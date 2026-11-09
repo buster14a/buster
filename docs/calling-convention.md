@@ -204,25 +204,10 @@ members' own:
   struct's storage at offset 0 is its first member's there, and the
   struct is aligned to its members' largest alignment unless `determinePacked`
   packs it (a member off its own alignment, or a size that isn't a multiple of
-<<<<<<< HEAD
-  it). A struct's bit-fields share access units (`accumulateBitFields`): a run
-  of them, from one that starts a byte through those that start inside a byte
-  after it, wider than an eightbyte is the integer its bytes round up to, an
-  `i128` for 9 to 16, where that fits before the next member with storage (but
-  a zero-width bit-field and an empty record) or the struct's end, and
-  otherwise an array of its bytes (`abi_bit_field_run`). So `struct { unsigned
-  __int128 x : 65; }` stores an `i128`, and packed, or followed by a `char` or
-  an `int[0]`, a `[9 x i8]`; a run's narrower units are left as its
-  bit-fields' types are aligned, which LLVM's units may not be (`struct { int
-  a : 3; }` is `{ i8, [3 x i8] }`, aligned to 1). A union is stored as the
-  member LLVM aligns
-  most, then the largest, the first of equals
-=======
   it). A struct's bit-fields are stored in access units (see "Bit-fields'
   access units" below), each a member of the struct's LLVM type with an
   alignment of its own. A union is stored as the member LLVM aligns most, then
   the largest, the first of equals
->>>>>>> origin/claude/bit-field-units-137
   (`CGRecordLowering::lowerUnion`); a bit-field there is an `iN` of its width,
   or of its type's bits if fewer, rounded up to bytes (`getIntNType`: 121 to
   128 bits make an `i128`). An array, a complex type, an enum and an `_Atomic`
@@ -257,9 +242,7 @@ members' own:
   LLVM aligns integers, an `i128` at 128 bits), and one of long doubles or of
   `_BitInt`s narrower than a byte, whose elements LLVM packs, is aligned to
   its bytes rounded up to a power of two (`abi_vector_llvm`).
-  Short bit-field runs of eight bytes or less also propagate `STORAGE_INEXACT`
-  through both the scalar storage calculation and vector parts, and through the
-  wide-record walk. Their access units remain a separate follow-up. Wide
+  Wide
   `_BitInt` storage uses LLVM's memory type: alignment 16 for sizes divisible
   by 16 bytes, and a byte array aligned to 1 otherwise. An enum backed by bool
   keeps vector storage; only a vector written with builtin bool elements uses
@@ -1309,15 +1292,11 @@ files. The counts below are the defaults'
   clang writes them, against the module's on every pair of classes and both
   kinds of size; the module's merge must equal clang's but where clang stops
   at MEMORY.
-<<<<<<< HEAD
 - **Builtin projection:** independently recomputed scalar rows and all metadata
   at each supported width and both char modes, including zero and partial
   builtin prefixes, reserved holes, small/requested capacities and refusals,
   poisoned padding and tails, and the first derived type's ordinary scheduling.
-- **Fixtures** (3,158 checks): types whose classes, pass bits and
-=======
-- **Fixtures** (2,638 checks): about 228 types whose classes, pass bits and
->>>>>>> origin/claude/bit-field-units-137
+- **Fixtures** (3,470 checks): types whose classes, pass bits and
   results clang's IR shows (`clang -O1 -S -emit-llvm` of functions that take
   and return them, read for `byval`, `sret`, the coerced types and the
   attributes), at each of the three vector widths, by the vector path and by
@@ -1332,23 +1311,11 @@ files. The counts below are the defaults'
   another low one, and unions whose struct holds a zero-length array of a
   larger record, plain (of 32 bytes, and of 80, whose row doesn't wait for its
   members), nested, packed or with a run of bit-fields that is an `i128` or
-<<<<<<< HEAD
   bytes, which ties with an `__int128` or doesn't, and four whose larger
   record one of `abi_wide_alignment`'s rules alone aligns to 1: a member off
   its own alignment, a record off its own, a size its alignment doesn't
   divide, and a union's members) and narrow low parts (`{__bf16, _Alignas(8)
-  char}` and its kin). Then the `_Atomic` types clang's LLVM types decide,
-  with the slots that `-mllvm -stop-after=finalize-isel`'s fixed stack objects
-  show: `_Atomic`s of structs of no size, `LARGER` and `GROWN` ones among them
-  (of a packed one, of a flexible array member's `unsigned _BitInt(127)`, of
-  one aligned by an array of none of a record larger than 64 bytes, and of an
-  array of none of a 32 KB vector or of a record holding one, 32 KB to LLVM),
-  and of aligned typedefs of an empty struct and of a 32-byte one, aligned to
-  8; packed structs ending in one (17 to 117 bytes to LLVM, and 32 KB and a
-  byte), structs and a union with room for one, the C layout, and the structs
-=======
-  bytes, which ties with an `__int128` or doesn't) and narrow low parts
-  (`{__bf16, _Alignas(8) char}` and its kin). Then structs' bit-fields in
+  char}` and its kin). Then structs' bit-fields in
   access units (`abi_test_build_units`), each with its LLVM type as the module
   keeps it, its `storage` and `layout`'s scalars (`abi_test_llvm`), as clang's
   IR has it: runs merged into an `i16` and an `i32` in an INTEGER high
@@ -1362,16 +1329,15 @@ files. The counts below are the defaults'
   larger than 16 bytes in a zero-length array (`abi_wide_alignment`);
   `{__int128 : 8}`, an `i8` aligned to 1, which a union with an `__int128`
   doesn't store; and an `_Atomic` of a struct of no size whose zero-length
-  array's element has such a unit, a copy of a byte. Then the
-  `_Atomic` types clang's
-  LLVM types decide, with the slots that `-mllvm -stop-after=finalize-isel`'s
-  fixed stack objects show: `_Atomic`s of structs of no size, `LARGER` and
-  `GROWN` ones among them (of a packed one, of a flexible array member's
-  `unsigned _BitInt(127)`, and of one aligned by an array of none of a record
-  larger than 64 bytes), and of aligned typedefs of an empty struct and of a
-  32-byte one, aligned to 8; packed structs ending in one (17 to 117 bytes to
-  LLVM), structs and a union with room for one, the C layout, and the structs
->>>>>>> origin/claude/bit-field-units-137
+  array's element has such a unit, a copy of a byte. Then the `_Atomic`
+  types clang's LLVM types decide, with the slots that `-mllvm -stop-after=finalize-isel`'s fixed stack objects
+  show: `_Atomic`s of structs of no size, `LARGER` and `GROWN` ones among them
+  (of a packed one, of a flexible array member's `unsigned _BitInt(127)`, of
+  one aligned by an array of none of a record larger than 64 bytes, and of an
+  array of none of a 32 KB vector or of a record holding one, 32 KB to LLVM),
+  and of aligned typedefs of an empty struct and of a 32-byte one, aligned to
+  8; packed structs ending in one (17 to 117 bytes to LLVM, and 32 KB and a
+  byte), structs and a union with room for one, the C layout, and the structs
   refused (a member after the overrun, a member of no size or a flexible one,
   a struct ending in one, an `_Atomic` of one; `_Atomic`s of a struct and a
   union of an array of none of a struct with a flexible array member and a
@@ -1407,13 +1373,8 @@ files. The counts below are the defaults'
   pointer; `unsigned _BitInt(4)`s: eight in xmm0, `SMALLER`, sixteen refused,
   32 a copy of 16 bytes); and lengths that aren't a power of two in memory
   (five floats and five doubles through a hidden pointer, three `long`s in
-<<<<<<< HEAD
-  rax, rdx and rcx, three doubles in xmm0, xmm1 and st0). Then thirty calls
+  rax, rdx and rcx, three doubles in xmm0, xmm1 and st0). Then thirty-two calls
   whose locations clang and LLVM give, with their totals: an `UNCOUNTED`
-=======
-  rax, rdx and rcx, three doubles in xmm0, xmm1 and st0). Then twenty-six
-  calls whose locations clang and LLVM give, with their totals: an `UNCOUNTED`
->>>>>>> origin/claude/bit-field-units-137
   `nullptr_t` that splits a struct; a `PAIR` on the stack with r9 taken by the
   `long` after it; a high eightbyte alone on the stack; an `UNCOUNTED`
   `_Atomic double` in xmm7; a hidden pointer; a struct of a flexible array
@@ -1430,7 +1391,6 @@ files. The counts below are the defaults'
   `i65` `SPLIT`; an `i128` whole on the stack, the `long` after it in r9); and
   a union stored as an `i128` with an SSE high eightbyte, counted as two
   general registers too, on the stack after five `long`s and in rdi and rsi
-<<<<<<< HEAD
   before a `double` in xmm0; a vector of 4,096 bools, which isn't `_Atomic`,
   returned through the hidden pointer LLVM demotes it to, in rdi, with the
   `long` after it in rsi (and one of 1,024, at every width); the 32 KB copy of
@@ -1444,16 +1404,11 @@ files. The counts below are the defaults'
   copy of 80 bytes aligned to 128, the `long` after it at 80, and as a result,
   whose hidden pointer clang doesn't count, the sixth `long` on the stack; and
   that struct aligned to 16 after six `long`s, a copy of its 16 bytes at stack 0
-  (not `LOW`: clang's count has no register), the `long` after it at 16. And
-=======
-  before a `double` in xmm0; and 513 bools after six `long`s, a copy of 80
-  bytes aligned to 128, the `long` after it at 80, and as a result, whose
-  hidden pointer clang doesn't count, the sixth `long` on the stack; and two
+  (not `LOW`: clang's count has no register), the `long` after it at 16; and two
   that access units decide, the union of `{__int128 : 8}` and an `__int128`
   whole on the stack after an `UNCOUNTED` `_Atomic int` and four `long`s, the
   `long` after it in r9, and that `_Atomic`'s byte in a slot of 8 after six
   `long`s, the `long` after it at 8. And
->>>>>>> origin/claude/bit-field-units-137
   `va_arg`'s plans for a `long` aligned to 32, which reads the overflow area
   aligned to 8, and for that union, from two general registers' slots. Last
   the levels across four calls by each path: a struct of 101 bytes ending in
@@ -1559,19 +1514,12 @@ fifth of the results `void`:
   every signature both ways and fails if a value differs where its mask says
   it means something, or a hidden pointer comes back wrong.
 
-<<<<<<< HEAD
 clang's signatures pass `_Atomic` types themselves as named arguments and
 results, as well as records of `_Atomic` members and aligned typedefs of
 `_Atomic` types (at seed 1, 82 to 117 `_Atomic` arguments and 9 to 19 `_Atomic`
 results a run; GCC's worlds make no `_Atomic`, which GCC classifies as its
 value). The clang worlds' `_Atomic`s of structs of no size reach them: at
 seeds 1 to 20, 330 `LARGER` arguments, 167 of them `GROWN`, for which our side
-=======
-The signatures leave out `_Atomic` types themselves (the fixtures check them;
-records of `_Atomic` members and aligned typedefs of `_Atomic` types are in).
-The clang worlds' `_Atomic`s of structs of no size reach them that way: at
-seeds 1 to 20, 329 `LARGER` arguments, 166 of them `GROWN`, for which our side
->>>>>>> origin/claude/bit-field-units-137
 copies a stack argument's own bytes, fewer than its slot's. clang's worlds
 leave out a type passed in registers that holds an array of elements of no
 size (`abi_test_empty_arrays`), on which clang 23 crashes now and then:
@@ -2072,28 +2020,10 @@ clang's build of the test's AVX `preserve_all` function that calls
   forwarded). Pass bits and results without those branches, from a table
   indexed by the classes and the type's kind or from the fold's vectors four
   types at a time, are the next try.
-<<<<<<< HEAD
 - **The levels.** The historical scans took 18% of this profile's vector
   classification cycles. #613 bounds the scan prefix and uses a topological
   schedule for deep graphs, retaining the shallow path and wide-record shortcut.
   The all-member wait-list experiment was rejected after a measured regression.
-- **Bit-fields' access units.** `abi_layout` and the parts take a run of
-  bit-fields within an eightbyte as its first bit-field's type, at its type's
-  offset, where clang's `accumulateBitFields` makes access units of the run's
-  bytes (merged up to a register while the next one's integer fits before the
-  next member with storage, else an array of bytes), and the struct's LLVM
-  alignment from them. Units decide what the module gives in three places: in
-  an INTEGER high eightbyte, by their alignment, whether a narrow SSE low part
-  widens (`LOW_GENERAL`); through a struct's LLVM alignment, a union's storage
-  member and so `PAIR` (`union { struct { __int128 a : 8; } s; __int128 i; }`
-  is one `i128` to clang, and the module splits it); and the LLVM sizes of
-  `LARGER` copies. `struct { _Complex _Float16 h; _Complex long z[0];
-  _BitInt(8) a : 3; unsigned char b : 8; }` is `(i64, i16)` to clang, a unit
-  of two bytes after the `<2 x half>`, and the module passes its low part in
-  xmm0, as it takes an `i8` with data after it. clang's cross-check found it
-  at seeds 50, 82 and 98 of 100, and leaves such types out until the module
-  works the units out (in `abi_bit_field_run`, which does it for a run wider
-  than an eightbyte), or refuses them.
 - **Flexible records with a size** keep no storage (`STORAGE_INEXACT`): an
   `_Atomic` of a record of no size that holds an array of none of them is
   refused, but a record of 16 bytes or less that holds one passes by alignment
@@ -2212,17 +2142,3 @@ counts; `test-types` covers its producer. Existing bulk and incremental type
 benchmarks and call batches are synthetic. [#133](https://github.com/buster14a/buster/issues/133)/[#137](https://github.com/buster14a/buster/issues/137)/[#136](https://github.com/buster14a/buster/issues/136)/[#177](https://github.com/buster14a/buster/issues/177) retain real
 source-signature production, whole type + ABI + emission costs, small/large
 occupancy, scratch/allocations and generated-program qualification.
-=======
-- **The levels.** Their scans (`abi_classify_levels` asking
-  `abi_dependencies_classified` about every pending type, a pass per level)
-  take 18% of the vector classification's cycles and branch on what each type
-  waits for. Each type's level is the longest path below it in the graph of
-  what it waits for, which pointer jumping or a pass in a topological order
-  could give for every type at once.
-- **Flexible records with a size** keep no storage (`STORAGE_INEXACT`), so
-  an `_Atomic` of a record of no size that holds an array of none of them is
-  refused. `abi_wide_alignment` could walk them as it walks large records,
-  with the levels waiting for what it reads.
-- **Plain `char`:** `abi_extension` takes it as signed, as x86-64 has it;
-  `-funsigned-char` would need a setting the type table doesn't have yet.
->>>>>>> origin/claude/bit-field-units-137

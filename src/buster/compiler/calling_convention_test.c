@@ -1809,10 +1809,9 @@ static uint32_t abi_test_other_values(uint32_t kind)
 // -stop-after=finalize-isel's fixed stack objects). An _Atomic of a type of no size is {T, [1 x i8]}, as large as T is
 // aligned in LLVM (LARGER): 16 bytes for _Atomic(struct { __int128 x[0]; }), of 1, and for one of a packed T, aligned
 // to 1, while clang has a general register free, an i8's 8 once it has none (GROWN); 32 KB for one aligned by a vector of
-// 32 KB, and one by a vector of 64 KB, past what the storage holds, refused, as is one aligned by a run of bit-fields of
-// an eightbyte or less, whose unit the module doesn't work out; and 1 byte for one of a _BitInt(129), an array of its
-// bytes in memory. A packed struct ending in one is
-// those bytes and an i8 (packed {that _Atomic} 17, a slot of 24); one with a member after the overrun is laid out
+// 32 KB, and one by a vector of 64 KB, past what the storage holds, refused; 1 byte for one aligned by a bit-field's
+// access unit of a byte; and 1 byte for one of a _BitInt(129), an array of its bytes in memory. A packed struct ending
+// in one is those bytes and an i8 (packed {that _Atomic} 17, a slot of 24); one with a member after the overrun is laid out
 // otherwise than C, and refused; one with room for it is the C layout, and so is a union. An _Atomic vector LLVM splits
 // into its elements (<5 x i8> into five i8s, <2 x i128> into four i64s) is refused too; one of bools is the integer of
 // its bits clang stores it as: a general register, two halves past 64 and an i128 at 128.
@@ -2005,21 +2004,18 @@ static void abi_test_build_atomics(AbiTestBuilder* builder)
     m[0] = abi_test_member(builder, type_array(table, abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 0), 0));
     abi_test_expectation(builder, "_Atomic {{float vector(65536)}[0]}", type_atomic(table, abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 0)),
                          BUSTER_ABI_IN_MEMORY, copy | larger | refused, 0, any, none, none);
-    // clang's unit for a run of bit-fields of an eightbyte or less, which the module doesn't work out (INEXACT): an
-    // _Atomic of a struct of none of {unsigned __int128 : 8, char[20]}, which LLVM stores as {i8, [20 x i8], [11 x i8]},
-    // aligned to 1 rather than 16, is refused. A _BitInt wider than 128 bits is an integer of its size in memory where
-    // that is a multiple of 16 bytes, and otherwise an array of its bytes: _Atomics of structs of none of _BitInt(129),
-    // of {_BitInt(129), char[4]} and of union {_BitInt(129), long} are 1, 1 and 8 bytes to LLVM, and of _BitInt(256) 16.
-    m[0] = abi_test_bits(builder, BUSTER_TYPE_UINT128, 8, true);
-    m[1] = abi_test_member(builder, type_array(table, BUSTER_TYPE_CHAR, 20));
-    m[0] = abi_test_member(builder, type_array(table, abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 2, false, 0), 0));
-    abi_test_expectation(builder, "_Atomic {{unsigned __int128 : 8, char[20]}[0]}", type_atomic(table, abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 0)),
-                         BUSTER_ABI_IN_MEMORY, copy | larger | refused, 0, any, none, none);
+    // A bit-field's access unit decides the alignment of a struct of no size it is in (abi_bit_field_unit):
+    // {unsigned __int128 : 1, unsigned char} is {i8, i8, [14 x i8]} to LLVM, aligned to 1, so an _Atomic of a struct of
+    // none of it is a 1-byte copy in a slot of 8, aligned to 16 (C's), as {unsigned __int128 : 8, char[20]}'s is
+    // (abi_test_build_units). A _BitInt wider than 128 bits is an integer of its size in memory where that is a multiple
+    // of 16 bytes, and otherwise an array of its bytes: _Atomics of structs of none of _BitInt(129), of
+    // {_BitInt(129), char[4]} and of union {_BitInt(129), long} are 1, 1 and 8 bytes to LLVM, and of _BitInt(256) 16.
     m[0] = abi_test_bits(builder, BUSTER_TYPE_UINT128, 1, true);
     m[1] = abi_test_member(builder, BUSTER_TYPE_UCHAR);
     m[0] = abi_test_member(builder, type_array(table, abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 2, false, 0), 0));
     abi_test_expectation(builder, "_Atomic {{unsigned __int128 : 1, unsigned char}[0]}", type_atomic(table, abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 0)),
-                         BUSTER_ABI_IN_MEMORY, copy | larger | refused, 0, any, none, none);
+                         BUSTER_ABI_IN_MEMORY, copy | 4u << BUSTER_ABI_PASS_ALIGNMENT_SHIFT, larger | grown | refused, hidden, none, none);
+    abi_test_slot(builder, 8);
     const TypeId bit_int_129 = type_bit_int(table, 129, false);
     m[0] = abi_test_member(builder, type_array(table, bit_int_129, 0));
     abi_test_expectation(builder, "_Atomic {_BitInt(129)[0]}", type_atomic(table, abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 0)),
@@ -2468,7 +2464,6 @@ static void abi_test_calls(AbiTestTally* tally, AbiTestTables* tables, uint32_t 
     m[0] = abi_test_member(&builder, BUSTER_TYPE_LONG);
     const TypeId aligned16 = abi_test_record(&builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 5);
     const TypeId bits513 = type_vector(table, BUSTER_TYPE_BOOL, 513, true);
-<<<<<<< HEAD
     m[0] = abi_test_member(&builder, type_bit_int(table, 129, false));
     m[1] = abi_test_member(&builder, type_array(table, BUSTER_TYPE_CHAR, 4));
     m[0] = abi_test_member(&builder, type_array(table, abi_test_record(&builder, BUSTER_TYPE_KIND_STRUCT, m, 2, false, 0), 0));
@@ -2478,7 +2473,6 @@ static void abi_test_calls(AbiTestTally* tally, AbiTestTables* tables, uint32_t 
     const TypeId enum_bits = type_enum_complete(table, bool_enum, BUSTER_TYPE_BOOL, 0) ? type_atomic(table, type_vector(table, bool_enum, 8, true)) : 0;
     m[0] = abi_test_member(&builder, type_array(table, type_bit_int(table, 129, true), 0));
     const TypeId atomic_unsigned_bytes = type_atomic(table, abi_test_record(&builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 0));
-=======
     m[0] = abi_test_bits(&builder, BUSTER_TYPE_INT128, 8, true);
     m[0] = abi_test_member(&builder, abi_test_record(&builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 0));
     m[1] = abi_test_member(&builder, BUSTER_TYPE_INT128);
@@ -2487,7 +2481,6 @@ static void abi_test_calls(AbiTestTally* tally, AbiTestTables* tables, uint32_t 
     m[1] = abi_test_member(&builder, type_array(table, BUSTER_TYPE_CHAR, 20));
     m[0] = abi_test_member(&builder, type_array(table, abi_test_record(&builder, BUSTER_TYPE_KIND_STRUCT, m, 2, false, 0), 0));
     const TypeId unit_byte = type_atomic(table, abi_test_record(&builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 0));
->>>>>>> origin/claude/bit-field-units-137
     if (vector)
     {
         abi_classify_all(&tables->abi, table);
@@ -2749,10 +2742,16 @@ static void abi_test_calls(AbiTestTally* tally, AbiTestTables* tables, uint32_t 
         L,
         L,
         L,
-<<<<<<< HEAD
         // 216: long x6, struct aligned(16) {long}, long
-=======
-        // 165: _Atomic int, long x4, union {struct {__int128 : 8}, __int128}, long
+        L,
+        L,
+        L,
+        L,
+        L,
+        L,
+        aligned16,
+        L,
+        // 224: _Atomic int, long x4, union {struct {__int128 : 8}, __int128}, long
         atomic_int,
         L,
         L,
@@ -2760,19 +2759,14 @@ static void abi_test_calls(AbiTestTally* tally, AbiTestTables* tables, uint32_t 
         L,
         unit_pair,
         L,
-        // 172: long x6, _Atomic {{unsigned __int128 : 8, char[20]}[0]}, long
->>>>>>> origin/claude/bit-field-units-137
+        // 231: long x6, _Atomic {{unsigned __int128 : 8, char[20]}[0]}, long
         L,
         L,
         L,
         L,
         L,
         L,
-<<<<<<< HEAD
-        aligned16,
-=======
         unit_byte,
->>>>>>> origin/claude/bit-field-units-137
         L,
     };
     const AbiTestLocation expected[] = {
@@ -3016,19 +3010,7 @@ static void abi_test_calls(AbiTestTally* tally, AbiTestTables* tables, uint32_t 
         { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R8, none, 0, 0 },
         { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R9, none, 0, 0 },
         { BUSTER_ABI_LOCATION_STACK, none, none, 0, 0 },
-<<<<<<< HEAD
         // 216: clang's count at 0, a copy of the struct, its 16 bytes in a slot of its own (not LOW), the long at 16.
-=======
-        // 165: an i128 on the stack whole, the long after it in r9.
-        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RDI, none, 0, 0 },
-        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RSI, none, 0, 0 },
-        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RDX, none, 0, 0 },
-        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RCX, none, 0, 0 },
-        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R8, none, 0, 0 },
-        { BUSTER_ABI_LOCATION_STACK, none, none, 0, 0 },
-        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R9, none, 0, 0 },
-        // 172: a copy of a byte in a slot of 8, the long after it at 8.
->>>>>>> origin/claude/bit-field-units-137
         { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RDI, none, 0, 0 },
         { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RSI, none, 0, 0 },
         { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RDX, none, 0, 0 },
@@ -3036,11 +3018,24 @@ static void abi_test_calls(AbiTestTally* tally, AbiTestTables* tables, uint32_t 
         { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R8, none, 0, 0 },
         { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R9, none, 0, 0 },
         { BUSTER_ABI_LOCATION_STACK, none, none, 0, 0 },
-<<<<<<< HEAD
         { BUSTER_ABI_LOCATION_STACK, none, none, 0, 16 },
-=======
+        // 224: an i128 on the stack whole, the long after it in r9.
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RDI, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RSI, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RDX, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RCX, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R8, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_STACK, none, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R9, none, 0, 0 },
+        // 231: a copy of a byte in a slot of 8, the long after it at 8.
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RDI, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RSI, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RDX, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RCX, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R8, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R9, none, 0, 0 },
+        { BUSTER_ABI_LOCATION_STACK, none, none, 0, 0 },
         { BUSTER_ABI_LOCATION_STACK, none, none, 0, 8 },
->>>>>>> origin/claude/bit-field-units-137
     };
     const uint32_t counts[] = {
         7,
@@ -3076,10 +3071,8 @@ static void abi_test_calls(AbiTestTally* tally, AbiTestTables* tables, uint32_t 
         1,
         8,
         6,
-<<<<<<< HEAD
-=======
+        8,
         7,
->>>>>>> origin/claude/bit-field-units-137
         8,
     };
     const uint32_t named[] = {
@@ -3116,10 +3109,8 @@ static void abi_test_calls(AbiTestTally* tally, AbiTestTables* tables, uint32_t 
         1,
         8,
         6,
-<<<<<<< HEAD
-=======
+        8,
         7,
->>>>>>> origin/claude/bit-field-units-137
         8,
     };
     const TypeId results[] = {
@@ -3157,10 +3148,8 @@ static void abi_test_calls(AbiTestTally* tally, AbiTestTables* tables, uint32_t 
         BUSTER_TYPE_VOID,
         bits513,
         BUSTER_TYPE_VOID,
-<<<<<<< HEAD
-=======
         BUSTER_TYPE_VOID,
->>>>>>> origin/claude/bit-field-units-137
+        BUSTER_TYPE_VOID,
     };
     const uint8_t variadic[] = {
         0,
@@ -3189,7 +3178,6 @@ static void abi_test_calls(AbiTestTally* tally, AbiTestTables* tables, uint32_t 
         0,
         0,
         0,
-<<<<<<< HEAD
         0,
         0,
         0,
@@ -3198,8 +3186,8 @@ static void abi_test_calls(AbiTestTally* tally, AbiTestTables* tables, uint32_t 
         0,
         0,
         0,
-=======
->>>>>>> origin/claude/bit-field-units-137
+        0,
+        0,
     };
     const AbiSignatures signatures = {
         .results = results,
@@ -3250,7 +3238,6 @@ static void abi_test_calls(AbiTestTally* tally, AbiTestTables* tables, uint32_t 
     abi_test_expect(tally, calls[19].stack_bytes == 16 && calls[19].stack_alignment_log2 == 4 && calls[19].integer_registers == 6, "fixtures", "call 19's totals");
     abi_test_expect(tally, calls[20].stack_bytes == 16 && calls[20].integer_registers == 6 && calls[20].vector_registers == 0, "fixtures", "call 20's totals");
     abi_test_expect(tally, calls[21].stack_bytes == 0 && calls[21].integer_registers == 3 && calls[21].vector_registers == 1, "fixtures", "call 21's totals");
-<<<<<<< HEAD
     const bool demoted = calls[22].result.kind == BUSTER_ABI_RESULT_MEMORY && (calls[22].result.flags & BUSTER_ABI_FLAG_DEMOTED) != 0;
     abi_test_expect(tally, demoted && calls[22].integer_registers == 2 && calls[22].stack_bytes == 0, "fixtures", "call 22's demoted result");
     abi_test_expect(tally, calls[23].stack_bytes == 32776 && calls[23].stack_alignment_log2 == 15 && calls[23].integer_registers == 6, "fixtures", "call 23's totals");
@@ -3264,11 +3251,8 @@ static void abi_test_calls(AbiTestTally* tally, AbiTestTables* tables, uint32_t 
     const bool demoted_1024 = calls[30].result.kind == BUSTER_ABI_RESULT_MEMORY && (calls[30].result.flags & BUSTER_ABI_FLAG_DEMOTED) != 0;
     abi_test_expect(tally, demoted_1024 && calls[30].integer_registers == 2, "fixtures", "call 30's demoted result");
     abi_test_expect(tally, calls[31].stack_bytes == 88 && calls[31].stack_alignment_log2 == 7 && calls[31].integer_registers == 6, "fixtures", "call 31's totals");
-=======
-    abi_test_expect(tally, calls[22].stack_bytes == 88 && calls[22].stack_alignment_log2 == 7 && calls[22].integer_registers == 6, "fixtures", "call 22's totals");
-    abi_test_expect(tally, calls[24].stack_bytes == 16 && calls[24].stack_alignment_log2 == 4 && calls[24].integer_registers == 6, "fixtures", "call 24's totals");
-    abi_test_expect(tally, calls[25].stack_bytes == 16 && calls[25].stack_alignment_log2 == 4 && calls[25].integer_registers == 6, "fixtures", "call 25's totals");
->>>>>>> origin/claude/bit-field-units-137
+    abi_test_expect(tally, calls[34].stack_bytes == 16 && calls[34].stack_alignment_log2 == 4 && calls[34].integer_registers == 6, "fixtures", "call 34's totals");
+    abi_test_expect(tally, calls[35].stack_bytes == 16 && calls[35].stack_alignment_log2 == 4 && calls[35].integer_registers == 6, "fixtures", "call 35's totals");
     abi_test_expect(tally,
                     calls[32].result.kind == BUSTER_ABI_RESULT_MEMORY && (calls[32].result.flags & BUSTER_ABI_FLAG_DEMOTED) != 0 && calls[32].integer_registers == 6 &&
                         calls[32].stack_bytes == 8,
@@ -7092,18 +7076,13 @@ static bool abi_test_cross(AbiTestTally* tally, uint64_t seed, uint32_t count, c
                 // fewer bits than its bytes (abi_test_holds).
                 const bool quad_pair = !gcc && (holds[index] & BUSTER_ABI_TEST_HOLDS_QUAD) != 0 && classes == BUSTER_ABI_CLASSES(BUSTER_ABI_SSE, BUSTER_ABI_SSE);
                 const bool union_packs = !gcc && (holds[index] & BUSTER_ABI_TEST_HOLDS_UNION_PACKS) != 0;
-<<<<<<< HEAD
                 // GCC classifies an array by its first element alone: a complex char or short element that crosses an
                 // eightbyte makes the next one INTEGERSI, of which GCC passes 4 bytes, past which the later elements' are
                 // lost (abi_test_holds' NARROW_COMPLEX_ARRAY).
                 const bool narrow_complex_array = gcc && (holds[index] & BUSTER_ABI_TEST_HOLDS_NARROW_COMPLEX_ARRAY) != 0;
                 if ((spelled || table->types.kind[index] == BUSTER_TYPE_KIND_ENUM) && small && abi_test_passable(&abi, table, type) && !gcc_differs &&
-                    !clang_crashes && !unit_decides && !odd_vector_record && !atomic_bits && !quad_pair && !union_packs && !narrow_complex_array &&
+                    !clang_crashes && !odd_vector_record && !atomic_bits && !quad_pair && !union_packs && !narrow_complex_array &&
                     (!compiled || abi_test_compiled_passes(table, type)))
-=======
-                if ((spelled || table->types.kind[index] == BUSTER_TYPE_KIND_ENUM) && small && abi_test_passable(&abi, table, type) && !atomic_result && !gcc_differs &&
-                    !clang_crashes && !odd_vector_record && !atomic_bits && !quad_pair && !union_packs)
->>>>>>> origin/claude/bit-field-units-137
                 {
                     types[type_count] = type;
                     type_count += 1;

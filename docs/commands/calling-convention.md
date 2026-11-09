@@ -34,7 +34,12 @@ its compiled runs) checks
   zero-size members, bit-fields, flexible array members, `_Atomic` and
   `nullptr_t` members, `i128` storage, which LLVM never splits, whatever the
   high eightbyte under an INTEGER low one and refused under another, runs of
-  bit-fields that are an `i128` and that aren't, unions whose storage member a
+  bit-fields that are an `i128` and that aren't, bit-fields' access units
+  as clang's IR has them (merged units in an INTEGER high eightbyte, which
+  widen a narrow SSE low part or don't, units that decide a union's storage
+  member, units stopped by a struct's end, a `char` or a zero-width
+  bit-field, and an `_Atomic` of a struct of no size whose element holds one),
+  unions whose storage member a
   zero-length array of a larger record decides (each of the walk's rules alone
   among them), and the narrow low parts clang widens into a general register;
   and the `_Atomic` types whose LLVM types decide: of types of no size, which
@@ -53,7 +58,10 @@ its compiled runs) checks
   `__int128` without two registers left, a hidden pointer, a record of a
   flexible array member alone as an `i0`, a struct whose narrow low part takes
   a general register, unions stored as an `i128`, which clang counts as two
-  registers with a NO_CLASS or SSE high eightbyte, runs of bit-fields where an
+  registers with a NO_CLASS or SSE high eightbyte, a union whose storage
+  member a bit-field's access unit decides, whole on the stack, an `_Atomic`
+  of a struct of no size whose access unit is a byte, in a slot of 8, runs of
+  bit-fields where an
   uncounted `_Atomic int` leaves one register, split or whole on the stack,
   the larger copies' slots, byval or an integer by clang's count, `_Atomic`
   bool vectors, a vector of bools that isn't `_Atomic` returned through a
@@ -159,8 +167,7 @@ GCC's worlds leave out
 what GCC lays out or passes otherwise than clang (the test names each, GCC's
 own bugs among them, and `docs/calling-convention.md` lists them), and clang's
 a type in registers that holds an array of elements of no size, on which clang
-23 crashes now and then, one with an SSE low eightbyte and bit-fields in an
-INTEGER high one, whose access units the module doesn't work out yet, an
+23 crashes now and then, an
 aligned typedef of an `_Atomic` vector of bools, whose atomic loads crash it,
 a record SSE, SSEUP of a size other than 16, 32 or 64 bytes and one SSE, SSE
 that holds a `__float128`, which the module doesn't model yet either, and a
