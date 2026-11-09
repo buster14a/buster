@@ -100,11 +100,16 @@ static BUSTER_PROBE_HELPER_ATTRIBUTES TypeId check_common_enum_coerced(const Che
 #if BUSTER_PROBE_VECTORIZE
 #pragma clang loop vectorize(enable)
 #endif
+        // The last enclosing completed definition wins. Reduce one-based indices so every unmatched lane is zero,
+        // then load the selected type once; a conditional TypeId recurrence leaves inactive vector lanes undefined.
+        uint32_t selected = 0;
         for (uint32_t i = 0; i < input->enum_definition_count; i += 1)
         {
             const CheckInputEnumDefinition* definition = input->enum_definitions + i;
-            result = definition->open < declaration && declaration < definition->close && token > definition->close ? definition->type : result;
+            const uint32_t candidate = definition->open < declaration && declaration < definition->close && token > definition->close ? i + 1 : 0;
+            selected = candidate > selected ? candidate : selected;
         }
+        result = selected != 0 ? input->enum_definitions[selected - 1].type : result;
     }
     return result;
 }
