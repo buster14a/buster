@@ -118,6 +118,9 @@ enum
     // statement increment or decrement (#1447, clang's CheckForLoopConditionalStatement and CheckForRedundantIteration):
     // -Wfor-loop-analysis, off by default, under -Wloop-analysis and -Wmost and so -Wall.
     CHECK_WARNING_ID_FOR_LOOP_ANALYSIS = 110,
+    // An unevaluated operand with a side effect (#1447, clang's CheckUnaryExprOrTypeTraitOperand and
+    // CreateGenericSelectionExpr): -Wunevaluated-expression, on by default, under -Wunused-value and so -Wunused and -Wall.
+    CHECK_WARNING_ID_UNEVALUATED_EXPRESSION = 111,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -362,6 +365,9 @@ typedef enum CheckWarningEventKind
     // payload.first_type and second_type its operands' types as clang's getEnumCoercedType gives them, payload.name and
     // data their typedef spellings (0 for none). check_common_enum_arithmetic reports it as the graph's operators.
     CHECK_WARNING_EVENT_ENUM_MIX,
+    // A sizeof's, an alignof's or a _Generic's unevaluated operand with a side effect (#1447,
+    // check_warning_graph_unevaluated), at its expression's location: the description's message.
+    CHECK_WARNING_EVENT_UNEVALUATED_EXPRESSION,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
 

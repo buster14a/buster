@@ -531,6 +531,43 @@ static uint32_t check_warning_graph_void_opener(const Parser* parser, uint32_t c
     return open > 0 ? open - 1 : BUSTER_CHECK_NONE;
 }
 
+// Whether the static selection whose `)` is `close` (a _Generic's or a __builtin_choose_expr's) chooses the operand that
+// holds `token`, a token inside its parentheses: `token` and the chosen operand's token lie between the same top-level
+// commas, as the separators' tree nests the operands before each one under it. The node at its `)` is the selection's,
+// or, for one the source reader chose, the chosen operand's own, under the conversions at that `)`. True where `close`
+// closes no selection, or one whose choice the graph doesn't hold.
+static bool check_warning_graph_chooses(const CheckInput* input, const Parser* parser, uint32_t close, uint32_t token)
+{
+    const CheckGraph* graph = &input->graph;
+    const uint32_t open = parser->tree.roles[close] == PARSE_ROLE_CLOSE_KEYWORD ? check_warning_graph_void_opener(parser, close) : BUSTER_CHECK_NONE;
+    const uint32_t keyword = open != BUSTER_CHECK_NONE && open > 0 ? open - 1 : BUSTER_CHECK_NONE;
+    const bool selection = keyword != BUSTER_CHECK_NONE && parser->tree.depths != NULL && open + 1 < close &&
+                           (parser->tokens.kinds[keyword] == PARSE_KIND_GENERIC || parser->tokens.names[keyword] == C_NAME_BUILTIN_CHOOSE_EXPR);
+    uint32_t chosen = selection && close < input->token_count && input->token_nodes != NULL ? input->token_nodes[close] : BUSTER_CHECK_NONE;
+    chosen = chosen < graph->count && graph->ops[chosen] == CHECK_OP_SELECT ? graph->operand0[chosen] : chosen;
+    for (uint32_t steps = 0; chosen < graph->count && graph->ops[chosen] == CHECK_OP_CONVERT && graph->tokens[chosen] == close && steps < graph->count;
+         steps += 1)
+    {
+        chosen = graph->operand0[chosen];
+    }
+    const uint32_t chosen_token = chosen < graph->count ? graph->tokens[chosen] : BUSTER_CHECK_NONE;
+    bool result = true;
+    if (selection && chosen_token > open && chosen_token < close && token > open && token < close)
+    {
+        const uint32_t depth = parser->tree.depths[open + 1];
+        uint32_t before_token = 0;
+        uint32_t before_chosen = 0;
+        for (uint32_t at = open + 1; at < close; at += 1)
+        {
+            const bool comma = parser->tokens.kinds[at] == PARSE_KIND_COMMA && parser->tree.depths[at] == depth;
+            before_token += comma && at < token ? 1u : 0u;
+            before_chosen += comma && at < chosen_token ? 1u : 0u;
+        }
+        result = before_token == before_chosen;
+    }
+    return result;
+}
+
 // The context of `child` of `parent`, whose context is `context`: the parent's, but in an operand that opens another.
 // A sizeof's or an alignof's operand (CLOSE_SIZEOF's, or the keyword's without parentheses), a typeof's and a
 // _Generic's controlling expression (left of its first separator) are unevaluated; an array declarator's bound is
@@ -660,6 +697,281 @@ static void check_warning_graph_void_dereferences(CheckInputReader* reader, cons
     }
 }
 
+// -Wunevaluated-expression (#1447, clang's CheckUnaryExprOrTypeTraitOperand and CreateGenericSelectionExpr): the expression
+// operand of a sizeof or an alignof (of no variable array type) and a _Generic's controlling expression are unevaluated,
+// and one with a side effect, as Expr::HasSideEffects finds it without the possible ones, warns at its expression's
+// location. A side effect is an assignment, an increment or a decrement, va_arg, or an atomic builtin clang makes an
+// AtomicExpr of; a call, a volatile read or a statement expression's declaration is none of itself. HasSideEffects
+// reads an expression's operands down from the operand, but no further than an expression whose location a macro
+// wrote (a macro's argument too), a nested sizeof's or alignof's operand, a type (a cast's, a compound literal's, a
+// typeof's), or a static selection's unchosen operands or controlling expression; in a GNU statement expression it reads
+// each statement's expressions as clang's SideEffectFinder visits them, which skips an unevaluated-argument builtin's
+// call that is a statement's own expression. The checks climb the parse tree from each side effect in the operand, as
+// a statement expression's statements are graph roots of their own.
+
+// Whether a macro wrote `token`, its argument's tokens too (clang's isMacroID).
+static bool check_warning_graph_macro(const Parser* parser, uint32_t token)
+{
+    const bool result = token < parser->tokens.count && parser->tokens.flags != NULL && (parser->tokens.flags[token] & BUSTER_PP_FROM_MACRO) != 0;
+    return result;
+}
+
+// Whether the parse tree's climb from `token` reaches `ancestor`.
+static bool check_warning_graph_within(const Parser* parser, uint32_t token, uint32_t ancestor)
+{
+    const uint32_t count = parser->tokens.count;
+    uint32_t at = token;
+    for (uint32_t steps = 0; at < count && at != ancestor && steps < count; steps += 1)
+    {
+        at = parser->tree.parents[at];
+    }
+    return at == ancestor && at < count;
+}
+
+// The first token of `token`'s subtree, a run of tokens: down its first children while they come before it, or, where the
+// parser left those out, back while the token before climbs to it.
+static uint32_t check_warning_graph_start(const Parser* parser, uint32_t token)
+{
+    uint32_t result = token;
+    if (parser->first_children != NULL)
+    {
+        for (uint32_t steps = 0; result < parser->tokens.count && parser->first_children[result] < result && steps < parser->tokens.count; steps += 1)
+        {
+            result = parser->first_children[result];
+        }
+    }
+    else
+    {
+        while (result != 0 && result < parser->tokens.count && check_warning_graph_within(parser, result - 1, token))
+        {
+            result -= 1;
+        }
+    }
+    return result;
+}
+
+// The location clang gives the expression whose node is the token `token` (Expr::getExprLoc), or BUSTER_CHECK_NONE for
+// a token that is no expression's (a statement's, a declaration's): an operator's own, a member's name, and the first token
+// of a group, a cast, a compound literal, a call, a keyword's operation, a conditional or a subscript (whose base's location
+// clang gives, its first token where the base is a name).
+static uint32_t check_warning_graph_location(const CheckInput* input, const Parser* parser, uint32_t token)
+{
+    const uint8_t role = parser->tree.roles[token];
+    const uint32_t node = token < input->token_count && input->token_nodes != NULL ? input->token_nodes[token] : BUSTER_CHECK_NONE;
+    const CheckOp op = node < input->graph.count ? input->graph.ops[node] : CHECK_OP_COUNT;
+    uint32_t result = BUSTER_CHECK_NONE;
+    if (role == PARSE_ROLE_CLOSE_GROUP || role == PARSE_ROLE_CLOSE_CAST || role == PARSE_ROLE_CLOSE_COMPOUND || role == PARSE_ROLE_CLOSE_COMPOUND_BODY ||
+        role == PARSE_ROLE_CLOSE_CALL || role == PARSE_ROLE_CLOSE_KEYWORD || role == PARSE_ROLE_CLOSE_TERNARY ||
+        (role == PARSE_ROLE_CLOSE_SUBSCRIPT && !check_warning_graph_void_declarator(parser, token)))
+    {
+        result = check_warning_graph_start(parser, token);
+    }
+    else if (role == PARSE_ROLE_MEMBER_OPERATOR)
+    {
+        result = token + 1;
+    }
+    else if (role == PARSE_ROLE_PREFIX || role == PARSE_ROLE_POSTFIX || role == PARSE_ROLE_OPERAND || role == PARSE_ROLE_COMMA ||
+             (role >= PARSE_ROLE_MULTIPLICATIVE && role <= PARSE_ROLE_LOGICAL_OR) || (role == PARSE_ROLE_ASSIGN && op != CHECK_OP_INITIALIZE))
+    {
+        result = token;
+    }
+    return result;
+}
+
+// Whether the node at `token` is a side effect of itself (an assignment's operator, an increment's or a decrement's,
+// va_arg's or an atomic builtin's call), and the location clang gives it in `*location`.
+static bool check_warning_graph_effect(const CheckInput* input, const Parser* parser, uint32_t token, uint32_t* location)
+{
+    const CheckGraph* graph = &input->graph;
+    const uint32_t node = token < input->token_count && input->token_nodes != NULL ? input->token_nodes[token] : BUSTER_CHECK_NONE;
+    const CheckOp op = node < graph->count ? graph->ops[node] : CHECK_OP_COUNT;
+    const uint32_t id = op == CHECK_OP_BUILTIN_ATOMIC && graph->members != NULL ? graph->members[node] : CBUILTIN_NONE;
+    // (Clang's AtomicExpr builtins: not the fences, the lock-free queries or the __sync family.)
+    const bool atomic = (id >= CBUILTIN_ATOMIC_LOAD && id <= CBUILTIN_ATOMIC_CLEAR) || (id >= CBUILTIN_ATOMIC_FETCH_MIN && id <= CBUILTIN_ATOMIC_FETCH_UDEC) ||
+                        (id >= CBUILTIN_C11_ATOMIC_INIT && id <= CBUILTIN_C11_ATOMIC_FETCH_MAX) ||
+                        (id >= CBUILTIN_ATOMIC_FETCH_FMAXIMUM && id <= CBUILTIN_ATOMIC_FETCH_FMINIMUM_NUM);
+    const bool result = op == CHECK_OP_ASSIGN || (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_BIT_XOR_ASSIGN) || op == CHECK_OP_VARARGS || atomic;
+    *location = result ? check_warning_graph_location(input, parser, token) : BUSTER_CHECK_NONE;
+    return result;
+}
+
+// Whether HasSideEffects reaches the side effect at `token`, whose location is `location`, from the operand whose
+// parent is `stop`: up the parse tree, through no expression whose location a macro wrote, no nested sizeof or alignof, no
+// type, no specifier's operand (typeof's), no tag's body or bit-field, no function's parameters, no attribute and no
+// static selection's other operands; in a statement expression, not from an unevaluated-argument builtin's call that is
+// a statement's own expression. A declaration's initializer or array bound there is read.
+static bool check_warning_graph_effect_reached(const CheckInput* input, const Parser* parser, uint32_t token, uint32_t location, uint32_t stop)
+{
+    const CheckGraph* graph = &input->graph;
+    const uint32_t count = parser->tokens.count;
+    bool result = !check_warning_graph_macro(parser, location);
+    uint32_t child = token;
+    for (uint32_t at = parser->tree.parents[token], steps = 0; result && at < count && at != stop && steps < count; steps += 1)
+    {
+        const uint8_t role = parser->tree.roles[at];
+        const uint8_t kind = parser->tokens.kinds[at];
+        const uint32_t node = at < input->token_count && input->token_nodes != NULL ? input->token_nodes[at] : BUSTER_CHECK_NONE;
+        const CheckOp op = node < graph->count ? graph->ops[node] : CHECK_OP_COUNT;
+        bool blocked = role == PARSE_ROLE_CLOSE_SIZEOF || (role == PARSE_ROLE_PREFIX && kind == PARSE_KIND_SIZEOF) || role == PARSE_ROLE_CLOSE_SPECIFIER ||
+                       role == PARSE_ROLE_CLOSE_STRUCT || role == PARSE_ROLE_CLOSE_ENUM || role == PARSE_ROLE_BITFIELD || role == PARSE_ROLE_CLOSE_FUNCTION ||
+                       role == PARSE_ROLE_CLOSE_ATTRIBUTE || role == PARSE_ROLE_CLOSE_ATTRIBUTE_SPECIFIER || role == PARSE_ROLE_CLOSE_ATTRIBUTE_LEFT ||
+                       role == PARSE_ROLE_CLOSE_ATTRIBUTE_RIGHT || role == PARSE_ROLE_CLOSE_ATTRIBUTE_LIST || role == PARSE_ROLE_CLOSE_ASM ||
+                       ((role == PARSE_ROLE_CLOSE_CAST || role == PARSE_ROLE_CLOSE_COMPOUND) && child < at);
+        // (A static selection's other operands and its controlling expression.)
+        blocked |= role == PARSE_ROLE_CLOSE_KEYWORD && !check_warning_graph_chooses(input, parser, at, token);
+        if (role == PARSE_ROLE_CLOSE_CALL && (op == CHECK_OP_BUILTIN_QUERY || op == CHECK_OP_BUILTIN_MISC || op == CHECK_OP_BUILTIN_UNARY) &&
+                 graph->members != NULL)
+        {
+            // An unevaluated-argument builtin's call that a statement holds as its own expression, which SideEffectFinder's
+            // visitor skips (a condition's, a return's, an initializer's, an expression statement's).
+            const uint32_t id = graph->members[node];
+            const uint32_t up = parser->tree.parents[at];
+            const uint8_t up_role = up < count ? parser->tree.roles[up] : PARSE_ROLE_NONE;
+            const uint32_t up_node = up < input->token_count && input->token_nodes != NULL ? input->token_nodes[up] : BUSTER_CHECK_NONE;
+            const bool statement = up_role == PARSE_ROLE_TERMINATOR || up_role == PARSE_ROLE_CLOSE_CONDITION || up_role == PARSE_ROLE_RETURN ||
+                                   up_role == PARSE_ROLE_CLOSE_FOR || (up_role == PARSE_ROLE_ASSIGN && up_node < graph->count && graph->ops[up_node] == CHECK_OP_INITIALIZE);
+            blocked |= statement && (id == CBUILTIN_CONSTANT_P || id == CBUILTIN_OBJECT_SIZE || id == CBUILTIN_DYNAMIC_OBJECT_SIZE || id == CBUILTIN_CLASSIFY_TYPE);
+        }
+        result = !blocked && !check_warning_graph_macro(parser, check_warning_graph_location(input, parser, at));
+        child = at;
+    }
+    return result;
+}
+
+// Whether the tokens [first, end), an unevaluated operand's whose parent is `stop`, hold a side effect HasSideEffects finds
+// (check_warning_graph_effect_reached). The candidates are the operators of assignments, increments and decrements and
+// the closers of calls and keywords' operations: 64 tokens' roles and kinds at a time, the scalar path's twin a token at
+// a time; each candidate's node says whether it is one.
+static bool check_warning_graph_side_effects(const CheckInput* input, const Parser* parser, uint32_t first, uint32_t end, uint32_t stop)
+{
+    const bool vector = !BUSTER_SCALAR_PATH(parser->options.scalar);
+    bool result = false;
+    for (uint32_t block = first; !result && block < end; block += 64)
+    {
+        const uint32_t live = end - block < 64 ? end - block : 64;
+        const uint64_t lanes = live == 64 ? UINT64_MAX : (UINT64_C(1) << live) - 1;
+        uint64_t candidates = 0;
+        if (vector)
+        {
+            const __m512i roles = _mm512_maskz_loadu_epi8((__mmask64)lanes, parser->tree.roles + block);
+            const __m512i kinds = _mm512_maskz_loadu_epi8((__mmask64)lanes, parser->tokens.kinds + block);
+            candidates = _mm512_mask_cmpeq_epi8_mask((__mmask64)lanes, roles, _mm512_set1_epi8((char)PARSE_ROLE_ASSIGN)) |
+                         _mm512_mask_cmpeq_epi8_mask((__mmask64)lanes, roles, _mm512_set1_epi8((char)PARSE_ROLE_CLOSE_CALL)) |
+                         _mm512_mask_cmpeq_epi8_mask((__mmask64)lanes, roles, _mm512_set1_epi8((char)PARSE_ROLE_CLOSE_KEYWORD)) |
+                         _mm512_mask_cmpeq_epi8_mask((__mmask64)lanes, kinds, _mm512_set1_epi8((char)PARSE_KIND_PLUSPLUS)) |
+                         _mm512_mask_cmpeq_epi8_mask((__mmask64)lanes, kinds, _mm512_set1_epi8((char)PARSE_KIND_MINUSMINUS));
+        }
+        else
+        {
+            for (uint32_t lane = 0; lane < live; lane += 1)
+            {
+                const uint8_t role = parser->tree.roles[block + lane];
+                const uint8_t kind = parser->tokens.kinds[block + lane];
+                const bool candidate = role == PARSE_ROLE_ASSIGN || role == PARSE_ROLE_CLOSE_CALL || role == PARSE_ROLE_CLOSE_KEYWORD ||
+                                       kind == PARSE_KIND_PLUSPLUS || kind == PARSE_KIND_MINUSMINUS;
+                candidates |= candidate ? UINT64_C(1) << lane : 0;
+            }
+        }
+        for (; !result && candidates != 0; candidates &= candidates - 1)
+        {
+            const uint32_t token = block + (uint32_t)__builtin_ctzll(candidates);
+            uint32_t location = BUSTER_CHECK_NONE;
+            result = check_warning_graph_effect(input, parser, token, &location) && check_warning_graph_effect_reached(input, parser, token, location, stop);
+        }
+    }
+    return result;
+}
+
+// The warning of an unevaluated operand with a side effect (check_warning_graph_side_effects): the operand's tokens
+// [first, end), whose parent is `stop`, at `location`, the operand's expression's, published once with `completion` in
+// lookahead, as clang's parser builds the operation there.
+static void check_warning_graph_unevaluated(CheckInputReader* reader, uint32_t first, uint32_t end, uint32_t stop, uint32_t location, uint32_t completion)
+{
+    const Parser* parser = reader->parser;
+    if (first < end && location < parser->tokens.count && !check_warning_graph_macro(parser, location) &&
+        check_warning_graph_side_effects(reader->output, parser, first, end, stop))
+    {
+        const CheckWarningEvent event =
+        {
+            .id = CHECK_WARNING_ID_UNEVALUATED_EXPRESSION,
+            .kind = CHECK_WARNING_EVENT_UNEVALUATED_EXPRESSION,
+            .token = location,
+            .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+            .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+            .completion = completion,
+            .payload = { .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+        };
+        check_input_warning_once(reader, &event);
+    }
+}
+
+// The unevaluated operand of the sizeof or alignof `node`: its tokens, its parent, its expression's location and the token
+// after the operation (check_warning_graph_unevaluated). A sizeof's own parentheses are clang's group, whose `(` is the
+// location; an operand of variable array type warns of none. Its node's source position is past its last token.
+static void check_warning_graph_operand(CheckInputReader* reader, const CheckStream* stream, uint32_t node)
+{
+    const CheckGraph* graph = &reader->output->graph;
+    const Parser* parser = reader->parser;
+    const uint32_t count = parser->tokens.count;
+    const uint32_t token = graph->tokens[node];
+    const CheckOp op = graph->ops[node];
+    const uint32_t end = graph->source_positions != NULL ? graph->source_positions[node] : BUSTER_CHECK_NONE;
+    if ((op == CHECK_OP_SIZEOF || op == CHECK_OP_ALIGNOF) && graph->operand0[node] < graph->count && token + 1 < end && end <= count &&
+        parser->tree.roles[token] == PARSE_ROLE_PREFIX && parser->tokens.kinds[token] == PARSE_KIND_SIZEOF &&
+        !check_input_vla_runtime_size(reader->types, check_stream_type(stream, graph->operand0[node])))
+    {
+        const bool grouped = parser->tree.roles[token + 1] == PARSE_ROLE_OPEN_SIZEOF;
+        uint32_t root = BUSTER_CHECK_NONE;
+        for (uint32_t at = token + 1; !grouped && root == BUSTER_CHECK_NONE && at < end; at += 1)
+        {
+            root = parser->tree.parents[at] == token ? at : root;
+        }
+        const uint32_t location = grouped ? token + 1 : root < count ? check_warning_graph_location(reader->output, parser, root) : BUSTER_CHECK_NONE;
+        check_warning_graph_unevaluated(reader, grouped ? token + 2 : token + 1, grouped ? end - 1 : end, grouped ? end - 1 : token, location, end);
+    }
+}
+
+// The controlling expression of each _Generic (check_warning_graph_unevaluated): its keyword's kind found 64 tokens at a
+// time (the scalar path's twin visits every token), its `)` the keyword's parent, its operand the tokens after its `(` up
+// to its first separator, whose bracket depth is its first token's.
+static void check_warning_graph_generics(CheckInputReader* reader)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t count = parser->tokens.count;
+    const bool scalar = BUSTER_SCALAR_PATH(parser->options.scalar);
+    for (uint32_t first = 0; first < count && !reader->output->resource; first += 64)
+    {
+        uint64_t active = scalar ? check_input_scan_all(first, count) : check_input_scan_equal(parser->tokens.kinds, first, count, PARSE_KIND_GENERIC);
+        for (; active != 0 && !reader->output->resource; active &= active - 1)
+        {
+            const uint32_t keyword = first + (uint32_t)__builtin_ctzll(active);
+            const uint32_t close = parser->tokens.kinds[keyword] == PARSE_KIND_GENERIC ? parser->tree.parents[keyword] : BUSTER_CHECK_NONE;
+            const uint32_t open = keyword + 1;
+            if (close < count && close > open + 1 && parser->tree.roles[close] == PARSE_ROLE_CLOSE_KEYWORD && parser->tokens.kinds[open] == PARSE_KIND_L_PAREN)
+            {
+                const uint32_t depth = parser->tree.depths != NULL ? parser->tree.depths[open + 1] : 0;
+                uint32_t separator = open + 1;
+                while (separator < close && !(parser->tokens.kinds[separator] == PARSE_KIND_COMMA && parser->tree.depths != NULL &&
+                                               parser->tree.depths[separator] == depth))
+                {
+                    separator += 1;
+                }
+                uint32_t root = BUSTER_CHECK_NONE;
+                for (uint32_t at = open + 1; root == BUSTER_CHECK_NONE && at < separator; at += 1)
+                {
+                    const uint32_t parent = parser->tree.parents[at];
+                    root = parent < open + 1 || parent >= separator ? at : root;
+                }
+                if (separator < close && root < separator)
+                {
+                    check_warning_graph_unevaluated(reader, open + 1, separator, parser->tree.parents[root], check_warning_graph_location(reader->output, parser, root),
+                                                    close + 1);
+                }
+            }
+        }
+    }
+}
+
 static bool check_input_warning_graph(CheckInput* input, const Parser* parser, TypeTable* types, const CheckStream* stream, Arena* output, Arena* scratch)
 {
     const uint64_t mark = output->length;
@@ -710,7 +1022,9 @@ static bool check_input_warning_graph(CheckInput* input, const Parser* parser, T
                         _mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_INITIALIZE)) |
                         _mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_CONVERT)) |
                         _mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_CALL)) |
-                        _mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_DEREFERENCE));
+                        _mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_DEREFERENCE)) |
+                        _mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_SIZEOF)) |
+                        _mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_ALIGNOF));
         }
         for (; valid && selected != 0; selected &= selected - 1)
         {
@@ -772,6 +1086,10 @@ static bool check_input_warning_graph(CheckInput* input, const Parser* parser, T
                         void_candidates[void_count++] = node;
                     }
                 }
+                else if (op == CHECK_OP_SIZEOF || op == CHECK_OP_ALIGNOF)
+                {
+                    check_warning_graph_operand(&reader, stream, node);
+                }
                 else if (op == CHECK_OP_CALL)
                 {
                     // diagnose_if's and enable_if's conditions at the call (#1447, c_check_condition_graph.c).
@@ -796,6 +1114,11 @@ static bool check_input_warning_graph(CheckInput* input, const Parser* parser, T
     if (valid && void_count != 0)
     {
         check_warning_graph_void_dereferences(&reader, stream, void_candidates, void_count);
+        valid = !staged.resource;
+    }
+    if (valid)
+    {
+        check_warning_graph_generics(&reader);
         valid = !staged.resource;
     }
     if (valid && check_sparse_wide_present(input->noderef_types))

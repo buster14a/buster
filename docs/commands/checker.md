@@ -213,10 +213,23 @@ unused-warning fixtures also check exact scope-completion tokens.
   controls and a value that decays from a variable array. Still separate: `-Wuninitialized` reads and writes
   in such a statement expression, which need the evaluation facts themselves; the input reader's
   `-Wshift-count-overflow` there; clang's runtime-warning drop in every array bound; a variable-array
-  `sizeof`'s comma operands, which clang warns of when it evaluates them; `-Wunevaluated-expression`, which
-  isn't implemented; and three forms the checker refuses: a statement expression in a variable-array
+  `sizeof`'s comma operands, which clang warns of when it evaluates them; and three forms the checker refuses: a statement expression in a variable-array
   `sizeof`'s operand, `sizeof ({ ... })` (whose `(` is the statement expression's own), and a statement
   expression as `_Generic`'s controlling expression.
+  `-Wunevaluated-expression` (#1447, clang's CheckUnaryExprOrTypeTraitOperand and CreateGenericSelectionExpr,
+  `check_warning_graph_operand`) is on by default, under `-Wunused-value`: the expression operand of a sizeof or an
+  alignof of no variable array type, and a `_Generic`'s controlling expression, that has a side effect as
+  Expr::HasSideEffects finds one without the possible ones (an assignment, an increment, `__builtin_va_arg`, an atomic
+  builtin clang makes an AtomicExpr of; not a call, a volatile read or a declaration), warns at the operand's location,
+  a sizeof's own `(` where it has one, once the operation is read. The search climbs the parse tree from each side
+  effect in the operand and stops at an expression whose location a macro wrote (an argument's too), a nested sizeof,
+  a type, a specifier's operand, a static selection's other operands, and, in a statement expression, an
+  unevaluated-argument builtin's call that is a statement's own expression. The scan is part of the warning graph's
+  16-node pass, and an operand's tokens are classified 64 at a time. Left: the operands the constant reader alone
+  reads (file-scope initializers, array bounds, enumerators, `_Static_assert`), and a bound of a pointer to a
+  variable array in a statement expression's declaration, which clang leaves out and the scan reads.
+  `c_check_unevaluated_driver_test.c` compares it with complete pinned-Clang output at each policy, both paths and one
+  or three lanes.
   `c_check_unused_result_driver_test.c` (#1447) compares a discarded call's result warnings (`-Wunused-result`'s
   warn_unused_result and nodiscard, a return type's, pure's and const's, the builtin table's) with Clang's whole
   output at each warning policy, both paths and one or three lanes: their spellings and messages, macros, types,

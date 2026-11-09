@@ -46,8 +46,10 @@ static bool check_warning_option(uint32_t id, String8 option)
     const bool wextra = id == CHECK_WARNING_ID_UNUSED_PARAMETER || id == CHECK_WARNING_ID_SIGN_COMPARE ||
                         id == CHECK_WARNING_ID_UNUSED_BUT_SET_PARAMETER;
     matches |= wall && check_diagnostic_option(option, "-Wall");
-    // -Wunused-value's (with -Wunused-comparison and -Wunused-result under it) is in -Wunused, which -Wmost and so -Wall hold.
-    const bool unused = id == CHECK_WARNING_ID_UNUSED_VALUE || id == CHECK_WARNING_ID_UNUSED_COMPARISON || id == CHECK_WARNING_ID_UNUSED_RESULT;
+    // -Wunused-value's (with -Wunused-comparison, -Wunused-result and -Wunevaluated-expression under it) is in -Wunused, which
+    // -Wmost and so -Wall hold.
+    const bool unused = id == CHECK_WARNING_ID_UNUSED_VALUE || id == CHECK_WARNING_ID_UNUSED_COMPARISON || id == CHECK_WARNING_ID_UNUSED_RESULT ||
+                        id == CHECK_WARNING_ID_UNEVALUATED_EXPRESSION;
     matches |= unused && (check_diagnostic_option(option, "-Wunused") || check_diagnostic_option(option, "-Wmost") || check_diagnostic_option(option, "-Wall"));
     matches |= wextra && (check_diagnostic_option(option, "-Wextra") || check_diagnostic_option(option, "-W"));
     // -Wint-in-bool-context and -Wtautological-compare (with -Wtautological-constant-compare under it) are -Wmost's (#1447).
