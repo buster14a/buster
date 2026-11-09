@@ -276,6 +276,7 @@ static void check_standalone_preprocessing(void)
         { "src/buster/compiler/c_preprocessor_history_test.c", "pp_test_history(" },
         { "src/buster/compiler/c_preprocessor_oracle.c", "run_preprocessor_tests(" },
         { "src/buster/compiler/c_parser_test.c", "run_parser_tests(" },
+        { "src/buster/compiler/foreign_test.c", "run_foreign_tests(" },
         { "src/buster/compiler/tier1_select_source_benchmark.c", "run_tier1_select_source_benchmark(" },
     };
     for (uint32_t i = 0; i < sizeof(files) / sizeof(files[0]); i += 1)
@@ -828,6 +829,13 @@ static void check_incremental(void)
         { "src/buster/compiler/c_parser_test.c", shared_main_units },
         { "src/buster/compiler/c_parser_bindings.c", shared_main_units },
         { "src/buster/compiler/c_builtin_intrinsic_catalog.c", shared_main_units },
+        { "src/buster/compiler/foreign_unwind_runtime_test.c", "main_unit_executable.c " },
+        { "src/buster/compiler/foreign_driver_symbols_test.c", "main_unit_executable.c " },
+        { "src/buster/compiler/foreign_strings_output_test.c", "main_unit_executable.c " },
+        { "src/buster/compiler/foreign_gc_benchmark.c", "main_unit_executable.c " },
+        { "src/buster/compiler/foreign_test.c", "main_unit_checker.c main_unit_executable.c " },
+        { "src/buster/compiler/foreign_link.c", shared_main_units },
+        { "src/buster/compiler/foreign_unwind.c", shared_main_units },
     };
     for (uint32_t i = 0; i < sizeof(files) / sizeof(files[0]); i += 1)
     {
