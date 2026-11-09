@@ -595,9 +595,12 @@ is, in source order. A prototype's end at its `)`. A definition's are declared
 again at its body's opening, as clang has them, since the body's scope is
 theirs too: in `int f(struct T *p) { struct T *q = p; ... }` the body's
 `struct T` is the parameter's (#435), and in
-`int f(enum E { K = 7 } e) { return K; }` its `K` the list's (#438). A list's
-second definition of a tag only warns in clang, which makes it a tag of its own
-that its name doesn't name, and the checker does the same. A tag that a
+`int f(enum E { K = 7 } e) { return K; }` its `K` the list's (#438). Before
+C23, a list's second definition of a tag only warns in clang, which makes it a
+tag of its own that its name doesn't name, and the checker does the same. Under
+C23 it is a redefinition as in any other scope (#1869): a record's is compared
+with the first and declares its type when compatible, or gives clang's
+"incompatible definitions" error; an enum's keeps the C23 enum limit below. A tag that a
 declarator's array bound names or defines outside a parameter list is the
 declarator's scope's: `int a[sizeof(struct V { int x; })]; struct V v;` is
 valid. A prototype in a constant expression's type name (a typeof's, a
