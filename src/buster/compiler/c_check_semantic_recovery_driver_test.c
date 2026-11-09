@@ -616,6 +616,8 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "struct S{int a;} s; int a[3] = { [sizeof(s.b)] = 1 };\n",
         "int f(int); int a[f(1, 2)];\n",
         "int f(int, int); int a[f(1)];\n",
+        "int f(void);\nint a[f(5)];\n",
+        "int f(void);\nint x __attribute__((aligned(f(5, 6))));\n",
         "struct T; int a[sizeof(struct T)];\n",
         "struct S{int a;} s; int a[s + 1];\n",
         "int f(int); int x __attribute__((aligned(f(1, 2))));\n",

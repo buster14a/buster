@@ -90,6 +90,8 @@ static CheckConstantError check_constant_failure_error(CheckInputReader* reader,
                             parser->tree.parents[open] < count;
         const uint32_t close = opened ? parser->tree.parents[open] : open;
         uint32_t commas = 0;
+        // With no parameters, the first argument is the first extra one (review on #1900).
+        result.token = opened && failure->expected == 0 && failure->actual > 0 && open + 1 < close ? open + 1 : result.token;
         for (uint32_t at = open + 1; opened && failure->actual > failure->expected && at < close && commas < failure->expected; at += 1)
         {
             const uint8_t kind_at = parser->tokens.kinds[at];
