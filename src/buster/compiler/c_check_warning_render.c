@@ -662,7 +662,9 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
     switch (event->kind)
     {
         case CHECK_WARNING_EVENT_DUPLICATE_DECLSPEC:
-            result = check_warning_text(scratch, "duplicate '%.*s' declaration specifier", (int)name.length, name.pointer);
+            // _Complex is "complex" in clang's words (DeclSpec::getSpecifierName), as its other errors name it.
+            result = payload->name == C_NAME_COMPLEX_C99 ? "duplicate 'complex' declaration specifier" :
+                     check_warning_text(scratch, "duplicate '%.*s' declaration specifier", (int)name.length, name.pointer);
             break;
         case CHECK_WARNING_EVENT_NORETURN_RETURN:
             result = check_warning_text(scratch, "function '%.*s' declared 'noreturn' should not return", (int)name.length, name.pointer);

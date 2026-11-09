@@ -5307,8 +5307,10 @@ static CheckDriverRound check_driver_rejected_read(const Parser* unit, const Par
     return round;
 }
 
-// The most readings of a rejected unit (check_driver_rejected_common): the first's errors' parts left out, then each one's new
-// errors' too.
+// The most readings of a rejected unit (check_driver_rejected_common) past those that reach the error limit's cut: the first's
+// errors' parts left out, then each one's new errors' too. Each reading before the cut adds an error, so they are at most
+// the limit's; past the cut, the bodies after it are left out, and these readings find what a body that holds the cut, or
+// file scope after it, still hides. Without a limit (-ferror-limit=0) the rounds go on while each finds an error.
 #define BUSTER_CHECK_DRIVER_REJECTED_ROUNDS 4u
 
 static void check_driver_rejected_common(const Parser* unit, const Parser* original, Preprocessor* pp, const CheckInput* first_input, const TypeTable* first_types,
@@ -5407,10 +5409,12 @@ static void check_driver_rejected_common(const Parser* unit, const Parser* origi
         }
     }
     // Rounds (#1447): a reading that finds errors of its own publishes them, and the next leaves their parts out too, so
-    // that each round adds parts left out, up to BUSTER_CHECK_DRIVER_REJECTED_ROUNDS readings; past them, or where a reading
-    // fails, the unit's warnings aren't given.
+    // that each round adds parts left out, until the error limit's cut and BUSTER_CHECK_DRIVER_REJECTED_ROUNDS readings
+    // past it; past them, or where a reading fails, the unit's warnings aren't given.
+    const uint32_t limit = pp->options.fatal_errors ? 1u : pp->options.error_limit;
+    const uint32_t rounds = limit != 0 && limit <= UINT32_MAX - BUSTER_CHECK_DRIVER_REJECTED_ROUNDS ? limit + BUSTER_CHECK_DRIVER_REJECTED_ROUNDS : UINT32_MAX;
     CheckDriverRound round = known != NULL ? CHECK_DRIVER_ROUND_ERRORS : CHECK_DRIVER_ROUND_FAILED;
-    for (uint32_t r = 0; round == CHECK_DRIVER_ROUND_ERRORS && r < BUSTER_CHECK_DRIVER_REJECTED_ROUNDS; r += 1)
+    for (uint32_t r = 0; round == CHECK_DRIVER_ROUND_ERRORS && r < rounds; r += 1)
     {
         memset(mask, 0, (uint64_t)count + 1);
         memset(edits, 0, (uint64_t)count + 1);
@@ -5444,6 +5448,25 @@ static void check_driver_rejected_common(const Parser* unit, const Parser* origi
             if (!kept && bodied)
             {
                 memset(mask + ranges[low - 1].begin, 1, ranges[low - 1].end - ranges[low - 1].begin);
+            }
+        }
+        // Past the error limit (#1447): clang's output stops at its cut, the error after the limit's (the first one, with
+        // -Wfatal-errors). The known errors' tokens may be several for one error (its position, its program's token), so
+        // the cut is counted in the bodies that hold one, each at least an error: the bodies after the one that brings
+        // them past the limit are past clang's cut, left out whole, and what those hold no longer asks for rounds.
+        const uint32_t cut_index = pp->options.fatal_errors ? 0 : pp->options.error_limit;
+        const bool limited = pp->options.fatal_errors || pp->options.error_limit != 0;
+        uint32_t errored_bodies = 0;
+        for (uint32_t b = 0; limited && b < body_count; b += 1)
+        {
+            if (errored_bodies > cut_index)
+            {
+                memset(mask + ranges[b].begin, 1, ranges[b].end - ranges[b].begin);
+                memset(bodies + ranges[b].begin, 1, ranges[b].end - ranges[b].begin);
+            }
+            else
+            {
+                errored_bodies += bodies[ranges[b].begin] != 0;
             }
         }
         ready = ready && check_lazy_mask_valid(parser, mask);
@@ -7201,6 +7224,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
         }
         pp->diagnostic_source = true;
         check_clock_mark(stage_clock, CHECK_STAGE_PREPROCESS);
+        check_clock_tokens(stage_clock, pp->output.count);
         // The phases of pp_run alone: a diagnostic's later replay of the unit (pp_history_ensure) adds to them.
         memcpy(pp_ticks, pp->ticks, sizeof(pp->ticks));
         // The files' token columns have no reader past the run (pp_release_file_columns, #628); --poison-arenas makes
