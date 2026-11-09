@@ -4795,7 +4795,7 @@ static bool check_driver_edit_statement(CheckDriverEditor* editor, uint32_t term
 }
 
 // Leave out the nearest part around `token` that the view can leave out alone: its initializer, from its `=`, where its
-// declaration is complete without it (not an array of unknown size, not const-qualified); its statement, or the
+// declaration is complete without it (not an array of unknown size, not const-qualified but at file scope); its statement, or the
 // part of it check_driver_edit_statement finds; its condition, which `-true` replaces; or its for statement's
 // increment. A token already left out is. False where none is.
 static bool check_driver_edit_site(CheckDriverEditor* editor, uint32_t token)
@@ -4824,7 +4824,11 @@ static bool check_driver_edit_site(CheckDriverEditor* editor, uint32_t token)
             // A const object of an arithmetic or enumeration type keeps it, as clang's stays valid, with `-*__func__`'s
             // unknown value in its place; another initializer the declaration can't do without leaves out its declarator.
             const bool replaced = function && constant && bare != 0 && (type_is_arithmetic(types, bare) || type_kind(types, bare) == BUSTER_TYPE_KIND_ENUM);
-            done = token < end && end <= count && type != 0 && !unsized && (!constant || replaced) && at + 1 < end;
+            // At file scope, a const object's initializer is left out alone (#1447): clang keeps such a declaration valid,
+            // its uses warning as before, its value unknown (`const int c;`). (An array of unknown size's isn't: the first
+            // reading leaves out the events of the bodies that use it, which a later reading doesn't give again.)
+            const bool alone = !function && constant && !unsized;
+            done = token < end && end <= count && type != 0 && ((!unsized && (!constant || replaced)) || alone) && at + 1 < end;
             valid = !done || check_driver_edit_apply(editor, replaced ? at + 1 : at, end - 1, replaced ? CHECK_DRIVER_EDIT_VALUE : CHECK_DRIVER_EDIT_DROP);
         }
         else if (role == PARSE_ROLE_TERMINATOR)
