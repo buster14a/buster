@@ -8743,7 +8743,9 @@ conditional operator's two function operands; this gives one for each.
     `'const CI[1]' (aka 'const int[1]')`, this `'CI[1]'`.
   - A cast inside a variable array's bound prints its type name as written
     (`int[(unsigned)n]`), where clang prints the type's own spelling
-    (`'int[(unsigned int)n]'`). Only a type's first eight bounds print;
+    (`'int[(unsigned int)n]'`), and `sizeof` of a parenthesized expression
+    has no space (`sizeof(x)`, clang's `sizeof (x)`; the static assertion's
+    requirement shares the spacing). Only a type's first eight bounds print;
     later ones print `[]`.
   - The input-side spelling helpers (`check_input_operand_type_spelling` and
     the others, `-Wsign-compare`'s operands among them) don't follow members:
