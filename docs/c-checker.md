@@ -340,7 +340,8 @@ its flag, mapped as clang maps it (`pp_c23_extension_severity`): the
 command line's `-W[no-]c23-extensions`, `-W[no-]c2x-extensions`,
 `-W[no-]everything`, `-Werror`, `-Werror=`/`-Wno-error=` and
 `-pedantic-errors`, under the source's `#pragma clang diagnostic` for the group,
-which the preprocessor follows through push and pop for it alone. Clang's -Wpre-c23-compat warning of
+which the preprocessor follows through push and pop, at any depth, for it
+alone. Clang's -Wpre-c23-compat warning of
 it in C23 isn't given. One difference from clang remains: clang takes an
 imaginary one (`5wbi`, a `_Complex _BitInt(4)` that it doesn't let a program
 spell otherwise), which the checker refuses, as GCC does.

@@ -1585,10 +1585,12 @@ struct Preprocessor
     uint32_t pushed_count;
     // The #pragma clang (or GCC) diagnostic pushes not yet popped: a pop without one isn't printed (pp_pragma_diagnostic).
     uint32_t diagnostic_depth;
-    // -Wc23-extensions' mapping by those pragmas (#1447, pp_c23_extension_severity): a PPPragmaMapping, and the one each
-    // of the first 64 pushes saved, which its pop restores.
+    // -Wc23-extensions' mapping by those pragmas (#1934, pp_c23_extension_severity): a PPPragmaMapping, and the one each
+    // open push saved, which its pop restores, by depth (room for `c23_extension_capacity`, grown in the arena as the
+    // pushes nest: any depth).
     uint8_t c23_extension_mapping;
-    uint8_t c23_extension_saved[64];
+    uint8_t* c23_extension_saved;
+    uint32_t c23_extension_capacity;
     // Where the open #pragma clang assume_nonnull, arc_cf_code_audited and unsafe_buffer_usage regions begin, or 0.
     uint32_t region_locations[3];
     // #pragma GCC poison's names, by IdentId, and how many there are (pp_check_poison).
@@ -15052,6 +15054,29 @@ static PPSeverity pp_c23_extension_severity(const Preprocessor* pp)
     return result;
 }
 
+// Room in Preprocessor.c23_extension_saved past depth `depth` (#1934): a buffer of twice the room in the arena, the old one's
+// mappings copied into it (cold: only nested pushes past the room grow it). A fatal error if the arena has none.
+static __attribute__((noinline, cold)) void pp_grow_pragma_mappings(Preprocessor* pp, uint32_t depth)
+{
+    const uint64_t wanted = (uint64_t)depth + 1;
+    uint64_t capacity = pp->c23_extension_capacity != 0 ? (uint64_t)pp->c23_extension_capacity * 2 : 64;
+    capacity = capacity > wanted ? capacity : wanted;
+    uint8_t* grown = capacity <= UINT32_MAX ? arena_push(&pp->arena, capacity, 1) : 0;
+    if (grown != 0)
+    {
+        if (pp->c23_extension_capacity != 0)
+        {
+            memcpy(grown, pp->c23_extension_saved, pp->c23_extension_capacity);
+        }
+        pp->c23_extension_saved = grown;
+        pp->c23_extension_capacity = (uint32_t)capacity;
+    }
+    else
+    {
+        pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "too many nested #pragma clang diagnostic pushes");
+    }
+}
+
 // #pragma GCC diagnostic and #pragma clang diagnostic, on their operands [begin, end) (unexpanded). clang prints one only
 // when it takes it, in its own form: push; pop with a push to pop (the two namespaces share the pushes); and ignored,
 // warning, error or fatal with a string (ordinary literals joined; another first token is an error) that names a
@@ -15068,9 +15093,13 @@ static void pp_pragma_diagnostic(Preprocessor* pp, const PPTokens* tokens, uint3
     uint32_t length = BUSTER_PP_NONE;
     if (push || (pop && pp->diagnostic_depth != 0))
     {
-        // (-Wc23-extensions' mapping, #1447: saved by a push, restored by its pop.)
+        // (-Wc23-extensions' mapping, #1934: saved by a push, restored by its pop.)
         const uint32_t saved = push ? pp->diagnostic_depth : pp->diagnostic_depth - 1;
-        if (saved < BUSTER_ARRAY_LENGTH(pp->c23_extension_saved))
+        if (push && saved >= pp->c23_extension_capacity)
+        {
+            pp_grow_pragma_mappings(pp, saved);
+        }
+        if (saved < pp->c23_extension_capacity)
         {
             pp->c23_extension_saved[saved] = push ? pp->c23_extension_mapping : pp->c23_extension_saved[saved];
             pp->c23_extension_mapping = push ? pp->c23_extension_mapping : pp->c23_extension_saved[saved];

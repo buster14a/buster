@@ -1565,6 +1565,11 @@ static void check_test_driver_attribute_arguments(CheckTest* test, const char* c
 // refused argument alone, the C23 parser's error of the attribute before a dropped standard one, the warning options and
 // pragmas, and the controls clang takes: the simple escapes, UCNs, an argument read as an expression, asm labels and
 // statements, a C23 attribute clang doesn't know.
+// Nested #pragma clang diagnostic pushes for check_test_driver_unevaluated_strings' units (#1934).
+#define BUSTER_TEST_PUSH1 "#pragma clang diagnostic push\n"
+#define BUSTER_TEST_PUSH8 BUSTER_TEST_PUSH1 BUSTER_TEST_PUSH1 BUSTER_TEST_PUSH1 BUSTER_TEST_PUSH1 BUSTER_TEST_PUSH1 BUSTER_TEST_PUSH1 BUSTER_TEST_PUSH1 BUSTER_TEST_PUSH1
+#define BUSTER_TEST_PUSH64 BUSTER_TEST_PUSH8 BUSTER_TEST_PUSH8 BUSTER_TEST_PUSH8 BUSTER_TEST_PUSH8 BUSTER_TEST_PUSH8 BUSTER_TEST_PUSH8 BUSTER_TEST_PUSH8 BUSTER_TEST_PUSH8
+
 static void check_test_driver_unevaluated_strings(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     typedef struct CheckUnevaluatedUnit CheckUnevaluatedUnit;
@@ -1892,6 +1897,15 @@ static void check_test_driver_unevaluated_strings(CheckTest* test, const char* c
         { "#pragma clang diagnostic error \"-Wc23-extensions\"\n#if 1wb\n#endif\nint x;\n", "-std=gnu17", NULL },
         { "#pragma clang diagnostic warning \"-Wc2x-extensions\"\n#if 1wb\n#endif\nint x;\n", "-std=gnu17", "-Werror" },
         { "#pragma clang diagnostic push\n#pragma clang diagnostic ignored \"-Wc23-extensions\"\n#if 3wb\n#endif\n#pragma clang diagnostic pop\n#if 1wb\n#endif\nint x;\n",
+          "-std=gnu17", NULL },
+        // 64 nested pushes: the mapping inside the innermost restored by its pop (#1934), at any depth.
+        { BUSTER_TEST_PUSH64 "#pragma clang diagnostic ignored \"-Wc23-extensions\"\n#pragma clang diagnostic pop\n#if 1wb\n#endif\nint x;\n",
+          "-std=gnu17", NULL },
+        // 65.
+        { BUSTER_TEST_PUSH64 BUSTER_TEST_PUSH1 "#pragma clang diagnostic ignored \"-Wc23-extensions\"\n#pragma clang diagnostic pop\n#if 1wb\n#endif\nint x;\n",
+          "-std=gnu17", NULL },
+        // 130.
+        { BUSTER_TEST_PUSH64 BUSTER_TEST_PUSH64 BUSTER_TEST_PUSH1 BUSTER_TEST_PUSH1 "#pragma clang diagnostic ignored \"-Wc23-extensions\"\n#pragma clang diagnostic pop\n#if 1wb\n#endif\nint x;\n",
           "-std=gnu17", NULL },
     };
     enum { LINES = 16384 };
