@@ -30,8 +30,7 @@
 #ifndef BUSTER_C_CHECK_PROGRAM_TARGET_VERSIONS_INCLUDED
 #define BUSTER_C_CHECK_PROGRAM_TARGET_VERSIONS_INCLUDED
 
-// The most versions a group's resolver takes, and the most features a version names.
-#define BUSTER_CHECK_PROGRAM_TARGET_OPTIONS 64u
+// The most features a version names.
 #define BUSTER_CHECK_PROGRAM_TARGET_FEATURES 32u
 
 // A processor's key feature's priority (c_check_target_versions.inc), or -2 for no processor of `name`.
@@ -506,13 +505,20 @@ static bool check_program_target_groups(CheckProgram* program, const CheckProgra
                       ((check_program_cpu_defined(program, group.clones) && !group.internal) ||
                        check_program_target_referenced(program, group.clones, initializer_references, initializer_reference_count));
         group.resolved = referenced;
-        // The options' conditions, which the CPU model's symbols follow.
-        CheckProgramTargetOption options[BUSTER_CHECK_PROGRAM_TARGET_OPTIONS];
-        uint32_t option_count = 0;
-        bool fits = true;
-        if (group.clones != 0)
+        // The options' conditions, which the CPU model's symbols follow: one per version (target's), or per item of
+        // target_clones' joined text, which has a comma between two.
+        uint32_t room = group.version_count;
+        for (uint32_t c = 0; group.clones != 0 && attribute->text.pointer != NULL && c <= attribute->text.length; c += 1)
         {
-            fits = check_program_target_clones(attribute, options, BUSTER_CHECK_PROGRAM_TARGET_OPTIONS, &option_count);
+            room += c == attribute->text.length || attribute->text.pointer[c] == ',';
+        }
+        CheckProgramTargetOption* options = room != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckProgramTargetOption, room) : NULL;
+        valid = room == 0 || options != NULL;
+        uint32_t option_count = 0;
+        bool fits = valid;
+        if (group.clones != 0 && fits)
+        {
+            fits = check_program_target_clones(attribute, options, room, &option_count);
         }
         for (uint32_t v = 0; group.clones == 0 && fits && v < group.version_count; v += 1)
         {
@@ -526,10 +532,11 @@ static bool check_program_target_groups(CheckProgram* program, const CheckProgra
             group.model |= options[o].cpu_is || options[o].mask[0] != 0;
             group.features2 |= (options[o].mask[1] | options[o].mask[2] | options[o].mask[3]) != 0;
         }
-        if (!fits)
+        if (valid && !fits)
         {
             check_program_fail(program, CHECK_PROGRAM_UNSUPPORTED, attribute->name_token);
         }
+        group.option_count = option_count;
         groups[kept++] = group;
     }
     if (valid)
@@ -602,27 +609,29 @@ static SymbolId check_program_target_body_symbol(const CheckProgram* program, ui
     return symbol;
 }
 
-// A group's options, in `options` (BUSTER_CHECK_PROGRAM_TARGET_OPTIONS of room), from its versions or its target_clones
-// attribute (check_program_target_groups checked that they fit and that their conditions are defined). Returns their
-// count.
-static uint32_t check_program_target_options(const CheckProgram* program, const CheckProgramTargetGroup* group, CheckProgramTargetOption* options)
+// A group's options (CheckProgramTargetGroup.option_count of them), in `arena`, from its versions or its target_clones
+// attribute (check_program_target_groups checked that they fit and that their conditions are defined), or NULL where
+// there was no room.
+static CheckProgramTargetOption* check_program_target_options(const CheckProgram* program, const CheckProgramTargetGroup* group, Arena* arena)
 {
+    const uint32_t room = group->option_count;
+    CheckProgramTargetOption* options = room != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, CheckProgramTargetOption, room) : NULL;
     uint32_t count = 0;
-    if (group->clones != 0)
+    if (options != NULL && group->clones != 0)
     {
         const CheckInputAttribute* attribute = check_target_versions_own(check_input_attributes_at(program->input, group->clones_declaration), CHECK_ATTRIBUTE_TARGET_CLONES);
-        (void)check_program_target_clones(attribute, options, BUSTER_CHECK_PROGRAM_TARGET_OPTIONS, &count);
+        (void)check_program_target_clones(attribute, options, room, &count);
     }
-    for (uint32_t v = 0; group->clones == 0 && v < group->version_count && v < BUSTER_CHECK_PROGRAM_TARGET_OPTIONS; v += 1)
+    for (uint32_t v = 0; options != NULL && group->clones == 0 && v < group->version_count && v < room; v += 1)
     {
         (void)check_program_target_parse(check_program_target_version_attribute(program, group->version_first + v)->text, options + v);
         count += 1;
     }
-    for (uint32_t o = 0; o < count; o += 1)
+    for (uint32_t o = 0; options != NULL && o < count; o += 1)
     {
         (void)check_program_target_condition(options + o);
     }
-    return count;
+    return options;
 }
 
 // The names of the groups' symbols before the emission adds them (`names` by symbol, CheckProgramCode's symbol_names):
@@ -634,10 +643,11 @@ static bool check_program_target_names(const CheckProgram* program, String8* nam
     for (uint32_t g = 0; valid && g < program->target_group_count; g += 1)
     {
         const CheckProgramTargetGroup* group = program->target_groups + g;
-        CheckProgramTargetOption options[BUSTER_CHECK_PROGRAM_TARGET_OPTIONS];
-        const uint32_t count = check_program_target_options(program, group, options);
+        const CheckProgramTargetOption* options = check_program_target_options(program, group, output);
+        const uint32_t count = options != NULL ? group->option_count : 0;
+        valid = options != NULL || group->option_count == 0;
         const SymbolId reference = program->object_symbols[group->reference];
-        if (group->clones == 0 && reference != 0 && program->symbol_objects[reference - 1] == group->reference)
+        if (valid && group->clones == 0 && reference != 0 && program->symbol_objects[reference - 1] == group->reference)
         {
             names[reference] = check_program_target_name(program, group->first, NULL, 0, ".ifunc", output);
             valid = names[reference].length != 0;
@@ -652,7 +662,7 @@ static bool check_program_target_names(const CheckProgram* program, String8* nam
             }
         }
         const SymbolId body = group->clones != 0 && program->target_symbols != NULL ? program->target_symbols[program->target_version_count + g] : 0;
-        if (body != 0 && count != 0)
+        if (valid && body != 0 && count != 0)
         {
             names[body] = check_program_target_option_name(program, group, options, output);
             valid = names[body].length != 0;
@@ -668,8 +678,7 @@ static void check_program_target_room(const CheckProgram* program, uint64_t* ato
     for (uint32_t g = 0; g < program->target_group_count; g += 1)
     {
         const CheckProgramTargetGroup* group = program->target_groups + g;
-        CheckProgramTargetOption options[BUSTER_CHECK_PROGRAM_TARGET_OPTIONS];
-        const uint32_t count = check_program_target_options(program, group, options);
+        const uint32_t count = group->option_count;
         *atoms += group->resolved;
         *symbols += 2 + count;
         *fixups += group->resolved ? 1 + 6 * (uint64_t)count : 0;
@@ -696,8 +705,9 @@ static bool check_program_target_symbols(CheckProgramCode* code, const CheckProg
     for (uint32_t g = 0; valid && g < program->target_group_count; g += 1)
     {
         const CheckProgramTargetGroup* group = program->target_groups + g;
-        CheckProgramTargetOption options[BUSTER_CHECK_PROGRAM_TARGET_OPTIONS];
-        const uint32_t count = check_program_target_options(program, group, options);
+        const CheckProgramTargetOption* options = check_program_target_options(program, group, output);
+        valid = options != NULL || group->option_count == 0;
+        const uint32_t count = options != NULL ? group->option_count : 0;
         const SymbolId body = group->clones != 0 && program->target_symbols != NULL ? program->target_symbols[program->target_version_count + g] : 0;
         // The other versions' names at a target_clones body.
         for (uint32_t o = 1; valid && body != 0 && o < count; o += 1)
@@ -785,8 +795,9 @@ static bool check_program_target_atoms(CheckProgramCode* code, const CheckProgra
     for (uint32_t g = 0; valid && g < program->target_group_count; g += 1)
     {
         const CheckProgramTargetGroup* group = program->target_groups + g;
-        CheckProgramTargetOption options[BUSTER_CHECK_PROGRAM_TARGET_OPTIONS];
-        const uint32_t count = check_program_target_options(program, group, options);
+        const CheckProgramTargetOption* options = check_program_target_options(program, group, bytes);
+        valid = options != NULL || group->option_count == 0;
+        const uint32_t count = options != NULL ? group->option_count : 0;
         const SymbolId body = group->clones != 0 && program->target_symbols != NULL ? program->target_symbols[program->target_version_count + g] : 0;
         const AtomId body_atom = body != 0 && body < link->symbols.count ? link->symbols.atom[body] : 0;
         for (uint32_t o = 1; valid && body_atom != 0 && o < count; o += 1)
@@ -801,7 +812,8 @@ static bool check_program_target_atoms(CheckProgramCode* code, const CheckProgra
         }
         // The options with their versions' symbols, without target_clones' repeated ones, in clang's stable order by
         // priority, the highest first.
-        CheckProgramTargetOption sorted[BUSTER_CHECK_PROGRAM_TARGET_OPTIONS];
+        CheckProgramTargetOption* sorted = count != 0 ? BUSTER_ARENA_PUSH_ARRAY(bytes, CheckProgramTargetOption, count) : NULL;
+        valid = count == 0 || sorted != NULL;
         uint32_t sorted_count = 0;
         for (uint32_t o = 0; valid && o < count; o += 1)
         {
@@ -833,10 +845,13 @@ static bool check_program_target_atoms(CheckProgramCode* code, const CheckProgra
         const uint32_t capacity = 6 + sorted_count * (16 + 4 * 22 + 9) + 2;
         uint8_t* text = valid ? arena_push(bytes, capacity, 16) : NULL;
         valid = text != NULL;
-        uint32_t fixup_offsets[1 + 6 * BUSTER_CHECK_PROGRAM_TARGET_OPTIONS];
-        uint8_t fixup_kinds[1 + 6 * BUSTER_CHECK_PROGRAM_TARGET_OPTIONS];
-        SymbolId fixup_targets[1 + 6 * BUSTER_CHECK_PROGRAM_TARGET_OPTIONS];
-        int32_t fixup_addends[1 + 6 * BUSTER_CHECK_PROGRAM_TARGET_OPTIONS];
+        // The fixups, in offset order: the call, and for each option at most its arch='s test, four words and its version.
+        const uint64_t fixup_room = 1 + 6 * (uint64_t)sorted_count;
+        uint32_t* fixup_offsets = valid ? BUSTER_ARENA_PUSH_ARRAY(bytes, uint32_t, fixup_room) : NULL;
+        uint8_t* fixup_kinds = fixup_offsets != NULL ? BUSTER_ARENA_PUSH_ARRAY(bytes, uint8_t, fixup_room) : NULL;
+        SymbolId* fixup_targets = fixup_kinds != NULL ? BUSTER_ARENA_PUSH_ARRAY(bytes, SymbolId, fixup_room) : NULL;
+        int32_t* fixup_addends = fixup_targets != NULL ? BUSTER_ARENA_PUSH_ARRAY(bytes, int32_t, fixup_room) : NULL;
+        valid = valid && fixup_addends != NULL;
         uint32_t fixups = 0;
         uint32_t length = 0;
         if (valid)

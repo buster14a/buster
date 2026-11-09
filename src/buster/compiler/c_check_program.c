@@ -332,6 +332,8 @@ struct CheckProgramTargetGroup
     uint32_t body;
     uint32_t version_first;
     uint32_t version_count;
+    // Its resolver's options: its versions, or target_clones' versions with their repetitions.
+    uint32_t option_count;
     bool internal;
     bool resolved;
     bool model;
