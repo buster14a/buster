@@ -5096,6 +5096,29 @@ typedef enum CheckDriverRound
     CHECK_DRIVER_ROUND_FAILED,
 } CheckDriverRound;
 
+// Whether a known error is in the top-level declaration that holds `token` (#1447): an edited view's reading may find an
+// error the first reading found at another token of it (a macro's use and its declaration's name), so its own isn't fresh.
+static bool check_driver_rejected_top_known(const Parser* parser, const uint32_t* errors, uint32_t error_count, uint32_t token)
+{
+    const uint32_t count = parser->tokens.count;
+    uint32_t top = token;
+    for (uint32_t steps = 0; top < count && parser->tree.parents[top] < count && steps < count; steps += 1)
+    {
+        top = parser->tree.parents[top];
+    }
+    bool known = false;
+    for (uint32_t e = 0; !known && top < count && e < error_count; e += 1)
+    {
+        uint32_t other = errors[e];
+        for (uint32_t steps = 0; other < count && parser->tree.parents[other] < count && steps < count; steps += 1)
+        {
+            other = parser->tree.parents[other];
+        }
+        known = other == top;
+    }
+    return known;
+}
+
 // Whether an error's token is among the unit's known ones.
 static bool check_driver_rejected_known(const uint32_t* errors, uint32_t error_count, uint32_t token)
 {
@@ -5248,7 +5271,7 @@ static CheckDriverRound check_driver_rejected_read(const Parser* unit, const Par
             const uint32_t token = phase == 0 ? input.reports[index].token : phase == 1 ? stream.reports[index].token : control.constraints[index].token;
             const uint32_t at = token < view_count && edited ? view.to_original[token] : token;
             const bool fresh = at < count && !check_driver_rejected_known(errors, error_count, at) &&
-                               !check_driver_rejected_known(found, *found_count, at);
+                               !check_driver_rejected_known(found, *found_count, at) && (!edited || !check_driver_rejected_top_known(unit, errors, error_count, at));
             valid = !fresh || *found_count < found_capacity;
             if (fresh && valid)
             {
