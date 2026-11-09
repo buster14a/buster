@@ -6031,12 +6031,6 @@ static void check_lower_eh_return(CheckLowerWriter* writer, uint32_t node)
     }
 }
 
-// A call's entries, as check_lower_call_to and check_lower_call_halves compile them: a normal source call, or an exactly
-// typed fortified libc call (`runtime`), with `halves` one that passes a half-precision argument, in an XMM register's low
-// 16 bits (a float's, its bits moved there as it is passed: check_lower_half_entry's CONVERT); without, any other, whose
-// half-precision argument (check_lower_call_passed) it leaves to check_lower_call_halves, returning true, so that its
-// own code has no test of one. A removed interval (`omitted` arguments from `omit`) contains only certified effect-free
-// constants; source argument indices and conversions remain unchanged for every retained argument.
 // The catalogue's library functions with the 'j' attribute, which return twice, in its order: all its entries with 'j'
 // but __builtin_setjmp, whose leaf is the lowering's own (Tier0Function.returns_twice). test-checker checks that these
 // are all of them, so a regenerated catalogue that changes the set fails there.
@@ -6112,6 +6106,12 @@ static bool check_lower_calls_twice(const CheckLowerWriter* writer, uint32_t obj
     return declared || named;
 }
 
+// A call's entries, as check_lower_call_to and check_lower_call_halves compile them: a normal source call, or an exactly
+// typed fortified libc call (`runtime`), with `halves` one that passes a half-precision argument, in an XMM register's low
+// 16 bits (a float's, its bits moved there as it is passed: check_lower_half_entry's CONVERT); without, any other, whose
+// half-precision argument (check_lower_call_passed) it leaves to check_lower_call_halves, returning true, so that its
+// own code has no test of one. A removed interval (`omitted` arguments from `omit`) contains only certified effect-free
+// constants; source argument indices and conversions remain unchanged for every retained argument.
 static inline __attribute__((always_inline)) bool check_lower_call_body(CheckLowerWriter* writer, uint32_t node, CheckLowerRuntime runtime, uint32_t omit,
                                                                       uint32_t omitted, bool halves, uint32_t destination)
 {
