@@ -1884,6 +1884,10 @@ static void check_test_driver_unevaluated_strings(CheckTest* test, const char* c
         { "int a = 5wb;\n#pragma clang diagnostic error \"-Wc23-extensions\"\nint b = 6wb;\n", "-std=gnu17", NULL },
         { "long a = 0x7fwb;\nlong b = 017wb;\nunsigned c = 0b1uwb;\n", "-std=gnu17", NULL },
         { "long a = 1'0wb;\n", "-std=gnu23", NULL },
+        // Before a syntax error, from the driver's scan of what the parse left unchecked (check_driver_bit_int_suffix).
+        { "int a = 5wb;\nint b = ;\n", "-std=gnu17", NULL },
+        { "int a = 5wb;\nint b = ;\n", "-std=gnu17", "-Werror=c23-extensions" },
+        { "int a = 5wb;\nint b = ;\n", "-std=gnu17", "-Wno-c23-extensions" },
         // In #if, the preprocessor's, with -Wc23-extensions' options and pragmas: off, promoted by -Werror, -Werror= and
         // -pedantic-errors, silenced by -w; a pragma's mapping over the command line's, and a push's restored by its pop.
         { "#if 1wb\n#endif\nint x;\n", "-std=gnu17", NULL },
