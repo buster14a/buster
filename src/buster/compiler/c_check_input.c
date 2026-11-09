@@ -1813,6 +1813,14 @@ struct CheckInputReader
     bool specifier_thread_local;
     // Whether the last complete declarator's own function declarator had a K&R identifier list.
     bool declarator_identifier_list;
+    // Semantic recovery's invalid declarations (#1447, check_input_invalid_declare): clang keeps such a declaration bound
+    // and its uses quiet. Whether the next declarator run may recover its type's errors (a declaration's own declarator,
+    // check_input_declaration), and whether the last complete one did; a byte per token, set at each invalid declaration's
+    // name, NULL in a unit without one; and how many there are.
+    bool declarator_recover;
+    bool declarator_invalid;
+    uint8_t* invalid_declarations;
+    uint32_t invalid_count;
     // The last complete declarator's lifetimebound attribute on a parameter of its own function declarator, where that
     // function returns void (#147), or BUSTER_CHECK_NONE.
     uint32_t declarator_lifetimebound;
@@ -5769,6 +5777,9 @@ struct CheckDeclaratorPart
     bool object_size;
     // A function's: whether a parameter has a Swift ABI (#1447, CheckDeclaratorParameter.abi).
     bool parameter_abis;
+    // An array's bound whose negative constant a recovering run reported (#1447, CheckDeclaratorRun.recover): the part
+    // makes the declaration invalid.
+    bool invalid;
     // The type once this part applies, the declarator's type built so far (check_input_attribute_type_warnings).
     TypeId type;
     // The address-space attributes this part's chunk applies to its type (#1447): its frame's records from space_first to
@@ -5849,19 +5860,36 @@ static CheckDeclaratorFrame check_input_declarator_frame(TypeId base, uint32_t f
     };
 }
 
+// The first token from `tag`, before `end`, that isn't a specifier's, a qualifier, __extension__ or an attribute list.
+static inline __attribute__((always_inline)) uint32_t check_input_specifiers_skip(const Parser* parser, uint32_t tag, uint32_t end)
+{
+    while (tag < end && (parser->tree.roles[tag] == PARSE_ROLE_SPECIFIER || parser->tokens.kinds[tag] == PARSE_KIND_QUALIFIER ||
+           parser->tokens.kinds[tag] == PARSE_KIND_EXTENSION || check_input_attribute_starts(parser, tag, end)))
+    {
+        tag = check_input_attribute_starts(parser, tag, end) ? check_input_skip_attributes(parser, tag, end) : tag + 1;
+    }
+    return tag;
+}
+
 // The struct, union or enum keyword among the specifiers from `first`, before `end`, whose body follows it: a definition
 // that the reader hasn't read yet, which a declaration's, a member's or a parameter's reader reads before the specifiers
-// (check_input_tag_definition), and BUSTER_CHECK_NONE when there's none.
+// (check_input_tag_definition), and BUSTER_CHECK_NONE when there's none. One in an _Atomic's or a typeof's type name
+// (`_Atomic(struct { int a; }) m;`, #1447) is the declaration's too, as clang reads it: the scan goes on into the group.
 // Always inlined (#880), as profile-guided builds do; hot callers: check_input_declarator_step and
 // check_input_declaration.
 static inline __attribute__((always_inline)) uint32_t check_input_specifier_definition(const CheckInputReader* reader, uint32_t first, uint32_t end)
 {
     const Parser* parser = reader->parser;
-    uint32_t tag = first;
-    while (tag < end && (parser->tree.roles[tag] == PARSE_ROLE_SPECIFIER || parser->tokens.kinds[tag] == PARSE_KIND_QUALIFIER ||
-           parser->tokens.kinds[tag] == PARSE_KIND_EXTENSION || check_input_attribute_starts(parser, tag, end)))
+    uint32_t tag = check_input_specifiers_skip(parser, first, end);
+    // The scan stops at the group's keyword or its `(`, whichever the parser didn't mark a specifier's.
+    const uint32_t opener = tag < end && tag > first && parser->tokens.kinds[tag] == PARSE_KIND_L_PAREN ? tag - 1 : tag;
+    const uint8_t opener_kind = opener < end ? parser->tokens.kinds[opener] : PARSE_KIND_END;
+    if (__builtin_expect((opener_kind == PARSE_KIND_ATOMIC || opener_kind == PARSE_KIND_TYPEOF) && opener + 1 < end &&
+                         parser->tokens.kinds[opener + 1] == PARSE_KIND_L_PAREN, 0))
     {
-        tag = check_input_attribute_starts(parser, tag, end) ? check_input_skip_attributes(parser, tag, end) : tag + 1;
+        const uint32_t close = parser->tree.parents[opener + 1];
+        end = close > opener + 1 && close < end ? close : end;
+        tag = check_input_specifiers_skip(parser, opener + 2, end);
     }
     const bool keyword = tag < end && (parser->tokens.kinds[tag] == PARSE_KIND_STRUCT || parser->tokens.kinds[tag] == PARSE_KIND_ENUM);
     const uint32_t body = keyword ? check_input_tag_body(parser, tag, end) : end;
@@ -5908,6 +5936,10 @@ struct CheckDeclaratorRun
     // A complete run whose declared name's own function declarator has a K&R identifier list.
     bool identifier_list;
     bool valid;
+    // Whether the run may recover its own declarator's type errors (#1447, CheckInputReader.declarator_recover), and
+    // whether it did: its type then has a stand-in where clang's has its error, and its declaration is invalid.
+    bool recover;
+    bool invalid;
 };
 
 // Declarator operators are collected outwards from the identifier, then applied in reverse to the base type.
@@ -7958,10 +7990,15 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
 // definition in it fails, with check_input_declarator_end's results.
 static TypeId check_input_declarator(CheckInputReader* reader, TypeId base, uint32_t* cursor, uint32_t end, uint32_t* name, uint32_t* names)
 {
+    // Only the run its caller asked for recovers: not one a bound's or a parameter's type name starts within it.
+    const bool recover = reader->declarator_recover;
+    reader->declarator_recover = false;
+    reader->declarator_invalid = false;
     CheckDeclaratorRun* run = check_input_declarator_begin(reader, base, *cursor, end);
     TypeId result = 0;
     if (run != 0)
     {
+        run->recover = recover;
         check_input_declarator_step(reader, run);
         while (run->valid && run->definition != BUSTER_CHECK_NONE)
         {
@@ -7971,7 +8008,9 @@ static TypeId check_input_declarator(CheckInputReader* reader, TypeId base, uint
                 check_input_declarator_step(reader, run);
             }
         }
+        const bool invalid = run->invalid;
         result = check_input_declarator_end(reader, run, cursor, name, names);
+        reader->declarator_invalid = result != 0 && invalid;
     }
     else
     {
