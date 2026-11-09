@@ -11031,11 +11031,41 @@ static uint32_t check_input_first_token(const CheckInputReader* reader, uint32_t
     return first;
 }
 
+// The string clang's constant evaluator reads at `address` (#1843, Expr::tryEvaluateString), another address constant
+// than a literal's start for __builtin_verbose_trap: its chars from the unit's constant objects (check_const_load, at
+// `position`), up to the first NUL, of an array of plain char (a const array's initializer the reader kept, or a
+// literal's). 0 for a string without a `$`, CHECK_INPUT_VERBOSE_TRAP_DOLLAR for one with, CHECK_INPUT_VERBOSE_TRAP_STRING
+// where the read leaves the object (past its end, or no NUL in it) and CHECK_INPUT_UNSUPPORTED where a char isn't known
+// (an object whose bytes the reader didn't keep, another element type), which the caller refuses by name.
+static uint32_t check_input_verbose_trap_object(CheckInputReader* reader, const CheckValue* address, uint32_t position)
+{
+    const CheckConstValues* owner = NULL;
+    const CheckConstObject* receipt = check_const_find(&reader->output->const_values, address->object, position, &owner);
+    const TypeId array = receipt != NULL ? type_strip_aligned(reader->types, receipt->type) : 0;
+    const bool chars = array != 0 && type_kind_is_array(type_kind(reader->types, array)) &&
+                       type_unqualified(type_strip_aligned(reader->types, type_element(reader->types, array))) == BUSTER_TYPE_CHAR;
+    const bool inside = chars && address->fault == CHECK_FAULT_NONE && address->offset >= 0 && (uint64_t)address->offset < receipt->byte_size;
+    uint32_t result = !chars ? CHECK_INPUT_UNSUPPORTED : !inside ? CHECK_INPUT_VERBOSE_TRAP_STRING : 0;
+    bool known = inside;
+    bool ended = false;
+    bool dollar = false;
+    for (uint64_t at = inside ? (uint64_t)address->offset : 0; known && !ended && at < receipt->byte_size; at += 1)
+    {
+        CheckValue loaded = { 0 };
+        known = check_const_load(reader->types, &reader->output->const_values, address->object, (int64_t)at, 0, 0, BUSTER_TYPE_CHAR, position, &loaded) &&
+                loaded.constant_kind == CHECK_CONSTANT_INTEGER;
+        ended = known && (uint8_t)loaded.integer == 0;
+        dollar |= known && (uint8_t)loaded.integer == '$';
+    }
+    result = !inside ? result : !known ? CHECK_INPUT_UNSUPPORTED : !ended ? CHECK_INPUT_VERBOSE_TRAP_STRING : dollar ? CHECK_INPUT_VERBOSE_TRAP_DOLLAR : 0;
+    return result;
+}
+
 // __builtin_verbose_trap's two arguments as clang's Sema takes them (#148): each a constant string whose bytes hold no
 // `$`, else an error at the argument's first token. A narrow string literal or __func__'s name, under parentheses and
 // casts, is read whole; an argument that is no address constant of an object (an automatic variable's value, an
-// integer, a null pointer) is no constant string. Another address constant (a const array's, a literal's past its start) clang
-// reads through its constant evaluator, whose reading of an object's bytes this reader doesn't model: it is refused.
+// integer, a null pointer) is no constant string. Another address constant (a const array's, a literal's past its start)
+// clang reads through its constant evaluator, which reads the object's bytes (check_input_verbose_trap_object).
 static void check_input_verbose_trap_arguments(CheckInputReader* reader, const CheckInputIntrinsicCall* call)
 {
     const Parser* parser = reader->parser;
@@ -11088,7 +11118,11 @@ static void check_input_verbose_trap_arguments(CheckInputReader* reader, const C
         }
         else
         {
-            check_input_report(reader, span.first, CHECK_INPUT_UNSUPPORTED);
+            const uint32_t verdict = check_input_verbose_trap_object(reader, &value, call->closing + 1);
+            if (verdict != 0)
+            {
+                check_input_report(reader, span.first, (CheckInputMessage)verdict);
+            }
         }
     }
 }
