@@ -36,7 +36,8 @@ requirements. [Command index](README.md).
   lowering under command-line and per-function targets. The overflow builtins
   (#1385, the guide's "The overflow builtins' instructions") are signed longs'
   rows of the operation and `seto` and the other classes' cheapest recipes,
-  `_BitInt`s of 65 to 127 bits' as `__int128`'s limbs (#1447):
+  `_BitInt`s of 65 to 127 bits' as `__int128`'s limbs, and past 128 bits the
+  exact result in the signed `_BitInt` that holds it (#1447):
   `test-builtin-lowering` runs every recipe natively against clang's builtins,
   `test-checker`'s `overflow-instruction-rows` program by both paths against
   clang -O0 with the rows' forms, `test-checker-driver`'s `tier1-overflow`

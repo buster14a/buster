@@ -3327,7 +3327,12 @@ What the lowering covers past scalars (#145's programs):
   constant; a bit-field of one is refused by name, and so is a complex one
   ("complex types of _BitInt past 128 bits"). `test-checker`'s
   `bit-int-past-128-bits` program, against clang -O0's build of it, has each of
-  them, clean under clang's UBSan on every input.
+  them, clean under clang's UBSan on every input. The overflow builtins take
+  them (#1447) as clang does, but `mul_overflow`'s of a signed one, which is
+  clang's error ("__builtin_mul_overflow does not support 'signed _BitInt'
+  operands of more than 128 bits"): the exact result in the signed `_BitInt`
+  that holds it, by these limbs' operations ([the builtins'
+  guide](c-builtins-integration.md)'s overflow section).
 - **Bit-fields.** A bit-field is read and written through the bytes that hold
   its bits and no other member's (C11 makes those other memory locations), as
   pieces of 8, 4, 2 and 1 bytes that form one little-endian unit: a read shifts

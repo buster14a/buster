@@ -3302,7 +3302,8 @@ static void check_test_driver_tier1_bits(CheckTest* test, const char* clang, con
 // 128-bit products and mixed signedness (c_builtin_lower.c's recipes), each alone; a chain whose values and flags stay
 // live across each other; and the issue's loop of a running sum and products, on the other unit's (clang -O2's) operands,
 // many of them at the types' boundaries; and _BitInts of 65 to 127 bits' sums, differences and products (#1447), passed by
-// pointer, whose destinations' 16 bytes, the padding extended from the width as clang stores it, are hashed.
+// pointer, whose destinations' 16 bytes, the padding extended from the width as clang stores it, are hashed; and a
+// _BitInt(200)'s difference and an unsigned one's product into an unsigned _BitInt(130), past 128 bits, so hashed.
 static const char check_test_tier1_overflow_header[] =
     "int o_add(long a, long b, long* r);\n"
     "int o_sub(long a, long b, long* r);\n"
@@ -3320,7 +3321,9 @@ static const char check_test_tier1_overflow_header[] =
     "int o_mul100(const _BitInt(100)* a, long b, _BitInt(100)* r);\n"
     "int o_mul127u(const unsigned _BitInt(127)* a, const unsigned _BitInt(127)* b, unsigned _BitInt(127)* r);\n"
     "int o_sub65(const unsigned _BitInt(127)* a, const _BitInt(100)* b, _BitInt(65)* r);\n"
-    "int o_add_long(const _BitInt(100)* a, long b, long* r);\n";
+    "int o_add_long(const _BitInt(100)* a, long b, long* r);\n"
+    "int o_sub200(const _BitInt(200)* a, const _BitInt(200)* b, _BitInt(200)* r);\n"
+    "int o_mul200u(const unsigned _BitInt(200)* a, const unsigned _BitInt(200)* b, unsigned _BitInt(130)* r);\n";
 
 static const char check_test_tier1_overflow_source[] =
     "#include \"tier1-overflow.h\"\n"
@@ -3364,7 +3367,9 @@ static const char check_test_tier1_overflow_source[] =
     "int o_mul100(const _BitInt(100)* a, long b, _BitInt(100)* r) { return __builtin_mul_overflow(*a, b, r); }\n"
     "int o_mul127u(const unsigned _BitInt(127)* a, const unsigned _BitInt(127)* b, unsigned _BitInt(127)* r) { return __builtin_mul_overflow(*a, *b, r); }\n"
     "int o_sub65(const unsigned _BitInt(127)* a, const _BitInt(100)* b, _BitInt(65)* r) { return __builtin_sub_overflow(*a, *b, r); }\n"
-    "int o_add_long(const _BitInt(100)* a, long b, long* r) { return __builtin_add_overflow(*a, b, r); }\n";
+    "int o_add_long(const _BitInt(100)* a, long b, long* r) { return __builtin_add_overflow(*a, b, r); }\n"
+    "int o_sub200(const _BitInt(200)* a, const _BitInt(200)* b, _BitInt(200)* r) { return __builtin_sub_overflow(*a, *b, r); }\n"
+    "int o_mul200u(const unsigned _BitInt(200)* a, const unsigned _BitInt(200)* b, unsigned _BitInt(130)* r) { return __builtin_mul_overflow(*a, *b, r); }\n";
 
 static const char check_test_tier1_overflow_other_source[] =
     "#include <stdio.h>\n"
@@ -3432,6 +3437,18 @@ static const char check_test_tier1_overflow_other_source[] =
     "            raw(&hash, &sr);\n"
     "            f = o_add_long(&xa, a, &r);\n"
     "            hash = hash * 31 + (unsigned)f + (unsigned long long)r;\n"
+    "            {\n"
+    "                _BitInt(200) wa = (_BitInt(200))((unsigned _BitInt(200))ua << (i % 80)), wb = (_BitInt(200))(-(unsigned _BitInt(200))ub << (i % 70)), wr = 0;\n"
+    "                unsigned _BitInt(200) va = (unsigned _BitInt(200))ua >> (i % 64), vb = (unsigned _BitInt(200))xb;\n"
+    "                unsigned _BitInt(130) vr = 0;\n"
+    "                unsigned long long w[4];\n"
+    "                f = o_sub200(&wa, &wb, &wr);\n"
+    "                __builtin_memcpy(w, &wr, 32);\n"
+    "                hash = (((hash * 31 + (unsigned)f) * 31 + w[0]) * 31 + w[1] + w[2]) * 31 + w[3];\n"
+    "                f = o_mul200u(&va, &vb, &vr);\n"
+    "                __builtin_memcpy(w, &vr, 24);\n"
+    "                hash = ((hash * 31 + (unsigned)f) * 31 + w[0]) * 31 + w[1] + w[2];\n"
+    "            }\n"
     "        }\n"
     "        p[i % 64] = a;\n"
     "        if (i % 64 == 63) hash = hash * 31 + (unsigned long long)o_sum(p, 64);\n"

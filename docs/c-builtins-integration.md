@@ -54,8 +54,12 @@ input program's object.
 Clang's generic overflow builtins accept non-const integer destinations,
 including `_Bool` and enums. This differs from GCC's documented exclusion of
 boolean and enumerated destinations. Bit-precise descriptors through 64 bits
-are accepted by the action kernel; wider overflow operands are refused
-explicitly. The runtime memory representation has a narrower contract below.
+are accepted by the action kernel; wider overflow operands are runtime actions,
+never folded, and past 128 bits a signed `_BitInt` of `mul_overflow`'s, as an
+operand or the destination, is clang's error at that argument ("__builtin_mul_overflow
+does not support 'signed _BitInt' operands of more than 128 bits",
+`CHECK_DIAG_OVERFLOW_BIT_INT`, #1447). The runtime memory representation has a
+narrower contract below.
 
 The input and output arrays are disjoint, naturally aligned C arrays with
 exactly `count` logical entries and no padding. They must also be disjoint from
@@ -278,7 +282,16 @@ operations are the same everywhere; 128-bit operands and destinations, and
 `_BitInt`s of 65 to 127 bits (#1447: their descriptor is their width, their
 high limb extended from it, and a destination fits where its high limb extended
 from the width's bits past 64 gives the result's back), keep their limbs' recipe
-(`cbuiltin_lower_overflow_wide`), and the destination stores its
+(`cbuiltin_lower_overflow_wide`). Where an operand or the destination is a
+`_BitInt` past 128 bits (#1447), the lowering computes the exact result in the
+signed `_BitInt` that holds it and every destination value
+(`check_lower_overflow_encompassing`: a sum's or difference's one bit past the
+widest operand's signed width, a product's the signed widths' sum), as clang's
+code does: both operands extended into its limbs, their sum or difference a limb
+at a time, their product by libgcc's `__mulbitint3`, as GCC -O0's code makes
+one; the destination takes its low limbs extended from its width, and the flag
+is whether the bits from its top bit up (past its width, unsigned) differ from
+its sign's (`check_lower_overflow_limbs`). Otherwise the destination stores its
 value before the recipe's last entry, the flag, which stays on the value stack.
 
 `test-builtin-lowering` runs every recipe natively against clang's builtins:
@@ -292,8 +305,11 @@ of the low bits alone would give them back). `test-checker`'s
 and mixed calls of boundary values by both paths against clang -O0's build and
 checks that the signed longs' rows are `add`, `imul` and `cmp` with `seto`;
 `test-checker`'s `bit-int-65-to-127-overflow` program runs `_BitInt`s of 65 to
-127 bits' and hashes their destinations' bytes; `test-checker-driver`'s Tier 1
-fixture `tier1-overflow` runs them by `--tier1`,
+127 bits' and hashes their destinations' bytes, and `bit-int-past-128-overflow`
+those past 128 bits' (to 300 bits, beside 129-bit, 128-bit, narrower and `_Bool`
+ones); `test-checker-driver`'s Tier 1 fixture `tier1-overflow` runs them by
+`--tier1` (a `_BitInt(200)` difference and an unsigned product among them), its
+default warnings' fixture checks the signed `mul_overflow` error against clang's,
 and `tests/ir-source/overflow-builtins.c` through the IR's lowerings, both
 interpreters and Tier 1 (`test-ssa-source --typed --tier1`).
 
