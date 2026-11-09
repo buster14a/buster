@@ -6717,11 +6717,19 @@ must deduce the same type, by C23 `auto`'s deduction below
 (`check_input_c23_auto_deduce`; `BUSTER_CHECK_DECLARATION_GNU_AUTO` keeps
 `__auto_type`'s words in its errors). Declarators that deduce differently are
 clang's error at the declaration, in the checker's words ("'__auto_type'
-deduced types differ within one declaration"). Refused by name: `_Atomic`,
-`restrict` and type attributes with `__auto_type`; a variably modified deduced
-type, whose sizes the declaration would have evaluated; and a variable with
-linkage that a declaration before it declared, whose types bind before the
-deduction.
+deduced types differ within one declaration"). A variably modified deduced
+type is the initializer's, whose sizes its own declaration evaluated, and the
+declaration evaluates none, as clang's doesn't (`__auto_type p = &vla;`); a
+cast to a variably modified type in the initializer is refused by name, as the
+cached evaluator that types it doesn't take one. A redeclaration of a
+variable with linkage takes the earlier declaration's type rather than a
+deduced one, as clang's C `mergeTypes` takes the placeholder before deducing
+(`extern long p; __auto_type p = 1;` is a long, its initializer converted;
+`check_input_auto_type_merged`), through pointer declarators. Refused by
+name: `_Atomic`, `restrict` and type attributes with `__auto_type`, a
+variably modified cast in the initializer, and a
+redeclaration whose merge clang refuses (its "redefinition of 'p' with a
+different type: 'const __auto_type' vs 'int'").
 
 `test-checker`'s source fixtures compare these with clang, their acceptance and
 first error's line, on both paths, and its programs (`local-labels`,
