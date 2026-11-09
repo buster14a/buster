@@ -625,6 +625,10 @@ at the target's forms, by both of the checker's paths:
   qwords, `pshufd`, `shufps` of halves, pairs or three elements and one of dwords, unpacks, `pshuflw` and `pshufhw` of
   words, and with SSSE3 `pshufb` of each vector by one constant (its top bits flipped for the second), ORed; with AVX
   a lane's insertion and extraction, and with AVX2 broadcasts, each lane's unpacks and `vpermd` with `vpblendd`.
+  A shift by a scalar count (`a << n`, `a >> 3`) is by the count in an XMM register, as clang's code shifts by a splat
+  (`check_vector_baseline_shift_by`, #1834): `psll`, `psrl` and `psra` of words, dwords and qwords, a qword's arithmetic
+  one the logical one xor its sign bit shifted alike less that, and bytes' through words: masked by `0xff` shifted
+  alike for a left or logical right shift, unpacked into words' high bytes, shifted and packed for an arithmetic one.
   `__builtin_convertvector`'s integer extensions without SSE4.1 and truncations without AVX-512 are sequences too
   (`check_vector_baseline_resize`, #1834): an extension unpacks the low elements with zeros, or with themselves and
   shifts them right arithmetically (a qword's high dword `psrad` by 31's); a truncation takes a qword's low dword
