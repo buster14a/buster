@@ -492,7 +492,14 @@ the GOT for an extern variable, as clang's code does). A `.comm` of a name the
 unit doesn't declare is the template's own common symbol. Both are
 `BUSTER_LINK_SYMBOL_COMMON` symbols of their own atoms, as C's commons are,
 which `-c`'s object writes `SHN_COMMON` and the direct path and the units' merge
-place as they place C's. `test-checker-driver --asm-definitions-only`
+place as they place C's. A label or `.comm` of a name the unit defines, a
+tentative definition's too, stays refused ("inline assembly labels named as the
+unit's symbols"), with or without `-fcommon`: clang 23 has no coherent object
+for it. Without `-fcommon` its object makes C's `.bss` definition a common of
+C's size at the template's alignment, dropping an initializer's bytes; with
+`-fcommon` a `.comm` of C's size and alignment is the one common, and another
+size or alignment is a backend crash ("redeclared as different type").
+`test-checker-driver --asm-definitions-only`
 (`c_check_asm_definition_driver_test.c`) compares each fixture's `-c` symbols
 and data relocations with clang 23's, on both paths, and runs the objects
 linked by clang and the direct path's executables against clang's build.
