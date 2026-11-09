@@ -74,24 +74,30 @@ static void check_input_constant_warning_clear(CheckInputReader* reader, uint32_
     check_input_warning_range(reader, first, end, warnings, 0);
 }
 
-static void check_input_constant_fold_warning(CheckInputReader* reader, uint32_t first, uint32_t end, const CheckValue* value, bool ignored, uint32_t location)
+// A non-ICE fold's warning. A declarator's array bound (`declarator`) or a GNU object read's is clang's
+// "variable length array folded to constant array", once for the declarator however many of its bounds fold: at
+// `location`, its declarator's name, where clang made the array variable and then folded it for a declaration that
+// can't have one (a GNU object read, a floating cast's value), and at the bound's first token where an ICE's form
+// folded only past an overflow or a shift's limit, which clang's array type folds at once, in every context.
+static void check_input_constant_fold_warning(CheckInputReader* reader, uint32_t first, uint32_t end, const CheckValue* value, bool ignored, uint32_t location,
+                                              bool declarator)
 {
     if (first < end && end <= reader->parser->tokens.count && reader->output->constant_warnings != 0 &&
         check_input_integer_constant(reader, value) && (value->flags & BUSTER_CHECK_ICE) == 0)
     {
-        if ((value->flags & BUSTER_CHECK_GNU_OBJECT_READ) != 0)
+        if ((value->flags & BUSTER_CHECK_GNU_OBJECT_READ) != 0 || (declarator && !ignored))
         {
             const CheckWarningEvent event = {
                 .id = CHECK_WARNING_ID_GNU_CONSTANT,
                 .kind = ignored ? CHECK_WARNING_EVENT_GNU_ICE_FOLD : CHECK_WARNING_EVENT_GNU_ARRAY_FOLD,
-                .token = location,
+                .token = declarator && (value->flags & (BUSTER_CHECK_GNU_ICE_FORM | BUSTER_CHECK_GNU_OBJECT_READ)) == BUSTER_CHECK_GNU_ICE_FORM ? first : location,
                 .source = BUSTER_CHECK_NONE,
                 .flags = ignored ? BUSTER_CHECK_WARNING_DEFAULT_IGNORED : 0,
                 .completion_kind = ignored ? CHECK_WARNING_COMPLETE_AT_TOKEN : CHECK_WARNING_COMPLETE_AFTER_DELIMITER,
                 .completion = end,
                 .payload = { .token = BUSTER_CHECK_NONE },
             };
-            check_input_warning_event(reader, &event, NULL, 0);
+            check_input_warning_once(reader, &event);
         }
         else
         {
@@ -118,14 +124,15 @@ static void check_input_constant_warning(CheckInputReader* reader, uint32_t firs
 {
     check_input_constant_warning_clear(reader, first, end,
         CHECK_WARNING_SHIFT_COUNT_NEGATIVE | CHECK_WARNING_SHIFT_COUNT_OVERFLOW | CHECK_WARNING_SHIFT_NEGATIVE_VALUE);
-    check_input_constant_fold_warning(reader, first, end, value, ignored, first);
+    check_input_constant_fold_warning(reader, first, end, value, ignored, first, false);
 }
 
-static void check_input_constant_bound_warning(CheckInputReader* reader, uint32_t first, uint32_t end, const CheckValue* value, uint32_t location)
+static void check_input_constant_bound_warning(CheckInputReader* reader, uint32_t first, uint32_t end, const CheckValue* value, uint32_t location,
+                                               bool declarator)
 {
     check_input_constant_warning_clear(reader, first, end,
         CHECK_WARNING_SHIFT_COUNT_NEGATIVE | CHECK_WARNING_SHIFT_COUNT_OVERFLOW | CHECK_WARNING_SHIFT_NEGATIVE_VALUE);
-    check_input_constant_fold_warning(reader, first, end, value, false, location);
+    check_input_constant_fold_warning(reader, first, end, value, false, location, declarator);
     if (reader->constant_contexts != 0 && first < end && end <= reader->parser->tokens.count)
     {
         for (uint32_t token = first; token < end; token += 1)
@@ -1061,7 +1068,7 @@ static TypeId check_constant_type(CheckConstantInput* input, uint32_t first, uin
                     part.extent = (uint64_t)extent;
                     if (valid)
                     {
-                        check_input_constant_bound_warning(reader, i + 1, close, &bound, i);
+                        check_input_constant_bound_warning(reader, i + 1, close, &bound, i, false);
                     }
                 }
                 else if (valid)
@@ -2200,7 +2207,7 @@ static bool check_constant_selection(CheckConstantInput* input, uint32_t keyword
                 const uint32_t root = check_constant_range_root(input, condition ? separator + 1 : next + 1, condition ? next : token);
                 *proof = input->proof_values[root - input->first];
             }
-            check_input_constant_fold_warning(reader, first, separator, &control, true, first);
+            check_input_constant_fold_warning(reader, first, separator, &control, true, first, false);
             check_input_warning_suppress(reader, condition ? next + 1 : separator + 1, condition ? token : next, CHECK_WARNING_INTEGER_OVERFLOW);
         }
     }

@@ -676,6 +676,39 @@ admit comma expressions or computed floating casts. Declaration-time warnings
 are retained by token and merged with graph warnings before rendering. Warning
 identity and default severity remain separate: an enum's GNU folding extension
 is normally quiet, while the corresponding folded file-scope array bound warns.
+As clang's do, a declarator's array bound that is no ICE but folds, wherever its
+array can't be variable (file scope, a member, a typedef at file scope, a block's
+`static` or `extern` object), warns "variable length array folded to constant
+array as an extension" once at the declarator's name, whatever folded it; a
+bit-field width, an enumerator's value, a static assertion, a case label or a
+designator folds quietly, and under `-Wgnu-folding-constant` with `-Werror` or
+`-pedantic` reads "expression is not an integer constant expression; folding it
+to a constant is a GNU extension" at the expression's first token
+(`c_check_vla_fold_driver_test.c`). A block's automatic array keeps such a bound
+variable, as does a `sizeof`'s type name anywhere.
+A variable-length array or variably modified type where C allows none takes
+clang's error at the declarator's name (`check_input_vla_place`,
+`check_input_vla_declaration`):
+- at file scope, "variable length array declaration not allowed at file
+  scope", or "variably modified type declaration …" where the declared type
+  is no array (`int (*p)[n]`);
+- a block's `extern` object, "… cannot have 'extern' linkage", by the same
+  two kinds;
+- a block's `static` array, "variable length array declaration cannot have
+  'static' storage duration";
+- a member, "fields must have a constant size: 'variable length array in
+  structure' extension will never be supported".
+
+A `sizeof` of a variable type name in a file-scope initializer
+(`int s = 1 + sizeof(int[n]);`) is "initializer element is not a compile-time
+constant", at the start of the initializer's element that holds it.
+
+Differences left: these errors stop the reader, where clang marks the
+declaration invalid and goes on. A file-scope cast to a variably modified
+type, and `_Alignof` of one, are still refused, though clang accepts them.
+A block's variable-length array with a non-empty initializer is still
+"invalid or unsupported declaration" (clang's "variable-sized object may not
+be initialized", at the bound).
 Immutable source-position diagnostic pragmas apply push/pop and exact warning
 group policy to these witnesses. Promoted warnings participate in first-error
 ordering and prevent object publication; `-w` suppresses them as Clang does.
@@ -7992,9 +8025,10 @@ arguments against the function. The checker now gives these as clang does.
   declaration with it, and `check_program_realign(program, b)` says whether
   body `b` realigns its stack (`Tier0Function.realign_stack`,
   `docs/tier0.md`'s realigned frames: 16 bytes' at least).
-  A variadic routine, which clang compiles, is refused by name ("unsupported:
-  variadic interrupt service routines"), as are `__builtin_eh_return`,
-  `__builtin_setjmp` and musttail calls in one, as in any preserving frame.
+  A variadic routine's list starts at the interrupted code's argument
+  registers, as LLVM's `x86_intrcc` has it (#1447, `docs/tier0.md`).
+  `__builtin_eh_return`, `__builtin_setjmp` and musttail calls in one are
+  refused by name, as in any preserving frame.
 
   GCC's and clang's `patchable_function_entry(N[, M[, "section"]])`
   (`CHECK_ATTRIBUTE_PATCHABLE_FUNCTION_ENTRY`, #1447) is clang's
