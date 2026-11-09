@@ -412,6 +412,81 @@ static bool check_driver_warning_parentheses(const Parser* parser, const TypeTab
     return valid;
 }
 
+// The sugar a typeof specifier prints as (#1837), clang's TypePrinter's: `typeof(T)` (`typeof_unqual(T)`) with its operand
+// type T as clang prints it, a typedef name as written and a nested typeof as its own sugar; `typeof (x)` of an expression
+// that is one name. Empty where it can't tell (another expression, or a type name that spells a typedef inside it), which
+// prints no sugar. `keyword` is the typeof's keyword; `names` prints the operand's type, its aliases unused.
+static String8 check_driver_typeof_text(const Parser* parser, Preprocessor* pp, const CheckInput* input, const TypeTable* types, Arena* scratch,
+                                        const TypeNames* names, uint32_t keyword, uint32_t options)
+{
+    const uint32_t count = parser->tokens.count;
+    // The keywords from the outermost in, while each one's operand is exactly the next typeof.
+    uint32_t chain[8];
+    uint32_t depth = 0;
+    String8 inner = { 0 };
+    bool expression = false;
+    bool walking = keyword + 1 < count && parser->tokens.kinds[keyword + 1] == PARSE_KIND_L_PAREN;
+    while (walking && depth < BUSTER_ARRAY_LENGTH(chain))
+    {
+        chain[depth++] = keyword;
+        const uint32_t close = parser->tree.parents[keyword + 1];
+        const uint32_t first = keyword + 2;
+        walking = false;
+        const bool one = close < count && first + 1 == close;
+        const uint32_t resolved = one && parser->tokens.kinds[first] == PARSE_KIND_IDENTIFIER && input->declarations != NULL ? input->declarations[first] : 0;
+        const bool typedef_name = resolved != 0 && resolved < input->token_count && input->declaration_kinds[resolved] == C_BINDING_TYPEDEF;
+        const bool nested = close < count && first < close && parser->tokens.kinds[first] == PARSE_KIND_TYPEOF && check_input_typeof_name(parser->tokens.names[first]) &&
+                            first + 1 < close && parser->tokens.kinds[first + 1] == PARSE_KIND_L_PAREN && parser->tree.parents[first + 1] + 1 == close;
+        // A type name of keywords and tags alone: its type prints as clang prints it.
+        bool keywords = close < count && first < close;
+        for (uint32_t token = first; keywords && token < close; token += 1)
+        {
+            const uint8_t kind = parser->tokens.kinds[token];
+            keywords = kind == PARSE_KIND_TYPE || kind == PARSE_KIND_QUALIFIER || kind == PARSE_KIND_STRUCT || kind == PARSE_KIND_ENUM ||
+                       kind == PARSE_KIND_STAR || (kind == PARSE_KIND_ATOMIC && !(token + 1 < close && parser->tokens.kinds[token + 1] == PARSE_KIND_L_PAREN)) ||
+                       (kind == PARSE_KIND_IDENTIFIER && token > first && (parser->tokens.kinds[token - 1] == PARSE_KIND_STRUCT || parser->tokens.kinds[token - 1] == PARSE_KIND_ENUM));
+        }
+        if (typedef_name)
+        {
+            const uint32_t name = parser->tokens.names[first];
+            inner = (String8){ .pointer = (char*)intern_bytes(pp->table, name), .length = intern_length(pp->table, name) };
+        }
+        else if (one && parser->tokens.kinds[first] == PARSE_KIND_IDENTIFIER && resolved != 0)
+        {
+            const uint32_t name = parser->tokens.names[first];
+            inner = (String8){ .pointer = (char*)intern_bytes(pp->table, name), .length = intern_length(pp->table, name) };
+            expression = true;
+        }
+        else if (nested)
+        {
+            keyword = first;
+            walking = true;
+        }
+        else if (keywords && chain[0] < input->token_count && type_is_valid(types, input->declared_types[chain[0]]))
+        {
+            // The outermost keyword's type: a nested typeof's own is read by the constant reader, which records none, and
+            // is that one's.
+            inner = type_print(types, scratch, input->declared_types[chain[0]], (String8){ 0 }, names, options);
+        }
+    }
+    String8 result = { 0 };
+    const char* text = NULL;
+    if (inner.length != 0 && !walking)
+    {
+        // From the innermost out: `typeof(` ... `)`, the innermost `typeof (` for an expression.
+        text = check_warning_text(scratch, "%.*s", (int)inner.length, inner.pointer);
+        for (uint32_t level = depth; text != NULL && level > 0; level -= 1)
+        {
+            const uint32_t name = parser->tokens.names[chain[level - 1]];
+            const bool unqualified = name == C_NAME_TYPEOF_UNQUAL || name == C_NAME_GNU_TYPEOF_UNQUAL || name == C_NAME_GNU_TYPEOF_UNQUAL2;
+            const bool spaced = expression && level == depth;
+            text = check_warning_text(scratch, "%s%s(%s)", unqualified ? "typeof_unqual" : "typeof", spaced ? " " : "", text);
+        }
+    }
+    result = text != NULL ? (String8){ .pointer = (char*)text, .length = (uint64_t)strlen(text) } : (String8){ 0 };
+    return result;
+}
+
 // A warning's type spelling (#992): `spelling` is the operand's typedef specifier's declaration, so the base's
 // specifier prints the typedef's name and clang's `(aka '...')` shows the type without that sugar; the sentinel
 // BUSTER_CHECK_NONE prints `__size_t` for a sizeof/alignof operand's own type. The anonymous map prints an
@@ -451,6 +526,15 @@ static String8 check_driver_warning_type_at(const Parser* parser, Preprocessor* 
                 alias_type = type_unqualified(type_strip_aligned(types, type));
                 alias_name = BUSTER_S8("__size_t");
             }
+            else if (spelling != 0 && input != NULL && input->declared_types != NULL && spelling < input->token_count &&
+                     parser->tokens.kinds[spelling] == PARSE_KIND_TYPEOF)
+            {
+                // A typeof specifier's sugar (#1837): its type prints as `typeof(...)`.
+                const TypeId declared = input->declared_types[spelling];
+                const uint32_t options = pp->options.language.standard >= 2023 ? BUSTER_TYPE_PRINT_C23 : 0;
+                alias_name = type_is_valid(types, declared) ? check_driver_typeof_text(parser, pp, input, types, scratch, &names, spelling, options) : (String8){ 0 };
+                alias_type = alias_name.length != 0 ? declared : 0;
+            }
             else if (spelling != 0 && input != NULL && input->declared_types != NULL && spelling < input->token_count)
             {
                 const TypeId declared = input->declared_types[spelling];
@@ -475,7 +559,8 @@ static String8 check_driver_warning_type_at(const Parser* parser, Preprocessor* 
             // (desugarForDiagnostic: "People want their vec4"): a typedef of that typedef's a.k.a. is that one's name,
             // and that one has none. The chain of typedef specifiers from the alias's declaration leads to it.
             const uint8_t alias_kind = alias_type != 0 ? type_kind(types, type_strip_aligned(types, alias_type)) : 0;
-            uint32_t vector_name = alias_kind == BUSTER_TYPE_KIND_VECTOR || alias_kind == BUSTER_TYPE_KIND_EXT_VECTOR ? spelling : 0;
+            const bool typeof_spelling = spelling != BUSTER_CHECK_NONE && spelling < parser->tokens.count && parser->tokens.kinds[spelling] == PARSE_KIND_TYPEOF;
+            uint32_t vector_name = !typeof_spelling && (alias_kind == BUSTER_TYPE_KIND_VECTOR || alias_kind == BUSTER_TYPE_KIND_EXT_VECTOR) ? spelling : 0;
             for (uint32_t steps = 0; vector_name != 0 && steps < 64; steps += 1)
             {
                 const uint32_t inner = check_input_typedef_spelling(input, parser, vector_name);
@@ -501,7 +586,7 @@ static String8 check_driver_warning_type_at(const Parser* parser, Preprocessor* 
                                      types->types.index[type_index(alias_tag)] : names.anonymous_count;
                 const bool naming = tag < names.anonymous_count && names.anonymous[tag].length == alias_name.length &&
                                     memcmp(names.anonymous[tag].pointer, alias_name.pointer, alias_name.length) == 0;
-                expand.anonymous_keyword = spelling != BUSTER_CHECK_NONE && !naming && check_input_typedef_spelling(input, parser, spelling) == 0;
+                expand.anonymous_keyword = spelling != BUSTER_CHECK_NONE && !naming && (typeof_spelling || check_input_typedef_spelling(input, parser, spelling) == 0);
                 expand.alias_count = vector_name != 0 ? 1 : 0;
                 expand.alias_types = &vector_type;
                 expand.alias_names = &vector_alias;

@@ -563,6 +563,24 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "enum F : _Complex _Complex _Bool { B };\nenum G : short short { C };\n_Atomic(signed signed char) s;\ntypeof(_Atomic _Atomic int) t;\n"
         "int f(void) { return sizeof(short short) + (int)(typeof(volatile volatile long))1 + _Alignof(_Complex _Complex double); }\n"
         "typeof(typeof(signed int signed) const const) u;\n",
+        // A typeof specifier's sugar in a warning's type (#1837), as clang prints it: a type name's, a typedef name's, a nested
+        // typeof's and one name's expression's, qualified, a sibling declarator's, a parameter's and a body's local.
+        "typedef long L;\n"
+        "struct S { int a; };\n"
+        "int x;\n"
+        "typeof(long) m1; char *p1 = &m1;\n"
+        "__typeof__(unsigned) m2; char *p2 = &m2;\n"
+        "typeof(L) m4; char *p4 = &m4;\n"
+        "typeof(int *) m5; char *p5 = &m5;\n"
+        "typeof(x) m6; char *p6 = &m6;\n"
+        "const typeof(long) m7; char *p7 = &m7;\n"
+        "typeof(struct S) m8; char *p8 = &m8;\n"
+        "typeof(typeof(long)) m9; char *p9 = &m9;\n"
+        "typeof(_Bool) m10; char *p10 = &m10;\n"
+        "typeof(long) a11, *b11; char *p11 = &a11;\n"
+        "int f(typeof(short) q) { char *p = &q; return *p; }\n"
+        "typedef typeof(long) TL; TL m13; char *p13 = &m13;\n"
+        "int g(void) { typeof(unsigned char) c = 1; int *q = &c; return *q; }\n",
         // An extern declaration of type void, which clang takes (#1447): its address, sizeof, a discarded use and a cast to
         // void are quiet, a block's extern too; reading its value is the error. A dereference's or subscript's of a void
         // pointer still warns, and a void value in a comma's, conditional's or selection's operand is quiet.

@@ -2266,12 +2266,55 @@ static bool check_driver_in_body(const Parser* parser, uint32_t token)
     return closed && open < token;
 }
 
-// Whether a reader's report counts in the scopes around it (check_driver_rejected_warnings): not a recovered one outside
-// every body (#1835). Clang gives those as it parses a declaration's specifiers, declarator and attributes, before a
-// definition's body opens its scope (ActOnStartOfFunctionDef), so they don't take the body's unused-variable warnings.
-static bool check_driver_error_scoped(const Parser* parser, const CheckInputReport* report)
+// Whether a recovered report is one whose declaration stays valid (#1835): a dropped attribute's
+// (check_input_attribute_recoverable) or a dropped specifier's (check_input_specifiers_recover). A rejected unit's rounds
+// read past it (check_driver_rejected_common).
+static bool check_driver_report_keeps_valid(const CheckInputReport* report)
 {
-    return !report->recovered || check_driver_in_body(parser, report->token);
+    const CheckInputMessage message = report->message;
+    const bool specifier = message == CHECK_INPUT_SPECIFIER_COMBINE || message == CHECK_INPUT_SPECIFIER_SIGN || message == CHECK_INPUT_SPECIFIER_WIDTH ||
+                           message == CHECK_INPUT_SPECIFIER_COMPLEX;
+    return report->recovered && (specifier || check_input_attribute_recoverable(report));
+}
+
+// Whether `token` is inside a declarator's parameter list: an enclosing `(`, matched backward over the tokens, is a
+// parameter list's, before a `;` or a brace. That `(` is one the parser marks so, or one right after a name that declares
+// itself (the vector parser marks a definition's whose first parameter starts with an attribute as a call's, #1968).
+static bool check_driver_in_parameters(const Parser* parser, const CheckInput* input, uint32_t token)
+{
+    uint32_t depth = 0;
+    bool inside = false;
+    bool scanning = token < parser->tokens.count;
+    for (uint32_t at = token; scanning && at > 0;)
+    {
+        at -= 1;
+        const uint8_t kind = parser->tokens.kinds[at];
+        const bool open = kind == PARSE_KIND_L_PAREN && depth == 0;
+        const bool declared = at > 0 && parser->tokens.kinds[at - 1] == PARSE_KIND_IDENTIFIER && input->declarations != NULL && at - 1 < input->token_count &&
+                              input->declarations[at - 1] == at - 1;
+        inside = open && (parser->tree.roles[at] == PARSE_ROLE_OPEN_FUNCTION || declared);
+        depth += kind == PARSE_KIND_R_PAREN ? 1u : 0u;
+        depth -= kind == PARSE_KIND_L_PAREN && depth != 0 ? 1u : 0u;
+        scanning = !inside && !(depth == 0 && (kind == PARSE_KIND_SEMI || kind == PARSE_KIND_L_BRACE || kind == PARSE_KIND_R_BRACE));
+    }
+    return inside;
+}
+
+// Whether a reader's report counts in the scopes around it (check_driver_rejected_warnings). Clang opens a definition's
+// body's scope before it handles the definition's declarator (ActOnStartOfFunctionDef: its own attributes, its
+// redeclaration), whose errors then keep the body's unused variables quiet; but what it gives as it parses, before that
+// (#1835), doesn't count: a specifier's (DeclSpec::Finish), a parameter's attributes' (ActOnParamDeclarator), and an
+// attribute's argument that must be a string literal (the parser's err_expected_string_literal).
+static bool check_driver_error_scoped(const Parser* parser, const CheckInput* input, const CheckInputReport* report)
+{
+    const CheckInputMessage message = report->message;
+    const bool specifier = message == CHECK_INPUT_SPECIFIER_COMBINE || message == CHECK_INPUT_SPECIFIER_SIGN || message == CHECK_INPUT_SPECIFIER_WIDTH ||
+                           message == CHECK_INPUT_SPECIFIER_COMPLEX;
+    const bool attribute = check_input_attribute_recoverable(report);
+    const bool parsed = message == CHECK_INPUT_ATTRIBUTE_STRING_ARGUMENT ||
+                        (message == CHECK_INPUT_ATTRIBUTE_ARGUMENT && (report->detail & 0xffu) == CHECK_ARGUMENT_STRING_LITERAL);
+    const bool early = report->recovered && (specifier || (attribute && (parsed || check_driver_in_parameters(parser, input, report->token))));
+    return !early || check_driver_in_body(parser, report->token);
 }
 
 // The prefix count of the unit's errors' tokens (check_driver_rejected_warnings): its reader's reports, its graph's and the
@@ -2287,7 +2330,7 @@ static uint32_t* check_driver_error_counts(const Parser* parser, const CheckInpu
         memset(errors, 0, ((uint64_t)count + 2) * sizeof(uint32_t));
         for (uint32_t i = 0; i < input->report_count; i += 1)
         {
-            errors[(input->reports[i].token < count ? input->reports[i].token : count) + 1] += check_driver_error_scoped(parser, input->reports + i) ? 1u : 0u;
+            errors[(input->reports[i].token < count ? input->reports[i].token : count) + 1] += check_driver_error_scoped(parser, input, input->reports + i) ? 1u : 0u;
         }
         for (uint32_t i = 0; i < stream->report_count; i += 1)
         {
@@ -5007,8 +5050,8 @@ typedef enum CheckDriverRound
     CHECK_DRIVER_ROUND_FAILED,
 } CheckDriverRound;
 
-// Whether the first reading's error at `token` is a recovered one only (CheckInputReport.recovered, #1447): no error at it
-// stopped the reader. Only a rejected unit's rounds call it.
+// Whether the first reading's errors at `token` all leave their declaration valid (check_driver_report_keeps_valid,
+// #1835): no other error is there. Only a rejected unit's rounds call it.
 static bool check_driver_rejected_recovered(const CheckInput* input, uint32_t token)
 {
     bool recovered = false;
@@ -5016,10 +5059,26 @@ static bool check_driver_rejected_recovered(const CheckInput* input, uint32_t to
     for (uint32_t i = 0; i < input->report_count; i += 1)
     {
         const bool at = input->reports[i].token == token;
-        recovered |= at && input->reports[i].recovered;
-        stopped |= at && !input->reports[i].recovered;
+        const bool keeps = check_driver_report_keeps_valid(input->reports + i);
+        recovered |= at && keeps;
+        stopped |= at && !keeps;
     }
     return recovered && !stopped;
+}
+
+// Whether the first reading's errors at `token` count in the scopes around it (check_driver_error_scoped): one does, or
+// none is a report's (a graph's or a control's, which count).
+static bool check_driver_rejected_scoped(const Parser* parser, const CheckInput* input, uint32_t token)
+{
+    bool reported = false;
+    bool scoped = false;
+    for (uint32_t i = 0; i < input->report_count; i += 1)
+    {
+        const bool at = input->reports[i].token == token;
+        reported |= at;
+        scoped |= at && check_driver_error_scoped(parser, input, input->reports + i);
+    }
+    return scoped || !reported;
 }
 
 // Whether an error's token is among the unit's known ones.
@@ -5089,8 +5148,8 @@ static CheckDriverRound check_driver_rejected_read(const Parser* unit, const Par
             // A dropped part's error counts just before the token after it (#1447): in its own scope, a dropped
             // declaration's at file scope, and not in the definition that follows it.
             const bool dropped = edited && errors[e] < count && edits[errors[e]] != 0;
-            // A recovered error outside every body counts in no scope (check_driver_error_scoped, #1835).
-            const bool scoped = errors[e] >= count || !check_driver_rejected_recovered(first_input, errors[e]) || check_driver_in_body(unit, errors[e]);
+            // A recovered error clang gives before a body's scope opens counts in none (check_driver_error_scoped, #1835).
+            const bool scoped = errors[e] >= count || check_driver_rejected_scoped(unit, first_input, errors[e]);
             error_counts[(at < view_count ? at : view_count) + (dropped ? 0u : 1u)] += scoped ? 1u : 0u;
         }
         for (uint32_t t = 1; t < view_count + 2; t += 1)
