@@ -4171,9 +4171,8 @@ do:
   no warning. Before C23, the list's redefinition of its own tag is "redefinition
   of 'S' will not be visible outside of this function", noted at the earlier
   definition; an enum's, read as an unnamed enum, gets the first warning too
-  (`c_check_warning_driver_test.c`). Left: a C23 list's redefinition of its own
-  record is taken as a new tag without clang's comparison (its "incompatible
-  definitions" error, [#1869](https://github.com/buster14a/buster/issues/1869)).
+  (`c_check_warning_driver_test.c`). A C23 list's redefinition of its own
+  record is compared instead, as any scope's (#1869).
 
 Phase 3 covers statements after an error:
 
