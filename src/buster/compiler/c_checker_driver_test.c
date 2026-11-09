@@ -543,6 +543,9 @@ static void check_test_driver_codegen_refusals(CheckTest* test, const char* exec
           "unsupported: __builtin_dump_struct whose printer returns an aggregate, a 128-bit or a half-precision value" },
         { "int g(int, const char*, ...);\nstruct S { int a; };\nvoid f(struct S* s, int n) { __builtin_dump_struct(s, g, ({ n; })); }\n",
           "unsupported: __builtin_dump_struct whose printer or other arguments have a statement expression or more than 4096 nodes, which its calls evaluate again" },
+        // A record in a segment's space (#1447), whose fields' loads would take no override.
+        { "struct S { int a; long b; };\nint printf(const char*, ...);\nvoid f(struct S __seg_fs* s) { __builtin_dump_struct(s, printf); }\n",
+          "unsupported: __builtin_dump_struct of a record in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
         { "int f(void) { return __builtin_available(macos 0.0.0, *); }\n",
           "unsupported: __builtin_available with an empty version, which clang doesn't compile either" },
     };

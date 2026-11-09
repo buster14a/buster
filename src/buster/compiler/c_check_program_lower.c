@@ -8744,6 +8744,9 @@ static const char* check_lower_dump_passed(CheckLowerWriter* writer, TypeId type
 // symbol called directly) and the rest of the arguments again, converted to the printer's parameters or promoted as
 // variadic arguments, then passes the format's string and the operands: the image's strings, a bit-field's width, and
 // each field's value read through the record's address, promoted, or its address. A call's result is discarded.
+static TypeId check_lower_atomic_pointee(const CheckLowerWriter* writer, uint32_t node);
+static bool check_lower_segment(const TypeTable* types, TypeId type);
+
 static void check_lower_dump_struct(CheckLowerWriter* writer, uint32_t node)
 {
     const CheckProgram* program = writer->program;
@@ -8794,6 +8797,10 @@ static void check_lower_dump_struct(CheckLowerWriter* writer, uint32_t node)
                                   (check_lower_aggregate(writer, result) || check_lower_wide(writer, result) || check_lower_vector_of(writer, result) != 0 ||
                                    check_lower_class(writer, result) >= BUSTER_TYPED_CLASSES);
     refused = refused == NULL && aggregate_result ? "__builtin_dump_struct whose printer returns an aggregate, a 128-bit or a half-precision value" : refused;
+    // A record in a segment's space (#1447), whose fields' loads would take no override (its first argument's pointee).
+    refused = refused == NULL && __builtin_expect(writer->segments, 0) && check_lower_segment(types, check_lower_atomic_pointee(writer, node))
+                  ? "__builtin_dump_struct of a record in a segment's address space (256, 257 or 258: %gs, %fs or %ss)"
+                  : refused;
     for (uint32_t o = 0; valid && refused == NULL && dump != NULL && o < dump->line_count; o += 1)
     {
         const CheckLowerDumpLine* line = dump->lines + o;
@@ -11545,6 +11552,24 @@ static TypeId check_lower_atomic_pointee(const CheckLowerWriter* writer, uint32_
     return kind == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(kind) ? type_element(types, pointer) : 0;
 }
 
+// Whether an atomic builtin has a pointer argument past its object's (a compare-exchange's expected value, a generic
+// builtin's value or result) into a segment's space: its LOAD or SET through it would take no override.
+static bool check_lower_atomic_other_segment(const CheckLowerWriter* writer, uint32_t node)
+{
+    const CheckProgram* program = writer->program;
+    const CheckGraph* graph = &program->input->graph;
+    const TypeTable* types = program->types;
+    const uint32_t first = graph->argument_offsets[node];
+    bool result = false;
+    for (uint32_t k = 1; !result && k < graph->argument_counts[node]; k += 1)
+    {
+        const TypeId pointer = type_strip_aligned(types, check_stream_type(program->stream, graph->argument_nodes[first + k]));
+        const uint8_t kind = type_kind(types, pointer);
+        result = (kind == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(kind)) && check_lower_segment(types, type_element(types, pointer));
+    }
+    return result;
+}
+
 // A node that loads from or stores to a segment's space (check_lower_segment), which the lowering refuses by name: an
 // lvalue read (not an address taken, `&` or a member's or a subscript's base), or an assignment's, a compound
 // assignment's or an increment's or decrement's operand; a vector's element, read or written, whose type has lost its
@@ -11579,7 +11604,7 @@ static bool check_lower_segment_access(const CheckLowerWriter* writer, uint32_t 
                               : written && !bit_field && check_lower_segment_carried(writer, check_stream_type(stream, target));
     return ((read || written) && !carried) || (element && check_lower_segment(program->types, check_stream_type(stream, target))) ||
            (atomic != BUSTER_CHECK_NONE && (check_lower_segment(types, stream->atomics[atomic].object_type) ||
-                                             check_lower_segment(types, check_lower_atomic_pointee(writer, node))));
+                                             check_lower_segment(types, check_lower_atomic_pointee(writer, node)) || check_lower_atomic_other_segment(writer, node)));
 }
 
 // Always inlined into the copies of the tasks' loop (check_lower_drain_body), each with its constant `bit_ints`
