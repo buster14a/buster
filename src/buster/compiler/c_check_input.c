@@ -2615,8 +2615,21 @@ static void check_input_report_subject(CheckInputReader* reader, uint32_t token,
 // differs from its previous declaration's (#1447): clang's MergeFunctionDecl checks conventions before types, with
 // "function declared 'A' here was previously declared 'B'" (or "without calling convention", where its first declaration
 // has none explicit) and its note at that first declaration (CHECK_INPUT_CONVENTION_CHANGE). no_caller_saved_registers,
-// clang's function type bit beside its convention (TYPE_FUNCTION_ABI_NO_CALLER_SAVED), keeps the type's error.
+// clang's function type bit beside its convention (TYPE_FUNCTION_ABI_NO_CALLER_SAVED), is checked after the conventions
+// (and before the types): a declaration that has it in its own attribute, after one without it, is clang's
+// "function declared with 'no_caller_saved_registers' attribute was previously declared without the
+// 'no_caller_saved_registers' attribute" (err_function_attribute_mismatch), noted at that previous declaration, the one its
+// lookup found (BUSTER_CHECK_CONVENTION_NO_CALLER_SAVED in the report's detail, with BUSTER_CHECK_CONVENTION_STANDARD where the
+// attribute is written `[[gnu::...]]`). One that inherits it is no error; one whose typedef's type carries it, which clang 23
+// crashes on, keeps the type's error.
+#define BUSTER_CHECK_CONVENTION_NO_CALLER_SAVED (1u << 17)
+#define BUSTER_CHECK_CONVENTION_STANDARD (1u << 18)
+
 static uint32_t check_input_abi_call(TypeFunctionABI abi);
+
+// BUSTER_CHECK_CONVENTION_NO_CALLER_SAVED where the declaration of `token` writes no_caller_saved_registers itself, with
+// BUSTER_CHECK_CONVENTION_STANDARD where its first such attribute is a C23 one, else 0 (c_check_attribute.c).
+static uint32_t check_input_no_caller_saved_written(const CheckInput* input, uint32_t token);
 
 static void check_input_report_redeclaration(CheckInputReader* reader, uint32_t token, CheckInputMessage message, uint32_t previous)
 {
@@ -2628,7 +2641,9 @@ static void check_input_report_redeclaration(CheckInputReader* reader, uint32_t 
     const bool explicit_first = reader->output->explicit_abis != NULL && reader->output->explicit_abis[first] != 0;
     const bool changed = message == CHECK_INPUT_CONFLICTING_TYPES && explicit_now && now != before && now != TYPE_FUNCTION_ABI_INVALID &&
                          before != TYPE_FUNCTION_ABI_INVALID && now != TYPE_FUNCTION_ABI_NO_CALLER_SAVED && before != TYPE_FUNCTION_ABI_NO_CALLER_SAVED;
-    if (changed)
+    const uint32_t saved = message == CHECK_INPUT_CONFLICTING_TYPES && !changed && now == TYPE_FUNCTION_ABI_NO_CALLER_SAVED && before == TYPE_FUNCTION_ABI_SYSV ?
+                           check_input_no_caller_saved_written(reader->output, token) : 0;
+    if (changed || saved != 0)
     {
         const uint32_t count = reader->output->report_count;
         check_input_report(reader, token, CHECK_INPUT_CONVENTION_CHANGE);
@@ -2636,8 +2651,8 @@ static void check_input_report_redeclaration(CheckInputReader* reader, uint32_t 
         {
             CheckInputReport* report = reader->output->reports + count;
             report->subject = previous + 1;
-            report->detail = check_input_abi_call(now) | check_input_abi_call(before) << 8 | (explicit_first ? 1u << 16 : 0);
-            report->note_token = first;
+            report->detail = saved != 0 ? saved : check_input_abi_call(now) | check_input_abi_call(before) << 8 | (explicit_first ? 1u << 16 : 0);
+            report->note_token = saved != 0 ? previous : first;
             report->note_kind = CHECK_INPUT_NOTE_PREVIOUS_DECLARATION;
         }
     }
