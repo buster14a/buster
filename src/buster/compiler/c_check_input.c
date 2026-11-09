@@ -9684,10 +9684,11 @@ static void check_input_attribute_merge_checks(CheckInputReader* reader, uint32_
 static void check_input_modular_format(CheckInputReader* reader, uint32_t token);
 
 // Whether a function's name could be a builtin's (#1843): every builtin a declaration keeps (check_input_builtin_function)
-// is spelled with a leading underscore, which few of a unit's functions are; their names are looked up.
+// is spelled with a leading underscore, which few of a unit's functions are; their names are looked up. A reader without
+// a unit's preprocessor (a unit test's of the binding alone) has no names to look up.
 static bool check_input_builtin_named(const CheckInputReader* reader, uint32_t name)
 {
-    const InternSpan span = reader->pp->table->spans[name];
+    const InternSpan span = reader->pp != NULL ? reader->pp->table->spans[name] : (InternSpan){ 0 };
     return span.length > 1 && reader->pp->table->records[span.offset] == '_';
 }
 
