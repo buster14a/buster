@@ -5292,10 +5292,46 @@ static bool check_input_enum_operand(const CheckInputReader* reader, uint32_t to
     return operand && !own;
 }
 
-// Whether the identifier `token` names a variable of a tagged enumeration type (through an aligned typedef too) or an
-// enumerator of a tagged enumeration outside that enumeration's definition (where clang takes it as an int): the nearest
+// Whether the typedef declared at `typedef_token` declares the anonymous enumeration `plain` itself, unqualified (an
+// aligned typedef's alignment aside): clang's name for linkage of an anonymous enumeration (#1447, hasNameForLinkage),
+// `typedef enum { A } T;`'s T. A typedef of that typedef declares it too, which only opens the gate (CheckInput.enum_names).
+static bool check_input_enum_typedef(const CheckInputReader* reader, uint32_t typedef_token, TypeId plain)
+{
+    const bool typedef_name = typedef_token < reader->parser->tokens.count && reader->declaration_kinds[typedef_token] == C_BINDING_TYPEDEF &&
+                              reader->declared_types[typedef_token] != 0;
+    const TypeId declared = typedef_name ? type_strip_aligned(reader->types, reader->declared_types[typedef_token]) : 0;
+    return typedef_name && type_unqualified(reader->declared_types[typedef_token]) == reader->declared_types[typedef_token] && declared == plain;
+}
+
+// The typedef declaration a declaration's specifiers at `declaration` name, or BUSTER_CHECK_NONE: the reader's twin of
+// check_input_typedef_spelling, whose crossing rules it keeps.
+static uint32_t check_input_reader_typedef(const CheckInputReader* reader, uint32_t declaration)
+{
+    const Parser* parser = reader->parser;
+    uint32_t result = BUSTER_CHECK_NONE;
+    bool going = declaration < parser->tokens.count;
+    for (uint32_t token = declaration; going && token > 0;)
+    {
+        token -= 1;
+        const uint8_t kind = parser->tokens.kinds[token];
+        const uint8_t role = parser->tree.roles[token];
+        const uint32_t resolved = kind == PARSE_KIND_IDENTIFIER ? reader->output->declarations[token] : 0;
+        const bool typedef_name = resolved != 0 && resolved != token && resolved < parser->tokens.count && reader->declaration_kinds[resolved] == C_BINDING_TYPEDEF;
+        result = typedef_name ? resolved : result;
+        going = !typedef_name && (kind == PARSE_KIND_IDENTIFIER ||
+                                  (kind != PARSE_KIND_SEMI && kind != PARSE_KIND_R_BRACE && kind != PARSE_KIND_L_BRACE && kind != PARSE_KIND_COLON &&
+                                   kind != PARSE_KIND_TYPE && kind != PARSE_KIND_STRUCT && kind != PARSE_KIND_ENUM && role != PARSE_ROLE_TERMINATOR &&
+                                   role != PARSE_ROLE_CLOSE_GROUP && role != PARSE_ROLE_LABEL));
+    }
+    return result;
+}
+
+// Whether the identifier `token` names a variable of a named enumeration type (through an aligned typedef too) or an
+// enumerator of a named enumeration outside that enumeration's definition (where clang takes it as an int): the nearest
 // enumeration definition before the enumerator's declaration that holds it, within 1024 tokens, beyond which it is taken
-// as tagged. Its `{` is where its tag ends (CheckInputReader.tag_ends), and its `}` the `{`'s parent.
+// as named. Its `{` is where its tag ends (CheckInputReader.tag_ends), and its `}` the `{`'s parent. Named is clang's
+// name for linkage: a tag, or for an anonymous one the typedef that declares it (check_input_enum_typedef), the
+// declarator after the definition's `}`, or the one a variable's specifiers name.
 static __attribute__((noinline)) bool check_input_enum_named(const CheckInputReader* reader, uint32_t token)
 {
     const Parser* parser = reader->parser;
@@ -5321,13 +5357,17 @@ static __attribute__((noinline)) bool check_input_enum_named(const CheckInputRea
             }
             const uint32_t close = opening < declaration ? parser->tree.parents[opening] : BUSTER_CHECK_NONE;
             found = close < parser->tokens.count && parser->tree.roles[close] == PARSE_ROLE_CLOSE_ENUM && declaration < close;
-            result = found ? types->tags.name[types->types.index[type_index(tag)]] != 0 && !(opening < token && token < close) : result;
+            const uint32_t declarator = found ? check_input_skip_attributes(parser, close + 1, parser->tokens.count) : BUSTER_CHECK_NONE;
+            result = found ? (types->tags.name[types->types.index[type_index(tag)]] != 0 || check_input_enum_typedef(reader, declarator, tag)) &&
+                             !(opening < token && token < close) : result;
         }
     }
     else if (type != 0)
     {
         const TypeId plain = type_unqualified(type_strip_aligned(types, type));
-        result = type_kind(types, plain) == BUSTER_TYPE_KIND_ENUM && types->tags.name[types->types.index[type_index(plain)]] != 0;
+        const bool enumeration = type_kind(types, plain) == BUSTER_TYPE_KIND_ENUM;
+        result = enumeration && (types->tags.name[types->types.index[type_index(plain)]] != 0 ||
+                                 check_input_enum_typedef(reader, check_input_reader_typedef(reader, declaration), plain));
     }
     return result;
 }
