@@ -7969,7 +7969,8 @@ static uint32_t check_common_value_root(const CheckGraph* graph, const CheckStre
 
 // The VALUE node holding the local object an address computation starts from: through subscripts and members for
 // address-of, and through subscripts alone for an array subscript's own base.
-static uint32_t check_common_address_root(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, uint32_t node, bool members)
+// Always inlined, as it was before #1447 grew the type readers it inlines past clang's threshold.
+static inline __attribute__((always_inline)) uint32_t check_common_address_root(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, uint32_t node, bool members)
 {
     uint32_t result = BUSTER_CHECK_NONE;
     for (uint32_t steps = 0; node < graph->count && steps < graph->count; steps += 1)

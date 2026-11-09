@@ -40,6 +40,9 @@ typedef enum CheckInputMessage
     CHECK_INPUT_DIRECT_INITIALIZER_DEDUCED,
     // A field designator that names no member of the record in CheckInputReport.type.
     CHECK_INPUT_INITIALIZER_MEMBER,
+    // An array initialized by a compound literal of another array type (#1447, GNU's extension): the array's type in
+    // CheckInputReport.type, the literal's in its value.
+    CHECK_INPUT_ARRAY_LITERAL_MISMATCH,
     // #pragma clang section's errors and section type conflicts, each with its message (CheckInputSections.diagnostics).
     CHECK_INPUT_SECTION,
     // #pragma clang optimize's errors, each with its message (CheckInputOptimizePragmas.diagnostics).
@@ -154,6 +157,20 @@ typedef enum CheckInputMessage
     CHECK_INPUT_VECTOR_TOO_LARGE,
     CHECK_INPUT_VECTOR_ZERO,
     CHECK_INPUT_VECTOR_MULTIPLE,
+    // The address-space qualifiers' errors (#1447), clang's: address_space's argument (no integer constant, negative, past
+    // the largest), at the attribute; a function type's, and a second space on a type, at the attribute; and the
+    // declarations a space can't qualify, at their names (a compound literal's at its `(`).
+    CHECK_INPUT_ADDRESS_SPACE_CONSTANT,
+    CHECK_INPUT_ADDRESS_SPACE_NEGATIVE,
+    CHECK_INPUT_ADDRESS_SPACE_TOO_HIGH,
+    CHECK_INPUT_ADDRESS_SPACE_FUNCTION,
+    CHECK_INPUT_ADDRESS_SPACE_MULTIPLE,
+    CHECK_INPUT_ADDRESS_SPACE_AUTOMATIC,
+    CHECK_INPUT_ADDRESS_SPACE_PARAMETER,
+    CHECK_INPUT_ADDRESS_SPACE_FIELD,
+    CHECK_INPUT_ADDRESS_SPACE_COMPOUND,
+    // Two garbage collection qualifiers on one type (#1447): objc_gc's weak and strong.
+    CHECK_INPUT_GC_MULTIPLE,
     CHECK_INPUT_ATTRIBUTE_ARGUMENT_COUNT,
     CHECK_INPUT_ATTRIBUTE_EXCLUSION,
     CHECK_INPUT_ATTRIBUTE_ANNOTATE_STRING,
@@ -320,6 +337,7 @@ static const char* const check_input_messages[] =
     "array initializer must be an initializer list or string literal",
     "initializer for a variable with deduced type contains multiple expressions",
     "field designator does not name a member of the record type",
+    "cannot initialize array with array of another type",
     "invalid '#pragma clang section' or section type conflict",
     "invalid '#pragma clang optimize'",
     "cannot jump from this goto statement to its label",
@@ -976,6 +994,10 @@ struct CheckInput
     // its graph, and declarations without one their whole graph.
     uint32_t* diagnostic_limits;
     uint32_t diagnostic_report_count;
+    // Where the ordered walk ended: the unit's token count, or the token where a reader's error stopped it, after which
+    // the reading found no declaration and gave no warning (#1447, check_driver_rejected_common); 0 where no walk ran
+    // in source order.
+    uint32_t walk_end;
     bool diagnostic_graph;
     // Whether the reader's arena of rare columns was base pages throughout, as where more than one lane reads the deferred
     // bodies of a large unit (check_input_sparse_arena, #764, #847): the tests require it of those readings and of no
@@ -3044,7 +3066,7 @@ static void check_input_attribute_function_types(CheckInputReader* reader, const
 {
     TypeId function = type;
     uint8_t kind = type != 0 ? type_kind(reader->types, function) : BUSTER_TYPE_KIND_FUNCTION;
-    while (kind == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(kind) || kind == BUSTER_TYPE_KIND_ALIGNED)
+    while (kind == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(kind) || kind == BUSTER_TYPE_KIND_ALIGNED || kind == BUSTER_TYPE_KIND_QUALIFIED)
     {
         function = reader->types->types.base[type_index(function)];
         kind = type_kind(reader->types, function);
@@ -3081,7 +3103,7 @@ static inline __attribute__((always_inline)) TypeId check_input_declarator_abi(C
     {
         TypeId function = type;
         uint8_t kind = type_kind(reader->types, function);
-        while (kind == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(kind) || kind == BUSTER_TYPE_KIND_ALIGNED)
+        while (kind == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(kind) || kind == BUSTER_TYPE_KIND_ALIGNED || kind == BUSTER_TYPE_KIND_QUALIFIED)
         {
             function = reader->types->types.base[type_index(function)];
             kind = type_kind(reader->types, function);
@@ -5253,7 +5275,7 @@ static bool check_input_read_attributes(CheckInputReader* reader, uint32_t* curs
             // vector_size's size of a value but no integer constant stays unresolved: its element type is checked first,
             // then its size, with clang's error (check_input_vector_size, #147).
             CheckValue probe = { 0 };
-            const bool unresolved = !evaluated && !type_argument && attribute->kind == CHECK_ATTRIBUTE_VECTOR_SIZE &&
+            const bool unresolved = !evaluated && !type_argument && (attribute->kind == CHECK_ATTRIBUTE_VECTOR_SIZE || attribute->kind == CHECK_ATTRIBUTE_ADDRESS_SPACE) &&
                                     check_input_evaluate(reader, attribute->argument_first, attribute->argument_end, &probe) &&
                                     check_input_const_rvalue(reader, attribute->argument_end, &probe);
             valid = unresolved || (evaluated && check_input_attribute_value(reader, &parsed, i, value));
@@ -5560,6 +5582,11 @@ struct CheckDeclaratorPart
     bool parameter_abis;
     // The type once this part applies, the declarator's type built so far (check_input_attribute_type_warnings).
     TypeId type;
+    // The address-space attributes this part's chunk applies to its type (#1447): its frame's records from space_first to
+    // space_end, a pointer's after its `*`, or a group's before it (CheckInputAttribute.space_applied).
+    CheckInputAttributes* spaces;
+    uint32_t space_first;
+    uint32_t space_end;
 };
 
 typedef struct CheckDeclaratorParameter CheckDeclaratorParameter;
@@ -5603,6 +5630,8 @@ struct CheckDeclaratorFrame
     uint8_t state;
     bool group;
     bool group_noderef;
+    // A group's attributes before its first `*` (#1447): their count, for its address spaces' part.
+    uint32_t leading_attributes;
     bool parameter;
     bool parameter_context;
     bool star_array;
@@ -5838,7 +5867,7 @@ static void check_input_attribute_type_warnings(CheckInputReader* reader, CheckI
     {
         TypeId function = type;
         uint8_t kind = type_kind(reader->types, function);
-        while (kind == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(kind) || kind == BUSTER_TYPE_KIND_ALIGNED)
+        while (kind == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(kind) || kind == BUSTER_TYPE_KIND_ALIGNED || kind == BUSTER_TYPE_KIND_QUALIFIED)
         {
             function = reader->types->types.base[type_index(function)];
             kind = type_kind(reader->types, function);
@@ -5935,6 +5964,51 @@ static bool check_input_objc_takes(const TypeTable* types, uint32_t kind, TypeId
     return pointer && (kind == 1 || type_kind(types, pointee) != BUSTER_TYPE_KIND_POINTER);
 }
 
+// A declarator's whole type `whole` made again from its level `at`, whose type step_types[at] now is (#1447, objc_gc's
+// qualifier): each outer level's pointer, _Atomic, array or extended qualifiers on the level inside it, written back to
+// step_types where `rebuild`, the last the new whole type. Whether it can: no function's level outside `at`, and the
+// outermost level's type the whole type (no attribute after the declarator changed it). Iterative, its levels at most
+// check_input_attribute_objc's 64.
+// clang's BuildCompoundLiteralExpr (#1447): a function's compound literal with an address space, its error at its `(`.
+static __attribute__((noinline)) bool check_input_compound_space(CheckInputReader* reader, uint32_t open, TypeId type)
+{
+    const bool result = type_address_space(type_object_qualifiers(reader->types, type)) != 0;
+    if (result)
+    {
+        check_input_report(reader, open, CHECK_INPUT_ADDRESS_SPACE_COMPOUND);
+    }
+    return result;
+}
+
+static bool check_input_objc_requalify(TypeTable* types, TypeId* step_types, const uint8_t* step_kinds, uint32_t at, uint32_t steps, TypeId whole, bool rebuild)
+{
+    bool result = at < steps && (rebuild || step_types[steps - 1] == whole);
+    TypeId current = step_types[at];
+    TypeId previous = step_types[at];
+    for (uint32_t s = at + 1; result && s < steps; s += 1)
+    {
+        const TypeId level = step_types[s];
+        const uint8_t kind = step_kinds[s];
+        const TypeId bare = type_unqualified(type_strip_aligned(types, level));
+        result = kind != BUSTER_TYPE_KIND_FUNCTION && (kind != BUSTER_TYPE_KIND_NONE || level == previous);
+        previous = level;
+        if (result && rebuild && kind == BUSTER_TYPE_KIND_POINTER)
+        {
+            const bool atomic = type_kind(types, bare) == BUSTER_TYPE_KIND_ATOMIC;
+            current = type_pointer(types, current);
+            current = current != 0 && atomic ? type_atomic(types, current) : current;
+            current = current != 0 ? type_extend(types, type_qualify(types, current, type_qualifiers(level)), type_extended_qualifiers(types, level)) : 0;
+        }
+        else if (result && rebuild && type_kind_is_array(kind))
+        {
+            current = type_derive(types, type_kind(types, bare), 0, current, types->types.extent[type_index(bare)]);
+        }
+        result = result && current != 0;
+        step_types[s] = result && rebuild ? current : step_types[s];
+    }
+    return result;
+}
+
 // clang's objc_gc and objc_ownership in C (#1447, SemaType's handleObjCPointerTypeAttr and its distribution), GNU's, on a
 // declarator's type (as check_input_attribute_type_warnings has its lists, its parts in `order`, the specifiers' type
 // `base` and the whole `type`), as GetFullTypeForDeclarator meets them. Each is tried where it is: the specifiers' on their
@@ -5947,10 +6021,14 @@ static bool check_input_objc_takes(const TypeTable* types, uint32_t kind, TypeId
 // argument"), weak or strong a garbage collection qualifier that changes the type, refused by name; objc_ownership's none
 // or weak its warning naming the type (weak's named '__weak'), strong and autoreleasing nothing outside ARC; another
 // identifier "argument not supported". Warnings in clang's order: the specifiers', then each chunk's as it is built, then
-// those that stayed after the declarator. Whether there was no error.
-static bool check_input_attribute_objc(CheckInputReader* reader, CheckInputAttributes* common, CheckInputAttributes* own, TypeId type, uint32_t name, uint32_t split,
+// those that stayed after the declarator. objc_gc's weak and strong qualify the type where they are handled (#1447), which
+// a second one's "multiple garbage collection attributes" refuses: the declarator's whole type `*whole` is made again
+// from that level out (check_input_objc_requalify); one inside a function's level is refused by name. Whether there was
+// no error.
+static bool check_input_attribute_objc(CheckInputReader* reader, CheckInputAttributes* common, CheckInputAttributes* own, TypeId* whole, uint32_t name, uint32_t split,
                                        const CheckDeclaratorPart* parts, uint32_t order, TypeId base)
 {
+    const TypeId type = *whole;
     const Parser* parser = reader->parser;
     TypeTable* types = reader->types;
     const uint32_t completion = reader->attribute_completion;
@@ -6084,9 +6162,23 @@ static bool check_input_attribute_objc(CheckInputReader* reader, CheckInputAttri
                         check_input_report_argument(reader, attribute->first, CHECK_INPUT_ATTRIBUTE_ARGUMENT_COUNT, BUSTER_CHECK_COUNT_EXACT | 1u << 8);
                         valid = false;
                     }
+                    else if (kind == 1 && (weak || strong) && (type_object_qualifiers(types, here) & BUSTER_TYPE_GC_MASK) != 0)
+                    {
+                        check_input_report_argument(reader, attribute->first, CHECK_INPUT_GC_MULTIPLE, 0);
+                        valid = false;
+                    }
+                    else if (kind == 1 && (weak || strong) && check_input_objc_requalify(types, step_types, step_kinds, at, steps, *whole, false))
+                    {
+                        const TypeId qualified = check_input_type_result(reader, type_extend(types, here, weak ? BUSTER_TYPE_GC_WEAK : BUSTER_TYPE_GC_STRONG));
+                        step_types[at] = qualified != 0 ? qualified : step_types[at];
+                        valid = qualified != 0 && check_input_objc_requalify(types, step_types, step_kinds, at, steps, *whole, true);
+                        *whole = valid ? check_input_type_result(reader, step_types[steps - 1]) : 0;
+                        valid = *whole != 0;
+                    }
                     else if (kind == 1 && (weak || strong))
                     {
-                        // A garbage collection qualifier changes the type (its compatibility, its spelling): refused by name.
+                        // A garbage collection qualifier of an inner level, whose outer levels would be made again: refused
+                        // by name.
                         check_input_attribute_error(reader, list, attribute->name_token, attribute->end, CHECK_ATTRIBUTE_ERROR_UNKNOWN);
                         valid = false;
                     }
@@ -6134,6 +6226,7 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                 }
             }
             frame->group_noderef = frame->group && check_input_noderef_new_attributes(frame->attributes, 0);
+            frame->leading_attributes = frame->group && frame->attributes != NULL && frame->attributes->count != 0 ? check_input_spaces_claim(frame->attributes, 0) : 0;
             while (i < frame->end && parser->tokens.kinds[i] == PARSE_KIND_STAR)
             {
                 const uint32_t token = i;
@@ -6161,6 +6254,8 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                         break;
                     }
                 }
+                const uint32_t space_end = frame->attributes != NULL && frame->attributes->count > attribute_first ?
+                                           check_input_spaces_claim(frame->attributes, attribute_first) : attribute_first;
                 parts[part_count] = (CheckDeclaratorPart)
                 {
                     .next = frame->pointers,
@@ -6169,6 +6264,9 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                     .kind = BUSTER_TYPE_KIND_POINTER,
                     .atomic = atomic,
                     .noderef = check_input_noderef_new_attributes(frame->attributes, attribute_first),
+                    .spaces = space_end > attribute_first ? frame->attributes : NULL,
+                    .space_first = attribute_first,
+                    .space_end = space_end,
                 };
                 frame->pointers = part_count++;
             }
@@ -6459,6 +6557,21 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
             }
             if (valid && frame->group)
             {
+                if (frame->leading_attributes != 0)
+                {
+                    // A group's leading address spaces qualify the type built outside it (#1447), as its noderef marks it.
+                    if (frame->last != BUSTER_CHECK_NONE)
+                    {
+                        parts[frame->last].next = part_count;
+                    }
+                    else
+                    {
+                        frame->first = part_count;
+                    }
+                    parts[part_count] = (CheckDeclaratorPart){ .next = BUSTER_CHECK_NONE, .token = frame->end, .kind = BUSTER_TYPE_KIND_NONE,
+                                                               .spaces = frame->attributes, .space_first = 0, .space_end = frame->leading_attributes };
+                    frame->last = part_count++;
+                }
                 if (frame->group_noderef)
                 {
                     // A parenthesized chunk marks the type composed outside it without adding a canonical layer.
@@ -6580,6 +6693,12 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                         type = check_input_vla_type(reader, part->token, type, frame->name, frame->parameter_context, part->kind, part->extent);
                         noderef = check_input_noderef_wrap(reader, noderef);
                     }
+                    // Its chunk's address spaces, in their order (#1447).
+                    for (uint32_t a = part->space_first; type != 0 && part->spaces != NULL && a < part->space_end; a += 1)
+                    {
+                        const CheckInputAttribute* attribute = part->spaces->records + a;
+                        type = attribute->kind == CHECK_ATTRIBUTE_ADDRESS_SPACE ? check_input_address_space(reader, part->spaces, attribute, type) : type;
+                    }
                     noderef = part->noderef ? check_input_noderef_mark(reader, noderef) : noderef;
                     parts[p].type = type;
                 }
@@ -6601,7 +6720,7 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                                                         frame->name, split, parts, reverse, frame->base);
                     // Objective-C's pointer type attributes, where the unit has one (#1447).
                     if (reader->objc_attributes &&
-                        !check_input_attribute_objc(reader, frame->parameter ? frame->common_attributes : run->common_attributes, frame->attributes, type, frame->name,
+                        !check_input_attribute_objc(reader, frame->parameter ? frame->common_attributes : run->common_attributes, frame->attributes, &type, frame->name,
                                                     split, parts, reverse, frame->base))
                     {
                         type = 0;
@@ -6627,6 +6746,13 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                         const uint8_t kind = type_kind(reader->types, type);
                         const TypeId adjusted = check_input_type_result(reader, type_adjust_parameter(reader->types, type));
                         valid = adjusted != 0 && type_kind(reader->types, adjusted) != BUSTER_TYPE_KIND_VOID;
+                        // clang's CheckParameter (#1447): a parameter whose type as declared, or its array's element, has
+                        // an address space, at its name or where it would be.
+                        if (valid && type_address_space(type_object_qualifiers(reader->types, type)) != 0)
+                        {
+                            check_input_report(reader, frame->name != BUSTER_CHECK_NONE ? frame->name : frame->missing_name, CHECK_INPUT_ADDRESS_SPACE_PARAMETER);
+                            valid = false;
+                        }
                         // A parameter's subjects as clang's attributes name them (#147), function-like by its adjusted type.
                         const uint32_t subjects = BUSTER_CHECK_SUBJECT_VARIABLE | BUSTER_CHECK_SUBJECT_PARAMETER | (valid ? check_input_type_subjects(reader->types, adjusted) : 0);
                         const uint32_t begin = check_input_attribute_begin(parser, frame->start, frame->end);
@@ -7492,6 +7618,17 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
                         valid = attributes == 0 || !attributes->counted ||
                                 check_input_counted_by_member(reader, frames, depth, members, member_count, attributes, counted_begin, &member);
                         bool flexible = false;
+                        // clang's CheckFieldDecl (#1447): a member whose type, or its array's element, has an address space.
+                        if (valid && type_address_space(type_object_qualifiers(reader->types, type)) != 0)
+                        {
+                            check_input_report(reader, name != BUSTER_CHECK_NONE ? name : failed_token, CHECK_INPUT_ADDRESS_SPACE_FIELD);
+                            valid = false;
+                        }
+                        else if (valid && __builtin_expect((type_object_qualifiers(reader->types, type) & BUSTER_TYPE_GC_MASK) == BUSTER_TYPE_GC_WEAK, 0))
+                        {
+                            const uint32_t at = name != BUSTER_CHECK_NONE ? name : failed_token;
+                            check_input_warning(reader, CHECK_WARNING_ID_IGNORED_ATTRIBUTES, CHECK_WARNING_EVENT_GC_WEAK_FIELD, at, CHECK_WARNING_COMPLETE_AT_TOKEN, at);
+                        }
                         valid = valid && type_check_member(reader->types, &member, true, &flexible) == TYPE_ERROR_NONE;
                         if (!valid && !type_is_complete(reader->types, type) && type_kind(reader->types, type_strip_aligned(reader->types, type)) != BUSTER_TYPE_KIND_INCOMPLETE_ARRAY &&
                             type_kind(reader->types, type) != BUSTER_TYPE_KIND_VOID && type_kind(reader->types, type) != BUSTER_TYPE_KIND_FUNCTION)
@@ -8680,6 +8817,19 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
             valid &= !thread_local || (!function && (file || is_static || storage == C_NAME_EXTERN));
             valid &= !file || (storage != C_NAME_REGISTER && storage != C_NAME_AUTO);
             valid &= !function || (storage != C_NAME_REGISTER && storage != C_NAME_AUTO && (file || !is_static));
+            // clang's CheckVariableDeclarationType (#1447): a variable of local storage (a block's, neither static nor
+            // extern) whose type, or its array's element, has an address space.
+            if (valid && !file && !is_typedef && !function && !is_static && storage != C_NAME_EXTERN &&
+                type_address_space(type_object_qualifiers(reader->types, type)) != 0)
+            {
+                check_input_report(reader, name, CHECK_INPUT_ADDRESS_SPACE_AUTOMATIC);
+                valid = false;
+            }
+            else if (valid && !file && !is_typedef && !function && !is_static && storage != C_NAME_EXTERN &&
+                     __builtin_expect((type_object_qualifiers(reader->types, type) & BUSTER_TYPE_GC_MASK) == BUSTER_TYPE_GC_WEAK, 0))
+            {
+                check_input_warning(reader, CHECK_WARNING_ID_IGNORED_ATTRIBUTES, CHECK_WARNING_EVENT_GC_WEAK_LOCAL, name, CHECK_WARNING_COMPLETE_AT_TOKEN, name);
+            }
             // A file scope's or an extern's declaration may leave its type to be completed later, but not a definition
             // with an initializer: clang reports that one's incomplete type at its name, wherever it is.
             const bool complete_object = is_typedef || function || ((file || storage == C_NAME_EXTERN) && !initialized) ||
@@ -9574,7 +9724,8 @@ static CheckC23AutoLevel* check_input_c23_auto_level(CheckInputReader* reader, C
 static bool check_input_c23_auto_placeholder(const TypeTable* types, TypeId type)
 {
     const uint8_t kind = type_kind(types, type);
-    return kind != BUSTER_TYPE_KIND_POINTER && !type_kind_is_array(kind) && kind != BUSTER_TYPE_KIND_FUNCTION && kind != BUSTER_TYPE_KIND_ALIGNED;
+    return kind != BUSTER_TYPE_KIND_POINTER && !type_kind_is_array(kind) && kind != BUSTER_TYPE_KIND_FUNCTION && kind != BUSTER_TYPE_KIND_ALIGNED &&
+           kind != BUSTER_TYPE_KIND_QUALIFIED;
 }
 
 static __attribute__((noinline)) TypeId check_input_c23_auto_deduce(CheckInputReader* reader, TypeId declared, TypeId initializer, uint32_t name,
@@ -9582,7 +9733,8 @@ static __attribute__((noinline)) TypeId check_input_c23_auto_deduce(CheckInputRe
 {
     TypeTable* types = reader->types;
     const uint64_t mark = reader->scratch->length;
-    TypeId deduced = type_adjust_parameter(types, initializer);
+    // The initializer's value has no extended qualifiers or alignment of its own (#1447): a deduced type drops them.
+    TypeId deduced = type_strip_aligned(types, type_adjust_parameter(types, initializer));
     TypeId declared_level = declared;
     CheckC23AutoLevel* top = 0;
     TypeId result = 0;
@@ -9601,6 +9753,7 @@ static __attribute__((noinline)) TypeId check_input_c23_auto_deduce(CheckInputRe
                 switch (level->kind)
                 {
                     case BUSTER_TYPE_KIND_ALIGNED: result = type_aligned(types, result, level->alignment_log2); break;
+                    case BUSTER_TYPE_KIND_QUALIFIED: result = type_extend(types, result, (uint32_t)level->extent); break;
                     case BUSTER_TYPE_KIND_POINTER: result = type_pointer(types, result); break;
                     case BUSTER_TYPE_KIND_ARRAY: result = type_array(types, result, level->extent); break;
                     case BUSTER_TYPE_KIND_INCOMPLETE_ARRAY: result = type_incomplete_array(types, result); break;
@@ -9631,6 +9784,18 @@ static __attribute__((noinline)) TypeId check_input_c23_auto_deduce(CheckInputRe
             {
                 level->qualifiers = type_qualifiers(declared_level) & ~BUSTER_TYPE_RESTRICT;
                 level->alignment_log2 = (uint32_t)types->types.extent[type_index(declared_level)];
+                declared_level = type_strip_alignment(types, declared_level);
+            }
+        }
+        else if (kind == BUSTER_TYPE_KIND_QUALIFIED)
+        {
+            // The extended qualifiers' level (#1447): the initializer's value has none.
+            level = check_input_c23_auto_level(reader, &top, kind);
+            valid = level != 0;
+            if (valid)
+            {
+                level->qualifiers = type_qualifiers(declared_level) & ~BUSTER_TYPE_RESTRICT;
+                level->extent = types->types.extent[type_index(declared_level)];
                 declared_level = type_strip_aligned(types, declared_level);
             }
         }
@@ -10133,6 +10298,9 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
             {
                 job->result = type_unqualified(job->result);
                 job->result = type_kind(reader->types, job->result) == BUSTER_TYPE_KIND_ATOMIC ? type_element(reader->types, job->result) : job->result;
+                // Its extended qualifiers too (#1447, clang's getUnqualifiedType).
+                job->result = job->result != 0 && type_object_qualifiers(reader->types, job->result) != 0 ?
+                              check_input_type_result(reader, type_unextend(reader->types, job->result, BUSTER_TYPE_SPACE_MASK | BUSTER_TYPE_GC_MASK)) : job->result;
             }
             job->ready = true;
             reader->specifier_query_depth -= 1;
@@ -10426,8 +10594,12 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
                     const uint32_t body = close + 1;
                     const uint32_t body_end = body < parser->tokens.count ? parser->tree.parents[body] : parser->tokens.count;
                     const uint8_t type_kind_value = type_kind(reader->types, type);
-                    if (body_end < parser->tokens.count && parser->tree.roles[body] == PARSE_ROLE_OPEN_COMPOUND_BODY &&
-                        type_kind_value != BUSTER_TYPE_KIND_FUNCTION && type_kind_value != BUSTER_TYPE_KIND_VOID)
+                    if (reader->function_result != 0 && __builtin_expect(type_object_qualifiers(reader->types, type) != 0, 0) &&
+                        check_input_compound_space(reader, i, type))
+                    {
+                    }
+                    else if (body_end < parser->tokens.count && parser->tree.roles[body] == PARSE_ROLE_OPEN_COMPOUND_BODY &&
+                             type_kind_value != BUSTER_TYPE_KIND_FUNCTION && type_kind_value != BUSTER_TYPE_KIND_VOID)
                     {
                         reader->output->declarations[i] = i;
                         reader->declared_types[i] = type;
@@ -13276,6 +13448,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
             // A successful deferred merge clears its mask and supplies the same complete unit as source order.
             // Selected/private views still retain a mask and cannot establish these independent-declaration cuts.
             const bool resolved = complete_translation_unit && input->report_count == 0 && reader.position == count && reader.expression_limit == count && input->deferred_tokens == NULL;
+            input->walk_end = reader.position;
             check_input_bindings(&reader, binding_mode);
             if (reader.fallthrough_count != 0 && !input->resource)
             {

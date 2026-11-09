@@ -17,17 +17,38 @@ struct CheckProgramDiagnostic
     uint32_t token;
     uint32_t position;
     CheckProgramFailure failure;
+    // check_program_diagnose_all's: every constraint error, at clang's places (check_program_diagnostic_location's).
+    const CheckProgramConstraint* constraints;
+    uint32_t constraint_count;
 };
 
-static void check_program_constraint_at(CheckProgram* program, uint32_t token, uint32_t position)
+// A constraint error at `token`, complete at `position`: the first one, by position, is the program's; a list
+// (check_program_diagnose_all) takes every one, with its words' facts and its note's token. `kept` false lists it alone.
+static void check_program_constraint_record(CheckProgram* program, uint32_t token, uint32_t position, CheckProgramFailure failure, uint32_t previous,
+                                            uint32_t node, bool kept)
 {
-    if (program->status == CHECK_PROGRAM_OK || (program->status == CHECK_PROGRAM_INVALID && position <= program->diagnostic_position))
+    if (kept && (program->status == CHECK_PROGRAM_OK || (program->status == CHECK_PROGRAM_INVALID && position <= program->diagnostic_position)))
     {
         program->status = CHECK_PROGRAM_INVALID;
         program->token = token;
         program->diagnostic_position = position;
-        program->failure = (CheckProgramFailure){ 0 };
+        program->failure = failure;
     }
+    if (program->constraints != 0 && program->constraint_count < program->constraint_capacity)
+    {
+        program->constraints[program->constraint_count++] = (CheckProgramConstraint){
+            .token = token,
+            .position = position,
+            .previous = previous,
+            .node = node,
+            .failure = failure,
+        };
+    }
+}
+
+static void check_program_constraint_at(CheckProgram* program, uint32_t token, uint32_t position)
+{
+    check_program_constraint_record(program, token, position, (CheckProgramFailure){ 0 }, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, true);
 }
 
 static void check_program_constraint(CheckProgram* program, uint32_t token)
@@ -117,6 +138,16 @@ static uint32_t* check_program_statement_ends(CheckProgram* program, const Parse
     return result;
 }
 
+// The statements' ends, made at the first conflict: a program without one makes none.
+static bool check_program_conflict_ends(CheckProgram* program, const Parser* parser, const uint32_t** ends, Arena* scratch)
+{
+    if (*ends == 0)
+    {
+        *ends = check_program_statement_ends(program, parser, scratch);
+    }
+    return *ends != 0;
+}
+
 static void check_program_case_conflicts(CheckProgram* program, const Parser* parser, const uint32_t* ends, Arena* scratch)
 {
     const uint64_t mark = scratch->length;
@@ -170,70 +201,111 @@ static void check_program_case_conflicts(CheckProgram* program, const Parser* pa
         {
             ranges += 1;
         }
-        // Defaults are diagnosed during a reverse source walk, before numeric collisions. Singleton checks
-        // then run in converted value order; GNU ranges follow, with their own source expression location.
-        uint32_t selected = values - first >= 2 ? order[values - 2] : BUSTER_CHECK_NONE;
-        unsigned __int128 duplicate = 0;
-        for (uint32_t i = values + 1; i < ranges && selected == BUSTER_CHECK_NONE; i += 1)
+        // Clang's order (ActOnFinishSwitchStmt), each error noted at the case it repeats, all published at the switch's
+        // end: the defaults by a reverse source walk, each but the last one's at it, noting the next; then the singletons
+        // in converted value order (source order among equals), each repeating the one before; then the nonempty GNU
+        // ranges by their low value, each noting the last singleton within it, or else the range before it where the two
+        // overlap, with that range's high value. Only the switch's first is the program's where there's no list.
+        bool kept = true;
+        // Clang makes a default's statement once its own statement is parsed, so the defaults' walk is by their
+        // statements' ends, an inner one's (a default labelling another) before its outer one's.
+        if (values - first >= 2)
         {
-            if (program->cases[order[i - 1]].lower == program->cases[order[i]].lower)
+            valid = check_program_conflict_ends(program, parser, &ends, scratch);
+        }
+        for (uint32_t i = first + 1; valid && values - first >= 2 && i < values; i += 1)
+        {
+            const uint32_t moved = order[i];
+            const uint32_t moved_end = ends[program->cases[moved].token];
+            uint32_t at = i;
+            while (at > first && (ends[program->cases[order[at - 1]].token] > moved_end ||
+                                  (ends[program->cases[order[at - 1]].token] == moved_end && program->cases[order[at - 1]].token < program->cases[moved].token)))
             {
-                selected = order[i];
-                duplicate = program->cases[selected].lower;
+                order[at] = order[at - 1];
+                at -= 1;
+            }
+            order[at] = moved;
+        }
+        for (uint32_t i = values - first >= 2 ? values - 1 : first; valid && i > first; i -= 1)
+        {
+            const CheckProgramCase* item = program->cases + order[i - 1];
+            const CheckProgramFailure failure = { .message = CHECK_PROGRAM_MESSAGE_DUPLICATE_DEFAULT, .type = item->type };
+            valid = valid && check_program_conflict_ends(program, parser, &ends, scratch);
+            if (valid)
+            {
+                check_program_constraint_record(program, item->token, ends[owner], failure, program->cases[order[i]].token, BUSTER_CHECK_NONE, kept);
+            }
+            kept = false;
+        }
+        for (uint32_t i = values + 1; valid && i < ranges; i += 1)
+        {
+            const CheckProgramCase* item = program->cases + order[i];
+            if (program->cases[order[i - 1]].lower == item->lower)
+            {
+                const CheckProgramFailure failure = { .message = CHECK_PROGRAM_MESSAGE_DUPLICATE_CASE, .type = item->type, .value = item->lower };
+                valid = valid && check_program_conflict_ends(program, parser, &ends, scratch);
+                if (valid)
+                {
+                    check_program_constraint_record(program, item->token, ends[owner], failure, program->cases[order[i - 1]].token, BUSTER_CHECK_NONE, kept);
+                }
+                kept = false;
             }
         }
         uint32_t previous = BUSTER_CHECK_NONE;
-        for (uint32_t i = ranges; i < end && selected == BUSTER_CHECK_NONE; i += 1)
+        for (uint32_t i = ranges; valid && i < end; i += 1)
         {
             const CheckProgramCase* item = program->cases + order[i];
             const unsigned __int128 lower = check_program_case_order(program, item, false);
             const unsigned __int128 upper = check_program_case_order(program, item, true);
             if (lower <= upper)
             {
+                // The first singleton not below the range, then the first above it.
                 uint32_t begin = values;
                 uint32_t limit = ranges;
                 while (begin < limit)
                 {
                     const uint32_t middle = begin + (limit - begin) / 2;
-                    if (check_program_case_order(program, program->cases + order[middle], false) < lower)
-                    {
-                        begin = middle + 1;
-                    }
-                    else
-                    {
-                        limit = middle;
-                    }
+                    const bool below = check_program_case_order(program, program->cases + order[middle], false) < lower;
+                    begin = below ? middle + 1 : begin;
+                    limit = below ? limit : middle;
                 }
-                if ((begin < ranges && check_program_case_order(program, program->cases + order[begin], false) <= upper) ||
-                    (previous != BUSTER_CHECK_NONE && check_program_case_order(program, program->cases + previous, true) >= lower))
+                uint32_t above = begin;
+                limit = ranges;
+                while (above < limit)
                 {
-                    selected = order[i];
-                    duplicate = begin < ranges && check_program_case_order(program, program->cases + order[begin], false) <= upper ?
-                                program->cases[order[begin]].lower : item->lower;
+                    const uint32_t middle = above + (limit - above) / 2;
+                    const bool within = check_program_case_order(program, program->cases + order[middle], false) <= upper;
+                    above = within ? middle + 1 : above;
+                    limit = within ? limit : middle;
+                }
+                uint32_t overlap = BUSTER_CHECK_NONE;
+                unsigned __int128 duplicate = 0;
+                if (begin < ranges && check_program_case_order(program, program->cases + order[begin], false) < upper)
+                {
+                    overlap = order[begin];
+                    duplicate = program->cases[overlap].lower;
+                }
+                if (above > values && check_program_case_order(program, program->cases + order[above - 1], false) >= lower)
+                {
+                    overlap = order[above - 1];
+                    duplicate = program->cases[overlap].lower;
+                }
+                if (previous != BUSTER_CHECK_NONE && lower <= check_program_case_order(program, program->cases + previous, true))
+                {
+                    overlap = previous;
+                    duplicate = program->cases[previous].upper;
+                }
+                if (overlap != BUSTER_CHECK_NONE)
+                {
+                    const CheckProgramFailure failure = { .message = CHECK_PROGRAM_MESSAGE_DUPLICATE_CASE, .type = item->type, .value = duplicate };
+                    valid = valid && check_program_conflict_ends(program, parser, &ends, scratch);
+                    if (valid)
+                    {
+                        check_program_constraint_record(program, item->token, ends[owner], failure, program->cases[overlap].token, BUSTER_CHECK_NONE, kept);
+                    }
+                    kept = false;
                 }
                 previous = order[i];
-            }
-        }
-        if (selected != BUSTER_CHECK_NONE)
-        {
-            if (ends == 0)
-            {
-                ends = check_program_statement_ends(program, parser, scratch);
-                valid = ends != 0;
-            }
-            if (valid)
-            {
-                const CheckProgramCase* item = program->cases + selected;
-                check_program_constraint_at(program, item->token, ends[owner]);
-                if (program->status == CHECK_PROGRAM_INVALID && program->token == item->token && program->diagnostic_position == ends[owner])
-                {
-                    program->failure = (CheckProgramFailure)
-                    {
-                        .message = item->fallback ? CHECK_PROGRAM_MESSAGE_DUPLICATE_DEFAULT : CHECK_PROGRAM_MESSAGE_DUPLICATE_CASE,
-                        .type = item->type,
-                        .value = duplicate,
-                    };
-                }
             }
         }
         first = end;
@@ -244,8 +316,10 @@ static void check_program_case_conflicts(CheckProgram* program, const Parser* pa
 // before_token is exclusive; NONE supplies no additional cutoff. Only successful dependency closures before
 // every existing reader report are eligible. True means scanning completed, even if result contains a C constraint
 // diagnostic. False means unusable inputs or resource failure. No output is published and scratch is restored.
-static bool check_program_diagnose(CheckProgramDiagnostic* result, const CheckInput* input, const CheckStream* stream,
-                                   const Parser* parser, const TypeTable* types, uint32_t before_token, Arena* scratch)
+// `output`, when given, takes the list of every constraint error (CheckProgramDiagnostic.constraints, #1447), in the
+// order the driver publishes them among errors of one place: a switch's conflicts in clang's order.
+static bool check_program_diagnose_all(CheckProgramDiagnostic* result, const CheckInput* input, const CheckStream* stream,
+                                       const Parser* parser, const TypeTable* types, uint32_t before_token, Arena* output, Arena* scratch)
 {
     *result = (CheckProgramDiagnostic){ .token = BUSTER_CHECK_NONE, .position = BUSTER_CHECK_NONE };
     const uint64_t mark = scratch != 0 ? scratch->length : 0;
@@ -253,7 +327,7 @@ static bool check_program_diagnose(CheckProgramDiagnostic* result, const CheckIn
     if (valid)
     {
         valid = input->token_count == parser->tokens.count && stream->count == input->graph.count && stream->status == CHECK_STATUS_OK &&
-                !input->resource && (input->report_count == 0 || input->diagnostic_graph) &&
+                !input->resource && (input->report_count == 0 || input->diagnostic_graph || input->recovered_valid) &&
                 (input->token_count == 0 || (input->token_nodes != 0 && check_sparse_present(input->control_owners) && check_sparse_present(input->case_ranges) &&
                  parser->tokens.kinds != 0 && parser->tree.roles != 0 && parser->tree.parents != 0)) &&
                 (input->report_count == 0 || input->reports != 0) && (stream->report_count == 0 || stream->reports != 0) &&
@@ -283,7 +357,16 @@ static bool check_program_diagnose(CheckProgramDiagnostic* result, const CheckIn
     }
     CheckProgram program = { .input = input, .stream = stream, .types = types, .token = BUSTER_CHECK_NONE, .diagnostic_position = BUSTER_CHECK_NONE };
     program.cases = valid && capacity != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckProgramCase, capacity) : 0;
-    if (valid && ((stream->count != 0 && complete == 0) || (capacity != 0 && program.cases == 0)))
+    // Each switch's condition, and each case's value or conflict, gives at most one.
+    uint32_t constraints = capacity;
+    for (uint32_t token = 0; valid && output != 0 && token < cutoff; token += 1)
+    {
+        constraints += parser->tokens.kinds[token] == PARSE_KIND_SWITCH;
+    }
+    program.constraints = valid && output != 0 && constraints != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckProgramConstraint, constraints) : 0;
+    program.constraint_capacity = program.constraints != 0 ? constraints : 0;
+    if (valid && ((stream->count != 0 && complete == 0) || (capacity != 0 && program.cases == 0) ||
+                  (output != 0 && constraints != 0 && program.constraints == 0)))
     {
         valid = false;
         result->status = CHECK_PROGRAM_RESOURCE;
@@ -336,7 +419,12 @@ static bool check_program_diagnose(CheckProgramDiagnostic* result, const CheckIn
             {
                 if (!check_action_integer_type(types, check_stream_type(stream, condition), &width, &sign))
                 {
-                    check_program_constraint(&program, owner);
+                    // Once, by its switch, where there's a list.
+                    if (selection || program.constraints == 0)
+                    {
+                        const CheckProgramFailure failure = { .message = CHECK_PROGRAM_MESSAGE_CONDITION, .type = check_stream_type(stream, condition) };
+                        check_program_constraint_record(&program, owner, owner, failure, BUSTER_CHECK_NONE, condition, true);
+                    }
                 }
                 else if (label && ends != 0 && ends[owner] < cutoff)
                 {
@@ -354,7 +442,11 @@ static bool check_program_diagnose(CheckProgramDiagnostic* result, const CheckIn
                         if (!fallback && (!check_program_case_value(&program, node, item.type, &item.lower) ||
                             !check_program_case_value(&program, high, item.type, &item.upper)))
                         {
-                            check_program_constraint(&program, end);
+                            // The reader's error, which a list doesn't repeat: clang drops the case.
+                            if (program.constraints == 0)
+                            {
+                                check_program_constraint(&program, end);
+                            }
                         }
                         else
                         {
@@ -373,12 +465,26 @@ static bool check_program_diagnose(CheckProgramDiagnostic* result, const CheckIn
         result->position = program.diagnostic_position;
         result->failure = program.failure;
         valid = program.status != CHECK_PROGRAM_RESOURCE;
+        for (uint32_t i = 0; valid && i < program.constraint_count; i += 1)
+        {
+            CheckProgramConstraint* constraint = program.constraints + i;
+            constraint->token = check_program_diagnostic_location(parser, constraint->token);
+            constraint->previous = constraint->previous != BUSTER_CHECK_NONE ? check_program_diagnostic_location(parser, constraint->previous) : BUSTER_CHECK_NONE;
+        }
+        result->constraints = valid ? program.constraints : 0;
+        result->constraint_count = valid ? program.constraint_count : 0;
     }
     if (scratch != 0)
     {
         arena_pop_to(scratch, mark);
     }
     return valid;
+}
+
+static bool check_program_diagnose(CheckProgramDiagnostic* result, const CheckInput* input, const CheckStream* stream,
+                                   const Parser* parser, const TypeTable* types, uint32_t before_token, Arena* scratch)
+{
+    return check_program_diagnose_all(result, input, stream, parser, types, before_token, 0, scratch);
 }
 
 #endif

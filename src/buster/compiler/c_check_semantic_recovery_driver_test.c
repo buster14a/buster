@@ -183,6 +183,50 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         // no node and keeps its error (third review on #1791).
         "int c = undecl, d[] = 6;\nunknown_type z;\n",
         "int c = undecl;\nint d[] = 6;\nint e[] = (5);\nint f2[] = undecl2 + 1;\nint g[] = (int)7;\nunknown_type z;\n",
+        // GNU's array initialized by a compound literal of its array type (#1447): the same element type and size or none
+        // (the literal's size then the array's, `(int[]){…}`'s once its own initializer finished); another array type's
+        // "cannot initialize array of type 'int[3]' with array of type 'int[2]'", recovered.
+        "int a[] = (int[2]){1, 2};\n"
+        "int b[2] = (int[2]){3, 4};\n"
+        "int c[3] = (int[2]){5, 6};\n"
+        "int d[1] = (int[2]){7, 8};\n"
+        "char s[] = (char[]){\"hi\"};\n"
+        "int e[] = ((int[3]){1});\n"
+        "_Static_assert(sizeof(a) == 8 && sizeof(e) == 12, \"\");\n"
+        "void f(void) { int x[] = (int[2]){1, 2}; int y[2] = (int[]){3, 4}; (void)x; (void)y; }\n",
+        "int a1[] = (long[2]){1, 2};\n"
+        "unsigned a2[] = (int[2]){1, 2};\n"
+        "const int a3[] = (int[2]){1, 2};\n"
+        "int a4[] = (const int[2]){1, 2};\n"
+        "int a5[2][2] = (int[2][2]){{1, 2}, {3, 4}};\n"
+        "int a6[] = (int[2]){1, 2, 3};\n"
+        "char a7[] = (char[2]){\"abc\"};\n"
+        "int a8[] = (int[2]){1} + 0;\n",
+        // An enumerator whose name is another kind of the scope's (an object, a typedef, a parameter, a local): clang's
+        // "redefinition of 'K'" with its note at the earlier declaration, the enumerator dropped and the next implicit
+        // value restarting at 0, of int or of the fixed type (#1447).
+        "int K;\n"
+        "enum E { K, L };\n"
+        "int use(void) { return K + L + undeclared; }\n",
+        "enum E { A, B };\n"
+        "int A;\n"
+        "float B(void);\n"
+        "typedef int A2;\n"
+        "enum F { A2 };\n"
+        "int use(void) { return A + B; }\n",
+        "void f(int P)\n"
+        "{\n"
+        "    enum { P, Q } e;\n"
+        "    int x = Q;\n"
+        "    (void)e; (void)x;\n"
+        "}\n",
+        "int K;\n"
+        "enum E { J = 5, K, M };\n"
+        "_Static_assert(M == 0, \"m\");\n"
+        "typedef long T;\n"
+        "enum F : short { U = 7, T, V };\n"
+        "_Static_assert(V == 0 && sizeof(V) == 2, \"v\");\n"
+        "void w(void) { int loc; enum { loc, after } e; (void)e; (void)loc; }\n",
         // A block's, and clang's unused-variable warnings of no scope in which an error occurred (a body's from its
         // definition's start).
         "void f(int p)\n{\n    int x;\n    float x;\n    int y = 1;\n    long y = 2;\n    (void)y;\n    if (y = 2) {}\n}\n"

@@ -64,6 +64,10 @@ the one `--clang` names:
 - conversions: every pair of codes through both vector kernels and the scalar
   twin, at every length to 200 and ending at a `PROT_NONE` page; the TypeId
   batch against `type_usual_arithmetic`; and clang's results as fixtures;
+- extended qualifiers (#1447, `type_test_extended`): `type_extend`'s
+  normalizations, the readers through `QUALIFIED`, a `__weak` member's layout
+  and a space's member refused, compatibility, composite types, clang's
+  spellings and the address spaces' inclusions;
 - compatibility, composite types and printing: fixtures, the C standard's
   examples among them, types that share their insides 64 levels deep (2^64
   leaves), which each walk must take pair by distinct pair, composites of

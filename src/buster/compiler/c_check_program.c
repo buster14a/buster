@@ -25,6 +25,8 @@ typedef enum CheckProgramMessage
     CHECK_PROGRAM_MESSAGE_GENERIC,
     CHECK_PROGRAM_MESSAGE_DUPLICATE_CASE,
     CHECK_PROGRAM_MESSAGE_DUPLICATE_DEFAULT,
+    // A switch's condition of a type that isn't an integer's (`type`).
+    CHECK_PROGRAM_MESSAGE_CONDITION,
 } CheckProgramMessage;
 
 typedef struct CheckProgramFailure CheckProgramFailure;
@@ -33,6 +35,19 @@ struct CheckProgramFailure
     CheckProgramMessage message;
     TypeId type;
     unsigned __int128 value;
+};
+
+// One of the constraint errors check_program_diagnose_all lists (#1447): where clang reports it (`token`), where its
+// statement is complete (`position`, which publishes it), its words' facts (`failure`, and `node` for a condition's
+// type's spelling) and the token of clang's "previous case defined here" note (`previous`, or BUSTER_CHECK_NONE).
+typedef struct CheckProgramConstraint CheckProgramConstraint;
+struct CheckProgramConstraint
+{
+    uint32_t token;
+    uint32_t position;
+    uint32_t previous;
+    uint32_t node;
+    CheckProgramFailure failure;
 };
 
 // A variable-length array's object (block scope, automatic, of a runtime size) is ALLOCATEd at its declaration (`token`;
@@ -401,6 +416,11 @@ struct CheckProgram
     uint32_t diagnostic_position;
     CheckProgramFailure failure;
     CheckProgramStatus status;
+    // check_program_diagnose_all's list of every constraint error, in clang's order within a statement; null elsewhere,
+    // where only the first is kept (`token`, `diagnostic_position`, `failure`).
+    CheckProgramConstraint* constraints;
+    uint32_t constraint_count;
+    uint32_t constraint_capacity;
     uint64_t output_bytes;
     // CheckProgramOptions.unselected_operands, asm_helpers, helper_forms, target, frame_pointer and probe_stack.
     bool unselected_operands;
