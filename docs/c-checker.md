@@ -2575,8 +2575,10 @@ What the lowering covers past scalars (#145's programs):
   folded to its width's bits, which the lowering extends from the width, as a
   narrower one's: a negative one's conversion to `__int128` or compare reads it
   as it is.
-  The overflow builtins of one of 65 to 127 bits are refused by name (their
-  recipes take a 128-bit operand whole).
+  The overflow builtins take one of 65 to 127 bits as an `__int128`'s limbs
+  (#1447): its descriptor is its width, its high limb extended from it, and a
+  destination's high limb is the result's extended from the width's bits past
+  64, which must give it back for the result to fit.
 - **x86 builtins (#136, #148).** The intrinsics' `__builtin_ia32_*` calls are
   X86 entries too (`c_check_program_x86.c`): a row per builtin, from a table by
   name, of its family's records with its rule's form, as clang -O0's code
