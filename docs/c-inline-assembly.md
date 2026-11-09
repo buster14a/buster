@@ -201,6 +201,14 @@ writes rsp, rbp or r15, which hold the frame.
 
 What differs from the helper: the template's rsp is its function's, as clang's
 is, and the statement costs no call, return, pushes or block address.
+
+On the 9700X ([the measurement record](https://github.com/buster14a/buster-performance/tree/181db9f04/docs/measurements/asm-bodies-1839-2026-11-09)),
+loops of one statement each, against the same compiler's helpers
+(`--helper-forms=asm`):
+- a flag output is 38% faster, a `"c"` shift count 43%, `mulq`'s fixed
+  registers 39% and cpuid 2%;
+- rdtsc and x87 `fsqrt`, dominated by their own latency, are level;
+- `-c` of `main.c` is unchanged (2.197 s → 2.189 s).
 `--helper-report` counts each body as the `asm` family's direct form. The
 interpreter (`interpret-c`) refuses a function with a body, as it doesn't run
 machine code.
