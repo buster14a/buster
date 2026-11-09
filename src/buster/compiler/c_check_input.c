@@ -978,6 +978,14 @@ struct CheckInput
     // Whether the unit read x86's interrupt or no_caller_saved_registers (#147): only then are its calls looked through
     // after checking, for the direct calls of interrupt service routines and -Wexcessive-regsave (check_input_interrupt_calls).
     bool interrupt_calls;
+    // The full expressions of those direct calls (#1447): triples of a range's first token (with BUSTER_CHECK_INTERRUPT_KEEP
+    // for one of the call's other arguments or list elements), its last and the call's callee's first, in which clang's
+    // invalid call leaves no other diagnostic, while the unit's others are found as a valid one's are
+    // (CheckInput.recovered_valid, check_driver_interrupt_kept, check_interrupt_full_expression). None in a unit without
+    // such an error.
+    uint32_t* interrupt_ranges;
+    uint32_t interrupt_range_count;
+    uint32_t interrupt_range_capacity;
     CheckInputAsm* asm_statements;
     uint32_t asm_count;
     uint32_t asm_capacity;
@@ -1097,6 +1105,29 @@ static __attribute__((unused)) uint32_t check_input_linkage(const uint8_t* bits,
 static __attribute__((unused)) void check_input_set_linkage(uint8_t* bits, uint32_t token, uint32_t linkage)
 {
     bits[token] = (uint8_t)((bits[token] & ((1u << BUSTER_CHECK_BITS_LINKAGE_SHIFT) - 1)) | linkage << BUSTER_CHECK_BITS_LINKAGE_SHIFT);
+}
+
+#define BUSTER_CHECK_INTERRUPT_KEEP 0x80000000u
+
+// Whether a diagnostic at `token` is published (#1447): not where it is inside a direct call's full expression, of an
+// interrupt service routine, whose error is clang's invalid call alone there, but in that call's other arguments or
+// list elements (CheckInput.interrupt_ranges). A unit without such an error takes one compare.
+static __attribute__((unused)) bool check_driver_interrupt_kept(const CheckInput* input, uint32_t token)
+{
+    bool kept = true;
+    for (uint32_t r = 0; kept && r < input->interrupt_range_count; r += 1)
+    {
+        const uint32_t* range = input->interrupt_ranges + r * 3;
+        bool dropped = (range[0] & BUSTER_CHECK_INTERRUPT_KEEP) == 0 && token >= range[0] && token <= range[1];
+        for (uint32_t k = 0; dropped && k < input->interrupt_range_count; k += 1)
+        {
+            const uint32_t* other = input->interrupt_ranges + k * 3;
+            dropped = !((other[0] & BUSTER_CHECK_INTERRUPT_KEEP) != 0 && other[2] == range[2] && token >= (other[0] & ~BUSTER_CHECK_INTERRUPT_KEEP) &&
+                        token <= other[1]);
+        }
+        kept = !dropped;
+    }
+    return kept;
 }
 
 // The attributes at `token` (CheckInput.attributes), null for none; `token` is at most the unit's count.
@@ -4301,13 +4332,16 @@ static TypeId check_input_tag_identity(CheckInputReader* reader, uint32_t token,
                     TypeId installed = 0;
                     const TypeId moded = check_input_attribute_mode(reader, own, mode, type, &installed);
                     // An error after which clang installs no type, an unknown or unsupported mode's (#1447): the enum goes on
-                    // without it, as one with no mode. One that still installs a floating type gives the enum the integer of
-                    // its layout (check_input_mode_enum_integer); a complex one stops the reader.
-                    const TypeId stand_in = moded == 0 && installed != type ? check_input_mode_enum_integer(reader->types, installed) : 0;
+                    // without it, as one with no mode. One that still installs a floating or a complex type gives the enum the
+                    // integer of its layout (check_input_mode_enum_integer), a complex one's alignment with it unless an
+                    // alignment attribute gives one; XC's and TC's stop the reader.
+                    uint8_t stand_in_alignment = 0;
+                    const TypeId stand_in = moded == 0 && installed != type ? check_input_mode_enum_integer(reader->types, installed, &stand_in_alignment) : 0;
                     const bool recovered = moded == 0 && (installed == type || stand_in != 0) && check_input_attribute_recover(reader, own, &recovery, 0, false, false);
                     const bool dropped = recovered && installed == type;
                     const TypeId underlying = moded != 0 ? moded : recovered ? stand_in : 0;
-                    valid = dropped || (underlying != 0 && type_enum_complete(reader->types, type, underlying, own->alignment_log2));
+                    const uint8_t alignment = own->alignment_log2 != 0 ? own->alignment_log2 : moded == 0 ? stand_in_alignment : 0;
+                    valid = dropped || (underlying != 0 && type_enum_complete(reader->types, type, underlying, alignment));
                     reader->output->resource |= underlying != 0 && !valid && reader->types->last_error == TYPE_ERROR_FULL;
                     if (!dropped)
                     {
