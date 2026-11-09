@@ -4182,7 +4182,17 @@ Other errors leave out their bodies, by `check_input_selected` as
 `-flazy-system-headers`' bodies are, as does every error where the view
 doesn't parse or its reading isn't valid (`check_driver_rejected_read`
 publishes nothing of an invalid reading, which is then read again with the
-bodies left out). The second reading's unused variables in a scope with an error
+bodies left out). The second reading may find errors of its own, which the
+first didn't reach: past a reader's error that isn't recovered (an incomplete
+object's type), which ends the first reading's walk and skips its control
+scan, a duplicate case, a label's redefinition or another such error. A view's
+reading with errors falls back to the bodies' as above, as they may be the
+view's own; the bodies' reading publishes those its known errors don't hold,
+its reader's and graph's reports and its controls' constraints, in clang's
+words (its reader's alone where its graph can't run after them), and the next
+round leaves their parts out too. Each round adds an error and its parts, up
+to `BUSTER_CHECK_DRIVER_REJECTED_ROUNDS` (4) readings; past them the unit's
+warnings aren't given. The second reading's unused variables in a scope with an error
 are left out (its own error counts, the dropped part's at the token after
 it). A function holding an error keeps its unused parameters, as clang's
 `ActOnFinishFunctionBody` gives them whatever the body's errors, except one
@@ -4455,11 +4465,9 @@ The later phases are left:
   without its common warnings. A function's unused parameter that its
   left-out part names through a local of the same name gets no
   `-Wunused-parameter`, where clang gives one.
-- **Errors past a reader's error that ends its walk.** A reader's error that
-  isn't recovered (an incomplete object's type) skips the control scan and
-  ends the first reading; a control error elsewhere (a duplicate case, a
-  label's redefinition) or a second such error then fails the second reading,
-  and the unit gets no warnings at all.
+- **Rounds past the cap.** A unit needing more than four readings' rounds
+  (each body's error ending the next reading's walk) gets its first errors
+  alone.
 
 ### What the lowering costs (#531)
 
