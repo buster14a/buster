@@ -5007,7 +5007,12 @@ static uint32_t check_driver_declared_scope(const Parser* parser, uint32_t token
     {
         head = parser->tree.parents[at] == terminator ? at : BUSTER_CHECK_NONE;
     }
-    const bool declares = head != BUSTER_CHECK_NONE && check_driver_specifier_role(parser->tree.roles[head]);
+    // A local label's declaration (`__label__ p;`) declares a label, no object.
+    bool declares = head != BUSTER_CHECK_NONE && check_driver_specifier_role(parser->tree.roles[head]);
+    for (uint32_t at = low; declares && at < terminator; at += 1)
+    {
+        declares = parser->tokens.kinds[at] != PARSE_KIND_LABEL;
+    }
     const uint32_t declarators = declares ? check_driver_declarators(parser, head, terminator) : BUSTER_CHECK_NONE;
     const uint32_t first = declarators != BUSTER_CHECK_NONE ? check_driver_subtree_start(parser, low, declarators) : terminator;
     // The first ordinary identifier of the segment that holds the token.
