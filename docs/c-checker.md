@@ -3823,6 +3823,37 @@ deferred merge has the same complete unit as source order and uses the same cuts
 All these views remain
 diagnostic-only and preserve the original source rejection.
 
+#### Declarator errors' words (#1447)
+
+The declarator's errors that used to read "invalid or unsupported declaration"
+take clang's words and places:
+
+- **A function returning an array or a function**, at its `(`: "function
+  cannot return array type 'int[3]'" or "function cannot return function
+  type 'int (void)'"
+  (`CHECK_INPUT_FUNCTION_RETURN`).
+- **A negative constant bound**, at the bound: "'a' declared as an array with
+  a negative size", or "array size is negative" in a type name
+  (`CHECK_INPUT_ARRAY_NEGATIVE`, `check_input_vla_bound`).
+- **An array of functions**, at its `[`: "'a' declared as array of functions
+  of type 'F' (aka 'int (void)')" (`CHECK_INPUT_ARRAY_FUNCTIONS`).
+- **An incomplete element**, at its `[`: "array has incomplete element type
+  'struct S'", with the tag's "forward declaration of 'struct S'" note
+  (`CHECK_INPUT_ARRAY_INCOMPLETE`). It is the type table's own refusal
+  (`TYPE_ERROR_ELEMENT`), found before it.
+- **A variable of type `void`**, at its name: "variable has incomplete type
+  'void'". An `extern` one, which clang accepts, is still refused.
+- **The forward declaration note** of an incomplete tag's variable and
+  tentative definition (`check_input_report_typed`).
+
+- **An array past the object limit** (2^61 bytes, clang's and the type
+  table's), at its bound: "array is too large (2'305'843'009'213'693'952
+  elements)", the count with clang's digit separators
+  (`CHECK_INPUT_ARRAY_TOO_LARGE`).
+
+Each still ends the unit's checking as before. The semantic-recovery fixtures
+compare each with clang.
+
 #### Semantic error recovery (#1447)
 
 Translation-unit-wide recovery after semantic errors comes in phases. The plan
@@ -3983,9 +4014,40 @@ do:
   without a fixed type listed twice) gives "redefinition of 'S'" at the name,
   noting the earlier definition. Its body is read as an anonymous tag's, so the
   name's later uses find the first definition, and a repeated enumerator in it
-  is reported as below. This is before C23 only: C23 allows a compatible
-  redefinition and words an incompatible one otherwise (N3037), which the
-  checker doesn't model, and still refuses with its generic error.
+  is reported as below. This is before C23 only. Under `-std=c23`/`gnu23`
+  (N3037) a struct or union defined again in its scope is compared with the
+  earlier definition when its body completes (`c_check_tag_compatible.c`),
+  as clang's structural equivalence compares them:
+  - The records' attributes are compared, arguments included, then each pair
+    of members in order: its attributes, then its names, bit-field widths and
+    types. An attribute's difference is clang's `-Wodr` error ("has an
+    attribute", or "has a member with an attribute"), noted at each list's
+    attribute where the lists first differ, and the comparison goes on.
+  - Members' types are walked together through pointers, arrays, atomics and
+    functions, the same at each level, qualifiers too. Any two records are
+    compatible there unless one is unnamed and written in its definition: two
+    named records, a struct and a union, or two typedefs' unnamed records are,
+    as in clang. Such a pair is queued and compared member by member after the
+    definition's own members, breadth first.
+  - The first difference is clang's "type 'struct S' has incompatible
+    definitions", with its two notes at the differing members (name,
+    bit-field, type, a member with no counterpart). An unnamed member's note
+    is at its declaration's first token and names `''`. A queued pair's
+    difference is reported at the second definition's unnamed record, named
+    as clang names it there (`struct S::(unnamed struct)::(unnamed at
+    f.c:2:21)`, an anonymous member's `(anonymous at ...)`).
+  - The errors are published where the second body ends, after what its
+    members report. A member whose record is itself an incompatible
+    redefinition reads as an `int`, as clang's invalid declaration does.
+
+  A compatible redefinition declares the earlier type. Otherwise the unit is
+  refused and recovered.
+
+  Left as they were: `-Wno-odr` doesn't turn the `-Wodr` errors off. An enum
+  defined again under C23 still refuses with the generic error, which stops
+  the reader. Clang compares its enumerators, and keeps both lists' names in
+  scope with ambiguous references. An `_Atomic(struct { ... })` member is the
+  parser's refusal, with or without a redefinition.
 - **A repeated enumerator** gives "redefinition of enumerator 'A'" with its
   note at the earlier one, and is dropped (`CheckTagFrame.dropped`). As in
   clang, whose next `CheckEnumConstant` sees no previous constant, the next
@@ -4078,15 +4140,47 @@ A rejected unit gets the warnings clang gives it outside its errors
 them (its reader's, its graph's, its asm, control, initializer and musttail
 errors). Where it can, that reading leaves out an error's part alone, in a
 private view of the unit's tokens reparsed as a repair's is
-(`check_driver_rejected_view`): an initializer, from its `=`, where the
-declaration is complete without it (not an unsized array's, not a const
-object's), else an expression statement in a body, which `{` `}` replace
-(`check_driver_rejected_edit`). The body is then read as clang reads it, its
-warnings before and after the error given, flushed (no analysis warnings).
+(`check_driver_rejected_view`). `check_driver_rejected_edit` walks up from the
+error to the nearest part it can leave out:
+
+- **An initializer**, from its `=`, where the declaration is complete without
+  it (not an unsized array's). A const object of an arithmetic or enumeration
+  type keeps its declaration, its initializer replaced by `-*__func__`, as
+  clang's const object stays valid with an unknown value.
+- **An expression statement**, which `{` `}` replace (a `return`'s too).
+- **A condition** (`if`, `while`, `do`, `switch`), which `-*__func__`
+  replaces: an `int` that reads no object of the unit's and is no constant,
+  so that the statements after it stay as reachable as they were. The
+  statement keeps its body, as clang's does.
+- **A for statement's clause**: the init's and the increment's are left out,
+  the condition's replaced as a condition is, so that the loop doesn't become
+  endless.
+- **A statement expression's value**: an error in its last statement is its
+  expression's, so the part around the expression is left out instead; an
+  error in an earlier statement is that statement's.
+- **A declarator**, where its declaration can't do without what holds the error
+  (an unsized array's or a const pointer's initializer, its specifiers, an
+  array bound): it is left out with the comma after it, or the last kept
+  one's before it, or the whole declaration where no other declarator is
+  kept. Every later identifier of its name in its scope is a use, whose own
+  part is left out in turn (a work list), so that no use reads an outer
+  declaration in its place. A typedef's isn't, as the parse reads its name as
+  a type.
+
+Each error's parts are left out all or none (an undo log). A part that holds a
+label, a `case`, a `goto`, a label's address or a tag's definition isn't. The
+replacements are chosen to give no warning of their own (a constant condition
+would: clang's "no case matching constant switch condition"). A part left out
+gives no warning of its own reading, where clang gives those of what it builds
+before the error; the first reading's folded shifts in it are still given, at
+the unit's end (`check_common_shift_finish`), not among the body's. A
+function that holds an error gets no `-Wunused-but-set-parameter` from that reading, as clang's
+`ActOnFinishFunctionBody` gives none: it may lack the parameter's reads
+(`CheckCommonFacts.flushed`'s 2). The body is then read as clang reads it, its warnings before and after the
+error given, flushed (no analysis warnings).
 Other errors leave out their bodies, by `check_input_selected` as
 `-flazy-system-headers`' bodies are, as does every error where the view
-doesn't parse or its reading isn't valid (a statement expression's last
-statement left out makes its value `void`; `check_driver_rejected_read`
+doesn't parse or its reading isn't valid (`check_driver_rejected_read`
 publishes nothing of an invalid reading, which is then read again with the
 bodies left out). The second reading may find errors of its own, which the
 first didn't reach: past a reader's error that isn't recovered (an incomplete
@@ -4121,6 +4215,11 @@ error it finds is among the unit's errors: as for the reader's and the graph's,
 its scopes' unused variables and the unit-end warnings are left out
 (`check_driver_rejected_warnings`). `c_check_statement_recovery_driver_test.c`
 compares fixtures of graph, control, asm and reader errors with clang.
+`c_check_structural_recovery_driver_test.c` compares the view parts' fixtures
+(conditions, for clauses, statement expressions, declarators, and the fallback
+of a part that holds a label or a goto) with clang 23 under `-Wall` and `-Wall
+-Wextra`, gnu17 and gnu23, by both paths and on one, two and three lanes, each
+with errors mid-body among warnings before and after them.
 
 Every declaration's failed initializer is given, as clang gives each
 (phase 2): `int a[2] = 5; int b[2] = 6;` has two errors where it had the
@@ -4247,21 +4346,52 @@ These differences remain:
 - An enum's vector mode after its body gives its deprecation warning twice (on
   main too).
 
+Three of clang's words and places are followed (#1447):
+
+- **A static initializer that isn't constant.** "initializer element is not a
+  compile-time constant" is at clang's culprit (`Expr::isConstantInitializer`):
+  the value past same-type casts and conversions, at a binary, unary or
+  postfix operator's token, a member's name, a cast's `(`, or the first token
+  of a call, a subscript, a conditional or a name (`check_init_culprit_at`).
+  A value of another type than its target's (`static long a = k + 1;`) has
+  clang's implicit conversion as its culprit instead, at the initializer's
+  first token, its parentheses included. The initializers' plan and the
+  expressions' static check both place it so.
+- **`sizeof` and `alignof` of an incomplete type.** "invalid application of
+  'sizeof' to an incomplete type 'T'", with `alignof` or `__alignof` as
+  clang spells the keyword, the type as written (a typedef with its "aka"),
+  at a type name's keyword or an expression's first token, and a tag's
+  "forward declaration" note (`check_semantic_forward_note`). An array of
+  unknown size's alignment is its element's (C11 6.5.3.4p3), as clang takes
+  it.
+- **A call of no function.** "called object type 'T' is not a function or
+  function pointer" at the call's `(`, with the callee's type as written once
+  loaded: without its qualifiers and `_Atomic`, so a `const T`'s typedef name
+  stays and a `const int` typedef's doesn't.
+
+These are rendering only, apart from the alignment, and only the reports'
+own nodes take them.
+
 The later phases are left:
 
 - **Invalid declarations.** Not covered by phase 2:
-  - C23's incompatible tag redefinitions (above).
+  - C23's redefinition of an enum, compatible or not (above).
 
   These still stop the reader. A non-constant initializer's error is at its
   first token, where clang's is at the operand that isn't constant
   (`k + 1`'s `+`), and `sizeof` of an incomplete type reads "incomplete type
   is not permitted here" at the `sizeof`, where clang's names the type at its
   operand; both on main too.
-- **Errors no view part leaves out.** A body's error in a condition, a for
-  header, a statement expression or a declaration other than through its
-  initializer still leaves its body out, and its warnings with it. An error
-  outside every body other than an initializer's (a declaration's, an
-  unsized array's or a const object's initializer) still leaves the unit
+- **Errors no view part leaves out.** A body's error in a part that holds a
+  label, a `case`, a `goto` or a tag's definition, or in a typedef's
+  declaration, still leaves its body out, and its warnings with it. A reader's
+  error that ends its walk in a declarator (`int a[s.b];`, still "invalid or
+  unsupported declaration") leaves its declarator out, but the first reading
+  never saw the body's later errors, so a second reading that meets one isn't
+  valid. The warnings clang gives of what a left-out part builds before its
+  error aren't given, but for a folded shift's, which comes at the unit's end.
+  An error outside every body other than an initializer's (a declaration's,
+  an unsized array's or a const object's initializer) still leaves the unit
   without its common warnings. A function's unused parameter that its
   left-out part names through a local of the same name gets no
   `-Wunused-parameter`, where clang gives one.

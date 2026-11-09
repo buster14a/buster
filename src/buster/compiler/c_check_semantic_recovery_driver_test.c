@@ -183,6 +183,82 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         // no node and keeps its error (third review on #1791).
         "int c = undecl, d[] = 6;\nunknown_type z;\n",
         "int c = undecl;\nint d[] = 6;\nint e[] = (5);\nint f2[] = undecl2 + 1;\nint g[] = (int)7;\nunknown_type z;\n",
+        // Clang's words and places (#1447): a static initializer's culprit (an operator, a member's name, a cast's `(`, a
+        // call's or a name's first token), `sizeof` and `alignof` of an incomplete type (the type as written, at a type
+        // name's keyword or an expression's start, with the tag's note; an array of unknown size's alignment its
+        // element's), and a call of no function (the callee's type, at the `(`).
+        "int k;\n"
+        "static int s2 = k + 1;\n"
+        "static int s3 = 1 + k;\n"
+        "static int s4 = (k);\n"
+        "static int s5 = -k;\n"
+        "static int s6 = k * 2 + 3;\n"
+        "static int s7 = 2 + 3 * k;\n"
+        "static int *p1 = &k + k;\n",
+        "int k;\n"
+        "int f(void);\n"
+        "struct S { int a; } s;\n"
+        "int arr[4];\n"
+        "static long c1 = (long)k;\n"
+        "static int c2 = f();\n"
+        "static int c3 = k ? 1 : 2;\n"
+        "static int c4 = s.a;\n"
+        "static int c5 = arr[k];\n"
+        "static int c6 = ((k));\n"
+        "static int c7[2] = { 1, k };\n"
+        "static struct S c8 = { k };\n"
+        "static int c9 = (int)(k + 1);\n"
+        "static int c10 = k++;\n"
+        "static int *c11 = &arr[k];\n"
+        "static int c13 = !k;\n",
+        // A value converted to another type: the conversion is clang's culprit, at the converted expression's first token,
+        // its parentheses included; a callee's type is the loaded one, its qualifiers and _Atomic dropped (review on #1802).
+        "int k;\nstruct S { int a; } s;\nenum E { X };\n"
+        "static long v1 = k + 1;\nstatic long v2 = s.a;\nstatic int v3 = sizeof(k) + k;\nstatic long v4 = (k);\n"
+        "static long v5 = (int)k;\nstatic long v6[2] = { k + 1, 2 };\nstatic float v7 = k * 2;\nstatic unsigned v8 = -k;\n"
+        "static void *v9 = (char *)0 + k;\nstatic const int v10 = k + 1;\nstatic enum E v11 = k + 1;\n"
+        "static struct { long x : 3; int y; } v12 = { k + 1, k + 2 };\nstatic _Bool v13 = k + 1;\n",
+        "const int cx; volatile int vx; _Atomic int ax; typedef const int CT; CT ctx; typedef int T; T tx; const T ctt;\n"
+        "typedef _Atomic int AT; AT atx; int *const pc; struct Q { int a; } const cq;\n"
+        "void f(void) { cx(); vx(); ax(); ctx(); tx(); ctt(); atx(); pc(); cq(); }\n",
+        // An array's or function's qualifiers are its elements', which the loaded type keeps (review on #1802).
+        "struct Q { int a; };\n"
+        "const int ca[2]; volatile int va[2]; const int na[2][3]; int * const pa[2]; const _Atomic int aa[2]; const struct Q cq2[2];\n"
+        "int (* const fpa[2])(void);\n"
+        "void g(void) { ca(); va(); na(); pa(); aa(); cq2(); fpa(); }\n",
+        "extern int a[];\n"
+        "struct Q;\n"
+        "int s = sizeof(a);\n"
+        "int t = sizeof(struct Q);\n"
+        "int u = sizeof a;\n"
+        "int v = _Alignof(struct Q);\n"
+        "void f(void);\n"
+        "int w = sizeof(f());\n"
+        "int x = sizeof(void);\n",
+        "struct Q;\n"
+        "int a1 = __alignof__(struct Q);\n"
+        "int a2 = __alignof(struct Q);\n"
+        "int a4 = _Alignof(struct Q);\n"
+        "extern int e[];\n"
+        "int a5 = __alignof__(e);\n"
+        "typedef struct Q QT;\n"
+        "int a6 = sizeof(QT);\n"
+        "union U; enum E;\n"
+        "int a7 = sizeof(union U) + sizeof(enum E);\n"
+        "int a8 = sizeof(struct Q *) + sizeof(e[0]);\n"
+        "void g(void) { struct Q *q = 0; int a9 = sizeof(*q); int a10 = sizeof *q; }\n",
+        "extern int e[];\n"
+        "_Static_assert(__alignof__(e) == 4, \"\");\n"
+        "_Static_assert(_Alignof(int[]) == 4, \"\");\n"
+        "_Static_assert(_Alignof(char[][4]) == 1, \"\");\n"
+        "extern double d2[][3];\n"
+        "_Static_assert(__alignof__(d2) == 8, \"\");\n"
+        "struct Q;\n"
+        "int q = _Alignof(struct Q);\n",
+        "int f(void);\n"
+        "int x;\n"
+        "struct S { int a; } s;\n"
+        "void g(void) { f()(); x(); s(); (1)(); int *p = 0; p(); }\n",
         // An enum redeclared with another fixed underlying type, without the one it had, or with one it hadn't: clang's
         // CheckEnumRedeclaration words and notes, after which the declaration, its body and its enumerators are dropped
         // and the name keeps the earlier enum (#1447). Typedef'd bases are spelled with their "aka", and an enum in a
@@ -282,6 +358,90 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "enum F : short { U = 7, T, V };\n"
         "_Static_assert(V == 0 && sizeof(V) == 2, \"v\");\n"
         "void w(void) { int loc; enum { loc, after } e; (void)e; (void)loc; }\n",
+        // C23's redefinition of a record in its scope (#1447, N3037), gnu23's alone: a compatible one redeclares the
+        // earlier record, typedef'd members and nested anonymous records too; an incompatible one is clang's "has
+        // incompatible definitions" with its notes at the first difference (a name, a bit-field, a type, a member more or
+        // fewer), and attributes one definition hasn't are -Wodr's error.
+        "/* gnu23 only */\n"
+        "struct S { int a; long b; };\n"
+        "struct S { int a; long b; };\n"
+        "union U { int x; float y; };\n"
+        "union U { int x; float y; };\n"
+        "struct N { struct S s; int arr[3]; int bits : 3; };\n"
+        "struct N { struct S s; int arr[3]; int bits : 3; };\n"
+        "int use(void) { struct S v = { 1, 2 }; struct N n; n.bits = 1; return v.a + n.arr[0]; }\n"
+        "void blk(void) { struct L { int q; }; struct L { int q; } l; l.q = 0; }\n"
+        "int bad = undeclared;\n",
+        "/* gnu23 only */\n"
+        "struct S { int a; long b; };\n"
+        "struct S { int a; int b; };\n"
+        "struct T { int a; };\n"
+        "struct T { int b; };\n"
+        "struct U { int a; int b; };\n"
+        "struct U { int a; };\n"
+        "struct W { int a : 3; };\n"
+        "struct W { int a : 4; };\n"
+        "struct X { int a; } __attribute__((packed));\n"
+        "struct X { int a; };\n"
+        "struct Y { int a; };\n"
+        "struct Y { const int a; };\n"
+        "int x = undeclared;\n",
+        "/* gnu23 only */\n"
+        "struct A { int a; int b : 3; };\n"
+        "struct A { int a; int b; };\n"
+        "struct B { int a; };\n"
+        "struct B { int a; int b; };\n"
+        "struct C { struct { int x; } in; };\n"
+        "struct C { struct { int x; } in; };\n"
+        "struct D { int a; };\n"
+        "struct D { int a; } __attribute__((aligned(8)));\n"
+        "struct E { int a[2]; };\n"
+        "struct E { int a[3]; };\n"
+        "typedef int I;\n"
+        "struct F { I a; };\n"
+        "struct F { int a; };\n"
+        "struct G { int a, b; };\n"
+        "struct G { int b, a; };\n"
+        "union H { int a; };\n"
+        "union H { int a; long b; };\n"
+        "void f(void) { struct L { int q; }; struct L { int r; }; }\n",
+        "/* gnu23 only */\n"
+        "struct D { int a; };\n"
+        "struct D { int a; } __attribute__((aligned(8)));\n"
+        "struct X { int a; } __attribute__((packed));\n"
+        "struct X { int a; } __attribute__((packed));\n"
+        "int x = undeclared;\n",
+        // Clang's C23 comparison of members' types (review on #1813): any two named records are compatible, a typedef's
+        // unnamed one too, and the unnamed records written in the members are compared member by member, through
+        // pointers, arrays, atomics and functions, after the definition's own members.
+        "/* gnu23 only */\n"
+        "struct I { int a; }; struct J { long b; }; union U { int a; };\n"
+        "typedef struct { int a; } AX; typedef union { int a; } UY;\n"
+        "struct S { struct I m; struct I *p; struct I a[2]; struct I (*f)(void); AX t; struct { int x; } *q; };\n"
+        "struct S { struct J m; union U *p; union U a[2]; union U (*f)(void); UY t; struct { int x; } *q; };\n"
+        "struct T { struct { int y; } arr[2]; const struct { int z; } *cp; _Atomic struct { int v; } *ap; struct { int u; } (*g)(int); struct { int w; }; };\n"
+        "struct T { struct { int y; } arr[2]; const struct { int z; } *cp; _Atomic struct { int v; } *ap; struct { int u; } (*g)(int); struct { int w; }; };\n"
+        "struct T t; int x = t.w + undeclared;\n",
+        // Their differences: at the innermost unnamed record (its enclosing records' names before its place), an unnamed
+        // bit-field's notes, and an incompatible inner record's member read as an int.
+        "/* gnu23 only */\n"
+        "struct A { struct { int x; } *p; };\nstruct A { struct { long x; } *p; };\n"
+        "struct B { struct { struct { int y; } in; } m; };\nstruct B { struct { struct { char y; } in; } m; };\n"
+        "struct C { struct { int x; }; int y; };\nstruct C { struct { long x; }; int y; };\n"
+        "struct D { int :3; };\nstruct D { int :4; };\n"
+        "struct E { struct I { int a; } m; };\nstruct E { struct I { long a; } m; };\n"
+        "struct F { int a; struct { int x; } *p; };\nstruct F { long a; struct { long x; } *p; };\n",
+        // Attributes, arguments included: the record's own, a member's (each clang's -Wodr error, the comparison going on)
+        // and an unnamed member record's, each noted where the lists first differ.
+        "/* gnu23 only */\n"
+        "struct A { int a; } __attribute__((visibility(\"hidden\")));\nstruct A { int a; } __attribute__((visibility(\"protected\")));\n"
+        "struct B { int a; } __attribute__((packed, aligned(4)));\nstruct B { int a; } __attribute__((aligned(4), packed));\n"
+        "struct C { int a; } __attribute__((aligned(4)));\nstruct C { int a; } __attribute__((aligned(8)));\n"
+        "struct D { int a __attribute__((aligned(8))); int b __attribute__((deprecated(\"x\"))); };\n"
+        "struct D { int a; int b __attribute__((deprecated(\"y\"))); };\n"
+        "struct E { int a; } __attribute__((packed));\nstruct E { long a; };\n"
+        "struct F { int a __attribute__((aligned(8))); int b; };\nstruct F { int a; long b; };\n"
+        "struct G { struct { int a; } __attribute__((packed)) m; };\nstruct G { struct { int a; } m; };\n",
         // A block's, and clang's unused-variable warnings of no scope in which an error occurred (a body's from its
         // definition's start).
         "void f(int p)\n{\n    int x;\n    float x;\n    int y = 1;\n    long y = 2;\n    (void)y;\n    if (y = 2) {}\n}\n"
@@ -327,6 +487,28 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "enum A { X = 5 };\nenum B { Y = 3, X, Z };\n_Static_assert(Z == 0, \"z\");\n"
         "enum C : long { P };\nenum D : char { Q = 7, P, R };\n_Static_assert(R == 0 && sizeof(R) == 1, \"r\");\n"
         "enum E { M = -1 };\nenum F { M };\n_Static_assert(sizeof(enum F) == 4 && (enum F)-1 > 0, \"u\");\nint x = undeclared;\n",
+        // Declarator errors in clang's words (#1447), each still ending the unit's checking: a function returning an array
+        // or a function, a negative bound (named, and a type name's), an array of functions (by a typedef's name, with its
+        // aka) or of an incomplete element (with the tag's forward declaration's note), and a variable of type void or of
+        // an incomplete tag, a tentative definition's too.
+        "struct S;\nint f(void)[3];\n",
+        "typedef int F(void);\nF g(void);\n",
+        "int s = sizeof(int[2]);\nint a[-1];\n",
+        "int s = sizeof(int[-4]);\n",
+        "typedef int F(void);\nF *ok[2];\nF af[2];\n",
+        "struct S;\nvoid h(struct S a[]);\n",
+        "int b[2][];\n",
+        "static void v;\n",
+        "struct S;\nint k(void) { struct S local; return 0; }\n",
+        "struct S s;\nint ok(void) { return 0; }\n",
+        // An array past clang's object limit, at its bound, its count with clang's digit separators: a declaration's, an
+        // inner array's (whose outer one is past it) and a type name's.
+        "char ok[0x1fffffffffffffff];\nint a[0x2000000000000000];\n",
+        "int c[0x100000000][0x100000000];\n",
+        "int s = sizeof(int[0x4000000000000000]);\n",
+        // A parameter's bound past its `static` and qualifiers (review on #1819).
+        "void f(int a[static 0x2000000000000000]);\n",
+        "void g(int a[const volatile 0x2000000000000000]);\n",
         // A tag defined again in its scope, whose body becomes an anonymous tag's: later uses of the name find the first
         // definition, and the second's enumerators are still declared (a repeated one with its own note).
         "struct S { int a; };\nstruct S { long b; };\nunion U { int a; };\nunion U { char c; } u2;\n"
@@ -343,8 +525,8 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "enum FE : int { FA, FB };\nenum FE : int { FC, FD };\nint fx = FC + FB;\nvoid fg(void) { enum FL : char { FL1 }; enum FL : char { FL2 }; }\n",
     };
     static const char* const standards[] = { "-std=gnu17", "-std=gnu23" };
-    // The tag redefinitions, the last three fixtures, are gnu17's alone: C23 allows a compatible one and words an
-    // incompatible one otherwise (N3037), which the checker doesn't model yet.
+    // The tag redefinitions, the last three fixtures, are gnu17's alone: C23 compares a redefined record with the
+    // earlier one (N3037, the gnu23 fixtures above), and an enum's redefinition still refuses generically there.
     const uint32_t before_c23 = BUSTER_ARRAY_LENGTH(fixtures) - 3;
     static const char* const options[] = { NULL, "-Wall", "-ferror-limit=2", "-w" };
     enum { LINES = 16384 };
@@ -358,7 +540,9 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         snprintf(source, sizeof(source), "%s/semantic-recovery-%u.c", directory, f);
         const bool made = parse_test_write(source, fixtures[f], strlen(fixtures[f]));
         const uint32_t standard_count = f >= before_c23 ? 1u : (uint32_t)BUSTER_ARRAY_LENGTH(standards);
-        for (uint32_t s = 0; made && s < standard_count; s += 1)
+        // A fixture that starts with this marker is gnu23's alone (C23's tag compatibility).
+        const bool c23_only = strncmp(fixtures[f], "/* gnu23 only */", 16) == 0;
+        for (uint32_t s = c23_only ? 1u : 0u; made && s < standard_count; s += 1)
         {
             for (uint32_t o = 0; o < BUSTER_ARRAY_LENGTH(options); o += 1)
             {
