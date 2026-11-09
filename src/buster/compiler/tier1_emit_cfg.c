@@ -1419,8 +1419,8 @@ static Tier1EmitError tier1_emit_cfg_stack_argument(Tier1EmitResult* emitted, ui
 
 // A by-value aggregate argument's bytes [from, from + size) from its address, node `value`'s at its call's use phase
 // `position` (#789), to `to_base` + `to`: through the scratch register from the address's register, or, where the allocation has
-// the address in a slot or recomputes it, from the scratch register, which takes it, through rax, which the red zone's
-// save slot holds meanwhile (BUSTER_TIER1_EMIT_STAGING_SAVE). The address's use isn't required: a call may pass more
+// the address in a slot or recomputes it, from the scratch register, which takes it, through rax, whose live value the
+// red zone's save slot holds meanwhile (BUSTER_TIER1_EMIT_STAGING_SAVE). The address's use isn't required: a call may pass more
 // aggregates than the registers its first allocation gives its uses.
 // A by-value aggregate's address, value `value` at `position`, in a register: its own, or the scratch register, reloaded
 // from its spill slot or recomputed (`*registered` false then).
@@ -1452,18 +1452,27 @@ static Tier1EmitError tier1_emit_cfg_aggregate_address(Tier1EmitResult* emitted,
     return error;
 }
 
-static Tier1EmitError tier1_emit_cfg_aggregate_copy(Tier1EmitResult* emitted, uint32_t value, uint32_t position, uint8_t to_base, int32_t to, uint32_t from, uint32_t size, Tier1EmitBuffer* buffer)
+static Tier1EmitError tier1_emit_cfg_aggregate_copy(Tier1EmitResult* emitted, const Tier1EmitTransitions* transitions, uint32_t owed, uint32_t value, uint32_t position, uint8_t to_base, int32_t to, uint32_t from, uint32_t size, Tier1EmitBuffer* buffer)
 {
     uint8_t source = BUSTER_TIER1_SELECT_SCRATCH;
     bool registered = false;
     Tier1EmitError error = tier1_emit_cfg_aggregate_address(emitted, value, position, buffer, &source, &registered);
     const uint8_t data = registered ? (uint8_t)BUSTER_TIER1_SELECT_SCRATCH : (uint8_t)X86_REGISTER_RAX;
+    // A borrowed rax needs preservation only while it actually holds a live value. Owners can outlast their intervals,
+    // and an owed value is still in its call-save row: tier1_emit_owed already repaid any this call consumes. Saving an
+    // otherwise unknown rax would read uninitialized storage in the code certificate.
+    const uint32_t owner = transitions->owners[X86_REGISTER_RAX];
+    const uint32_t v = owner != BUSTER_IR_NONE ? emitted->node_values[owner] : BUSTER_TIER1_CFG_NONE;
+    uint32_t location = BUSTER_TIER1_CFG_NONE;
+    uint8_t kind = 0;
+    const bool preserve = !registered && (owed & (1u << X86_REGISTER_RAX)) == 0 && owner != BUSTER_IR_NONE && transitions->registers[owner] == X86_REGISTER_RAX &&
+                          v != BUSTER_TIER1_CFG_NONE && tier1_cfg_location(&emitted->cfg, v, position, &location, &kind) && kind == BUSTER_TIER1_ALLOCATE_REGISTER && location == X86_REGISTER_RAX;
     const int32_t save_slot = tier1_emit_staging(BUSTER_TIER1_EMIT_STAGING_SAVE);
     const X86Instruction save = { .displacement = save_slot, .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RSP, .mode = BUSTER_X86_MEMORY_BASE, .form = X86_FORM_MOV_RM64_R64 };
     const X86Instruction restore = { .displacement = save_slot, .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RSP, .mode = BUSTER_X86_MEMORY_BASE, .form = X86_FORM_MOV_R64_RM64 };
-    error = error != TIER1_EMIT_OK || registered || tier1_emit_append(buffer, save) ? error : TIER1_EMIT_MEMORY;
+    error = error != TIER1_EMIT_OK || !preserve || tier1_emit_append(buffer, save) ? error : TIER1_EMIT_MEMORY;
     error = error != TIER1_EMIT_OK || tier1_emit_copy_bytes(buffer, data, to_base, to, source, (int32_t)from, size) ? error : TIER1_EMIT_MEMORY;
-    error = error != TIER1_EMIT_OK || registered || tier1_emit_append(buffer, restore) ? error : TIER1_EMIT_MEMORY;
+    error = error != TIER1_EMIT_OK || !preserve || tier1_emit_append(buffer, restore) ? error : TIER1_EMIT_MEMORY;
     return error;
 }
 
@@ -3358,7 +3367,7 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
                     const uint32_t part_count = record != 0 && !whole ? tier1_select_location_parts(record->location, record->size, parts) : 0;
                     if (whole && registered && error == TIER1_EMIT_OK)
                     {
-                        error = tier1_emit_cfg_aggregate_copy(emitted, value, use, X86_REGISTER_RSP, (int32_t)record->location.stack_offset, 0, record->size, &buffer);
+                        error = tier1_emit_cfg_aggregate_copy(emitted, &transitions, saves.owed, value, use, X86_REGISTER_RSP, (int32_t)record->location.stack_offset, 0, record->size, &buffer);
                     }
                     for (uint32_t k = 0; registered && error == TIER1_EMIT_OK && k < part_count; k += 1)
                     {
@@ -3376,7 +3385,7 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
                         }
                         else
                         {
-                            error = to.valid ? tier1_emit_cfg_aggregate_copy(emitted, value, use, to.base, to.displacement, parts[k].offset, parts[k].bytes, &buffer) : TIER1_EMIT_ALLOCATION;
+                            error = to.valid ? tier1_emit_cfg_aggregate_copy(emitted, &transitions, saves.owed, value, use, to.base, to.displacement, parts[k].offset, parts[k].bytes, &buffer) : TIER1_EMIT_ALLOCATION;
                         }
                         staged += slots;
                         staged_zmm += zmm ? 1 : 0;
