@@ -744,6 +744,9 @@ static void check_incremental(void)
     }
     pass("missing cached or published compile commands are restored without compiling or linking");
 
+    static const char shared_main_units[] =
+        "main.c main_unit_assembler.c main_unit_backend.c main_unit_check_builtins.c main_unit_checker.c "
+        "main_unit_dynamic.c main_unit_executable.c main_unit_frontend.c main_unit_link.c main_unit_types.c main_unit_x86.c ";
     static const struct
     {
         const char* source;
@@ -762,9 +765,15 @@ static void check_incremental(void)
         { "src/buster/compiler/c_check_program_amx_test.c", "main_unit_checker.c " },
         { "src/buster/compiler/c_checker_driver_test.c", "main_unit_checker.c " },
         { "src/buster/compiler/c_check_debug_tier1_parameters_test.c", "main_unit_checker.c " },
-        { "src/buster/compiler/c_checker_test.c",
-          "main.c main_unit_assembler.c main_unit_backend.c main_unit_check_builtins.c main_unit_checker.c "
-          "main_unit_dynamic.c main_unit_executable.c main_unit_frontend.c main_unit_link.c main_unit_types.c main_unit_x86.c " },
+        { "src/buster/compiler/c_checker_test.c", shared_main_units },
+        { "src/buster/compiler/ir_simd_model_test.c", "main_unit_backend.c " },
+        { "src/buster/compiler/interpreter_wide_test.c", "main_unit_backend.c " },
+        { "src/buster/compiler/ir_optimize_simd_test.c", "main_unit_backend.c " },
+        { "src/buster/compiler/tier1_call_probe_test.c", "main_unit_backend.c " },
+        { "src/buster/compiler/tier1_address_coalesce_test.c", "main_unit_backend.c " },
+        { "src/buster/compiler/ir_if_convert.c", shared_main_units },
+        { "src/buster/compiler/ir_optimize_verified.c", shared_main_units },
+        { "src/buster/compiler/tier1_select_burs_test.c", shared_main_units },
     };
     for (uint32_t i = 0; i < sizeof(files) / sizeof(files[0]); i += 1)
     {
