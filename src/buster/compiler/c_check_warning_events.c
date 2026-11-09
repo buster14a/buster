@@ -121,6 +121,8 @@ enum
     // An implicit conversion from one named enumeration to another (#1447, the end of clang's CheckImplicitConversion), an
     // enumerator taken as its enumeration: -Wimplicit-enum-enum-cast, on by default, under -Wenum-conversion.
     CHECK_WARNING_ID_IMPLICIT_ENUM_ENUM_CAST = 111,
+    // An alias whose function type isn't its aliasee's (#1849, clang's code generation at -c): -Wattribute-alias.
+    CHECK_WARNING_ID_ATTRIBUTE_ALIAS = 112,
     CHECK_WARNING_ID_COUNT,
 };
 

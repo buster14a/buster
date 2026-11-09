@@ -148,6 +148,7 @@ static const CheckWarningDescription check_warning_descriptions[] =
     { "-Wanon-enum-enum-conversion", NULL, "arithmetic between different enumeration types" },
     { "-Wfor-loop-analysis", "-Wloop-analysis", "variable used in loop condition not modified in loop body" },
     { "-Wimplicit-enum-enum-cast", "-Wenum-conversion", "implicit conversion from enumeration type to different enumeration type" },
+    { "-Wattribute-alias", NULL, "alias and aliasee have different types" },
 };
 
 _Static_assert(BUSTER_ARRAY_LENGTH(check_warning_descriptions) == CHECK_WARNING_ID_COUNT, "every sparse policy ID has a description");

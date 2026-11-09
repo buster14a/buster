@@ -3608,13 +3608,26 @@ What the lowering covers past scalars (#145's programs):
   previous declaration one, as clang's `getActingDefinition` requires) is
   clang's "alias definition of 'w' after tentative definition" at its name,
   with "previous definition is here" at the last one
-  (`check_input_alias_tentative`). Refused by name: an alias whose
-  thread-local storage isn't its definition's, and at `-c` an alias variable
-  the unit defines tentatively after it (clang takes the declaration as the
-  alias's). Not modeled: clang's warnings at them (an alias
-  of a weak alias, a section on an alias, different types, an ifunc on a
-  variable, which is ignored), and the redefinition's own message (the
-  generic "conflicting declaration"). `__has_attribute` and
+  (`check_input_alias_tentative`), after which clang drops the alias
+  attribute and reads on, as the reader does (the report is a recovered one,
+  #1849). A redefinition of an alias or ifunc is clang's "redefinition of
+  'x'" with its note, and an ifunc on a variable is ignored with clang's
+  warning. An alias variable that the unit defines tentatively after the alias
+  is the alias's declaration, as clang takes it: the selection leaves out its
+  data, and its symbol is at its aliasee's definition (#1849). An alias whose
+  thread-local storage isn't its definition's has its definition's symbol
+  type, section and value, as clang's object has it; a reference to one, which
+  clang's code makes as the alias's own declaration says, is refused by name
+  (`BUSTER_CHECK_PROGRAM_ALIAS_REFERENCED`). Clang's code generation warnings
+  at the aliases and ifuncs it accepts are `check_driver_alias_warnings`', at
+  `-c` and in its order beside the errors (#1849): "alias and aliasee have
+  different types" (`-Wattribute-alias`, a function alias whose type isn't
+  compatible with its aliasee's definition's, which the note names), "alias
+  (or ifunc) will not be in section '.s' but in the same section as the
+  aliasee (resolver)" at a section attribute whose name isn't the aliasee's,
+  and "alias will always resolve to f even if weak definition of wf is
+  overridden" where the immediate target is a weak alias
+  (`-Wignored-attributes`), each as the options and pragmas map it. `__has_attribute` and
   `__has_c_attribute` answer 1 for them. `test-checker` runs programs of
   aliases of static functions and objects (thread-local ones too) and chains of
   them, with static data that refers to local ones, ifuncs and weakrefs
