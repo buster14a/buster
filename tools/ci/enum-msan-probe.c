@@ -97,12 +97,12 @@ static BUSTER_PROBE_HELPER_ATTRIBUTES TypeId check_common_enum_coerced(const Che
                                  input->declarations[token] : BUSTER_CHECK_NONE;
     if (declaration < input->token_count && input->declaration_kinds[declaration] == C_BINDING_ENUMERATOR)
     {
-#if BUSTER_PROBE_VECTORIZE
-#pragma clang loop vectorize(enable)
-#endif
         // The last enclosing completed definition wins. Reduce one-based indices so every unmatched lane is zero,
         // then load the selected type once; a conditional TypeId recurrence leaves inactive vector lanes undefined.
         uint32_t selected = 0;
+#if BUSTER_PROBE_VECTORIZE
+#pragma clang loop vectorize(enable)
+#endif
         for (uint32_t i = 0; i < input->enum_definition_count; i += 1)
         {
             const CheckInputEnumDefinition* definition = input->enum_definitions + i;
