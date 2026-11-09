@@ -293,6 +293,30 @@ benchmark. Their private fixtures are guarded inside those roots; editing the
 shared BURS root or either production optimizer file still rebuilds all eleven
 main units.
 
+The frontend owns the private preprocessor, parser, GNU, bindings and lowering
+fixtures and their fixture-consuming commands. Edits to
+`preprocessor_fuzz_generate.c`, `c_preprocessor_directives_test.c`,
+`c_predefines_test.c`, `c_gnu_test.c`, `c_parser_bindings_test.c` or the nested
+`x86_target_policy_test.c` rebuild only `main_unit_frontend.c`.
+`c_preprocessor_history_test.c` is included by the frontend and checker units:
+the checker shares its diagnostic scratch-location normalization, while the
+frontend alone includes its private tests. The shared helper spans in
+`c_preprocessor_test.c`, `c_preprocessor_oracle.c` and `c_parser_test.c` stay at
+their original positions, so editing those roots still rebuilds all eleven
+units, as does editing the production `c_parser_bindings.c` or
+`c_builtin_intrinsic_catalog.c`. The intrinsic catalog keeps its first inclusion
+position in every unit, including those that omit the feature tests. On vector
+hosts, editing it also rebuilds the standalone `c_checker_benchmark.c`, which
+includes the catalog itself.
+
+The frontend roots with internal guards and `tier1_select_source_benchmark.c`
+also preserve standalone preprocessing. Without `main.c`'s unity-unit
+definitions, their guards keep the complete source. The correctness
+inventory preprocesses `main.c` and every `*_benchmark.c` as independent inputs
+and compares them with Clang. The build regression also preprocesses the
+guarded frontend roots and the Tier 1 source benchmark directly, checking that
+their private entry points remain in the output.
+
 The test commands, their owning units and compiler optimization flags stay the
 same. Shared fixtures, including the checker's common helpers and
 `oracle_cache_test.c`, retain their callers and the references that keep shared

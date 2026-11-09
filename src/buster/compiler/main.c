@@ -177,11 +177,13 @@ int run_tier1_allocate_benchmark(int argc, char** argv);
 // The preprocessor's fuzz tooling (#109): the generator, the clang oracle, the comparison and the minimizer, and their
 // self-tests, for the test-preprocessor-fuzz command. test-preprocessor --fuzz runs the preprocessor against them
 // (c_preprocessor_fuzz.c).
+#if BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND)
 #include "buster/compiler/preprocessor_fuzz.c"
 #include "buster/compiler/preprocessor_fuzz_generate.c"
 #include "buster/compiler/preprocessor_fuzz_clang.c"
 #include "buster/compiler/preprocessor_fuzz_test.c"
 #include "buster/compiler/preprocessor_fuzz_benchmark.c"
+#endif
 
 // External randomized C compiler comparison and its independent process/accounting fixtures.
 #include "buster/compiler/differential.c"
@@ -209,8 +211,10 @@ int run_refinement_benchmark(int argc, char** argv);
 #include "buster/compiler/oracle_cache.c"
 #include "buster/compiler/oracle_cache_test.c"
 #include "buster/compiler/c_preprocessor_test.c"
+#if BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND)
 #include "buster/compiler/c_predefines_test.c"
 #include "buster/compiler/c_preprocessor_fuzz.c"
+#endif
 #include "buster/compiler/c_preprocessor_oracle.c"
 #include "buster/compiler/x86_target_forms.c"
 int run_preprocessor_benchmark(int argc, char** argv);
@@ -227,21 +231,29 @@ int run_files_benchmark(int argc, char** argv);
 // test-parser command.
 #include "buster/compiler/c_parser.c"
 #include "buster/compiler/c_parser_test.c"
+#if BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND)
 #include "buster/compiler/c_gnu_test.c"
 #include "buster/compiler/c_gnu_benchmark.c"
+#endif
 int run_parser_benchmark(int argc, char** argv);
 
 // Scoped name-resolution kernels and their event-stream oracle; c_parser.c includes the shared kernels.
+#if BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND)
 #include "buster/compiler/c_bindings_test.c"
 #include "buster/compiler/c_bindings_benchmark.c"
+#endif
 #include "buster/compiler/c_parser_bindings.c"
+#if BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND)
 #include "buster/compiler/c_parser_bindings_test.c"
 #include "buster/compiler/c_parser_bindings_benchmark.c"
+#endif
 
 // Selective lowering consumes resolved definition/reference columns; the checker producer is still pending.
 #include "buster/compiler/c_lowering.c"
+#if BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND)
 #include "buster/compiler/c_lowering_test.c"
 #include "buster/compiler/c_lowering_benchmark.c"
+#endif
 
 // The link representation (atoms, symbols, fixups and names, which the object writer and the linker share), the test
 // programs generated in it, and their tests, for the test-link command.
@@ -336,7 +348,9 @@ int run_branch_sizing_benchmark(int argc, char** argv);
 #include "buster/compiler/x86_semantics.c"
 
 #include "buster/compiler/x86_match.c"
+#if BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND)
 #include "buster/compiler/x86_target_test.c"
+#endif
 #include "buster/compiler/assembler.c"
 #include "buster/compiler/assembler_driver.c"
 #if BUSTER_IN_UNIT(BUSTER_UNIT_ASSEMBLER)
@@ -371,7 +385,9 @@ int run_type_benchmark(int argc, char** argv);
 // Immutable source-position histories retain declaration visibility for deferred body consumers.
 #include "buster/compiler/c_environment.c"
 #include "buster/compiler/c_environment_test.c"
+#if BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND)
 #include "buster/compiler/c_environment_benchmark.c"
+#endif
 // The checker's own code goes in a section of its own, .text.buster_checker, which every unit starts on a page (#502):
 // the driver's time depends on where its hot loops fall in the instruction caches, and code compiled before them, in
 // their unit or in another, moved them by any number of bytes. In their section, only the checker's own code moves
@@ -857,6 +873,23 @@ static __attribute__((unused)) void main_checker_test_interfaces(void)
 }
 #endif
 
+#if !BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND)
+// The frontend fixtures supply these shared helpers' callers. Retain their semantic references in the other units
+// without parsing the fixtures or emitting code; the frontend still checks the real calls with unused warnings on.
+static __attribute__((unused)) void main_frontend_test_interfaces(void)
+{
+    (void)&test_process_finish;
+    (void)&test_process_test;
+    (void)&pp_test_read_output;
+    (void)&parse_kernels_reserve;
+    (void)&parse_twins;
+    (void)&parse_vector_postorder_reserve;
+    (void)&parse_test_status_bytes;
+    (void)&parse_test_lowest_descriptor;
+    (void)&parse_test_read_capture;
+}
+#endif
+
 #if !BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 // The IR and Tier 1 fixtures supply these shared static entry points' callers in the backend unit. Keep their
 // semantic references in the others without parsing the fixtures or emitting code; the owner retains real callers.
@@ -929,22 +962,27 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     {
         result = run_assembler_benchmark(argc - 2, argv + 2);
     }
+#if BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND) && argc >= 2 && strcmp(argv[1], "test-preprocessor") == 0)
     {
         result = run_preprocessor_tests(argc - 2, argv + 2);
     }
+#endif
     else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-preprocessor") == 0)
     {
         result = run_preprocessor_benchmark(argc - 1, argv + 1);
     }
+#if BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND) && argc >= 2 && strcmp(argv[1], "test-parser") == 0)
     {
         result = run_parser_tests(argc - 2, argv + 2);
     }
+#endif
     else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-parser") == 0)
     {
         result = run_parser_benchmark(argc - 1, argv + 1);
     }
+#if BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND) && argc >= 2 && strcmp(argv[1], "test-gnu") == 0)
     {
         result = run_gnu_tests(argc - 2, argv + 2);
@@ -977,6 +1015,7 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     {
         result = run_parser_bindings_benchmark(argc - 2, argv + 2);
     }
+#endif
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "test-lexer") == 0)
     {
         result = run_c_lexer_tests(argv[0], argc - 2, argv + 2);
@@ -989,10 +1028,12 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     {
         result = run_x86_encoder_tests(argc - 2, argv + 2);
     }
+#if BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND) && argc >= 2 && strcmp(argv[1], "test-x86-target") == 0)
     {
         result = run_x86_target_tests();
     }
+#endif
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-x86-target-selection") == 0)
     {
         result = run_x86_target_selection_tests() ? 0 : 1;
@@ -1017,10 +1058,12 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     {
         result = run_mask_spill_measure(argc - 2, argv + 2);
     }
+#if BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND)
     else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND) && argc >= 2 && strcmp(argv[1], "benchmark-x86-target") == 0)
     {
         result = run_x86_target_benchmark(argc - 2, argv + 2);
     }
+#endif
     else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-x86-encoder") == 0)
     {
         result = run_x86_encoder_benchmark(argc - 1, argv + 1);
@@ -1087,6 +1130,7 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     {
         result = run_dataflow_benchmark(argc - 1, argv + 1);
     }
+#if BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND) && argc >= 2 && strcmp(argv[1], "test-preprocessor-fuzz") == 0)
     {
         result = run_preprocessor_fuzz_tests(argc - 2, argv + 2);
@@ -1095,7 +1139,6 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     {
         result = run_preprocessor_fuzz_benchmark(argc - 1, argv + 1);
     }
-#if BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND) && argc >= 2 && strcmp(argv[1], "test-refinement") == 0)
     {
         result = run_refinement_tests(argc - 2, argv + 2);
@@ -1395,10 +1438,12 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     {
         result = run_c_environment_tests(argc - 2, argv + 2);
     }
+#if BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND)
     else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND) && argc >= 2 && strcmp(argv[1], "benchmark-environments") == 0)
     {
         result = run_c_environment_benchmark(argc - 2, argv + 2);
     }
+#endif
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "test-checker-corpus") == 0)
     {
         result = run_checker_corpus(argc - 2, argv + 2);
