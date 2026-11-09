@@ -417,7 +417,10 @@ instructions, labels and the syntax directives. It refuses:
 
 - every other directive, which the planner assembles whole instead (below);
 - its numeric labels and `.`, but as a `jmp`'s or `jcc`'s target without an
-  addend, and `loop` and `jrcxz` to any of its labels;
+  addend, and `loop` and `jrcxz` to any of its labels: the planner assembles
+  these whole too (#1845), as their failure asks (`AsmCode.directive`), so
+  that `leaq 1f(%rip)`, `.`'s address and `loop 1b` are the assembler's own
+  fixups and branches, as clang's;
 - undefined numeric labels;
 - what the matcher doesn't take.
 
@@ -824,9 +827,10 @@ has the commands, the logs and the default path's numbers against main.
     `.weak`/`.globl` labels and an undefined `.globl` declaration,
     `.hidden`/`.type`/`.size` on a data label, `.equ` with `.set`, `.ascii`,
     `.asciz`, `.string`, `.quad`, `.word`, `.zero`, `.space` and `.bss`, a
-    `.nops` control, and a naked function's `.p2align` and `.byte`; and the
-    refusals of a `.set` used by another template, a template that returns
-    before any branch, and CFI.
+    `.nops` control, and a naked function's `.p2align` and `.byte`; numeric
+    labels and `.` as data, their distances as clang's, and a `loop` to a
+    numeric label; and the refusals of a `.set` used by another template, a
+    template that returns before any branch, and CFI.
 
   Each refusal above is checked by name, but the label with a unit symbol's
   name, which the emission refuses: `test-checker-driver` checks that one
@@ -862,8 +866,7 @@ What the lowering still refuses of what GCC and clang take:
 - an asm goto's label as data or a call's target (the Linux kernel's jump
   tables), whose exits a helper has no address for;
 
-- labels in templates of no instructions (a place in the caller's code), and
-  numeric labels or `.` as data;
+- labels in templates of no instructions (a place in the caller's code);
 - a template that returns, which clang places in its function's own code; the
   helper design refuses it by name, until #1839 places such templates in their
   callers;
