@@ -1,0 +1,73 @@
+name: Diagnose enum coercion MSan for 1829
+
+on:
+  push:
+    branches: [diagnostics/1829-enum-msan]
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    env:
+      BUSTER_HOST_ARCH: native
+      BUSTER_SANITIZER: memory
+      BUSTER_SANITIZER_OPTIMIZATION: '3'
+      BUSTER_LINKER: lld
+      BUSTER_DEBUG_INFO: '0'
+    steps:
+      - name: Check out this diagnostic revision
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+      - name: Restore verified tool inputs
+        uses: ./.github/actions/hosted-tools
+        with:
+          artifact-name: ''
+      - name: Install pinned Clang and build tools
+        run: bash tools/ci/setup-hosted.sh
+      - name: Configure fatal MemorySanitizer and verify its detector
+        run: |
+          bash tools/ci/sanitizers.sh configure "$RUNNER_TEMP/sanitizer-reports"
+          bash tools/ci/sanitizers.sh probe "$RUNNER_TEMP/sanitizer-probes"
+      - name: Check initialized enum records with and without auto-vectorization
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build/enum-msan-probe
+          clang --version
+          lscpu
+          status=0
+          for mode in native scalarized baseline; do
+            flags=(-std=gnu17 -O3 -g -fwrapv -funsigned-char -fno-strict-aliasing -fsanitize=memory -fsanitize-memory-track-origins=2 -fno-omit-frame-pointer -fPIE -pie)
+            case "$mode" in
+              native) flags+=(-march=native) ;;
+              scalarized) flags+=(-march=native -fno-vectorize -fno-slp-vectorize) ;;
+              baseline) flags+=(-march=x86-64) ;;
+            esac
+            clang "${flags[@]}" tools/ci/enum-msan-probe.c -o "build/enum-msan-probe/$mode"
+            clang "${flags[@]}" -S -emit-llvm tools/ci/enum-msan-probe.c -o "build/enum-msan-probe/$mode.ll"
+            result=0
+            "build/enum-msan-probe/$mode" > "build/enum-msan-probe/$mode.log" 2>&1 || result=$?
+            cat "build/enum-msan-probe/$mode.log"
+            printf '%s\t%s\n' "$mode" "$result" | tee -a build/enum-msan-probe/results.tsv
+            if [ "$result" -ne 0 ]; then status=1; fi
+          done
+          exit "$status"
+      - name: Audit sanitizer output
+        if: always()
+        run: bash tools/ci/sanitizers.sh audit "$RUNNER_TEMP/sanitizer-reports"
+      - name: Retain diagnostic results and generated IR
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: enum-msan-diagnostic-${{ github.run_attempt }}
+          path: |
+            build/enum-msan-probe/*.log
+            build/enum-msan-probe/*.ll
+            build/enum-msan-probe/results.tsv
+            ${{ runner.temp }}/sanitizer-reports
+          retention-days: 7
+          if-no-files-found: warn
