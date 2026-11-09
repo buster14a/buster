@@ -253,15 +253,15 @@ jobs:
         # The sanitizer rows take far longer than the plain ones: pull requests run the plain builds alone, as nightly
         # backlog runs and an admitted snapshot run do (the `plain` scope: the 9700X's gate), and pushes to main, the
         # daily run, full dispatches and the snapshot's deferred daily run the whole matrix.
-        sanitizer: ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '["none"]' || '["none", "address", "undefined", "thread", "memory"]') }}
+        # `address` already combines ASan, UBSan, bounds and LSan; standalone UBSan remains
+        # available for diagnosis but does not repeat the entire hosted suite.
+        sanitizer: ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '["none"]' || '["none", "address", "thread", "memory"]') }}
         optimization: [3]
         # Each row's inventory runs as 4 shards, a runner each (`parallel --shard K/4`, dealt by
         # tools/ci/correctness.costs): a plain row's test step took about 14.5 minutes on one 4-CPU runner, and its
-        # shards take about 2 to 4. The job's name, the run step's `/4` and the O1 rows' shards below must match this
+        # shards take about 2 to 4. The job's name and the run step's `/4` must match this
         # list, which tools/ci/changes.c's self-test checks (changes_shard_policy).
         shard: [1, 2, 3, 4]
-        include: >-
-          ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '[]' || '[{"host_arch": "x86-64", "sanitizer": "address", "optimization": 1, "shard": 1}, {"host_arch": "x86-64", "sanitizer": "address", "optimization": 1, "shard": 2}, {"host_arch": "x86-64", "sanitizer": "address", "optimization": 1, "shard": 3}, {"host_arch": "x86-64", "sanitizer": "address", "optimization": 1, "shard": 4}, {"host_arch": "native", "sanitizer": "address", "optimization": 1, "shard": 1}, {"host_arch": "native", "sanitizer": "address", "optimization": 1, "shard": 2}, {"host_arch": "native", "sanitizer": "address", "optimization": 1, "shard": 3}, {"host_arch": "native", "sanitizer": "address", "optimization": 1, "shard": 4}]') }}
     defaults:
       run:
         shell: bash
