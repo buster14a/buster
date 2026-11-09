@@ -3983,9 +3983,40 @@ do:
   without a fixed type listed twice) gives "redefinition of 'S'" at the name,
   noting the earlier definition. Its body is read as an anonymous tag's, so the
   name's later uses find the first definition, and a repeated enumerator in it
-  is reported as below. This is before C23 only: C23 allows a compatible
-  redefinition and words an incompatible one otherwise (N3037), which the
-  checker doesn't model, and still refuses with its generic error.
+  is reported as below. This is before C23 only. Under `-std=c23`/`gnu23`
+  (N3037) a struct or union defined again in its scope is compared with the
+  earlier definition when its body completes (`c_check_tag_compatible.c`),
+  as clang's structural equivalence compares them:
+  - The records' attributes are compared, arguments included, then each pair
+    of members in order: its attributes, then its names, bit-field widths and
+    types. An attribute's difference is clang's `-Wodr` error ("has an
+    attribute", or "has a member with an attribute"), noted at each list's
+    attribute where the lists first differ, and the comparison goes on.
+  - Members' types are walked together through pointers, arrays, atomics and
+    functions, the same at each level, qualifiers too. Any two records are
+    compatible there unless one is unnamed and written in its definition: two
+    named records, a struct and a union, or two typedefs' unnamed records are,
+    as in clang. Such a pair is queued and compared member by member after the
+    definition's own members, breadth first.
+  - The first difference is clang's "type 'struct S' has incompatible
+    definitions", with its two notes at the differing members (name,
+    bit-field, type, a member with no counterpart). An unnamed member's note
+    is at its declaration's first token and names `''`. A queued pair's
+    difference is reported at the second definition's unnamed record, named
+    as clang names it there (`struct S::(unnamed struct)::(unnamed at
+    f.c:2:21)`, an anonymous member's `(anonymous at ...)`).
+  - The errors are published where the second body ends, after what its
+    members report. A member whose record is itself an incompatible
+    redefinition reads as an `int`, as clang's invalid declaration does.
+
+  A compatible redefinition declares the earlier type. Otherwise the unit is
+  refused and recovered.
+
+  Left as they were: `-Wno-odr` doesn't turn the `-Wodr` errors off. An enum
+  defined again under C23 still refuses with the generic error, which stops
+  the reader. Clang compares its enumerators, and keeps both lists' names in
+  scope with ambiguous references. An `_Atomic(struct { ... })` member is the
+  parser's refusal, with or without a redefinition.
 - **A repeated enumerator** gives "redefinition of enumerator 'A'" with its
   note at the earlier one, and is dropped (`CheckTagFrame.dropped`). As in
   clang, whose next `CheckEnumConstant` sees no previous constant, the next
@@ -4277,7 +4308,7 @@ These differences remain:
 The later phases are left:
 
 - **Invalid declarations.** Not covered by phase 2:
-  - C23's incompatible tag redefinitions (above).
+  - C23's redefinition of an enum, compatible or not (above).
 
   These still stop the reader. A non-constant initializer's error is at its
   first token, where clang's is at the operand that isn't constant

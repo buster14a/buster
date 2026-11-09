@@ -60,6 +60,7 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_DECLARATION: result = "invalid or unsupported declaration"; break;
         case CHECK_INPUT_INITIALIZER_MEMBER: result = "field designator does not refer to any field in the record type"; break;
         case CHECK_INPUT_ARRAY_LITERAL_MISMATCH: result = "cannot initialize array with array of another type"; break;
+        case CHECK_INPUT_TAG_INCOMPATIBLE: result = "type has incompatible definitions"; break;
         case CHECK_INPUT_UNDECLARED: result = "use of undeclared identifier"; break;
         case CHECK_INPUT_LITERAL: result = "invalid or unsupported literal"; break;
         case CHECK_INPUT_RESOURCE: result = "type checker ran out of memory"; break;
@@ -3844,6 +3845,13 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                                            "previous definition is here" : "previous declaration is here",
                             };
                             pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, previous < count ? 1u : 0u, "%s", message);
+                        }
+                        else if (phase == 0 && kind == CHECK_INPUT_TAG_INCOMPATIBLE && token < count)
+                        {
+                            // C23's incompatible redefinition of a record (#1447), with clang's two notes.
+                            PPOutputDiagnosticNote notes[2] = { 0 };
+                            const uint32_t noted = check_semantic_tag_notes(parser, pp, input, types, &spell, input->reports + index, notes, scratch);
+                            pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, notes, noted, "%s", message);
                         }
                         else if (phase == 0 && input->reports[index].message == CHECK_INPUT_CPU_DISPATCH)
                         {
