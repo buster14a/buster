@@ -2694,10 +2694,13 @@ option (`--variant`).
   which every run must give alike. Each compiler's median wall time and user
   cycles are divided by them, and each stage's median by them twice: as TSC
   ticks at the report's `tsc-mhz`, and as core cycles at the `--time-stages`
-  processes' median user cycles per user millisecond, their average clock. The
-  core figure takes a stage as running at that average clock, which a pinned,
-  single-lane compile on a steady boost clock nearly is; the TSC figure is
-  exact but counts at the TSC's fixed rate, not the core's.
+  processes' average clock: the median of their cycles, user and kernel (a
+  third counter), per wall millisecond, which a pinned process spends running
+  but for its exec's and exit's waits. The core figure takes a stage as running
+  at that average clock, which a pinned, single-lane compile on a steady boost
+  clock nearly is; the TSC figure is exact but counts at the TSC's fixed rate,
+  not the core's. (`rusage`'s user time is too coarse for the clock: user cycles
+  per user millisecond came to 5.63 GHz, above the 9700X's 5.5 GHz boost.)
 - **Checks.** Every process must exit with status 0, the two objects of every
   run must be the same bytes, and every report must be whole.
 - **Coverage.** After the runs, with the medians, it prints the first

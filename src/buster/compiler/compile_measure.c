@@ -22,8 +22,9 @@
 // default's), the default against each reference, each compile's time and user cycles per preprocessed token (the
 // report's `tokens`, #146), and each stage's median, its range, its share of the median span and its cycles per token
 // (the preprocessor's phases, the reader's expressions' walk, `check-input.expressions`, and the lowering's phases,
-// under their stages): TSC ticks at the report's `tsc-mhz`, and core cycles at the --time-stages processes' median user
-// cycles per user millisecond, which takes the stage as running at the process's average clock (one pinned thread).
+// under their stages): TSC ticks at the report's `tsc-mhz`, and core cycles at the --time-stages processes' median
+// cycles (user and kernel) per wall microsecond, which takes the stage as running at the process's average clock (one
+// pinned thread).
 // Then the ranking, with the time each process spent outside the clock's span (exec, the loader, main's dispatch and
 // exit), and the lowering's coverage, the first report's `lowering-nodes` line. Every process must exit with status 0,
 // every run's default and --time-stages objects must be the same bytes, and every report must be whole, or the command
@@ -65,10 +66,26 @@ struct MeasureCompile
     char errors[PATH_MAX];
 };
 
+// A counter of the child's cycles in user and kernel mode alike, from its exec to its exit, with every thread it starts,
+// or -1 where perf_event_open refuses it: what measure-compile takes the core's clock from.
+static int measure_compile_open_cycles(pid_t child)
+{
+    struct perf_event_attr attribute = { 0 };
+    attribute.size = sizeof(attribute);
+    attribute.type = PERF_TYPE_HARDWARE;
+    attribute.config = PERF_COUNT_HW_CPU_CYCLES;
+    attribute.disabled = 1;
+    attribute.enable_on_exec = 1;
+    attribute.inherit = 1;
+    attribute.exclude_hv = 1;
+    attribute.read_format = PERF_FORMAT_TOTAL_TIME_ENABLED | PERF_FORMAT_TOTAL_TIME_RUNNING;
+    return (int)syscall(SYS_perf_event_open, &attribute, child, -1, -1, PERF_FLAG_FD_CLOEXEC);
+}
+
 // Runs compile `c` once, its standard output on /dev/null and its errors into `m->errors`, with its user cycles and
-// instructions counted (profile_open_counter) where the kernel allows. The child waits on a pipe until its counters are
-// open, then execs.
-static ProfileTimed measure_compile_one(const MeasureCompile* m, uint32_t c, char** argv)
+// instructions counted (profile_open_counter) where the kernel allows, and into `*all_cycles` its cycles in both modes
+// (0 where uncounted). The child waits on a pipe until its counters are open, then execs.
+static ProfileTimed measure_compile_one(const MeasureCompile* m, uint32_t c, char** argv, uint64_t* all_cycles)
 {
     const MeasureReference* reference = c >= 2 ? &m->references[c - 2] : NULL;
     const char* executable = reference != NULL ? reference->executable : "/proc/self/exe";
@@ -113,6 +130,7 @@ static ProfileTimed measure_compile_one(const MeasureCompile* m, uint32_t c, cha
     }
     const int cycles = child != -1 ? profile_open_counter(child, PERF_COUNT_HW_CPU_CYCLES) : -1;
     const int instructions = child != -1 ? profile_open_counter(child, PERF_COUNT_HW_INSTRUCTIONS) : -1;
+    const int both = child != -1 ? measure_compile_open_cycles(child) : -1;
     const uint64_t start = profile_now_ns();
     if (piped)
     {
@@ -131,6 +149,8 @@ static ProfileTimed measure_compile_one(const MeasureCompile* m, uint32_t c, cha
     uint64_t instruction_count = 0;
     const bool counted_cycles = profile_read_counter(cycles, &cycle_count);
     const bool counted_instructions = profile_read_counter(instructions, &instruction_count);
+    const bool counted_both = profile_read_counter(both, all_cycles);
+    *all_cycles = counted_both ? *all_cycles : 0;
     if (waited)
     {
         result = (ProfileTimed){
@@ -221,7 +241,9 @@ static double measure_compile_median(double* values, uint32_t count)
 #define BUSTER_MEASURE_PARTS (BUSTER_MEASURE_WALK + 1)
 #define BUSTER_MEASURE_TSC (BUSTER_MEASURE_PARTS + BUSTER_CHECK_CLOCK_WALK_PARTS + 2)
 #define BUSTER_MEASURE_TOKENS (BUSTER_MEASURE_TSC + 1)
-#define BUSTER_MEASURE_ROW (BUSTER_MEASURE_TOKENS + 1)
+// The --time-stages process's core clock in MHz, -1 uncounted.
+#define BUSTER_MEASURE_CLOCK (BUSTER_MEASURE_TOKENS + 1)
+#define BUSTER_MEASURE_ROW (BUSTER_MEASURE_CLOCK + 1)
 
 // The cycles per token of `milliseconds`: TSC ticks at `tsc_mhz` and core cycles at `core_mhz` (-1 where uncounted).
 static void measure_compile_per_token(double milliseconds, double tsc_mhz, double core_mhz, double tokens, double* tsc, double* core)
@@ -253,7 +275,8 @@ static uint64_t measure_compile_run(Arena* arena, MeasureCompile* m)
         for (uint32_t position = 0; failures == 0 && position < compiles; position += 1)
         {
             const uint32_t c = warmup ? position : (uint32_t)profile_ab_tree(run - m->warmups, position, compiles);
-            const ProfileTimed one = measure_compile_one(m, c, argv);
+            uint64_t all_cycles = 0;
+            const ProfileTimed one = measure_compile_one(m, c, argv, &all_cycles);
             const bool exited = one.status != -1 && WIFEXITED(one.status) && WEXITSTATUS(one.status) == 0;
             const uint64_t mark = arena->length;
             const char* errors = exited && c == 1 ? measure_compile_read(arena, m->errors) : NULL;
@@ -270,6 +293,9 @@ static uint64_t measure_compile_run(Arena* arena, MeasureCompile* m)
                                              row[BUSTER_MEASURE_TOKENS] >= 0);
             if (c == 1)
             {
+                // The core's clock across the process: its cycles in both modes per microsecond of its wall time, which a
+                // pinned process spends running, but for its exec's and exit's waits (-1 uncounted).
+                row[BUSTER_MEASURE_CLOCK] = all_cycles != 0 && one.wall_ns != 0 ? (double)all_cycles * 1e3 / (double)one.wall_ns : -1;
                 row[BUSTER_MEASURE_OUTSIDE] = (double)one.wall_ns / 1e6 - row[BUSTER_MEASURE_SPAN];
                 expression_work = check_clock_walk_work(errors);
             }
@@ -399,21 +425,14 @@ static uint64_t measure_compile_run(Arena* arena, MeasureCompile* m)
         low[i] = unavailable ? -1 : values[0];
         high[i] = unavailable ? -1 : values[m->runs - 1];
     }
-    // The core's clock in the --time-stages processes: their median user cycles per user millisecond (-1 uncounted).
-    bool counted = failures == 0;
-    for (uint32_t r = 0; counted && r < m->runs; r += 1)
-    {
-        const ProfileTimed* one = &timed[(uint64_t)r * BUSTER_MEASURE_COMPILES + 1];
-        counted = one->counted && one->user_us != 0;
-        values[r] = counted ? (double)one->cycles / (double)one->user_us : 0;
-    }
-    const double core_mhz = counted ? measure_compile_median(values, m->runs) : -1;
+    // The core's clock in the --time-stages processes: the median of their cycles per wall microsecond (-1 uncounted).
+    const double core_mhz = median[BUSTER_MEASURE_CLOCK];
     if (failures == 0)
     {
         const double span = median[BUSTER_MEASURE_SPAN];
         const double tsc_mhz = median[BUSTER_MEASURE_TSC];
         double sum = 0;
-        printf("cycles per token: TSC ticks at %.1f MHz; core cycles at %.1f MHz, the --time-stages processes' median user cycles per user ms (-1 uncounted)\n",
+        printf("cycles per token: TSC ticks at %.1f MHz; core cycles at %.1f MHz, the --time-stages processes' median cycles (user and kernel) per wall ms (-1 uncounted)\n",
                tsc_mhz, core_mhz);
         printf("--time-stages' stages, medians of %u runs: ms (range), share of the median span; low-confidence system ms, minor faults, approximate post-exec peak KiB added (-1 unavailable); TSC ticks and core cycles per token\n", m->runs);
         for (uint32_t s = 0; s < CHECK_STAGE_COUNT; s += 1)
