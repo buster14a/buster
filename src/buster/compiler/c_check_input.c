@@ -10407,7 +10407,11 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
     const uint32_t name = reader->parser->tokens.names[token];
     const uint32_t old = check_input_library_binding(reader, name, point);
     const uint32_t old_declaration = old != 0 ? reader->bindings.declaration[old - 1] : BUSTER_CHECK_NONE;
-    const bool old_invalid = reader->output->invalid_declarations != NULL && old_declaration < reader->parser->tokens.count && reader->output->invalid_declarations[old_declaration] != 0;
+    const bool visible_invalid = reader->output->invalid_declarations != NULL && old_declaration < reader->parser->tokens.count &&
+                                 reader->output->invalid_declarations[old_declaration] != 0;
+    // Another kind of entity's redeclaration is still clang's "redefinition of 'X' as different kind of symbol", which
+    // MergeFunctionDecl and MergeVarDecl give before they look at the earlier one's invalidity: checked as any other is.
+    const bool old_invalid = visible_invalid && reader->declaration_kinds[old_declaration] == reader->declaration_kinds[token];
     if (__builtin_expect(old_invalid && reader->declaration_kinds[token] == C_BINDING_FUNCTION, 0))
     {
         check_input_invalid_declare(reader, token);
