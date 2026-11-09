@@ -1975,6 +1975,17 @@ struct CheckInputReader
     uint32_t* c23_earlier_keywords;
     uint32_t c23_count;
     uint32_t c23_capacity;
+    // C23's members with attributes, each its name's token and its list, which a redefinition's comparison reads
+    // (check_tag_member_attributes): kept in C23 units alone.
+    uint32_t* c23_member_tokens;
+    CheckInputAttributes** c23_member_attributes;
+    uint32_t c23_member_count;
+    uint32_t c23_member_capacity;
+    // C23's redefinitions found incompatible, each its keyword: clang's declaration of one is invalid, so a member of its
+    // type reads as int in an enclosing redefinition's comparison.
+    uint32_t* c23_failed;
+    uint32_t c23_failed_count;
+    uint32_t c23_failed_capacity;
 };
 
 // Whether one of the sparse columns the expressions' walk tests first has an entry for `token`: a statement expression's
@@ -2606,6 +2617,7 @@ static void check_input_report_redeclaration(CheckInputReader* reader, uint32_t 
 
 // c_check_tag_compatible.c's, which C23's redefinition of a record notes for its completion (#1447).
 static bool check_tag_compatible_note(CheckInputReader* reader, uint32_t keyword, TypeId earlier, uint32_t earlier_keyword);
+static bool check_tag_member_attributes_note(CheckInputReader* reader, uint32_t token, CheckInputAttributes* attributes);
 
 // Append a multiversioning message that names the attribute at `attribute` and carries `note` at `note_token`, if any,
 // to the unit's deferred reports.
@@ -7762,6 +7774,11 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
                             .packed = attributes != 0 && attributes->packed,
                             .alignment_log2 = attributes != 0 ? attributes->alignment_log2 : 0,
                         };
+                        if (attributes != 0 && attributes->count != 0 && parser->language.standard >= 2023 && name != BUSTER_CHECK_NONE)
+                        {
+                            // A C23 redefinition compares its members' attributes (c_check_tag_compatible.c).
+                            valid = check_tag_member_attributes_note(reader, name, attributes);
+                        }
                         // clang's counted_by family (#148), on this member, among the record's members declared before it.
                         const uint32_t counted_begin = check_input_attribute_begin(parser, frame->member_begin, frame->close);
                         valid = attributes == 0 || !attributes->counted ||

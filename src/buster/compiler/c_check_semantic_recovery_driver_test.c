@@ -335,6 +335,37 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "struct X { int a; } __attribute__((packed));\n"
         "struct X { int a; } __attribute__((packed));\n"
         "int x = undeclared;\n",
+        // Clang's C23 comparison of members' types (review on #1813): any two named records are compatible, a typedef's
+        // unnamed one too, and the unnamed records written in the members are compared member by member, through
+        // pointers, arrays, atomics and functions, after the definition's own members.
+        "/* gnu23 only */\n"
+        "struct I { int a; }; struct J { long b; }; union U { int a; };\n"
+        "typedef struct { int a; } AX; typedef union { int a; } UY;\n"
+        "struct S { struct I m; struct I *p; struct I a[2]; struct I (*f)(void); AX t; struct { int x; } *q; };\n"
+        "struct S { struct J m; union U *p; union U a[2]; union U (*f)(void); UY t; struct { int x; } *q; };\n"
+        "struct T { struct { int y; } arr[2]; const struct { int z; } *cp; _Atomic struct { int v; } *ap; struct { int u; } (*g)(int); struct { int w; }; };\n"
+        "struct T { struct { int y; } arr[2]; const struct { int z; } *cp; _Atomic struct { int v; } *ap; struct { int u; } (*g)(int); struct { int w; }; };\n"
+        "struct T t; int x = t.w + undeclared;\n",
+        // Their differences: at the innermost unnamed record (its enclosing records' names before its place), an unnamed
+        // bit-field's notes, and an incompatible inner record's member read as an int.
+        "/* gnu23 only */\n"
+        "struct A { struct { int x; } *p; };\nstruct A { struct { long x; } *p; };\n"
+        "struct B { struct { struct { int y; } in; } m; };\nstruct B { struct { struct { char y; } in; } m; };\n"
+        "struct C { struct { int x; }; int y; };\nstruct C { struct { long x; }; int y; };\n"
+        "struct D { int :3; };\nstruct D { int :4; };\n"
+        "struct E { struct I { int a; } m; };\nstruct E { struct I { long a; } m; };\n"
+        "struct F { int a; struct { int x; } *p; };\nstruct F { long a; struct { long x; } *p; };\n",
+        // Attributes, arguments included: the record's own, a member's (each clang's -Wodr error, the comparison going on)
+        // and an unnamed member record's, each noted where the lists first differ.
+        "/* gnu23 only */\n"
+        "struct A { int a; } __attribute__((visibility(\"hidden\")));\nstruct A { int a; } __attribute__((visibility(\"protected\")));\n"
+        "struct B { int a; } __attribute__((packed, aligned(4)));\nstruct B { int a; } __attribute__((aligned(4), packed));\n"
+        "struct C { int a; } __attribute__((aligned(4)));\nstruct C { int a; } __attribute__((aligned(8)));\n"
+        "struct D { int a __attribute__((aligned(8))); int b __attribute__((deprecated(\"x\"))); };\n"
+        "struct D { int a; int b __attribute__((deprecated(\"y\"))); };\n"
+        "struct E { int a; } __attribute__((packed));\nstruct E { long a; };\n"
+        "struct F { int a __attribute__((aligned(8))); int b; };\nstruct F { int a; long b; };\n"
+        "struct G { struct { int a; } __attribute__((packed)) m; };\nstruct G { struct { int a; } m; };\n",
         // A block's, and clang's unused-variable warnings of no scope in which an error occurred (a body's from its
         // definition's start).
         "void f(int p)\n{\n    int x;\n    float x;\n    int y = 1;\n    long y = 2;\n    (void)y;\n    if (y = 2) {}\n}\n"
