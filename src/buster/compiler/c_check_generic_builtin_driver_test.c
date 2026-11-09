@@ -373,5 +373,7 @@ static void check_test_driver_builtin_declarations(CheckTest* test, const char* 
         "    return 0;\n"
         "}\n";
     check_test_library_run(test, clang, executable, directory, "builtins under their declarations", program, "-std=gnu17", NULL);
-    check_test_library_run(test, clang, executable, directory, "builtins under their declarations by Tier 1", program, "-std=gnu17", "--tier1");
+    check_test_library_own_option = "--tier1";
+    check_test_library_run(test, clang, executable, directory, "builtins under their declarations by Tier 1", program, "-std=gnu17", NULL);
+    check_test_library_own_option = NULL;
 }
