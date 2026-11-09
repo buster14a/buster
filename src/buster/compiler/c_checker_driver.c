@@ -2804,7 +2804,7 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
     const uint64_t kr_offset64 = (uint64_t)input->report_count + stream_reports + extra_count + input->implicit_function_count;
     const uint64_t call_offset64 = kr_offset64 + input->kr_diagnostic_count;
     const uint64_t report_room = call_offset64 + (show_warnings ? node_warnings : 0) + 1;
-    const uint64_t warning_room = show_warnings ? (uint64_t)constant_warnings + (attribute_warnings ? scanned : 0) + node_warnings + excess_count + 1 : 0;
+    const uint64_t warning_room = show_warnings ? (uint64_t)constant_warnings + (attribute_warnings ? scanned : 0) + (uint64_t)node_warnings * 2 + excess_count + 1 : 0;
     const uint32_t completion_count = show_warnings ? input->warning_events.count : 0;
     const bool reports = report_room > 1;
     const bool fits = count < UINT32_MAX && call_offset64 + nodes <= UINT32_MAX && report_room <= UINT32_MAX && warning_room <= UINT32_MAX;
@@ -2877,11 +2877,19 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
             {
                 const uint32_t node = first + (uint32_t)__builtin_ctz(selected);
                 const uint32_t source = input->graph.tokens[node];
-                const uint32_t packed = stream->warnings[node] & 0xffffu;
+                const uint32_t warned = stream->warnings[node] & 0xffffu;
+                // A folded non-ICE expression's warning is at its first token, as clang's ext_expr_not_ice is at the
+                // expression's begin: a cast's `(`, not the node's `)`.
+                const uint32_t folded = warned & CHECK_WARNING_GNU_CONSTANT;
+                const uint32_t packed = warned & ~folded;
+                const uint32_t ignored = stream->warning_ignored != NULL ? stream->warning_ignored[node] : 0;
                 if (source < count && packed != 0)
                 {
-                    const uint32_t ignored = stream->warning_ignored != NULL ? stream->warning_ignored[node] : 0;
                     warning_keys[warning_total++] = check_driver_warning_key(source, packed, packed & ~ignored);
+                }
+                if (source < count && folded != 0)
+                {
+                    warning_keys[warning_total++] = check_driver_warning_key(check_common_subtree_start(parser, source), folded, folded & ~ignored);
                 }
                 const uint32_t flags = stream->warnings[node] & CHECK_WARNING_KR_CALLS;
                 if (flags != 0)
