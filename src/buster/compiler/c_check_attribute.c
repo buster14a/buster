@@ -5084,6 +5084,19 @@ static uint32_t check_input_abi_call(TypeFunctionABI abi)
     return result;
 }
 
+static uint32_t check_input_no_caller_saved_written(const CheckInput* input, uint32_t token)
+{
+    const CheckInputAttributes* attributes = check_sparse_wide_present(input->attributes) ? check_input_attributes_at(input, token) : NULL;
+    uint32_t result = 0;
+    for (uint32_t i = 0; attributes != NULL && result == 0 && i < attributes->count; i += 1)
+    {
+        const CheckInputAttribute* attribute = attributes->records + i;
+        const bool saved = attribute->kind == CHECK_ATTRIBUTE_CALLING_CONVENTION && attribute->value == CHECK_CALL_NO_CALLER_SAVED;
+        result = saved ? BUSTER_CHECK_CONVENTION_NO_CALLER_SAVED | (attribute->standard ? BUSTER_CHECK_CONVENTION_STANDARD : 0) : 0;
+    }
+    return result;
+}
+
 static TypeFunctionABI check_input_attribute_requested_abi(const CheckInputAttributes* attributes)
 {
     const CheckInputCallingConvention call = attributes != 0 ? attributes->calling_convention : CHECK_CALL_DEFAULT;
