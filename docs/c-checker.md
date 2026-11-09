@@ -8345,11 +8345,14 @@ arguments against the function. The checker now gives these as clang does.
       declaration's is clang's "function declared 'A' here was previously
       declared 'B'" (or "without calling convention", where its first
       declaration has none explicit), with its "previous declaration is here"
-      note at the first declaration (#1447, `check_input_report_redeclaration`),
-      but for `no_caller_saved_registers`, whose clang message is "function
-      declared with 'no_caller_saved_registers' attribute was previously
-      declared without the 'no_caller_saved_registers' attribute": that one is
-      "conflicting types for 'f'", without its note;
+      note at the first declaration (#1447, `check_input_report_redeclaration`).
+      A redeclaration that adds `no_caller_saved_registers` in its own
+      attribute is clang's "function declared with 'no_caller_saved_registers'
+      attribute was previously declared without the 'no_caller_saved_registers'
+      attribute" (`'gnu::no_caller_saved_registers'` for a C23 one), before a
+      type conflict, noted at the declaration its lookup found. One whose
+      typedef carries the attribute, which crashes clang 23, keeps "conflicting
+      types for 'f'";
     - a function type spelled with a macro of its convention prints without
       clang's macro name (`'MS void (void) __attribute__((ms_abi))'`), and a
       typedef's attribute without clang's sugar
