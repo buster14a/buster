@@ -7693,8 +7693,15 @@ arguments against the function. The checker now gives these as clang does.
   don't carry (the encoder has the prefixes, which only thread-local storage's
   forms use). A load or store in one of those spaces is refused by name ("a load
   or store in a segment's address space", check_lower_segment_access, where a
-  unit has such a type at all: CheckLowerWriter.segments); taking an address
-  there is compiled. Any other space's code is the default space's, as clang's.
+  unit has such a type at all: CheckLowerWriter.segments), and so are the
+  accesses whose lvalue doesn't carry the space: a vector's element, read or
+  written (its type loses the vector's space), an atomic builtin's object
+  (`__atomic_*`, `__c11_atomic_*`, `__sync_*`, reached through the pointer
+  argument), and an asm statement's register output (stored through its
+  address; "an asm output in a segment's address space ... but a memory one").
+  Before, those compiled without the override. A memory asm operand's address is
+  the template's, without the segment, as clang's is. Taking an address there is
+  compiled. Any other space's code is the default space's, as clang's.
 
   What differs from clang: C23's spellings (`[[clang::address_space(1)]]` and
   the others), which slide from a declaration to its specifiers with clang's
