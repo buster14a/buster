@@ -4719,16 +4719,25 @@ static TypeId check_input_attribute_mode(CheckInputReader* reader, CheckInputAtt
 }
 
 // An enum's stand-in for the type a mode's error still installs (#1447, check_input_attribute_mode's `installed`): clang's
-// AddModeAttr makes a real floating type the enum's integer type, which the type table doesn't take, so the enum gets the
-// signed integer of its size and alignment (__fp16's, float's, double's, long double's and __float128's), which gives it
-// clang's layout; 0 for another type (a complex one, whose alignment no integer has), which still stops the reader.
-static TypeId check_input_mode_enum_integer(const TypeTable* types, TypeId installed)
+// AddModeAttr makes a real floating or a complex type the enum's integer type, which the type table doesn't take, so the
+// enum gets the signed integer of its size: of its alignment too for a real floating type (__fp16's, float's, double's,
+// long double's and __float128's), and with the complex type's alignment in `alignment_log2` (log2 + 1, as
+// type_enum_complete takes it, 0 for none) for a complex one (HC's, SC's and DC's: int, long and __int128 at 2, 4 and 8
+// bytes), which gives the enum clang's layout. 0 for another type (XC's and TC's 32 bytes, which no integer has), which
+// still stops the reader. (HC's complex __fp16, which the type table can't make, installs nothing: its enum is one with no
+// mode, 4 bytes aligned to 4 where clang's are aligned to 2.)
+static TypeId check_input_mode_enum_integer(const TypeTable* types, TypeId installed, uint8_t* alignment_log2)
 {
     const TypeId bare = installed != 0 ? type_strip_aligned(types, installed) : 0;
-    const bool floating = bare != 0 && type_kind(types, bare) == BUSTER_TYPE_KIND_FLOATING;
-    const uint64_t size = floating ? type_size(types, bare) : 0;
-    const TypeId result = size == 2 ? BUSTER_TYPE_SHORT : size == 4 ? BUSTER_TYPE_INT : size == 8 ? BUSTER_TYPE_LONG : size == 16 ? BUSTER_TYPE_INT128 : 0;
-    return result != 0 && type_alignment(types, result) == type_alignment(types, bare) ? result : 0;
+    const uint8_t kind = bare != 0 ? type_kind(types, bare) : BUSTER_TYPE_KIND_NONE;
+    const bool floating = kind == BUSTER_TYPE_KIND_FLOATING;
+    const bool complex = kind == BUSTER_TYPE_KIND_COMPLEX;
+    const uint64_t size = floating || complex ? type_size(types, bare) : 0;
+    const TypeId integer = size == 2 && floating ? BUSTER_TYPE_SHORT : size == 4 ? BUSTER_TYPE_INT : size == 8 ? BUSTER_TYPE_LONG :
+                           size == 16 ? BUSTER_TYPE_INT128 : 0;
+    const TypeId result = integer != 0 && (complex || type_alignment(types, integer) == type_alignment(types, bare)) ? integer : 0;
+    *alignment_log2 = result != 0 && complex ? (uint8_t)(__builtin_ctzll(type_alignment(types, bare)) + 1) : 0;
+    return result;
 }
 
 // vector_size's checks of its element type `element` and its size, as clang's BuildVectorType makes them, in its order

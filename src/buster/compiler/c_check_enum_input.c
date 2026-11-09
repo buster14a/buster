@@ -346,13 +346,15 @@ static bool check_input_enum_complete(CheckInputReader* reader, CheckTagFrame* f
     // the mode's (check_input_enum_mode).
     const CheckInputAttribute* late_mode = !moded && reader->enum_fixed[tag] == BUSTER_CHECK_ENUM_NONE ? check_input_enum_mode(frame->attributes, frame->close) : NULL;
     // An error after which clang installs no type, an unknown or unsupported mode's, leaves the enum as one with no mode
-    // (#1447); one that still installs a floating type gives it the integer of its layout (check_input_mode_enum_integer),
-    // and a complex one stops the reader.
+    // (#1447); one that still installs a floating or a complex type gives it the integer of its layout
+    // (check_input_mode_enum_integer), and XC's or TC's stops the reader.
     const CheckInputAttributeRecovery late_recovery = late_mode != NULL ? check_input_attribute_recovery(reader, frame->attributes, (CheckInputAttribute*)late_mode) :
                                                       (CheckInputAttributeRecovery){ 0 };
     TypeId late_installed = 0;
     const TypeId late_checked = late_mode != NULL ? check_input_attribute_mode(reader, frame->attributes, late_mode, frame->type, &late_installed) : 0;
-    const TypeId late_stand_in = late_mode != NULL && late_checked == 0 && late_installed != frame->type ? check_input_mode_enum_integer(reader->types, late_installed) : 0;
+    uint8_t late_alignment = 0;
+    const TypeId late_stand_in = late_mode != NULL && late_checked == 0 && late_installed != frame->type ?
+                                 check_input_mode_enum_integer(reader->types, late_installed, &late_alignment) : 0;
     const bool late_recovered = late_mode != NULL && late_checked == 0 && (late_installed == frame->type || late_stand_in != 0) &&
                                 check_input_attribute_recover(reader, frame->attributes, &late_recovery, 0, false, false);
     const bool late_dropped = late_recovered && late_installed == frame->type;
@@ -380,7 +382,9 @@ static bool check_input_enum_complete(CheckInputReader* reader, CheckTagFrame* f
         // (One a mode completed has its type; one after its body gives it.)
         const TypeId underlying = moded ? reader->types->types.base[type_index(frame->type)] : late_moded != 0 ? late_moded :
                                   type_enum_underlying(packed, frame->negative_bits, frame->positive_bits);
-        valid = valid && (moded || type_enum_complete(reader->types, frame->type, underlying, alignment));
+        // (A complex mode's stand-in takes the complex type's alignment, but where an alignment attribute gives one.)
+        const uint8_t complete_alignment = alignment != 0 || late_checked != 0 || !late_recovered ? alignment : late_alignment;
+        valid = valid && (moded || type_enum_complete(reader->types, frame->type, underlying, complete_alignment));
         reader->output->resource |= !valid && reader->types->last_error == TYPE_ERROR_FULL;
         reader->enum_fixed[tag] = moded ? BUSTER_CHECK_ENUM_LISTED : reader->enum_fixed[tag];
         if (valid)
