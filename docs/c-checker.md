@@ -3682,9 +3682,9 @@ What the lowering covers past scalars (#145's programs):
   `__has_c_attribute(gnu::retain)` answer 1. `test-checker-driver` compares
   each retained definition's section (name, type, flags and alignment) and
   the object's OS/ABI with clang's object's, and runs the programs, linked
-  from `-c`'s objects and by the direct path. `common` stays refused by name:
-  its symbols are `SHN_COMMON`'s, which neither the link representation nor
-  the object writer has.
+  from `-c`'s objects and by the direct path. The `common` attribute and
+  `-fcommon` make common symbols (`BUSTER_LINK_SYMBOL_COMMON`, `-c`'s objects'
+  `SHN_COMMON`): [the GNU extensions' table](c-gnu-extensions.md).
 - **Switches (#136's item 7).** A switch's value goes in a temporary, and each
   case compares it, as clang -O0's code does for a sparse switch, unless clang
   would build a jump table: then the switch dispatches through one
