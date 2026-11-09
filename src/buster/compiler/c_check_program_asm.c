@@ -1269,6 +1269,9 @@ static const CheckAsmImplicit check_asm_implicit[] = {
     { X86_FORM_XSETBV, 0 },
     { X86_FORM_VZEROUPPER, BUSTER_TIER0_XMM_ALL },
     { X86_FORM_VZEROALL, BUSTER_TIER0_XMM_ALL },
+    // fxrstor loads xmm0 to xmm15 (and MXCSR) from its area, beside the x87's state.
+    { X86_FORM_FXRSTOR_M, BUSTER_TIER0_XMM_ALL },
+    { X86_FORM_FXRSTOR64_M, BUSTER_TIER0_XMM_ALL },
 };
 #undef BUSTER_CHECK_ASM_GPR
 
@@ -1319,7 +1322,8 @@ static uint32_t check_asm_inline_touched(const CheckAsmPlace* places, uint32_t c
                 implicit += 1;
             }
             // An x87 form (fsqrt, fprem, fxch, fld %st(1), fxsave...) reads and writes the x87's registers, its status
-            // and control words, the flags and memory alone: a general register only by `fnstsw %ax`'s, which the table has.
+            // and control words, the flags and memory alone: a general register only by `fnstsw %ax`'s, and xmm0 to
+            // xmm15 only by fxrstor's, which the table has.
             const char* mnemonic = x86_form_description(record->form)->mnemonic;
             const bool x87 = mnemonic != NULL && mnemonic[0] == 'f' && record->form != X86_FORM_FNSTSW_AX && record->form != X86_FORM_FSTSW_AX;
             placed = implicit < BUSTER_ARRAY_LENGTH(check_asm_implicit) || x87;

@@ -13374,7 +13374,8 @@ static bool check_lower_asm_passed(const CheckAsmPlace* place)
 static uint8_t check_lower_asm_class(CheckLowerWriter* writer, const CheckProgramAsm* plan, uint32_t k)
 {
     const CheckAsmPlace* place = plan->places + k;
-    const TypeId type = place->kind == BUSTER_CHECK_ASM_MEMORY ? BUSTER_TYPE_ULONG : place->tied != BUSTER_CHECK_NONE && !place->written ? plan->places[place->tied].type : place->type;
+    const bool tied = place->tied != BUSTER_CHECK_NONE && !place->written;
+    const TypeId type = place->kind == BUSTER_CHECK_ASM_MEMORY ? BUSTER_TYPE_ULONG : tied ? plan->places[place->tied].type : place->type;
     const uint8_t class = check_lower_class(writer, type);
     return class == BUSTER_TYPED_CLASS_I8 ? BUSTER_TYPED_CLASS_U8 : class == BUSTER_TYPED_CLASS_I16 ? BUSTER_TYPED_CLASS_U16 : class;
 }
@@ -13534,7 +13535,8 @@ static void check_lower_asm(CheckLowerWriter* writer, CheckControl control)
             const bool passed = check_lower_asm_passed(place);
             const uint8_t class = check_lower_class(writer, place->type);
             const uint8_t argument = passed ? check_lower_asm_class(writer, plan, k) : class;
-            if (passed && argument != (place->tied != BUSTER_CHECK_NONE && k >= statement->output_count ? check_lower_class(writer, plan->places[place->tied].type) : class))
+            const bool tied = place->tied != BUSTER_CHECK_NONE && k >= statement->output_count;
+            if (passed && argument != (tied ? check_lower_class(writer, plan->places[place->tied].type) : class))
             {
                 check_lower_instruction(writer, BUSTER_TYPED_CONVERT, argument, 0);
             }
