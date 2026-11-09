@@ -870,7 +870,19 @@ static bool tier0_inline_tables(const Tier0InlineInput* input, const Tier0Inline
     uint64_t* x87_constants = plan->x87_count != 0 ? BUSTER_TIER0_INLINE_PUSH(arena, uint64_t, 2 * plan->x87_count) : 0;
     uint64_t* vector_constants = plan->vector_count != 0 ? BUSTER_TIER0_INLINE_PUSH(arena, uint64_t, 8 * plan->vector_count) : 0;
     uint8_t* vector_constant_bytes = plan->vector_count != 0 ? BUSTER_TIER0_INLINE_PUSH(arena, uint8_t, plan->vector_count) : 0;
-    bool valid = local_classes != 0 && local_flags != 0 && (!plan->sizes || (local_sizes != 0 && local_alignments != 0)) && call_targets != 0 && call_first != 0 &&
+    // The asm bodies (#1839): the caller's, then each site's copy of its callee's, its block rebased to the site's locals.
+    uint64_t body_count = caller->asm_body_count;
+    bool bodies_column = caller->call_asm != 0;
+    for (uint32_t s = 0; s < plan->site_count; s += 1)
+    {
+        const Tier0Function* callee = input->callees[plan->distinct[plan->sites[s].callee].index];
+        body_count += callee->asm_body_count;
+        bodies_column |= callee->call_asm != 0;
+    }
+    uint32_t* call_asm = bodies_column ? BUSTER_TIER0_INLINE_PUSH(arena, uint32_t, rows) : 0;
+    Tier0AsmBody* asm_bodies = body_count != 0 ? BUSTER_TIER0_INLINE_PUSH(arena, Tier0AsmBody, body_count) : 0;
+    bool valid = (!bodies_column || call_asm != 0) && (body_count == 0 || asm_bodies != 0) && body_count <= UINT32_MAX;
+    valid = valid && local_classes != 0 && local_flags != 0 && (!plan->sizes || (local_sizes != 0 && local_alignments != 0)) && call_targets != 0 && call_first != 0 &&
                  call_argument_counts != 0 && call_variadic != 0 && calls != 0 && (!plan->result_objects || call_result_objects != 0) &&
                  (caller->call_tails == 0 || call_tails != 0) && argument_locations != 0 && argument_classes != 0 && (!plan->argument_sizes || argument_sizes != 0) &&
                  (plan->operation_count == 0 || operations != 0) && (plan->x87_count == 0 || x87_constants != 0) &&
@@ -916,6 +928,22 @@ static bool tier0_inline_tables(const Tier0InlineInput* input, const Tier0Inline
             tier0_inline_copy(call_tails, caller->call_tails, own_rows);
             tier0_inline_fill(call_tails + own_rows, 0, rows - own_rows);
         }
+        if (call_asm != 0)
+        {
+            if (caller->call_asm != 0)
+            {
+                tier0_inline_copy(call_asm, caller->call_asm, (uint64_t)own_rows * sizeof(uint32_t));
+            }
+            else
+            {
+                tier0_inline_fill(call_asm, 0, (uint64_t)own_rows * sizeof(uint32_t));
+            }
+        }
+        if (caller->asm_body_count != 0)
+        {
+            tier0_inline_copy(asm_bodies, caller->asm_bodies, (uint64_t)caller->asm_body_count * sizeof(Tier0AsmBody));
+        }
+        uint32_t body_base = caller->asm_body_count;
         const uint32_t own_arguments = caller->argument_count;
         tier0_inline_copy(argument_locations, caller->argument_locations, (uint64_t)own_arguments * sizeof(AbiLocation));
         tier0_inline_copy(argument_classes, caller->argument_classes, own_arguments);
@@ -1013,6 +1041,17 @@ static bool tier0_inline_tables(const Tier0InlineInput* input, const Tier0Inline
                 const uint32_t object = callee->call_result_objects != 0 ? callee->call_result_objects[c] : 0;
                 call_result_objects[base + c] = object != 0 ? object + site->local_base : 0;
             }
+            for (uint32_t c = 0; call_asm != 0 && c < count; c += 1)
+            {
+                const uint32_t body = callee->call_asm != 0 ? callee->call_asm[c] : 0;
+                call_asm[base + c] = body != 0 ? body + body_base : 0;
+            }
+            for (uint32_t b = 0; b < callee->asm_body_count; b += 1)
+            {
+                asm_bodies[body_base + b] = callee->asm_bodies[b];
+                asm_bodies[body_base + b].block += callee->asm_bodies[b].block != BUSTER_TIER0_ASM_NO_BLOCK ? site->local_base : 0;
+            }
+            body_base += callee->asm_body_count;
             const uint32_t arguments_count = callee->argument_count;
             if (arguments_count != 0)
             {
@@ -1041,6 +1080,9 @@ static bool tier0_inline_tables(const Tier0InlineInput* input, const Tier0Inline
         g->call_result_objects = call_result_objects;
         g->call_tails = call_tails;
         g->call_count = (uint32_t)rows;
+        g->call_asm = call_asm;
+        g->asm_bodies = asm_bodies;
+        g->asm_body_count = (uint32_t)body_count;
         g->argument_locations = argument_locations;
         g->argument_classes = argument_classes;
         g->argument_sizes = argument_sizes;

@@ -274,20 +274,26 @@ operation of the operands' type, 1 where the exact result leaves its signed rang
 which Tier 1 selects as the operation and `seto` ([the selection
 guide](tier1-selection.md)), and the typed stream's interpreter evaluates the
 rows by the same semantics (`ir_intrinsic_overflow`). The recipes' typed
-operations are the same everywhere; 128-bit operands and destinations keep their
-limbs' recipe (`cbuiltin_lower_overflow_wide`), and the destination stores its
+operations are the same everywhere; 128-bit operands and destinations, and
+`_BitInt`s of 65 to 127 bits (#1447: their descriptor is their width, their
+high limb extended from it, and a destination fits where its high limb extended
+from the width's bits past 64 gives the result's back), keep their limbs' recipe
+(`cbuiltin_lower_overflow_wide`), and the destination stores its
 value before the recipe's last entry, the flag, which stays on the value stack.
 
 `test-builtin-lowering` runs every recipe natively against clang's builtins:
 every ordinary signed and unsigned 8/16/32/64-bit and `_Bool` operand and
-destination, `_BitInt` destinations, and `_BitInt` operands narrower than their
+destination, `_BitInt` destinations (of 65 to 127 bits too, with 100- and 127-bit
+operands), and `_BitInt` operands narrower than their
 slot class beside whole ones (each recipe's: at most 32 bits, past them, an
 unsigned 32-bit product past 2^63 into a signed `_BitInt(63)`, whose extension
 of the low bits alone would give them back). `test-checker`'s
 `overflow-instruction-rows` program runs signed longs', ints', unsigned longs'
 and mixed calls of boundary values by both paths against clang -O0's build and
 checks that the signed longs' rows are `add`, `imul` and `cmp` with `seto`;
-`test-checker-driver`'s Tier 1 fixture `tier1-overflow` runs them by `--tier1`,
+`test-checker`'s `bit-int-65-to-127-overflow` program runs `_BitInt`s of 65 to
+127 bits' and hashes their destinations' bytes; `test-checker-driver`'s Tier 1
+fixture `tier1-overflow` runs them by `--tier1`,
 and `tests/ir-source/overflow-builtins.c` through the IR's lowerings, both
 interpreters and Tier 1 (`test-ssa-source --typed --tier1`).
 
@@ -1771,10 +1777,12 @@ one real floating type T once lvalue-converted (`float` to `long double`, and
 `_Float16`, `__bf16` and `__float128`, as clang 23 takes them), and neither is
 converted otherwise. As clang's Sema, it checks each argument's type before its
 conversion first, so that an `_Atomic double` is refused, and an integer or a
-complex value, then the two types against each other; the checker's errors are
-its own generic ones at the call's `)`, where clang's are "argument type ... is
-not a real floating point type" at the argument and "arguments are of different
-types" at re (pending, as for the other miscellaneous builtins). It folds where both are
+complex value, then the two types against each other. Its errors are clang's
+(`check_semantic_expression`): "argument type 'T' is not a real floating point
+type" at the first such argument, its type as written (an array's, a function's,
+a qualified one's, its typedef's with its `aka`), and "arguments are of different
+types ('R' vs 'I')" at re, by the converted types, their qualifiers dropped and
+their typedefs kept. It folds where both are
 floating constants, as clang's evaluator folds it, so that glibc's `CMPLX` makes
 static data and an enumerator's `__imag__` an integer constant: the folds keep
 signed zeros, infinities and NaNs, a `static const` object's value, and long

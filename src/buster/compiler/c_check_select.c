@@ -204,7 +204,7 @@ static bool check_input_selection(CheckInputReader* reader, uint32_t close)
             {
                 reader->selected_tokens[close] = root;
                 check_input_sparse_mark(reader, close, root < reader->parser->tokens.count);
-                check_input_constant_fold_warning(reader, first, separator, &control, true, first);
+                check_input_constant_fold_warning(reader, first, separator, &control, true, first, false);
                 check_input_warning_suppress(reader, condition ? next + 1 : separator + 1, condition ? close : next, CHECK_WARNING_INTEGER_OVERFLOW);
             }
         }
