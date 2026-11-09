@@ -14,6 +14,7 @@ static void tier1_cfg_test_spill_prefix(Tier1CfgTestTally* tally)
     uint32_t fragment_starts[] = { 1, 2, 4, 6, 8, 10, 1, 6, 1 };
     uint32_t fragment_ends[] = { 2, 4, 6, 8, 10, 12, 6, 12, 12 };
     uint32_t spill_values[] = { 1, 0 };
+    uint32_t spill_ids[] = { 1, 0, UINT32_MAX };
     uint8_t kinds[] = {
         BUSTER_TIER1_ALLOCATE_REGISTER,
         BUSTER_TIER1_ALLOCATE_SPILL,
@@ -37,6 +38,7 @@ static void tier1_cfg_test_spill_prefix(Tier1CfgTestTally* tally)
             .starts = fragment_starts,
             .ends = fragment_ends,
             .kinds = kinds,
+            .spill_ids = spill_ids,
             .spill_values = spill_values,
             .spill_count = 2,
             .fragment_count = 9,
