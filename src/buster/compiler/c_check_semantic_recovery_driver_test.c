@@ -664,6 +664,10 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "int g(void) { return sizeof(struct A) + sizeof(struct I) + sizeof(enum E) + sizeof(struct J) + t.t[1] + missing; }\n",
         "const _Atomic(struct A { int a; }) *p, q;\n_Atomic(struct A) r;\nint k(void) { int unused; return (int)sizeof(*p) + undeclared; }\n"
         "void l(void) { for (_Atomic(struct F { int f; }) i;;) { (void)i; break; } int quiet; }\n",
+        // In a prototype's parameters (review on #1891): a tag of prototype scope, with clang's -Wvisibility before C23, in a
+        // declaration's parameter, a pointer's, a nested group's and a definition's.
+        "void f(_Atomic(struct P { int x; }) p);\nvoid g(typeof(struct Q { long y; }) *q);\nvoid h(typeof(_Atomic(struct R { short z; })) r);\n"
+        "int k(_Atomic(struct A { int a; }) a, typeof(struct B { char b; }) b) { int unused; return (int)sizeof a + b.b; }\nint z = missing;\n",
         // A tag defined again in its scope, whose body becomes an anonymous tag's: later uses of the name find the first
         // definition, and the second's enumerators are still declared (a repeated one with its own note).
         "struct S { int a; };\nstruct S { long b; };\nunion U { int a; };\nunion U { char c; } u2;\n"

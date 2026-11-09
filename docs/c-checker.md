@@ -4115,7 +4115,7 @@ do:
   (`_Atomic(struct S { int a; }) m;`, `typeof(_Atomic(struct S { ... }))`) is
   read before the specifiers, as a declaration's own definition is
   (`check_input_specifier_definition` goes on into each group, #1447), in a
-  declaration, a member, a parameter, a typedef and a type name; it used to be
+  declaration, a member, a prototype's parameter (of prototype scope, with clang's `-Wvisibility` before C23), a typedef and a type name; it used to be
   the reader's generic refusal.
 - **A repeated enumerator** gives "redefinition of enumerator 'A'" with its
   note at the earlier one, and is dropped (`CheckTagFrame.dropped`). As in
