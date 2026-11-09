@@ -32,13 +32,22 @@ static IrSimdOperation ir_interpreter_simd_opcode(uint8_t op)
     return operation;
 }
 
-// A width change's model operation (#1840: extract, widen and insert), or IR_SIMD_OPERATION_COUNT for any other intrinsic.
+// A width change's or a permute's model operation (#1840: extract, widen, insert, permute, shuffle, align and
+// shuffle_lanes), or IR_SIMD_OPERATION_COUNT for any other intrinsic.
 static IrSimdOperation ir_interpreter_simd_intrinsic(uint32_t kind)
 {
-    const IrSimdOperation operation = kind == BUSTER_IR_INTRINSIC_EXTRACT ? IR_SIMD_EXTRACT :
-                                      kind == BUSTER_IR_INTRINSIC_WIDEN   ? IR_SIMD_WIDEN :
-                                      kind == BUSTER_IR_INTRINSIC_INSERT  ? IR_SIMD_INSERT :
-                                                                            IR_SIMD_OPERATION_COUNT;
+    IrSimdOperation operation = IR_SIMD_OPERATION_COUNT;
+    switch (kind)
+    {
+        case BUSTER_IR_INTRINSIC_EXTRACT: operation = IR_SIMD_EXTRACT; break;
+        case BUSTER_IR_INTRINSIC_WIDEN: operation = IR_SIMD_WIDEN; break;
+        case BUSTER_IR_INTRINSIC_INSERT: operation = IR_SIMD_INSERT; break;
+        case BUSTER_IR_INTRINSIC_PERMUTE: operation = IR_SIMD_PERMUTE; break;
+        case BUSTER_IR_INTRINSIC_SHUFFLE: operation = IR_SIMD_SHUFFLE; break;
+        case BUSTER_IR_INTRINSIC_ALIGN: operation = IR_SIMD_ALIGN; break;
+        case BUSTER_IR_INTRINSIC_SHUFFLE_LANES: operation = IR_SIMD_SHUFFLE_LANES; break;
+        default: break;
+    }
     return operation;
 }
 

@@ -268,6 +268,9 @@ typedef enum Tier1SelectRule
 // `source_width` the other vector's bytes (an extract's or a widen's operand's, an insert's inserted values[1]'s),
 // `immediate` its part (tier1_select_width_change).
 #define BUSTER_TIER1_VECTOR_WIDTH_CHANGE 10
+// A permute (#1840): `operation` its kind past BUSTER_IR_INTRINSIC_PERMUTE (0 permute, 1 shuffle, 2 align, 3
+// shuffle_lanes), `immediate` the IR's flags (tier1_select_permute_form).
+#define BUSTER_TIER1_VECTOR_PERMUTE 11
 
 // TIER1_RULE_X87's kinds, its pattern's `scale` (#141):
 // - CONSTANT, its constant's index in `immediate`, and UNDEF, which stores nothing;
@@ -1189,6 +1192,57 @@ static void tier1_select_width_change(Tier1SelectRecords* result, const Tier1Sel
     }
 }
 
+// A permute's EVEX form at `width` bytes (#1840), by its kind past BUSTER_IR_INTRINSIC_PERMUTE and the IR's flags, or
+// X86_FORM_NONE where it has none (a doubleword's or a quadword's variable permute of 16 bytes, a quadword's of 32, a
+// shuffle of 16-byte lanes of 16 bytes), which leaves its node no candidate: vpermb to vpermq by the lanes' size, vpshufb,
+// valignd or valignq by the lanes' size, and vshufi64x2.
+static uint16_t tier1_select_permute_form(uint32_t kind, uint32_t flags, uint32_t width)
+{
+    static const uint16_t permutes[4][3] = {
+        { X86_FORM_VPERMB_X_X_XM128, X86_FORM_VPERMB_Y_Y_YM256, X86_FORM_VPERMB_Z_Z_ZM512 },
+        { X86_FORM_VPERMW_X_X_XM128, X86_FORM_VPERMW_Y_Y_YM256, X86_FORM_VPERMW_Z_Z_ZM512 },
+        { X86_FORM_NONE, X86_FORM_VPERMD_Y_Y_YM256_EVEX, X86_FORM_VPERMD_Z_Z_ZM512 },
+        { X86_FORM_NONE, X86_FORM_NONE, X86_FORM_VPERMQ_Z_Z_ZM512 },
+    };
+    static const uint16_t shuffles[3] = { X86_FORM_VPSHUFB_X_X_XM128_EVEX, X86_FORM_VPSHUFB_Y_Y_YM256_EVEX, X86_FORM_VPSHUFB_Z_Z_ZM512 };
+    static const uint16_t aligns[2][3] = {
+        { X86_FORM_VALIGND_X_X_XM128_IMM8, X86_FORM_VALIGND_Y_Y_YM256_IMM8, X86_FORM_VALIGND_Z_Z_ZM512_IMM8 },
+        { X86_FORM_VALIGNQ_X_X_XM128_IMM8, X86_FORM_VALIGNQ_Y_Y_YM256_IMM8, X86_FORM_VALIGNQ_Z_Z_ZM512_IMM8 },
+    };
+    static const uint16_t lanes[3] = { X86_FORM_NONE, X86_FORM_VSHUFI64X2_Y_Y_YM256_IMM8, X86_FORM_VSHUFI64X2_Z_Z_ZM512_IMM8 };
+    const uint32_t index = width == 16 ? 0 : width == 32 ? 1 : width == 64 ? 2 : 3;
+    uint16_t form = X86_FORM_NONE;
+    if (index < 3)
+    {
+        form = kind == 0 && flags <= 3                         ? permutes[flags][index] :
+               kind == 1                                       ? shuffles[index] :
+               kind == 2 && (flags >> 4 == 2 || flags >> 4 == 3) ? aligns[(flags >> 4) - 2][index] :
+               kind == 3                                       ? lanes[index] :
+                                                                 X86_FORM_NONE;
+    }
+    return form;
+}
+
+// A permute's record (#1840): its form of values[0] and values[1] into the destination; the variable permutes take their
+// indices, values[1], in vvvv and the lanes they move, values[0], in rm, the others values[0] in vvvv and values[1] in rm,
+// and align and shuffle_lanes their immediate (an align's count, its flags' low 4 bits).
+static void tier1_select_permute(Tier1SelectRecords* result, const Tier1SelectHoles* holes)
+{
+    const uint32_t kind = (uint32_t)holes->operation;
+    const uint32_t flags = (uint32_t)holes->immediate;
+    const uint8_t left = holes->left & 15;
+    const uint8_t right = holes->right & 15;
+    const X86Instruction record = {
+        .form = tier1_select_permute_form(kind, flags, holes->width),
+        .reg = holes->destination & 15,
+        .vvvv = kind == 0 ? right : left,
+        .rm = kind == 0 ? left : right,
+        .mode = BUSTER_X86_REGISTER_DIRECT,
+        .immediate = kind == 2 ? (int32_t)(flags & 15) : kind == 3 ? (int32_t)flags : 0,
+    };
+    tier1_select_append(result, record);
+}
+
 static void tier1_select_scalar_splat(Tier1SelectRecords* result, const Tier1SelectHoles* holes)
 {
     const uint32_t type = holes->source_width;
@@ -1759,6 +1813,10 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         else if (kind == BUSTER_TIER1_VECTOR_WIDTH_CHANGE)
         {
             tier1_select_width_change(&result, holes);
+        }
+        else if (kind == BUSTER_TIER1_VECTOR_PERMUTE)
+        {
+            tier1_select_permute(&result, holes);
         }
         else if (holes->sse && width == 16 && kind != BUSTER_TIER1_VECTOR_COMPARE && kind != BUSTER_TIER1_VECTOR_SELECT)
         {
@@ -4065,7 +4123,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
     // A vector's operations (#141), behind one test: a function without vectors pays no other here.
     const bool vector_node = (vector_width != 0 && (op == IR_VCONST || op == IR_UNDEF || op == IR_COPY || op == IR_NOT || op == IR_ADD || op == IR_SUB || op == IR_MUL || op == IR_AND ||
                                                    op == IR_OR || op == IR_XOR || op == IR_SHL || op == IR_LSHR || op == IR_ASHR || (op >= IR_FADD && op <= IR_FDIV) ||
-                                                   op == IR_VSELECT || (op == IR_INTRINSIC && (c == BUSTER_IR_INTRINSIC_SPLAT || (c >= BUSTER_IR_INTRINSIC_EXTRACT && c <= BUSTER_IR_INTRINSIC_INSERT))))) ||
+                                                   op == IR_VSELECT || (op == IR_INTRINSIC && (c == BUSTER_IR_INTRINSIC_SPLAT || (c >= BUSTER_IR_INTRINSIC_EXTRACT && c <= BUSTER_IR_INTRINSIC_SHUFFLE_LANES))))) ||
                              compare_width != 0;
     if (vector_node)
     {
@@ -4119,6 +4177,22 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             }
             base.intrinsic_cost = 1;
             tier1_select_add_candidate(forest, node, &candidates, base);
+        }
+        else if (vector_width != 0 && op == IR_INTRINSIC && c >= BUSTER_IR_INTRINSIC_PERMUTE && c <= BUSTER_IR_INTRINSIC_SHUFFLE_LANES)
+        {
+            // A permute (#1840): its immediate in the IR's flags; no candidate where its width has no form.
+            base.rule = TIER1_RULE_VECTOR;
+            base.width = (uint8_t)vector_width;
+            base.scale = BUSTER_TIER1_VECTOR_PERMUTE;
+            base.operation = (uint8_t)(c - BUSTER_IR_INTRINSIC_PERMUTE);
+            base.immediate = function->flags[node];
+            base.values[0] = a;
+            base.values[1] = b;
+            base.intrinsic_cost = 1;
+            if (tier1_select_permute_form(c - BUSTER_IR_INTRINSIC_PERMUTE, function->flags[node], vector_width) != X86_FORM_NONE)
+            {
+                tier1_select_add_candidate(forest, node, &candidates, base);
+            }
         }
         else if (vector_width != 0 && (op == IR_COPY || op == IR_NOT))
         {

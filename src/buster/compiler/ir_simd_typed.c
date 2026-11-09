@@ -94,6 +94,10 @@ struct IrSimdTypedOperation
     uint8_t width_change;
     uint8_t part;
     bool merge_mask;
+    // A permute (#1840, ir_simd_typed_permute): its IR intrinsic (BUSTER_IR_INTRINSIC_PERMUTE to _SHUFFLE_LANES) plus one, 0
+    // for any other row, and its immediate, the IR's flags.
+    uint8_t permute;
+    uint8_t immediate;
 };
 
 typedef struct IrSimdTypedForm IrSimdTypedForm;
@@ -1037,10 +1041,89 @@ static IrSimdTypedStatus ir_simd_typed_width(const Tier0Operation* source, uint6
     return status;
 }
 
+// The permutes (#1840): a row of two vectors of the result's width (16, 32 or 64 bytes) and one record of a permute's form
+// at that width, register-direct with no decoration: vpermb, vpermw, vpermd and vpermq of VECTOR(1)'s indices (vvvv) into
+// VECTOR(0)'s lanes (rm), the variable permutes' builtins as the front end swaps them (permute of VECTOR(0) by VECTOR(1),
+// its flags its lanes' bytes' log2); vpshufb of VECTOR(0) (vvvv) by VECTOR(1) (rm) (shuffle); and valignd, valignq,
+// vshufi32x4 and vshufi64x2 of VECTOR(0) (vvvv) and VECTOR(1) (rm) by the record's immediate (align, of its lanes' size
+// and the immediate's count, its bits below the lanes, which the instruction reads; shuffle_lanes of the immediate, its
+// low 2 bits at 32 bytes, whose 32x4 and 64x2 forms move the same 16-byte lanes). The destination is VECTOR(0)'s register (reg). Its features are the form's and its vectors' moves
+// (AVX512F, VL below 64 bytes): Tier 1 selects the form at the same width, vshufi64x2 for both shuffles of lanes;
+// otherwise, and for any other form or field, it stays a machine row.
+static IrSimdTypedStatus ir_simd_typed_permute(const Tier0Operation* source, uint64_t target_features, IrSimdTypedOperation* result)
+{
+    typedef struct IrSimdTypedPermuteForm IrSimdTypedPermuteForm;
+    struct IrSimdTypedPermuteForm
+    {
+        uint16_t forms[3];
+        uint8_t kind;
+        uint8_t flags;
+        bool indices_first;
+    };
+    static const IrSimdTypedPermuteForm forms[] = {
+        { { X86_FORM_VPERMB_X_X_XM128, X86_FORM_VPERMB_Y_Y_YM256, X86_FORM_VPERMB_Z_Z_ZM512 }, BUSTER_IR_INTRINSIC_PERMUTE, 0, true },
+        { { X86_FORM_VPERMW_X_X_XM128, X86_FORM_VPERMW_Y_Y_YM256, X86_FORM_VPERMW_Z_Z_ZM512 }, BUSTER_IR_INTRINSIC_PERMUTE, 1, true },
+        { { X86_FORM_NONE, X86_FORM_VPERMD_Y_Y_YM256_EVEX, X86_FORM_VPERMD_Z_Z_ZM512 }, BUSTER_IR_INTRINSIC_PERMUTE, 2, true },
+        { { X86_FORM_NONE, X86_FORM_NONE, X86_FORM_VPERMQ_Z_Z_ZM512 }, BUSTER_IR_INTRINSIC_PERMUTE, 3, true },
+        { { X86_FORM_VPSHUFB_X_X_XM128_EVEX, X86_FORM_VPSHUFB_Y_Y_YM256_EVEX, X86_FORM_VPSHUFB_Z_Z_ZM512 }, BUSTER_IR_INTRINSIC_SHUFFLE, 0, false },
+        { { X86_FORM_VALIGND_X_X_XM128_IMM8, X86_FORM_VALIGND_Y_Y_YM256_IMM8, X86_FORM_VALIGND_Z_Z_ZM512_IMM8 }, BUSTER_IR_INTRINSIC_ALIGN, 0x20, false },
+        { { X86_FORM_VALIGNQ_X_X_XM128_IMM8, X86_FORM_VALIGNQ_Y_Y_YM256_IMM8, X86_FORM_VALIGNQ_Z_Z_ZM512_IMM8 }, BUSTER_IR_INTRINSIC_ALIGN, 0x30, false },
+        { { X86_FORM_NONE, X86_FORM_VSHUFI32X4_Y_Y_YM256_IMM8, X86_FORM_VSHUFI32X4_Z_Z_ZM512_IMM8 }, BUSTER_IR_INTRINSIC_SHUFFLE_LANES, 0, false },
+        { { X86_FORM_NONE, X86_FORM_VSHUFI64X2_Y_Y_YM256_IMM8, X86_FORM_VSHUFI64X2_Z_Z_ZM512_IMM8 }, BUSTER_IR_INTRINSIC_SHUFFLE_LANES, 0, false },
+    };
+    const uint8_t v0 = BUSTER_TIER0_ROLE_VECTOR(0);
+    const uint8_t v1 = BUSTER_TIER0_ROLE_VECTOR(1);
+    const uint32_t bytes = source->result_bytes;
+    const uint32_t width = bytes == 16 ? 0 : bytes == 32 ? 1 : 2;
+    const bool admitted = source->result_class == BUSTER_TYPED_CLASS_VECTOR && (bytes == 16 || bytes == 32 || bytes == 64) && source->record_count == 1 &&
+                          source->operand_count == 2 && source->operand_classes[0] == BUSTER_TYPED_CLASS_VECTOR && source->operand_bytes[0] == bytes &&
+                          source->operand_classes[1] == BUSTER_TYPED_CLASS_VECTOR && source->operand_bytes[1] == bytes;
+    const X86Instruction* record = &source->records[0];
+    IrSimdTypedOperation candidate = { .operation = IR_SIMD_OPERATION_COUNT };
+    for (uint32_t form = 0; admitted && form < BUSTER_ARRAY_LENGTH(forms); form += 1)
+    {
+        const IrSimdTypedPermuteForm* entry = &forms[form];
+        const bool immediate = entry->kind == BUSTER_IR_INTRINSIC_ALIGN || entry->kind == BUSTER_IR_INTRINSIC_SHUFFLE_LANES;
+        const X86Instruction expected = {
+            .form = entry->forms[width],
+            .reg = v0,
+            .vvvv = entry->indices_first ? v1 : v0,
+            .rm = entry->indices_first ? v0 : v1,
+            .mode = BUSTER_X86_REGISTER_DIRECT,
+            .immediate = immediate ? record->immediate : 0,
+        };
+        // The bits of the immediate the instruction reads: an align's count below its lanes, a 32-byte shuffle of lanes' low 2.
+        const uint32_t lanes = bytes >> (entry->flags >> 4);
+        const uint32_t flags = entry->kind == BUSTER_IR_INTRINSIC_ALIGN                 ? entry->flags | ((uint32_t)record->immediate & (lanes - 1)) :
+                               entry->kind == BUSTER_IR_INTRINSIC_SHUFFLE_LANES && width == 1 ? (uint32_t)record->immediate & 3 :
+                               immediate                                                ? (uint32_t)record->immediate :
+                                                                                          entry->flags;
+        const bool fits = record->immediate >= 0 && record->immediate <= 255 && ir_permute_flags_valid(entry->kind, (uint32_t)(IR_V4I32 + width), flags);
+        if (expected.form != X86_FORM_NONE && fits && memcmp(record, &expected, sizeof(expected)) == 0)
+        {
+            candidate.permute = (uint8_t)(entry->kind + 1);
+            candidate.immediate = (uint8_t)flags;
+            candidate.required_features = ir_typed_vector_moves(bytes, target_features) | BUSTER_X86_FEATURE(AVX512F) | (width < 2 ? BUSTER_X86_FEATURE(AVX512VL) : 0) |
+                                          (x86_target_requirement(record->form) & ~BUSTER_X86_TARGET_KNOWN);
+        }
+    }
+    const IrSimdTypedStatus status = candidate.permute != 0 && (target_features & candidate.required_features) == candidate.required_features ? IR_SIMD_TYPED_OK :
+                                                                                                                                              IR_SIMD_TYPED_UNSUPPORTED;
+    if (status == IR_SIMD_TYPED_OK)
+    {
+        candidate.shape = (IrSimdShape)(IR_SIMD_V4I32 + width);
+        candidate.operand_count = 2;
+        memcpy(candidate.operand_classes, source->operand_classes, sizeof(candidate.operand_classes));
+        memcpy(candidate.operand_bytes, source->operand_bytes, sizeof(candidate.operand_bytes));
+        *result = candidate;
+    }
+    return status;
+}
+
 // A row's decoding: the bit builtins', the signed overflow builtins', masks, scalar intrinsics, lane operations,
-// comparisons into a mask alone, width changes (#1840), then exact scalar splats; other admitted forms stay machine rows. A
-// semantic match whose target lacks a required feature stays refused, but a comparison into a mask alone or a width
-// change, whose machine row a target may still run, stays one.
+// comparisons into a mask alone, width changes and permutes (#1840), then exact scalar splats; other admitted forms stay machine rows. A
+// semantic match whose target lacks a required feature stays refused, but a comparison into a mask alone, a width change
+// or a permute, whose machine row a target may still run, stays one.
 static IrSimdTypedStatus ir_simd_typed_row(const Tier0Operation* source, uint64_t target_features, IrSimdTypedOperation* result)
 {
     const bool masks = source != NULL && source->operand_count != 0 && source->operand_classes[0] == BUSTER_TYPED_CLASS_MASK && tier0_class_integer(source->result_class);
@@ -1064,6 +1147,10 @@ static IrSimdTypedStatus ir_simd_typed_row(const Tier0Operation* source, uint64_
     if (status == IR_SIMD_TYPED_UNSUPPORTED && source->result_class == BUSTER_TYPED_CLASS_VECTOR)
     {
         status = ir_simd_typed_width(source, target_features, result);
+    }
+    if (status == IR_SIMD_TYPED_UNSUPPORTED && source->result_class == BUSTER_TYPED_CLASS_VECTOR)
+    {
+        status = ir_simd_typed_permute(source, target_features, result);
     }
     if (status == IR_SIMD_TYPED_UNSUPPORTED)
     {

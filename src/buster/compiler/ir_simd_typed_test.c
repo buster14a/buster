@@ -1047,8 +1047,116 @@ static void ir_simd_typed_test_widths(IrTestTally* tally)
     printf("  IR SIMD rows: %u insert rows and %u masked extract rows of the front end at 8 immediates, and %u casts' rows, decode to the IR's width changes\n", inserts, extracts, casts);
 }
 
+// A front-end rule's permute (#1840), written out from its form's mnemonic: its kind past BUSTER_IR_INTRINSIC_PERMUTE
+// (0 vpermb to vpermq, 1 vpshufb, 2 valignd and valignq, 3 vshufi32x4 and vshufi64x2), or 4 for any other rule; and its
+// flags at immediate `code`: the elements' bytes' log2, 0, that log2 in bits 4 and 5 and the code's count below the
+// lanes, and the code below 4 of a 32-byte vector's or any byte of a 64-byte one's.
+static uint32_t ir_simd_typed_test_permute_kind(const CheckX86LowerRule* rule, uint32_t code, uint32_t* flags)
+{
+    const char* mnemonic = rule->form != X86_FORM_NONE ? x86_form_description(rule->form)->mnemonic : "";
+    const bool binary = rule->family == CHECK_X86_LOWER_BINARY && rule->other == 0;
+    const bool immediate = rule->family == CHECK_X86_LOWER_BINARY_IMMEDIATE && rule->other == 0;
+    const uint32_t size = rule->element == 1 ? 0 : rule->element == 2 ? 1 : rule->element == 4 ? 2 : 3;
+    const bool permute = binary && rule->swap && (strcmp(mnemonic, "vpermb") == 0 || strcmp(mnemonic, "vpermw") == 0 ||
+                                                  (strcmp(mnemonic, "vpermd") == 0 && rule->bytes >= 32) || (strcmp(mnemonic, "vpermq") == 0 && rule->bytes == 64));
+    const bool shuffle = binary && !rule->swap && strcmp(mnemonic, "vpshufb") == 0;
+    const bool align = immediate && (strcmp(mnemonic, "valignd") == 0 || strcmp(mnemonic, "valignq") == 0);
+    const bool lanes = immediate && rule->bytes >= 32 && (strcmp(mnemonic, "vshufi32x4") == 0 || strcmp(mnemonic, "vshufi64x2") == 0);
+    const uint32_t kind = permute ? 0 : shuffle ? 1 : align ? 2 : lanes ? 3 : 4;
+    *flags = kind == 0 ? size : kind == 2 ? (size << 4) | (code % (rule->bytes >> size)) : kind == 3 ? (rule->bytes == 32 ? code & 3 : code & 255) : 0;
+    return kind;
+}
+
+// The permutes (#1840): every front-end rule of vpermb, vpermw, vpermd and vpermq (the variable permutes, their indices
+// in vvvv), vpshufb, valignd, valignq, vshufi32x4 and vshufi64x2, at 8 immediates for those that take one, decodes as the
+// IR's permute of its kind and flags, written out, at exactly its form's features and its vectors' moves; refused without
+// each and under 8 changes.
+static void ir_simd_typed_test_permutes(IrTestTally* tally)
+{
+    const X86Target every = { .features = UINT64_MAX, .extensions = UINT64_MAX };
+    const uint64_t all = UINT64_MAX;
+    static const uint64_t features[] = { BUSTER_X86_FEATURE(AVX512F), BUSTER_X86_FEATURE(AVX512VL), BUSTER_X86_FEATURE(AVX512BW), BUSTER_X86_FEATURE(AVX512VBMI) };
+    uint32_t decoded_rows[4] = { 0 };
+    const bool tables = x86_encoder_initialize() && tier0_initialize();
+    ir_test_expect(tally, tables, "the encoder's, the effects' and Tier 0's tables");
+    for (uint32_t i = 0; tables && i < BUSTER_ARRAY_LENGTH(check_x86_lower_rules); i += 1)
+    {
+        const CheckX86LowerRule* rule = check_x86_lower_rules + i;
+        uint32_t flags = 0;
+        const uint32_t kind = ir_simd_typed_test_permute_kind(rule, 0, &flags);
+        const uint32_t codes = kind >= 2 ? 8 : 1;
+        for (uint32_t code = 0; kind < 4 && code < codes; code += 1)
+        {
+            ir_simd_typed_test_permute_kind(rule, code, &flags);
+            Tier0Operation row;
+            char description[224];
+            const bool made = check_x86_lower_row_of(&every, rule, code, 4, 0, false, &row) == NULL;
+            snprintf(description, sizeof(description), "%s (code %u): its row is the front end's", rule->name, code);
+            ir_test_expect(tally, made, description);
+            if (!made)
+            {
+                continue;
+            }
+            const uint64_t expected = BUSTER_X86_FEATURE(AVX512F) | (rule->bytes < 64 ? BUSTER_X86_FEATURE(AVX512VL) : 0) |
+                                      ((kind == 0 && rule->element <= 2) || kind == 1 ? BUSTER_X86_FEATURE(AVX512BW) : 0) |
+                                      (kind == 0 && rule->element == 1 ? BUSTER_X86_FEATURE(AVX512VBMI) : 0);
+            IrSimdTypedOperation decoded;
+            memset(&decoded, 0xa5, sizeof(decoded));
+            const IrSimdTypedStatus status = ir_simd_typed_row(&row, all, &decoded);
+            snprintf(description, sizeof(description), "%s (code %u): the IR's permute of kind %u and flags 0x%x at exactly its features", rule->name, code, kind, flags);
+            ir_test_expect(tally, status == IR_SIMD_TYPED_OK && !decoded.machine && decoded.permute == BUSTER_IR_INTRINSIC_PERMUTE + kind + 1 && decoded.immediate == flags &&
+                                      decoded.width_change == 0 && decoded.operation == IR_SIMD_OPERATION_COUNT && (decoded.required_features & ~BUSTER_X86_FEATURE(AVX)) == expected,
+                           description);
+            decoded_rows[kind] += status == IR_SIMD_TYPED_OK && decoded.permute != 0;
+            for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(features); f += 1)
+            {
+                IrSimdTypedOperation without;
+                memset(&without, 0x5a, sizeof(without));
+                const IrSimdTypedStatus refused = ir_simd_typed_row(&row, all & ~features[f], &without);
+                const bool needed = (expected & features[f]) != 0;
+                snprintf(description, sizeof(description), "%s (code %u): without a feature it needs it stays the machine row, and needs no other", rule->name, code);
+                ir_test_expect(tally, needed ? ir_simd_typed_test_undecoded(refused, &without) || refused == IR_SIMD_TYPED_OK : refused == IR_SIMD_TYPED_OK && without.permute != 0,
+                               description);
+                if (needed && refused == IR_SIMD_TYPED_OK)
+                {
+                    ir_test_expect(tally, without.permute == 0, description);
+                }
+            }
+            for (uint32_t m = 0; m < 8; m += 1)
+            {
+                Tier0Operation changed = row;
+                X86Instruction* first = &changed.records[0];
+                switch (m)
+                {
+                case 0: first->decorations = BUSTER_TIER0_DECORATION_MASK(0); break;
+                case 1: first->mode = BUSTER_X86_MEMORY_BASE; break;
+                case 2: first->rm = first->vvvv; break;
+                case 3: first->reg = BUSTER_TIER0_ROLE_VECTOR(1); break;
+                case 4: changed.operand_bytes[1] = rule->bytes == 64 ? 32 : 64; break;
+                case 5:
+                    changed.records[1] = changed.records[0];
+                    changed.record_count = 2;
+                    break;
+                case 6: first->displacement = 4; break;
+                case 7: first->immediate = kind < 2 ? 1 : 256; break;
+                }
+                memset(&decoded, 0xa5, sizeof(decoded));
+                const IrSimdTypedStatus refused = ir_simd_typed_row(&changed, all, &decoded);
+                snprintf(description, sizeof(description), "%s (code %u, change %u): not the IR's permute", rule->name, code, m);
+                ir_test_expect(tally, ir_simd_typed_test_undecoded(refused, &decoded) || (refused == IR_SIMD_TYPED_OK && decoded.permute == 0 && !decoded.machine && m == 4), description);
+            }
+        }
+    }
+    // vpermb and vpermw at 3 widths, vpermd at 2 and vpermq at 1; vpshufb at 3; valignd and valignq at 3 widths, and the
+    // two shuffles of lanes at 2, at 8 immediates.
+    ir_test_expect(tally, decoded_rows[0] == 9 && decoded_rows[1] == 3 && decoded_rows[2] == 6 * 8 && decoded_rows[3] == 4 * 8, "every permute rule decodes");
+    printf("  IR SIMD rows: the front end's permutes decode to the IR's: %u variable permutes, %u byte shuffles, %u aligns and %u shuffles of lanes\n", decoded_rows[0],
+           decoded_rows[1], decoded_rows[2], decoded_rows[3]);
+}
+
 static void ir_simd_typed_test(IrTestTally* tally)
 {
+    ir_simd_typed_test_permutes(tally);
     ir_simd_typed_test_widths(tally);
     ir_simd_typed_test_splats(tally);
     ir_simd_typed_test_machine(tally);
