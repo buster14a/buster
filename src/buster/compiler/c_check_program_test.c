@@ -5437,8 +5437,10 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
             "static int x=(int){1};static double d=(double){2.5};int vv;int*pp=(int*){&vv};void*np=(void*){0};"
             "long n2=(long){1}<<40;int nested=(int){(int){3}};unsigned char narrow=(unsigned char){300};"
             "int arr[]={(int){4},(int){5}+1};struct S{int a;long b;}st={(int){6},(long){7}};"
+            "static int braced0=(int){{}};static int braced3=(int){{3}};static int braced4=(int){{4},};"
             "int tested(int n){static int y=(int){4};static long z=(long){5}+1;static float f=(float){1.5};"
-            "return x+(int)d+(pp==&vv)+(np==0)+(int)(n2>>40)+nested+narrow+arr[0]+arr[1]+st.a+(int)st.b+y+(int)z+(int)(f*2)+n;}",
+            "return x+(int)d+(pp==&vv)+(np==0)+(int)(n2>>40)+nested+narrow+arr[0]+arr[1]+st.a+(int)st.b+y+(int)z+(int)(f*2)+n+"
+            "braced0*1000+braced3*10000+braced4*100000;}",
             "scalar-compound-literals-in-static-initializers", clang);
         // #1447: GNU's relative jump table, the difference of two labels' addresses in a static initializer, through the
         // conversions clang keeps (to unsigned, through long, in a long array), dispatched by a computed goto.

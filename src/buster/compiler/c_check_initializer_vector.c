@@ -390,7 +390,7 @@ static bool check_init_scalar_literal(CheckInitWalker* walker, uint32_t node, ui
         first += 1;
         last = valid ? check_init_expression_end(parser, first, close) : first;
         const bool trailing = last < close && parser->tokens.kinds[last] == PARSE_KIND_COMMA && last + 1 == close;
-        valid = valid && first < last && (walker->ignore_excess || last == close || trailing);
+        valid = valid && (walker->ignore_excess || last == close || trailing);
     }
     const uint32_t value_node = valid && first < last ? check_init_node(walker, first, last) : BUSTER_CHECK_NONE;
     CheckValue value = { .type = BUSTER_TYPE_INT, .category = CHECK_RVALUE, .constant_kind = CHECK_CONSTANT_INTEGER };
