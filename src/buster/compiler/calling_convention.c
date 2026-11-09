@@ -1036,7 +1036,8 @@ static AbiUnit abi_bit_field_unit(const AbiTable* abi, const TypeTable* table, u
         install = !first && bytes > 8;
         if (!install)
         {
-            const uint64_t limit = abi_unit_limit(abi, table, field, end, size);
+            // A run's own offset is the limit: probe past the span's end alone.
+            const uint64_t limit = run ? table->members.offset[field] >> 3 : abi_unit_limit(abi, table, field, end, size);
             const uint64_t natural = abi_integer_bytes(bytes);
             const bool fits = start + natural <= limit;
             best_end = fits ? field : best_end;
