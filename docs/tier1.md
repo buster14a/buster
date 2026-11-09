@@ -625,6 +625,14 @@ before the depth slots above. The 9700X job runs the measurement on its daily
 and dispatched runs, and on pull requests that change Tier 1's input or
 pipeline.
 
+#1216 keeps dispatch loops' loop-carried values in registers and their phi
+webs in one slot ([the allocation guide](tier1-allocation.md)). From its merge
+base `6a021550e`, the tagged edge spills, reloads and moves fell from 469 M to
+226 M on speedtest1 and from 1,013 M to 477 M on Lua (51.9% and 52.9%). On the
+9700X, user cycles fell from 974 M to 928 M and from 1,322 M to 1,219 M
+(100 ln(head / base) of -4.91 and -8.25), head faster at every layout
+([the record](https://github.com/buster14a/buster-performance/tree/c8cc523034dd4035161800a4d0940e287a8975dc/docs/measurements/tier1-loop-carried-1216-2026-11-09)).
+
 ## Current integration boundary
 
 The implementation now consumes the shared IR and the upstream local-SSA
