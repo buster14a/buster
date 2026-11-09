@@ -2171,17 +2171,20 @@ static void check_program_emit_help(CheckEmitBoard* board, uint32_t index)
     }
 }
 
-// The asm templates' names' symbols (CheckProgramAsms.names), into `symbols`, by name: a label's a local symbol of its
-// own, which the merge defines where its template's code puts it; another name's the program's symbol of that link name
-// (its asm label or its identifier: a name the emission makes is no template's to know), found in one pass over the
-// program's symbols; or else an undefined global symbol of its own, as GNU as and clang make one for a name the unit
-// doesn't define. The symbols of its own are numbered from `first` in the names' order, `*own` of them, and `externals`
-// (with binding, or 0) gets each undefined one's spelling. A label with one of the program's symbols' names is refused
-// (`*reason`), as GNU as and clang refuse a symbol defined twice. False for that, or an arena without room. The pass is
-// scalar: a unit's templates have few names (main.c's units 6), and it looks up only symbols' names of their lengths.
+// The asm templates' names' symbols (CheckProgramAsms.names), into `symbols`, by name: another name's the program's
+// symbol of that link name (its asm label or its identifier: a name the emission makes is no template's to know), found
+// in one pass over the program's symbols; a label's (or a `.comm`'s) the program's symbol of its name where the unit
+// declares that symbol without defining it (`defined`, by object: `void f(void);` with a template's `f:`, or `extern int
+// x;` with its `.comm x,4,4`), which the merge then defines where its template puts it, as clang's assembler binds the
+// C references to the template's definition; another label's a local symbol of its own; or else an undefined global
+// symbol of its own, as GNU as and clang make one for a name the unit doesn't define. The symbols of its own are
+// numbered from `first` in the names' order, `*own` of them, and `externals` (with binding, or 0) gets each undefined
+// one's spelling. A label (or an absolute symbol) with the name of a symbol the unit defines is refused (`*reason`), as
+// GNU as and clang refuse a symbol defined twice. False for that, or an arena without room. The pass is scalar: a unit's
+// templates have few names (main.c's units 6), and it looks up only symbols' names of their lengths.
 static bool check_program_emit_asm_symbols(const CheckProgram* program, const Parser* parser, const InternTable* identifiers, const String8* symbol_names,
-                                           const CheckProgramAsms* asms, SymbolId first, SymbolId* symbols, uint32_t* own, String8* externals,
-                                           uint32_t* external_count, const char** reason, Arena* scratch)
+                                           const uint8_t* defined, const CheckProgramAsms* asms, SymbolId first, SymbolId* symbols, uint32_t* own,
+                                           String8* externals, uint32_t* external_count, const char** reason, Arena* scratch)
 {
     const CheckInput* input = program->input;
     const uint32_t count = asms->name_count;
@@ -2231,7 +2234,7 @@ static bool check_program_emit_asm_symbols(const CheckProgram* program, const Pa
                 slot = (slot + 1) & (slots - 1);
             }
             const uint32_t n = table[slot] != 0 ? table[slot] - 1 : BUSTER_CHECK_NONE;
-            if (n != BUSTER_CHECK_NONE && asms->names[n].label)
+            if (n != BUSTER_CHECK_NONE && asms->names[n].label && (asms->names[n].absolute || defined[program->symbol_objects[s]] != 0))
             {
                 *reason = "inline assembly labels named as the unit's symbols";
                 valid = false;
@@ -2261,7 +2264,7 @@ static bool check_program_emit_asm_symbols(const CheckProgram* program, const Pa
         {
             symbols[n] = 0;
         }
-        else if (name->label || symbols[n] == 0)
+        else if (symbols[n] == 0)
         {
             symbols[n] = first + *own;
             *own += 1;
@@ -3573,32 +3576,6 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
                                                                                                     asms->name_count + 1) : 0;
     uint32_t external_count = 0;
     valid = valid && (binding == NULL || externals != 0);
-    for (uint32_t s = 0; valid && externals != 0 && s < program->symbol_count; s += 1)
-    {
-        const uint32_t object = program->symbol_objects[s];
-        const uint32_t declaration = program->object_declarations[object];
-        // A weakref's own symbol (#147) refers to its name, which symbol_names holds, and a weakref's target referred to
-        // through weakrefs alone is weak whatever its linkage.
-        const bool weakref = symbol_aliases != 0 && symbol_aliases[s + 1] != 0 && program->aliases[symbol_aliases[s + 1] - 1].kind == CHECK_PROGRAM_WEAKREF;
-        if (declaration != BUSTER_CHECK_NONE && !check_input_bit(program->input->declaration_bits, declaration, BUSTER_CHECK_BITS_COMPOUND) && !defined[object] &&
-            (check_input_linkage(program->input->declaration_bits, declaration) == 2 || weakref || weak[s + 1]))
-        {
-            const uint32_t identifier = parser->tokens.names[declaration];
-            externals[external_count++] = symbol_names[s + 1].length != 0 ? symbol_names[s + 1] :
-                                                                              (String8){ .pointer = (char*)intern_bytes(identifiers, identifier),
-                                                                                         .length = intern_length(identifiers, identifier) };
-        }
-        else if (program->cfstring_class_own && object == program->cfstring_class)
-        {
-            // The class the unit's constant CFStrings point to (#148), which it doesn't declare.
-            externals[external_count++] = (String8){ .pointer = (char*)check_program_cfstring_class_name, .length = sizeof(check_program_cfstring_class_name) - 1 };
-        }
-    }
-    for (uint32_t r = 0; valid && externals != 0 && r < result->lowered.runtime_symbol_count; r += 1)
-    {
-        const char* spelling = check_lower_runtime_names[result->lowered.runtime_order[r]];
-        externals[external_count++] = (String8){ .pointer = (char*)spelling, .length = strlen(spelling) };
-    }
     // The jump tables: an atom each, a fixup per entry, and their symbols and their labels'.
     uint64_t table_entries = 0;
     for (uint32_t t = 0; valid && t < result->lowered.table_count; t += 1)
@@ -3617,10 +3594,56 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     if (valid && asms->name_count != 0)
     {
         const char* reason = NULL;
-        valid = check_program_emit_asm_symbols(program, parser, identifiers, symbol_names, asms, asm_first, asm_symbols, &asm_own, externals, &external_count,
-                                               &reason, scratch);
+        valid = check_program_emit_asm_symbols(program, parser, identifiers, symbol_names, defined, asms, asm_first, asm_symbols, &asm_own, externals,
+                                               &external_count, &reason, scratch);
         result->status = valid ? result->status : reason != NULL ? CHECK_PROGRAM_UNSUPPORTED : CHECK_PROGRAM_RESOURCE;
         result->reason = reason != NULL ? reason : result->reason;
+    }
+    // The program's symbols a template's label or `.comm` defines (check_program_emit_asm_symbols), by symbol: its name's
+    // index plus one. Such a symbol is the template's definition, not an undefined name for the runtime to supply.
+    bool asm_defining = false;
+    for (uint32_t n = 0; valid && n < asms->name_count; n += 1)
+    {
+        asm_defining |= asms->names[n].label && asm_symbols[n] != 0 && asm_symbols[n] < asm_first;
+    }
+    uint32_t* asm_defines = asm_defining ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)program->symbol_count + 1) : 0;
+    valid = valid && (!asm_defining || asm_defines != 0);
+    if (valid && asm_defining)
+    {
+        memset(asm_defines, 0, ((uint64_t)program->symbol_count + 1) * sizeof(uint32_t));
+        for (uint32_t n = 0; n < asms->name_count; n += 1)
+        {
+            if (asms->names[n].label && asm_symbols[n] != 0 && asm_symbols[n] < asm_first)
+            {
+                asm_defines[asm_symbols[n]] = n + 1;
+            }
+        }
+    }
+    for (uint32_t s = 0; valid && externals != 0 && s < program->symbol_count; s += 1)
+    {
+        const uint32_t object = program->symbol_objects[s];
+        const uint32_t declaration = program->object_declarations[object];
+        // A weakref's own symbol (#147) refers to its name, which symbol_names holds, and a weakref's target referred to
+        // through weakrefs alone is weak whatever its linkage.
+        const bool weakref = symbol_aliases != 0 && symbol_aliases[s + 1] != 0 && program->aliases[symbol_aliases[s + 1] - 1].kind == CHECK_PROGRAM_WEAKREF;
+        if (declaration != BUSTER_CHECK_NONE && !check_input_bit(program->input->declaration_bits, declaration, BUSTER_CHECK_BITS_COMPOUND) && !defined[object] &&
+            (asm_defines == 0 || asm_defines[s + 1] == 0) && (check_input_linkage(program->input->declaration_bits, declaration) == 2 || weakref || weak[s + 1]))
+        {
+            const uint32_t identifier = parser->tokens.names[declaration];
+            externals[external_count++] = symbol_names[s + 1].length != 0 ? symbol_names[s + 1] :
+                                                                              (String8){ .pointer = (char*)intern_bytes(identifiers, identifier),
+                                                                                         .length = intern_length(identifiers, identifier) };
+        }
+        else if (program->cfstring_class_own && object == program->cfstring_class)
+        {
+            // The class the unit's constant CFStrings point to (#148), which it doesn't declare.
+            externals[external_count++] = (String8){ .pointer = (char*)check_program_cfstring_class_name, .length = sizeof(check_program_cfstring_class_name) - 1 };
+        }
+    }
+    for (uint32_t r = 0; valid && externals != 0 && r < result->lowered.runtime_symbol_count; r += 1)
+    {
+        const char* spelling = check_lower_runtime_names[result->lowered.runtime_order[r]];
+        externals[external_count++] = (String8){ .pointer = (char*)spelling, .length = strlen(spelling) };
     }
     const LinkCapacity runtime = binding != NULL && valid ? bind_capacity_needed(binding->runtime, externals, external_count, scratch, &name_bytes, &atom_bytes) :
                                                             (LinkCapacity){ 0 };
@@ -3812,6 +3835,14 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             const bool is_common = check_program_emit_common(commons[s + 1], program->input->common_tentatives) && alias == NULL &&
                                    kind == BUSTER_LINK_SYMBOL_OBJECT && (flags & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_GLOBAL;
             flags = is_common ? (uint8_t)((flags & ~BUSTER_LINK_SYMBOL_TYPE) | BUSTER_LINK_SYMBOL_COMMON) : flags;
+            // A symbol a template defines (asm_defines: a declaration's, `f:` or `.comm x,4,4`) is the template's label,
+            // as clang's assembler makes it: its type the template's (none without `.type`, a `.comm`'s common), local
+            // without a binding directive, and of the template's visibility or else the declaration's.
+            const CheckAsmName* defining = asm_defines != 0 && asm_defines[s + 1] != 0 ? &asms->names[asm_defines[s + 1] - 1] : NULL;
+            const uint8_t defining_visibility = defining != NULL ? defining->flags & BUSTER_LINK_SYMBOL_VISIBILITY : BUSTER_LINK_SYMBOL_DEFAULT;
+            flags = defining == NULL ? flags :
+                    (uint8_t)((defining->flags & (BUSTER_LINK_SYMBOL_TYPE | BUSTER_LINK_SYMBOL_BINDING)) |
+                              (defining_visibility != BUSTER_LINK_SYMBOL_DEFAULT ? defining_visibility : flags & BUSTER_LINK_SYMBOL_VISIBILITY));
         }
         else if (object != 0 && object - 1 < parser->tokens.count &&
                  (parser->tokens.kinds[object - 1] == PARSE_KIND_STRING || check_input_function_name_token(parser, object - 1) ||
@@ -3987,6 +4018,11 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     for (uint32_t k = 0; valid && binding != NULL && k < result->lowered.label_symbol_count; k += 1)
     {
         result->link.symbols.source[result->lowered.label_symbols[k]] = BUSTER_LINK_SOURCE_PROGRAM;
+    }
+    // The program's symbols the templates define (asm_defines), which the units' merge defines.
+    for (uint32_t s = 1; valid && binding != NULL && asm_defines != 0 && s <= program->symbol_count; s += 1)
+    {
+        result->link.symbols.source[s] = asm_defines[s] != 0 ? BUSTER_LINK_SOURCE_PROGRAM : result->link.symbols.source[s];
     }
     // The aliases' and ifuncs' symbols (#147), which check_program_sections defines once the static data's atoms exist:
     // the program's in -c's link too, so that the static data may refer to a local one before it has an atom

@@ -81,14 +81,15 @@ unused-warning fixtures also check exact scope-completion tokens.
   and the default C command (`-fsyntax-only`, `-c`) use it; `compiler parse`
   keeps the parser's driver alone. Unsupported syntax is diagnosed.
   `test-checker-driver --executable ./build/compiler [--part K/N]
-  [--lazy-system-headers | --cpu-dispatch-only]` and `test-checker-asm`
+  [--lazy-system-headers | --cpu-dispatch-only | --asm-definitions-only]` and `test-checker-asm`
   check the driver and inline assembly against Clang (named UCNs too, #1447,
   `check_test_driver_named_ucns`; with
   `--lazy-system-headers`, only the checks that pass the driver
   `-flazy-system-headers`, since the others run the same either way, and
   `--part K/N` runs the K-th of N parts its checks are dealt to in turn,
   `CheckDriverPart`; `--cpu-dispatch-only` runs the `cpu_specific` and
-  `cpu_dispatch` section alone, #1447; `--semantic-recovery-only` runs
+  `cpu_dispatch` section alone, #1447; `--asm-definitions-only` runs what
+  inline assembly defines against clang's objects alone, #1848; `--semantic-recovery-only` runs
   `c_check_semantic_recovery_driver_test.c`, `c_check_statement_recovery_driver_test.c`,
   `c_check_type_attribute_recovery_driver_test.c` and
   `c_check_structural_recovery_driver_test.c` alone, the whole output and status
