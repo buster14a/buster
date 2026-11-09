@@ -991,7 +991,8 @@ static void check_lower_unsupported(CheckLowerWriter* writer, const char* featur
 // swifttailcc's callee-popped frame (swiftasynccall's) are no frame or location Tier 0 has.
 static const char* check_lower_convention(const TypeTable* types, TypeId function)
 {
-    const TypeFunctionABI convention = type_function_abi_kind(types, function);
+    // (no_caller_saved_registers beside a convention, #1447, is that convention's arguments.)
+    const TypeFunctionABI convention = type_function_convention(types, function);
     const char* result = NULL;
     switch (convention)
     {
@@ -1024,6 +1025,7 @@ static const char* check_lower_convention(const TypeTable* types, TypeId functio
 static const char* check_lower_convention_call(const TypeTable* types, TypeId function, uint64_t target)
 {
     const char* result = check_lower_convention(types, function);
+    // (One with no_caller_saved_registers keeps every register, #1447: its abi_kind is the bit's, which this isn't.)
     if (result == NULL && type_function_abi_kind(types, function) == TYPE_FUNCTION_ABI_INTEL_OCL && (target & BUSTER_X86_FEATURE(AVX512F)) != 0)
     {
         result = "calls of intel_ocl_bicc functions on an AVX-512 target, whose callees don't keep rbp, r12 and r13";
@@ -1045,10 +1047,12 @@ static const char* check_lower_convention_call(const TypeTable* types, TypeId fu
 // zmm31 and the mask registers, k4 to k7 of them (Tier 0's block keeps k0 to k7). Nothing for another convention.
 static void check_lower_preserve(const TypeTable* types, TypeId function, uint64_t target, bool interrupt, Tier0Function* output)
 {
-    const TypeFunctionABI convention = type_function_abi_kind(types, function);
+    // no_caller_saved_registers beside another convention keeps every register too (#1447, LLVM's getCalleeSavedRegs takes
+    // x86_intrcc's set for the attribute whatever the convention).
+    const bool every = type_function_keeps_registers(types, function) || interrupt;
+    const TypeFunctionABI convention = every ? TYPE_FUNCTION_ABI_NO_CALLER_SAVED : type_function_abi_kind(types, function);
     const bool most = convention == TYPE_FUNCTION_ABI_PRESERVE_MOST;
     const bool all = convention == TYPE_FUNCTION_ABI_PRESERVE_ALL;
-    const bool every = convention == TYPE_FUNCTION_ABI_NO_CALLER_SAVED || interrupt;
     const bool wide = every && (target & BUSTER_X86_FEATURE(AVX512F)) != 0;
     const uint16_t general = (uint16_t)(1u << X86_REGISTER_RAX | 1u << X86_REGISTER_RCX | 1u << X86_REGISTER_RDX | 1u << X86_REGISTER_RSI |
                                         1u << X86_REGISTER_RDI | 1u << X86_REGISTER_R8 | 1u << X86_REGISTER_R9 | 1u << X86_REGISTER_R10);
@@ -15516,7 +15520,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         if (tier0_preserving(function) && (writer->tails || writer->eh_return || writer->returns_twice))
         {
             const TypeFunctionABI convention = type_function_abi_kind(types, type);
-            const bool every = convention == TYPE_FUNCTION_ABI_NO_CALLER_SAVED;
+            const bool every = type_function_keeps_registers(types, type);
             const bool ocl = convention == TYPE_FUNCTION_ABI_INTEL_OCL;
             static const char* const reasons[3][4] = {
                 { "__builtin_eh_return in an interrupt service routine", "__builtin_eh_return in a function with no_caller_saved_registers",

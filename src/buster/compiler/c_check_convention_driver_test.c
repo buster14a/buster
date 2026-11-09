@@ -487,6 +487,10 @@ static void check_test_driver_preserving_frames(CheckTest* test, const char* cla
         "long ocl(long a, long b);\n"
         "long ocl_calls(long a, long b);\n"
         "double ocl_double(double a, double b);\n"
+        "long most_every(long a, long b);\n"
+        "long all_every(long a, long b);\n"
+        "long ocl_every(long a, long b);\n"
+        "double ocl_every_double(double a, double b);\n"
         "extern int depth_seen;\n"
         "int main(void)\n"
         "{\n"
@@ -530,6 +534,11 @@ static void check_test_driver_preserving_frames(CheckTest* test, const char* cla
         "    bad |= check(\"ocl\", (void*)ocl, ocl_set, OCL_VECTORS, OCL_WIDTH, OCL_MASKS, 40, 2, &r) || r != 42;\n"
         "    bad |= check(\"ocl_calls\", (void*)ocl_calls, ocl_set, OCL_VECTORS, OCL_WIDTH, OCL_MASKS, 40, 2, &r) || r != 126;\n"
         "    bad |= check(\"ocl_double\", (void*)ocl_double, ocl_set, OCL_VECTORS, OCL_WIDTH, OCL_MASKS, 1, 2, &r) || ocl_double(2.0, 3.0) != 7.0;\n"
+        "    // no_caller_saved_registers beside another convention (#1447): every register, the convention's arguments.\n"
+        "    bad |= check(\"most_every\", (void*)most_every, every_set & ~1u, EVERY_VECTORS, EVERY_WIDTH, EVERY_MASKS, 40, 2, &r) || r != 126;\n"
+        "    bad |= check(\"all_every\", (void*)all_every, every_set & ~1u, EVERY_VECTORS, EVERY_WIDTH, EVERY_MASKS, 40, 2, &r) || r != 42;\n"
+        "    bad |= check(\"ocl_every\", (void*)ocl_every, every_set & ~1u, EVERY_VECTORS, EVERY_WIDTH, EVERY_MASKS, 40, 2, &r) || r != 126;\n"
+        "    bad |= ocl_every_double(2.0, 3.0) != 7.0 || most_every(1, 2) != 9;\n"
         "    Pair p = most_pair(5, 3);\n"
         "    bad |= p.a != 8 || p.b != 2 || all_double(2.0, 3.0) != 7.0;\n"
         "    printf(bad ? \"FAILED\\n\" : \"ok\\n\");\n"
@@ -567,7 +576,12 @@ static void check_test_driver_preserving_frames(CheckTest* test, const char* cla
         "__attribute__((cdecl, no_caller_saved_registers)) long every_cdecl(long a, long b) { char buf[64]; __builtin_snprintf(buf, sizeof buf, \"%f\", 2.5); return a + b; }\n"
         "__attribute__((intel_ocl_bicc)) long ocl(long a, long b) { double x = (double)a * 0.5; return (long)(x * 2) + b; }\n"
         "__attribute__((intel_ocl_bicc)) long ocl_calls(long a, long b) { char buf[64]; __builtin_snprintf(buf, sizeof buf, \"%f %ld\", 1.5, a); return helper(a, b); }\n"
-        "__attribute__((intel_ocl_bicc)) double ocl_double(double a, double b) { char buf[64]; __builtin_snprintf(buf, sizeof buf, \"%f\", a); return a * b + 1.0; }\n";
+        "__attribute__((intel_ocl_bicc)) double ocl_double(double a, double b) { char buf[64]; __builtin_snprintf(buf, sizeof buf, \"%f\", a); return a * b + 1.0; }\n"
+        "__attribute__((preserve_most, no_caller_saved_registers)) long most_every(long a, long b) { char buf[64]; __builtin_snprintf(buf, sizeof buf, \"%f\", 2.5); return helper(a, b); }\n"
+        "__attribute__((no_caller_saved_registers)) long all_every(long a, long b) __attribute__((preserve_all));\n"
+        "long all_every(long a, long b) { double x = (double)a * 0.5; return (long)(x * 2) + b; }\n"
+        "__attribute__((intel_ocl_bicc, no_caller_saved_registers)) long ocl_every(long a, long b) { char buf[64]; __builtin_snprintf(buf, sizeof buf, \"%f %ld\", 1.5, a); return helper(a, b); }\n"
+        "__attribute__((no_caller_saved_registers, intel_ocl_bicc)) double ocl_every_double(double a, double b) { return a * b + 1.0; }\n";
     static const struct
     {
         const char* name;

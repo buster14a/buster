@@ -1535,6 +1535,19 @@ static void check_test_driver_attribute_arguments(CheckTest* test, const char* c
         "void f(int a __attribute__((no_caller_saved_registers)));\n",
         "void f(void) __attribute__((stdcall(1)));\n",
         "void (*p)(void) __attribute__((stdcall(1)));\n",
+        // no_caller_saved_registers beside another convention (#1447): clang's bit, printed after the convention, part of the
+        // type's identity, inherited by a redeclaration that has the convention alone and an error where one adds it.
+        "void a(void) __attribute__((ms_abi, no_caller_saved_registers)); void t(void) { int y = a; }\n",
+        "typedef void T(void) __attribute__((vectorcall)); T f __attribute__((no_caller_saved_registers)); void t(void) { int y = f; }\n",
+        "void b(void) __attribute__((no_caller_saved_registers, preserve_most)); void b(void) __attribute__((preserve_most));\n",
+        "void e(void) __attribute__((preserve_most)); void e(void) __attribute__((no_caller_saved_registers, preserve_most));\n",
+        "typedef void N(void) __attribute__((regcall, no_caller_saved_registers)); typedef void M(void) __attribute__((no_caller_saved_registers, regcall));\n"
+        "typedef void R(void) __attribute__((regcall)); _Static_assert(__builtin_types_compatible_p(N, M), \"same\"); "
+        "_Static_assert(!__builtin_types_compatible_p(N, R), \"differ\");\n",
+        "void a(int, ...) __attribute__((vectorcall, no_caller_saved_registers));\n",
+        "void g(void) __attribute__((ms_abi, sysv_abi, no_caller_saved_registers));\n",
+        "__attribute__((intel_ocl_bicc, no_caller_saved_registers)) long f(long a) { return a; } __attribute__((no_caller_saved_registers)) long h(long a) "
+        "__attribute__((preserve_all)) { return f(a); }\n",
         // target diagnostics name the decoded unsupported fragment, including permitted escapes.
         "int f(void) __attribute__((target(\"bo\\\\gus\")));\n",
         "int f(void) __attribute__((target(\"bo\\tgus\")));\n",
