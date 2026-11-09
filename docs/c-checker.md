@@ -307,7 +307,12 @@ declaration of it alone (`enum E;`) too; a reference to it (`enum E x;`) needs
 none. A declaration of it with a declarator (`enum E : int x;`) is refused at
 the `:`, and an enum without a base can't be given one, nor the other way round,
 each where clang reports it. An `aligned` attribute after its body, which clang
-applies after the base completed it, is refused as unsupported. (Attributes
+applies after the base completed it, sets its alignment then (#1447,
+`type_enum_realign`), as clang's does where nothing has asked its layout yet:
+clang memoizes an enum's layout at its first query, after which the attribute
+changes nothing. So it is taken where the enum completed at this body's `{` and
+the body doesn't name it (`enum E`); one whose body names it, or one completed
+by an earlier declaration (`enum E : char;`), stays refused as unsupported. (Attributes
 after a tag's name, before a `;`, make any tag's declaration a reference to the
 visible tag, as clang has it, not a declaration of it alone.)
 
