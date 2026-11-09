@@ -249,6 +249,7 @@ static void check_test_driver_asm_definitions(CheckTest* test, const char* clang
             snprintf(description, sizeof(description), "%s: -c by %s: %s", fixtures[f].name, p == 0 ? "clang" : p == 1 ? "the vector path" : "the scalar path",
                      text != NULL ? text : "");
             free(text);
+            text = NULL;
             check_test_expect(test, compiled, description);
             const bool read = compiled && check_test_asm_definition_symbols(objects[p], fixtures[f].functions, listed[p], sizeof(listed[p]));
             snprintf(description, sizeof(description), "%s: the %s object's symbols read", fixtures[f].name, p == 0 ? "clang" : p == 1 ? "vector" : "scalar");
