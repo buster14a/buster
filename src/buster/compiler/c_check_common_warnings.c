@@ -2611,8 +2611,10 @@ static void check_common_stmt_marker(CheckCommonEmission* emission, uint32_t nod
              !(role == PARSE_ROLE_CLOSE_CAST && check_common_void_cast(parser, emission->pp, emission->input, emission->stream, emission->types, token)) &&
              parser->tokens.kinds[token] != PARSE_KIND_L_PAREN &&
              parser->tokens.kinds[token] != PARSE_KIND_PLUSPLUS && parser->tokens.kinds[token] != PARSE_KIND_MINUSMINUS &&
-             !check_common_node_effect(graph, node) && !check_common_volatile_read(emission->stream, emission->types, node))
+             !check_common_node_effect(graph, node) && !check_common_volatile_read(emission->stream, emission->types, node) &&
+             type_kind(emission->types, type_strip_aligned(emission->types, check_stream_value(emission->stream, node).type)) != BUSTER_TYPE_KIND_VOID)
     {
+        // (A value of type void, an extern void object's, is no result clang warns of, #1447.)
         // A discarded member read points at the member's name, like the comma's left operand does.
         const uint32_t report = role == PARSE_ROLE_CLOSE_CAST ? check_common_cast_opener(parser, token) :
                                 role == PARSE_ROLE_MEMBER_OPERATOR && token + 1 < count ? token + 1 : token;

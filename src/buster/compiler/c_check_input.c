@@ -8804,7 +8804,9 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
             }
             const bool function = type_kind(reader->types, type) == BUSTER_TYPE_KIND_FUNCTION;
             const bool file = reader->function_result == 0;
-            valid &= is_typedef || function || type_kind(reader->types, type) != BUSTER_TYPE_KIND_VOID;
+            // A variable of type void is an error but an extern declaration's, which clang takes (#1447): its address is
+            // a pointer to void, and a definition of it later is the error.
+            valid &= is_typedef || function || type_kind(reader->types, type) != BUSTER_TYPE_KIND_VOID || (storage == C_NAME_EXTERN && !initialized);
             // A function specifier declares a function only: clang refuses inline elsewhere, and the _Noreturn keyword
             // on a typedef (of a function's type too) or an object, at the specifier.
             const uint32_t specifier = !valid ? BUSTER_CHECK_NONE : is_inline && !function ? check_input_inline_token(parser, first, name) :

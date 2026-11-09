@@ -272,6 +272,10 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "enum A { X = 5 };\nenum B { Y = 3, X, Z };\n_Static_assert(Z == 0, \"z\");\n"
         "enum C : long { P };\nenum D : char { Q = 7, P, R };\n_Static_assert(R == 0 && sizeof(R) == 1, \"r\");\n"
         "enum E { M = -1 };\nenum F { M };\n_Static_assert(sizeof(enum F) == 4 && (enum F)-1 > 0, \"u\");\nint x = undeclared;\n",
+        // An extern declaration of type void, which clang takes (#1447): its address, sizeof, a discarded use and a cast to
+        // void are quiet, a block's extern too; reading its value is the error.
+        "extern void v;\nextern const void cv;\nvoid *p = &v;\nconst void *q = &cv;\nint s = sizeof v;\n"
+        "void g(void) { v; (void)v; int unused; }\nvoid h(void) { extern void lv; void *r = &lv; }\nint f(void) { return v; }\n",
         // A tag defined again in its scope, whose body becomes an anonymous tag's: later uses of the name find the first
         // definition, and the second's enumerators are still declared (a repeated one with its own note).
         "struct S { int a; };\nstruct S { long b; };\nunion U { int a; };\nunion U { char c; } u2;\n"
