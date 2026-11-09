@@ -151,6 +151,9 @@ typedef enum CheckInputMessage
     // report's), and a definition of one (clang's err_builtin_definition).
     CHECK_INPUT_BUILTIN_CONFLICT,
     CHECK_INPUT_BUILTIN_DEFINITION,
+    // Any declaration with external linkage of a custom-checked builtin's name (#1918's review, clang's
+    // err_builtin_redeclare: "cannot redeclare builtin function"), with the same note.
+    CHECK_INPUT_BUILTIN_REDECLARE,
     CHECK_INPUT_ATTRIBUTE_OUT_OF_BOUNDS,
     CHECK_INPUT_ATTRIBUTE_TYPES,
     CHECK_INPUT_ATTRIBUTE_LIST_PLACE,
@@ -9692,8 +9695,9 @@ static bool check_input_builtin_named(const CheckInputReader* reader, uint32_t n
 // C23's <stdbit.h> functions, which are library functions), or an x86 builtin of the intrinsic catalogue's rows and
 // leaves (cbuiltin_source_intrinsic, as check_input_intrinsic_prepare claims its calls); not a library builtin (`abs`, a
 // row of clang's 'f' attribute), which a program may define. Its prototype's type into *type where the catalogue decodes
-// one (0 for a custom-checked builtin's, or none). False for a name of no builtin.
-static bool check_input_builtin_function(CheckInputReader* reader, uint32_t name, TypeId* type)
+// one (0 for none), and into *custom whether clang checks its calls itself (its 't' attribute), whose prototype's type
+// is decoded as clang's GetBuiltinType decodes it for its note, past the attribute. False for a name of no builtin.
+static bool check_input_builtin_function(CheckInputReader* reader, uint32_t name, TypeId* type, bool* custom)
 {
     const InternSpan span = reader->pp->table->spans[name];
     const char* spelling = (const char*)reader->pp->table->records + span.offset;
@@ -9706,9 +9710,21 @@ static bool check_input_builtin_function(CheckInputReader* reader, uint32_t name
     const bool language = info == NULL || strcmp(info->language_token, "ALL_LANGUAGES") == 0 || strcmp(info->language_token, "ALL_GNU_LANGUAGES") == 0;
     const bool result = language && ((catalog && !library) || intrinsic);
     *type = 0;
-    if (result && info != NULL && !info->custom_typechecking)
+    char attributes[64];
+    uint32_t attribute_count = 0;
+    *custom = info != NULL && (info->custom_typechecking || memchr(info->attributes, 't', info->attributes_length) != NULL);
+    for (uint32_t i = 0; info != NULL && i < info->attributes_length && attribute_count < sizeof(attributes); i += 1)
     {
-        const CheckInputIntrinsicDeclaration declaration = check_input_intrinsic_decode(reader, info);
+        attributes[attribute_count] = info->attributes[i];
+        attribute_count += info->attributes[i] != 't' ? 1 : 0;
+    }
+    BuiltinIntrinsicInfo plain = info != NULL ? *info : (BuiltinIntrinsicInfo){ 0 };
+    plain.attributes = attributes;
+    plain.attributes_length = attribute_count;
+    plain.custom_typechecking = false;
+    if (result && info != NULL && info->attributes_length <= sizeof(attributes))
+    {
+        const CheckInputIntrinsicDeclaration declaration = check_input_intrinsic_decode(reader, &plain);
         reader->output->resource |= declaration.types.status == BUILTIN_INTRINSIC_TYPES_CAPACITY;
         *type = declaration.types.status == BUILTIN_INTRINSIC_TYPES_SUCCESS && !declaration.types.signature_ignored ? declaration.types.function_type : 0;
     }
@@ -9717,20 +9733,22 @@ static bool check_input_builtin_function(CheckInputReader* reader, uint32_t name
 
 // A function's declaration `token` with external linkage of a builtin's name (#1843, check_input_builtin_function), as
 // clang's Sema takes it: a type that isn't compatible with the builtin's is clang's "conflicting types" (MergeFunctionDecl
-// against the builtin's implicit declaration), with its note of the builtin's type; and a definition is clang's error
+// against the builtin's implicit declaration), with its note of the builtin's type, and any of a custom-checked builtin is
+// its "cannot redeclare builtin function", with the same note; and a definition is clang's error
 // (ActOnStartOfFunctionDef's err_builtin_definition), but of a library builtin. A compatible declaration leaves the name
 // the builtin's: its calls are the builtin's (check_input_resolve_name, check_input_intrinsic_prepare). Rare: scalar.
 static __attribute__((noinline)) void check_input_builtin_declaration(CheckInputReader* reader, uint32_t token)
 {
     TypeId builtin = 0;
-    if (check_input_builtin_function(reader, reader->parser->tokens.names[token], &builtin))
+    bool custom = false;
+    if (check_input_builtin_function(reader, reader->parser->tokens.names[token], &builtin, &custom))
     {
-        const TypeAnswer compatible = builtin != 0 ? type_compatible(reader->types, builtin, reader->declared_types[token]) : TYPE_ANSWER_YES;
+        const TypeAnswer compatible = builtin != 0 && !custom ? type_compatible(reader->types, builtin, reader->declared_types[token]) : TYPE_ANSWER_YES;
         reader->output->resource |= compatible == TYPE_ANSWER_FULL;
         const uint32_t before = reader->output->report_count;
-        if (compatible == TYPE_ANSWER_NO)
+        if (custom || compatible == TYPE_ANSWER_NO)
         {
-            check_input_report(reader, token, CHECK_INPUT_BUILTIN_CONFLICT);
+            check_input_report(reader, token, custom ? CHECK_INPUT_BUILTIN_REDECLARE : CHECK_INPUT_BUILTIN_CONFLICT);
             if (reader->output->report_count > before)
             {
                 reader->output->reports[before].type = builtin;

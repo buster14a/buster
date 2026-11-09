@@ -153,6 +153,7 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_BUILTIN_NOT_CALLED: result = "builtin functions must be directly called"; break;
         case CHECK_INPUT_BUILTIN_CONFLICT: result = "conflicting types for builtin function"; break;
         case CHECK_INPUT_BUILTIN_DEFINITION: result = "definition of builtin function"; break;
+        case CHECK_INPUT_BUILTIN_REDECLARE: result = "cannot redeclare builtin function"; break;
         case CHECK_INPUT_ATTRIBUTE_OUT_OF_BOUNDS: result = "attribute parameter is out of bounds"; break;
         case CHECK_INPUT_ATTRIBUTE_TYPES: result = "attribute cannot be applied to types"; break;
         case CHECK_INPUT_ATTRIBUTE_LIST_PLACE: result = "an attribute list cannot appear here"; break;
@@ -3648,9 +3649,10 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                             const uint32_t keyword = parser->tokens.names[token];
                             pp_diagnose_output_offset_at(pp, PP_SEVERITY_ERROR, source, keyword != 0 ? intern_length(pp->table, keyword) : 0, publication, "%s", message);
                         }
-                        else if (phase == 0 && kind == CHECK_INPUT_BUILTIN_CONFLICT && token < count)
+                        else if (phase == 0 && (kind == CHECK_INPUT_BUILTIN_CONFLICT || kind == CHECK_INPUT_BUILTIN_REDECLARE) && token < count)
                         {
-                            // A builtin's declaration of another type (#1843): clang's "conflicting types", with its note, at
+                            // A builtin's declaration of another type (#1843): clang's "conflicting types", or a custom-checked
+                            // one's any declaration, "cannot redeclare builtin function" (#1918's review), with its note, at
                             // the same name, of the builtin's type as clang prints it (check_driver_warning_type).
                             const CheckInputReport* report = input->reports + index;
                             const uint64_t type_mark = scratch->length;
@@ -3672,7 +3674,8 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                                 .token = source,
                                 .message = note_text,
                             };
-                            pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, type.length != 0 ? 1u : 0u, "conflicting types for '%.*s'",
+                            pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, type.length != 0 ? 1u : 0u,
+                                                        kind == CHECK_INPUT_BUILTIN_REDECLARE ? "cannot redeclare builtin function '%.*s'" : "conflicting types for '%.*s'",
                                                         (int)intern_length(pp->table, name), (const char*)intern_bytes(pp->table, name));
                             arena_pop_to(scratch, type_mark);
                         }

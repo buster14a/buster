@@ -273,7 +273,8 @@ static void check_test_driver_counted_by(CheckTest* test, const char* clang, con
 // Declarations of builtins' names with external linkage (#1843, check_input_builtin_declaration), by the driver against
 // clang, by both paths of -fsyntax-only: the whole output, line for line, with the exit status, a unit each. A definition
 // of a header builtin's or a catalog builtin's name is clang's "definition of builtin function", C99's inline one too; a
-// declaration of another type is clang's "conflicting types" with its note of the builtin's type; and a static
+// declaration of another type is clang's "conflicting types" with its note of the builtin's type, and any of a
+// custom-checked builtin clang's "cannot redeclare builtin function"; and a static
 // definition, a compatible declaration (with no prototype, a const parameter or a typedef's type) and a library
 // builtin's definition are the program's. Then a program of __builtin_bswap32 and __builtin_clz declared, at file scope
 // and at block scope, which stay the builtins (an integer constant expression's too), and of a static definition of a
@@ -297,6 +298,16 @@ static void check_test_driver_builtin_declarations(CheckTest* test, const char* 
         "unsigned __builtin_bswap32();\ntypedef unsigned U;\nU __builtin_bswap32(const U);\nint __builtin_clz(unsigned) __attribute__((const));\n"
         "void _mm_pause(void);\nint abs(int x) { return x < 0 ? -x : x; }\n",
         "int g(void) { int __builtin_clz = 3; return __builtin_clz; }\n",
+        // Custom-checked builtins (#1918's review): any declaration is clang's "cannot redeclare builtin function".
+        "int __builtin_add_overflow(int);\n",
+        "_Bool __builtin_add_overflow();\n",
+        "int __builtin_add_overflow(int x) { return x; }\n",
+        "int __builtin_constant_p(int);\n",
+        "void* __builtin_launder(void*);\n",
+        "int __builtin_isnan(double);\n",
+        "int __sync_fetch_and_add(int*, int);\n",
+        "int g(void) { int __builtin_classify_type(); return 0; }\n",
+        "unsigned long __builtin_object_size(const void*, int);\nint __builtin_expect(long, long);\n",
     };
     enum { LINES = 8192 };
     char* expected_lines = malloc(LINES);
