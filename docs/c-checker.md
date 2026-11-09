@@ -4093,8 +4093,7 @@ do:
   definition; an enum's, read as an unnamed enum, gets the first warning too
   (`c_check_warning_driver_test.c`). Left: a C23 list's redefinition of its own
   record is taken as a new tag without clang's comparison (its "incompatible
-  definitions" error), and a tag in a statement expression inside a
-  prototype's list is warned of as the list's.
+  definitions" error).
 
 Phase 3 covers statements after an error:
 
