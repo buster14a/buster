@@ -4211,7 +4211,10 @@ Three of clang's words and places are followed (#1447):
   the value past same-type casts and conversions, at a binary, unary or
   postfix operator's token, a member's name, a cast's `(`, or the first token
   of a call, a subscript, a conditional or a name (`check_init_culprit_at`).
-  The initializers' plan and the expressions' static check both place it so.
+  A value of another type than its target's (`static long a = k + 1;`) has
+  clang's implicit conversion as its culprit instead, at the initializer's
+  first token, its parentheses included. The initializers' plan and the
+  expressions' static check both place it so.
 - **`sizeof` and `alignof` of an incomplete type.** "invalid application of
   'sizeof' to an incomplete type 'T'", with `alignof` or `__alignof` as
   clang spells the keyword, the type as written (a typedef with its "aka"),
@@ -4220,7 +4223,9 @@ Three of clang's words and places are followed (#1447):
   unknown size's alignment is its element's (C11 6.5.3.4p3), as clang takes
   it.
 - **A call of no function.** "called object type 'T' is not a function or
-  function pointer" at the call's `(`, with the callee's type as written.
+  function pointer" at the call's `(`, with the callee's type as written once
+  loaded: without its qualifiers and `_Atomic`, so a `const T`'s typedef name
+  stays and a `const int` typedef's doesn't.
 
 These are rendering only, apart from the alignment, and only the reports'
 own nodes take them.

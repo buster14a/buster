@@ -280,21 +280,29 @@ static bool check_init_aggregate(const TypeTable* types, TypeId type)
 // operator (a binary, unary or postfix operator's token), its member's name, a cast's `(`, or its first token (a call's, a
 // subscript's, a conditional's, a name's). `fallback` where the graph doesn't say. Iterative, bounded by the graph.
 static uint32_t check_init_culprit_at(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, const Parser* parser,
-                                      uint32_t node, uint32_t fallback)
+                                      uint32_t node, uint32_t fallback, TypeId target)
 {
     const uint32_t count = graph != NULL && parser != NULL && stream != NULL ? graph->count : 0;
     uint32_t at = node;
-    bool stripping = at < count;
+    // A value converted to another type than its own (`static long a = k + 1;`, an int's): clang's culprit is the implicit
+    // conversion, which only a NoOp or an lvalue's load would see through, at the converted expression's first token (review
+    // on #1802). So is a conversion's or a cast's in the value, other than one to its operand's own type, stripped here.
+    const bool converted = target != 0 && at < count && at < stream->count &&
+                           type_unqualified(type_strip_aligned(types, target)) != type_unqualified(type_strip_aligned(types, check_stream_type(stream, at)));
+    bool stripping = at < count && !converted;
     for (uint32_t steps = 0; stripping && steps < count; steps += 1)
     {
         const CheckOp op = graph->ops[at];
         const uint32_t operand = graph->operand0[at];
-        const bool same = op == CHECK_OP_CAST && operand < count && operand < stream->count && at < stream->count &&
+        const bool same = (op == CHECK_OP_CAST || op == CHECK_OP_CONVERT) && operand < count && operand < stream->count && at < stream->count &&
                           type_unqualified(type_strip_aligned(types, check_stream_type(stream, at))) ==
                           type_unqualified(type_strip_aligned(types, check_stream_type(stream, operand)));
-        stripping = (op == CHECK_OP_CONVERT || same) && operand < count;
+        stripping = same;
         at = stripping ? operand : at;
     }
+    // The converted value's begin is the initializer's own first token, `fallback`, its parentheses included.
+    const bool whole = converted || (at == node && at < count && graph->ops[at] == CHECK_OP_CONVERT);
+    at = whole ? count : at;
     uint32_t result = fallback;
     bool begin = false;
     for (uint32_t steps = 0; at < count && steps < count; steps += 1)
@@ -325,9 +333,9 @@ static uint32_t check_init_culprit_at(const CheckGraph* graph, const CheckStream
     return result < (parser != NULL ? parser->tokens.count : 0) ? result : fallback;
 }
 
-static uint32_t check_init_culprit(const CheckInitWalker* walker, uint32_t node, uint32_t fallback)
+static uint32_t check_init_culprit(const CheckInitWalker* walker, uint32_t node, uint32_t fallback, TypeId target)
 {
-    return check_init_culprit_at(walker->graph, walker->stream, walker->types, walker->parser, node, fallback);
+    return check_init_culprit_at(walker->graph, walker->stream, walker->types, walker->parser, node, fallback, target);
 }
 
 static void check_init_fail(CheckInitWalker* walker, CheckInitStatus status, uint32_t token)
@@ -2111,7 +2119,7 @@ static void check_init_vector_value(CheckInitWalker* walker, const CheckInitSele
         }
         else if (walker->static_storage && !check_value_evaluated_constant(&converted.value))
         {
-            check_init_fail(walker, CHECK_INIT_NON_CONSTANT, check_init_culprit(walker, source_node, token));
+            check_init_fail(walker, CHECK_INIT_NON_CONSTANT, check_init_culprit(walker, source_node, token, element));
         }
         else
         {
@@ -2151,7 +2159,7 @@ static void check_init_vector_value(CheckInitWalker* walker, const CheckInitSele
         }
         else if (walker->static_storage)
         {
-            check_init_fail(walker, CHECK_INIT_NON_CONSTANT, check_init_culprit(walker, node, token));
+            check_init_fail(walker, CHECK_INIT_NON_CONSTANT, check_init_culprit(walker, node, token, destination));
         }
         else
         {
@@ -2479,7 +2487,7 @@ static void check_init_value(CheckInitWalker* walker, const CheckInitSelection* 
             else if (walker->static_storage && !walker->defer_constants &&
                      !check_value_static_initializer(&converted.value, selected->width != 0))
             {
-                check_init_fail(walker, CHECK_INIT_NON_CONSTANT, check_init_culprit(walker, node, token));
+                check_init_fail(walker, CHECK_INIT_NON_CONSTANT, check_init_culprit(walker, node, token, destination));
             }
             else
             {
@@ -2940,7 +2948,7 @@ static bool check_initializer_plan_warnings(TypeTable* types, const Parser* pars
                 if (part->kind == CHECK_INIT_VALUE && !check_value_static_initializer(value, part->bit_width != 0))
                 {
                     result->status = CHECK_INIT_NON_CONSTANT;
-                    result->failed_token = check_init_culprit_at(graph, stream, types, parser, part->node, part->token);
+                    result->failed_token = check_init_culprit_at(graph, stream, types, parser, part->node, part->token, part->type);
                     valid = false;
                 }
             }

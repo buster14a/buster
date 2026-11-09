@@ -211,6 +211,16 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "static int c10 = k++;\n"
         "static int *c11 = &arr[k];\n"
         "static int c13 = !k;\n",
+        // A value converted to another type: the conversion is clang's culprit, at the converted expression's first token,
+        // its parentheses included; a callee's type is the loaded one, its qualifiers and _Atomic dropped (review on #1802).
+        "int k;\nstruct S { int a; } s;\nenum E { X };\n"
+        "static long v1 = k + 1;\nstatic long v2 = s.a;\nstatic int v3 = sizeof(k) + k;\nstatic long v4 = (k);\n"
+        "static long v5 = (int)k;\nstatic long v6[2] = { k + 1, 2 };\nstatic float v7 = k * 2;\nstatic unsigned v8 = -k;\n"
+        "static void *v9 = (char *)0 + k;\nstatic const int v10 = k + 1;\nstatic enum E v11 = k + 1;\n"
+        "static struct { long x : 3; int y; } v12 = { k + 1, k + 2 };\nstatic _Bool v13 = k + 1;\n",
+        "const int cx; volatile int vx; _Atomic int ax; typedef const int CT; CT ctx; typedef int T; T tx; const T ctt;\n"
+        "typedef _Atomic int AT; AT atx; int *const pc; struct Q { int a; } const cq;\n"
+        "void f(void) { cx(); vx(); ax(); ctx(); tx(); ctt(); atx(); pc(); cq(); }\n",
         "extern int a[];\n"
         "struct Q;\n"
         "int s = sizeof(a);\n"

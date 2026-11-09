@@ -514,8 +514,10 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
     {
         // At clang's culprit (#1447): an initialization's value's, not the initializer's first token. (A report's token is
         // its node's; the reports' walk's model pairs others, which keep their token.)
-        const uint32_t value = op == CHECK_OP_INITIALIZE && operand < count ? operand : node;
-        *location = check_init_culprit_at(graph, stream, types, parser, value, token);
+        const bool initialize = op == CHECK_OP_INITIALIZE && operand < count;
+        const uint32_t value = initialize ? operand : node;
+        const TypeId target = initialize && node < stream->count ? check_stream_type(stream, node) : 0;
+        *location = check_init_culprit_at(graph, stream, types, parser, value, token, target);
     }
     else if (report->message == CHECK_MESSAGE_ACTION && node < count)
     {
@@ -610,8 +612,12 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
         }
         else if (report->diagnostic == CHECK_DIAG_CALL && op == CHECK_OP_CALL && operand_type != 0 && graph->tokens[node] == token)
         {
-            // clang's err_typecheck_call_not_function at the call's `(`, the callee's type as written.
-            const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, operand_type, check_semantic_operand_spelling(parser, input, operand));
+            // clang's err_typecheck_call_not_function at the call's `(`, the callee's type as written once loaded: without
+            // its qualifiers and _Atomic, so that a typedef's name stays only where it is the loaded type (`const T`'s T,
+            // not a `const int` typedef's; review on #1802).
+            const TypeId plain = type_unqualified(operand_type);
+            const TypeId loaded = type_kind(types, plain) == BUSTER_TYPE_KIND_ATOMIC ? type_unqualified(types->types.base[type_index(plain)]) : plain;
+            const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, loaded, check_semantic_operand_spelling(parser, input, operand));
             uint32_t open = token;
             while (open != 0 && open < parser->tokens.count && !(parser->tokens.kinds[open] == PARSE_KIND_L_PAREN && parser->tree.parents[open] == token))
             {
