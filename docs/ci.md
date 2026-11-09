@@ -2,8 +2,8 @@
 
 Every merge and direct push to `main` triggers the full hosted correctness
 suite against that push's exact `github.sha`, including documentation-only
-changes (#1271). It runs both host architectures, every sanitizer configuration
-and shard, the O1 address-sanitizer rows, and all three fuzz campaigns.
+changes (#1271). It runs both host architectures, all four O3 build modes
+(plain and three sanitizer configurations) across four shards, and all three fuzz campaigns.
 The pre-merge PR matrix, Measurement storage, a no-code exemption and a later
 nightly run do not replace that post-merge coverage.
 
@@ -76,7 +76,7 @@ transparent huge pages off (#1109, `arena_page_policy` in `lane.c`), and the
 9700X with them as its system has them.
 Baseline memory boundary tests also run with undefined-behavior checks.
 The hosted matrix additionally builds the entire compiler with each of
-`BUSTER_SANITIZER=address|undefined|thread|memory`, for both host architectures.
+`BUSTER_SANITIZER=address|thread|memory`, for both host architectures.
 Every variant runs `tools/ci/correctness.tests`, including the same corpus,
 seeds, lane counts, generated-code execution and external cross-checks. These
 are full suites, a row's 4 shards together; the TSan and MSan rows are not
@@ -578,12 +578,11 @@ existing fixed-address link. `build.sh print-compile-flags` and
 `print-sanitizer-flags` expose the actual arguments as NUL-delimited arrays.
 Instrumentation is applied to every build unit and the final link; it cannot
 be combined with the private baseline runtime used for QEMU smoke tests.
-`BUSTER_SANITIZER_OPTIMIZATION=1|2|3` selects an explicit optimization level.
-The full hosted sanitizer matrix runs at `-O3`; additional combined ASan/UBSan
-rows run the entire suite at `-O1` on both host architectures. These rows and the
-fuzz campaigns run on pushes to main and on the daily and dispatched runs, not on
-pull requests, whose hosted jobs are the plain builds of both architectures. This retains
-diagnostic-friendly coverage without substituting it for production optimization.
+`BUSTER_SANITIZER_OPTIMIZATION=1|2|3` remains available for explicitly selected
+diagnostic builds. The hosted matrix runs at `-O3` throughout, without separate
+`-O1` sanitizer rows. Its sanitizer rows and the fuzz campaigns run on pushes
+to main and on the daily and dispatched runs, not on pull requests, whose
+hosted jobs are the plain builds of both architectures.
 The sanitizer rows' job limit is 360 minutes and each command's is 7200 seconds:
 the driver's in-process checks run the whole compiler per fixture and take tens
 of minutes each with a detector, while the plain rows have a 120-minute job
@@ -593,13 +592,18 @@ limit and 600-second command limit.
 | --- | --- |
 | `none` (default) | Ordinary optimized build |
 | `address` | ASan, UBSan, bounds, leaks, stack use after scope and return |
-| `undefined` | Independent UBSan and bounds run |
+| `undefined` (manual only) | Standalone UBSan and bounds for targeted investigations |
 | `thread` | TSan across the correctness inventory, but the compiler's own `main.c` checking comparison |
 | `memory` | MSan with level-two origin tracking across the correctness inventory, but the compiler's own `main.c` checking comparison |
 
-ASan, UBSan and leak checking share a process. TSan and MSan have separate
-builds because their runtimes cannot be combined with ASan. The independent
-UBSan run also avoids ASan's allocation layout and its earlier failure points.
+The `address` mode combines ASan, UBSan, bounds and leak checking in one build
+and run; its detector probes verify each kind of failure before the full suite.
+TSan and MSan retain separate builds because their runtimes cannot be combined
+with ASan. Removing the standalone UBSan CI rows saves eight builds and suite
+runs (two architectures, four shards) but removes an independent instrumented
+execution: standalone UBSan has a different allocation layout and can continue
+past failures that would stop ASan. `BUSTER_SANITIZER=undefined` remains
+available for targeted investigation.
 The checks cover the host compiler implementation. Generated machine code and
 external reference tools retain their own execution and validation contracts;
 bootstrap instrumentation does not instrument Buster's generated instructions.
@@ -646,9 +650,9 @@ shadow took the same check past 20 GiB before it was stopped; that cannot share
 a 16 GiB hosted runner with any other command. The `-c` commands peak at
 10 GiB under TSan and 6.6 GiB under MSan (`-O3`, `--lanes 1`), so those rows
 run them in the workflow's separate "Compile main.c alone under TSan or MSan"
-step after the suite, where the runner is otherwise idle; the plain, ASan and
-UBSan rows, both host architectures, and the 9700X run them in the suite. The
-plain, ASan and UBSan rows and the 9700X also run the checking comparison, so
+step after the suite, where the runner is otherwise idle; the plain and ASan
+rows of both host architectures, plus the 9700X, run them in the suite. The
+plain and ASan rows and the 9700X also run the checking comparison, so
 the self-check remains required wherever the runner has the memory. Every other
 command runs in every row.
 
