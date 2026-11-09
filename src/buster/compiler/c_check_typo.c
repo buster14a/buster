@@ -91,6 +91,10 @@ struct CheckTypo
     uint32_t suggested_token;
     uint32_t suggested_keyword;
     uint32_t suggested_type;
+    // The walk's own values' searches (check_typo_walk_value), in its order, and how many of them the answers' have passed.
+    uint32_t walk_value_tokens[BUSTER_CHECK_TYPO_LIMIT];
+    uint32_t walk_value_count;
+    uint32_t walk_value_cursor;
     // The calls of a prototyped function with too few arguments or too many before the latest value's, each a search of
     // clang's own (TryTypoCorrectionForCall's, which suggests nothing in C): counted once a search needs them.
     CheckTypoCalls value_calls;
@@ -595,8 +599,13 @@ static uint32_t check_typo_value(CheckInputReader* reader, uint32_t token, uint3
             typo->function_searches += input->implicit_function_corrections[typo->function_cursor] != BUSTER_CHECK_TYPO_UNSEARCHED ? 1u : 0u;
             typo->function_cursor += 1;
         }
-        const bool room = typo->value_count + typo->function_searches < BUSTER_CHECK_TYPO_LIMIT &&
-                          typo->value_count + typo->function_searches + check_typo_calls_before(reader, &typo->value_calls, token) < BUSTER_CHECK_TYPO_LIMIT;
+        // And the walk's values' before it (check_typo_walk_value).
+        while (typo->walk_value_cursor < typo->walk_value_count && typo->walk_value_tokens[typo->walk_value_cursor] < token)
+        {
+            typo->walk_value_cursor += 1;
+        }
+        const uint32_t searches = typo->value_count + typo->function_searches + typo->walk_value_cursor;
+        const bool room = searches < BUSTER_CHECK_TYPO_LIMIT && searches + check_typo_calls_before(reader, &typo->value_calls, token) < BUSTER_CHECK_TYPO_LIMIT;
         if (room)
         {
             typo->value_tokens[typo->value_count++] = token;
@@ -632,6 +641,24 @@ static uint32_t check_typo_function(CheckInputReader* reader, uint32_t token)
         const bool implicit = declaration < reader->parser->tokens.count && reader->output->function_flags != NULL &&
                               (reader->output->function_flags[declaration] & CHECK_INPUT_FUNCTION_IMPLICIT) != 0;
         result = implicit ? BUSTER_CHECK_NONE : declaration;
+    }
+    return result;
+}
+
+// A value's undeclared name at `token` that the walk reads (#1447, check_constant_name): a declarator's constant's, whose
+// value or type the declaration needs before the walk goes on, so that it can't wait for the binding answers. The
+// declarations visible are the stream's so far, as for an undeclared function's call. The declare event of the name it
+// corrects to, or BUSTER_CHECK_NONE. It counts toward the limit with the walk's calls, in the walk's order; a value's
+// search that the answers make later in a body before it isn't counted there.
+static uint32_t check_typo_walk_value(CheckInputReader* reader, uint32_t token)
+{
+    uint32_t result = BUSTER_CHECK_NONE;
+    if (!reader->typo_disabled && check_typo_ready(reader) && reader->typo->walk_searches < BUSTER_CHECK_TYPO_LIMIT)
+    {
+        CheckTypo* typo = reader->typo;
+        typo->walk_searches += 1;
+        typo->walk_value_tokens[typo->walk_value_count++] = token;
+        result = check_typo_search(reader, &typo->walk, token, reader->bindings.count, CHECK_TYPO_VALUE);
     }
     return result;
 }
