@@ -3327,9 +3327,19 @@ static bool check_constant_evaluate(CheckConstantInput* input)
                 check_constant_warning_operands(input, &action, first, count);
                 check_constant_runtime_query(input, &action);
                 check_constant_action(input, &action, first, NULL, &checked);
+                // A mix needs two operands that may be enumerations' or one and a floating one: an integer variable of a
+                // standard type, the usual operand of a function body's operator, is neither (check_constant_enum_mix).
                 const CheckOp op = action.op;
-                if (checked.diagnostic == CHECK_DIAG_NONE && ((op >= CHECK_OP_ADD && op <= CHECK_OP_REMAINDER) || (op >= CHECK_OP_LESS && op <= CHECK_OP_NOT_EQUAL) ||
-                                                              (op >= CHECK_OP_BIT_AND && op <= CHECK_OP_BIT_XOR) || op == CHECK_OP_CONDITIONAL))
+                const uint32_t last = op == CHECK_OP_CONDITIONAL ? 2 : 1;
+                bool plain = false;
+                for (uint32_t i = last - 1; i <= last; i += 1)
+                {
+                    const uint32_t index = type_index(action.operands[i].type);
+                    plain |= index >= BUSTER_TYPE_CODE_BOOL && index <= BUSTER_TYPE_CODE_ULLONG && (action.operands[i].flags & BUSTER_CHECK_ICE) == 0;
+                }
+                if (checked.diagnostic == CHECK_DIAG_NONE && !plain &&
+                    ((op >= CHECK_OP_ADD && op <= CHECK_OP_REMAINDER) || (op >= CHECK_OP_LESS && op <= CHECK_OP_NOT_EQUAL) ||
+                     (op >= CHECK_OP_BIT_AND && op <= CHECK_OP_BIT_XOR) || op == CHECK_OP_CONDITIONAL))
                 {
                     check_constant_enum_mix(input, &action, first, count, token);
                 }
