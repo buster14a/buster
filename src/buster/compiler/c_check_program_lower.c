@@ -8901,9 +8901,11 @@ static void check_lower_dump_struct(CheckLowerWriter* writer, uint32_t node)
                 else
                 {
                     const uint8_t class = check_lower_class(writer, operand->type);
-                    if (check_lower_vector_of(writer, operand->promoted) != 0)
+                    if (check_lower_vector_of(writer, operand->promoted) != 0 || check_lower_wide(writer, operand->promoted))
                     {
-                        // A vector passes from an object of its bytes, as a call's.
+                        // A vector or a 128-bit integer passes from an object of its bytes, as a call's
+                        // (check_lower_dump_argument's); clang's formats print a 128-bit field by its address, so only
+                        // a vector reaches here today.
                         const uint32_t local = check_lower_temporary_of(writer, operand->promoted);
                         check_lower_instruction(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, local);
                         check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, check_lower_class(writer, operand->promoted), local);
