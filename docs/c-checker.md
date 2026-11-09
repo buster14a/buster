@@ -4220,6 +4220,82 @@ These differences remain:
 - An enum's vector mode after its body gives its deprecation warning twice (on
   main too).
 
+#### Typo correction (#1447)
+
+An undeclared name gets clang 23's "did you mean" (`c_check_typo.c`), in two
+forms:
+
+- **A value context's identifier:** "use of undeclared identifier 'countr';
+  did you mean 'counter'?", with the note "'counter' declared here". The use
+  goes on as the candidate, so the diagnostics its type gives follow (a
+  constant's conversion into it, a pointer's type).
+- **A call to an undeclared function that clang declares implicitly**
+  (before C23): its error as before, then the notes "did you mean 'compute'?"
+  and "'compute' declared here". The call stays the implicit declaration's. A
+  name that an earlier implicit or block-scope declaration made (clang's
+  `ExternCPrev`), or a library builtin's, gets no suggestion. In C23 such a
+  call is the value context's error and correction.
+
+The choice is clang's `TypoCorrectionConsumer`'s:
+
+- The candidates are the visible ordinary names of the kinds the context
+  takes: objects, functions and enumerators for a value, functions alone for
+  an implicit call. Never a typedef's name, a keyword, a member, a tag or a
+  label, nor a name declared later.
+- A typo shorter than 3 bytes is never corrected.
+- A candidate whose length differs from the typo's (`n`) by `delta` is
+  skipped where `n / delta < 3`.
+- Its Levenshtein distance (a transposition counts two) counts within
+  `(n + 2) / 3`. The least distance wins where one candidate alone has it and
+  `n / distance >= 3`. A tie gives none, even where only one of the tied names
+  would type-check, as clang's.
+- Each attempt, failed or not, counts toward clang's 50 per unit, after which
+  no name is corrected.
+
+The work is data-parallel, and only a miss pays for it:
+
+- **Candidates.** They are read off the bindings' active declarations once per
+  scope state (a fingerprint of the active stack), so a body's typos share one
+  set. Each is an active declaration that is still its name's head.
+- **Distances.** The vector path's are Myers' and Hyyrö's bit-parallel
+  algorithm with the typo as its pattern, 16 candidates in a vector's 32-bit
+  lanes (typos up to 32 bytes), their bytes transposed per batch and the
+  pattern's masks gathered. The scalar path, its twin and oracle, takes the
+  textbook dynamic programme (`c_check_typo_test.c` compares them). A longer
+  typo takes the programme on both paths.
+- **Recovery.** A corrected use's binding event becomes the candidate's, which
+  both resolvers answer with its declaration. Its report recovers through
+  phase 1's path, so the construct isn't cut. It is ordered and published at
+  its full expression's start, as clang corrects a typo once its full
+  expression is complete, before what takes the expression (an
+  initialization's, a return's conversion).
+- **Lanes.** A lane can't list the visible names: its stream has the top
+  level's only as the proxies of the names its body uses. A lane's miss that
+  some identifier of the unit is near refuses the lane, and source order
+  corrects it.
+
+`c_check_typo_driver_test.c` compares its fixtures as above, on the vector,
+`--scalar` and 1-, 2- and 3-lane paths. They include:
+- a corrected type that drives a later warning;
+- ties and the other names that give no suggestion;
+- the 50-attempt limit, reached by corrections and by failures;
+- a stress unit of 4000 globals and 50 typos.
+
+These differences remain:
+
+- **The limit with `-c`'s deferred bodies.** A lane body whose misses no name
+  is near stays on its lane without counting them, and the top level's misses
+  are counted before the refused bodies'. A unit of more than 50 attempts may
+  then correct other typos than clang. `-fsyntax-only` and `-c` without lanes
+  count in source order.
+- **Pre-existing differences**, which the fixtures avoid:
+  - a misspelled member (which clang doesn't correct either) gets no "no member
+    named" error here, and stops the reader;
+  - `retrun 0;` is a parse error here, where clang gives an undeclared
+    identifier;
+  - "called object type 'int'", "invalid operands … ('int (int)' …)" and
+    `-Wpointer-integer-compare`'s types aren't worded as clang's.
+
 The later phases are left:
 
 - **Invalid declarations.** Not covered by phase 2:
