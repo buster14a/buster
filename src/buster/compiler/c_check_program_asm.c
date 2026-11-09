@@ -2460,8 +2460,10 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
         // Placed in its caller as an asm body (#1839): its records run in its call row's place, with no helper.
         X86Instruction* records = 0;
         // Its register operands are its call row's arguments (#1839's measurements: a load of the block's slot, which the
-        // lowering stored through a register a moment before, failed store-to-load forwarding once a run).
-        const bool passed = true;
+        // lowering stored through a register a moment before, failed store-to-load forwarding once a run), but in a
+        // lowering for Tier 1 (CheckProgramOptions.asm_bodies), whose body call takes the block's address alone and whose
+        // stores into the block are rsp-relative.
+        const bool passed = !program->asm_bodies;
         uint32_t first = 0;
         const uint32_t records_count = check_asm_inline_code(places, count, &code, stores, pops, passed, &records, &first, output);
         plan->inline_passed = passed;
