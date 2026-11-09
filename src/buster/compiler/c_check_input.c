@@ -2923,9 +2923,10 @@ static void check_input_diagnostic_recover(CheckInputReader* reader, bool resolv
             {
                 limits[token] = next[limits[token]];
             }
-            arena_pop_to(reader->arena, kept);
-            input->diagnostic_limits = limits;
-            input->diagnostic_report_count = input->report_count;
+            // (Where the regions' stack couldn't be pushed, the unit is a resource failure, which publishes no cut.)
+            arena_pop_to(reader->arena, input->resource ? mark : kept);
+            input->diagnostic_limits = input->resource ? NULL : limits;
+            input->diagnostic_report_count = input->resource ? 0 : input->report_count;
         }
     }
 }
