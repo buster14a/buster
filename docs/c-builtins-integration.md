@@ -2525,10 +2525,10 @@ address constant, a `static const char[]`'s or a literal's past its start, clang
 reads through its constant evaluator: the adapter reads its chars from the
 unit's constant objects (`check_input_verbose_trap_object`, #1843) up to the
 first NUL, of an array of plain char, with clang's errors where the string has a
-`$` or the read leaves the object (past its end, or no NUL in it). An object
-whose bytes the reader doesn't keep (a member array's, which clang's evaluator
-reads too), a const pointer's value (which the adapter doesn't load), and such
-an argument under a cast (which through `void *` clang
+`$` or the read leaves the array (past its end, or no NUL in it). The address
+of a const record's member array reads its string to the member's end, and a
+const pointer object's value its pointee's. An object whose bytes the reader
+doesn't keep, and such an argument under a cast (which through `void *` clang
 calls no constant string), are still refused by name.
 
 Two costs are accepted for now:

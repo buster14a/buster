@@ -28,11 +28,18 @@ static void check_test_driver_generic_builtins(CheckTest* test, const char* clan
         { "verbose_trap of a call", "const char* f(void);\nvoid g(void) {\n__builtin_verbose_trap(\"c\", f());\n}\n" },
         // Another address constant than a literal's start (#1843): a const array's, its initializer's chars read to the
         // first NUL, as clang's constant evaluator reads them: a `$` before it, a read past the array's end or an array of
-        // no NUL is clang's error; a literal past its start reads alike. (A const pointer's value, which the reader doesn't
-        // load, is refused by name: c_check_program_generic_builtins_test.c.)
+        // no NUL is clang's error; a literal past its start reads alike, and so do a const record's member array (up to its
+        // own end) and a const pointer's pointee.
         { "verbose_trap of const arrays", "static const char m[] = \"abc\";\nconst char n[] = \"a\\0$\";\n"
                                           "static const char o[4] = { 'x', 'y', 0, 0 };\n"
                                           "void g(void) {\n__builtin_verbose_trap(m, n);\n__builtin_verbose_trap(&m[1], o);\n__builtin_verbose_trap(m + 2, m + 3);\n}\n" },
+        { "verbose_trap of a member array and a const pointer", "struct S { int n; char a[4]; char b[3]; };\nstatic const struct S s = { 1, \"ab\", \"c$\" };\n"
+                                                                "static const char m[] = \"xyz\";\nstatic const char* const p = m + 1;\n"
+                                                                "void g(void) {\n__builtin_verbose_trap(s.a, &s.a[1]);\n__builtin_verbose_trap(p, s.a + 2);\n}\n" },
+        { "verbose_trap of a member array's dollar", "struct S { int n; char a[4]; char b[3]; };\nstatic const struct S s = { 1, \"ab\", \"c$\" };\n"
+                                                     "void g(void) {\n__builtin_verbose_trap(s.a, s.b);\n}\n" },
+        { "verbose_trap of a const pointer's dollar", "static const char m[] = \"x$z\";\nstatic const char* const p = m;\n"
+                                                      "void g(void) {\n__builtin_verbose_trap(\"c\", p);\n}\n" },
         { "verbose_trap of a literal past its start", "void g(void) {\n__builtin_verbose_trap(\"ab$\" + 3, &\"c$d\"[2]);\n}\n" },
         { "verbose_trap of a literal's dollar past its start", "void g(void) {\n__builtin_verbose_trap(\"c\", \"ab$c\" + 1);\n}\n" },
         { "verbose_trap of a const array's dollar", "static const char m[] = \"a$c\";\nvoid g(void) {\n__builtin_verbose_trap(\"c\", m);\n}\n" },
