@@ -4111,6 +4111,32 @@ static TypeId check_input_tag_identity(CheckInputReader* reader, uint32_t token,
             }
             valid = reader->output->report_count == before + 1 && check_input_recover_reports(reader, before);
         }
+        // Before C23, a parameter list's redefinition (above) is clang's -Wvisibility warning "redefinition of 'S' will not
+        // be visible outside of this function", noted at the earlier definition; an enum's anonymous one is warned of
+        // below as a new tag too. (C23 compares the two, as for any other redefinition.)
+        if (valid && redefinition && !c23)
+        {
+            const uint32_t old = reader->bindings.declaration[previous - 1];
+            const uint32_t defined_at = check_input_tag_definition_name(reader, defined, old);
+            const CheckWarningEvent event =
+            {
+                .id = CHECK_WARNING_ID_VISIBILITY,
+                .kind = CHECK_WARNING_EVENT_PROTOTYPE_REDEFINITION,
+                .token = declaration,
+                .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+                .completion = declaration,
+                .payload = { .name = name, .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+            };
+            const CheckWarningNote note =
+            {
+                .kind = CHECK_WARNING_NOTE_PREVIOUS_DEFINITION,
+                .token = defined_at != BUSTER_CHECK_NONE ? defined_at : old,
+                .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                .payload = { .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+            };
+            check_input_warning_event(reader, &event, &note, 1);
+        }
         const bool anonymous = redefinition || again || compatible;
         // A body that a mismatched enum's declaration drops, past which the tag ends.
         bool skipped = false;
@@ -4182,6 +4208,24 @@ static TypeId check_input_tag_identity(CheckInputReader* reader, uint32_t token,
                 if (reader->transparent_unions != 0)
                 {
                     reader->transparent_unions[tag] = 0;
+                }
+                // A tag that a prototype's list (or an old-style definition's declarations) declares first, named or an
+                // enum, which no declaration outside the function names: clang's ActOnTag warns of it (-Wvisibility, at its
+                // name, an unnamed enum's keyword), but for a C23 definition, which a compatible one outside may redefine.
+                // An enum's redefinition there is an unnamed enum's, warned of too, at the name.
+                if (reader->prototype_depth != 0 && ((name != 0 && !anonymous) || kind == BUSTER_TYPE_KIND_ENUM) && !(c23 && body))
+                {
+                    const CheckWarningEvent event =
+                    {
+                        .id = CHECK_WARNING_ID_VISIBILITY,
+                        .kind = CHECK_WARNING_EVENT_PROTOTYPE_TAG,
+                        .token = declaration,
+                        .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                        .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+                        .completion = declaration,
+                        .payload = { .token = BUSTER_CHECK_WARNING_NO_SOURCE, .first_type = type },
+                    };
+                    check_input_warning_event(reader, &event, NULL, 0);
                 }
                 if (fixed)
                 {

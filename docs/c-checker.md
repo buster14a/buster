@@ -4082,9 +4082,20 @@ do:
   typedef, a parameter, a local) gives clang's "redefinition of 'K'", with
   "previous definition is here" at the earlier declaration, and is dropped the
   same way. (A name declared after an enumerator is the redeclaration's
-  "redefinition of 'K' as different kind of symbol" instead.) Clang's
-  `-Wvisibility` of a tag declared in a prototype, which the checker doesn't
-  give at all, is left out of its fixtures.
+  "redefinition of 'K' as different kind of symbol" instead.)
+- **A tag a prototype's list declares first** (named, or any enum), which no
+  declaration outside the function names, is clang's `-Wvisibility` warning
+  "declaration of 'struct S' will not be visible outside of this function",
+  on by default, at its name (an unnamed enum's keyword), as clang's `ActOnTag`
+  gives it: in a definition's list, a nested prototype's, a member's
+  function pointer's, a block's prototype and an array bound in the list, and
+  for a definition that shadows a file-scope tag. A C23 definition there is
+  no warning. Before C23, the list's redefinition of its own tag is "redefinition
+  of 'S' will not be visible outside of this function", noted at the earlier
+  definition; an enum's, read as an unnamed enum, gets the first warning too
+  (`c_check_warning_driver_test.c`). Left: a C23 list's redefinition of its own
+  record is taken as a new tag without clang's comparison (its "incompatible
+  definitions" error, [#1869](https://github.com/buster14a/buster/issues/1869)).
 
 Phase 3 covers statements after an error:
 
