@@ -6939,7 +6939,10 @@ change, it refused such a declaration by name.
   attribute 'X' has higher precedence than function attribute 'Y'" with
   "conflicting attribute is here" at that declaration's first token;
   `nomerge` on a statement that evaluates no call, "'X' attribute is ignored
-  because there exists no call expression inside the statement". The calls
+  because there exists no call expression inside the statement"; a `nomerge`
+  of arguments, clang's "'nomerge' attribute takes no arguments"; and
+  `suppress`'s arguments, string literals through parentheses
+  (`suppress(("a"))`, clang's `checkStringLiteralArgumentAttr`). The calls
   are clang's `CallExprFinder`'s (`check_input_statement_call`): a call's
   `(` (not a declarator's parameters') or an asm statement's, outside
   `sizeof`'s, `_Alignof`'s and `typeof`'s operands and GNU attributes'

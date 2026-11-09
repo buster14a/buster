@@ -145,8 +145,8 @@ static void check_test_driver_label_attributes(CheckTest* test, const char* clan
         // through redeclarations, called wherever the statement runs (an operand, an argument, an initializer, a declaration's,
         // an if's, a switch's, a loop's condition); a library function and a builtin clang marks noreturn; __builtin_assume
         // of a false condition. And conditions folded as clang's CFG builder folds them, through && and ||, `!` and a const
-        // object. But a call in a short-circuited operand, a conditional's arm, sizeof, through a pointer, a declaration
-        // alone, a for's increment, and a condition that doesn't fold leave the fallthrough reachable.
+        // object. But a call in a short-circuited operand, a conditional's arm, sizeof, through a pointer of no noreturn
+        // type, a declaration alone, a for's increment, and a condition that doesn't fold leave the fallthrough reachable.
         { "unreachable fallthroughs after calls that never return",
           "__attribute__((noreturn)) void die(void);\n_Noreturn void quit(int);\nvoid stop(void);\n_Noreturn void stop(void);\n_Noreturn int fail(void);\nint fail(void);\n"
           "void abort(void);\nvoid exit(int);\nint g(int);\nint f(int x, int y) {\nswitch (x) {\n"
@@ -195,6 +195,52 @@ static void check_test_driver_label_attributes(CheckTest* test, const char* clan
           "int f(int x, int y) {\nswitch (x) {\ncase 1: y++; if (y) die(); else g(); __attribute__((fallthrough)); x++;\ncase 2: return 1;\n}\nreturn 0;\n}\n" },
         { "a reachable fallthrough after a right operand", "_Noreturn void die(void);\n_Noreturn int fail(void);\nvoid g(void);\n"
           "int f(int x, int y) {\nswitch (x) {\ncase 1: y++; (void)(y && fail()); __attribute__((fallthrough)); x++;\ncase 2: return 1;\n}\nreturn 0;\n}\n" },
+        // A call through an object whose function type is noreturn (#1844): GNU's noreturn on the pointer's own declaration,
+        // a parameter's or a typedef's (through another typedef), called by name or through `*`.
+        { "unreachable fallthroughs after calls through noreturn pointers",
+          "typedef void (*N)(void) __attribute__((noreturn));\ntypedef N M;\nextern N np;\nextern M mp;\n"
+          "extern void (*vp)(void) __attribute__((noreturn));\nint f(int x, int y, N p) {\nswitch (x) {\n"
+          "case 1: np(); __attribute__((fallthrough)); x++;\ncase 2: mp(); __attribute__((fallthrough)); x++;\n"
+          "case 3: vp(); __attribute__((fallthrough)); x++;\ncase 4: (*vp)(); __attribute__((fallthrough)); x++;\n"
+          "case 5: p(); __attribute__((fallthrough)); x++;\ncase 6: return 1;\n}\nreturn 0;\n}\n" },
+        // clang's CFG builder's tautology checks (#1844): comparisons of one variable with integer literals under && and ||,
+        // an operand and its negation, a bitwise operation's equality with a literal it can't give, a boolean's comparison
+        // with a literal past 1, a `|` of a nonzero literal, and `& 0` and `* 0`; in an if's condition and a loop's.
+        { "unreachable fallthroughs after tautologies",
+          "int f(int x, int y, unsigned u, long l) {\nswitch (x) {\n"
+          "case 1: if (y > 5 && y < 3) ; else return 1; __attribute__((fallthrough)); x++;\n"
+          "case 2: if (y < 5 || y > 3) return 2; __attribute__((fallthrough)); x++;\n"
+          "case 3: if (y || !y) return 3; __attribute__((fallthrough)); x++;\n"
+          "case 4: if ((y & 4) != 3) return 4; __attribute__((fallthrough)); x++;\n"
+          "case 5: if ((y | 8) == 1) ; else return 5; __attribute__((fallthrough)); x++;\n"
+          "case 6: if ((y < x) != 10) return 6; __attribute__((fallthrough)); x++;\n"
+          "case 7: if (10 > (y == x)) return 7; __attribute__((fallthrough)); x++;\n"
+          "case 8: if (y | 2) return 8; __attribute__((fallthrough)); x++;\n"
+          "case 9: if (y & 0) ; else return 9; __attribute__((fallthrough)); x++;\n"
+          "case 10: if (y * 0) ; else return 10; __attribute__((fallthrough)); x++;\n"
+          "case 11: if (u != 1 || u != 2) return 11; __attribute__((fallthrough)); x++;\n"
+          "case 12: if (l == 'a' || l != 'a') return 12; __attribute__((fallthrough)); x++;\n"
+          "case 13: while ((y > 1 || y < 3) || x) ; __attribute__((fallthrough)); x++;\n"
+          "case 14: if (-3 < y || y <= -3) return 14; __attribute__((fallthrough)); x++;\n"
+          "case 15: if ((y > 5 && y < 3)) ; else return 15; __attribute__((fallthrough)); x++;\n"
+          "case 16: if (0 || ((y & 4) == 3)) ; else return 16; __attribute__((fallthrough)); x++;\n"
+          "case 17: for (; (y > 1 || y < 3) || x;) ; __attribute__((fallthrough)); x++;\n"
+          "case 18: return 0;\n}\nreturn 0;\n}\n" },
+        // But not inside the parentheses of a condition that is no logical operator, nor past `!`, which clang's
+        // tryEvaluateBool doesn't look through, nor in a do loop's parenthesized operand, nor across types, nor in
+        // __builtin_assume's argument (each alone).
+        { "a reachable fallthrough after a parenthesized comparison", "int f(int x, int y) {\nswitch (x) {\n"
+          "case 1: y++; if (((y & 4) != 3)) return 1; __attribute__((fallthrough)); x++;\ncase 2: return 1;\n}\nreturn 0;\n}\n" },
+        { "a reachable fallthrough after a do loop's parenthesized operand", "int f(int x, int y) {\nswitch (x) {\n"
+          "case 1: y++; do ; while ((y > 1 || y < 3) || x); __attribute__((fallthrough)); x++;\ncase 2: return 1;\n}\nreturn 0;\n}\n" },
+        { "a reachable fallthrough after a negated tautology", "int f(int x, int y) {\nswitch (x) {\n"
+          "case 1: y++; if (!(y > 5 && y < 3)) return 1; __attribute__((fallthrough)); x++;\ncase 2: return 1;\n}\nreturn 0;\n}\n" },
+        { "a reachable fallthrough after literals of two types", "int f(int x, int y) {\nswitch (x) {\n"
+          "case 1: y++; if (y > 5 && y < 3L) ; else return 1; __attribute__((fallthrough)); x++;\ncase 2: return 1;\n}\nreturn 0;\n}\n" },
+        { "a reachable fallthrough after __builtin_assume of a tautology", "int f(int x, int y) {\nswitch (x) {\n"
+          "case 1: y++; __builtin_assume(y > 5 && y < 3); __attribute__((fallthrough)); x++;\ncase 2: return 1;\n}\nreturn 0;\n}\n" },
+        { "a reachable fallthrough after a satisfiable comparison", "int f(int x, int y) {\nswitch (x) {\n"
+          "case 1: y++; if (y > 3 && y < 5) ; else return 1; __attribute__((fallthrough)); x++;\ncase 2: return 1;\n}\nreturn 0;\n}\n" },
         // A loop whose breaks can't run never ends, as clang's CFG prunes an if's branch its folded condition doesn't take
         // (#1126's review): `if (0) break;`, an else of a true condition, a break of a nested loop or switch, and a body
         // that is an if itself. But a break that can run ends it (each alone, as above).
