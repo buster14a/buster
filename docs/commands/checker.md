@@ -296,6 +296,19 @@ unused-warning fixtures also check exact scope-completion tokens.
   an enumeration.
   `c_check_enum_arithmetic_driver_test.c` compares them with complete pinned-Clang output at each policy, both paths and
   with `-c`.
+  `-Wfor-loop-analysis` (#1447, clang's CheckForLoopConditionalStatement and CheckForRedundantIteration,
+  `check_common_for_loops`) is off by default, under `-Wloop-analysis` and `-Wmost` and so `-Wall`; a unit where nothing
+  enables it skips the scan. The condition is its truth test's operand. Its variables, where it is simple (operators,
+  casts, literals, local non-volatile variables, a static selection's chosen operand, `__builtin_offsetof` and the
+  unevaluated-argument builtins, `check_common_loop_extract`), warn at their first use when neither the condition, the
+  increment nor the body may change them (an assignment's target, an increment's operand, an address, a member's object
+  or an array's decay, outside sizeof, alignof and a static selection's unchosen operands), in a loop with no return,
+  break or goto. A variable's `++` or `--` alone as both the increment and the body block's last statement, with no
+  continue of the loop, warns at the body's with a note at the header's. Each check is skipped where the warning is
+  ignored at the condition's or the increment's first token, as clang's are. Both are published past the statement's
+  last token, after its body's own warnings.
+  `c_check_for_loop_driver_test.c` compares them with complete pinned-Clang output at each policy, both paths and with
+  `-c`.
   An implicit conversion from one named enumeration to another, an enumerator taken as its enumeration, is clang's
   `-Wimplicit-enum-enum-cast` (#1447, CheckImplicitConversion's last case, `check_common_enum_cast`), on by default under
   `-Wenum-conversion`: an initializer's, an assignment's, a prototype's argument's, a return's and a brace initializer's
