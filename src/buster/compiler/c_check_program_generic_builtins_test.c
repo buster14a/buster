@@ -67,16 +67,17 @@ static __attribute__((noinline)) void check_test_generic_builtin_sources(CheckTe
         { .name = "generic: verbose_trap of an automatic const array's dollar", .source =
           "void f(void)\n{\nconst char m[] = \"a$c\";\n__builtin_verbose_trap(\"x\", m);\n}\n", .rejected = true },
         { .name = "generic: verbose_trap of a member array", .source =
-          "struct S { char a[4]; };\nstatic const struct S s = { \"abc\" };\nvoid f(void)\n{\n__builtin_verbose_trap(\"x\", s.a);\n}\n", .unsupported = true },
+          "struct S { char a[4]; };\nstatic const struct S s = { \"abc\" };\nvoid f(void)\n{\n__builtin_verbose_trap(\"x\", s.a);\n}\n", .rejected = true,
+          .unsupported = true },
         { .name = "generic: verbose_trap of a member array's dollar", .source =
           "struct S { char a[4]; };\nstatic const struct S s = { \"ab$\" };\nvoid f(void)\n{\n__builtin_verbose_trap(\"x\", s.a);\n}\n", .rejected = true,
-          .unsupported = true },
+          .unsupported = true, .undecided = true },
         { .name = "generic: verbose_trap of a const pointer's value", .source =
           "static const char m[] = \"abc\";\nstatic const char* const p = m + 1;\nvoid f(void)\n{\n__builtin_verbose_trap(\"x\", p);\n}\n",
-          .unsupported = true },
+          .rejected = true, .unsupported = true },
         { .name = "generic: verbose_trap of a const array through void *", .source =
           "static const char m[] = \"a$c\";\nvoid f(void)\n{\n__builtin_verbose_trap(\"x\", (const char*)(const void*)m);\n}\n", .rejected = true,
-          .unsupported = true },
+          .unsupported = true, .undecided = true },
         { .name = "generic: verbose_trap of a dollar under a cast", .source =
           "void f(void)\n{\n__builtin_verbose_trap(\"a\", (const char*)(\"x$\"));\n}\n", .rejected = true },
         { .name = "generic: verbose_trap of one argument", .source = "void f(void)\n{\n__builtin_verbose_trap(\"a\");\n}\n", .rejected = true },
@@ -545,7 +546,9 @@ static __attribute__((noinline)) void check_test_generic_builtin_sources(CheckTe
     {
         char description[192];
         snprintf(description, sizeof(description), "%s: expectation differs from Clang", fixtures[i].name);
-        check_test_expect(test, outcomes[i].rejected == fixtures[i].rejected, description);
+        // A refusal by name (`unsupported`) of what clang takes, or (`undecided`) of what it rejects, as test-checker's
+        // source fixtures read them.
+        check_test_expect(test, outcomes[i].rejected == (fixtures[i].rejected && (!fixtures[i].unsupported || fixtures[i].undecided)), description);
         check_test_source(test, fixtures + i, paths[i], outcomes + i);
     }
     for (uint32_t i = 0; i < FILE_COUNT; i += 1)
