@@ -291,7 +291,14 @@ asm (`X86FloatingPoint.cpp`), which clang's code keeps and refuses to break:
   (`fistpll %0` of a `"t"` input, clobbering `"st"`; `"=t"(r) : "0"(x)`), and
   the popped inputs lie above the others;
 - the template finds the inputs at their depths, and leaves the outputs from
-  st(0) down above the inputs it didn't pop (fscale's st(1), fprem's).
+  st(0) down above the inputs it didn't pop (fscale's st(1), fprem's);
+- two operands at one depth are one register's, as clang's code makes them
+  (#1846): two inputs' depth holds the first matching or `+` input's value in
+  clang's order of the inputs (the explicit ones, then the `+` outputs'), as
+  LLVM copies the tied ones into the register last, else the last other
+  input's; the others aren't loaded. Two outputs at one depth each take its
+  value: the helper stores all but the last from a copy (`fld %st(0)`). GCC
+  refuses such a statement ("impossible constraints").
 
 A template names a `t` operand `%st` and a `u` operand `%st(1)`, as GCC and
 clang print them (#1115: `"fmul %1, %0" : "+t"(x) : "u"(y)`), which the
@@ -580,9 +587,8 @@ Each refusal names its feature, as the driver prints it ("unsupported: ..."):
 - MMX's, the opmasks' and the rax and rdx pair's constraints (`y`, `k`, `A`),
   and the other letters it doesn't place;
 - x87 operands and clobbers off the stack's top (an input at st(1) without one
-  at st(0), a clobber below the outputs), which clang's code refuses too; two
-  operands at one depth, which clang compiles as one register's; and an
-  integer in an x87 register. An x87 operand named in the template prints as
+  at st(0), a clobber below the outputs), which clang's code refuses too; and
+  an integer in an x87 register. An x87 operand named in the template prints as
   its depth's register, `%st` or `%st(1)`, as GCC and clang print it;
 - a template's common symbols (`.comm` of a global, #1115), which only an
   assembler's object holds (`SHN_COMMON`);
@@ -746,6 +752,10 @@ has the commands, the logs and the default path's numbers against main.
     as `%st(1)`, `fxch`, `fadd %%st(1), %%st`, `fld %%st(0)` and `fstp
     %%st(1)`, AT&T's reversed `fsubp %%st, %%st(1)` popping a clobbered st(1),
     and `fcomi` into a flag output;
+  - two x87 operands at one depth (#1846): inputs where a `+` or a matching
+    input's value wins, in either order, and where the last of two plain ones
+    does, at st(0) and st(1); and two outputs of one depth, a template's push
+    among them;
   - the x87's operands: the shapes of musl's long double functions, in
     functions of the test's own (`fabs`, `fsqrt` and `frndint` on `+t`, fprem's
     and fprem1's loops with the status word in `%ax`, a remainder's quotient bits
@@ -806,5 +816,5 @@ What the lowering still refuses of what GCC and clang take:
 - the matcher's gaps: MMX's `movq`, `lock xchg`, `ffreep`, and the
   instructions outside its families (an x87 memory operand without a width,
   `fstp (%rax)`, is refused as clang refuses it);
-- two operands at one x87 depth, and explicit register variables in the
-  registers the helper doesn't place them in.
+- explicit register variables in the registers the helper doesn't place them
+  in.

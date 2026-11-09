@@ -989,8 +989,24 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
                                        "asm-x87-integer", true, false, 0, 1, "inline assembly operands of this type in their constraint's registers");
     check_test_program_boundary_reason(test, "int tested(int n){long double x=n;__asm__ volatile(\"\" : : \"u\"(x));return n;}",
                                        "asm-x87-gap", true, false, 0, 1, "inline assembly's x87 operands and clobbers off the stack's top");
-    check_test_program_boundary_reason(test, "int tested(int n){long double x=n,y=n;__asm__ volatile(\"\" : : \"t\"(x), \"t\"(y));return n;}",
-                                       "asm-x87-doubled", true, false, 0, 2, "inline assembly's x87 operands and clobbers off the stack's top");
+    // Two operands at one depth (#1846), one register's as clang's code makes them: two inputs' depth takes the first
+    // matching or `+` input's value in clang's order of the inputs (the explicit ones, then the `+` outputs'), else the
+    // last other input's; two outputs at one depth each take its value, a template's push's too.
+    check_test_program_source(test,
+        "static double plus_last(double x, double y){__asm__(\"\" : \"+t\"(x) : \"t\"(y));return x;}"
+        "static double tied_first(double x, double y){double r;__asm__(\"\" : \"=t\"(r) : \"0\"(x), \"t\"(y));return r;}"
+        "static double tied_after(double x, double y){double r;__asm__(\"\" : \"=t\"(r) : \"t\"(y), \"0\"(x));return r;}"
+        "static double last_below(double x, double y, double z){double r;__asm__(\"fxch\" : \"=t\"(r) : \"t\"(x), \"u\"(y), \"u\"(z) : \"st(1)\");return r;}"
+        "static long double both_out(long double x, long double y){long double r, s;__asm__(\"\" : \"=t\"(r), \"=t\"(s) : \"t\"(x), \"t\"(y));return r*10+s;}"
+        "static long double first_matching(long double x, long double y){long double r, s;__asm__(\"\" : \"=t\"(r), \"=t\"(s) : \"1\"(y), \"0\"(x));return r*10+s;}"
+        "static long double two_plus(long double x, long double y){__asm__(\"\" : \"+t\"(x), \"+t\"(y));return x*10+y;}"
+        "static long double matching_wins(long double x, long double y, long double z){long double r;__asm__(\"\" : \"=t\"(r) : \"t\"(z), \"0\"(x), \"t\"(y));return r;}"
+        "static float added(float x, float y){__asm__(\"fadd %1, %0\" : \"+t\"(x) : \"t\"(y));return x;}"
+        "static void pushed_twice(double* a, float* b){__asm__(\"fldpi\" : \"=t\"(*a), \"=t\"(*b));}"
+        "int tested(int n){double a=0;float b=0;pushed_twice(&a,&b);double x=n*0.5+1,y=n-3.25,z=n*n+0.125;"
+        "return (int)(plus_last(x,y)*8)+(int)(tied_first(x,y)*16)+(int)(tied_after(x,y)*32)+(int)(last_below(x,y,z)*4)+(int)both_out(x,y)+(int)(first_matching(x,y)*2)+"
+        "(int)(two_plus(x,y)*3)+(int)(matching_wins(x,y,z)*5)+(int)(added((float)x,(float)y)*7)+(int)(a*1000)+(int)(b*100000);}",
+        "asm-x87-doubled", clang);
     check_test_program_boundary_reason(test, "int tested(int n){long double x=n;__asm__ volatile(\"\" : : \"t\"(x) : \"st(1)\");return n;}",
                                        "asm-x87-clobber", true, false, 0, 1, "inline assembly's x87 operands and clobbers off the stack's top");
     // x87 registers named in templates (#147): %0 of t as %st, of u as %st(1), the stack's registers by name, an
