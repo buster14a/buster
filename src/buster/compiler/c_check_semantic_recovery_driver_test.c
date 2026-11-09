@@ -221,6 +221,11 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "const int cx; volatile int vx; _Atomic int ax; typedef const int CT; CT ctx; typedef int T; T tx; const T ctt;\n"
         "typedef _Atomic int AT; AT atx; int *const pc; struct Q { int a; } const cq;\n"
         "void f(void) { cx(); vx(); ax(); ctx(); tx(); ctt(); atx(); pc(); cq(); }\n",
+        // An array's or function's qualifiers are its elements', which the loaded type keeps (review on #1802).
+        "struct Q { int a; };\n"
+        "const int ca[2]; volatile int va[2]; const int na[2][3]; int * const pa[2]; const _Atomic int aa[2]; const struct Q cq2[2];\n"
+        "int (* const fpa[2])(void);\n"
+        "void g(void) { ca(); va(); na(); pa(); aa(); cq2(); fpa(); }\n",
         "extern int a[];\n"
         "struct Q;\n"
         "int s = sizeof(a);\n"

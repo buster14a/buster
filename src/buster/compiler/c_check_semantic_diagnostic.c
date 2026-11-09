@@ -644,9 +644,12 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
         {
             // clang's err_typecheck_call_not_function at the call's `(`, the callee's type as written once loaded: without
             // its qualifiers and _Atomic, so that a typedef's name stays only where it is the loaded type (`const T`'s T,
-            // not a `const int` typedef's; review on #1802).
-            const TypeId plain = type_unqualified(operand_type);
-            const TypeId loaded = type_kind(types, plain) == BUSTER_TYPE_KIND_ATOMIC ? type_unqualified(types->types.base[type_index(plain)]) : plain;
+            // not a `const int` typedef's; review on #1802). An array's or function's qualifiers are its elements', which
+            // lvalue-to-rvalue never reaches (clang's DefaultLvalueConversion decays first), so they stay.
+            const uint8_t callee_kind = check_action_kind(types, operand_type);
+            const bool decays = type_kind_is_array(callee_kind) || callee_kind == BUSTER_TYPE_KIND_FUNCTION;
+            const TypeId plain = decays ? operand_type : type_unqualified(operand_type);
+            const TypeId loaded = !decays && type_kind(types, plain) == BUSTER_TYPE_KIND_ATOMIC ? type_unqualified(types->types.base[type_index(plain)]) : plain;
             const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, loaded, check_semantic_operand_spelling(parser, input, operand));
             uint32_t open = token;
             while (open != 0 && open < parser->tokens.count && !(parser->tokens.kinds[open] == PARSE_KIND_L_PAREN && parser->tree.parents[open] == token))
