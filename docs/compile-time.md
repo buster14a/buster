@@ -2677,12 +2677,27 @@ report, on standard error after the command, a row per stage.
   is a test of a null pointer; the reader's walk keeps its own counts, above. With it, the report and the objects are checked
   by `test-checker-driver --executable`.
 
-**The harness.** `measure-compile [--runs N] [--warmups N] [--reference PATH]
-[--directory DIR] [--keep] -- ARGUMENT...` (`compile_measure.c`) times
-`ARGUMENT... -o FILE` as whole processes in a Williams design's order: this compiler
-without the option, with it, and the reference compiler.
-- **Measures.** Each process's wall time runs from `fork` to `wait4`'s return,
-  and `wait4`'s rusage gives its user and system time, peak RSS and faults.
+**The harness.** `measure-compile [--runs N] [--warmups N] [--reference PATH
+[--reference-option OPTION]... | --variant OPTION]... [--directory DIR] [--keep] --
+ARGUMENT...` (`compile_measure.c`) times `ARGUMENT... -o FILE` as whole processes
+in a Williams design's order: this compiler without the option, with it, and up
+to four references (#146): other compilers, each with its own options before the
+arguments (`--reference clang --reference-option -O0`), or this compiler with an
+option (`--variant`).
+- **Measures.** Each process waits on a pipe until its counters are open; its
+  wall time runs from its release to `wait4`'s return, and `wait4`'s rusage
+  gives its user and system time, peak RSS and faults. Its user cycles and
+  instructions come from `perf_event_open`, from its exec to its exit, as
+  `time-runs`' do; where the kernel refuses them, the report says `uncounted`.
+- **Per token (#146).** `--time-stages`' report gives the preprocessed tokens,
+  `time-process tokens` (the preprocessor's output, its end of file among it),
+  which every run must give alike. Each compiler's median wall time and user
+  cycles are divided by them, and each stage's median by them twice: as TSC
+  ticks at the report's `tsc-mhz`, and as core cycles at the `--time-stages`
+  processes' median user cycles per user millisecond, their average clock. The
+  core figure takes a stage as running at that average clock, which a pinned,
+  single-lane compile on a steady boost clock nearly is; the TSC figure is
+  exact but counts at the TSC's fixed rate, not the core's.
 - **Checks.** Every process must exit with status 0, the two objects of every
   run must be the same bytes, and every report must be whole.
 - **Coverage.** After the runs, with the medians, it prints the first
