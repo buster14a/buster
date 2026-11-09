@@ -142,14 +142,17 @@ counts each placed statement as the `asm` family's direct form.
 Clang places every asm statement in its caller, and the owner decided that
 this compiler does too ([#1447](https://github.com/buster14a/buster/issues/1447#issuecomment-6736401463),
 item 2). A statement that isn't a row (above), and whose template has no
-branch, label or reference, is an asm body: the records a helper would have
+named label or reference and isn't an asm goto, is an asm body: the records a helper would have
 between its frame and its return, which run in the statement's place in its
 function (`check_asm_inline_code`, `Tier0AsmBody`):
 
 1. the operands' loads from the operand block, the x87's first, the deepest
    first, each from the block's frame place (`BUSTER_TIER0_ASM_BLOCK`, which
    Tier 0 replaces with the block's home);
-2. the template's records;
+2. the template's records, its own branches to its numeric labels among them
+   (`1:` and `jnz 1b`), which Tier 0 emits as local branches of the function,
+   sized by branch sizing with its own (`Tier0AsmBody.branches`); a label at the
+   template's end is the first store's record, as in a helper;
 3. the flag outputs' `setcc` stores, the register outputs' stores through their
    addresses, the x87 outputs' stores from st(0) down and the pops of the x87
    inputs the template left, each address loaded from the block into a store
@@ -182,8 +185,9 @@ x87's control forms, `clflush`, `serialize`, `xsetbv` and `vzeroupper`/`vzeroall
 These take their implicit registers from `check_asm_implicit`. An x87 operation
 (`fsqrt`, `fxch`, `fld %st(1)`, `fxsave`) writes no general register. A record
 of any other unknown form keeps the helper. So does one that touches the stack
-or control flow (a push, a call, a jump, a return), as `unwind_tier0_frame`
-refuses in a body, and one that writes rsp, rbp or r15, which hold the frame.
+or control flow (a push, a call, a return, a jump or branch but the template's
+own to its labels), as `unwind_tier0_frame` refuses in a body, and one that
+writes rsp, rbp or r15, which hold the frame.
 
 What differs from the helper: the template's rsp is its function's, as clang's
 is, and the statement costs no call, return, pushes or block address.
@@ -847,7 +851,8 @@ has the commands, the logs and the default path's numbers against main.
 ## Pending
 
 What placement in the caller doesn't take yet (#1839), each keeping its helper:
-templates of labels and branches, asm goto, templates that return, templates
+templates of named labels (a symbol at the label's record) or references to
+names, asm goto, `loop` and `jrcxz` (which the lowering refuses by name), templates that return, templates
 that take directives, forms of unknown effects outside `check_asm_implicit`, and
 Tier 1, whose IR has no operation for an asm body or a row it doesn't decode,
 so that its lowering keeps the helpers.

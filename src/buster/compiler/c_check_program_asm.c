@@ -195,6 +195,10 @@ struct CheckProgramAsm
     X86Instruction* inline_records;
     uint32_t inline_count;
     uint32_t inline_touched;
+    // Its template's local branches (Tier0AsmBody.branches and targets), relative to its first record.
+    uint32_t* inline_branches;
+    uint32_t* inline_targets;
+    uint32_t inline_branch_count;
     bool inlined;
 };
 
@@ -1105,10 +1109,11 @@ static Tier0Code check_asm_helper_code(const CheckAsmPlace* places, uint32_t cou
 // none of them is the block's register; then the template's records; the flag outputs' stores while the flags are the
 // template's, each condition's setcc into `stores[1]`, zero-extended, and stored over its object through its address in
 // `stores[0]`; the register outputs' stores, each through its address in `stores[1]`; the x87 outputs', from st(0) down;
-// and the pops of the x87 inputs the template left. No output is in a store's register. Returns the count, 0 without
-// room in `output` (a statement of no records has at least an x87 or a flag output's).
+// and the pops of the x87 inputs the template left. No output is in a store's register. Returns the count, and the
+// template's first record in `*first` (its branches' and labels' records are past it), with 0 records without room in
+// `output` (a statement of no records has at least an x87 or a flag output's).
 static uint32_t check_asm_inline_code(const CheckAsmPlace* places, uint32_t count, const AsmCode* code, const uint8_t stores[2], uint32_t pops,
-                                      X86Instruction** records, Arena* output)
+                                      X86Instruction** records, uint32_t* first, Arena* output)
 {
     uint32_t loads = 0;
     uint32_t stored = 0;
@@ -1151,6 +1156,7 @@ static uint32_t check_asm_inline_code(const CheckAsmPlace* places, uint32_t coun
                                                   .displacement = (int32_t)slot };
             }
         }
+        *first = at;
         if (code->count != 0)
         {
             memcpy(written + at, code->records, (uint64_t)code->count * sizeof(X86Instruction));
@@ -1215,8 +1221,8 @@ static uint32_t check_asm_inline_code(const CheckAsmPlace* places, uint32_t coun
 // The registers an asm body touches (#1839, Tier0AsmBody.touched, in BUSTER_TIER0_XMM's layout): `taken`'s general ones
 // (its operands', its clobbers' and its stores'), the XMM registers of its vector operands and clobbers (`vectors`, a bit
 // each), and what x86_semantics.c says its template's records write; or UINT32_MAX for a template it doesn't place: a
-// record of unknown effects, or one that touches the stack or control flow (a push, a call, a jump, a return, a trap),
-// as unwind_tier0_frame refuses in a function's body, or that writes a register holding the frame (rsp, rbp, r15). A form
+// record of unknown effects, or one that touches the stack or control flow (a push, a call, a jump or branch but the
+// template's own to its labels, a return, a trap), as unwind_tier0_frame refuses in a function's body, or that writes a register holding the frame (rsp, rbp, r15). A form
 // x86_semantics.c doesn't cover takes check_asm_implicit's registers, or none for an x87 form's, or keeps the helper.
 // The forms common in inline assembly that x86_semantics.c gives only its conservative record (every register, unknown
 // control), with the registers each writes, as the instruction set's references define them: none touches the stack,
@@ -1283,9 +1289,16 @@ static uint32_t check_asm_inline_touched(const CheckAsmPlace* places, uint32_t c
         }
         else
         {
-            placed = x86_effects_control(effects) == BUSTER_X86_CONTROL_NONE &&
+            // A local branch of the template's own (its branch columns'), to one of its labels, is a branch of the body.
+            bool local = false;
+            for (uint32_t b = 0; b < code->branch_count; b += 1)
+            {
+                local |= code->branches[b] == r;
+            }
+            const uint32_t control = x86_effects_control(effects);
+            placed = (control == BUSTER_X86_CONTROL_NONE || (local && (control == BUSTER_X86_CONTROL_JUMP || control == BUSTER_X86_CONTROL_BRANCH))) &&
                      (effects->memory & (BUSTER_X86_MEMORY_EFFECT_STACK_READ | BUSTER_X86_MEMORY_EFFECT_STACK_WRITE)) == 0 &&
-                     (writes & (BUSTER_X86_RESOURCE_CONTROL | BUSTER_X86_RESOURCE_CALL)) == 0;
+                     (writes & ((local ? 0 : BUSTER_X86_RESOURCE_CONTROL) | BUSTER_X86_RESOURCE_CALL)) == 0;
             written |= writes & (BUSTER_X86_RESOURCE_GPRS | BUSTER_X86_RESOURCE_LOWER_VECTORS);
         }
     }
@@ -2403,13 +2416,25 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
         }
     }
     else if (valid && reason == NULL && helped && !program->asm_helpers && !check_program_helper_forced(program, CHECK_PROGRAM_HELPER_ASM) &&
-             !statement->is_goto && code.branch_count == 0 && code.reference_count == 0 && code.label_count == 0 &&
+             !statement->is_goto && code.reference_count == 0 && code.label_count == 0 &&
              (inline_touched = check_asm_inline_touched(places, count, &code, taken, vectors)) != UINT32_MAX)
     {
         // Placed in its caller as an asm body (#1839): its records run in its call row's place, with no helper.
         X86Instruction* records = 0;
-        const uint32_t records_count = check_asm_inline_code(places, count, &code, stores, pops, &records, output);
-        valid = records != 0;
+        uint32_t first = 0;
+        const uint32_t records_count = check_asm_inline_code(places, count, &code, stores, pops, &records, &first, output);
+        uint32_t* branches = code.branch_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, code.branch_count) : 0;
+        uint32_t* targets = code.branch_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, code.branch_count) : 0;
+        valid = records != 0 && (code.branch_count == 0 || (branches != 0 && targets != 0));
+        for (uint32_t b = 0; valid && b < code.branch_count; b += 1)
+        {
+            // The template's branches and their labels' records, past the body's loads.
+            branches[b] = first + code.branches[b];
+            targets[b] = first + code.targets[b];
+        }
+        plan->inline_branches = branches;
+        plan->inline_targets = targets;
+        plan->inline_branch_count = valid ? code.branch_count : 0;
         plan->inline_records = records;
         plan->inline_count = records_count;
         plan->inline_touched = inline_touched;
@@ -2478,6 +2503,9 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
         plan->inline_records = 0;
         plan->inline_count = 0;
         plan->inlined = false;
+        plan->inline_branches = 0;
+        plan->inline_targets = 0;
+        plan->inline_branch_count = 0;
     }
     arena_pop_to(scratch, scratch_mark);
     return valid;

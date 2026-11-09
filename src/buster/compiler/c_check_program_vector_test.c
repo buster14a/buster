@@ -628,6 +628,52 @@ static void check_test_program_vector_refusals(CheckTest* test, const X86Target*
 
 }
 
+// Accesses in a segment's space (#1447) that the lowering refuses by name, which compiled without the segment before: a
+// vector's element (whose type loses its vector's space), an atomic builtin's object (which its pointer reaches), and an
+// asm statement's register output (stored through its address). Clang's code has %gs or %fs on each.
+static void check_test_program_segment_refusals(CheckTest* test, const X86Target* target)
+{
+    static const struct
+    {
+        const char* name;
+        const char* source;
+        const char* reason;
+    } refused[] = {
+        { "segment-vector-element-read", "typedef int V __attribute__((vector_size(16)));int tested(V __seg_gs*p){return (*p)[1];}",
+          "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
+        { "segment-vector-element-write", "typedef int V __attribute__((vector_size(16)));void tested(V __seg_fs*p,int x){(*p)[1]=x;}",
+          "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
+        { "segment-vector-element-update", "typedef int V __attribute__((vector_size(16)));void tested(V __seg_gs*p){(*p)[2]++;}",
+          "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
+        { "segment-atomic-load", "int tested(int __seg_fs*p){return __atomic_load_n(p,5);}",
+          "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
+        { "segment-atomic-store", "void tested(int __seg_gs*p){__atomic_store_n(p,3,5);}",
+          "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
+        { "segment-atomic-exchange", "int tested(int __seg_gs*p){return __atomic_exchange_n(p,3,5);}",
+          "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
+        { "segment-atomic-compare-exchange", "_Bool tested(int __seg_gs*p,int*e){return __atomic_compare_exchange_n(p,e,1,0,5,5);}",
+          "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
+        { "segment-atomic-fetch-add", "int tested(int __seg_fs*p){return __atomic_fetch_add(p,1,5);}",
+          "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
+        { "segment-sync-fetch-add", "int tested(int __seg_gs*p){return __sync_fetch_and_add(p,1);}",
+          "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
+        { "segment-c11-atomic-load", "int tested(_Atomic int __seg_fs*p){return __c11_atomic_load(p,5);}",
+          "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
+        { "segment-atomic-test-and-set", "_Bool tested(char __seg_fs*p){return __atomic_test_and_set(p,5);}",
+          "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
+        { "segment-atomic-clear", "void tested(char __seg_gs*p){__atomic_clear(p,5);}",
+          "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
+        { "segment-asm-register-output", "void tested(int __seg_gs*p){__asm__(\"movl $1,%0\":\"=r\"(*p));}",
+          "an asm output in a segment's address space (256, 257 or 258: %gs, %fs or %ss) but a memory one" },
+        { "segment-asm-read-write-output", "void tested(int __seg_gs*p){__asm__(\"incl %0\":\"+r\"(*p));}",
+          "an asm output in a segment's address space (256, 257 or 258: %gs, %fs or %ss) but a memory one" },
+    };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(refused); i += 1)
+    {
+        check_test_program_boundary_target(test, refused[i].source, refused[i].name, true, false, 0, 0, refused[i].reason, target);
+    }
+}
+
 // Initializer validation keeps atomic rvalue identity while storage uses the underlying vector bytes.
 static void check_test_program_atomic_vector_constraints(CheckTest* test, const char* clang)
 {
@@ -1014,6 +1060,7 @@ static __attribute__((noinline)) void check_test_program_vectors(CheckTest* test
         check_test_program_build_release();
         check_test_program_march = "-march=x86-64";
         check_test_program_vector_refusals(test, &target);
+        check_test_program_segment_refusals(test, &target);
         check_test_program_atomic_vector_constraints(test, clang);
         check_test_program_vector_baselines(test, clang);
     }
