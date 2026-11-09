@@ -292,9 +292,12 @@ The optimizer roots `ir_optimize_test.c` and `ir_optimize_text_test.c`, includin
 their nested if-conversion and verified-pass fixtures, also belong to BACKEND.
 Other units include the production `ir_if_convert.c` and
 `ir_optimize_verified.c` directly at the same positions. Editing those production
-passes still rebuilds all eleven main units. `ir_source_test.c` and
-`tier1_select_burs_test.c` retain narrow helpers for BACKEND and CHECKER; editing
-either root rebuilds those two units.
+passes still rebuilds all eleven main units. The source preparation interface in
+`ir_source_test.c` serves BACKEND and CHECKER; other units include production
+`ir_dataflow.c` directly at the same position. The source root and
+`tier1_select_burs_test.c` therefore rebuild those two consumers alone, while
+`ir_dataflow.c` remains a dependency of all eleven units. Four narrow semantic
+references retain production unused-function checking without emitting code.
 
 The backend also owns the private Tier 0 fixtures, their nested tests and vector
 baseline, the mask tests and the streaming tests and benchmark. Editing those
