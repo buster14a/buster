@@ -5206,10 +5206,12 @@ static bool check_input_enum_operand(const CheckInputReader* reader, uint32_t to
 }
 
 // Whether the identifier `token` names a variable of a tagged enumeration type (through an aligned typedef too) or an
-// enumerator of a tagged enumeration: the nearest enumeration definition before the enumerator's declaration that holds it,
-// within 256 tokens, beyond which it is taken as tagged.
+// enumerator of a tagged enumeration outside that enumeration's definition (where clang takes it as an int): the nearest
+// enumeration definition before the enumerator's declaration that holds it, within 1024 tokens, beyond which it is taken
+// as tagged. Its `{` is where its tag ends (CheckInputReader.tag_ends), and its `}` the `{`'s parent.
 static bool check_input_enum_named(const CheckInputReader* reader, uint32_t token)
 {
+    const Parser* parser = reader->parser;
     const TypeTable* types = reader->types;
     const uint32_t declaration = reader->output->declarations[token];
     const TypeId type = reader->declared_types[token];
@@ -5219,12 +5221,20 @@ static bool check_input_enum_named(const CheckInputReader* reader, uint32_t toke
         // (Without the tags' column, as a reader made for a test has none, it is taken as tagged.)
         bool found = reader->tag_types == NULL || reader->tag_ends == NULL;
         result = true;
-        for (uint32_t back = 1; !found && back <= 256 && back <= declaration; back += 1)
+        for (uint32_t back = 1; !found && back <= 1024 && back <= declaration; back += 1)
         {
             const uint32_t at = declaration - back;
             const TypeId tag = reader->tag_types[at] != 0 ? type_unqualified(reader->tag_types[at]) : 0;
-            found = tag != 0 && type_kind(types, tag) == BUSTER_TYPE_KIND_ENUM && reader->tag_ends[at] > declaration;
-            result = found ? types->tags.name[types->types.index[type_index(tag)]] != 0 : result;
+            // (Its `{`, where the tag ends: the enumeration's own reads happen before the tag's end moves past it.)
+            uint32_t opening = BUSTER_CHECK_NONE;
+            const uint32_t end = tag != 0 && type_kind(types, tag) == BUSTER_TYPE_KIND_ENUM ? reader->tag_ends[at] : 0;
+            for (uint32_t k = at + 1; opening == BUSTER_CHECK_NONE && k <= end && k < parser->tokens.count; k += 1)
+            {
+                opening = parser->tokens.kinds[k] == PARSE_KIND_L_BRACE ? k : opening;
+            }
+            const uint32_t close = opening < declaration ? parser->tree.parents[opening] : BUSTER_CHECK_NONE;
+            found = close < parser->tokens.count && parser->tree.roles[close] == PARSE_ROLE_CLOSE_ENUM && declaration < close;
+            result = found ? types->tags.name[types->types.index[type_index(tag)]] != 0 && !(opening < token && token < close) : result;
         }
     }
     else if (type != 0)
