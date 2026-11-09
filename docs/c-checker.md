@@ -4001,7 +4001,8 @@ once. A definition after an earlier one gives the TLS error and then "redefiniti
 of 'x'", noted at the first definition, at the same name. A block extern's
 mismatch with another block's declaration is checked against the linked one.
 
-Left as it is: a redefinition (`int x = 1; int x = 2;`) is still dropped.
+Left as it is ([#1868](https://github.com/buster14a/buster/issues/1868)): a
+redefinition (`int x = 1; int x = 2;`) is still dropped.
 Clang keeps that invalid declaration in its chain too, so a later declaration
 is compared with it, without its type check: `float x;` after it is no error
 in clang, and a later TLS or linkage error notes it.
