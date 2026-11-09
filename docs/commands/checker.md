@@ -290,7 +290,10 @@ unused-warning fixtures also check exact scope-completion tokens.
   operator's operand (`CheckInput.enum_operands`, set where the identifiers' leaves are made, outside its own
   enumeration's definition) is scanned, and an operator is tested only where an operand may be an enumeration. An
   enumeration operand that is only a member, a call's result or a cast's isn't looked for without one, and the constant
-  reader's expressions (an array bound in a type name, an enumerator's value) aren't scanned.
+  reader's expressions (an array bound in a type name, an enumerator's value), and a `typeof` operand's, aren't
+  scanned. A comparison's operands are rvalues, as clang's DefaultLvalueConversion makes them: unqualified, a typedef
+  that carries a qualifier itself spelled as its type; a GNU `a ?: b`'s omitted operand is its condition promoted, never
+  an enumeration.
   `c_check_enum_arithmetic_driver_test.c` compares them with complete pinned-Clang output at each policy, both paths and
   with `-c`.
   An implicit conversion from one named enumeration to another, an enumerator taken as its enumeration, is clang's
@@ -586,6 +589,13 @@ The behavior was checked in the pinned Clang 23.1.4 source, revision
 `ArgType::matchesType`, and `CheckPrintfHandler::HandleAmount` in
 [SemaChecking.cpp](https://github.com/llvm/llvm-project/blob/7a941dfb2877a0b8cf30323fefa85ad019e0b0f5/clang/lib/Sema/SemaChecking.cpp).
 No upstream implementation or fixture is imported.
+
+`c_check_address_space_driver_test.c` adds original fixtures for the address
+spaces and objc_gc's qualifiers (#1447) to `test-checker-driver` through the same
+harness: their declarations, spellings and errors, the conversions' errors and
+notes, the conditionals' types (by `_Generic`), and the segments' accesses that
+the lowering refuses (`-fsyntax-only` alone). Each one's whole output equals
+Clang's on both kernels, at each policy and lane count.
 
 `c_check_format_bitint_driver_test.c` adds 25 original fixtures to
 `test-checker-driver` through the shared default-warning harness. Independent

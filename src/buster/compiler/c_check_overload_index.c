@@ -75,7 +75,7 @@ static bool check_overload_signature_hash(CheckOverloadIndex* index, const TypeT
         {
             const uint8_t kind = types->kind[i];
             uint64_t hash = type_hash_finish(i);
-            if (kind == BUSTER_TYPE_KIND_ALIGNED)
+            if (kind == BUSTER_TYPE_KIND_ALIGNED || kind == BUSTER_TYPE_KIND_QUALIFIED)
             {
                 hash = hashes[type_index(types->base[i])];
             }
