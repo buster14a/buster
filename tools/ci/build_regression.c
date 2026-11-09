@@ -1448,6 +1448,13 @@ static void check_incremental(void)
         {
             checked_owners += sizeof(catalog_benchmark) - 1;
         }
+        // The vector scheduling benchmark includes the same fixture independently of main.c. Keep it in the
+        // rebuild plan, and check its exact additional owner without broadening the unity ownership assertion.
+        static const char schedule_owners[] = "main_unit_backend.c tier1_schedule_benchmark.c ";
+        if (strcmp(source, "src/buster/compiler/tier1_schedule_fixture.c") == 0 && strcmp(expected, schedule_owners) == 0)
+        {
+            checked_owners = "main_unit_backend.c ";
+        }
         if (files[i].owners != 0 && strcmp(checked_owners, files[i].owners) != 0)
         {
             fail("%s is included by %s; expected exactly %s", source, expected, files[i].owners);
