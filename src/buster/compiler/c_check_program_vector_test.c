@@ -1002,6 +1002,25 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
           "#endif\n"
           "return (int)h;}\n"
         },
+        // #1834: shifts by a scalar count without AVX-512, by the count in an XMM register as clang's code shifts by a
+        // splat: words', dwords' and qwords' PSLL, PSRL and PSRA (a qword's arithmetic one by the logical one and its sign
+        // bit), bytes' through words (masked, or unpacked into words' high bytes), of 8, 16 and 32 bytes, and 32 bytes
+        // split in two without AVX; counts of each type, constant and not.
+        { "baseline-scalar-shifts",
+          "#define T(name,ct,W) typedef ct name __attribute__((vector_size(W)));\n"
+          "T(sb,signed char,16)T(ub,unsigned char,16)T(sw,short,16)T(uw,unsigned short,16)T(sd,int,16)T(ud,unsigned,16)T(sq,long long,16)"
+          "T(uq,unsigned long long,16)T(sb8,signed char,8)T(ud2,unsigned,8)T(sw4,short,8)T(SB,signed char,32)T(UB,unsigned char,32)T(SW,short,32)"
+          "T(SD,int,32)T(UQ,unsigned long long,32)T(SQ,long long,32)\n"
+          "#define S(T,bits) do{T x_;fill(&x_,sizeof(T),n+k+(int)sizeof(T)*bits);T r_[]={x_<<(k%bits),x_>>(k%bits),x_<<3,x_>>(bits-1),x_>>0,"
+          "(T)(x_<<(unsigned char)(bits/2))};FOLD(r_);}while(0)\n"
+          "int tested(int n){unsigned h=2166136261u;for(int k=0;k<70;k+=3){\n"
+          "S(sb,8);S(ub,8);S(sw,16);S(uw,16);S(sd,32);S(ud,32);S(sq,64);S(uq,64);S(sb8,8);S(ud2,32);S(sw4,16);\n"
+          "#ifndef __AVX512F__\n"
+          "S(SB,8);S(UB,8);\n"
+          "#endif\n"
+          "S(SW,16);S(SD,32);S(UQ,64);S(SQ,64);long long kk=k%64;v2di z;fill(&z,16,n);v2di zz=z>>kk;FOLD(zz);}\n"
+          "return (int)h;}\n"
+        },
         // AVX's and AVX2's (x86-64-v3's): 256-bit unpacks, broadcasts, permutes, variable shifts, lanes' extractions and
         // insertions, extensions, gathers, FMA's (of no NaN) and F16C's conversions, and shuffles of dwords and qwords.
         { "baseline-avx2",
