@@ -121,9 +121,11 @@ enum
     // An implicit conversion from one named enumeration to another (#1447, the end of clang's CheckImplicitConversion), an
     // enumerator taken as its enumeration: -Wimplicit-enum-enum-cast, on by default, under -Wenum-conversion.
     CHECK_WARNING_ID_IMPLICIT_ENUM_ENUM_CAST = 111,
+    // A tag a prototype's parameter list declares first (#1447, clang's ActOnTag): -Wvisibility, on by default.
+    CHECK_WARNING_ID_VISIBILITY = 112,
     // A target_clones attribute that mixes a string of several versions with other strings (#1838, clang's
     // SemaX86::checkTargetClonesAttr): -Wtarget-clones-mixed-specifiers, on by default, under -Wfunction-multiversion.
-    CHECK_WARNING_ID_TARGET_CLONES_MIXED_SPECIFIERS = 112,
+    CHECK_WARNING_ID_TARGET_CLONES_MIXED_SPECIFIERS = 113,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -374,6 +376,12 @@ typedef enum CheckWarningEventKind
     CHECK_WARNING_EVENT_TARGET_CLONES_UNSUPPORTED,
     CHECK_WARNING_EVENT_TARGET_CLONES_DUPLICATE,
     CHECK_WARNING_EVENT_TARGET_CLONES_MIXED,
+    // A tag a prototype's parameter list (or an old-style definition's declarations) declares first, which no declaration
+    // outside it names (#1447, -Wvisibility): at its name, an unnamed enum's keyword; payload.first_type the tag's type.
+    CHECK_WARNING_EVENT_PROTOTYPE_TAG,
+    // A tag a prototype's list defines again (#1447, -Wvisibility): at its name, payload.name the name, with a
+    // CHECK_WARNING_NOTE_PREVIOUS_DEFINITION at the earlier definition.
+    CHECK_WARNING_EVENT_PROTOTYPE_REDEFINITION,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
 
