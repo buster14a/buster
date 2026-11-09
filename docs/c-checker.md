@@ -2575,8 +2575,10 @@ What the lowering covers past scalars (#145's programs):
   folded to its width's bits, which the lowering extends from the width, as a
   narrower one's: a negative one's conversion to `__int128` or compare reads it
   as it is.
-  The overflow builtins of one of 65 to 127 bits are refused by name (their
-  recipes take a 128-bit operand whole).
+  The overflow builtins take one of 65 to 127 bits as an `__int128`'s limbs
+  (#1447): its descriptor is its width, its high limb extended from it, and a
+  destination's high limb is the result's extended from the width's bits past
+  64, which must give it back for the result to fit.
 - **x86 builtins (#136, #148).** The intrinsics' `__builtin_ia32_*` calls are
   X86 entries too (`c_check_program_x86.c`): a row per builtin, from a table by
   name, of its family's records with its rule's form, as clang -O0's code
@@ -3809,8 +3811,10 @@ that holds the name is cut whole, where clang still checks an operator on its
 value (`({ undeclared; p; }) + 1.5`); a unit with an error publishes no
 runtime (non-constant) shift warning, where clang, which then skips their
 reachability analysis, publishes them all (`x << 40`); a missing name that
-the declaration walk reports (an enumerator's or an array bound's) is a
-declarator failure, which keeps the whole unit's conservative prefix; and a
+the declaration walk reports in an array's bound, a `typeof` operand, a
+`_BitInt` width or a file-scope designator is a declarator failure, which
+keeps the whole unit's conservative prefix (an enumerator's value's and a
+bit-field width's are recovered: below); and a
 unit with any report other than a missing name (a control-flow error such as
 a `break` outside a loop, a declaration conflict) keeps the previous
 whole-unit prefix, which starts at the unit's first report of any kind, even
@@ -3987,15 +3991,25 @@ declarations. Otherwise a storage mismatch says "thread-local declaration of
 'X' follows non-thread-local declaration", or its reverse. That diagnostic
 notes the visible prior declaration, with its declaration/definition note;
 object type conflicts still note the latest prior declaration of the entity,
-including one from another block. The checks that reject and recover the
-declaration are unchanged. The semantic-recovery fixtures cover both storage
-directions, extern and static combinations, and subsequent declarations and
-uses under the same Clang comparison matrix.
-The distinct recovery behavior of a TLS-only mismatch is tracked in
-[#1786](https://github.com/buster14a/buster/issues/1786): Clang keeps that
-declaration in its chain, while the reader currently drops it. This diagnostic
-fix does not claim parity for subsequent conflicts of that same entity or a
-second initializer diagnostic on an already-defined object.
+including one from another block. The semantic-recovery fixtures cover both
+storage directions, extern and static combinations, and subsequent
+declarations and uses under the same Clang comparison matrix.
+
+A mismatch of thread-local storage alone keeps its declaration, as clang's
+`MergeVarDecl` links it after the error (#1786): the error is recovered and the
+declaration is merged, bound and linked as a valid one, with its own storage.
+The next declaration is compared with it (`_Thread_local int x; int x; int x;`
+has one error, and a third `float x;` notes the second), and its linked
+declaration's check doesn't compare the storage again, so the error is given
+once. A definition after an earlier one gives the TLS error and then "redefinition
+of 'x'", noted at the first definition, at the same name. A block extern's
+mismatch with another block's declaration is checked against the linked one.
+
+Left as it is ([#1868](https://github.com/buster14a/buster/issues/1868)): a
+redefinition (`int x = 1; int x = 2;`) is still dropped.
+Clang keeps that invalid declaration in its chain too, so a later declaration
+is compared with it, without its type check: `float x;` after it is no error
+in clang, and a later TLS or linkage error notes it.
 
 `check_driver_rejected_warnings` follows clang's `ActOnPopScope`: a scope in
 which an error occurred gives no unused-variable warning, nested scopes'
@@ -4080,9 +4094,20 @@ do:
   typedef, a parameter, a local) gives clang's "redefinition of 'K'", with
   "previous definition is here" at the earlier declaration, and is dropped the
   same way. (A name declared after an enumerator is the redeclaration's
-  "redefinition of 'K' as different kind of symbol" instead.) Clang's
-  `-Wvisibility` of a tag declared in a prototype, which the checker doesn't
-  give at all, is left out of its fixtures.
+  "redefinition of 'K' as different kind of symbol" instead.)
+- **A tag a prototype's list declares first** (named, or any enum), which no
+  declaration outside the function names, is clang's `-Wvisibility` warning
+  "declaration of 'struct S' will not be visible outside of this function",
+  on by default, at its name (an unnamed enum's keyword), as clang's `ActOnTag`
+  gives it: in a definition's list, a nested prototype's, a member's
+  function pointer's, a block's prototype and an array bound in the list, and
+  for a definition that shadows a file-scope tag. A C23 definition there is
+  no warning. Before C23, the list's redefinition of its own tag is "redefinition
+  of 'S' will not be visible outside of this function", noted at the earlier
+  definition; an enum's, read as an unnamed enum, gets the first warning too
+  (`c_check_warning_driver_test.c`). Left: a C23 list's redefinition of its own
+  record is taken as a new tag without clang's comparison (its "incompatible
+  definitions" error, [#1869](https://github.com/buster14a/buster/issues/1869)).
 
 Phase 3 covers statements after an error:
 
@@ -4349,9 +4374,24 @@ Left as they were:
 - Later diagnostics spell the name as written, not the one taken
   (`const int counter; countr = 5;`), and a function designator's
   comparison statement keeps its `-Wunused` and `-Wparentheses` notes.
-- A name the walk itself reads, a `typeof` operand, an array's bound or an
-  enumerator's value, is not corrected: an undeclared one there still stops
-  the reader, typo or not, as on main.
+- A name the walk itself reads is searched in the walk's order
+  (`check_typo_walk_value`, `check_constant_name` in `c_check_constant.c`),
+  among the declarations visible so far. In an enumerator's value or a
+  bit-field's width, the correction is taken as if it were written, and a
+  name with no correction is clang's error at the name, recovered: the
+  enumerator takes the value it would have had with no `=` (clang gives
+  `enum E { Z = 4, A = zzz, B }` A 5 and B 6, and a fixed enum's next value),
+  and the member is no bit-field, an unnamed one an unnamed member of its
+  whole type (`long : zzz` aligns the record to 8). A correction to a
+  non-constant (`enum { B = countr + 1 }` with an `int counter`) keeps the
+  generic declaration error where clang says "expression is not an integer
+  constant expression" at the culprit, as any non-constant enumerator value
+  or width does. A `typeof` operand, an array's bound, a `_BitInt` width or a
+  designator's index is not corrected yet: an undeclared one there still
+  stops the reader. Lanes and deferred readers search nothing: a unit with
+  such a name is read again in source order, which corrects it. A walk
+  search doesn't count a value's search that the binding answers make later
+  in an earlier body, which matters only past clang's 50 corrections.
 - A library function implicitly declared in an earlier function is no
   candidate, where clang's declaration stays visible at file scope.
 - A warning at an operator or a declarator whose operand was corrected
@@ -7758,8 +7798,15 @@ arguments against the function. The checker now gives these as clang does.
   don't carry (the encoder has the prefixes, which only thread-local storage's
   forms use). A load or store in one of those spaces is refused by name ("a load
   or store in a segment's address space", check_lower_segment_access, where a
-  unit has such a type at all: CheckLowerWriter.segments); taking an address
-  there is compiled. Any other space's code is the default space's, as clang's.
+  unit has such a type at all: CheckLowerWriter.segments), and so are the
+  accesses whose lvalue doesn't carry the space: a vector's element, read or
+  written (its type loses the vector's space), an atomic builtin's object
+  (`__atomic_*`, `__c11_atomic_*`, `__sync_*`, reached through the pointer
+  argument), and an asm statement's register output (stored through its
+  address; "an asm output in a segment's address space ... but a memory one").
+  Before, those compiled without the override. A memory asm operand's address is
+  the template's, without the segment, as clang's is. Taking an address there is
+  compiled. Any other space's code is the default space's, as clang's.
 
   What differs from clang: C23's spellings (`[[clang::address_space(1)]]` and
   the others), which slide from a declaration to its specifiers with clang's
@@ -8311,11 +8358,14 @@ arguments against the function. The checker now gives these as clang does.
       declaration's is clang's "function declared 'A' here was previously
       declared 'B'" (or "without calling convention", where its first
       declaration has none explicit), with its "previous declaration is here"
-      note at the first declaration (#1447, `check_input_report_redeclaration`),
-      but for `no_caller_saved_registers`, whose clang message is "function
-      declared with 'no_caller_saved_registers' attribute was previously
-      declared without the 'no_caller_saved_registers' attribute": that one is
-      "conflicting types for 'f'", without its note;
+      note at the first declaration (#1447, `check_input_report_redeclaration`).
+      A redeclaration that adds `no_caller_saved_registers` in its own
+      attribute is clang's "function declared with 'no_caller_saved_registers'
+      attribute was previously declared without the 'no_caller_saved_registers'
+      attribute" (`'gnu::no_caller_saved_registers'` for a C23 one), before a
+      type conflict, noted at the declaration its lookup found. One whose
+      typedef carries the attribute, which crashes clang 23, keeps "conflicting
+      types for 'f'";
     - a function type spelled with a macro of its convention prints without
       clang's macro name (`'MS void (void) __attribute__((ms_abi))'`), and a
       typedef's attribute without clang's sugar
@@ -8635,19 +8685,30 @@ conditional operator's two function operands; this gives one for each.
   pointer to an incomplete type 'struct s'" (a subscript's "subscript of
   pointer to incomplete type", at its `[`), of the pointee as written, with its
   "forward declaration of 'struct s'" note at the tag's declaring name.
+- **Type sugar** (#1447). An operand's type keeps the typedef clang's sugar
+  keeps there. A dereference or subscript follows the declaration's chain of
+  typedef specifiers to the first typedef whose type is the operand's level
+  (`check_driver_spelling_chain`): `*p` of a `pv p` (`typedef v4si *pv`) is
+  `'v4si'`, and `**b` of a `VPP b` (`typedef VP *VPP`) is
+  `'VP' (aka 'void *')`. A chain's types only shrink, so its first match is
+  clang's. A `.` or `->` operand keeps its member declarator's typedef: the
+  member's declarator is found in its record's body, which
+  `CheckGraph.tag_completions` locates (`check_semantic_member_token`), so
+  `x.f++` of a member `uu f` is `'uu' (aka 'struct u')`. An a.k.a. keeps a
+  vector's own typedef at any level (`'pv' (aka 'v4si *')`), as
+  `desugarForDiagnostic` stops there. A typedef'd array's element keeps its
+  qualified typedef (`'CI[2]' (aka 'const int[2]')`, `type_print`).
+  `c_check_type_sugar_driver_test.c` compares these whole-output with clang.
 - **Differences left.**
-  - A vector type reached through a pointer typedef (`typedef v4si *pv;`)
-    prints without its typedef's name, and so does a member's type
-    (`x.f++` of a member `uu f` prints `'struct u'` where clang's is
-    `'uu' (aka 'struct u')`): a record's members keep no declaration.
   - An assignment to a member that is const itself is "read-only variable is
-    not assignable", where clang names the member with its note: a record's
-    members keep no declaration. A typedef'd array's variable prints its
-    element's typedef unspelled (`'const int[2]'` for clang's
-    `'CI[2]' (aka 'const int[2]')`).
-  - A typedef inside another typedef (`typedef VP *VPP`) loses its inner name
-    in the void dereference's operand type (`**b`'s `'void *'` for clang's
-    `'VP'`).
+    not assignable", where clang names the member with its note.
+  - A qualifier written again over a qualified typedef's array
+    (`const CI twice[1]`) is dropped: clang prints
+    `'const CI[1]' (aka 'const int[1]')`, this `'CI[1]'`.
+  - The input-side spelling helpers (`check_input_operand_type_spelling` and
+    the others, `-Wsign-compare`'s operands among them) don't follow members:
+    `x.n < i` prints `'unsigned long'` for clang's
+    `'ul' (aka 'unsigned long')`.
 
 ## Ignorable and unsupported pragmas
 

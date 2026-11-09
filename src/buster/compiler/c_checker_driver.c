@@ -3773,9 +3773,20 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                                 .token = report->note_token < count ? parser->tokens.sources[report->note_token] : 0,
                                 .message = "previous declaration is here",
                             };
-                            pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, report->note_token < count ? 1u : 0u,
-                                                        "function declared '%s' here was previously declared %s", check_input_convention_name(report->detail & 0xffu),
-                                                        previous_text);
+                            if ((report->detail & BUSTER_CHECK_CONVENTION_NO_CALLER_SAVED) != 0)
+                            {
+                                // no_caller_saved_registers added by a redeclaration, clang's err_function_attribute_mismatch, the
+                                // attribute named as clang prints it: a C23 one's with its gnu scope.
+                                const char* name = (report->detail & BUSTER_CHECK_CONVENTION_STANDARD) != 0 ? "gnu::no_caller_saved_registers" : "no_caller_saved_registers";
+                                pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, report->note_token < count ? 1u : 0u,
+                                                            "function declared with '%s' attribute was previously declared without the '%s' attribute", name, name);
+                            }
+                            else
+                            {
+                                pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, report->note_token < count ? 1u : 0u,
+                                                            "function declared '%s' here was previously declared %s", check_input_convention_name(report->detail & 0xffu),
+                                                            previous_text);
+                            }
                         }
                         else if (phase == 0 && kind == CHECK_INPUT_ATTRIBUTE_CONVENTIONS)
                         {
