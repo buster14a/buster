@@ -442,7 +442,6 @@ static void check_interrupt_evaluated_calls(CheckInputReader* reader, const Chec
     const CheckGraph* graph = &input->graph;
     const Parser* parser = reader->parser;
     const uint32_t count = parser->tokens.count;
-    const bool scalar = parser->options.scalar;
     const uint64_t words = ((uint64_t)count + 63) / 64 + 1;
     uint64_t* graphed = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint64_t, words);
     input->resource |= graphed == NULL;
@@ -459,7 +458,7 @@ static void check_interrupt_evaluated_calls(CheckInputReader* reader, const Chec
     {
         const uint32_t live = count - first < 64 ? count - first : 64;
         uint64_t selected = 0;
-        if (!BUSTER_SCALAR_PATH(scalar))
+        if (!BUSTER_SCALAR_PATH(parser->options.scalar))
         {
             const __mmask64 lanes = live == 64 ? ~(__mmask64)0 : ((__mmask64)1 << live) - 1;
             const __m512i roles = _mm512_maskz_loadu_epi8(lanes, parser->tree.roles + first);
