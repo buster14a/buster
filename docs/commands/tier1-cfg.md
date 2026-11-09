@@ -7,10 +7,13 @@ requirements. [Command index](README.md).
 ## Module overview
 
 - `tier1_cfg.c` allocates over a CFG (#140): per-block ranges from `dataflow.c`'s
-  liveness with phi operands on their edges, hinted (`hint_values`) to keep one
+  liveness with phi operands on their edges, hinted (`hint_values`, and
+  `hint_intervals` for a dispatch loop's handlers' entries, #1216) to keep one
   register, then each edge's parallel move, placed at a block's end or start or
-  on the split edge, with a temporary slot for slot cycles. `tier1_cfg_verify`
-  is its independent checker, which simulates each block and edge, and checks
+  on the split edge, with a temporary slot for slot cycles. With `slot_widths`,
+  a phi web's spilled values share one slot where none overlaps another, so an
+  edge moves nothing for an operand already in its phi's slot (#1216).
+  `tier1_cfg_verify` is its independent checker, which simulates each block and edge, and checks
   each piece of a range cut at a split where its split's moves leave it. Its
   classes, and `tier1_allocate.c`'s, are general, vector and AVX-512's opmask
   registers (#179: k1 to k7 for values, a class with k0 refused, k0 the class's
@@ -18,7 +21,8 @@ requirements. [Command index](README.md).
   the successor's entry from one forward sweep of that value's intervals (#1399), and emission resolves a position
   from the first interval overlapping its block when that column fits. The verifier and the certificate keep the
   binary search and check both results against it. `test-tier1-cfg` runs fixtures and random SSA over random CFGs of the
-  three classes with mutants; `test-tier1-cfg-source` adapts every function `-c`
+  three classes with mutants (three generated cases in four share phi webs' slots, and a mutant gives two values whose
+  slot fragments overlap one slot); `test-tier1-cfg-source` adapts every function `-c`
   compiles of real C, lowered and promoted, through a machine model
   (`tier1_cfg_ir.c`) and checks both paths' allocations, and with `--simd`
   allocates #732's SIMD functions as lowered, their masks in the opmask class.
