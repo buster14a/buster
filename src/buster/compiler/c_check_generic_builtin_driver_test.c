@@ -272,7 +272,8 @@ static void check_test_driver_counted_by(CheckTest* test, const char* clang, con
 
 // __builtin_cpu_supports of a feature clang doesn't know (#1843, check_input_cpu_supports_literal), by the driver against
 // clang, by both paths of -fsyntax-only: the whole output, line for line, with the exit status, under no option, -w and
-// -Werror. clang's warning of no option is at the builtin's name, in a body, under parentheses, in sizeof's operand and in
+// -Werror. clang's warning of no option is at the callee's first token (a parenthesized name's outermost `(`), in a body,
+// under parentheses, in sizeof's operand and in
 // a condition; a feature it knows, a concatenated one, gives none, and an empty string and another case's spelling do.
 static void check_test_driver_cpu_supports(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
@@ -282,7 +283,8 @@ static void check_test_driver_cpu_supports(CheckTest* test, const char* clang, c
         "    return __builtin_cpu_supports(\"foo\") + __builtin_cpu_supports(((\"x86-64-v9\"))) + __builtin_cpu_supports(\"avx2\") +\n"
         "           __builtin_cpu_supports(\"avx\" \"512f\") + __builtin_cpu_supports(\"\") + __builtin_cpu_supports(\"AVX2\");\n"
         "}\n"
-        "int g(void) { if (__builtin_cpu_supports(\"avx2,sse\")) return 1; return __builtin_cpu_supports(\"x86-64-v3\"); }\n";
+        "int g(void) { if (__builtin_cpu_supports(\"avx2,sse\")) return 1; return __builtin_cpu_supports(\"x86-64-v3\"); }\n"
+        "int h(void) { return (__builtin_cpu_supports)(\"unknown\") + ((__builtin_cpu_supports))((\"x\")) + (__builtin_cpu_supports)(\"avx2\"); }\n";
     static const char* const options[] = { NULL, "-w", "-Werror" };
     enum { LINES = 8192 };
     char* expected_lines = malloc(LINES);

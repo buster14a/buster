@@ -183,8 +183,8 @@ static void check_input_cfstring_literal(CheckInputReader* reader, const CheckBu
 }
 
 // clang's warning of __builtin_cpu_supports's literal of a feature it doesn't know (#1843, SemaX86's validateCpuSupports:
-// "invalid cpu feature string for builtin", of no option), at the builtin's name `keyword`, once the call `closing` is
-// read. A cast literal is the call's error instead. Rare: scalar.
+// "invalid cpu feature string for builtin", of no option), at the callee's first token `keyword` (the builtin's name, or
+// its outermost parenthesis), once the call `closing` is read. A cast literal is the call's error instead. Rare: scalar.
 static void check_input_cpu_supports_literal(CheckInputReader* reader, const CheckBuiltinCall* evidence, uint32_t keyword, uint32_t closing)
 {
     const uint64_t test = check_builtin_cpu_lookup(check_builtin_cpu_features, BUSTER_ARRAY_LENGTH(check_builtin_cpu_features), evidence->nan_payload,
@@ -290,7 +290,10 @@ static __attribute__((noinline)) void check_input_misc_evidence(CheckInputReader
     }
     if (builtin == CBUILTIN_CPU_SUPPORTS && count == 1 && evidence->nan_payload_known && !evidence->nan_payload_cast && reader->first_child[token] < token)
     {
-        check_input_cpu_supports_literal(reader, evidence, reader->first_child[token], token);
+        // At the callee's first token: a parenthesized name's outermost `(` (#1916's review), whose `)` is the call's child.
+        const uint32_t callee = reader->first_child[token];
+        const bool grouped = reader->parser->tree.roles[callee] == PARSE_ROLE_CLOSE_GROUP && reader->first_child[callee] < callee;
+        check_input_cpu_supports_literal(reader, evidence, grouped ? reader->first_child[callee] : callee, token);
     }
     if (builtin == CBUILTIN_EXPECT_WITH_PROBABILITY && count == 3 && graph->argument_count >= 3 &&
         graph->argument_offsets[node] == graph->argument_count - 3)
