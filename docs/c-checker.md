@@ -4067,15 +4067,49 @@ A rejected unit gets the warnings clang gives it outside its errors
 them (its reader's, its graph's, its asm, control, initializer and musttail
 errors). Where it can, that reading leaves out an error's part alone, in a
 private view of the unit's tokens reparsed as a repair's is
-(`check_driver_rejected_view`): an initializer, from its `=`, where the
-declaration is complete without it (not an unsized array's, not a const
-object's), else an expression statement in a body, which `{` `}` replace
-(`check_driver_rejected_edit`). The body is then read as clang reads it, its
-warnings before and after the error given, flushed (no analysis warnings).
+(`check_driver_rejected_view`). `check_driver_rejected_edit` walks up from the
+error to the nearest part it can leave out:
+
+- **An initializer**, from its `=`, where the declaration is complete without
+  it (not an unsized array's). A const object of an arithmetic or enumeration
+  type keeps its declaration, its initializer replaced by `-*__func__`, as
+  clang's const object stays valid with an unknown value.
+- **An expression statement**, which `{` `}` replace (a `return`'s too).
+- **A condition** (`if`, `while`, `do`, `switch`), which `-*__func__`
+  replaces: an `int` that reads no object of the unit's and is no constant,
+  so that the statements after it stay as reachable as they were. The
+  statement keeps its body, as clang's does.
+- **A for statement's clause**: the init's and the increment's are left out,
+  the condition's replaced as a condition is, so that the loop doesn't become
+  endless.
+- **A statement expression's value**: an error in its last statement is its
+  expression's, so the part around the expression is left out instead; an
+  error in an earlier statement is that statement's.
+- **A declarator**, where its declaration can't do without what holds the error
+  (an unsized array's or a const pointer's initializer, its specifiers, an
+  array bound): it is left out with the comma after it, or the last kept
+  one's before it, or the whole declaration where no other declarator is
+  kept. Every later identifier of its name in its scope is a use, whose own
+  part is left out in turn (a work list), so that no use reads an outer
+  declaration in its place. A typedef's isn't, as the parse reads its name as
+  a type.
+
+Each error's parts are left out all or none (an undo log). A part that holds a
+label, a `case`, a `goto`, a label's address or a tag's definition isn't. The
+replacements are chosen to give no warning of their own (a constant condition
+would: clang's "no case matching constant switch condition"). A part left out
+gives no warning of its own reading, where clang gives those of what it builds
+before the error; the first reading's folded shifts in it are still given, at
+the unit's end (`check_common_shift_finish`), not among the body's. A function that holds an error
+gets no `-Wunused-but-set-parameter` from that reading, as clang's
+`ActOnFinishFunctionBody` gives none: it may lack the parameter's reads
+(`CheckCommonFacts.flushed`'s 2). In a flushed body, `-Wself-assign` is given
+where it stands, as clang gives it, not with the body's runtime warnings at its
+end. The body is then read as clang reads it, its warnings before and after the
+error given, flushed (no analysis warnings).
 Other errors leave out their bodies, by `check_input_selected` as
 `-flazy-system-headers`' bodies are, as does every error where the view
-doesn't parse or its reading isn't valid (a statement expression's last
-statement left out makes its value `void`; `check_driver_rejected_read`
+doesn't parse or its reading isn't valid (`check_driver_rejected_read`
 publishes nothing of an invalid reading, which is then read again with the
 bodies left out). The second reading's unused variables in a scope with an error
 are left out (its own error counts, the dropped part's at the token after
@@ -4094,6 +4128,11 @@ error it finds is among the unit's errors: as for the reader's and the graph's,
 its scopes' unused variables and the unit-end warnings are left out
 (`check_driver_rejected_warnings`). `c_check_statement_recovery_driver_test.c`
 compares fixtures of graph, control, asm and reader errors with clang.
+`c_check_structural_recovery_driver_test.c` compares the view parts' fixtures
+(conditions, for clauses, statement expressions, declarators, and the fallback
+of a part that holds a label or a goto) with clang 23 under `-Wall` and `-Wall
+-Wextra`, gnu17 and gnu23, by both paths and on one, two and three lanes, each
+with errors mid-body among warnings before and after them.
 
 Every declaration's failed initializer is given, as clang gives each
 (phase 2): `int a[2] = 5; int b[2] = 6;` has two errors where it had the
@@ -4230,14 +4269,18 @@ The later phases are left:
   (`k + 1`'s `+`), and `sizeof` of an incomplete type reads "incomplete type
   is not permitted here" at the `sizeof`, where clang's names the type at its
   operand; both on main too.
-- **Errors no view part leaves out.** A body's error in a condition, a for
-  header, a statement expression or a declaration other than through its
-  initializer still leaves its body out, and its warnings with it. An error
-  outside every body other than an initializer's (a declaration's, an
-  unsized array's or a const object's initializer) still leaves the unit
-  without its common warnings. A function holding an error gets no
-  `-Wunused-parameter`, where clang gives one for a parameter it doesn't
-  use.
+- **Errors no view part leaves out.** A body's error in a part that holds a
+  label, a `case`, a `goto` or a tag's definition, or in a typedef's
+  declaration, still leaves its body out, and its warnings with it. A reader's
+  error that ends its walk in a declarator (`int a[s.b];`, still "invalid or
+  unsupported declaration") leaves its declarator out, but the first reading
+  never saw the body's later errors, so a second reading that meets one isn't
+  valid. The warnings clang gives of what a left-out part builds before its
+  error aren't given, but for a folded shift's, which comes at the unit's end. An error outside every body
+  other than an initializer's (a declaration's, an unsized array's or a const
+  object's initializer) still leaves the unit without its common warnings. A
+  function holding an error gets no `-Wunused-parameter`, where clang gives
+  one for a parameter it doesn't use.
 
 ### What the lowering costs (#531)
 
