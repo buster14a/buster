@@ -5216,7 +5216,8 @@ static bool check_input_enum_named(const CheckInputReader* reader, uint32_t toke
     bool result = false;
     if (type != 0 && reader->declaration_kinds[declaration] == C_BINDING_ENUMERATOR)
     {
-        bool found = false;
+        // (Without the tags' column, as a reader made for a test has none, it is taken as tagged.)
+        bool found = reader->tag_types == NULL || reader->tag_ends == NULL;
         result = true;
         for (uint32_t back = 1; !found && back <= 256 && back <= declaration; back += 1)
         {
