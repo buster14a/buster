@@ -141,9 +141,15 @@ static const struct
       "__builtin_signbit(-0.0q),__builtin_isfpclass(0x1p-16494q,0x0080),__builtin_isinf(1e5000q),(int)0.1q};"
       "__float128 g(int n){switch(n&3){case 0:return 0.1q;case 1:return -0x1p-16494q;case 2:return __builtin_nansf128(\"0x123456789abcdef0123\");"
       "default:return (__float128)(unsigned __int128)-1;}}"
+      // A _Complex __float128 constant's parts stay exact long doubles until complex constants keep bits: a part that isn't
+      // one is computed at run time, and an exact one's part folds with its bits.
+      "static int z[]={(_Complex __float128)1.5q==(_Complex __float128)1.25q,(_Complex __float128)1.5q!=0};"
+      "int cz(void){return (_Complex __float128)0x1.0000000000000000000000001p0q==(_Complex __float128)0x1.00000000000000000000000008p0q;}"
+      "__float128 cr(int n){return n?__real__(_Complex __float128)0.1q:__real__(_Complex __float128)1.5q+__imag__ 1.5qi;}"
       "int tested(int n){unsigned x=2166136261u;x=hash(x,q,sizeof q);x=hash(x,d,sizeof d);x=hash(x,f,sizeof f);x=hash(x,h,sizeof h);"
       "x=hash(x,b,sizeof b);x=hash(x,u,sizeof u);x=hash(x,k,sizeof k);for(unsigned i=0;i<sizeof l/sizeof*l;i++)x=hash(x,&l[i],10);"
       "__float128 r=g(n);x=hash(x,&r,16);__float128 c=0.7q;x=hash(x,&c,16);double e=0.1q;x=hash(x,&e,8);"
+      "x=hash(x,z,sizeof z);x^=(unsigned)cz();__float128 w=cr(n&1);x=hash(x,&w,16);"
       "return (int)(x^(unsigned)n);}" },
     // A narrow NaN converted at run time. Runtime conversion must still
     // quiet signaling inputs and put their payloads in the target format's high fraction bits.

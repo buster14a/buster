@@ -453,11 +453,16 @@ static bool check_builtin_float_compare_long(uint32_t id, long double a, long do
            id == CBUILTIN_ISLESSGREATER ? __builtin_islessgreater(a, b) : __builtin_isunordered(a, b);
 }
 
-static __attribute__((noinline)) bool check_builtin_float_compare_quad(uint32_t id, __float128 a, __float128 b)
+// A __float128's by its bits, NaNs unordered first, so that the host compares only numbers, with its plain operators (the
+// comparison builtins of a run-time __float128 are no code this compiler makes, and it compiles itself).
+static __attribute__((noinline)) bool check_builtin_float_compare_quad(uint32_t id, unsigned __int128 left, unsigned __int128 right)
 {
-    return id == CBUILTIN_ISGREATER ? __builtin_isgreater(a, b) : id == CBUILTIN_ISGREATEREQUAL ? __builtin_isgreaterequal(a, b) :
-           id == CBUILTIN_ISLESS ? __builtin_isless(a, b) : id == CBUILTIN_ISLESSEQUAL ? __builtin_islessequal(a, b) :
-           id == CBUILTIN_ISLESSGREATER ? __builtin_islessgreater(a, b) : __builtin_isunordered(a, b);
+    const bool unordered = check_quad_is_nan(left) || check_quad_is_nan(right);
+    const __float128 a = unordered ? 0 : check_quad_host(left);
+    const __float128 b = unordered ? 0 : check_quad_host(right);
+    const bool answer = id == CBUILTIN_ISGREATER ? a > b : id == CBUILTIN_ISGREATEREQUAL ? a >= b : id == CBUILTIN_ISLESS ? a < b :
+                        id == CBUILTIN_ISLESSEQUAL ? a <= b : id == CBUILTIN_ISLESSGREATER ? a != b : false;
+    return id == CBUILTIN_ISUNORDERED ? unordered : !unordered && answer;
 }
 
 static void check_builtin_float_compare(TypeTable* table, const CheckBuiltinFloatAction* input, CheckBuiltinFloatResult* output, CheckValue* values)
@@ -493,7 +498,7 @@ static void check_builtin_float_compare(TypeTable* table, const CheckBuiltinFloa
                            output->action.value.fault == CHECK_FAULT_NONE;
         if (known)
         {
-            const bool answer = quad ? check_builtin_float_compare_quad(input->id, check_quad_host(values[0].integer), check_quad_host(values[1].integer)) :
+            const bool answer = quad ? check_builtin_float_compare_quad(input->id, values[0].integer, values[1].integer) :
                                        check_builtin_float_compare_long(input->id, values[0].floating, values[1].floating);
             output->action.value.constant_kind = CHECK_CONSTANT_INTEGER;
             output->action.value.integer = answer;
