@@ -2053,7 +2053,24 @@ struct CheckInputReader
     // source order.
     CheckTypo* typo;
     bool typo_disabled;
+    // The next constant reading's undeclared names (#1447, check_constant_name): CHECK_CONSTANT_NAMES_*, which that reading
+    // takes and clears. The names reported so far, and those of them no correction took: a declarator's reading that
+    // reported one has its errors.
+    uint8_t constant_names;
+    uint32_t constant_named;
+    uint32_t constant_missing;
 };
+
+// What a constant's reading does with an undeclared name it binds (check_constant_name). By default nothing: its caller
+// reports its failure. A declarator's constant reports each one in clang's words, at the name, with its typo's
+// correction, which the reading then takes, its error recovered. One with no correction is recovered too where the
+// caller recovers its declaration (an enumerator's value, a bit-field's width), and otherwise ends the walk.
+typedef enum CheckConstantNames
+{
+    CHECK_CONSTANT_NAMES_NONE,
+    CHECK_CONSTANT_NAMES_REPORT,
+    CHECK_CONSTANT_NAMES_RECOVER,
+} CheckConstantNames;
 
 // Whether one of the sparse columns the expressions' walk tests first has an entry for `token`: a statement expression's
 // group, a cached constant, a runtime selection, a va_arg call, a designator, a variable array's bound or an asm statement.
@@ -4142,6 +4159,32 @@ static TypeId check_input_tag_identity(CheckInputReader* reader, uint32_t token,
             }
             valid = reader->output->report_count == before + 1 && check_input_recover_reports(reader, before);
         }
+        // Before C23, a parameter list's redefinition (above) is clang's -Wvisibility warning "redefinition of 'S' will not
+        // be visible outside of this function", noted at the earlier definition; an enum's anonymous one is warned of
+        // below as a new tag too. (C23 compares the two, as for any other redefinition.)
+        if (valid && redefinition && !c23)
+        {
+            const uint32_t old = reader->bindings.declaration[previous - 1];
+            const uint32_t defined_at = check_input_tag_definition_name(reader, defined, old);
+            const CheckWarningEvent event =
+            {
+                .id = CHECK_WARNING_ID_VISIBILITY,
+                .kind = CHECK_WARNING_EVENT_PROTOTYPE_REDEFINITION,
+                .token = declaration,
+                .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+                .completion = declaration,
+                .payload = { .name = name, .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+            };
+            const CheckWarningNote note =
+            {
+                .kind = CHECK_WARNING_NOTE_PREVIOUS_DEFINITION,
+                .token = defined_at != BUSTER_CHECK_NONE ? defined_at : old,
+                .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                .payload = { .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+            };
+            check_input_warning_event(reader, &event, &note, 1);
+        }
         const bool anonymous = redefinition || again || compatible;
         // A body that a mismatched enum's declaration drops, past which the tag ends.
         bool skipped = false;
@@ -4213,6 +4256,24 @@ static TypeId check_input_tag_identity(CheckInputReader* reader, uint32_t token,
                 if (reader->transparent_unions != 0)
                 {
                     reader->transparent_unions[tag] = 0;
+                }
+                // A tag that a prototype's list (or an old-style definition's declarations) declares first, named or an
+                // enum, which no declaration outside the function names: clang's ActOnTag warns of it (-Wvisibility, at its
+                // name, an unnamed enum's keyword), but for a C23 definition, which a compatible one outside may redefine.
+                // An enum's redefinition there is an unnamed enum's, warned of too, at the name.
+                if (reader->prototype_depth != 0 && ((name != 0 && !anonymous) || kind == BUSTER_TYPE_KIND_ENUM) && !(c23 && body))
+                {
+                    const CheckWarningEvent event =
+                    {
+                        .id = CHECK_WARNING_ID_VISIBILITY,
+                        .kind = CHECK_WARNING_EVENT_PROTOTYPE_TAG,
+                        .token = declaration,
+                        .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                        .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+                        .completion = declaration,
+                        .payload = { .token = BUSTER_CHECK_WARNING_NO_SOURCE, .first_type = type },
+                    };
+                    check_input_warning_event(reader, &event, NULL, 0);
                 }
                 if (fixed)
                 {
@@ -8052,6 +8113,7 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
                     }
                     valid &= (check_input_overload_flags(attributes) & BUSTER_CHECK_OVERLOADABLE) == 0;
                     uint32_t width = BUSTER_TYPE_NOT_BIT_FIELD;
+                    bool widthless = false;
                     if (i < frame->close && parser->tokens.kinds[i] == PARSE_KIND_COLON)
                     {
                         const uint32_t colon = i++;
@@ -8069,8 +8131,19 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
                         // the width's tree.
                         const bool attributed = i < frame->close && parser->tokens.kinds[i] == PARSE_KIND_ATTRIBUTE;
                         int64_t bits = 0;
-                        valid &= check_input_constant(reader, begin, i, &bits) && bits >= 0 && bits <= UINT32_MAX;
-                        width = (uint32_t)bits;
+                        // An undeclared name in the width that no correction took is clang's error at the name, recovered,
+                        // and the member isn't a bit-field (#1447, check_constant_name): `struct S { int b : zzz; int c; }`
+                        // has clang's size 8.
+                        const uint32_t missing = reader->constant_missing;
+                        reader->constant_names = begin < i ? CHECK_CONSTANT_NAMES_RECOVER : CHECK_CONSTANT_NAMES_NONE;
+                        const bool read = check_input_constant(reader, begin, i, &bits);
+                        reader->constant_names = CHECK_CONSTANT_NAMES_NONE;
+                        const bool named = reader->constant_missing != missing;
+                        valid &= named || (read && bits >= 0 && bits <= UINT32_MAX);
+                        width = named ? BUSTER_TYPE_NOT_BIT_FIELD : (uint32_t)bits;
+                        // An unnamed one stays a member, unnamed, of its whole type, as clang's field (`long : zzz` aligns
+                        // the record to 8), and declares something.
+                        widthless = named;
                         const uint32_t before = attributes != 0 ? attributes->count : 0;
                         valid = valid && (!attributed || check_input_read_attributes(reader, &i, frame->close, &attributes));
                         // Their function types' attributes, which meet the member's type (#147).
@@ -8093,14 +8166,14 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
                     // _Alignas's errors, each member's (#1447): a bit-field's place, else its values'. A member that declares
                     // nothing (no name, bit-field or anonymous record) has none, as clang declares no field for it.
                     const uint8_t member_kind = type != 0 ? type_kind(reader->types, type_strip_aligned(reader->types, type)) : BUSTER_TYPE_KIND_NONE;
-                    const bool declares = name != BUSTER_CHECK_NONE || width != BUSTER_TYPE_NOT_BIT_FIELD || member_kind == BUSTER_TYPE_KIND_STRUCT ||
+                    const bool declares = name != BUSTER_CHECK_NONE || width != BUSTER_TYPE_NOT_BIT_FIELD || widthless || member_kind == BUSTER_TYPE_KIND_STRUCT ||
                                           member_kind == BUSTER_TYPE_KIND_UNION;
                     const uint32_t alignas_place = width != BUSTER_TYPE_NOT_BIT_FIELD ? 3u : CHECK_ALIGNAS_OBJECT;
                     valid = valid && (attributes == 0 || !attributes->has_alignas || !declares ||
                                       check_input_alignas_declarator(reader, attributes, NULL, alignas_place));
                     valid = valid && (alignas_place != CHECK_ALIGNAS_OBJECT || !declares || check_input_alignas_underaligned(reader, attributes, type, name));
                     // A member's subjects as clang's attributes name them (#147): a bit-field or not, function-like by its type.
-                    if (valid && (name != BUSTER_CHECK_NONE || width != BUSTER_TYPE_NOT_BIT_FIELD))
+                    if (valid && (name != BUSTER_CHECK_NONE || width != BUSTER_TYPE_NOT_BIT_FIELD || widthless))
                     {
                         const uint32_t subjects = BUSTER_CHECK_SUBJECT_FIELD |
                                                   (width != BUSTER_TYPE_NOT_BIT_FIELD ? BUSTER_CHECK_SUBJECT_BIT_FIELD : BUSTER_CHECK_SUBJECT_NON_BIT_FIELD) |
@@ -8117,7 +8190,7 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
                         valid = false;
                     }
                     bool tag_only = false;
-                    if (valid && name == BUSTER_CHECK_NONE && width == BUSTER_TYPE_NOT_BIT_FIELD)
+                    if (valid && name == BUSTER_CHECK_NONE && width == BUSTER_TYPE_NOT_BIT_FIELD && !widthless)
                     {
                         // A member of no declarator is an anonymous structure or union, an enum's enumerators, or
                         // declares its tag or nothing, which clang takes with a warning (-Wmissing-declarations), and

@@ -210,6 +210,11 @@ struct CheckConstantInput
     // references already have declaration/type columns, while new type syntax and builtins still need normal binding.
     bool scoped_names;
     bool deferred_tags;
+    // CHECK_CONSTANT_NAMES_*, the reader's when the reading began (check_constant_name).
+    uint8_t names;
+    // The undeclared names this reading reported that no correction took (check_constant_name): a job's own, which
+    // a nested tag's readings between its steps don't touch.
+    uint32_t missing;
 };
 
 static uint32_t check_constant_overload_token(const CheckConstantInput* input, uint32_t root)
@@ -1809,6 +1814,69 @@ static void check_constant_prototype_open(CheckConstantInput* input, uint32_t to
     }
 }
 
+static uint32_t check_typo_walk_value(CheckInputReader* reader, uint32_t token);
+
+// Whether the walk has reported `token`'s undeclared name already: a declarator may read its constant again.
+static bool check_constant_name_reported(const CheckInput* output, uint32_t token)
+{
+    bool reported = false;
+    for (uint32_t i = 0; !reported && i < output->report_count; i += 1)
+    {
+        reported = output->reports[i].token == token && output->reports[i].message == CHECK_INPUT_UNDECLARED;
+    }
+    for (uint32_t i = 0; !reported && i < output->recovered_count; i += 1)
+    {
+        reported = output->recovered_reports[i].token == token && output->recovered_reports[i].message == CHECK_INPUT_UNDECLARED;
+    }
+    return reported;
+}
+
+// An undeclared name at `token` that a declarator's constant binds (#1447): an enumerator's value, a bit-field's width,
+// an array's bound, a typeof's operand, a _BitInt's width or a designator's index. Its error is clang's, at the name, as
+// its parser gives it on reading the name (Sema::DiagnoseEmptyLookup), each in the expression's order. A typo's correction
+// (c_check_typo.c) is taken as if it were written: its error is recovered, and the name binds that declaration, a use of
+// it by the declaration's own name, so that the unused declarations' analysis counts it as clang marks it referenced.
+// One with no correction is recovered where the reading's caller recovers the declaration (CHECK_CONSTANT_NAMES_RECOVER),
+// and otherwise ends the walk. None of this is done on a lane or by a deferred reader, whose unit with an undeclared name
+// is read again in source order, nor at a call's callee, whose implicit declaration is the walk's.
+static void check_constant_name(CheckConstantInput* input, uint32_t token)
+{
+    CheckInputReader* reader = input->reader;
+    CheckInput* output = reader->output;
+    const Parser* parser = reader->parser;
+    const uint32_t count = parser->tokens.count;
+    const bool callee = token + 1 < count && parser->tree.roles[token + 1] == PARSE_ROLE_OPEN_CALL;
+    const bool ordered = !reader->lane && reader->deferred == NULL && !callee && !output->resource;
+    if (ordered && output->declarations[token] == BUSTER_CHECK_NONE && !check_constant_name_reported(output, token))
+    {
+        const uint32_t event = check_typo_walk_value(reader, token);
+        const uint32_t declaration = event != BUSTER_CHECK_NONE ? reader->bindings.declaration[event] : BUSTER_CHECK_NONE;
+        const bool corrected = declaration < count;
+        const uint32_t before = output->report_count;
+        check_input_report(reader, token, corrected ? CHECK_INPUT_UNDECLARED_CORRECTED : CHECK_INPUT_UNDECLARED);
+        const bool reported = output->report_count == before + 1 && !output->resource;
+        if (reported && corrected)
+        {
+            output->reports[before].note_token = declaration;
+            output->declarations[token] = declaration;
+            reader->declared_types[token] = reader->declared_types[declaration];
+            if (output->overload_heads != 0)
+            {
+                output->overload_heads[token] = output->overload_heads[declaration];
+            }
+            const uint32_t name = parser->tokens.names[declaration];
+            output->resource |= c_bindings_use(&reader->bindings, C_BINDING_ORDINARY, name, token, check_input_use_point(reader, token)) == 0;
+        }
+        reader->constant_named += reported ? 1u : 0u;
+        reader->constant_missing += reported && !corrected ? 1u : 0u;
+        input->missing += reported && !corrected ? 1u : 0u;
+        if (reported && (corrected || input->names == CHECK_CONSTANT_NAMES_RECOVER))
+        {
+            check_input_recover_reports(reader, before);
+        }
+    }
+}
+
 static bool check_constant_prototype_close(CheckConstantInput* input, uint32_t token)
 {
     CheckInputReader* reader = input->reader;
@@ -2055,7 +2123,12 @@ static bool check_constant_bind(CheckConstantInput* input, bool type_name)
             {
                 // Preserve missing operands for the semantic pass. A later undeclared name must not hide
                 // an earlier invalid sizeof/type query in the same bound merely because binding runs first.
+                // A declarator's constant reports it here, where clang's parser reads it (#1447).
                 valid = role == PARSE_ROLE_OPERAND;
+                if (valid && input->names != CHECK_CONSTANT_NAMES_NONE)
+                {
+                    check_constant_name(input, token);
+                }
             }
         }
         if (!valid && input->failed_token != 0)
@@ -4205,6 +4278,11 @@ static bool check_constant_raw_bind(CheckConstantInput* input, bool type_name)
                         handle != 0 ? type == (input->syntax[index] != 0) : !input->syntax[index]);
             }
             valid = valid && !(!input->cached && builtin == CBUILTIN_NONE && check_input_use_shadowed(reader, token, handle));
+            if (valid && input->names != CHECK_CONSTANT_NAMES_NONE && handle == 0 && builtin == CBUILTIN_NONE && !invoke && intrinsic == 0 && !input->cached &&
+                !scoped && !input->syntax[index] && parser->tree.roles[token] == PARSE_ROLE_OPERAND)
+            {
+                check_constant_name(input, token);
+            }
             if (valid && !input->cached && builtin == CBUILTIN_NONE && handle != 0)
             {
                 const uint32_t declaration = reader->bindings.declaration[handle - 1];
@@ -4415,7 +4493,10 @@ static bool check_constant_input_initialize(CheckConstantInput* input, CheckInpu
         .prototype_depth = reader->prototype_depth,
         .cached = cached,
         .failed_token = failed_token,
+        .names = reader->constant_names,
     };
+    // A reading that this one starts (a member's bound in a tag it defines) sets its own.
+    reader->constant_names = CHECK_CONSTANT_NAMES_NONE;
     if (failed_token != 0)
     {
         *failed_token = BUSTER_CHECK_NONE;
