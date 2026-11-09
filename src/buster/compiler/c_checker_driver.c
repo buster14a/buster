@@ -7237,6 +7237,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
         }
         pp->diagnostic_source = true;
         check_clock_mark(stage_clock, CHECK_STAGE_PREPROCESS);
+        check_clock_tokens(stage_clock, pp->output.count);
         // The phases of pp_run alone: a diagnostic's later replay of the unit (pp_history_ensure) adds to them.
         memcpy(pp_ticks, pp->ticks, sizeof(pp->ticks));
         // The files' token columns have no reader past the run (pp_release_file_columns, #628); --poison-arenas makes
