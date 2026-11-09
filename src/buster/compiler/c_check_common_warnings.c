@@ -1205,7 +1205,8 @@ struct CheckCommonFacts
     // What each node's subtree holds for the expression walk (BUSTER_CHECK_REACH_*).
     uint8_t* reach;
     // The tokens of the bodies clang ends after the unit's first error (check_common_flush), or null: none, in a unit without
-    // one.
+    // one. 2 marks a body that holds an error, which a rejected unit's second reading left out of it (#1447,
+    // check_driver_rejected_read): clang gives it no -Wunused-but-set-parameter, and the reading may lack its reads.
     const uint8_t* flushed;
     // The plain `x = y` assignments, a bit per node, -Wself-assign's candidates (check_common_self_assigns), or null where it
     // can't warn.
@@ -8704,7 +8705,7 @@ static void check_common_uninitialized(const Parser* parser, Preprocessor* pp, c
                 }
             }
             else if (parameter && scalar && !addressed[declaration] && first_use_read[declaration] == BUSTER_CHECK_NONE &&
-                     written[declaration] != 0 && statement_write[declaration] != 0)
+                     written[declaration] != 0 && statement_write[declaration] != 0 && (analysed || facts->flushed[declared_body] != 2))
             {
                 const char* message = check_warning_text(scratch, "parameter '%.*s' set but not used",
                                                           (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
