@@ -1827,6 +1827,7 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .name = "odr attribute differences in a system header",
         .source = "# 1 \"odr_system.h\" 1 3\nstruct S { char c; int a; } __attribute__((packed));\nstruct S { char c; int a; };\n"
                   "# 4 \"odr_main.c\" 2\n_Static_assert(sizeof(struct S) == 5, \"first\");\nstruct S s;\n",
+        .c23 = true,
     },
     {
         // A C23 parameter list's compatible redefinition of its own record (#1869) declares the first's type: the body
