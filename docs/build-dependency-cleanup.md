@@ -69,6 +69,14 @@ vector scheduling fixtures also serve `tier1_schedule_benchmark.c`, counters
 serve `tier0_benchmark.c`, and the intrinsic catalog serves
 `c_checker_benchmark.c`. Their full edit plans include those objects.
 
+Some test-named roots are already entirely necessary shared work:
+`debug_executable_test.c` supplies native debug writers,
+`tier0_benchmark_measure.c` supplies counter utilities, and the ABI-bounds and
+row-source headers supply shared constants/data. Temporary-path normalization,
+work assignment and host-symbol lookup are support helpers. The other shared
+test roots keep owner-only fixtures behind internal guards; their file-level
+sharing authorizes only the remaining helper interface, not new private work.
+
 ## Automated prevention
 
 The original ownership check remains in ordinary correctness CI. Its expanded
@@ -131,5 +139,9 @@ The remaining source opportunities require broader production boundaries:
    those copies would change objects and lies outside byte-identical fixture
    isolation. Initializer/macro/helper-body growth also remains a review duty.
 
-Raw dependency captures, hashes, validation logs and reproduction tools belong
-in `buster-performance/docs/measurements`, not in this compiler repository.
+Raw dependency captures, hashes, classified inventories, validation logs and
+reproduction tools are stored in the
+[pinned performance record](https://github.com/buster14a/buster-performance/tree/1b31577d4f7e5a09395325863efded6c26de4b7f/docs/measurements/2026-11-09-unity-ownership),
+outside this compiler repository. That record names the exact tested source
+and checker revisions; its CI snapshot is point-in-time evidence, not a claim
+about later heads or hardware admission.
