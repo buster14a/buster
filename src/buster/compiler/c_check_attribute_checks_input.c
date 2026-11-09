@@ -606,7 +606,14 @@ static bool check_input_availability_handle(CheckInputReader* reader, CheckInput
         CheckAvailabilityEntry entry;
         if (list != NULL && check_input_availability_entry(reader, attribute, &entry))
         {
-            check_input_availability_own(reader, attributes, index, list, &count);
+            for (uint32_t i = 0; i < index; i += 1)
+            {
+                CheckAvailabilityEntry earlier;
+                if (!attributes->records[i].earlier_declaration && check_input_availability_entry(reader, attributes->records + i, &earlier))
+                {
+                    check_input_availability_merge(reader, list, &count, &earlier, false, 0);
+                }
+            }
             check_input_availability_merge(reader, list, &count, &entry, true, attribute->end);
         }
         arena_pop_to(reader->scratch, mark);
@@ -668,6 +675,35 @@ static void check_input_availability_redeclaration(CheckInputReader* reader, uin
     if (made != NULL && earlier_count != 0)
     {
         check_input_availability_own(reader, own, own != NULL ? own->count : 0, made, &made_count);
+        for (uint32_t i = 0; i < earlier_count; i += 1)
+        {
+            CheckAvailabilityEntry inherited = earlier[i];
+            inherited.inherited = true;
+            check_input_availability_merge(reader, made, &made_count, &inherited, true, point);
+        }
+    }
+    arena_pop_to(reader->scratch, mark);
+}
+
+// A tag's redeclaration's availability (#1447, mergeDeclAttributes' mergeAvailabilityAttr of the previous declaration's,
+// each inherited): its own attributes' (`own`) entries, merged as each was, and the tag's attributes so far (`previous`)
+// merged into them, with their warnings, given at `point`.
+static void check_input_availability_tag_merge(CheckInputReader* reader, const CheckInputAttributes* own, const CheckInputAttributes* previous, uint32_t point)
+{
+    const uint64_t mark = reader->scratch->length;
+    const uint64_t room = (own != NULL ? own->count : 0u) + (previous != NULL ? previous->count : 0u) + 1u;
+    CheckAvailabilityEntry* earlier = own != NULL && previous != NULL ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, CheckAvailabilityEntry, room) : NULL;
+    CheckAvailabilityEntry* made = earlier != NULL ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, CheckAvailabilityEntry, room) : NULL;
+    reader->output->resource |= own != NULL && previous != NULL && made == NULL;
+    uint32_t earlier_count = 0;
+    uint32_t made_count = 0;
+    if (made != NULL)
+    {
+        check_input_availability_own(reader, previous, previous->count, earlier, &earlier_count);
+    }
+    if (made != NULL && earlier_count != 0)
+    {
+        check_input_availability_own(reader, own, own->count, made, &made_count);
         for (uint32_t i = 0; i < earlier_count; i += 1)
         {
             CheckAvailabilityEntry inherited = earlier[i];

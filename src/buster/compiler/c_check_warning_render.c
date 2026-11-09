@@ -653,6 +653,24 @@ static bool check_warning_attribute_suggestion(String8 written, bool standard, S
     return corrected;
 }
 
+// The macro name clang gives an objc_gc's or objc_ownership's warning that its type doesn't take it (#1447, Sema's
+// diagnoseBadTypeAttribute): "__strong" for a strong one, "__weak" for a weak one, where the outermost macro that wrote it
+// is named so (pp_output_macro_place), and its place there into *location and *origin; else NULL, and the token's own.
+static const char* check_warning_objc_macro(const Parser* parser, Preprocessor* pp, const CheckWarningEvent* event, uint32_t* location, uint32_t* origin)
+{
+    const uint32_t count = parser->tokens.count;
+    const uint32_t argument = event->token + 2;
+    const bool argued = (event->kind == CHECK_WARNING_EVENT_OBJC_POINTER_TYPE || event->kind == CHECK_WARNING_EVENT_OBJC_OBJECT_TYPE) && argument < count &&
+                        parser->tokens.kinds[event->token + 1] == PARSE_KIND_L_PAREN && parser->tokens.kinds[argument] == PARSE_KIND_IDENTIFIER;
+    const uint32_t word = argued ? parser->tokens.names[argument] : 0;
+    const bool strong = word != 0 && intern_length(pp->table, word) == 6 && memcmp(intern_bytes(pp->table, word), "strong", 6) == 0;
+    const bool weak = word != 0 && intern_length(pp->table, word) == 4 && memcmp(intern_bytes(pp->table, word), "weak", 4) == 0;
+    const char* macro = strong ? "__strong" : weak ? "__weak" : NULL;
+    const uint32_t source = event->source != BUSTER_CHECK_WARNING_NO_SOURCE ? event->source : parser->tokens.sources[event->token];
+    const bool lifted = pp_output_macro_place(pp, source, event->kind == CHECK_WARNING_EVENT_OBJC_WEAK_TYPE ? NULL : macro != NULL ? macro : "", location, origin);
+    return lifted && event->kind != CHECK_WARNING_EVENT_OBJC_WEAK_TYPE ? macro : NULL;
+}
+
 static const char* check_driver_warning_message(const Parser* parser, Preprocessor* pp, const CheckInput* input, const TypeTable* types,
                                                 CheckWarningSpelling* spell, const CheckWarningEvent* event, Arena* scratch)
 {
@@ -808,7 +826,11 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
         {
             const String8 type = check_driver_warning_type_at(parser, pp, input, types, spell, scratch, payload->first_type, payload->data,
                                                               payload->token, payload->second_type);
-            const String8 named = event->kind == CHECK_WARNING_EVENT_OBJC_WEAK_TYPE ? (String8){ "__weak", 6 } : name;
+            uint32_t location = 0;
+            uint32_t origin = 0;
+            const char* macro = check_warning_objc_macro(parser, pp, event, &location, &origin);
+            const String8 named = event->kind == CHECK_WARNING_EVENT_OBJC_WEAK_TYPE ? (String8){ "__weak", 6 } :
+                                  macro != NULL ? (String8){ (char*)macro, strlen(macro) } : name;
             result = type.length != 0 ? check_warning_text(scratch, "'%.*s' only applies to %s types; type here is %.*s", (int)named.length, named.pointer,
                                                            event->kind == CHECK_WARNING_EVENT_OBJC_POINTER_TYPE ? "pointer" : "Objective-C object or block pointer",
                                                            (int)type.length, type.pointer) : NULL;
@@ -1485,9 +1507,18 @@ static bool check_driver_warning_events_at(const Parser* parser, Preprocessor* p
                         // An implicit attribute's warning, which clang gives no location (#147: interrupt's used).
                         pp_diagnose_unlocated_notes(pp, disposition, boundary, notes, event->note_count, "%s%s", message, suffix);
                     }
+                    else if (event->kind == CHECK_WARNING_EVENT_OBJC_POINTER_TYPE || event->kind == CHECK_WARNING_EVENT_OBJC_OBJECT_TYPE ||
+                             event->kind == CHECK_WARNING_EVENT_OBJC_WEAK_TYPE)
+                    {
+                        // At the macro's expansion clang gives them (check_warning_objc_macro), before the declaration's
+                        // attributes' checks at the same boundary.
+                        uint32_t location = 0;
+                        uint32_t origin = 0;
+                        (void)check_warning_objc_macro(parser, pp, event, &location, &origin);
+                        pp_diagnose_placed_notes_phase(pp, disposition, location, origin, boundary, PP_DIAGNOSTIC_TYPE, notes, event->note_count, "%s%s", message, suffix);
+                    }
                     else if (event->kind == CHECK_WARNING_EVENT_FUNCTION_TYPE_ATTRIBUTE || event->kind == CHECK_WARNING_EVENT_CONVENTION_UNSUPPORTED ||
-                             event->kind == CHECK_WARNING_EVENT_OBJC_POINTER_TYPE || event->kind == CHECK_WARNING_EVENT_OBJC_OBJECT_TYPE ||
-                             event->kind == CHECK_WARNING_EVENT_OBJC_WEAK_TYPE || event->kind == CHECK_WARNING_EVENT_OBJC_UNSUPPORTED)
+                             event->kind == CHECK_WARNING_EVENT_OBJC_UNSUPPORTED)
                     {
                         // A declarator's type's warnings precede its declaration's attributes' checks at the same boundary.
                         pp_diagnose_output_notes_phase(pp, disposition, source, boundary, PP_DIAGNOSTIC_TYPE, notes, event->note_count, "%s%s", message, suffix);

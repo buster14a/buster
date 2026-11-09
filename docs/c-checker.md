@@ -7514,8 +7514,11 @@ arguments against the function. The checker now gives these as clang does.
     redeclaration's attribute for a platform its earlier declarations have
     with other versions is "availability does not match previous
     declaration", noted at the earlier one
-    (`check_input_availability_redeclaration`). No platform is Linux's, so no
-    use is deprecated or unavailable by it.
+    (`check_input_availability_redeclaration`); a tag's redeclaration's
+    against the tag's attributes so far, its definition's where it has one
+    (`check_input_availability_tag_merge`), a definition's own not against
+    those it joins. No platform is Linux's, so no use is deprecated or
+    unavailable by it.
   - `external_source_symbol`'s clauses (`language`, `defined_in`,
     `generated_declaration`, `USR`), each once, are read as clang's parser
     reads them (`check_input_external_source_parse`), with its errors at the
@@ -7557,7 +7560,12 @@ arguments against the function. The checker now gives these as clang does.
     function, in type names too. Where no pointer takes one it is "'X' only
     applies to (Objective-C object or block) pointer types; type here is 'T'",
     naming the type where it stopped, before the declaration's attributes'
-    checks. Where a pointer takes it, its argument must be an identifier;
+    checks; through macros, as clang places it: `strong` and `weak`
+    named `__strong` and `__weak` and placed at the outermost macro's
+    expansion where that macro is spelled so (findMacroSpelling), and
+    `objc_ownership(weak)`'s pointer warning at the immediate expansion of the
+    macro that wrote it (`pp_output_macro_place`). Where a pointer takes it,
+    its argument must be an identifier;
     `objc_ownership(none)` and `(weak)` (named `__weak`) warn that C has no
     Objective-C object, `strong` and `autoreleasing` change nothing outside
     ARC, and another argument is "argument not supported". On a declaration
@@ -7631,8 +7639,11 @@ arguments against the function. The checker now gives these as clang does.
   "applying attribute 'clang::neon_vector_type' to a declaration is
   deprecated; apply it to the type instead": one before the declaration (or a
   parameter's) as clang warns before applying it, one after a declarator's
-  name once its type took it (CheckInputAttribute.neon_deprecated). A
-  statement's is its error alone, and one in a tag's own list (`struct
+  name once its type took it (CheckInputAttribute.neon_deprecated). After a
+  typedef's name, it and `btf_type_tag` are ProcessDeclAttribute's "cannot be
+  applied to a declaration" instead (`check_input_attribute_typedef`), the
+  vector's after its element's, size's and count's errors
+  (CheckInputAttribute.neon_typedef). A statement's is its error alone, and one in a tag's own list (`struct
   [[clang::neon_vector_type(4)]] S`) is ProcessDeclAttribute's "cannot be
   applied to a declaration" after a count's error, as `btf_type_tag`'s now are
   too.
@@ -8273,23 +8284,19 @@ arguments against the function. The checker now gives these as clang does.
     power of 2") goes on to the later declarations, as clang does ("Semantic
     error recovery", #1447). Another checker error still ends what is
     published; a unit's later parse errors are printed.
-  - The checks-only attributes (#1447): through a macro, `objc_ownership`'s
-    warning on a pointer is at the attribute with the macro's notes, where
-    clang puts it at the macro's immediate expansion, and clang names either
-    attribute `__weak` or `__strong` when the outermost macro is spelled so;
-    objc_gc's and objc_ownership's C23 spellings are refused (see above). In a
-    `_Generic` association's type their warnings aren't made, and a `typeof` type name that starts with a GNU attribute isn't read as
-    one, as for every attribute there. `availability` on a tag's
-    redeclaration isn't compared with the earlier one's. As everywhere, a
+  - The checks-only attributes (#1447): objc_gc's and objc_ownership's C23
+    spellings are refused (see above). In a `_Generic` association's type
+    their warnings aren't made, and a `typeof` type name that starts with a
+    GNU attribute isn't read as one, as for every attribute there. As everywhere, a
     declaration's first error ends the unit: a shared specifiers'
     `objc_ownership` with a count's error warns and errs for the first
     declarator alone, and a TCB function's call clang declares implicitly
     with an error (C99 and later) has no `-Wtcb-enforcement` warning after
     it.
     `diagnose_as_builtin`'s calls have no `-Wfortify-source` warnings, as no
-    call has. A C23 NEON vector attribute after a typedef's or a tag's name
-    gets the deprecation warning where clang's error is "cannot be applied to
-    a declaration", as `btf_type_tag`'s does.
+    call has. A C23 NEON vector's or `btf_type_tag`'s list after a tag's name
+    is the parser's "an attribute list cannot appear here" alone, where clang
+    goes on to "cannot be applied to a declaration".
 - **Tests.** `test-checker` checks the facts table's order and bounds, its
   counts and five rows, and conflicting conventions on a function and on
   another type (`c_check_attribute_test.c`). `test-checker-driver` compares

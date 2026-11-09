@@ -58,6 +58,38 @@ static void check_test_driver_checks_attributes(CheckTest* test, const char* cla
         "void g(void) { __attribute__((availability(macos, introduced=10.4))) int a; }\n",
         "void g(void) { __attribute__((availability(macos, introduced=10.4))) ; }\n",
         "[[clang::availability(macos, introduced=10.4)]] void f(void);\n",
+        // objc_gc's and objc_ownership's warnings through macros: at the macro's expansion, named __weak or __strong where the
+        // outermost macro is spelled so.
+        "#define MYW __attribute__((objc_ownership(weak)))\n#define A MYW\n#define ID(x) x\nint * MYW p1;\nint * A p2;\nint * ID(MYW) p3;\n",
+        "#define __weak __attribute__((objc_ownership(weak)))\n#define W2 __weak\nint * __weak p1;\nint * W2 p2;\n__weak int p3;\n",
+        "#define __strong __attribute__((objc_ownership(strong)))\n#define S2 __strong\n#define ID(x) x\nint __strong p1;\nint S2 p2;\nint ID(__strong) p3;\n",
+        "#define __weak __attribute__((objc_gc(weak)))\n#define GCS __attribute__((objc_gc(strong)))\nint __weak p1;\nint GCS p2;\nint * __weak p3;\n",
+        "#define NONE __attribute__((objc_ownership(none)))\nint NONE p1;\nint __attribute__((objc_ownership(strong))) p2;\n",
+        // availability on a tag's redeclarations, compared with the tag's earlier attributes.
+        "struct __attribute__((availability(macos, introduced=10.4))) S;\nstruct __attribute__((availability(macos, introduced=10.5))) S;\n",
+        "struct __attribute__((availability(macos, introduced=10.4, deprecated=10.6))) T { int a; };\n"
+        "struct __attribute__((availability(macos, introduced=10.4, deprecated=10.7))) T;\n",
+        "enum __attribute__((availability(macos, obsoleted=10.4))) E { A };\nenum __attribute__((availability(macos, obsoleted=10.5))) E;\n",
+        "union __attribute__((availability(ios, introduced=4))) U;\nunion __attribute__((availability(ios, introduced=4))) U;\n",
+        "struct __attribute__((availability(macos, introduced=10.4))) S;\nstruct __attribute__((availability(macos, introduced=10.5))) S { int a; };\n",
+        "struct __attribute__((availability(ios, introduced=4))) A;\nstruct A;\nstruct __attribute__((availability(ios, introduced=5))) A;\n",
+        "union __attribute__((availability(macos, introduced=10.1), availability(ios, introduced=3))) U;\n"
+        "union __attribute__((availability(macos, introduced=10.2), availability(ios, introduced=4))) U;\n",
+        "struct __attribute__((availability(macos, introduced=10.4))) S;\nvoid f(void) { struct __attribute__((availability(macos, introduced=10.9))) S; }\n",
+        "struct __attribute__((availability(macos, introduced=10.4, deprecated=10.3))) B;\nstruct __attribute__((availability(macos, introduced=10.5))) B;\n",
+        // A C23 NEON vector or btf_type_tag after a typedef's name, refused there, after the vector's own errors.
+        "typedef int T [[clang::neon_vector_type(4)]];\n",
+        "typedef int T [[clang::neon_polyvector_type(4)]];\n",
+        "typedef int T [[clang::neon_vector_type(3)]];\n",
+        "typedef int T [[clang::neon_vector_type]];\n",
+        "typedef int V [[clang::btf_type_tag(\"a\")]];\n",
+        "typedef int U, T [[clang::btf_type_tag(\"x\")]];\n",
+        "typedef struct { int a; } T [[clang::btf_type_tag(\"a\")]];\n",
+        "typedef int *T [[clang::btf_type_tag(\"a\")]];\n",
+        "void f(void) { typedef int T [[clang::neon_vector_type(4)]]; }\n",
+        "typedef int T [[clang::neon_vector_type(4)]], U;\n",
+        "int x [[clang::btf_type_tag(\"a\")]];\nstruct S { int m [[clang::neon_vector_type(4)]]; };\n",
+        "[[clang::neon_vector_type(4)]] typedef int T;\n[[clang::btf_type_tag(\"a\")]] typedef int U;\n",
         "__attribute__((availability(macos, introduced=10.4))) void f(void);\n__attribute__((availability(macos, introduced=10.5))) void f(void);\n",
         "__attribute__((availability(macos, introduced=10.4), availability(macos, introduced=10.5))) void f(void);\n",
         "__attribute__((availability(macos, unavailable))) void f(void);\nvoid g(void) { f(); }\n",

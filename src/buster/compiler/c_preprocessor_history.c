@@ -1118,6 +1118,85 @@ BUSTER_PREPROCESSOR_ENTRY __attribute__((unused, format(printf, 6, 7))) void pp_
     va_end(arguments);
 }
 
+// Where clang gives a diagnostic of an attribute a macro wrote (#1447, Objective-C's pointer type attributes'): output token
+// `token`'s location and macro history lifted out of the macro whose body spelled it, to that macro's expansion (the
+// immediate expansion SourceManager gives), or, with `name`, to the outermost expansion where that macro is named `name`
+// (Sema's findMacroSpelling: its expansion location spelled so), into *location and *origin. Whether it was lifted; where
+// it isn't, they are the token's own.
+BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) bool pp_output_macro_place(Preprocessor* pp, uint32_t token, const char* name, uint32_t* location, uint32_t* origin)
+{
+    pp_history_ensure(pp);
+    pp_output_ensure(pp);
+    const uint32_t own_location = token < pp->output.count ? pp->output.locations[token] : 0;
+    const uint32_t own_origin = token < pp->output.count ? pp_history_at(pp, token) : 0;
+    bool lifted = false;
+    uint32_t at = own_location;
+    uint32_t cursor = own_origin;
+    if (name == NULL && cursor != 0 && (cursor & ~BUSTER_PP_ORIGIN_INDEX) == 0)
+    {
+        const PPExpansion* expansion = &pp->history[(cursor & BUSTER_PP_ORIGIN_INDEX) - 1];
+        at = expansion->begin;
+        cursor = expansion->parent;
+        lifted = true;
+    }
+    else if (name == NULL && cursor != 0 && (cursor & ~BUSTER_PP_ORIGIN_INDEX) == BUSTER_PP_ORIGIN_ARGUMENT)
+    {
+        // A macro argument's: its parameter in the macro's body, which that macro's expansion holds.
+        const PPSubstitution* substitution = &pp->substitutions[(cursor & BUSTER_PP_ORIGIN_INDEX) - 1];
+        at = substitution->parameter;
+        cursor = substitution->expansion;
+        lifted = substitution->expansion != 0;
+    }
+    else if (name != NULL)
+    {
+        // The outermost expansion's macro: the last expansion the chain passes, an argument's through its macro's expansion
+        // (SourceManager's expansion location of an argument is its macro's).
+        IdentId outer = 0;
+        for (uint64_t steps = 0; cursor != 0 && steps < (uint64_t)pp->history_count + pp->substitution_count + pp->generated_count + 1; steps += 1)
+        {
+            const uint32_t index = (cursor & BUSTER_PP_ORIGIN_INDEX) - 1;
+            const uint32_t kind = cursor & ~BUSTER_PP_ORIGIN_INDEX;
+            if (kind == BUSTER_PP_ORIGIN_ARGUMENT)
+            {
+                const PPSubstitution* substitution = &pp->substitutions[index];
+                at = substitution->parameter;
+                cursor = substitution->expansion;
+            }
+            else if (kind == BUSTER_PP_ORIGIN_GENERATED)
+            {
+                at = pp->generated[index].anchor;
+                cursor = pp->generated[index].expansion;
+                outer = 0;
+            }
+            else
+            {
+                const PPExpansion* expansion = &pp->history[index];
+                outer = expansion->builtin == PP_BUILTIN_NONE ? expansion->name : 0;
+                at = expansion->begin;
+                cursor = expansion->parent;
+            }
+        }
+        const uint32_t length = (uint32_t)strlen(name);
+        lifted = cursor == 0 && outer != 0 && intern_length(pp->table, outer) == length && memcmp(intern_bytes(pp->table, outer), name, length) == 0;
+    }
+    *location = lifted ? at : own_location;
+    *origin = lifted ? cursor : own_origin;
+    return lifted;
+}
+
+// pp_diagnose_output_notes_phase at an explicit place (pp_output_macro_place's).
+BUSTER_PREPROCESSOR_ENTRY __attribute__((unused, format(printf, 9, 10))) void pp_diagnose_placed_notes_phase(Preprocessor* pp, PPSeverity severity, uint32_t location,
+                                                                                                         uint32_t origin, uint32_t position, PPDiagnosticPhase phase,
+                                                                                                         const PPOutputDiagnosticNote* notes, uint32_t note_count,
+                                                                                                         const char* format, ...)
+{
+    va_list arguments;
+    va_start(arguments, format);
+    pp_history_ensure(pp);
+    pp_diagnose_source_location(pp, severity, location, origin, position, phase, notes, note_count, NULL, 0, format, arguments);
+    va_end(arguments);
+}
+
 BUSTER_PREPROCESSOR_ENTRY __attribute__((unused, format(printf, 8, 9))) void pp_diagnose_output_notes_phase(Preprocessor* pp, PPSeverity severity, uint32_t token, uint32_t position, PPDiagnosticPhase phase,
                                                                                                         const PPOutputDiagnosticNote* notes, uint32_t note_count, const char* format, ...)
 {
