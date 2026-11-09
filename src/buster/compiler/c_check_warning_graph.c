@@ -262,6 +262,264 @@ struct CheckInterruptBody
     uint32_t caller;
 };
 
+// What check_input_interrupt_calls looks calls up in (#147): per object, its first declaration interrupt marks and its
+// first no_caller_saved_registers marks; the bodies they mark, in token order; and the unit's reports before the pass.
+typedef struct CheckInterruptCalls CheckInterruptCalls;
+struct CheckInterruptCalls
+{
+    const uint32_t* interrupts;
+    const uint32_t* saving;
+    const CheckInterruptBody* bodies;
+    uint32_t filled;
+    uint32_t report_begin;
+};
+
+// Whether `token` is a keyword whose parenthesized head holds a full expression (#1447): if, while, switch, for.
+static bool check_interrupt_head(const Parser* parser, uint32_t token)
+{
+    const uint8_t kind = parser->tokens.kinds[token];
+    return kind == PARSE_KIND_IF || kind == PARSE_KIND_WHILE || kind == PARSE_KIND_SWITCH || kind == PARSE_KIND_FOR;
+}
+
+// Records the full expression around a direct call's error, from its callee's first token `first` to its `)` `close`
+// (#1447, CheckInput.interrupt_ranges): out through the parentheses and brackets around it, to the `;`, `{` or `}` of its
+// statement, declaration or initializer list, or a control statement's head's parentheses. A cold scan of the tokens
+// around the rare error.
+static void check_interrupt_full_expression(CheckInputReader* reader, uint32_t first, uint32_t close)
+{
+    CheckInput* input = reader->output;
+    const Parser* parser = reader->parser;
+    const uint32_t count = parser->tokens.count;
+    uint32_t begin = first;
+    uint32_t depth = 0;
+    bool open = true;
+    while (open && begin != 0)
+    {
+        const uint32_t t = begin - 1;
+        const uint8_t kind = parser->tokens.kinds[t];
+        const bool closing = kind == PARSE_KIND_R_PAREN || kind == PARSE_KIND_R_SQUARE;
+        const bool opening = kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE;
+        const bool head = opening && depth == 0 && t != 0 && check_interrupt_head(parser, t - 1);
+        open = !head && !(depth == 0 && (kind == PARSE_KIND_SEMI || kind == PARSE_KIND_L_BRACE || kind == PARSE_KIND_R_BRACE));
+        depth += closing ? 1 : 0;
+        depth -= opening && depth != 0 ? 1 : 0;
+        begin = open ? t : begin;
+    }
+    uint32_t end = close;
+    depth = 0;
+    open = true;
+    while (open && end + 1 < count)
+    {
+        const uint32_t t = end + 1;
+        const uint8_t kind = parser->tokens.kinds[t];
+        const bool closing = kind == PARSE_KIND_R_PAREN || kind == PARSE_KIND_R_SQUARE;
+        const bool opening = kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE;
+        uint32_t matched = t;
+        for (uint32_t k = t; closing && depth == 0 && matched == t && k != 0;)
+        {
+            k -= 1;
+            matched = (parser->tokens.kinds[k] == PARSE_KIND_L_PAREN || parser->tokens.kinds[k] == PARSE_KIND_L_SQUARE) && parser->tree.parents[k] == t ? k : matched;
+        }
+        const bool head = closing && depth == 0 && matched != t && matched != 0 && check_interrupt_head(parser, matched - 1);
+        open = !head && !(depth == 0 && (kind == PARSE_KIND_SEMI || kind == PARSE_KIND_L_BRACE || kind == PARSE_KIND_R_BRACE));
+        depth += opening ? 1 : 0;
+        depth -= closing && depth != 0 ? 1 : 0;
+        end = open ? t : end;
+    }
+    if (input->interrupt_range_count == input->interrupt_range_capacity && !input->resource)
+    {
+        const uint32_t capacity = input->interrupt_range_capacity != 0 ? input->interrupt_range_capacity * 2 : 4;
+        uint32_t* grown = BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint32_t, (uint64_t)capacity * 2);
+        input->resource |= grown == NULL;
+        if (grown != NULL && input->interrupt_range_count != 0)
+        {
+            memcpy(grown, input->interrupt_ranges, (uint64_t)input->interrupt_range_count * 2 * sizeof(uint32_t));
+        }
+        input->interrupt_ranges = grown != NULL ? grown : input->interrupt_ranges;
+        input->interrupt_range_capacity = grown != NULL ? capacity : input->interrupt_range_capacity;
+    }
+    if (input->interrupt_range_count < input->interrupt_range_capacity)
+    {
+        input->interrupt_ranges[input->interrupt_range_count * 2] = begin;
+        input->interrupt_ranges[input->interrupt_range_count * 2 + 1] = end;
+        input->interrupt_range_count += 1;
+    }
+}
+
+// A call's error or warning (#147, check_input_interrupt_calls): its callee from `callee_first` to its `(` (`open`), its
+// `)` (`close`), the name its callee names through parentheses, selections and one address-of (`named`), or a builtin's
+// (`builtin`), BUSTER_CHECK_NONE for neither.
+static void check_interrupt_call_report(CheckInputReader* reader, const CheckInterruptCalls* calls, uint32_t callee_first, uint32_t open, uint32_t close,
+                                        uint32_t named, uint32_t builtin)
+{
+    CheckInput* input = reader->output;
+    const Parser* parser = reader->parser;
+    const uint32_t count = parser->tokens.count;
+    const bool scalar = parser->options.scalar;
+    const uint32_t location = callee_first < open ? check_input_expression_root_location(parser, callee_first, open, NULL) : BUSTER_CHECK_NONE;
+    const uint32_t declaration = named < count ? input->declarations[named] : BUSTER_CHECK_NONE;
+    const uint32_t object = declaration < count && input->declaration_kinds[declaration] == C_BINDING_FUNCTION ? input->objects[declaration] : 0;
+    const bool function = object != 0 && object <= count;
+    // The body the call is in, of those the attributes mark: the last that opens before it.
+    uint32_t low = 0;
+    uint32_t high = location < count ? calls->filled : 0;
+    while (low < high)
+    {
+        const uint32_t middle = low + (high - low) / 2;
+        low = calls->bodies[middle].open < close ? middle + 1 : low;
+        high = calls->bodies[middle].open < close ? high : middle;
+    }
+    const CheckInterruptBody* body = low != 0 && close < calls->bodies[low - 1].close ? calls->bodies + low - 1 : NULL;
+    // A call around a direct call's error (whose callee or arguments hold it) is clang's invalid expression, which
+    // it builds no call of, and so warns of nothing: one of this pass's errors, of the few a unit has, inside it.
+    bool invalid = false;
+    for (uint32_t r = calls->report_begin; location < count && !invalid && r < input->report_count; r += 1)
+    {
+        invalid = input->reports[r].message == CHECK_INPUT_INTERRUPT_CALLED && input->reports[r].token >= callee_first && input->reports[r].completion < close;
+    }
+    if (location < count && function && calls->interrupts[object] <= declaration)
+    {
+        const uint32_t before = input->report_count;
+        check_input_report(reader, location, CHECK_INPUT_INTERRUPT_CALLED);
+        if (input->report_count > before)
+        {
+            input->reports[before].completion = close;
+            input->reports[before].suborder = (uint64_t)location + 1;
+        }
+        check_interrupt_full_expression(reader, callee_first, close);
+    }
+    else if (location < count && body != NULL && !invalid && !(function && calls->saving[object] <= declaration))
+    {
+        const uint32_t noted = function ? declaration : builtin < count ? check_interrupt_first_use(parser, parser->tokens.names[builtin], builtin + 1, scalar) :
+                                                                        BUSTER_CHECK_NONE;
+        const CheckWarningEvent event =
+        {
+            .id = CHECK_WARNING_ID_EXCESSIVE_REGSAVE,
+            .kind = CHECK_WARNING_EVENT_EXCESSIVE_REGSAVE,
+            .token = location,
+            .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+            .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+            .completion = close,
+            .suborder = (uint64_t)location + 1,
+            .payload = { .token = BUSTER_CHECK_WARNING_NO_SOURCE, .data = body->caller },
+        };
+        const CheckWarningNote note =
+        {
+            .kind = CHECK_WARNING_NOTE_DECLARED_HERE,
+            .token = noted,
+            .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+            .payload = { .name = noted < count ? parser->tokens.names[noted] : 0, .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+        };
+        check_input_warning_event(reader, &event, &note, noted < count ? 1u : 0u);
+    }
+}
+
+// The opening '(' of the group, call or subscript that `close` closes, by the parse tree's link from it (#1447): a
+// backward search, in check_interrupt_evaluated_calls' rare calls alone. `close` itself where none is found.
+static uint32_t check_interrupt_opening(const Parser* parser, uint32_t close)
+{
+    uint32_t result = close;
+    for (uint32_t t = close; result == close && t != 0;)
+    {
+        t -= 1;
+        const uint8_t kind = parser->tokens.kinds[t];
+        result = (kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE) && parser->tree.parents[t] == close ? t : result;
+    }
+    return result;
+}
+
+// The calls the reader's evaluator alone reads (#1447): a typeof's operand's, a constant array bound's, whose `)` no graph
+// node has (CheckGraph.tokens), and which clang builds as it builds any call (BuildResolvedCallExpr): their direct calls
+// of interrupt service routines and their -Wexcessive-regsave warnings (check_interrupt_call_report). A call's callee is
+// the postfix expression before its `(`, and the name it names one written alone, in parentheses or after one `&`, which
+// must be a declared name's use: a builtin's (an undeclared name's) and one through another expression (`s.f()`) aren't
+// looked up here, nor warned of. The graph's tokens are marked in a bitset; the
+// vector path then compares 64 tokens' roles at a time with PARSE_ROLE_CLOSE_CALL, the scalar path, its twin, each
+// token's.
+static void check_interrupt_evaluated_calls(CheckInputReader* reader, const CheckInterruptCalls* calls)
+{
+    CheckInput* input = reader->output;
+    const CheckGraph* graph = &input->graph;
+    const Parser* parser = reader->parser;
+    const uint32_t count = parser->tokens.count;
+    const bool scalar = parser->options.scalar;
+    const uint64_t words = ((uint64_t)count + 63) / 64 + 1;
+    uint64_t* graphed = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint64_t, words);
+    input->resource |= graphed == NULL;
+    if (graphed != NULL)
+    {
+        memset(graphed, 0, words * sizeof(uint64_t));
+        for (uint32_t node = 0; node < graph->count; node += 1)
+        {
+            const uint32_t token = graph->tokens[node];
+            graphed[(token < count ? token : count) / 64] |= UINT64_C(1) << ((token < count ? token : count) % 64);
+        }
+    }
+    for (uint32_t first = 0; graphed != NULL && !input->resource && first < count; first += 64)
+    {
+        const uint32_t live = count - first < 64 ? count - first : 64;
+        uint64_t selected = 0;
+        if (!BUSTER_SCALAR_PATH(scalar))
+        {
+            const __mmask64 lanes = live == 64 ? ~(__mmask64)0 : ((__mmask64)1 << live) - 1;
+            const __m512i roles = _mm512_maskz_loadu_epi8(lanes, parser->tree.roles + first);
+            selected = _mm512_mask_cmpeq_epi8_mask(lanes, roles, _mm512_set1_epi8((char)PARSE_ROLE_CLOSE_CALL));
+        }
+        else
+        {
+            for (uint32_t k = 0; k < live; k += 1)
+            {
+                selected |= (uint64_t)(parser->tree.roles[first + k] == PARSE_ROLE_CLOSE_CALL) << k;
+            }
+        }
+        selected &= ~graphed[first / 64];
+        for (; !input->resource && selected != 0; selected &= selected - 1)
+        {
+            const uint32_t close = first + (uint32_t)__builtin_ctzll(selected);
+            const uint32_t open = check_interrupt_opening(parser, close);
+            // The callee: the postfix expression that ends before the `(`, through calls', subscripts' and members' bases to
+            // a name or a group.
+            uint32_t callee_first = open;
+            bool more = open != 0 && open != close;
+            for (uint32_t at = open, steps = 0; more && steps < count; steps += 1)
+            {
+                const uint32_t last = at - 1;
+                const uint8_t kind = parser->tokens.kinds[last];
+                const bool closing = kind == PARSE_KIND_R_PAREN || kind == PARSE_KIND_R_SQUARE;
+                const uint32_t opening = closing ? check_interrupt_opening(parser, last) : last;
+                const bool name = kind == PARSE_KIND_IDENTIFIER;
+                const bool member = name && last >= 2 && (parser->tokens.kinds[last - 1] == PARSE_KIND_PERIOD || parser->tokens.kinds[last - 1] == PARSE_KIND_ARROW);
+                const bool postfix = closing && opening != last &&
+                                     (parser->tokens.kinds[opening] == PARSE_KIND_L_SQUARE || parser->tree.roles[last] == PARSE_ROLE_CLOSE_CALL);
+                callee_first = name || (closing && opening != last) ? opening : callee_first;
+                at = member ? last - 1 : postfix ? opening : at;
+                more = (member || postfix) && at != 0;
+            }
+            // Its name, alone, in parentheses, or after one `&` in them.
+            uint32_t low = callee_first;
+            uint32_t high = open != 0 ? open - 1 : 0;
+            bool addressed = false;
+            for (uint32_t steps = 0; callee_first < open && low < high && steps < count; steps += 1)
+            {
+                const bool group = parser->tokens.kinds[low] == PARSE_KIND_L_PAREN && parser->tree.parents[low] == high;
+                const bool address = !group && !addressed && parser->tokens.kinds[low] == PARSE_KIND_AMP;
+                addressed |= address;
+                low += group || address ? 1 : 0;
+                high -= group ? 1 : 0;
+                steps = group || address ? steps : count;
+            }
+            const uint32_t named = callee_first < open && low == high && parser->tokens.kinds[low] == PARSE_KIND_IDENTIFIER ? low : BUSTER_CHECK_NONE;
+            const uint32_t declaration = named < count ? input->declarations[named] : BUSTER_CHECK_NONE;
+            // A use of a declared name: not a function declarator's own name (whose parameter list's role a call's can be),
+            // nor a builtin's.
+            if (open != close && declaration < count && declaration != named)
+            {
+                check_interrupt_call_report(reader, calls, callee_first, open, close, named, BUSTER_CHECK_NONE);
+            }
+        }
+    }
+}
+
 // x86's interrupt and no_caller_saved_registers at calls (#147, clang's BuildResolvedCallExpr), in a unit that read either
 // (CheckInput.interrupt_calls). A call of a function an interrupt attribute marks is clang's error "interrupt service
 // routine cannot be called directly" at its callee (Expr::getExprLoc's place: check_input_expression_root_location); its
@@ -272,8 +530,9 @@ struct CheckInterruptBody
 // through a pointer has none; a call around a direct call's error, clang's invalid expression, none. A declaration has
 // an attribute that it or an earlier declaration of its entity has, as
 // clang's redeclarations inherit them, a declaration's own (no_caller_saved_registers through a typedef's function type
-// isn't). The calls are the graph's, in its order, which is clang's: a call's callee's and arguments' calls first. Its
-// operands that the reader's evaluator alone reads (a typeof's, a constant array bound) have none. A unit without the
+// isn't). The calls are the graph's, in its order, which is clang's: a call's callee's and arguments' calls first; then
+// those the reader's evaluator alone reads (a typeof's, a constant array bound's: check_interrupt_evaluated_calls),
+// each at its place. A unit without the
 // attributes takes none of this; one with them, two columns of its objects and a pass over its nodes, the vector path 16
 // nodes' operations at a time, the scalar path, its twin, each node's.
 static void check_input_interrupt_calls(CheckInputReader* reader)
@@ -340,6 +599,7 @@ static void check_input_interrupt_calls(CheckInputReader* reader)
             bodies[filled++] = (CheckInterruptBody){ .open = opening, .close = parser->tree.parents[opening], .caller = interrupts[object] <= declaration ? 0u : 1u };
         }
     }
+    const CheckInterruptCalls calls = { .interrupts = interrupts, .saving = saving, .bodies = bodies, .filled = filled, .report_begin = report_begin };
     for (uint32_t first = 0; valid && first < graph->count; first += 16)
     {
         const uint32_t live = graph->count - first < 16 ? graph->count - first : 16;
@@ -401,63 +661,14 @@ static void check_input_interrupt_calls(CheckInputReader* reader)
             {
                 callee_first -= 1;
             }
-            const uint32_t location = callee_first < open ? check_input_expression_root_location(parser, callee_first, open, NULL) : BUSTER_CHECK_NONE;
-            const uint32_t declaration = named < count ? input->declarations[named] : BUSTER_CHECK_NONE;
-            const uint32_t object = declaration < count && input->declaration_kinds[declaration] == C_BINDING_FUNCTION ? input->objects[declaration] : 0;
-            const bool function = object != 0 && object <= count;
-            // The body the call is in, of those the attributes mark: the last that opens before it.
-            uint32_t low = 0;
-            uint32_t high = location < count ? filled : 0;
-            while (low < high)
-            {
-                const uint32_t middle = low + (high - low) / 2;
-                low = bodies[middle].open < close ? middle + 1 : low;
-                high = bodies[middle].open < close ? high : middle;
-            }
-            const CheckInterruptBody* body = low != 0 && close < bodies[low - 1].close ? bodies + low - 1 : NULL;
-            // A call around a direct call's error (whose callee or arguments hold it) is clang's invalid expression, which
-            // it builds no call of, and so warns of nothing: one of this pass's errors, of the few a unit has, inside it.
-            bool invalid = false;
-            for (uint32_t r = report_begin; location < count && !invalid && r < input->report_count; r += 1)
-            {
-                invalid = input->reports[r].message == CHECK_INPUT_INTERRUPT_CALLED && input->reports[r].token >= callee_first && input->reports[r].completion < close;
-            }
-            if (location < count && function && interrupts[object] <= declaration)
-            {
-                const uint32_t before = input->report_count;
-                check_input_report(reader, location, CHECK_INPUT_INTERRUPT_CALLED);
-                if (input->report_count > before)
-                {
-                    input->reports[before].completion = close;
-                    input->reports[before].suborder = (uint64_t)location + 1;
-                }
-            }
-            else if (location < count && body != NULL && !invalid && !(function && saving[object] <= declaration))
-            {
-                const uint32_t noted = function ? declaration : builtin < count ? check_interrupt_first_use(parser, parser->tokens.names[builtin], builtin + 1, scalar) :
-                                                                                BUSTER_CHECK_NONE;
-                const CheckWarningEvent event =
-                {
-                    .id = CHECK_WARNING_ID_EXCESSIVE_REGSAVE,
-                    .kind = CHECK_WARNING_EVENT_EXCESSIVE_REGSAVE,
-                    .token = location,
-                    .source = BUSTER_CHECK_WARNING_NO_SOURCE,
-                    .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
-                    .completion = close,
-                    .suborder = (uint64_t)location + 1,
-                    .payload = { .token = BUSTER_CHECK_WARNING_NO_SOURCE, .data = body->caller },
-                };
-                const CheckWarningNote note =
-                {
-                    .kind = CHECK_WARNING_NOTE_DECLARED_HERE,
-                    .token = noted,
-                    .source = BUSTER_CHECK_WARNING_NO_SOURCE,
-                    .payload = { .name = noted < count ? parser->tokens.names[noted] : 0, .token = BUSTER_CHECK_WARNING_NO_SOURCE },
-                };
-                check_input_warning_event(reader, &event, &note, noted < count ? 1u : 0u);
-            }
+            check_interrupt_call_report(reader, &calls, callee_first, open, close, named, builtin);
             valid = !input->resource;
         }
+    }
+    if (valid)
+    {
+        check_interrupt_evaluated_calls(reader, &calls);
+        valid = !input->resource;
     }
     input->resource |= !valid;
     arena_pop_to(scratch, mark);
@@ -815,8 +1026,17 @@ static bool check_input_warning_graph(CheckInput* input, const Parser* parser, T
     }
     if (valid && input->interrupt_calls)
     {
+        // A direct call's error is clang's invalid call alone (#1447): a unit valid until then goes on to its later checks
+        // as one whose only reports are recovered ones does (CheckInput.recovered_valid), and is rejected.
+        const uint32_t before = staged.report_count;
+        const bool clean = before == 0 || (staged.recovered_valid && staged.recovered_published == before);
         check_input_interrupt_calls(&reader);
         valid = !staged.resource;
+        if (valid && clean && staged.report_count > before)
+        {
+            staged.recovered_published += staged.report_count - before;
+            staged.recovered_valid = true;
+        }
     }
     if (valid)
     {
@@ -825,6 +1045,11 @@ static bool check_input_warning_graph(CheckInput* input, const Parser* parser, T
         // The unavailable members' errors (check_input_member_uses) and the direct calls of interrupt service routines
         // (check_input_interrupt_calls), in the reports' capacity the reader gave them.
         input->report_count = staged.report_count;
+        input->recovered_published = staged.recovered_published;
+        input->recovered_valid = staged.recovered_valid;
+        input->interrupt_ranges = staged.interrupt_ranges;
+        input->interrupt_range_count = staged.interrupt_range_count;
+        input->interrupt_range_capacity = staged.interrupt_range_capacity;
     }
     else
     {

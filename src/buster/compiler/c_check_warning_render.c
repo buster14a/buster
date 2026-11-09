@@ -1414,7 +1414,8 @@ static bool check_driver_warning_events_at(const Parser* parser, Preprocessor* p
         const bool late = event->kind == CHECK_WARNING_EVENT_UNUSED_PARAMETER && event->completion_kind != CHECK_WARNING_COMPLETE_TU_END;
         const bool retained = late == (step >= view->count) && event->kind != CHECK_WARNING_EVENT_MESSAGE && event->kind != CHECK_WARNING_EVENT_ENUM_MIX &&
                               (event->token < parser->tokens.count || (event->kind == CHECK_WARNING_EVENT_PRAGMA && event->token == parser->tokens.count)) &&
-                              (repair == NULL || check_repair_warning_token(repair, event->token));
+                              (repair == NULL || check_repair_warning_token(repair, event->token)) &&
+                              (input->interrupt_range_count == 0 || check_driver_interrupt_kept(input, event->token));
         if (retained)
         {
             valid = event->id < BUSTER_ARRAY_LENGTH(check_warning_descriptions) && event->note_first <= view->note_count &&

@@ -958,6 +958,12 @@ struct CheckInput
     // Whether the unit read x86's interrupt or no_caller_saved_registers (#147): only then are its calls looked through
     // after checking, for the direct calls of interrupt service routines and -Wexcessive-regsave (check_input_interrupt_calls).
     bool interrupt_calls;
+    // The full expressions of those direct calls (#1447): pairs of their first and last tokens, in which clang's invalid
+    // call leaves no other diagnostic, while the unit's others are found as a valid one's are (CheckInput.recovered_valid,
+    // check_driver_interrupt_kept). None in a unit without such an error.
+    uint32_t* interrupt_ranges;
+    uint32_t interrupt_range_count;
+    uint32_t interrupt_range_capacity;
     CheckInputAsm* asm_statements;
     uint32_t asm_count;
     uint32_t asm_capacity;
@@ -1077,6 +1083,19 @@ static __attribute__((unused)) uint32_t check_input_linkage(const uint8_t* bits,
 static __attribute__((unused)) void check_input_set_linkage(uint8_t* bits, uint32_t token, uint32_t linkage)
 {
     bits[token] = (uint8_t)((bits[token] & ((1u << BUSTER_CHECK_BITS_LINKAGE_SHIFT) - 1)) | linkage << BUSTER_CHECK_BITS_LINKAGE_SHIFT);
+}
+
+// Whether a diagnostic at `token` is published (#1447): not where it is inside a direct call's full expression, of an
+// interrupt service routine, whose error is clang's invalid call alone there (CheckInput.interrupt_ranges). A unit without
+// such an error takes one compare.
+static __attribute__((unused)) bool check_driver_interrupt_kept(const CheckInput* input, uint32_t token)
+{
+    bool kept = true;
+    for (uint32_t r = 0; kept && r < input->interrupt_range_count; r += 1)
+    {
+        kept = token < input->interrupt_ranges[r * 2] || token > input->interrupt_ranges[r * 2 + 1];
+    }
+    return kept;
 }
 
 // The attributes at `token` (CheckInput.attributes), null for none; `token` is at most the unit's count.

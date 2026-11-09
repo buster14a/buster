@@ -2902,6 +2902,16 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                 }
             }
         }
+        // Inside a direct call's full expression, of an interrupt service routine, only its error (#1447).
+        uint32_t report_kept = 0;
+        for (uint32_t i = 0; input->interrupt_range_count != 0 && i < report_total; i += 1)
+        {
+            const uint32_t sequence = (uint32_t)report_keys[i];
+            const bool called = sequence < input->report_count && input->reports[sequence].message == CHECK_INPUT_INTERRUPT_CALLED;
+            report_keys[report_kept] = report_keys[i];
+            report_kept += called || check_driver_interrupt_kept(input, (uint32_t)(report_keys[i] >> 32)) ? 1u : 0u;
+        }
+        report_total = input->interrupt_range_count != 0 ? report_kept : report_total;
         uint64_t* firsts = reports ? c_bindings_sort(report_keys, report_sorting, report_total, !scalar, varying) : NULL;
         uint32_t first_count = 0;
         for (uint32_t i = 0; i < report_total; i += 1)
@@ -2982,6 +2992,13 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                 warning_keys[warning_total++] = check_driver_warning_key(excess_tokens[i], CHECK_WARNING_EXCESS_INITIALIZERS, CHECK_WARNING_EXCESS_INITIALIZERS);
             }
         }
+        uint32_t warning_kept = 0;
+        for (uint32_t i = 0; input->interrupt_range_count != 0 && i < warning_total; i += 1)
+        {
+            warning_keys[warning_kept] = warning_keys[i];
+            warning_kept += check_driver_interrupt_kept(input, (uint32_t)(warning_keys[i] >> 32)) ? 1u : 0u;
+        }
+        warning_total = input->interrupt_range_count != 0 ? warning_kept : warning_total;
         uint64_t* warnings = show_warnings ? c_bindings_sort(warning_keys, warning_sorting, warning_total, !scalar, varying) : NULL;
         uint32_t warning_count = 0;
         for (uint32_t i = 0; i < warning_total; i += 1)
