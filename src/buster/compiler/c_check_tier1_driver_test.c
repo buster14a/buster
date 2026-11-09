@@ -2830,7 +2830,7 @@ static const char check_test_tier1_asm_source[] =
     "{\n"
     "    unsigned a, b, c, d;\n"
     "    __asm__ volatile(\"cpuid\" : \"=a\"(a), \"=b\"(b), \"=c\"(c), \"=d\"(d) : \"a\"(0u), \"c\"(0u));\n"
-    "    return (b == 0x756e6547u || b == 0x68747541u) + (a != 0);\n"
+    "    return ((b == 0x756e6547u) | (b == 0x68747541u)) + (a != 0);\n"
     "}\n"
     "unsigned __attribute__((noinline)) tier1_cpuid(unsigned n, unsigned a1, unsigned a2, unsigned a3, unsigned a4, unsigned a5, unsigned a6, unsigned a7)\n"
     "{\n"
