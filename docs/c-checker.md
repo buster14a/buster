@@ -4171,8 +4171,16 @@ recovery applies where:
   keyword's type, or a tag's, typedef name's or `typeof`'s type that the
   dropped token didn't replace.
 
-A list with a second error, or a storage class's conflict, still stops the
-reader. Error-free lists never reach this. The semantic-recovery fixtures cover
+A _Complex the type doesn't take is dropped at the list's end too, where the
+reader checks it (`_Complex _Bool` is a `_Bool`). Still stopping the reader:
+
+- a list with a second error (`int float char x;`, where clang reports both);
+- a storage class's conflict;
+- a second type specifier that is no keyword (`int typeof(int)`, `int _BitInt(8)`,
+  `int _Atomic(int)`, `int struct S`), whose state the slots can't rebuild.
+
+`_Complex _Complex _Bool` gives its warning and error in source order, where
+clang gives them in its discovery order. Error-free lists never reach this. The semantic-recovery fixtures cover
 each kind at file scope, in a body, a parameter, a cast, `sizeof` and a member,
 and a repeated `_Complex`'s warning, "duplicate 'complex' declaration
 specifier" in clang's words.
