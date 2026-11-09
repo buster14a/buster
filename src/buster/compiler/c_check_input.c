@@ -885,6 +885,11 @@ struct CheckInput
     uint8_t x86_range_severities[2];
     bool x86_range_quiet;
     bool x86_range_policy;
+    // clang's -Wodr, a DefaultError warning (#1447): its command-line mapping before -w, whether -w is given, and whether
+    // -Wsystem-headers is.
+    uint8_t odr_severity;
+    bool odr_quiet;
+    bool odr_system;
     // -Wfatal-errors: a command-line or default error is fatal before a source pragma can map it, while a source
     // pragma's own error stays an error, as clang's does.
     bool fatal_errors;

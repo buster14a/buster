@@ -1785,6 +1785,50 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .warnings = 3,
         .notes = 1,
     },
+    {
+        // C23 records redefined with other attributes (#1447): clang's -Wodr is an error by default; ignored, the
+        // definitions are compatible, and the name keeps the first's type (its layout, which the assertions read).
+        .name = "odr attribute differences ignored",
+        .source = "struct S { char c; int a; } __attribute__((packed));\nstruct S { char c; int a; };\n"
+                  "_Static_assert(sizeof(struct S) == 5, \"first\");\n"
+                  "struct U { char c; int a __attribute__((aligned(16))); };\nstruct U { char c; int a; };\n"
+                  "_Static_assert(sizeof(struct U) == 32, \"first u\");\nstruct S s;\nstruct U u;\n",
+        .options = { "-Wno-odr" },
+        .c23 = true,
+    },
+    {
+        // Demoted, each is a warning with its note at the attribute the earlier list has.
+        .name = "odr attribute differences demoted",
+        .source = "struct S { char c; int a; } __attribute__((packed));\nstruct S { char c; int a; };\n"
+                  "_Static_assert(sizeof(struct S) == 5, \"first\");\n"
+                  "struct U { char c; int a __attribute__((aligned(16))); };\nstruct U { char c; int a; };\n"
+                  "_Static_assert(sizeof(struct U) == 32, \"first u\");\nstruct S s;\nstruct U u;\n",
+        .options = { "-Wno-error=odr" },
+        .warnings = 2,
+        .notes = 2,
+        .c23 = true,
+    },
+    {
+        // Source pragmas: ignored for one, a warning for another (one -Werror leaves), and the default error after them.
+        .name = "odr attribute differences under pragmas",
+        .source = "struct S { char c; int a; } __attribute__((packed));\n#pragma clang diagnostic push\n#pragma clang diagnostic ignored \"-Wodr\"\n"
+                  "struct S { char c; int a; };\n#pragma clang diagnostic pop\n_Static_assert(sizeof(struct S) == 5, \"first\");\n"
+                  "struct U { char c; int a __attribute__((aligned(16))); };\n#pragma clang diagnostic push\n#pragma clang diagnostic warning \"-Wodr\"\n"
+                  "struct U { char c; int a; };\n#pragma clang diagnostic pop\n_Static_assert(sizeof(struct U) == 32, \"first u\");\n"
+                  "struct V { int a; } __attribute__((aligned(8)));\nstruct V { int a; } __attribute__((aligned(16)));\n",
+        .warnings = 1,
+        .errors = 1,
+        .notes = 3,
+        .c23 = true,
+    },
+    {
+        // In a system header (here a line marker's), clang ignores it, error or not, without -Wsystem-headers; the name
+        // keeps the first definition's type.
+        .name = "odr attribute differences in a system header",
+        .source = "# 1 \"odr_system.h\" 1 3\nstruct S { char c; int a; } __attribute__((packed));\nstruct S { char c; int a; };\n"
+                  "# 4 \"odr_main.c\" 2\n_Static_assert(sizeof(struct S) == 5, \"first\");\nstruct S s;\n",
+        .c23 = true,
+    },
 };
 
 static void check_test_driver_warning_fixtures(CheckTest* test, const char* clang, const char* executable, const char* directory,
