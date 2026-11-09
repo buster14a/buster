@@ -1231,6 +1231,26 @@ static uint32_t check_asm_inline_code(const CheckAsmPlace* places, uint32_t coun
 // record of unknown effects, or one that touches the stack or control flow (a push, a call, a jump or branch but the
 // template's own to its labels, a return, a trap), as unwind_tier0_frame refuses in a function's body, or that writes a register holding the frame (rsp, rbp, r15). A form
 // x86_semantics.c doesn't cover takes check_asm_implicit's registers, or none for an x87 form's, or keeps the helper.
+// Whether a template's records name an opmask register (k0 to k7) in any field. Tier 1's CFG consumer saves no mask value
+// around an asm body, as it saves them around a call (#1839), so that in a lowering for Tier 1
+// (CheckProgramOptions.asm_bodies) such a template keeps its helper, whose call it saves them around; Tier 0 takes an asm
+// body as a call, whose saves of the mask stack it makes.
+static bool check_asm_names_opmask(const AsmCode* code)
+{
+    bool named = false;
+    for (uint32_t r = 0; !named && r < code->count; r += 1)
+    {
+        X86Instruction record = code->records[r];
+        const Tier0Fields fields = tier0_operation_fields(&record);
+        for (uint32_t f = 0; f < fields.count; f += 1)
+        {
+            named |= fields.classes[f] == BUSTER_X86_CLASS_OPMASK;
+        }
+        named |= (record.decorations & 0x07) != 0;
+    }
+    return named;
+}
+
 // Whether `form` returns: ret, and its imm16, 16-bit, 32-bit and prefixed forms.
 static bool check_asm_return(uint32_t form)
 {
@@ -2455,6 +2475,7 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
     }
     else if (valid && reason == NULL && helped && !program->asm_helpers && !check_program_helper_forced(program, CHECK_PROGRAM_HELPER_ASM) &&
              !statement->is_goto && code.reference_count == 0 && code.label_count == 0 &&
+             !(program->asm_bodies && check_asm_names_opmask(&code)) &&
              (inline_touched = check_asm_inline_touched(places, count, &code, taken, vectors)) != UINT32_MAX)
     {
         // Placed in its caller as an asm body (#1839): its records run in its call row's place, with no helper.
