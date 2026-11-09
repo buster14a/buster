@@ -174,7 +174,7 @@ static void check_test_driver_asm_definitions(CheckTest* test, const char* clang
         // File-scope assembly (#619) that defines functions and data C declares and calls, refers to C's function and
         // variables (a static one that C reads too, so that clang emits it), with local, `.L` and numeric labels,
         // a `.pushsection` string, a common symbol and a weak reference.
-        { "file-scope assembly's symbols",
+        { "file-scope assembly's symbols", "bump main",
           "#include <stdio.h>\n"
           "int counter = 5;\n"
           "static int hidden = 9;\n"
