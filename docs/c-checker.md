@@ -8728,7 +8728,9 @@ conditional operator's two function operands; this gives one for each.
   clang's. A `.` or `->` operand keeps its member declarator's typedef: the
   member's declarator is found in its record's body, which
   `CheckGraph.tag_completions` locates (`check_semantic_member_token`), so
-  `x.f++` of a member `uu f` is `'uu' (aka 'struct u')`. An a.k.a. keeps a
+  `x.f++` of a member `uu f` is `'uu' (aka 'struct u')`, and a warning's
+  member operand (`check_common_operand_spelling`) keeps it too:
+  `x.n < i` is `'ul' (aka 'unsigned long')`. An a.k.a. keeps a
   vector's own typedef at any level (`'pv' (aka 'v4si *')`), as
   `desugarForDiagnostic` stops there. A typedef'd array's element keeps its
   qualified typedef (`'CI[2]' (aka 'const int[2]')`, `type_print`).
@@ -8739,10 +8741,11 @@ conditional operator's two function operands; this gives one for each.
   - A qualifier written again over a qualified typedef's array
     (`const CI twice[1]`) is dropped: clang prints
     `'const CI[1]' (aka 'const int[1]')`, this `'CI[1]'`.
-  - The input-side spelling helpers (`check_input_operand_type_spelling` and
-    the others, `-Wsign-compare`'s operands among them) don't follow members:
-    `x.n < i` prints `'unsigned long'` for clang's
-    `'ul' (aka 'unsigned long')`.
+  - The reader's spelling helpers (`check_input_operand_type_spelling`,
+    `check_input_object_spelling`), which run before the stream has types,
+    don't follow members. The warnings the driver spells after checking
+    (`check_common_operand_spelling`: `-Wsign-compare`, `-Wformat`,
+    `-Wenum-compare` and the like) do.
 
 ## Ignorable and unsupported pragmas
 

@@ -93,6 +93,31 @@ static const CheckDriverDefaultWarningFixture check_driver_type_sugar_fixtures[]
         .errors = 5,
         .notes = 2,
     },
+    {
+        // Warnings' operands keep their member's typedef (check_common_operand_spelling): -Wsign-compare's, -Wformat's
+        // and -Wenum-compare's, through `.`, `->` and a member array's subscript.
+        .name = "member typedefs in warning operands",
+        .source = "int printf(const char *, ...);\n"
+                  "typedef unsigned long ul;\n"
+                  "typedef enum { A1, A2 } EA;\n"
+                  "typedef enum { B1 } EB;\n"
+                  "typedef double D;\n"
+                  "struct s { ul n; EA ea; EB eb; D d; ul arr[2]; struct s *next; };\n"
+                  "int f(struct s x, struct s *px, int i)\n"
+                  "{\n"
+                  "    int r = 0;\n"
+                  "    r += x.n < i;\n"
+                  "    r += px->next->arr[0] < i;\n"
+                  "    r += x.ea == x.eb;\n"
+                  "    r += x.ea + px->eb;\n"
+                  "    r += (x.ea < px->eb);\n"
+                  "    printf(\"%d %s %f\\n\", x.n, px->d, x.arr[1]);\n"
+                  "    printf(\"%ld\\n\", x.d);\n"
+                  "    return r + (i ? x.ea : x.eb);\n"
+                  "}\n",
+        .options = { "-Wsign-compare" },
+        .warnings = 8,
+    },
 };
 
 static void check_test_driver_type_sugar(CheckTest* test, const char* clang, const char* executable, const char* directory)

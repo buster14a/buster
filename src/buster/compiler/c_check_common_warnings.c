@@ -164,7 +164,7 @@ static void check_common_report_published(const Parser* parser, Preprocessor* pp
 // casts, dereferences, subscripts, conversions and arithmetic; a bounded work budget leaves unusually large expressions
 // in their canonical spelling. `sizeof` and `alignof` use the renderer's __size_t sentinel.
 static uint32_t check_common_operand_spelling(const Parser* parser, const CheckInput* input, const CheckGraph* graph,
-                                              const CheckStream* stream, uint32_t node)
+                                              const CheckStream* stream, const TypeTable* types, uint32_t node)
 {
     typedef struct CheckCommonSpellingFrame
     {
@@ -288,6 +288,14 @@ static uint32_t check_common_operand_spelling(const Parser* parser, const CheckI
                     result = 0;
                     count -= 1;
                 }
+            }
+            else if (op == CHECK_OP_MEMBER || op == CHECK_OP_ARROW)
+            {
+                // A member's own declarator's typedef (#1447), found in its record's body.
+                const uint32_t member = check_semantic_member_of(parser, input, stream, types, current);
+                const uint32_t declarator = member != 0 ? check_semantic_member_token(parser, input, types, member) : BUSTER_CHECK_NONE;
+                result = declarator < input->token_count ? check_input_typedef_spelling(input, parser, declarator) : 0;
+                count -= 1;
             }
             else
             {
@@ -1895,10 +1903,10 @@ static void check_common_sign_own(CheckCommonEmission* emission, uint32_t node)
         {
             const String8 left_name = check_driver_warning_type(parser, emission->pp, emission->input, types, emission->spell, scratch,
                                                                 check_stream_type(stream, left),
-                                                                check_common_operand_spelling(parser, emission->input, graph, stream, left));
+                                                                check_common_operand_spelling(parser, emission->input, graph, stream, types, left));
             const String8 right_name = check_driver_warning_type(parser, emission->pp, emission->input, types, emission->spell, scratch,
                                                                  check_stream_type(stream, right),
-                                                                 check_common_operand_spelling(parser, emission->input, graph, stream, right));
+                                                                 check_common_operand_spelling(parser, emission->input, graph, stream, types, right));
             if (left_name.length != 0 && right_name.length != 0)
             {
                 const char* message = check_warning_text(scratch, "comparison of integers of different signs: %.*s and %.*s",
@@ -3587,8 +3595,8 @@ static __attribute__((noinline)) void check_common_enum_arithmetic(const Parser*
             const uint32_t question = check_common_enum_question(parser, graph->tokens[node], op == CHECK_OP_CONDITIONAL);
             const TypeId left_coerced = check_common_enum_coerced(input, stream, left);
             const TypeId right_coerced = check_common_enum_coerced(input, stream, right);
-            const uint32_t left_spelling = left_coerced == check_stream_type(stream, left) ? check_common_operand_spelling(parser, input, graph, stream, left) : 0;
-            const uint32_t right_spelling = right_coerced == check_stream_type(stream, right) ? check_common_operand_spelling(parser, input, graph, stream, right) : 0;
+            const uint32_t left_spelling = left_coerced == check_stream_type(stream, left) ? check_common_operand_spelling(parser, input, graph, stream, types, left) : 0;
+            const uint32_t right_spelling = right_coerced == check_stream_type(stream, right) ? check_common_operand_spelling(parser, input, graph, stream, types, right) : 0;
             check_common_enum_mix(parser, pp, input, types, spell, scratch, kind, question, op == CHECK_OP_CONDITIONAL && question + 1 == graph->tokens[node],
                                   left_coerced, right_coerced, left_spelling, right_spelling);
         }
@@ -6020,7 +6028,7 @@ static void check_common_format_report_type(const Parser* parser, Preprocessor* 
     const uint32_t argument_node = graph->argument_nodes[offset + argument];
     const TypeId type = check_common_format_argument_type(graph, stream, types, offset, argument);
     const uint32_t spelling = argument_node < graph->count && type == check_stream_type(stream, argument_node) ?
-                              check_common_operand_spelling(parser, input, graph, stream, argument_node) : 0;
+                              check_common_operand_spelling(parser, input, graph, stream, types, argument_node) : 0;
     const String8 actual = check_common_type_text(parser, pp, input, types, spell, scratch, type,
                                                   spelling);
     const uint32_t at_token = argument_node < graph->count ? check_common_argument_start(parser, graph->tokens[argument_node]) : format_token;
@@ -6048,7 +6056,7 @@ static void check_common_format_width_report(const Parser* parser, Preprocessor*
     const uint32_t argument_node = graph->argument_nodes[offset + argument];
     const TypeId type = check_common_format_argument_type(graph, stream, types, offset, argument);
     const uint32_t spelling = argument_node < graph->count && type == check_stream_type(stream, argument_node) ?
-                              check_common_operand_spelling(parser, input, graph, stream, argument_node) : 0;
+                              check_common_operand_spelling(parser, input, graph, stream, types, argument_node) : 0;
     const String8 actual = check_common_type_text(parser, pp, input, types, spell, scratch, type,
                                                   spelling);
     if (actual.length != 0)
