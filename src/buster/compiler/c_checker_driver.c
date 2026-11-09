@@ -67,6 +67,7 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_ARRAY_TOO_LARGE: result = "array is too large"; break;
         case CHECK_INPUT_TYPE_SPECIFIER_MISSING: result = "type name requires a specifier or qualifier"; break;
         case CHECK_INPUT_INVALID_USE: result = "use of an invalid declaration"; break;
+        case CHECK_INPUT_CONSTANT_EXPRESSION: result = "invalid constant expression"; break;
         case CHECK_INPUT_TAG_INCOMPATIBLE: result = "type has incompatible definitions"; break;
         case CHECK_INPUT_UNDECLARED_CORRECTED: result = "use of undeclared identifier"; break;
         case CHECK_INPUT_UNDECLARED: result = "use of undeclared identifier"; break;
@@ -421,6 +422,12 @@ static void check_driver_attribute_argument(const Parser* parser, const Preproce
             break;
         case CHECK_ARGUMENT_EXPRESSION_BINARY:
             snprintf(text, capacity, "invalid operands to binary expression (%.*s)", (int)literal.length, literal.pointer);
+            break;
+        case CHECK_ARGUMENT_EXPRESSION_ARROW_POINTER:
+            snprintf(text, capacity, "member reference type %.*s is not a pointer", (int)literal.length, literal.pointer);
+            break;
+        case CHECK_ARGUMENT_EXPRESSION_INCOMPLETE_ARITHMETIC:
+            snprintf(text, capacity, "arithmetic on a pointer to an incomplete type %.*s", (int)literal.length, literal.pointer);
             break;
         case CHECK_ARGUMENT_ANNOTATE_CONSTANT:
             snprintf(text, capacity, "'%s' attribute requires parameter %u to be a constant expression", parsed, number);
@@ -4031,8 +4038,10 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                             // An unevaluated string literal's escape sequences (#147): each one's diagnostics, at its backslash.
                             check_driver_unevaluated_escapes(parser, pp, input, input->reports + index, publication, scratch);
                         }
-                        else if (phase == 0 && input->reports[index].message == CHECK_INPUT_ATTRIBUTE_ARGUMENT && input->reports[index].attribute < count)
+                        else if (phase == 0 && (input->reports[index].message == CHECK_INPUT_ATTRIBUTE_ARGUMENT || input->reports[index].message == CHECK_INPUT_CONSTANT_EXPRESSION) &&
+                                 input->reports[index].attribute < count)
                         {
+                            // (And a declarator's constant's in the same words, #1447.)
                             // An attribute argument's error (#147) as clang's handler words it; a parser's "expected ')'" with
                             // its note at the arguments' `(`.
                             char text[768];
@@ -4045,6 +4054,8 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                                                 (report->detail & 0xffu) == CHECK_ARGUMENT_EXPRESSION_MEMBER_NAME ||
                                                 (report->detail & 0xffu) == CHECK_ARGUMENT_EXPRESSION_SIZEOF ||
                                                 (report->detail & 0xffu) == CHECK_ARGUMENT_EXPRESSION_BINARY ||
+                                                (report->detail & 0xffu) == CHECK_ARGUMENT_EXPRESSION_ARROW_POINTER ||
+                                                (report->detail & 0xffu) == CHECK_ARGUMENT_EXPRESSION_INCOMPLETE_ARITHMETIC ||
                                                 (report->detail & 0xffu) == CHECK_ARGUMENT_CALLBACK_COUNT ||
                                                 (report->detail & 0xffu) == CHECK_ARGUMENT_SWIFT_ASYNC_BLOCK ||
                                                 (report->detail & 0xffu) == CHECK_ARGUMENT_SWIFT_PARAMETER_TYPE ||
