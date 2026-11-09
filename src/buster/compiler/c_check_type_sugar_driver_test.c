@@ -138,6 +138,30 @@ static const CheckDriverDefaultWarningFixture check_driver_type_sugar_fixtures[]
                   "}\n",
         .errors = 5,
     },
+    {
+        // A space written directly with an integer suffix is that space's direct spelling: the macro another declaration
+        // writes it with names neither.
+        .name = "address spaces written directly with integer suffixes",
+        .source = "#define AS1 __attribute__((address_space(1)))\n"
+                  "int AS1 *x;\n"
+                  "void f(int __attribute__((address_space(1u))) *p, int __attribute__((address_space(1UL))) *r)\n"
+                  "{\n"
+                  "    int *q = p;\n"
+                  "    int *s = r;\n"
+                  "}\n",
+        .errors = 2,
+    },
+    {
+        // An operand that isn't a plain integer constant (`1+0`) may write any space: no macro names one.
+        .name = "address spaces written with a constant expression",
+        .source = "#define AS1 __attribute__((address_space(1)))\n"
+                  "int AS1 *x;\n"
+                  "void f(int __attribute__((address_space(1+0))) *p)\n"
+                  "{\n"
+                  "    int *q = p;\n"
+                  "}\n",
+        .errors = 1,
+    },
 };
 
 static void check_test_driver_type_sugar(CheckTest* test, const char* clang, const char* executable, const char* directory)

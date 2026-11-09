@@ -7853,8 +7853,10 @@ arguments against the function. The checker now gives these as clang does.
   that wrote its space (MacroQualifiedType: `'AS1 int *'`), declaration by
   declaration. Here a space prints by its macro only where one macro writes it
   throughout the unit (`check_driver_space_macros`, #1447). Its attribute is
-  spelled out in two cases: a space the unit writes both ways or with two
-  macros, and `__builtin_dump_struct`'s output. Clang spells a group's leading
+  spelled out in three cases: a space the unit writes both ways or with two
+  macros (`address_space(1u)` is space 1 written directly), every space where
+  an operand isn't an integer constant (`address_space(1+0)`), and
+  `__builtin_dump_struct`'s output. Clang spells a group's leading
   space where it was
   written (`'int (__attribute__((address_space(1))) *)[3]'`); a garbage
   collection qualifier inside a function's level is refused by name, and the

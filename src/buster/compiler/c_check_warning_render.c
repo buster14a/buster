@@ -279,7 +279,8 @@ static uint32_t check_driver_macro_root(const Preprocessor* pp, uint32_t origin)
 // object-like macro by its name, a function-like one by its invocation as written (`'ASN(3) int *'`), the outermost
 // one where macros nest, where the list is that expansion's whole and isn't a predefined macro's (`__seg_gs`).
 // clang names each declaration's own spelling; a space this unit writes both ways, or with two
-// macros, keeps its attribute spelled out. One scan of the `__attribute__` tokens, on a pass's first rendered type.
+// macros, keeps its attribute spelled out, and every space does where an operand isn't an integer constant this reads
+// (`address_space(1+0)`), whose space could be any one. One scan of the `__attribute__` tokens, on a pass's first rendered type.
 static bool check_driver_space_macros(const Parser* parser, Preprocessor* pp, CheckWarningSpelling* spell, Arena* scratch)
 {
     uint32_t* spaces = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, BUSTER_CHECK_DRIVER_SPACE_MACROS);
@@ -288,6 +289,7 @@ static bool check_driver_space_macros(const Parser* parser, Preprocessor* pp, Ch
     const bool valid = mixed != NULL;
     const bool history = valid && pp_history_ensure(pp);
     uint32_t count = 0;
+    bool unreadable = false;
     const uint32_t token_count = parser->tokens.count;
     for (uint32_t t = 0; history && t + 1 < token_count; t += 1)
     {
@@ -308,7 +310,15 @@ static bool check_driver_space_macros(const Parser* parser, Preprocessor* pp, Ch
             }
             char* end = NULL;
             const unsigned long long value = read ? strtoull(digits, &end, 0) : 0;
-            if (read && end != NULL && *end == 0 && value <= BUSTER_TYPE_SPACE_MASK - BUSTER_TYPE_SPACE_TARGET)
+            // An integer suffix (`1u`, `1UL`) is the same constant.
+            while (read && end != NULL && (*end == 'u' || *end == 'U' || *end == 'l' || *end == 'L'))
+            {
+                end += 1;
+            }
+            const bool constant = read && end != NULL && *end == 0 && value <= BUSTER_TYPE_SPACE_MASK - BUSTER_TYPE_SPACE_TARGET;
+            // Any other operand (`1+0`, a named constant) may write any space directly: no macro names one then.
+            unreadable |= space && !constant;
+            if (constant)
             {
                 const uint32_t word = BUSTER_TYPE_SPACE_TARGET + (uint32_t)value;
                 // clang's FindLocsWithCommonFileID: the list is a whole expansion, its `__attribute__` that expansion's
@@ -355,7 +365,7 @@ static bool check_driver_space_macros(const Parser* parser, Preprocessor* pp, Ch
     }
     spell->space_macro_spaces = spaces;
     spell->space_macro_texts = texts;
-    spell->space_macro_count = kept;
+    spell->space_macro_count = unreadable ? 0 : kept;
     return valid;
 }
 
