@@ -150,7 +150,8 @@ static const CheckWarningDescription check_warning_descriptions[] =
     { "-Wimplicit-enum-enum-cast", "-Wenum-conversion", "implicit conversion from enumeration type to different enumeration type" },
     { "-Wvisibility", NULL, "declaration will not be visible outside of this function" },
     { "-Wodr", NULL, "type has an attribute which currently causes the types to be treated as though they are incompatible" },
-    { "-Wunevaluated-expression", "-Wunused-value", "expression with side effects has no effect in an unevaluated context" },
+    [CHECK_WARNING_ID_UNEVALUATED_EXPRESSION] =
+        { "-Wunevaluated-expression", "-Wunused-value", "expression with side effects has no effect in an unevaluated context" },
 };
 
 _Static_assert(BUSTER_ARRAY_LENGTH(check_warning_descriptions) == CHECK_WARNING_ID_COUNT, "every sparse policy ID has a description");

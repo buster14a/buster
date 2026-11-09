@@ -128,7 +128,8 @@ enum
     CHECK_WARNING_ID_ODR = 113,
     // An unevaluated operand with a side effect (#1447, clang's CheckUnaryExprOrTypeTraitOperand and
     // CreateGenericSelectionExpr): -Wunevaluated-expression, on by default, under -Wunused-value and so -Wunused and -Wall.
-    CHECK_WARNING_ID_UNEVALUATED_EXPRESSION = 114,
+    // (114 to 120 are other open pull requests'.)
+    CHECK_WARNING_ID_UNEVALUATED_EXPRESSION = 121,
     CHECK_WARNING_ID_COUNT,
 };
 
