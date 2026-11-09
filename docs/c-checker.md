@@ -2575,8 +2575,10 @@ What the lowering covers past scalars (#145's programs):
   folded to its width's bits, which the lowering extends from the width, as a
   narrower one's: a negative one's conversion to `__int128` or compare reads it
   as it is.
-  The overflow builtins of one of 65 to 127 bits are refused by name (their
-  recipes take a 128-bit operand whole).
+  The overflow builtins take one of 65 to 127 bits as an `__int128`'s limbs
+  (#1447): its descriptor is its width, its high limb extended from it, and a
+  destination's high limb is the result's extended from the width's bits past
+  64, which must give it back for the result to fit.
 - **x86 builtins (#136, #148).** The intrinsics' `__builtin_ia32_*` calls are
   X86 entries too (`c_check_program_x86.c`): a row per builtin, from a table by
   name, of its family's records with its rule's form, as clang -O0's code
@@ -4099,9 +4101,20 @@ do:
   typedef, a parameter, a local) gives clang's "redefinition of 'K'", with
   "previous definition is here" at the earlier declaration, and is dropped the
   same way. (A name declared after an enumerator is the redeclaration's
-  "redefinition of 'K' as different kind of symbol" instead.) Clang's
-  `-Wvisibility` of a tag declared in a prototype, which the checker doesn't
-  give at all, is left out of its fixtures.
+  "redefinition of 'K' as different kind of symbol" instead.)
+- **A tag a prototype's list declares first** (named, or any enum), which no
+  declaration outside the function names, is clang's `-Wvisibility` warning
+  "declaration of 'struct S' will not be visible outside of this function",
+  on by default, at its name (an unnamed enum's keyword), as clang's `ActOnTag`
+  gives it: in a definition's list, a nested prototype's, a member's
+  function pointer's, a block's prototype and an array bound in the list, and
+  for a definition that shadows a file-scope tag. A C23 definition there is
+  no warning. Before C23, the list's redefinition of its own tag is "redefinition
+  of 'S' will not be visible outside of this function", noted at the earlier
+  definition; an enum's, read as an unnamed enum, gets the first warning too
+  (`c_check_warning_driver_test.c`). Left: a C23 list's redefinition of its own
+  record is taken as a new tag without clang's comparison (its "incompatible
+  definitions" error, [#1869](https://github.com/buster14a/buster/issues/1869)).
 
 Phase 3 covers statements after an error:
 
@@ -8673,19 +8686,30 @@ conditional operator's two function operands; this gives one for each.
   pointer to an incomplete type 'struct s'" (a subscript's "subscript of
   pointer to incomplete type", at its `[`), of the pointee as written, with its
   "forward declaration of 'struct s'" note at the tag's declaring name.
+- **Type sugar** (#1447). An operand's type keeps the typedef clang's sugar
+  keeps there. A dereference or subscript follows the declaration's chain of
+  typedef specifiers to the first typedef whose type is the operand's level
+  (`check_driver_spelling_chain`): `*p` of a `pv p` (`typedef v4si *pv`) is
+  `'v4si'`, and `**b` of a `VPP b` (`typedef VP *VPP`) is
+  `'VP' (aka 'void *')`. A chain's types only shrink, so its first match is
+  clang's. A `.` or `->` operand keeps its member declarator's typedef: the
+  member's declarator is found in its record's body, which
+  `CheckGraph.tag_completions` locates (`check_semantic_member_token`), so
+  `x.f++` of a member `uu f` is `'uu' (aka 'struct u')`. An a.k.a. keeps a
+  vector's own typedef at any level (`'pv' (aka 'v4si *')`), as
+  `desugarForDiagnostic` stops there. A typedef'd array's element keeps its
+  qualified typedef (`'CI[2]' (aka 'const int[2]')`, `type_print`).
+  `c_check_type_sugar_driver_test.c` compares these whole-output with clang.
 - **Differences left.**
-  - A vector type reached through a pointer typedef (`typedef v4si *pv;`)
-    prints without its typedef's name, and so does a member's type
-    (`x.f++` of a member `uu f` prints `'struct u'` where clang's is
-    `'uu' (aka 'struct u')`): a record's members keep no declaration.
   - An assignment to a member that is const itself is "read-only variable is
-    not assignable", where clang names the member with its note: a record's
-    members keep no declaration. A typedef'd array's variable prints its
-    element's typedef unspelled (`'const int[2]'` for clang's
-    `'CI[2]' (aka 'const int[2]')`).
-  - A typedef inside another typedef (`typedef VP *VPP`) loses its inner name
-    in the void dereference's operand type (`**b`'s `'void *'` for clang's
-    `'VP'`).
+    not assignable", where clang names the member with its note.
+  - A qualifier written again over a qualified typedef's array
+    (`const CI twice[1]`) is dropped: clang prints
+    `'const CI[1]' (aka 'const int[1]')`, this `'CI[1]'`.
+  - The input-side spelling helpers (`check_input_operand_type_spelling` and
+    the others, `-Wsign-compare`'s operands among them) don't follow members:
+    `x.n < i` prints `'unsigned long'` for clang's
+    `'ul' (aka 'unsigned long')`.
 
 ## Ignorable and unsupported pragmas
 

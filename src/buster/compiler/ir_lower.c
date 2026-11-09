@@ -1786,8 +1786,10 @@ static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType res
             check.instruction = entry;
         }
     }
-    if (check.error == IR_OK && (input->unwind_init || input->returns_twice || tier0_preserving(input) || input->realign_stack))
+    if (check.error == IR_OK && (input->unwind_init || input->returns_twice || tier0_preserving(input) || input->realign_stack || input->asm_body_count != 0))
     {
+        // An asm statement placed in its caller as an asm body (#1839, Tier0Function.call_asm) is Tier 0's too, until the
+        // IR has a form for one.
         // __builtin_unwind_init's frame, which saves every callee-saved register (Tier0Function.unwind_init),
         // __builtin_setjmp's, which keeps nothing in one (Tier0Function.returns_twice), a preserving function's, which
         // keeps registers for its caller past them (#147, Tier0Function.preserve_general), and a force_align_arg_pointer
