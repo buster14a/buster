@@ -271,6 +271,9 @@ typedef enum Tier1SelectRule
 // A permute (#1840): `operation` its kind past BUSTER_IR_INTRINSIC_PERMUTE (0 permute, 1 shuffle, 2 align, 3
 // shuffle_lanes), `immediate` the IR's flags (tier1_select_permute_form).
 #define BUSTER_TIER1_VECTOR_PERMUTE 11
+// A conversion (#1840): `operation` its kind past BUSTER_IR_INTRINSIC_EXTEND (0 extend, 1 truncate), `immediate` the
+// IR's flags, `source_width` the source's bytes (tier1_select_convert_form).
+#define BUSTER_TIER1_VECTOR_CONVERT 12
 
 // TIER1_RULE_X87's kinds, its pattern's `scale` (#141):
 // - CONSTANT, its constant's index in `immediate`, and UNDEF, which stores nothing;
@@ -1243,6 +1246,30 @@ static void tier1_select_permute(Tier1SelectRecords* result, const Tier1SelectHo
     tier1_select_append(result, record);
 }
 
+#include "buster/compiler/ir_simd_convert_forms.c"
+
+// A conversion's EVEX form (#1840), by its kind past BUSTER_IR_INTRINSIC_EXTEND, the IR's flags, the result's bytes and
+// the source's: the decoder's tables' (ir_simd_typed_extensions at the result's width, ir_simd_typed_truncations at the
+// source's), or X86_FORM_NONE for a pair the flags don't name.
+static uint16_t tier1_select_convert_form(uint32_t kind, uint32_t flags, uint32_t width, uint32_t source_width)
+{
+    const uint32_t from = flags & 3;
+    const uint32_t to = (flags >> 2) & 3;
+    const uint32_t mode = flags >> 4;
+    const uint32_t bytes = kind == 0 ? width : source_width;
+    const uint32_t index = bytes == 16 ? 0 : bytes == 32 ? 1 : bytes == 64 ? 2 : 3;
+    uint16_t form = X86_FORM_NONE;
+    for (uint32_t pair = 0; index < 3 && pair < 6; pair += 1)
+    {
+        const uint8_t* sizes = kind == 0 ? ir_simd_typed_extension_pairs[pair] : ir_simd_typed_truncation_pairs[pair];
+        if (sizes[0] == from && sizes[1] == to)
+        {
+            form = kind == 0 && mode <= 1 ? ir_simd_typed_extensions[mode][pair][index] : kind == 1 && mode <= 2 ? ir_simd_typed_truncations[mode][pair][index] : X86_FORM_NONE;
+        }
+    }
+    return form;
+}
+
 static void tier1_select_scalar_splat(Tier1SelectRecords* result, const Tier1SelectHoles* holes)
 {
     const uint32_t type = holes->source_width;
@@ -1817,6 +1844,19 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         else if (kind == BUSTER_TIER1_VECTOR_PERMUTE)
         {
             tier1_select_permute(&result, holes);
+        }
+        else if (kind == BUSTER_TIER1_VECTOR_CONVERT)
+        {
+            // An extension's destination in reg and its source in rm; a truncation's source in reg and its destination in
+            // rm, which zeroes the register past its lanes.
+            const bool extend = holes->operation == 0;
+            const X86Instruction record = {
+                .form = tier1_select_convert_form((uint32_t)holes->operation, (uint32_t)holes->immediate, width, holes->source_width),
+                .reg = extend ? x : left,
+                .rm = extend ? left : x,
+                .mode = BUSTER_X86_REGISTER_DIRECT,
+            };
+            tier1_select_append(&result, record);
         }
         else if (holes->sse && width == 16 && kind != BUSTER_TIER1_VECTOR_COMPARE && kind != BUSTER_TIER1_VECTOR_SELECT)
         {
@@ -4123,7 +4163,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
     // A vector's operations (#141), behind one test: a function without vectors pays no other here.
     const bool vector_node = (vector_width != 0 && (op == IR_VCONST || op == IR_UNDEF || op == IR_COPY || op == IR_NOT || op == IR_ADD || op == IR_SUB || op == IR_MUL || op == IR_AND ||
                                                    op == IR_OR || op == IR_XOR || op == IR_SHL || op == IR_LSHR || op == IR_ASHR || (op >= IR_FADD && op <= IR_FDIV) ||
-                                                   op == IR_VSELECT || (op == IR_INTRINSIC && (c == BUSTER_IR_INTRINSIC_SPLAT || (c >= BUSTER_IR_INTRINSIC_EXTRACT && c <= BUSTER_IR_INTRINSIC_SHUFFLE_LANES))))) ||
+                                                   op == IR_VSELECT || (op == IR_INTRINSIC && (c == BUSTER_IR_INTRINSIC_SPLAT || (c >= BUSTER_IR_INTRINSIC_EXTRACT && c <= BUSTER_IR_INTRINSIC_TRUNCATE))))) ||
                              compare_width != 0;
     if (vector_node)
     {
@@ -4190,6 +4230,22 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             base.values[1] = b;
             base.intrinsic_cost = 1;
             if (tier1_select_permute_form(c - BUSTER_IR_INTRINSIC_PERMUTE, function->flags[node], vector_width) != X86_FORM_NONE)
+            {
+                tier1_select_add_candidate(forest, node, &candidates, base);
+            }
+        }
+        else if (vector_width != 0 && op == IR_INTRINSIC && (c == BUSTER_IR_INTRINSIC_EXTEND || c == BUSTER_IR_INTRINSIC_TRUNCATE))
+        {
+            // A conversion (#1840): its lanes and mode in the IR's flags, the source's width beside them.
+            base.rule = TIER1_RULE_VECTOR;
+            base.width = (uint8_t)vector_width;
+            base.scale = BUSTER_TIER1_VECTOR_CONVERT;
+            base.operation = (uint8_t)(c - BUSTER_IR_INTRINSIC_EXTEND);
+            base.immediate = function->flags[node];
+            base.source_width = a < function->instruction_count ? (uint8_t)tier1_select_vector_width(function->type[a]) : 0;
+            base.values[0] = a;
+            base.intrinsic_cost = 1;
+            if (tier1_select_convert_form(c - BUSTER_IR_INTRINSIC_EXTEND, function->flags[node], vector_width, base.source_width) != X86_FORM_NONE)
             {
                 tier1_select_add_candidate(forest, node, &candidates, base);
             }

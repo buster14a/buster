@@ -3734,8 +3734,8 @@ static void check_test_driver_tier1_rows(CheckTest* test, const char* clang, con
     // placement moved every vector operand in and every vector result out: 150 for the unit's 58 rows). The unit's 11
     // compares into masks were rows that took no move; #1623 decodes them into the IR's comparisons, so the bound counts
     // them with the rows still. #1840 decodes its inserts, extracts and casts between widths into the IR's own
-    // intrinsics, and its variable permutes and byte shuffles into the IR's permutes, which leaves 61 rows and 32 moves by
-    // Tier 1 (75 and 39 before).
+    // intrinsics, its variable permutes and byte shuffles into the IR's permutes and its widening conversion into the IR's
+    // extend, which leaves 59 rows and 32 moves by Tier 1 (75 and 39 before).
     const uint64_t compares = 11;
     char header[512];
     char unit[512];

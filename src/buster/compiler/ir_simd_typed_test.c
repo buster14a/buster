@@ -1154,8 +1154,144 @@ static void ir_simd_typed_test_permutes(IrTestTally* tally)
            decoded_rows[1], decoded_rows[2], decoded_rows[3]);
 }
 
+// The conversions (#1840): every __builtin_convertvector row between integer vectors of other element sizes, by the real
+// producer (check_vector_convert_row) at every pair of sizes and signedness, every result width and the operand widths it
+// takes, decodes as the IR's extend or truncate of its lanes' sizes and sign, written out, at exactly its form's features
+// and AVX512F's and VL's; and every TRUNCATE rule's row (the vpmov, vpmovs and vpmovus builtins under a mask) as the IR's
+// truncate merged under the mask where its lanes fill its result, and a machine row where they don't. Each refused
+// without each feature it needs and under changes.
+static void ir_simd_typed_test_conversions(IrTestTally* tally)
+{
+    static const TypeId elements[2][4] = {
+        { BUSTER_TYPE_UCHAR, BUSTER_TYPE_USHORT, BUSTER_TYPE_UINT, BUSTER_TYPE_ULLONG },
+        { BUSTER_TYPE_SCHAR, BUSTER_TYPE_SHORT, BUSTER_TYPE_INT, BUSTER_TYPE_LLONG },
+    };
+    const X86Target every = { .features = UINT64_MAX, .extensions = UINT64_MAX };
+    const uint64_t all = UINT64_MAX;
+    static const uint64_t features[] = { BUSTER_X86_FEATURE(AVX512F), BUSTER_X86_FEATURE(AVX512VL), BUSTER_X86_FEATURE(AVX512BW), BUSTER_X86_FEATURE(AVX512DQ) };
+    uint32_t extends = 0;
+    uint32_t truncates = 0;
+    uint32_t masked = 0;
+    uint32_t partial = 0;
+    TypeTestTable table = {0};
+    const bool ready = type_test_table_open(&table, 512) && x86_encoder_initialize() && tier0_initialize();
+    ir_test_expect(tally, ready, "conversion decoder producer type table");
+    for (uint32_t sign = 0; ready && sign < 2; sign += 1)
+    {
+        for (uint32_t from = 0; from < 4; from += 1)
+        {
+            for (uint32_t to = 0; to < 4; to += 1)
+            {
+                for (uint32_t width = 0; from != to && width < 3; width += 1)
+                {
+                    // The result's width, and the operand's: the source's lanes' bytes, or a wider operand's where those are fewer than 16.
+                    const uint32_t bytes = 16u << width;
+                    const uint32_t lanes = bytes >> to;
+                    const uint32_t source_bytes = lanes << from;
+                    if (source_bytes > 64)
+                    {
+                        continue;
+                    }
+                    for (uint32_t operand = source_bytes < 16 ? 16 : source_bytes; operand <= 64; operand *= 2)
+                    {
+                        const TypeId source = type_vector(&table.table, elements[sign][from], lanes, false);
+                        const TypeId result = type_vector(&table.table, elements[sign][to], lanes, false);
+                        Tier0Operation row;
+                        const char* reason = check_vector_convert_row(&table.table, &every, source, operand, result, &row);
+                        char description[224];
+                        snprintf(description, sizeof(description), "convertvector of %u lanes of %u bytes (signed %u) to %u bytes, operand %u: ", lanes, 1u << from, sign,
+                                 1u << to, operand);
+                        if (reason != NULL)
+                        {
+                            // The producer refuses a truncation of a wider operand's first lanes.
+                            ir_test_expect(tally, to < from && operand != source_bytes, description);
+                            continue;
+                        }
+                        const bool extend = to > from;
+                        // Written out: the form's features (BW for bytes to words, either way), AVX512F's and VL's.
+                        const uint64_t expected = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512VL) | ((from == 0 && to == 1) || (from == 1 && to == 0) ? BUSTER_X86_FEATURE(AVX512BW) : 0);
+                        const uint32_t flags = from | to << 2 | (extend ? sign << 4 : 0);
+                        IrSimdTypedOperation decoded;
+                        memset(&decoded, 0xa5, sizeof(decoded));
+                        const IrSimdTypedStatus status = ir_simd_typed_row(&row, all, &decoded);
+                        ir_test_expect(tally, status == IR_SIMD_TYPED_OK && decoded.convert == (extend ? BUSTER_IR_INTRINSIC_EXTEND : BUSTER_IR_INTRINSIC_TRUNCATE) + 1 &&
+                                                  decoded.immediate == flags && !decoded.merge_mask && !decoded.machine && decoded.required_features == expected,
+                                       description);
+                        extends += extend && status == IR_SIMD_TYPED_OK;
+                        truncates += !extend && status == IR_SIMD_TYPED_OK;
+                        for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(features); f += 1)
+                        {
+                            IrSimdTypedOperation without;
+                            memset(&without, 0x5a, sizeof(without));
+                            const IrSimdTypedStatus refused = ir_simd_typed_row(&row, all & ~features[f], &without);
+                            ir_test_expect(tally, (expected & features[f]) != 0 ? ir_simd_typed_test_undecoded(refused, &without) : refused == IR_SIMD_TYPED_OK && without.convert != 0,
+                                           "a conversion without a feature it needs stays the machine row, and needs no other");
+                        }
+                        for (uint32_t m = 0; m < 5; m += 1)
+                        {
+                            Tier0Operation changed = row;
+                            switch (m)
+                            {
+                            case 0: changed.records[0].decorations = BUSTER_TIER0_DECORATION_MASK(0); break;
+                            case 1: changed.records[0].mode = BUSTER_X86_MEMORY_BASE; break;
+                            case 2: changed.records[0].rm = BUSTER_TIER0_ROLE_VECTOR(1); break;
+                            case 3: changed.result_bytes = (uint8_t)(bytes == 64 ? 32 : bytes * 2); break;
+                            case 4: changed.records[0].immediate = 1; break;
+                            }
+                            ir_test_expect(tally, ir_simd_typed_test_undecoded(ir_simd_typed_row(&changed, all, &decoded), &decoded), "a changed conversion isn't the IR's");
+                        }
+                    }
+                }
+            }
+        }
+    }
+    for (uint32_t i = 0; ready && i < BUSTER_ARRAY_LENGTH(check_x86_lower_rules); i += 1)
+    {
+        const CheckX86LowerRule* rule = check_x86_lower_rules + i;
+        if (rule->family != CHECK_X86_LOWER_TRUNCATE)
+        {
+            continue;
+        }
+        Tier0Operation row;
+        const bool made = check_x86_lower_row_of(&every, rule, 0, 4, 0, false, &row) == NULL && check_x86_lower_masks(&row, &every);
+        ir_test_expect(tally, made, "a truncation's builtin's row in the mask class");
+        const char* mnemonic = x86_form_description(rule->form)->mnemonic;
+        const uint32_t mode = strncmp(mnemonic, "vpmovus", 7) == 0 ? 2 : strncmp(mnemonic, "vpmovs", 6) == 0 && mnemonic[6] != 'x' ? 1 : 0;
+        const uint32_t to_bytes = mnemonic[strlen(mnemonic) - 1] == 'b' ? 1 : mnemonic[strlen(mnemonic) - 1] == 'w' ? 2 : 4;
+        const uint32_t lanes = (uint32_t)rule->bytes / rule->element;
+        const bool fills = lanes * to_bytes == rule->other;
+        IrSimdTypedOperation decoded;
+        memset(&decoded, 0xa5, sizeof(decoded));
+        const IrSimdTypedStatus status = made ? ir_simd_typed_row(&row, all, &decoded) : IR_SIMD_TYPED_INVALID;
+        char description[160];
+        snprintf(description, sizeof(description), "%s: %s", rule->name, fills ? "the IR's truncate merged under its mask" : "a machine row, its lanes not filling its result");
+        const uint32_t from = rule->element == 2 ? 1 : rule->element == 4 ? 2 : 3;
+        const uint32_t to = to_bytes == 1 ? 0 : to_bytes == 2 ? 1 : 2;
+        ir_test_expect(tally, fills ? status == IR_SIMD_TYPED_OK && decoded.convert == BUSTER_IR_INTRINSIC_TRUNCATE + 1 && decoded.merge_mask &&
+                                          decoded.immediate == (from | to << 2 | mode << 4) && decoded.lane == (to == 0 ? IR_SIMD_LANE_I8 : to == 1 ? IR_SIMD_LANE_I16 : IR_SIMD_LANE_I32) :
+                                      ir_simd_typed_test_undecoded(status, &decoded),
+                       description);
+        masked += fills && status == IR_SIMD_TYPED_OK;
+        partial += !fills;
+        if (fills)
+        {
+            Tier0Operation changed = row;
+            changed.records[0].decorations = 0;
+            ir_test_expect(tally, ir_simd_typed_test_undecoded(ir_simd_typed_row(&changed, all, &decoded), &decoded), "a masked truncation's row without its mask isn't the IR's");
+            changed = row;
+            changed.records[1].rm = BUSTER_TIER0_ROLE_VECTOR(0);
+            ir_test_expect(tally, ir_simd_typed_test_undecoded(ir_simd_typed_row(&changed, all, &decoded), &decoded), "a masked truncation's row moving another register isn't the IR's");
+        }
+    }
+    type_test_table_close(&table);
+    ir_test_expect(tally, extends != 0 && truncates != 0 && masked != 0 && partial != 0, "the conversions decode, and partial masked truncations stay rows");
+    printf("  IR SIMD rows: the front end's conversions decode to the IR's: %u extensions and %u truncations of convertvector, %u masked truncations (%u partial ones stay rows)\n",
+           extends, truncates, masked, partial);
+}
+
 static void ir_simd_typed_test(IrTestTally* tally)
 {
+    ir_simd_typed_test_conversions(tally);
     ir_simd_typed_test_permutes(tally);
     ir_simd_typed_test_widths(tally);
     ir_simd_typed_test_splats(tally);

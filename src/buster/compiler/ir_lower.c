@@ -717,6 +717,18 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_vector_operation(
         value = ir_typed_emit(sink, IR_VSELECT, type, mask, active, inactive, 0);
         ir_typed_lanes(sink, value, operation->lane);
     }
+    else if (operation->convert != 0)
+    {
+        // A conversion (#1840), its lanes and mode in its flags; a masked truncation's merged into its second operand under
+        // its third where the typed stream's writemask hasn't every lane.
+        value = ir_typed_emit(sink, IR_INTRINSIC, type, operands[0], BUSTER_IR_NONE, operation->convert - 1u, 0);
+        ir_typed_lanes(sink, value, (IrSimdLane)operation->immediate);
+        if (operation->merge_mask && !unmasked)
+        {
+            value = ir_typed_emit(sink, IR_VSELECT, type, operands[2], value, operands[1], 0);
+            ir_typed_lanes(sink, value, operation->lane);
+        }
+    }
     else if (operation->permute != 0)
     {
         // A permute (#1840), its immediate in its flags.
@@ -749,7 +761,7 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_vector_operation(
 // operand have it (_mm512_cmpeq_epi8_mask's -1). The typed stream decides it, so both lowering passes agree.
 static bool ir_typed_unmasked(const Tier0Function* input, const IrSimdTypedOperation* operation, uint32_t i)
 {
-    // A comparison's lanes, or a masked extract's (#1840): its result's, the merged operand's.
+    // A comparison's lanes, or a masked extract's or truncation's (#1840): its result's, the merged operand's.
     const uint32_t lanes = operation->compare_mask ? 8u * operation->operand_bytes[0] / ir_simd_lane_bits(operation->lane) :
                            operation->merge_mask   ? 8u * operation->operand_bytes[1] / ir_simd_lane_bits(operation->lane) :
                                                      0;
