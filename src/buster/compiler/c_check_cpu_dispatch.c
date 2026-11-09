@@ -67,7 +67,7 @@ typedef enum CheckCpuDispatchError
     CHECK_CPU_DISPATCH_LINKAGE,
     // Multiversioning by target strings' (#1838, c_check_target_versions.c): "function multiversioning doesn't support
     // feature 'X'" (or "architecture"), `attribute` the target string's first token and `value` the item's bytes in its
-    // decoded text (start, and length above bit 16), with the caused-here note where an earlier declaration has it;
+    // decoded text (start, and length above bit 32), with the caused-here note where an earlier declaration has it;
     CHECK_CPU_DISPATCH_TARGET_FEATURE,
     CHECK_CPU_DISPATCH_TARGET_ARCHITECTURE,
     // "multiversioned function redeclarations require identical target attributes", with a note at the previous
