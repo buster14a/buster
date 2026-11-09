@@ -7695,6 +7695,8 @@ static int run_checker_driver_tests(int argc, char** argv)
     bool cpu_dispatch_only = false;
     // --semantic-recovery-only: the semantic error recovery section alone (#1447).
     bool semantic_recovery_only = false;
+    // --type-sugar-only: the type sugar section alone (#1447).
+    bool type_sugar_only = false;
     bool options = true;
     for (int i = 0; options && i < argc; i += 1)
     {
@@ -7718,6 +7720,10 @@ static int run_checker_driver_tests(int argc, char** argv)
         {
             semantic_recovery_only = true;
         }
+        else if (strcmp(argv[i], "--type-sugar-only") == 0)
+        {
+            type_sugar_only = true;
+        }
         else if (strcmp(argv[i], "--lazy-system-headers") == 0)
         {
             lazy = true;
@@ -7736,7 +7742,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             options = false;
         }
     }
-    const uint32_t focuses = (uint32_t)sign_compare_only + (uint32_t)cpu_dispatch_only + (uint32_t)semantic_recovery_only;
+    const uint32_t focuses = (uint32_t)sign_compare_only + (uint32_t)cpu_dispatch_only + (uint32_t)semantic_recovery_only + (uint32_t)type_sugar_only;
     options &= focuses <= 1 && (focuses == 0 || (!lazy && check_driver_part.count == 1));
     // One focused section's alone: the others' gates take `focused` as --sign-compare-only's did.
     const bool focused = focuses != 0;
@@ -8238,6 +8244,10 @@ static int run_checker_driver_tests(int argc, char** argv)
         check_test_driver_statement_recovery(&test, clang, executable != NULL ? executable : "./build/compiler", directory);
         check_test_driver_type_attribute_recovery(&test, clang, executable != NULL ? executable : "./build/compiler", directory);
         check_test_driver_structural_recovery(&test, clang, executable != NULL ? executable : "./build/compiler", directory);
+    }
+    if (temporary && type_sugar_only)
+    {
+        check_test_driver_type_sugar(&test, clang, executable, directory);
     }
     const char* clang_arguments[] = { "-std=gnu17", "-w" };
     if (temporary && !focused && !lazy && check_test_driver_takes())

@@ -501,16 +501,17 @@ static String8 check_driver_warning_type_at(const Parser* parser, Preprocessor* 
             const String8 sugared = contextual ? type_print(types, scratch, type, (String8){ 0 }, &names, options) : (String8){ 0 };
             String8 canonical = { 0 };
             // clang's desugaring stops at a vector type's own typedef, the one whose underlying type is the vector
-            // (desugarForDiagnostic: "People want their vec4"): a typedef of that typedef's a.k.a. is that one's name,
-            // and that one has none. The chain of typedef specifiers from the alias's declaration leads to it.
-            const uint8_t alias_kind = alias_type != 0 ? type_kind(types, type_strip_aligned(types, alias_type)) : 0;
-            uint32_t vector_name = alias_kind == BUSTER_TYPE_KIND_VECTOR || alias_kind == BUSTER_TYPE_KIND_EXT_VECTOR ? spelling : 0;
-            for (uint32_t steps = 0; vector_name != 0 && steps < 64; steps += 1)
+            // (desugarForDiagnostic: "People want their vec4"), at any level (#1447): a typedef of that typedef's
+            // a.k.a. is that one's name, a pointer typedef's (`typedef v4si *pv`) keeps it at the pointee
+            // (`'pv' (aka 'v4si *')`), and that one has none. It is the last vector typedef along the chain of
+            // typedef specifiers from the alias's declaration.
+            uint32_t vector_name = 0;
+            uint32_t chain = alias_type != 0 && spelling != BUSTER_CHECK_NONE ? spelling : 0;
+            for (uint32_t steps = 0; chain != 0 && chain < input->token_count && steps < 64; steps += 1)
             {
-                const uint32_t inner = check_input_typedef_spelling(input, parser, vector_name);
-                const bool same = inner != 0 && inner < input->token_count && input->declared_types[inner] == alias_type;
-                vector_name = same ? inner : vector_name;
-                steps = same ? steps : 64;
+                const uint8_t kind = type_kind(types, type_strip_aligned(types, input->declared_types[chain]));
+                vector_name = kind == BUSTER_TYPE_KIND_VECTOR || kind == BUSTER_TYPE_KIND_EXT_VECTOR ? chain : vector_name;
+                chain = check_input_typedef_spelling(input, parser, chain);
             }
             TypeId vector_type = vector_name != 0 ? input->declared_types[vector_name] : 0;
             const uint32_t vector_identifier = vector_name != 0 ? parser->tokens.names[vector_name] : 0;
