@@ -5328,7 +5328,9 @@ static CheckDriverRound check_driver_rejected_read(const Parser* unit, const Par
                 for (uint32_t t = scopes == NULL ? begin : end; !errored && t < end; t += 1)
                 {
                     const bool left = left_bodies[t] != 0 || (left_parts != NULL && left_parts[t] != 0);
-                    errored = left && unit->tokens.kinds[t] == PARSE_KIND_IDENTIFIER && unit->tokens.names[t] == name;
+                    const uint8_t before = unit->tokens.kinds[t - 1];
+                    errored = left && unit->tokens.kinds[t] == PARSE_KIND_IDENTIFIER && unit->tokens.names[t] == name && before != PARSE_KIND_PERIOD &&
+                              before != PARSE_KIND_ARROW;
                 }
                 arena_pop_to(scratch, scopes_mark);
             }
