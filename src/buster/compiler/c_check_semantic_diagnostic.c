@@ -662,6 +662,32 @@ static uint32_t check_semantic_switch(const Parser* parser, uint32_t close)
 }
 
 // `note`, where the message has one (its message NULL where not): a const variable's "declared const here" (#147).
+// Clang's "forward declaration of 'struct S'" note of an incomplete tag (`bare`, unqualified), at the tag's declaring
+// name: its first token that declares a tag of this type. None for a type of no such name.
+static PPOutputDiagnosticNote check_semantic_forward_note(const Parser* parser, Preprocessor* pp, const CheckInput* input, const TypeTable* types,
+                                                          CheckWarningSpelling* spell, TypeId bare, Arena* scratch)
+{
+    PPOutputDiagnosticNote result = { 0 };
+    const uint8_t kind = bare != 0 ? type_kind(types, bare) : BUSTER_TYPE_KIND_VOID;
+    const bool tag = kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION || kind == BUSTER_TYPE_KIND_ENUM;
+    const uint32_t name = tag ? types->tags.name[types->types.index[type_index(bare)]] : 0;
+    uint32_t declared = BUSTER_CHECK_NONE;
+    for (uint32_t t = 0; name != 0 && declared == BUSTER_CHECK_NONE && t < input->token_count; t += 1)
+    {
+        declared = parser->tokens.names[t] == name && input->declarations[t] == t && input->declaration_kinds[t] == C_BINDING_TAG_KIND &&
+                   type_unqualified(input->declared_types[t]) == bare ? t : BUSTER_CHECK_NONE;
+    }
+    const String8 named = declared != BUSTER_CHECK_NONE ? check_driver_warning_type(parser, pp, input, types, spell, scratch, bare, 0) : (String8){ "", 0 };
+    if (named.length != 0)
+    {
+        result = (PPOutputDiagnosticNote){
+            .token = parser->tokens.sources[declared],
+            .message = check_warning_text(scratch, "forward declaration of %.*s", (int)named.length, named.pointer),
+        };
+    }
+    return result;
+}
+
 static const char* check_semantic_expression(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
                                             const TypeTable* types, const CheckReport* report, CheckWarningSpelling* spell, uint32_t* location,
                                             PPOutputDiagnosticNote* note, Arena* scratch)
@@ -679,6 +705,15 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
     if (report->message == CHECK_MESSAGE_STATIC_ASSERT)
     {
         result = check_semantic_assert(parser, pp, input, report, location, scratch);
+    }
+    else if (report->message == CHECK_MESSAGE_STATIC_INITIALIZER && node < count && graph->tokens[node] == token)
+    {
+        // At clang's culprit (#1447): an initialization's value's, not the initializer's first token. (A report's token is
+        // its node's; the reports' walk's model pairs others, which keep their token.)
+        const bool initialize = op == CHECK_OP_INITIALIZE && operand < count;
+        const uint32_t value = initialize ? operand : node;
+        const TypeId target = initialize && node < stream->count ? check_stream_type(stream, node) : 0;
+        *location = check_init_culprit_at(graph, stream, types, parser, value, token, target);
     }
     else if (report->message == CHECK_MESSAGE_ACTION && node < count)
     {
@@ -742,22 +777,55 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
                     open -= 1;
                 }
                 *location = open;
-                // The tag's declaring name: its first token that declares a tag of this type.
-                const uint32_t name = types->tags.name[types->types.index[type_index(bare)]];
-                uint32_t declared = BUSTER_CHECK_NONE;
-                for (uint32_t t = 0; name != 0 && declared == BUSTER_CHECK_NONE && t < input->token_count; t += 1)
-                {
-                    declared = parser->tokens.names[t] == name && input->declarations[t] == t && input->declaration_kinds[t] == C_BINDING_TAG_KIND &&
-                               type_unqualified(input->declared_types[t]) == bare ? t : BUSTER_CHECK_NONE;
-                }
-                const String8 named = declared != BUSTER_CHECK_NONE ? check_driver_warning_type(parser, pp, input, types, spell, scratch, bare, 0) : (String8){ "", 0 };
-                if (named.length != 0)
-                {
-                    *note = (PPOutputDiagnosticNote){
-                        .token = parser->tokens.sources[declared],
-                        .message = check_warning_text(scratch, "forward declaration of %.*s", (int)named.length, named.pointer),
-                    };
-                }
+                *note = check_semantic_forward_note(parser, pp, input, types, spell, bare, scratch);
+            }
+        }
+        else if (report->diagnostic == CHECK_DIAG_INCOMPLETE && (op == CHECK_OP_SIZEOF || op == CHECK_OP_ALIGNOF) && token < parser->tokens.count &&
+                 graph->tokens[node] == token)
+        {
+            // clang's err_sizeof_alignof_incomplete_or_sizeless_type, named by the keyword as clang spells it (`alignof` for
+            // _Alignof and alignof, `__alignof` for GNU's): a type name's at the keyword, its typedef as written; an
+            // expression's at the expression, its type as the operand's. The tag's "forward declaration" note.
+            const bool expression = operand < stream->count;
+            const TypeId named = expression ? operand_type : graph->types != NULL ? graph->types[node] : 0;
+            uint32_t spelling = expression ? check_semantic_operand_spelling(parser, input, operand) : 0;
+            const uint32_t close = !expression && token + 1 < parser->tokens.count && parser->tokens.kinds[token + 1] == PARSE_KIND_L_PAREN ?
+                                   parser->tree.parents[token + 1] : token;
+            for (uint32_t type_name = token + 2; !expression && spelling == 0 && type_name < close && close < parser->tokens.count; type_name += 1)
+            {
+                const uint32_t resolved = parser->tokens.kinds[type_name] == PARSE_KIND_IDENTIFIER && input->declarations != NULL ? input->declarations[type_name] : 0;
+                spelling = resolved != 0 && resolved < input->token_count && input->declaration_kinds[resolved] == C_BINDING_TYPEDEF ? resolved : 0;
+            }
+            const String8 type = named != 0 ? check_driver_warning_type(parser, pp, input, types, spell, scratch, named, spelling) : (String8){ "", 0 };
+            const uint32_t keyword = parser->tokens.names[token];
+            const char* word = op == CHECK_OP_SIZEOF ? "sizeof" : keyword == C_NAME_ALIGNOF_C11 || keyword == C_NAME_ALIGNOF ? "alignof" : "__alignof";
+            if (type.length != 0)
+            {
+                result = check_warning_text(scratch, "invalid application of '%s' to an incomplete type %.*s", word, (int)type.length, type.pointer);
+                *location = expression ? token + 1 : token;
+                *note = check_semantic_forward_note(parser, pp, input, types, spell, type_unqualified(type_strip_aligned(types, named)), scratch);
+            }
+        }
+        else if (report->diagnostic == CHECK_DIAG_CALL && op == CHECK_OP_CALL && operand_type != 0 && graph->tokens[node] == token)
+        {
+            // clang's err_typecheck_call_not_function at the call's `(`, the callee's type as written once loaded: without
+            // its qualifiers and _Atomic, so that a typedef's name stays only where it is the loaded type (`const T`'s T,
+            // not a `const int` typedef's; review on #1802). An array's or function's qualifiers are its elements', which
+            // lvalue-to-rvalue never reaches (clang's DefaultLvalueConversion decays first), so they stay.
+            const uint8_t callee_kind = check_action_kind(types, operand_type);
+            const bool decays = type_kind_is_array(callee_kind) || callee_kind == BUSTER_TYPE_KIND_FUNCTION;
+            const TypeId plain = decays ? operand_type : type_unqualified(operand_type);
+            const TypeId loaded = !decays && type_kind(types, plain) == BUSTER_TYPE_KIND_ATOMIC ? type_unqualified(types->types.base[type_index(plain)]) : plain;
+            const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, loaded, check_semantic_operand_spelling(parser, input, operand));
+            uint32_t open = token;
+            while (open != 0 && open < parser->tokens.count && !(parser->tokens.kinds[open] == PARSE_KIND_L_PAREN && parser->tree.parents[open] == token))
+            {
+                open -= 1;
+            }
+            if (type.length != 0)
+            {
+                result = check_warning_text(scratch, "called object type %.*s is not a function or function pointer", (int)type.length, type.pointer);
+                *location = open;
             }
         }
         else if (report->diagnostic == CHECK_DIAG_LVALUE_REQUIRED &&
