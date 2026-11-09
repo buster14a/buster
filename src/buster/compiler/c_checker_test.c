@@ -3160,9 +3160,18 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
             false
         },
         {
-            // Its alignment applied after its body, which the enum's completion at its base came before: refused.
+            // Its alignment applied after its body, which the enum's completion at its base came before (#1447): clang's,
+            // where nothing asked the enum's layout first.
             "fixed enum: aligned after its body",
-            "enum F : char { B } __attribute__((aligned(8)));\n",
+            "enum F : char { B } __attribute__((aligned(8)));\n"
+            "_Static_assert(sizeof(enum F) == 1 && _Alignof(enum F) == 8, \"F\");\n",
+            false,
+            false
+        },
+        {
+            // One whose body names it, which may have asked its layout, which clang memoizes before the attribute: refused.
+            "fixed enum: aligned after a body that names it",
+            "enum G : char { C = sizeof(enum G) } __attribute__((aligned(8)));\n",
             true,
             true
         },

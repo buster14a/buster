@@ -497,6 +497,10 @@ prints `_Bool` in C17 and `bool` with `BUSTER_TYPE_PRINT_C23`, as clang does in
 each mode. Two things it can't spell as clang does: a variable array's size
 expression (it prints `[]`, and `[*]` for `[*]`) and an anonymous tag's
 location (it prints `(unnamed)` where clang names the file and line).
+A qualified array whose element a sugar alias names with those qualifiers
+leaves them to the element (`type_print_element_qualifiers`, #1447): clang's
+array type keeps `CI arr[2]`'s qualifiers on its element, so it prints
+`CI[2]`, not `const int[2]`.
 
 Extended qualifiers print after const, volatile and restrict, as clang's
 `Qualifiers::print` has them (#1447): a target's space as its attribute
