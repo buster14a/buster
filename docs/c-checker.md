@@ -4378,19 +4378,35 @@ recovery applies where:
   keyword's type, or a tag's, typedef name's or `typeof`'s type that the
   dropped token didn't replace.
 
-A _Complex the type doesn't take is dropped at the list's end too, where the
-reader checks it (`_Complex _Bool` is a `_Bool`). Still stopping the reader:
+A `_Complex` the type doesn't take is dropped at the list's end too, where the
+reader checks it (`_Complex _Bool` is a `_Bool`), with every `_Complex` of the
+list, as `DeclSpec::Finish` unsets the slot. That holds after a type of no
+keyword too (`typeof(_Bool) _Complex`, `struct S _Complex`).
 
-- a list with a second error (`int float char x;`, where clang reports both);
+The operand readers recover the same way. A `typeof`'s or an `_Atomic`'s type
+name (`check_constant_specifiers`) and an enum's fixed underlying type
+(`check_input_enum_underlying`) are read again without the dropped specifier
+(`check_input_specifiers_dropped`). So `typeof(_Complex _Bool)` is a `_Bool`
+and `enum E : long float` a `long`.
+
+An error of the list's end (a sign, a width or a `_Complex` the type doesn't
+take) is published at the token after the list. It comes after the list's
+repeated specifiers' warnings, in clang's discovery order:
+`_Complex _Complex _Bool` warns, then errs.
+
+Still stopping the reader:
+
+- a list with a second error (`int float char x;`, `_Complex _Bool int y;`,
+  `unsigned float unsigned x;`), where clang reports both;
 - a storage class's conflict;
 - a second type specifier that is no keyword (`int typeof(int)`, `int _BitInt(8)`,
   `int _Atomic(int)`, `int struct S`), whose state the slots can't rebuild.
 
-`_Complex _Complex _Bool` gives its warning and error in source order, where
-clang gives them in its discovery order. Error-free lists never reach this. The semantic-recovery fixtures cover
-each kind at file scope, in a body, a parameter, a cast, `sizeof` and a member,
-and a repeated `_Complex`'s warning, "duplicate 'complex' declaration
-specifier" in clang's words.
+Error-free lists never reach this. The semantic-recovery fixtures cover each
+kind at file scope, in a body, a parameter, a cast, `sizeof`, a member, a
+`typeof`, an `_Atomic` and an enum's base. They also cover a repeated
+`_Complex`'s warning, "duplicate 'complex' declaration specifier" in clang's
+words. The operand readers give no duplicate-specifier warning (#1836).
 
 Type attributes' errors don't stop the reader either (`check_input_attribute_type`).
 What clang 23 does with each is followed:

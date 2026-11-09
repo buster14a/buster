@@ -546,7 +546,7 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "int plain = undeclared_var;\nstruct S;\n_Complex _Complex struct S y5;\nint float y6;\nenum E5 : _Complex _Bool { A5 };\n",
         // The operand readers in a body, a cast, sizeof, a parameter and a member, and a list's end's errors after its
         // repeated specifiers' warnings. (No error that stops the reader: after a parameter's recovered error, one drops
-        // the later bodies' warnings, as an attribute's recovered error in a parameter does on main.)
+        // the later bodies' warnings, #1835.)
         "int f(typeof(_Complex _Bool) p, _Atomic(int float) q) { typeof(_Complex _Bool) a = 1; _Atomic(long float) b = 2;\n"
         "  return (int)(typeof(int float))a + sizeof(typeof(unsigned float)) + p + q + b; }\n"
         "struct T { typeof(long float) m; _Atomic(_Complex _Bool) n; } t;\nenum E1 : long float { A1 };\nenum E3 : int char { A3 };\n"
