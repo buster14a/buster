@@ -1214,9 +1214,16 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
             result = "body of cpu_dispatch function will be ignored";
             break;
         case CHECK_WARNING_EVENT_ADDRESS_SPACE_DEPRECATED:
-            // (clang's message quotes the quoted name again.)
-            result = check_warning_text(scratch, "''%.*s'' attribute is deprecated and may be removed in a future version of Clang", (int)name.length, name.pointer);
+        {
+            // (clang's message quotes the quoted name again; a C23 one's with its scope, #1447.)
+            const bool standard = (payload->data & BUSTER_CHECK_WARNING_STANDARD_ATTRIBUTE) != 0;
+            const uint32_t scope_name = payload->data & ~BUSTER_CHECK_WARNING_STANDARD_ATTRIBUTE;
+            const String8 scope = scope_name != 0 ? check_warning_attribute_scope(check_driver_warning_name(pp, scope_name)) : (String8){ "", 0 };
+            const String8 attribute = standard ? check_warning_attribute_name(name, scope, true) : name;
+            result = check_warning_text(scratch, "''%.*s%s%.*s'' attribute is deprecated and may be removed in a future version of Clang", (int)scope.length,
+                                        scope.pointer, scope.length != 0 ? "::" : "", (int)attribute.length, attribute.pointer);
             break;
+        }
         case CHECK_WARNING_EVENT_ADDRESS_SPACE_IDENTICAL:
             result = "multiple identical address spaces specified for type";
             break;
