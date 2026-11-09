@@ -19,18 +19,30 @@ struct CheckConstantError
     uint64_t value;
     uint32_t note_token;
     uint8_t note_kind;
+    // The token before which the type's typedef spelling is looked for (check_input_typedef_spelling), or 0 for the
+    // caller's: a sizeof's operand's, which clang names as written (`sizeof(Outer)`'s 'Outer' (aka 'struct T')).
+    uint32_t spelling;
 };
 
-// The declaration of the tag of `type` (a struct, union or enum, its qualifiers and alignment aside) that names it, or
-// BUSTER_CHECK_NONE: clang's "forward declaration of" note's place.
+// The first token that declares the tag of `type` (a struct, union or enum, its qualifiers and alignment aside), or
+// BUSTER_CHECK_NONE: clang's "forward declaration of" note's place. It is the type's own declaration, not the name's
+// visible one, which an inner definition may shadow (`typedef struct T Outer;` read past a block's `struct T { ... }`,
+// review on #1900), as check_semantic_forward_note's; an error's path alone scans for it.
 static uint32_t check_constant_failure_tag(CheckInputReader* reader, TypeId type)
 {
-    const TypeId bare = type != 0 ? type_strip_aligned(reader->types, type) : 0;
+    const CheckInput* input = reader->output;
+    const Parser* parser = reader->parser;
+    const TypeId bare = type != 0 ? type_unqualified(type_strip_aligned(reader->types, type)) : 0;
     const uint8_t kind = bare != 0 ? type_kind(reader->types, bare) : 0;
     const bool tagged = kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION || kind == BUSTER_TYPE_KIND_ENUM;
     const uint32_t name = tagged ? reader->types->tags.name[reader->types->types.index[type_index(bare)]] : 0;
-    const uint32_t binding = name != 0 ? c_bindings_lookup(&reader->bindings, C_BINDING_TAG, name) : 0;
-    return binding != 0 ? reader->bindings.declaration[binding - 1] : BUSTER_CHECK_NONE;
+    uint32_t declared = BUSTER_CHECK_NONE;
+    for (uint32_t t = 0; name != 0 && declared == BUSTER_CHECK_NONE && t < parser->tokens.count; t += 1)
+    {
+        declared = parser->tokens.names[t] == name && input->declarations[t] == t && reader->declaration_kinds[t] == C_BINDING_TAG_KIND &&
+                   type_unqualified(reader->declared_types[t]) == bare ? t : BUSTER_CHECK_NONE;
+    }
+    return declared;
 }
 
 static CheckConstantError check_constant_failure_error(CheckInputReader* reader, const CheckConstantFailure* failure, uint32_t token)
@@ -74,6 +86,8 @@ static CheckConstantError check_constant_failure_error(CheckInputReader* reader,
     // A member's name follows its operator, where clang reports a missing member and `->` of no pointer.
     const bool named = result.error == CHECK_ARGUMENT_EXPRESSION_MEMBER_NAME || result.error == CHECK_ARGUMENT_EXPRESSION_ARROW_POINTER;
     result.token = named && token + 1 < count && parser->tokens.kinds[token + 1] == PARSE_KIND_IDENTIFIER ? token + 1 : token;
+    const uint32_t operand = size && token + 1 < count && parser->tokens.kinds[token + 1] == PARSE_KIND_L_PAREN ? parser->tree.parents[token + 1] : 0;
+    result.spelling = operand > token && operand < count ? operand : 0;
     if ((size && (record || kind == BUSTER_TYPE_KIND_ENUM)) || arithmetic)
     {
         result.note_token = check_constant_failure_tag(reader, arithmetic ? pointee : type);
@@ -129,7 +143,7 @@ static void check_input_constant_failure_report(CheckInputReader* reader, const 
         report->attribute = mapped.token;
         report->type = mapped.type;
         report->value = mapped.value;
-        report->type_spelling = check_input_typedef_spelling(reader->output, parser, first);
+        report->type_spelling = check_input_typedef_spelling(reader->output, parser, mapped.spelling != 0 ? mapped.spelling : first);
         report->note_token = mapped.note_token;
         report->note_kind = mapped.note_kind;
     }
@@ -180,7 +194,7 @@ static bool check_input_attribute_expression(CheckInputReader* reader, CheckInpu
                 CheckInputReport* report = reader->output->reports + before;
                 report->type = mapped.type;
                 report->value = mapped.value;
-                report->type_spelling = check_input_typedef_spelling(reader->output, parser, first);
+                report->type_spelling = check_input_typedef_spelling(reader->output, parser, mapped.spelling != 0 ? mapped.spelling : first);
                 report->note_token = type_tail ? open : mapped.note_token;
                 report->note_kind = type_tail ? CHECK_INPUT_NOTE_MATCH_PAREN : mapped.note_kind;
             }
