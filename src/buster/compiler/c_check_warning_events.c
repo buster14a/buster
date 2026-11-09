@@ -118,6 +118,8 @@ enum
     // statement increment or decrement (#1447, clang's CheckForLoopConditionalStatement and CheckForRedundantIteration):
     // -Wfor-loop-analysis, off by default, under -Wloop-analysis and -Wmost and so -Wall.
     CHECK_WARNING_ID_FOR_LOOP_ANALYSIS = 110,
+    // A tag a prototype's parameter list declares first (#1447, clang's ActOnTag): -Wvisibility, on by default.
+    CHECK_WARNING_ID_VISIBILITY = 111,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -362,6 +364,12 @@ typedef enum CheckWarningEventKind
     // payload.first_type and second_type its operands' types as clang's getEnumCoercedType gives them, payload.name and
     // data their typedef spellings (0 for none). check_common_enum_arithmetic reports it as the graph's operators.
     CHECK_WARNING_EVENT_ENUM_MIX,
+    // A tag a prototype's parameter list (or an old-style definition's declarations) declares first, which no declaration
+    // outside it names (#1447, -Wvisibility): at its name, an unnamed enum's keyword; payload.first_type the tag's type.
+    CHECK_WARNING_EVENT_PROTOTYPE_TAG,
+    // A tag a prototype's list defines again (#1447, -Wvisibility): at its name, payload.name the name, with a
+    // CHECK_WARNING_NOTE_PREVIOUS_DEFINITION at the earlier definition.
+    CHECK_WARNING_EVENT_PROTOTYPE_REDEFINITION,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
 

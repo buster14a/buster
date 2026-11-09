@@ -733,6 +733,15 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
                 (int)name.length, name.pointer, (int)type.length, type.pointer) : NULL;
             break;
         }
+        case CHECK_WARNING_EVENT_PROTOTYPE_TAG:
+        {
+            const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, payload->first_type, 0);
+            result = type.length != 0 ? check_warning_text(scratch, "declaration of %.*s will not be visible outside of this function", (int)type.length, type.pointer) : NULL;
+            break;
+        }
+        case CHECK_WARNING_EVENT_PROTOTYPE_REDEFINITION:
+            result = check_warning_text(scratch, "redefinition of '%.*s' will not be visible outside of this function", (int)name.length, name.pointer);
+            break;
         case CHECK_WARNING_EVENT_LIBRARY_REDECLARATION:
             result = check_warning_text(scratch, "incompatible redeclaration of library function '%.*s'", (int)name.length, name.pointer);
             break;
