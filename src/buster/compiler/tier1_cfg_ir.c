@@ -21,6 +21,7 @@
 //   register.
 // - Registers: every general register but rsp and r11, the scratch; xmm0 to xmm14, xmm15 the scratch; k1 to k7, k0
 //   the scratch (it can't be a write mask).
+// - Slot widths by type (tier1_cfg_ir_width), so that a phi web's spilled values share a slot as Tier 1's do (#1216).
 //
 // This is test and measurement tooling outside the compile path, with no vector path of its own.
 
@@ -80,6 +81,29 @@ static uint32_t tier1_cfg_ir_class(uint8_t type)
         class = BUSTER_TIER1_ALLOCATE_MASK;
     }
     return class;
+}
+
+// A value's slot bytes under the model, which a phi web shares a slot at (tier1_cfg_share_slots, #1216).
+static uint8_t tier1_cfg_ir_width(uint8_t type)
+{
+    uint8_t width = 8;
+    if (type == IR_I1 || type == IR_I8 || type == IR_M8)
+    {
+        width = 1;
+    }
+    else if (type == IR_I16 || type == IR_M16)
+    {
+        width = 2;
+    }
+    else if (type == IR_I32 || type == IR_F32 || type == IR_M32)
+    {
+        width = 4;
+    }
+    else if (type == IR_V4I32 || type == IR_V8I32 || type == IR_V16I32)
+    {
+        width = type == IR_V4I32 ? 16 : type == IR_V8I32 ? 32 : 64;
+    }
+    return width;
 }
 
 // Each class's registers instruction i clobbers between its uses and its result: a call every caller-saved one (all of
@@ -200,6 +224,7 @@ static Tier1CfgIrStatus tier1_cfg_from_ir(const IrFunction* function, Arena* are
     uint32_t* allowed = ready ? arena_push_array(arena, (uint64_t)value_count + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
     uint32_t* definitions = ready ? arena_push_array(arena, (uint64_t)value_count + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
     uint8_t* rematerializable = ready ? arena_push(arena, (uint64_t)value_count + 1, 1) : 0;
+    uint8_t* slot_widths = ready ? arena_push(arena, (uint64_t)value_count + 1, 1) : 0;
     uint32_t* use_offsets = ready ? arena_push_array(arena, (uint64_t)value_count + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
     uint32_t* use_positions = ready ? arena_push_array(arena, (uint64_t)use_count + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
     uint8_t* use_required = ready ? arena_push(arena, (uint64_t)use_count + 1, 1) : 0;
@@ -215,7 +240,7 @@ static Tier1CfgIrStatus tier1_cfg_from_ir(const IrFunction* function, Arena* are
     uint32_t* fixed_ends = ready ? arena_push_array(arena, (uint64_t)fixed_count + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
     uint32_t* fixed_registers = ready ? arena_push_array(arena, (uint64_t)fixed_count + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
     uint8_t* fixed_classes = ready ? arena_push(arena, (uint64_t)fixed_count + 1, 1) : 0;
-    ready = ready && classes != 0 && allowed != 0 && definitions != 0 && rematerializable != 0 && use_offsets != 0 && use_positions != 0 && use_required != 0 && successor_offsets != 0 && successors != 0 && predecessor_offsets != 0 && predecessors != 0 && phi_offsets != 0 && phi_values != 0 && phi_operand_offsets != 0 && phi_operands != 0 && fixed_starts != 0 && fixed_ends != 0 && fixed_registers != 0 && fixed_classes != 0;
+    ready = ready && classes != 0 && allowed != 0 && definitions != 0 && rematerializable != 0 && slot_widths != 0 && use_offsets != 0 && use_positions != 0 && use_required != 0 && successor_offsets != 0 && successors != 0 && predecessor_offsets != 0 && predecessors != 0 && phi_offsets != 0 && phi_values != 0 && phi_operand_offsets != 0 && phi_operands != 0 && fixed_starts != 0 && fixed_ends != 0 && fixed_registers != 0 && fixed_classes != 0;
     status = ready || status != TIER1_CFG_IR_OK ? status : TIER1_CFG_IR_MEMORY;
     if (ready)
     {
@@ -230,6 +255,7 @@ static Tier1CfgIrStatus tier1_cfg_from_ir(const IrFunction* function, Arena* are
                 allowed[v] = tier1_cfg_ir_registers(classes[v]);
                 definitions[v] = definitions_of[i];
                 rematerializable[v] = tier1_cfg_ir_rematerializable(function->op[i]);
+                slot_widths[v] = tier1_cfg_ir_width(function->type[i]);
                 use_offsets[v] = use;
                 for (uint32_t u = uses.offsets[i]; u < uses.offsets[i + 1]; u += 1)
                 {
@@ -338,6 +364,7 @@ static Tier1CfgIrStatus tier1_cfg_from_ir(const IrFunction* function, Arena* are
             .allowed_registers = allowed,
             .definitions = definitions,
             .rematerializable = rematerializable,
+            .slot_widths = slot_widths,
             .use_offsets = use_offsets,
             .use_positions = use_positions,
             .use_required = use_required,

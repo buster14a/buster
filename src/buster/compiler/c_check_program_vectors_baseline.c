@@ -16,7 +16,9 @@ struct CheckVectorBaseline
 
 #define BUSTER_CHECK_BASE_PACKED(context, name) ((context)->bytes > 16 ? X86_FORM_V##name##_Y_Y_YM256 : \
                                                 (context)->avx ? X86_FORM_V##name##_X_X_XM128 : X86_FORM_##name##_X_XM128)
-// A unary form by its 16-byte operands (`x`) and 32-byte ones (`y`).
+// A unary form by its 16-byte operands (`x`) and 32-byte ones (`y`). This and BUSTER_CHECK_BASE_PACKED stay defined past
+// this file, for c_check_program_vector_builtins.c's conversion rows, which c_check_program_lower.c includes after it and
+// which undefines them at its end.
 #define BUSTER_CHECK_BASE_UNARY(context, name, x, y) ((context)->bytes > 16 ? X86_FORM_V##name##_##y : \
                                                      (context)->avx ? X86_FORM_V##name##_##x : X86_FORM_##name##_##x)
 
