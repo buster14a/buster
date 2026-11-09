@@ -1785,7 +1785,6 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .warnings = 3,
         .notes = 1,
     },
-    },
     {
         // A C23 parameter list's compatible redefinition of its own record (#1869) declares the first's type: the body
         // reads both parameters and a pointer to it as one type, compiled on every path.
