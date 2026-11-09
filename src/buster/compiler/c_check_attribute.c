@@ -1587,19 +1587,22 @@ static uint32_t check_input_unevaluated_refused(CheckInputReader* reader, uint32
         strings = parser->tokens.kinds[token] == PARSE_KIND_STRING;
     }
     uint32_t refused = BUSTER_CHECK_NONE;
+    // (Whether a token has a prefix or an escape, which alone may have the warnings below: most have neither.)
+    bool notable = false;
     for (uint32_t token = first; strings && refused == BUSTER_CHECK_NONE && token < last; token += 1)
     {
         const uint64_t mark = reader->scratch->length;
         const uint8_t* bytes = NULL;
         uint32_t length = 0;
         const bool spelled = check_input_spelling(reader, token, &bytes, &length);
+        notable |= spelled && length != 0 && (bytes[0] != '"' || memchr(bytes, '\\', length) != NULL);
         bool had_error = false;
         refused = spelled && check_literal_unevaluated_escapes(bytes, length, reader->pp != NULL && reader->pp->options.language.standard >= 2023, false, NULL, &had_error) != 0 ? token : BUSTER_CHECK_NONE;
         arena_pop_to(reader->scratch, mark);
     }
     // Each encoding prefix's -Winvalid-unevaluated-string warning (#1447), once though a list may be read again; a literal
     // clang refuses has them from the driver, before its escapes' (check_driver_escapes).
-    for (uint32_t token = first; strings && refused == BUSTER_CHECK_NONE && token < last; token += 1)
+    for (uint32_t token = first; notable && refused == BUSTER_CHECK_NONE && token < last; token += 1)
     {
         const uint64_t mark = reader->scratch->length;
         const uint8_t* bytes = NULL;
@@ -1625,7 +1628,7 @@ static uint32_t check_input_unevaluated_refused(CheckInputReader* reader, uint32
     // -pedantic's warnings of the delimited and named escapes of a literal clang takes (#1447), once each token though a
     // list may be read again: the driver's of one it refuses (check_driver_escape).
     bool had_error = false;
-    for (uint32_t token = first; strings && refused == BUSTER_CHECK_NONE && token < last; token += 1)
+    for (uint32_t token = first; notable && refused == BUSTER_CHECK_NONE && token < last; token += 1)
     {
         const uint64_t mark = reader->scratch->length;
         const uint8_t* bytes = NULL;
