@@ -4057,8 +4057,14 @@ do:
   Left as they were: `-Wno-odr` doesn't turn the `-Wodr` errors off. An enum
   defined again under C23 still refuses with the generic error, which stops
   the reader. Clang compares its enumerators, and keeps both lists' names in
-  scope with ambiguous references. An `_Atomic(struct { ... })` member is the
-  parser's refusal, with or without a redefinition.
+  scope with ambiguous references.
+
+  A tag defined in an `_Atomic(...)` or a `typeof(...)` specifier
+  (`_Atomic(struct S { int a; }) m;`, `typeof(_Atomic(struct S { ... }))`) is
+  read before the specifiers, as a declaration's own definition is
+  (`check_input_specifier_definition` goes on into each group, #1447), in a
+  declaration, a member, a parameter, a typedef and a type name; it used to be
+  the reader's generic refusal.
 - **A repeated enumerator** gives "redefinition of enumerator 'A'" with its
   note at the earlier one, and is dropped (`CheckTagFrame.dropped`). As in
   clang, whose next `CheckEnumConstant` sees no previous constant, the next

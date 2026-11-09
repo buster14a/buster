@@ -586,6 +586,17 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         // A parameter's bound past its `static` and qualifiers (review on #1819).
         "void f(int a[static 0x2000000000000000]);\n",
         "void g(int a[const volatile 0x2000000000000000]);\n",
+        // A tag defined in an _Atomic's or a typeof's type name (#1447), nested too, read before the specifiers: at file
+        // scope, in members, blocks, typedefs and type names, its type usable after it; the unit's error is a later one.
+        "_Atomic(struct A { int a; char c; }) m;\n_Atomic(union U { int a; float f; }) u;\n_Atomic(enum E { E1, E2 }) e;\n"
+        "typeof(struct T { long t[3]; }) const t;\ntypedef _Atomic(struct B { long b; }) AB;\n"
+        "typeof(_Atomic(struct Z { short z; })) zz;\n_Static_assert(sizeof zz == 2 && _Alignof(_Atomic(struct A)) == 8, \"\");\n"
+        "struct H { _Atomic(struct I { int i; }) inner; typeof(struct J { char j; }) jj; };\n"
+        "int f(void) { _Atomic(struct L { int l; }) x; typeof(struct M { int m; }) y = {1}; "
+        "return sizeof(_Atomic(struct N { int n; })) + (int)sizeof(typeof(struct O { int o; })) + y.m + E2; }\n"
+        "int g(void) { return sizeof(struct A) + sizeof(struct I) + sizeof(enum E) + sizeof(struct J) + t.t[1] + missing; }\n",
+        "const _Atomic(struct A { int a; }) *p, q;\n_Atomic(struct A) r;\nint k(void) { int unused; return (int)sizeof(*p) + undeclared; }\n"
+        "void l(void) { for (_Atomic(struct F { int f; }) i;;) { (void)i; break; } int quiet; }\n",
         // A tag defined again in its scope, whose body becomes an anonymous tag's: later uses of the name find the first
         // definition, and the second's enumerators are still declared (a repeated one with its own note).
         "struct S { int a; };\nstruct S { long b; };\nunion U { int a; };\nunion U { char c; } u2;\n"
