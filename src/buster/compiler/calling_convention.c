@@ -215,8 +215,9 @@ _Static_assert(sizeof(AbiVaList) == 24, "the psABI's va_list element is 24 bytes
 //     value LLVM splits into more parts than a location holds, as no class says (abi_value_splits: an _Atomic vector
 //     wider than 16 bytes and than the target's vector registers, or one LLVM breaks into its elements, and an integer
 //     of more than 128 bits); a type holding a LARGER one that clang lays out otherwise than the C type, or whose LLVM
-//     size the module doesn't keep (abi_copy_bytes); and one whose INTEGER high eightbyte clang reads as an i128 from
-//     offset 8, under an SSE or NO_CLASS low one (abi_finish).
+//     size the module doesn't keep (abi_copy_bytes); one whose INTEGER high eightbyte clang reads as an i128 from
+//     offset 8, under an SSE or NO_CLASS low one (abi_finish); and an aggregate SSE, SSEUP of a size no vector register
+//     has, which clang passes as <size / 8 x double> (abi_finish_passing).
 //   - CLASSIFIED: the type's row and these bits are in the table.
 //   - VALUE (bits 16 to 18): an UNCOUNTED value's kind: a general register (GENERAL), two (PAIR), a vector register
 //     (VECTOR), x87's, always on the stack (X87), or two halves, each in a general register while one is left and
@@ -1003,8 +1004,18 @@ static uint8_t abi_bit_field_run(const AbiTable* abi, const TypeTable* table, ui
     return result;
 }
 
-// The record larger than 16 bytes (without a flexible array member) that a type is, or is an array, an aligned typedef
-// or an _Atomic type of, or 0: what a zero-length array holds that the table keeps no storage for.
+// Whether a type index is a record whose storage the table doesn't keep (abi_storage: INEXACT), which
+// abi_wide_alignment walks: one larger than 16 bytes, or one with a flexible array member and a size.
+static bool abi_is_wide(const TypeTable* table, uint32_t index)
+{
+    const uint8_t kind = table->types.kind[index];
+    const uint64_t size = table->types.size[index];
+    const bool flexible = (table->types.flags[index] & BUSTER_TYPE_FLAG_FLEXIBLE) != 0;
+    return (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION) && (size > BUSTER_ABI_REGISTER_BYTES || (flexible && size != 0));
+}
+
+// The record larger than 16 bytes, or with a flexible array member and a size, that a type is, or is an array, an
+// aligned typedef or an _Atomic type of, or 0: what a zero-length array holds that the table keeps no storage for.
 static uint32_t abi_wide_record(const TypeTable* table, TypeId type)
 {
     uint32_t index = type >> BUSTER_TYPE_INDEX_SHIFT;
@@ -1013,10 +1024,7 @@ static uint32_t abi_wide_record(const TypeTable* table, TypeId type)
     {
         index = table->types.base[index] >> BUSTER_TYPE_INDEX_SHIFT;
     }
-    const uint8_t kind = table->types.kind[index];
-    const bool wide = (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION) && table->types.size[index] > BUSTER_ABI_REGISTER_BYTES &&
-                      (table->types.flags[index] & BUSTER_TYPE_FLAG_FLEXIBLE) == 0;
-    return wide ? index : 0;
+    return abi_is_wide(table, index) ? index : 0;
 }
 
 // abi_wide_alignment's flag for a walk that read the storage of a type not classified yet.
@@ -1057,8 +1065,9 @@ static void abi_wide_fold(const TypeTable* table, AbiWideFrame* frame, uint32_t 
     frame->inexact = frame->inexact || (storage & BUSTER_ABI_STORAGE_INEXACT) != 0;
 }
 
-// The storage of clang's LLVM type of a record larger than 16 bytes, which AbiTable.storage doesn't keep (abi_storage's
-// for it, but the i128 and EMPTY): the log2 of its alignment, a struct's members' largest storage alignment (a
+// The storage of clang's LLVM type of a record larger than 16 bytes, or with a flexible array member and a size, which
+// AbiTable.storage doesn't keep (abi_storage's for it, but the i128 and EMPTY; a flexible array member is an array of
+// none of its element): the log2 of its alignment, a struct's members' largest storage alignment (a
 // bit-field's run's unit's past an eightbyte, abi_bit_field_run) and a union's most aligned member's
 // (abi_member_storage's), unless a struct's member is off its own or the size isn't a multiple of it (determinePacked:
 // 1); and INEXACT if a member's storage is, or for a struct's bit-field run of an eightbyte or less. A member that holds
@@ -1102,10 +1111,13 @@ __attribute__((cold, noinline)) static uint32_t abi_wide_alignment(const AbiTabl
         const uint32_t tag = table->types.index[frame->index];
         const uint32_t end = table->tags.member_begin[tag] + table->tags.member_count[tag];
         const bool in_union = table->types.kind[frame->index] == BUSTER_TYPE_KIND_UNION;
+        // A flexible array member, the last, is an array of no elements of its element: the element's storage, walked
+        // when it is a record the table keeps none for, and its element what must be classified.
+        const uint32_t open = (table->types.flags[frame->index] & BUSTER_TYPE_FLAG_FLEXIBLE) != 0 ? end - 1 : UINT32_MAX;
         if (frame->member < end)
         {
             const uint32_t member = frame->member;
-            const TypeId type = table->members.type[member];
+            const TypeId type = member == open ? table->types.base[abi_resolved_index(table, table->members.type[member])] : table->members.type[member];
             const bool bit_field = (table->members.flags[member] & BUSTER_TYPE_MEMBER_BIT_FIELD) != 0;
             const uint32_t wide = bit_field ? 0 : abi_wide_record(table, type);
             frame->member += 1;
@@ -1135,7 +1147,8 @@ __attribute__((cold, noinline)) static uint32_t abi_wide_alignment(const AbiTabl
                 const bool in_run = !in_union && bit_field;
                 frame->run_storage = in_run && member >= frame->run_end ? abi_bit_field_run(abi, table, member, end, table->types.size[frame->index], &frame->run_end)
                                                                         : frame->run_storage;
-                const uint8_t storage = in_run && frame->run_storage != UINT8_MAX ? frame->run_storage : abi_member_storage(abi, table, member, in_union, false, &bytes);
+                const uint8_t storage =
+                    in_run && frame->run_storage != UINT8_MAX ? frame->run_storage : abi_member_storage(abi, table, member, in_union, member == open, &bytes);
                 const uint8_t alignment = storage & BUSTER_ABI_STORAGE_ALIGNMENT;
                 ready = ready && (abi->pass[type >> BUSTER_TYPE_INDEX_SHIFT] & BUSTER_ABI_PASS_CLASSIFIED) != 0;
                 frame->largest = alignment > frame->largest ? alignment : frame->largest;
@@ -1217,7 +1230,7 @@ static uint32_t abi_union_storage_member(const AbiTable* abi, const TypeTable* t
 // no elements (a zero-length array, or a flexible array member: abi_open_storage), whose storage is the record's LLVM
 // type's (clang keeps the array in its LLVM type, [0 x %struct.big]), walked when the array is finished
 // (abi_wide_alignment); and it is never EMPTY, which takes a size of 0. So does a record with a flexible array member
-// and a size, MEMORY, its members maybe not classified yet; one of no size waits for them, since an _Atomic of it takes
+// and a size, MEMORY, its members maybe not classified yet, which the walk takes as it takes a larger one; one of no size waits for them, since an _Atomic of it takes
 // its alignment as its LLVM size (abi_copy_bytes). A type aligned past the 2^15 the storage holds is INEXACT too (LLVM
 // aligns a vector as large as itself, so one of 64 KB or more), and so is a record holding an INEXACT type. A struct
 // with a bit-field run of an eightbyte or less is INEXACT until its unit is modeled. A wide _BitInt is an integer
@@ -3113,8 +3126,7 @@ static bool abi_schedule_wide(const TypeTable* table, TypeId type)
         kind = table->types.kind[index];
         wrapper = kind == BUSTER_TYPE_KIND_ARRAY || kind == BUSTER_TYPE_KIND_ALIGNED || kind == BUSTER_TYPE_KIND_QUALIFIED || kind == BUSTER_TYPE_KIND_ATOMIC;
     }
-    const bool record = kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION;
-    return wrapper || (record && table->types.size[index] > BUSTER_ABI_REGISTER_BYTES && (table->types.flags[index] & BUSTER_TYPE_FLAG_FLEXIBLE) == 0);
+    return wrapper || abi_is_wide(table, index);
 }
 
 // Topological levels for pending types after the bounded scan prefix. Unlike ABI pass bits, these levels include

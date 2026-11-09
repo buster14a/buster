@@ -8043,6 +8043,12 @@ static void check_lower_varargs_prepare(CheckLowerWriter* writer, uint32_t node)
     {
         check_lower_unsupported(writer, check_lower_passed(writer, requested));
     }
+    else if (argument && !microsoft && (writer->abi_table->pass[type_index(requested)] & BUSTER_ABI_PASS_UNSUPPORTED) != 0)
+    {
+        // What the module doesn't place as clang does, which a call refuses too: a record SSE, SSEUP of a size no vector
+        // register has, whose va_arg clang reads from the save area as <size / 8 x double>, is one.
+        check_lower_unsupported(writer, "va_arg of this type (its calling convention)");
+    }
     else
     {
         const uint32_t index = writer->varargs_count++;

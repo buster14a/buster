@@ -621,7 +621,7 @@ static AbiClasses abi_test_classify(const TypeTable* table, uint32_t vector_byte
 #define BUSTER_ABI_TEST_XMM(n) (BUSTER_ABI_REGISTER_VECTOR | (n))
 #define BUSTER_ABI_TEST_ST(n) (BUSTER_ABI_REGISTER_X87 | (n))
 #define BUSTER_ABI_TEST_NONE BUSTER_ABI_REGISTER_NONE
-#define BUSTER_ABI_TEST_FIXTURES 256
+#define BUSTER_ABI_TEST_FIXTURES 320
 // A result kind the fixture doesn't check: an UNSUPPORTED type's, which the code generator refuses.
 #define BUSTER_ABI_TEST_RESULT_ANY 0xff
 
@@ -1350,6 +1350,44 @@ static void abi_test_build_records(AbiTestBuilder* builder)
     m[1] = abi_test_member(builder, tail80);
     abi_test_in_registers(builder, "union {__int128, {long, long, {__int128, char[64]}[0]}}", abi_test_record(builder, BUSTER_TYPE_KIND_UNION, m, 2, false, 0),
                           BUSTER_ABI_TEST_INTEGERS, BUSTER_ABI_PASS_PAIR, 0, rax, rdx);
+    // And with a record that has a flexible array member and a size, whose storage the table doesn't keep: the walk takes
+    // its flexible array member's element, {int, __int128[]} and {int, {__int128, long}[]} aligned to 16 (two i64s, or
+    // one i128 with the __int128 first), and {char[20], long[]} aligned to 8, below the __int128 (one i128).
+    m[0] = abi_test_member(builder, BUSTER_TYPE_INT);
+    m[1] = abi_test_member(builder, type_incomplete_array(table, BUSTER_TYPE_INT128));
+    const TypeId open_quad = abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 2, false, 0);
+    m[0] = abi_test_member(builder, BUSTER_TYPE_LONG);
+    m[1] = abi_test_member(builder, BUSTER_TYPE_LONG);
+    m[2] = abi_test_member(builder, type_array(table, open_quad, 0));
+    const TypeId tail_open = abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 3, false, 0);
+    m[0] = abi_test_member(builder, tail_open);
+    m[1] = abi_test_member(builder, BUSTER_TYPE_INT128);
+    abi_test_in_registers(builder, "union {{long, long, {int, __int128[]}[0]}, __int128}", abi_test_record(builder, BUSTER_TYPE_KIND_UNION, m, 2, false, 0),
+                          BUSTER_ABI_TEST_INTEGERS, 0, BUSTER_ABI_PASS_PAIR, rax, rdx);
+    m[0] = abi_test_member(builder, BUSTER_TYPE_INT128);
+    m[1] = abi_test_member(builder, tail_open);
+    abi_test_in_registers(builder, "union {__int128, {long, long, {int, __int128[]}[0]}}", abi_test_record(builder, BUSTER_TYPE_KIND_UNION, m, 2, false, 0),
+                          BUSTER_ABI_TEST_INTEGERS, BUSTER_ABI_PASS_PAIR, 0, rax, rdx);
+    m[0] = abi_test_member(builder, BUSTER_TYPE_INT);
+    m[1] = abi_test_member(builder, type_incomplete_array(table, big));
+    const TypeId open_big = abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 2, false, 0);
+    m[0] = abi_test_member(builder, BUSTER_TYPE_LONG);
+    m[1] = abi_test_member(builder, BUSTER_TYPE_LONG);
+    m[2] = abi_test_member(builder, type_array(table, open_big, 0));
+    m[0] = abi_test_member(builder, abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 3, false, 0));
+    m[1] = abi_test_member(builder, BUSTER_TYPE_INT128);
+    abi_test_in_registers(builder, "union {{long, long, {int, {__int128, long}[]}[0]}, __int128}",
+                          abi_test_record(builder, BUSTER_TYPE_KIND_UNION, m, 2, false, 0), BUSTER_ABI_TEST_INTEGERS, 0, BUSTER_ABI_PASS_PAIR, rax, rdx);
+    m[0] = abi_test_member(builder, type_array(table, BUSTER_TYPE_CHAR, 20));
+    m[1] = abi_test_member(builder, type_incomplete_array(table, BUSTER_TYPE_LONG));
+    const TypeId open_chars = abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 2, false, 0);
+    m[0] = abi_test_member(builder, BUSTER_TYPE_LONG);
+    m[1] = abi_test_member(builder, BUSTER_TYPE_LONG);
+    m[2] = abi_test_member(builder, type_array(table, open_chars, 0));
+    m[0] = abi_test_member(builder, abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 3, false, 0));
+    m[1] = abi_test_member(builder, BUSTER_TYPE_INT128);
+    abi_test_in_registers(builder, "union {{long, long, {char[20], long[]}[0]}, __int128}", abi_test_record(builder, BUSTER_TYPE_KIND_UNION, m, 2, false, 0),
+                          BUSTER_ABI_TEST_INTEGERS, BUSTER_ABI_PASS_PAIR, 0, rax, rdx);
     // Each of abi_wide_alignment's rules alone, a record larger than 16 bytes that LLVM aligns to 1, so that the __int128 is
     // the union's storage (one i128, as clang 23 passes each): a member off its own alignment (packed {char, long double,
     // char[15]}, 32 bytes), a record off its own (packed {char, {__int128, long}, char[15]}, 48 bytes), a size its
@@ -1862,22 +1900,26 @@ static void abi_test_build_atomics(AbiTestBuilder* builder)
     abi_test_expectation(builder, "_Atomic {struct {__int128, char[100]}[0]}", type_atomic(table, abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 0)),
                          BUSTER_ABI_IN_MEMORY, copy | larger | 4u << BUSTER_ABI_PASS_ALIGNMENT_SHIFT, grown | refused, hidden, none, none);
     abi_test_slot(builder, 16);
-    // And by a record with a flexible array member and a size, whose storage the module doesn't keep (INEXACT): an
-    // array of none of them in a struct and in a union, and in a record larger than 16 bytes, which the walk takes.
+    // And by a record with a flexible array member and a size, whose storage the table doesn't keep (INEXACT), which the
+    // walk takes from its members and its flexible array member's element: an array of none of them in a struct and in a
+    // union, and in a record larger than 16 bytes, aligned to 8 and so 8 bytes to LLVM ({%struct, [1 x i8]}, byval).
     m[0] = abi_test_member(builder, BUSTER_TYPE_INT);
     m[1] = abi_test_member(builder, type_incomplete_array(table, BUSTER_TYPE_LONG));
     const TypeId open_sized = abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 2, false, 0);
     m[0] = abi_test_member(builder, type_array(table, open_sized, 0));
     abi_test_expectation(builder, "_Atomic {struct {int, long[]}[0]}", type_atomic(table, abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 0)),
-                         BUSTER_ABI_IN_MEMORY, copy | larger | refused, 0, any, none, none);
+                         BUSTER_ABI_IN_MEMORY, copy | larger | 3u << BUSTER_ABI_PASS_ALIGNMENT_SHIFT, grown | refused, hidden, none, none);
+    abi_test_slot(builder, 8);
     abi_test_expectation(builder, "_Atomic union {struct {int, long[]}[0]}", type_atomic(table, abi_test_record(builder, BUSTER_TYPE_KIND_UNION, m, 1, false, 0)),
-                         BUSTER_ABI_IN_MEMORY, copy | larger | refused, 0, any, none, none);
+                         BUSTER_ABI_IN_MEMORY, copy | larger | 3u << BUSTER_ABI_PASS_ALIGNMENT_SHIFT, grown | refused, hidden, none, none);
+    abi_test_slot(builder, 8);
     m[0] = abi_test_member(builder, type_array(table, BUSTER_TYPE_CHAR, 20));
     m[1] = abi_test_member(builder, open_sized);
     m[0] = abi_test_member(builder, type_array(table, abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 2, false, 0), 0));
     abi_test_expectation(builder, "_Atomic {struct {char[20], struct {int, long[]}}[0]}",
-                         type_atomic(table, abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 0)), BUSTER_ABI_IN_MEMORY, copy | larger | refused, 0, any,
-                         none, none);
+                         type_atomic(table, abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 0)), BUSTER_ABI_IN_MEMORY,
+                         copy | larger | 3u << BUSTER_ABI_PASS_ALIGNMENT_SHIFT, grown | refused, hidden, none, none);
+    abi_test_slot(builder, 8);
     // An _Atomic's canonical type drops its value's typedefs: of an aligned(16) typedef of an empty struct, it is aligned
     // to 16 in C and to 1 canonically, by which clang checks a member's offset. A union of an empty struct and an array of
     // none of them (through an aligned(1) typedef) at offset 1 passes as an i8.
