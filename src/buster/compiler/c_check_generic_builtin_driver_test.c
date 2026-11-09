@@ -41,13 +41,14 @@ static void check_test_driver_generic_builtins(CheckTest* test, const char* clan
           "void g7(double d) { (void)__builtin_complex(d, cd); }\nvoid g8(double d) { (void)__builtin_complex(e, d); }\n"
           "void g9(double d) { (void)__builtin_complex((void*)0, d); }\nvoid g10(void) { (void)__builtin_complex(1, 2); }\n"
           "void g11(double d) { (void)__builtin_complex(d, (_Bool)1); }\nvoid g12(double d) { (void)__builtin_complex(d, (__int128)x + 1); }\n"
-          "void g13(I* p) { (void)__builtin_complex(*p, 1.0); }\n" },
+          "void g13(I* p) { (void)__builtin_complex(*p, 1.0); }\nvoid g14(double d) { (void)__builtin_complex(d, (I)1); }\n"
+          "void g15(double d) { (void)__builtin_complex(\"s\", d); }\nvoid g16(double d) { (void)__builtin_complex(d, (struct T *)0); }\n" },
         { "complex of different types",
           "typedef double D;\ntypedef float F;\nD dd;\nF ff;\nconst double cd;\nvolatile float vf;\nconst D cdd;\n"
           "void g1(void) { (void)__builtin_complex(dd, ff); }\nvoid g2(void) { (void)__builtin_complex(cd, vf); }\n"
           "void g3(void) { (void)__builtin_complex((D)1, 2.0f); }\nvoid g4(void) { (void)__builtin_complex(1.0L, (_Float16)1); }\n"
           "void g5(void) { (void)__builtin_complex(1.0q, 1.0); }\nvoid g6(void) { (void)__builtin_complex((__bf16)1, (_Float16)1); }\n"
-          "void g7(void) { (void)__builtin_complex(cdd, ff); }\n"
+          "void g7(void) { (void)__builtin_complex(cdd, ff); }\nvoid g9(float f) { (void)__builtin_complex(f, (D)2); }\n"
           "void g8(void) { (void)__builtin_complex(cd, dd); (void)__builtin_complex(1.0f, (F)2); (void)__builtin_complex(cdd, dd); }\n" },
     };
     char source[PATH_MAX];

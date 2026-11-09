@@ -926,21 +926,23 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
             const uint32_t second = graph->argument_nodes[offset + 1];
             const TypeId first_type = first < stream->count ? check_stream_type(stream, first) : 0;
             const TypeId second_type = second < stream->count ? check_stream_type(stream, second) : 0;
+            // A cast's typedef is its type name's (`(D)1`'s D), any other operand's its object's.
+            const uint32_t first_spelling = first < graph->count && graph->ops[first] == CHECK_OP_CAST ? check_input_operand_type_spelling(input, parser, first) :
+                                                                                                        check_semantic_operand_spelling(parser, input, first);
+            const uint32_t second_spelling = second < graph->count && graph->ops[second] == CHECK_OP_CAST ? check_input_operand_type_spelling(input, parser, second) :
+                                                                                                           check_semantic_operand_spelling(parser, input, second);
             if (report->diagnostic == CHECK_DIAG_INVALID_TYPE && first_type != 0 && second_type != 0)
             {
                 const bool second_wrong = check_action_kind(types, first_type) == BUSTER_TYPE_KIND_FLOATING;
-                const uint32_t culprit = second_wrong ? second : first;
                 const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, second_wrong ? second_type : first_type,
-                                                               check_semantic_operand_spelling(parser, input, culprit));
+                                                               second_wrong ? second_spelling : first_spelling);
                 result = type.length != 0 ? check_warning_text(scratch, "argument type %.*s is not a real floating point type", (int)type.length, type.pointer) : NULL;
                 *location = graph->argument_tokens[offset + (second_wrong ? 1u : 0u)];
             }
             else if (first_type != 0 && second_type != 0)
             {
-                const String8 real = check_driver_warning_type(parser, pp, input, types, spell, scratch, type_unqualified(first_type),
-                                                               check_semantic_operand_spelling(parser, input, first));
-                const String8 imaginary = check_driver_warning_type(parser, pp, input, types, spell, scratch, type_unqualified(second_type),
-                                                                    check_semantic_operand_spelling(parser, input, second));
+                const String8 real = check_driver_warning_type(parser, pp, input, types, spell, scratch, type_unqualified(first_type), first_spelling);
+                const String8 imaginary = check_driver_warning_type(parser, pp, input, types, spell, scratch, type_unqualified(second_type), second_spelling);
                 result = real.length != 0 && imaginary.length != 0 ? check_warning_text(scratch, "arguments are of different types (%.*s vs %.*s)", (int)real.length,
                                                                                          real.pointer, (int)imaginary.length, imaginary.pointer) : NULL;
                 *location = graph->argument_tokens[offset];
