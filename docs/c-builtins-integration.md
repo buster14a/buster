@@ -439,7 +439,8 @@ checks them on x86-64 Linux.
     backend refuses.
   - `-c` refuses `__builtin_zos_va_start` and `__builtin_zos_va_copy` by name.
     clang's x86-64 code for them is LLVM's 24-byte `va_start` and `va_copy`
-    over the `char *` that z/OS's list is.
+    over the `char *` that z/OS's list is. The owner decided on 2026-11-08
+    that they stay refused (#1785).
 - **Input counts.** The reader counts calls of these names among its varargs
   spellings, to size its tables. A spelling the unit never interned takes no
   comparison in that count.
@@ -1902,19 +1903,33 @@ clang's Sema builds it.
 ### Checked, refused in code (#148)
 
 `__has_builtin` answers 1 for some builtins whose source checks are clang's
-but whose code `-c` refuses by name. Some are refused because clang can't
-compile them for x86-64 either: `__builtin_preserve_access_index` (BPF
-alone) and `__builtin_hlsl_resource_getpointer_typed`. Others clang does
-compile, and this compiler doesn't yet:
+but whose code `-c` refuses by name (#1785). Some are refused because clang
+can't compile them for x86-64 either: `__builtin_preserve_access_index` (BPF
+alone: "using builtin_preserve_access_index() without -g", and with `-g` the
+backend's "Cannot select: intrinsic %llvm.preserve.struct.access.index") and
+`__builtin_hlsl_resource_getpointer_typed` ("cannot compile this builtin
+function yet"). The others clang does compile, but its code for them isn't
+sound, and this compiler keeps refusing them:
 
 - `__builtin___NSStringMakeConstantString` of no string literal, whose
-  object clang's code makes from what isn't one;
+  object clang's code makes from what isn't one (below, "Code of no
+  literal");
 - `__builtin_zos_va_start` and `__builtin_zos_va_copy`, whose code clang
-  writes over a `char *` that its 24-byte list overruns;
+  writes over a `char *` that its 24-byte list overruns. The owner decided on
+  2026-11-08 to keep refusing them rather than copy clang's overrunning code
+  (#1785).
 
-`__builtin_available` with an empty version (`0.0.0`) is refused too, as
-clang's code generation refuses it, and so is `__builtin_counted_by_ref` of a
-bit-field count, which crashes clang's.
+`__builtin_available` with an empty version (`0.0.0`) is refused too. Clang
+23.1.5's code generation refuses it where it reaches the expression ("cannot
+compile this scalar expression yet": an if's condition, an operand of `+`),
+but where the invalid expression is a whole return value, a declaration's
+initializer or a conditional's condition, Sema drops that statement or
+declaration silently: `return __builtin_available(macos 0.0.0, *);` compiles
+to a function that returns an uninitialized value, with only
+`-Wreturn-type`'s warning. `__builtin_counted_by_ref` of a bit-field count
+crashes clang's code generation, and so does `os_log` data of a 32- or
+64-byte vector or of a `_BitInt` past 128 bits. Each was rechecked against
+clang 23.1.5 on 2026-11-09.
 
 A unit that only checks them (`-fsyntax-only`) gets clang's answers. A unit
 that compiles one gets the refusal's message, at the call.
@@ -2061,6 +2076,14 @@ scope `sizeof`'s).
   `cast<StringLiteral>` of another expression), and `-c` refuses it by name
   ("unsupported: an NSString of no string literal, whose object clang's code
   makes from the literal its argument isn't").
+  - What clang's object holds is another node's bytes read as a literal's,
+    so it isn't defined, and an assertion-enabled clang aborts at the cast.
+    Clang 23.1.5's release build (#1785) makes an empty 8-bit string (flags
+    `0x7c8`, length 0) for a pointer variable, an array, `s + 1`, a
+    conditional, `(char *)0` and a compound literal, and for `__func__` an
+    array of 8 zero UTF-16 units (flags `0x7d0`, length 8). Clang looks
+    through casts first, so `(const char *)(void *)"zz"` makes the literal's
+    own string.
 - **Differences.**
   - Clang's evaluator takes an NSString of no literal as an address constant
     too, and accepts a static initializer of one; this checker refuses it as
@@ -2313,7 +2336,9 @@ expression. On an x86-64 Linux target, whose platform name is empty, the
   A version whose kept components are all 0 (`0.0.0`, `0.2147483648`) is no
   spec of clang's, without a diagnostic: clang's expression is invalid, and
   its code generation refuses it ("cannot compile this scalar expression
-  yet"), as `-c` does here by name.
+  yet") or, where it is a whole return value or initializer, drops the
+  statement silently ("Checked, refused in code"). `-c` refuses it here by
+  name.
 - **The value.** The call takes no operand (its specs' tokens are ignored).
   The walk and the constant evaluator, in its raw and its bound modes, give it
   the builtin's id at its `)`, so `sizeof`, `typeof`, `_Generic` and a VLA's
