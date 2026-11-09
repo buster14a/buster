@@ -359,6 +359,34 @@ static void check_input_unused_events(CheckInputReader* reader, const uint8_t* u
 // checked before any is published: a use names a token, and sees no event at or after itself.
 // A use's retained answer. Declaration tokens carry immutable elaborated types; all writes belong to the use token.
 // The deferred handoff groups every event for the same use token in one body part, including repeated query uses.
+// A value's undeclared name that a typo corrects (#1447, c_check_typo.c): clang's error, recovered, says what it meant,
+// and the use takes that declaration as if it were written. The declaration's handle (its declare event + 1), or 0.
+static uint32_t check_input_binding_correct(CheckInputReader* reader, uint32_t token, uint32_t event)
+{
+    CheckInput* output = reader->output;
+    const uint32_t corrected = check_typo_value(reader, token, event);
+    uint32_t result = 0;
+    if (corrected != BUSTER_CHECK_NONE && reader->typo->corrected_count < BUSTER_CHECK_TYPO_LIMIT)
+    {
+        const uint32_t before = output->report_count;
+        check_input_report(reader, token, CHECK_INPUT_UNDECLARED_CORRECTED);
+        if (output->report_count == before + 1 && !output->resource)
+        {
+            output->reports[before].note_token = reader->bindings.declaration[corrected];
+        }
+        const bool recovered = output->report_count == before + 1 && check_input_recover_reports(reader, before);
+        result = recovered ? corrected + 1 : 0;
+        if (recovered)
+        {
+            CheckTypo* typo = reader->typo;
+            typo->corrected_events[typo->corrected_count] = event;
+            typo->corrected_handles[typo->corrected_count] = result;
+            typo->corrected_count += 1;
+        }
+    }
+    return result;
+}
+
 static void check_input_binding_answer(CheckInputReader* reader, const uint32_t* resolved, uint32_t event)
 {
     CheckInput* output = reader->output;
@@ -368,7 +396,8 @@ static void check_input_binding_answer(CheckInputReader* reader, const uint32_t*
     if (events->operation[event] == C_BINDING_USE)
     {
         const uint32_t token = events->declaration[event];
-        const uint32_t handle = resolved[event];
+        const bool value = events->key[event] / events->name_capacity == C_BINDING_ORDINARY;
+        const uint32_t handle = resolved[event] != 0 || !value ? resolved[event] : check_input_binding_correct(reader, token, event);
         const uint32_t declaration = handle != 0 ? events->declaration[handle - 1] : BUSTER_CHECK_NONE;
         const uint32_t old = output->declarations[token];
         const TypeId captured = reader->declared_types[token];
@@ -455,7 +484,7 @@ static bool check_input_binding_answers(CheckInputReader* reader, const uint32_t
                 const uint32_t event = uses != NULL ? uses[at_use] : at_use;
                 if (events->operation[event] == C_BINDING_USE)
                 {
-                    const uint32_t handle = resolved[event];
+                    const uint32_t handle = check_typo_handle(reader, resolved, event);
                     if (handle != 0 && handle <= events->count && events->operation[handle - 1] == C_BINDING_DECLARE)
                     {
                         // A use binds the whole declaration chain: a prototype and its definition are one entity,
@@ -585,7 +614,9 @@ static bool check_input_binding_columns(CheckInputReader* reader, const ParseBin
             const uint32_t old = output->declarations[token];
             const bool ordinary = events->key[event] / events->name_capacity == C_BINDING_ORDINARY;
             const bool recorded = parsed->token_events[token] != 0 && parsed->namespaces[token] == C_BINDING_ORDINARY;
-            const uint32_t declaration = ordinary && recorded ? parsed->declarations[token] : old;
+            const uint32_t found = ordinary && recorded ? parsed->declarations[token] : old;
+            const uint32_t corrected = found == BUSTER_CHECK_NONE && ordinary ? check_input_binding_correct(reader, token, event) : 0;
+            const uint32_t declaration = corrected != 0 ? events->declaration[corrected - 1] : found;
             const TypeId captured = reader->declared_types[token];
             const TypeId incomplete = check_input_binding_incomplete(reader, declaration, token);
             output->declarations[token] = declaration;

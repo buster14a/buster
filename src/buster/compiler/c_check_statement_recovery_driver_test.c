@@ -187,6 +187,39 @@ static void check_test_driver_statement_recovery(CheckTest* test, const char* cl
         "    if (x = 2) return y;\n"
         "    return 0;\n"
         "}\n",
+        // A function holding an error keeps its unused parameters, as clang's: but one that its left-out part names, an
+        // erroneous expression's operand or sizeof's, is used; a member's name of the same spelling isn't. The scope
+        // holding an error loses its unused variables, the enclosing body's with it.
+        "struct T { int a; };\n"
+        "int f1(int a, int b) { int u; return a + undeclared; }\n"
+        "int f3(int a, struct T t) { return t.a + nope; }\n"
+        "int f8(int a) { return sizeof(a) + zz; }\n"
+        "int f9(int a, int c) { int w; { int q = c + zz; } return 0; }\n"
+        "int g(int y) { return 0; }\n"
+        "int h(void) { int v; return 0; }\n",
+        // A reader's error that ends the first reading's walk, which skips the reader's control scan too: a duplicate case
+        // before it, which the second reading finds and gives, then leaves its body out of a third, which gives the warnings.
+        "void k(int a) { switch (a) { case 1: case 1: break; } }\n"
+        "int m(void) { _Static_assert(0, \"x\"); return 0; }\n"
+        "int g(int y) { if (y = 1) return 1; int w; return 0; }\n",
+        // The same with the control errors after it, in two bodies.
+        "int m(void) { _Static_assert(0, \"x\"); return 0; }\n"
+        "void k(int a) { switch (a) { case 1: case 1: break; } }\n"
+        "void k2(int a) { switch (a) { default: break; case 2: case 2: break; default: break; } }\n"
+        "int g(int y) { if (y = 1) return 1; int w; return 0; }\n",
+        // Rounds: the second reading's walk ends at the second assertion, so the third reading finds the duplicate case,
+        // and a fourth gives the warnings.
+        "int m(void) { _Static_assert(0, \"x\"); return 0; }\n"
+        "int n(void) { _Static_assert(0, \"y\"); return 0; }\n"
+        "void k(int a) { switch (a) { case 1: case 1: break; } }\n"
+        "int g(int y) { if (y = 1) return 1; int w; return 0; }\n",
+        // A label's redefinition, which clang drops, keeping its statement, is recovered: the body's switch is checked on, its
+        // duplicate case given. Clang defines a label as its statement completes, so of a label and one within its statement
+        // (`L: L: ;`, `M: { M: ; }`, `P: Q: P: ;`) the outer is the redefinition; of two in sequence, the second.
+        "void k(int a) { L: L: ; switch (a) { case 1: case 1; break; } }\n"
+        "void m(void) { M: { M: ; } N: ; N: ; goto N; }\n"
+        "void n(void) { P: Q: P: ; goto Q; }\n"
+        "int g(int y) { if (y = 1) return 1; int w; return 0; }\n",
     };
     static const char* const standards[] = { "-std=gnu17", "-std=gnu23" };
     // Each run's options: none, one or two.
@@ -243,20 +276,43 @@ static void check_test_driver_statement_recovery(CheckTest* test, const char* cl
                 free(expected);
             }
         }
-        // -c is refused, and writes no object, by both paths.
-        for (uint32_t scalar = 0; made && scalar < 2; scalar += 1)
+        // -c is refused, and writes no object, by both paths, on the unit's own reading and on real lanes (deferred bodies on
+        // one, two and three lanes, which -c starts), whose diagnostics are clang's, whole, as -fsyntax-only's are.
+        char* reference_arguments[] = { (char*)clang, "-std=gnu17", "-fsyntax-only", "-fno-caret-diagnostics", source, NULL };
+        char* reference = NULL;
+        const int reference_status = made ? check_test_driver_spawn(reference_arguments, &reference) : 0;
+        const bool referenced = made && reference_status != 0 && reference != NULL && check_test_diagnostic_lines(reference, expected_lines, LINES);
+        check_test_expect(test, !made || referenced, "statement recovery: clang's lines for -c's comparison are read");
+        static const char* const lane_counts[] = { NULL, "1", "2", "3" };
+        for (uint32_t run = 0; referenced && run < 2 * BUSTER_ARRAY_LENGTH(lane_counts); run += 1)
         {
+            const uint32_t scalar = run & 1;
+            const char* lane_count = lane_counts[run / 2];
             unlink(object);
-            char* arguments[] = { (char*)executable, "-std=gnu17", "-c", source, "-o", object, scalar != 0 ? "--scalar" : NULL, NULL };
+            char* arguments[12] = { (char*)executable, "-std=gnu17", "-fno-caret-diagnostics", "-c", source, "-o", object };
+            uint32_t at = 7;
+            if (scalar != 0)
+            {
+                arguments[at++] = "--scalar";
+            }
+            if (lane_count != NULL)
+            {
+                arguments[at++] = "--deferred-bodies";
+                arguments[at++] = "--lanes";
+                arguments[at++] = (char*)lane_count;
+            }
+            arguments[at] = NULL;
             char* text = NULL;
             const int status = check_test_driver_spawn(arguments, &text);
             const bool written = access(object, F_OK) == 0;
-            char description[256];
-            snprintf(description, sizeof(description), "statement recovery %u, -c by the %s path: refused (status %d), no object", f, scalar != 0 ? "scalar" : "vector",
-                     status);
-            check_test_expect(test, status != 0 && !written, description);
+            const bool same = text != NULL && check_test_diagnostic_lines(text, actual_lines, LINES) && strcmp(expected_lines, actual_lines) == 0;
+            char description[8192];
+            snprintf(description, sizeof(description), "statement recovery %u, -c by the %s path on %s lanes: refused (status %d), no object, clang's lines\n%s(clang\n%s)",
+                     f, scalar != 0 ? "scalar" : "vector", lane_count != NULL ? lane_count : "no", status, same ? "" : actual_lines, same ? "" : expected_lines);
+            check_test_expect(test, status != 0 && !written && same, description);
             free(text);
         }
+        free(reference);
         check_test_expect(test, made, "statement recovery: fixture written");
         unlink(source);
     }
@@ -331,6 +387,73 @@ static void check_test_driver_statement_recovery(CheckTest* test, const char* cl
         }
         unlink(source);
     }
+    // The rounds' cap (BUSTER_CHECK_DRIVER_REJECTED_ROUNDS): each body's incomplete object ends its reading's walk, so the
+    // first reading gives the first error and each round one more, until the cap; past it the unit's warnings aren't given.
+    // So the first errors are clang's, the last isn't given, and nor are the warnings. (The forward declarations' notes aren't
+    // yet clang's, so the lines compared are the errors'.)
+    static const char capped[] =
+        "void m1(void) { struct S1 s; }\nvoid m2(void) { struct S2 s; }\nvoid m3(void) { struct S3 s; }\n"
+        "void m4(void) { struct S4 s; }\nvoid m5(void) { struct S5 s; }\nvoid m6(void) { struct S6 s; }\n"
+        "int g(int y) { if (y = 1) return 1; int w; return 0; }\n";
+    snprintf(source, sizeof(source), "%s/statement-recovery-capped.c", directory);
+    const bool capped_made = expected_lines != NULL && actual_lines != NULL && parse_test_write(source, capped, sizeof(capped) - 1);
+    check_test_expect(test, capped_made, "statement recovery: the capped fixture is written");
+    for (uint32_t mode = 0; capped_made && mode < 3; mode += 1)
+    {
+        char* arguments[12] = { (char*)clang, "-std=gnu17", "-fsyntax-only", "-fno-caret-diagnostics", "-Wall", source, NULL };
+        char* texts[2] = { NULL, NULL };
+        char* lines[2] = { expected_lines, actual_lines };
+        bool read = true;
+        for (uint32_t side = 0; side < 2; side += 1)
+        {
+            uint32_t at = 6;
+            arguments[0] = side == 0 ? (char*)clang : (char*)executable;
+            if (side == 1 && mode == 1)
+            {
+                arguments[at++] = "--scalar";
+            }
+            else if (side == 1 && mode == 2)
+            {
+                arguments[at++] = "--deferred-bodies";
+                arguments[at++] = "--lanes";
+                arguments[at++] = "2";
+            }
+            arguments[at] = NULL;
+            const int status = check_test_driver_spawn(arguments, &texts[side]);
+            read = read && status != 0 && texts[side] != NULL && check_test_diagnostic_lines(texts[side], lines[side], LINES);
+            // The errors' lines alone: clang's first five, buster's all.
+            size_t kept = 0;
+            uint32_t errors = 0;
+            for (char* line = lines[side]; read && *line != 0;)
+            {
+                char* end = strchr(line, '\n');
+                const size_t size = end != NULL ? (size_t)(end - line) + 1 : strlen(line);
+                const bool error = memmem(line, size, ": error: ", 9) != NULL;
+                errors += error;
+                if (error && (side == 1 || errors <= BUSTER_CHECK_DRIVER_REJECTED_ROUNDS + 1))
+                {
+                    memmove(lines[side] + kept, line, size);
+                    kept += size;
+                }
+                line += size;
+            }
+            if (read)
+            {
+                lines[side][kept] = 0;
+            }
+            // Buster's other lines: none but the notes it leaves out.
+            const bool warned = side == 1 && texts[side] != NULL && strstr(texts[side], ": warning: ") != NULL;
+            read = read && !warned;
+        }
+        const bool same = read && strcmp(expected_lines, actual_lines) == 0;
+        char description[8192];
+        snprintf(description, sizeof(description), "statement recovery: a unit past the rounds' cap, mode %u: the first errors alone:\n%s(clang\n%s)", mode,
+                 read ? actual_lines : "", read ? expected_lines : "");
+        check_test_expect(test, same, description);
+        free(texts[0]);
+        free(texts[1]);
+    }
+    unlink(source);
     unlink(object);
     free(expected_lines);
     free(actual_lines);

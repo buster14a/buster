@@ -51,7 +51,8 @@ static bool check_warning_option(uint32_t id, String8 option)
     matches |= unused && (check_diagnostic_option(option, "-Wunused") || check_diagnostic_option(option, "-Wmost") || check_diagnostic_option(option, "-Wall"));
     matches |= wextra && (check_diagnostic_option(option, "-Wextra") || check_diagnostic_option(option, "-W"));
     // -Wint-in-bool-context and -Wtautological-compare (with -Wtautological-constant-compare under it) are -Wmost's (#1447).
-    const bool most = id == CHECK_WARNING_ID_INT_IN_BOOL_CONTEXT || id == CHECK_WARNING_ID_TAUTOLOGICAL_CONSTANT_COMPARE;
+    const bool most = id == CHECK_WARNING_ID_INT_IN_BOOL_CONTEXT || id == CHECK_WARNING_ID_TAUTOLOGICAL_CONSTANT_COMPARE ||
+                      id == CHECK_WARNING_ID_FOR_LOOP_ANALYSIS;
     matches |= most && (check_diagnostic_option(option, "-Wmost") || check_diagnostic_option(option, "-Wall"));
     // -Wconstant-conversion holds -Wbitfield-constant-conversion, which holds -Wsingle-bit-bitfield-constant-conversion;
     // -Wconversion holds all three, and -Wnon-gcc -Wconversion (#1447).
@@ -59,6 +60,10 @@ static bool check_warning_option(uint32_t id, String8 option)
                                      id == CHECK_WARNING_ID_SINGLE_BIT_BITFIELD_CONSTANT_CONVERSION;
     matches |= id == CHECK_WARNING_ID_SINGLE_BIT_BITFIELD_CONSTANT_CONVERSION && check_diagnostic_option(option, "-Wconstant-conversion");
     matches |= constant_conversion && (check_diagnostic_option(option, "-Wconversion") || check_diagnostic_option(option, "-Wnon-gcc"));
+    // -Wenum-conversion's three are -Wconversion's, and so -Wnon-gcc's (#1447).
+    const bool enum_conversion = id == CHECK_WARNING_ID_ENUM_ENUM_CONVERSION || id == CHECK_WARNING_ID_ENUM_COMPARE_CONDITIONAL ||
+                                 id == CHECK_WARNING_ID_ENUM_FLOAT_CONVERSION;
+    matches |= enum_conversion && (check_diagnostic_option(option, "-Wconversion") || check_diagnostic_option(option, "-Wnon-gcc"));
     return matches;
 }
 
