@@ -1428,16 +1428,18 @@ static __attribute__((noinline)) CheckLowerLimbRoom check_lower_limb_room(const 
         bool misc = false;
         if (graph->ops[node] == CHECK_OP_BUILTIN_MISC && graph->argument_counts != NULL)
         {
-            // A bit builtin's limbs (check_lower_bits_limbs): up to 128 entries a limb of its widest argument, as a rotation's
-            // two shifts, and their temporaries and objects.
+            // A bit builtin's limbs (check_lower_bits_limbs): up to 192 entries a limb of its widest argument (SWAR's bit_ceil,
+            // whose leading zeros, population count and one-hot store take about 140 at x86-64's baseline; a rotation's two
+            // shifts fewer), and their temporaries and objects.
             const uint32_t first = graph->argument_offsets[node];
             for (uint32_t i = 0; i < graph->argument_counts[node] && i < 4; i += 1)
             {
                 const uint32_t limbs = check_lower_limb_type(types, stream->argument_conversions[first + i].type).count;
                 misc = misc || limbs != 0;
-                units = 2 * limbs > units ? 2 * limbs : units;
+                units = 3 * limbs > units ? 3 * limbs : units;
             }
-            units = misc && 2 * check_lower_limb_type(types, check_stream_type(stream, node)).count > units ? 2 * check_lower_limb_type(types, check_stream_type(stream, node)).count : units;
+            const uint32_t result = check_lower_limb_type(types, check_stream_type(stream, node)).count;
+            units = misc && 3 * result > units ? 3 * result : units;
         }
         room.entries += 64 * (uint64_t)units;
         room.locals += complex ? 128 : misc ? 48 : units != 0 ? 16 : 0;
