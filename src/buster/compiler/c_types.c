@@ -721,6 +721,12 @@ struct TypeNames
     uint32_t anonymous_count;
     const TypePrintParen* parentheses;
     uint32_t parenthesis_count;
+    // Optional (#1447): the macro that writes a target address space, as clang's MacroQualifiedType names it
+    // (`'AS1 int *'`): a level whose space is `space_macro_spaces[i]` (its BUSTER_TYPE_SPACE_TARGET-based word) prints
+    // `space_macro_texts[i]` before the level, with its other qualifiers after the level's specifier.
+    const uint32_t* space_macro_spaces;
+    const String8* space_macro_texts;
+    uint32_t space_macro_count;
 };
 
 // The printer's options: BUSTER_TYPE_PRINT_C23 spells bool as C23 and clang in C23 mode do (bool, not _Bool), and
@@ -6094,6 +6100,19 @@ static void type_print_space(TypePrinter* printer)
 
 // Qualifiers::print: AppendTypeQualList, in C99 and later (restrict spelled as such), then the extended qualifiers
 // (#1447): an OpenCL address space by its keyword, a target's as its attribute, and the garbage collection qualifier.
+// The space macro (TypeNames.space_macro_spaces) of a level's extended qualifiers, or UINT32_MAX.
+static uint32_t type_print_space_macro(const TypePrinter* printer, uint32_t extended)
+{
+    const TypeNames* names = printer->names;
+    const uint32_t space = type_address_space(extended);
+    uint32_t result = UINT32_MAX;
+    for (uint32_t i = 0; space >= BUSTER_TYPE_SPACE_TARGET && names != 0 && result == UINT32_MAX && i < names->space_macro_count; i += 1)
+    {
+        result = names->space_macro_spaces[i] == space ? i : UINT32_MAX;
+    }
+    return result;
+}
+
 static void type_print_qualifiers(TypePrinter* printer, uint32_t qualifiers, uint32_t extended)
 {
     const char* names[3] = {
@@ -6125,7 +6144,12 @@ static void type_print_qualifiers(TypePrinter* printer, uint32_t qualifiers, uin
     if (space != BUSTER_TYPE_SPACE_DEFAULT)
     {
         type_print_text(printer, first ? "" : " ");
-        if (space >= BUSTER_TYPE_SPACE_TARGET)
+        const uint32_t macro = type_print_space_macro(printer, extended);
+        if (macro != UINT32_MAX)
+        {
+            type_print_bytes(printer, printer->names->space_macro_texts[macro].pointer, printer->names->space_macro_texts[macro].length);
+        }
+        else if (space >= BUSTER_TYPE_SPACE_TARGET)
         {
             type_print_text(printer, "__attribute__((address_space(");
             type_print_number(printer, space - BUSTER_TYPE_SPACE_TARGET);
@@ -6579,13 +6603,22 @@ static void type_print_step(TypePrinter* printer, TypePrintFrame frame)
             // A qualified array whose element an alias names leaves its qualifiers to that element.
             const uint32_t delegated = type_print_element_qualifiers(printer, type);
             const uint32_t qualifiers = type_qualifiers(type) & ~delegated;
-            const bool prefix = type_print_can_prefix(table, type);
-            if (prefix && (qualifiers | extended) != 0)
+            // A space a macro writes names the level by the macro, before it, and its other qualifiers follow it, as
+            // clang's MacroQualifiedType prints (`'AS1 int const *'`, `int *AS1 *`'s `'AS1 int **'`).
+            const uint32_t macro = type_print_space_macro(printer, extended);
+            if (macro != UINT32_MAX)
             {
-                type_print_qualifiers(printer, qualifiers, extended);
+                type_print_bytes(printer, printer->names->space_macro_texts[macro].pointer, printer->names->space_macro_texts[macro].length);
                 type_print_text(printer, " ");
             }
-            const bool after = !prefix && (qualifiers | extended) != 0;
+            const uint32_t shown = macro != UINT32_MAX ? extended & ~BUSTER_TYPE_SPACE_MASK : extended;
+            const bool prefix = macro == UINT32_MAX && type_print_can_prefix(table, type);
+            if (prefix && (qualifiers | shown) != 0)
+            {
+                type_print_qualifiers(printer, qualifiers, shown);
+                type_print_text(printer, " ");
+            }
+            const bool after = !prefix && (qualifiers | shown) != 0;
             type_print_push(printer, BUSTER_TYPE_PRINT_BEFORE_END, spelled, printer->empty, after, 0);
             if (after)
             {
@@ -6601,7 +6634,10 @@ static void type_print_step(TypePrinter* printer, TypePrintFrame frame)
     {
         if (frame.after)
         {
-            type_print_qualifiers(printer, type_qualifiers(frame.type), type_extended_qualifiers(table, frame.type));
+            // A macro's level (BEFORE) prints its qualifiers after its specifier, without its space.
+            const uint32_t extended = type_extended_qualifiers(table, frame.type);
+            const bool macro = type_print_space_macro(printer, extended) != UINT32_MAX;
+            type_print_qualifiers(printer, type_qualifiers(frame.type), macro ? extended & ~BUSTER_TYPE_SPACE_MASK : extended);
             if (!frame.saved)
             {
                 type_print_text(printer, " ");
