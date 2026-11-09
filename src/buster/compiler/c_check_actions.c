@@ -34,6 +34,10 @@ typedef enum CheckConstantKind
     CHECK_CONSTANT_FLOATING,
     CHECK_CONSTANT_ADDRESS,
     CHECK_CONSTANT_COMPLEX,
+    // GNU's difference of two labels' addresses in a static initializer (#1447, check_init_label_difference): the
+    // minuend label's object in `object`, the subtrahend's in `integer`. Only a static initializer's constants and parts
+    // hold one, which the static data writes as the labels' distance in their function's code (check_data_label_distance).
+    CHECK_CONSTANT_LABEL_DIFFERENCE,
 } CheckConstantKind;
 
 typedef enum CheckFault
