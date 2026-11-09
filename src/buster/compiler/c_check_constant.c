@@ -379,32 +379,47 @@ static uint32_t check_constant_enumerator(const CheckConstantInput* input, uint3
 // before the use, and else `type` with its typedef spelling in `spelling` (0 for none).
 static TypeId check_constant_enum_operand(const CheckConstantInput* input, uint32_t at, TypeId type, uint32_t* spelling)
 {
-    const CheckInputReader* reader = input->reader;
+    CheckInputReader* reader = input->reader;
     const Parser* parser = reader->parser;
     const uint32_t declaration = check_constant_enumerator(input, at);
     TypeId result = type;
     *spelling = 0;
     if (declaration != BUSTER_CHECK_NONE)
     {
-        // The enumeration's closing brace, from the enumerator's name, then its `{` and its `enum` keyword's tag.
-        uint32_t close = declaration;
-        for (uint32_t steps = 0; close < parser->tokens.count && parser->tree.roles[close] != PARSE_ROLE_CLOSE_ENUM && parser->tree.parents[close] != close &&
-                                 steps < parser->tokens.count; steps += 1)
+        const uint32_t slot = declaration & 63u;
+        if (reader->enum_keys[slot] != declaration + 1)
         {
-            close = parser->tree.parents[close];
+            // The enumeration's closing brace, from the enumerator's name, then its `{` and its `enum` keyword's tag.
+            uint32_t close = declaration;
+            for (uint32_t steps = 0; close < parser->tokens.count && parser->tree.roles[close] != PARSE_ROLE_CLOSE_ENUM && parser->tree.parents[close] != close &&
+                                     steps < parser->tokens.count; steps += 1)
+            {
+                close = parser->tree.parents[close];
+            }
+            uint32_t opening = parser->tree.roles[close] == PARSE_ROLE_CLOSE_ENUM ? reader->first_child[close] : BUSTER_CHECK_NONE;
+            while (opening != BUSTER_CHECK_NONE && parser->tokens.kinds[opening] != PARSE_KIND_L_BRACE)
+            {
+                opening = reader->next_child[opening];
+            }
+            uint32_t keyword = opening;
+            while (opening != BUSTER_CHECK_NONE && keyword != 0 && parser->tokens.kinds[keyword] != PARSE_KIND_ENUM)
+            {
+                keyword -= 1;
+            }
+            const bool found = opening != BUSTER_CHECK_NONE && parser->tokens.kinds[keyword] == PARSE_KIND_ENUM && check_input_enum_opening(reader, keyword) == opening;
+            const uint32_t found_close = found ? close : BUSTER_CHECK_NONE;
+            const TypeId found_type = found ? reader->tag_types[keyword] : 0;
+            // (Only a found enumeration is kept: inside its own definition its tag may not be read yet.)
+            reader->enum_keys[slot] = found ? declaration + 1 : reader->enum_keys[slot];
+            reader->enum_closes[slot] = found ? found_close : reader->enum_closes[slot];
+            reader->enum_types[slot] = found ? found_type : reader->enum_types[slot];
+            result = found_close < at ? found_type : result;
         }
-        uint32_t opening = close < at && parser->tree.roles[close] == PARSE_ROLE_CLOSE_ENUM ? reader->first_child[close] : BUSTER_CHECK_NONE;
-        while (opening != BUSTER_CHECK_NONE && parser->tokens.kinds[opening] != PARSE_KIND_L_BRACE)
+        else
         {
-            opening = reader->next_child[opening];
+            // Complete before the use: an enumerator of the enumeration being defined is an int.
+            result = reader->enum_closes[slot] < at ? reader->enum_types[slot] : result;
         }
-        uint32_t keyword = opening;
-        while (opening != BUSTER_CHECK_NONE && keyword != 0 && parser->tokens.kinds[keyword] != PARSE_KIND_ENUM)
-        {
-            keyword -= 1;
-        }
-        const bool found = opening != BUSTER_CHECK_NONE && parser->tokens.kinds[keyword] == PARSE_KIND_ENUM && check_input_enum_opening(reader, keyword) == opening;
-        result = found ? reader->tag_types[keyword] : result;
     }
     else if (at < parser->tokens.count)
     {

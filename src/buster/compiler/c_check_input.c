@@ -1702,6 +1702,13 @@ struct CheckInputReader
     bool library_names_known;
     // The GNU attribute names' rows by name (check_input_attribute_gnu_rows), which a reader's copy keeps its own of.
     CheckInputGnuRows gnu_rows[1u << BUSTER_CHECK_GNU_ROW_BITS];
+    // The enumerations of the enumerators the constant reader's mixes coerce (check_constant_enum_operand), by their
+    // declarations' low bits: the declaration plus one (0 for an empty slot), its enumeration's closing brace and type.
+    // An operator of a body compares an enumeration's variable with an enumerator again and again, and finding the brace
+    // walks the enumeration's list.
+    uint32_t enum_keys[64];
+    uint32_t enum_closes[64];
+    TypeId enum_types[64];
     CheckOverloadCandidate* overload_candidates;
     uint32_t overload_capacity;
     CheckOverloadIndex overload_index;
