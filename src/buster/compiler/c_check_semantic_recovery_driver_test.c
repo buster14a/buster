@@ -272,6 +272,19 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "enum A { X = 5 };\nenum B { Y = 3, X, Z };\n_Static_assert(Z == 0, \"z\");\n"
         "enum C : long { P };\nenum D : char { Q = 7, P, R };\n_Static_assert(R == 0 && sizeof(R) == 1, \"r\");\n"
         "enum E { M = -1 };\nenum F { M };\n_Static_assert(sizeof(enum F) == 4 && (enum F)-1 > 0, \"u\");\nint x = undeclared;\n",
+        // Specifiers that don't combine, which clang's DeclSpec drops, the declaration staying valid (#1447): a second type,
+        // width or sign is dropped at its error; a sign or a width the type doesn't take drops the sign, or the type
+        // (`long float` is a long). The declarations' types show in later conversions, and the bodies' warnings follow.
+        "long long long a1;\nint float a2;\nfloat int a3;\nunsigned float a4;\nlong float a5;\nshort double a6;\nlong _Bool a7;\n"
+        "signed unsigned a8;\nchar int a9;\nlong long double a10;\ndouble float a11;\n"
+        "int use(void) { char *p = &a1; p = &a2; p = &a3; p = &a4; p = &a5; p = &a6; p = &a7; p = &a8; p = &a10; p = &a11; return a9; }\n"
+        "static int g(int a) { int unused; if (a = 1) return 2; return 3; }\n"
+        "int h(void) { int z; return z; }\n",
+        // The same in a body, a parameter, a cast, sizeof's type name and a member, and a repeated specifier's warning.
+        "int f(long long long p, int float q) { short long z = 1; return (int)(unsigned signed)p + q + z; }\n"
+        "int g(void) { int unused; char int c = 1; if (c = 2) return 1; return sizeof(long float); }\n"
+        "struct T { long long long m; int float n; } t;\nlong double long ld;\n_Complex _Complex double cd;\n"
+        "static int h(void) { int u; return 0; }\n",
         // A tag defined again in its scope, whose body becomes an anonymous tag's: later uses of the name find the first
         // definition, and the second's enumerators are still declared (a repeated one with its own note).
         "struct S { int a; };\nstruct S { long b; };\nunion U { int a; };\nunion U { char c; } u2;\n"

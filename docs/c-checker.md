@@ -4144,6 +4144,39 @@ no initializer. Clang's typo correction ("did you mean"), which buster lacks,
 keeps a misspelled name's initializer a value, so there clang gives the error
 where buster doesn't.
 
+Declaration specifiers that don't combine don't stop the reader either
+(`check_input_specifiers_recover`). Clang's `DeclSpec` drops the specifier the
+error is about and keeps the declaration valid, so the unit goes on as in
+phase 1, in every place specifiers are read (file scope, a body, a parameter,
+a member, a cast's and `sizeof`'s type name). What is dropped:
+
+- **A second type, width or sign**, at its error ("cannot combine with
+  previous 'int' declaration specifier"): `int float` is an `int`,
+  `long long long` a `long long`, `signed unsigned` an `int`.
+- **A sign the type doesn't take** ("'float' cannot be signed or unsigned"):
+  `unsigned float` is a `float`.
+- **The type of a width it doesn't take** ("'long float' is invalid"): the
+  width stays, so `long float` is a `long`, `long long double` a
+  `long long`, `long _Bool` a `long`.
+- **`_Complex` with a type it doesn't take.**
+
+The reader finds the error where a specifier makes the list invalid. Only then
+does `check_declspec_scan` work out which token clang drops: once over the list,
+then again without that token, to check that nothing else is wrong. The
+recovery applies where:
+
+- the dropped specifier is a keyword;
+- the list without it has no other error;
+- the reader's state up to the error can be rebuilt from the scan's slots: a
+  keyword's type, or a tag's, typedef name's or `typeof`'s type that the
+  dropped token didn't replace.
+
+A list with a second error, or a storage class's conflict, still stops the
+reader. Error-free lists never reach this. The semantic-recovery fixtures cover
+each kind at file scope, in a body, a parameter, a cast, `sizeof` and a member,
+and a repeated `_Complex`'s warning, "duplicate 'complex' declaration
+specifier" in clang's words.
+
 Type attributes' errors don't stop the reader either (`check_input_attribute_type`).
 What clang 23 does with each is followed:
 

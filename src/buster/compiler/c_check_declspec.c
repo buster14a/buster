@@ -88,6 +88,19 @@ struct CheckDeclspecResult
     uint8_t second;
 };
 
+// The slots a list read without an error holds once it ends (check_declspec_scan, #1447): its type, width and sign
+// (CHECK_DECLSPEC_*), whether it has _Complex, its type's token, and whether every specifier was one the scan knows.
+typedef struct CheckDeclspecSlots CheckDeclspecSlots;
+struct CheckDeclspecSlots
+{
+    uint32_t type_token;
+    uint8_t type;
+    uint8_t width;
+    uint8_t sign;
+    bool complex;
+    bool known;
+};
+
 // The token after a group that opens at `open` (a `(`, `[` or `{`), balanced over all three, or `end`.
 static uint32_t check_declspec_skip_group(const Parser* parser, uint32_t open, uint32_t end)
 {
@@ -167,7 +180,10 @@ static uint8_t check_declspec_type_name(uint32_t name, bool c23)
 
 // clang's first error for the specifiers from `first` to `end` (a declaration's, a parameter's or a type name's), into
 // `result`. False if clang gives none, or if a specifier is one this doesn't model, which the caller's own report keeps.
-static __attribute__((noinline, cold)) bool check_declspec_error(const Parser* parser, uint32_t first, uint32_t end, CheckDeclspecResult* result)
+// check_declspec_error's scan, with the token `skip` left out (BUSTER_CHECK_NONE for none), which a specifier clang drops
+// is (#1447, check_input_specifiers_recover), and the slots it ends with in `slots`.
+static __attribute__((noinline, cold)) bool check_declspec_scan(const Parser* parser, uint32_t first, uint32_t end, uint32_t skip, CheckDeclspecResult* result,
+                                                                CheckDeclspecSlots* slots)
 {
     const bool c23 = parser->language.standard >= 2023;
     // The type, the width, the sign, _Complex, the storage class, the thread storage class and constexpr: each one's
@@ -177,6 +193,7 @@ static __attribute__((noinline, cold)) bool check_declspec_error(const Parser* p
     uint8_t sign = CHECK_DECLSPEC_NONE;
     uint8_t storage = CHECK_DECLSPEC_NONE;
     uint8_t thread = CHECK_DECLSPEC_NONE;
+    uint32_t type_token = BUSTER_CHECK_NONE;
     uint32_t width_token = BUSTER_CHECK_NONE;
     uint32_t sign_token = BUSTER_CHECK_NONE;
     uint32_t complex_token = BUSTER_CHECK_NONE;
@@ -199,7 +216,11 @@ static __attribute__((noinline, cold)) bool check_declspec_error(const Parser* p
         uint8_t new_storage = CHECK_DECLSPEC_NONE;
         uint8_t new_thread = CHECK_DECLSPEC_NONE;
         uint32_t next = i + 1;
-        if ((kind == PARSE_KIND_ATTRIBUTE || kind == PARSE_KIND_ALIGNAS) && group)
+        if (i == skip)
+        {
+            // (A keyword clang drops: none of the slots.)
+        }
+        else if ((kind == PARSE_KIND_ATTRIBUTE || kind == PARSE_KIND_ALIGNAS) && group)
         {
             next = check_declspec_skip_group(parser, i + 1, end);
         }
@@ -294,6 +315,7 @@ static __attribute__((noinline, cold)) bool check_declspec_error(const Parser* p
         }
         else if (reading)
         {
+            type_token = new_type != CHECK_DECLSPEC_NONE ? i : type_token;
             type = new_type != CHECK_DECLSPEC_NONE ? new_type : type;
             width_token = new_width != CHECK_DECLSPEC_NONE && width == CHECK_DECLSPEC_NONE ? i : width_token;
             width = new_width != CHECK_DECLSPEC_NONE ? new_width : width;
@@ -332,5 +354,21 @@ static __attribute__((noinline, cold)) bool check_declspec_error(const Parser* p
     {
         *result = (CheckDeclspecResult){ .token = constexpr_token, .error = CHECK_DECLSPEC_ERROR_COMBINE, .first = thread != CHECK_DECLSPEC_NONE ? thread : storage };
     }
+    if (slots != NULL)
+    {
+        *slots = (CheckDeclspecSlots){
+            .type_token = type_token,
+            .type = type,
+            .width = width,
+            .sign = sign,
+            .complex = complex_token != BUSTER_CHECK_NONE,
+            .known = known,
+        };
+    }
     return known && result->error != CHECK_DECLSPEC_ERROR_NONE;
+}
+
+static bool check_declspec_error(const Parser* parser, uint32_t first, uint32_t end, CheckDeclspecResult* result)
+{
+    return check_declspec_scan(parser, first, end, BUSTER_CHECK_NONE, result, NULL);
 }
