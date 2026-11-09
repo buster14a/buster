@@ -1563,13 +1563,6 @@ struct CheckInputGnuRows
 
 struct CheckInputReader
 {
-    // C23's records defined again in their scope (#1447, c_check_tag_compatible.c): each second definition's keyword, the
-    // earlier record and its keyword, for the second's completion to compare them. Empty in units without one.
-    uint32_t* c23_tags;
-    TypeId* c23_earlier;
-    uint32_t* c23_earlier_keywords;
-    uint32_t c23_count;
-    uint32_t c23_capacity;
     CheckInput* output;
     const Parser* parser;
     Preprocessor* pp;
@@ -1962,6 +1955,13 @@ struct CheckInputReader
     uint32_t lane_tags;
     bool lane;
     bool lane_unsupported;
+    // C23's records defined again in their scope (#1447, c_check_tag_compatible.c): each second definition's keyword, the
+    // earlier record and its keyword, for the second's completion to compare them. Empty in units without one.
+    uint32_t* c23_tags;
+    TypeId* c23_earlier;
+    uint32_t* c23_earlier_keywords;
+    uint32_t c23_count;
+    uint32_t c23_capacity;
 };
 
 // Whether one of the sparse columns the expressions' walk tests first has an entry for `token`: a statement expression's
