@@ -3574,6 +3574,41 @@ static bool type_enum_complete(TypeTable* table, TypeId enumeration, TypeId unde
     return error == TYPE_ERROR_NONE;
 }
 
+// A fixed enum's aligned attribute after its body (#1447), where nothing has asked its layout since its completion at the
+// body's `{`: clang applies it then (ASTContext::getTypeInfo of an enum takes its declaration's largest alignment, and
+// memoizes it at the first query, which the caller rules out). The completion's record, the table's last ENUM of the
+// tag, takes the alignment too, so that a replay completes it so from the start, which nothing could tell apart.
+static __attribute__((unused)) bool type_enum_realign(TypeTable* table, TypeId enumeration, uint8_t alignment_log2)
+{
+    const bool valid = type_is_valid(table, enumeration) && type_kind(table, enumeration) == BUSTER_TYPE_KIND_ENUM && type_is_complete(table, enumeration) &&
+                       alignment_log2 != 0 && alignment_log2 <= BUSTER_TYPE_MAX_ALIGNMENT_LOG2 + 1;
+    if (valid)
+    {
+        const uint32_t index = type_index(enumeration);
+        const uint32_t tag = table->types.index[index];
+        table->types.alignment_log2[index] = (uint8_t)(alignment_log2 - 1);
+        table->tags.alignment_log2[tag] = alignment_log2;
+        TypeChanges* changes = table->changes;
+        bool amended = changes == 0 || changes->full;
+        for (uint32_t i = amended ? 0 : changes->count; !amended && i-- > 0;)
+        {
+            TypeChange* change = changes->items + i;
+            amended = change->operation == BUSTER_TYPE_CHANGE_ENUM && change->tag == tag;
+            change->alignment_log2 = amended ? alignment_log2 : change->alignment_log2;
+        }
+        // A record without the completion can't be replayed.
+        if (!amended)
+        {
+            changes->full = true;
+        }
+    }
+    else
+    {
+        type_set_error(table, TYPE_ERROR_ALIGNMENT);
+    }
+    return valid;
+}
+
 // The lookup: through each record's own lookup, a scan or a probe of its index, which gives the member that finds the
 // name, and into that member's record when it is an anonymous member, until a named member has the name. Each step goes
 // into a record that was complete before the record that holds it was defined, so there are never more steps than
