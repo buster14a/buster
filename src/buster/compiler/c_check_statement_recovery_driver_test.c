@@ -213,6 +213,13 @@ static void check_test_driver_statement_recovery(CheckTest* test, const char* cl
         "int n(void) { _Static_assert(0, \"y\"); return 0; }\n"
         "void k(int a) { switch (a) { case 1: case 1: break; } }\n"
         "int g(int y) { if (y = 1) return 1; int w; return 0; }\n",
+        // A label's redefinition, which clang drops, keeping its statement, is recovered: the body's switch is checked on, its
+        // duplicate case given. Clang defines a label as its statement completes, so of a label and one within its statement
+        // (`L: L: ;`, `M: { M: ; }`, `P: Q: P: ;`) the outer is the redefinition; of two in sequence, the second.
+        "void k(int a) { L: L: ; switch (a) { case 1: case 1: break; } }\n"
+        "void m(void) { M: { M: ; } N: ; N: ; goto N; }\n"
+        "void n(void) { P: Q: P: ; goto Q; }\n"
+        "int g(int y) { if (y = 1) return 1; int w; return 0; }\n",
     };
     static const char* const standards[] = { "-std=gnu17", "-std=gnu23" };
     // Each run's options: none, one or two.

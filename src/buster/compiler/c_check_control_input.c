@@ -2522,22 +2522,36 @@ static __attribute__((always_inline)) void check_input_controls_range(CheckInput
                         locals.scopes[token] = ambiguous ? 0 : scope + 1;
                     }
                     uint64_t slot = ((uint64_t)name * UINT64_C(11400714819323198485) + scope) & (capacity - 1);
+                    // Whether a redefinition keeps the earlier label as the name's, for its gotos.
+                    bool kept_earlier = false;
                     while (!ambiguous && labels[slot] != 0)
                     {
                         const uint32_t old = labels[slot] - 1;
                         const uint32_t old_name = check_input_label_name(reader, old);
                         if (check_input_label_scope(reader, &locals, old) == scope && parser->tokens.names[old_name] == name)
                         {
+                            // Clang defines a label as its statement completes (ActOnLabelStmt), so a label within the other's
+                            // statement (`L: L: ;`, `L: { L: ; }`) is the one defined first, and the other is the redefinition,
+                            // which clang drops, keeping its statement.
+                            uint32_t outer = parser->tree.parents[token];
+                            for (uint32_t steps = 0; outer < count && outer != old && parser->tree.parents[outer] != outer && steps < count; steps += 1)
+                            {
+                                outer = parser->tree.parents[outer];
+                            }
+                            const bool nested = outer == old;
+                            kept_earlier = !nested;
                             if (!prefix || token < limit)
                             {
                                 // With clang's note at the first definition's name, a local label's at its name in its list
-                                // (its scope), which declares it.
+                                // (its scope), which declares it. Recovered (#1447): the statement stays, and the unit is read
+                                // on as a valid one, its controls' constraints among them.
                                 const uint32_t before = reader->output->report_count;
-                                check_input_report(reader, name_token, CHECK_INPUT_LABEL_REDEFINITION);
+                                check_input_report(reader, nested ? old_name : name_token, CHECK_INPUT_LABEL_REDEFINITION);
                                 if (reader->output->report_count != before)
                                 {
-                                    reader->output->reports[before].note_token = local != BUSTER_CHECK_NONE ? scope : old_name;
+                                    reader->output->reports[before].note_token = local != BUSTER_CHECK_NONE ? scope : nested ? name_token : old_name;
                                     reader->output->reports[before].note_kind = CHECK_INPUT_NOTE_PREVIOUS_DEFINITION;
+                                    check_input_recover_reports(reader, before);
                                 }
                             }
                             break;
@@ -2548,7 +2562,7 @@ static __attribute__((always_inline)) void check_input_controls_range(CheckInput
                     {
                         check_input_report(reader, name_token, CHECK_INPUT_LABEL_AMBIGUOUS);
                     }
-                    else if (!ambiguous)
+                    else if (!ambiguous && !kept_earlier)
                     {
                         labels[slot] = token + 1;
                     }
