@@ -5430,8 +5430,9 @@ static void check_driver_rejected_common(const Parser* unit, const Parser* origi
                 top = parser->tree.parents[top];
             }
             const bool head = !bodied && top < count && parser->tree.roles[top] == PARSE_ROLE_CLOSE_BODY;
+            // (A body's error the editor refuses leaves its body out alone, below, not its whole definition.)
             const bool kept = token < count && ((!head && check_driver_rejected_edit(&editor, token)) ||
-                                                check_driver_rejected_declaration(parser, first_input, ranges, body_count, token, edits, mask));
+                                                (!bodied && check_driver_rejected_declaration(parser, first_input, ranges, body_count, token, edits, mask)));
             edited |= kept;
             ready = kept || bodied;
             const bool dropped = !bodied && token < count &&

@@ -139,7 +139,12 @@ static void check_test_driver_structural_recovery(CheckTest* test, const char* c
         "int (*p(void)[3])(int) { return 0; }\n"
         "int k(int y) { int w; y = y; return y << 41; }\n"
         "_Static_assert(0, \"nope\");\n"
-        "int m(int y) { int w; y = y; return y; }\n",
+        "int m(int y) { int w; y = y; return y; }\n"
+        // A body's error the editor refuses (its part holds a goto) leaves that body out alone, not its definition: the
+        // bodies that call it keep their warnings.
+        "struct S { int a; } s;\n"
+        "int n(int x) { x = ({ if (x) goto out; s.b; }); out: return x; }\n"
+        "int caller(int c) { int w; c = c; return n(1) + (c << 42); }\n",
     };
     static const char* const standards[] = { "-std=gnu17", "-std=gnu23" };
     static const char* const options[][2] = { { "-Wall", NULL }, { "-Wall", "-Wextra" } };
