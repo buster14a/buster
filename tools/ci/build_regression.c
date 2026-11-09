@@ -1422,6 +1422,13 @@ static void check_incremental(void)
         // The vector-only standalone checker benchmark also reads the intrinsic catalog. Allow that exact sorted
         // extra owner while still requiring every main unit; keep the full dependency list for Ninja's plan below.
         const char* checked_owners = expected;
+        // The vector-only standalone Tier 0 benchmark shares these counter utilities too. Preserve its exact
+        // dependency in the plan while checking the two unity consumers independently of host ISA.
+        static const char counter_owners[] = "main_unit_backend.c main_unit_checker.c tier0_benchmark.c ";
+        if (strcmp(source, "src/buster/compiler/tier0_benchmark_measure.c") == 0 && strcmp(expected, counter_owners) == 0)
+        {
+            checked_owners = "main_unit_backend.c main_unit_checker.c ";
+        }
         static const char catalog_benchmark[] = "c_checker_benchmark.c ";
         if (strcmp(source, "src/buster/compiler/c_builtin_intrinsic_catalog.c") == 0 &&
             strncmp(checked_owners, catalog_benchmark, sizeof(catalog_benchmark) - 1) == 0)
