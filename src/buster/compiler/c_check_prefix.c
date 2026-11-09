@@ -379,7 +379,7 @@ static bool check_prefix_pragma_between(const Parser* view, uint32_t token)
 // pragma between (check_prefix_pragma_between).
 static bool check_prefix_resumes(const Parser* view, const ParseDiagnostic* diagnostic, uint32_t limit)
 {
-    bool valid = diagnostic->error && diagnostic->resumed && diagnostic->token < limit && diagnostic->token != 0 &&
+    bool valid = diagnostic->error && (diagnostic->resumed || diagnostic->resume_colon) && diagnostic->token < limit && diagnostic->token != 0 &&
                  (view->tokens.pragma_count == 0 || !check_prefix_pragma_between(view, diagnostic->token));
     if (valid && diagnostic->resume_end != 0)
     {
@@ -412,6 +412,7 @@ static ParseDiagnostic check_prefix_original_diagnostic(const ParseDiagnostic* d
     result.resumed = false;
     result.resume_delete = false;
     result.resume_end = 0;
+    result.resume_colon = false;
     return result;
 }
 
@@ -573,7 +574,7 @@ static CheckPrefixStatus check_prefix_resume(CheckResumed* resumed, const Parser
                     {
                         if (!diagnostic->resume_delete)
                         {
-                            view->tokens.kinds[written] = PARSE_KIND_SEMI;
+                            view->tokens.kinds[written] = diagnostic->resume_colon ? PARSE_KIND_COLON : PARSE_KIND_SEMI;
                             view->tokens.names[written] = 0;
                             view->tokens.sources[written] = current->tokens.sources[to];
                             view->tokens.flags[written] = 0;
@@ -585,6 +586,7 @@ static CheckPrefixStatus check_prefix_resume(CheckResumed* resumed, const Parser
                         pending[pending_count].resumed = false;
                         pending[pending_count].resume_delete = false;
                         pending[pending_count].resume_end = 0;
+                        pending[pending_count].resume_colon = false;
                         pending_count += 1;
                     }
                     from = diagnostic != NULL && diagnostic->resume_end != 0 ? diagnostic->resume_end : to;
