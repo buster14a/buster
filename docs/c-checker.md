@@ -7899,7 +7899,15 @@ arguments against the function. The checker now gives these as clang does.
 
   `intel_ocl_bicc`, `swiftcall` and `swiftasynccall` are function types'
   conventions (#1447), spelled in types as clang's `TypePrinter` spells them:
-  `inteloclbicc`, `swiftcall` and `swiftasynccall`. The Swift parameter
+  `inteloclbicc`, `swiftcall` and `swiftasynccall` where a declaration's
+  attribute prints, and `intel_ocl_bicc` (and `swiftasynccall` without its
+  space) in an a.k.a.'s canonical type (`BUSTER_TYPE_PRINT_CANONICAL_CC`). A
+  function designator's `preserve_*` prints before it
+  (`'__attribute__((preserve_most)) void (void)'`). A convention that one
+  macro writes throughout the unit names the type by that macro, before the
+  canonical spelling, as clang's `MacroQualifiedType` does
+  (`check_driver_convention_macros`:
+  `'MS void (void) __attribute__((ms_abi))'`). The Swift parameter
   attributes (`swift_indirect_result`, `swift_error_result`, `swift_context`,
   `swift_async_context`) are a parameter's ABI in its function's type
   (`TypeParameterABI`), printed before its type
@@ -8411,15 +8419,18 @@ arguments against the function. The checker now gives these as clang does.
       type conflict, noted at the declaration its lookup found. One whose
       typedef carries the attribute, which crashes clang 23, keeps "conflicting
       types for 'f'";
-    - a function type spelled with a macro of its convention prints without
-      clang's macro name (`'MS void (void) __attribute__((ms_abi))'`), and a
-      typedef's attribute without clang's sugar
-      (`__attribute__((intel_ocl_bicc))` where its canonical type is
-      `inteloclbicc`);
-    - an assignment between pointers to functions of two conventions is
-      "incompatible operand or conversion types", where clang's is
-      "incompatible function pointer types assigning to …";
-    - a typedef's type prints without clang's `'F *' (aka '…')`.
+    - a declaration's convention attribute is clang's `AttributedType`, which
+      the type table doesn't keep. So `sysv_abi`, the default here, prints
+      nowhere, where clang prints a declared function's
+      (`'void (void) __attribute__((sysv_abi))'`). A pointer declarator's
+      attribute prints canonically: clang prints
+      `'__attribute__((preserve_most))  void ((*))(void)'` for
+      `void (*p)(void) __attribute__((preserve_most))`, and drops the
+      attribute after a macro written inside the pointer's parentheses
+      (`void (MS *p)(void)` is `'MS void (*)(void)'`);
+    - a convention's macro name, as an address space's, is per unit: a
+      convention the unit writes both ways, with two macros, or anywhere
+      through a keyword (`__regcall`), is spelled out.
   - x86's `interrupt` (#147):
     - the calls in operands the reader's evaluator alone reads (a `typeof`'s,
       a constant array bound's `sizeof`) have no graph node: a direct call of

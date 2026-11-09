@@ -737,6 +737,10 @@ struct TypeNames
 // unnamed tag's row, `(unnamed struct at file:line:col)`, then carries its kind itself).
 #define BUSTER_TYPE_PRINT_C23 0x01
 #define BUSTER_TYPE_PRINT_NO_TAG_KEYWORD 0x02
+// BUSTER_TYPE_PRINT_CANONICAL_CC spells a calling convention as clang's canonical function type does (printFunctionAfter,
+// #1447): an a.k.a.'s or a macro's (`intel_ocl_bicc`, and swiftasynccall without its space), where the attribute a
+// declaration wrote prints by its AttributedType (`inteloclbicc`).
+#define BUSTER_TYPE_PRINT_CANONICAL_CC 0x04
 
 // At most how many bytes type_initialize pushes from its arena for `capacity`, and how many the index arena needs to
 // grow to the largest index those types can use.
@@ -6779,10 +6783,11 @@ static void type_print_step(TypePrinter* printer, TypePrintFrame frame)
         };
         _Static_assert(sizeof(spellings) / sizeof(spellings[0]) == TYPE_FUNCTION_ABI_COUNT, "every convention has a spelling");
         const TypeFunctionABI abi = type_function_abi_kind(table, frame.type);
+        const bool canonical = (printer->options & BUSTER_TYPE_PRINT_CANONICAL_CC) != 0;
         if ((uint32_t)abi < sizeof(spellings) / sizeof(spellings[0]))
         {
-            type_print_text(printer, " __attribute__((");
-            type_print_text(printer, spellings[abi]);
+            type_print_text(printer, canonical && abi == TYPE_FUNCTION_ABI_SWIFT_ASYNC ? "__attribute__((" : " __attribute__((");
+            type_print_text(printer, canonical && abi == TYPE_FUNCTION_ABI_INTEL_OCL ? "intel_ocl_bicc" : spellings[abi]);
             type_print_text(printer, "))");
         }
     }

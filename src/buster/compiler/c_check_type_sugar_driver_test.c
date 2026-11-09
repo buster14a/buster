@@ -194,7 +194,68 @@ static const CheckDriverDefaultWarningFixture check_driver_type_sugar_fixtures[]
     },
 };
 
+// Calling conventions in type spellings (#1447): clang's canonical spelling in an a.k.a. (`intel_ocl_bicc`,
+// swiftasynccall without its space), a function designator's preserve_* before it, and a convention one macro writes
+// named by the macro before the canonical spelling (check_driver_convention_macros).
+static const CheckDriverDefaultWarningFixture check_driver_convention_sugar_fixtures[] =
+{
+    {
+        .name = "calling convention macro names",
+        .source = "#define MS __attribute__((ms_abi))\n"
+                  "#define VC __attribute__((vectorcall))\n"
+                  "#define PM __attribute__((preserve_most))\n"
+                  "#define IO __attribute__((intel_ocl_bicc))\n"
+                  "MS void a(void);\n"
+                  "void b(void) MS;\n"
+                  "void VC c(void);\n"
+                  "PM void d(void);\n"
+                  "IO void e(void);\n"
+                  "typedef MS void T(void);\n"
+                  "T *t;\n"
+                  "void use(void)\n"
+                  "{\n"
+                  "    int x;\n"
+                  "    x = a;\n"
+                  "    x = b;\n"
+                  "    x = c;\n"
+                  "    x = d;\n"
+                  "    x = e;\n"
+                  "    x = t;\n"
+                  "    x = &a;\n"
+                  "}\n",
+        .errors = 7,
+    },
+    {
+        .name = "calling conventions as written and canonical",
+        .source = "typedef void TI(void) __attribute__((intel_ocl_bicc));\n"
+                  "typedef void TA(void) __attribute__((swiftasynccall));\n"
+                  "void m(void) __attribute__((ms_abi));\n"
+                  "void pm(void) __attribute__((preserve_most));\n"
+                  "void pa(void) __attribute__((preserve_all));\n"
+                  "void pn(void) __attribute__((preserve_none));\n"
+                  "void io(void) __attribute__((intel_ocl_bicc));\n"
+                  "void __regcall rc(void);\n"
+                  "TI *ti;\n"
+                  "TA *ta;\n"
+                  "void use(void)\n"
+                  "{\n"
+                  "    int x;\n"
+                  "    x = m;\n"
+                  "    x = pm;\n"
+                  "    x = pa;\n"
+                  "    x = pn;\n"
+                  "    x = io;\n"
+                  "    x = rc;\n"
+                  "    x = ti;\n"
+                  "    x = ta;\n"
+                  "}\n",
+        .errors = 8,
+    },
+};
+
 static void check_test_driver_type_sugar(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     check_test_driver_warning_fixtures(test, clang, executable, directory, check_driver_type_sugar_fixtures, BUSTER_ARRAY_LENGTH(check_driver_type_sugar_fixtures));
+    check_test_driver_warning_fixtures(test, clang, executable, directory, check_driver_convention_sugar_fixtures,
+                                       BUSTER_ARRAY_LENGTH(check_driver_convention_sugar_fixtures));
 }
