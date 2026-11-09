@@ -1735,6 +1735,16 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .notes = 4,
     },
     {
+        // __float128 literals (#1250): each value its binary128 bits', printed at 35 digits, a -0's sign too (as every
+        // format's), and the format's own limits.
+        .name = "__float128 literal conversions and limits",
+        .source = "int d = 1.5q;\n_Bool b = 0.1q;\n_Bool t = 0x1p-16494q;\n_Bool z = -0.0q;\nunsigned u = -1.5q;\nint i = 1e40q;\n"
+                  "short s = 70000.5q;\nlong long l = 9007199254740993.5q;\n__int128 e = 12345678901234567890123.0q;\n__int128 f = -0.1q;\n"
+                  "__float128 big = 1e5000q;\n__float128 small = 1e-5000q;\n__float128 tiny = 0x1p-16495q;\n__float128 rounded = 0x1.8p-16495q;\n"
+                  "_Bool zd = -0.0;\nint g(void) { int x = 2.75q; int y = -0.0L; return x + y; }\n",
+        .warnings = 15,
+    },
+    {
         // Clang's ActOnFinishFunctionBody gives a function's unused parameters after its body scope's unused variables
         // and before its missing return.
         .name = "unused parameters after the body's unused variables",

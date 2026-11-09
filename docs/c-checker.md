@@ -3252,15 +3252,24 @@ What the lowering covers past scalars (#145's programs):
   folds it to a constant zero of its type where its operand has no effect
   (`check_lower_quad_constant` writes a folded constant's bits), and after the
   operand where it has (`check_lower_aggregate_zero`).
-  The checker folds a `__float128` constant where its value survives the long
-  double storage exactly: a `q`/`Q` literal whose binary128 rounding is exact
-  in long double (the literal reader's rule), and an integer or narrower
-  floating constant whose conversion is exact. A static one with such an
-  initializer is written as 16 binary128 bytes; a value that would round
-  through long double, such as `0.1Q` or a 128-bit integer with more than 64
-  significant bits, is still refused as not constant. Narrower-format NaNs
-  converted to `__float128` are also refused as constants: the current compact
-  representation cannot preserve their widened payloads. An increment or a
+  A `__float128` constant keeps its binary128 bits (#1250, `c_check_quad.c`):
+  `CheckValue.integer` holds the 16 bytes the object holds, and `floating` a
+  long double mirror rounded to odd (the significand's top 64 bits, the last
+  one set where a lower one is), whose sign, class, truth and order are the
+  value's, and which rounds once more to `float`, `double` or a half format as
+  the exact value would. A NaN's mirror holds its fraction's top 63 bits, as a
+  narrowing keeps them. A `q`/`Q` literal is `strtof128`'s bits, rounded once.
+  An integer converts to `__float128` rounded once, another format exactly (a
+  NaN quieted, its payload at the fraction's top), and `__float128` converts to
+  an integer by truncating its bits, to long double rounded once from them, and
+  to the narrower formats from its mirror. Comparisons, the classification
+  builtins, `fabsf128`, `copysignf128`, `fmaxf128`, `fminf128` and their
+  `_num` kin, and unary `+` and `-`, fold from the bits; arithmetic doesn't
+  yet. Static data and code write the bits. `test-checker
+  --program-float-constants`' `float-constants-quad-bits` compares them all
+  with clang -O0's build. A `_Complex __float128` constant's parts are still
+  long doubles that must hold them exactly, so an imaginary `q` literal is
+  taken only where its long double is its value. An increment or a
   decrement (#147) is `__addtf3`'s or `__subtf3`'s of a constant 1.0, as clang
   -O0's is
   (`check_lower_quad_update_emit`, a postfix one's value a copy of the object

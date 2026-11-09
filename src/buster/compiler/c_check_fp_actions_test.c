@@ -527,9 +527,9 @@ static void check_test_real_nan_actions(CheckTest* test, TypeTable* table)
     }
 }
 
-// A narrower NaN's top-aligned payload cannot be held in the compact quad representation. Never emit
-// a folded quad with misplaced payload bits or an unquieted signaling NaN.
-static void check_test_quad_narrow_nan_refusal(CheckTest* test, TypeTable* table)
+// A narrower NaN widened to __float128 (#1250): quieted, its sign kept, its payload at the fraction's top, as APFloat
+// widens it: the x87 significand's 63 bits below the integer bit become the fraction's bits 111 to 49.
+static void check_test_quad_narrow_nan_widening(CheckTest* test, TypeTable* table)
 {
     const TypeId formats[] = { BUSTER_TYPE_FLOAT16, BUSTER_TYPE_FLOAT, BUSTER_TYPE_DOUBLE, BUSTER_TYPE_LONG_DOUBLE };
     const CheckOp operations[] = { CHECK_OP_CAST, CHECK_OP_INITIALIZE };
@@ -543,9 +543,17 @@ static void check_test_quad_narrow_nan_refusal(CheckTest* test, TypeTable* table
                 const CheckAction action = { .op = operations[j], .operands = { check_test_float(formats[i], values[k]) },
                                              .type = BUSTER_TYPE_FLOAT128 };
                 const CheckActionResult result = check_test_action(test, table, action);
-                check_test_expect(test, result.diagnostic == CHECK_DIAG_NONE && result.value.fault == CHECK_FAULT_UNSUPPORTED_CONSTANT &&
-                                       result.value.constant_kind == CHECK_CONSTANT_NONE,
-                                  "narrow NaN to quad refuses an unrepresentable folded payload");
+                uint64_t significand = 0;
+                uint16_t sign_exponent = 0;
+                memcpy(&significand, &values[k], sizeof(significand));
+                memcpy(&sign_exponent, (const uint8_t*)&values[k] + 8, sizeof(sign_exponent));
+                const uint64_t high = ((uint64_t)(sign_exponent & 0x8000u) << 48) | (UINT64_C(0x7fff) << 48) | (UINT64_C(1) << 47) |
+                                      ((significand & UINT64_C(0x7fffffffffffffff)) >> 15);
+                const uint64_t low = significand << 49;
+                check_test_expect(test, result.diagnostic == CHECK_DIAG_NONE && result.value.fault == CHECK_FAULT_NONE &&
+                                       result.value.constant_kind == CHECK_CONSTANT_FLOATING && (uint64_t)result.value.integer == low &&
+                                       (uint64_t)(result.value.integer >> 64) == high && isnan(result.value.floating),
+                                  "a narrow NaN widened to __float128 is quiet, its payload at the fraction's top");
             }
         }
     }
@@ -556,7 +564,7 @@ static __attribute__((noinline)) void check_test_fp_actions(CheckTest* test, Typ
     check_test_pragma_extensions(test);
     check_test_fp_action_guards(test, table);
     check_test_fp_action_values(test, table);
-    check_test_quad_narrow_nan_refusal(test, table);
+    check_test_quad_narrow_nan_widening(test, table);
     check_test_half_encodings(test);
     check_test_half_constant_actions(test, table);
     check_test_half_constant_graph(test, table);
