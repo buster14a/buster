@@ -4204,8 +4204,15 @@ view's own; the bodies' reading publishes those its known errors don't hold,
 its reader's and graph's reports and its controls' constraints, in clang's
 words (its reader's alone where its graph can't run after them), and the next
 round leaves their parts out too. Each round adds an error and its parts, up
-to `BUSTER_CHECK_DRIVER_REJECTED_ROUNDS` (4) readings; past them the unit's
-warnings aren't given. The second reading's unused variables in a scope with an error
+to clang's error limit's cut (the error after `-ferror-limit`'s, the first with
+`-Wfatal-errors`), past which clang gives nothing: counted in the bodies that
+hold a known error (each at least one; an error's tokens may be several), the
+bodies after the one that brings them past the limit are left out whole, and
+`BUSTER_CHECK_DRIVER_REJECTED_ROUNDS` (4) more readings find what the body
+that holds it, or file scope after it, still hides; past them the unit's
+warnings aren't given. Without a limit (`-ferror-limit=0`) the rounds go on
+while each finds an error. Each round is a reading of the unit, so a unit of
+`n` walk-ending errors costs up to `min(n, limit) + 1` readings. The second reading's unused variables in a scope with an error
 are left out (its own error counts, the dropped part's at the token after
 it). A function holding an error keeps its unused parameters, as clang's
 `ActOnFinishFunctionBody` gives them whatever the body's errors, except one
@@ -4378,6 +4385,63 @@ Left as they were:
   (`-Wpointer-sign`, a qualifier's) comes before the correction's error,
   where clang's comes after it.
 
+Declaration specifiers that don't combine don't stop the reader either
+(`check_input_specifiers_recover`). Clang's `DeclSpec` drops the specifier the
+error is about and keeps the declaration valid, so the unit goes on as in
+phase 1, in every place specifiers are read (file scope, a body, a parameter,
+a member, a cast's and `sizeof`'s type name). What is dropped:
+
+- **A second type, width or sign**, at its error ("cannot combine with
+  previous 'int' declaration specifier"): `int float` is an `int`,
+  `long long long` a `long long`, `signed unsigned` an `int`.
+- **A sign the type doesn't take** ("'float' cannot be signed or unsigned"):
+  `unsigned float` is a `float`.
+- **The type of a width it doesn't take** ("'long float' is invalid"): the
+  width stays, so `long float` is a `long`, `long long double` a
+  `long long`, `long _Bool` a `long`.
+- **`_Complex` with a type it doesn't take.**
+
+The reader finds the error where a specifier makes the list invalid. Only then
+does `check_declspec_scan` work out which token clang drops: once over the list,
+then again without that token, to check that nothing else is wrong. The
+recovery applies where:
+
+- the dropped specifier is a keyword;
+- the list without it has no other error;
+- the reader's state up to the error can be rebuilt from the scan's slots: a
+  keyword's type, or a tag's, typedef name's or `typeof`'s type that the
+  dropped token didn't replace.
+
+A `_Complex` the type doesn't take is dropped at the list's end too, where the
+reader checks it (`_Complex _Bool` is a `_Bool`), with every `_Complex` of the
+list, as `DeclSpec::Finish` unsets the slot. That holds after a type of no
+keyword too (`typeof(_Bool) _Complex`, `struct S _Complex`).
+
+The operand readers recover the same way. A `typeof`'s or an `_Atomic`'s type
+name (`check_constant_specifiers`) and an enum's fixed underlying type
+(`check_input_enum_underlying`) are read again without the dropped specifier
+(`check_input_specifiers_dropped`). So `typeof(_Complex _Bool)` is a `_Bool`
+and `enum E : long float` a `long`.
+
+An error of the list's end (a sign, a width or a `_Complex` the type doesn't
+take) is published at the token after the list. It comes after the list's
+repeated specifiers' warnings, in clang's discovery order:
+`_Complex _Complex _Bool` warns, then errs.
+
+Still stopping the reader:
+
+- a list with a second error (`int float char x;`, `_Complex _Bool int y;`,
+  `unsigned float unsigned x;`), where clang reports both;
+- a storage class's conflict;
+- a second type specifier that is no keyword (`int typeof(int)`, `int _BitInt(8)`,
+  `int _Atomic(int)`, `int struct S`), whose state the slots can't rebuild.
+
+Error-free lists never reach this. The semantic-recovery fixtures cover each
+kind at file scope, in a body, a parameter, a cast, `sizeof`, a member, a
+`typeof`, an `_Atomic` and an enum's base. They also cover a repeated
+`_Complex`'s warning, "duplicate 'complex' declaration specifier" in clang's
+words. The operand readers give no duplicate-specifier warning (#1836).
+
 Type attributes' errors don't stop the reader either (`check_input_attribute_type`).
 What clang 23 does with each is followed:
 
@@ -4512,9 +4576,10 @@ The later phases are left:
   leaves the unit without its common warnings. A function's unused parameter that its
   left-out part names through a local of the same name gets no
   `-Wunused-parameter`, where clang gives one.
-- **Rounds past the cap.** A unit needing more than four readings' rounds
-  (each body's error ending the next reading's walk) gets its first errors
-  alone.
+- **Errors an edited reading meets.** A reading of the view that finds an error
+  of its own isn't taken (its body is left out whole instead), so a body with
+  two walk-ending errors (`struct T1 t; struct U1 v;`) loses the second, and
+  its warnings with it.
 
 ### What the lowering costs (#531)
 
