@@ -139,6 +139,36 @@ static const CheckDriverDefaultWarningFixture check_driver_type_sugar_fixtures[]
         .errors = 5,
     },
     {
+        // Several warnings of one pass print by the macros, each event after the first reading the pass's map
+        // (check_driver_spelling_ready builds it below the events' marks).
+        .name = "address space macro names in several warnings of one pass",
+        .source = "int printf(const char *, ...);\n"
+                  "#define AS1 __attribute__((address_space(1)))\n"
+                  "#define AS2 __attribute__((address_space(2)))\n"
+                  "void f(AS1 int *p, AS2 char *q, AS1 const int *r)\n"
+                  "{\n"
+                  "    printf(\"%d\\n\", p);\n"
+                  "    printf(\"%f\\n\", q);\n"
+                  "    printf(\"%d %d\\n\", r, p);\n"
+                  "}\n",
+        .warnings = 4,
+    },
+    {
+        // The same through incompatible pointer conversions' errors.
+        .name = "address space macro names in several conversion errors",
+        .source = "#define AS1 __attribute__((address_space(1)))\n"
+                  "#define AS2 __attribute__((address_space(2)))\n"
+                  "void f(AS1 int *p, AS2 char *q)\n"
+                  "{\n"
+                  "    AS1 char *a = p;\n"
+                  "    AS2 int *b = q;\n"
+                  "    AS1 long *c = p;\n"
+                  "    AS2 short *d = q;\n"
+                  "    (void)a; (void)b; (void)c; (void)d;\n"
+                  "}\n",
+        .errors = 4,
+    },
+    {
         // A space written directly with an integer suffix is that space's direct spelling: the macro another declaration
         // writes it with names neither.
         .name = "address spaces written directly with integer suffixes",

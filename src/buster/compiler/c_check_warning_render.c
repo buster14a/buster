@@ -135,7 +135,6 @@ struct CheckWarningSpelling
     uint32_t* space_macro_spaces;
     String8* space_macro_texts;
     uint32_t space_macro_count;
-    bool space_built;
     bool built;
 };
 
@@ -257,6 +256,7 @@ static bool check_driver_spelling_build(const Parser* parser, Preprocessor* pp, 
 // c_check_semantic_diagnostic.c's, included after this file.
 static String8 check_semantic_token(const Parser* parser, Preprocessor* pp, uint32_t token, Arena* scratch);
 
+// The distinct spaces a unit's map holds; a space past them keeps its attribute spelled out.
 #define BUSTER_CHECK_DRIVER_SPACE_MACROS 16
 
 // The outermost macro expansion a token's origin comes from (its PPExpansion's index plus one), through the macros
@@ -280,14 +280,22 @@ static uint32_t check_driver_macro_root(const Preprocessor* pp, uint32_t origin)
 // one where macros nest, where the list is that expansion's whole and isn't a predefined macro's (`__seg_gs`).
 // clang names each declaration's own spelling; a space this unit writes both ways, or with two
 // macros, keeps its attribute spelled out, and every space does where an operand isn't an integer constant this reads
-// (`address_space(1+0)`), whose space could be any one. One scan of the `__attribute__` tokens, on a pass's first rendered type.
+// (`address_space(1+0)`), whose space could be any one. One scan of the `__attribute__` tokens, with the pass's other spelling rows (check_driver_spelling_ready).
 static bool check_driver_space_macros(const Parser* parser, Preprocessor* pp, CheckWarningSpelling* spell, Arena* scratch)
 {
     uint32_t* spaces = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, BUSTER_CHECK_DRIVER_SPACE_MACROS);
     String8* texts = spaces != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, String8, BUSTER_CHECK_DRIVER_SPACE_MACROS) : NULL;
     bool* mixed = texts != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, bool, BUSTER_CHECK_DRIVER_SPACE_MACROS) : NULL;
     const bool valid = mixed != NULL;
-    const bool history = valid && pp_history_ensure(pp);
+    // The token histories only where an `address_space` attribute is written at all: most units have none.
+    bool written = false;
+    for (uint32_t t = 0; valid && !written && t < parser->tokens.count; t += 1)
+    {
+        const String8 name = parser->tokens.kinds[t] == PARSE_KIND_IDENTIFIER ? check_driver_warning_name(pp, parser->tokens.names[t]) : (String8){ 0 };
+        written = (name.length == 13 && memcmp(name.pointer, "address_space", 13) == 0) ||
+                  (name.length == 17 && memcmp(name.pointer, "__address_space__", 17) == 0);
+    }
+    const bool history = written && pp_history_ensure(pp);
     uint32_t count = 0;
     bool unreadable = false;
     const uint32_t token_count = parser->tokens.count;
@@ -369,22 +377,6 @@ static bool check_driver_space_macros(const Parser* parser, Preprocessor* pp, Ch
     return valid;
 }
 
-// Whether a type has a target address space at a level type_print reaches through pointers, arrays and functions'
-// results: where check_driver_space_macros's scan can matter.
-static bool check_driver_type_has_space(const TypeTable* types, TypeId type)
-{
-    bool found = false;
-    TypeId level = type;
-    for (uint32_t depth = 0; !found && depth < 256 && level != 0 && type_is_valid(types, level); depth += 1)
-    {
-        found = type_address_space(type_extended_qualifiers(types, level)) >= BUSTER_TYPE_SPACE_TARGET;
-        const TypeId bare = type_unqualified(type_strip_aligned(types, level));
-        const uint8_t kind = type_kind(types, bare);
-        level = kind == BUSTER_TYPE_KIND_POINTER || kind == BUSTER_TYPE_KIND_FUNCTION || type_kind_is_array(kind) ? types->types.base[type_index(bare)] : 0;
-    }
-    return found;
-}
-
 // One pass's spelling rows, built on its first rendered type (#992): a pass that renders none never scans the
 // token columns. A built pass keeps its rows until it ends, above every per-event mark.
 static bool check_driver_spelling_ready(const Parser* parser, Preprocessor* pp, const CheckInput* input, const TypeTable* types,
@@ -411,7 +403,11 @@ static bool check_driver_spelling_ready(const Parser* parser, Preprocessor* pp, 
         {
             valid = check_driver_spelling_build(parser, pp, input, types, spell, scratch);
         }
-
+        // With the other rows, below every event's mark: a pass's later events read the map too (#1447).
+        if (valid)
+        {
+            valid = check_driver_space_macros(parser, pp, spell, scratch);
+        }
         if (!valid)
         {
             spell->bytes = NULL;
@@ -618,11 +614,6 @@ static String8 check_driver_warning_type_at(const Parser* parser, Preprocessor* 
                 .anonymous = spell->anonymous,
                 .anonymous_count = spell->anonymous_count,
             };
-            if (!spell->space_built && check_driver_type_has_space(types, type))
-            {
-                spell->space_built = true;
-                spell->space_built = check_driver_space_macros(parser, pp, spell, scratch);
-            }
             names.space_macro_spaces = spell->space_macro_spaces;
             names.space_macro_texts = spell->space_macro_texts;
             names.space_macro_count = spell->space_macro_count;
