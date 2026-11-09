@@ -8704,8 +8704,25 @@ compares scalar/vector objects and poisoned multi-lane objects. The shared walk
 borrows live preprocessing options only during selection and retains no new
 pointer to a worker's preprocessor.
 
-`#pragma weak ALIAS = TARGET` remains refused because it can create a typed alias
-declaration without a C declarator. This is separate from ordinary weak binding.
+`#pragma weak ALIAS = TARGET` (#1849) declares ALIAS a weak alias of TARGET, as
+clang's Sema clones TARGET's declaration under ALIAS's name with weak and alias
+attributes: TARGET is looked up at the pragma, or at its first later external
+declaration, and one that already has an alias attribute makes it a no-op; a
+TARGET never declared is clang's "weak identifier 'TARGET' never declared" at
+ALIAS. The shapes whose ALIAS the unit declares with external linkage, of
+TARGET's kind, type and thread-local storage, without a section, alias or
+definition after the pragma and named by nothing after it, take the alias as
+attributes of ALIAS's declaration (`check_input_symbol_alias`), which the
+emission makes clang's weak alias of TARGET's definition; one whose ALIAS the
+unit defined before the pragma is clang's no-op. The rest stay refused by name:
+an ALIAS the unit doesn't declare (clang's clone is a declaration without a C
+declarator, which a later use names), one named after the pragma (clang's
+lookup then finds two declarations), one defined after it, of another kind,
+type or thread-local storage, with a section or an alias of its own, or a
+TARGET the unit doesn't define (clang's error at the pragma). This is separate
+from ordinary weak binding. `test-checker-driver`
+(`c_check_symbol_pragma_driver_test.c`) compares the supported shapes'
+symbols and programs with clang's, by both paths.
 
 With `-flazy-system-headers`, an earlier occurrence of the pragma's name in a
 deferred body is conservatively refused because its binding was not checked;
