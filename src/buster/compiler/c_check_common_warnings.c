@@ -1960,6 +1960,16 @@ static inline bool check_common_enum_cast_candidate(bool named, const Parser* pa
            check_common_enum_cast_source(parser, graph, stream, types, source);
 }
 
+// Whether an implicit conversion edge, its flags `flags`, from `source` to `target` is a candidate conversion between
+// enumerations (check_common_enum_cast_candidate): an assignment's, neither a cast's nor an atomic's. Out of line, so
+// that the candidate tests it joins keep their code where the unit names no tagged enumeration (CheckInput.enum_names).
+static __attribute__((noinline)) bool check_common_enum_cast_edge(const Parser* parser, const CheckGraph* graph, const CheckStream* stream,
+                                                                  const TypeTable* types, uint32_t source, uint32_t flags, TypeId target)
+{
+    return (flags & BUSTER_CHECK_CONVERT_ASSIGNMENT) != 0 && (flags & (BUSTER_CHECK_CONVERT_CAST | BUSTER_CHECK_CONVERT_ATOMIC)) == 0 &&
+           check_common_enum_cast_candidate(true, parser, graph, stream, types, source, target);
+}
+
 // Clang's conversion between different enumerations (#1447, CheckImplicitConversion's last case): `source`'s implicit
 // conversion to `target`, carried to a conditional's arms (its true arm's first, the unselected one's too: no runtime
 // pruning) and to a root comma's result, warns at each leaf whose type, an enumerator's taken as its enumeration
@@ -4611,13 +4621,10 @@ static uint8_t check_common_candidate_bits(const Parser* parser, const CheckGrap
                                             (op == CHECK_OP_ASSIGN &&
                                              check_common_bitfield_assignment(graph, stream, types, node, &bit_width, &original, &truncated)));
             }
-            if (!conversion)
-            {
-                // A conversion between enumerations (#1447, check_common_enum_cast).
-                const uint32_t flags = stream->conversions[node].operands[op == CHECK_OP_ASSIGN ? 1u : 0u].flags;
-                conversion = (flags & BUSTER_CHECK_CONVERT_ASSIGNMENT) != 0 && (flags & (BUSTER_CHECK_CONVERT_CAST | BUSTER_CHECK_CONVERT_ATOMIC)) == 0 &&
-                             check_common_enum_cast_candidate(enum_names, parser, graph, stream, types, source, check_stream_type(stream, node));
-            }
+            // A conversion between enumerations (#1447, check_common_enum_cast).
+            conversion = conversion || (enum_names && check_common_enum_cast_edge(parser, graph, stream, types, source,
+                                                                                    stream->conversions[node].operands[op == CHECK_OP_ASSIGN ? 1u : 0u].flags,
+                                                                                    check_stream_type(stream, node)));
             if (!conversion && check_common_bool_candidate(graph, source))
             {
                 // A `<<` converted to _Bool, constant or not (#1447, check_common_int_in_bool).
@@ -4642,10 +4649,8 @@ static uint8_t check_common_candidate_bits(const Parser* parser, const CheckGrap
             if (source < graph->count && source < stream->count)
             {
                 // A conversion between enumerations (#1447, check_common_enum_cast), a prototype's parameter's.
-                const CheckConversion cast = stream->argument_conversions[offset + i];
-                const bool enum_cast = (cast.flags & BUSTER_CHECK_CONVERT_ASSIGNMENT) != 0 &&
-                                       (cast.flags & (BUSTER_CHECK_CONVERT_CAST | BUSTER_CHECK_CONVERT_ATOMIC)) == 0 &&
-                                       check_common_enum_cast_candidate(enum_names, parser, graph, stream, types, source, cast.type);
+                const bool enum_cast = enum_names && check_common_enum_cast_edge(parser, graph, stream, types, source, stream->argument_conversions[offset + i].flags,
+                                                                                  stream->argument_conversions[offset + i].type);
                 const CheckConstantKind constant = check_stream_constant_kind(stream, source);
                 const bool arms = check_common_conversion_arms(graph, source);
                 if (check_common_conversion_source(constant, arms))
