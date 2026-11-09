@@ -179,6 +179,10 @@ static __attribute__((unused)) CBuiltinLibraryFold cbuiltin_library_fold(CBuilti
 // builtin (its name a builtin of the unit, external, of the row's prototype: Sema's BuiltinAttr), folds as __builtin_X's
 // does (c_check_builtin_library.c's check_builtin_library_fold_plain). memchr, strchr, wcschr and wmemchr fold to
 // pointers, which the code calls instead, and memcpy, memmove, wmemcpy and wmemmove in C++'s constant evaluation alone.
+// Past them, the plain builtins that don't fold (no E: CBUILTIN_LIBRARY_FOLD_NONE) but whose call clang -O0's code
+// computes inline (#967): fmax, fmin, fmaximum_num and fminimum_num of float and double, llvm.maxnum's, minnum's,
+// maximumnum's and minimumnum's, which the lowering computes as __builtin_X's (`library`, their library builtin, and
+// CBUILTIN_LIBRARY_COUNT for the folds').
 typedef struct CBuiltinLibraryPlainFold CBuiltinLibraryPlainFold;
 struct CBuiltinLibraryPlainFold
 {
@@ -186,19 +190,28 @@ struct CBuiltinLibraryPlainFold
     const char* prototype;
     CBuiltinLibraryFold fold;
     bool wide;
+    CBuiltinLibraryId library;
 };
 
 static const CBuiltinLibraryPlainFold cbuiltin_library_plain_folds[] __attribute__((unused)) =
 {
-    { "bcmp", "ivC*vC*z", CBUILTIN_LIBRARY_FOLD_COMPARE_MEMORY, false },
-    { "memcmp", "ivC*vC*z", CBUILTIN_LIBRARY_FOLD_COMPARE_MEMORY, false },
-    { "strcmp", "icC*cC*", CBUILTIN_LIBRARY_FOLD_COMPARE, false },
-    { "strlen", "zcC*", CBUILTIN_LIBRARY_FOLD_LENGTH, false },
-    { "strncmp", "icC*cC*z", CBUILTIN_LIBRARY_FOLD_COMPARE_BOUNDED, false },
-    { "wcscmp", "iwC*wC*", CBUILTIN_LIBRARY_FOLD_COMPARE, true },
-    { "wcslen", "zwC*", CBUILTIN_LIBRARY_FOLD_LENGTH, true },
-    { "wcsncmp", "iwC*wC*z", CBUILTIN_LIBRARY_FOLD_COMPARE_BOUNDED, true },
-    { "wmemcmp", "iwC*wC*z", CBUILTIN_LIBRARY_FOLD_COMPARE_MEMORY, true },
+    { "bcmp", "ivC*vC*z", CBUILTIN_LIBRARY_FOLD_COMPARE_MEMORY, false, CBUILTIN_LIBRARY_COUNT },
+    { "memcmp", "ivC*vC*z", CBUILTIN_LIBRARY_FOLD_COMPARE_MEMORY, false, CBUILTIN_LIBRARY_COUNT },
+    { "strcmp", "icC*cC*", CBUILTIN_LIBRARY_FOLD_COMPARE, false, CBUILTIN_LIBRARY_COUNT },
+    { "strlen", "zcC*", CBUILTIN_LIBRARY_FOLD_LENGTH, false, CBUILTIN_LIBRARY_COUNT },
+    { "strncmp", "icC*cC*z", CBUILTIN_LIBRARY_FOLD_COMPARE_BOUNDED, false, CBUILTIN_LIBRARY_COUNT },
+    { "wcscmp", "iwC*wC*", CBUILTIN_LIBRARY_FOLD_COMPARE, true, CBUILTIN_LIBRARY_COUNT },
+    { "wcslen", "zwC*", CBUILTIN_LIBRARY_FOLD_LENGTH, true, CBUILTIN_LIBRARY_COUNT },
+    { "wcsncmp", "iwC*wC*z", CBUILTIN_LIBRARY_FOLD_COMPARE_BOUNDED, true, CBUILTIN_LIBRARY_COUNT },
+    { "wmemcmp", "iwC*wC*z", CBUILTIN_LIBRARY_FOLD_COMPARE_MEMORY, true, CBUILTIN_LIBRARY_COUNT },
+    { "fmax", "ddd", CBUILTIN_LIBRARY_FOLD_NONE, false, CBUILTIN_LIBRARY_FMAX },
+    { "fmaxf", "fff", CBUILTIN_LIBRARY_FOLD_NONE, false, CBUILTIN_LIBRARY_FMAXF },
+    { "fmin", "ddd", CBUILTIN_LIBRARY_FOLD_NONE, false, CBUILTIN_LIBRARY_FMIN },
+    { "fminf", "fff", CBUILTIN_LIBRARY_FOLD_NONE, false, CBUILTIN_LIBRARY_FMINF },
+    { "fmaximum_num", "ddd", CBUILTIN_LIBRARY_FOLD_NONE, false, CBUILTIN_LIBRARY_FMAXIMUM_NUM },
+    { "fmaximum_numf", "fff", CBUILTIN_LIBRARY_FOLD_NONE, false, CBUILTIN_LIBRARY_FMAXIMUM_NUMF },
+    { "fminimum_num", "ddd", CBUILTIN_LIBRARY_FOLD_NONE, false, CBUILTIN_LIBRARY_FMINIMUM_NUM },
+    { "fminimum_numf", "fff", CBUILTIN_LIBRARY_FOLD_NONE, false, CBUILTIN_LIBRARY_FMINIMUM_NUMF },
 };
 
 #define BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS ((uint32_t)(sizeof(cbuiltin_library_plain_folds) / sizeof(cbuiltin_library_plain_folds[0])))

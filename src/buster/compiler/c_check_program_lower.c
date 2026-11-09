@@ -6289,9 +6289,26 @@ static void check_lower_call_to(CheckLowerWriter* writer, uint32_t node, CheckLo
     check_lower_call_result(writer, node, runtime, omit, omitted, BUSTER_CHECK_NONE);
 }
 
+static CBuiltinId check_lower_library_extreme(CBuiltinLibraryId library);
+static void check_lower_vector_floating(CheckLowerWriter* writer, uint32_t node, CBuiltinId builtin, uint32_t arguments);
+
+// A call, but one of the unit's declaration of fmax, fmin or their _num kin of float or double that clang makes the
+// builtin (the reader's mark, BUSTER_CHECK_LIBRARY_CALL), which clang -O0's code computes inline as __builtin_X's (#967);
+// a musttail return's stays the call it names.
 static void check_lower_call(CheckLowerWriter* writer, uint32_t node)
 {
-    check_lower_call_to(writer, node, CHECK_LOWER_RUNTIMES, 0, 0);
+    const uint32_t member = writer->program->input->graph.members[node];
+    const uint32_t index = member & ~BUSTER_CHECK_LIBRARY_CALL;
+    const bool marked = (member & BUSTER_CHECK_LIBRARY_CALL) != 0 && index < BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS;
+    const CBuiltinId extreme = marked ? check_lower_library_extreme(cbuiltin_library_plain_folds[index].library) : CBUILTIN_COUNT;
+    if (extreme != CBUILTIN_COUNT && writer->program->input->graph.argument_counts[node] == 2 && node != writer->tail)
+    {
+        check_lower_vector_floating(writer, node, extreme, 2);
+    }
+    else
+    {
+        check_lower_call_to(writer, node, CHECK_LOWER_RUNTIMES, 0, 0);
+    }
 }
 
 // A direct atomic load or store (#1059, check_program_direct_access's `marker`): the pointer's operand, for a store the
@@ -10323,6 +10340,24 @@ static bool check_lower_library_promoted(CheckLowerWriter* writer, uint32_t node
     return bits || runtime != CHECK_LOWER_RUNTIMES;
 }
 
+// The llvm intrinsic clang -O0's code computes a library builtin of float or double by, of the four it computes inline
+// rather than calling the library (#967): fmax's and fmin's llvm.maxnum and minnum, fmaximum_num's and fminimum_num's
+// llvm.maximumnum and minimumnum, as the elementwise builtins that are those intrinsics; CBUILTIN_COUNT for any other.
+// CBUILTIN_LIBRARY_COUNT's too, a plain fold's (cbuiltin_library_plain_folds).
+static CBuiltinId check_lower_library_extreme(CBuiltinLibraryId library)
+{
+    CBuiltinId result = CBUILTIN_COUNT;
+    switch (library)
+    {
+        case CBUILTIN_LIBRARY_FMAX: case CBUILTIN_LIBRARY_FMAXF: result = CBUILTIN_ELEMENTWISE_MAXNUM; break;
+        case CBUILTIN_LIBRARY_FMIN: case CBUILTIN_LIBRARY_FMINF: result = CBUILTIN_ELEMENTWISE_MINNUM; break;
+        case CBUILTIN_LIBRARY_FMAXIMUM_NUM: case CBUILTIN_LIBRARY_FMAXIMUM_NUMF: result = CBUILTIN_ELEMENTWISE_MAXIMUMNUM; break;
+        case CBUILTIN_LIBRARY_FMINIMUM_NUM: case CBUILTIN_LIBRARY_FMINIMUM_NUMF: result = CBUILTIN_ELEMENTWISE_MINIMUMNUM; break;
+        default: break;
+    }
+    return result;
+}
+
 // An x86 builtin's call: a leaf's (c_builtin_x86_helpers.c) where the helpers planned one for it, the generic
 // __builtin_unpredictable's operand (its hint is the branch's, which Tier 0 doesn't take) and __builtin_assume's nothing
 // (its operand isn't evaluated), or its row (check_lower_x86_row_builtin).
@@ -10346,6 +10381,11 @@ static __attribute__((noinline)) void check_lower_x86_builtin(CheckLowerWriter* 
     else if (library != CBUILTIN_LIBRARY_COUNT && cbuiltin_library_half(library) && check_lower_library_promoted(writer, node, library))
     {
         // Computed as clang's code computes it (check_lower_library_promoted).
+    }
+    else if (library != CBUILTIN_LIBRARY_COUNT && check_lower_library_extreme(library) != CBUILTIN_COUNT)
+    {
+        // fmax, fmin and their _num kin of float and double, computed as clang's code computes their intrinsics (#967).
+        check_lower_vector_floating(writer, node, check_lower_library_extreme(library), 2);
     }
     else if (library != CBUILTIN_LIBRARY_COUNT)
     {
@@ -10838,6 +10878,7 @@ static void check_lower_vector_floating(CheckLowerWriter* writer, uint32_t node,
     const bool ldexp = builtin == CBUILTIN_ELEMENTWISE_LDEXP;
     const TypeId exponent = ldexp ? stream->argument_conversions[first + 1].type : 0;
     Tier0Operation row;
+    Tier0Operation tail;
     CheckVectorConstants constants = { 0 };
     const char* reason = NULL;
     if (bytes != 0)
@@ -10860,8 +10901,28 @@ static void check_lower_vector_floating(CheckLowerWriter* writer, uint32_t node,
     {
         // An exponent wider than 64 bits (an __int128's, a _BitInt's) has no instruction's conversion.
         const uint64_t width = ldexp ? type_size(types, exponent) : 0;
-        reason = ldexp && width != 4 && width != 8 ? "ldexp of exponents wider than 64 bits" : check_vector_floating_scalar_row(&writer->target, builtin, class, &row, &constants);
-        if (reason == NULL)
+        reason = ldexp && width != 4 && width != 8 ? "ldexp of exponents wider than 64 bits" :
+                                                     check_vector_floating_scalar_row(&writer->target, builtin, class, &row, &constants, &tail);
+        if (reason == NULL && tail.record_count != 0)
+        {
+            // Two rows (check_vector_extreme_scalar_rows' maximumnum and minimumnum without AVX): x and y in temporaries,
+            // the first row of x, y and its constant, then the tail of its value, y and x.
+            const uint32_t x = check_lower_temporary(writer, class);
+            const uint32_t y = check_lower_temporary(writer, class);
+            check_lower_instruction(writer, BUSTER_TYPED_X86, class, check_lower_operation_index(writer, &tail));
+            check_lower_instruction(writer, BUSTER_TYPED_LOCAL, class, x);
+            check_lower_instruction(writer, BUSTER_TYPED_LOCAL, class, y);
+            check_lower_instruction(writer, BUSTER_TYPED_X86, class, check_lower_operation_index(writer, &row));
+            check_lower_row_constants(writer, &row, &constants, arguments);
+            check_lower_instruction(writer, BUSTER_TYPED_LOCAL, class, y);
+            check_lower_instruction(writer, BUSTER_TYPED_LOCAL, class, x);
+            check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, class, y);
+            check_lower_operand(writer, node, 4, false, stream->argument_conversions[first + 1].type);
+            check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, class, x);
+            check_lower_operand(writer, node, 3, false, stream->argument_conversions[first].type);
+            writer->vectors = true;
+        }
+        else if (reason == NULL)
         {
             check_lower_instruction(writer, BUSTER_TYPED_X86, class, check_lower_operation_index(writer, &row));
             check_lower_row_constants(writer, &row, &constants, arguments);
