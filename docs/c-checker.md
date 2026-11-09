@@ -8034,6 +8034,10 @@ arguments against the function. The checker now gives these as clang does.
   (`CheckInput.interrupt_calls`), the calls are looked through
   (`check_input_interrupt_calls`): a direct call of a function an
   interrupt attribute marks, at or before the declaration its name finds
+  (along the declarations each redeclaration's lookup found, which clang
+  merges it with: one in a closed or hidden block isn't a later file-scope
+  declaration's that has an earlier visible one, #1447,
+  `CheckInput.redeclaration_links`)
   (through parentheses, `_Generic`, `__builtin_choose_expr` and one
   address-of, as `ActOnCallExpr` finds it; in `sizeof` and `_Generic`'s
   operands too), is clang's "interrupt service routine cannot be called
@@ -8459,10 +8463,6 @@ arguments against the function. The checker now gives these as clang does.
       `typeof`'s, a constant array bound's), those of a builtin and those
       whose callee isn't a name (`typeof(s.f())`) are neither a direct call's
       error nor -Wexcessive-regsave's warning;
-    - a declaration's interrupt and no_caller_saved_registers are an entity's
-      first declarations' with them, up to the declaration a call's name finds
-      (or the definition): a block's redeclaration that clang's chain doesn't
-      link is taken as linked;
     - a direct call's error drops every other diagnostic of its full
       expression (`CheckInput.interrupt_ranges`: its declarator's initializer
       or its statement, but the call's other arguments and list elements),

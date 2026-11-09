@@ -224,6 +224,17 @@ static void check_test_driver_interrupts(CheckTest* test, const char* clang, con
         { "__attribute__((interrupt)) void h(void *); int g(int, int); void f(void) { g((h(0), 1), 1 / 0); }\n", NULL, { "-Wall", NULL } },
         { "__attribute__((interrupt)) void h(void *); void f(void) { unsigned u = 0; int i = 0; (void)(u < (h(0), i)); _Generic(h(0), default: 0); }\n", NULL,
           { "-Wall", NULL } },
+        // A redeclaration inherits from the declaration its lookup finds (#1447, CheckInput.redeclaration_links): a block's
+        // declaration in a closed or hidden scope isn't found by a later file-scope one that has an earlier visible one.
+        { "void f(void *p); void g(void) { { __attribute__((interrupt)) void f(void *); } } void f(void *p); void k(void) { f(0); }\n", NULL, { NULL } },
+        { "void f(void *p); void g(void) { int f; { __attribute__((interrupt)) void f(void *); } } void f(void *p); void k(void) { f(0); }\n", NULL, { NULL } },
+        { "void g(void) { int f; { __attribute__((interrupt)) void f(void *); } } void f(void *p); void k(void) { f(0); }\n", NULL, { NULL } },
+        { "void g(void) { int f; { __attribute__((interrupt)) void f(void *); f(0); } }\n", NULL, { NULL } },
+        { "void f(void *p); void g(void) { { __attribute__((interrupt)) void f(void *); } void f(void *); f(0); }\n", NULL, { NULL } },
+        { "void g(void) { { __attribute__((interrupt)) void f(void *); } } void k(void) { void f(void *); f(0); }\n", NULL, { NULL } },
+        { "void f(void *p); void g(void) { int f; { __attribute__((interrupt)) void f(void *); } } void k(void) { void f(void *); f(0); }\n", NULL, { NULL } },
+        { "void g(int f) { { __attribute__((interrupt)) void f(void *); } } void f(void *p); void k(void) { f(0); }\n", NULL, { NULL } },
+        { "void q(void); void g(void) { { __attribute__((no_caller_saved_registers)) void q(void); } } void q(void); __attribute__((interrupt)) void h(void *p) { q(); }\n", NULL, { NULL } },
         // A call around one's error is clang's invalid expression, of no -Wexcessive-regsave warning of its own.
         { "__attribute__((interrupt)) void h(void *p) { (void)__builtin_call_with_static_chain(h(p), p); }\n", NULL, { NULL } },
         { "__attribute__((interrupt)) void f(void *p); int g(int); __attribute__((interrupt)) void h(void *p) { g((f(p), 1)); g(2); }\n", NULL, { NULL } },

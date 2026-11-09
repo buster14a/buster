@@ -985,6 +985,14 @@ struct CheckInput
     // Whether the unit read x86's interrupt or no_caller_saved_registers (#147): only then are its calls looked through
     // after checking, for the direct calls of interrupt service routines and -Wexcessive-regsave (check_input_interrupt_calls).
     bool interrupt_calls;
+    // The function declarations whose lookup found a declaration of their entity other than its latest (#1447): pairs of
+    // the declaration and the one it found, in source order. clang merges a redeclaration with the declaration its lookup
+    // finds (MergeFunctionDecl's Old), whose attributes it inherits, not with a later one in a closed or hidden scope:
+    // `void f(void *); void g(void) { { __attribute__((interrupt)) void f(void *); } } void f(void *);`'s third declaration
+    // is the first's alone. check_input_interrupt_calls reads them; a lane refuses to make one.
+    uint32_t* redeclaration_links;
+    uint32_t redeclaration_link_count;
+    uint32_t redeclaration_link_capacity;
     // The full expressions of those direct calls (#1447): triples of a range's first token (with BUSTER_CHECK_INTERRUPT_KEEP
     // for one of the call's other arguments or list elements), its last and the call's callee's first, in which clang's
     // invalid call leaves no other diagnostic, while the unit's others are found as a valid one's are
@@ -10159,6 +10167,32 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
         (reader->output->function_flags[linked_library - 1] & CHECK_INPUT_FUNCTION_IMPLICIT_LIBRARY) != 0 &&
         (reader->output->function_flags[token] & CHECK_INPUT_FUNCTION_IMPLICIT_LIBRARY) == 0;
     check_input_inherit_abi(reader, token, old, overload);
+    // A function declaration whose lookup found another declaration of its entity than the latest (#1447,
+    // CheckInput.redeclaration_links).
+    const uint32_t latest = kind == C_BINDING_FUNCTION && linked_visible && reader->linked_declarations != NULL ? reader->linked_declarations[name] : 0;
+    if (latest != 0 && latest - 1 != old_declaration && reader->declaration_kinds[latest - 1] == C_BINDING_FUNCTION)
+    {
+        check_input_lane_refuse(reader, reader->lane, "a body declares a function its lookup links to other than its latest declaration");
+        CheckInput* input = reader->output;
+        if (!reader->lane && input->redeclaration_link_count == input->redeclaration_link_capacity && !input->resource)
+        {
+            const uint32_t capacity = input->redeclaration_link_capacity != 0 ? input->redeclaration_link_capacity * 2 : 4;
+            uint32_t* grown = BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint32_t, (uint64_t)capacity * 2);
+            input->resource |= grown == NULL;
+            if (grown != NULL && input->redeclaration_link_count != 0)
+            {
+                memcpy(grown, input->redeclaration_links, (uint64_t)input->redeclaration_link_count * 2 * sizeof(uint32_t));
+            }
+            input->redeclaration_links = grown != NULL ? grown : input->redeclaration_links;
+            input->redeclaration_link_capacity = grown != NULL ? capacity : input->redeclaration_link_capacity;
+        }
+        if (!reader->lane && input->redeclaration_link_count < input->redeclaration_link_capacity)
+        {
+            input->redeclaration_links[input->redeclaration_link_count * 2] = token;
+            input->redeclaration_links[input->redeclaration_link_count * 2 + 1] = old_declaration;
+            input->redeclaration_link_count += 1;
+        }
+    }
     // A cpu_specific or cpu_dispatch declaration (#1447) of another version than the visible one before it is an entity of
     // its own, bound apart; one of an earlier version's redeclares that one, its definitions one entity's.
     bool versions = false;
