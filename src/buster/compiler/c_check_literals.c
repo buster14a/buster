@@ -391,7 +391,8 @@ static void check_literal_number_plain(const uint8_t* bytes, uint32_t length, Ar
             }
             else if (type == BUSTER_TYPE_FLOAT128)
             {
-                // Its bits in `integer` and `high`, its mirror the value (c_check_quad.c), as check_literal_value reads them.
+                // Its bits in `integer` and `high`, its mirror the value (c_check_quad.c), as check_literal_value reads
+                // them.
                 unsigned __int128 bits = 0;
                 represented = check_literal_quad(spelling, &end, &bits);
                 value = check_quad_mirror(bits);

@@ -4063,8 +4063,8 @@ static void check_common_conversion_leaf(const Parser* parser, Preprocessor* pp,
             const bool out_of_range = (changed.flags & BUSTER_CHECK_GNU_FLOAT_RANGE) != 0;
             const __int128 target_integer = check_common_integer_value(&changed, width, is_signed);
             const long double target_float = is_signed ? (long double)target_integer : (long double)changed.integer;
-            // A __float128's value is its bits' (c_check_quad.c), which its mirror may round. A -0 changes too, as clang
-            // takes its sign (its mirror's is the bits').
+            // A __float128's value is its bits' (c_check_quad.c), which its mirror may round. A -0 changes too, as
+            // clang takes its sign (its mirror's is the bits').
             const bool quad = type_unqualified(type_strip_aligned(types, value->type)) == BUSTER_TYPE_FLOAT128;
             const bool negative_zero = value->floating == 0 && signbit(value->floating) != 0;
             const bool different = negative_zero || (quad ? check_common_quad_changed(value->integer, target_integer, changed.integer, is_signed) :

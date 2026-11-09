@@ -126,8 +126,8 @@ static long double check_builtin_library_extreme(long double x, long double y, b
     return x != x ? y : y != y ? x : extreme;
 }
 
-// The __float128 folds (#1250): fabsf128 and copysignf128 of their bits' signs, and fmaxf128, fminf128 and their _num kin
-// of their values (c_check_quad.c), as check_builtin_library_extreme decides them. Whether it folded.
+// The __float128 folds (#1250): fabsf128 and copysignf128 of their bits' signs, and fmaxf128, fminf128 and their _num
+// kin of their values (c_check_quad.c), as check_builtin_library_extreme decides them. Whether it folded.
 static __attribute__((noinline)) bool check_builtin_library_fold_quad(CBuiltinLibraryFold fold, const CheckValue* converted, uint32_t count, CheckValue* folded)
 {
     const bool floating = count >= 1 && converted[0].constant_kind == CHECK_CONSTANT_FLOATING &&

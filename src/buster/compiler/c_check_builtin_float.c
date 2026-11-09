@@ -146,8 +146,8 @@ static CheckValue check_builtin_float_argument(TypeTable* table, const CheckBuil
 }
 
 // A NaN's payload string, as clang's getAsInteger reads it: decimal, or hexadecimal, binary or octal after its prefix.
-// The payload is reduced modulo 2^128, which every format keeps whole below its quiet bit (float's 22 bits, double's 51,
-// _Float16's 9, long double's 62 and __float128's 111), as makeNaN truncates it.
+// The payload is reduced modulo 2^128, which every format keeps whole below its quiet bit (float's 22 bits, double's
+// 51, _Float16's 9, long double's 62 and __float128's 111), as makeNaN truncates it.
 static bool check_builtin_float_payload(const uint8_t* bytes, uint32_t length, unsigned __int128* payload)
 {
     uint32_t base = 10;
@@ -191,10 +191,10 @@ static bool check_builtin_float_payload(const uint8_t* bytes, uint32_t length, u
 }
 
 // The constant builtins' values (huge_val, inf, nan and nans of each type): an infinity, or a NaN of the type's format
-// with `payload` as clang's APFloat makeNaN gives it, the payload masked below the quiet bit, the quiet bit set or, for a
-// signaling NaN, clear, and a signaling NaN without a payload given the bit below the quiet one. In the long double as
-// check_action_nan_bits reads it: the format's fraction at the significand's top (a long double's whole). A __float128's
-// are its bits (c_check_quad.c), which the caller makes.
+// with `payload` as clang's APFloat makeNaN gives it, the payload masked below the quiet bit, the quiet bit set or, for
+// a signaling NaN, clear, and a signaling NaN without a payload given the bit below the quiet one. In the long double
+// as check_action_nan_bits reads it: the format's fraction at the significand's top (a long double's whole). A
+// __float128's are its bits (c_check_quad.c), which the caller makes.
 static long double check_builtin_float_special(TypeId type, bool nan, bool signaling, uint64_t payload)
 {
     _Static_assert(sizeof(long double) == 16 && LDBL_MANT_DIG == 64 && LDBL_MAX_EXP == 16384, "the checker host uses x87 extended precision");
@@ -453,8 +453,8 @@ static bool check_builtin_float_compare_long(uint32_t id, long double a, long do
            id == CBUILTIN_ISLESSGREATER ? __builtin_islessgreater(a, b) : __builtin_isunordered(a, b);
 }
 
-// A __float128's by its bits, NaNs unordered first, so that the host compares only numbers, with its plain operators (the
-// comparison builtins of a run-time __float128 are no code this compiler makes, and it compiles itself).
+// A __float128's by its bits, NaNs unordered first, so that the host compares only numbers, with its plain operators
+// (the comparison builtins of a run-time __float128 are no code this compiler makes, and it compiles itself).
 static __attribute__((noinline)) bool check_builtin_float_compare_quad(uint32_t id, unsigned __int128 left, unsigned __int128 right)
 {
     const bool unordered = check_quad_is_nan(left) || check_quad_is_nan(right);
@@ -491,8 +491,8 @@ static void check_builtin_float_compare(TypeTable* table, const CheckBuiltinFloa
             check_action_conversion(table, &values[i], common, BUSTER_CHECK_CONVERT_ARITHMETIC, &output->argument_conversions[i], input->node);
         }
         check_builtin_float_inherit(output, values, 3, 3, 2);
-        // A __float128's constants compare by their bits (c_check_quad.c), as the host's binary128: two values its mirror
-        // can't tell apart.
+        // A __float128's constants compare by their bits (c_check_quad.c), as the host's binary128: two values its
+        // mirror can't tell apart.
         const bool quad = type_unqualified(type_strip_aligned(table, common)) == BUSTER_TYPE_FLOAT128;
         const bool known = (supported || quad) && values[0].constant_kind == CHECK_CONSTANT_FLOATING && values[1].constant_kind == CHECK_CONSTANT_FLOATING &&
                            output->action.value.fault == CHECK_FAULT_NONE;
@@ -762,8 +762,8 @@ static void check_builtin_float_one(TypeTable* table, const CheckBuiltinFloatAct
                 }
                 output->selectors[i] = values[i];
             }
-            // A half-precision constant is its exact value, and a __float128 one's mirror its class (c_check_quad.c): they fold
-            // as clang folds them, though a __float128's run time is refused.
+            // A half-precision constant is its exact value, and a __float128 one's mirror its class (c_check_quad.c):
+            // they fold as clang folds them, though a __float128's run time is refused.
             const bool quad = type == BUSTER_TYPE_FLOAT128;
             const bool folds = supported || check_action_half_format(type) != CHECK_HALF_NONE || quad;
             const bool known = folds && !vector && values[fp].constant_kind == CHECK_CONSTANT_FLOATING && values[fp].fault == CHECK_FAULT_NONE;
