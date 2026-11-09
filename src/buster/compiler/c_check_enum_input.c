@@ -146,6 +146,7 @@ static bool check_input_enum_read(CheckInputReader* reader, CheckTagFrame* frame
     uint32_t i = name + 1;
     bool valid = name < frame->close && parser->tokens.kinds[name] == PARSE_KIND_IDENTIFIER;
     CheckValue value = { 0 };
+    bool missing = false;
     CheckInputAttributes* attributes = frame->enumerator_attributes;
     // An enum with a fixed underlying type is complete from its base on (check_input_tag_identity); one a mode completed
     // isn't fixed (BUSTER_CHECK_ENUM_MODED).
@@ -196,19 +197,25 @@ static bool check_input_enum_read(CheckInputReader* reader, CheckTagFrame* frame
                 }
                 i += 1;
             }
+            // Its undeclared names are clang's errors at each one, recovered (#1447, check_constant_name).
+            reader->constant_names = CHECK_CONSTANT_NAMES_RECOVER;
             frame->enum_job = valid ? check_input_constant_job(reader, first, i) : 0;
+            reader->constant_names = CHECK_CONSTANT_NAMES_NONE;
             frame->enumerator_attributes = attributes;
             failed_token = first;
         }
         CheckConstantInput* job = frame->enum_job;
         valid = job != 0 && check_input_constant_job_step(job, &value, nested_tag);
+        // An undeclared name in the value, which no correction took: clang's error, recovered, and the enumerator takes the
+        // value it would have had with none, as clang's does (`enum E { Z = 4, A = zzz, B }` gives A 5 and B 6).
+        missing = job != 0 && *nested_tag == BUSTER_CHECK_NONE && job->missing != 0;
         if (job != 0)
         {
             i = job->end;
             failed_token = job->failure != BUSTER_CHECK_NONE ? job->failure : job->first;
             if (*nested_tag == BUSTER_CHECK_NONE)
             {
-                valid = valid && check_input_const_rvalue(reader, i, &value) && check_input_integer_constant(reader, &value);
+                valid = !missing && valid && check_input_const_rvalue(reader, i, &value) && check_input_integer_constant(reader, &value);
                 if (valid)
                 {
                     check_input_constant_warning(reader, job->first, i, &value, true);
@@ -219,7 +226,12 @@ static bool check_input_enum_read(CheckInputReader* reader, CheckTagFrame* frame
                 arena_pop_to(reader->scratch, mark);
             }
         }
-        if (valid && *nested_tag == BUSTER_CHECK_NONE && fixed)
+        if (missing)
+        {
+            value = (CheckValue){ 0 };
+            valid = fixed ? check_input_enum_fixed_value(reader, frame, name, false, &value, false) : check_input_enum_successor(reader, frame, &value);
+        }
+        else if (valid && *nested_tag == BUSTER_CHECK_NONE && fixed)
         {
             valid = check_input_enum_fixed_value(reader, frame, name, true, &value, false);
         }
@@ -346,13 +358,15 @@ static bool check_input_enum_complete(CheckInputReader* reader, CheckTagFrame* f
     // the mode's (check_input_enum_mode).
     const CheckInputAttribute* late_mode = !moded && reader->enum_fixed[tag] == BUSTER_CHECK_ENUM_NONE ? check_input_enum_mode(frame->attributes, frame->close) : NULL;
     // An error after which clang installs no type, an unknown or unsupported mode's, leaves the enum as one with no mode
-    // (#1447); one that still installs a floating type gives it the integer of its layout (check_input_mode_enum_integer),
-    // and a complex one stops the reader.
+    // (#1447); one that still installs a floating or a complex type gives it the integer of its layout
+    // (check_input_mode_enum_integer), and XC's or TC's stops the reader.
     const CheckInputAttributeRecovery late_recovery = late_mode != NULL ? check_input_attribute_recovery(reader, frame->attributes, (CheckInputAttribute*)late_mode) :
                                                       (CheckInputAttributeRecovery){ 0 };
     TypeId late_installed = 0;
     const TypeId late_checked = late_mode != NULL ? check_input_attribute_mode(reader, frame->attributes, late_mode, frame->type, &late_installed) : 0;
-    const TypeId late_stand_in = late_mode != NULL && late_checked == 0 && late_installed != frame->type ? check_input_mode_enum_integer(reader->types, late_installed) : 0;
+    uint8_t late_alignment = 0;
+    const TypeId late_stand_in = late_mode != NULL && late_checked == 0 && late_installed != frame->type ?
+                                 check_input_mode_enum_integer(reader->types, late_installed, &late_alignment) : 0;
     const bool late_recovered = late_mode != NULL && late_checked == 0 && (late_installed == frame->type || late_stand_in != 0) &&
                                 check_input_attribute_recover(reader, frame->attributes, &late_recovery, 0, false, false);
     const bool late_dropped = late_recovered && late_installed == frame->type;
@@ -380,7 +394,9 @@ static bool check_input_enum_complete(CheckInputReader* reader, CheckTagFrame* f
         // (One a mode completed has its type; one after its body gives it.)
         const TypeId underlying = moded ? reader->types->types.base[type_index(frame->type)] : late_moded != 0 ? late_moded :
                                   type_enum_underlying(packed, frame->negative_bits, frame->positive_bits);
-        valid = valid && (moded || type_enum_complete(reader->types, frame->type, underlying, alignment));
+        // (A complex mode's stand-in takes the complex type's alignment, but where an alignment attribute gives one.)
+        const uint8_t complete_alignment = alignment != 0 || late_checked != 0 || !late_recovered ? alignment : late_alignment;
+        valid = valid && (moded || type_enum_complete(reader->types, frame->type, underlying, complete_alignment));
         reader->output->resource |= !valid && reader->types->last_error == TYPE_ERROR_FULL;
         reader->enum_fixed[tag] = moded ? BUSTER_CHECK_ENUM_LISTED : reader->enum_fixed[tag];
         if (valid)

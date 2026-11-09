@@ -7,7 +7,8 @@
 // (#179: a phi swap through k0, a slot swap through its temporary slot, masks across a call and eight masks in seven
 // registers), and a generator gives random SSA over random CFGs (loops, irreducible regions, several latches) of the
 // three classes, every value defined in a block that dominates its uses. Both entry points must give results that tier1_cfg_verify accepts, and tier1_allocation_verify where the
-// case is small enough for its quadratic check. Mutants of the published moves and fragments must fail the checker.
+// case is small enough for its quadratic check (on a slot per spilled value: three generated cases in four give slot
+// widths, and their phi webs share slots, #1216). Mutants of the published moves and fragments must fail the checker.
 // Every allocation's certificate (#939, tier1_certificate_cfg.c) must pass tier1_certificate_check, and the slow oracle
 // must give the same answer wherever its bounds take the program, for the allocations and for every mutant.
 
@@ -34,6 +35,9 @@ struct Tier1CfgTestBuilder
     // UINT32_MAX for a phi, defined at its block's start.
     uint32_t def_instruction[BUSTER_TIER1_CFG_TEST_VALUES];
     uint8_t remat[BUSTER_TIER1_CFG_TEST_VALUES];
+    // Each value's slot width, given to the input where share_slots asks for a phi web's shared slots (#1216).
+    uint8_t slot_width[BUSTER_TIER1_CFG_TEST_VALUES];
+    bool share_slots;
     uint32_t use_count;
     uint32_t use_value[BUSTER_TIER1_CFG_TEST_USES];
     uint32_t use_block[BUSTER_TIER1_CFG_TEST_USES];
@@ -87,6 +91,11 @@ struct Tier1CfgTestTally
     uint64_t destination_killed;
     uint64_t k0_mutants;
     uint64_t k0_killed;
+    // #1216: spilled values that share another's slot (a phi web's, tier1_cfg_share_slots), and two values whose slot
+    // fragments overlap given one slot: every such mutant must fail the checker.
+    uint64_t shared_slots;
+    uint64_t slot_mutants;
+    uint64_t slot_killed;
     // Phi operands that are undefined (BUSTER_TIER1_CFG_NONE, the IR's undef, #141).
     uint64_t undefined_operands;
     // #1142's review: allocations of a malformed shape (an interval map or an interval's fragments past their columns,
@@ -108,6 +117,7 @@ struct Tier1CfgTestTally
     uint64_t definition_refused;
     uint64_t destination_refused;
     uint64_t k0_refused;
+    uint64_t slot_refused;
     uint64_t shape_refused;
     uint64_t certificate_only;
     uint64_t verifier_only;
@@ -139,6 +149,7 @@ static uint32_t tier1_cfg_test_value(Tier1CfgTestBuilder* builder, uint32_t bloc
     builder->def_block[v] = block;
     builder->def_instruction[v] = instruction;
     builder->remat[v] = 0;
+    builder->slot_width[v] = 8;
     builder->value_count += 1;
     return v;
 }
@@ -211,7 +222,8 @@ static bool tier1_cfg_test_build(const Tier1CfgTestBuilder* builder, Arena* aren
     uint32_t* fixed_ends = arena_push_array(arena, builder->fixed_count + 1, sizeof(uint32_t), 4);
     uint32_t* fixed_registers = arena_push_array(arena, builder->fixed_count + 1, sizeof(uint32_t), 4);
     uint8_t* fixed_classes = arena_push(arena, builder->fixed_count + 1, 1);
-    const bool built = block_starts != 0 && successor_offsets != 0 && successors != 0 && predecessor_offsets != 0 && predecessors != 0 && classes != 0 && allowed != 0 && definitions != 0 && remat != 0 && use_offsets != 0 && use_positions != 0 && use_required != 0 && phi_offsets != 0 && phi_values != 0 && phi_operand_offsets != 0 && phi_operands != 0 && fixed_starts != 0 && fixed_ends != 0 && fixed_registers != 0 && fixed_classes != 0;
+    uint8_t* slot_widths = builder->share_slots ? arena_push(arena, builder->value_count + 1, 1) : 0;
+    const bool built = (!builder->share_slots || slot_widths != 0) && block_starts != 0 && successor_offsets != 0 && successors != 0 && predecessor_offsets != 0 && predecessors != 0 && classes != 0 && allowed != 0 && definitions != 0 && remat != 0 && use_offsets != 0 && use_positions != 0 && use_required != 0 && phi_offsets != 0 && phi_values != 0 && phi_operand_offsets != 0 && phi_operands != 0 && fixed_starts != 0 && fixed_ends != 0 && fixed_registers != 0 && fixed_classes != 0;
     if (built)
     {
         block_starts[0] = 0;
@@ -247,6 +259,10 @@ static bool tier1_cfg_test_build(const Tier1CfgTestBuilder* builder, Arena* aren
             allowed[v] = builder->allowed[v];
             definitions[v] = builder->def_instruction[v] == UINT32_MAX ? start : start + 2 * builder->def_instruction[v] + 1;
             remat[v] = builder->remat[v];
+            if (slot_widths != 0)
+            {
+                slot_widths[v] = builder->slot_width[v];
+            }
             use_offsets[v] = use;
             const uint32_t first = use;
             for (uint32_t u = 0; u < builder->use_count; u += 1)
@@ -307,6 +323,7 @@ static bool tier1_cfg_test_build(const Tier1CfgTestBuilder* builder, Arena* aren
             .allowed_registers = allowed,
             .definitions = definitions,
             .rematerializable = remat,
+            .slot_widths = slot_widths,
             .use_offsets = use_offsets,
             .use_positions = use_positions,
             .use_required = use_required,
@@ -447,6 +464,31 @@ static bool tier1_cfg_test_lookup(const Tier1CfgInput* input, const Tier1CfgAllo
     return ok;
 }
 
+// tier1_allocation_verify on the allocation with a slot for each spilled value, as tier1_allocate gives them: it takes a
+// slot to hold one value, and a phi web's shared slots (tier1_cfg_share_slots, #1216) change nothing else it checks.
+static bool tier1_cfg_test_unshared_verify(const Tier1CfgInput* input, const Tier1CfgAllocation* result, Arena* scratch)
+{
+    const uint64_t saved = scratch->length;
+    Tier1Allocation unshared = result->allocation;
+    uint32_t* ids = arena_push_array(scratch, (uint64_t)input->value_count + 1, sizeof(uint32_t), 4);
+    uint32_t* values = arena_push_array(scratch, (uint64_t)input->value_count + 1, sizeof(uint32_t), 4);
+    bool valid = ids != 0 && values != 0;
+    uint32_t count = 0;
+    for (uint32_t v = 0; valid && v < input->value_count; v += 1)
+    {
+        const bool spilled = result->allocation.spill_ids[v] != UINT32_MAX;
+        ids[v] = spilled ? count : UINT32_MAX;
+        values[count] = v;
+        count += spilled;
+    }
+    unshared.spill_ids = ids;
+    unshared.spill_values = values;
+    unshared.spill_count = count;
+    valid = valid && tier1_allocation_verify(&result->intervals, &unshared);
+    arena_pop_to(scratch, saved);
+    return valid;
+}
+
 // Allocates one case by both entry points and checks each result. Mutants of the first result with moves: every
 // edge move's destination redirected to an unused register, and one interval fragment's register swapped.
 // `temp_slots` are the classes whose temporary slot the case must use, `split_moves` the fewest moves at splits it must
@@ -476,6 +518,11 @@ static void tier1_cfg_test_case(Tier1CfgTestTally* tally, const Tier1CfgInput* i
             tally->split_moves += result.move_count - result.edge_move_offsets[input->edge_count];
             tally->split_edges += result.split_edges;
             tally->spills += result.allocation.spill_count;
+            for (uint32_t v = 0; v < input->value_count; v += 1)
+            {
+                tally->shared_slots += result.allocation.spill_ids[v] != UINT32_MAX;
+            }
+            tally->shared_slots -= result.allocation.spill_count;
             Tier1CfgCheck check;
             const bool verified = tier1_cfg_verify(input, &result, scratch, &check);
             if (!verified && tally->failures < 20)
@@ -487,7 +534,7 @@ static void tier1_cfg_test_case(Tier1CfgTestTally* tally, const Tier1CfgInput* i
             tier1_cfg_test_expect(tally, tier1_cfg_test_certify(tally, input, &result, output, scratch, true), "the certificate checker proves the allocation");
             if (result.intervals.count <= 600)
             {
-                tier1_cfg_test_expect(tally, tier1_allocation_verify(&result.intervals, &result.allocation), "the interval verifier accepts the allocation");
+                tier1_cfg_test_expect(tally, tier1_cfg_test_unshared_verify(input, &result, scratch), "the interval verifier accepts the allocation");
             }
             for (uint32_t m = 0; m < result.move_count; m += 1)
             {
@@ -539,6 +586,37 @@ static void tier1_cfg_test_case(Tier1CfgTestTally* tally, const Tier1CfgInput* i
                             allocation->registers[f] = saved;
                             tally->interference_mutants += 1;
                             tally->interference_killed += rejected;
+                            tried += 1;
+                        }
+                    }
+                }
+                // Slot: a spilled value given the slot of another value of its class whose slot fragment overlaps one of
+                // its own (#1216). Whichever reaches the slot second overwrites the other while the allocation keeps it there.
+                tried = 0;
+                for (uint32_t i = 0; tried < 4 && i < result.intervals.count; i += 1)
+                {
+                    const uint32_t v = result.intervals.values[i];
+                    for (uint32_t f = allocation->fragment_offsets[i]; tried < 4 && f < allocation->fragment_offsets[i + 1]; f += 1)
+                    {
+                        uint32_t other = UINT32_MAX;
+                        for (uint32_t j = 0; allocation->kinds[f] == BUSTER_TIER1_ALLOCATE_SPILL && other == UINT32_MAX && j < result.intervals.count; j += 1)
+                        {
+                            const uint32_t w = result.intervals.values[j];
+                            const bool apart = w != v && result.intervals.classes[j] == result.intervals.classes[i] && allocation->spill_ids[w] != allocation->spill_ids[v];
+                            for (uint32_t g = allocation->fragment_offsets[j]; apart && other == UINT32_MAX && g < allocation->fragment_offsets[j + 1]; g += 1)
+                            {
+                                const bool overlap = allocation->starts[g] < allocation->ends[f] && allocation->starts[f] < allocation->ends[g];
+                                other = overlap && allocation->kinds[g] == BUSTER_TIER1_ALLOCATE_SPILL ? w : other;
+                            }
+                        }
+                        if (other != UINT32_MAX)
+                        {
+                            const uint32_t saved = allocation->spill_ids[v];
+                            allocation->spill_ids[v] = allocation->spill_ids[other];
+                            const bool rejected = tier1_cfg_test_mutant(tally, input, &result, output, scratch, &tally->slot_refused);
+                            allocation->spill_ids[v] = saved;
+                            tally->slot_mutants += 1;
+                            tally->slot_killed += rejected;
                             tried += 1;
                         }
                     }
@@ -961,6 +1039,13 @@ static bool tier1_cfg_test_generate(Tier1CfgTestBuilder* builder, uint64_t seed,
             // One in six undefined: the IR's undef, which the edge moves nothing for (#141).
             builder->phi_operand[k][j] = tier1_cfg_test_random(&random) % 6 == 0 ? BUSTER_TIER1_CFG_NONE : chosen;
         }
+    }
+    // Three cases in four let a phi web share slots (#1216), one value in seven at another slot width, which keeps it
+    // apart; drawn from the seed, not the generator, so the programs stay those of earlier runs.
+    builder->share_slots = seed % 4 != 3;
+    for (uint32_t v = 0; v < builder->value_count; v += 1)
+    {
+        builder->slot_width[v] = v % 7 == 6 ? 4 : 8;
     }
     return valid;
 }
@@ -1502,6 +1587,7 @@ static __attribute__((unused)) int run_tier1_cfg_tests(int argc, char** argv)
         // slot-to-slot move through the scratch register and a temporary slot.
         tier1_cfg_test_expect(&tally, tally.interference_killed == tally.interference_mutants && tally.order_killed == tally.order_mutants && tally.definition_killed == tally.definition_mutants, "every mutant fails the checker");
         tier1_cfg_test_expect(&tally, tally.destination_killed == tally.destination_mutants && tally.k0_killed == tally.k0_mutants, "every split destination and k0 mutant fails the checker");
+        tier1_cfg_test_expect(&tally, tally.slot_killed == tally.slot_mutants && (count < 500 || (tally.slot_mutants != 0 && tally.shared_slots != 0)), "phi webs share slots, and every shared-slot mutant fails the checker");
         tier1_cfg_test_expect(&tally, tally.definition_mutants != 0, "the random programs' required definitions reach the definition mutant");
         tier1_cfg_test_expect(&tally, count < 500 || (tally.interference_mutants != 0 && tally.order_mutants != 0 && tally.destination_mutants != 0 && tally.k0_mutants != 0 && tally.split_edges != 0 && tally.split_moves != 0 && tally.scratch_moves != 0 && tally.temp_slot_cases != 0), "the cases reach every kind of move and mutant");
         tier1_cfg_test_expect(&tally, tally.mask_moves != 0 && tally.mask_spills != 0 && tally.mask_split_moves != 0, "the opmask class moves, spills and splits masks");
@@ -1513,11 +1599,11 @@ static __attribute__((unused)) int run_tier1_cfg_tests(int argc, char** argv)
         // names of equal contents in one register at a block's start, a mask in k0 for a fragment nothing reads), and
         // the certificate never refuses what the verifier accepts.
         tier1_cfg_test_expect(&tally, tally.order_refused == tally.order_mutants && tally.definition_refused == tally.definition_mutants && tally.destination_refused == tally.destination_mutants, "every order, definition and split destination mutant fails the certificate");
-        tier1_cfg_test_expect(&tally, tally.certificate_only == 0 && tally.verifier_only == (tally.interference_mutants - tally.interference_refused) + (tally.k0_mutants - tally.k0_refused), "the certificate refuses no mutant the verifier accepts");
+        tier1_cfg_test_expect(&tally, tally.certificate_only == 0 && tally.verifier_only == (tally.interference_mutants - tally.interference_refused) + (tally.k0_mutants - tally.k0_refused) + (tally.slot_mutants - tally.slot_refused), "the certificate refuses no mutant the verifier accepts");
         // A malformed shape must fail both, before either reads through it (#1142's review).
         tier1_cfg_test_expect(&tally, tally.shape_mutants != 0 && tally.shape_killed == tally.shape_mutants && tally.shape_refused == tally.shape_mutants, "every malformed shape fails both checkers");
-        printf("test-tier1-cfg: %" PRIu64 " checks, %" PRIu64 " failures; %" PRIu64 " allocations, %" PRIu64 " constraint refusals; %" PRIu64 " moves, %" PRIu64 " at splits, %" PRIu64 " through the scratch register, %" PRIu64 " split edges, %" PRIu64 " spilled values, %" PRIu64 " allocations with a temporary slot; %" PRIu64 " mask moves, %" PRIu64 " at splits, %" PRIu64 " spilled masks; mutants rejected: %" PRIu64 " of %" PRIu64 " interference, %" PRIu64 " of %" PRIu64 " order, %" PRIu64 " of %" PRIu64 " definition, %" PRIu64 " of %" PRIu64 " split destination, %" PRIu64 " of %" PRIu64 " k0 (seed=%" PRIu64 ", count=%" PRIu64 ")\n", tally.checks, tally.failures, tally.allocations, tally.constraints, tally.moves, tally.split_moves, tally.scratch_moves, tally.split_edges, tally.spills, tally.temp_slot_cases, tally.mask_moves, tally.mask_split_moves, tally.mask_spills, tally.interference_killed, tally.interference_mutants, tally.order_killed, tally.order_mutants, tally.definition_killed, tally.definition_mutants, tally.destination_killed, tally.destination_mutants, tally.k0_killed, tally.k0_mutants, seed, count);
-        printf("test-tier1-cfg: certificates: %" PRIu64 " proved (%" PRIu64 " by the oracle too), %" PRIu64 " facts, %" PRIu64 " edits, %" PRIu64 " operands, %" PRIu64 " renames; mutants refused: %" PRIu64 " interference, %" PRIu64 " order, %" PRIu64 " definition, %" PRIu64 " split destination, %" PRIu64 " k0, %" PRIu64 " of %" PRIu64 " shape; %" PRIu64 " refused by the certificate alone, %" PRIu64 " by the verifier alone\n", tally.certificates, tally.oracle_certificates, tally.certificate_facts, tally.certificate_edits, tally.certificate_operands, tally.certificate_renames, tally.interference_refused, tally.order_refused, tally.definition_refused, tally.destination_refused, tally.k0_refused, tally.shape_refused, tally.shape_mutants, tally.certificate_only, tally.verifier_only);
+        printf("test-tier1-cfg: %" PRIu64 " checks, %" PRIu64 " failures; %" PRIu64 " allocations, %" PRIu64 " constraint refusals; %" PRIu64 " moves, %" PRIu64 " at splits, %" PRIu64 " through the scratch register, %" PRIu64 " split edges, %" PRIu64 " spilled values, %" PRIu64 " allocations with a temporary slot; %" PRIu64 " mask moves, %" PRIu64 " at splits, %" PRIu64 " spilled masks; mutants rejected: %" PRIu64 " of %" PRIu64 " interference, %" PRIu64 " of %" PRIu64 " order, %" PRIu64 " of %" PRIu64 " definition, %" PRIu64 " of %" PRIu64 " split destination, %" PRIu64 " of %" PRIu64 " k0, %" PRIu64 " of %" PRIu64 " shared slot; %" PRIu64 " values in a phi web's slot (seed=%" PRIu64 ", count=%" PRIu64 ")\n", tally.checks, tally.failures, tally.allocations, tally.constraints, tally.moves, tally.split_moves, tally.scratch_moves, tally.split_edges, tally.spills, tally.temp_slot_cases, tally.mask_moves, tally.mask_split_moves, tally.mask_spills, tally.interference_killed, tally.interference_mutants, tally.order_killed, tally.order_mutants, tally.definition_killed, tally.definition_mutants, tally.destination_killed, tally.destination_mutants, tally.k0_killed, tally.k0_mutants, tally.slot_killed, tally.slot_mutants, tally.shared_slots, seed, count);
+        printf("test-tier1-cfg: certificates: %" PRIu64 " proved (%" PRIu64 " by the oracle too), %" PRIu64 " facts, %" PRIu64 " edits, %" PRIu64 " operands, %" PRIu64 " renames; mutants refused: %" PRIu64 " interference, %" PRIu64 " order, %" PRIu64 " definition, %" PRIu64 " split destination, %" PRIu64 " k0, %" PRIu64 " shared slot, %" PRIu64 " of %" PRIu64 " shape; %" PRIu64 " refused by the certificate alone, %" PRIu64 " by the verifier alone\n", tally.certificates, tally.oracle_certificates, tally.certificate_facts, tally.certificate_edits, tally.certificate_operands, tally.certificate_renames, tally.interference_refused, tally.order_refused, tally.definition_refused, tally.destination_refused, tally.k0_refused, tally.slot_refused, tally.shape_refused, tally.shape_mutants, tally.certificate_only, tally.verifier_only);
         result = tally.failures == 0 ? 0 : 1;
         arena_release(&work);
         arena_release(&scratch);
