@@ -4,9 +4,10 @@
 // The executable's entry point, main, which includes most of the compiler and all of its tests. build.sh compiles this
 // file once per unit, in parallel, so that the build waits for the largest unit rather than for all of this code in one
 // clang process (#270): main.c alone is the driver's unit, and each main_unit_*.c names another unit and includes this
-// file. Every unit reads all of it, and so has the whole file's diagnostics, but emits only its own commands' code: each
-// of main_command's branches first tests its unit, so that the other units' branches fold to false, and clang, which
-// emits a static function only once emitted code refers to it, emits none of theirs. main, in the driver's unit, asks
+// file. Shared implementation and fixtures are read by every unit; independent tests are included only in the unit
+// that runs them, keeping their parsing and edit dependencies there. Each of main_command's branches first tests its
+// unit (and an independent test's branch is included with its test), so the other units' branches fold to false. Clang
+// emits a static function only once emitted code refers to it, and emits none of theirs. main, in the driver's unit, asks
 // each other unit for the command in turn, then its own commands, then runs the compiler itself.
 //
 // The modules that several units' commands run compile in one unit alone, their home, which the others call (#270):
@@ -16,7 +17,7 @@
 // nothing, so that they have external linkage there, and in the other units BUSTER_ELSEWHERE, which makes their
 // definitions inline ones that are never inlined, which clang doesn't emit: their calls go to the home's, and the
 // static functions that only the entry points reach aren't emitted there either. A unit without main.c, a benchmark's,
-// has them static. Each unit still reads every definition, so that its diagnostics are the whole file's. A command
+// has them static. Each unit still reads the shared implementation definitions for diagnostics. A command
 // whose code calls a home's entry point runs in two units' copies of the code, so a home's code must share no static
 // variable with its callers' units: main.c's units have one lane context (lane.c), and ./build.sh check-call-graph
 // checks the rest (call_graph.c).
@@ -168,7 +169,9 @@ int run_dominator_benchmark(int argc, char** argv);
 #include "buster/compiler/tier1_allocate_test.c"
 #include "buster/compiler/tier1_cfg.c"
 #include "buster/compiler/tier1_certificate_cfg.c"
+#if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/tier1_cfg_test.c"
+#endif
 int run_tier1_allocate_benchmark(int argc, char** argv);
 
 // The preprocessor's fuzz tooling (#109): the generator, the clang oracle, the comparison and the minimizer, and their
@@ -188,7 +191,9 @@ int run_tier1_allocate_benchmark(int argc, char** argv);
 // tests, for the test-refinement command. Its benchmark is another translation unit.
 #include "buster/compiler/c_intern.c"
 #include "buster/compiler/c_refine.c"
+#if BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND)
 #include "buster/compiler/c_refine_test.c"
+#endif
 int run_refinement_benchmark(int argc, char** argv);
 
 // The preprocessor (c_preprocessor.c, with the predefined macros of c_predefines.c) and its tests, for the -E and
@@ -213,7 +218,9 @@ int run_preprocessor_benchmark(int argc, char** argv);
 // The per-file jobs on lanes and the run-ahead that fill the preprocessor's file cache (c_files.c), and their tests, for
 // the test-files command. Its benchmark is another translation unit.
 #include "buster/compiler/c_files.c"
+#if BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND)
 #include "buster/compiler/c_files_test.c"
+#endif
 int run_files_benchmark(int argc, char** argv);
 
 // The parser (c_parser.c) and its tests, for the default command, which preprocesses and parses a file, and the
@@ -332,7 +339,9 @@ int run_branch_sizing_benchmark(int argc, char** argv);
 #include "buster/compiler/x86_target_test.c"
 #include "buster/compiler/assembler.c"
 #include "buster/compiler/assembler_driver.c"
+#if BUSTER_IN_UNIT(BUSTER_UNIT_ASSEMBLER)
 #include "buster/compiler/assembler_test.c"
+#endif
 #include "buster/compiler/assembler_benchmark.c"
 
 #include "buster/compiler/x86_semantics_test.c"
@@ -510,6 +519,7 @@ int run_backend_benchmark(int argc, char** argv);
 #pragma clang optimize off
 #include "buster/compiler/c_checker_test.c"
 #pragma clang optimize on
+#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECK_BUILTINS)
 #include "buster/compiler/c_builtin_intrinsic_types_test.c"
 #include "buster/compiler/c_builtin_intrinsic_features_test.c"
 #include "buster/compiler/c_builtin_intrinsic_catalog_test.c"
@@ -528,11 +538,14 @@ int run_backend_benchmark(int argc, char** argv);
 #include "buster/compiler/c_check_builtin_typed_overflow_test.c"
 #include "buster/compiler/c_check_builtin_bits_test.c"
 #include "buster/compiler/c_check_builtin_rounds_test.c"
+#endif
 #include "buster/compiler/c_check_corpus.c"
 // #1057: a real C file prepared as -c prepares it, which the source benchmarks and the IR's commands on real C share.
 #include "buster/compiler/c_check_source_prepare.c"
 #pragma clang optimize off
+#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
 #include "buster/compiler/c_check_deferred_test.c"
+#endif
 #include "buster/compiler/c_check_mutation_test.c"
 #include "buster/compiler/c_check_constraints_test.c"
 #include "buster/compiler/c_checker_driver_test.c"
@@ -585,7 +598,9 @@ int run_backend_benchmark(int argc, char** argv);
 #include "buster/compiler/ir_interpreter.c"
 #include "buster/compiler/ir_test.c"
 #include "buster/compiler/ir_lower_test.c"
+#if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/ssa_ir_test.c"
+#endif
 #include "buster/compiler/ir_parse_test.c"
 #include "buster/compiler/interpreter_test.c"
 #include "buster/compiler/tier0_mask_test.c"
@@ -640,9 +655,13 @@ int run_backend_benchmark(int argc, char** argv);
 #include "buster/compiler/tier1_emit_test.c"
 #include "buster/compiler/tier1_pipeline_test.c"
 // #179: hand-written IR of AVX-512's masks through Tier 1, natively against the shared IR's interpreter.
+#if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/tier1_masks_test.c"
+#endif
 // #141: the 128-bit integers' split into halves through Tier 1, natively against the shared IR's interpreter.
+#if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/tier1_wide_test.c"
+#endif
 // #179: what a mask's spill costs, to memory against to a general register, and the programs' checks.
 #include "buster/compiler/mask_spill_measure.c"
 #include "buster/compiler/mask_spill_measure_test.c"
@@ -660,7 +679,9 @@ int run_backend_benchmark(int argc, char** argv);
 #pragma clang optimize on
 #pragma clang section text = ""
 // #1056: the tier-neutral emitted function's tests (row programs, Tier 0's and Tier 1's frame events, the verifier).
+#if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/emitted_code_test.c"
+#endif
 bool run_x86_target_selection_tests(void);
 #if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/x86_target_selection_test.c"
@@ -675,12 +696,16 @@ int run_tier1_model_measure_tests(int argc, char** argv);
 // The call graph check (the style's rule against recursion, on the compiler's own LLVM IR) and its tests, for the
 // check-call-graph and test-call-graph commands.
 #include "buster/compiler/call_graph.c"
+#if BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER)
 #include "buster/compiler/call_graph_test.c"
+#endif
 
 // The profiling tools (ab, and the reports of perf's and objdump's text: hot-loops, label-spills, spill-report and
 // branch-misses) and their tests, for the test-profile command.
 #include "buster/compiler/profile.c"
+#if BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER)
 #include "buster/compiler/profile_test.c"
+#endif
 
 // measure-compile (#518): whole compiles timed as processes against a reference compiler, with --time-stages' report of
 // where their time goes.
@@ -692,6 +717,8 @@ int run_tier1_model_measure_tests(int argc, char** argv);
 // measure-tier1-programs (#138, #1189): speedtest1 and Lua's scripts by both tiers, clang -O0 and -O2 and tcc, as whole
 // processes in a Williams design's order, against each other.
 #include "buster/compiler/tier1_programs_measure.c"
+// test-sqlite (#146): SQLite's shell by both tiers against clang's, over SQLite's CLI tests and tests/sqlite's scripts.
+#include "buster/compiler/sqlite_test.c"
 // measure-tier1-rows (#1283): vector code (test-checker-driver's machine rows' unit, a lexer's byte scan and the compiler's
 // own lexer) by Tier 0, Tier 1 and another compiler's Tier 1, with the moves around Tier 1's machine rows counted.
 #include "buster/compiler/tier1_rows_measure.c"
@@ -705,7 +732,9 @@ int run_tier1_model_measure_tests(int argc, char** argv);
 // The runner the 9700X job runs its tests through (a list of commands at once, each one's output printed in the list's
 // order) and its tests, for the parallel and test-parallel commands.
 #include "buster/compiler/parallel.c"
+#if BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER)
 #include "buster/compiler/parallel_test.c"
+#endif
 
 // The c-testsuite harness (#145), for the test-c-testsuite command: each program compiled and linked by this
 // executable, run and compared with its expected output.
@@ -777,10 +806,12 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     {
         result = run_ssa_benchmark(argc - 2, argv + 2);
     }
+#if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-ssa-ir") == 0)
     {
         result = run_ssa_ir_tests(argc - 2, argv + 2);
     }
+#endif
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc == 2 && strcmp(argv[1], "test-diagnostics") == 0)
     {
         result = run_diagnostic_tests();
@@ -805,10 +836,12 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     {
         result = run_x86_intrinsic_tests(argc - 2, argv + 2);
     }
+#if BUSTER_IN_UNIT(BUSTER_UNIT_ASSEMBLER)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_ASSEMBLER) && argc >= 2 && strcmp(argv[1], "test-assembler") == 0)
     {
         result = run_assembler_tests(argc - 2, argv + 2);
     }
+#endif
     else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_ASSEMBLER) && argc >= 2 && strcmp(argv[1], "benchmark-assembler") == 0)
     {
         result = run_assembler_benchmark(argc - 2, argv + 2);
@@ -945,10 +978,12 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     {
         result = run_tier1_allocate_benchmark(argc - 2, argv + 2);
     }
+#if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-tier1-cfg") == 0)
     {
         result = run_tier1_cfg_tests(argc - 2, argv + 2);
     }
+#endif
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-tier1-schedule") == 0)
     {
         result = run_tier1_schedule_tests(argc - 2, argv + 2);
@@ -977,10 +1012,12 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     {
         result = run_preprocessor_fuzz_benchmark(argc - 1, argv + 1);
     }
+#if BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND) && argc >= 2 && strcmp(argv[1], "test-refinement") == 0)
     {
         result = run_refinement_tests(argc - 2, argv + 2);
     }
+#endif
     else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-refinement") == 0)
     {
         result = run_refinement_benchmark(argc - 1, argv + 1);
@@ -1105,10 +1142,12 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     {
         result = run_branch_sizing_benchmark(argc - 1, argv + 1);
     }
+#if BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND) && argc >= 2 && strcmp(argv[1], "test-files") == 0)
     {
         result = run_files_tests(argc - 2, argv + 2);
     }
+#endif
     else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-files") == 0)
     {
         result = run_files_benchmark(argc - 1, argv + 1);
@@ -1165,6 +1204,7 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     {
         result = run_check_units_tests(argc - 2, argv + 2);
     }
+#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECK_BUILTINS)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECK_BUILTINS) && argc >= 2 && strcmp(argv[1], "test-check-builtins") == 0)
     {
         result = run_check_builtin_tests(argc - 2, argv + 2);
@@ -1233,6 +1273,7 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     {
         result = run_check_builtin_rounds_tests(argc - 2, argv + 2);
     }
+#endif
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-builtin-lower") == 0)
     {
         result = run_builtin_lower_tests(argc - 2, argv + 2);
@@ -1277,10 +1318,12 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     {
         result = run_checker_corpus(argc - 2, argv + 2);
     }
+#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "test-checker-deferred") == 0)
     {
         result = run_checker_deferred_tests(argc - 2, argv + 2);
     }
+#endif
     else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "benchmark-checker-deferred") == 0)
     {
         result = run_checker_deferred_benchmark(argc - 2, argv + 2);
@@ -1375,10 +1418,12 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     {
         result = run_builtin_tests(argc - 2, argv + 2);
     }
+#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECK_BUILTINS)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECK_BUILTINS) && argc >= 2 && strcmp(argv[1], "test-check-builtins-atomic-rmw") == 0)
     {
         result = run_check_builtin_atomic_rmw_tests(argc - 2, argv + 2);
     }
+#endif
     else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-builtins") == 0)
     {
         result = run_builtin_benchmark(argc - 1, argv + 1);
@@ -1439,10 +1484,12 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     {
         result = run_builtin_lower_benchmark(argc - 2, argv + 2);
     }
+#if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-emitted-code") == 0)
     {
         result = run_emitted_code_tests(argc - 2, argv + 2);
     }
+#endif
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-unwind") == 0)
     {
         result = run_unwind_tests(argc - 2, argv + 2);
@@ -1559,6 +1606,7 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     {
         result = run_tier1_pipeline_tests(argc - 2, argv + 2);
     }
+#if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-tier1-masks") == 0)
     {
         result = run_tier1_mask_tests(argc - 2, argv + 2);
@@ -1567,6 +1615,7 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     {
         result = run_tier1_wide_tests(argc - 2, argv + 2);
     }
+#endif
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "benchmark-tier1-pipeline") == 0)
     {
         result = run_tier1_pipeline_benchmark(argc - 2, argv + 2);
@@ -1595,10 +1644,12 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     {
         result = run_check_call_graph(argc - 2, argv + 2);
     }
+#if BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "test-call-graph") == 0)
     {
         result = run_call_graph_tests(argc - 2, argv + 2);
     }
+#endif
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 &&
              (strcmp(argv[1], "ab") == 0 || strcmp(argv[1], "hot-loops") == 0 || strcmp(argv[1], "label-spills") == 0 ||
               strcmp(argv[1], "spill-report") == 0 || strcmp(argv[1], "branch-misses") == 0 || strcmp(argv[1], "time-runs") == 0))
@@ -1613,6 +1664,10 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     {
         result = run_tier1_programs_measure(argc - 1, argv + 1);
     }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "test-sqlite") == 0)
+    {
+        result = run_sqlite_tests(argc - 1, argv + 1);
+    }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "measure-tier1-rows") == 0)
     {
         result = run_tier1_rows_measure(argc - 1, argv + 1);
@@ -1625,18 +1680,22 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     {
         result = run_helpers_measure(argc - 1, argv + 1);
     }
+#if BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "test-profile") == 0)
     {
         result = run_profile_tests(argc - 2, argv + 2);
     }
+#endif
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "parallel") == 0)
     {
         result = run_parallel_command(argc - 1, argv + 1);
     }
+#if BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "test-parallel") == 0)
     {
         result = run_parallel_tests(argc - 2, argv + 2);
     }
+#endif
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "test-tool") == 0)
     {
         result = test_tool_command(argc - 2, argv + 2);

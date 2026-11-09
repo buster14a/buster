@@ -24,7 +24,7 @@ static bool check_value_evaluated_constant(const CheckValue* value)
 
 static bool check_value_static_initializer(const CheckValue* value, bool bit_field)
 {
-    const bool address = value->constant_kind == CHECK_CONSTANT_ADDRESS && value->object != 0;
+    const bool address = (value->constant_kind == CHECK_CONSTANT_ADDRESS && value->object != 0) || value->constant_kind == CHECK_CONSTANT_LABEL_DIFFERENCE;
     const bool eligible = check_value_evaluated_constant(value) &&
                           (!address || ((value->flags & BUSTER_CHECK_STATIC_OBJECT) != 0 && !bit_field));
     return eligible;

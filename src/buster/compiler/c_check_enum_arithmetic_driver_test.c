@@ -128,6 +128,15 @@ static const CheckDriverDefaultWarningFixture check_driver_enum_arithmetic_fixtu
         .warnings = 3,
     },
     {
+        // The nearest opening definition is an already-closed inner enum for OuterLast and PeerLast.
+        // This exercises check_common_enum_coerced's linear fallback, not its binary-search fast path.
+        .name = "enumerator coercion with nested definitions and closed inner scopes",
+        .source = "enum Outer { OuterFirst = sizeof(enum Inner { InnerOnly }), OuterLast };\n"
+                  "enum Peer { PeerFirst = sizeof(enum PeerInner { PeerInnerOnly }), PeerLast };\n"
+                  "int f(enum Outer a, enum Peer b) { return (OuterLast == PeerLast) + (a == OuterLast) + (b == PeerLast); }\n",
+        .warnings = 1,
+    },
+    {
         .name = "comparisons of different enumerations warn by default, at their operators",
         .source = check_driver_enum_mix_source,
         .warnings = 3,

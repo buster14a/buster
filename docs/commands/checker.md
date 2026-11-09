@@ -81,7 +81,7 @@ unused-warning fixtures also check exact scope-completion tokens.
   and the default C command (`-fsyntax-only`, `-c`) use it; `compiler parse`
   keeps the parser's driver alone. Unsupported syntax is diagnosed.
   `test-checker-driver --executable ./build/compiler [--part K/N]
-  [--lazy-system-headers | --cpu-dispatch-only]` and `test-checker-asm`
+  [--lazy-system-headers | --cpu-dispatch-only | --type-sugar-only]` and `test-checker-asm`
   check the driver and inline assembly against Clang (named UCNs too, #1447,
   `check_test_driver_named_ucns`; with
   `--lazy-system-headers`, only the checks that pass the driver
@@ -94,7 +94,10 @@ unused-warning fixtures also check exact scope-completion tokens.
   `c_check_structural_recovery_driver_test.c` alone, the whole output and status
   of semantic error recovery's fixtures against clang's on the vector, scalar
   and two-lane deferred paths, and `-c`'s refusal of each: `docs/c-checker.md`'s
-  "Semantic error recovery", #1447). Its library-builtin comparisons are pinned to Clang
+  "Semantic error recovery", #1447; `--type-sugar-only` runs
+  `c_check_type_sugar_driver_test.c` alone, the typedef sugar diagnostics keep
+  through typedef chains, members and qualified arrays, `docs/c-checker.md`'s
+  "Type sugar", #1447). Its library-builtin comparisons are pinned to Clang
   23.1.4's official build, CI's reference: it compares `clang --version` with
   it, prints `expected clang 23.1.4, found …` when another build is found, and
   skips only the plain names that build's vendor is known to classify
@@ -300,13 +303,12 @@ unused-warning fixtures also check exact scope-completion tokens.
   initializer's is warned once. A comparison's operands are rvalues, as clang's DefaultLvalueConversion makes them: unqualified, a typedef
   that carries a qualifier itself spelled as its type; a GNU `a ?: b`'s omitted operand is its condition promoted, never
   an enumeration.
-  `check_common_enum_coerced` selects the last enclosing completed definition with an unsigned maximum of one-based
-  record indices, then loads the selected type once; zero retains the operand's stream type. Every unmatched SIMD
-  lane contributes zero. This avoids Clang 23 MSan's whole-vector check of inactive poison lanes before
-  `llvm.experimental.vector.extract.last.active`, which a conditional TypeId recurrence produced (#1829), without
-  disabling vectorization or sanitizer instrumentation.
-  `c_check_enum_arithmetic_driver_test.c` compares them with complete pinned-Clang output at each policy, both paths and
-  with `-c`, including nine- and seventeen-definition fixtures that cross vector chunks and scalar tails.
+  `check_common_enum_coerced` first finds the nearest enclosing definition by its ordered opening token. Nested
+  enum definitions inside enumerator values can close before a later outer enumerator, so the fallback scans all
+  definitions. It takes the maximum one-based matching index (zero for nonmatching SIMD lanes), then loads that type
+  once, avoiding Clang 23 MSan checking inactive poison TypeId lanes before `llvm.experimental.vector.extract.last.active`
+  (#1829). `c_check_enum_arithmetic_driver_test.c` compares complete pinned-Clang output at each policy, both paths
+  and with `-c`, including 9/17-definition vector-chunk cases and nested-definition fallback coverage.
   `-Wfor-loop-analysis` (#1447, clang's CheckForLoopConditionalStatement and CheckForRedundantIteration,
   `check_common_for_loops`) is off by default, under `-Wloop-analysis` and `-Wmost` and so `-Wall`; a unit where nothing
   enables it skips the scan. The condition is its truth test's operand. Its variables, where it is simple (operators,
@@ -320,6 +322,24 @@ unused-warning fixtures also check exact scope-completion tokens.
   last token, after its body's own warnings.
   `c_check_for_loop_driver_test.c` compares them with complete pinned-Clang output at each policy, both paths and with
   `-c`.
+  An implicit conversion from one named enumeration to another, an enumerator taken as its enumeration, is clang's
+  `-Wimplicit-enum-enum-cast` (#1447, CheckImplicitConversion's last case, `check_common_enum_cast`), on by default under
+  `-Wenum-conversion`: an initializer's, an assignment's, a prototype's argument's, a return's and a brace initializer's
+  value's, carried to both arms of a conditional (no runtime pruning), through a selection to its selected arm and to a
+  root comma's result, warned at each leaf's expression location (an operator's, a member's name, else its first token
+  inside its parentheses) as the full expression completes, in unreachable code too. Both enumerations need clang's name
+  for linkage: a tag, or the unqualified typedef that declares an anonymous one. Clang's range tests come first
+  (`check_common_enum_cast_reached`): a leaf whose likely range (a constant's significant or active bits, a bit-field's
+  width, else its type's) is wider than the target's integer type gives no enumeration warning, a constant's
+  -Wconstant-conversion instead; nor does a non-negative constant that fills a signed target exactly from a signed type.
+  Its candidates are the conversion walk's (`check_common_enum_cast_candidate`: an enumeration's target, from a source
+  that may be one), and a brace initializer's plan is read for it where a value part's target is an enumeration
+  (`CheckInitializer.enum_values`). They are tested only in a unit that names a named enumeration's enumerator or
+  variable (`CheckInput.enum_names`, set where the identifiers' leaves are made): a conversion whose source enumeration
+  is only a member's, a call's result or a cast's isn't looked for without one. A selection whose selected arm is a
+  constant (`_Generic(c, int: B)`) folds to its value, whose enumerator isn't looked for.
+  `c_check_enum_cast_driver_test.c` compares it with complete pinned-Clang output at each policy, both paths and with
+  `-c`, with a generated matrix of the C23 underlying types' pairs.
   `c_check_shift_count_driver_test.c` compares complete pinned-Clang diagnostics and independent counts for both
   shift directions, narrow promotions, 128-bit and bit-precise widths, compound assignments, side effects, macros
   and warning policy. The shared default-warning harness covers syntax checking and object publication through
