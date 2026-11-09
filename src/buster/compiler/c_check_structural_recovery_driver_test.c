@@ -130,7 +130,8 @@ static void check_test_driver_structural_recovery(CheckTest* test, const char* c
         "void g(int p, int q) { p = 1; q = 2; s.b; }\n"
         "void h(int p) { p = 1; }\n",
         // A part that holds a label address, a local label or a tag definition whose names aren't used outside it is left
-        // out too (#1447); a case label's statement expression keeps its switch whole.
+        // out too (#1447); a case label's statement expression keeps its switch whole, and a goto inside a loop keeps its
+        // body whole.
         "int printf(const char *, ...);\n"
         "struct S { int a; } s;\n"
         "struct Q { int a; } q;\n"
@@ -138,6 +139,8 @@ static void check_test_driver_structural_recovery(CheckTest* test, const char* c
         "int local(int x) { x = x; x = ({ __label__ in; goto in; in: s.b; }); if (x = 2) x = 1; return x << 41; }\n"
         "int tag(int x) { x = x; x = sizeof(struct R { int a; }) + s.b; printf(\"%s\", x); return x << 42; }\n"
         "int cased(int x) { x = x; x = ({ switch (x) { case 1: s.b; } 0; }); return x << 44; }\n"
+        // A goto inside a loop keeps its part, whose jump -Wfor-loop-analysis looks for: its body is left out whole.
+        "void looped(int i, int n) { for (; i < n; ) { (void)({ goto out; s.b; }); } out:; }\n"
         "int other(int y) { int w; y = y; return y; }\n",
     };
     static const char* const standards[] = { "-std=gnu17", "-std=gnu23" };

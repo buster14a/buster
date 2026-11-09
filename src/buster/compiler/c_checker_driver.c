@@ -4565,7 +4565,13 @@ static bool check_driver_tag_local(const Parser* parser, uint32_t open, uint32_t
         depth += parser->tree.roles[close] == PARSE_ROLE_OPEN_STRUCT || parser->tree.roles[close] == PARSE_ROLE_OPEN_ENUM;
         depth -= (parser->tree.roles[close] == PARSE_ROLE_CLOSE_STRUCT || parser->tree.roles[close] == PARSE_ROLE_CLOSE_ENUM) && depth != 0;
     }
-    bool local = close <= last;
+    // Its tag is the identifier right after its keyword (`struct` stands for `union` too), or it has none; anything else between them (a C23 enumeration's
+    // `: type`, an attribute) makes it not local, as its tag isn't found.
+    const uint8_t keyword = open > 0 ? parser->tokens.kinds[open - 1] : PARSE_KIND_COUNT;
+    const uint8_t before_tag = open > 1 ? parser->tokens.kinds[open - 2] : PARSE_KIND_COUNT;
+    const bool anonymous = keyword == PARSE_KIND_STRUCT || keyword == PARSE_KIND_ENUM;
+    const bool tagged = keyword == PARSE_KIND_IDENTIFIER && (before_tag == PARSE_KIND_STRUCT || before_tag == PARSE_KIND_ENUM);
+    bool local = close <= last && (anonymous || tagged);
     // Its names: the tag before the `{`, and an enumeration's enumerators, each after its `{` or a `,` (an argument after
     // a value's `,` too, which only makes it less often local).
     for (uint32_t at = open > 0 ? open - 1 : open; local && at < close; at += 1)
@@ -4587,9 +4593,27 @@ static bool check_driver_tag_local(const Parser* parser, uint32_t open, uint32_t
 // left out whole is left so. A run with a replacement is left out whole or not at all: the region may hold it, or be
 // held by it, but not cross it; one without a replacement may also be crossed by one without. The region may hold no
 // case label, which its switch's checks need, nor a tag definition that declares a name used outside it
-// (check_driver_tag_local). It may hold a label, a goto, a label address or a local label's declaration (#1447): a
-// label left out that a kept goto names leaves the reading an error, whose view isn't taken, and a goto left out
-// changes no warning a flushed body gives. False where it can't be left out.
+// (check_driver_tag_local), nor a goto inside a loop, whose jump `-Wfor-loop-analysis` looks for. It may hold a label,
+// another goto, a label address or a local label's declaration (#1447): a label left out that a kept goto names leaves
+// the reading an error, whose view isn't taken, and a goto left out of no loop changes no warning a flushed body gives
+// (while buster gives no -Wunused-label: one would then warn of a kept label the goto named). False where it can't be
+// left out.
+// Whether `token` is inside a loop's statement in its body: a `for`'s, a `do`'s or a `while`'s.
+static bool check_driver_in_loop(const Parser* parser, uint32_t token)
+{
+    const uint32_t count = parser->tokens.count;
+    bool loop = false;
+    uint32_t at = token < count ? parser->tree.parents[token] : BUSTER_CHECK_NONE;
+    for (uint32_t steps = 0; !loop && at < count && parser->tree.roles[at] != PARSE_ROLE_CLOSE_BODY && steps < count; steps += 1)
+    {
+        const uint8_t role = parser->tree.roles[at];
+        const uint32_t open = role == PARSE_ROLE_CLOSE_CONDITION ? check_driver_child_before(parser, at, PARSE_ROLE_OPEN_CONDITION, 0, at) : BUSTER_CHECK_NONE;
+        loop = role == PARSE_ROLE_CLOSE_FOR || role == PARSE_ROLE_DO || (open != BUSTER_CHECK_NONE && open > 0 && parser->tokens.kinds[open - 1] == PARSE_KIND_WHILE);
+        at = parser->tree.parents[at];
+    }
+    return loop;
+}
+
 static bool check_driver_edit_apply(CheckDriverEditor* editor, uint32_t begin, uint32_t last, uint8_t first)
 {
     const Parser* parser = editor->parser;
@@ -4604,7 +4628,7 @@ static bool check_driver_edit_apply(CheckDriverEditor* editor, uint32_t begin, u
         const uint8_t kind = parser->tokens.kinds[at];
         const bool tag = role == PARSE_ROLE_OPEN_STRUCT || role == PARSE_ROLE_OPEN_ENUM;
         valid = role != PARSE_ROLE_OPEN_CASE && role != PARSE_ROLE_CLOSE_CASE && kind != PARSE_KIND_CASE && kind != PARSE_KIND_DEFAULT &&
-                (!tag || check_driver_tag_local(parser, at, begin, last));
+                (!tag || check_driver_tag_local(parser, at, begin, last)) && (kind != PARSE_KIND_GOTO || !check_driver_in_loop(parser, at));
     }
     if (valid && !covered)
     {

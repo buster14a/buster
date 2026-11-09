@@ -4241,11 +4241,14 @@ Each error's parts are left out all or none (an undo log). A part that holds a
 coverage, duplicate values) need it, nor one that holds a tag's definition
 declaring a name used outside the part (its tag, an enumerator), which the
 reading would take for an outer declaration's without an error
-(`check_driver_tag_local`). A part may hold a label, a `goto`, a label's
-address or a local label's declaration (#1447): a left-out label that a kept
-`goto` names leaves the reading an error, so its view isn't taken, and a
-left-out `goto` changes no warning a flushed body gives (buster gives no
-`-Wunused-label` yet). The
+(`check_driver_tag_local`; a tag it can't find, as a C23 enumeration's with
+`: type`, counts as used), nor one that holds a `goto` inside a loop, whose
+jump `-Wfor-loop-analysis` looks for. A part may hold a label, another
+`goto`, a label's address or a local label's declaration (#1447): a left-out
+label that a kept `goto` names leaves the reading an error, so its view isn't
+taken, and a left-out `goto` outside loops changes no warning a flushed body
+gives (buster gives no `-Wunused-label` yet: once it does, a kept label whose
+only `goto` is left out would warn). The
 replacements are chosen to give no warning of their own (a constant condition
 would: clang's "no case matching constant switch condition"). A part left out
 gives no warning of its own reading, where clang gives those of what it builds
