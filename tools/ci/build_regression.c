@@ -9,6 +9,7 @@
 //   ./build-regression --compile-commands-only  # Small database dependency fixture; does not build the compiler.
 //
 // It removes every tree under build/cmake (clean --all) and checks that
+//   - guarded test roots retain their private entry points when preprocessed without main.c's unity-unit selector;
 //   - each baseline CRT startup object relinks and post-links every affected executable, with no work when unchanged;
 //   - filtered compile commands are configuration-specific, reused until an input changes and rebuilt if missing;
 //   - fresh build.sh, direct CMake and preset trees ignore hostile CFLAGS/LDFLAGS before probing C, including cached
@@ -259,6 +260,47 @@ static void capture_line(char* const* argv, char* line, size_t size)
     }
     snprintf(line, size, "%s", text.data);
     free(text.data);
+}
+
+// The correctness inventory preprocesses main.c and every *_benchmark.c as independent inputs, without a unit
+// selector. Check the roots with shared fixture islands too: a bare BUSTER_IN_UNIT(...) in #if fails outside main.c,
+// while a fallback that excludes the private body silently loses part of the standalone input.
+static void check_standalone_preprocessing(void)
+{
+    static const struct
+    {
+        const char* source;
+        const char* entry;
+    } files[] = {
+        { "src/buster/compiler/c_preprocessor_test.c", "run_preprocessor_fixture_tests(" },
+        { "src/buster/compiler/c_preprocessor_history_test.c", "pp_test_history(" },
+        { "src/buster/compiler/c_preprocessor_oracle.c", "run_preprocessor_tests(" },
+        { "src/buster/compiler/c_parser_test.c", "run_parser_tests(" },
+        { "src/buster/compiler/tier1_select_source_benchmark.c", "run_tier1_select_source_benchmark(" },
+    };
+    for (uint32_t i = 0; i < sizeof(files) / sizeof(files[0]); i += 1)
+    {
+        char* argv[] = {
+            "clang",
+            "-E",
+            "-P",
+            "-target",
+            "x86_64-pc-linux-gnu",
+            "-march=x86-64",
+            "-Isrc",
+            "-fwrapv",
+            "-funsigned-char",
+            (char*)files[i].source,
+            0,
+        };
+        Text text = capture(argv);
+        if (strstr(text.data, files[i].entry) == 0)
+        {
+            fail("%s lost %s when preprocessed outside a unity unit", files[i].source, files[i].entry);
+        }
+        free(text.data);
+    }
+    pass("guarded roots retain their private entry points when preprocessed without a unity unit");
 }
 
 static void snapshot(Snapshot* snapshot)
@@ -774,6 +816,18 @@ static void check_incremental(void)
         { "src/buster/compiler/ir_if_convert.c", shared_main_units },
         { "src/buster/compiler/ir_optimize_verified.c", shared_main_units },
         { "src/buster/compiler/tier1_select_burs_test.c", shared_main_units },
+        { "src/buster/compiler/preprocessor_fuzz_generate.c", "main_unit_frontend.c " },
+        { "src/buster/compiler/c_preprocessor_directives_test.c", "main_unit_frontend.c " },
+        { "src/buster/compiler/c_predefines_test.c", "main_unit_frontend.c " },
+        { "src/buster/compiler/c_gnu_test.c", "main_unit_frontend.c " },
+        { "src/buster/compiler/c_parser_bindings_test.c", "main_unit_frontend.c " },
+        { "src/buster/compiler/x86_target_policy_test.c", "main_unit_frontend.c " },
+        { "src/buster/compiler/c_preprocessor_history_test.c", "main_unit_checker.c main_unit_frontend.c " },
+        { "src/buster/compiler/c_preprocessor_test.c", shared_main_units },
+        { "src/buster/compiler/c_preprocessor_oracle.c", shared_main_units },
+        { "src/buster/compiler/c_parser_test.c", shared_main_units },
+        { "src/buster/compiler/c_parser_bindings.c", shared_main_units },
+        { "src/buster/compiler/c_builtin_intrinsic_catalog.c", shared_main_units },
     };
     for (uint32_t i = 0; i < sizeof(files) / sizeof(files[0]); i += 1)
     {
@@ -784,7 +838,16 @@ static void check_incremental(void)
         {
             fail("no unit depends on %s", source);
         }
-        if (files[i].owners != 0 && strcmp(expected, files[i].owners) != 0)
+        // The vector-only standalone checker benchmark also reads the intrinsic catalog. Allow that exact sorted
+        // extra owner while still requiring every main unit; keep the full dependency list for Ninja's plan below.
+        const char* checked_owners = expected;
+        static const char catalog_benchmark[] = "c_checker_benchmark.c ";
+        if (strcmp(source, "src/buster/compiler/c_builtin_intrinsic_catalog.c") == 0 &&
+            strncmp(checked_owners, catalog_benchmark, sizeof(catalog_benchmark) - 1) == 0)
+        {
+            checked_owners += sizeof(catalog_benchmark) - 1;
+        }
+        if (files[i].owners != 0 && strcmp(checked_owners, files[i].owners) != 0)
         {
             fail("%s is included by %s; expected exactly %s", source, expected, files[i].owners);
         }
@@ -1511,6 +1574,10 @@ int main(int argc, char** argv)
     }
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
+    if (argc == 1)
+    {
+        check_standalone_preprocessing();
+    }
     if (!flags_only && !commands_only)
     {
         check_crt_link_dependencies();
