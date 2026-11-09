@@ -307,7 +307,12 @@ declaration of it alone (`enum E;`) too; a reference to it (`enum E x;`) needs
 none. A declaration of it with a declarator (`enum E : int x;`) is refused at
 the `:`, and an enum without a base can't be given one, nor the other way round,
 each where clang reports it. An `aligned` attribute after its body, which clang
-applies after the base completed it, is refused as unsupported. (Attributes
+applies after the base completed it, sets its alignment then (#1447,
+`type_enum_realign`), as clang's does where nothing has asked its layout yet:
+clang memoizes an enum's layout at its first query, after which the attribute
+changes nothing. So it is taken where the enum completed at this body's `{` and
+the body doesn't name it (`enum E`); one whose body names it, or one completed
+by an earlier declaration (`enum E : char;`), stays refused as unsupported. (Attributes
 after a tag's name, before a `;`, make any tag's declaration a reference to the
 visible tag, as clang has it, not a declaration of it alone.)
 
@@ -3677,9 +3682,9 @@ What the lowering covers past scalars (#145's programs):
   `__has_c_attribute(gnu::retain)` answer 1. `test-checker-driver` compares
   each retained definition's section (name, type, flags and alignment) and
   the object's OS/ABI with clang's object's, and runs the programs, linked
-  from `-c`'s objects and by the direct path. `common` stays refused by name:
-  its symbols are `SHN_COMMON`'s, which neither the link representation nor
-  the object writer has.
+  from `-c`'s objects and by the direct path. The `common` attribute and
+  `-fcommon` make common symbols (`BUSTER_LINK_SYMBOL_COMMON`, `-c`'s objects'
+  `SHN_COMMON`): [the GNU extensions' table](c-gnu-extensions.md).
 - **Switches (#136's item 7).** A switch's value goes in a temporary, and each
   case compares it, as clang -O0's code does for a sparse switch, unless clang
   would build a jump table: then the switch dispatches through one
