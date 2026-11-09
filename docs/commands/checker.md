@@ -316,8 +316,9 @@ unused-warning fixtures also check exact scope-completion tokens.
   counts only where the value of each statement expression around it in the loop is evaluated too, none is in a
   specifier's operand (typeof's) or a sizeof's, and each static selection around it chooses the operand that holds it,
   by the parse tree, as the selections' unchosen roots can't tell a statement expression's statements in a chosen arm
-  from those in another (#1821, `check_common_loop_reached`); a sizeof's type name's bounds are unvisited as well. Left: a bound of a pointer to a variable array in a declaration (`int (*p)[i++];`), which clang's
-  visitor skips and the checker counts. A variable's `++` or `--` alone as both the increment and the body block's last statement, with no
+  from those in another (#1821, `check_common_loop_reached`); a sizeof's type name's bounds are unvisited as well. Left:
+  a bound of a pointer to a variable array in a declaration (`int (*p)[i++];`), which clang's visitor skips and the
+  checker counts. A variable's `++` or `--` alone as both the increment and the body block's last statement, with no
   continue of the loop, warns at the body's with a note at the header's. Each check is skipped where the warning is
   ignored at the condition's or the increment's first token, as clang's are. Both are published past the statement's
   last token, after its body's own warnings.
