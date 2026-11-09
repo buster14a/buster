@@ -277,6 +277,15 @@ static void check_test_driver_convention_diagnostics(CheckTest* test, const char
         { "void f(void *c __attribute__((swift_async_context)));\nvoid __attribute__((ms_abi)) g(void *__attribute__((swift_async_context)) c);\n"
           "void __attribute__((intel_ocl_bicc)) h(void *__attribute__((swift_async_context)) c, int x);\nlong k(void *__attribute__((swift_async_context)) c) { return (long)c; }\n", "-std=gnu17" },
         { "void f(void *c __attribute__((swift_async_context)));\nvoid __attribute__((preserve_most)) g(int x, void *__attribute__((swift_async_context)) c);\n", "-std=gnu23" },
+        // no_caller_saved_registers added by a redeclaration (#1447): clang's err_function_attribute_mismatch before the
+        // type's conflict, noted at the declaration its lookup found (the latest, a block's), its spelling normalized, a
+        // C23 one's with its scope; one that drops it inherits it, and a definition's after a declaration's is the error too.
+        { "void a(void);\n__attribute__((no_caller_saved_registers)) void a(void);\nvoid b(void);\n__attribute__((__no_caller_saved_registers__)) void b(void);\n"
+          "void c(void);\nvoid c(void) __attribute__((no_caller_saved_registers));\nvoid d(void);\nvoid d(void);\n__attribute__((no_caller_saved_registers)) void d(void);\n"
+          "void g(int);\n__attribute__((no_caller_saved_registers)) void g(long);\nvoid h(void) { void k(void); }\n__attribute__((no_caller_saved_registers)) void k(void);\n"
+          "__attribute__((no_caller_saved_registers)) void m(void);\nvoid m(void);\nvoid m(void) {}\nvoid n(void);\n__attribute__((no_caller_saved_registers)) void n(void) {}\n", "-std=gnu17" },
+        { "void a(void);\n[[gnu::no_caller_saved_registers]] void a(void);\nvoid b(void);\n[[gnu::no_caller_saved_registers]] void b(void) __attribute__((no_caller_saved_registers));\n"
+          "void c(void);\n__attribute__((no_caller_saved_registers)) void (c)(void);\nvoid h(void) { void k(void); __attribute__((no_caller_saved_registers)) void k(void); }\n", "-std=gnu23" },
     };
     enum { LINES = 16384 };
     char* expected_lines = malloc(LINES);
