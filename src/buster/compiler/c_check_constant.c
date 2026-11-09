@@ -1715,6 +1715,18 @@ static bool check_input_stdc_library_call(CheckInputReader* reader, uint32_t tok
     return result;
 }
 
+// Whether a catalog builtin's name `builtin` (but a <stdbit.h> function's, check_input_stdc_library_call's), bound to
+// the declaration of binding `handle`, stays the builtin (#1843): a function's declaration with external linkage, which
+// clang's FunctionDecl::getBuiltinID keeps the builtin's (__builtin_bswap32 declared `unsigned __builtin_bswap32(unsigned);`),
+// its type compatible with the builtin's or clang's error at it (check_input_builtin_declaration). A static function and an
+// object of the name are the program's.
+static bool check_input_builtin_kept(const CheckInputReader* reader, uint32_t handle, uint16_t builtin)
+{
+    const uint32_t declaration = handle != 0 ? reader->bindings.declaration[handle - 1] : BUSTER_CHECK_NONE;
+    return builtin != CBUILTIN_NONE && !cbuiltin_stdc_library(builtin) && declaration < reader->parser->tokens.count &&
+           reader->declaration_kinds[declaration] == C_BINDING_FUNCTION && check_input_linkage(reader->declaration_bits, declaration) == 2;
+}
+
 static uint16_t check_constant_integer_builtin(CheckConstantInput* input, uint32_t token, uint32_t handle)
 {
     CheckInputReader* reader = input->reader;
@@ -1727,7 +1739,7 @@ static uint16_t check_constant_integer_builtin(CheckConstantInput* input, uint32
     uint16_t builtin = CBUILTIN_NONE;
     const bool called = open < close && close < input->end && parser->tokens.kinds[open] == PARSE_KIND_L_PAREN &&
                         (input->raw || parser->tree.roles[close] == PARSE_ROLE_CLOSE_CALL);
-    if (called && handle == 0)
+    if (called && (handle == 0 || check_input_builtin_kept(reader, handle, check_constant_builtin_name(reader, parser->tokens.names[token]))))
     {
         builtin = reader->builtins[close];
         if (!input->cached)

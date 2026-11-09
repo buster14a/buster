@@ -47,8 +47,8 @@ builds default to `-O3`, frames and line information, with fatal symbolized dete
 proofs and child-report auditing. `BUSTER_FUZZ_AVAILABLE=1` adds in-process
 coverage and the `--fuzz` driver override; `BUSTER_FUZZ_ENTRY=FILE.c` replaces
 its byte-input callback. Hosted frontend, ELF and crash/replay campaigns gate
-the same runs. Additional full ASan/UBSan suites run at `-O1`;
-`BUSTER_SANITIZER_OPTIMIZATION=1|2|3` selects an explicit level.
+the same runs. The hosted matrix runs at `-O3` throughout;
+`BUSTER_SANITIZER_OPTIMIZATION=1|2|3` remains available for explicit diagnostic builds.
 See `docs/ci.md` for usage and the precise coverage boundaries.
 After all the hosted variants and fuzz jobs a run has pass on the same triggering revision, Benchpress
 requires the complete vector feature set and runs native correctness before
@@ -163,9 +163,8 @@ there at a time, so everything takes one lock:
   It also fails when the hosted test job's shards disagree
   (`changes_shard_policy`): its matrix's `shard: [1, ..., N]` must count from 1
   without a gap, and the same N must be in the job's name, the run step's
-  `--shard "${{ matrix.shard }}/N"` and the O1 rows' include entries (shards 1
-  to N of each architecture), since a list and an N that disagree would leave a
-  shard's commands unrun with every job green. Run it
+  `--shard "${{ matrix.shard }}/N"`, since a list and an N that disagree
+  would leave a shard's commands unrun with every job green. Run it
   locally with `cc -std=c17 -O2 -Wall -Wextra -Werror -o /tmp/changes
   tools/ci/changes.c && /tmp/changes --self-test` after changing a gate, a
   benchmark's step, the tables or the shards. Its oracle policy pins the 9700X
