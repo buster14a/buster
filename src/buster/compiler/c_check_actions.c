@@ -326,6 +326,10 @@ typedef enum CheckDiagnostic
 #define CHECK_WARNING_KR_TOO_FEW 0x800000u
 #define CHECK_WARNING_KR_TOO_MANY 0x1000000u
 #define CHECK_WARNING_KR_CALLS (CHECK_WARNING_NON_PROTOTYPE_CALL | CHECK_WARNING_KR_TOO_FEW | CHECK_WARNING_KR_TOO_MANY)
+// No warning: an arithmetic, comparison or conditional operator has an operand of an enumeration type, whatever the
+// operand's form (a member, a call, a cast, a subscript...). check_graph_store moves it from the result to its stream's
+// enum_operands, the gate of the enumeration-mix scan (check_common_enum_arithmetic), so no warnings column holds it.
+#define CHECK_WARNING_ENUM_OPERAND 0x80000000u
 
 typedef struct CheckConversion CheckConversion;
 struct CheckConversion
@@ -1703,6 +1707,8 @@ static void check_action_arithmetic(TypeTable* table, const CheckAction* action,
     CheckValue right = unary ? left : check_action_operand(table, action, result, 1);
     const bool left_ok = bits ? check_action_is_integer(table, left.type) : check_action_is_arithmetic(table, left.type);
     const bool right_ok = bits ? check_action_is_integer(table, right.type) : check_action_is_arithmetic(table, right.type);
+    result->warnings |= check_action_kind(table, left.type) == BUSTER_TYPE_KIND_ENUM || check_action_kind(table, right.type) == BUSTER_TYPE_KIND_ENUM ?
+                        CHECK_WARNING_ENUM_OPERAND : 0;
     if (!left_ok || !right_ok)
     {
         check_action_diagnose(result, bits ? CHECK_DIAG_INTEGER_REQUIRED : CHECK_DIAG_ARITHMETIC_REQUIRED, left_ok ? 1 : 0);
@@ -1985,6 +1991,8 @@ static void check_action_conditional(TypeTable* table, const CheckAction* action
     CheckValue left = check_action_operand(table, action, result, 1);
     CheckValue right = check_action_operand(table, action, result, 2);
     TypeId common = 0;
+    result->warnings |= check_action_kind(table, left.type) == BUSTER_TYPE_KIND_ENUM || check_action_kind(table, right.type) == BUSTER_TYPE_KIND_ENUM ?
+                        CHECK_WARNING_ENUM_OPERAND : 0;
     if (!check_action_is_scalar(table, condition.type))
     {
         check_action_diagnose(result, CHECK_DIAG_SCALAR_REQUIRED, 0);
