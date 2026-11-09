@@ -1138,7 +1138,8 @@ static uint32_t check_asm_inline_code(const CheckAsmPlace* places, uint32_t coun
         stored += check_asm_stores(places + k) || check_asm_x87_stores(places + k);
         flags += check_asm_flag_stores(places + k);
     }
-    const uint64_t capacity = (uint64_t)loads + code->count + 2 * (uint64_t)stored + 5 * (uint64_t)flags + pops;
+    // An x87 output that shares its depth with a later one is stored from a copy, one record more (fld %st(0)).
+    const uint64_t capacity = (uint64_t)loads + code->count + 3 * (uint64_t)stored + 5 * (uint64_t)flags + pops;
     X86Instruction* written = capacity != 0 && capacity <= UINT32_MAX ? BUSTER_ARENA_PUSH_ARRAY(output, X86Instruction, capacity) : 0;
     uint32_t at = 0;
     if (written != 0)
@@ -1214,8 +1215,18 @@ static uint32_t check_asm_inline_code(const CheckAsmPlace* places, uint32_t coun
             for (uint32_t k = 0; k < count; k += 1)
             {
                 const CheckAsmPlace* place = places + k;
+                bool later = false;
+                for (uint32_t o = k + 1; o < count; o += 1)
+                {
+                    later |= check_asm_x87_stores(places + o) && places[o].reg == depth;
+                }
                 if (check_asm_x87_stores(place) && place->reg == depth)
                 {
+                    // Another output at this depth after it takes the same value (#1846): stored from a copy.
+                    if (later)
+                    {
+                        written[at++] = (X86Instruction){ .form = X86_FORM_FLD_ST, .rm = 0, .mode = BUSTER_X86_REGISTER_DIRECT };
+                    }
                     written[at++] = (X86Instruction){ .form = X86_FORM_MOV_R64_RM64, .reg = stores[1], .rm = BUSTER_TIER0_ASM_BLOCK, .mode = BUSTER_X86_MEMORY_BASE,
                                                       .displacement = (int32_t)place->slot };
                     const uint32_t form = place->size == 4 ? X86_FORM_FSTP_M32 : place->size == 8 ? X86_FORM_FSTP_M64 : X86_FORM_FSTP_M80;

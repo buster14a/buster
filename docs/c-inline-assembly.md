@@ -358,8 +358,9 @@ asm (`X86FloatingPoint.cpp`), which clang's code keeps and refuses to break:
   clang's order of the inputs (the explicit ones, then the `+` outputs'), as
   LLVM copies the tied ones into the register last, else the last other
   input's; the others aren't loaded. Two outputs at one depth each take its
-  value: the helper stores all but the last from a copy (`fld %st(0)`). GCC
-  refuses such a statement ("impossible constraints").
+  value: the helper, or the asm body in its caller, stores all but the last
+  from a copy (`fld %st(0)`). GCC refuses such a statement ("impossible
+  constraints").
 
 A template names a `t` operand `%st` and a `u` operand `%st(1)`, as GCC and
 clang print them (#1115: `"fmul %1, %0" : "+t"(x) : "u"(y)`), which the
