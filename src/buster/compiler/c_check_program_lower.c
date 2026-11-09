@@ -10924,6 +10924,14 @@ static void check_lower_reduce_operand(CheckLowerWriter* writer, uint32_t node, 
 
 #include "c_check_program_transport.c"
 
+// Whether `type` is a vector wider than the target's widest registers (check_lower_transport_width: 16 bytes without
+// AVX, 32 without AVX-512), which a builtin's row can't take whole: its builtins run on pieces of the registers' width
+// through memory, as a transport vector's do (#1834), as LLVM's legalization splits them.
+static bool check_lower_vector_wide(const CheckLowerWriter* writer, TypeId type)
+{
+    return check_lower_vector_of(writer, type) > check_lower_transport_width(writer);
+}
+
 // The generic vector builtins' X86 entries (c_check_program_vector_builtins.c), or their refusal by name. A row's
 // operands are the builtin's vector arguments at their types, whose tasks run before its entry's (the tasks run in the
 // reverse of their pushes):
@@ -10984,7 +10992,8 @@ static __attribute__((noinline)) void check_lower_vector_builtin(CheckLowerWrite
         const bool fused = narrow && check_lower_vector_of(writer, result) != 0;
         const TypeId operand = fused ? stream->argument_conversions[graph->argument_offsets[a]].type : source;
         // Of transport vectors, or into one (#137), element by element: its entries are its own.
-        const bool transport = !fused && (check_lower_vector_of(writer, source) == 0 || check_lower_vector_of(writer, result) == 0);
+        const bool transport = !fused && (check_lower_vector_of(writer, source) == 0 || check_lower_vector_of(writer, result) == 0 ||
+                                          check_lower_vector_wide(writer, source) || check_lower_vector_wide(writer, result));
         if (transport)
         {
             check_lower_transport_shuffle(writer, node);
@@ -11057,7 +11066,8 @@ static __attribute__((noinline)) void check_lower_vector_builtin(CheckLowerWrite
             }
         }
         // Of a transport vector, or into one (#137), element by element: its entries are its own.
-        const bool transport = check_lower_vector_of(writer, operand_type) == 0 || check_lower_vector_of(writer, result) == 0;
+        const bool transport = check_lower_vector_of(writer, operand_type) == 0 || check_lower_vector_of(writer, result) == 0 ||
+                               check_lower_vector_wide(writer, operand_type) || check_lower_vector_wide(writer, result);
         if (transport)
         {
             check_lower_transport_convertvector(writer, node);
@@ -11077,8 +11087,9 @@ static __attribute__((noinline)) void check_lower_vector_builtin(CheckLowerWrite
     {
         check_lower_transport_boolean_builtin(writer, node, builtin, effect->evaluated_argument_count);
     }
-    else if ((check_lower_transport_type(types, result) ||
-              (builtin == CBUILTIN_ELEMENTWISE_LDEXP && count >= 2 && check_lower_transport_type(types, stream->argument_conversions[first + 1].type))) &&
+    else if ((check_lower_transport_type(types, result) || check_lower_vector_wide(writer, result) ||
+              (builtin == CBUILTIN_ELEMENTWISE_LDEXP && count >= 2 && (check_lower_transport_type(types, stream->argument_conversions[first + 1].type) ||
+                                                                      check_lower_vector_wide(writer, stream->argument_conversions[first + 1].type)))) &&
              (check_builtin_vector_elementwise(builtin) || builtin == CBUILTIN_ELEMENTWISE_LDEXP) &&
              !check_lower_libm_builtin(builtin) && !check_lower_strict_round(graph, node, builtin) && builtin != CBUILTIN_ELEMENTWISE_PDEP &&
              builtin != CBUILTIN_ELEMENTWISE_PEXT && builtin != CBUILTIN_ELEMENTWISE_CLMUL)

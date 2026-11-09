@@ -625,6 +625,9 @@ at the target's forms, by both of the checker's paths:
   qwords, `pshufd`, `shufps` of halves, pairs or three elements and one of dwords, unpacks, `pshuflw` and `pshufhw` of
   words, and with SSSE3 `pshufb` of each vector by one constant (its top bits flipped for the second), ORed; with AVX
   a lane's insertion and extraction, and with AVX2 broadcasts, each lane's unpacks and `vpermd` with `vpblendd`.
+  The generic builtins of vectors wider than the target's registers (32 bytes without AVX, 64 without AVX-512) run on
+  pieces of the registers' width through memory, as a transport vector's do (`check_lower_vector_wide`, #1834):
+  shuffles element by element, conversions and elementwise builtins each piece's row.
 - What has no form at the target is refused by name: shuffles of bytes and words without SSSE3, their 32-byte ones
   without AVX-512, minimum and maximum of elements SSE2 hasn't (and of qwords), absolute values without SSSE3, the
   integers' extensions without SSE4.1 and truncations, and scalar fused multiply-adds without FMA. The sign masks and

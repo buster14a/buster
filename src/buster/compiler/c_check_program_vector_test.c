@@ -849,6 +849,44 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
           "#endif\n"
           "return (int)h;}\n"
         },
+        // #1834: the generic builtins of vectors wider than the target's registers (32 bytes without AVX, 64 without
+        // AVX-512) on pieces of the registers' width through memory, as a transport vector's: shuffles of each element
+        // size, a 16-byte vector's two into one of 32 and 32-byte ones' into 16, conversions widening and between integers
+        // and floats, and elementwise minima, maxima, saturating arithmetic and square roots.
+        { "baseline-wide-builtins",
+          "typedef int I8 __attribute__((vector_size(32),aligned(16)));typedef unsigned U8 __attribute__((vector_size(32),aligned(16)));typedef float F8 __attribute__((vector_size(32),aligned(16)));\n"
+          "typedef short S16 __attribute__((vector_size(32),aligned(16)));typedef unsigned char B32 __attribute__((vector_size(32),aligned(16)));typedef double D4 __attribute__((vector_size(32),aligned(16)));\n"
+          "typedef long long L4 __attribute__((vector_size(32),aligned(16)));typedef short S8 __attribute__((vector_size(16)));typedef int I4 __attribute__((vector_size(16)));\n"
+          "typedef unsigned char B64 __attribute__((vector_size(64),aligned(16)));typedef int I16 __attribute__((vector_size(64),aligned(16)));typedef float F16 __attribute__((vector_size(64),aligned(16)));\n"
+          "typedef double D8 __attribute__((vector_size(64),aligned(16)));typedef unsigned short W32 __attribute__((vector_size(64),aligned(16)));\n"
+          "int tested(int n){unsigned h=2166136261u;I8 a,b;U8 u,v;S16 s,t;B32 c,d;L4 l,m;I16 w,x;B64 e,g;W32 y,z;F8 f,k;D4 q,r;F16 fa;D8 da;\n"
+          "fill(&a,32,n);fill(&b,32,n+1);fill(&u,32,n+2);fill(&v,32,n+3);fill(&s,32,n+4);fill(&t,32,n+5);fill(&c,32,n+6);fill(&d,32,n+7);fill(&l,32,n+8);fill(&m,32,n+9);\n"
+          "fill(&w,64,n+10);fill(&x,64,n+11);fill(&e,64,n+12);fill(&g,64,n+13);fill(&y,64,n+14);fill(&z,64,n+15);\n"
+          "for(int i=0;i<8;i++){f[i]=(float)((n*13+i*7)%50-25)*0.75f;k[i]=(float)((n*5+i*3)%40-20)*0.5f;}for(int i=0;i<4;i++){q[i]=f[i]*1.5;r[i]=k[i+4];}\n"
+          "for(int i=0;i<16;i++)fa[i]=(float)((i*7+n)%30-15)*0.25f;for(int i=0;i<8;i++)da[i]=fa[i*2];\n"
+          "I8 s1[]={__builtin_shufflevector(a,b,7,6,5,4,3,2,1,0),__builtin_shufflevector(a,b,0,8,1,9,2,10,3,11),__builtin_shufflevector(a,b,15,0,14,1,13,2,12,3)};FOLD(s1);\n"
+          "#if defined(__SSSE3__)&&!defined(__AVX2__)\n"
+          "B32 s2r=__builtin_shufflevector(c,d,31,30,29,28,27,26,25,24,23,22,21,20,19,18,17,16,15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,0);FOLD(s2r);\n"
+          "#endif\n"
+          "#ifndef __AVX2__\n"
+          "B32 s2[]={__builtin_shufflevector(c,d,0,32,1,33,2,34,3,35,4,36,5,37,6,38,7,39,8,40,9,41,10,42,11,43,12,44,13,45,14,46,15,47)};FOLD(s2);\n"
+          "#endif\n"
+          "L4 s3=__builtin_shufflevector(l,m,3,4,1,6);FOLD(s3);I4 s4=__builtin_shufflevector(a,b,1,9,7,15);FOLD(s4);I8 s5=__builtin_shufflevector((I4){n,2,3,4},(I4){5,6,7,n},7,6,5,4,3,2,1,0);FOLD(s5);\n"
+          "I16 s6=__builtin_shufflevector(w,x,31,30,29,28,27,26,25,24,0,1,2,3,4,5,6,7);FOLD(s6);\n"
+          "F8 c3=__builtin_convertvector(a,F8);FOLD(c3);I8 c4=__builtin_convertvector(f,I8);FOLD(c4);\n"
+          "D4 c5=__builtin_convertvector(s4,D4);FOLD(c5);L4 c6=__builtin_convertvector(s4,L4);FOLD(c6);typedef unsigned char B16 __attribute__((vector_size(16)));B16 cc;fill(&cc,16,n);I16 c7=__builtin_convertvector(cc,I16);FOLD(c7);F16 c8=__builtin_convertvector(w,F16);FOLD(c8);\n"
+          "#ifdef __SSE4_1__\n"
+          "U8 e2[]={__builtin_elementwise_min(u,v),__builtin_elementwise_max(u,v)};FOLD(e2);\n"
+          "#endif\n"
+          "I8 e1[]={a+b};FOLD(e1);\n"
+          "S16 e3[]={__builtin_elementwise_min(s,t),__builtin_elementwise_add_sat(s,t),__builtin_elementwise_sub_sat(s,t)};FOLD(e3);\n"
+          "B32 e4[]={__builtin_elementwise_min(c,d),__builtin_elementwise_max(c,d),__builtin_elementwise_add_sat(c,d),__builtin_elementwise_sub_sat(c,d)};FOLD(e4);\n"
+          "B64 e5[]={__builtin_elementwise_min(e,g),__builtin_elementwise_add_sat(e,g)};FOLD(e5);W32 e6[]={__builtin_elementwise_sub_sat(y,z)};FOLD(e6);\n"
+          "F8 e7[]={__builtin_elementwise_sqrt(f*f)};FOLD(e7);\n"
+          "D4 e8[]={__builtin_elementwise_sqrt(q*q)};FOLD(e8);\n"
+          "F16 e9[]={__builtin_elementwise_sqrt(fa*fa)};FOLD(e9);D8 e10[]={__builtin_elementwise_sqrt(da*da)};FOLD(e10);\n"
+          "return (int)h;}\n"
+        },
         // AVX's and AVX2's (x86-64-v3's): 256-bit unpacks, broadcasts, permutes, variable shifts, lanes' extractions and
         // insertions, extensions, gathers, FMA's (of no NaN) and F16C's conversions, and shuffles of dwords and qwords.
         { "baseline-avx2",
