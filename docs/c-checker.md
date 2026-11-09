@@ -4351,6 +4351,63 @@ Left as they were:
   (`-Wpointer-sign`, a qualifier's) comes before the correction's error,
   where clang's comes after it.
 
+Declaration specifiers that don't combine don't stop the reader either
+(`check_input_specifiers_recover`). Clang's `DeclSpec` drops the specifier the
+error is about and keeps the declaration valid, so the unit goes on as in
+phase 1, in every place specifiers are read (file scope, a body, a parameter,
+a member, a cast's and `sizeof`'s type name). What is dropped:
+
+- **A second type, width or sign**, at its error ("cannot combine with
+  previous 'int' declaration specifier"): `int float` is an `int`,
+  `long long long` a `long long`, `signed unsigned` an `int`.
+- **A sign the type doesn't take** ("'float' cannot be signed or unsigned"):
+  `unsigned float` is a `float`.
+- **The type of a width it doesn't take** ("'long float' is invalid"): the
+  width stays, so `long float` is a `long`, `long long double` a
+  `long long`, `long _Bool` a `long`.
+- **`_Complex` with a type it doesn't take.**
+
+The reader finds the error where a specifier makes the list invalid. Only then
+does `check_declspec_scan` work out which token clang drops: once over the list,
+then again without that token, to check that nothing else is wrong. The
+recovery applies where:
+
+- the dropped specifier is a keyword;
+- the list without it has no other error;
+- the reader's state up to the error can be rebuilt from the scan's slots: a
+  keyword's type, or a tag's, typedef name's or `typeof`'s type that the
+  dropped token didn't replace.
+
+A `_Complex` the type doesn't take is dropped at the list's end too, where the
+reader checks it (`_Complex _Bool` is a `_Bool`), with every `_Complex` of the
+list, as `DeclSpec::Finish` unsets the slot. That holds after a type of no
+keyword too (`typeof(_Bool) _Complex`, `struct S _Complex`).
+
+The operand readers recover the same way. A `typeof`'s or an `_Atomic`'s type
+name (`check_constant_specifiers`) and an enum's fixed underlying type
+(`check_input_enum_underlying`) are read again without the dropped specifier
+(`check_input_specifiers_dropped`). So `typeof(_Complex _Bool)` is a `_Bool`
+and `enum E : long float` a `long`.
+
+An error of the list's end (a sign, a width or a `_Complex` the type doesn't
+take) is published at the token after the list. It comes after the list's
+repeated specifiers' warnings, in clang's discovery order:
+`_Complex _Complex _Bool` warns, then errs.
+
+Still stopping the reader:
+
+- a list with a second error (`int float char x;`, `_Complex _Bool int y;`,
+  `unsigned float unsigned x;`), where clang reports both;
+- a storage class's conflict;
+- a second type specifier that is no keyword (`int typeof(int)`, `int _BitInt(8)`,
+  `int _Atomic(int)`, `int struct S`), whose state the slots can't rebuild.
+
+Error-free lists never reach this. The semantic-recovery fixtures cover each
+kind at file scope, in a body, a parameter, a cast, `sizeof`, a member, a
+`typeof`, an `_Atomic` and an enum's base. They also cover a repeated
+`_Complex`'s warning, "duplicate 'complex' declaration specifier" in clang's
+words. The operand readers give no duplicate-specifier warning (#1836).
+
 Type attributes' errors don't stop the reader either (`check_input_attribute_type`).
 What clang 23 does with each is followed:
 

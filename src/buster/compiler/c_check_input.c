@@ -2309,6 +2309,8 @@ static __attribute__((noinline, cold)) void check_input_duplicate_specifier(Chec
         .source = BUSTER_CHECK_WARNING_NO_SOURCE,
         .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
         .completion = token + 1,
+        // Before an error of the list's end (DeclSpec::Finish's) published at the same token (check_input_report_specifiers).
+        .suborder = 1,
         .payload = { .name = name, .token = BUSTER_CHECK_WARNING_NO_SOURCE },
     };
     check_input_warning_once(reader, &event);
@@ -3529,12 +3531,120 @@ static void check_input_report_specifiers(CheckInputReader* reader, uint32_t fir
         {
             reader->output->reports[count].specifier = declspec.first;
             reader->output->reports[count].specifier_type = declspec.second;
+            // An error of the list's end follows the list's repeated specifiers' warnings, which come first at that point
+            // (check_input_duplicate_specifier), and precedes the declarator's diagnostics.
+            reader->output->reports[count].completion = declspec.finish != BUSTER_CHECK_NONE ? declspec.finish : 0;
+            reader->output->reports[count].suborder = declspec.finish != BUSTER_CHECK_NONE ? 2u : 0u;
         }
     }
     else
     {
         check_input_report(reader, fallback, CHECK_INPUT_DECLARATION);
     }
+}
+
+// Whether `token` is a keyword of a type, a width, a sign or _Complex: what clang's DeclSpec drops on its error.
+static bool check_input_specifier_keyword(const Parser* parser, uint32_t token)
+{
+    const uint32_t name = parser->tokens.names[token];
+    return name == C_NAME_LONG || name == C_NAME_SHORT || name == C_NAME_SIGNED || name == C_NAME_GNU_SIGNED || name == C_NAME_GNU_SIGNED2 ||
+           name == C_NAME_UNSIGNED || name == C_NAME_INT || name == C_NAME_COMPLEX_C99 || name == C_NAME_GNU_COMPLEX || name == C_NAME_GNU_COMPLEX2 ||
+           (parser->tokens.kinds[token] == PARSE_KIND_TYPE && name != C_NAME_AUTO_TYPE);
+}
+
+// The builtin type of a slot of the type that is a keyword's (CHECK_DECLSPEC_*): 0 for int's and none, which the width
+// and the sign make; BUSTER_CHECK_NONE where the slot isn't a keyword's (a tag, a typedef name, typeof, _BitInt).
+static uint32_t check_input_specifier_slot_type(uint8_t slot)
+{
+    uint32_t result = BUSTER_CHECK_NONE;
+    switch (slot)
+    {
+        case CHECK_DECLSPEC_NONE: case CHECK_DECLSPEC_INT: result = 0; break;
+        case CHECK_DECLSPEC_VOID: result = BUSTER_TYPE_VOID; break;
+        case CHECK_DECLSPEC_CHAR: result = BUSTER_TYPE_CHAR; break;
+        case CHECK_DECLSPEC_INT128: result = BUSTER_TYPE_INT128; break;
+        case CHECK_DECLSPEC_HALF: result = BUSTER_TYPE_HALF; break;
+        case CHECK_DECLSPEC_FLOAT: result = BUSTER_TYPE_FLOAT; break;
+        case CHECK_DECLSPEC_DOUBLE: result = BUSTER_TYPE_DOUBLE; break;
+        case CHECK_DECLSPEC_FLOAT16: result = BUSTER_TYPE_FLOAT16; break;
+        case CHECK_DECLSPEC_FLOAT128: result = BUSTER_TYPE_FLOAT128; break;
+        case CHECK_DECLSPEC_BF16: result = BUSTER_TYPE_BF16; break;
+        case CHECK_DECLSPEC_BOOL_C99: case CHECK_DECLSPEC_BOOL: result = BUSTER_TYPE_BOOL; break;
+        default: break;
+    }
+    return result;
+}
+
+// The specifier clang's DeclSpec drops for the list from `first` to `end`, which doesn't combine (#1447): a second type,
+// width or sign, at its error; a sign or _Complex the type doesn't take; the type a width doesn't take. BUSTER_CHECK_NONE
+// unless it is a keyword and the list has no other error without it (every _Complex of it, for a _Complex's), so that it
+// recovers; a storage class's conflict doesn't.
+static __attribute__((noinline, cold)) uint32_t check_input_specifiers_dropped(const Parser* parser, uint32_t first, uint32_t end)
+{
+    CheckDeclspecResult error;
+    CheckDeclspecSlots slots;
+    const bool erroneous = check_declspec_scan(parser, first, end, BUSTER_CHECK_NONE, &error, &slots);
+    const bool storage = error.first == CHECK_DECLSPEC_TYPEDEF || error.first >= CHECK_DECLSPEC_EXTERN;
+    const uint32_t dropped = !erroneous ? BUSTER_CHECK_NONE :
+                             error.error == CHECK_DECLSPEC_ERROR_COMBINE ? (storage ? BUSTER_CHECK_NONE : error.token) :
+                             error.error == CHECK_DECLSPEC_ERROR_WIDTH ? slots.type_token : error.token;
+    CheckDeclspecResult rest;
+    CheckDeclspecSlots whole;
+    const bool recovered = dropped != BUSTER_CHECK_NONE && check_input_specifier_keyword(parser, dropped) &&
+                           !check_declspec_scan(parser, first, end, dropped, &rest, &whole) && whole.known;
+    return recovered ? dropped : BUSTER_CHECK_NONE;
+}
+
+// The reader's state of a specifier list's type, which check_input_specifiers builds token by token.
+typedef struct CheckInputSpecifierState CheckInputSpecifierState;
+struct CheckInputSpecifierState
+{
+    TypeId base;
+    uint32_t longs;
+    uint32_t shorts;
+    uint32_t signedness;
+    uint32_t complex_token;
+    bool integer_seen;
+    bool complex;
+};
+
+// A specifier list that doesn't combine at `at` (#1447), recovered as clang's DeclSpec recovers it: it drops the
+// specifier its error is about (a second type, width or sign, at the error; a sign or _Complex the type doesn't take;
+// the type a width doesn't take, which leaves int of that width: `long float` is a long), and the declaration stays
+// valid. Where the dropped specifier is a keyword, the list has no other error without it, and the state up to `at`
+// can be rebuilt from its slots, `state` is that list's to `at` without it, and the report is recovered (phase 1:
+// check_input_recover_reports). Else nothing changes: the caller reports and stops, as before. Only a refusal calls it.
+static __attribute__((noinline, cold)) bool check_input_specifiers_recover(CheckInputReader* reader, uint32_t first, uint32_t end, uint32_t at,
+                                                                           CheckInputSpecifierState* state)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t dropped = check_input_specifiers_dropped(parser, first, end);
+    CheckDeclspecResult rest;
+    CheckDeclspecSlots prefix;
+    bool recovered = dropped != BUSTER_CHECK_NONE && dropped <= at && !check_declspec_scan(parser, first, at + 1, dropped, &rest, &prefix) && prefix.known;
+    const uint32_t keyword_type = recovered ? check_input_specifier_slot_type(prefix.type) : BUSTER_CHECK_NONE;
+    // A type that is no keyword's is the reader's base already, unless `at` is a type keyword that took its place: not
+    // int, which is a slot of its own, nor _Complex, a flag (review on #1820: `typeof(_Bool) _Complex x;`).
+    const uint32_t at_name = parser->tokens.names[at];
+    const bool overwritten = parser->tokens.kinds[at] == PARSE_KIND_TYPE && at_name != C_NAME_INT && !check_declspec_complex_name(at_name);
+    recovered = recovered && (keyword_type != BUSTER_CHECK_NONE || !overwritten);
+    const uint32_t count = reader->output->report_count;
+    if (recovered)
+    {
+        check_input_report_specifiers(reader, first, end, at);
+        recovered = reader->output->report_count != count && check_input_recover_reports(reader, count);
+    }
+    if (recovered)
+    {
+        state->base = keyword_type != BUSTER_CHECK_NONE ? (TypeId)keyword_type : state->base;
+        state->longs = prefix.width == CHECK_DECLSPEC_LONG_LONG ? 2u : prefix.width == CHECK_DECLSPEC_LONG ? 1u : 0u;
+        state->shorts = prefix.width == CHECK_DECLSPEC_SHORT;
+        state->signedness = prefix.sign == CHECK_DECLSPEC_UNSIGNED ? 2u : prefix.sign == CHECK_DECLSPEC_SIGNED ? 1u : 0u;
+        state->integer_seen = prefix.type == CHECK_DECLSPEC_INT;
+        state->complex = prefix.complex;
+        state->complex_token = prefix.complex ? state->complex_token : BUSTER_CHECK_NONE;
+    }
+    return recovered;
 }
 
 static bool check_input_specifier_combination(const TypeTable* types, TypeId base, uint32_t longs, uint32_t shorts,
@@ -3570,92 +3680,126 @@ static TypeId check_input_enum_underlying(CheckInputReader* reader, uint32_t col
     bool integer_seen = false;
     TypeId base = 0;
     bool valid = colon + 1 < end;
-    for (uint32_t i = colon + 1; valid && i < end; i += 1)
+    // A base whose specifiers don't combine is read again without the one clang's DeclSpec drops (#1447, review on #1820:
+    // `enum E : _Complex _Bool`), every _Complex for a _Complex's, as check_input_specifiers recovers it; not one with
+    // attributes, whose reading reports.
+    uint32_t skip = BUSTER_CHECK_NONE;
+    bool skip_complex = false;
+    bool attributed = false;
+    bool attempt = true;
+    while (attempt)
     {
-        const uint32_t name = parser->tokens.names[i];
-        const uint8_t kind = parser->tokens.kinds[i];
-        if (check_input_read_qualifier(reader, i, &qualifiers))
+        qualifiers = 0;
+        longs = 0;
+        shorts = 0;
+        signedness = 0;
+        integer_seen = false;
+        base = 0;
+        valid = colon + 1 < end;
+        for (uint32_t i = colon + 1; valid && i < end; i += 1)
         {
-            // const and volatile dropped, as clang drops them (with a warning); restrict, which needs a pointer, refused.
-            valid = (qualifiers & BUSTER_TYPE_RESTRICT) == 0;
-        }
-        else if (kind == PARSE_KIND_ATTRIBUTE)
-        {
-            // GNU attributes among the specifiers, which clang ignores in a base (with a warning), but one that would make
-            // the type a vector's, which isn't an integer type. Parsed, not evaluated: a vector's size doesn't decide that,
-            // and an argument's evaluation would come back here through a tag of its own.
-            uint32_t cursor = i;
-            CheckInputAttributes parsed = { 0 };
-            valid = check_input_attributes(reader, &cursor, end, &parsed) && cursor > i;
-            for (uint32_t a = 0; valid && a < parsed.count; a += 1)
+            const uint32_t name = parser->tokens.names[i];
+            const uint8_t kind = parser->tokens.kinds[i];
+            if (i == skip || (skip_complex && check_declspec_complex_name(name)))
             {
-                valid = parsed.records[a].kind != CHECK_ATTRIBUTE_VECTOR_SIZE && parsed.records[a].kind != CHECK_ATTRIBUTE_EXT_VECTOR_TYPE;
+                // (Dropped.)
             }
-            i = cursor - 1;
-        }
-        else if (name == C_NAME_LONG)
-        {
-            longs += 1;
-        }
-        else if (name == C_NAME_SHORT)
-        {
-            shorts += 1;
-        }
-        else if (name == C_NAME_SIGNED || name == C_NAME_GNU_SIGNED || name == C_NAME_GNU_SIGNED2 || name == C_NAME_UNSIGNED)
-        {
-            valid = signedness == 0 || signedness == (name == C_NAME_UNSIGNED ? 2u : 1u);
-            signedness = name == C_NAME_UNSIGNED ? 2 : 1;
-        }
-        else if (name == C_NAME_INT)
-        {
-            valid = !integer_seen;
-            integer_seen = true;
-        }
-        else if (kind == PARSE_KIND_TYPE && base == 0)
-        {
-            base = name == C_NAME_CHAR ? BUSTER_TYPE_CHAR : name == C_NAME_BOOL || name == C_NAME_BOOL_C99 ? BUSTER_TYPE_BOOL :
-                   name == C_NAME_INT128 ? BUSTER_TYPE_INT128 : name == C_NAME_FLOAT ? BUSTER_TYPE_FLOAT : name == C_NAME_DOUBLE ? BUSTER_TYPE_DOUBLE : 0;
-            valid = base != 0;
-        }
-        else if (kind == PARSE_KIND_IDENTIFIER && base == 0)
-        {
-            const uint32_t handle = c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, name);
-            const TypeId predefined = handle == 0 ? check_input_predefined_type(reader, name) : 0;
-            valid = predefined != 0 || (handle != 0 && reader->bindings.kind[handle - 1] == C_BINDING_TYPEDEF);
-            if (valid)
+            else if (check_input_read_qualifier(reader, i, &qualifiers))
             {
-                const uint32_t declaration = handle != 0 ? reader->bindings.declaration[handle - 1] : BUSTER_CHECK_NONE;
-                base = predefined != 0 ? predefined : reader->declared_types[declaration];
-                reader->output->declarations[i] = declaration != BUSTER_CHECK_NONE ? declaration : reader->output->declarations[i];
-                reader->declared_types[i] = base;
+                // const and volatile dropped, as clang drops them (with a warning); restrict, which needs a pointer, refused.
+                valid = (qualifiers & BUSTER_TYPE_RESTRICT) == 0;
             }
+            else if (kind == PARSE_KIND_ATTRIBUTE)
+            {
+                // GNU attributes among the specifiers, which clang ignores in a base (with a warning), but one that would make
+                // the type a vector's, which isn't an integer type. Parsed, not evaluated: a vector's size doesn't decide that,
+                // and an argument's evaluation would come back here through a tag of its own.
+                uint32_t cursor = i;
+                CheckInputAttributes parsed = { 0 };
+                attributed = true;
+                valid = check_input_attributes(reader, &cursor, end, &parsed) && cursor > i;
+                for (uint32_t a = 0; valid && a < parsed.count; a += 1)
+                {
+                    valid = parsed.records[a].kind != CHECK_ATTRIBUTE_VECTOR_SIZE && parsed.records[a].kind != CHECK_ATTRIBUTE_EXT_VECTOR_TYPE;
+                }
+                i = cursor - 1;
+            }
+            else if (name == C_NAME_LONG)
+            {
+                longs += 1;
+            }
+            else if (name == C_NAME_SHORT)
+            {
+                shorts += 1;
+            }
+            else if (name == C_NAME_SIGNED || name == C_NAME_GNU_SIGNED || name == C_NAME_GNU_SIGNED2 || name == C_NAME_UNSIGNED)
+            {
+                valid = signedness == 0 || signedness == (name == C_NAME_UNSIGNED ? 2u : 1u);
+                signedness = name == C_NAME_UNSIGNED ? 2 : 1;
+            }
+            else if (name == C_NAME_INT)
+            {
+                valid = !integer_seen;
+                integer_seen = true;
+            }
+            else if (kind == PARSE_KIND_TYPE && base == 0)
+            {
+                base = name == C_NAME_CHAR ? BUSTER_TYPE_CHAR : name == C_NAME_BOOL || name == C_NAME_BOOL_C99 ? BUSTER_TYPE_BOOL :
+                       name == C_NAME_INT128 ? BUSTER_TYPE_INT128 : name == C_NAME_FLOAT ? BUSTER_TYPE_FLOAT : name == C_NAME_DOUBLE ? BUSTER_TYPE_DOUBLE : 0;
+                valid = base != 0;
+            }
+            else if (kind == PARSE_KIND_IDENTIFIER && base == 0)
+            {
+                const uint32_t handle = c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, name);
+                const TypeId predefined = handle == 0 ? check_input_predefined_type(reader, name) : 0;
+                valid = predefined != 0 || (handle != 0 && reader->bindings.kind[handle - 1] == C_BINDING_TYPEDEF);
+                if (valid)
+                {
+                    const uint32_t declaration = handle != 0 ? reader->bindings.declaration[handle - 1] : BUSTER_CHECK_NONE;
+                    base = predefined != 0 ? predefined : reader->declared_types[declaration];
+                    reader->output->declarations[i] = declaration != BUSTER_CHECK_NONE ? declaration : reader->output->declarations[i];
+                    reader->declared_types[i] = base;
+                }
+            }
+            else
+            {
+                valid = false;
+            }
+            valid = valid && check_input_specifier_combination(reader->types, base, longs, shorts, signedness, integer_seen);
         }
-        else
+        if (valid && base == 0)
         {
-            valid = false;
+            base = shorts ? (signedness == 2 ? BUSTER_TYPE_USHORT : BUSTER_TYPE_SHORT) :
+                   longs == 2 ? (signedness == 2 ? BUSTER_TYPE_ULLONG : BUSTER_TYPE_LLONG) :
+                   longs == 1 ? (signedness == 2 ? BUSTER_TYPE_ULONG : BUSTER_TYPE_LONG) :
+                                (signedness == 2 ? BUSTER_TYPE_UINT : BUSTER_TYPE_INT);
         }
-        valid = valid && check_input_specifier_combination(reader->types, base, longs, shorts, signedness, integer_seen);
+        else if (valid && base == BUSTER_TYPE_CHAR)
+        {
+            valid = !longs && !shorts && !integer_seen;
+            base = signedness == 2 ? BUSTER_TYPE_UCHAR : signedness == 1 ? BUSTER_TYPE_SCHAR : BUSTER_TYPE_CHAR;
+        }
+        else if (valid && base == BUSTER_TYPE_INT128)
+        {
+            valid = !longs && !shorts && !integer_seen;
+            base = signedness == 2 ? BUSTER_TYPE_UINT128 : base;
+        }
+        else if (valid)
+        {
+            valid = !longs && !shorts && !signedness && !integer_seen;
+        }
+        const uint32_t dropped = !valid && skip == BUSTER_CHECK_NONE && !attributed && colon + 1 < end ?
+                                 check_input_specifiers_dropped(parser, colon + 1, end) : BUSTER_CHECK_NONE;
+        attempt = dropped != BUSTER_CHECK_NONE;
+        skip = attempt ? dropped : skip;
+        skip_complex = attempt && check_declspec_complex_name(parser->tokens.names[dropped]);
     }
-    if (valid && base == 0)
+    if (skip != BUSTER_CHECK_NONE)
     {
-        base = shorts ? (signedness == 2 ? BUSTER_TYPE_USHORT : BUSTER_TYPE_SHORT) :
-               longs == 2 ? (signedness == 2 ? BUSTER_TYPE_ULLONG : BUSTER_TYPE_LLONG) :
-               longs == 1 ? (signedness == 2 ? BUSTER_TYPE_ULONG : BUSTER_TYPE_LONG) :
-                            (signedness == 2 ? BUSTER_TYPE_UINT : BUSTER_TYPE_INT);
-    }
-    else if (valid && base == BUSTER_TYPE_CHAR)
-    {
-        valid = !longs && !shorts && !integer_seen;
-        base = signedness == 2 ? BUSTER_TYPE_UCHAR : signedness == 1 ? BUSTER_TYPE_SCHAR : BUSTER_TYPE_CHAR;
-    }
-    else if (valid && base == BUSTER_TYPE_INT128)
-    {
-        valid = !longs && !shorts && !integer_seen;
-        base = signedness == 2 ? BUSTER_TYPE_UINT128 : base;
-    }
-    else if (valid)
-    {
-        valid = !longs && !shorts && !signedness && !integer_seen;
+        // Read without it: clang's error, recovered (phase 1, check_input_recover_reports).
+        const uint32_t count = reader->output->report_count;
+        check_input_report_specifiers(reader, colon + 1, end, colon + 1);
+        valid = valid && reader->output->report_count != count && check_input_recover_reports(reader, count);
     }
     const TypeId integer = valid ? type_unqualified(type_strip_aligned(reader->types, base)) : 0;
     valid = valid && type_kind(reader->types, integer) == BUSTER_TYPE_KIND_INTEGER;
@@ -4217,6 +4361,8 @@ static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor,
     bool complex = false;
     bool atomic = false;
     bool reported = false;
+    // Whether a specifier that doesn't combine was dropped, as clang's DeclSpec drops it (#1447): once per list.
+    bool specifiers_recovered = false;
     const uint32_t reports = reader->output->report_count;
     // Whether a _BitInt base is this list's own keyword's, which the list's signedness makes signed or unsigned below;
     // a typedef name's or a typeof's keeps the signedness it has.
@@ -4538,16 +4684,41 @@ static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor,
             if (!valid)
             {
                 CheckDeclspecResult declspec;
+                CheckInputSpecifierState state = {
+                    .base = base,
+                    .longs = longs,
+                    .shorts = shorts,
+                    .signedness = signedness,
+                    .complex_token = complex_token,
+                    .integer_seen = integer_seen,
+                    .complex = complex,
+                };
                 if (!reported && auto_type != BUSTER_CHECK_NONE && !check_declspec_error(parser, first, end, &declspec))
                 {
                     check_input_report(reader, check_input_auto_type_clash(reader, first, i, end, auto_clash), CHECK_INPUT_DECLARATION);
+                }
+                else if (!reported && !specifiers_recovered && auto_type == BUSTER_CHECK_NONE && check_input_specifiers_recover(reader, first, end, i, &state))
+                {
+                    // Clang's DeclSpec dropped a specifier, and the list goes on as valid (#1447).
+                    base = state.base;
+                    longs = state.longs;
+                    shorts = state.shorts;
+                    signedness = state.signedness;
+                    complex_token = state.complex_token;
+                    integer_seen = state.integer_seen;
+                    complex = state.complex;
+                    specifiers_recovered = true;
+                    valid = true;
                 }
                 else if (!reported)
                 {
                     check_input_report_specifiers(reader, first, end, i);
                 }
-                reported = true;
-                break;
+                reported |= !valid;
+                if (!valid)
+                {
+                    break;
+                }
             }
             reader->ignored[i] = true;
             saw = true;
@@ -4654,7 +4825,17 @@ static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor,
     {
         const uint32_t code = type_index(base);
         valid = code < 64 && ((BUSTER_TYPE_COMPLEX_SPELLABLE >> code) & 1) != 0;
-        base = valid ? check_input_type_result(reader, type_complex(reader->types, base)) : 0;
+        // A _Complex the type doesn't take, which clang's DeclSpec drops at the list's end (#1447, review on #1820): the
+        // list goes on as its type alone, where it is otherwise valid.
+        CheckInputSpecifierState state = { .base = base, .complex_token = complex_token, .complex = complex };
+        if (!valid && !specifiers_recovered && auto_type == BUSTER_CHECK_NONE && i > first && check_input_specifiers_recover(reader, first, end, i - 1, &state) &&
+            !state.complex)
+        {
+            specifiers_recovered = true;
+            complex = false;
+            valid = true;
+        }
+        base = !valid ? 0 : complex ? check_input_type_result(reader, type_complex(reader->types, base)) : base;
     }
     if (atomic && valid)
     {
