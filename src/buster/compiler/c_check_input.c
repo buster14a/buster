@@ -1718,6 +1718,13 @@ struct CheckInputReader
     bool library_names_known;
     // The GNU attribute names' rows by name (check_input_attribute_gnu_rows), which a reader's copy keeps its own of.
     CheckInputGnuRows gnu_rows[1u << BUSTER_CHECK_GNU_ROW_BITS];
+    // The enumerations of the enumerators the constant reader's mixes coerce (check_constant_enum_operand), by their
+    // declarations' low bits: the declaration plus one (0 for an empty slot), its enumeration's closing brace and type.
+    // An operator of a body compares an enumeration's variable with an enumerator again and again, and finding the brace
+    // walks the enumeration's list.
+    uint32_t enum_keys[64];
+    uint32_t enum_closes[64];
+    TypeId enum_types[64];
     CheckOverloadCandidate* overload_candidates;
     uint32_t overload_capacity;
     CheckOverloadIndex overload_index;
@@ -2360,50 +2367,51 @@ static TypeId check_input_object_spelling(const TypeTable* types, const CheckInp
     return result;
 }
 
+// An operand's typedef-specifier declaration for its warning spelling (#992), by the token that holds its value: a
+// cast's (`cast`) type name's typedef, else the typedef naming the specifier of the declaration the token names, else 0.
+static uint32_t check_input_token_type_spelling(const CheckInput* input, const Parser* parser, uint32_t token, bool cast)
+{
+    uint32_t result = 0;
+    if (cast && token < parser->tokens.count && parser->tree.roles[token] == PARSE_ROLE_CLOSE_CAST)
+    {
+        // A cast's own type name is the operand's specifier (#992): `(size_t)4`'s `size_t` is itself
+        // the typedef-name use, so its resolution is the specifier's declaration — no declaration to
+        // scan back from as a named object's would.
+        uint32_t open = token;
+        while (open != 0 && !(parser->tokens.kinds[open] == PARSE_KIND_L_PAREN && parser->tree.parents[open] == token))
+        {
+            open -= 1;
+        }
+        for (uint32_t type_name = open + 1; result == 0 && type_name < token; type_name += 1)
+        {
+            const uint32_t resolved = parser->tokens.kinds[type_name] == PARSE_KIND_IDENTIFIER && input->declarations != 0 ?
+                                      input->declarations[type_name] : 0;
+            if (resolved != 0 && resolved < input->token_count && input->declaration_kinds != 0 &&
+                input->declaration_kinds[resolved] == C_BINDING_TYPEDEF)
+            {
+                result = resolved;
+            }
+        }
+    }
+    else
+    {
+        result = token < input->token_count && input->declarations != 0 ? check_input_typedef_spelling(input, parser, input->declarations[token]) : 0;
+    }
+    return result;
+}
+
 // One ordered-comparison operand's typedef-specifier declaration for its warning spelling (#992): the
-// BUSTER_CHECK_NONE sentinel where its expression was a sizeof/alignof — clang's `__size_t` there — else the
-// typedef naming its operand declaration's specifier, else 0. `node` is the operand's own graph node, from the
-// graph walk directly or `token_nodes` at an action's token.
+// BUSTER_CHECK_NONE sentinel where its expression was a sizeof/alignof — clang's `__size_t` there — else its token's
+// (check_input_token_type_spelling). `node` is the operand's own graph node, from the graph walk directly or
+// `token_nodes` at an action's token.
 static uint32_t check_input_operand_type_spelling(const CheckInput* input, const Parser* parser, uint32_t node)
 {
     const CheckGraph* graph = &input->graph;
     uint32_t result = 0;
     if (node < graph->count)
     {
-        if (graph->ops[node] == CHECK_OP_SIZEOF || graph->ops[node] == CHECK_OP_ALIGNOF)
-        {
-            result = BUSTER_CHECK_NONE;
-        }
-        else
-        {
-            const uint32_t token = graph->tokens[node];
-            if (graph->ops[node] == CHECK_OP_CAST && token < parser->tokens.count && parser->tree.roles[token] == PARSE_ROLE_CLOSE_CAST)
-            {
-                // A cast's own type name is the operand's specifier (#992): `(size_t)4`'s `size_t` is itself
-                // the typedef-name use, so its resolution is the specifier's declaration — no declaration to
-                // scan back from as a named object's would.
-                uint32_t open = token;
-                while (open != 0 && !(parser->tokens.kinds[open] == PARSE_KIND_L_PAREN && parser->tree.parents[open] == token))
-                {
-                    open -= 1;
-                }
-                for (uint32_t type_name = open + 1; result == 0 && type_name < token; type_name += 1)
-                {
-                    const uint32_t resolved = parser->tokens.kinds[type_name] == PARSE_KIND_IDENTIFIER && input->declarations != 0 ?
-                                              input->declarations[type_name] : 0;
-                    if (resolved != 0 && resolved < input->token_count && input->declaration_kinds != 0 &&
-                        input->declaration_kinds[resolved] == C_BINDING_TYPEDEF)
-                    {
-                        result = resolved;
-                    }
-                }
-            }
-            else
-            {
-                result = token < input->token_count && input->declarations != 0 ?
-                         check_input_typedef_spelling(input, parser, input->declarations[token]) : 0;
-            }
-        }
+        const bool query = graph->ops[node] == CHECK_OP_SIZEOF || graph->ops[node] == CHECK_OP_ALIGNOF;
+        result = query ? BUSTER_CHECK_NONE : check_input_token_type_spelling(input, parser, graph->tokens[node], graph->ops[node] == CHECK_OP_CAST);
     }
     return result;
 }

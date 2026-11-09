@@ -572,7 +572,7 @@ static bool check_query_stored(const CheckStream* stream, uint32_t node, const C
     written.flags = check_value_source_flags((CheckOp)stream->graph->ops[node], result->value.flags);
     const CheckValue stored = check_stream_value(stream, node);
     bool same = check_query_same_value(&stored, &written) && stream->diagnostics[node] == result->diagnostic &&
-                stream->diagnostic_operands[node] == result->diagnostic_operand && stream->warnings[node] == result->warnings &&
+                stream->diagnostic_operands[node] == result->diagnostic_operand && stream->warnings[node] == (result->warnings & ~CHECK_WARNING_ENUM_OPERAND) &&
                 stream->member_offsets[node] == result->member_offset;
     const CheckNodeConversions* conversions = stream->conversions + node;
     for (uint32_t i = 0; same && i < BUSTER_ARRAY_LENGTH(result->conversions); i += 1)
