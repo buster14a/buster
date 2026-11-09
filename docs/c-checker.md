@@ -4202,8 +4202,15 @@ view's own; the bodies' reading publishes those its known errors don't hold,
 its reader's and graph's reports and its controls' constraints, in clang's
 words (its reader's alone where its graph can't run after them), and the next
 round leaves their parts out too. Each round adds an error and its parts, up
-to `BUSTER_CHECK_DRIVER_REJECTED_ROUNDS` (4) readings; past them the unit's
-warnings aren't given. The second reading's unused variables in a scope with an error
+to clang's error limit's cut (the error after `-ferror-limit`'s, the first with
+`-Wfatal-errors`), past which clang gives nothing: counted in the bodies that
+hold a known error (each at least one; an error's tokens may be several), the
+bodies after the one that brings them past the limit are left out whole, and
+`BUSTER_CHECK_DRIVER_REJECTED_ROUNDS` (4) more readings find what the body
+that holds it, or file scope after it, still hides; past them the unit's
+warnings aren't given. Without a limit (`-ferror-limit=0`) the rounds go on
+while each finds an error. Each round is a reading of the unit, so a unit of
+`n` walk-ending errors costs up to `min(n, limit) + 1` readings. The second reading's unused variables in a scope with an error
 are left out (its own error counts, the dropped part's at the token after
 it). A function holding an error keeps its unused parameters, as clang's
 `ActOnFinishFunctionBody` gives them whatever the body's errors, except one
@@ -4485,9 +4492,10 @@ The later phases are left:
   leaves the unit without its common warnings. A function's unused parameter that its
   left-out part names through a local of the same name gets no
   `-Wunused-parameter`, where clang gives one.
-- **Rounds past the cap.** A unit needing more than four readings' rounds
-  (each body's error ending the next reading's walk) gets its first errors
-  alone.
+- **Errors an edited reading meets.** A reading of the view that finds an error
+  of its own isn't taken (its body is left out whole instead), so a body with
+  two walk-ending errors (`struct T1 t; struct U1 v;`) loses the second, and
+  its warnings with it.
 
 ### What the lowering costs (#531)
 
