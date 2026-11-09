@@ -1065,8 +1065,13 @@ the error code below them. There is no call's return address. So:
 - **No red zone.** A nested interrupt's frame would land below rsp, so the routine's red zone temporaries
   (`tier0_temporary`, `tier0_red_zone`) are the frame's top 128 bytes, right below the pushes and the preserve block,
   from rbp. Neither a realignment nor an allocation moves them, and no other place reaches them.
-- **Its result is void, and it takes no variadic arguments.** `tier0_preserve_valid` refuses any other metadata on both
-  compile paths.
+- **Its result is void.** `tier0_preserve_valid` refuses any other metadata on both compile paths.
+- **A variadic routine** (#1447) is LLVM's `x86_intrcc` with `...`: its named parameters take no register, so its
+  `va_list` starts with `gp_offset` 0 and `fp_offset` 48 at the interrupted code's rdi and xmm0, which its prologue
+  saves before the entry overwrites rdi and rsi. Its overflow area is 40 bytes past where it was entered
+  (`Tier0Function.incoming_variadic`'s `stack_bytes` of 32, past the incoming area), as LLVM's is. Tier 0 saves the
+  XMMs whatever al says, where LLVM saves them only for a nonzero al; a list read past what was saved is garbage
+  either way.
 
 **The unwind tables** (`Tier0Code.frame_interrupt`):
 
