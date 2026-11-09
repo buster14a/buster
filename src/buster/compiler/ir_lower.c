@@ -717,6 +717,19 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_vector_operation(
         value = ir_typed_emit(sink, IR_VSELECT, type, mask, active, inactive, 0);
         ir_typed_lanes(sink, value, operation->lane);
     }
+    else if (operation->width_change != 0)
+    {
+        // A width change (#1840), its part in its flags; a masked extract's merged into its second operand under its third
+        // where the typed stream's writemask hasn't every lane.
+        const uint32_t kind = operation->width_change - 1u;
+        value = ir_typed_emit(sink, IR_INTRINSIC, type, operands[0], kind == BUSTER_IR_INTRINSIC_INSERT ? operands[1] : BUSTER_IR_NONE, kind, 0);
+        ir_typed_lanes(sink, value, (IrSimdLane)operation->part);
+        if (operation->merge_mask && !unmasked)
+        {
+            value = ir_typed_emit(sink, IR_VSELECT, type, operands[2], value, operands[1], 0);
+            ir_typed_lanes(sink, value, operation->lane);
+        }
+    }
     else
     {
         value = ir_typed_emit(sink, (IrOp)ops[operation->operation], type, operands[0], operation->operand_count == 2 ? operands[1] : BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
@@ -730,7 +743,10 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_vector_operation(
 // operand have it (_mm512_cmpeq_epi8_mask's -1). The typed stream decides it, so both lowering passes agree.
 static bool ir_typed_unmasked(const Tier0Function* input, const IrSimdTypedOperation* operation, uint32_t i)
 {
-    const uint32_t lanes = operation->compare_mask ? 8u * operation->operand_bytes[0] / ir_simd_lane_bits(operation->lane) : 0;
+    // A comparison's lanes, or a masked extract's (#1840): its result's, the merged operand's.
+    const uint32_t lanes = operation->compare_mask ? 8u * operation->operand_bytes[0] / ir_simd_lane_bits(operation->lane) :
+                           operation->merge_mask   ? 8u * operation->operand_bytes[1] / ir_simd_lane_bits(operation->lane) :
+                                                     0;
     const uint64_t every = lanes >= 64 ? UINT64_MAX : (UINT64_C(1) << lanes) - 1;
     return lanes != 0 && i >= 2 && input->kinds[i - 1] == BUSTER_TYPED_CONVERT && input->classes[i - 1] == BUSTER_TYPED_CLASS_MASK && input->kinds[i - 2] == BUSTER_TYPED_CONST &&
            input->classes[i - 2] >= BUSTER_TYPED_CLASS_I8 && input->classes[i - 2] <= BUSTER_TYPED_CLASS_U64 && (input->values[i - 2] & every) == every;

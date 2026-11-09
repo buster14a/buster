@@ -383,6 +383,98 @@ The tests:
   under a writemask and a float's, run natively against clang's; its bound of a
   move for every two rows counts them with the rows, where they took no move.
 
+## Width changes (#1840)
+
+[#1840](https://github.com/buster14a/buster/issues/1840) decodes the x86
+builtins' remaining rows family by family. Its design comment counts them by
+kind. Moving bits between vector widths takes three unary or binary kinds of
+`intrinsic`:
+
+```text
+%4 = intrinsic.v4i32 %3 extract 3
+%9 = intrinsic.v16i32 %1 widen
+%13 = intrinsic.v16i32 %3, %1 insert 2
+```
+
+An intrinsic's `flags` are its immediate: a width change's part, in units of the
+narrower vector, and 0 for every other kind (which the verifier now checks per
+kind rather than as lanes).
+
+- `extract` (`BUSTER_IR_INTRINSIC_EXTRACT`): the `flags`th part of a, of the
+  result's width. The result is a narrower vector: 16 bytes of 32 or 64, or 32
+  of 64.
+- `widen` (`BUSTER_IR_INTRINSIC_WIDEN`): a in the result's low bytes and zeros
+  past them. a is a narrower vector; `flags` is 0.
+- `insert` (`BUSTER_IR_INTRINSIC_INSERT`): a, of the result's type, with its
+  `flags`th part of b's width replaced by b, a narrower vector.
+
+They read no lanes and move bits whole. The text names the part after an
+extract's or an insert's kind. `tests/ir/widths.ir` round-trips every form.
+
+The model (`ir_simd_model.c`'s `IR_SIMD_EXTRACT`, `IR_SIMD_WIDEN` and
+`IR_SIMD_INSERT`, its action's `index` the part) moves whole words, and the
+interpreter runs it. SCCP folds a width change once its operands are constant.
+GVN and LICM take it as a pure operation, its part in their key. Dead code
+removes an unused one.
+
+`ir_simd_typed_width` decodes three kinds of row:
+
+- **Casts.** The rows of no record of one vector operand (or two of one width,
+  the second kept for its effects alone), whose result is the operand's
+  register, of another width. These are the intrinsics' casts, as
+  `c_check_program_vector_builtins.c` gives every shuffle that moves no element.
+  A narrower result is an extract of part 0; a wider one is a widen, since Tier
+  0 and Tier 1 both zero-extend an operand into its role's register.
+- **Inserts.** BINARY_IMMEDIATE's `vinsert` rows (`vinserti32x4` to
+  `vinsertf64x4`, and the `vinsertf128` builtins) become inserts of the
+  immediate's part.
+- **Masked extracts.** EXTRACT_LANE's `vextract` rows under a writemask, merged
+  into w, become an extract and a `vselect` of the form's elements' lanes. The
+  `vselect` is left out where the typed stream's writemask has every lane, as
+  #1623's comparisons do.
+
+Each record must be register-direct with no other field, and the target must
+have AVX512F and VL, the rows' own forms' features (DQ for `32x8` and `64x2`)
+and, merged, the mask's moves. Otherwise the row stays a machine row.
+
+Tier 1 selects each kind as one EVEX instruction (`BUSTER_TIER1_VECTOR_WIDTH_CHANGE`):
+- an extract of part 0 and a widen as the narrower width's move, which an
+  extract leaves out when its registers are the same, and a widen never, since
+  the move zeroes the register past it;
+- another extract as `vextracti32x4` or `vextracti64x4`;
+- an insert as `vinserti32x4` or `vinserti64x4`.
+
+Their six register forms have new Zen 5 rows, measured on the 9700X ([the
+record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/ir-width-changes-1840-2026-11-09),
+buster-performance#354; [the model guide](x86-zen5.md)).
+
+Measured by `--tier1 --tier1-report -march=znver5`, both compilers compiling
+main `cb608c1`'s sources:
+
+| Unit | Main rows | Records | Row moves | This change rows | Records | Row moves |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `main_unit_frontend.c` | 1,207 | 576,053 | 782 | 1,111 | 575,941 | 693 |
+| `main_unit_backend.c` | 1,735 | 1,490,643 | 1,010 | 1,643 | 1,490,520 | 926 |
+
+The tests:
+
+- `test-ir`: both verifiers admit each kind at every pair of widths and part
+  below 5 exactly where the widths and part agree (19 forms), and refuse another
+  kind's flags. The model's values are checked against bytes written out.
+- `test-ir-parse`: round-trips the forms.
+- `test-ir-optimize`: SCCP folds, by both paths, an insert's part back, a
+  widen's zeros and another part's own value.
+- `test-ir-simd`: decodes every insert rule (16) and masked extract rule (12)
+  at 8 immediates, and every cast's row. Features are written out, and each
+  row stays a machine row without each feature it needs and under 9 changes.
+- `test-tier1-masks`: runs 78 programs, each rule's every part and the 6 casts,
+  each its only row. Every lane of an extract is merged under an input word or
+  an unmasked writemask. They go through both lowering paths, the interpreter
+  at every stage and Tier 1's native code, against a C model.
+- `test-checker-driver`'s machine-rows unit: its inserts, extracts and casts are
+  now the IR's. It has 65 rows and 32 moves (main: 75 and 39), and its native
+  hashes are clang -O0's by both paths.
+
 ## Lanes: the vectors' element types (#141)
 
 The IR's vector types are containers of 16, 32 and 64 bytes (`v4i32`, `v8i32`

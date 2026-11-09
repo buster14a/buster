@@ -109,6 +109,10 @@ struct Tier1MasksTest
     uint32_t compare_rows;
     uint32_t compare_decoded;
     uint32_t compare_native;
+    // The front end's width changes (#1840, tier1_masks_test_widths): those tried, and those through every stage as the
+    // IR's extract, widen or insert.
+    uint32_t width_attempts;
+    uint32_t width_rows;
     // The machine rows' mutants (#1284, tier1_masks_test_row_mutants): borrowed opmask registers' reloads left out, staging
     // copies renamed into a live value's register; and of each, those the code's certificate refused.
     uint32_t row_reloads;
@@ -4747,6 +4751,140 @@ static void tier1_masks_test_compares(Tier1MasksTest* test)
     free(program);
 }
 
+// The front end's width changes through the IR to Tier 1 (#1840): every insert rule (BINARY_IMMEDIATE's vinsert forms) and
+// masked extract rule (EXTRACT_LANE's, in the mask class) at each of its parts, and the casts' rows of no record at every
+// pair of widths, each as the program's only row, in 4 statements: of the input buffer's vectors k and k + 1 (modulo 4,
+// of the row's operands' bytes), an extract's writemask the input word k in the odd statements and a constant of every
+// lane in the even ones, as clang's intrinsics without a mask give it, the result stored into the output's vector k.
+// tier1_masks_test_typed_pipeline takes each through the IR as its extract, widen or insert (and an extract's vselect),
+// which the interpreter runs at every stage, and Tier 1 natively, against a C model of the bytes. Tier 0 doesn't run them
+// here, as the selects' (tier1_masks_test_selects).
+static void tier1_masks_test_widths(Tier1MasksTest* test)
+{
+    const X86Target target = { .features = test->v4_features };
+    Tier0TestMaskProgram* program = malloc(sizeof(*program));
+    uint64_t* inputs = calloc(BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS, BUSTER_TIER1_MASKS_TEST_IN);
+    uint8_t* expected = malloc(BUSTER_TIER1_MASKS_TEST_OUT * BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS);
+    Arena arenas[3] = { arena_reserve(64u << 20), arena_reserve(64u << 20), arena_reserve(64u << 20) };
+    bool ready = tier1_masks_test_expect(test, program != 0 && inputs != 0 && expected != 0 && arenas[0].base != 0 && arenas[1].base != 0 && arenas[2].base != 0,
+                                         "the width changes' memory");
+    uint64_t state = test->random ^ UINT64_C(0x3c6ef372fe94f82b);
+    // The rules' cases, then the 6 casts' (case past the rules: a pair of widths).
+    const uint32_t rules = BUSTER_ARRAY_LENGTH(check_x86_lower_rules);
+    for (uint32_t i = 0; ready && i < rules + 6; i += 1)
+    {
+        const CheckX86LowerRule* rule = i < rules ? check_x86_lower_rules + i : 0;
+        const char* mnemonic = rule != 0 && rule->form != X86_FORM_NONE ? x86_form_description(rule->form)->mnemonic : "";
+        const bool insert = rule != 0 && rule->family == CHECK_X86_LOWER_BINARY_IMMEDIATE && rule->other != 0 && strncmp(mnemonic, "vinsert", 7) == 0 &&
+                            strcmp(mnemonic, "vinsertps") != 0;
+        const bool extract = rule != 0 && rule->family == CHECK_X86_LOWER_EXTRACT_LANE;
+        const bool cast = rule == 0;
+        static const uint8_t pairs[6][2] = { { 16, 32 }, { 16, 64 }, { 32, 64 }, { 32, 16 }, { 64, 16 }, { 64, 32 } };
+        const uint32_t parts = insert || extract ? (uint32_t)rule->bytes / rule->other : 1;
+        for (uint32_t code = 0; (insert || extract || cast) && code < parts; code += 1)
+        {
+            const uint64_t output_mark = test->output.length;
+            test->width_attempts += 1;
+            Tier0Operation row = { 0 };
+            bool made = true;
+            char name[128];
+            if (cast)
+            {
+                row.result_class = BUSTER_TYPED_CLASS_VECTOR;
+                row.result_bytes = pairs[i - rules][1];
+                row.operand_count = 1;
+                row.operand_classes[0] = BUSTER_TYPED_CLASS_VECTOR;
+                row.operand_bytes[0] = pairs[i - rules][0];
+                snprintf(name, sizeof(name), "a cast of %u bytes to %u", row.operand_bytes[0], row.result_bytes);
+            }
+            else
+            {
+                made = check_x86_lower_row_of(&target, rule, code, 4, 0, false, &row) == NULL && (!extract || check_x86_lower_masks(&row, &target));
+                snprintf(name, sizeof(name), "%s (part %u)", rule->name, code);
+            }
+            const uint32_t bytes = row.result_bytes;
+            const uint32_t a_bytes = row.operand_bytes[0];
+            const uint32_t b_bytes = row.operand_count > 1 ? row.operand_bytes[1] : 0;
+            bool ok = tier1_masks_test_expect(test, made && row.result_class == BUSTER_TYPED_CLASS_VECTOR, "the front end's width change's row");
+            program->count = 0;
+            program->overflow = false;
+            program->rows = true;
+            program->objects = false;
+            for (uint32_t k = 0; ok && k < 4; k += 1)
+            {
+                tier0_test_mask_address(program, BUSTER_TIER0_TEST_MASK_OUT, k * bytes / 8);
+                tier0_test_mask_address(program, BUSTER_TIER0_TEST_MASK_IN, k * a_bytes / 8 % 32);
+                tier0_test_mask_emit(program, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_VECTOR, a_bytes);
+                if (b_bytes != 0)
+                {
+                    tier0_test_mask_address(program, BUSTER_TIER0_TEST_MASK_IN, (k + 1) * b_bytes / 8 % 32);
+                    tier0_test_mask_emit(program, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_VECTOR, b_bytes);
+                }
+                if (extract && (k & 1) != 0)
+                {
+                    tier0_test_mask_address(program, BUSTER_TIER0_TEST_MASK_IN, k);
+                    tier0_test_mask_emit(program, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_U64, 0);
+                }
+                else if (extract)
+                {
+                    tier0_test_mask_emit(program, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, UINT64_MAX);
+                }
+                if (extract)
+                {
+                    tier0_test_mask_emit(program, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_MASK, row.operand_bytes[2]);
+                }
+                tier0_test_mask_emit(program, BUSTER_TYPED_X86, row.result_class, 0);
+                tier0_test_mask_emit(program, BUSTER_TYPED_SET, row.result_class, bytes);
+            }
+            tier0_test_mask_emit(program, BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_VOID, 0);
+            ok = ok && tier1_masks_test_expect(test, !program->overflow, "the width change's program fits");
+            Tier0Function functions[2] = { tier0_test_mask_function(program), tier0_test_mask_leaf() };
+            functions[0].operations = &row;
+            functions[0].operation_count = 1;
+            for (uint32_t input = 0; ok && input < BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS; input += 1)
+            {
+                uint64_t* in = inputs + (uint64_t)input * (BUSTER_TIER1_MASKS_TEST_IN / 8);
+                uint8_t* wanted = expected + (uint64_t)input * BUSTER_TIER1_MASKS_TEST_OUT;
+                tier0_test_mask_inputs(in, &state);
+                memset(wanted, 0xa5, BUSTER_TIER1_MASKS_TEST_OUT);
+                for (uint32_t k = 0; k < 4; k += 1)
+                {
+                    const uint8_t* a = (const uint8_t*)in + k * a_bytes % 256;
+                    const uint8_t* b = (const uint8_t*)in + (k + 1) * b_bytes % 256;
+                    const uint64_t mask = extract && (k & 1) != 0 ? in[k] : UINT64_MAX;
+                    uint8_t* out = wanted + k * bytes;
+                    for (uint32_t byte = 0; byte < bytes; byte += 1)
+                    {
+                        const uint32_t start = code * (insert ? b_bytes : bytes);
+                        const bool inserted = insert && byte >= start && byte < start + b_bytes;
+                        const bool kept = !extract || ((mask >> (byte / rule->element)) & 1) != 0;
+                        out[byte] = insert                     ? (inserted ? b[byte - start] : a[byte]) :
+                                    extract                    ? (kept ? a[start + byte] : b[byte]) :
+                                    bytes < a_bytes || byte < a_bytes ? a[byte] :
+                                                                 0;
+                    }
+                }
+            }
+            bool machine = false;
+            ok = ok && tier1_masks_test_typed_pipeline(test, name, functions, true, inputs, expected, arenas, &machine);
+            test->width_rows += ok;
+            tier1_masks_test_expect(test, test->scratch.length == 0, "the width changes return the scratch arena");
+            arena_pop_to(&test->output, output_mark);
+            for (uint32_t k = 0; k < 3; k += 1)
+            {
+                arena_pop_to(&arenas[k], 0);
+            }
+        }
+    }
+    for (uint32_t k = 0; k < 3; k += 1)
+    {
+        arena_release(&arenas[k]);
+    }
+    free(expected);
+    free(inputs);
+    free(program);
+}
+
 static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
 {
     uint64_t seed = 179;
@@ -4833,6 +4971,7 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
             tier1_masks_test_typed(&test);
             tier1_masks_test_builtins(&test);
             tier1_masks_test_compares(&test);
+            tier1_masks_test_widths(&test);
             tier1_masks_test_refusals(&test, baseline, foundation);
             tier1_masks_test_scan(&test);
             tier1_masks_test_forms(&test);
@@ -4845,13 +4984,16 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
             // Tier 0's programs through the IR: every one taken whole, some with machine rows, and natively by both paths.
             tier1_masks_test_expect(&test, test.typed_programs == BUSTER_TIER1_MASKS_TEST_PROGRAMS && test.typed_machine != 0 && test.typed_machine < test.typed_programs,
                                     "Tier 0's mask programs go through the IR and Tier 1, those whose rows the decoders refuse as machine rows");
-            tier1_masks_test_expect(&test, !test.native || test.typed_runs == 2u * BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS * (test.typed_programs + test.builtin_rows + test.compare_rows),
+            tier1_masks_test_expect(&test, !test.native || test.typed_runs == 2u * BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS * (test.typed_programs + test.builtin_rows + test.compare_rows + test.width_rows),
                                     "every typed program and front-end row runs natively by both of Tier 1's paths");
             // The comparisons: 24 integer rules (bytes to quadwords, signed and unsigned, at 3 widths) at 8 immediates, 6
             // of them the IR's; 6 packed float rules at 32, 12 of them the IR's.
             tier1_masks_test_expect(&test, test.compare_attempts == 24 * 8 + 6 * 32 && test.compare_rows == test.compare_attempts && test.compare_decoded == 24 * 6 + 6 * 12,
                                     "every front-end comparison into a mask goes through Tier 0, the IR and Tier 1, those of an IR predicate as the IR's comparisons");
             tier1_masks_test_expect(&test, !test.native || test.compare_native == BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS * test.compare_rows, "Tier 0 runs every front-end comparison natively");
+            // The width changes (#1840): every insert and masked extract rule at each part, and the 6 casts.
+            tier1_masks_test_expect(&test, test.width_attempts > 6 && test.width_rows == test.width_attempts,
+                                    "every front-end width change goes through the IR and Tier 1 as the IR's extract, widen or insert");
             // The front end's rows: every rule of the five families, the shifts at every count.
             tier1_masks_test_expect(&test, test.builtin_attempts != 0 && test.builtin_rows == test.builtin_attempts, "every front-end opmask row goes through Tier 0, the IR and Tier 1");
             tier1_masks_test_expect(&test, !test.native || test.builtin_native == BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS * test.builtin_rows, "Tier 0 runs every front-end row natively");
@@ -4862,6 +5004,8 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
         printf("test-tier1-masks: the front end's comparisons into masks: %u through Tier 0 natively (%u runs) and Tier 1, %u of them the IR's comparisons through its interpreter, SSA and the "
                "optimizer, the others machine rows\n",
                test.compare_rows, test.compare_native, test.compare_decoded);
+        printf("test-tier1-masks: the front end's width changes: %u through the IR's interpreter, SSA, the optimizer and Tier 1 natively as its extract, widen and insert\n",
+               test.width_rows);
         tier1_masks_test_expect(&test, tier1_masks_test_row_occupancy(),
                                 "VECTOR roles share a register where one is done with it before the other's pure write in a record whose destination may be a source, and only there (#1283, #1284)");
         tier1_masks_test_expect(&test, test.row_reloads != 0 && test.row_stagings != 0 && test.row_roles != 0 && test.row_k0 != 0 && test.row_splits != 0 && test.row_split_mutants != 0 && test.vector_moves != 0,

@@ -155,7 +155,8 @@ typedef enum IrOp
     // cleared), and BMI1's bextr (a's bits from b's low byte up, as many as its second byte says), whose x86 rows the
     // typed stream's lowering admits (ir_simd_typed.c). The unary splat (#1450) repeats scalar a's raw bits throughout
     // a vector result; its scalar type gives the lane width, b is absent and flags are zero. It does no arithmetic,
-    // including on floating operands, so signed zeros and NaN payloads are unchanged.
+    // including on floating operands, so signed zeros and NaN payloads are unchanged. The vector width changes (#1840:
+    // extract, widen and insert) move a vector's bits whole between widths, their part in flags.
     IR_INTRINSIC,
     // An atomic read/modify/write (#1059): `a` the object's address, `b` the operand, of the result's type (an integer of
     // 1, 2, 4 or 8 bytes), and its flags BUSTER_IR_ATOMIC with its C memory order and its operation
@@ -202,7 +203,15 @@ typedef enum IrOp
 #define BUSTER_IR_INTRINSIC_SADDO 12u
 #define BUSTER_IR_INTRINSIC_SSUBO 13u
 #define BUSTER_IR_INTRINSIC_SMULO 14u
-#define BUSTER_IR_INTRINSIC_COUNT 15u
+// The vector width changes (#1840), which move bits whole and read no lanes, their part in the instruction's flags (an
+// intrinsic's immediate, 0 for every other kind): extract's result is a's `flags`th part of the result's width, a wider
+// vector (16 bytes of 32 or 64, 32 of 64); widen's is a, a narrower vector, in its low bytes and zeros past them (flags
+// 0); and insert's is a, of its type, with its `flags`th part of b's width replaced by b, a narrower vector. The x86
+// builtins' casts between widths, vextracti32x4 to vinserti64x4.
+#define BUSTER_IR_INTRINSIC_EXTRACT 15u
+#define BUSTER_IR_INTRINSIC_WIDEN 16u
+#define BUSTER_IR_INTRINSIC_INSERT 17u
+#define BUSTER_IR_INTRINSIC_COUNT 18u
 
 // ICMP EQ/NE accept pointers too; the other integer predicates require integer operands. FCMP uses EQ through GE:
 // ordered comparisons, except NE, which is true for unordered inputs, as in C.
@@ -697,6 +706,9 @@ static const char* const ir_intrinsic_names[BUSTER_IR_INTRINSIC_COUNT] = {
     "saddo",
     "ssubo",
     "smulo",
+    "extract",
+    "widen",
+    "insert",
 };
 
 // A fence's orders' names in the text form, C's memory_order's (BUSTER_IR_FENCE_ORDER), and its signal scope's word.
@@ -1651,7 +1663,7 @@ static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i)
     }
     else if (((op == IR_LOAD || op == IR_STORE) && (!ir_access_flags_valid(op, f->flags[i]) || f->alignment_log2[i] > 31)) ||
              (op == IR_ATOMIC_RMW && (!ir_rmw_flags_valid(f->flags[i]) || f->alignment_log2[i] > 31)) ||
-             ((op != IR_LOAD && op != IR_STORE && op != IR_ATOMIC_RMW) && ((f->flags[i] != 0 && !ir_lane_valid(op, f->flags[i])) || f->alignment_log2[i] != 0)))
+             ((op != IR_LOAD && op != IR_STORE && op != IR_ATOMIC_RMW) && ((f->flags[i] != 0 && op != IR_INTRINSIC && !ir_lane_valid(op, f->flags[i])) || f->alignment_log2[i] != 0)))
     {
         check.error = IR_ERROR_METADATA;
     }
@@ -1720,7 +1732,33 @@ static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i)
             case IR_RULE_FENCE: valid = (a & ~(BUSTER_IR_FENCE_ORDER | BUSTER_IR_FENCE_SIGNAL)) == 0 && (a & BUSTER_IR_FENCE_ORDER) <= BUSTER_IR_FENCE_SEQ_CST; break;
             case IR_RULE_INTRINSIC:
             {
-                if (c == BUSTER_IR_INTRINSIC_SPLAT)
+                // An intrinsic's flags are its immediate: a width change's part (#1840), and 0 for every other kind.
+                const uint32_t part = f->flags[i];
+                if (c == BUSTER_IR_INTRINSIC_EXTRACT || c == BUSTER_IR_INTRINSIC_WIDEN)
+                {
+                    const uint32_t narrow = c == BUSTER_IR_INTRINSIC_EXTRACT ? type : ta;
+                    const uint32_t wide = c == BUSTER_IR_INTRINSIC_EXTRACT ? ta : type;
+                    valid = ir_vector_type(type) && ir_vector_type(ta) && ir_type_bits[narrow] < ir_type_bits[wide] && b == BUSTER_IR_NONE &&
+                            (c == BUSTER_IR_INTRINSIC_EXTRACT ? part < ir_type_bits[wide] / ir_type_bits[narrow] : part == 0);
+                }
+                else if (c == BUSTER_IR_INTRINSIC_INSERT)
+                {
+                    if (b >= f->instruction_count || f->type[b] == IR_VOID || f->type[b] >= IR_TYPE_COUNT)
+                    {
+                        check = ir_check(IR_ERROR_OPERAND, i, 1);
+                    }
+                    else
+                    {
+                        const uint32_t tb_part = f->type[b];
+                        valid = ir_vector_type(type) && ta == type && ir_vector_type(tb_part) && ir_type_bits[tb_part] < ir_type_bits[type] &&
+                                part < ir_type_bits[type] / ir_type_bits[tb_part];
+                    }
+                }
+                else if (part != 0)
+                {
+                    valid = false;
+                }
+                else if (c == BUSTER_IR_INTRINSIC_SPLAT)
                 {
                     valid = ir_vector_type(type) && ir_splat_scalar_type(ta) && b == BUSTER_IR_NONE;
                 }
@@ -3093,6 +3131,11 @@ static IrError ir_print(const IrFunction* f, Arena* scratch, FILE* output)
                         if (op == IR_INTRINSIC)
                         {
                             fprintf(output, " %s", c < BUSTER_IR_INTRINSIC_COUNT ? ir_intrinsic_names[c] : "invalid");
+                            // A width change's part (#1840), its immediate.
+                            if (c == BUSTER_IR_INTRINSIC_EXTRACT || c == BUSTER_IR_INTRINSIC_INSERT)
+                            {
+                                fprintf(output, " %u", (unsigned)f->flags[i]);
+                            }
                         }
                         if (op == IR_ATOMIC_RMW)
                         {
