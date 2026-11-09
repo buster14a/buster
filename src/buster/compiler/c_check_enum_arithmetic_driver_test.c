@@ -78,7 +78,7 @@ static const char check_driver_enum_constants_source[] =
     "enum C { X, Y = X + A1, Z = Y | A2, W = (TE1)1 + (TE2)1 };\n"
     "int a1[(A1 < A2) + 1];\n"
     "int a2[1 + (B1 ? A1 : A2)];\n"
-    "int a3[(int)(A1 + 2.0f)];\n"
+    "enum F { Q = (int)(A1 + 2.0f) };\n"
     "int a4[U1 + A1 + 1];\n"
     "int a5[sizeof(typeof(A1 + A2))];\n"
     "_Alignas(4 << (A1 & A2)) int a6;\n"
@@ -166,6 +166,60 @@ static const CheckDriverDefaultWarningFixture check_driver_enum_arithmetic_fixtu
                   "}\n",
         .options = { "-Wenum-conversion", "-Wanon-enum-enum-conversion" },
         .warnings = 12,
+    },
+    {
+        .name = "enumeration mixes of forms, by default",
+        .source = check_driver_enum_forms_source,
+        .warnings = 4,
+    },
+    {
+        .name = "enumeration mixes of forms under -Wenum-conversion",
+        .source = check_driver_enum_forms_source,
+        .options = { "-Wenum-conversion", "-Wanon-enum-enum-conversion" },
+        .warnings = 9,
+    },
+    {
+        .name = "enumeration mixes of forms under -w",
+        .source = check_driver_enum_forms_source,
+        .options = { "-w" },
+    },
+    {
+        .name = "enumeration mixes of bounds, by default",
+        .source = check_driver_enum_bounds_source,
+        .warnings = 2,
+    },
+    {
+        .name = "enumeration mixes of bounds under -Wenum-conversion",
+        .source = check_driver_enum_bounds_source,
+        .options = { "-Wenum-conversion", "-Wanon-enum-enum-conversion" },
+        .warnings = 12,
+    },
+    {
+        .name = "enumeration mixes of bounds under -w",
+        .source = check_driver_enum_bounds_source,
+        .options = { "-w" },
+    },
+    {
+        .name = "enumeration mixes of constants, by default",
+        .source = check_driver_enum_constants_source,
+        .warnings = 2,
+    },
+    {
+        .name = "enumeration mixes of constants under -Wenum-conversion",
+        .source = check_driver_enum_constants_source,
+        .options = { "-Wenum-conversion", "-Wanon-enum-enum-conversion" },
+        .warnings = 10,
+    },
+    {
+        .name = "enumeration mixes of constants under -w",
+        .source = check_driver_enum_constants_source,
+        .options = { "-w" },
+    },
+    {
+        .name = "-Werror=enum-compare in array bounds and bit-field widths",
+        .source = check_driver_enum_constants_source,
+        .options = { "-Werror=enum-compare" },
+        .errors = 2,
     },
     {
         .name = "pragmas map the enumeration warnings at their operators",
