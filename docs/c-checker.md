@@ -760,7 +760,11 @@ old-style definition. The completed parameter types remain; an outer tag or
 ordinary name becomes visible again in the body and following file scope.
 These declarations are not republished into the body as prototype-definition
 tags are. The extra visibility/redefinition warning sequence is not reproduced.
-Variably modified parameters remain refused by name. An identifier list
+A variably modified parameter's bounds (`int f(n, a) int n; int a[n][n]; {}`)
+are a prototype parameter's (#1447): the list's declarators read them as a
+parameter's, each bound's record names the listed parameter, and the function's
+entry evaluates them; the walk takes their tokens, the list's only ones it
+takes. A `[*]` bound there stays an error, as clang's is. An identifier list
 outside a definition is refused, as C17 6.7.6.3p3 has it; C23 rejects identifier lists.
 Parenthesized `_Atomic(T)` starts the declaration list at the same boundary
 as the qualifier form `_Atomic T`. Its type name uses the ordinary evaluator,

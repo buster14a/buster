@@ -1802,6 +1802,9 @@ struct CheckInputReader
     // The prototypes open around the reader's position: a declarator's parameter lists, each a scope a level deeper than
     // the one around it (check_input_declaration_depth).
     uint32_t prototype_depth;
+    // While a K&R definition's declaration list's declarator is read (#1447): its arrays' bounds are a parameter's, which
+    // the function's entry evaluates (check_input_kr_declarations).
+    bool kr_declarator;
     uint8_t specifier_abi_origin;
     uint8_t declarator_abi_origin;
     // check_input_declarator_conventions's record of the declarator check_input_declarator_end ended (#1447).
@@ -6741,7 +6744,8 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                 // A bound that defines a struct, union or enum stops the run at each definition, with its evaluation
                 // kept for the next step, which reads the bound again from here.
                 frame->star_array |= star;
-                valid = check_input_vla_bound(reader, i, bound, close, frame->name, frame->parameter_context, star, &run->bound, &run->definition, &part.kind, &part.extent);
+                valid = check_input_vla_bound(reader, i, bound, close, frame->name, frame->parameter_context || reader->kr_declarator, star, &run->bound, &run->definition,
+                                              &part.kind, &part.extent);
                 run->definition_end = run->definition != BUSTER_CHECK_NONE ? close : run->definition_end;
             }
             if (valid && run->definition == BUSTER_CHECK_NONE)
@@ -6997,7 +7001,8 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                             check_input_report_typed(reader, bound, CHECK_INPUT_ARRAY_TOO_LARGE, type, BUSTER_CHECK_NONE, part->extent);
                             type = 0;
                         }
-                        type = type != 0 ? check_input_vla_type(reader, part->token, type, frame->name, frame->parameter_context, part->kind, part->extent) : 0;
+                        type = type != 0 ? check_input_vla_type(reader, part->token, type, frame->name, frame->parameter_context || reader->kr_declarator, part->kind,
+                                                                part->extent) : 0;
                         noderef = check_input_noderef_wrap(reader, noderef);
                     }
                     // Its chunk's address spaces, in their order (#1447).
@@ -8092,11 +8097,13 @@ static TypeId check_input_kr_parameter_type(const TypeTable* types, TypeId decla
 // declared yet, without an initializer. Each listed name gets its declared type, adjusted as a parameter's (an array's
 // and a function's to a pointer); one left undeclared is int in C89, or an error at its name from C99 on. The list's
 // tags and enumerators have one header scope, which ends before the body, as clang gives an old-style definition;
-// unlike a prototype definition's, its declarations are not published into the body. Variably modified types remain
-// unsupported. The list's tokens are the definition's: the walk passes over them.
+// unlike a prototype definition's, its declarations are not published into the body. A variably modified one's bounds
+// are a parameter's (#1447), which the function's entry evaluates (check_input_vla_parameters): their records name its
+// listed name, and the walk takes their tokens. The list's other tokens are the definition's: the walk passes over them.
 static bool check_input_kr_declarations(CheckInputReader* reader, uint32_t names, uint32_t first, uint32_t body)
 {
     const Parser* parser = reader->parser;
+    const uint32_t vla_mark = reader->output->vla_count;
     const uint32_t binding_mark = c_bindings_mark(&reader->bindings);
     const uint32_t prototype_depth = reader->prototype_depth;
     reader->prototype_depth += 1;
@@ -8134,7 +8141,10 @@ static bool check_input_kr_declarations(CheckInputReader* reader, uint32_t names
             uint32_t parameters = BUSTER_CHECK_NONE;
             reader->specifier_noderef = base_noderef;
             reader->declarator_common = common;
+            const uint32_t declarator_vlas = reader->output->vla_count;
+            reader->kr_declarator = true;
             const TypeId type = check_input_declarator(reader, base, &i, body, &name, &parameters);
+            reader->kr_declarator = false;
             CheckInputAttributes* attributes = check_input_merge_attributes(reader, common, reader->declarator_attributes);
             const uint8_t next = i < body ? parser->tokens.kinds[i] : PARSE_KIND_END;
             valid = type != 0 && name != BUSTER_CHECK_NONE && !reader->declarator_identifier_list && (next == PARSE_KIND_COMMA || next == PARSE_KIND_SEMI);
@@ -8146,12 +8156,7 @@ static bool check_input_kr_declarations(CheckInputReader* reader, uint32_t names
                 listed = parser->tokens.names[parameter] == parser->tokens.names[name] ? parameter : BUSTER_CHECK_NONE;
             }
             const uint32_t visible = valid ? c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, parser->tokens.names[name]) : 0;
-            if (valid && (type_inherited_flags(reader->types, type) & BUSTER_TYPE_FLAG_VARIABLY_MODIFIED) != 0)
-            {
-                check_input_report(reader, name, CHECK_INPUT_UNSUPPORTED);
-                valid = false;
-            }
-            else if (valid && (listed == BUSTER_CHECK_NONE || reader->declared_types[listed] != 0 ||
+            if (valid && (listed == BUSTER_CHECK_NONE || reader->declared_types[listed] != 0 ||
                      (visible != 0 && reader->bindings.depth[visible - 1] == check_input_declaration_depth(reader))))
             {
                 // A name the list doesn't have ("parameter named 'b' is missing"), or one it declared already.
@@ -8167,6 +8172,12 @@ static bool check_input_kr_declarations(CheckInputReader* reader, uint32_t names
                 check_input_rare_claim(reader, &reader->parameter_shapes[listed]);
                 reader->parameter_shapes[listed] = type_kind_is_array(kind) ? 1 : kind == BUSTER_TYPE_KIND_FUNCTION ? 4 : 0;
                 check_input_set_bit(reader->declaration_bits, listed, BUSTER_CHECK_BITS_REGISTER, storage == C_NAME_REGISTER);
+                // Its bounds are the listed parameter's, as a prototype's are its parameter's.
+                for (uint32_t v = declarator_vlas; v < reader->output->vla_count; v += 1)
+                {
+                    CheckInputVla* vla = &reader->output->vlas[v];
+                    vla->declaration = vla->declaration == name ? listed : vla->declaration;
+                }
                 check_input_set_attributes_at(reader->output, listed, attributes);
                 const CheckNoderefType* noderef = check_input_noderef_adjust_parameter(reader, type, reader->declarator_noderef);
                 check_input_noderef_set(reader->output, listed, noderef);
@@ -8216,9 +8227,16 @@ static bool check_input_kr_declarations(CheckInputReader* reader, uint32_t names
             }
         }
     }
+    // The walk takes the bounds' tokens (a few, in a rare form: a scan of the list's records for each token).
     for (uint32_t token = first; token < body; token += 1)
     {
-        reader->ignored[token] = true;
+        bool bound = false;
+        for (uint32_t v = vla_mark; v < reader->output->vla_count; v += 1)
+        {
+            const CheckInputVla* vla = &reader->output->vlas[v];
+            bound |= token >= vla->bound_begin && token < vla->bound_end && reader->types->types.extent[type_index(vla->type)] != 0;
+        }
+        reader->ignored[token] |= !bound;
     }
     const bool restored = c_bindings_restore(&reader->bindings, binding_mark, body);
     reader->output->resource |= !restored;

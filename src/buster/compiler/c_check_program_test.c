@@ -4429,6 +4429,13 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
             "{struct S s={7};return x+(int)sizeof(*p)+(int)sizeof(*q)+(int)s.outer+A;}"
             "int tested(int n){return tags(n&127,0,0);}",
             "kr-header-tag-layout-enum-abi-and-outer-scope", clang);
+        // #1447: a K&R definition's variably modified parameters, their bounds evaluated at its entry.
+        check_test_program_source(test,
+            "int sum(n,m,a)int n,m;int a[n][m];{int s=0;for(int i=0;i<n;i++)for(int j=0;j<m;j++)s+=a[i][j];return s+(int)sizeof(a[0]);}"
+            "int last(a,n)int n;int a[n];{return a[n-1];}"
+            "int fp(n,p)int n;int (*p)[n+1];{return (int)sizeof(*p)+(*p)[n];}"
+            "int tested(int n){int a[2][3]={{1,2,3},{4,5,n}};int b[4]={1,2,3,n};return sum(2,3,a)*1000+last(b,4)*100+fp(3,&b);}",
+            "kr-variably-modified-parameters", clang);
         // The comparison builtins (#148) in each format on the harness's special values (zeros, infinities, quiet and signaling
         // NaNs, subnormals): their results and the exceptions their quiet compares raise, their arguments' conversions and
         // order, and mingw's fmaxl, which the libc corpus's comparison found.
