@@ -213,10 +213,10 @@ unused-warning fixtures also check exact scope-completion tokens.
   statement expression. A `sizeof` of a variable-array expression evaluates its operand after all.
   The contexts' memo is pushed at a unit's first such warning, so a unit without one pays nothing. Six
   original default-warning fixtures compare complete output with Clang, among them the evaluated and bound
-  controls and a value that decays from a variable array. A statement expression whose value is
-  not evaluated has none of its nodes evaluated either (`check_common_region_evaluation`): the run of nodes before its
-  own, its statements' and nested statement expressions', is cleared after the evaluation facts are made on either
-  path, so `-Wuninitialized` reads none of its reads and writes. `sizeof ({ ... })`'s `(` is its statement
+  controls and a value that decays from a variable array. For `-Wuninitialized`, a statement
+  expression whose value is not evaluated has none of its nodes evaluated either (`check_common_region_evaluation`,
+  on the analysis's own copy of the facts): clang's CFG holds none of them, so the analysis reads none of their reads
+  and writes, while the warnings that read a context keep a bound's there. `sizeof ({ ... })`'s `(` is its statement
   expression's own, as clang's parser reads a parenthesized expression there, on both parser paths. Still separate: the
   input reader's `-Wshift-count-overflow` there; clang's runtime-warning drop in every array bound; a variable-array
   `sizeof`'s comma operands, which clang warns of when it evaluates them; `-Wunevaluated-expression`, which

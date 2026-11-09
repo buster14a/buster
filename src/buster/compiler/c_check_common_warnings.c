@@ -972,7 +972,6 @@ static bool check_common_shift_replay(Preprocessor* pp, CheckCommonShiftWarnings
 }
 
 static uint8_t* check_common_unselected(const CheckGraph* graph, const Parser* parser, Arena* scratch);
-static void check_common_region_evaluation(const CheckInput* input, const Parser* parser, uint8_t* evaluated);
 static void check_common_body_reached(const CheckProgram* program, const CheckProgramBody* body, uint8_t* seen, uint32_t* queue);
 static uint8_t* check_common_evaluated(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, const Parser* parser,
                                        const CheckProgram* program, const uint32_t* parents, Arena* scratch);
@@ -1172,9 +1171,7 @@ static void check_common_shift_unreached(const Parser* parser, Preprocessor* pp,
             CheckProgram whole = program != NULL ? *program : (CheckProgram){ 0 };
             whole.dropped_range_count = 0;
             unselected = check_common_unselected(graph, parser, scratch);
-            uint8_t* evaluated_whole = check_common_evaluated(graph, stream, types, parser, program != NULL ? &whole : NULL, parents, scratch);
-            check_common_region_evaluation(input, parser, evaluated_whole);
-            reached = evaluated_whole;
+            reached = check_common_evaluated(graph, stream, types, parser, program != NULL ? &whole : NULL, parents, scratch);
             marked = true;
         }
         drop &= reached != NULL && unselected != NULL &&
@@ -8207,11 +8204,12 @@ static void check_common_flush(const CheckGraph* graph, const uint32_t* parents,
     }
 }
 
-// A GNU statement expression's statements are graph roots of their own, evaluated as roots are; clang evaluates them
-// where it evaluates the statement expression (#1447). So where its value, the node at its `)`, is not evaluated (a
-// sizeof's or an alignof's operand, a condition's arm left out), neither is any of its nodes, the run of nodes just
-// before its own whose tokens its parentheses hold, nested statement expressions' with them. The reader's list of
-// statement expressions finds them: a unit without one reads nothing, and each one left out clears its own nodes once.
+// A GNU statement expression's statements are graph roots of their own, evaluated as roots are; clang's CFG holds them
+// where it holds the statement expression (#1447). So for -Wuninitialized, where its value, the node at its `)`, is not
+// evaluated (a sizeof's or an alignof's operand, a condition's arm left out), neither is any of its nodes, the run of
+// nodes just before its own whose tokens its parentheses hold, nested statement expressions' and array bounds' with
+// them (the warnings that read a context keep a bound's, constant-evaluated to clang). The reader's list of statement
+// expressions finds them, and each one left out clears its own nodes once.
 static void check_common_region_evaluation(const CheckInput* input, const Parser* parser, uint8_t* evaluated)
 {
     const CheckGraph* graph = &input->graph;
@@ -8334,7 +8332,6 @@ static bool check_common_facts(const CheckInput* input, const CheckStream* strea
     {
         check_common_flush(graph, parents, flushed, parser->tokens.count, evaluated);
     }
-    check_common_region_evaluation(input, parser, evaluated);
     *facts = (CheckCommonFacts){ .parents = parents, .used = used, .evaluated = evaluated, .reach = reach, .flushed = flushed, .self_assigns = self_assigns };
     const bool result = count == 0 || evaluated != NULL;
     return result;
@@ -8572,7 +8569,15 @@ static void check_common_uninitialized(const Parser* parser, Preprocessor* pp, c
     const uint8_t* used_value = facts->used;
     uint8_t* parameters = count != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, uint8_t, count) : NULL;
     uint8_t* statement_write = count != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, uint8_t, count) : NULL;
-    const uint8_t* evaluated = facts->evaluated;
+    // (In a unit with statement expressions, the analysis's own copy of the facts, without an unevaluated one's nodes:
+    // clang's CFG holds none of them, where the warnings that read a context keep a bound's.)
+    uint8_t* regional = input->region_count != 0 && facts->evaluated != NULL && graph->count != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, uint8_t, graph->count) : NULL;
+    if (regional != NULL)
+    {
+        memcpy(regional, facts->evaluated, graph->count);
+        check_common_region_evaluation(input, parser, regional);
+    }
+    const uint8_t* evaluated = regional != NULL ? regional : input->region_count != 0 ? NULL : facts->evaluated;
     bool valid = count == 0 || (first_write != NULL && addressed != NULL && written != NULL && first_read != NULL && first_use_read != NULL &&
                                 parameters != NULL && statement_write != NULL &&
                                 (graph->count == 0 || (nonread != NULL && self_read != NULL && target != NULL && used_value != NULL && evaluated != NULL)));
