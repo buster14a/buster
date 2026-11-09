@@ -336,13 +336,14 @@ static uint32_t x86_match_bucket(const X86MatchIndex* index, String8 name)
 
 // Whether the parser has a grammar for an operand descriptor (#1134): no operand, memory addressed by general registers,
 // or by a vector index (VSIB, a gather's or scatter's, #1115), or a register of a class it names (general registers,
-// XMM, YMM and ZMM registers, opmasks, and the x87's stack: %st and %st(i), Intel's st and st(i), #147). MMX, bound,
-// control, debug, segment and tile registers, register pairs and blocks and a default flags value aren't the parser's,
-// and neither are the forms that take them.
+// XMM, YMM and ZMM registers, opmasks, the x87's stack: %st and %st(i), Intel's st and st(i), #147, and MMX's mm0 to
+// mm7, #1846). Bound, control, debug, segment and tile registers, register pairs and blocks and a default flags value
+// aren't the parser's, and neither are the forms that take them.
 static bool x86_match_descriptor_parsed(uint16_t descriptor)
 {
     const uint32_t class = descriptor & BUSTER_X86_OPERAND_CLASS;
-    const bool named = class == BUSTER_X86_CLASS_NONE ? (descriptor & BUSTER_X86_OPERAND_REGISTER) == 0 : class <= BUSTER_X86_CLASS_OPMASK || class == BUSTER_X86_CLASS_ST;
+    const bool named = class == BUSTER_X86_CLASS_NONE ? (descriptor & BUSTER_X86_OPERAND_REGISTER) == 0 :
+                       class <= BUSTER_X86_CLASS_OPMASK || class == BUSTER_X86_CLASS_ST || class == BUSTER_X86_CLASS_MMX;
     const uint16_t unparsed = BUSTER_X86_OPERAND_PAIR | BUSTER_X86_OPERAND_BLOCK | BUSTER_X86_OPERAND_DFV | BUSTER_X86_OPERAND_TEST;
     return named && (descriptor & unparsed) == 0;
 }

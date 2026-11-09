@@ -240,6 +240,7 @@ alternative (`check_asm_constraint_parse`):
 | `a b c d S D` | that register |
 | `x`, `v` | an XMM register, for a `float` or a `double`; a vector in a template of no instructions |
 | `t`, `u` | the x87's st(0) and st(1), for a `float`, a `double` or a `long double` |
+| `y` | an MMX register, mm0 up, for an integer, a pointer, a `float` or a `double` of up to 8 bytes |
 | `m`, `o`, `V`, `<`, `>` | memory at an lvalue's address, which a general register holds |
 | `i`, `n`, `I J K M N O`, `e`, `Z` | an integer constant, within its letter's range |
 | a digit, `[name]` | the output's register (a matching input) |
@@ -277,6 +278,23 @@ clang's code gives it (CodeGen's `AddVariableConstraints`;
 The variable is an ordinary local otherwise: the operand block takes its value,
 or an output's address, as any operand's, and the helper loads it into the
 register (a callee-saved one among the helper's pushes).
+
+### MMX's operands
+
+`y` places an operand in an MMX register (#1846), mm0 up but the ones the
+clobbers name (`"mm0"`): an integer, a pointer, a `float` or a `double` of up
+to 8 bytes, as clang takes them (clang takes an `__m64` too, a vector whose
+8-byte loads Tier 0 doesn't have, so the lowering refuses it by name). The template
+names it `%mm0`; clang refuses every modifier of one, and so does the lowering.
+The helper loads it as clang's code does, zero-extended into rax and moved into
+its register (`movzwl`, then `movq %rax, %mm0`), before the general registers'
+loads, and stores an output's low bytes through its address (`movq` or `movd`,
+a narrower one's through a general register). As in clang's code, nothing runs
+`emms`: the template's author leaves the x87's state as the code after it needs
+it. A statement of MMX and x87 operands is refused by name (their registers are
+the same), and so is one whose template takes directives. A template of no
+instructions has no helper, as for general registers: clang's code would move
+the values through an MMX register and back, unchanged.
 
 ### The x87's operands
 
@@ -577,8 +595,10 @@ Each refusal names its feature, as the driver prints it ("unsupported: ..."):
 - flag outputs named in their templates (clang prints the register its code
   sets the condition into after the template), of a size no integer store
   covers, and with another alternative (`"=r@ccz"`, which clang takes as `r`);
-- MMX's, the opmasks' and the rax and rdx pair's constraints (`y`, `k`, `A`),
-  and the other letters it doesn't place;
+- the opmasks' and the rax and rdx pair's constraints (`k`, `A`), and the
+  other letters it doesn't place;
+- MMX operands with a modifier (clang refuses each), beside x87 operands in
+  one statement, and in templates that take directives;
 - x87 operands and clobbers off the stack's top (an input at st(1) without one
   at st(0), a clobber below the outputs), which clang's code refuses too; two
   operands at one depth, which clang compiles as one register's; and an
@@ -739,6 +759,11 @@ has the commands, the logs and the default path's numbers against main.
     width, a 32-bit name, outputs of a register's and a memory constraint, a
     `+` operand in rbx, a matching input in its variable's register, an XMM
     register's, and a template of no instructions;
+  - MMX's operands (#1846): `y`'s of a `long`, an `unsigned`, a `short`, a
+    byte, a `double`'s bits, an early-clobbered output, a
+    matching input, MMX clobbers that the operands avoid, an MMX input into a
+    general output, and a template of no instructions; their refusals: a
+    modifier, x87 operands beside them, and a template that takes directives;
   - `f`'s inputs, below the fixed operands, each in a register of its own,
     beside a `+t` operand, early-clobbered outputs the template pushes, and a
     template of no instructions;
@@ -803,7 +828,7 @@ What the lowering still refuses of what GCC and clang take:
   function's own code; this compiler's helper design refuses it by name;
 - naked functions of no instructions, and naked functions' operands other than
   integer constants (clang's `"m"(global)`, printed RIP-relative);
-- the matcher's gaps: MMX's `movq`, `lock xchg`, `ffreep`, and the
+- the matcher's gaps: `lock xchg`, `ffreep`, and the
   instructions outside its families (an x87 memory operand without a width,
   `fstp (%rax)`, is refused as clang refuses it);
 - two operands at one x87 depth, and explicit register variables in the

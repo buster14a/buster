@@ -1538,6 +1538,12 @@ static bool asm_register(String8 spelling, X86Operand* operand)
         *operand = (X86Operand){.kind = X86_OPERAND_REGISTER, .class = BUSTER_X86_CLASS_ST, .width = 0, .reg = 0};
         found = true;
     }
+    if (name.length == 3 && name.pointer[0] == 'm' && name.pointer[1] == 'm' && name.pointer[2] >= '0' && name.pointer[2] <= '7')
+    {
+        // MMX's mm0 to mm7 (#1846), 8 bytes each.
+        *operand = (X86Operand){.kind = X86_OPERAND_REGISTER, .class = BUSTER_X86_CLASS_MMX, .width = 8, .reg = (uint8_t)(name.pointer[2] - '0')};
+        found = true;
+    }
     if (name.length == 2 && name.pointer[1] == 'h' && name.pointer[0] >= 'a' && name.pointer[0] <= 'd')
     {
         const uint8_t high[] = {X86_REGISTER_AH, X86_REGISTER_BH, X86_REGISTER_CH, X86_REGISTER_DH};
@@ -2557,8 +2563,8 @@ static int32_t asm_compare_predicate(String8* name)
     return result;
 }
 
-// Whether an AT&T instruction's operands (its tokens to `end`) name an XMM register: then movq is SSE2's, as GNU as
-// reads it, not mov's 64-bit form.
+// Whether an AT&T instruction's operands (its tokens to `end`) name an XMM or an MMX register: then movq is SSE2's or
+// MMX's (#1846), as GNU as reads it, not mov's 64-bit form.
 static bool asm_vector_operands(const AsmParser* parser, uint32_t end)
 {
     bool found = false;
@@ -2566,7 +2572,7 @@ static bool asm_vector_operands(const AsmParser* parser, uint32_t end)
     {
         X86Operand operand;
         found = parser->tokens[i].kind == '%' && parser->tokens[i + 1].kind == BUSTER_ASM_WORD && asm_token_register(parser, i + 1, &operand) &&
-                operand.class == BUSTER_X86_CLASS_XMM;
+                (operand.class == BUSTER_X86_CLASS_XMM || operand.class == BUSTER_X86_CLASS_MMX);
     }
     return found;
 }

@@ -12,7 +12,8 @@
 // helpers, in this order (CheckProgramAsm):
 //   - Placement. Each operand takes its constraint's first alternative (check_asm_constraint_parse): a general register
 //     of a class or a fixed one, an XMM register for a float or a double, the x87's st(0) or st(1) for a float, a
-//     double or a long double (t, u: BUSTER_CHECK_ASM_X87, by LLVM's rules for an asm's stack), memory (an lvalue's:
+//     double or a long double (t, u: BUSTER_CHECK_ASM_X87, by LLVM's rules for an asm's stack), an MMX register (y:
+//     BUSTER_CHECK_ASM_MMX), memory (an lvalue's:
 //     clang and the checker refuse an rvalue there), an integer constant, or an output's register (a matching input).
 //     An operand that names an explicit register variable takes the variable's register instead, as clang's code gives
 //     it (check_asm_variable_register). Every operand has a register of its own but a matching pair, none a clobber,
@@ -48,9 +49,9 @@
 //
 // What the lowering refuses, by name (CheckProgramAsm.reason): an asm goto's label as anything but a jmp's or a jcc's
 // target, flag outputs named in their templates, of a size no integer store covers or with other alternatives, f's x87
-// registers, the MMX, mask
-// and vector register classes and the other letters it doesn't place (A, p, Y, the floating constants), x87 operands
-// and clobbers off the stack's top, symbolic immediates and constants outside their
+// registers, the mask and vector register classes and the other letters it doesn't place (A, p, Y, the floating
+// constants), MMX operands with a modifier, beside x87 ones or in templates that take directives, x87 operands and
+// clobbers off the stack's top, symbolic immediates and constants outside their
 // letter's range, operands of types no general or XMM register holds by value (but a vector in a template of no
 // instructions, BUSTER_CHECK_ASM_HELD), bit-fields, explicit register variables in registers it doesn't place one in
 // (rsp, a high byte, APX's and the other classes') and as memory inputs, clobbers of an operand's register, APX's
@@ -84,6 +85,10 @@
 // An object of 1, 2, 4, 8 or 16 bytes (CheckAsmPlace.size), whatever its type: clang's code stores the value's integer
 // bits, a float's or a struct's too. A `+` one reads nothing: clang's code loads its value where the template can't read it.
 #define BUSTER_CHECK_ASM_FLAG 7
+// An MMX register's operand ("y"(x), #1846): an integer, a pointer, a float or a double of 1 to 8 bytes (an __m64's
+// vector isn't one: Tier 0 has no 8-byte vector load), in mm0 to mm7 (CheckAsmPlace.reg), as clang's code places it: the helper loads the value
+// zero-extended through rax (movq %rax, %mmN) and stores the register's low bytes after the template.
+#define BUSTER_CHECK_ASM_MMX 8
 
 // The general registers but rsp, the ones the helper may take, and the callee-saved ones among them.
 #define BUSTER_CHECK_ASM_GENERAL_ALL (0xffffu & ~(1u << X86_REGISTER_RSP))
@@ -244,6 +249,8 @@ struct CheckAsmConstraint
     // A flag output's condition code plus one (x86's, check_asm_flag_condition), 0 for none.
     uint8_t flag;
     bool vector;
+    // y's MMX registers (#1846).
+    bool mmx;
     bool memory;
     bool immediate;
     bool ranged;
@@ -426,6 +433,10 @@ static CheckAsmConstraint check_asm_constraint_parse(const CheckInputAsm* statem
         {
             result.vector = true;
         }
+        else if (byte == 'y')
+        {
+            result.mmx = true;
+        }
         else if (byte == 't' || byte == 'u')
         {
             // The x87 stack's top and the register under it, st(0) and st(1) (clang's {st} and {st(1)}).
@@ -478,7 +489,6 @@ static CheckAsmConstraint check_asm_constraint_parse(const CheckInputAsm* statem
         else if (result.refused == NULL)
         {
             result.refused = byte == '@'                                 ? "inline assembly flag outputs" :
-                             byte == 'y'                                 ? "inline assembly operands in MMX registers" :
                              byte == 'k'                                 ? "inline assembly operands in opmask registers" :
                              byte == 'A'                                 ? "inline assembly operands in the rax and rdx pair" :
                                                                            "this inline assembly constraint";
@@ -592,6 +602,19 @@ static const char* check_asm_print(Arena* scratch, const CheckAsmPlace* place, u
         if (modifier == 0 || modifier == 'x' || modifier == 't' || modifier == 'g')
         {
             check_asm_emit_text(scratch, modifier == 't' ? "%ymm" : modifier == 'g' ? "%zmm" : "%xmm", valid);
+            check_asm_emit_number(scratch, place->reg, valid);
+        }
+        else
+        {
+            refused = "this inline assembly operand modifier";
+        }
+    }
+    else if (place->kind == BUSTER_CHECK_ASM_MMX)
+    {
+        // Its register, as clang prints it; clang refuses every modifier of one.
+        if (modifier == 0)
+        {
+            check_asm_emit_text(scratch, "%mm", valid);
             check_asm_emit_number(scratch, place->reg, valid);
         }
         else
@@ -801,6 +824,18 @@ static bool check_asm_x87_stores(const CheckAsmPlace* place)
     return place->kind == BUSTER_CHECK_ASM_X87 && place->written;
 }
 
+// Whether the helper loads MMX operand `place` before the template (an input's value, a matching input's, a `+`
+// operand's), and whether it stores it after the template (an output, through the address its slot holds).
+static bool check_asm_mmx_loads(const CheckAsmPlace* place)
+{
+    return place->kind == BUSTER_CHECK_ASM_MMX && place->read;
+}
+
+static bool check_asm_mmx_stores(const CheckAsmPlace* place)
+{
+    return place->kind == BUSTER_CHECK_ASM_MMX && place->written;
+}
+
 // Whether the helper stores flag output `place` after the template: its condition's value over its object.
 static bool check_asm_flag_stores(const CheckAsmPlace* place)
 {
@@ -849,6 +884,8 @@ static Tier0Code check_asm_helper_code(const CheckAsmPlace* places, uint32_t cou
     uint32_t loads = 0;
     uint32_t stored = 0;
     uint32_t flags = 0;
+    uint32_t mmx_loads = 0;
+    uint32_t mmx_stores = 0;
     for (uint32_t r = 0; r < BUSTER_TIER0_CALLEE_SAVED; r += 1)
     {
         pushes += (saved >> tier0_callee_saved[r] & 1) != 0;
@@ -858,16 +895,20 @@ static Tier0Code check_asm_helper_code(const CheckAsmPlace* places, uint32_t cou
         loads += check_asm_loads(places + k) || check_asm_x87_loads(places + k);
         stored += check_asm_stores(places + k) || check_asm_x87_stores(places + k);
         flags += check_asm_flag_stores(places + k);
+        mmx_loads += check_asm_mmx_loads(places + k);
+        mmx_stores += check_asm_mmx_stores(places + k);
     }
     // At the call, rsp is 8 past a multiple of 16; the pushes and the reservation (the block's address's slot) leave it
     // at one at the template, as clang -O0's functions have it in their bodies.
     const uint32_t frame = pushes % 2 == 0 ? 8 : 16;
     // A flag output's store takes 6 records at most: the setcc, its zero extension, the object's address, its store (and
-    // the high half's zero for 16 bytes) and the block's address again.
+    // the high half's zero for 16 bytes) and the block's address again. An MMX operand's load takes 2 (into rax, then the
+    // register), and its store 4 at most (the address, the register's low bytes into a general register, their store
+    // and the block's address again).
     // An asm goto's exits: a move and a jump each, the last one's falling into the tail, and the tail's move into eax.
     const uint64_t exits = labels != 0 ? 2 * ((uint64_t)labels + 1) - 1 + 1 : 0;
-    const uint64_t records = 2 * (uint64_t)pushes + (block ? 1 : 0) + loads + code->count + exits +
-                             (stored + flags != 0 ? 1 + 2 * (uint64_t)stored + 6 * (uint64_t)flags : 0) + pops + 3;
+    const uint64_t records = 2 * (uint64_t)pushes + (block ? 1 : 0) + loads + 2 * (uint64_t)mmx_loads + code->count + exits +
+                             (stored + flags + mmx_stores != 0 ? 1 + 2 * (uint64_t)stored + 6 * (uint64_t)flags + 4 * (uint64_t)mmx_stores : 0) + pops + 3;
     const uint32_t branch_count = code->branch_count + goto_count + labels;
     const uint32_t reference_count = code->reference_count - goto_count;
     X86Instruction* written = records <= UINT32_MAX ? BUSTER_ARENA_PUSH_ARRAY(output, X86Instruction, records) : 0;
@@ -905,6 +946,20 @@ static Tier0Code check_asm_helper_code(const CheckAsmPlace* places, uint32_t cou
                     written[at++] = (X86Instruction){ .form = (uint16_t)form, .rm = X86_REGISTER_RDI, .mode = BUSTER_X86_MEMORY_BASE,
                                                       .displacement = (int32_t)(place->written ? place->value : place->slot) };
                 }
+            }
+        }
+        // The MMX operands, from the block rdi holds, before the general registers' loads: each value zero-extended into
+        // rax, then moved into its register (movq %rax, %mmN), as clang's code loads it.
+        for (uint32_t k = 0; k < count; k += 1)
+        {
+            const CheckAsmPlace* place = places + k;
+            if (check_asm_mmx_loads(place))
+            {
+                const uint32_t form = place->size == 1 ? X86_FORM_MOVZX_R32_RM8 : place->size == 2 ? X86_FORM_MOVZX_R32_RM16 :
+                                      place->size == 4 ? X86_FORM_MOV_R32_RM32 : X86_FORM_MOV_R64_RM64;
+                written[at++] = (X86Instruction){ .form = (uint16_t)form, .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RDI, .mode = BUSTER_X86_MEMORY_BASE,
+                                                  .displacement = (int32_t)(place->written ? place->value : place->slot) };
+                written[at++] = (X86Instruction){ .form = X86_FORM_MOVQ_MM_RM64, .reg = place->reg, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_REGISTER_DIRECT };
             }
         }
         // The loads, from the block rdi holds: the one into rdi last. Only a matching pair shares a register, and of it only
@@ -997,7 +1052,7 @@ static Tier0Code check_asm_helper_code(const CheckAsmPlace* places, uint32_t cou
             }
         }
         *first = base;
-        if (stored + flags != 0)
+        if (stored + flags + mmx_stores != 0)
         {
             written[at++] = (X86Instruction){ .form = X86_FORM_MOV_R64_RM64, .reg = stores[0], .rm = X86_REGISTER_RSP, .mode = BUSTER_X86_MEMORY_BASE };
         }
@@ -1038,6 +1093,29 @@ static Tier0Code check_asm_helper_code(const CheckAsmPlace* places, uint32_t cou
                                       place->size == 1 ? X86_FORM_MOV_RM8_R8 : place->size == 2 ? X86_FORM_MOV_RM16_R16 :
                                       place->size == 4 ? X86_FORM_MOV_RM32_R32 : X86_FORM_MOV_RM64_R64;
                 written[at++] = (X86Instruction){ .form = (uint16_t)form, .reg = place->reg, .rm = stores[1], .mode = BUSTER_X86_MEMORY_BASE };
+            }
+        }
+        // The MMX outputs, through their addresses: movq's 8 bytes or movd's 4, and a narrower value's bytes through the
+        // block's register, whose address the reservation keeps and which is loaded again after it.
+        for (uint32_t k = 0; k < count; k += 1)
+        {
+            const CheckAsmPlace* place = places + k;
+            if (check_asm_mmx_stores(place))
+            {
+                written[at++] = (X86Instruction){ .form = X86_FORM_MOV_R64_RM64, .reg = stores[1], .rm = stores[0], .mode = BUSTER_X86_MEMORY_BASE,
+                                                  .displacement = (int32_t)place->slot };
+                if (place->size == 8 || place->size == 4)
+                {
+                    written[at++] = (X86Instruction){ .form = place->size == 8 ? X86_FORM_MOVQ_M64_MM : X86_FORM_MOVD_RM32_MM, .reg = place->reg, .rm = stores[1],
+                                                      .mode = BUSTER_X86_MEMORY_BASE };
+                }
+                else
+                {
+                    written[at++] = (X86Instruction){ .form = X86_FORM_MOVD_RM32_MM, .reg = place->reg, .rm = stores[0], .mode = BUSTER_X86_REGISTER_DIRECT };
+                    written[at++] = (X86Instruction){ .form = place->size == 1 ? X86_FORM_MOV_RM8_R8 : X86_FORM_MOV_RM16_R16, .reg = stores[0], .rm = stores[1],
+                                                      .mode = BUSTER_X86_MEMORY_BASE };
+                    written[at++] = (X86Instruction){ .form = X86_FORM_MOV_R64_RM64, .reg = stores[0], .rm = X86_REGISTER_RSP, .mode = BUSTER_X86_MEMORY_BASE };
+                }
             }
         }
         // The x87 outputs, from st(0) down, each popped through its address by its type's width; then the inputs the
@@ -1658,12 +1736,18 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
     CheckAsmConstraint* constraints = count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckAsmConstraint, count) : 0;
     bool valid = count == 0 || (places != 0 && constraints != 0);
     const char* reason = count > BUSTER_CHECK_ASM_OPERANDS ? "inline assembly statements of more than 64 operands" : NULL;
-    // The registers no operand may take: the clobbers' (and rsp), and the XMM ones the clobbers name.
+    // The registers no operand may take: the clobbers' (and rsp), and the XMM and MMX ones the clobbers name.
     uint32_t taken = 1u << X86_REGISTER_RSP;
     uint32_t vectors = 0;
+    uint32_t mmx = 0;
     for (uint32_t c = 0; valid && reason == NULL && c < statement->clobber_count; c += 1)
     {
-        const int32_t reg = check_asm_clobber(statement->clobbers[c]);
+        const CheckAsmText clobber = statement->clobbers[c];
+        const uint32_t named = clobber.length != 0 && (clobber.bytes[0] == '%' || clobber.bytes[0] == '#') ? 1 : 0;
+        const bool mmx_clobber = clobber.length == named + 3 && clobber.bytes[named] == 'm' && clobber.bytes[named + 1] == 'm' && clobber.bytes[named + 2] >= '0' &&
+                                 clobber.bytes[named + 2] <= '7';
+        mmx |= mmx_clobber ? 1u << (clobber.bytes[named + 2] - '0') : 0;
+        const int32_t reg = check_asm_clobber(clobber);
         if (reg == -2)
         {
             reason = "APX's registers in inline assembly";
@@ -1714,7 +1798,7 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
         // output's even of a memory constraint, which clang's code makes that register too, but not an input's of one,
         // which clang refuses as it lowers it ("cannot handle indirect register inputs yet").
         const int32_t variable = check_asm_variable_register(program, checked->node);
-        const bool memory_only = constraint->memory && constraint->general == 0 && !constraint->vector && constraint->x87 == 0;
+        const bool memory_only = constraint->memory && constraint->general == 0 && !constraint->vector && constraint->x87 == 0 && !constraint->mmx;
         const uint32_t x87 = check_asm_x87_bytes(types, type);
         if (constraint->refused != NULL)
         {
@@ -1786,6 +1870,11 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
         {
             place->kind = BUSTER_CHECK_ASM_GENERAL;
         }
+        else if (constraint->mmx && registered)
+        {
+            place->kind = BUSTER_CHECK_ASM_MMX;
+            place->size = (uint8_t)size;
+        }
         else if (constraint->vector && floating)
         {
             place->kind = BUSTER_CHECK_ASM_VECTOR;
@@ -1801,7 +1890,7 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
         }
         else
         {
-            reason = constraint->immediate && !constraint->memory && constraint->general == 0 && !constraint->vector ?
+            reason = constraint->immediate && !constraint->memory && constraint->general == 0 && !constraint->vector && !constraint->mmx ?
                      "inline assembly immediates that aren't integer constants" : "inline assembly operands of this type in their constraint's registers";
         }
     }
@@ -1860,6 +1949,13 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
                 reg = free != 0 ? __builtin_ctz(free) : -3;
                 vectors |= free != 0 ? 1u << reg : 0;
             }
+            else if (pass == 3 && place->kind == BUSTER_CHECK_ASM_MMX && place->tied == BUSTER_CHECK_NONE)
+            {
+                // mm0 up, but the clobbered ones.
+                const uint32_t free = ~mmx & 0xffu;
+                reg = free != 0 ? __builtin_ctz(free) : -3;
+                mmx |= free != 0 ? 1u << reg : 0;
+            }
             else if (pass == 3 && place->tied != BUSTER_CHECK_NONE)
             {
                 // A matching input takes its output's register, which a register output of its own has (the checker
@@ -1867,7 +1963,8 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
                 // output's depth, as its own type loads (a float, a double or a long double).
                 const CheckAsmPlace* target = place->tied < statement->output_count ? places + place->tied : 0;
                 const uint32_t x87 = check_asm_x87_bytes(types, place->type);
-                if (target == 0 || (target->kind != BUSTER_CHECK_ASM_GENERAL && target->kind != BUSTER_CHECK_ASM_VECTOR && target->kind != BUSTER_CHECK_ASM_X87) ||
+                if (target == 0 ||
+                    (target->kind != BUSTER_CHECK_ASM_GENERAL && target->kind != BUSTER_CHECK_ASM_VECTOR && target->kind != BUSTER_CHECK_ASM_X87 && target->kind != BUSTER_CHECK_ASM_MMX) ||
                     target->read)
                 {
                     reason = "inline assembly inputs matching an output that isn't a register's of its own";
@@ -1975,7 +2072,7 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
     uint32_t outputs = 0;
     for (uint32_t k = 0; valid && reason == NULL && k < count; k += 1)
     {
-        outputs += check_asm_stores(places + k) || check_asm_x87_stores(places + k) || check_asm_flag_stores(places + k);
+        outputs += check_asm_stores(places + k) || check_asm_x87_stores(places + k) || check_asm_flag_stores(places + k) || check_asm_mmx_stores(places + k);
         avoided |= check_asm_stores(places + k) && places[k].kind == BUSTER_CHECK_ASM_GENERAL ? 1u << places[k].reg : 0;
     }
     for (uint32_t i = 0; valid && reason == NULL && outputs != 0 && i < 2; i += 1)
@@ -2134,13 +2231,19 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
     bool x87 = false;
     bool held = false;
     bool flagged = false;
+    bool mmx_used = false;
     for (uint32_t k = 0; valid && reason == NULL && k < count; k += 1)
     {
         x87 |= places[k].kind == BUSTER_CHECK_ASM_X87;
         held |= places[k].kind == BUSTER_CHECK_ASM_HELD;
         flagged |= places[k].kind == BUSTER_CHECK_ASM_FLAG;
+        mmx_used |= places[k].kind == BUSTER_CHECK_ASM_MMX;
     }
     reason = valid && reason == NULL && unit_assembled && x87 ? "inline assembly x87 operands in templates that take directives" : reason;
+    reason = valid && reason == NULL && unit_assembled && mmx_used ? "inline assembly MMX operands in templates that take directives" : reason;
+    // The MMX registers are the x87's: loading one leaves the x87's stack full, so a statement of both has no order of
+    // its loads that keeps both (#1846).
+    reason = valid && reason == NULL && x87 && mmx_used ? "inline assembly x87 and MMX operands in one statement" : reason;
     reason = valid && reason == NULL && unit_assembled && held ? "inline assembly vector operands in templates that take directives" : reason;
     reason = valid && reason == NULL && unit_assembled && flagged ? "inline assembly flag outputs in templates that take directives" : reason;
     reason = valid && reason == NULL && unit_assembled && statement->is_goto ? "asm goto in templates that take directives" : reason;
