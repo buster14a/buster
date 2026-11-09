@@ -776,7 +776,12 @@ int run_backend_benchmark(int argc, char** argv);
 #include "buster/compiler/ir_benchmark.c"
 #include "buster/compiler/ir_lower_benchmark.c"
 #endif
+#if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) || BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
 #include "buster/compiler/ir_source_test.c"
+#else
+// Keep the production pass at its first include position without the source-test preparation interface.
+#include "buster/compiler/ir_dataflow.c"
+#endif
 #include "buster/compiler/tier1_cfg_ir.c"
 #if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/tier1_cfg_source_test.c"
@@ -1044,6 +1049,18 @@ static __attribute__((unused)) void main_checker_test_interfaces(void)
     (void)&lowering_symbols_compare_strings;
     (void)&run_check_command;
     (void)&check_corpus_check;
+}
+#endif
+
+#if !BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && !BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
+// Source preparation's real calls belong to BACKEND and CHECKER. Keep only semantic references to its production
+// dependencies in other units, with no emitted code; both consumers retain normal unused-function diagnostics.
+static __attribute__((unused)) void main_ir_source_interfaces(void)
+{
+    (void)&check_program_access;
+    (void)&check_request_describe_text;
+    (void)&check_source_prepare;
+    (void)&check_source_release;
 }
 #endif
 
