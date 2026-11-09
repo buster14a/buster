@@ -994,6 +994,10 @@ struct CheckInput
     // its graph, and declarations without one their whole graph.
     uint32_t* diagnostic_limits;
     uint32_t diagnostic_report_count;
+    // Where the ordered walk ended: the unit's token count, or the token where a reader's error stopped it, after which
+    // the reading found no declaration and gave no warning (#1447, check_driver_rejected_common); 0 where no walk ran
+    // in source order.
+    uint32_t walk_end;
     bool diagnostic_graph;
     // Whether the reader's arena of rare columns was base pages throughout, as where more than one lane reads the deferred
     // bodies of a large unit (check_input_sparse_arena, #764, #847): the tests require it of those readings and of no
@@ -13444,6 +13448,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
             // A successful deferred merge clears its mask and supplies the same complete unit as source order.
             // Selected/private views still retain a mask and cannot establish these independent-declaration cuts.
             const bool resolved = complete_translation_unit && input->report_count == 0 && reader.position == count && reader.expression_limit == count && input->deferred_tokens == NULL;
+            input->walk_end = reader.position;
             check_input_bindings(&reader, binding_mode);
             if (reader.fallthrough_count != 0 && !input->resource)
             {
