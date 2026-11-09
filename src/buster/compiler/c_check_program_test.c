@@ -1554,7 +1554,9 @@ static bool check_test_data_prepare_dense(CheckTestDataPrepared* result, const C
             const uint32_t plan_index = check_test_initializer_index_dense(initializers, token);
             valid = plan_index <= initializers->count &&
                     (plan_index == 0 || (initializers->declaration_tokens != 0 && initializers->declaration_tokens[plan_index - 1] == token));
-            reference_capacity += valid && plan_index != 0 ? initializers->plans[plan_index - 1].count : 0;
+            // A label difference's part references two objects (#1447), as check_data_input_prepared counts it.
+            const CheckInitializer* counted = valid && plan_index != 0 ? initializers->plans + plan_index - 1 : NULL;
+            reference_capacity += counted != NULL ? (uint64_t)counted->count * (counted->label_differences ? 2u : 1u) : 0;
             if (!valid)
             {
                 result->status = CHECK_DATA_INPUT_INVALID;
@@ -1641,6 +1643,20 @@ static bool check_test_data_prepare_dense(CheckTestDataPrepared* result, const C
                     if (valid)
                     {
                         result->references[result->reference_count++] = references[reference];
+                    }
+                }
+                // Each label difference's two labels, after the parts' references (#1447).
+                for (uint32_t part = 0; valid && plan != 0 && part < plan->count; part += 1)
+                {
+                    const CheckValue* value = &plan->parts[part].value;
+                    if (plan->parts[part].kind == CHECK_INIT_VALUE && value->constant_kind == CHECK_CONSTANT_LABEL_DIFFERENCE)
+                    {
+                        valid = result->reference_count + 2 <= reference_capacity;
+                        if (valid)
+                        {
+                            result->references[result->reference_count++] = value->object;
+                            result->references[result->reference_count++] = (uint32_t)value->integer;
+                        }
                     }
                 }
                 if (!valid && result->status == CHECK_DATA_INPUT_OK)
