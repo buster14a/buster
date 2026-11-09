@@ -11122,9 +11122,11 @@ static uint32_t check_input_first_token(const CheckInputReader* reader, uint32_t
 // The string clang's constant evaluator reads at `address` (#1843, Expr::tryEvaluateString), another address constant
 // than a literal's start for __builtin_verbose_trap: its chars from the unit's constant objects (check_const_load, at
 // `position`), up to the first NUL, of an array of plain char (a const array's initializer the reader kept, or a
-// literal's). 0 for a string without a `$`, CHECK_INPUT_VERBOSE_TRAP_DOLLAR for one with, CHECK_INPUT_VERBOSE_TRAP_STRING
-// where the read leaves the object (past its end, or no NUL in it) and CHECK_INPUT_UNSUPPORTED where a char isn't known
-// (an object whose bytes the reader didn't keep, another element type), which the caller refuses by name.
+// literal's). BUSTER_CHECK_VERBOSE_TRAP_STRING_VALID for a string without a `$` (no message's value: CHECK_INPUT_UNSUPPORTED
+// is 0, #1917's review), CHECK_INPUT_VERBOSE_TRAP_DOLLAR for one with, CHECK_INPUT_VERBOSE_TRAP_STRING where the read leaves
+// the object (past its end, or no NUL in it) and CHECK_INPUT_UNSUPPORTED where a char isn't known (an object whose bytes
+// the reader didn't keep, another element type), which the caller refuses by name.
+#define BUSTER_CHECK_VERBOSE_TRAP_STRING_VALID UINT32_MAX
 static uint32_t check_input_verbose_trap_object(CheckInputReader* reader, const CheckValue* address, uint32_t position)
 {
     const CheckConstValues* owner = NULL;
@@ -11133,7 +11135,7 @@ static uint32_t check_input_verbose_trap_object(CheckInputReader* reader, const 
     const bool chars = array != 0 && type_kind_is_array(type_kind(reader->types, array)) &&
                        type_unqualified(type_strip_aligned(reader->types, type_element(reader->types, array))) == BUSTER_TYPE_CHAR;
     const bool inside = chars && address->fault == CHECK_FAULT_NONE && address->offset >= 0 && (uint64_t)address->offset < receipt->byte_size;
-    uint32_t result = !chars ? CHECK_INPUT_UNSUPPORTED : !inside ? CHECK_INPUT_VERBOSE_TRAP_STRING : 0;
+    uint32_t result = !chars ? CHECK_INPUT_UNSUPPORTED : CHECK_INPUT_VERBOSE_TRAP_STRING;
     bool known = inside;
     bool ended = false;
     bool dollar = false;
@@ -11145,7 +11147,8 @@ static uint32_t check_input_verbose_trap_object(CheckInputReader* reader, const 
         ended = known && (uint8_t)loaded.integer == 0;
         dollar |= known && (uint8_t)loaded.integer == '$';
     }
-    result = !inside ? result : !known ? CHECK_INPUT_UNSUPPORTED : !ended ? CHECK_INPUT_VERBOSE_TRAP_STRING : dollar ? CHECK_INPUT_VERBOSE_TRAP_DOLLAR : 0;
+    result = !inside ? result : !known ? CHECK_INPUT_UNSUPPORTED : !ended ? CHECK_INPUT_VERBOSE_TRAP_STRING : dollar ? CHECK_INPUT_VERBOSE_TRAP_DOLLAR :
+             BUSTER_CHECK_VERBOSE_TRAP_STRING_VALID;
     return result;
 }
 
@@ -11207,7 +11210,7 @@ static void check_input_verbose_trap_arguments(CheckInputReader* reader, const C
         else
         {
             const uint32_t verdict = check_input_verbose_trap_object(reader, &value, call->closing + 1);
-            if (verdict != 0)
+            if (verdict != BUSTER_CHECK_VERBOSE_TRAP_STRING_VALID)
             {
                 check_input_report(reader, span.first, (CheckInputMessage)verdict);
             }
