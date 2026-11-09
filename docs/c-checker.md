@@ -3517,9 +3517,23 @@ What the lowering covers past scalars (#145's programs):
   clang's `checkNewAttributesAfterDef` drops it (with its warning), and so are
   constructors and destructors there (`check_input_attribute_late`, which
   copies a specifier's list before marking one declarator's). A weak
-  declaration after a use makes the reference weak, as GCC's does; clang's
-  stays global, as its code generation made it at the use (GCC says the
-  behavior is unspecified). A defined function's constructor and destructor
+  declaration (or `#pragma weak`) after a use binds as clang's code
+  generation does (#1849, the owner's decision on #1447; GCC makes the
+  reference weak and says the behavior is unspecified): a definition's symbol
+  is weak, a tentative definition's only where a weak declaration comes no
+  later than its last tentative definition (`getActingDefinition`), and an
+  undefined object's has the binding of the declaration that its first
+  emitted reference names, which stays. `check_program_weak_late` keeps the
+  weak declarations of the objects that have none on their first declaration
+  (a pragma's applies at the pragma), and the selection's
+  `check_program_weak_bindings` finds the first reference with the late
+  rename's emission walk (eager bodies at their ends, static data at its
+  declaration where clang must emit it, deferred bodies and data at the
+  unit's end; a body's reference names the latest declaration before it,
+  static data's the latest where it is emitted). Where only deferred code
+  refers to the object and its references disagree, clang's order of
+  deferred emission decides, which isn't modeled: that is refused by name.
+  A defined function's constructor and destructor
   each give an entry of the init or fini array: an atom of a pointer to the
   function (`ABS64`), in the order LLVM writes `llvm.global_ctors` and
   `llvm.global_dtors`, stably by priority from the definitions' order (an
@@ -3531,7 +3545,9 @@ What the lowering covers past scalars (#145's programs):
   `.fini_array.N` (`check_program_sections`'s descriptors), as clang's object
   has them. The selection takes constructors and destructors as roots.
   `test-checker-driver` (`c_check_symbol_driver_test.c`) compiles a fixture
-  of them by clang and both paths: each symbol's binding must be clang's,
+  of them by clang and both paths, and one of late weak declarations and
+  pragmas (with and without `-fcommon`, and the refused shape): each symbol's
+  binding must be clang's,
   both paths' objects the same bytes, and the objects, linked by `cc` alone
   and with another object's strong definitions, and the direct path's
   executables, must print what clang's build prints, its constructors' order
@@ -8670,7 +8686,10 @@ translation unit's declarations, so a local shadow does not redirect it. Forward
 directives that never acquire an external declaration warn at EOF; forward
 typedefs and internal `redefine_extname` declarations retain Clang's distinct
 warning groups and locations. A weak directive after an existing internal declaration
-or typedef is a silent no-op, as in the oracle.
+or typedef is a silent no-op, as in the oracle. A directive after a use applies
+to the declaration that was the latest at it, from the directive on, as clang
+adds the attribute there (#1849): an earlier eagerly emitted reference keeps
+the symbol global (the weak attribute's "after a use" rule).
 
 `#pragma redefine_extname NAME SYMBOL` uses the existing asm-label emission path
 for declarations and subsequent references. The first pending rename and explicit

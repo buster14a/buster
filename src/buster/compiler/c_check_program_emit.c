@@ -3289,6 +3289,22 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         // through weakrefs alone (BUSTER_CHECK_PROGRAM_ALIAS_WEAK). An alias or ifunc clang's code generation refuses (the
         // driver reports its error before the emission: check_driver_aliases), or one the emission doesn't take, is
         // refused at its attribute, in source order.
+        // A late weak declaration (#1849) leaves the symbol of an object global where the selection found that clang's
+        // code generation binds it before the declaration applies (check_program_weak_bindings), or can't tell.
+        for (uint32_t i = 0; valid && program->weak_decided && i < program->weak_global_count; i += 1)
+        {
+            const uint32_t object = program->weak_globals[i];
+            const SymbolId taken = object < program->object_count ? program->object_symbols[object] : 0;
+            const SymbolId symbol = taken != 0 && program->symbol_objects[taken - 1] == object ? taken : 0;
+            weak[symbol] = symbol != 0 ? 0 : weak[symbol];
+        }
+        if (valid && program->weak_decided && program->weak_refused != 0)
+        {
+            result->status = CHECK_PROGRAM_UNSUPPORTED;
+            result->reason = "a weak declaration after a use that only code clang emits at the unit's end makes, through declarations before and after it";
+            result->token = program->weak_refused - 1;
+            valid = false;
+        }
         // cpu_specific's and cpu_dispatch's names (#1447): f.ifunc for the references, f.X for each version's own.
         valid = valid && check_program_cpu_names(program, symbol_names, output);
         if (symbol_aliases != 0)
