@@ -3828,8 +3828,10 @@ diagnostic-only and preserve the original source rejection.
 An `extern` declaration of type `void` (`extern void v;`, a block's too) is
 valid, as clang takes it. Its address is a `void *` to an undefined symbol that
 another unit defines. `sizeof v`, a discarded `v;` and `(void)v` are quiet: a
-value of type `void` is no unused result. Reading its value is clang's error,
-and so is a definition (`void v;`, `extern void v = 1;`).
+value of type `void` is no unused result, in a comma's, conditional's or
+selection's operand too. A dereference's or subscript's of a `void *` still
+warns, as clang's `isUnusedResultAWarning` names those unconditionally. Reading
+its value is clang's error, and so is a definition (`void v;`, `extern void v = 1;`).
 
 #### Semantic error recovery (#1447)
 

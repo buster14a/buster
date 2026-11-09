@@ -2225,6 +2225,18 @@ static bool check_common_volatile_read(const CheckStream* stream, const TypeTabl
     return result;
 }
 
+// Whether a discarded `node`'s value is of type void where clang's isUnusedResultAWarning stays quiet: a void value is
+// no unused result (an extern void object's, #1447), but a dereference's or a subscript's warns all the same — clang
+// warns of those unconditionally, and only they can yield void. The statement marker and this walk's leaf share it.
+static bool check_common_void_quiet(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, uint32_t node)
+{
+    const CheckOp op = node < graph->count ? graph->ops[node] : CHECK_OP_COUNT;
+    const TypeId type = op != CHECK_OP_DEREFERENCE && op != CHECK_OP_SUBSCRIPT && node < stream->count ?
+                        type_strip_aligned(types, check_stream_type(stream, node)) : 0;
+    const bool result = type != 0 && type_kind(types, type) == BUSTER_TYPE_KIND_VOID;
+    return result;
+}
+
 // Whether a call in a logical operator's operand, whose result this unit's marks don't say warns, keeps the operator's
 // warning all the same (#1390): where a typedef of the unit has a result contract, which a return type spelled through
 // typeof may carry past the declarator's specifiers, or where the callee is overloaded, whose candidate's contracts the
@@ -2248,8 +2260,9 @@ static bool check_common_unused_unknown(const CheckCommonEmission* emission, uin
 // where both arms' do (a GNU `x ?: y`'s where its else arm's does), and is reported at the else arm's, which clang
 // evaluates last; a logical operator's warns where both operands' do, and is reported at the operator; a selection's is
 // its chosen operand's, a statement expression's its last value's (none is quiet), a conversion's its operand's. Any
-// other value warns where it is a call whose result warns, or where it has no effect, is no cast to void and reads no
-// volatile object; in a logical operator's operand a call keeps the warning in the units check_common_unused_unknown says. The
+// other value warns where it is a call whose result warns, or where it has no effect, is no cast to void, is no void
+// value but a dereference's or a subscript's, and reads no volatile object; in a logical operator's operand a call keeps
+// the warning in the units check_common_unused_unknown says. The
 // walk goes into the left operands first and holds the right ones, and each logical operator's mark after its operands,
 // on a bounded stack; it runs only for a discarded statement's value, a comma's left operand and a discarded comma's, so
 // that the graph's facts needn't hold an answer for every operator.
@@ -2322,7 +2335,8 @@ static __attribute__((noinline)) CheckCommonUnused check_common_unused_of(CheckC
             call = !mark && emission->ignored != NULL && check_common_ignored_op(op) && check_common_ignored_of(emission, at, &result.found);
             const bool unknown = !mark && !call && op == CHECK_OP_CALL && (kind & BUSTER_CHECK_UNUSED_LOGICAL) != 0 && check_common_unused_unknown(emission, at);
             warns = mark || call || unknown ||
-                    (!void_cast && !check_common_node_effect(graph, at) && !check_common_volatile_read(stream, types, at));
+                    (!void_cast && !check_common_node_effect(graph, at) && !check_common_volatile_read(stream, types, at) &&
+                     !check_common_void_quiet(graph, stream, types, at));
             leaf = at;
             done = depth == 0;
             at = depth != 0 ? pending[depth - 1] : BUSTER_CHECK_NONE;
@@ -2612,9 +2626,9 @@ static void check_common_stmt_marker(CheckCommonEmission* emission, uint32_t nod
              parser->tokens.kinds[token] != PARSE_KIND_L_PAREN &&
              parser->tokens.kinds[token] != PARSE_KIND_PLUSPLUS && parser->tokens.kinds[token] != PARSE_KIND_MINUSMINUS &&
              !check_common_node_effect(graph, node) && !check_common_volatile_read(emission->stream, emission->types, node) &&
-             type_kind(emission->types, type_strip_aligned(emission->types, check_stream_value(emission->stream, node).type)) != BUSTER_TYPE_KIND_VOID)
+             !check_common_void_quiet(graph, emission->stream, emission->types, node))
     {
-        // (A value of type void, an extern void object's, is no result clang warns of, #1447.)
+        // (A value of type void is no result clang warns of, but a dereference's or a subscript's is, #1447.)
         // A discarded member read points at the member's name, like the comma's left operand does.
         const uint32_t report = role == PARSE_ROLE_CLOSE_CAST ? check_common_cast_opener(parser, token) :
                                 role == PARSE_ROLE_MEMBER_OPERATOR && token + 1 < count ? token + 1 : token;
