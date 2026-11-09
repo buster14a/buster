@@ -212,6 +212,9 @@ struct CheckConstantInput
     bool deferred_tags;
     // CHECK_CONSTANT_NAMES_*, the reader's when the reading began (check_constant_name).
     uint8_t names;
+    // The undeclared names this reading reported that no correction took (check_constant_name): a job's own, which
+    // a nested tag's readings between its steps don't touch.
+    uint32_t missing;
 };
 
 static uint32_t check_constant_overload_token(const CheckConstantInput* input, uint32_t root)
@@ -1828,6 +1831,7 @@ static void check_constant_name(CheckConstantInput* input, uint32_t token)
         }
         reader->constant_named += reported ? 1u : 0u;
         reader->constant_missing += reported && !corrected ? 1u : 0u;
+        input->missing += reported && !corrected ? 1u : 0u;
         if (reported && (corrected || input->names == CHECK_CONSTANT_NAMES_RECOVER))
         {
             check_input_recover_reports(reader, before);

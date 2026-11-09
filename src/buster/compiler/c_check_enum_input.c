@@ -146,6 +146,7 @@ static bool check_input_enum_read(CheckInputReader* reader, CheckTagFrame* frame
     uint32_t i = name + 1;
     bool valid = name < frame->close && parser->tokens.kinds[name] == PARSE_KIND_IDENTIFIER;
     CheckValue value = { 0 };
+    bool missing = false;
     CheckInputAttributes* attributes = frame->enumerator_attributes;
     // An enum with a fixed underlying type is complete from its base on (check_input_tag_identity); one a mode completed
     // isn't fixed (BUSTER_CHECK_ENUM_MODED).
@@ -196,19 +197,25 @@ static bool check_input_enum_read(CheckInputReader* reader, CheckTagFrame* frame
                 }
                 i += 1;
             }
+            // Its undeclared names are clang's errors at each one, recovered (#1447, check_constant_name).
+            reader->constant_names = CHECK_CONSTANT_NAMES_RECOVER;
             frame->enum_job = valid ? check_input_constant_job(reader, first, i) : 0;
+            reader->constant_names = CHECK_CONSTANT_NAMES_NONE;
             frame->enumerator_attributes = attributes;
             failed_token = first;
         }
         CheckConstantInput* job = frame->enum_job;
         valid = job != 0 && check_input_constant_job_step(job, &value, nested_tag);
+        // An undeclared name in the value, which no correction took: clang's error, recovered, and the enumerator takes the
+        // value it would have had with none, as clang's does (`enum E { Z = 4, A = zzz, B }` gives A 5 and B 6).
+        missing = job != 0 && *nested_tag == BUSTER_CHECK_NONE && job->missing != 0;
         if (job != 0)
         {
             i = job->end;
             failed_token = job->failure != BUSTER_CHECK_NONE ? job->failure : job->first;
             if (*nested_tag == BUSTER_CHECK_NONE)
             {
-                valid = valid && check_input_const_rvalue(reader, i, &value) && check_input_integer_constant(reader, &value);
+                valid = !missing && valid && check_input_const_rvalue(reader, i, &value) && check_input_integer_constant(reader, &value);
                 if (valid)
                 {
                     check_input_constant_warning(reader, job->first, i, &value, true);
@@ -219,7 +226,12 @@ static bool check_input_enum_read(CheckInputReader* reader, CheckTagFrame* frame
                 arena_pop_to(reader->scratch, mark);
             }
         }
-        if (valid && *nested_tag == BUSTER_CHECK_NONE && fixed)
+        if (missing)
+        {
+            value = (CheckValue){ 0 };
+            valid = fixed ? check_input_enum_fixed_value(reader, frame, name, false, &value, false) : check_input_enum_successor(reader, frame, &value);
+        }
+        else if (valid && *nested_tag == BUSTER_CHECK_NONE && fixed)
         {
             valid = check_input_enum_fixed_value(reader, frame, name, true, &value, false);
         }

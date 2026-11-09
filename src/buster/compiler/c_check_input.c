@@ -7786,8 +7786,16 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
                         // the width's tree.
                         const bool attributed = i < frame->close && parser->tokens.kinds[i] == PARSE_KIND_ATTRIBUTE;
                         int64_t bits = 0;
-                        valid &= check_input_constant(reader, begin, i, &bits) && bits >= 0 && bits <= UINT32_MAX;
-                        width = (uint32_t)bits;
+                        // An undeclared name in the width that no correction took is clang's error at the name, recovered,
+                        // and the member isn't a bit-field (#1447, check_constant_name): `struct S { int b : zzz; int c; }`
+                        // has clang's size 8.
+                        const uint32_t missing = reader->constant_missing;
+                        reader->constant_names = begin < i ? CHECK_CONSTANT_NAMES_RECOVER : CHECK_CONSTANT_NAMES_NONE;
+                        const bool read = check_input_constant(reader, begin, i, &bits);
+                        reader->constant_names = CHECK_CONSTANT_NAMES_NONE;
+                        const bool named = reader->constant_missing != missing;
+                        valid &= named || (read && bits >= 0 && bits <= UINT32_MAX);
+                        width = named ? BUSTER_TYPE_NOT_BIT_FIELD : (uint32_t)bits;
                         const uint32_t before = attributes != 0 ? attributes->count : 0;
                         valid = valid && (!attributed || check_input_read_attributes(reader, &i, frame->close, &attributes));
                         // Their function types' attributes, which meet the member's type (#147).
