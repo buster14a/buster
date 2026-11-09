@@ -157,7 +157,7 @@
 // x86_encode_scalar_apx encodes; or in 32-bit or 16-bit mode, without REX, which x86_validate_32 and x86_validate_16
 // check and x86_encode_scalar_32 and x86_encode_scalar_16 encode.
 static X86EncoderMode x86_test_mode;
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DRIVER || BUSTER_UNIT == BUSTER_UNIT_X86 || BUSTER_UNIT == BUSTER_UNIT_FRONTEND || BUSTER_UNIT == BUSTER_UNIT_ASSEMBLER
 // xorshift64*.
 static uint64_t x86_test_random(uint64_t* state)
 {
@@ -168,12 +168,14 @@ static uint64_t x86_test_random(uint64_t* state)
     *state = x;
     return x * 0x2545F4914F6CDD1Dull;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DRIVER || BUSTER_UNIT == BUSTER_UNIT_X86 || BUSTER_UNIT == BUSTER_UNIT_FRONTEND || BUSTER_UNIT == BUSTER_UNIT_ASSEMBLER
 static uint32_t x86_random_below(uint64_t* state, uint32_t bound)
 {
     return (uint32_t)((x86_test_random(state) >> 32) * bound >> 32);
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_X86 || BUSTER_UNIT == BUSTER_UNIT_FRONTEND || BUSTER_UNIT == BUSTER_UNIT_ASSEMBLER
 // A register of the class (in a form of the family), more often one of the numbers with special encodings (4, 5, 12
 // and 13, and in half of an EVEX form's vector registers, 16 to 31, as in half of the general registers with `extended`:
 // APX's 20, 21, 28 and 29 among them) and, for a legacy byte register, sometimes AH to BH; for a control or segment
@@ -223,7 +225,8 @@ static uint8_t x86_random_register(uint64_t* state, uint16_t operand, uint8_t fa
     }
     return result;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_X86 || BUSTER_UNIT == BUSTER_UNIT_FRONTEND || BUSTER_UNIT == BUSTER_UNIT_ASSEMBLER
 // Mostly the values at the edges of each displacement size, and for an EVEX form's N (`scale`, a power of two), its
 // multiples, those at the edges of the 8-bit range in units of N among them, and their neighbors.
 static int32_t x86_random_displacement(uint64_t* state, uint32_t scale)
@@ -241,7 +244,8 @@ static int32_t x86_random_displacement(uint64_t* state, uint32_t scale)
     }
     return result;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_X86 || BUSTER_UNIT == BUSTER_UNIT_FRONTEND || BUSTER_UNIT == BUSTER_UNIT_ASSEMBLER
 // An immediate of `bytes` bytes (as X86Instruction.immediate holds it: a ptr16:32's offset, or a 64-bit one's low
 // half), in the range a sign-extended one has if `sign_extended`.
 static int32_t x86_random_immediate(uint64_t* state, uint32_t bytes, bool sign_extended)
@@ -259,12 +263,14 @@ static int32_t x86_random_immediate(uint64_t* state, uint32_t bytes, bool sign_e
     }
     return result;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_X86 || BUSTER_UNIT == BUSTER_UNIT_FRONTEND || BUSTER_UNIT == BUSTER_UNIT_ASSEMBLER
 static bool x86_fits_int8(int32_t value)
 {
     return value >= -128 && value <= 127;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_X86 || BUSTER_UNIT == BUSTER_UNIT_FRONTEND || BUSTER_UNIT == BUSTER_UNIT_ASSEMBLER
 // A form's opcode, without its prefixes, as one number (for the forms GNU as encodes differently), and for APX's map 4
 // forms, the legacy opcode byte they take.
 static uint32_t x86_form_opcode(const X86FormDescription* form)
@@ -272,7 +278,8 @@ static uint32_t x86_form_opcode(const X86FormDescription* form)
     const bool map4 = form->family == BUSTER_X86_FAMILY_EVEX && x86_opcode_map(form) == 4;
     return form->opcode_bytes == 1 || map4 ? form->opcode & 0xff : 0x10000 | form->opcode;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DRIVER || BUSTER_UNIT == BUSTER_UNIT_X86 || BUSTER_UNIT == BUSTER_UNIT_FRONTEND || BUSTER_UNIT == BUSTER_UNIT_ASSEMBLER || BUSTER_UNIT == BUSTER_UNIT_BACKEND
 // The mode's scalar encoder and validation (see x86_test_mode), and its vectorized encoder: x86_encode's,
 // x86_encode_address32's, x86_encode_apx's, x86_encode_mode32's or x86_encode_mode16's.
 static int64_t x86_test_encode_scalar(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint64_t capacity, uint32_t* offsets, uint32_t* fixup_ends)
@@ -283,6 +290,7 @@ static int64_t x86_test_encode_scalar(const X86Instruction* instructions, uint64
            : x86_test_mode == X86_ENCODER_MODE_16      ? x86_encode_scalar_16(instructions, count, output, capacity, offsets, fixup_ends)
                                                        : x86_encode_scalar(instructions, count, output, capacity, offsets, fixup_ends);
 }
+#endif
 #if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_X86
 static int64_t x86_test_encode(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint64_t capacity, uint32_t* offsets, uint32_t* fixup_ends)
 {
@@ -312,6 +320,7 @@ static uint64_t x86_test_validate(const X86Instruction* instructions, uint64_t c
                                                        : x86_validate(instructions, count);
 }
 #endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_X86 || BUSTER_UNIT == BUSTER_UNIT_FRONTEND || BUSTER_UNIT == BUSTER_UNIT_ASSEMBLER
 static bool x86_test_instruction_is_valid(const X86Instruction* instruction)
 {
     return x86_test_mode == X86_ENCODER_MODE_ADDRESS32 ? x86_instruction_is_valid_address32(instruction)
@@ -320,6 +329,7 @@ static bool x86_test_instruction_is_valid(const X86Instruction* instruction)
            : x86_test_mode == X86_ENCODER_MODE_16      ? x86_instruction_is_valid_16(instruction)
                                                        : x86_instruction_is_valid(instruction);
 }
+#endif
 #if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_X86
 // The mode's words in the checks' lines: none for x86_encode's, or the addresses, registers or mode.
 static const char* x86_test_mode_words(void)
@@ -331,6 +341,7 @@ static const char* x86_test_mode_words(void)
                                                        : "";
 }
 #endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DRIVER || BUSTER_UNIT == BUSTER_UNIT_X86 || BUSTER_UNIT == BUSTER_UNIT_FRONTEND || BUSTER_UNIT == BUSTER_UNIT_ASSEMBLER || BUSTER_UNIT == BUSTER_UNIT_BACKEND
 // Whether the instruction's memory operand, or the addresses it makes itself, are 16-bit: in 16-bit mode, and in 32-bit
 // mode with BUSTER_X86_MODE_ADDRESS_SIZE.
 static bool x86_test_address16(const X86Instruction* instruction)
@@ -338,7 +349,8 @@ static bool x86_test_address16(const X86Instruction* instruction)
     const bool other = (instruction->mode & BUSTER_X86_MODE_ADDRESS_SIZE) != 0;
     return (x86_test_mode == X86_ENCODER_MODE_16 && !other) || (x86_test_mode == X86_ENCODER_MODE_32 && other);
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_X86
 // Whether the form exists in the mode: in 64-bit mode's, the rows before BUSTER_X86_FORM_LEGACY_MODES, and in 16- and
 // 32-bit modes those x86_form_legacy says.
 static bool x86_test_form_exists(uint32_t form_index)
@@ -347,7 +359,8 @@ static bool x86_test_form_exists(uint32_t form_index)
     const uint8_t in_mode = x86_test_mode == X86_ENCODER_MODE_16 ? BUSTER_X86_LEGACY_IN_16 : BUSTER_X86_LEGACY_IN_32;
     return x86_mode_is_legacy(x86_test_mode) ? (x86_form_legacy[row] & in_mode) != 0 : row < BUSTER_X86_FORM_LEGACY_MODES;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DRIVER || BUSTER_UNIT == BUSTER_UNIT_X86 || BUSTER_UNIT == BUSTER_UNIT_FRONTEND || BUSTER_UNIT == BUSTER_UNIT_ASSEMBLER || BUSTER_UNIT == BUSTER_UNIT_BACKEND
 // Whether the form's register operand is an address, which takes the address's size: MOVDIR64B's, ENQCMD's and
 // ENQCMDS's (in ModRM.reg), and in 16- and 32-bit modes, UMONITOR's (in ModRM.rm).
 static bool x86_form_has_address_register(uint32_t form_index)
@@ -357,14 +370,16 @@ static bool x86_form_has_address_register(uint32_t form_index)
            row == X86_FORM_ENQCMD_R64_M512_EVEX || row == X86_FORM_ENQCMDS_R64_M512_EVEX || row == X86_FORM_MOVDIR64B_R32_M512 || row == X86_FORM_ENQCMD_R32_M512 ||
            row == X86_FORM_ENQCMDS_R32_M512 || row == X86_FORM_UMONITOR_R32;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DRIVER || BUSTER_UNIT == BUSTER_UNIT_X86 || BUSTER_UNIT == BUSTER_UNIT_FRONTEND || BUSTER_UNIT == BUSTER_UNIT_ASSEMBLER || BUSTER_UNIT == BUSTER_UNIT_BACKEND
 // The class an address register is printed with: the address's size.
 static uint16_t x86_address_register_operand(const X86Instruction* instruction, uint16_t operand)
 {
     const bool address32 = x86_test_mode == X86_ENCODER_MODE_ADDRESS32 || x86_mode_is_legacy(x86_test_mode);
     return !x86_form_has_address_register(instruction->form) || !address32 ? operand : x86_test_address16(instruction) ? BUSTER_X86_OPERAND_GW : BUSTER_X86_OPERAND_GD;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DRIVER || BUSTER_UNIT == BUSTER_UNIT_X86 || BUSTER_UNIT == BUSTER_UNIT_FRONTEND || BUSTER_UNIT == BUSTER_UNIT_ASSEMBLER || BUSTER_UNIT == BUSTER_UNIT_BACKEND
 // The address size prefix the printer writes the instruction with, or none: addr32 for a 32-bit address in 64-bit mode,
 // and in 16- and 32-bit modes the other address size's (addr32 or addr16), where nothing in the instruction says the
 // address's size: no general register (an absolute address or a VSIB operand without a base, whose index is a vector
@@ -400,21 +415,24 @@ static const char* x86_printed_address_prefix(const X86Instruction* instruction)
     }
     return result;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DRIVER || BUSTER_UNIT == BUSTER_UNIT_X86 || BUSTER_UNIT == BUSTER_UNIT_FRONTEND || BUSTER_UNIT == BUSTER_UNIT_ASSEMBLER || BUSTER_UNIT == BUSTER_UNIT_BACKEND
 // Whether the form's immediate is an MSR index: map 7's (VEX's, and APX's EVEX forms), unsigned (GNU as rejects a
 // negative one).
 static bool x86_form_has_msr_index(const X86FormDescription* form)
 {
     return form->family != BUSTER_X86_FAMILY_LEGACY && x86_opcode_map(form) == 7;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_X86
 // Whether an MPX form takes only memory, so that it has no instruction with a 32-bit address.
 static bool x86_form_is_bound_memory(uint32_t form_index)
 {
     const X86FormDescription* form = x86_form_description(form_index);
     return (form->reg & BUSTER_X86_OPERAND_CLASS) == BUSTER_X86_CLASS_BND && (form->rm & BUSTER_X86_OPERAND_MEMORY) && !(form->rm & BUSTER_X86_OPERAND_REGISTER);
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_X86 || BUSTER_UNIT == BUSTER_UNIT_FRONTEND || BUSTER_UNIT == BUSTER_UNIT_ASSEMBLER
 // Whether GNU as would encode the instruction with another form of the same mnemonic (a shorter one, usually), so
 // that --print-assembly avoids it.
 static bool x86_assembler_prefers_another_form(const X86Instruction* instruction)
@@ -550,7 +568,8 @@ static bool x86_assembler_prefers_another_form(const X86Instruction* instruction
     }
     return result;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_X86 || BUSTER_UNIT == BUSTER_UNIT_FRONTEND || BUSTER_UNIT == BUSTER_UNIT_ASSEMBLER
 // Whether, in 16- and 32-bit modes, the instruction can take a segment override in its decorations: its form takes one
 // (x86_form_takes_override) and has no FS or GS, and it has an address (a memory operand, if the form's rm can be one).
 static bool x86_test_takes_override(const X86Instruction* instruction)
@@ -559,7 +578,8 @@ static bool x86_test_takes_override(const X86Instruction* instruction)
     const bool addressed = (instruction->mode & BUSTER_X86_MODE_MEMORY) || !(form->rm & BUSTER_X86_OPERAND_MEMORY);
     return x86_form_takes_override(form) && addressed && x86_form_segment(instruction->form) == 0;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_X86 || BUSTER_UNIT == BUSTER_UNIT_FRONTEND || BUSTER_UNIT == BUSTER_UNIT_ASSEMBLER
 // A random memory operand for 16- and 32-bit modes (x86_random_instruction's): of the mode's address size, or one time
 // in four the other one (BUSTER_X86_MODE_ADDRESS_SIZE), but always 32-bit for a VSIB, SIB or MPX operand, which can't
 // be 16-bit. A 16-bit address is BX or BP and SI or DI, one of the four alone or absolute, with a displacement modulo
@@ -618,7 +638,8 @@ static void x86_random_legacy_memory(uint64_t* state, X86Instruction* instructio
         instruction->form = (uint16_t)(instruction->form + (x86_random_below(state, 2) == 0 ? BUSTER_X86_FORM_FS : BUSTER_X86_FORM_GS));
     }
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_X86 || BUSTER_UNIT == BUSTER_UNIT_FRONTEND || BUSTER_UNIT == BUSTER_UNIT_ASSEMBLER
 // A random valid instruction of the form. For --print-assembly (`for_assembler`), one GNU as encodes with this form.
 // With APX, a form with REX2 or an EVEX form has general registers, bases and general indexes from 16 to 31 half the
 // time (and with a segment override, maybe one that has no REX2, which the loop tries again).
@@ -769,7 +790,8 @@ static X86Instruction x86_random_instruction(uint64_t* state, uint16_t form_inde
     }
     return result;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_X86
 // A random form of the mode other than X86_FORM_NONE (see x86_test_form_exists), or with `with_none`, X86_FORM_NONE one
 // time in 16. With 32-bit addresses, one that has instructions with them; with APX, half the time one with REX2 and a
 // quarter of the time an EVEX one, whose general registers can be 16 to 31 (the others' can't, and REX2's forms are a
@@ -794,6 +816,7 @@ static uint16_t x86_random_form(uint64_t* state, bool with_none)
     }
     return result;
 }
+#endif
 #if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_X86
 static void x86_random_instructions(uint64_t* state, X86Instruction* instructions, uint64_t count, bool with_none, bool for_assembler)
 {
@@ -923,7 +946,7 @@ static const char* const x86_bound_names[4] = { "bnd0", "bnd1", "bnd2", "bnd3" }
 static const char* const x86_segment_names[8] = { "es", "cs", "ss", "ds", "fs", "gs", "sreg6", "sreg7" };
 // The rounding modes (BUSTER_X86_DECORATION_ROUNDING), as GNU as writes them.
 static const char* const x86_rounding_names[4] = { "{rn-sae}", "{rd-sae}", "{ru-sae}", "{rz-sae}" };
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DRIVER || BUSTER_UNIT == BUSTER_UNIT_X86 || BUSTER_UNIT == BUSTER_UNIT_FRONTEND || BUSTER_UNIT == BUSTER_UNIT_ASSEMBLER || BUSTER_UNIT == BUSTER_UNIT_BACKEND
 // A register's name (an invalid one's, too: the numbers wrap around).
 static const char* x86_register_name(uint8_t value, uint16_t operand)
 {
@@ -949,7 +972,8 @@ static const char* x86_register_name(uint8_t value, uint16_t operand)
     }
     return result;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DRIVER || BUSTER_UNIT == BUSTER_UNIT_X86 || BUSTER_UNIT == BUSTER_UNIT_FRONTEND || BUSTER_UNIT == BUSTER_UNIT_ASSEMBLER || BUSTER_UNIT == BUSTER_UNIT_BACKEND
 // The number of the form's legacy prefixes.
 static uint32_t x86_prefix_count(const X86FormDescription* form)
 {
@@ -960,12 +984,14 @@ static uint32_t x86_prefix_count(const X86FormDescription* form)
     }
     return result;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DRIVER || BUSTER_UNIT == BUSTER_UNIT_X86 || BUSTER_UNIT == BUSTER_UNIT_FRONTEND || BUSTER_UNIT == BUSTER_UNIT_ASSEMBLER || BUSTER_UNIT == BUSTER_UNIT_BACKEND
 static const char* x86_accumulator_name(uint32_t bytes)
 {
     return bytes == 1 ? "al" : bytes == 2 ? "ax" : bytes == 4 ? "eax" : "rax";
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DRIVER || BUSTER_UNIT == BUSTER_UNIT_X86 || BUSTER_UNIT == BUSTER_UNIT_FRONTEND || BUSTER_UNIT == BUSTER_UNIT_ASSEMBLER || BUSTER_UNIT == BUSTER_UNIT_BACKEND
 // A memory operand; a VSIB one's index is a vector register of the rm operand's class, and a SIB one's index 4 is none,
 // which isn't printed (GNU as reads riz as a symbol in Intel syntax). With a symbolic displacement (`symbolic`), the
 // displacement is dsym plus the field's value.
@@ -1011,7 +1037,8 @@ static void x86_print_memory(FILE* file, const X86Instruction* instruction, uint
         fprintf(file, "%s%s%+d]", *symbol != 0 ? "+" : "", symbol, instruction->displacement);
     }
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DRIVER || BUSTER_UNIT == BUSTER_UNIT_X86 || BUSTER_UNIT == BUSTER_UNIT_FRONTEND || BUSTER_UNIT == BUSTER_UNIT_ASSEMBLER || BUSTER_UNIT == BUSTER_UNIT_BACKEND
 // Whether the form is a far branch through memory (call or jmp to a far pointer: FF /3 and FF /5).
 static bool x86_form_is_far_branch(const X86FormDescription* form)
 {
@@ -1019,14 +1046,16 @@ static bool x86_form_is_far_branch(const X86FormDescription* form)
     return form->family == BUSTER_X86_FAMILY_LEGACY && form->opcode_bytes == 1 && form->opcode == 0xff && (form->encoding & BUSTER_X86_ENCODING_DIGIT) &&
            (digit == 3 || digit == 5);
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DRIVER || BUSTER_UNIT == BUSTER_UNIT_X86 || BUSTER_UNIT == BUSTER_UNIT_FRONTEND || BUSTER_UNIT == BUSTER_UNIT_ASSEMBLER || BUSTER_UNIT == BUSTER_UNIT_BACKEND
 // Whether the form is a near call or jmp through a 32-bit register or doubleword (with NOTRACK or BND too).
 static bool x86_form_is_near32_branch(uint32_t row)
 {
     return row == X86_FORM_CALL_RM32 || row == X86_FORM_JMP_RM32 || row == X86_FORM_NOTRACK_CALL_RM32 || row == X86_FORM_NOTRACK_JMP_RM32 ||
            row == X86_FORM_BND_CALL_RM32 || row == X86_FORM_BND_JMP_RM32;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DRIVER || BUSTER_UNIT == BUSTER_UNIT_X86 || BUSTER_UNIT == BUSTER_UNIT_FRONTEND || BUSTER_UNIT == BUSTER_UNIT_ASSEMBLER || BUSTER_UNIT == BUSTER_UNIT_BACKEND
 // Whether the printer writes the instruction's memory operand without a size, as its mnemonic and prefix say it: in 16-
 // and 32-bit modes, a far branch's (lcall or ljmp) and a 6-byte pseudo-descriptor's (lgdtw's and the others', which GNU
 // as takes with its suffix alone), and in 16-bit mode, a near call's or jmp's through a doubleword, which GNU as takes
@@ -1039,7 +1068,8 @@ static bool x86_printed_without_size(const X86Instruction* instruction)
     return x86_mode_is_legacy(x86_test_mode) && (instruction->mode & BUSTER_X86_MODE_MEMORY) &&
            (x86_form_is_far_branch(form) || descriptor || (x86_test_mode == X86_ENCODER_MODE_16 && x86_form_is_near32_branch(row)));
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DRIVER || BUSTER_UNIT == BUSTER_UNIT_X86 || BUSTER_UNIT == BUSTER_UNIT_FRONTEND || BUSTER_UNIT == BUSTER_UNIT_ASSEMBLER || BUSTER_UNIT == BUSTER_UNIT_BACKEND
 // A broadcast's memory operand is its element, whose size is the disp8 scale (and see x86_printed_without_size).
 static void x86_print_rm(FILE* file, const X86Instruction* instruction, const X86FormDescription* form, uint32_t symbolic)
 {
@@ -1053,7 +1083,8 @@ static void x86_print_rm(FILE* file, const X86Instruction* instruction, const X8
         fprintf(file, "%s", x86_register_name(instruction->rm, x86_address_register_operand(instruction, form->rm)));
     }
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DRIVER || BUSTER_UNIT == BUSTER_UNIT_X86 || BUSTER_UNIT == BUSTER_UNIT_FRONTEND || BUSTER_UNIT == BUSTER_UNIT_ASSEMBLER || BUSTER_UNIT == BUSTER_UNIT_BACKEND
 // The operands of a syntax, in order (r for reg, v for vvvv, m for rm, i for the immediate, c for CL, 1 for 1, s for
 // ST(0), a for the accumulator, 4 for the /is4 register and z for the selector below it), for the syntaxes
 // x86_print_instruction doesn't print itself.
@@ -1102,7 +1133,8 @@ static const char* x86_syntax_operands(uint8_t syntax)
     }
     return result;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DRIVER || BUSTER_UNIT == BUSTER_UNIT_X86 || BUSTER_UNIT == BUSTER_UNIT_FRONTEND || BUSTER_UNIT == BUSTER_UNIT_ASSEMBLER || BUSTER_UNIT == BUSTER_UNIT_BACKEND
 // Whether the form is a VEX one whose mnemonic an EVEX form has too, from a table of every form that the first call
 // fills.
 static bool x86_vex_form_shares_mnemonic(uint32_t form)
@@ -1126,22 +1158,24 @@ static bool x86_vex_form_shares_mnemonic(uint32_t form)
     }
     return shares[(form & BUSTER_X86_FORM_NUMBER) % X86_FORM_COUNT];
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DRIVER || BUSTER_UNIT == BUSTER_UNIT_X86 || BUSTER_UNIT == BUSTER_UNIT_FRONTEND || BUSTER_UNIT == BUSTER_UNIT_ASSEMBLER || BUSTER_UNIT == BUSTER_UNIT_BACKEND
 // Whether the form is one of cfcmovcc's, whose NF picks the store form: GNU as takes {store} for that, but no {nf}.
 static bool x86_form_is_cfcmov(const X86FormDescription* form)
 {
     return strncmp(form->mnemonic, "cfcmov", 6) == 0;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DRIVER || BUSTER_UNIT == BUSTER_UNIT_X86 || BUSTER_UNIT == BUSTER_UNIT_FRONTEND || BUSTER_UNIT == BUSTER_UNIT_ASSEMBLER || BUSTER_UNIT == BUSTER_UNIT_BACKEND
 // A far pointer's offset, signed: a ptr16:16's low 16 bits, or a ptr16:32's immediate.
 static int32_t x86_far_offset(const X86Instruction* instruction)
 {
     return x86_form_description(instruction->form)->immediate_bytes == 4 ? (int32_t)(int16_t)instruction->immediate : instruction->immediate;
 }
-
+#endif
 // The names of the flags in a default flags value, from bit 3 to bit 0.
 static const char* const x86_dfv_names[] = { "of", "sf", "zf", "cf" };
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DRIVER || BUSTER_UNIT == BUSTER_UNIT_X86 || BUSTER_UNIT == BUSTER_UNIT_FRONTEND || BUSTER_UNIT == BUSTER_UNIT_ASSEMBLER || BUSTER_UNIT == BUSTER_UNIT_BACKEND
 // Prints the form's mnemonic as GNU as takes it in the mode. In 16- and 32-bit modes, jrcxz is jecxz or jcxz by the
 // address size, sysexitd and sysretd are sysexit and sysret, and a far branch through memory is lcall or ljmp, which
 // like a far branch to a pointer in the immediate takes data16 or data32 for a pointer of the other operand size (a
@@ -1179,7 +1213,8 @@ static void x86_print_mnemonic(FILE* file, const X86Instruction* instruction)
     }
     fprintf(file, "%s%s%s", prefix, mnemonic, suffix);
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DRIVER || BUSTER_UNIT == BUSTER_UNIT_X86 || BUSTER_UNIT == BUSTER_UNIT_FRONTEND || BUSTER_UNIT == BUSTER_UNIT_ASSEMBLER || BUSTER_UNIT == BUSTER_UNIT_BACKEND
 // Prints the instruction in GNU as Intel syntax. A register-to-register move or arithmetic instruction gets {load} or
 // {store}, which picks the form with ModRM.reg as the destination or the source (or with ND, the first source or the
 // second: a destination in EVEX.vvvv) (and keeps GNU as from swapping a VEX
@@ -1367,6 +1402,7 @@ static void x86_print_instruction(FILE* file, const X86Instruction* instruction,
         }
     }
 }
+#endif
 #if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_X86
 static void x86_print_bytes(const uint8_t* bytes, uint64_t length)
 {
@@ -3943,6 +3979,7 @@ static void x86_test_report_fault(int signal_number)
     _exit(1);
 }
 #endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DRIVER || BUSTER_UNIT == BUSTER_UNIT_X86 || BUSTER_UNIT == BUSTER_UNIT_LINK
 // Maps `bytes` rounded up to whole pages between two PROT_NONE pages, and returns the end of the readable part.
 static uint8_t* x86_map_guarded(uint64_t bytes, uint64_t page, uint64_t* mapped_bytes)
 {
@@ -3957,6 +3994,7 @@ static uint8_t* x86_map_guarded(uint64_t bytes, uint64_t page, uint64_t* mapped_
     }
     return result;
 }
+#endif
 #if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_X86
 static bool x86_check_page_edges(uint64_t* state, X86Instruction* scratch, X86Buffers* buffers)
 {
@@ -5303,6 +5341,7 @@ static bool x86_print_assembly(uint64_t seed, uint64_t* state, uint64_t count, X
     return true;
 }
 #endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DRIVER || BUSTER_UNIT == BUSTER_UNIT_X86
 // The bytes of a file, or null (malloc'd; the caller frees them).
 static uint8_t* x86_read_file(const char* path, uint64_t* length)
 {
@@ -5329,7 +5368,8 @@ static uint8_t* x86_read_file(const char* path, uint64_t* length)
     }
     return result;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DRIVER || BUSTER_UNIT == BUSTER_UNIT_X86 || BUSTER_UNIT == BUSTER_UNIT_BACKEND
 // An ELF object's section, by type and name: its contents and header, or null if the file has none (or isn't a 64-bit
 // little-endian ELF file whose section headers and that section are inside it).
 static const uint8_t* x86_elf_section(const uint8_t* file, uint64_t length, uint32_t type, const char* name, const Elf64_Shdr** header)
@@ -5359,6 +5399,7 @@ static const uint8_t* x86_elf_section(const uint8_t* file, uint64_t length, uint
     }
     return result;
 }
+#endif
 #if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_X86
 // A relocation as the ELF object has it: the offset in .text, the type (R_X86_64_*), the addend and the symbol's name;
 // and for an expected one, its instruction's index.
