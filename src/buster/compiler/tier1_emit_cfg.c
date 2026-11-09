@@ -715,6 +715,7 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
     uint32_t* predecessor_offsets = ok ? ir_allocate(output, (uint64_t)blocks + 1, 4, &ok) : 0;
     uint32_t* predecessors = ok ? ir_allocate(output, (uint64_t)edges + 1, 4, &ok) : 0;
     uint8_t* classes = ok ? ir_allocate(output, (uint64_t)value_count + 1, 1, &ok) : 0;
+    uint8_t* slot_widths = ok ? ir_allocate(output, (uint64_t)value_count + 1, 1, &ok) : 0;
     uint32_t* allowed = ok ? ir_allocate(output, (uint64_t)value_count + 1, 4, &ok) : 0;
     uint32_t* defined = ok ? ir_allocate(output, (uint64_t)value_count + 1, 4, &ok) : 0;
     uint32_t* definitions = ok ? ir_allocate(output, (uint64_t)value_count + 1, 4, &ok) : 0;
@@ -778,6 +779,8 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
             const uint32_t node = value_nodes[v];
             const uint32_t op = function->op[node];
             classes[v] = node_classes[node];
+            // A slot's bytes, the frame row's (tier1_emit_cfg_row_bytes): a phi web shares a slot only at one width.
+            slot_widths[v] = (uint8_t)prepared->sizes[node];
             const bool vector_value = classes[v] == BUSTER_TIER1_ALLOCATE_VECTOR;
             allowed[v] = classes[v] == BUSTER_TIER1_ALLOCATE_MASK ? BUSTER_TIER1_EMIT_MASK_REGISTERS : vector_value ? vector_registers : registers;
             // A parameter's incoming register, its place's (#141): a general one, or an xmm one for a floating value.
@@ -926,6 +929,7 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
             .predecessor_offsets = predecessor_offsets,
             .predecessors = predecessors,
             .classes = classes,
+            .slot_widths = slot_widths,
             .allowed_registers = allowed,
             .definition_registers = defined,
             .definitions = definitions,
@@ -1202,7 +1206,7 @@ static Tier1EmitError tier1_emit_cfg_lifetimes(const IrFunction* function, const
     return error;
 }
 
-// The frame: each spilled value's slot over its intervals' hull (a phi's widened to its predecessors' ends), the general
+// The frame: each slot over its values' intervals' hull (a phi's widened to its predecessors' ends), the general
 // registers' caller-save rows, the opmask registers' a call saves, the xmm registers' (#141), and each class's temporary
 // slot where a move used it, in that row order, then the frame objects.
 static Tier1EmitError tier1_emit_cfg_frame(const Tier1SelectPlan* plan, const Tier1EmitOptions* options, Arena* output, Arena* scratch, Tier1EmitResult* emitted)
@@ -1234,26 +1238,37 @@ static Tier1EmitError tier1_emit_cfg_frame(const Tier1SelectPlan* plan, const Ti
     }
     for (uint32_t k = 0; error == TIER1_EMIT_OK && k < spills; k += 1)
     {
-        const uint32_t v = cfg->allocation.spill_values[k];
-        const uint32_t node = emitted->value_nodes[v];
-        uint32_t start = input->position_count;
-        uint32_t end = 0;
-        for (uint32_t i = cfg->value_interval_offsets[v]; i < cfg->value_interval_offsets[v + 1]; i += 1)
-        {
-            start = cfg->intervals.starts[i] < start ? cfg->intervals.starts[i] : start;
-            end = cfg->intervals.ends[i] > end ? cfg->intervals.ends[i] : end;
-        }
-        // A phi's slot is written at its predecessors' ends, where the phi isn't live yet.
-        const uint32_t home = phis[v] != 0 ? tier1_cfg_block_of(input, input->definitions[v]) : 0;
-        for (uint32_t e = phis[v] != 0 ? input->predecessor_offsets[home] : 0; phis[v] != 0 && e < input->predecessor_offsets[home + 1]; e += 1)
-        {
-            const uint32_t exit = input->block_starts[input->predecessors[e] + 1] - 1;
-            start = exit < start ? exit : start;
-            end = exit + 1 > end ? exit + 1 : end;
-        }
-        prepared->starts[node] = start;
-        prepared->ends[node] = end;
+        const uint32_t node = emitted->value_nodes[cfg->allocation.spill_values[k]];
+        prepared->starts[node] = input->position_count;
+        prepared->ends[node] = 0;
         indices[k] = node;
+    }
+    // A phi web's values share a slot (tier1_cfg_share_slots): its row's hull is all of theirs, kept in its first value's
+    // column.
+    for (uint32_t v = 0; error == TIER1_EMIT_OK && v < input->value_count; v += 1)
+    {
+        const uint32_t k = cfg->allocation.spill_ids[v];
+        if (k < spills)
+        {
+            const uint32_t node = indices[k];
+            uint32_t start = prepared->starts[node];
+            uint32_t end = prepared->ends[node];
+            for (uint32_t i = cfg->value_interval_offsets[v]; i < cfg->value_interval_offsets[v + 1]; i += 1)
+            {
+                start = cfg->intervals.starts[i] < start ? cfg->intervals.starts[i] : start;
+                end = cfg->intervals.ends[i] > end ? cfg->intervals.ends[i] : end;
+            }
+            // A phi's slot is written at its predecessors' ends, where the phi isn't live yet.
+            const uint32_t home = phis[v] != 0 ? tier1_cfg_block_of(input, input->definitions[v]) : 0;
+            for (uint32_t e = phis[v] != 0 ? input->predecessor_offsets[home] : 0; phis[v] != 0 && e < input->predecessor_offsets[home + 1]; e += 1)
+            {
+                const uint32_t exit = input->block_starts[input->predecessors[e] + 1] - 1;
+                start = exit < start ? exit : start;
+                end = exit + 1 > end ? exit + 1 : end;
+            }
+            prepared->starts[node] = start;
+            prepared->ends[node] = end;
+        }
     }
     // The rows past the spills, each its column: the general registers' call saves (those a call or a fixed register's
     // sequence saves, each its register's column: #177), the opmask registers' (one column per register), the temporary
@@ -1404,8 +1419,8 @@ static Tier1EmitError tier1_emit_cfg_stack_argument(Tier1EmitResult* emitted, ui
 
 // A by-value aggregate argument's bytes [from, from + size) from its address, node `value`'s at its call's use phase
 // `position` (#789), to `to_base` + `to`: through the scratch register from the address's register, or, where the allocation has
-// the address in a slot or recomputes it, from the scratch register, which takes it, through rax, which the red zone's
-// save slot holds meanwhile (BUSTER_TIER1_EMIT_STAGING_SAVE). The address's use isn't required: a call may pass more
+// the address in a slot or recomputes it, from the scratch register, which takes it, through rax, whose live value the
+// red zone's save slot holds meanwhile (BUSTER_TIER1_EMIT_STAGING_SAVE). The address's use isn't required: a call may pass more
 // aggregates than the registers its first allocation gives its uses.
 // A by-value aggregate's address, value `value` at `position`, in a register: its own, or the scratch register, reloaded
 // from its spill slot or recomputed (`*registered` false then).
@@ -1437,18 +1452,27 @@ static Tier1EmitError tier1_emit_cfg_aggregate_address(Tier1EmitResult* emitted,
     return error;
 }
 
-static Tier1EmitError tier1_emit_cfg_aggregate_copy(Tier1EmitResult* emitted, uint32_t value, uint32_t position, uint8_t to_base, int32_t to, uint32_t from, uint32_t size, Tier1EmitBuffer* buffer)
+static Tier1EmitError tier1_emit_cfg_aggregate_copy(Tier1EmitResult* emitted, const Tier1EmitTransitions* transitions, uint32_t owed, uint32_t value, uint32_t position, uint8_t to_base, int32_t to, uint32_t from, uint32_t size, Tier1EmitBuffer* buffer)
 {
     uint8_t source = BUSTER_TIER1_SELECT_SCRATCH;
     bool registered = false;
     Tier1EmitError error = tier1_emit_cfg_aggregate_address(emitted, value, position, buffer, &source, &registered);
     const uint8_t data = registered ? (uint8_t)BUSTER_TIER1_SELECT_SCRATCH : (uint8_t)X86_REGISTER_RAX;
+    // A borrowed rax needs preservation only while it actually holds a live value. Owners can outlast their intervals,
+    // and an owed value is still in its call-save row: tier1_emit_owed already repaid any this call consumes. Saving an
+    // otherwise unknown rax would read uninitialized storage in the code certificate.
+    const uint32_t owner = transitions->owners[X86_REGISTER_RAX];
+    const uint32_t v = owner != BUSTER_IR_NONE ? emitted->node_values[owner] : BUSTER_TIER1_CFG_NONE;
+    uint32_t location = BUSTER_TIER1_CFG_NONE;
+    uint8_t kind = 0;
+    const bool preserve = !registered && (owed & (1u << X86_REGISTER_RAX)) == 0 && owner != BUSTER_IR_NONE && transitions->registers[owner] == X86_REGISTER_RAX &&
+                          v != BUSTER_TIER1_CFG_NONE && tier1_cfg_location(&emitted->cfg, v, position, &location, &kind) && kind == BUSTER_TIER1_ALLOCATE_REGISTER && location == X86_REGISTER_RAX;
     const int32_t save_slot = tier1_emit_staging(BUSTER_TIER1_EMIT_STAGING_SAVE);
     const X86Instruction save = { .displacement = save_slot, .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RSP, .mode = BUSTER_X86_MEMORY_BASE, .form = X86_FORM_MOV_RM64_R64 };
     const X86Instruction restore = { .displacement = save_slot, .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RSP, .mode = BUSTER_X86_MEMORY_BASE, .form = X86_FORM_MOV_R64_RM64 };
-    error = error != TIER1_EMIT_OK || registered || tier1_emit_append(buffer, save) ? error : TIER1_EMIT_MEMORY;
+    error = error != TIER1_EMIT_OK || !preserve || tier1_emit_append(buffer, save) ? error : TIER1_EMIT_MEMORY;
     error = error != TIER1_EMIT_OK || tier1_emit_copy_bytes(buffer, data, to_base, to, source, (int32_t)from, size) ? error : TIER1_EMIT_MEMORY;
-    error = error != TIER1_EMIT_OK || registered || tier1_emit_append(buffer, restore) ? error : TIER1_EMIT_MEMORY;
+    error = error != TIER1_EMIT_OK || !preserve || tier1_emit_append(buffer, restore) ? error : TIER1_EMIT_MEMORY;
     return error;
 }
 
@@ -3343,7 +3367,7 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
                     const uint32_t part_count = record != 0 && !whole ? tier1_select_location_parts(record->location, record->size, parts) : 0;
                     if (whole && registered && error == TIER1_EMIT_OK)
                     {
-                        error = tier1_emit_cfg_aggregate_copy(emitted, value, use, X86_REGISTER_RSP, (int32_t)record->location.stack_offset, 0, record->size, &buffer);
+                        error = tier1_emit_cfg_aggregate_copy(emitted, &transitions, saves.owed, value, use, X86_REGISTER_RSP, (int32_t)record->location.stack_offset, 0, record->size, &buffer);
                     }
                     for (uint32_t k = 0; registered && error == TIER1_EMIT_OK && k < part_count; k += 1)
                     {
@@ -3361,7 +3385,7 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
                         }
                         else
                         {
-                            error = to.valid ? tier1_emit_cfg_aggregate_copy(emitted, value, use, to.base, to.displacement, parts[k].offset, parts[k].bytes, &buffer) : TIER1_EMIT_ALLOCATION;
+                            error = to.valid ? tier1_emit_cfg_aggregate_copy(emitted, &transitions, saves.owed, value, use, to.base, to.displacement, parts[k].offset, parts[k].bytes, &buffer) : TIER1_EMIT_ALLOCATION;
                         }
                         staged += slots;
                         staged_zmm += zmm ? 1 : 0;
@@ -3722,8 +3746,40 @@ static Tier1EmitError tier1_emit_cfg_callee(const Tier1SelectPlan* plan, const T
         }
     }
     uint32_t* allowed = ok ? ir_allocate(output, (uint64_t)input->value_count + 1, 4, &ok) : 0;
+    // Each phi web's root (a phi and its operands, joined), and whether a member of the root's web crosses a call: the
+    // whole web then takes callee-saved registers, so that a loop's back edge can keep its phi's register.
+    uint32_t* parents = ok ? ir_allocate(scratch, (uint64_t)input->value_count + 1, 4, &ok) : 0;
+    uint8_t* crossed = ok ? ir_allocate(scratch, (uint64_t)input->value_count + 1, 1, &ok) : 0;
+    for (uint32_t v = 0; ok && v < input->value_count; v += 1)
+    {
+        parents[v] = v;
+        crossed[v] = 0;
+    }
+    for (uint32_t k = 0; ok && k < input->phi_count; k += 1)
+    {
+        uint32_t a = input->phi_values[k];
+        while (parents[a] != a)
+        {
+            parents[a] = parents[parents[a]];
+            a = parents[a];
+        }
+        for (uint32_t o = input->phi_operand_offsets[k]; o < input->phi_operand_offsets[k + 1]; o += 1)
+        {
+            uint32_t b = input->phi_operands[o];
+            while (b != BUSTER_TIER1_CFG_NONE && parents[b] != b)
+            {
+                parents[b] = parents[parents[b]];
+                b = parents[b];
+            }
+            if (b != BUSTER_TIER1_CFG_NONE && b != a)
+            {
+                parents[b] = a;
+            }
+        }
+    }
     uint32_t crossing = 0;
     const uint32_t caller = input->registers[0];
+    for (uint32_t pass = 0; ok && pass < 2; pass += 1)
     for (uint32_t v = 0; ok && v < input->value_count; v += 1)
     {
         const uint32_t node = emitted->value_nodes[v];
@@ -3749,9 +3805,16 @@ static Tier1EmitError tier1_emit_cfg_callee(const Tier1SelectPlan* plan, const T
         // too, in a callee-saved register from the entry on, it would hold one for the whole entry block, which spilled
         // more than its saves around the calls there cost (on speedtest1, a slower run). A parameter the first
         // allocation already freed (tier1_emit_cfg_function) stays free, the entry's moves bringing it.
+        uint32_t root = v;
+        while (parents[root] != root)
+        {
+            root = parents[root];
+        }
+        crossed[root] |= pass == 0 && crosses;
+        crosses = crossed[root] != 0;
         const uint32_t defined = input->definition_registers != 0 ? input->definition_registers[v] : 0;
         allowed[v] = general ? (crosses ? callee : caller) | defined : input->allowed_registers[v];
-        crossing += general && crosses;
+        crossing += pass == 1 && general && crosses;
     }
     Tier1EmitError error = ok || callee == 0 ? TIER1_EMIT_OK : TIER1_EMIT_MEMORY;
     if (error == TIER1_EMIT_OK && crossing != 0)
