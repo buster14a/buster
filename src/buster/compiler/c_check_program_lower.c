@@ -6292,15 +6292,11 @@ static void check_lower_call_to(CheckLowerWriter* writer, uint32_t node, CheckLo
 static CBuiltinId check_lower_library_extreme(CBuiltinLibraryId library);
 static void check_lower_vector_floating(CheckLowerWriter* writer, uint32_t node, CBuiltinId builtin, uint32_t arguments);
 
-// The elementwise builtin whose intrinsic clang -O0's code computes a call by in place of the call (#967): a call of the
-// unit's declaration of fmax, fmin or their _num kin of float or double that clang makes the builtin (the reader's mark,
-// BUSTER_CHECK_LIBRARY_CALL), as __builtin_X's; CBUILTIN_COUNT for any other call.
+// The elementwise builtin whose intrinsic clang -O0's code computes a call by in place of the call (#967,
+// check_program_call_extreme's library builtin, as __builtin_X's); CBUILTIN_COUNT for any other call.
 static CBuiltinId check_lower_call_extreme(const CheckProgram* program, uint32_t node)
 {
-    const uint32_t member = program->input->graph.members[node];
-    const uint32_t index = member & ~BUSTER_CHECK_LIBRARY_CALL;
-    const bool marked = (member & BUSTER_CHECK_LIBRARY_CALL) != 0 && index < BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS && program->input->graph.argument_counts[node] == 2;
-    return marked ? check_lower_library_extreme(cbuiltin_library_plain_folds[index].library) : CBUILTIN_COUNT;
+    return check_lower_library_extreme(check_program_call_extreme(program, node));
 }
 
 // A call, or the instructions of check_lower_call_extreme's intrinsic.

@@ -3179,7 +3179,11 @@ plain calls of the unit's declarations that clang makes the builtin (the
 reader's mark, `cbuiltin_library_plain_folds`' entries of no fold, which
 `check_lower_call` takes, a musttail return's too, as clang's code computes
 it inline and returns it; such a call references no function, so that a
-program links without libm as clang's does): `__builtin_elementwise_maxnum`'s
+program links without libm as clang's does; but a declaration with an asm
+label, which clang's code calls by its label, `check_program_call_extreme`;
+`-fno-builtin` and `-fno-builtin-NAME` keep the call, and
+`test-checker-driver`'s library runs check all three; a definition's
+`no_builtin` is #1958's): `__builtin_elementwise_maxnum`'s
 rows and its kin's
 (`check_vector_floating_scalar_row`), which glibc's functions would not match.
 clang's code of `llvm.maxnum` and `llvm.minnum` gives its first operand of two

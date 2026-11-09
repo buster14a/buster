@@ -2848,6 +2848,33 @@ static bool check_program_labeled(CheckProgram* program, uint32_t root, uint32_t
     return labeled;
 }
 
+// The library builtin a call computes inline as clang -O0's code does (#967), or CBUILTIN_LIBRARY_COUNT: a call of the
+// unit's declaration of fmax, fmin or their _num kin of float or double that clang makes the builtin (the reader's mark,
+// BUSTER_CHECK_LIBRARY_CALL), but of one with an asm label on a declaration, which clang's code calls by its label
+// (EmitBuiltinExpr's BuiltinIDIfNoAsmLabel is 0 for it). The label's search reads the callee's declarations, in a unit
+// with an asm keyword alone, for the few calls the reader marked.
+static CBuiltinLibraryId check_program_call_extreme(const CheckProgram* program, uint32_t node)
+{
+    const CheckInput* input = program->input;
+    const CheckGraph* graph = &input->graph;
+    const uint32_t member = graph->members[node];
+    const uint32_t index = member & ~BUSTER_CHECK_LIBRARY_CALL;
+    const bool marked = (member & BUSTER_CHECK_LIBRARY_CALL) != 0 && index < BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS && graph->argument_counts[node] == 2 &&
+                        cbuiltin_library_plain_folds[index].library != CBUILTIN_LIBRARY_COUNT;
+    const uint32_t callee = marked ? graph->operand0[node] : BUSTER_CHECK_NONE;
+    const uint32_t object = callee < graph->count ? check_stream_value(program->stream, callee).object : 0;
+    bool labelled = false;
+    for (uint32_t token = 0; marked && object != 0 && input->asm_capacity != 0 && !labelled && token < input->token_count; token += 1)
+    {
+        const CheckInputAttributes* attributes = input->objects[token] == object && input->declarations[token] == token ? check_input_attributes_at(input, token) : NULL;
+        for (uint32_t i = 0; attributes != NULL && i < attributes->count; i += 1)
+        {
+            labelled |= attributes->records[i].kind == CHECK_ATTRIBUTE_ASM_LABEL && !attributes->records[i].ignored;
+        }
+    }
+    return marked && !labelled ? cbuiltin_library_plain_folds[index].library : CBUILTIN_LIBRARY_COUNT;
+}
+
 static uint32_t check_program_references(CheckProgram* program, const CheckControl* controls, uint32_t count, uint32_t epoch,
                                          uint32_t* seen, uint32_t* nodes, uint32_t* stack, uint64_t* references, uint8_t* needed)
 {
@@ -2948,10 +2975,7 @@ static uint32_t check_program_references(CheckProgram* program, const CheckContr
                 }
                 // A plain fmax or its kin that the code computes inline (#967, check_lower_call_extreme) references no
                 // function, as clang's code doesn't.
-                const uint32_t member = graph->members[node];
-                const uint32_t index = member & ~BUSTER_CHECK_LIBRARY_CALL;
-                if ((member & BUSTER_CHECK_LIBRARY_CALL) != 0 && index < BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS &&
-                    cbuiltin_library_plain_folds[index].library != CBUILTIN_LIBRARY_COUNT && graph->argument_counts[node] == 2)
+                if (check_program_call_extreme(program, node) != CBUILTIN_LIBRARY_COUNT)
                 {
                     operands[0] = BUSTER_CHECK_NONE;
                 }
