@@ -11489,10 +11489,25 @@ static bool check_lower_segment_types(const TypeTable* types)
     return result;
 }
 
+// The type whose space an atomic builtin's object is in: its pointer argument's pointee (the first argument's own type,
+// before its conversion), which a generic builtin's object type (__atomic_test_and_set's, __atomic_clear's) doesn't
+// carry; 0 where the first argument isn't a pointer or an array.
+static TypeId check_lower_atomic_pointee(const CheckLowerWriter* writer, uint32_t node)
+{
+    const CheckProgram* program = writer->program;
+    const CheckGraph* graph = &program->input->graph;
+    const TypeTable* types = program->types;
+    const uint32_t first = graph->argument_offsets[node];
+    const TypeId pointer = graph->argument_counts[node] != 0 ? type_strip_aligned(types, check_stream_type(program->stream, graph->argument_nodes[first])) : 0;
+    const uint8_t kind = pointer != 0 ? type_kind(types, pointer) : BUSTER_TYPE_KIND_VOID;
+    return kind == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(kind) ? type_element(types, pointer) : 0;
+}
+
 // A node that loads from or stores to a segment's space (check_lower_segment), which the lowering refuses by name: an
 // lvalue read (not an address taken, `&` or a member's or a subscript's base), or an assignment's, a compound
 // assignment's or an increment's or decrement's operand; a vector's element, read or written, whose type has lost its
-// vector's space; and an atomic builtin's object, which its pointer argument reaches.
+// vector's space; and an atomic builtin's object, which its pointer argument reaches (its object type's space, or its
+// pointer's pointee's: check_lower_atomic_pointee).
 static bool check_lower_segment_access(const CheckLowerWriter* writer, uint32_t node, const CheckValue* value, bool address)
 {
     const CheckProgram* program = writer->program;
@@ -11506,7 +11521,8 @@ static bool check_lower_segment_access(const CheckLowerWriter* writer, uint32_t 
                                                           : BUSTER_CHECK_NONE;
     return (!address && value->category == CHECK_LVALUE && check_lower_segment(program->types, value->type)) ||
            ((store || element) && check_lower_segment(program->types, check_stream_type(stream, target))) ||
-           (atomic != BUSTER_CHECK_NONE && check_lower_segment(program->types, stream->atomics[atomic].object_type));
+           (atomic != BUSTER_CHECK_NONE && (check_lower_segment(program->types, stream->atomics[atomic].object_type) ||
+                                             check_lower_segment(program->types, check_lower_atomic_pointee(writer, node))));
 }
 
 // Always inlined into the copies of the tasks' loop (check_lower_drain_body), each with its constant `bit_ints`
