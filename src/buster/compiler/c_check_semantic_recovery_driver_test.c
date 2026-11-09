@@ -187,6 +187,26 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "int visible_plain;\n"
         "void declare_visible_plain(void) { extern int visible_plain; (void)visible_plain; }\n_Thread_local int visible_plain;\n"
         "int *use_block_tls(void) { return &block_tls; }\nint *use_block_plain(void) { return &block_plain; }\n",
+        // A TLS-only mismatch keeps the declaration in the chain (#1786): the next declaration is compared with it, its
+        // storage its own, and a type conflict notes it. Both directions, tentative and extern declarations.
+        "_Thread_local int kept_tls;\nint kept_tls;\nint kept_tls;\n"
+        "_Thread_local int kept_type;\nint kept_type;\nfloat kept_type;\n"
+        "int kept_plain;\n_Thread_local int kept_plain;\nfloat kept_plain;\n"
+        "extern _Thread_local int kept_extern;\nextern int kept_extern;\nextern float kept_extern;\n"
+        "extern int kept_back;\nextern _Thread_local int kept_back;\nextern _Thread_local int kept_back;\nextern int kept_back;\n"
+        "int use_kept(void) { return kept_tls + kept_type + kept_plain + kept_extern + kept_back; }\n",
+        // Its redefinition's error follows the TLS one, noted at the first definition; a later declaration of the chain
+        // sees the kept one, and a definition after it is the redefinition alone.
+        "_Thread_local int defined_tls = 1;\nint defined_tls = 2;\n"
+        "int defined_plain = 1;\n_Thread_local int defined_plain = 2;\n"
+        "_Thread_local int defined_later = 1;\nint defined_later;\nint defined_later;\nint defined_later = 3;\n"
+        "int defined_extern = 1;\nextern _Thread_local int defined_extern;\nextern _Thread_local int defined_extern;\n",
+        // Block externs: within one block, across blocks, and a file-scope declaration after another block's.
+        "void block_chain(void) { extern _Thread_local int chained; extern int chained; extern float chained; }\n"
+        "void block_first(void) { extern _Thread_local int across; }\n"
+        "void block_second(void) { extern int across; extern float across; }\n"
+        "void block_file(void) { extern _Thread_local int filed; }\nint filed;\nint filed;\nfloat filed;\n"
+        "int use_filed(void) { return filed; }\n",
         // Every declaration's failed initializer, not only the first's (#1447, phase 2): arrays, records and pointers, at
         // file and block scope, a static object's braced conversion, and an error of the walk's between them.
         "struct P { int x; int y; };\nint a[2] = 5;\nstruct P p = { .z = 1 };\nvoid f(void)\n{\n    int b[2] = 6;\n    struct P q = 3;\n"

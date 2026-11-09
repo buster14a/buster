@@ -3987,15 +3987,24 @@ declarations. Otherwise a storage mismatch says "thread-local declaration of
 'X' follows non-thread-local declaration", or its reverse. That diagnostic
 notes the visible prior declaration, with its declaration/definition note;
 object type conflicts still note the latest prior declaration of the entity,
-including one from another block. The checks that reject and recover the
-declaration are unchanged. The semantic-recovery fixtures cover both storage
-directions, extern and static combinations, and subsequent declarations and
-uses under the same Clang comparison matrix.
-The distinct recovery behavior of a TLS-only mismatch is tracked in
-[#1786](https://github.com/buster14a/buster/issues/1786): Clang keeps that
-declaration in its chain, while the reader currently drops it. This diagnostic
-fix does not claim parity for subsequent conflicts of that same entity or a
-second initializer diagnostic on an already-defined object.
+including one from another block. The semantic-recovery fixtures cover both
+storage directions, extern and static combinations, and subsequent
+declarations and uses under the same Clang comparison matrix.
+
+A mismatch of thread-local storage alone keeps its declaration, as clang's
+`MergeVarDecl` links it after the error (#1786): the error is recovered and the
+declaration is merged, bound and linked as a valid one, with its own storage.
+The next declaration is compared with it (`_Thread_local int x; int x; int x;`
+has one error, and a third `float x;` notes the second), and its linked
+declaration's check doesn't compare the storage again, so the error is given
+once. A definition after an earlier one gives the TLS error and then "redefinition
+of 'x'", noted at the first definition, at the same name. A block extern's
+mismatch with another block's declaration is checked against the linked one.
+
+Left as it is: a redefinition (`int x = 1; int x = 2;`) is still dropped.
+Clang keeps that invalid declaration in its chain too, so a later declaration
+is compared with it, without its type check: `float x;` after it is no error
+in clang, and a later TLS or linkage error notes it.
 
 `check_driver_rejected_warnings` follows clang's `ActOnPopScope`: a scope in
 which an error occurred gives no unused-variable warning, nested scopes'
