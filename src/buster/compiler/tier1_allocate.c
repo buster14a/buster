@@ -476,22 +476,23 @@ static inline __attribute__((always_inline)) bool tier1_allocate_scan_uses(const
             const uint32_t free = ~occupied & allowed[interval];
             const uint8_t follow = tier1_allocation_value_hint(&columns, last, interval);
             const bool recomputed = tier1_allocation_spill_kind(&columns, interval) == BUSTER_TIER1_ALLOCATE_REMATERIALIZE;
-            // A value with no use in its interval holds no register there where it would be recomputed, or where its
-            // value was in memory last: edges move it where a successor wants it in one.
+            // An unused recipe may keep an unclaimed free register, preserving a hoisted definition without taking
+            // a continuing value's register. It never evicts one; an unused value last in memory stays there.
             const bool idle = !use_event && !required && columns.use_offsets[interval] == columns.use_offsets[interval + 1] && (recomputed || follow == BUSTER_TIER1_ALLOCATE_MEMORY_HINT);
             const bool starting = !use_event && position == claims_at;
             const uint32_t mine = starting && follow < 32 && ((claimed >> follow) & 1) != 0 && claimers[follow] == interval ? 1u << follow : 0;
             const uint32_t open = free & ~(starting ? claimed & ~mine : 0);
             claimed &= ~mine;
             uint32_t chosen = UINT32_MAX;
-            if (idle)
+            if (idle && (!recomputed || open == 0))
             {
             }
             else if (open != 0 || (free != 0 && required))
             {
                 const uint32_t pool = open != 0 ? open : free;
+                const uint32_t hint_pool = idle ? pool : free;
                 chosen = (uint32_t)__builtin_ctz(pool);
-                if (columns.hints != 0 && columns.hints[interval] != UINT8_MAX && ((free >> columns.hints[interval]) & 1) != 0)
+                if (columns.hints != 0 && columns.hints[interval] != UINT8_MAX && ((hint_pool >> columns.hints[interval]) & 1) != 0)
                 {
                     chosen = columns.hints[interval];
                 }

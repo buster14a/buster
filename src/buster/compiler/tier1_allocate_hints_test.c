@@ -82,8 +82,122 @@ static bool tier1_allocation_test_hinted_levels(const Tier1AllocationInput* inpu
     return fits;
 }
 
+// An unused recipe can preserve a hoisted definition through quiet blocks, but cannot displace a loop value.
+// Literal traces cover spare registers, another start's claim despite a conflicting physical hint, no free register,
+// eviction by a later required value, and a stored value's unused continuation. Restricted masks force the scan on
+// both production paths, so the regular-class coloring path cannot hide a regression in the required-use policy.
+static void tier1_allocation_test_idle(Tier1AllocationTestTally* tally, Arena* arena)
+{
+    const uint32_t starts[][5] = {
+        { 0, 4, 8, 12 },
+        { 0, 1, 4, 4, 8 },
+        { 0, 4, 8 },
+        { 0, 4, 6, 12 },
+        { 0, 1, 4, 8 },
+    };
+    const uint32_t ends[][5] = {
+        { 4, 8, 12, 16 },
+        { 4, 4, 8, 8, 12 },
+        { 8, 8, 16 },
+        { 4, 12, 10, 16 },
+        { 4, 4, 8, 12 },
+    };
+    const uint32_t values[][5] = {
+        { 0, 0, 0, 0 },
+        { 0, 1, 1, 0, 1 },
+        { 0, 1, 1 },
+        { 0, 0, 1, 0 },
+        { 0, 1, 0, 0 },
+    };
+    const uint32_t allowed[][5] = {
+        { 1, 1, 1, 1 },
+        { 3, 3, 3, 3, 3 },
+        { 1, 1, 1 },
+        { 1, 1, 1, 1 },
+        { 1, 1, 1, 1 },
+    };
+    const uint8_t rematerializable[][5] = {
+        { 1, 1, 1, 1 },
+        { 0, 1, 1, 0, 1 },
+        { 1, 1, 1 },
+        { 1, 1, 0, 1 },
+        { 0, 0, 0, 0 },
+    };
+    const uint32_t use_offsets[][6] = {
+        { 0, 1, 1, 1, 2 },
+        { 0, 1, 2, 2, 3, 4 },
+        { 0, 1, 1, 3 },
+        { 0, 1, 1, 2, 3 },
+        { 0, 1, 2, 2, 3 },
+    };
+    const uint32_t use_positions[][4] = {
+        { 0, 14 },
+        { 0, 1, 6, 10 },
+        { 0, 8, 14 },
+        { 0, 6, 12 },
+        { 0, 1, 8 },
+    };
+    const uint8_t expected_kinds[][5] = {
+        { BUSTER_TIER1_ALLOCATE_REGISTER, BUSTER_TIER1_ALLOCATE_REGISTER, BUSTER_TIER1_ALLOCATE_REGISTER, BUSTER_TIER1_ALLOCATE_REGISTER },
+        { BUSTER_TIER1_ALLOCATE_REGISTER, BUSTER_TIER1_ALLOCATE_REGISTER, BUSTER_TIER1_ALLOCATE_REGISTER, BUSTER_TIER1_ALLOCATE_REGISTER, BUSTER_TIER1_ALLOCATE_REGISTER },
+        { BUSTER_TIER1_ALLOCATE_REGISTER, BUSTER_TIER1_ALLOCATE_REMATERIALIZE, BUSTER_TIER1_ALLOCATE_REGISTER },
+        { BUSTER_TIER1_ALLOCATE_REGISTER, BUSTER_TIER1_ALLOCATE_REGISTER, BUSTER_TIER1_ALLOCATE_REMATERIALIZE, BUSTER_TIER1_ALLOCATE_REGISTER, BUSTER_TIER1_ALLOCATE_REGISTER },
+        { BUSTER_TIER1_ALLOCATE_REGISTER, BUSTER_TIER1_ALLOCATE_SPILL, BUSTER_TIER1_ALLOCATE_REGISTER, BUSTER_TIER1_ALLOCATE_SPILL, BUSTER_TIER1_ALLOCATE_REGISTER },
+    };
+    const uint8_t expected_registers[][5] = {
+        { 0, 0, 0, 0 },
+        { 0, 1, 1, 0, 1 },
+        { 0, UINT8_MAX, 0 },
+        { 0, 0, UINT8_MAX, 0, 0 },
+        { 0, UINT8_MAX, 0, UINT8_MAX, 0 },
+    };
+    const uint32_t counts[] = { 4, 5, 3, 4, 4 };
+    const uint32_t fragments[] = { 4, 5, 3, 5, 5 };
+    const uint8_t classes[5] = { 0 };
+    const uint8_t required[4] = { 1, 1, 1, 1 };
+    const uint8_t hints[5] = { UINT8_MAX, UINT8_MAX, 0, UINT8_MAX, UINT8_MAX };
+    const char* names[] = {
+        "an unused recipe preserves its required definition through two quiet ranges",
+        "an unused recipe's physical hint cannot take another start's claimed register",
+        "an unused recipe with no free register never evicts an active value",
+        "a recipe kept through a quiet range remains evictable at a required use",
+        "an unused stored value stays in its slot despite a free register",
+    };
+    for (uint32_t fixture = 0; fixture < BUSTER_ARRAY_LENGTH(counts); fixture += 1)
+    {
+        const Tier1AllocationInput input = {
+            .starts = starts[fixture],
+            .ends = ends[fixture],
+            .values = values[fixture],
+            .allowed_registers = allowed[fixture],
+            .classes = classes,
+            .hints = fixture == 1 ? hints : 0,
+            .hint_values = values[fixture],
+            .rematerializable = rematerializable[fixture],
+            .use_offsets = use_offsets[fixture],
+            .use_positions = use_positions[fixture],
+            .use_required = required,
+            .use_count = use_offsets[fixture][counts[fixture]],
+            .count = counts[fixture],
+            .value_count = fixture == 0 ? 1 : 2,
+            .position_count = 16,
+            .registers = { 7 },
+        };
+        for (uint32_t path = 0; path < 3; path += 1)
+        {
+            const uint64_t saved = arena->length;
+            Tier1Allocation output = { 0 };
+            const Tier1AllocationError error = path == 0 ? tier1_allocate(&input, arena, &output) : path == 1 ? tier1_allocate_scalar(&input, arena, &output) : tier1_allocate_scan_reference(&input, arena, &output);
+            const bool valid = error == TIER1_ALLOCATION_OK && output.scalar_intervals == input.count && output.fragment_count == fragments[fixture] && output.splits == fragments[fixture] - input.count && output.spill_count == (fixture == 4 ? 1u : 0u) && tier1_allocation_verify(&input, &output) && tier1_allocation_test_occupancy(&input, &output) && memcmp(output.kinds, expected_kinds[fixture], fragments[fixture]) == 0 && memcmp(output.registers, expected_registers[fixture], fragments[fixture]) == 0;
+            tier1_allocation_test_expect(tally, valid, names[fixture]);
+            arena_pop_to(arena, saved);
+        }
+    }
+}
+
 static void tier1_allocation_test_hints(Tier1AllocationTestTally* tally, Arena* arena, uint64_t seed)
 {
+    tier1_allocation_test_idle(tally, arena);
     // Two values, each with two adjacent ranges: a [0, 10) [10, 20), b [2, 10) [10, 20). Ends come first in input
     // order, a's then b's, so the level rule gives a's second range b's register and b's a's.
     {

@@ -236,10 +236,14 @@ unpinned active interval whose next use is farther away. Without use columns,
 the end position is the conservative next-use estimate. With `use_required`
 (#1216), the victim is a rematerializable interval first, then the farthest
 next use, then, at equal distance, the value with fewer uses over all its
-intervals; and an interval with no use of its own, starting where it is not
-required, takes no register where it would be rematerialized or where its value
-was last in its slot. A CFG's edges move it where a successor wants it in a
-register, instead of the range holding one through a loop's other paths. The
+intervals. An interval with no use of its own, starting where it is not
+required, keeps an unclaimed free register if it can be rematerialized, but
+never evicts another value or takes a continuing value's claimed register,
+even through a physical-register hint. This preserves hoisted definitions
+through low-pressure blocks, including a jump table's once-per-entry base
+(#1217), while leaving them cheap eviction victims under pressure. If its
+value was last in its slot and has no recipe, it stays there. A CFG's edges
+move a value without a register where a successor wants it in one. The
 intervals starting at one position claim the registers they are hinted to,
 first come in input order, before any takes one; an interval whose hint is
 another's claim, or that has none, takes a free register no other claims there,
