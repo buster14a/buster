@@ -3811,8 +3811,9 @@ runtime (non-constant) shift warning, where clang, which then skips their
 reachability analysis, publishes them all (`x << 40`); a missing name that
 the declaration walk reports in an array's bound, a `typeof` operand, a
 `_BitInt` width or a file-scope designator is a declarator failure, which
-keeps the whole unit's conservative prefix (an enumerator's value's and a
-bit-field width's are recovered: below); and a
+keeps the whole unit's conservative prefix (an enumerator's value's, a
+bit-field width's, and a declaration's last declarator's bound's or
+`typeof`'s are recovered: below); and a
 unit with any report other than a missing name (a control-flow error such as
 a `break` outside a loop, a declaration conflict) keeps the previous
 whole-unit prefix, which starts at the unit's first report of any kind, even
@@ -4423,9 +4424,14 @@ Left as they were:
   or width does. In a `typeof` operand, an array's bound, a `_BitInt` width
   or a designator's index, a correction is taken too (`typeof(countr)` has
   counter's type, `int v[countr]` is a VLA), and each name with none is
-  clang's error at it, in the expression's order, and stops the reader
-  there: clang keeps such a declaration invalid with quiet uses, which waits
-  for the reader's invalid binding. A `_BitInt` whose width had one is no
+  clang's error at it, in the expression's order. A declaration's last
+  declarator whose bound or `typeof` holds such names, uninitialized and not
+  a typedef, is an invalid declaration (below), as clang's, and the reader
+  goes on (`check_input_declarator_recover_names`, and the specifiers'
+  `typeof` with a stand-in `int`). Another still stops the reader there: a
+  typedef's, a type name's, a designator's, an initialized one's, and a
+  declarator before another, whose rest clang's parser skips (`int a[zzz],
+  b;` declares no `b`, whose uses are then clang's undeclared errors). A `_BitInt` whose width had one is no
   type specifier, as clang drops it, and its parser's error follows: a
   declaration's "type specifier missing" (C23's "a type specifier is
   required") at its first declarator's name, a C23 parameter's "unknown type

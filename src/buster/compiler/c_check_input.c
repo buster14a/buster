@@ -1840,6 +1840,13 @@ struct CheckInputReader
     // Whether the next declarator run may recover its type's errors (#1447: a declaration's own declarator,
     // check_input_declaration), and whether the last complete one did, its declaration invalid (check_input_invalid_declare).
     bool declarator_recover;
+    // Whether the last declarator's bound recovered undeclared names that no correction took (#1447,
+    // check_input_declarator_recover_names); and whether the specifiers' typeof did, with the recovered reports' count
+    // before it: either declaration is invalid only as its declaration's last declarator, uninitialized and no typedef,
+    // as clang's parser skips to the next `;` past such a declarator.
+    bool declarator_names;
+    bool specifier_names;
+    uint32_t specifier_names_mark;
     bool declarator_invalid;
     // The last complete declarator's lifetimebound attribute on a parameter of its own function declarator, where that
     // function returns void (#147), or BUSTER_CHECK_NONE.
@@ -4531,6 +4538,22 @@ static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor,
                 selected = close > i + 1 && close < end ? check_input_constant_type(reader, i, close + 1) : 0;
                 reader->constant_names = CHECK_CONSTANT_NAMES_NONE;
                 reader->constant_failure = NULL;
+                // A declaration's typeof whose errors are all undeclared names (#1447): recovered with a stand-in int, its
+                // declaration then invalid (check_input_declaration), as clang's; not on a lane, whose unit goes to source
+                // order.
+                bool names = selected == 0 && reader->output->report_count > typed_reports && reader->specifier_owner == first && !reader->output->resource;
+                for (uint32_t r = typed_reports; names && r < reader->output->report_count; r += 1)
+                {
+                    names = reader->output->reports[r].message == CHECK_INPUT_UNDECLARED;
+                }
+                check_input_lane_refuse(reader, names && reader->lane, "an invalid declaration's uses are quiet in source order");
+                const uint32_t names_mark = reader->output->recovered_count;
+                if (names && !reader->lane && check_input_recover_reports(reader, typed_reports))
+                {
+                    selected = BUSTER_TYPE_INT;
+                    reader->specifier_names = true;
+                    reader->specifier_names_mark = names_mark;
+                }
             }
             abi_origin = job != 0 && job->ready && job->keyword == i ? job->result_abi_origin : reader->constant_abi_origin;
             noderef = job != NULL && job->ready && job->keyword == i ? job->noderef_result : reader->constant_noderef;
@@ -4549,7 +4572,7 @@ static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor,
             {
                 reader->ignored[token] |= job == 0 || job->keyword != i || token <= i + 1 || token == close;
             }
-            if (selected != 0 && (kind == PARSE_KIND_TYPEOF || kind == PARSE_KIND_ATOMIC))
+            if (selected != 0 && (kind == PARSE_KIND_TYPEOF || kind == PARSE_KIND_ATOMIC) && !reader->specifier_names)
             {
                 valid &= check_input_vla_query(reader, i + 2, close, selected);
             }
@@ -6166,6 +6189,24 @@ static bool check_input_declarator_recover(CheckInputReader* reader, CheckDeclar
     return recovered;
 }
 
+// A bound's undeclared names that no correction took (#1447, check_constant_name), its reports from `before`, all of them
+// the names': as check_input_declarator_recover, for each. Whether it did.
+static bool check_input_declarator_recover_names(CheckInputReader* reader, CheckDeclaratorRun* run, const CheckDeclaratorFrame* frame, uint32_t before)
+{
+    const CheckInput* output = reader->output;
+    bool names = output->report_count > before && !output->resource;
+    for (uint32_t r = before; names && r < output->report_count; r += 1)
+    {
+        names = output->reports[r].message == CHECK_INPUT_UNDECLARED;
+    }
+    const bool eligible = names && run->recover && !frame->parameter_context;
+    check_input_lane_refuse(reader, eligible && reader->lane, "an invalid declaration's uses are quiet in source order");
+    const bool recovered = eligible && !reader->lane && check_input_recover_reports(reader, before);
+    run->invalid |= recovered;
+    reader->declarator_names |= recovered;
+    return recovered;
+}
+
 // Declarator operators are collected outwards from the identifier, then applied in reverse to the base type.
 // Group and prototype-parameter frames share one explicit stack, so neither parentheses nor nested callbacks use
 // the C call stack. A prototype's bindings are restored at its closing parenthesis; its own names, and the tags and
@@ -6915,6 +6956,15 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                 // A negative constant bound (#1447): an invalid declaration, its array a stand-in of no element.
                 if (__builtin_expect(!valid, 0) && reader->output->report_count == before + 1 && reader->output->reports[before].message == CHECK_INPUT_ARRAY_NEGATIVE &&
                     check_input_declarator_recover(reader, run, frame, before))
+                {
+                    valid = true;
+                    part.kind = BUSTER_TYPE_KIND_ARRAY;
+                    part.extent = 0;
+                    part.invalid = true;
+                    memset(reader->ignored + i, 1, close - i + 1);
+                }
+                // Undeclared names that no correction took (#1447): an invalid declaration too, as clang's.
+                else if (__builtin_expect(!valid, 0) && run->definition == BUSTER_CHECK_NONE && check_input_declarator_recover_names(reader, run, frame, before))
                 {
                     valid = true;
                     part.kind = BUSTER_TYPE_KIND_ARRAY;
@@ -9091,9 +9141,14 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
     reader->specifier_pending = false;
     const bool free_standing = !continuation && check_input_free_standing(parser, first, count);
     reader->specifier_free_standing = free_standing;
+    reader->specifier_names = false;
     const TypeId base = !prepared ? 0 : continuation ? BUSTER_CHECK_RARE(reader, declaration_bases, first) : check_input_specifiers(reader, &i, count, &is_typedef, &storage, &is_inline, false);
     reader->specifier_free_standing = false;
     reader->specifier_owner = BUSTER_CHECK_NONE;
+    // A typeof whose undeclared names were recovered (#1447): its declarator decides (below).
+    bool specifier_names = reader->specifier_names;
+    const uint32_t specifier_names_mark = reader->specifier_names_mark;
+    reader->specifier_names = false;
     if (reader->specifier_pending)
     {
         reader->specifier_jobs[first]->vla_begin = vla_begin;
@@ -9214,8 +9269,29 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
         // deduced declaration's, nor in a lane.
         const uint32_t recovered_mark = reader->output->recovered_count;
         reader->declarator_recover = !is_typedef && !c23_auto && !check_input_auto_type(base);
+        reader->declarator_names = false;
         TypeId type = check_input_declarator(reader, base, &i, count, &name, &parameters);
         bool invalid = reader->declarator_invalid;
+        // A bound's or the specifiers' undeclared names make the declaration invalid as its last declarator alone, and
+        // not a typedef's (#1447): another stops as before.
+        const bool named = reader->declarator_names || specifier_names;
+        const bool last = i < count && parser->tokens.kinds[i] == PARSE_KIND_SEMI;
+        if (__builtin_expect(specifier_names, 0) && !is_typedef && last && type != 0)
+        {
+            invalid = true;
+        }
+        else if (__builtin_expect(specifier_names, 0))
+        {
+            check_input_recover_undo(reader, specifier_names_mark);
+            valid = false;
+        }
+        specifier_names = false;
+        if (__builtin_expect(named && invalid, 0) && !last)
+        {
+            check_input_recover_undo(reader, recovered_mark);
+            valid = false;
+            invalid = false;
+        }
         reader->declarator_overloadable = false;
         const uint32_t parameter_declarations = reader->declarator_declarations;
         // The declared function's own list, where its interrupt attribute's errors are (#147), before a K&R definition's

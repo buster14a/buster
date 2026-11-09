@@ -584,8 +584,8 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "int counter;\nenum { WIDTH = 8 };\ntypeof(countr) y;\nint *py = &y;\n_BitInt(WIDTHX) w;\nint f(int n)\n{\n"
         "    int unused;\n    int v[countr + n];\n    if (n = 2) return sizeof(typeof(countr)) + sizeof v;\n    return (int)w;\n"
         "}\n",
-        // One that no correction takes still ends the unit's checking, after each name of its expression, as clang reports
-        // them: a bound's, a typedef's, a type name's typeof's, and a designator's (whose list clang drops there). A
+        // One that no correction takes is clang's error at each name of its expression, in its order: a bound's, a
+        // typedef's, a type name's typeof's, and a designator's (whose list clang drops there). A
         // _BitInt's is no type specifier, as clang drops it: its parser's error follows, a declaration's at its first
         // declarator's name (C23's own words, and a C23 parameter's name a type's), a member's or a type name's at the end
         // of the list.
@@ -598,6 +598,19 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "int s = sizeof(_BitInt(zzz));\n",
         "int a[3] = { [zzz] = 1, [yyy] = 2 };\n",
         "enum { W = 1 };\nint a[3] = { [W ... zzz + yyy] = 1 };\n",
+        // A declaration's last declarator whose bound or typeof has undeclared names that no correction takes is invalid,
+        // as clang's, and stays bound, its uses quiet (#1447, check_input_declarator_recover_names, the specifiers'
+        // typeof): the unit goes on with its later errors and warnings, at file scope and in a body. A typedef's, a type
+        // name's or a designator's still ends the walk, and so does a declarator before another, whose rest clang's parser
+        // skips (`int a[zzz], b;` declares no b).
+        "typeof(zzz) x; int *p = &x; int y(void) { return x.foo + sizeof x; }\n",
+        "int a[zzz]; int *p = a; int f(void) { int u; return sizeof a + a[1]; }\n",
+        "int f(void) { int v[zzz]; return v[0] + nope; }\n",
+        "int f(void) { typeof(zzz) v; int u; return v + nope; }\n",
+        "int a[zzz]; int b[yyy]; int g(int n) { if (n = 2) return 1; return 0; }\n",
+        "typeof(zzz) x; typeof(yyy) w; int f(void) { int unused; return 0; }\n",
+        "int a[zzz]; int a[3];\n",
+        "static int a[zzz]; int f(void) { return a[0]; }\n",
         // A declarator's constant that fails ends the walk with clang's error in its words (#1447,
         // check_input_constant_failure_report), as an attribute argument's: a missing member, `->` of no pointer and a
         // member access's base, pointer arithmetic on an incomplete pointee, `sizeof` of an incomplete type, a call's
