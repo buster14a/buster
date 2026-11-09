@@ -118,9 +118,17 @@ enum
     // statement increment or decrement (#1447, clang's CheckForLoopConditionalStatement and CheckForRedundantIteration):
     // -Wfor-loop-analysis, off by default, under -Wloop-analysis and -Wmost and so -Wall.
     CHECK_WARNING_ID_FOR_LOOP_ANALYSIS = 110,
+    // An implicit conversion from one named enumeration to another (#1447, the end of clang's CheckImplicitConversion), an
+    // enumerator taken as its enumeration: -Wimplicit-enum-enum-cast, on by default, under -Wenum-conversion.
+    CHECK_WARNING_ID_IMPLICIT_ENUM_ENUM_CAST = 111,
+    // A tag a prototype's parameter list declares first (#1447, clang's ActOnTag): -Wvisibility, on by default.
+    CHECK_WARNING_ID_VISIBILITY = 112,
+    // A C23 record's redefinition whose attributes differ (#1447, c_check_tag_compatible.c): clang's -Wodr, an error by
+    // default (check_input_odr_severity).
+    CHECK_WARNING_ID_ODR = 113,
     // An unevaluated operand with a side effect (#1447, clang's CheckUnaryExprOrTypeTraitOperand and
     // CreateGenericSelectionExpr): -Wunevaluated-expression, on by default, under -Wunused-value and so -Wunused and -Wall.
-    CHECK_WARNING_ID_UNEVALUATED_EXPRESSION = 111,
+    CHECK_WARNING_ID_UNEVALUATED_EXPRESSION = 114,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -365,6 +373,16 @@ typedef enum CheckWarningEventKind
     // payload.first_type and second_type its operands' types as clang's getEnumCoercedType gives them, payload.name and
     // data their typedef spellings (0 for none). check_common_enum_arithmetic reports it as the graph's operators.
     CHECK_WARNING_EVENT_ENUM_MIX,
+    // A tag a prototype's parameter list (or an old-style definition's declarations) declares first, which no declaration
+    // outside it names (#1447, -Wvisibility): at its name, an unnamed enum's keyword; payload.first_type the tag's type.
+    CHECK_WARNING_EVENT_PROTOTYPE_TAG,
+    // A tag a prototype's list defines again (#1447, -Wvisibility): at its name, payload.name the name, with a
+    // CHECK_WARNING_NOTE_PREVIOUS_DEFINITION at the earlier definition.
+    CHECK_WARNING_EVENT_PROTOTYPE_REDEFINITION,
+    // A C23 record's redefinition whose attributes (payload.data 0) or a member's (1) differ from the earlier's, as a
+    // warning (#1447, -Wno-error=odr or a pragma's): at its name, with a CHECK_WARNING_NOTE_ATTRIBUTE_HERE at each list's
+    // differing attribute, the earlier's first.
+    CHECK_WARNING_EVENT_ODR_ATTRIBUTE,
     // A sizeof's, an alignof's or a _Generic's unevaluated operand with a side effect (#1447,
     // check_warning_graph_unevaluated), at its expression's location: the description's message.
     CHECK_WARNING_EVENT_UNEVALUATED_EXPRESSION,
@@ -401,6 +419,8 @@ typedef enum CheckWarningNoteKind
     CHECK_WARNING_NOTE_DECLARED_HERE,
     // "from 'diagnose_if' attribute on 'f':" (#1447), payload.name the function's name.
     CHECK_WARNING_NOTE_DIAGNOSE_IF,
+    // "attribute 'packed' here" (#1447, CHECK_WARNING_EVENT_ODR_ATTRIBUTE's), payload.name the attribute's name.
+    CHECK_WARNING_NOTE_ATTRIBUTE_HERE,
     CHECK_WARNING_NOTE_KIND_COUNT,
 } CheckWarningNoteKind;
 

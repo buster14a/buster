@@ -2,8 +2,8 @@
 
 Every merge and direct push to `main` triggers the full hosted correctness
 suite against that push's exact `github.sha`, including documentation-only
-changes (#1271). It runs both host architectures, every sanitizer configuration
-and shard, the O1 address-sanitizer rows, and all three fuzz campaigns.
+changes (#1271). It runs both host architectures, all five O3 build modes
+(plain and four sanitizers) across four shards, and all three fuzz campaigns.
 The pre-merge PR matrix, Measurement storage, a no-code exemption and a later
 nightly run do not replace that post-merge coverage.
 
@@ -578,12 +578,11 @@ existing fixed-address link. `build.sh print-compile-flags` and
 `print-sanitizer-flags` expose the actual arguments as NUL-delimited arrays.
 Instrumentation is applied to every build unit and the final link; it cannot
 be combined with the private baseline runtime used for QEMU smoke tests.
-`BUSTER_SANITIZER_OPTIMIZATION=1|2|3` selects an explicit optimization level.
-The full hosted sanitizer matrix runs at `-O3`; additional combined ASan/UBSan
-rows run the entire suite at `-O1` on both host architectures. These rows and the
-fuzz campaigns run on pushes to main and on the daily and dispatched runs, not on
-pull requests, whose hosted jobs are the plain builds of both architectures. This retains
-diagnostic-friendly coverage without substituting it for production optimization.
+`BUSTER_SANITIZER_OPTIMIZATION=1|2|3` remains available for explicitly selected
+diagnostic builds. The hosted matrix runs at `-O3` throughout, without separate
+`-O1` sanitizer rows. Its sanitizer rows and the fuzz campaigns run on pushes
+to main and on the daily and dispatched runs, not on pull requests, whose
+hosted jobs are the plain builds of both architectures.
 The sanitizer rows' job limit is 360 minutes and each command's is 7200 seconds:
 the driver's in-process checks run the whole compiler per fixture and take tens
 of minutes each with a detector, while the plain rows have a 120-minute job
