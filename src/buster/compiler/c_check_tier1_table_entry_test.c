@@ -148,13 +148,13 @@ static void check_test_tier1_table_entry_controls(CheckTest* test, const char* o
 {
     X86Decoded* probe = malloc((uint64_t)count * sizeof(X86Decoded));
     uint32_t branch = count;
-    for (uint32_t i = 0; i < count && branch == count; i += 1)
+    for (uint32_t i = address + 1; i < count && branch == count; i += 1)
     {
         const uint32_t form = records[i].instruction.form & BUSTER_X86_FORM_NUMBER;
         const uint32_t control = (uint32_t)x86_effects(form)->kinds >> 4;
         branch = x86_form_descriptions[form].relative_bytes != 0 && (control == BUSTER_X86_CONTROL_JUMP || control == BUSTER_X86_CONTROL_BRANCH) ? i : branch;
     }
-    const bool ready = probe != NULL && address + 1 < count && branch < count && records[address].length >= 4;
+    const bool ready = probe != NULL && address + 1 < count && branch < count && dispatch < count && records[address].length >= 4;
     check_test_expect(test, ready, "the table entry proof's decoded controls have room and a direct branch");
     if (ready)
     {
@@ -166,7 +166,9 @@ static void check_test_tier1_table_entry_controls(CheckTest* test, const char* o
         memcpy(probe, records, (uint64_t)count * sizeof(X86Decoded));
         probe[address + 1].instruction = records[address].instruction;
         probe[address].instruction = records[branch].instruction;
-        check_test_expect(test, !check_test_tier1_table_entry(probe, count, address + 1, dispatch, targets), "the table entry proof rejects a LEA after an initial branch");
+        probe[address].instruction.displacement = (int64_t)records[dispatch].offset - records[address].offset - records[address].length;
+        check_test_expect(test, !check_test_tier1_table_entry(probe, count, address + 1, dispatch, targets),
+                          "the table entry proof rejects a direct branch that can bypass its LEA into dispatch");
         memcpy(probe, records, (uint64_t)count * sizeof(X86Decoded));
         probe[branch].instruction.displacement = (int64_t)records[address].offset - records[branch].offset - records[branch].length;
         check_test_expect(test, !check_test_tier1_table_entry(probe, count, address, dispatch, targets), "the table entry proof rejects direct reentry into its LEA");
