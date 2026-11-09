@@ -124,7 +124,9 @@ int run_c_lexer_benchmark(int argc, char** argv);
 
 // The x86-64 encoder and its tests, for the test-x86-encoder command. Its benchmark is another translation unit.
 #include "buster/compiler/x86_64_encoder.c"
+#if BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) || BUSTER_IN_UNIT(BUSTER_UNIT_X86) || BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND) || BUSTER_IN_UNIT(BUSTER_UNIT_ASSEMBLER) || BUSTER_IN_UNIT(BUSTER_UNIT_LINK) || BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/x86_64_encoder_test.c"
+#endif
 #include "buster/compiler/x86_zen5.c"
 #include "buster/compiler/x86_64_disassembler.c"
 #if BUSTER_IN_UNIT(BUSTER_UNIT_X86)
@@ -283,15 +285,21 @@ int run_parser_benchmark(int argc, char** argv);
 // programs generated in it, and their tests, for the test-link command.
 #include "buster/compiler/link.c"
 #include "buster/compiler/link_program.c"
+#if BUSTER_IN_UNIT(BUSTER_UNIT_LINK) || BUSTER_IN_UNIT(BUSTER_UNIT_DYNAMIC) || BUSTER_IN_UNIT(BUSTER_UNIT_EXECUTABLE)
 #include "buster/compiler/link_test.c"
+#endif
+#if BUSTER_IN_UNIT(BUSTER_UNIT_LINK) || BUSTER_IN_UNIT(BUSTER_UNIT_DYNAMIC) || BUSTER_IN_UNIT(BUSTER_UNIT_EXECUTABLE)
 #include "buster/compiler/link_order_test.c"
+#endif
 
 // The object writer (ET_REL objects from the link representation, for -c) and its tests, for the test-object-writer
 // command. Its benchmark is another translation unit.
 #include "buster/compiler/object_writer.c"
 #include "buster/compiler/object_writer_test.c"
 #include "buster/compiler/debug.c"
+#if BUSTER_IN_UNIT(BUSTER_UNIT_LINK) || BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) || BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
 #include "buster/compiler/debug_test.c"
+#endif
 #if BUSTER_IN_UNIT(BUSTER_UNIT_LINK) || BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/debug_benchmark.c"
 #endif
@@ -301,36 +309,52 @@ int run_object_writer_benchmark(int argc, char** argv);
 // the C runtime's files, found and imported with them, and their tests, for the test-import command.
 #include "buster/compiler/import.c"
 #include "buster/compiler/runtime.c"
+#if BUSTER_IN_UNIT(BUSTER_UNIT_LINK) || BUSTER_IN_UNIT(BUSTER_UNIT_DYNAMIC) || BUSTER_IN_UNIT(BUSTER_UNIT_EXECUTABLE)
 #include "buster/compiler/import_test.c"
+#endif
 int run_import_benchmark(int argc, char** argv);
 
 // Binding: the C runtime joined to a program's link and each name bound, and its tests, for the test-bind command. Its
 // benchmark is another translation unit.
 #include "buster/compiler/bind.c"
+#if BUSTER_IN_UNIT(BUSTER_UNIT_LINK) || BUSTER_IN_UNIT(BUSTER_UNIT_DYNAMIC) || BUSTER_IN_UNIT(BUSTER_UNIT_EXECUTABLE)
 #include "buster/compiler/bind_test.c"
+#endif
 int run_bind_benchmark(int argc, char** argv);
 
 // The direct path's executables (layout, patching, the build ID and the output file) and their tests, for the
 // test-executable command. Its benchmark is another translation unit.
 #include "buster/compiler/executable.c"
+#if BUSTER_IN_UNIT(BUSTER_UNIT_LINK) || BUSTER_IN_UNIT(BUSTER_UNIT_EXECUTABLE) || BUSTER_IN_UNIT(BUSTER_UNIT_DYNAMIC) || BUSTER_IN_UNIT(BUSTER_UNIT_ASSEMBLER) || BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) || BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
 #include "buster/compiler/executable_test.c"
+#endif
+#if BUSTER_IN_UNIT(BUSTER_UNIT_LINK) || BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/debug_executable_test.c"
+#endif
 // The object writer's DWARF checks (ObjectOptions.debug), which test-object-writer runs: they need debug.c's units and
 // the executable tests' ELF reading.
+#if BUSTER_IN_UNIT(BUSTER_UNIT_LINK)
 #include "buster/compiler/object_debug_test.c"
+#endif
 int run_executable_benchmark(int argc, char** argv);
 
 // A dynamic PIE's inputs from the runtime and binding, and the dynamic PIE's tests, for the test-dynamic command.
 #include "buster/compiler/dynamic.c"
+#if BUSTER_IN_UNIT(BUSTER_UNIT_DYNAMIC) || BUSTER_IN_UNIT(BUSTER_UNIT_EXECUTABLE) || BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
 #include "buster/compiler/dynamic_test.c"
+#endif
 
 // The static executables' tests with the C runtime, for the test-static command.
+#if BUSTER_IN_UNIT(BUSTER_UNIT_DYNAMIC) || BUSTER_IN_UNIT(BUSTER_UNIT_EXECUTABLE)
 #include "buster/compiler/static_test.c"
+#endif
 
 // The runtime snapshot (the imported runtime kept in the cache directory) and its tests, for the test-snapshot command.
 // Its benchmark is another translation unit.
 #include "buster/compiler/snapshot.c"
+#if BUSTER_IN_UNIT(BUSTER_UNIT_EXECUTABLE) || BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
 #include "buster/compiler/snapshot_test.c"
+#endif
 int run_snapshot_benchmark(int argc, char** argv);
 
 // Foreign inputs (other compilers' objects, archives, shared libraries and scripts: opened, parsed and resolved, with
@@ -1091,11 +1115,6 @@ static __attribute__((unused)) void main_x86_test_interfaces(void)
     (void)&branch_sizing_chain;
     (void)&x86_zen5_case_find;
     (void)&x86_zen5_missing;
-    (void)&x86_print_instruction;
-    (void)&x86_read_file;
-    (void)&x86_elf_section;
-    (void)&x86_random_instruction;
-    (void)&x86_random_form;
 }
 
 #if !BUSTER_IN_UNIT(BUSTER_UNIT_TYPES)
@@ -1103,6 +1122,13 @@ static __attribute__((unused)) void main_type_test_interfaces(void)
 {
     (void)&cbuiltin_lookup_scalar;
     (void)&cbuiltin_lookup;
+}
+#endif
+
+#if !BUSTER_IN_UNIT(BUSTER_UNIT_LINK)
+static __attribute__((unused)) void main_link_test_interfaces(void)
+{
+    (void)&debug_write;
 }
 #endif
 
@@ -1403,18 +1429,24 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     {
         result = run_refinement_benchmark(argc - 1, argv + 1);
     }
+#if BUSTER_IN_UNIT(BUSTER_UNIT_LINK)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_LINK) && argc >= 2 && strcmp(argv[1], "test-link") == 0)
     {
         result = run_link_tests(argc - 2, argv + 2);
     }
+#endif
+#if BUSTER_IN_UNIT(BUSTER_UNIT_LINK)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_LINK) && argc >= 2 && strcmp(argv[1], "test-object-writer") == 0)
     {
         result = run_object_writer_tests(argc - 2, argv + 2);
     }
+#endif
+#if BUSTER_IN_UNIT(BUSTER_UNIT_LINK)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_LINK) && argc >= 2 && strcmp(argv[1], "test-debug") == 0)
     {
         result = run_debug_tests(argc - 2, argv + 2);
     }
+#endif
 #if BUSTER_IN_UNIT(BUSTER_UNIT_LINK)
     else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_LINK) && argc >= 2 && strcmp(argv[1], "benchmark-debug") == 0)
     {
@@ -1425,42 +1457,54 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     {
         result = run_object_writer_benchmark(argc - 1, argv + 1);
     }
+#if BUSTER_IN_UNIT(BUSTER_UNIT_LINK)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_LINK) && argc >= 2 && strcmp(argv[1], "test-import") == 0)
     {
         result = run_import_tests(argc - 2, argv + 2);
     }
+#endif
     else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-import") == 0)
     {
         result = run_import_benchmark(argc - 1, argv + 1);
     }
+#if BUSTER_IN_UNIT(BUSTER_UNIT_LINK)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_LINK) && argc >= 2 && strcmp(argv[1], "test-bind") == 0)
     {
         result = run_bind_tests(argc - 2, argv + 2);
     }
+#endif
     else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-bind") == 0)
     {
         result = run_bind_benchmark(argc - 1, argv + 1);
     }
+#if BUSTER_IN_UNIT(BUSTER_UNIT_EXECUTABLE)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_EXECUTABLE) && argc >= 2 && strcmp(argv[1], "test-executable") == 0)
     {
         result = run_executable_tests(argc - 2, argv + 2);
     }
+#endif
     else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-executable") == 0)
     {
         result = run_executable_benchmark(argc - 1, argv + 1);
     }
+#if BUSTER_IN_UNIT(BUSTER_UNIT_DYNAMIC)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DYNAMIC) && argc >= 2 && strcmp(argv[1], "test-dynamic") == 0)
     {
         result = run_dynamic_tests(argc - 2, argv + 2);
     }
+#endif
+#if BUSTER_IN_UNIT(BUSTER_UNIT_DYNAMIC)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DYNAMIC) && argc >= 2 && strcmp(argv[1], "test-static") == 0)
     {
         result = run_static_tests(argc - 2, argv + 2);
     }
+#endif
+#if BUSTER_IN_UNIT(BUSTER_UNIT_EXECUTABLE)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_EXECUTABLE) && argc >= 2 && strcmp(argv[1], "test-snapshot") == 0)
     {
         result = run_snapshot_tests(argc - 2, argv + 2);
     }
+#endif
     else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-snapshot") == 0)
     {
         result = run_snapshot_benchmark(argc - 1, argv + 1);

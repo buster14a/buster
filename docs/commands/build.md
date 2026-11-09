@@ -370,6 +370,18 @@ The BURS and source-corpus helper roots have exactly BACKEND and CHECKER as
 consumers. The c-testsuite command's fixtures belong to DRIVER; BACKEND shares
 only its process/file helpers for the SSA source tests.
 
+ELF fixtures use the same boundaries. LINK owns private object/DWARF/import
+and binding checks; EXECUTABLE owns executable, symbol and snapshot checks;
+DYNAMIC owns its PIE, library, bounds and static-link suites. Their small
+constructors, readers, runners and shared inputs remain at their original
+positions, with individual helper guards matching their actual consumers.
+The linker, import and binding roots have LINK, DYNAMIC and EXECUTABLE as
+consumers; the debug native helpers have LINK and BACKEND; snapshot's patching
+helpers also serve CHECKER. The shared object-view declarations and helpers in
+`object_writer_test.c` remain available to the production symbol reader.
+All owning commands and their emitted code stay in the same units, and the
+importer's five assertion coordinates are preserved.
+
 The test commands, their owning units and compiler optimization flags stay the
 same. Shared fixtures, including the checker's common helpers and
 `oracle_cache_test.c`, retain their callers and the references that keep shared

@@ -58,7 +58,7 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE
 #define BUSTER_SNAPSHOT_TEST_CHILDREN 8
 // How long a child that opens the runtime may take before an alarm ends it.
 #define BUSTER_SNAPSHOT_TEST_SECONDS 30
@@ -180,7 +180,8 @@ static bool snapshot_test_same_link(const Runtime* x, const Runtime* y)
 // The most bytes the crt objects' records take after a snapshot's directory: 3.5 KB for the dynamic runtime of the
 // laptop's GCC 16 and glibc 2.44, the regions' alignments included.
 #define BUSTER_SNAPSHOT_TEST_OBJECT_BYTES (16ull << 10)
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE
 // Whether a loaded runtime's crt objects' records, which every link joins, are together after its snapshot's directory
 // (#490): every slice of a crt object that binding reads (runtime_piece_slices) within the bytes from the directory's
 // end to the end of their atoms' bytes in the data, at most BUSTER_SNAPSHOT_TEST_OBJECT_BYTES, and none of a member's
@@ -207,7 +208,8 @@ static bool snapshot_test_objects_together(const Runtime* loaded, uint64_t* obje
     }
     return result;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE
 // Whether every fixup of each piece of a runtime targets one of the piece's own symbols: binding writes a piece's entries
 // of Bind.symbols as it joins, and reads them only for the piece's fixups, never clearing the rest (#490).
 static bool snapshot_test_fixups_in_pieces(const Runtime* runtime)
@@ -1060,7 +1062,7 @@ static bool snapshot_test_deferred(const ExecutableTestDirectory* directory, con
     }
     return snapshot_test_report(&tally);
 }
-
+#endif
 // Writes `count` bytes at `offset` of the file, all of them.
 static bool snapshot_test_pwrite(int file, const uint8_t* bytes, uint64_t count, uint64_t offset)
 {
@@ -1074,7 +1076,7 @@ static bool snapshot_test_pwrite(int file, const uint8_t* bytes, uint64_t count,
     }
     return result;
 }
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE
 // Changes the file, which holds the snapshot `good`, in place into a damaged copy of it: its first `length` bytes and
 // `extra` zeros after them, with the byte at `flip` (if it is below length) changed; or with `repair`, that copy back
 // into `good`. Each writes only what differs, so that a case of a static runtime's 9 MB snapshot costs its damage, not
@@ -1328,7 +1330,7 @@ static bool snapshot_test_invalid(const ExecutableTestDirectory* directory, cons
     }
     return snapshot_test_report(&tally);
 }
-
+#endif
 // ---------------------------------------------------------------------------------------------------------------------
 // Damaged pieces
 //
@@ -1401,7 +1403,7 @@ static uint32_t snapshot_test_piece_at(const SnapshotHeader* header, Runtime* vi
     }
     return result;
 }
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE
 // A byte of a piece's records: the first of its symbols' values, or else of its names' lengths, of its atoms' bytes or
 // of its atoms' sizes, in whichever region holds it (snapshot_record_offset).
 static uint64_t snapshot_test_piece_byte(const SnapshotHeader* header, const Runtime* view, uint32_t piece)
@@ -1448,7 +1450,8 @@ static SnapshotStatus snapshot_test_damage(Runtime* loaded, int file, const char
     const bool damaged = file >= 0 && snapshot_test_edit(file, good, good.length, 0, flip, false);
     return damaged ? snapshot_load(loaded, path, kind, compiler, 0) : SNAPSHOT_STATUS_MISSING;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE
 // A runtime's snapshot with a byte of its pieces' records changed, one at a time: at each 1/61 of them, and the first
 // and last of each piece region. Each loads, every piece is current but the one whose records hold the byte
 // (snapshot_test_piece_at), if any, and a link's room is the whole snapshot's (snapshot_test_room), since sizing reads
@@ -2077,3 +2080,4 @@ static int run_snapshot_tests(int argc, char** argv)
     }
     return result;
 }
+#endif
