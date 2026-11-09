@@ -1418,8 +1418,22 @@ static __attribute__((noinline)) CheckLowerLimbRoom check_lower_limb_room(const 
                                                                      check_lower_limb_descriptor(types, conversions->store.type)).count;
             units = 2 * limbs > units ? 2 * limbs : units;
         }
+        bool misc = false;
+        if (graph->ops[node] == CHECK_OP_BUILTIN_MISC && graph->argument_counts != NULL)
+        {
+            // A bit builtin's limbs (check_lower_bits_limbs): up to 128 entries a limb of its widest argument, as a rotation's
+            // two shifts, and their temporaries and objects.
+            const uint32_t first = graph->argument_offsets[node];
+            for (uint32_t i = 0; i < graph->argument_counts[node] && i < 4; i += 1)
+            {
+                const uint32_t limbs = check_lower_limb_type(types, stream->argument_conversions[first + i].type).count;
+                misc = misc || limbs != 0;
+                units = 2 * limbs > units ? 2 * limbs : units;
+            }
+            units = misc && 2 * check_lower_limb_type(types, check_stream_type(stream, node)).count > units ? 2 * check_lower_limb_type(types, check_stream_type(stream, node)).count : units;
+        }
         room.entries += 64 * (uint64_t)units;
-        room.locals += complex ? 128 : units != 0 ? 16 : 0;
+        room.locals += complex ? 128 : misc ? 48 : units != 0 ? 16 : 0;
         room.calls += complex ? 24 : 0;
         room.arguments += complex ? 128 : 0;
     }
@@ -9308,10 +9322,41 @@ static void check_lower_miscellaneous_prepare(CheckLowerWriter* writer, uint32_t
             call->constant_size_known = true;
             call->constant_size = (uint32_t)stream->misc[selected].alignment;
         }
-        if (cbuiltin_align(call->id))
+        // A bit or an alignment builtin with a _BitInt past 128 bits (#1447) takes limb descriptors
+        // (check_lower_limb_descriptor), its arguments' and its result's, and goes by check_lower_bits_limbs: such an
+        // argument's local holds its limbs' address, and such a result is a frame object's address of its own.
+        bool limbs = false;
+        if (cbuiltin_align(call->id) || (cbuiltin_bits(call->id) && !cbuiltin_carry(call->id)))
         {
-            // An alignment builtin's recipe takes its source's, alignment's and result's descriptors, of up to 128 bits (the
-            // checker refuses wider _BitInts), a pointer's 64, and a result past 64 bits' frame object.
+            limbs = check_lower_limb_value(writer, check_stream_type(stream, node));
+            for (uint32_t i = 0; i < evaluated; i += 1)
+            {
+                limbs = limbs || check_lower_limb_value(writer, stream->argument_conversions[first + i].type);
+            }
+        }
+        if (limbs)
+        {
+            const TypeId result_type = check_stream_type(stream, node);
+            const bool pointer = cbuiltin_align(call->id) && type_kind(program->types, type_strip_aligned(program->types, result_type)) == BUSTER_TYPE_KIND_POINTER;
+            call->result_type = pointer ? BUSTER_CHECK_LOWER_LIMB_DESCRIPTOR | 64 : check_lower_limb_descriptor(program->types, result_type);
+            for (uint32_t i = 0; i < evaluated; i += 1)
+            {
+                const TypeId type = stream->argument_conversions[first + i].type;
+                const bool address = cbuiltin_align(call->id) && type_kind(program->types, type_strip_aligned(program->types, type)) == BUSTER_TYPE_KIND_POINTER;
+                call->argument_types[i] = address ? BUSTER_CHECK_LOWER_LIMB_DESCRIPTOR | 64 : check_lower_limb_descriptor(program->types, type);
+            }
+            const uint32_t width = call->result_type & BUSTER_CHECK_LOWER_LIMB_WIDTH;
+            if (width > 64 && width <= 128)
+            {
+                // A narrower result (a rotation's or an alignment's of a narrower source by a wider count or alignment) is
+                // the recipe's, in its frame object.
+                call->result_object = check_lower_temporary(writer, check_lower_class(writer, result_type));
+            }
+        }
+        else if (cbuiltin_align(call->id))
+        {
+            // An alignment builtin's recipe takes its source's, alignment's and result's descriptors, of up to 128 bits (wider
+            // _BitInts go by check_lower_bits_limbs), a pointer's 64, and a result past 64 bits' frame object.
             const TypeId result_type = check_stream_type(stream, node);
             call->result_type = check_lower_align_type(program->types, result_type);
             call->argument_types[0] = check_lower_align_type(program->types, stream->argument_conversions[first].type);
@@ -9328,7 +9373,7 @@ static void check_lower_miscellaneous_prepare(CheckLowerWriter* writer, uint32_t
         else if (cbuiltin_bits(call->id))
         {
             // A bit builtin's recipe (c_builtin_bits_lower.c) takes its arguments' and result's descriptors, of up to 128
-            // bits (the checker refuses wider _BitInts), and a result past 64 bits' frame object, whose value it is.
+            // bits (wider _BitInts go by check_lower_bits_limbs), and a result past 64 bits' frame object, whose value it is.
             const TypeId result_type = check_stream_type(stream, node);
             const uint32_t result = check_lower_builtin_type(program->types, result_type);
             bool described = cbuiltin_carry(call->id) || result != 0;
@@ -9374,7 +9419,7 @@ static void check_lower_miscellaneous_prepare(CheckLowerWriter* writer, uint32_t
             {
                 check_lower_unsupported(writer, "builtins of long double and __int128 operands");
             }
-            call->arguments[i] = check_lower_temporary(writer, check_lower_class(writer, type));
+            call->arguments[i] = check_lower_temporary(writer, limbs ? check_lower_value_class(writer, type) : check_lower_class(writer, type));
         }
         check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_BUILTIN_MISC, .node = index, .type = check_stream_type(stream, node) });
         for (uint32_t i = evaluated; i-- > 0 && writer->output->status == CHECK_PROGRAM_OK;)
@@ -9457,6 +9502,555 @@ static void check_lower_miscellaneous_bits(CheckLowerWriter* writer, CBuiltinMis
     }
 }
 
+// A limb descriptor of up to 128 bits as the recipes' (width | BUSTER_CBUILTIN_SIGNED, BUSTER_CBUILTIN_LOWER_WIDE for 128).
+static uint32_t check_lower_limb_recipe_type(uint32_t descriptor)
+{
+    const CheckLowerLimbs limbs = check_lower_limb_described(descriptor);
+    return (limbs.width == 128 ? BUSTER_CBUILTIN_LOWER_WIDE : limbs.width) | (limbs.sign ? BUSTER_CBUILTIN_SIGNED : 0);
+}
+
+// Limb `limb` of a builtin's argument of limb descriptor `descriptor` whose local `local` holds it (a _BitInt's past 128
+// bits' address, a 16-byte frame object of one of 65 to 128 bits, or a local of its class), a U64 onto the stack: its top
+// limb extended from its width, past its limbs its sign's limb, both with zeros where `zero` or it is unsigned (#1447).
+static void check_lower_limb_argument(CheckLowerWriter* writer, uint32_t local, uint32_t descriptor, uint32_t limb, bool zero)
+{
+    CheckLowerLimbs source = check_lower_limb_described(descriptor);
+    source.sign = source.sign && !zero;
+    const uint32_t count = source.width > 128 ? source.count : source.width > 64 ? 2 : 1;
+    const uint32_t from = limb < count ? limb : count - 1;
+    if (limb >= count && !source.sign)
+    {
+        check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 0);
+    }
+    else
+    {
+        if (source.width > 128)
+        {
+            check_lower_limb_address(writer, local, false, from);
+            check_lower_emit(writer, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_U64, 0);
+        }
+        else if (count == 2)
+        {
+            check_lower_emit(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, local);
+            check_lower_offset(writer, 8 * (uint64_t)from);
+            check_lower_emit(writer, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_U64, 0);
+        }
+        else
+        {
+            check_lower_emit(writer, BUSTER_TYPED_LOCAL, writer->value_classes[local], local);
+            check_lower_emit(writer, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U64, 0);
+        }
+        if (from + 1 == count)
+        {
+            check_lower_limb_extend(writer, (CheckLowerLimbs){ .count = count, .width = source.width, .sign = source.sign }, BUSTER_TYPED_CLASS_U64);
+        }
+        if (limb >= count)
+        {
+            check_lower_emit(writer, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_I64, 0);
+            check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U32, 63);
+            check_lower_emit(writer, BUSTER_TYPED_SHR, BUSTER_TYPED_CLASS_I64, 0);
+            check_lower_emit(writer, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U64, 0);
+        }
+    }
+}
+
+// `x`'s value (a U64 temporary's) `kind` (SHR or SHL) `count` bits, masked by `mask`, onto the stack.
+static void check_lower_limb_masked(CheckLowerWriter* writer, uint32_t x, uint8_t kind, uint32_t count, uint64_t mask, bool mask_first)
+{
+    check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, x);
+    if (mask_first)
+    {
+        check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, mask);
+        check_lower_emit(writer, BUSTER_TYPED_AND, BUSTER_TYPED_CLASS_U64, 0);
+    }
+    if (count != 0)
+    {
+        check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U32, count);
+        check_lower_emit(writer, kind, BUSTER_TYPED_CLASS_U64, 0);
+    }
+    if (!mask_first)
+    {
+        check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, mask);
+        check_lower_emit(writer, BUSTER_TYPED_AND, BUSTER_TYPED_CLASS_U64, 0);
+    }
+}
+
+// The scratch of a builtin's limbs (check_lower_bits_limbs): its target's rows for a limb's population count, leading and
+// trailing zeros and byte swap (each an operation index plus one, 0 where the target has no instruction that gives 64 for
+// zero), and two U64 temporaries.
+typedef struct CheckLowerLimbBits
+{
+    uint32_t popcount;
+    uint32_t leading;
+    uint32_t trailing;
+    uint32_t swap;
+    uint32_t t;
+    uint32_t u;
+} CheckLowerLimbBits;
+
+// The population count of the U64 in temporary `x`, a U64 onto the stack: POPCNT's, or SWAR's sums of bit pairs, nibbles
+// and bytes, the last by a multiply, without branches.
+static void check_lower_limb_popcount(CheckLowerWriter* writer, const CheckLowerLimbBits* bits, uint32_t x)
+{
+    if (bits->popcount != 0)
+    {
+        check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, x);
+        check_lower_emit(writer, BUSTER_TYPED_X86, BUSTER_TYPED_CLASS_U64, bits->popcount - 1);
+    }
+    else
+    {
+        check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, x);
+        check_lower_limb_masked(writer, x, BUSTER_TYPED_SHR, 1, UINT64_C(0x5555555555555555), false);
+        check_lower_emit(writer, BUSTER_TYPED_SUB, BUSTER_TYPED_CLASS_U64, 0);
+        check_lower_emit(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, bits->u);
+        check_lower_limb_masked(writer, bits->u, BUSTER_TYPED_SHR, 0, UINT64_C(0x3333333333333333), false);
+        check_lower_limb_masked(writer, bits->u, BUSTER_TYPED_SHR, 2, UINT64_C(0x3333333333333333), false);
+        check_lower_emit(writer, BUSTER_TYPED_ADD, BUSTER_TYPED_CLASS_U64, 0);
+        check_lower_emit(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, bits->u);
+        check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, bits->u);
+        check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, bits->u);
+        check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U32, 4);
+        check_lower_emit(writer, BUSTER_TYPED_SHR, BUSTER_TYPED_CLASS_U64, 0);
+        check_lower_emit(writer, BUSTER_TYPED_ADD, BUSTER_TYPED_CLASS_U64, 0);
+        check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, UINT64_C(0x0f0f0f0f0f0f0f0f));
+        check_lower_emit(writer, BUSTER_TYPED_AND, BUSTER_TYPED_CLASS_U64, 0);
+        check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, UINT64_C(0x0101010101010101));
+        check_lower_emit(writer, BUSTER_TYPED_MUL, BUSTER_TYPED_CLASS_U64, 0);
+        check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U32, 56);
+        check_lower_emit(writer, BUSTER_TYPED_SHR, BUSTER_TYPED_CLASS_U64, 0);
+    }
+}
+
+// The leading (or trailing) zeros of the U64 in temporary `x`, 64 for zero, a U64 onto the stack: LZCNT's (TZCNT's), or
+// 64 less the population count of x's bits smeared down from its top one (the population count of the zeros below its
+// lowest one, ~x & (x - 1)).
+static void check_lower_limb_zeros(CheckLowerWriter* writer, const CheckLowerLimbBits* bits, uint32_t x, bool trailing)
+{
+    const uint32_t row = trailing ? bits->trailing : bits->leading;
+    if (row != 0)
+    {
+        check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, x);
+        check_lower_emit(writer, BUSTER_TYPED_X86, BUSTER_TYPED_CLASS_U64, row - 1);
+    }
+    else if (trailing)
+    {
+        check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, x);
+        check_lower_emit(writer, BUSTER_TYPED_NOT, BUSTER_TYPED_CLASS_U64, 0);
+        check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, x);
+        check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 1);
+        check_lower_emit(writer, BUSTER_TYPED_SUB, BUSTER_TYPED_CLASS_U64, 0);
+        check_lower_emit(writer, BUSTER_TYPED_AND, BUSTER_TYPED_CLASS_U64, 0);
+        check_lower_emit(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, bits->t);
+        check_lower_limb_popcount(writer, bits, bits->t);
+    }
+    else
+    {
+        check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, x);
+        check_lower_emit(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, bits->t);
+        for (uint32_t shift = 1; shift < 64; shift *= 2)
+        {
+            check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, bits->t);
+            check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, bits->t);
+            check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U32, shift);
+            check_lower_emit(writer, BUSTER_TYPED_SHR, BUSTER_TYPED_CLASS_U64, 0);
+            check_lower_emit(writer, BUSTER_TYPED_OR, BUSTER_TYPED_CLASS_U64, 0);
+            check_lower_emit(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, bits->t);
+        }
+        check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 64);
+        check_lower_limb_popcount(writer, bits, bits->t);
+        check_lower_emit(writer, BUSTER_TYPED_SUB, BUSTER_TYPED_CLASS_U64, 0);
+    }
+}
+
+// The bits (`reverse`) or the bytes of the U64 in temporary `x` reversed, back into it: BSWAP's row, then for the bits
+// masked swaps of nibbles, pairs and bits.
+static void check_lower_limb_reverse(CheckLowerWriter* writer, const CheckLowerLimbBits* bits, uint32_t x, bool reverse)
+{
+    static const uint64_t masks[3] = { UINT64_C(0x0f0f0f0f0f0f0f0f), UINT64_C(0x3333333333333333), UINT64_C(0x5555555555555555) };
+    check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, x);
+    check_lower_emit(writer, BUSTER_TYPED_X86, BUSTER_TYPED_CLASS_U64, bits->swap - 1);
+    check_lower_emit(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, x);
+    for (uint32_t step = 0; reverse && step < 3; step += 1)
+    {
+        const uint32_t shift = 4u >> step;
+        check_lower_limb_masked(writer, x, BUSTER_TYPED_SHR, shift, masks[step], false);
+        check_lower_limb_masked(writer, x, BUSTER_TYPED_SHL, shift, masks[step], true);
+        check_lower_emit(writer, BUSTER_TYPED_OR, BUSTER_TYPED_CLASS_U64, 0);
+        check_lower_emit(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, x);
+    }
+}
+
+// A rotation's count, of limb descriptor `descriptor` in local `local`, modulo `width`, a negative one's mathematical
+// remainder, as clang's NormalizeRotateAmount takes it, into a U64 temporary: the sum of its limbs' remainders, each
+// times 2^(64 i)'s, and for a negative one (its pattern less 2^(64 n)) width less 2^(64 n)'s (#1447).
+static uint32_t check_lower_limb_rotate_amount(CheckLowerWriter* writer, uint32_t local, uint32_t descriptor, uint32_t width)
+{
+    const CheckLowerLimbs count = check_lower_limb_described(descriptor);
+    const uint32_t limbs = count.width > 128 ? count.count : count.width > 64 ? 2 : 1;
+    const uint32_t k = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
+    unsigned __int128 power = 1 % width;
+    for (uint32_t limb = 0; limb < limbs && writer->output->status == CHECK_PROGRAM_OK; limb += 1)
+    {
+        check_lower_limb_argument(writer, local, descriptor, limb, false);
+        check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, width);
+        check_lower_emit(writer, BUSTER_TYPED_MOD, BUSTER_TYPED_CLASS_U64, 0);
+        check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, (uint64_t)power);
+        check_lower_emit(writer, BUSTER_TYPED_MUL, BUSTER_TYPED_CLASS_U64, 0);
+        if (limb != 0)
+        {
+            check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, k);
+            check_lower_emit(writer, BUSTER_TYPED_ADD, BUSTER_TYPED_CLASS_U64, 0);
+        }
+        check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, width);
+        check_lower_emit(writer, BUSTER_TYPED_MOD, BUSTER_TYPED_CLASS_U64, 0);
+        check_lower_emit(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, k);
+        power = (power << 64) % width;
+    }
+    if (count.sign)
+    {
+        check_lower_limb_argument(writer, local, descriptor, limbs - 1, false);
+        check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U32, 63);
+        check_lower_emit(writer, BUSTER_TYPED_SHR, BUSTER_TYPED_CLASS_U64, 0);
+        check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, (uint64_t)((width - power) % width));
+        check_lower_emit(writer, BUSTER_TYPED_MUL, BUSTER_TYPED_CLASS_U64, 0);
+        check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, k);
+        check_lower_emit(writer, BUSTER_TYPED_ADD, BUSTER_TYPED_CLASS_U64, 0);
+        check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, width);
+        check_lower_emit(writer, BUSTER_TYPED_MOD, BUSTER_TYPED_CLASS_U64, 0);
+        check_lower_emit(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, k);
+    }
+    return k;
+}
+
+// Limb `limb` of a bit builtin's first argument, `x`'s limbs in local `local`, into temporary `y`: zero-extended from its
+// width, and with `invert` complemented within it.
+static void check_lower_limb_bits_load(CheckLowerWriter* writer, CheckLowerLimbs x, uint32_t local, uint32_t descriptor, uint32_t limb, bool invert, uint32_t y)
+{
+    check_lower_limb_argument(writer, local, descriptor, limb, true);
+    if (invert)
+    {
+        check_lower_emit(writer, BUSTER_TYPED_NOT, BUSTER_TYPED_CLASS_U64, 0);
+        if (limb + 1 == x.count && x.width % 64 != 0)
+        {
+            check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, UINT64_MAX >> (64 - x.width % 64));
+            check_lower_emit(writer, BUSTER_TYPED_AND, BUSTER_TYPED_CLASS_U64, 0);
+        }
+    }
+    check_lower_emit(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, y);
+}
+
+// The leading (or trailing) zeros of a bit builtin's first argument past 128 bits, into temporary `count`, and into
+// `zero` 1 where it is zero: from its top limb down (its bottom one up), each limb's zeros added while the limbs before
+// it are zero, `zero` cleared at a limb that isn't, less the padding past the width (where the value is zero).
+static void check_lower_limb_bits_zeros(CheckLowerWriter* writer, const CheckLowerLimbBits* bits, CheckLowerLimbs x, uint32_t local, uint32_t descriptor, bool invert,
+                                        bool trailing, uint32_t count, uint32_t zero)
+{
+    const uint32_t y = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
+    const uint32_t padding = 64 * x.count - x.width;
+    check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 0);
+    check_lower_emit(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, count);
+    check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 1);
+    check_lower_emit(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, zero);
+    for (uint32_t i = 0; i < x.count && writer->output->status == CHECK_PROGRAM_OK; i += 1)
+    {
+        const uint32_t limb = trailing ? i : x.count - 1 - i;
+        check_lower_limb_bits_load(writer, x, local, descriptor, limb, invert, y);
+        check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, count);
+        check_lower_limb_zeros(writer, bits, y, trailing);
+        check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, zero);
+        check_lower_emit(writer, BUSTER_TYPED_MUL, BUSTER_TYPED_CLASS_U64, 0);
+        check_lower_emit(writer, BUSTER_TYPED_ADD, BUSTER_TYPED_CLASS_U64, 0);
+        check_lower_emit(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, count);
+        check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, zero);
+        check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, y);
+        check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 0);
+        check_lower_emit(writer, BUSTER_TYPED_EQ, BUSTER_TYPED_CLASS_I32, 0);
+        check_lower_emit(writer, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U64, 0);
+        check_lower_emit(writer, BUSTER_TYPED_AND, BUSTER_TYPED_CLASS_U64, 0);
+        check_lower_emit(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, zero);
+    }
+    if (padding != 0)
+    {
+        // A leading count's top limb counts the padding always; a trailing one's where the value is zero alone.
+        check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, count);
+        check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, padding);
+        if (trailing)
+        {
+            check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, zero);
+            check_lower_emit(writer, BUSTER_TYPED_MUL, BUSTER_TYPED_CLASS_U64, 0);
+        }
+        check_lower_emit(writer, BUSTER_TYPED_SUB, BUSTER_TYPED_CLASS_U64, 0);
+        check_lower_emit(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, count);
+    }
+}
+
+// The population count of a bit builtin's first argument past 128 bits, its limbs' summed, into temporary `count`.
+static void check_lower_limb_bits_popcount(CheckLowerWriter* writer, const CheckLowerLimbBits* bits, CheckLowerLimbs x, uint32_t local, uint32_t descriptor, uint32_t count)
+{
+    const uint32_t y = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
+    for (uint32_t limb = 0; limb < x.count && writer->output->status == CHECK_PROGRAM_OK; limb += 1)
+    {
+        check_lower_limb_bits_load(writer, x, local, descriptor, limb, false, y);
+        check_lower_limb_popcount(writer, bits, y);
+        if (limb != 0)
+        {
+            check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, count);
+            check_lower_emit(writer, BUSTER_TYPED_ADD, BUSTER_TYPED_CLASS_U64, 0);
+        }
+        check_lower_emit(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, count);
+    }
+}
+
+// A bit builtin whose first argument is a _BitInt past 128 bits (#1447), limb by limb on U64 temporaries, as clang's code
+// computes on its iN, without branches: a count (popcountg, clzg, ctzg and the stdc counts) leaves its result's class; a
+// value (a reversal, a byte swap, bit_floor, bit_ceil, a rotation) is a frame object of its limbs, whose address it
+// leaves. A rotation of a narrower value by a count past 128 bits reduces the count modulo the width and leaves the rest
+// to the recipe (false). A count goes a limb at a time (check_lower_limb_bits_zeros, check_lower_limb_bits_popcount); a
+// reversal or a byte swap reverses each limb into the other end, then shifts the limbs down by the padding past the
+// width; bit_floor's and bit_ceil's bit k is limb k / 64's bit k % 64; a rotation by k is the left shift by k ORed with
+// the right shift by (w - k) % w (check_lower_limb_shift), k the count's remainder (check_lower_limb_rotate_amount).
+static bool check_lower_bits_limbs(CheckLowerWriter* writer, CBuiltinMiscLowerCall* call)
+{
+    const CBuiltinId id = cbuiltin_stdc_generic(call->id);
+    const CheckLowerLimbs x = check_lower_limb_described(call->argument_types[0]);
+    const CheckLowerLimbs result = check_lower_limb_described(call->result_type);
+    const bool rotate = id == CBUILTIN_STDC_ROTATE_LEFT || id == CBUILTIN_STDC_ROTATE_RIGHT;
+    bool done = true;
+    if (cbuiltin_align(id))
+    {
+        check_lower_unsupported(writer, "alignment builtins of _BitInt past 128 bits");
+    }
+    else if (x.width <= 128)
+    {
+        // A narrower value's rotation by a count past 128 bits: the count's remainder as an unsigned int, then the recipe.
+        const uint32_t k = check_lower_limb_rotate_amount(writer, call->arguments[1], call->argument_types[1], x.width);
+        const uint32_t narrow = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U32);
+        check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, k);
+        check_lower_emit(writer, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U32, 0);
+        check_lower_emit(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U32, narrow);
+        call->arguments[1] = narrow;
+        call->argument_types[1] = 32;
+        call->argument_types[0] = check_lower_limb_recipe_type(call->argument_types[0]);
+        call->result_type = check_lower_limb_recipe_type(call->result_type);
+        done = false;
+    }
+    else
+    {
+        const uint64_t features = writer->target.features;
+        CheckLowerLimbBits bits = {
+            .popcount = (features & BUSTER_X86_FEATURE(POPCNT)) != 0 ? check_lower_bits_operation(writer, CBUILTIN_POPCOUNT, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64) + 1 : 0,
+            .leading = (features & BUSTER_X86_FEATURE(LZCNT)) != 0 ? check_lower_bits_operation(writer, CBUILTIN_CLZ, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64) + 1 : 0,
+            .trailing = (features & BUSTER_X86_FEATURE(BMI)) != 0 ? check_lower_bits_operation(writer, CBUILTIN_CTZ, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64) + 1 : 0,
+            .swap = id == CBUILTIN_BITREVERSEG || id == CBUILTIN_BSWAPG ? check_lower_bits_operation(writer, CBUILTIN_BSWAP64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64) + 1 : 0,
+            .t = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64),
+            .u = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64),
+        };
+        const uint32_t local = call->arguments[0];
+        const uint32_t descriptor = call->argument_types[0];
+        const bool leading = id == CBUILTIN_CLZG || id == CBUILTIN_STDC_LEADING_ZEROS || id == CBUILTIN_STDC_LEADING_ONES ||
+                             id == CBUILTIN_STDC_FIRST_LEADING_ZERO || id == CBUILTIN_STDC_FIRST_LEADING_ONE || id == CBUILTIN_STDC_BIT_WIDTH;
+        const bool trailing = id == CBUILTIN_CTZG || id == CBUILTIN_STDC_TRAILING_ZEROS || id == CBUILTIN_STDC_TRAILING_ONES ||
+                              id == CBUILTIN_STDC_FIRST_TRAILING_ZERO || id == CBUILTIN_STDC_FIRST_TRAILING_ONE;
+        const bool first = id >= CBUILTIN_STDC_FIRST_LEADING_ZERO && id <= CBUILTIN_STDC_FIRST_TRAILING_ONE;
+        const bool population = id == CBUILTIN_POPCOUNTG || id == CBUILTIN_STDC_COUNT_ONES || id == CBUILTIN_STDC_COUNT_ZEROS || id == CBUILTIN_STDC_HAS_SINGLE_BIT;
+        const uint32_t count = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
+        const uint32_t zero = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
+        if (leading || trailing)
+        {
+            check_lower_limb_bits_zeros(writer, &bits, x, local, descriptor, cbuiltin_bits_inverted(id), trailing, count, zero);
+            if (id == CBUILTIN_STDC_BIT_WIDTH)
+            {
+                check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, x.width);
+                check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, count);
+                check_lower_emit(writer, BUSTER_TYPED_SUB, BUSTER_TYPED_CLASS_U64, 0);
+            }
+            else if (first || call->argument_count == 2)
+            {
+                // The position past the count, or the fallback, where the value is zero: (count + 1) & (zero - 1), or
+                // (count & (zero - 1)) | (fallback & -zero).
+                check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, count);
+                if (first)
+                {
+                    check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 1);
+                    check_lower_emit(writer, BUSTER_TYPED_ADD, BUSTER_TYPED_CLASS_U64, 0);
+                }
+                check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, zero);
+                check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 1);
+                check_lower_emit(writer, BUSTER_TYPED_SUB, BUSTER_TYPED_CLASS_U64, 0);
+                check_lower_emit(writer, BUSTER_TYPED_AND, BUSTER_TYPED_CLASS_U64, 0);
+                if (!first)
+                {
+                    check_lower_limb_argument(writer, call->arguments[1], call->argument_types[1], 0, false);
+                    check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, zero);
+                    check_lower_emit(writer, BUSTER_TYPED_NEG, BUSTER_TYPED_CLASS_U64, 0);
+                    check_lower_emit(writer, BUSTER_TYPED_AND, BUSTER_TYPED_CLASS_U64, 0);
+                    check_lower_emit(writer, BUSTER_TYPED_OR, BUSTER_TYPED_CLASS_U64, 0);
+                }
+            }
+            else
+            {
+                check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, count);
+            }
+        }
+        else if (population)
+        {
+            check_lower_limb_bits_popcount(writer, &bits, x, local, descriptor, count);
+            if (id == CBUILTIN_STDC_COUNT_ZEROS)
+            {
+                check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, x.width);
+            }
+            check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, count);
+            if (id == CBUILTIN_STDC_COUNT_ZEROS)
+            {
+                check_lower_emit(writer, BUSTER_TYPED_SUB, BUSTER_TYPED_CLASS_U64, 0);
+            }
+            else if (id == CBUILTIN_STDC_HAS_SINGLE_BIT)
+            {
+                check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 1);
+                check_lower_emit(writer, BUSTER_TYPED_EQ, BUSTER_TYPED_CLASS_I32, 0);
+                check_lower_emit(writer, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U64, 0);
+            }
+        }
+        else
+        {
+            const uint32_t object = check_lower_limb_object(writer, result);
+            if (id == CBUILTIN_STDC_BIT_FLOOR || id == CBUILTIN_STDC_BIT_CEIL)
+            {
+                // k: bit_floor's the bit width less one, none (all ones) for 0; bit_ceil's the bit width less one more for a
+                // power of two, 0 where that is at most 1, none where it is the width (clang's wrap).
+                const uint32_t k = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
+                check_lower_limb_bits_zeros(writer, &bits, x, local, descriptor, false, false, count, zero);
+                check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, x.width);
+                check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, count);
+                check_lower_emit(writer, BUSTER_TYPED_SUB, BUSTER_TYPED_CLASS_U64, 0);
+                check_lower_emit(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, k);
+                if (id == CBUILTIN_STDC_BIT_FLOOR)
+                {
+                    check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, k);
+                    check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 1);
+                    check_lower_emit(writer, BUSTER_TYPED_SUB, BUSTER_TYPED_CLASS_U64, 0);
+                    check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, zero);
+                    check_lower_emit(writer, BUSTER_TYPED_NEG, BUSTER_TYPED_CLASS_U64, 0);
+                    check_lower_emit(writer, BUSTER_TYPED_OR, BUSTER_TYPED_CLASS_U64, 0);
+                    check_lower_emit(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, k);
+                }
+                else
+                {
+                    check_lower_limb_bits_popcount(writer, &bits, x, local, descriptor, count);
+                    check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, k);
+                    check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, count);
+                    check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 1);
+                    check_lower_emit(writer, BUSTER_TYPED_EQ, BUSTER_TYPED_CLASS_I32, 0);
+                    check_lower_emit(writer, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U64, 0);
+                    check_lower_emit(writer, BUSTER_TYPED_SUB, BUSTER_TYPED_CLASS_U64, 0);
+                    check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, k);
+                    check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 1);
+                    check_lower_emit(writer, BUSTER_TYPED_GT, BUSTER_TYPED_CLASS_I32, 0);
+                    check_lower_emit(writer, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U64, 0);
+                    check_lower_emit(writer, BUSTER_TYPED_NEG, BUSTER_TYPED_CLASS_U64, 0);
+                    check_lower_emit(writer, BUSTER_TYPED_AND, BUSTER_TYPED_CLASS_U64, 0);
+                    check_lower_emit(writer, BUSTER_TYPED_STORE_LOCAL, BUSTER_TYPED_CLASS_U64, k);
+                    check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, k);
+                    check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, x.width);
+                    check_lower_emit(writer, BUSTER_TYPED_EQ, BUSTER_TYPED_CLASS_I32, 0);
+                    check_lower_emit(writer, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U64, 0);
+                    check_lower_emit(writer, BUSTER_TYPED_NEG, BUSTER_TYPED_CLASS_U64, 0);
+                    check_lower_emit(writer, BUSTER_TYPED_OR, BUSTER_TYPED_CLASS_U64, 0);
+                    check_lower_emit(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, k);
+                }
+                // Limb j is 1 << (k & 63) where k / 64 is j.
+                for (uint32_t limb = 0; limb < result.count && writer->output->status == CHECK_PROGRAM_OK; limb += 1)
+                {
+                    check_lower_limb_address(writer, object, true, limb);
+                    check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 1);
+                    check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, k);
+                    check_lower_emit(writer, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U32, 0);
+                    check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U32, 63);
+                    check_lower_emit(writer, BUSTER_TYPED_AND, BUSTER_TYPED_CLASS_U32, 0);
+                    check_lower_emit(writer, BUSTER_TYPED_SHL, BUSTER_TYPED_CLASS_U64, 0);
+                    check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, k);
+                    check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U32, 6);
+                    check_lower_emit(writer, BUSTER_TYPED_SHR, BUSTER_TYPED_CLASS_U64, 0);
+                    check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, limb);
+                    check_lower_emit(writer, BUSTER_TYPED_EQ, BUSTER_TYPED_CLASS_I32, 0);
+                    check_lower_emit(writer, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U64, 0);
+                    check_lower_emit(writer, BUSTER_TYPED_MUL, BUSTER_TYPED_CLASS_U64, 0);
+                    check_lower_emit(writer, BUSTER_TYPED_SET, BUSTER_TYPED_CLASS_U64, 0);
+                }
+                check_lower_emit(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, object);
+            }
+            else if (rotate)
+            {
+                // Left by k, right by (w - k) % w; a right rotation's k is w less the count's remainder, modulo w.
+                const uint32_t k = check_lower_limb_rotate_amount(writer, call->arguments[1], call->argument_types[1], x.width);
+                const uint32_t other = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
+                const uint32_t shifted[2] = { check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64), check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64) };
+                const CheckLowerLimbs value = { .count = x.count, .width = x.width, .sign = false };
+                for (uint32_t step = id == CBUILTIN_STDC_ROTATE_RIGHT ? 0 : 1; step < 2; step += 1)
+                {
+                    check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, x.width);
+                    check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, k);
+                    check_lower_emit(writer, BUSTER_TYPED_SUB, BUSTER_TYPED_CLASS_U64, 0);
+                    check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, x.width);
+                    check_lower_emit(writer, BUSTER_TYPED_MOD, BUSTER_TYPED_CLASS_U64, 0);
+                    check_lower_emit(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, step == 0 ? k : other);
+                }
+                check_lower_limb_shift(writer, true, value, local, k, BUSTER_TYPE_ULONG);
+                check_lower_emit(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, shifted[0]);
+                check_lower_limb_shift(writer, false, value, local, other, BUSTER_TYPE_ULONG);
+                check_lower_emit(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, shifted[1]);
+                check_lower_limb_arithmetic(writer, CHECK_OP_BIT_OR, value, shifted[0], shifted[1]);
+            }
+            else
+            {
+                // Each limb reversed into the other end of a buffer, then the buffer's limbs shifted down by the padding.
+                const uint32_t buffer = check_lower_limb_object(writer, x);
+                const uint32_t y = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
+                const uint32_t padding = 64 * x.count - x.width;
+                for (uint32_t limb = 0; limb < x.count && writer->output->status == CHECK_PROGRAM_OK; limb += 1)
+                {
+                    check_lower_limb_bits_load(writer, x, local, descriptor, x.count - 1 - limb, false, y);
+                    check_lower_limb_reverse(writer, &bits, y, id == CBUILTIN_BITREVERSEG);
+                    check_lower_limb_address(writer, buffer, true, limb);
+                    check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, y);
+                    check_lower_emit(writer, BUSTER_TYPED_SET, BUSTER_TYPED_CLASS_U64, 0);
+                }
+                for (uint32_t limb = 0; limb < result.count && writer->output->status == CHECK_PROGRAM_OK; limb += 1)
+                {
+                    check_lower_limb_address(writer, object, true, limb);
+                    check_lower_limb_address(writer, buffer, true, limb);
+                    check_lower_emit(writer, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_U64, 0);
+                    if (padding != 0)
+                    {
+                        check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U32, padding);
+                        check_lower_emit(writer, BUSTER_TYPED_SHR, BUSTER_TYPED_CLASS_U64, 0);
+                        if (limb + 1 < result.count)
+                        {
+                            check_lower_limb_address(writer, buffer, true, limb + 1);
+                            check_lower_emit(writer, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_U64, 0);
+                            check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U32, 64 - padding);
+                            check_lower_emit(writer, BUSTER_TYPED_SHL, BUSTER_TYPED_CLASS_U64, 0);
+                            check_lower_emit(writer, BUSTER_TYPED_OR, BUSTER_TYPED_CLASS_U64, 0);
+                        }
+                    }
+                    if (limb + 1 == result.count)
+                    {
+                        check_lower_limb_extend(writer, result, BUSTER_TYPED_CLASS_U64);
+                    }
+                    check_lower_emit(writer, BUSTER_TYPED_SET, BUSTER_TYPED_CLASS_U64, 0);
+                }
+                check_lower_emit(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, object);
+            }
+        }
+        if (leading || trailing || population)
+        {
+            // A count's U64 as its result's class (int, unsigned int or bool).
+            check_lower_emit(writer, BUSTER_TYPED_CONVERT, cbuiltin_lower_type_class(check_lower_limb_recipe_type(call->result_type)), 0);
+        }
+    }
+    return done;
+}
+
 static void check_lower_miscellaneous_emit(CheckLowerWriter* writer, CheckLowerTask task)
 {
     CBuiltinLowerBuffer buffer = {
@@ -9466,7 +10060,14 @@ static void check_lower_miscellaneous_emit(CheckLowerWriter* writer, CheckLowerT
         .local_capacity = writer->local_capacity < BUSTER_TIER0_MAX_LOCALS ? writer->local_capacity : BUSTER_TIER0_MAX_LOCALS,
     };
     CBuiltinMiscLowerCall call = writer->miscellaneous[task.node];
-    if (cbuiltin_bits(call.id))
+    bool done = false;
+    if ((call.result_type & BUSTER_CHECK_LOWER_LIMB_DESCRIPTOR) != 0)
+    {
+        // A _BitInt past 128 bits (#1447): its value's builtin limb by limb, or a narrower one's recipe of its count or
+        // alignment reduced to the recipe's descriptors.
+        done = check_lower_bits_limbs(writer, &call);
+    }
+    if (!done && cbuiltin_bits(call.id))
     {
         check_lower_miscellaneous_bits(writer, &call);
     }
@@ -9479,8 +10080,13 @@ static void check_lower_miscellaneous_emit(CheckLowerWriter* writer, CheckLowerT
         call.padding_count = count != UINT32_MAX ? count : 0;
         call.result_type = 0;
     }
-    const CBuiltinLowerResult result = BUSTER_SCALAR_PATH(writer->scalar) ? cbuiltin_misc_lower_scalar(&buffer, &call) : cbuiltin_misc_lower(&buffer, &call);
-    check_lower_builtin_finish(writer, &buffer, result, task.type);
+    if (!done)
+    {
+        buffer.count = writer->count;
+        buffer.local_count = writer->local_count;
+        const CBuiltinLowerResult result = BUSTER_SCALAR_PATH(writer->scalar) ? cbuiltin_misc_lower_scalar(&buffer, &call) : cbuiltin_misc_lower(&buffer, &call);
+        check_lower_builtin_finish(writer, &buffer, result, task.type);
+    }
 }
 
 static void check_lower_floating_recipe(CheckLowerWriter* writer, const CBuiltinFloatLowerCall* call, TypeId type)

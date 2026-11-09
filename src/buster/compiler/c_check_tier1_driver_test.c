@@ -3149,7 +3149,9 @@ static void check_test_driver_tier1_bmi(CheckTest* test, const char* clang, cons
 // The classic bit builtins' fixture (#1374, check_lower_bits_row): every one of them alone, a chain of them whose values
 // stay live across each other, and a loop that iterates a word's set bits by ctz, each count's IR intrinsic (bsf, bsr,
 // tzcnt, lzcnt, popcnt, bswap) by the target's form, on the other unit's (clang -O2's) operands, never 0 for ctz and clz.
-// The generic/C23 recipes (#1652) also take zero, negative fallback results, narrow and wide _BitInts and one-zero limbs.
+// The generic/C23 recipes (#1652) also take zero, negative fallback results, narrow and wide _BitInts and one-zero limbs,
+// and _BitInts past 128 bits (#1447) limb by limb, a rotation of a width no power of two against a reference in clang's
+// build, whose code generator can't compile one.
 static const char check_test_tier1_bits_header[] =
     "unsigned b_bswap16(unsigned short x);\n"
     "unsigned b_bswap32(unsigned x);\n"
@@ -3171,7 +3173,8 @@ static const char check_test_tier1_bits_header[] =
     "unsigned long b_bits(unsigned long a);\n"
     "unsigned long b_generic(unsigned long a, int f);\n"
     "unsigned long b_stdc(unsigned long a);\n"
-    "unsigned long b_generic_wide(unsigned long low, unsigned long high, int f);\n";
+    "unsigned long b_generic_wide(unsigned long low, unsigned long high, int f);\n"
+    "unsigned long b_generic_limbs(unsigned long low, unsigned long high, int f, int k);\n";
 
 static const char check_test_tier1_bits_source[] =
     "#include \"tier1-bits.h\"\n"
@@ -3250,6 +3253,26 @@ static const char check_test_tier1_bits_source[] =
     "    swap=__builtin_stdc_bit_floor(u); h=h*31+(unsigned long)swap+(unsigned long)(swap>>64);\n"
     "    swap=__builtin_stdc_bit_ceil(u); h=h*31+(unsigned long)swap+(unsigned long)(swap>>64);\n"
     "    return h;\n"
+    "}\n"
+    "#define LIMBS(p,n) for(unsigned j=0;j<(n);j++){unsigned long w;__builtin_memcpy(&w,(const char*)(p)+8*j,8);h=h*31+w;}\n"
+    "#ifdef __BUSTER__\n"
+    "#define ROTL(x,c,w) __builtin_stdc_rotate_left(x,c)\n"
+    "#else\n"
+    "#define ROTL(x,c,w) ({__typeof__(x) x_=(x);unsigned k_=(unsigned)((((c)%(w))+(w))%(w));k_?(x_<<k_)|(x_>>((w)-k_)):x_;})\n"
+    "#endif\n"
+    "unsigned long b_generic_limbs(unsigned long low, unsigned long high, int f, int k)\n"
+    "{\n"
+    "    unsigned _BitInt(256) w=((unsigned _BitInt(256))high<<((unsigned)k%190))^((unsigned _BitInt(256))low<<64)^high;\n"
+    "    unsigned _BitInt(200) a=(unsigned _BitInt(200))w; unsigned _BitInt(129) b=(unsigned _BitInt(129))(w>>(unsigned)k%128); _BitInt(208) c=(_BitInt(208))~w;\n"
+    "    unsigned long h=__builtin_popcountg(w)+__builtin_popcountg(a)+__builtin_popcountg(b);\n"
+    "    h=h*31+(unsigned)__builtin_clzg(a,f)+(unsigned)__builtin_ctzg(a,f)+(unsigned)__builtin_clzg(w,f)+(unsigned)__builtin_ctzg(b,f);\n"
+    "    STDC(a); STDC(b); STDC(w);\n"
+    "    unsigned _BitInt(200) r=__builtin_bitreverseg(a); LIMBS(&r,4);\n"
+    "    _BitInt(208) q=__builtin_bswapg(c); LIMBS(&q,4); q=__builtin_bitreverseg(c); LIMBS(&q,4);\n"
+    "    unsigned _BitInt(256) t=__builtin_stdc_rotate_left(w,k); LIMBS(&t,4); t=__builtin_stdc_rotate_right(w,c); LIMBS(&t,4);\n"
+    "    r=ROTL(a,k,200); LIMBS(&r,4); unsigned _BitInt(129) s=ROTL(b,(long)f,129); LIMBS(&s,3);\n"
+    "    h=h*31+__builtin_stdc_rotate_left((unsigned)low,c)+__builtin_stdc_rotate_right((unsigned short)high,a);\n"
+    "    return h;\n"
     "}\n";
 
 static const char check_test_tier1_bits_other_source[] =
@@ -3274,6 +3297,7 @@ static const char check_test_tier1_bits_other_source[] =
     "        hash = hash * 31 + b_generic(a, f) + b_generic(0, f) + b_stdc(a) + b_stdc(0);\n"
     "        hash = hash * 31 + b_generic_wide(a, 0, f) + b_generic_wide(0, a, f) + b_generic_wide(a, ~a, f);\n"
     "        if (i == 0) hash = hash * 31 + b_generic_wide(0, 0, f);\n"
+    "        hash = hash * 31 + b_generic_limbs(a, ~a >> (i % 7), f, i - 2048) + b_generic_limbs(0, 0, f, i) + b_generic_limbs(~0ull, ~0ull, f, -i);\n"
     "        if (i < 2) printf(\"%llx %x %d %d %lx %lx\\n\", a, b_bswap32((unsigned)a), b_ctzl(n), b_clzl(n), b_chain(a, (unsigned)a), b_bits(a));\n"
     "    }\n"
     "    printf(\"%llx\\n\", hash);\n"

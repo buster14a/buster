@@ -30,7 +30,8 @@ requirements. [Command index](README.md).
   checking that their rows are the target's forms. The generic/C23 bit counts,
   `clrsb*` and `bswapg` reuse those rows (#1652), with narrow-width corrections
   and defined zero/fallback results, including 65–128-bit operands split into
-  limbs. The same checker target matrix checks their rows and boundary values;
+  limbs and operands past 128 bits computed limb by limb (#1447,
+  `check_lower_bits_limbs`). The same checker target matrix checks their rows and boundary values;
   `test-checker-driver`'s Tier 1 fixture checks narrow and wide forms at the
   first three targets, and `tests/ir-source/bit-builtins.c` checks the IR
   lowering under command-line and per-function targets. The overflow builtins
