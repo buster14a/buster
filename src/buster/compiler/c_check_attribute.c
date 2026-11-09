@@ -1536,6 +1536,12 @@ static bool check_input_attribute_string(CheckInputReader* reader, uint32_t firs
             valid = check_input_spelling(reader, i, &parts[i - first].bytes, &parts[i - first].length);
             reader->output->resource |= !valid;
         }
+        if (valid && !evaluated)
+        {
+            // An unevaluated string literal's encoding prefix has no effect (#1447): its warning is
+            // check_input_unevaluated_refused's.
+            check_literal_unevaluated_parts(&parts[i - first], 1);
+        }
         if (valid)
         {
             const CheckStringSpan span = check_literal_string_span(&parts[i - first]);
@@ -1564,8 +1570,9 @@ static bool check_input_attribute_string(CheckInputReader* reader, uint32_t firs
 // (#147, ParseUnevaluatedStringLiteralExpression): of the string literals from `first` to `end` (an attribute's argument's
 // parentheses peeled, as ParseUnevaluatedStringInAttribute peels them, into `*end`), the first token that has an escape
 // sequence clang refuses there (check_literal_unevaluated_escapes), or BUSTER_CHECK_NONE. Tokens of another kind are left
-// to the callers' own errors.
-static uint32_t check_input_unevaluated_refused(CheckInputReader* reader, uint32_t first, uint32_t* end)
+// to the callers' own errors. A literal it takes has its warnings here (#1447), completed at `completion` (a static
+// assertion's keyword, whose failure clang's Sema gives after its parser's warnings), else at their token.
+static uint32_t check_input_unevaluated_refused(CheckInputReader* reader, uint32_t first, uint32_t* end, uint32_t completion)
 {
     const Parser* parser = reader->parser;
     uint32_t last = *end;
@@ -1587,7 +1594,72 @@ static uint32_t check_input_unevaluated_refused(CheckInputReader* reader, uint32
         uint32_t length = 0;
         const bool spelled = check_input_spelling(reader, token, &bytes, &length);
         bool had_error = false;
-        refused = spelled && check_literal_unevaluated_escapes(bytes, length, reader->pp != NULL && reader->pp->options.language.standard >= 2023, NULL, &had_error) != 0 ? token : BUSTER_CHECK_NONE;
+        refused = spelled && check_literal_unevaluated_escapes(bytes, length, reader->pp != NULL && reader->pp->options.language.standard >= 2023, false, NULL, &had_error) != 0 ? token : BUSTER_CHECK_NONE;
+        arena_pop_to(reader->scratch, mark);
+    }
+    // Each encoding prefix's -Winvalid-unevaluated-string warning (#1447), once though a list may be read again; a literal
+    // clang refuses has them from the driver, before its escapes' (check_driver_escapes).
+    for (uint32_t token = first; strings && refused == BUSTER_CHECK_NONE && token < last; token += 1)
+    {
+        const uint64_t mark = reader->scratch->length;
+        const uint8_t* bytes = NULL;
+        uint32_t length = 0;
+        const uint32_t prefix = check_input_spelling(reader, token, &bytes, &length) ? check_literal_encoding_prefix(bytes, length) : 0;
+        const uint8_t letter = prefix != 0 ? bytes[0] : 0;
+        arena_pop_to(reader->scratch, mark);
+        if (prefix != 0)
+        {
+            const CheckWarningEvent event =
+            {
+                .id = CHECK_WARNING_ID_INVALID_UNEVALUATED_STRING,
+                .kind = CHECK_WARNING_EVENT_UNEVALUATED_PREFIX,
+                .token = token,
+                .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+                .completion = completion != BUSTER_CHECK_NONE ? completion : token + 1,
+                .payload = { .name = letter, .data = prefix, .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+            };
+            check_input_warning_once(reader, &event);
+        }
+    }
+    // -pedantic's warnings of the delimited and named escapes of a literal clang takes (#1447), once each token though a
+    // list may be read again: the driver's of one it refuses (check_driver_escape).
+    bool had_error = false;
+    for (uint32_t token = first; strings && refused == BUSTER_CHECK_NONE && token < last; token += 1)
+    {
+        const uint64_t mark = reader->scratch->length;
+        const uint8_t* bytes = NULL;
+        uint32_t length = 0;
+        const bool c23 = reader->pp != NULL && reader->pp->options.language.standard >= 2023;
+        const bool spelled = check_input_spelling(reader, token, &bytes, &length) && length != 0;
+        const bool before = had_error;
+        const uint32_t count = spelled ? check_literal_unevaluated_escapes(bytes, length, c23, true, NULL, &had_error) : 0;
+        const uint64_t key = (uint64_t)CHECK_WARNING_EVENT_DELIMITED_ESCAPE << 32 | ((uint64_t)token + 1);
+        bool fresh = count != 0 && !check_warning_set_contains(&reader->source_warning_keys, key);
+        if (fresh)
+        {
+            fresh = check_warning_set_add(&reader->source_warning_keys, key);
+            reader->output->resource |= !fresh;
+        }
+        CheckEscapeDiagnostic* diagnostics = fresh ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, CheckEscapeDiagnostic, BUSTER_CHECK_ESCAPE_DIAGNOSTICS(length)) : NULL;
+        reader->output->resource |= fresh && diagnostics == NULL;
+        bool replayed = before;
+        const uint32_t written = diagnostics != NULL ? check_literal_unevaluated_escapes(bytes, length, c23, true, diagnostics, &replayed) : 0;
+        for (uint32_t i = 0; i < written; i += 1)
+        {
+            const CheckWarningEvent event =
+            {
+                .id = CHECK_WARNING_ID_DELIMITED_ESCAPE,
+                .kind = CHECK_WARNING_EVENT_DELIMITED_ESCAPE,
+                .token = token,
+                .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                .flags = BUSTER_CHECK_WARNING_DEFAULT_IGNORED,
+                .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+                .completion = completion != BUSTER_CHECK_NONE ? completion : token + 1,
+                .payload = { .data = diagnostics[i].kind == CHECK_ESCAPE_DIAGNOSTIC_NAMED, .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+            };
+            check_input_warning_event(reader, &event, NULL, 0);
+        }
         arena_pop_to(reader->scratch, mark);
     }
     *end = last;
@@ -1596,9 +1668,9 @@ static uint32_t check_input_unevaluated_refused(CheckInputReader* reader, uint32
 
 // check_input_unevaluated_refused's literal, whose error drops what it belonged to: whether it has one, and then
 // CHECK_INPUT_UNEVALUATED_ESCAPE at its first token that has one, once, though a list may be read again.
-static bool check_input_unevaluated_strings(CheckInputReader* reader, uint32_t first, uint32_t end)
+static bool check_input_unevaluated_strings(CheckInputReader* reader, uint32_t first, uint32_t end, uint32_t completion)
 {
-    const uint32_t refused = check_input_unevaluated_refused(reader, first, &end);
+    const uint32_t refused = check_input_unevaluated_refused(reader, first, &end, completion);
     bool reported = false;
     for (uint32_t r = 0; refused != BUSTER_CHECK_NONE && r < reader->output->report_count; r += 1)
     {
@@ -2845,7 +2917,7 @@ static bool check_input_attribute_ignored_lists(CheckInputReader* reader, uint32
                         const bool library = reader->library_declarations != NULL && reader->library_declarations[word] != 0;
                         undeclared = named && !library && c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, word) == 0 ? token : BUSTER_CHECK_NONE;
                     }
-                    if (string && !identifier && check_input_unevaluated_strings(reader, argument, stop))
+                    if (string && !identifier && check_input_unevaluated_strings(reader, argument, stop, BUSTER_CHECK_NONE))
                     {
                         // An escape sequence clang refuses in it, its error: then clang drops the attribute.
                         valid = false;
@@ -3874,7 +3946,7 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
             const bool lone = stop == argument + 1 && parser->tokens.kinds[argument] == PARSE_KIND_IDENTIFIER;
             const bool identifier = lone && ((index == 0 && (read->flags & BUSTER_CHECK_ARGUMENTS_IDENTIFIER) != 0) || (read->flags & identifiers) != 0);
             const bool string = index < 32 && ((read->strings >> index) & 1u) != 0 && (read->flags & (identifiers | BUSTER_CHECK_ARGUMENTS_TYPE)) == 0;
-            escaped = string && !identifier && check_input_unevaluated_strings(reader, argument, stop);
+            escaped = string && !identifier && check_input_unevaluated_strings(reader, argument, stop, BUSTER_CHECK_NONE);
             literal = arguments != NULL && string && !identifier && !escaped && (!strings || stop == argument) ? argument : BUSTER_CHECK_NONE;
             argument = stop + 1;
         }

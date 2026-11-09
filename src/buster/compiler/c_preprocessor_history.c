@@ -524,7 +524,7 @@ static void pp_render_diagnostic(Preprocessor* pp, PPSeverity severity, uint32_t
             // Forwarding alone is silent. If the substituted token is itself subsequently expanded, Clang also
             // shows the parameter through which the macro name arrived (CALL(F), where CALL(f) expands to f()).
             const PPSubstitution* substitution = &pp->substitutions[index];
-            if (count != 0)
+            if (count != 0 || pp->diagnostic_arguments)
             {
                 notes[count++] = (PPDiagnosticSource)
                 {
@@ -662,6 +662,7 @@ static void pp_collect_diagnostic(Preprocessor* pp, PPSeverity severity, uint64_
                 .source_notes = owned_notes,
                 .source_note_count = note_count,
                 .severity = (uint8_t)severity,
+                .arguments = pp->diagnostic_arguments,
             };
             if (note_bytes != 0)
             {
@@ -824,6 +825,8 @@ BUSTER_PREPROCESSOR_ENTRY void pp_diagnostic_publish(Preprocessor* pp)
                     const bool owner_fatal = owner->fatal;
                     owner->fatal = pp->fatal;
                     owner->diagnostic_include_range = pp->diagnostic_include_range;
+                    const bool owner_arguments = owner->diagnostic_arguments;
+                    owner->diagnostic_arguments = record->arguments;
                     const PPDiagnosticNote note = {
                         .location = record->note_location,
                         .message = record->note_message,
@@ -837,6 +840,7 @@ BUSTER_PREPROCESSOR_ENTRY void pp_diagnostic_publish(Preprocessor* pp)
                         pp_render_message(owner, PP_SEVERITY_NOTE, source->location, source->origin, NULL, "%s", source->message);
                     }
                     pp->diagnostic_include_range = owner->diagnostic_include_range;
+                    owner->diagnostic_arguments = owner_arguments;
                     owner->fatal = owner_fatal;
                 }
             }

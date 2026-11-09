@@ -3452,12 +3452,26 @@ spellings alone would miss this change (#272).
   and records the errors with its raw string literals' (`pp_record_named_ucns`).
   A first version, a scan of every byte of its own, added about 1 ms (3%) to
   `main.c`'s preprocessing on the 9700X (the refine phase 5.5 to 6.5 ms).
-  Not clang's yet, for `\N` as for `\u`: the error of a basic or control
-  character's UCN in a skipped group, which clang gives; a UCN of a character
-  no identifier may have within one ("character <U+2603> not allowed in an
-  identifier"), which clang reads into the identifier after that error; the
-  -Wunicode warnings of a `\N` without its braces or name; and `-pedantic`'s
-  warning that a named UCN is clang's extension.
+  A `\N` that clang reads as no UCN where a token starts or an identifier goes
+  on has its -Wunicode warning at the backslash (#1447), which is then read as
+  itself: "incomplete universal character name; treating as '\' followed by
+  identifier" without a `{`, "empty delimited universal character name;
+  treating as '\' 'N' '{' '}'", and "incomplete delimited universal character
+  name; treating as '\' 'N' '{' identifier" where the line ends before the
+  `}` (`BUSTER_PP_NAMED_UCN_INCOMPLETE` and after). One that starts a token,
+  its name exactly Unicode's, has -pedantic's "named escape sequences are a
+  Clang extension" at the backslash, before its character's error
+  (`BUSTER_PP_NAMED_UCN_EXTENSION`), as a warning under `-pedantic`,
+  `-Wpedantic` or `-Wdelimited-escape-sequence-extension` and an error under
+  `-pedantic-errors` (`pp_pedantic_severity`, the command line's alone). Both
+  are raw errors found as the others (`pp_named_ucn_at`), so a file without a
+  candidate pays nothing more, and print no flag, as the preprocessor's other
+  warnings don't. Not clang's yet, for `\N` as for `\u`: the error of a basic
+  or control character's UCN in a skipped group, which clang gives; a UCN of a
+  character no identifier may have within one ("character <U+2603> not allowed
+  in an identifier"), which clang reads into the identifier after that error;
+  and the -Wunicode warnings of a `\u` or `\U` without its digits, which the
+  candidates' search (a backslash before `N`) doesn't find.
 - `-E -P` keeps no line numbers, so it doesn't move the token after a
   `_Pragma` that prints nothing to its own line, as clang's printer does when
   that token is on another line; `-E` with line markers does.

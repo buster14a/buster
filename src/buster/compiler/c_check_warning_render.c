@@ -998,6 +998,13 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
         case CHECK_WARNING_EVENT_UNKNOWN_ESCAPE:
             result = check_warning_text(scratch, "unknown escape sequence '\\%c'", (char)payload->name);
             break;
+        case CHECK_WARNING_EVENT_DELIMITED_ESCAPE:
+            result = payload->data != 0 ? "named escape sequences are a Clang extension" : "delimited escape sequences are a C2y extension";
+            break;
+        case CHECK_WARNING_EVENT_UNEVALUATED_PREFIX:
+            result = check_warning_text(scratch, "encoding prefix '%s' on an unevaluated string literal has no effect",
+                                        payload->data == 2 ? "u8" : payload->name == 'L' ? "L" : payload->name == 'U' ? "U" : "u");
+            break;
         case CHECK_WARNING_EVENT_ALIGNOF_EXPRESSION:
         {
             result = check_warning_text(scratch, "'%.*s' applied to an expression is a GNU extension", (int)name.length, name.pointer);
@@ -1456,10 +1463,19 @@ static bool check_driver_warning_events_at(const Parser* parser, Preprocessor* p
                                                      semantic ? PP_DIAGNOSTIC_SEMANTIC : PP_DIAGNOSTIC_LEXICAL, "%s%s", message, suffix);
                         }
                     }
+                    else if (event->kind == CHECK_WARNING_EVENT_UNEVALUATED_PREFIX || event->kind == CHECK_WARNING_EVENT_DELIMITED_ESCAPE)
+                    {
+                        // At the literal, with the macro argument it came from (#1447).
+                        pp->diagnostic_arguments = true;
+                        pp_diagnose_output_offset_at(pp, disposition, source, 0, boundary, "%s%s", message, suffix);
+                        pp->diagnostic_arguments = false;
+                    }
                     else if (event->kind == CHECK_WARNING_EVENT_UNKNOWN_ESCAPE)
                     {
-                        // At its backslash inside the literal's token (#1447).
+                        // At its backslash inside the literal's token (#1447), with the macro argument it came from.
+                        pp->diagnostic_arguments = true;
                         pp_diagnose_output_offset_at(pp, disposition, source, event->payload.data, boundary, "%s%s", message, suffix);
+                        pp->diagnostic_arguments = false;
                     }
                     else if ((event->flags & BUSTER_CHECK_WARNING_UNLOCATED) != 0)
                     {

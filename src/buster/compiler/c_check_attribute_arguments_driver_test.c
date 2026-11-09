@@ -1862,6 +1862,59 @@ static void check_test_driver_unevaluated_strings(CheckTest* test, const char* c
         { "_Static_assert(1, \"\\N{DIGIT ZERO}\");\n", "-std=gnu17", NULL },
         { "__attribute__((deprecated(\"\\N{latin small letter a}\"))) void f(void);\n", "-std=gnu17", NULL },
         { "int x __asm__(\"a\\N{NOT A NAME}\");\n", "-std=gnu17", NULL },
+        // An unevaluated string literal's encoding prefix (#1447): -Winvalid-unevaluated-string's warning at each prefixed token, before
+        // its escapes' diagnostics, and the literal read as an ordinary one (a static assertion's message, an attribute's argument), with
+        // the macro argument it came from; by the option and pragmas.
+        { "_Static_assert(1, u8\"a\");\n", "-std=gnu17", NULL },
+        { "_Static_assert(1, u8\"a\");\n", "-std=gnu23", NULL },
+        { "_Static_assert(1, L\"a\" \"b\");\n_Static_assert(1, \"a\" u\"b\");\n", "-std=gnu17", NULL },
+        { "_Static_assert(0, L\"m\" \"sg\");\n", "-std=gnu17", NULL },
+        { "_Static_assert(0, U\"\\u00e9x\");\n", "-std=gnu17", NULL },
+        { "__attribute__((deprecated(U\"x\"))) int a;\nvoid f(void) { (void)a; }\n", "-std=gnu17", NULL },
+        { "int b __attribute__((section(u8\"s\")));\n", "-std=gnu17", NULL },
+        { "[[deprecated(L\"x\")]] int a;\nvoid f(void) { (void)a; }\n", "-std=gnu23", NULL },
+        { "_Static_assert(1, u8\"msg\\q\");\n", "-std=gnu17", NULL },
+        { "_Static_assert(1, \"\\q\" u8\"a\");\n", "-std=gnu17", NULL },
+        { "_Static_assert(1, L\"\\q\" u8\"a\");\n", "-std=gnu17", NULL },
+        { "#define M(x) _Static_assert(1, x)\nM(u8\"a\");\n", "-std=gnu17", NULL },
+        { "_Static_assert(1, u8R\"(x)\");\n", "-std=gnu17", NULL },
+        { "_Static_assert(1, u8\"a\");\n", "-std=gnu17", "-Wno-invalid-unevaluated-string" },
+        { "_Static_assert(1, u8\"a\");\n", "-std=gnu17", "-Werror=invalid-unevaluated-string" },
+        { "#pragma clang diagnostic ignored \"-Winvalid-unevaluated-string\"\n_Static_assert(1, L\"a\");\n", "-std=gnu17", NULL },
+        { "void f(void) { _Static_assert(1, U\"x\"); }\n", "-std=gnu17", NULL },
+        // -pedantic's warnings of an unevaluated string literal's escapes (#1447): a GNU one's before its error, a delimited or named one's
+        // at the literal while it has no error, after a universal character name's own error; by the options.
+        { "_Static_assert(1, \"\\e\\E\");\n", "-std=gnu17", "-pedantic" },
+        { "__attribute__((deprecated(\"\\(\\{\\[\\%\"))) void f(void);\n", "-std=gnu23", "-pedantic" },
+        { "_Static_assert(1, \"\\x{41}\\x{41}\");\n", "-std=gnu17", "-pedantic" },
+        { "_Static_assert(1, \"\\o{1}\");\n", "-std=gnu17", "-pedantic" },
+        { "_Static_assert(1, \"\\u{e9}\\u{e9}\");\n", "-std=gnu17", "-pedantic" },
+        { "_Static_assert(1, \"\\u{41}x\\u{e9}\");\n", "-std=gnu17", "-pedantic" },
+        { "_Static_assert(1, \"\\u{41}x\\u{e9}\");\n", "-std=gnu23", "-pedantic" },
+        { "_Static_assert(1, \"\\N{SNOWMAN}\");\n", "-std=gnu17", "-pedantic" },
+        { "_Static_assert(1, \"a\\e\\x{41}\");\n", "-std=gnu17", "-pedantic" },
+        { "_Static_assert(1, \"\\x{4g}\" \"\\N{FOO}\" \"\\u{d800}\");\n", "-std=gnu17", "-pedantic" },
+        { "_Static_assert(1, \"\\u{e9}\");\n__attribute__((deprecated(\"\\e\"))) void f(void);\n", "-std=gnu17", "-Wpedantic" },
+        { "_Static_assert(1, \"\\u{e9}\");\n__attribute__((deprecated(\"\\e\"))) void f(void);\n", "-std=gnu17", "-Wdelimited-escape-sequence-extension" },
+        { "_Static_assert(1, \"\\u{e9}\");\n__attribute__((deprecated(\"\\e\"))) void f(void);\n", "-std=gnu17", "-pedantic-errors" },
+        { "_Static_assert(1, \"\\u{e9}\");\n__attribute__((deprecated(\"\\e\"))) void f(void);\n", "-std=gnu17", NULL },
+        // A literal's escape diagnostics show the macro argument it came from (#1447), as clang's literal parsers' do; a numeric
+        // constant's don't.
+        { "#define M(x) _Static_assert(1, x)\nM(\"\\q\");\n", "-std=gnu17", NULL },
+        { "#define D(x) __attribute__((deprecated(x)))\nD(\"a\\e\") int c;\n", "-std=gnu17", NULL },
+        { "#define M(x) (x)\n#define K(y) M(y)\nconst char *s = K(\"\\q\");\n", "-std=gnu17", NULL },
+        { "#define M(x) x x\nconst char *s = M(\"\\q\");\n", "-std=gnu17", NULL },
+        { "#define M(x) x\nconst char *a = M(\"\\N{FOO}\");\n", "-std=gnu17", NULL },
+        { "#define M(x) x\nint a = M('\\q');\n", "-std=gnu17", NULL },
+        { "#define M(x) x\nconst char *s = M(\"\\x100\");\n", "-std=gnu17", NULL },
+        { "#define M(x) x\nint a = M(08);\n", "-std=gnu17", NULL },
+        // The literals past where a reader's error stopped the unit's checking (#1447): each one's errors and warnings, as clang's
+        // literal parsers give them whatever came before (an evaluated literal's, a numeric constant's, an attribute's and a
+        // static assertion's message's).
+        { "int a = undeclared;\nconst char *s = \"\\x123\";\nint c = '\\777';\nchar d[] = \"\\o{8}\";\nvoid f(void) { int x = \"\\u{}\"[0]; (void)x; }\n", "-std=gnu17", NULL },
+        { "const char *s = \"\\x123\";\nconst char *t = \"\\q\" \"\\x100\";\nint n = 09 + 1e;\n", "-std=gnu17", NULL },
+        { "const char *s = \"\\x123\";\n__attribute__((deprecated(\"\\e\"))) int y;\n_Static_assert(1, \"\\q\");\n", "-std=gnu17", NULL },
+        { "const char *s = \"\\x123\";\nconst char *t = \"\\q\";\n", "-std=gnu17", "-Wno-unknown-escape-sequence" },
     };
     enum { LINES = 16384 };
     char* expected_lines = malloc(LINES);

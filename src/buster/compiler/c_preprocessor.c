@@ -535,6 +535,16 @@ typedef struct PPFileData PPFileData;
 // isn't a character such a token may have: a name that isn't Unicode's, or a character below U+00A0
 // (pp_diagnose_named_ucn words clang's errors, #1447). One within a token is read without them, as clang reads it.
 #define BUSTER_PP_NAMED_UCN_ERROR 0x80
+// A named UCN that starts a token as clang reads it whole, its name exactly Unicode's (#1447): -pedantic's warning that it
+// is clang's extension (pp_diagnose_named_ucn), before its character's error, if any (then it is
+// BUSTER_PP_NAMED_UCN_ERROR's).
+#define BUSTER_PP_NAMED_UCN_EXTENSION 0x81
+// A `\N` where a token starts or an identifier goes on that clang reads as no UCN (#1447): -Wunicode's warnings, which
+// treat its backslash as itself (pp_diagnose_named_ucn_shape): no `{` after it, an empty name (`\N{}`), or a name with
+// no `}` before the line's end.
+#define BUSTER_PP_NAMED_UCN_INCOMPLETE 0x82
+#define BUSTER_PP_NAMED_UCN_EMPTY 0x83
+#define BUSTER_PP_NAMED_UCN_UNTERMINATED 0x84
 // The bytes of a bad name pp_diagnose_named_ucn's error prints, at most.
 #define BUSTER_PP_NAMED_UCN_NAME_BYTES 1024
 
@@ -543,7 +553,7 @@ struct PPRawError
 {
     uint32_t token;
     uint32_t offset;
-    // A CRawStringError, or BUSTER_PP_NAMED_UCN_ERROR.
+    // A CRawStringError, or a named UCN's (BUSTER_PP_NAMED_UCN_ERROR and those after it).
     uint8_t kind;
 };
 
@@ -1408,6 +1418,8 @@ struct PPDiagnosticRecord
     PPDiagnosticSourceNote* source_notes;
     uint32_t source_note_count;
     uint8_t severity;
+    // Whether its macro notes show the argument it came from (Preprocessor.diagnostic_arguments).
+    bool arguments;
 };
 
 struct Preprocessor
@@ -1656,6 +1668,10 @@ struct Preprocessor
     uint32_t diagnostic_run_first;
     bool diagnostic_collection_failed;
     bool diagnostic_source;
+    // Set by a caller around a literal's diagnostic at a character of its spelling (#1447): clang's StringLiteralParser and
+    // CharLiteralParser diagnostics, whose macro notes show the macro argument the literal came from ("expanded from
+    // macro 'M'" at the parameter), where other diagnostics' forwarding is silent (pp_render_diagnostic).
+    bool diagnostic_arguments;
     bool history_failed;
     // What a run leaves open, or closes without its opening: invocations and builtin operands left open where their
     // context ended, conditionals and block comments left open at a file's end, pragma regions (assume_nonnull,
@@ -3319,13 +3335,16 @@ static void pp_scan_named_ucn_chunks(const uint8_t* bytes, uint64_t length, cons
 }
 
 // Is candidate byte `i` of a file (pp_named_ucn_candidates) the backslash (or the end of ??/) of a named UCN that starts
-// an identifier or an unknown token and that clang diagnoses there? Then `token` is that token and `position` the UCN's
-// first byte. clang reads one within a token (an identifier's or a pp-number's later character) without a diagnostic
-// (tryConsumeIdentifierUCN): its name exactly Unicode's and its character one the token may have, or else the token ends
-// before it and it starts the next. Where it starts a token, its name not exactly Unicode's or a character below U+00A0
-// (whatever its name loosely stands for) is an error (pp_diagnose_named_ucn). A UCN in a literal or a comment is in
-// neither: #if words one in a character constant when it reads it (pp_parse_ucn), and the checker one in a literal.
-static bool pp_named_ucn_at(uint32_t refine_flags, const PPFileData* data, uint64_t i, uint32_t* token, uint64_t* position)
+// an identifier or an unknown token and that clang diagnoses there? Then `token` is that token, `position` the UCN's
+// first byte and `kind` the diagnostic's. clang reads one within a token (an identifier's or a pp-number's later
+// character) without a diagnostic (tryConsumeIdentifierUCN): its name exactly Unicode's and its character one the token
+// may have, or else the token ends before it and it starts the next. Where it starts a token, its name not exactly
+// Unicode's or a character below U+00A0 (whatever its name loosely stands for) is an error (BUSTER_PP_NAMED_UCN_ERROR,
+// pp_diagnose_named_ucn); an exact name's, -pedantic's warning that it is clang's extension
+// (BUSTER_PP_NAMED_UCN_EXTENSION, #1447); and a `\N` clang reads as no UCN (no `{`, an empty name or no `}`), a -Wunicode
+// warning (#1447, BUSTER_PP_NAMED_UCN_INCOMPLETE and after). A UCN in a literal or a comment is in neither: #if words one
+// in a character constant when it reads it (pp_parse_ucn), and the checker one in a literal.
+static bool pp_named_ucn_at(uint32_t refine_flags, const PPFileData* data, uint64_t i, uint32_t* token, uint64_t* position, uint8_t* kind)
 {
     // As pp_file_lexer reads the file.
     const ScalarLexer lexer = {
@@ -3344,8 +3363,23 @@ static bool pp_named_ucn_at(uint32_t refine_flags, const PPFileData* data, uint6
     result = result && peek_char(&lexer, start + size, &kind_size) == 'N';
     uint64_t end = 0;
     uint32_t code_point = 0;
-    // (A name exactly Unicode's of a character at U+00A0 or past it is no error.)
-    result = result && read_ucn(&lexer, start, &end, &code_point) && code_point == 0;
+    const bool read = result && read_ucn(&lexer, start, &end, &code_point);
+    // What clang reads where no UCN is (read_ucn_name's shapes): no `{`, `{}`, or a name the line ends in.
+    uint64_t brace_size = 0;
+    const bool braced = result && !read && peek_char(&lexer, start + size + kind_size, &brace_size) == '{';
+    uint64_t close_size = 0;
+    const bool empty = braced && peek_char(&lexer, start + size + kind_size + brace_size, &close_size) == '}';
+    // (A name exactly Unicode's of a character at U+00A0 or past it is no error, but -pedantic's warning.)
+    uint8_t name[BUSTER_PP_NAMED_UCN_NAME_BYTES];
+    uint64_t name_length = 0;
+    uint64_t name_start = 0;
+    uint64_t name_end = 0;
+    uint32_t exact = 0;
+    const bool named = read && code_point != 0 && read_ucn_name(&lexer, start, name, sizeof(name), &name_length, &name_start, &name_end) &&
+                       name_length < sizeof(name) && unicode_name_strict(name, (uint32_t)name_length, &exact);
+    *kind = !result ? 0 : read && code_point == 0 ? BUSTER_PP_NAMED_UCN_ERROR : named ? BUSTER_PP_NAMED_UCN_EXTENSION :
+            read ? 0 : !braced ? BUSTER_PP_NAMED_UCN_INCOMPLETE : empty ? BUSTER_PP_NAMED_UCN_EMPTY : BUSTER_PP_NAMED_UCN_UNTERMINATED;
+    result = *kind != 0;
     // The token it may start: the last that starts at it or before it.
     uint32_t low = 0;
     uint32_t high = result ? data->token_count : 0;
@@ -3358,8 +3392,8 @@ static bool pp_named_ucn_at(uint32_t refine_flags, const PPFileData* data, uint6
     }
     result = result && low != 0;
     const uint32_t t = low != 0 ? low - 1 : 0;
-    const uint8_t kind = result ? data->kinds[t] & 0x7F : C_TOKEN_KIND_COUNT;
-    result = result && (kind == C_TOKEN_UNKNOWN || kind == C_TOKEN_RAW_IDENTIFIER) && data->starts[t] == start;
+    const uint8_t token_kind = result ? data->kinds[t] & 0x7F : C_TOKEN_KIND_COUNT;
+    result = result && (token_kind == C_TOKEN_UNKNOWN || token_kind == C_TOKEN_RAW_IDENTIFIER) && data->starts[t] == start;
     *token = t;
     *position = start;
     return result;
@@ -3387,9 +3421,10 @@ static bool pp_record_named_ucns(const PPPrepare* prepare, Arena* arena, PPFileD
             {
                 uint32_t token = 0;
                 uint64_t position = 0;
-                if (named < scan->count && pp_named_ucn_at(prepare->refine_flags, data, b + (uint64_t)__builtin_ctzll(bits), &token, &position))
+                uint8_t kind = 0;
+                if (named < scan->count && pp_named_ucn_at(prepare->refine_flags, data, b + (uint64_t)__builtin_ctzll(bits), &token, &position, &kind))
                 {
-                    errors[raw_count + named] = (PPRawError){ .token = token, .offset = (uint32_t)position, .kind = BUSTER_PP_NAMED_UCN_ERROR };
+                    errors[raw_count + named] = (PPRawError){ .token = token, .offset = (uint32_t)position, .kind = kind };
                     named += 1;
                 }
             }
@@ -6824,6 +6859,26 @@ static void pp_diagnose_ucn_basic(Preprocessor* pp, uint32_t location, uint32_t 
     }
 }
 
+// How -pedantic's warnings of the preprocessor are given (#1447): as warnings under -pedantic, -Wpedantic,
+// -Wdelimited-escape-sequence-extension or -Weverything, errors under -pedantic-errors, the last of those and their -Wno-
+// forms deciding; PP_SEVERITY_NOTE for none. The command line's alone: the source's pragmas don't reach the lexer's raw
+// diagnostics.
+static PPSeverity pp_pedantic_severity(const Preprocessor* pp)
+{
+    PPSeverity result = PP_SEVERITY_NOTE;
+    bool errors = false;
+    for (uint32_t i = 0; i < pp->options.semantic_warning_option_count; i += 1)
+    {
+        const char* option = pp->options.semantic_warning_options[i];
+        const bool on = strcmp(option, "-pedantic") == 0 || strcmp(option, "-Wpedantic") == 0 || strcmp(option, "-Wdelimited-escape-sequence-extension") == 0 ||
+                        strcmp(option, "-Weverything") == 0;
+        const bool off = strcmp(option, "-Wno-pedantic") == 0 || strcmp(option, "-Wno-delimited-escape-sequence-extension") == 0 || strcmp(option, "-Wno-everything") == 0;
+        errors |= strcmp(option, "-pedantic-errors") == 0;
+        result = on || strcmp(option, "-pedantic-errors") == 0 ? PP_SEVERITY_WARNING : off ? PP_SEVERITY_NOTE : result;
+    }
+    return result == PP_SEVERITY_WARNING && errors ? PP_SEVERITY_ERROR : result;
+}
+
 // The diagnostics of a named UCN that starts a token (BUSTER_PP_NAMED_UCN_ERROR), whose backslash is byte `offset` of
 // `data`, at `base`: as clang's tryReadNamedUCN, a name that isn't exactly Unicode's is an error at the name, with a note
 // where it is one loosely, whose character clang reads it as; then as tryReadUCN, that character (or the exact name's)
@@ -6839,8 +6894,14 @@ static __attribute__((noinline, cold)) void pp_diagnose_named_ucn(Preprocessor* 
     {
         const uint32_t shown = length < sizeof(name) ? (uint32_t)length : (uint32_t)sizeof(name);
         uint32_t code_point = 0;
-        const bool exact = unicode_name_strict(name, shown, &code_point);
+        const bool exact = length < sizeof(name) && unicode_name_strict(name, shown, &code_point);
         bool found = exact;
+        const PPSeverity extension = exact ? pp_pedantic_severity(pp) : PP_SEVERITY_NOTE;
+        if (extension != PP_SEVERITY_NOTE)
+        {
+            // -pedantic's (#1447), at the backslash, before its character's error.
+            pp_diagnose(pp, extension, base + offset, "named escape sequences are a Clang extension");
+        }
         if (!exact)
         {
             UnicodeNameDiagnosis diagnosis;
@@ -6930,7 +6991,17 @@ static __attribute__((noinline, cold)) void pp_read_raw_errors_slow(Preprocessor
                     break;
                 }
                 case BUSTER_PP_NAMED_UCN_ERROR:
+                case BUSTER_PP_NAMED_UCN_EXTENSION:
                     pp_diagnose_named_ucn(pp, data, pp->ranges[context->range].base, error.offset);
+                    break;
+                case BUSTER_PP_NAMED_UCN_INCOMPLETE:
+                    pp_diagnose(pp, PP_SEVERITY_WARNING, location, "incomplete universal character name; treating as '\\' followed by identifier");
+                    break;
+                case BUSTER_PP_NAMED_UCN_EMPTY:
+                    pp_diagnose(pp, PP_SEVERITY_WARNING, location, "empty delimited universal character name; treating as '\\' 'N' '{' '}'");
+                    break;
+                case BUSTER_PP_NAMED_UCN_UNTERMINATED:
+                    pp_diagnose(pp, PP_SEVERITY_WARNING, location, "incomplete delimited universal character name; treating as '\\' 'N' '{' identifier");
                     break;
                 case C_RAW_STRING_OK:
                     break;
@@ -14261,13 +14332,13 @@ static uint32_t pp_decode_file_name(Preprocessor* pp, const uint8_t* spelling, u
     bool valid = length >= 2 && spelling[0] == '"' && spelling[length - 1] == '"';
     bool reported = false;
     bool counted_error = false;
-    const uint32_t escapes = valid ? check_literal_unevaluated_escapes(spelling, length, pp->options.language.standard >= 2023, NULL, &counted_error) : 0;
+    const uint32_t escapes = valid ? check_literal_unevaluated_escapes(spelling, length, pp->options.language.standard >= 2023, false, NULL, &counted_error) : 0;
     if (escapes != 0)
     {
         Scratch scratch = scratch_begin(0);
         CheckEscapeDiagnostic* diagnostics = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, CheckEscapeDiagnostic, BUSTER_CHECK_ESCAPE_DIAGNOSTICS(length));
         bool had_error = false;
-        const uint32_t count = diagnostics != NULL ? check_literal_unevaluated_escapes(spelling, length, pp->options.language.standard >= 2023, diagnostics, &had_error) : 0;
+        const uint32_t count = diagnostics != NULL ? check_literal_unevaluated_escapes(spelling, length, pp->options.language.standard >= 2023, false, diagnostics, &had_error) : 0;
         for (uint32_t i = 0; i < count; i += 1)
         {
             const CheckEscapeDiagnostic* diagnostic = diagnostics + i;

@@ -118,6 +118,12 @@ enum
     // statement increment or decrement (#1447, clang's CheckForLoopConditionalStatement and CheckForRedundantIteration):
     // -Wfor-loop-analysis, off by default, under -Wloop-analysis and -Wmost and so -Wall.
     CHECK_WARNING_ID_FOR_LOOP_ANALYSIS = 110,
+    // An encoding prefix on an unevaluated string literal (#1447): -Winvalid-unevaluated-string, on by default.
+    CHECK_WARNING_ID_INVALID_UNEVALUATED_STRING = 111,
+    // -pedantic's warnings of an unevaluated string literal's escapes (#1447): a GNU one's (-Wpedantic) and a delimited or
+    // named one's (-Wdelimited-escape-sequence-extension), off by default, extensions -pedantic gives.
+    CHECK_WARNING_ID_NONSTANDARD_ESCAPE = 112,
+    CHECK_WARNING_ID_DELIMITED_ESCAPE = 113,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -362,6 +368,14 @@ typedef enum CheckWarningEventKind
     // payload.first_type and second_type its operands' types as clang's getEnumCoercedType gives them, payload.name and
     // data their typedef spellings (0 for none). check_common_enum_arithmetic reports it as the graph's operators.
     CHECK_WARNING_EVENT_ENUM_MIX,
+    // An unevaluated string literal's encoding prefix (#1447): "encoding prefix 'P' on an unevaluated string literal has no
+    // effect", at the token, payload.data the prefix's length (1 or 2: u8). A literal with an escape clang refuses there
+    // has its warnings from the driver instead, before the escapes' (check_driver_escapes).
+    CHECK_WARNING_EVENT_UNEVALUATED_PREFIX,
+    // A delimited or named escape sequence of an unevaluated string literal clang takes (#1447, -pedantic's
+    // -Wdelimited-escape-sequence-extension): at the token, payload.data 1 for a named one's "named escape sequences are a
+    // Clang extension", 0 for "delimited escape sequences are a C2y extension".
+    CHECK_WARNING_EVENT_DELIMITED_ESCAPE,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
 

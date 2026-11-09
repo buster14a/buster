@@ -1838,11 +1838,33 @@ by the preprocessor (`pp_decode_file_name`), whose unknown-escape warning has
 no flag, as its other warnings haven't. Asm labels and statements, pragmas'
 strings and `_Pragma` read evaluated literals, as clang's do.
 
-Not clang's yet: the encoding prefix's -Winvalid-unevaluated-string warning
-(a prefixed argument stays "expected string literal"), -pedantic's warnings of
-the non-standard escapes, the "expanded from macro" note of a literal that is
-a macro's argument, and what follows `\x` without digits, which clang alone
-keeps (its attribute still applies). A static assertion's message of an escape
+An encoding prefix (`L`, `u`, `U`, `u8`) has no effect there (#1447): each
+prefixed token has -Winvalid-unevaluated-string's "encoding prefix 'P' on an
+unevaluated string literal has no effect" at it, and the literal reads as an
+ordinary one (`check_literal_unevaluated_parts`), so `deprecated(U"x")`'s
+message is `x` and `_Static_assert(0, L"m" "sg")` fails with `msg`. Clang
+gives a literal's prefix warnings before any of its escapes' diagnostics, and
+a static assertion's before its failure: the reader's event of a literal it
+takes (`check_input_unevaluated_refused`, completed at the assertion's
+keyword), the driver's ahead of the escapes of one it refuses
+(`check_driver_unevaluated_prefixes`). -pedantic's warnings come with the
+escapes' (`check_literal_unevaluated_escapes`' `pedantic`): "use of
+non-standard escape character '\e'" (-Wpedantic) before a GNU escape's error,
+and -Wdelimited-escape-sequence-extension's "delimited escape sequences are a
+C2y extension" and "named escape sequences are a Clang extension", which clang
+places at the literal's token, after a delimited or named escape it read whole
+while the literal had no error (a delimited universal character name's after
+its own basic or control character's error). Both are off by default, given by
+-pedantic, and errors under -pedantic-errors (`check_warning_pedantic`). A
+literal's escape and prefix diagnostics show the macro argument it came from,
+"expanded from macro 'M'" at the parameter, as clang's literal parsers' do
+(`Preprocessor.diagnostic_arguments`); a numeric constant's errors don't, nor
+clang's.
+
+Not clang's yet: what follows `\x` without digits, which clang alone keeps
+(its attribute still applies); and -pedantic's warnings of an evaluated
+literal's escapes (`"\e"` in an initializer), which the fast decoding takes
+without a scan. A static assertion's message of an escape
 the fast decoding refuses (a named or a delimited one, #1447) is read as clang
 reads it (`check_literal_strings_extended`). Like the checker's other errors, the
 first one ends the unit's semantic diagnostics after its declaration.
@@ -1884,9 +1906,12 @@ literals, decode the same way: the label through `check_input_attribute_string`'
 `evaluated`. A static assertion's message stays the unevaluated literals'
 (`check_driver_escapes`). After a unit's parse error, the driver's scan of the
 unparsed rest (`check_driver_unparsed_strings`) words the evaluated literals'
-errors too. After a checker error, the first ends the unit's semantic
-diagnostics as the others do, so clang's later literal errors there are still
-missing (semantic error recovery).
+errors too. After a checker error that stops the reader, the literals it
+left unread are scanned as a failed parse's rest is
+(`check_driver_unread_literals`, from `CheckInput.walk_end` and past the last
+report's token): their errors and warnings, which clang's literal parsers give
+whatever came before. The unit's other semantic diagnostics still end there
+(semantic error recovery).
 
 An ordinary character constant of more than one character
 (`CheckLiteral.characters`) has clang's warnings at it
