@@ -5632,7 +5632,7 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         {
             check_test_program_boundary_target(test, "union __attribute__((packed)) U{float v __attribute__((vector_size(16)));char c[22];};"
                                                      "union U make(int n){union U u={0};u.c[0]=(char)n;return u;}int tested(int n){return make(n).c[0];}",
-                                               "odd-vector-union-result", true, false, 0, 0, "structs and unions returned in these registers", &v3);
+                                               "odd-vector-union-result", true, false, 1, 1, "structs and unions returned in these registers", &v3);
         }
         check_test_program_boundary(test, "struct W{unsigned __int128 x:100;};int tested(int n){struct W w;w.x=n;return w.x>1;}", "int128-bit-field-past-8-bytes", true,
                                     false, 0, 0);
