@@ -414,8 +414,9 @@ struct Tier0Operation
 // statement's operand block, a frame object of the function's (`block`, a local): a record's base of
 // BUSTER_TIER0_ASM_BLOCK addresses it, its displacement a slot's offset in it. They write the registers of `touched`
 // (BUSTER_TIER0_XMM's layout), the flags and memory, nothing that holds the frame (rsp, rbp, r15), no opmask register
-// and no x87 register past the template's own use of its stack, which it leaves empty; they have no branch, no reference
-// and no effect on the stack or on control flow (c_check_program_asm.c's check_asm_inline_code). Tier 0 takes the call
+// and no x87 register past the template's own use of its stack, which it leaves empty; they have no reference and no
+// effect on the stack, and leave control flow only by their own branches to their own records, or to their end
+// (c_check_program_asm.c's check_asm_inline_code). Tier 0 takes the call
 // as any other, its clobbers with `touched`'s: the values live across it saved and restored (every depth below it in a
 // register, where `touched` has a callee-saved one), no home in a register it touches, and a callee-saved one it touches
 // saved by the prologue.
@@ -431,6 +432,12 @@ struct Tier0AsmBody
     uint32_t count;
     uint32_t block;
     uint32_t touched;
+    // The template's local branches (#1839): `branch_count` of its records, ascending, each a rel8 form that branch sizing
+    // sizes, and each one's target, a record of the body or its count (the body's end), as Tier0Code's branch columns
+    // have them but relative to the body's first record.
+    const uint32_t* branches;
+    const uint32_t* targets;
+    uint32_t branch_count;
 };
 
 // The most a function may have of each (the columns' indices are 32-bit), and of its objects' bytes, each object's
@@ -6425,6 +6432,11 @@ static __attribute__((noinline, cold)) bool tier0_asm_bodies_check(const Tier0Fu
         valid = (body->block == BUSTER_TIER0_ASM_NO_BLOCK || (body->block < function->local_count && tier0_is_object(function, body->block))) &&
                 (body->count == 0 || body->records != 0) &&
                 (body->touched & (1u << X86_REGISTER_RSP | 1u << X86_REGISTER_RBP | 1u << X86_REGISTER_R15)) == 0;
+        valid = valid && body->branch_count <= body->count && (body->branch_count == 0 || (body->branches != 0 && body->targets != 0));
+        for (uint32_t b = 0; valid && b < body->branch_count; b += 1)
+        {
+            valid = body->branches[b] < body->count && (b == 0 || body->branches[b - 1] < body->branches[b]) && body->targets[b] <= body->count;
+        }
         for (uint32_t r = 0; valid && r < body->count; r += 1)
         {
             const X86Instruction* record = &body->records[r];
@@ -6473,6 +6485,8 @@ static void tier0_emit_call_record(const Tier0Function* function, const Tier0Hom
     const Tier0AsmBody* body = tier0_call_body(function, call);
     if (body != 0)
     {
+        const uint32_t first = writer->count;
+        uint32_t branch = 0;
         for (uint32_t r = 0; r < body->count; r += 1)
         {
             X86Instruction record = body->records[r];
@@ -6481,6 +6495,17 @@ static void tier0_emit_call_record(const Tier0Function* function, const Tier0Hom
                 const Tier0Home block = homes[body->block];
                 record.rm = block.reg;
                 record.displacement += block.displacement;
+            }
+            if (branch < body->branch_count && body->branches[branch] == r)
+            {
+                // The template's own branch, which branch sizing sizes as the function's: its target in the function's records.
+                if (writer->records != 0)
+                {
+                    writer->branches[writer->branch_count] = writer->count;
+                    writer->targets[writer->branch_count] = first + body->targets[branch];
+                }
+                writer->branch_count += 1;
+                branch += 1;
             }
             tier0_put(writer, record);
         }
@@ -6504,6 +6529,13 @@ static void tier0_emit_call_record(const Tier0Function* function, const Tier0Hom
         writer->reference_count += 1;
         tier0_put(writer, tier0_instruction(X86_FORM_CALL_REL32 | BUSTER_X86_FORM_FIXUP, 0, 0, 0, 0, 0));
     }
+}
+
+// How many branches tier0_emit_call_record writes for call row `call`: an asm body's own.
+static uint32_t tier0_count_call_branches(const Tier0Function* function, uint32_t call)
+{
+    const Tier0AsmBody* body = tier0_call_body(function, call);
+    return body != 0 ? body->branch_count : 0;
 }
 
 // How many records tier0_emit_call_record writes for call row `call`, and its references into `references`.
@@ -9349,6 +9381,8 @@ static inline __attribute__((always_inline)) uint32_t tier0_count_deferred(const
         const uint32_t value = tier0_integer_depths[entries->depths[i] - 2];
         count = value == X86_REGISTER_RCX ? 3 : 4;
     }
+    // An asm body's own branches (#1839).
+    *branches += kind == BUSTER_TYPED_CALL ? tier0_count_call_branches(function, (uint32_t)function->values[i]) : 0;
     return count;
 }
 
@@ -10438,6 +10472,7 @@ static uint32_t tier0_count_deep(const Tier0Function* function, const Tier0Entri
         count += !stored && tier0_stack(function->classes[i]) != 0 ? 1 : 0;
         count += 2 * tier0_saved_masks(entries, i);
         counts->references += references;
+        counts->branches += !tail ? tier0_count_call_branches(function, call) : 0;
     }
     else
     {
