@@ -1476,6 +1476,25 @@ static void check_test_driver_attribute_arguments(CheckTest* test, const char* c
         "__attribute__((stdcall(1))) void f(void);\n",
         "void f(void) __attribute__((pcs(\"aapcs\", 1))) {}\n",
         "int x __attribute__((ms_abi(1), unused));\n",
+        // On a tag, its count's error too, as clang's handleCallConvAttr checks it there (#1447); its arguments are expressions
+        // to clang's parser first, whose undeclared names' errors drop it wherever it is.
+        "struct __attribute__((vectorcall(1))) S { int a; };\n",
+        "struct __attribute__((ms_abi(1, 2))) S;\n",
+        "union __attribute__((sysv_abi(1))) U { int a; };\n",
+        "enum __attribute__((preserve_all(1))) E { A };\n",
+        "struct __attribute__((stdcall(1))) S { int a; };\n",
+        "struct __attribute__((swiftcall(1))) S { int a; };\n",
+        "struct __attribute__((intel_ocl_bicc(1))) S { int a; };\n",
+        "struct S { int a; } __attribute__((ms_abi(1)));\n",
+        "struct __attribute__((vectorcall(1), ms_abi(2))) S { int a; };\n",
+        "struct __attribute__((amdgpu_kernel(1))) S { int a; };\n",
+        "struct __attribute__((pcs(\"aapcs\", 1))) S { int a; };\n",
+        "struct __attribute__((regcall(x))) S { int a; };\n",
+        "struct __attribute__((stdcall(y))) S { int a; };\n",
+        "int x __attribute__((vectorcall(y)));\n",
+        "void f(void) __attribute__((vectorcall(y)));\n",
+        "void f(void) __attribute__((pcs(\"aapcs\", 1)));\n",
+        "int n; void f(void) __attribute__((ms_abi(n + 1)));\n",
         // no_caller_saved_registers with System V's convention, in either order and every place, is the bit's type, which
         // the assertions see where the diagnostics can't (#1639's review).
         "typedef void N(void) __attribute__((no_caller_saved_registers));\n__attribute__((cdecl, no_caller_saved_registers)) void f(void);\n"
