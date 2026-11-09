@@ -2248,6 +2248,18 @@ static bool check_common_volatile_read(const CheckStream* stream, const TypeTabl
     return result;
 }
 
+// Whether a discarded `node`'s value is of type void where clang's isUnusedResultAWarning stays quiet: a void value is
+// no unused result (an extern void object's, #1447), but a dereference's or a subscript's warns all the same — clang
+// warns of those unconditionally, and only they can yield void. The statement marker and this walk's leaf share it.
+static bool check_common_void_quiet(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, uint32_t node)
+{
+    const CheckOp op = node < graph->count ? graph->ops[node] : CHECK_OP_COUNT;
+    const TypeId type = op != CHECK_OP_DEREFERENCE && op != CHECK_OP_SUBSCRIPT && node < stream->count ?
+                        type_strip_aligned(types, check_stream_type(stream, node)) : 0;
+    const bool result = type != 0 && type_kind(types, type) == BUSTER_TYPE_KIND_VOID;
+    return result;
+}
+
 // Whether a call in a logical operator's operand, whose result this unit's marks don't say warns, keeps the operator's
 // warning all the same (#1390): where a typedef of the unit has a result contract, which a return type spelled through
 // typeof may carry past the declarator's specifiers, or where the callee is overloaded, whose candidate's contracts the
@@ -2271,8 +2283,9 @@ static bool check_common_unused_unknown(const CheckCommonEmission* emission, uin
 // where both arms' do (a GNU `x ?: y`'s where its else arm's does), and is reported at the else arm's, which clang
 // evaluates last; a logical operator's warns where both operands' do, and is reported at the operator; a selection's is
 // its chosen operand's, a statement expression's its last value's (none is quiet), a conversion's its operand's. Any
-// other value warns where it is a call whose result warns, or where it has no effect, is no cast to void and reads no
-// volatile object; in a logical operator's operand a call keeps the warning in the units check_common_unused_unknown says. The
+// other value warns where it is a call whose result warns, or where it has no effect, is no cast to void, is no void
+// value but a dereference's or a subscript's, and reads no volatile object; in a logical operator's operand a call keeps
+// the warning in the units check_common_unused_unknown says. The
 // walk goes into the left operands first and holds the right ones, and each logical operator's mark after its operands,
 // on a bounded stack; it runs only for a discarded statement's value, a comma's left operand and a discarded comma's, so
 // that the graph's facts needn't hold an answer for every operator.
@@ -2345,7 +2358,8 @@ static __attribute__((noinline)) CheckCommonUnused check_common_unused_of(CheckC
             call = !mark && emission->ignored != NULL && check_common_ignored_op(op) && check_common_ignored_of(emission, at, &result.found);
             const bool unknown = !mark && !call && op == CHECK_OP_CALL && (kind & BUSTER_CHECK_UNUSED_LOGICAL) != 0 && check_common_unused_unknown(emission, at);
             warns = mark || call || unknown ||
-                    (!void_cast && !check_common_node_effect(graph, at) && !check_common_volatile_read(stream, types, at));
+                    (!void_cast && !check_common_node_effect(graph, at) && !check_common_volatile_read(stream, types, at) &&
+                     !check_common_void_quiet(graph, stream, types, at));
             leaf = at;
             done = depth == 0;
             at = depth != 0 ? pending[depth - 1] : BUSTER_CHECK_NONE;
@@ -2634,8 +2648,10 @@ static void check_common_stmt_marker(CheckCommonEmission* emission, uint32_t nod
              !(role == PARSE_ROLE_CLOSE_CAST && check_common_void_cast(parser, emission->pp, emission->input, emission->stream, emission->types, token)) &&
              parser->tokens.kinds[token] != PARSE_KIND_L_PAREN &&
              parser->tokens.kinds[token] != PARSE_KIND_PLUSPLUS && parser->tokens.kinds[token] != PARSE_KIND_MINUSMINUS &&
-             !check_common_node_effect(graph, node) && !check_common_volatile_read(emission->stream, emission->types, node))
+             !check_common_node_effect(graph, node) && !check_common_volatile_read(emission->stream, emission->types, node) &&
+             !check_common_void_quiet(graph, emission->stream, emission->types, node))
     {
+        // (A value of type void is no result clang warns of, but a dereference's or a subscript's is, #1447.)
         // A discarded member read points at the member's name, like the comma's left operand does.
         const uint32_t report = role == PARSE_ROLE_CLOSE_CAST ? check_common_cast_opener(parser, token) :
                                 role == PARSE_ROLE_MEMBER_OPERATOR && token + 1 < count ? token + 1 : token;
@@ -3245,12 +3261,76 @@ static bool check_common_floating_kind(const TypeTable* types, TypeId type)
            (kind == BUSTER_TYPE_KIND_COMPLEX && check_action_kind(types, type_element(types, type_strip_aligned(types, type))) == BUSTER_TYPE_KIND_FLOATING);
 }
 
+// A conditional's place, clang's: its `?`, the `:`'s child. A GNU `a ?: b`'s `?` and `:` are adjacent.
+static uint32_t check_common_enum_question(const Parser* parser, uint32_t colon, bool conditional)
+{
+    uint32_t question = colon;
+    for (uint32_t at = conditional ? colon : 0; at != 0 && question == colon;)
+    {
+        at -= 1;
+        question = parser->tree.parents[at] == colon && parser->tree.roles[at] == PARSE_ROLE_OPEN_TERNARY ? at : question;
+    }
+    return question;
+}
+
+// One operator's enumeration mix (clang's checkEnumArithmeticConversions), reported at `question` (a conditional's `?`):
+// `kind` its message's (0 arithmetic, 1 bitwise, 2 comparison, 3 conditional, 4 compound assignment), `omitted` a GNU
+// `a ?: b`'s, whose omitted middle operand is its condition promoted (clang's UsualUnaryConversions): an enumeration's is
+// an integer then, and a floating one an rvalue. Each operand's type is as getEnumCoercedType gives it
+// (check_common_enum_coerced), with its typedef spelling where it is the operand's own (0 for none).
+static void check_common_enum_mix(const Parser* parser, Preprocessor* pp, const CheckInput* input, TypeTable* types, CheckWarningSpelling* spell,
+                                  Arena* scratch, uint32_t kind, uint32_t question, bool omitted, TypeId left_coerced, TypeId right_coerced,
+                                  uint32_t left_spelling, uint32_t right_spelling)
+{
+    static const char* const kinds[] = { "arithmetic between", "bitwise operation between", "comparison of", "conditional expression between",
+                                         "compound assignment of" };
+    const bool compound = kind == 4;
+    // A comparison's operands are rvalues first (clang's DefaultLvalueConversion): unqualified, a typedef that
+    // carries a qualifier itself spelled as its type.
+    const bool rvalue_left = kind == 2 || omitted;
+    const bool rvalue_right = kind == 2;
+    const TypeId left_type = rvalue_left ? type_unqualified(left_coerced) : left_coerced;
+    const TypeId right_type = rvalue_right ? type_unqualified(right_coerced) : right_coerced;
+    const bool left_enum = !omitted && check_action_kind(types, left_type) == BUSTER_TYPE_KIND_ENUM;
+    const bool right_enum = check_action_kind(types, right_type) == BUSTER_TYPE_KIND_ENUM;
+    const bool floating = (!compound && left_enum && check_common_floating_kind(types, right_type)) ||
+                          (right_enum && check_common_floating_kind(types, left_type));
+    const bool mixed = !floating && !compound && left_enum && right_enum &&
+                       type_unqualified(type_strip_aligned(types, left_type)) != type_unqualified(type_strip_aligned(types, right_type));
+    if (floating || mixed)
+    {
+        const TypeId left_alias = left_spelling < input->token_count && input->declared_types != NULL ? input->declared_types[left_spelling] : 0;
+        const TypeId right_alias = right_spelling < input->token_count && input->declared_types != NULL ? input->declared_types[right_spelling] : 0;
+        left_spelling = rvalue_left && left_alias != 0 && type_qualifiers(left_alias) != 0 ? 0 : left_spelling;
+        right_spelling = rvalue_right && right_alias != 0 && type_qualifiers(right_alias) != 0 ? 0 : right_spelling;
+        const String8 left_name = check_driver_warning_type(parser, pp, input, types, spell, scratch, left_type, left_spelling);
+        const String8 right_name = check_driver_warning_type(parser, pp, input, types, spell, scratch, right_type, right_spelling);
+        const String8 left_plain = mixed ? check_driver_warning_type(parser, pp, input, types, spell, scratch, left_type, 0) : (String8){ 0 };
+        const String8 right_plain = mixed ? check_driver_warning_type(parser, pp, input, types, spell, scratch, right_type, 0) : (String8){ 0 };
+        const bool anonymous = mixed && (memmem(left_plain.pointer, left_plain.length, "(unnamed", 8) != NULL ||
+                                         memmem(right_plain.pointer, right_plain.length, "(unnamed", 8) != NULL);
+        const uint32_t id = floating ? CHECK_WARNING_ID_ENUM_FLOAT_CONVERSION : anonymous ? CHECK_WARNING_ID_ANON_ENUM_ENUM_CONVERSION :
+                            kind == 3 ? CHECK_WARNING_ID_ENUM_COMPARE_CONDITIONAL : kind == 2 ? CHECK_WARNING_ID_ENUM_COMPARE :
+                            CHECK_WARNING_ID_ENUM_ENUM_CONVERSION;
+        const char* message = floating ?
+            check_warning_text(scratch, "%s %s type %.*s %s %s type %.*s", kinds[kind], left_enum ? "enumeration" : "floating-point",
+                               (int)left_name.length, left_name.pointer, kind == 2 ? "with" : kind == 4 ? "from" : "and",
+                               left_enum ? "floating-point" : "enumeration", (int)right_name.length, right_name.pointer) :
+            check_warning_text(scratch, "%s different enumeration types (%.*s and %.*s)", kinds[kind], (int)left_name.length, left_name.pointer,
+                               (int)right_name.length, right_name.pointer);
+        if (left_name.length != 0 && right_name.length != 0 && message != NULL)
+        {
+            check_common_report(parser, pp, input, question, id, id != CHECK_WARNING_ID_ENUM_COMPARE, message, NULL, 0, scratch);
+        }
+    }
+}
+
 // Clang's checkEnumArithmeticConversions (#1447): the usual arithmetic conversions of an operator whose operands are
 // enumerations of different types, or an enumeration and a floating type, warned as the operator is built, at it. The
 // operands are as written, an enumerator as its enumeration (check_common_enum_coerced). A compound assignment warns only
-// for an enumeration converted to its floating target. Only a unit where an enumerator or an enumeration's variable is
-// named as such an operator's operand (CheckInput.enum_operands) is scanned: an enumeration operand that is only a
-// member, a call's result or a cast's is not looked for without one.
+// for an enumeration converted to its floating target. Only a unit where such an operator may mix enumerations is
+// scanned: an enumerator named as its operand (CheckInput.enum_operands, an int to the actions), or an operand of an
+// enumeration type in any form, a member, a call or a cast as well as a variable (CheckStream.enum_operands).
 static __attribute__((noinline)) void check_common_enum_arithmetic(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, TypeTable* types,
                                          CheckWarningSpelling* spell, Arena* scratch)
 {
@@ -3263,11 +3343,9 @@ static __attribute__((noinline)) void check_common_enum_arithmetic(const Parser*
         CHECK_OP_CONDITIONAL, CHECK_OP_ADD_ASSIGN, CHECK_OP_SUBTRACT_ASSIGN, CHECK_OP_MULTIPLY_ASSIGN, CHECK_OP_DIVIDE_ASSIGN,
         CHECK_OP_REMAINDER_ASSIGN, CHECK_OP_BIT_AND_ASSIGN, CHECK_OP_BIT_OR_ASSIGN, CHECK_OP_BIT_XOR_ASSIGN,
     };
-    static const char* const kinds[] = { "arithmetic between", "bitwise operation between", "comparison of", "conditional expression between",
-                                         "compound assignment of" };
     const CheckCommonOps set = check_common_ops(ops, BUSTER_ARRAY_LENGTH(ops));
     CheckCommonScan scan = { 0 };
-    for (uint32_t node = input->enum_operands ? check_common_next_op(graph, &set, &scan, vector) : graph->count; node < graph->count && !pp->fatal;
+    for (uint32_t node = input->enum_operands || stream->enum_operands ? check_common_next_op(graph, &set, &scan, vector) : graph->count; node < graph->count && !pp->fatal;
          node = check_common_next_op(graph, &set, &scan, vector))
     {
         const CheckOp op = graph->ops[node];
@@ -3290,59 +3368,32 @@ static __attribute__((noinline)) void check_common_enum_arithmetic(const Parser*
         }
         if (kind < 5 && left < graph->count && right < graph->count && enumish && stream->diagnostics[node] == CHECK_DIAG_NONE)
         {
-            // A GNU `a ?: b`'s omitted middle operand is its condition promoted (clang's UsualUnaryConversions): an
-            // enumeration's is an integer then, and a floating one an rvalue. Its `?` and `:` are adjacent.
-            const uint32_t colon = graph->tokens[node];
-            uint32_t question = colon;
-            for (uint32_t at = op == CHECK_OP_CONDITIONAL ? colon : 0; at != 0 && question == colon;)
-            {
-                at -= 1;
-                question = parser->tree.parents[at] == colon && parser->tree.roles[at] == PARSE_ROLE_OPEN_TERNARY ? at : question;
-            }
-            const bool omitted = op == CHECK_OP_CONDITIONAL && question + 1 == colon;
-            // A comparison's operands are rvalues first (clang's DefaultLvalueConversion): unqualified, a typedef that
-            // carries a qualifier itself spelled as its type.
-            const bool rvalue_left = kind == 2 || omitted;
-            const bool rvalue_right = kind == 2;
+            const uint32_t question = check_common_enum_question(parser, graph->tokens[node], op == CHECK_OP_CONDITIONAL);
             const TypeId left_coerced = check_common_enum_coerced(input, stream, left);
             const TypeId right_coerced = check_common_enum_coerced(input, stream, right);
-            const TypeId left_type = rvalue_left ? type_unqualified(left_coerced) : left_coerced;
-            const TypeId right_type = rvalue_right ? type_unqualified(right_coerced) : right_coerced;
-            const bool left_enum = !omitted && check_action_kind(types, left_type) == BUSTER_TYPE_KIND_ENUM;
-            const bool right_enum = check_action_kind(types, right_type) == BUSTER_TYPE_KIND_ENUM;
-            const bool floating = (!compound && left_enum && check_common_floating_kind(types, right_type)) ||
-                                  (right_enum && check_common_floating_kind(types, left_type));
-            const bool mixed = !floating && !compound && left_enum && right_enum &&
-                               type_unqualified(type_strip_aligned(types, left_type)) != type_unqualified(type_strip_aligned(types, right_type));
-            if (floating || mixed)
-            {
-                uint32_t left_spelling = left_coerced == check_stream_type(stream, left) ? check_common_operand_spelling(parser, input, graph, stream, left) : 0;
-                uint32_t right_spelling = right_coerced == check_stream_type(stream, right) ? check_common_operand_spelling(parser, input, graph, stream, right) : 0;
-                const TypeId left_alias = left_spelling < input->token_count && input->declared_types != NULL ? input->declared_types[left_spelling] : 0;
-                const TypeId right_alias = right_spelling < input->token_count && input->declared_types != NULL ? input->declared_types[right_spelling] : 0;
-                left_spelling = rvalue_left && left_alias != 0 && type_qualifiers(left_alias) != 0 ? 0 : left_spelling;
-                right_spelling = rvalue_right && right_alias != 0 && type_qualifiers(right_alias) != 0 ? 0 : right_spelling;
-                const String8 left_name = check_driver_warning_type(parser, pp, input, types, spell, scratch, left_type, left_spelling);
-                const String8 right_name = check_driver_warning_type(parser, pp, input, types, spell, scratch, right_type, right_spelling);
-                const String8 left_plain = mixed ? check_driver_warning_type(parser, pp, input, types, spell, scratch, left_type, 0) : (String8){ 0 };
-                const String8 right_plain = mixed ? check_driver_warning_type(parser, pp, input, types, spell, scratch, right_type, 0) : (String8){ 0 };
-                const bool anonymous = mixed && (memmem(left_plain.pointer, left_plain.length, "(unnamed", 8) != NULL ||
-                                                 memmem(right_plain.pointer, right_plain.length, "(unnamed", 8) != NULL);
-                const uint32_t id = floating ? CHECK_WARNING_ID_ENUM_FLOAT_CONVERSION : anonymous ? CHECK_WARNING_ID_ANON_ENUM_ENUM_CONVERSION :
-                                    kind == 3 ? CHECK_WARNING_ID_ENUM_COMPARE_CONDITIONAL : kind == 2 ? CHECK_WARNING_ID_ENUM_COMPARE :
-                                    CHECK_WARNING_ID_ENUM_ENUM_CONVERSION;
-                const char* message = floating ?
-                    check_warning_text(scratch, "%s %s type %.*s %s %s type %.*s", kinds[kind], left_enum ? "enumeration" : "floating-point",
-                                       (int)left_name.length, left_name.pointer, kind == 2 ? "with" : kind == 4 ? "from" : "and",
-                                       left_enum ? "floating-point" : "enumeration", (int)right_name.length, right_name.pointer) :
-                    check_warning_text(scratch, "%s different enumeration types (%.*s and %.*s)", kinds[kind], (int)left_name.length, left_name.pointer,
-                                       (int)right_name.length, right_name.pointer);
-                if (left_name.length != 0 && right_name.length != 0 && message != NULL)
-                {
-                    // (A conditional's node is its `:`; clang's place is its `?`, the `:`'s child.)
-                    check_common_report(parser, pp, input, question, id, id != CHECK_WARNING_ID_ENUM_COMPARE, message, NULL, 0, scratch);
-                }
-            }
+            const uint32_t left_spelling = left_coerced == check_stream_type(stream, left) ? check_common_operand_spelling(parser, input, graph, stream, left) : 0;
+            const uint32_t right_spelling = right_coerced == check_stream_type(stream, right) ? check_common_operand_spelling(parser, input, graph, stream, right) : 0;
+            check_common_enum_mix(parser, pp, input, types, spell, scratch, kind, question, op == CHECK_OP_CONDITIONAL && question + 1 == graph->tokens[node],
+                                  left_coerced, right_coerced, left_spelling, right_spelling);
+        }
+    }
+    // The constant reader's mixes (CHECK_WARNING_EVENT_ENUM_MIX), but where the graph has the operator: a
+    // _Static_assert's, an initializer's.
+    for (uint32_t i = 0; i < input->warning_events.count && !pp->fatal; i += 1)
+    {
+        const CheckWarningEvent* event = input->warning_events.events + i;
+        const uint32_t token = event->token;
+        const uint32_t node = event->kind == CHECK_WARNING_EVENT_ENUM_MIX && token < input->token_count && input->token_nodes != NULL ?
+                              input->token_nodes[token] : BUSTER_CHECK_NONE;
+        if (event->kind == CHECK_WARNING_EVENT_ENUM_MIX && token < parser->tokens.count && (node >= graph->count || graph->tokens[node] != token))
+        {
+            const uint8_t role = parser->tree.roles[token];
+            const bool conditional = role == PARSE_ROLE_CLOSE_TERNARY;
+            const uint32_t kind = conditional ? 3 : role == PARSE_ROLE_RELATIONAL || role == PARSE_ROLE_EQUALITY ? 2 :
+                                  role == PARSE_ROLE_BITWISE_AND || role == PARSE_ROLE_BITWISE_OR || role == PARSE_ROLE_BITWISE_XOR ? 1 : 0;
+            const uint32_t question = check_common_enum_question(parser, token, conditional);
+            check_common_enum_mix(parser, pp, input, types, spell, scratch, kind, question, conditional && question + 1 == token, event->payload.first_type,
+                                  event->payload.second_type, event->payload.name, event->payload.data);
         }
     }
 }

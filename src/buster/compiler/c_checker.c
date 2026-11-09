@@ -658,6 +658,8 @@ struct CheckStream
     // Final nonzero warning rows, published by check_graph_warning_contexts. Hand-built streams leave the flag off.
     uint32_t warning_count;
     bool warnings_prepared;
+    // Whether an action of the run had an operand of an enumeration type (CHECK_WARNING_ENUM_OPERAND).
+    bool enum_operands;
     // Warning kinds whose default severity is ignored; an explicit source policy may enable them.
     uint32_t* warning_ignored;
     CheckReport* reports;
@@ -2030,7 +2032,8 @@ static inline __attribute__((always_inline)) void check_graph_store(CheckStream*
     }
     if (result->warnings != 0 || !stream->zero_columns)
     {
-        stream->warnings[node] = result->warnings;
+        stream->warnings[node] = result->warnings & ~CHECK_WARNING_ENUM_OPERAND;
+        stream->enum_operands |= (result->warnings & CHECK_WARNING_ENUM_OPERAND) != 0;
     }
     stream->member_offsets[node] = result->member_offset;
 }

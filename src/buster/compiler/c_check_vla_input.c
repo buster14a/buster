@@ -224,6 +224,7 @@ static bool check_input_vla_bound(CheckInputReader* reader, uint32_t open, uint3
     {
         CheckValue value = { 0 };
         uint32_t failed = BUSTER_CHECK_NONE;
+        bool negative = false;
         if (*job == 0 && check_input_vla_defines(reader, first, end))
         {
             *job = check_input_constant_job(reader, first, end);
@@ -256,7 +257,9 @@ static bool check_input_vla_bound(CheckInputReader* reader, uint32_t open, uint3
         if (valid && evaluated && (folded || (value.flags & BUSTER_CHECK_ICE) != 0))
         {
             int64_t number = 0;
-            valid = check_action_i64(reader->types, &value, &number) && number >= 0;
+            const bool converted = check_action_i64(reader->types, &value, &number);
+            valid = converted && number >= 0;
+            negative = converted && number < 0;
             *kind = BUSTER_TYPE_KIND_ARRAY;
             *extent = (uint64_t)number;
             if (valid)
@@ -273,7 +276,12 @@ static bool check_input_vla_bound(CheckInputReader* reader, uint32_t open, uint3
         {
             const uint32_t token = failed < parser->tokens.count ? failed : first;
             const bool missing = parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER && reader->output->declarations[token] == BUSTER_CHECK_NONE;
-            check_input_report(reader, token, missing ? CHECK_INPUT_UNDECLARED : CHECK_INPUT_DECLARATION);
+            // A negative constant is clang's own error (#1447), at the bound's first token, naming the declarator's name.
+            check_input_report(reader, negative ? first : token, negative ? CHECK_INPUT_ARRAY_NEGATIVE : missing ? CHECK_INPUT_UNDECLARED : CHECK_INPUT_DECLARATION);
+            if (negative && reader->output->report_count == 1)
+            {
+                reader->output->reports[0].value = name < parser->tokens.count && parser->tokens.kinds[name] == PARSE_KIND_IDENTIFIER ? name : BUSTER_CHECK_NONE;
+            }
         }
     }
     else if (valid && star)

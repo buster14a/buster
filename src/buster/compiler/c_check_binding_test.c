@@ -1008,8 +1008,54 @@ static void check_test_binding_recovery_limits(CheckTest* test)
     arena_release(&storage);
 }
 
+// Typo correction's distances (#1447, c_check_typo.c): the vector path's bit-parallel Myers, against the scalar path's
+// dynamic-programming table, its twin, for random spellings of 1 to 64 bytes from small alphabets (many matches), with
+// the textbook cases among them.
+static void check_test_typo_distances(CheckTest* test)
+{
+    static const struct { const char* a; const char* b; uint32_t distance; } known[] =
+    {
+        { "counter", "countr", 1 },
+        { "counter", "coutner", 2 },
+        { "kitten", "sitting", 3 },
+        { "value", "valeu", 2 },
+        { "a", "b", 1 },
+        { "flaw", "lawn", 2 },
+    };
+    uint32_t row[130];
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(known); i += 1)
+    {
+        const uint8_t* a = (const uint8_t*)known[i].a;
+        const uint8_t* b = (const uint8_t*)known[i].b;
+        const uint32_t a_length = (uint32_t)strlen(known[i].a);
+        const uint32_t b_length = (uint32_t)strlen(known[i].b);
+        check_test_expect(test, check_typo_distance_table(a, a_length, b, b_length, row) == known[i].distance, "typo distance table differs from the known distance");
+        check_test_expect(test, check_typo_distance_bits(a, a_length, b, b_length) == known[i].distance, "typo bit-parallel distance differs from the known distance");
+    }
+    uint64_t state = 0x9e3779b97f4a7c15ull;
+    for (uint32_t trial = 0; trial < 4096; trial += 1)
+    {
+        uint8_t a[64];
+        uint8_t b[64];
+        state = state * 6364136223846793005ull + 1442695040888963407ull;
+        const uint32_t a_length = 1 + (uint32_t)(state >> 58);
+        const uint32_t b_length = (uint32_t)((state >> 40) % 65);
+        const uint32_t alphabet = 2 + (uint32_t)((state >> 20) % 6);
+        for (uint32_t j = 0; j < 64; j += 1)
+        {
+            state = state * 6364136223846793005ull + 1442695040888963407ull;
+            a[j] = (uint8_t)('a' + (state >> 33) % alphabet);
+            b[j] = (uint8_t)('a' + (state >> 45) % alphabet);
+        }
+        const uint32_t table = check_typo_distance_table(a, a_length, b, b_length, row);
+        const uint32_t bits = check_typo_distance_bits(a, a_length, b, b_length);
+        check_test_expect(test, table == bits, "typo bit-parallel distance differs from its scalar twin");
+    }
+}
+
 static __attribute__((noinline)) void check_test_bindings(CheckTest* test)
 {
+    check_test_typo_distances(test);
     check_test_binding_source(test, "", "x", 0, 0, true, false);
     const uint32_t shadow[] = {
         0,
