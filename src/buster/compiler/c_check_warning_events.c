@@ -114,6 +114,10 @@ enum
     CHECK_WARNING_ID_ENUM_COMPARE_CONDITIONAL = 107,
     CHECK_WARNING_ID_ENUM_FLOAT_CONVERSION = 108,
     CHECK_WARNING_ID_ANON_ENUM_ENUM_CONVERSION = 109,
+    // A for loop's condition variables its loop never changes, and its variable both its header and its body's last
+    // statement increment or decrement (#1447, clang's CheckForLoopConditionalStatement and CheckForRedundantIteration):
+    // -Wfor-loop-analysis, off by default, under -Wloop-analysis and -Wmost and so -Wall.
+    CHECK_WARNING_ID_FOR_LOOP_ANALYSIS = 110,
     CHECK_WARNING_ID_COUNT,
 };
 
