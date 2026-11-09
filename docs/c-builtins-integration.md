@@ -274,20 +274,26 @@ operation of the operands' type, 1 where the exact result leaves its signed rang
 which Tier 1 selects as the operation and `seto` ([the selection
 guide](tier1-selection.md)), and the typed stream's interpreter evaluates the
 rows by the same semantics (`ir_intrinsic_overflow`). The recipes' typed
-operations are the same everywhere; 128-bit operands and destinations keep their
-limbs' recipe (`cbuiltin_lower_overflow_wide`), and the destination stores its
+operations are the same everywhere; 128-bit operands and destinations, and
+`_BitInt`s of 65 to 127 bits (#1447: their descriptor is their width, their
+high limb extended from it, and a destination fits where its high limb extended
+from the width's bits past 64 gives the result's back), keep their limbs' recipe
+(`cbuiltin_lower_overflow_wide`), and the destination stores its
 value before the recipe's last entry, the flag, which stays on the value stack.
 
 `test-builtin-lowering` runs every recipe natively against clang's builtins:
 every ordinary signed and unsigned 8/16/32/64-bit and `_Bool` operand and
-destination, `_BitInt` destinations, and `_BitInt` operands narrower than their
+destination, `_BitInt` destinations (of 65 to 127 bits too, with 100- and 127-bit
+operands), and `_BitInt` operands narrower than their
 slot class beside whole ones (each recipe's: at most 32 bits, past them, an
 unsigned 32-bit product past 2^63 into a signed `_BitInt(63)`, whose extension
 of the low bits alone would give them back). `test-checker`'s
 `overflow-instruction-rows` program runs signed longs', ints', unsigned longs'
 and mixed calls of boundary values by both paths against clang -O0's build and
 checks that the signed longs' rows are `add`, `imul` and `cmp` with `seto`;
-`test-checker-driver`'s Tier 1 fixture `tier1-overflow` runs them by `--tier1`,
+`test-checker`'s `bit-int-65-to-127-overflow` program runs `_BitInt`s of 65 to
+127 bits' and hashes their destinations' bytes; `test-checker-driver`'s Tier 1
+fixture `tier1-overflow` runs them by `--tier1`,
 and `tests/ir-source/overflow-builtins.c` through the IR's lowerings, both
 interpreters and Tier 1 (`test-ssa-source --typed --tier1`).
 
