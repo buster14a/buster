@@ -1225,12 +1225,6 @@ static uint32_t check_asm_inline_code(const CheckAsmPlace* places, uint32_t coun
     return at;
 }
 
-// The registers an asm body touches (#1839, Tier0AsmBody.touched, in BUSTER_TIER0_XMM's layout): `taken`'s general ones
-// (its operands', its clobbers' and its stores'), the XMM registers of its vector operands and clobbers (`vectors`, a bit
-// each), and what x86_semantics.c says its template's records write; or UINT32_MAX for a template it doesn't place: a
-// record of unknown effects, or one that touches the stack or control flow (a push, a call, a jump or branch but the
-// template's own to its labels, a return, a trap), as unwind_tier0_frame refuses in a function's body, or that writes a register holding the frame (rsp, rbp, r15). A form
-// x86_semantics.c doesn't cover takes check_asm_implicit's registers, or none for an x87 form's, or keeps the helper.
 // Whether a template's records name an opmask register (k0 to k7) in any field. Tier 1's CFG consumer saves no mask value
 // around an asm body, as it saves them around a call (#1839), so that in a lowering for Tier 1
 // (CheckProgramOptions.asm_bodies) such a template keeps its helper, whose call it saves them around; Tier 0 takes an asm
@@ -1289,9 +1283,19 @@ static const CheckAsmImplicit check_asm_implicit[] = {
     { X86_FORM_XSETBV, 0 },
     { X86_FORM_VZEROUPPER, BUSTER_TIER0_XMM_ALL },
     { X86_FORM_VZEROALL, BUSTER_TIER0_XMM_ALL },
+    // fxrstor loads xmm0 to xmm15 (and MXCSR) from its area, beside the x87's state.
+    { X86_FORM_FXRSTOR_M, BUSTER_TIER0_XMM_ALL },
+    { X86_FORM_FXRSTOR64_M, BUSTER_TIER0_XMM_ALL },
 };
 #undef BUSTER_CHECK_ASM_GPR
 
+// The registers an asm body touches (#1839, Tier0AsmBody.touched, in BUSTER_TIER0_XMM's layout): `taken`'s general ones
+// (its operands', its clobbers' and its stores'), the XMM registers of its vector operands and clobbers (`vectors`, a bit
+// each), and what x86_semantics.c says its template's records write; or UINT32_MAX for a template it doesn't place: a
+// record of unknown effects, or one that touches the stack or control flow (a push, a call, a jump or branch but the
+// template's own to its labels, a trap), as unwind_tier0_frame refuses in a function's body, or that writes a register
+// holding the frame (rsp, rbp, r15), but on its way out of the function. A form x86_semantics.c doesn't cover takes
+// check_asm_implicit's registers, or none for an x87 form's, or keeps the helper.
 static uint32_t check_asm_inline_touched(const CheckAsmPlace* places, uint32_t count, const AsmCode* code, uint32_t taken, uint32_t vectors)
 {
     uint64_t written = (uint64_t)(taken & 0xffffu & ~(1u << X86_REGISTER_RSP)) | ((uint64_t)(vectors & 0xffffu) << 16);
@@ -1339,7 +1343,8 @@ static uint32_t check_asm_inline_touched(const CheckAsmPlace* places, uint32_t c
                 implicit += 1;
             }
             // An x87 form (fsqrt, fprem, fxch, fld %st(1), fxsave...) reads and writes the x87's registers, its status
-            // and control words, the flags and memory alone: a general register only by `fnstsw %ax`'s, which the table has.
+            // and control words, the flags and memory alone: a general register only by `fnstsw %ax`'s, and xmm0 to
+            // xmm15 only by fxrstor's, which the table has.
             const char* mnemonic = x86_form_description(record->form)->mnemonic;
             const bool x87 = mnemonic != NULL && mnemonic[0] == 'f' && record->form != X86_FORM_FNSTSW_AX && record->form != X86_FORM_FSTSW_AX;
             placed = implicit < BUSTER_ARRAY_LENGTH(check_asm_implicit) || x87;

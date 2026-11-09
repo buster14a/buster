@@ -328,13 +328,15 @@ static void check_test_driver_asm_return(CheckTest* test, const char* clang, con
     // rbx as the harness set it: 0x1234, 4660.
     const size_t length = strlen(expected);
     check_test_expect(test, !ran || (length > 6 && strcmp(expected + length - 6, " 4660\n") == 0), "clang's build keeps the caller's rbx through a template's return");
-    for (uint32_t path = 0; ran && path < 2; path += 1)
+    // Each path, with the frame pointer the option keeps and with the default options, which omit it elsewhere: a function
+    // whose template returns keeps one either way, for its `leave` (tier0_kept_pointer).
+    for (uint32_t build = 0; ran && build < 4; build += 1)
     {
         char object[512];
         char program[512];
-        snprintf(object, sizeof(object), "%s/asm-return-%u.o", directory, path);
-        snprintf(program, sizeof(program), "%s/asm-return-%u", directory, path);
-        const bool compiled = check_test_frame_pointer_build(executable, source, object, false, false, path != 0, true, false);
+        snprintf(object, sizeof(object), "%s/asm-return-%u.o", directory, build);
+        snprintf(program, sizeof(program), "%s/asm-return-%u", directory, build);
+        const bool compiled = check_test_frame_pointer_build(executable, source, object, false, false, (build & 1) != 0, build < 2, false);
         check_test_expect(test, compiled, "the returning asm templates compile by Tier 0, under --verify");
         char* link_arguments[] = { (char*)clang, "-o", program, object, harness_object, NULL };
         char* link_text = NULL;
