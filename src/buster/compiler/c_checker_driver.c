@@ -230,6 +230,12 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_ENABLE_IF_CALL: result = "no matching function for call"; break;
         case CHECK_INPUT_ENABLE_IF_ADDRESS: result = "cannot take address of function because it has one or more non-tautological enable_if conditions"; break;
         case CHECK_INPUT_CPU_DISPATCH: result = "invalid cpu_specific or cpu_dispatch declaration"; break;
+        case CHECK_INPUT_VLA_FILE_SCOPE: result = "variable length array declaration not allowed at file scope"; break;
+        case CHECK_INPUT_VM_FILE_SCOPE: result = "variably modified type declaration not allowed at file scope"; break;
+        case CHECK_INPUT_VLA_STATIC: result = "variable length array declaration cannot have 'static' storage duration"; break;
+        case CHECK_INPUT_VLA_EXTERN: result = "variable length array declaration cannot have 'extern' linkage"; break;
+        case CHECK_INPUT_VM_EXTERN: result = "variably modified type declaration cannot have 'extern' linkage"; break;
+        case CHECK_INPUT_VLA_FIELD: result = "fields must have a constant size: 'variable length array in structure' extension will never be supported"; break;
     }
     return result;
 }
@@ -2901,7 +2907,7 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
     const uint64_t kr_offset64 = (uint64_t)input->report_count + stream_reports + extra_count + input->implicit_function_count;
     const uint64_t call_offset64 = kr_offset64 + input->kr_diagnostic_count;
     const uint64_t report_room = call_offset64 + (show_warnings ? node_warnings : 0) + 1;
-    const uint64_t warning_room = show_warnings ? (uint64_t)constant_warnings + (attribute_warnings ? scanned : 0) + node_warnings + excess_count + 1 : 0;
+    const uint64_t warning_room = show_warnings ? (uint64_t)constant_warnings + (attribute_warnings ? scanned : 0) + (uint64_t)node_warnings * 2 + excess_count + 1 : 0;
     const uint32_t completion_count = show_warnings ? input->warning_events.count : 0;
     const bool reports = report_room > 1;
     const bool fits = count < UINT32_MAX && call_offset64 + nodes <= UINT32_MAX && report_room <= UINT32_MAX && warning_room <= UINT32_MAX;
@@ -2974,11 +2980,19 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
             {
                 const uint32_t node = first + (uint32_t)__builtin_ctz(selected);
                 const uint32_t source = input->graph.tokens[node];
-                const uint32_t packed = stream->warnings[node] & 0xffffu;
+                const uint32_t warned = stream->warnings[node] & 0xffffu;
+                // A folded non-ICE expression's warning is at its first token, as clang's ext_expr_not_ice is at the
+                // expression's begin: a cast's `(`, not the node's `)`.
+                const uint32_t folded = warned & CHECK_WARNING_GNU_CONSTANT;
+                const uint32_t packed = warned & ~folded;
+                const uint32_t ignored = stream->warning_ignored != NULL ? stream->warning_ignored[node] : 0;
                 if (source < count && packed != 0)
                 {
-                    const uint32_t ignored = stream->warning_ignored != NULL ? stream->warning_ignored[node] : 0;
                     warning_keys[warning_total++] = check_driver_warning_key(source, packed, packed & ~ignored);
+                }
+                if (source < count && folded != 0)
+                {
+                    warning_keys[warning_total++] = check_driver_warning_key(check_common_subtree_start(parser, source), folded, folded & ~ignored);
                 }
                 const uint32_t flags = stream->warnings[node] & CHECK_WARNING_KR_CALLS;
                 if (flags != 0)
@@ -2992,6 +3006,16 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                 }
             }
         }
+        // Inside a direct call's full expression, of an interrupt service routine, only its error (#1447).
+        uint32_t report_kept = 0;
+        for (uint32_t i = 0; input->interrupt_range_count != 0 && i < report_total; i += 1)
+        {
+            const uint32_t sequence = (uint32_t)report_keys[i];
+            const bool called = sequence < input->report_count && input->reports[sequence].message == CHECK_INPUT_INTERRUPT_CALLED;
+            report_keys[report_kept] = report_keys[i];
+            report_kept += called || check_driver_interrupt_kept(input, (uint32_t)(report_keys[i] >> 32)) ? 1u : 0u;
+        }
+        report_total = input->interrupt_range_count != 0 ? report_kept : report_total;
         uint64_t* firsts = reports ? c_bindings_sort(report_keys, report_sorting, report_total, !scalar, varying) : NULL;
         uint32_t first_count = 0;
         for (uint32_t i = 0; i < report_total; i += 1)
@@ -3072,6 +3096,13 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                 warning_keys[warning_total++] = check_driver_warning_key(excess_tokens[i], CHECK_WARNING_EXCESS_INITIALIZERS, CHECK_WARNING_EXCESS_INITIALIZERS);
             }
         }
+        uint32_t warning_kept = 0;
+        for (uint32_t i = 0; input->interrupt_range_count != 0 && i < warning_total; i += 1)
+        {
+            warning_keys[warning_kept] = warning_keys[i];
+            warning_kept += check_driver_interrupt_kept(input, (uint32_t)(warning_keys[i] >> 32)) ? 1u : 0u;
+        }
+        warning_total = input->interrupt_range_count != 0 ? warning_kept : warning_total;
         uint64_t* warnings = show_warnings ? c_bindings_sort(warning_keys, warning_sorting, warning_total, !scalar, varying) : NULL;
         uint32_t warning_count = 0;
         for (uint32_t i = 0; i < warning_total; i += 1)
@@ -3863,9 +3894,20 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                                 .token = report->note_token < count ? parser->tokens.sources[report->note_token] : 0,
                                 .message = "previous declaration is here",
                             };
-                            pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, report->note_token < count ? 1u : 0u,
-                                                        "function declared '%s' here was previously declared %s", check_input_convention_name(report->detail & 0xffu),
-                                                        previous_text);
+                            if ((report->detail & BUSTER_CHECK_CONVENTION_NO_CALLER_SAVED) != 0)
+                            {
+                                // no_caller_saved_registers added by a redeclaration, clang's err_function_attribute_mismatch, the
+                                // attribute named as clang prints it: a C23 one's with its gnu scope.
+                                const char* name = (report->detail & BUSTER_CHECK_CONVENTION_STANDARD) != 0 ? "gnu::no_caller_saved_registers" : "no_caller_saved_registers";
+                                pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, report->note_token < count ? 1u : 0u,
+                                                            "function declared with '%s' attribute was previously declared without the '%s' attribute", name, name);
+                            }
+                            else
+                            {
+                                pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, report->note_token < count ? 1u : 0u,
+                                                            "function declared '%s' here was previously declared %s", check_input_convention_name(report->detail & 0xffu),
+                                                            previous_text);
+                            }
                         }
                         else if (phase == 0 && kind == CHECK_INPUT_ATTRIBUTE_CONVENTIONS)
                         {
