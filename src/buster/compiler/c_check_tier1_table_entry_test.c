@@ -5,7 +5,9 @@
 // its last backward direct branch. Include after c_check_tier1_table_targets_test.c. This bounded object oracle
 // checks an entry prefix and every direct and four table targets, rather than inferring a loop from physical order.
 
-static bool check_test_tier1_table_boundary(const X86Decoded* records, uint32_t count, int64_t goal, uint32_t address)
+// A direct branch's target is any exact instruction boundary; a table entry additionally
+// must target an instruction strictly after the single table-base LEA.
+static uint32_t check_test_tier1_table_index(const X86Decoded* records, uint32_t count, int64_t goal)
 {
     uint32_t low = 0;
     uint32_t high = count;
@@ -15,15 +17,23 @@ static bool check_test_tier1_table_boundary(const X86Decoded* records, uint32_t 
         low = (int64_t)records[middle].offset < goal ? middle + 1 : low;
         high = (int64_t)records[middle].offset < goal ? high : middle;
     }
-    return low < count && low > address && (int64_t)records[low].offset == goal;
+    return low < count && (int64_t)records[low].offset == goal ? low : count;
 }
 
-// Entry reaches the sole RIP-relative LEA without a control transfer, and no direct or indirect edge can reenter
-// that prefix. Calls and unknown control are refused: tier1_table_loop has neither. The separate dispatch check
-// still owns the exact MOVSXD/ADD/JMP register relationship, and the ELF helper owns its sole PC32 association.
+static bool check_test_tier1_table_boundary(const X86Decoded* records, uint32_t count, int64_t goal, uint32_t address)
+{
+    const uint32_t target = check_test_tier1_table_index(records, count, goal);
+    return target < count && target > address;
+}
+
+// The base must run exactly once on every path to the indirect dispatch, even when an entry
+// guard branches directly to the return before materializing it. Walk the decoded CFG with
+// two states (before and after the LEA), including all four ELF-resolved indirect targets.
+// A path that dispatches without the LEA or visits it a second time is rejected. Check every
+// direct branch's boundary, including unreachable ones, and refuse unknown controls.
 static bool check_test_tier1_table_entry(const X86Decoded* records, uint32_t count, uint32_t address, uint32_t dispatch, const uint32_t* targets)
 {
-    bool valid = address < count && dispatch < count;
+    bool valid = records != NULL && targets != NULL && count != 0 && address < count && dispatch < count;
     uint32_t addresses = 0;
     uint32_t jumps = 0;
     for (uint32_t i = 0; valid && i < count; i += 1)
@@ -33,25 +43,101 @@ static bool check_test_tier1_table_entry(const X86Decoded* records, uint32_t cou
         const uint32_t control = (uint32_t)x86_effects(form)->kinds >> 4;
         const bool table_address = form == X86_FORM_LEA_R64_M && instruction->mode == BUSTER_X86_MEMORY_RIP;
         const bool indirect = form == X86_FORM_JMP_RM64 && instruction->mode == BUSTER_X86_REGISTER_DIRECT;
+        const bool relative = x86_form_descriptions[form].relative_bytes != 0;
         addresses += table_address;
         jumps += indirect;
-        valid = (!table_address || i == address) && (i >= address || control == BUSTER_X86_CONTROL_NONE) &&
-                control != BUSTER_X86_CONTROL_CALL && control != BUSTER_X86_CONTROL_TRAP && control != BUSTER_X86_CONTROL_UNKNOWN;
-        if (valid && x86_form_descriptions[form].relative_bytes != 0)
+        valid = (!table_address || i == address) &&
+                (control == BUSTER_X86_CONTROL_NONE || control == BUSTER_X86_CONTROL_BRANCH ||
+                 control == BUSTER_X86_CONTROL_JUMP || control == BUSTER_X86_CONTROL_RETURN);
+        if (valid && relative)
         {
             const int64_t goal = (int64_t)records[i].offset + records[i].length + instruction->displacement;
             valid = (control == BUSTER_X86_CONTROL_JUMP || control == BUSTER_X86_CONTROL_BRANCH) &&
-                    check_test_tier1_table_boundary(records, count, goal, address);
+                    check_test_tier1_table_index(records, count, goal) < count;
         }
         else if (valid && (control == BUSTER_X86_CONTROL_JUMP || control == BUSTER_X86_CONTROL_BRANCH))
         {
-            valid = indirect && i == dispatch;
+            valid = control == BUSTER_X86_CONTROL_JUMP && indirect && i == dispatch;
         }
     }
     for (uint32_t t = 0; valid && t < 4; t += 1)
     {
         valid = check_test_tier1_table_boundary(records, count, targets[t], address);
     }
+
+    // State bit 0: reached without executing the LEA. Bit 1: reached after executing it.
+    // A monotone fixed point adds at most two bits per instruction, so 2 * count rounds suffice.
+    uint8_t* reached = valid && addresses == 1 && jumps == 1 ? calloc(count, sizeof(uint8_t)) : NULL;
+    valid = valid && reached != NULL;
+    if (valid)
+    {
+        reached[0] = 1;
+        bool settled = false;
+        for (uint64_t round = 0; valid && round <= (uint64_t)count * 2; round += 1)
+        {
+            bool changed = false;
+            for (uint32_t i = 0; valid && i < count; i += 1)
+            {
+                uint8_t state = reached[i];
+                if (state == 0)
+                {
+                    continue;
+                }
+                if (i == address)
+                {
+                    valid = (state & 2) == 0;
+                    state = 2;
+                }
+                if (i == dispatch)
+                {
+                    valid = valid && (state & 1) == 0;
+                }
+                if (!valid)
+                {
+                    break;
+                }
+                const X86Instruction* instruction = &records[i].instruction;
+                const uint32_t form = instruction->form & BUSTER_X86_FORM_NUMBER;
+                const uint32_t control = (uint32_t)x86_effects(form)->kinds >> 4;
+                const bool relative = x86_form_descriptions[form].relative_bytes != 0;
+                if (relative)
+                {
+                    const int64_t goal = (int64_t)records[i].offset + records[i].length + instruction->displacement;
+                    const uint32_t target = check_test_tier1_table_index(records, count, goal);
+                    const uint8_t prior = reached[target];
+                    reached[target] |= state;
+                    changed |= prior != reached[target];
+                }
+                else if (control == BUSTER_X86_CONTROL_JUMP)
+                {
+                    for (uint32_t t = 0; t < 4; t += 1)
+                    {
+                        const uint32_t target = check_test_tier1_table_index(records, count, targets[t]);
+                        const uint8_t prior = reached[target];
+                        reached[target] |= state;
+                        changed |= prior != reached[target];
+                    }
+                }
+                if (control == BUSTER_X86_CONTROL_NONE || control == BUSTER_X86_CONTROL_BRANCH)
+                {
+                    valid = i + 1 < count;
+                    if (valid)
+                    {
+                        const uint8_t prior = reached[i + 1];
+                        reached[i + 1] |= state;
+                        changed |= prior != reached[i + 1];
+                    }
+                }
+            }
+            if (valid && !changed)
+            {
+                settled = true;
+                break;
+            }
+        }
+        valid = valid && settled && (reached[address] & 1) != 0 && (reached[dispatch] & 2) != 0;
+    }
+    free(reached);
     return valid && addresses == 1 && jumps == 1;
 }
 
