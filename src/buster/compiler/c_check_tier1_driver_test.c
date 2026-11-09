@@ -760,11 +760,12 @@ static const char check_test_tier1_records_other_source[] =
     "unsigned long b_call_many(int seed) { return a_many(seed, seed + 1, seed + 2, seed + 3, b_make_S16(seed), b_make_Big(seed + 1), b_make_DI(seed + 2), b_make_S6(seed + 3), b_make_S1(seed + 4)); }\n"
     "unsigned long b_vsum(int n, ...) { va_list ap; va_start(ap, n); unsigned long h = 0; for (int i = 0; i < n; i += 1) h = h * 131 + b_hash_S12(va_arg(ap, S12)); va_end(ap); return h; }\n";
 
-// The returns-twice fixture (#1847): functions that call setjmp (glibc's macro, _setjmp), sigsetjmp (__sigsetjmp) and
-// a function a declaration gives returns_twice (the other unit's, which jumps to _setjmp), each holding values across the call in a
-// caller-saved register and a spill slot while its first return's path calls with others in the same places, then
-// longjmps; and one that calls none. Tier 1's code for the callers would find the others' values on the second return:
-// they are Tier 0's, and the other function Tier 1's.
+// The returns-twice fixture (#1847): functions that call setjmp (glibc's macro, _setjmp), sigsetjmp (__sigsetjmp), a
+// function a declaration gives returns_twice (the other unit's, which jumps to _setjmp) and _setjmp through a volatile
+// pointer of setjmp's type (check_lower_indirect_twice), each holding values across the call in a caller-saved register
+// and a spill slot while its first return's path calls with others in the same places, then longjmps; and one that
+// calls none, through a volatile pointer of another type. Tier 1's code for the callers would find the others' values
+// on the second return: they are Tier 0's, and the other function Tier 1's.
 static const char check_test_tier1_twice_source[] =
     "#include <setjmp.h>\n#include <stdio.h>\n"
     "static jmp_buf buf;\n"
@@ -778,8 +779,11 @@ static const char check_test_tier1_twice_source[] =
     "int tier1_twice_setjmp(int n) { int v = f(n); long w = f(n + 1); if (setjmp(buf) == 0) { long r = churn(v, n); jump(); return (int)r; } return v + (int)w; }\n"
     "int tier1_twice_sigsetjmp(int n) { int v = f(n); long w = f(n + 2); if (sigsetjmp(sbuf, 0) == 0) { long r = churn(v, n); sjump(); return (int)r; } return v * 2 + (int)w; }\n"
     "int tier1_twice_declared(int n) { int v = f(n); long w = f(n + 3); if (tier1_declared_setjmp(buf) == 0) { long r = churn(v, n); jump(); return (int)r; } return v * 3 + (int)w; }\n"
-    "int tier1_twice_none(int n) { int v = f(n); long r = churn(v, n); return v + (int)r; }\n"
-    "int main(void) { printf(\"%d %d %d %d\\n\", tier1_twice_setjmp(5), tier1_twice_sigsetjmp(6), tier1_twice_declared(7), tier1_twice_none(8)); return 0; }\n";
+    "static int (*volatile tier1_save)(jmp_buf) = _setjmp;\n"
+    "static long (*volatile tier1_churn)(int, int) = churn;\n"
+    "int tier1_twice_pointer(int n) { int v = f(n); long w = f(n + 4); if (tier1_save(buf) == 0) { long r = churn(v, n); jump(); return (int)r; } return v * 5 + (int)w; }\n"
+    "int tier1_twice_none(int n) { int v = f(n); long r = tier1_churn(v, n); return v + (int)r; }\n"
+    "int main(void) { printf(\"%d %d %d %d %d\\n\", tier1_twice_setjmp(5), tier1_twice_sigsetjmp(6), tier1_twice_declared(7), tier1_twice_pointer(9), tier1_twice_none(8)); return 0; }\n";
 static const char check_test_tier1_twice_other_source[] =
     "__asm__(\".text\\n.globl tier1_declared_setjmp\\n.type tier1_declared_setjmp, @function\\ntier1_declared_setjmp:\\n    jmp _setjmp@PLT\\n\");\n";
 
@@ -2800,7 +2804,7 @@ static void check_test_driver_tier1_float(CheckTest* test, const char* clang, co
 }
 
 // The returns-twice fixture (#1847, check_test_tier1_twice_source), its unit by --tier1 --verify -c by each path, with
-// and without rematerialization, linked with its other unit compiled by clang -O2: the three callers of a returns-twice
+// and without rematerialization, linked with its other unit compiled by clang -O2: the four callers of a returns-twice
 // function are refused and Tier 0's, the other function Tier 1's, and the program prints what clang -O0's build prints.
 static void check_test_driver_tier1_twice(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
@@ -2826,7 +2830,7 @@ static void check_test_driver_tier1_twice(CheckTest* test, const char* clang, co
     char expected[256] = { 0 };
     const bool ran = referenced && check_test_driver_capture(reference, expected, sizeof(expected)) && expected[0] != 0;
     check_test_expect(test, ran, "clang's build of the returns-twice fixture runs");
-    static const char* const callers[3] = { "tier1_twice_setjmp", "tier1_twice_sigsetjmp", "tier1_twice_declared" };
+    static const char* const callers[4] = { "tier1_twice_setjmp", "tier1_twice_sigsetjmp", "tier1_twice_declared", "tier1_twice_pointer" };
     for (uint32_t rematerialize = 0; ran && rematerialize < 2; rematerialize += 1)
     {
         for (uint32_t path = 0; path < 2; path += 1)

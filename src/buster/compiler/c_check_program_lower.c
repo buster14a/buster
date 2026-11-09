@@ -778,10 +778,11 @@ struct CheckLowerWriter
     // (Tier0Function.returns_twice).
     bool returns_twice;
     // Whether the body calls another function that returns twice (#1847, Tier0Function.calls_returns_twice), and
-    // whether the unit may have one (CheckLowerShared.twice): a direct call asks then alone.
+    // whether the unit may have one (CheckLowerShared.twice): a call asks then alone.
     bool calls_returns_twice;
     bool twice;
     const IdentId* twice_names;
+    IdentId twice_tag;
     // Whether the function whose opening token is `init_reentry_body` - 1 names a returns-twice function: a whole-object
     // call initializer asks once per body, before any argument tasks are emitted (check_lower_init_reentry).
     uint32_t init_reentry_body;
@@ -6054,9 +6055,10 @@ static const BuiltinIntrinsicName check_lower_twice_entries[BUSTER_CHECK_LOWER_T
 #undef BUSTER_CHECK_LOWER_TWICE_NAME
 };
 
-// Into names[], each entry's interned id, 0 where the unit doesn't spell it: whether a call may return twice, which a
-// declaration's returns_twice also makes so (#1847, check_lower_calls_twice).
-static bool check_lower_twice_names(const CheckProgram* program, IdentId* names)
+// Into names[], each entry's interned id, 0 where the unit doesn't spell it, and into *tag the jmp_buf's element's tag,
+// glibc's `__jmp_buf_tag` (check_lower_indirect_twice): whether a call may return twice, which a declaration's
+// returns_twice also makes so (#1847, check_lower_calls_twice).
+static bool check_lower_twice_names(const CheckProgram* program, IdentId* names, IdentId* tag)
 {
     bool spelled = false;
     for (uint32_t k = 0; k < BUSTER_CHECK_LOWER_TWICE_NAMES; k += 1)
@@ -6065,7 +6067,23 @@ static bool check_lower_twice_names(const CheckProgram* program, IdentId* names)
         names[k] = program->identifiers != NULL ? intern_find(program->identifiers, (const uint8_t*)entry->name, entry->length) : 0;
         spelled |= names[k] != 0;
     }
-    return spelled || program->object_returns_twice != NULL;
+    static const char jmp_buf_tag[] = "__jmp_buf_tag";
+    *tag = program->identifiers != NULL ? intern_find(program->identifiers, (const uint8_t*)jmp_buf_tag, sizeof(jmp_buf_tag) - 1) : 0;
+    return spelled || *tag != 0 || program->object_returns_twice != NULL;
+}
+
+// Whether an indirect call may reach a function that returns twice (#1847): one through a pointer whose function's first
+// parameter is a jmp_buf's or a sigjmp_buf's element (a pointer to glibc's `struct __jmp_buf_tag`), as setjmp's,
+// _setjmp's, sigsetjmp's and __sigsetjmp's are. C (C17 7.13.1.1) has setjmp invoked by its name alone, so neither clang
+// nor LLVM marks such a call returns_twice; their -O0 code survives it because it gives every value its own stack home,
+// which Tier 1's shared rows and slots don't. A call through a pointer of any other type is an ordinary call.
+static bool check_lower_indirect_twice(const CheckLowerWriter* writer, const TypeId* parameter_types, uint32_t parameters)
+{
+    const TypeTable* types = writer->program->types;
+    const TypeId first = parameters != 0 ? type_strip_aligned(types, parameter_types[0]) : 0;
+    const TypeId element = first != 0 && type_kind(types, first) == BUSTER_TYPE_KIND_POINTER ? type_unqualified(type_strip_aligned(types, type_element(types, first))) : 0;
+    const bool structure = element != 0 && type_kind(types, element) == BUSTER_TYPE_KIND_STRUCT;
+    return structure && writer->twice_tag != 0 && types->tags.name[types->types.index[type_index(element)]] == writer->twice_tag;
 }
 
 // Whether a direct call's callee, `object`, returns twice (#1847, Tier0Function.calls_returns_twice): a declaration
@@ -6174,7 +6192,7 @@ static inline __attribute__((always_inline)) bool check_lower_call_body(CheckLow
     const bool direct = builtin || (value.category != CHECK_LVALUE && value.constant_kind == CHECK_CONSTANT_ADDRESS && value.object != 0 && value.offset == 0 &&
                         value.object < writer->program->object_count && writer->program->object_symbols[value.object] != 0 &&
                         (value.flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT)) == 0);
-    writer->calls_returns_twice |= writer->twice && direct && !builtin && check_lower_calls_twice(writer, value.object);
+    writer->calls_returns_twice |= writer->twice && !builtin && (direct ? check_lower_calls_twice(writer, value.object) : check_lower_indirect_twice(writer, parameter_types, parameters));
     if (passed != NULL || count + chained > BUSTER_TIER0_MAX_CALL_ARGUMENTS || returned != NULL)
     {
         // A half-precision argument (the first type it finds of the parameters' and the arguments'): the call is
@@ -14066,6 +14084,7 @@ struct CheckLowerShared
     // The interned names of the library functions that return twice (check_lower_twice_entries), 0 for one the unit
     // doesn't spell, and whether the unit may call one: it spells one, or a declaration has returns_twice.
     IdentId twice_names[BUSTER_CHECK_LOWER_TWICE_NAMES];
+    IdentId twice_tag;
     bool twice;
     uint32_t* initializer_declarations;
     uint32_t* local_map;
@@ -14505,7 +14524,7 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
         valid = check_lower_copy_type_facts(types, shared->type_count, shared->type_facts, scratch, scalar);
         shared->bit_ints = memchr(types->types.kind, BUSTER_TYPE_KIND_BIT_INT, types->types.count) != NULL;
         shared->segments = memchr(types->types.kind, BUSTER_TYPE_KIND_QUALIFIED, types->types.count) != NULL && check_lower_segment_types(types);
-        shared->twice = check_lower_twice_names(program, shared->twice_names);
+        shared->twice = check_lower_twice_names(program, shared->twice_names, &shared->twice_tag);
         shared->overloads = input == 0 || program->stream == NULL || input->overload_heads != NULL || program->stream->overload_address_count != 0 ||
                             program->stream->dense_values != NULL;
     }
@@ -14837,6 +14856,7 @@ static bool check_lower_writer_begin(CheckLowerWriter* writer, CheckLowerAbi* ab
         .segments = shared->segments,
         .twice = shared->twice,
         .twice_names = shared->twice_names,
+        .twice_tag = shared->twice_tag,
         .abi_table = &shared->table,
         .type_classes = shared->type_classes,
         .type_facts = shared->type_facts,

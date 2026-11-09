@@ -342,15 +342,22 @@ that returns twice is Tier 0's (#1847): `__builtin_setjmp`'s callers since
 #148, and since #1847 the callers of setjmp's library kin (the catalogue's
 entries with clang's `j` attribute: `setjmp`, `_setjmp`, `__sigsetjmp`,
 `sigsetjmp`, `savectx`, `vfork`, `getcontext` and `_setjmpex`) and of any
-function a declaration gives `returns_twice` (`Tier0Function.calls_returns_twice`).
+function a declaration gives `returns_twice` (`Tier0Function.calls_returns_twice`),
+and the callers through a pointer whose function's first parameter is a
+`jmp_buf`'s or a `sigjmp_buf`'s element (glibc's `struct __jmp_buf_tag *`), as
+setjmp's is (`check_lower_indirect_twice`). C invokes `setjmp` by its name alone
+(C17 7.13.1.1), and neither clang nor LLVM marks a call through a pointer
+`returns_twice`; clang's -O0 code survives one only because it gives every value
+its own stack home. A call through a pointer of any other type is an ordinary
+call.
 Tier 1 shares call-save rows and spill slots among values whose ranges don't
 meet on the CFG, which has no edge from a `longjmp` back to the call, so a
 second return would read another value's bytes; LLVM's StackSlotColoring stays
 out of such a function for the same reason. Their `longjmp` restores the
 callee-saved registers, and C's contexts for `setjmp` hold no value of Tier 0's
 stacks across its call, so Tier 0's code needs nothing more.
-`test-checker-driver`'s returns-twice unit runs each kind against clang -O0's
-build. Still refused: a
+`test-checker-driver`'s returns-twice unit runs each kind, the pointer's too,
+against clang -O0's build. Still refused: a
 vector result LLVM demotes to a hidden pointer, naked functions, whose bodies
 are assembly Tier 0 copies as written, an address whose offset alone is past 32
 bits. The IR's switches and selects of floating
