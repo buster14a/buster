@@ -461,8 +461,9 @@ static __attribute__((no_sanitize("function"))) void cbuiltin_lower_test_case(CB
     arena_pop_to(arena, mark);
 }
 
-// 128-bit operands and destinations (BUSTER_CBUILTIN_LOWER_WIDE): clang's own builtin on the operands' and the
-// destination's types, each operand passed as its 128-bit pattern, and the destination's value as one.
+// 128-bit operands and destinations (BUSTER_CBUILTIN_LOWER_WIDE), and _BitInts of 65 to 127 bits (#1447): clang's own
+// builtin on the operands' and the destination's types, each operand passed as its 128-bit pattern, and the
+// destination's value as one, extended from its width as clang stores it.
 #define BUSTER_CBUILTIN_LOWER_TEST_WIDE(A, B, R) do { \
     R destination; \
     if (id == CBUILTIN_ADD_OVERFLOW) { overflow = __builtin_add_overflow((A)a, (B)b, &destination); } \
@@ -478,23 +479,33 @@ static __attribute__((no_sanitize("function"))) void cbuiltin_lower_test_case(CB
     case 64 | BUSTER_CBUILTIN_SIGNED: BUSTER_CBUILTIN_LOWER_TEST_WIDE(A, B, int64_t); break; \
     case BUSTER_CBUILTIN_LOWER_WIDE: BUSTER_CBUILTIN_LOWER_TEST_WIDE(A, B, unsigned __int128); break; \
     case BUSTER_CBUILTIN_LOWER_WIDE | BUSTER_CBUILTIN_SIGNED: BUSTER_CBUILTIN_LOWER_TEST_WIDE(A, B, __int128); break; \
+    case 65 | BUSTER_CBUILTIN_SIGNED: BUSTER_CBUILTIN_LOWER_TEST_WIDE(A, B, _BitInt(65)); break; \
+    case 65: BUSTER_CBUILTIN_LOWER_TEST_WIDE(A, B, unsigned _BitInt(65)); break; \
+    case 96 | BUSTER_CBUILTIN_SIGNED: BUSTER_CBUILTIN_LOWER_TEST_WIDE(A, B, _BitInt(96)); break; \
+    case 100: BUSTER_CBUILTIN_LOWER_TEST_WIDE(A, B, unsigned _BitInt(100)); break; \
+    case 127 | BUSTER_CBUILTIN_SIGNED: BUSTER_CBUILTIN_LOWER_TEST_WIDE(A, B, _BitInt(127)); break; \
+    case 127: BUSTER_CBUILTIN_LOWER_TEST_WIDE(A, B, unsigned _BitInt(127)); break; \
     default: break; }
 #define BUSTER_CBUILTIN_LOWER_TEST_WIDE_SECOND(A) switch (b_type) { \
     case 64: BUSTER_CBUILTIN_LOWER_TEST_WIDE_RESULT(A, uint64_t); break; \
     case 64 | BUSTER_CBUILTIN_SIGNED: BUSTER_CBUILTIN_LOWER_TEST_WIDE_RESULT(A, int64_t); break; \
     case BUSTER_CBUILTIN_LOWER_WIDE: BUSTER_CBUILTIN_LOWER_TEST_WIDE_RESULT(A, unsigned __int128); break; \
     case BUSTER_CBUILTIN_LOWER_WIDE | BUSTER_CBUILTIN_SIGNED: BUSTER_CBUILTIN_LOWER_TEST_WIDE_RESULT(A, __int128); break; \
+    case 100 | BUSTER_CBUILTIN_SIGNED: BUSTER_CBUILTIN_LOWER_TEST_WIDE_RESULT(A, _BitInt(100)); break; \
+    case 127: BUSTER_CBUILTIN_LOWER_TEST_WIDE_RESULT(A, unsigned _BitInt(127)); break; \
     default: break; }
 
-static const uint32_t cbuiltin_lower_test_wide_operands[4] =
+static const uint32_t cbuiltin_lower_test_wide_operands[6] =
 {
     64,
     64 | BUSTER_CBUILTIN_SIGNED,
     BUSTER_CBUILTIN_LOWER_WIDE,
     BUSTER_CBUILTIN_LOWER_WIDE | BUSTER_CBUILTIN_SIGNED,
+    100 | BUSTER_CBUILTIN_SIGNED,
+    127,
 };
 
-static const uint32_t cbuiltin_lower_test_wide_results[7] =
+static const uint32_t cbuiltin_lower_test_wide_results[13] =
 {
     1,
     8 | BUSTER_CBUILTIN_SIGNED,
@@ -503,6 +514,12 @@ static const uint32_t cbuiltin_lower_test_wide_results[7] =
     64 | BUSTER_CBUILTIN_SIGNED,
     BUSTER_CBUILTIN_LOWER_WIDE,
     BUSTER_CBUILTIN_LOWER_WIDE | BUSTER_CBUILTIN_SIGNED,
+    65 | BUSTER_CBUILTIN_SIGNED,
+    65,
+    96 | BUSTER_CBUILTIN_SIGNED,
+    100,
+    127 | BUSTER_CBUILTIN_SIGNED,
+    127,
 };
 
 static __attribute__((noinline)) uint32_t cbuiltin_lower_test_wide_oracle(CBuiltinId id, unsigned __int128 a, uint32_t a_type, unsigned __int128 b, uint32_t b_type,
@@ -515,6 +532,8 @@ static __attribute__((noinline)) uint32_t cbuiltin_lower_test_wide_oracle(CBuilt
     case 64 | BUSTER_CBUILTIN_SIGNED: BUSTER_CBUILTIN_LOWER_TEST_WIDE_SECOND(int64_t); break;
     case BUSTER_CBUILTIN_LOWER_WIDE: BUSTER_CBUILTIN_LOWER_TEST_WIDE_SECOND(unsigned __int128); break;
     case BUSTER_CBUILTIN_LOWER_WIDE | BUSTER_CBUILTIN_SIGNED: BUSTER_CBUILTIN_LOWER_TEST_WIDE_SECOND(__int128); break;
+    case 100 | BUSTER_CBUILTIN_SIGNED: BUSTER_CBUILTIN_LOWER_TEST_WIDE_SECOND(_BitInt(100)); break;
+    case 127: BUSTER_CBUILTIN_LOWER_TEST_WIDE_SECOND(unsigned _BitInt(127)); break;
     default: break;
     }
     return overflow;
@@ -525,11 +544,12 @@ static __attribute__((noinline)) uint32_t cbuiltin_lower_test_wide_oracle(CBuilt
 #undef BUSTER_CBUILTIN_LOWER_TEST_WIDE
 
 // An operand's pattern, as 128 bits: a 64-bit one's input extended by its signedness, a 128-bit one's boundaries
-// (the halves' carries and signs among them) and random values.
+// (the halves' carries and signs among them) and random values, and a _BitInt's of 65 to 127 bits those shifted down to
+// its width, extended from it as clang stores it (its top bit and largest value from the 128-bit ones').
 static unsigned __int128 cbuiltin_lower_test_wide_input(uint32_t index, uint32_t type, uint64_t* state)
 {
     unsigned __int128 result = 0;
-    if (!cbuiltin_lower_wide(type))
+    if (!cbuiltin_lower_limbs(type))
     {
         const uint64_t bits = cbuiltin_lower_test_input(index, type, state);
         result = (type & BUSTER_CBUILTIN_SIGNED) != 0 ? (unsigned __int128)(__int128)(int64_t)bits : bits;
@@ -560,6 +580,13 @@ static unsigned __int128 cbuiltin_lower_test_wide_input(uint32_t index, uint32_t
         const uint64_t low = cbuiltin_lower_test_random(state);
         // Random values of every magnitude: their high halves shifted down so that some products fit.
         result = index < 16 ? boundaries[index] : ((unsigned __int128)(high >> (index % 64)) << 64) | low;
+        if (cbuiltin_lower_between(type))
+        {
+            const uint32_t shift = 128 - (type & ~BUSTER_CBUILTIN_SIGNED);
+            result >>= index < 16 && index != 1 && index != 2 ? shift : 0;
+            result <<= shift;
+            result = (type & BUSTER_CBUILTIN_SIGNED) != 0 ? (unsigned __int128)((__int128)result >> shift) : result >> shift;
+        }
     }
     return result;
 }
@@ -589,7 +616,7 @@ static __attribute__((no_sanitize("function"))) void cbuiltin_lower_test_wide_ca
         }
         for (uint32_t i = 0; i < 2; i += 1)
         {
-            const bool wide = cbuiltin_lower_wide(types[i]);
+            const bool wide = cbuiltin_lower_limbs(types[i]);
             const uint32_t class = wide ? ((types[i] & BUSTER_CBUILTIN_SIGNED) != 0 ? BUSTER_TYPED_CLASS_I128 : BUSTER_TYPED_CLASS_U128) : cbuiltin_lower_type_class(types[i]);
             stream->local_classes[3 + i] = wide ? BUSTER_TYPED_CLASS_VOID : (uint8_t)class;
             stream->local_flags[3 + i] = wide ? BUSTER_TYPED_LOCAL_ADDRESS_TAKEN : 0;
@@ -720,7 +747,7 @@ static __attribute__((no_sanitize("function"))) void cbuiltin_lower_test_wide_ca
         const bool waited = child > 0 && waitpid(child, &status, 0) == child;
         ok = cbuiltin_lower_test_expect(tally, waited && WIFEXITED(status) && WEXITSTATUS(status) == 0, "wide native child", call.id, (uint32_t)status);
     }
-    const uint32_t result_bytes = cbuiltin_lower_wide(call.result_type) ? 16 : ((call.result_type & ~BUSTER_CBUILTIN_SIGNED) + 7) / 8;
+    const uint32_t result_bytes = cbuiltin_lower_limbs(call.result_type) ? 16 : ((call.result_type & ~BUSTER_CBUILTIN_SIGNED) + 7) / 8;
     for (uint32_t i = 0; ok && i < BUSTER_CBUILTIN_LOWER_TEST_INPUTS; i += 1)
     {
         uint8_t expected_bytes[24];
@@ -1161,7 +1188,8 @@ static int run_builtin_lower_tests(int argc, char** argv)
                 }
             }
         }
-        // 128-bit operands or destinations, mixed with 64-bit ones and narrower destinations, signed and unsigned.
+        // 128-bit operands or destinations, and _BitInts of 65 to 127 bits (#1447), mixed with 64-bit ones and narrower
+        // destinations, signed and unsigned.
         for (uint32_t id = CBUILTIN_ADD_OVERFLOW; id <= CBUILTIN_MUL_OVERFLOW; id += 1)
         {
             for (uint32_t at = 0; at < BUSTER_ARRAY_LENGTH(cbuiltin_lower_test_wide_operands); at += 1)
@@ -1177,7 +1205,7 @@ static int run_builtin_lower_tests(int argc, char** argv)
                             .b_type = cbuiltin_lower_test_wide_operands[bt],
                             .result_type = cbuiltin_lower_test_wide_results[rt],
                         };
-                        if (cbuiltin_lower_wide(call.a_type) || cbuiltin_lower_wide(call.b_type) || cbuiltin_lower_wide(call.result_type))
+                        if (cbuiltin_lower_limbs(call.a_type) || cbuiltin_lower_limbs(call.b_type) || cbuiltin_lower_limbs(call.result_type))
                         {
                             cbuiltin_lower_test_wide_case(&tally, &arena, call, &state);
                         }
