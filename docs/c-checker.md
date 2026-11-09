@@ -4171,7 +4171,9 @@ An undeclared name that is a typo of a visible one is clang's (#1447,
   name the context takes is as near and the typo's length is at least three
   times its distance.
 - **A value** (`DiagnoseEmptyLookup`) takes an object, a function or an
-  enumerator; before `=`, `->` or `.`, not a function. Its error reads
+  enumerator; within an expression, before `=`, `->` or `.`, not a function
+  (`CastExpressionIdValidator`). A statement's first name takes an object
+  alone before `=`, and any value otherwise (`StatementFilterCCC`). Its error reads
   "use of undeclared identifier 'countr'; did you mean 'counter'?", with
   "'counter' declared here". The use then binds to that declaration as if it
   were written (`CHECK_INPUT_UNDECLARED_CORRECTED`, recovered), so the later
@@ -4210,8 +4212,16 @@ Left as they were:
 - Clang also offers keywords where it reads an expression or a statement's
   start, and on taking one parses the statement again with it (`whil;` then
   gives "expected '(' after 'while'"). Where a keyword (`do`, `sizeof`,
-  `int`, ...) or a visible typedef is as near as the best value, buster
-  suggests nothing.
+  `int`, ...) is as near as the best value, or a visible typedef is at a
+  statement's start before `(`, `[` or a name, buster suggests nothing; so
+  `int x = whil;` gets no "did you mean 'while'?".
+- Type names are clang's parser's to correct (`DiagnoseUnknownTypeName`):
+  `myin x;`, `sizeof(myin)`, `(myin)x` and `_Alignof(myin)` keep buster's
+  parse errors, with no suggestion. Neither does an implicit declaration's
+  diagnostic that `-Werror` makes an error before C99.
+- Later diagnostics spell the name as written, not the one taken
+  (`const int counter; countr = 5;`), and a function designator's
+  comparison statement keeps its `-Wunused` and `-Wparentheses` notes.
 - A name the walk itself reads, a `typeof` operand, an array's bound or an
   enumerator's value, is not corrected: an undeclared one there still stops
   the reader, typo or not, as on main.

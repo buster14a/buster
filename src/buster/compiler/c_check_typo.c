@@ -264,11 +264,31 @@ static uint32_t check_typo_prefilter(const CheckTypoScope* scope, uint32_t name_
     return count;
 }
 
-// Whether a name's declaration kind is one `mode` takes, before `next`.
-static bool check_typo_accepted(uint8_t kind, CheckTypoMode mode, bool object_only)
+// What a value's context takes (clang's callbacks): every value; or, before `=`, `->` or `.` within an expression, no
+// function (CastExpressionIdValidator); or, before a statement's `=`, an object alone (StatementFilterCCC's VarDecl).
+typedef enum CheckTypoTakes
 {
-    const bool value = kind == C_BINDING_OBJECT || kind == C_BINDING_ENUMERATOR || (kind == C_BINDING_FUNCTION && !object_only);
+    CHECK_TYPO_TAKES_VALUES,
+    CHECK_TYPO_TAKES_NO_FUNCTION,
+    CHECK_TYPO_TAKES_OBJECT,
+} CheckTypoTakes;
+
+// Whether a name's declaration kind is one `mode` takes, in its context.
+static bool check_typo_accepted(uint8_t kind, CheckTypoMode mode, CheckTypoTakes takes)
+{
+    const bool value = kind == C_BINDING_OBJECT || (kind == C_BINDING_ENUMERATOR && takes != CHECK_TYPO_TAKES_OBJECT) ||
+                       (kind == C_BINDING_FUNCTION && takes == CHECK_TYPO_TAKES_VALUES);
     return mode == CHECK_TYPO_FUNCTION ? kind == C_BINDING_FUNCTION : value;
+}
+
+// Whether the name at `token` starts a statement, where clang's parser classifies it (ClassifyName, StatementFilterCCC):
+// after a `;`, a `{` or a `}`, a condition's or a for header's `)`, `else`, `do`, or a label's or a case's `:`.
+static bool check_typo_statement_start(const Parser* parser, uint32_t token)
+{
+    const uint8_t kind = token != 0 ? parser->tokens.kinds[token - 1] : PARSE_KIND_END;
+    const uint8_t role = token != 0 ? parser->tree.roles[token - 1] : PARSE_ROLE_COUNT;
+    return kind == PARSE_KIND_SEMI || kind == PARSE_KIND_L_BRACE || kind == PARSE_KIND_R_BRACE || kind == PARSE_KIND_ELSE || kind == PARSE_KIND_DO ||
+           role == PARSE_ROLE_CLOSE_CONDITION || role == PARSE_ROLE_CLOSE_FOR || (kind == PARSE_KIND_COLON && role != PARSE_ROLE_CLOSE_TERNARY);
 }
 
 // The declaration a typo at `token` corrects to, its declare event's, from the declarations visible at `limit` (an event
@@ -309,10 +329,17 @@ static uint32_t check_typo_search(CheckInputReader* reader, CheckTypoScope* scop
             }
         }
         // Each name's innermost declaration (the latest kept of its key), and of those the nearest the mode takes; a
-        // keyword or a typedef as near, the conservative refusal above.
-        const bool object_only = mode == CHECK_TYPO_VALUE && token + 1 < parser->tokens.count &&
-                                 (parser->tokens.kinds[token + 1] == PARSE_KIND_EQUAL || parser->tokens.kinds[token + 1] == PARSE_KIND_ARROW ||
-                                  parser->tokens.kinds[token + 1] == PARSE_KIND_PERIOD);
+        // keyword or a typedef as near, the conservative refusal above, where clang's callback would offer one: a
+        // typedef only at a statement's start before `(`, `[` or a name, a keyword within an expression or at a
+        // statement's start before `(`, a name, `->`, `.`, `;` or `{`.
+        const uint8_t next = token + 1 < parser->tokens.count ? parser->tokens.kinds[token + 1] : PARSE_KIND_END;
+        const bool statement = mode == CHECK_TYPO_VALUE && check_typo_statement_start(parser, token);
+        const bool member = next == PARSE_KIND_ARROW || next == PARSE_KIND_PERIOD;
+        const CheckTypoTakes takes = statement && next == PARSE_KIND_EQUAL ? CHECK_TYPO_TAKES_OBJECT :
+                                     !statement && (next == PARSE_KIND_EQUAL || member) ? CHECK_TYPO_TAKES_NO_FUNCTION : CHECK_TYPO_TAKES_VALUES;
+        const bool typedefs = statement && (next == PARSE_KIND_L_PAREN || next == PARSE_KIND_L_SQUARE || next == PARSE_KIND_IDENTIFIER);
+        const bool keywords = !statement || next == PARSE_KIND_L_PAREN || next == PARSE_KIND_IDENTIFIER || member || next == PARSE_KIND_SEMI ||
+                              next == PARSE_KIND_L_BRACE;
         uint32_t best = UINT32_MAX;
         uint32_t best_at = BUSTER_CHECK_NONE;
         uint32_t ties = 0;
@@ -327,14 +354,14 @@ static uint32_t check_typo_search(CheckInputReader* reader, CheckTypoScope* scop
             }
             const uint8_t kind = bindings->kind[scope->events[at]];
             const uint32_t distance = typo->distances[k];
-            const bool accepted = !shadowed && distance != 0 && check_typo_accepted(kind, mode, object_only);
-            const bool rival = !shadowed && distance != 0 && mode == CHECK_TYPO_VALUE && kind == C_BINDING_TYPEDEF;
+            const bool accepted = !shadowed && distance != 0 && check_typo_accepted(kind, mode, takes);
+            const bool rival = !shadowed && distance != 0 && mode == CHECK_TYPO_VALUE && kind == C_BINDING_TYPEDEF && typedefs;
             ties = accepted && distance == best ? ties + 1 : accepted && distance < best ? 1 : ties;
             best_at = accepted && distance < best ? at : best_at;
             best = accepted && distance < best ? distance : best;
             other_best = rival && distance < other_best ? distance : other_best;
         }
-        for (uint32_t w = 0; mode == CHECK_TYPO_VALUE && best != UINT32_MAX && w < BUSTER_ARRAY_LENGTH(check_typo_keywords); w += 1)
+        for (uint32_t w = 0; mode == CHECK_TYPO_VALUE && keywords && best != UINT32_MAX && w < BUSTER_ARRAY_LENGTH(check_typo_keywords); w += 1)
         {
             const char* keyword = check_typo_keywords[w];
             const uint32_t keyword_length = (uint32_t)strlen(keyword);

@@ -370,6 +370,11 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "    int e = myin;\n    take(rati);\n    int *f = &ratoi;\n    int h = (int)countr;\n    svl.a = 1;\n    pointe = 0;\n"
         "    switch (param) { case countr: break; }\n    int i = alphc;\n    { int value; int j = valu; }\n    int k = value;\n"
         "    return a + b + c + d + e + h + i + k;\n}\n",
+        // A statement's first name before `=` takes an object alone (clang's StatementFilterCCC), where one within an
+        // expression takes an enumerator too; a typedef is no candidate within an expression (review on #1822).
+        "enum { COUNTER };\ntypedef int counting;\nint counter;\n"
+        "void f(int n)\n{\n    COUNTR = 5;\n    if (n) COUNTR = 1;\n    lbl: COUNTR = 2;\n    switch (n) { case 1: COUNTR = 3; }\n"
+        "    n = n ? COUNTR : 1;\n    int x = countin;\n    countin = 1;\n    (void)x;\n}\n",
         // An undeclared function's call notes the function it may have meant; an implicit declaration is itself a name
         // of its block, which ties with the other (gnu17's: C23 has no implicit declaration).
         "/* gnu17 only */\nint compute(int);\nint counter;\nvoid f(void) { int x = compte(1); }\nvoid g(void) { int d = countr; }\n"
