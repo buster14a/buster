@@ -527,6 +527,18 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "void g(void) { v; (void)v; int unused; }\nvoid h(void) { extern void lv; void *r = &lv; }\n"
         "void warns(void) {\n    *p;\n    q[0];\n    (1, v);\n    (v, x);\n    c ? v : cv;\n    c ? *p : *p;\n"
         "    _Generic(x, int: v, default: cv);\n    _Generic(x, int: x, default: v);\n}\nint f(void) { return v; }\n",
+        // File-scope declarations whose error no smaller part holds (#1447, check_driver_rejected_declaration): the view leaves
+        // the declaration out, and the bodies after it give their warnings; a const object's initializer, specifiers that
+        // don't combine, and two such declarations in a row.
+        "const int c = undeclared_name;\nstatic int g(int a) { int unused; if (a = 1) return 2; return 3; }\nint h(void) { int z; return z; }\n",
+        "long long long x;\nint m(int a) { int unused; if (a = 2) return 1; return 0; }\n",
+        "const int c = nope;\nint float y;\nint k(int a) { int unused; if (a = 3) return 1; return 0; }\n",
+        // A dropped part's error counts just before the token after it (#1447): a block's dropped initializer and a dropped
+        // statement right after its body's `{` stay in their scope, whose unused variables are left out, as clang leaves
+        // them, and the next body keeps its own.
+        "struct S { int a; } s;\nvoid f(void) { int y = s.b; int z; }\nvoid g(void) { s.b; int w; }\nvoid h(void) { int unused; }\n",
+        // A body that names the left-out declaration is left out with it, and one that doesn't keeps its warnings.
+        "const int c = nope;\nint uses(void) { return c; }\nint m(int a) { int unused; if (a = 2) return 1; return 0; }\n",
         // Typo correction (#1447): a value's undeclared name recovers through the nearest visible name, as if it were
         // written (its type drives the later errors: a parameter's conversion, a case label's constant, a static
         // initializer's), unless another name is as near (alpha/alphb), the name is a typedef's, or it follows a cast;
