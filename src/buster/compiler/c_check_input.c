@@ -792,6 +792,9 @@ struct CheckInput
     uint32_t multiversion_report_count;
     uint32_t multiversion_report_capacity;
     uint32_t* implicit_function_tokens;
+    // Each implicit function's typo correction (#1447, c_check_typo.c), parallel to implicit_function_tokens: the declaration
+    // of the visible function clang's notes suggest, plus one, or 0.
+    uint32_t* implicit_function_corrections;
     uint32_t implicit_function_count;
     uint8_t implicit_function_diagnostic;
     uint8_t implicit_library_diagnostic;
@@ -1628,6 +1631,8 @@ struct CheckInputReader
     const CheckConstexprValue* constexpr_indexed;
     const CheckInputReader* constexpr_index_owner;
     uint32_t implicit_function_capacity;
+    // The unit's typo correction state, made at its first missing name (#1447, c_check_typo.c), or NULL.
+    struct CheckTypo* typo;
     // The fallthrough null statements whose placement clang's analysis of the function's CFG checks, which the controls'
     // walk records (check_input_fallthrough_record) and check_input_fallthrough_placements checks once the bindings'
     // replay has resolved the uses that analysis reads: a callee's declaration, a constant's (#1126's review).
@@ -9615,6 +9620,7 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
     }
 }
 
+#include "c_check_typo.c"
 #include "c_check_implicit_input.c"
 
 // The plain library builtins' folds' identifiers in the unit, and their mask (CheckInputReader.library_names).
@@ -10130,16 +10136,23 @@ static inline __attribute__((always_inline)) void check_input_resolve_name(Check
                 }
             }
         }
-        else if (intrinsic == CHECK_INPUT_INTRINSIC_NOT_FOUND && reader->output->declarations[i] == BUSTER_CHECK_NONE &&
-                 c_bindings_use(&reader->bindings, C_BINDING_ORDINARY, identifier, i, i) == 0)
+        uint32_t named = identifier;
+        if (intrinsic == CHECK_INPUT_INTRINSIC_NOT_FOUND && reader->output->declarations[i] == BUSTER_CHECK_NONE)
         {
-            reader->output->resource = true;
+            const uint32_t event = c_bindings_use(&reader->bindings, C_BINDING_ORDINARY, identifier, i, i);
+            reader->output->resource |= event == 0;
+            // A name no declaration binds: its typo correction, which makes the event the candidate's use (#1447).
+            if (__builtin_expect(event != 0 && reader->bindings.previous[event - 1] == 0, 0))
+            {
+                check_input_typo_use(reader, i, event);
+                named = reader->bindings.key[event - 1];
+            }
         }
         if (intrinsic == CHECK_INPUT_INTRINSIC_NOT_FOUND && __builtin_expect(reader->specifier_query_depth != 0 || i < reader->inference_end, 0))
         {
             // The suspended type query consumes this expression before the final batch replay. Capture
             // its declaration while the source scope is active; the replay still verifies the same event.
-            const uint32_t handle = c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, identifier);
+            const uint32_t handle = c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, named);
             if (handle != 0)
             {
                 const uint32_t declaration = reader->bindings.declaration[handle - 1];

@@ -3201,16 +3201,36 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                         check_driver_implicit_library(pp, types, input, pp_severity, parser->tokens.sources[token], publication, intern_bytes(pp->table, name),
                                                       intern_length(pp->table, name), input->implicit_function_c99, scratch);
                     }
-                    else if (input->implicit_function_c99)
-                    {
-                        pp_diagnose_output_at(pp, pp_severity, parser->tokens.sources[token], publication,
-                            "call to undeclared function '%.*s'; ISO C99 and later do not support implicit function declarations [-Wimplicit-function-declaration]",
-                            (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
-                    }
                     else
                     {
-                        pp_diagnose_output_at(pp, pp_severity, parser->tokens.sources[token], publication, "implicit declaration of function '%.*s' [-Wimplicit-function-declaration]",
-                                           (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
+                        // Clang's typo correction's notes (#1447, c_check_typo.c): the suggestion at the call's name, then the
+                        // suggested function's declaration.
+                        const uint32_t which = sequence - offset;
+                        const uint32_t corrected = which < input->implicit_function_count && input->implicit_function_corrections != NULL &&
+                                                   input->implicit_function_corrections[which] != 0 && input->implicit_function_corrections[which] - 1 < count ?
+                                                   input->implicit_function_corrections[which] - 1 : BUSTER_CHECK_NONE;
+                        const uint32_t candidate = corrected != BUSTER_CHECK_NONE ? parser->tokens.names[corrected] : 0;
+                        char suggestion[192];
+                        char declared[192];
+                        snprintf(suggestion, sizeof(suggestion), "did you mean '%.*s'?", (int)intern_length(pp->table, candidate), intern_bytes(pp->table, candidate));
+                        snprintf(declared, sizeof(declared), "'%.*s' declared here", (int)intern_length(pp->table, candidate), intern_bytes(pp->table, candidate));
+                        const PPOutputDiagnosticNote notes[2] = {
+                            { .token = parser->tokens.sources[token], .message = suggestion },
+                            { .token = corrected != BUSTER_CHECK_NONE ? parser->tokens.sources[corrected] : 0, .message = declared },
+                        };
+                        const uint32_t note_count = corrected != BUSTER_CHECK_NONE ? 2u : 0u;
+                        if (input->implicit_function_c99)
+                        {
+                            pp_diagnose_output_notes_at(pp, pp_severity, parser->tokens.sources[token], publication, notes, note_count,
+                                "call to undeclared function '%.*s'; ISO C99 and later do not support implicit function declarations [-Wimplicit-function-declaration]",
+                                (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
+                        }
+                        else
+                        {
+                            pp_diagnose_output_notes_at(pp, pp_severity, parser->tokens.sources[token], publication, notes, note_count,
+                                                        "implicit declaration of function '%.*s' [-Wimplicit-function-declaration]",
+                                                        (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
+                        }
                     }
                 }
                 else
@@ -3742,11 +3762,23 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                         }
                         else if ((kind == CHECK_INPUT_UNDECLARED || kind == CHECK_INPUT_UNKNOWN_BUILTIN) && named)
                         {
-                            const uint32_t name = parser->tokens.names[token];
+                            // A typo's correction (#1447, c_check_typo.c): the name it suggests, with its note at its declaration. (Its
+                            // order's token is its full expression's first; the name is the report's.)
+                            const CheckInputReport* report = input->reports + index;
+                            const uint32_t name = parser->tokens.names[report->token < count ? report->token : token];
+                            const uint32_t corrected = kind == CHECK_INPUT_UNDECLARED && report->subject != 0 && report->subject - 1 < count ? report->subject - 1 :
+                                                       BUSTER_CHECK_NONE;
+                            const uint32_t candidate = corrected != BUSTER_CHECK_NONE ? parser->tokens.names[corrected] : 0;
+                            char suggestion[192];
+                            char declared[192];
+                            snprintf(suggestion, sizeof(suggestion), "; did you mean '%.*s'?", (int)intern_length(pp->table, candidate), intern_bytes(pp->table, candidate));
+                            snprintf(declared, sizeof(declared), "'%.*s' declared here", (int)intern_length(pp->table, candidate), intern_bytes(pp->table, candidate));
+                            const PPOutputDiagnosticNote note = { .token = corrected != BUSTER_CHECK_NONE ? parser->tokens.sources[corrected] : 0, .message = declared };
                             // clang's unknown builtin is an error of -Wimplicit-function-declaration's group, which it names.
-                            pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "use of %s '%.*s'%s", kind == CHECK_INPUT_UNDECLARED ? "undeclared identifier" :
-                                                 "unknown builtin", (int)intern_length(pp->table, name), intern_bytes(pp->table, name),
-                                                 kind == CHECK_INPUT_UNDECLARED ? "" : " [-Wimplicit-function-declaration]");
+                            pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, corrected != BUSTER_CHECK_NONE ? 1u : 0u, "use of %s '%.*s'%s%s",
+                                                        kind == CHECK_INPUT_UNDECLARED ? "undeclared identifier" : "unknown builtin", (int)intern_length(pp->table, name),
+                                                        intern_bytes(pp->table, name), corrected != BUSTER_CHECK_NONE ? suggestion : "",
+                                                        kind == CHECK_INPUT_UNDECLARED ? "" : " [-Wimplicit-function-declaration]");
                         }
                         else if ((kind == CHECK_INPUT_CLEANUP_FUNCTION || kind == CHECK_INPUT_CLEANUP_PARAMETERS || kind == CHECK_INPUT_CLEANUP_TYPE) && named)
                         {

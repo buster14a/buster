@@ -6310,6 +6310,7 @@ static CheckSparseWide check_input_attributes_from(Arena* arena, CheckInputAttri
 #include "c_check_program_library_test.c"
 #include "c_check_program_classify_test.c"
 #include "c_check_program_constants_test.c"
+#include "c_check_typo_test.c"
 
 // The reader's count of builtin call records (check_input_builtin_capacity), by both paths, against the test's own, on
 // builtins columns of every length to 200 that end at a PROT_NONE page: mostly tokens without a builtin, and builtins
@@ -7073,6 +7074,10 @@ static int run_checker_tests(int argc, char** argv)
             if (check_test_takes())
             {
                 check_test_corpus_symbol_reasons(&test, clang);
+            }
+            if (check_test_takes())
+            {
+                check_test_typo(&test);
             }
             // The coded walk's classes (#1038) need every source fixture's counts: a part has only its own.
             if (check_test_part.count == 1)

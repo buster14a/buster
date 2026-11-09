@@ -116,7 +116,8 @@ static inline __attribute__((always_inline)) void check_input_implicit_function(
                 const uint32_t capacity = reader->implicit_function_capacity == 0 ? 8 :
                                           reader->implicit_function_capacity <= UINT32_MAX / 2 ? reader->implicit_function_capacity * 2 : 0;
                 uint32_t* tokens = capacity != 0 ? BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint32_t, capacity) : NULL;
-                if (tokens == NULL)
+                uint32_t* corrections = tokens != NULL ? BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint32_t, capacity) : NULL;
+                if (corrections == NULL)
                 {
                     input->resource = true;
                 }
@@ -125,8 +126,10 @@ static inline __attribute__((always_inline)) void check_input_implicit_function(
                     if (input->implicit_function_count != 0)
                     {
                         memcpy(tokens, input->implicit_function_tokens, (uint64_t)input->implicit_function_count * sizeof(uint32_t));
+                        memcpy(corrections, input->implicit_function_corrections, (uint64_t)input->implicit_function_count * sizeof(uint32_t));
                     }
                     input->implicit_function_tokens = tokens;
+                    input->implicit_function_corrections = corrections;
                     reader->implicit_function_capacity = capacity;
                 }
             }
@@ -146,6 +149,10 @@ static inline __attribute__((always_inline)) void check_input_implicit_function(
             {
                 if (!diagnosed)
                 {
+                    // Clang's typo correction of a function no earlier declaration of its name (clang's ExternCPrev) or
+                    // library builtin names: notes that suggest a visible function (#1447, c_check_typo.c).
+                    const uint32_t correction = linked == 0 && !eligible ? check_typo_correct(reader, token, true) : BUSTER_CHECK_NONE;
+                    input->implicit_function_corrections[input->implicit_function_count] = correction != BUSTER_CHECK_NONE ? correction + 1 : 0;
                     input->implicit_function_tokens[input->implicit_function_count++] = token;
                 }
                 input->declarations[token] = token;
