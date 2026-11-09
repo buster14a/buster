@@ -120,6 +120,24 @@ static const CheckDriverDefaultWarningFixture check_driver_type_sugar_fixtures[]
                   "}\n",
         .errors = 11,
     },
+    {
+        // No macro names a space where clang's FindLocsWithCommonFileID finds none: a predefined macro's (`__seg_gs`, and
+        // a user macro over it) and an attribute list that isn't its macro's whole expansion.
+        .name = "address spaces no macro names",
+        .source = "#define MYGS __seg_gs\n"
+                  "#define CAS const __attribute__((address_space(1)))\n"
+                  "#define ASV __attribute__((address_space(2))) volatile\n"
+                  "#define AS3 __attribute__((address_space(3)))\n"
+                  "void f(__seg_gs int *a, MYGS int *b, CAS int *c, ASV int *d, AS3 int *e)\n"
+                  "{\n"
+                  "    a();\n"
+                  "    b();\n"
+                  "    c();\n"
+                  "    d();\n"
+                  "    e();\n"
+                  "}\n",
+        .errors = 5,
+    },
 };
 
 static void check_test_driver_type_sugar(CheckTest* test, const char* clang, const char* executable, const char* directory)

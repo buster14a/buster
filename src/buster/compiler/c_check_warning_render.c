@@ -268,7 +268,8 @@ static uint32_t check_driver_macro_root(const Preprocessor* pp, uint32_t origin)
 // The macros that write the unit's target address spaces (#1447), as clang's MacroQualifiedType names a type whose
 // attribute list one macro's expansion wrote (`#define AS1 __attribute__((address_space(1)))`, `'AS1 int *'`): an
 // object-like macro by its name, a function-like one by its invocation as written (`'ASN(3) int *'`), the outermost
-// one where macros nest. clang names each declaration's own spelling; a space this unit writes both ways, or with two
+// one where macros nest, where the list is that expansion's whole and isn't a predefined macro's (`__seg_gs`).
+// clang names each declaration's own spelling; a space this unit writes both ways, or with two
 // macros, keeps its attribute spelled out. One scan of the `__attribute__` tokens, on a pass's first rendered type.
 static bool check_driver_space_macros(const Parser* parser, Preprocessor* pp, CheckWarningSpelling* spell, Arena* scratch)
 {
@@ -301,8 +302,16 @@ static bool check_driver_space_macros(const Parser* parser, Preprocessor* pp, Ch
             if (read && end != NULL && *end == 0 && value <= BUSTER_TYPE_SPACE_MASK - BUSTER_TYPE_SPACE_TARGET)
             {
                 const uint32_t word = BUSTER_TYPE_SPACE_TARGET + (uint32_t)value;
-                const uint32_t root = check_driver_macro_root(pp, pp_history_at(pp, parser->tokens.sources[t]));
-                const bool whole = root != 0 && root == check_driver_macro_root(pp, pp_history_at(pp, parser->tokens.sources[close]));
+                // clang's FindLocsWithCommonFileID: the list is a whole expansion, its `__attribute__` that expansion's
+                // first token and its `)` the last, and not spelled in the predefines (`__seg_gs`, isWrittenInBuiltinFile).
+                const uint32_t first = parser->tokens.sources[t];
+                const uint32_t last = parser->tokens.sources[close];
+                const uint32_t root = check_driver_macro_root(pp, pp_history_at(pp, first));
+                const uint32_t range = root != 0 && first < pp->output.count ? pp_find_range(pp, pp->output.locations[first]) : BUSTER_PP_NONE;
+                const bool builtin = range != BUSTER_PP_NONE && pp->files[pp->ranges[range].file].data == pp->predefines_data;
+                const bool whole = root != 0 && !builtin && last < pp->output.count && root == check_driver_macro_root(pp, pp_history_at(pp, last)) &&
+                                   (first == 0 || check_driver_macro_root(pp, pp_history_at(pp, first - 1)) != root) &&
+                                   (last + 1 >= pp->output.count || check_driver_macro_root(pp, pp_history_at(pp, last + 1)) != root);
                 const PPExpansion* expansion = whole ? &pp->history[root - 1] : NULL;
                 const bool invocation = expansion != NULL && expansion->end > expansion->begin &&
                                         pp_find_range(pp, expansion->begin) == pp_find_range(pp, expansion->end);
