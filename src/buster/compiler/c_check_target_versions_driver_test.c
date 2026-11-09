@@ -213,30 +213,46 @@ static void check_test_target_versions_diagnostics(CheckTest* test, const char* 
     };
     enum { LINES = 65536, LONG = 4096 };
     // Long lists, built here: past 64 versions (a version first seen there and repeated), past an offset of 1024 bytes in
-    // one string, and past 64 strings.
-    char* long_units[4] = { malloc(LONG), malloc(LONG), malloc(LONG), malloc(LONG) };
-    const uint32_t long_versions[4] = { 70, 140, 70, 140 };
-    for (uint32_t l = 0; l < 4; l += 1)
+    // one string, and past 64 strings; then a declaration of 70 versions and its redeclaration, with the same versions and
+    // with its last one different.
+    enum { LONG_UNITS = 6 };
+    char* long_units[LONG_UNITS] = { malloc(LONG), malloc(LONG), malloc(LONG), malloc(LONG), malloc(LONG), malloc(LONG) };
+    const uint32_t long_versions[LONG_UNITS] = { 70, 140, 70, 140, 70, 70 };
+    static const char* const tails[LONG_UNITS][2] = {
+        { "avx2,avx2\"", NULL },
+        { "avx2,  avx2\"", NULL },
+        { "\"sse4.2\", \"sse4.2\"", NULL },
+        { "foo\"", NULL },
+        { "avx2\"", "avx2\"" },
+        { "avx2\"", "sse4.2\"" },
+    };
+    static const char* const ends[2] = { "))) int f(void) { return 1; }\n", "))) int f(void);\n" };
+    bool built = true;
+    for (uint32_t l = 0; l < LONG_UNITS; l += 1)
     {
-        int length = long_units[l] != NULL ? snprintf(long_units[l], LONG, "__attribute__((target_clones(%s", l == 2 ? "" : "\"") : -1;
-        for (uint32_t v = 0; length > 0 && length < LONG && v < long_versions[l]; v += 1)
+        int length = long_units[l] != NULL ? 0 : -1;
+        const uint32_t copies = tails[l][1] != NULL ? 2 : 1;
+        for (uint32_t copy = 0; length >= 0 && length < LONG && copy < copies; copy += 1)
         {
-            length += snprintf(long_units[l] + length, LONG - (size_t)length, l == 2 ? "\"default\", " : "default,");
+            length += snprintf(long_units[l] + length, LONG - (size_t)length, "__attribute__((target_clones(%s", l == 2 ? "" : "\"");
+            for (uint32_t v = 0; length > 0 && length < LONG && v < long_versions[l]; v += 1)
+            {
+                length += snprintf(long_units[l] + length, LONG - (size_t)length, l == 2 ? "\"default\", " : "default,");
+            }
+            if (length > 0 && length < LONG)
+            {
+                length += snprintf(long_units[l] + length, LONG - (size_t)length, "%s%s", tails[l][copy], ends[copies - 1]);
+            }
         }
-        static const char* const tails[4] = { "avx2,avx2\"", "avx2,  avx2\"", "\"sse4.2\", \"sse4.2\"", "foo\"" };
-        if (length > 0 && length < LONG)
-        {
-            snprintf(long_units[l] + length, LONG - (size_t)length, "%s))) int f(void) { return 1; }\n", tails[l]);
-        }
+        built = built && length > 0 && length < LONG;
     }
     char* expected_lines = malloc(LINES);
     char* actual_lines = malloc(LINES);
     char source[PATH_MAX];
     snprintf(source, sizeof(source), "%s/target-versions.c", directory);
-    const uint32_t plain = BUSTER_ARRAY_LENGTH(units) + 4;
+    const uint32_t plain = BUSTER_ARRAY_LENGTH(units) + LONG_UNITS;
     const uint32_t total = plain + BUSTER_ARRAY_LENGTH(flagged) * BUSTER_ARRAY_LENGTH(options);
-    for (uint32_t unit = 0; expected_lines != NULL && actual_lines != NULL && long_units[0] != NULL && long_units[1] != NULL && long_units[2] != NULL &&
-                            long_units[3] != NULL && unit < total; unit += 1)
+    for (uint32_t unit = 0; expected_lines != NULL && actual_lines != NULL && built && unit < total; unit += 1)
     {
         const uint32_t flag = unit - plain;
         const char* text = unit < BUSTER_ARRAY_LENGTH(units) ? units[unit] : unit < plain ? long_units[unit - BUSTER_ARRAY_LENGTH(units)] :
@@ -268,7 +284,7 @@ static void check_test_target_versions_diagnostics(CheckTest* test, const char* 
     }
     free(expected_lines);
     free(actual_lines);
-    for (uint32_t l = 0; l < 4; l += 1)
+    for (uint32_t l = 0; l < LONG_UNITS; l += 1)
     {
         free(long_units[l]);
     }
