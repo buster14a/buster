@@ -4818,9 +4818,12 @@ static bool check_driver_edit_site(CheckDriverEditor* editor, uint32_t token)
             const TypeId bare = type != 0 ? type_strip_aligned(types, type) : 0;
             const bool unsized = bare != 0 && type_kind(types, bare) == BUSTER_TYPE_KIND_ARRAY && !type_is_complete(types, bare);
             const bool constant = (type_qualifiers(type) & BUSTER_TYPE_CONST) != 0;
+            // `__func__` is a function's alone: at file scope the value reads undeclared and the view's reading fails,
+            // so a file-scope const object's initializer is left to check_driver_rejected_declaration instead.
+            const bool function = check_sparse_get(input->declaration_bodies, declaration) != BUSTER_CHECK_NONE;
             // A const object of an arithmetic or enumeration type keeps it, as clang's stays valid, with `-*__func__`'s
             // unknown value in its place; another initializer the declaration can't do without leaves out its declarator.
-            const bool replaced = constant && bare != 0 && (type_is_arithmetic(types, bare) || type_kind(types, bare) == BUSTER_TYPE_KIND_ENUM);
+            const bool replaced = function && constant && bare != 0 && (type_is_arithmetic(types, bare) || type_kind(types, bare) == BUSTER_TYPE_KIND_ENUM);
             done = token < end && end <= count && type != 0 && !unsized && (!constant || replaced) && at + 1 < end;
             valid = !done || check_driver_edit_apply(editor, replaced ? at + 1 : at, end - 1, replaced ? CHECK_DRIVER_EDIT_VALUE : CHECK_DRIVER_EDIT_DROP);
         }
@@ -4874,6 +4877,85 @@ static bool check_driver_rejected_edit(CheckDriverEditor* editor, uint32_t token
     {
         editor->log_count -= 2;
         editor->edits[editor->log[editor->log_count]] = (uint8_t)editor->log[editor->log_count + 1];
+    }
+    return valid;
+}
+
+// A rejected unit's error in a file-scope declaration that check_driver_rejected_edit leaves (#1447): its specifiers',
+// its declarator's, an invalid type's, an array of unknown size's or a const object's initializer. Clang marks such a
+// declaration invalid and keeps it bound, its uses quiet; the view leaves the whole declaration out instead, from its first
+// token to its `;`, and the mask leaves out every body that names one of its names, which the reading would otherwise
+// find undeclared. False, leaving `edits` and `mask` as they were, where the error isn't in such a declaration (a function
+// definition's, a body's) or a file-scope declaration outside it names one of them: its round isn't ready, as before.
+// Only a rejected unit's rounds call it.
+static bool check_driver_rejected_declaration(const Parser* parser, const CheckInput* input, const CBodyRange* ranges, uint32_t body_count, uint32_t token,
+                                              uint8_t* edits, uint8_t* mask)
+{
+    const uint32_t count = parser->tokens.count;
+    // The declaration: the error's outermost parent, a `;` at file scope.
+    uint32_t top = token;
+    for (uint32_t steps = 0; top < count && parser->tree.parents[top] < count && steps < count; steps += 1)
+    {
+        top = parser->tree.parents[top];
+    }
+    bool valid = top < count && parser->tree.roles[top] == PARSE_ROLE_TERMINATOR && input->declarations != NULL;
+    uint32_t low = 0;
+    uint32_t high = valid ? top : 0;
+    while (low < high)
+    {
+        const uint32_t middle = low + (high - low) / 2;
+        const bool inside = check_driver_descends(parser, middle, top);
+        low = inside ? low : middle + 1;
+        high = inside ? middle : high;
+    }
+    // No body in it (a statement expression's), and no part of it left out otherwise.
+    for (uint32_t at = low; valid && at <= top; at += 1)
+    {
+        valid = edits[at] != 2 && parser->tree.roles[at] != PARSE_ROLE_OPEN_BODY;
+    }
+    // The bodies that name one of its names, outside it; a file-scope use declines.
+    uint32_t users = 0;
+    for (uint32_t at = low; valid && at <= top; at += 1)
+    {
+        const uint32_t name = parser->tokens.names[at];
+        const bool declared = parser->tokens.kinds[at] == PARSE_KIND_IDENTIFIER && input->declarations[at] == at && name != 0;
+        for (uint32_t use = 0; declared && valid && use < count; use += 1)
+        {
+            const bool named = (use < low || use > top) && parser->tokens.kinds[use] == PARSE_KIND_IDENTIFIER && parser->tokens.names[use] == name;
+            uint32_t first = 0;
+            uint32_t last = body_count;
+            while (named && first < last)
+            {
+                const uint32_t middle = first + (last - first) / 2;
+                const bool before = ranges[middle].begin <= use;
+                first = before ? middle + 1 : first;
+                last = before ? last : middle;
+            }
+            const bool bodied = named && first != 0 && use < ranges[first - 1].end;
+            valid = !named || bodied;
+            users += bodied;
+        }
+    }
+    if (valid)
+    {
+        for (uint32_t at = low; users != 0 && at <= top; at += 1)
+        {
+            const uint32_t name = parser->tokens.names[at];
+            const bool declared = parser->tokens.kinds[at] == PARSE_KIND_IDENTIFIER && input->declarations[at] == at && name != 0;
+            for (uint32_t b = 0; declared && b < body_count; b += 1)
+            {
+                bool names = false;
+                for (uint32_t use = ranges[b].begin; !names && use < ranges[b].end; use += 1)
+                {
+                    names = parser->tokens.kinds[use] == PARSE_KIND_IDENTIFIER && parser->tokens.names[use] == name;
+                }
+                if (names)
+                {
+                    memset(mask + ranges[b].begin, 1, ranges[b].end - ranges[b].begin);
+                }
+            }
+        }
+        memset(edits + low, 1, top - low + 1);
     }
     return valid;
 }
@@ -4959,7 +5041,10 @@ static CheckDriverRound check_driver_rejected_read(const Parser* unit, const Par
         for (uint32_t e = 0; e < error_count; e += 1)
         {
             const uint32_t at = errors[e] < count ? (edited ? view.to_view[errors[e]] : errors[e]) : view_count;
-            error_counts[(at < view_count ? at : view_count) + 1] += 1;
+            // A dropped part's error counts just before the token after it (#1447): in its own scope, a dropped
+            // declaration's at file scope, and not in the definition that follows it.
+            const bool dropped = edited && errors[e] < count && edits[errors[e]] != 0;
+            error_counts[(at < view_count ? at : view_count) + (dropped ? 0u : 1u)] += 1;
         }
         for (uint32_t t = 1; t < view_count + 2; t += 1)
         {
@@ -5278,7 +5363,8 @@ static void check_driver_rejected_common(const Parser* unit, const Parser* origi
         bool ready = true;
         for (uint32_t e = 0; ready && e < known_count; e += 1)
         {
-            const bool kept = known[e] < count && check_driver_rejected_edit(&editor, known[e]);
+            const bool kept = known[e] < count && (check_driver_rejected_edit(&editor, known[e]) ||
+                                                   check_driver_rejected_declaration(parser, first_input, ranges, body_count, known[e], edits, mask));
             edited |= kept;
             // The body whose tokens hold the error: the last one to begin at or before it.
             const uint32_t token = known[e];
