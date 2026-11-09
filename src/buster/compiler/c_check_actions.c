@@ -2747,7 +2747,10 @@ static inline __attribute__((always_inline)) void check_action_cast(TypeTable* t
 
 static void check_action_query(TypeTable* table, const CheckAction* action, CheckActionResult* result)
 {
-    const TypeId target = action->type != 0 ? action->type : action->operands[0].type;
+    const TypeId queried = action->type != 0 ? action->type : action->operands[0].type;
+    // An array's alignment is its element's (C11 6.5.3.4p3), which clang takes of an array of unknown size too (#1447).
+    const bool element = action->op == CHECK_OP_ALIGNOF && queried != 0 && type_kind(table, type_strip_aligned(table, queried)) == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY;
+    const TypeId target = element ? type_element(table, type_strip_aligned(table, queried)) : queried;
     const uint8_t kind = check_action_kind(table, target);
     const bool bit_field = action->type == 0 && action->operands[0].category == CHECK_LVALUE && (action->operands[0].flags & BUSTER_CHECK_BIT_FIELD) != 0;
     const bool gnu = kind == BUSTER_TYPE_KIND_FUNCTION || kind == BUSTER_TYPE_KIND_VOID;
