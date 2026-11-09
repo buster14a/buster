@@ -1,0 +1,919 @@
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+// Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+//
+// The code clang 23 generates for GNU's function multiversioning by target strings on x86-64 Linux (#1838;
+// CodeGenModule::emitMultiVersionFunctions, GetOrCreateMultiVersionResolver, getMangledNameImpl's AppendTargetMangling
+// and AppendTargetClonesMangling, and CodeGenFunction::EmitX86MultiVersionResolver and FormX86ResolverCondition, at
+// llvmorg-23.1.4, read for their rules and written again in C). The checker keeps each version apart
+// (c_check_target_versions.c); a function's versions form a group:
+//
+// - target's versions: each version's body is its own symbol, its mangled name (f for "default"; else f., then arch_CPU,
+//   then its features sorted by their priorities, the highest first, joined by '_': f.arch_znver4, f.popcnt_sse4.2),
+//   compiled with its own features (check_program_targets). Every reference to a version, a call or an address, reaches
+//   the group's reference object R (a synthetic object at the first declaration's attribute name), whose symbol is
+//   f.ifunc, an IFUNC (weak, local in a static group) at the resolver f.resolver, which the unit emits where it has a
+//   reference.
+// - target_clones: the function's own symbol f is the IFUNC (weak, local where it's static) at f.resolver, with f.ifunc
+//   an alias of it, which the unit emits where it defines or references the function. Its body is compiled once, with
+//   the unit's features, as each version is valid there (clang compiles a copy per version, with its features), at the
+//   first version's name (f.avx2.0: the version, arch_CPU for arch=, and its place among the versions that aren't
+//   "default", which takes their count) and the others' names, a synthetic object's symbol at the attribute's name.
+// - The resolver calls __cpu_indicator_init and returns the first version whose condition libgcc's CPU model meets, the
+//   versions sorted as clang's llvm::stable_sort sorts them, by their priorities (getFMVPriority: the highest of their
+//   features' priorities, doubled, and an arch='s key feature's, doubled plus one), the highest first, in their
+//   declarations' order otherwise. A version's condition is its arch= (__builtin_cpu_is's test of the model's vendor,
+//   type or subtype; a microarchitecture level's feature bit) and its features' bits; one of neither, as "default", is
+//   taken unconditionally, and a model none matches is a ud2.
+//
+// A group has a few versions, and each step reads those few records: scalar, as a vector pass would set up more than
+// it saves. A unit without a multiversioned function (CheckInput.target_multiversion) never calls these functions.
+#ifndef BUSTER_C_CHECK_PROGRAM_TARGET_VERSIONS_INCLUDED
+#define BUSTER_C_CHECK_PROGRAM_TARGET_VERSIONS_INCLUDED
+
+// The most versions a group's resolver takes, and the most features a version names.
+#define BUSTER_CHECK_PROGRAM_TARGET_OPTIONS 64u
+#define BUSTER_CHECK_PROGRAM_TARGET_FEATURES 32u
+
+// A processor's key feature's priority (c_check_target_versions.inc), or -2 for no processor of `name`.
+static int32_t check_program_target_arch_priority(String8 name)
+{
+    static const struct
+    {
+        const char* name;
+        int32_t priority;
+    } rows[] =
+    {
+#define BUSTER_CHECK_TARGET_VERSION_FEATURE(NAME, PRIORITY, WORD, BIT)
+#define BUSTER_CHECK_TARGET_VERSION_LEVEL(NAME, WORD, BIT)
+#define BUSTER_CHECK_TARGET_VERSION_ARCH(NAME, PRIORITY) { NAME, PRIORITY },
+#include "c_check_target_versions.inc"
+#undef BUSTER_CHECK_TARGET_VERSION_FEATURE
+#undef BUSTER_CHECK_TARGET_VERSION_LEVEL
+#undef BUSTER_CHECK_TARGET_VERSION_ARCH
+    };
+    int32_t result = -2;
+    for (uint32_t r = 0; result == -2 && r < BUSTER_ARRAY_LENGTH(rows); r += 1)
+    {
+        result = strlen(rows[r].name) == name.length && memcmp(rows[r].name, name.pointer, name.length) == 0 ? rows[r].priority : -2;
+    }
+    return result;
+}
+
+// A microarchitecture level's bit of libgcc's CPU model (`*word`, `*bit`), where `name` names one.
+static bool check_program_target_level(String8 name, uint32_t* word, uint32_t* bit)
+{
+    static const struct
+    {
+        const char* name;
+        uint32_t word;
+        uint32_t bit;
+    } rows[] =
+    {
+#define BUSTER_CHECK_TARGET_VERSION_FEATURE(NAME, PRIORITY, WORD, BIT)
+#define BUSTER_CHECK_TARGET_VERSION_LEVEL(NAME, WORD, BIT) { NAME, WORD, BIT },
+#define BUSTER_CHECK_TARGET_VERSION_ARCH(NAME, PRIORITY)
+#include "c_check_target_versions.inc"
+#undef BUSTER_CHECK_TARGET_VERSION_FEATURE
+#undef BUSTER_CHECK_TARGET_VERSION_LEVEL
+#undef BUSTER_CHECK_TARGET_VERSION_ARCH
+    };
+    bool found = false;
+    for (uint32_t r = 0; !found && r < BUSTER_ARRAY_LENGTH(rows); r += 1)
+    {
+        found = strlen(rows[r].name) == name.length && memcmp(rows[r].name, name.pointer, name.length) == 0;
+        *word = found ? rows[r].word : *word;
+        *bit = found ? rows[r].bit : *bit;
+    }
+    return found;
+}
+
+// __builtin_cpu_is's test of `name` (c_builtin_cpu.inc): the model's field (0 the vendor, 1 the type, 2 the subtype) and
+// its value, where `name` names one.
+static bool check_program_target_cpu_is(String8 name, uint32_t* field, uint32_t* value)
+{
+    static const struct
+    {
+        const char* name;
+        uint32_t field;
+        uint32_t value;
+    } rows[] =
+    {
+#define BUSTER_CBUILTIN_CPU_FEATURE(NAME, WORD, BIT)
+#define BUSTER_CBUILTIN_CPU_NAME(NAME, FIELD, VALUE) { NAME, FIELD, VALUE },
+#include "c_builtin_cpu.inc"
+#undef BUSTER_CBUILTIN_CPU_FEATURE
+#undef BUSTER_CBUILTIN_CPU_NAME
+    };
+    bool found = false;
+    for (uint32_t r = 0; !found && r < BUSTER_ARRAY_LENGTH(rows); r += 1)
+    {
+        found = strlen(rows[r].name) == name.length && memcmp(rows[r].name, name.pointer, name.length) == 0;
+        *field = found ? rows[r].field : *field;
+        *value = found ? rows[r].value : *value;
+    }
+    return found;
+}
+
+// A version as the resolver tests it: its arch= (empty for none) and features (`feature_count`), what its name adds to
+// the function's (`suffix`, without the leading period), and whether it is "default". A target_clones version's place
+// among the versions that aren't "default" (`index`), and whether an earlier one is the same (`repeated`).
+typedef struct CheckProgramTargetOption CheckProgramTargetOption;
+struct CheckProgramTargetOption
+{
+    String8 arch;
+    String8 features[BUSTER_CHECK_PROGRAM_TARGET_FEATURES];
+    uint32_t feature_count;
+    bool is_default;
+    bool repeated;
+    uint32_t index;
+    // The resolver's: the version's symbol, its priority, its condition (the CPU model's mask of four words, and
+    // __builtin_cpu_is's field and value where `cpu_is`).
+    SymbolId symbol;
+    uint32_t priority;
+    uint32_t mask[4];
+    bool cpu_is;
+    uint32_t field;
+    uint32_t value;
+};
+
+// The option of target's version string `text`: its arch= and features (clang's parseTargetAttr; the checker took each
+// feature as a version's). Whether it fits.
+static bool check_program_target_parse(String8 text, CheckProgramTargetOption* option)
+{
+    *option = (CheckProgramTargetOption){ .is_default = check_input_attribute_equal(text, "default") };
+    bool fits = true;
+    for (uint32_t cursor = 0; !option->is_default && cursor <= text.length;)
+    {
+        uint32_t end = cursor;
+        while (end < text.length && text.pointer[end] != ',')
+        {
+            end += 1;
+        }
+        const String8 item = check_target_version_slice(text, cursor, end);
+        cursor = end + 1;
+        uint32_t equals = 0;
+        while (equals < item.length && item.pointer[equals] != '=')
+        {
+            equals += 1;
+        }
+        const String8 value = equals < item.length ? check_target_version_slice(item, equals + 1, (uint32_t)item.length) : (String8){ 0 };
+        if (check_target_version_prefix(item, "arch="))
+        {
+            option->arch = option->arch.pointer == NULL ? value : option->arch;
+        }
+        else if (check_target_version_prefix(item, "fpmath=") || check_target_version_prefix(item, "branch-protection=") ||
+                 check_target_version_prefix(item, "tune="))
+        {
+        }
+        else if (option->feature_count < BUSTER_CHECK_PROGRAM_TARGET_FEATURES)
+        {
+            option->features[option->feature_count++] = item;
+        }
+        else
+        {
+            fits = false;
+        }
+    }
+    return fits;
+}
+
+// The priority of a feature a version may name, doubled (getFMVPriority's), or 0.
+static uint32_t check_program_target_feature_priority(String8 feature)
+{
+    const int32_t row = check_target_version_feature(feature);
+    return row >= 0 ? check_target_version_features[row].priority << 1 : 0;
+}
+
+// The resolver's condition and priority of `option`: whether clang's are defined (an arch= of no processor, or of one
+// whose key feature has no priority, is undefined behavior in clang's getFMVPriority: refused by name).
+static bool check_program_target_condition(CheckProgramTargetOption* option)
+{
+    bool valid = true;
+    option->priority = 0;
+    memset(option->mask, 0, sizeof(option->mask));
+    option->cpu_is = false;
+    for (uint32_t f = 0; f < option->feature_count; f += 1)
+    {
+        const int32_t row = check_target_version_feature(option->features[f]);
+        valid &= row >= 0;
+        if (row >= 0)
+        {
+            const CheckTargetVersionFeature* feature = check_target_version_features + row;
+            option->mask[feature->word] |= UINT32_C(1) << feature->bit;
+            option->priority = option->priority > feature->priority << 1 ? option->priority : feature->priority << 1;
+        }
+    }
+    if (option->arch.length != 0)
+    {
+        const int32_t key = check_program_target_arch_priority(option->arch);
+        valid &= key >= 0;
+        const uint32_t priority = key >= 0 ? ((uint32_t)key << 1) + 1 : 0;
+        option->priority = option->priority > priority ? option->priority : priority;
+        uint32_t word = 0;
+        uint32_t bit = 0;
+        const bool level = option->arch.length >= 6 && memcmp(option->arch.pointer, "x86-64", 6) == 0;
+        if (level)
+        {
+            valid &= check_program_target_level(option->arch, &word, &bit);
+            option->mask[word] |= UINT32_C(1) << bit;
+        }
+        else
+        {
+            option->cpu_is = check_program_target_cpu_is(option->arch, &option->field, &option->value);
+            valid &= option->cpu_is;
+        }
+    }
+    return valid;
+}
+
+// The name a version's symbol adds to the function's, after a period, written to `text` (room for `capacity` bytes):
+// target's (arch_CPU, then the features by their priorities, the highest first, '_' between) or target_clones' (its
+// version, arch_CPU for arch=, then a period and its index). Returns its length, 0 where it didn't fit.
+static uint32_t check_program_target_suffix(const CheckProgramTargetOption* option, bool clones, char* text, uint32_t capacity)
+{
+    uint32_t length = 0;
+    bool fits = true;
+    // The pieces in their order.
+    String8 pieces[BUSTER_CHECK_PROGRAM_TARGET_FEATURES + 1];
+    uint32_t piece_count = 0;
+    if (option->arch.length != 0)
+    {
+        pieces[piece_count++] = option->arch;
+    }
+    uint32_t order[BUSTER_CHECK_PROGRAM_TARGET_FEATURES];
+    for (uint32_t f = 0; f < option->feature_count; f += 1)
+    {
+        // Insertion by priority, the highest first.
+        const uint32_t priority = check_program_target_feature_priority(option->features[f]);
+        uint32_t at = f;
+        while (at > 0 && check_program_target_feature_priority(option->features[order[at - 1]]) < priority)
+        {
+            order[at] = order[at - 1];
+            at -= 1;
+        }
+        order[at] = f;
+    }
+    for (uint32_t f = 0; f < option->feature_count; f += 1)
+    {
+        pieces[piece_count++] = option->features[order[f]];
+    }
+    for (uint32_t p = 0; fits && p < piece_count; p += 1)
+    {
+        const bool arch = p == 0 && option->arch.length != 0;
+        const uint64_t needed = (p != 0 && !clones ? 1u : 0u) + (arch ? 5u : 0u) + pieces[p].length;
+        fits = length + needed <= capacity;
+        if (fits)
+        {
+            if (p != 0 && !clones)
+            {
+                text[length++] = '_';
+            }
+            if (arch)
+            {
+                memcpy(text + length, "arch_", 5);
+                length += 5;
+            }
+            memcpy(text + length, pieces[p].pointer, pieces[p].length);
+            length += (uint32_t)pieces[p].length;
+        }
+    }
+    if (fits && clones && option->is_default)
+    {
+        fits = length + 7 <= capacity;
+        if (fits)
+        {
+            memcpy(text + length, "default", 7);
+            length += 7;
+        }
+    }
+    if (fits && clones)
+    {
+        const int written = snprintf(text + length, capacity - length, ".%u", option->index);
+        fits = written > 0 && (uint32_t)written < capacity - length;
+        length += fits ? (uint32_t)written : 0;
+    }
+    return fits ? length : 0;
+}
+
+// The versions of a target_clones attribute, in its order (checkTargetClonesAttr's, each string's versions split, which
+// the checker keeps joined by commas as the attribute's text): `count` of them, at most `capacity`, each with its index
+// and whether an earlier one is the same. Whether they fit.
+static bool check_program_target_clones(const CheckInputAttribute* attribute, CheckProgramTargetOption* options, uint32_t capacity, uint32_t* count)
+{
+    const String8 text = attribute->text;
+    bool fits = text.pointer != NULL;
+    *count = 0;
+    uint32_t others = 0;
+    for (uint32_t cursor = 0; fits && cursor <= text.length;)
+    {
+        uint32_t end = cursor;
+        while (end < text.length && text.pointer[end] != ',')
+        {
+            end += 1;
+        }
+        const String8 item = check_target_version_slice(text, cursor, end);
+        cursor = end + 1;
+        fits = *count < capacity;
+        if (fits)
+        {
+            CheckProgramTargetOption* option = options + *count;
+            *option = (CheckProgramTargetOption){ .is_default = check_input_attribute_equal(item, "default") };
+            if (check_target_version_prefix(item, "arch="))
+            {
+                option->arch = check_target_version_slice(item, 5, (uint32_t)item.length);
+            }
+            else if (!option->is_default)
+            {
+                option->features[0] = item;
+                option->feature_count = 1;
+            }
+            option->index = others;
+            others += option->is_default ? 0 : 1;
+            for (uint32_t earlier = 0; earlier < *count; earlier += 1)
+            {
+                option->repeated |= check_target_versions_text_equal(options[earlier].arch, option->arch) &&
+                                    options[earlier].feature_count == option->feature_count && options[earlier].is_default == option->is_default &&
+                                    (option->feature_count == 0 || check_target_versions_text_equal(options[earlier].features[0], option->features[0]));
+            }
+            *count += 1;
+        }
+    }
+    for (uint32_t c = 0; c < *count; c += 1)
+    {
+        options[c].index = options[c].is_default ? others : options[c].index;
+    }
+    return fits;
+}
+
+// The function's name followed by a period and `suffix` (`suffix_length` bytes), or by `tail` where it isn't NULL, in
+// `output`.
+static String8 check_program_target_name(const CheckProgram* program, uint32_t declaration, const char* suffix, uint32_t suffix_length, const char* tail, Arena* output)
+{
+    const uint32_t identifier = program->parser->tokens.names[declaration];
+    const uint32_t length = intern_length(program->identifiers, identifier);
+    const uint64_t extra = tail != NULL ? strlen(tail) : (uint64_t)suffix_length + 1;
+    char* text = BUSTER_ARENA_PUSH_ARRAY(output, char, (uint64_t)length + extra);
+    if (text != NULL)
+    {
+        memcpy(text, intern_bytes(program->identifiers, identifier), length);
+        if (tail != NULL)
+        {
+            memcpy(text + length, tail, extra);
+        }
+        else
+        {
+            text[length] = '.';
+            memcpy(text + length + 1, suffix, suffix_length);
+        }
+    }
+    return (String8){ .pointer = text, .length = text != NULL ? length + extra : 0 };
+}
+
+// The symbol name of option `option` of group `group`: f for target's "default", f.SUFFIX otherwise. In `output`.
+static String8 check_program_target_option_name(const CheckProgram* program, const CheckProgramTargetGroup* group, const CheckProgramTargetOption* option, Arena* output)
+{
+    char suffix[512];
+    const bool clones = group->clones != 0;
+    const uint32_t length = !clones && option->is_default ? 0 : check_program_target_suffix(option, clones, suffix, sizeof(suffix));
+    const bool plain = !clones && option->is_default;
+    return plain ? check_program_target_name(program, group->first, NULL, 0, "", output) :
+           check_program_target_name(program, group->first, suffix, length, NULL, output);
+}
+
+// The target attribute of target's version `v`.
+static const CheckInputAttribute* check_program_target_version_attribute(const CheckProgram* program, uint32_t v)
+{
+    return check_target_versions_own(check_input_attributes_at(program->input, program->target_versions[v].declaration), CHECK_ATTRIBUTE_TARGET);
+}
+
+// Whether `object` is referenced: by a body (CheckProgram.references) or by an initializer (`initializer_references`).
+static bool check_program_target_referenced(const CheckProgram* program, uint32_t object, const uint32_t* initializer_references, uint32_t initializer_reference_count)
+{
+    bool found = false;
+    for (uint32_t b = 0; !found && b < program->body_count; b += 1)
+    {
+        const CheckProgramBody* body = program->bodies + b;
+        for (uint32_t r = 0; !found && program->references != NULL && r < body->reference_count; r += 1)
+        {
+            found = program->references[body->reference_first + r] == object;
+        }
+    }
+    for (uint32_t r = 0; !found && initializer_references != NULL && r < initializer_reference_count; r += 1)
+    {
+        found = initializer_references[r] == object;
+    }
+    return found;
+}
+
+// The unit's groups (CheckProgram.target_groups) from the declarations with a target or target_clones attribute among the
+// static objects' target events: by name, a group where a declaration has target("default") or target_clones, or two
+// objects have target attributes. The options of each resolver are checked here, where their conditions are clang's
+// (an arch= whose priority clang leaves undefined is refused by name). In `output`. Returns false where there was no
+// room.
+static bool check_program_target_groups(CheckProgram* program, const CheckProgramTargetEvents* events, const uint32_t* initializer_references,
+                                        uint32_t initializer_reference_count, Arena* output)
+{
+    const CheckInput* input = program->input;
+    const Parser* parser = program->parser;
+    const bool named = program->identifiers != NULL;
+    const uint32_t count = events->room && named ? events->count : 0;
+    if (events->room && events->count != 0 && !named)
+    {
+        check_program_fail(program, CHECK_PROGRAM_UNSUPPORTED, (uint32_t)events->keys[0]);
+    }
+    CheckProgramTargetGroup* groups = count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckProgramTargetGroup, count) : NULL;
+    CheckProgramTargetVersion* versions = count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckProgramTargetVersion, count) : NULL;
+    bool valid = count == 0 || (groups != NULL && versions != NULL);
+    uint32_t group_count = 0;
+    uint32_t version_count = 0;
+    for (uint32_t e = 0; valid && e < count; e += 1)
+    {
+        const uint32_t token = (uint32_t)events->keys[e];
+        const CheckInputAttributes* attributes = check_input_attributes_at(input, token);
+        const bool versioned = check_target_versions_own(attributes, CHECK_ATTRIBUTE_TARGET) != NULL || check_target_versions_own(attributes, CHECK_ATTRIBUTE_TARGET_CLONES) != NULL;
+        bool known = !versioned;
+        for (uint32_t g = 0; !known && g < group_count; g += 1)
+        {
+            known = parser->tokens.names[groups[g].first] == parser->tokens.names[token];
+            groups[g].first = known && token < groups[g].first ? token : groups[g].first;
+        }
+        if (!known)
+        {
+            groups[group_count++] = (CheckProgramTargetGroup){ .first = token };
+        }
+    }
+    // Each group's versions, and whether it is multiversioned at all; a name of one plain target function is no group.
+    uint32_t kept = 0;
+    for (uint32_t g = 0; valid && g < group_count; g += 1)
+    {
+        CheckProgramTargetGroup group = groups[g];
+        group.version_first = version_count;
+        bool multiversioned = false;
+        for (uint32_t e = 0; e < count; e += 1)
+        {
+            const uint32_t token = (uint32_t)events->keys[e];
+            const uint32_t object = (uint32_t)(events->keys[e] >> 32);
+            const CheckInputAttributes* attributes = check_input_attributes_at(input, token);
+            const CheckInputAttribute* target = check_target_versions_own(attributes, CHECK_ATTRIBUTE_TARGET);
+            const CheckInputAttribute* clones = check_target_versions_own(attributes, CHECK_ATTRIBUTE_TARGET_CLONES);
+            if ((target == NULL && clones == NULL) || parser->tokens.names[token] != parser->tokens.names[group.first])
+            {
+                continue;
+            }
+            multiversioned |= clones != NULL || check_target_versions_default(target);
+            if (clones != NULL)
+            {
+                group.clones = object;
+                group.clones_declaration = group.clones_declaration == 0 || token < group.clones_declaration ? token : group.clones_declaration;
+                continue;
+            }
+            bool known = false;
+            for (uint32_t v = group.version_first; v < version_count; v += 1)
+            {
+                known |= versions[v].object == object;
+                versions[v].declaration = versions[v].object == object && token < versions[v].declaration ? token : versions[v].declaration;
+            }
+            if (!known)
+            {
+                versions[version_count++] = (CheckProgramTargetVersion){ .object = object, .declaration = token };
+            }
+        }
+        multiversioned |= version_count - group.version_first > 1;
+        group.version_count = version_count - group.version_first;
+        if (!multiversioned)
+        {
+            version_count = group.version_first;
+            continue;
+        }
+        group.internal = check_input_linkage(input->declaration_bits, group.first) == 1;
+        // R, or a target_clones body's own symbol's object: the synthetic object at the attribute's name, plus one.
+        const uint32_t attributed = group.clones != 0 ? group.clones_declaration : group.first;
+        const CheckInputAttributes* attributes = check_input_attributes_at(input, attributed);
+        const CheckInputAttribute* attribute = group.clones != 0 ? check_target_versions_own(attributes, CHECK_ATTRIBUTE_TARGET_CLONES) :
+                                                                   check_target_versions_own(attributes, CHECK_ATTRIBUTE_TARGET);
+        const uint32_t synthetic = attribute->name_token + 1;
+        program->object_declarations[synthetic] = attributed;
+        group.reference = group.clones != 0 ? group.clones : synthetic;
+        group.body = group.clones != 0 ? synthetic : 0;
+        // Resolved: target's where a version is referenced; target_clones' where defined or referenced.
+        bool referenced = false;
+        for (uint32_t v = group.version_first; v < version_count; v += 1)
+        {
+            referenced |= check_program_target_referenced(program, versions[v].object, initializer_references, initializer_reference_count);
+        }
+        // (A static one is emitted only where referenced, as clang defers it.)
+        referenced |= group.clones != 0 &&
+                      ((check_program_cpu_defined(program, group.clones) && !group.internal) ||
+                       check_program_target_referenced(program, group.clones, initializer_references, initializer_reference_count));
+        group.resolved = referenced;
+        // The options' conditions, which the CPU model's symbols follow.
+        CheckProgramTargetOption options[BUSTER_CHECK_PROGRAM_TARGET_OPTIONS];
+        uint32_t option_count = 0;
+        bool fits = true;
+        if (group.clones != 0)
+        {
+            fits = check_program_target_clones(attribute, options, BUSTER_CHECK_PROGRAM_TARGET_OPTIONS, &option_count);
+        }
+        for (uint32_t v = 0; group.clones == 0 && fits && v < group.version_count; v += 1)
+        {
+            const CheckInputAttribute* target = check_target_versions_own(check_input_attributes_at(input, versions[group.version_first + v].declaration), CHECK_ATTRIBUTE_TARGET);
+            fits = check_program_target_parse(target->text, options + v);
+            option_count += 1;
+        }
+        for (uint32_t o = 0; fits && o < option_count; o += 1)
+        {
+            fits = check_program_target_condition(options + o);
+            group.model |= options[o].cpu_is || options[o].mask[0] != 0;
+            group.features2 |= (options[o].mask[1] | options[o].mask[2] | options[o].mask[3]) != 0;
+        }
+        if (!fits)
+        {
+            check_program_fail(program, CHECK_PROGRAM_UNSUPPORTED, attribute->name_token);
+        }
+        groups[kept++] = group;
+    }
+    if (valid)
+    {
+        program->target_groups = groups;
+        program->target_group_count = kept;
+        program->target_versions = versions;
+        program->target_version_count = version_count;
+    }
+    return valid;
+}
+
+// Before the symbols are numbered (check_program_alias_number): R is needed where the group is resolved; a version is
+// needed for its own symbol where the program has its body (its references move to R); and a target_clones body's own
+// symbol's object where the program has the body.
+static void check_program_target_needed(const CheckProgram* program, uint8_t* needed)
+{
+    for (uint32_t g = 0; g < program->target_group_count; g += 1)
+    {
+        const CheckProgramTargetGroup* group = program->target_groups + g;
+        for (uint32_t v = group->version_first; v < group->version_first + group->version_count; v += 1)
+        {
+            const uint32_t object = program->target_versions[v].object;
+            needed[object] = check_program_cpu_defined(program, object);
+        }
+        needed[group->reference] |= group->resolved;
+        if (group->body != 0)
+        {
+            needed[group->body] = check_program_cpu_defined(program, group->clones);
+        }
+    }
+}
+
+// After the symbols are numbered: each version's own symbol and each target_clones body's (CheckProgram.target_symbols,
+// in `output`; 0 for none), and every version's references at R's symbol. Returns false where there was no room.
+static bool check_program_target_number(CheckProgram* program, Arena* output)
+{
+    const uint32_t count = program->target_version_count + program->target_group_count;
+    SymbolId* symbols = count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, SymbolId, count) : NULL;
+    const bool valid = count == 0 || symbols != NULL;
+    for (uint32_t g = 0; valid && g < program->target_group_count; g += 1)
+    {
+        const CheckProgramTargetGroup* group = program->target_groups + g;
+        const SymbolId reference = program->object_symbols[group->reference];
+        for (uint32_t v = group->version_first; v < group->version_first + group->version_count; v += 1)
+        {
+            const uint32_t object = program->target_versions[v].object;
+            symbols[v] = program->object_symbols[object];
+            program->object_symbols[object] = reference;
+        }
+        symbols[program->target_version_count + g] = group->body != 0 ? program->object_symbols[group->body] : 0;
+    }
+    program->target_symbols = valid ? symbols : NULL;
+    return valid;
+}
+
+// The symbol body `b` is defined at for these groups: a version's own, or a target_clones body's; 0 for another body.
+static SymbolId check_program_target_body_symbol(const CheckProgram* program, uint32_t b)
+{
+    const uint32_t object = program->bodies[b].object;
+    SymbolId symbol = 0;
+    for (uint32_t v = 0; program->target_symbols != NULL && v < program->target_version_count; v += 1)
+    {
+        symbol = program->target_versions[v].object == object ? program->target_symbols[v] : symbol;
+    }
+    for (uint32_t g = 0; program->target_symbols != NULL && g < program->target_group_count; g += 1)
+    {
+        symbol = program->target_groups[g].clones != 0 && program->target_groups[g].clones == object ? program->target_symbols[program->target_version_count + g] : symbol;
+    }
+    return symbol;
+}
+
+// A group's options, in `options` (BUSTER_CHECK_PROGRAM_TARGET_OPTIONS of room), from its versions or its target_clones
+// attribute (check_program_target_groups checked that they fit and that their conditions are defined). Returns their
+// count.
+static uint32_t check_program_target_options(const CheckProgram* program, const CheckProgramTargetGroup* group, CheckProgramTargetOption* options)
+{
+    uint32_t count = 0;
+    if (group->clones != 0)
+    {
+        const CheckInputAttribute* attribute = check_target_versions_own(check_input_attributes_at(program->input, group->clones_declaration), CHECK_ATTRIBUTE_TARGET_CLONES);
+        (void)check_program_target_clones(attribute, options, BUSTER_CHECK_PROGRAM_TARGET_OPTIONS, &count);
+    }
+    for (uint32_t v = 0; group->clones == 0 && v < group->version_count && v < BUSTER_CHECK_PROGRAM_TARGET_OPTIONS; v += 1)
+    {
+        (void)check_program_target_parse(check_program_target_version_attribute(program, group->version_first + v)->text, options + v);
+        count += 1;
+    }
+    for (uint32_t o = 0; o < count; o += 1)
+    {
+        (void)check_program_target_condition(options + o);
+    }
+    return count;
+}
+
+// The names of the groups' symbols before the emission adds them (`names` by symbol, CheckProgramCode's symbol_names):
+// R's f.ifunc, each version's own (f for "default"), and each target_clones body's (its first version's name). Returns
+// false where there was no room.
+static bool check_program_target_names(const CheckProgram* program, String8* names, Arena* output)
+{
+    bool valid = true;
+    for (uint32_t g = 0; valid && g < program->target_group_count; g += 1)
+    {
+        const CheckProgramTargetGroup* group = program->target_groups + g;
+        CheckProgramTargetOption options[BUSTER_CHECK_PROGRAM_TARGET_OPTIONS];
+        const uint32_t count = check_program_target_options(program, group, options);
+        const SymbolId reference = program->object_symbols[group->reference];
+        if (group->clones == 0 && reference != 0 && program->symbol_objects[reference - 1] == group->reference)
+        {
+            names[reference] = check_program_target_name(program, group->first, NULL, 0, ".ifunc", output);
+            valid = names[reference].length != 0;
+        }
+        for (uint32_t v = 0; valid && group->clones == 0 && v < group->version_count && v < count; v += 1)
+        {
+            const SymbolId own = program->target_symbols != NULL ? program->target_symbols[group->version_first + v] : 0;
+            if (own != 0)
+            {
+                names[own] = check_program_target_option_name(program, group, options + v, output);
+                valid = names[own].length != 0;
+            }
+        }
+        const SymbolId body = group->clones != 0 && program->target_symbols != NULL ? program->target_symbols[program->target_version_count + g] : 0;
+        if (body != 0 && count != 0)
+        {
+            names[body] = check_program_target_option_name(program, group, options, output);
+            valid = names[body].length != 0;
+        }
+    }
+    return valid;
+}
+
+// The link room the groups' code takes beyond the program's symbols: the resolvers' atoms; their symbols (the resolver,
+// f.ifunc's alias, each option's version) and their fixups.
+static void check_program_target_room(const CheckProgram* program, uint64_t* atoms, uint64_t* symbols, uint64_t* fixups)
+{
+    for (uint32_t g = 0; g < program->target_group_count; g += 1)
+    {
+        const CheckProgramTargetGroup* group = program->target_groups + g;
+        CheckProgramTargetOption options[BUSTER_CHECK_PROGRAM_TARGET_OPTIONS];
+        const uint32_t count = check_program_target_options(program, group, options);
+        *atoms += group->resolved;
+        *symbols += 2 + count;
+        *fixups += group->resolved ? 1 + 6 * (uint64_t)count : 0;
+    }
+}
+
+// The symbol of the version of `option` in group `group`: its own (target's version with a body, CheckProgram.
+// target_symbols, or a target_clones body's first name) or one of the link's from `first` on, or 0.
+static SymbolId check_program_target_symbol(const Link* link, SymbolId first, String8 name)
+{
+    return check_program_cpu_find(link, first, name);
+}
+
+// The groups' symbols beyond the program's, once the program's, the helpers', the runtime's and the templates' exist and
+// before an executable's runtime joins (bind.c): each target_clones body's other versions' names (of its own symbol's
+// flags), and for each resolved group, its resolver f.resolver (a weak function, local in a static group), each of its
+// options' versions the unit doesn't define (undefined globals), R or f made an IFUNC of the resolver's binding, and
+// target_clones' f.ifunc, another. Names in `output`. Returns false with `code`'s status and reason set.
+static bool check_program_target_symbols(CheckProgramCode* code, const CheckProgram* program, Arena* output)
+{
+    Link* link = &code->link;
+    bool valid = true;
+    code->target_first = link->symbols.count;
+    for (uint32_t g = 0; valid && g < program->target_group_count; g += 1)
+    {
+        const CheckProgramTargetGroup* group = program->target_groups + g;
+        CheckProgramTargetOption options[BUSTER_CHECK_PROGRAM_TARGET_OPTIONS];
+        const uint32_t count = check_program_target_options(program, group, options);
+        const SymbolId body = group->clones != 0 && program->target_symbols != NULL ? program->target_symbols[program->target_version_count + g] : 0;
+        // The other versions' names at a target_clones body.
+        for (uint32_t o = 1; valid && body != 0 && o < count; o += 1)
+        {
+            if (!options[o].repeated)
+            {
+                valid = check_program_cpu_add(link, check_program_target_option_name(program, group, options + o, output), link->symbols.flags[body], true) != 0;
+            }
+        }
+        const SymbolId reference = program->object_symbols[group->reference];
+        if (!valid || !group->resolved || reference == 0)
+        {
+            continue;
+        }
+        const uint8_t binding = group->internal ? BUSTER_LINK_SYMBOL_LOCAL : BUSTER_LINK_SYMBOL_WEAK;
+        valid = check_program_cpu_add(link, check_program_target_name(program, group->first, NULL, 0, ".resolver", output), binding | BUSTER_LINK_SYMBOL_FUNCTION, true) != 0;
+        for (uint32_t o = 0; valid && o < count; o += 1)
+        {
+            const String8 name = check_program_target_option_name(program, group, options + o, output);
+            valid = name.length != 0 && (options[o].repeated || check_program_target_symbol(link, 1, name) != 0 ||
+                                         check_program_cpu_add(link, name, BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_NOTYPE, false) != 0);
+        }
+        if (valid && group->clones != 0)
+        {
+            valid = check_program_cpu_add(link, check_program_target_name(program, group->first, NULL, 0, ".ifunc", output), binding | BUSTER_LINK_SYMBOL_IFUNC, true) != 0;
+        }
+        if (valid)
+        {
+            link->symbols.flags[reference] = (uint8_t)((link->symbols.flags[reference] & BUSTER_LINK_SYMBOL_VISIBILITY) | binding | BUSTER_LINK_SYMBOL_IFUNC);
+            link->symbols.source[reference] = BUSTER_LINK_SOURCE_PROGRAM;
+        }
+    }
+    if (!valid)
+    {
+        code->status = CHECK_PROGRAM_RESOURCE;
+        code->reason = "a function multiversioned by target strings couldn't have its symbols added";
+    }
+    return valid;
+}
+
+// Appends the test of one word of the CPU model's features to a resolver's code: `mov eax, [rip + word]` (a PC32 fixup
+// to __cpu_model + 12 or __cpu_features2 + 4 * (w - 1)), `and eax, mask`, `cmp eax, mask`, `jne next`, whose
+// displacement's offset goes to `branches`.
+static void check_program_target_word(uint8_t* text, uint32_t* length, uint32_t w, uint32_t mask, SymbolId model, SymbolId features, uint32_t* fixup_offsets,
+                                      uint8_t* fixup_kinds, SymbolId* fixup_targets, int32_t* fixup_addends, uint32_t* fixups, uint32_t* branches,
+                                      uint32_t* branch_count)
+{
+    static const uint8_t test[] = { 0x8b, 0x05, 0, 0, 0, 0, 0x25, 0, 0, 0, 0, 0x3d, 0, 0, 0, 0, 0x0f, 0x85, 0, 0, 0, 0 };
+    check_program_cpu_bytes(text, length, test, sizeof(test));
+    fixup_offsets[*fixups] = *length - 20;
+    fixup_kinds[*fixups] = BUSTER_LINK_FIXUP_PC32;
+    fixup_targets[*fixups] = w == 0 ? model : features;
+    fixup_addends[*fixups] = (w == 0 ? 12 : 4 * ((int32_t)w - 1)) - 4;
+    *fixups += 1;
+    check_program_cpu_u32(text, *length - 15, mask);
+    check_program_cpu_u32(text, *length - 10, mask);
+    branches[(*branch_count)++] = *length - 4;
+}
+
+// The groups' code once the functions' atoms exist (after check_program_target_symbols): each target_clones body's other
+// versions' names at its body; and each resolved group's resolver, in `bytes`, with f.resolver and R (or f and f.ifunc)
+// at it. The resolver is clang's EmitX86MultiVersionResolver in other instructions:
+//
+//     push rax                                  ; the stack aligned for the call
+//     call __cpu_indicator_init                 ; PLT32
+//   for each option, in clang's order: its arch='s test, `cmp dword [rip + __cpu_model + 4 * field], value` and
+//   `jne next` (a microarchitecture level's is a feature word's), then each nonzero word of its features' mask:
+//     mov eax, [rip + word]                     ; PC32 (0: __cpu_model + 12, 1 to 3: __cpu_features2 + 4 * (w - 1))
+//     and eax, mask
+//     cmp eax, mask
+//     jne next
+//     lea rax, [rip + f.X]                      ; PC32 to a version the unit defines,
+//     (mov rax, [rip + f.X@GOTPCREL])           ; REX_GOTPCRELX to one it doesn't
+//     pop rcx
+//     ret
+//   next: ...
+//     ud2                                       ; no option's condition: clang's trap
+//
+// An option of no condition is taken unconditionally (clang's default, which sorts last), and none after it is reached.
+// Returns false with `code`'s status and reason set.
+static bool check_program_target_atoms(CheckProgramCode* code, const CheckProgram* program, Arena* bytes)
+{
+    Link* link = &code->link;
+    bool valid = true;
+    for (uint32_t g = 0; valid && g < program->target_group_count; g += 1)
+    {
+        const CheckProgramTargetGroup* group = program->target_groups + g;
+        CheckProgramTargetOption options[BUSTER_CHECK_PROGRAM_TARGET_OPTIONS];
+        const uint32_t count = check_program_target_options(program, group, options);
+        const SymbolId body = group->clones != 0 && program->target_symbols != NULL ? program->target_symbols[program->target_version_count + g] : 0;
+        const AtomId body_atom = body != 0 && body < link->symbols.count ? link->symbols.atom[body] : 0;
+        for (uint32_t o = 1; valid && body_atom != 0 && o < count; o += 1)
+        {
+            const SymbolId symbol = options[o].repeated ? 0 : check_program_cpu_find(link, code->target_first, check_program_target_option_name(program, group, options + o, bytes));
+            valid = options[o].repeated || (symbol != 0 && link_define_symbol(link, symbol, body_atom, link->symbols.value[body], link->symbols.size[body]));
+        }
+        const SymbolId reference = program->object_symbols[group->reference];
+        if (!valid || !group->resolved || reference == 0)
+        {
+            continue;
+        }
+        // The options with their versions' symbols, without target_clones' repeated ones, in clang's stable order by
+        // priority, the highest first.
+        CheckProgramTargetOption sorted[BUSTER_CHECK_PROGRAM_TARGET_OPTIONS];
+        uint32_t sorted_count = 0;
+        for (uint32_t o = 0; valid && o < count; o += 1)
+        {
+            if (options[o].repeated)
+            {
+                continue;
+            }
+            CheckProgramTargetOption option = options[o];
+            const String8 name = check_program_target_option_name(program, group, &option, bytes);
+            option.symbol = name.length != 0 ? check_program_target_symbol(link, 1, name) : 0;
+            valid = option.symbol != 0;
+            uint32_t at = sorted_count;
+            while (at > 0 && sorted[at - 1].priority < option.priority)
+            {
+                sorted[at] = sorted[at - 1];
+                at -= 1;
+            }
+            sorted[at] = option;
+            sorted_count += 1;
+        }
+        const SymbolId indicator = code->lowered.runtime_symbols[CHECK_LOWER_RUNTIME_CPU_INDICATOR_INIT];
+        const SymbolId model = code->lowered.runtime_symbols[CHECK_LOWER_RUNTIME_CPU_MODEL];
+        const SymbolId features = code->lowered.runtime_symbols[CHECK_LOWER_RUNTIME_CPU_FEATURES2];
+        const String8 resolver_name = check_program_target_name(program, group->first, NULL, 0, ".resolver", bytes);
+        const SymbolId resolver = resolver_name.length != 0 ? check_program_cpu_find(link, code->target_first, resolver_name) : 0;
+        valid = valid && indicator != 0 && (!group->model || model != 0) && (!group->features2 || features != 0) && resolver != 0;
+        // The code: 6 bytes for the entry; for each option, 16 for its arch='s test, 22 for each mask word and 9 for its
+        // return; and 2.
+        const uint32_t capacity = 6 + sorted_count * (16 + 4 * 22 + 9) + 2;
+        uint8_t* text = valid ? arena_push(bytes, capacity, 16) : NULL;
+        valid = text != NULL;
+        uint32_t fixup_offsets[1 + 6 * BUSTER_CHECK_PROGRAM_TARGET_OPTIONS];
+        uint8_t fixup_kinds[1 + 6 * BUSTER_CHECK_PROGRAM_TARGET_OPTIONS];
+        SymbolId fixup_targets[1 + 6 * BUSTER_CHECK_PROGRAM_TARGET_OPTIONS];
+        int32_t fixup_addends[1 + 6 * BUSTER_CHECK_PROGRAM_TARGET_OPTIONS];
+        uint32_t fixups = 0;
+        uint32_t length = 0;
+        if (valid)
+        {
+            static const uint8_t entry[] = { 0x50, 0xe8, 0, 0, 0, 0 };
+            check_program_cpu_bytes(text, &length, entry, sizeof(entry));
+            fixup_offsets[fixups] = 2;
+            fixup_kinds[fixups] = BUSTER_LINK_FIXUP_CALL;
+            fixup_targets[fixups] = indicator;
+            fixup_addends[fixups] = -4;
+            fixups += 1;
+        }
+        bool taken = false;
+        for (uint32_t o = 0; valid && !taken && o < sorted_count; o += 1)
+        {
+            const CheckProgramTargetOption* option = sorted + o;
+            uint32_t branches[5];
+            uint32_t branch_count = 0;
+            if (option->cpu_is)
+            {
+                // cmp dword [rip + __cpu_model + 4 * field], value; jne next.
+                static const uint8_t compare[] = { 0x81, 0x3d, 0, 0, 0, 0, 0, 0, 0, 0, 0x0f, 0x85, 0, 0, 0, 0 };
+                check_program_cpu_bytes(text, &length, compare, sizeof(compare));
+                fixup_offsets[fixups] = length - 14;
+                fixup_kinds[fixups] = BUSTER_LINK_FIXUP_PC32;
+                fixup_targets[fixups] = model;
+                fixup_addends[fixups] = 4 * (int32_t)option->field - 8;
+                fixups += 1;
+                check_program_cpu_u32(text, length - 10, option->value);
+                branches[branch_count++] = length - 4;
+            }
+            for (uint32_t w = 0; w < 4; w += 1)
+            {
+                if (option->mask[w] != 0)
+                {
+                    check_program_target_word(text, &length, w, option->mask[w], model, features, fixup_offsets, fixup_kinds, fixup_targets, fixup_addends, &fixups,
+                                              branches, &branch_count);
+                }
+            }
+            const bool local = link->symbols.source[option->symbol] == BUSTER_LINK_SOURCE_PROGRAM;
+            const uint8_t address[] = { 0x48, local ? 0x8d : 0x8b, 0x05, 0, 0, 0, 0, 0x59, 0xc3 };
+            check_program_cpu_bytes(text, &length, address, sizeof(address));
+            fixup_offsets[fixups] = length - 6;
+            fixup_kinds[fixups] = local ? BUSTER_LINK_FIXUP_PC32 : BUSTER_LINK_FIXUP_LOAD_GOT;
+            fixup_targets[fixups] = option->symbol;
+            fixup_addends[fixups] = -4;
+            fixups += 1;
+            for (uint32_t b = 0; b < branch_count; b += 1)
+            {
+                check_program_cpu_u32(text, branches[b], length - (branches[b] + 4));
+            }
+            taken = branch_count == 0;
+        }
+        if (valid && !taken)
+        {
+            static const uint8_t trap[] = { 0x0f, 0x0b };
+            check_program_cpu_bytes(text, &length, trap, sizeof(trap));
+        }
+        const AtomId atom = valid ? link_add_atom(link, BUSTER_LINK_CLASS_TEXT, 4, length, text, 0) : 0;
+        valid = atom != 0;
+        for (uint32_t f = 0; valid && f < fixups; f += 1)
+        {
+            valid = link_add_fixup(link, atom, fixup_offsets[f], fixup_kinds[f], fixup_targets[f], fixup_addends[f]) != 0;
+        }
+        const SymbolId alias = valid && group->clones != 0 ? check_program_cpu_find(link, code->target_first, check_program_target_name(program, group->first, NULL, 0, ".ifunc", bytes)) : 0;
+        const SymbolId defined[3] = { resolver, reference, alias };
+        for (uint32_t d = 0; valid && d < 3; d += 1)
+        {
+            valid = defined[d] == 0 ? d == 2 && group->clones == 0 : link_define_symbol(link, defined[d], atom, 0, length);
+        }
+    }
+    if (!valid)
+    {
+        code->status = CHECK_PROGRAM_BACKEND;
+        code->reason = "a resolver of a function multiversioned by target strings couldn't be emitted";
+    }
+    return valid;
+}
+
+#endif

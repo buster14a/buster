@@ -544,6 +544,8 @@ static bool check_program_alias_number(CheckProgram* program, uint8_t* needed, u
     }
     // cpu_specific's versions and cpu_dispatch's dispatchers (#1447): their groups' reference objects are needed.
     check_program_cpu_needed(program, needed);
+    // Multiversioning by target strings' groups (#1838): their reference objects and bodies' own symbols' objects.
+    check_program_target_needed(program, needed);
     program->symbol_count = check_program_needed_count(needed, program->object_count, BUSTER_SCALAR_PATH(scalar));
     program->symbol_objects = program->symbol_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, program->symbol_count) : 0;
     const bool valid = program->symbol_count == 0 || program->symbol_objects != 0;
@@ -564,7 +566,7 @@ static bool check_program_alias_number(CheckProgram* program, uint8_t* needed, u
         const CheckDataCFString* call = program->cfstrings + k;
         program->object_symbols[call->object] = program->object_symbols[call->canonical];
     }
-    return valid && check_program_cpu_number(program, output);
+    return valid && check_program_cpu_number(program, output) && check_program_target_number(program, output);
 }
 
 #endif

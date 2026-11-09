@@ -252,7 +252,293 @@ static void check_test_target_versions_diagnostics(CheckTest* test, const char* 
     unlink(source);
 }
 
+
+// The object at `path`'s named symbols that aren't sections, files or .L labels, each "name binding type defined" (a
+// line each, in symbol-table order) into `text` (room for `capacity` bytes). Whether it was read.
+static bool check_test_target_versions_symbols(const char* path, char* text, size_t capacity)
+{
+    Arena arena = arena_reserve(UINT64_C(1) << 24);
+    CheckTestElf elf = { 0 };
+    bool valid = arena.base != 0 && check_test_elf_open(&elf, object_test_read_file(&arena, path));
+    size_t length = 0;
+    text[0] = 0;
+    for (uint64_t i = 1; valid && i < elf.symbol_count; i += 1)
+    {
+        const char* name = check_test_elf_string(elf.symbol_names, elf.symbol_names_size, elf.symbols[i].st_name);
+        const uint32_t type = ELF64_ST_TYPE(elf.symbols[i].st_info);
+        if (name != NULL && name[0] != 0 && type != STT_SECTION && type != STT_FILE && strncmp(name, ".L", 2) != 0)
+        {
+            const int written = snprintf(text + length, capacity - length, "%s %u %u %u\n", name, (uint32_t)ELF64_ST_BIND(elf.symbols[i].st_info), type,
+                                         elf.symbols[i].st_shndx != SHN_UNDEF ? 1u : 0u);
+            valid = written > 0 && (size_t)written < capacity - length;
+            length += valid ? (size_t)written : 0;
+        }
+    }
+    arena_release(&arena);
+    return valid;
+}
+
+// Whether every line of `expected` is a line of `actual` and the other way round (the symbols, in any order).
+static bool check_test_target_versions_same_lines(const char* expected, const char* actual)
+{
+    bool same = true;
+    for (uint32_t side = 0; same && side < 2; side += 1)
+    {
+        const char* from = side == 0 ? expected : actual;
+        const char* in = side == 0 ? actual : expected;
+        for (const char* line = from; same && *line != 0;)
+        {
+            const char* end = strchr(line, '\n');
+            const size_t length = end != NULL ? (size_t)(end - line) + 1 : strlen(line);
+            bool found = false;
+            for (const char* other = in; !found && *other != 0;)
+            {
+                const char* other_end = strchr(other, '\n');
+                const size_t other_length = other_end != NULL ? (size_t)(other_end - other) + 1 : strlen(other);
+                found = other_length == length && memcmp(other, line, length) == 0;
+                other += other_length;
+            }
+            same = found;
+            line += length;
+        }
+    }
+    return same;
+}
+
+// Objects: a unit of versions (target's, external and static with a call, and target_clones', external and static
+// with a call) and a unit of their callers (declarations, calls and addresses), each by clang and both paths: the
+// objects' symbols must be clang's, with clang's bindings, types and definedness; the scalar and vector objects the same
+// bytes; every mix of the objects linked by cc must run as clang's; and so must the direct path's executable of both,
+// and -g's.
+static void check_test_target_versions_objects(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const char versions[] =
+        "__attribute__((target(\"avx2\"))) int f(int x) { return x + 2; }\n"
+        "__attribute__((target(\"default\"))) int f(int x) { return x + 1; }\n"
+        "__attribute__((target(\"arch=znver4\"))) int f(int x) { return x + 4; }\n"
+        "__attribute__((target(\"popcnt,sse4.2\"))) int f(int x) { return x + 42; }\n"
+        "static __attribute__((target(\"default\"))) int s(void) { return 10; }\n"
+        "static __attribute__((target(\"avx512f\"))) int s(void) { return 20; }\n"
+        "int call_s(void) { return s(); }\n"
+        "__attribute__((target_clones(\"avx2\", \"arch=x86-64-v3\", \"sse4.1\", \"default\"))) int c(int x) { return x * 3; }\n"
+        "static __attribute__((target_clones(\"gfni\", \"default\"))) int t(void) { return 7; }\n"
+        "int call_t(void) { return t(); }\n";
+    static const char callers[] =
+        "int printf(const char*, ...);\n"
+        "__attribute__((target(\"avx2\"))) int f(int x);\n"
+        "__attribute__((target(\"default\"))) int f(int x);\n"
+        "__attribute__((target(\"arch=znver4\"))) int f(int x);\n"
+        "__attribute__((target(\"popcnt,sse4.2\"))) int f(int x);\n"
+        "__attribute__((target_clones(\"avx2\", \"arch=x86-64-v3\", \"sse4.1\", \"default\"))) int c(int x);\n"
+        "int call_s(void);\nint call_t(void);\n"
+        "int (*address_f)(int) = f;\nint (*address_c)(int) = c;\n"
+        "int main(void) { printf(\"%d %d %d %d %d %d\\n\", f(5), call_s(), address_f(1), c(2), address_c(3), call_t()); return 0; }\n";
+    char sources[2][PATH_MAX];
+    char objects[2][3][PATH_MAX];
+    snprintf(sources[0], sizeof(sources[0]), "%s/target-versions.c", directory);
+    snprintf(sources[1], sizeof(sources[1]), "%s/target-callers.c", directory);
+    const bool written = parse_test_write(sources[0], versions, sizeof(versions) - 1) && parse_test_write(sources[1], callers, sizeof(callers) - 1);
+    check_test_expect(test, written, "target versions: the objects' fixtures are written");
+    bool built[2][3] = { { false } };
+    enum { SYMBOLS = 8192 };
+    char* symbols[3] = { malloc(SYMBOLS), malloc(SYMBOLS), malloc(SYMBOLS) };
+    for (uint32_t u = 0; written && u < 2; u += 1)
+    {
+        for (uint32_t p = 0; p < 3; p += 1)
+        {
+            snprintf(objects[u][p], sizeof(objects[u][p]), "%s/target-%s-%u.o", directory, u == 0 ? "versions" : "callers", p);
+            built[u][p] = check_test_cpu_dispatch_build(p == 0 ? clang : executable, sources[u], objects[u][p], true, p == 2, NULL);
+            char description[256];
+            snprintf(description, sizeof(description), "target versions: the %s unit compiles through %s", u == 0 ? "versions'" : "callers'",
+                     p == 0 ? "clang" : p == 1 ? "the vector path" : "the scalar path");
+            check_test_expect(test, built[u][p], description);
+        }
+        const bool read = symbols[0] != NULL && symbols[1] != NULL && symbols[2] != NULL && built[u][0] && built[u][1] && built[u][2] &&
+                          check_test_target_versions_symbols(objects[u][0], symbols[0], SYMBOLS) && check_test_target_versions_symbols(objects[u][1], symbols[1], SYMBOLS) &&
+                          check_test_target_versions_symbols(objects[u][2], symbols[2], SYMBOLS);
+        for (uint32_t p = 1; p < 3; p += 1)
+        {
+            char description[SYMBOLS * 2 + 256];
+            snprintf(description, sizeof(description), "target versions: the %s object's symbols are clang's, by the %s path:\n%s(clang\n%s)", u == 0 ? "versions'" : "callers'",
+                     p == 1 ? "vector" : "scalar", read ? symbols[p] : "", read ? symbols[0] : "");
+            check_test_expect(test, read && check_test_target_versions_same_lines(symbols[0], symbols[p]), description);
+        }
+        check_test_expect(test, built[u][1] && built[u][2] && check_test_driver_same_files(objects[u][1], objects[u][2]),
+                          "target versions: the scalar and vector objects match byte for byte");
+    }
+    for (uint32_t i = 0; i < 3; i += 1)
+    {
+        free(symbols[i]);
+    }
+    static const uint32_t mixes[][2] = { { 0, 0 }, { 1, 1 }, { 2, 2 }, { 1, 0 }, { 0, 1 }, { 2, 0 }, { 0, 2 } };
+    char runs[BUSTER_ARRAY_LENGTH(mixes)][128];
+    char program[PATH_MAX];
+    snprintf(program, sizeof(program), "%s/target-mixed", directory);
+    for (uint32_t m = 0; written && m < BUSTER_ARRAY_LENGTH(mixes); m += 1)
+    {
+        const bool ran = built[0][mixes[m][0]] && built[1][mixes[m][1]] &&
+                         check_test_cpu_dispatch_link_run(clang, objects[0][mixes[m][0]], objects[1][mixes[m][1]], program, runs[m], sizeof(runs[m]));
+        char description[384];
+        snprintf(description, sizeof(description), "target versions: the versions' object %u and the callers' %u link and run as clang's: \"%s\" (clang \"%s\")",
+                 mixes[m][0], mixes[m][1], ran ? runs[m] : "", runs[0]);
+        check_test_expect(test, ran && strcmp(runs[m], runs[0]) == 0, description);
+    }
+    unlink(program);
+    // The direct path's executable of both units, by both paths, and -g's object linked by cc.
+    char together[PATH_MAX];
+    snprintf(together, sizeof(together), "%s/target-together.c", directory);
+    char text[sizeof(versions) + sizeof(callers)];
+    snprintf(text, sizeof(text), "%s%s", versions, callers);
+    const bool joined = written && parse_test_write(together, text, strlen(text));
+    for (uint32_t p = 0; joined && p < 4; p += 1)
+    {
+        char built_program[PATH_MAX];
+        char debug_object[PATH_MAX];
+        char captured[128] = { 0 };
+        snprintf(built_program, sizeof(built_program), "%s/target-direct-%u", directory, p);
+        snprintf(debug_object, sizeof(debug_object), "%s/target-debug-%u.o", directory, p);
+        bool ran = false;
+        if (p < 2)
+        {
+            ran = check_test_cpu_dispatch_build(executable, together, built_program, false, p == 1, NULL) && check_test_driver_capture(built_program, captured, sizeof(captured));
+        }
+        else
+        {
+            char* arguments[] = { (char*)executable, "-std=gnu17", "-O0", "-w", "-g", "-c", together, "-o", debug_object, p == 3 ? "--scalar" : NULL, NULL };
+            char* output = NULL;
+            const bool compiled = check_test_driver_spawn(arguments, &output) == 0;
+            free(output);
+            output = NULL;
+            char* link[] = { (char*)clang, debug_object, "-o", built_program, NULL };
+            const bool linked = compiled && check_test_driver_spawn(link, &output) == 0;
+            free(output);
+            ran = linked && check_test_driver_capture(built_program, captured, sizeof(captured));
+        }
+        char description[384];
+        snprintf(description, sizeof(description), "target versions: %s, by the %s path, runs as clang's build: \"%s\" (clang \"%s\")",
+                 p < 2 ? "the direct path's executable" : "-g's object", p % 2 == 0 ? "vector" : "scalar", captured, runs[0]);
+        check_test_expect(test, ran && strcmp(captured, runs[0]) == 0, description);
+        unlink(built_program);
+        unlink(debug_object);
+    }
+    for (uint32_t u = 0; u < 2; u += 1)
+    {
+        for (uint32_t p = 0; p < 3; p += 1)
+        {
+            unlink(objects[u][p]);
+        }
+        unlink(sources[u]);
+    }
+    unlink(together);
+}
+
+// The resolvers' choices over libgcc's CPU model, which a unit defines (statically initialized, as an IFUNC's resolver
+// runs at load), for each of a set of models: target's versions, each returning its own number, by clang and both paths;
+// and target_clones', whose versions share their code here, by calling the resolver of a unit that declares them (built
+// by clang and both paths, linked before clang's object of their definition, whose versions have addresses of their
+// own) and naming the version it returns.
+static void check_test_target_versions_models(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const char model[] =
+        "int printf(const char*, ...);\n"
+        "struct M { unsigned vendor, type, subtype; unsigned features[1]; } __cpu_model = { VENDOR, TYPE, SUBTYPE, { W0 } };\n"
+        "unsigned __cpu_features2[3] = { W1, W2, W3 };\nvoid __cpu_indicator_init(void) {}\n"
+        "__attribute__((target(\"avx2\"))) int f(void) { return 1; }\n"
+        "__attribute__((target(\"default\"))) int f(void) { return 0; }\n"
+        "__attribute__((target(\"arch=znver4\"))) int f(void) { return 2; }\n"
+        "__attribute__((target(\"sse4.2,popcnt\"))) int f(void) { return 3; }\n"
+        "__attribute__((target(\"avx2,bmi\"))) int f(void) { return 4; }\n"
+        "__attribute__((target(\"bmi2,avx2\"))) int f(void) { return 5; }\n"
+        "__attribute__((target(\"gfni\"))) int f(void) { return 6; }\n"
+        "__attribute__((target(\"arch=sandybridge,avx\"))) int f(void) { return 7; }\n"
+        "__attribute__((target(\"avx512vp2intersect\"))) int f(void) { return 8; }\n"
+        "__attribute__((target_clones(\"avx2,bmi\", \"bmi2\", \"arch=x86-64-v4\", \"arch=znver5\", \"avx10.1\", \"sse4.1\", \"default\"))) int c(void);\n"
+        "void* resolve(void) __asm__(\"c.resolver\");\n"
+        "int c0(void) __asm__(\"c.avx2.0\");\nint c1(void) __asm__(\"c.bmi.1\");\nint c2(void) __asm__(\"c.bmi2.2\");\n"
+        "int c3(void) __asm__(\"c.arch_x86-64-v4.3\");\nint c4(void) __asm__(\"c.arch_znver5.4\");\nint c5(void) __asm__(\"c.avx10.1.5\");\n"
+        "int c6(void) __asm__(\"c.sse4.1.6\");\nint c7(void) __asm__(\"c.default.7\");\n"
+        "int (*address_c)(void) = c;\n"
+        "int main(void)\n{\n    void* chosen = resolve();\n    void* versions[] = { (void*)c0, (void*)c1, (void*)c2, (void*)c3, (void*)c4, (void*)c5, (void*)c6, (void*)c7 };\n"
+        "    int index = -1;\n    for (int i = 0; i < 8; i += 1) { index = versions[i] == chosen ? i : index; }\n"
+        "    printf(\"%d %d\\n\", f(), index);\n    return 0;\n}\n";
+    static const char clones[] =
+        "__attribute__((target_clones(\"avx2,bmi\", \"bmi2\", \"arch=x86-64-v4\", \"arch=znver5\", \"avx10.1\", \"sse4.1\", \"default\"))) int c(void) { return 1; }\n";
+    char path[PATH_MAX];
+    char clones_path[PATH_MAX];
+    char clones_object[PATH_MAX];
+    snprintf(path, sizeof(path), "%s/target-models.c", directory);
+    snprintf(clones_path, sizeof(clones_path), "%s/target-clones.c", directory);
+    snprintf(clones_object, sizeof(clones_object), "%s/target-clones.o", directory);
+    const bool written = parse_test_write(path, model, sizeof(model) - 1) && parse_test_write(clones_path, clones, sizeof(clones) - 1) &&
+                         check_test_cpu_dispatch_build(clang, clones_path, clones_object, true, false, NULL);
+    check_test_expect(test, written, "target versions: the models' fixtures are written");
+    // The models: none, every bit, each version's own bits, its CPU's (znver4 is AMD's family 19h's subtype 29;
+    // sandybridge Intel's corei7's 3), and each with its highest bit of word 0 cleared.
+    static const uint32_t models[][7] = {
+        { 0, 0, 0, 0, 0, 0, 0 },
+        { 0, 0, 0, UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX },
+        { 0, 0, 0, 0x400u, 0, 0, 0 },
+        { 0, 0, 0, 0x10400u, 0, 0, 0 },
+        { 0, 0, 0, 0x30400u, 0, 0, 0 },
+        { 0, 0, 0, 0x20400u, 0, 0, 0 },
+        { 0, 0, 0, 0x104u, 0, 0, 0 },
+        { 0, 0, 0, 0x100u, 0, 0, 0 },
+        { 0, 0, 0, 0, 1u, 0, 0 },
+        { 2, 3, 29, 0, 0, 0, 0 },
+        { 2, 3, 29, 0x400u, 1u, 0, 0 },
+        { 1, 1, 3, 0x200u, 0, 0, 0 },
+        { 1, 1, 3, 0, 0, 0, 0 },
+        { 0, 0, 0, 0, 0x20u, 0, 0 },
+        { 0, 0, 0, 0, 0, 0, 1u },
+        { 0, 0, 0, 0, 0, 0, 0x8000u },
+        { 0, 0, 0, 0, 0, 0, 0x40000u },
+        { 0, 0, 0, 0, 0, 0, 0x4u },
+        { 2, 3, 30, 0, 0, 0, 0 },
+        { 0, 0, 0, 0x80u, 0, 0, 0 },
+        { 0, 0, 0, 0x20000u, 0, 0, 0 },
+    };
+    for (uint32_t m = 0; written && m < BUSTER_ARRAY_LENGTH(models); m += 1)
+    {
+        static const char* const names[] = { "VENDOR", "TYPE", "SUBTYPE", "W0", "W1", "W2", "W3" };
+        char defines[7][48];
+        for (uint32_t d = 0; d < 7; d += 1)
+        {
+            snprintf(defines[d], sizeof(defines[d]), "-D%s=%uu", names[d], models[m][d]);
+        }
+        char captured[3][64] = { { 0 } };
+        bool ran[3] = { false };
+        for (uint32_t b = 0; b < 3; b += 1)
+        {
+            char object[PATH_MAX];
+            char built[PATH_MAX];
+            snprintf(object, sizeof(object), "%s/target-model-%u.o", directory, b);
+            snprintf(built, sizeof(built), "%s/target-model-%u", directory, b);
+            char* arguments[20] = { (char*)(b == 0 ? clang : executable), "-std=gnu17", "-O0", "-w", "-c", defines[0], defines[1], defines[2], defines[3], defines[4],
+                                    defines[5], defines[6], path, "-o", object, b == 2 ? "--scalar" : NULL, NULL };
+            char* text = NULL;
+            unlink(object);
+            const bool compiled = check_test_driver_spawn(arguments, &text) == 0;
+            free(text);
+            ran[b] = compiled && check_test_cpu_dispatch_link_run(clang, object, clones_object, built, captured[b], sizeof(captured[b]));
+            unlink(object);
+            unlink(built);
+        }
+        for (uint32_t b = 1; b < 3; b += 1)
+        {
+            char description[384];
+            snprintf(description, sizeof(description), "target versions: the resolvers of model %u choose clang's versions, by the %s path: \"%s\" (clang \"%s\")", m,
+                     b == 1 ? "vector" : "scalar", captured[b], captured[0]);
+            check_test_expect(test, ran[0] && ran[b] && strcmp(captured[b], captured[0]) == 0, description);
+        }
+    }
+    unlink(path);
+    unlink(clones_path);
+    unlink(clones_object);
+}
+
 static void check_test_driver_target_versions(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     check_test_target_versions_diagnostics(test, clang, executable, directory);
+    check_test_target_versions_objects(test, clang, executable, directory);
+    check_test_target_versions_models(test, clang, executable, directory);
 }

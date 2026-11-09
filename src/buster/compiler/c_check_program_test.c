@@ -1810,6 +1810,15 @@ static bool check_test_program_sparse(const CheckProgram* program, const CheckDa
             expected[program->cpu_groups[g].reference] |= program->cpu_groups[g].dispatch != 0;
             expected[program->cpu_groups[g].dispatch] |= program->cpu_groups[g].dispatch != 0;
         }
+        // A resolved group's R (or target_clones' f) of multiversioning by target strings, at its resolver, and a
+        // target_clones body's own symbol's object, at its body (#1838).
+        for (uint32_t g = 0; g < program->target_group_count; g += 1)
+        {
+            const CheckProgramTargetGroup* group = program->target_groups + g;
+            expected[group->reference] |= group->resolved;
+            expected[group->body] |= group->body != 0 && expected[group->clones];
+            expected[group->clones] = group->clones != 0 ? group->resolved : expected[group->clones];
+        }
     }
     for (uint32_t path = 0; same && path < 2; path += 1)
     {

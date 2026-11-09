@@ -15742,6 +15742,23 @@ static bool check_lower_finish(CheckProgramLowered* lowered, const CheckLowerSha
             }
         }
     }
+    // So do the resolvers of multiversioning by target strings (#1838, check_program_target_atoms), the model's and its
+    // second array of features where an option tests them.
+    for (uint32_t g = 0; valid && g < program->target_group_count; g += 1)
+    {
+        const CheckProgramTargetGroup* group = program->target_groups + g;
+        const bool used[3] = { group->resolved, group->resolved && group->model, group->resolved && group->features2 };
+        static const CheckLowerRuntime model[3] = { CHECK_LOWER_RUNTIME_CPU_INDICATOR_INIT, CHECK_LOWER_RUNTIME_CPU_MODEL, CHECK_LOWER_RUNTIME_CPU_FEATURES2 };
+        for (uint32_t m = 0; m < 3; m += 1)
+        {
+            lowered->runtime_symbols[model[m]] = used[m] && lowered->runtime_symbols[model[m]] == 0 ? shared->declared_runtimes[model[m]] : lowered->runtime_symbols[model[m]];
+            if (used[m] && lowered->runtime_symbols[model[m]] == 0)
+            {
+                lowered->runtime_symbols[model[m]] = (SymbolId)((uint64_t)program->symbol_count + lowered->helpers.count + lowered->initializers.count + lowered->runtime_symbol_count + 1);
+                lowered->runtime_order[lowered->runtime_symbol_count++] = (uint16_t)model[m];
+            }
+        }
+    }
     lowered->label_symbol_count = valid ? written : 0;
     // Every call of a runtime function takes its symbol (check_lower_runtime's provisional one until now).
     for (uint32_t b = 0; valid && runtimes && b < program->body_count; b += 1)
