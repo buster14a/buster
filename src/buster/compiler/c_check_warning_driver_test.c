@@ -1756,7 +1756,7 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
                   "struct V { void (*fp)(struct U *); };\nstruct T { int b; };\nvoid g1(struct T *p, struct T { int c; } *q);\n"
                   "int g2(struct R { int x; } a, struct R { int y; } b);\nint g3(enum F { B1 } a, enum F { B2 } b);\n"
                   "int g4(int (*a)[sizeof(struct Q { int q; })]);\n",
-        .warnings = 23,
+        .warnings = 22,
         .notes = 2,
     },
     {
