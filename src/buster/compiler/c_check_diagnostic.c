@@ -149,7 +149,8 @@ static const CheckWarningDescription check_warning_descriptions[] =
     { "-Wfor-loop-analysis", "-Wloop-analysis", "variable used in loop condition not modified in loop body" },
     { "-Wimplicit-enum-enum-cast", "-Wenum-conversion", "implicit conversion from enumeration type to different enumeration type" },
     { "-Wvisibility", NULL, "declaration will not be visible outside of this function" },
-    { "-Wtarget-clones-mixed-specifiers", "-Wfunction-multiversion", "mixing 'target_clones' specifier mechanisms is permitted for GCC compatibility" },
+    // (#1838: its ID assigned past the ones other pull requests take, which their rows fill.)
+    [CHECK_WARNING_ID_TARGET_CLONES_MIXED_SPECIFIERS] = { "-Wtarget-clones-mixed-specifiers", "-Wfunction-multiversion", "mixing 'target_clones' specifier mechanisms is permitted for GCC compatibility" },
 };
 
 _Static_assert(BUSTER_ARRAY_LENGTH(check_warning_descriptions) == CHECK_WARNING_ID_COUNT, "every sparse policy ID has a description");

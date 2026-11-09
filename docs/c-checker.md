@@ -3133,7 +3133,7 @@ What the lowering covers past scalars (#145's programs):
   and drops the attribute; a version listed again is -Wfunction-multiversion's
   "version list contains duplicate entries" at it; a string of several
   versions among several strings is -Wtarget-clones-mixed-specifiers' warning
-  at the first (warning ID 113); and a list without `default` is "'target_clones'
+  at the first (warning ID 117); and a list without `default` is "'target_clones'
   multiversioning requires a default target" at the attribute's name. A version
   is placed at its string literal's quote plus its offset in the trimmed
   string, as clang places it. `test-checker-driver --target-versions-only`
