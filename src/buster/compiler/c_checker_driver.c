@@ -59,6 +59,7 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_UNSUPPORTED: result = "construct is not yet supported by the type checker"; break;
         case CHECK_INPUT_DECLARATION: result = "invalid or unsupported declaration"; break;
         case CHECK_INPUT_INITIALIZER_MEMBER: result = "field designator does not refer to any field in the record type"; break;
+        case CHECK_INPUT_ARRAY_LITERAL_MISMATCH: result = "cannot initialize array with array of another type"; break;
         case CHECK_INPUT_UNDECLARED: result = "use of undeclared identifier"; break;
         case CHECK_INPUT_LITERAL: result = "invalid or unsupported literal"; break;
         case CHECK_INPUT_RESOURCE: result = "type checker ran out of memory"; break;
