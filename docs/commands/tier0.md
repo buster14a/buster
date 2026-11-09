@@ -194,7 +194,8 @@ overrides (`Tier0Function.segments`) for every integer and floating class, at
 `[p]`, `[p + 8]` and `[p + i * size]`, a seq_cst store, and copies of long
 double, the 128-bit integers and vectors (EVEX and SSE/AVX transports) from and
 to a segment: both paths alike, each record the stripped twin's but for the
-override on the access's memory operand, and validation's rules for the marker.
+override on the access's memory operand, and validation's rules for the marker
+(a constant's top bits are its own; the segment 3 is refused).
 A child runs them, `%fs` at the thread's base and `%gs` set by `arch_prctl`, on
 addresses that hold the data only through the segment. After
 the programs, the `x87` check (`tier0_x87_test.c`, #136's item 8) compiles long
