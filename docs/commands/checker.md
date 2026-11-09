@@ -148,7 +148,7 @@ unused-warning fixtures also check exact scope-completion tokens.
   Required constant evaluation folds `_Float16` and `__bf16` arithmetic in the source format after each operation
   (#1497); runtime half-precision chains retain their target's excess-precision behavior. The constant-source and
   floating-action fixtures cover that distinction, ties, subnormals and negative zero.
-  `float`, `double` and `long double` folds give APFloat's NaNs, not the host's (#1473): an invalid operation
+  `float`, `double`, `long double` and `__float128` folds give APFloat's NaNs, not the host's (#1473, #1250): an invalid operation
   (`inf - inf`, `0 * inf`, `0 / 0`) folds to the positive quiet NaN, and an operation on a NaN keeps its first NaN
   operand's sign and payload, quieted. The floating-action fixtures, the constant-source fixture "real invalid
   constant arithmetic has Clang NaN signs" and `--program-float-constants`' "float-constants-invalid-arithmetic"

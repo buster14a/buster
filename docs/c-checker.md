@@ -3264,10 +3264,14 @@ What the lowering covers past scalars (#145's programs):
   an integer by truncating its bits, to long double rounded once from them, and
   to the narrower formats from its mirror. Comparisons, the classification
   builtins, `fabsf128`, `copysignf128`, `fmaxf128`, `fminf128` and their
-  `_num` kin, and unary `+` and `-`, fold from the bits; arithmetic doesn't
-  yet. Static data and code write the bits. `test-checker
-  --program-float-constants`' `float-constants-quad-bits` compares them all
-  with clang -O0's build. A `_Complex __float128` constant's parts are still
+  `_num` kin, and unary `+` and `-`, fold from the bits, and so do `+`, `-`,
+  `*` and `/`: the host's binary128 (libgcc's or compiler-rt's soft-fp),
+  rounded once to nearest, with APFloat's NaNs (an invalid operation's positive
+  canonical NaN, else the first NaN operand quieted, `check_quad_arithmetic`);
+  under `FENV_ACCESS`, their exactness is the bits' (`check_query_quad`).
+  Static data and code write the bits. `test-checker
+  --program-float-constants`' `float-constants-quad-bits` and
+  `float-constants-quad-arithmetic` compare them all with clang -O0's build. A `_Complex __float128` constant's parts are still
   long doubles that must hold them exactly, so an imaginary `q` literal is
   taken only where its long double is its value. An increment or a
   decrement (#147) is `__addtf3`'s or `__subtf3`'s of a constant 1.0, as clang

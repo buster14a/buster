@@ -1578,6 +1578,27 @@ static uint32_t check_action_fold_integer(CheckIntegerFold fold, CheckValue* val
     return check_action_fold_integer_result(fold, value, answer, fault);
 }
 
+// A __float128 operation's bits (#1250): the host's binary128 arithmetic, rounded once to nearest, ties to even, as
+// APFloat's, with its NaNs (check_action_fold_nan's rule): the first NaN operand's bits, quieted, or for an invalid
+// operation on numbers the positive canonical NaN. `op` is +, -, * or /, the only ones C applies to a real floating type.
+static __attribute__((noinline)) unsigned __int128 check_quad_arithmetic(CheckOp op, unsigned __int128 left, unsigned __int128 right)
+{
+    unsigned __int128 result = 0;
+    if (check_quad_is_nan(left) || check_quad_is_nan(right))
+    {
+        result = (check_quad_is_nan(left) ? left : right) | BUSTER_CHECK_QUAD_QUIET;
+    }
+    else
+    {
+        const __float128 a = check_quad_host(left);
+        const __float128 b = check_quad_host(right);
+        const __float128 value = op == CHECK_OP_ADD ? a + b : op == CHECK_OP_SUBTRACT ? a - b : op == CHECK_OP_MULTIPLY ? a * b : a / b;
+        result = check_quad_from_host(value);
+        result = check_quad_is_nan(result) ? BUSTER_CHECK_QUAD_EXPONENT | BUSTER_CHECK_QUAD_QUIET : result;
+    }
+    return result;
+}
+
 // A folded operation's NaN as clang's APFloat makes it, in every floating format (#1473): the first NaN operand's sign
 // and payload, quieted, or for an invalid operation on non-NaNs (inf + -inf, 0 * inf, 0 / 0, inf / inf) the positive
 // canonical NaN. The host's SSE and x87 give their negative indefinite NaN instead, and may take either NaN operand.
@@ -1648,6 +1669,10 @@ static void check_action_fold_floating(CheckOp op, const CheckValue* a, const Ch
             case CHECK_OP_EQUAL: number = !unordered && left == right; break;
             default: number = unordered || left != right; break;
         }
+    }
+    else if (quad && op >= CHECK_OP_ADD && op <= CHECK_OP_DIVIDE)
+    {
+        quad_bits = check_quad_arithmetic(op, a->integer, b->integer);
     }
     else if (a->type == BUSTER_TYPE_FLOAT)
     {
