@@ -6,8 +6,10 @@
 //
 // - Diagnostics: each unit's whole output (diagnostics, their places, their order, their notes) must be clang's by both
 //   paths, in GNU C17: target_clones' strings (unsupported features and CPUs, empty versions, a trailing comma, the
-//   duplicates, mixed specifiers, the missing default, trimmed versions, concatenated literals); then the warnings'
-//   options.
+//   duplicates, mixed specifiers, the missing default, trimmed versions, concatenated literals); multiversioning's rules
+//   (versions apart, redeclarations of one, a call no default reaches, a use before the function became
+//   multiversioned, duplicates, missing attributes, mixed kinds, unsupported versions, prototypes, return types, inline
+//   specifications, linkage, main); then the warnings' options. Each unit also runs with its bodies deferred.
 // Include after the driver test's helpers (check_test_driver_spawn, check_test_diagnostic_lines).
 
 static void check_test_target_versions_diagnostics(CheckTest* test, const char* clang, const char* executable, const char* directory)
@@ -51,7 +53,148 @@ static void check_test_target_versions_diagnostics(CheckTest* test, const char* 
         // Other subjects and arguments.
         "int x __attribute__((target_clones(\"avx2\", \"default\")));\n",
         "__attribute__((target_clones(1, \"default\"))) int f(void) { return 1; }\n",
-        "__attribute__((target_clones(\"default\"), target_clones(\"avx2\", \"default\"))) int f(void) { return 1; }\n",
+        "__attribute__((target_clones(\"default\"), target_clones(\"avx2\", \"default\"))) int f(void) { return 1; }\n",        // Multiversioning by target strings: versions of several strings, a default, its forward declaration, redeclarations of a version, calls after the default.
+        "__attribute__((target(\"avx2\"))) int f(void) { return 1; }\n"
+        "__attribute__((target(\"default\"))) int f(void) { return 2; }\n"
+        "__attribute__((target(\"arch=znver4\"))) int f(void) { return 4; }\n"
+        "__attribute__((target(\"sse4.2,popcnt\"))) int f(void) { return 42; }\n"
+        "int main(void) { return f(); }\n",
+        "__attribute__((target(\"default\"))) int f(void);\n"
+        "int g(void) { return f(); }\n"
+        "__attribute__((target(\"avx2\"))) int f(void) { return 1; }\n"
+        "__attribute__((target(\"default\"))) int f(void) { return 2; }\n",
+        "__attribute__((target(\"avx2\"))) int f(void);\n"
+        "__attribute__((target(\"avx2\"))) int f(void);\n"
+        "__attribute__((target(\"avx2\"))) int f(void) { return 1; }\n"
+        "__attribute__((target(\"default\"))) int f(void);\n"
+        "__attribute__((target(\"default\"))) int f(void) { return 0; }\n"
+        "__attribute__((target(\"avx2\"))) int f(void) { return 2; }\n",
+        "int f(void);\n"
+        "int x = sizeof(f());\n"
+        "__attribute__((target(\"default\"))) int f(void) { return 1; }\n"
+        "__attribute__((target(\"avx2\"))) int f(void) { return 2; }\n"
+        "int main(void) { return f(); }\n",
+        "__attribute__((target(\"avx2\"))) int f(void) { return f(); }\n"
+        "__attribute__((target(\"default\"))) int f(void) { return 1; }\n",
+        "static __attribute__((target(\"default\"))) int f(void) { return 0; }\n"
+        "static __attribute__((target(\"avx2\"))) int f(void) { return 1; }\n"
+        "int g(void) { return f(); }\n",
+        "__attribute__((target(\"default\"))) int f(void) { return 0; }\n"
+        "__attribute__((target(\"avx2\"))) int f(void);\n"
+        "int g(void) { int f(void); return f(); }\n",
+        "__attribute__((target(\"default\"))) int f(void) { return 1; }\n"
+        "int main(void) { return f(); }\n",
+        "__attribute__((target(\"avx2\"))) int main(void) { return 1; }\n",
+        "__attribute__((target(\"tune=znver4\"))) int f(void) { return 1; }\n"
+        "__attribute__((target(\"default\"))) int f(void) { return 0; }\n"
+        "__attribute__((target(\"tune=znver5\"))) int f(void) { return 2; }\n",
+        "__attribute__((target(\"avx2\"), used)) int f(void) { return 1; }\n"
+        "__attribute__((target(\"default\"), noinline)) int f(void) { return 0; }\n",
+        "void h(void) { __attribute__((target(\"default\"))) int f(void); __attribute__((target(\"avx2\"))) int f(void); }\n",
+        // target_clones: redeclarations with and without the attribute, the same list spelled otherwise, after a plain declaration.
+        "__attribute__((target_clones(\"avx2\",\"default\"))) int f(void);\n"
+        "int f(void);\n"
+        "int f(void) { return 1; }\n"
+        "int g(void) { return f(); }\n",
+        "__attribute__((target_clones(\"avx2\",\"default\"))) int f(void);\n"
+        "__attribute__((target_clones(\"avx2\",\"default\"))) int f(void) { return 1; }\n",
+        "__attribute__((target_clones(\"avx2\",\"default\"))) int f(void) { return 1; }\n"
+        "__attribute__((target_clones(\"avx2, default\"))) int f(void);\n",
+        "__attribute__((target_clones(\"avx2\",\"default\"))) int f(void) { return 1; }\n"
+        "__attribute__((target_clones(\"avx2\",\"default\"))) int f(void) { return 2; }\n",
+        "__attribute__((target_clones(\"avx2\",\"default\"))) int f(void);\n"
+        "__attribute__((target_clones(\"sse4.2\",\"default\"))) int f(void) { return 1; }\n",
+        "int f(void);\n"
+        "__attribute__((target_clones(\"avx2\",\"default\"))) int f(void) { return 1; }\n"
+        "int main(void) { return f(); }\n",
+        "__attribute__((target_clones(\"avx2\",\"default\"))) int main(void) { return 1; }\n",
+        "__attribute__((target_clones(\"default\"))) int f();\n",
+        // Their errors: a call no default reaches, a use before the function became multiversioned, duplicates, missing attributes, mixed kinds, unsupported versions, prototypes, return types, inline specifications, linkage, main.
+        "__attribute__((target(\"avx2\"))) int f(void) { return 1; }\n"
+        "__attribute__((target(\"sse4.2\"))) int f(void) { return 2; }\n"
+        "int main(void) { return f() + (f)(); }\n",
+        "__attribute__((target(\"avx2\"))) int f(void) { return 1; }\n"
+        "__attribute__((target(\"sse4.2\"))) int f(void) { return 2; }\n"
+        "int g(void) { return f(); }\n"
+        "__attribute__((target(\"default\"))) int f(void) { return 0; }\n"
+        "int h(void) { return f(); }\n",
+        "int f(void);\n"
+        "int g(void) { return f(); }\n"
+        "__attribute__((target(\"avx2\"))) int f(void) { return 1; }\n"
+        "__attribute__((target(\"default\"))) int f(void) { return 2; }\n",
+        "__attribute__((target(\"avx2\"))) int f(void) { return 1; }\n"
+        "int g(void) { return f(); }\n"
+        "__attribute__((target(\"default\"))) int f(void) { return 2; }\n",
+        "int f(void);\n"
+        "int g(void) { return f(); }\n"
+        "__attribute__((target_clones(\"sse4.2\",\"default\"))) int f(void) { return 1; }\n",
+        "__attribute__((target(\"avx2\"))) int f(void) { return 1; }\n"
+        "__attribute__((target(\"avx2\"))) int f(void) { return 2; }\n"
+        "__attribute__((target(\"default\"))) int f(void) { return 2; }\n",
+        "__attribute__((target(\"avx2,sse4.2\"))) int f(void) { return 1; }\n"
+        "__attribute__((target(\"sse4.2,avx2\"))) int f(void) { return 2; }\n"
+        "__attribute__((target(\"default\"))) int f(void) { return 2; }\n",
+        "__attribute__((target(\"avx2,sse4.2\"))) int f(void);\n"
+        "__attribute__((target(\"default\"))) int f(void);\n"
+        "__attribute__((target(\" sse4.2 , avx2 \"))) int f(void);\n",
+        "__attribute__((target(\"arch=znver4\"))) int f(void);\n"
+        "__attribute__((target(\"default\"))) int f(void);\n"
+        "__attribute__((target(\"arch=znver4,tune=znver5\"))) int f(void);\n"
+        "__attribute__((target(\"arch=znver3\"))) int f(void);\n",
+        "__attribute__((target(\"default\"))) int f(void) { return 0; }\n"
+        "__attribute__((target(\"avx2\"))) int f(void) { return 1; }\n"
+        "__attribute__((target(\"avx2\"))) int f(void) { return 1; }\n",
+        "__attribute__((target(\"no-avx2\"))) int f(void) { return 1; }\n"
+        "__attribute__((target(\"default\"))) int f(void) { return 2; }\n",
+        "__attribute__((target(\"crc32\"))) int f(void) { return 1; }\n"
+        "__attribute__((target(\"default\"))) int f(void) { return 2; }\n",
+        "__attribute__((target(\"arch=x86-64-v3\"))) int f(void) { return 1; }\n"
+        "__attribute__((target(\"default\"))) int f(void) { return 2; }\n",
+        "__attribute__((target(\"default\"))) int f(void);\n"
+        "__attribute__((target(\"adx\"))) int f(void);\n"
+        "__attribute__((target(\"no-sse\"))) int f(void);\n"
+        "__attribute__((target(\"arch=x86-64-v2\"))) int f(void);\n"
+        "__attribute__((target(\"arch=amdfam19h\"))) int f(void);\n"
+        "__attribute__((target(\"avx2,crc32\"))) int f(void);\n",
+        "__attribute__((target(\"avx2\"))) int f(void) { return 1; }\n"
+        "__attribute__((target(\"default\"))) int f(void) { return 2; }\n"
+        "static int f(void);\n",
+        "__attribute__((target(\"avx2\"))) int f(void) { return 1; }\n"
+        "__attribute__((target(\"default\"))) int f(void) { return 2; }\n"
+        "int f(void);\n",
+        "__attribute__((target(\"avx2\"))) int f(void);\n"
+        "int f(void);\n"
+        "__attribute__((target(\"default\"))) int f(void);\n",
+        "__attribute__((target(\"avx2\"))) int f(void);\n"
+        "int f(void);\n"
+        "__attribute__((target(\"sse4.2\"))) int f(void);\n",
+        "__attribute__((target(\"avx2\"))) int f(void);\n"
+        "__attribute__((target(\"default\"))) int f(void);\n"
+        "int g(void) { extern int f(void); return f(); }\n",
+        "__attribute__((target(\"avx2\"))) static int f(void) { return 1; }\n"
+        "__attribute__((target(\"default\"))) int f(void) { return 2; }\n",
+        "__attribute__((target(\"avx2\"))) int f(void) { return 1; }\n"
+        "__attribute__((target(\"default\"))) long f(void) { return 2; }\n",
+        "__attribute__((target(\"avx2\"))) int f(void) { return 1; }\n"
+        "__attribute__((target(\"default\"))) inline int f(void) { return 2; }\n",
+        "__attribute__((target(\"default\"))) int f(int);\n"
+        "__attribute__((target(\"avx2\"))) int f(long);\n",
+        "__attribute__((target(\"avx2\"))) int f() { return 1; }\n"
+        "__attribute__((target(\"default\"))) int f() { return 2; }\n",
+        "__attribute__((target(\"default\"))) int f(void);\n"
+        "__attribute__((target(\"avx2\"))) int f();\n",
+        "__attribute__((target(\"default\"))) int f();\n",
+        "__attribute__((target_clones(\"avx2\",\"default\"))) int f(void) { return 1; }\n"
+        "__attribute__((target(\"avx2\"))) int f(void) { return 1; }\n",
+        "__attribute__((target_clones(\"avx2\",\"default\"))) int f(void);\n"
+        "__attribute__((target(\"default\"))) int f(void);\n",
+        "__attribute__((target(\"default\"))) int f(void);\n"
+        "__attribute__((target_clones(\"avx2\",\"default\"))) int f(void);\n",
+        "__attribute__((target(\"default\"))) int main(void) { return 1; }\n",
+        "__attribute__((target(\"default\"))) int main(void);\n"
+        "int main(void) { return 0; }\n",
+        "__attribute__((target(\"avx2\"))) inline int f(void) { return 1; }\n"
+        "__attribute__((target(\"default\"))) inline int f(void) { return 0; }\n",
     };
     // Units whose warnings each option set below changes.
     static const char* const flagged[] = {
@@ -88,15 +231,17 @@ static void check_test_target_versions_diagnostics(CheckTest* test, const char* 
         char description[4096];
         snprintf(description, sizeof(description), "target versions %u: clang's lines read", unit);
         check_test_expect(test, made && lines, description);
-        for (uint32_t scalar = 0; lines && scalar < 2; scalar += 1)
+        // The vector path, the scalar one, and the vector one with the bodies deferred (a unit with a multiversioned
+        // function is read in source order all the same).
+        for (uint32_t scalar = 0; lines && scalar < 3; scalar += 1)
         {
             arguments[0] = (char*)executable;
-            arguments[option != NULL ? 6 : 5] = scalar != 0 ? "--scalar" : NULL;
+            arguments[option != NULL ? 6 : 5] = scalar == 1 ? "--scalar" : scalar == 2 ? "--deferred-bodies" : NULL;
             char* actual = NULL;
             const int status = check_test_driver_spawn(arguments, &actual);
             const bool same = actual != NULL && check_test_diagnostic_lines(actual, actual_lines, LINES) && strcmp(expected_lines, actual_lines) == 0;
             snprintf(description, sizeof(description), "target versions %u (%s%s%s), %s: status %d (clang %d), lines\n%s(clang\n%s)", unit,
-                     option != NULL ? option : "", option != NULL ? " " : "", text, scalar != 0 ? "scalar" : "vector", status, oracle, actual_lines, expected_lines);
+                     option != NULL ? option : "", option != NULL ? " " : "", text, scalar == 1 ? "scalar" : scalar == 2 ? "deferred" : "vector", status, oracle, actual_lines, expected_lines);
             check_test_expect(test, same && (status != 0) == (oracle != 0), description);
             free(actual);
         }

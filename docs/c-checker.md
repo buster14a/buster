@@ -3065,8 +3065,9 @@ What the lowering covers past scalars (#145's programs):
   guide](x86-target.md)), and an attribute of the string before it, as a
   header's functions have, is read as that one was. A unit without one, the
   usual one, makes no column. A function of several versions
-  (GNU's function multiversioning: `target_clones`, or two strings) is refused by
-  name when its body is selected; a declaration-only version with no body is
+  (GNU's function multiversioning: `target_clones`, `target("default")`, or two
+  strings, which the checker keeps apart, #1838) is refused by name when its
+  body is selected; a declaration-only version with no body is
   still outside that refusal, and so are vector values in a function whose
   attribute turns AVX-512F or AVX-512VL off; the convention stays the unit's, as
   clang's does.
@@ -3104,6 +3105,49 @@ What the lowering covers past scalars (#145's programs):
   string, as clang places it. `test-checker-driver --target-versions-only`
   (`c_check_target_versions_driver_test.c`) compares each unit's whole output
   with clang's by both paths, and the warnings' options.
+- **Multiversioning by target strings (#1838).** clang's rules for a function
+  multiversioned by `target` and `target_clones` (`CheckMultiVersionFunction`
+  and its helpers), in `c_check_target_versions.c`, after the #839 checks:
+  - *Versions.* A function becomes multiversioned at its first declaration of
+    `target("default")` or `target_clones`, or where a `target` declaration
+    follows one of another string. Each version is an entity of its own that
+    shares the name, which binding keeps apart
+    (`check_input_target_versions_match`), and a declaration of a version's
+    string, or of the same `target_clones` list, redeclares it
+    (`check_input_cpu_dispatch_redeclare`). A `default` after a plain
+    declaration redeclares that one, and so does a `target_clones` declaration
+    or a plain one after `target_clones`.
+  - *Errors,* each clang's, in its order: "'main' cannot be a multiversioned
+    function"; "function declaration cannot become a multiversioned function
+    after first usage" (with its note where `target` caused it); "multiversioned
+    function must have a prototype" and "... has a different return type"
+    (inline specification, linkage); "function multiversioning doesn't support
+    feature 'X'" (or architecture: an `arch=` no `__builtin_cpu_is` takes, a
+    negated feature, one of no multiversioning priority), for the earlier
+    declaration's too, with the caused-here note; "multiversioned function
+    redeclarations require identical target attributes" (strings of the same
+    parse); "function declaration is missing 'target' attribute in a
+    multiversioned function" (also at an earlier plain redeclaration, with the
+    caused-here note); "multiversioning attributes cannot be combined";
+    "'target_clones' attribute does not match previous declaration"; and "no
+    matching function for call to 'f'" at a call no visible default version
+    reaches (`check_input_target_versions_calls`). A refused declaration is
+    invalid (`CheckInputReader.cpu_invalid`), and the later ones' rules skip it.
+  - *Uses.* Whether a function was used before a declaration (clang's
+    `isUsed`) is read from the binding events: an evaluated use that reached
+    its declarations, outside its own body. A unit with a multiversioned
+    function is read in source order for it (`CheckInput.target_multiversion`,
+    `check_deferred_bodies`).
+  - *Tests.* `test-checker-driver --target-versions-only` compares each unit's
+    whole output with clang's by the vector path, the scalar one and with the
+    bodies deferred.
+  - *Differences from clang.* Where several versions are visible, clang
+    resolves a reference as an overload set. A call of the wrong arity or
+    argument types gets this checker's call errors, not "no matching function"
+    with its candidate notes. A reference other than a call, which clang
+    resolves only against a function pointer type and a default version,
+    is accepted. A different calling convention isn't compared. Code
+    generation is #1838's next step: the versions' bodies are refused by name.
 - **`cpu_specific` and `cpu_dispatch` (#1447).** clang's CPU multiversioning,
   checked as clang 23's Sema checks it (`c_check_cpu_dispatch.c`, after the
   #839 checks) and emitted as its code generation emits it

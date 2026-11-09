@@ -3987,6 +3987,43 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                                 case CHECK_CPU_DISPATCH_LINKAGE:
                                     pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "multiversioned function declaration has a different %s", different);
                                     break;
+                                case CHECK_CPU_DISPATCH_TARGET_FEATURE:
+                                case CHECK_CPU_DISPATCH_TARGET_ARCHITECTURE:
+                                {
+                                    // The item of the target string (#1838), its bytes in the string's decoded text.
+                                    const String8 text = report->attribute < count ? check_warning_strings_value(parser, pp, report->attribute, scratch) : (String8){ 0 };
+                                    const uint64_t start = report->value & 0xffffffffu;
+                                    const uint64_t length = report->value >> 32;
+                                    const bool inside = start <= text.length && length <= text.length - start;
+                                    pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, noted ? 1u : 0u,
+                                                                "function multiversioning doesn't support %s '%.*s'",
+                                                                report->detail == CHECK_CPU_DISPATCH_TARGET_FEATURE ? "feature" : "architecture", inside ? (int)length : 0,
+                                                                inside ? text.pointer + start : "");
+                                    break;
+                                }
+                                case CHECK_CPU_DISPATCH_TARGET_DUPLICATE:
+                                    pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, noted ? 1u : 0u,
+                                                                "multiversioned function redeclarations require identical target attributes");
+                                    break;
+                                case CHECK_CPU_DISPATCH_AFTER_USE:
+                                    pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, noted ? 1u : 0u,
+                                                                "function declaration cannot become a multiversioned function after first usage");
+                                    break;
+                                case CHECK_CPU_DISPATCH_TARGET_REQUIRED:
+                                    pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, noted ? 1u : 0u,
+                                                                "function declaration is missing 'target' attribute in a multiversioned function");
+                                    break;
+                                case CHECK_CPU_DISPATCH_CLONES_MISMATCH:
+                                    pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, noted ? 1u : 0u,
+                                                                "'target_clones' attribute does not match previous declaration");
+                                    break;
+                                case CHECK_CPU_DISPATCH_NO_MATCH:
+                                {
+                                    const uint32_t function = report->attribute < count ? parser->tokens.names[report->attribute] : 0;
+                                    pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "no matching function for call to '%.*s'",
+                                                          (int)intern_length(pp->table, function), intern_bytes(pp->table, function));
+                                    break;
+                                }
                             }
                         }
                         else if (phase == 0 && input->reports[index].message == CHECK_INPUT_ALIAS_TENTATIVE && token < count)

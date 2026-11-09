@@ -8040,6 +8040,8 @@ static bool check_input_attribute_definition(CheckInputReader* reader, CheckInpu
         attribute->ignored |= kind == CHECK_ATTRIBUTE_IFUNC && !subject.function;
         const bool aliasing = kind == CHECK_ATTRIBUTE_ALIAS || (kind == CHECK_ATTRIBUTE_IFUNC && subject.function) ||
                               (kind == CHECK_ATTRIBUTE_WEAKREF && attribute->argument_count != 0 && !subject.is_typedef && subject.file);
+        // A function's target or target_clones attribute asks its rules and binding about multiversioning (#1838).
+        reader->target_versions |= (kind == CHECK_ATTRIBUTE_TARGET || kind == CHECK_ATTRIBUTE_TARGET_CLONES) && subject.function;
         if ((kind == CHECK_ATTRIBUTE_CPU_SPECIFIC || kind == CHECK_ATTRIBUTE_CPU_DISPATCH) && subject.function)
         {
             // clang's handler checks each CPU's name (#1447, c_check_cpu_dispatch.c); an error drops the attribute, and
