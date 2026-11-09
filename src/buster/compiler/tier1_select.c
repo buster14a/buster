@@ -28,8 +28,9 @@
 // The most integer or pointer arguments a call passes, and parameters a function takes (#141): those past the registers
 // in the stack's 8-byte slots, the outgoing area's at a call and the incoming area's at the entry. Their values needn't
 // be in registers there: the CFG consumer stores each argument from wherever it is and loads each parameter into its
-// first fragment's place (tier1_emit_cfg.c).
-#define BUSTER_TIER1_SELECT_MAX_ARGUMENTS 16
+// first fragment's place (tier1_emit_cfg.c). 64 since #1847, from 16: _mm512_set_epi8's parameters (and the scalar
+// host's emulation's arguments) and printf's calls of the compiler's own tests, 16 of main_unit_backend.c's 25 refusals.
+#define BUSTER_TIER1_SELECT_MAX_ARGUMENTS 64
 
 typedef enum Tier1SelectError
 {
