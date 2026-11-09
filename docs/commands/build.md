@@ -337,6 +337,18 @@ and compares them with Clang. The build regression also preprocesses the
 guarded roots directly, checking that their private entry points remain in the
 output.
 
+The remaining independent diagnostic, dataflow, SSA, allocation, builtin-lowering,
+frame, unwind, intrinsic, measurement and source-benchmark fixtures follow the
+same rule. In particular, the allocator's nested `tier1_allocate_test_cases.c`
+and the scheduler's `tier1_schedule_fixture.c` belong to BACKEND; the lowering
+inventory belongs to CHECKER; and the driver owns the process measurements and
+SQLite harness. The row-source header is shared by DRIVER and CHECKER alone.
+The benchmark counter utilities have exactly BACKEND and CHECKER as consumers;
+the debug benchmark keeps only its clock available to BACKEND beside its LINK
+owner. Intrinsic object-reading helpers remain available to the checker's AMX
+fixtures and X86. Standalone benchmark translation units retain their own
+includes and dependency sets.
+
 The test commands, their owning units and compiler optimization flags stay the
 same. Shared fixtures, including the checker's common helpers and
 `oracle_cache_test.c`, retain their callers and the references that keep shared
