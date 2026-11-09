@@ -125,7 +125,7 @@ enum
     CHECK_WARNING_ID_VISIBILITY = 112,
     // __builtin_cpu_supports of a feature clang doesn't know (#1843, clang's SemaX86 validateCpuSupports): its warning of no
     // option, whose call is false.
-    CHECK_WARNING_ID_INVALID_CPU_SUPPORTS = 113,
+    CHECK_WARNING_ID_INVALID_CPU_SUPPORTS = 118,
     CHECK_WARNING_ID_COUNT,
 };
 

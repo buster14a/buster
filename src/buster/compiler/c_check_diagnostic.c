@@ -149,7 +149,8 @@ static const CheckWarningDescription check_warning_descriptions[] =
     { "-Wfor-loop-analysis", "-Wloop-analysis", "variable used in loop condition not modified in loop body" },
     { "-Wimplicit-enum-enum-cast", "-Wenum-conversion", "implicit conversion from enumeration type to different enumeration type" },
     { "-Wvisibility", NULL, "declaration will not be visible outside of this function" },
-    { NULL, NULL, "invalid cpu feature string for builtin" },
+    // (#1843: its ID assigned past the ones other pull requests take, which their rows fill.)
+    [CHECK_WARNING_ID_INVALID_CPU_SUPPORTS] = { NULL, NULL, "invalid cpu feature string for builtin" },
 };
 
 _Static_assert(BUSTER_ARRAY_LENGTH(check_warning_descriptions) == CHECK_WARNING_ID_COUNT, "every sparse policy ID has a description");
