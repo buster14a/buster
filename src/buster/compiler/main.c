@@ -505,9 +505,11 @@ int run_tier1_frame_benchmark(int argc, char** argv);
 #include "buster/compiler/unwind_benchmark.c"
 // Streaming the output (#88): Tier 0's code written while it compiles, in the data-first order, against the end.
 #include "buster/compiler/streaming.c"
+#if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/streaming_test.c"
 #include "buster/compiler/streaming_benchmark.c"
 #include "buster/compiler/streaming_benchmark_test.c"
+#endif
 int run_backend_benchmark(int argc, char** argv);
 
 // Source checking's program consumer shares the ABI and Tier 0 interfaces. Keep the source driver and its
@@ -636,9 +638,7 @@ int run_backend_benchmark(int argc, char** argv);
 #include "buster/compiler/ssa_ir_test.c"
 #include "buster/compiler/ir_parse_test.c"
 #include "buster/compiler/interpreter_test.c"
-#endif
 #include "buster/compiler/tier0_mask_test.c"
-#if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/interpreter_native_test.c"
 #include "buster/compiler/interpreter_link_test.c"
 #include "buster/compiler/ir_interpreter_test.c"
@@ -897,7 +897,7 @@ static __attribute__((unused)) void main_frontend_test_interfaces(void)
 #endif
 
 #if !BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
-// The IR and Tier 1 fixtures supply these shared static entry points' callers in the backend unit. Keep their
+// The backend fixtures supply these shared static entry points' callers in their owning unit. Keep their
 // semantic references in the others without parsing the fixtures or emitting code; the owner retains real callers.
 static __attribute__((unused)) void main_backend_test_interfaces(void)
 {
@@ -905,6 +905,9 @@ static __attribute__((unused)) void main_backend_test_interfaces(void)
     (void)&tier1_cfg_from_ir;
     (void)&ir_reduce_oracle;
     (void)&tier1_select_emit;
+    (void)&stream_program_generate;
+    (void)&stream_write;
+    (void)&stream_write_link;
 }
 #endif
 
@@ -1611,10 +1614,12 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     {
         result = run_tier1_frame_benchmark(argc - 1, argv + 1);
     }
+#if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-tier0") == 0)
     {
         result = run_tier0_tests(argc - 2, argv + 2);
     }
+#endif
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-builtin-lowering") == 0)
     {
         result = run_builtin_lower_tests(argc - 2, argv + 2);
@@ -1657,6 +1662,7 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     {
         result = run_unwind_benchmark(argc - 2, argv + 2);
     }
+#if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-streaming") == 0)
     {
         result = run_streaming_tests(argc - 2, argv + 2);
@@ -1665,6 +1671,7 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     {
         result = run_streaming_benchmark(argc - 2, argv + 2);
     }
+#endif
     else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-backend") == 0)
     {
         result = run_backend_benchmark(argc - 1, argv + 1);
