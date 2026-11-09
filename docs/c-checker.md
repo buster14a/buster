@@ -3983,9 +3983,40 @@ do:
   without a fixed type listed twice) gives "redefinition of 'S'" at the name,
   noting the earlier definition. Its body is read as an anonymous tag's, so the
   name's later uses find the first definition, and a repeated enumerator in it
-  is reported as below. This is before C23 only: C23 allows a compatible
-  redefinition and words an incompatible one otherwise (N3037), which the
-  checker doesn't model, and still refuses with its generic error.
+  is reported as below. This is before C23 only. Under `-std=c23`/`gnu23`
+  (N3037) a struct or union defined again in its scope is compared with the
+  earlier definition when its body completes (`c_check_tag_compatible.c`),
+  as clang's structural equivalence compares them:
+  - The records' attributes are compared, arguments included, then each pair
+    of members in order: its attributes, then its names, bit-field widths and
+    types. An attribute's difference is clang's `-Wodr` error ("has an
+    attribute", or "has a member with an attribute"), noted at each list's
+    attribute where the lists first differ, and the comparison goes on.
+  - Members' types are walked together through pointers, arrays, atomics and
+    functions, the same at each level, qualifiers too. Any two records are
+    compatible there unless one is unnamed and written in its definition: two
+    named records, a struct and a union, or two typedefs' unnamed records are,
+    as in clang. Such a pair is queued and compared member by member after the
+    definition's own members, breadth first.
+  - The first difference is clang's "type 'struct S' has incompatible
+    definitions", with its two notes at the differing members (name,
+    bit-field, type, a member with no counterpart). An unnamed member's note
+    is at its declaration's first token and names `''`. A queued pair's
+    difference is reported at the second definition's unnamed record, named
+    as clang names it there (`struct S::(unnamed struct)::(unnamed at
+    f.c:2:21)`, an anonymous member's `(anonymous at ...)`).
+  - The errors are published where the second body ends, after what its
+    members report. A member whose record is itself an incompatible
+    redefinition reads as an `int`, as clang's invalid declaration does.
+
+  A compatible redefinition declares the earlier type. Otherwise the unit is
+  refused and recovered.
+
+  Left as they were: `-Wno-odr` doesn't turn the `-Wodr` errors off. An enum
+  defined again under C23 still refuses with the generic error, which stops
+  the reader. Clang compares its enumerators, and keeps both lists' names in
+  scope with ambiguous references. An `_Atomic(struct { ... })` member is the
+  parser's refusal, with or without a redefinition.
 - **A repeated enumerator** gives "redefinition of enumerator 'A'" with its
   note at the earlier one, and is dropped (`CheckTagFrame.dropped`). As in
   clang, whose next `CheckEnumConstant` sees no previous constant, the next
@@ -4078,15 +4109,47 @@ A rejected unit gets the warnings clang gives it outside its errors
 them (its reader's, its graph's, its asm, control, initializer and musttail
 errors). Where it can, that reading leaves out an error's part alone, in a
 private view of the unit's tokens reparsed as a repair's is
-(`check_driver_rejected_view`): an initializer, from its `=`, where the
-declaration is complete without it (not an unsized array's, not a const
-object's), else an expression statement in a body, which `{` `}` replace
-(`check_driver_rejected_edit`). The body is then read as clang reads it, its
-warnings before and after the error given, flushed (no analysis warnings).
+(`check_driver_rejected_view`). `check_driver_rejected_edit` walks up from the
+error to the nearest part it can leave out:
+
+- **An initializer**, from its `=`, where the declaration is complete without
+  it (not an unsized array's). A const object of an arithmetic or enumeration
+  type keeps its declaration, its initializer replaced by `-*__func__`, as
+  clang's const object stays valid with an unknown value.
+- **An expression statement**, which `{` `}` replace (a `return`'s too).
+- **A condition** (`if`, `while`, `do`, `switch`), which `-*__func__`
+  replaces: an `int` that reads no object of the unit's and is no constant,
+  so that the statements after it stay as reachable as they were. The
+  statement keeps its body, as clang's does.
+- **A for statement's clause**: the init's and the increment's are left out,
+  the condition's replaced as a condition is, so that the loop doesn't become
+  endless.
+- **A statement expression's value**: an error in its last statement is its
+  expression's, so the part around the expression is left out instead; an
+  error in an earlier statement is that statement's.
+- **A declarator**, where its declaration can't do without what holds the error
+  (an unsized array's or a const pointer's initializer, its specifiers, an
+  array bound): it is left out with the comma after it, or the last kept
+  one's before it, or the whole declaration where no other declarator is
+  kept. Every later identifier of its name in its scope is a use, whose own
+  part is left out in turn (a work list), so that no use reads an outer
+  declaration in its place. A typedef's isn't, as the parse reads its name as
+  a type.
+
+Each error's parts are left out all or none (an undo log). A part that holds a
+label, a `case`, a `goto`, a label's address or a tag's definition isn't. The
+replacements are chosen to give no warning of their own (a constant condition
+would: clang's "no case matching constant switch condition"). A part left out
+gives no warning of its own reading, where clang gives those of what it builds
+before the error; the first reading's folded shifts in it are still given, at
+the unit's end (`check_common_shift_finish`), not among the body's. A
+function that holds an error gets no `-Wunused-but-set-parameter` from that reading, as clang's
+`ActOnFinishFunctionBody` gives none: it may lack the parameter's reads
+(`CheckCommonFacts.flushed`'s 2). The body is then read as clang reads it, its warnings before and after the
+error given, flushed (no analysis warnings).
 Other errors leave out their bodies, by `check_input_selected` as
 `-flazy-system-headers`' bodies are, as does every error where the view
-doesn't parse or its reading isn't valid (a statement expression's last
-statement left out makes its value `void`; `check_driver_rejected_read`
+doesn't parse or its reading isn't valid (`check_driver_rejected_read`
 publishes nothing of an invalid reading, which is then read again with the
 bodies left out). The second reading's unused variables in a scope with an error
 are left out (its own error counts, the dropped part's at the token after
@@ -4111,6 +4174,11 @@ error it finds is among the unit's errors: as for the reader's and the graph's,
 its scopes' unused variables and the unit-end warnings are left out
 (`check_driver_rejected_warnings`). `c_check_statement_recovery_driver_test.c`
 compares fixtures of graph, control, asm and reader errors with clang.
+`c_check_structural_recovery_driver_test.c` compares the view parts' fixtures
+(conditions, for clauses, statement expressions, declarators, and the fallback
+of a part that holds a label or a goto) with clang 23 under `-Wall` and `-Wall
+-Wextra`, gnu17 and gnu23, by both paths and on one, two and three lanes, each
+with errors mid-body among warnings before and after them.
 
 Every declaration's failed initializer is given, as clang gives each
 (phase 2): `int a[2] = 5; int b[2] = 6;` has two errors where it had the
@@ -4310,18 +4378,23 @@ These differences remain:
 The later phases are left:
 
 - **Invalid declarations.** Not covered by phase 2:
-  - C23's incompatible tag redefinitions (above).
+  - C23's redefinition of an enum, compatible or not (above).
 
   These still stop the reader. A non-constant initializer's error is at its
   first token, where clang's is at the operand that isn't constant
   (`k + 1`'s `+`), and `sizeof` of an incomplete type reads "incomplete type
   is not permitted here" at the `sizeof`, where clang's names the type at its
   operand; both on main too.
-- **Errors no view part leaves out.** A body's error in a condition, a for
-  header, a statement expression or a declaration other than through its
-  initializer still leaves its body out, and its warnings with it. An error
-  outside every body other than an initializer's (a declaration's, an
-  unsized array's or a const object's initializer) still leaves the unit
+- **Errors no view part leaves out.** A body's error in a part that holds a
+  label, a `case`, a `goto` or a tag's definition, or in a typedef's
+  declaration, still leaves its body out, and its warnings with it. A reader's
+  error that ends its walk in a declarator (`int a[s.b];`, still "invalid or
+  unsupported declaration") leaves its declarator out, but the first reading
+  never saw the body's later errors, so a second reading that meets one isn't
+  valid. The warnings clang gives of what a left-out part builds before its
+  error aren't given, but for a folded shift's, which comes at the unit's end.
+  An error outside every body other than an initializer's (a declaration's,
+  an unsized array's or a const object's initializer) still leaves the unit
   without its common warnings. A function's unused parameter that its
   left-out part names through a local of the same name gets no
   `-Wunused-parameter`, where clang gives one.
@@ -6320,7 +6393,13 @@ from outside the block reaches none of them. Clang's errors, at its places: a
 list's name that its block doesn't define is "use of undeclared label" at the
 name in the list, reported as the block ends; a second definition in the scope
 is "redefinition of label" at its name, with clang's "previous definition is
-here" at the first (a local label's at its name in the list); and a name that a block's lists declare
+here" at the first (a local label's at its name in the list). First is clang's
+order: it defines a label as its statement completes, so of a label and one
+within its statement (`L: L: ;`, `L: { L: ; }`, `L: M: L: ;`) the inner is the
+definition, which gotos reach, and the outer the redefinition. The
+redefinition is recovered (#1447): clang drops the label and keeps its
+statement, so the unit is read on as a valid one, and a later duplicate case in
+the body is given too. A name that a block's lists declare
 twice is ambiguous where it is defined or used, and undeclared at both of its
 declarations. Clang reports that last one's ambiguity first, the driver in
 source order. A unit without a list builds none of it; the vector path's mask
