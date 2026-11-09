@@ -1570,6 +1570,47 @@ static void abi_test_build_records(AbiTestBuilder* builder)
     m[0] = abi_test_member(builder, type_array(table, type_aligned(table, bf16, 0), 1));
     abi_test_in_registers(builder, "{aligned(1) __bf16[1], _Alignas(8) int}", abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 2, false, 0), sse_integer, low_general,
                           0, rax, rdx);
+    // A union stored as a __float128 whose classes are SSE, SSE or SSE, INTEGER: getFPTypeAtOffset finds the fp128 at
+    // offset 0 as its low part, 16 bytes, which GetX86_64ByValArgumentPair widens to an i64 whatever the high part, a
+    // double or an i64, is: {i64, double} and {i64, i64}. A vector of one __float128 is no fp128 to it, and a union of it
+    // is {double, double}.
+    const AbiClasses sse_sse = BUSTER_ABI_TEST_SSES;
+    const TypeId quad = BUSTER_TYPE_FLOAT128;
+    m[0] = abi_test_member(builder, quad);
+    m[1] = abi_test_member(builder, type_array(table, type_vector_size(table, BUSTER_TYPE_CHAR, 8), 2));
+    abi_test_in_registers(builder, "union {__float128, char x8[2]}", abi_test_record(builder, BUSTER_TYPE_KIND_UNION, m, 2, false, 0), sse_sse, low_general, 0, rax,
+                          BUSTER_ABI_TEST_XMM(0));
+    m[1] = abi_test_member(builder, type_array(table, BUSTER_TYPE_DOUBLE, 2));
+    const TypeId quad_doubles = abi_test_record(builder, BUSTER_TYPE_KIND_UNION, m, 2, false, 0);
+    abi_test_in_registers(builder, "union {__float128, double[2]}", quad_doubles, sse_sse, low_general, 0, rax, BUSTER_ABI_TEST_XMM(0));
+    m[1] = abi_test_member(builder, type_array(table, BUSTER_TYPE_FLOAT, 4));
+    abi_test_in_registers(builder, "union {__float128, float[4]}", abi_test_record(builder, BUSTER_TYPE_KIND_UNION, m, 2, false, 0), sse_sse, low_general, 0, rax,
+                          BUSTER_ABI_TEST_XMM(0));
+    m[2] = abi_test_member(builder, BUSTER_TYPE_DOUBLE);
+    m[3] = abi_test_member(builder, BUSTER_TYPE_LONG);
+    m[1] = abi_test_member(builder, abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, &m[2], 2, false, 0));
+    abi_test_in_registers(builder, "union {__float128, {double, long}}", abi_test_record(builder, BUSTER_TYPE_KIND_UNION, m, 2, false, 0), sse_integer, low_general, 0,
+                          rax, rdx);
+    // The member stored, the most aligned, comes second, or holds the __float128 in a struct or an array of one.
+    m[0] = abi_test_member(builder, type_array(table, BUSTER_TYPE_DOUBLE, 2));
+    m[1] = abi_test_member(builder, quad);
+    abi_test_in_registers(builder, "union {double[2], __float128}", abi_test_record(builder, BUSTER_TYPE_KIND_UNION, m, 2, false, 0), sse_sse, low_general, 0, rax,
+                          BUSTER_ABI_TEST_XMM(0));
+    m[2] = abi_test_member(builder, quad);
+    m[0] = abi_test_member(builder, abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, &m[2], 1, false, 0));
+    m[1] = abi_test_member(builder, BUSTER_TYPE_COMPLEX_DOUBLE);
+    abi_test_in_registers(builder, "union {{__float128}, _Complex double}", abi_test_record(builder, BUSTER_TYPE_KIND_UNION, m, 2, false, 0), sse_sse, low_general, 0,
+                          rax, BUSTER_ABI_TEST_XMM(0));
+    m[0] = abi_test_member(builder, type_array(table, quad, 1));
+    abi_test_in_registers(builder, "union {__float128[1], _Complex double}", abi_test_record(builder, BUSTER_TYPE_KIND_UNION, m, 2, false, 0), sse_sse, low_general, 0,
+                          rax, BUSTER_ABI_TEST_XMM(0));
+    m[0] = abi_test_member(builder, quad_doubles);
+    abi_test_in_registers(builder, "{union {__float128, double[2]}}", abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 0), sse_sse, low_general, 0, rax,
+                          BUSTER_ABI_TEST_XMM(0));
+    m[0] = abi_test_member(builder, abi_test_vector(builder, quad, 16));
+    m[1] = abi_test_member(builder, type_array(table, BUSTER_TYPE_DOUBLE, 2));
+    abi_test_in_registers(builder, "union {__float128 x1, double[2]}", abi_test_record(builder, BUSTER_TYPE_KIND_UNION, m, 2, false, 0), sse_sse, 0, low_general,
+                          BUSTER_ABI_TEST_XMM(0), BUSTER_ABI_TEST_XMM(1));
     // A struct of 32 bytes: MEMORY, unless it is one vector the target passes in a register.
     m[0] = abi_test_member(builder, type_vector_size(table, BUSTER_TYPE_FLOAT, 16));
     m[1] = abi_test_member(builder, type_vector_size(table, BUSTER_TYPE_FLOAT, 16));
@@ -1601,6 +1642,59 @@ static void abi_test_build_records(AbiTestBuilder* builder)
         abi_test_in_memory(builder, "union {float x8, char[20]}", with_chars);
     }
     abi_test_in_memory(builder, "union {float x8, long}", with_long);
+    // A union of a 16-byte vector and a longer array, packed or aligned below its size, is SSE, SSEUP at a size no
+    // vector register has where the target's vectors are as wide: clang passes it as <size / 8 x double> (GetByteVectorType),
+    // which LLVM widens to the next power of two, with only those doubles' bytes: 17 to 23 bytes in an xmm register, 24
+    // to 31 in a ymm one, 33 to 39 in a ymm one too and 40 to 63 in a zmm one (on the stack, aligned to their register's
+    // size, in a variadic call). The module refuses them, and what holds one as its only member.
+    const TypeId float4 = type_vector_size(table, BUSTER_TYPE_FLOAT, 16);
+    const uint64_t odd_sizes[] = {
+        17,
+        22,
+        24,
+        31,
+        33,
+        40,
+        63,
+    };
+    const char* odd_names[] = {
+        "packed union {float x4, char[17]}",
+        "packed union {float x4, char[22]}",
+        "packed aligned(8) union {float x4, char[18]}",
+        "packed union {float x4, char[31]}",
+        "packed union {float x4, char[33]}",
+        "packed union {float x4, char[40]}",
+        "packed union {float x4, char[63]}",
+    };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(odd_sizes); i += 1)
+    {
+        const bool aligned = odd_sizes[i] == 24;
+        m[0] = abi_test_member(builder, float4);
+        m[1] = abi_test_member(builder, type_array(table, BUSTER_TYPE_CHAR, aligned ? 18 : odd_sizes[i]));
+        const TypeId odd = abi_test_record(builder, BUSTER_TYPE_KIND_UNION, m, 2, true, aligned ? 3 : 0);
+        if (odd_sizes[i] <= builder->vector_bytes)
+        {
+            abi_test_vector_refused(builder, odd_names[i], odd, BUSTER_ABI_RESULT_REGISTERS, BUSTER_ABI_TEST_XMM(0), BUSTER_ABI_TEST_NONE);
+        }
+        else
+        {
+            abi_test_in_memory(builder, odd_names[i], odd);
+        }
+        if (odd_sizes[i] == 22)
+        {
+            m[0] = abi_test_member(builder, type_array(table, odd, 1));
+            const TypeId holder = abi_test_record(builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 0);
+            if (builder->vector_bytes >= 32)
+            {
+                abi_test_vector_refused(builder, "{packed union {float x4, char[22]}[1]}", holder, BUSTER_ABI_RESULT_REGISTERS, BUSTER_ABI_TEST_XMM(0),
+                                        BUSTER_ABI_TEST_NONE);
+            }
+            else
+            {
+                abi_test_in_memory(builder, "{packed union {float x4, char[22]}[1]}", holder);
+            }
+        }
+    }
     // Nested at a nonzero offset: {int; struct {short, short}} is one INTEGER eightbyte; {int; struct {float, float}}
     // puts the inner struct's halves in different eightbytes.
     m[0] = abi_test_member(builder, BUSTER_TYPE_FLOAT);
@@ -5075,9 +5169,6 @@ static uint64_t abi_test_llvm_bytes(const TypeTable* table, TypeId type)
 
 // Per type, what it holds, in itself or in its members, elements, base or value, that clang 23 passes or copies
 // otherwise than the module says (bits):
-//   - HOLDS_QUAD: a __float128. A record SSE, SSE whose LLVM type starts with one, 16 bytes, gets it from
-//     GetSSETypeAtOffset as its low part, which GetX86_64ByValArgumentPair widens to an i64 (docs/calling-convention.md,
-//     "Next steps"). A vector of them is no fp128 to getFPTypeAtOffset, and holds none.
 //   - HOLDS_PACKS: a vector whose LLVM type packs it into fewer bits than its bytes (of bools other than a multiple of 8
 //     that fills its bytes, of narrow _BitInts or of long doubles: abi_test_packed_bits).
 //   - HOLDS_UNION_PACKS: a union that holds such a vector. As the union's LLVM type, which takes its most aligned member
@@ -5089,7 +5180,6 @@ static uint64_t abi_test_llvm_bytes(const TypeTable* table, TypeId type)
 //     is 16 bytes, losing the later elements' bytes past them: struct { char c[6]; _Complex short s[2]; } aligned to 4
 //     passes s[1]'s imaginary part in neither GCC's call nor GCC's callee.
 // Worked out in passes over the table until one changes nothing; 0 without the memory.
-#define BUSTER_ABI_TEST_HOLDS_QUAD 1u
 #define BUSTER_ABI_TEST_HOLDS_PACKS 2u
 #define BUSTER_ABI_TEST_HOLDS_UNION_PACKS 4u
 #define BUSTER_ABI_TEST_HOLDS_NARROW_COMPLEX 8u
@@ -5106,11 +5196,7 @@ static uint8_t* abi_test_holds(const TypeTable* table)
         {
             const uint8_t kind = table->types.kind[index];
             uint8_t value = holds[index];
-            if (kind == BUSTER_TYPE_KIND_FLOATING && table->types.code[index] == BUSTER_TYPE_CODE_FLOAT128)
-            {
-                value |= BUSTER_ABI_TEST_HOLDS_QUAD;
-            }
-            else if (kind == BUSTER_TYPE_KIND_VECTOR || kind == BUSTER_TYPE_KIND_EXT_VECTOR)
+            if (kind == BUSTER_TYPE_KIND_VECTOR || kind == BUSTER_TYPE_KIND_EXT_VECTOR)
             {
                 const uint64_t bits = abi_test_packed_bits(table, index);
                 const uint64_t count = table->types.extent[index];
@@ -6888,28 +6974,20 @@ static bool abi_test_cross(AbiTestTally* tally, uint64_t seed, uint32_t count, c
                 // eightbyte widens (abi_test_bit_field_bytes).
                 const AbiClasses classes = abi_classes(&abi, type, true);
                 const bool unit_decides = !gcc && (classes & 7) == BUSTER_ABI_SSE && (classes >> 4) == BUSTER_ABI_INTEGER && (bit_field_bytes[index] & 0xff00u) != 0;
-                // A record SSE, SSEUP of a size that isn't a vector register's, which clang passes as <size / 8 x double>
-                // (a union of a 16-byte vector and a longer array): not modeled yet (docs/calling-convention.md, "Next
-                // steps").
-                const uint64_t resolved_size = table->types.size[abi_resolved_index(table, type)];
                 const uint8_t resolved_kind = table->types.kind[abi_resolved_index(table, type)];
-                const bool odd_vector_record = (resolved_kind == BUSTER_TYPE_KIND_STRUCT || resolved_kind == BUSTER_TYPE_KIND_UNION) &&
-                                               (abi.pass[index] & BUSTER_ABI_PASS_VECTOR) != 0 && resolved_size != 16 && resolved_size != 32 && resolved_size != 64;
                 // clang's atomic loads of an _Atomic vector of bools crash its instruction selection (an aligned typedef
                 // of one's too).
                 const uint32_t atomic_value = resolved_kind == BUSTER_TYPE_KIND_ATOMIC ? abi_resolved_index(table, table->types.base[abi_resolved_index(table, type)]) : 0;
                 const bool atomic_bits = atomic_value != 0 && table->types.kind[atomic_value] == BUSTER_TYPE_KIND_EXT_VECTOR &&
                                          abi_test_packed_bits(table, atomic_value) == 1;
-                // A record SSE, SSE whose LLVM type may start with a __float128, and a union of a vector LLVM packs into
-                // fewer bits than its bytes (abi_test_holds).
-                const bool quad_pair = !gcc && (holds[index] & BUSTER_ABI_TEST_HOLDS_QUAD) != 0 && classes == BUSTER_ABI_CLASSES(BUSTER_ABI_SSE, BUSTER_ABI_SSE);
+                // A union of a vector LLVM packs into fewer bits than its bytes (abi_test_holds).
                 const bool union_packs = !gcc && (holds[index] & BUSTER_ABI_TEST_HOLDS_UNION_PACKS) != 0;
                 // GCC classifies an array by its first element alone: a complex char or short element that crosses an
                 // eightbyte makes the next one INTEGERSI, of which GCC passes 4 bytes, past which the later elements' are
                 // lost (abi_test_holds' NARROW_COMPLEX_ARRAY).
                 const bool narrow_complex_array = gcc && (holds[index] & BUSTER_ABI_TEST_HOLDS_NARROW_COMPLEX_ARRAY) != 0;
                 if ((spelled || table->types.kind[index] == BUSTER_TYPE_KIND_ENUM) && small && abi_test_passable(&abi, table, type) && !gcc_differs &&
-                    !clang_crashes && !unit_decides && !odd_vector_record && !atomic_bits && !quad_pair && !union_packs && !narrow_complex_array &&
+                    !clang_crashes && !unit_decides && !atomic_bits && !union_packs && !narrow_complex_array &&
                     (!compiled || abi_test_compiled_passes(table, type)))
                 {
                     types[type_count] = type;

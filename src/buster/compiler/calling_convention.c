@@ -27,8 +27,8 @@
 // the registers (abi_storage and abi_layout model the types it needs): an i128 at a record's offset 0 makes it one value
 // LLVM never splits (BUSTER_ABI_PASS_PAIR) when its low eightbyte is INTEGER, whatever the high one is, as a run of
 // bit-fields wider than an eightbyte is where 16 bytes fit for it (abi_bit_field_run), and with another low eightbyte an
-// INTEGER high one is refused (UNSUPPORTED); a narrow low part with a high part not aligned to 8 goes in a general
-// register (LOW_GENERAL); a vector result LLVM demotes to a hidden pointer isn't in clang's count (DEMOTED); a vector of
+// INTEGER high one is refused (UNSUPPORTED); a narrow low part with a high part not aligned to 8, or a union's fp128,
+// goes in a general register (LOW_GENERAL); a vector result LLVM demotes to a hidden pointer isn't in clang's count (DEMOTED); a vector of
 // one element is its element's value (HALVES for a <1 x i128>); an _Atomic of a type of no size is larger to LLVM than
 // in C, and so is a packed struct that ends in one, whose copies take LLVM's size (LARGER, GROWN: abi_copy_bytes); an
 // _Atomic vector of bools is the integer clang stores it as; a vector LLVM packs in memory (of bools, narrow _BitInts or
@@ -225,7 +225,8 @@ _Static_assert(sizeof(AbiVaList) == 24, "the psABI's va_list element is 24 bytes
 //     one, an aggregate's own, an _Atomic aggregate's canonical type's: abi_atomic_alignment_log2).
 //   - LOW_GENERAL (bit 27): the low eightbyte, SSE by its class (LOW_SSE, which clang counts), goes in a general
 //     register: clang's type for it is narrow (a bfloat, <2 x half> or <2 x bfloat>) and the high part's isn't aligned
-//     to 8, so GetX86_64ByValArgumentPair widens it to an i64 (it widens a half or a float to a double).
+//     to 8, or it is a union's fp128, 16 bytes, so GetX86_64ByValArgumentPair widens it to an i64 (it widens a half or a
+//     float to a double).
 //   - EMPTY (bit 26): a type of no size. One in memory (a record of a flexible array member alone) takes an 8-byte slot,
 //     as LLVM gives a byval argument, unless clang has no general register free and its alignment is 8 or less: clang
 //     then passes an aggregate of 8 bytes or less as an integer of its size (getIndirectResult), here an i0, which
@@ -403,7 +404,8 @@ typedef struct AbiTable AbiTable;
 
 // AbiTable.layout: the scalars of clang's LLVM type of each type in its first 16 bytes, as GetSSETypeAtOffset and
 // GetINTEGERTypeAtOffset find them (abi_layout): 4 bits for each even offset (bits 0 to 31: the kind of the scalar that
-// starts there), and which of the 16 bytes hold data of the C type (bits 32 to 47, BitsContainNoUserData's).
+// starts there), and which of the 16 bytes hold data of the C type (bits 32 to 47, BitsContainNoUserData's). FP128 is a
+// __float128's fp128, the one floating type of 16 bytes getFPTypeAtOffset finds (an x86_fp80 is X87's).
 #define BUSTER_ABI_LEAF_NONE 0u
 #define BUSTER_ABI_LEAF_I8 1u
 #define BUSTER_ABI_LEAF_I16 2u
@@ -414,6 +416,7 @@ typedef struct AbiTable AbiTable;
 #define BUSTER_ABI_LEAF_FLOAT 7u
 #define BUSTER_ABI_LEAF_DOUBLE 8u
 #define BUSTER_ABI_LEAF_OTHER 9u
+#define BUSTER_ABI_LEAF_FP128 10u
 #define BUSTER_ABI_LAYOUT_DATA_SHIFT 32
 
 struct AbiTable
@@ -1336,7 +1339,7 @@ static uint64_t abi_integer_leaf(uint64_t bytes)
 }
 
 // A type's layout (AbiTable.layout) once its members' are in place: a scalar's own kind at 0 (an integer or a _BitInt
-// by its size: i8 to i64, its memory type; a vector, an i128 and the like OTHER); an enum's, an _Atomic one's, a complex
+// by its size: i8 to i64, its memory type; a __float128 FP128; a vector, an i128 and the like OTHER); an enum's, an _Atomic one's, a complex
 // type's and an array's from their underlying type's, value's or elements'; a struct's from its members' at their
 // offsets, a bit-field as an integer of its type at the start of its storage unit (an approximation of clang's access
 // units) and data over its type's size from its offset; a union's scalars its storage member's
@@ -1360,6 +1363,7 @@ static uint64_t abi_layout(const AbiTable* abi, const TypeTable* table, uint32_t
                : code == BUSTER_TYPE_CODE_BF16                                   ? BUSTER_ABI_LEAF_BFLOAT
                : code == BUSTER_TYPE_CODE_FLOAT                                  ? BUSTER_ABI_LEAF_FLOAT
                : code == BUSTER_TYPE_CODE_DOUBLE                                 ? BUSTER_ABI_LEAF_DOUBLE
+               : code == BUSTER_TYPE_CODE_FLOAT128                               ? BUSTER_ABI_LEAF_FP128
                                                                                  : BUSTER_ABI_LEAF_OTHER;
     }
     else if (kind == BUSTER_TYPE_KIND_POINTER || kind == BUSTER_TYPE_KIND_NULLPTR)
@@ -1508,7 +1512,11 @@ static uint32_t abi_integer_part(uint64_t layout, uint64_t size)
 }
 
 // Whether a type's low eightbyte, SSE by its class, goes in a general register (BUSTER_ABI_PASS_LOW_GENERAL): clang's
-// type for it is narrow and its high part's isn't aligned to 8, so the pair would put the high part before 8.
+// type for it is narrow and its high part's isn't aligned to 8, so the pair would put the high part before 8; or it is
+// an fp128 (a union stored as a __float128, SSE, SSE or SSE, INTEGER: getFPTypeAtOffset finds the fp128 at offset 0, 16
+// bytes), so that the high part, a double or an i64, would start at 16, whatever its alignment, and
+// GetX86_64ByValArgumentPair widens the low part to an i64 (its assertion that the part is an integer is off in release
+// builds): `union { __float128 q; double d[2]; }` is {i64, double}.
 static bool abi_low_general(const AbiTable* abi, const TypeTable* table, uint32_t index, uint8_t low, uint8_t high)
 {
     const uint64_t layout = abi->layout[index];
@@ -1520,7 +1528,7 @@ static bool abi_low_general(const AbiTable* abi, const TypeTable* table, uint32_
     {
         abi_sse_part(layout, 0, size, &narrow);
         const uint32_t high_alignment_log2 = high == BUSTER_ABI_INTEGER ? abi_integer_part(layout, size) : abi_sse_part(layout, 8, size, &high_narrow);
-        result = narrow && high_alignment_log2 < 3;
+        result = (narrow && high_alignment_log2 < 3) || abi_leaf(layout, 0) == BUSTER_ABI_LEAF_FP128;
     }
     return result;
 }
@@ -2254,6 +2262,10 @@ static void abi_finish_passing(AbiTable* abi, const TypeTable* table, uint32_t i
         pass |= (high == BUSTER_ABI_SSE || high == BUSTER_ABI_X87UP) && !pair ? BUSTER_ABI_PASS_HIGH_SSE : 0;
         pass |= high == BUSTER_ABI_SSEUP ? BUSTER_ABI_PASS_VECTOR : 0;
         pass |= high == BUSTER_ABI_SSEUP && size > BUSTER_ABI_REGISTER_BYTES ? BUSTER_ABI_PASS_WIDE : 0;
+        // An aggregate SSE, SSEUP of a size no vector register has (a union of a 16-byte vector and a longer array,
+        // packed or aligned below its size, of 17 to 63 bytes): clang's GetByteVectorType gives it <size / 8 x double>,
+        // which LLVM passes in the register of the next power of two, with only those doubles' bytes (refused).
+        pass |= high == BUSTER_ABI_SSEUP && aggregate && size != 16 && size != 32 && size != 64 ? BUSTER_ABI_PASS_UNSUPPORTED : 0;
         pass |= pair ? BUSTER_ABI_PASS_PAIR : 0;
         pass |= i128 && !pair && high == BUSTER_ABI_INTEGER ? BUSTER_ABI_PASS_UNSUPPORTED : 0;
         pass |= low == BUSTER_ABI_INTEGER && high == BUSTER_ABI_NO_CLASS ? abi_extension(table, index) : 0;
