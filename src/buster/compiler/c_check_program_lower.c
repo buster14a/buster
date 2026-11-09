@@ -10888,7 +10888,8 @@ static void check_lower_vector_floating(CheckLowerWriter* writer, uint32_t node,
     }
     else if ((class == BUSTER_TYPED_CLASS_F80 && (builtin <= CBUILTIN_ELEMENTWISE_ROUND || builtin == CBUILTIN_ELEMENTWISE_MAXNUM || builtin == CBUILTIN_ELEMENTWISE_MINNUM ||
                                                   (ldexp && type_size(types, exponent) == 4))) ||
-             (ldexp && type_size(types, exponent) <= 8 && (writer->target.features & BUSTER_X86_FEATURE(AVX512F)) == 0))
+             ((class == BUSTER_TYPED_CLASS_F32 || class == BUSTER_TYPED_CLASS_F64) && ldexp && type_size(types, exponent) <= 8 &&
+              (writer->target.features & BUSTER_X86_FEATURE(AVX512F)) == 0))
     {
         // A float's or double's ldexp without AVX-512F's VSCALEFSS is the C library's too, as clang's code calls it (#1834),
         // of the exponent's low 32 bits as an int.
