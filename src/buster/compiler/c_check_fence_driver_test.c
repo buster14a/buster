@@ -670,16 +670,17 @@ static void check_test_driver_helper_report(CheckTest* test, const char* executa
                                   "    __asm__ volatile(\"rdtsc\" : \"=a\"(lo), \"=d\"(hi));\n"
                                   "    return a + __atomic_load_n(&counter, __ATOMIC_ACQUIRE) + (int)((lo ^ hi) & 1);\n"
                                   "}\n";
-    // By --helper-forms too (#1059's paired measurements): every family's direct forms take their helpers but the
+    // The nop is a Tier 0 row and rdtsc's fixed registers an asm body (#1839): both direct. By --helper-forms too (#1059's
+    // paired measurements): every family's direct forms take their helpers but the
     // implicit _Atomic object's (its store, load and update, which have none), and two families' alone.
     static const char* const options[3] = { NULL, "--helper-forms=all", "--helper-forms=atomic-rmw,asm" };
     static const char* const lines[3][6] = {
         {
-            "helpers\tunits=1\trefused=0\tdirect=8\thelper=1\tplanned=1\n",
+            "helpers\tunits=1\trefused=0\tdirect=9\thelper=0\tplanned=0\n",
             "helpers.atomic-access\tdirect=4\thelper=0\tplanned=0\n",
             "helpers.atomic-rmw\tdirect=2\thelper=0\tplanned=0\n",
             "helpers.fence\tdirect=1\thelper=0\tplanned=0\n",
-            "helpers.asm\tdirect=1\thelper=1\tplanned=1\n",
+            "helpers.asm\tdirect=2\thelper=0\tplanned=0\n",
             "helpers.unmodeled\tdirect=0\thelper=0\tplanned=0\n",
         },
         {
