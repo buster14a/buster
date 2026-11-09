@@ -207,6 +207,17 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "void block_second(void) { extern int across; extern float across; }\n"
         "void block_file(void) { extern _Thread_local int filed; }\nint filed;\nint filed;\nfloat filed;\n"
         "int use_filed(void) { return filed; }\n",
+        // An object's redefinition stays in its chain, invalid (#1868): a later declaration's type isn't checked against
+        // it, while linkage and thread-local errors note it, and a third definition notes the first.
+        "int a = 1;\nint a = 2;\nfloat a;\n"
+        "int b = 1;\nint b = 2;\nstatic int b;\n"
+        "int c = 1;\nint c = 2;\nextern float c;\n"
+        "int d = 1;\nint d = 2;\nint d = 3;\n"
+        "int z = 1;\nint z = 2;\n_Thread_local int z;\n"
+        "_Thread_local int y = 1;\nint y = 2;\nint y;\n"
+        "void blk(void) { int l; int l; float l; (void)l; }\n"
+        "void blk2(void) { extern int m; }\nint m = 1;\nint m = 2;\nlong m;\n"
+        "int use(void) { return b + d + y + m; }\n",
         // Every declaration's failed initializer, not only the first's (#1447, phase 2): arrays, records and pointers, at
         // file and block scope, a static object's braced conversion, and an error of the walk's between them.
         "struct P { int x; int y; };\nint a[2] = 5;\nstruct P p = { .z = 1 };\nvoid f(void)\n{\n    int b[2] = 6;\n    struct P q = 3;\n"

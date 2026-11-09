@@ -2017,6 +2017,11 @@ struct CheckInputReader
     uint32_t* c23_failed;
     uint32_t c23_failed_count;
     uint32_t c23_failed_capacity;
+    // The objects' redefinitions kept after their error (#1868), as clang keeps such an invalid declaration in its chain
+    // and lookup: their names' tokens, few, on the error path alone. A later declaration's type isn't checked against one.
+    uint32_t* invalid_redefinitions;
+    uint32_t invalid_redefinition_count;
+    uint32_t invalid_redefinition_capacity;
     // Typo correction's state (#1447, c_check_typo.c), made at the unit's first undeclared name; and whether it is off,
     // in a deferred reader's lanes and the answers they share, whose unit with an undeclared name is read again in
     // source order.
@@ -9856,6 +9861,43 @@ static void check_input_alias_tentative(CheckInputReader* reader, uint32_t token
 static void check_input_attribute_merge_checks(CheckInputReader* reader, uint32_t token, uint32_t previous, bool visible, uint32_t point);
 static void check_input_modular_format(CheckInputReader* reader, uint32_t token);
 
+// Whether `token` declares an object's redefinition kept after its error (CheckInputReader.invalid_redefinitions).
+static bool check_input_invalid_redefinition(const CheckInputReader* reader, uint32_t token)
+{
+    bool result = false;
+    for (uint32_t i = 0; !result && i < reader->invalid_redefinition_count; i += 1)
+    {
+        result = reader->invalid_redefinitions[i] == token;
+    }
+    return result;
+}
+
+// Remembers `token` as an invalid redefinition. Whether there was room. (A lane, whose list is the top level's, has none
+// to remember: a body's declaration can't define an object with linkage.)
+static bool check_input_invalid_redefinition_note(CheckInputReader* reader, uint32_t token)
+{
+    check_input_lane_refuse(reader, reader->lane, "a body redefines an object with linkage");
+    bool room = !reader->lane && reader->invalid_redefinition_count < reader->invalid_redefinition_capacity;
+    if (!room && !reader->lane)
+    {
+        const uint32_t capacity = reader->invalid_redefinition_capacity == 0 ? 8 : reader->invalid_redefinition_capacity * 2;
+        uint32_t* tokens = BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint32_t, capacity);
+        room = tokens != NULL;
+        if (room && reader->invalid_redefinition_count != 0)
+        {
+            memcpy(tokens, reader->invalid_redefinitions, (uint64_t)reader->invalid_redefinition_count * sizeof(uint32_t));
+        }
+        reader->invalid_redefinitions = room ? tokens : reader->invalid_redefinitions;
+        reader->invalid_redefinition_capacity = room ? capacity : reader->invalid_redefinition_capacity;
+    }
+    if (room)
+    {
+        reader->invalid_redefinitions[reader->invalid_redefinition_count++] = token;
+    }
+    reader->output->resource |= !room;
+    return room;
+}
+
 static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t point)
 {
     const uint32_t name = reader->parser->tokens.names[token];
@@ -9896,6 +9938,8 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
     bool dropped = false;
     bool thread_local_checked = false;
     bool thread_local_reported = false;
+    // Whether the visible declaration, which its linked check would compare the type with too, is an invalid redefinition.
+    bool invalid_checked = false;
     if (!overload && !versions && old != 0 && (reader->bindings.depth[old - 1] == reader->scope_count || linked_visible))
     {
         const uint32_t previous = reader->bindings.declaration[old - 1];
@@ -9911,7 +9955,13 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
             type_parameters(reader->types, reader->declared_types[previous], &previous_count);
             parameter_conflict = previous_count != 0 && (reader->types->types.flags[type_index(reader->declared_types[token])] & BUSTER_TYPE_FLAG_PROTOTYPE) == 0;
         }
-        const bool mismatch = !repeatable || (compatible != TYPE_ANSWER_YES && !library_redeclaration) || reader->bindings.kind[old - 1] != kind ||
+        // An object's invalid redefinition (#1868) is no type's to check against, as clang's MergeVarDeclTypes skips an
+        // invalid declaration: the linkage and storage checks still note it, and the declaration keeps its own type.
+        const bool invalid_previous = compatible != TYPE_ANSWER_YES && kind == C_BINDING_OBJECT && reader->bindings.kind[old - 1] == kind &&
+                                      reader->invalid_redefinition_count != 0 && check_input_invalid_redefinition(reader, previous);
+        invalid_checked = invalid_previous && linked_visible;
+        const TypeAnswer judged = invalid_previous ? TYPE_ANSWER_YES : compatible;
+        const bool mismatch = !repeatable || (judged != TYPE_ANSWER_YES && !library_redeclaration) || reader->bindings.kind[old - 1] != kind ||
                               check_input_linkage(reader->declaration_bits, token) != check_input_linkage(reader->declaration_bits, previous) || parameter_conflict;
         const bool thread_local = check_input_bit(reader->output->declaration_bits, token, BUSTER_CHECK_BITS_THREAD_LOCAL) !=
                                   check_input_bit(reader->output->declaration_bits, previous, BUSTER_CHECK_BITS_THREAD_LOCAL);
@@ -9924,7 +9974,7 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
         if (thread_local_alone)
         {
             const uint32_t before = reader->output->report_count;
-            check_input_redeclaration_report(reader, token, previous, compatible, repeatable, parameter_conflict, true, CHECK_INPUT_REDECLARATION);
+            check_input_redeclaration_report(reader, token, previous, judged, repeatable, parameter_conflict, true, CHECK_INPUT_REDECLARATION);
             (void)(reader->output->report_count == before + 1 && check_input_recover_reports(reader, before));
         }
         if (mismatch || (thread_local && !thread_local_alone))
@@ -9932,7 +9982,7 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
             const CheckInputMessage message = kind == C_BINDING_FUNCTION && reader->declaration_kinds[previous] == kind && compatible == TYPE_ANSWER_NO && !library_redeclaration ?
                                               CHECK_INPUT_CONFLICTING_TYPES : CHECK_INPUT_REDECLARATION;
             const uint32_t before = reader->output->report_count;
-            check_input_redeclaration_report(reader, token, previous, compatible, repeatable, parameter_conflict, true, message);
+            check_input_redeclaration_report(reader, token, previous, judged, repeatable, parameter_conflict, true, message);
             // clang marks the redeclaration invalid and leaves it out of its name's lookup, which finds the visible
             // declaration still (#1447's semantic recovery, phase 2): the report moves past, and the declaration isn't
             // bound or linked.
@@ -9957,7 +10007,7 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
                 check_input_attribute_merge_checks(reader, token, previous, true, point);
             }
             check_input_naked_inherit(reader, token, previous);
-            const TypeId composite = library_redeclaration && compatible == TYPE_ANSWER_NO ? reader->declared_types[token] :
+            const TypeId composite = (library_redeclaration && compatible == TYPE_ANSWER_NO) || invalid_previous ? reader->declared_types[token] :
                 check_input_type_result(reader, type_composite(reader->types, reader->declared_types[previous], reader->declared_types[token]));
             if (composite == 0)
             {
@@ -9998,8 +10048,10 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
             const bool repeated_loader = has_attributes && kind == C_BINDING_OBJECT && definition != 0 &&
                 check_input_attribute_of(check_input_attributes_at(reader->output, token), CHECK_ATTRIBUTE_LOADER_UNINITIALIZED) != NULL &&
                 check_input_attribute_of(check_input_attributes_at(reader->output, definition - 1), CHECK_ATTRIBUTE_LOADER_UNINITIALIZED) != NULL;
+            // The type isn't checked against the entity's when the visible declaration was an invalid redefinition (above).
+            const TypeAnswer judged = invalid_checked ? TYPE_ANSWER_YES : compatible;
             const bool mismatch = reader->declaration_kinds[previous] != kind || check_input_linkage(reader->declaration_bits, previous) != check_input_linkage(reader->declaration_bits, token) ||
-                                  (compatible != TYPE_ANSWER_YES && !library_redeclaration) || parameter_conflict;
+                                  (judged != TYPE_ANSWER_YES && !library_redeclaration) || parameter_conflict;
             const bool thread_local = !thread_local_checked && check_input_bit(reader->output->declaration_bits, token, BUSTER_CHECK_BITS_THREAD_LOCAL) !=
                                       check_input_bit(reader->output->declaration_bits, previous, BUSTER_CHECK_BITS_THREAD_LOCAL);
             // An object's thread-local storage alone differing, as above (#1786): reported, then merged, or followed by its
@@ -10008,16 +10060,22 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
             if (thread_local_alone)
             {
                 const uint32_t before = reader->output->report_count;
-                check_input_redeclaration_report(reader, token, previous, compatible, true, parameter_conflict, true, CHECK_INPUT_REDECLARATION);
+                check_input_redeclaration_report(reader, token, previous, judged, true, parameter_conflict, true, CHECK_INPUT_REDECLARATION);
                 (void)(reader->output->report_count == before + 1 && check_input_recover_reports(reader, before));
                 thread_local_reported = true;
             }
-            if (mismatch || (reader->definition_origins[token] && definition && !repeated_loader) || (thread_local && !thread_local_alone))
+            // An object's second definition alone (#1868): clang's AddInitializerToDecl reports "redefinition of 'x'" after
+            // MergeVarDecl has linked the declaration, which stays in its chain and lookup, invalid. It is merged and bound
+            // as a valid one, and remembered, so that a later declaration's type isn't checked against it.
+            const bool redefined = reader->definition_origins[token] && definition && !repeated_loader;
+            const bool redefinition_alone = redefined && !mismatch && !(thread_local && !thread_local_alone) && kind == C_BINDING_OBJECT;
+            const bool conflict = mismatch || redefined || (thread_local && !thread_local_alone);
+            if (conflict)
             {
                 const uint32_t before = reader->output->report_count;
                 const CheckInputMessage message = kind == C_BINDING_FUNCTION && reader->declaration_kinds[previous] == kind && compatible == TYPE_ANSWER_NO && !library_redeclaration ?
                                                   CHECK_INPUT_CONFLICTING_TYPES : CHECK_INPUT_REDECLARATION;
-                check_input_redeclaration_report(reader, token, previous, compatible, true, parameter_conflict, !thread_local_checked && !thread_local_alone, message);
+                check_input_redeclaration_report(reader, token, previous, judged, true, parameter_conflict, !thread_local_checked && !thread_local_alone, message);
                 // (The redefinition's error is the declaration's second at its name: kept after the TLS one.)
                 if (thread_local_reported && reader->output->report_count == before + 1 && !reader->output->resource)
                 {
@@ -10026,7 +10084,12 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
                 // Its entity's redeclaration is left out too (#1447, phase 2), but for a loader variable's, whose note
                 // follows below.
                 const bool loading = has_attributes && check_input_attribute_of(check_input_attributes_at(reader->output, token), CHECK_ATTRIBUTE_LOADER_UNINITIALIZED) != NULL;
-                dropped = !loading && reader->output->report_count == before + 1 && check_input_recover_reports(reader, before);
+                const bool recovered = !loading && reader->output->report_count == before + 1 && check_input_recover_reports(reader, before);
+                dropped = recovered && !redefinition_alone;
+                if (recovered && redefinition_alone)
+                {
+                    (void)check_input_invalid_redefinition_note(reader, token);
+                }
                 const bool loader = has_attributes &&
                     ((definition != 0 && check_input_attribute_of(check_input_attributes_at(reader->output, definition - 1), CHECK_ATTRIBUTE_LOADER_UNINITIALIZED) != NULL) ||
                      check_input_attribute_of(check_input_attributes_at(reader->output, token), CHECK_ATTRIBUTE_LOADER_UNINITIALIZED) != NULL);
@@ -10037,7 +10100,7 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
                     reader->output->reports[before].note_kind = CHECK_INPUT_NOTE_PREVIOUS_DEFINITION;
                 }
             }
-            else
+            if (!conflict || (redefinition_alone && !dropped && reader->output->report_count == 0))
             {
                 check_input_attribute_late(reader, token, previous, point, linked_visible);
                 if (reader->merged_attributes)
@@ -10081,7 +10144,7 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
                     };
                     check_input_warning_event(reader, &event, NULL, 0);
                 }
-                composite = library_redeclaration && compatible == TYPE_ANSWER_NO ? reader->declared_types[token] :
+                composite = (library_redeclaration && compatible == TYPE_ANSWER_NO) || invalid_checked ? reader->declared_types[token] :
                     check_input_type_result(reader, type_composite(reader->types, reader->linked_types[name], reader->declared_types[token]));
                 if (composite == 0)
                 {

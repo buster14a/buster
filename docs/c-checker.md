@@ -4001,11 +4001,16 @@ once. A definition after an earlier one gives the TLS error and then "redefiniti
 of 'x'", noted at the first definition, at the same name. A block extern's
 mismatch with another block's declaration is checked against the linked one.
 
-Left as it is ([#1868](https://github.com/buster14a/buster/issues/1868)): a
-redefinition (`int x = 1; int x = 2;`) is still dropped.
-Clang keeps that invalid declaration in its chain too, so a later declaration
-is compared with it, without its type check: `float x;` after it is no error
-in clang, and a later TLS or linkage error notes it.
+An object's second definition alone (`int x = 1; int x = 2;`) stays in its
+chain too (#1868): clang's `AddInitializerToDecl` reports "redefinition of 'x'"
+after `MergeVarDecl` has linked the declaration, which stays in lookup,
+invalid. The checker binds it and remembers it
+(`CheckInputReader.invalid_redefinitions`), and a later declaration's type
+isn't checked against it, as clang's `MergeVarDeclTypes` skips an invalid
+declaration: `float x;` after it is no error, and keeps its own type. Linkage
+and thread-local errors still note it, and a third definition's error notes
+the first. A block's duplicate local is still dropped, as clang's lookup
+finds the first there.
 
 `check_driver_rejected_warnings` follows clang's `ActOnPopScope`: a scope in
 which an error occurred gives no unused-variable warning, nested scopes'
