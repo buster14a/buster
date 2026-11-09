@@ -5430,7 +5430,7 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
             "int tested(int n){static const int t[]={&&add-&&add,&&sub-&&add,&&mul-&&add};"
             "static const long l[]={(char*)&&mul-(char*)&&add,(int*)&&sub-(int*)&&add};"
             "static const unsigned u=(unsigned)(long)(&&add-&&sub);static const int v=+(__extension__(&&sub-&&add));"
-            "int x=n+10,r=0;for(int k=0;k<5;k++){goto*(&&add+t[(n+k)%3]);"
+            "int x=n+10,r=0;for(int k=0;k<5;k++){goto*(&&add+t[((n&7)+k)%3]);"
             "add:r+=x+1;continue;sub:r+=x-1;continue;mul:r+=x*2;}"
             "return r+(l[0]==t[2])+(l[1]==t[1])*2+((int)u==-t[1])*4+(v==t[1])*8;}",
             "label-differences-in-static-initializers", clang);
