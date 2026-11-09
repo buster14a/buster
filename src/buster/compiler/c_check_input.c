@@ -43,6 +43,9 @@ typedef enum CheckInputMessage
     // An array initialized by a compound literal of another array type (#1447, GNU's extension): the array's type in
     // CheckInputReport.type, the literal's in its value.
     CHECK_INPUT_ARRAY_LITERAL_MISMATCH,
+    // An undeclared value's name that a typo corrects (#1447, c_check_typo.c), recovered: the declaration it takes in
+    // CheckInputReport.note_token, "did you mean" its name and "declared here" at it.
+    CHECK_INPUT_UNDECLARED_CORRECTED,
     // #pragma clang section's errors and section type conflicts, each with its message (CheckInputSections.diagnostics).
     CHECK_INPUT_SECTION,
     // #pragma clang optimize's errors, each with its message (CheckInputOptimizePragmas.diagnostics).
@@ -338,6 +341,7 @@ static const char* const check_input_messages[] =
     "initializer for a variable with deduced type contains multiple expressions",
     "field designator does not name a member of the record type",
     "cannot initialize array with array of another type",
+    "use of undeclared identifier; did you mean another",
     "invalid '#pragma clang section' or section type conflict",
     "invalid '#pragma clang optimize'",
     "cannot jump from this goto statement to its label",
@@ -792,6 +796,9 @@ struct CheckInput
     uint32_t multiversion_report_count;
     uint32_t multiversion_report_capacity;
     uint32_t* implicit_function_tokens;
+    // Beside each, the function its name may have meant's declaration token (#1447, c_check_typo.c): a "did you mean"
+    // note and a "declared here" one; or BUSTER_CHECK_NONE, or BUSTER_CHECK_TYPO_UNSEARCHED where no search was made.
+    uint32_t* implicit_function_corrections;
     uint32_t implicit_function_count;
     uint8_t implicit_function_diagnostic;
     uint8_t implicit_library_diagnostic;
@@ -1427,6 +1434,7 @@ static const uint8_t check_input_role_codes[128] __attribute__((aligned(64))) =
 };
 
 typedef struct CheckInputReader CheckInputReader;
+typedef struct CheckTypo CheckTypo;
 // #113's deferred bodies (c_check_deferred.c, included after this file): the top level's walk records where it
 // skips each body, and the bodies are read and merged before the walk's later phases.
 typedef struct CheckDeferred CheckDeferred;
@@ -1844,6 +1852,11 @@ struct CheckInputReader
     // Per tag: whether an enum has a fixed underlying type (C23's `enum E : T`), which completes it at its base, and
     // whether its enumerators were listed yet (BUSTER_CHECK_ENUM_*).
     uint8_t* enum_fixed;
+    // Typo correction's state (#1447, c_check_typo.c), made at the unit's first undeclared name; and whether it is off,
+    // in a deferred reader's lanes and the answers they share, whose unit with an undeclared name is read again in
+    // source order.
+    CheckTypo* typo;
+    bool typo_disabled;
     uint32_t* transparent_unions;
     const uint32_t* ends;
     const uint32_t* first_child;
@@ -9611,6 +9624,7 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
     }
 }
 
+#include "c_check_typo.c"
 #include "c_check_implicit_input.c"
 
 // The plain library builtins' folds' identifiers in the unit, and their mask (CheckInputReader.library_names).
@@ -13445,6 +13459,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
             // Selected/private views still retain a mask and cannot establish these independent-declaration cuts.
             const bool resolved = complete_translation_unit && input->report_count == 0 && reader.position == count && reader.expression_limit == count && input->deferred_tokens == NULL;
             check_input_bindings(&reader, binding_mode);
+            check_typo_finish(&reader);
             if (reader.fallthrough_count != 0 && !input->resource)
             {
                 check_input_fallthrough_placements(&reader);

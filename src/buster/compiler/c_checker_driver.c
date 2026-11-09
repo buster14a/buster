@@ -60,6 +60,7 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_DECLARATION: result = "invalid or unsupported declaration"; break;
         case CHECK_INPUT_INITIALIZER_MEMBER: result = "field designator does not refer to any field in the record type"; break;
         case CHECK_INPUT_ARRAY_LITERAL_MISMATCH: result = "cannot initialize array with array of another type"; break;
+        case CHECK_INPUT_UNDECLARED_CORRECTED: result = "use of undeclared identifier"; break;
         case CHECK_INPUT_UNDECLARED: result = "use of undeclared identifier"; break;
         case CHECK_INPUT_LITERAL: result = "invalid or unsupported literal"; break;
         case CHECK_INPUT_RESOURCE: result = "type checker ran out of memory"; break;
@@ -3012,7 +3013,11 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
             const bool input_repeated = sequence < input->report_count && input->reports[sequence].repeated;
             const bool repeated = input_repeated ||
                                   (sequence >= input->report_count + stream_reports && extra_index < extra_count && extra[extra_index].repeated);
-            if (first_count == 0 || (firsts[first_count - 1] >> 32) != (firsts[i] >> 32) || repeated)
+            // A typo's correction (#1447) is not its token's error but a name's: the expression it recovers to keeps its own
+            // error at that token, as clang's does (`static int s = countr;`'s non-constant one), once.
+            const uint32_t last = first_count != 0 ? (uint32_t)firsts[first_count - 1] : BUSTER_CHECK_NONE;
+            const bool corrected = last < input->report_count && input->reports[last].message == CHECK_INPUT_UNDECLARED_CORRECTED;
+            if (first_count == 0 || (firsts[first_count - 1] >> 32) != (firsts[i] >> 32) || repeated || corrected)
             {
                 firsts[first_count++] = firsts[i];
             }
@@ -3283,7 +3288,24 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                     }
                     else if (input->implicit_function_c99)
                     {
-                        pp_diagnose_output_at(pp, pp_severity, parser->tokens.sources[token], publication,
+                        // The function the name may have meant (#1447, c_check_typo.c), which clang's ImplicitlyDefineFunction
+                        // searches only where its diagnostic is an error: a "did you mean" note at the call's name and a
+                        // "declared here" one at the function's.
+                        const uint32_t implicit = sequence - offset;
+                        const uint32_t meant = input->implicit_function_corrections != NULL && implicit < input->implicit_function_count ?
+                                               input->implicit_function_corrections[implicit] : BUSTER_CHECK_NONE;
+                        const bool corrected = severity >= CHECK_WARNING_ERROR && meant < count;
+                        const uint32_t other = corrected ? parser->tokens.names[meant] : 0;
+                        char suggestion[512];
+                        char declared[512];
+                        snprintf(suggestion, sizeof(suggestion), "did you mean '%.*s'?", (int)intern_length(pp->table, other), intern_bytes(pp->table, other));
+                        snprintf(declared, sizeof(declared), "'%.*s' declared here", (int)intern_length(pp->table, other), intern_bytes(pp->table, other));
+                        const PPOutputDiagnosticNote notes[2] =
+                        {
+                            { .token = parser->tokens.sources[token], .message = suggestion },
+                            { .token = corrected ? parser->tokens.sources[meant] : 0, .message = declared },
+                        };
+                        pp_diagnose_output_notes_at(pp, pp_severity, parser->tokens.sources[token], publication, notes, corrected ? 2u : 0u,
                             "call to undeclared function '%.*s'; ISO C99 and later do not support implicit function declarations [-Wimplicit-function-declaration]",
                             (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
                     }
@@ -3819,6 +3841,20 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                         {
                             // A numeric constant's error, or a string literal's or a character constant's escapes' (#1447),
                             // worded and placed as clang's.
+                        }
+                        else if (kind == CHECK_INPUT_UNDECLARED_CORRECTED && named && input->reports[index].note_token < count)
+                        {
+                            // A typo's correction (#1447, c_check_typo.c): clang's DiagnoseEmptyLookup's suggestion, and its
+                            // note at the declaration taken.
+                            const uint32_t name = parser->tokens.names[located];
+                            const uint32_t meant = input->reports[index].note_token;
+                            const uint32_t other = parser->tokens.names[meant];
+                            char declared[512];
+                            snprintf(declared, sizeof(declared), "'%.*s' declared here", (int)intern_length(pp->table, other), intern_bytes(pp->table, other));
+                            const PPOutputDiagnosticNote note = { .token = parser->tokens.sources[meant], .message = declared };
+                            pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, 1, "use of undeclared identifier '%.*s'; did you mean '%.*s'?",
+                                                        (int)intern_length(pp->table, name), intern_bytes(pp->table, name), (int)intern_length(pp->table, other),
+                                                        intern_bytes(pp->table, other));
                         }
                         else if ((kind == CHECK_INPUT_UNDECLARED || kind == CHECK_INPUT_UNKNOWN_BUILTIN) && named)
                         {

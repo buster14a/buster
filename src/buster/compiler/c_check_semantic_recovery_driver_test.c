@@ -29,6 +29,39 @@ static void check_test_semantic_recovery_lookahead(char* text)
     }
 }
 
+
+// The typo stress fixture's source (#1447): three thousand file-scope names (alpha_000 to charlie_999) declared one by one,
+// and a function that reads fifty-three of them misspelled, each without its `_`, which only its own name is one edit from.
+// Its length, or 0 where `capacity` is too small.
+static uint64_t check_test_typo_stress(char* text, uint64_t capacity)
+{
+    static const char* const prefixes[] = { "alpha", "bravo", "charlie" };
+    uint64_t length = 0;
+    bool fits = true;
+    for (uint32_t p = 0; fits && p < BUSTER_ARRAY_LENGTH(prefixes); p += 1)
+    {
+        for (uint32_t i = 0; fits && i < 1000; i += 1)
+        {
+            const int written = snprintf(text + length, capacity - length, "int %s_%03u;\n", prefixes[p], i);
+            fits = written > 0 && (uint64_t)written < capacity - length;
+            length += fits ? (uint64_t)written : 0;
+        }
+    }
+    const int head = fits ? snprintf(text + length, capacity - length, "int f(void)\n{\n    int s = 0;\n") : -1;
+    fits = head > 0 && (uint64_t)head < capacity - length;
+    length += fits ? (uint64_t)head : 0;
+    for (uint32_t k = 0; fits && k < 53; k += 1)
+    {
+        const int written = snprintf(text + length, capacity - length, "    s += %s%03u;\n", prefixes[k % 3], (k * 389u + 17u) % 1000u);
+        fits = written > 0 && (uint64_t)written < capacity - length;
+        length += fits ? (uint64_t)written : 0;
+    }
+    const int tail = fits ? snprintf(text + length, capacity - length, "    return s;\n}\n") : -1;
+    fits = tail > 0 && (uint64_t)tail < capacity - length;
+    length += fits ? (uint64_t)tail : 0;
+    return fits ? length : 0;
+}
+
 static void check_test_driver_semantic_recovery(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     static const char* const fixtures[] = {
@@ -272,6 +305,23 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "enum A { X = 5 };\nenum B { Y = 3, X, Z };\n_Static_assert(Z == 0, \"z\");\n"
         "enum C : long { P };\nenum D : char { Q = 7, P, R };\n_Static_assert(R == 0 && sizeof(R) == 1, \"r\");\n"
         "enum E { M = -1 };\nenum F { M };\n_Static_assert(sizeof(enum F) == 4 && (enum F)-1 > 0, \"u\");\nint x = undeclared;\n",
+        // Typo correction (#1447): a value's undeclared name recovers through the nearest visible name, as if it were
+        // written (its type drives the later errors: a parameter's conversion, a case label's constant, a static
+        // initializer's), unless another name is as near (alpha/alphb), the name is a typedef's, or it follows a cast;
+        // an inner block's names are gone after it.
+        "int counter, counter1, counter2;\nfloat ratio;\nint *pointer;\nenum { ALPHA, BETA };\ntypedef int myint;\n"
+        "struct S { int a; } sval;\nvoid take(int *);\nstatic int s = countr;\nint alpha, alphb;\n"
+        "int g(int param)\n{\n    int a = countr;\n    int b = counter + counte;\n    int c = ALPHAA;\n    int d = paramm;\n"
+        "    int e = myin;\n    take(rati);\n    int *f = &ratoi;\n    int h = (int)countr;\n    svl.a = 1;\n    pointe = 0;\n"
+        "    switch (param) { case countr: break; }\n    int i = alphc;\n    { int value; int j = valu; }\n    int k = value;\n"
+        "    return a + b + c + d + e + h + i + k;\n}\n",
+        // An undeclared function's call notes the function it may have meant; an implicit declaration is itself a name
+        // of its block, which ties with the other (gnu17's: C23 has no implicit declaration).
+        "/* gnu17 only */\nint compute(int);\nint counter;\nvoid f(void) { int x = compte(1); }\nvoid g(void) { int d = countr; }\n"
+        "void k(void) { { countre(1); } int e = countr; }\nvoid m(void) { countre(1); int e = countr; }\n",
+        // Three thousand names and fifty-three typos, written out where the fixture is (check_test_typo_stress): each
+        // search reads the visible names once (c_check_typo.c).
+        "/* typo stress */\n",
         // A tag defined again in its scope, whose body becomes an anonymous tag's: later uses of the name find the first
         // definition, and the second's enumerators are still declared (a repeated one with its own note).
         "struct S { int a; };\nstruct S { long b; };\nunion U { int a; };\nunion U { char c; } u2;\n"
@@ -290,6 +340,7 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
     // incompatible one otherwise (N3037), which the checker doesn't model yet.
     const uint32_t before_c23 = BUSTER_ARRAY_LENGTH(fixtures) - 3;
     static const char* const options[] = { NULL, "-Wall", "-ferror-limit=2", "-w" };
+    static char stress_text[65536];
     enum { LINES = 16384 };
     char* expected_lines = malloc(LINES);
     char* actual_lines = malloc(LINES);
@@ -299,8 +350,13 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
     for (uint32_t f = 0; expected_lines != NULL && actual_lines != NULL && f < BUSTER_ARRAY_LENGTH(fixtures); f += 1)
     {
         snprintf(source, sizeof(source), "%s/semantic-recovery-%u.c", directory, f);
-        const bool made = parse_test_write(source, fixtures[f], strlen(fixtures[f]));
-        const uint32_t standard_count = f >= before_c23 ? 1u : (uint32_t)BUSTER_ARRAY_LENGTH(standards);
+        const bool stress = strncmp(fixtures[f], "/* typo stress */", 17) == 0;
+        const uint64_t stress_length = stress ? check_test_typo_stress(stress_text, sizeof(stress_text)) : 0;
+        const bool made = stress ? stress_length != 0 && parse_test_write(source, stress_text, stress_length) :
+                                   parse_test_write(source, fixtures[f], strlen(fixtures[f]));
+        // A fixture marked as gnu17's alone, which C23's rules or a wording outside this suite reads otherwise.
+        const bool c17_only = strncmp(fixtures[f], "/* gnu17 only */", 16) == 0;
+        const uint32_t standard_count = f >= before_c23 || c17_only ? 1u : (uint32_t)BUSTER_ARRAY_LENGTH(standards);
         for (uint32_t s = 0; made && s < standard_count; s += 1)
         {
             for (uint32_t o = 0; o < BUSTER_ARRAY_LENGTH(options); o += 1)
