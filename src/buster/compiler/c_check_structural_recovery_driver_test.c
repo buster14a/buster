@@ -138,7 +138,11 @@ static void check_test_driver_structural_recovery(CheckTest* test, const char* c
         "const struct P p = { undeclared, 2 };\n"
         "const double d = undeclared;\n"
         "int g(int z) { int w; z = z; printf(\"%s\", z); return z + s + c + e + p.a + (int)d; }\n"
-        "int h(int z) { int v; z = z; return z << 40; }\n",
+        "int h(int z) { int v; z = z; return z << 40; }\n"
+        // A fixed-size const array's and a const pointer's (#1447, review of #1956).
+        "static const int a[2] = { undeclared, 1 };\n"
+        "int *const cp = &undeclared2;\n"
+        "int k(int x) { int w; x = x; printf(\"%s\", x); return x + a[1] + *cp; }\n",
     };
     static const char* const standards[] = { "-std=gnu17", "-std=gnu23" };
     static const char* const options[][2] = { { "-Wall", NULL }, { "-Wall", "-Wextra" } };
