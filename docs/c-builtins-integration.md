@@ -1777,10 +1777,12 @@ one real floating type T once lvalue-converted (`float` to `long double`, and
 `_Float16`, `__bf16` and `__float128`, as clang 23 takes them), and neither is
 converted otherwise. As clang's Sema, it checks each argument's type before its
 conversion first, so that an `_Atomic double` is refused, and an integer or a
-complex value, then the two types against each other; the checker's errors are
-its own generic ones at the call's `)`, where clang's are "argument type ... is
-not a real floating point type" at the argument and "arguments are of different
-types" at re (pending, as for the other miscellaneous builtins). It folds where both are
+complex value, then the two types against each other. Its errors are clang's
+(`check_semantic_expression`): "argument type 'T' is not a real floating point
+type" at the first such argument, its type as written (an array's, a function's,
+a qualified one's, its typedef's with its `aka`), and "arguments are of different
+types ('R' vs 'I')" at re, by the converted types, their qualifiers dropped and
+their typedefs kept. It folds where both are
 floating constants, as clang's evaluator folds it, so that glibc's `CMPLX` makes
 static data and an enumerator's `__imag__` an integer constant: the folds keep
 signed zeros, infinities and NaNs, a `static const` object's value, and long
@@ -2865,11 +2867,16 @@ the existing families or of new ones:
   scope or at block scope, as clang keeps it (`check_input_intrinsic_prepare`,
   each catalogue row's verdict remembered in `CheckInputReader.intrinsic_source`);
   a definition with internal linkage is the program's function, and a local
-  object of the name hides it. Pending: clang refuses a definition of one with
-  external linkage (`definition of builtin function`), which this compiler
-  takes as the builtin; and the builtins of the dedicated paths
-  (`__builtin_bswap32`, `__builtin_clz`), which clang keeps under a matching
-  declaration too, become calls of their names here.
+  object of the name hides it. A declaration with external linkage of a
+  builtin's name (an x86 builtin of those rows and leaves, or a catalog builtin
+  such as `__builtin_bswap32` or `__builtin_clz`; not a library builtin, which a
+  program may define) is checked as clang's Sema checks it
+  (`check_input_builtin_declaration`, #1843): a type that isn't compatible with
+  the builtin's is clang's "conflicting types", with its note of the builtin's
+  type, and a definition, C99's inline one too, is clang's "definition of builtin
+  function". A compatible declaration keeps a catalog builtin the builtin, its
+  calls the builtin's, an integer constant expression's too
+  (`check_input_builtin_kept`), as clang keeps it.
   `_mm_prefetch` is `<xmmintrin.h>`'s macro over `__builtin_prefetch` where
   the header is included, and without it clang's builtin (a
   `TARGET_HEADER_BUILTIN` of no features), which is a leaf too: its hint a

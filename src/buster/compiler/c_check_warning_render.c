@@ -692,6 +692,9 @@ static bool check_warning_attribute_suggestion(String8 written, bool standard, S
     return corrected;
 }
 
+// c_check_semantic_diagnostic.c's: a record's name as clang's -Wodr and incompatible-definition errors spell it.
+static String8 check_semantic_tag_spelling(const Parser* parser, Preprocessor* pp, uint32_t token, Arena* scratch);
+
 static const char* check_driver_warning_message(const Parser* parser, Preprocessor* pp, const CheckInput* input, const TypeTable* types,
                                                 CheckWarningSpelling* spell, const CheckWarningEvent* event, Arena* scratch)
 {
@@ -802,6 +805,13 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
         case CHECK_WARNING_EVENT_PROTOTYPE_REDEFINITION:
             result = check_warning_text(scratch, "redefinition of '%.*s' will not be visible outside of this function", (int)name.length, name.pointer);
             break;
+        case CHECK_WARNING_EVENT_ODR_ATTRIBUTE:
+        {
+            const String8 spelled = check_semantic_tag_spelling(parser, pp, event->token, scratch);
+            result = spelled.length != 0 ? check_warning_text(scratch, "type '%.*s' has %s which currently causes the types to be treated as though they are incompatible",
+                                                              (int)spelled.length, spelled.pointer, payload->data != 0 ? "a member with an attribute" : "an attribute") : NULL;
+            break;
+        }
         case CHECK_WARNING_EVENT_LIBRARY_REDECLARATION:
             result = check_warning_text(scratch, "incompatible redeclaration of library function '%.*s'", (int)name.length, name.pointer);
             break;
@@ -1384,6 +1394,9 @@ static const char* check_driver_warning_note(const Parser* parser, Preprocessor*
         case CHECK_WARNING_NOTE_DECLARED_HERE:
             result = check_warning_text(scratch, "'%.*s' declared here", (int)name.length, name.pointer);
             break;
+        case CHECK_WARNING_NOTE_ATTRIBUTE_HERE:
+            result = check_warning_text(scratch, "attribute '%.*s' here", (int)name.length, name.pointer);
+            break;
         case CHECK_WARNING_NOTE_DIAGNOSE_IF:
             result = check_warning_text(scratch, "from 'diagnose_if' attribute on '%.*s':", (int)name.length, name.pointer);
             break;
@@ -1462,7 +1475,8 @@ static bool check_driver_warning_events_at(const Parser* parser, Preprocessor* p
         const bool late = event->kind == CHECK_WARNING_EVENT_UNUSED_PARAMETER && event->completion_kind != CHECK_WARNING_COMPLETE_TU_END;
         const bool retained = late == (step >= view->count) && event->kind != CHECK_WARNING_EVENT_MESSAGE && event->kind != CHECK_WARNING_EVENT_ENUM_MIX &&
                               (event->token < parser->tokens.count || (event->kind == CHECK_WARNING_EVENT_PRAGMA && event->token == parser->tokens.count)) &&
-                              (repair == NULL || check_repair_warning_token(repair, event->token));
+                              (repair == NULL || check_repair_warning_token(repair, event->token)) &&
+                              (input->interrupt_range_count == 0 || check_driver_interrupt_kept(input, event->token));
         if (retained)
         {
             valid = event->id < BUSTER_ARRAY_LENGTH(check_warning_descriptions) && event->note_first <= view->note_count &&

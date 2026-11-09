@@ -70,6 +70,8 @@ static CheckWarningSeverity check_common_severity(Preprocessor* pp, const Parser
     {
         severity = CHECK_WARNING_IGNORE;
     }
+    // None inside a direct call's full expression, of an interrupt service routine (#1447, check_driver_interrupt_kept).
+    severity = input->interrupt_range_count != 0 && !check_driver_interrupt_kept(input, token) ? CHECK_WARNING_IGNORE : severity;
     return severity;
 }
 
