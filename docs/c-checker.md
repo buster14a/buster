@@ -4264,7 +4264,8 @@ reading with errors falls back to the bodies' as above, as they may be the
 view's own; an error outside every body falls back to its whole declaration
 or definition left out (`check_driver_rejected_declaration`), with the bodies
 that name it, which leaves no use undeclared, so that reading's errors are the
-unit's too. The bodies' reading publishes those its known errors don't hold,
+unit's too, unless a left-out declaration defines a tag outside every body,
+whose later uses would read an incomplete type. The bodies' reading publishes those its known errors don't hold,
 its reader's and graph's reports and its controls' constraints, in clang's
 words (its reader's alone where its graph can't run after them), and the next
 round leaves their parts out too. Each round adds an error and its parts, up

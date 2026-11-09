@@ -136,6 +136,8 @@ static void check_test_driver_structural_recovery(CheckTest* test, const char* c
         "int f(int x) { x = x; printf(\"%s\", x); return x << 40; }\n"
         "int g(int a[-1]) { return 0; }\n"
         "int h(int y) { int w; y = y; return y; }\n"
+        // (A body that calls the left-out definition is left out too; this one has no warning of its own to lose.)
+        "int calls(int c) { return g(&c); }\n"
         "int (*p(void)[3])(int) { return 0; }\n"
         "int k(int y) { int w; y = y; return y << 41; }\n"
         "_Static_assert(0, \"nope\");\n"

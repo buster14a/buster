@@ -5083,7 +5083,10 @@ static CheckDriverRound check_driver_rejected_read(const Parser* unit, const Par
         for (uint32_t token = 0; token < view.parser.tokens.count; token += 1)
         {
             const uint32_t from = view.to_original[token];
-            view_mask[token] = from != BUSTER_CHECK_NONE ? mask[from] : token != 0 ? view_mask[token - 1] : 0;
+            // (A replacement takes the mask of the token before it, but a left-out declaration's `;`, which is at file
+            // scope: after a masked body, that would mask a token outside every body.)
+            const bool empty = from == BUSTER_CHECK_NONE && view.parser.tokens.kinds[token] == PARSE_KIND_SEMI;
+            view_mask[token] = from != BUSTER_CHECK_NONE ? mask[from] : token != 0 && !empty ? view_mask[token - 1] : 0;
         }
         view_mask[view.parser.tokens.count] = 0;
         parser = &view.parser;
@@ -5291,7 +5294,8 @@ static CheckDriverRound check_driver_rejected_read(const Parser* unit, const Par
                     first_body = before ? middle + 1 : first_body;
                     last_body = before ? last_body : middle;
                 }
-                const bool holds = first_body < body_count && bodies[ranges[first_body].begin] != 0;
+                // (A body left out whole without an error of its own, one that names a left-out declaration, too.)
+                const bool holds = first_body < body_count && (bodies[ranges[first_body].begin] != 0 || left_bodies[ranges[first_body].begin] != 0);
                 const uint32_t name = unit->tokens.names[at];
                 const uint32_t end = holds ? ranges[first_body].end : 0;
                 for (uint32_t t = holds ? ranges[first_body].begin : 0; !errored && t < end; t += 1)
@@ -5511,9 +5515,20 @@ static void check_driver_rejected_common(const Parser* unit, const Parser* origi
                                   CHECK_DRIVER_ROUND_FAILED;
         uint8_t* fallback = !edited ? mask : fallback_ready ? fallback_mask : NULL;
         const uint8_t* fallback_view = edited && fallback_edited ? fallback_edits : NULL;
+        // Its errors are the unit's only where no left-out declaration defines a tag outside every body (`struct T { … }
+        // g(...)`), whose later uses would read an incomplete type clang doesn't: else an error it finds isn't taken.
+        bool whole = true;
+        uint32_t next_body = 0;
+        for (uint32_t token = 0; whole && fallback_view != NULL && token < count; token += 1)
+        {
+            next_body += next_body < body_count && ranges[next_body].end <= token;
+            const bool in_body = next_body < body_count && ranges[next_body].begin <= token && token < ranges[next_body].end;
+            const uint8_t role = parser->tree.roles[token];
+            whole = fallback_view[token] == CHECK_DRIVER_EDIT_KEEP || in_body || (role != PARSE_ROLE_OPEN_STRUCT && role != PARSE_ROLE_OPEN_ENUM);
+        }
         if (ready && round == CHECK_DRIVER_ROUND_FAILED && fallback != NULL && check_lazy_mask_valid(unit, fallback))
         {
-            round = check_driver_rejected_read(unit, original, pp, known, known_count, ranges, body_count, bodies, fallback, fallback_view, true, scalar,
+            round = check_driver_rejected_read(unit, original, pp, known, known_count, ranges, body_count, bodies, fallback, fallback_view, whole, scalar,
                                                return_warning, return_baseline, shifts, first, first_graph, stop, publication_end, fresh, fresh_capacity,
                                                &added, arena, scratch);
         }
