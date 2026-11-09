@@ -600,6 +600,15 @@ None of the existing passes that `--tier1` doesn't run measures as a gain:
 - SROA: [the scalar-replacement guide](ir-scalar-replacement.md)'s "In `--tier1`".
 - The inliner: [the inlining guide](ir-inlining.md)'s "Reach in `--tier1`".
 
+Two further directions are not pursued now, by the owner's decision on #1447
+([comment 6736401463](https://github.com/buster14a/buster/issues/1447#issuecomment-6736401463),
+item 4, closing #1450's last open items):
+- profile-guided code placement: blocks keep the static fall-through order of
+  `ir_optimize_layout.c` ([the command guide](commands/tier1.md)'s "Block
+  placement and critical-edge fall-through");
+- shrink-wrapping, which #1625 measured as a bound of about 1% of speedtest1's
+  executed ops ([the frame guide](tier1-frame.md)'s "Shrink-wrapping").
+
 What did pay is a slot per depth and type for the typed stream's values that
 cross blocks ([the IR guide](ir.md)'s adapter): 1.2% of speedtest1's
 instructions and 1.3% of Lua's. On instructions, `--tier1` is now below clang
