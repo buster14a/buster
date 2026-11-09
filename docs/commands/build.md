@@ -288,20 +288,19 @@ The backend similarly owns the private IR, interpreter, optimizer and Tier 1
 fixtures. Edits to nested files such as `ir_simd_model_test.c`,
 `interpreter_wide_test.c`, `ir_optimize_simd_test.c`, `tier1_call_probe_test.c`
 and `tier1_address_coalesce_test.c` rebuild only `main_unit_backend.c`.
-Several containing files remain shared deliberately: `ir_source_test.c`
-provides source preparation, the optimizer test roots include the production
-`ir_if_convert.c` and `ir_optimize_verified.c` at their original positions, and
-`tier1_select_burs_test.c` provides checks used by the checker's code-certificate
-benchmark. Their private fixtures are guarded inside those roots; editing the
-shared BURS root or either production optimizer file still rebuilds all eleven
-main units.
+The optimizer roots `ir_optimize_test.c` and `ir_optimize_text_test.c`, including
+their nested if-conversion and verified-pass fixtures, also belong to BACKEND.
+Other units include the production `ir_if_convert.c` and
+`ir_optimize_verified.c` directly at the same positions. Editing those production
+passes still rebuilds all eleven main units. `ir_source_test.c` and
+`tier1_select_burs_test.c` retain narrow helpers for BACKEND and CHECKER; editing
+either root rebuilds those two units.
 
 The backend also owns the private Tier 0 fixtures, their nested tests and vector
 baseline, the mask tests and the streaming tests and benchmark. Editing those
-files rebuilds only `main_unit_backend.c`. The shared `tier0_test.c` root keeps
-`tier0_test_same_code` at its original position for `unwind_tier0_test.c`, while
-its private spans are guarded. The root, `tier0_generate.c` and production
-`streaming.c` therefore retain all eleven owners.
+files rebuilds only `main_unit_backend.c`. `tier0_test_same_code` and its unwind
+consumer belong to that same unit, so the entire `tier0_test.c` root is private.
+Production `tier0_generate.c` and `streaming.c` retain all eleven owners.
 
 The frontend owns the private preprocessor, parser, GNU, bindings and lowering
 fixtures and their fixture-consuming commands. Edits to

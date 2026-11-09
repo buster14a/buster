@@ -800,7 +800,12 @@ int run_backend_benchmark(int argc, char** argv);
 #if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/ir_optimize_inline_test.c"
 #endif
+#if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/ir_optimize_test.c"
+#else
+// The production pass was first included by the test root here. Keep that position without its fixture dependency.
+#include "buster/compiler/ir_if_convert.c"
+#endif
 #if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/ir_optimize_benchmark.c"
 #endif
@@ -818,7 +823,11 @@ int run_backend_benchmark(int argc, char** argv);
 #include "buster/compiler/ir_optimize_inline_simd_test.c"
 #endif
 // #175's first #139 pass tests in the IR's text form: hand-written before/after pairs under tests/ir/optimize.
+#if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/ir_optimize_text_test.c"
+#else
+#include "buster/compiler/ir_optimize_verified.c"
+#endif
 // #866's GVN variants on real source's lowered IR are part of #131's IR benchmark, which needs GVN's definitions.
 #if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/ir_source_benchmark.c"

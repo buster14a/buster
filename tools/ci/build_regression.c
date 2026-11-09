@@ -901,10 +901,6 @@ static const OwnershipException ownership_exceptions[] = {
     { "tier1_select_burs_test.c", "main_unit_backend.c main_unit_checker.c" },
     { "tier1_select_source_benchmark.c", "main_unit_backend.c main_unit_checker.c" },
     // These roots preserve the first inclusion of production optimizer code while guarding their private bodies.
-    { "ir_if_convert_test.c", 0 },
-    { "ir_optimize_test.c", 0 },
-    { "ir_optimize_text_test.c", 0 },
-    { "ir_optimize_verified_test.c", 0 },
     // Remaining legacy sharing, to narrow as each family's outward helper references are isolated. These rows do
     // not endorse parsing private fixtures everywhere; exact paths keep that existing debt from silently growing.
     { "bind_test.c", "main_unit_link.c main_unit_dynamic.c main_unit_executable.c" },
@@ -1376,6 +1372,10 @@ static void check_incremental(void)
         { "src/buster/compiler/ir_simd_model_test.c", "main_unit_backend.c " },
         { "src/buster/compiler/interpreter_wide_test.c", "main_unit_backend.c " },
         { "src/buster/compiler/ir_optimize_simd_test.c", "main_unit_backend.c " },
+        { "src/buster/compiler/ir_optimize_test.c", "main_unit_backend.c " },
+        { "src/buster/compiler/ir_if_convert_test.c", "main_unit_backend.c " },
+        { "src/buster/compiler/ir_optimize_text_test.c", "main_unit_backend.c " },
+        { "src/buster/compiler/ir_optimize_verified_test.c", "main_unit_backend.c " },
         { "src/buster/compiler/tier1_call_probe_test.c", "main_unit_backend.c " },
         { "src/buster/compiler/tier1_address_coalesce_test.c", "main_unit_backend.c " },
         { "src/buster/compiler/ir_if_convert.c", shared_main_units },
