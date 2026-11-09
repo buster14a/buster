@@ -9964,9 +9964,23 @@ static __attribute__((noinline)) void check_lower_vector_operation(CheckLowerWri
         const TypeId vector = stream->conversions[node].operands[0].type;
         const bool shift = op == CHECK_OP_SHIFT_LEFT || op == CHECK_OP_SHIFT_RIGHT;
         const bool scalar_count = shift && check_lower_vector_bytes(types, check_stream_type(stream, b)) == 0;
+        const uint64_t evex = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512VL);
         check_lower_vector_half_chain(writer, vector, op, a, b);
-        check_lower_vector_row(writer, op, vector, 0);
-        check_lower_vector_operand(writer, node, 1, scalar_count ? vector : stream->conversions[node].operands[1].type);
+        if (scalar_count && (writer->target.features & evex) != evex)
+        {
+            // Without AVX-512, a scalar count's shift is by the count itself, as clang's code shifts by a splat (#1834):
+            // its row's integer operand, the count converted to unsigned int.
+            const TypeId count = check_stream_type(stream, b);
+            check_lower_vector_row(writer, op == CHECK_OP_SHIFT_LEFT ? BUSTER_CHECK_VECTOR_SHIFT_LEFT_BY : BUSTER_CHECK_VECTOR_SHIFT_RIGHT_BY, vector,
+                                   BUSTER_TYPED_CLASS_U32);
+            check_lower_convert(writer, count, BUSTER_TYPE_UINT);
+            check_lower_operand(writer, node, 1, false, count);
+        }
+        else
+        {
+            check_lower_vector_row(writer, op, vector, 0);
+            check_lower_vector_operand(writer, node, 1, scalar_count ? vector : stream->conversions[node].operands[1].type);
+        }
         check_lower_vector_operand(writer, node, 0, vector);
     }
 }
@@ -11487,18 +11501,40 @@ static bool check_lower_segment_types(const TypeTable* types)
     return result;
 }
 
+// The type whose space an atomic builtin's object is in: its pointer argument's pointee (the first argument's own type,
+// before its conversion), which a generic builtin's object type (__atomic_test_and_set's, __atomic_clear's) doesn't
+// carry; 0 where the first argument isn't a pointer or an array.
+static TypeId check_lower_atomic_pointee(const CheckLowerWriter* writer, uint32_t node)
+{
+    const CheckProgram* program = writer->program;
+    const CheckGraph* graph = &program->input->graph;
+    const TypeTable* types = program->types;
+    const uint32_t first = graph->argument_offsets[node];
+    const TypeId pointer = graph->argument_counts[node] != 0 ? type_strip_aligned(types, check_stream_type(program->stream, graph->argument_nodes[first])) : 0;
+    const uint8_t kind = pointer != 0 ? type_kind(types, pointer) : BUSTER_TYPE_KIND_VOID;
+    return kind == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(kind) ? type_element(types, pointer) : 0;
+}
+
 // A node that loads from or stores to a segment's space (check_lower_segment), which the lowering refuses by name: an
 // lvalue read (not an address taken, `&` or a member's or a subscript's base), or an assignment's, a compound
-// assignment's or an increment's or decrement's operand.
+// assignment's or an increment's or decrement's operand; a vector's element, read or written, whose type has lost its
+// vector's space; and an atomic builtin's object, which its pointer argument reaches (its object type's space, or its
+// pointer's pointee's: check_lower_atomic_pointee).
 static bool check_lower_segment_access(const CheckLowerWriter* writer, uint32_t node, const CheckValue* value, bool address)
 {
     const CheckProgram* program = writer->program;
     const CheckGraph* graph = &program->input->graph;
+    const CheckStream* stream = program->stream;
     const CheckOp op = graph->ops[node];
     const uint32_t target = graph->operand0[node];
-    const bool store = (op == CHECK_OP_ASSIGN || (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_BIT_XOR_ASSIGN)) && target < program->stream->count;
+    const bool store = (op == CHECK_OP_ASSIGN || (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_BIT_XOR_ASSIGN)) && target < stream->count;
+    const bool element = op == CHECK_OP_SUBSCRIPT && (value->flags & BUSTER_CHECK_VECTOR_ELEMENT) != 0 && target < stream->count;
+    const uint32_t atomic = op == CHECK_OP_BUILTIN_ATOMIC ? check_program_builtin_index(stream->atomics, stream->atomic_count, sizeof(CheckBuiltinAtomicEffect), node)
+                                                          : BUSTER_CHECK_NONE;
     return (!address && value->category == CHECK_LVALUE && check_lower_segment(program->types, value->type)) ||
-           (store && check_lower_segment(program->types, check_stream_type(program->stream, target)));
+           ((store || element) && check_lower_segment(program->types, check_stream_type(stream, target))) ||
+           (atomic != BUSTER_CHECK_NONE && (check_lower_segment(program->types, stream->atomics[atomic].object_type) ||
+                                             check_lower_segment(program->types, check_lower_atomic_pointee(writer, node))));
 }
 
 // Always inlined into the copies of the tasks' loop (check_lower_drain_body), each with its constant `bit_ints`
@@ -13279,6 +13315,21 @@ static void check_lower_asm_slot(CheckLowerWriter* writer, uint32_t object, uint
     check_lower_instruction(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, object);
 }
 
+// Whether an asm statement has an output in a segment's space (check_lower_segment, #1447) that isn't a memory one: its
+// value is stored through the output's address, which the lowering's stores don't carry the segment of yet. A memory
+// operand's address is the template's, as clang's is: it drops the space there.
+static bool check_lower_asm_segment(const CheckLowerWriter* writer, const CheckInputAsm* statement, const CheckProgramAsm* plan)
+{
+    bool result = false;
+    for (uint32_t k = 0; !result && k < statement->output_count; k += 1)
+    {
+        const uint32_t node = statement->operands[k].node;
+        result = plan->places[k].kind != BUSTER_CHECK_ASM_MEMORY && node < writer->program->stream->count &&
+                 check_lower_segment(writer->program->types, check_stream_type(writer->program->stream, node));
+    }
+    return result;
+}
+
 // An asm statement (CHECK_CONTROL_ASM), as check_program_asm_plan planned it, in clang's order: each output's address,
 // with a `+` operand's value loaded through it, then each input's value (a memory input's address). With a helper,
 // they go into its operand block, a frame object, whose address the helper's call takes; a template of no
@@ -13305,6 +13356,10 @@ static void check_lower_asm(CheckLowerWriter* writer, CheckControl control)
     else if (count > BUSTER_CHECK_ASM_OPERANDS)
     {
         check_lower_fail(writer, CHECK_PROGRAM_INVALID);
+    }
+    else if (__builtin_expect(writer->segments, 0) && check_lower_asm_segment(writer, statement, plan))
+    {
+        check_lower_unsupported(writer, "an asm output in a segment's address space (256, 257 or 258: %gs, %fs or %ss) but a memory one");
     }
     else if (plan->row != 0)
     {
@@ -14976,12 +15031,6 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
             // GNU's function multiversioning: a version's symbol and the resolver's ifunc that calls reach.
             check_lower_unsupported(writer, "functions of several target versions (target_clones, or target attributes of other strings)");
         }
-        else if (check_program_interrupt(program, b) && writer->variadic)
-        {
-            // x86's interrupt service routine (#147, CheckProgram.object_interrupt) is Tier 0's frame (Tier0Function.interrupt),
-            // which takes no variadic arguments: the processor pushes none.
-            check_lower_unsupported(writer, "variadic interrupt service routines");
-        }
         else if (convention != NULL)
         {
             check_lower_unsupported(writer, convention);
@@ -15163,8 +15212,11 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
                 abi_assign_scalar(table, signature, named, &own);
             }
             arena_pop_to(scratch, mark);
-            writer->gp_offset = BUSTER_ABI_SLOT_BYTES * own.integer_registers;
-            writer->fp_offset = BUSTER_ABI_SAVE_AREA_VECTOR_OFFSET + BUSTER_ABI_SAVE_AREA_VECTOR_SLOT_BYTES * own.vector_registers;
+            // A variadic interrupt service routine's named parameters (#1447, LLVM's CC_X86_64_Intr) take no register: its
+            // list starts at the interrupted code's rdi and xmm0, which its frame keeps (Tier0Function.incoming_variadic, set below).
+            const bool interrupt = check_program_interrupt(program, b);
+            writer->gp_offset = interrupt ? 0 : BUSTER_ABI_SLOT_BYTES * own.integer_registers;
+            writer->fp_offset = BUSTER_ABI_SAVE_AREA_VECTOR_OFFSET + (interrupt ? 0 : BUSTER_ABI_SAVE_AREA_VECTOR_SLOT_BYTES * own.vector_registers);
         }
         if (check_lower_wide(writer, result) || check_lower_vector_of(writer, result) != 0)
         {
@@ -15645,6 +15697,26 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
             function->calls = calls + signature_index + 1;
             function->argument_locations = locations + first + declared;
             function->incoming_variadic = shared->incoming[b] ? calls + signature_index : 0;
+            if (shared->incoming[b] && function->interrupt != 0)
+            {
+                // A variadic interrupt service routine's incoming frame (#1447, LLVM's x86_intrcc): its named parameters, the
+                // processor's frame and error code, take no register, so its list's registers are the interrupted code's,
+                // from rdi and xmm0, which its frame keeps; and its overflow area is 40 bytes past where it was entered, 32
+                // past the incoming area (Tier0Frame.incoming), as LLVM's CC_X86_64_Intr leaves its stack size.
+                AbiCall* own = BUSTER_ARENA_PUSH_ARRAY(output, AbiCall, 1);
+                if (own == 0)
+                {
+                    status->status = CHECK_PROGRAM_RESOURCE;
+                }
+                else
+                {
+                    *own = calls[signature_index];
+                    own->integer_registers = 0;
+                    own->vector_registers = 0;
+                    own->stack_bytes = 4 * BUSTER_ABI_SLOT_BYTES;
+                    function->incoming_variadic = own;
+                }
+            }
             if (function->parameter_count != declared)
             {
                 // The hidden pointer, parameter 0, in rdi before the declared parameters' locations.

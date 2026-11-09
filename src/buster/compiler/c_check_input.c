@@ -313,6 +313,14 @@ typedef enum CheckInputMessage
     // An array of more than BUSTER_TYPE_MAX_OBJECT_BYTES (#1447, clang's limit too), at its bound: "array is too large
     // (2'305'843'009'213'693'952 elements)", its count in `value`.
     CHECK_INPUT_ARRAY_TOO_LARGE,
+    // A variable-length array or variably modified type where C allows none (#1447, check_input_vla_place), each at its
+    // declarator's name as clang's: at file scope, a block's static or extern object, a member.
+    CHECK_INPUT_VLA_FILE_SCOPE,
+    CHECK_INPUT_VM_FILE_SCOPE,
+    CHECK_INPUT_VLA_STATIC,
+    CHECK_INPUT_VLA_EXTERN,
+    CHECK_INPUT_VM_EXTERN,
+    CHECK_INPUT_VLA_FIELD,
 } CheckInputMessage;
 
 // CHECK_INPUT_DIRECT_INITIALIZER_ARRAY's detail: the literal the element takes besides a list, in clang's words.
@@ -470,6 +478,12 @@ static const char* const check_input_messages[] =
     [CHECK_INPUT_ENABLE_IF_CALL] = "no matching function for call",
     [CHECK_INPUT_ENABLE_IF_ADDRESS] = "cannot take address of function because it has one or more non-tautological enable_if conditions",
     [CHECK_INPUT_CPU_DISPATCH] = "invalid cpu_specific or cpu_dispatch declaration",
+    [CHECK_INPUT_VLA_FILE_SCOPE] = "variable length array declaration not allowed at file scope",
+    [CHECK_INPUT_VM_FILE_SCOPE] = "variably modified type declaration not allowed at file scope",
+    [CHECK_INPUT_VLA_STATIC] = "variable length array declaration cannot have 'static' storage duration",
+    [CHECK_INPUT_VLA_EXTERN] = "variable length array declaration cannot have 'extern' linkage",
+    [CHECK_INPUT_VM_EXTERN] = "variably modified type declaration cannot have 'extern' linkage",
+    [CHECK_INPUT_VLA_FIELD] = "fields must have a constant size: 'variable length array in structure' extension will never be supported",
 };
 
 // The type/action tables currently describe one C LP64 model: 32-bit wchar_t, x87 long double stored in 16 bytes, and
@@ -958,6 +972,14 @@ struct CheckInput
     // Whether the unit read x86's interrupt or no_caller_saved_registers (#147): only then are its calls looked through
     // after checking, for the direct calls of interrupt service routines and -Wexcessive-regsave (check_input_interrupt_calls).
     bool interrupt_calls;
+    // The full expressions of those direct calls (#1447): triples of a range's first token (with BUSTER_CHECK_INTERRUPT_KEEP
+    // for one of the call's other arguments or list elements), its last and the call's callee's first, in which clang's
+    // invalid call leaves no other diagnostic, while the unit's others are found as a valid one's are
+    // (CheckInput.recovered_valid, check_driver_interrupt_kept, check_interrupt_full_expression). None in a unit without
+    // such an error.
+    uint32_t* interrupt_ranges;
+    uint32_t interrupt_range_count;
+    uint32_t interrupt_range_capacity;
     CheckInputAsm* asm_statements;
     uint32_t asm_count;
     uint32_t asm_capacity;
@@ -1077,6 +1099,29 @@ static __attribute__((unused)) uint32_t check_input_linkage(const uint8_t* bits,
 static __attribute__((unused)) void check_input_set_linkage(uint8_t* bits, uint32_t token, uint32_t linkage)
 {
     bits[token] = (uint8_t)((bits[token] & ((1u << BUSTER_CHECK_BITS_LINKAGE_SHIFT) - 1)) | linkage << BUSTER_CHECK_BITS_LINKAGE_SHIFT);
+}
+
+#define BUSTER_CHECK_INTERRUPT_KEEP 0x80000000u
+
+// Whether a diagnostic at `token` is published (#1447): not where it is inside a direct call's full expression, of an
+// interrupt service routine, whose error is clang's invalid call alone there, but in that call's other arguments or
+// list elements (CheckInput.interrupt_ranges). A unit without such an error takes one compare.
+static __attribute__((unused)) bool check_driver_interrupt_kept(const CheckInput* input, uint32_t token)
+{
+    bool kept = true;
+    for (uint32_t r = 0; kept && r < input->interrupt_range_count; r += 1)
+    {
+        const uint32_t* range = input->interrupt_ranges + r * 3;
+        bool dropped = (range[0] & BUSTER_CHECK_INTERRUPT_KEEP) == 0 && token >= range[0] && token <= range[1];
+        for (uint32_t k = 0; dropped && k < input->interrupt_range_count; k += 1)
+        {
+            const uint32_t* other = input->interrupt_ranges + k * 3;
+            dropped = !((other[0] & BUSTER_CHECK_INTERRUPT_KEEP) != 0 && other[2] == range[2] && token >= (other[0] & ~BUSTER_CHECK_INTERRUPT_KEEP) &&
+                        token <= other[1]);
+        }
+        kept = !dropped;
+    }
+    return kept;
 }
 
 // The attributes at `token` (CheckInput.attributes), null for none; `token` is at most the unit's count.
@@ -1635,6 +1680,9 @@ struct CheckInputReader
     CheckInputSpecifierJob** specifier_jobs;
     CheckInputSpecifierJob** specifier_finishes;
     uint32_t specifier_owner;
+    // The storage class of the declaration whose declarators are being read (C_NAME_STATIC, C_NAME_EXTERN, ... or 0):
+    // a static or extern block-scope array's bound clang folds as a file-scope one's (check_input_vla_force_constant).
+    uint32_t declarator_storage;
     // The __auto_type keyword of the specifiers check_input_specifiers read last, when they had one, or C23's auto.
     uint32_t specifier_auto_type;
     // C23's inferred auto and constexpr (#793) from the specifiers check_input_specifiers read last.
@@ -2637,8 +2685,21 @@ static void check_input_report_subject(CheckInputReader* reader, uint32_t token,
 // differs from its previous declaration's (#1447): clang's MergeFunctionDecl checks conventions before types, with
 // "function declared 'A' here was previously declared 'B'" (or "without calling convention", where its first declaration
 // has none explicit) and its note at that first declaration (CHECK_INPUT_CONVENTION_CHANGE). no_caller_saved_registers,
-// clang's function type bit beside its convention (TYPE_FUNCTION_ABI_NO_CALLER_SAVED), keeps the type's error.
+// clang's function type bit beside its convention (TYPE_FUNCTION_ABI_NO_CALLER_SAVED), is checked after the conventions
+// (and before the types): a declaration that has it in its own attribute, after one without it, is clang's
+// "function declared with 'no_caller_saved_registers' attribute was previously declared without the
+// 'no_caller_saved_registers' attribute" (err_function_attribute_mismatch), noted at that previous declaration, the one its
+// lookup found (BUSTER_CHECK_CONVENTION_NO_CALLER_SAVED in the report's detail, with BUSTER_CHECK_CONVENTION_STANDARD where the
+// attribute is written `[[gnu::...]]`). One that inherits it is no error; one whose typedef's type carries it, which clang 23
+// crashes on, keeps the type's error.
+#define BUSTER_CHECK_CONVENTION_NO_CALLER_SAVED (1u << 17)
+#define BUSTER_CHECK_CONVENTION_STANDARD (1u << 18)
+
 static uint32_t check_input_abi_call(TypeFunctionABI abi);
+
+// BUSTER_CHECK_CONVENTION_NO_CALLER_SAVED where the declaration of `token` writes no_caller_saved_registers itself, with
+// BUSTER_CHECK_CONVENTION_STANDARD where its first such attribute is a C23 one, else 0 (c_check_attribute.c).
+static uint32_t check_input_no_caller_saved_written(const CheckInput* input, uint32_t token);
 
 static void check_input_report_redeclaration(CheckInputReader* reader, uint32_t token, CheckInputMessage message, uint32_t previous)
 {
@@ -2650,7 +2711,9 @@ static void check_input_report_redeclaration(CheckInputReader* reader, uint32_t 
     const bool explicit_first = reader->output->explicit_abis != NULL && reader->output->explicit_abis[first] != 0;
     const bool changed = message == CHECK_INPUT_CONFLICTING_TYPES && explicit_now && now != before && now != TYPE_FUNCTION_ABI_INVALID &&
                          before != TYPE_FUNCTION_ABI_INVALID && now != TYPE_FUNCTION_ABI_NO_CALLER_SAVED && before != TYPE_FUNCTION_ABI_NO_CALLER_SAVED;
-    if (changed)
+    const uint32_t saved = message == CHECK_INPUT_CONFLICTING_TYPES && !changed && now == TYPE_FUNCTION_ABI_NO_CALLER_SAVED && before == TYPE_FUNCTION_ABI_SYSV ?
+                           check_input_no_caller_saved_written(reader->output, token) : 0;
+    if (changed || saved != 0)
     {
         const uint32_t count = reader->output->report_count;
         check_input_report(reader, token, CHECK_INPUT_CONVENTION_CHANGE);
@@ -2658,8 +2721,8 @@ static void check_input_report_redeclaration(CheckInputReader* reader, uint32_t 
         {
             CheckInputReport* report = reader->output->reports + count;
             report->subject = previous + 1;
-            report->detail = check_input_abi_call(now) | check_input_abi_call(before) << 8 | (explicit_first ? 1u << 16 : 0);
-            report->note_token = first;
+            report->detail = saved != 0 ? saved : check_input_abi_call(now) | check_input_abi_call(before) << 8 | (explicit_first ? 1u << 16 : 0);
+            report->note_token = saved != 0 ? previous : first;
             report->note_kind = CHECK_INPUT_NOTE_PREVIOUS_DECLARATION;
         }
     }
@@ -4263,13 +4326,16 @@ static TypeId check_input_tag_identity(CheckInputReader* reader, uint32_t token,
                     TypeId installed = 0;
                     const TypeId moded = check_input_attribute_mode(reader, own, mode, type, &installed);
                     // An error after which clang installs no type, an unknown or unsupported mode's (#1447): the enum goes on
-                    // without it, as one with no mode. One that still installs a floating type gives the enum the integer of
-                    // its layout (check_input_mode_enum_integer); a complex one stops the reader.
-                    const TypeId stand_in = moded == 0 && installed != type ? check_input_mode_enum_integer(reader->types, installed) : 0;
+                    // without it, as one with no mode. One that still installs a floating or a complex type gives the enum the
+                    // integer of its layout (check_input_mode_enum_integer), a complex one's alignment with it unless an
+                    // alignment attribute gives one; XC's and TC's stop the reader.
+                    uint8_t stand_in_alignment = 0;
+                    const TypeId stand_in = moded == 0 && installed != type ? check_input_mode_enum_integer(reader->types, installed, &stand_in_alignment) : 0;
                     const bool recovered = moded == 0 && (installed == type || stand_in != 0) && check_input_attribute_recover(reader, own, &recovery, 0, false, false);
                     const bool dropped = recovered && installed == type;
                     const TypeId underlying = moded != 0 ? moded : recovered ? stand_in : 0;
-                    valid = dropped || (underlying != 0 && type_enum_complete(reader->types, type, underlying, own->alignment_log2));
+                    const uint8_t alignment = own->alignment_log2 != 0 ? own->alignment_log2 : moded == 0 ? stand_in_alignment : 0;
+                    valid = dropped || (underlying != 0 && type_enum_complete(reader->types, type, underlying, alignment));
                     reader->output->resource |= underlying != 0 && !valid && reader->types->last_error == TYPE_ERROR_FULL;
                     if (!dropped)
                     {
@@ -8230,6 +8296,13 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
                             const uint32_t at = name != BUSTER_CHECK_NONE ? name : failed_token;
                             check_input_warning(reader, CHECK_WARNING_ID_IGNORED_ATTRIBUTES, CHECK_WARNING_EVENT_GC_WEAK_FIELD, at, CHECK_WARNING_COMPLETE_AT_TOKEN, at);
                         }
+                        // A block's record's variably modified member (#1447): clang's "fields must have a constant
+                        // size"; at file scope the bound gives it (check_input_vla_place).
+                        if (valid && name != BUSTER_CHECK_NONE && check_input_vla_modified(reader->types, type))
+                        {
+                            check_input_report(reader, name, CHECK_INPUT_VLA_FIELD);
+                            valid = false;
+                        }
                         valid = valid && type_check_member(reader->types, &member, true, &flexible) == TYPE_ERROR_NONE;
                         if (!valid && !type_is_complete(reader->types, type) && type_kind(reader->types, type_strip_aligned(reader->types, type)) != BUSTER_TYPE_KIND_INCOMPLETE_ARRAY &&
                             type_kind(reader->types, type) != BUSTER_TYPE_KIND_VOID && type_kind(reader->types, type) != BUSTER_TYPE_KIND_FUNCTION)
@@ -9128,6 +9201,7 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
     const TypeId base = !prepared ? 0 : continuation ? BUSTER_CHECK_RARE(reader, declaration_bases, first) : check_input_specifiers(reader, &i, count, &is_typedef, &storage, &is_inline, false);
     reader->specifier_free_standing = false;
     reader->specifier_owner = BUSTER_CHECK_NONE;
+    reader->declarator_storage = storage;
     if (reader->specifier_pending)
     {
         reader->specifier_jobs[first]->vla_begin = vla_begin;
@@ -9984,8 +10058,12 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
             }
         }
     }
-    // Whether the declaration conflicts with the visible one and is left out (below).
+    // Whether the declaration conflicts with the visible one and is left out (below), whether its thread-local storage
+    // was compared with the visible one's there (the latest declaration of its entity, whose storage clang compares), and
+    // whether a mismatch of it alone was reported.
     bool dropped = false;
+    bool thread_local_checked = false;
+    bool thread_local_reported = false;
     if (!overload && !versions && old != 0 && (reader->bindings.depth[old - 1] == reader->scope_count || linked_visible))
     {
         const uint32_t previous = reader->bindings.declaration[old - 1];
@@ -10001,13 +10079,28 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
             type_parameters(reader->types, reader->declared_types[previous], &previous_count);
             parameter_conflict = previous_count != 0 && (reader->types->types.flags[type_index(reader->declared_types[token])] & BUSTER_TYPE_FLAG_PROTOTYPE) == 0;
         }
-        if (!repeatable || (compatible != TYPE_ANSWER_YES && !library_redeclaration) || reader->bindings.kind[old - 1] != kind || check_input_linkage(reader->declaration_bits, token) != check_input_linkage(reader->declaration_bits, previous) ||
-            check_input_bit(reader->output->declaration_bits, token, BUSTER_CHECK_BITS_THREAD_LOCAL) != check_input_bit(reader->output->declaration_bits, previous, BUSTER_CHECK_BITS_THREAD_LOCAL) || parameter_conflict)
+        const bool mismatch = !repeatable || (compatible != TYPE_ANSWER_YES && !library_redeclaration) || reader->bindings.kind[old - 1] != kind ||
+                              check_input_linkage(reader->declaration_bits, token) != check_input_linkage(reader->declaration_bits, previous) || parameter_conflict;
+        const bool thread_local = check_input_bit(reader->output->declaration_bits, token, BUSTER_CHECK_BITS_THREAD_LOCAL) !=
+                                  check_input_bit(reader->output->declaration_bits, previous, BUSTER_CHECK_BITS_THREAD_LOCAL);
+        // An object's thread-local storage alone differing is clang's error, but its MergeVarDecl links the declaration
+        // still, which keeps its own storage (#1786): the report moves past, and the declaration is merged as a valid one.
+        // Its linked declaration's check below doesn't compare the storage again.
+        const bool thread_local_alone = thread_local && !mismatch && kind == C_BINDING_OBJECT;
+        thread_local_checked = true;
+        thread_local_reported = thread_local_alone;
+        if (thread_local_alone)
+        {
+            const uint32_t before = reader->output->report_count;
+            check_input_redeclaration_report(reader, token, previous, compatible, repeatable, parameter_conflict, true, CHECK_INPUT_REDECLARATION);
+            (void)(reader->output->report_count == before + 1 && check_input_recover_reports(reader, before));
+        }
+        if (mismatch || (thread_local && !thread_local_alone))
         {
             const CheckInputMessage message = kind == C_BINDING_FUNCTION && reader->declaration_kinds[previous] == kind && compatible == TYPE_ANSWER_NO && !library_redeclaration ?
                                               CHECK_INPUT_CONFLICTING_TYPES : CHECK_INPUT_REDECLARATION;
             const uint32_t before = reader->output->report_count;
-            check_input_redeclaration_report(reader, token, previous, compatible, repeatable, parameter_conflict, message);
+            check_input_redeclaration_report(reader, token, previous, compatible, repeatable, parameter_conflict, true, message);
             // clang marks the redeclaration invalid and leaves it out of its name's lookup, which finds the visible
             // declaration still (#1447's semantic recovery, phase 2): the report moves past, and the declaration isn't
             // bound or linked.
@@ -10073,15 +10166,31 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
             const bool repeated_loader = has_attributes && kind == C_BINDING_OBJECT && definition != 0 &&
                 check_input_attribute_of(check_input_attributes_at(reader->output, token), CHECK_ATTRIBUTE_LOADER_UNINITIALIZED) != NULL &&
                 check_input_attribute_of(check_input_attributes_at(reader->output, definition - 1), CHECK_ATTRIBUTE_LOADER_UNINITIALIZED) != NULL;
-            if (reader->declaration_kinds[previous] != kind || check_input_linkage(reader->declaration_bits, previous) != check_input_linkage(reader->declaration_bits, token) ||
-                (compatible != TYPE_ANSWER_YES && !library_redeclaration) ||
-                (reader->definition_origins[token] && definition && !repeated_loader) ||
-                check_input_bit(reader->output->declaration_bits, token, BUSTER_CHECK_BITS_THREAD_LOCAL) != check_input_bit(reader->output->declaration_bits, previous, BUSTER_CHECK_BITS_THREAD_LOCAL) || parameter_conflict)
+            const bool mismatch = reader->declaration_kinds[previous] != kind || check_input_linkage(reader->declaration_bits, previous) != check_input_linkage(reader->declaration_bits, token) ||
+                                  (compatible != TYPE_ANSWER_YES && !library_redeclaration) || parameter_conflict;
+            const bool thread_local = !thread_local_checked && check_input_bit(reader->output->declaration_bits, token, BUSTER_CHECK_BITS_THREAD_LOCAL) !=
+                                      check_input_bit(reader->output->declaration_bits, previous, BUSTER_CHECK_BITS_THREAD_LOCAL);
+            // An object's thread-local storage alone differing, as above (#1786): reported, then merged, or followed by its
+            // redefinition's error, as clang's AddInitializerToDecl gives it after MergeVarDecl's.
+            const bool thread_local_alone = thread_local && !mismatch && kind == C_BINDING_OBJECT;
+            if (thread_local_alone)
+            {
+                const uint32_t before = reader->output->report_count;
+                check_input_redeclaration_report(reader, token, previous, compatible, true, parameter_conflict, true, CHECK_INPUT_REDECLARATION);
+                (void)(reader->output->report_count == before + 1 && check_input_recover_reports(reader, before));
+                thread_local_reported = true;
+            }
+            if (mismatch || (reader->definition_origins[token] && definition && !repeated_loader) || (thread_local && !thread_local_alone))
             {
                 const uint32_t before = reader->output->report_count;
                 const CheckInputMessage message = kind == C_BINDING_FUNCTION && reader->declaration_kinds[previous] == kind && compatible == TYPE_ANSWER_NO && !library_redeclaration ?
                                                   CHECK_INPUT_CONFLICTING_TYPES : CHECK_INPUT_REDECLARATION;
-                check_input_redeclaration_report(reader, token, previous, compatible, true, parameter_conflict, message);
+                check_input_redeclaration_report(reader, token, previous, compatible, true, parameter_conflict, !thread_local_checked && !thread_local_alone, message);
+                // (The redefinition's error is the declaration's second at its name: kept after the TLS one.)
+                if (thread_local_reported && reader->output->report_count == before + 1 && !reader->output->resource)
+                {
+                    reader->output->reports[before].repeated = true;
+                }
                 // Its entity's redeclaration is left out too (#1447, phase 2), but for a loader variable's, whose note
                 // follows below.
                 const bool loading = has_attributes && check_input_attribute_of(check_input_attributes_at(reader->output, token), CHECK_ATTRIBUTE_LOADER_UNINITIALIZED) != NULL;
@@ -10165,6 +10274,9 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
             check_input_lane_refuse(reader, linked == 0, "a body declares something with linkage first");
             check_input_lane_refuse(reader, linked != 0 && composite != reader->linked_types[name], "a body's declaration with linkage changes its entity's type");
             check_input_lane_refuse(reader, (flags & CHECK_INPUT_FUNCTION_NAKED) != 0, "a body's declaration with linkage differs from the one it replaces");
+            check_input_lane_refuse(reader, replaced && check_input_bit(reader->output->declaration_bits, token, BUSTER_CHECK_BITS_THREAD_LOCAL) !=
+                                    check_input_bit(reader->output->declaration_bits, linked - 1, BUSTER_CHECK_BITS_THREAD_LOCAL),
+                                    "a body's declaration with linkage differs from the one it replaces in thread-local storage");
         }
         reader->linked_types[name] = dropped ? reader->linked_types[name] : composite;
         // Attribute evaluation may publish a declaration's attributes after it binds. Retain its scope independently of
