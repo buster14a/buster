@@ -345,6 +345,24 @@ buster_link(compiler_link)
 buster_post_link(compiler_link "${compiler}" OBJECTS ${objects} ${lexer_objects})
 add_custom_target(compiler ALL DEPENDS "${compiler}")
 
+# Filter the multi-config database only when CMake regenerates it or the filter changes. Keeping this in Ninja's graph
+# avoids parsing the whole JSON again after every unchanged build or source edit. Direct CMake builds may leave
+# export disabled; build.sh and the presets enable it and publish the selected configuration's cached copy.
+function(buster_compile_commands target)
+    if(CMAKE_EXPORT_COMPILE_COMMANDS)
+        set(commands "${CMAKE_BINARY_DIR}/$<CONFIG>/compile_commands.json")
+        add_custom_command(OUTPUT "${commands}"
+            COMMAND "${CMAKE_COMMAND}" "-DINPUT=${CMAKE_BINARY_DIR}/compile_commands.json" "-DOUTPUT=${commands}"
+                "-DCONFIG=$<CONFIG>" -P "${CMAKE_SOURCE_DIR}/cmake/BusterCompileCommands.cmake"
+            DEPENDS "${CMAKE_BINARY_DIR}/compile_commands.json" "${CMAKE_SOURCE_DIR}/cmake/BusterCompileCommands.cmake"
+            COMMENT "Selecting $<CONFIG> compile commands"
+            VERBATIM)
+        add_custom_target(${target}_compile_commands DEPENDS "${commands}")
+        add_dependencies(${target} ${target}_compile_commands)
+    endif()
+endfunction()
+buster_compile_commands(compiler)
+
 # build.sh shifts: the same objects linked again with BUSTER_SHIFTS' bytes of padding in .text before
 # BUSTER_SHIFT_SOURCE's (cmake/BusterShiftPadding.cmake), into CONFIG/shifts/compiler-SHIFT, for time-runs to compare
 # builds over their code's placements: the same code ran up to 2% faster or slower so on the 9700X (#509).

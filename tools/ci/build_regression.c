@@ -6,9 +6,11 @@
 //
 //   cc -std=c17 -O2 -Wall -Wextra -Werror -o build-regression tools/ci/build_regression.c && ./build-regression
 //   ./build-regression --flags-only  # Just the fresh-tree ignored-flag regressions; cleans the selected build tree.
+//   ./build-regression --compile-commands-only  # Small database dependency fixture; does not build the compiler.
 //
 // It removes every tree under build/cmake (clean --all) and checks that
 //   - each baseline CRT startup object relinks and post-links every affected executable, with no work when unchanged;
+//   - filtered compile commands are configuration-specific, reused until an input changes and rebuilt if missing;
 //   - fresh build.sh, direct CMake and preset trees ignore hostile CFLAGS/LDFLAGS before probing C, including cached
 //     global/configuration flags, in generated compile/link commands and real unit compiles;
 //   - a clean --all during a build waits for it, and then removes every tree and the published files;
@@ -345,6 +347,14 @@ static void ran_since(const Snapshot* before, char* names, size_t size)
     }
 }
 
+// CMake may rewrite the exported database even when only a link setting changed. Those tests still require the
+// exact compiler work, allowing the metadata filter alone in addition. Ordinary no-op/source-edit tests do not.
+static const char* compiler_outputs(const char* names)
+{
+    const char* prefix = "compile_commands.json ";
+    return strncmp(names, prefix, strlen(prefix)) == 0 ? names + strlen(prefix) : names;
+}
+
 static bool same_file(const char* a, const char* b)
 {
     struct stat first;
@@ -367,11 +377,11 @@ static bool same_time(struct stat a, struct stat b)
     return a.st_mtim.tv_sec == b.st_mtim.tv_sec && a.st_mtim.tv_nsec == b.st_mtim.tv_nsec;
 }
 
-// Whether every "command" of build/compile_commands.json compiles into the configuration `config`'s objects, by its
+// Whether every "command" of `path` compiles into the configuration `config`'s objects, by its
 // -o argument (CMake 3.25's entries have no "output"), and there is one.
-static bool compile_commands_of(const char* config)
+static bool compile_commands_file_of(const char* path, const char* config)
 {
-    Text text = read_file("build/compile_commands.json");
+    Text text = read_file(path);
     char directory[64];
     snprintf(directory, sizeof(directory), ".dir/%s/", config);
     uint32_t count = 0;
@@ -395,6 +405,11 @@ static bool compile_commands_of(const char* config)
     }
     free(text.data);
     return result && count != 0;
+}
+
+static bool compile_commands_of(const char* config)
+{
+    return compile_commands_file_of("build/compile_commands.json", config);
 }
 
 // The objects' file names, without .o, whose depfiles name the source `file`, sorted, each followed by a space.
@@ -702,45 +717,87 @@ static void check_incremental(void)
     }
     pass("an unchanged build compiles, links, bakes and publishes nothing");
 
-    static const char* const files[] = {
-        "src/buster/compiler/tier1_model_measure.c",
-        "src/buster/compiler/c_lexer.c",
-        "src/buster/compiler/host_isa.h",
+    char selected[PATH_MAX];
+    snprintf(selected, sizeof(selected), "%s/Release/compile_commands.json", tree);
+    if (unlink(selected) != 0)
+    {
+        fail("can't remove the cached Release compile commands");
+    }
+    BUILD("build");
+    ran_since(&before, names, sizeof(names));
+    if (strcmp(names, "compile_commands.json ") != 0 || !compile_commands_of("Release") ||
+        status_of("build/compiler").st_ino != compiler.st_ino ||
+        !same_time(status_of("build/compile_commands.json"), commands))
+    {
+        fail("a missing cached database ran %s or changed the published files", names);
+    }
+    snapshot(&before);
+    if (unlink("build/compile_commands.json") != 0)
+    {
+        fail("can't remove the published compile commands");
+    }
+    BUILD("build");
+    ran_since(&before, names, sizeof(names));
+    if (names[0] != 0 || !compile_commands_of("Release") || status_of("build/compiler").st_ino != compiler.st_ino)
+    {
+        fail("a missing published database ran %s or wasn't restored", names);
+    }
+    pass("missing cached or published compile commands are restored without compiling or linking");
+
+    static const struct
+    {
+        const char* source;
+        const char* owner;
+    } files[] = {
+        { "src/buster/compiler/tier1_model_measure.c", 0 },
+        { "src/buster/compiler/c_lexer.c", 0 },
+        { "src/buster/compiler/host_isa.h", 0 },
+        { "src/buster/compiler/c_check_builtin_bits_test.c", "main_unit_check_builtins.c " },
+        { "src/buster/compiler/profile_test.c", "main.c " },
+        { "src/buster/compiler/c_files_test.c", "main_unit_frontend.c " },
+        { "src/buster/compiler/tier1_wide_test.c", "main_unit_backend.c " },
     };
     for (uint32_t i = 0; i < sizeof(files) / sizeof(files[0]); i += 1)
     {
+        const char* source = files[i].source;
         char expected[8192];
-        dependents(files[i], expected, sizeof(expected));
+        dependents(source, expected, sizeof(expected));
         if (expected[0] == 0)
         {
-            fail("no unit depends on %s", files[i]);
+            fail("no unit depends on %s", source);
         }
-        const struct stat file = status_of(files[i]);
-        utimensat(AT_FDCWD, files[i], 0, 0);
+        if (files[i].owner != 0 && strcmp(expected, files[i].owner) != 0)
+        {
+            fail("%s is included by %s, not its owner %s alone", source, expected, files[i].owner);
+        }
+        const struct stat file = status_of(source);
+        utimensat(AT_FDCWD, source, 0, 0);
         char plan[8192];
         planned(plan, sizeof(plan));
         const struct timespec times[2] = { file.st_atim, file.st_mtim };
-        utimensat(AT_FDCWD, files[i], times, 0);
+        utimensat(AT_FDCWD, source, times, 0);
         if (strcmp(plan, expected) != 0)
         {
-            fail("%s: Ninja would compile %s, not %s", files[i], plan, expected);
+            fail("%s: Ninja would compile %s, not %s", source, plan, expected);
         }
         if (planned(plan, sizeof(plan)))
         {
-            fail("%s's time restored, Ninja still has work", files[i]);
+            fail("%s's time restored, Ninja still has work", source);
         }
         uint32_t count = 0;
         for (const char* space = strchr(expected, ' '); space != 0; space = strchr(space + 1, ' '))
         {
             count += 1;
         }
-        pass("%s rebuilds its %u dependents alone", files[i], count);
+        pass("%s rebuilds its %u dependents alone", source, count);
     }
     snapshot(&before);
+    const struct stat selected_before = status_of(selected);
     utimensat(AT_FDCWD, "src/buster/compiler/tier1_model_measure.c", 0, 0);
     BUILD("build");
     ran_since(&before, names, sizeof(names));
-    if (strcmp(names, "compiler compiler.link tier1_model_measure.c.o ") != 0 || !same_file("build/compiler", release))
+    if (strcmp(names, "compiler compiler.link tier1_model_measure.c.o ") != 0 || !same_file("build/compiler", release) ||
+        !same_time(status_of(selected), selected_before))
     {
         fail("an edited unit ran %s", names);
     }
@@ -764,13 +821,13 @@ static void check_configurations(void)
     snapshot(&before);
     BUILD("build");
     ran_since(&before, names, sizeof(names));
-    if (names[0] != 0 || !same_file("build/compiler", release))
+    if (names[0] != 0 || !same_file("build/compiler", release) || !compile_commands_of("Release"))
     {
         fail("switching back to Release ran %s or didn't publish it", names);
     }
     BUILD("--config", "Debug");
     ran_since(&before, names, sizeof(names));
-    if (names[0] != 0 || !same_file("build/compiler", debug))
+    if (names[0] != 0 || !same_file("build/compiler", debug) || !compile_commands_of("Debug"))
     {
         fail("switching back to Debug ran %s or didn't publish it", names);
     }
@@ -783,7 +840,7 @@ static void check_configurations(void)
         snapshot(&before);
         BUILD_ENV(bakes[i], "build");
         ran_since(&before, names, sizeof(names));
-        if (strcmp(names, "compiler ") != 0)
+        if (strcmp(compiler_outputs(names), "compiler ") != 0)
         {
             fail("%s ran %s", bakes[i][0], names);
         }
@@ -798,7 +855,7 @@ static void check_configurations(void)
         snapshot(&before);
         BUILD_ENV(linker, "build");
         ran_since(&before, names, sizeof(names));
-        if (strcmp(names, "compiler compiler.link ") != 0)
+        if (strcmp(compiler_outputs(names), "compiler compiler.link ") != 0)
         {
             fail("BUSTER_LINKER=bfd ran %s", names);
         }
@@ -910,6 +967,7 @@ static void check_failures(void)
 {
     // A post-link step that fails, by an nm that does.
     ino_t inode = status_of("build/compiler").st_ino;
+    const struct stat commands = status_of("build/compile_commands.json");
     char directory[PATH_MAX];
     snprintf(directory, sizeof(directory), "%s/nm", work);
     mkdir(directory, 0755);
@@ -923,7 +981,8 @@ static void check_failures(void)
     {
         fail("a failed post-link step succeeded");
     }
-    if (status_of("build/compiler").st_ino != inode || access(release, F_OK) == 0)
+    if (status_of("build/compiler").st_ino != inode || access(release, F_OK) == 0 ||
+        !same_time(status_of("build/compile_commands.json"), commands))
     {
         fail("a failed post-link step published build/compiler or left %s", release);
     }
@@ -1058,7 +1117,7 @@ static void check_presets_and_prints(void)
             fail("the release preset's build failed");
         }
         ran_since(&before, names, sizeof(names));
-        if (names[0] != 0)
+        if (compiler_outputs(names)[0] != 0)
         {
             fail("the release preset rebuilt %s", names);
         }
@@ -1266,12 +1325,161 @@ static void check_crt_link_dependencies(void)
     pass("each baseline CRT startup object relinks and post-links both executables; unchanged builds are no-ops");
 }
 
+// Exercise the real database target with one tiny source: both configurations, content-changing regeneration,
+// ordinary source edits, missing output and filter changes, plus a direct build with export disabled.
+static void check_compile_commands(void)
+{
+    char directory[PATH_MAX];
+    snprintf(directory, sizeof(directory), "%s/compile-commands", work);
+    if (mkdir(directory, 0755) != 0 || chdir(directory) != 0 || mkdir("cmake", 0755) != 0)
+    {
+        fail("can't make the compile commands fixture");
+    }
+    char filter_path[PATH_MAX];
+    snprintf(filter_path, sizeof(filter_path), "%s/cmake/BusterCompileCommands.cmake", root);
+    Text filter = read_file(filter_path);
+    write_file("cmake/BusterCompileCommands.cmake", filter.data, 0644);
+    free(filter.data);
+    write_file("main.c", "int main(void) { return 0; }\n", 0644);
+    write_file("CMakeLists.txt",
+        "cmake_minimum_required(VERSION 3.25)\n"
+        "project(compile_commands_fixture C)\n"
+        "set(CMAKE_CONFIGURATION_TYPES Debug Release)\n"
+        "set(FIXTURE_VALUE 1 CACHE STRING \"A command that changes\")\n"
+        "file(READ \"${BUSTER_SOURCE}/CMakeLists.txt\" source)\n"
+        "string(FIND \"${source}\" \"function(buster_compile_commands target)\" begin)\n"
+        "if(begin LESS 0)\n  message(FATAL_ERROR \"buster_compile_commands not found\")\nendif()\n"
+        "string(SUBSTRING \"${source}\" ${begin} -1 tail)\n"
+        "string(FIND \"${tail}\" \"\\nendfunction()\" end)\n"
+        "if(end LESS 0)\n  message(FATAL_ERROR \"buster_compile_commands end not found\")\nendif()\n"
+        "string(LENGTH \"\\nendfunction()\" marker_length)\n"
+        "math(EXPR length \"${end} + ${marker_length}\")\n"
+        "string(SUBSTRING \"${tail}\" 0 ${length} function_text)\n"
+        "cmake_language(EVAL CODE \"${function_text}\")\n"
+        "add_executable(compiler main.c)\n"
+        "target_compile_definitions(compiler PRIVATE FIXTURE_VALUE=${FIXTURE_VALUE})\n"
+        "buster_compile_commands(compiler)\n", 0644);
+    char source_arg[PATH_MAX + 32];
+    snprintf(source_arg, sizeof(source_arg), "-DBUSTER_SOURCE=%s", root);
+    char* configure[] = { "cmake", "-S", ".", "-B", "out", "-G", "Ninja Multi-Config", source_arg,
+                          "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON", "-DFIXTURE_VALUE=1", 0 };
+    Text log = capture(configure);
+    free(log.data);
+    char* build[] = { "cmake", "--build", "out", "--config", "Debug", "--parallel", "1", 0 };
+    const char* configurations[] = { "Debug", "Release" };
+    for (uint32_t i = 0; i < 2; i += 1)
+    {
+        build[4] = (char*)configurations[i];
+        log = capture(build);
+        free(log.data);
+        char commands[128];
+        snprintf(commands, sizeof(commands), "out/%s/compile_commands.json", configurations[i]);
+        if (!compile_commands_file_of(commands, configurations[i]))
+        {
+            fail("the cached %s database has the wrong configuration", configurations[i]);
+        }
+        log = capture(build);
+        if (strstr(log.data, "no work to do") == 0)
+        {
+            fail("unchanged %s database rebuilt: %s", configurations[i], log.data);
+        }
+        free(log.data);
+    }
+    build[4] = "Debug";
+    const struct stat commands = status_of("out/Debug/compile_commands.json");
+    if (utimensat(AT_FDCWD, "main.c", 0, 0) != 0)
+    {
+        fail("can't update the fixture source");
+    }
+    log = capture(build);
+    if (strstr(log.data, "Building C object") == 0 ||
+        !same_time(status_of("out/Debug/compile_commands.json"), commands))
+    {
+        fail("a source edit didn't compile alone: %s", log.data);
+    }
+    free(log.data);
+    const struct stat compiler = status_of("out/Debug/compiler");
+    if (unlink("out/Debug/compile_commands.json") != 0)
+    {
+        fail("can't remove the fixture database");
+    }
+    log = capture(build);
+    free(log.data);
+    if (!compile_commands_file_of("out/Debug/compile_commands.json", "Debug") ||
+        !same_time(status_of("out/Debug/compiler"), compiler))
+    {
+        fail("a missing database wasn't restored alone");
+    }
+    // The fixture is small enough for the output and the touch to share a filesystem timestamp tick.
+    const struct timespec tick = { 0, 20000000 };
+    nanosleep(&tick, 0);
+    if (utimensat(AT_FDCWD, "cmake/BusterCompileCommands.cmake", 0, 0) != 0)
+    {
+        fail("can't update the fixture filter");
+    }
+    log = capture(build);
+    if (strstr(log.data, "Selecting Debug compile commands") == 0 ||
+        !same_time(status_of("out/Debug/compiler"), compiler))
+    {
+        fail("an updated filter didn't regenerate the database alone: %s", log.data);
+    }
+    free(log.data);
+    configure[9] = "-DFIXTURE_VALUE=2";
+    log = capture(configure);
+    free(log.data);
+    log = capture(build);
+    free(log.data);
+    Text changed = read_file("out/Debug/compile_commands.json");
+    if (!compile_commands_file_of("out/Debug/compile_commands.json", "Debug") ||
+        strstr(changed.data, "-DFIXTURE_VALUE=2") == 0 || strstr(changed.data, "-DFIXTURE_VALUE=1") != 0)
+    {
+        fail("changed compile arguments weren't refreshed in the cached database");
+    }
+    const struct stat changed_compiler = status_of("out/Debug/compiler");
+    log = capture(configure);
+    free(log.data);
+    log = capture(build);
+    free(log.data);
+    Text unchanged = read_file("out/Debug/compile_commands.json");
+    if (strcmp(unchanged.data, changed.data) != 0 || !same_time(status_of("out/Debug/compiler"), changed_compiler))
+    {
+        fail("an unchanged configure changed the selected commands or rebuilt the executable");
+    }
+    free(unchanged.data);
+    free(changed.data);
+    log = capture(build);
+    if (strstr(log.data, "no work to do") == 0)
+    {
+        fail("an unchanged build after configuration regenerated the database: %s", log.data);
+    }
+    free(log.data);
+    configure[4] = "without-export";
+    configure[8] = "-DCMAKE_EXPORT_COMPILE_COMMANDS=OFF";
+    log = capture(configure);
+    free(log.data);
+    build[2] = "without-export";
+    log = capture(build);
+    free(log.data);
+    if (access("without-export/Debug/compiler", X_OK) != 0 ||
+        access("without-export/Debug/compile_commands.json", F_OK) == 0)
+    {
+        fail("a direct build with export disabled needs a compilation database");
+    }
+    if (chdir(root) != 0)
+    {
+        fail("can't return to %s", root);
+    }
+    pass("compile commands select each configuration, reuse unchanged inputs, refresh changes and allow export off");
+}
+
 int main(int argc, char** argv)
 {
     const bool flags_only = argc == 2 && strcmp(argv[1], "--flags-only") == 0;
-    if (argc != 1 && !flags_only)
+    const bool crt_only = argc == 2 && strcmp(argv[1], "--crt-link-only") == 0;
+    const bool commands_only = argc == 2 && strcmp(argv[1], "--compile-commands-only") == 0;
+    if (argc != 1 && !flags_only && !crt_only && !commands_only)
     {
-        fail("usage: build-regression [--flags-only]");
+        fail("usage: build-regression [--flags-only | --crt-link-only | --compile-commands-only]");
     }
     if (getcwd(root, sizeof(root)) == 0 || access("build.sh", X_OK) != 0)
     {
@@ -1285,34 +1493,35 @@ int main(int argc, char** argv)
     }
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
-    check_crt_link_dependencies();
-    if (argc == 2 && strcmp(argv[1], "--crt-link-only") == 0)
+    if (!flags_only && !commands_only)
     {
-        char* remove[] = { "rm", "-rf", work, 0 };
-        return run(0, 0, remove);
+        check_crt_link_dependencies();
     }
-    if (argc != 1)
+    if (!flags_only && !crt_only)
     {
-        fail("unknown argument");
+        check_compile_commands();
     }
-    BUILD("clean");
-    char* output[] = { "./build.sh", "print-output", 0 };
-    char* output_debug[] = { "./build.sh", "print-output", "--config", "Debug", 0 };
-    capture_line(output, release, sizeof(release));
-    capture_line(output_debug, debug, sizeof(debug));
-    snprintf(tree, sizeof(tree), "%s", release);
-    *strrchr(tree, '/') = 0;
-    *strrchr(tree, '/') = 0;
-    snprintf(ninja_log, sizeof(ninja_log), "%s/.ninja_log", tree);
-    check_ignored_flags();
-    if (!flags_only)
+    if (!crt_only && !commands_only)
     {
-        check_clean_all();
-        check_incremental();
-        check_configurations();
-        check_failures();
-        check_presets_and_prints();
-        check_experiments();
+        BUILD("clean");
+        char* output[] = { "./build.sh", "print-output", 0 };
+        char* output_debug[] = { "./build.sh", "print-output", "--config", "Debug", 0 };
+        capture_line(output, release, sizeof(release));
+        capture_line(output_debug, debug, sizeof(debug));
+        snprintf(tree, sizeof(tree), "%s", release);
+        *strrchr(tree, '/') = 0;
+        *strrchr(tree, '/') = 0;
+        snprintf(ninja_log, sizeof(ninja_log), "%s/.ninja_log", tree);
+        check_ignored_flags();
+        if (!flags_only)
+        {
+            check_clean_all();
+            check_incremental();
+            check_configurations();
+            check_failures();
+            check_presets_and_prints();
+            check_experiments();
+        }
     }
     char* remove[] = { "rm", "-rf", work, 0 };
     run(0, 0, remove);
