@@ -6040,6 +6040,9 @@ struct TypePrinter
     uint32_t aliased_count;
     uint32_t frames_typed;
     uint32_t step;
+    // A qualified array level's qualifiers, which its element takes where a sugar alias names the qualified element
+    // (type_print_element_qualifiers): the array kind's BEFORE and AFTER push that element.
+    uint32_t element_qualifiers;
 };
 
 // The output's bytes, pushed in order so that they stay contiguous.
@@ -6207,6 +6210,20 @@ static uint32_t type_print_sugar(const TypePrinter* printer, TypeId type, uint32
         sugar = *whole != UINT32_MAX ? *whole : type_print_alias(names, unqualified);
     }
     return sugar;
+}
+
+// The qualifiers a qualified array level (`type`, not ALIGNED) leaves to its element, as clang's array types keep them
+// (#1447): where a sugar alias names that element with them, the typedef `CI` of `CI a[2]` (`const int`), which the
+// array's `const int[2]` would otherwise print as `const int[2]`; 0 where none does, or the level has extended
+// qualifiers, which stay as they print.
+static uint32_t type_print_element_qualifiers(const TypePrinter* printer, TypeId type)
+{
+    const TypeTable* table = printer->table;
+    const uint32_t qualifiers = type_qualifiers(type);
+    const bool array = qualifiers != 0 && type_kind_is_array(type_kind(table, type)) && type_extended_qualifiers(table, type) == 0;
+    uint32_t whole = UINT32_MAX;
+    const bool named = array && printer->names != 0 && type_print_sugar(printer, type_element(table, type), &whole) != UINT32_MAX;
+    return named ? qualifiers : 0;
 }
 
 // Whether an alias named a level, which then has no suffix of its own: by type, or by place, the level `step` whose
@@ -6394,7 +6411,7 @@ static void type_print_before_kind(TypePrinter* printer, TypeId type)
     }
     else if (type_kind_is_array(kind) || kind == BUSTER_TYPE_KIND_EXT_VECTOR)
     {
-        type_print_push(printer, BUSTER_TYPE_PRINT_BEFORE, base, false, false, printer->step + 1);
+        type_print_push(printer, BUSTER_TYPE_PRINT_BEFORE, base | printer->element_qualifiers, false, false, printer->step + 1);
     }
     else if (kind == BUSTER_TYPE_KIND_FUNCTION)
     {
@@ -6462,7 +6479,7 @@ static void type_print_after_kind(TypePrinter* printer, TypeId type)
         {
             type_print_text(printer, kind == BUSTER_TYPE_KIND_VARIABLE_ARRAY && table->types.extent[index] == 0 ? "[*]" : "[]");
         }
-        type_print_push(printer, BUSTER_TYPE_PRINT_AFTER, base, false, false, printer->step + 1);
+        type_print_push(printer, BUSTER_TYPE_PRINT_AFTER, base | printer->element_qualifiers, false, false, printer->step + 1);
     }
     else if (kind == BUSTER_TYPE_KIND_FUNCTION)
     {
@@ -6559,7 +6576,9 @@ static void type_print_step(TypePrinter* printer, TypePrintFrame frame)
         }
         else
         {
-            const uint32_t qualifiers = type_qualifiers(type);
+            // A qualified array whose element an alias names leaves its qualifiers to that element.
+            const uint32_t delegated = type_print_element_qualifiers(printer, type);
+            const uint32_t qualifiers = type_qualifiers(type) & ~delegated;
             const bool prefix = type_print_can_prefix(table, type);
             if (prefix && (qualifiers | extended) != 0)
             {
@@ -6573,7 +6592,9 @@ static void type_print_step(TypePrinter* printer, TypePrintFrame frame)
                 printer->empty = false;
             }
             printer->step = frame.step;
+            printer->element_qualifiers = delegated;
             type_print_before_kind(printer, unqualified);
+            printer->element_qualifiers = 0;
         }
     }
     else if (frame.operation == BUSTER_TYPE_PRINT_BEFORE_END)
@@ -6604,7 +6625,11 @@ static void type_print_step(TypePrinter* printer, TypePrintFrame frame)
         if (!aliased)
         {
             printer->step = frame.step;
+            // (By place, the element's AFTER asks after its BEFORE's step, and the place has moved on since.)
+            const bool by_type = printer->names != 0 && printer->names->alias_order == 0;
+            printer->element_qualifiers = by_type ? type_print_element_qualifiers(printer, type) : 0;
             type_print_after_kind(printer, unqualified);
+            printer->element_qualifiers = 0;
         }
     }
     else if (frame.operation == BUSTER_TYPE_PRINT_POINTER_END)

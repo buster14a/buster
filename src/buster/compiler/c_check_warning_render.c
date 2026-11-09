@@ -403,10 +403,47 @@ static bool check_driver_warning_parentheses(const Parser* parser, const TypeTab
     return valid;
 }
 
+// Whether `alias`, unqualified, is one of `type`'s levels, as type_print reaches them: the type itself, then through
+// pointers, arrays and functions' results to the specifier.
+static bool check_driver_spelling_level(const TypeTable* types, TypeId type, TypeId alias)
+{
+    const TypeId wanted = type_unqualified(type_strip_aligned(types, alias));
+    TypeId level = type;
+    bool found = false;
+    for (uint32_t depth = 0; !found && depth < 256 && level != 0 && type_is_valid(types, level); depth += 1)
+    {
+        const TypeId bare = type_unqualified(type_strip_aligned(types, level));
+        const uint8_t kind = type_kind(types, bare);
+        found = bare == wanted;
+        level = kind == BUSTER_TYPE_KIND_POINTER || kind == BUSTER_TYPE_KIND_FUNCTION || type_kind_is_array(kind) ? types->types.base[type_index(bare)] : 0;
+    }
+    return found;
+}
+
+// The typedef of `spelling`'s chain that names one of `type`'s levels (#1447), as clang's sugar keeps it through
+// dereferences and subscripts: a declaration's levels sit over its specifier's typedef, whose own levels sit over its
+// specifier's, and so on, so the first typedef along that chain whose type is a level of `type` is the one clang's type
+// names there (`*p` of a `pv p`, `typedef v4si *pv`, is `v4si`; `**b` of a `VPP b`, `typedef VP *VPP`, is `VP`). A
+// chain's types only shrink, so no later one can be a level above it. `spelling` where none is.
+static uint32_t check_driver_spelling_chain(const Parser* parser, const CheckInput* input, const TypeTable* types, TypeId type, uint32_t spelling)
+{
+    uint32_t result = spelling;
+    uint32_t at = spelling;
+    bool found = false;
+    for (uint32_t steps = 0; !found && at != 0 && at < input->token_count && steps < 64; steps += 1)
+    {
+        found = check_driver_spelling_level(types, type, input->declared_types[at]);
+        result = found ? at : result;
+        at = found ? at : check_input_typedef_spelling(input, parser, at);
+    }
+    return result;
+}
+
 // A warning's type spelling (#992): `spelling` is the operand's typedef specifier's declaration, so the base's
 // specifier prints the typedef's name and clang's `(aka '...')` shows the type without that sugar; the sentinel
 // BUSTER_CHECK_NONE prints `__size_t` for a sizeof/alignof operand's own type. The anonymous map prints an
-// unnamed tag's typedef name or its `(unnamed at file:line:col)`.
+// unnamed tag's typedef name or its `(unnamed at file:line:col)`. Where the typedef's own type isn't one of the
+// type's levels, a typedef its own declaration spells may be (check_driver_spelling_chain).
 static String8 check_driver_warning_type_at(const Parser* parser, Preprocessor* pp, const CheckInput* input, const TypeTable* types,
                                             CheckWarningSpelling* spell, Arena* scratch, TypeId type, uint32_t spelling,
                                             uint32_t declaration, TypeId declared)
@@ -444,6 +481,7 @@ static String8 check_driver_warning_type_at(const Parser* parser, Preprocessor* 
             }
             else if (spelling != 0 && input != NULL && input->declared_types != NULL && spelling < input->token_count)
             {
+                spelling = check_driver_spelling_chain(parser, input, types, type, spelling);
                 const TypeId declared = input->declared_types[spelling];
                 const uint32_t name = spelling < parser->tokens.count ? parser->tokens.names[spelling] : spell->count;
                 if (type_is_valid(types, declared) && name < spell->count)
