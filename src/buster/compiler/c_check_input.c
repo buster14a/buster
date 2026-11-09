@@ -1603,6 +1603,9 @@ struct CheckInputReader
     CheckInputSpecifierJob** specifier_jobs;
     CheckInputSpecifierJob** specifier_finishes;
     uint32_t specifier_owner;
+    // The storage class of the declaration whose declarators are being read (C_NAME_STATIC, C_NAME_EXTERN, ... or 0):
+    // a static or extern block-scope array's bound clang folds as a file-scope one's (check_input_vla_force_constant).
+    uint32_t declarator_storage;
     // The __auto_type keyword of the specifiers check_input_specifiers read last, when they had one, or C23's auto.
     uint32_t specifier_auto_type;
     // C23's inferred auto and constexpr (#793) from the specifiers check_input_specifiers read last.
@@ -8639,6 +8642,7 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
     const TypeId base = !prepared ? 0 : continuation ? BUSTER_CHECK_RARE(reader, declaration_bases, first) : check_input_specifiers(reader, &i, count, &is_typedef, &storage, &is_inline, false);
     reader->specifier_free_standing = false;
     reader->specifier_owner = BUSTER_CHECK_NONE;
+    reader->declarator_storage = storage;
     if (reader->specifier_pending)
     {
         reader->specifier_jobs[first]->vla_begin = vla_begin;

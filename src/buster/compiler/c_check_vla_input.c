@@ -34,7 +34,9 @@ static bool check_input_vla_runtime_size(const TypeTable* types, TypeId type)
 static bool check_input_vla_force_constant(const CheckInputReader* reader, uint32_t open, bool parameter)
 {
     const Parser* parser = reader->parser;
-    bool force = !parameter && reader->function_body == BUSTER_CHECK_NONE;
+    // At file scope, and for a block's static or extern object, whose array clang can't make variable.
+    bool force = !parameter && (reader->function_body == BUSTER_CHECK_NONE || reader->declarator_storage == C_NAME_STATIC ||
+                                reader->declarator_storage == C_NAME_EXTERN);
     for (uint32_t token = open, steps = 0; !parameter && token < parser->tokens.count && steps < parser->tokens.count; steps += 1)
     {
         const uint8_t role = parser->tree.roles[token];
@@ -145,7 +147,7 @@ static bool check_input_vla_bound(CheckInputReader* reader, uint32_t open, uint3
             *extent = (uint64_t)number;
             if (valid)
             {
-                check_input_constant_bound_warning(reader, first, end, &value, name < parser->tokens.count ? name : open);
+                check_input_constant_bound_warning(reader, first, end, &value, name < parser->tokens.count ? name : open, true);
             }
         }
         else if (valid && evaluated)
