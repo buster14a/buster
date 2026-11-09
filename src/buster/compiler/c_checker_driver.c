@@ -7048,9 +7048,12 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         // (#777).
                         .discard_huge = lanes != NULL && lanes->units_lane != NULL && check_units_discard_huge(lanes->units_lane),
                     });
+                    // A resume that read the whole unit (#147) checks its view as the semantic unit it is, its `prefix_only`
+                    // keeping only the emission and the translation unit's end obligations back (`checking` the recovered
+                    // parser, where a prefix's or a repair's is a view of its own).
                     const bool program_diagnostics = result == 0 ||
-                        (ready && expression_valid && additional_count == 0 && !repairing && !prefix_only && (pp->errors != 0 || publication_errors || input.recovered_valid) &&
-                         !pp->diagnostic_collection_failed && !pp->history_failed);
+                        (ready && expression_valid && additional_count == 0 && !repairing && (!prefix_only || checking == recovered) &&
+                         (pp->errors != 0 || publication_errors || input.recovered_valid) && !pp->diagnostic_collection_failed && !pp->history_failed);
                     CheckInput diagnostic_input;
                     const CheckInput* program_input = &input;
                     if (program_diagnostics && result != 0 && input.visibility_error)
@@ -7152,11 +7155,12 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                             arena_pop_to(scratch, flushed_mark);
                         }
                     }
-                    else if (!quiet && !driver_fatal && ready && !prefix_only && !repairing && !parse_failed && !pp->fatal && !pp->diagnostic_collection_failed &&
-                             !pp->history_failed && (located || (program_diagnostics && program.token < tokens)))
+                    else if (!quiet && !driver_fatal && ready && (!prefix_only || checking == recovered) && !repairing && !pp->fatal &&
+                             !pp->diagnostic_collection_failed && !pp->history_failed && (located || (program_diagnostics && program.token < tokens)))
                     {
                         // A rejected unit's common warnings, of the bodies its errors don't reach (#1447): its reader's, its
-                        // graph's and its other errors' tokens, and its program's.
+                        // graph's and its other errors' tokens, and its program's. A parse a resume read whole (#147) is
+                        // one too: its checking is the recovered parser, where a prefix's or a repair's is a view of its own.
                         const uint64_t error_room = (uint64_t)input.report_count + stream.report_count + 2 * (uint64_t)additional_count + control.constraint_count + 1;
                         uint32_t* error_tokens = error_room <= UINT32_MAX ? BUSTER_ARENA_PUSH_ARRAY(output_arena, uint32_t, error_room) : NULL;
                         uint32_t error_count = 0;
