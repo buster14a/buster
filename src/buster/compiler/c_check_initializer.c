@@ -89,6 +89,9 @@ struct CheckInitializer
     // A value part whose target is an enumeration (#1447): the plans the common warnings read for a conversion between
     // enumerations (check_common_enum_cast).
     bool enum_values;
+    // A value part that is a label difference (#1447, check_init_label_difference), whose two labels the static data's
+    // references take (check_data_input_prepared).
+    bool label_differences;
 };
 
 static __attribute__((unused)) bool check_initializer_run(TypeTable* types, const Parser* parser, const uint32_t* token_nodes,
@@ -635,6 +638,7 @@ static void check_init_append(CheckInitWalker* walker, const CheckInitPart* part
             walker->result->changed_integers |= check_init_changed_integer(walker, part);
             const uint8_t target_kind = part->kind == CHECK_INIT_VALUE ? type_kind(walker->types, part->conversion.type) : BUSTER_TYPE_KIND_VOID;
             walker->result->enum_values |= target_kind == BUSTER_TYPE_KIND_ENUM || target_kind == BUSTER_TYPE_KIND_ALIGNED;
+            walker->result->label_differences |= part->kind == CHECK_INIT_VALUE && part->value.constant_kind == CHECK_CONSTANT_LABEL_DIFFERENCE;
         }
     }
 }
@@ -2362,8 +2366,10 @@ static void check_init_value(CheckInitWalker* walker, const CheckInitSelection* 
     }
     const CheckInitConstants* previous_constants = walker->constants;
     CheckInitConstants constants = { 0 };
+    // An object's read too, which may be a scalar compound literal's (check_init_scalar_literal, #1447).
     if (!walker->infer && walker->static_storage && node < walker->stream->count && walker->graph != NULL && walker->constants == NULL &&
         (check_stream_constant_kind(walker->stream, node) == CHECK_CONSTANT_NONE ||
+         (check_stream_category(walker->stream, node) == CHECK_LVALUE && check_action_is_scalar(walker->types, check_stream_type(walker->stream, node))) ||
          (check_vector_type(walker->types, check_stream_type(walker->stream, node)) && check_init_constant_bytes(walker, node) == NULL)))
     {
         check_init_constants(walker, token, end, node, &constants);
@@ -2453,7 +2459,16 @@ static void check_init_value(CheckInitWalker* walker, const CheckInitSelection* 
             CheckActionResult converted = { 0 };
             uint32_t candidate = 0;
             converted.diagnostic = check_init_overload(walker, &action, &candidate);
-            if (converted.diagnostic == CHECK_DIAG_NONE)
+            // A label difference (#1447, check_init_label_difference) converts as clang keeps it, and is no constant else.
+            const bool label = action.operands[0].constant_kind == CHECK_CONSTANT_LABEL_DIFFERENCE;
+            if (converted.diagnostic == CHECK_DIAG_NONE && label)
+            {
+                converted.value = action.operands[0];
+                converted.value.type = destination;
+                converted.value.constant_kind = check_init_label_conversion(walker->types, action.operands[0].type, destination) ? CHECK_CONSTANT_LABEL_DIFFERENCE :
+                                                                                                                                  CHECK_CONSTANT_NONE;
+            }
+            else if (converted.diagnostic == CHECK_DIAG_NONE)
             {
                 check_action_scalar(walker->types, &action, &converted);
             }
