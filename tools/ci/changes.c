@@ -2683,8 +2683,8 @@ static bool changes_main_policy(Text workflow)
         { 1, "    if: ${{ !cancelled() && needs.prepare-hosted-tools.result == 'success' && github.repository_id == '1421805693' && needs.evidence.result == 'success' && needs.evidence.outputs.hosted == 'run' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) && (github.event_name != 'pull_request' || (needs.agent-guide-size.result == 'success' && needs.dco-hooks.result == 'success')) }}" },
         { 1, "      fail-fast: ${{ github.event_name == 'pull_request' }}" },
         { 1, "        host_arch: [x86-64, native]" },
-        { 1, "        sanitizer: ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '[\"none\"]' || '[\"none\", \"address\", \"undefined\", \"thread\", \"memory\"]') }}" },
-        { 1, "          ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '[]' || '[{\"host_arch\": \"x86-64\", \"sanitizer\": \"address\", \"optimization\": 1, \"shard\": 1}, {\"host_arch\": \"x86-64\", \"sanitizer\": \"address\", \"optimization\": 1, \"shard\": 2}, {\"host_arch\": \"x86-64\", \"sanitizer\": \"address\", \"optimization\": 1, \"shard\": 3}, {\"host_arch\": \"x86-64\", \"sanitizer\": \"address\", \"optimization\": 1, \"shard\": 4}, {\"host_arch\": \"native\", \"sanitizer\": \"address\", \"optimization\": 1, \"shard\": 1}, {\"host_arch\": \"native\", \"sanitizer\": \"address\", \"optimization\": 1, \"shard\": 2}, {\"host_arch\": \"native\", \"sanitizer\": \"address\", \"optimization\": 1, \"shard\": 3}, {\"host_arch\": \"native\", \"sanitizer\": \"address\", \"optimization\": 1, \"shard\": 4}]') }}" },
+        { 1, "        sanitizer: ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '[\"none\"]' || '[\"none\", \"address\", \"thread\", \"memory\"]') }}" },
+        { 1, "        optimization: [3]" },
         { 1, "          ref: ${{ github.sha }}" },
         { 2, "    needs: [changes, evidence, prepare-hosted-tools]" },
         { 2, "          artifact-name: ${{ needs.prepare-hosted-tools.outputs.artifact-name }}" },
@@ -2774,9 +2774,11 @@ static void changes_test_main_policy(ChangesTest* test, Text workflow)
         { "  test:", "    needs: [changes, evidence, agent-guide-size, dco-hooks, prepare-hosted-tools]", "    needs: [changes, evidence, agent-guide-size, dco-hooks]", "tests omit preparation dependency" },
         { "  test:", "      fail-fast: ${{ github.event_name == 'pull_request' }}", "      fail-fast: true", "main matrix fail-fast" },
         { "  test:", "        host_arch: [x86-64, native]", "        host_arch: [native]", "missing baseline architecture" },
-        { "  test:", "        sanitizer: ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '[\"none\"]' || '[\"none\", \"address\", \"undefined\", \"thread\", \"memory\"]') }}", "        sanitizer: ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '[\"none\"]' || '[\"none\", \"address\", \"undefined\", \"thread\"]') }}", "missing memory sanitizer" },
-        { "  test:", "        sanitizer: ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '[\"none\"]' || '[\"none\", \"address\", \"undefined\", \"thread\", \"memory\"]') }}", "        sanitizer: ${{ fromJSON((github.event_name != 'schedule' || needs.evidence.outputs.scope == 'plain') && '[\"none\"]' || '[\"none\", \"address\", \"undefined\", \"thread\", \"memory\"]') }}", "push gets plain matrix" },
-        { "  test:", "          ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '[]' || '[{\"host_arch\": \"x86-64\", \"sanitizer\": \"address\", \"optimization\": 1, \"shard\": 1}, {\"host_arch\": \"x86-64\", \"sanitizer\": \"address\", \"optimization\": 1, \"shard\": 2}, {\"host_arch\": \"x86-64\", \"sanitizer\": \"address\", \"optimization\": 1, \"shard\": 3}, {\"host_arch\": \"x86-64\", \"sanitizer\": \"address\", \"optimization\": 1, \"shard\": 4}, {\"host_arch\": \"native\", \"sanitizer\": \"address\", \"optimization\": 1, \"shard\": 1}, {\"host_arch\": \"native\", \"sanitizer\": \"address\", \"optimization\": 1, \"shard\": 2}, {\"host_arch\": \"native\", \"sanitizer\": \"address\", \"optimization\": 1, \"shard\": 3}, {\"host_arch\": \"native\", \"sanitizer\": \"address\", \"optimization\": 1, \"shard\": 4}]') }}", "          ${{ fromJSON('[]') }}", "missing O1 sanitizer rows" },
+        { "  test:", "        sanitizer: ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '[\"none\"]' || '[\"none\", \"address\", \"thread\", \"memory\"]') }}", "        sanitizer: ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '[\"none\"]' || '[\"none\", \"thread\", \"memory\"]') }}", "missing address sanitizer" },
+        { "  test:", "        sanitizer: ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '[\"none\"]' || '[\"none\", \"address\", \"thread\", \"memory\"]') }}", "        sanitizer: ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '[\"none\"]' || '[\"none\", \"address\", \"memory\"]') }}", "missing thread sanitizer" },
+        { "  test:", "        sanitizer: ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '[\"none\"]' || '[\"none\", \"address\", \"thread\", \"memory\"]') }}", "        sanitizer: ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '[\"none\"]' || '[\"none\", \"address\", \"thread\"]') }}", "missing memory sanitizer" },
+        { "  test:", "        sanitizer: ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '[\"none\"]' || '[\"none\", \"address\", \"thread\", \"memory\"]') }}", "        sanitizer: ${{ fromJSON((github.event_name != 'schedule' || needs.evidence.outputs.scope == 'plain') && '[\"none\"]' || '[\"none\", \"address\", \"thread\", \"memory\"]') }}", "push gets plain matrix" },
+        { "  test:", "        optimization: [3]", "        optimization: [1]", "missing O3 optimization" },
         { "  test:", "          ref: ${{ github.sha }}", "          ref: main", "moving hosted revision" },
         { "  fuzz:", "    if: ${{ !cancelled() && needs.prepare-hosted-tools.result == 'success' && github.repository_id == '1421805693' && github.event_name != 'pull_request' && needs.evidence.result == 'success' && needs.evidence.outputs.hosted == 'run' && needs.evidence.outputs.scope == 'full' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) }}", "    if: ${{ !cancelled() && needs.prepare-hosted-tools.result == 'success' && github.repository_id == '1421805693' && github.event_name != 'pull_request' && needs.evidence.result == 'success' && needs.evidence.outputs.hosted == 'run' && needs.evidence.outputs.hardware == 'admit' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) }}", "native reuse suppresses fuzzing" },
         { "  fuzz:", "needs.prepare-hosted-tools.result == 'success' && ", "", "fuzzing bypasses preparation failure" },
@@ -2805,10 +2807,10 @@ static void changes_test_main_policy(ChangesTest* test, Text workflow)
     }
 }
 
-// The hosted test job's shards (docs/ci.md): its matrix's `shard: [1, ..., N]`, consecutive from 1, and the same N in the
-// job's name (`shard ${{ matrix.shard }} of N)`), in the run step's `--shard "${{ matrix.shard }}/N"`, and in the O1
-// rows' include entries, shards 1 to N of each architecture. `parallel --shard K/N` deals the inventory to N shards, so a
-// list and an N that disagree would leave a shard's commands unrun (or run some twice) with every job green.
+// The hosted test job's shards (docs/ci.md): its matrix's `shard: [1, ..., N]` must count from 1, and the same N must
+// appear in the job's name (`shard ${{ matrix.shard }} of N)`) and run step's `--shard "${{ matrix.shard }}/N"`.
+// `parallel --shard K/N` deals the inventory to N shards, so disagreeing values would leave commands unrun
+// (or run some twice) with every job green.
 static bool changes_shard_policy(Text workflow)
 {
     const char* text = text_terminated(workflow);
@@ -2835,29 +2837,12 @@ static bool changes_shard_policy(Text workflow)
     valid = valid && memmem(job, length, pattern, strlen(pattern)) != NULL;
     snprintf(pattern, sizeof(pattern), "--shard \"${{ matrix.shard }}/%u\"", shards);
     valid = valid && memmem(job, length, pattern, strlen(pattern)) != NULL;
-    // The O1 rows: each architecture's shards 1 to N, and no other O1 entry.
-    static const char* const architectures[] = { "x86-64", "native" };
-    for (uint32_t a = 0; valid && a < sizeof(architectures) / sizeof(architectures[0]); a += 1)
-    {
-        for (uint32_t k = 1; valid && k <= shards; k += 1)
-        {
-            snprintf(pattern, sizeof(pattern), "{\"host_arch\": \"%s\", \"sanitizer\": \"address\", \"optimization\": 1, \"shard\": %u}", architectures[a], k);
-            valid = memmem(job, length, pattern, strlen(pattern)) != NULL;
-        }
-    }
-    static const char entry[] = "\"optimization\": 1, \"shard\": ";
-    uint32_t entries = 0;
-    for (const char* e = valid ? memmem(job, length, entry, sizeof(entry) - 1) : NULL; e != NULL;
-         e = memmem(e + 1, length - (size_t)(e + 1 - job), entry, sizeof(entry) - 1))
-    {
-        entries += 1;
-    }
-    return valid && entries == shards * (uint32_t)(sizeof(architectures) / sizeof(architectures[0]));
+    return valid;
 }
 
 static void changes_test_shard_policy(ChangesTest* test, Text workflow)
 {
-    changes_expect(test, changes_shard_policy(workflow), "shard policy: the test job's shard list, its N and the O1 rows' shards agree", (Text){ 0 });
+    changes_expect(test, changes_shard_policy(workflow), "shard policy: the test job's shard list, job name and command agree", (Text){ 0 });
     static const struct
     {
         const char* before;
@@ -2870,10 +2855,6 @@ static void changes_test_shard_policy(ChangesTest* test, Text workflow)
         { "--shard \"${{ matrix.shard }}/4\"", "--shard \"${{ matrix.shard }}/5\"" },
         { "--shard \"${{ matrix.shard }}/4\"", "--shard \"${{ matrix.shard }}/3\"" },
         { "shard ${{ matrix.shard }} of 4)", "shard ${{ matrix.shard }} of 5)" },
-        { ", {\"host_arch\": \"native\", \"sanitizer\": \"address\", \"optimization\": 1, \"shard\": 4}", "" },
-        { "{\"host_arch\": \"x86-64\", \"sanitizer\": \"address\", \"optimization\": 1, \"shard\": 2}",
-          "{\"host_arch\": \"x86-64\", \"sanitizer\": \"address\", \"optimization\": 1, \"shard\": 1}" },
-        { "\"optimization\": 1, \"shard\": 4}]", "\"optimization\": 1, \"shard\": 4}, {\"host_arch\": \"native\", \"sanitizer\": \"address\", \"optimization\": 1, \"shard\": 5}]" },
     };
     const char* original = text_terminated(workflow);
     for (uint32_t i = 0; i < sizeof(mutants) / sizeof(mutants[0]); i += 1)
