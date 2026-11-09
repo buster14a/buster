@@ -15832,6 +15832,11 @@ static bool pp_parse_integer(Preprocessor* pp, const uint8_t* spelling, uint32_t
         }
     }
     valid &= digits || radix == 8;
+    if (valid && longs == 4 && pp->options.language.standard < 2023)
+    {
+        // As clang's NumericLiteralParser warns of the suffix (#1447), before the value's errors.
+        pp_diagnose(pp, PP_SEVERITY_WARNING, location, "'_BitInt' suffix for literals is a C23 extension");
+    }
     if (!valid)
     {
         pp_diagnose_integer(pp, spelling, length, location);

@@ -362,6 +362,9 @@ typedef enum CheckWarningEventKind
     // payload.first_type and second_type its operands' types as clang's getEnumCoercedType gives them, payload.name and
     // data their typedef spellings (0 for none). check_common_enum_arithmetic reports it as the graph's operators.
     CHECK_WARNING_EVENT_ENUM_MIX,
+    // A bit-precise constant's suffix (wb or uwb) before C23 (#1447): -Wc23-extensions' "'_BitInt' suffix for literals is a
+    // C23 extension" (CHECK_WARNING_ID_C23_PARAMETER's option), at the constant.
+    CHECK_WARNING_EVENT_BIT_INT_SUFFIX,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
 
