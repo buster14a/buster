@@ -5624,6 +5624,11 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         check_test_program_boundary_reason(test, "struct W{unsigned _BitInt(200) x:150;};int tested(int n){struct W w;w.x=n;return w.x>1;}", "bit-int-200-bit-field", true,
                                            false, 0, 0, "bit-fields of this type or spread over more than 8 bytes");
         check_test_program_boundary(test, "int tested(int n){_BitInt(100) r;return __builtin_add_overflow(n,n,&r);}", "bit-int-100-overflow", true, true, 0, 0);
+        // A result SSE, SSEUP of 22 bytes, which clang returns as <2 x double> in xmm0 (#1832): refused by its registers,
+        // not as a long double (an x87 register's bit, which a NONE second register has too).
+        check_test_program_boundary_reason(test, "union __attribute__((packed)) U{float v __attribute__((vector_size(16)));char c[22];};"
+                                           "union U make(int n){union U u={0};u.c[0]=(char)n;return u;}int tested(int n){return make(n).c[0];}",
+                                           "odd-vector-union-result", true, false, 0, 0, "structs and unions returned in these registers");
         check_test_program_boundary(test, "struct W{unsigned __int128 x:100;};int tested(int n){struct W w;w.x=n;return w.x>1;}", "int128-bit-field-past-8-bytes", true,
                                     false, 0, 0);
         check_test_program_boundary(test,
