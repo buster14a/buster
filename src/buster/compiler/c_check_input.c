@@ -5209,7 +5209,7 @@ static bool check_input_enum_operand(const CheckInputReader* reader, uint32_t to
 // enumerator of a tagged enumeration outside that enumeration's definition (where clang takes it as an int): the nearest
 // enumeration definition before the enumerator's declaration that holds it, within 1024 tokens, beyond which it is taken
 // as tagged. Its `{` is where its tag ends (CheckInputReader.tag_ends), and its `}` the `{`'s parent.
-static bool check_input_enum_named(const CheckInputReader* reader, uint32_t token)
+static __attribute__((noinline)) bool check_input_enum_named(const CheckInputReader* reader, uint32_t token)
 {
     const Parser* parser = reader->parser;
     const TypeTable* types = reader->types;

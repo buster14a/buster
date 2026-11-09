@@ -596,6 +596,20 @@ static inline __m512i check_input_gather_bytes(__mmask16 lanes, __m512i indices,
     return _mm512_and_si512(_mm512_srlv_epi32(dwords, shifts), _mm512_set1_epi32(0xff));
 }
 
+// The identifiers at `tokens` that `enums` selects, enumerators and enumerations' variables, as they mark the unit
+// (check_input_note_enum, their twin): rare, so out of line, that the identifiers' vector loop keeps its code.
+static __attribute__((noinline, cold)) void check_input_note_enums(const CheckInputReader* reader, const uint32_t* tokens, __mmask16 enums)
+{
+    for (__mmask16 named = enums; named != 0 && !reader->output->enum_names; named &= (__mmask16)(named - 1))
+    {
+        reader->output->enum_names = check_input_enum_named(reader, tokens[__builtin_ctz(named)]);
+    }
+    for (__mmask16 operands = enums; operands != 0 && !reader->output->enum_operands; operands &= (__mmask16)(operands - 1))
+    {
+        reader->output->enum_operands = check_input_enum_operand(reader, tokens[__builtin_ctz(operands)]);
+    }
+}
+
 // The entries of the chunk's identifiers, the `acting` tokens and classes whose class is CHECK_INPUT_CODE_IDENTIFIER, in
 // their order into `identifiers`; returns how many. The vector path compresses the identifiers 16 tokens at a time, then
 // gathers 16 identifiers' columns at once: their types and declarations, then their declarations' columns and their
@@ -645,13 +659,9 @@ static uint32_t check_input_expression_identifiers(const CheckInputReader* reade
         // An enumerator or an enumeration's variable marks the unit (check_input_note_enum, its twin).
         __mmask16 enums = enumeration | _mm512_mask_cmpeq_epi32_mask(typed, type_kinds, _mm512_set1_epi32(BUSTER_TYPE_KIND_ENUM)) |
                           _mm512_mask_cmpeq_epi32_mask(typed, type_kinds, _mm512_set1_epi32(BUSTER_TYPE_KIND_ALIGNED));
-        for (__mmask16 named = enums; named != 0 && !reader->output->enum_names; named &= (__mmask16)(named - 1))
+        if (__builtin_expect(enums != 0 && !(reader->output->enum_operands && reader->output->enum_names), 0))
         {
-            reader->output->enum_names = check_input_enum_named(reader, found[at + (uint32_t)__builtin_ctz(named)]);
-        }
-        for (; enums != 0 && !reader->output->enum_operands; enums &= (__mmask16)(enums - 1))
-        {
-            reader->output->enum_operands = check_input_enum_operand(reader, found[at + (uint32_t)__builtin_ctz(enums)]);
+            check_input_note_enums(reader, found + at, enums);
         }
         const __mmask16 has_object = _mm512_mask_test_epi32_mask(typed, objects, objects);
         const __mmask16 nonnull = has_object & ~enumeration;
