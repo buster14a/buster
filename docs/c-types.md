@@ -509,8 +509,11 @@ Extended qualifiers print after const, volatile and restrict, as clang's
 after a pointer's `*` (`int *const __attribute__((address_space(2)))`). A
 typedef's name under a space prints after it
 (`__attribute__((address_space(1))) T *`). clang's name of a type whose space
-a macro wrote (its `MacroQualifiedType`, `'AS1 int *'`) isn't given: the
-attribute is spelled out.
+a macro wrote (its `MacroQualifiedType`, `'AS1 int *'`) prints by the macro
+where the caller gives one by space (`TypeNames.space_macro_spaces`, #1447):
+before its level, with the level's other qualifiers after its specifier
+(`'AS1 int const *'`), as clang's printer places them; else the attribute is
+spelled out.
 
 ## Tests
 

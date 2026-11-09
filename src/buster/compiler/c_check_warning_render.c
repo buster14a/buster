@@ -131,6 +131,11 @@ struct CheckWarningSpelling
     uint32_t count;
     String8* anonymous;
     uint32_t anonymous_count;
+    // The target address spaces a macro writes throughout the unit (check_driver_space_macros, #1447).
+    uint32_t* space_macro_spaces;
+    String8* space_macro_texts;
+    uint32_t space_macro_count;
+    bool space_built;
     bool built;
 };
 
@@ -249,6 +254,118 @@ static bool check_driver_spelling_build(const Parser* parser, Preprocessor* pp, 
     return valid;
 }
 
+// c_check_semantic_diagnostic.c's, included after this file.
+static String8 check_semantic_token(const Parser* parser, Preprocessor* pp, uint32_t token, Arena* scratch);
+
+#define BUSTER_CHECK_DRIVER_SPACE_MACROS 16
+
+// The outermost macro expansion a token's origin comes from (its PPExpansion's index plus one), through the macros
+// expanded inside others; 0 for a token the source wrote or a generated one.
+static uint32_t check_driver_macro_root(const Preprocessor* pp, uint32_t origin)
+{
+    uint32_t result = 0;
+    for (uint32_t steps = 0; origin != 0 && steps < 256; steps += 1)
+    {
+        const uint32_t index = (origin & BUSTER_PP_ORIGIN_INDEX) - 1;
+        const uint32_t kind = origin & ~BUSTER_PP_ORIGIN_INDEX;
+        result = kind == 0 ? index + 1 : kind == BUSTER_PP_ORIGIN_ARGUMENT ? result : 0;
+        origin = kind == 0 ? pp->history[index].parent : kind == BUSTER_PP_ORIGIN_ARGUMENT ? pp->substitutions[index].source : 0;
+    }
+    return result;
+}
+
+// The macros that write the unit's target address spaces (#1447), as clang's MacroQualifiedType names a type whose
+// attribute list one macro's expansion wrote (`#define AS1 __attribute__((address_space(1)))`, `'AS1 int *'`): an
+// object-like macro by its name, a function-like one by its invocation as written (`'ASN(3) int *'`), the outermost
+// one where macros nest. clang names each declaration's own spelling; a space this unit writes both ways, or with two
+// macros, keeps its attribute spelled out. One scan of the `__attribute__` tokens, on a pass's first rendered type.
+static bool check_driver_space_macros(const Parser* parser, Preprocessor* pp, CheckWarningSpelling* spell, Arena* scratch)
+{
+    uint32_t* spaces = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, BUSTER_CHECK_DRIVER_SPACE_MACROS);
+    String8* texts = spaces != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, String8, BUSTER_CHECK_DRIVER_SPACE_MACROS) : NULL;
+    bool* mixed = texts != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, bool, BUSTER_CHECK_DRIVER_SPACE_MACROS) : NULL;
+    const bool valid = mixed != NULL;
+    const bool history = valid && pp_history_ensure(pp);
+    uint32_t count = 0;
+    const uint32_t token_count = parser->tokens.count;
+    for (uint32_t t = 0; history && t + 1 < token_count; t += 1)
+    {
+        const uint32_t close = parser->tokens.kinds[t] == PARSE_KIND_ATTRIBUTE && parser->tokens.kinds[t + 1] == PARSE_KIND_L_PAREN ? parser->tree.parents[t + 1] :
+                               BUSTER_CHECK_NONE;
+        for (uint32_t a = t + 2; close < token_count && a + 3 < close; a += 1)
+        {
+            const String8 name = parser->tokens.kinds[a] == PARSE_KIND_IDENTIFIER ? check_driver_warning_name(pp, parser->tokens.names[a]) : (String8){ 0 };
+            const bool space = (name.length == 13 && memcmp(name.pointer, "address_space", 13) == 0) ||
+                               (name.length == 17 && memcmp(name.pointer, "__address_space__", 17) == 0);
+            const String8 number = space && parser->tokens.kinds[a + 1] == PARSE_KIND_L_PAREN && parser->tokens.kinds[a + 2] == PARSE_KIND_NUMBER &&
+                                   parser->tokens.kinds[a + 3] == PARSE_KIND_R_PAREN ? check_semantic_token(parser, pp, a + 2, scratch) : (String8){ 0 };
+            char digits[24] = { 0 };
+            const bool read = number.length != 0 && number.length < sizeof(digits);
+            if (read)
+            {
+                memcpy(digits, number.pointer, number.length);
+            }
+            char* end = NULL;
+            const unsigned long long value = read ? strtoull(digits, &end, 0) : 0;
+            if (read && end != NULL && *end == 0 && value <= BUSTER_TYPE_SPACE_MASK - BUSTER_TYPE_SPACE_TARGET)
+            {
+                const uint32_t word = BUSTER_TYPE_SPACE_TARGET + (uint32_t)value;
+                const uint32_t root = check_driver_macro_root(pp, pp_history_at(pp, parser->tokens.sources[t]));
+                const bool whole = root != 0 && root == check_driver_macro_root(pp, pp_history_at(pp, parser->tokens.sources[close]));
+                const PPExpansion* expansion = whole ? &pp->history[root - 1] : NULL;
+                const bool invocation = expansion != NULL && expansion->end > expansion->begin &&
+                                        pp_find_range(pp, expansion->begin) == pp_find_range(pp, expansion->end);
+                const uint8_t* bytes = invocation ? pp_location_bytes(pp, expansion->begin) : NULL;
+                const String8 text = bytes != NULL ? (String8){ .pointer = (char*)bytes, .length = (uint64_t)(expansion->end - expansion->begin) + 1 } :
+                                     expansion != NULL ? check_driver_warning_name(pp, expansion->name) : (String8){ 0 };
+                uint32_t entry = count;
+                for (uint32_t i = 0; entry == count && i < count; i += 1)
+                {
+                    entry = spaces[i] == word ? i : count;
+                }
+                if (entry == count && count < BUSTER_CHECK_DRIVER_SPACE_MACROS)
+                {
+                    spaces[count] = word;
+                    texts[count] = text;
+                    mixed[count] = text.length == 0;
+                    count += 1;
+                }
+                else if (entry < count)
+                {
+                    mixed[entry] |= text.length != texts[entry].length || (text.length != 0 && memcmp(text.pointer, texts[entry].pointer, text.length) != 0);
+                }
+            }
+        }
+    }
+    uint32_t kept = 0;
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        spaces[kept] = spaces[i];
+        texts[kept] = texts[i];
+        kept += mixed[i] ? 0 : 1;
+    }
+    spell->space_macro_spaces = spaces;
+    spell->space_macro_texts = texts;
+    spell->space_macro_count = kept;
+    return valid;
+}
+
+// Whether a type has a target address space at a level type_print reaches through pointers, arrays and functions'
+// results: where check_driver_space_macros's scan can matter.
+static bool check_driver_type_has_space(const TypeTable* types, TypeId type)
+{
+    bool found = false;
+    TypeId level = type;
+    for (uint32_t depth = 0; !found && depth < 256 && level != 0 && type_is_valid(types, level); depth += 1)
+    {
+        found = type_address_space(type_extended_qualifiers(types, level)) >= BUSTER_TYPE_SPACE_TARGET;
+        const TypeId bare = type_unqualified(type_strip_aligned(types, level));
+        const uint8_t kind = type_kind(types, bare);
+        level = kind == BUSTER_TYPE_KIND_POINTER || kind == BUSTER_TYPE_KIND_FUNCTION || type_kind_is_array(kind) ? types->types.base[type_index(bare)] : 0;
+    }
+    return found;
+}
+
 // One pass's spelling rows, built on its first rendered type (#992): a pass that renders none never scans the
 // token columns. A built pass keeps its rows until it ends, above every per-event mark.
 static bool check_driver_spelling_ready(const Parser* parser, Preprocessor* pp, const CheckInput* input, const TypeTable* types,
@@ -275,6 +392,7 @@ static bool check_driver_spelling_ready(const Parser* parser, Preprocessor* pp, 
         {
             valid = check_driver_spelling_build(parser, pp, input, types, spell, scratch);
         }
+
         if (!valid)
         {
             spell->bytes = NULL;
@@ -481,6 +599,14 @@ static String8 check_driver_warning_type_at(const Parser* parser, Preprocessor* 
                 .anonymous = spell->anonymous,
                 .anonymous_count = spell->anonymous_count,
             };
+            if (!spell->space_built && check_driver_type_has_space(types, type))
+            {
+                spell->space_built = true;
+                spell->space_built = check_driver_space_macros(parser, pp, spell, scratch);
+            }
+            names.space_macro_spaces = spell->space_macro_spaces;
+            names.space_macro_texts = spell->space_macro_texts;
+            names.space_macro_count = spell->space_macro_count;
             TypeId alias_type = 0;
             String8 alias_name = { 0 };
             if (spelling == BUSTER_CHECK_NONE)
@@ -545,13 +671,20 @@ static String8 check_driver_warning_type_at(const Parser* parser, Preprocessor* 
                 expand.alias_types = &vector_type;
                 expand.alias_names = &vector_alias;
                 expand.parenthesis_count = 0;
+                // desugarForDiagnostic strips a macro's name too: the a.k.a. spells the space out.
+                expand.space_macro_count = 0;
                 canonical = type_print(types, scratch, type, (String8){ 0 }, &expand, options);
             }
+            // A macro's name alone gives no a.k.a. (it sets no ShouldAKA): the comparison is without it.
+            TypeNames bare = names;
+            bare.space_macro_count = 0;
+            const String8 compared = canonical.length != 0 && names.space_macro_count != 0 && contextual ?
+                                     type_print(types, scratch, type, (String8){ 0 }, &bare, options) : sugared;
             // The returned text carries its own quotes: clang's `(aka '...')` sits outside the type's, so the
             // messages print `%.*s` without quoting it themselves.
             result = sugared;
             if (sugared.length != 0 && canonical.length != 0 &&
-                (canonical.length != sugared.length || memcmp(canonical.pointer, sugared.pointer, canonical.length) != 0))
+                (canonical.length != compared.length || memcmp(canonical.pointer, compared.pointer, canonical.length) != 0))
             {
                 const char* combined = check_warning_text(scratch, "'%.*s' (aka '%.*s')", (int)sugared.length, sugared.pointer,
                                                           (int)canonical.length, canonical.pointer);

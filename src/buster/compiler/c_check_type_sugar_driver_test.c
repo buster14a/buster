@@ -93,6 +93,33 @@ static const CheckDriverDefaultWarningFixture check_driver_type_sugar_fixtures[]
         .errors = 5,
         .notes = 2,
     },
+    {
+        // A target address space one macro writes throughout the unit prints by the macro (check_driver_space_macros,
+        // clang's MacroQualifiedType): before its level, with that level's other qualifiers after its specifier; a
+        // function-like macro by its invocation, nested macros by the outermost; a typedef's a.k.a. spells it out.
+        .name = "address space macro names",
+        .source = "#define AS1 __attribute__((address_space(1)))\n"
+                  "#define ASN(n) __attribute__((address_space(n)))\n"
+                  "#define INNER __attribute__((address_space(4)))\n"
+                  "#define OUTER INNER\n"
+                  "typedef AS1 int I1;\n"
+                  "struct m { AS1 int *f; };\n"
+                  "void f(const AS1 int *a, AS1 const volatile int *b, int *AS1 *c, I1 *d, ASN(3) int *e, OUTER int *g, struct m mm, AS1 int *const k, I1 *const *l)\n"
+                  "{\n"
+                  "    a();\n"
+                  "    b();\n"
+                  "    c();\n"
+                  "    d();\n"
+                  "    e();\n"
+                  "    g();\n"
+                  "    mm.f();\n"
+                  "    k();\n"
+                  "    l();\n"
+                  "    a = e;\n"
+                  "    int x = a;\n"
+                  "}\n",
+        .errors = 11,
+    },
 };
 
 static void check_test_driver_type_sugar(CheckTest* test, const char* clang, const char* executable, const char* directory)
