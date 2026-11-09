@@ -3811,8 +3811,10 @@ that holds the name is cut whole, where clang still checks an operator on its
 value (`({ undeclared; p; }) + 1.5`); a unit with an error publishes no
 runtime (non-constant) shift warning, where clang, which then skips their
 reachability analysis, publishes them all (`x << 40`); a missing name that
-the declaration walk reports (an enumerator's or an array bound's) is a
-declarator failure, which keeps the whole unit's conservative prefix; and a
+the declaration walk reports in an array's bound, a `typeof` operand, a
+`_BitInt` width or a file-scope designator is a declarator failure, which
+keeps the whole unit's conservative prefix (an enumerator's value's and a
+bit-field width's are recovered: below); and a
 unit with any report other than a missing name (a control-flow error such as
 a `break` outside a loop, a declaration conflict) keeps the previous
 whole-unit prefix, which starts at the unit's first report of any kind, even
@@ -4362,9 +4364,24 @@ Left as they were:
 - Later diagnostics spell the name as written, not the one taken
   (`const int counter; countr = 5;`), and a function designator's
   comparison statement keeps its `-Wunused` and `-Wparentheses` notes.
-- A name the walk itself reads, a `typeof` operand, an array's bound or an
-  enumerator's value, is not corrected: an undeclared one there still stops
-  the reader, typo or not, as on main.
+- A name the walk itself reads is searched in the walk's order
+  (`check_typo_walk_value`, `check_constant_name` in `c_check_constant.c`),
+  among the declarations visible so far. In an enumerator's value or a
+  bit-field's width, the correction is taken as if it were written, and a
+  name with no correction is clang's error at the name, recovered: the
+  enumerator takes the value it would have had with no `=` (clang gives
+  `enum E { Z = 4, A = zzz, B }` A 5 and B 6, and a fixed enum's next value),
+  and the member is no bit-field, an unnamed one an unnamed member of its
+  whole type (`long : zzz` aligns the record to 8). A correction to a
+  non-constant (`enum { B = countr + 1 }` with an `int counter`) keeps the
+  generic declaration error where clang says "expression is not an integer
+  constant expression" at the culprit, as any non-constant enumerator value
+  or width does. A `typeof` operand, an array's bound, a `_BitInt` width or a
+  designator's index is not corrected yet: an undeclared one there still
+  stops the reader. Lanes and deferred readers search nothing: a unit with
+  such a name is read again in source order, which corrects it. A walk
+  search doesn't count a value's search that the binding answers make later
+  in an earlier body, which matters only past clang's 50 corrections.
 - A library function implicitly declared in an earlier function is no
   candidate, where clang's declaration stays visible at file scope.
 - A warning at an operator or a declarator whose operand was corrected
