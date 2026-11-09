@@ -758,6 +758,39 @@ static void check_test_library_runs(CheckTest* test, const char* clang, const ch
             NULL,
         },
         {
+            "no_builtin(\"fmax\") keeps the function's fmax a call, its fmin inline (#1958)",
+            "int printf(const char*,...);double fmax(double,double);double fmin(double,double);\n"
+            "__attribute__((no_builtin(\"fmax\"))) int main(void){volatile double z=0.0,n=-0.0;"
+            "printf(\"%d %d\\n\",__builtin_signbit(fmax(n,z))!=0,__builtin_signbit(fmin(z,n))!=0);return 0;}\n",
+            "-std=gnu17",
+            NULL,
+        },
+        {
+            "no_builtin keeps every plain library builtin's call a call, but its __builtin_ form's",
+            "int printf(const char*,...);int strcmp(const char*,const char*);unsigned long strlen(const char*);double fmin(double,double);\n"
+            "static int other(void){return strcmp(\"a\",\"c\");}\n"
+            "__attribute__((no_builtin)) int main(void){volatile double z=0.0,n=-0.0;"
+            "printf(\"%d %d %d %d %d\\n\",strcmp(\"a\",\"c\"),__builtin_strcmp(\"a\",\"c\"),(int)strlen(\"abc\"),__builtin_signbit(fmin(z,n))!=0,other());return 0;}\n",
+            "-std=gnu17",
+            NULL,
+        },
+        {
+            "no_builtin of another name or \"*\" leaves strcmp a fold",
+            "int strcmp(const char*,const char*);\n"
+            "__attribute__((no_builtin(\"strlen\",\"memcpy\"))) static int f(void){return strcmp(\"a\",\"c\");}\n"
+            "__attribute__((no_builtin(\"*\"))) int main(void){return strcmp(\"a\",\"c\")+f()+4;}\n",
+            "-std=gnu17",
+            NULL,
+        },
+        {
+            "no_builtin keeps a <stdbit.h> function's call the definition's",
+            "int printf(const char*,...);\nunsigned int stdc_leading_zeros_ui(unsigned int x){(void)x;return 99;}\n"
+            "__attribute__((no_builtin(\"stdc_leading_zeros_ui\"))) int main(void){volatile unsigned v=1;"
+            "printf(\"%u %u\\n\",stdc_leading_zeros_ui(v),__builtin_stdc_leading_zeros(v));return 0;}\n",
+            "-std=gnu23",
+            NULL,
+        },
+        {
             "__builtin_strcmp folds whatever the options",
             "int main(void){return __builtin_strcmp(\"a\",\"c\")+2;}\n",
             "-std=gnu17",

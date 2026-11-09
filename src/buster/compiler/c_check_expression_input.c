@@ -1323,7 +1323,9 @@ static bool check_input_expression_call(CheckInputReader* reader, CheckInputBatc
                 const uint32_t designator = callee_op == CHECK_OP_ADDRESS ? check_input_batch_operand0(reader, batch, callee) : callee;
                 const uint32_t use = designator < node && check_input_batch_op(reader, batch, designator) == CHECK_OP_VALUE ? check_input_batch_token(reader, batch, designator) :
                                                                                                                              BUSTER_CHECK_NONE;
-                const uint32_t library = use != BUSTER_CHECK_NONE ? check_input_library_call(reader, use) : 0;
+                uint32_t library = use != BUSTER_CHECK_NONE ? check_input_library_call(reader, use) : 0;
+                // In a function whose no_builtin names it, the call is the declaration's (#1958).
+                library = library != 0 && check_input_no_builtin(reader, reader->parser->tokens.names[use]) ? 0 : library;
                 batch->members[place] = library != 0 ? library : batch->members[place];
             }
             const uint32_t callee_token = input->overload_heads != NULL ? check_input_batch_token(reader, batch, callee) : reader->parser->tokens.count;

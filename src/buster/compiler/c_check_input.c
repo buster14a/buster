@@ -10384,6 +10384,36 @@ static inline __attribute__((always_inline)) uint32_t check_input_library_call(C
     return masked ? check_input_library_declaration(reader, declaration) : 0;
 }
 
+// Whether the function whose body the walk reads (reader->function_body) has clang's no_builtin attribute for the library
+// function named `name` (#1958): with no arguments, every one; else one of its strings. clang's code then calls the
+// unit's declaration of a plain library builtin in that body rather than compute or fold it (EmitDirectCallee's
+// no-builtin-NAME and no-builtins function attributes), though its constant contexts still fold (the constant
+// evaluator doesn't read the attribute). A string clang warns names no builtin ("*" among them) matches none.
+static __attribute__((noinline)) bool check_input_no_builtin(CheckInputReader* reader, IdentId name)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t body = reader->function_body;
+    const uint32_t function = body < parser->tokens.count ? check_sparse_get(reader->output->body_declarations, body) : BUSTER_CHECK_NONE;
+    const CheckInputAttributes* attributes = function < parser->tokens.count ? check_input_attributes_at(reader->output, function) : NULL;
+    const uint8_t* spelling = name != 0 ? intern_bytes(reader->pp->table, name) : NULL;
+    const uint32_t length = name != 0 ? intern_length(reader->pp->table, name) : 0;
+    bool covered = false;
+    for (uint32_t i = 0; attributes != NULL && !covered && i < attributes->count; i += 1)
+    {
+        const CheckInputAttribute* attribute = attributes->records + i;
+        const bool applies = attribute->kind == CHECK_ATTRIBUTE_NO_BUILTIN && !attribute->ignored;
+        covered = applies && attribute->argument_count == 0;
+        for (uint32_t k = 0; applies && !covered && k < attribute->argument_count; k += 1)
+        {
+            const uint32_t first = k == 0 ? attribute->argument_first : attribute->argument_ends[k - 1] + 1;
+            const uint32_t end = k + 1 < attribute->argument_count ? attribute->argument_ends[k] : attribute->argument_end;
+            String8 text = { 0 };
+            covered = check_input_attribute_string(reader, first, end, false, &text) && text.length == length && memcmp(text.pointer, spelling, length) == 0;
+        }
+    }
+    return covered;
+}
+
 #include "c_check_literal_table_input.c"
 // C23 auto's deduction (#793), as clang deduces a placeholder through the declarator's shape: the initializer's type
 // is lvalue-converted and decayed at the top, then each pointer, array, function and aligned level matches its own
@@ -10754,7 +10784,9 @@ static inline __attribute__((always_inline)) void check_input_resolve_name(Check
     const uint32_t bound = __builtin_expect(builtin != CBUILTIN_NONE, 0) ? c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, identifier) : 0;
     // A catalog builtin's name that no declaration binds, or a call of the unit's declaration of a <stdbit.h>
     // function that clang makes the builtin.
-    const bool claimed = cbuiltin_stdc_library(builtin) ? check_input_stdc_library_call(reader, i, bound, builtin) : bound == 0;
+    // In a function whose no_builtin names a <stdbit.h> function, its call is the declaration's (#1958).
+    const bool claimed = cbuiltin_stdc_library(builtin) ? check_input_stdc_library_call(reader, i, bound, builtin) && !check_input_no_builtin(reader, identifier) :
+                                                          bound == 0;
     if (__builtin_expect(builtin != CBUILTIN_NONE, 0) && role == PARSE_ROLE_OPERAND && claimed)
     {
         // The callee may be the name in parentheses, which clang's call looks through (check_input_callee_end): they
@@ -12542,7 +12574,9 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
                 // A call of a plain library builtin's declaration that clang folds (#148), marked for the checker.
                 const uint32_t callee = graph->ops[a] == CHECK_OP_ADDRESS ? graph->operand0[a] : a;
                 const uint32_t use = callee < node && graph->ops[callee] == CHECK_OP_VALUE ? graph->tokens[callee] : BUSTER_CHECK_NONE;
-                const uint32_t library = use != BUSTER_CHECK_NONE ? check_input_library_call(reader, use) : 0;
+                uint32_t library = use != BUSTER_CHECK_NONE ? check_input_library_call(reader, use) : 0;
+                // In a function whose no_builtin names it, the call is the declaration's (#1958).
+                library = library != 0 && check_input_no_builtin(reader, parser->tokens.names[use]) ? 0 : library;
                 graph->members[node] = library != 0 ? library : graph->members[node];
             }
             if (BUSTER_CHECK_RARE(reader, builtins, token) != 0)
