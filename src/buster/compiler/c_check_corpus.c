@@ -2081,7 +2081,7 @@ static bool check_corpus_view_equal(const CheckCorpusPath* a, const CheckCorpusP
         const ParseDiagnostic* right = y->diagnostics + report;
         equal = left->token == right->token && left->argument == right->argument && left->message == right->message &&
                 left->place == right->place && left->error == right->error && left->note == right->note &&
-                left->resumed == right->resumed && left->parameter_type == right->parameter_type;
+                left->resumed == right->resumed && left->parameter_type == right->parameter_type && left->resume_colon == right->resume_colon;
     }
     if (equal && a->prefix != 0)
     {
@@ -2391,7 +2391,7 @@ static bool check_corpus_equal(const CheckCorpusPath* a, const CheckCorpusPath* 
             const ParseDiagnostic* right = b->resumed->diagnostics + i;
             equal = left->token == right->token && left->argument == right->argument && left->message == right->message &&
                     left->place == right->place && left->error == right->error && left->note == right->note && left->resumed == right->resumed &&
-                    left->resume_delete == right->resume_delete && left->resume_end == right->resume_end;
+                    left->resume_delete == right->resume_delete && left->resume_end == right->resume_end && left->resume_colon == right->resume_colon;
         }
     }
     equal = equal && check_corpus_view_equal(a, b, x, y) && (a->repair == NULL) == (b->repair == NULL) &&
