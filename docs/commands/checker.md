@@ -210,13 +210,16 @@ unused-warning fixtures also check exact scope-completion tokens.
   statement expression. A `sizeof` of a variable-array expression evaluates its operand after all.
   The contexts' memo is pushed at a unit's first such warning, so a unit without one pays nothing. Six
   original default-warning fixtures compare complete output with Clang, among them the evaluated and bound
-  controls and a value that decays from a variable array. Still separate: `-Wuninitialized` reads and writes
-  in such a statement expression, which need the evaluation facts themselves; the input reader's
-  `-Wshift-count-overflow` there; clang's runtime-warning drop in every array bound; a variable-array
+  controls and a value that decays from a variable array. A statement expression whose value is
+  not evaluated has none of its nodes evaluated either (`check_common_region_evaluation`): the run of nodes before its
+  own, its statements' and nested statement expressions', is cleared after the evaluation facts are made on either
+  path, so `-Wuninitialized` reads none of its reads and writes. `sizeof ({ ... })`'s `(` is its statement
+  expression's own, as clang's parser reads a parenthesized expression there, on both parser paths. Still separate: the
+  input reader's `-Wshift-count-overflow` there; clang's runtime-warning drop in every array bound; a variable-array
   `sizeof`'s comma operands, which clang warns of when it evaluates them; `-Wunevaluated-expression`, which
-  isn't implemented; and three forms the checker refuses: a statement expression in a variable-array
-  `sizeof`'s operand, `sizeof ({ ... })` (whose `(` is the statement expression's own), and a statement
-  expression as `_Generic`'s controlling expression.
+  isn't implemented; and two forms the checker refuses: a statement expression in a variable-array
+  `sizeof`'s operand and a statement expression as `_Generic`'s controlling expression, which the constant reader
+  reads outside a deferred typeof region.
   `c_check_unused_result_driver_test.c` (#1447) compares a discarded call's result warnings (`-Wunused-result`'s
   warn_unused_result and nodiscard, a return type's, pure's and const's, the builtin table's) with Clang's whole
   output at each warning policy, both paths and one or three lanes: their spellings and messages, macros, types,

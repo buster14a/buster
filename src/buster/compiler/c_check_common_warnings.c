@@ -967,6 +967,7 @@ static bool check_common_shift_replay(Preprocessor* pp, CheckCommonShiftWarnings
 }
 
 static uint8_t* check_common_unselected(const CheckGraph* graph, const Parser* parser, Arena* scratch);
+static void check_common_region_evaluation(const CheckInput* input, const Parser* parser, uint8_t* evaluated);
 static void check_common_body_reached(const CheckProgram* program, const CheckProgramBody* body, uint8_t* seen, uint32_t* queue);
 static uint8_t* check_common_evaluated(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, const Parser* parser,
                                        const CheckProgram* program, const uint32_t* parents, Arena* scratch);
@@ -1166,7 +1167,9 @@ static void check_common_shift_unreached(const Parser* parser, Preprocessor* pp,
             CheckProgram whole = program != NULL ? *program : (CheckProgram){ 0 };
             whole.dropped_range_count = 0;
             unselected = check_common_unselected(graph, parser, scratch);
-            reached = check_common_evaluated(graph, stream, types, parser, program != NULL ? &whole : NULL, parents, scratch);
+            uint8_t* evaluated_whole = check_common_evaluated(graph, stream, types, parser, program != NULL ? &whole : NULL, parents, scratch);
+            check_common_region_evaluation(input, parser, evaluated_whole);
+            reached = evaluated_whole;
             marked = true;
         }
         drop &= reached != NULL && unselected != NULL &&
@@ -7967,6 +7970,29 @@ static void check_common_flush(const CheckGraph* graph, const uint32_t* parents,
     }
 }
 
+// A GNU statement expression's statements are graph roots of their own, evaluated as roots are; clang evaluates them
+// where it evaluates the statement expression (#1447). So where its value, the node at its `)`, is not evaluated (a
+// sizeof's or an alignof's operand, a condition's arm left out), neither is any of its nodes, the run of nodes just
+// before its own whose tokens its parentheses hold, nested statement expressions' with them. The reader's list of
+// statement expressions finds them: a unit without one reads nothing, and each one left out clears its own nodes once.
+static void check_common_region_evaluation(const CheckInput* input, const Parser* parser, uint8_t* evaluated)
+{
+    const CheckGraph* graph = &input->graph;
+    for (uint32_t region = evaluated != NULL && input->token_nodes != NULL ? input->region_count : 0; region-- > 0;)
+    {
+        const uint32_t open = input->regions[region].opening;
+        const uint32_t close = input->regions[region].closing;
+        const uint32_t value = close < input->token_count && close < parser->tokens.count ? input->token_nodes[close] : BUSTER_CHECK_NONE;
+        if (value < graph->count && graph->ops[value] == CHECK_OP_STATEMENT_VALUE && evaluated[value] == 0)
+        {
+            for (uint32_t node = value; node-- > 0 && graph->tokens[node] > open && graph->tokens[node] < close;)
+            {
+                evaluated[node] = 0;
+            }
+        }
+    }
+}
+
 // The graph's facts (CheckCommonFacts) into `facts`: each node's parent, whether its value is used (where -Wuninitialized
 // reads it) and its reach, then which nodes are evaluated. The scalar path makes them in one pass over the nodes in graph
 // order, so that its operands' and arguments' already hold; an operand that doesn't precede its node, which the graph's
@@ -7975,10 +8001,11 @@ static void check_common_flush(const CheckGraph* graph, const uint32_t* parents,
 // first ancestor that has it, whose ancestors all do; and takes the evaluated nodes by check_common_evaluated_tree. False
 // where scratch can't hold them. (Whether a discarded value warns is check_common_unused_of's, asked only of a discarded
 // one.)
-static bool check_common_facts(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, const Parser* parser,
+static bool check_common_facts(const CheckInput* input, const CheckStream* stream, const TypeTable* types, const Parser* parser,
                                const CheckProgram* program, const CheckCommonEnabled* enabled, const uint8_t* flushed, Arena* scratch,
                                CheckCommonFacts* facts)
 {
+    const CheckGraph* graph = &input->graph;
     const uint32_t count = graph->count;
     const bool vector = !BUSTER_SCALAR_PATH(parser->options.scalar);
     uint32_t* parents = count != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : NULL;
@@ -8070,6 +8097,7 @@ static bool check_common_facts(const CheckGraph* graph, const CheckStream* strea
     {
         check_common_flush(graph, parents, flushed, parser->tokens.count, evaluated);
     }
+    check_common_region_evaluation(input, parser, evaluated);
     *facts = (CheckCommonFacts){ .parents = parents, .used = used, .evaluated = evaluated, .reach = reach, .flushed = flushed, .self_assigns = self_assigns };
     const bool result = count == 0 || evaluated != NULL;
     return result;
@@ -9138,7 +9166,7 @@ static void check_driver_common_warnings(const Parser* parser, Preprocessor* pp,
     check_common_dangling_else(parser, pp, input, scratch);
     check_common_switches(parser, pp, input, stream, types, &spell, program, scratch);
     CheckCommonFacts facts = { 0 };
-    if (!check_common_facts(&input->graph, stream, types, parser, program, &enabled, flushed, scratch, &facts))
+    if (!check_common_facts(input, stream, types, parser, program, &enabled, flushed, scratch, &facts))
     {
         check_common_exhausted(pp);
     }
