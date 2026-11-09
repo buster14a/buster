@@ -118,12 +118,17 @@ enum
     // statement increment or decrement (#1447, clang's CheckForLoopConditionalStatement and CheckForRedundantIteration):
     // -Wfor-loop-analysis, off by default, under -Wloop-analysis and -Wmost and so -Wall.
     CHECK_WARNING_ID_FOR_LOOP_ANALYSIS = 110,
+    // An implicit conversion from one named enumeration to another (#1447, the end of clang's CheckImplicitConversion), an
+    // enumerator taken as its enumeration: -Wimplicit-enum-enum-cast, on by default, under -Wenum-conversion.
+    CHECK_WARNING_ID_IMPLICIT_ENUM_ENUM_CAST = 111,
+    // A tag a prototype's parameter list declares first (#1447, clang's ActOnTag): -Wvisibility, on by default.
+    CHECK_WARNING_ID_VISIBILITY = 112,
     // An encoding prefix on an unevaluated string literal (#1447): -Winvalid-unevaluated-string, on by default.
-    CHECK_WARNING_ID_INVALID_UNEVALUATED_STRING = 111,
+    CHECK_WARNING_ID_INVALID_UNEVALUATED_STRING = 113,
     // -pedantic's warnings of an unevaluated string literal's escapes (#1447): a GNU one's (-Wpedantic) and a delimited or
     // named one's (-Wdelimited-escape-sequence-extension), off by default, extensions -pedantic gives.
-    CHECK_WARNING_ID_NONSTANDARD_ESCAPE = 112,
-    CHECK_WARNING_ID_DELIMITED_ESCAPE = 113,
+    CHECK_WARNING_ID_NONSTANDARD_ESCAPE = 114,
+    CHECK_WARNING_ID_DELIMITED_ESCAPE = 115,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -368,6 +373,12 @@ typedef enum CheckWarningEventKind
     // payload.first_type and second_type its operands' types as clang's getEnumCoercedType gives them, payload.name and
     // data their typedef spellings (0 for none). check_common_enum_arithmetic reports it as the graph's operators.
     CHECK_WARNING_EVENT_ENUM_MIX,
+    // A tag a prototype's parameter list (or an old-style definition's declarations) declares first, which no declaration
+    // outside it names (#1447, -Wvisibility): at its name, an unnamed enum's keyword; payload.first_type the tag's type.
+    CHECK_WARNING_EVENT_PROTOTYPE_TAG,
+    // A tag a prototype's list defines again (#1447, -Wvisibility): at its name, payload.name the name, with a
+    // CHECK_WARNING_NOTE_PREVIOUS_DEFINITION at the earlier definition.
+    CHECK_WARNING_EVENT_PROTOTYPE_REDEFINITION,
     // An unevaluated string literal's encoding prefix (#1447): "encoding prefix 'P' on an unevaluated string literal has no
     // effect", at the token, payload.data the prefix's length (1 or 2: u8). A literal with an escape clang refuses there
     // has its warnings from the driver instead, before the escapes' (check_driver_escapes).
