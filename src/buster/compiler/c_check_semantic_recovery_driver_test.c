@@ -285,6 +285,9 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "int g(void) { int unused; char int c = 1; if (c = 2) return 1; return sizeof(long float); }\n"
         "struct T { long long long m; int float n; } t;\nlong double long ld;\n_Complex _Complex double cd;\n"
         "static int h(void) { int u; return 0; }\n",
+        // A _Complex the type doesn't take, dropped at the list's end, before and after the type, and the declarations after
+        // it checked; a _BitInt named as clang names it in a combination's error (review on #1820).
+        "_Complex _Bool cb;\nint float y;\n_Bool _Complex cb2;\nint float z;\n_BitInt(8) int b;\n",
         // A tag defined again in its scope, whose body becomes an anonymous tag's: later uses of the name find the first
         // definition, and the second's enumerators are still declared (a repeated one with its own note).
         "struct S { int a; };\nstruct S { long b; };\nunion U { int a; };\nunion U { char c; } u2;\n"

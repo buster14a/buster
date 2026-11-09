@@ -237,15 +237,16 @@ static __attribute__((noinline, cold)) bool check_declspec_scan(const Parser* pa
             new_type = CHECK_DECLSPEC_ATOMIC;
             next = check_declspec_skip_group(parser, i + 1, end);
         }
+        else if ((name == C_NAME_BITINT || name == C_NAME_EXTINT) && group)
+        {
+            // Before typeof's: the parser's kind of _BitInt is typeof's too, and clang names it '_BitInt' (review on #1820).
+            new_type = CHECK_DECLSPEC_BIT_INT;
+            next = check_declspec_skip_group(parser, i + 1, end);
+        }
         else if (kind == PARSE_KIND_TYPEOF && group)
         {
             const bool unqualified = name == C_NAME_TYPEOF_UNQUAL || name == C_NAME_GNU_TYPEOF_UNQUAL || name == C_NAME_GNU_TYPEOF_UNQUAL2;
             new_type = unqualified ? CHECK_DECLSPEC_TYPEOF_UNQUAL : CHECK_DECLSPEC_TYPEOF;
-            next = check_declspec_skip_group(parser, i + 1, end);
-        }
-        else if ((name == C_NAME_BITINT || name == C_NAME_EXTINT) && group)
-        {
-            new_type = CHECK_DECLSPEC_BIT_INT;
             next = check_declspec_skip_group(parser, i + 1, end);
         }
         else if (kind == PARSE_KIND_STRUCT || kind == PARSE_KIND_ENUM)

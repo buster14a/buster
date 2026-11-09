@@ -4631,7 +4631,17 @@ static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor,
     {
         const uint32_t code = type_index(base);
         valid = code < 64 && ((BUSTER_TYPE_COMPLEX_SPELLABLE >> code) & 1) != 0;
-        base = valid ? check_input_type_result(reader, type_complex(reader->types, base)) : 0;
+        // A _Complex the type doesn't take, which clang's DeclSpec drops at the list's end (#1447, review on #1820): the
+        // list goes on as its type alone, where it is otherwise valid.
+        CheckInputSpecifierState state = { .base = base, .complex_token = complex_token, .complex = complex };
+        if (!valid && !specifiers_recovered && auto_type == BUSTER_CHECK_NONE && i > first && check_input_specifiers_recover(reader, first, end, i - 1, &state) &&
+            !state.complex)
+        {
+            specifiers_recovered = true;
+            complex = false;
+            valid = true;
+        }
+        base = !valid ? 0 : complex ? check_input_type_result(reader, type_complex(reader->types, base)) : base;
     }
     if (atomic && valid)
     {
