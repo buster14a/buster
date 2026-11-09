@@ -911,7 +911,7 @@ static ImportResult import_object_symbols(Link* link, const ImportElf* elf, cons
         const bool common = reserved && section == SHN_COMMON;
         const bool common_valid = common && binding == STB_GLOBAL && (type == STT_OBJECT || type == STT_NOTYPE || type == STT_COMMON) &&
                                   symbol.st_value != 0 && (symbol.st_value & (symbol.st_value - 1)) == 0 &&
-                                  (uint32_t)__builtin_ctzll(symbol.st_value | 1) <= BUSTER_LINK_MAX_ALIGNMENT_LOG2;
+                                  (uint32_t)__builtin_ctzll(symbol.st_value) <= BUSTER_LINK_MAX_ALIGNMENT_LOG2;
         const AtomId atom = section != SHN_UNDEF && !reserved && section < elf->section_count ? object->section_atoms[section] : 0;
         String8 name = { 0 };
         uint8_t flags = 0;

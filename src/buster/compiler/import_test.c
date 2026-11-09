@@ -1601,6 +1601,20 @@ static void import_test_common(ImportTestTally* tally, const ImportTestFile* bas
     {
         import_test_paths(tally, bytes, IMPORT_TEST_EXACT, "a common symbol", symbol_index, arena);
     }
+    // Past the link's largest alignment, the symbol is unsupported before it adds its atom: the link has the sections'
+    // atoms alone, as the hand-made object without a common has.
+    const uint32_t sections_only = imported ? link.atoms.count - 1 : 0;
+    const ImportTestFile past = import_test_changed(&changed, entry + offsetof(Elf64_Sym, st_value), 8, UINT64_C(1) << (BUSTER_LINK_MAX_ALIGNMENT_LOG2 + 1), arena);
+    const String8 past_bytes = import_test_bytes(&past);
+    LinkCapacity past_capacity = { 0 };
+    Link past_link;
+    ImportObject past_object;
+    const bool initialized = past.bytes != 0 && import_object_capacity(past_bytes, &past_capacity).error == IMPORT_ERROR_NONE &&
+                             link_initialize(&past_link, arena, arena, past_capacity);
+    const ImportResult refused = initialized ? import_object(&past_link, past_bytes, BUSTER_IMPORT_TEST_UNIT, BUSTER_LINK_SOURCE_FOREIGN_OBJECT, arena, &past_object) :
+                                               import_test_result(IMPORT_ERROR_MEMORY, 0, 0, 0, 0, 0);
+    import_test_expect(tally, imported && initialized && refused.error == IMPORT_ERROR_UNSUPPORTED && past_link.error == LINK_ERROR_NONE && past_link.atoms.count == sections_only,
+                       "a common past the largest alignment is unsupported before it changes the link", symbol_index);
     arena_pop_to(arena, length);
 }
 
@@ -1838,6 +1852,12 @@ static bool import_test_objects(Arena* arena)
         import_test_case(&tally, o, &changed, "a common symbol of alignment 3", object + offsetof(Elf64_Sym, st_value), 8, 3, object_unsupported, arena);
         changed = import_test_changed(&changed, object + offsetof(Elf64_Sym, st_value), 8, 8, arena);
         import_test_case(&tally, o, &changed, "a common symbol of alignment 8", object + offsetof(Elf64_Sym, st_value), 8, 8, imports, arena);
+        // The link's largest alignment, 2^BUSTER_LINK_MAX_ALIGNMENT_LOG2, and the next one, which is unsupported before the
+        // symbol changes the link.
+        import_test_case(&tally, o, &changed, "a common symbol of the largest alignment", object + offsetof(Elf64_Sym, st_value), 8,
+                         UINT64_C(1) << BUSTER_LINK_MAX_ALIGNMENT_LOG2, imports, arena);
+        import_test_case(&tally, o, &changed, "a common symbol past the largest alignment", object + offsetof(Elf64_Sym, st_value), 8,
+                         UINT64_C(1) << (BUSTER_LINK_MAX_ALIGNMENT_LOG2 + 1), object_unsupported, arena);
         import_test_case(&tally, o, &changed, "a weak common symbol", object + offsetof(Elf64_Sym, st_info), 1, ELF64_ST_INFO(STB_WEAK, STT_OBJECT), object_unsupported, arena);
         import_test_case(&tally, o, &changed, "a common function", object + offsetof(Elf64_Sym, st_info), 1, ELF64_ST_INFO(STB_GLOBAL, STT_FUNC),
                          import_test_result(IMPORT_ERROR_UNSUPPORTED, object, 0, test->global_object, 0, STT_FUNC), arena);
