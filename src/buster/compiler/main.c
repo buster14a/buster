@@ -112,7 +112,9 @@
 
 // The external tools the cross-checks spawn, probed once per command (#1129), and their tests, for the test-tool command.
 // Every test file after this point sees its types and functions.
+#if BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) || BUSTER_IN_UNIT(BUSTER_UNIT_TYPES) || BUSTER_IN_UNIT(BUSTER_UNIT_X86) || BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND) || BUSTER_IN_UNIT(BUSTER_UNIT_LINK) || BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/test_tool.c"
+#endif
 
 // The lexer benchmark is a separate translation unit, linked into the compiler executable.
 int run_c_lexer_benchmark(int argc, char** argv);
@@ -208,8 +210,8 @@ int run_tier1_allocate_benchmark(int argc, char** argv);
 #endif
 
 // External randomized C compiler comparison and its independent process/accounting fixtures.
-#include "buster/compiler/differential.c"
 #if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
+#include "buster/compiler/differential.c"
 #include "buster/compiler/differential_test.c"
 #endif
 
@@ -774,7 +776,12 @@ int run_backend_benchmark(int argc, char** argv);
 #include "buster/compiler/ir_benchmark.c"
 #include "buster/compiler/ir_lower_benchmark.c"
 #endif
+#if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) || BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
 #include "buster/compiler/ir_source_test.c"
+#else
+// Keep the production pass at its first include position without the source-test preparation interface.
+#include "buster/compiler/ir_dataflow.c"
+#endif
 #include "buster/compiler/tier1_cfg_ir.c"
 #if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/tier1_cfg_source_test.c"
@@ -800,7 +807,12 @@ int run_backend_benchmark(int argc, char** argv);
 #if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/ir_optimize_inline_test.c"
 #endif
+#if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/ir_optimize_test.c"
+#else
+// The production pass was first included by the test root here. Keep that position without its fixture dependency.
+#include "buster/compiler/ir_if_convert.c"
+#endif
 #if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/ir_optimize_benchmark.c"
 #endif
@@ -818,7 +830,11 @@ int run_backend_benchmark(int argc, char** argv);
 #include "buster/compiler/ir_optimize_inline_simd_test.c"
 #endif
 // #175's first #139 pass tests in the IR's text form: hand-written before/after pairs under tests/ir/optimize.
+#if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/ir_optimize_text_test.c"
+#else
+#include "buster/compiler/ir_optimize_verified.c"
+#endif
 // #866's GVN variants on real source's lowered IR are part of #131's IR benchmark, which needs GVN's definitions.
 #if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/ir_source_benchmark.c"
@@ -1036,13 +1052,23 @@ static __attribute__((unused)) void main_checker_test_interfaces(void)
 }
 #endif
 
+#if !BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && !BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
+// Source preparation's real calls belong to BACKEND and CHECKER. Keep only semantic references to its production
+// dependencies in other units, with no emitted code; both consumers retain normal unused-function diagnostics.
+static __attribute__((unused)) void main_ir_source_interfaces(void)
+{
+    (void)&check_program_access;
+    (void)&check_request_describe_text;
+    (void)&check_source_prepare;
+    (void)&check_source_release;
+}
+#endif
+
 #if !BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND)
 // The frontend fixtures supply these shared helpers' callers. Retain their semantic references in the other units
 // without parsing the fixtures or emitting code; the frontend still checks the real calls with unused warnings on.
 static __attribute__((unused)) void main_frontend_test_interfaces(void)
 {
-    (void)&test_process_finish;
-    (void)&test_process_test;
     (void)&pp_test_read_output;
     (void)&parse_kernels_reserve;
     (void)&parse_twins;
@@ -1923,10 +1949,12 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     {
         result = run_calling_convention_benchmark(argc - 1, argv + 1);
     }
+#if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-differential") == 0)
     {
         result = run_differential_command(argc - 2, argv + 2);
     }
+#endif
 #if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-differential-harness") == 0)
     {
@@ -2241,10 +2269,12 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
         result = run_parallel_tests(argc - 2, argv + 2);
     }
 #endif
+#if BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "test-tool") == 0)
     {
         result = test_tool_command(argc - 2, argv + 2);
     }
+#endif
 #if BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "test-oracle-cache") == 0)
     {
