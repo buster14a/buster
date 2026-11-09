@@ -719,6 +719,9 @@ struct TypeNames
     uint32_t* alias_order_printed;
     const String8* anonymous;
     uint32_t anonymous_count;
+    // Whether a typedef's name of an anonymous tag (an `anonymous` row not in parentheses) prints after its keyword, as
+    // clang's a.k.a. of a typedef whose declaration spells the tag's definition does (`'SP' (aka 'struct S *')`).
+    bool anonymous_keyword;
     const TypePrintParen* parentheses;
     uint32_t parenthesis_count;
     // Optional (#1447): the macro that writes a target address space, as clang's MacroQualifiedType names it
@@ -6411,8 +6414,8 @@ static void type_print_before_kind(TypePrinter* printer, TypeId type)
         else if (spelling.length != 0)
         {
             // A `(unnamed at file:line:col)` row keeps the keyword; a typedef's own name replaces it, as clang's
-            // `T` does for the record it names (#992).
-            if (spelling.length != 0 && *spelling.pointer == '(' && keyword)
+            // `T` does for the record it names (#992), but for an a.k.a. that spells the definition (anonymous_keyword).
+            if (spelling.length != 0 && (*spelling.pointer == '(' || printer->names->anonymous_keyword) && keyword)
             {
                 type_print_text(printer, kind == BUSTER_TYPE_KIND_STRUCT ? "struct " : kind == BUSTER_TYPE_KIND_UNION ? "union " : "enum ");
             }

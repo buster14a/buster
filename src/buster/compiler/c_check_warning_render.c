@@ -145,6 +145,13 @@ struct CheckWarningSpelling
 // and typedef-kind declarations per publication pass; the rows sit under the pass's event marks in the
 // caller's scratch, so they survive until the pass ends. Returns false on an allocation failure, which the
 // caller reports like the renderer's other allocations rather than dropping the spelling.
+// Whether the typedef type `type` carries qualifiers, through an aligned typedef's too: such a typedef of an anonymous tag
+// isn't its name (#1447, clang's typedef name for linkage).
+static bool check_driver_typedef_qualified(const TypeTable* types, TypeId type)
+{
+    return type_unqualified(type) != type || type_unqualified(type_strip_aligned(types, type)) != type_strip_aligned(types, type);
+}
+
 static bool check_driver_spelling_build(const Parser* parser, Preprocessor* pp, const CheckInput* input, const TypeTable* types,
                                         CheckWarningSpelling* spell, Arena* scratch)
 {
@@ -194,8 +201,10 @@ static bool check_driver_spelling_build(const Parser* parser, Preprocessor* pp, 
                         {
                             if (binding == C_BINDING_TYPEDEF)
                             {
-                                // The typedef is the anonymous record's canonical name; its first one wins.
-                                if ((named[tag / 64] & ((uint64_t)1 << (tag & 63))) == 0)
+                                // The typedef is the anonymous record's canonical name; its first one wins. A qualified
+                                // one names none (clang's typedef name for linkage is the tag's own type's, #1447).
+                                if ((named[tag / 64] & ((uint64_t)1 << (tag & 63))) == 0 &&
+                                    !check_driver_typedef_qualified(types, input->declared_types[i]))
                                 {
                                     named[tag / 64] |= (uint64_t)1 << (tag & 63);
                                     const uint32_t name = parser->tokens.names[i];
@@ -655,8 +664,18 @@ static String8 check_driver_warning_type_at(const Parser* parser, Preprocessor* 
             if (names.alias_count != 0 && vector_name != spelling)
             {
                 // clang's `(aka '...')`: the same type with the typedef sugar expanded — an anonymous record's
-                // typedef stays, since it is that record's own name; a vector's own typedef stays too.
+                // typedef stays, since it is that record's own name; a vector's own typedef stays too. Where the
+                // alias's declaration spells the record's definition rather than a typedef, its type as written is the
+                // tag's, which prints its keyword (`'SP' (aka 'struct S *')`, #1447).
                 TypeNames expand = names;
+                // (The typedef that names the record is its own spelling: no a.k.a.)
+                const TypeId alias_tag = alias_type != 0 ? type_unqualified(type_strip_aligned(types, alias_type)) : 0;
+                const uint8_t alias_tag_kind = alias_tag != 0 ? type_kind(types, alias_tag) : BUSTER_TYPE_KIND_VOID;
+                const uint32_t tag = alias_tag_kind == BUSTER_TYPE_KIND_STRUCT || alias_tag_kind == BUSTER_TYPE_KIND_UNION || alias_tag_kind == BUSTER_TYPE_KIND_ENUM ?
+                                     types->types.index[type_index(alias_tag)] : names.anonymous_count;
+                const bool naming = tag < names.anonymous_count && names.anonymous[tag].length == alias_name.length &&
+                                    memcmp(names.anonymous[tag].pointer, alias_name.pointer, alias_name.length) == 0;
+                expand.anonymous_keyword = spelling != BUSTER_CHECK_NONE && !naming && check_input_typedef_spelling(input, parser, spelling) == 0;
                 expand.alias_count = vector_name != 0 ? 1 : 0;
                 expand.alias_types = &vector_type;
                 expand.alias_names = &vector_alias;
@@ -824,7 +843,9 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
     switch (event->kind)
     {
         case CHECK_WARNING_EVENT_DUPLICATE_DECLSPEC:
-            result = check_warning_text(scratch, "duplicate '%.*s' declaration specifier", (int)name.length, name.pointer);
+            // _Complex is "complex" in clang's words (DeclSpec::getSpecifierName), as its other errors name it.
+            result = payload->name == C_NAME_COMPLEX_C99 ? "duplicate 'complex' declaration specifier" :
+                     check_warning_text(scratch, "duplicate '%.*s' declaration specifier", (int)name.length, name.pointer);
             break;
         case CHECK_WARNING_EVENT_NORETURN_RETURN:
             result = check_warning_text(scratch, "function '%.*s' declared 'noreturn' should not return", (int)name.length, name.pointer);

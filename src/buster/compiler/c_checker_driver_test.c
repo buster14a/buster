@@ -4402,7 +4402,7 @@ static bool check_test_driver_time_report(const char* text, double* stages)
                                            "\ntime-process\tstage-system-validation\tdocs-compile-time-clock-accounting-control\n",
                                            "\ntime-process\tstage-system-use\tdo-not-rank-or-subtract-from-elapsed\n",
                                            "\ntime-process\tpeak-rss-kb\t", "\ntime-process\tminor-faults\t", "\ntime-process\tmajor-faults\t",
-                                           "\ntime-process\tlanes-asked\t", "\ntime-process\tlanes\t", "\ntime-process\thuge-pages\t" };
+                                           "\ntime-process\tlanes-asked\t", "\ntime-process\tlanes\t", "\ntime-process\thuge-pages\t", "\ntime-process\ttokens\t" };
     double phases[BUSTER_CHECK_CLOCK_PHASES] = { 0 };
     double total = -1;
     double walk = -1;
@@ -5016,11 +5016,22 @@ static void check_test_driver_time_stages(CheckTest* test, const char* executabl
                                                      "BUSTER_HUGE_PAGES=0 turns huge pages off for the process, 1 leaves them as the system has them, and "
                                                      "on this machine, not virtual, they are as the process's parent had them without it; a busy host turns "
                                                      "them off for the arenas alone, not for the programs the compiler starts or interprets");
-    // measure-compile on the same source, with this compiler as its reference, and with a reference that fails.
-    char* const measured[] = { compiler, "measure-compile", "--runs", "2", "--directory", (char*)directory, "--reference", compiler, "--", "-c", source, NULL };
+    // measure-compile on the same source, with this compiler as two references (#146: the second with an option of its
+    // own), with a reference that fails, and with a reference's option and no reference.
+    char* const measured[] = { compiler, "measure-compile", "--runs", "2", "--directory", (char*)directory, "--reference", compiler, "--reference", compiler,
+                               "--reference-option", "-c", "--", "-c", source, NULL };
     char* const failed[] = { compiler, "measure-compile", "--runs", "1", "--directory", (char*)directory, "--reference", "/bin/false", "--", "-c", source, NULL };
+    char* const unreferenced[] = { compiler, "measure-compile", "--runs", "1", "--directory", (char*)directory, "--reference-option", "-c", "--", "-c", source, NULL };
     const int measured_status = made ? check_test_driver_spawn_stream(measured, &text, true) : -1;
     const bool qualified = text != NULL && strstr(text, "stage system time: low-confidence getrusage(RUSAGE_SELF) deltas between resource marks, -1 when unavailable") != NULL;
+    // Each reference against the default, by its name, and every compile's and stage's work per token.
+    const char* base = strrchr(compiler, '/') != NULL ? strrchr(compiler, '/') + 1 : compiler;
+    char against[2][PATH_MAX + 64];
+    snprintf(against[0], sizeof(against[0]), "\ndefault against %s: ", base);
+    snprintf(against[1], sizeof(against[1]), "\ndefault against %s -c: ", base);
+    const bool referenced = text != NULL && strstr(text, against[0]) != NULL && strstr(text, against[1]) != NULL &&
+                            strstr(text, "\nper token: ") != NULL && strstr(text, "\ncycles per token: TSC ticks at ") != NULL &&
+                            strstr(text, " TSC ticks and ") != NULL;
     // The reader's expressions' walk (#1038), under its stage, and its parts' and usage's rows under it; and the lowering's
     // coverage (#1048), the first report's `lowering-nodes` line, once.
     bool walked = text != NULL && strstr(text, "\n    check-input.expressions ") != NULL && strstr(text, "\n      expressions.usage ") != NULL;
@@ -5036,7 +5047,12 @@ static void check_test_driver_time_stages(CheckTest* test, const char* executabl
     text = NULL;
     const int failed_status = made ? check_test_driver_spawn(failed, &text) : -1;
     free(text);
+    text = NULL;
+    const int unreferenced_status = made ? check_test_driver_spawn(unreferenced, &text) : -1;
+    free(text);
     check_test_expect(test, measured_status == 0 && failed_status == 1, "measure-compile times the compiles, and fails when one fails");
+    check_test_expect(test, referenced, "measure-compile compares the default with each of several references, and gives the work per token");
+    check_test_expect(test, unreferenced_status == 1, "measure-compile refuses a reference's option without a reference");
     check_test_expect(test, qualified, "measure-compile qualifies the stage system-time attribution");
     check_test_expect(test, walked, "measure-compile reports the reader's expressions' walk, its parts and its usage under its stage");
     check_test_expect(test, coverage_once, "measure-compile reports the lowering's coverage once");
@@ -7556,6 +7572,7 @@ static void check_test_driver_optimize_pragmas(CheckTest* test, const char* clan
 #include "c_check_register_driver_test.c"
 #include "c_check_enum_arithmetic_driver_test.c"
 #include "c_check_for_loop_driver_test.c"
+#include "c_check_enum_cast_driver_test.c"
 #include "c_check_sign_compare_driver_test.c"
 #include "c_check_type_sugar_driver_test.c"
 
@@ -8412,6 +8429,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             check_test_driver_registers(&test, clang, executable, directory);
             check_test_driver_enum_arithmetic(&test, clang, executable, directory);
             check_test_driver_for_loops(&test, clang, executable, directory);
+            check_test_driver_enum_casts(&test, clang, executable, directory);
         }
         if (!lazy && check_test_driver_takes())
         {
