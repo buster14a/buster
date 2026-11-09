@@ -15,11 +15,12 @@
 // values are explicitly converted first. Widths 8/16/32/64 have fixed machine classes; unsigned width1 is _Bool in a
 // U8 slot and explicitly truncates to one bit. A _BitInt of another width up to 64 bits takes the narrowest of those
 // classes that holds it, its value extended from its width in it, as clang stores it and the producer keeps it, and its
-// destination's value is extended so before its store. A 128-bit operand (BUSTER_CBUILTIN_LOWER_WIDE) is an
-// address-taken frame object holding its 16 bytes, which integer LOADs read as limbs, and a 128-bit destination takes
-// two U64 stores; the exact result's limbs come from U128 multiplications of 64-bit limbs (cbuiltin_lower_overflow_wide).
-// Other bit-precise widths are refused here. clz/ctz of zero remain undefined by their source contracts (the emitted
-// recipe happens to produce the width). ffs of zero is defined to produce zero.
+// destination's value is extended so before its store. A 128-bit operand (BUSTER_CBUILTIN_LOWER_WIDE), or a _BitInt's of
+// 65 to 127 bits (its width's descriptor, #1447), is an address-taken frame object holding its 16 bytes, its high limb
+// extended from the width, which integer LOADs read as limbs, and such a destination takes two U64 stores, the high one
+// extended from its width; the exact result's limbs come from U128 multiplications of 64-bit limbs
+// (cbuiltin_lower_overflow_wide). Wider bit-precise widths are refused here. clz/ctz of zero remain undefined by their
+// source contracts (the emitted recipe happens to produce the width). ffs of zero is defined to produce zero.
 //
 // Output columns and local columns must be mutually disjoint, writable to their capacities, and disjoint from the
 // buffer/call objects and optional scratch record. Existing locals must be initialized. A successful append claims its
@@ -32,7 +33,7 @@
 #define BUSTER_CBUILTIN_LOWER_ENTRIES 512u
 #define BUSTER_CBUILTIN_LOWER_TEMPORARIES 20u
 // An overflow builtin's 128-bit operand or destination type (__int128's), with BUSTER_CBUILTIN_SIGNED or not: the other
-// types' descriptors are their width (1 to 64) with it, whose seven bits stop short of 128.
+// types' descriptors are their width (1 to 127) with it, whose seven bits stop short of 128.
 #define BUSTER_CBUILTIN_LOWER_WIDE 0x100u
 
 typedef enum CBuiltinLowerError
@@ -675,6 +676,21 @@ static bool cbuiltin_lower_wide(uint32_t type)
     return (type & ~BUSTER_CBUILTIN_SIGNED) == BUSTER_CBUILTIN_LOWER_WIDE;
 }
 
+// A _BitInt of 65 to 127 bits' descriptor (#1447): its width, signed or not, which the seven bits below
+// BUSTER_CBUILTIN_SIGNED hold. Its value is two limbs, as a 128-bit one's, its high limb extended from the width's bits
+// past 64, as clang stores it and the producer keeps it.
+static bool cbuiltin_lower_between(uint32_t type)
+{
+    const uint32_t width = type & ~BUSTER_CBUILTIN_SIGNED;
+    return width > 64 && width < 128;
+}
+
+// Whether a descriptor's value is two limbs in a frame object: a 128-bit one's, or a _BitInt's of 65 to 127 bits.
+static bool cbuiltin_lower_limbs(uint32_t type)
+{
+    return cbuiltin_lower_wide(type) || cbuiltin_lower_between(type);
+}
+
 // `slot` = `a` + `b` (or `a` - `b`, `kind` SUB), of U64 slots apart from `slot`, and `carry` = 1 when the sum wrapped (the
 // difference borrowed), else 0.
 static void cbuiltin_lower_carry(CBuiltinLowerRecipe* recipe, uint32_t slot, uint32_t carry, uint32_t kind, uint32_t a, uint32_t b)
@@ -747,13 +763,15 @@ static void cbuiltin_lower_wide_correct(CBuiltinLowerRecipe* recipe, uint32_t lo
     cbuiltin_lower_binary(recipe, low, BUSTER_TYPED_SUB, low, temporary);
 }
 
-// A 128-bit operand or destination (__int128's): the operands as 128-bit two's complement limbs (x1:x0), a narrower
-// one's x1 its extension, and the exact result as limbs r0 to r3 of 64 bits, enough of them for it in two's complement:
-// three for a sum or a difference, four for a product (an unsigned one never sets the top two all ones, so it can't pass
-// as a negative value). A product is the operands' patterns' unsigned one, its columns' 64-bit products by U128, less
-// 2^128 times the other operand's pattern for each negative operand. The result fits a destination of width w when the
-// limbs past w are the extension of its value's top bit (or zero, unsigned); the destination takes the low w bits, a
-// 128-bit one its two limbs in two stores.
+// A 128-bit operand or destination (__int128's), or one of a _BitInt of 65 to 127 bits (#1447): the operands as 128-bit
+// two's complement limbs (x1:x0), a _BitInt's x1 extended from its width as it is stored, a narrower one's x1 its
+// extension, and the exact result as limbs r0 to r3 of 64 bits, enough of them for it in two's complement: three for a
+// sum or a difference, four for a product (an unsigned one never sets the top two all ones, so it can't pass as a negative
+// value). A product is the operands' patterns' unsigned one, its columns' 64-bit products by U128, less 2^128 times the
+// other operand's pattern for each negative operand. The result fits a destination of width w when the bits past w are the
+// extension of its value's top bit (or zero, unsigned): for a _BitInt of 65 to 127 bits, r1 extended from its bits past 64
+// gives r1 back and the limbs past it are that limb's extension. The destination takes the low w bits extended, one of two
+// limbs in two stores.
 static void cbuiltin_lower_overflow_wide(CBuiltinLowerRecipe* recipe, const CBuiltinLowerCall* call)
 {
     uint32_t limbs[2][2];
@@ -765,7 +783,7 @@ static void cbuiltin_lower_overflow_wide(CBuiltinLowerRecipe* recipe, const CBui
         limbs[i][0] = cbuiltin_lower_temporary(recipe);
         limbs[i][1] = cbuiltin_lower_temporary(recipe);
         extensions[i] = cbuiltin_lower_temporary(recipe);
-        if (cbuiltin_lower_wide(types[i]))
+        if (cbuiltin_lower_limbs(types[i]))
         {
             cbuiltin_lower_emit(recipe, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, slots[i]);
             cbuiltin_lower_emit(recipe, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_U64, 0);
@@ -853,11 +871,14 @@ static void cbuiltin_lower_overflow_wide(CBuiltinLowerRecipe* recipe, const CBui
     }
     const uint32_t limb_count = product ? 4 : 3;
     const bool sign = (call->result_type & BUSTER_CBUILTIN_SIGNED) != 0;
-    const bool wide = cbuiltin_lower_wide(call->result_type);
+    const bool wide = cbuiltin_lower_limbs(call->result_type);
+    const bool between = cbuiltin_lower_between(call->result_type);
     const uint32_t destination_class = wide ? BUSTER_TYPED_CLASS_U64 : cbuiltin_lower_type_class(call->result_type);
     const uint32_t normalized = t1;
     const uint32_t extension = t2;
     const uint32_t mismatch = t3;
+    // A _BitInt of 65 to 127 bits' high limb: r1's bits of the width past 64, extended from them (t0 is free by now).
+    const uint32_t high = between ? t0 : r[1];
     // The destination's value as limbs, its low w bits extended: a narrower one's low limb, and its extension above it.
     if (wide)
     {
@@ -868,16 +889,46 @@ static void cbuiltin_lower_overflow_wide(CBuiltinLowerRecipe* recipe, const CBui
         cbuiltin_lower_destination(recipe, r[0], call->result_type);
     }
     cbuiltin_lower_set(recipe, normalized);
+    if (between)
+    {
+        const uint32_t shift = 128 - (call->result_type & ~BUSTER_CBUILTIN_SIGNED);
+        cbuiltin_lower_local(recipe, r[1]);
+        cbuiltin_lower_constant(recipe, shift);
+        cbuiltin_lower_operation(recipe, BUSTER_TYPED_SHL);
+        if (sign)
+        {
+            cbuiltin_lower_emit(recipe, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_I64, 0);
+            cbuiltin_lower_emit(recipe, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, shift);
+            cbuiltin_lower_emit(recipe, BUSTER_TYPED_SHR, BUSTER_TYPED_CLASS_I64, 0);
+            cbuiltin_lower_emit(recipe, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U64, 0);
+        }
+        else
+        {
+            cbuiltin_lower_constant(recipe, shift);
+            cbuiltin_lower_operation(recipe, BUSTER_TYPED_SHR);
+        }
+        cbuiltin_lower_set(recipe, high);
+    }
     cbuiltin_lower_constant(recipe, 0);
     if (sign)
     {
-        cbuiltin_lower_local(recipe, wide ? r[1] : normalized);
+        cbuiltin_lower_local(recipe, wide ? high : normalized);
         cbuiltin_lower_constant(recipe, 63);
         cbuiltin_lower_operation(recipe, BUSTER_TYPED_SHR);
         cbuiltin_lower_operation(recipe, BUSTER_TYPED_SUB);
     }
     cbuiltin_lower_set(recipe, extension);
     cbuiltin_lower_binary(recipe, mismatch, BUSTER_TYPED_NE, r[0], normalized);
+    if (between)
+    {
+        cbuiltin_lower_local(recipe, r[1]);
+        cbuiltin_lower_local(recipe, high);
+        cbuiltin_lower_operation(recipe, BUSTER_TYPED_NE);
+        cbuiltin_lower_emit(recipe, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U64, 0);
+        cbuiltin_lower_local(recipe, mismatch);
+        cbuiltin_lower_operation(recipe, BUSTER_TYPED_OR);
+        cbuiltin_lower_set(recipe, mismatch);
+    }
     for (uint32_t limb = wide ? 2 : 1; limb < limb_count; limb += 1)
     {
         cbuiltin_lower_local(recipe, r[limb]);
@@ -900,24 +951,25 @@ static void cbuiltin_lower_overflow_wide(CBuiltinLowerRecipe* recipe, const CBui
         cbuiltin_lower_local(recipe, call->destination);
         cbuiltin_lower_constant(recipe, 8);
         cbuiltin_lower_operation(recipe, BUSTER_TYPED_ADD);
-        cbuiltin_lower_local(recipe, r[1]);
+        cbuiltin_lower_local(recipe, high);
         cbuiltin_lower_emit(recipe, BUSTER_TYPED_SET, BUSTER_TYPED_CLASS_U64, 0);
     }
     cbuiltin_lower_local(recipe, mismatch);
     cbuiltin_lower_emit(recipe, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_I32, 0);
 }
 
-// An overflow builtin's operand or destination type the recipes take: one of a machine class, or a 128-bit one.
+// An overflow builtin's operand or destination type the recipes take: one of a machine class, or one of two limbs (a
+// 128-bit one, a _BitInt of 65 to 127 bits).
 static bool cbuiltin_lower_type_valid(uint32_t type)
 {
-    return cbuiltin_lower_type_class(type) != BUSTER_TYPED_CLASS_VOID || cbuiltin_lower_wide(type);
+    return cbuiltin_lower_type_class(type) != BUSTER_TYPED_CLASS_VOID || cbuiltin_lower_limbs(type);
 }
 
-// Whether `slot` holds an operand of `type`: a local of its class, or for a 128-bit one an address-taken frame object
+// Whether `slot` holds an operand of `type`: a local of its class, or for one of two limbs an address-taken frame object
 // (class VOID) whose first 16 bytes hold it.
 static bool cbuiltin_lower_slot_valid(const CBuiltinLowerBuffer* buffer, uint32_t slot, uint32_t type)
 {
-    const bool wide = cbuiltin_lower_wide(type);
+    const bool wide = cbuiltin_lower_limbs(type);
     return buffer->local_classes[slot] == (wide ? BUSTER_TYPED_CLASS_VOID : cbuiltin_lower_type_class(type)) &&
            (!wide || (buffer->local_flags[slot] & BUSTER_TYPED_LOCAL_ADDRESS_TAKEN) != 0);
 }
@@ -980,7 +1032,7 @@ static CBuiltinLowerResult cbuiltin_lower_append(CBuiltinLowerBuffer* buffer, co
         recipe.temporary_first = buffer->local_count;
         recipe.scratch = buffer->scratch;
         result.result_class = unary ? cbuiltin_lower_unary(&recipe, call) : BUSTER_TYPED_CLASS_I32;
-        if (overflow && (cbuiltin_lower_wide(call->a_type) || cbuiltin_lower_wide(call->b_type) || cbuiltin_lower_wide(call->result_type)))
+        if (overflow && (cbuiltin_lower_limbs(call->a_type) || cbuiltin_lower_limbs(call->b_type) || cbuiltin_lower_limbs(call->result_type)))
         {
             cbuiltin_lower_overflow_wide(&recipe, call);
         }

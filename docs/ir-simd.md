@@ -383,12 +383,94 @@ The tests:
   under a writemask and a float's, run natively against clang's; its bound of a
   move for every two rows counts them with the rows, where they took no move.
 
+## Selects and undefined vectors (#1840)
+
+The x86 builtins' remaining rows ([#1840](https://github.com/buster14a/buster/issues/1840))
+are decoded family by family into the IR's operations. Families that need a new
+operation get a kind of `intrinsic`, as the splat does. Counted at Tier 1's
+emission of each machine row (`--tier1 --tier1-report -march=znver5`, inlined
+copies included), main `cb608c1` has 1,207 machine rows in `main_unit_frontend.c`
+and 1,735 in `main_unit_backend.c`. They break down by kind as follows:
+
+| Kind | Frontend | Backend |
+| --- | ---: | ---: |
+| selects (a masked move: `_mm512_mask_mov_*`, `_mask_blend_*`, every masked operation's merge) | 257 | 403 |
+| permutes and shuffles (`vpermt2*` 263 of both units' 567, `vpermb/w/d/q` 177) | 312 | 255 |
+| masked loads | 151 | 247 |
+| masked stores | 45 | 91 |
+| shifts by a scalar or an immediate, rotates | 32 | 176 |
+| other integer operations (minimum, maximum, saturation, products' high halves) | 60 | 55 |
+| casts between widths (rows of no record) | 55 | 55 |
+| 16- and 32-byte lanes inserted and extracted | 41 | 48 |
+| compress and expand | 41 | 18 |
+| AES rounds | 65 | 13 |
+| extensions | 27 | 84 |
+| truncations | 25 | 31 |
+| masks to vectors and back | 32 | 8 |
+| one element, movemask | 23 | 23 |
+| undefined vectors | 21 | 36 |
+| ternary logic, tests, blends | 10 | 54 |
+| reductions | 9 | 31 |
+| gathers, scatters, compressing stores | 1 | 71 |
+| floating arithmetic and conversions, others | 0 | 36 |
+
+The first family needs no new operation. `ir_simd_typed_select` decodes a SELECT
+rule's row (`__builtin_ia32_select*` of each element and width) as the opmask
+conversion leaves it. The row has a mask and two vectors of one width. Its two
+records are `vmovdqu64` of VECTOR(2) into VECTOR(0), then the move of the
+elements (`vmovdqu8` to `vmovdqu64`) of VECTOR(1) into it under MASK(0), both
+register-direct with no other field or decoration. It becomes the IR's
+`vselect` of the mask, VECTOR(1) and VECTOR(2), its lanes the elements'
+integers, as Tier 1 selects it already (`vpblendmb` to `vpblendmq`). A float's,
+a double's, a half's and a bf16's select has the integer lanes of its width,
+whose bits it copies without evaluating them. The mask must be the lanes'
+(`ir_lane_mask`'s bytes). The features are those of the forms Tier 1 selects:
+AVX512F, VL below 64 bytes, BW for byte and word lanes, and the mask's moves
+(DQ for a byte's, BW for 32 and 64 lanes').
+
+`ir_simd_typed_zero` decodes an UNDEFINED rule's row (`_mm512_undefined_epi32`
+and the rest): no operand and one `vpxorq` of VECTOR(0) with itself at the
+result's width. It becomes the IR's zero vector of that width, the value the row
+gives, which refines an undefined vector.
+
+Any other form, decoration or target leaves the row a machine row, as before:
+zeroing, a different register, a memory operand, a record too many, a mask of
+another width, or a target without one of the features.
+
+Measured by `--tier1 --tier1-report -march=znver5`, each compiler compiling
+the same sources, the change removes 278 frontend rows and 439 backend rows:
+
+| Unit | Main `cb608c1` rows | Records | This change rows | Records |
+| --- | ---: | ---: | ---: | ---: |
+| `main_unit_frontend.c` | 1,207 | 576,053 | 929 | 575,650 |
+| `main_unit_backend.c` | 1,735 | 1,490,643 | 1,296 | 1,490,048 |
+
+The moves around the rows fall from 782 to 636 in the frontend and from 1,010 to
+818 in the backend.
+
+The tests:
+
+- `test-ir-simd` decodes every SELECT rule's row (24: bytes to quadwords, floats,
+  doubles, halves and bf16s at three widths) and the three UNDEFINED rules'.
+  Their lanes, masks and features are checked against values written out. A
+  row stays a machine row:
+  - without each feature it needs;
+  - under 10 changes (decorations, zeroing, displacement, memory, registers,
+    an immediate, a mask or vector of another width, a record too many).
+- `test-tier1-masks` takes each of the 27 rows as a program's only row, in
+  four statements of vectors and masks from an input buffer. It runs them
+  through both lowering paths, the IR's interpreter at every stage, and Tier
+  1's native code, against a C model. Tier 0 doesn't run them there: its
+  register-direct moves have no Zen 5 row yet, which its builds require.
+- `test-checker-driver`'s machine rows' unit keeps its masked operations and
+  blends, now the IR's selects. It has 61 machine rows where main has 75, with
+  33 moves where main has 39, still within its bound of a move for every two
+  rows.
+
 ## Width changes (#1840)
 
-[#1840](https://github.com/buster14a/buster/issues/1840) decodes the x86
-builtins' remaining rows family by family. Its design comment counts them by
-kind. Moving bits between vector widths takes three unary or binary kinds of
-`intrinsic`:
+Moving bits between vector widths, the next family of #1840's rows (counted in
+the section above), takes three unary or binary kinds of `intrinsic`:
 
 ```text
 %4 = intrinsic.v4i32 %3 extract 3
@@ -456,6 +538,11 @@ main `cb608c1`'s sources:
 | `main_unit_frontend.c` | 1,207 | 576,053 | 782 | 1,111 | 575,941 | 693 |
 | `main_unit_backend.c` | 1,735 | 1,490,643 | 1,010 | 1,643 | 1,490,520 | 926 |
 
+With #1878's selects, merged since, the two families together leave 833 and
+1,204 rows: measured by main `48c0839`'s compiler with this change, compiling the
+same sources (main's own improvements since change the records, 538,003 and
+1,393,252, so they compare with neither column).
+
 The tests:
 
 - `test-ir`: both verifiers admit each kind at every pair of widths and part
@@ -472,8 +559,8 @@ The tests:
   an unmasked writemask. They go through both lowering paths, the interpreter
   at every stage and Tier 1's native code, against a C model.
 - `test-checker-driver`'s machine-rows unit: its inserts, extracts and casts are
-  now the IR's. It has 65 rows and 32 moves (main: 75 and 39), and its native
-  hashes are clang -O0's by both paths.
+  now the IR's. It has 65 rows and 32 moves (main: 75 and 39), 51 and 26 with
+  the selects, and its native hashes are clang -O0's by both paths.
 
 ## Permutes (#1840)
 
