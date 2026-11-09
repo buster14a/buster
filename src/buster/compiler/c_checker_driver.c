@@ -1158,6 +1158,37 @@ static void check_driver_unevaluated_escapes(const Parser* parser, Preprocessor*
     }
 }
 
+// A bit-precise constant's suffix before C23 among the numeric constants a failed parse left unchecked (#1447): the
+// warning the checked ones' reader gives (check_input_bit_int_suffix), as the command line maps it.
+static void check_driver_bit_int_suffix(Preprocessor* pp, const Parser* parser, uint32_t token, Arena* scratch)
+{
+    static const CheckInput none = { 0 };
+    const uint32_t source = parser->tokens.sources[token];
+    PPTokens* output = &pp->output;
+    if (parser->language.standard < 2023 && source < output->count && output->kinds[source] != BUSTER_PP_KIND_EMBED && output->kinds[source] != BUSTER_PP_KIND_INTEGER)
+    {
+        const uint64_t mark = scratch->length;
+        const uint64_t capacity = (uint64_t)output->values[source] - output->locations[source] + 1;
+        uint8_t* buffer = arena_push(scratch, capacity, 1);
+        const uint8_t* bytes = 0;
+        const uint32_t length = buffer != 0 ? pp_spelling(pp, output->kinds[source], output->values[source], output->locations[source], buffer, &bytes) : 0;
+        CheckLiteral literal = { 0 };
+        if (length != 0)
+        {
+            check_literal_number(bytes, length, scratch, &literal);
+        }
+        const CheckWarningSeverity severity = literal.valid && literal.bit_width != 0 ? check_common_severity(pp, parser, &none, token, CHECK_WARNING_ID_C23_PARAMETER, false) :
+                                                                                         CHECK_WARNING_IGNORE;
+        const bool error = severity == CHECK_WARNING_ERROR;
+        const PPSeverity disposition = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_MAPPED_FATAL : error ? PP_SEVERITY_MAPPED_ERROR : PP_SEVERITY_WARNING;
+        if (severity != CHECK_WARNING_IGNORE)
+        {
+            pp_diagnose_output_at(pp, disposition, source, source, "'_BitInt' suffix for literals is a C23 extension [%s-Wc23-extensions]", error ? "-Werror," : "");
+        }
+        arena_pop_to(scratch, mark);
+    }
+}
+
 // The numeric constants a failed parse left unchecked, from `begin` (where the checked prefix or repair ends) to its first
 // error: clang diagnoses each as it parses it, before that error, which is where buster's checker never reaches them
 // (#1127). Each one's publication is its own token, so it sorts before the parse's diagnostics. Numbers in a C23
@@ -1186,9 +1217,9 @@ static void check_driver_unparsed_literals(const Parser* parser, Preprocessor* p
         }
         else
         {
-            if (kind == PARSE_KIND_NUMBER)
+            if (kind == PARSE_KIND_NUMBER && !check_driver_literal(pp, parser, t, parser->tokens.sources[t], parser->tokens.sources[t], scratch))
             {
-                check_driver_literal(pp, parser, t, parser->tokens.sources[t], parser->tokens.sources[t], scratch);
+                check_driver_bit_int_suffix(pp, parser, t, scratch);
             }
             t += 1;
         }

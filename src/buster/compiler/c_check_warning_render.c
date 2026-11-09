@@ -1074,6 +1074,9 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
             result = check_warning_text(scratch, "encoding prefix '%s' on an unevaluated string literal has no effect",
                                         payload->data == 2 ? "u8" : payload->name == 'L' ? "L" : payload->name == 'U' ? "U" : "u");
             break;
+        case CHECK_WARNING_EVENT_BIT_INT_SUFFIX:
+            result = "'_BitInt' suffix for literals is a C23 extension";
+            break;
         case CHECK_WARNING_EVENT_ALIGNOF_EXPRESSION:
         {
             result = check_warning_text(scratch, "'%.*s' applied to an expression is a GNU extension", (int)name.length, name.pointer);

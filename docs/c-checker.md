@@ -330,12 +330,21 @@ where clang takes it: a `wb` one of 128 bits with its top bit set is
 `_BitInt(129)`. The literal leaves its type to the reader, which makes the
 `_BitInt` in its table (`CheckLiteral.bit_width`, `check_input_literal`); #658's
 literal tables leave such constants to the ordinary path. `#if` reads them as
-clang does, through the preprocessor's own constants. Two differences from clang
-remain:
-- before C23, clang warns that the suffix is a C23 extension
-  (`-Wc23-extensions`), and the checker doesn't;
-- clang takes an imaginary one (`5wbi`, a `_Complex _BitInt(4)` that it doesn't
-  let a program spell otherwise), which the checker refuses, as GCC does.
+clang does, through the preprocessor's own constants. Before C23 the suffix
+has clang's -Wc23-extensions warning, "'_BitInt' suffix for literals is a C23
+extension", at the constant (#1447): once, from the reader
+(`check_input_bit_int_suffix`), as the constant evaluator may read it again;
+from the driver's scan of what a failed parse left unchecked
+(`check_driver_bit_int_suffix`); and in `#if` from the preprocessor, with
+its flag, mapped as clang maps it (`pp_c23_extension_severity`): the
+command line's `-W[no-]c23-extensions`, `-W[no-]c2x-extensions`,
+`-W[no-]everything`, `-Werror`, `-Werror=`/`-Wno-error=` and
+`-pedantic-errors`, under the source's `#pragma clang diagnostic` for the group,
+which the preprocessor follows through push and pop, at any depth, for it
+alone. Clang's -Wpre-c23-compat warning of
+it in C23 isn't given. One difference from clang remains: clang takes an
+imaginary one (`5wbi`, a `_Complex _BitInt(4)` that it doesn't let a program
+spell otherwise), which the checker refuses, as GCC does.
 
 What this compiler's own `main.c` needed (#129) the checker takes as clang 23
 does, each rule checked against clang's answers on probes of it:

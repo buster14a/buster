@@ -387,6 +387,9 @@ typedef enum CheckWarningEventKind
     // -Wdelimited-escape-sequence-extension): at the token, payload.data 1 for a named one's "named escape sequences are a
     // Clang extension", 0 for "delimited escape sequences are a C2y extension".
     CHECK_WARNING_EVENT_DELIMITED_ESCAPE,
+    // A bit-precise constant's suffix (wb or uwb) before C23 (#1447): -Wc23-extensions' "'_BitInt' suffix for literals is a
+    // C23 extension" (CHECK_WARNING_ID_C23_PARAMETER's option), at the constant.
+    CHECK_WARNING_EVENT_BIT_INT_SUFFIX,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
 
