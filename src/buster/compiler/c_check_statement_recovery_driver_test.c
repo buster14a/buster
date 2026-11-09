@@ -387,71 +387,59 @@ static void check_test_driver_statement_recovery(CheckTest* test, const char* cl
         }
         unlink(source);
     }
-    // The rounds' cap (BUSTER_CHECK_DRIVER_REJECTED_ROUNDS): each body's incomplete object ends its reading's walk, so the
-    // first reading gives the first error and each round one more, until the cap; past it the unit's warnings aren't given.
-    // So the first errors are clang's, the last isn't given, and nor are the warnings. (The forward declarations' notes aren't
-    // yet clang's, so the lines compared are the errors'.)
+    // Rounds past the error limit's cut (BUSTER_CHECK_DRIVER_REJECTED_ROUNDS, #1447): each body's incomplete object ends its
+    // reading's walk, so the first reading gives the first error and each round one more, until clang's error limit cuts
+    // the output; the bodies after the cut are left out, and the warnings before it are given. The whole output, by
+    // default, at a limit inside the errors, with -Wfatal-errors and without a limit, by the vector path, the scalar
+    // one and deferred bodies on two lanes.
     static const char capped[] =
         "void m1(void) { struct S1 s; }\nvoid m2(void) { struct S2 s; }\nvoid m3(void) { struct S3 s; }\n"
         "void m4(void) { struct S4 s; }\nvoid m5(void) { struct S5 s; }\nvoid m6(void) { struct S6 s; }\n"
-        "int g(int y) { if (y = 1) return 1; int w; return 0; }\n";
+        "int g(int y) { if (y = 1) return 1; int w; return 0; }\n"
+        "int h(int x) { x = x; struct S7 s; return x = x; }\n";
+    static const char* const limits[] = { NULL, "-ferror-limit=3", "-Wfatal-errors", "-ferror-limit=0" };
     snprintf(source, sizeof(source), "%s/statement-recovery-capped.c", directory);
     const bool capped_made = expected_lines != NULL && actual_lines != NULL && parse_test_write(source, capped, sizeof(capped) - 1);
     check_test_expect(test, capped_made, "statement recovery: the capped fixture is written");
-    for (uint32_t mode = 0; capped_made && mode < 3; mode += 1)
+    for (uint32_t l = 0; capped_made && l < BUSTER_ARRAY_LENGTH(limits); l += 1)
     {
-        char* arguments[12] = { (char*)clang, "-std=gnu17", "-fsyntax-only", "-fno-caret-diagnostics", "-Wall", source, NULL };
-        char* texts[2] = { NULL, NULL };
-        char* lines[2] = { expected_lines, actual_lines };
-        bool read = true;
-        for (uint32_t side = 0; side < 2; side += 1)
+        for (uint32_t mode = 0; mode < 3; mode += 1)
         {
-            uint32_t at = 6;
-            arguments[0] = side == 0 ? (char*)clang : (char*)executable;
-            if (side == 1 && mode == 1)
+            char* arguments[12] = { (char*)clang, "-std=gnu17", "-fsyntax-only", "-fno-caret-diagnostics", "-Wall", source, NULL };
+            char* texts[2] = { NULL, NULL };
+            char* lines[2] = { expected_lines, actual_lines };
+            int statuses[2] = { 0, 0 };
+            bool read = true;
+            for (uint32_t side = 0; side < 2; side += 1)
             {
-                arguments[at++] = "--scalar";
-            }
-            else if (side == 1 && mode == 2)
-            {
-                arguments[at++] = "--deferred-bodies";
-                arguments[at++] = "--lanes";
-                arguments[at++] = "2";
-            }
-            arguments[at] = NULL;
-            const int status = check_test_driver_spawn(arguments, &texts[side]);
-            read = read && status != 0 && texts[side] != NULL && check_test_diagnostic_lines(texts[side], lines[side], LINES);
-            // The errors' lines alone: clang's first five, buster's all.
-            size_t kept = 0;
-            uint32_t errors = 0;
-            for (char* line = lines[side]; read && *line != 0;)
-            {
-                char* end = strchr(line, '\n');
-                const size_t size = end != NULL ? (size_t)(end - line) + 1 : strlen(line);
-                const bool error = memmem(line, size, ": error: ", 9) != NULL;
-                errors += error;
-                if (error && (side == 1 || errors <= BUSTER_CHECK_DRIVER_REJECTED_ROUNDS + 1))
+                uint32_t at = 6;
+                arguments[0] = side == 0 ? (char*)clang : (char*)executable;
+                if (limits[l] != NULL)
                 {
-                    memmove(lines[side] + kept, line, size);
-                    kept += size;
+                    arguments[at++] = (char*)limits[l];
                 }
-                line += size;
+                if (side == 1 && mode == 1)
+                {
+                    arguments[at++] = "--scalar";
+                }
+                else if (side == 1 && mode == 2)
+                {
+                    arguments[at++] = "--deferred-bodies";
+                    arguments[at++] = "--lanes";
+                    arguments[at++] = "2";
+                }
+                arguments[at] = NULL;
+                statuses[side] = check_test_driver_spawn(arguments, &texts[side]);
+                read = read && texts[side] != NULL && check_test_diagnostic_lines(texts[side], lines[side], LINES);
             }
-            if (read)
-            {
-                lines[side][kept] = 0;
-            }
-            // Buster's other lines: none but the notes it leaves out.
-            const bool warned = side == 1 && texts[side] != NULL && strstr(texts[side], ": warning: ") != NULL;
-            read = read && !warned;
+            const bool same = read && statuses[0] != 0 && statuses[1] != 0 && strcmp(expected_lines, actual_lines) == 0;
+            char description[8192];
+            snprintf(description, sizeof(description), "statement recovery: a unit of many rounds, %s, mode %u:\n%s(clang\n%s)",
+                     limits[l] != NULL ? limits[l] : "the default limit", mode, read ? actual_lines : "", read ? expected_lines : "");
+            check_test_expect(test, same, description);
+            free(texts[0]);
+            free(texts[1]);
         }
-        const bool same = read && strcmp(expected_lines, actual_lines) == 0;
-        char description[8192];
-        snprintf(description, sizeof(description), "statement recovery: a unit past the rounds' cap, mode %u: the first errors alone:\n%s(clang\n%s)", mode,
-                 read ? actual_lines : "", read ? expected_lines : "");
-        check_test_expect(test, same, description);
-        free(texts[0]);
-        free(texts[1]);
     }
     unlink(source);
     unlink(object);
