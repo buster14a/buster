@@ -368,6 +368,10 @@ but its naked one. The scalar ones, BMI2's
 instruction of selection's `TIER1_RULE_INTRINSIC`, and so are the C bit builtins'
 rows (#1374: `tzcnt`, `bsf`, `lzcnt`, `bsr`, `popcnt` and `bswap`) and the signed
 overflow builtins' (#1385: `saddo`, `ssubo` and `smulo`, the operation and `seto`).
+The masked moves' selects of the x86 builtins (every masked operation's merge)
+are the IR's `vselect` and their undefined vectors its zero vector (#1840, [the
+SIMD IR guide](ir-simd.md)'s "Selects and undefined vectors"), which Tier 1
+selects as `vpblendm` and `vpxor`.
 
 ### Inlining (#1282)
 
