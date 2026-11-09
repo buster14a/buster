@@ -4470,6 +4470,37 @@ static bool parse_scalar_type_argument_attribute(const ParseScalar* parser, Iden
     return result;
 }
 
+// Whether the typedef name at `token`, in the arguments of a counted_by family attribute (frame `frame`, a GNU attribute's
+// call), names a member of a record being defined, which clang's lookup in the attribute's argument finds before the
+// typedef (#1842): an identifier of its name in an enclosing struct or union body before it, in a declarator's place
+// (after a specifier, a typedef name, `*`, `,` or a body's `}`, and before `;`, `,`, `:`, `[`, `)` or an attribute).
+static bool parse_scalar_counted_member(const ParseScalar* parser, const ParseFrame* frame, uint32_t token)
+{
+    static const char* const names[] = { "counted_by", "sized_by", "counted_by_or_null", "sized_by_or_null" };
+    bool counted = frame->role == PARSE_ROLE_OPEN_CALL && frame->opener > 0 && parse_scalar_gnu_attribute_group(parser, frame);
+    bool spelled = false;
+    for (uint32_t n = 0; counted && !spelled && n < sizeof(names) / sizeof(names[0]); n += 1)
+    {
+        spelled = parse_scalar_attribute_spelled(parser, parser->names[frame->opener - 1], true, names[n]);
+    }
+    bool found = false;
+    for (uint32_t f = 0; spelled && !found && f < parser->frame_count; f += 1)
+    {
+        const ParseFrame* body = parser->frames + f;
+        for (uint32_t t = body->role == PARSE_ROLE_OPEN_STRUCT ? body->opener + 1 : token; !found && t < token; t += 1)
+        {
+            const uint8_t before = parser->kinds[t - 1];
+            const uint8_t after = parser->kinds[t + 1];
+            const bool declarator = before == PARSE_KIND_TYPE || before == PARSE_KIND_QUALIFIER || before == PARSE_KIND_STAR || before == PARSE_KIND_COMMA ||
+                                    before == PARSE_KIND_R_BRACE || before == PARSE_KIND_IDENTIFIER;
+            const bool ends = after == PARSE_KIND_SEMI || after == PARSE_KIND_COMMA || after == PARSE_KIND_COLON || after == PARSE_KIND_L_SQUARE ||
+                              after == PARSE_KIND_R_PAREN || after == PARSE_KIND_ATTRIBUTE;
+            found = parser->kinds[t] == PARSE_KIND_IDENTIFIER && parser->names[t] == parser->names[token] && declarator && ends;
+        }
+    }
+    return found;
+}
+
 // clang's attributes whose arguments its parser reads its own way, as no expressions (#1447): availability's
 // (ParseAvailabilityAttribute) and external_source_symbol's (ParseExternalSourceSymbolAttribute), by their GNU names, a
 // keyword's underscores too. Their arguments are a balanced run of tokens, which the checker reads as clang's parser does.
@@ -4632,7 +4663,9 @@ static void parse_scalar_operand(ParseScalar* parser, uint32_t i, ParseFrame* fr
             parser->frames[parser->frame_count - 3].flags |= statement ? BUSTER_PARSE_FRAME_STATEMENT_ATTRIBUTE : BUSTER_PARSE_FRAME_DECLARATION_ATTRIBUTE;
         }
         // GNU's `&&label` names a label, whatever the ordinary names mean.
-        const bool ordinary = !attribute && !(previous == PARSE_KIND_AMPAMP && parser->roles[(int64_t)i - 1] == PARSE_ROLE_PREFIX);
+        // A counted_by family's count names a member before a typedef of its name (parse_scalar_counted_member).
+        const bool ordinary = !attribute && !(previous == PARSE_KIND_AMPAMP && parser->roles[(int64_t)i - 1] == PARSE_ROLE_PREFIX) &&
+                              !(parse_scalar_is_typedef_name(parser, i) && parse_scalar_counted_member(parser, frame, i));
         if (ordinary && parse_scalar_is_typedef_name(parser, i) && previous == PARSE_KIND_SIZEOF)
         {
             parse_scalar_error_argument(parser, i, PARSE_MESSAGE_EXPECTED_PARENTHESES_AROUND_TYPE_NAME, BUSTER_PARSE_AFTER_PREVIOUS, i - 1);
