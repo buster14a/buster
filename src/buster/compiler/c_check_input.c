@@ -3931,9 +3931,10 @@ static uint32_t check_input_declaration_depth(const CheckInputReader* reader)
 // it), and it may be declared without its body only by a declaration of it alone (`enum E : T;`). Its redeclarations
 // in its scope keep its base (a declaration alone, `enum E;`, too; a reference, `enum E x;`, has none), and only one
 // lists its enumerators; one without a base can't list them, nor one with a base those of an enum without one, as clang
-// has it. A parameter list's definition of a tag the list defined already is no error in clang, only a warning
+// has it. Before C23, a parameter list's definition of a tag the list defined already is no error in clang, only a warning
 // (Sema::ActOnTag's warn_redefinition_in_param_list): it makes a tag of its own, which its name doesn't name, so that
-// the name goes on naming the first (`int f(struct S { int x; } a, struct S { int y; } b)`).
+// the name goes on naming the first (`int f(struct S { int x; } a, struct S { int y; } b)`). C23's is any scope's
+// redefinition (#1869).
 static inline __attribute__((always_inline)) CheckInputAttributes* check_input_merge_attributes(CheckInputReader* reader, CheckInputAttributes* common, CheckInputAttributes* suffix);
 static void check_input_transparent_union_warning(CheckInputReader* reader, TypeId type, const CheckInputAttribute* attribute, TypeTransparentUnionResult marked,
                                                   uint32_t point);
@@ -4165,8 +4166,11 @@ static TypeId check_input_tag_identity(CheckInputReader* reader, uint32_t token,
         const TypeId underlying = valid && fixed ? check_input_enum_underlying(reader, colon, i) : 0;
         valid &= !fixed || underlying != 0;
         // A parameter list's second definition of a tag of the same kind (above): one with its enumerators listed, or
-        // complete, for an enum without a fixed underlying type and a record.
-        const TypeId defined = same_scope && body && reader->prototype_depth != 0 ? reader->declared_types[reader->bindings.declaration[previous - 1]] : 0;
+        // complete, for an enum without a fixed underlying type and a record. Before C23 alone: C23's is a redefinition as
+        // any other scope's (below), a record's compared with the earlier (#1869), as clang's ActOnTag checks structural
+        // equivalence before its parameter-list case.
+        const bool c23 = parser->language.standard >= 2023;
+        const TypeId defined = same_scope && body && reader->prototype_depth != 0 && !c23 ? reader->declared_types[reader->bindings.declaration[previous - 1]] : 0;
         const uint32_t defined_tag = defined != 0 && type_kind(reader->types, defined) == kind ? reader->types->types.index[type_index(defined)] : 0;
         const bool redefinition = defined_tag != 0 && (kind == BUSTER_TYPE_KIND_ENUM && reader->enum_fixed[defined_tag] != BUSTER_CHECK_ENUM_NONE ?
                                                        reader->enum_fixed[defined_tag] == BUSTER_CHECK_ENUM_LISTED : type_is_complete(reader->types, defined));
@@ -4176,7 +4180,6 @@ static TypeId check_input_tag_identity(CheckInputReader* reader, uint32_t token,
         // compatible record's redefinition (N3037): its body is read as an anonymous record's too, and compared with the
         // earlier once complete (check_input_tag_compatible), which an enum's still refuses as before. Before C23, a fixed
         // enum listed again with the same base is one too; with another base, the mismatch below.
-        const bool c23 = parser->language.standard >= 2023;
         const TypeId earlier = valid && same_scope && body && !redefinition ? reader->declared_types[reader->bindings.declaration[previous - 1]] : 0;
         const uint32_t earlier_tag = earlier != 0 && type_kind(reader->types, earlier) == kind ? reader->types->types.index[type_index(earlier)] : 0;
         const uint8_t earlier_state = earlier_tag != 0 && kind == BUSTER_TYPE_KIND_ENUM ? reader->enum_fixed[earlier_tag] : BUSTER_CHECK_ENUM_NONE;
