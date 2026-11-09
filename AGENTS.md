@@ -408,8 +408,8 @@ preprocessor's predefines give as clang's do for the same options
 ## Command and module index
 
 Source entry points below are relative to `src/buster/compiler/`, except
-`tools/` paths; each guide has the commands, files, flags and acceptance
-boundaries. [Detailed section index](docs/commands/README.md#detailed-sections).
+`tools/` paths; each guide has the details. [Detailed section
+index](docs/commands/README.md#detailed-sections).
 
 - `test-assembler, benchmark-assembler` — `assembler.c` — [guide](docs/commands/assembler.md).
 - `test-bind, benchmark-bind` — `bind.c` — [guide](docs/commands/bind.md).
@@ -425,7 +425,7 @@ boundaries. [Detailed section index](docs/commands/README.md#detailed-sections).
 - `test-check-debug, benchmark-check-debug` — `c_check_debug.c` — [guide](docs/commands/check-debug.md).
 - `correctness.tests / CI selection` — `tools/ci/correctness.tests` — [guide](docs/commands/ci.md).
 - `measure-compile, --time-stages` — `c_check_clock.c` — [guide](docs/commands/compile-time.md).
-- `test-c-testsuite` — `c_testsuite.c` — [guide](docs/commands/c-testsuite.md).
+- `test-c-testsuite, test-sqlite` — `c_testsuite.c`, `sqlite_test.c` — [guide](docs/commands/c-testsuite.md).
 - `dco status, audit, compose` — `tools/dco/dco.c` — [guide](docs/commands/dco.md).
 - `test-dataflow, benchmark-dataflow` — `dataflow.c` — [guide](docs/commands/dataflow.md).
 - `test-debug, benchmark-debug` — `debug.c` — [guide](docs/commands/debug.md).
