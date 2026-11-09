@@ -15,14 +15,14 @@
 // to none and then 8 bytes more at a time until the plan succeeds: each run before it must fail for want of room
 // (CHECK_PROGRAM_RESOURCE) with both arenas as they were, among them a run whose room ends before each statement's
 // places; then the plans must be the whole arena's: an asm body each for the first two (#1839), the third refused by name,
-// and a helper for the fourth, whose template branches.
+// and a helper for the fourth, whose form x86_semantics.c doesn't cover (rorx).
 static void check_test_program_asm_room(CheckTest* test)
 {
     static const char source[] =
         "float through(float x){__asm__ volatile(\"\" : \"+t\"(x));return x;}"
         "long double root(long double x){__asm__(\"fsqrt\" : \"+t\"(x));return x;}"
         "int flagged(int a, float x){long long z;__asm__(\"cmpl $0, %2\" : \"=y\"(z), \"+t\"(x) : \"r\"(a));return (int)z+(int)x;}"
-        "int branched(int n){int r;__asm__(\"testl %1, %1\\n\\tjle 1f\\n\\tmovl $5, %0\\n1:\" : \"=r\"(r) : \"r\"(n), \"0\"(0));return r;}";
+        "int rotated(int n){int r;__asm__(\"rorxl $3, %1, %0\" : \"=r\"(r) : \"r\"(n));return r;}";
     static InternTable identifiers;
     static Preprocessor pp;
     static Parser parser;
@@ -80,7 +80,7 @@ static void check_test_program_asm_room(CheckTest* test)
                                  planned.plans[1].helper == BUSTER_CHECK_NONE && planned.plans[2].reason != NULL &&
                                  strcmp(planned.plans[2].reason, "inline assembly operands in MMX registers") == 0 && planned.plans[3].reason == NULL &&
                                  !planned.plans[3].inlined && planned.plans[3].helper != BUSTER_CHECK_NONE && helpers.count == 1;
-        snprintf(description, sizeof(description), "asm room, %s: the x87 statements are asm bodies, the MMX operand is refused by name, the branch has a helper",
+        snprintf(description, sizeof(description), "asm room, %s: the x87 statements are asm bodies, the MMX operand is refused by name, rorx has a helper",
                  path == 0 ? "scalar" : "vector");
         check_test_expect(test, plans_right, description);
         parse_release(&parser);
@@ -103,7 +103,7 @@ static void check_test_program_asm_room(CheckTest* test)
 // the block, runs cpuid and stores its four outputs through their addresses, and touches rbx; rdtsc's; a shift's count
 // in cl), a literal register (`%%rsp`, read), a syntax switch, more records than a row takes, an x87 operand, a form
 // x86_semantics.c doesn't cover (ldmxcsr), an explicit register variable, and a register class narrower than the sixteen
-// (Q's); but a branch to a label, which keeps its helper.
+// (Q's), and a branch to a numeric label (a branch of the body); but a named label, which keeps its helper.
 static void check_test_program_asm_placement(CheckTest* test)
 {
     static const char source[] =
@@ -124,7 +124,8 @@ static void check_test_program_asm_placement(CheckTest* test)
         "long double rooted(long double x){__asm__(\"fsqrt\" : \"+t\"(x));return x;}"
         "void loaded(unsigned m){__asm__ volatile(\"ldmxcsr %0\" : : \"m\"(m));}"
         "long fixed(long a){register long r10 __asm__(\"r10\") = a;__asm__(\"incq %0\" : \"+r\"(r10));return r10;}"
-        "int high(int x){__asm__(\"incl %0\" : \"+Q\"(x));return x;}";
+        "int high(int x){__asm__(\"incl %0\" : \"+Q\"(x));return x;}"
+        "int named(int n){int r;__asm__(\"testl %1, %1\\n\\tjle .Lnamed%=\\n\\tmovl $5, %0\\n.Lnamed%=:\" : \"=r\"(r) : \"r\"(n), \"0\"(0));return r;}";
     static const uint16_t first_forms[] = {
         X86_FORM_BSWAP_R32, X86_FORM_MOV_RM32_R32, X86_FORM_SQRTSD_X_XM64, X86_FORM_MFENCE, X86_FORM_LOCK_XADD_M32_R32, X86_FORM_ADD_RM64_IMM8, X86_FORM_MFENCE,
     };
@@ -133,8 +134,9 @@ static void check_test_program_asm_placement(CheckTest* test)
     enum
     {
         PLACED = 7,
-        KEPT = 11,
+        KEPT = 12,
         BRANCHED = 11,
+        NAMED = 18,
     };
     static InternTable identifiers;
     static Preprocessor pp;
@@ -178,9 +180,16 @@ static void check_test_program_asm_placement(CheckTest* test)
             const CheckProgramAsm* plan = planned.plans + s;
             const Tier0Operation* row = plan->row;
             const bool placed = s < PLACED;
-            const bool helped = s == BRANCHED;
+            const bool helped = s == NAMED;
             bool right = plan->planned && plan->reason == NULL && (row != NULL) == placed && (plan->helper != BUSTER_CHECK_NONE) == helped &&
                          plan->inlined == (!placed && !helped) && (plan->inline_count != 0) == plan->inlined;
+            if (right && s == BRANCHED)
+            {
+                // The branch's body: its two loads (n, the matching 0), then testl, jle and movl, the jle a branch of the body to
+                // its label at the template's end, the first store.
+                right = plan->inline_branch_count == 1 && plan->inline_branches[0] == 3 && plan->inline_targets[0] == 5 &&
+                        plan->inline_records[2].form == X86_FORM_TEST_RM32_R32;
+            }
             if (right && s == PLACED)
             {
                 // cpuid's body: eax and ecx from the block, cpuid, then each output's address into the store register and
@@ -436,6 +445,18 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
         "long r;__asm__ volatile(\"syscall\" : \"=a\"(r) : \"0\"(39L) : \"rcx\", \"r11\", \"memory\");"
         "return (int)(s^(unsigned)t^(unsigned)u^(unsigned)(r>0));}",
         "asm-bodies", clang);
+    // Asm bodies of templates with their own labels and branches (#1839): a backward loop (decl and jnz), a forward jmp over a store, a template whose branches go to its end (the stores), and a byte copy's loop of
+    // two pointers, each in a loop of live values, against clang's build.
+    check_test_program_source(test,
+        "static int spin(int n){int c=0;__asm__(\"testl %1, %1\\n\\tjle 2f\\n1:\\n\\taddl $3, %0\\n\\tdecl %1\\n\\tjnz 1b\\n2:\" : \"+r\"(c), \"+r\"(n) : : \"cc\");return c;}"
+        "static int skip(int x){int r=x;__asm__(\"cmpq $10, %1\\n\\tjg 1f\\n\\tmovl $-1, %0\\n\\tjmp 2f\\n1:\\n\\tleal 100(%1), %0\\n2:\" : \"=&r\"(r) : \"r\"((long)x) : \"cc\");return r;}"
+        "static void copy(char* d, const char* s, unsigned long n){__asm__ volatile(\"testq %2, %2\\n\\tjz 2f\\n1:\\n\\tmovb (%1), %%al\\n\\tmovb %%al, (%0)\\n\\tincq %0\\n\\tincq %1\\n\\tdecq %2\\n\\tjnz 1b\\n2:\""
+        " : \"+r\"(d), \"+r\"(s), \"+r\"(n) : : \"rax\", \"cc\", \"memory\");}"
+        "int tested(int n){unsigned long a=n,b=n+1,c=n+2,d=n+3,e=n+4,f=n+5,g=n+6,h=n+7;unsigned s=0;char buf[16]={0};"
+        "for(int i=-2;i<12;i++){s=s*7+(unsigned)spin(i+n)+(unsigned)skip(i+n)+(unsigned)(a+b+c+d+e+f+g+h);a+=1;h-=1;"
+        "copy(buf,\"0123456789abcdef\",(unsigned long)(i<0?0:i));s+=(unsigned)buf[i<0?0:i];}"
+        "return (int)s;}",
+        "asm-body-branches", clang);
     // Templates of no instructions, the compiler barriers: their operands evaluated, and nothing called. A comment with
     // operands substituted into it assembles to nothing too.
     check_test_program_source(test,
