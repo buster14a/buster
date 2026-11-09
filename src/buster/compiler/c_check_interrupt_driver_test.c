@@ -327,13 +327,14 @@ static void check_test_driver_interrupts(CheckTest* test, const char* clang, con
     {
         const bool made = parse_test_write(source, definitions[d], strlen(definitions[d]));
         char* text = NULL;
-        char* reference[] = { (char*)clang, "-std=gnu17", "-O0", "-c", source, "-o", object, NULL };
+        // (-w: a variadic routine's va_start and va_end are -Wexcessive-regsave's calls, which the units above compare.)
+        char* reference[] = { (char*)clang, "-std=gnu17", "-w", "-O0", "-c", source, "-o", object, NULL };
         const int oracle = made ? check_test_driver_spawn(reference, &text) : -1;
         free(text);
         for (uint32_t p = 0; made && p < 2; p += 1)
         {
             text = NULL;
-            char* arguments[] = { (char*)executable, "-std=gnu17", "-c", source, "-o", object, p == 1 ? "--scalar" : NULL, NULL };
+            char* arguments[] = { (char*)executable, "-std=gnu17", "-w", "-c", source, "-o", object, p == 1 ? "--scalar" : NULL, NULL };
             const int status = check_test_driver_spawn(arguments, &text);
             char description[1024];
             snprintf(description, sizeof(description), "interrupt definition %u by the %s path compiles as clang compiles it (status %d, clang %d: %s)", d,
