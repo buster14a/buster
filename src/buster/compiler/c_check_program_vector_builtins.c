@@ -301,6 +301,63 @@ static const char* check_vector_convert_floating_forms(CheckVectorShape in, Chec
     return reason;
 }
 
+// The baseline's row of a __builtin_convertvector whose EVEX row has no SSE or AVX form (#1834): between integers, their
+// extension or truncation (check_vector_baseline_resize); from 8- or 16-bit integers to floats or doubles, the extension
+// to dwords and then CVTDQ2PS or CVTDQ2PD; from floats or doubles to them, CVTTPS2DQ or CVTTPD2DQ and then the
+// truncation of the dwords. Its operand and result are the EVEX row's, its records rewritten; NULL or the reason.
+static const char* check_vector_baseline_convert(const X86Target* target, CheckVectorShape in, CheckVectorShape out, Tier0Operation* row)
+{
+    const bool avx = (target->features & BUSTER_X86_FEATURE(AVX)) != 0;
+    const uint32_t registers = avx ? 32 : 16;
+    const uint8_t v0 = BUSTER_TIER0_ROLE_VECTOR(0);
+    const bool integers = in.integer && out.integer;
+    // The dwords' bytes: those an extension writes, those a truncation reads.
+    const uint32_t dwords = integers ? (out.element > in.element ? out.bytes : in.bytes) : 4 * in.lanes;
+    const bool from_narrow = in.integer && in.element <= 2 && out.floating && !out.bfloat && out.element >= 4;
+    const bool to_narrow = out.integer && out.element <= 2 && in.floating && !in.bfloat && in.element >= 4;
+    const char* reason = NULL;
+    row->record_count = 0;
+    CheckVectorBaseline context = { row, dwords, avx, true };
+    if (!integers && !from_narrow && !to_narrow)
+    {
+        reason = "vector conversions unavailable at this target";
+    }
+    else if (in.bytes > registers || out.bytes > registers)
+    {
+        reason = "vector conversions wider than the target's registers";
+    }
+    else if (integers || from_narrow)
+    {
+        const uint32_t to = integers ? out.element : 4;
+        // An extension's sequence is SSE2's alone, without SSE4.1 (and so AVX): 16 bytes.
+        context.valid = to < in.element || dwords <= 16;
+        check_vector_baseline_resize(&context, in.element, to, in.is_signed);
+        if (!integers)
+        {
+            context.bytes = out.bytes;
+            const uint32_t form = out.element == 4 ? BUSTER_CHECK_BASE_UNARY(&context, CVTDQ2PS, X_XM128, Y_YM256) :
+                                                     BUSTER_CHECK_BASE_UNARY(&context, CVTDQ2PD, X_XM64, Y_XM128);
+            check_vector_baseline_put(&context, check_vector_lower_record(form, v0, 0, v0));
+        }
+    }
+    else
+    {
+        context.bytes = in.bytes;
+        const uint32_t form = in.element == 4 ? BUSTER_CHECK_BASE_UNARY(&context, CVTTPS2DQ, X_XM128, Y_YM256) :
+                                                BUSTER_CHECK_BASE_UNARY(&context, CVTTPD2DQ, X_XM128, X_YM256);
+        check_vector_baseline_put(&context, check_vector_lower_record(form, v0, 0, v0));
+        context.bytes = dwords;
+        check_vector_baseline_resize(&context, 4, out.element, true);
+    }
+    Tier0Operation baseline;
+    if (reason == NULL && !(context.valid && check_vector_baseline_row(target, row, &baseline)))
+    {
+        reason = integers && out.element < in.element ? "vector truncations of integers unavailable at this target" :
+                 integers ? "vector extensions of integers unavailable at this target" : "vector conversions unavailable at this target";
+    }
+    return reason;
+}
+
 // The row of __builtin_convertvector between vectors of the same lanes: the operand's first `result`'s lanes elements of
 // `source`'s element type (all of a vector of `source`'s type, or a shuffle's first elements of its operand of
 // `operand_bytes`, which the conversion takes in place of the shuffle's narrower vector), each to `result`'s element.
@@ -440,17 +497,16 @@ static const char* check_vector_convert_row(const TypeTable* types, const X86Tar
         needed = pair == 0 ? BUSTER_X86_FEATURE(AVX512BW) : 0;
     }
     const uint64_t evex = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512VL);
-    Tier0Operation baseline;
-    if (reason == NULL && row->record_count != 0 && (target->features & evex) != evex)
+    const bool baseline = (target->features & evex) != evex;
+    Tier0Operation forms;
+    if (reason == NULL && row->record_count != 0 && baseline && !check_vector_baseline_row(target, row, &forms))
     {
         // Without AVX-512, SSE's or AVX's form of the conversion (#775), which the lowering takes in the EVEX one's place
-        // (check_lower_operation_index): SSE4.1's extensions among the integers'; their truncations have none.
-        const bool truncates = !in.floating && !out.floating && out.element < in.element;
-        reason = check_vector_baseline_row(target, row, &baseline) ? NULL :
-                 truncates ? "vector truncations of integers without AVX-512" :
-                 !in.floating && !out.floating ? "vector extensions of integers without SSE4.1" : "vector conversions unavailable at this target";
+        // (check_lower_operation_index), or where it has none (the integers' truncations, their extensions without SSE4.1)
+        // the baseline's sequence (check_vector_baseline_convert).
+        reason = check_vector_baseline_convert(target, in, out, row);
     }
-    else if (reason == NULL && (target->features & needed) != needed)
+    else if (reason == NULL && !baseline && (target->features & needed) != needed)
     {
         reason = "vector conversions of 8-bit elements to 16-bit ones without AVX-512BW";
     }
@@ -2005,3 +2061,6 @@ static bool check_vector_reduce_fill_row(const TypeTable* types, CBuiltinId buil
     }
     return padded;
 }
+
+#undef BUSTER_CHECK_BASE_PACKED
+#undef BUSTER_CHECK_BASE_UNARY
