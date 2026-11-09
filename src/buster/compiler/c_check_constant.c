@@ -671,8 +671,9 @@ static TypeId check_constant_specifiers(CheckConstantInput* input, uint32_t* cur
             {
                 i = input->attribute_starts[i - input->first]->end - 1;
             }
-            else if (check_input_qualifier(parser, i, &qualifiers))
+            else if (check_input_read_qualifier(reader, i, &qualifiers))
             {
+                // (A repeated one warns there, as check_input_specifiers' does, #1836.)
             }
             else if (kind == PARSE_KIND_STORAGE)
             {
@@ -681,10 +682,19 @@ static TypeId check_constant_specifiers(CheckConstantInput* input, uint32_t* cur
             }
             else if (name == C_NAME_COMPLEX_C99 || name == C_NAME_GNU_COMPLEX || name == C_NAME_GNU_COMPLEX2)
             {
+                // A repeated specifier warns as check_input_specifiers' does (#1836), once a token whichever reading.
+                if (complex)
+                {
+                    check_input_duplicate_specifier(reader, i, C_NAME_COMPLEX_C99);
+                }
                 complex = true;
             }
             else if (kind == PARSE_KIND_ATOMIC && (i + 1 >= end || parser->tokens.kinds[i + 1] != PARSE_KIND_L_PAREN))
             {
+                if (atomic)
+                {
+                    check_input_duplicate_specifier(reader, i, C_NAME_ATOMIC);
+                }
                 atomic = true;
             }
             else if ((kind == PARSE_KIND_TYPEOF || kind == PARSE_KIND_ATOMIC) && i + 1 < end &&
@@ -706,11 +716,19 @@ static TypeId check_constant_specifiers(CheckConstantInput* input, uint32_t* cur
             }
             else if (name == C_NAME_SHORT)
             {
+                if (shorts != 0)
+                {
+                    check_input_duplicate_specifier(reader, i, C_NAME_SHORT);
+                }
                 shorts = 1;
             }
             else if (name == C_NAME_SIGNED || name == C_NAME_GNU_SIGNED || name == C_NAME_GNU_SIGNED2 || name == C_NAME_UNSIGNED)
             {
                 const uint32_t selected = name == C_NAME_UNSIGNED ? 2 : 1;
+                if (signedness == selected)
+                {
+                    check_input_duplicate_specifier(reader, i, name == C_NAME_UNSIGNED ? C_NAME_UNSIGNED : C_NAME_SIGNED);
+                }
                 valid &= signedness == 0 || signedness == selected;
                 signedness = selected;
             }

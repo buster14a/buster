@@ -545,13 +545,24 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "_Complex _Complex _Bool y1;\nint float y2;\n_Complex _Bool _Complex y3;\nint float y4;\n_BitInt(8) _Complex z;\n"
         "int plain = undeclared_var;\nstruct S;\n_Complex _Complex struct S y5;\nint float y6;\nenum E5 : _Complex _Bool { A5 };\n",
         // The operand readers in a body, a cast, sizeof, a parameter and a member, and a list's end's errors after its
-        // repeated specifiers' warnings. (No error that stops the reader: after a parameter's recovered error, one drops
-        // the later bodies' warnings, #1835.)
+        // repeated specifiers' warnings.
         "int f(typeof(_Complex _Bool) p, _Atomic(int float) q) { typeof(_Complex _Bool) a = 1; _Atomic(long float) b = 2;\n"
         "  return (int)(typeof(int float))a + sizeof(typeof(unsigned float)) + p + q + b; }\n"
         "struct T { typeof(long float) m; _Atomic(_Complex _Bool) n; } t;\nenum E1 : long float { A1 };\nenum E3 : int char { A3 };\n"
         "const _Complex const _Bool c1;\nvolatile long volatile float c2;\n_Complex long _Bool c3;\n"
         "typeof(typeof(_Complex _Bool) _Complex) c4;\nstatic int g(void) { int u; return 0; }\n",
+        // A recovered error in a definition's head, a specifier's or an attribute's, and then errors that stop the reader
+        // (#1835): the later bodies keep their warnings, and the definitions' own bodies theirs, since clang gives those
+        // errors before the body opens its scope; a body with an error of its own loses its unused variables.
+        "int f(long float q) { int v; return q; }\n__attribute__((section(1))) int g(void) { int w; return 0; }\n"
+        "int h(__attribute__((aligned(3))) int q) { int x; return q; }\nint p(__attribute__((aligned(3))) int q);\n"
+        "void k(long float r) { int y = undeclJ; }\nint a = undeclI;\nstatic int s(void) { int u; return 0; }\nint m(void) { int z; return z; }\n",
+        // A repeated specifier in an operand reader's type name (#1836): a typeof's, an _Atomic's, sizeof's, a cast's and
+        // an enum's base, warned as clang's DeclSpec warns, a dropped _Complex's too.
+        "typeof(unsigned unsigned int) q;\nint r = sizeof(typeof(const const int));\nenum E : unsigned unsigned short { A };\n"
+        "enum F : _Complex _Complex _Bool { B };\nenum G : short short { C };\n_Atomic(signed signed char) s;\ntypeof(_Atomic _Atomic int) t;\n"
+        "int f(void) { return sizeof(short short) + (int)(typeof(volatile volatile long))1 + _Alignof(_Complex _Complex double); }\n"
+        "typeof(typeof(signed int signed) const const) u;\n",
         // An extern declaration of type void, which clang takes (#1447): its address, sizeof, a discarded use and a cast to
         // void are quiet, a block's extern too; reading its value is the error. A dereference's or subscript's of a void
         // pointer still warns, and a void value in a comma's, conditional's or selection's operand is quiet.

@@ -2245,8 +2245,37 @@ static bool check_driver_rejected_warnings(const Parser* parser, const CheckWarn
     return valid;
 }
 
+// Whether `token` is inside a function's body, between its braces: a definition's head is under its body's `}` in the
+// tree too, so the body's `{` decides. Only a recovered report's scope asks it (check_driver_error_scoped).
+static bool check_driver_in_body(const Parser* parser, uint32_t token)
+{
+    const uint32_t count = parser->tokens.count;
+    uint32_t ancestor = token;
+    uint32_t steps = 0;
+    while (ancestor < count && parser->tree.roles[ancestor] != PARSE_ROLE_CLOSE_BODY && steps < count)
+    {
+        ancestor = parser->tree.parents[ancestor];
+        steps += 1;
+    }
+    const bool closed = ancestor < count && parser->tree.roles[ancestor] == PARSE_ROLE_CLOSE_BODY;
+    uint32_t open = closed ? ancestor : 0;
+    while (open > 0 && !(parser->tree.roles[open] == PARSE_ROLE_OPEN_BODY && parser->tree.parents[open] == ancestor))
+    {
+        open -= 1;
+    }
+    return closed && open < token;
+}
+
+// Whether a reader's report counts in the scopes around it (check_driver_rejected_warnings): not a recovered one outside
+// every body (#1835). Clang gives those as it parses a declaration's specifiers, declarator and attributes, before a
+// definition's body opens its scope (ActOnStartOfFunctionDef), so they don't take the body's unused-variable warnings.
+static bool check_driver_error_scoped(const Parser* parser, const CheckInputReport* report)
+{
+    return !report->recovered || check_driver_in_body(parser, report->token);
+}
+
 // The prefix count of the unit's errors' tokens (check_driver_rejected_warnings): its reader's reports, its graph's and the
-// driver's own. NULL without any, or without room.
+// driver's own, but a recovered report outside every body (check_driver_error_scoped). NULL without any, or without room.
 static uint32_t* check_driver_error_counts(const Parser* parser, const CheckInput* input, const CheckStream* stream, const CheckDriverDiagnostic* extra,
                                            uint32_t extra_count, Arena* scratch)
 {
@@ -2258,7 +2287,7 @@ static uint32_t* check_driver_error_counts(const Parser* parser, const CheckInpu
         memset(errors, 0, ((uint64_t)count + 2) * sizeof(uint32_t));
         for (uint32_t i = 0; i < input->report_count; i += 1)
         {
-            errors[(input->reports[i].token < count ? input->reports[i].token : count) + 1] += 1;
+            errors[(input->reports[i].token < count ? input->reports[i].token : count) + 1] += check_driver_error_scoped(parser, input->reports + i) ? 1u : 0u;
         }
         for (uint32_t i = 0; i < stream->report_count; i += 1)
         {
@@ -4978,6 +5007,21 @@ typedef enum CheckDriverRound
     CHECK_DRIVER_ROUND_FAILED,
 } CheckDriverRound;
 
+// Whether the first reading's error at `token` is a recovered one only (CheckInputReport.recovered, #1447): no error at it
+// stopped the reader. Only a rejected unit's rounds call it.
+static bool check_driver_rejected_recovered(const CheckInput* input, uint32_t token)
+{
+    bool recovered = false;
+    bool stopped = false;
+    for (uint32_t i = 0; i < input->report_count; i += 1)
+    {
+        const bool at = input->reports[i].token == token;
+        recovered |= at && input->reports[i].recovered;
+        stopped |= at && !input->reports[i].recovered;
+    }
+    return recovered && !stopped;
+}
+
 // Whether an error's token is among the unit's known ones.
 static bool check_driver_rejected_known(const uint32_t* errors, uint32_t error_count, uint32_t token)
 {
@@ -4996,7 +5040,8 @@ static bool check_driver_rejected_known(const uint32_t* errors, uint32_t error_c
 // may be the view's own (a statement expression's value left void); the unit's, with bodies alone left out, publishes those
 // not among `errors`, in clang's words, and puts their tokens in `found` (room for `found_capacity`), for the next round
 // to leave out too.
-static CheckDriverRound check_driver_rejected_read(const Parser* unit, const Parser* original, Preprocessor* pp, const uint32_t* errors, uint32_t error_count,
+static CheckDriverRound check_driver_rejected_read(const Parser* unit, const Parser* original, Preprocessor* pp, const CheckInput* first_input,
+                                                   const uint32_t* errors, uint32_t error_count,
                                                    const CBodyRange* ranges, uint32_t body_count, const uint8_t* bodies, uint8_t* mask, const uint8_t* edits,
                                                    bool scalar, bool return_warning, CheckWarningSeverity return_baseline, CheckCommonShiftWarnings* shifts,
                                                    const CheckWarningEvents* first, const CheckWarningEvents* first_graph, uint32_t stop,
@@ -5044,7 +5089,9 @@ static CheckDriverRound check_driver_rejected_read(const Parser* unit, const Par
             // A dropped part's error counts just before the token after it (#1447): in its own scope, a dropped
             // declaration's at file scope, and not in the definition that follows it.
             const bool dropped = edited && errors[e] < count && edits[errors[e]] != 0;
-            error_counts[(at < view_count ? at : view_count) + (dropped ? 0u : 1u)] += 1;
+            // A recovered error outside every body counts in no scope (check_driver_error_scoped, #1835).
+            const bool scoped = errors[e] >= count || !check_driver_rejected_recovered(first_input, errors[e]) || check_driver_in_body(unit, errors[e]);
+            error_counts[(at < view_count ? at : view_count) + (dropped ? 0u : 1u)] += scoped ? 1u : 0u;
         }
         for (uint32_t t = 1; t < view_count + 2; t += 1)
         {
@@ -5064,9 +5111,11 @@ static CheckDriverRound check_driver_rejected_read(const Parser* unit, const Par
     TypeTable types = { 0 };
     valid = valid && capacity.types != 0 && type_initialize(&types, &type_arena, &index_arena, capacity);
     CheckInput input = { 0 };
-    // (A reading whose reader reports an error isn't selected's valid one, but its reports are the round's.)
+    // (A reading whose reader reports an error isn't selected's valid one, but its reports are the round's. One whose only
+    // reports are recovered ones, a recovered error the round left in (#1835), reads on as a valid one, as the unit's first
+    // reading does: CheckInput.recovered_valid.)
     const bool selected = valid && check_input_selected(&input, parser, pp, &types, arena, scratch, mask);
-    valid = valid && (selected || (input.report_count != 0 && !input.recovered_valid)) && !input.resource;
+    valid = valid && (selected || input.report_count != 0) && !input.resource;
     const CheckOptions check_options = { .scalar = scalar };
     CheckStream stream = { 0 };
     // The reading's own errors: its reader's (a recovered one's unit is valid), whose reports stand without the graph, which
@@ -5378,7 +5427,10 @@ static void check_driver_rejected_common(const Parser* unit, const Parser* origi
                 high = before ? high : middle;
             }
             const bool bodied = low != 0 && token < ranges[low - 1].end;
-            ready = kept || bodied;
+            // A recovered error outside every body (#1447, CheckInputReport.recovered: a definition's parameter's, #1835)
+            // needs no part left out: the reading recovers it again, its declaration valid, as clang keeps it. It still
+            // counts in its scope (error_counts).
+            ready = kept || bodied || check_driver_rejected_recovered(first_input, token);
             bodied_all &= bodied;
             if (bodied)
             {
@@ -5396,14 +5448,14 @@ static void check_driver_rejected_common(const Parser* unit, const Parser* origi
         uint32_t added = 0;
         uint32_t* fresh = known + known_count;
         const uint32_t fresh_capacity = (uint32_t)(known_capacity - known_count);
-        round = ready && edited ? check_driver_rejected_read(unit, original, pp, known, known_count, ranges, body_count, bodies, mask, edits, scalar, return_warning,
+        round = ready && edited ? check_driver_rejected_read(unit, original, pp, first_input, known, known_count, ranges, body_count, bodies, mask, edits, scalar, return_warning,
                                                              return_baseline, shifts, first, first_graph, stop, publication_end, fresh, fresh_capacity, &added,
                                                              arena, scratch) :
                                   CHECK_DRIVER_ROUND_FAILED;
         uint8_t* fallback = !edited ? mask : bodied_all ? bodies : NULL;
         if (ready && round == CHECK_DRIVER_ROUND_FAILED && fallback != NULL && check_lazy_mask_valid(unit, fallback))
         {
-            round = check_driver_rejected_read(unit, original, pp, known, known_count, ranges, body_count, bodies, fallback, NULL, scalar, return_warning,
+            round = check_driver_rejected_read(unit, original, pp, first_input, known, known_count, ranges, body_count, bodies, fallback, NULL, scalar, return_warning,
                                                return_baseline, shifts, first, first_graph, stop, publication_end, fresh, fresh_capacity, &added, arena,
                                                scratch);
         }

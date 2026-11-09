@@ -3686,6 +3686,7 @@ static TypeId check_input_enum_underlying(CheckInputReader* reader, uint32_t col
     uint32_t skip = BUSTER_CHECK_NONE;
     bool skip_complex = false;
     bool attributed = false;
+    bool complex_seen = false;
     bool attempt = true;
     while (attempt)
     {
@@ -3696,13 +3697,19 @@ static TypeId check_input_enum_underlying(CheckInputReader* reader, uint32_t col
         integer_seen = false;
         base = 0;
         valid = colon + 1 < end;
+        complex_seen = false;
         for (uint32_t i = colon + 1; valid && i < end; i += 1)
         {
             const uint32_t name = parser->tokens.names[i];
             const uint8_t kind = parser->tokens.kinds[i];
             if (i == skip || (skip_complex && check_declspec_complex_name(name)))
             {
-                // (Dropped.)
+                // (Dropped; a repeated _Complex still warns, as clang's DeclSpec gives it before the list's end, #1836.)
+                if (skip_complex && check_declspec_complex_name(name) && complex_seen)
+                {
+                    check_input_duplicate_specifier(reader, i, C_NAME_COMPLEX_C99);
+                }
+                complex_seen |= check_declspec_complex_name(name);
             }
             else if (check_input_read_qualifier(reader, i, &qualifiers))
             {
@@ -3730,10 +3737,19 @@ static TypeId check_input_enum_underlying(CheckInputReader* reader, uint32_t col
             }
             else if (name == C_NAME_SHORT)
             {
+                // A repeated specifier warns as check_input_specifiers' does (#1836), once a token whichever reading.
+                if (shorts != 0)
+                {
+                    check_input_duplicate_specifier(reader, i, C_NAME_SHORT);
+                }
                 shorts += 1;
             }
             else if (name == C_NAME_SIGNED || name == C_NAME_GNU_SIGNED || name == C_NAME_GNU_SIGNED2 || name == C_NAME_UNSIGNED)
             {
+                if (signedness == (name == C_NAME_UNSIGNED ? 2u : 1u))
+                {
+                    check_input_duplicate_specifier(reader, i, name == C_NAME_UNSIGNED ? C_NAME_UNSIGNED : C_NAME_SIGNED);
+                }
                 valid = signedness == 0 || signedness == (name == C_NAME_UNSIGNED ? 2u : 1u);
                 signedness = name == C_NAME_UNSIGNED ? 2 : 1;
             }
