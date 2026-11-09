@@ -17,9 +17,12 @@ requirements. [Command index](README.md).
   on a host busy when it started, #672: its tasks runnable at least a quarter of its CPUs online), and with
   `--check-transitions` the memoized transitions'
   hits, misses, folds and entries (#1050: `time-check transition-*`); off by default, its laps test a null pointer.
-  `measure-compile [--runs N] [--reference PATH | --variant OPTION] -- ARGUMENT...` times `ARGUMENT... -o FILE` as whole
-  processes, with and without the option and against a reference compiler (tcc), or with `--variant` against this
-  compiler with OPTION before the arguments (#172's `--variant --tier1-schedule=post`), in a Williams design's
-  order, with each stage's medians and the lowering's coverage; the 9700X job runs it on
+  `measure-compile [--runs N] [--reference PATH [--reference-option OPTION]... | --variant OPTION]... -- ARGUMENT...`
+  times `ARGUMENT... -o FILE` as whole processes, with and without the option and against up to four references:
+  compilers (tcc, or clang and gcc with `--reference-option -O0`, #146), or with `--variant` this compiler with OPTION
+  before the arguments (#172's `--variant --tier1-schedule=post`), in a Williams design's order, with each process's
+  user cycles and instructions where perf_event_open allows them, each compiler's time and cycles per preprocessed token
+  (the report's `time-process tokens`), each stage's medians with its TSC ticks and core cycles per token, and the
+  lowering's coverage; the 9700X job runs it on
   `sqlite3.c` against tcc, with perf's counters and profile, where `changes`' `compile_time` says. [The compile-time
   guide](../../docs/compile-time.md) has the attribution. `test-checker-driver --executable` checks both.
