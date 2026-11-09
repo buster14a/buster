@@ -147,6 +147,7 @@ static const CheckWarningDescription check_warning_descriptions[] =
     { "-Wenum-float-conversion", "-Wenum-conversion", "arithmetic between enumeration type and floating-point type" },
     { "-Wanon-enum-enum-conversion", NULL, "arithmetic between different enumeration types" },
     { "-Wfor-loop-analysis", "-Wloop-analysis", "variable used in loop condition not modified in loop body" },
+    { "-Wimplicit-enum-enum-cast", "-Wenum-conversion", "implicit conversion from enumeration type to different enumeration type" },
     { "-Wtarget-clones-mixed-specifiers", "-Wfunction-multiversion", "mixing 'target_clones' specifier mechanisms is permitted for GCC compatibility" },
 };
 
