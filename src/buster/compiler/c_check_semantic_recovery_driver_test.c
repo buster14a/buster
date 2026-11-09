@@ -464,6 +464,16 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "struct X { int a; } __attribute__((packed));\n"
         "struct X { int a; } __attribute__((packed));\n"
         "int x = undeclared;\n",
+        // A C23 parameter list's redefinition of its own record (#1869) is compared as any scope's: incompatible ones in a
+        // prototype, a block's prototype and a union, a compatible one declaring the first's type, and a nested
+        // prototype's definition, which is a new scope's and no redefinition.
+        "/* gnu23 only */\n"
+        "int f(struct S { int x; } a, struct S { int y; } b);\n"
+        "int g(struct T { int x; } a, struct T { int x; } b, struct T *c) { return a.x + b.x + c->x; }\n"
+        "int h(union U { int i; } a, union U { int i; float f; } b);\n"
+        "void k(void) { int m(struct V { int a; } *p, struct V { long a; } *q); }\n"
+        "int n(struct W { int a; } *p, int (*q)(struct W { int a; } *r));\n"
+        "int bad = undeclared;\n",
         // Clang's C23 comparison of members' types (review on #1813): any two named records are compatible, a typedef's
         // unnamed one too, and the unnamed records written in the members are compared member by member, through
         // pointers, arrays, atomics and functions, after the definition's own members.
