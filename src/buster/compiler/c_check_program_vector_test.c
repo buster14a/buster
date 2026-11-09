@@ -628,6 +628,52 @@ static void check_test_program_vector_refusals(CheckTest* test, const X86Target*
 
 }
 
+// Accesses in a segment's space (#1447) that the lowering refuses by name, which compiled without the segment before: a
+// vector's element (whose type loses its vector's space), an atomic builtin's object (which its pointer reaches), and an
+// asm statement's register output (stored through its address). Clang's code has %gs or %fs on each.
+static void check_test_program_segment_refusals(CheckTest* test, const X86Target* target)
+{
+    static const struct
+    {
+        const char* name;
+        const char* source;
+        const char* reason;
+    } refused[] = {
+        { "segment-vector-element-read", "typedef int V __attribute__((vector_size(16)));int tested(V __seg_gs*p){return (*p)[1];}",
+          "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
+        { "segment-vector-element-write", "typedef int V __attribute__((vector_size(16)));void tested(V __seg_fs*p,int x){(*p)[1]=x;}",
+          "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
+        { "segment-vector-element-update", "typedef int V __attribute__((vector_size(16)));void tested(V __seg_gs*p){(*p)[2]++;}",
+          "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
+        { "segment-atomic-load", "int tested(int __seg_fs*p){return __atomic_load_n(p,5);}",
+          "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
+        { "segment-atomic-store", "void tested(int __seg_gs*p){__atomic_store_n(p,3,5);}",
+          "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
+        { "segment-atomic-exchange", "int tested(int __seg_gs*p){return __atomic_exchange_n(p,3,5);}",
+          "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
+        { "segment-atomic-compare-exchange", "_Bool tested(int __seg_gs*p,int*e){return __atomic_compare_exchange_n(p,e,1,0,5,5);}",
+          "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
+        { "segment-atomic-fetch-add", "int tested(int __seg_fs*p){return __atomic_fetch_add(p,1,5);}",
+          "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
+        { "segment-sync-fetch-add", "int tested(int __seg_gs*p){return __sync_fetch_and_add(p,1);}",
+          "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
+        { "segment-c11-atomic-load", "int tested(_Atomic int __seg_fs*p){return __c11_atomic_load(p,5);}",
+          "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
+        { "segment-atomic-test-and-set", "_Bool tested(char __seg_fs*p){return __atomic_test_and_set(p,5);}",
+          "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
+        { "segment-atomic-clear", "void tested(char __seg_gs*p){__atomic_clear(p,5);}",
+          "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
+        { "segment-asm-register-output", "void tested(int __seg_gs*p){__asm__(\"movl $1,%0\":\"=r\"(*p));}",
+          "an asm output in a segment's address space (256, 257 or 258: %gs, %fs or %ss) but a memory one" },
+        { "segment-asm-read-write-output", "void tested(int __seg_gs*p){__asm__(\"incl %0\":\"+r\"(*p));}",
+          "an asm output in a segment's address space (256, 257 or 258: %gs, %fs or %ss) but a memory one" },
+    };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(refused); i += 1)
+    {
+        check_test_program_boundary_target(test, refused[i].source, refused[i].name, true, false, 0, 0, refused[i].reason, target);
+    }
+}
+
 // Initializer validation keeps atomic rvalue identity while storage uses the underlying vector bytes.
 static void check_test_program_atomic_vector_constraints(CheckTest* test, const char* clang)
 {
@@ -874,6 +920,25 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
           "#endif\n"
           "return (int)h;}\n"
         },
+        // #1834: shifts by a scalar count without AVX-512, by the count in an XMM register as clang's code shifts by a
+        // splat: words', dwords' and qwords' PSLL, PSRL and PSRA (a qword's arithmetic one by the logical one and its sign
+        // bit), bytes' through words (masked, or unpacked into words' high bytes), of 8, 16 and 32 bytes, and 32 bytes
+        // split in two without AVX; counts of each type, constant and not.
+        { "baseline-scalar-shifts",
+          "#define T(name,ct,W) typedef ct name __attribute__((vector_size(W)));\n"
+          "T(sb,signed char,16)T(ub,unsigned char,16)T(sw,short,16)T(uw,unsigned short,16)T(sd,int,16)T(ud,unsigned,16)T(sq,long long,16)"
+          "T(uq,unsigned long long,16)T(sb8,signed char,8)T(ud2,unsigned,8)T(sw4,short,8)T(SB,signed char,32)T(UB,unsigned char,32)T(SW,short,32)"
+          "T(SD,int,32)T(UQ,unsigned long long,32)T(SQ,long long,32)\n"
+          "#define S(T,bits) do{T x_;fill(&x_,sizeof(T),n+k+(int)sizeof(T)*bits);T r_[]={x_<<(k%bits),x_>>(k%bits),x_<<3,x_>>(bits-1),x_>>0,"
+          "(T)(x_<<(unsigned char)(bits/2))};FOLD(r_);}while(0)\n"
+          "int tested(int n){unsigned h=2166136261u;for(int k=0;k<70;k+=3){\n"
+          "S(sb,8);S(ub,8);S(sw,16);S(uw,16);S(sd,32);S(ud,32);S(sq,64);S(uq,64);S(sb8,8);S(ud2,32);S(sw4,16);\n"
+          "#ifndef __AVX512F__\n"
+          "S(SB,8);S(UB,8);\n"
+          "#endif\n"
+          "S(SW,16);S(SD,32);S(UQ,64);S(SQ,64);long long kk=k%64;v2di z;fill(&z,16,n);v2di zz=z>>kk;FOLD(zz);}\n"
+          "return (int)h;}\n"
+        },
         // #1834: the generic builtins of vectors wider than the target's registers (32 bytes without AVX, 64 without
         // AVX-512) on pieces of the registers' width through memory, as a transport vector's: shuffles of each element
         // size, a 16-byte vector's two into one of 32 and 32-byte ones' into 16, conversions widening and between integers
@@ -1050,6 +1115,7 @@ static __attribute__((noinline)) void check_test_program_vectors(CheckTest* test
         check_test_program_build_release();
         check_test_program_march = "-march=x86-64";
         check_test_program_vector_refusals(test, &target);
+        check_test_program_segment_refusals(test, &target);
         check_test_program_atomic_vector_constraints(test, clang);
         check_test_program_vector_baselines(test, clang);
     }
