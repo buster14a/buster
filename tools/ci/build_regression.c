@@ -7,9 +7,11 @@
 //   cc -std=c17 -O2 -Wall -Wextra -Werror -o build-regression tools/ci/build_regression.c && ./build-regression
 //   ./build-regression --flags-only  # Just the fresh-tree ignored-flag regressions; cleans the selected build tree.
 //   ./build-regression --compile-commands-only  # Small database dependency fixture; does not build the compiler.
+//   ./build-regression --ownership-only [COMPILER]  # Check an existing build's fixture ownership; builds nothing.
 //
 // It removes every tree under build/cmake (clean --all) and checks that
 //   - guarded test roots retain their private entry points when preprocessed without main.c's unity-unit selector;
+//   - every active test, benchmark and measurement C file has one unity owner, except exact shared-fixture debts;
 //   - each baseline CRT startup object relinks and post-links every affected executable, with no work when unchanged;
 //   - filtered compile commands are configuration-specific, reused until an input changes and rebuilt if missing;
 //   - fresh build.sh, direct CMake and preset trees ignore hostile CFLAGS/LDFLAGS before probing C, including cached
@@ -55,6 +57,47 @@ struct Text
 {
     char* data;
     size_t length;
+};
+
+#define BUSTER_OWNERSHIP_UNITS 64
+
+typedef struct OwnershipUnits OwnershipUnits;
+struct OwnershipUnits
+{
+    const char* names[BUSTER_OWNERSHIP_UNITS];
+    uint32_t count;
+};
+
+typedef struct OwnershipFile OwnershipFile;
+struct OwnershipFile
+{
+    const char* path;
+    uint64_t owners;
+};
+
+typedef struct OwnershipGraph OwnershipGraph;
+struct OwnershipGraph
+{
+    OwnershipFile files[BUSTER_REGRESSION_ENTRIES];
+    uint32_t count;
+    uint64_t seen;
+};
+
+typedef struct OwnershipException OwnershipException;
+struct OwnershipException
+{
+    const char* path;
+    // Space-separated main-unit basenames; null means every main unit. Never a prefix or descendant allowance.
+    const char* owners;
+};
+
+typedef struct OwnershipIssue OwnershipIssue;
+struct OwnershipIssue
+{
+    const char* reason;
+    const char* path;
+    uint64_t actual;
+    uint64_t expected;
 };
 
 // Each output's last entry in Ninja's log: its run's times and the output's time, which Ninja keeps when it compacts
@@ -277,6 +320,7 @@ static void check_standalone_preprocessing(void)
         { "src/buster/compiler/c_preprocessor_oracle.c", "run_preprocessor_tests(" },
         { "src/buster/compiler/c_parser_test.c", "run_parser_tests(" },
         { "src/buster/compiler/foreign_test.c", "run_foreign_tests(" },
+        { "src/buster/compiler/tier0_test.c", "run_tier0_tests(" },
         { "src/buster/compiler/tier1_select_source_benchmark.c", "run_tier1_select_source_benchmark(" },
     };
     for (uint32_t i = 0; i < sizeof(files) / sizeof(files[0]); i += 1)
@@ -453,6 +497,555 @@ static bool compile_commands_file_of(const char* path, const char* config)
 static bool compile_commands_of(const char* config)
 {
     return compile_commands_file_of("build/compile_commands.json", config);
+}
+
+static bool ownership_suffix(const char* path, const char* suffix)
+{
+    const size_t length = strlen(path);
+    const size_t tail = strlen(suffix);
+    return length >= tail && strcmp(path + length - tail, suffix) == 0;
+}
+
+static bool ownership_unit_name(const char* name)
+{
+    return strcmp(name, "main.c") == 0 || (strncmp(name, "main_unit_", 10) == 0 && ownership_suffix(name, ".c"));
+}
+
+static uint64_t ownership_all(const OwnershipUnits* units)
+{
+    return UINT64_MAX >> (BUSTER_OWNERSHIP_UNITS - units->count);
+}
+
+// Read the actual build's unity sources, rather than maintaining another list alongside BUSTER_SOURCES. Their names
+// borrow `sources`, as the graph's paths borrow the single Ninja dependency capture.
+static OwnershipUnits ownership_units(Text sources)
+{
+    OwnershipUnits units = { 0 };
+    for (size_t offset = 0; offset < sources.length;)
+    {
+        const char* source = sources.data + offset;
+        const char* end = memchr(source, 0, sources.length - offset);
+        if (end == 0)
+        {
+            fail("print-sources did not terminate its arguments");
+        }
+        const char* slash = strrchr(source, '/');
+        const char* name = slash != 0 ? slash + 1 : source;
+        if (ownership_unit_name(name))
+        {
+            if (units.count == BUSTER_OWNERSHIP_UNITS)
+            {
+                fail("too many unity sources for the ownership check");
+            }
+            for (uint32_t i = 0; i < units.count; i += 1)
+            {
+                if (strcmp(units.names[i], name) == 0)
+                {
+                    fail("print-sources repeats unity source %s", name);
+                }
+            }
+            units.names[units.count++] = name;
+        }
+        offset = (size_t)(end - sources.data) + 1;
+    }
+    if (units.count < 2)
+    {
+        fail("print-sources did not name the unity sources");
+    }
+    return units;
+}
+
+// Ninja gives a flat transitive dependency set for each object, so this catches nested additions exactly as direct
+// ones. Standalone benchmark/test objects are not unity owners. Require every selected unity record exactly once,
+// with VALID dependency data: incomplete or stale captures must not make a leaked include appear single-owner.
+static OwnershipIssue ownership_read(char* text, const char* directory, const char* config, const OwnershipUnits* units, OwnershipGraph* graph)
+{
+    OwnershipIssue issue = { 0 };
+    memset(graph, 0, sizeof(*graph));
+    char prefix[PATH_MAX];
+    snprintf(prefix, sizeof(prefix), "%s/src/buster/compiler/", directory);
+    const size_t prefix_length = strlen(prefix);
+    uint64_t owner = 0;
+    char* saved = 0;
+    for (char* line = strtok_r(text, "\n", &saved); line != 0 && issue.reason == 0; line = strtok_r(0, "\n", &saved))
+    {
+        if (line[0] != ' ')
+        {
+            owner = 0;
+            char* marker = strstr(line, ": #deps ");
+            if (marker != 0)
+            {
+                *marker = 0;
+                char* slash = strrchr(line, '/');
+                char* name = slash != 0 ? slash + 1 : line;
+                if (ownership_suffix(name, ".c.o"))
+                {
+                    name[strlen(name) - 2] = 0;
+                    if (ownership_unit_name(name))
+                    {
+                        uint32_t unit = 0;
+                        while (unit < units->count && strcmp(name, units->names[unit]) != 0)
+                        {
+                            unit += 1;
+                        }
+                        char expected[PATH_MAX];
+                        snprintf(expected, sizeof(expected), "CMakeFiles/buster_%.*s.dir/%s/src/buster/compiler/%s", (int)strlen(name) - 2, name, config, name);
+                        if (unit == units->count || strcmp(line, expected) != 0 || strstr(marker + 1, " (VALID)") == 0)
+                        {
+                            issue = (OwnershipIssue){ .reason = "invalid or stale unity dependency record", .path = name };
+                        }
+                        else
+                        {
+                            owner = UINT64_C(1) << unit;
+                            if ((graph->seen & owner) != 0)
+                            {
+                                issue = (OwnershipIssue){ .reason = "duplicate unity dependency record", .path = name };
+                            }
+                            graph->seen |= owner;
+                        }
+                    }
+                }
+            }
+        }
+        else if (owner != 0)
+        {
+            while (*line == ' ')
+            {
+                line += 1;
+            }
+            if (strncmp(line, prefix, prefix_length) == 0 &&
+                (ownership_suffix(line, "_test.c") || ownership_suffix(line, "_benchmark.c") || ownership_suffix(line, "_measure.c")))
+            {
+                const char* path = line + prefix_length;
+                uint32_t file = 0;
+                while (file < graph->count && strcmp(graph->files[file].path, path) != 0)
+                {
+                    file += 1;
+                }
+                if (file == BUSTER_REGRESSION_ENTRIES)
+                {
+                    issue = (OwnershipIssue){ .reason = "too many fixture dependency paths", .path = path };
+                }
+                else
+                {
+                    if (file == graph->count)
+                    {
+                        graph->files[file].path = path;
+                        graph->count += 1;
+                    }
+                    graph->files[file].owners |= owner;
+                }
+            }
+        }
+    }
+    if (issue.reason == 0 && graph->seen != ownership_all(units))
+    {
+        issue = (OwnershipIssue){ .reason = "missing unity dependency records", .path = "Ninja dependency capture", .actual = graph->seen, .expected = ownership_all(units) };
+    }
+    return issue;
+}
+
+static OwnershipIssue ownership_check(const OwnershipUnits* units, const OwnershipGraph* graph, const OwnershipException* exceptions, uint32_t count)
+{
+    OwnershipIssue issue = { 0 };
+    for (uint32_t i = 0; i < graph->count && issue.reason == 0; i += 1)
+    {
+        const OwnershipFile* file = &graph->files[i];
+        bool shared = false;
+        for (uint32_t j = 0; j < count; j += 1)
+        {
+            shared = shared || strcmp(file->path, exceptions[j].path) == 0;
+        }
+        if (!shared && (file->owners & (file->owners - 1)) != 0)
+        {
+            issue = (OwnershipIssue){ .reason = "private fixture has multiple unity owners", .path = file->path, .actual = file->owners };
+        }
+    }
+    for (uint32_t i = 0; i < count && issue.reason == 0; i += 1)
+    {
+        const OwnershipException* exception = &exceptions[i];
+        uint64_t expected = exception->owners == 0 ? ownership_all(units) : 0;
+        const char* name = exception->owners;
+        while (name != 0 && *name != 0 && issue.reason == 0)
+        {
+            const size_t length = strcspn(name, " ");
+            uint32_t unit = 0;
+            while (unit < units->count && (strlen(units->names[unit]) != length || strncmp(name, units->names[unit], length) != 0))
+            {
+                unit += 1;
+            }
+            if (unit == units->count)
+            {
+                issue = (OwnershipIssue){ .reason = "exception names an unknown unity owner", .path = exception->path };
+            }
+            else
+            {
+                expected |= UINT64_C(1) << unit;
+            }
+            name += length;
+            if (*name == ' ')
+            {
+                name += 1;
+            }
+        }
+        if (issue.reason == 0 && (expected == 0 || (expected & (expected - 1)) == 0))
+        {
+            issue = (OwnershipIssue){ .reason = "shared exception must name multiple unity owners", .path = exception->path, .expected = expected };
+        }
+        uint32_t file = 0;
+        while (file < graph->count && strcmp(exception->path, graph->files[file].path) != 0)
+        {
+            file += 1;
+        }
+        if (issue.reason == 0 && file == graph->count)
+        {
+            issue = (OwnershipIssue){ .reason = "unused shared-fixture exception", .path = exception->path, .expected = expected };
+        }
+        else if (issue.reason == 0 && graph->files[file].owners != expected)
+        {
+            issue = (OwnershipIssue){ .reason = "shared fixture's exact owner set changed", .path = exception->path, .actual = graph->files[file].owners, .expected = expected };
+        }
+        for (uint32_t j = 0; j < i && issue.reason == 0; j += 1)
+        {
+            if (strcmp(exception->path, exceptions[j].path) == 0)
+            {
+                issue = (OwnershipIssue){ .reason = "duplicate shared-fixture exception", .path = exception->path };
+            }
+        }
+    }
+    return issue;
+}
+
+static void ownership_names(const OwnershipUnits* units, uint64_t mask, char* names, size_t size)
+{
+    names[0] = 0;
+    size_t length = 0;
+    for (uint32_t i = 0; i < units->count; i += 1)
+    {
+        if ((mask & (UINT64_C(1) << i)) != 0)
+        {
+            const int added = snprintf(names + length, size - length, "%s%s", length != 0 ? " " : "", units->names[i]);
+            if (added < 0 || (size_t)added >= size - length)
+            {
+                fail("unity owner names exceed the diagnostic buffer");
+            }
+            length += (size_t)added;
+        }
+    }
+    if (length == 0)
+    {
+        snprintf(names, size, "none");
+    }
+}
+
+static void ownership_report(const OwnershipUnits* units, OwnershipIssue issue)
+{
+    if (issue.reason != 0)
+    {
+        char actual[4096];
+        char expected[4096];
+        ownership_names(units, issue.actual, actual, sizeof(actual));
+        ownership_names(units, issue.expected, expected, sizeof(expected));
+        fail("%s: %s; actual unity owners: %s; expected: %s. Guard private includes for their command's unit; "
+             "keep only justified exact shared exceptions, remove obsolete ones, and build before checking dependencies",
+             issue.path, issue.reason, actual, issue.expected != 0 ? expected : "one unity unit (or complete valid dependency records)");
+    }
+}
+
+static void ownership_fixture_append(char* text, size_t size, size_t* length, const char* format, ...)
+{
+    va_list arguments;
+    va_start(arguments, format);
+    const int added = vsnprintf(text + *length, size - *length, format, arguments);
+    va_end(arguments);
+    if (added < 0 || (size_t)added >= size - *length)
+    {
+        fail("ownership regression fixture exceeds its buffer");
+    }
+    *length += (size_t)added;
+}
+
+// These are flattened compiler dependency fixtures, including an unrelated standalone consumer. A shared root's
+// exception must not authorize a new nested file, and incomplete dependency data must not authorize anything.
+static void check_ownership_fixtures(void)
+{
+    static const OwnershipUnits units = {
+        .names = { "main.c", "main_unit_backend.c", "main_unit_frontend.c" },
+        .count = 3,
+    };
+    static const OwnershipException shared[] = {
+        { "shared_test.c", "main_unit_backend.c main_unit_frontend.c" },
+        { "shared_test.c", "main_unit_backend.c main_unit_frontend.c" },
+    };
+    static const struct
+    {
+        const char* label;
+        const char* files[3];
+        uint32_t shared;
+        const char* extra;
+        const char* error;
+    } cases[] = {
+        { "private and exact shared sources", { "driver_test.c", "new_test.c shared_test.c", "shared_test.c" }, true,
+          "CMakeFiles/buster_other_benchmark.dir/Release/src/buster/compiler/other_benchmark.c.o: #deps 1, deps mtime 1 (VALID)\n"
+          "    /fixture/src/buster/compiler/new_test.c\n", 0 },
+        { "new direct test leak", { "new_test.c", "new_test.c", "" }, false, "", "private fixture has multiple unity owners" },
+        { "new nested benchmark leak", { "", "shared_test.c nested/new_benchmark.c", "shared_test.c nested/new_benchmark.c" }, true, "",
+          "private fixture has multiple unity owners" },
+        { "new measurement leak", { "new_measure.c", "new_measure.c", "" }, false, "", "private fixture has multiple unity owners" },
+        { "shared production and declarations", { "production.c fixture_test.h", "production.c fixture_test.h", "" }, false, "", 0 },
+        { "changed shared owners", { "shared_test.c", "shared_test.c", "" }, true, "", "shared fixture's exact owner set changed" },
+        { "widened shared owners", { "shared_test.c", "shared_test.c", "shared_test.c" }, true, "", "shared fixture's exact owner set changed" },
+        { "obsolete shared exception", { "", "shared_test.c", "" }, true, "", "shared fixture's exact owner set changed" },
+        { "unused shared exception", { "", "", "" }, true, "", "unused shared-fixture exception" },
+        { "duplicate shared exception", { "", "shared_test.c", "shared_test.c" }, 2, "", "duplicate shared-fixture exception" },
+        { "missing unity record", { "", "", 0 }, false, "", "missing unity dependency records" },
+        { "empty dependency capture", { 0, 0, 0 }, false, "", "missing unity dependency records" },
+        { "duplicate unity record", { "", "", "" }, false,
+          "CMakeFiles/buster_main.dir/Release/src/buster/compiler/main.c.o: #deps 0, deps mtime 1 (VALID)\n", "duplicate unity dependency record" },
+        { "stale unity record", { "", "", 0 }, false,
+          "CMakeFiles/buster_main_unit_frontend.dir/Release/src/buster/compiler/main_unit_frontend.c.o: #deps 0, deps mtime 1 (STALE)\n",
+          "invalid or stale unity dependency record" },
+        { "wrong configuration", { "", "", 0 }, false,
+          "CMakeFiles/buster_main_unit_frontend.dir/Debug/src/buster/compiler/main_unit_frontend.c.o: #deps 0, deps mtime 1 (VALID)\n",
+          "invalid or stale unity dependency record" },
+        { "unknown unity record", { "", "", "" }, false,
+          "CMakeFiles/buster_main_unit_unknown.dir/Release/src/buster/compiler/main_unit_unknown.c.o: #deps 0, deps mtime 1 (VALID)\n",
+          "invalid or stale unity dependency record" },
+    };
+    static OwnershipGraph graph;
+    for (uint32_t test = 0; test < sizeof(cases) / sizeof(cases[0]); test += 1)
+    {
+        char text[4096];
+        size_t length = 0;
+        for (uint32_t unit = 0; unit < units.count; unit += 1)
+        {
+            if (cases[test].files[unit] != 0)
+            {
+                ownership_fixture_append(text, sizeof(text), &length,
+                                         "CMakeFiles/buster_%.*s.dir/Release/src/buster/compiler/%s.o: #deps 2, deps mtime 1 (VALID)\n",
+                                         (int)strlen(units.names[unit]) - 2, units.names[unit], units.names[unit]);
+                const char* file = cases[test].files[unit];
+                while (*file != 0)
+                {
+                    const size_t bytes = strcspn(file, " ");
+                    ownership_fixture_append(text, sizeof(text), &length, "    /fixture/src/buster/compiler/%.*s\n", (int)bytes, file);
+                    file += bytes + (file[bytes] == ' ');
+                }
+            }
+        }
+        ownership_fixture_append(text, sizeof(text), &length, "%s", cases[test].extra);
+        OwnershipIssue issue = ownership_read(text, "/fixture", "Release", &units, &graph);
+        if (issue.reason == 0)
+        {
+            issue = ownership_check(&units, &graph, shared, cases[test].shared);
+        }
+        if ((issue.reason == 0) != (cases[test].error == 0) ||
+            (issue.reason != 0 && cases[test].error != 0 && strcmp(issue.reason, cases[test].error) != 0))
+        {
+            fail("ownership fixture '%s': %s; expected %s", cases[test].label, issue.reason != 0 ? issue.reason : "success",
+                 cases[test].error != 0 ? cases[test].error : "success");
+        }
+    }
+    // Narrowing an obsolete exception to match its now-private file must not keep the exception alive.
+    static const OwnershipException unnecessary[] = {
+        { "shared_test.c", "main_unit_backend.c" },
+    };
+    memset(&graph, 0, sizeof(graph));
+    graph.files[0] = (OwnershipFile){ .path = "shared_test.c", .owners = UINT64_C(1) << 1 };
+    graph.count = 1;
+    const OwnershipIssue unnecessary_issue = ownership_check(&units, &graph, unnecessary, 1);
+    if (unnecessary_issue.reason == 0 || strcmp(unnecessary_issue.reason, "shared exception must name multiple unity owners") != 0)
+    {
+        fail("ownership accepted a matching single-owner shared exception");
+    }
+    pass("ownership rejects new direct/nested leaks, changed/shared masks, obsolete exceptions and incomplete records");
+}
+
+// This is only the current sharing debt, not an inventory of the private tests. New files default to one unity
+// owner. An exception names one exact path and one exact owner set; neither its children nor a new file with the
+// same prefix inherit it. Remove a row when its file becomes private, and justify any new sharing at its include.
+static const OwnershipException ownership_exceptions[] = {
+    // Shared comparison, parser/oracle and source-preparation helpers retained at their original include positions.
+    { "c_checker_test.c", 0 },
+    { "c_parser_test.c", 0 },
+    { "c_preprocessor_test.c", 0 },
+    { "c_preprocessor_history_test.c", "main_unit_frontend.c main_unit_checker.c" },
+    { "foreign_test.c", "main_unit_executable.c main_unit_checker.c" },
+    { "ir_source_test.c", 0 },
+    { "tier1_select_test.c", 0 },
+    { "tier1_select_burs_test.c", 0 },
+    { "tier1_select_source_benchmark.c", 0 },
+    { "tier0_test.c", 0 },
+    // These roots preserve the first inclusion of production optimizer code while guarding their private bodies.
+    { "ir_if_convert_test.c", 0 },
+    { "ir_optimize_test.c", 0 },
+    { "ir_optimize_text_test.c", 0 },
+    { "ir_optimize_verified_test.c", 0 },
+    // Remaining legacy sharing, to narrow as each family's outward helper references are isolated. These rows do
+    // not endorse parsing private fixtures everywhere; exact paths keep that existing debt from silently growing.
+    { "assembler_benchmark.c", 0 },
+    { "bind_test.c", 0 },
+    { "branch_sizing_test.c", 0 },
+    { "c_builtin_atomic_helpers_test.c", 0 },
+    { "c_builtin_atomic_rmw_helpers_test.c", 0 },
+    { "c_builtin_float_lower_test.c", 0 },
+    { "c_builtin_lower_benchmark.c", 0 },
+    { "c_builtin_lower_test.c", 0 },
+    { "c_builtin_math_helpers_test.c", 0 },
+    { "c_builtin_misc_lower_test.c", 0 },
+    { "c_builtin_rounds_helper_test.c", 0 },
+    { "c_builtin_terminal_helpers_test.c", 0 },
+    { "c_builtin_test.c", 0 },
+    { "c_builtin_varargs_lower_test.c", 0 },
+    { "c_check_binding_benchmark.c", 0 },
+    { "c_check_deferred_benchmark.c", 0 },
+    { "c_check_lanes_benchmark.c", 0 },
+    { "c_check_source_benchmark.c", 0 },
+    { "c_environment_test.c", 0 },
+    { "c_lexer_test.c", 0 },
+    { "c_lowering_source_benchmark.c", 0 },
+    { "c_types_deferred_test.c", 0 },
+    { "c_types_lookup_test.c", 0 },
+    { "c_types_test.c", 0 },
+    { "calling_convention_test.c", 0 },
+    { "compile_measure.c", 0 },
+    { "dataflow_test.c", 0 },
+    { "debug_benchmark.c", 0 },
+    { "debug_executable_test.c", 0 },
+    { "debug_test.c", 0 },
+    { "diagnostic_benchmark.c", 0 },
+    { "diagnostic_test.c", 0 },
+    { "differential_test.c", 0 },
+    { "dominators_test.c", 0 },
+    { "dynamic_bounds_test.c", 0 },
+    { "dynamic_libraries_test.c", 0 },
+    { "dynamic_test.c", 0 },
+    { "executable_symbols_test.c", 0 },
+    { "executable_test.c", 0 },
+    { "frame_measure.c", 0 },
+    { "helpers_measure.c", 0 },
+    { "import_test.c", 0 },
+    { "inflate_test.c", 0 },
+    { "lane_test.c", 0 },
+    { "link_order_test.c", 0 },
+    { "link_test.c", 0 },
+    { "mask_spill_measure.c", 0 },
+    { "mask_spill_measure_test.c", 0 },
+    { "object_debug_test.c", 0 },
+    { "object_writer_test.c", 0 },
+    { "oracle_cache_test.c", 0 },
+    { "runtime_library_search_test.c", 0 },
+    { "snapshot_test.c", 0 },
+    { "sqlite_test.c", 0 },
+    { "ssa_benchmark.c", 0 },
+    { "ssa_test.c", 0 },
+    { "static_test.c", 0 },
+    { "tier0_benchmark_measure.c", 0 },
+    { "tier0_source_benchmark.c", 0 },
+    { "tier0_variadic_frame_test.c", 0 },
+    { "tier1_allocate_expiry_test.c", 0 },
+    { "tier1_allocate_hints_test.c", 0 },
+    { "tier1_allocate_test.c", 0 },
+    { "tier1_certificate_interval_test.c", 0 },
+    { "tier1_certificate_test.c", 0 },
+    { "tier1_code_certificate_benchmark.c", 0 },
+    { "tier1_frame_execution_test.c", 0 },
+    { "tier1_frame_test.c", 0 },
+    { "tier1_moves_test.c", 0 },
+    { "tier1_programs_measure.c", 0 },
+    { "tier1_rows_measure.c", 0 },
+    { "tier1_schedule_test.c", 0 },
+    { "unwind_benchmark.c", 0 },
+    { "unwind_native_test.c", 0 },
+    { "unwind_test.c", 0 },
+    { "unwind_tier0_test.c", 0 },
+    { "x86_64_disassembler_test.c", 0 },
+    { "x86_64_encoder_test.c", 0 },
+    { "x86_intrinsics_test.c", 0 },
+    { "x86_semantics_test.c", 0 },
+    { "x86_zen5_measure.c", 0 },
+    { "x86_zen5_test.c", 0 },
+};
+
+static void check_ownership(const char* directory, const char* config)
+{
+    check_ownership_fixtures();
+    char ninja_file[64];
+    snprintf(ninja_file, sizeof(ninja_file), "build-%s.ninja", config);
+    // Ninja's VALID mark compares the object with its recorded mtime, not the source with the object. A dry run
+    // also detects edits that would change the include graph. Never build here, including in the inventory mode.
+    char* plan_argv[] = { "ninja", "-C", (char*)directory, "-f", ninja_file, "-n", "compiler", 0 };
+    Text plan = capture(plan_argv);
+    if (strstr(plan.data, "ninja: no work to do.") == 0)
+    {
+        fputs(plan.data, stderr);
+        fail("ownership requires an up-to-date %s compiler; build that configuration first", config);
+    }
+    free(plan.data);
+    char* sources_argv[] = { "./build.sh", "print-sources", 0 };
+    Text sources = capture(sources_argv);
+    const OwnershipUnits units = ownership_units(sources);
+    // Debug and Release share .ninja_deps. Ask for the selected objects explicitly in this one capture so no
+    // unrelated configuration's record can hide a missing selected record or count as another owner.
+    char objects[BUSTER_OWNERSHIP_UNITS][PATH_MAX];
+    char* deps_argv[BUSTER_OWNERSHIP_UNITS + 8] = { "ninja", "-C", (char*)directory, "-f", ninja_file, "-t", "deps" };
+    for (uint32_t i = 0; i < units.count; i += 1)
+    {
+        snprintf(objects[i], sizeof(objects[i]), "CMakeFiles/buster_%.*s.dir/%s/src/buster/compiler/%s.o",
+                 (int)strlen(units.names[i]) - 2, units.names[i], config, units.names[i]);
+        deps_argv[7 + i] = objects[i];
+    }
+    deps_argv[7 + units.count] = 0;
+    Text deps = capture(deps_argv);
+    static OwnershipGraph graph;
+    ownership_report(&units, ownership_read(deps.data, root, config, &units, &graph));
+    const uint32_t exceptions = sizeof(ownership_exceptions) / sizeof(ownership_exceptions[0]);
+    ownership_report(&units, ownership_check(&units, &graph, ownership_exceptions, exceptions));
+    pass("%s ownership: %u active test/benchmark/measurement C files, %u single-owner and %u exact shared exceptions across %u unity units",
+         config, graph.count, graph.count - exceptions, exceptions, units.count);
+    free(deps.data);
+    free(sources.data);
+}
+
+static void check_existing_ownership(const char* compiler)
+{
+    char selected[PATH_MAX];
+    if (compiler == 0)
+    {
+        char* output[] = { "./build.sh", "print-output", "--config", "Release", 0 };
+        capture_line(output, selected, sizeof(selected));
+        compiler = selected;
+    }
+    char resolved[PATH_MAX];
+    if (realpath(compiler, resolved) == 0 || access(resolved, X_OK) != 0)
+    {
+        fail("ownership requires an existing built compiler: %s", compiler);
+    }
+    // realpath resolves symbolic links, not build/compiler's hard link. Match that publication against the
+    // selected tree's outputs rather than guessing its configuration; unsupported detached copies fail closed.
+    if (!ownership_suffix(resolved, "/Release/compiler") && !ownership_suffix(resolved, "/Debug/compiler"))
+    {
+        static const char* configs[] = { "Release", "Debug" };
+        bool found = false;
+        for (uint32_t i = 0; i < 2 && !found; i += 1)
+        {
+            char* output[] = { "./build.sh", "print-output", "--config", (char*)configs[i], 0 };
+            capture_line(output, selected, sizeof(selected));
+            found = same_file(compiler, selected);
+            if (found && realpath(selected, resolved) == 0)
+            {
+                fail("can't resolve ownership build path %s", selected);
+            }
+        }
+        if (!found)
+        {
+            fail("%s is a detached compiler copy; pass a built CONFIG/compiler path or set the selected build's environment", compiler);
+        }
+    }
+    *strrchr(resolved, '/') = 0;
+    char* config = strrchr(resolved, '/') + 1;
+    config[-1] = 0;
+    check_ownership(resolved, config);
 }
 
 // The objects' file names, without .o, whose depfiles name the source `file`, sorted, each followed by a space.
@@ -760,6 +1353,8 @@ static void check_incremental(void)
     }
     pass("an unchanged build compiles, links, bakes and publishes nothing");
 
+    check_ownership(tree, "Release");
+
     char selected[PATH_MAX];
     snprintf(selected, sizeof(selected), "%s/Release/compile_commands.json", tree);
     if (unlink(selected) != 0)
@@ -836,6 +1431,11 @@ static void check_incremental(void)
         { "src/buster/compiler/foreign_test.c", "main_unit_checker.c main_unit_executable.c " },
         { "src/buster/compiler/foreign_link.c", shared_main_units },
         { "src/buster/compiler/foreign_unwind.c", shared_main_units },
+        { "src/buster/compiler/tier0_x87_test.c", "main_unit_backend.c " },
+        { "src/buster/compiler/tier0_vector_baseline_test.inc", "main_unit_backend.c " },
+        { "src/buster/compiler/tier0_mask_test.c", "main_unit_backend.c " },
+        { "src/buster/compiler/streaming_benchmark_test.c", "main_unit_backend.c " },
+        { "src/buster/compiler/tier0_test.c", shared_main_units },
     };
     for (uint32_t i = 0; i < sizeof(files) / sizeof(files[0]); i += 1)
     {
@@ -1566,9 +2166,10 @@ int main(int argc, char** argv)
     const bool flags_only = argc == 2 && strcmp(argv[1], "--flags-only") == 0;
     const bool crt_only = argc == 2 && strcmp(argv[1], "--crt-link-only") == 0;
     const bool commands_only = argc == 2 && strcmp(argv[1], "--compile-commands-only") == 0;
-    if (argc != 1 && !flags_only && !crt_only && !commands_only)
+    const bool ownership_only = (argc == 2 || argc == 3) && strcmp(argv[1], "--ownership-only") == 0;
+    if (argc != 1 && !flags_only && !crt_only && !commands_only && !ownership_only)
     {
-        fail("usage: build-regression [--flags-only | --crt-link-only | --compile-commands-only]");
+        fail("usage: build-regression [--flags-only | --crt-link-only | --compile-commands-only | --ownership-only [COMPILER]]");
     }
     if (getcwd(root, sizeof(root)) == 0 || access("build.sh", X_OK) != 0)
     {
@@ -1586,15 +2187,19 @@ int main(int argc, char** argv)
     {
         check_standalone_preprocessing();
     }
-    if (!flags_only && !commands_only)
+    if (ownership_only)
+    {
+        check_existing_ownership(argc == 3 ? argv[2] : 0);
+    }
+    if (!ownership_only && !flags_only && !commands_only)
     {
         check_crt_link_dependencies();
     }
-    if (!flags_only && !crt_only)
+    if (!ownership_only && !flags_only && !crt_only)
     {
         check_compile_commands();
     }
-    if (!crt_only && !commands_only)
+    if (!ownership_only && !crt_only && !commands_only)
     {
         BUILD("clean");
         char* output[] = { "./build.sh", "print-output", 0 };

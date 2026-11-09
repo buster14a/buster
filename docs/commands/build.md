@@ -293,6 +293,13 @@ benchmark. Their private fixtures are guarded inside those roots; editing the
 shared BURS root or either production optimizer file still rebuilds all eleven
 main units.
 
+The backend also owns the private Tier 0 fixtures, their nested tests and vector
+baseline, the mask tests and the streaming tests and benchmark. Editing those
+files rebuilds only `main_unit_backend.c`. The shared `tier0_test.c` root keeps
+`tier0_test_same_code` at its original position for `unwind_tier0_test.c`, while
+its private spans are guarded. The root, `tier0_generate.c` and production
+`streaming.c` therefore retain all eleven owners.
+
 The frontend owns the private preprocessor, parser, GNU, bindings and lowering
 fixtures and their fixture-consuming commands. Edits to
 `preprocessor_fuzz_generate.c`, `c_preprocessor_directives_test.c`,
@@ -319,7 +326,7 @@ and editing that root rebuilds exactly the checker and executable units. The
 production `foreign_link.c` and `foreign_unwind.c` remain shared by all eleven
 main units.
 
-The frontend roots with internal guards, `foreign_test.c` and
+The frontend roots with internal guards, `foreign_test.c`, `tier0_test.c` and
 `tier1_select_source_benchmark.c` also preserve standalone preprocessing. Without
 `main.c`'s unity-unit definitions, their guards keep the complete source. The
 correctness inventory preprocesses `main.c` and every `*_benchmark.c` as independent inputs
@@ -334,6 +341,40 @@ helpers used in vector builds. Check every unit with scalar and vector flags
 after changing these guards; the build regression harness checks representative
 private-test edits against their exact owning units and keeps shared helper and
 production dependencies explicit.
+
+### Preventing dependency growth
+
+Give new test, inline benchmark and measurement C files the `*_test.c`,
+`*_benchmark.c` and `*_measure.c` suffixes. Keep their includes and command
+branches inside their owning unit's guard. If another family needs a helper,
+share the narrow helper span and keep private fixtures and nested includes
+guarded. A root that is also preprocessed as a standalone input must keep its
+complete source when `BUSTER_UNIT` is undefined.
+
+The build regression's `--ownership-only [COMPILER]` mode checks every matching
+file included by a main unity unit, using the selected compiler's Ninja graph.
+The default is exactly one unity owner. Existing shared files have exact paths
+and owner sets in the exception table; an exception never covers a new nested
+file. The check rejects owner mismatches and stale exceptions, so isolating a
+family also removes its obsolete entries. The remaining broad sharing is
+recorded debt, not permission for new fixtures to inherit it. New shared helpers
+need an explicit owner set and a reason; do not add a private fixture to the
+exception table merely to pass the check.
+
+After building the selected configuration, run the check directly with:
+
+```sh
+cc -std=c17 -O2 -Wall -Wextra -Werror -o /tmp/buster-build-regression tools/ci/build_regression.c
+/tmp/buster-build-regression --ownership-only "$(./build.sh print-output --config Release)"
+```
+
+Pass the Debug output path to check Debug instead. The check refuses an
+incomplete graph or pending build work, rather than accepting old dependency
+data after an unbuilt edit. It reads one dependency snapshot and does not
+rebuild the compiler. The ordinary correctness inventory runs it against its
+own compiler, including on source-only PRs that do not trigger the separate
+build-regression workflow. Representative edit-plan checks remain in the full
+build regression to verify Ninja's actual invalidation behavior.
 
 ## Presets and CTest
 

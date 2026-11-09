@@ -3,6 +3,11 @@
 # BUSTER_COMPILER, its own executable's path, so that the commands test the configuration that runs them; run one by
 # hand with BUSTER_COMPILER set to a build's executable, such as build/compiler.
 
+== Check unity fixture ownership without rebuilding
+# The existing build's compiler dependency records must keep every private test/benchmark/measurement in one main
+# unit, including new nested files. Exact legacy shared exceptions may not widen, and stale records fail closed.
+cc -std=c17 -O2 -Wall -Wextra -Werror -o build/build-regression tools/ci/build_regression.c
+build/build-regression --ownership-only "$BUSTER_COMPILER"
 == Test the foreign inputs [8 CPUs]
 # Generated programs' objects split into archives and compiled C and C++ cases, resolved by both paths on 1,
 # 2, 3 and 8 lanes; --cross-check also links each with GNU ld and lld and compares the members they load, the

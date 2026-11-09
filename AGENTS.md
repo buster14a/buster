@@ -190,15 +190,16 @@ Write code in **C** unless the goal or action explicitly disallows C or requires
 another language. This applies to supporting tools, tests, and automation as
 well as compiler code.
 
-Follow [the C coding style](docs/coding-style.md) for new or modified compiler
-code. The essentials are: C and Clang on Linux/Zen 5, 4-space Allman formatting,
+Follow [the C coding style](docs/coding-style.md): 4-space Allman formatting,
 `snake_case` functions, `PascalCase` types, `BUSTER_` macros, one return per
-function, direct and explicit control flow, bounded slices, arena-oriented
-allocation, and safe SIMD memory accesses. Prefer simple data layouts and
-measured end-to-end performance improvements. Prefer single-line statements,
-declarations, and function headers where readable, and one aggregate field or
-initializer entry per line. Do not import buster-legacy's portability
-or infrastructure machinery merely to match its style.
+function, explicit control flow, bounded slices, arena allocation and safe SIMD
+memory accesses. Prefer simple layouts, measured end-to-end improvements,
+readable single-line statements, declarations and function headers, and one
+aggregate field or initializer entry per line. Do not import buster-legacy's
+portability or infrastructure to match its style.
+
+Keep private test and benchmark fixtures in their owning unity unit; follow
+the [build ownership rules](docs/commands/build.md#unity-test-dependencies).
 
 ## Data-parallel first
 
