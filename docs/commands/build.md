@@ -272,12 +272,22 @@ rebuilds only `main_unit_check_builtins.c`, `profile_test.c` only `main.c`,
 `c_files_test.c` only `main_unit_frontend.c`, and `tier1_wide_test.c` only
 `main_unit_backend.c`, followed by the link and post-link checks.
 
+The checker keeps `c_checker_test.c` shared for its value and stream comparison
+helpers, while its private fixtures, test routines and nested test files are
+compiled only by `main_unit_checker.c`. Editing `c_check_program_test.c`,
+`c_check_generic_test.c`, `c_check_attribute_test.c`, or the program tests'
+nested `c_check_program_amx_test.c` therefore rebuilds that unit alone. Editing
+the checker driver suite `c_checker_driver_test.c` or the debug test
+`c_check_debug_tier1_parameters_test.c` also rebuilds only that unit. Editing
+the shared `c_checker_test.c` root still rebuilds all eleven units.
+
 The test commands, their owning units and compiler optimization flags stay the
-same. Shared fixtures, including `c_checker_test.c` and `oracle_cache_test.c`,
-remain shared: removing a test from a unit must preserve both its callers and
-the references that keep shared helpers used in vector builds. Check every unit
-with scalar and vector flags after changing these guards; the build regression
-harness checks representative test edits against their exact owning units.
+same. Shared fixtures, including the checker's common helpers and
+`oracle_cache_test.c`, retain their callers and the references that keep shared
+helpers used in vector builds. Check every unit with scalar and vector flags
+after changing these guards; the build regression harness checks representative
+private-test edits against their exact owning units and keeps the shared checker
+root's eleven-unit dependency explicit.
 
 ## Presets and CTest
 

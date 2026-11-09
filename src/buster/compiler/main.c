@@ -545,17 +545,21 @@ int run_backend_benchmark(int argc, char** argv);
 #pragma clang optimize off
 #if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
 #include "buster/compiler/c_check_deferred_test.c"
-#endif
 #include "buster/compiler/c_check_mutation_test.c"
 #include "buster/compiler/c_check_constraints_test.c"
 #include "buster/compiler/c_checker_driver_test.c"
 #include "buster/compiler/c_check_debug_test.c"
+#endif
 // #151's test-check-lanes: the functions' lanes, every output one lane's (check_program_emit_lanes).
+#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
 #include "buster/compiler/c_check_lanes_test.c"
+#endif
 // #152's test-check-units: the driver's commands of several source files, every unit's output its own alone's.
+#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
 #include "buster/compiler/c_check_units_test.c"
 #include "buster/compiler/c_check_unwind_test.c"
 #include "buster/compiler/c_check_asm_test.c"
+#endif
 #pragma clang optimize on
 #include "buster/compiler/c_check_source_benchmark.c"
 // #113's benchmark-checker-deferred: the deferred reader against source order's, and its position checks.
@@ -567,21 +571,29 @@ int run_backend_benchmark(int argc, char** argv);
 // #136's benchmark-backend-source: benchmark-backend's variants on the functions -c compiles of real units.
 #include "buster/compiler/tier0_source_benchmark.c"
 // #1398's test-tier0-inline: Tier 0's splice of always_inline functions, its vector path against its twin, on real C.
+#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
 #include "buster/compiler/c_check_tier0_inline_test.c"
+#endif
 // #151's benchmark-check-lanes: a unit's functions compiled on lanes, against one lane.
 #include "buster/compiler/c_check_lanes_benchmark.c"
 #include "buster/compiler/c_check_binding_benchmark.c"
+#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
 #include "buster/compiler/c_check_debug_benchmark.c"
+#endif
 #pragma clang optimize off
+#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
 #include "buster/compiler/c_check_source_benchmark_test.c"
 #include "buster/compiler/c_lowering_source_benchmark_test.c"
 #include "buster/compiler/c_check_lower_inventory_test.c"
+#endif
 // #1048's test-lowering-templates: node templates against the tasks' rules, function for function.
+#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
 #include "buster/compiler/c_check_program_templates_test.c"
 #include "buster/compiler/tier0_source_benchmark_test.c"
 #include "buster/compiler/c_check_lanes_benchmark_test.c"
 #include "buster/compiler/c_check_request_test.c"
 #include "buster/compiler/c_check_corpus_symbols_test.c"
+#endif
 #pragma clang optimize on
 
 // Tier 1's arena-backed instruction columns, exact verifier twins, stable text form and typed-stream adapter.
@@ -674,8 +686,10 @@ int run_backend_benchmark(int argc, char** argv);
 #pragma clang section text = ".text.buster_checker"
 #include "buster/compiler/c_check_tier1.c"
 #pragma clang optimize off
+#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
 #include "buster/compiler/c_check_debug_tier1_parameters_test.c"
 #include "buster/compiler/c_check_tier1_outcome_test.c"
+#endif
 #pragma clang optimize on
 #pragma clang section text = ""
 // #1056: the tier-neutral emitted function's tests (row programs, Tier 0's and Tier 1's frame events, the verifier).
@@ -713,7 +727,9 @@ int run_tier1_model_measure_tests(int argc, char** argv);
 
 // #1128's benchmark-check-units: a command of several units timed as processes by each lane count, with its system time
 // against one lane's (time-runs' runs, of test-check-units' program of synth's shape).
+#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
 #include "buster/compiler/c_check_units_benchmark.c"
+#endif
 // measure-tier1-programs (#138, #1189): speedtest1 and Lua's scripts by both tiers, clang -O0 and -O2 and tcc, as whole
 // processes in a Williams design's order, against each other.
 #include "buster/compiler/tier1_programs_measure.c"
@@ -783,6 +799,31 @@ static bool main_preprocessing(int count, char** arguments)
         }
     }
     return result;
+}
+#endif
+
+#if !BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
+// These shared static entry points were referenced only by the checker fixtures now read in their owning unit.
+// Keep those semantic references without parsing the fixtures: this unused function is never called or emitted.
+// Other unused-function diagnostics remain enabled, and the checker unit still checks the interfaces' real callers.
+static __attribute__((unused)) void main_checker_test_interfaces(void)
+{
+    (void)&c_body_bindings_span;
+    (void)&c_body_bindings_spans;
+    (void)&c_body_bindings_resolve;
+    (void)&check_input_control_next;
+    (void)&check_input_label_capacity;
+    (void)&check_diagnostic_first_pragma_error;
+    (void)&check_initializers_diagnose;
+    (void)&check_data_input;
+    (void)&check_program_lower_sources;
+    (void)&check_program_lower_templates;
+    (void)&check_debug_value_range_scan;
+    (void)&check_debug_value_range_indexed;
+    (void)&lowering_symbols_compare_strings;
+    (void)&run_check_command;
+    (void)&check_corpus_check;
+    (void)&lower_source_failure;
 }
 #endif
 
@@ -1172,6 +1213,7 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
         arena_limits_fix();
         result = run_parse_command(argc - 2, argv + 2);
     }
+#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "test-checker") == 0)
     {
         result = run_checker_tests(argc - 2, argv + 2);
@@ -1204,6 +1246,7 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     {
         result = run_check_units_tests(argc - 2, argv + 2);
     }
+#endif
 #if BUSTER_IN_UNIT(BUSTER_UNIT_CHECK_BUILTINS)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECK_BUILTINS) && argc >= 2 && strcmp(argv[1], "test-check-builtins") == 0)
     {
@@ -1340,10 +1383,12 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     {
         result = run_lowering_inventory(argc - 2, argv + 2);
     }
+#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "test-lowering-templates") == 0)
     {
         result = run_lowering_templates_tests(argc - 2, argv + 2);
     }
+#endif
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-ir-source") == 0)
     {
         result = run_ir_source_tests(argc - 2, argv + 2);
@@ -1378,10 +1423,12 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     {
         result = run_ir_source_benchmark(argc - 2, argv + 2);
     }
+#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "test-tier0-inline") == 0)
     {
         result = run_tier0_inline_tests(argc - 2, argv + 2);
     }
+#endif
     else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "benchmark-backend-source") == 0)
     {
         result = run_backend_source_benchmark(argc - 2, argv + 2);
@@ -1390,10 +1437,12 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     {
         result = run_check_lanes_benchmark(argc - 2, argv + 2);
     }
+#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
     else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "benchmark-check-units") == 0)
     {
         result = run_check_units_benchmark(argc - 2, argv + 2);
     }
+#endif
     else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "benchmark-checker-bindings") == 0)
     {
         result = run_checker_binding_benchmark(argc - 2, argv + 2);
