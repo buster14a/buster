@@ -37,7 +37,7 @@ struct CheckWarningDescription
 static const CheckWarningDescription check_warning_descriptions[] =
 {
     { "-Wincompatible-pointer-types-discards-qualifiers", "-Wincompatible-pointer-types", "conversion discards pointer qualifiers" },
-    { "-Wgnu-folding-constant", "-Wgnu", "folding an integer constant expression is a GNU extension" },
+    { "-Wgnu-folding-constant", "-Wgnu", "expression is not an integer constant expression; folding it to a constant is a GNU extension" },
     { "-Wenum-too-large", NULL, "enumeration values exceed the available integer range" },
     { "-Winteger-overflow", NULL, "integer constant expression overflows its type" },
     { "-Wshift-count-negative", NULL, "shift count is negative" },
