@@ -571,8 +571,14 @@ does, each rule checked against clang's answers on probes of it:
   GNU C does, into a `static` array's element or a `static` struct, where its
   body's parts are constant (`(S8){ "a", 1 }`, not `(S8){ "a", n }`). The
   initializer copies the literal's parts, as it did only for a file-scope
-  literal's. A scalar compound literal (`(int){ 1 }`) stays refused there, at
-  file scope too.
+  literal's. A scalar compound literal's value (`static int x = (int){ 1 };`,
+  `(long){ 5 } + 1`, `(int){ (int){ 3 } }`), at file scope too, is its body's one
+  value converted to its type, where that is a number or a static object's
+  address constant (#1447, `check_init_scalar_literal`): the constant cache that
+  folds a vector literal's lanes folds it, and the operations around it, a
+  conditional's among them (`(int){ 5 } ? 6 : 7`). Still refused: one in a
+  file-scope array's bound (`char e[(int){ 2 }];`), which clang folds to a
+  constant array with its `-Wgnu-folding-constant` warning.
 
 Declaration specifiers and comma-separated declarators are elaborated in source
 order, including the scope of a name in its own initializer. The reader
@@ -3402,9 +3408,18 @@ What the lowering covers past scalars (#145's programs):
   function's labels (`Tier0Function.label_entries`), and the emission defines
   a local symbol at each one's first record after branch sizing
   (`.Lbuster_label_N`, of no type), which `GLOBAL_ADDRESS` reaches and a static
-  table's pointers point at. Not yet: the difference of two labels' addresses
-  as a static initializer's constant (GNU's relative jump tables), which clang
-  folds and the checker refuses as not a constant.
+  table's pointers point at. The difference of two labels' addresses in a
+  static initializer (GNU's relative jump tables, `static const int t[] =
+  { &&a - &&b };`, #1447) is a constant of its own kind
+  (`CHECK_CONSTANT_LABEL_DIFFERENCE`, `check_init_label_difference`), as
+  clang's evaluator keeps an AddrLabelDiff: `&&a - &&b` of any pointer types to
+  the labels (divided by no element size, as clang's isn't), through
+  parentheses, a unary plus, `__extension__` and conversions to an integer type
+  of 32 bits or more that doesn't widen it; any other operation on it, or a
+  narrower or wider conversion, is no constant, as in clang. The static data
+  writes the labels' distance in their function's code, which the emission
+  placed before the data is planned, where an assembler resolves clang's
+  `.long .La-.Lb`; the labels are objects the program must have symbols of.
   The two control walks filter the parser's immutable kind/role columns in
   bounded 64-byte blocks and visit exact events in source order: function
   bodies, labels, `__label__` lists, cases, gotos and label addresses in the

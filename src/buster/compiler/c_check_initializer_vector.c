@@ -368,6 +368,116 @@ static bool check_init_vector_literal(CheckInitWalker* walker, uint32_t node, ui
     return valid;
 }
 
+// A scalar compound literal's value in a static object's initializer (#1447): clang folds `(int){ 1 }`, at file scope
+// and in a function, as GNU C does. Its body's one value (in braces of its own or not, `{}` a zero), converted to the
+// literal's type as its initializer converts it, where that value is constant: a number, or an address constant of a
+// static object's.
+static bool check_init_scalar_literal(CheckInitWalker* walker, uint32_t node, uint32_t opener, CheckValue* scalar)
+{
+    const Parser* parser = walker->parser;
+    const TypeId type = check_stream_type(walker->stream, node);
+    const uint32_t end = parser->tree.parents[opener];
+    bool valid = opener < end && end < parser->tokens.count && parser->tokens.kinds[end] == PARSE_KIND_R_BRACE;
+    uint32_t first = opener + 1;
+    uint32_t last = valid ? check_init_expression_end(parser, first, end) : first;
+    const bool excess = valid && last < end && !(parser->tokens.kinds[last] == PARSE_KIND_COMMA && last + 1 == end);
+    valid = valid && (!excess || walker->ignore_excess) &&
+            (first == end || (parser->tokens.kinds[first] != PARSE_KIND_PERIOD && parser->tokens.kinds[first] != PARSE_KIND_L_SQUARE));
+    while (valid && first < last && parser->tokens.kinds[first] == PARSE_KIND_L_BRACE)
+    {
+        const uint32_t close = check_init_excess_end(parser, first + 1, last);
+        valid = close < last && close + 1 == last;
+        first += 1;
+        last = valid ? check_init_expression_end(parser, first, close) : first;
+        const bool trailing = last < close && parser->tokens.kinds[last] == PARSE_KIND_COMMA && last + 1 == close;
+        valid = valid && first < last && (walker->ignore_excess || last == close || trailing);
+    }
+    const uint32_t value_node = valid && first < last ? check_init_node(walker, first, last) : BUSTER_CHECK_NONE;
+    CheckValue value = { .type = BUSTER_TYPE_INT, .category = CHECK_RVALUE, .constant_kind = CHECK_CONSTANT_INTEGER };
+    if (valid && first < last)
+    {
+        valid = value_node < node;
+        value = valid ? check_init_constant_value(walker, value_node) : value;
+    }
+    if (valid)
+    {
+        const CheckAction action = {
+            .op = CHECK_OP_INITIALIZE, .operands = { value }, .type = type,
+            .node = value_node, .context = check_init_context(walker, value_node, first),
+        };
+        CheckActionResult converted = { 0 };
+        check_action_scalar(walker->types, &action, &converted);
+        valid = converted.diagnostic == CHECK_DIAG_NONE && converted.value.fault == CHECK_FAULT_NONE && (converted.value.flags & BUSTER_CHECK_SIDE_EFFECT) == 0 &&
+                (check_init_constant_known(&converted.value) ||
+                 (converted.value.constant_kind == CHECK_CONSTANT_ADDRESS &&
+                  (converted.value.object == 0 || (converted.value.flags & BUSTER_CHECK_STATIC_OBJECT) != 0)));
+        if (converted.diagnostic == CHECK_DIAG_RESOURCE)
+        {
+            check_init_fail(walker, CHECK_INIT_RESOURCE, first);
+        }
+        *scalar = converted.value;
+        scalar->category = CHECK_RVALUE;
+    }
+    return valid;
+}
+
+// Whether `value` is the address of a label (GNU's &&label: its label's own object, the token after it), not offset.
+static bool check_init_label_address(const CheckInitWalker* walker, const CheckValue* value)
+{
+    const Parser* parser = walker->parser;
+    return value->constant_kind == CHECK_CONSTANT_ADDRESS && value->offset == 0 && value->object != 0 && value->object - 1 < parser->tokens.count &&
+           parser->tree.roles[value->object - 1] == PARSE_ROLE_LABEL && check_action_kind(walker->types, value->type) == BUSTER_TYPE_KIND_POINTER;
+}
+
+// Whether converting a label difference of type `source` to `target` keeps it (#1447): as clang's IntExprEvaluator takes
+// the integral cast of an AddrLabelDiff, to an integer type of at least 32 bits and at most the source's, which its code
+// gives as a 32- or 64-bit field of the labels' distance.
+static bool check_init_label_conversion(const TypeTable* types, TypeId source, TypeId target)
+{
+    uint32_t source_width = 0;
+    uint32_t target_width = 0;
+    bool source_signed = false;
+    bool target_signed = false;
+    return check_action_integer_type(types, source, &source_width, &source_signed) && check_action_integer_type(types, target, &target_width, &target_signed) &&
+           target_width >= 32 && target_width <= source_width && type_unqualified(type_strip_aligned(types, target)) != BUSTER_TYPE_BOOL;
+}
+
+// GNU's difference of two labels' addresses in a static initializer (#1447), as clang's constant evaluator keeps it (an
+// AddrLabelDiff): `&&a - &&b`, of any pointer types to the labels (clang divides by no element size), kept through
+// parentheses, a unary plus, __extension__ and conversions to integer types of 32 bits or more that don't widen it
+// (check_init_label_conversion). Any other operation on one isn't constant. Whether `node` makes or takes one: its value,
+// of kind CHECK_CONSTANT_LABEL_DIFFERENCE, in *scalar, and whether it is valid in *valid.
+static bool check_init_label_difference(CheckInitWalker* walker, uint32_t node, CheckValue* scalar, bool* valid)
+{
+    const CheckGraph* graph = walker->graph;
+    const CheckOp op = graph->ops[node];
+    const uint32_t operands[] = { graph->operand0[node], graph->operand1[node], graph->operand2[node] };
+    CheckValue values[3] = { 0 };
+    bool taken = false;
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(operands); i += 1)
+    {
+        values[i] = operands[i] < node ? check_init_constant_value(walker, operands[i]) : (CheckValue){ 0 };
+        taken |= values[i].constant_kind == CHECK_CONSTANT_LABEL_DIFFERENCE;
+    }
+    const TypeId type = check_stream_type(walker->stream, node);
+    const bool made = op == CHECK_OP_SUBTRACT && check_init_label_address(walker, &values[0]) && check_init_label_address(walker, &values[1]);
+    const bool kept = values[0].constant_kind == CHECK_CONSTANT_LABEL_DIFFERENCE &&
+                      (op == CHECK_OP_POSITIVE || op == CHECK_OP_SELECT ||
+                       ((op == CHECK_OP_CAST || op == CHECK_OP_CONVERT || op == CHECK_OP_INITIALIZE) && check_init_label_conversion(walker->types, values[0].type, type)));
+    *valid = made || kept;
+    if (made)
+    {
+        *scalar = (CheckValue){ .type = type, .category = CHECK_RVALUE, .flags = BUSTER_CHECK_STATIC_OBJECT, .constant_kind = CHECK_CONSTANT_LABEL_DIFFERENCE,
+                                .object = values[0].object, .integer = values[1].object };
+    }
+    else if (kept)
+    {
+        *scalar = values[0];
+        scalar->type = type;
+    }
+    return made || taken;
+}
+
 static bool check_init_vector_fold(CheckInitWalker* walker, uint32_t node, uint8_t* bytes)
 {
     const CheckGraph* graph = walker->graph;
@@ -569,15 +679,18 @@ static void check_init_constants(CheckInitWalker* walker, uint32_t begin, uint32
         const CheckOp op = graph->ops[node];
         const bool vector = check_vector_type(walker->types, checked.type);
         const bool leaf = vector && op == CHECK_OP_VALUE && entry->opener != BUSTER_CHECK_NONE;
+        // A scalar compound literal's value (check_init_scalar_literal), folded as an operation's.
+        const bool scalar_leaf = !vector && op == CHECK_OP_VALUE && entry->opener != BUSTER_CHECK_NONE && check_action_is_scalar(walker->types, checked.type);
         const bool unary = op >= CHECK_OP_POSITIVE && op <= CHECK_OP_BIT_NOT;
-        const bool binary = op >= CHECK_OP_ADD && op <= CHECK_OP_LOGICAL_OR;
+        // A scalar conditional folds as an operation (#1447): `(int){ 1 } ? a : b`.
+        const bool binary = (op >= CHECK_OP_ADD && op <= CHECK_OP_LOGICAL_OR) || (!vector && op == CHECK_OP_CONDITIONAL);
         const bool convert = op == CHECK_OP_CAST || op == CHECK_OP_CONVERT || op == CHECK_OP_INITIALIZE || op == CHECK_OP_SELECT;
         const bool select = op == CHECK_OP_MEMBER || op == CHECK_OP_SUBSCRIPT;
         // Automatic compound leaves carry their runtime materialization effect, inherited by enclosing
         // operations. Prove their value from the actual constant lanes instead of erasing graph flags or
         // rejecting that marker wholesale. Calls, updates and runtime scalar operands cannot fill this cache.
         const bool clean = walker->stream->diagnostics[node] == CHECK_DIAG_NONE && checked.fault == CHECK_FAULT_NONE;
-        if (clean && (vector || leaf || ((unary || binary || convert || select) && checked.constant_kind == CHECK_CONSTANT_NONE)))
+        if (clean && (vector || leaf || scalar_leaf || ((unary || binary || convert || select) && checked.constant_kind == CHECK_CONSTANT_NONE)))
         {
             const uint64_t allocation = walker->scratch->length;
             const uint64_t size = vector || leaf ? type_size(walker->types, checked.type) : 0;
@@ -600,9 +713,17 @@ static void check_init_constants(CheckInitWalker* walker, uint32_t begin, uint32
                     *scalar = (CheckValue){ .type = checked.type, .category = CHECK_RVALUE };
                 }
                 const uint32_t source = graph->operand0[node];
+                // A label difference made or taken (check_init_label_difference), whose validity it gives.
+                bool label_valid = false;
+                const bool label = !vector && !leaf && !scalar_leaf && !select && (unary || binary || convert) &&
+                                   check_init_label_difference(walker, node, scalar, &label_valid);
                 if (leaf)
                 {
                     valid = check_init_vector_literal(walker, node, entry->opener, bytes, size);
+                }
+                else if (scalar_leaf)
+                {
+                    valid = check_init_scalar_literal(walker, node, entry->opener, scalar);
                 }
                 else if (select)
                 {
@@ -654,6 +775,10 @@ static void check_init_constants(CheckInitWalker* walker, uint32_t begin, uint32
                     // reinterpretation from C static constant expressions. Keep that source constraint here.
                     valid = false;
                 }
+                else if (label)
+                {
+                    valid = label_valid;
+                }
                 else if (!vector && (unary || binary || convert))
                 {
                     CheckAction action = { 0 };
@@ -675,7 +800,7 @@ static void check_init_constants(CheckInitWalker* walker, uint32_t begin, uint32
                 {
                     valid = false;
                 }
-                valid = valid && (scalar == NULL || check_init_constant_known(scalar));
+                valid = valid && (scalar == NULL || scalar_leaf || scalar->constant_kind == CHECK_CONSTANT_LABEL_DIFFERENCE || check_init_constant_known(scalar));
             }
             arena_pop_to(walker->scratch, temporary);
             if (valid)
