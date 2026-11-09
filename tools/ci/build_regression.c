@@ -347,6 +347,8 @@ static void check_standalone_preprocessing(void)
         { "src/buster/compiler/foreign_test.c", "run_foreign_tests(" },
         { "src/buster/compiler/tier0_test.c", "run_tier0_tests(" },
         { "src/buster/compiler/tier1_select_source_benchmark.c", "run_tier1_select_source_benchmark(" },
+        { "src/buster/compiler/test_tool.c", "test_tool_test(" },
+        { "src/buster/compiler/test_process.c", "test_process_test(" },
     };
     for (uint32_t i = 0; i < sizeof(files) / sizeof(files[0]); i += 1)
     {
@@ -1409,6 +1411,9 @@ static void check_incremental(void)
         { "src/buster/compiler/dataflow_test.c", "main.c " },
         { "src/buster/compiler/oracle_cache_test.c", "main.c " },
         { "src/buster/compiler/compile_measure.c", "main.c " },
+        { "src/buster/compiler/differential.c", "main_unit_backend.c " },
+        { "src/buster/compiler/test_tool_test.c", "main.c " },
+        { "src/buster/compiler/test_process_test.c", "main_unit_frontend.c " },
         { "src/buster/compiler/tier1_allocate_test_cases.c", "main_unit_backend.c " },
         { "src/buster/compiler/tier1_schedule_fixture.c", "main_unit_backend.c " },
         { "src/buster/compiler/c_builtin_float_lower_test.c", "main_unit_backend.c " },

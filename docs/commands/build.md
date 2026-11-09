@@ -302,6 +302,13 @@ files rebuilds only `main_unit_backend.c`. `tier0_test_same_code` and its unwind
 consumer belong to that same unit, so the entire `tier0_test.c` root is private.
 Production `tier0_generate.c` and `streaming.c` retain all eleven owners.
 
+Nonstandard support names follow the same rule. The differential command's
+`differential.c` belongs to BACKEND. `test_tool.c` keeps probing helpers for
+DRIVER, TYPES, X86, FRONTEND, LINK and BACKEND, while `test_tool_test.c` belongs
+to DRIVER. `test_process.c` keeps the CPU-limit and capture-file helpers shared;
+its process-worker functions and `test_process_test.c` belong to FRONTEND.
+Standalone inclusion of either support root retains its complete self-tests.
+
 The frontend owns the private preprocessor, parser, GNU, bindings and lowering
 fixtures and their fixture-consuming commands. Edits to
 `preprocessor_fuzz_generate.c`, `c_preprocessor_directives_test.c`,

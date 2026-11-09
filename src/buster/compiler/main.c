@@ -112,7 +112,9 @@
 
 // The external tools the cross-checks spawn, probed once per command (#1129), and their tests, for the test-tool command.
 // Every test file after this point sees its types and functions.
+#if BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) || BUSTER_IN_UNIT(BUSTER_UNIT_TYPES) || BUSTER_IN_UNIT(BUSTER_UNIT_X86) || BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND) || BUSTER_IN_UNIT(BUSTER_UNIT_LINK) || BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/test_tool.c"
+#endif
 
 // The lexer benchmark is a separate translation unit, linked into the compiler executable.
 int run_c_lexer_benchmark(int argc, char** argv);
@@ -208,8 +210,8 @@ int run_tier1_allocate_benchmark(int argc, char** argv);
 #endif
 
 // External randomized C compiler comparison and its independent process/accounting fixtures.
-#include "buster/compiler/differential.c"
 #if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
+#include "buster/compiler/differential.c"
 #include "buster/compiler/differential_test.c"
 #endif
 
@@ -1050,8 +1052,6 @@ static __attribute__((unused)) void main_checker_test_interfaces(void)
 // without parsing the fixtures or emitting code; the frontend still checks the real calls with unused warnings on.
 static __attribute__((unused)) void main_frontend_test_interfaces(void)
 {
-    (void)&test_process_finish;
-    (void)&test_process_test;
     (void)&pp_test_read_output;
     (void)&parse_kernels_reserve;
     (void)&parse_twins;
@@ -1932,10 +1932,12 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     {
         result = run_calling_convention_benchmark(argc - 1, argv + 1);
     }
+#if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-differential") == 0)
     {
         result = run_differential_command(argc - 2, argv + 2);
     }
+#endif
 #if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-differential-harness") == 0)
     {
@@ -2250,10 +2252,12 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
         result = run_parallel_tests(argc - 2, argv + 2);
     }
 #endif
+#if BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "test-tool") == 0)
     {
         result = test_tool_command(argc - 2, argv + 2);
     }
+#endif
 #if BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "test-oracle-cache") == 0)
     {
