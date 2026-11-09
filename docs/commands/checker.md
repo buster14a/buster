@@ -280,6 +280,22 @@ unused-warning fixtures also check exact scope-completion tokens.
   value's first token in member order, before that initializer's conversions, which it keeps, even in an unevaluated
   operand. `c_check_bitfield_driver_test.c` compares both with complete pinned-Clang output at each policy, both paths
   and with `-c`.
+  An operator's usual arithmetic conversions of enumerations of different types, or of an enumeration and a floating
+  type, are clang's checkEnumArithmeticConversions (#1447, `check_common_enum_arithmetic`), warned at the operator (a
+  conditional's `?`) as it is built, with an enumerator taken as its enumeration: a comparison's `-Wenum-compare`, on by
+  default; an arithmetic or bitwise operation's `-Wenum-enum-conversion`, a conditional's `-Wenum-compare-conditional`
+  and a floating mix's `-Wenum-float-conversion` (a compound assignment's only from an enumeration to a floating target),
+  the three under `-Wenum-conversion` and so `-Wconversion` and `-Wnon-gcc`; and an unnamed enumeration's
+  `-Wanon-enum-enum-conversion`. Only a unit where an enumerator or an enumeration's variable is named as such an
+  operator's operand (`CheckInput.enum_operands`, set where the identifiers' leaves are made, outside its own
+  enumeration's definition) is scanned, and an operator is tested only where an operand may be an enumeration. An
+  enumeration operand that is only a member, a call's result or a cast's isn't looked for without one, and the constant
+  reader's expressions (an array bound in a type name, an enumerator's value), and a `typeof` operand's, aren't
+  scanned. A comparison's operands are rvalues, as clang's DefaultLvalueConversion makes them: unqualified, a typedef
+  that carries a qualifier itself spelled as its type; a GNU `a ?: b`'s omitted operand is its condition promoted, never
+  an enumeration.
+  `c_check_enum_arithmetic_driver_test.c` compares them with complete pinned-Clang output at each policy, both paths and
+  with `-c`.
   `c_check_shift_count_driver_test.c` compares complete pinned-Clang diagnostics and independent counts for both
   shift directions, narrow promotions, 128-bit and bit-precise widths, compound assignments, side effects, macros
   and warning policy. The shared default-warning harness covers syntax checking and object publication through
