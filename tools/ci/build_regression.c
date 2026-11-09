@@ -747,7 +747,7 @@ static void check_incremental(void)
     static const struct
     {
         const char* source;
-        const char* owner;
+        const char* owners;
     } files[] = {
         { "src/buster/compiler/tier1_model_measure.c", 0 },
         { "src/buster/compiler/c_lexer.c", 0 },
@@ -756,6 +756,15 @@ static void check_incremental(void)
         { "src/buster/compiler/profile_test.c", "main.c " },
         { "src/buster/compiler/c_files_test.c", "main_unit_frontend.c " },
         { "src/buster/compiler/tier1_wide_test.c", "main_unit_backend.c " },
+        { "src/buster/compiler/c_check_program_test.c", "main_unit_checker.c " },
+        { "src/buster/compiler/c_check_generic_test.c", "main_unit_checker.c " },
+        { "src/buster/compiler/c_check_attribute_test.c", "main_unit_checker.c " },
+        { "src/buster/compiler/c_check_program_amx_test.c", "main_unit_checker.c " },
+        { "src/buster/compiler/c_checker_driver_test.c", "main_unit_checker.c " },
+        { "src/buster/compiler/c_check_debug_tier1_parameters_test.c", "main_unit_checker.c " },
+        { "src/buster/compiler/c_checker_test.c",
+          "main.c main_unit_assembler.c main_unit_backend.c main_unit_check_builtins.c main_unit_checker.c "
+          "main_unit_dynamic.c main_unit_executable.c main_unit_frontend.c main_unit_link.c main_unit_types.c main_unit_x86.c " },
     };
     for (uint32_t i = 0; i < sizeof(files) / sizeof(files[0]); i += 1)
     {
@@ -766,9 +775,9 @@ static void check_incremental(void)
         {
             fail("no unit depends on %s", source);
         }
-        if (files[i].owner != 0 && strcmp(expected, files[i].owner) != 0)
+        if (files[i].owners != 0 && strcmp(expected, files[i].owners) != 0)
         {
-            fail("%s is included by %s, not its owner %s alone", source, expected, files[i].owner);
+            fail("%s is included by %s; expected exactly %s", source, expected, files[i].owners);
         }
         const struct stat file = status_of(source);
         utimensat(AT_FDCWD, source, 0, 0);
