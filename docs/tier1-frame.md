@@ -449,6 +449,11 @@ code certificate, for a bound of about 1% on speedtest1. If it is reconsidered,
 `luaD_precall` comes first: its Lua-function path calls nothing, and all five of
 its saved registers could move.
 
+The owner decided not to pursue shrink-wrapping now, with profile-guided code
+placement ([#1447's comment
+6736401463](https://github.com/buster14a/buster/issues/1447#issuecomment-6736401463),
+item 4).
+
 ## Native frame companion
 
 [`tier1_frame_emit.c`](../src/buster/compiler/tier1_frame_emit.c) consumes the

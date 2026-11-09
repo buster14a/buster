@@ -67,6 +67,13 @@ the 9700X, and 0.32 s with `--cross-check`) checks `import.c` and
   without a symbol table, as `crtn.o` is. Then each check a well-formed object
   never trips, one change at a time, with the error, the index of the
   section, symbol or relocation, the type and the byte offset it reports;
+- common symbols (#1849): the hand-made object's global object made an
+  `SHN_COMMON` one of alignment 8 (and `STT_COMMON`), which the exact path
+  imports as a `BUSTER_LINK_SYMBOL_COMMON` symbol of its own `.bss` atom of its
+  size and alignment, the vector path leaving the object to it; a common of
+  alignment 0 or 3, a weak one and a function's, which are unsupported; and the
+  object writer's object of a common and a function that refers to it, read
+  back to the same common and its fixup;
 - archives made by hand (a 32-bit index, a 64-bit one and none, long names,
   an odd member's padding, a member of no bytes, a member without a symbol,
   an index of several of the vector path's batches with a member's symbols
