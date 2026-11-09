@@ -480,8 +480,8 @@ static bool check_input_enum_read(CheckInputReader* reader, CheckTagFrame* frame
             // A C23 redefinition's enumerator of an earlier definition's name (#1447): no redefinition, but a name both
             // declare, which its uses find ambiguous (check_tag_enum_ambiguous).
             // (A third definition's finds the second's, itself ambiguous with the earlier's, whose candidate it names.)
-            const uint32_t bound = old != 0 ? reader->bindings.declaration[old - 1] : BUSTER_CHECK_NONE;
-            const uint32_t chained = bound < parser->tokens.count && reader->ambiguous_index != NULL ? reader->ambiguous_index[bound] : 0;
+            const uint32_t bound = !valid ? reader->bindings.declaration[old - 1] : BUSTER_CHECK_NONE;
+            const uint32_t chained = !valid && bound < parser->tokens.count && reader->ambiguous_index != NULL ? reader->ambiguous_index[bound] : 0;
             const uint32_t old_declaration = chained != 0 ? reader->ambiguous_partners[chained - 1] : bound;
             uint32_t earlier_keyword = BUSTER_CHECK_NONE;
             const bool ambiguous = !valid && reader->c23_count != 0 && reader->bindings.kind[old - 1] == C_BINDING_ENUMERATOR &&
