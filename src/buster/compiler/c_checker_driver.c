@@ -151,6 +151,8 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_UNKNOWN_BUILTIN: result = "use of unknown builtin"; break;
         case CHECK_INPUT_INVOKE_ARGUMENTS: result = "too few arguments to function call, expected at least 1, have 0"; break;
         case CHECK_INPUT_BUILTIN_NOT_CALLED: result = "builtin functions must be directly called"; break;
+        case CHECK_INPUT_BUILTIN_CONFLICT: result = "conflicting types for builtin function"; break;
+        case CHECK_INPUT_BUILTIN_DEFINITION: result = "definition of builtin function"; break;
         case CHECK_INPUT_ATTRIBUTE_OUT_OF_BOUNDS: result = "attribute parameter is out of bounds"; break;
         case CHECK_INPUT_ATTRIBUTE_TYPES: result = "attribute cannot be applied to types"; break;
         case CHECK_INPUT_ATTRIBUTE_LIST_PLACE: result = "an attribute list cannot appear here"; break;
@@ -3645,6 +3647,40 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                             // Just after the tag's keyword, where clang's fix-it puts the attributes.
                             const uint32_t keyword = parser->tokens.names[token];
                             pp_diagnose_output_offset_at(pp, PP_SEVERITY_ERROR, source, keyword != 0 ? intern_length(pp->table, keyword) : 0, publication, "%s", message);
+                        }
+                        else if (phase == 0 && kind == CHECK_INPUT_BUILTIN_CONFLICT && token < count)
+                        {
+                            // A builtin's declaration of another type (#1843): clang's "conflicting types", with its note, at
+                            // the same name, of the builtin's type as clang prints it (check_driver_warning_type).
+                            const CheckInputReport* report = input->reports + index;
+                            const uint64_t type_mark = scratch->length;
+                            CheckWarningSpelling spell = { .count = pp->table->count };
+                            spell.bytes = BUSTER_ARENA_PUSH_ARRAY(scratch, const uint8_t*, spell.count);
+                            spell.lengths = spell.bytes != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, spell.count) : NULL;
+                            for (uint32_t s = 0; spell.lengths != NULL && s < spell.count; s += 1)
+                            {
+                                spell.bytes[s] = intern_bytes(pp->table, s);
+                                spell.lengths[s] = intern_length(pp->table, s);
+                            }
+                            const bool spelled = spell.lengths != NULL && check_driver_spelling_build(parser, pp, input, types, &spell, scratch);
+                            const String8 type = spelled ? check_driver_warning_type(parser, pp, input, types, &spell, scratch, report->type, 0) : (String8){ 0 };
+                            const uint32_t name = parser->tokens.names[token];
+                            char note_text[512];
+                            snprintf(note_text, sizeof(note_text), "'%.*s' is a builtin with type %.*s", (int)intern_length(pp->table, name),
+                                     (const char*)intern_bytes(pp->table, name), (int)type.length, type.pointer);
+                            const PPOutputDiagnosticNote note = {
+                                .token = source,
+                                .message = note_text,
+                            };
+                            pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, type.length != 0 ? 1u : 0u, "conflicting types for '%.*s'",
+                                                        (int)intern_length(pp->table, name), (const char*)intern_bytes(pp->table, name));
+                            arena_pop_to(scratch, type_mark);
+                        }
+                        else if (phase == 0 && kind == CHECK_INPUT_BUILTIN_DEFINITION && token < count)
+                        {
+                            const uint32_t name = parser->tokens.names[token];
+                            pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "definition of builtin function '%.*s'", (int)intern_length(pp->table, name),
+                                                  (const char*)intern_bytes(pp->table, name));
                         }
                         else if (phase == 0 && kind == CHECK_INPUT_ENUM_NOT_REPRESENTABLE)
                         {

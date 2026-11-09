@@ -146,6 +146,11 @@ typedef enum CheckInputMessage
     CHECK_INPUT_UNKNOWN_BUILTIN,
     CHECK_INPUT_INVOKE_ARGUMENTS,
     CHECK_INPUT_BUILTIN_NOT_CALLED,
+    // A declaration with external linkage of a builtin's name (#1843, check_input_builtin_declaration), at its name: one
+    // whose type isn't compatible with the builtin's (clang's "conflicting types", with its note of the builtin's type, the
+    // report's), and a definition of one (clang's err_builtin_definition).
+    CHECK_INPUT_BUILTIN_CONFLICT,
+    CHECK_INPUT_BUILTIN_DEFINITION,
     CHECK_INPUT_ATTRIBUTE_OUT_OF_BOUNDS,
     CHECK_INPUT_ATTRIBUTE_TYPES,
     CHECK_INPUT_ATTRIBUTE_LIST_PLACE,
@@ -9587,6 +9592,69 @@ static void check_input_alias_tentative(CheckInputReader* reader, uint32_t token
 static void check_input_attribute_merge_checks(CheckInputReader* reader, uint32_t token, uint32_t previous, bool visible, uint32_t point);
 static void check_input_modular_format(CheckInputReader* reader, uint32_t token);
 
+// Whether a function's name could be a builtin's (#1843): every builtin a declaration keeps (check_input_builtin_function)
+// is spelled with a leading underscore, which few of a unit's functions are; their names are looked up.
+static bool check_input_builtin_named(const CheckInputReader* reader, uint32_t name)
+{
+    const InternSpan span = reader->pp->table->spans[name];
+    return span.length > 1 && reader->pp->table->records[span.offset] == '_';
+}
+
+// The builtin a function's name `name` names, as clang's declarations of it keep it (#1843): a catalog builtin's (but
+// C23's <stdbit.h> functions, which are library functions), or an x86 builtin of the intrinsic catalogue's rows and
+// leaves (cbuiltin_source_intrinsic, as check_input_intrinsic_prepare claims its calls); not a library builtin (`abs`, a
+// row of clang's 'f' attribute), which a program may define. Its prototype's type into *type where the catalogue decodes
+// one (0 for a custom-checked builtin's, or none). False for a name of no builtin.
+static bool check_input_builtin_function(CheckInputReader* reader, uint32_t name, TypeId* type)
+{
+    const InternSpan span = reader->pp->table->spans[name];
+    const char* spelling = (const char*)reader->pp->table->records + span.offset;
+    const uint16_t builtin = check_constant_builtin_name(reader, name);
+    const BuiltinIntrinsicInfo* info = builtin_intrinsic_lookup(spelling, span.length);
+    const bool library = info != NULL && memchr(info->attributes, 'f', info->attributes_length) != NULL;
+    const bool catalog = builtin != CBUILTIN_NONE && !cbuiltin_stdc_library(builtin);
+    const bool intrinsic = !library && info != NULL && cbuiltin_source_intrinsic((const uint8_t*)spelling, span.length);
+    // (Of a C unit's languages: not Microsoft's, OpenCL's or C++'s alone.)
+    const bool language = info == NULL || strcmp(info->language_token, "ALL_LANGUAGES") == 0 || strcmp(info->language_token, "ALL_GNU_LANGUAGES") == 0;
+    const bool result = language && ((catalog && !library) || intrinsic);
+    *type = 0;
+    if (result && info != NULL && !info->custom_typechecking)
+    {
+        const CheckInputIntrinsicDeclaration declaration = check_input_intrinsic_decode(reader, info);
+        reader->output->resource |= declaration.types.status == BUILTIN_INTRINSIC_TYPES_CAPACITY;
+        *type = declaration.types.status == BUILTIN_INTRINSIC_TYPES_SUCCESS && !declaration.types.signature_ignored ? declaration.types.function_type : 0;
+    }
+    return result;
+}
+
+// A function's declaration `token` with external linkage of a builtin's name (#1843, check_input_builtin_function), as
+// clang's Sema takes it: a type that isn't compatible with the builtin's is clang's "conflicting types" (MergeFunctionDecl
+// against the builtin's implicit declaration), with its note of the builtin's type; and a definition is clang's error
+// (ActOnStartOfFunctionDef's err_builtin_definition), but of a library builtin. A compatible declaration leaves the name
+// the builtin's: its calls are the builtin's (check_input_resolve_name, check_input_intrinsic_prepare). Rare: scalar.
+static __attribute__((noinline)) void check_input_builtin_declaration(CheckInputReader* reader, uint32_t token)
+{
+    TypeId builtin = 0;
+    if (check_input_builtin_function(reader, reader->parser->tokens.names[token], &builtin))
+    {
+        const TypeAnswer compatible = builtin != 0 ? type_compatible(reader->types, builtin, reader->declared_types[token]) : TYPE_ANSWER_YES;
+        reader->output->resource |= compatible == TYPE_ANSWER_FULL;
+        const uint32_t before = reader->output->report_count;
+        if (compatible == TYPE_ANSWER_NO)
+        {
+            check_input_report(reader, token, CHECK_INPUT_BUILTIN_CONFLICT);
+            if (reader->output->report_count > before)
+            {
+                reader->output->reports[before].type = builtin;
+            }
+        }
+        else if (check_input_bit(reader->declaration_bits, token, BUSTER_CHECK_BITS_DEFINED))
+        {
+            check_input_report(reader, token, CHECK_INPUT_BUILTIN_DEFINITION);
+        }
+    }
+}
+
 static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t point)
 {
     const uint32_t name = reader->parser->tokens.names[token];
@@ -9595,6 +9663,11 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
     const uint32_t old_declaration = old != 0 ? reader->bindings.declaration[old - 1] : BUSTER_CHECK_NONE;
     const bool linked_visible = old != 0 && check_input_linkage(reader->declaration_bits, old_declaration) != 0 && check_input_linkage(reader->declaration_bits, token) != 0;
     const bool overload = check_input_overload_active(reader, token);
+    if (__builtin_expect(kind == C_BINDING_FUNCTION && check_input_linkage(reader->declaration_bits, token) == 2 && !overload &&
+                         check_input_builtin_named(reader, name), 0))
+    {
+        check_input_builtin_declaration(reader, token);
+    }
     const uint32_t linked_library = kind == C_BINDING_FUNCTION && check_input_linkage(reader->declaration_bits, token) == 2 && reader->linked_declarations != NULL ? reader->linked_declarations[name] : 0;
     const bool library_redeclaration = kind == C_BINDING_FUNCTION && check_input_linkage(reader->declaration_bits, token) == 2 && linked_library != 0 && reader->output->function_flags != NULL &&
         (reader->output->function_flags[linked_library - 1] & CHECK_INPUT_FUNCTION_IMPLICIT_LIBRARY) != 0 &&
@@ -10298,9 +10371,10 @@ static inline __attribute__((always_inline)) void check_input_resolve_name(Check
     }
     const uint16_t builtin = check_input_builtin_id(reader, i);
     const uint32_t bound = __builtin_expect(builtin != CBUILTIN_NONE, 0) ? c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, identifier) : 0;
-    // A catalog builtin's name that no declaration binds, or a call of the unit's declaration of a <stdbit.h>
-    // function that clang makes the builtin.
-    const bool claimed = cbuiltin_stdc_library(builtin) ? check_input_stdc_library_call(reader, i, bound, builtin) : bound == 0;
+    // A catalog builtin's name that no declaration binds or a declaration with external linkage binds
+    // (check_input_builtin_kept), or a call of the unit's declaration of a <stdbit.h> function that clang makes the builtin.
+    const bool claimed = cbuiltin_stdc_library(builtin) ? check_input_stdc_library_call(reader, i, bound, builtin) :
+                         bound == 0 || check_input_builtin_kept(reader, bound, builtin);
     if (__builtin_expect(builtin != CBUILTIN_NONE, 0) && role == PARSE_ROLE_OPERAND && claimed)
     {
         // The callee may be the name in parentheses, which clang's call looks through (check_input_callee_end): they
