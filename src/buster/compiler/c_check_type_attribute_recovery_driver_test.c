@@ -117,6 +117,15 @@ static void check_test_driver_type_attribute_recovery(CheckTest* test, const cha
         "_Static_assert(sizeof(enum F) == 8 && _Alignof(enum F) == 8, \"eight\");\nenum F f = C;\nstruct Z *s = &f;\n"
         "enum __attribute__((mode(XF))) G { D };\n_Static_assert(sizeof(enum G) == 16 && _Alignof(enum G) == 16, \"sixteen\");\n"
         "enum __attribute__((mode(HF))) I { I0 };\n_Static_assert(sizeof(enum I) == 2, \"hf\");\nint k = C << 40;\nstruct Z *t = (enum I *)0;\n",
+        // An enum's complex mode (#1447): clang installs the complex type as its integer type, here the integer of its size
+        // with the complex type's alignment (check_input_mode_enum_integer), but where an alignment attribute gives one,
+        // before and after its body; its enumerators stay int. (Clang crashes on arithmetic with such an enum's object.)
+        "enum __attribute__((mode(SC))) E { A, B = A + 1 };\n_Static_assert(sizeof(enum E) == 8 && _Alignof(enum E) == 4, \"sc\");\n"
+        "_Static_assert(_Generic(B, int: 1, default: 0), \"int\");\nenum E e;\nstruct Z *q = &e;\nenum F { C } __attribute__((mode(DC)));\n"
+        "_Static_assert(sizeof(enum F) == 16 && _Alignof(enum F) == 8, \"dc\");\nenum __attribute__((mode(SC), aligned(2))) J { J1 };\n"
+        "_Static_assert(sizeof(enum J) == 8 && _Alignof(enum J) == 2, \"aligned\");\nenum K { K1 } __attribute__((aligned(16), mode(SC)));\n"
+        "_Static_assert(sizeof(enum K) == 8, \"late aligned\");\nstruct L { char c; enum E m; };\n_Static_assert(sizeof(struct L) == 12, \"member\");\n"
+        "int use(void) { int unused; return C + J1 + K1 + B; }\n",
         // Conversions into such an enum: a floating value's silent (no -Wliteral-conversion on an enumeration target), an
         // integer's -Wconstant-conversion at its integer's width, as clang's; no other error, so the common warnings run.
         "enum __attribute__((mode(SF))) E { A };\nenum E e = 2.5;\nenum E g = 5000000000;\nenum E h = 1e20;\n"
