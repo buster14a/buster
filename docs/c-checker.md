@@ -3806,16 +3806,13 @@ constraints still run at translation-unit end. `test-checker`
 name silences and the siblings it doesn't with clang, by both paths, with
 `-fsyntax-only` and `-c`. What remains conservative: a statement expression
 that holds the name is cut whole, where clang still checks an operator on its
-value (`({ undeclared; p; }) + 1.5`); a unit with an error publishes no
-runtime (non-constant) shift warning, where clang, which then skips their
-reachability analysis, publishes them all (`x << 40`); a missing name that
-the declaration walk reports (an enumerator's or an array bound's) is a
-declarator failure, which keeps the whole unit's conservative prefix; and a
-unit with any report other than a missing name (a control-flow error such as
-a `break` outside a loop, a declaration conflict) keeps the previous
-whole-unit prefix, which starts at the unit's first report of any kind, even
-after a missing name, since these per-construct cuts are made only when the
-unit's only reports are missing operand names.
+value (`({ undeclared; p; }) + 1.5`); and a missing name that the
+declaration walk reports (an enumerator's or an array bound's) is a
+declarator failure. A rejected unit's later warnings, its runtime shifts'
+(`x << 40`) among them, and those of a unit with other reports (a `break`
+outside a loop, a declaration conflict), come from the reparsed view of
+"Semantic error recovery" below, whose gaps its "later phases are left"
+lists.
 Type-query/declarator failures, unsupported pragmas, resource failures and
 unfinished resolver states retain the conservative prefix. Repaired/deferred
 views with skipped bodies do not enable this new binding recovery. A successful
@@ -4209,9 +4206,10 @@ it). A function holding an error keeps its unused parameters, as clang's
 `ActOnFinishFunctionBody` gives them whatever the body's errors, except one
 that what the reading left out of its body names, which clang's reading of that
 part takes for a use (an erroneous expression's operands are still referenced);
-a member's name of the same spelling is no use. A local of the same name
-declared in the kept part, which the left-out part's use names instead, still
-silences the parameter's warning. Where that reading is valid, its program
+a member's, a tag's or a label's name of the same spelling is no use, nor is
+a declarator's name or a use inside the scope of a declaration of that name: a
+block's, a `for` clause's, a statement expression's, or a prototype's parameter
+list's (`check_driver_declared_scope`, `check_driver_prototype_scope`). Where that reading is valid, its program
 gives the other bodies' `-Wreturn-type` and common warnings, the bodies after
 the unit's first error flushed as above. Where a reader's error left the first
 reading without some of its warnings, the second's are given, without the
@@ -4455,14 +4453,11 @@ own nodes take them.
 
 The later phases are left:
 
-- **Invalid declarations.** Not covered by phase 2:
-  - C23's redefinition of an enum, compatible or not (above).
-
-  These still stop the reader. A non-constant initializer's error is at its
-  first token, where clang's is at the operand that isn't constant
-  (`k + 1`'s `+`), and `sizeof` of an incomplete type reads "incomplete type
-  is not permitted here" at the `sizeof`, where clang's names the type at its
-  operand; both on main too.
+- **Invalid declarations.** Not covered by phase 2: C23's redefinition of an
+  enum (above) reads "invalid or unsupported declaration", where clang
+  accepts a compatible one and calls an incompatible one's type "has
+  incompatible definitions", with its enumerators' notes; the unit's later
+  warnings are kept.
 - **Errors no view part leaves out.** A body's error in a part that holds a
   label, a `case`, a `goto` or a tag's definition, or in a typedef's
   declaration, still leaves its body out, and its warnings with it. A reader's
@@ -4482,9 +4477,7 @@ The later phases are left:
   initializer (`const int d = 1 / 0;`'s division). A file-scope use elsewhere,
   an error in a function definition outside its body, or an error outside
   every body other than an initializer's or a file-scope declaration's still
-  leaves the unit without its common warnings. A function's unused parameter that its
-  left-out part names through a local of the same name gets no
-  `-Wunused-parameter`, where clang gives one.
+  leaves the unit without its common warnings.
 - **Rounds past the cap.** A unit needing more than four readings' rounds
   (each body's error ending the next reading's walk) gets its first errors
   alone.

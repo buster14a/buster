@@ -4978,6 +4978,67 @@ typedef enum CheckDriverRound
     CHECK_DRIVER_ROUND_FAILED,
 } CheckDriverRound;
 
+// The scope of the block-scope declaration whose declarator `token` names, else BUSTER_CHECK_NONE: the `}` of the block
+// or body it is in, or its for statement's `)` for a clause's. A declarator's name is the first ordinary identifier of
+// its segment of the declaration's list (check_driver_edit_uses'), so a prototype's parameters and a record's members
+// declare none here.
+static uint32_t check_driver_declared_scope(const Parser* parser, uint32_t token)
+{
+    const uint32_t count = parser->tokens.count;
+    uint32_t terminator = token < count && parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER && parser->tree.roles[token] == PARSE_ROLE_OPERAND ? token :
+                                                                                                                                           BUSTER_CHECK_NONE;
+    for (uint32_t steps = 0; terminator < count && parser->tree.roles[terminator] != PARSE_ROLE_TERMINATOR && steps < count; steps += 1)
+    {
+        terminator = parser->tree.parents[terminator];
+    }
+    // The block it is in, past its labels.
+    uint32_t scope = terminator < count ? parser->tree.parents[terminator] : BUSTER_CHECK_NONE;
+    for (uint32_t steps = 0; scope < count && (parser->tree.roles[scope] == PARSE_ROLE_LABEL || parser->tree.roles[scope] == PARSE_ROLE_CLOSE_CASE) &&
+         steps < count; steps += 1)
+    {
+        scope = parser->tree.parents[scope];
+    }
+    const uint8_t scope_role = scope < count ? parser->tree.roles[scope] : PARSE_ROLE_COUNT;
+    const bool block = scope_role == PARSE_ROLE_CLOSE_BLOCK || scope_role == PARSE_ROLE_CLOSE_BODY ||
+                       (scope_role == PARSE_ROLE_CLOSE_FOR && terminator < scope);
+    const uint32_t low = block ? check_driver_subtree_start(parser, 0, terminator) : terminator;
+    uint32_t head = BUSTER_CHECK_NONE;
+    for (uint32_t at = low; block && head == BUSTER_CHECK_NONE && at < terminator; at += 1)
+    {
+        head = parser->tree.parents[at] == terminator ? at : BUSTER_CHECK_NONE;
+    }
+    const bool declares = head != BUSTER_CHECK_NONE && check_driver_specifier_role(parser->tree.roles[head]);
+    const uint32_t declarators = declares ? check_driver_declarators(parser, head, terminator) : BUSTER_CHECK_NONE;
+    const uint32_t first = declarators != BUSTER_CHECK_NONE ? check_driver_subtree_start(parser, low, declarators) : terminator;
+    // The first ordinary identifier of the segment that holds the token.
+    uint32_t name = BUSTER_CHECK_NONE;
+    for (uint32_t at = first; declarators != BUSTER_CHECK_NONE && at <= token; at += 1)
+    {
+        const bool ordinary = parser->tokens.kinds[at] == PARSE_KIND_IDENTIFIER && parser->tree.roles[at] == PARSE_ROLE_OPERAND;
+        name = check_driver_list_comma(parser, at, declarators) ? BUSTER_CHECK_NONE : name == BUSTER_CHECK_NONE && ordinary ? at : name;
+    }
+    return name == token ? scope : BUSTER_CHECK_NONE;
+}
+
+// The parameter list whose prototype's parameter `token` names (`int (*)(int p)`), its closer, else BUSTER_CHECK_NONE: an
+// identifier after its specifiers, its parent, in a parameter list (a call's, where a type name reads one so), which
+// declares it in the list's own scope.
+static uint32_t check_driver_prototype_scope(const Parser* parser, uint32_t token)
+{
+    const uint32_t count = parser->tokens.count;
+    const uint32_t parent = token < count ? parser->tree.parents[token] : BUSTER_CHECK_NONE;
+    const bool named = parent < token && check_driver_specifier_role(parser->tree.roles[parent]) && parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER;
+    uint32_t at = named ? parent : BUSTER_CHECK_NONE;
+    uint32_t list = BUSTER_CHECK_NONE;
+    for (uint32_t steps = 0; list == BUSTER_CHECK_NONE && at < count && parser->tree.roles[at] != PARSE_ROLE_TERMINATOR &&
+         parser->tree.roles[at] != PARSE_ROLE_CLOSE_BLOCK && parser->tree.roles[at] != PARSE_ROLE_CLOSE_BODY && steps < count; steps += 1)
+    {
+        list = parser->tree.roles[at] == PARSE_ROLE_CLOSE_CALL || parser->tree.roles[at] == PARSE_ROLE_CLOSE_FUNCTION ? at : BUSTER_CHECK_NONE;
+        at = parser->tree.parents[at];
+    }
+    return list;
+}
+
 // Whether an error's token is among the unit's known ones.
 static bool check_driver_rejected_known(const uint32_t* errors, uint32_t error_count, uint32_t token)
 {
@@ -5230,14 +5291,41 @@ static CheckDriverRound check_driver_rejected_read(const Parser* unit, const Par
                 }
                 const bool holds = first_body < body_count && bodies[ranges[first_body].begin] != 0;
                 const uint32_t name = unit->tokens.names[at];
+                const uint32_t begin = holds ? ranges[first_body].begin : 0;
                 const uint32_t end = holds ? ranges[first_body].end : 0;
-                for (uint32_t t = holds ? ranges[first_body].begin : 0; !errored && t < end; t += 1)
+                // The scopes of the body's declarations of the name so far, which a use inside one reads instead (#1447):
+                // a local's declarator and its uses aren't the parameter's.
+                const uint64_t scopes_mark = scratch->length;
+                uint32_t* scopes = holds ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)(end - begin) + 1) : NULL;
+                uint32_t scope_count = 0;
+                for (uint32_t t = begin; scopes != NULL && !errored && t < end; t += 1)
+                {
+                    const uint8_t before = unit->tokens.kinds[t - 1];
+                    const uint32_t parent = unit->tree.parents[t];
+                    const bool ordinary = unit->tokens.kinds[t] == PARSE_KIND_IDENTIFIER && unit->tokens.names[t] == name && before != PARSE_KIND_PERIOD &&
+                                          before != PARSE_KIND_ARROW && before != PARSE_KIND_GOTO && unit->tree.roles[t] != PARSE_ROLE_TAG &&
+                                          unit->tree.roles[t] != PARSE_ROLE_MEMBER && !(parent < count && unit->tree.roles[parent] == PARSE_ROLE_LABEL);
+                    const uint32_t declared = ordinary ? check_driver_declared_scope(unit, t) : BUSTER_CHECK_NONE;
+                    const uint32_t scope = ordinary && declared == BUSTER_CHECK_NONE ? check_driver_prototype_scope(unit, t) : declared;
+                    if (scope != BUSTER_CHECK_NONE)
+                    {
+                        scopes[scope_count++] = scope;
+                    }
+                    bool shadowed = false;
+                    for (uint32_t s = 0; ordinary && scope == BUSTER_CHECK_NONE && !shadowed && s < scope_count; s += 1)
+                    {
+                        shadowed = check_driver_descends(unit, t, scopes[s]);
+                    }
+                    const bool left = left_bodies[t] != 0 || (left_parts != NULL && left_parts[t] != 0);
+                    errored = left && ordinary && scope == BUSTER_CHECK_NONE && !shadowed;
+                }
+                // (Without room for the scopes, any use of the name is the parameter's, as before.)
+                for (uint32_t t = scopes == NULL ? begin : end; !errored && t < end; t += 1)
                 {
                     const bool left = left_bodies[t] != 0 || (left_parts != NULL && left_parts[t] != 0);
-                    const uint8_t before = unit->tokens.kinds[t - 1];
-                    errored = left && unit->tokens.kinds[t] == PARSE_KIND_IDENTIFIER && unit->tokens.names[t] == name &&
-                              before != PARSE_KIND_PERIOD && before != PARSE_KIND_ARROW;
+                    errored = left && unit->tokens.kinds[t] == PARSE_KIND_IDENTIFIER && unit->tokens.names[t] == name;
                 }
+                arena_pop_to(scratch, scopes_mark);
             }
             // (Past `stop` the first reading published none of its events.)
             if (!errored && (!known_event || events->events[i].token >= stop))
