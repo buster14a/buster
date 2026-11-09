@@ -676,6 +676,16 @@ admit comma expressions or computed floating casts. Declaration-time warnings
 are retained by token and merged with graph warnings before rendering. Warning
 identity and default severity remain separate: an enum's GNU folding extension
 is normally quiet, while the corresponding folded file-scope array bound warns.
+As clang's do, a declarator's array bound that is no ICE but folds, wherever its
+array can't be variable (file scope, a member, a typedef at file scope, a block's
+`static` or `extern` object), warns "variable length array folded to constant
+array as an extension" once at the declarator's name, whatever folded it; a
+bit-field width, an enumerator's value, a static assertion, a case label or a
+designator folds quietly, and under `-Wgnu-folding-constant` with `-Werror` or
+`-pedantic` reads "expression is not an integer constant expression; folding it
+to a constant is a GNU extension" at the expression's first token
+(`c_check_vla_fold_driver_test.c`). A block's automatic array keeps such a bound
+variable.
 Immutable source-position diagnostic pragmas apply push/pop and exact warning
 group policy to these witnesses. Promoted warnings participate in first-error
 ordering and prevent object publication; `-w` suppresses them as Clang does.
