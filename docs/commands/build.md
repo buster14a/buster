@@ -174,8 +174,11 @@ editors and static analyzers read (Release after a plain `./build.sh`). Ninja
 keeps that filtered database in `CONFIG/compile_commands.json`, rebuilding it
 when CMake regenerates the multi-config database, its filter changes, or the
 cached file is missing. Unchanged builds and source edits reuse it. Publication
-copies it only after the build succeeds, so a failed build leaves the published database
-intact even when its cached replacement was already generated.
+compares it with the published database under the publication lock and stages a
+copy only when the contents differ or the published file is missing. Unchanged
+builds and source edits therefore write no temporary database. A needed copy is
+completed before replacing the published compiler, so a failed build or staging
+copy leaves both published files intact even when a new cached database exists.
 
 ## Targets and outputs
 
@@ -483,3 +486,11 @@ changed compile arguments, a missing cached database, an edited filter and
 export disabled. It builds only the fixture. The full harness also checks
 that missing cached or published databases are restored without recompiling
 or relinking Buster, and that configuration switches publish the right one.
+
+`build-regression --driver-only` checks the build driver's actual version,
+description and publication helpers in a disposable directory, without building the compiler.
+It checks version thresholds, publication without a database copy when the
+contents match, changed and missing databases, copy fallback, and staging
+failures that must preserve both published files. The full harness runs these
+checks too. Keep these behavioral checks when changing the wrapper's fixed
+overhead; no-op timing thresholds would be sensitive to runner load.
