@@ -1197,6 +1197,8 @@ static bool ir_typed_aggregate_call(const Tier0Function* input, uint32_t call, b
     for (uint32_t a = 0; (input->argument_sizes != 0 || ignored) && a < input->call_argument_counts[call]; a += 1)
     {
         const uint32_t argument = input->call_first[call] + a;
+        // Without locations, a stand-in in registers, which counts as two general ones (registers {0, 0}, rax) and is never
+        // on the stack, so it never asks for records.
         const AbiLocation location = located ? input->argument_locations[argument] : (AbiLocation){ .kind = BUSTER_ABI_LOCATION_REGISTERS };
         const uint8_t class = input->argument_classes[argument];
         const bool general_class = class >= BUSTER_TYPED_CLASS_I8 && class <= BUSTER_TYPED_CLASS_U64;
