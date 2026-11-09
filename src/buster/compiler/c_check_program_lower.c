@@ -9817,15 +9817,13 @@ static void check_lower_limb_bits_popcount(CheckLowerWriter* writer, const Check
 }
 
 // An alignment builtin with a _BitInt past 128 bits (#1447), as clang's code computes it (cbuiltin_misc_align's rule):
-// for such a source, limb by limb, its bits zero-extended from its width, the alignment's zero-extended or truncated to
-// it, and the mask M the alignment less 1 in that width (all ones for one that truncates to 0) by a borrow chain; align_up
-// is (x + M) & ~M by a carry chain, align_down x & ~M, each a frame object of the source's type whose address it leaves,
-// and is_aligned whether (x & M)'s limbs are all zero. An alignment past 128 bits is the checker's refusal (its constant
-// can't be checked yet).
-static bool check_lower_align_limbs(CheckLowerWriter* writer, const CBuiltinMiscLowerCall* call)
+// for such a source, limb by limb, its bits zero-extended from its width, the alignment's (of at most 128 bits) zero-
+// extended to it, and the mask M the alignment less 1 by a borrow chain; align_up is (x + M) & ~M by a carry chain,
+// align_down x & ~M, each a frame object of the source's type whose address it leaves, and is_aligned whether (x & M)'s
+// limbs are all zero. An alignment past 128 bits is the checker's refusal (its constant can't be checked yet).
+static void check_lower_align_limbs(CheckLowerWriter* writer, const CBuiltinMiscLowerCall* call)
 {
     const CheckLowerLimbs x = check_lower_limb_described(call->argument_types[0]);
-    const bool done = true;
     if (x.width <= 128)
     {
         // An alignment past 128 bits of a narrower source, which the checker refuses (its constant can't be checked yet).
@@ -9930,7 +9928,6 @@ static bool check_lower_align_limbs(CheckLowerWriter* writer, const CBuiltinMisc
             check_lower_emit(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, object);
         }
     }
-    return done;
 }
 
 // A bit builtin whose first argument is a _BitInt past 128 bits (#1447), limb by limb on U64 temporaries, as clang's code
@@ -9950,7 +9947,7 @@ static bool check_lower_bits_limbs(CheckLowerWriter* writer, CBuiltinMiscLowerCa
     bool done = true;
     if (cbuiltin_align(id))
     {
-        done = check_lower_align_limbs(writer, call);
+        check_lower_align_limbs(writer, call);
     }
     else if (x.width <= 128)
     {
