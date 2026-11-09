@@ -96,8 +96,8 @@ unused-warning fixtures also check exact scope-completion tokens.
   and two-lane deferred paths, and `-c`'s refusal of each: `docs/c-checker.md`'s
   "Semantic error recovery", #1447; `--type-sugar-only` runs
   `c_check_type_sugar_driver_test.c` alone, the typedef sugar diagnostics keep
-  through typedef chains, members and qualified arrays, `docs/c-checker.md`'s
-  "Type sugar", #1447). Its library-builtin comparisons are pinned to Clang
+  through typedef chains, members and qualified arrays, and const assignment's
+  notes, `docs/c-checker.md`'s "Type sugar" and "Const assignment", #1447). Its library-builtin comparisons are pinned to Clang
   23.1.4's official build, CI's reference: it compares `clang --version` with
   it, prints `expected clang 23.1.4, found …` when another build is found, and
   skips only the plain names that build's vendor is known to classify

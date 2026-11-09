@@ -8553,13 +8553,28 @@ conditional operator's two function operands; this gives one for each.
   isn't constant).
   `-Wreturn-type`'s walk takes the same truth, so `if (n || 1) return 1;` ends
   a function without the warning.
-- **A const variable's assignment.** "cannot assign to variable 'x' with
-  const-qualified type 'const int'" with clang's "variable 'x' declared const
-  here" note at its name, as clang's `DiagnoseConstAssignment` walks to it:
-  through an array's subscripts (named with its declared type,
-  `'const int[2]'`), a record's `.` members that aren't const themselves, and
-  an arrow to the pointer variable (`p->a` of a `const struct s *p` names
-  `p`). A pointer's target stays "read-only variable is not assignable".
+- **Const assignment** (#1447). clang's `DiagnoseConstAssignment`
+  (`check_semantic_const_assignment`) walks an assignment's lvalue through
+  members, subscripts and vector elements to a variable or a direct call. It
+  names the first const level it meets and adds a note for each const level,
+  outermost first:
+  - "cannot assign to non-static data member 'a' with const-qualified type
+    'const int'", noted at the member's declarator, which is found in its
+    record's body;
+  - "cannot assign to variable 'x' with const-qualified type 'const int'",
+    noted at the variable's name;
+  - "cannot assign to return value because function 'f' returns a const
+    value", noted at the return type's first type specifier.
+
+  A level reached through `->` is const by its pointer's target. A record with
+  a const member somewhere in it (`DiagnoseRecursiveConstFields`,
+  `check_semantic_const_fields`) names that member's first instance,
+  breadth-first through its members' records, and adds a note for each one,
+  with "nested" past the record's own members. The lvalue is named as a
+  member, a variable, or, parenthesized or otherwise, "lvalue". Any other
+  lvalue gets "read-only variable is not assignable". A report carries up to
+  `BUSTER_CHECK_SEMANTIC_NOTES` (32) notes, and the search visits at most 64
+  records.
 - **Arithmetic on a pointer to an incomplete type**: clang's "arithmetic on a
   pointer to an incomplete type 'struct s'" (a subscript's "subscript of
   pointer to incomplete type", at its `[`), of the pointee as written, with its
@@ -8579,8 +8594,6 @@ conditional operator's two function operands; this gives one for each.
   qualified typedef (`'CI[2]' (aka 'const int[2]')`, `type_print`).
   `c_check_type_sugar_driver_test.c` compares these whole-output with clang.
 - **Differences left.**
-  - An assignment to a member that is const itself is "read-only variable is
-    not assignable", where clang names the member with its note.
   - A qualifier written again over a qualified typedef's array
     (`const CI twice[1]`) is dropped: clang prints
     `'const CI[1]' (aka 'const int[1]')`, this `'CI[1]'`.

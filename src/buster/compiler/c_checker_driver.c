@@ -3261,7 +3261,7 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                     // published where the report's own token puts it (#1066).
                     char x86_text[BUSTER_CHECK_DIAGNOSTIC_X86_TEXT];
                     uint32_t x86_location = BUSTER_CHECK_NONE;
-                    PPOutputDiagnosticNote x86_note = { 0 };
+                    PPOutputDiagnosticNote x86_note[BUSTER_CHECK_SEMANTIC_NOTES] = { 0 };
                     const char* x86_message = phase == 1 ? check_diagnostic_x86_hard(input, stream, stream->reports + index, x86_text, sizeof(x86_text), &x86_location) :
                                                            NULL;
                     if (x86_message == NULL && phase == 1)
@@ -3282,7 +3282,7 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                     }
                     if (x86_message == NULL && phase == 1)
                     {
-                        x86_message = check_semantic_expression(parser, pp, input, stream, types, stream->reports + index, &spell, &x86_location, &x86_note, scratch);
+                        x86_message = check_semantic_expression(parser, pp, input, stream, types, stream->reports + index, &spell, &x86_location, x86_note, scratch);
                     }
                     if (phase == 0 && input->reports[index].message == CHECK_INPUT_FP_EVAL_USE)
                     {
@@ -4276,8 +4276,8 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                         }
                         else if (x86_message != NULL && x86_location < count)
                         {
-                            pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, parser->tokens.sources[x86_location], publication, &x86_note,
-                                                        x86_note.message != NULL ? 1u : 0u, "%s", x86_message);
+                            pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, parser->tokens.sources[x86_location], publication, x86_note,
+                                                        check_semantic_note_count(x86_note), "%s", x86_message);
                         }
                         else if (phase == 0 && input->reports[index].note_kind == CHECK_INPUT_NOTE_ATTRIBUTE_HERE &&
                                  input->reports[index].note_token < count)
