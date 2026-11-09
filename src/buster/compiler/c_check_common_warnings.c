@@ -8211,8 +8211,8 @@ static void check_common_flush(const CheckGraph* graph, const uint32_t* parents,
 // them (the warnings that read a context keep a bound's, constant-evaluated to clang). The reader's list of statement
 // expressions finds them, and each one left out clears its own nodes once. Scalar: it runs only in a unit with statement
 // expressions, with the uninitialized analysis enabled, and clears only the nodes of those in an unevaluated operand,
-// rare and few, where a store a node is what a vector store of 64 would save; its loop over the statement expressions
-// costs a load and a test each.
+// rare and few, one store a node, which a vector store would save little of; its loop over the statement expressions
+// costs a load and a test each. It isn't measured on the 9700X: no unit of the timed corpus reaches the clearing.
 static void check_common_region_evaluation(const CheckInput* input, const Parser* parser, uint8_t* evaluated)
 {
     const CheckGraph* graph = &input->graph;
