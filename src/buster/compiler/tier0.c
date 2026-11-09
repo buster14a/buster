@@ -414,8 +414,9 @@ struct Tier0Operation
 // statement's operand block, a frame object of the function's (`block`, a local): a record's base of
 // BUSTER_TIER0_ASM_BLOCK addresses it, its displacement a slot's offset in it. They write the registers of `touched`
 // (BUSTER_TIER0_XMM's layout), the flags and memory, nothing that holds the frame (rsp, rbp, r15), no opmask register
-// and no x87 register past the template's own use of its stack, which it leaves empty; they have no branch, no reference
-// and no effect on the stack or on control flow (c_check_program_asm.c's check_asm_inline_code). Tier 0 takes the call
+// and no x87 register past the template's own use of its stack, which it leaves empty; they have no reference and no
+// effect on the stack, and leave control flow only by their own branches to their own records, or to their end
+// (c_check_program_asm.c's check_asm_inline_code). Tier 0 takes the call
 // as any other, its clobbers with `touched`'s: the values live across it saved and restored (every depth below it in a
 // register, where `touched` has a callee-saved one), no home in a register it touches, and a callee-saved one it touches
 // saved by the prologue.
@@ -431,6 +432,12 @@ struct Tier0AsmBody
     uint32_t count;
     uint32_t block;
     uint32_t touched;
+    // The template's local branches (#1839): `branch_count` of its records, ascending, each a rel8 form that branch sizing
+    // sizes, and each one's target, a record of the body or its count (the body's end), as Tier0Code's branch columns
+    // have them but relative to the body's first record.
+    const uint32_t* branches;
+    const uint32_t* targets;
+    uint32_t branch_count;
 };
 
 // The most a function may have of each (the columns' indices are 32-bit), and of its objects' bytes, each object's
@@ -671,7 +678,8 @@ struct Tier0Function
     // saved, so that their System V locations take them as ever (tier0_emit_interrupt). The error code's frame is 8
     // bytes out of a call's alignment, which its reservation makes up; its epilogue steps over the error code. It ends
     // with iretq. It keeps no temporary below rsp, where a nested interrupt's frame would land: its red zone's
-    // temporaries are its frame's (Tier0Frame.temporaries). Its result is void, and it takes no variadic arguments.
+    // temporaries are its frame's (Tier0Frame.temporaries). Its result is void. A variadic one's list (#1447) starts at
+    // the interrupted code's registers, which its prologue saves before its entry gives rdi and rsi its parameters.
     uint8_t interrupt;
     // Whether the prologue realigns the stack to 16 bytes at least (#1447, x86's force_align_arg_pointer, LLVM's
     // stackrealign), as a frame whose objects need more does (tier0_frame_alignment): its caller, an interrupt handler or
@@ -1018,12 +1026,15 @@ static bool tier0_preserve_valid(const Tier0Function* function)
     const bool widths = (vectors == 0 && bytes == 0) || (vectors != 0 && (vectors >> 16) == 0 && (bytes == 16 || bytes == 32 || bytes == 64)) ||
                         ((vectors >> 16) != 0 && bytes == 64);
     // An interrupt service routine (Tier0Function.interrupt) keeps registers, returns nothing, and takes its frame's
-    // address, and the error code where it has one, at their System V locations, in rdi and rsi, without variadic ones.
+    // address, and the error code where it has one, at their System V locations, in rdi and rsi; a variadic one's list
+    // takes no register for them (#1447).
     const uint32_t interrupt = function->interrupt;
     const AbiLocation* parameters = function->parameters;
+    const AbiCall* incoming = function->incoming_variadic;
     const bool handler = interrupt == 0 ||
                          (interrupt <= BUSTER_TIER0_INTERRUPT_ERROR_CODE && preserving && function->parameter_count == interrupt && parameters != 0 &&
-                          function->result.kind == BUSTER_ABI_RESULT_IGNORE && function->incoming_variadic == 0 &&
+                          function->result.kind == BUSTER_ABI_RESULT_IGNORE &&
+                          (incoming == 0 || (incoming->integer_registers == 0 && incoming->vector_registers == 0)) &&
                           parameters[0].kind == BUSTER_ABI_LOCATION_REGISTERS && parameters[0].registers[0] == X86_REGISTER_RDI &&
                           (interrupt == BUSTER_TIER0_INTERRUPT_HANDLER ||
                            (parameters[1].kind == BUSTER_ABI_LOCATION_REGISTERS && parameters[1].registers[0] == X86_REGISTER_RSI)));
@@ -6425,6 +6436,11 @@ static __attribute__((noinline, cold)) bool tier0_asm_bodies_check(const Tier0Fu
         valid = (body->block == BUSTER_TIER0_ASM_NO_BLOCK || (body->block < function->local_count && tier0_is_object(function, body->block))) &&
                 (body->count == 0 || body->records != 0) &&
                 (body->touched & (1u << X86_REGISTER_RSP | 1u << X86_REGISTER_RBP | 1u << X86_REGISTER_R15)) == 0;
+        valid = valid && body->branch_count <= body->count && (body->branch_count == 0 || (body->branches != 0 && body->targets != 0));
+        for (uint32_t b = 0; valid && b < body->branch_count; b += 1)
+        {
+            valid = body->branches[b] < body->count && (b == 0 || body->branches[b - 1] < body->branches[b]) && body->targets[b] <= body->count;
+        }
         for (uint32_t r = 0; valid && r < body->count; r += 1)
         {
             const X86Instruction* record = &body->records[r];
@@ -6473,6 +6489,8 @@ static void tier0_emit_call_record(const Tier0Function* function, const Tier0Hom
     const Tier0AsmBody* body = tier0_call_body(function, call);
     if (body != 0)
     {
+        const uint32_t first = writer->count;
+        uint32_t branch = 0;
         for (uint32_t r = 0; r < body->count; r += 1)
         {
             X86Instruction record = body->records[r];
@@ -6481,6 +6499,17 @@ static void tier0_emit_call_record(const Tier0Function* function, const Tier0Hom
                 const Tier0Home block = homes[body->block];
                 record.rm = block.reg;
                 record.displacement += block.displacement;
+            }
+            if (branch < body->branch_count && body->branches[branch] == r)
+            {
+                // The template's own branch, which branch sizing sizes as the function's: its target in the function's records.
+                if (writer->records != 0)
+                {
+                    writer->branches[writer->branch_count] = writer->count;
+                    writer->targets[writer->branch_count] = first + body->targets[branch];
+                }
+                writer->branch_count += 1;
+                branch += 1;
             }
             tier0_put(writer, record);
         }
@@ -6504,6 +6533,13 @@ static void tier0_emit_call_record(const Tier0Function* function, const Tier0Hom
         writer->reference_count += 1;
         tier0_put(writer, tier0_instruction(X86_FORM_CALL_REL32 | BUSTER_X86_FORM_FIXUP, 0, 0, 0, 0, 0));
     }
+}
+
+// How many branches tier0_emit_call_record writes for call row `call`: an asm body's own.
+static uint32_t tier0_count_call_branches(const Tier0Function* function, uint32_t call)
+{
+    const Tier0AsmBody* body = tier0_call_body(function, call);
+    return body != 0 ? body->branch_count : 0;
 }
 
 // How many records tier0_emit_call_record writes for call row `call`, and its references into `references`.
@@ -9349,6 +9385,8 @@ static inline __attribute__((always_inline)) uint32_t tier0_count_deferred(const
         const uint32_t value = tier0_integer_depths[entries->depths[i] - 2];
         count = value == X86_REGISTER_RCX ? 3 : 4;
     }
+    // An asm body's own branches (#1839).
+    *branches += kind == BUSTER_TYPED_CALL ? tier0_count_call_branches(function, (uint32_t)function->values[i]) : 0;
     return count;
 }
 
@@ -9537,14 +9575,12 @@ static void tier0_emit_prologue(const Tier0Function* function, const Tier0Frame*
     {
         tier0_emit_realignment(frame, writer);
     }
-    if (frame->interrupt != 0)
-    {
-        tier0_emit_interrupt(frame, writer);
-    }
     if (function->incoming_variadic != 0)
     {
         // Snapshot before any parameter home move can overwrite an unnamed argument. Full unaligned baseline
-        // XMM stores preserve all 128 bits without reading AL, adding branches or touching FP status/control.
+        // XMM stores preserve all 128 bits without reading AL, adding branches or touching FP status/control. A variadic
+        // interrupt service routine's are the interrupted code's registers, before its entry gives rdi and rsi its
+        // parameters (#1447), as LLVM's x86_intrcc saves them.
         for (uint32_t general = 0; general < BUSTER_ABI_INTEGER_ARGUMENTS; general += 1)
         {
             tier0_put(writer, tier0_instruction(X86_FORM_MOV_RM64_R64, abi_integer_arguments[general], X86_REGISTER_RSP, BUSTER_X86_MEMORY_BASE,
@@ -9555,6 +9591,10 @@ static void tier0_emit_prologue(const Tier0Function* function, const Tier0Frame*
             tier0_put(writer, tier0_instruction(X86_FORM_MOVUPS_XM_X, vector, X86_REGISTER_RSP, BUSTER_X86_MEMORY_BASE,
                 (int32_t)(frame->variadic_area + BUSTER_ABI_SAVE_AREA_VECTOR_OFFSET + vector * BUSTER_ABI_SAVE_AREA_VECTOR_SLOT_BYTES), 0));
         }
+    }
+    if (frame->interrupt != 0)
+    {
+        tier0_emit_interrupt(frame, writer);
     }
     // Each parameter into its home: a register's moved or stored, and a register home of one on the stack loaded from its
     // incoming slot. No home is an arrival register (tier0_assign_homes), so the order doesn't matter. An aggregate's
@@ -10438,6 +10478,7 @@ static uint32_t tier0_count_deep(const Tier0Function* function, const Tier0Entri
         count += !stored && tier0_stack(function->classes[i]) != 0 ? 1 : 0;
         count += 2 * tier0_saved_masks(entries, i);
         counts->references += references;
+        counts->branches += !tail ? tier0_count_call_branches(function, call) : 0;
     }
     else
     {

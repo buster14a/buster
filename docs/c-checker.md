@@ -676,6 +676,39 @@ admit comma expressions or computed floating casts. Declaration-time warnings
 are retained by token and merged with graph warnings before rendering. Warning
 identity and default severity remain separate: an enum's GNU folding extension
 is normally quiet, while the corresponding folded file-scope array bound warns.
+As clang's do, a declarator's array bound that is no ICE but folds, wherever its
+array can't be variable (file scope, a member, a typedef at file scope, a block's
+`static` or `extern` object), warns "variable length array folded to constant
+array as an extension" once at the declarator's name, whatever folded it; a
+bit-field width, an enumerator's value, a static assertion, a case label or a
+designator folds quietly, and under `-Wgnu-folding-constant` with `-Werror` or
+`-pedantic` reads "expression is not an integer constant expression; folding it
+to a constant is a GNU extension" at the expression's first token
+(`c_check_vla_fold_driver_test.c`). A block's automatic array keeps such a bound
+variable, as does a `sizeof`'s type name anywhere.
+A variable-length array or variably modified type where C allows none takes
+clang's error at the declarator's name (`check_input_vla_place`,
+`check_input_vla_declaration`):
+- at file scope, "variable length array declaration not allowed at file
+  scope", or "variably modified type declaration …" where the declared type
+  is no array (`int (*p)[n]`);
+- a block's `extern` object, "… cannot have 'extern' linkage", by the same
+  two kinds;
+- a block's `static` array, "variable length array declaration cannot have
+  'static' storage duration";
+- a member, "fields must have a constant size: 'variable length array in
+  structure' extension will never be supported".
+
+A `sizeof` of a variable type name in a file-scope initializer
+(`int s = 1 + sizeof(int[n]);`) is "initializer element is not a compile-time
+constant", at the start of the initializer's element that holds it.
+
+Differences left: these errors stop the reader, where clang marks the
+declaration invalid and goes on. A file-scope cast to a variably modified
+type, and `_Alignof` of one, are still refused, though clang accepts them.
+A block's variable-length array with a non-empty initializer is still
+"invalid or unsupported declaration" (clang's "variable-sized object may not
+be initialized", at the bound).
 Immutable source-position diagnostic pragmas apply push/pop and exact warning
 group policy to these witnesses. Promoted warnings participate in first-error
 ordering and prevent object publication; `-w` suppresses them as Clang does.
@@ -4008,15 +4041,25 @@ declarations. Otherwise a storage mismatch says "thread-local declaration of
 'X' follows non-thread-local declaration", or its reverse. That diagnostic
 notes the visible prior declaration, with its declaration/definition note;
 object type conflicts still note the latest prior declaration of the entity,
-including one from another block. The checks that reject and recover the
-declaration are unchanged. The semantic-recovery fixtures cover both storage
-directions, extern and static combinations, and subsequent declarations and
-uses under the same Clang comparison matrix.
-The distinct recovery behavior of a TLS-only mismatch is tracked in
-[#1786](https://github.com/buster14a/buster/issues/1786): Clang keeps that
-declaration in its chain, while the reader currently drops it. This diagnostic
-fix does not claim parity for subsequent conflicts of that same entity or a
-second initializer diagnostic on an already-defined object.
+including one from another block. The semantic-recovery fixtures cover both
+storage directions, extern and static combinations, and subsequent
+declarations and uses under the same Clang comparison matrix.
+
+A mismatch of thread-local storage alone keeps its declaration, as clang's
+`MergeVarDecl` links it after the error (#1786): the error is recovered and the
+declaration is merged, bound and linked as a valid one, with its own storage.
+The next declaration is compared with it (`_Thread_local int x; int x; int x;`
+has one error, and a third `float x;` notes the second), and its linked
+declaration's check doesn't compare the storage again, so the error is given
+once. A definition after an earlier one gives the TLS error and then "redefinition
+of 'x'", noted at the first definition, at the same name. A block extern's
+mismatch with another block's declaration is checked against the linked one.
+
+Left as it is ([#1868](https://github.com/buster14a/buster/issues/1868)): a
+redefinition (`int x = 1; int x = 2;`) is still dropped.
+Clang keeps that invalid declaration in its chain too, so a later declaration
+is compared with it, without its type check: `float x;` after it is no error
+in clang, and a later TLS or linkage error notes it.
 
 `check_driver_rejected_warnings` follows clang's `ActOnPopScope`: a scope in
 which an error occurred gives no unused-variable warning, nested scopes'
@@ -7815,8 +7858,15 @@ arguments against the function. The checker now gives these as clang does.
   don't carry (the encoder has the prefixes, which only thread-local storage's
   forms use). A load or store in one of those spaces is refused by name ("a load
   or store in a segment's address space", check_lower_segment_access, where a
-  unit has such a type at all: CheckLowerWriter.segments); taking an address
-  there is compiled. Any other space's code is the default space's, as clang's.
+  unit has such a type at all: CheckLowerWriter.segments), and so are the
+  accesses whose lvalue doesn't carry the space: a vector's element, read or
+  written (its type loses the vector's space), an atomic builtin's object
+  (`__atomic_*`, `__c11_atomic_*`, `__sync_*`, reached through the pointer
+  argument), and an asm statement's register output (stored through its
+  address; "an asm output in a segment's address space ... but a memory one").
+  Before, those compiled without the override. A memory asm operand's address is
+  the template's, without the segment, as clang's is. Taking an address there is
+  compiled. Any other space's code is the default space's, as clang's.
 
   What differs from clang: C23's spellings (`[[clang::address_space(1)]]` and
   the others), which slide from a declaration to its specifiers with clang's
@@ -7996,9 +8046,10 @@ arguments against the function. The checker now gives these as clang does.
   declaration with it, and `check_program_realign(program, b)` says whether
   body `b` realigns its stack (`Tier0Function.realign_stack`,
   `docs/tier0.md`'s realigned frames: 16 bytes' at least).
-  A variadic routine, which clang compiles, is refused by name ("unsupported:
-  variadic interrupt service routines"), as are `__builtin_eh_return`,
-  `__builtin_setjmp` and musttail calls in one, as in any preserving frame.
+  A variadic routine's list starts at the interrupted code's argument
+  registers, as LLVM's `x86_intrcc` has it (#1447, `docs/tier0.md`).
+  `__builtin_eh_return`, `__builtin_setjmp` and musttail calls in one are
+  refused by name, as in any preserving frame.
 
   GCC's and clang's `patchable_function_entry(N[, M[, "section"]])`
   (`CHECK_ATTRIBUTE_PATCHABLE_FUNCTION_ENTRY`, #1447) is clang's
@@ -8362,11 +8413,14 @@ arguments against the function. The checker now gives these as clang does.
       declaration's is clang's "function declared 'A' here was previously
       declared 'B'" (or "without calling convention", where its first
       declaration has none explicit), with its "previous declaration is here"
-      note at the first declaration (#1447, `check_input_report_redeclaration`),
-      but for `no_caller_saved_registers`, whose clang message is "function
-      declared with 'no_caller_saved_registers' attribute was previously
-      declared without the 'no_caller_saved_registers' attribute": that one is
-      "conflicting types for 'f'", without its note;
+      note at the first declaration (#1447, `check_input_report_redeclaration`).
+      A redeclaration that adds `no_caller_saved_registers` in its own
+      attribute is clang's "function declared with 'no_caller_saved_registers'
+      attribute was previously declared without the 'no_caller_saved_registers'
+      attribute" (`'gnu::no_caller_saved_registers'` for a C23 one), before a
+      type conflict, noted at the declaration its lookup found. One whose
+      typedef carries the attribute, which crashes clang 23, keeps "conflicting
+      types for 'f'";
     - a function type spelled with a macro of its convention prints without
       clang's macro name (`'MS void (void) __attribute__((ms_abi))'`), and a
       typedef's attribute without clang's sugar
