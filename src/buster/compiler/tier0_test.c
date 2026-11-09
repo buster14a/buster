@@ -4142,13 +4142,16 @@ static void tier0_test_segments(Tier0TestTally* tally)
         function.count = 3;
         function.segments = true;
         const Tier0Check constant = tier0_validate(&function);
+        const Tier0Check constant_scalar = tier0_validate_scalar(&function);
         values[0] = 64;
         values[1] = BUSTER_TYPED_ACCESS_SEGMENT;
         const Tier0Check three = tier0_validate(&function);
+        const Tier0Check three_scalar = tier0_validate_scalar(&function);
         values[1] = (uint64_t)BUSTER_TYPED_SEGMENT_GS << BUSTER_TYPED_ACCESS_SEGMENT_SHIFT;
         const Tier0Check gs = tier0_validate(&function);
-        tier0_test_expect(tally, constant.error == TIER0_OK && three.error == TIER0_ERROR_INVALID && gs.error == TIER0_OK, "segments",
-                          "tier0_validate: a CONST's top bits %d, the segment 3 %d, GS on a LOAD %d", constant.error, three.error, gs.error);
+        tier0_test_expect(tally, constant.error == TIER0_OK && constant_scalar.error == TIER0_OK && three.error == TIER0_ERROR_INVALID &&
+                                     three_scalar.error == TIER0_ERROR_INVALID && gs.error == TIER0_OK,
+                          "segments", "tier0_validate: a CONST's top bits %d, the segment 3 %d, GS on a LOAD %d", constant.error, three.error, gs.error);
     }
     Tier0TestSegmentCase cases[BUSTER_TIER0_TEST_SEGMENT_CASES];
     const uint32_t count = tier0_test_segment_cases(cases);
@@ -4197,9 +4200,11 @@ static void tier0_test_segments(Tier0TestTally* tally)
         function.values = values;
         function.segments = true;
         const Tier0Check check = tier0_validate(&function);
+        const Tier0Check scalar_check = tier0_validate_scalar(&function);
         const Tier0Code scalar = tier0_compile_scalar(&function, &arena);
         const Tier0Code vector = tier0_compile(&function, &arena);
-        ready = tier0_test_expect(tally, check.error == TIER0_OK && plain.error == TIER0_OK && scalar.error == TIER0_OK && tier0_test_same_code(&scalar, &vector) &&
+        ready = tier0_test_expect(tally, check.error == TIER0_OK && scalar_check.error == TIER0_OK && plain.error == TIER0_OK && scalar.error == TIER0_OK &&
+                                             tier0_test_same_code(&scalar, &vector) &&
                                              x86_validate(scalar.records, scalar.count) == scalar.count && scalar.count == plain.count,
                                   "segments", "case %u (class %u, shape %u): rule \"%s\" at %u, errors %d and %d, or the paths differ", k, c->class, c->shape,
                                   check.rule != 0 ? check.rule : "", check.node, plain.error, scalar.error);

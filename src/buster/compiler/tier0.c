@@ -11748,7 +11748,8 @@ static void tier0_validate_tables(const Tier0Function* function, Tier0Validator*
 // The stream's rules an entry at a time: the twin and oracle of the vector path (tier0_validate_accepts), which gives
 // tier0_validate's verdict and rule wherever the vector path doesn't take a stream. Out of line: it runs for --scalar and
 // for the streams the vector path leaves to it, not for every function the lowering validates.
-static __attribute__((noinline)) Tier0Check tier0_validate_scalar(const Tier0Function* function)
+// tier0_validate_scalar's body, for a function without segment overrides.
+static __attribute__((noinline)) Tier0Check tier0_validate_scalar_entries(const Tier0Function* function)
 {
     Tier0Validator validator;
     memset(&validator, 0, sizeof(validator));
@@ -14877,14 +14878,15 @@ static Tier0Check tier0_validate_entries(const Tier0Function* function)
                        function->argument_count <= BUSTER_TIER0_VALIDATE_SMALL_COUNT;
     if (small || !tier0_validate_accepts(function))
     {
-        check = tier0_validate_scalar(function);
+        check = tier0_validate_scalar_entries(function);
     }
     return check;
 }
 
-// tier0_validate of a function with segment overrides (#1447, Tier0Function.segments), out of line: its overrides'
-// places (tier0_segments_strip), then its stripped copy on the usual paths.
-static __attribute__((noinline)) Tier0Check tier0_validate_segments(const Tier0Function* function)
+// tier0_validate and tier0_validate_scalar (`vector` false) of a function with segment overrides (#1447,
+// Tier0Function.segments), out of line: its overrides (tier0_segments_strip), then its stripped copy on the path's own
+// passes.
+static __attribute__((noinline)) Tier0Check tier0_validate_segments(const Tier0Function* function, bool vector)
 {
     Tier0Check check;
     memset(&check, 0, sizeof(check));
@@ -14905,7 +14907,7 @@ static __attribute__((noinline)) Tier0Check tier0_validate_segments(const Tier0F
         Tier0Function stripped = *function;
         stripped.values = values;
         stripped.segments = false;
-        check = tier0_validate_entries(&stripped);
+        check = vector ? tier0_validate_entries(&stripped) : tier0_validate_scalar_entries(&stripped);
     }
     scratch_end(scratch);
     return check;
@@ -14913,5 +14915,10 @@ static __attribute__((noinline)) Tier0Check tier0_validate_segments(const Tier0F
 
 static Tier0Check tier0_validate(const Tier0Function* function)
 {
-    return __builtin_expect(function->segments, 0) ? tier0_validate_segments(function) : tier0_validate_entries(function);
+    return __builtin_expect(function->segments, 0) ? tier0_validate_segments(function, true) : tier0_validate_entries(function);
+}
+
+static Tier0Check tier0_validate_scalar(const Tier0Function* function)
+{
+    return __builtin_expect(function->segments, 0) ? tier0_validate_segments(function, false) : tier0_validate_scalar_entries(function);
 }
