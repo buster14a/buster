@@ -43,6 +43,7 @@ through `testfixture` (to come).
   ".read FILE"`), which must end "N tests run with 0 errors", and the scripts
   in `--scripts` (`tests/sqlite`: the SQL engine, the bundled extensions, the
   output modes and dot-commands, on-disk databases with `.selftest`), each in
-  an empty directory. Every run's output and exit status must be clang's
-  shell's, byte for byte. The hosted rows and native correctness run it
+  an empty directory, with 120 s (a build 600 s). Every run's output and exit
+  status must be clang's shell's, byte for byte, and clang's shell must have
+  run the script (status 0 or 1, with output). The hosted rows and native correctness run it
   (`correctness.tests`); it takes a few seconds.

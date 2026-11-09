@@ -144,6 +144,8 @@ on every use, published atomically, and replaced when stale or corrupt:
 - **c-testsuite:** a bare mirror holding the pinned commit
   (`tools/ci/fetch-c-testsuite.sh`). The checkout fetches it through Git's pack
   protocol, which checks every object's hash.
+- **SQLite's tree (#146):** a bare mirror holding SQLite 3.53.2's commit, in
+  the same way (`tools/ci/fetch-sqlite.sh`), for `test-sqlite`'s CLI tests.
 
 The pragma oracle is not cached. Its 2.3 s build finishes while the compiler
 build's longest unit (35 s) still runs, so a cached oracle would save no time.

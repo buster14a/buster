@@ -16,7 +16,8 @@
 //   ".testcase"s' count, "N tests run with 0 errors";
 // - each .sql file of --scripts (tests/sqlite: the SQL engine, the bundled extensions, the dot-commands, and on-disk
 //   databases with .selftest), run the same way.
-// Every run's output and exit status by this compiler's builds must be the clang build's, byte for byte. Each build's
+// Every run's output and exit status by this compiler's builds must be the clang build's, byte for byte, and the clang
+// build's run must have run the script (status 0 or 1, and some output). A run has 120 s, a build 600 s. Each build's
 // commands' errors go to DIR/errors.txt, printed on a failure. DIR is a new directory under --directory ($TMPDIR, or
 // /tmp), removed at the end unless --keep or a failure.
 //
@@ -103,9 +104,9 @@ static bool sqlite_test_path(char* path, const char* format, const char* a, cons
 
 // Runs argv (argv[0] looked up in PATH as a shell does) in `directory` (null: this one), its standard input
 // /dev/null, its standard output and errors into `output` (null: appended to `errors`), with `environment` (null: none)
-// set in its environment. Returns its exit status, 128 and the signal's number for one a signal ended, or -1 if it
-// didn't run.
-static int sqlite_test_spawn_with(char* const* argv, const char* directory, const char* output, const char* errors, const char* environment)
+// set in its environment, for at most `seconds`: an alarm, which execve keeps, ends it with SIGALRM then. Returns its
+// exit status, 128 and the signal's number for one a signal ended (142 for the alarm's), or -1 if it didn't run.
+static int sqlite_test_spawn_with(char* const* argv, const char* directory, const char* output, const char* errors, const char* environment, uint32_t seconds)
 {
     const pid_t child = fork();
     if (child == 0)
@@ -114,6 +115,7 @@ static int sqlite_test_spawn_with(char* const* argv, const char* directory, cons
         {
             putenv((char*)environment);
         }
+        alarm(seconds);
         const int null = open("/dev/null", O_RDONLY | O_CLOEXEC);
         const int out = output != NULL ? open(output, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644) : open(errors, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
         if (null != -1 && out != -1 && dup2(null, STDIN_FILENO) != -1 && dup2(out, STDOUT_FILENO) != -1 && dup2(out, STDERR_FILENO) != -1 &&
@@ -137,9 +139,13 @@ static int sqlite_test_spawn_with(char* const* argv, const char* directory, cons
     return result;
 }
 
+// A build's limit, and a script run's (SQLite's CLI tests and tests/sqlite's take about a second each).
+#define BUSTER_SQLITE_TEST_BUILD_SECONDS 600
+#define BUSTER_SQLITE_TEST_RUN_SECONDS 120
+
 static int sqlite_test_spawn(char* const* argv, const char* directory, const char* output, const char* errors)
 {
-    return sqlite_test_spawn_with(argv, directory, output, errors, NULL);
+    return sqlite_test_spawn_with(argv, directory, output, errors, NULL, BUSTER_SQLITE_TEST_BUILD_SECONDS);
 }
 
 // Builds the shell of build `b` into t->shells[b], its errors appended to t->errors. Returns whether it built.
@@ -182,13 +188,26 @@ static int sqlite_test_run(SqliteTest* t, uint32_t b, const char* script, char* 
 {
     char directory[PATH_MAX];
     char number[16];
-    char read[PATH_MAX + 16];
+    // The script's path in double quotes, as the shell's dot-command parser takes an argument with blanks, its
+    // backslashes and quotes escaped (parseDotCmdArgs, resolve_backslashes).
+    char read[2 * PATH_MAX + 16];
+    uint32_t length = (uint32_t)snprintf(read, sizeof(read), ".read \"");
+    for (const char* c = script; *c != 0 && length + 4 < sizeof(read); c += 1)
+    {
+        if (*c == '\\' || *c == '"')
+        {
+            read[length++] = '\\';
+        }
+        read[length++] = *c;
+    }
+    read[length++] = '"';
+    read[length] = 0;
     snprintf(number, sizeof(number), "%u", t->runs);
     t->runs += 1;
     const bool ok = sqlite_test_path(directory, "%s/run-%s", t->directory, number) && sqlite_test_path(output, "%s/run-%s.txt", t->directory, number) &&
-                    snprintf(read, sizeof(read), ".read %s", script) < (int)sizeof(read) && mkdir(directory, 0755) == 0;
+                    strlen(script) < PATH_MAX && mkdir(directory, 0755) == 0;
     char* arguments[] = { t->shells[b], ":memory:", read, NULL };
-    return ok ? sqlite_test_spawn(arguments, directory, output, NULL) : -1;
+    return ok ? sqlite_test_spawn_with(arguments, directory, output, NULL, NULL, BUSTER_SQLITE_TEST_RUN_SECONDS) : -1;
 }
 
 // The line of `text` at which it first differs from `reference`, from 1.
@@ -240,10 +259,14 @@ static bool sqlite_test_check(Arena* arena, SqliteTest* t, const char* script, c
         texts[b] = statuses[b] != -1 ? measure_compile_read(arena, outputs[b]) : NULL;
         ok = ok && texts[b] != NULL;
     }
-    const bool passed = ok && (!counted || (statuses[SQLITE_TEST_CLANG] == 0 && sqlite_test_passed(texts[SQLITE_TEST_CLANG])));
+    // The reference must have run the script: the shell's own statuses (0, or 1 after an error), never the 127 of a shell
+    // that didn't start or a signal's, and some output; a comparison of two failures to start would pass vacuously.
+    const int reference = statuses[SQLITE_TEST_CLANG];
+    const bool ran = ok && (reference == 0 || reference == 1) && texts[SQLITE_TEST_CLANG][0] != 0;
+    const bool passed = ran && (!counted || (reference == 0 && sqlite_test_passed(texts[SQLITE_TEST_CLANG])));
     if (!passed)
     {
-        printf("test-sqlite: %s: clang -O0's shell %s (status %d)\n", name, ok ? "didn't pass its tests" : "didn't run", statuses[SQLITE_TEST_CLANG]);
+        printf("test-sqlite: %s: clang -O0's shell %s (status %d)\n", name, ran ? "didn't pass its tests" : "didn't run it", reference);
     }
     ok = passed;
     for (uint32_t b = SQLITE_TEST_TIER0; passed && b < BUSTER_SQLITE_TEST_BUILDS; b += 1)
@@ -361,7 +384,14 @@ static int run_sqlite_tests(int argc, char** argv)
     }
     const int length = valid ? snprintf(t.directory, sizeof(t.directory), "%s/test-sqlite-XXXXXX", parent) : -1;
     valid = valid && length > 0 && (size_t)length + 64 < sizeof(t.directory);
-    const bool made = valid && mkdtemp(t.directory) != NULL;
+    // The work directory absolute (a relative --directory or TMPDIR among them): each run's shell starts in a directory
+    // of its own, by the path made from it.
+    char absolute[PATH_MAX];
+    const bool made = valid && mkdtemp(t.directory) != NULL && realpath(t.directory, absolute) != NULL && strlen(absolute) + 64 < sizeof(t.directory);
+    if (made)
+    {
+        memcpy(t.directory, absolute, strlen(absolute) + 1);
+    }
     int result = 1;
     if (!valid)
     {
