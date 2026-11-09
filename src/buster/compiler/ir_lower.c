@@ -1786,13 +1786,14 @@ static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType res
             check.instruction = entry;
         }
     }
-    if (check.error == IR_OK && (input->unwind_init || input->returns_twice || tier0_preserving(input) || input->realign_stack))
+    if (check.error == IR_OK && (input->unwind_init || input->returns_twice || tier0_preserving(input) || input->realign_stack || input->segments))
     {
         // __builtin_unwind_init's frame, which saves every callee-saved register (Tier0Function.unwind_init),
         // __builtin_setjmp's, which keeps nothing in one (Tier0Function.returns_twice), a preserving function's, which
         // keeps registers for its caller past them (#147, Tier0Function.preserve_general), and a force_align_arg_pointer
-        // function's, which realigns its stack (#1447, Tier0Function.realign_stack), are Tier 0's: ordinary Tier 1 falls
-        // back to them.
+        // function's, which realigns its stack (#1447, Tier0Function.realign_stack), and a function with segment overrides
+        // (#1447, Tier0Function.segments: loads and stores in __seg_fs or __seg_gs, which the IR doesn't carry yet) are Tier
+        // 0's: ordinary Tier 1 falls back to them.
         check.error = IR_ERROR_UNSUPPORTED;
     }
     if (check.error == IR_OK)

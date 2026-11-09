@@ -188,7 +188,15 @@ of both TLS models (`_Thread_local` in C), and functions' addresses through the
 GOT. The native run gives each symbol a GOT slot and the thread-locals a block
 of their own, which FS points at for the entry's call alone. An `access` check
 before the programs compiles every global kind of every class by each access:
-both paths alike, with the access's references, and validation's rule. After
+both paths alike, with the access's references, and validation's rule. A
+`segments` check (#1447) compiles `LOAD`, `STORE` and `SET` with FS and GS
+overrides (`Tier0Function.segments`) for every integer and floating class, at
+`[p]`, `[p + 8]` and `[p + i * size]`, a seq_cst store, and copies of long
+double, the 128-bit integers and vectors (EVEX and SSE/AVX transports) from and
+to a segment: both paths alike, each record the stripped twin's but for the
+override on the access's memory operand, and validation's rules for the marker.
+A child runs them, `%fs` at the thread's base and `%gs` set by `arch_prctl`, on
+addresses that hold the data only through the segment. After
 the programs, the `x87` check (`tier0_x87_test.c`, #136's item 8) compiles long
 double code by both paths into the same records, encoded by both encoders into
 the same bytes and run natively, called from C through function pointers, so

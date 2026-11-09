@@ -1055,7 +1055,10 @@ static bool interpreter_typed_symbol_address(const InterpreterProgram* program, 
 
 static bool interpreter_typed_function_valid(const Tier0Function* function)
 {
-    bool result = function->count <= BUSTER_TIER0_MAX_ENTRIES && function->local_count <= BUSTER_TIER0_MAX_LOCALS && function->parameter_count <= function->local_count;
+    // A segment override (#1447, Tier0Function.segments) is the generated code's alone: the interpreter has no segment
+    // bases to add.
+    bool result = function->count <= BUSTER_TIER0_MAX_ENTRIES && function->local_count <= BUSTER_TIER0_MAX_LOCALS && function->parameter_count <= function->local_count &&
+                  !function->segments;
     result = result && (function->count == 0 || (function->kinds != 0 && function->classes != 0 && function->values != 0));
     result = result && (function->local_count == 0 || function->local_classes != 0);
     result = result && (function->call_count == 0 || (function->call_targets != 0 && function->call_first != 0 && function->call_argument_counts != 0 && function->call_variadic != 0));
