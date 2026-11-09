@@ -8330,6 +8330,7 @@ static int run_checker_driver_tests(int argc, char** argv)
         if (!lazy && check_test_driver_takes())
         {
             check_test_driver_cleanup_errors(&test, clang, executable, directory);
+            check_test_driver_cleanup_chains(&test, clang, executable, directory);
         }
         if (!lazy && check_test_driver_takes())
         {
