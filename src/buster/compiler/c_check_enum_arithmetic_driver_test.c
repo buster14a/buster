@@ -91,6 +91,32 @@ static const CheckDriverDefaultWarningFixture check_driver_enum_arithmetic_fixtu
         .warnings = 11,
     },
     {
+        // Review on #1809: a comparison's operands are rvalues, and a GNU `?:`'s omitted operand is its promoted condition.
+        .name = "qualified comparisons and GNU omitted conditional operands",
+        .source = "enum E { A, B }; enum F { C, D }; typedef enum E TN; typedef const enum E CNST; typedef enum { X } AN;\n"
+                  "int f(const enum E ce, volatile enum E ve, enum F f2, const double cd, const TN ct, CNST cn, volatile float vf, enum E e, double d, const AN an) {\n"
+                  "    int r = 0;\n"
+                  "    r += ce < f2; r += f2 == ve; r += ce < cd; r += vf > e; r += ct != f2; r += cn <= f2; r += an == f2;\n"
+                  "    r += ce + f2; r += ct | f2; r += cd * ce;\n"
+                  "    r += e ?: f2; r += e ?: 1.5; r += e ?: d; r += cd ?: e; r += d ?: e; r += A ?: C;\n"
+                  "    return r;\n"
+                  "}\n",
+        .warnings = 5,
+    },
+    {
+        .name = "qualified comparisons and GNU omitted conditional operands under -Wenum-conversion",
+        .source = "enum E { A, B }; enum F { C, D }; typedef enum E TN; typedef const enum E CNST; typedef enum { X } AN;\n"
+                  "int f(const enum E ce, volatile enum E ve, enum F f2, const double cd, const TN ct, CNST cn, volatile float vf, enum E e, double d, const AN an) {\n"
+                  "    int r = 0;\n"
+                  "    r += ce < f2; r += f2 == ve; r += ce < cd; r += vf > e; r += ct != f2; r += cn <= f2; r += an == f2;\n"
+                  "    r += ce + f2; r += ct | f2; r += cd * ce;\n"
+                  "    r += e ?: f2; r += e ?: 1.5; r += e ?: d; r += cd ?: e; r += d ?: e; r += A ?: C;\n"
+                  "    return r;\n"
+                  "}\n",
+        .options = { "-Wenum-conversion", "-Wanon-enum-enum-conversion" },
+        .warnings = 12,
+    },
+    {
         .name = "pragmas map the enumeration warnings at their operators",
         .source = "enum E { A, B }; enum F { C, D };\n"
                   "int f(enum E e, enum F g) {\n"

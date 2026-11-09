@@ -3267,9 +3267,25 @@ static __attribute__((noinline)) void check_common_enum_arithmetic(const Parser*
         }
         if (kind < 5 && left < graph->count && right < graph->count && enumish && stream->diagnostics[node] == CHECK_DIAG_NONE)
         {
-            const TypeId left_type = check_common_enum_coerced(input, stream, left);
-            const TypeId right_type = check_common_enum_coerced(input, stream, right);
-            const bool left_enum = check_action_kind(types, left_type) == BUSTER_TYPE_KIND_ENUM;
+            // A GNU `a ?: b`'s omitted middle operand is its condition promoted (clang's UsualUnaryConversions): an
+            // enumeration's is an integer then, and a floating one an rvalue. Its `?` and `:` are adjacent.
+            const uint32_t colon = graph->tokens[node];
+            uint32_t question = colon;
+            for (uint32_t at = op == CHECK_OP_CONDITIONAL ? colon : 0; at != 0 && question == colon;)
+            {
+                at -= 1;
+                question = parser->tree.parents[at] == colon && parser->tree.roles[at] == PARSE_ROLE_OPEN_TERNARY ? at : question;
+            }
+            const bool omitted = op == CHECK_OP_CONDITIONAL && question + 1 == colon;
+            // A comparison's operands are rvalues first (clang's DefaultLvalueConversion): unqualified, a typedef that
+            // carries a qualifier itself spelled as its type.
+            const bool rvalue_left = kind == 2 || omitted;
+            const bool rvalue_right = kind == 2;
+            const TypeId left_coerced = check_common_enum_coerced(input, stream, left);
+            const TypeId right_coerced = check_common_enum_coerced(input, stream, right);
+            const TypeId left_type = rvalue_left ? type_unqualified(left_coerced) : left_coerced;
+            const TypeId right_type = rvalue_right ? type_unqualified(right_coerced) : right_coerced;
+            const bool left_enum = !omitted && check_action_kind(types, left_type) == BUSTER_TYPE_KIND_ENUM;
             const bool right_enum = check_action_kind(types, right_type) == BUSTER_TYPE_KIND_ENUM;
             const bool floating = (!compound && left_enum && check_common_floating_kind(types, right_type)) ||
                                   (right_enum && check_common_floating_kind(types, left_type));
@@ -3277,8 +3293,12 @@ static __attribute__((noinline)) void check_common_enum_arithmetic(const Parser*
                                type_unqualified(type_strip_aligned(types, left_type)) != type_unqualified(type_strip_aligned(types, right_type));
             if (floating || mixed)
             {
-                const uint32_t left_spelling = left_type == check_stream_type(stream, left) ? check_common_operand_spelling(parser, input, graph, stream, left) : 0;
-                const uint32_t right_spelling = right_type == check_stream_type(stream, right) ? check_common_operand_spelling(parser, input, graph, stream, right) : 0;
+                uint32_t left_spelling = left_coerced == check_stream_type(stream, left) ? check_common_operand_spelling(parser, input, graph, stream, left) : 0;
+                uint32_t right_spelling = right_coerced == check_stream_type(stream, right) ? check_common_operand_spelling(parser, input, graph, stream, right) : 0;
+                const TypeId left_alias = left_spelling < input->token_count && input->declared_types != NULL ? input->declared_types[left_spelling] : 0;
+                const TypeId right_alias = right_spelling < input->token_count && input->declared_types != NULL ? input->declared_types[right_spelling] : 0;
+                left_spelling = rvalue_left && left_alias != 0 && type_qualifiers(left_alias) != 0 ? 0 : left_spelling;
+                right_spelling = rvalue_right && right_alias != 0 && type_qualifiers(right_alias) != 0 ? 0 : right_spelling;
                 const String8 left_name = check_driver_warning_type(parser, pp, input, types, spell, scratch, left_type, left_spelling);
                 const String8 right_name = check_driver_warning_type(parser, pp, input, types, spell, scratch, right_type, right_spelling);
                 const String8 left_plain = mixed ? check_driver_warning_type(parser, pp, input, types, spell, scratch, left_type, 0) : (String8){ 0 };
@@ -3297,14 +3317,7 @@ static __attribute__((noinline)) void check_common_enum_arithmetic(const Parser*
                 if (left_name.length != 0 && right_name.length != 0 && message != NULL)
                 {
                     // (A conditional's node is its `:`; clang's place is its `?`, the `:`'s child.)
-                    const uint32_t colon = graph->tokens[node];
-                    uint32_t token = colon;
-                    for (uint32_t at = op == CHECK_OP_CONDITIONAL ? colon : 0; at != 0 && token == colon;)
-                    {
-                        at -= 1;
-                        token = parser->tree.parents[at] == colon && parser->tree.roles[at] == PARSE_ROLE_OPEN_TERNARY ? at : token;
-                    }
-                    check_common_report(parser, pp, input, token, id, id != CHECK_WARNING_ID_ENUM_COMPARE, message, NULL, 0, scratch);
+                    check_common_report(parser, pp, input, question, id, id != CHECK_WARNING_ID_ENUM_COMPARE, message, NULL, 0, scratch);
                 }
             }
         }

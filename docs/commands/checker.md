@@ -290,7 +290,10 @@ unused-warning fixtures also check exact scope-completion tokens.
   operator's operand (`CheckInput.enum_operands`, set where the identifiers' leaves are made, outside its own
   enumeration's definition) is scanned, and an operator is tested only where an operand may be an enumeration. An
   enumeration operand that is only a member, a call's result or a cast's isn't looked for without one, and the constant
-  reader's expressions (an array bound in a type name, an enumerator's value) aren't scanned.
+  reader's expressions (an array bound in a type name, an enumerator's value), and a `typeof` operand's, aren't
+  scanned. A comparison's operands are rvalues, as clang's DefaultLvalueConversion makes them: unqualified, a typedef
+  that carries a qualifier itself spelled as its type; a GNU `a ?: b`'s omitted operand is its condition promoted, never
+  an enumeration.
   `c_check_enum_arithmetic_driver_test.c` compares them with complete pinned-Clang output at each policy, both paths and
   with `-c`.
   `c_check_shift_count_driver_test.c` compares complete pinned-Clang diagnostics and independent counts for both
