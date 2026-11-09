@@ -981,10 +981,11 @@ static void check_builtin_misc_more(TypeTable* table, const CheckBuiltinMiscActi
 // __builtin_complex(re, im): the complex number re + im i, of type _Complex T, where re and im are of one real floating
 // type T (clang 23 takes _Float16, __bf16 and __float128 too) once lvalue-converted, and are never converted otherwise, as
 // clang's Sema checks them: each argument's type before its conversion first, so that an _Atomic one is refused (clang's
-// "argument type is not a real floating point type"), then the two converted types (its "arguments are of different
-// types"). It folds where both arguments are floating constants of a type whose complex constants the folds, the
-// lowering and the data keep (float, double, long double and the half formats; not __float128's), as clang's evaluator
-// folds it: what glibc's CMPLX of a static initializer reads.
+// "argument type is not a real floating point type", INVALID_TYPE), then the two converted types (its "arguments are of
+// different types", INCOMPATIBLE), which check_semantic_expression words as clang's. It folds where both arguments are
+// floating constants of a type whose complex constants the folds, the lowering and the data keep (float, double, long
+// double and the half formats; not __float128's), as clang's evaluator folds it: what glibc's CMPLX of a static
+// initializer reads.
 static void check_builtin_misc_complex(TypeTable* table, const CheckBuiltinMiscAction* input, CheckBuiltinMiscResult* output, const CheckValue* values)
 {
     const TypeId real = type_unqualified(type_strip_aligned(table, values[0].type));

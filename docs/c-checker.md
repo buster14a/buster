@@ -307,7 +307,12 @@ declaration of it alone (`enum E;`) too; a reference to it (`enum E x;`) needs
 none. A declaration of it with a declarator (`enum E : int x;`) is refused at
 the `:`, and an enum without a base can't be given one, nor the other way round,
 each where clang reports it. An `aligned` attribute after its body, which clang
-applies after the base completed it, is refused as unsupported. (Attributes
+applies after the base completed it, sets its alignment then (#1447,
+`type_enum_realign`), as clang's does where nothing has asked its layout yet:
+clang memoizes an enum's layout at its first query, after which the attribute
+changes nothing. So it is taken where the enum completed at this body's `{` and
+the body doesn't name it (`enum E`); one whose body names it, or one completed
+by an earlier declaration (`enum E : char;`), stays refused as unsupported. (Attributes
 after a tag's name, before a `;`, make any tag's declaration a reference to the
 visible tag, as clang has it, not a declaration of it alone.)
 
@@ -4514,8 +4519,14 @@ What clang 23 does with each is followed:
   `long`, `XF` and `TF` an `__int128`), which gives it clang's layout. Its
   conversions are clang's too: a floating value converts into it silently,
   since `-Wliteral-conversion` takes no enumeration target, and an integer
-  gets `-Wconstant-conversion` at the integer's width. A complex mode, whose
-  alignment no integer has, still stops the reader.
+  gets `-Wconstant-conversion` at the integer's width. A complex mode
+  installs the complex type: the enum gets the signed integer of its size
+  with the complex type's alignment (`SC` a `long` aligned to 4, `DC` an
+  `__int128` aligned to 8), unless an alignment attribute gives one, which replaces it
+  even downward (`mode(SC), aligned(2)` is aligned to 2); its enumerators stay
+  `int`. `XC` and `TC` (32 bytes, no integer) still stop the reader, and `HC`'s
+  complex `__fp16`, which the type table can't make, installs nothing (4 bytes
+  aligned to 4, where clang's are aligned to 2).
 
 In each case the declaration stays valid and the attribute is ignored, as in
 phase 1.
@@ -4564,8 +4575,8 @@ alignments that stand.
 `c_check_type_attribute_recovery_driver_test.c` compares its fixtures as above.
 These differences remain:
 
-- An enum's complex mode of the other kind (`enum __attribute__((mode(SC)))
-  E`) still stops the reader.
+- An enum's `XC` or `TC` mode still stops the reader, and an `HC` one has
+  the layout of an enum with no mode.
 - An enum's vector mode after its body gives its deprecation warning twice (on
   main too).
 
@@ -8024,9 +8035,10 @@ arguments against the function. The checker now gives these as clang does.
   declaration with it, and `check_program_realign(program, b)` says whether
   body `b` realigns its stack (`Tier0Function.realign_stack`,
   `docs/tier0.md`'s realigned frames: 16 bytes' at least).
-  A variadic routine, which clang compiles, is refused by name ("unsupported:
-  variadic interrupt service routines"), as are `__builtin_eh_return`,
-  `__builtin_setjmp` and musttail calls in one, as in any preserving frame.
+  A variadic routine's list starts at the interrupted code's argument
+  registers, as LLVM's `x86_intrcc` has it (#1447, `docs/tier0.md`).
+  `__builtin_eh_return`, `__builtin_setjmp` and musttail calls in one are
+  refused by name, as in any preserving frame.
 
   GCC's and clang's `patchable_function_entry(N[, M[, "section"]])`
   (`CHECK_ATTRIBUTE_PATCHABLE_FUNCTION_ENTRY`, #1447) is clang's
