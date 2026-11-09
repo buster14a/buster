@@ -8330,11 +8330,12 @@ arguments against the function. The checker now gives these as clang does.
       (or the definition): a block's redeclaration that clang's chain doesn't
       link is taken as linked;
     - a direct call's error drops every other diagnostic of its full
-      expression (`CheckInput.interrupt_ranges`, bounded by another
-      declarator's, list element's or argument's `,`), where clang keeps those
-      of the operands that don't hold the call, built before or after it
-      (`g(1) + (f(0), 1)`'s -Wexcessive-regsave of `g(1)`, `x = (f(0), 1), x =
-      1 / 0`'s division by zero).
+      expression (`CheckInput.interrupt_ranges`: its declarator's initializer
+      or its statement, but the call's other arguments and list elements),
+      where clang keeps those of the other operands that don't hold the call,
+      built before or after it (`g(1) + (f(0), 1)`'s -Wexcessive-regsave of
+      `g(1)`, `x = (f(0), 1), x = 1 / 0`'s division by zero, `(f(0), (1, 2))`'s
+      inner comma's -Wunused-value).
   - After a missing `;`'s recovery, an error the checker recovers from
     (`int x _Alignas(3) int y _Alignas(4);`'s "requested alignment is not a
     power of 2") goes on to the later declarations, as clang does ("Semantic

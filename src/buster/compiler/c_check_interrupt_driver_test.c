@@ -214,11 +214,11 @@ static void check_test_driver_interrupts(CheckTest* test, const char* clang, con
         { "__attribute__((interrupt)) void f(void *p); void g(void) { f(0); } char c = 1000;\n", NULL, { NULL } },
         { "__attribute__((interrupt)) void f(void *p); void g(void) { f(0); } struct S { int a; } s = { 1, 2 };\n", NULL, { NULL } },
         { "__attribute__((interrupt)) void f(void *p); void g(void) { f(0); } void k(void) { int x = 1; x = x; }\n", NULL, { "-Wall", NULL } },
-        // Only the call's full expression loses its diagnostics: not another declarator's initializer, list element or
-        // argument (#1930's review).
+        // Only the call's full expression loses its diagnostics: not another declarator's initializer, nor the call's
+        // other list elements or arguments (#1930's review).
         { "__attribute__((interrupt)) void h(void *); void f(void) { int a = (h(0), 1), b = 1 / 0; (void)a; (void)b; }\n", "-std=gnu17", { "-Wall", NULL } },
         { "__attribute__((interrupt)) void h(void *); void f(void) { int b = 1 / 0, a = (h(0), 1); (void)a; (void)b; }\n", "-std=gnu17", { "-Wall", NULL } },
-        { "__attribute__((interrupt)) void h(void *); void f(void) { int a = (h(0), (1, 2)), b = 1 / 0; (void)a; (void)b; }\n", NULL, { "-Wall", NULL } },
+        { "__attribute__((interrupt)) void h(void *); void f(void) { int a = (h(0), 1), b = (1, 2); (void)a; (void)b; }\n", NULL, { "-Wall", NULL } },
         { "__attribute__((interrupt)) void h(void *); void f(void) { int a[2] = { (h(0), 1), 1 / 0 }; (void)a; }\n", NULL, { "-Wall", NULL } },
         { "__attribute__((interrupt)) void h(void *); void f(void) { char c = (h(0), 1000), d = 1000; (void)c; (void)d; }\n", NULL, { "-Wall", NULL } },
         { "__attribute__((interrupt)) void h(void *); int g(int, int); void f(void) { g((h(0), 1), 1 / 0); }\n", NULL, { "-Wall", NULL } },

@@ -958,9 +958,11 @@ struct CheckInput
     // Whether the unit read x86's interrupt or no_caller_saved_registers (#147): only then are its calls looked through
     // after checking, for the direct calls of interrupt service routines and -Wexcessive-regsave (check_input_interrupt_calls).
     bool interrupt_calls;
-    // The full expressions of those direct calls (#1447): pairs of their first and last tokens, in which clang's invalid
-    // call leaves no other diagnostic, while the unit's others are found as a valid one's are (CheckInput.recovered_valid,
-    // check_driver_interrupt_kept). None in a unit without such an error.
+    // The full expressions of those direct calls (#1447): triples of a range's first token (with BUSTER_CHECK_INTERRUPT_KEEP
+    // for one of the call's other arguments or list elements), its last and the call's callee's first, in which clang's
+    // invalid call leaves no other diagnostic, while the unit's others are found as a valid one's are
+    // (CheckInput.recovered_valid, check_driver_interrupt_kept, check_interrupt_full_expression). None in a unit without
+    // such an error.
     uint32_t* interrupt_ranges;
     uint32_t interrupt_range_count;
     uint32_t interrupt_range_capacity;
@@ -1085,15 +1087,25 @@ static __attribute__((unused)) void check_input_set_linkage(uint8_t* bits, uint3
     bits[token] = (uint8_t)((bits[token] & ((1u << BUSTER_CHECK_BITS_LINKAGE_SHIFT) - 1)) | linkage << BUSTER_CHECK_BITS_LINKAGE_SHIFT);
 }
 
+#define BUSTER_CHECK_INTERRUPT_KEEP 0x80000000u
+
 // Whether a diagnostic at `token` is published (#1447): not where it is inside a direct call's full expression, of an
-// interrupt service routine, whose error is clang's invalid call alone there (CheckInput.interrupt_ranges). A unit without
-// such an error takes one compare.
+// interrupt service routine, whose error is clang's invalid call alone there, but in that call's other arguments or
+// list elements (CheckInput.interrupt_ranges). A unit without such an error takes one compare.
 static __attribute__((unused)) bool check_driver_interrupt_kept(const CheckInput* input, uint32_t token)
 {
     bool kept = true;
     for (uint32_t r = 0; kept && r < input->interrupt_range_count; r += 1)
     {
-        kept = token < input->interrupt_ranges[r * 2] || token > input->interrupt_ranges[r * 2 + 1];
+        const uint32_t* range = input->interrupt_ranges + r * 3;
+        bool dropped = (range[0] & BUSTER_CHECK_INTERRUPT_KEEP) == 0 && token >= range[0] && token <= range[1];
+        for (uint32_t k = 0; dropped && k < input->interrupt_range_count; k += 1)
+        {
+            const uint32_t* other = input->interrupt_ranges + k * 3;
+            dropped = !((other[0] & BUSTER_CHECK_INTERRUPT_KEEP) != 0 && other[2] == range[2] && token >= (other[0] & ~BUSTER_CHECK_INTERRUPT_KEEP) &&
+                        token <= other[1]);
+        }
+        kept = !dropped;
     }
     return kept;
 }

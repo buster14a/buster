@@ -281,72 +281,129 @@ static bool check_interrupt_head(const Parser* parser, uint32_t token)
     return kind == PARSE_KIND_IF || kind == PARSE_KIND_WHILE || kind == PARSE_KIND_SWITCH || kind == PARSE_KIND_FOR;
 }
 
+// Appends a range of a direct call's full expression (#1447, CheckInput.interrupt_ranges): its tokens from `first` to `last`,
+// which drop the other diagnostics there, or with `keep` its operands that don't hold the call (another argument, another
+// list element), which keep theirs; `owner` the call's callee's first token, whose own ranges they are.
+static void check_interrupt_range(CheckInputReader* reader, uint32_t first, uint32_t last, uint32_t owner, bool keep)
+{
+    CheckInput* input = reader->output;
+    if (input->interrupt_range_count == input->interrupt_range_capacity && !input->resource)
+    {
+        const uint32_t capacity = input->interrupt_range_capacity != 0 ? input->interrupt_range_capacity * 2 : 4;
+        uint32_t* grown = BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint32_t, (uint64_t)capacity * 3);
+        input->resource |= grown == NULL;
+        if (grown != NULL && input->interrupt_range_count != 0)
+        {
+            memcpy(grown, input->interrupt_ranges, (uint64_t)input->interrupt_range_count * 3 * sizeof(uint32_t));
+        }
+        input->interrupt_ranges = grown != NULL ? grown : input->interrupt_ranges;
+        input->interrupt_range_capacity = grown != NULL ? capacity : input->interrupt_range_capacity;
+    }
+    if (input->interrupt_range_count < input->interrupt_range_capacity && first <= last && last < BUSTER_CHECK_INTERRUPT_KEEP)
+    {
+        input->interrupt_ranges[input->interrupt_range_count * 3] = first | (keep ? BUSTER_CHECK_INTERRUPT_KEEP : 0u);
+        input->interrupt_ranges[input->interrupt_range_count * 3 + 1] = last;
+        input->interrupt_ranges[input->interrupt_range_count * 3 + 2] = owner;
+        input->interrupt_range_count += 1;
+    }
+}
+
 // Records the full expression around a direct call's error, from its callee's first token `first` to its `)` `close`
-// (#1447, CheckInput.interrupt_ranges): out through the parentheses and brackets around it, to the `;`, `{` or `}` of its
-// statement, declaration or initializer list, a separator's `,` (another declarator's, list element's or argument's,
-// each its own full expression or operand, which clang builds whatever this one is), or a control statement's head's
-// parentheses. A cold scan of the tokens around the rare error.
+// (#1447, CheckInput.interrupt_ranges). Out through the groups around it: a call's or an initializer list's keeps its
+// other arguments or elements, which clang builds whatever this one is (check_interrupt_range's `keep`); any other group
+// (parentheses, a subscript, _Generic's) is the call's expression's. It ends at its statement (a `;`, a block's braces),
+// a control statement's head's parentheses, or the declarator's initializer that holds it (CheckInput.initializer_begins
+// and initializer_ends): another declarator's is its own full expression. A cold scan of the tokens around the rare error.
 static void check_interrupt_full_expression(CheckInputReader* reader, uint32_t first, uint32_t close)
 {
     CheckInput* input = reader->output;
     const Parser* parser = reader->parser;
     const uint32_t count = parser->tokens.count;
-    uint32_t begin = first;
+    uint32_t low = first;
+    uint32_t high = close;
+    uint32_t begin = 0;
+    bool top = false;
+    for (uint32_t steps = 0; !top && steps < count; steps += 1)
+    {
+        // The opener around the tokens from `low` on, or the statement's boundary before them.
+        uint32_t depth = 0;
+        uint32_t t = low;
+        uint32_t opener = BUSTER_CHECK_NONE;
+        // The `;` or `}` that ends the statement before, or the unit's start (BUSTER_CHECK_NONE).
+        uint32_t stop = BUSTER_CHECK_NONE;
+        bool boundary = false;
+        while (opener == BUSTER_CHECK_NONE && !boundary)
+        {
+            boundary = t == 0;
+            t -= boundary ? 0 : 1;
+            const uint8_t kind = boundary ? PARSE_KIND_SEMI : parser->tokens.kinds[t];
+            const bool closing = kind == PARSE_KIND_R_PAREN || kind == PARSE_KIND_R_SQUARE || kind == PARSE_KIND_R_BRACE;
+            const bool opening = kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE || kind == PARSE_KIND_L_BRACE;
+            const bool ends = !boundary && depth == 0 && (kind == PARSE_KIND_SEMI || kind == PARSE_KIND_R_BRACE);
+            stop = ends ? t : stop;
+            boundary |= ends;
+            opener = !boundary && depth == 0 && opening ? t : BUSTER_CHECK_NONE;
+            depth += !boundary && closing ? 1 : 0;
+            depth -= !boundary && opening && depth != 0 ? 1 : 0;
+        }
+        const uint8_t role = opener != BUSTER_CHECK_NONE ? parser->tree.roles[opener] : PARSE_ROLE_NONE;
+        const bool statement = opener != BUSTER_CHECK_NONE && parser->tokens.kinds[opener] == PARSE_KIND_L_BRACE && role != PARSE_ROLE_OPEN_INITIALIZER;
+        const bool condition = opener != BUSTER_CHECK_NONE && opener != 0 && parser->tokens.kinds[opener] == PARSE_KIND_L_PAREN && check_interrupt_head(parser, opener - 1);
+        top = boundary || statement || condition;
+        begin = boundary ? (stop != BUSTER_CHECK_NONE ? stop + 1 : 0) : opener != BUSTER_CHECK_NONE ? opener + 1 : begin;
+        const uint32_t closer = !top ? parser->tree.parents[opener] : BUSTER_CHECK_NONE;
+        if (!top && closer < count && closer > high && (role == PARSE_ROLE_OPEN_CALL || role == PARSE_ROLE_OPEN_INITIALIZER))
+        {
+            // The argument or element that holds the call, between the list's `,`s at its level.
+            uint32_t segment_low = opener + 1;
+            uint32_t segment_high = closer - 1;
+            uint32_t level = 0;
+            for (uint32_t k = opener + 1; k < closer; k += 1)
+            {
+                const uint8_t kind = parser->tokens.kinds[k];
+                const bool comma = level == 0 && kind == PARSE_KIND_COMMA;
+                segment_low = comma && k < low ? k + 1 : segment_low;
+                segment_high = comma && k > high && segment_high == closer - 1 ? k - 1 : segment_high;
+                level += kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE || kind == PARSE_KIND_L_BRACE ? 1 : 0;
+                level -= level != 0 && (kind == PARSE_KIND_R_PAREN || kind == PARSE_KIND_R_SQUARE || kind == PARSE_KIND_R_BRACE) ? 1 : 0;
+            }
+            if (segment_low > opener + 1)
+            {
+                check_interrupt_range(reader, opener + 1, segment_low - 1, first, true);
+            }
+            if (segment_high < closer - 1)
+            {
+                check_interrupt_range(reader, segment_high + 1, closer - 1, first, true);
+            }
+        }
+        low = top ? low : opener;
+        high = top || closer >= count ? high : closer;
+    }
+    // The statement's end, or the control head's `)`.
+    uint32_t end = high;
     uint32_t depth = 0;
     bool open = true;
-    while (open && begin != 0)
-    {
-        const uint32_t t = begin - 1;
-        const uint8_t kind = parser->tokens.kinds[t];
-        const bool closing = kind == PARSE_KIND_R_PAREN || kind == PARSE_KIND_R_SQUARE;
-        const bool opening = kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE;
-        const bool head = opening && depth == 0 && t != 0 && check_interrupt_head(parser, t - 1);
-        const bool separator = depth == 0 && parser->tree.roles[t] == PARSE_ROLE_SEPARATOR;
-        open = !head && !separator && !(depth == 0 && (kind == PARSE_KIND_SEMI || kind == PARSE_KIND_L_BRACE || kind == PARSE_KIND_R_BRACE));
-        depth += closing ? 1 : 0;
-        depth -= opening && depth != 0 ? 1 : 0;
-        begin = open ? t : begin;
-    }
-    uint32_t end = close;
-    depth = 0;
-    open = true;
     while (open && end + 1 < count)
     {
         const uint32_t t = end + 1;
         const uint8_t kind = parser->tokens.kinds[t];
-        const bool closing = kind == PARSE_KIND_R_PAREN || kind == PARSE_KIND_R_SQUARE;
-        const bool opening = kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE;
-        uint32_t matched = t;
-        for (uint32_t k = t; closing && depth == 0 && matched == t && k != 0;)
-        {
-            k -= 1;
-            matched = (parser->tokens.kinds[k] == PARSE_KIND_L_PAREN || parser->tokens.kinds[k] == PARSE_KIND_L_SQUARE) && parser->tree.parents[k] == t ? k : matched;
-        }
-        const bool head = closing && depth == 0 && matched != t && matched != 0 && check_interrupt_head(parser, matched - 1);
-        const bool separator = depth == 0 && parser->tree.roles[t] == PARSE_ROLE_SEPARATOR;
-        open = !head && !separator && !(depth == 0 && (kind == PARSE_KIND_SEMI || kind == PARSE_KIND_L_BRACE || kind == PARSE_KIND_R_BRACE));
+        const bool closing = kind == PARSE_KIND_R_PAREN || kind == PARSE_KIND_R_SQUARE || kind == PARSE_KIND_R_BRACE;
+        const bool opening = kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE || kind == PARSE_KIND_L_BRACE;
+        open = !(depth == 0 && (kind == PARSE_KIND_SEMI || closing));
         depth += opening ? 1 : 0;
         depth -= closing && depth != 0 ? 1 : 0;
         end = open ? t : end;
     }
-    if (input->interrupt_range_count == input->interrupt_range_capacity && !input->resource)
+    // The declarator's initializer that holds the call, the innermost, where it is in one.
+    for (uint32_t d = begin; d < first && d < input->token_count; d += 1)
     {
-        const uint32_t capacity = input->interrupt_range_capacity != 0 ? input->interrupt_range_capacity * 2 : 4;
-        uint32_t* grown = BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint32_t, (uint64_t)capacity * 2);
-        input->resource |= grown == NULL;
-        if (grown != NULL && input->interrupt_range_count != 0)
-        {
-            memcpy(grown, input->interrupt_ranges, (uint64_t)input->interrupt_range_count * 2 * sizeof(uint32_t));
-        }
-        input->interrupt_ranges = grown != NULL ? grown : input->interrupt_ranges;
-        input->interrupt_range_capacity = grown != NULL ? capacity : input->interrupt_range_capacity;
+        const uint32_t initializer = check_sparse_get(input->initializer_begins, d);
+        const uint32_t ending = initializer != BUSTER_CHECK_NONE ? check_sparse_get(input->initializer_ends, d) : BUSTER_CHECK_NONE;
+        const bool holds = initializer != BUSTER_CHECK_NONE && ending != BUSTER_CHECK_NONE && initializer <= first && ending > close && initializer >= begin;
+        begin = holds ? initializer : begin;
+        end = holds && ending - 1 < end ? ending - 1 : end;
     }
-    if (input->interrupt_range_count < input->interrupt_range_capacity)
-    {
-        input->interrupt_ranges[input->interrupt_range_count * 2] = begin;
-        input->interrupt_ranges[input->interrupt_range_count * 2 + 1] = end;
-        input->interrupt_range_count += 1;
-    }
+    check_interrupt_range(reader, begin, end, first, false);
 }
 
 // A call's error or warning (#147, check_input_interrupt_calls): its callee from `callee_first` to its `(` (`open`), its
