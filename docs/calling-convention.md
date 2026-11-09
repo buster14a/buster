@@ -153,12 +153,12 @@ what it is (`abi_finish`):
 | 10, 11 | `SIGN`, `ZERO` | clang's `Extend`: the caller extends the value to 32 bits; for a result, what clang's IR asks of the callee, which LLVM's x86-64 code doesn't do (see "Extension") |
 | 12 | `AGGREGATE` | clang's `byval`: in memory as an argument, a copy on the stack (or an integer value: see "Two counts") |
 | 13 | `END_MEMORY` | a type of no size that is MEMORY at offset 16 though not at 0 |
-| 14 | `UNSUPPORTED` | what the module doesn't place as clang and LLVM do, which the code generator refuses: an `UNCOUNTED` value LLVM splits into more parts than a location holds, as no class says (an `_Atomic` vector wider than 16 bytes and than the target's vector registers, or one LLVM breaks into its elements, and an integer of more than 128 bits); a vector SSE, SSEUP by its classes that LLVM breaks up (of bools or of `_BitInt`s narrower than a byte, of long doubles, of two or more `__float128`s, of `_BitInt`s wider than 128 bits), and a record or an array of one such member, which clang passes as it; and one of `_BitInt(128)`s, whose `i64`s LLVM puts in general registers once clang has no vector register for it; a type holding a `LARGER` one that clang lays out otherwise than the C type, or whose LLVM size the module doesn't keep; and one whose INTEGER high eightbyte clang reads as an `i128` from offset 8, under an SSE or NO_CLASS low one (see "Where clang's LLVM types decide") |
+| 14 | `UNSUPPORTED` | what the module doesn't place as clang and LLVM do, which the code generator refuses: an `UNCOUNTED` value LLVM splits into more parts than a location holds, as no class says (an `_Atomic` vector wider than 16 bytes and than the target's vector registers, or one LLVM breaks into its elements, and an integer of more than 128 bits); a vector SSE, SSEUP by its classes that LLVM breaks up (of bools or of `_BitInt`s narrower than a byte, of long doubles, of two or more `__float128`s, of `_BitInt`s wider than 128 bits), and a record or an array of one such member, which clang passes as it; and one of `_BitInt(128)`s, whose `i64`s LLVM puts in general registers once clang has no vector register for it; a record SSE, SSEUP of a size no vector register has, which clang passes as `<size / 8 x double>`; a type holding a `LARGER` one that clang lays out otherwise than the C type, or whose LLVM size the module doesn't keep; and one whose INTEGER high eightbyte clang reads as an `i128` from offset 8, under an SSE or NO_CLASS low one (see "Where clang's LLVM types decide") |
 | 15 | `CLASSIFIED` | the row and these bits are in the table |
 | 16 to 18 | `VALUE` | the kind of value a scalar in memory passes as: a general register (`GENERAL`), two (`PAIR`), a vector register (`VECTOR`), x87's (`X87`), which always goes on the stack, so that such a type isn't `UNCOUNTED`, or two halves, each in a general register while one is left and then on the stack (`HALVES`: a `<1 x i128>`, which LLVM splits as it never does an `i128`) |
 | 20 to 25 | `ALIGNMENT` | the log2 of the stack slot's alignment: 3, or the type's own if larger (an aggregate's own, an `_Atomic` one's canonical type's, a scalar's value's natural one) |
 | 26 | `EMPTY` | a type of no size: in memory it takes an 8-byte slot, or none as an `i0` (see "Two counts") |
-| 27 | `LOW_GENERAL` | the low eightbyte, SSE by its class and counted so by clang, goes in a general register: clang's type for it is narrow and the high part's isn't aligned to 8 (see "Where clang's LLVM types decide") |
+| 27 | `LOW_GENERAL` | the low eightbyte, SSE by its class and counted so by clang, goes in a general register: clang's type for it is narrow and the high part's isn't aligned to 8, or it is a union's 16-byte `fp128` (see "Where clang's LLVM types decide") |
 | 28 | `GROWN` | a `LARGER` type of 8 bytes or less, aligned to 8 or less, whose copy takes more than 8 bytes, so that its slot depends on clang's count: a `byval` copy of `stack_bytes` while clang has a general register free, and once it has none an integer of its size (`getIndirectResult`), in a general register LLVM has left or 8 bytes of the stack |
 | 29 | `LARGER` | clang's LLVM type for it is larger than its C type, and `stack_bytes` that type's size, which a `byval` copy takes, rounded up to 8: an `_Atomic` of a type of no size, and a struct that ends in one running past its end (see "Where clang's LLVM types decide") |
 | 30 | `SMALLER` | clang's LLVM type for it is smaller than its C type, and `stack_bytes` that type's size, rounded up to 8: a vector whose elements LLVM packs in memory (of bools, of `_BitInt`s narrower than a byte, of long doubles), whose objects clang makes that small though `sizeof` says more. A copy of it takes those bytes, and so does what a callee stores through a hidden pointer; the rest of the C type is padding (see "Where clang's LLVM types decide") |
@@ -237,15 +237,17 @@ members' own:
   on have 2^n of them. `union {struct {long a, b; struct {__int128 x;
   long y;} z[0];} s; __int128 i;}` passes as two `i64`s (the struct is aligned
   to 16 and comes first) where `union {__int128 i; ...}` passes as one `i128`.
-  `STORAGE_INEXACT` also marks a record with a flexible array member and a
-  size, which gets no storage either (its members may be classified after it:
-  see "Levels"), and what holds one, a record the walk takes among them: its
-  alignment may not be LLVM's. It marks a type aligned past the 2^15 the
-  storage holds too, and what holds one: LLVM aligns a vector as large as
-  itself, so one of 64 KB or more. An `_Atomic` of a type of no size takes its
-  value's alignment as its size, and is refused for an inexact one. A type of
-  16 bytes or less holds such a type only through an array of none of them,
-  and passes by that alignment unchecked. A vector is aligned as in C, but a
+  A record with a flexible array member and a size gets no storage either
+  (`STORAGE_INEXACT`: its members may be classified after it, see "Levels"),
+  and the walk takes it as it takes a larger record (`abi_wide_record`), its
+  flexible array member as an array of none of its element, whose storage it
+  reads or, for a record it keeps none for, walks in turn: `union {struct
+  {long a, b; struct {int i; __int128 q[];} z[0];} s; __int128 i;}` passes as
+  two `i64`s, as clang 23 passes it. `STORAGE_INEXACT` also marks a type
+  aligned past the 2^15 the storage holds, and what holds one: LLVM aligns a
+  vector as large as itself, so one of 64 KB or more. An `_Atomic` of a type
+  of no size takes its value's alignment as its size, and is refused for an
+  inexact one. A vector is aligned as in C, but a
   vector of bools is the integer of its bits clang stores it as (aligned as
   LLVM aligns integers, an `i128` at 128 bits), and one of long doubles or of
   `_BitInt`s narrower than a byte, whose elements LLVM packs, is aligned to
@@ -598,7 +600,8 @@ and then `abi_finish_passing`, which both paths share:
   reads the `i128` from offset 8, which the module refuses (`UNSUPPORTED`);
 - **`LOW_GENERAL`** when the low eightbyte is SSE but clang's type for it, by
   `GetSSETypeAtOffset` over `layout`, is narrow (a `bfloat`, `<2 x half>` or
-  `<2 x bfloat>`) and the high part's isn't aligned to 8 (`abi_low_general`):
+  `<2 x bfloat>`) and the high part's isn't aligned to 8, or is the 16-byte
+  `fp128` of a union stored as a `__float128` (`abi_low_general`):
   `GetX86_64ByValArgumentPair` widens such a low part to an `i64`, which goes
   in a general register;
 - **`SIGN` or `ZERO`** for `bool`, the character and short types, enums of
@@ -975,7 +978,27 @@ and has a fixture:
   to an `i64`, which goes in a general register though clang counted a
   vector one (`LOW_GENERAL`). That is a `bfloat`, `<2 x half>` or `<2 x
   bfloat>` before an `i32`, a `float` or the like: `struct { __bf16 a, b;
-  _Alignas(8) int c; }` passes in rdi and rsi.
+  _Alignas(8) int c; }` passes in rdi and rsi. And it is the `fp128` that
+  `getFPTypeAtOffset` finds at offset 0 of a union stored as a `__float128`
+  (`abi_layout`'s `FP128` leaf) with SSE, SSE or SSE, INTEGER classes: 16
+  bytes, so that the high part can't start at 8, and the low part widens to
+  an `i64` (the assertion that it is an integer is off in release builds).
+  `union { __float128 q; double d[2]; }` is `{i64, double}`, in rdi and xmm0,
+  and `union { __float128 q; struct { double d; long l; } s; }` is `{i64,
+  i64}`. A vector of one `__float128` is no `fp128` to it: a union of one and
+  `double[2]` passes in xmm0 and xmm1.
+- **Records SSE, SSEUP of a size no vector register has.** A union of a
+  16-byte vector and a longer array, packed or aligned below its size, is SSE,
+  SSEUP at 17 to 63 bytes but 32 where the target's vectors are as wide.
+  `GetByteVectorType` gives it `<size / 8 x double>`, which LLVM widens to the
+  register of the next power of two and passes with only those doubles'
+  bytes: 17 to 23 bytes as `<2 x double>` in xmm0, losing the rest; 24 to 31
+  as `<3 x double>` in ymm0 (on the stack in a variadic call, in a 32-byte
+  slot aligned to 32); 33 to 39 in a ymm register and 40 to 63 in a zmm one.
+  Each size would need its register width apart from the type's size, which
+  Tier 0's parts don't have, so the module refuses them (`UNSUPPORTED`, still
+  `VECTOR` and `WIDE` as their classes say), and the producer refuses them in
+  calls and in `va_arg`, whose save area clang reads as that vector.
 - **`i128` storage.** An `i128` at a record's offset 0 makes the record one
   `i128` value (`PAIR`), which LLVM never splits, in a stack slot aligned to
   16 whatever the record's alignment. With a NO_CLASS high eightbyte too, as
@@ -1048,11 +1071,11 @@ and has a fixture:
   refuses such a struct (`UNSUPPORTED`). It also refuses one holding a type it
   keeps no LLVM size of: an array of them, an `_Atomic` of a `LARGER` struct,
   or a `LARGER` struct, unless the next member leaves that struct's slot
-  room; and an `_Atomic` of a type of no size whose alignment comes, through
-  an array of none of them, from a record with a flexible array member and a
-  size or from one that holds one (a larger record's comes from its members',
-  `abi_wide_alignment`'s walk), or from a vector of 64 KB or more, aligned
-  past the 2^15 the storage holds (`STORAGE_INEXACT`). A union is never
+  room; and an `_Atomic` of a type of no size whose alignment comes from a
+  vector of 64 KB or more, aligned past the 2^15 the storage holds
+  (`STORAGE_INEXACT`; through an array of none of them, a larger record's or a
+  record's with a flexible array member and a size comes from its members',
+  `abi_wide_alignment`'s walk). A union is never
   larger: `lowerUnion` cuts its storage to its size.
 - **Vectors LLVM breaks up.** clang passes a vector as its LLVM type, `<N x
   T>`: an `_Atomic` one always, as its value, and another where its classes
@@ -1283,10 +1306,7 @@ files. The counts below are the defaults'
   8; packed structs ending in one (17 to 117 bytes to LLVM, and 32 KB and a
   byte), structs and a union with room for one, the C layout, and the structs
   refused (a member after the overrun, a member of no size or a flexible one,
-  a struct ending in one, an `_Atomic` of one; `_Atomic`s of a struct and a
-  union of an array of none of a struct with a flexible array member and a
-  size, and of a struct of an array of none of a struct of 32 bytes holding
-  one: `STORAGE_INEXACT`; and `_Atomic`s of structs of no size aligned by a
+  a struct ending in one, an `_Atomic` of one; and `_Atomic`s of structs of no size aligned by a
   vector of 64 KB, past what the storage holds, or by a record holding one,
   and a packed struct ending in the first); a union at offset 1 of an empty
   struct and an array of none of an `_Atomic` of an `aligned(16)` typedef of
@@ -1468,10 +1488,9 @@ element's LLVM size, 0, where they look into it, as `GetSSETypeAtOffset` does
 after the `_Float16` in `struct { long l; _Float16 h; struct {} e[1]; }`
 passed by value. Their signatures pass no type with an SSE low eightbyte and
 bit-fields in an INTEGER high one (`abi_test_bit_field_bytes`), whose access
-units the module doesn't work out yet, an aligned typedef of an `_Atomic`
-vector of bools, whose atomic loads crash its instruction selection, a record
-SSE, SSEUP of a size other than 16, 32 or 64 bytes or one SSE, SSE that holds
-a `__float128` (see "Next steps" for these three), or a union that holds a
+units the module doesn't work out yet (see "Next steps"), an aligned typedef
+of an `_Atomic` vector of bools, whose atomic loads crash its instruction
+selection, or a union that holds a
 vector LLVM packs into fewer bits than its bytes (of bools, but for a multiple
 of 8 that fills them, of narrow `_BitInt`s or of long doubles): clang's LLVM
 type for a union is its most aligned member's, the first of them, and its
@@ -1901,8 +1920,9 @@ clang's `-Wexcessive-regsave` warning (#147, `docs/c-checker.md`): the
 callee may clobber the vector registers the caller keeps. An interrupt
 service routine's definition keeps that same set of every register in Tier
 0's handler frame (`check_program_interrupt`, `Tier0Function.interrupt`,
-`docs/tier0.md`), which returns with `iretq`; a variadic one is refused by
-name ("unsupported: variadic interrupt service routines").
+`docs/tier0.md`), which returns with `iretq`; a variadic one's list starts
+at the interrupted code's argument registers, as LLVM's `x86_intrcc` has it
+(#1447).
 
 Tier 0 leaves out the result's registers, which the caller reads (LLVM's
 return lowering takes them out of the set). A definition whose frame Tier 0's
@@ -1931,29 +1951,6 @@ clang's build of the test's AVX `preserve_all` function that calls
 
 ## Next steps
 
-- **#136's use:** call sequences, prologues and `va_arg` from these
-  locations, and Tier 0's depth-to-register order (contract 6 on #135).
-- **A union stored as an `fp128` with an SSE high eightbyte**, which the
-  cross-check leaves out (any record SSE, SSE that holds a `__float128`).
-  clang's `GetSSETypeAtOffset` returns the `fp128` at the union's offset 0 for
-  its low eightbyte, 16 bytes, so that `GetX86_64ByValArgumentPair` can't
-  start the high part at 8 and widens the low one to an `i64` (its assertion
-  that the low part is an integer or a pointer is off in release builds):
-  `union { __float128 q; char v __attribute__((vector_size(8))) [2]; }` passes
-  in rdi and xmm0 and returns in rax and xmm0, where the module gives xmm0 and
-  xmm1. It is `LOW_GENERAL`'s rule for a 16-byte low part, which `abi_layout`
-  keeps no `fp128` leaf to find.
-- **Records SSE, SSEUP of a size that isn't a vector register's**, which the
-  cross-check leaves out. A union of a 16-byte vector and a longer array
-  (NO_CLASS), packed or of an alignment below its size, can be SSE, SSEUP at
-  22 or 24 bytes, and the module passes it in one vector register of its size
-  (`WIDE`, on the stack in a variadic call). clang's `GetByteVectorType` gives
-  such a record `<size / 8 x double>`: 22 bytes are `<2 x double>`, in xmm0
-  even in a variadic call (al 1) and losing their last 6 bytes; 24 bytes are
-  `<3 x double>`, which LLVM widens to a ymm register, and in a variadic call
-  to a 32-byte slot aligned to 32 where the module gives one of 24 aligned to
-  8. Each size needs its rule (`<size / 8 x double>`'s register and slot), or
-  `UNSUPPORTED`.
 - **The finishing step's branches.** `abi_finish_passing`, which both paths
   share, is now the largest part of the vector classification's time: 43% of
   its cycles in a profile of the benchmark, 94% of them at the instruction
@@ -1983,20 +1980,14 @@ clang's build of the test's AVX `preserve_all` function that calls
   at seeds 50, 82 and 98 of 100, and leaves such types out until the module
   works the units out (in `abi_bit_field_run`, which does it for a run wider
   than an eightbyte), or refuses them.
-- **Flexible records with a size** keep no storage (`STORAGE_INEXACT`): an
-  `_Atomic` of a record of no size that holds an array of none of them is
-  refused, but a record of 16 bytes or less that holds one passes by alignment
-  1, unchecked: `union {{long, long, {int, __int128[]}[0]}, __int128}` is two
-  `i64`s to clang 23, and the module makes it a `PAIR` at every width.
-  `abi_wide_alignment` could walk them as it walks large records, with the
-  levels waiting for what it reads.
 - **What computes with the vectors passed by their bytes.** The producer
   passes, returns, copies and stores vectors of 1 and 2 bytes, of `bool` and of
-  more than 64 bytes (#137), and reads and writes the elements of those whose
-  elements are bytes, but refuses by name their arithmetic, comparisons,
-  conversions and splats, constant expressions, a `bool` vector's elements and
-  the vector builtins of them. The compiled runs, whose C only moves values,
-  don't need them.
+  more than 64 bytes (#137), and computes with them as clang -O0 does (#1445),
+  their builtins and logical and conditional operators among them (#1454).
+  What it still refuses by name are the operations pinned clang rejects,
+  crashes on or miscomputes: compound assignments of `bool` elements and some
+  of the `bool` vectors' `__builtin_elementwise_clzg` and `ctzg` cases. The
+  compiled runs, whose C only moves values, don't need them.
 - **Plain `char`:** `abi_extension` takes it as signed, as x86-64 has it, or
   as unsigned where the type table says so (`TypeTable.char_unsigned`, from
   `-funsigned-char`). The cross-check's worlds keep signed char; its extension

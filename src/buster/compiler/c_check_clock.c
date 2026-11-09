@@ -249,6 +249,10 @@ struct CheckClock
     bool deferred_expression_retry;
     uint64_t deferred_expression_ticks[4];
     const char* deferred_reason;
+    // The preprocessed tokens (the preprocessor's output, its end of file among them): the compile's unit of work, which
+    // measure-compile divides each stage's cycles by (#146); `time-process tokens`. The calling thread's unit's; 0 for
+    // several source files, whose units run on the lanes in one stage (c_checker_units.c).
+    uint64_t tokens;
 };
 
 // The expressions' walk's parts, as CheckInput.expression_part_ticks holds them (BUSTER_CHECK_EXPRESSION_PART_*).
@@ -262,6 +266,15 @@ static __attribute__((unused)) void check_clock_lanes(CheckClock* stage_clock, u
     {
         stage_clock->lanes_asked = asked;
         stage_clock->lanes = lanes;
+    }
+}
+
+// Adds a unit's preprocessed tokens to the report's count (CheckClock.tokens), with a clock.
+static __attribute__((unused)) void check_clock_tokens(CheckClock* stage_clock, uint64_t tokens)
+{
+    if (stage_clock != NULL)
+    {
+        stage_clock->tokens += tokens;
     }
 }
 
@@ -439,6 +452,7 @@ static void check_clock_report(const CheckClock* stage_clock, const uint64_t* pp
         fprintf(stream, "time-write\t%s\t%.3f\n", check_clock_write_names[p], (double)stage_clock->write_nanoseconds[p] / 1e6);
     }
     fprintf(stream, "time-process\ttsc-mhz\t%.1f\n", ticks_per_millisecond / 1e3);
+    fprintf(stream, "time-process\ttokens\t%" PRIu64 "\n", stage_clock->tokens);
     if (stage_clock->lanes_asked != 0)
     {
         fprintf(stream, "time-process\tlanes-asked\t%u\n", stage_clock->lanes_asked);
@@ -561,6 +575,26 @@ static __attribute__((unused)) void check_clock_print_walk(FILE* stream, const d
     }
     fprintf(stream, "      %-18s %9.3f  %7.0f  low-confidence system ms and minor faults across the walk (-1 unavailable)\n", "expressions.usage",
             median[BUSTER_CHECK_CLOCK_WALK_PARTS], median[BUSTER_CHECK_CLOCK_WALK_PARTS + 1]);
+}
+
+// The value of the report's `time-process NAME VALUE` line in `text` (`tsc-mhz`, `tokens`), or -1 where it has no such
+// line, or one whose value isn't a nonnegative number.
+static __attribute__((unused)) double check_clock_read_process(const char* text, const char* name)
+{
+    char wanted[64];
+    snprintf(wanted, sizeof(wanted), "time-process\t%s\t", name);
+    const size_t length = strlen(wanted);
+    const char* line = text != NULL && strncmp(text, wanted, length) == 0 ? text : NULL;
+    const char* found = text != NULL && line == NULL ? strstr(text, wanted) : NULL;
+    // A match inside a line isn't the row: it must start one.
+    while (found != NULL && found[-1] != '\n')
+    {
+        found = strstr(found + 1, wanted);
+    }
+    line = line != NULL ? line : found;
+    double value = -1;
+    const bool read = line != NULL && sscanf(line + length, "%lf", &value) == 1 && value >= 0;
+    return read ? value : -1;
 }
 
 // Reads a report check_clock_report wrote, in `text` among other lines (a compile's diagnostics): each stage's
