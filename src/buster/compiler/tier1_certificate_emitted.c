@@ -62,7 +62,8 @@
 //
 // Not decoded yet, so not certified, each counted by its reason (Tier1CertEmittedReason): stack parameters and arguments
 // where the frame base register doesn't reach them, dynamic frames (alloca, a dynamic outgoing area, a realigned frame
-// whose frame base register isn't rsp), a probe's prologue, a variadic definition's register save area, the x87's values
+// whose frame base register isn't rsp), a probe's prologue, a variadic definition's register save area, an asm body's
+// records (#1839, TIER1_RULE_ASM: a template whose effects the IR doesn't say), the x87's values
 // (a long double's, an aggregate's x87 parts), indirect jumps to several labels, an entry block that is a loop's, and a
 // machine row of a form x86 semantics' effects don't cover or whose records name a role's register implicitly. The
 // allocation's own certificate (tier1_certificate_cfg.c) still covers them. Canonical 32-bit storage (a 4-byte value's upper half zero) is the selection's contract and isn't
@@ -90,6 +91,8 @@ typedef enum Tier1CertEmittedReason
     // implicitly (#1284: its one ORIGINAL wouldn't say when); a long double's (its x87 stack).
     TIER1_CERT_EMITTED_VECTOR,
     TIER1_CERT_EMITTED_X87,
+    // An asm body's records (#1839), the front end's template, whose own branches and registers the decoding doesn't follow.
+    TIER1_CERT_EMITTED_ASM,
     // The code doesn't decode to its own certificate: a refusal.
     TIER1_CERT_EMITTED_ORIGIN,
     TIER1_CERT_EMITTED_DECODE,
@@ -120,6 +123,7 @@ static __attribute__((unused)) const char* tier1_cert_emitted_reason_name(Tier1C
         "probe",
         "vector",
         "x87",
+        "asm",
         "origin",
         "decode",
         "kernel",
@@ -1833,6 +1837,10 @@ static Tier1CertEmittedReason tier1_cert_emitted_supported(const Tier1SelectPlan
         if (rule == TIER1_RULE_ALLOCA || rule == TIER1_RULE_ALLOCA_IMMEDIATE || rule == TIER1_RULE_STACK_RESTORE)
         {
             reason = TIER1_CERT_EMITTED_DYNAMIC;
+        }
+        else if (!plan->covered[node] && rule == TIER1_RULE_ASM)
+        {
+            reason = TIER1_CERT_EMITTED_ASM;
         }
         else if (op == IR_PARAM && tier1_select_entry_parameter(function, node) && tier1_select_parameter_place(function, function->a[node]).kind != BUSTER_TIER1_PLACE_GENERAL &&
                  tier1_select_parameter_place(function, function->a[node]).kind != BUSTER_TIER1_PLACE_VECTOR)

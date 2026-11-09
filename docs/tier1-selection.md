@@ -1370,6 +1370,41 @@ reload left out, a staging copy onto a live register, a claimed placement whose
 roles share a register Tier 0 keeps apart or whose opmask register named by number
 is k0.
 
+## Asm bodies (#1839)
+
+A body call ([the IR guide](ir.md)'s "Asm bodies") is `TIER1_RULE_ASM`, its
+`immediate` the body's index, of no operand and no result: its block argument is
+the `stack_addr` of a frame object, which no register holds (the node has no
+effective use, so the address is computed only where something else reads it).
+The selector takes a body whose block is a `stack_addr` and which touches none of
+rsp, rbp and r15 (`tier1_select_asm_supported`), as the producer has them. Like a
+row call it is no call of a function's: no argument moves, no outgoing area. Only
+the CFG consumer takes it (`tier1_emit_cfg_asm`), which writes, at the node's
+definition phase:
+
+1. the stores of the values that live past the node in the general registers the
+   body touches into their call-save rows, a callee-saved register's among them
+   (rbx for `cpuid`, where a value crosses a call there), and of the floating
+   values in the xmm registers it touches into theirs, as a call saves them;
+2. the body's records, each that addresses the operand block
+   (`BUSTER_TIER0_ASM_BLOCK`) addressing the block's frame object from the frame's
+   base register, its own branches the function's branches to their records (one
+   to the body's end the first restore's), sized with the function's;
+3. the loads back.
+
+The general registers it touches are its fixed registers
+(`tier1_select_node_fixed`), so that the frame gives them call-save rows where a
+value crosses the body in one (`tier1_emit_cfg_saves`, a callee-saved register's
+too where the function calls), owed values are taken back before it, and its rows
+are dropped after it, as a fixed rule's sequence has them; the xmm registers' rows
+are a call's. Its frame is a calling function's (rsp aligned at the template, no
+leaf frame), and the prologue saves the callee-saved registers it touches
+(`Tier1EmitPrepared.asm_callee`), as clang's saves `cpuid`'s rbx. The template's
+own records aren't bounded by the target's forms (as the assembler takes any
+instruction whatever `-march` says). The code's certificate leaves a function with
+a body uncertified (`asm`), as it leaves the x87's: the decoding doesn't follow a
+template's registers and branches; the allocation's certificate still covers it.
+
 ## Tests and benchmark
 
 `test-tier1-select` checks identical scalar/vector costed plans and emitted

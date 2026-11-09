@@ -702,8 +702,9 @@ isn't rsp; long doubles (the x87 stack, an aggregate's x87 parts among them),
 a prologue's stack probes, a variadic definition's register save area, an
 indirect jump to several labels, a call's stack arguments or a stack
 parameter where the frame base register isn't rsp's (or the incoming area's),
-an entry block that is a loop's, and a machine row of an implicit register or
-an uncovered form. The allocation's certificate still covers
+an entry block that is a loop's, a machine row of an implicit register or
+an uncovered form, and an asm body (#1839, `asm`: a template's own registers and
+branches, which the decoding doesn't follow). The allocation's certificate still covers
 them, and the straight-line consumer's functions keep the interval
 certificate. Canonical 32-bit storage (a 4-byte value's upper half zero) is the
 selection's contract and isn't checked: a 4-byte value is its low 4 bytes.

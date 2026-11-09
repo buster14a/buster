@@ -2435,7 +2435,7 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
             plan->helper = BUSTER_CHECK_NONE;
         }
     }
-    else if (valid && reason == NULL && helped && !x87 && !flagged && code.count != 0 && !program->asm_helpers &&
+    else if (valid && reason == NULL && helped && !x87 && !flagged && code.count != 0 && !program->asm_helpers && !program->asm_bodies &&
              !check_program_helper_forced(program, CHECK_PROGRAM_HELPER_ASM) &&
              check_asm_row(program, s, places, constraints, index, scalar, &row, &valid, output, scratch))
     {
