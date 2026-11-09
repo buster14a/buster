@@ -4259,9 +4259,17 @@ The later phases are left:
   operand; both on main too.
 - **Errors no view part leaves out.** A body's error in a condition, a for
   header, a statement expression or a declaration other than through its
-  initializer still leaves its body out, and its warnings with it. An error
-  outside every body other than an initializer's (a declaration's, an
-  unsized array's or a const object's initializer) still leaves the unit
+  initializer still leaves its body out, and its warnings with it. A
+  file-scope declaration's error that no smaller part holds (its specifiers',
+  its declarator's, an invalid type's, an unsized array's or a const object's
+  initializer's) leaves the whole declaration out of the view, to its `;`
+  (`check_driver_rejected_declaration`, #1447), and every body that names one
+  of its names. A dropped part's error counts just before the token after it,
+  so the definition that follows keeps its unused variables. Clang instead
+  keeps such a declaration bound and invalid, its uses quiet: the bodies that
+  name it lose their warnings here, and so does the declaration's own
+  initializer (`const int d = 1 / 0;`'s division). A file-scope use elsewhere,
+  or an error in a function definition outside its body, still leaves the unit
   without its common warnings. A function's unused parameter that its
   left-out part names through a local of the same name gets no
   `-Wunused-parameter`, where clang gives one.
