@@ -368,7 +368,8 @@ clang's code generation; the lowering refuses it by name). The template names
 it `%k0`; clang refuses every modifier of one, and so does the lowering. The
 helper loads it zero-extended into rax and moves it in by its width (`kmovw
 %eax, %k0`, `kmovd`, `kmovq`), and stores an output's bits through a general
-register, as clang's code does. kmovw needs AVX-512F, kmovd and kmovq
+register, as clang's code does (a statement of one keeps its helper: #1839's
+asm bodies don't move them). kmovw needs AVX-512F, kmovd and kmovq
 AVX-512BW, by the body's instruction set (its function's target attributes
 among them): without them, clang can't place the operand ("could not allocate
 output register"), and the lowering refuses it by name.
