@@ -238,6 +238,7 @@ alternative (`check_asm_constraint_parse`):
 | --- | --- |
 | `r`, `q`, `l`, `R`, `Q` | a general register of the class (`Q`: rax, rbx, rcx, rdx; `R`: the first eight) |
 | `a b c d S D` | that register |
+| `A` | rax for up to 8 bytes, printed by its 64-bit name; rdx:rax for an `__int128` |
 | `x`, `v` | an XMM register, for a `float` or a `double`; a vector in a template of no instructions |
 | `t`, `u` | the x87's st(0) and st(1), for a `float`, a `double` or a `long double` |
 | `y` | an MMX register, mm0 up, for an integer, a pointer, a `float` or a `double` of up to 8 bytes |
@@ -279,6 +280,17 @@ clang's code gives it (CodeGen's `AddVariableConstraints`;
 The variable is an ordinary local otherwise: the operand block takes its value,
 or an output's address, as any operand's, and the helper loads it into the
 register (a callee-saved one among the helper's pushes).
+
+### A's operands
+
+`A` is clang 23's on x86-64 (#1846): a value of up to 8 bytes in rax,
+zero-extended there as clang's code widens it to 64 bits, which the template
+names by rax's 64-bit name (`%rax` for an `int` too; `%k0` is `%eax`); and an
+`__int128` in rdx:rax, its low half in rax, its high half in rdx, which the
+template names `%rax` (GCC's "ax:dx pair"). An input fixed to rax or rdx shares
+its register with a pair output that isn't early-clobbered or `+`, as clang's
+code shares it: mulq's `"=A"(r) : "a"(x), "rm"(y)` multiplies x in rax. The
+helper loads and stores the pair by its halves, from a slot of 16 bytes.
 
 ### MMX's operands
 
@@ -610,8 +622,8 @@ Each refusal names its feature, as the driver prints it ("unsupported: ..."):
 - flag outputs named in their templates (clang prints the register its code
   sets the condition into after the template), of a size no integer store
   covers, and with another alternative (`"=r@ccz"`, which clang takes as `r`);
-- the rax and rdx pair's constraint (`A`), and the other letters it doesn't
-  place;
+- the letters it doesn't place, and `A` of other sizes than up to 8 bytes and
+  an integer's 16, and in a template that takes directives with 16 bytes;
 - MMX operands with a modifier (clang refuses each), beside x87 operands in
   one statement, and in templates that take directives;
 - opmask operands with a modifier, in templates that take directives, and
@@ -777,6 +789,11 @@ has the commands, the logs and the default path's numbers against main.
     width, a 32-bit name, outputs of a register's and a memory constraint, a
     `+` operand in rbx, a matching input in its variable's register, an XMM
     register's, and a template of no instructions;
+  - A's operands (#1846): mulq's 128-bit product into rdx:rax beside an `"a"`
+    input that shares rax, a `+` pair, a pair's input matching its output, and
+    values of 2 to 8 bytes in rax, printed by their 64-bit names (an
+    `unsigned` zero-extended there, a `double`'s bits); and the refusal of a
+    pair in a template that takes directives;
   - MMX's operands (#1846): `y`'s of a `long`, an `unsigned`, a `short`, a
     byte, a `double`'s bits, an early-clobbered output, a
     matching input, MMX clobbers that the operands avoid, an MMX input into a
