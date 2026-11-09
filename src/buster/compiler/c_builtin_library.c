@@ -378,6 +378,15 @@ static void cbuiltin_library_append(CBuiltinLibraryText* text, const char* bytes
 static bool cbuiltin_library_spell_type(const char* encoding, uint32_t length, uint32_t* position, bool sugared, bool* sized, CBuiltinLibraryText* text)
 {
     uint32_t at = *position;
+    // A vector's lanes (`V8s`: eight shorts), spelled as clang's TypePrinter spells a vector_size type.
+    uint32_t lanes = 0;
+    const bool vector = at < length && encoding[at] == 'V';
+    at += vector;
+    while (vector && at < length && encoding[at] >= '0' && encoding[at] <= '9' && lanes < 100000)
+    {
+        lanes = lanes * 10u + (uint32_t)(encoding[at] - '0');
+        at += 1;
+    }
     uint32_t longs = 0;
     bool is_unsigned = false;
     bool complex = false;
@@ -428,6 +437,16 @@ static bool cbuiltin_library_spell_type(const char* encoding, uint32_t length, u
     {
         cbuiltin_library_append(text, "_Complex ");
     }
+    if (vector && base != NULL)
+    {
+        char size[32];
+        snprintf(size, sizeof(size), "%u", lanes);
+        cbuiltin_library_append(text, "__attribute__((__vector_size__(");
+        cbuiltin_library_append(text, size);
+        cbuiltin_library_append(text, " * sizeof(");
+        cbuiltin_library_append(text, base);
+        cbuiltin_library_append(text, ")))) ");
+    }
     cbuiltin_library_append(text, base != NULL ? base : "");
     while (at < length && (encoding[at] == '*' || encoding[at] == 'C' || encoding[at] == 'R'))
     {
@@ -437,7 +456,7 @@ static bool cbuiltin_library_spell_type(const char* encoding, uint32_t length, u
         at += 1;
     }
     *position = at;
-    return base != NULL;
+    return base != NULL && (!vector || (lanes != 0 && !constant && !complex));
 }
 
 // A plain library builtin's prototype, from its row's encoding and attributes (`r` noreturn), as clang's diagnostics
@@ -511,19 +530,22 @@ static __attribute__((unused)) bool cbuiltin_library_nonnull(const char* attribu
 // says), with " _Nonnull" where its row's N attribute lists it and `sugared` says. Into `buffer` of `capacity` bytes,
 // NUL-terminated. False where it and the parameters before it aren't spelled so, or it doesn't fit.
 static __attribute__((unused)) bool cbuiltin_library_spell_parameter(const char* encoding, uint32_t length, const char* attributes, uint32_t attributes_length,
-                                                                     uint32_t index, bool sugared, bool c99, char* buffer, uint32_t capacity, bool* sized)
+                                                                     uint32_t index, bool sugared, bool c99, const CBuiltinLibraryNamed* named, char* buffer,
+                                                                     uint32_t capacity, bool* sized)
 {
-    char skipped[128];
+    char skipped[256];
     CBuiltinLibraryText skip = {
         .bytes = skipped,
         .capacity = sizeof(skipped),
         .restrict_spelling = "restrict",
+        .named = named,
     };
     CBuiltinLibraryText text = {
         .bytes = buffer,
         .capacity = capacity,
         .full = capacity == 0,
         .restrict_spelling = c99 ? "restrict" : "__restrict",
+        .named = named,
     };
     uint32_t position = 0;
     bool ignored = false;
@@ -541,6 +563,43 @@ static __attribute__((unused)) bool cbuiltin_library_spell_parameter(const char*
         cbuiltin_library_append(&text, " _Nonnull");
     }
     return valid && !text.full;
+}
+
+// clang's description after a vector parameter's spelling (#1447, diagnose_as_builtin's error of mismatched types): the
+// `index`th (from 0) of `encoding`'s parameters, where it is a vector and no pointer, as "(vector of 8 'short' values)",
+// into `buffer` of `capacity` bytes. False where it isn't one, or it doesn't fit.
+static __attribute__((unused)) bool cbuiltin_library_vector_description(const char* encoding, uint32_t length, uint32_t index, char* buffer, uint32_t capacity)
+{
+    char skipped[256];
+    CBuiltinLibraryText skip = {
+        .bytes = skipped,
+        .capacity = sizeof(skipped),
+        .restrict_spelling = "restrict",
+    };
+    uint32_t position = 0;
+    bool ignored = false;
+    bool valid = cbuiltin_library_spell_type(encoding, length, &position, true, &ignored, &skip);
+    for (uint32_t i = 0; valid && i < index; i += 1)
+    {
+        skip.length = 0;
+        skip.full = false;
+        valid = position < length && encoding[position] != '.' && cbuiltin_library_spell_type(encoding, length, &position, true, &ignored, &skip);
+    }
+    const uint32_t start = position;
+    skip.length = 0;
+    skip.full = false;
+    valid = valid && position < length && encoding[position] == 'V' && cbuiltin_library_spell_type(encoding, length, &position, true, &ignored, &skip);
+    // The element's spelling follows the attribute's, and no pointer follows it.
+    const char* close = valid ? memchr(skipped, ')', skip.length) : NULL;
+    const char* element = close != NULL && skip.length > 5 ? strstr(skipped, ")))) ") : NULL;
+    valid = valid && !skip.full && element != NULL && skipped[skip.length - 1] != '*';
+    uint32_t lanes = 0;
+    for (uint32_t at = start + 1; valid && at < length && encoding[at] >= '0' && encoding[at] <= '9'; at += 1)
+    {
+        lanes = lanes * 10u + (uint32_t)(encoding[at] - '0');
+    }
+    const int written = valid ? snprintf(buffer, capacity, "(vector of %u '%.*s' values)", lanes, (int)(skip.length - (uint32_t)(element + 5 - skipped)), element + 5) : -1;
+    return valid && written > 0 && (uint32_t)written < capacity;
 }
 
 // The header that clang's note names for a row's header token (Builtins::getHeaderName), NULL for NO_HEADER or a token

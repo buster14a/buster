@@ -7591,17 +7591,27 @@ arguments against the function. The checker now gives these as clang does.
     not match", at the index, naming the parameter's type as its declarator
     spells it and the builtin's as clang's declaration of it does
     (`cbuiltin_library_spell_parameter`: `'__size_t' (aka 'unsigned long')`,
-    `'const char *restrict _Nonnull'` for a nonnull one). Refused by name are
-    the cases whose diagnostics are clang's own elsewhere: an undeclared
-    library function's name (its implicit declaration's), a builtin's name in
-    another expression (`&__builtin_abs`), a redeclared builtin, a builtin
-    parameter's type the spelling doesn't cover (a vector's, `FILE`'s); an
-    index of 0, on which clang 23 crashes; and more than 32 arguments. A
-    definition's identifier list compares its parameters by their declarations'
-    types, the promoted prototype's standing aside, as clang's ParmVarDecl
-    types do. It changes nothing else here: the
+    `'const char *restrict _Nonnull'` for a nonnull one, a vector's
+    `'__attribute__((__vector_size__(8 * sizeof(short)))) short' (vector of 8
+    'short' values)`, `FILE`'s by the unit's typedef, `'FILE *restrict
+    _Nonnull' (aka 'struct F *restrict')`). A builtin's name in another
+    expression, not called (`&__builtin_abs`, `__builtin_abs + 0`), is clang's
+    "builtin functions must be directly called" at the name (at the outermost
+    parentheses around it), then the argument's error at the expression clang
+    recovers (its first token; a lone `&name`'s after the name), or, in a
+    sizeof's, alignof's or typeof's operand, which clang doesn't recover,
+    nothing more: the attribute is dropped. A redeclared builtin
+    (`int __builtin_abs(int);`) is still that builtin, but a static one.
+    More than 32 arguments are the count's error, as no builtin takes as many.
+    Refused by name are an undeclared library function's name, whose
+    diagnostics are its implicit declaration's (`diagnose_as_builtin(memcpy,
+    ...)` with no declaration of `memcpy`), and an index of 0, on which clang
+    23 crashes. A definition's identifier list compares its parameters by
+    their declarations' types, the promoted prototype's standing aside, as
+    clang's ParmVarDecl types do. It changes nothing else here: the
     `-Wfortify-source` warnings clang gives the function's calls, as it gives
-    them a builtin's, the checker makes for no call.
+    them a builtin's, the checker makes for no call (it has no
+    `-Wfortify-source`).
 
   clang's NEON vectors (#1447), `neon_vector_type(N)` and
   `neon_polyvector_type(N)`, are vectors on x86-64 too: GNU vectors of a kind

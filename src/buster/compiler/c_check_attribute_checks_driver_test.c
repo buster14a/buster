@@ -874,6 +874,27 @@ static void check_test_driver_checks_attributes(CheckTest* test, const char* cla
         "int f(int, int) __attribute__((diagnose_as_builtin(__builtin_abs, 2), diagnose_as_builtin(__builtin_abs, 1)));\n",
         "int f(int x) __attribute__((diagnose_as_builtin((__builtin_abs), 1)));\n",
         "int f(int x) __attribute__((diagnose_as_builtin(((x)), 1)));\n",
+        // A builtin's name in another expression: "builtin functions must be directly called", then the argument's error at
+        // the expression clang recovers (none in sizeof's operand); a builtin's call is no builtin's name.
+        "int f(int) __attribute__((diagnose_as_builtin(&__builtin_abs, 1)));\n",
+        "int f(int) __attribute__((diagnose_as_builtin(&__builtin_abs)));\n",
+        "int f(int) __attribute__((diagnose_as_builtin((&__builtin_abs), 1)));\n",
+        "int f(int) __attribute__((diagnose_as_builtin(*__builtin_abs, 1)));\n",
+        "int f(int) __attribute__((diagnose_as_builtin(__builtin_abs + 0, 1)));\n",
+        "int f(int) __attribute__((diagnose_as_builtin(1 ? __builtin_abs : 0, 1)));\n",
+        "int f(int) __attribute__((diagnose_as_builtin(sizeof(__builtin_abs), 1)));\nint g(int) __attribute__((diagnose_as_builtin(__builtin_abs, 1)));\n",
+        "int f(int) __attribute__((diagnose_as_builtin(__builtin_abs(1), 1)));\n",
+        // A redeclared builtin is that builtin, but a static one.
+        "int __builtin_abs(int);\nint f(int) __attribute__((diagnose_as_builtin(__builtin_abs, 1)));\n",
+        "int __builtin_abs(int);\nint f(long) __attribute__((diagnose_as_builtin(__builtin_abs, 1)));\n",
+        "static int __builtin_abs(int);\nint f(int) __attribute__((diagnose_as_builtin(__builtin_abs, 1)));\n",
+        "void g(void) { int __builtin_abs(int); }\nint f(int) __attribute__((diagnose_as_builtin(__builtin_abs, 1)));\n",
+        // A vector's and FILE's parameter types, spelled as clang spells them; more arguments than the builtin takes.
+        "int f(int a, int b) __attribute__((diagnose_as_builtin(__builtin_ia32_pmaddwd128, 1, 2)));\n",
+        "typedef short v8 __attribute__((vector_size(16)));\nv8 f(v8 a, int b) __attribute__((diagnose_as_builtin(__builtin_ia32_pmaddwd128, 1, 2)));\n",
+        "typedef struct F FILE;\nint f(int a, int b, int c) __attribute__((diagnose_as_builtin(__builtin_vfprintf, 1, 2, 3)));\n",
+        "typedef struct F FILE;\nint f(FILE *a, const char *b, int c) __attribute__((diagnose_as_builtin(__builtin_vfprintf, 1, 2, 3)));\n",
+        "int f(int x) __attribute__((diagnose_as_builtin(__builtin_abs, 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1)));\n",
     };
     // diagnose_as_builtin on K&R definitions (#1447, gnu89's identifier lists): the declarations' types compare, not the
     // promoted prototype's, as clang's ParmVarDecl types do.
