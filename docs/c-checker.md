@@ -685,7 +685,30 @@ designator folds quietly, and under `-Wgnu-folding-constant` with `-Werror` or
 `-pedantic` reads "expression is not an integer constant expression; folding it
 to a constant is a GNU extension" at the expression's first token
 (`c_check_vla_fold_driver_test.c`). A block's automatic array keeps such a bound
-variable.
+variable, as does a `sizeof`'s type name anywhere.
+A variable-length array or variably modified type where C allows none takes
+clang's error at the declarator's name (`check_input_vla_place`,
+`check_input_vla_declaration`):
+- at file scope, "variable length array declaration not allowed at file
+  scope", or "variably modified type declaration …" where the declared type
+  is no array (`int (*p)[n]`);
+- a block's `extern` object, "… cannot have 'extern' linkage", by the same
+  two kinds;
+- a block's `static` array, "variable length array declaration cannot have
+  'static' storage duration";
+- a member, "fields must have a constant size: 'variable length array in
+  structure' extension will never be supported".
+
+A `sizeof` of a variable type name in a file-scope initializer
+(`int s = 1 + sizeof(int[n]);`) is "initializer element is not a compile-time
+constant", at the start of the initializer's element that holds it.
+
+Differences left: these errors stop the reader, where clang marks the
+declaration invalid and goes on. A file-scope cast to a variably modified
+type, and `_Alignof` of one, are still refused, though clang accepts them.
+A block's variable-length array with a non-empty initializer is still
+"invalid or unsupported declaration" (clang's "variable-sized object may not
+be initialized", at the bound).
 Immutable source-position diagnostic pragmas apply push/pop and exact warning
 group policy to these witnesses. Promoted warnings participate in first-error
 ordering and prevent object publication; `-w` suppresses them as Clang does.

@@ -293,6 +293,14 @@ typedef enum CheckInputMessage
     // A block's extern declaration with an initializer, at its name (#1447): clang's "declaration of block scope identifier
     // with linkage cannot have an initializer".
     CHECK_INPUT_BLOCK_EXTERN_INITIALIZER,
+    // A variable-length array or variably modified type where C allows none (#1447, check_input_vla_place), each at its
+    // declarator's name as clang's: at file scope, a block's static or extern object, a member.
+    CHECK_INPUT_VLA_FILE_SCOPE,
+    CHECK_INPUT_VM_FILE_SCOPE,
+    CHECK_INPUT_VLA_STATIC,
+    CHECK_INPUT_VLA_EXTERN,
+    CHECK_INPUT_VM_EXTERN,
+    CHECK_INPUT_VLA_FIELD,
 } CheckInputMessage;
 
 // CHECK_INPUT_DIRECT_INITIALIZER_ARRAY's detail: the literal the element takes besides a list, in clang's words.
@@ -448,6 +456,12 @@ static const char* const check_input_messages[] =
     [CHECK_INPUT_ENABLE_IF_CALL] = "no matching function for call",
     [CHECK_INPUT_ENABLE_IF_ADDRESS] = "cannot take address of function because it has one or more non-tautological enable_if conditions",
     [CHECK_INPUT_CPU_DISPATCH] = "invalid cpu_specific or cpu_dispatch declaration",
+    [CHECK_INPUT_VLA_FILE_SCOPE] = "variable length array declaration not allowed at file scope",
+    [CHECK_INPUT_VM_FILE_SCOPE] = "variably modified type declaration not allowed at file scope",
+    [CHECK_INPUT_VLA_STATIC] = "variable length array declaration cannot have 'static' storage duration",
+    [CHECK_INPUT_VLA_EXTERN] = "variable length array declaration cannot have 'extern' linkage",
+    [CHECK_INPUT_VM_EXTERN] = "variably modified type declaration cannot have 'extern' linkage",
+    [CHECK_INPUT_VLA_FIELD] = "fields must have a constant size: 'variable length array in structure' extension will never be supported",
 };
 
 // The type/action tables currently describe one C LP64 model: 32-bit wchar_t, x87 long double stored in 16 bytes, and
@@ -7743,6 +7757,13 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
                         {
                             const uint32_t at = name != BUSTER_CHECK_NONE ? name : failed_token;
                             check_input_warning(reader, CHECK_WARNING_ID_IGNORED_ATTRIBUTES, CHECK_WARNING_EVENT_GC_WEAK_FIELD, at, CHECK_WARNING_COMPLETE_AT_TOKEN, at);
+                        }
+                        // A block's record's variably modified member (#1447): clang's "fields must have a constant
+                        // size"; at file scope the bound gives it (check_input_vla_place).
+                        if (valid && name != BUSTER_CHECK_NONE && check_input_vla_modified(reader->types, type))
+                        {
+                            check_input_report(reader, name, CHECK_INPUT_VLA_FIELD);
+                            valid = false;
                         }
                         valid = valid && type_check_member(reader->types, &member, true, &flexible) == TYPE_ERROR_NONE;
                         if (!valid && !type_is_complete(reader->types, type) && type_kind(reader->types, type_strip_aligned(reader->types, type)) != BUSTER_TYPE_KIND_INCOMPLETE_ARRAY &&

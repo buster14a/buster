@@ -6,8 +6,11 @@
 // -Wgnu-folding-constant's "variable length array folded to constant array as an extension" at its name, once for the
 // declarator; a bit-field's width, an enumerator's value, a case label, a designator and a parameter's bound fold
 // silently, a block's automatic array stays variable, and an alignment or a type name's bound in a file-scope initializer
-// is an error. The shared warning harness compares the pinned Clang's complete diagnostics through both kernels and
-// requested lanes.
+// is an error. A variable-length array or variably modified type where C allows none takes clang's error at its place
+// (check_input_vla_place, check_input_vla_declaration): at file scope, a block's static or extern object, a member, and a
+// sizeof's type name in a file-scope initializer. Each such source has one, as the reader stops at it where clang goes
+// on. The shared warning harness compares the pinned Clang's complete diagnostics through both kernels and requested
+// lanes.
 
 static const char check_driver_vla_fold_contexts_source[] =
     "#define F (int)(1.0 + 2)\n"
@@ -70,6 +73,54 @@ static const char check_driver_vla_fold_forms_source[] =
     "int g2[k];\n"
     "int g3[(int)\"x\"[0] - 'x' + 1];\n";
 
+static const char check_driver_vla_place_source_0[] =
+    "#define F (int)(1.0 + 2)\n"
+    "int s = 1 + sizeof(int[F]);\n";
+
+static const char check_driver_vla_place_source_1[] =
+    "#define F (int)(1.0 + 2)\n"
+    "int g[sizeof(int[F])];\n";
+
+static const char check_driver_vla_place_source_2[] =
+    "#define F (int)(1.0 + 2)\n"
+    "void f(void) { static int b[F]; extern int c[F]; static int d[sizeof(int[F])]; }\n";
+
+static const char check_driver_vla_place_source_3[] =
+    "#define F (int)(1.0 + 2)\n"
+    "struct S { int m[sizeof(int[F])]; };\n";
+
+static const char check_driver_vla_place_source_4[] =
+    "int n;\n"
+    "int g[2][n];\n";
+
+static const char check_driver_vla_place_source_5[] =
+    "int n;\n"
+    "int (*p)[n];\n";
+
+static const char check_driver_vla_place_source_6[] =
+    "int n;\n"
+    "typedef int T[n];\n";
+
+static const char check_driver_vla_place_source_7[] =
+    "int n;\n"
+    "int s[2][2] = { { 1, 2 }, { [1] = 3 + (sizeof(int[n])) } };\n";
+
+static const char check_driver_vla_place_source_8[] =
+    "void f(int n) { extern int b[n]; }\n";
+
+static const char check_driver_vla_place_source_9[] =
+    "void f(int n) { extern int (*p)[n]; }\n";
+
+static const char check_driver_vla_place_source_10[] =
+    "void f(int n) { static _Thread_local int b[n]; }\n";
+
+static const char check_driver_vla_place_source_11[] =
+    "void f(int n) { struct S { int a; int (*p)[n]; }; }\n";
+
+static const char check_driver_vla_place_source_12[] =
+    "int n;\n"
+    "union U { int m[2][n]; };\n";
+
 static const CheckDriverDefaultWarningFixture check_driver_vla_fold_fixtures[] =
 {
     {
@@ -107,6 +158,72 @@ static const CheckDriverDefaultWarningFixture check_driver_vla_fold_fixtures[] =
         .name = "folded bounds under -Wno-gnu-folding-constant",
         .source = check_driver_vla_fold_forms_source,
         .options = { "-Wno-gnu-folding-constant" },
+    },
+    {
+        .name = "a type name's folded-looking bound in a file-scope initializer stays variable",
+        .source = check_driver_vla_place_source_0,
+        .errors = 1,
+    },
+    {
+        .name = "a file-scope bound that holds a variable type name",
+        .source = check_driver_vla_place_source_1,
+        .errors = 1,
+    },
+    {
+        .name = "a block's static array whose bound holds a variable type name",
+        .source = check_driver_vla_place_source_2,
+        .warnings = 2,
+        .errors = 1,
+    },
+    {
+        .name = "a member whose bound holds a variable type name",
+        .source = check_driver_vla_place_source_3,
+        .errors = 1,
+    },
+    {
+        .name = "a file-scope variable-length array",
+        .source = check_driver_vla_place_source_4,
+        .errors = 1,
+    },
+    {
+        .name = "a file-scope variably modified pointer",
+        .source = check_driver_vla_place_source_5,
+        .errors = 1,
+    },
+    {
+        .name = "a file-scope variable-length typedef",
+        .source = check_driver_vla_place_source_6,
+        .errors = 1,
+    },
+    {
+        .name = "a list item's variable type name in a file-scope initializer",
+        .source = check_driver_vla_place_source_7,
+        .errors = 1,
+    },
+    {
+        .name = "a block's extern variable-length array",
+        .source = check_driver_vla_place_source_8,
+        .errors = 1,
+    },
+    {
+        .name = "a block's extern variably modified pointer",
+        .source = check_driver_vla_place_source_9,
+        .errors = 1,
+    },
+    {
+        .name = "a block's static thread-local variable-length array",
+        .source = check_driver_vla_place_source_10,
+        .errors = 1,
+    },
+    {
+        .name = "a block's record's variably modified member",
+        .source = check_driver_vla_place_source_11,
+        .errors = 1,
+    },
+    {
+        .name = "a file-scope record's variable-length member",
+        .source = check_driver_vla_place_source_12,
+        .errors = 1,
     },
 };
 

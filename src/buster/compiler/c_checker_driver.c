@@ -223,6 +223,12 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_ENABLE_IF_CALL: result = "no matching function for call"; break;
         case CHECK_INPUT_ENABLE_IF_ADDRESS: result = "cannot take address of function because it has one or more non-tautological enable_if conditions"; break;
         case CHECK_INPUT_CPU_DISPATCH: result = "invalid cpu_specific or cpu_dispatch declaration"; break;
+        case CHECK_INPUT_VLA_FILE_SCOPE: result = "variable length array declaration not allowed at file scope"; break;
+        case CHECK_INPUT_VM_FILE_SCOPE: result = "variably modified type declaration not allowed at file scope"; break;
+        case CHECK_INPUT_VLA_STATIC: result = "variable length array declaration cannot have 'static' storage duration"; break;
+        case CHECK_INPUT_VLA_EXTERN: result = "variable length array declaration cannot have 'extern' linkage"; break;
+        case CHECK_INPUT_VM_EXTERN: result = "variably modified type declaration cannot have 'extern' linkage"; break;
+        case CHECK_INPUT_VLA_FIELD: result = "fields must have a constant size: 'variable length array in structure' extension will never be supported"; break;
     }
     return result;
 }
