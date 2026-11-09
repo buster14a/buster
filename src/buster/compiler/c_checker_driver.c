@@ -4944,18 +4944,15 @@ static bool check_driver_rejected_declaration(const Parser* parser, const CheckI
     {
         valid = edits[at] != 2 && parser->tree.roles[at] != PARSE_ROLE_OPEN_BODY;
     }
-    // The bodies that name one of its names, outside it; a file-scope use declines. A name another declaration outside it
-    // declares too (an earlier C23 definition's enumerator, #1447) is still declared where it's left out.
+    // The bodies that name one of its names, outside it; a file-scope use declines. A C23 enum redefinition's enumerator
+    // of a name the earlier definition declares too (#1447, CheckInput.ambiguous_index) is still declared where it's left
+    // out, by that one.
     uint32_t users = 0;
     for (uint32_t at = low; valid && at <= top; at += 1)
     {
         const uint32_t name = parser->tokens.names[at];
-        bool declared = parser->tokens.kinds[at] == PARSE_KIND_IDENTIFIER && input->declarations[at] == at && name != 0;
-        for (uint32_t other = 0; declared && other < count; other += 1)
-        {
-            declared = (other >= low && other <= top) || parser->tokens.kinds[other] != PARSE_KIND_IDENTIFIER || parser->tokens.names[other] != name ||
-                       input->declarations[other] != other;
-        }
+        const bool declared = parser->tokens.kinds[at] == PARSE_KIND_IDENTIFIER && input->declarations[at] == at && name != 0 &&
+                              (input->ambiguous_index == NULL || input->ambiguous_index[at] == 0);
         for (uint32_t use = 0; declared && valid && use < count; use += 1)
         {
             // (Another declaration of the name, an earlier C23 definition's enumerator among them, names nothing.)
@@ -4980,18 +4977,16 @@ static bool check_driver_rejected_declaration(const Parser* parser, const CheckI
         for (uint32_t at = low; users != 0 && at <= top; at += 1)
         {
             const uint32_t name = parser->tokens.names[at];
-            bool declared = parser->tokens.kinds[at] == PARSE_KIND_IDENTIFIER && input->declarations[at] == at && name != 0;
-            for (uint32_t other = 0; declared && other < count; other += 1)
-            {
-                declared = (other >= low && other <= top) || parser->tokens.kinds[other] != PARSE_KIND_IDENTIFIER || parser->tokens.names[other] != name ||
-                           input->declarations[other] != other;
-            }
+            const bool declared = parser->tokens.kinds[at] == PARSE_KIND_IDENTIFIER && input->declarations[at] == at && name != 0 &&
+                                  (input->ambiguous_index == NULL || input->ambiguous_index[at] == 0);
             for (uint32_t b = 0; declared && b < body_count; b += 1)
             {
                 bool names = false;
                 for (uint32_t use = ranges[b].begin; !names && use < ranges[b].end; use += 1)
                 {
-                    names = parser->tokens.kinds[use] == PARSE_KIND_IDENTIFIER && parser->tokens.names[use] == name && (quiet == NULL || quiet[use] == 0);
+                    // (A local of the name declared there, `void f(void) { int Z; }`, names nothing of this one's.)
+                    names = parser->tokens.kinds[use] == PARSE_KIND_IDENTIFIER && parser->tokens.names[use] == name && (quiet == NULL || quiet[use] == 0) &&
+                            input->declarations[use] != use;
                 }
                 if (names)
                 {
@@ -5427,8 +5422,10 @@ static void check_driver_rejected_common(const Parser* unit, const Parser* origi
         memcpy(known, errors, (uint64_t)error_count * sizeof(uint32_t));
         for (uint32_t token = 0; invalid_count != 0 && token < count; token += 1)
         {
-            known[known_count] = token;
-            known_count += first_input->invalid_declarations[token] != 0 && known_count < error_count + invalid_count;
+            if (first_input->invalid_declarations[token] != 0 && known_count < error_count + invalid_count)
+            {
+                known[known_count++] = token;
+            }
         }
     }
     // Rounds (#1447): a reading that finds errors of its own publishes them, and the next leaves their parts out too, so

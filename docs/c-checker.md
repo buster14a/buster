@@ -3885,7 +3885,9 @@ in a declaration's own declarator (not a typedef's, a parameter's, a deduced
   function's redeclaration is invalid too, and an object's is checked as if
   nothing were visible, but for its linkage: `static void v; int v;` gives
   "non-static declaration of 'v' follows static declaration", and that one is
-  invalid too.
+  invalid too. Another kind of entity's (`int a[-1]; int a(void);`, a typedef
+  after either) is checked against it as against any other, clang's
+  "redefinition of 'a' as different kind of symbol".
 - **Its uses are quiet.** `check_input_binding_answers` gives each use of an
   invalid declaration no declaration and the silent report
   `CHECK_INPUT_INVALID_USE`, which recovers as an undeclared name's does
@@ -4137,7 +4139,10 @@ do:
   - A compatible one declares the earlier type, and its names are ambiguous
     within its body alone; an incompatible one keeps its own type, and the
     names both lists declare stay ambiguous.
-  - A unit with one reads its bodies in source order.
+  - A unit with one reads its bodies in source order. A rejected unit's later
+    readings, which leave the redefinition out, count its enumerators of the
+    earlier one's names as still declared there (`CheckInput.ambiguous_index`),
+    and a body's own local of such a name as no use of it.
 
   Left: a block's redefinition, whose notes clang qualifies (`f()::X`), still
   refuses with the generic error; a third definition's ambiguous uses note its

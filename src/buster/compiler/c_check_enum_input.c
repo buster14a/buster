@@ -172,6 +172,7 @@ static bool check_tag_enum_ambiguous(CheckInputReader* reader, uint32_t token, u
         {
             memset(reader->ambiguous_index, 0, (uint64_t)count * sizeof(uint32_t));
         }
+        reader->output->ambiguous_index = reader->ambiguous_index;
     }
     bool room = reader->ambiguous_index != NULL && reader->ambiguous_count < reader->ambiguous_capacity;
     if (reader->ambiguous_index != NULL && !room)
@@ -295,6 +296,8 @@ static bool check_tag_enum_compatible(CheckInputReader* reader, const CheckTagFr
         const uint32_t old_name = check_tag_name_token(parser, earlier_keyword, name, &old_open);
         const bool bodied = old_open < parser->tokens.count && parser->tokens.kinds[old_open] == PARSE_KIND_L_BRACE;
         const uint32_t old_close = bodied ? parser->tree.parents[old_open] : old_open;
+        // The earlier list: the identifiers of its body that declare themselves as enumerators. An enum's body holds no
+        // other declaration (a tag in an enumerator's value is a type name's, not a declarator's).
         uint32_t old_count = 0;
         for (uint32_t t = bodied ? old_open + 1 : old_close; t < old_close; t += 1)
         {
