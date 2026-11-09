@@ -118,6 +118,9 @@ enum
     // statement increment or decrement (#1447, clang's CheckForLoopConditionalStatement and CheckForRedundantIteration):
     // -Wfor-loop-analysis, off by default, under -Wloop-analysis and -Wmost and so -Wall.
     CHECK_WARNING_ID_FOR_LOOP_ANALYSIS = 110,
+    // An implicit conversion from one named enumeration to another (#1447, the end of clang's CheckImplicitConversion), an
+    // enumerator taken as its enumeration: -Wimplicit-enum-enum-cast, on by default, under -Wenum-conversion.
+    CHECK_WARNING_ID_IMPLICIT_ENUM_ENUM_CAST = 111,
     CHECK_WARNING_ID_COUNT,
 };
 
