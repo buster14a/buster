@@ -993,9 +993,9 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
             const TypeId second_type = second < stream->count ? check_stream_type(stream, second) : 0;
             // A cast's typedef is its type name's (`(D)1`'s D), any other operand's its object's.
             const uint32_t first_spelling = first < graph->count && graph->ops[first] == CHECK_OP_CAST ? check_input_operand_type_spelling(input, parser, first) :
-                                                                                                        check_semantic_operand_spelling(parser, input, first);
+                                                                                                        check_semantic_operand_spelling(parser, input, stream, types, first);
             const uint32_t second_spelling = second < graph->count && graph->ops[second] == CHECK_OP_CAST ? check_input_operand_type_spelling(input, parser, second) :
-                                                                                                           check_semantic_operand_spelling(parser, input, second);
+                                                                                                           check_semantic_operand_spelling(parser, input, stream, types, second);
             if (report->diagnostic == CHECK_DIAG_INVALID_TYPE && first_type != 0 && second_type != 0)
             {
                 const bool second_wrong = check_action_kind(types, first_type) == BUSTER_TYPE_KIND_FLOATING;
