@@ -4256,9 +4256,79 @@ own completed type where it had none (`(int[]){1, 2}`). Any other array type
 is clang's "cannot initialize array of type 'int[3]' with array of type
 'int[2]'" at the name (`CHECK_INPUT_ARRAY_LITERAL_MISMATCH`, its value the
 literal's TypeId, which lanes remap), recovered, the array keeping its type and
-no initializer. Clang's typo correction ("did you mean"), which buster lacks,
-keeps a misspelled name's initializer a value, so there clang gives the error
-where buster doesn't.
+no initializer.
+
+An undeclared name that is a typo of a visible one is clang's (#1447,
+`c_check_typo.c`). The rules are clang 23's, as probed:
+
+- **Candidates.** The names visible at the use: the innermost declaration of
+  each, an implicitly declared function's among them in its block. A name
+  whose length differs
+  from the typo's by more than a third of it is skipped
+  (`TypoCorrectionConsumer::addName`), and so is one further than
+  (length + 2) / 3 by Levenshtein's distance. The nearest is taken if no other
+  name the context takes is as near and the typo's length is at least three
+  times its distance.
+- **A value** (`DiagnoseEmptyLookup`) takes an object, a function or an
+  enumerator; within an expression, before `=`, `->` or `.`, not a function
+  (`CastExpressionIdValidator`). A statement's first name takes an object
+  alone before `=`, and any value otherwise (`StatementFilterCCC`). Its error reads
+  "use of undeclared identifier 'countr'; did you mean 'counter'?", with
+  "'counter' declared here". The use then binds to that declaration as if it
+  were written (`CHECK_INPUT_UNDECLARED_CORRECTED`, recovered), so the later
+  diagnostics follow from its type: a conversion's error, a case label's
+  constant, a static initializer's "not a compile-time constant" (which the
+  driver keeps at the corrected name's token after its own error); the unused
+  declarations' analysis counts the use. A name just after a cast's `)`
+  isn't corrected.
+- **An undeclared function's call** in C99 and later (`ImplicitlyDefineFunction`,
+  only where its diagnostic is an error) takes a function. Its error gets
+  "did you mean 'compute'?" at the call and "'compute' declared here", but not
+  where the nearest is itself implicitly declared. No search is made where
+  the name was declared with linkage before, another call's implicit
+  declaration or a block's extern (clang's `ExternCPrev`). The call still
+  declares the function implicitly.
+- **The limit.** At most 50 searches are made in a unit
+  (`-fspell-checking-limit`), counted in source order: the values', the
+  calls', and clang's search at each call of a prototyped function with too
+  few or too many arguments (`TryTypoCorrectionForCall`, which suggests
+  nothing in C). The calls' suggestions past the limit are dropped once the
+  values' are known (`check_typo_finish`).
+
+The search runs only after an undeclared name, so a valid unit pays nothing.
+It replays the binding stream's scope stack once per unit (`CheckTypoScope`,
+one for the walk's calls and one for the answers' values), then prefilters
+the visible names by length (`3 * |difference| <= length`) in AVX-512. Each
+distance comes from Myers's bit-parallel algorithm, with the candidate's
+equality masks from byte compares; names over 64 bytes, and the scalar path,
+use the dynamic-programming table, the twin that `test-checker` checks against
+(`check_test_typo_distances`). On a 5,000-name unit, 66 searches add about
+6 ms to a 12 ms read. A deferred reader corrects nothing on its lanes: a unit
+with an undeclared name fails them and is read again in source order.
+
+Left as they were:
+
+- Clang also offers keywords where it reads an expression or a statement's
+  start, and on taking one parses the statement again with it (`whil;` then
+  gives "expected '(' after 'while'"). Where a keyword (`do`, `sizeof`,
+  `int`, ...) is as near as the best value, or a visible typedef is at a
+  statement's start before `(`, `[` or a name, buster suggests nothing; so
+  `int x = whil;` gets no "did you mean 'while'?".
+- Type names are clang's parser's to correct (`DiagnoseUnknownTypeName`):
+  `myin x;`, `sizeof(myin)`, `(myin)x` and `_Alignof(myin)` keep buster's
+  parse errors, with no suggestion. Neither does an implicit declaration's
+  diagnostic that `-Werror` makes an error before C99.
+- Later diagnostics spell the name as written, not the one taken
+  (`const int counter; countr = 5;`), and a function designator's
+  comparison statement keeps its `-Wunused` and `-Wparentheses` notes.
+- A name the walk itself reads, a `typeof` operand, an array's bound or an
+  enumerator's value, is not corrected: an undeclared one there still stops
+  the reader, typo or not, as on main.
+- A library function implicitly declared in an earlier function is no
+  candidate, where clang's declaration stays visible at file scope.
+- A warning at an operator or a declarator whose operand was corrected
+  (`-Wpointer-sign`, a qualifier's) comes before the correction's error,
+  where clang's comes after it.
 
 Type attributes' errors don't stop the reader either (`check_input_attribute_type`).
 What clang 23 does with each is followed:

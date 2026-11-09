@@ -241,6 +241,10 @@ static bool check_deferred_binding_answers(CheckDeferred* deferred, CheckInputRe
     }
     if (used)
     {
+        // No typo is corrected here, nor on the lanes, which share the reader's state (#1447): a unit with an undeclared
+        // name fails the lanes and is read again in source order (check_input_deferred_run), which corrects it.
+        const bool typo_disabled = reader->typo_disabled;
+        reader->typo_disabled = true;
         const uint64_t mark = reader->scratch->length;
         const uint32_t group_size = check_deferred_post_group(deferred->body_count, lanes);
         const uint32_t groups = (deferred->body_count + group_size - 1) / group_size;
@@ -274,6 +278,7 @@ static bool check_deferred_binding_answers(CheckDeferred* deferred, CheckInputRe
         deferred->expression_retry |= !valid;
         reader->output->resource |= !valid;
         arena_pop_to(reader->scratch, mark);
+        reader->typo_disabled = typo_disabled;
     }
     return used;
 }
