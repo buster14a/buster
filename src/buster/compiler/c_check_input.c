@@ -6731,7 +6731,14 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                         if (type != 0 && part->kind == BUSTER_TYPE_KIND_ARRAY &&
                             __builtin_expect(__builtin_mul_overflow(type_size(reader->types, element), part->extent, &bytes) || bytes > BUSTER_TYPE_MAX_OBJECT_BYTES, 0))
                         {
-                            check_input_report_typed(reader, part->token + 1, CHECK_INPUT_ARRAY_TOO_LARGE, type, BUSTER_CHECK_NONE, part->extent);
+                            // At the bound, past a parameter's `static` and qualifiers (review on #1819).
+                            uint32_t bound = part->token + 1;
+                            uint32_t skipped = 0;
+                            while (bound < parser->tokens.count && (parser->tokens.names[bound] == C_NAME_STATIC || check_input_qualifier(parser, bound, &skipped)))
+                            {
+                                bound += 1;
+                            }
+                            check_input_report_typed(reader, bound, CHECK_INPUT_ARRAY_TOO_LARGE, type, BUSTER_CHECK_NONE, part->extent);
                             type = 0;
                         }
                         type = type != 0 ? check_input_vla_type(reader, part->token, type, frame->name, frame->parameter_context, part->kind, part->extent) : 0;
