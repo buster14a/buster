@@ -903,6 +903,49 @@ static const char* check_vector_bitreverse_shape_row(const X86Target* target, Ch
     return reason;
 }
 
+// The baseline's row of __builtin_elementwise_min, _max or _abs of integers whose EVEX row has no SSE or AVX form (#1834)
+// (check_vector_baseline_extremes, check_vector_baseline_absolute): its operands the EVEX row's, and an unsigned
+// compare's bias of the elements' sign bits its next (`constants`), the records rewritten. NULL or the reason.
+static const char* check_vector_baseline_elementwise(const X86Target* target, CBuiltinId builtin, CheckVectorShape shape, Tier0Operation* row,
+                                                     CheckVectorConstants* constants)
+{
+    const bool maximum = builtin == CBUILTIN_ELEMENTWISE_MAX;
+    const bool extreme = maximum || builtin == CBUILTIN_ELEMENTWISE_MIN;
+    const uint32_t e = shape.element;
+    const char* reason = NULL;
+    row->record_count = 0;
+    CheckVectorBaseline context = { row, shape.bytes, (target->features & BUSTER_X86_FEATURE(AVX)) != 0, true };
+    if (!shape.integer || (!extreme && builtin != CBUILTIN_ELEMENTWISE_ABS) || (e != 1 && e != 2 && e != 4 && e != 8))
+    {
+        reason = "elementwise vector builtins unavailable at this target";
+    }
+    else if (extreme && e == 8 && (target->features & BUSTER_X86_FEATURE(SSE42)) == 0)
+    {
+        reason = "vector minimum and maximum of 64-bit elements without SSE4.2";
+    }
+    else if (extreme)
+    {
+        uint8_t bias = 0;
+        if (!shape.is_signed && e != 2)
+        {
+            check_vector_constant(row, constants, 1ull << (8 * e - 1), e, BUSTER_TYPED_CLASS_VECTOR, shape.bytes);
+            context.valid = row->operand_count == 3;
+            bias = BUSTER_TIER0_ROLE_VECTOR(2);
+        }
+        check_vector_baseline_extremes(&context, maximum, e, shape.is_signed, bias);
+    }
+    else
+    {
+        check_vector_baseline_absolute(&context, e);
+    }
+    Tier0Operation baseline;
+    if (reason == NULL && !(context.valid && check_vector_baseline_row(target, row, &baseline)))
+    {
+        reason = extreme ? "vector minimum and maximum unavailable at this target" : "vector absolute values unavailable at this target";
+    }
+    return reason;
+}
+
 // The row of a __builtin_elementwise_* function at a vector type, of `arguments` operands (all of the type, which its
 // result is too): of integers, max and min, abs, saturating addition and subtraction, population counts, leading and
 // trailing zero counts (clzg's and ctzg's second operands the elements a zero element takes) and funnel shifts; of
@@ -1194,9 +1237,7 @@ static const char* check_vector_elementwise_shape_row(const X86Target* target, C
             // place (check_lower_operation_index), or its refusal by name.
             const bool extreme = builtin == CBUILTIN_ELEMENTWISE_MAX || builtin == CBUILTIN_ELEMENTWISE_MIN;
             reason = check_vector_baseline_row(target, row, &baseline) ? NULL :
-                     extreme && shape.element == 8 ? "vector minimum and maximum of 64-bit elements without AVX-512" :
-                     extreme ? "vector minimum and maximum of these elements without SSE4.1" :
-                     builtin == CBUILTIN_ELEMENTWISE_ABS ? "vector absolute values without SSSE3" :
+                     extreme || builtin == CBUILTIN_ELEMENTWISE_ABS ? check_vector_baseline_elementwise(target, builtin, shape, row, constants) :
                      (target->features & needed) != needed ? check_vector_builtin_feature_reason(builtin, needed, target->features) :
                                                              "elementwise vector builtins unavailable at this target";
         }

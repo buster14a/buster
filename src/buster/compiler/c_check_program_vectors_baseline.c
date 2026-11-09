@@ -78,6 +78,78 @@ static void check_vector_baseline_shift(CheckVectorBaseline* context, uint8_t va
     check_vector_baseline_put(context, record);
 }
 
+// The minimum or maximum of VECTOR(0)'s and VECTOR(1)'s integers of `element` bytes into VECTOR(0) without the
+// instruction (#1834), as LLVM lowers it: unsigned words' maximum is a - b saturated plus b (PSUBUSW, PADDW), their
+// minimum a less that; the others select a where a mask is set and b elsewhere (PAND, PANDN, POR), the mask a's
+// compare with b (PCMPGT, b's with a for a minimum), unsigned elements' biased by their sign bit (XORPS with `bias`, the
+// role of a constant operand of it, which it overwrites) first. VECTOR(3) is its scratch.
+static void check_vector_baseline_extremes(CheckVectorBaseline* context, bool maximum, uint32_t element, bool is_signed, uint8_t bias)
+{
+    const uint8_t v0 = BUSTER_TIER0_ROLE_VECTOR(0);
+    const uint8_t v1 = BUSTER_TIER0_ROLE_VECTOR(1);
+    const uint8_t mask = BUSTER_TIER0_ROLE_VECTOR(3);
+    if (element == 2 && !is_signed && maximum)
+    {
+        check_vector_baseline_binary(context, BUSTER_CHECK_BASE_PACKED(context, PSUBUSW), v0, v0, v1);
+        check_vector_baseline_binary(context, BUSTER_CHECK_BASE_PACKED(context, PADDW), v0, v0, v1);
+    }
+    else if (element == 2 && !is_signed)
+    {
+        check_vector_baseline_binary(context, BUSTER_CHECK_BASE_PACKED(context, PSUBUSW), mask, v0, v1);
+        check_vector_baseline_binary(context, BUSTER_CHECK_BASE_PACKED(context, PSUBW), v0, v0, mask);
+    }
+    else
+    {
+        const uint32_t compare = element == 1 ? BUSTER_CHECK_BASE_PACKED(context, PCMPGTB) : element == 2 ? BUSTER_CHECK_BASE_PACKED(context, PCMPGTW) :
+                                 element == 4 ? BUSTER_CHECK_BASE_PACKED(context, PCMPGTD) : BUSTER_CHECK_BASE_PACKED(context, PCMPGTQ);
+        const uint8_t first = maximum ? v0 : v1;
+        const uint8_t second = maximum ? v1 : v0;
+        if (is_signed)
+        {
+            check_vector_baseline_binary(context, compare, mask, first, second);
+        }
+        else
+        {
+            check_vector_baseline_binary(context, BUSTER_CHECK_BASE_PACKED(context, XORPS), mask, first, bias);
+            check_vector_baseline_binary(context, BUSTER_CHECK_BASE_PACKED(context, XORPS), bias, bias, second);
+            check_vector_baseline_binary(context, compare, mask, mask, bias);
+        }
+        check_vector_baseline_binary(context, BUSTER_CHECK_BASE_PACKED(context, PAND), v0, v0, mask);
+        check_vector_baseline_binary(context, BUSTER_CHECK_BASE_PACKED(context, PANDN), mask, mask, v1);
+        check_vector_baseline_binary(context, BUSTER_CHECK_BASE_PACKED(context, POR), v0, v0, mask);
+    }
+}
+
+// The absolute values of VECTOR(0)'s integers of `element` bytes without SSSE3's PABS or AVX-512's VPABSQ (#1834), as
+// LLVM lowers them: bytes' are the unsigned minimum of each and its negation (PMINUB), words' the signed maximum (PMAXSW);
+// a dword's or qword's is its xor with its sign less its sign (PSRAD by 31, a qword's broadcast from its high dword by
+// PSHUFD). VECTOR(1) is its scratch.
+static void check_vector_baseline_absolute(CheckVectorBaseline* context, uint32_t element)
+{
+    const uint8_t v0 = BUSTER_TIER0_ROLE_VECTOR(0);
+    const uint8_t v1 = BUSTER_TIER0_ROLE_VECTOR(1);
+    if (element <= 2)
+    {
+        check_vector_baseline_binary(context, BUSTER_CHECK_BASE_PACKED(context, XORPS), v1, v1, v1);
+        check_vector_baseline_binary(context, element == 1 ? BUSTER_CHECK_BASE_PACKED(context, PSUBB) : BUSTER_CHECK_BASE_PACKED(context, PSUBW), v1, v1, v0);
+        check_vector_baseline_binary(context, element == 1 ? BUSTER_CHECK_BASE_PACKED(context, PMINUB) : BUSTER_CHECK_BASE_PACKED(context, PMAXSW), v0, v0, v1);
+    }
+    else
+    {
+        const uint32_t shift = context->bytes > 16 ? X86_FORM_VPSRAD_Y_Y_IMM8 : context->avx ? X86_FORM_VPSRAD_X_X_IMM8 : X86_FORM_PSRAD_X_IMM8;
+        check_vector_baseline_copy(context, v1, v0);
+        X86Instruction record = check_vector_lower_record(shift, 0, context->avx ? v1 : 0, v1);
+        record.immediate = 31;
+        check_vector_baseline_put(context, record);
+        if (element == 8)
+        {
+            check_vector_baseline_shuffle(context, v1, v1, 0xf5);
+        }
+        check_vector_baseline_binary(context, BUSTER_CHECK_BASE_PACKED(context, XORPS), v0, v0, v1);
+        check_vector_baseline_binary(context, element == 4 ? BUSTER_CHECK_BASE_PACKED(context, PSUBD) : BUSTER_CHECK_BASE_PACKED(context, PSUBQ), v0, v0, v1);
+    }
+}
+
 static void check_vector_baseline_ones(CheckVectorBaseline* context, uint8_t value)
 {
     check_vector_baseline_binary(context, BUSTER_CHECK_BASE_PACKED(context, PCMPEQD), value, value, value);
