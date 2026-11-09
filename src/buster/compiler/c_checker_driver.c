@@ -3833,7 +3833,7 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                         }
                         else if (phase == 0 && token < count &&
                                  (((kind == CHECK_INPUT_REDECLARATION || kind == CHECK_INPUT_CONFLICTING_TYPES) &&
-                                   input->reports[index].detail > CHECK_REDECLARATION_GENERIC && input->reports[index].detail <= CHECK_REDECLARATION_KIND) ||
+                                   input->reports[index].detail > CHECK_REDECLARATION_GENERIC && input->reports[index].detail <= CHECK_REDECLARATION_ENUM_NONFIXED) ||
                                   (kind == CHECK_INPUT_ENUMERATOR_REDEFINITION && input->reports[index].note_kind == CHECK_INPUT_NOTE_PREVIOUS_DEFINITION)))
                         {
                             const CheckInputReport* conflict = input->reports + index;
@@ -4807,6 +4807,9 @@ static bool check_driver_rejected_read(const Parser* unit, const Parser* origina
     const bool viewed = edited && check_driver_rejected_view(&view, unit, edits, arena, scratch);
     uint8_t* view_mask = viewed ? BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, (uint64_t)view.parser.tokens.count + 1) : NULL;
     bool valid = !edited || view_mask != NULL;
+    // What the reading leaves out, in the unit's tokens: the bodies it masks and the parts its view drops.
+    const uint8_t* left_bodies = mask;
+    const uint8_t* left_parts = edits;
     if (valid && edited)
     {
         for (uint32_t token = 0; token < view.parser.tokens.count; token += 1)
@@ -4913,7 +4916,9 @@ static bool check_driver_rejected_read(const Parser* unit, const Parser* origina
             {
                 known_event = sorted[at] == key;
             }
-            // A parameter's unused warning, where its function holds an error: the reading left out what may use it.
+            // A parameter's unused warning, where its function holds an error, as clang's (ActOnFinishFunctionBody gives
+            // them whatever the body's errors): unless what the reading left out of its body names it, which clang's
+            // reading of that part takes for a use, as it does an erroneous expression's operands; a member's name doesn't.
             bool errored = false;
             if (events->events[i].kind == CHECK_WARNING_EVENT_UNUSED_PARAMETER && at < count)
             {
@@ -4926,7 +4931,16 @@ static bool check_driver_rejected_read(const Parser* unit, const Parser* origina
                     first_body = before ? middle + 1 : first_body;
                     last_body = before ? last_body : middle;
                 }
-                errored = first_body < body_count && bodies[ranges[first_body].begin] != 0;
+                const bool holds = first_body < body_count && bodies[ranges[first_body].begin] != 0;
+                const uint32_t name = unit->tokens.names[at];
+                const uint32_t end = holds ? ranges[first_body].end : 0;
+                for (uint32_t t = holds ? ranges[first_body].begin : 0; !errored && t < end; t += 1)
+                {
+                    const bool left = left_bodies[t] != 0 || (left_parts != NULL && left_parts[t] != 0);
+                    const uint8_t before = unit->tokens.kinds[t - 1];
+                    errored = left && unit->tokens.kinds[t] == PARSE_KIND_IDENTIFIER && unit->tokens.names[t] == name &&
+                              before != PARSE_KIND_PERIOD && before != PARSE_KIND_ARROW;
+                }
             }
             // (Past `stop` the first reading published none of its events.)
             if (!errored && (!known_event || events->events[i].token >= stop))

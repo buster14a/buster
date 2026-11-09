@@ -760,6 +760,9 @@ static bool check_deferred_lane_prepare(CheckDeferred* deferred, CheckDeferredLa
     // which take the indices after the top level's and are set where each is made (check_input_tag_identity).
     reader->enum_fixed = reader->tag_completions != 0 ? check_deferred_copy(arena, top->enum_fixed, top->types->tags.count, tags, sizeof(uint8_t)) : 0;
     valid = reader->enum_fixed != 0;
+    // Each tag's latest declaration, set where a body's tag is made: a body declares none of the top level's again.
+    reader->tag_declared = valid ? check_deferred_copy(arena, 0, 0, tags, sizeof(uint32_t)) : 0;
+    valid = reader->tag_declared != 0;
     if (valid && top->intrinsic_names != 0)
     {
         // The intrinsics' tables, after the top level's of which each body appends its own declarations and calls; their

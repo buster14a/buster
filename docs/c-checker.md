@@ -3992,6 +3992,17 @@ do:
   implicit value restarts at 0 of `int` or of the fixed type
   (`CheckTagFrame.restart`), and an enum left with no enumerator is
   complete as `unsigned int`.
+- **An enum with a fixed underlying type.** Listed again with its base, it is
+  the redefinition above (before C23). Redeclared with another base, without
+  the base it had, or with one it hadn't, it gives clang's
+  `CheckEnumRedeclaration` error: "enumeration redeclared with different
+  underlying type 'long' (was 'int')" (each base as written, a typedef with
+  its "aka"), or "enumeration previously declared with (non)fixed underlying
+  type", with "previous declaration is here" at the earlier one
+  (`CHECK_REDECLARATION_ENUM_BASE`, `_FIXED`, `_NONFIXED`). As clang's
+  `ActOnTag` drops such a declaration, its body is skipped: its tag ends past
+  the `}` and no frame reads it, so its enumerators are undeclared, and the
+  name keeps the earlier enum.
 - **An enumerator whose name is another kind of the scope's** (an object, a
   typedef, a parameter, a local) gives clang's "redefinition of 'K'", with
   "previous definition is here" at the earlier declaration, and is dropped the
@@ -4100,12 +4111,10 @@ replacements are chosen to give no warning of their own (a constant condition
 would: clang's "no case matching constant switch condition"). A part left out
 gives no warning of its own reading, where clang gives those of what it builds
 before the error; the first reading's folded shifts in it are still given, at
-the unit's end (`check_common_shift_finish`), not among the body's. A function that holds an error
-gets no `-Wunused-but-set-parameter` from that reading, as clang's
+the unit's end (`check_common_shift_finish`), not among the body's. A
+function that holds an error gets no `-Wunused-but-set-parameter` from that reading, as clang's
 `ActOnFinishFunctionBody` gives none: it may lack the parameter's reads
-(`CheckCommonFacts.flushed`'s 2). In a flushed body, `-Wself-assign` is given
-where it stands, as clang gives it, not with the body's runtime warnings at its
-end. The body is then read as clang reads it, its warnings before and after the
+(`CheckCommonFacts.flushed`'s 2). The body is then read as clang reads it, its warnings before and after the
 error given, flushed (no analysis warnings).
 Other errors leave out their bodies, by `check_input_selected` as
 `-flazy-system-headers`' bodies are, as does every error where the view
@@ -4113,7 +4122,13 @@ doesn't parse or its reading isn't valid (`check_driver_rejected_read`
 publishes nothing of an invalid reading, which is then read again with the
 bodies left out). The second reading's unused variables in a scope with an error
 are left out (its own error counts, the dropped part's at the token after
-it), and its unused parameters in a function with one. Where that reading is valid, its program
+it). A function holding an error keeps its unused parameters, as clang's
+`ActOnFinishFunctionBody` gives them whatever the body's errors, except one
+that what the reading left out of its body names, which clang's reading of that
+part takes for a use (an erroneous expression's operands are still referenced);
+a member's name of the same spelling is no use. A local of the same name
+declared in the kept part, which the left-out part's use names instead, still
+silences the parameter's warning. Where that reading is valid, its program
 gives the other bodies' `-Wreturn-type` and common warnings, the bodies after
 the unit's first error flushed as above. Where a reader's error left the first
 reading without some of its warnings, the second's are given, without the
@@ -4276,11 +4291,17 @@ The later phases are left:
   unsupported declaration") leaves its declarator out, but the first reading
   never saw the body's later errors, so a second reading that meets one isn't
   valid. The warnings clang gives of what a left-out part builds before its
-  error aren't given, but for a folded shift's, which comes at the unit's end. An error outside every body
-  other than an initializer's (a declaration's, an unsized array's or a const
-  object's initializer) still leaves the unit without its common warnings. A
-  function holding an error gets no `-Wunused-parameter`, where clang gives
-  one for a parameter it doesn't use.
+  error aren't given, but for a folded shift's, which comes at the unit's end.
+  An error outside every body other than an initializer's (a declaration's,
+  an unsized array's or a const object's initializer) still leaves the unit
+  without its common warnings. A function's unused parameter that its
+  left-out part names through a local of the same name gets no
+  `-Wunused-parameter`, where clang gives one.
+- **Errors past a reader's error that ends its walk.** A reader's error that
+  isn't recovered (an incomplete object's type) skips the control scan and
+  ends the first reading; a control error elsewhere (a duplicate case, a
+  label's redefinition) or a second such error then fails the second reading,
+  and the unit gets no warnings at all.
 
 ### What the lowering costs (#531)
 
