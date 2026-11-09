@@ -243,4 +243,38 @@ static void check_test_driver_asm_definitions(CheckTest* test, const char* clang
         }
         unlink(path);
     }
+    // A template's `.comm` of a name the unit defines, a tentative definition's too, stays refused by name, whatever
+    // -fcommon: clang 23 has no coherent object for it. Without -fcommon its object makes C's .bss definition a common of
+    // C's size at the template's alignment (an initializer's bytes are lost); with -fcommon a `.comm` of C's size and
+    // alignment is the one common, and another size or alignment is a backend crash ("x redeclared as different type").
+    static const char* const common_definitions[] = {
+        "int x; void declare(void) { __asm__(\".comm x,4,4\"); } int main(void) { declare(); x = 42; return x != 42; }\n",
+        "int x; void declare(void) { __asm__(\".comm x,16,16\"); } int main(void) { declare(); x = 42; return x != 42; }\n",
+        "int x = 1; void declare(void) { __asm__(\".comm x,4,4\"); } int main(void) { declare(); return x != 1; }\n",
+    };
+    for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(common_definitions); f += 1)
+    {
+        char path[512];
+        char output[512];
+        snprintf(path, sizeof(path), "%s/asm-common-definition-%u.c", directory, f);
+        snprintf(output, sizeof(output), "%s/asm-common-definition-%u.o", directory, f);
+        const bool written = parse_test_write(path, common_definitions[f], strlen(common_definitions[f]));
+        for (uint32_t route = 0; written && route < 8; route += 1)
+        {
+            // Both paths, -c and the direct path, with and without -fcommon.
+            char* text = NULL;
+            char* arguments[] = { (char*)executable, "-std=gnu17", (route & 4) != 0 ? "-fcommon" : "-fno-common", path, "-o", output, (route & 2) != 0 ? "-c" : NULL,
+                                  NULL, NULL };
+            arguments[(route & 2) != 0 ? 7 : 6] = (route & 1) != 0 ? "--scalar" : NULL;
+            const int status = check_test_driver_spawn(arguments, &text);
+            char description[1024];
+            snprintf(description, sizeof(description), "a template's .comm of the unit's definition %u is refused by name (%s, %s, %s): %s", f,
+                     (route & 1) != 0 ? "scalar" : "vector", (route & 2) != 0 ? "-c" : "direct", (route & 4) != 0 ? "-fcommon" : "-fno-common", text != NULL ? text : "");
+            check_test_expect(test, status == 1 && text != NULL && strstr(text, "unsupported: inline assembly labels named as the unit's symbols") != NULL,
+                              description);
+            free(text);
+        }
+        unlink(path);
+        unlink(output);
+    }
 }
