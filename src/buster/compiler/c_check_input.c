@@ -7062,6 +7062,13 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                 {
                     first = parts[first].next;
                 }
+                // The function chunk nearest the name, which clang gives the declaration's specifiers' and trailing calling
+                // conventions before it builds the chunk's type (distributeFunctionTypeAttr, #1447).
+                uint32_t innermost = first;
+                while (innermost != BUSTER_CHECK_NONE && parts[innermost].kind != BUSTER_TYPE_KIND_FUNCTION)
+                {
+                    innermost = parts[innermost].next;
+                }
                 uint32_t reverse = BUSTER_CHECK_NONE;
                 for (uint32_t part = frame->first; part != BUSTER_CHECK_NONE;)
                 {
@@ -7134,9 +7141,14 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                             parameter_types[count++] = parameters[parameter].type;
                         }
                         // A parameter's Swift ABI is checked against the declaration's own function's convention once it is
-                        // final (check_input_declarator_end); another function's, a pointer's or a parameter's, is refused by
-                        // name: its convention can come from attributes clang places otherwise (#1447).
-                        if (part->parameter_abis && (frame->parameter || p != first))
+                        // final (check_input_declarator_end). Another function chunk than the one nearest the name has no
+                        // convention when clang builds it (getCCForDeclaratorChunk reads the chunk's own attributes, which
+                        // C's syntax gives none, and distribution goes to the nearest), so its ABIs are checked as System V's
+                        // (#1447: `void (*f(void))(__attribute__((swift_context)) void *)`). The nearest's of a pointer's or
+                        // a parameter's declarator, whose convention can come from attributes clang places otherwise (in the
+                        // pointer's chunk), is refused by name.
+                        const bool outer = part->parameter_abis && p != innermost;
+                        if (part->parameter_abis && !outer && (frame->parameter || p != first))
                         {
                             for (uint32_t parameter = part->parameter_first; parameter != BUSTER_CHECK_NONE; parameter = parameters[parameter].next)
                             {
@@ -7150,6 +7162,22 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                         type = valid && parameter_types != 0 && (!part->parameter_abis || parameter_abis != NULL) ?
                                check_input_type_result(reader, type_function_full(reader->types, type, parameter_types, count, part->flags, TYPE_FUNCTION_ABI_SYSV,
                                                                                   parameter_abis)) : 0;
+                        if (outer && type != 0)
+                        {
+                            // (In the scratch the parameter types take, popped below.)
+                            uint32_t* places = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, (uint64_t)count + 1);
+                            uint32_t* tokens = places != NULL ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, (uint64_t)count + 1) : NULL;
+                            reader->output->resource |= tokens == NULL;
+                            uint32_t index = 0;
+                            for (uint32_t parameter = part->parameter_first; tokens != NULL && parameter != BUSTER_CHECK_NONE && index < count;
+                                 parameter = parameters[parameter].next)
+                            {
+                                places[index] = parameters[parameter].place;
+                                tokens[index++] = parameters[parameter].abi_token;
+                            }
+                            valid = tokens != NULL && check_input_swift_parameters(reader, type, places, tokens, index);
+                            type = valid ? type : 0;
+                        }
                         noderef = check_input_noderef_make(reader, noderef, annotated, false);
                         arena_pop_to(reader->scratch, parameter_mark);
                     }
