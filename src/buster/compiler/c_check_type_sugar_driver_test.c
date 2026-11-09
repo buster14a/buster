@@ -93,6 +93,14 @@ static const CheckDriverDefaultWarningFixture check_driver_type_sugar_fixtures[]
         .errors = 5,
         .notes = 2,
     },
+    {
+        // A multidimensional array's qualifiers pass through each element array to the typedef that names them.
+        .name = "qualified typedefs of multidimensional array elements",
+        .source = "typedef const int CI;\n"
+                  "typedef volatile int VI;\n"
+                  "void f(void) { CI b[2][3] = { 0 }; b++; b[0]++; VI c[1][2][3]; c++; c[0]++; }\n",
+        .errors = 4,
+    },
 };
 
 // A variable array's size expression as written (#1447, check_driver_vla_bounds), through pointers, arrays, typedefs

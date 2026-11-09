@@ -6219,7 +6219,7 @@ static uint32_t type_print_sugar(const TypePrinter* printer, TypeId type, uint32
 }
 
 // The qualifiers a qualified array level (`type`, not ALIGNED) leaves to its element, as clang's array types keep them
-// (#1447): where a sugar alias names that element with them, the typedef `CI` of `CI a[2]` (`const int`), which the
+// (#1447): where a sugar alias names that element with them, the typedef `CI` of `CI a[2]` or `CI b[2][3]` (`const int`), which the
 // array's `const int[2]` would otherwise print as `const int[2]`; 0 where none does, or the level has extended
 // qualifiers, which stay as they print.
 static uint32_t type_print_element_qualifiers(const TypePrinter* printer, TypeId type)
@@ -6227,8 +6227,16 @@ static uint32_t type_print_element_qualifiers(const TypePrinter* printer, TypeId
     const TypeTable* table = printer->table;
     const uint32_t qualifiers = type_qualifiers(type);
     const bool array = qualifiers != 0 && type_kind_is_array(type_kind(table, type)) && type_extended_qualifiers(table, type) == 0;
-    uint32_t whole = UINT32_MAX;
-    const bool named = array && printer->names != 0 && type_print_sugar(printer, type_element(table, type), &whole) != UINT32_MAX;
+    // Through the arrays of a multidimensional one (`CI b[2][3]`), whose element arrays pass them on in turn.
+    TypeId element = array && printer->names != 0 ? type_element(table, type) : 0;
+    bool named = false;
+    for (uint32_t depth = 0; !named && depth < 64 && element != 0; depth += 1)
+    {
+        uint32_t whole = UINT32_MAX;
+        named = type_print_sugar(printer, element, &whole) != UINT32_MAX;
+        const bool deeper = !named && type_kind_is_array(type_kind(table, element)) && type_extended_qualifiers(table, element) == 0;
+        element = deeper ? type_element(table, element) : 0;
+    }
     return named ? qualifiers : 0;
 }
 
