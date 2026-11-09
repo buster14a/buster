@@ -10,7 +10,7 @@ permissions:
 jobs:
   probe:
     runs-on: ubuntu-26.04
-    timeout-minutes: 20
+    timeout-minutes: 45
     env:
       BUSTER_HOST_ARCH: native
       BUSTER_SANITIZER: memory
@@ -56,6 +56,50 @@ jobs:
             if [ "$result" -ne 0 ]; then status=1; fi
           done
           exit "$status"
+      - name: Build the unchanged full compiler with native O3 MemorySanitizer
+        run: ./build.sh --config Release
+      - name: Reproduce the unchanged main self-compile
+        id: original
+        shell: bash
+        run: |
+          set -euo pipefail
+          unset CPATH C_INCLUDE_PATH
+          mapfile -d '' -t flags < <(env -u BUSTER_SANITIZER -u BUSTER_SANITIZER_OPTIMIZATION -u BUSTER_FUZZ_AVAILABLE -u BUSTER_FUZZ_ENTRY \
+            BUSTER_HOST_ARCH=znver5 BUSTER_DEBUG_INFO=0 ./build.sh print-compile-flags)
+          test "${#flags[@]}" -gt 0
+          compiler=$(./build.sh print-output --config Release)
+          status=0
+          MSAN_OPTIONS="$MSAN_OPTIONS:log_path=$RUNNER_TEMP/sanitizer-reports/original" \
+            "$compiler" --lanes 1 --verify -c "${flags[@]}" -o build/enum-msan-probe/original.o src/buster/compiler/main.c \
+            > build/enum-msan-probe/original.log 2>&1 || status=$?
+          cat build/enum-msan-probe/original.log
+          printf 'original\t%s\n' "$status" | tee -a build/enum-msan-probe/results.tsv
+          printf 'status=%s\n' "$status" >> "$GITHUB_OUTPUT"
+          llvm-objdump --disassemble-symbols=check_common_enum_coerced --source --line-numbers "$compiler" \
+            > build/enum-msan-probe/original-helper.s
+          find "$RUNNER_TEMP/sanitizer-reports" -type f -exec cat {} +
+      - name: Add initialized-input checks and rebuild the affected compiler unit
+        if: steps.original.outputs.status == '86'
+        run: |
+          git apply tools/ci/enum-msan-trace.patch
+          ./build.sh --config Release
+      - name: Trace the same full self-compile with checked inputs
+        if: steps.original.outputs.status == '86'
+        shell: bash
+        run: |
+          set -euo pipefail
+          unset CPATH C_INCLUDE_PATH
+          mapfile -d '' -t flags < <(env -u BUSTER_SANITIZER -u BUSTER_SANITIZER_OPTIMIZATION -u BUSTER_FUZZ_AVAILABLE -u BUSTER_FUZZ_ENTRY \
+            BUSTER_HOST_ARCH=znver5 BUSTER_DEBUG_INFO=0 ./build.sh print-compile-flags)
+          test "${#flags[@]}" -gt 0
+          compiler=$(./build.sh print-output --config Release)
+          status=0
+          MSAN_OPTIONS="$MSAN_OPTIONS:log_path=$RUNNER_TEMP/sanitizer-reports/traced" \
+            "$compiler" --lanes 1 --verify -c "${flags[@]}" -o build/enum-msan-probe/traced.o src/buster/compiler/main.c \
+            > build/enum-msan-probe/traced.log 2>&1 || status=$?
+          cat build/enum-msan-probe/traced.log
+          printf 'traced\t%s\n' "$status" | tee -a build/enum-msan-probe/results.tsv
+          find "$RUNNER_TEMP/sanitizer-reports" -type f -exec cat {} +
       - name: Audit sanitizer output
         if: always()
         run: bash tools/ci/sanitizers.sh audit "$RUNNER_TEMP/sanitizer-reports"
@@ -67,6 +111,7 @@ jobs:
           path: |
             build/enum-msan-probe/*.log
             build/enum-msan-probe/*.ll
+            build/enum-msan-probe/*.s
             build/enum-msan-probe/results.tsv
             ${{ runner.temp }}/sanitizer-reports
           retention-days: 7

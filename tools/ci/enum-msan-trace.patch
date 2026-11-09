@@ -1,0 +1,106 @@
+--- a/src/buster/compiler/c_check_common_warnings.c
++++ b/src/buster/compiler/c_check_common_warnings.c
+@@ -3233,10 +3233,103 @@
+     }
+ }
+ 
++#if __has_feature(memory_sanitizer)
++#include <sanitizer/msan_interface.h>
++
++// Diagnostic-only preflight for #1829. Check the actual bytes before the
++// production helper uses them, without changing its loop or any shadow state.
++static __attribute__((noinline)) void check_common_enum_msan_inputs(const CheckInput* input, const CheckStream* stream, uint32_t node)
++{
++    const CheckGraph* graph = &input->graph;
++    __msan_check_mem_is_initialized(&node, sizeof(node));
++    __msan_check_mem_is_initialized(&graph->count, sizeof(graph->count));
++    __msan_check_mem_is_initialized(&stream->count, sizeof(stream->count));
++    __msan_check_mem_is_initialized(&input->token_count, sizeof(input->token_count));
++    if (node >= graph->count || node >= stream->count)
++    {
++        fprintf(stderr, "enum-msan preflight: invalid node %u (graph=%u stream=%u)\n", node, graph->count, stream->count);
++        abort();
++    }
++
++    __msan_check_mem_is_initialized(&stream->dense_values, sizeof(stream->dense_values));
++    if (stream->dense_values != NULL)
++    {
++        __msan_check_mem_is_initialized(&stream->dense_values[node].type, sizeof(stream->dense_values[node].type));
++    }
++    else
++    {
++        __msan_check_mem_is_initialized(&stream->value_types, sizeof(stream->value_types));
++        if (stream->value_types == NULL)
++        {
++            fprintf(stderr, "enum-msan preflight: absent stream value types\n");
++            abort();
++        }
++        __msan_check_mem_is_initialized(stream->value_types + node, sizeof(*stream->value_types));
++    }
++
++    __msan_check_mem_is_initialized(&graph->tokens, sizeof(graph->tokens));
++    __msan_check_mem_is_initialized(&graph->ops, sizeof(graph->ops));
++    if (graph->tokens == NULL || graph->ops == NULL)
++    {
++        fprintf(stderr, "enum-msan preflight: absent graph tokens or operations\n");
++        abort();
++    }
++    __msan_check_mem_is_initialized(graph->tokens + node, sizeof(*graph->tokens));
++    __msan_check_mem_is_initialized(graph->ops + node, sizeof(*graph->ops));
++    const uint32_t token = graph->tokens[node];
++    if (graph->ops[node] == CHECK_OP_VALUE && token < input->token_count)
++    {
++        __msan_check_mem_is_initialized(&input->declarations, sizeof(input->declarations));
++        if (input->declarations != NULL)
++        {
++            __msan_check_mem_is_initialized(input->declarations + token, sizeof(*input->declarations));
++            const uint32_t declaration = input->declarations[token];
++            if (declaration < input->token_count)
++            {
++                __msan_check_mem_is_initialized(&input->declaration_kinds, sizeof(input->declaration_kinds));
++                if (input->declaration_kinds == NULL)
++                {
++                    fprintf(stderr, "enum-msan preflight: absent declaration kinds\n");
++                    abort();
++                }
++                __msan_check_mem_is_initialized(input->declaration_kinds + declaration, sizeof(*input->declaration_kinds));
++                if (input->declaration_kinds[declaration] == C_BINDING_ENUMERATOR)
++                {
++                    __msan_check_mem_is_initialized(&input->enum_definition_count, sizeof(input->enum_definition_count));
++                    const uint32_t count = input->enum_definition_count;
++                    // Every published definition owns an enum keyword in this unit.
++                    // This validates the logical bound before computing the byte size.
++                    if (count > input->token_count)
++                    {
++                        fprintf(stderr, "enum-msan preflight: invalid definition count %u (tokens=%u)\n", count, input->token_count);
++                        abort();
++                    }
++                    if (count != 0)
++                    {
++                        __msan_check_mem_is_initialized(&input->enum_definitions, sizeof(input->enum_definitions));
++                        if (input->enum_definitions == NULL)
++                        {
++                            fprintf(stderr, "enum-msan preflight: absent enum definitions for %u records\n", count);
++                            abort();
++                        }
++                        _Static_assert(sizeof(CheckInputEnumDefinition) == 3 * sizeof(uint32_t), "check only initialized enum fields");
++                        _Static_assert(SIZE_MAX / sizeof(CheckInputEnumDefinition) >= UINT32_MAX, "definition byte size fits this host");
++                        __msan_check_mem_is_initialized(input->enum_definitions, (size_t)count * sizeof(*input->enum_definitions));
++                    }
++                }
++            }
++        }
++    }
++}
++#endif
++
+ // The type clang's getEnumCoercedType gives an operand: an enumerator's own enumeration where the operand names one
+ // (parentheses are no nodes) and that enumeration's definition is complete, past its closing brace, else its type.
+ static TypeId check_common_enum_coerced(const CheckInput* input, const CheckStream* stream, uint32_t node)
+ {
++#if __has_feature(memory_sanitizer)
++    check_common_enum_msan_inputs(input, stream, node);
++#endif
+     const CheckGraph* graph = &input->graph;
+     TypeId result = check_stream_type(stream, node);
+     const uint32_t token = graph->tokens[node];
