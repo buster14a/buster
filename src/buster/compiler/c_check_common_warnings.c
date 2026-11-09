@@ -8584,17 +8584,24 @@ static bool check_common_loop_local(const Parser* parser, const CheckInput* inpu
            !check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_THREAD_LOCAL) && (type_qualifiers(type) & BUSTER_TYPE_VOLATILE) == 0;
 }
 
-#define BUSTER_CHECK_LOOP_DECLS 16u
-#define BUSTER_CHECK_LOOP_STACK 128u
+// Whether a builtin node is one clang's EvaluatedExprVisitor leaves unvisited, a leaf of a simple condition: an
+// unevaluated-argument builtin's call (constant_p, object_size, dynamic_object_size, classify_type).
+static bool check_common_loop_unevaluated_builtin(const CheckGraph* graph, uint32_t node)
+{
+    const CheckOp op = graph->ops[node];
+    const uint32_t id = graph->members != NULL ? graph->members[node] : 0;
+    return (op == CHECK_OP_BUILTIN_QUERY || op == CHECK_OP_BUILTIN_MISC || op == CHECK_OP_BUILTIN_UNARY) &&
+           (id == CBUILTIN_CONSTANT_P || id == CBUILTIN_OBJECT_SIZE || id == CBUILTIN_DYNAMIC_OBJECT_SIZE || id == CBUILTIN_CLASSIFY_TYPE);
+}
 
 // clang's DeclExtractor over a for loop's condition, `first` its first node: whether it is simple (a tree of operators,
-// casts, literals and variables), and its variables in their first uses' order in `decls`, their count in `*count` (one
-// past BUSTER_CHECK_LOOP_DECLS gives up), and the first use's token in `*at`.
-static bool check_common_loop_extract(const Parser* parser, const CheckInput* input, const CheckStream* stream, uint32_t first, uint32_t* decls,
-                                      uint32_t* count, uint32_t* at)
+// casts, literals, variables, a static selection's chosen operand and the leaves clang leaves unvisited), and its
+// variables in their first uses' order in `decls`, their count in `*count`, and the first use's token in `*at`. `stack`
+// and `decls` hold the graph's count each.
+static bool check_common_loop_extract(const Parser* parser, const Preprocessor* pp, const CheckInput* input, const CheckStream* stream, uint32_t first,
+                                      uint32_t* stack, uint32_t* decls, uint32_t* count, uint32_t* at)
 {
     const CheckGraph* graph = &input->graph;
-    uint32_t stack[BUSTER_CHECK_LOOP_STACK];
     uint32_t depth = 0;
     stack[depth++] = first;
     bool simple = true;
@@ -8611,7 +8618,18 @@ static bool check_common_loop_extract(const Parser* parser, const CheckInput* in
             const uint8_t kind = token < parser->tokens.count ? parser->tokens.kinds[token] : PARSE_KIND_END;
             const uint32_t declaration = kind == PARSE_KIND_IDENTIFIER && token < input->token_count ? input->declarations[token] : BUSTER_CHECK_NONE;
             const bool variable = declaration < input->token_count && input->declaration_kinds[declaration] == C_BINDING_OBJECT;
-            simple = variable || kind == PARSE_KIND_NUMBER || kind == PARSE_KIND_CHARACTER;
+            // (__builtin_offsetof's folded value, clang's OffsetOfExpr, is a leaf too: its node is at its `)`, whose child its `(`
+            // is, after the builtin's name.)
+            uint32_t opener = BUSTER_CHECK_NONE;
+            for (uint32_t back = kind == PARSE_KIND_R_PAREN ? token : 0; back != 0 && opener == BUSTER_CHECK_NONE;)
+            {
+                back -= 1;
+                opener = parser->tree.parents[back] == token && parser->tokens.kinds[back] == PARSE_KIND_L_PAREN ? back : BUSTER_CHECK_NONE;
+            }
+            const uint32_t name = opener != BUSTER_CHECK_NONE && opener != 0 ?
+                                  parser->tokens.names[opener - 1] : 0;
+            const bool offsetof = name != 0 && intern_length(pp->table, name) == 18 && memcmp(intern_bytes(pp->table, name), "__builtin_offsetof", 18) == 0;
+            simple = variable || offsetof || kind == PARSE_KIND_NUMBER || kind == PARSE_KIND_CHARACTER;
             bool seen = false;
             for (uint32_t i = 0; variable && i < *count; i += 1)
             {
@@ -8619,9 +8637,7 @@ static bool check_common_loop_extract(const Parser* parser, const CheckInput* in
             }
             if (variable && !seen)
             {
-                simple = *count < BUSTER_CHECK_LOOP_DECLS;
-                decls[*count < BUSTER_CHECK_LOOP_DECLS ? *count : 0] = *count < BUSTER_CHECK_LOOP_DECLS ? declaration : decls[0];
-                *count += *count < BUSTER_CHECK_LOOP_DECLS;
+                decls[(*count)++] = declaration;
                 // A volatile or global variable leaves the whole condition unanalysed, as clang returns.
                 simple &= check_common_loop_local(parser, input, declaration, check_stream_type(stream, node));
             }
@@ -8640,9 +8656,13 @@ static bool check_common_loop_extract(const Parser* parser, const CheckInput* in
             operands[2] = graph->operand0[node];
         }
         else if ((op >= CHECK_OP_POSITIVE && op <= CHECK_OP_BIT_NOT) || op == CHECK_OP_ADDRESS || op == CHECK_OP_CAST || op == CHECK_OP_CONVERT ||
-                 op == CHECK_OP_CONDITION || (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_POST_DECREMENT))
+                 op == CHECK_OP_CONDITION || (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_POST_DECREMENT) || op == CHECK_OP_SELECT)
         {
+            // (A _Generic's or a __builtin_choose_expr's chosen operand alone, as clang's visitor takes.)
             operands[0] = graph->operand0[node];
+        }
+        else if (check_common_loop_unevaluated_builtin(graph, node))
+        {
         }
         else
         {
@@ -8654,9 +8674,8 @@ static bool check_common_loop_extract(const Parser* parser, const CheckInput* in
         {
             if (operands[i] < graph->count)
             {
-                simple = depth < BUSTER_CHECK_LOOP_STACK;
-                stack[depth < BUSTER_CHECK_LOOP_STACK ? depth : 0] = operands[i];
-                depth += depth < BUSTER_CHECK_LOOP_STACK;
+                // (A tree's nodes are each pushed once: the graph's count bounds the stack.)
+                stack[depth++] = operands[i];
             }
         }
     }
@@ -8666,12 +8685,19 @@ static bool check_common_loop_extract(const Parser* parser, const CheckInput* in
 // Whether the use of a loop's variable at `token` may change it, clang's DeclMatcher: any but a read of its value (an
 // assignment's target, an increment's operand, an address, a member's object or an array's decay). An unevaluated use
 // is none.
-static bool check_common_loop_changes(const CheckInput* input, const CheckStream* stream, const TypeTable* types, const uint32_t* parents, uint32_t token)
+static bool check_common_loop_changes(const CheckInput* input, const CheckStream* stream, const TypeTable* types, const uint32_t* parents,
+                                      const uint8_t* unselected, uint32_t token)
 {
     const CheckGraph* graph = &input->graph;
     const uint32_t node = token < input->token_count && input->token_nodes != NULL ? input->token_nodes[token] : BUSTER_CHECK_NONE;
     bool result = false;
-    if (node < graph->count && check_common_loop_evaluated(graph, parents, node))
+    // (A static selection's unchosen operand, or its controlling expression, is a root clang's visitor never reaches.)
+    uint32_t root = node;
+    for (uint32_t steps = 0; root < graph->count && parents[root] < graph->count && steps < graph->count; steps += 1)
+    {
+        root = parents[root];
+    }
+    if (node < graph->count && check_common_loop_evaluated(graph, parents, node) && (unselected == NULL || unselected[root] == 0))
     {
         const uint32_t parent = parents[node];
         const CheckOp op = parent < graph->count ? graph->ops[parent] : CHECK_OP_COUNT;
@@ -8712,6 +8738,11 @@ static __attribute__((noinline)) void check_common_for_loops(const Parser* parse
     static const uint8_t roles[] = { PARSE_ROLE_CLOSE_FOR };
     CheckCommonScan scan = { 0 };
     const bool enabled = parents != NULL && check_common_enabled(pp, input, CHECK_WARNING_ID_FOR_LOOP_ANALYSIS, true);
+    // The condition's walk's stack and variables, and the static selections' unchosen roots, made at the first loop that
+    // needs each.
+    uint32_t* stack = NULL;
+    uint32_t* decls = NULL;
+    const uint8_t* unselected = NULL;
     for (uint32_t close = enabled ? check_common_next_token(parser, count, BUSTER_CHECK_NONE, roles, BUSTER_ARRAY_LENGTH(roles), &scan, vector) : count;
          close < count && !pp->fatal; close = check_common_next_token(parser, count, BUSTER_CHECK_NONE, roles, BUSTER_ARRAY_LENGTH(roles), &scan, vector))
     {
@@ -8737,22 +8768,38 @@ static __attribute__((noinline)) void check_common_for_loops(const Parser* parse
         {
             continue;
         }
-        // The condition, clang's Second, by its first node's root (a truth test's operand).
+        // The condition, clang's Second: its truth test's operand, the root a token of it climbs to that is the test (a
+        // statement expression's statements and a static selection's other operands are roots of their own). Clang skips
+        // it where the warning is ignored at its first token.
         uint32_t root = BUSTER_CHECK_NONE;
-        for (uint32_t at = semis[0] + 1; at < semis[1] && root == BUSTER_CHECK_NONE; at += 1)
+        const bool conditional = semis[0] + 1 < semis[1] &&
+                                 check_common_severity(pp, parser, input, semis[0] + 1, CHECK_WARNING_ID_FOR_LOOP_ANALYSIS, true) != CHECK_WARNING_IGNORE;
+        for (uint32_t at = semis[0] + 1; conditional && at < semis[1] && root >= input->graph.count; at += 1)
         {
-            root = at < input->token_count && input->token_nodes != NULL ? input->token_nodes[at] : BUSTER_CHECK_NONE;
+            uint32_t up = at < input->token_count && input->token_nodes != NULL ? input->token_nodes[at] : BUSTER_CHECK_NONE;
+            for (uint32_t steps = 0; up < input->graph.count && parents[up] < input->graph.count && steps < input->graph.count; steps += 1)
+            {
+                up = parents[up];
+            }
+            root = up < input->graph.count && input->graph.ops[up] == CHECK_OP_CONDITION ? input->graph.operand0[up] : BUSTER_CHECK_NONE;
         }
-        for (uint32_t steps = 0; root < input->graph.count && parents[root] < input->graph.count && steps < input->graph.count; steps += 1)
+        if (root < input->graph.count && stack == NULL)
         {
-            root = parents[root];
+            stack = CHECK_COMMON_PUSH_ARRAY(scratch, uint32_t, input->graph.count);
+            decls = stack != NULL ? CHECK_COMMON_PUSH_ARRAY(scratch, uint32_t, input->graph.count) : NULL;
+            if (decls == NULL)
+            {
+                check_common_exhausted(pp);
+            }
         }
-        root = root < input->graph.count && input->graph.ops[root] == CHECK_OP_CONDITION ? input->graph.operand0[root] : root;
-        uint32_t decls[BUSTER_CHECK_LOOP_DECLS];
         uint32_t used = 0;
         uint32_t at = BUSTER_CHECK_NONE;
-        if (root < input->graph.count && check_common_loop_extract(parser, input, stream, root, decls, &used, &at) && used != 0)
+        if (root < input->graph.count && decls != NULL && check_common_loop_extract(parser, pp, input, stream, root, stack, decls, &used, &at) && used != 0)
         {
+            if (unselected == NULL)
+            {
+                unselected = check_common_unselected(&input->graph, parser, scratch);
+            }
             bool found = false;
             for (uint32_t token = semis[0] + 1; !found && token <= end; token += 1)
             {
@@ -8764,7 +8811,7 @@ static __attribute__((noinline)) void check_common_for_loops(const Parser* parse
                     listed |= decls[i] == declaration;
                 }
                 found = kind == PARSE_KIND_RETURN || kind == PARSE_KIND_BREAK || kind == PARSE_KIND_GOTO ||
-                        (listed && check_common_loop_changes(input, stream, types, parents, token));
+                        (listed && check_common_loop_changes(input, stream, types, parents, unselected, token));
             }
             if (!found)
             {
@@ -8793,7 +8840,10 @@ static __attribute__((noinline)) void check_common_for_loops(const Parser* parse
         const uint32_t block = close + 1 < count && parser->tree.roles[close + 1] == PARSE_ROLE_OPEN_BLOCK ? parser->tree.parents[close + 1] : BUSTER_CHECK_NONE;
         bool header_increment = false;
         bool body_increment = false;
-        const uint32_t header = semis[1] + 3 == close ? check_common_loop_step(parser, input, semis[1] + 1, &header_increment) : BUSTER_CHECK_NONE;
+        // (Clang skips it where the warning is ignored at the increment's first token.)
+        const uint32_t header = semis[1] + 3 == close &&
+                                check_common_severity(pp, parser, input, semis[1] + 1, CHECK_WARNING_ID_FOR_LOOP_ANALYSIS, true) != CHECK_WARNING_IGNORE ?
+                                check_common_loop_step(parser, input, semis[1] + 1, &header_increment) : BUSTER_CHECK_NONE;
         const uint32_t before = block < count && block >= close + 5 ? block - 4 : BUSTER_CHECK_NONE;
         const bool alone = before < count && parser->tokens.kinds[block - 1] == PARSE_KIND_SEMI && parser->tree.parents[block - 1] == block &&
                            (before == close + 1 || (parser->tokens.kinds[before] == PARSE_KIND_SEMI && parser->tree.roles[before] == PARSE_ROLE_TERMINATOR) ||

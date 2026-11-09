@@ -108,6 +108,48 @@ static const CheckDriverDefaultWarningFixture check_driver_for_loop_fixtures[] =
         .notes = 4,
     },
     {
+        // Review on #1811: statement expressions, static selections and the builtins clang leaves unvisited in a condition.
+        .name = "conditions with statement expressions, selections and unvisited builtins, and selections in the body",
+        .source = "struct S { int a, b; };\n"
+                  "void f(int i, int n, int j, int *p) {\n"
+                  "    for (; ({ i < n; 1; }); ) { }\n"
+                  "    for (; (int)({ i < n; 0; }); ) { }\n"
+                  "    for (; _Generic(i, int: j < n, default: 0); ) { }\n"
+                  "    for (; _Generic(0, int: i < n, default: 0); ) { }\n"
+                  "    for (; i < __builtin_offsetof(struct S, b); ) { }\n"
+                  "    for (; i < n + __builtin_constant_p(j); ) { }\n"
+                  "    for (; i < __builtin_object_size(p, 0); ) { }\n"
+                  "    for (; i < __builtin_classify_type(j); ) { }\n"
+                  "    for (; __builtin_choose_expr(1, i < n, j); ) { }\n"
+                  "    for (; i < n; ) { (void)__builtin_choose_expr(0, i++, 0); }\n"
+                  "    for (; i < n; ) { (void)_Generic(0, int: 0, default: i++); }\n"
+                  "    for (; i < n; ) { (void)_Generic(0, int: i++, default: 0); }\n"
+                  "}\n",
+        .options = { "-Wfor-loop-analysis" },
+        .warnings = 11,
+    },
+    {
+        // Review on #1811: the condition's and the increment's first tokens' pragmas, and many variables and nodes.
+        .name = "pragmas at the condition and the increment, and long conditions",
+        .source = "void f(int i, int n, int a, int b, int c, int d, int e, int g, int h, int k, int l, int m, int o, int p, int q, int r, int s, int t) {\n"
+                  "#pragma clang diagnostic push\n"
+                  "#pragma clang diagnostic ignored \"-Wfor-loop-analysis\"\n"
+                  "    for (; i < n;\n"
+                  "#pragma clang diagnostic pop\n"
+                  "         i++) { i++; }\n"
+                  "#pragma clang diagnostic push\n"
+                  "#pragma clang diagnostic ignored \"-Wfor-loop-analysis\"\n"
+                  "    for (; \n"
+                  "#pragma clang diagnostic pop\n"
+                  "        i < n; ) { }\n"
+                  "    for (; a + b + c + d + e + g + h + k + l + m + o + p + q + r + s + t + i + n < 0; ) { }\n"
+                  "    for (; i + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 < n; ) { }\n"
+                  "}\n",
+        .options = { "-Wfor-loop-analysis" },
+        .warnings = 4,
+        .notes = 1,
+    },
+    {
         .name = "-Werror=for-loop-analysis and a pragma",
         .source = check_driver_for_loop_order_source,
         .options = { "-Werror=for-loop-analysis", "-Wall" },
