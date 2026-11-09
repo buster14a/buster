@@ -52,6 +52,13 @@ requirements. [Command index](README.md).
   it also combines a carried row with a by-value aggregate call. `test-tier1-emit`
   also requires zero repeat stores for a single earlier
   predecessor, while joins and backward-layout predecessors still store.
+  Its aggregate-copy regression (#1816) runs the real emitter and decoder with
+  a rematerialized address and dead, live, owed, expired, spilled or relocated
+  rax ownership. The independent value-flow checker proves the live value
+  survives or is repaid, and rejects missing or corrupted preservation and a
+  saved unknown register.
+  The full driver's `tier1-shapes` fixture covers the original rematerialization
+  failure through compilation, linking and execution.
   The debug-definition fixture (#1114) emits the real call program with source
   metadata and without `certify`, and requires the complete code certificate
   before publishing result claims. A call result begins only after its actual
