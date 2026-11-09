@@ -109,6 +109,10 @@ struct Tier1MasksTest
     uint32_t compare_rows;
     uint32_t compare_decoded;
     uint32_t compare_native;
+    // The front end's masked moves' selects and undefined vectors (#1840, tier1_masks_test_selects): those tried, and
+    // those through every stage as the IR's vselect or zero vector.
+    uint32_t select_attempts;
+    uint32_t select_rows;
     // The front end's width changes (#1840, tier1_masks_test_widths): those tried, and those through every stage as the
     // IR's extract, widen or insert.
     uint32_t width_attempts;
@@ -4885,6 +4889,109 @@ static void tier1_masks_test_widths(Tier1MasksTest* test)
     free(program);
 }
 
+// The front end's masked moves' selects and undefined vectors through Tier 0 and the IR to Tier 1 (#1840): every SELECT
+// rule (`__builtin_ia32_select*` of each element and width) as check_x86_lower_masks moves its mask into the mask class,
+// and every UNDEFINED rule, each as the program's only row, in 4 statements: a select of the vectors at k and k + 1
+// (modulo 4, of the rule's bytes each) from the input buffer under the input word k, converted to the mask, stored into
+// the output's vector k; an undefined vector's zeros stored there. tier1_masks_test_typed_pipeline takes it through the
+// IR as its vselect or zero vector, which the IR's interpreter runs at every stage, and through Tier 1 natively, each
+// against a C model: each lane the first vector's where the mask's bit is set, the second's elsewhere; zeros. Tier 0 runs
+// no row of them here: its register-direct moves have no Zen 5 row (x86_zen5_rows.c) yet, which its builds require.
+static void tier1_masks_test_selects(Tier1MasksTest* test)
+{
+    const X86Target target = { .features = test->v4_features };
+    Tier0TestMaskProgram* program = malloc(sizeof(*program));
+    uint64_t* inputs = calloc(BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS, BUSTER_TIER1_MASKS_TEST_IN);
+    uint8_t* expected = malloc(BUSTER_TIER1_MASKS_TEST_OUT * BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS);
+    Arena arenas[3] = { arena_reserve(64u << 20), arena_reserve(64u << 20), arena_reserve(64u << 20) };
+    bool ready = tier1_masks_test_expect(test, program != 0 && inputs != 0 && expected != 0 && arenas[0].base != 0 && arenas[1].base != 0 && arenas[2].base != 0,
+                                         "the selects' memory");
+    uint64_t state = test->random ^ UINT64_C(0xbb67ae8584caa73b);
+    for (uint32_t i = 0; ready && i < BUSTER_ARRAY_LENGTH(check_x86_lower_rules); i += 1)
+    {
+        const CheckX86LowerRule* rule = check_x86_lower_rules + i;
+        const bool select = rule->family == CHECK_X86_LOWER_SELECT;
+        if (!select && rule->family != CHECK_X86_LOWER_UNDEFINED)
+        {
+            continue;
+        }
+        const uint64_t output_mark = test->output.length;
+        test->select_attempts += 1;
+        Tier0Operation row;
+        const bool made = check_x86_lower_row_of(&target, rule, 0, 4, 0, false, &row) == NULL && (!select || check_x86_lower_masks(&row, &target));
+        const uint32_t bytes = rule->bytes;
+        const uint32_t slots = bytes / 8;
+        bool ok = tier1_masks_test_expect(test, made && row.operand_count == (select ? 3 : 0) && row.result_class == BUSTER_TYPED_CLASS_VECTOR && row.result_bytes == bytes,
+                                          "the front end's select or undefined vector row, in the mask class at x86-64-v4");
+        program->count = 0;
+        program->overflow = false;
+        program->rows = true;
+        program->objects = false;
+        for (uint32_t k = 0; ok && k < 4; k += 1)
+        {
+            tier0_test_mask_address(program, BUSTER_TIER0_TEST_MASK_OUT, k * slots);
+            if (select)
+            {
+                tier0_test_mask_address(program, BUSTER_TIER0_TEST_MASK_IN, k);
+                tier0_test_mask_emit(program, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_U64, 0);
+                tier0_test_mask_emit(program, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_MASK, row.operand_bytes[0]);
+                tier0_test_mask_address(program, BUSTER_TIER0_TEST_MASK_IN, k * slots);
+                tier0_test_mask_emit(program, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_VECTOR, bytes);
+                tier0_test_mask_address(program, BUSTER_TIER0_TEST_MASK_IN, ((k + 1) & 3) * slots);
+                tier0_test_mask_emit(program, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_VECTOR, bytes);
+            }
+            tier0_test_mask_emit(program, BUSTER_TYPED_X86, row.result_class, 0);
+            tier0_test_mask_emit(program, BUSTER_TYPED_SET, row.result_class, bytes);
+        }
+        tier0_test_mask_emit(program, BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_VOID, 0);
+        ok = ok && tier1_masks_test_expect(test, !program->overflow, "the select's program fits");
+        Tier0Function functions[2] = { tier0_test_mask_function(program), tier0_test_mask_leaf() };
+        functions[0].operations = &row;
+        functions[0].operation_count = 1;
+        for (uint32_t input = 0; ok && input < BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS; input += 1)
+        {
+            uint64_t* in = inputs + (uint64_t)input * (BUSTER_TIER1_MASKS_TEST_IN / 8);
+            uint8_t* wanted = expected + (uint64_t)input * BUSTER_TIER1_MASKS_TEST_OUT;
+            tier0_test_mask_inputs(in, &state);
+            memset(wanted, 0xa5, BUSTER_TIER1_MASKS_TEST_OUT);
+            for (uint32_t k = 0; k < 4; k += 1)
+            {
+                const uint8_t* w = (const uint8_t*)in + bytes * k;
+                const uint8_t* a = (const uint8_t*)in + bytes * ((k + 1) & 3);
+                uint8_t* out = wanted + bytes * k;
+                for (uint32_t lane = 0; lane < bytes / rule->element; lane += 1)
+                {
+                    const bool set = select && (in[k] >> lane & 1) != 0;
+                    if (select)
+                    {
+                        memcpy(out + rule->element * lane, (set ? w : a) + rule->element * lane, rule->element);
+                    }
+                    else
+                    {
+                        memset(out + rule->element * lane, 0, rule->element);
+                    }
+                }
+            }
+        }
+        bool machine = false;
+        ok = ok && tier1_masks_test_typed_pipeline(test, rule->name, functions, true, inputs, expected, arenas, &machine);
+        test->select_rows += ok;
+        tier1_masks_test_expect(test, test->scratch.length == 0, "the selects return the scratch arena");
+        arena_pop_to(&test->output, output_mark);
+        for (uint32_t k = 0; k < 3; k += 1)
+        {
+            arena_pop_to(&arenas[k], 0);
+        }
+    }
+    for (uint32_t k = 0; k < 3; k += 1)
+    {
+        arena_release(&arenas[k]);
+    }
+    free(expected);
+    free(inputs);
+    free(program);
+}
+
 static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
 {
     uint64_t seed = 179;
@@ -4971,6 +5078,7 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
             tier1_masks_test_typed(&test);
             tier1_masks_test_builtins(&test);
             tier1_masks_test_compares(&test);
+            tier1_masks_test_selects(&test);
             tier1_masks_test_widths(&test);
             tier1_masks_test_refusals(&test, baseline, foundation);
             tier1_masks_test_scan(&test);
@@ -4984,13 +5092,17 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
             // Tier 0's programs through the IR: every one taken whole, some with machine rows, and natively by both paths.
             tier1_masks_test_expect(&test, test.typed_programs == BUSTER_TIER1_MASKS_TEST_PROGRAMS && test.typed_machine != 0 && test.typed_machine < test.typed_programs,
                                     "Tier 0's mask programs go through the IR and Tier 1, those whose rows the decoders refuse as machine rows");
-            tier1_masks_test_expect(&test, !test.native || test.typed_runs == 2u * BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS * (test.typed_programs + test.builtin_rows + test.compare_rows + test.width_rows),
+            tier1_masks_test_expect(&test, !test.native || test.typed_runs == 2u * BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS * (test.typed_programs + test.builtin_rows + test.compare_rows + test.select_rows + test.width_rows),
                                     "every typed program and front-end row runs natively by both of Tier 1's paths");
             // The comparisons: 24 integer rules (bytes to quadwords, signed and unsigned, at 3 widths) at 8 immediates, 6
             // of them the IR's; 6 packed float rules at 32, 12 of them the IR's.
             tier1_masks_test_expect(&test, test.compare_attempts == 24 * 8 + 6 * 32 && test.compare_rows == test.compare_attempts && test.compare_decoded == 24 * 6 + 6 * 12,
                                     "every front-end comparison into a mask goes through Tier 0, the IR and Tier 1, those of an IR predicate as the IR's comparisons");
             tier1_masks_test_expect(&test, !test.native || test.compare_native == BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS * test.compare_rows, "Tier 0 runs every front-end comparison natively");
+            // The selects (#1840): 24 SELECT rules (bytes to quadwords, floats, doubles, halves and bf16s at 3 widths) and 3
+            // UNDEFINED ones, every one the IR's own operation.
+            tier1_masks_test_expect(&test, test.select_attempts == 24 + 3 && test.select_rows == test.select_attempts,
+                                    "every front-end select and undefined vector goes through Tier 0, the IR and Tier 1 as the IR's vselect or zero vector");
             // The width changes (#1840): every insert and masked extract rule at each part, and the 6 casts.
             tier1_masks_test_expect(&test, test.width_attempts > 6 && test.width_rows == test.width_attempts,
                                     "every front-end width change goes through the IR and Tier 1 as the IR's extract, widen or insert");
@@ -5000,6 +5112,8 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
         }
         printf("test-tier1-masks: Tier 0's mask programs: %u through the IR's interpreter, SSA, the optimizer and Tier 1 (%" PRIu64 " native runs), %u of them with machine rows, natively alone\n",
                test.typed_programs, test.typed_runs, test.typed_machine);
+        printf("test-tier1-masks: the front end's selects and undefined vectors: %u through the IR's interpreter, SSA, the optimizer and Tier 1 natively as its vselect and zero vector\n",
+               test.select_rows);
         printf("test-tier1-masks: the front end's opmask rows: %u through Tier 0 natively (%u runs), the IR's interpreter, SSA, the optimizer and Tier 1\n", test.builtin_rows, test.builtin_native);
         printf("test-tier1-masks: the front end's comparisons into masks: %u through Tier 0 natively (%u runs) and Tier 1, %u of them the IR's comparisons through its interpreter, SSA and the "
                "optimizer, the others machine rows\n",

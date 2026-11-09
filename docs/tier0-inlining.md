@@ -143,6 +143,10 @@ stream (`CheckProgramLowered.functions[b]`) has none of:
   first version's rule, and every `<immintrin.h>` wrapper keeps it. The
   "Later steps" section lifts it.
 
+A callee's or a caller's asm bodies (#1839, `Tier0Function.call_asm`) come with
+it: the caller's keep their rows and blocks, and each site's copy of a callee's
+bodies takes the site's rows and its block among the site's locals.
+
 A **call site** is a `CALL` entry of the caller whose call table row names a
 callee (`call_targets[c]` a callee's symbol), with `call_variadic[c]` clear and
 the caller's target including the callee's. Every other call stays a call.

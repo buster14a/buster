@@ -730,6 +730,18 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_vector_operation(
             ir_typed_lanes(sink, value, operation->lane);
         }
     }
+    else if (operation->operation == IR_SIMD_SELECT)
+    {
+        // A masked move's select (#1840): the second operand's lanes where the mask's bits are set, the third's elsewhere.
+        value = ir_typed_emit(sink, IR_VSELECT, type, operands[0], operands[1], operands[2], 0);
+        ir_typed_lanes(sink, value, operation->lane);
+    }
+    else if (operation->zero)
+    {
+        // An undefined vector's row (#1840): the zero vector it gives.
+        const uint64_t zero[8] = {0};
+        value = ir_typed_vector_constant(sink, type, zero);
+    }
     else
     {
         value = ir_typed_emit(sink, (IrOp)ops[operation->operation], type, operands[0], operation->operand_count == 2 ? operands[1] : BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
@@ -1802,8 +1814,10 @@ static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType res
             check.instruction = entry;
         }
     }
-    if (check.error == IR_OK && (input->unwind_init || input->returns_twice || tier0_preserving(input) || input->realign_stack))
+    if (check.error == IR_OK && (input->unwind_init || input->returns_twice || tier0_preserving(input) || input->realign_stack || input->asm_body_count != 0))
     {
+        // An asm statement placed in its caller as an asm body (#1839, Tier0Function.call_asm) is Tier 0's too, until the
+        // IR has a form for one.
         // __builtin_unwind_init's frame, which saves every callee-saved register (Tier0Function.unwind_init),
         // __builtin_setjmp's, which keeps nothing in one (Tier0Function.returns_twice), a preserving function's, which
         // keeps registers for its caller past them (#147, Tier0Function.preserve_general), and a force_align_arg_pointer

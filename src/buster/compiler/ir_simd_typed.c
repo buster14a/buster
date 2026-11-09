@@ -94,6 +94,9 @@ struct IrSimdTypedOperation
     uint8_t width_change;
     uint8_t part;
     bool merge_mask;
+    // A row of no operand whose vector is zeros (#1840, ir_simd_typed_zero): an undefined vector's, which the IR's zero
+    // constant is.
+    bool zero;
 };
 
 typedef struct IrSimdTypedForm IrSimdTypedForm;
@@ -1037,10 +1040,101 @@ static IrSimdTypedStatus ir_simd_typed_width(const Tier0Operation* source, uint6
     return status;
 }
 
+// A masked move's select (#1840): the SELECT rule's row as the opmask conversion leaves it (c_check_program_x86.c's
+// CHECK_X86_LOWER_SELECT, `_mm512_mask_mov_epi8`, `_mm512_mask_blend_epi32` and the rest at each width): a mask and two
+// vectors of one width (16, 32 or 64 bytes) in, VECTOR(2)'s register moved whole into VECTOR(0)'s (vmovdqu64), then
+// VECTOR(1)'s moved into it under MASK(0) by the move of its elements (vmovdqu8 to vmovdqu64), register-direct with no
+// other field or decoration. It is the IR's vselect of the mask, VECTOR(1) and VECTOR(2), its lanes the move's elements'
+// integers, whose mask must be the lanes' (ir_lane_mask's bytes: a byte for 8 lanes or fewer). Its features are the
+// forms Tier 1 selects for it: vpblendm at its lanes' width (BW for bytes and words) and its moves (AVX512F, VL below 64
+// bytes; the mask's: DQ for a byte's, BW for 32 and 64 lanes'). Otherwise it stays a machine row.
+static IrSimdTypedStatus ir_simd_typed_select(const Tier0Operation* source, uint64_t target_features, IrSimdTypedOperation* result)
+{
+    static const uint16_t moves[4][3] = {
+        { X86_FORM_VMOVDQU8_X_XM128, X86_FORM_VMOVDQU8_Y_YM256, X86_FORM_VMOVDQU8_Z_ZM512 },
+        { X86_FORM_VMOVDQU16_X_XM128, X86_FORM_VMOVDQU16_Y_YM256, X86_FORM_VMOVDQU16_Z_ZM512 },
+        { X86_FORM_VMOVDQU32_X_XM128, X86_FORM_VMOVDQU32_Y_YM256, X86_FORM_VMOVDQU32_Z_ZM512 },
+        { X86_FORM_VMOVDQU64_X_XM128, X86_FORM_VMOVDQU64_Y_YM256, X86_FORM_VMOVDQU64_Z_ZM512 },
+    };
+    static const uint8_t lanes[4] = { IR_SIMD_LANE_I8, IR_SIMD_LANE_I16, IR_SIMD_LANE_I32, IR_SIMD_LANE_I64 };
+    const uint32_t bytes = source->result_bytes;
+    const uint32_t width = bytes == 16 ? 0 : bytes == 32 ? 1 : 2;
+    const bool admitted = source->result_class == BUSTER_TYPED_CLASS_VECTOR && (bytes == 16 || bytes == 32 || bytes == 64) && source->record_count == 2 &&
+                          source->operand_count == 3 && source->operand_classes[0] == BUSTER_TYPED_CLASS_MASK && source->operand_classes[1] == BUSTER_TYPED_CLASS_VECTOR &&
+                          source->operand_bytes[1] == bytes && source->operand_classes[2] == BUSTER_TYPED_CLASS_VECTOR && source->operand_bytes[2] == bytes;
+    const X86Instruction whole = {
+        .form = moves[3][width],
+        .reg = BUSTER_TIER0_ROLE_VECTOR(0),
+        .rm = BUSTER_TIER0_ROLE_VECTOR(2),
+        .mode = BUSTER_X86_REGISTER_DIRECT,
+    };
+    IrSimdTypedOperation candidate = { .operation = IR_SIMD_OPERATION_COUNT };
+    for (uint32_t size = 0; admitted && size < 4; size += 1)
+    {
+        const X86Instruction merged = {
+            .form = moves[size][width],
+            .reg = BUSTER_TIER0_ROLE_VECTOR(0),
+            .rm = BUSTER_TIER0_ROLE_VECTOR(1),
+            .mode = BUSTER_X86_REGISTER_DIRECT,
+            .decorations = BUSTER_TIER0_DECORATION_MASK(0),
+        };
+        const uint32_t count = bytes >> size;
+        const uint32_t mask_bytes = count <= 8 ? 1 : count / 8;
+        if (memcmp(&source->records[0], &whole, sizeof(whole)) == 0 && memcmp(&source->records[1], &merged, sizeof(merged)) == 0 && source->operand_bytes[0] == mask_bytes)
+        {
+            candidate.operation = IR_SIMD_SELECT;
+            candidate.lane = (IrSimdLane)lanes[size];
+            candidate.required_features = ir_typed_vector_moves(bytes, target_features) | BUSTER_X86_FEATURE(AVX512F) |
+                                          ((x86_target_requirement(whole.form) | x86_target_requirement(merged.form)) & ~BUSTER_X86_TARGET_KNOWN) |
+                                          (mask_bytes == 1 ? BUSTER_X86_FEATURE(AVX512DQ) : 0) | (mask_bytes >= 4 ? BUSTER_X86_FEATURE(AVX512BW) : 0);
+        }
+    }
+    const IrSimdTypedStatus status = candidate.operation != IR_SIMD_OPERATION_COUNT && (target_features & candidate.required_features) == candidate.required_features ?
+                                         IR_SIMD_TYPED_OK : IR_SIMD_TYPED_UNSUPPORTED;
+    if (status == IR_SIMD_TYPED_OK)
+    {
+        candidate.shape = (IrSimdShape)(IR_SIMD_V4I32 + width);
+        candidate.operand_count = source->operand_count;
+        memcpy(candidate.operand_classes, source->operand_classes, sizeof(candidate.operand_classes));
+        memcpy(candidate.operand_bytes, source->operand_bytes, sizeof(candidate.operand_bytes));
+        *result = candidate;
+    }
+    return status;
+}
+
+// An undefined vector's row (#1840, c_check_program_x86.c's CHECK_X86_LOWER_UNDEFINED, `_mm512_undefined_epi32` and the
+// rest): no operand, one record of vpxorq of VECTOR(0) with itself at the result's width, register-direct and undecorated.
+// It is the IR's zero vector of that width, which the row gives (a refinement of an undefined value). Its features are
+// the form's and the vector's moves; otherwise it stays a machine row.
+static IrSimdTypedStatus ir_simd_typed_zero(const Tier0Operation* source, uint64_t target_features, IrSimdTypedOperation* result)
+{
+    static const uint16_t forms[3] = { X86_FORM_VPXORQ_X_X_XM128, X86_FORM_VPXORQ_Y_Y_YM256, X86_FORM_VPXORQ_Z_Z_ZM512 };
+    const uint32_t bytes = source->result_bytes;
+    const uint32_t width = bytes == 16 ? 0 : bytes == 32 ? 1 : 2;
+    const uint8_t v0 = BUSTER_TIER0_ROLE_VECTOR(0);
+    const X86Instruction expected = { .form = forms[width], .reg = v0, .vvvv = v0, .rm = v0, .mode = BUSTER_X86_REGISTER_DIRECT };
+    const bool admitted = source->result_class == BUSTER_TYPED_CLASS_VECTOR && (bytes == 16 || bytes == 32 || bytes == 64) && source->record_count == 1 &&
+                          source->operand_count == 0 && memcmp(&source->records[0], &expected, sizeof(expected)) == 0;
+    const uint64_t required = ir_typed_vector_moves(bytes, target_features) | (x86_target_requirement(expected.form) & ~BUSTER_X86_TARGET_KNOWN);
+    const IrSimdTypedStatus status = admitted && (target_features & required) == required ? IR_SIMD_TYPED_OK : IR_SIMD_TYPED_UNSUPPORTED;
+    if (status == IR_SIMD_TYPED_OK)
+    {
+        const IrSimdTypedOperation candidate = {
+            .operation = IR_SIMD_OPERATION_COUNT,
+            .shape = (IrSimdShape)(IR_SIMD_V4I32 + width),
+            .required_features = required,
+            .zero = true,
+        };
+        *result = candidate;
+    }
+    return status;
+}
+
 // A row's decoding: the bit builtins', the signed overflow builtins', masks, scalar intrinsics, lane operations,
-// comparisons into a mask alone, width changes (#1840), then exact scalar splats; other admitted forms stay machine rows. A
-// semantic match whose target lacks a required feature stays refused, but a comparison into a mask alone or a width
-// change, whose machine row a target may still run, stays one.
+// comparisons into a mask alone, masked moves' selects, undefined vectors and width changes (#1840), then exact scalar
+// splats; other admitted forms stay machine rows. A semantic match whose target lacks a required feature stays refused,
+// but a comparison into a mask alone, a select, an undefined vector or a width change, whose machine row a target may
+// still run, stays one.
 static IrSimdTypedStatus ir_simd_typed_row(const Tier0Operation* source, uint64_t target_features, IrSimdTypedOperation* result)
 {
     const bool masks = source != NULL && source->operand_count != 0 && source->operand_classes[0] == BUSTER_TYPED_CLASS_MASK && tier0_class_integer(source->result_class);
@@ -1060,6 +1154,14 @@ static IrSimdTypedStatus ir_simd_typed_row(const Tier0Operation* source, uint64_
     if (status == IR_SIMD_TYPED_UNSUPPORTED && source->result_class == BUSTER_TYPED_CLASS_MASK)
     {
         status = ir_simd_typed_compare_mask(source, target_features, result);
+    }
+    if (status == IR_SIMD_TYPED_UNSUPPORTED && source->result_class == BUSTER_TYPED_CLASS_VECTOR)
+    {
+        status = ir_simd_typed_select(source, target_features, result);
+    }
+    if (status == IR_SIMD_TYPED_UNSUPPORTED && source->result_class == BUSTER_TYPED_CLASS_VECTOR)
+    {
+        status = ir_simd_typed_zero(source, target_features, result);
     }
     if (status == IR_SIMD_TYPED_UNSUPPORTED && source->result_class == BUSTER_TYPED_CLASS_VECTOR)
     {
