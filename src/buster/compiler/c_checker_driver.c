@@ -64,6 +64,7 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_ARRAY_NEGATIVE: result = "array size is negative"; break;
         case CHECK_INPUT_ARRAY_FUNCTIONS: result = "declared as array of functions"; break;
         case CHECK_INPUT_ARRAY_INCOMPLETE: result = "array has incomplete element type"; break;
+        case CHECK_INPUT_ARRAY_TOO_LARGE: result = "array is too large"; break;
         case CHECK_INPUT_UNDECLARED: result = "use of undeclared identifier"; break;
         case CHECK_INPUT_LITERAL: result = "invalid or unsupported literal"; break;
         case CHECK_INPUT_RESOURCE: result = "type checker ran out of memory"; break;
@@ -3648,7 +3649,7 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                             arena_pop_to(scratch, type_mark);
                         }
                         else if (phase == 0 && (kind == CHECK_INPUT_VECTOR_ELEMENT || kind == CHECK_INPUT_FUNCTION_RETURN || kind == CHECK_INPUT_ARRAY_FUNCTIONS ||
-                                 kind == CHECK_INPUT_ARRAY_INCOMPLETE || kind == CHECK_INPUT_ARRAY_NEGATIVE ||
+                                 kind == CHECK_INPUT_ARRAY_INCOMPLETE || kind == CHECK_INPUT_ARRAY_NEGATIVE || kind == CHECK_INPUT_ARRAY_TOO_LARGE ||
                                  ((kind == CHECK_INPUT_INCOMPLETE_OBJECT || kind == CHECK_INPUT_INCOMPLETE_TENTATIVE) && input->reports[index].type != 0)))
                         {
                             // The element type as clang prints it, its typedef's name first (check_driver_warning_type).
@@ -3688,6 +3689,24 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                             else if (kind == CHECK_INPUT_ARRAY_NEGATIVE)
                             {
                                 pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "array size is negative");
+                            }
+                            else if (kind == CHECK_INPUT_ARRAY_TOO_LARGE)
+                            {
+                                // The count with clang's digit separators (APInt's toString with a separator).
+                                char digits[32];
+                                char grouped[48];
+                                const int length = snprintf(digits, sizeof(digits), "%llu", (unsigned long long)report->value);
+                                uint32_t at = 0;
+                                for (int d = 0; d < length; d += 1)
+                                {
+                                    grouped[at++] = digits[d];
+                                    if (d + 1 < length && (length - d - 1) % 3 == 0)
+                                    {
+                                        grouped[at++] = '\'';
+                                    }
+                                }
+                                grouped[at] = 0;
+                                pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "array is too large (%s elements)", grouped);
                             }
                             else if (kind == CHECK_INPUT_ARRAY_FUNCTIONS)
                             {

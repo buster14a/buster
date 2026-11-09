@@ -3846,8 +3846,13 @@ take clang's words and places:
 - **The forward declaration note** of an incomplete tag's variable and
   tentative definition (`check_input_report_typed`).
 
-Each still ends the unit's checking as before. Clang's "array is too large"
-keeps the generic error. The semantic-recovery fixtures compare each with clang.
+- **An array past the object limit** (2^61 bytes, clang's and the type
+  table's), at its bound: "array is too large (2'305'843'009'213'693'952
+  elements)", the count with clang's digit separators
+  (`CHECK_INPUT_ARRAY_TOO_LARGE`).
+
+Each still ends the unit's checking as before. The semantic-recovery fixtures
+compare each with clang.
 
 #### Semantic error recovery (#1447)
 

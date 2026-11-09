@@ -303,6 +303,9 @@ typedef enum CheckInputMessage
     CHECK_INPUT_ARRAY_NEGATIVE,
     CHECK_INPUT_ARRAY_FUNCTIONS,
     CHECK_INPUT_ARRAY_INCOMPLETE,
+    // An array of more than BUSTER_TYPE_MAX_OBJECT_BYTES (#1447, clang's limit too), at its bound: "array is too large
+    // (2'305'843'009'213'693'952 elements)", its count in `value`.
+    CHECK_INPUT_ARRAY_TOO_LARGE,
 } CheckInputMessage;
 
 // CHECK_INPUT_DIRECT_INITIALIZER_ARRAY's detail: the literal the element takes besides a list, in clang's words.
@@ -6722,6 +6725,13 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                         {
                             check_input_report_typed(reader, part->token, functions ? CHECK_INPUT_ARRAY_FUNCTIONS : CHECK_INPUT_ARRAY_INCOMPLETE, type,
                                                      type == frame->base ? frame->name : BUSTER_CHECK_NONE, frame->name);
+                            type = 0;
+                        }
+                        uint64_t bytes = 0;
+                        if (type != 0 && part->kind == BUSTER_TYPE_KIND_ARRAY &&
+                            __builtin_expect(__builtin_mul_overflow(type_size(reader->types, element), part->extent, &bytes) || bytes > BUSTER_TYPE_MAX_OBJECT_BYTES, 0))
+                        {
+                            check_input_report_typed(reader, part->token + 1, CHECK_INPUT_ARRAY_TOO_LARGE, type, BUSTER_CHECK_NONE, part->extent);
                             type = 0;
                         }
                         type = type != 0 ? check_input_vla_type(reader, part->token, type, frame->name, frame->parameter_context, part->kind, part->extent) : 0;

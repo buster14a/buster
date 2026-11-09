@@ -286,6 +286,11 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "static void v;\n",
         "struct S;\nint k(void) { struct S local; return 0; }\n",
         "struct S s;\nint ok(void) { return 0; }\n",
+        // An array past clang's object limit, at its bound, its count with clang's digit separators: a declaration's, an
+        // inner array's (whose outer one is past it) and a type name's.
+        "char ok[0x1fffffffffffffff];\nint a[0x2000000000000000];\n",
+        "int c[0x100000000][0x100000000];\n",
+        "int s = sizeof(int[0x4000000000000000]);\n",
         // A tag defined again in its scope, whose body becomes an anonymous tag's: later uses of the name find the first
         // definition, and the second's enumerators are still declared (a repeated one with its own note).
         "struct S { int a; };\nstruct S { long b; };\nunion U { int a; };\nunion U { char c; } u2;\n"
