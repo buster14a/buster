@@ -656,6 +656,14 @@ struct AbiTestBuilder
     uint32_t vector_bytes;
 };
 
+// An AbiReturn's 8 bytes as one number, for a report.
+static uint64_t abi_test_return_bits(AbiReturn result)
+{
+    uint64_t bits = 0;
+    memcpy(&bits, &result, sizeof(bits));
+    return bits;
+}
+
 static void abi_test_expectation(AbiTestBuilder* builder, const char* name, TypeId type, AbiClasses named, uint32_t set, uint32_t clear, uint8_t result_kind, uint8_t first,
                                  uint8_t second)
 {
@@ -4661,6 +4669,26 @@ static bool abi_test_worlds(uint64_t seed, uint32_t count)
                     abi_test_expect(&tally, same, "worlds", detail);
                 }
                 free(again);
+                // abi_result's table against the classes' branches (abi_result_branches): each classified type with its own
+                // pass bits, and with each extension (none, SIGN, ZERO). LOW_GENERAL and PAIR stay as the type has them: the
+                // classification sets them only under an SSE and an INTEGER low eightbyte (abi_low_general, abi_is_pair).
+                const uint32_t extensions[] = {
+                    0,
+                    BUSTER_ABI_PASS_SIGN,
+                    BUSTER_ABI_PASS_ZERO,
+                };
+                for (uint32_t index = 1; index < table->types.count; index += 1)
+                {
+                    for (uint32_t e = 0; (vector.pass[index] & BUSTER_ABI_PASS_CLASSIFIED) != 0 && e < BUSTER_ARRAY_LENGTH(extensions); e += 1)
+                    {
+                        const uint32_t pass = (vector.pass[index] & ~(BUSTER_ABI_PASS_SIGN | BUSTER_ABI_PASS_ZERO)) | extensions[e];
+                        const AbiReturn tabled = abi_result(&vector, table, index, pass);
+                        const AbiReturn branched = abi_result_branches(&vector, table, index, pass);
+                        snprintf(detail, sizeof(detail), "type %u's result by the table with pass %08x: %016" PRIx64 ", by the branches %016" PRIx64, index, pass,
+                                 abi_test_return_bits(tabled), abi_test_return_bits(branched));
+                        abi_test_expect(&tally, memcmp(&tabled, &branched, sizeof(AbiReturn)) == 0, "worlds", detail);
+                    }
+                }
                 // Types made after the table of the types alone are past its rows: classifying again leaves them to a table
                 // with room for them, and touches nothing past its own rows, while the whole table classifies them.
                 const uint32_t before = table->types.count;

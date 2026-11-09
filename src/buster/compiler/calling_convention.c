@@ -1819,8 +1819,8 @@ static void abi_value_result(const AbiTable* abi, const TypeTable* table, uint32
     }
 }
 
-// A type's result: clang's classifyReturnType, with LLVM's registers for what it returns as a value.
-static AbiReturn abi_result(const AbiTable* abi, const TypeTable* table, uint32_t index, uint32_t pass)
+// A type's result by the classes' branches, as abi_result had it before its table: abi_result's oracle in the tests.
+static __attribute__((unused)) AbiReturn abi_result_branches(const AbiTable* abi, const TypeTable* table, uint32_t index, uint32_t pass)
 {
     const AbiClasses classes = abi->rows[(uint64_t)index * BUSTER_ABI_ROW_BYTES];
     const uint8_t low = BUSTER_ABI_LOW(classes);
@@ -1898,6 +1898,79 @@ static AbiReturn abi_result(const AbiTable* abi, const TypeTable* table, uint32_
                 vectors += 1;
                 part += 1;
             }
+        }
+    }
+    return result;
+}
+
+// The results abi_result takes from the classes alone, indexed by the low eightbyte's class (INTEGER where LOW_GENERAL
+// puts it in a general register) times BUSTER_ABI_CLASS_COUNT plus the high one's (INTEGER for a PAIR): x87's st0 for
+// X87, st0 and st1 for COMPLEX_X87, a vector register whole for an SSEUP high eightbyte (its part_bytes 0 here, the
+// type's size in abi_result), and otherwise an eightbyte a register in order, INTEGER's rax then rdx and SSE's and
+// X87UP's xmm0 then xmm1, the high one alone (HIGH) under a NO_CLASS low one. MEMORY, MEMORY is nothing (IGNORE, no
+// register), where a MEMORY low eightbyte or IGNORE starts; the other MEMORY entries are unused.
+#define BUSTER_ABI_SHAPE_TAKES(c) ((c) == BUSTER_ABI_INTEGER || (c) == BUSTER_ABI_SSE || (c) == BUSTER_ABI_X87UP)
+#define BUSTER_ABI_SHAPE_FIRST(f) ((f) == BUSTER_ABI_INTEGER ? BUSTER_ABI_RAX : BUSTER_ABI_REGISTER_VECTOR)
+#define BUSTER_ABI_SHAPE_SECOND(f, s)                                                                                                                    \
+    ((s) == BUSTER_ABI_INTEGER ? ((f) == BUSTER_ABI_INTEGER ? BUSTER_ABI_RDX : BUSTER_ABI_RAX)                                                           \
+                               : ((f) == BUSTER_ABI_SSE || (f) == BUSTER_ABI_X87UP ? (BUSTER_ABI_REGISTER_VECTOR | 1) : BUSTER_ABI_REGISTER_VECTOR))
+#define BUSTER_ABI_SHAPE_ZERO(f, s)                                                                                                                      \
+    ((f) == BUSTER_ABI_X87 || (f) == BUSTER_ABI_COMPLEX_X87 ? BUSTER_ABI_REGISTER_X87                                                                  \
+     : (s) == BUSTER_ABI_SSEUP                            ? BUSTER_ABI_REGISTER_VECTOR                                                                \
+     : BUSTER_ABI_SHAPE_TAKES(f)                          ? BUSTER_ABI_SHAPE_FIRST(f)                                                                 \
+     : BUSTER_ABI_SHAPE_TAKES(s)                          ? BUSTER_ABI_SHAPE_SECOND(f, s)                                                             \
+                                                          : BUSTER_ABI_REGISTER_NONE)
+#define BUSTER_ABI_SHAPE_ONE(f, s)                                                                                                                       \
+    ((f) == BUSTER_ABI_COMPLEX_X87                                                       ? (BUSTER_ABI_REGISTER_X87 | 1)                             \
+     : (f) != BUSTER_ABI_X87 && (s) != BUSTER_ABI_SSEUP && BUSTER_ABI_SHAPE_TAKES(f) && BUSTER_ABI_SHAPE_TAKES(s) ? BUSTER_ABI_SHAPE_SECOND(f, s) \
+                                                                                         : BUSTER_ABI_REGISTER_NONE)
+#define BUSTER_ABI_SHAPE(f, s)                                                                                                                           \
+    {                                                                                                                                                    \
+        .kind = (f) == BUSTER_ABI_MEMORY ? BUSTER_ABI_RESULT_IGNORE : BUSTER_ABI_RESULT_REGISTERS,                                                       \
+        .flags = (f) == BUSTER_ABI_NO_CLASS && (s) != BUSTER_ABI_SSEUP ? BUSTER_ABI_FLAG_HIGH : 0,                                                      \
+        .part_bytes = (f) == BUSTER_ABI_MEMORY || (s) == BUSTER_ABI_SSEUP ? 0 : (f) == BUSTER_ABI_X87 || (f) == BUSTER_ABI_COMPLEX_X87 ? 16 : 8,      \
+        .registers = {                                                                                                                                   \
+            BUSTER_ABI_SHAPE_ZERO(f, s),                                                                                                                 \
+            BUSTER_ABI_SHAPE_ONE(f, s),                                                                                                                  \
+            BUSTER_ABI_REGISTER_NONE,                                                                                                                    \
+            BUSTER_ABI_REGISTER_NONE,                                                                                                                    \
+        },                                                                                                                                               \
+        .padding = 0,                                                                                                                                    \
+    }
+#define BUSTER_ABI_SHAPE_ROW(f)                                                                                                                          \
+    BUSTER_ABI_SHAPE(f, 0), BUSTER_ABI_SHAPE(f, 1), BUSTER_ABI_SHAPE(f, 2), BUSTER_ABI_SHAPE(f, 3), BUSTER_ABI_SHAPE(f, 4), BUSTER_ABI_SHAPE(f, 5),    \
+        BUSTER_ABI_SHAPE(f, 6), BUSTER_ABI_SHAPE(f, 7)
+static const AbiReturn abi_result_shapes[BUSTER_ABI_CLASS_COUNT * BUSTER_ABI_CLASS_COUNT] = {
+    BUSTER_ABI_SHAPE_ROW(0), BUSTER_ABI_SHAPE_ROW(1), BUSTER_ABI_SHAPE_ROW(2), BUSTER_ABI_SHAPE_ROW(3),
+    BUSTER_ABI_SHAPE_ROW(4), BUSTER_ABI_SHAPE_ROW(5), BUSTER_ABI_SHAPE_ROW(6), BUSTER_ABI_SHAPE_ROW(7),
+};
+
+// A type's result: clang's classifyReturnType, with LLVM's registers for what it returns as a value. Its registers come
+// from abi_result_shapes by the classes as they pass (LOW_GENERAL's low eightbyte and PAIR's high one INTEGER), without
+// branches on them, the extension's flag from the pass bits and an SSEUP's part from the size; nothing for IGNORE, and a
+// MEMORY low eightbyte's through the hidden pointer or, for a scalar, as its value (abi_value_result).
+static AbiReturn abi_result(const AbiTable* abi, const TypeTable* table, uint32_t index, uint32_t pass)
+{
+    const AbiClasses classes = abi->rows[(uint64_t)index * BUSTER_ABI_ROW_BYTES];
+    const uint8_t low = BUSTER_ABI_LOW(classes);
+    const uint8_t high = BUSTER_ABI_HIGH(classes);
+    const uint8_t first = (pass & BUSTER_ABI_PASS_LOW_GENERAL) != 0 ? BUSTER_ABI_INTEGER : low;
+    const uint8_t second = (pass & BUSTER_ABI_PASS_PAIR) != 0 ? BUSTER_ABI_INTEGER : high;
+    const uint8_t extension = (uint8_t)((pass & BUSTER_ABI_PASS_SIGN) != 0 ? BUSTER_ABI_FLAG_SIGN : (pass & BUSTER_ABI_PASS_ZERO) != 0 ? BUSTER_ABI_FLAG_ZERO : 0);
+    const bool nothing = (pass & BUSTER_ABI_PASS_IGNORE) != 0 || low == BUSTER_ABI_MEMORY;
+    AbiReturn result = abi_result_shapes[nothing ? (uint32_t)BUSTER_ABI_MEMORY * BUSTER_ABI_CLASS_COUNT + BUSTER_ABI_MEMORY : (uint32_t)first * BUSTER_ABI_CLASS_COUNT + second];
+    result.flags |= extension;
+    result.part_bytes = result.kind == BUSTER_ABI_RESULT_REGISTERS && result.part_bytes == 0 ? (uint8_t)table->types.size[index] : result.part_bytes;
+    if ((pass & BUSTER_ABI_PASS_IGNORE) == 0 && low == BUSTER_ABI_MEMORY)
+    {
+        if (abi_is_aggregate(table, index))
+        {
+            result.kind = BUSTER_ABI_RESULT_MEMORY;
+        }
+        else
+        {
+            // A scalar clang returns as its value: nullptr_t, _Atomic scalars, vectors MEMORY by their size.
+            abi_value_result(abi, table, index, abi_value_class(table, index), &result);
         }
     }
     return result;
