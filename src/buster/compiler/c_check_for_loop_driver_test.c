@@ -79,6 +79,44 @@ static const char check_driver_for_loop_order_source[] =
                   "    return r;\n"
                   "}\n";
 
+// #1821: loops whose variables only statement expressions in unevaluated operands write.
+static const char check_driver_for_loop_unevaluated_source[] =
+    "void f(int i, int n) {\n"
+    "    for (; i < n;) { (void)__builtin_constant_p(({ i = 8; 1; })); }\n"
+    "    for (; i < n + __builtin_constant_p(({ i = 6; 1; })); ) { }\n"
+    "    for (; i < n;) { (void)sizeof(({ i = 9; 1; })); }\n"
+    "    for (; i < n;) { (void)_Alignof(({ i = 1; 1; })); }\n"
+    "    for (; i < n;) { typeof(({ i = 1; 1; })) t = 0; (void)t; }\n"
+    "    for (; i < n;) { (void)({ i = 1; 1; }); }\n"
+    "    for (; i < n;) { (void)__builtin_constant_p(({ ({ i = 2; 1; }); })); }\n"
+    "    for (; i < n;) { (void)sizeof(({ (void)({ i = 2; 1; }); 1; })); }\n"
+    "    for (; i < n;) { (void)_Generic(1, int: ({ i = 4; 1; }), long: 2); }\n"
+    "    for (; i < n;) { (void)_Generic(1, long: ({ i = 4; 1; }), int: 2); }\n"
+    "    for (; i < n;) { (void)__builtin_choose_expr(1, ({ i = 4; 1; }), 2); }\n"
+    "    for (; i < n;) { (void)__builtin_choose_expr(0, ({ i = 4; 1; }), 2); }\n"
+    "    for (; i < n;) { (void)__builtin_object_size(({ i = 5; &i; }), 0); }\n"
+    "    for (; i < n;) { (void)_Generic(1, long: ({ (void)({ i = 4; 1; }); 1; }), int: 2); }\n"
+    "    for (; i < n;) { (void)_Generic(1, int: ({ (void)({ i = 4; 1; }); 1; }), long: 2); }\n"
+    "    for (; i < n;) { (void)_Generic(1, int: ({ (void)sizeof(({ i = 4; 1; })); 1; }), long: 2); }\n"
+    "}\n"
+    "void g(int i, int n) {\n"
+    "    for (; i < n;) { (void)sizeof(({ return; 1; })); }\n"
+    "    for (; i < n;) { (void)sizeof(({ break; 1; })); }\n"
+    "    for (; i < n;) { (void)({ break; 1; }); }\n"
+    "    for (; i < n;) { (void)_Generic(1, long: ({ goto out; 1; }), int: 2); }\n"
+    "    for (; i < n + sizeof(({ i = 2; 1; }));) { }\n"
+    "    for (; i < n; (void)sizeof(({ i = 2; 1; }))) { }\n"
+    "    for (; i < n; (void)__builtin_constant_p(({ (void)({ i++; 1; }); 1; }))) { }\n"
+    "    for (; i < n;) { (void)sizeof(int[({ i = 1; n; })]); }\n"
+    "    for (; i < n;) { (void)sizeof(int[i++]); }\n"
+    "    for (; i < n;) { (void)sizeof(int (*)[i++]); }\n"
+    "    for (; i < n;) { int a[n]; (void)sizeof(a[({ i = 3; 1; })]); }\n"
+    "    for (; i < n;) { int a[({ i = 3; n; })]; (void)a; }\n"
+    "    for (; i < n;) { int a = ({ i = 3; 8; }); (void)a; }\n"
+    "    (void)sizeof(({ for (; i < n;) { i++; } 1; }));\n"
+    "out:;\n"
+    "}\n";
+
 static const CheckDriverDefaultWarningFixture check_driver_for_loop_fixtures[] =
 {
     {
@@ -169,6 +207,35 @@ static const CheckDriverDefaultWarningFixture check_driver_for_loop_fixtures[] =
                   "}\n",
         .options = { "-Wfor-loop-analysis" },
         .warnings = 10,
+    },
+    {
+        // #1821: a write in a GNU statement expression clang's visitor never reaches changes no loop variable: one in an
+        // unevaluated operand (sizeof, _Alignof, typeof, an unevaluated-argument builtin's call, a sizeof's type name's
+        // bounds), nested or not, or in a static selection's other arm, as a return, a break or a goto there is none.
+        // One in a selected arm, in a bound or in an initializer is.
+        .name = "statement expressions in unevaluated operands",
+        .source = check_driver_for_loop_unevaluated_source,
+        .options = { "-Wfor-loop-analysis", "-Wno-unevaluated-expression" },
+        .warnings = 23,
+    },
+    {
+        .name = "statement expressions in unevaluated operands in C23",
+        .source = check_driver_for_loop_unevaluated_source,
+        .options = { "-Wfor-loop-analysis", "-Wno-unevaluated-expression" },
+        .warnings = 23,
+        .c23 = true,
+    },
+    {
+        .name = "statement expressions in unevaluated operands under -Wall",
+        .source = check_driver_for_loop_unevaluated_source,
+        .options = { "-Wall", "-Wno-unevaluated-expression" },
+        .warnings = 23,
+    },
+    {
+        .name = "statement expressions in unevaluated operands under -Wall -Wextra",
+        .source = check_driver_for_loop_unevaluated_source,
+        .options = { "-Wall", "-Wextra", "-Wno-unevaluated-expression" },
+        .warnings = 24,
     },
     {
         .name = "-Werror=for-loop-analysis and a pragma",
