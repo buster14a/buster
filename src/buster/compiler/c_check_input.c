@@ -839,6 +839,9 @@ struct CheckInput
     // Whether an expression names an enumerator or a variable of an enumeration type (#1447): only then may an
     // operator's operands mix enumerations (check_common_enum_arithmetic).
     bool enum_operands;
+    // Whether an expression names an enumerator or a variable of a tagged enumeration type (#1447): only then may an
+    // implicit conversion change one named enumeration to another (check_common_enum_cast).
+    bool enum_names;
     uint8_t* function_flags;
     // The unit's FILE, jmp_buf, sigjmp_buf and ucontext_t (their typedefs' types) where an implicit declaration of a library
     // builtin took one (#148, check_input_implicit_function), which its diagnostic spells (CBuiltinLibraryNamed).
@@ -5333,14 +5336,99 @@ static bool check_input_enum_operand(const CheckInputReader* reader, uint32_t to
     return operand && !own;
 }
 
+// Whether the typedef declared at `typedef_token` declares the anonymous enumeration `plain` itself, unqualified (an
+// aligned typedef's alignment aside): clang's name for linkage of an anonymous enumeration (#1447, hasNameForLinkage),
+// `typedef enum { A } T;`'s T. A typedef of that typedef declares it too, which only opens the gate (CheckInput.enum_names).
+static bool check_input_enum_typedef(const CheckInputReader* reader, uint32_t typedef_token, TypeId plain)
+{
+    const bool typedef_name = typedef_token < reader->parser->tokens.count && reader->declaration_kinds[typedef_token] == C_BINDING_TYPEDEF &&
+                              reader->declared_types[typedef_token] != 0;
+    const TypeId declared = typedef_name ? type_strip_aligned(reader->types, reader->declared_types[typedef_token]) : 0;
+    return typedef_name && type_unqualified(reader->declared_types[typedef_token]) == reader->declared_types[typedef_token] && declared == plain;
+}
+
+// The typedef declaration a declaration's specifiers at `declaration` name, or BUSTER_CHECK_NONE: the reader's twin of
+// check_input_typedef_spelling, whose crossing rules it keeps.
+static uint32_t check_input_reader_typedef(const CheckInputReader* reader, uint32_t declaration)
+{
+    const Parser* parser = reader->parser;
+    uint32_t result = BUSTER_CHECK_NONE;
+    bool going = declaration < parser->tokens.count;
+    for (uint32_t token = declaration; going && token > 0;)
+    {
+        token -= 1;
+        const uint8_t kind = parser->tokens.kinds[token];
+        const uint8_t role = parser->tree.roles[token];
+        const uint32_t resolved = kind == PARSE_KIND_IDENTIFIER ? reader->output->declarations[token] : 0;
+        const bool typedef_name = resolved != 0 && resolved != token && resolved < parser->tokens.count && reader->declaration_kinds[resolved] == C_BINDING_TYPEDEF;
+        result = typedef_name ? resolved : result;
+        going = !typedef_name && (kind == PARSE_KIND_IDENTIFIER ||
+                                  (kind != PARSE_KIND_SEMI && kind != PARSE_KIND_R_BRACE && kind != PARSE_KIND_L_BRACE && kind != PARSE_KIND_COLON &&
+                                   kind != PARSE_KIND_TYPE && kind != PARSE_KIND_STRUCT && kind != PARSE_KIND_ENUM && role != PARSE_ROLE_TERMINATOR &&
+                                   role != PARSE_ROLE_CLOSE_GROUP && role != PARSE_ROLE_LABEL));
+    }
+    return result;
+}
+
+// Whether the identifier `token` names a variable of a named enumeration type (through an aligned typedef too) or an
+// enumerator of a named enumeration outside that enumeration's definition (where clang takes it as an int): the nearest
+// enumeration definition before the enumerator's declaration that holds it, within 1024 tokens, beyond which it is taken
+// as named. Its `{` is where its tag ends (CheckInputReader.tag_ends), and its `}` the `{`'s parent. Named is clang's
+// name for linkage: a tag, or for an anonymous one the typedef that declares it (check_input_enum_typedef), the
+// declarator after the definition's `}`, or the one a variable's specifiers name.
+static __attribute__((noinline)) bool check_input_enum_named(const CheckInputReader* reader, uint32_t token)
+{
+    const Parser* parser = reader->parser;
+    const TypeTable* types = reader->types;
+    const uint32_t declaration = reader->output->declarations[token];
+    const TypeId type = reader->declared_types[token];
+    bool result = false;
+    if (type != 0 && reader->declaration_kinds[declaration] == C_BINDING_ENUMERATOR)
+    {
+        // (Without the tags' column, as a reader made for a test has none, it is taken as tagged.)
+        bool found = reader->tag_types == NULL || reader->tag_ends == NULL;
+        result = true;
+        for (uint32_t back = 1; !found && back <= 1024 && back <= declaration; back += 1)
+        {
+            const uint32_t at = declaration - back;
+            const TypeId tag = reader->tag_types[at] != 0 ? type_unqualified(reader->tag_types[at]) : 0;
+            // (Its `{`, where the tag ends: the enumeration's own reads happen before the tag's end moves past it.)
+            uint32_t opening = BUSTER_CHECK_NONE;
+            const uint32_t end = tag != 0 && type_kind(types, tag) == BUSTER_TYPE_KIND_ENUM ? reader->tag_ends[at] : 0;
+            for (uint32_t k = at + 1; opening == BUSTER_CHECK_NONE && k <= end && k < parser->tokens.count; k += 1)
+            {
+                opening = parser->tokens.kinds[k] == PARSE_KIND_L_BRACE ? k : opening;
+            }
+            const uint32_t close = opening < declaration ? parser->tree.parents[opening] : BUSTER_CHECK_NONE;
+            found = close < parser->tokens.count && parser->tree.roles[close] == PARSE_ROLE_CLOSE_ENUM && declaration < close;
+            const uint32_t declarator = found ? check_input_skip_attributes(parser, close + 1, parser->tokens.count) : BUSTER_CHECK_NONE;
+            result = found ? (types->tags.name[types->types.index[type_index(tag)]] != 0 || check_input_enum_typedef(reader, declarator, tag)) &&
+                             !(opening < token && token < close) : result;
+        }
+    }
+    else if (type != 0)
+    {
+        const TypeId plain = type_unqualified(type_strip_aligned(types, type));
+        const bool enumeration = type_kind(types, plain) == BUSTER_TYPE_KIND_ENUM;
+        result = enumeration && (types->tags.name[types->types.index[type_index(plain)]] != 0 ||
+                                 check_input_enum_typedef(reader, check_input_reader_typedef(reader, declaration), plain));
+    }
+    return result;
+}
+
 // An identifier leaf at `token` that names an enumerator or a variable of an enumeration type (an aligned typedef's
-// variable too, whose own kind hides its type's) as such an operator's operand marks the unit (CheckInput.enum_operands).
+// variable too, whose own kind hides its type's) as such an operator's operand marks the unit (CheckInput.enum_operands);
+// one of a tagged enumeration anywhere marks it too (CheckInput.enum_names).
 static void check_input_note_enum(const CheckInputReader* reader, uint32_t token, bool enumeration, TypeId type)
 {
     const uint8_t kind = type_kind(reader->types, type);
     if ((enumeration || kind == BUSTER_TYPE_KIND_ENUM || kind == BUSTER_TYPE_KIND_ALIGNED) && check_input_enum_operand(reader, token))
     {
         reader->output->enum_operands = true;
+    }
+    if ((enumeration || kind == BUSTER_TYPE_KIND_ENUM || kind == BUSTER_TYPE_KIND_ALIGNED) && !reader->output->enum_names)
+    {
+        reader->output->enum_names = check_input_enum_named(reader, token);
     }
 }
 
