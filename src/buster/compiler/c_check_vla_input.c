@@ -88,6 +88,38 @@ static bool check_input_vla_defines(const CheckInputReader* reader, uint32_t fir
     return outside && !inside;
 }
 
+// Whether a block-scope array's bound has a statement expression that holds more than expression statements (#1447): a
+// declaration (`[({ int k = n; k + 1; })]`), an if, a loop, a jump, a label or a block, at any depth, which only the walk
+// reads (check_input_region_prepare), in source order with the bound's other names. Such a bound is no integer constant
+// expression, so that the array is variable, and the walk checks and evaluates it whole, without the constant reader,
+// whose names would bind before the statements' declarations. A scan of the bound's tokens and its blocks' statements,
+// in a rare form's declarators only (those with a statement expression in a bound).
+static bool check_input_vla_walked(const CheckInputReader* reader, uint32_t open, uint32_t first, uint32_t end, bool parameter)
+{
+    const Parser* parser = reader->parser;
+    bool statements = false;
+    for (uint32_t token = first; !statements && token + 1 < end; token += 1)
+    {
+        const bool region = parser->tree.roles[token] == PARSE_ROLE_OPEN_GROUP && parser->tree.roles[token + 1] == PARSE_ROLE_OPEN_BLOCK && parser->tree.parents[token] < end;
+        const uint32_t block = region ? parser->tree.parents[token + 1] : BUSTER_CHECK_NONE;
+        for (uint32_t child = block < end ? reader->first_child[block] : BUSTER_CHECK_NONE; !statements && child != BUSTER_CHECK_NONE; child = reader->next_child[child])
+        {
+            const uint8_t role = parser->tree.roles[child];
+            statements = role != PARSE_ROLE_OPEN_BLOCK && (role != PARSE_ROLE_TERMINATOR || reader->first_child[child] == BUSTER_CHECK_NONE);
+            for (uint32_t part = !statements && role == PARSE_ROLE_TERMINATOR ? reader->first_child[child] : BUSTER_CHECK_NONE; !statements && part != BUSTER_CHECK_NONE;
+                 part = reader->next_child[part])
+            {
+                const uint8_t part_role = parser->tree.roles[part];
+                const uint8_t kind = parser->tokens.kinds[part];
+                statements = part_role == PARSE_ROLE_SPECIFIER || part_role == PARSE_ROLE_RETURN || kind == PARSE_KIND_GOTO || kind == PARSE_KIND_BREAK ||
+                             kind == PARSE_KIND_CONTINUE || kind == PARSE_KIND_STRUCT ||
+                             kind == PARSE_KIND_ENUM || kind == PARSE_KIND_STATIC_ASSERT || check_input_attribute_starts(parser, part, child);
+            }
+        }
+    }
+    return statements && !parameter && reader->function_body != BUSTER_CHECK_NONE && !check_input_vla_force_constant(reader, open, parameter);
+}
+
 // The bound from `first` to `end` (its `]`) of the array declarator that `open` opens. One that defines a struct, union
 // or enum (`[sizeof(struct V { int x; })]`) is evaluated by a job of the constant evaluator (check_input_constant_job),
 // which binds the bound's names in source order and stops at each definition, as an enumerator's value's does: then
@@ -109,6 +141,7 @@ static bool check_input_vla_bound(CheckInputReader* reader, uint32_t open, uint3
         CheckValue value = { 0 };
         uint32_t failed = BUSTER_CHECK_NONE;
         bool negative = false;
+        bool walked = false;
         if (*job == 0 && check_input_vla_defines(reader, first, end))
         {
             *job = check_input_constant_job(reader, first, end);
@@ -125,6 +158,10 @@ static bool check_input_vla_bound(CheckInputReader* reader, uint32_t open, uint3
                 arena_pop_to(reader->scratch, input->mark);
             }
         }
+        else if (valid && check_input_vla_walked(reader, open, first, end, parameter))
+        {
+            walked = true;
+        }
         else if (valid)
         {
             TypeId unused = 0;
@@ -133,10 +170,11 @@ static bool check_input_vla_bound(CheckInputReader* reader, uint32_t open, uint3
         }
         // A job that stopped at a definition has no value yet.
         const bool evaluated = *definition == BUSTER_CHECK_NONE;
-        valid = valid && (!evaluated || check_input_const_rvalue(reader, end, &value));
-        valid = valid && (!evaluated || check_action_is_integer(reader->types, value.type));
+        valid = valid && (!evaluated || walked || check_input_const_rvalue(reader, end, &value));
+        valid = valid && (!evaluated || walked || check_action_is_integer(reader->types, value.type));
         // clang folds a GNU constant in an array bound, but not a saturated floating conversion's value.
-        const bool folded = evaluated && check_input_integer_constant(reader, &value) && (value.flags & (BUSTER_CHECK_GNU_DIVISION | BUSTER_CHECK_GNU_FLOAT_RANGE)) == 0 &&
+        const bool folded = evaluated && !walked && check_input_integer_constant(reader, &value) &&
+                            (value.flags & (BUSTER_CHECK_GNU_DIVISION | BUSTER_CHECK_GNU_FLOAT_RANGE)) == 0 &&
                             (check_input_integer_ice(reader, &value) || check_input_vla_force_constant(reader, open, parameter));
         if (valid && evaluated && (folded || (value.flags & BUSTER_CHECK_ICE) != 0))
         {

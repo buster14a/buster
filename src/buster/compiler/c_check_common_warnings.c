@@ -524,7 +524,14 @@ static bool check_common_statement_terminator(const Parser* parser, uint32_t tok
         const uint32_t owner = role == PARSE_ROLE_TERMINATOR ? parser->tree.parents[at] : count;
         const uint8_t owner_role = owner < count ? parser->tree.roles[owner] : PARSE_ROLE_NONE;
         // The block that owns the `;`, by its `}`: a statement expression's where a `)` closes the group right after it.
-        const uint32_t close = owner_role == PARSE_ROLE_OPEN_BLOCK ? parser->tree.parents[owner] : owner_role == PARSE_ROLE_CLOSE_BLOCK ? owner : count;
+        // A labeled last statement's `;` is the block's through its labels (#1447), as clang's StmtExpr value is.
+        uint32_t labeled = owner;
+        for (uint32_t label_steps = 0; labeled < count && parser->tree.roles[labeled] == PARSE_ROLE_LABEL && label_steps < count; label_steps += 1)
+        {
+            labeled = parser->tree.parents[labeled];
+        }
+        const uint8_t block_role = labeled < count ? parser->tree.roles[labeled] : PARSE_ROLE_NONE;
+        const uint32_t close = block_role == PARSE_ROLE_OPEN_BLOCK ? parser->tree.parents[labeled] : block_role == PARSE_ROLE_CLOSE_BLOCK ? labeled : count;
         const bool last_value = close < count && at + 1 == close && close + 1 < count && parser->tokens.kinds[close + 1] == PARSE_KIND_R_PAREN &&
                                 parser->tree.roles[close + 1] == PARSE_ROLE_CLOSE_GROUP;
         if (last_value)
