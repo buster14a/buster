@@ -1433,14 +1433,15 @@ static const CheckAsmImplicit check_asm_implicit[] = {
 #undef BUSTER_CHECK_ASM_GPR
 
 // Whether an asm body (check_asm_inline_code) takes `places`' shapes: not #1846's MMX and opmask operands, whose loads
-// and stores through rax only the helper has (check_asm_helper_code), nor A's rdx:rax pairs; a statement of one keeps
-// its helper.
+// and stores through rax only the helper has (check_asm_helper_code), nor A's rdx:rax pairs, nor register variables in
+// a high byte or in XMM16 up, which its loads and stores name otherwise; a statement of one keeps its helper.
 static bool check_asm_inline_takes(const CheckAsmPlace* places, uint32_t count)
 {
     bool takes = true;
     for (uint32_t k = 0; k < count; k += 1)
     {
-        takes &= places[k].kind != BUSTER_CHECK_ASM_MMX && places[k].kind != BUSTER_CHECK_ASM_MASK && places[k].kind != BUSTER_CHECK_ASM_PAIR;
+        takes &= places[k].kind != BUSTER_CHECK_ASM_MMX && places[k].kind != BUSTER_CHECK_ASM_MASK && places[k].kind != BUSTER_CHECK_ASM_PAIR &&
+                 !places[k].high && !(places[k].kind == BUSTER_CHECK_ASM_VECTOR && places[k].reg >= 16);
     }
     return takes;
 }

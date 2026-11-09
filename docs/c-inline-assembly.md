@@ -351,6 +351,9 @@ clang's code gives it (CodeGen's `AddVariableConstraints`;
   variable is refused, where clang's code loads both and the byte's load
   overwrites the other's bits 8 to 15.
 
+A statement of a high byte's or an XMM16-up variable keeps its helper: #1839's
+asm bodies don't load them by those names.
+
 rsp stays refused: clang's code moves the variable's value into rsp before the
 template (an uninitialized local's garbage), where a helper's rsp is its own;
 the Linux kernel's idiom, a global register variable in rsp, is a declaration
