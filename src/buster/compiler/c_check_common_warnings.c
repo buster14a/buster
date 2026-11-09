@@ -3244,11 +3244,16 @@ static TypeId check_common_enum_coerced(const CheckInput* input, const CheckStre
                                  input->declarations[token] : BUSTER_CHECK_NONE;
     if (declaration < input->token_count && input->declaration_kinds[declaration] == C_BINDING_ENUMERATOR)
     {
+        // The last enclosing completed definition wins. A max of one-based indices gives unmatched SIMD lanes zero.
+        // Loading its type once avoids Clang 23 MSan's whole-vector check of inactive TypeId lanes (#1829).
+        uint32_t selected = 0;
         for (uint32_t i = 0; i < input->enum_definition_count; i += 1)
         {
             const CheckInputEnumDefinition* definition = input->enum_definitions + i;
-            result = definition->open < declaration && declaration < definition->close && token > definition->close ? definition->type : result;
+            const uint32_t candidate = definition->open < declaration && declaration < definition->close && token > definition->close ? i + 1 : 0;
+            selected = candidate > selected ? candidate : selected;
         }
+        result = selected != 0 ? input->enum_definitions[selected - 1].type : result;
     }
     return result;
 }
