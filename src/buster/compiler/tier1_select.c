@@ -1167,8 +1167,9 @@ static void tier1_select_overflow(Tier1SelectRecords* result, const Tier1SelectH
 // for AVX's 32-byte result, vinsertf128. It never interprets a NaN or a signed zero as arithmetic.
 // A width change's records (#1840), EVEX's (the decoder admits one at a target with AVX512F and VL alone, and the
 // emission's allow-list refuses these forms elsewhere): an extract of part 0 the narrower width's move from the source's
-// register, which the destination's holds already where they are the same; a widen the narrower width's move, which zeroes
-// the wider register past it, even into its own register; an extract of another part vextracti32x4 (16 bytes of 32 or
+// register, which the destination's holds already where they are the same; a widen the narrower width's EVEX move
+// (vmovdqa64), which zeroes the wider register past it, even into its own register (legacy SSE's movaps would keep the
+// bytes past 16 of a register that held the wide value); an extract of another part vextracti32x4 (16 bytes of 32 or
 // 64) or vextracti64x4 (32 of 64); and an insert vinserti32x4 or vinserti64x4 of values[1] into a copy of values[0].
 static void tier1_select_width_change(Tier1SelectRecords* result, const Tier1SelectHoles* holes)
 {
@@ -1189,9 +1190,14 @@ static void tier1_select_width_change(Tier1SelectRecords* result, const Tier1Sel
         const uint16_t form = width == 32 ? X86_FORM_VEXTRACTI64X4_YM256_Z_IMM8 : other == 64 ? X86_FORM_VEXTRACTI32X4_XM128_Z_IMM8 : X86_FORM_VEXTRACTI32X4_XM128_Y_IMM8;
         tier1_select_append(result, (X86Instruction){ .form = form, .reg = left, .rm = x, .mode = BUSTER_X86_REGISTER_DIRECT, .immediate = (int32_t)part });
     }
-    else if (kind == 1 || x != left)
+    else if (kind == 1)
     {
-        tier1_select_append(result, tier1_select_class_move(x, left, kind == 1 ? other : width, false));
+        // EVEX's move of the narrower width, never legacy SSE's movaps, which keeps the register's bytes past 16.
+        tier1_select_append(result, tier1_select_register_record(tier1_select_vector_forms(other, BUSTER_TIER1_ENCODING_EVEX)->move, x, left));
+    }
+    else if (x != left)
+    {
+        tier1_select_append(result, tier1_select_class_move(x, left, width, false));
     }
 }
 

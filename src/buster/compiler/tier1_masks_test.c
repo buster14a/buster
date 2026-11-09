@@ -4767,8 +4767,10 @@ static void tier1_masks_test_compares(Tier1MasksTest* test)
 // of the row's operands' bytes), an extract's writemask the input word k in the odd statements and a constant of every
 // lane in the even ones, as clang's intrinsics without a mask give it, the result stored into the output's vector k.
 // tier1_masks_test_typed_pipeline takes each through the IR as its extract, widen or insert (and an extract's vselect),
-// which the interpreter runs at every stage, and Tier 1 natively, against a C model of the bytes. Tier 0 doesn't run them
-// here, as the selects' (tier1_masks_test_selects).
+// which the interpreter runs at every stage, and Tier 1 natively, against a C model of the bytes. Three round trips, a
+// cast of a wide vector to a narrower width and back, check that a widen zeroes the bytes past its source even where its
+// register held the wide vector's (the narrower value's extract of part 0 moves nothing). Tier 0 doesn't run them here,
+// as the selects' (tier1_masks_test_selects).
 static void tier1_masks_test_widths(Tier1MasksTest* test)
 {
     const X86Target target = { .features = test->v4_features };
@@ -4779,9 +4781,9 @@ static void tier1_masks_test_widths(Tier1MasksTest* test)
     bool ready = tier1_masks_test_expect(test, program != 0 && inputs != 0 && expected != 0 && arenas[0].base != 0 && arenas[1].base != 0 && arenas[2].base != 0,
                                          "the width changes' memory");
     uint64_t state = test->random ^ UINT64_C(0x3c6ef372fe94f82b);
-    // The rules' cases, then the 6 casts' (case past the rules: a pair of widths).
+    // The rules' cases, then the 6 casts' (case past the rules: a pair of widths), then the 3 round trips'.
     const uint32_t rules = BUSTER_ARRAY_LENGTH(check_x86_lower_rules);
-    for (uint32_t i = 0; ready && i < rules + 6; i += 1)
+    for (uint32_t i = 0; ready && i < rules + 9; i += 1)
     {
         const CheckX86LowerRule* rule = i < rules ? check_x86_lower_rules + i : 0;
         const char* mnemonic = rule != 0 && rule->form != X86_FORM_NONE ? x86_form_description(rule->form)->mnemonic : "";
@@ -4789,33 +4791,41 @@ static void tier1_masks_test_widths(Tier1MasksTest* test)
                             strcmp(mnemonic, "vinsertps") != 0;
         const bool extract = rule != 0 && rule->family == CHECK_X86_LOWER_EXTRACT_LANE;
         const bool cast = rule == 0;
-        static const uint8_t pairs[6][2] = { { 16, 32 }, { 16, 64 }, { 32, 64 }, { 32, 16 }, { 64, 16 }, { 64, 32 } };
+        const bool round = i >= rules + 6;
+        static const uint8_t pairs[9][2] = { { 16, 32 }, { 16, 64 }, { 32, 64 }, { 32, 16 }, { 64, 16 }, { 64, 32 }, { 64, 16 }, { 32, 16 }, { 64, 32 } };
         const uint32_t parts = insert || extract ? (uint32_t)rule->bytes / rule->other : 1;
         for (uint32_t code = 0; (insert || extract || cast) && code < parts; code += 1)
         {
             const uint64_t output_mark = test->output.length;
             test->width_attempts += 1;
-            Tier0Operation row = { 0 };
+            Tier0Operation rows[2] = { 0 };
+            Tier0Operation* const row_pointer = rows;
             bool made = true;
             char name[128];
+            for (uint32_t r = 0; cast && r < 2; r += 1)
+            {
+                rows[r].result_class = BUSTER_TYPED_CLASS_VECTOR;
+                rows[r].result_bytes = pairs[i - rules][1 - r];
+                rows[r].operand_count = 1;
+                rows[r].operand_classes[0] = BUSTER_TYPED_CLASS_VECTOR;
+                rows[r].operand_bytes[0] = pairs[i - rules][r];
+            }
             if (cast)
             {
-                row.result_class = BUSTER_TYPED_CLASS_VECTOR;
-                row.result_bytes = pairs[i - rules][1];
-                row.operand_count = 1;
-                row.operand_classes[0] = BUSTER_TYPED_CLASS_VECTOR;
-                row.operand_bytes[0] = pairs[i - rules][0];
-                snprintf(name, sizeof(name), "a cast of %u bytes to %u", row.operand_bytes[0], row.result_bytes);
+                snprintf(name, sizeof(name), round ? "a cast of %u bytes to %u and back" : "a cast of %u bytes to %u", rows[0].operand_bytes[0], rows[0].result_bytes);
             }
             else
             {
-                made = check_x86_lower_row_of(&target, rule, code, 4, 0, false, &row) == NULL && (!extract || check_x86_lower_masks(&row, &target));
+                made = check_x86_lower_row_of(&target, rule, code, 4, 0, false, row_pointer) == NULL && (!extract || check_x86_lower_masks(row_pointer, &target));
                 snprintf(name, sizeof(name), "%s (part %u)", rule->name, code);
             }
-            const uint32_t bytes = row.result_bytes;
-            const uint32_t a_bytes = row.operand_bytes[0];
-            const uint32_t b_bytes = row.operand_count > 1 ? row.operand_bytes[1] : 0;
-            bool ok = tier1_masks_test_expect(test, made && row.result_class == BUSTER_TYPED_CLASS_VECTOR, "the front end's width change's row");
+            const Tier0Operation* const last = rows + (round ? 1 : 0);
+            const uint32_t bytes = last->result_bytes;
+            const uint32_t a_bytes = rows[0].operand_bytes[0];
+            const uint32_t b_bytes = rows[0].operand_count > 1 ? rows[0].operand_bytes[1] : 0;
+            // A round trip's bytes of the source vector it keeps: the narrower width's.
+            const uint32_t narrow = round ? rows[0].result_bytes : bytes;
+            bool ok = tier1_masks_test_expect(test, made && last->result_class == BUSTER_TYPED_CLASS_VECTOR, "the front end's width change's row");
             program->count = 0;
             program->overflow = false;
             program->rows = true;
@@ -4841,16 +4851,19 @@ static void tier1_masks_test_widths(Tier1MasksTest* test)
                 }
                 if (extract)
                 {
-                    tier0_test_mask_emit(program, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_MASK, row.operand_bytes[2]);
+                    tier0_test_mask_emit(program, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_MASK, rows[0].operand_bytes[2]);
                 }
-                tier0_test_mask_emit(program, BUSTER_TYPED_X86, row.result_class, 0);
-                tier0_test_mask_emit(program, BUSTER_TYPED_SET, row.result_class, bytes);
+                for (uint32_t r = 0; r < (round ? 2u : 1u); r += 1)
+                {
+                    tier0_test_mask_emit(program, BUSTER_TYPED_X86, rows[r].result_class, r);
+                }
+                tier0_test_mask_emit(program, BUSTER_TYPED_SET, last->result_class, bytes);
             }
             tier0_test_mask_emit(program, BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_VOID, 0);
             ok = ok && tier1_masks_test_expect(test, !program->overflow, "the width change's program fits");
             Tier0Function functions[2] = { tier0_test_mask_function(program), tier0_test_mask_leaf() };
-            functions[0].operations = &row;
-            functions[0].operation_count = 1;
+            functions[0].operations = rows;
+            functions[0].operation_count = round ? 2 : 1;
             for (uint32_t input = 0; ok && input < BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS; input += 1)
             {
                 uint64_t* in = inputs + (uint64_t)input * (BUSTER_TIER1_MASKS_TEST_IN / 8);
@@ -4870,7 +4883,7 @@ static void tier1_masks_test_widths(Tier1MasksTest* test)
                         const bool kept = !extract || ((mask >> (byte / rule->element)) & 1) != 0;
                         out[byte] = insert                     ? (inserted ? b[byte - start] : a[byte]) :
                                     extract                    ? (kept ? a[start + byte] : b[byte]) :
-                                    bytes < a_bytes || byte < a_bytes ? a[byte] :
+                                    byte < narrow && byte < a_bytes ? a[byte] :
                                                                  0;
                     }
                 }

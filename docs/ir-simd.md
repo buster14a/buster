@@ -520,9 +520,11 @@ have AVX512F and VL, the rows' own forms' features (DQ for `32x8` and `64x2`)
 and, merged, the mask's moves. Otherwise the row stays a machine row.
 
 Tier 1 selects each kind as one EVEX instruction (`BUSTER_TIER1_VECTOR_WIDTH_CHANGE`):
-- an extract of part 0 and a widen as the narrower width's move, which an
-  extract leaves out when its registers are the same, and a widen never, since
-  the move zeroes the register past it;
+- an extract of part 0 as the narrower width's move, left out when its
+  registers are the same;
+- a widen as the narrower width's EVEX move (`vmovdqa64`), even into its own
+  register, since that move zeroes the register past it. Legacy SSE's `movaps`
+  would keep the bytes past 16 of a register that held the wide value;
 - another extract as `vextracti32x4` or `vextracti64x4`;
 - an insert as `vinserti32x4` or `vinserti64x4`.
 
@@ -554,8 +556,9 @@ The tests:
 - `test-ir-simd`: decodes every insert rule (16) and masked extract rule (12)
   at 8 immediates, and every cast's row. Features are written out, and each
   row stays a machine row without each feature it needs and under 9 changes.
-- `test-tier1-masks`: runs 78 programs, each rule's every part and the 6 casts,
-  each its only row. Every lane of an extract is merged under an input word or
+- `test-tier1-masks`: runs 81 programs, each rule's every part and the 6 casts,
+  each its only row, and 3 round trips, a cast to a narrower width and back,
+  whose widen writes the register that held the wide value. Every lane of an extract is merged under an input word or
   an unmasked writemask. They go through both lowering paths, the interpreter
   at every stage and Tier 1's native code, against a C model.
 - `test-checker-driver`'s machine-rows unit: its inserts, extracts and casts are
