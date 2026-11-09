@@ -4430,15 +4430,44 @@ static bool check_driver_rejected_edit(const Parser* parser, const CheckInput* i
 // reading's, which the caller published, but those the first reading lacks: its events' (by kind and token), and past
 // `stop`, where a reader's error ended its walk, its reports' and warnings'. Nothing where an error lies outside every body, or the reading isn't valid. Only
 // a rejected unit pays for it; the type table, input and program are its own, and the arenas' pushes stay to the unit's end.
-// A rejected unit's second reading (check_driver_rejected_common): with `edits`, through the view that leaves out what they
-// mark, the mask's bodies left out besides; without, the unit itself with the mask's bodies left out. Whether its reading
-// was valid, so that its warnings are published: where it isn't, nothing is.
-static bool check_driver_rejected_read(const Parser* unit, const Parser* original, Preprocessor* pp, const uint32_t* errors, uint32_t error_count,
-                                       const CBodyRange* ranges, uint32_t body_count, const uint8_t* bodies, uint8_t* mask, const uint8_t* edits, bool scalar,
-                                       bool return_warning, CheckWarningSeverity return_baseline, CheckCommonShiftWarnings* shifts,
-                                       const CheckWarningEvents* first, const CheckWarningEvents* first_graph, uint32_t stop, uint32_t publication_end,
-                                       Arena* arena, Arena* scratch)
+// What a rejected unit's reading came to (check_driver_rejected_read).
+typedef enum CheckDriverRound
 {
+    // Its reading was valid, and its warnings are published.
+    CHECK_DRIVER_ROUND_DONE,
+    // Its reading found errors the unit's earlier readings hadn't: they are published, and `found` has their tokens.
+    CHECK_DRIVER_ROUND_ERRORS,
+    // Its reading couldn't be made or isn't valid: nothing is published.
+    CHECK_DRIVER_ROUND_FAILED,
+} CheckDriverRound;
+
+// Whether an error's token is among the unit's known ones.
+static bool check_driver_rejected_known(const uint32_t* errors, uint32_t error_count, uint32_t token)
+{
+    bool known = false;
+    for (uint32_t e = 0; !known && e < error_count; e += 1)
+    {
+        known = errors[e] == token;
+    }
+    return known;
+}
+
+// A rejected unit's second reading (check_driver_rejected_common): with `edits`, through the view that leaves out what they
+// mark, the mask's bodies left out besides; without, the unit itself with the mask's bodies left out. Where its reading is
+// valid, its warnings are published. Where it finds errors of its own, which the first reading didn't reach (past a reader's
+// error that ended its walk, or a control the reader's scan then skipped), a view's reading publishes nothing, as its errors
+// may be the view's own (a statement expression's value left void); the unit's, with bodies alone left out, publishes those
+// not among `errors`, in clang's words, and puts their tokens in `found` (room for `found_capacity`), for the next round
+// to leave out too.
+static CheckDriverRound check_driver_rejected_read(const Parser* unit, const Parser* original, Preprocessor* pp, const uint32_t* errors, uint32_t error_count,
+                                                   const CBodyRange* ranges, uint32_t body_count, const uint8_t* bodies, uint8_t* mask, const uint8_t* edits,
+                                                   bool scalar, bool return_warning, CheckWarningSeverity return_baseline, CheckCommonShiftWarnings* shifts,
+                                                   const CheckWarningEvents* first, const CheckWarningEvents* first_graph, uint32_t stop,
+                                                   uint32_t publication_end, uint32_t* found, uint32_t found_capacity, uint32_t* found_count,
+                                                   Arena* arena, Arena* scratch)
+{
+    CheckDriverRound round = CHECK_DRIVER_ROUND_FAILED;
+    *found_count = 0;
     const Parser* parser = unit;
     const uint32_t count = unit->tokens.count;
     const bool edited = edits != NULL;
@@ -4495,15 +4524,27 @@ static bool check_driver_rejected_read(const Parser* unit, const Parser* origina
     TypeTable types = { 0 };
     valid = valid && capacity.types != 0 && type_initialize(&types, &type_arena, &index_arena, capacity);
     CheckInput input = { 0 };
-    valid = valid && check_input_selected(&input, parser, pp, &types, arena, scratch, mask) && !input.resource && (input.report_count == 0 || input.recovered_valid);
+    // (A reading whose reader reports an error isn't selected's valid one, but its reports are the round's.)
+    const bool selected = valid && check_input_selected(&input, parser, pp, &types, arena, scratch, mask);
+    valid = valid && (selected || (input.report_count != 0 && !input.recovered_valid)) && !input.resource;
     const CheckOptions check_options = { .scalar = scalar };
     CheckStream stream = { 0 };
-    valid = valid && check_graph_run(&types, &input.graph, arena, scratch, &check_options, &stream) && stream.report_count == 0 &&
-            check_input_packed_finalize(&input, parser, &types, &stream, scratch) && check_input_warning_graph(&input, parser, &types, &stream, arena, scratch);
+    // The reading's own errors: its reader's (a recovered one's unit is valid), whose reports stand without the graph, which
+    // may not run after them, and its graph's.
+    const bool reader_errors = valid && input.report_count != 0 && !input.recovered_valid;
+    const bool graphed = valid && check_graph_run(&types, &input.graph, arena, scratch, &check_options, &stream);
+    if (!graphed)
+    {
+        stream = (CheckStream){ 0 };
+    }
+    valid = valid && (graphed || reader_errors);
+    bool errored_reading = valid && (reader_errors || stream.report_count != 0);
+    valid = valid && (errored_reading || (check_input_packed_finalize(&input, parser, &types, &stream, scratch) &&
+                                          check_input_warning_graph(&input, parser, &types, &stream, arena, scratch)));
     CheckAsms asms = { 0 };
     CheckInitializers initializers = { 0 };
-    valid = valid && check_asms_run(&asms, &input, &stream, &types, arena, scratch) &&
-            check_initializers_run_events(&initializers, &input, &stream, parser, &types, arena, scratch, NULL, NULL);
+    valid = valid && (errored_reading || (check_asms_run(&asms, &input, &stream, &types, arena, scratch) &&
+                                          check_initializers_run_events(&initializers, &input, &stream, parser, &types, arena, scratch, NULL, NULL)));
     const CheckProgramOptions program_options = check_request_program_options(pp, (CheckProgramOptions){
         .initializers = &initializers,
         .asms = &asms,
@@ -4511,8 +4552,84 @@ static bool check_driver_rejected_read(const Parser* unit, const Parser* origina
         .return_warnings = return_warning,
         .noreturn_warnings = true,
     });
-    CheckProgram program;
-    valid = valid && check_program(&program, parser, &input, &stream, &types, program_options, arena, scratch);
+    CheckProgram program = { 0 };
+    const bool checked = valid && !errored_reading && check_program(&program, parser, &input, &stream, &types, program_options, arena, scratch);
+    errored_reading = valid && (errored_reading || (!checked && program.status == CHECK_PROGRAM_INVALID));
+    valid = valid && (errored_reading || checked);
+    if (errored_reading && edited)
+    {
+        valid = false;
+    }
+    else if (errored_reading)
+    {
+        // The reading's errors the unit's earlier ones don't hold, published as the first reading's are: its reader's and
+        // its graph's reports, and its controls' constraints, each in clang's words, in source order.
+        CheckProgramDiagnostic control = { 0 };
+        const bool listed = graphed && check_program_diagnose_all(&control, &input, &stream, parser, &types, BUSTER_CHECK_NONE, arena, scratch);
+        const uint32_t constraint_count = listed ? control.constraint_count : 0;
+        CheckInputReport* reports = input.report_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, CheckInputReport, input.report_count) : NULL;
+        CheckReport* graph_reports = stream.report_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, CheckReport, stream.report_count) : NULL;
+        CheckDriverDiagnostic* extra = constraint_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, CheckDriverDiagnostic, constraint_count) : NULL;
+        valid = (input.report_count == 0 || reports != NULL) && (stream.report_count == 0 || graph_reports != NULL) && (constraint_count == 0 || extra != NULL);
+        CheckInput published = input;
+        CheckStream published_stream = stream;
+        published.reports = reports;
+        published.report_count = 0;
+        published_stream.reports = graph_reports;
+        published_stream.report_count = 0;
+        uint32_t extra_count = 0;
+        // Each error's token in the unit's, where the view put one there.
+        for (uint32_t i = 0; valid && i < input.report_count + stream.report_count + constraint_count; i += 1)
+        {
+            const uint32_t phase = i < input.report_count ? 0 : i < input.report_count + stream.report_count ? 1 : 2;
+            const uint32_t index = phase == 0 ? i : phase == 1 ? i - input.report_count : i - input.report_count - stream.report_count;
+            const uint32_t token = phase == 0 ? input.reports[index].token : phase == 1 ? stream.reports[index].token : control.constraints[index].token;
+            const uint32_t at = token < view_count && edited ? view.to_original[token] : token;
+            const bool fresh = at < count && !check_driver_rejected_known(errors, error_count, at) &&
+                               !check_driver_rejected_known(found, *found_count, at);
+            valid = !fresh || *found_count < found_capacity;
+            if (fresh && valid)
+            {
+                found[(*found_count)++] = at;
+                if (phase == 0)
+                {
+                    reports[published.report_count++] = input.reports[index];
+                }
+                else if (phase == 1)
+                {
+                    graph_reports[published_stream.report_count++] = stream.reports[index];
+                }
+                else
+                {
+                    const CheckProgramConstraint* constraint = control.constraints + index;
+                    extra[extra_count++] = (CheckDriverDiagnostic){
+                        .token = constraint->token,
+                        .message = check_semantic_constraint(parser, pp, &input, &types, constraint, arena),
+                        .position = constraint->position,
+                        .completion = constraint->position < view_count ? constraint->position + 1u : view_count,
+                        .repeated = true,
+                        .note_token = constraint->previous,
+                        .note = constraint->previous != BUSTER_CHECK_NONE ? "previous case defined here" : NULL,
+                    };
+                }
+            }
+        }
+        // Errors alone: the reading's warnings are the next round's, and its unit-wide records (pragmas, implicit
+        // declarations, K&R's) the first reading's.
+        published.implicit_function_count = 0;
+        published.kr_diagnostic_count = 0;
+        published.fp_pragma_count = 0;
+        published.visibility_pragmas = NULL;
+        published.packed_member_count = 0;
+        published.pragma_warnings.count = 0;
+        if (valid && *found_count != 0)
+        {
+            check_driver_reports_from(parser, original, pp, publication_end, &published, &published_stream, &types, NULL, NULL, extra, extra_count, NULL, 0, true,
+                                      NULL, 0, scratch);
+        }
+        round = valid && *found_count != 0 ? CHECK_DRIVER_ROUND_ERRORS : CHECK_DRIVER_ROUND_FAILED;
+        valid = false;
+    }
     // The reader's and the graph's warning events the first reading lacks (#1447): a reader's error that ends its
     // reading leaves the bodies after it without theirs, and every unit without its unused declarations'. The first
     // reading's own events, published or left out, are its; the others are the rejected unit's (the unit-end ones left out).
@@ -4613,11 +4730,16 @@ static bool check_driver_rejected_read(const Parser* unit, const Parser* origina
         const uint8_t* flushed = check_driver_flushed_bodies(parser, original, pp, &program, scratch);
         check_driver_common_warnings(parser, pp, &input, &stream, &types, &program, flushed, shifts, scratch);
         arena_pop_to(scratch, flushed_mark);
+        round = CHECK_DRIVER_ROUND_DONE;
     }
     arena_release(&type_arena);
     arena_release(&index_arena);
-    return valid;
+    return round;
 }
+
+// The most readings of a rejected unit (check_driver_rejected_common): the first's errors' parts left out, then each one's new
+// errors' too.
+#define BUSTER_CHECK_DRIVER_REJECTED_ROUNDS 4u
 
 static void check_driver_rejected_common(const Parser* unit, const Parser* original, Preprocessor* pp, const CheckInput* first_input, const TypeTable* first_types,
                                          const uint32_t* errors, uint32_t error_count, bool scalar, bool return_warning, CheckWarningSeverity return_baseline,
@@ -4647,8 +4769,6 @@ static void check_driver_rejected_common(const Parser* unit, const Parser* origi
     valid = edits != NULL && (initialized_count == 0 || initialized != NULL);
     if (valid)
     {
-        memset(mask, 0, (uint64_t)count + 1);
-        memset(edits, 0, (uint64_t)count + 1);
         initialized_count = 0;
         for (uint32_t token = 0; token < count; token += 1)
         {
@@ -4658,57 +4778,76 @@ static void check_driver_rejected_common(const Parser* unit, const Parser* origi
             }
         }
     }
-    bool edited = false;
-    // The bodies of every error, the mask where the view can't be made; and whether each error has one.
+    // The bodies of every error, the mask where the view can't be made.
     uint8_t* bodies = valid ? BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, (uint64_t)count + 1) : NULL;
-    bool bodied_all = true;
-    valid = valid && bodies != NULL;
-    if (valid)
+    // The unit's known errors: the first reading's, then each round's new ones, at most one per token.
+    const uint64_t known_capacity = (uint64_t)error_count + count + 1;
+    uint32_t* known = valid && bodies != NULL && known_capacity <= UINT32_MAX ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, known_capacity) : NULL;
+    uint32_t known_count = error_count;
+    if (known != NULL)
     {
+        memcpy(known, errors, (uint64_t)error_count * sizeof(uint32_t));
+    }
+    // Rounds (#1447): a reading that finds errors of its own publishes them, and the next leaves their parts out too, so
+    // that each round adds parts left out, up to BUSTER_CHECK_DRIVER_REJECTED_ROUNDS readings; past them, or where a reading
+    // fails, the unit's warnings aren't given.
+    CheckDriverRound round = known != NULL ? CHECK_DRIVER_ROUND_ERRORS : CHECK_DRIVER_ROUND_FAILED;
+    for (uint32_t r = 0; round == CHECK_DRIVER_ROUND_ERRORS && r < BUSTER_CHECK_DRIVER_REJECTED_ROUNDS; r += 1)
+    {
+        memset(mask, 0, (uint64_t)count + 1);
+        memset(edits, 0, (uint64_t)count + 1);
         memset(bodies, 0, (uint64_t)count + 1);
-    }
-    for (uint32_t e = 0; valid && e < error_count; e += 1)
-    {
-        const bool kept = errors[e] < count && check_driver_rejected_edit(parser, first_input, first_types, initialized, initialized_count, errors[e], edits);
-        edited |= kept;
-        // The body whose tokens hold the error: the last one to begin at or before it.
-        const uint32_t token = errors[e];
-        uint32_t low = 0;
-        uint32_t high = body_count;
-        while (low < high)
+        bool edited = false;
+        bool bodied_all = true;
+        bool ready = true;
+        for (uint32_t e = 0; ready && e < known_count; e += 1)
         {
-            const uint32_t middle = low + (high - low) / 2;
-            const bool before = ranges[middle].begin <= token;
-            low = before ? middle + 1 : low;
-            high = before ? high : middle;
+            const bool kept = known[e] < count && check_driver_rejected_edit(parser, first_input, first_types, initialized, initialized_count, known[e], edits);
+            edited |= kept;
+            // The body whose tokens hold the error: the last one to begin at or before it.
+            const uint32_t token = known[e];
+            uint32_t low = 0;
+            uint32_t high = body_count;
+            while (low < high)
+            {
+                const uint32_t middle = low + (high - low) / 2;
+                const bool before = ranges[middle].begin <= token;
+                low = before ? middle + 1 : low;
+                high = before ? high : middle;
+            }
+            const bool bodied = low != 0 && token < ranges[low - 1].end;
+            ready = kept || bodied;
+            bodied_all &= bodied;
+            if (bodied)
+            {
+                memset(bodies + ranges[low - 1].begin, 1, ranges[low - 1].end - ranges[low - 1].begin);
+            }
+            if (!kept && bodied)
+            {
+                memset(mask + ranges[low - 1].begin, 1, ranges[low - 1].end - ranges[low - 1].begin);
+            }
         }
-        const bool bodied = low != 0 && token < ranges[low - 1].end;
-        valid = kept || bodied;
-        bodied_all &= bodied;
-        if (bodied)
+        ready = ready && check_lazy_mask_valid(parser, mask);
+        // The view, where an error's part is left out. Where its reading isn't valid (a statement expression's last
+        // statement left out makes its value void) or the view can't be made, every error's body is left out instead, as
+        // where none is edited: what that reading reads, the first did too.
+        uint32_t added = 0;
+        uint32_t* fresh = known + known_count;
+        const uint32_t fresh_capacity = (uint32_t)(known_capacity - known_count);
+        round = ready && edited ? check_driver_rejected_read(unit, original, pp, known, known_count, ranges, body_count, bodies, mask, edits, scalar, return_warning,
+                                                             return_baseline, shifts, first, first_graph, stop, publication_end, fresh, fresh_capacity, &added,
+                                                             arena, scratch) :
+                                  CHECK_DRIVER_ROUND_FAILED;
+        uint8_t* fallback = !edited ? mask : bodied_all ? bodies : NULL;
+        if (ready && round == CHECK_DRIVER_ROUND_FAILED && fallback != NULL && check_lazy_mask_valid(unit, fallback))
         {
-            memset(bodies + ranges[low - 1].begin, 1, ranges[low - 1].end - ranges[low - 1].begin);
+            round = check_driver_rejected_read(unit, original, pp, known, known_count, ranges, body_count, bodies, fallback, NULL, scalar, return_warning,
+                                               return_baseline, shifts, first, first_graph, stop, publication_end, fresh, fresh_capacity, &added, arena,
+                                               scratch);
         }
-        if (!kept && bodied)
-        {
-            memset(mask + ranges[low - 1].begin, 1, ranges[low - 1].end - ranges[low - 1].begin);
-        }
-    }
-    valid = valid && check_lazy_mask_valid(parser, mask);
-    // The view, where an error's part is left out. Where its reading isn't valid (a statement expression's last statement
-    // left out makes its value void) or the view can't be made, every error's body is left out instead, as where none is
-    // edited: what that reading reads, the first did too.
-    const bool read = valid && edited && check_driver_rejected_read(unit, original, pp, errors, error_count, ranges, body_count, bodies, mask, edits, scalar,
-                                                                    return_warning, return_baseline, shifts, first, first_graph, stop, publication_end,
-                                                                    arena, scratch);
-    uint8_t* fallback = !edited ? mask : bodied_all ? bodies : NULL;
-    if (valid && !read && fallback != NULL && check_lazy_mask_valid(unit, fallback))
-    {
-        check_driver_rejected_read(unit, original, pp, errors, error_count, ranges, body_count, bodies, fallback, NULL, scalar, return_warning, return_baseline,
-                                   shifts, first, first_graph, stop, publication_end, arena, scratch);
+        known_count += added;
     }
 }
-
 
 static void check_driver_dump(const CheckGraph* graph, const CheckStream* stream, TypeTable* types, Arena* scratch)
 {
