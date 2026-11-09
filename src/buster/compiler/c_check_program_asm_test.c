@@ -1065,7 +1065,9 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
         "static int below(long double a, long double b){int r;__asm__(\"fcomi %%st(1), %%st\" : \"=@ccb\"(r) : \"t\"(a), \"u\"(b));return r;}"
         "int tested(int n){long double a=n*0.5L+1,b=n-2.25L;return (int)(swap_sub(a,b)*8)+(int)(add_top(a,b)*4)+(int)square(a)+(int)(reversed(a,b)*16)+below(a,b)*1000+below(b,a)*3000;}",
         "asm-x87-named", clang);
-    check_test_program_boundary_reason(test, "int tested(int n){__asm__ volatile(\"rep ret\" ::: \"memory\");return n;}",
+    // A template that returns is an asm body, whose return leaves its caller (#1839, test-checker-driver's returning templates);
+    // one that keeps its helper, as a named label's does, is refused by name.
+    check_test_program_boundary_reason(test, "int tested(int n){__asm__ volatile(\"rep ret\\n.Lafter%=:\" ::: \"memory\");return n;}",
                                       "asm-returning-template", true, false, 0, 0, "inline assembly templates that return from their helper");
     // Explicit register variables the lowering doesn't place: in rsp (the helper's own), a high byte and an XMM register
     // past XMM15; an input of a memory constraint, which clang's code refuses too; and an integer in an XMM register.

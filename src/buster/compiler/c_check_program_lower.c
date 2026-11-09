@@ -13398,6 +13398,7 @@ static void check_lower_asm(CheckLowerWriter* writer, CheckControl control)
                     .branches = plan->inline_branches,
                     .targets = plan->inline_targets,
                     .branch_count = plan->inline_branch_count,
+                    .leaves = plan->inline_leaves,
                 };
                 writer->asm_body_calls[writer->asm_body_count] = call;
                 writer->asm_body_count += 1;
