@@ -183,6 +183,61 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         // no node and keeps its error (third review on #1791).
         "int c = undecl, d[] = 6;\nunknown_type z;\n",
         "int c = undecl;\nint d[] = 6;\nint e[] = (5);\nint f2[] = undecl2 + 1;\nint g[] = (int)7;\nunknown_type z;\n",
+        // An enum redeclared with another fixed underlying type, without the one it had, or with one it hadn't: clang's
+        // CheckEnumRedeclaration words and notes, after which the declaration, its body and its enumerators are dropped
+        // and the name keeps the earlier enum (#1447). Typedef'd bases are spelled with their "aka", and an enum in a
+        // record is read so too.
+        "enum E : int;\n"
+        "enum E : long;\n"
+        "enum F : short { P };\n"
+        "enum F : int;\n"
+        "enum G { Q };\n"
+        "enum G : int;\n"
+        "enum H : int;\n"
+        "enum H { R };\n"
+        "int x = undeclared;\n",
+        "typedef long L;\n"
+        "typedef int I;\n"
+        "enum E : I;\n"
+        "enum E : L;\n"
+        "enum F : I { F1 };\n"
+        "enum F : int;\n"
+        "enum F f;\n"
+        "int s = sizeof(f);\n"
+        "enum H : short;\n"
+        "enum H { R = 1 };\n"
+        "_Static_assert(sizeof(R) == 4, \"r\");\n"
+        "_Static_assert(sizeof(enum H) == 2, \"h\");\n",
+        "enum A : short { A1 };\n"
+        "enum A : int { A2 };\n"
+        "int a = A2;\n"
+        "enum B { B1 };\n"
+        "enum B : int { B2 };\n"
+        "int b = B2;\n"
+        "enum C : int;\n"
+        "enum C : long { C1 };\n"
+        "int c = C1;\n"
+        "enum D : int;\n"
+        "enum D;\n"
+        "enum D : int { D1 };\n"
+        "int d = D1;\n",
+        "void h(void) { enum K : char { K1 }; enum K : int { K2 }; int k = K2; }\n"
+        "void m(void) { enum N { N1 }; enum N : int; }\n",
+        "struct T { enum Z : int { Z1 } a; enum Z : long { Z2 } b; int c; };\n"
+        "int z = Z2;\n"
+        "struct U { enum Y : short { Y1 } a; };\n"
+        "enum Y : char;\n"
+        "struct T t;\n"
+        "int s = sizeof(t.c);\n",
+        // The note is at the latest declaration clang kept, whose base the "(was …)" spells, not the first (review on
+        // #1805); a dropped one's attributes go with it, unwarned.
+        "enum E : short;\nenum E : short int;\nenum E : signed short;\nenum E : long;\n"
+        "typedef int I;\nenum F : I;\nenum F : int;\nenum F : long;\n"
+        "enum G : int;\nenum G;\nenum G : int;\nenum G g;\nenum G : long;\n"
+        "void f(void) { enum K : char; enum K : char; enum K : int; }\n",
+        "enum E : int { A };\nenum E : long { B } __attribute__((unused));\nenum __attribute__((unused)) E : long { C };\n"
+        "enum F { F1 };\nenum F : int { F2 } __attribute__((unused));\nenum F;\nenum F : char;\n"
+        "__attribute__((unused)) enum H : int { H1 };\n__attribute__((unused)) enum H : long { H2 };\n",
         // GNU's array initialized by a compound literal of its array type (#1447): the same element type and size or none
         // (the literal's size then the array's, `(int[]){…}`'s once its own initializer finished); another array type's
         // "cannot initialize array of type 'int[3]' with array of type 'int[2]'", recovered.
@@ -227,6 +282,90 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "enum F : short { U = 7, T, V };\n"
         "_Static_assert(V == 0 && sizeof(V) == 2, \"v\");\n"
         "void w(void) { int loc; enum { loc, after } e; (void)e; (void)loc; }\n",
+        // C23's redefinition of a record in its scope (#1447, N3037), gnu23's alone: a compatible one redeclares the
+        // earlier record, typedef'd members and nested anonymous records too; an incompatible one is clang's "has
+        // incompatible definitions" with its notes at the first difference (a name, a bit-field, a type, a member more or
+        // fewer), and attributes one definition hasn't are -Wodr's error.
+        "/* gnu23 only */\n"
+        "struct S { int a; long b; };\n"
+        "struct S { int a; long b; };\n"
+        "union U { int x; float y; };\n"
+        "union U { int x; float y; };\n"
+        "struct N { struct S s; int arr[3]; int bits : 3; };\n"
+        "struct N { struct S s; int arr[3]; int bits : 3; };\n"
+        "int use(void) { struct S v = { 1, 2 }; struct N n; n.bits = 1; return v.a + n.arr[0]; }\n"
+        "void blk(void) { struct L { int q; }; struct L { int q; } l; l.q = 0; }\n"
+        "int bad = undeclared;\n",
+        "/* gnu23 only */\n"
+        "struct S { int a; long b; };\n"
+        "struct S { int a; int b; };\n"
+        "struct T { int a; };\n"
+        "struct T { int b; };\n"
+        "struct U { int a; int b; };\n"
+        "struct U { int a; };\n"
+        "struct W { int a : 3; };\n"
+        "struct W { int a : 4; };\n"
+        "struct X { int a; } __attribute__((packed));\n"
+        "struct X { int a; };\n"
+        "struct Y { int a; };\n"
+        "struct Y { const int a; };\n"
+        "int x = undeclared;\n",
+        "/* gnu23 only */\n"
+        "struct A { int a; int b : 3; };\n"
+        "struct A { int a; int b; };\n"
+        "struct B { int a; };\n"
+        "struct B { int a; int b; };\n"
+        "struct C { struct { int x; } in; };\n"
+        "struct C { struct { int x; } in; };\n"
+        "struct D { int a; };\n"
+        "struct D { int a; } __attribute__((aligned(8)));\n"
+        "struct E { int a[2]; };\n"
+        "struct E { int a[3]; };\n"
+        "typedef int I;\n"
+        "struct F { I a; };\n"
+        "struct F { int a; };\n"
+        "struct G { int a, b; };\n"
+        "struct G { int b, a; };\n"
+        "union H { int a; };\n"
+        "union H { int a; long b; };\n"
+        "void f(void) { struct L { int q; }; struct L { int r; }; }\n",
+        "/* gnu23 only */\n"
+        "struct D { int a; };\n"
+        "struct D { int a; } __attribute__((aligned(8)));\n"
+        "struct X { int a; } __attribute__((packed));\n"
+        "struct X { int a; } __attribute__((packed));\n"
+        "int x = undeclared;\n",
+        // Clang's C23 comparison of members' types (review on #1813): any two named records are compatible, a typedef's
+        // unnamed one too, and the unnamed records written in the members are compared member by member, through
+        // pointers, arrays, atomics and functions, after the definition's own members.
+        "/* gnu23 only */\n"
+        "struct I { int a; }; struct J { long b; }; union U { int a; };\n"
+        "typedef struct { int a; } AX; typedef union { int a; } UY;\n"
+        "struct S { struct I m; struct I *p; struct I a[2]; struct I (*f)(void); AX t; struct { int x; } *q; };\n"
+        "struct S { struct J m; union U *p; union U a[2]; union U (*f)(void); UY t; struct { int x; } *q; };\n"
+        "struct T { struct { int y; } arr[2]; const struct { int z; } *cp; _Atomic struct { int v; } *ap; struct { int u; } (*g)(int); struct { int w; }; };\n"
+        "struct T { struct { int y; } arr[2]; const struct { int z; } *cp; _Atomic struct { int v; } *ap; struct { int u; } (*g)(int); struct { int w; }; };\n"
+        "struct T t; int x = t.w + undeclared;\n",
+        // Their differences: at the innermost unnamed record (its enclosing records' names before its place), an unnamed
+        // bit-field's notes, and an incompatible inner record's member read as an int.
+        "/* gnu23 only */\n"
+        "struct A { struct { int x; } *p; };\nstruct A { struct { long x; } *p; };\n"
+        "struct B { struct { struct { int y; } in; } m; };\nstruct B { struct { struct { char y; } in; } m; };\n"
+        "struct C { struct { int x; }; int y; };\nstruct C { struct { long x; }; int y; };\n"
+        "struct D { int :3; };\nstruct D { int :4; };\n"
+        "struct E { struct I { int a; } m; };\nstruct E { struct I { long a; } m; };\n"
+        "struct F { int a; struct { int x; } *p; };\nstruct F { long a; struct { long x; } *p; };\n",
+        // Attributes, arguments included: the record's own, a member's (each clang's -Wodr error, the comparison going on)
+        // and an unnamed member record's, each noted where the lists first differ.
+        "/* gnu23 only */\n"
+        "struct A { int a; } __attribute__((visibility(\"hidden\")));\nstruct A { int a; } __attribute__((visibility(\"protected\")));\n"
+        "struct B { int a; } __attribute__((packed, aligned(4)));\nstruct B { int a; } __attribute__((aligned(4), packed));\n"
+        "struct C { int a; } __attribute__((aligned(4)));\nstruct C { int a; } __attribute__((aligned(8)));\n"
+        "struct D { int a __attribute__((aligned(8))); int b __attribute__((deprecated(\"x\"))); };\n"
+        "struct D { int a; int b __attribute__((deprecated(\"y\"))); };\n"
+        "struct E { int a; } __attribute__((packed));\nstruct E { long a; };\n"
+        "struct F { int a __attribute__((aligned(8))); int b; };\nstruct F { int a; long b; };\n"
+        "struct G { struct { int a; } __attribute__((packed)) m; };\nstruct G { struct { int a; } m; };\n",
         // A block's, and clang's unused-variable warnings of no scope in which an error occurred (a body's from its
         // definition's start).
         "void f(int p)\n{\n    int x;\n    float x;\n    int y = 1;\n    long y = 2;\n    (void)y;\n    if (y = 2) {}\n}\n"
@@ -305,11 +444,13 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         // The note is at the definition when a forward declaration or a use comes first (review on #1788).
         "struct S;\nstruct S { int a; };\nstruct S { int b; };\nstruct S { int c; };\nstruct T x;\nstruct T { int a; };\n"
         "struct T { int b; };\nenum E *pe;\nenum E { A };\nenum E { B };\n"
-        "void f(void) { struct L *p; struct L { int a; }; struct L { int b; }; (void)p; }\n",
+        "void f(void) { struct L *p; struct L { int a; }; struct L { int b; }; (void)p; }\n"
+        // A fixed enum listed again with its base, at file and block scope.
+        "enum FE : int { FA, FB };\nenum FE : int { FC, FD };\nint fx = FC + FB;\nvoid fg(void) { enum FL : char { FL1 }; enum FL : char { FL2 }; }\n",
     };
     static const char* const standards[] = { "-std=gnu17", "-std=gnu23" };
-    // The tag redefinitions, the last three fixtures, are gnu17's alone: C23 allows a compatible one and words an
-    // incompatible one otherwise (N3037), which the checker doesn't model yet.
+    // The tag redefinitions, the last three fixtures, are gnu17's alone: C23 compares a redefined record with the
+    // earlier one (N3037, the gnu23 fixtures above), and an enum's redefinition still refuses generically there.
     const uint32_t before_c23 = BUSTER_ARRAY_LENGTH(fixtures) - 3;
     static const char* const options[] = { NULL, "-Wall", "-ferror-limit=2", "-w" };
     enum { LINES = 16384 };
@@ -323,7 +464,9 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         snprintf(source, sizeof(source), "%s/semantic-recovery-%u.c", directory, f);
         const bool made = parse_test_write(source, fixtures[f], strlen(fixtures[f]));
         const uint32_t standard_count = f >= before_c23 ? 1u : (uint32_t)BUSTER_ARRAY_LENGTH(standards);
-        for (uint32_t s = 0; made && s < standard_count; s += 1)
+        // A fixture that starts with this marker is gnu23's alone (C23's tag compatibility).
+        const bool c23_only = strncmp(fixtures[f], "/* gnu23 only */", 16) == 0;
+        for (uint32_t s = c23_only ? 1u : 0u; made && s < standard_count; s += 1)
         {
             for (uint32_t o = 0; o < BUSTER_ARRAY_LENGTH(options); o += 1)
             {

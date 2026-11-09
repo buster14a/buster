@@ -34,6 +34,177 @@ static uint32_t check_semantic_function(const Parser* parser, const CheckInput* 
     return result;
 }
 
+// Whether the unnamed record at `keyword` is a record's anonymous member, a definition with no declarator: clang's
+// "anonymous" one, any other unnamed one's "unnamed".
+static bool check_semantic_anonymous_member(const Parser* parser, uint32_t keyword)
+{
+    const uint32_t body = check_input_skip_attributes(parser, keyword + 1, parser->tokens.count);
+    const uint32_t close = body < parser->tokens.count && parser->tokens.kinds[body] == PARSE_KIND_L_BRACE ? parser->tree.parents[body] : parser->tokens.count;
+    const uint32_t after = close < parser->tokens.count && close > body ? check_input_skip_attributes(parser, close + 1, parser->tokens.count) : parser->tokens.count;
+    return after < parser->tokens.count && parser->tokens.kinds[after] == PARSE_KIND_SEMI;
+}
+
+// The record at `token` as clang's C23 comparison names it (#1447): at a named record's name, `struct S`; at an unnamed
+// record's keyword, its enclosing records' names outward in, each unnamed one `(unnamed struct)`, then its own place,
+// `struct S::(unnamed struct)::(unnamed at file:line:col)`. The enclosing records are the record bodies (`{` of a struct's
+// or a union's) open at the token, found by a backward scan that skips each closed bracket's pair.
+static String8 check_semantic_tag_spelling(const Parser* parser, Preprocessor* pp, uint32_t token, Arena* scratch)
+{
+    const bool unnamed = parser->tokens.kinds[token] == PARSE_KIND_STRUCT;
+    uint32_t keyword = token;
+    for (uint32_t steps = 0; !unnamed && keyword != 0 && steps < 64 && parser->tokens.kinds[keyword] != PARSE_KIND_STRUCT; steps += 1)
+    {
+        keyword -= 1;
+    }
+    const String8 word = check_semantic_name(parser, pp, keyword);
+    const char* text = check_warning_text(scratch, "%.*s ", (int)word.length, word.pointer);
+    // The enclosing records outward, their keywords, then written inward: each `{` of a record's body that no `}` after
+    // it closes before the token.
+    uint32_t enclosing[16];
+    uint32_t depth = 0;
+    uint32_t closed = 0;
+    for (uint32_t t = token; unnamed && t != 0 && depth < BUSTER_ARRAY_LENGTH(enclosing);)
+    {
+        t -= 1;
+        const uint8_t kind = parser->tokens.kinds[t];
+        closed += kind == PARSE_KIND_R_BRACE ? 1u : 0u;
+        if (kind == PARSE_KIND_L_BRACE && closed != 0)
+        {
+            closed -= 1;
+        }
+        else if (kind == PARSE_KIND_L_BRACE && parser->tree.roles[t] == PARSE_ROLE_OPEN_STRUCT)
+        {
+            uint32_t record = t;
+            for (uint32_t steps = 0; record != 0 && steps < 256 && parser->tokens.kinds[record] != PARSE_KIND_STRUCT; steps += 1)
+            {
+                record -= 1;
+                record = parser->tokens.kinds[record] == PARSE_KIND_R_PAREN && parser->tree.parents[record] < record ? parser->tree.parents[record] : record;
+            }
+            enclosing[depth++] = record;
+        }
+        else if (kind == PARSE_KIND_L_BRACE)
+        {
+            // A body or a block that isn't a record's: no record encloses past it.
+            t = 0;
+        }
+    }
+    for (uint32_t level = depth; text != NULL && level-- > 0;)
+    {
+        // A record's name is the identifier after its keyword, past its attributes, before its body.
+        const uint32_t after = check_input_skip_attributes(parser, enclosing[level] + 1, parser->tokens.count);
+        const bool named = after < parser->tokens.count && parser->tokens.kinds[after] == PARSE_KIND_IDENTIFIER;
+        const String8 part = named ? check_semantic_name(parser, pp, after) : check_semantic_name(parser, pp, enclosing[level]);
+        text = check_warning_text(scratch, named ? "%s%.*s::" : check_semantic_anonymous_member(parser, enclosing[level]) ? "%s(anonymous %.*s)::" :
+                                                                                                                   "%s(unnamed %.*s)::",
+                                  text, (int)part.length, part.pointer);
+    }
+    if (text != NULL && unnamed)
+    {
+        const bool history = pp_history_ensure(pp);
+        const uint32_t source = parser->tokens.sources[token];
+        const uint32_t origin = history ? pp_history_at(pp, source) : 0;
+        const uint32_t location = source < pp->output.count ? pp_expansion_location(pp, source, origin) : 0;
+        const char* file = NULL;
+        uint32_t file_length = 0;
+        const uint32_t line = pp_presumed(pp, location, &file, &file_length);
+        const uint32_t range = pp_find_range(pp, location);
+        uint32_t column = 1;
+        if (range != BUSTER_PP_NONE)
+        {
+            (void)pp_line_of(pp, range, location, &column);
+        }
+        text = check_warning_text(scratch, "%s(%s at %.*s:%u:%u)", text, check_semantic_anonymous_member(parser, token) ? "anonymous" : "unnamed",
+                                  (int)file_length, file, line, column);
+    }
+    else if (text != NULL)
+    {
+        const String8 own = check_semantic_name(parser, pp, token);
+        text = own.length != 0 ? check_warning_text(scratch, "%s%.*s", text, (int)own.length, own.pointer) : NULL;
+    }
+    return text != NULL ? (String8){ .pointer = (char*)text, .length = (uint64_t)strlen(text) } : (String8){ 0 };
+}
+
+// C23's incompatible redefinition's two notes (#1447, CHECK_INPUT_TAG_INCOMPATIBLE): at the first difference's member of
+// the second definition then the earlier's, or at a member then "no corresponding field" at the other definition's name,
+// as clang words them. How many there are.
+static uint32_t check_semantic_tag_notes(const Parser* parser, Preprocessor* pp, const CheckInput* input, const TypeTable* types,
+                                         CheckWarningSpelling* spell, const CheckInputReport* report, PPOutputDiagnosticNote* notes, Arena* scratch)
+{
+    const uint32_t count = input->token_count;
+    const uint32_t first = report->attribute;
+    const uint32_t second = report->note_token;
+    // An unnamed member's note is at its declaration's first token, and names nothing (BUSTER_CHECK_TAG_*_UNNAMED).
+    const bool first_unnamed = (report->bit_widths & 0x8000u) != 0;
+    const bool second_unnamed = (report->bit_widths & 0x80000000u) != 0;
+    const String8 first_name = first < count && !first_unnamed ? check_semantic_name(parser, pp, first) : (String8){ "", 0 };
+    const String8 second_name = second < count && !second_unnamed ? check_semantic_name(parser, pp, second) : (String8){ "", 0 };
+    const char* texts[2] = { NULL, NULL };
+    switch (report->detail)
+    {
+        case 0: // CHECK_TAG_MISMATCH_NAME
+            texts[0] = check_warning_text(scratch, "field has name '%.*s' here", (int)first_name.length, first_name.pointer);
+            texts[1] = check_warning_text(scratch, "field has name '%.*s' here", (int)second_name.length, second_name.pointer);
+            break;
+        case 1: // CHECK_TAG_MISMATCH_BIT_FIELD
+        {
+            const uint32_t widths[2] = { (report->bit_widths >> 16) & 0x7fffu, report->bit_widths & 0x7fffu };
+            const String8 names[2] = { first_name, second_name };
+            for (uint32_t n = 0; n < 2; n += 1)
+            {
+                texts[n] = widths[n] == 0 ? check_warning_text(scratch, "field '%.*s' is not a bit-field", (int)names[n].length, names[n].pointer) :
+                                            check_warning_text(scratch, "bit-field '%.*s' has bit-width %u here", (int)names[n].length, names[n].pointer, widths[n] - 1);
+            }
+        } break;
+        case 2: // CHECK_TAG_MISMATCH_TYPE
+        {
+            const String8 first_type = check_driver_warning_type(parser, pp, input, types, spell, scratch, report->type,
+                                                                 first < count && !first_unnamed ? check_input_typedef_spelling(input, parser, first) : 0);
+            const String8 second_type = check_driver_warning_type(parser, pp, input, types, spell, scratch, (TypeId)report->value,
+                                                                  second < count && !second_unnamed ? check_input_typedef_spelling(input, parser, second) : 0);
+            texts[0] = check_warning_text(scratch, "field '%.*s' has type %.*s here", (int)first_name.length, first_name.pointer, (int)first_type.length, first_type.pointer);
+            texts[1] = check_warning_text(scratch, "field '%.*s' has type %.*s here", (int)second_name.length, second_name.pointer, (int)second_type.length, second_type.pointer);
+        } break;
+        case 5: // CHECK_TAG_MISMATCH_ATTRIBUTE
+        case 6: // CHECK_TAG_MISMATCH_MEMBER_ATTRIBUTE: each definition's attribute where the lists differ, the earlier's first
+            texts[0] = check_warning_text(scratch, "attribute '%.*s' here", (int)first_name.length, first_name.pointer);
+            texts[1] = check_warning_text(scratch, "attribute '%.*s' here", (int)second_name.length, second_name.pointer);
+            break;
+        default: // CHECK_TAG_MISMATCH_EXTRA_NEW, CHECK_TAG_MISMATCH_EXTRA_OLD
+        {
+            const String8 first_type = check_driver_warning_type(parser, pp, input, types, spell, scratch, report->type,
+                                                                 first < count && !first_unnamed ? check_input_typedef_spelling(input, parser, first) : 0);
+            texts[0] = check_warning_text(scratch, "field '%.*s' has type %.*s here", (int)first_name.length, first_name.pointer, (int)first_type.length, first_type.pointer);
+            texts[1] = "no corresponding field here";
+        } break;
+    }
+    uint32_t result = 0;
+    const uint32_t tokens[2] = { first, second };
+    for (uint32_t n = 0; n < 2; n += 1)
+    {
+        if (tokens[n] < count && texts[n] != NULL)
+        {
+            notes[result] = (PPOutputDiagnosticNote){ .token = parser->tokens.sources[tokens[n]], .message = texts[n] };
+            result += 1;
+        }
+    }
+    return result;
+}
+
+// The typedef that spells an enum's fixed underlying type after its name `token` (`enum E : my_int`), for clang's words
+// of it, or 0 for a base of no typedef (or no base). Bounded by the base's tokens, to the body's `{` or the `;`.
+static uint32_t check_semantic_enum_base_spelling(const Parser* parser, const CheckInput* input, uint32_t token)
+{
+    uint32_t result = 0;
+    const bool based = token + 1 < parser->tokens.count && parser->tokens.kinds[token + 1] == PARSE_KIND_COLON;
+    for (uint32_t t = token + 2; based && result == 0 && t < parser->tokens.count && t < input->token_count &&
+                                 parser->tokens.kinds[t] != PARSE_KIND_L_BRACE && parser->tokens.kinds[t] != PARSE_KIND_SEMI; t += 1)
+    {
+        const uint32_t resolved = parser->tokens.kinds[t] == PARSE_KIND_IDENTIFIER && input->declarations != NULL ? input->declarations[t] : 0;
+        result = resolved != 0 && resolved < input->token_count && input->declaration_kinds[resolved] == C_BINDING_TYPEDEF ? resolved : 0;
+    }
+    return result;
+}
+
 static const char* check_semantic_input(const Parser* parser, Preprocessor* pp, const CheckInput* input, const TypeTable* types,
                                        const CheckInputReport* report, CheckWarningSpelling* spell, Arena* scratch)
 {
@@ -50,6 +221,16 @@ static const char* check_semantic_input(const Parser* parser, Preprocessor* pp, 
             result = check_warning_text(scratch, "non-void function '%.*s' should return a value [-Wreturn-mismatch]",
                                         (int)function_name.length, function_name.pointer);
         }
+    }
+    else if (report->message == CHECK_INPUT_TAG_INCOMPATIBLE && token > 0 && token < parser->tokens.count)
+    {
+        // C23's incompatible redefinition of a record (#1447): its keyword, struct or union, and its name; or an unnamed
+        // record's in a member's type, at its keyword, named as clang names it there (check_semantic_tag_spelling).
+        const String8 spelled = check_semantic_tag_spelling(parser, pp, token, scratch);
+        const char* what = report->detail == 5 ? "has an attribute which currently causes the types to be treated as though they are incompatible [-Wodr]" :
+                           report->detail == 6 ? "has a member with an attribute which currently causes the types to be treated as though they are incompatible [-Wodr]" :
+                                                 "has incompatible definitions";
+        result = spelled.length == 0 ? NULL : check_warning_text(scratch, "type '%.*s' %s", (int)spelled.length, spelled.pointer, what);
     }
     else if (report->message == CHECK_INPUT_ENUMERATOR_REDEFINITION && name.length != 0)
     {
@@ -87,6 +268,21 @@ static const char* check_semantic_input(const Parser* parser, Preprocessor* pp, 
             const String8 prior = check_driver_warning_type(parser, pp, input, types, spell, scratch, (TypeId)report->value, prior_spelling);
             result = current.length == 0 || prior.length == 0 ? NULL : check_warning_text(scratch, "typedef redefinition with different types (%.*s vs %.*s)",
                                                                                          (int)current.length, current.pointer, (int)prior.length, prior.pointer);
+        }
+        else if (report->detail == CHECK_REDECLARATION_ENUM_BASE)
+        {
+            // Both bases as written, a typedef's with its "aka": the new one's after this name's `:`, the earlier one's after
+            // the noted name's.
+            const uint32_t noted = report->note_token < count ? report->note_token : previous;
+            const String8 current = check_driver_warning_type(parser, pp, input, types, spell, scratch, report->type, check_semantic_enum_base_spelling(parser, input, token));
+            const String8 prior = check_driver_warning_type(parser, pp, input, types, spell, scratch, (TypeId)report->value, check_semantic_enum_base_spelling(parser, input, noted));
+            result = current.length == 0 || prior.length == 0 ? NULL : check_warning_text(scratch, "enumeration redeclared with different underlying type %.*s (was %.*s)",
+                                                                                         (int)current.length, current.pointer, (int)prior.length, prior.pointer);
+        }
+        else if (report->detail == CHECK_REDECLARATION_ENUM_FIXED || report->detail == CHECK_REDECLARATION_ENUM_NONFIXED)
+        {
+            result = report->detail == CHECK_REDECLARATION_ENUM_FIXED ? "enumeration previously declared with fixed underlying type" :
+                                                                        "enumeration previously declared with nonfixed underlying type";
         }
         else if (report->detail == CHECK_REDECLARATION_KIND)
         {

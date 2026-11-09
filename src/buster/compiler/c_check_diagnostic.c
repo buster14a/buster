@@ -141,6 +141,12 @@ static const CheckWarningDescription check_warning_descriptions[] =
     { "-Wtautological-constant-compare", "-Wtautological-compare", "converting the result of '?:' with integer constants to a boolean always evaluates to 'true'" },
     { "-Wbitfield-constant-conversion", "-Wconstant-conversion", "implicit truncation to bit-field changes value" },
     { "-Wsingle-bit-bitfield-constant-conversion", "-Wbitfield-constant-conversion", "implicit truncation to a one-bit wide bit-field changes value" },
+    { "-Wenum-compare", NULL, "comparison of different enumeration types" },
+    { "-Wenum-enum-conversion", "-Wenum-conversion", "arithmetic between different enumeration types" },
+    { "-Wenum-compare-conditional", "-Wenum-conversion", "conditional expression between different enumeration types" },
+    { "-Wenum-float-conversion", "-Wenum-conversion", "arithmetic between enumeration type and floating-point type" },
+    { "-Wanon-enum-enum-conversion", NULL, "arithmetic between different enumeration types" },
+    { "-Wfor-loop-analysis", "-Wloop-analysis", "variable used in loop condition not modified in loop body" },
 };
 
 _Static_assert(BUSTER_ARRAY_LENGTH(check_warning_descriptions) == CHECK_WARNING_ID_COUNT, "every sparse policy ID has a description");
