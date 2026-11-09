@@ -4525,10 +4525,46 @@ struct CheckDriverEditor
     uint32_t log_capacity;
 };
 
+// Whether the tag definition whose `{` is `open`, inside [begin, last], declares no name used outside that region: its
+// tag's, and an enumeration's enumerators', which the reading after leaving it out would read as another declaration's
+// (an outer one's) without an error. Any identifier of the same spelling outside counts, in any name space.
+static bool check_driver_tag_local(const Parser* parser, uint32_t open, uint32_t begin, uint32_t last)
+{
+    const uint32_t count = parser->tokens.count;
+    const bool enumeration = parser->tree.roles[open] == PARSE_ROLE_OPEN_ENUM;
+    const uint8_t close_role = enumeration ? PARSE_ROLE_CLOSE_ENUM : PARSE_ROLE_CLOSE_STRUCT;
+    // The definition's `}`: the first closer of its kind at its depth.
+    uint32_t close = open + 1;
+    for (uint32_t depth = 0; close <= last && !(depth == 0 && parser->tree.roles[close] == close_role); close += 1)
+    {
+        depth += parser->tree.roles[close] == PARSE_ROLE_OPEN_STRUCT || parser->tree.roles[close] == PARSE_ROLE_OPEN_ENUM;
+        depth -= (parser->tree.roles[close] == PARSE_ROLE_CLOSE_STRUCT || parser->tree.roles[close] == PARSE_ROLE_CLOSE_ENUM) && depth != 0;
+    }
+    bool local = close <= last;
+    // Its names: the tag before the `{`, and an enumeration's enumerators, each after its `{` or a `,` (an argument after
+    // a value's `,` too, which only makes it less often local).
+    for (uint32_t at = open > 0 ? open - 1 : open; local && at < close; at += 1)
+    {
+        const uint8_t before = at > 0 ? parser->tokens.kinds[at - 1] : PARSE_KIND_COUNT;
+        const bool tag = at + 1 == open && parser->tokens.kinds[at] == PARSE_KIND_IDENTIFIER;
+        const bool enumerator = enumeration && at > open && parser->tokens.kinds[at] == PARSE_KIND_IDENTIFIER &&
+                                (before == PARSE_KIND_L_BRACE || before == PARSE_KIND_COMMA);
+        const uint32_t name = parser->tokens.names[at];
+        for (uint32_t use = 0; (tag || enumerator) && local && use < count; use += 1)
+        {
+            local = (use >= begin && use <= last) || parser->tokens.kinds[use] != PARSE_KIND_IDENTIFIER || parser->tokens.names[use] != name;
+        }
+    }
+    return local;
+}
+
 // Leave out the region [begin, last], `first` its first token's fate (DROP, or its run's replacement). A region already
 // left out whole is left so. A run with a replacement is left out whole or not at all: the region may hold it, or be
 // held by it, but not cross it; one without a replacement may also be crossed by one without. The region may hold no
-// label, case, goto, label address or tag definition, which the reading after it needs. False where it can't be left out.
+// case label, which its switch's checks need, nor a tag definition that declares a name used outside it
+// (check_driver_tag_local). It may hold a label, a goto, a label address or a local label's declaration (#1447): a
+// label left out that a kept goto names leaves the reading an error, whose view isn't taken, and a goto left out
+// changes no warning a flushed body gives. False where it can't be left out.
 static bool check_driver_edit_apply(CheckDriverEditor* editor, uint32_t begin, uint32_t last, uint8_t first)
 {
     const Parser* parser = editor->parser;
@@ -4541,9 +4577,9 @@ static bool check_driver_edit_apply(CheckDriverEditor* editor, uint32_t begin, u
         covered &= edits[at] != CHECK_DRIVER_EDIT_KEEP;
         const uint8_t role = parser->tree.roles[at];
         const uint8_t kind = parser->tokens.kinds[at];
-        valid = role != PARSE_ROLE_LABEL && role != PARSE_ROLE_OPEN_CASE && role != PARSE_ROLE_CLOSE_CASE && role != PARSE_ROLE_OPEN_STRUCT &&
-                role != PARSE_ROLE_OPEN_ENUM && kind != PARSE_KIND_GOTO && kind != PARSE_KIND_CASE && kind != PARSE_KIND_DEFAULT &&
-                !(kind == PARSE_KIND_AMPAMP && role == PARSE_ROLE_PREFIX);
+        const bool tag = role == PARSE_ROLE_OPEN_STRUCT || role == PARSE_ROLE_OPEN_ENUM;
+        valid = role != PARSE_ROLE_OPEN_CASE && role != PARSE_ROLE_CLOSE_CASE && kind != PARSE_KIND_CASE && kind != PARSE_KIND_DEFAULT &&
+                (!tag || check_driver_tag_local(parser, at, begin, last));
     }
     if (valid && !covered)
     {

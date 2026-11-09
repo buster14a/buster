@@ -4179,7 +4179,15 @@ error to the nearest part it can leave out:
   a type.
 
 Each error's parts are left out all or none (an undo log). A part that holds a
-label, a `case`, a `goto`, a label's address or a tag's definition isn't. The
+`case` or `default` label isn't, as its switch's checks (`-Wswitch`'s
+coverage, duplicate values) need it, nor one that holds a tag's definition
+declaring a name used outside the part (its tag, an enumerator), which the
+reading would take for an outer declaration's without an error
+(`check_driver_tag_local`). A part may hold a label, a `goto`, a label's
+address or a local label's declaration (#1447): a left-out label that a kept
+`goto` names leaves the reading an error, so its view isn't taken, and a
+left-out `goto` changes no warning a flushed body gives (buster gives no
+`-Wunused-label` yet). The
 replacements are chosen to give no warning of their own (a constant condition
 would: clang's "no case matching constant switch condition"). A part left out
 gives no warning of its own reading, where clang gives those of what it builds
@@ -4227,8 +4235,8 @@ its scopes' unused variables and the unit-end warnings are left out
 (`check_driver_rejected_warnings`). `c_check_statement_recovery_driver_test.c`
 compares fixtures of graph, control, asm and reader errors with clang.
 `c_check_structural_recovery_driver_test.c` compares the view parts' fixtures
-(conditions, for clauses, statement expressions, declarators, and the fallback
-of a part that holds a label or a goto) with clang 23 under `-Wall` and `-Wall
+(conditions, for clauses, statement expressions, declarators, parts that hold
+a label, a goto, a label's address or a local tag's definition) with clang 23 under `-Wall` and `-Wall
 -Wextra`, gnu17 and gnu23, by both paths and on one, two and three lanes, each
 with errors mid-body among warnings before and after them.
 
@@ -4464,8 +4472,8 @@ The later phases are left:
   is not permitted here" at the `sizeof`, where clang's names the type at its
   operand; both on main too.
 - **Errors no view part leaves out.** A body's error in a part that holds a
-  label, a `case`, a `goto` or a tag's definition, or in a typedef's
-  declaration, still leaves its body out, and its warnings with it. A reader's
+  `case` label or a tag's definition whose names are used outside it, or in a
+  typedef's declaration, still leaves its body out, and its warnings with it. A reader's
   error that ends its walk in a declarator (`int a[s.b];`, still "invalid or
   unsupported declaration") leaves its declarator out, but the first reading
   never saw the body's later errors, so a second reading that meets one isn't
