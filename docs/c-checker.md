@@ -3065,9 +3065,9 @@ What the lowering covers past scalars (#145's programs):
   guide](x86-target.md)), and an attribute of the string before it, as a
   header's functions have, is read as that one was. A unit without one, the
   usual one, makes no column. A function of several versions
-  (GNU's function multiversioning: `target_clones`, `target("default")`, or two
-  strings, which the checker keeps apart, #1838) is refused by name when its
-  body is selected; a declaration-only version with no body is
+  (GNU's function multiversioning: `target_clones`, or two strings, which the
+  checker keeps apart, #1838) is refused by name when its body is selected (a
+  lone `target("default")` function is compiled as a plain one); a declaration-only version with no body is
   still outside that refusal, and so are vector values in a function whose
   attribute turns AVX-512F or AVX-512VL off; the convention stays the unit's, as
   clang's does.

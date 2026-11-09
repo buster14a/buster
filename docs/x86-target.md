@@ -324,11 +324,12 @@ anywhere, and `branch-protection=`. So does `"default"`.
 
 The attribute applies as clang merges it: from the definition or a declaration
 before it; one after the definition is dropped where none came before. A
-function of several versions (two strings, `target("default")`, or
-`target_clones`) is GNU's function multiversioning: the checker keeps its
-versions apart and reports clang's errors (`docs/c-checker.md`, "Multiversioning
-by target strings"), but its symbols and resolver aren't made yet (#1838): its
-bodies are refused by name. The calling convention stays the unit's, as
+function of several versions (two strings, or `target_clones`) is GNU's
+function multiversioning: the checker keeps its versions apart and reports
+clang's errors (`docs/c-checker.md`, "Multiversioning by target strings"), but
+its symbols and resolver aren't made yet (#1838): its bodies are refused by
+name. A lone `target("default")` function, which clang multiversions too, is
+still compiled as a plain function. The calling convention stays the unit's, as
 clang's x86-64 ABI level is the unit's, and so a function has vector values only
 where both the unit's target and its own have AVX-512F and AVX-512VL.
 
