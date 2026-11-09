@@ -2052,14 +2052,15 @@ static uint32_t check_common_enum_cast_location(const Parser* parser, const Chec
 // The target's typedef as written (clang's sugar) for the conversion node `conversion` (BUSTER_CHECK_NONE for none): an
 // assignment's left operand's, an initializer's declaration's (its `=` reads the specifiers back) or a return's
 // function's. Only a warning reads it: the function's search is a scan of the unit's bodies.
-static uint32_t check_common_enum_cast_spelling(const Parser* parser, const CheckInput* input, const CheckStream* stream, uint32_t conversion)
+static uint32_t check_common_enum_cast_spelling(const Parser* parser, const CheckInput* input, const CheckStream* stream, const TypeTable* types,
+                                                uint32_t conversion)
 {
     const CheckGraph* graph = &input->graph;
     const CheckOp op = conversion < graph->count ? graph->ops[conversion] : CHECK_OP_COUNT;
     const uint32_t token = conversion < graph->count ? graph->tokens[conversion] : BUSTER_CHECK_NONE;
     const bool returned = op == CHECK_OP_CONVERT && token < parser->tokens.count && parser->tokens.kinds[token] == PARSE_KIND_RETURN;
     const uint32_t function = returned ? check_semantic_function(parser, input, token) : BUSTER_CHECK_NONE;
-    return op == CHECK_OP_ASSIGN ? check_common_operand_spelling(parser, input, graph, stream, graph->operand0[conversion]) :
+    return op == CHECK_OP_ASSIGN ? check_common_operand_spelling(parser, input, graph, stream, types, graph->operand0[conversion]) :
            op == CHECK_OP_INITIALIZE ? check_input_typedef_spelling(input, parser, token) :
            function < input->token_count ? check_input_typedef_spelling(input, parser, function) : 0;
 }
@@ -2105,7 +2106,7 @@ static __attribute__((noinline)) void check_common_enum_cast(const Parser* parse
         if (converts && !rendered)
         {
             rendered = true;
-            const uint32_t target_spelling = check_common_enum_cast_spelling(parser, input, stream, conversion);
+            const uint32_t target_spelling = check_common_enum_cast_spelling(parser, input, stream, types, conversion);
             target_name = check_driver_warning_type(parser, pp, input, types, spell, scratch, target, target_spelling);
             const String8 target_plain = check_driver_warning_type(parser, pp, input, types, spell, scratch, target_enum, 0);
             // (An unnamed target warns of nothing.)
@@ -2114,7 +2115,7 @@ static __attribute__((noinline)) void check_common_enum_cast(const Parser* parse
         if (converts && target_name.length != 0)
         {
             const bool enumerator = coerced != check_stream_type(stream, leaf);
-            const uint32_t spelling = enumerator ? 0 : check_common_operand_spelling(parser, input, graph, stream, leaf);
+            const uint32_t spelling = enumerator ? 0 : check_common_operand_spelling(parser, input, graph, stream, types, leaf);
             const String8 source_name = check_driver_warning_type(parser, pp, input, types, spell, scratch, coerced, spelling);
             const String8 plain = check_driver_warning_type(parser, pp, input, types, spell, scratch, leaf_enum, 0);
             if (source_name.length != 0 && memmem(plain.pointer, plain.length, "(unnamed", 8) == NULL)
