@@ -8407,6 +8407,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             check_test_driver_generic_builtins(&test, clang, executable, directory);
             check_test_driver_availability(&test, clang, executable, directory);
             check_test_driver_cpu_supports(&test, clang, executable, directory);
+            check_test_driver_builtin_declarations(&test, clang, executable, directory);
             check_test_driver_counted_by(&test, clang, executable, directory);
         }
         if (!lazy && check_test_driver_takes())
