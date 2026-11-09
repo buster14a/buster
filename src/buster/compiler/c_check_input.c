@@ -793,6 +793,9 @@ struct CheckInput
     // Whether an expression names an enumerator or a variable of an enumeration type (#1447): only then may an
     // operator's operands mix enumerations (check_common_enum_arithmetic).
     bool enum_operands;
+    // Whether an expression names an enumerator or a variable of a tagged enumeration type (#1447): only then may an
+    // implicit conversion change one named enumeration to another (check_common_enum_cast).
+    bool enum_names;
     uint8_t* function_flags;
     // The unit's FILE, jmp_buf, sigjmp_buf and ucontext_t (their typedefs' types) where an implicit declaration of a library
     // builtin took one (#148, check_input_implicit_function), which its diagnostic spells (CBuiltinLibraryNamed).
@@ -5132,14 +5135,48 @@ static bool check_input_enum_operand(const CheckInputReader* reader, uint32_t to
     return operand && !own;
 }
 
+// Whether the identifier `token` names a variable of a tagged enumeration type (through an aligned typedef too) or an
+// enumerator of a tagged enumeration: the nearest enumeration definition before the enumerator's declaration that holds it,
+// within 256 tokens, beyond which it is taken as tagged.
+static bool check_input_enum_named(const CheckInputReader* reader, uint32_t token)
+{
+    const TypeTable* types = reader->types;
+    const uint32_t declaration = reader->output->declarations[token];
+    const TypeId type = reader->declared_types[token];
+    bool result = false;
+    if (type != 0 && reader->declaration_kinds[declaration] == C_BINDING_ENUMERATOR)
+    {
+        bool found = false;
+        result = true;
+        for (uint32_t back = 1; !found && back <= 256 && back <= declaration; back += 1)
+        {
+            const uint32_t at = declaration - back;
+            const TypeId tag = reader->tag_types[at] != 0 ? type_unqualified(reader->tag_types[at]) : 0;
+            found = tag != 0 && type_kind(types, tag) == BUSTER_TYPE_KIND_ENUM && reader->tag_ends[at] > declaration;
+            result = found ? types->tags.name[types->types.index[type_index(tag)]] != 0 : result;
+        }
+    }
+    else if (type != 0)
+    {
+        const TypeId plain = type_unqualified(type_strip_aligned(types, type));
+        result = type_kind(types, plain) == BUSTER_TYPE_KIND_ENUM && types->tags.name[types->types.index[type_index(plain)]] != 0;
+    }
+    return result;
+}
+
 // An identifier leaf at `token` that names an enumerator or a variable of an enumeration type (an aligned typedef's
-// variable too, whose own kind hides its type's) as such an operator's operand marks the unit (CheckInput.enum_operands).
+// variable too, whose own kind hides its type's) as such an operator's operand marks the unit (CheckInput.enum_operands);
+// one of a tagged enumeration anywhere marks it too (CheckInput.enum_names).
 static void check_input_note_enum(const CheckInputReader* reader, uint32_t token, bool enumeration, TypeId type)
 {
     const uint8_t kind = type_kind(reader->types, type);
     if ((enumeration || kind == BUSTER_TYPE_KIND_ENUM || kind == BUSTER_TYPE_KIND_ALIGNED) && check_input_enum_operand(reader, token))
     {
         reader->output->enum_operands = true;
+    }
+    if ((enumeration || kind == BUSTER_TYPE_KIND_ENUM || kind == BUSTER_TYPE_KIND_ALIGNED) && !reader->output->enum_names)
+    {
+        reader->output->enum_names = check_input_enum_named(reader, token);
     }
 }
 

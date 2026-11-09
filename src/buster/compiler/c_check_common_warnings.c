@@ -884,6 +884,9 @@ struct CheckCommonEnabled
     bool sign_compare;
     bool self_assign;
     bool uninitialized;
+    // Whether the unit names a tagged enumeration's enumerator or variable (CheckInput.enum_names), which an implicit
+    // conversion between enumerations needs (check_common_enum_cast).
+    bool enum_cast;
 };
 
 // A folded shift's runtime warnings the legacy driver words (#1394): its counts and its negative left operand, clang's
@@ -1946,10 +1949,10 @@ static __attribute__((noinline)) bool check_common_enum_cast_source(const Parser
 // Whether `source`'s implicit conversion to `target` may change its enumeration (#1447, -Wimplicit-enum-enum-cast): the
 // target's own kind an enumeration's (or an aligned typedef's, which hides it), tested first as it rarely is, and the
 // source one that may be an enumeration (check_common_enum_cast_source).
-static inline bool check_common_enum_cast_candidate(const Parser* parser, const CheckGraph* graph, const CheckStream* stream, const TypeTable* types,
-                                                    uint32_t source, TypeId target)
+static inline bool check_common_enum_cast_candidate(bool named, const Parser* parser, const CheckGraph* graph, const CheckStream* stream,
+                                                    const TypeTable* types, uint32_t source, TypeId target)
 {
-    const uint8_t target_kind = type_kind(types, target);
+    const uint8_t target_kind = named ? type_kind(types, target) : BUSTER_TYPE_KIND_VOID;
     return __builtin_expect(target_kind == BUSTER_TYPE_KIND_ENUM || target_kind == BUSTER_TYPE_KIND_ALIGNED, 0) && source < graph->count &&
            check_common_enum_cast_source(parser, graph, stream, types, source);
 }
@@ -2029,7 +2032,7 @@ static void check_common_call_argument(CheckCommonEmission* emission, uint32_t i
         }
         if (argument < graph->count && prototype && (conversion.flags & BUSTER_CHECK_CONVERT_ASSIGNMENT) != 0 &&
             (conversion.flags & (BUSTER_CHECK_CONVERT_CAST | BUSTER_CHECK_CONVERT_ATOMIC)) == 0 &&
-            check_common_enum_cast_candidate(emission->parser, graph, stream, emission->types, argument, conversion.type))
+            check_common_enum_cast_candidate(emission->input->enum_names, emission->parser, graph, stream, emission->types, argument, conversion.type))
         {
             check_common_enum_cast(emission->parser, emission->pp, emission->input, stream, emission->types, emission->spell, argument, conversion.type, 0,
                                    emission->parents, emission->at_once, emission->scratch);
@@ -2095,7 +2098,7 @@ static void check_common_conversion_own(CheckCommonEmission* emission, uint32_t 
                                           original, truncated, graph->tokens[node], publication, false, emission->scratch);
         }
         if (source < graph->count && (flags & BUSTER_CHECK_CONVERT_ASSIGNMENT) != 0 && (flags & (BUSTER_CHECK_CONVERT_CAST | BUSTER_CHECK_CONVERT_ATOMIC)) == 0 &&
-            check_common_enum_cast_candidate(emission->parser, graph, stream, emission->types, source, check_stream_type(stream, node)))
+            check_common_enum_cast_candidate(emission->input->enum_names, emission->parser, graph, stream, emission->types, source, check_stream_type(stream, node)))
         {
             // The target's typedef as written (clang's sugar): an assignment's left operand's, an initializer's declaration's
             // (its `=` reads the specifiers back) or a return's function's.
@@ -4234,7 +4237,7 @@ static bool check_common_initializer_literal(const Parser* parser, const CheckIn
     __int128 truncated = 0;
     return target &&
            (check_common_conversion_arms(&input->graph, part->node) || check_common_initializer_bitfield(input, stream, types, part, &original, &truncated) ||
-            check_common_enum_cast_candidate(parser, &input->graph, stream, types, part->node, part->conversion.type) ||
+            check_common_enum_cast_candidate(input->enum_names, parser, &input->graph, stream, types, part->node, part->conversion.type) ||
             (check_common_bool_target(types, part->conversion.type) && check_common_bool_candidate(&input->graph, part->node)) ||
             (type_kind(types, type_unqualified(type_strip_aligned(types, check_stream_type(stream, part->node)))) == BUSTER_TYPE_KIND_FLOATING &&
              check_common_floating_literal(parser, &input->graph, part->node)) ||
@@ -4544,7 +4547,7 @@ static bool check_common_bitfield_assignment(const CheckGraph* graph, const Chec
 // outside its array, a comma the source writes. What their tests read past them only takes warnings away, so that a node it
 // rejects can't warn, and the walks needn't visit a subtree without one.
 static uint8_t check_common_candidate_bits(const Parser* parser, const CheckGraph* graph, const CheckStream* stream, const TypeTable* types,
-                                           uint32_t node, bool self_assign)
+                                           uint32_t node, bool self_assign, bool enum_cast)
 {
     const CheckOp op = graph->ops[node];
     bool own = false;
@@ -4578,7 +4581,7 @@ static uint8_t check_common_candidate_bits(const Parser* parser, const CheckGrap
                 // A conversion between enumerations (#1447, check_common_enum_cast).
                 const uint32_t flags = stream->conversions[node].operands[op == CHECK_OP_ASSIGN ? 1u : 0u].flags;
                 conversion = (flags & BUSTER_CHECK_CONVERT_ASSIGNMENT) != 0 && (flags & (BUSTER_CHECK_CONVERT_CAST | BUSTER_CHECK_CONVERT_ATOMIC)) == 0 &&
-                             check_common_enum_cast_candidate(parser, graph, stream, types, source, check_stream_type(stream, node));
+                             check_common_enum_cast_candidate(enum_cast, parser, graph, stream, types, source, check_stream_type(stream, node));
             }
             if (!conversion && check_common_bool_candidate(graph, source))
             {
@@ -4607,7 +4610,7 @@ static uint8_t check_common_candidate_bits(const Parser* parser, const CheckGrap
                 const CheckConversion cast = stream->argument_conversions[offset + i];
                 const bool enum_cast = (cast.flags & BUSTER_CHECK_CONVERT_ASSIGNMENT) != 0 &&
                                        (cast.flags & (BUSTER_CHECK_CONVERT_CAST | BUSTER_CHECK_CONVERT_ATOMIC)) == 0 &&
-                                       check_common_enum_cast_candidate(parser, graph, stream, types, source, cast.type);
+                                       check_common_enum_cast_candidate(enum_cast, parser, graph, stream, types, source, cast.type);
                 const CheckConstantKind constant = check_stream_constant_kind(stream, source);
                 const bool arms = check_common_conversion_arms(graph, source);
                 if (check_common_conversion_source(constant, arms))
@@ -4690,7 +4693,7 @@ static uint8_t check_common_own_reach(const Parser* parser, const CheckGraph* gr
     const bool comparison = enabled->sign_compare && op >= CHECK_OP_LESS && op <= CHECK_OP_NOT_EQUAL;
     // A source comma's left-operand marker is the arithmetic scan's (check_common_arithmetic_own).
     const bool comma = op == CHECK_OP_COMMA && graph->tokens[node] < parser->tokens.count && parser->tokens.kinds[graph->tokens[node]] == PARSE_KIND_COMMA;
-    const uint8_t result = (uint8_t)(check_common_candidate_bits(parser, graph, stream, types, node, enabled->self_assign) |
+    const uint8_t result = (uint8_t)(check_common_candidate_bits(parser, graph, stream, types, node, enabled->self_assign, enabled->enum_cast) |
                                      (division || shift || comma ? BUSTER_CHECK_REACH_ARITHMETIC : 0u) | (comparison ? BUSTER_CHECK_REACH_SIGN : 0u) |
                                      (shift ? BUSTER_CHECK_REACH_SHIFT : 0u));
     return result;
@@ -4796,7 +4799,7 @@ static void check_common_initializer_conversions(CheckCommonEmission* emission, 
             // (Not a compound literal's in an unevaluated query's operand: check_common_query_suppressed.)
             // (An _Atomic element converts to its value type, so the planner marks it: BUSTER_CHECK_CONVERT_ATOMIC.)
             const bool atomic = (part->conversion.flags & BUSTER_CHECK_CONVERT_ATOMIC) != 0;
-            if (!atomic && check_common_enum_cast_candidate(parser, graph, stream, emission->types, root, part->conversion.type))
+            if (!atomic && check_common_enum_cast_candidate(input->enum_names, parser, graph, stream, emission->types, root, part->conversion.type))
             {
                 check_common_enum_cast(parser, pp, input, stream, emission->types, emission->spell, root, part->conversion.type, 0, emission->parents,
                                        emission->at_once, emission->scratch);
@@ -5167,7 +5170,7 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
                 __int128 truncated = 0;
                 source_contexts |= check_common_bitfield_assignment(graph, stream, types, node, &bit_width, &original, &truncated);
                 // A conversion between enumerations (#1447, check_common_enum_cast), also clang's Diag.
-                source_contexts |= check_common_enum_cast_candidate(parser, graph, stream, types, source, check_stream_type(stream, node));
+                source_contexts |= check_common_enum_cast_candidate(input->enum_names, parser, graph, stream, types, source, check_stream_type(stream, node));
             }
             source_contexts |= evaluated[node] == 0 && check_common_truth_candidate(graph, stream, node);
             if (evaluated[node] == 0 && op == CHECK_OP_CALL && graph->argument_offsets != NULL && graph->argument_counts != NULL)
@@ -5179,7 +5182,7 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
                                        (check_stream_constant_kind(stream, argument) == CHECK_CONSTANT_FLOATING || check_common_conversion_arms(graph, argument) ||
                                         check_common_bool_candidate(graph, argument));
                     source_contexts |= stream->argument_conversions != NULL &&
-                                       check_common_enum_cast_candidate(parser, graph, stream, types, argument,
+                                       check_common_enum_cast_candidate(input->enum_names, parser, graph, stream, types, argument,
                                                                         stream->argument_conversions[graph->argument_offsets[node] + i].type);
                 }
             }
@@ -8815,6 +8818,7 @@ static void check_driver_common_warnings(const Parser* parser, Preprocessor* pp,
         .self_assign = check_common_enabled(pp, input, CHECK_WARNING_ID_SELF_ASSIGN, true),
         .uninitialized = check_common_enabled(pp, input, CHECK_WARNING_ID_UNINITIALIZED, true) ||
                          check_common_enabled(pp, input, CHECK_WARNING_ID_UNUSED_BUT_SET_PARAMETER, true),
+        .enum_cast = input->enum_names,
     };
     check_common_parentheses(parser, pp, input, stream, types, scratch);
     check_common_enum_arithmetic(parser, pp, input, stream, types, &spell, scratch);

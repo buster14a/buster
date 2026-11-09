@@ -645,6 +645,10 @@ static uint32_t check_input_expression_identifiers(const CheckInputReader* reade
         // An enumerator or an enumeration's variable marks the unit (check_input_note_enum, its twin).
         __mmask16 enums = enumeration | _mm512_mask_cmpeq_epi32_mask(typed, type_kinds, _mm512_set1_epi32(BUSTER_TYPE_KIND_ENUM)) |
                           _mm512_mask_cmpeq_epi32_mask(typed, type_kinds, _mm512_set1_epi32(BUSTER_TYPE_KIND_ALIGNED));
+        for (__mmask16 named = enums; named != 0 && !reader->output->enum_names; named &= (__mmask16)(named - 1))
+        {
+            reader->output->enum_names = check_input_enum_named(reader, found[at + (uint32_t)__builtin_ctz(named)]);
+        }
         for (; enums != 0 && !reader->output->enum_operands; enums &= (__mmask16)(enums - 1))
         {
             reader->output->enum_operands = check_input_enum_operand(reader, found[at + (uint32_t)__builtin_ctz(enums)]);

@@ -299,7 +299,10 @@ unused-warning fixtures also check exact scope-completion tokens.
   value's, carried to both arms of a conditional (no runtime pruning) and to a root comma's result, warned at each leaf
   as the full expression completes, in unreachable code too. Its candidates are the conversion walk's
   (`check_common_enum_cast_candidate`: an enumeration's target, from a source that may be one), and a brace initializer's
-  plan is read for it where a value part's target is an enumeration (`CheckInitializer.enum_values`).
+  plan is read for it where a value part's target is an enumeration (`CheckInitializer.enum_values`). They are tested
+  only in a unit that names a tagged enumeration's enumerator or variable (`CheckInput.enum_names`, set where the
+  identifiers' leaves are made): a conversion whose source enumeration is only a member's, a call's result or a cast's
+  isn't looked for without one.
   `c_check_enum_cast_driver_test.c` compares it with complete pinned-Clang output at each policy, both paths and with `-c`.
   `c_check_shift_count_driver_test.c` compares complete pinned-Clang diagnostics and independent counts for both
   shift directions, narrow promotions, 128-bit and bit-precise widths, compound assignments, side effects, macros
