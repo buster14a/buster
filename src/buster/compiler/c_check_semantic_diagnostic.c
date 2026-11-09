@@ -692,11 +692,20 @@ static const char* check_semantic_const_assignment(const Parser* parser, Preproc
     }
     else if (root == CHECK_OP_CALL)
     {
-        // A direct call's: its callee a function's name.
-        const uint32_t callee = graph->operand0[at];
+        // A direct call's (clang's getDirectCallee): its callee a function's name, through `*`, `&` and conversions
+        // (`(*f)()`, `(&f)()`); a function pointer variable's call is no direct one.
+        uint32_t callee = graph->operand0[at];
+        for (uint32_t steps = 0; steps < 64 && callee < graph->count &&
+                                 (graph->ops[callee] == CHECK_OP_DEREFERENCE || graph->ops[callee] == CHECK_OP_ADDRESS || graph->ops[callee] == CHECK_OP_CONVERT);
+             steps += 1)
+        {
+            callee = graph->operand0[callee];
+        }
         const uint32_t name_token = callee < graph->count && graph->ops[callee] == CHECK_OP_VALUE ? graph->tokens[callee] : BUSTER_CHECK_NONE;
-        const uint32_t declaration = name_token < input->token_count && parser->tokens.kinds[name_token] == PARSE_KIND_IDENTIFIER && input->declarations != NULL ?
-                                     input->declarations[name_token] : BUSTER_CHECK_NONE;
+        const uint32_t named = name_token < input->token_count && parser->tokens.kinds[name_token] == PARSE_KIND_IDENTIFIER && input->declarations != NULL ?
+                               input->declarations[name_token] : BUSTER_CHECK_NONE;
+        const uint32_t declaration = named < input->token_count && input->declaration_kinds != NULL && input->declaration_kinds[named] == C_BINDING_FUNCTION ?
+                                     named : BUSTER_CHECK_NONE;
         const TypeId callee_type = callee < stream->count ? type_unqualified(type_strip_aligned(types, check_stream_type(stream, callee))) : 0;
         const TypeId function = callee_type != 0 && type_kind(types, callee_type) == BUSTER_TYPE_KIND_POINTER ?
                                 type_unqualified(type_strip_aligned(types, type_element(types, callee_type))) : callee_type;

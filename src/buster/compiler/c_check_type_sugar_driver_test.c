@@ -216,6 +216,29 @@ static const CheckDriverDefaultWarningFixture check_driver_const_assignment_fixt
         .errors = 11,
         .notes = 13,
     },
+    {
+        // A call's return value is a function's only through a direct callee (clang's getDirectCallee): a function's name
+        // through `*`, `&` and parentheses; a function pointer variable's or parameter's call is the generic error.
+        .name = "const return values of direct and indirect calls",
+        .source = "struct s { int a; const int b; };\n"
+                  "const struct s *f(void);\n"
+                  "const struct s *(*hp)(void);\n"
+                  "void use(const struct s *(*lp)(void))\n"
+                  "{\n"
+                  "    f()->a = 1;\n"
+                  "    hp()->a = 2;\n"
+                  "    lp()->a = 3;\n"
+                  "    (*hp)()->a = 4;\n"
+                  "    hp()->b = 5;\n"
+                  "    (&f)()->a = 6;\n"
+                  "    (*f)()->a = 7;\n"
+                  "    (**f)()->a = 8;\n"
+                  "    (&*f)()->a = 9;\n"
+                  "    ((f))()->a = 10;\n"
+                  "}\n",
+        .errors = 10,
+        .notes = 7,
+    },
 };
 
 static void check_test_driver_type_sugar(CheckTest* test, const char* clang, const char* executable, const char* directory)
