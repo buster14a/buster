@@ -3682,9 +3682,9 @@ What the lowering covers past scalars (#145's programs):
   `__has_c_attribute(gnu::retain)` answer 1. `test-checker-driver` compares
   each retained definition's section (name, type, flags and alignment) and
   the object's OS/ABI with clang's object's, and runs the programs, linked
-  from `-c`'s objects and by the direct path. `common` stays refused by name:
-  its symbols are `SHN_COMMON`'s, which neither the link representation nor
-  the object writer has.
+  from `-c`'s objects and by the direct path. The `common` attribute and
+  `-fcommon` make common symbols (`BUSTER_LINK_SYMBOL_COMMON`, `-c`'s objects'
+  `SHN_COMMON`): [the GNU extensions' table](c-gnu-extensions.md).
 - **Switches (#136's item 7).** A switch's value goes in a temporary, and each
   case compares it, as clang -O0's code does for a sparse switch, unless clang
   would build a jump table: then the switch dispatches through one
@@ -7888,7 +7888,12 @@ arguments against the function. The checker now gives these as clang does.
   "'X' attribute only applies to functions and methods" (after an unsupported
   convention's warning), as clang's handlers give it to a declaration without a
   declarator; a bit-field's after its width meets its type
-  ("only applies to function types"). A variadic function's `vectorcall` or
+  ("only applies to function types"). A convention's wrong count of arguments
+  is clang's error where it meets a function or a tag ("'X' attribute takes no
+  arguments", after a definition's `-Wgcc-compat` warning), and on another
+  subject its subject's warning alone (`CheckInputAttribute.convention_count`);
+  its arguments are expressions to clang's parser first, whose errors (an
+  undeclared name's) drop it wherever it is (#1447), but `pcs`', a string's. A variadic function's `vectorcall` or
   `regcall` is clang's "variadic function cannot use vectorcall calling
   convention", and so is a `swiftcall` or `swiftasynccall` one's; a declaration
   (not a definition or a typedef) of such a function without a prototype is
@@ -7977,7 +7982,10 @@ arguments against the function. The checker now gives these as clang does.
   arguments are expressions to clang's parser (an undeclared name, a missing
   operand: their errors drop it) and nothing to its handler, whatever their
   count. Then, the first rule broken being the declaration's error
-  (`check_input_interrupt_handler`): a result that isn't void, at its type's
+  (`check_input_interrupt_handler`), which drops the attribute and leaves the
+  declaration valid, as clang's handler returns (#1447: its later attributes'
+  errors, `_Alignas`' among them, follow it in their order, and each
+  declarator and later declaration is checked): a result that isn't void, at its type's
   start (`check_input_interrupt_result`: past storage classes, qualifiers and
   attributes; `_Complex`'s type's, `_Atomic(T)`'s T's); a count of parameters
   but one or two (a variadic one's named ones), at the declaration's start; a
@@ -8004,7 +8012,11 @@ arguments against the function. The checker now gives these as clang does.
   address-of, as `ActOnCallExpr` finds it; in `sizeof` and `_Generic`'s
   operands too), is clang's "interrupt service routine cannot be called
   directly" at the callee (Expr::getExprLoc's place: a parenthesized one's
-  `(`, a member's name, a subscript's base's), and in the body of a function
+  `(`, a member's name, a subscript's base's). That error is the call's alone:
+  the unit's later checks run as a valid unit's do (#1447,
+  `CheckInput.recovered_valid`), and no other diagnostic of its full
+  expression is published, as clang's invalid call leaves none
+  (`CheckInput.interrupt_ranges`). In the body of a function
   either marks, any other call whose callee no `no_caller_saved_registers`
   marks (the declaration's attribute, which a typedef's function type
   doesn't give) is -Wexcessive-regsave's warning, interrupt's message where
@@ -8014,7 +8026,10 @@ arguments against the function. The checker now gives these as clang does.
   error, which clang doesn't build, has none. Builtins are calls but those
   clang parses as keywords' forms (`va_arg`, `convertvector`, `offsetof`,
   `types_compatible_p`, `choose_expr`). The calls are the graph's in its
-  postorder, clang's order: a call's callee's and arguments' calls first. An
+  postorder, clang's order: a call's callee's and arguments' calls first;
+  then those the reader's evaluator alone reads, a `typeof`'s and a constant
+  array bound's, whose `)` no graph node has, of a declared name's callee
+  (`check_interrupt_evaluated_calls`, #1447). An
   interrupt service routine's definition is Tier 0's handler frame
   (`Tier0Function.interrupt`, `docs/tier0.md`): `CheckProgram.object_interrupt`
   holds each function's first declaration with the attribute,
@@ -8393,9 +8408,6 @@ arguments against the function. The checker now gives these as clang does.
     missing-semicolon and malformed K&R-tail repairs above preserve their
     original parse errors and notes; they do not make every parser or semantic
     failure resumable (`docs/c-parser.md`).
-  - A calling convention's wrong count is clang's error where the convention
-    meets a function, after a definition's `-Wgcc-compat` warning, and on
-    another subject its warning alone (`CheckInputAttribute.convention_count`).
   - A calling convention's redeclaration and assignment messages, the same for
     `no_caller_saved_registers`:
     - a function declared with an explicit convention other than its earlier
@@ -8412,27 +8424,26 @@ arguments against the function. The checker now gives these as clang does.
       types for 'f'";
     - a function type spelled with a macro of its convention prints without
       clang's macro name (`'MS void (void) __attribute__((ms_abi))'`), and a
-      typedef's attribute without clang's sugar
-      (`__attribute__((intel_ocl_bicc))` where its canonical type is
-      `inteloclbicc`);
-    - an assignment between pointers to functions of two conventions is
-      "incompatible operand or conversion types", where clang's is
-      "incompatible function pointer types assigning to …";
-    - a typedef's type prints without clang's `'F *' (aka '…')`.
+      type whose convention an attribute wrote prints its canonical spelling
+      (`__attribute__((inteloclbicc))`, and so in a typedef's `(aka '…')`)
+      where clang prints the attribute as written
+      (`__attribute__((intel_ocl_bicc))`, clang's AttributedType sugar).
   - x86's `interrupt` (#147):
-    - the calls in operands the reader's evaluator alone reads (a `typeof`'s,
-      a constant array bound's `sizeof`) have no graph node: a direct call of
-      an interrupt service routine there isn't clang's error, nor any call
-      there -Wexcessive-regsave's warning;
+    - of the calls in operands the reader's evaluator alone reads (a
+      `typeof`'s, a constant array bound's), those of a builtin and those
+      whose callee isn't a name (`typeof(s.f())`) are neither a direct call's
+      error nor -Wexcessive-regsave's warning;
     - a declaration's interrupt and no_caller_saved_registers are an entity's
       first declarations' with them, up to the declaration a call's name finds
       (or the definition): a block's redeclaration that clang's chain doesn't
       link is taken as linked;
-    - the checker's first error in a declaration ends it, as everywhere:
-      `_Alignas` on a handler is its error alone, where clang gives
-      interrupt's first and then `_Alignas`';
-    - a unit with a direct call's error stops before its later checks (asm
-      operands, initializers' warnings), whose diagnostics clang gives too.
+    - a direct call's error drops every other diagnostic of its full
+      expression (`CheckInput.interrupt_ranges`: its declarator's initializer
+      or its statement, but the call's other arguments and list elements),
+      where clang keeps those of the other operands that don't hold the call,
+      built before or after it (`g(1) + (f(0), 1)`'s -Wexcessive-regsave of
+      `g(1)`, `x = (f(0), 1), x = 1 / 0`'s division by zero, `(f(0), (1, 2))`'s
+      inner comma's -Wunused-value).
   - After a missing `;`'s recovery, an error the checker recovers from
     (`int x _Alignas(3) int y _Alignas(4);`'s "requested alignment is not a
     power of 2") goes on to the later declarations, as clang does ("Semantic
