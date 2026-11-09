@@ -161,6 +161,15 @@ static const char check_driver_enum_cast_leaves_source[] =
     "    e = _Generic(c, int: (c, g), default: B);\n"
     "}\n";
 
+// Enumeration definitions nested in an enumerator's value: an outer enumerator after an inner definition closes, and
+// inner ones after both (check_common_enum_coerced's search, #1923).
+static const char check_driver_enum_cast_nested_source[] =
+    "enum O { OA = sizeof(enum I { IX, IY }), OB, OC = IY };\n"
+    "enum P { PA };\n"
+    "void f(enum P p) { p = OB; p = IX; p = OA; p = IY; p = OC; (void)p; }\n"
+    "enum Q { QA = sizeof(enum R { RX }) + sizeof(enum S { SX }), QB };\n"
+    "void g(enum P p) { p = QB; p = RX; p = SX; p = QA; (void)p; }\n";
+
 static const CheckDriverDefaultWarningFixture check_driver_enum_cast_fixtures[] =
 {
     {
@@ -228,6 +237,11 @@ static const CheckDriverDefaultWarningFixture check_driver_enum_cast_fixtures[] 
         .name = "where assignments, increments, casts, calls, members and bit-fields report",
         .source = check_driver_enum_cast_leaves_source,
         .warnings = 14,
+    },
+    {
+        .name = "enumerators of definitions nested in an enumerator's value",
+        .source = check_driver_enum_cast_nested_source,
+        .warnings = 9,
     },
 };
 
