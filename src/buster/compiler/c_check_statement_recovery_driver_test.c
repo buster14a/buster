@@ -269,20 +269,43 @@ static void check_test_driver_statement_recovery(CheckTest* test, const char* cl
                 free(expected);
             }
         }
-        // -c is refused, and writes no object, by both paths.
-        for (uint32_t scalar = 0; made && scalar < 2; scalar += 1)
+        // -c is refused, and writes no object, by both paths, on the unit's own reading and on real lanes (deferred bodies on
+        // one, two and three lanes, which -c starts), whose diagnostics are clang's, whole, as -fsyntax-only's are.
+        char* reference_arguments[] = { (char*)clang, "-std=gnu17", "-fsyntax-only", "-fno-caret-diagnostics", source, NULL };
+        char* reference = NULL;
+        const int reference_status = made ? check_test_driver_spawn(reference_arguments, &reference) : 0;
+        const bool referenced = made && reference_status != 0 && reference != NULL && check_test_diagnostic_lines(reference, expected_lines, LINES);
+        check_test_expect(test, !made || referenced, "statement recovery: clang's lines for -c's comparison are read");
+        static const char* const lane_counts[] = { NULL, "1", "2", "3" };
+        for (uint32_t run = 0; referenced && run < 2 * BUSTER_ARRAY_LENGTH(lane_counts); run += 1)
         {
+            const uint32_t scalar = run & 1;
+            const char* lane_count = lane_counts[run / 2];
             unlink(object);
-            char* arguments[] = { (char*)executable, "-std=gnu17", "-c", source, "-o", object, scalar != 0 ? "--scalar" : NULL, NULL };
+            char* arguments[12] = { (char*)executable, "-std=gnu17", "-fno-caret-diagnostics", "-c", source, "-o", object };
+            uint32_t at = 7;
+            if (scalar != 0)
+            {
+                arguments[at++] = "--scalar";
+            }
+            if (lane_count != NULL)
+            {
+                arguments[at++] = "--deferred-bodies";
+                arguments[at++] = "--lanes";
+                arguments[at++] = (char*)lane_count;
+            }
+            arguments[at] = NULL;
             char* text = NULL;
             const int status = check_test_driver_spawn(arguments, &text);
             const bool written = access(object, F_OK) == 0;
-            char description[256];
-            snprintf(description, sizeof(description), "statement recovery %u, -c by the %s path: refused (status %d), no object", f, scalar != 0 ? "scalar" : "vector",
-                     status);
-            check_test_expect(test, status != 0 && !written, description);
+            const bool same = text != NULL && check_test_diagnostic_lines(text, actual_lines, LINES) && strcmp(expected_lines, actual_lines) == 0;
+            char description[8192];
+            snprintf(description, sizeof(description), "statement recovery %u, -c by the %s path on %s lanes: refused (status %d), no object, clang's lines\n%s(clang\n%s)",
+                     f, scalar != 0 ? "scalar" : "vector", lane_count != NULL ? lane_count : "no", status, same ? "" : actual_lines, same ? "" : expected_lines);
+            check_test_expect(test, status != 0 && !written && same, description);
             free(text);
         }
+        free(reference);
         check_test_expect(test, made, "statement recovery: fixture written");
         unlink(source);
     }
