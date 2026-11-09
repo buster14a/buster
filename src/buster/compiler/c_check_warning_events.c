@@ -118,6 +118,9 @@ enum
     // statement increment or decrement (#1447, clang's CheckForLoopConditionalStatement and CheckForRedundantIteration):
     // -Wfor-loop-analysis, off by default, under -Wloop-analysis and -Wmost and so -Wall.
     CHECK_WARNING_ID_FOR_LOOP_ANALYSIS = 110,
+    // A target_clones attribute that mixes a string of several versions with other strings (#1838, clang's
+    // SemaX86::checkTargetClonesAttr): -Wtarget-clones-mixed-specifiers, on by default and in no group.
+    CHECK_WARNING_ID_TARGET_CLONES_MIXED_SPECIFIERS = 111,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -362,8 +365,21 @@ typedef enum CheckWarningEventKind
     // payload.first_type and second_type its operands' types as clang's getEnumCoercedType gives them, payload.name and
     // data their typedef spellings (0 for none). check_common_enum_arithmetic reports it as the graph's operators.
     CHECK_WARNING_EVENT_ENUM_MIX,
+    // target_clones' versions (#1838, c_check_target_versions.c), each at its string literal's quote plus its offset in
+    // the trimmed string (payload.data, BUSTER_CHECK_TARGET_CLONES_FIELD's fields: the version's bytes in the string's
+    // decoded text, its offset, and whether it is a CPU's): -Wignored-attributes' unsupported one, -Wfunction-multiversion's
+    // duplicate one, and -Wtarget-clones-mixed-specifiers' at the first string.
+    CHECK_WARNING_EVENT_TARGET_CLONES_UNSUPPORTED,
+    CHECK_WARNING_EVENT_TARGET_CLONES_DUPLICATE,
+    CHECK_WARNING_EVENT_TARGET_CLONES_MIXED,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
+
+// CHECK_WARNING_EVENT_TARGET_CLONES_*'s data (#1838): a version's bytes [start, start + length) in its string's decoded
+// text (bits 0 to 9 and 10 to 19) and its place, its offset from the trimmed text's start (bits 20 to 29), each below
+// BUSTER_CHECK_TARGET_CLONES_FIELD, and whether an unsupported one is a CPU's.
+#define BUSTER_CHECK_TARGET_CLONES_FIELD 1024u
+#define BUSTER_CHECK_TARGET_CLONES_CPU (1u << 30)
 
 // CHECK_WARNING_EVENT_TRANSPARENT_UNION's case, in its data's low byte (its bits above it), and its note's.
 #define BUSTER_CHECK_TRANSPARENT_INCOMPLETE 1u
