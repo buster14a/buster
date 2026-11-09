@@ -879,7 +879,10 @@ static const char check_test_tier1_wide_source[] =
 // way round; and ones the convention ignores, passed and returned nowhere: an empty struct, and one of unnamed
 // bit-fields. Each crosses between this unit (Tier 1's) and the other (clang -O2's) both ways, as arguments and results:
 // the other unit's b_empty, by --tier1, once passed its empty struct's address in rdi, x's register (a call without
-// records, ir_typed_aggregate_call).
+// records, ir_typed_aggregate_call). And (#1879) a struct of a flexible array member alone, of no size and MEMORY, which
+// clang passes byval in an 8-byte slot: after five longs in rdi to r8 and a double in xmm0, then a long in r9 and one
+// on the stack after its slot, where a call without records once put its address in r9 and the rest one place on;
+// first too, before a long in rdi.
 static const char check_test_tier1_shapes_header[] =
     "#include <stdio.h>\n"
     "typedef struct { long x; long : 64; } Low;\n"
@@ -890,6 +893,7 @@ static const char check_test_tier1_shapes_header[] =
     "typedef struct { long a, b; } LL;\n"
     "typedef struct {} Empty;\n"
     "typedef struct { int : 32; } Bits;\n"
+    "typedef struct { long *p[]; } Flex;\n"
     "long b_low(Low s);\n"
     "long b_high(High s);\n"
     "long b_high_mixed(HighMixed s);\n"
@@ -919,7 +923,12 @@ static const char check_test_tier1_shapes_header[] =
     "long a_empty(Empty e, long x);\n"
     "long a_bits(long a, Bits b, long c);\n"
     "Empty a_make_empty(long x);\n"
-    "long a_empty_chain(long x);\n";
+    "long a_empty_chain(long x);\n"
+    "long b_flex(long a, long b, long c, long d, long e, double f, Flex s, long t, long u);\n"
+    "long b_flex_first(Flex s, long x);\n"
+    "long a_flex(long a, long b, long c, long d, long e, double f, Flex s, long t, long u);\n"
+    "long a_flex_first(Flex s, long x);\n"
+    "long a_flex_chain(long k);\n";
 
 static const char check_test_tier1_shapes_other_source[] =
     "#include \"tier1-shapes.h\"\n"
@@ -937,7 +946,9 @@ static const char check_test_tier1_shapes_other_source[] =
     "long b_back(int k) { return a_make_low(k).x * 3 + a_make_high(k + 1).y * 5 + a_make_high_mixed(k + 2).i + (long)(a_make_high_mixed(k).f * 8); }\n"
     "long b_empty(Empty e, long x) { return a_empty(e, x) * 2 + x; }\n"
     "long b_bits(long a, Bits b, long c) { return a_bits(a, b, c) + 1; }\n"
-    "Empty b_make_empty(long x) { Empty e = { }; (void)x; return e; }\n";
+    "Empty b_make_empty(long x) { Empty e = { }; (void)x; return e; }\n"
+    "long b_flex(long a, long b, long c, long d, long e, double f, Flex s, long t, long u) { return a_flex(a, b, c, d, e, f, s, t, u) * 3 + a + t * 5 + u * 7; }\n"
+    "long b_flex_first(Flex s, long x) { return a_flex_first(s, x) * 2 + x; }\n";
 
 static const char check_test_tier1_shapes_source[] =
     "#include \"tier1-shapes.h\"\n"
@@ -956,6 +967,9 @@ static const char check_test_tier1_shapes_source[] =
     "long a_bits(long a, Bits b, long c) { Bits copy = b; (void)copy; return a * 5 + c; }\n"
     "Empty a_make_empty(long x) { Empty e; (void)x; return e; }\n"
     "long a_empty_chain(long x) { Empty e = b_make_empty(x); Bits b = { }; return b_empty(e, x) + b_bits(x, b, x + 1) + a_empty(a_make_empty(x), x); }\n"
+    "long a_flex(long a, long b, long c, long d, long e, double f, Flex s, long t, long u) { (void)s; return a + b * 2 + c * 3 + d * 4 + e * 5 + (long)(f * 6) + t * 7 + u * 8; }\n"
+    "long a_flex_first(Flex s, long x) { (void)s; return x * 9 + 4; }\n"
+    "long a_flex_chain(long k) { Flex s; return b_flex(k, k + 1, k + 2, k + 3, k + 4, k * 0.5, s, k + 5, k + 6) + b_flex_first(s, k); }\n"
     "int main(void)\n"
     "{\n"
     "    for (int k = 1; k < 4; k += 1)\n"
@@ -972,6 +986,7 @@ static const char check_test_tier1_shapes_source[] =
     "        printf(\"%ld %ld %ld\\n\", a_make_low(k).x, a_make_high(k).y, (long)a_make_high_mixed(k).i);\n"
     "        Empty e = { };\n"
     "        printf(\"%ld %ld\\n\", b_empty(e, k), a_empty_chain(k));\n"
+    "        printf(\"%ld\\n\", a_flex_chain(k));\n"
     "    }\n"
     "    return 0;\n"
     "}\n";
