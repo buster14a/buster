@@ -849,6 +849,19 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
           "#endif\n"
           "return (int)h;}\n"
         },
+        // Scalars' roundings and fused multiply-adds without AVX-512F (#1834): the C library's ceilf ... roundf and fmaf and
+        // fma without SSE4.1 and FMA, SSE4.1's ROUNDSS and ROUNDSD (round's of the value plus the largest value below 0.5 of
+        // its sign) and FMA's VFMADD213SS and SD where the target has them; halves, values near them and past 2^23 and 2^52.
+        { "baseline-scalar-rounding",
+          "#define R(v) do{__typeof__(v) r_[]={__builtin_elementwise_ceil(v),__builtin_elementwise_floor(v),__builtin_elementwise_trunc(v),"
+          "__builtin_elementwise_rint(v),__builtin_elementwise_nearbyint(v),__builtin_elementwise_roundeven(v),__builtin_elementwise_round(v)};FOLD(r_);}while(0)\n"
+          "int tested(int n){unsigned h=2166136261u;\n"
+          "static const float fs[]={0.5f,-0.5f,1.5f,2.5f,-2.5f,0.49999997f,-0.49999997f,8388607.5f,-0.0f,1e30f,-3.75f,0.0f};\n"
+          "static const double ds[]={0.5,-0.5,1.5,2.5,-2.5,0.49999999999999994,-0.49999999999999994,4503599627370495.5,-0.0,1e300,-3.75,0.0};\n"
+          "for(int i=0;i<12;i++){float x=fs[i]*(float)(n+1);double y=ds[i]*(double)(n+1);R(x);R(y);"
+          "float f=__builtin_elementwise_fma(x,1.0f/3.0f,(float)n);double g=__builtin_elementwise_fma(y,1.0/3.0,-y);FOLD(f);FOLD(g);}\n"
+          "return (int)h;}\n"
+        },
         // AVX's and AVX2's (x86-64-v3's): 256-bit unpacks, broadcasts, permutes, variable shifts, lanes' extractions and
         // insertions, extensions, gathers, FMA's (of no NaN) and F16C's conversions, and shuffles of dwords and qwords.
         { "baseline-avx2",
@@ -940,7 +953,6 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
                 { 1, "typedef int V __attribute__((vector_size(16)));V tested(V a){return __builtin_elementwise_abs(a);}", "vector absolute values without SSSE3" },
                 { 1, "typedef char N __attribute__((vector_size(8)));typedef short V __attribute__((vector_size(16)));V tested(N a){return __builtin_convertvector(a,V);}",
                   "vector extensions of integers without SSE4.1" },
-                { 1, "float tested(float a,float b,float c){return __builtin_elementwise_fma(a,b,c);}", "fused multiply-adds of scalars without FMA or AVX-512F" },
                 { 7, "typedef long long V __attribute__((vector_size(16)));V tested(V a,V b){return __builtin_elementwise_max(a,b);}",
                   "vector minimum and maximum of 64-bit elements without AVX-512" },
                 { 7, "typedef int V __attribute__((vector_size(16)));typedef short N __attribute__((vector_size(8)));N tested(V a){return __builtin_convertvector(a,N);}",

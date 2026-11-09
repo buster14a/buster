@@ -627,7 +627,11 @@ at the target's forms, by both of the checker's paths:
   a lane's insertion and extraction, and with AVX2 broadcasts, each lane's unpacks and `vpermd` with `vpblendd`.
 - What has no form at the target is refused by name: shuffles of bytes and words without SSSE3, their 32-byte ones
   without AVX-512, minimum and maximum of elements SSE2 hasn't (and of qwords), absolute values without SSSE3, the
-  integers' extensions without SSE4.1 and truncations, and scalar fused multiply-adds without FMA. The sign masks and
+  integers' extensions without SSE4.1 and truncations, and the scalars' other elementwise builtins without AVX-512F
+  (copysign, the minima and maxima, canonicalize). A scalar's fused multiply-add without FMA is the C library's `fmaf`
+  or `fma`, and its roundings (ceil, floor, trunc, rint, nearbyint, roundeven and round) without SSE4.1 its `ceilf` ...
+  `round`, as clang's code calls them; with SSE4.1, `roundss` and `roundsd` (round's of the value plus the largest
+  value below 0.5 of its sign). The sign masks and
   the conversions to integers in a general register (`movmskps`, `cvt(t)ss2si` and the others), vector results in
   several registers and operators on vectors wider than the registers are #1193's.
 - `test-checker --program-vectors` runs `c_check_program_vector_test.c`'s baseline programs (the SSE2 survey's

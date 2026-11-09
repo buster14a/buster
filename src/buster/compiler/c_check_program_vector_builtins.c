@@ -1453,7 +1453,31 @@ static const char* check_vector_floating_scalar_row(const X86Target* target, CBu
     {
         row->operand_classes[j] = class;
     }
-    if ((target->features & BUSTER_X86_FEATURE(AVX512F)) == 0)
+    if ((target->features & BUSTER_X86_FEATURE(AVX512F)) == 0 && builtin <= CBUILTIN_ELEMENTWISE_ROUND && (target->features & BUSTER_X86_FEATURE(SSE41)) != 0)
+    {
+        // Without AVX-512F, SSE4.1's ROUNDSS or ROUNDSD (AVX's VEX forms) of the value, as clang's code rounds it (#1834);
+        // llvm.round's of the value plus the largest value below 0.5 of its sign (ANDPS of the sign, ORPS, ADDSS or ADDSD),
+        // truncated. Without SSE4.1 the lowering calls the C library's function instead (check_lower_vector_floating).
+        const bool avx = (target->features & BUSTER_X86_FEATURE(AVX)) != 0;
+        uint32_t r = 0;
+        uint8_t source = f0;
+        if (builtin == CBUILTIN_ELEMENTWISE_ROUND)
+        {
+            check_vector_constant(row, constants, check_vector_floating_half(d), d ? 8 : 4, class, 0);
+            check_vector_constant(row, constants, sign, d ? 8 : 4, class, 0);
+            const uint32_t add = avx ? (d ? X86_FORM_VADDSD_X_X_XM64 : X86_FORM_VADDSS_X_X_XM32) : (d ? X86_FORM_ADDSD_X_XM64 : X86_FORM_ADDSS_X_XM32);
+            row->records[r++] = check_vector_lower_record(avx ? X86_FORM_VANDPS_X_X_XM128 : X86_FORM_ANDPS_X_XM128, f2, avx ? f2 : 0, f0);
+            row->records[r++] = check_vector_lower_record(avx ? X86_FORM_VORPS_X_X_XM128 : X86_FORM_ORPS_X_XM128, f2, avx ? f2 : 0, f1);
+            row->records[r++] = check_vector_lower_record(add, f2, avx ? f2 : 0, f0);
+            source = f2;
+        }
+        const uint32_t rounding = avx ? (d ? X86_FORM_VROUNDSD_X_X_XM64_IMM8 : X86_FORM_VROUNDSS_X_X_XM32_IMM8) :
+                                        (d ? X86_FORM_ROUNDSD_X_XM64_IMM8 : X86_FORM_ROUNDSS_X_XM32_IMM8);
+        row->records[r] = check_vector_lower_record(rounding, fr, avx ? source : 0, source);
+        row->records[r++].immediate = check_vector_rounding(builtin);
+        row->record_count = (uint8_t)r;
+    }
+    else if ((target->features & BUSTER_X86_FEATURE(AVX512F)) == 0)
     {
         reason = "elementwise builtins of scalars without AVX-512F";
     }
