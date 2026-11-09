@@ -1183,6 +1183,12 @@ rbp for the rare deeper expressions. The floating one is xmm0 to xmm15.
   the frame's save area and restores them; depths in callee-saved registers survive it by themselves.
 - **Deeper expressions:** past 15 integer or 16 floating values live at once, the values go to frame slots ("Deep
   values", below).
+- **Asm bodies (#1839):** a call row whose `Tier0Function.call_asm` names an asm body (`Tier0AsmBody`) has the body's
+  records in the call's place, with no call: an asm statement placed in its caller ([inline assembly](c-inline-assembly.md),
+  "Asm bodies"). It is a call in every other respect, its clobbers with the registers the body touches: below it, every
+  depth in a register is saved where the body touches a callee-saved one, no home is a register it touches, and the
+  prologue saves the callee-saved ones it touches. A record whose base is `BUSTER_TIER0_ASM_BLOCK` addresses the
+  statement's operand block, a frame object, which Tier 0 replaces with the block's home.
 
 **Homes.**
 
