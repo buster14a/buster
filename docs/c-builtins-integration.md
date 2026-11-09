@@ -2392,7 +2392,8 @@ calls `__cpu_indicator_init`, which is also the model's constructor;
 (parenthesized at most, never cast, as `allow_runtime_check`'s)
 names in its word (`__cpu_model.features[0]` at 12, or `__cpu_features2`'s),
 and is false for a feature clang doesn't know, where clang also warns
-(pending here); `cpu_is(s)` compares the model's vendor, type or subtype with
+("invalid cpu feature string for builtin", of no option, at the builtin's name:
+`check_input_cpu_supports_literal`, #1843); `cpu_is(s)` compares the model's vendor, type or subtype with
 the value of the name s, which clang must know (an error otherwise). The names
 and their words, bits, fields and values are `c_builtin_cpu.inc`, derived
 LLVM data that `tools/generate_x86_cpu_model.c` generates: the strings and ABI

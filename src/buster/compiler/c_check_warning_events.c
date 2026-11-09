@@ -118,6 +118,9 @@ enum
     // statement increment or decrement (#1447, clang's CheckForLoopConditionalStatement and CheckForRedundantIteration):
     // -Wfor-loop-analysis, off by default, under -Wloop-analysis and -Wmost and so -Wall.
     CHECK_WARNING_ID_FOR_LOOP_ANALYSIS = 110,
+    // __builtin_cpu_supports of a feature clang doesn't know (#1843, clang's SemaX86 validateCpuSupports): its warning of no
+    // option, whose call is false.
+    CHECK_WARNING_ID_INVALID_CPU_SUPPORTS = 111,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -362,6 +365,9 @@ typedef enum CheckWarningEventKind
     // payload.first_type and second_type its operands' types as clang's getEnumCoercedType gives them, payload.name and
     // data their typedef spellings (0 for none). check_common_enum_arithmetic reports it as the graph's operators.
     CHECK_WARNING_EVENT_ENUM_MIX,
+    // __builtin_cpu_supports's literal of a feature clang doesn't know (#1843, check_input_cpu_supports_literal), at the
+    // builtin's name: the description's message.
+    CHECK_WARNING_EVENT_INVALID_CPU_SUPPORTS,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
 

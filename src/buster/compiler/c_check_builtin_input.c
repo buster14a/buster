@@ -182,6 +182,29 @@ static void check_input_cfstring_literal(CheckInputReader* reader, const CheckBu
     }
 }
 
+// clang's warning of __builtin_cpu_supports's literal of a feature it doesn't know (#1843, SemaX86's validateCpuSupports:
+// "invalid cpu feature string for builtin", of no option), at the builtin's name `keyword`, once the call `closing` is
+// read. A cast literal is the call's error instead. Rare: scalar.
+static void check_input_cpu_supports_literal(CheckInputReader* reader, const CheckBuiltinCall* evidence, uint32_t keyword, uint32_t closing)
+{
+    const uint64_t test = check_builtin_cpu_lookup(check_builtin_cpu_features, BUSTER_ARRAY_LENGTH(check_builtin_cpu_features), evidence->nan_payload,
+                                                   evidence->nan_payload_length);
+    if (test == 0)
+    {
+        const CheckWarningEvent event =
+        {
+            .id = CHECK_WARNING_ID_INVALID_CPU_SUPPORTS,
+            .kind = CHECK_WARNING_EVENT_INVALID_CPU_SUPPORTS,
+            .token = keyword,
+            .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+            .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+            .completion = closing,
+            .payload = { .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+        };
+        check_input_warning_once(reader, &event);
+    }
+}
+
 // Whether call `close` (its `)`) calls a builtin, as clang's getBuiltinCallee finds one through the callee's
 // parentheses (#148): a catalog builtin or a header builtin's leaf, which the reader claims at the call, or the unit's
 // declaration, with external linkage, of a library builtin's name (pp_library_builtin, `abs` or `strlen` declared).
@@ -264,6 +287,10 @@ static __attribute__((noinline)) void check_input_misc_evidence(CheckInputReader
     if (builtin == CBUILTIN_CFSTRING_MAKE_CONSTANT_STRING && count == 1 && evidence->nan_payload_known && !evidence->nan_payload_utf8)
     {
         check_input_cfstring_literal(reader, evidence, token);
+    }
+    if (builtin == CBUILTIN_CPU_SUPPORTS && count == 1 && evidence->nan_payload_known && !evidence->nan_payload_cast && reader->first_child[token] < token)
+    {
+        check_input_cpu_supports_literal(reader, evidence, reader->first_child[token], token);
     }
     if (builtin == CBUILTIN_EXPECT_WITH_PROBABILITY && count == 3 && graph->argument_count >= 3 &&
         graph->argument_offsets[node] == graph->argument_count - 3)
