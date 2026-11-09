@@ -879,6 +879,25 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
         "register long i __asm__(\"r10\")=n+100;__asm__(\"\" : \"+r\"(i));"
         "return (int)o1+(int)(o2>>33)*3+(int)o3*5+o4*7+(int)e+(int)f*11+(int)g*13+(int)o5*17+(int)(o6*4)*19+(int)i*23;}",
         "asm-register-variables", clang);
+    // Register variables in high byte registers (#1846), loaded and stored by their names and printed by them (by the
+    // register's other names under a modifier): a `+` one, an input by its modifiers, an output, a matching input in
+    // its output's, and a short in "ah", which clang's code takes as ax.
+    check_test_program_source(test,
+        "static int bumped(int n){register unsigned char c __asm__(\"ah\")=(unsigned char)n;__asm__(\"incb %0\" : \"+r\"(c));return c;}"
+        "static int named(int n){register unsigned char c __asm__(\"bh\")=(unsigned char)n;int r;__asm__(\"movzbl %1, %0\\n\\taddl $3, %0 # %h1 %b1 %k1\" : \"=r\"(r) : \"q\"(c));return r;}"
+        "static int out_high(int n){register signed char c __asm__(\"dh\");__asm__(\"movb %1, %0\\n\\tnegb %0\" : \"=r\"(c) : \"r\"((signed char)n));return c;}"
+        "static int matched_high(int n){register unsigned char c __asm__(\"ch\");__asm__(\"shlb $1, %0\" : \"=r\"(c) : \"0\"((unsigned char)(n+9)));return c;}"
+        "static int wider(int n){register short s __asm__(\"ah\")=(short)n;__asm__(\"addw $300, %0\" : \"+r\"(s));return s;}"
+        "int tested(int n){return bumped(n*37)+named(n*11)*3+out_high(n*5)*5+matched_high(n)*7+wider(n*1000)*11;}",
+        "asm-register-variables-high", clang);
+    // And in XMM16 to XMM31 (#1846), by EVEX's moves, in functions whose target attributes have AVX-512F: compiled and
+    // linked everywhere, run where the host has it.
+    check_test_program_source_native(test,
+        "static __attribute__((target(\"avx512f\"))) double doubled(double x){register double d __asm__(\"xmm20\")=x;__asm__(\"vaddsd %0, %0, %0\" : \"+v\"(d));return d;}"
+        "static __attribute__((target(\"avx512f\"))) float moved(float x){register float f __asm__(\"xmm31\");__asm__(\"vmovss %1, %1, %0\" : \"=v\"(f) : \"v\"(x));return f;}"
+        "static __attribute__((target(\"avx512f\"))) double summed(double x, double y){register double a __asm__(\"xmm16\")=x;register double b __asm__(\"xmm17\")=y;__asm__(\"vaddsd %1, %0, %0\" : \"+v\"(a) : \"v\"(b));return a;}"
+        "int tested(int n){return (int)(doubled(n*0.75)*8)+(int)(moved(n*1.5f)*4)*3+(int)(summed(n*0.25,n-2.5)*16)*5;}",
+        "asm-register-variables-xmm16", clang, (x86_target_native().features & BUSTER_X86_FEATURE(AVX512F)) != 0);
     // The forms of musl's long double functions (src/math/x86_64), in functions of this test's own: fabs, fsqrt and
     // frndint on a `+t` operand; fprem's and fprem1's loops with y in st(1) and the status word through fnstsw %ax ("=a"),
     // whose st(1) the helper pops after it stores x; a remainder's quotient bits from that word (C0, C3 and C1, its bits
@@ -1071,14 +1090,15 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
                                        "asm-mmx-vector", true, false, 0, 1, "inline assembly operands of this type in their constraint's registers");
     check_test_program_boundary_reason(test, "int tested(int n){__asm__ volatile(\"rep ret\" ::: \"memory\");return n;}",
                                       "asm-returning-template", true, false, 0, 0, "inline assembly templates that return from their helper");
-    // Explicit register variables the lowering doesn't place: in rsp (the helper's own), a high byte and an XMM register
-    // past XMM15; an input of a memory constraint, which clang's code refuses too; and an integer in an XMM register.
+    // Explicit register variables the lowering doesn't place: in rsp (the helper's own), in an XMM register past XMM15
+    // without AVX-512F and in a high byte in a template that takes directives; an input of a memory constraint, which
+    // clang's code refuses too; and an integer in an XMM register.
     check_test_program_boundary_reason(test, "int tested(int n){register long r __asm__(\"rsp\");__asm__ volatile(\"\" : : \"r\"(r));return n;}",
                                        "asm-register-variable-rsp", true, false, 0, 0, "explicit register variables of this register as inline assembly operands");
-    check_test_program_boundary_reason(test, "int tested(int n){register char r __asm__(\"ah\")=(char)n;__asm__ volatile(\"\" : : \"q\"(r));return n;}",
-                                       "asm-register-variable-high", true, false, 0, 1, "explicit register variables of this register as inline assembly operands");
+    check_test_program_boundary_reason(test, "int tested(int n){register char r __asm__(\"ah\")=(char)n;__asm__ volatile(\".p2align 4\\n\\tincb %0\" : \"+q\"(r));return r;}",
+                                       "asm-register-variable-high", true, false, 0, 1, "explicit register variables in high byte registers in templates that take directives");
     check_test_program_boundary_reason(test, "int tested(int n){register double r __asm__(\"xmm16\")=n;__asm__ volatile(\"\" : : \"v\"(r));return n;}",
-                                       "asm-register-variable-xmm16", true, false, 0, 1, "explicit register variables of this register as inline assembly operands");
+                                       "asm-register-variable-xmm16", true, false, 0, 1, "explicit register variables in XMM16 to XMM31 without AVX-512F");
     check_test_program_boundary_reason(test, "int tested(int n){register long r __asm__(\"r10\")=n;__asm__ volatile(\"\" : : \"m\"(r));return n;}",
                                        "asm-register-variable-memory", true, false, 0, 1, "explicit register variables as inline assembly memory inputs");
     check_test_program_boundary_reason(test, "int tested(int n){register long r __asm__(\"xmm3\")=n;__asm__ volatile(\"\" : : \"x\"(r));return n;}",

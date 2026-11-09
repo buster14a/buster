@@ -275,7 +275,25 @@ clang's code gives it (CodeGen's `AddVariableConstraints`;
   output of a memory constraint (`"=m"(r10)`) is r10 too, and a matching input
   is in its variable's register rather than its output's;
 - a general register by any of its names (`"ebx"` is rbx; an `int`'s operand
-  prints `%r10d`), and xmm0 to xmm15 for a `float` or a `double`.
+  prints `%r10d`), and xmm0 to xmm15 for a `float` or a `double`;
+- xmm16 to xmm31 too (#1846), where the body's instruction set has AVX-512F
+  (its function's target attributes among them): the helper moves them by
+  EVEX's `vmovd` and `vmovq`. Without it clang can't place one ("could not
+  allocate output register"), and the lowering refuses it by name;
+- a high byte register (#1846), `register unsigned char c __asm__("ah")`: a
+  byte's operand is the high byte, which the helper loads and stores by its
+  name (through a register of the first eight, as a REX prefix can't name it)
+  and the template prints by it, `%ah` (under a modifier, the register's other
+  names: `%b0` is `%al`, `%k0` `%eax`, as clang prints them); a wider value's is
+  its register's low bytes, as clang's code takes a `short` in "ah" as ax. The
+  variable takes its whole register: an operand fixed to rax beside an "ah"
+  variable is refused, where clang's code loads both and the byte's load
+  overwrites the other's bits 8 to 15.
+
+rsp stays refused: clang's code moves the variable's value into rsp before the
+template (an uninitialized local's garbage), where a helper's rsp is its own;
+the Linux kernel's idiom, a global register variable in rsp, is a declaration
+the checker doesn't take yet.
 
 The variable is an ordinary local otherwise: the operand block takes its value,
 or an output's address, as any operand's, and the helper loads it into the
@@ -641,10 +659,12 @@ Each refusal names its feature, as the driver prints it ("unsupported: ..."):
   but a vector in a template of no instructions that doesn't refer to it;
 - bit-fields;
 - explicit register variables in registers the helper doesn't place one in
-  (rsp, which is the helper's own, the high bytes, APX's r16 to r31, XMM16 to
-  XMM31 and the other classes' registers), as memory inputs (`"m"(r10)`, which
-  clang's code refuses too), and of other types than a general register's or
-  an XMM register's (an integer in an XMM register's variable);
+  (rsp, which is the helper's own, APX's r16 to r31 and the other classes'
+  registers: the x87's, MMX's, the opmasks', YMM's and ZMM's), in XMM16 to
+  XMM31 without AVX-512F, in a high byte in a template that takes directives,
+  as memory inputs (`"m"(r10)`, which clang's code refuses too), and of other
+  types than a general register's or an XMM register's (an integer in an XMM
+  register's variable);
 - an operand fixed to another's register or to a clobber;
 - APX's registers r16 to r31;
 - statements of more than 64 operands;
@@ -782,6 +802,10 @@ has the commands, the logs and the default path's numbers against main.
     (`sqrtsd`, `cvtsd2si` into 64- and 32-bit registers, `fabs`'s mask),
     dr_flac's `rep; bsr` in GCC's dialect alternatives, and FMA3's
     `vfmadd132sd` and `vfmadd132ss`, run where the host has FMA;
+  - explicit register variables in high byte registers (#1846): a `+` one, an
+    input by its modifiers, an output, a matching input, and a `short` in
+    "ah" as ax; and in XMM16 to XMM31, in functions whose target attributes
+    have AVX-512F, run where the host has it;
   - explicit register variables: wrappers of the test's own in the shape of
     musl's syscall wrappers (r10, r8 and r9 beside the fixed registers) on
     harmless system calls, and each shape of a
@@ -872,5 +896,7 @@ What the lowering still refuses of what GCC and clang take:
 - the matcher's gaps: `lock xchg`, `ffreep`, and the
   instructions outside its families (an x87 memory operand without a width,
   `fstp (%rax)`, is refused as clang refuses it);
-- two operands at one x87 depth, and explicit register variables in the
-  registers the helper doesn't place them in.
+- two operands at one x87 depth;
+- explicit register variables in rsp (clang's code moves the variable's value
+  into it, a local's garbage where it has none), and in the other classes'
+  registers (the x87's, MMX's, the opmasks', YMM's and ZMM's).
