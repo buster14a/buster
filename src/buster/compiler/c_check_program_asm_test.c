@@ -746,7 +746,7 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
     check_test_program_asm_goto(test, clang);
     // The forms of musl's x86_64 atomics (arch/x86_64/atomic_arch.h), in functions of this test's own: lock prefixes as
     // statements of their own before cmpxchg, xadd, and, or, xor, inc and dec on memory outputs (an "=m" one beside
-    // an "m" input of its object, and "+m"), xchg, a store fenced by a locked or of the stack, pause, the bit scans
+    // an "m" input of its object, and "+m"), xchg and `lock xchg` (#1846), a store fenced by a locked or of the stack, pause, the bit scans
     // (of operands never zero, whose result the scans leave undefined), and a load of the thread pointer through %fs.
     // hlt is compiled, assembled and linked, never run.
     check_test_program_source(test,
@@ -754,6 +754,7 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
         "static void* swap_pointer_if(void* volatile* slot, void* expected, void* wanted){__asm__(\"lock ; cmpxchg %3, %1\" : \"=a\"(expected), \"=m\"(*slot) : \"a\"(expected), \"r\"(wanted) : \"memory\");return expected;}"
         "static long swap_long_if(volatile long* slot, long expected, long wanted){__asm__ __volatile__(\"lock ; cmpxchgq %2, %1\" : \"+a\"(expected), \"+m\"(*slot) : \"r\"(wanted) : \"memory\", \"cc\");return expected;}"
         "static int trade(volatile int* slot, int value){int old;__asm__ __volatile__(\"xchg %0, %1\" : \"=r\"(old), \"=m\"(*slot) : \"0\"(value) : \"memory\");return old;}"
+        "static long locked_trade(volatile long* slot, long value){__asm__ __volatile__(\"lock xchg %0, %1\" : \"+r\"(value), \"+m\"(*slot) : : \"memory\");return value;}"
         "static int add_returning_old(volatile int* slot, int amount){int old;__asm__ __volatile__(\"lock ; xadd %0, %1\" : \"=r\"(old), \"=m\"(*slot) : \"0\"(amount) : \"memory\");return old;}"
         "static long add_long_returning_old(volatile long* slot, long amount){__asm__ __volatile__(\"lock ; xadd %0, %1\" : \"+r\"(amount), \"+m\"(*slot) : : \"memory\", \"cc\");return amount;}"
         "static void keep_bits(volatile unsigned* slot, unsigned bits){__asm__ __volatile__(\"lock ; and %1, %0\" : \"=m\"(*slot) : \"r\"(bits) : \"memory\");}"
@@ -773,7 +774,7 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
         "int tested(int n){volatile int word=n*7;int r=swap_if(&word,n*7,n+3);r=r*5+swap_if(&word,-1,9)+word*3;"
         "void* volatile cell=&r;void* before=swap_pointer_if(&cell,&r,(void*)&word);r+=(before==(void*)&r)*2+(cell==(void*)&word)*4;"
         "volatile long big=(long)n<<36;long previous=swap_long_if(&big,(long)n<<36,-n);r+=(int)(previous>>36)+(int)big;"
-        "r=r*3+trade(&word,n-1)+word;r=r*7+add_returning_old(&word,n*5)+word;volatile long total=1000;r+=(int)add_long_returning_old(&total,n)+(int)total;"
+        "r=r*3+trade(&word,n-1)+word;volatile long cell64=(long)n<<33;r+=(int)(locked_trade(&cell64,n+2)>>33)+(int)cell64;r=r*7+add_returning_old(&word,n*5)+word;volatile long total=1000;r+=(int)add_long_returning_old(&total,n)+(int)total;"
         "volatile unsigned mask=0xf0f0u+n;keep_bits(&mask,0x3c3cu);set_bits(&mask,(unsigned)n<<8);"
         "volatile unsigned long flags=(unsigned long)n*0x100000001ul;keep_wide_bits(&flags,0xffff0000fffful);set_wide_bits(&flags,(unsigned long)n<<44);flip_wide_bits(&flags,0x11);"
         "volatile int tally=n;count_up(&tally);count_up(&tally);count_down(&tally);volatile long countdown=n*4;count_down_long(&countdown);"
@@ -994,14 +995,15 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
     check_test_program_boundary_reason(test, "int tested(int n){long double x=n;__asm__ volatile(\"\" : : \"t\"(x) : \"st(1)\");return n;}",
                                        "asm-x87-clobber", true, false, 0, 1, "inline assembly's x87 operands and clobbers off the stack's top");
     // x87 registers named in templates (#147): %0 of t as %st, of u as %st(1), the stack's registers by name, an
-    // exchange, AT&T's reversed subtraction with a pop, and a compare into the flags.
+    // exchange, AT&T's reversed subtraction with a pop, a compare into the flags, and ffreep's pop (#1223).
     check_test_program_source(test,
         "static long double swap_sub(long double a, long double b){__asm__(\"fxch %1\\n\\tfsub %1, %0\" : \"+t\"(a), \"+u\"(b));return a*3+b;}"
         "static long double add_top(long double a, long double b){__asm__(\"fadd %%st(1), %%st\" : \"+t\"(a) : \"u\"(b));return a;}"
         "static long double square(long double a){__asm__(\"fld %%st(0)\\n\\tfmul %%st(1), %%st\\n\\tfstp %%st(1)\" : \"+t\"(a));return a;}"
         "static long double reversed(long double a, long double b){long double r;__asm__(\"fsubp %%st, %%st(1)\" : \"=t\"(r) : \"0\"(a), \"u\"(b) : \"st(1)\");return r;}"
         "static int below(long double a, long double b){int r;__asm__(\"fcomi %%st(1), %%st\" : \"=@ccb\"(r) : \"t\"(a), \"u\"(b));return r;}"
-        "int tested(int n){long double a=n*0.5L+1,b=n-2.25L;return (int)(swap_sub(a,b)*8)+(int)(add_top(a,b)*4)+(int)square(a)+(int)(reversed(a,b)*16)+below(a,b)*1000+below(b,a)*3000;}",
+        "static long double square_freed(long double a){__asm__(\"fld %%st(0)\\n\\tfmul %%st(1), %%st\\n\\tfxch\\n\\tffreep %%st(0)\" : \"+t\"(a));return a;}"
+        "int tested(int n){long double a=n*0.5L+1,b=n-2.25L;return (int)(swap_sub(a,b)*8)+(int)(add_top(a,b)*4)+(int)square(a)+(int)(square_freed(b)*2)+(int)(reversed(a,b)*16)+below(a,b)*1000+below(b,a)*3000;}",
         "asm-x87-named", clang);
     check_test_program_boundary_reason(test, "int tested(int n){__asm__ volatile(\"rep ret\" ::: \"memory\");return n;}",
                                       "asm-returning-template", true, false, 0, 0, "inline assembly templates that return from their helper");

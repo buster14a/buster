@@ -130,13 +130,13 @@
 // The digest's stream and the hash of x86_encode_scalar's bytes for it (FNV-1a, 64-bit).
 #define BUSTER_X86_TEST_DIGEST_SEED 1
 #define BUSTER_X86_TEST_DIGEST_INSTRUCTIONS 100000
-#define BUSTER_X86_TEST_DIGEST 0xc41b44d654f1912full
+#define BUSTER_X86_TEST_DIGEST 0x7d15a411bce393a8ull
 // The same for the stream with 32-bit addresses (--address32), for the one with APX's registers (--apx), and for those
 // of 32-bit and 16-bit modes (--mode32 and --mode16).
-#define BUSTER_X86_TEST_DIGEST_ADDRESS32 0x52a5ccefd44d71f2ull
-#define BUSTER_X86_TEST_DIGEST_APX 0xdb7a16046c6f0decull
-#define BUSTER_X86_TEST_DIGEST_32 0x7667a4b1c4188b89ull
-#define BUSTER_X86_TEST_DIGEST_16 0x89a7588fe1dd8db8ull
+#define BUSTER_X86_TEST_DIGEST_ADDRESS32 0xa6cbef03673e5622ull
+#define BUSTER_X86_TEST_DIGEST_APX 0xa93018755bf10a0eull
+#define BUSTER_X86_TEST_DIGEST_32 0x7dd46140275c23b6ull
+#define BUSTER_X86_TEST_DIGEST_16 0xa1ca8dc80cc67494ull
 // 2^64 divided by the golden ratio: the first state of the random sequence, and the multiplier that turns --seed N
 // into one (N * BUSTER_X86_TEST_GOLDEN_RATIO + 1).
 #define BUSTER_X86_TEST_GOLDEN_RATIO 0x9E3779B97F4A7C15ull
@@ -1874,6 +1874,10 @@ static const KnownEncoding x86_known_encodings[] = {
     { { .form = X86_FORM_LOCK_ADD_M64_IMM8, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE, .immediate = 0x12 }, 5, { 0xf0, 0x48, 0x83, 0x00, 0x12 } },
     { { .form = X86_FORM_LOCK_BTC_M16_R16, .reg = X86_REGISTER_RCX, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 5, { 0x66, 0xf0, 0x0f, 0xbb, 0x08 } },
     { { .form = X86_FORM_LOCK_CMPXCHG8B_M64, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 4, { 0xf0, 0x0f, 0xc7, 0x08 } },
+    // lock xchg byte ptr [rax], cl; lock xchg word ptr [rax], cx; lock xchg qword ptr [r8], r9 (#1846, GNU as's and clang's bytes)
+    { { .form = X86_FORM_LOCK_XCHG_M8_R8, .reg = X86_REGISTER_RCX, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 3, { 0xf0, 0x86, 0x08 } },
+    { { .form = X86_FORM_LOCK_XCHG_M16_R16, .reg = X86_REGISTER_RCX, .rm = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_BASE }, 4, { 0x66, 0xf0, 0x87, 0x08 } },
+    { { .form = X86_FORM_LOCK_XCHG_M64_R64, .reg = X86_REGISTER_R9, .rm = X86_REGISTER_R8, .mode = BUSTER_X86_MEMORY_BASE }, 4, { 0xf0, 0x4d, 0x87, 0x08 } },
     // movsb; cmpsd; rep movsw; rep movsq; repne scasq
     { { .form = X86_FORM_MOVS_B }, 1, { 0xa4 } },
     { { .form = X86_FORM_CMPS_D }, 1, { 0xa7 } },
