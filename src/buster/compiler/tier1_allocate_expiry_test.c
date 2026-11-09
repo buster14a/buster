@@ -260,15 +260,16 @@ static void tier1_allocation_test_expiry(Tier1AllocationTestTally* tally)
         {
             // Interval0's required use at3 is processed before interval1's later duplicate use event at3. That
             // resident r0 is already pinned, so reload interval0 into interval2's r1, not the first occupied slot.
+            // Interval2's three uses tie the others' at interval0's start, which therefore evicts neither.
             .input = {
                 .starts = (uint32_t[]){ 2, 0, 1 },
                 .ends = (uint32_t[]){ 8, 9, 10 },
                 .values = (uint32_t[]){ 0, 1, 2 },
                 .allowed_registers = (uint32_t[]){ 3, 3, 3 },
-                .use_offsets = (uint32_t[]){ 0, 3, 6, 8 },
-                .use_positions = (uint32_t[]){ 3, 3, 7, 3, 3, 8, 3, 9 },
-                .use_required = (uint8_t[]){ 1, 1, 1, 0, 1, 0, 0, 0 },
-                .use_count = 8,
+                .use_offsets = (uint32_t[]){ 0, 3, 6, 9 },
+                .use_positions = (uint32_t[]){ 3, 3, 7, 3, 3, 8, 3, 3, 9 },
+                .use_required = (uint8_t[]){ 1, 1, 1, 0, 1, 0, 0, 0, 0 },
+                .use_count = 9,
                 .count = 3,
                 .value_count = 3,
                 .position_count = 10,
@@ -289,7 +290,7 @@ static void tier1_allocation_test_expiry(Tier1AllocationTestTally* tally)
                 .scalar_intervals = 3,
                 .splits = 2,
                 .peak_pressure = { 3, 0 },
-                .retained_bytes = 265,
+                .retained_bytes = 285,
             },
             .name = "simultaneous required operands are pinned before earlier events and duplicates need no extra register",
         },
