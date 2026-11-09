@@ -3496,7 +3496,19 @@ What the lowering covers past scalars (#145's programs):
   jump no path reaches keeps its run in place. Code and call rows grow
   linearly in exits plus cleanups, where they grew as their product (85
   cleanups with an early return each made 3,825 calls, and 86 exhausted the
-  call rows). A `return` computes its value first
+  call rows). An exit keeps only the innermost record whose scope holds its
+  target; the planner finds its last record in one preorder sweep, and a
+  scope's end and `check_control_cleanup_at` skip closed scopes whole, so the
+  planning is linear too. On the 9700X, 10,000 cleanups with an early return
+  each compile in 36 ms by Tier 0 (`-c`), and sqlite3.c's compile is
+  unchanged ([the measurements](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/cleanup-chains-1370-2026-11-09)).
+  The planner stays scalar. It runs only for a body with an exit through a
+  cleanup, which no sqlite3.c body has, and it is a few linear passes over
+  that body's records and exits: 23–46 ms of check-program at 10,000–20,000
+  cleanups, where the parse and the input take as much again. Tier 1 refuses
+  such a body past about 800 cleanups (`cause=cfg-allocation`). Main refuses
+  the same control flow written with gotos alike: #1384's dense matrices.
+  A `return` computes its value first
   (`CHECK_CONTROL_RESULT`: into a temporary of its class, the result object,
   or for a struct or union its bytes copied into a frame object of their own
   or where the hidden pointer points), then the cleanups, then returns it
