@@ -3467,7 +3467,7 @@ static const char check_test_tier1_extremes_source[] =
     "{\n"
     "    double x = fmax(a, b), y = fminimum_num(b, a);\n"
     "    float z = fmaximum_numf(c, d), w = __builtin_fminf(d, c);\n"
-    "    return fmin(fmaximum_num(x, (double)z), __builtin_fmax(y, (double)w)) + x * 0.5 + (double)z;\n"
+    "    return fmaximum_num(fmin(fmaximum_num(x, (double)z), __builtin_fmax(y, (double)w)), fminimum_num((double)z, x));\n"
     "}\n"
     "double e_fold(const double* p, unsigned n)\n"
     "{\n"

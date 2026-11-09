@@ -6292,16 +6292,22 @@ static void check_lower_call_to(CheckLowerWriter* writer, uint32_t node, CheckLo
 static CBuiltinId check_lower_library_extreme(CBuiltinLibraryId library);
 static void check_lower_vector_floating(CheckLowerWriter* writer, uint32_t node, CBuiltinId builtin, uint32_t arguments);
 
-// A call, but one of the unit's declaration of fmax, fmin or their _num kin of float or double that clang makes the
-// builtin (the reader's mark, BUSTER_CHECK_LIBRARY_CALL), which clang -O0's code computes inline as __builtin_X's (#967);
-// a musttail return's stays the call it names.
+// The elementwise builtin whose intrinsic clang -O0's code computes a call by in place of the call (#967): a call of the
+// unit's declaration of fmax, fmin or their _num kin of float or double that clang makes the builtin (the reader's mark,
+// BUSTER_CHECK_LIBRARY_CALL), as __builtin_X's; CBUILTIN_COUNT for any other call.
+static CBuiltinId check_lower_call_extreme(const CheckProgram* program, uint32_t node)
+{
+    const uint32_t member = program->input->graph.members[node];
+    const uint32_t index = member & ~BUSTER_CHECK_LIBRARY_CALL;
+    const bool marked = (member & BUSTER_CHECK_LIBRARY_CALL) != 0 && index < BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS && program->input->graph.argument_counts[node] == 2;
+    return marked ? check_lower_library_extreme(cbuiltin_library_plain_folds[index].library) : CBUILTIN_COUNT;
+}
+
+// A call, or the instructions of check_lower_call_extreme's intrinsic.
 static void check_lower_call(CheckLowerWriter* writer, uint32_t node)
 {
-    const uint32_t member = writer->program->input->graph.members[node];
-    const uint32_t index = member & ~BUSTER_CHECK_LIBRARY_CALL;
-    const bool marked = (member & BUSTER_CHECK_LIBRARY_CALL) != 0 && index < BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS;
-    const CBuiltinId extreme = marked ? check_lower_library_extreme(cbuiltin_library_plain_folds[index].library) : CBUILTIN_COUNT;
-    if (extreme != CBUILTIN_COUNT && writer->program->input->graph.argument_counts[node] == 2 && node != writer->tail)
+    const CBuiltinId extreme = check_lower_call_extreme(writer->program, node);
+    if (extreme != CBUILTIN_COUNT)
     {
         check_lower_vector_floating(writer, node, extreme, 2);
     }
@@ -13661,7 +13667,13 @@ static void check_lower_tail_return(CheckLowerWriter* writer, uint32_t node)
     {
         call = graph->operand0[call];
     }
-    if (call < graph->count && graph->ops[call] == CHECK_OP_CALL)
+    if (call < graph->count && graph->ops[call] == CHECK_OP_CALL && check_lower_call_extreme(writer->program, call) != CBUILTIN_COUNT)
+    {
+        // A musttail return of fmax or its kin, which clang's code computes inline (#967) and returns as any value.
+        check_lower_instruction(writer, BUSTER_TYPED_RETURN, check_lower_class(writer, writer->result), 0);
+        check_lower_expression(writer, node, false, 0);
+    }
+    else if (call < graph->count && graph->ops[call] == CHECK_OP_CALL)
     {
         writer->tail = call;
         check_lower_call(writer, call);

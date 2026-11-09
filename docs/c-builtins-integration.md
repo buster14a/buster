@@ -3177,7 +3177,10 @@ inline, and so does this lowering compute `fmax`, `fmin`, `fmaximum_num` and
 `fminimum_num` of `float` and `double` (#967), as `__builtin_` calls and as
 plain calls of the unit's declarations that clang makes the builtin (the
 reader's mark, `cbuiltin_library_plain_folds`' entries of no fold, which
-`check_lower_call` takes): `__builtin_elementwise_maxnum`'s rows and its kin's
+`check_lower_call` takes, a musttail return's too, as clang's code computes
+it inline and returns it; such a call references no function, so that a
+program links without libm as clang's does): `__builtin_elementwise_maxnum`'s
+rows and its kin's
 (`check_vector_floating_scalar_row`), which glibc's functions would not match.
 clang's code of `llvm.maxnum` and `llvm.minnum` gives its first operand of two
 zeros and the other operand of a signaling NaN, where glibc's `fmax` and `fmin`

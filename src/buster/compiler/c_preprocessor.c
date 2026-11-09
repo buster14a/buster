@@ -17937,7 +17937,9 @@ static uint32_t pp_implemented_constexpr_query(const PPOptions* options, const u
     const CBuiltinLibraryId library = cbuiltin_library_id((const char*)name, length);
     const bool catalog = cbuiltin_has_capability(name, length, BUSTER_CBUILTIN_CAP_CONSTEXPR) && pp_builtin_language(options, cbuiltin_languages(name, length));
     const bool folded = library != CBUILTIN_LIBRARY_COUNT && cbuiltin_library_fold(library, &wide) != CBUILTIN_LIBRARY_FOLD_NONE;
-    const bool plain = (cbuiltin_library_plain_fold((const char*)name, length) != BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS ||
+    const uint32_t plain_fold = cbuiltin_library_plain_fold((const char*)name, length);
+    // The plain entries of no fold (fmax and its kin, #967) are computed inline, not folded.
+    const bool plain = ((plain_fold != BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS && cbuiltin_library_plain_folds[plain_fold].fold != CBUILTIN_LIBRARY_FOLD_NONE) ||
                         cbuiltin_stdc_library_resolve((const char*)name, length) != CBUILTIN_NONE) &&
                        pp_library_builtin(options, name, length);
     const uint32_t result = catalog | folded | plain;

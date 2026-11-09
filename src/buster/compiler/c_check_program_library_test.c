@@ -397,15 +397,18 @@ static __attribute__((noinline)) void check_test_library_sources(CheckTest* test
 // fmax, fmin and their _num kin of the harness's special values (zeros of both signs, infinities, quiet and signaling
 // NaNs, subnormals), of float and double, as __builtin_X's and plain calls of the unit's declarations, which clang -O0's
 // code computes inline as llvm.maxnum, minnum, maximumnum and minimumnum (#967), as it computes the elementwise builtins
-// of those intrinsics' names: of two zeros maxnum's and minnum's first
-// operand, of a signaling NaN beside a number the number, and maximumnum's and minimumnum's signaling first operand,
-// unquieted, beside another NaN, bit for bit. The long double ones call fmaxl and fminl, as clang's code does.
+// of those intrinsics' names: of two zeros maxnum's and minnum's first operand, of a signaling NaN beside a number the
+// number, and maximumnum's and minimumnum's signaling first operand, unquieted, beside another NaN, bit for bit; a
+// musttail return of one too, which clang's code computes inline. The long double ones call fmaxl and fminl, as clang's
+// code does.
 static const char check_test_library_extremes_source[] =
     BUSTER_CHECK_TEST_LIBRARY_FOLD
     "double fp_special(int);float fp_specialf(int);"
     "double fmax(double,double);double fmin(double,double);float fmaxf(float,float);float fminf(float,float);"
     "double fmaximum_num(double,double);double fminimum_num(double,double);float fmaximum_numf(float,float);float fminimum_numf(float,float);"
+    "static double tail(double a,double b){__attribute__((musttail)) return fmax(a,b);}"
     "int tested(int n){unsigned long h=14695981039346656037UL;for(int i=0;i<9;i++){double a=fp_special(n),b=fp_special(i);float f=fp_specialf(n),g=fp_specialf(i);"
+    "h=hd(h,tail(b,a));"
     "h=hd(h,__builtin_fmax(a,b));h=hd(h,__builtin_fmin(a,b));h=hd(h,__builtin_fmaximum_num(a,b));h=hd(h,__builtin_fminimum_num(a,b));"
     "h=hf(h,__builtin_fmaxf(f,g));h=hf(h,__builtin_fminf(f,g));h=hf(h,__builtin_fmaximum_numf(f,g));h=hf(h,__builtin_fminimum_numf(f,g));"
     "h=hd(h,fmax(b,a));h=hd(h,fmin(b,a));h=hd(h,fmaximum_num(b,a));h=hd(h,fminimum_num(b,a));"

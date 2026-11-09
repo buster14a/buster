@@ -2946,6 +2946,15 @@ static uint32_t check_program_references(CheckProgram* program, const CheckContr
                     // This edge names the source overload set; the checked selection above is the callee.
                     operands[0] = BUSTER_CHECK_NONE;
                 }
+                // A plain fmax or its kin that the code computes inline (#967, check_lower_call_extreme) references no
+                // function, as clang's code doesn't.
+                const uint32_t member = graph->members[node];
+                const uint32_t index = member & ~BUSTER_CHECK_LIBRARY_CALL;
+                if ((member & BUSTER_CHECK_LIBRARY_CALL) != 0 && index < BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS &&
+                    cbuiltin_library_plain_folds[index].library != CBUILTIN_LIBRARY_COUNT && graph->argument_counts[node] == 2)
+                {
+                    operands[0] = BUSTER_CHECK_NONE;
+                }
             }
             if (op == CHECK_OP_VARARGS)
             {
