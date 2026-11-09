@@ -587,11 +587,12 @@ clang sets the output after one. With flag outputs lowered, the preprocessor
 defines `__GCC_ASM_FLAG_OUTPUTS__`, as clang does.
 
 A template that names a flag output (#1846) prints the register its condition
-is set into after the template, as clang prints its own: the helper's setcc
-register, 32 bits wide whatever the object, as clang's code sets an `i32`
-(`%0` is `%ecx`, `%b0` `%cl`, `%q0` `%rcx`). Nothing reads it before the
-setcc, so a template may write it (clang's `setz %b0` beside the output is
-overwritten too); which register it is follows each compiler's allocation.
+is set into after the template, as clang prints its own: the setcc register of
+its helper or its asm body, 32 bits wide whatever the object, as clang's code
+sets an `i32` (`%0` is `%ecx`, `%b0` `%cl`, `%q0` `%rcx`). Nothing reads it
+before the setcc, so a template may write it (clang's `setz %b0` beside the
+output is overwritten too); which register it is follows each compiler's
+allocation.
 
 ## asm goto
 
