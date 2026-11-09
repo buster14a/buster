@@ -520,6 +520,13 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "enum A { X = 5 };\nenum B { Y = 3, X, Z };\n_Static_assert(Z == 0, \"z\");\n"
         "enum C : long { P };\nenum D : char { Q = 7, P, R };\n_Static_assert(R == 0 && sizeof(R) == 1, \"r\");\n"
         "enum E { M = -1 };\nenum F { M };\n_Static_assert(sizeof(enum F) == 4 && (enum F)-1 > 0, \"u\");\nint x = undeclared;\n",
+        // An extern declaration of type void, which clang takes (#1447): its address, sizeof, a discarded use and a cast to
+        // void are quiet, a block's extern too; reading its value is the error. A dereference's or subscript's of a void
+        // pointer still warns, and a void value in a comma's, conditional's or selection's operand is quiet.
+        "extern void v;\nextern const void cv;\nvoid *p = &v;\nconst void *q = &cv;\nint s = sizeof v;\nint x, c;\n"
+        "void g(void) { v; (void)v; int unused; }\nvoid h(void) { extern void lv; void *r = &lv; }\n"
+        "void warns(void) {\n    *p;\n    q[0];\n    (1, v);\n    (v, x);\n    c ? v : cv;\n    c ? *p : *p;\n"
+        "    _Generic(x, int: v, default: cv);\n    _Generic(x, int: x, default: v);\n}\nint f(void) { return v; }\n",
         // File-scope declarations whose error no smaller part holds (#1447, check_driver_rejected_declaration): the view leaves
         // the declaration out, and the bodies after it give their warnings; a const object's initializer, specifiers that
         // don't combine, and two such declarations in a row.

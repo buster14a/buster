@@ -9043,15 +9043,17 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
             }
             const bool function = type_kind(reader->types, type) == BUSTER_TYPE_KIND_FUNCTION;
             const bool file = reader->function_result == 0;
-            // A variable of type void (#1447): clang's "variable has incomplete type 'void'" at its name, but an extern
-            // declaration's, which clang takes (and the checker doesn't yet).
+            // A variable of type void is an error but an extern declaration's with no initializer, which clang takes
+            // (#1447): its address is a pointer to void, and a definition of it later is the error. Any other gets
+            // clang's "variable has incomplete type 'void'" at its name.
             const bool void_object = !is_typedef && !function && type_kind(reader->types, type) == BUSTER_TYPE_KIND_VOID;
-            if (__builtin_expect(valid && void_object && storage != C_NAME_EXTERN, 0))
+            const bool void_extern = void_object && storage == C_NAME_EXTERN && !initialized;
+            if (__builtin_expect(valid && void_object && !void_extern, 0))
             {
                 reader->declared_types[name] = type;
                 check_input_incomplete_variable(reader, name, type);
             }
-            valid &= !void_object;
+            valid &= is_typedef || function || type_kind(reader->types, type) != BUSTER_TYPE_KIND_VOID || void_extern;
             // A function specifier declares a function only: clang refuses inline elsewhere, and the _Noreturn keyword
             // on a typedef (of a function's type too) or an object, at the specifier.
             const uint32_t specifier = !valid ? BUSTER_CHECK_NONE : is_inline && !function ? check_input_inline_token(parser, first, name) :
