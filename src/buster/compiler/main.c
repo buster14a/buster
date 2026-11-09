@@ -314,7 +314,9 @@ int run_snapshot_benchmark(int argc, char** argv);
 #include "buster/compiler/inflate_test.c"
 #include "buster/compiler/foreign.c"
 #include "buster/compiler/foreign_unwind.c"
+#if BUSTER_IN_UNIT(BUSTER_UNIT_EXECUTABLE)
 #include "buster/compiler/foreign_unwind_benchmark.c"
+#endif
 #include "buster/compiler/foreign_gc.c"
 #include "buster/compiler/foreign_link.c"
 #include "buster/compiler/foreign_gc_link.c"
@@ -323,9 +325,13 @@ int run_snapshot_benchmark(int argc, char** argv);
 #include "buster/compiler/foreign_strings.c"
 #include "buster/compiler/foreign_strings_link.c"
 #include "buster/compiler/foreign_driver.c"
+#if BUSTER_IN_UNIT(BUSTER_UNIT_EXECUTABLE) || BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
 #include "buster/compiler/foreign_test.c"
+#endif
+#if BUSTER_IN_UNIT(BUSTER_UNIT_EXECUTABLE)
 #include "buster/compiler/foreign_gc_benchmark.c"
 #include "buster/compiler/foreign_unwind_dedup_benchmark.c"
+#endif
 int run_foreign_benchmark(int argc, char** argv);
 // The link benchmark (the direct path against the object writer and the linkers, on the same programs) and the floors'
 // (what the machine and the kernel charge a linker) are other translation units.
@@ -902,6 +908,15 @@ static __attribute__((unused)) void main_backend_test_interfaces(void)
 }
 #endif
 
+#if !BUSTER_IN_UNIT(BUSTER_UNIT_EXECUTABLE)
+// The foreign fixtures supply this shared helper's callers. Keep its semantic reference in the other units without
+// parsing the fixtures or emitting code; the executable unit still checks the real callers with unused warnings on.
+static __attribute__((unused)) void main_foreign_test_interfaces(void)
+{
+    (void)&foreign_unwind_dedup_section_offset;
+}
+#endif
+
 // Runs the command argv[1] names if it is one of this unit's (*found). Each branch first tests the unit whose code it
 // is, so that the other units' branches fold to false (at the top). What no unit takes runs the compiler itself
 // (main_source_command), in a frame of its own: noinline keeps this function's frame, the tests' locals, out of main's.
@@ -1212,6 +1227,7 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     {
         result = run_inflate_tests(argc - 2, argv + 2);
     }
+#if BUSTER_IN_UNIT(BUSTER_UNIT_EXECUTABLE)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_EXECUTABLE) && argc >= 2 && strcmp(argv[1], "test-foreign") == 0)
     {
         result = run_foreign_tests(argc - 2, argv + 2);
@@ -1232,10 +1248,12 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     {
         result = run_foreign_unwind_benchmark(argc - 2, argv + 2);
     }
+#endif
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_EXECUTABLE) && argc >= 2 && strcmp(argv[1], "link-foreign") == 0)
     {
         result = run_foreign_link(argc - 2, argv + 2);
     }
+#if BUSTER_IN_UNIT(BUSTER_UNIT_EXECUTABLE)
     else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_EXECUTABLE) && argc >= 2 && strcmp(argv[1], "benchmark-foreign-gc") == 0)
     {
         result = run_foreign_gc_benchmark(argc - 2, argv + 2);
@@ -1244,6 +1262,7 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     {
         result = run_foreign_unwind_dedup_benchmark(argc - 2, argv + 2);
     }
+#endif
     else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "benchmark-foreign") == 0)
     {
         result = run_foreign_benchmark(argc - 1, argv + 1);

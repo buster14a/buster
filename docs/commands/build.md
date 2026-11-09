@@ -309,13 +309,23 @@ position in every unit, including those that omit the feature tests. On vector
 hosts, editing it also rebuilds the standalone `c_checker_benchmark.c`, which
 includes the catalog itself.
 
-The frontend roots with internal guards and `tier1_select_source_benchmark.c`
-also preserve standalone preprocessing. Without `main.c`'s unity-unit
-definitions, their guards keep the complete source. The correctness
-inventory preprocesses `main.c` and every `*_benchmark.c` as independent inputs
+The executable unit owns the private foreign input fixtures and the benchmark
+commands that use them. Editing `foreign_unwind_runtime_test.c`,
+the nested `foreign_driver_symbols_test.c`, `foreign_strings_output_test.c`
+or the directly included `foreign_gc_benchmark.c` rebuilds only
+`main_unit_executable.c`. The checker shares helpers that read and write ELF files
+and link test programs in `foreign_test.c`; their definitions stay at their original positions,
+and editing that root rebuilds exactly the checker and executable units. The
+production `foreign_link.c` and `foreign_unwind.c` remain shared by all eleven
+main units.
+
+The frontend roots with internal guards, `foreign_test.c` and
+`tier1_select_source_benchmark.c` also preserve standalone preprocessing. Without
+`main.c`'s unity-unit definitions, their guards keep the complete source. The
+correctness inventory preprocesses `main.c` and every `*_benchmark.c` as independent inputs
 and compares them with Clang. The build regression also preprocesses the
-guarded frontend roots and the Tier 1 source benchmark directly, checking that
-their private entry points remain in the output.
+guarded roots directly, checking that their private entry points remain in the
+output.
 
 The test commands, their owning units and compiler optimization flags stay the
 same. Shared fixtures, including the checker's common helpers and
