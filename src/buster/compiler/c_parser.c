@@ -4472,8 +4472,12 @@ static bool parse_scalar_type_argument_attribute(const ParseScalar* parser, Iden
 
 // Whether the typedef name at `token`, in the arguments of a counted_by family attribute (frame `frame`, a GNU attribute's
 // call), names a member of a record being defined, which clang's lookup in the attribute's argument finds before the
-// typedef (#1842): an identifier of its name in an enclosing struct or union body before it, in a declarator's place
-// (after a specifier, a typedef name, `*`, `,` or a body's `}`, and before `;`, `,`, `:`, `[`, `)` or an attribute).
+// typedef (#1842): a declarator's name of its name in an enclosing struct or union body before it. A name is an identifier
+// after a specifier, a typedef or tag name, `*`, `,`, a body's `}` or a declarator's grouping `(`, and before `;`, `,`, `:`, `[`,
+// a grouping `)` or an attribute. Parentheses group a declarator after a specifier, a typedef or tag name, `*`, `,`, `}` or
+// another grouping `(` (`int (n);`, `int ((n));`); any others (a function declarator's parameters, an attribute's
+// arguments, sizeof's operand) hold no member's name. The bodies of named records nested in it hold their own records'
+// members; each body's own scan finds the members of a named record still open.
 static bool parse_scalar_counted_member(const ParseScalar* parser, const ParseFrame* frame, uint32_t token)
 {
     static const char* const names[] = { "counted_by", "sized_by", "counted_by_or_null", "sized_by_or_null" };
@@ -4487,15 +4491,35 @@ static bool parse_scalar_counted_member(const ParseScalar* parser, const ParseFr
     for (uint32_t f = 0; spelled && !found && f < parser->frame_count; f += 1)
     {
         const ParseFrame* body = parser->frames + f;
+        // The depth of the parentheses open since the body's `{`, the depth of the first that groups no declarator (0
+        // where none is open), and the depth of a named record's body the scan skips.
+        uint32_t parentheses = 0;
+        uint32_t other = 0;
+        uint32_t named = 0;
         for (uint32_t t = body->role == PARSE_ROLE_OPEN_STRUCT ? body->opener + 1 : token; !found && t < token; t += 1)
         {
+            const uint8_t kind = parser->kinds[t];
             const uint8_t before = parser->kinds[t - 1];
             const uint8_t after = parser->kinds[t + 1];
-            const bool declarator = before == PARSE_KIND_TYPE || before == PARSE_KIND_QUALIFIER || before == PARSE_KIND_STAR || before == PARSE_KIND_COMMA ||
-                                    before == PARSE_KIND_R_BRACE || before == PARSE_KIND_IDENTIFIER;
+            const bool place = before == PARSE_KIND_TYPE || before == PARSE_KIND_QUALIFIER || before == PARSE_KIND_STAR || before == PARSE_KIND_COMMA ||
+                               before == PARSE_KIND_R_BRACE ||
+                               (before == PARSE_KIND_IDENTIFIER && (parse_scalar_is_typedef_name(parser, t - 1) || parser->kinds[t - 2] == PARSE_KIND_STRUCT ||
+                                                                    parser->kinds[t - 2] == PARSE_KIND_ENUM));
+            const bool opens = kind == PARSE_KIND_L_BRACE && (named != 0 || before == PARSE_KIND_IDENTIFIER);
+            named = named + (opens ? 1u : 0u) - (named != 0 && kind == PARSE_KIND_R_BRACE ? 1u : 0u);
+            const bool open = named == 0 && kind == PARSE_KIND_L_PAREN;
+            const bool close = named == 0 && kind == PARSE_KIND_R_PAREN && parentheses != 0;
+            // A `(` that groups: after a declarator's place or a grouping `(`.
+            const bool grouping = open && other == 0 && (place || before == PARSE_KIND_L_PAREN);
+            parentheses += open ? 1u : 0u;
+            other = open && !grouping && other == 0 ? parentheses : other;
+            const bool closes_other = close && other == parentheses;
+            other = closes_other ? 0 : other;
+            parentheses -= close ? 1u : 0u;
+            const bool declarator = place || (before == PARSE_KIND_L_PAREN && other == 0);
             const bool ends = after == PARSE_KIND_SEMI || after == PARSE_KIND_COMMA || after == PARSE_KIND_COLON || after == PARSE_KIND_L_SQUARE ||
-                              after == PARSE_KIND_R_PAREN || after == PARSE_KIND_ATTRIBUTE;
-            found = parser->kinds[t] == PARSE_KIND_IDENTIFIER && parser->names[t] == parser->names[token] && declarator && ends;
+                              after == PARSE_KIND_ATTRIBUTE || (after == PARSE_KIND_R_PAREN && parentheses != 0);
+            found = named == 0 && other == 0 && kind == PARSE_KIND_IDENTIFIER && parser->names[t] == parser->names[token] && declarator && ends;
         }
     }
     return found;
