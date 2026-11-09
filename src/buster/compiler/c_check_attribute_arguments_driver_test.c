@@ -1578,6 +1578,8 @@ static void check_test_driver_unevaluated_strings(CheckTest* test, const char* c
         const char* source;
         const char* standard;
         const char* option;
+        // A system header's text, <h.h> in a directory -isystem names (#1934), or null.
+        const char* header;
     };
     static const CheckUnevaluatedUnit units[] = {
         // The issue's probes.
@@ -1897,6 +1899,17 @@ static void check_test_driver_unevaluated_strings(CheckTest* test, const char* c
         { "#if 1wb\n#endif\nint x;\n", "-std=gnu17", "-pedantic-errors" },
         { "#if 1wb\n#endif\nint x;\n", "-std=gnu17", "-Werror" },
         { "#if 1wb\n#endif\nint x;\n", "-std=gnu17", "-w" },
+        // -w and a system header silence it however it is mapped (#1934): a pragma's error, -Werror, -pedantic-errors and
+        // -Werror=; -Wsystem-headers shows a system header's.
+        { "#pragma clang diagnostic error \"-Wc23-extensions\"\n#if 1wb\n#endif\nint x;\n", "-std=gnu17", "-w" },
+        { "#pragma clang diagnostic fatal \"-Wc23-extensions\"\n#if 1wb\n#endif\nint x;\n", "-std=gnu17", "-w" },
+        { "#pragma GCC diagnostic ignored \"-Wc23-extensions\"\n#if 1wb\n#endif\nint x;\n", "-std=gnu17", NULL },
+        { "#include <h.h>\nint x;\n", "-std=gnu17", NULL, "#if 1wb\n#endif\n" },
+        { "#include <h.h>\nint x;\n", "-std=gnu17", "-Werror", "#if 1wb\n#endif\n" },
+        { "#include <h.h>\nint x;\n", "-std=gnu17", "-pedantic-errors", "#if 1wb\n#endif\n" },
+        { "#include <h.h>\nint x;\n", "-std=gnu17", "-Werror=c23-extensions", "#if 1wb\n#endif\n" },
+        { "#include <h.h>\nint x;\n", "-std=gnu17", NULL, "#pragma clang diagnostic error \"-Wc23-extensions\"\n#if 1wb\n#endif\n" },
+        { "#include <h.h>\nint x;\n", "-std=gnu17", "-Wsystem-headers", "#if 1wb\n#endif\n" },
         { "#pragma clang diagnostic ignored \"-Wc23-extensions\"\n#if 1wb\n#endif\nint x;\n", "-std=gnu17", NULL },
         { "#pragma clang diagnostic error \"-Wc23-extensions\"\n#if 1wb\n#endif\nint x;\n", "-std=gnu17", NULL },
         { "#pragma clang diagnostic warning \"-Wc2x-extensions\"\n#if 1wb\n#endif\nint x;\n", "-std=gnu17", "-Werror" },
@@ -1917,13 +1930,34 @@ static void check_test_driver_unevaluated_strings(CheckTest* test, const char* c
     char* actual_lines = malloc(LINES);
     char source[PATH_MAX];
     snprintf(source, sizeof(source), "%s/unevaluated-strings.c", directory);
+    char system[PATH_MAX];
+    char header[PATH_MAX];
+    snprintf(system, sizeof(system), "%s/unevaluated-system", directory);
+    snprintf(header, sizeof(header), "%s/h.h", system);
     for (uint32_t unit = 0; expected_lines != NULL && actual_lines != NULL && unit < BUSTER_ARRAY_LENGTH(units); unit += 1)
     {
         const CheckUnevaluatedUnit* fixture = units + unit;
-        const bool made = parse_test_write(source, fixture->source, strlen(fixture->source));
-        // The option, where there is one, before the path's.
-        char* arguments[] = { (char*)clang, (char*)fixture->standard, "-fsyntax-only", "-fno-caret-diagnostics", source, (char*)fixture->option, NULL, NULL };
-        const uint32_t path = fixture->option != NULL ? 6 : 5;
+        bool made = parse_test_write(source, fixture->source, strlen(fixture->source));
+        if (fixture->header != NULL)
+        {
+            mkdir(system, 0755);
+            made = made && parse_test_write(header, fixture->header, strlen(fixture->header));
+        }
+        // The system headers' directory, where there is one, then the path, then the option where there is one, then
+        // --scalar's place.
+        char* arguments[10] = { (char*)clang, (char*)fixture->standard, "-fsyntax-only", "-fno-caret-diagnostics" };
+        uint32_t count = 4;
+        if (fixture->header != NULL)
+        {
+            arguments[count++] = "-isystem";
+            arguments[count++] = system;
+        }
+        arguments[count++] = source;
+        if (fixture->option != NULL)
+        {
+            arguments[count++] = (char*)fixture->option;
+        }
+        const uint32_t path = count;
         char* expected = NULL;
         const int oracle = made ? check_test_driver_spawn(arguments, &expected) : -1;
         const bool lines = expected != NULL && check_test_diagnostic_lines(expected, expected_lines, LINES);
@@ -1948,4 +1982,6 @@ static void check_test_driver_unevaluated_strings(CheckTest* test, const char* c
     free(expected_lines);
     free(actual_lines);
     unlink(source);
+    unlink(header);
+    rmdir(system);
 }

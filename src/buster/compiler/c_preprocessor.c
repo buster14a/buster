@@ -15012,6 +15012,9 @@ static const char* const pp_remark_groups[] = {
 };
 
 // What a #pragma clang diagnostic made of a warning group (#1447): nothing, or its severity from there on.
+// pp_c23_extension_severity's answer for a warning that isn't given (#1934): no severity a diagnostic is given with.
+#define BUSTER_PP_IGNORED PP_SEVERITY_NOTE
+
 typedef enum PPPragmaMapping
 {
     PP_PRAGMA_MAPPING_NONE,
@@ -15025,7 +15028,7 @@ typedef enum PPPragmaMapping
 // maps it: the source's #pragma clang diagnostic for the group, -Wc2x-extensions or -Weverything
 // (Preprocessor.c23_extension_mapping); else the command line's, its last -W[no-]c23-extensions, -W[no-]c2x-extensions or
 // -W[no-]everything, promoted by -Werror (or -Werror= of the group) or -pedantic-errors, an extension's, unless
-// -Wno-error= demotes it. PP_SEVERITY_NOTE where it is ignored.
+// -Wno-error= demotes it. PP_SEVERITY_NOTE where it is ignored, and wherever under -w.
 static PPSeverity pp_c23_extension_severity(const Preprocessor* pp)
 {
     bool enabled = true;
@@ -15046,12 +15049,13 @@ static PPSeverity pp_c23_extension_severity(const Preprocessor* pp)
         errors = strcmp(option, "-Werror") == 0 ? true : strcmp(option, "-Wno-error") == 0 ? false : errors;
         pedantic_errors |= strcmp(option, "-pedantic-errors") == 0;
     }
-    PPSeverity result = !enabled || pp->options.suppress_warnings ? PP_SEVERITY_NOTE :
+    PPSeverity result = !enabled || pp->options.suppress_warnings ? BUSTER_PP_IGNORED :
                         group_error || ((errors || pedantic_errors) && !demoted) ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING;
     const uint8_t mapping = pp->c23_extension_mapping;
-    result = mapping == PP_PRAGMA_MAPPING_IGNORED ? PP_SEVERITY_NOTE : mapping == PP_PRAGMA_MAPPING_WARNING ? PP_SEVERITY_WARNING :
+    result = mapping == PP_PRAGMA_MAPPING_IGNORED ? BUSTER_PP_IGNORED : mapping == PP_PRAGMA_MAPPING_WARNING ? PP_SEVERITY_WARNING :
              mapping == PP_PRAGMA_MAPPING_ERROR ? PP_SEVERITY_MAPPED_ERROR : mapping == PP_PRAGMA_MAPPING_FATAL ? PP_SEVERITY_MAPPED_FATAL : result;
-    return result;
+    // -w silences it however it is mapped, a promoted one and a pragma's error too, as clang's.
+    return pp->options.suppress_warnings ? BUSTER_PP_IGNORED : result;
 }
 
 // Room in Preprocessor.c23_extension_saved past depth `depth` (#1934): a buffer of twice the room in the arena, the old one's
@@ -15925,8 +15929,10 @@ static bool pp_parse_integer(Preprocessor* pp, const uint8_t* spelling, uint32_t
         }
     }
     valid &= digits || radix == 8;
-    const PPSeverity extension = valid && longs == 4 && pp->options.language.standard < 2023 ? pp_c23_extension_severity(pp) : PP_SEVERITY_NOTE;
-    if (extension != PP_SEVERITY_NOTE)
+    PPSeverity extension = valid && longs == 4 && pp->options.language.standard < 2023 ? pp_c23_extension_severity(pp) : BUSTER_PP_IGNORED;
+    // A system header's is none without -Wsystem-headers, however it is mapped, as clang's (#1934).
+    extension = extension != BUSTER_PP_IGNORED && !pp_diagnostic_warning_visible(pp, location, location != 0 ? pp->diagnostic_origin : 0) ? BUSTER_PP_IGNORED : extension;
+    if (extension != BUSTER_PP_IGNORED)
     {
         // As clang's NumericLiteralParser warns of the suffix (#1447), before the value's errors, as -Wc23-extensions' options
         // and pragmas map it, with its flag.
