@@ -187,6 +187,16 @@ static void check_test_driver_statement_recovery(CheckTest* test, const char* cl
         "    if (x = 2) return y;\n"
         "    return 0;\n"
         "}\n",
+        // A function holding an error keeps its unused parameters, as clang's: but one that its left-out part names, an
+        // erroneous expression's operand or sizeof's, is used; a member's name of the same spelling isn't. The scope
+        // holding an error loses its unused variables, the enclosing body's with it.
+        "struct T { int a; };\n"
+        "int f1(int a, int b) { int u; return a + undeclared; }\n"
+        "int f3(int a, struct T t) { return t.a + nope; }\n"
+        "int f8(int a) { return sizeof(a) + zz; }\n"
+        "int f9(int a, int c) { int w; { int q = c + zz; } return 0; }\n"
+        "int g(int y) { return 0; }\n"
+        "int h(void) { int v; return 0; }\n",
     };
     static const char* const standards[] = { "-std=gnu17", "-std=gnu23" };
     // Each run's options: none, one or two.
