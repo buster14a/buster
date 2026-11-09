@@ -260,6 +260,12 @@ static CheckDataStatus check_data_plan_scalar(const TypeTable* types, const Chec
                 {
                     status = CHECK_DATA_UNSUPPORTED;
                 }
+                else if (type_unqualified(element) == BUSTER_TYPE_FLOAT128)
+                {
+                    // A _Complex __float128's parts are its bits (#1250, check_quad_complex_set).
+                    check_data_integer_bytes(plan->bytes, value->integer, 16);
+                    check_data_integer_bytes(plan->bytes + 16, check_quad_complex_imaginary(value), 16);
+                }
                 else if (check_action_float_supported(types, element) || check_action_half_format(element) != CHECK_HALF_NONE)
                 {
                     const long double real = check_action_round_float(element, value->floating);

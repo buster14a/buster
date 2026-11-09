@@ -399,7 +399,7 @@ static void check_actions(TypeTable* table, const CheckAction* actions, CheckAct
 static bool check_action_vector_eligible(const TypeTable* table, const CheckAction* action);
 static void check_complex_convert(const TypeTable* table, CheckValue* value, TypeId destination, uint32_t node);
 static uint32_t check_complex_fold(const TypeTable* table, CheckOp op, const CheckValue* left, const CheckValue* right, uint32_t domains, CheckValue* value,
-                                   uint32_t node, uint32_t extensions);
+                                   uint32_t node, uint32_t extensions, bool constant_evaluated);
 static void check_complex_part(TypeTable* table, const CheckAction* action, CheckActionResult* result);
 static void check_complex_conjugate(TypeTable* table, const CheckAction* action, CheckActionResult* result);
 static bool check_vector_type(const TypeTable* table, TypeId type);
@@ -559,7 +559,11 @@ static bool check_action_truth(const TypeTable* table, const CheckValue* value, 
     else if (value->constant_kind == CHECK_CONSTANT_COMPLEX)
     {
         const TypeId element = type_element(table, type_strip_aligned(table, value->type));
-        *truth = check_action_is_integer(table, element) ? value->integer != 0 : value->floating != 0 || value->imaginary != 0;
+        // A _Complex __float128's parts are its bits (check_quad_complex_set): true where either is no zero.
+        const bool quad = type_unqualified(type_strip_aligned(table, element)) == BUSTER_TYPE_FLOAT128;
+        *truth = check_action_is_integer(table, element) ? value->integer != 0 :
+                 quad ? ((value->integer | check_quad_complex_imaginary(value)) & ~BUSTER_CHECK_QUAD_SIGN) != 0 :
+                        value->floating != 0 || value->imaginary != 0;
     }
     else if (value->constant_kind == CHECK_CONSTANT_ADDRESS)
     {
@@ -1870,7 +1874,8 @@ static void check_action_arithmetic(TypeTable* table, const CheckAction* action,
                     const TypeId original_right = unary ? original_left : type_conversion_operand(table, action->operands[1].type);
                     const uint32_t domains = (check_action_kind(table, original_left) == BUSTER_TYPE_KIND_COMPLEX ? 1u : 0u) |
                                              (check_action_kind(table, original_right) == BUSTER_TYPE_KIND_COMPLEX ? 2u : 0u);
-                    result->warnings |= check_complex_fold(table, op, &left, &right, domains, &result->value, action->node, action->context.extensions);
+                    result->warnings |= check_complex_fold(table, op, &left, &right, domains, &result->value, action->node, action->context.extensions,
+                                                              action->context.constant_evaluated);
                 }
                 else if (!check_action_fold_symbolic(table, op, &left, &right, &result->value))
                 {

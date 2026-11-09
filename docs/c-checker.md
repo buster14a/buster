@@ -3312,9 +3312,17 @@ What the lowering covers past scalars (#145's programs):
   Static data and code write the bits. `test-checker
   --program-float-constants`' `float-constants-quad-bits` and
   `float-constants-quad-arithmetic` compare them all with clang -O0's build.
-  A `_Complex __float128` constant's parts are still long doubles that must
-  hold them exactly, so an imaginary `q` literal is taken only where its long
-  double is its value. An increment or a
+  A `_Complex __float128` constant keeps both parts' bits
+  (`check_quad_complex_set`): the real part's in `integer`, the imaginary
+  part's in the two storage words its long double parts would hold, which every
+  reader takes by `check_complex_component`. `__builtin_complex`, imaginary
+  `q` literals, conversions, `==`, truth, `+`, `-`, `~`, and `*` and `/` fold as
+  clang 23's evaluator folds them in static data (`HandleComplexComplexMul` and
+  `HandleComplexComplexDiv`, Annex G's recoveries among them, each step
+  APFloat's), and in code as clang -O0's code computes them: its `*` folds as
+  LLVM folds the formula but where both parts are NaNs (its `__multc3`), and its
+  `/` by a complex value is `__divtc3`'s at run time. `float-constants-complex-quad`
+  compares them with clang -O0's build. An increment or a
   decrement (#147) is `__addtf3`'s or `__subtf3`'s of a constant 1.0, as clang
   -O0's is
   (`check_lower_quad_update_emit`, a postfix one's value a copy of the object

@@ -972,8 +972,8 @@ static void check_builtin_misc_more(TypeTable* table, const CheckBuiltinMiscActi
 // "argument type is not a real floating point type", INVALID_TYPE), then the two converted types (its "arguments are of
 // different types", INCOMPATIBLE), which check_semantic_expression words as clang's. It folds where both arguments are
 // floating constants of a type whose complex constants the folds, the lowering and the data keep (float, double, long
-// double and the half formats; not __float128's), as clang's evaluator folds it: what glibc's CMPLX of a static
-// initializer reads.
+// double, the half formats, and __float128's by their bits, #1250), as clang's evaluator folds it: what glibc's CMPLX of
+// a static initializer reads.
 static void check_builtin_misc_complex(TypeTable* table, const CheckBuiltinMiscAction* input, CheckBuiltinMiscResult* output, const CheckValue* values)
 {
     const TypeId real = type_unqualified(type_strip_aligned(table, values[0].type));
@@ -993,13 +993,19 @@ static void check_builtin_misc_complex(TypeTable* table, const CheckBuiltinMiscA
     else
     {
         const TypeId complex = type_complex(table, real);
+        const bool quad = real == BUSTER_TYPE_FLOAT128;
         const bool folds = values[0].constant_kind == CHECK_CONSTANT_FLOATING && values[1].constant_kind == CHECK_CONSTANT_FLOATING &&
-                           (check_action_float_supported(table, real) || check_action_half_format(real) != CHECK_HALF_NONE);
+                           (check_action_float_supported(table, real) || check_action_half_format(real) != CHECK_HALF_NONE || quad);
         output->action.value.type = complex;
         output->action.value.category = CHECK_RVALUE;
         output->action.value.constant_kind = folds ? CHECK_CONSTANT_COMPLEX : CHECK_CONSTANT_NONE;
         output->action.value.floating = folds ? values[0].floating : 0.0L;
         output->action.value.imaginary = folds ? values[1].floating : 0.0L;
+        if (folds && quad)
+        {
+            // A _Complex __float128's parts are its bits (#1250, check_quad_complex_set).
+            check_quad_complex_set(&output->action.value, values[0].integer, values[1].integer);
+        }
         output->action.value.flags &= ~(BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_ICE_FORM | BUSTER_CHECK_FLOAT_LITERAL | BUSTER_CHECK_ICE_UNEVALUATED |
                                         BUSTER_CHECK_NULL_POINTER | BUSTER_CHECK_LITERAL_ZERO);
         if (complex == 0)
