@@ -71,6 +71,8 @@ typedef struct CheckWarningCommandLine CheckWarningCommandLine;
 struct CheckWarningCommandLine
 {
     CheckWarningSeverity severity;
+    // The severity before -w, which leaves a default error that no option demoted (clang's -Wodr, #1447).
+    CheckWarningSeverity mapped;
     bool quiet;
     bool system_headers;
 };
@@ -168,5 +170,6 @@ static CheckWarningCommandLine check_warning_command_line(const PPOptions* optio
         mapped = CHECK_WARNING_ERROR;
     }
     result.severity = result.quiet ? CHECK_WARNING_IGNORE : mapped;
+    result.mapped = mapped;
     return result;
 }

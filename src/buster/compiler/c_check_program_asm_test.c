@@ -759,6 +759,15 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
         "__asm__(\"leaq .Lshared_point(%%rip), %0\" : \"=r\"(there));"
         "return r*7+s+(here==there)+external_helper(0);}",
         "asm-symbol-references", clang);
+    // Numeric labels and `.` as data (#1845), and a loop's branch to a numeric label: the template assembled whole, as
+    // a template of directives is, its labels' distances as clang's.
+    check_test_program_source(test,
+        "int tested(int n){long a,b,c,d;int e=n;"
+        "__asm__(\"leaq 1f(%%rip), %0\\n\\tleaq 2f(%%rip), %1\\n1:\\tnop\\n2:\\tsubq %0, %1\" : \"=&r\"(a), \"=&r\"(b));"
+        "__asm__(\"leaq .(%%rip), %0\\n\\tleaq .(%%rip), %1\\n\\tsubq %0, %1\" : \"=&r\"(c), \"=&r\"(d));"
+        "__asm__(\"movl $3, %%ecx\\n1:\\tincl %0\\n\\tloop 1b\" : \"+r\"(e) : : \"rcx\");"
+        "return (int)(b*1000+d*100)+e+(a!=0)+(c!=0);}",
+        "asm-numeric-data", clang);
     // A label inside a helper's template at its exact record: another statement's template calls the snippet it marks,
     // which the first template jumps over.
     check_test_program_source(test,
@@ -1094,8 +1103,6 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
                                        "asm-local-undefined", true, false, 0, 0, "inline assembly's local labels that no template defines");
     check_test_program_boundary_reason(test, "int tested(int n){__asm__(\"lonely:\");return n;}",
                                        "asm-label-no-instructions", true, false, 0, 0, "inline assembly labels in templates of no instructions");
-    check_test_program_boundary_reason(test, "int tested(int n){long a;__asm__(\"leaq 1f(%%rip), %0\\n1:\" : \"=r\"(a));return n+(int)a;}",
-                                       "asm-numeric-data", true, false, 0, 0, "inline assembly's numeric labels and `.` are only its own jmp's and jcc's targets");
     // A vector in a vector register's constraint where the template has instructions, refers to it, or it is a volatile
     // output (whose load and store clang's code makes), which the helper doesn't place yet.
     static const char* const held[][2] = {

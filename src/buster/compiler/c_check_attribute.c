@@ -5280,6 +5280,8 @@ static bool check_input_swift_parameters(CheckInputReader* reader, TypeId functi
     const bool swift = convention == TYPE_FUNCTION_ABI_SWIFT;
     const bool either = swift || convention == TYPE_FUNCTION_ABI_SWIFT_ASYNC;
     bool valid = true;
+    // The convention's error is the function's first incompatible parameter's alone (clang's hasCheckedSwiftCall).
+    bool convention_checked = false;
     for (uint32_t i = 0; type_function_has_parameter_abis(types, function) && i < count; i += 1)
     {
         const TypeParameterABI abi = type_parameter_abi(types, function, i);
@@ -5287,15 +5289,17 @@ static bool check_input_swift_parameters(CheckInputReader* reader, TypeId functi
         const bool error_result = abi == TYPE_PARAMETER_ABI_SWIFT_ERROR_RESULT;
         uint32_t error = BUSTER_CHECK_NONE;
         uint32_t number = abi;
-        if (abi != TYPE_PARAMETER_ABI_ORDINARY && abi != TYPE_PARAMETER_ABI_SWIFT_ASYNC_CONTEXT && !(error_result ? swift : either))
+        if (abi != TYPE_PARAMETER_ABI_ORDINARY && abi != TYPE_PARAMETER_ABI_SWIFT_ASYNC_CONTEXT && !(error_result ? swift : either) && !convention_checked)
         {
             error = CHECK_ARGUMENT_SWIFT_PARAMETER_CONVENTION;
             number |= error_result ? BUSTER_CHECK_SWIFT_ONLY : 0;
+            convention_checked = true;
         }
         const uint32_t order = abi == TYPE_PARAMETER_ABI_SWIFT_INDIRECT_RESULT && i != 0 && previous != TYPE_PARAMETER_ABI_SWIFT_INDIRECT_RESULT ?
                                CHECK_ARGUMENT_SWIFT_INDIRECT_FIRST :
                                error_result && previous != TYPE_PARAMETER_ABI_SWIFT_CONTEXT ? CHECK_ARGUMENT_SWIFT_ERROR_AFTER_CONTEXT : BUSTER_CHECK_NONE;
-        // (clang gives both, the convention's first.)
+        // (clang gives both, the convention's first: the order's is kept at the same place as a repeated report, which the
+        // driver doesn't fold into the first, #1447.)
         for (uint32_t pass = 0; pass < 2; pass += 1)
         {
             const uint32_t kind = pass == 0 ? error : order;
@@ -5306,6 +5310,7 @@ static bool check_input_swift_parameters(CheckInputReader* reader, TypeId functi
                 if (reader->output->report_count > before)
                 {
                     reader->output->reports[before].attribute = attributes[i];
+                    reader->output->reports[before].repeated |= pass == 1 && error != BUSTER_CHECK_NONE;
                 }
                 valid = false;
             }
