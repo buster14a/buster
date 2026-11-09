@@ -199,6 +199,9 @@ struct CheckProgramAsm
     uint32_t* inline_branches;
     uint32_t* inline_targets;
     uint32_t inline_branch_count;
+    // Whether its register operands are its call row's arguments, each in its register (check_asm_inline_code's
+    // `passed`), rather than loads from its block.
+    bool inline_passed;
     bool inlined;
 };
 
@@ -1109,11 +1112,13 @@ static Tier0Code check_asm_helper_code(const CheckAsmPlace* places, uint32_t cou
 // none of them is the block's register; then the template's records; the flag outputs' stores while the flags are the
 // template's, each condition's setcc into `stores[1]`, zero-extended, and stored over its object through its address in
 // `stores[0]`; the register outputs' stores, each through its address in `stores[1]`; the x87 outputs', from st(0) down;
-// and the pops of the x87 inputs the template left. No output is in a store's register. Returns the count, and the
-// template's first record in `*first` (its branches' and labels' records are past it), with 0 records without room in
-// `output` (a statement of no records has at least an x87 or a flag output's).
+// and the pops of the x87 inputs the template left. No output is in a store's register. With `passed`, the operands a
+// register holds when the template starts (check_asm_loads') are the call row's arguments instead, which Tier 0 moves into
+// their registers (CheckProgramAsm.inline_passed): the body loads only the x87's. Returns the count, and the template's
+// first record in `*first` (its branches' and labels' records are past it), with 0 records without room in `output` (a
+// statement of no records has at least an x87 or a flag output's).
 static uint32_t check_asm_inline_code(const CheckAsmPlace* places, uint32_t count, const AsmCode* code, const uint8_t stores[2], uint32_t pops,
-                                      X86Instruction** records, uint32_t* first, Arena* output)
+                                      bool passed, X86Instruction** records, uint32_t* first, Arena* output)
 {
     uint32_t loads = 0;
     uint32_t stored = 0;
@@ -1145,7 +1150,7 @@ static uint32_t check_asm_inline_code(const CheckAsmPlace* places, uint32_t coun
         for (uint32_t k = 0; k < count; k += 1)
         {
             const CheckAsmPlace* place = places + k;
-            if (check_asm_loads(place))
+            if (check_asm_loads(place) && !passed)
             {
                 const uint32_t slot = place->written && place->kind != BUSTER_CHECK_ASM_MEMORY ? place->value : place->slot;
                 const uint32_t form = place->kind == BUSTER_CHECK_ASM_VECTOR ? (place->size == 4 ? X86_FORM_MOVD_X_RM32 : X86_FORM_MOVQ_X_XM64) :
@@ -2421,8 +2426,12 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
     {
         // Placed in its caller as an asm body (#1839): its records run in its call row's place, with no helper.
         X86Instruction* records = 0;
+        // Its register operands are its call row's arguments (#1839's measurements: a load of the block's slot, which the
+        // lowering stored through a register a moment before, failed store-to-load forwarding once a run).
+        const bool passed = true;
         uint32_t first = 0;
-        const uint32_t records_count = check_asm_inline_code(places, count, &code, stores, pops, &records, &first, output);
+        const uint32_t records_count = check_asm_inline_code(places, count, &code, stores, pops, passed, &records, &first, output);
+        plan->inline_passed = passed;
         uint32_t* branches = code.branch_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, code.branch_count) : 0;
         uint32_t* targets = code.branch_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, code.branch_count) : 0;
         valid = records != 0 && (code.branch_count == 0 || (branches != 0 && targets != 0));

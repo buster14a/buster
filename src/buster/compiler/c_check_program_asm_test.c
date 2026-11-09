@@ -99,8 +99,8 @@ static void check_test_program_asm_room(CheckTest* test)
 // a `+` register (its address, then its value), two early-clobbered outputs in scratch registers, an XMM output from an
 // XMM input, the fences and pause of no operand, a locked xadd of a `+` register and a `+` memory operand, a matching
 // input converted to its output's type, a constant, and a clobber of a register the records don't write. Each other one
-// is an asm body in its caller (#1839, check_asm_inline_code): fixed registers (cpuid's, whose body loads its inputs from
-// the block, runs cpuid and stores its four outputs through their addresses, and touches rbx; rdtsc's; a shift's count
+// is an asm body in its caller (#1839, check_asm_inline_code): fixed registers (cpuid's, whose inputs are its call's
+// arguments, whose body runs cpuid and stores its four outputs through their addresses, and which touches rbx; rdtsc's; a shift's count
 // in cl), a literal register (`%%rsp`, read), a syntax switch, more records than a row takes, an x87 operand, a form
 // x86_semantics.c doesn't cover (ldmxcsr), an explicit register variable, and a register class narrower than the sixteen
 // (Q's), and a branch to a numeric label (a branch of the body); but a named label, which keeps its helper.
@@ -185,19 +185,18 @@ static void check_test_program_asm_placement(CheckTest* test)
                          plan->inlined == (!placed && !helped) && (plan->inline_count != 0) == plan->inlined;
             if (right && s == BRANCHED)
             {
-                // The branch's body: its two loads (n, the matching 0), then testl, jle and movl, the jle a branch of the body to
+                // The branch's body: its inputs are its call's arguments, so it starts at testl, then jle and movl, the jle a branch of the body to
                 // its label at the template's end, the first store.
-                right = plan->inline_branch_count == 1 && plan->inline_branches[0] == 3 && plan->inline_targets[0] == 5 &&
-                        plan->inline_records[2].form == X86_FORM_TEST_RM32_R32;
+                right = plan->inline_branch_count == 1 && plan->inline_branches[0] == 1 && plan->inline_targets[0] == 3 &&
+                        plan->inline_records[0].form == X86_FORM_TEST_RM32_R32;
             }
             if (right && s == PLACED)
             {
-                // cpuid's body: eax and ecx from the block, cpuid, then each output's address into the store register and
-                // its store.
+                // cpuid's body (#1839): its inputs are its call's arguments, which Tier 0 moves into eax and ecx, so it starts
+                // at cpuid; then each output's address from the block into the store register, and its store.
                 const X86Instruction* records = plan->inline_records;
-                right = plan->inline_count == 11 && records[0].rm == BUSTER_TIER0_ASM_BLOCK && records[0].reg == X86_REGISTER_RAX &&
-                        records[1].rm == BUSTER_TIER0_ASM_BLOCK && records[1].reg == X86_REGISTER_RCX && records[2].form == X86_FORM_CPUID &&
-                        records[3].rm == BUSTER_TIER0_ASM_BLOCK && records[4].form == X86_FORM_MOV_RM32_R32 && records[4].reg == X86_REGISTER_RAX &&
+                right = plan->inline_passed && plan->inline_count == 9 && records[0].form == X86_FORM_CPUID && records[1].rm == BUSTER_TIER0_ASM_BLOCK &&
+                        records[2].form == X86_FORM_MOV_RM32_R32 && records[2].reg == X86_REGISTER_RAX &&
                         (plan->inline_touched & (1u << X86_REGISTER_RBX | 1u << X86_REGISTER_RDX)) == (1u << X86_REGISTER_RBX | 1u << X86_REGISTER_RDX) &&
                         (plan->inline_touched & (1u << X86_REGISTER_RSP | 1u << X86_REGISTER_RBP | 1u << X86_REGISTER_R15)) == 0;
             }
