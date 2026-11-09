@@ -215,6 +215,7 @@ static bool check_input_target_clones(CheckInputReader* reader, CheckInputAttrib
         joined += seen[s].length + 1;
     }
     char* text = decoded && !unsupported && joined != 0 ? BUSTER_ARENA_PUSH_ARRAY(reader->arena, char, joined) : NULL;
+    reader->output->resource |= decoded && !unsupported && joined != 0 && text == NULL;
     uint64_t length = 0;
     for (uint32_t s = 0; text != NULL && s < seen_count; s += 1)
     {

@@ -30,9 +30,6 @@
 #ifndef BUSTER_C_CHECK_PROGRAM_TARGET_VERSIONS_INCLUDED
 #define BUSTER_C_CHECK_PROGRAM_TARGET_VERSIONS_INCLUDED
 
-// The most features a version names.
-#define BUSTER_CHECK_PROGRAM_TARGET_FEATURES 32u
-
 // A processor's key feature's priority (c_check_target_versions.inc), or -2 for no processor of `name`.
 static int32_t check_program_target_arch_priority(String8 name)
 {
@@ -120,7 +117,8 @@ typedef struct CheckProgramTargetOption CheckProgramTargetOption;
 struct CheckProgramTargetOption
 {
     String8 arch;
-    String8 features[BUSTER_CHECK_PROGRAM_TARGET_FEATURES];
+    // In the arena the options are in, one entry for each item of the version's string.
+    String8* features;
     uint32_t feature_count;
     bool is_default;
     bool repeated;
@@ -136,12 +134,18 @@ struct CheckProgramTargetOption
 };
 
 // The option of target's version string `text`: its arch= and features (clang's parseTargetAttr; the checker took each
-// feature as a version's). Whether it fits.
-static bool check_program_target_parse(String8 text, CheckProgramTargetOption* option)
+// feature as a version's), the features in `arena`. Whether there was room.
+static bool check_program_target_parse(String8 text, CheckProgramTargetOption* option, Arena* arena)
 {
     *option = (CheckProgramTargetOption){ .is_default = check_input_attribute_equal(text, "default") };
-    bool fits = true;
-    for (uint32_t cursor = 0; !option->is_default && cursor <= text.length;)
+    uint64_t items = 1;
+    for (uint64_t i = 0; !option->is_default && i < text.length; i += 1)
+    {
+        items += text.pointer[i] == ',';
+    }
+    option->features = option->is_default ? NULL : BUSTER_ARENA_PUSH_ARRAY(arena, String8, items);
+    const bool fits = option->is_default || option->features != NULL;
+    for (uint32_t cursor = 0; fits && !option->is_default && cursor <= text.length;)
     {
         uint32_t end = cursor;
         while (end < text.length && text.pointer[end] != ',')
@@ -164,13 +168,9 @@ static bool check_program_target_parse(String8 text, CheckProgramTargetOption* o
                  check_target_version_prefix(item, "tune="))
         {
         }
-        else if (option->feature_count < BUSTER_CHECK_PROGRAM_TARGET_FEATURES)
-        {
-            option->features[option->feature_count++] = item;
-        }
         else
         {
-            fits = false;
+            option->features[option->feature_count++] = item;
         }
     }
     return fits;
@@ -225,79 +225,28 @@ static bool check_program_target_condition(CheckProgramTargetOption* option)
     return valid;
 }
 
-// The name a version's symbol adds to the function's, after a period, written to `text` (room for `capacity` bytes):
-// target's (arch_CPU, then the features by their priorities, the highest first, '_' between) or target_clones' (its
-// version, arch_CPU for arch=, then a period and its index). Returns its length, 0 where it didn't fit.
-static uint32_t check_program_target_suffix(const CheckProgramTargetOption* option, bool clones, char* text, uint32_t capacity)
+// The feature of `option` that a target version's name gives after the one of key `after`: the features by their
+// priorities, the highest first, in their order among equals (clang's stable sort), each of key priority << 32 | ~place.
+// UINT32_MAX after the last; `after` UINT64_MAX for the first.
+static uint32_t check_program_target_next_feature(const CheckProgramTargetOption* option, uint64_t* after)
 {
-    uint32_t length = 0;
-    bool fits = true;
-    // The pieces in their order.
-    String8 pieces[BUSTER_CHECK_PROGRAM_TARGET_FEATURES + 1];
-    uint32_t piece_count = 0;
-    if (option->arch.length != 0)
-    {
-        pieces[piece_count++] = option->arch;
-    }
-    uint32_t order[BUSTER_CHECK_PROGRAM_TARGET_FEATURES];
+    uint32_t next = UINT32_MAX;
+    uint64_t best = 0;
     for (uint32_t f = 0; f < option->feature_count; f += 1)
     {
-        // Insertion by priority, the highest first.
-        const uint32_t priority = check_program_target_feature_priority(option->features[f]);
-        uint32_t at = f;
-        while (at > 0 && check_program_target_feature_priority(option->features[order[at - 1]]) < priority)
-        {
-            order[at] = order[at - 1];
-            at -= 1;
-        }
-        order[at] = f;
+        const uint64_t key = (uint64_t)check_program_target_feature_priority(option->features[f]) << 32 | (uint64_t)(UINT32_MAX - f);
+        const bool better = key < *after && (next == UINT32_MAX || key > best);
+        next = better ? f : next;
+        best = better ? key : best;
     }
-    for (uint32_t f = 0; f < option->feature_count; f += 1)
-    {
-        pieces[piece_count++] = option->features[order[f]];
-    }
-    for (uint32_t p = 0; fits && p < piece_count; p += 1)
-    {
-        const bool arch = p == 0 && option->arch.length != 0;
-        const uint64_t needed = (p != 0 && !clones ? 1u : 0u) + (arch ? 5u : 0u) + pieces[p].length;
-        fits = length + needed <= capacity;
-        if (fits)
-        {
-            if (p != 0 && !clones)
-            {
-                text[length++] = '_';
-            }
-            if (arch)
-            {
-                memcpy(text + length, "arch_", 5);
-                length += 5;
-            }
-            memcpy(text + length, pieces[p].pointer, pieces[p].length);
-            length += (uint32_t)pieces[p].length;
-        }
-    }
-    if (fits && clones && option->is_default)
-    {
-        fits = length + 7 <= capacity;
-        if (fits)
-        {
-            memcpy(text + length, "default", 7);
-            length += 7;
-        }
-    }
-    if (fits && clones)
-    {
-        const int written = snprintf(text + length, capacity - length, ".%u", option->index);
-        fits = written > 0 && (uint32_t)written < capacity - length;
-        length += fits ? (uint32_t)written : 0;
-    }
-    return fits ? length : 0;
+    *after = next != UINT32_MAX ? best : 0;
+    return next;
 }
 
 // The versions of a target_clones attribute, in its order (checkTargetClonesAttr's, each string's versions split, which
 // the checker keeps joined by commas as the attribute's text): `count` of them, at most `capacity`, each with its index
-// and whether an earlier one is the same. Whether they fit.
-static bool check_program_target_clones(const CheckInputAttribute* attribute, CheckProgramTargetOption* options, uint32_t capacity, uint32_t* count)
+// and whether an earlier one is the same; their features in `arena`. Whether they fit.
+static bool check_program_target_clones(const CheckInputAttribute* attribute, CheckProgramTargetOption* options, uint32_t capacity, uint32_t* count, Arena* arena)
 {
     const String8 text = attribute->text;
     bool fits = text.pointer != NULL;
@@ -323,8 +272,13 @@ static bool check_program_target_clones(const CheckInputAttribute* attribute, Ch
             }
             else if (!option->is_default)
             {
-                option->features[0] = item;
-                option->feature_count = 1;
+                option->features = BUSTER_ARENA_PUSH_ARRAY(arena, String8, 1);
+                fits = option->features != NULL;
+                option->feature_count = fits ? 1 : 0;
+                if (fits)
+                {
+                    option->features[0] = item;
+                }
             }
             option->index = others;
             others += option->is_default ? 0 : 1;
@@ -368,15 +322,66 @@ static String8 check_program_target_name(const CheckProgram* program, uint32_t d
     return (String8){ .pointer = text, .length = text != NULL ? length + extra : 0 };
 }
 
-// The symbol name of option `option` of group `group`: f for target's "default", f.SUFFIX otherwise. In `output`.
+// The symbol name of option `option` of group `group`: f for target's "default", f.SUFFIX otherwise, in `output`. The
+// suffix is target's (arch_CPU, then the features by their priorities, the highest first, '_' between) or target_clones'
+// (its version, arch_CPU for arch=, then a period and its index). Empty where there was no room.
 static String8 check_program_target_option_name(const CheckProgram* program, const CheckProgramTargetGroup* group, const CheckProgramTargetOption* option, Arena* output)
 {
-    char suffix[512];
     const bool clones = group->clones != 0;
-    const uint32_t length = !clones && option->is_default ? 0 : check_program_target_suffix(option, clones, suffix, sizeof(suffix));
     const bool plain = !clones && option->is_default;
-    return plain ? check_program_target_name(program, group->first, NULL, 0, "", output) :
-           check_program_target_name(program, group->first, suffix, length, NULL, output);
+    char index[16];
+    const int index_length = clones ? snprintf(index, sizeof(index), ".%u", option->index) : 0;
+    const uint32_t identifier = program->parser->tokens.names[group->first];
+    const uint32_t identifier_length = intern_length(program->identifiers, identifier);
+    // The pieces: arch= first, then the features in their order.
+    uint64_t length = identifier_length;
+    uint32_t pieces = 0;
+    if (!plain && option->arch.length != 0)
+    {
+        length += 5 + option->arch.length;
+        pieces += 1;
+    }
+    for (uint32_t f = 0; !plain && f < option->feature_count; f += 1)
+    {
+        length += option->features[f].length;
+        pieces += 1;
+    }
+    length += plain ? 0 : 1u + (clones || pieces == 0 ? 0u : pieces - 1u) + (clones && option->is_default ? 7u : 0u) + (uint32_t)index_length;
+    char* text = index_length >= 0 ? BUSTER_ARENA_PUSH_ARRAY(output, char, length) : NULL;
+    uint64_t at = 0;
+    if (text != NULL)
+    {
+        memcpy(text, intern_bytes(program->identifiers, identifier), identifier_length);
+        at = identifier_length;
+        if (!plain)
+        {
+            text[at++] = '.';
+        }
+        if (!plain && option->arch.length != 0)
+        {
+            memcpy(text + at, "arch_", 5);
+            memcpy(text + at + 5, option->arch.pointer, option->arch.length);
+            at += 5 + option->arch.length;
+        }
+        uint64_t after = UINT64_MAX;
+        for (uint32_t f = plain ? UINT32_MAX : check_program_target_next_feature(option, &after); f != UINT32_MAX; f = check_program_target_next_feature(option, &after))
+        {
+            if (!clones && (at != identifier_length + 1))
+            {
+                text[at++] = '_';
+            }
+            memcpy(text + at, option->features[f].pointer, option->features[f].length);
+            at += option->features[f].length;
+        }
+        if (clones && option->is_default)
+        {
+            memcpy(text + at, "default", 7);
+            at += 7;
+        }
+        memcpy(text + at, index, (uint64_t)index_length);
+        at += (uint64_t)index_length;
+    }
+    return (String8){ .pointer = text, .length = text != NULL ? at : 0 };
 }
 
 // The target attribute of target's version `v`.
@@ -518,12 +523,12 @@ static bool check_program_target_groups(CheckProgram* program, const CheckProgra
         bool fits = valid;
         if (group.clones != 0 && fits)
         {
-            fits = check_program_target_clones(attribute, options, room, &option_count);
+            fits = check_program_target_clones(attribute, options, room, &option_count, output);
         }
         for (uint32_t v = 0; group.clones == 0 && fits && v < group.version_count; v += 1)
         {
             const CheckInputAttribute* target = check_target_versions_own(check_input_attributes_at(input, versions[group.version_first + v].declaration), CHECK_ATTRIBUTE_TARGET);
-            fits = check_program_target_parse(target->text, options + v);
+            fits = check_program_target_parse(target->text, options + v, output);
             option_count += 1;
         }
         for (uint32_t o = 0; fits && o < option_count; o += 1)
@@ -620,11 +625,11 @@ static CheckProgramTargetOption* check_program_target_options(const CheckProgram
     if (options != NULL && group->clones != 0)
     {
         const CheckInputAttribute* attribute = check_target_versions_own(check_input_attributes_at(program->input, group->clones_declaration), CHECK_ATTRIBUTE_TARGET_CLONES);
-        (void)check_program_target_clones(attribute, options, room, &count);
+        (void)check_program_target_clones(attribute, options, room, &count, arena);
     }
     for (uint32_t v = 0; options != NULL && group->clones == 0 && v < group->version_count && v < room; v += 1)
     {
-        (void)check_program_target_parse(check_program_target_version_attribute(program, group->version_first + v)->text, options + v);
+        (void)check_program_target_parse(check_program_target_version_attribute(program, group->version_first + v)->text, options + v, arena);
         count += 1;
     }
     for (uint32_t o = 0; options != NULL && o < count; o += 1)

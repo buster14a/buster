@@ -400,7 +400,12 @@ static void check_test_target_versions_objects(CheckTest* test, const char* clan
         "int call_s(void) { return s(); }\n"
         "__attribute__((target_clones(\"avx2\", \"arch=x86-64-v3\", \"sse4.1\", \"default\"))) int c(int x) { return x * 3; }\n"
         "static __attribute__((target_clones(\"gfni\", \"default\"))) int t(void) { return 7; }\n"
-        "int call_t(void) { return t(); }\n";
+        "int call_t(void) { return t(); }\n"
+        // A repeated version (kept for its index, without a symbol of its own) and a default that isn't last.
+        "__attribute__((target_clones(\"default\", \"avx2\", \"sse4.2\", \"avx2\"))) int d(int x) { return x * 5; }\n"
+        // A version of 41 features, its name past 200 bytes.
+        "__attribute__((target(\"default\"))) int g(int x) { return x - 1; }\n"
+        "__attribute__((target(\"popcnt,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2\"))) int g(int x) { return x - 2; }\n";
     static const char callers[] =
         "int printf(const char*, ...);\n"
         "__attribute__((target(\"avx2\"))) int f(int x);\n"
@@ -408,9 +413,13 @@ static void check_test_target_versions_objects(CheckTest* test, const char* clan
         "__attribute__((target(\"arch=znver4\"))) int f(int x);\n"
         "__attribute__((target(\"popcnt,sse4.2\"))) int f(int x);\n"
         "__attribute__((target_clones(\"avx2\", \"arch=x86-64-v3\", \"sse4.1\", \"default\"))) int c(int x);\n"
+        "__attribute__((target_clones(\"default\", \"avx2\", \"sse4.2\", \"avx2\"))) int d(int x);\n"
+        "__attribute__((target(\"default\"))) int g(int x);\n"
+        "__attribute__((target(\"popcnt,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2\"))) int g(int x);\n"
         "int call_s(void);\nint call_t(void);\n"
-        "int (*address_f)(int) = f;\nint (*address_c)(int) = c;\n"
-        "int main(void) { printf(\"%d %d %d %d %d %d\\n\", f(5), call_s(), address_f(1), c(2), address_c(3), call_t()); return 0; }\n";
+        "int (*address_f)(int) = f;\nint (*address_c)(int) = c;\nint (*address_d)(int) = d;\n"
+        "int main(void) { printf(\"%d %d %d %d %d %d %d %d %d\\n\", f(5), call_s(), address_f(1), c(2), address_c(3), call_t(), d(4), address_d(6), g(9));\n"
+        "    return 0; }\n";
     char sources[2][PATH_MAX];
     char objects[2][3][PATH_MAX];
     snprintf(sources[0], sizeof(sources[0]), "%s/target-versions.c", directory);
@@ -536,11 +545,18 @@ static void check_test_target_versions_models(CheckTest* test, const char* clang
         "int c3(void) __asm__(\"c.arch_x86-64-v4.3\");\nint c4(void) __asm__(\"c.arch_znver5.4\");\nint c5(void) __asm__(\"c.avx10.1.5\");\n"
         "int c6(void) __asm__(\"c.sse4.1.6\");\nint c7(void) __asm__(\"c.default.7\");\n"
         "int (*address_c)(void) = c;\n"
+        // A repeated version and a default that isn't last: d.avx2.0, d.sse4.2.1 and d.default.3.
+        "__attribute__((target_clones(\"default\", \"avx2\", \"sse4.2\", \"avx2\"))) int d(void);\n"
+        "void* resolve_d(void) __asm__(\"d.resolver\");\n"
+        "int d0(void) __asm__(\"d.avx2.0\");\nint d1(void) __asm__(\"d.sse4.2.1\");\nint d3(void) __asm__(\"d.default.3\");\n"
+        "int (*address_d)(void) = d;\n"
         "int main(void)\n{\n    void* chosen = resolve();\n    void* versions[] = { (void*)c0, (void*)c1, (void*)c2, (void*)c3, (void*)c4, (void*)c5, (void*)c6, (void*)c7 };\n"
         "    int index = -1;\n    for (int i = 0; i < 8; i += 1) { index = versions[i] == chosen ? i : index; }\n"
-        "    printf(\"%d %d\\n\", f(), index);\n    return 0;\n}\n";
+        "    void* chosen_d = resolve_d();\n    int index_d = chosen_d == (void*)d0 ? 0 : chosen_d == (void*)d1 ? 1 : chosen_d == (void*)d3 ? 3 : -1;\n"
+        "    printf(\"%d %d %d\\n\", f(), index, index_d);\n    return 0;\n}\n";
     static const char clones[] =
-        "__attribute__((target_clones(\"avx2,bmi\", \"bmi2\", \"arch=x86-64-v4\", \"arch=znver5\", \"avx10.1\", \"sse4.1\", \"default\"))) int c(void) { return 1; }\n";
+        "__attribute__((target_clones(\"avx2,bmi\", \"bmi2\", \"arch=x86-64-v4\", \"arch=znver5\", \"avx10.1\", \"sse4.1\", \"default\"))) int c(void) { return 1; }\n"
+        "__attribute__((target_clones(\"default\", \"avx2\", \"sse4.2\", \"avx2\"))) int d(void) { return 2; }\n";
     char path[PATH_MAX];
     char clones_path[PATH_MAX];
     char clones_object[PATH_MAX];
