@@ -13,6 +13,10 @@
 // What a row computes: one of C's operators on vectors (CHECK_OP_ADD ... CHECK_OP_NOT_EQUAL, and the unary
 // CHECK_OP_NEGATIVE and CHECK_OP_BIT_NOT), or a splat of a scalar operand into every element.
 #define BUSTER_CHECK_VECTOR_SPLAT CHECK_OP_COUNT
+// Without AVX-512, a shift of a vector's elements by a scalar count (#1834), the row's integer operand (U32), as clang's
+// code shifts by an XMM register's count (check_vector_baseline_shift_by): left, or right by the elements' signedness.
+#define BUSTER_CHECK_VECTOR_SHIFT_LEFT_BY (CHECK_OP_COUNT + 1)
+#define BUSTER_CHECK_VECTOR_SHIFT_RIGHT_BY (CHECK_OP_COUNT + 2)
 
 // A vector's element, as the rows read it: its bytes (1, 2, 4 or 8), and whether it is floating (_Float16, float or
 // double) or a signed integer.
