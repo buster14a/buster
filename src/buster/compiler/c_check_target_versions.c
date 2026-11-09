@@ -606,45 +606,62 @@ static bool check_target_versions_compatible(CheckInputReader* reader, uint32_t 
     return refused;
 }
 
+// A walk over a target_clones attribute's versions: each string argument's items between commas, trimmed, in order.
+typedef struct CheckTargetClonesWalk CheckTargetClonesWalk;
+struct CheckTargetClonesWalk
+{
+    const CheckInputAttribute* attribute;
+    String8 text;
+    uint32_t argument;
+    uint32_t cursor;
+    bool valid;
+};
+
+// The walk's next version into `item`; false at its end or on an argument that is not a string.
+static bool check_target_clones_next(CheckInputReader* reader, CheckTargetClonesWalk* walk, String8* item)
+{
+    while (walk->valid && walk->cursor >= walk->text.length && walk->argument < walk->attribute->argument_count)
+    {
+        uint32_t first = 0;
+        uint32_t end = 0;
+        walk->text = (String8){ 0 };
+        walk->valid = check_input_attribute_argument(walk->attribute, walk->argument, &first, &end) && check_input_attribute_string(reader, first, end, false, &walk->text);
+        walk->argument += 1;
+        walk->cursor = 0;
+    }
+    const bool found = walk->valid && walk->cursor < walk->text.length;
+    if (found)
+    {
+        uint32_t item_end = walk->cursor;
+        while (item_end < walk->text.length && walk->text.pointer[item_end] != ',')
+        {
+            item_end += 1;
+        }
+        *item = check_target_version_slice(walk->text, walk->cursor, item_end);
+        walk->cursor = item_end + 1;
+    }
+    return found;
+}
+
 // Whether the target_clones lists of `a` and `b` are the same strings (clang's std::equal of their versions, each string
-// of several versions its versions, as checkTargetClonesAttr split them).
+// of several versions its versions, as checkTargetClonesAttr split them); any number of versions, walked side by side.
 static bool check_target_versions_same_clones(CheckInputReader* reader, const CheckInputAttribute* a, const CheckInputAttribute* b)
 {
-    const CheckInputAttribute* attributes[2] = { a, b };
-    String8 versions[2][BUSTER_CHECK_TARGET_VERSION_ITEMS];
-    uint32_t counts[2] = { 0, 0 };
-    bool valid = true;
-    for (uint32_t side = 0; side < 2; side += 1)
+    CheckTargetClonesWalk walks[2] = {
+        { .attribute = a, .valid = true },
+        { .attribute = b, .valid = true },
+    };
+    bool same = true;
+    bool more = true;
+    while (same && more)
     {
-        const CheckInputAttribute* attribute = attributes[side];
-        for (uint32_t argument = 0; valid && argument < attribute->argument_count; argument += 1)
-        {
-            uint32_t first = 0;
-            uint32_t end = 0;
-            String8 text = { 0 };
-            valid = check_input_attribute_argument(attribute, argument, &first, &end) && check_input_attribute_string(reader, first, end, false, &text);
-            for (uint32_t cursor = 0; valid && cursor < text.length;)
-            {
-                uint32_t item_end = cursor;
-                while (item_end < text.length && text.pointer[item_end] != ',')
-                {
-                    item_end += 1;
-                }
-                valid = counts[side] < BUSTER_CHECK_TARGET_VERSION_ITEMS;
-                if (valid)
-                {
-                    versions[side][counts[side]++] = check_target_version_slice(text, cursor, item_end);
-                }
-                cursor = item_end + 1;
-            }
-        }
+        String8 items[2] = { 0 };
+        const bool has_a = check_target_clones_next(reader, &walks[0], &items[0]);
+        const bool has_b = check_target_clones_next(reader, &walks[1], &items[1]);
+        same = has_a == has_b && (!has_a || check_target_versions_text_equal(items[0], items[1]));
+        more = has_a;
     }
-    bool same = valid && counts[0] == counts[1];
-    for (uint32_t i = 0; same && i < counts[0]; i += 1)
-    {
-        same = check_target_versions_text_equal(versions[0][i], versions[1][i]);
-    }
-    return same;
+    return same && walks[0].valid && walks[1].valid;
 }
 
 // clang's CheckMultiVersionFunction for a function's declaration at `name`, of `type` and `attributes`, against the
