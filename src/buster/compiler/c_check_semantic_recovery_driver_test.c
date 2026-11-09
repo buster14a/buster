@@ -670,6 +670,11 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "int f(int, int); int a[f(1)];\n",
         "int f(void);\nint a[f(5)];\n",
         "int f(void);\nint x __attribute__((aligned(f(5, 6))));\n",
+        // The forward declaration's note at the diagnosed type's own declaration, which an inner definition shadows, and a
+        // sizeof's operand's typedef spelling, as clang's (review on #1900).
+        "struct T;\ntypedef struct T Outer;\nvoid f(void) {\n    struct T { int x; };\n    int a[sizeof(Outer)];\n}\n",
+        "struct T;\ntypedef struct T *OuterP;\nvoid f(void) {\n    struct T { int x; };\n    int a[sizeof((OuterP)0 + 1)];\n}\n",
+        "struct T;\ntypedef struct T Outer;\nvoid f(void) {\n    struct T { int x; };\n    int x __attribute__((aligned(sizeof(Outer))));\n}\n",
         "struct T; int a[sizeof(struct T)];\n",
         "struct S{int a;} s; int a[s + 1];\n",
         "int f(int); int x __attribute__((aligned(f(1, 2))));\n",
