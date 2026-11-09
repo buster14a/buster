@@ -72,6 +72,9 @@ struct Tier1CfgSourceTotals
     uint64_t functions;
     uint64_t unsupported;
     uint64_t unpromoted;
+    // Functions whose frame is Tier 0's alone (ir_lower_tier0_frame: a setjmp's caller, #1847), which the lowering refuses
+    // by design: neither unpromoted nor a failure.
+    uint64_t tier0;
     uint64_t malformed;
     uint64_t disagreed;
     uint64_t instructions;
@@ -168,14 +171,16 @@ static void tier1_cfg_source_check(Tier1CfgSourceTotals* totals, const IrSourceF
         const IrCheck lowering = ir_lower_typed_target(source->function, source->result_type, source->symbol_count, source->target_features, lowered_output, scratch, &lowered);
         // A function with vectors promotes as any other (#141), and with --simd is counted.
         const IrCheck promotion = lowering.error == IR_OK ? ssa_ir_promote(&lowered, promoted_output, scratch, &promoted) : lowering;
+        const bool frame = lowering.error == IR_ERROR_UNSUPPORTED && ir_lower_tier0_frame(source->function);
+        totals->tier0 += frame;
         const IrFunction* allocated = &promoted;
         totals->simd += simd && promotion.error == IR_OK && ir_function_has_vectors(&promoted);
         Tier1CfgIrProblem problem = { 0 };
         const Tier1CfgIrStatus adapted = promotion.error == IR_OK ? tier1_cfg_from_ir(allocated, problem_arena, scratch, &problem) : TIER1_CFG_IR_INVALID;
-        totals->unpromoted += promotion.error != IR_OK;
+        totals->unpromoted += promotion.error != IR_OK && !frame;
         totals->unsupported += adapted == TIER1_CFG_IR_UNSUPPORTED;
         totals->malformed += promotion.error == IR_OK && adapted != TIER1_CFG_IR_OK && adapted != TIER1_CFG_IR_UNSUPPORTED;
-        bool failed = promotion.error != IR_OK || (adapted != TIER1_CFG_IR_OK && adapted != TIER1_CFG_IR_UNSUPPORTED);
+        bool failed = (promotion.error != IR_OK && !frame) || (promotion.error == IR_OK && adapted != TIER1_CFG_IR_OK && adapted != TIER1_CFG_IR_UNSUPPORTED);
         if (adapted == TIER1_CFG_IR_OK)
         {
             const Tier1CfgInput* input = &problem.input;
@@ -256,7 +261,8 @@ static void tier1_cfg_source_check(Tier1CfgSourceTotals* totals, const IrSourceF
         }
         if (promotion.error != IR_OK || (adapted != TIER1_CFG_IR_OK && adapted != TIER1_CFG_IR_UNSUPPORTED))
         {
-            printf("tier1-cfg-source: file=%s function=%s %s ir_error=%u adapter=%u\n", name, source->name, promotion.error != IR_OK ? "unpromoted" : "malformed", (unsigned)promotion.error, (unsigned)adapted);
+            printf("tier1-cfg-source: file=%s function=%s %s ir_error=%u adapter=%u\n", name, source->name, frame ? "tier0" : promotion.error != IR_OK ? "unpromoted" : "malformed",
+                   (unsigned)promotion.error, (unsigned)adapted);
         }
         failures += failed;
         arena_pop_to(problem_arena, problem_mark);
@@ -346,8 +352,8 @@ static __attribute__((unused)) int run_tier1_cfg_source_tests(int count, char** 
     const uint64_t refused = totals.paths[0].failed + totals.paths[0].rejected + totals.paths[1].failed + totals.paths[1].rejected + totals.paths[0].uncertified + totals.paths[1].uncertified;
     if (valid)
     {
-        printf("tier1-cfg-source: totals files=%" PRIu64 " left_out=%" PRIu64 " failed=%" PRIu64 " functions=%" PRIu64 " unsupported=%" PRIu64 " unpromoted=%" PRIu64 " malformed=%" PRIu64 " disagreed=%" PRIu64 " instructions=%" PRIu64 " values=%" PRIu64 " blocks=%" PRIu64 " edges=%" PRIu64 " phis=%" PRIu64 " simd_vectors=%" PRIu64 " masks=%" PRIu64 "\n",
-               totals.files, totals.left_out, totals.failed_files, totals.functions, totals.unsupported, totals.unpromoted, totals.malformed, totals.disagreed, totals.instructions, totals.values, totals.blocks, totals.edges, totals.phis, totals.simd, totals.mask_values);
+        printf("tier1-cfg-source: totals files=%" PRIu64 " left_out=%" PRIu64 " failed=%" PRIu64 " functions=%" PRIu64 " unsupported=%" PRIu64 " unpromoted=%" PRIu64 " tier0=%" PRIu64 " malformed=%" PRIu64 " disagreed=%" PRIu64 " instructions=%" PRIu64 " values=%" PRIu64 " blocks=%" PRIu64 " edges=%" PRIu64 " phis=%" PRIu64 " simd_vectors=%" PRIu64 " masks=%" PRIu64 "\n",
+               totals.files, totals.left_out, totals.failed_files, totals.functions, totals.unsupported, totals.unpromoted, totals.tier0, totals.malformed, totals.disagreed, totals.instructions, totals.values, totals.blocks, totals.edges, totals.phis, totals.simd, totals.mask_values);
         tier1_cfg_source_print_path("vector", &totals.paths[0], totals.instructions);
         tier1_cfg_source_print_path("scalar", &totals.paths[1], totals.instructions);
         printf("tier1-cfg-source: frame traffic: slot_accesses=%" PRIu64 " vector=%" PRIu64 " scalar=%" PRIu64 "\n", totals.slot_accesses, totals.slot_accesses + totals.paths[0].stores + totals.paths[0].reloads,
