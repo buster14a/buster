@@ -318,6 +318,11 @@ typedef enum CheckInputMessage
     // are (CHECK_INPUT_UNDECLARED's completion, check_input_diagnostic_recover). The driver publishes nothing for it and
     // counts it as no error (check_driver_quiet_report).
     CHECK_INPUT_INVALID_USE,
+    // A use of a name that two C23 definitions of an enum both declare (#1447, check_tag_enum_ambiguous): clang's
+    // "reference to 'X' is ambiguous" at it, its notes "candidate found by name lookup is 'X'" at the second definition's
+    // enumerator (`note_token`) and the earlier's (`attribute`). Its enclosing expressions' diagnostics are left out as an
+    // undeclared name's are.
+    CHECK_INPUT_AMBIGUOUS,
 } CheckInputMessage;
 
 // CHECK_INPUT_DIRECT_INITIALIZER_ARRAY's detail: the literal the element takes besides a list, in clang's words.
@@ -2028,6 +2033,16 @@ struct CheckInputReader
     uint32_t* c23_failed;
     uint32_t c23_failed_count;
     uint32_t c23_failed_capacity;
+    // C23's enum redefinitions (#1447, check_tag_enum_ambiguous): each enumerator of a second definition that an earlier
+    // one's name declares too, that earlier one, and the use from which the name is no longer ambiguous (past the second's
+    // body where the definitions are compatible, else BUSTER_CHECK_NONE); and a word per token, the pair's index plus one at
+    // the second's enumerator, NULL in a unit without one.
+    uint32_t* ambiguous_declarations;
+    uint32_t* ambiguous_partners;
+    uint32_t* ambiguous_ends;
+    uint32_t* ambiguous_index;
+    uint32_t ambiguous_count;
+    uint32_t ambiguous_capacity;
     // Typo correction's state (#1447, c_check_typo.c), made at the unit's first undeclared name; and whether it is off,
     // in a deferred reader's lanes and the answers they share, whose unit with an undeclared name is read again in
     // source order.
@@ -2590,7 +2605,7 @@ static void check_input_report(CheckInputReader* reader, uint32_t token, CheckIn
         {
             .token = token,
             .message = message,
-            .completion = (message == CHECK_INPUT_UNDECLARED || message == CHECK_INPUT_INVALID_USE) && reader->parser != NULL && token < reader->parser->tokens.count &&
+            .completion = (message == CHECK_INPUT_UNDECLARED || message == CHECK_INPUT_INVALID_USE || message == CHECK_INPUT_AMBIGUOUS) && reader->parser != NULL && token < reader->parser->tokens.count &&
                           reader->parser->tokens.kinds != NULL && reader->parser->tree.roles != NULL &&
                           reader->parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER && reader->parser->tree.roles[token] == PARSE_ROLE_OPERAND ? token + 1u : 0,
         };
@@ -2665,6 +2680,9 @@ static void check_input_report_redeclaration(CheckInputReader* reader, uint32_t 
 
 // c_check_tag_compatible.c's, which C23's redefinition of a record notes for its completion (#1447).
 static bool check_tag_compatible_note(CheckInputReader* reader, uint32_t keyword, TypeId earlier, uint32_t earlier_keyword);
+static TypeId check_tag_compatible_earlier(const CheckInputReader* reader, uint32_t keyword, uint32_t* earlier_keyword);
+static uint32_t check_tag_name_token(const Parser* parser, uint32_t keyword, uint32_t name, uint32_t* open);
+static bool check_tag_failed_note(CheckInputReader* reader, uint32_t keyword);
 static bool check_tag_member_attributes_note(CheckInputReader* reader, uint32_t token, CheckInputAttributes* attributes);
 
 // Append a multiversioning message that names the attribute at `attribute` and carries `note` at `note_token`, if any,
@@ -2818,7 +2836,8 @@ static void check_input_diagnostic_recover(CheckInputReader* reader, bool resolv
     for (uint32_t report = 0; recoverable && report < input->report_count; report += 1)
     {
         const CheckInputReport* item = input->reports + report;
-        recoverable = (item->message == CHECK_INPUT_UNDECLARED || item->message == CHECK_INPUT_INVALID_USE) && item->pragma == 0 && item->token < count &&
+        recoverable = (item->message == CHECK_INPUT_UNDECLARED || item->message == CHECK_INPUT_INVALID_USE || item->message == CHECK_INPUT_AMBIGUOUS) &&
+                      item->pragma == 0 && item->token < count &&
                       parser->tokens.kinds[item->token] == PARSE_KIND_IDENTIFIER && parser->tree.roles[item->token] == PARSE_ROLE_OPERAND;
     }
     if (recoverable)
@@ -3979,18 +3998,26 @@ static TypeId check_input_tag_identity(CheckInputReader* reader, uint32_t token,
         const bool again = !c23 && earlier_tag != 0 && type_is_complete(reader->types, earlier) &&
                            (kind != BUSTER_TYPE_KIND_ENUM || (earlier_state == BUSTER_CHECK_ENUM_NONE && !fixed) ||
                             (earlier_state == BUSTER_CHECK_ENUM_LISTED && fixed && reader->types->types.base[type_index(earlier)] == underlying));
-        const bool compatible = c23 && earlier_tag != 0 && kind != BUSTER_TYPE_KIND_ENUM && type_is_complete(reader->types, earlier);
+        // An enum's, at file scope (#1447, check_tag_enum_compatible): one without a fixed type after one without, or one
+        // listed again with its fixed base. Its body is an anonymous enum's whose enumerators of the earlier one's names
+        // are ambiguous (check_tag_enum_ambiguous), compared with the earlier once complete. (A block's notes name its
+        // function, `f()::X`, which the reader doesn't spell: it still refuses there.)
+        const bool enum_again = c23 && earlier_tag != 0 && kind == BUSTER_TYPE_KIND_ENUM && type_is_complete(reader->types, earlier) && depth == 0 &&
+                                ((earlier_state == BUSTER_CHECK_ENUM_NONE && !fixed) ||
+                                 (earlier_state == BUSTER_CHECK_ENUM_LISTED && fixed && reader->types->types.base[type_index(earlier)] == underlying));
+        const bool compatible = c23 && earlier_tag != 0 && (kind != BUSTER_TYPE_KIND_ENUM || enum_again) && type_is_complete(reader->types, earlier);
         if (compatible)
         {
             // The earlier definition's keyword, before its name and any attributes of the tag.
             const uint32_t old = reader->bindings.declaration[previous - 1];
             const uint32_t defined_at = check_input_tag_definition_name(reader, earlier, old);
             uint32_t keyword = defined_at != BUSTER_CHECK_NONE ? defined_at : old;
-            for (uint32_t steps = 0; keyword != 0 && steps < 64 && parser->tokens.kinds[keyword] != PARSE_KIND_STRUCT; steps += 1)
+            const uint8_t keyword_kind = kind == BUSTER_TYPE_KIND_ENUM ? PARSE_KIND_ENUM : PARSE_KIND_STRUCT;
+            for (uint32_t steps = 0; keyword != 0 && steps < 64 && parser->tokens.kinds[keyword] != keyword_kind; steps += 1)
             {
                 keyword -= 1;
             }
-            valid = check_tag_compatible_note(reader, token, earlier, parser->tokens.kinds[keyword] == PARSE_KIND_STRUCT ? keyword : BUSTER_CHECK_NONE);
+            valid = check_tag_compatible_note(reader, token, earlier, parser->tokens.kinds[keyword] == keyword_kind ? keyword : BUSTER_CHECK_NONE);
         }
         if (again)
         {
@@ -7749,8 +7776,11 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
                 const uint32_t tag = reader->types->types.index[type_index(frame->type)];
                 reader->tag_completions[tag] = reader->enum_fixed[tag] == BUSTER_CHECK_ENUM_NONE ? i + 1 : reader->tag_completions[tag];
                 check_input_transparent_union(reader, frame->type, frame->attributes, after);
-                // A C23 redefinition, compared with the record it redefines (c_check_tag_compatible.c).
-                valid = kind == BUSTER_TYPE_KIND_ENUM || reader->c23_count == 0 || check_input_tag_compatible(reader, frame->token, frame->type, frame->attributes);
+                // A C23 redefinition, compared with the record or the enum it redefines (c_check_tag_compatible.c,
+                // c_check_enum_input.c).
+                valid = reader->c23_count == 0 ||
+                        (kind == BUSTER_TYPE_KIND_ENUM ? check_tag_enum_compatible(reader, frame, members) :
+                                                         check_input_tag_compatible(reader, frame->token, frame->type, frame->attributes));
             }
             reader->ignored[i] = true;
             check_input_rare_claim(reader, &reader->tag_ends[frame->token]);

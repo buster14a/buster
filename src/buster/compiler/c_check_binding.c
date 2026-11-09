@@ -462,17 +462,27 @@ static bool check_input_binding_answers(CheckInputReader* reader, const uint32_t
         check_input_binding_answer(reader, resolved, uses != NULL ? uses[at] : at);
     }
     // A use of an invalid declaration (#1447, check_input_invalid_declare) names none, as an undeclared one doesn't, and
-    // its report is quiet: only a unit with one pays for the pass.
-    for (uint32_t at = 0; valid && !deferred && reader->output->invalid_count != 0 && at < use_count; at += 1)
+    // its report is quiet; so does an ambiguous one of a name two C23 definitions of an enum declare
+    // (check_tag_enum_ambiguous), whose report is clang's error. Only a unit with one pays for the pass.
+    const bool invalid = reader->output->invalid_count != 0;
+    for (uint32_t at = 0; valid && !deferred && (invalid || reader->ambiguous_count != 0) && at < use_count; at += 1)
     {
         const uint32_t event = uses != NULL ? uses[at] : at;
         const uint32_t token = events->declaration[event];
         const uint32_t declaration = events->operation[event] == C_BINDING_USE && token < count ? output->declarations[token] : BUSTER_CHECK_NONE;
-        if (declaration < count && reader->output->invalid_declarations[declaration] != 0)
+        const uint32_t pair = declaration < count && reader->ambiguous_index != NULL ? reader->ambiguous_index[declaration] : 0;
+        const bool ambiguous = pair != 0 && token < reader->ambiguous_ends[pair - 1];
+        if (ambiguous || (invalid && declaration < count && reader->output->invalid_declarations[declaration] != 0))
         {
             output->declarations[token] = BUSTER_CHECK_NONE;
             reader->declared_types[token] = 0;
-            check_input_report(reader, token, CHECK_INPUT_INVALID_USE);
+            const uint32_t before = output->report_count;
+            check_input_report(reader, token, ambiguous ? CHECK_INPUT_AMBIGUOUS : CHECK_INPUT_INVALID_USE);
+            if (ambiguous && output->report_count == before + 1 && !output->resource)
+            {
+                output->reports[before].note_token = declaration;
+                output->reports[before].attribute = reader->ambiguous_partners[pair - 1];
+            }
         }
     }
     valid &= !output->resource;

@@ -66,6 +66,7 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_ARRAY_INCOMPLETE: result = "array has incomplete element type"; break;
         case CHECK_INPUT_ARRAY_TOO_LARGE: result = "array is too large"; break;
         case CHECK_INPUT_INVALID_USE: result = "use of an invalid declaration"; break;
+        case CHECK_INPUT_AMBIGUOUS: result = "reference to identifier is ambiguous"; break;
         case CHECK_INPUT_TAG_INCOMPATIBLE: result = "type has incompatible definitions"; break;
         case CHECK_INPUT_UNDECLARED_CORRECTED: result = "use of undeclared identifier"; break;
         case CHECK_INPUT_UNDECLARED: result = "use of undeclared identifier"; break;
@@ -3832,6 +3833,20 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                                                         (int)intern_length(pp->table, name), intern_bytes(pp->table, name), (int)intern_length(pp->table, other),
                                                         intern_bytes(pp->table, other));
                         }
+                        else if (kind == CHECK_INPUT_AMBIGUOUS && named && input->reports[index].note_token < count && input->reports[index].attribute < count)
+                        {
+                            // A name two C23 definitions of an enum declare (#1447, check_tag_enum_ambiguous): clang's candidates,
+                            // the second definition's enumerator first.
+                            const uint32_t name = parser->tokens.names[token];
+                            char candidate[512];
+                            snprintf(candidate, sizeof(candidate), "candidate found by name lookup is '%.*s'", (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
+                            const PPOutputDiagnosticNote notes[2] = {
+                                { .token = parser->tokens.sources[input->reports[index].note_token], .message = candidate },
+                                { .token = parser->tokens.sources[input->reports[index].attribute], .message = candidate },
+                            };
+                            pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, notes, 2, "reference to '%.*s' is ambiguous",
+                                                        (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
+                        }
                         else if ((kind == CHECK_INPUT_UNDECLARED || kind == CHECK_INPUT_UNKNOWN_BUILTIN) && named)
                         {
                             const uint32_t name = parser->tokens.names[token];
@@ -4918,16 +4933,23 @@ static bool check_driver_rejected_declaration(const Parser* parser, const CheckI
     {
         valid = edits[at] != 2 && parser->tree.roles[at] != PARSE_ROLE_OPEN_BODY;
     }
-    // The bodies that name one of its names, outside it; a file-scope use declines.
+    // The bodies that name one of its names, outside it; a file-scope use declines. A name another declaration outside it
+    // declares too (an earlier C23 definition's enumerator, #1447) is still declared where it's left out.
     uint32_t users = 0;
     for (uint32_t at = low; valid && at <= top; at += 1)
     {
         const uint32_t name = parser->tokens.names[at];
-        const bool declared = parser->tokens.kinds[at] == PARSE_KIND_IDENTIFIER && input->declarations[at] == at && name != 0;
+        bool declared = parser->tokens.kinds[at] == PARSE_KIND_IDENTIFIER && input->declarations[at] == at && name != 0;
+        for (uint32_t other = 0; declared && other < count; other += 1)
+        {
+            declared = (other >= low && other <= top) || parser->tokens.kinds[other] != PARSE_KIND_IDENTIFIER || parser->tokens.names[other] != name ||
+                       input->declarations[other] != other;
+        }
         for (uint32_t use = 0; declared && valid && use < count; use += 1)
         {
+            // (Another declaration of the name, an earlier C23 definition's enumerator among them, names nothing.)
             const bool named = (use < low || use > top) && parser->tokens.kinds[use] == PARSE_KIND_IDENTIFIER && parser->tokens.names[use] == name &&
-                               (quiet == NULL || quiet[use] == 0);
+                               (quiet == NULL || quiet[use] == 0) && input->declarations[use] != use;
             uint32_t first = 0;
             uint32_t last = body_count;
             while (named && first < last)
@@ -4947,7 +4969,12 @@ static bool check_driver_rejected_declaration(const Parser* parser, const CheckI
         for (uint32_t at = low; users != 0 && at <= top; at += 1)
         {
             const uint32_t name = parser->tokens.names[at];
-            const bool declared = parser->tokens.kinds[at] == PARSE_KIND_IDENTIFIER && input->declarations[at] == at && name != 0;
+            bool declared = parser->tokens.kinds[at] == PARSE_KIND_IDENTIFIER && input->declarations[at] == at && name != 0;
+            for (uint32_t other = 0; declared && other < count; other += 1)
+            {
+                declared = (other >= low && other <= top) || parser->tokens.kinds[other] != PARSE_KIND_IDENTIFIER || parser->tokens.names[other] != name ||
+                           input->declarations[other] != other;
+            }
             for (uint32_t b = 0; declared && b < body_count; b += 1)
             {
                 bool names = false;

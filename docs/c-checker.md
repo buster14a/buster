@@ -4100,11 +4100,37 @@ do:
   A compatible redefinition declares the earlier type. Otherwise the unit is
   refused and recovered.
 
-  Left as they were: `-Wno-odr` doesn't turn the `-Wodr` errors off. An enum
-  defined again under C23 still refuses with the generic error, which stops
-  the reader. Clang compares its enumerators, and keeps both lists' names in
-  scope with ambiguous references. An `_Atomic(struct { ... })` member is the
-  parser's refusal, with or without a redefinition.
+  Left as they were: `-Wno-odr` doesn't turn the `-Wodr` errors off. An
+  `_Atomic(struct { ... })` member is the parser's refusal, with or without a
+  redefinition.
+
+  An enum defined again at file scope (#1447, c_check_enum_input.c) is read the
+  same way, an enum without a fixed type after one without, or one listed again
+  with its fixed base:
+  - Its body is an anonymous enum's. An enumerator of a name the earlier
+    definition's declare too is no redefinition but a name both declare
+    (`check_tag_enum_ambiguous`): its uses get clang's "reference to 'X' is
+    ambiguous" (`CHECK_INPUT_AMBIGUOUS`), with the candidates' notes at the
+    second definition's enumerator and the earlier's, and recover as an
+    undeclared name's do.
+  - Once complete it is compared as clang's structural equivalence compares
+    enums (`check_tag_enum_compatible`): each list sorted by the names' bytes,
+    then pairwise their names and values, and past the shorter list the
+    longer one's next. The first difference is "type 'enum G' has
+    incompatible definitions", with "enumerator 'Z' with value 1 here" notes
+    (the second's, then the earlier's), or one past the other list and "no
+    corresponding enumerator here" at the other definition's name.
+  - A compatible one declares the earlier type, and its names are ambiguous
+    within its body alone; an incompatible one keeps its own type, and the
+    names both lists declare stay ambiguous.
+  - A unit with one reads its bodies in source order.
+
+  Left: a block's redefinition, whose notes clang qualifies (`f()::X`), still
+  refuses with the generic error; a third definition's ambiguous uses note its
+  own enumerator and the first's, where clang's candidates list all three; and a
+  rejected unit whose incompatible redefinition's own names are used at file
+  scope next to an ambiguous use loses its later readings' warnings, as its
+  view leaves the redefinition out.
 - **A repeated enumerator** gives "redefinition of enumerator 'A'" with its
   note at the earlier one, and is dropped (`CheckTagFrame.dropped`). As in
   clang, whose next `CheckEnumConstant` sees no previous constant, the next
@@ -4503,7 +4529,7 @@ The later phases are left:
 
 - **Invalid declarations.** Not covered by phase 2 or the invalid
   declarations above:
-  - C23's redefinition of an enum, compatible or not (above).
+  - C23's redefinition of an enum in a block, or a third time (above).
   - An initialized invalid declaration, a typedef's declarator error and a
     parameter's, which clang marks invalid too.
 
