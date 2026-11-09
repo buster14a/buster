@@ -7689,12 +7689,20 @@ arguments against the function. The checker now gives these as clang does.
 
   Lowering: clang's x86 target maps address spaces 256, 257 and 258
   (`__seg_gs`, `__seg_fs`) to the `%gs`, `%fs` and `%ss` segments, whose loads
-  and stores need a segment override that Tier 0's and Tier 1's memory operands
-  don't carry (the encoder has the prefixes, which only thread-local storage's
-  forms use). A load or store in one of those spaces is refused by name ("a load
-  or store in a segment's address space", check_lower_segment_access, where a
-  unit has such a type at all: CheckLowerWriter.segments), and so are the
-  accesses whose lvalue doesn't carry the space: a vector's element, read or
+  and stores take a segment override. A load or store in `%fs` or `%gs` of an
+  integer, a floating value (long double too), a 128-bit integer or a vector,
+  by indirection, member, subscript or name, and an assignment, compound
+  assignment, increment or decrement of one, takes it (check_lower_access: the
+  typed stream's `BUSTER_TYPED_ACCESS_SEGMENT` on its LOAD, STORE or SET, which
+  Tier 0 puts on the access's memory operand; docs/tier0.md); a global in one
+  goes through its address, as a memory class's does (`lea sym(%rip)` and then
+  `%gs:(%rax)`, the byte clang's `%gs:sym(%rip)` reaches). Tier 1 falls back to
+  Tier 0 for such a function. The rest is refused by name ("a load or store in a
+  segment's address space", check_lower_segment_access, where a unit has such a
+  type at all: CheckLowerWriter.segments): an aggregate's copy, a bit-field, a
+  complex, half-precision or `_BitInt` value, an `_Atomic` object, and `%ss`'s
+  space (258, whose `36` prefix no 64-bit form of the encoder's has); and so are
+  the accesses whose lvalue doesn't carry the space: a vector's element, read or
   written (its type loses the vector's space), an atomic builtin's object
   (`__atomic_*`, `__c11_atomic_*`, `__sync_*`, reached through the pointer
   argument), and an asm statement's register output (stored through its

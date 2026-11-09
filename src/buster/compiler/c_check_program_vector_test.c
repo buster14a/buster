@@ -663,11 +663,70 @@ static void check_test_program_segment_refusals(CheckTest* test, const X86Target
           "an asm output in a segment's address space (256, 257 or 258: %gs, %fs or %ss) but a memory one" },
         { "segment-asm-read-write-output", "void tested(int __seg_gs*p){__asm__(\"incl %0\":\"+r\"(*p));}",
           "an asm output in a segment's address space (256, 257 or 258: %gs, %fs or %ss) but a memory one" },
+        // What the lowering doesn't carry the override through yet (check_lower_segment_carried): an aggregate's copy, a
+        // bit-field, a complex value, a half-precision value, a _BitInt, an _Atomic object, and %ss's space (258).
+        { "segment-struct-copy", "struct S{long a,b,c;};struct S tested(struct S __seg_fs*p){return *p;}",
+          "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
+        { "segment-struct-store", "struct S{long a,b,c;};void tested(struct S __seg_fs*p,struct S s){*p=s;}",
+          "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
+        { "segment-bit-field", "struct S{int a:3,b:5;};int tested(struct S __seg_gs*p){return p->b;}",
+          "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
+        { "segment-complex", "_Complex double tested(_Complex double __seg_gs*p){return *p;}",
+          "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
+        { "segment-half", "float tested(_Float16 __seg_gs*p){return *p;}",
+          "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
+        { "segment-bit-int", "int tested(_BitInt(40) __seg_fs*p){return (int)*p;}",
+          "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
+        { "segment-atomic-object", "int tested(_Atomic int __seg_fs*p){return *p;}",
+          "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
+        { "segment-ss", "int tested(int __attribute__((address_space(258)))*p){return *p;}",
+          "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
     };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(refused); i += 1)
     {
         check_test_program_boundary_target(test, refused[i].source, refused[i].name, true, false, 0, 0, refused[i].reason, target);
     }
+}
+
+// Loads and stores in __seg_fs and __seg_gs (#1447), run and compared with clang's code: thread-locals reached through
+// %fs (their address less the thread pointer, __builtin_thread_pointer's), and globals in __seg_gs through %gs, whose
+// base arch_prctl sets to a window over them and restores to 0. Indirection, subscripts, members, compound assignments,
+// increments and decrements, of integers, floating values, long double, __int128 and vectors, at -O0 (Tier 0) and
+// through Tier 1's fallback to Tier 0.
+static void check_test_program_segments(CheckTest* test, const char* clang)
+{
+    check_test_program_source(test,
+        "struct S{long a;int b;char c[8];};"
+        "static _Thread_local long tl[4]={1,2,3,4};static _Thread_local struct S ts={5,6,\"abcdefg\"};"
+        "static _Thread_local double td=2.5;static _Thread_local long double tq=1.75L;static _Thread_local __int128 ti=77;"
+        "static long rd(long __seg_fs*p,int i){return p[i];}static void wr(long __seg_fs*p,int i,long v){p[i]=v;}"
+        "static int member(struct S __seg_fs*s,int n){s->b+=n;s->c[n&7]=(char)('A'+n);return s->b+s->c[(n+1)&7]+(int)s->a;}"
+        "int tested(int n){char*tp=__builtin_thread_pointer();"
+        "long __seg_fs*p=(long __seg_fs*)((char*)tl-tp);struct S __seg_fs*s=(struct S __seg_fs*)((char*)&ts-tp);"
+        "double __seg_fs*d=(double __seg_fs*)((char*)&td-tp);long double __seg_fs*q=(long double __seg_fs*)((char*)&tq-tp);"
+        "__int128 __seg_fs*w=(__int128 __seg_fs*)((char*)&ti-tp);"
+        "wr(p,n&3,n*7L);*p+=n;p[1]++;--p[2];long r=rd(p,(n+1)&3)+p[1]*3+(p[3]<<=1);"
+        "r+=member(s,n);*d+=n;*d*=1.5;*q-=n;*w+=n;*w<<=3;"
+        "return (int)(r+tl[0]+tl[1]+tl[2]+tl[3]+ts.b+(long)td+(long)tq+(long)ti+(long)(ti>>64));}",
+        "segment-thread-locals", clang);
+    check_test_program_source(test,
+        "typedef int v4si __attribute__((vector_size(16)));static _Thread_local v4si tv={9,8,7,6};"
+        "int tested(int n){char*tp=__builtin_thread_pointer();v4si __seg_fs*p=(v4si __seg_fs*)((char*)&tv-tp);"
+        "v4si v=*p;v4si k={n,n+1,n+2,n+3};*p=v*k;*p+=k;v=*p;return v[0]+v[1]*3+v[2]*5+v[3]*7+tv[n&3];}",
+        "segment-vectors", clang);
+    check_test_program_source(test,
+        "long syscall(long,...);__seg_gs int gs_count;__seg_gs long gs_wide[4];__seg_gs double gs_d;"
+        "static char window[1<<16] __attribute__((aligned(64)));"
+        "int tested(int n){unsigned long a=(unsigned long)&gs_count,b=(unsigned long)gs_wide,c=(unsigned long)&gs_d;"
+        "unsigned long lo=a<b?a:b;lo=lo<c?lo:c;unsigned long hi=a>b?a:b;hi=hi>c?hi:c;"
+        "if(hi-lo+64>sizeof window)return -1;"
+        "for(unsigned i=0;i<sizeof window;i++)window[i]=(char)i;"
+        "if(syscall(158,0x1001,(unsigned long)window-lo)!=0)return -2;"
+        "gs_count=n;gs_count++;gs_count*=3;gs_wide[n&3]=gs_count;gs_wide[0]+=gs_wide[1];gs_d=n*0.5;gs_d+=gs_count;"
+        "long r=gs_count+gs_wide[0]+gs_wide[n&3]+(long)gs_d+--gs_count;"
+        "if(syscall(158,0x1001,0UL)!=0)return -3;"
+        "return (int)r+window[a-lo]+window[b-lo+8];}",
+        "segment-gs-globals", clang);
 }
 
 // Initializer validation keeps atomic rvalue identity while storage uses the underlying vector bytes.
@@ -1034,6 +1093,7 @@ static __attribute__((noinline)) void check_test_program_vectors(CheckTest* test
         check_test_program_march = "-march=x86-64";
         check_test_program_vector_refusals(test, &target);
         check_test_program_segment_refusals(test, &target);
+        check_test_program_segments(test, clang);
         check_test_program_atomic_vector_constraints(test, clang);
         check_test_program_vector_baselines(test, clang);
     }
