@@ -83,6 +83,9 @@ typedef struct CheckDeclspecResult CheckDeclspecResult;
 struct CheckDeclspecResult
 {
     uint32_t token;
+    // For an error clang gives at the list's end (DeclSpec::Finish's), the token after the list, which it is published at,
+    // past the list's own diagnostics (a repeated specifier's warning, review on #1820); else BUSTER_CHECK_NONE.
+    uint32_t finish;
     uint8_t error;
     uint8_t first;
     uint8_t second;
@@ -206,7 +209,7 @@ static __attribute__((noinline, cold)) bool check_declspec_scan(const Parser* pa
     uint32_t storage_token = BUSTER_CHECK_NONE;
     uint32_t thread_token = BUSTER_CHECK_NONE;
     uint32_t constexpr_token = BUSTER_CHECK_NONE;
-    *result = (CheckDeclspecResult){ .token = BUSTER_CHECK_NONE };
+    *result = (CheckDeclspecResult){ .token = BUSTER_CHECK_NONE, .finish = BUSTER_CHECK_NONE };
     // A _Complex that clang drops is its whole slot: every _Complex of the list, a repeated one too (DeclSpec::Finish
     // unsets TypeSpecComplex; review on #1820, `_Complex _Complex _Bool`).
     const bool skip_complex = skip != BUSTER_CHECK_NONE && check_declspec_complex_name(parser->tokens.names[skip]);
@@ -321,7 +324,7 @@ static __attribute__((noinline, cold)) bool check_declspec_scan(const Parser* pa
                                  new_thread != CHECK_DECLSPEC_NONE && thread != CHECK_DECLSPEC_NONE && new_thread != thread ? thread : CHECK_DECLSPEC_NONE;
         if (reading && conflict != CHECK_DECLSPEC_NONE)
         {
-            *result = (CheckDeclspecResult){ .token = i, .error = CHECK_DECLSPEC_ERROR_COMBINE, .first = conflict };
+            *result = (CheckDeclspecResult){ .token = i, .finish = BUSTER_CHECK_NONE, .error = CHECK_DECLSPEC_ERROR_COMBINE, .first = conflict };
         }
         else if (reading)
         {
@@ -364,6 +367,7 @@ static __attribute__((noinline, cold)) bool check_declspec_scan(const Parser* pa
     {
         *result = (CheckDeclspecResult){ .token = constexpr_token, .error = CHECK_DECLSPEC_ERROR_COMBINE, .first = thread != CHECK_DECLSPEC_NONE ? thread : storage };
     }
+    result->finish = finish && result->error != CHECK_DECLSPEC_ERROR_NONE ? i : BUSTER_CHECK_NONE;
     if (slots != NULL)
     {
         *slots = (CheckDeclspecSlots){

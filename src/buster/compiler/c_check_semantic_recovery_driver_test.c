@@ -536,6 +536,22 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         // A _Complex the type doesn't take, dropped at the list's end, before and after the type, and the declarations after
         // it checked; a _BitInt named as clang names it in a combination's error (review on #1820).
         "_Complex _Bool cb;\nint float y;\n_Bool _Complex cb2;\nint float z;\n_BitInt(8) int b;\n",
+        // A _Complex after a type of no keyword, and in the operand readers' type names: a typeof's, an _Atomic's and an
+        // enum's base (re-review on #1820), each dropped as clang drops it, the unit checked after it.
+        "typeof(_Bool) _Complex x1;\nint a1 = undeclI;\n_BitInt(8) _Complex x2;\n_Atomic(int) _Complex x3;\nstruct SI;\nstruct SI _Complex x4;\n"
+        "enum EI;\nenum EI _Complex x5;\ntypeof(_Complex _Bool) x6;\n_Atomic(_Complex _Bool) x7;\nenum EU : _Complex _Bool { EA9 };\n"
+        "_Static_assert(sizeof(x6) == 1 && sizeof(enum EU) == 1, \"b\");\nint a2 = undeclJ;\n",
+        // A repeated _Complex, whose warning clang gives before the list's end's error; every _Complex is dropped.
+        "_Complex _Complex _Bool y1;\nint float y2;\n_Complex _Bool _Complex y3;\nint float y4;\n_BitInt(8) _Complex z;\n"
+        "int plain = undeclared_var;\nstruct S;\n_Complex _Complex struct S y5;\nint float y6;\nenum E5 : _Complex _Bool { A5 };\n",
+        // The operand readers in a body, a cast, sizeof, a parameter and a member, and a list's end's errors after its
+        // repeated specifiers' warnings. (No error that stops the reader: after a parameter's recovered error, one drops
+        // the later bodies' warnings, as an attribute's recovered error in a parameter does on main.)
+        "int f(typeof(_Complex _Bool) p, _Atomic(int float) q) { typeof(_Complex _Bool) a = 1; _Atomic(long float) b = 2;\n"
+        "  return (int)(typeof(int float))a + sizeof(typeof(unsigned float)) + p + q + b; }\n"
+        "struct T { typeof(long float) m; _Atomic(_Complex _Bool) n; } t;\nenum E1 : long float { A1 };\nenum E3 : int char { A3 };\n"
+        "const _Complex const _Bool c1;\nvolatile long volatile float c2;\n_Complex long _Bool c3;\n"
+        "typeof(typeof(_Complex _Bool) _Complex) c4;\nstatic int g(void) { int u; return 0; }\n",
         // An extern declaration of type void, which clang takes (#1447): its address, sizeof, a discarded use and a cast to
         // void are quiet, a block's extern too; reading its value is the error. A dereference's or subscript's of a void
         // pointer still warns, and a void value in a comma's, conditional's or selection's operand is quiet.
