@@ -752,9 +752,8 @@ static void check_test_library_runs(CheckTest* test, const char* clang, const ch
             "-fno-builtin-fmax",
         },
         {
-            "an asm label keeps fmax a call of the label's function",
-            BUSTER_CHECK_TEST_EXTREMES_PROGRAM(" __asm__(\"labelled_fmax\")")
-            "double labelled_fmax(double a,double b){return a*0+b*0+42;}\n",
+            "an asm label keeps fmax a call of the label's function (glibc's fmin)",
+            BUSTER_CHECK_TEST_EXTREMES_PROGRAM(" __asm__(\"fmin\")"),
             "-std=gnu17",
             NULL,
         },
