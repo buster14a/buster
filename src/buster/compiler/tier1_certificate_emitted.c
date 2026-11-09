@@ -2571,7 +2571,8 @@ static bool tier1_cert_emitted_result(Tier1CertEmittedBuild* build, uint32_t nod
     const uint32_t part_count = tier1_select_result_parts(result, function->result_size, parts);
     const bool hidden = result.kind == BUSTER_ABI_RESULT_MEMORY;
     uint32_t at = r;
-    bool valid = source < 16 && source != BUSTER_TIER1_SELECT_SCRATCH && value != BUSTER_TIER1_CFG_NONE && r <= end;
+    // Every part's slots in the red zone (#1847, tier1_select_result_staged), as the consumer refuses any other.
+    bool valid = source < 16 && source != BUSTER_TIER1_SELECT_SCRATCH && value != BUSTER_TIER1_CFG_NONE && r <= end && tier1_select_result_staged(parts, part_count);
     for (uint32_t k = 0; valid && k < part_count; k += 1)
     {
         const int32_t staged = tier1_emit_staging_part(tier1_select_result_slot(parts, k), parts[k].bytes);

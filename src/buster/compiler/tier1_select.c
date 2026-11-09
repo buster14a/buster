@@ -3100,11 +3100,16 @@ static uint16_t tier1_select_part_form(uint32_t bytes, bool load)
 
 // The most parts a result has (#1624): a vector's split across xmm0 to xmm3.
 #define BUSTER_TIER1_SELECT_RESULT_PARTS 4u
+// The red zone's 8-byte slots, its 128 bytes below rsp, where a function's own result parts wait on the way out
+// (tier1_emit_cfg_aggregate_result, #1847): a split vector's four 32-byte parts or two 64-byte ones take all 16.
+#define BUSTER_TIER1_SELECT_RED_ZONE_SLOTS 16u
 
 // The parts of an aggregate result of `size` bytes in rax and rdx or xmm0 and xmm1 (#789), eightbyte 1 alone with HIGH
 // (#141), or a vector's wider than the target's registers (#1624, tier0_vector_result_parts' shape, #1193): split
-// across the first two or four vector registers, 16 or 32 bytes each (xmm's without AVX, ymm's with it), part k at byte
-// k * part_bytes of its object. None for any other result. `parts` has room for BUSTER_TIER1_SELECT_RESULT_PARTS.
+// across the first two or four vector registers, 16, 32 or 64 bytes each (xmm's without AVX, ymm's with it, zmm's with
+// AVX512F: a 128-byte vector's), part k at byte k * part_bytes of its object, as long as the parts fit the red zone's
+// slots, where the function's own return stages them (#1847: a 256-byte vector's four zmm parts don't). None for any
+// other result. `parts` has room for BUSTER_TIER1_SELECT_RESULT_PARTS.
 static uint32_t tier1_select_result_parts(AbiReturn result, uint32_t size, Tier1SelectPart* parts)
 {
     uint32_t vectors = 0;
@@ -3118,7 +3123,8 @@ static uint32_t tier1_select_result_parts(AbiReturn result, uint32_t size, Tier1
         rest = rest && result.registers[k] == BUSTER_ABI_REGISTER_NONE;
     }
     const bool split = result.kind == BUSTER_ABI_RESULT_REGISTERS && (result.flags & BUSTER_ABI_FLAG_HIGH) == 0 && (vectors == 2 || vectors == 4) && rest &&
-                       (result.part_bytes == 16 || result.part_bytes == 32) && size == vectors * result.part_bytes;
+                       (result.part_bytes == 16 || result.part_bytes == 32 || result.part_bytes == 64) && size == vectors * result.part_bytes &&
+                       vectors * tier1_select_part_slots(result.part_bytes) <= BUSTER_TIER1_SELECT_RED_ZONE_SLOTS;
     const bool registers = !split && result.kind == BUSTER_ABI_RESULT_REGISTERS && result.registers[2] == BUSTER_ABI_REGISTER_NONE && result.registers[3] == BUSTER_ABI_REGISTER_NONE;
     uint32_t count = registers ? tier1_select_parts_of(result.registers, (result.flags & BUSTER_ABI_FLAG_HIGH) != 0, false, false, size, BUSTER_TIER1_SELECT_RESULT_GENERAL, 2, parts) : 0;
     for (uint32_t k = 0; split && k < vectors; k += 1)
@@ -3130,7 +3136,8 @@ static uint32_t tier1_select_result_parts(AbiReturn result, uint32_t size, Tier1
 }
 
 // The first red-zone staging slot of result part k (#1624): the slots of the parts before it, each a whole vector
-// register's bytes' or an eightbyte's one (tier1_select_part_slots).
+// register's bytes' or an eightbyte's one (tier1_select_part_slots). Of k = the part count, the slots they all take,
+// which BUSTER_TIER1_SELECT_RED_ZONE_SLOTS bounds (tier1_select_result_staged).
 static uint32_t tier1_select_result_slot(const Tier1SelectPart* parts, uint32_t k)
 {
     uint32_t slot = 0;
@@ -3139,6 +3146,14 @@ static uint32_t tier1_select_result_slot(const Tier1SelectPart* parts, uint32_t 
         slot += tier1_select_part_slots(parts[j].bytes);
     }
     return slot;
+}
+
+// Whether a function's own result parts, `count` of them, fit the red zone's slots, as its return stages them all at
+// once (#1847, the #1645 review's bound): tier1_select_result_parts admits no other, and its consumer and the code's
+// certificate refuse one.
+static bool tier1_select_result_staged(const Tier1SelectPart* parts, uint32_t count)
+{
+    return count <= BUSTER_TIER1_SELECT_RESULT_PARTS && tier1_select_result_slot(parts, count) <= BUSTER_TIER1_SELECT_RED_ZONE_SLOTS;
 }
 
 // Whether Tier 1 takes an argument's or a parameter's ABI record for a value of IR type `type` (#789): a scalar in one
