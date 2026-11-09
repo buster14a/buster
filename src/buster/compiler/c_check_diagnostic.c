@@ -223,6 +223,54 @@ static CheckWarningSeverity check_diagnostic_severity_id_from(const CheckInput* 
     return severity;
 }
 
+// check_diagnostic_severity_id_from for a grouped diagnose_if (#1447): the source pragma in force at the event that names
+// warning group `group` (its index in pp_features_warning) or a group that holds it replaces `severity`.
+static __attribute__((unused)) CheckWarningSeverity check_diagnostic_group_severity_from(const CheckInput* input, uint32_t token, uint32_t source, uint32_t group, CheckWarningSeverity severity)
+{
+    const CheckInputDiagnosticPragmas* history = input->diagnostic_pragmas;
+    if (history != NULL)
+    {
+        uint32_t low = 0;
+        uint32_t high = history->count;
+        while (low < high)
+        {
+            const uint32_t middle = low + (high - low) / 2;
+            const CheckInputDiagnosticPragma* record = history->records + middle;
+            if (record->token < token || (record->token == token && record->source_begin < source))
+            {
+                low = middle + 1;
+            }
+            else
+            {
+                high = middle;
+            }
+        }
+        uint32_t state = low != 0 ? history->records[low - 1].state_after : BUSTER_CHECK_NONE;
+        bool matched = false;
+        for (uint32_t visited = 0; !matched && state < history->count && visited < history->count; visited += 1)
+        {
+            const CheckInputDiagnosticPragma* record = history->records + state;
+            char name[128];
+            const bool fits = record->option.length >= 2 && record->option.length - 2 < sizeof(name) && record->option.pointer[0] == '-' && record->option.pointer[1] == 'W';
+            if (fits)
+            {
+                memcpy(name, record->option.pointer + 2, record->option.length - 2);
+                name[record->option.length - 2] = 0;
+            }
+            const uint32_t holder = fits ? pp_warning_group_index(name) : UINT32_MAX;
+            matched = holder != UINT32_MAX && pp_warning_group_holds(holder, group);
+            if (matched)
+            {
+                severity = record->operation == CHECK_DIAGNOSTIC_IGNORED ? CHECK_WARNING_IGNORE :
+                           record->operation == CHECK_DIAGNOSTIC_ERROR ? CHECK_WARNING_ERROR :
+                           record->operation == CHECK_DIAGNOSTIC_FATAL ? CHECK_WARNING_FATAL : CHECK_WARNING_WARNING;
+            }
+            state = record->state_before;
+        }
+    }
+    return severity;
+}
+
 static CheckWarningSeverity check_diagnostic_severity_from(const CheckInput* input, uint32_t token, uint32_t source, uint32_t warning, CheckWarningSeverity severity)
 {
     return check_diagnostic_severity_id_from(input, token, source, check_diagnostic_warning_index(warning), severity);

@@ -27,6 +27,17 @@ project material under the default terms. LLVM revision
 Clang runs externally as the diagnostic oracle. The existing frozen warning
 name catalog is reused. No upstream implementation or test fixture is imported.
 
+The warning-group tree in `c_preprocessor_warning_options.c`
+(`pp_warning_group_children` and `pp_warning_group_parents`, #1447) is factual
+data generated from the output of `diagtool tree` of Ubuntu's clang 23.1.5
+package (`diagtool-23`, LLVM `DiagnosticGroups.td`): each edge is a group and
+a group listed directly above it, by the output's indentation, as indices into
+the existing frozen warning-name catalog, leaving out the remark groups and the
+bare `-W`. LLVM is licensed Apache-2.0 WITH LLVM-exception. No upstream
+implementation or test fixture is imported; the diagnose_if group policy, its
+code and its driver fixtures are original project material under the default
+terms, with Clang 23.1.5 as the behavioral oracle.
+
 The declaration-attribute completion work for #1447/#147 in
 `c_check_attribute_expression.c`, `c_check_thread_safety_input.c`, their checker
 and diagnostic integration, and the added attribute driver fixtures is original
