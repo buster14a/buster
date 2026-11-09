@@ -3,7 +3,7 @@
 //
 // #148 miscellaneous builtin semantic actions. Include after c_builtin_catalog.c and c_check_actions.c.
 // Arguments are already elaborated source values. The caller retains their graph identities and evaluation order;
-// evaluated_operands is a bit mask, never permission to evaluate an operand twice. No action reads source memory.
+// evaluated_operands is a bit mask (all ones also takes the arguments past its 32), never permission to evaluate an operand twice. No action reads source memory.
 // Tag completions are immutable source positions, separate from diagnostic node identities. A null completion
 // slice uses the current table for direct action callers. Batches run in order because decay types may be interned.
 // Input/output slices require ordinary C alignment, no padding, and must be disjoint from each other/type storage.
@@ -1611,9 +1611,10 @@ static __attribute__((unused)) void check_builtin_misc_one(TypeTable* table, con
         // size_t(...), at least one argument.
         case CBUILTIN_INFER_ALLOC_TOKEN: minimum = 1; maximum = 31; break;
         case CBUILTIN_CALL_WITH_STATIC_CHAIN: minimum = maximum = 2; break;
-        // A format, past __builtin_os_log_format's buffer, and its data, as many as the operands' mask holds.
-        case CBUILTIN_OS_LOG_FORMAT_BUFFER_SIZE: minimum = 1; maximum = 31; break;
-        case CBUILTIN_OS_LOG_FORMAT: minimum = 2; maximum = 31; break;
+        // A format, past __builtin_os_log_format's buffer, and up to 255 data arguments, as clang's BuiltinOSLogFormat
+        // takes them (its required arguments plus 0xff); data past the operands' mask is evaluated (evaluated_operands).
+        case CBUILTIN_OS_LOG_FORMAT_BUFFER_SIZE: minimum = 1; maximum = 1 + 255; break;
+        case CBUILTIN_OS_LOG_FORMAT: minimum = 2; maximum = 2 + 255; break;
         // A record's pointer, a printing function, and that function's leading arguments.
         case CBUILTIN_DUMP_STRUCT: minimum = 2; maximum = 31; break;
         case CBUILTIN_COUNTED_BY_REF: minimum = maximum = 1; break;
@@ -1655,7 +1656,8 @@ static __attribute__((unused)) void check_builtin_misc_one(TypeTable* table, con
     {
         CheckValue values[4] = { 0 };
         output->runtime_builtin = input->id;
-        output->evaluated_operands = (UINT32_C(1) << input->argument_count) - 1;
+        // Every argument; a full mask holds those past its 32 bits too (os_log's data).
+        output->evaluated_operands = input->argument_count >= 32 ? UINT32_MAX : (UINT32_C(1) << input->argument_count) - 1;
         // __builtin_classify_type's operand is its type alone, of any expression, which no conversion reaches, and
         // addressof's and function_start's are their designators. allow_runtime_check's and allow_sanitize_check's string
         // and annotation's second argument are their literals (CheckBuiltinMiscAction.string_known), never converted.

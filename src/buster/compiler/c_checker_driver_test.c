@@ -513,8 +513,8 @@ static void check_test_driver_setjmp_held(CheckTest* test, const char* executabl
 // no literal, which clang's code reads as one
 // (check_test_driver_cfstrings has the constant strings' objects); z/OS's va_start and
 // va_copy, which clang's x86-64 code makes over a char *; os_log's
-// data taken again across side effects, a __float128's and a 2-byte vector's, and those clang's code crashes on (a 32-byte
-// vector); dump_struct's generated calls; and
+// data taken again across side effects, a __float128's and a 2-byte vector's, those clang's code crashes on (a 32-byte
+// vector), and a format of more than 255 items, whose count byte clang's code truncates (#1785); dump_struct's generated calls; and
 // __builtin_available with an empty version, an invalid expression of clang's, which its code generation refuses too.
 static void check_test_driver_codegen_refusals(CheckTest* test, const char* executable, const char* directory)
 {
@@ -539,6 +539,9 @@ static void check_test_driver_codegen_refusals(CheckTest* test, const char* exec
           "unsupported: __builtin_os_log_format of data clang's code doesn't make (past 16 bytes, a _BitInt past 128 bits)" },
         { "void* f(void* b, _BitInt(200) w) { return __builtin_os_log_format(b, \"%d\", w); }\n",
           "unsupported: __builtin_os_log_format of data clang's code doesn't make (past 16 bytes, a _BitInt past 128 bits)" },
+        { "#define F \"%1$d %1$d %1$d %1$d %1$d %1$d %1$d %1$d %1$d %1$d \"\n#define G F F F F F F F F F F\n"
+          "void* f(void* b) { return __builtin_os_log_format(b, G G G, 1); }\n",
+          "unsupported: __builtin_os_log_format of more than 255 items, whose count clang's code truncates" },
         { "struct S { int a; };\nstruct T { int x; } g(const char*, ...);\nvoid f(struct S* s) { __builtin_dump_struct(s, g); }\n",
           "unsupported: __builtin_dump_struct whose printer returns an aggregate, a 128-bit or a half-precision value" },
         { "int g(int, const char*, ...);\nstruct S { int a; };\nvoid f(struct S* s, int n) { __builtin_dump_struct(s, g, ({ n; })); }\n",

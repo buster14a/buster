@@ -3010,7 +3010,7 @@ static uint32_t check_program_references(CheckProgram* program, const CheckContr
                 for (uint32_t a = 0; a < graph->argument_counts[node]; a += 1)
                 {
                     const uint32_t argument = graph->argument_nodes[graph->argument_offsets[node] + a];
-                    if (op == CHECK_OP_CALL || op == CHECK_OP_BUILTIN_X86 || (a < 32 && (mask & (1u << a)) != 0))
+                    if (op == CHECK_OP_CALL || op == CHECK_OP_BUILTIN_X86 || (a < 32 ? (mask & (1u << a)) != 0 : mask == UINT32_MAX))
                     {
                         const CheckOverloadResult* selected = check_program_overload_address(program, node, a + 3);
                         if (selected != NULL)

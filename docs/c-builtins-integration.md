@@ -2176,8 +2176,12 @@ clang's os_log buffers, as `BuiltinOSLogFormat`, `OSLog.cpp` and
     the item's temporaries as it is evaluated.
   - A 32- or 64-byte vector and a `_BitInt` past 128 bits are refused by
     name: clang's code generation crashes on them.
-- **Limits.** At most 31 arguments are taken, and clang takes up to the
-  format's plus 255.
+- **Limits.** Up to 255 data arguments are taken, as clang's Sema takes
+  them (the required arguments plus 0xff): "too many arguments to function
+  call, expected at most 256" (257 for `__builtin_os_log_format`) past them.
+  Those past the operands' 32-bit mask are evaluated and reached through its
+  full mask (#1785). A format of more than 255 items, whose count byte clang's
+  code truncates (300 items store 0x2c), is refused by name.
 
 `__builtin_dump_struct(pointer, printer, rest...)` (0x4b3, #148) is clang's
 record dump, as `BuiltinDumpStruct` checks it.
