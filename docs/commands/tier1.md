@@ -59,7 +59,8 @@ requirements. [Command index](README.md).
   `test-tier1-pipeline --cross-check` and `test-tier1-masks` (hand-written mask and vector IR
   natively against the IR's interpreter; Tier 0's mask programs, every `_k*`
   builtin's row and every comparison into a mask (#1623) through the IR, SSA and
-  the optimizer to Tier 1's native code) for bounded typed-stream/native
+  the optimizer to Tier 1's native code; comparisons ANDed with a mask, which
+  selection folds into one compare under that writemask, #1847) for bounded typed-stream/native
   validation; `benchmark-tier1-pipeline [--clang PATH] [--repeat N]` times the
   pipeline's fixtures by Tier 1, Tier 0 and clang `-O0`/`-O2` (bounded kernels,
   not programs; under the 9700X's lock, CPU 2), and `benchmark-tier1-select-source

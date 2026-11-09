@@ -1791,6 +1791,7 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
             const bool real = ir_simd_lane_floating((IrSimdLane)lane);
             const uint32_t condition = holes->condition < (real ? IR_GE + 1u : (uint32_t)IR_PREDICATE_COUNT) ? holes->condition : IR_EQ;
             const uint32_t index = width == 16 ? 0 : width == 32 ? 1 : 2;
+            // A masked comparison's writemask (#1847), its third value's opmask register: none, k0's encoding, without one.
             const X86Instruction record = {
                 .form = tier1_select_lane_compares[lane][!real && condition >= IR_ULT][index],
                 .reg = (uint8_t)(destination & 7),
@@ -1798,6 +1799,7 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
                 .rm = right,
                 .mode = BUSTER_X86_REGISTER_DIRECT,
                 .immediate = real ? floating[condition] : predicates[condition],
+                .decorations = (uint8_t)(holes->third & BUSTER_X86_DECORATION_MASK),
             };
             tier1_select_append(&result, record);
         }
@@ -3968,6 +3970,17 @@ static Tier1SelectAddress tier1_select_address(const Tier1SelectForest* forest, 
     return address;
 }
 
+// Whether `value`, an operand of `node`'s AND of masks, is a comparison into a mask that the AND's pattern takes as its
+// own under the other operand as its writemask (#1847): a vector comparison of the AND's mask type (the lanes' mask) and
+// one of its predicates, which only the AND reads, in its block.
+static bool tier1_select_masked_compare(const Tier1SelectForest* forest, uint32_t node, uint32_t value)
+{
+    const IrFunction* function = forest->function;
+    const bool compare = value < function->instruction_count && function->op[value] == IR_VCMP && function->type[value] == function->type[node] &&
+                         function->c[value] < IR_PREDICATE_COUNT && function->a[value] < function->instruction_count;
+    return compare && tier1_select_vector_width(function->type[function->a[value]]) != 0 && tier1_select_tree_child(forest, node, value);
+}
+
 // The memory operand of `node`'s access through `pointer`, in values[first] and values[first + 1] (its base and index),
 // with its scale and displacement. Returns whether the walk took anything.
 static inline __attribute__((always_inline)) bool tier1_select_memory(const Tier1SelectForest* forest, uint32_t node, uint32_t pointer, Tier1SelectPattern* pattern, uint32_t first)
@@ -4147,6 +4160,25 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         base.values[1] = b;
         base.intrinsic_cost = 1;
         tier1_select_add_candidate(forest, node, &candidates, base);
+        // A comparison into a mask ANDed with another mask (#1847: the IR's form of a masked comparison's row,
+        // ir_simd_typed_compare_mask, whose writemask isn't every lane, ir_typed_unmasked): the comparison under that mask
+        // as its writemask, `{k}`, which leaves 0 in the lanes the writemask doesn't have, one vpcmp or vcmpps as the
+        // row's was. The comparison is the AND's tree child, either operand, the left one first.
+        const uint32_t compared = op != IR_AND ? BUSTER_IR_NONE : tier1_select_masked_compare(forest, node, a) ? a : tier1_select_masked_compare(forest, node, b) ? b : BUSTER_IR_NONE;
+        if (compared != BUSTER_IR_NONE)
+        {
+            Tier1SelectPattern masked = base;
+            masked.rule = TIER1_RULE_VECTOR;
+            masked.width = (uint8_t)tier1_select_vector_width(function->type[function->a[compared]]);
+            masked.scale = BUSTER_TIER1_VECTOR_COMPARE;
+            masked.condition = (uint8_t)function->c[compared];
+            masked.source_width = function->flags[compared];
+            masked.values[0] = function->a[compared];
+            masked.values[1] = function->b[compared];
+            masked.values[2] = compared == a ? b : a;
+            tier1_select_fold(forest, node, compared, &masked);
+            tier1_select_add_candidate(forest, node, &candidates, masked);
+        }
     }
     else if (mask_width != 0 && op == IR_NOT)
     {
