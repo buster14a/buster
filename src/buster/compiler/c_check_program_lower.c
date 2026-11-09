@@ -7615,8 +7615,8 @@ static void check_lower_bit_update(CheckLowerWriter* writer, uint32_t node, bool
 static void check_lower_initializer(CheckLowerWriter* writer, CheckControl control);
 static void check_lower_control(CheckLowerWriter* writer, uint32_t index);
 
-// An integer type's descriptor for the builtins' recipes: its width (a 128-bit one's BUSTER_CBUILTIN_LOWER_WIDE) and
-// whether it is signed.
+// An integer type's descriptor for the builtins' recipes: its width (a 128-bit one's BUSTER_CBUILTIN_LOWER_WIDE; a _BitInt
+// of 65 to 127 bits, whose value is two limbs as a 128-bit one's, its width, #1447) and whether it is signed.
 static uint32_t check_lower_builtin_type(const TypeTable* types, TypeId type)
 {
     uint32_t width = 0;
@@ -7632,15 +7632,6 @@ static uint32_t check_lower_align_type(const TypeTable* types, TypeId type)
 {
     const uint32_t result = type_kind(types, type_strip_aligned(types, type)) == BUSTER_TYPE_KIND_POINTER ? 64 : check_lower_builtin_type(types, type);
     return result;
-}
-
-// Whether an overflow builtin's operand or destination is a _BitInt of 65 to 127 bits, which its recipes don't take: they
-// take a 128-bit one whole (BUSTER_CBUILTIN_LOWER_WIDE) and narrower ones of up to 64 bits.
-static bool check_lower_builtin_between(const TypeTable* types, TypeId type)
-{
-    uint32_t width = 0;
-    bool sign = false;
-    return check_action_integer_type(types, type, &width, &sign) && width > 64 && width < 128;
 }
 
 // One primitive shared by the classic bit builtins and the generic/C23 recipes: CLZ, CTZ, POPCOUNT or BSWAP64 chooses
@@ -7791,11 +7782,6 @@ static void check_lower_builtin_prepare(CheckLowerWriter* writer, uint32_t node)
         else if (stream->effects[selected].unsupported != 0 || stream->effects[selected].evaluated_operands != 7)
         {
             check_lower_unsupported(writer, "this overflow builtin");
-        }
-        else if (check_lower_builtin_between(program->types, conversions->operands[0].type) ||
-                 check_lower_builtin_between(program->types, conversions->operands[1].type) || check_lower_builtin_between(program->types, conversions->store.type))
-        {
-            check_lower_unsupported(writer, "overflow builtins of _BitInt of 65 to 127 bits");
         }
         else
         {
@@ -8042,6 +8028,12 @@ static void check_lower_varargs_prepare(CheckLowerWriter* writer, uint32_t node)
     else if (argument && check_lower_passed(writer, requested) != NULL)
     {
         check_lower_unsupported(writer, check_lower_passed(writer, requested));
+    }
+    else if (argument && !microsoft && (writer->abi_table->pass[type_index(requested)] & BUSTER_ABI_PASS_UNSUPPORTED) != 0)
+    {
+        // What the module doesn't place as clang does, which a call refuses too: a record SSE, SSEUP of a size no vector
+        // register has, whose va_arg clang reads from the save area as <size / 8 x double>, is one.
+        check_lower_unsupported(writer, "va_arg of this type (its calling convention)");
     }
     else
     {
@@ -10926,7 +10918,11 @@ static void check_lower_reduce_operand(CheckLowerWriter* writer, uint32_t node, 
 
 // Whether `type` is a vector wider than the target's widest registers (check_lower_transport_width: 16 bytes without
 // AVX, 32 without AVX-512), which a builtin's row can't take whole: its builtins run on pieces of the registers' width
-// through memory, as a transport vector's do (#1834), as LLVM's legalization splits them.
+// through memory, as a transport vector's do (#1834), as LLVM's legalization splits them. A target with AVX-512F but not
+// AVX-512VL (knl's) is one without AVX-512 here, as every row of the checker's is (check_lower_vector_row splits its
+// operators at 32 bytes too). A wide shuffle runs element by element (check_lower_transport_shuffle): an output piece
+// may read any input piece, and splitting one into register-width rows needs a plan across the pieces, which #1834
+// leaves for later.
 static bool check_lower_vector_wide(const CheckLowerWriter* writer, TypeId type)
 {
     return check_lower_vector_of(writer, type) > check_lower_transport_width(writer);
