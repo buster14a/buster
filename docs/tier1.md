@@ -355,7 +355,11 @@ meet on the CFG, which has no edge from a `longjmp` back to the call, so a
 second return would read another value's bytes; LLVM's StackSlotColoring stays
 out of such a function for the same reason. Their `longjmp` restores the
 callee-saved registers, and C's contexts for `setjmp` hold no value of Tier 0's
-stacks across its call, so Tier 0's code needs nothing more.
+stacks across its call, so Tier 0's code needs nothing more. Such a caller's IR
+lowers as any other's, so that the IR's corpus checks still take every function:
+Tier 1's admission (`check_tier1_compile`) is what refuses it, `--tier1-refusals`
+naming it at the lowering stage with `cause=admission error=2`, and neither
+inliner takes it as a callee, as LLVM's `isInlineViable` doesn't.
 `test-checker-driver`'s returns-twice unit runs each kind, the pointer's too,
 against clang -O0's build. Still refused: a
 vector result LLVM demotes to a hidden pointer, naked functions, whose bodies

@@ -1759,19 +1759,6 @@ static bool ir_typed_debug_scalars(const Tier0Function* input, const IrTypedPlan
     return ok;
 }
 
-// Whether `input`'s frame is Tier 0's alone, which ordinary Tier 1 falls back to: __builtin_unwind_init's, which saves
-// every callee-saved register (Tier0Function.unwind_init); __builtin_setjmp's, which keeps nothing in one
-// (Tier0Function.returns_twice); a caller of setjmp's library kin, whose second return finds the values Tier 1 shares
-// its slots with (#1847, Tier0Function.calls_returns_twice); a preserving function's, which keeps registers for its
-// caller past them (#147, Tier0Function.preserve_general); a force_align_arg_pointer function's, which realigns its
-// stack (#1447, Tier0Function.realign_stack); and one with an asm statement placed in it as an asm body (#1839,
-// Tier0Function.call_asm), until the IR has a form for one. The corpus runners (test-ssa-source, test-tier1-cfg-source)
-// count such a function's refusal as Tier 0's, not as a failure.
-static __attribute__((unused)) bool ir_lower_tier0_frame(const Tier0Function* input)
-{
-    return input->unwind_init || input->returns_twice || input->calls_returns_twice || tier0_preserving(input) || input->realign_stack || input->asm_body_count != 0;
-}
-
 // `pieces`: a vector wider than the target moves whole (ir_typed_vector_piece) is taken as its pieces' moves would be, for
 // a caller that splits it into them before selection (#1624, ir_vector_split.c); otherwise it is refused.
 static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType result_type, uint32_t symbol_count, Arena* output, Arena* scratch, IrFunction* result, bool vector, uint64_t target_features,
@@ -1811,8 +1798,16 @@ static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType res
             check.instruction = entry;
         }
     }
-    if (check.error == IR_OK && ir_lower_tier0_frame(input))
+    if (check.error == IR_OK && (input->unwind_init || input->returns_twice || tier0_preserving(input) || input->realign_stack || input->asm_body_count != 0))
     {
+        // An asm statement placed in its caller as an asm body (#1839, Tier0Function.call_asm) is Tier 0's too, until the
+        // IR has a form for one.
+        // __builtin_unwind_init's frame, which saves every callee-saved register (Tier0Function.unwind_init),
+        // __builtin_setjmp's, which keeps nothing in one (Tier0Function.returns_twice), a preserving function's, which
+        // keeps registers for its caller past them (#147, Tier0Function.preserve_general), and a force_align_arg_pointer
+        // function's, which realigns its stack (#1447, Tier0Function.realign_stack), are Tier 0's: ordinary Tier 1 falls
+        // back to them. A caller of setjmp's library kin lowers (Tier0Function.calls_returns_twice): only Tier 1's
+        // admission leaves it to Tier 0 (check_tier1_compile, #1847).
         check.error = IR_ERROR_UNSUPPORTED;
     }
     if (check.error == IR_OK)

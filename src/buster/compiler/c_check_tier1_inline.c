@@ -105,7 +105,9 @@ static bool check_tier1_inline_cache(CheckTier1Lane* lane, const CheckTier1Inlin
 // lowering and promotion go in steps[1] and steps[2], free before the caller's own promotion.
 static bool check_tier1_inline_prepare(CheckTier1Lane* lane, const CheckTier1Inline* inlining, uint32_t b, bool scalar)
 {
-    uint8_t state = inlining->ready[b] != 0 ? lane->inline_states[b] : BUSTER_CHECK_TIER1_INLINE_REFUSED;
+    // A callee that calls a function that returns twice (#1847) stays a call, as LLVM's isInlineViable keeps it: its caller
+    // would hold the call without Tier0Function.calls_returns_twice.
+    uint8_t state = inlining->ready[b] != 0 && !inlining->lowered->functions[b].calls_returns_twice ? lane->inline_states[b] : BUSTER_CHECK_TIER1_INLINE_REFUSED;
     if (state == BUSTER_CHECK_TIER1_INLINE_UNPREPARED)
     {
         const CheckProgram* program = inlining->program;

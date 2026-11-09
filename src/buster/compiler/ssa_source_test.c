@@ -85,10 +85,8 @@ struct SsaSourceTotals
     // Each path's promoted instructions and phis (the vector path's, then the scalar path's).
     uint64_t promoted[2];
     uint64_t phis[2];
-    // Functions that a lowering or a promotion refused, or whose promotion failed a check; and those whose frame is Tier
-    // 0's alone (ir_lower_tier0_frame: a setjmp's caller, #1847), which the lowering refuses by design.
+    // Functions that a lowering or a promotion refused, or whose promotion failed a check.
     uint64_t failures;
-    uint64_t tier0;
     // Programs run in the three forms, those whose runs all gave the expected outcome, and the generated programs and
     // those whose clang build couldn't be made or run.
     uint64_t programs;
@@ -719,7 +717,6 @@ static void ssa_source_file(SsaSourceTotals* totals, const char* name, char** op
     uint64_t phis[2] = { 0, 0 };
     uint32_t entry = UINT32_MAX;
     uint32_t failures = 0;
-    uint32_t tier0 = 0;
     for (uint32_t f = 0; checked && f < file.count; f += 1)
     {
         const IrSourceFunction* source = &file.functions[f];
@@ -750,18 +747,10 @@ static void ssa_source_file(SsaSourceTotals* totals, const char* name, char** op
                 path_failed = form;
             }
         }
-        // A function whose frame is Tier 0's alone, which the lowering refuses as it must (#1847), is no failure: it is
-        // counted, and the file's program, which needs every function's IR, isn't run.
-        const bool frame = !promoted && lowered.error == IR_ERROR_UNSUPPORTED && ir_lower_tier0_frame(source->function);
         if (promoted)
         {
             instructions += forms[BUSTER_SSA_SOURCE_MEMORY][f].instruction_count;
             entry = source->name_length == 4 && memcmp(source->name, "main", 4) == 0 ? f : entry;
-        }
-        else if (frame)
-        {
-            tier0 += 1;
-            printf("test-ssa-source: file=%s function=%s left to Tier 0: its frame is Tier 0's alone\n", name, source->name);
         }
         else
         {
@@ -771,7 +760,6 @@ static void ssa_source_file(SsaSourceTotals* totals, const char* name, char** op
         }
     }
     totals->failures += failures;
-    totals->tier0 += tier0;
     if (checked)
     {
         totals->files += 1;
@@ -783,7 +771,7 @@ static void ssa_source_file(SsaSourceTotals* totals, const char* name, char** op
     // The program's run, where every function promoted and it has a main.
     const char* outcome = "none";
     char counted[96] = { 0 };
-    if (checked && failures == 0 && tier0 == 0 && entry != UINT32_MAX)
+    if (checked && failures == 0 && entry != UINT32_MAX)
     {
         char path[PATH_MAX];
         snprintf(path, sizeof(path), "%s.expected", name);
@@ -805,8 +793,8 @@ static void ssa_source_file(SsaSourceTotals* totals, const char* name, char** op
     }
     if (checked)
     {
-        printf("test-ssa-source: file=%s functions=%u instructions=%" PRIu64 " phis=%" PRIu64 "/%" PRIu64 " failures=%u tier0=%u run=%s%s\n", name, file.count, instructions,
-               phis[0], phis[1], failures, tier0, outcome, counted);
+        printf("test-ssa-source: file=%s functions=%u instructions=%" PRIu64 " phis=%" PRIu64 "/%" PRIu64 " failures=%u run=%s%s\n", name, file.count, instructions,
+               phis[0], phis[1], failures, outcome, counted);
     }
     fflush(stdout);
     arena_pop_to(&arenas->lowered, 0);
@@ -1229,11 +1217,11 @@ static int run_ssa_source_tests(int count, char** arguments)
     if (valid)
     {
         printf("test-ssa-source: totals files=%" PRIu64 " left_out=%" PRIu64 " failed=%" PRIu64 " functions=%" PRIu64 " instructions=%" PRIu64
-               " promoted=%" PRIu64 "/%" PRIu64 " phis=%" PRIu64 "/%" PRIu64 " failures=%" PRIu64 " tier0=%" PRIu64 " programs=%" PRIu64 " passed=%" PRIu64 " steps=%" PRIu64
+               " promoted=%" PRIu64 "/%" PRIu64 " phis=%" PRIu64 "/%" PRIu64 " failures=%" PRIu64 " programs=%" PRIu64 " passed=%" PRIu64 " steps=%" PRIu64
                "/%" PRIu64 "/%" PRIu64 "/%" PRIu64 " generated=%" PRIu64 " unbuilt=%" PRIu64 " native_programs=%" PRIu64 " native_passed=%" PRIu64
                " native_functions=%" PRIu64 "/%" PRIu64 "\n",
                totals.files, totals.left_out, totals.failed_files, totals.functions, totals.instructions, totals.promoted[0], totals.promoted[1], totals.phis[0],
-               totals.phis[1], totals.failures, totals.tier0, totals.programs, totals.passed, totals.steps[0], totals.steps[1], totals.steps[2], totals.steps[3], totals.generated, totals.unbuilt,
+               totals.phis[1], totals.failures, totals.programs, totals.passed, totals.steps[0], totals.steps[1], totals.steps[2], totals.steps[3], totals.generated, totals.unbuilt,
                totals.native_programs, totals.native_passed, totals.native_functions[0], totals.native_functions[1]);
         oracle_cache_report(oracle_cache(), "test-ssa-source");
         if (!keep && passed)
