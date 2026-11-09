@@ -4265,11 +4265,9 @@ The later phases are left:
   without its common warnings. A function's unused parameter that its
   left-out part names through a local of the same name gets no
   `-Wunused-parameter`, where clang gives one.
-- **A label's redefinition.** It is reported at the second label with its
-  note at the first, where clang reports the first with its note at the
-  second, and a duplicate case after it in the same body isn't reported (on
-  main too). A unit needing more than four readings' rounds (each body's error
-  ending the next reading's walk) gets its first errors alone.
+- **Rounds past the cap.** A unit needing more than four readings' rounds
+  (each body's error ending the next reading's walk) gets its first errors
+  alone.
 
 ### What the lowering costs (#531)
 
@@ -6260,7 +6258,13 @@ from outside the block reaches none of them. Clang's errors, at its places: a
 list's name that its block doesn't define is "use of undeclared label" at the
 name in the list, reported as the block ends; a second definition in the scope
 is "redefinition of label" at its name, with clang's "previous definition is
-here" at the first (a local label's at its name in the list); and a name that a block's lists declare
+here" at the first (a local label's at its name in the list). First is clang's
+order: it defines a label as its statement completes, so of a label and one
+within its statement (`L: L: ;`, `L: { L: ; }`, `L: M: L: ;`) the inner is the
+definition, which gotos reach, and the outer the redefinition. The
+redefinition is recovered (#1447): clang drops the label and keeps its
+statement, so the unit is read on as a valid one, and a later duplicate case in
+the body is given too. A name that a block's lists declare
 twice is ambiguous where it is defined or used, and undeclared at both of its
 declarations. Clang reports that last one's ambiguity first, the driver in
 source order. A unit without a list builds none of it; the vector path's mask
