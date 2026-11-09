@@ -336,7 +336,7 @@ extension", at the constant (#1447): once, from the reader
 (`check_input_bit_int_suffix`), as the constant evaluator may read it again;
 from the driver's scan of what a failed parse left unchecked
 (`check_driver_bit_int_suffix`); and in `#if` from the preprocessor, with
-its flag, mapped as clang maps it (`pp_c23_extension_severity`): the
+its flag, mapped as clang maps it (`pp_warning_severity`, #1934): the
 command line's `-W[no-]c23-extensions`, `-W[no-]c2x-extensions`,
 `-W[no-]everything`, `-Werror`, `-Werror=`/`-Wno-error=` and
 `-pedantic-errors`, under the source's `#pragma clang diagnostic` for the group,

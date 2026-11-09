@@ -1597,12 +1597,12 @@ struct Preprocessor
     uint32_t pushed_count;
     // The #pragma clang (or GCC) diagnostic pushes not yet popped: a pop without one isn't printed (pp_pragma_diagnostic).
     uint32_t diagnostic_depth;
-    // -Wc23-extensions' mapping by those pragmas (#1934, pp_c23_extension_severity): a PPPragmaMapping, and the one each
-    // open push saved, which its pop restores, by depth (room for `c23_extension_capacity`, grown in the arena as the
-    // pushes nest: any depth).
-    uint8_t c23_extension_mapping;
-    uint8_t* c23_extension_saved;
-    uint32_t c23_extension_capacity;
+    // The mappings those pragmas give the preprocessor's warning groups (#1934, pp_warning_severity): a PPPragmaMapping
+    // each, by PPWarningGroup, and the ones each open push saved, which its pop restores, BUSTER_PP_WARNING_GROUPS bytes a
+    // depth (room for `warning_capacity` depths, grown in the arena as the pushes nest: any depth).
+    uint8_t warning_mappings[4];
+    uint8_t* warning_saved;
+    uint32_t warning_capacity;
     // Where the open #pragma clang assume_nonnull, arc_cf_code_audited and unsafe_buffer_usage regions begin, or 0.
     uint32_t region_locations[3];
     // #pragma GCC poison's names, by IdentId, and how many there are (pp_check_poison).
@@ -6865,24 +6865,114 @@ static void pp_diagnose_ucn_basic(Preprocessor* pp, uint32_t location, uint32_t 
     }
 }
 
-// How -pedantic's warnings of the preprocessor are given (#1447): as warnings under -pedantic, -Wpedantic,
-// -Wdelimited-escape-sequence-extension or -Weverything, errors under -pedantic-errors, the last of those and their -Wno-
-// forms deciding; PP_SEVERITY_NOTE for none. The command line's alone: the source's pragmas don't reach the lexer's raw
-// diagnostics.
-static PPSeverity pp_pedantic_severity(const Preprocessor* pp)
+// The answer of pp_warning_severity for a warning that isn't given (#1934): no severity a diagnostic is given with.
+#define BUSTER_PP_IGNORED PP_SEVERITY_NOTE
+
+// What a #pragma clang diagnostic made of a warning group (#1934): nothing, or its severity from there on.
+typedef enum PPPragmaMapping
 {
-    PPSeverity result = PP_SEVERITY_NOTE;
+    PP_PRAGMA_MAPPING_NONE,
+    PP_PRAGMA_MAPPING_IGNORED,
+    PP_PRAGMA_MAPPING_WARNING,
+    PP_PRAGMA_MAPPING_ERROR,
+    PP_PRAGMA_MAPPING_FATAL,
+} PPPragmaMapping;
+
+// The preprocessor's warnings that follow clang's options and pragmas (#1934, pp_warning_severity), by their group:
+// -Wc23-extensions' (a bit-precise constant's suffix in #if), -Wunicode's (a \N read as no UCN) and
+// -Wdelimited-escape-sequence-extension's (a named UCN that starts a token, #1447).
+typedef enum PPWarningGroup
+{
+    PP_WARNING_C23_EXTENSIONS,
+    PP_WARNING_UNICODE,
+    PP_WARNING_DELIMITED_ESCAPE,
+    BUSTER_PP_WARNING_GROUPS,
+} PPWarningGroup;
+
+typedef struct PPWarningGroupName PPWarningGroupName;
+struct PPWarningGroupName
+{
+    // Its names without -W: its own, its old one and a group that holds it (or null), and its flag as printed.
+    const char* name;
+    const char* alias;
+    const char* parent;
+    // Whether it is clang's extension (-pedantic-errors promotes it), and whether it is on by default (else -pedantic
+    // gives it).
+    bool extension;
+    bool on;
+};
+
+static const PPWarningGroupName pp_warning_groups[BUSTER_PP_WARNING_GROUPS] =
+{
+    { "c23-extensions", "c2x-extensions", NULL, true, true },
+    { "unicode", NULL, NULL, false, true },
+    { "delimited-escape-sequence-extension", NULL, "pedantic", true, false },
+};
+
+_Static_assert(BUSTER_PP_WARNING_GROUPS <= sizeof(((Preprocessor*)0)->warning_mappings), "a mapping for each warning group");
+
+// Whether `length` bytes at `name` (an option's name without -W) name warning group `g`: its own name, its old one, a group
+// that holds it, or everything.
+static bool pp_warning_group_named(uint32_t g, const char* name, uint32_t length)
+{
+    const PPWarningGroupName* group = pp_warning_groups + g;
+    const char* names[4] = { group->name, group->alias, group->parent, "everything" };
+    bool result = false;
+    for (uint32_t k = 0; k < 4; k += 1)
+    {
+        result |= names[k] != NULL && strlen(names[k]) == length && memcmp(names[k], name, length) == 0;
+    }
+    return result;
+}
+
+// The severity a warning of group `group` at `location` is given with, as clang maps it (#1934); BUSTER_PP_IGNORED for none.
+// First whether it is seen at all, as a warning, before any promotion counts: none under -w, and none in a system header
+// without -Wsystem-headers. Then the command line's: its last -W or -Wno- of the group's names (pp_warning_group_named), or
+// for one off by default -pedantic or -pedantic-errors, promoted by -Werror, -Werror= of the group, or -pedantic-errors of
+// an extension, unless -Wno-error= of it demotes it. The source's #pragma clang diagnostic for it replaces that
+// (Preprocessor.warning_mappings).
+static PPSeverity pp_warning_severity(Preprocessor* pp, PPWarningGroup group, uint32_t location)
+{
+    const PPWarningGroupName* info = pp_warning_groups + group;
+    bool enabled = info->on;
     bool errors = false;
+    bool group_error = false;
+    bool demoted = false;
+    bool pedantic_errors = false;
     for (uint32_t i = 0; i < pp->options.semantic_warning_option_count; i += 1)
     {
         const char* option = pp->options.semantic_warning_options[i];
-        const bool on = strcmp(option, "-pedantic") == 0 || strcmp(option, "-Wpedantic") == 0 || strcmp(option, "-Wdelimited-escape-sequence-extension") == 0 ||
-                        strcmp(option, "-Weverything") == 0;
-        const bool off = strcmp(option, "-Wno-pedantic") == 0 || strcmp(option, "-Wno-delimited-escape-sequence-extension") == 0 || strcmp(option, "-Wno-everything") == 0;
-        errors |= strcmp(option, "-pedantic-errors") == 0;
-        result = on || strcmp(option, "-pedantic-errors") == 0 ? PP_SEVERITY_WARNING : off ? PP_SEVERITY_NOTE : result;
+        const uint32_t length = (uint32_t)strlen(option);
+        const bool pedantic = strcmp(option, "-pedantic") == 0 || strcmp(option, "-pedantic-errors") == 0;
+        const bool on = (length > 2 && option[0] == '-' && option[1] == 'W' && strncmp(option, "-Wno-", 5) != 0 && strncmp(option, "-Werror", 7) != 0 &&
+                         pp_warning_group_named(group, option + 2, length - 2)) || (pedantic && !info->on);
+        const bool off = strncmp(option, "-Wno-", 5) == 0 && strncmp(option, "-Wno-error", 10) != 0 && pp_warning_group_named(group, option + 5, length - 5);
+        const bool promote = strncmp(option, "-Werror=", 8) == 0 && pp_warning_group_named(group, option + 8, length - 8);
+        const bool demote = strncmp(option, "-Wno-error=", 11) == 0 && pp_warning_group_named(group, option + 11, length - 11);
+        enabled = on || promote ? true : off ? false : enabled;
+        group_error = promote ? true : demote ? false : group_error;
+        demoted = demote ? true : promote ? false : demoted;
+        errors = strcmp(option, "-Werror") == 0 ? true : strcmp(option, "-Wno-error") == 0 ? false : errors;
+        pedantic_errors |= strcmp(option, "-pedantic-errors") == 0;
     }
-    return result == PP_SEVERITY_WARNING && errors ? PP_SEVERITY_ERROR : result;
+    PPSeverity result = !enabled ? BUSTER_PP_IGNORED :
+                        group_error || ((errors || (pedantic_errors && info->extension)) && !demoted) ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING;
+    const uint8_t mapping = pp->warning_mappings[group];
+    result = mapping == PP_PRAGMA_MAPPING_IGNORED ? BUSTER_PP_IGNORED : mapping == PP_PRAGMA_MAPPING_WARNING ? PP_SEVERITY_WARNING :
+             mapping == PP_PRAGMA_MAPPING_ERROR ? PP_SEVERITY_MAPPED_ERROR : mapping == PP_PRAGMA_MAPPING_FATAL ? PP_SEVERITY_MAPPED_FATAL : result;
+    const bool seen = !pp->options.suppress_warnings && pp_diagnostic_warning_visible(pp, location, location != 0 ? pp->diagnostic_origin : 0);
+    return seen ? result : BUSTER_PP_IGNORED;
+}
+
+// A warning of group `group` (pp_warning_severity) at `location`, its message with clang's flag after it.
+static __attribute__((noinline, cold)) void pp_diagnose_group(Preprocessor* pp, PPWarningGroup group, uint32_t location, const char* message)
+{
+    const PPSeverity severity = pp_warning_severity(pp, group, location);
+    if (severity != BUSTER_PP_IGNORED)
+    {
+        const bool promoted = severity == PP_SEVERITY_ERROR || severity == PP_SEVERITY_MAPPED_ERROR;
+        pp_diagnose(pp, severity, location, "%s [%s-W%s]", message, promoted ? "-Werror," : "", pp_warning_groups[group].name);
+    }
 }
 
 // The diagnostics of a named UCN that starts a token (BUSTER_PP_NAMED_UCN_ERROR), whose backslash is byte `offset` of
@@ -6902,11 +6992,10 @@ static __attribute__((noinline, cold)) void pp_diagnose_named_ucn(Preprocessor* 
         uint32_t code_point = 0;
         const bool exact = length < sizeof(name) && unicode_name_strict(name, shown, &code_point);
         bool found = exact;
-        const PPSeverity extension = exact ? pp_pedantic_severity(pp) : PP_SEVERITY_NOTE;
-        if (extension != PP_SEVERITY_NOTE)
+        if (exact)
         {
             // -pedantic's (#1447), at the backslash, before its character's error.
-            pp_diagnose(pp, extension, base + offset, "named escape sequences are a Clang extension");
+            pp_diagnose_group(pp, PP_WARNING_DELIMITED_ESCAPE, base + offset, "named escape sequences are a Clang extension");
         }
         if (!exact)
         {
@@ -7001,13 +7090,13 @@ static __attribute__((noinline, cold)) void pp_read_raw_errors_slow(Preprocessor
                     pp_diagnose_named_ucn(pp, data, pp->ranges[context->range].base, error.offset);
                     break;
                 case BUSTER_PP_NAMED_UCN_INCOMPLETE:
-                    pp_diagnose(pp, PP_SEVERITY_WARNING, location, "incomplete universal character name; treating as '\\' followed by identifier");
+                    pp_diagnose_group(pp, PP_WARNING_UNICODE, location, "incomplete universal character name; treating as '\\' followed by identifier");
                     break;
                 case BUSTER_PP_NAMED_UCN_EMPTY:
-                    pp_diagnose(pp, PP_SEVERITY_WARNING, location, "empty delimited universal character name; treating as '\\' 'N' '{' '}'");
+                    pp_diagnose_group(pp, PP_WARNING_UNICODE, location, "empty delimited universal character name; treating as '\\' 'N' '{' '}'");
                     break;
                 case BUSTER_PP_NAMED_UCN_UNTERMINATED:
-                    pp_diagnose(pp, PP_SEVERITY_WARNING, location, "incomplete delimited universal character name; treating as '\\' 'N' '{' identifier");
+                    pp_diagnose_group(pp, PP_WARNING_UNICODE, location, "incomplete delimited universal character name; treating as '\\' 'N' '{' identifier");
                     break;
                 case C_RAW_STRING_OK:
                     break;
@@ -15083,68 +15172,22 @@ static const char* const pp_remark_groups[] = {
 };
 
 // What a #pragma clang diagnostic made of a warning group (#1447): nothing, or its severity from there on.
-// pp_c23_extension_severity's answer for a warning that isn't given (#1934): no severity a diagnostic is given with.
-#define BUSTER_PP_IGNORED PP_SEVERITY_NOTE
-
-typedef enum PPPragmaMapping
-{
-    PP_PRAGMA_MAPPING_NONE,
-    PP_PRAGMA_MAPPING_IGNORED,
-    PP_PRAGMA_MAPPING_WARNING,
-    PP_PRAGMA_MAPPING_ERROR,
-    PP_PRAGMA_MAPPING_FATAL,
-} PPPragmaMapping;
-
-// The severity of the preprocessor's -Wc23-extensions warnings (#1447: a bit-precise constant's suffix in #if), as clang
-// maps it: the source's #pragma clang diagnostic for the group, -Wc2x-extensions or -Weverything
-// (Preprocessor.c23_extension_mapping); else the command line's, its last -W[no-]c23-extensions, -W[no-]c2x-extensions or
-// -W[no-]everything, promoted by -Werror (or -Werror= of the group) or -pedantic-errors, an extension's, unless
-// -Wno-error= demotes it. PP_SEVERITY_NOTE where it is ignored, and wherever under -w.
-static PPSeverity pp_c23_extension_severity(const Preprocessor* pp)
-{
-    bool enabled = true;
-    bool errors = false;
-    bool group_error = false;
-    bool demoted = false;
-    bool pedantic_errors = false;
-    for (uint32_t i = 0; i < pp->options.semantic_warning_option_count; i += 1)
-    {
-        const char* option = pp->options.semantic_warning_options[i];
-        const bool on = strcmp(option, "-Wc23-extensions") == 0 || strcmp(option, "-Wc2x-extensions") == 0 || strcmp(option, "-Weverything") == 0;
-        const bool off = strcmp(option, "-Wno-c23-extensions") == 0 || strcmp(option, "-Wno-c2x-extensions") == 0 || strcmp(option, "-Wno-everything") == 0;
-        const bool promote = strcmp(option, "-Werror=c23-extensions") == 0 || strcmp(option, "-Werror=c2x-extensions") == 0;
-        const bool demote = strcmp(option, "-Wno-error=c23-extensions") == 0 || strcmp(option, "-Wno-error=c2x-extensions") == 0;
-        enabled = on || promote ? true : off ? false : enabled;
-        group_error = promote ? true : demote ? false : group_error;
-        demoted = demote ? true : promote ? false : demoted;
-        errors = strcmp(option, "-Werror") == 0 ? true : strcmp(option, "-Wno-error") == 0 ? false : errors;
-        pedantic_errors |= strcmp(option, "-pedantic-errors") == 0;
-    }
-    PPSeverity result = !enabled || pp->options.suppress_warnings ? BUSTER_PP_IGNORED :
-                        group_error || ((errors || pedantic_errors) && !demoted) ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING;
-    const uint8_t mapping = pp->c23_extension_mapping;
-    result = mapping == PP_PRAGMA_MAPPING_IGNORED ? BUSTER_PP_IGNORED : mapping == PP_PRAGMA_MAPPING_WARNING ? PP_SEVERITY_WARNING :
-             mapping == PP_PRAGMA_MAPPING_ERROR ? PP_SEVERITY_MAPPED_ERROR : mapping == PP_PRAGMA_MAPPING_FATAL ? PP_SEVERITY_MAPPED_FATAL : result;
-    // -w silences it however it is mapped, a promoted one and a pragma's error too, as clang's.
-    return pp->options.suppress_warnings ? BUSTER_PP_IGNORED : result;
-}
-
-// Room in Preprocessor.c23_extension_saved past depth `depth` (#1934): a buffer of twice the room in the arena, the old one's
+// Room in Preprocessor.warning_saved past depth `depth` (#1934): a buffer of twice the room in the arena, the old one's
 // mappings copied into it (cold: only nested pushes past the room grow it). A fatal error if the arena has none.
 static __attribute__((noinline, cold)) void pp_grow_pragma_mappings(Preprocessor* pp, uint32_t depth)
 {
     const uint64_t wanted = (uint64_t)depth + 1;
-    uint64_t capacity = pp->c23_extension_capacity != 0 ? (uint64_t)pp->c23_extension_capacity * 2 : 64;
+    uint64_t capacity = pp->warning_capacity != 0 ? (uint64_t)pp->warning_capacity * 2 : 64;
     capacity = capacity > wanted ? capacity : wanted;
-    uint8_t* grown = capacity <= UINT32_MAX ? arena_push(&pp->arena, capacity, 1) : 0;
+    uint8_t* grown = capacity <= UINT32_MAX / BUSTER_PP_WARNING_GROUPS ? arena_push(&pp->arena, capacity * BUSTER_PP_WARNING_GROUPS, 1) : 0;
     if (grown != 0)
     {
-        if (pp->c23_extension_capacity != 0)
+        if (pp->warning_capacity != 0)
         {
-            memcpy(grown, pp->c23_extension_saved, pp->c23_extension_capacity);
+            memcpy(grown, pp->warning_saved, (uint64_t)pp->warning_capacity * BUSTER_PP_WARNING_GROUPS);
         }
-        pp->c23_extension_saved = grown;
-        pp->c23_extension_capacity = (uint32_t)capacity;
+        pp->warning_saved = grown;
+        pp->warning_capacity = (uint32_t)capacity;
     }
     else
     {
@@ -15168,16 +15211,17 @@ static void pp_pragma_diagnostic(Preprocessor* pp, const PPTokens* tokens, uint3
     uint32_t length = BUSTER_PP_NONE;
     if (push || (pop && pp->diagnostic_depth != 0))
     {
-        // (-Wc23-extensions' mapping, #1934: saved by a push, restored by its pop.)
+        // (The warning groups' mappings, #1934: saved by a push, restored by its pop.)
         const uint32_t saved = push ? pp->diagnostic_depth : pp->diagnostic_depth - 1;
-        if (push && saved >= pp->c23_extension_capacity)
+        if (push && saved >= pp->warning_capacity)
         {
             pp_grow_pragma_mappings(pp, saved);
         }
-        if (saved < pp->c23_extension_capacity)
+        for (uint32_t g = 0; saved < pp->warning_capacity && g < BUSTER_PP_WARNING_GROUPS; g += 1)
         {
-            pp->c23_extension_saved[saved] = push ? pp->c23_extension_mapping : pp->c23_extension_saved[saved];
-            pp->c23_extension_mapping = push ? pp->c23_extension_mapping : pp->c23_extension_saved[saved];
+            uint8_t* slot = pp->warning_saved + (uint64_t)saved * BUSTER_PP_WARNING_GROUPS + g;
+            *slot = push ? pp->warning_mappings[g] : *slot;
+            pp->warning_mappings[g] = *slot;
         }
         pp->diagnostic_depth = push ? pp->diagnostic_depth + 1 : pp->diagnostic_depth - 1;
         printed = true;
@@ -15209,15 +15253,14 @@ static void pp_pragma_diagnostic(Preprocessor* pp, const PPTokens* tokens, uint3
                         (int)length, (const char*)name);
         }
         printed = known;
-        // -Wc23-extensions' mapping from here on (#1447): its group's, its old name's or everything's.
-        const bool c23 = known && name[1] == 'W' &&
-                         ((length == 16 && (memcmp(name, "-Wc23-extensions", 16) == 0 || memcmp(name, "-Wc2x-extensions", 16) == 0)) ||
-                          (length == 12 && memcmp(name, "-Weverything", 12) == 0));
-        if (c23)
+        // The mapping from here on of each warning group it names (#1934): by its name, its old one, a group that holds it, or
+        // everything.
+        const uint8_t mapping = pp_token_is_name(pp, tokens, begin, end, "ignored") ? PP_PRAGMA_MAPPING_IGNORED :
+                                pp_token_is_name(pp, tokens, begin, end, "warning") ? PP_PRAGMA_MAPPING_WARNING :
+                                pp_token_is_name(pp, tokens, begin, end, "error") ? PP_PRAGMA_MAPPING_ERROR : PP_PRAGMA_MAPPING_FATAL;
+        for (uint32_t g = 0; known && name[1] == 'W' && g < BUSTER_PP_WARNING_GROUPS; g += 1)
         {
-            pp->c23_extension_mapping = pp_token_is_name(pp, tokens, begin, end, "ignored") ? PP_PRAGMA_MAPPING_IGNORED :
-                                        pp_token_is_name(pp, tokens, begin, end, "warning") ? PP_PRAGMA_MAPPING_WARNING :
-                                        pp_token_is_name(pp, tokens, begin, end, "error") ? PP_PRAGMA_MAPPING_ERROR : PP_PRAGMA_MAPPING_FATAL;
+            pp->warning_mappings[g] = pp_warning_group_named(g, (const char*)name + 2, length - 2) ? mapping : pp->warning_mappings[g];
         }
     }
     else
@@ -16000,15 +16043,11 @@ static bool pp_parse_integer(Preprocessor* pp, const uint8_t* spelling, uint32_t
         }
     }
     valid &= digits || radix == 8;
-    PPSeverity extension = valid && longs == 4 && pp->options.language.standard < 2023 ? pp_c23_extension_severity(pp) : BUSTER_PP_IGNORED;
-    // A system header's is none without -Wsystem-headers, however it is mapped, as clang's (#1934).
-    extension = extension != BUSTER_PP_IGNORED && !pp_diagnostic_warning_visible(pp, location, location != 0 ? pp->diagnostic_origin : 0) ? BUSTER_PP_IGNORED : extension;
-    if (extension != BUSTER_PP_IGNORED)
+    if (valid && longs == 4 && pp->options.language.standard < 2023)
     {
         // As clang's NumericLiteralParser warns of the suffix (#1447), before the value's errors, as -Wc23-extensions' options
-        // and pragmas map it, with its flag.
-        const bool promoted = extension == PP_SEVERITY_ERROR || extension == PP_SEVERITY_MAPPED_ERROR;
-        pp_diagnose(pp, extension, location, "'_BitInt' suffix for literals is a C23 extension [%s-Wc23-extensions]", promoted ? "-Werror," : "");
+        // and pragmas map it (#1934).
+        pp_diagnose_group(pp, PP_WARNING_C23_EXTENSIONS, location, "'_BitInt' suffix for literals is a C23 extension");
     }
     if (!valid)
     {

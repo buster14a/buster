@@ -5290,6 +5290,48 @@ static bool pp_test_named_ucns(const char* directory, bool with_clang)
             .options = "-pedantic -Wno-delimited-escape-sequence-extension",
             .warnings = true,
         },
+        {
+            // -Wunicode's options, -w and pragmas (#1934): off, promoted, silenced, and mapped from the pragma on.
+            .name = "-Wno-unicode",
+            .source = "f\\N\n",
+            .standard = "gnu17",
+            .expected = "",
+            .options = "-Wno-unicode",
+            .warnings = true,
+        },
+        {
+            .name = "-Werror=unicode",
+            .source = "f\\N\n",
+            .standard = "gnu17",
+            .expected = "1:2: error: incomplete universal character name; treating as '\\' followed by identifier\n",
+            .options = "-Werror=unicode",
+            .warnings = true,
+        },
+        {
+            .name = "-w over -Werror",
+            .source = "f\\N\n",
+            .standard = "gnu17",
+            .expected = "",
+            .options = "-w -Werror",
+            .warnings = true,
+        },
+        {
+            .name = "-Wunicode's pragmas",
+            .source = "#pragma clang diagnostic push\n#pragma clang diagnostic ignored \"-Wunicode\"\nf\\N\n#pragma clang diagnostic pop\ng\\N\n"
+                      "#pragma clang diagnostic error \"-Wunicode\"\nh\\N\n",
+            .standard = "gnu17",
+            .expected = "5:2: warning: incomplete universal character name; treating as '\\' followed by identifier\n"
+                        "7:2: error: incomplete universal character name; treating as '\\' followed by identifier\n",
+            .warnings = true,
+        },
+        {
+            .name = "-pedantic's warning under a pragma",
+            .source = "#pragma clang diagnostic ignored \"-Wpedantic\"\n\\N{GREEK SMALL LETTER ALPHA}x\n",
+            .standard = "gnu17",
+            .expected = "",
+            .options = "-pedantic",
+            .warnings = true,
+        },
     };
     uint32_t failures = 0;
     enum
