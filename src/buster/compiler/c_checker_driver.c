@@ -151,6 +151,9 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_UNKNOWN_BUILTIN: result = "use of unknown builtin"; break;
         case CHECK_INPUT_INVOKE_ARGUMENTS: result = "too few arguments to function call, expected at least 1, have 0"; break;
         case CHECK_INPUT_BUILTIN_NOT_CALLED: result = "builtin functions must be directly called"; break;
+        case CHECK_INPUT_BUILTIN_CONFLICT: result = "conflicting types for builtin function"; break;
+        case CHECK_INPUT_BUILTIN_DEFINITION: result = "definition of builtin function"; break;
+        case CHECK_INPUT_BUILTIN_REDECLARE: result = "cannot redeclare builtin function"; break;
         case CHECK_INPUT_ATTRIBUTE_OUT_OF_BOUNDS: result = "attribute parameter is out of bounds"; break;
         case CHECK_INPUT_ATTRIBUTE_TYPES: result = "attribute cannot be applied to types"; break;
         case CHECK_INPUT_ATTRIBUTE_LIST_PLACE: result = "an attribute list cannot appear here"; break;
@@ -2916,6 +2919,16 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                 }
             }
         }
+        // Inside a direct call's full expression, of an interrupt service routine, only its error (#1447).
+        uint32_t report_kept = 0;
+        for (uint32_t i = 0; input->interrupt_range_count != 0 && i < report_total; i += 1)
+        {
+            const uint32_t sequence = (uint32_t)report_keys[i];
+            const bool called = sequence < input->report_count && input->reports[sequence].message == CHECK_INPUT_INTERRUPT_CALLED;
+            report_keys[report_kept] = report_keys[i];
+            report_kept += called || check_driver_interrupt_kept(input, (uint32_t)(report_keys[i] >> 32)) ? 1u : 0u;
+        }
+        report_total = input->interrupt_range_count != 0 ? report_kept : report_total;
         uint64_t* firsts = reports ? c_bindings_sort(report_keys, report_sorting, report_total, !scalar, varying) : NULL;
         uint32_t first_count = 0;
         for (uint32_t i = 0; i < report_total; i += 1)
@@ -2996,6 +3009,13 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                 warning_keys[warning_total++] = check_driver_warning_key(excess_tokens[i], CHECK_WARNING_EXCESS_INITIALIZERS, CHECK_WARNING_EXCESS_INITIALIZERS);
             }
         }
+        uint32_t warning_kept = 0;
+        for (uint32_t i = 0; input->interrupt_range_count != 0 && i < warning_total; i += 1)
+        {
+            warning_keys[warning_kept] = warning_keys[i];
+            warning_kept += check_driver_interrupt_kept(input, (uint32_t)(warning_keys[i] >> 32)) ? 1u : 0u;
+        }
+        warning_total = input->interrupt_range_count != 0 ? warning_kept : warning_total;
         uint64_t* warnings = show_warnings ? c_bindings_sort(warning_keys, warning_sorting, warning_total, !scalar, varying) : NULL;
         uint32_t warning_count = 0;
         for (uint32_t i = 0; i < warning_total; i += 1)
@@ -3659,6 +3679,42 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                             // Just after the tag's keyword, where clang's fix-it puts the attributes.
                             const uint32_t keyword = parser->tokens.names[token];
                             pp_diagnose_output_offset_at(pp, PP_SEVERITY_ERROR, source, keyword != 0 ? intern_length(pp->table, keyword) : 0, publication, "%s", message);
+                        }
+                        else if (phase == 0 && (kind == CHECK_INPUT_BUILTIN_CONFLICT || kind == CHECK_INPUT_BUILTIN_REDECLARE) && token < count)
+                        {
+                            // A builtin's declaration of another type (#1843): clang's "conflicting types", or a custom-checked
+                            // one's any declaration, "cannot redeclare builtin function" (#1918's review), with its note, at
+                            // the same name, of the builtin's type as clang prints it (check_driver_warning_type).
+                            const CheckInputReport* report = input->reports + index;
+                            const uint64_t type_mark = scratch->length;
+                            CheckWarningSpelling spell = { .count = pp->table->count };
+                            spell.bytes = BUSTER_ARENA_PUSH_ARRAY(scratch, const uint8_t*, spell.count);
+                            spell.lengths = spell.bytes != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, spell.count) : NULL;
+                            for (uint32_t s = 0; spell.lengths != NULL && s < spell.count; s += 1)
+                            {
+                                spell.bytes[s] = intern_bytes(pp->table, s);
+                                spell.lengths[s] = intern_length(pp->table, s);
+                            }
+                            const bool spelled = spell.lengths != NULL && check_driver_spelling_build(parser, pp, input, types, &spell, scratch);
+                            const String8 type = spelled ? check_driver_warning_type(parser, pp, input, types, &spell, scratch, report->type, 0) : (String8){ 0 };
+                            const uint32_t name = parser->tokens.names[token];
+                            char note_text[512];
+                            snprintf(note_text, sizeof(note_text), "'%.*s' is a builtin with type %.*s", (int)intern_length(pp->table, name),
+                                     (const char*)intern_bytes(pp->table, name), (int)type.length, type.pointer);
+                            const PPOutputDiagnosticNote note = {
+                                .token = source,
+                                .message = note_text,
+                            };
+                            pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, type.length != 0 ? 1u : 0u,
+                                                        kind == CHECK_INPUT_BUILTIN_REDECLARE ? "cannot redeclare builtin function '%.*s'" : "conflicting types for '%.*s'",
+                                                        (int)intern_length(pp->table, name), (const char*)intern_bytes(pp->table, name));
+                            arena_pop_to(scratch, type_mark);
+                        }
+                        else if (phase == 0 && kind == CHECK_INPUT_BUILTIN_DEFINITION && token < count)
+                        {
+                            const uint32_t name = parser->tokens.names[token];
+                            pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "definition of builtin function '%.*s'", (int)intern_length(pp->table, name),
+                                                  (const char*)intern_bytes(pp->table, name));
                         }
                         else if (phase == 0 && kind == CHECK_INPUT_ENUM_NOT_REPRESENTABLE)
                         {

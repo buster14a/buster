@@ -576,8 +576,14 @@ does, each rule checked against clang's answers on probes of it:
   GNU C does, into a `static` array's element or a `static` struct, where its
   body's parts are constant (`(S8){ "a", 1 }`, not `(S8){ "a", n }`). The
   initializer copies the literal's parts, as it did only for a file-scope
-  literal's. A scalar compound literal (`(int){ 1 }`) stays refused there, at
-  file scope too.
+  literal's. A scalar compound literal's value (`static int x = (int){ 1 };`,
+  `(long){ 5 } + 1`, `(int){ (int){ 3 } }`), at file scope too, is its body's one
+  value converted to its type, where that is a number or a static object's
+  address constant (#1447, `check_init_scalar_literal`): the constant cache that
+  folds a vector literal's lanes folds it, and the operations around it, a
+  conditional's among them (`(int){ 5 } ? 6 : 7`). Still refused: one in a
+  file-scope array's bound (`char e[(int){ 2 }];`), which clang folds to a
+  constant array with its `-Wgnu-folding-constant` warning.
 
 Declaration specifiers and comma-separated declarators are elaborated in source
 order, including the scope of a name in its own initializer. The reader
@@ -798,7 +804,11 @@ old-style definition. The completed parameter types remain; an outer tag or
 ordinary name becomes visible again in the body and following file scope.
 These declarations are not republished into the body as prototype-definition
 tags are. The extra visibility/redefinition warning sequence is not reproduced.
-Variably modified parameters remain refused by name. An identifier list
+A variably modified parameter's bounds (`int f(n, a) int n; int a[n][n]; {}`)
+are a prototype parameter's (#1447): the list's declarators read them as a
+parameter's, each bound's record names the listed parameter, and the function's
+entry evaluates them; the walk takes their tokens, the list's only ones it
+takes. A `[*]` bound there stays an error, as clang's is. An identifier list
 outside a definition is refused, as C17 6.7.6.3p3 has it; C23 rejects identifier lists.
 Parenthesized `_Atomic(T)` starts the declaration list at the same boundary
 as the qualifier form `_Atomic T`. Its type name uses the ordinary evaluator,
@@ -3442,9 +3452,18 @@ What the lowering covers past scalars (#145's programs):
   function's labels (`Tier0Function.label_entries`), and the emission defines
   a local symbol at each one's first record after branch sizing
   (`.Lbuster_label_N`, of no type), which `GLOBAL_ADDRESS` reaches and a static
-  table's pointers point at. Not yet: the difference of two labels' addresses
-  as a static initializer's constant (GNU's relative jump tables), which clang
-  folds and the checker refuses as not a constant.
+  table's pointers point at. The difference of two labels' addresses in a
+  static initializer (GNU's relative jump tables, `static const int t[] =
+  { &&a - &&b };`, #1447) is a constant of its own kind
+  (`CHECK_CONSTANT_LABEL_DIFFERENCE`, `check_init_label_difference`), as
+  clang's evaluator keeps an AddrLabelDiff: `&&a - &&b` of any pointer types to
+  the labels (divided by no element size, as clang's isn't), through
+  parentheses, a unary plus, `__extension__` and conversions to an integer type
+  of 32 bits or more that doesn't widen it; any other operation on it, or a
+  narrower or wider conversion, is no constant, as in clang. The static data
+  writes the labels' distance in their function's code, which the emission
+  placed before the data is planned, where an assembler resolves clang's
+  `.long .La-.Lb`; the labels are objects the program must have symbols of.
   The two control walks filter the parser's immutable kind/role columns in
   bounded 64-byte blocks and visit exact events in source order: function
   bodies, labels, `__label__` lists, cases, gotos and label addresses in the
@@ -4106,9 +4125,15 @@ do:
   A compatible redefinition declares the earlier type. Otherwise the unit is
   refused and recovered.
 
-  Left as they were: `-Wno-odr` doesn't turn the `-Wodr` errors off. An enum
-  defined again under C23 still refuses with the generic error, which stops
-  the reader. Clang compares its enumerators, and keeps both lists' names in
+  The `-Wodr` errors follow clang's policy for a default error: `-w` leaves
+  them, `-Wno-error=odr` makes them warnings (with their notes) and `-Wno-odr`
+  drops them, as does a source pragma at the redefinition's name. In a system
+  header they are ignored without `-Wsystem-headers`. A demoted or
+  ignored one doesn't make the definitions incompatible: one that is otherwise
+  compatible declares the earlier type, as in clang (`check_input_odr_severity`).
+
+  Left as they were: an enum defined again under C23 still refuses with the
+  generic error, which stops the reader. Clang compares its enumerators, and keeps both lists' names in
   scope with ambiguous references. An `_Atomic(struct { ... })` member is the
   parser's refusal, with or without a redefinition.
 - **A repeated enumerator** gives "redefinition of enumerator 'A'" with its
@@ -7889,7 +7914,12 @@ arguments against the function. The checker now gives these as clang does.
   "'X' attribute only applies to functions and methods" (after an unsupported
   convention's warning), as clang's handlers give it to a declaration without a
   declarator; a bit-field's after its width meets its type
-  ("only applies to function types"). A variadic function's `vectorcall` or
+  ("only applies to function types"). A convention's wrong count of arguments
+  is clang's error where it meets a function or a tag ("'X' attribute takes no
+  arguments", after a definition's `-Wgcc-compat` warning), and on another
+  subject its subject's warning alone (`CheckInputAttribute.convention_count`);
+  its arguments are expressions to clang's parser first, whose errors (an
+  undeclared name's) drop it wherever it is (#1447), but `pcs`', a string's. A variadic function's `vectorcall` or
   `regcall` is clang's "variadic function cannot use vectorcall calling
   convention", and so is a `swiftcall` or `swiftasynccall` one's; a declaration
   (not a definition or a typedef) of such a function without a prototype is
@@ -7922,11 +7952,17 @@ arguments against the function. The checker now gives these as clang does.
   `checkExtParameterInfos` checks them, at the parameter: the convention
   (swiftcall or swiftasynccall, swiftcall's alone for an error result, and any
   for `swift_async_context`, whose function clang's backend gives it r14, which
-  the producer refuses by name), an indirect result first or after another, an
-  error result just after a context. A Swift parameter of another function type
-  than a declaration's own (a pointer's, a parameter's or a type name's), whose
-  convention clang takes from attributes it places otherwise, is refused by
-  name. Off a parameter, each is "only applies to parameters" (a warning).
+  the producer refuses by name; the convention's error once per function, at
+  its first incompatible parameter, as clang's `hasCheckedSwiftCall` has it), an
+  indirect result first or after another, an error result just after a
+  context. A function chunk farther from the name than the nearest one
+  (`void (*f(void))(…)`'s returned function's, `void (*(*p)(int))(…)`'s) has no
+  convention when clang builds it, as distribution gives the declaration's
+  conventions to the nearest, so its parameters are checked as System V's
+  there (#1447). The nearest chunk of a pointer's, a parameter's or a type
+  name's declarator, whose convention clang takes from attributes it places
+  otherwise (a pointer chunk's own), is refused by name. Off a parameter, each
+  is "only applies to parameters" (a warning).
 
   A definition's `-Wgcc-compat` warning comes before Sema's
   diagnostics of the same attribute.
@@ -7986,7 +8022,10 @@ arguments against the function. The checker now gives these as clang does.
   arguments are expressions to clang's parser (an undeclared name, a missing
   operand: their errors drop it) and nothing to its handler, whatever their
   count. Then, the first rule broken being the declaration's error
-  (`check_input_interrupt_handler`): a result that isn't void, at its type's
+  (`check_input_interrupt_handler`), which drops the attribute and leaves the
+  declaration valid, as clang's handler returns (#1447: its later attributes'
+  errors, `_Alignas`' among them, follow it in their order, and each
+  declarator and later declaration is checked): a result that isn't void, at its type's
   start (`check_input_interrupt_result`: past storage classes, qualifiers and
   attributes; `_Complex`'s type's, `_Atomic(T)`'s T's); a count of parameters
   but one or two (a variadic one's named ones), at the declaration's start; a
@@ -8013,7 +8052,11 @@ arguments against the function. The checker now gives these as clang does.
   address-of, as `ActOnCallExpr` finds it; in `sizeof` and `_Generic`'s
   operands too), is clang's "interrupt service routine cannot be called
   directly" at the callee (Expr::getExprLoc's place: a parenthesized one's
-  `(`, a member's name, a subscript's base's), and in the body of a function
+  `(`, a member's name, a subscript's base's). That error is the call's alone:
+  the unit's later checks run as a valid unit's do (#1447,
+  `CheckInput.recovered_valid`), and no other diagnostic of its full
+  expression is published, as clang's invalid call leaves none
+  (`CheckInput.interrupt_ranges`). In the body of a function
   either marks, any other call whose callee no `no_caller_saved_registers`
   marks (the declaration's attribute, which a typedef's function type
   doesn't give) is -Wexcessive-regsave's warning, interrupt's message where
@@ -8023,7 +8066,10 @@ arguments against the function. The checker now gives these as clang does.
   error, which clang doesn't build, has none. Builtins are calls but those
   clang parses as keywords' forms (`va_arg`, `convertvector`, `offsetof`,
   `types_compatible_p`, `choose_expr`). The calls are the graph's in its
-  postorder, clang's order: a call's callee's and arguments' calls first. An
+  postorder, clang's order: a call's callee's and arguments' calls first;
+  then those the reader's evaluator alone reads, a `typeof`'s and a constant
+  array bound's, whose `)` no graph node has, of a declared name's callee
+  (`check_interrupt_evaluated_calls`, #1447). An
   interrupt service routine's definition is Tier 0's handler frame
   (`Tier0Function.interrupt`, `docs/tier0.md`): `CheckProgram.object_interrupt`
   holds each function's first declaration with the attribute,
@@ -8402,9 +8448,6 @@ arguments against the function. The checker now gives these as clang does.
     missing-semicolon and malformed K&R-tail repairs above preserve their
     original parse errors and notes; they do not make every parser or semantic
     failure resumable (`docs/c-parser.md`).
-  - A calling convention's wrong count is clang's error where the convention
-    meets a function, after a definition's `-Wgcc-compat` warning, and on
-    another subject its warning alone (`CheckInputAttribute.convention_count`).
   - A calling convention's redeclaration and assignment messages, the same for
     `no_caller_saved_registers`:
     - a function declared with an explicit convention other than its earlier
@@ -8432,19 +8475,21 @@ arguments against the function. The checker now gives these as clang does.
       convention the unit writes both ways, with two macros, or anywhere
       through a keyword (`__regcall`), is spelled out.
   - x86's `interrupt` (#147):
-    - the calls in operands the reader's evaluator alone reads (a `typeof`'s,
-      a constant array bound's `sizeof`) have no graph node: a direct call of
-      an interrupt service routine there isn't clang's error, nor any call
-      there -Wexcessive-regsave's warning;
+    - of the calls in operands the reader's evaluator alone reads (a
+      `typeof`'s, a constant array bound's), those of a builtin and those
+      whose callee isn't a name (`typeof(s.f())`) are neither a direct call's
+      error nor -Wexcessive-regsave's warning;
     - a declaration's interrupt and no_caller_saved_registers are an entity's
       first declarations' with them, up to the declaration a call's name finds
       (or the definition): a block's redeclaration that clang's chain doesn't
       link is taken as linked;
-    - the checker's first error in a declaration ends it, as everywhere:
-      `_Alignas` on a handler is its error alone, where clang gives
-      interrupt's first and then `_Alignas`';
-    - a unit with a direct call's error stops before its later checks (asm
-      operands, initializers' warnings), whose diagnostics clang gives too.
+    - a direct call's error drops every other diagnostic of its full
+      expression (`CheckInput.interrupt_ranges`: its declarator's initializer
+      or its statement, but the call's other arguments and list elements),
+      where clang keeps those of the other operands that don't hold the call,
+      built before or after it (`g(1) + (f(0), 1)`'s -Wexcessive-regsave of
+      `g(1)`, `x = (f(0), 1), x = 1 / 0`'s division by zero, `(f(0), (1, 2))`'s
+      inner comma's -Wunused-value).
   - After a missing `;`'s recovery, an error the checker recovers from
     (`int x _Alignas(3) int y _Alignas(4);`'s "requested alignment is not a
     power of 2") goes on to the later declarations, as clang does ("Semantic

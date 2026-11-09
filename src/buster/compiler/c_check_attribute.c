@@ -260,7 +260,7 @@ struct CheckInputAttribute
     // A keyword's record (_Alignas, asm, a calling convention, _Noreturn, a nullability), not an attribute list's item.
     bool keyword;
     // A calling convention's wrong count of arguments (BUSTER_CHECK_COUNT_* and its bound), clang's error where the
-    // convention meets a function (check_input_attribute_conventions); on another subject, its warning alone.
+    // convention meets a function (check_input_attribute_conventions) or a tag; on another subject, its warning alone.
     uint8_t convention_count;
     uint8_t convention_bound;
     // cleanup's function declaration plus one, bound before later declarators can shadow its parsed argument.
@@ -3588,11 +3588,11 @@ struct CheckInputAttributeRecovery
 };
 
 // Whether an attribute's error is one clang's handleDeclAttribute gives and then returns from without adding the attribute,
-// which leaves the declaration valid: its arguments' (their values, counts, strings and parameter indices), its subject's
-// and a mutual exclusion's; and a vector type's element or size, which clang's HandleVectorSizeAttr and
-// HandleNeonVectorTypeAttr give and then leave the type as it was (check_input_attribute_type). Others stop the reader as
-// before: an undeclared name's, a pragma's, conflicting calling conventions' (a type's, which clang makes invalid) and a
-// list's place (its parser's).
+// which leaves the declaration valid: its arguments' (their values, counts, strings and parameter indices), its subject's,
+// a mutual exclusion's and x86's interrupt handler's (#1447); and a vector type's element or size, which clang's
+// HandleVectorSizeAttr and HandleNeonVectorTypeAttr give and then leave the type as it was (check_input_attribute_type).
+// Others stop the reader as before: an undeclared name's, a pragma's, conflicting calling conventions' (a type's, which
+// clang makes invalid) and a list's place (its parser's).
 static bool check_input_attribute_recoverable(const CheckInputReport* report)
 {
     const CheckInputMessage message = report->message;
@@ -3600,7 +3600,8 @@ static bool check_input_attribute_recoverable(const CheckInputReport* report)
                            message == CHECK_INPUT_ATTRIBUTE_SUBJECT || message == CHECK_INPUT_ATTRIBUTE_OUT_OF_BOUNDS ||
                            message == CHECK_INPUT_ATTRIBUTE_INDEX_BOUNDS || message == CHECK_INPUT_ATTRIBUTE_EXCLUSION ||
                            message == CHECK_INPUT_ATTRIBUTE_ANNOTATE_STRING || message == CHECK_INPUT_ATTRIBUTE_STRING_ARGUMENT ||
-                           message == CHECK_INPUT_ATTRIBUTE_INT_OR_BOOL || message == CHECK_INPUT_ATTRIBUTE_TYPES;
+                           message == CHECK_INPUT_ATTRIBUTE_INT_OR_BOOL || message == CHECK_INPUT_ATTRIBUTE_TYPES ||
+                           message == CHECK_INPUT_INTERRUPT_HANDLER;
     const bool vector = message == CHECK_INPUT_VECTOR_ELEMENT || message == CHECK_INPUT_VECTOR_BIT_INT || message == CHECK_INPUT_VECTOR_CONSTANT ||
                         message == CHECK_INPUT_VECTOR_NEGATIVE || message == CHECK_INPUT_VECTOR_TOO_LARGE || message == CHECK_INPUT_VECTOR_ZERO ||
                         message == CHECK_INPUT_VECTOR_MULTIPLE;
@@ -4136,6 +4137,7 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
             const bool convention = rule->kind == CHECK_ATTRIBUTE_CALLING_CONVENTION && check_input_attribute_call(name) != CHECK_CALL_NO_CALLER_SAVED;
             uint32_t convention_bound = 0;
             const uint8_t convention_count = convention ? check_input_attribute_count_check(counted, count, &convention_bound) : BUSTER_CHECK_COUNT_NONE;
+            uint8_t parsed_convention = BUSTER_CHECK_PARSED_CLEAN;
             // (interrupt's arguments x86's handler never counts.)
             uint8_t count_check = rule->kind == CHECK_ATTRIBUTE_MUSTTAIL || rule->kind == CHECK_ATTRIBUTE_CLEANUP || rule->kind == CHECK_ATTRIBUTE_COUNTED_BY || convention ||
                                   interrupt ? BUSTER_CHECK_COUNT_NONE : check_input_attribute_count_check(counted, count, &bound);
@@ -4211,12 +4213,23 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
                 // name), then its subject's and its count's (check_input_cleanup_declaration).
                 valid = false;
             }
+            else if (convention_count != BUSTER_CHECK_COUNT_NONE && !check_input_attribute_equal(name, "pcs") &&
+                     (parsed_convention = check_input_attribute_parsed(reader, attributes, &attribute)) == BUSTER_CHECK_PARSED_ERROR)
+            {
+                // Its arguments are expressions to clang's parser first (#1447): an undeclared name's error drops it. (pcs's
+                // are its string's, which its count's error comes before.)
+                valid = false;
+            }
             else if (convention_count != BUSTER_CHECK_COUNT_NONE)
             {
-                // Its arguments aren't read: its count is its error where it meets a function, and nothing elsewhere.
+                // Its count is its error where it meets a function or a tag, and its subject's warning alone elsewhere
+                // (check_input_attribute_subjects); arguments whose errors need the expression reader are read as
+                // interrupt's are.
                 attribute.convention_count = convention_count;
                 attribute.convention_bound = (uint8_t)convention_bound;
                 attribute.argument_count = count;
+                attribute.parse_arguments = parsed_convention == BUSTER_CHECK_PARSED_UNSURE;
+                attribute.parsed_schema = (uint8_t)CHECK_ATTRIBUTE_INTEGER_LIST;
             }
             else if (interrupt)
             {
@@ -5223,6 +5236,8 @@ static bool check_input_swift_parameters(CheckInputReader* reader, TypeId functi
     const bool swift = convention == TYPE_FUNCTION_ABI_SWIFT;
     const bool either = swift || convention == TYPE_FUNCTION_ABI_SWIFT_ASYNC;
     bool valid = true;
+    // The convention's error is the function's first incompatible parameter's alone (clang's hasCheckedSwiftCall).
+    bool convention_checked = false;
     for (uint32_t i = 0; type_function_has_parameter_abis(types, function) && i < count; i += 1)
     {
         const TypeParameterABI abi = type_parameter_abi(types, function, i);
@@ -5230,15 +5245,17 @@ static bool check_input_swift_parameters(CheckInputReader* reader, TypeId functi
         const bool error_result = abi == TYPE_PARAMETER_ABI_SWIFT_ERROR_RESULT;
         uint32_t error = BUSTER_CHECK_NONE;
         uint32_t number = abi;
-        if (abi != TYPE_PARAMETER_ABI_ORDINARY && abi != TYPE_PARAMETER_ABI_SWIFT_ASYNC_CONTEXT && !(error_result ? swift : either))
+        if (abi != TYPE_PARAMETER_ABI_ORDINARY && abi != TYPE_PARAMETER_ABI_SWIFT_ASYNC_CONTEXT && !(error_result ? swift : either) && !convention_checked)
         {
             error = CHECK_ARGUMENT_SWIFT_PARAMETER_CONVENTION;
             number |= error_result ? BUSTER_CHECK_SWIFT_ONLY : 0;
+            convention_checked = true;
         }
         const uint32_t order = abi == TYPE_PARAMETER_ABI_SWIFT_INDIRECT_RESULT && i != 0 && previous != TYPE_PARAMETER_ABI_SWIFT_INDIRECT_RESULT ?
                                CHECK_ARGUMENT_SWIFT_INDIRECT_FIRST :
                                error_result && previous != TYPE_PARAMETER_ABI_SWIFT_CONTEXT ? CHECK_ARGUMENT_SWIFT_ERROR_AFTER_CONTEXT : BUSTER_CHECK_NONE;
-        // (clang gives both, the convention's first.)
+        // (clang gives both, the convention's first: the order's is kept at the same place as a repeated report, which the
+        // driver doesn't fold into the first, #1447.)
         for (uint32_t pass = 0; pass < 2; pass += 1)
         {
             const uint32_t kind = pass == 0 ? error : order;
@@ -5249,6 +5266,7 @@ static bool check_input_swift_parameters(CheckInputReader* reader, TypeId functi
                 if (reader->output->report_count > before)
                 {
                     reader->output->reports[before].attribute = attributes[i];
+                    reader->output->reports[before].repeated |= pass == 1 && error != BUSTER_CHECK_NONE;
                 }
                 valid = false;
             }
@@ -7514,6 +7532,8 @@ static bool check_input_interrupt_handler(CheckInputReader* reader, CheckInputAt
         {
             reader->output->reports[before].detail = rule | (located ? 0u : BUSTER_CHECK_INTERRUPT_UNLOCATED);
             reader->output->reports[before].attribute = attribute->first;
+            // In the order of the declaration's attributes, as clang's handlers run, wherever its place (#1447).
+            reader->output->reports[before].sort = attribute->first;
         }
         if (attributes->error == CHECK_ATTRIBUTE_ERROR_NONE)
         {
@@ -7602,10 +7622,12 @@ static bool check_input_attribute_subjects(CheckInputReader* reader, CheckInputA
         CheckInputAttribute* attribute = attributes->records + i++;
         recovery = check_input_attribute_recovery(reader, attributes, attribute);
         if (attribute->kind == CHECK_ATTRIBUTE_CALLING_CONVENTION && attribute->convention_count != BUSTER_CHECK_COUNT_NONE && !attribute->subject_ignored &&
-            check_input_attribute_function_wrapped(reader->types, type))
+            (check_input_attribute_function_wrapped(reader->types, type) ||
+             (declaration & (BUSTER_CHECK_SUBJECT_STRUCT | BUSTER_CHECK_SUBJECT_UNION | BUSTER_CHECK_SUBJECT_ENUM)) != 0))
         {
             // A calling convention's wrong count on a function, or a pointer or an array of one, is clang's error alone,
-            // after its parser's warnings (a definition's -Wgcc-compat); on another subject its warning (#147,
+            // after its parser's warnings (a definition's -Wgcc-compat); on a tag too, whose declaration clang's
+            // handleCallConvAttr checks it on (#1447); on another subject its warning (#147,
             // CheckInputAttribute.convention_count).
             check_input_report_argument(reader, attribute->first, CHECK_INPUT_ATTRIBUTE_ARGUMENT_COUNT,
                                         attribute->convention_count | (uint32_t)attribute->convention_bound << 8);
@@ -7796,6 +7818,9 @@ static bool check_input_attribute_subjects(CheckInputReader* reader, CheckInputA
             valid = check_input_interrupt_handler(reader, attributes, attribute, declaration, type, begin, name);
             attribute->ignored = !valid;
             attribute->subject_ignored = !valid;
+            // Its error leaves the declaration valid, as clang's handler returns (#1447): the declaration's later
+            // attributes' errors follow it, published with the declarator's other waiting errors, in their order.
+            valid = valid || check_input_attribute_errors_recover(reader, attributes, &recovery, completion > 1 ? completion - 1 : completion);
         }
         // patchable_function_entry where its subjects take it (#1447): its handler's checks of its arguments.
         if (valid && attribute->kind == CHECK_ATTRIBUTE_PATCHABLE_FUNCTION_ENTRY && !attribute->ignored && !attribute->subject_ignored)
