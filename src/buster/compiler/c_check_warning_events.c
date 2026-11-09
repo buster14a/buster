@@ -123,6 +123,9 @@ enum
     CHECK_WARNING_ID_IMPLICIT_ENUM_ENUM_CAST = 111,
     // A tag a prototype's parameter list declares first (#1447, clang's ActOnTag): -Wvisibility, on by default.
     CHECK_WARNING_ID_VISIBILITY = 112,
+    // A C23 record's redefinition whose attributes differ (#1447, c_check_tag_compatible.c): clang's -Wodr, an error by
+    // default (check_input_odr_severity).
+    CHECK_WARNING_ID_ODR = 113,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -373,6 +376,10 @@ typedef enum CheckWarningEventKind
     // A tag a prototype's list defines again (#1447, -Wvisibility): at its name, payload.name the name, with a
     // CHECK_WARNING_NOTE_PREVIOUS_DEFINITION at the earlier definition.
     CHECK_WARNING_EVENT_PROTOTYPE_REDEFINITION,
+    // A C23 record's redefinition whose attributes (payload.data 0) or a member's (1) differ from the earlier's, as a
+    // warning (#1447, -Wno-error=odr or a pragma's): at its name, with a CHECK_WARNING_NOTE_ATTRIBUTE_HERE at each list's
+    // differing attribute, the earlier's first.
+    CHECK_WARNING_EVENT_ODR_ATTRIBUTE,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
 
@@ -406,6 +413,8 @@ typedef enum CheckWarningNoteKind
     CHECK_WARNING_NOTE_DECLARED_HERE,
     // "from 'diagnose_if' attribute on 'f':" (#1447), payload.name the function's name.
     CHECK_WARNING_NOTE_DIAGNOSE_IF,
+    // "attribute 'packed' here" (#1447, CHECK_WARNING_EVENT_ODR_ATTRIBUTE's), payload.name the attribute's name.
+    CHECK_WARNING_NOTE_ATTRIBUTE_HERE,
     CHECK_WARNING_NOTE_KIND_COUNT,
 } CheckWarningNoteKind;
 
