@@ -62,8 +62,10 @@ static bool check_input_redeclaration_extern(const Parser* parser, uint32_t toke
     return result;
 }
 
-static void check_input_redeclaration_report(CheckInputReader* reader, uint32_t token, uint32_t previous,
-                                             TypeAnswer compatible, bool repeatable, bool parameter_conflict, CheckInputMessage message)
+// `thread_local` says whether a thread-local storage mismatch is still this declaration's to report: one reported against
+// the visible declaration already isn't its linked declaration's too (#1786).
+static void check_input_redeclaration_report(CheckInputReader* reader, uint32_t token, uint32_t previous, TypeAnswer compatible,
+                                             bool repeatable, bool parameter_conflict, bool thread_local, CheckInputMessage message)
 {
     CheckInput* input = reader->output;
     CheckRedeclarationKind detail = CHECK_REDECLARATION_GENERIC;
@@ -77,7 +79,7 @@ static void check_input_redeclaration_report(CheckInputReader* reader, uint32_t 
         const uint32_t linkage = check_input_linkage(reader->declaration_bits, token);
         const uint32_t earlier_linkage = check_input_linkage(reader->declaration_bits, previous);
         const bool current_tls = check_input_bit(reader->declaration_bits, token, BUSTER_CHECK_BITS_THREAD_LOCAL);
-        const bool same_tls = current_tls == check_input_bit(reader->declaration_bits, previous, BUSTER_CHECK_BITS_THREAD_LOCAL);
+        const bool same_tls = !thread_local || current_tls == check_input_bit(reader->declaration_bits, previous, BUSTER_CHECK_BITS_THREAD_LOCAL);
         const uint32_t definition = reader->definition_origins != NULL ? reader->definition_origins[previous] : 0;
         const uint32_t current_definition = reader->definition_origins != NULL ? reader->definition_origins[token] : 0;
         const bool object = kind == C_BINDING_OBJECT;

@@ -73,8 +73,9 @@ static void check_complex_convert(const TypeTable* table, CheckValue* value, Typ
         value->flags &= ~(BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_ICE_FORM | BUSTER_CHECK_FLOAT_LITERAL | BUSTER_CHECK_ICE_UNEVALUATED | BUSTER_CHECK_NULL_POINTER);
         if (target_complex && real.fault == CHECK_FAULT_NONE && imaginary.fault == CHECK_FAULT_NONE)
         {
-            // A _Complex __float128 constant holds its parts as long doubles (#1250): only where they are its parts exactly,
-            // their mirrors their values (c_check_quad.c); another's is refused, as before __float128 kept bits.
+            // A _Complex __float128 constant holds its parts as long doubles (#1250): only where they are its parts
+            // exactly, their mirrors their values (c_check_quad.c); another's is refused, as before __float128 kept
+            // bits.
             const bool quad = type_unqualified(type_strip_aligned(table, element)) == BUSTER_TYPE_FLOAT128;
             const bool exact = !quad || real.constant_kind != CHECK_CONSTANT_FLOATING || imaginary.constant_kind != CHECK_CONSTANT_FLOATING ||
                                (check_quad_widen(real.floating, false) == real.integer && check_quad_widen(imaginary.floating, false) == imaginary.integer);

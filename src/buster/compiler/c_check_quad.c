@@ -3,15 +3,15 @@
 //
 // __float128 constants (#1250). A CheckValue of __float128 keeps the binary128 value's exact bits in `integer` (bit 127
 // its sign, bits 126..112 its exponent, bits 111..0 its fraction: the 16 bytes the object holds, little-endian), and in
-// `floating` a long double mirror of it, rounded to odd: the significand's top 64 bits, its last bit set where a lower one
-// is (a nonzero subnormal below the x87's least is that least). The mirror keeps what the other formats' consumers read
-// from a value: its sign, its class (zero, subnormal, normal, infinity, NaN, quiet or signaling, as the formats share the
-// exponent field), its truth and its order; and a value rounded to odd at 64 bits rounds once more to float's, double's
-// or a half format's 24, 53, 11 or 8 bits as the exact value would have rounded. A NaN's mirror is the others' (check
-// _action_nan_bits): the fraction's top 63 bits at the significand's, the quiet bit at bit 62, so that a narrowing keeps
-// them as APFloat's does; one whose payload lies below those bits only keeps the significand's last bit, so that it stays
-// a NaN. What the mirror can't give, the bits do: the object's bytes, a conversion to long double or an integer, an
-// equality, and arithmetic. Included by c_check_actions.c after CheckValue.
+// `floating` a long double mirror of it, rounded to odd: the significand's top 64 bits, its last bit set where a lower
+// one is (a nonzero subnormal below the x87's least is that least). The mirror keeps what the other formats' consumers
+// read from a value: its sign, its class (zero, subnormal, normal, infinity, NaN, quiet or signaling, as the formats
+// share the exponent field), its truth and its order; and a value rounded to odd at 64 bits rounds once more to
+// float's, double's or a half format's 24, 53, 11 or 8 bits as the exact value would have rounded. A NaN's mirror is
+// the others' (check_action_nan_bits): the fraction's top 63 bits at the significand's, the quiet bit at bit 62, so
+// that a narrowing keeps them as APFloat's does; one whose payload lies below those bits only keeps the significand's
+// last bit, so that it stays a NaN. What the mirror can't give, the bits do: the object's bytes, a conversion to long
+// double or an integer, an equality, and arithmetic. Included by c_check_actions.c after CheckValue.
 
 #define BUSTER_CHECK_QUAD_SIGN ((unsigned __int128)1 << 127)
 #define BUSTER_CHECK_QUAD_QUIET ((unsigned __int128)1 << 111)

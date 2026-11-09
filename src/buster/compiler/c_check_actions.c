@@ -809,8 +809,8 @@ static __attribute__((noinline)) bool check_action_convert_half(const TypeTable*
     return integer || floating;
 }
 
-// A __float128 constant converted to an integer type of `width` bits (#1250): truncated toward zero from its bits, or, past
-// the type's range or a NaN, saturated as check_action_convert_plain's other floating sources are. Its least value
+// A __float128 constant converted to an integer type of `width` bits (#1250): truncated toward zero from its bits, or,
+// past the type's range or a NaN, saturated as check_action_convert_plain's other floating sources are. Its least value
 // below -2^(width-1) is -2^(width-1) - 1 where that's a binary128 value (a width to 112), and -2^(width-1) itself
 // otherwise, as no binary128 value lies between the two there.
 static __attribute__((noinline)) void check_action_convert_quad_integer(CheckValue* value, uint32_t width, bool is_signed)
@@ -1580,7 +1580,8 @@ static uint32_t check_action_fold_integer(CheckIntegerFold fold, CheckValue* val
 
 // A __float128 operation's bits (#1250): the host's binary128 arithmetic, rounded once to nearest, ties to even, as
 // APFloat's, with its NaNs (check_action_fold_nan's rule): the first NaN operand's bits, quieted, or for an invalid
-// operation on numbers the positive canonical NaN. `op` is +, -, * or /, the only ones C applies to a real floating type.
+// operation on numbers the positive canonical NaN. `op` is +, -, * or /, the only ones C applies to a real floating
+// type.
 static __attribute__((noinline)) unsigned __int128 check_quad_arithmetic(CheckOp op, unsigned __int128 left, unsigned __int128 right)
 {
     unsigned __int128 result = 0;
@@ -1641,8 +1642,9 @@ static void check_action_fold_floating(CheckOp op, const CheckValue* a, const Ch
             default: supported = false; break; \
         } \
     } while (0)
-    // A unary + or - of a NaN, or of a __float128 constant, is its sign alone, as APFloat's changeSign makes it: converting a
-    // NaN to its format first would quiet a signaling one. A __float128's sign is its bits' and its mirror's.
+    // A unary + or - of a NaN, or of a __float128 constant, is its sign alone, as APFloat's changeSign makes it:
+    // converting a NaN to its format first would quiet a signaling one. A __float128's sign is its bits' and its
+    // mirror's.
     const bool quad = a->type == BUSTER_TYPE_FLOAT128;
     const bool sign = (op == CHECK_OP_POSITIVE || op == CHECK_OP_NEGATIVE) && (isnan(a->floating) || quad);
     unsigned __int128 quad_bits = a->integer;

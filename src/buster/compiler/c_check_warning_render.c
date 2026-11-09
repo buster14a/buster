@@ -140,6 +140,13 @@ struct CheckWarningSpelling
 // and typedef-kind declarations per publication pass; the rows sit under the pass's event marks in the
 // caller's scratch, so they survive until the pass ends. Returns false on an allocation failure, which the
 // caller reports like the renderer's other allocations rather than dropping the spelling.
+// Whether the typedef type `type` carries qualifiers, through an aligned typedef's too: such a typedef of an anonymous tag
+// isn't its name (#1447, clang's typedef name for linkage).
+static bool check_driver_typedef_qualified(const TypeTable* types, TypeId type)
+{
+    return type_unqualified(type) != type || type_unqualified(type_strip_aligned(types, type)) != type_strip_aligned(types, type);
+}
+
 static bool check_driver_spelling_build(const Parser* parser, Preprocessor* pp, const CheckInput* input, const TypeTable* types,
                                         CheckWarningSpelling* spell, Arena* scratch)
 {
@@ -189,8 +196,10 @@ static bool check_driver_spelling_build(const Parser* parser, Preprocessor* pp, 
                         {
                             if (binding == C_BINDING_TYPEDEF)
                             {
-                                // The typedef is the anonymous record's canonical name; its first one wins.
-                                if ((named[tag / 64] & ((uint64_t)1 << (tag & 63))) == 0)
+                                // The typedef is the anonymous record's canonical name; its first one wins. A qualified
+                                // one names none (clang's typedef name for linkage is the tag's own type's, #1447).
+                                if ((named[tag / 64] & ((uint64_t)1 << (tag & 63))) == 0 &&
+                                    !check_driver_typedef_qualified(types, input->declared_types[i]))
                                 {
                                     named[tag / 64] |= (uint64_t)1 << (tag & 63);
                                     const uint32_t name = parser->tokens.names[i];
@@ -403,10 +412,47 @@ static bool check_driver_warning_parentheses(const Parser* parser, const TypeTab
     return valid;
 }
 
+// Whether `alias`, unqualified, is one of `type`'s levels, as type_print reaches them: the type itself, then through
+// pointers, arrays and functions' results to the specifier.
+static bool check_driver_spelling_level(const TypeTable* types, TypeId type, TypeId alias)
+{
+    const TypeId wanted = type_unqualified(type_strip_aligned(types, alias));
+    TypeId level = type;
+    bool found = false;
+    for (uint32_t depth = 0; !found && depth < 256 && level != 0 && type_is_valid(types, level); depth += 1)
+    {
+        const TypeId bare = type_unqualified(type_strip_aligned(types, level));
+        const uint8_t kind = type_kind(types, bare);
+        found = bare == wanted;
+        level = kind == BUSTER_TYPE_KIND_POINTER || kind == BUSTER_TYPE_KIND_FUNCTION || type_kind_is_array(kind) ? types->types.base[type_index(bare)] : 0;
+    }
+    return found;
+}
+
+// The typedef of `spelling`'s chain that names one of `type`'s levels (#1447), as clang's sugar keeps it through
+// dereferences and subscripts: a declaration's levels sit over its specifier's typedef, whose own levels sit over its
+// specifier's, and so on, so the first typedef along that chain whose type is a level of `type` is the one clang's type
+// names there (`*p` of a `pv p`, `typedef v4si *pv`, is `v4si`; `**b` of a `VPP b`, `typedef VP *VPP`, is `VP`). A
+// chain's types only shrink, so no later one can be a level above it. `spelling` where none is.
+static uint32_t check_driver_spelling_chain(const Parser* parser, const CheckInput* input, const TypeTable* types, TypeId type, uint32_t spelling)
+{
+    uint32_t result = spelling;
+    uint32_t at = spelling;
+    bool found = false;
+    for (uint32_t steps = 0; !found && at != 0 && at < input->token_count && steps < 64; steps += 1)
+    {
+        found = check_driver_spelling_level(types, type, input->declared_types[at]);
+        result = found ? at : result;
+        at = found ? at : check_input_typedef_spelling(input, parser, at);
+    }
+    return result;
+}
+
 // A warning's type spelling (#992): `spelling` is the operand's typedef specifier's declaration, so the base's
 // specifier prints the typedef's name and clang's `(aka '...')` shows the type without that sugar; the sentinel
 // BUSTER_CHECK_NONE prints `__size_t` for a sizeof/alignof operand's own type. The anonymous map prints an
-// unnamed tag's typedef name or its `(unnamed at file:line:col)`.
+// unnamed tag's typedef name or its `(unnamed at file:line:col)`. Where the typedef's own type isn't one of the
+// type's levels, a typedef its own declaration spells may be (check_driver_spelling_chain).
 static String8 check_driver_warning_type_at(const Parser* parser, Preprocessor* pp, const CheckInput* input, const TypeTable* types,
                                             CheckWarningSpelling* spell, Arena* scratch, TypeId type, uint32_t spelling,
                                             uint32_t declaration, TypeId declared)
@@ -444,6 +490,7 @@ static String8 check_driver_warning_type_at(const Parser* parser, Preprocessor* 
             }
             else if (spelling != 0 && input != NULL && input->declared_types != NULL && spelling < input->token_count)
             {
+                spelling = check_driver_spelling_chain(parser, input, types, type, spelling);
                 const TypeId declared = input->declared_types[spelling];
                 const uint32_t name = spelling < parser->tokens.count ? parser->tokens.names[spelling] : spell->count;
                 if (type_is_valid(types, declared) && name < spell->count)
@@ -463,16 +510,17 @@ static String8 check_driver_warning_type_at(const Parser* parser, Preprocessor* 
             const String8 sugared = contextual ? type_print(types, scratch, type, (String8){ 0 }, &names, options) : (String8){ 0 };
             String8 canonical = { 0 };
             // clang's desugaring stops at a vector type's own typedef, the one whose underlying type is the vector
-            // (desugarForDiagnostic: "People want their vec4"): a typedef of that typedef's a.k.a. is that one's name,
-            // and that one has none. The chain of typedef specifiers from the alias's declaration leads to it.
-            const uint8_t alias_kind = alias_type != 0 ? type_kind(types, type_strip_aligned(types, alias_type)) : 0;
-            uint32_t vector_name = alias_kind == BUSTER_TYPE_KIND_VECTOR || alias_kind == BUSTER_TYPE_KIND_EXT_VECTOR ? spelling : 0;
-            for (uint32_t steps = 0; vector_name != 0 && steps < 64; steps += 1)
+            // (desugarForDiagnostic: "People want their vec4"), at any level (#1447): a typedef of that typedef's
+            // a.k.a. is that one's name, a pointer typedef's (`typedef v4si *pv`) keeps it at the pointee
+            // (`'pv' (aka 'v4si *')`), and that one has none. It is the last vector typedef along the chain of
+            // typedef specifiers from the alias's declaration.
+            uint32_t vector_name = 0;
+            uint32_t chain = alias_type != 0 && spelling != BUSTER_CHECK_NONE ? spelling : 0;
+            for (uint32_t steps = 0; chain != 0 && chain < input->token_count && steps < 64; steps += 1)
             {
-                const uint32_t inner = check_input_typedef_spelling(input, parser, vector_name);
-                const bool same = inner != 0 && inner < input->token_count && input->declared_types[inner] == alias_type;
-                vector_name = same ? inner : vector_name;
-                steps = same ? steps : 64;
+                const uint8_t kind = type_kind(types, type_strip_aligned(types, input->declared_types[chain]));
+                vector_name = kind == BUSTER_TYPE_KIND_VECTOR || kind == BUSTER_TYPE_KIND_EXT_VECTOR ? chain : vector_name;
+                chain = check_input_typedef_spelling(input, parser, chain);
             }
             TypeId vector_type = vector_name != 0 ? input->declared_types[vector_name] : 0;
             const uint32_t vector_identifier = vector_name != 0 ? parser->tokens.names[vector_name] : 0;
@@ -481,8 +529,18 @@ static String8 check_driver_warning_type_at(const Parser* parser, Preprocessor* 
             if (names.alias_count != 0 && vector_name != spelling)
             {
                 // clang's `(aka '...')`: the same type with the typedef sugar expanded — an anonymous record's
-                // typedef stays, since it is that record's own name; a vector's own typedef stays too.
+                // typedef stays, since it is that record's own name; a vector's own typedef stays too. Where the
+                // alias's declaration spells the record's definition rather than a typedef, its type as written is the
+                // tag's, which prints its keyword (`'SP' (aka 'struct S *')`, #1447).
                 TypeNames expand = names;
+                // (The typedef that names the record is its own spelling: no a.k.a.)
+                const TypeId alias_tag = alias_type != 0 ? type_unqualified(type_strip_aligned(types, alias_type)) : 0;
+                const uint8_t alias_tag_kind = alias_tag != 0 ? type_kind(types, alias_tag) : BUSTER_TYPE_KIND_VOID;
+                const uint32_t tag = alias_tag_kind == BUSTER_TYPE_KIND_STRUCT || alias_tag_kind == BUSTER_TYPE_KIND_UNION || alias_tag_kind == BUSTER_TYPE_KIND_ENUM ?
+                                     types->types.index[type_index(alias_tag)] : names.anonymous_count;
+                const bool naming = tag < names.anonymous_count && names.anonymous[tag].length == alias_name.length &&
+                                    memcmp(names.anonymous[tag].pointer, alias_name.pointer, alias_name.length) == 0;
+                expand.anonymous_keyword = spelling != BUSTER_CHECK_NONE && !naming && check_input_typedef_spelling(input, parser, spelling) == 0;
                 expand.alias_count = vector_name != 0 ? 1 : 0;
                 expand.alias_types = &vector_type;
                 expand.alias_names = &vector_alias;
@@ -643,7 +701,9 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
     switch (event->kind)
     {
         case CHECK_WARNING_EVENT_DUPLICATE_DECLSPEC:
-            result = check_warning_text(scratch, "duplicate '%.*s' declaration specifier", (int)name.length, name.pointer);
+            // _Complex is "complex" in clang's words (DeclSpec::getSpecifierName), as its other errors name it.
+            result = payload->name == C_NAME_COMPLEX_C99 ? "duplicate 'complex' declaration specifier" :
+                     check_warning_text(scratch, "duplicate '%.*s' declaration specifier", (int)name.length, name.pointer);
             break;
         case CHECK_WARNING_EVENT_NORETURN_RETURN:
             result = check_warning_text(scratch, "function '%.*s' declared 'noreturn' should not return", (int)name.length, name.pointer);
@@ -736,6 +796,15 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
                 (int)name.length, name.pointer, (int)type.length, type.pointer) : NULL;
             break;
         }
+        case CHECK_WARNING_EVENT_PROTOTYPE_TAG:
+        {
+            const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, payload->first_type, 0);
+            result = type.length != 0 ? check_warning_text(scratch, "declaration of %.*s will not be visible outside of this function", (int)type.length, type.pointer) : NULL;
+            break;
+        }
+        case CHECK_WARNING_EVENT_PROTOTYPE_REDEFINITION:
+            result = check_warning_text(scratch, "redefinition of '%.*s' will not be visible outside of this function", (int)name.length, name.pointer);
+            break;
         case CHECK_WARNING_EVENT_LIBRARY_REDECLARATION:
             result = check_warning_text(scratch, "incompatible redeclaration of library function '%.*s'", (int)name.length, name.pointer);
             break;

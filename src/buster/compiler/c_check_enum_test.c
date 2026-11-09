@@ -256,6 +256,15 @@ static __attribute__((noinline)) void check_test_enum_sources(CheckTest* test, c
                       "_Static_assert(sizeof(enum E)==4 && _Alignof(enum E)==16 && _Generic(A,unsigned:1,default:0),\"aligned\");\n",
         },
         {
+            // #1447: clang applies a fixed enum's aligned attribute after its body, which nothing asked its layout before.
+            .name = "fixed enum aligned after its body",
+            .source = "enum E : char { A, B } __attribute__((aligned(8))); enum __attribute__((aligned(2))) I : char { I0 } __attribute__((aligned(8))); "
+                      "enum H : int { H0 } __attribute__((aligned(2))); struct S { char c; enum E e; }; "
+                      "enum : short { K0 } __attribute__((aligned(4))) k; "
+                      "_Static_assert(sizeof(enum E)==1 && _Alignof(enum E)==8 && _Alignof(enum I)==8 && _Alignof(enum H)==2 && sizeof(struct S)==16 && "
+                      "__alignof__(k)==4,\"late alignment\");\n",
+        },
+        {
             .name = "nested record enum chains remain separate",
             .source = "struct S { enum E { A=0x80000000, B } x; enum F { C=-1, D } y; }; "
                       "_Static_assert(B==2147483649U && D==0 && sizeof(struct S)==8,\"nested chains\");\n",
