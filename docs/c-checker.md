@@ -4056,7 +4056,8 @@ do:
 
   The `-Wodr` errors follow clang's policy for a default error: `-w` leaves
   them, `-Wno-error=odr` makes them warnings (with their notes) and `-Wno-odr`
-  drops them, as does a source pragma at the redefinition's name. A demoted or
+  drops them, as does a source pragma at the redefinition's name. In a system
+  header they are ignored without `-Wsystem-headers`. A demoted or
   ignored one doesn't make the definitions incompatible: one that is otherwise
   compatible declares the earlier type, as in clang (`check_input_odr_severity`).
 
