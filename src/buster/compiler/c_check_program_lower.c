@@ -13550,10 +13550,12 @@ static void check_lower_asm(CheckLowerWriter* writer, CheckControl control)
     }
 }
 
-// A cleanup's call (CHECK_CONTROL_CLEANUP, #147): its function's, of its variable's address, the result dropped. A function
-// of a parameter other than a pointer is refused by name (clang's code bit-casts the address to a _Bool, invalid IR,
-// which leaves the address's low bit), and so is one of a result that comes back in memory or a result object (an
-// aggregate, a 128-bit integer, a vector); a variadic one isn't: one parameter, no vector registers.
+// A cleanup's call (CHECK_CONTROL_CLEANUP, #147): its function's, of its variable's address, the result dropped. The
+// one parameter other than a pointer that clang's Sema takes is a _Bool (an address converts to one), which clang's
+// code bit-casts the address to (invalid IR, which leaves the address's low bit): that bit, as its code passes it. An
+// _Atomic _Bool's crashes clang's instruction selection and is refused by name. A result that comes back in memory or
+// in a result object (an aggregate, a 128-bit integer, a vector) lands in a frame object of its own, as a source call's
+// does (check_lower_call_body), which nothing reads; a variadic function takes one parameter and no vector registers.
 static void check_lower_cleanup(CheckLowerWriter* writer, CheckControl control)
 {
     const CheckProgram* program = writer->program;
@@ -13568,29 +13570,50 @@ static void check_lower_cleanup(CheckLowerWriter* writer, CheckControl control)
     const TypeId* parameter_types = type != 0 && type_kind(types, type) == BUSTER_TYPE_KIND_FUNCTION ? type_parameters(types, type, &parameters) : NULL;
     const TypeId result = parameter_types != NULL ? type_return(types, type) : 0;
     const uint8_t class = result != 0 ? check_lower_class(writer, result) : UINT8_MAX;
+    const uint8_t parameter_facts = parameters == 1 ? check_lower_facts(writer, parameter_types[0]) : 0;
+    const bool pointer = (parameter_facts & BUSTER_CHECK_LOWER_TYPE_POINTER) != 0 && (parameter_facts & BUSTER_CHECK_LOWER_TYPE_ATOMIC) == 0;
+    const bool low_bit = (parameter_facts & (BUSTER_CHECK_LOWER_TYPE_BOOL | BUSTER_CHECK_LOWER_TYPE_ATOMIC)) == BUSTER_CHECK_LOWER_TYPE_BOOL;
+    const bool aggregate = result != 0 && check_lower_aggregate(writer, result);
+    const bool object_result = aggregate || (result != 0 && (check_lower_wide(writer, result) || check_lower_vector_of(writer, result) != 0));
+    const char* returned = aggregate ? check_lower_by_value(writer, result, true) : class == UINT8_MAX ? "cleanup functions of this result type" : NULL;
     if (symbol == 0 || parameters != 1 || variable == 0 || variable >= program->object_count)
     {
         check_lower_fail(writer, CHECK_PROGRAM_INVALID);
     }
-    else if (type_kind(types, type_strip_aligned(types, parameter_types[0])) != BUSTER_TYPE_KIND_POINTER)
+    else if (!pointer && !low_bit)
     {
-        check_lower_unsupported(writer, "cleanup functions of a parameter other than a pointer");
+        check_lower_unsupported(writer, "cleanup functions of an _Atomic parameter");
     }
-    else if (class == UINT8_MAX || check_lower_aggregate(writer, result) || check_lower_wide(writer, result) || check_lower_vector_of(writer, result) != 0)
+    else if (returned != NULL)
     {
-        check_lower_unsupported(writer, "cleanup functions whose result returns in memory, a 128-bit integer or a vector");
+        check_lower_unsupported(writer, returned);
     }
     else
     {
-        const uint32_t call = check_lower_native_call(writer, symbol, result, parameter_types, 1);
+        // A result object as aligned as a source call's (check_lower_call_body): the more aligned of the result's type and
+        // its canonical type.
+        const uint32_t declared = aggregate ? type_alignment_log2(types, result) : 0;
+        const uint32_t canonical = aggregate ? type_alignment_log2(types, type_strip_aligned(types, result)) : 0;
+        const uint32_t object = !object_result ? BUSTER_CHECK_NONE :
+                                aggregate      ? check_lower_object(writer, type_size(types, result), declared > canonical ? declared : canonical) :
+                                                 check_lower_temporary_of(writer, result);
+        const uint32_t call = writer->output->status == CHECK_PROGRAM_OK ? check_lower_native_call(writer, symbol, result, parameter_types, 1) : BUSTER_CHECK_NONE;
         if (call != BUSTER_CHECK_NONE)
         {
             const bool variadic = (types->types.flags[type_index(type)] & BUSTER_TYPE_FLAG_VARIADIC) != 0;
             writer->call_variadic[call] = variadic;
             writer->abi->variadic[writer->abi->count - 1] = variadic;
+            writer->call_result_objects[call] = object_result ? object + 1 : 0;
+            writer->aggregates |= object_result;
             check_lower_address(writer, variable, 0);
-            check_lower_emit(writer, BUSTER_TYPED_CALL, class, call);
-            if (class != BUSTER_TYPED_CLASS_VOID)
+            if (low_bit)
+            {
+                check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 1);
+                check_lower_emit(writer, BUSTER_TYPED_AND, BUSTER_TYPED_CLASS_U64, 0);
+                check_lower_emit(writer, BUSTER_TYPED_CONVERT, check_lower_class(writer, parameter_types[0]), 0);
+            }
+            check_lower_emit(writer, BUSTER_TYPED_CALL, object_result ? BUSTER_TYPED_CLASS_VOID : class, call);
+            if (!object_result && class != BUSTER_TYPED_CLASS_VOID)
             {
                 check_lower_emit(writer, BUSTER_TYPED_DISCARD, class, 0);
             }
