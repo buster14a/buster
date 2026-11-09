@@ -8986,37 +8986,58 @@ static bool check_common_loop_unevaluated_builtin(const CheckGraph* graph, uint3
 }
 
 // Whether `node`'s evaluation is clang's EvaluatedExprVisitor's: not under a sizeof (of a variable array too, whose bounds
-// it never visits either), an alignof or an unevaluated-argument builtin's call, whose operands it skips. Its graph root
-// goes to `*root`.
-static bool check_common_loop_evaluated(const CheckGraph* graph, const uint32_t* parents, uint32_t node, uint32_t* root)
+// it never visits either), an alignof or an unevaluated-argument builtin's call, whose operands it skips.
+static bool check_common_loop_evaluated(const CheckGraph* graph, const uint32_t* parents, uint32_t node)
 {
     bool result = true;
     for (uint32_t at = node, steps = 0; result && at < graph->count && steps < graph->count; steps += 1)
     {
         result = graph->ops[at] != CHECK_OP_SIZEOF && graph->ops[at] != CHECK_OP_SIZEOF_VLA && graph->ops[at] != CHECK_OP_ALIGNOF &&
                  !check_common_loop_unevaluated_builtin(graph, at);
-        *root = at;
         at = parents[at];
     }
     return result;
 }
 
+// Whether the static selection whose `)` is `close` (a _Generic's or a __builtin_choose_expr's) chooses the operand whose
+// subtree's root is `child`, its child: the parse tree's climb from the chosen operand's token reaches `child`. The node
+// at its `)` is the selection's, or, for one the source reader chose, the chosen operand's own. True where `close` closes
+// no selection, or one whose choice the graph doesn't hold.
+static bool check_common_loop_selected(const Parser* parser, const CheckInput* input, uint32_t close, uint32_t child)
+{
+    const CheckGraph* graph = &input->graph;
+    const uint32_t count = parser->tokens.count;
+    const uint32_t open = parser->tree.roles[close] == PARSE_ROLE_CLOSE_KEYWORD ? check_warning_graph_void_opener(parser, close) : BUSTER_CHECK_NONE;
+    const uint32_t keyword = open != BUSTER_CHECK_NONE && open > 0 ? open - 1 : BUSTER_CHECK_NONE;
+    const bool selection = keyword != BUSTER_CHECK_NONE &&
+                           (parser->tokens.kinds[keyword] == PARSE_KIND_GENERIC || parser->tokens.names[keyword] == C_NAME_BUILTIN_CHOOSE_EXPR);
+    const uint32_t node = selection && close < input->token_count && input->token_nodes != NULL ? input->token_nodes[close] : BUSTER_CHECK_NONE;
+    const uint32_t chosen = node < graph->count && graph->ops[node] == CHECK_OP_SELECT ? graph->operand0[node] : node;
+    uint32_t at = chosen < graph->count ? graph->tokens[chosen] : child;
+    for (uint32_t steps = 0; at < count && at != child && at != close && steps < count; steps += 1)
+    {
+        at = parser->tree.parents[at];
+    }
+    return at == child;
+}
+
 // Whether the visitor reaches `token`, inside the for statement whose `)` is `close` (#1821): its node, where it has one,
 // is evaluated (check_common_loop_evaluated), and so is the value of each GNU statement expression around it there, a
 // node at its `)`, as a statement expression's statements are graph roots of their own that only the parse tree places in
-// its operand; none is in a specifier's operand (typeof's), nor has a value without a node. The outermost root is no
-// static selection's unchosen operand or controlling expression (`unselected`), which the visitor never reaches either; a
-// statement's root inside a statement expression is no answer there, as the selection's range holds the chosen arm's too.
-static bool check_common_loop_reached(const Parser* parser, const CheckInput* input, const uint32_t* parents, const uint8_t* unselected,
-                                      uint32_t token, uint32_t close)
+// its operand; none is in a specifier's operand (typeof's), nor has a value without a node. And each static selection
+// around it there chooses the operand it is in (check_common_loop_selected), as the visitor reads the chosen operand
+// alone: a selection's other operands and its controlling expression are graph roots of their own too, which a selection
+// inside a statement expression inside another selection's chosen operand would hide from a test of the roots alone.
+static bool check_common_loop_reached(const Parser* parser, const CheckInput* input, const uint32_t* parents, uint32_t token, uint32_t close)
 {
     const CheckGraph* graph = &input->graph;
     const uint32_t first = token < input->token_count && input->token_nodes != NULL ? input->token_nodes[token] : BUSTER_CHECK_NONE;
-    uint32_t root = BUSTER_CHECK_NONE;
-    bool result = first >= graph->count || check_common_loop_evaluated(graph, parents, first, &root);
+    bool result = first >= graph->count || check_common_loop_evaluated(graph, parents, first);
+    uint32_t child = token;
     for (uint32_t at = token, steps = 0; result && at < parser->tokens.count && at != close && parser->tree.parents[at] != at && steps < parser->tokens.count;
          steps += 1)
     {
+        child = at;
         at = parser->tree.parents[at];
         const bool group = at < input->token_count && parser->tree.roles[at] == PARSE_ROLE_CLOSE_GROUP && input->expression_regions != NULL &&
                            input->expression_regions[at] != 0;
@@ -9025,11 +9046,12 @@ static bool check_common_loop_reached(const Parser* parser, const CheckInput* in
         // alignof's, a type name's bounds too.)
         const uint8_t role = at < parser->tokens.count ? parser->tree.roles[at] : PARSE_ROLE_NONE;
         const bool unevaluated = role == PARSE_ROLE_CLOSE_SPECIFIER || role == PARSE_ROLE_CLOSE_SIZEOF ||
-                                 (role == PARSE_ROLE_PREFIX && parser->tokens.kinds[at] == PARSE_KIND_SIZEOF);
+                                 (role == PARSE_ROLE_PREFIX && parser->tokens.kinds[at] == PARSE_KIND_SIZEOF) ||
+                                 (role == PARSE_ROLE_CLOSE_KEYWORD && !check_common_loop_selected(parser, input, at, child));
         result = !unevaluated &&
-                 (!group || (node < graph->count && graph->ops[node] == CHECK_OP_STATEMENT_VALUE && check_common_loop_evaluated(graph, parents, node, &root)));
+                 (!group || (node < graph->count && graph->ops[node] == CHECK_OP_STATEMENT_VALUE && check_common_loop_evaluated(graph, parents, node)));
     }
-    return result && (unselected == NULL || root >= graph->count || unselected[root] == 0);
+    return result;
 }
 
 // Whether `token` is inside the statement `close`, a for's closing parenthesis, holds: its parse-tree climb reaches it.
@@ -9144,7 +9166,7 @@ static bool check_common_loop_extract(const Parser* parser, const Preprocessor* 
 // assignment's target, an increment's operand, an address, a member's object or an array's decay). An unevaluated use
 // is none, a statement expression's inside an unevaluated operand too (check_common_loop_reached).
 static bool check_common_loop_changes(const Parser* parser, const CheckInput* input, const CheckStream* stream, const TypeTable* types,
-                                      const uint32_t* parents, const uint8_t* unselected, uint32_t token, uint32_t close)
+                                      const uint32_t* parents, uint32_t token, uint32_t close)
 {
     const CheckGraph* graph = &input->graph;
     const uint32_t node = token < input->token_count && input->token_nodes != NULL ? input->token_nodes[token] : BUSTER_CHECK_NONE;
@@ -9158,7 +9180,7 @@ static bool check_common_loop_changes(const Parser* parser, const CheckInput* in
                  (target && (op == CHECK_OP_ASSIGN || op == CHECK_OP_MEMBER || (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_POST_DECREMENT) ||
                              (op >= CHECK_OP_ADD_ASSIGN && op <= CHECK_OP_BIT_XOR_ASSIGN)));
         // (Only a change asks for the climb.)
-        result = result && check_common_loop_reached(parser, input, parents, unselected, token, close);
+        result = result && check_common_loop_reached(parser, input, parents, token, close);
     }
     return result;
 }
@@ -9192,11 +9214,9 @@ static __attribute__((noinline)) void check_common_for_loops(const Parser* parse
     static const uint8_t roles[] = { PARSE_ROLE_CLOSE_FOR };
     CheckCommonScan scan = { 0 };
     const bool enabled = parents != NULL && check_common_enabled(pp, input, CHECK_WARNING_ID_FOR_LOOP_ANALYSIS, true);
-    // The condition's walk's stack and variables, and the static selections' unchosen roots, made at the first loop that
-    // needs each.
+    // The condition's walk's stack and variables, made at the first loop that needs them.
     uint32_t* stack = NULL;
     uint32_t* decls = NULL;
-    const uint8_t* unselected = NULL;
     for (uint32_t close = enabled ? check_common_next_token(parser, count, BUSTER_CHECK_NONE, roles, BUSTER_ARRAY_LENGTH(roles), &scan, vector) : count;
          close < count && !pp->fatal; close = check_common_next_token(parser, count, BUSTER_CHECK_NONE, roles, BUSTER_ARRAY_LENGTH(roles), &scan, vector))
     {
@@ -9256,10 +9276,6 @@ static __attribute__((noinline)) void check_common_for_loops(const Parser* parse
         uint32_t at = BUSTER_CHECK_NONE;
         if (root < input->graph.count && decls != NULL && check_common_loop_extract(parser, pp, input, stream, root, stack, decls, &used, &at) && used != 0)
         {
-            if (unselected == NULL)
-            {
-                unselected = check_common_unselected(&input->graph, parser, scratch);
-            }
             bool found = false;
             for (uint32_t token = semis[0] + 1; !found && token <= end; token += 1)
             {
@@ -9271,8 +9287,8 @@ static __attribute__((noinline)) void check_common_for_loops(const Parser* parse
                     listed |= decls[i] == declaration;
                 }
                 const bool jump = kind == PARSE_KIND_RETURN || kind == PARSE_KIND_BREAK || kind == PARSE_KIND_GOTO;
-                found = (jump && check_common_loop_reached(parser, input, parents, unselected, token, close)) ||
-                        (listed && check_common_loop_changes(parser, input, stream, types, parents, unselected, token, close));
+                found = (jump && check_common_loop_reached(parser, input, parents, token, close)) ||
+                        (listed && check_common_loop_changes(parser, input, stream, types, parents, token, close));
             }
             if (!found)
             {

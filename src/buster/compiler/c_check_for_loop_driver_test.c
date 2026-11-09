@@ -117,6 +117,66 @@ static const char check_driver_for_loop_unevaluated_source[] =
     "out:;\n"
     "}\n";
 
+// Review on #1896: static selections nested in statement expressions nested in static selections, each arm chosen or
+// not, with writes and jumps; and __builtin_choose_expr's.
+static const char check_driver_for_loop_nested_selections_source[] =
+    "void f1(int i, int n) {\n"
+    "    for (; i < n;) {\n"
+    "        (void)({ (void)_Generic(1, long: ({ i++; 1; }), int: 2); 1; });\n"
+    "    }\n"
+    "}\n"
+    "void f2(int i, int n) {\n"
+    "    for (; i < n;) {\n"
+    "        (void)({ (void)_Generic(1, int: ({ i++; 1; }), long: 2); 1; });\n"
+    "    }\n"
+    "}\n"
+    "void f3(int i, int n) {\n"
+    "    for (; i < n;) {\n"
+    "        (void)({ (void)_Generic(1, long: ({ break; 1; }), int: 2); 1; });\n"
+    "    }\n"
+    "}\n"
+    "void f4(int i, int n) {\n"
+    "    for (; i < n;) {\n"
+    "        (void)({ (void)_Generic(1, int: ({ break; 1; }), long: 2); 1; });\n"
+    "    }\n"
+    "}\n"
+    "void f5(int i, int n) {\n"
+    "    for (; i < n;) {\n"
+    "        (void)_Generic(1, int: ({ (void)_Generic(1, long: ({ i++; 1; }), int: 2); 1; }), long: 2);\n"
+    "    }\n"
+    "}\n"
+    "void f6(int i, int n) {\n"
+    "    for (; i < n;) {\n"
+    "        (void)_Generic(1, int: ({ (void)__builtin_choose_expr(1, ({ i++; 1; }), 2); 1; }), long: 2);\n"
+    "    }\n"
+    "}\n"
+    "void f7(int i, int n) {\n"
+    "    for (; i < n;) {\n"
+    "        (void)({ (void)__builtin_choose_expr(0, ({ i++; 1; }), 2); 1; });\n"
+    "    }\n"
+    "}\n"
+    "void f8(int i, int n) {\n"
+    "    for (; i < n;) {\n"
+    "        (void)({ (void)sizeof(_Generic(1, int: ({ i++; 1; }), long: 2)); 1; });\n"
+    "    }\n"
+    "}\n"
+    "void f9(int i, int n) {\n"
+    "    for (; i < n;) {\n"
+    "        (void)({ (void)_Generic(1, long: ({ goto out; 1; }), int: 2); 1; });\n"
+    "    }\n"
+    "out:;\n"
+    "}\n"
+    "void f11(int i, int n) {\n"
+    "    for (; i < n;) {\n"
+    "        (void)_Generic(1, long: 0, int: ({ (void)_Generic(1, int: ({ (void)({ i++; 1; }); 1; }), long: 2); 1; }));\n"
+    "    }\n"
+    "}\n"
+    "void f12(int i, int n) {\n"
+    "    for (; i < n;) {\n"
+    "        (void)_Generic(1, long: 0, int: ({ (void)_Generic(1, long: ({ (void)({ return; 1; }); 1; }), int: 2); 1; }));\n"
+    "    }\n"
+    "}\n";
+
 static const CheckDriverDefaultWarningFixture check_driver_for_loop_fixtures[] =
 {
     {
@@ -236,6 +296,25 @@ static const CheckDriverDefaultWarningFixture check_driver_for_loop_fixtures[] =
         .source = check_driver_for_loop_unevaluated_source,
         .options = { "-Wall", "-Wextra", "-Wno-unevaluated-expression" },
         .warnings = 24,
+    },
+    {
+        .name = "nested selections in statement expressions",
+        .source = check_driver_for_loop_nested_selections_source,
+        .options = { "-Wfor-loop-analysis", "-Wno-unevaluated-expression" },
+        .warnings = 7,
+    },
+    {
+        .name = "nested selections in statement expressions in C23",
+        .source = check_driver_for_loop_nested_selections_source,
+        .options = { "-Wfor-loop-analysis", "-Wno-unevaluated-expression" },
+        .warnings = 7,
+        .c23 = true,
+    },
+    {
+        .name = "nested selections in statement expressions under -Wall -Wextra",
+        .source = check_driver_for_loop_nested_selections_source,
+        .options = { "-Wall", "-Wextra", "-Wno-unevaluated-expression" },
+        .warnings = 7,
     },
     {
         .name = "-Werror=for-loop-analysis and a pragma",
