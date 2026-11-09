@@ -914,6 +914,9 @@ struct CheckInput
     struct CheckConditionDeclaration* condition_declarations;
     uint32_t condition_declaration_count;
     uint32_t condition_declaration_capacity;
+    // The type tags' declarations and registered values (#1447, c_check_type_safety_input.c), for -Wtype-safety's calls
+    // (check_common_type_safety): null in a unit without them.
+    struct CheckTypeTags* type_tags;
     uint8_t* availability_contexts;
     // The availability attributes' warnings' texts (#1447, CheckInputAvailabilityText), in the output arena, grown by doubling.
     CheckInputAvailabilityText* availability_texts;
@@ -1956,6 +1959,9 @@ struct CheckInputReader
     bool merged_attributes;
     // Whether an objc_gc or objc_ownership attribute was read, for its declarators' types (#1447, check_input_attribute_objc).
     bool objc_attributes;
+    // Whether an argument_with_type_tag, pointer_with_type_tag or type_tag_for_datatype attribute was read, for its
+    // handler's checks and its declarations' rules and tags (#1447, c_check_type_safety_input.c).
+    bool type_tag_attributes;
     // While a function's declaration's attributes are checked (check_input_attribute_subjects): its declarator's first
     // named parameter's token plus one (its parameters linked by parameter_next), which callback's names index; else 0.
     uint32_t attribute_parameters;
@@ -5344,12 +5350,14 @@ static bool check_input_ownership_indices(CheckInputReader* reader, const CheckI
 
 // Whether a generic attribute's integer arguments are its handler's parameter indices, evaluated where it is read (#1447,
 // CheckInputAttribute.constants): 1 for callback's (any argument but a lone name), 2 for swift_async's (its second), 3 for
-// diagnose_as_builtin's (each after its first, in 32 bits as clang's checkUInt32Argument reads them), else 0.
+// diagnose_as_builtin's and the type tags' argument_with_type_tag's and pointer_with_type_tag's (each after its first, in
+// 32 bits as clang's checkUInt32Argument reads them, and its checkFunctionOrMethodParameterIndex's getLimitedValue then
+// clamps), else 0.
 static uint32_t check_input_checked_indices(CheckInputReader* reader, const CheckInputAttribute* attribute)
 {
     const String8 name = check_input_attribute_name(reader, attribute->name);
     return check_input_attribute_equal(name, "callback") ? 1u : check_input_attribute_equal(name, "swift_async") && attribute->argument_count == 2 ? 2u :
-           check_input_attribute_equal(name, "diagnose_as_builtin") ? 3u : 0u;
+           check_input_attribute_equal(name, "diagnose_as_builtin") || check_input_type_tag_rule(name) ? 3u : 0u;
 }
 
 // A type argument's type (#147, CheckInputAttribute.argument_type): a C23 attribute's lone typedef name, which its tokens
@@ -9168,6 +9176,12 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
             {
                 valid = check_input_conditions(reader, attributes, name, type, parameters, function_list, previous_declaration);
             }
+            // The type tags' rules and tags (#1447, c_check_type_safety_input.c), its own or its previous declaration's.
+            if (valid && reader->type_tag_attributes && !is_typedef)
+            {
+                valid = check_input_type_tag_declaration(reader, attributes, name, type, previous_declaration,
+                                                         initialized && parser->tokens.kinds[i] == PARSE_KIND_EQUAL ? i : BUSTER_CHECK_NONE);
+            }
             // clang's lifetimebound on a parameter of a function that returns void (#147, checkLifetimeBoundAttr), at the
             // attribute: of a function's declaration alone.
             if (valid && function && !is_typedef && reader->declarator_lifetimebound != BUSTER_CHECK_NONE)
@@ -10108,6 +10122,7 @@ static __attribute__((noinline)) TypeId check_input_c23_auto_deduce(CheckInputRe
 #include "c_check_control_input.c"
 #include "c_check_availability_input.c"
 #include "c_check_attribute_checks_input.c"
+#include "c_check_type_safety_input.c"
 #include "c_check_builtin_input.c"
 #include "c_check_asm_input.c"
 #include "c_check_musttail.c"

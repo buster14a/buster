@@ -1469,6 +1469,9 @@ struct ParseTree
     uint32_t* parents;
 };
 
+// The spellings of the attributes whose arguments clang's parser reads its own way (parse_scalar_custom_attribute).
+#define BUSTER_PARSE_CUSTOM_ATTRIBUTES 6u
+
 // The bindings a parse starts from: a meaning for every IdentId, PARSE_MEANING_ORDINARY but for clang's predeclared
 // typedef names, which every parse leaves as it found them.
 typedef struct ParseMeanings ParseMeanings;
@@ -1478,10 +1481,10 @@ struct ParseMeanings
     uint32_t capacity;
     // The scalar parser reads attribute spellings only where they decide declaration versus statement syntax.
     const InternTable* table;
-    // availability's and external_source_symbol's names, and their keyword spellings (#1447), found once in `table` where the
-    // meanings are made (0 for a name the unit doesn't have): parse_flag_custom_attributes reads these, not the table, which
-    // a caller may have released by then (the parser benchmark's is).
-    IdentId custom_attributes[4];
+    // availability's, external_source_symbol's and type_tag_for_datatype's names, and their keyword spellings (#1447), found
+    // once in `table` where the meanings are made (0 for a name the unit doesn't have): parse_flag_custom_attributes reads
+    // these, not the table, which a caller may have released by then (the parser benchmark's is).
+    IdentId custom_attributes[BUSTER_PARSE_CUSTOM_ATTRIBUTES];
 };
 
 typedef struct ParseScalar ParseScalar;
@@ -4471,11 +4474,13 @@ static bool parse_scalar_type_argument_attribute(const ParseScalar* parser, Iden
 }
 
 // clang's attributes whose arguments its parser reads its own way, as no expressions (#1447): availability's
-// (ParseAvailabilityAttribute) and external_source_symbol's (ParseExternalSourceSymbolAttribute), by their GNU names, a
-// keyword's underscores too. Their arguments are a balanced run of tokens, which the checker reads as clang's parser does.
+// (ParseAvailabilityAttribute), external_source_symbol's (ParseExternalSourceSymbolAttribute) and type_tag_for_datatype's
+// (ParseTypeTagForDatatypeAttribute: a kind, a type name and flags), by their GNU names, a keyword's underscores too. Their
+// arguments are a balanced run of tokens, which the checker reads as clang's parser does.
 static bool parse_scalar_custom_attribute(const ParseScalar* parser, IdentId name)
 {
-    return parse_scalar_attribute_spelled(parser, name, true, "availability") || parse_scalar_attribute_spelled(parser, name, true, "external_source_symbol");
+    return parse_scalar_attribute_spelled(parser, name, true, "availability") || parse_scalar_attribute_spelled(parser, name, true, "external_source_symbol") ||
+           parse_scalar_attribute_spelled(parser, name, true, "type_tag_for_datatype");
 }
 
 // An expression parse failure inside a GNU attribute can follow an earlier malformed string slot. Clang's
@@ -12742,15 +12747,16 @@ static bool parse_statements_vector(ParseKernels* kernels, uint32_t count, Parse
     return result;
 }
 
-// The kernels read a GNU attribute's arguments as an expression's, where the scalar parser reads availability's and
-// external_source_symbol's as a balanced run of tokens (#1447, parse_scalar_custom_attribute): a top-level declaration
-// with either name before a `(` goes to the scalar parser, its first token flagged. A unit whose names have neither
-// (nearly every one: the interner finds no such name) looks at no token; one that has them, 16 tokens a compare.
+// The kernels read a GNU attribute's arguments as an expression's, where the scalar parser reads availability's,
+// external_source_symbol's and type_tag_for_datatype's as a balanced run of tokens (#1447, parse_scalar_custom_attribute):
+// a top-level declaration with such a name before a `(` goes to the scalar parser, its first token flagged. A unit whose
+// names have none (nearly every one: the interner finds no such name) looks at no token; one that has them, 16 tokens a
+// compare.
 static void parse_flag_custom_attributes(ParseKernels* kernels, const ParseInput* input)
 {
-    IdentId names[4] = { 0, 0, 0, 0 };
+    IdentId names[BUSTER_PARSE_CUSTOM_ATTRIBUTES] = { 0 };
     bool any = false;
-    for (uint32_t s = 0; input->meanings != NULL && s < 4; s += 1)
+    for (uint32_t s = 0; input->meanings != NULL && s < BUSTER_PARSE_CUSTOM_ATTRIBUTES; s += 1)
     {
         names[s] = input->meanings->custom_attributes[s];
         any |= names[s] != 0;
@@ -12761,7 +12767,7 @@ static void parse_flag_custom_attributes(ParseKernels* kernels, const ParseInput
         const __mmask16 live = count - block < 16 ? (__mmask16)((1u << (count - block)) - 1) : (__mmask16)0xffff;
         const __m512i loaded = _mm512_maskz_loadu_epi32(live, input->names + block);
         __mmask16 found = 0;
-        for (uint32_t s = 0; s < 4; s += 1)
+        for (uint32_t s = 0; s < BUSTER_PARSE_CUSTOM_ATTRIBUTES; s += 1)
         {
             found |= names[s] != 0 ? _mm512_mask_cmpeq_epi32_mask(live, loaded, _mm512_set1_epi32((int32_t)names[s])) : 0;
         }
@@ -13325,8 +13331,10 @@ static bool parse_prepare_meanings(Parser* parser, InternTable* table)
     parser->meanings.meanings = !result ? 0 : capacity <= parser->meaning_room ? parser->meaning_column : parse_column(parser, 9, capacity, 1);
     parser->meanings.capacity = capacity;
     parser->meanings.table = table;
-    static const char* const custom_spellings[4] = { "availability", "__availability__", "external_source_symbol", "__external_source_symbol__" };
-    for (uint32_t s = 0; s < 4; s += 1)
+    static const char* const custom_spellings[BUSTER_PARSE_CUSTOM_ATTRIBUTES] = {
+        "availability", "__availability__", "external_source_symbol", "__external_source_symbol__", "type_tag_for_datatype", "__type_tag_for_datatype__",
+    };
+    for (uint32_t s = 0; s < BUSTER_PARSE_CUSTOM_ATTRIBUTES; s += 1)
     {
         parser->meanings.custom_attributes[s] = intern_find(table, (const uint8_t*)custom_spellings[s], (uint32_t)strlen(custom_spellings[s]));
     }

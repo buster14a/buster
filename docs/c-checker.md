@@ -7549,6 +7549,45 @@ arguments against the function. The checker now gives these as clang does.
     attribute", once its declaration's attributes are merged), and a
     redeclaration's other arguments are "attribute 'modular_format' is
     already applied with different arguments". It is an optimization's hint.
+  - The type tags (`c_check_type_safety_input.c`): `argument_with_type_tag`
+    and `pointer_with_type_tag`'s kind, argument index and tag index, on a
+    function or a function pointer, and `type_tag_for_datatype`'s kind, type
+    and flags (`layout_compatible`, `must_be_null`) on a variable. The tag's
+    arguments are read as clang's parser reads them
+    (`check_input_type_tag_parse`), with its errors at the token ("expected
+    identifier", "expected ','", "invalid comparison flag 'F'; use
+    'layout_compatible' or 'must_be_null'", "unknown type name 'T'", "expected
+    a type", "expected ')'"). The handlers' checks follow
+    (`check_input_type_tag_handled`): each index an integer constant naming a
+    parameter, a variadic function's past them too, `pointer_with_type_tag`'s
+    argument a pointer parameter, and the tag's declaration a variable. Each
+    function, function pointer or variable keeps its own rules and tags, or
+    its previous declaration's where it has none of that kind, as clang's
+    redeclarations merge them; a variable of an integer type with an
+    initializer registers its tags for the initializer's value (an
+    initializer that is no integer constant is "'type_tag_for_datatype'
+    attribute requires the initializer to be an integer constant expression").
+    At each call of a function or function pointer named directly,
+    `-Wtype-safety` (on by default) checks each rule as clang's
+    CheckArgumentWithTypeTag does (`check_common_type_safety`): the tag
+    argument, through casts, `&`, `*`, a comma's right operand and a
+    constant condition's arm, names a variable's tag or is an integer literal
+    whose value was registered before the call; a tag of another kind is "this
+    type tag was not designed to be used with this function"; else the
+    argument, as converted for its parameter (but a pointer's own type where
+    the parameter is `void *`, which a `void *` argument skips), must have the
+    tag's type (a pointer to it), plain `char` matching the `signed` or
+    `unsigned char` it is: "argument type 'A' doesn't match specified 'K' type
+    tag that requires 'T'"; a `layout_compatible` tag compares as clang's
+    isLayoutCompatible (`check_common_layout_compatible`), and a
+    `must_be_null` tag wants a null pointer constant ("specified K type tag
+    requires a null pointer"). Refused by name: a rule's index past a variadic
+    function's parameters (whose calls clang checks for that argument), a
+    rule on a member, a tag on a parameter, a tag whose type the constant
+    reader doesn't read, and these attributes in a body a lane reads. A
+    file-scope initializer that calls a function gives its tag's error before
+    "initializer element is not a compile-time constant", which clang gives
+    first.
   - `objc_ownership` and `objc_gc` are a declarator's type's, applied as
     clang's GetFullTypeForDeclarator distributes them
     (`check_input_attribute_objc`): the specifiers' to the declarator's
@@ -7911,9 +7950,12 @@ arguments against the function. The checker now gives these as clang does.
   (`check_program_emit_patchable`, both tiers' code) is the [object writer
   guide](object-writer-and-linker.md)'s "Patchable function entries".
 
-  The rest stay refused by name: the attributes whose handlers clang has its
-  own (`pass_object_size` and others). Recognizing their names does not
-  supply those handlers or their ABI effects.
+  The rest stay refused by name, where they apply: `format_matches`,
+  `cfi_salt`, `objc_bridge`, `objc_bridge_related`, `swift_name`,
+  `swift_async_name`, `swift_error`, `swift_async_error`, `swift_newtype` and
+  `swift_wrapper` in either syntax, and the C23 spellings of `objc_gc`,
+  `objc_ownership`, `address_space` and the OpenCL spaces, and of
+  `annotate_type`. Recognizing their names does not supply their handlers.
 - **Type arguments.** The attributes clang's `attributeIsTypeArgAttr` names
   (`preferred_type`, `vec_type_hint`, `iboutletcollection`, `preferred_name`,
   and C++'s `Owner`, `Pointer`, `contained_type` and

@@ -118,6 +118,9 @@ enum
     // statement increment or decrement (#1447, clang's CheckForLoopConditionalStatement and CheckForRedundantIteration):
     // -Wfor-loop-analysis, off by default, under -Wloop-analysis and -Wmost and so -Wall.
     CHECK_WARNING_ID_FOR_LOOP_ANALYSIS = 110,
+    // A call's argument whose type its type tag doesn't match (#1447, clang's CheckArgumentWithTypeTag, the attributes
+    // argument_with_type_tag, pointer_with_type_tag and type_tag_for_datatype): -Wtype-safety, on by default.
+    CHECK_WARNING_ID_TYPE_SAFETY = 111,
     CHECK_WARNING_ID_COUNT,
 };
 

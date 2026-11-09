@@ -301,6 +301,13 @@ static void check_driver_attribute_argument(const Parser* parser, const Preproce
         case CHECK_ARGUMENT_ALIGNMENT_POWER: snprintf(text, capacity, "%s", check_driver_alignment_power); break;
         case CHECK_ARGUMENT_ALIGNAS_INTEGER_CONSTANT: snprintf(text, capacity, "'aligned' attribute requires integer constant"); break;
         case CHECK_ARGUMENT_ALIGNMENT_TOO_LARGE: snprintf(text, capacity, "requested alignment must be 4294967296 bytes or smaller"); break;
+        case CHECK_ARGUMENT_TYPE_TAG_IDENTIFIER: snprintf(text, capacity, "expected identifier"); break;
+        case CHECK_ARGUMENT_TYPE_TAG_FLAG:
+            snprintf(text, capacity, "invalid comparison flag '%.*s'; use 'layout_compatible' or 'must_be_null'", (int)literal.length, literal.pointer);
+            break;
+        case CHECK_ARGUMENT_TYPE_TAG_INITIALIZER:
+            snprintf(text, capacity, "'type_tag_for_datatype' attribute requires the initializer to be an integer constant expression");
+            break;
         case CHECK_ARGUMENT_ZERO_VECTOR: snprintf(text, capacity, "zero vector size"); break;
         case CHECK_ARGUMENT_REGPARM_RANGE: snprintf(text, capacity, "'regparm' parameter must be between 0 and 6 inclusive"); break;
         case CHECK_ARGUMENT_OUT_OF_BOUNDS: snprintf(text, capacity, "'%s' attribute parameter %u is out of bounds", parsed, number); break;
@@ -4058,7 +4065,8 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                                                    (argument_error == CHECK_ARGUMENT_ERROR_DOMAIN && (report->detail >> 8) != 0) ||
                                                    argument_error == CHECK_ARGUMENT_AVAILABILITY_REDUNDANT || argument_error == CHECK_ARGUMENT_AVAILABILITY_EQUAL ||
                                                    argument_error == CHECK_ARGUMENT_AVAILABILITY_STAGE || argument_error == CHECK_ARGUMENT_AVAILABILITY_ANY_APPLE ||
-                                                   argument_error == CHECK_ARGUMENT_SOURCE_DUPLICATE || argument_error == CHECK_ARGUMENT_SOURCE_EQUAL) &&
+                                                   argument_error == CHECK_ARGUMENT_SOURCE_DUPLICATE || argument_error == CHECK_ARGUMENT_SOURCE_EQUAL ||
+                                                   argument_error == CHECK_ARGUMENT_TYPE_TAG_FLAG) &&
                                                   report->value < count;
                             // (A TCB's string, after the other attribute's name in the value, and a duplicate aspect's.)
                             const uint32_t string_token = (report->detail & 0xffu) == CHECK_ARGUMENT_TCB_CONFLICT ? (uint32_t)(report->value >> 32) :

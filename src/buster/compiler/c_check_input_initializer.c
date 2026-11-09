@@ -113,8 +113,10 @@ static bool check_input_initializer_prepare_slow(CheckInputReader* reader, uint3
     const bool incomplete = type_kind(reader->types, type) == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY;
     // An array whose initializer is parenthesized may be a compound literal's (GNU's, check_input_initializer_finish).
     const bool parenthesized = parser->tokens.kinds[begin] == PARSE_KIND_L_PAREN && type_kind_is_array(type_kind(reader->types, type_strip_aligned(reader->types, type)));
+    // (A variable whose type tags register its initializer's value, #1447, c_check_type_safety_input.c, finishes too.)
     if (valid && (incomplete || parenthesized || check_const_eligible(reader->types, type) || check_input_auto_type(type) ||
-                  (BUSTER_CHECK_RARE(reader, declaration_flags, declaration) & BUSTER_CHECK_DECLARATION_DEDUCED) != 0))
+                  (BUSTER_CHECK_RARE(reader, declaration_flags, declaration) & BUSTER_CHECK_DECLARATION_DEDUCED) != 0 ||
+                  (reader->type_tag_attributes && check_type_tags_pending(reader->output, declaration) != NULL)))
     {
         check_input_rare_claim(reader, &reader->incomplete_array_types[declaration]);
         reader->incomplete_array_types[declaration] = incomplete ? type : 0;
@@ -707,6 +709,10 @@ static bool check_input_initializer_finish(CheckInputReader* reader, uint32_t de
     if (valid && !listless && check_const_eligible(reader->types, type))
     {
         check_input_initializer_const(reader, declaration, begin, end, type);
+    }
+    if (valid && !listless && reader->type_tag_attributes)
+    {
+        valid = check_input_type_tag_finish(reader, declaration, begin, end);
     }
     if (!valid && !mismatched && reader->output->report_count == 0)
     {
