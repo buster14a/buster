@@ -1920,8 +1920,9 @@ clang's `-Wexcessive-regsave` warning (#147, `docs/c-checker.md`): the
 callee may clobber the vector registers the caller keeps. An interrupt
 service routine's definition keeps that same set of every register in Tier
 0's handler frame (`check_program_interrupt`, `Tier0Function.interrupt`,
-`docs/tier0.md`), which returns with `iretq`; a variadic one is refused by
-name ("unsupported: variadic interrupt service routines").
+`docs/tier0.md`), which returns with `iretq`; a variadic one's list starts
+at the interrupted code's argument registers, as LLVM's `x86_intrcc` has it
+(#1447).
 
 Tier 0 leaves out the result's registers, which the caller reads (LLVM's
 return lowering takes them out of the set). A definition whose frame Tier 0's

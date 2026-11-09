@@ -15017,12 +15017,6 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
             // GNU's function multiversioning: a version's symbol and the resolver's ifunc that calls reach.
             check_lower_unsupported(writer, "functions of several target versions (target_clones, or target attributes of other strings)");
         }
-        else if (check_program_interrupt(program, b) && writer->variadic)
-        {
-            // x86's interrupt service routine (#147, CheckProgram.object_interrupt) is Tier 0's frame (Tier0Function.interrupt),
-            // which takes no variadic arguments: the processor pushes none.
-            check_lower_unsupported(writer, "variadic interrupt service routines");
-        }
         else if (convention != NULL)
         {
             check_lower_unsupported(writer, convention);
@@ -15204,8 +15198,11 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
                 abi_assign_scalar(table, signature, named, &own);
             }
             arena_pop_to(scratch, mark);
-            writer->gp_offset = BUSTER_ABI_SLOT_BYTES * own.integer_registers;
-            writer->fp_offset = BUSTER_ABI_SAVE_AREA_VECTOR_OFFSET + BUSTER_ABI_SAVE_AREA_VECTOR_SLOT_BYTES * own.vector_registers;
+            // A variadic interrupt service routine's named parameters (#1447, LLVM's CC_X86_64_Intr) take no register: its
+            // list starts at the interrupted code's rdi and xmm0, which its frame keeps (Tier0Function.incoming_variadic, set below).
+            const bool interrupt = check_program_interrupt(program, b);
+            writer->gp_offset = interrupt ? 0 : BUSTER_ABI_SLOT_BYTES * own.integer_registers;
+            writer->fp_offset = BUSTER_ABI_SAVE_AREA_VECTOR_OFFSET + (interrupt ? 0 : BUSTER_ABI_SAVE_AREA_VECTOR_SLOT_BYTES * own.vector_registers);
         }
         if (check_lower_wide(writer, result) || check_lower_vector_of(writer, result) != 0)
         {
@@ -15686,6 +15683,26 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
             function->calls = calls + signature_index + 1;
             function->argument_locations = locations + first + declared;
             function->incoming_variadic = shared->incoming[b] ? calls + signature_index : 0;
+            if (shared->incoming[b] && function->interrupt != 0)
+            {
+                // A variadic interrupt service routine's incoming frame (#1447, LLVM's x86_intrcc): its named parameters, the
+                // processor's frame and error code, take no register, so its list's registers are the interrupted code's,
+                // from rdi and xmm0, which its frame keeps; and its overflow area is 40 bytes past where it was entered, 32
+                // past the incoming area (Tier0Frame.incoming), as LLVM's CC_X86_64_Intr leaves its stack size.
+                AbiCall* own = BUSTER_ARENA_PUSH_ARRAY(output, AbiCall, 1);
+                if (own == 0)
+                {
+                    status->status = CHECK_PROGRAM_RESOURCE;
+                }
+                else
+                {
+                    *own = calls[signature_index];
+                    own->integer_registers = 0;
+                    own->vector_registers = 0;
+                    own->stack_bytes = 4 * BUSTER_ABI_SLOT_BYTES;
+                    function->incoming_variadic = own;
+                }
+            }
             if (function->parameter_count != declared)
             {
                 // The hidden pointer, parameter 0, in rdi before the declared parameters' locations.

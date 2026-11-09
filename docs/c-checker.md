@@ -8019,9 +8019,10 @@ arguments against the function. The checker now gives these as clang does.
   declaration with it, and `check_program_realign(program, b)` says whether
   body `b` realigns its stack (`Tier0Function.realign_stack`,
   `docs/tier0.md`'s realigned frames: 16 bytes' at least).
-  A variadic routine, which clang compiles, is refused by name ("unsupported:
-  variadic interrupt service routines"), as are `__builtin_eh_return`,
-  `__builtin_setjmp` and musttail calls in one, as in any preserving frame.
+  A variadic routine's list starts at the interrupted code's argument
+  registers, as LLVM's `x86_intrcc` has it (#1447, `docs/tier0.md`).
+  `__builtin_eh_return`, `__builtin_setjmp` and musttail calls in one are
+  refused by name, as in any preserving frame.
 
   GCC's and clang's `patchable_function_entry(N[, M[, "section"]])`
   (`CHECK_ATTRIBUTE_PATCHABLE_FUNCTION_ENTRY`, #1447) is clang's
