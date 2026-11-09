@@ -1395,8 +1395,13 @@ carry no segment (the encoder has the overrides, which thread-local storage's
 forms alone use), so the lowering refuses such a load or store by name, rather
 than compile it as a plain access: an lvalue of one of those spaces read (not an
 address taken: `&`, a member's or a subscript's base), and an assignment's,
-compound assignment's, increment's or decrement's operand in one
-(`check_lower_segment_access`). Only a unit whose type table has a type in a
+compound assignment's, increment's or decrement's operand in one; a vector's
+element read or written through a vector in one (the element's type has lost the
+space); and an atomic builtin's object in one, which its pointer argument reaches
+(`check_lower_segment_access`). An asm statement's register output in one is
+refused too (`check_lower_asm_segment`), since its value is stored through the
+output's address; a memory operand's address goes to the template without the
+segment, as clang's does. Only a unit whose type table has a type in a
 segment's space tests its nodes (`CheckLowerWriter.segments`, from one `memchr`
 of the kinds for a `QUALIFIED` record, then those records' spaces), and such a
 unit's expressions take the expansion, not the plain or batched paths, so that
