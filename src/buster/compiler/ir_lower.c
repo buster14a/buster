@@ -729,6 +729,7 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_vector_operation(
         // where the typed stream's writemask hasn't every lane.
         const uint32_t kind = operation->width_change - 1u;
         value = ir_typed_emit(sink, IR_INTRINSIC, type, operands[0], kind == BUSTER_IR_INTRINSIC_INSERT ? operands[1] : BUSTER_IR_NONE, kind, 0);
+        // An intrinsic's flags are its immediate, here the part, not lanes: the lanes' setter writes the flags column.
         ir_typed_lanes(sink, value, (IrSimdLane)operation->part);
         if (operation->merge_mask && !unmasked)
         {
