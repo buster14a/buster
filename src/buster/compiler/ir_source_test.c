@@ -32,11 +32,15 @@
 #include <sys/resource.h>
 #include <sys/wait.h>
 
+#if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "ir_source_roundtrip.c"
 #include "ir_source_dominators.c"
+#endif
 #include "ir_dataflow.c"
+#if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "ir_dataflow_test.c"
 #include "ir_dataflow_benchmark.c"
+#endif
 
 // ir_source_prepare's linkage (main.c's BUSTER_IR_SOURCE_ENTRY): main.c's units compile it in the checker's, its home,
 // whose check and emission it runs, and call it from the backend's, where the IR's commands run (#784); a unit of its own
@@ -294,6 +298,9 @@ BUSTER_IR_SOURCE_ENTRY void ir_source_prepare(IrSourceFile* result, const char* 
     arena_release(&bytes);
     check_source_release(&source);
 }
+
+// Only the backend's commands need the fixtures; the preparation above also serves the checker's code certificate.
+#if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 
 // What the command found, over every file.
 typedef struct IrSourceTotals IrSourceTotals;
@@ -747,3 +754,5 @@ static int run_ir_source_tests(int count, char** arguments)
     const bool benchmark = count > 0 && strcmp(arguments[0], "--benchmark-self-test") == 0;
     return benchmark ? run_ir_source_benchmark_tests(count - 1, arguments + 1) : ir_source_tests_command(count, arguments);
 }
+
+#endif

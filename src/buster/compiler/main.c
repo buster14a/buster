@@ -608,25 +608,31 @@ int run_backend_benchmark(int argc, char** argv);
 #include "buster/compiler/interpreter_link.c"
 #include "buster/compiler/ir_parse.c"
 #include "buster/compiler/ir_interpreter.c"
+#if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/ir_test.c"
 #include "buster/compiler/ir_lower_test.c"
-#if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/ssa_ir_test.c"
-#endif
 #include "buster/compiler/ir_parse_test.c"
 #include "buster/compiler/interpreter_test.c"
+#endif
 #include "buster/compiler/tier0_mask_test.c"
+#if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/interpreter_native_test.c"
 #include "buster/compiler/interpreter_link_test.c"
 #include "buster/compiler/ir_interpreter_test.c"
+#endif
 #include "buster/compiler/interpreter_driver.c"
+#if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/ir_benchmark.c"
 #include "buster/compiler/ir_lower_benchmark.c"
+#endif
 #include "buster/compiler/ir_source_test.c"
 #include "buster/compiler/tier1_cfg_ir.c"
+#if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/tier1_cfg_source_test.c"
 #include "buster/compiler/tier1_cfg_source_benchmark.c"
 #include "buster/compiler/tier1_certificate_benchmark.c"
+#endif
 
 // Verified Tier 1 optimization passes and independent before/after semantic tests.
 #include "buster/compiler/ir_optimize.c"
@@ -637,35 +643,53 @@ int run_backend_benchmark(int argc, char** argv);
 #include "buster/compiler/ir_rebuild.c"
 #include "buster/compiler/ir_reduce.c"
 #include "buster/compiler/ir_reduce_oracle.c"
+#if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/ir_reduce_test.c"
 #include "buster/compiler/ir_reduce_driver.c"
 #include "buster/compiler/ir_reduce_driver_test.c"
+#endif
 #include "buster/compiler/ir_optimize_inline.c"
+#if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/ir_optimize_inline_test.c"
+#endif
 #include "buster/compiler/ir_optimize_test.c"
+#if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/ir_optimize_benchmark.c"
+#endif
 #include "buster/compiler/ir_optimize_gvn.c"
+#if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/ir_optimize_gvn_test.c"
+#endif
 #include "buster/compiler/ir_optimize_licm.c"
+#if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/ir_optimize_licm_test.c"
+#endif
 #include "buster/compiler/ir_optimize_sroa.c"
+#if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/ir_optimize_sroa_test.c"
 #include "buster/compiler/ir_optimize_inline_simd_test.c"
+#endif
 // #175's first #139 pass tests in the IR's text form: hand-written before/after pairs under tests/ir/optimize.
 #include "buster/compiler/ir_optimize_text_test.c"
 // #866's GVN variants on real source's lowered IR are part of #131's IR benchmark, which needs GVN's definitions.
+#if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/ir_source_benchmark.c"
 #include "buster/compiler/ir_optimize_passes_benchmark.c"
 #include "buster/compiler/ir_metamorphic.c"
+#endif
 
 // Selected effective uses feed liveness, allocation and the bounded native function consumer.
 #include "buster/compiler/tier1_select.c"
 #include "buster/compiler/tier1_select_test.c"
 #include "buster/compiler/tier1_liveness.c"
+#if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/tier1_liveness_test.c"
+#endif
 #include "buster/compiler/tier1_emit.c"
+#if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/tier1_emit_test.c"
 #include "buster/compiler/tier1_pipeline_test.c"
+#endif
 // #179: hand-written IR of AVX-512's masks through Tier 1, natively against the shared IR's interpreter.
 #if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/tier1_masks_test.c"
@@ -677,7 +701,9 @@ int run_backend_benchmark(int argc, char** argv);
 // #179: what a mask's spill costs, to memory against to a general register, and the programs' checks.
 #include "buster/compiler/mask_spill_measure.c"
 #include "buster/compiler/mask_spill_measure_test.c"
+#if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/tier1_pipeline_benchmark.c"
+#endif
 #include "buster/compiler/tier1_select_source_benchmark.c"
 // #939: the certificate of the CFG consumer's code on real C, decoded from its records, beside the emission it certifies:
 // the checker's unit's command, as its corpus's preparation's home.
@@ -700,9 +726,11 @@ bool run_x86_target_selection_tests(void);
 #if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/x86_target_selection_test.c"
 #endif
+#if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/ir_stack_test.c"
 #include "buster/compiler/ir_simd_typed_test.c"
 #include "buster/compiler/ir_simd_consumer_test.c"
+#endif
 int run_tier1_select_benchmark(int argc, char** argv);
 int run_tier1_model_measure(int argc, char** argv);
 int run_tier1_model_measure_tests(int argc, char** argv);
@@ -759,9 +787,11 @@ int run_tier1_model_measure_tests(int argc, char** argv);
 // #134's test-ssa-source: every function of real and generated C promoted by both of ssa_ir.c's paths with the SSA
 // verifier's checks, and each program with a main run by the IR's interpreter in its three forms (all locals in memory,
 // and each path's SSA), against its expected output.
+#if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/ssa_source_generate.c"
 #include "buster/compiler/ssa_source_test.c"
 #include "buster/compiler/interpreter_source_driver.c"
+#endif
 
 // The other units' main_command, each in its own unit (at the top).
 int main_unit_x86(int argc, char** argv, bool* found);
@@ -824,6 +854,18 @@ static __attribute__((unused)) void main_checker_test_interfaces(void)
     (void)&run_check_command;
     (void)&check_corpus_check;
     (void)&lower_source_failure;
+}
+#endif
+
+#if !BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
+// The IR and Tier 1 fixtures supply these shared static entry points' callers in the backend unit. Keep their
+// semantic references in the others without parsing the fixtures or emitting code; the owner retains real callers.
+static __attribute__((unused)) void main_backend_test_interfaces(void)
+{
+    (void)&ir_lower_typed_path;
+    (void)&tier1_cfg_from_ir;
+    (void)&ir_reduce_oracle;
+    (void)&tier1_select_emit;
 }
 #endif
 
@@ -1389,6 +1431,7 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
         result = run_lowering_templates_tests(argc - 2, argv + 2);
     }
 #endif
+#if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-ir-source") == 0)
     {
         result = run_ir_source_tests(argc - 2, argv + 2);
@@ -1409,12 +1452,14 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     {
         result = run_tier1_select_source_benchmark(argc - 2, argv + 2);
     }
+#endif
     else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "benchmark-tier1-code-certificate") == 0)
     {
         // The checker's unit, the home of its corpus's preparation (ir_source_prepare), whose emitter is the one it times:
         // the code certificate's command reaches one copy of the emitter's lazily built tables (x86_zen5_id's).
         result = run_tier1_code_certificate_benchmark(argc - 2, argv + 2);
     }
+#if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-ssa-source") == 0)
     {
         result = run_ssa_source_tests(argc - 2, argv + 2);
@@ -1423,6 +1468,7 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     {
         result = run_ir_source_benchmark(argc - 2, argv + 2);
     }
+#endif
 #if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "test-tier0-inline") == 0)
     {
@@ -1559,6 +1605,7 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     {
         result = run_backend_benchmark(argc - 1, argv + 1);
     }
+#if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-ir") == 0)
     {
         result = run_ir_tests(argc - 2, argv + 2);
@@ -1583,6 +1630,8 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     {
         result = run_ir_reduce(argc - 2, argv + 2);
     }
+#endif
+#if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-interpreter") == 0)
     {
         result = run_interpreter_tests(argc - 2, argv + 2);
@@ -1599,10 +1648,12 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     {
         result = run_ir_interpreter_tests(argc - 2, argv + 2);
     }
+#endif
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "interpret-ir") == 0)
     {
         result = run_ir_interpreter(argc - 2, argv + 2);
     }
+#if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "interpret-c") == 0)
     {
         result = run_typed_source(argc - 2, argv + 2);
@@ -1655,6 +1706,7 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     {
         result = run_tier1_pipeline_tests(argc - 2, argv + 2);
     }
+#endif
 #if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-tier1-masks") == 0)
     {
@@ -1665,10 +1717,12 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
         result = run_tier1_wide_tests(argc - 2, argv + 2);
     }
 #endif
+#if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "benchmark-tier1-pipeline") == 0)
     {
         result = run_tier1_pipeline_benchmark(argc - 2, argv + 2);
     }
+#endif
     else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "benchmark-tier1-select") == 0)
     {
         result = run_tier1_select_benchmark(argc - 1, argv + 1);
@@ -1681,6 +1735,7 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     {
         result = run_tier1_model_measure(argc - 1, argv + 1);
     }
+#if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
     else if (BUSTER_HOST_VECTOR && BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "benchmark-ir-optimize-passes") == 0)
     {
         result = run_ir_optimize_passes_benchmark(argc - 1, argv + 1);
@@ -1689,6 +1744,7 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     {
         result = run_ir_optimize_benchmark(argc - 1, argv + 1);
     }
+#endif
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "check-call-graph") == 0)
     {
         result = run_check_call_graph(argc - 2, argv + 2);

@@ -15,7 +15,18 @@
 // 9700X's lock pinned to one CPU (taskset -c 2 ...).
 //
 //   build/compiler benchmark-tier1-select-source [--only select|select-scalar] [--after-scalar MS] [preprocessor options] file...
+//
+// The corpus's type and preparation also serve the checker's code-certificate benchmark. Keep those shared at their
+// original positions; only the backend unit reads this command's measurement and driver.
 
+// This file is also preprocessed on its own by the clang comparison, outside a unity unit.
+#ifdef BUSTER_IN_UNIT
+#define BUSTER_TIER1_SELECT_SOURCE_BACKEND BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
+#else
+#define BUSTER_TIER1_SELECT_SOURCE_BACKEND 1
+#endif
+
+#if BUSTER_TIER1_SELECT_SOURCE_BACKEND
 #define BUSTER_TIER1_SELECT_SOURCE_VECTOR 0
 #define BUSTER_TIER1_SELECT_SOURCE_SCALAR 1
 #define BUSTER_TIER1_SELECT_SOURCE_VARIANTS 2
@@ -24,6 +35,7 @@ static const char* const tier1_select_source_variant_names[BUSTER_TIER1_SELECT_S
     "select",
     "select-scalar",
 };
+#endif
 
 // The corpus: each function's optimized IR and its dominance, in the kept arena, which both selections took.
 typedef struct Tier1SelectSourceCorpus Tier1SelectSourceCorpus;
@@ -43,6 +55,7 @@ struct Tier1SelectSourceCorpus
     Tier1BursCheck burs;
 };
 
+#if BUSTER_TIER1_SELECT_SOURCE_BACKEND
 static Tier0BenchmarkReading tier1_select_source_run(uint32_t variant, const Tier1SelectSourceCorpus* corpus, Arena* output, Arena* scratch, Tier0BenchmarkCounters counters)
 {
     uint32_t failures = 0;
@@ -66,6 +79,7 @@ static Tier0BenchmarkReading tier1_select_source_run(uint32_t variant, const Tie
     };
     return taken;
 }
+#endif
 
 // Adds `file`'s functions to the corpus: each one lowered into `kept[0]`, promoted into `kept[1]` and optimized into
 // `kept[2]` as the driver's --tier1 steps take it (each step's output in an arena apart from its input's, and kept, since
@@ -154,6 +168,7 @@ static bool tier1_select_source_corpus_file(Tier1SelectSourceCorpus* corpus, con
     return valid;
 }
 
+#if BUSTER_TIER1_SELECT_SOURCE_BACKEND
 static bool tier1_select_source_measure(const Tier1SelectSourceCorpus* corpus, Arena* output, Arena* scratch, uint32_t only, uint64_t after_scalar)
 {
     const Tier0BenchmarkCounters counters = {
@@ -327,3 +342,6 @@ static __attribute__((unused)) int run_tier1_select_source_benchmark(int count, 
     free(options);
     return measured ? 0 : 1;
 }
+#endif
+
+#undef BUSTER_TIER1_SELECT_SOURCE_BACKEND

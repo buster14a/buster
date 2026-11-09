@@ -281,13 +281,25 @@ the checker driver suite `c_checker_driver_test.c` or the debug test
 `c_check_debug_tier1_parameters_test.c` also rebuilds only that unit. Editing
 the shared `c_checker_test.c` root still rebuilds all eleven units.
 
+The backend similarly owns the private IR, interpreter, optimizer and Tier 1
+fixtures. Edits to nested files such as `ir_simd_model_test.c`,
+`interpreter_wide_test.c`, `ir_optimize_simd_test.c`, `tier1_call_probe_test.c`
+and `tier1_address_coalesce_test.c` rebuild only `main_unit_backend.c`.
+Several containing files remain shared deliberately: `ir_source_test.c`
+provides source preparation, the optimizer test roots include the production
+`ir_if_convert.c` and `ir_optimize_verified.c` at their original positions, and
+`tier1_select_burs_test.c` provides checks used by the checker's code-certificate
+benchmark. Their private fixtures are guarded inside those roots; editing the
+shared BURS root or either production optimizer file still rebuilds all eleven
+main units.
+
 The test commands, their owning units and compiler optimization flags stay the
 same. Shared fixtures, including the checker's common helpers and
 `oracle_cache_test.c`, retain their callers and the references that keep shared
 helpers used in vector builds. Check every unit with scalar and vector flags
 after changing these guards; the build regression harness checks representative
-private-test edits against their exact owning units and keeps the shared checker
-root's eleven-unit dependency explicit.
+private-test edits against their exact owning units and keeps shared helper and
+production dependencies explicit.
 
 ## Presets and CTest
 
