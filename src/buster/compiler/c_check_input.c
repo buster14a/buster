@@ -3603,8 +3603,10 @@ static __attribute__((noinline, cold)) bool check_input_specifiers_recover(Check
     recovered = recovered && !check_declspec_scan(parser, first, end, dropped, &rest, &whole) && whole.known &&
                 !check_declspec_scan(parser, first, at + 1, dropped, &rest, &prefix) && prefix.known;
     const uint32_t keyword_type = recovered ? check_input_specifier_slot_type(prefix.type) : BUSTER_CHECK_NONE;
-    // A type that is no keyword's is the reader's base already, unless `at` is a type keyword that took its place.
-    const bool overwritten = parser->tokens.kinds[at] == PARSE_KIND_TYPE && parser->tokens.names[at] != C_NAME_INT;
+    // A type that is no keyword's is the reader's base already, unless `at` is a type keyword that took its place: not
+    // int, which is a slot of its own, nor _Complex, a flag (review on #1820: `typeof(_Bool) _Complex x;`).
+    const uint32_t at_name = parser->tokens.names[at];
+    const bool overwritten = parser->tokens.kinds[at] == PARSE_KIND_TYPE && at_name != C_NAME_INT && !check_declspec_complex_name(at_name);
     recovered = recovered && (keyword_type != BUSTER_CHECK_NONE || !overwritten);
     const uint32_t count = reader->output->report_count;
     if (recovered)

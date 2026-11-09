@@ -178,10 +178,16 @@ static uint8_t check_declspec_type_name(uint32_t name, bool c23)
     return result;
 }
 
+// Whether `name` is a spelling of _Complex.
+static bool check_declspec_complex_name(uint32_t name)
+{
+    return name == C_NAME_COMPLEX_C99 || name == C_NAME_GNU_COMPLEX || name == C_NAME_GNU_COMPLEX2;
+}
+
 // clang's first error for the specifiers from `first` to `end` (a declaration's, a parameter's or a type name's), into
 // `result`. False if clang gives none, or if a specifier is one this doesn't model, which the caller's own report keeps.
 // check_declspec_error's scan, with the token `skip` left out (BUSTER_CHECK_NONE for none), which a specifier clang drops
-// is (#1447, check_input_specifiers_recover), and the slots it ends with in `slots`.
+// is (#1447, check_input_specifiers_recover), every _Complex for a _Complex's, and the slots it ends with in `slots`.
 static __attribute__((noinline, cold)) bool check_declspec_scan(const Parser* parser, uint32_t first, uint32_t end, uint32_t skip, CheckDeclspecResult* result,
                                                                 CheckDeclspecSlots* slots)
 {
@@ -201,6 +207,9 @@ static __attribute__((noinline, cold)) bool check_declspec_scan(const Parser* pa
     uint32_t thread_token = BUSTER_CHECK_NONE;
     uint32_t constexpr_token = BUSTER_CHECK_NONE;
     *result = (CheckDeclspecResult){ .token = BUSTER_CHECK_NONE };
+    // A _Complex that clang drops is its whole slot: every _Complex of the list, a repeated one too (DeclSpec::Finish
+    // unsets TypeSpecComplex; review on #1820, `_Complex _Complex _Bool`).
+    const bool skip_complex = skip != BUSTER_CHECK_NONE && check_declspec_complex_name(parser->tokens.names[skip]);
     uint32_t i = first;
     bool reading = true;
     bool known = true;
@@ -216,7 +225,7 @@ static __attribute__((noinline, cold)) bool check_declspec_scan(const Parser* pa
         uint8_t new_storage = CHECK_DECLSPEC_NONE;
         uint8_t new_thread = CHECK_DECLSPEC_NONE;
         uint32_t next = i + 1;
-        if (i == skip)
+        if (i == skip || (skip_complex && check_declspec_complex_name(name)))
         {
             // (A keyword clang drops: none of the slots.)
         }
@@ -285,7 +294,7 @@ static __attribute__((noinline, cold)) bool check_declspec_scan(const Parser* pa
         {
             new_sign = name == C_NAME_UNSIGNED ? CHECK_DECLSPEC_UNSIGNED : CHECK_DECLSPEC_SIGNED;
         }
-        else if (name == C_NAME_COMPLEX_C99 || name == C_NAME_GNU_COMPLEX || name == C_NAME_GNU_COMPLEX2)
+        else if (check_declspec_complex_name(name))
         {
             complex_token = complex_token == BUSTER_CHECK_NONE ? i : complex_token;
         }
