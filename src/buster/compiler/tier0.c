@@ -608,6 +608,13 @@ struct Tier0Function
     // local in one (tier0_assign_homes) and no value of its stacks either (its integer depths are the caller-saved
     // registers' alone), and a realigned frame whose base is r15 is refused.
     bool returns_twice;
+    // Whether the function calls another function that returns twice (#1847): setjmp's library kin, the catalogue's
+    // entries with the 'j' attribute, or one a declaration gives returns_twice. Their longjmp restores the callee-saved
+    // registers, and C's contexts for setjmp hold no value of the stacks across its call, so Tier 0's frame needs nothing
+    // more. Tier 1 falls back to Tier 0 for it (ir_lower): its call-save rows and spill slots are shared by values whose
+    // ranges don't meet on the CFG, which has no edge from a longjmp back to the call, as LLVM's StackSlotColoring stays
+    // out of such a function; and the Tier 0 inliner takes no such callee, as LLVM's isInlineViable.
+    bool calls_returns_twice;
     // Whether the function calls __builtin_eh_return (#148): its frame, and its TAIL_CALL of a BUSTER_TIER0_TAIL_EH row.
     bool eh_return;
     const uint64_t* vector_constants;

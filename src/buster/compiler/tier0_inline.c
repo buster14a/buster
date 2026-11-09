@@ -139,13 +139,13 @@ static bool tier0_inline_branch(uint32_t kind)
 }
 
 // Whether `function`'s stream can be a callee's (docs/tier0-inlining.md, "Eligibility"): nothing about its own frame or
-// code addresses (variadic, setjmp, eh_return, unwind_init, an interrupt or preserving convention, a realigned stack,
-// labels, ALLOCA and the stack's kinds, FRAME_ADDRESS, tail calls, JUMP_INDIRECT), no result through memory, and at
-// most one RETURN, its last entry. Its entries are its body, but that RETURN (`*body`).
+// code addresses (variadic, setjmp or a call of its kin, eh_return, unwind_init, an interrupt or preserving convention,
+// a realigned stack, labels, ALLOCA and the stack's kinds, FRAME_ADDRESS, tail calls, JUMP_INDIRECT), no result through
+// memory, and at most one RETURN, its last entry. Its entries are its body, but that RETURN (`*body`).
 static bool tier0_inline_callee_valid(const Tier0Function* function, uint32_t* body)
 {
     const uint32_t count = function->count;
-    bool valid = function->incoming_variadic == 0 && !function->returns_twice && !function->eh_return && !function->unwind_init && function->interrupt == 0 &&
+    bool valid = function->incoming_variadic == 0 && !function->returns_twice && !function->calls_returns_twice && !function->eh_return && !function->unwind_init && function->interrupt == 0 &&
                  function->preserve_general == 0 && function->preserve_vectors == 0 && function->preserve_mask_bytes == 0 && !function->realign_stack &&
                  function->label_count == 0 && function->table_count == 0 && function->result.kind != BUSTER_ABI_RESULT_MEMORY;
     const bool returns = count != 0 && function->kinds[count - 1] == BUSTER_TYPED_RETURN;

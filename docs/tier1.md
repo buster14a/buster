@@ -337,7 +337,20 @@ register parts exceed the red zone's 14 eightbyte staging slots reserve one
 frame object for the largest call (#1450), addressed through the stable frame
 base even in a dynamic frame. Four or more 32-byte vector arguments therefore
 work on both v3 and v4 policies; the checker driver's overflow-staging fixture
-cross-links them with clang under `--verify`. Still refused: a
+cross-links them with clang under `--verify`. A function that calls a function
+that returns twice is Tier 0's (#1847): `__builtin_setjmp`'s callers since
+#148, and since #1847 the callers of setjmp's library kin (the catalogue's
+entries with clang's `j` attribute: `setjmp`, `_setjmp`, `__sigsetjmp`,
+`sigsetjmp`, `savectx`, `vfork`, `getcontext` and `_setjmpex`) and of any
+function a declaration gives `returns_twice` (`Tier0Function.calls_returns_twice`).
+Tier 1 shares call-save rows and spill slots among values whose ranges don't
+meet on the CFG, which has no edge from a `longjmp` back to the call, so a
+second return would read another value's bytes; LLVM's StackSlotColoring stays
+out of such a function for the same reason. Their `longjmp` restores the
+callee-saved registers, and C's contexts for `setjmp` hold no value of Tier 0's
+stacks across its call, so Tier 0's code needs nothing more.
+`test-checker-driver`'s returns-twice unit runs each kind against clang -O0's
+build. Still refused: a
 vector result LLVM demotes to a hidden pointer, naked functions, whose bodies
 are assembly Tier 0 copies as written, an address whose offset alone is past 32
 bits. The IR's switches and selects of floating

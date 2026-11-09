@@ -3574,6 +3574,25 @@ static void check_test_program_many_declarators(CheckTest* test, const char* cla
     }
 }
 
+// #1847: the lowering's library functions that return twice (check_lower_twice_entries), whose callers Tier 1 leaves to
+// Tier 0, are exactly the catalogue's entries with the 'j' attribute but __builtin_setjmp, in its order.
+static void check_test_program_twice_library(CheckTest* test)
+{
+    uint32_t matched = 0;
+    bool ordered = true;
+    for (uint32_t i = 0; i < BUSTER_BUILTIN_INTRINSIC_COUNT; i += 1)
+    {
+        const BuiltinIntrinsicInfo* info = builtin_intrinsic_infos + i;
+        const bool own = info->name_length == sizeof("__builtin_setjmp") - 1 && memcmp(info->name, "__builtin_setjmp", info->name_length) == 0;
+        const bool listed = !own && memchr(info->attributes, 'j', info->attributes_length) != NULL;
+        const BuiltinIntrinsicName* entry = listed && matched < BUSTER_CHECK_LOWER_TWICE_NAMES ? check_lower_twice_entries + matched : NULL;
+        ordered = ordered && (!listed || (entry != NULL && entry->length == info->name_length && memcmp(entry->name, info->name, entry->length) == 0));
+        matched += listed ? 1 : 0;
+    }
+    check_test_expect(test, ordered && matched == BUSTER_CHECK_LOWER_TWICE_NAMES,
+                      "the lowering's returns-twice library names are exactly the catalogue's entries with the 'j' attribute but __builtin_setjmp");
+}
+
 static __attribute__((noinline)) void check_test_programs(CheckTest* test, const char* clang)
 {
     if (check_test_takes())
@@ -3581,6 +3600,7 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         check_test_program_array_alignment(test, clang);
         check_test_program_return_marks(test);
         check_test_program_return_library(test);
+        check_test_program_twice_library(test);
         check_test_literal_tables(test, clang);
         check_test_program_builtin_scratch(test, clang);
         check_test_program_copies(test, clang);
