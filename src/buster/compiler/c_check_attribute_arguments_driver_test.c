@@ -1879,6 +1879,20 @@ static void check_test_driver_unevaluated_strings(CheckTest* test, const char* c
         { "int a = 5wb;\n#pragma clang diagnostic error \"-Wc23-extensions\"\nint b = 6wb;\n", "-std=gnu17", NULL },
         { "long a = 0x7fwb;\nlong b = 017wb;\nunsigned c = 0b1uwb;\n", "-std=gnu17", NULL },
         { "long a = 1'0wb;\n", "-std=gnu23", NULL },
+        // In #if, the preprocessor's, with -Wc23-extensions' options and pragmas: off, promoted by -Werror, -Werror= and
+        // -pedantic-errors, silenced by -w; a pragma's mapping over the command line's, and a push's restored by its pop.
+        { "#if 1wb\n#endif\nint x;\n", "-std=gnu17", NULL },
+        { "#if 1wb\n#endif\nint x;\n", "-std=gnu23", NULL },
+        { "#if 1wb\n#endif\nint x;\n", "-std=gnu17", "-Wno-c23-extensions" },
+        { "#if 1wb\n#endif\nint x;\n", "-std=gnu17", "-Werror=c23-extensions" },
+        { "#if 1wb\n#endif\nint x;\n", "-std=gnu17", "-pedantic-errors" },
+        { "#if 1wb\n#endif\nint x;\n", "-std=gnu17", "-Werror" },
+        { "#if 1wb\n#endif\nint x;\n", "-std=gnu17", "-w" },
+        { "#pragma clang diagnostic ignored \"-Wc23-extensions\"\n#if 1wb\n#endif\nint x;\n", "-std=gnu17", NULL },
+        { "#pragma clang diagnostic error \"-Wc23-extensions\"\n#if 1wb\n#endif\nint x;\n", "-std=gnu17", NULL },
+        { "#pragma clang diagnostic warning \"-Wc2x-extensions\"\n#if 1wb\n#endif\nint x;\n", "-std=gnu17", "-Werror" },
+        { "#pragma clang diagnostic push\n#pragma clang diagnostic ignored \"-Wc23-extensions\"\n#if 3wb\n#endif\n#pragma clang diagnostic pop\n#if 1wb\n#endif\nint x;\n",
+          "-std=gnu17", NULL },
     };
     enum { LINES = 16384 };
     char* expected_lines = malloc(LINES);
