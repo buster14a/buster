@@ -4,8 +4,9 @@
 # hand with BUSTER_COMPILER set to a build's executable, such as build/compiler.
 
 == Check unity fixture ownership without rebuilding
-# The existing build's compiler dependency records must keep every private test/benchmark/measurement in one main
-# unit, including new nested files. Exact legacy shared exceptions may not widen, and stale records fail closed.
+# The existing compiler's dependency graph keeps private fixtures, arbitrary nested includes and test headers in
+# one main unit. Exact shared exceptions and shared-root structure may not grow silently; stale/incomplete records
+# fail closed. Internally guarded roots also retain their complete standalone preprocessing.
 cc -std=c17 -O2 -Wall -Wextra -Werror -o build/build-regression tools/ci/build_regression.c
 build/build-regression --ownership-only "$BUSTER_COMPILER"
 == Test the foreign inputs [8 CPUs]

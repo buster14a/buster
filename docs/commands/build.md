@@ -292,15 +292,25 @@ The optimizer roots `ir_optimize_test.c` and `ir_optimize_text_test.c`, includin
 their nested if-conversion and verified-pass fixtures, also belong to BACKEND.
 Other units include the production `ir_if_convert.c` and
 `ir_optimize_verified.c` directly at the same positions. Editing those production
-passes still rebuilds all eleven main units. `ir_source_test.c` and
-`tier1_select_burs_test.c` retain narrow helpers for BACKEND and CHECKER; editing
-either root rebuilds those two units.
+passes still rebuilds all eleven main units. The source preparation interface in
+`ir_source_test.c` serves BACKEND and CHECKER; other units include production
+`ir_dataflow.c` directly at the same position. The source root and
+`tier1_select_burs_test.c` therefore rebuild those two consumers alone, while
+`ir_dataflow.c` remains a dependency of all eleven units. Four narrow semantic
+references retain production unused-function checking without emitting code.
 
 The backend also owns the private Tier 0 fixtures, their nested tests and vector
 baseline, the mask tests and the streaming tests and benchmark. Editing those
 files rebuilds only `main_unit_backend.c`. `tier0_test_same_code` and its unwind
 consumer belong to that same unit, so the entire `tier0_test.c` root is private.
 Production `tier0_generate.c` and `streaming.c` retain all eleven owners.
+
+Nonstandard support names follow the same rule. The differential command's
+`differential.c` belongs to BACKEND. `test_tool.c` keeps probing helpers for
+DRIVER, TYPES, X86, FRONTEND, LINK and BACKEND, while `test_tool_test.c` belongs
+to DRIVER. `test_process.c` keeps the CPU-limit and capture-file helpers shared;
+its process-worker functions and `test_process_test.c` belong to FRONTEND.
+Standalone inclusion of either support root retains its complete self-tests.
 
 The frontend owns the private preprocessor, parser, GNU, bindings and lowering
 fixtures and their fixture-consuming commands. Edits to
@@ -382,9 +392,10 @@ All owning commands and their emitted code stay in the same units, and the
 importer's five assertion coordinates are preserved.
 
 The test commands, their owning units and compiler optimization flags stay the
-same. Shared fixtures, including the checker's common helpers and
-`oracle_cache_test.c`, retain their callers and the references that keep shared
-helpers used in vector builds. Check every unit with scalar and vector flags
+same. The checker's common helpers retain their callers; the driver's
+`oracle_cache_test.c` is private. Narrow semantic references keep production
+helpers checked in units that omit their fixture callers and emit no code.
+Check every unit with scalar and vector flags
 after changing these guards; the build regression harness checks representative
 private-test edits against their exact owning units and keeps shared helper and
 production dependencies explicit.
@@ -392,21 +403,40 @@ production dependencies explicit.
 ### Preventing dependency growth
 
 Give new test, inline benchmark and measurement C files the `*_test.c`,
-`*_benchmark.c` and `*_measure.c` suffixes. Keep their includes and command
+`*_benchmark.c` and `*_measure.c` suffixes; name test headers/fragments
+`*_test.h`/`*_test.inc`. Keep their includes and command
 branches inside their owning unit's guard. If another family needs a helper,
 share the narrow helper span and keep private fixtures and nested includes
 guarded. A root that is also preprocessed as a standalone input must keep its
 complete source when `BUSTER_UNIT` is undefined.
 
-The build regression's `--ownership-only [COMPILER]` mode checks every matching
-file included by a main unity unit, using the selected compiler's Ninja graph.
-The default is exactly one unity owner. Existing shared files have exact paths
-and owner sets in the exception table; an exception never covers a new nested
-file. The check rejects owner mismatches and stale exceptions, so isolating a
-family also removes its obsolete entries. The remaining broad sharing is
-recorded debt, not permission for new fixtures to inherit it. New shared helpers
-need an explicit owner set and a reason; do not add a private fixture to the
-exception table merely to pass the check.
+The build regression's `--ownership-only [COMPILER]` mode reads all active
+repository paths in the selected compiler's Ninja graph. Test/benchmark/measure
+names, fixture names and explicit nonstandard roots seed a literal quoted-include
+closure. Every active descendant is checked regardless of suffix, extension or
+directory, including headers, `.inc` files and generated fixture data. The
+default is exactly one unity owner. A shared root never exempts a new child or
+prefix. Important nonstandard paths also assert the command's exact owner.
+
+Shared exceptions name exact paths, explicit owner sets and a reason; even the
+current eleven-unit set is explicit, so adding a unit cannot silently widen it.
+Remove obsolete exceptions. Production implementations/data reached through
+fixtures have their own exact rows, rather than an allowance for descendants.
+The two scalar host headers have separate, exact configuration-scoped rows.
+Do not add private fixtures to the exception table merely to pass the check.
+
+Shared fixture/support roots also pin a small lexical fingerprint of their
+shared declaration headers, aggregate members, include directives and macro
+names with their owner masks. Unit-private islands do not contribute. Unknown
+host predicates conservatively include both branches, so scalar CI protects
+vector-only shared growth too. New unguarded functions, data declarations,
+headers or widened helper guards therefore require review even inside an
+already-approved root. Guard private additions for their owner; update the
+reported fingerprint only after reviewing a justified shared change. This is
+not a C semantic analysis: function bodies, data initializers and macro
+replacement bodies still need review for private fixture growth. Macro-computed
+include paths need an explicit assertion if literal closure cannot discover
+them. Keep includes literal where practical.
 
 After building the selected configuration, run the check directly with:
 
@@ -417,11 +447,17 @@ cc -std=c17 -O2 -Wall -Wextra -Werror -o /tmp/buster-build-regression tools/ci/b
 
 Pass the Debug output path to check Debug instead. The check refuses an
 incomplete graph or pending build work, rather than accepting old dependency
-data after an unbuilt edit. It reads one dependency snapshot and does not
+data after an unbuilt edit. Each unity record must be VALID, have its declared
+number of dependencies and contain its own source; missing, duplicate, stale
+or wrong-configuration records fail. It also preprocesses internally guarded
+roots without a unity selector. It reads one dependency snapshot and does not
 rebuild the compiler. The ordinary correctness inventory runs it against its
 own compiler, including on source-only PRs that do not trigger the separate
 build-regression workflow. Representative edit-plan checks remain in the full
 build regression to verify Ninja's actual invalidation behavior.
+
+The [cleanup inventory](../build-dependency-cleanup.md) records completed packets,
+necessary sharing, remaining production boundaries and validation limits.
 
 ## Presets and CTest
 
