@@ -793,6 +793,12 @@ struct CheckLowerWriter
     Tier0Operation* operations;
     uint32_t operation_count;
     uint32_t operation_capacity;
+    // The function's asm bodies (#1839, Tier0Function.asm_bodies), each with its call row (`asm_body_calls`), of which
+    // check_lower_finish makes Tier0Function.call_asm, and the room for them (CheckProgramAsms.body_capacity).
+    Tier0AsmBody* asm_bodies;
+    uint32_t* asm_body_calls;
+    uint32_t asm_body_count;
+    uint32_t asm_body_capacity;
     // The function's vector constants (Tier0Function.vector_constants), 64 bytes each and each one's bytes: a shuffle's
     // index vector (check_lower_vector_builtin) or a vector of zeros, each distinct constant once, and the room for them.
     uint64_t* vector_constants;
@@ -13342,14 +13348,14 @@ static void check_lower_asm(CheckLowerWriter* writer, CheckControl control)
             }
         }
     }
-    else if (plan->helper != BUSTER_CHECK_NONE)
+    else if (plan->helper != BUSTER_CHECK_NONE || plan->inlined)
     {
-        const CheckProgramHelper* helper = writer->output->helpers.items + plan->helper;
+        const CheckProgramHelper* helper = plan->inlined ? 0 : writer->output->helpers.items + plan->helper;
         const uint32_t object = plan->block != 0 ? check_lower_object(writer, plan->block, 3) : BUSTER_CHECK_NONE;
         const TypeId argument = BUSTER_TYPE_ULONG;
         // An asm goto's helper returns its exit (0 for the fall-through, a label's index plus one), which a temporary keeps
         // for a branch to each label after the call: the tasks are pushed last first.
-        const bool jumps = helper->result_type == BUSTER_TYPE_INT && statement->is_goto;
+        const bool jumps = helper != 0 && helper->result_type == BUSTER_TYPE_INT && statement->is_goto;
         const uint32_t exit = jumps && writer->output->status == CHECK_PROGRAM_OK ? check_lower_temporary(writer, BUSTER_TYPED_CLASS_I32) : BUSTER_CHECK_NONE;
         for (uint32_t l = statement->label_count; jumps && l-- > 0 && writer->output->status == CHECK_PROGRAM_OK;)
         {
@@ -13364,9 +13370,34 @@ static void check_lower_asm(CheckLowerWriter* writer, CheckControl control)
             check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_I32, exit);
         }
         const TypeId result = jumps ? BUSTER_TYPE_INT : BUSTER_TYPE_VOID;
-        const uint32_t call = writer->output->status == CHECK_PROGRAM_OK ? check_lower_native_call(writer, helper->symbol, result, &argument, plan->block != 0 ? 1 : 0) : 0;
+        uint32_t call = 0;
+        if (writer->output->status == CHECK_PROGRAM_OK && plan->inlined)
+        {
+            // Placed in its caller as an asm body (#1839): a call row of no arguments whose callee is the body, which
+            // reads the block in its frame place.
+            call = check_lower_native_call(writer, BUSTER_TIER0_CALL_ASM_TARGET, BUSTER_TYPE_VOID, NULL, 0);
+            if (writer->asm_body_count >= writer->asm_body_capacity)
+            {
+                check_lower_resource(writer, "lowering asm body storage");
+            }
+            else if (call != BUSTER_CHECK_NONE)
+            {
+                writer->asm_bodies[writer->asm_body_count] = (Tier0AsmBody){
+                    .records = plan->inline_records,
+                    .count = plan->inline_count,
+                    .block = plan->block != 0 ? object : BUSTER_TIER0_ASM_NO_BLOCK,
+                    .touched = plan->inline_touched,
+                };
+                writer->asm_body_calls[writer->asm_body_count] = call;
+                writer->asm_body_count += 1;
+            }
+        }
+        else if (writer->output->status == CHECK_PROGRAM_OK)
+        {
+            call = check_lower_native_call(writer, helper->symbol, result, &argument, plan->block != 0 ? 1 : 0);
+        }
         check_lower_instruction(writer, BUSTER_TYPED_CALL, jumps ? BUSTER_TYPED_CLASS_I32 : BUSTER_TYPED_CLASS_VOID, call);
-        if (plan->block != 0)
+        if (plan->block != 0 && !plan->inlined)
         {
             check_lower_instruction(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, object);
         }
@@ -14747,6 +14778,9 @@ static bool check_lower_writer_begin(CheckLowerWriter* writer, CheckLowerAbi* ab
     // function resets the row count and copies its rows to output before the next body reuses this lane's table.
     writer->operation_capacity = shared->operation_capacity;
     BUSTER_CHECK_LOWER_COLUMN(operations, Tier0Operation, shared->operation_capacity);
+    writer->asm_body_capacity = shared->lowered->asms.body_capacity;
+    BUSTER_CHECK_LOWER_COLUMN(asm_bodies, Tier0AsmBody, (uint64_t)shared->lowered->asms.body_capacity + 1);
+    BUSTER_CHECK_LOWER_COLUMN(asm_body_calls, uint32_t, (uint64_t)shared->lowered->asms.body_capacity + 1);
     writer->vector_constant_capacity = BUSTER_CHECK_LOWER_VECTOR_CONSTANTS;
     BUSTER_CHECK_LOWER_COLUMN(vector_constants, uint64_t, 8 * (uint64_t)BUSTER_CHECK_LOWER_VECTOR_CONSTANTS);
     BUSTER_CHECK_LOWER_COLUMN(vector_constant_bytes, uint8_t, BUSTER_CHECK_LOWER_VECTOR_CONSTANTS);
@@ -14910,6 +14944,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         writer->vectors = false;
         writer->masks = false;
         writer->operation_count = 0;
+        writer->asm_body_count = 0;
         writer->vector_constant_count = 0;
         writer->result_object = BUSTER_CHECK_NONE;
         writer->kept_local = BUSTER_CHECK_NONE;
@@ -15451,6 +15486,26 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         }
         BUSTER_CHECK_LOWER_COPY(operations, operations, Tier0Operation, writer->operation_count);
         function->operation_count = writer->operation_count;
+        // The asm bodies (#1839), and the call rows' column of them: each body's call its index plus one, any other 0.
+        BUSTER_CHECK_LOWER_COPY(asm_bodies, asm_bodies, Tier0AsmBody, writer->asm_body_count);
+        function->asm_body_count = writer->asm_body_count;
+        if (status->status == CHECK_PROGRAM_OK && writer->asm_body_count != 0)
+        {
+            uint32_t* call_asm = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)writer->call_count + 1);
+            if (call_asm != 0)
+            {
+                memset(call_asm, 0, ((uint64_t)writer->call_count + 1) * sizeof(uint32_t));
+                for (uint32_t k = 0; k < writer->asm_body_count; k += 1)
+                {
+                    call_asm[writer->asm_body_calls[k]] = k + 1;
+                }
+                function->call_asm = call_asm;
+            }
+            else
+            {
+                status->status = CHECK_PROGRAM_RESOURCE;
+            }
+        }
         BUSTER_CHECK_LOWER_COPY(vector_constants, vector_constants, uint64_t, 8 * (uint64_t)writer->vector_constant_count);
         BUSTER_CHECK_LOWER_COPY(vector_constant_bytes, vector_constant_bytes, uint8_t, writer->vector_constant_count);
         function->vector_constant_count = writer->vector_constant_count;
