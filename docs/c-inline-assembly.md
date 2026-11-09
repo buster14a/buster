@@ -351,7 +351,8 @@ names by rax's 64-bit name (`%rax` for an `int` too; `%k0` is `%eax`); and an
 template names `%rax` (GCC's "ax:dx pair"). An input fixed to rax or rdx shares
 its register with a pair output that isn't early-clobbered or `+`, as clang's
 code shares it: mulq's `"=A"(r) : "a"(x), "rm"(y)` multiplies x in rax. The
-helper loads and stores the pair by its halves, from a slot of 16 bytes.
+helper loads and stores the pair by its halves, from a slot of 16 bytes; a
+statement of one keeps its helper (#1839's asm bodies don't move pairs).
 
 ### MMX's operands
 
