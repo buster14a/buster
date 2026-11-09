@@ -3854,8 +3854,54 @@ take clang's words and places:
   elements)", the count with clang's digit separators
   (`CHECK_INPUT_ARRAY_TOO_LARGE`).
 
-Each still ends the unit's checking as before. The semantic-recovery fixtures
-compare each with clang.
+Each of these, but a typedef's or a parameter's, now makes its declaration
+invalid, as clang's does, and the reader goes on (below). The semantic-recovery
+fixtures compare each with clang.
+
+#### Invalid declarations (#1447)
+
+Clang marks a declaration whose declarator or type is in error invalid, keeps it
+bound, and leaves its uses quiet: a `RecoveryExpr` around each, whose enclosing
+expressions give no diagnostic of their own. The reader does the same for the
+declarator errors above and a variable of type `void` or of an incomplete type,
+in a declaration's own declarator (not a typedef's, a parameter's, a deduced
+`auto`'s or a K&R definition's):
+
+- **The error recovers.** `check_input_declarator_recover` and
+  `check_input_variable_recover` move the report to the recovered ones, so the
+  reader goes on, and the type has a stand-in `int` where clang's has its
+  error: a function returning an array returns `int`, as clang's
+  `BuildFunctionType` makes it; an array of functions, of an incomplete
+  element, past the object limit or of a negative bound, and a `void` or
+  incomplete variable, are `int`. A constant read at the walk (a bound,
+  `typeof`, an enumerator, `_Static_assert`, a bit-field's width) sees the
+  stand-in; its uses there are quiet all the same.
+- **It stays bound.** `check_input_invalid_declare` marks its name in
+  `CheckInput.invalid_declarations` (a byte per token, allocated by the unit's
+  first, with `invalid_count`). `check_input_bind` binds it as it is, with no
+  redeclaration checks and no linkage. After a visible invalid declaration, a
+  function's redeclaration is invalid too, and an object's is checked as if
+  nothing were visible, but for its linkage: `static void v; int v;` gives
+  "non-static declaration of 'v' follows static declaration", and that one is
+  invalid too.
+- **Its uses are quiet.** `check_input_binding_answers` gives each use of an
+  invalid declaration no declaration and the silent report
+  `CHECK_INPUT_INVALID_USE`, which recovers as an undeclared name's does
+  (`check_input_diagnostic_recover`'s limits, the initializer and repair
+  checks). The driver publishes nothing for it and counts it as no error of its
+  scope, so the scope keeps its unused variables, and a unit whose only reports
+  are such uses has its unused declarations' warnings from the first reading.
+  The rejected unit's later readings leave each use's part out, and each
+  invalid declaration with it, without leaving out the bodies that name them
+  (`check_driver_rejected_common`'s `quiet`).
+- **Source order.** A unit with an invalid declaration at file scope reads its
+  bodies in source order (`check_deferred_bodies`), and a lane that meets one
+  in its body refuses, so source order recovers it.
+
+Left as before: an initialized invalid declaration still stops the reader
+(clang checks its initializer without the declaration's type, and its
+undeclared names and warnings there), and so does an invalid function
+definition's K&R list. `-c` refuses every such unit.
 
 #### Extern objects of type void (#1447)
 
@@ -4482,8 +4528,11 @@ own nodes take them.
 
 The later phases are left:
 
-- **Invalid declarations.** Not covered by phase 2:
+- **Invalid declarations.** Not covered by phase 2 or the invalid
+  declarations above:
   - C23's redefinition of an enum, compatible or not (above).
+  - An initialized invalid declaration, a typedef's declarator error and a
+    parameter's, which clang marks invalid too.
 
   These still stop the reader. A non-constant initializer's error is at its
   first token, where clang's is at the operand that isn't constant
@@ -4504,9 +4553,11 @@ The later phases are left:
   (`check_driver_rejected_declaration`, #1447), and every body that names one
   of its names; a dropped part's error counts just before the token after it,
   so the definition that follows keeps its unused variables. Clang instead
-  keeps such a declaration bound and invalid, its uses quiet: the bodies that
-  name it lose their warnings here, and so does the declaration's own
-  initializer (`const int d = 1 / 0;`'s division). A file-scope use elsewhere,
+  keeps such a declaration bound and invalid, its uses quiet: the reader does
+  so for the declarator errors (invalid declarations, above), whose uses are
+  known errors of their own; for the others the bodies that name it lose their
+  warnings here, and so does the declaration's own initializer
+  (`const int d = 1 / 0;`'s division). A file-scope use elsewhere,
   an error in a function definition outside its body, or an error outside
   every body other than an initializer's or a file-scope declaration's still
   leaves the unit without its common warnings. A function's unused parameter that its

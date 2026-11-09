@@ -387,13 +387,13 @@ static void check_test_driver_statement_recovery(CheckTest* test, const char* cl
         }
         unlink(source);
     }
-    // The rounds' cap (BUSTER_CHECK_DRIVER_REJECTED_ROUNDS): each body's incomplete object ends its reading's walk, so the
-    // first reading gives the first error and each round one more, until the cap; past it the unit's warnings aren't given.
-    // So the first errors are clang's, the last isn't given, and nor are the warnings. (The forward declarations' notes aren't
-    // yet clang's, so the lines compared are the errors'.)
+    // The rounds' cap (BUSTER_CHECK_DRIVER_REJECTED_ROUNDS): each body's initialized incomplete object ends its reading's
+    // walk (an uninitialized one is an invalid declaration that recovers, #1447), so the first reading gives the first error
+    // and each round one more, until the cap; past it the unit's warnings aren't given. So the first errors are clang's, the
+    // last isn't given, and nor are the warnings. (The lines compared are the errors'.)
     static const char capped[] =
-        "void m1(void) { struct S1 s; }\nvoid m2(void) { struct S2 s; }\nvoid m3(void) { struct S3 s; }\n"
-        "void m4(void) { struct S4 s; }\nvoid m5(void) { struct S5 s; }\nvoid m6(void) { struct S6 s; }\n"
+        "void m1(void) { struct S1 s = {0}; }\nvoid m2(void) { struct S2 s = {0}; }\nvoid m3(void) { struct S3 s = {0}; }\n"
+        "void m4(void) { struct S4 s = {0}; }\nvoid m5(void) { struct S5 s = {0}; }\nvoid m6(void) { struct S6 s = {0}; }\n"
         "int g(int y) { if (y = 1) return 1; int w; return 0; }\n";
     snprintf(source, sizeof(source), "%s/statement-recovery-capped.c", directory);
     const bool capped_made = expected_lines != NULL && actual_lines != NULL && parse_test_write(source, capped, sizeof(capped) - 1);

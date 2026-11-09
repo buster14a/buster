@@ -66,6 +66,7 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_ARRAY_INCOMPLETE: result = "array has incomplete element type"; break;
         case CHECK_INPUT_ARRAY_TOO_LARGE: result = "array is too large"; break;
         case CHECK_INPUT_TYPE_SPECIFIER_MISSING: result = "type name requires a specifier or qualifier"; break;
+        case CHECK_INPUT_INVALID_USE: result = "use of an invalid declaration"; break;
         case CHECK_INPUT_TAG_INCOMPATIBLE: result = "type has incompatible definitions"; break;
         case CHECK_INPUT_UNDECLARED_CORRECTED: result = "use of undeclared identifier"; break;
         case CHECK_INPUT_UNDECLARED: result = "use of undeclared identifier"; break;
@@ -2260,9 +2261,10 @@ static uint32_t* check_driver_error_counts(const Parser* parser, const CheckInpu
     if (errors != NULL)
     {
         memset(errors, 0, ((uint64_t)count + 2) * sizeof(uint32_t));
+        // (An invalid declaration's quiet use is no error of its scope's, #1447: clang warns of its unused variables.)
         for (uint32_t i = 0; i < input->report_count; i += 1)
         {
-            errors[(input->reports[i].token < count ? input->reports[i].token : count) + 1] += 1;
+            errors[(input->reports[i].token < count ? input->reports[i].token : count) + 1] += input->reports[i].message != CHECK_INPUT_INVALID_USE;
         }
         for (uint32_t i = 0; i < stream->report_count; i += 1)
         {
@@ -2840,7 +2842,9 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
         {
             const uint32_t located = input->reports[i].sort != 0 ? input->reports[i].sort : input->reports[i].token;
             const uint32_t token = located < count ? located : count;
-            if (repair == NULL || check_repair_input_report(repair, input->reports + i) || check_repair_loop_report(repair, input, input->reports + i))
+            // An invalid declaration's use publishes nothing (#1447, CHECK_INPUT_INVALID_USE).
+            if (input->reports[i].message != CHECK_INPUT_INVALID_USE &&
+                (repair == NULL || check_repair_input_report(repair, input->reports + i) || check_repair_loop_report(repair, input, input->reports + i)))
             {
                 report_keys[report_total++] = (uint64_t)token << 32 | i;
             }
@@ -4891,9 +4895,10 @@ static bool check_driver_rejected_edit(CheckDriverEditor* editor, uint32_t token
 // token to its `;`, and the mask leaves out every body that names one of its names, which the reading would otherwise
 // find undeclared. False, leaving `edits` and `mask` as they were, where the error isn't in such a declaration (a function
 // definition's, a body's) or a file-scope declaration outside it names one of them: its round isn't ready, as before.
-// Only a rejected unit's rounds call it.
+// A use `quiet` marks, an invalid declaration's that the reader kept bound (CHECK_INPUT_INVALID_USE), is a known error
+// itself, its part left out, and counts as no naming here. Only a rejected unit's rounds call it.
 static bool check_driver_rejected_declaration(const Parser* parser, const CheckInput* input, const CBodyRange* ranges, uint32_t body_count, uint32_t token,
-                                              uint8_t* edits, uint8_t* mask)
+                                              const uint8_t* quiet, uint8_t* edits, uint8_t* mask)
 {
     const uint32_t count = parser->tokens.count;
     // The declaration: the error's outermost parent, a `;` at file scope.
@@ -4925,7 +4930,8 @@ static bool check_driver_rejected_declaration(const Parser* parser, const CheckI
         const bool declared = parser->tokens.kinds[at] == PARSE_KIND_IDENTIFIER && input->declarations[at] == at && name != 0;
         for (uint32_t use = 0; declared && valid && use < count; use += 1)
         {
-            const bool named = (use < low || use > top) && parser->tokens.kinds[use] == PARSE_KIND_IDENTIFIER && parser->tokens.names[use] == name;
+            const bool named = (use < low || use > top) && parser->tokens.kinds[use] == PARSE_KIND_IDENTIFIER && parser->tokens.names[use] == name &&
+                               (quiet == NULL || quiet[use] == 0);
             uint32_t first = 0;
             uint32_t last = body_count;
             while (named && first < last)
@@ -4951,7 +4957,7 @@ static bool check_driver_rejected_declaration(const Parser* parser, const CheckI
                 bool names = false;
                 for (uint32_t use = ranges[b].begin; !names && use < ranges[b].end; use += 1)
                 {
-                    names = parser->tokens.kinds[use] == PARSE_KIND_IDENTIFIER && parser->tokens.names[use] == name;
+                    names = parser->tokens.kinds[use] == PARSE_KIND_IDENTIFIER && parser->tokens.names[use] == name && (quiet == NULL || quiet[use] == 0);
                 }
                 if (names)
                 {
@@ -5005,7 +5011,7 @@ static CheckDriverRound check_driver_rejected_read(const Parser* unit, const Par
                                                    bool scalar, bool return_warning, CheckWarningSeverity return_baseline, CheckCommonShiftWarnings* shifts,
                                                    const CheckWarningEvents* first, const CheckWarningEvents* first_graph, uint32_t stop,
                                                    uint32_t publication_end, uint32_t* found, uint32_t found_capacity, uint32_t* found_count,
-                                                   Arena* arena, Arena* scratch)
+                                                   const uint8_t* quiet, Arena* arena, Arena* scratch)
 {
     CheckDriverRound round = CHECK_DRIVER_ROUND_FAILED;
     *found_count = 0;
@@ -5048,7 +5054,8 @@ static CheckDriverRound check_driver_rejected_read(const Parser* unit, const Par
             // A dropped part's error counts just before the token after it (#1447): in its own scope, a dropped
             // declaration's at file scope, and not in the definition that follows it.
             const bool dropped = edited && errors[e] < count && edits[errors[e]] != 0;
-            error_counts[(at < view_count ? at : view_count) + (dropped ? 0u : 1u)] += 1;
+            // (An invalid declaration's quiet use, 1 in `quiet`, is no error of its scope's, #1447, check_driver_error_counts.)
+            error_counts[(at < view_count ? at : view_count) + (dropped ? 0u : 1u)] += quiet == NULL || errors[e] >= count || quiet[errors[e]] != 1;
         }
         for (uint32_t t = 1; t < view_count + 2; t += 1)
         {
@@ -5332,6 +5339,35 @@ static void check_driver_rejected_common(const Parser* unit, const Parser* origi
             }
         }
     }
+    // The unit's invalid declarations (#1447, check_input_invalid_declare) and their uses (CHECK_INPUT_INVALID_USE): known
+    // errors, which count as no error of their scope's (clang warns of its unused variables), whose parts the readings leave
+    // out, as each other's. A body that names such a declaration there isn't left out whole for it
+    // (check_driver_rejected_declaration), and a redeclaration the first reading bound quietly after an invalid one, which
+    // would conflict where the view has left that out, is left out too. 1 at a use, 2 at a declaration's name; NULL in a
+    // unit without one.
+    uint8_t* quiet = NULL;
+    const uint32_t invalid_count = first_input->invalid_declarations != NULL ? first_input->invalid_count : 0;
+    for (uint32_t i = 0; valid && i < first_input->report_count + (invalid_count != 0 ? count : 0); i += 1)
+    {
+        const bool reported = i < first_input->report_count;
+        const uint32_t token = reported ? first_input->reports[i].token : i - first_input->report_count;
+        if (reported ? first_input->reports[i].message == CHECK_INPUT_INVALID_USE && token < count : first_input->invalid_declarations[token] != 0)
+        {
+            if (quiet == NULL)
+            {
+                quiet = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, count);
+                valid = quiet != NULL;
+                if (valid)
+                {
+                    memset(quiet, 0, count);
+                }
+            }
+            if (quiet != NULL)
+            {
+                quiet[token] = reported ? 1 : 2;
+            }
+        }
+    }
     CheckDriverEditor editor = {
         .parser = parser,
         .input = first_input,
@@ -5345,13 +5381,19 @@ static void check_driver_rejected_common(const Parser* unit, const Parser* origi
     };
     // The bodies of every error, the mask where the view can't be made; and whether each error has one.
     uint8_t* bodies = valid ? BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, (uint64_t)count + 1) : NULL;
-    // The unit's known errors: the first reading's, then each round's new ones, at most one per token.
-    const uint64_t known_capacity = (uint64_t)error_count + count + 1;
+    // The unit's known errors: the first reading's, its invalid declarations, then each round's new ones, at most one per
+    // token.
+    const uint64_t known_capacity = (uint64_t)error_count + invalid_count + count + 1;
     uint32_t* known = valid && bodies != NULL && known_capacity <= UINT32_MAX ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, known_capacity) : NULL;
     uint32_t known_count = error_count;
     if (known != NULL)
     {
         memcpy(known, errors, (uint64_t)error_count * sizeof(uint32_t));
+        for (uint32_t token = 0; invalid_count != 0 && token < count; token += 1)
+        {
+            known[known_count] = token;
+            known_count += first_input->invalid_declarations[token] != 0 && known_count < error_count + invalid_count;
+        }
     }
     // Rounds (#1447): a reading that finds errors of its own publishes them, and the next leaves their parts out too, so
     // that each round adds parts left out, up to BUSTER_CHECK_DRIVER_REJECTED_ROUNDS readings; past them, or where a reading
@@ -5368,7 +5410,7 @@ static void check_driver_rejected_common(const Parser* unit, const Parser* origi
         for (uint32_t e = 0; ready && e < known_count; e += 1)
         {
             const bool kept = known[e] < count && (check_driver_rejected_edit(&editor, known[e]) ||
-                                                   check_driver_rejected_declaration(parser, first_input, ranges, body_count, known[e], edits, mask));
+                                                   check_driver_rejected_declaration(parser, first_input, ranges, body_count, known[e], quiet, edits, mask));
             edited |= kept;
             // The body whose tokens hold the error: the last one to begin at or before it.
             const uint32_t token = known[e];
@@ -5402,14 +5444,14 @@ static void check_driver_rejected_common(const Parser* unit, const Parser* origi
         const uint32_t fresh_capacity = (uint32_t)(known_capacity - known_count);
         round = ready && edited ? check_driver_rejected_read(unit, original, pp, known, known_count, ranges, body_count, bodies, mask, edits, scalar, return_warning,
                                                              return_baseline, shifts, first, first_graph, stop, publication_end, fresh, fresh_capacity, &added,
-                                                             arena, scratch) :
+                                                             quiet, arena, scratch) :
                                   CHECK_DRIVER_ROUND_FAILED;
         uint8_t* fallback = !edited ? mask : bodied_all ? bodies : NULL;
         if (ready && round == CHECK_DRIVER_ROUND_FAILED && fallback != NULL && check_lazy_mask_valid(unit, fallback))
         {
             round = check_driver_rejected_read(unit, original, pp, known, known_count, ranges, body_count, bodies, fallback, NULL, scalar, return_warning,
-                                               return_baseline, shifts, first, first_graph, stop, publication_end, fresh, fresh_capacity, &added, arena,
-                                               scratch);
+                                               return_baseline, shifts, first, first_graph, stop, publication_end, fresh, fresh_capacity, &added, quiet,
+                                               arena, scratch);
         }
         known_count += added;
     }

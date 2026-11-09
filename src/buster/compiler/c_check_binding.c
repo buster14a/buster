@@ -461,11 +461,32 @@ static bool check_input_binding_answers(CheckInputReader* reader, const uint32_t
     {
         check_input_binding_answer(reader, resolved, uses != NULL ? uses[at] : at);
     }
+    // A use of an invalid declaration (#1447, check_input_invalid_declare) names none, as an undeclared one doesn't, and
+    // its report is quiet: only a unit with one pays for the pass.
+    for (uint32_t at = 0; valid && !deferred && reader->output->invalid_count != 0 && at < use_count; at += 1)
+    {
+        const uint32_t event = uses != NULL ? uses[at] : at;
+        const uint32_t token = events->declaration[event];
+        const uint32_t declaration = events->operation[event] == C_BINDING_USE && token < count ? output->declarations[token] : BUSTER_CHECK_NONE;
+        if (declaration < count && reader->output->invalid_declarations[declaration] != 0)
+        {
+            output->declarations[token] = BUSTER_CHECK_NONE;
+            reader->declared_types[token] = 0;
+            check_input_report(reader, token, CHECK_INPUT_INVALID_USE);
+        }
+    }
     valid &= !output->resource;
     const bool unused_columns = check_sparse_present(output->body_declarations) && check_sparse_present(output->parameters) &&
                                 check_sparse_present(output->parameter_next) && check_sparse_present(output->declaration_bodies) &&
                                 output->declaration_kinds != NULL && output->declaration_bits != NULL;
-    if (valid && unused_columns && output->report_count == 0 && events->count != 0)
+    // (A unit whose only reports are quiet uses of invalid declarations, #1447, has its unused declarations' warnings as a
+    // valid one does: clang gives them, and its uses mark their declarations used.)
+    bool quiet_only = true;
+    for (uint32_t r = 0; quiet_only && r < output->report_count; r += 1)
+    {
+        quiet_only = output->reports[r].message == CHECK_INPUT_INVALID_USE;
+    }
+    if (valid && unused_columns && quiet_only && events->count != 0)
     {
         uint8_t* used = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint8_t, events->count);
         uint8_t* used_tokens = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint8_t, count);
