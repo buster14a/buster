@@ -119,7 +119,7 @@
 #include <elf.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_X86
 // Random streams: every count below BUSTER_X86_TEST_SHORT_COUNTS, then this many instructions at once.
 #define BUSTER_X86_TEST_SHORT_COUNTS 200
 #define BUSTER_X86_TEST_DEFAULT_COUNT 300000
@@ -146,7 +146,7 @@
 #define BUSTER_X86_TEST_INVALID_INSTRUCTIONS 20000
 // Instructions longer than 15 bytes of each kind, in 16- and 32-bit modes (x86_check_overlong).
 #define BUSTER_X86_TEST_OVERLONG_INSTRUCTIONS 4096
-
+#endif
 // ---------------------------------------------------------------------------------------------------------------------
 // Random instructions
 
@@ -283,7 +283,7 @@ static int64_t x86_test_encode_scalar(const X86Instruction* instructions, uint64
            : x86_test_mode == X86_ENCODER_MODE_16      ? x86_encode_scalar_16(instructions, count, output, capacity, offsets, fixup_ends)
                                                        : x86_encode_scalar(instructions, count, output, capacity, offsets, fixup_ends);
 }
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_X86
 static int64_t x86_test_encode(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint64_t capacity, uint32_t* offsets, uint32_t* fixup_ends)
 {
     return x86_test_mode == X86_ENCODER_MODE_ADDRESS32 ? x86_encode_address32(instructions, count, output, capacity, offsets, fixup_ends)
@@ -311,7 +311,7 @@ static uint64_t x86_test_validate(const X86Instruction* instructions, uint64_t c
            : x86_test_mode == X86_ENCODER_MODE_16      ? x86_validate_16(instructions, count)
                                                        : x86_validate(instructions, count);
 }
-
+#endif
 static bool x86_test_instruction_is_valid(const X86Instruction* instruction)
 {
     return x86_test_mode == X86_ENCODER_MODE_ADDRESS32 ? x86_instruction_is_valid_address32(instruction)
@@ -320,7 +320,7 @@ static bool x86_test_instruction_is_valid(const X86Instruction* instruction)
            : x86_test_mode == X86_ENCODER_MODE_16      ? x86_instruction_is_valid_16(instruction)
                                                        : x86_instruction_is_valid(instruction);
 }
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_X86
 // The mode's words in the checks' lines: none for x86_encode's, or the addresses, registers or mode.
 static const char* x86_test_mode_words(void)
 {
@@ -330,7 +330,7 @@ static const char* x86_test_mode_words(void)
            : x86_test_mode == X86_ENCODER_MODE_16      ? " in 16-bit mode"
                                                        : "";
 }
-
+#endif
 // Whether the instruction's memory operand, or the addresses it makes itself, are 16-bit: in 16-bit mode, and in 32-bit
 // mode with BUSTER_X86_MODE_ADDRESS_SIZE.
 static bool x86_test_address16(const X86Instruction* instruction)
@@ -794,7 +794,7 @@ static uint16_t x86_random_form(uint64_t* state, bool with_none)
     }
     return result;
 }
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_X86
 static void x86_random_instructions(uint64_t* state, X86Instruction* instructions, uint64_t count, bool with_none, bool for_assembler)
 {
     for (uint64_t i = 0; i < count; i += 1)
@@ -822,11 +822,11 @@ static uint64_t x86_count_marked(const X86Instruction* instructions, uint64_t co
     }
     return result;
 }
-
+#endif
 // The fields of an instruction that --print-assembly prints as symbols (a bit per X86FixupField).
 #define BUSTER_X86_TEST_SYMBOLIC_DISPLACEMENT (1u << X86_FIXUP_DISPLACEMENT)
 #define BUSTER_X86_TEST_SYMBOLIC_IMMEDIATE (1u << X86_FIXUP_IMMEDIATE)
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_X86
 // Whether the instruction's memory operand has a full displacement field, 32-bit or with a 16-bit address 16-bit:
 // always without a base, and after one unless the displacement is zero (but after RBP or R13, or BP alone) or a
 // multiple of the form's N whose quotient fits in 8 bits (modulo 2^16 with a 16-bit address).
@@ -884,7 +884,7 @@ static void x86_mark_symbolic(uint64_t seed, X86Instruction* instructions, uint6
         instructions[i].form |= chosen != 0 ? BUSTER_X86_FORM_FIXUP : 0;
     }
 }
-
+#endif
 // ---------------------------------------------------------------------------------------------------------------------
 // Printing, in GNU as Intel syntax
 
@@ -1367,7 +1367,7 @@ static void x86_print_instruction(FILE* file, const X86Instruction* instruction,
         }
     }
 }
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_X86
 static void x86_print_bytes(const uint8_t* bytes, uint64_t length)
 {
     for (uint64_t i = 0; i < length; i += 1)
@@ -3469,7 +3469,8 @@ static bool x86_check_known(void)
            (unsigned long)vectorized);
     return scalar == 0 && vectorized == 0;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_X86
 // Instructions that x86_validate_apx and x86_encode_scalar_apx must reject, as GNU as does: the XSAVE
 // family with a base or index from 16 to 31 (REX2 is #UD with it), a high byte register with REX2, XMM16 to XMM31 in
 // SSE's forms (which only EVEX has), and registers 16 to 31 in VEX forms that have no EVEX one.
@@ -3724,9 +3725,9 @@ static bool x86_check_digest(X86Instruction* instructions, uint8_t* output)
            (long long)length, (unsigned long long)digest, result ? "matches the one GNU as checked" : "DIFFERENT FROM THE ONE GNU AS CHECKED");
     return result;
 }
-
+#endif
 typedef int64_t X86EncodeFunction(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint32_t* offsets, uint32_t* fixup_ends);
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_X86
 typedef struct X86Variant X86Variant;
 struct X86Variant
 {
@@ -3941,7 +3942,7 @@ static void x86_test_report_fault(int signal_number)
     }
     _exit(1);
 }
-
+#endif
 // Maps `bytes` rounded up to whole pages between two PROT_NONE pages, and returns the end of the readable part.
 static uint8_t* x86_map_guarded(uint64_t bytes, uint64_t page, uint64_t* mapped_bytes)
 {
@@ -3956,7 +3957,7 @@ static uint8_t* x86_map_guarded(uint64_t bytes, uint64_t page, uint64_t* mapped_
     }
     return result;
 }
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_X86
 static bool x86_check_page_edges(uint64_t* state, X86Instruction* scratch, X86Buffers* buffers)
 {
     const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
@@ -5301,7 +5302,7 @@ static bool x86_print_assembly(uint64_t seed, uint64_t* state, uint64_t count, X
     }
     return true;
 }
-
+#endif
 // The bytes of a file, or null (malloc'd; the caller frees them).
 static uint8_t* x86_read_file(const char* path, uint64_t* length)
 {
@@ -5358,7 +5359,7 @@ static const uint8_t* x86_elf_section(const uint8_t* file, uint64_t length, uint
     }
     return result;
 }
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_X86
 // A relocation as the ELF object has it: the offset in .text, the type (R_X86_64_*), the addend and the symbol's name;
 // and for an expected one, its instruction's index.
 typedef struct X86Relocation X86Relocation;
@@ -5794,3 +5795,4 @@ static int run_x86_encoder_tests(int argc, char** argv)
     free(buffers.fixup_ends);
     return result;
 }
+#endif

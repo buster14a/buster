@@ -323,6 +323,16 @@ static void check_standalone_preprocessing(void)
         { "src/buster/compiler/c_preprocessor_oracle.c", "run_preprocessor_tests(" },
         { "src/buster/compiler/c_parser_test.c", "run_parser_tests(" },
         { "src/buster/compiler/debug_benchmark.c", "run_debug_benchmark(" },
+        { "src/buster/compiler/c_builtin_test.c", "run_builtin_tests(" },
+        { "src/buster/compiler/c_environment_test.c", "run_c_environment_tests(" },
+        { "src/buster/compiler/c_types_test.c", "run_type_tests(" },
+        { "src/buster/compiler/calling_convention_test.c", "run_calling_convention_tests(" },
+        { "src/buster/compiler/lane_test.c", "run_lane_tests(" },
+        { "src/buster/compiler/c_testsuite.c", "run_c_testsuite_tests(" },
+        { "src/buster/compiler/branch_sizing_test.c", "run_branch_sizing_tests(" },
+        { "src/buster/compiler/x86_64_encoder_test.c", "run_x86_encoder_tests(" },
+        { "src/buster/compiler/x86_intrinsics_test.c", "run_x86_intrinsic_tests(" },
+        { "src/buster/compiler/x86_semantics_test.c", "run_x86_semantics_tests(" },
         { "src/buster/compiler/foreign_test.c", "run_foreign_tests(" },
         { "src/buster/compiler/tier0_test.c", "run_tier0_tests(" },
         { "src/buster/compiler/tier1_select_source_benchmark.c", "run_tier1_select_source_benchmark(" },
@@ -876,10 +886,9 @@ static const OwnershipException ownership_exceptions[] = {
     { "c_preprocessor_history_test.c", "main_unit_frontend.c main_unit_checker.c" },
     { "foreign_test.c", "main_unit_executable.c main_unit_checker.c" },
     { "ir_source_test.c", 0 },
-    { "tier1_select_test.c", 0 },
-    { "tier1_select_burs_test.c", 0 },
-    { "tier1_select_source_benchmark.c", 0 },
-    { "tier0_test.c", 0 },
+    { "tier1_select_test.c", "main_unit_backend.c main_unit_checker.c" },
+    { "tier1_select_burs_test.c", "main_unit_backend.c main_unit_checker.c" },
+    { "tier1_select_source_benchmark.c", "main_unit_backend.c main_unit_checker.c" },
     // These roots preserve the first inclusion of production optimizer code while guarding their private bodies.
     { "ir_if_convert_test.c", 0 },
     { "ir_optimize_test.c", 0 },
@@ -888,14 +897,12 @@ static const OwnershipException ownership_exceptions[] = {
     // Remaining legacy sharing, to narrow as each family's outward helper references are isolated. These rows do
     // not endorse parsing private fixtures everywhere; exact paths keep that existing debt from silently growing.
     { "bind_test.c", 0 },
-    { "branch_sizing_test.c", 0 },
-    { "c_builtin_test.c", 0 },
-    { "c_environment_test.c", 0 },
-    { "c_lexer_test.c", 0 },
-    { "c_types_deferred_test.c", 0 },
-    { "c_types_lookup_test.c", 0 },
-    { "c_types_test.c", 0 },
-    { "calling_convention_test.c", 0 },
+    // A process runner for semantics checks, integer oracles for builtin actions, and checker/type fixture builders.
+    { "branch_sizing_test.c", "main.c main_unit_x86.c" },
+    { "c_builtin_test.c", "main_unit_types.c main_unit_check_builtins.c" },
+    { "c_environment_test.c", "main_unit_frontend.c main_unit_checker.c" },
+    { "c_types_test.c", "main_unit_types.c main_unit_frontend.c main_unit_backend.c main_unit_checker.c" },
+    { "calling_convention_test.c", "main_unit_types.c main_unit_checker.c" },
     // The backend unwind benchmark uses the clock; only LINK reads the private benchmark body.
     { "debug_benchmark.c", "main_unit_backend.c main_unit_link.c" },
     { "debug_executable_test.c", 0 },
@@ -906,7 +913,8 @@ static const OwnershipException ownership_exceptions[] = {
     { "executable_symbols_test.c", 0 },
     { "executable_test.c", 0 },
     { "import_test.c", 0 },
-    { "lane_test.c", 0 },
+    // CPU topology readers serve the driver, checker lane tests and foreign driver tests; VM readers serve the first two.
+    { "lane_test.c", "main.c main_unit_checker.c main_unit_executable.c" },
     { "link_order_test.c", 0 },
     { "link_test.c", 0 },
     { "object_debug_test.c", 0 },
@@ -920,8 +928,6 @@ static const OwnershipException ownership_exceptions[] = {
     // The checker AMX fixtures share object reading and instruction decoding with the intrinsic tests.
     { "x86_intrinsics_test.c", "main_unit_checker.c main_unit_x86.c" },
     { "x86_semantics_test.c", 0 },
-    { "x86_zen5_measure.c", 0 },
-    { "x86_zen5_test.c", 0 },
 };
 
 static void check_ownership(const char* directory, const char* config)
@@ -1368,7 +1374,7 @@ static void check_incremental(void)
         { "src/buster/compiler/tier1_address_coalesce_test.c", "main_unit_backend.c " },
         { "src/buster/compiler/ir_if_convert.c", shared_main_units },
         { "src/buster/compiler/ir_optimize_verified.c", shared_main_units },
-        { "src/buster/compiler/tier1_select_burs_test.c", shared_main_units },
+        { "src/buster/compiler/tier1_select_burs_test.c", "main_unit_backend.c main_unit_checker.c " },
         { "src/buster/compiler/preprocessor_fuzz_generate.c", "main_unit_frontend.c " },
         { "src/buster/compiler/c_preprocessor_directives_test.c", "main_unit_frontend.c " },
         { "src/buster/compiler/c_predefines_test.c", "main_unit_frontend.c " },
@@ -1392,7 +1398,7 @@ static void check_incremental(void)
         { "src/buster/compiler/tier0_vector_baseline_test.inc", "main_unit_backend.c " },
         { "src/buster/compiler/tier0_mask_test.c", "main_unit_backend.c " },
         { "src/buster/compiler/streaming_benchmark_test.c", "main_unit_backend.c " },
-        { "src/buster/compiler/tier0_test.c", shared_main_units },
+        { "src/buster/compiler/tier0_test.c", "main_unit_backend.c " },
         { "src/buster/compiler/diagnostic_test.c", "main.c " },
         { "src/buster/compiler/dataflow_test.c", "main.c " },
         { "src/buster/compiler/oracle_cache_test.c", "main.c " },
@@ -1409,6 +1415,13 @@ static void check_incremental(void)
         { "src/buster/compiler/tier0_benchmark_measure.c", "main_unit_backend.c main_unit_checker.c " },
         { "src/buster/compiler/x86_intrinsics_test.c", "main_unit_checker.c main_unit_x86.c " },
         { "src/buster/compiler/c_check_tier1_rows_fixture.h", "main.c main_unit_checker.c " },
+        { "src/buster/compiler/calling_convention_test_limits.h", "main_unit_backend.c main_unit_checker.c main_unit_types.c " },
+        { "src/buster/compiler/c_types_deferred_test.c", "main_unit_types.c " },
+        { "src/buster/compiler/c_types_lookup_test.c", "main_unit_types.c " },
+        { "src/buster/compiler/c_testsuite.c", "main.c main_unit_backend.c " },
+        { "src/buster/compiler/c_lexer_test.c", "main.c " },
+        { "src/buster/compiler/lane_test.c", "main.c main_unit_checker.c main_unit_executable.c " },
+        { "src/buster/compiler/branch_sizing_test.c", "main.c main_unit_x86.c " },
     };
     for (uint32_t i = 0; i < sizeof(files) / sizeof(files[0]); i += 1)
     {

@@ -349,6 +349,27 @@ owner. Intrinsic object-reading helpers remain available to the checker's AMX
 fixtures and X86. Standalone benchmark translation units retain their own
 includes and dependency sets.
 
+The type fixtures keep table allocation available to TYPES, FRONTEND, BACKEND
+and CHECKER, with the generated-world helpers restricted to TYPES and CHECKER.
+Their private type tests, including the deferred and lookup suites, belong to
+TYPES. The ABI root similarly shares only its generated-world builder with
+CHECKER; `calling_convention_test_limits.h` supplies its three contract bounds
+to the backend without including that fixture root. Integer builtin oracles
+serve TYPES and CHECK_BUILTINS; environment jobs serve FRONTEND and CHECKER.
+Lane topology helpers serve DRIVER, CHECKER and EXECUTABLE, while the VM helpers
+serve DRIVER and CHECKER alone. Private bodies retain complete standalone
+preprocessing.
+
+X86 owns the encoder and intrinsic fixtures, with their printing, generation
+and object-reading helpers retained for other families. The branch-sizing
+root shares its process runner with DRIVER. The semantics root deliberately
+keeps six `used` globals in every unity object at their original positions;
+its form names also serve BACKEND, and only DRIVER reads the fixture bodies.
+The lexer and Tier 0 roots now belong wholly to DRIVER and BACKEND respectively.
+The BURS and source-corpus helper roots have exactly BACKEND and CHECKER as
+consumers. The c-testsuite command's fixtures belong to DRIVER; BACKEND shares
+only its process/file helpers for the SSA source tests.
+
 The test commands, their owning units and compiler optimization flags stay the
 same. Shared fixtures, including the checker's common helpers and
 `oracle_cache_test.c`, retain their callers and the references that keep shared
