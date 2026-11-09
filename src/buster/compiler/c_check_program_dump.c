@@ -105,7 +105,8 @@ static uint32_t check_lower_dump_string(CheckLowerDumpBuilder* builder, const ch
         builder->strings = table != NULL ? table : builder->strings;
         builder->string_room = table != NULL ? room : builder->string_room;
     }
-    uint32_t slot = builder->refusal == NULL ? check_lower_dump_hash((const uint8_t*)bytes, length) & (builder->string_room - 1) : 0;
+    // The hash of the bytes before the first NUL, as the table's growth finds a stored string's (strlen).
+    uint32_t slot = builder->refusal == NULL ? check_lower_dump_hash((const uint8_t*)bytes, strnlen(bytes, length)) & (builder->string_room - 1) : 0;
     while (builder->refusal == NULL && result == UINT32_MAX && builder->strings[slot] != 0)
     {
         const uint32_t offset = builder->strings[slot] - 1;
