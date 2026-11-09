@@ -3004,6 +3004,71 @@ static void check_test_driver_tier1_asm(CheckTest* test, const char* clang, cons
     unlink(reference);
 }
 
+// The asm bodies' opmask fixture (#1839): two masks live across a template that writes k1 to k7, its clobbers, in a
+// function Tier 1 compiles. Tier 1's CFG consumer saves no mask value around an asm body, so such a template keeps its
+// helper (check_asm_names_opmask), whose call saves them; the masks then pick the lanes the sum adds.
+static const char check_test_tier1_asm_masks_source[] =
+    "#include <immintrin.h>\n"
+    "#include <stdio.h>\n"
+    "__attribute__((noinline)) int tier1_kept(const int* p, int x)\n"
+    "{\n"
+    "    __m512i v = _mm512_loadu_si512(p);\n"
+    "    __mmask16 m = _mm512_cmpgt_epi32_mask(v, _mm512_set1_epi32(x));\n"
+    "    __mmask16 n = _mm512_cmplt_epi32_mask(v, _mm512_set1_epi32(x + 6));\n"
+    "    __asm__ volatile(\"xorl %%eax, %%eax\\n\\tkmovw %%eax, %%k1\\n\\tkmovw %%eax, %%k2\\n\\tkmovw %%eax, %%k3\\n\\tkmovw %%eax, %%k4\\n\\t\"\n"
+    "                     \"kmovw %%eax, %%k5\\n\\tkmovw %%eax, %%k6\\n\\tkmovw %%eax, %%k7\"\n"
+    "                     ::: \"eax\", \"k1\", \"k2\", \"k3\", \"k4\", \"k5\", \"k6\", \"k7\");\n"
+    "    return _mm512_mask_reduce_add_epi32(m & n, v) + __builtin_popcount(m) * 100 + __builtin_popcount(n) * 10000;\n"
+    "}\n"
+    "int main(void)\n"
+    "{\n"
+    "    int a[16];\n"
+    "    for (int i = 0; i < 16; i += 1)\n"
+    "    {\n"
+    "        a[i] = i * 3 - 7;\n"
+    "    }\n"
+    "    printf(\"kept %d %d\\n\", tier1_kept(a, 2), tier1_kept(a, -5));\n"
+    "    return 0;\n"
+    "}\n";
+
+// The opmask fixture above by --tier1 --verify for x86-64-v4, by each path, with and without rematerialization: it
+// compiles, tier1_kept Tier 1's, and where the host has AVX-512 F, BW, DQ and VL prints clang -O0's build's output.
+static void check_test_driver_tier1_asm_masks(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    char unit[512];
+    char reference[512];
+    snprintf(unit, sizeof(unit), "%s/tier1-asm-masks.c", directory);
+    snprintf(reference, sizeof(reference), "%s/tier1-asm-masks-clang", directory);
+    const bool written = parse_test_write(unit, check_test_tier1_asm_masks_source, sizeof(check_test_tier1_asm_masks_source) - 1);
+    char* reference_arguments[] = { (char*)clang, "-O0", "-w", "-march=x86-64-v4", "-o", reference, unit, NULL };
+    char* text = NULL;
+    const bool referenced = written && check_test_driver_spawn(reference_arguments, &text) == 0;
+    free(text);
+    check_test_expect(test, referenced, "clang builds the asm bodies' opmask fixture");
+    const uint64_t needed = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512BW) | BUSTER_X86_FEATURE(AVX512DQ) | BUSTER_X86_FEATURE(AVX512VL);
+    const bool host = (x86_target_native().features & needed) == needed;
+    char expected[256] = { 0 };
+    const bool ran = referenced && host && check_test_driver_capture(reference, expected, sizeof(expected)) && expected[0] != 0;
+    check_test_expect(test, !host || ran, "clang's build of the asm bodies' opmask fixture runs");
+    for (uint32_t rematerialize = 0; referenced && rematerialize < 2; rematerialize += 1)
+    {
+        for (uint32_t path = 0; path < 2; path += 1)
+        {
+            char program[512];
+            snprintf(program, sizeof(program), "%s/tier1-asm-masks-%u-%u", directory, rematerialize, path);
+            CheckTestTier1Build build;
+            const bool compiled = check_test_tier1_build(executable, unit, "tier1_kept", program, rematerialize != 0, path != 0, false, false, "-march=x86-64-v4", &build);
+            check_test_expect(test, compiled, "the asm bodies' opmask fixture compiles by --tier1, tier1_kept Tier 1's");
+            char actual[256] = { 0 };
+            check_test_expect(test, !host || (compiled && check_test_driver_capture(program, actual, sizeof(actual)) && strcmp(actual, expected) == 0),
+                              "Tier 1 keeps the masks live across a template that writes k1 to k7, as clang -O0's build does");
+            unlink(program);
+        }
+    }
+    unlink(unit);
+    unlink(reference);
+}
+
 // A fixture of two units sharing a header, `name`.h (#789, #141): its unit by --tier1 -c, by each path with and without
 // rematerialization, every function Tier 1's, linked with its other unit compiled by clang -O2, prints what clang -O0's
 // build of both prints; and both units by --tier1, every function of both Tier 1's, print it too. `what` names it in the

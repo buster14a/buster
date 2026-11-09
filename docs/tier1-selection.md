@@ -1405,6 +1405,21 @@ instruction whatever `-march` says). The code's certificate leaves a function wi
 a body uncertified (`asm`), as it leaves the x87's: the decoding doesn't follow a
 template's registers and branches; the allocation's certificate still covers it.
 
+Registers outside `touched` hold no value across the node: the allocator gives
+values xmm0 to xmm14 alone (xmm15 is the vector class's scratch within a node,
+zmm16 and on a row's or a call's staging within a node), and the x87 stack is
+empty after every node (`tier1_emit_cfg_x87`), so a template may use all eight
+of its slots. Nothing saves a mask value around a body, so in a lowering for
+Tier 1 a template whose records name k0 to k7 keeps its helper
+(`check_asm_names_opmask`), whose call saves the masks.
+
+Some bodies keep their function on Tier 0, which then compiles it whole:
+
+- a template that returns from its function (`IrAsmBody` from
+  `Tier0AsmBody.leaves`, which `ir_lower` refuses), whose frame is Tier 0's;
+- a body `tier1_select_asm_supported` refuses: a block that isn't a
+  `stack_addr`, or a template that touches rsp, rbp or r15.
+
 ## Tests and benchmark
 
 `test-tier1-select` checks identical scalar/vector costed plans and emitted
