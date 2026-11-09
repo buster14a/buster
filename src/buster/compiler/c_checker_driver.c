@@ -5448,8 +5448,10 @@ static void check_driver_rejected_common(const Parser* unit, const Parser* origi
         memcpy(known, errors, (uint64_t)error_count * sizeof(uint32_t));
         for (uint32_t token = 0; invalid_count != 0 && token < count; token += 1)
         {
-            known[known_count] = token;
-            known_count += first_input->invalid_declarations[token] != 0 && known_count < error_count + invalid_count;
+            if (first_input->invalid_declarations[token] != 0 && known_count < error_count + invalid_count)
+            {
+                known[known_count++] = token;
+            }
         }
     }
     // Rounds (#1447): a reading that finds errors of its own publishes them, and the next leaves their parts out too, so

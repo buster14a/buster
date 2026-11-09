@@ -742,6 +742,11 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "int a[-1]; int a[2]; float a;\nstruct S s1; int s1; float s1;\nstatic void v; int v;\nint f(void)[3]; int f(void); float f(int);\n"
         "int u(void) { return f(1, 2); }\nint y(void) { int unused; return 0; }\n",
         "int f(void)[3]; int f(void); float f(int);\nint u(void) { return f(1, 2); }\nint y(void) { int unused; return 0; }\n",
+        // Another kind of entity's redeclaration after an invalid one is still clang's "redefinition of 'a' as different
+        // kind of symbol" (review on #1884): an object after a function, a function after an object, and a typedef after
+        // either.
+        "int a[-1];\nint a(void);\nint f(void)[3];\nint f;\nstruct S;\nstruct S s;\nvoid s(void);\nint g(void) { int unused; return a + f; }\n",
+        "static void v;\nint v(void);\nint w(void)[2];\ntypedef int w;\nint b[-1];\ntypedef int b;\nint h(void) { int unused; return 0; }\n",
         // A tag defined again in its scope, whose body becomes an anonymous tag's: later uses of the name find the first
         // definition, and the second's enumerators are still declared (a repeated one with its own note).
         "struct S { int a; };\nstruct S { long b; };\nunion U { int a; };\nunion U { char c; } u2;\n"

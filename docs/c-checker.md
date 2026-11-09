@@ -3942,7 +3942,9 @@ in a declaration's own declarator (not a typedef's, a parameter's, a deduced
   function's redeclaration is invalid too, and an object's is checked as if
   nothing were visible, but for its linkage: `static void v; int v;` gives
   "non-static declaration of 'v' follows static declaration", and that one is
-  invalid too.
+  invalid too. Another kind of entity's (`int a[-1]; int a(void);`, a typedef
+  after either) is checked against it as against any other, clang's
+  "redefinition of 'a' as different kind of symbol".
 - **Its uses are quiet.** `check_input_binding_answers` gives each use of an
   invalid declaration no declaration and the silent report
   `CHECK_INPUT_INVALID_USE`, which recovers as an undeclared name's does

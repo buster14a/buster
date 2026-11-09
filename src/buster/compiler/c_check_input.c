@@ -319,11 +319,6 @@ typedef enum CheckInputMessage
     // 2 a type name's or a member's "type name requires a specifier or qualifier", 3 a C23 parameter's name's "unknown type
     // name 'a'".
     CHECK_INPUT_TYPE_SPECIFIER_MISSING,
-    // A use of an invalid declaration (#1447, check_input_invalid_declare), at its name: no diagnostic of its own, as
-    // clang's RecoveryExpr has none, but the uses' and their enclosing expressions' are left out as an undeclared name's
-    // are (CHECK_INPUT_UNDECLARED's completion, check_input_diagnostic_recover). The driver publishes nothing for it and
-    // counts it as no error (check_driver_quiet_report).
-    CHECK_INPUT_INVALID_USE,
     // A declarator's constant's error in clang's words (#1447, check_input_constant_failure_report): a missing member, a
     // member access's base, `sizeof` of an incomplete type, a call's argument count, a binary operator's operands or
     // pointer arithmetic on an incomplete pointee, as CHECK_INPUT_ATTRIBUTE_ARGUMENT's (its CheckAttributeArgumentError in
@@ -337,6 +332,12 @@ typedef enum CheckInputMessage
     CHECK_INPUT_VLA_EXTERN,
     CHECK_INPUT_VM_EXTERN,
     CHECK_INPUT_VLA_FIELD,
+
+    // A use of an invalid declaration (#1447, check_input_invalid_declare), at its name: no diagnostic of its own, as
+    // clang's RecoveryExpr has none, but the uses' and their enclosing expressions' are left out as an undeclared name's
+    // are (CHECK_INPUT_UNDECLARED's completion, check_input_diagnostic_recover). The driver publishes nothing for it and
+    // counts it as no error of its scope (check_driver_error_counts).
+    CHECK_INPUT_INVALID_USE,
 } CheckInputMessage;
 
 // CHECK_INPUT_DIRECT_INITIALIZER_ARRAY's detail: the literal the element takes besides a list, in clang's words.
@@ -10637,7 +10638,11 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
     const uint32_t name = reader->parser->tokens.names[token];
     const uint32_t old = check_input_library_binding(reader, name, point);
     const uint32_t old_declaration = old != 0 ? reader->bindings.declaration[old - 1] : BUSTER_CHECK_NONE;
-    const bool old_invalid = reader->output->invalid_declarations != NULL && old_declaration < reader->parser->tokens.count && reader->output->invalid_declarations[old_declaration] != 0;
+    const bool visible_invalid = reader->output->invalid_declarations != NULL && old_declaration < reader->parser->tokens.count &&
+                                 reader->output->invalid_declarations[old_declaration] != 0;
+    // Another kind of entity's redeclaration is still clang's "redefinition of 'X' as different kind of symbol", which
+    // MergeFunctionDecl and MergeVarDecl give before they look at the earlier one's invalidity: checked as any other is.
+    const bool old_invalid = visible_invalid && reader->declaration_kinds[old_declaration] == reader->declaration_kinds[token];
     if (__builtin_expect(old_invalid && reader->declaration_kinds[token] == C_BINDING_FUNCTION, 0))
     {
         check_input_invalid_declare(reader, token);
