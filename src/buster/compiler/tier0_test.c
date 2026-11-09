@@ -4129,7 +4129,7 @@ static uint32_t tier0_test_segment_cases(Tier0TestSegmentCase* cases)
 static void tier0_test_segments(Tier0TestTally* tally)
 {
     Arena arena = arena_reserve(1ull << 26);
-    // Validation: an override on a CONST, and the segment 3 on a LOAD.
+    // Validation: a CONST's top bits are its own, not an override (a negative constant's); the segment 3 on a LOAD is none.
     {
         static const uint8_t kinds[3] = { BUSTER_TYPED_CONST, BUSTER_TYPED_LOAD, BUSTER_TYPED_RETURN };
         static const uint8_t classes[3] = { BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I32 };
@@ -4147,8 +4147,8 @@ static void tier0_test_segments(Tier0TestTally* tally)
         const Tier0Check three = tier0_validate(&function);
         values[1] = (uint64_t)BUSTER_TYPED_SEGMENT_GS << BUSTER_TYPED_ACCESS_SEGMENT_SHIFT;
         const Tier0Check gs = tier0_validate(&function);
-        tier0_test_expect(tally, constant.error == TIER0_ERROR_INVALID && three.error == TIER0_ERROR_INVALID && gs.error == TIER0_OK, "segments",
-                          "tier0_validate: an override on a CONST %d, the segment 3 %d, GS on a LOAD %d", constant.error, three.error, gs.error);
+        tier0_test_expect(tally, constant.error == TIER0_OK && three.error == TIER0_ERROR_INVALID && gs.error == TIER0_OK, "segments",
+                          "tier0_validate: a CONST's top bits %d, the segment 3 %d, GS on a LOAD %d", constant.error, three.error, gs.error);
     }
     Tier0TestSegmentCase cases[BUSTER_TIER0_TEST_SEGMENT_CASES];
     const uint32_t count = tier0_test_segment_cases(cases);

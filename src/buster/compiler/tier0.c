@@ -313,7 +313,8 @@
 // A LOAD's, STORE's or SET's segment override (#1447), in its value's top two bits past what each class's value holds
 // (an atomic marker and its order, a vector's or a mask's bytes): FS (clang's address space 257, __seg_fs) or GS (256,
 // __seg_gs), numbered as the encoder's overrides are (form + segment * X86_FORM_COUNT is the form with the override). A
-// function with one says so (Tier0Function.segments); no other kind takes it, and 3 is none.
+// function with one says so (Tier0Function.segments); no other kind takes it (another kind's value is its own whole: a
+// constant's top bits are its own), and 3 is none.
 #define BUSTER_TYPED_ACCESS_SEGMENT_SHIFT 62
 #define BUSTER_TYPED_ACCESS_SEGMENT (UINT64_C(3) << BUSTER_TYPED_ACCESS_SEGMENT_SHIFT)
 #define BUSTER_TYPED_SEGMENT_FS 1
@@ -13709,8 +13710,8 @@ static Tier0Code tier0_compile_entries(const Tier0Function* function, const uint
 #endif
 
 // A function with segment overrides (#1447, Tier0Function.segments), out of line: its values without them, in a copy of
-// its values column (`values`), and each entry's override (`segments`), from a LOAD's, STORE's or SET's value. False
-// where another kind has one, or one is 3, which no segment is.
+// its values column (`values`), and each entry's override (`segments`), from a LOAD's, STORE's or SET's value. Another
+// kind's value is its own whole (a constant's top bits are its own). False where an override is 3, which no segment is.
 static bool tier0_segments_strip(const Tier0Function* function, uint64_t* values, uint8_t* segments)
 {
     bool valid = true;
@@ -13720,7 +13721,7 @@ static bool tier0_segments_strip(const Tier0Function* function, uint64_t* values
         const uint64_t value = function->values[i];
         const uint32_t segment = (uint32_t)(value >> BUSTER_TYPED_ACCESS_SEGMENT_SHIFT);
         const bool access = kind == BUSTER_TYPED_LOAD || kind == BUSTER_TYPED_STORE || kind == BUSTER_TYPED_SET;
-        valid = valid && (segment == 0 || (access && segment != 3));
+        valid = valid && (!access || segment != 3);
         values[i] = access ? value & ~BUSTER_TYPED_ACCESS_SEGMENT : value;
         segments[i] = access ? (uint8_t)segment : 0;
     }
@@ -14897,7 +14898,7 @@ static __attribute__((noinline)) Tier0Check tier0_validate_segments(const Tier0F
     else if (!tier0_segments_strip(function, values, segments))
     {
         check.error = TIER0_ERROR_INVALID;
-        check.rule = "a segment override on an entry other than a LOAD, STORE or SET, or one that isn't FS or GS";
+        check.rule = "a LOAD's, STORE's or SET's segment override that isn't FS or GS";
     }
     else
     {
