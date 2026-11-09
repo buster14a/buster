@@ -83,9 +83,11 @@ static void check_test_record_names(CheckTest* test)
         check_test_expect(test, empty != 0 && type_complete_record(&types.table, empty, 0, 0, attributes) &&
                                check_input_record_names(&reader, &empty_member, 1, 1, &failed) && failed == BUSTER_CHECK_NONE && !input.resource,
                           "an empty anonymous record introduces no names");
-        const TypeMember invalid = { .type = BUSTER_TYPE_INT, .bit_width = BUSTER_TYPE_NOT_BIT_FIELD };
-        check_test_expect(test, !check_input_record_names(&reader, &invalid, 1, 100, &failed) && failed == 0 && !input.resource,
-                          "an anonymous nonrecord is a semantic failure");
+        const TypeMember unnamed = { .type = BUSTER_TYPE_INT, .bit_width = BUSTER_TYPE_NOT_BIT_FIELD };
+        // An unnamed member of another type is a bit-field whose width was an undeclared name (#1447): clang's field, which
+        // names nothing.
+        check_test_expect(test, check_input_record_names(&reader, &unnamed, 1, 100, &failed) && failed == BUSTER_CHECK_NONE && !input.resource,
+                          "an unnamed nonrecord introduces no names");
         const TypeMember incomplete = { .type = type_tag(&types.table, BUSTER_TYPE_KIND_STRUCT, 1000), .bit_width = BUSTER_TYPE_NOT_BIT_FIELD };
         check_test_expect(test, !check_input_record_names(&reader, &incomplete, 1, 100, &failed) && failed == 0 && !input.resource,
                           "an incomplete anonymous record is a semantic failure");
