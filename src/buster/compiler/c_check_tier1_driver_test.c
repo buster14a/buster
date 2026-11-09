@@ -2003,8 +2003,14 @@ static void check_test_driver_tier1_labels(CheckTest* test, const char* clang, c
                                         check_test_tier1_table_targets(object, "tier1_table_loop", records[loop_address].offset,
                                                                        records[loop_address].offset + records[loop_address].length - 4, loop_targets, false);
             const bool entry = table_resolved && check_test_tier1_table_entry(records, loop_records, loop_address, dispatch, loop_targets);
+            if (loop_addresses != 1 || loop_relocations != 1 || !entry)
+            {
+                fprintf(stderr, "test-checker: Tier 1 loop table proof: remat=%u path=%u records=%u base=%u dispatch=%u LEAs=%u PC32s=%u ELF=%u CFG=%u targets=%u,%u,%u,%u\\n",
+                        rematerialize, path, loop_records, loop_address, dispatch, loop_addresses, loop_relocations, table_resolved, entry,
+                        loop_targets[0], loop_targets[1], loop_targets[2], loop_targets[3]);
+            }
             check_test_expect(test, loop_addresses == 1 && loop_relocations == 1 && entry,
-                              "the loop's one relocated table base is reached at entry and no direct or table edge reenters it");
+                              "the loop's single relocated table base dominates each dispatch and cannot be reentered");
             if (entry && rematerialize == 0 && path == 0)
             {
                 check_test_tier1_table_entry_controls(test, object, records, loop_records, loop_address, dispatch, loop_targets);
