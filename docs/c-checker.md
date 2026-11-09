@@ -4090,7 +4090,13 @@ statement left out makes its value `void`; `check_driver_rejected_read`
 publishes nothing of an invalid reading, which is then read again with the
 bodies left out). The second reading's unused variables in a scope with an error
 are left out (its own error counts, the dropped part's at the token after
-it), and its unused parameters in a function with one. Where that reading is valid, its program
+it). A function holding an error keeps its unused parameters, as clang's
+`ActOnFinishFunctionBody` gives them whatever the body's errors, except one
+that what the reading left out of its body names, which clang's reading of that
+part takes for a use (an erroneous expression's operands are still referenced);
+a member's name of the same spelling is no use. A local of the same name
+declared in the kept part, which the left-out part's use names instead, still
+silences the parameter's warning. Where that reading is valid, its program
 gives the other bodies' `-Wreturn-type` and common warnings, the bodies after
 the unit's first error flushed as above. Where a reader's error left the first
 reading without some of its warnings, the second's are given, without the
@@ -4246,9 +4252,14 @@ The later phases are left:
   initializer still leaves its body out, and its warnings with it. An error
   outside every body other than an initializer's (a declaration's, an
   unsized array's or a const object's initializer) still leaves the unit
-  without its common warnings. A function holding an error gets no
-  `-Wunused-parameter`, where clang gives one for a parameter it doesn't
-  use.
+  without its common warnings. A function's unused parameter that its
+  left-out part names through a local of the same name gets no
+  `-Wunused-parameter`, where clang gives one.
+- **Errors past a reader's error that ends its walk.** A reader's error that
+  isn't recovered (an incomplete object's type) skips the control scan and
+  ends the first reading; a control error elsewhere (a duplicate case, a
+  label's redefinition) or a second such error then fails the second reading,
+  and the unit gets no warnings at all.
 
 ### What the lowering costs (#531)
 
