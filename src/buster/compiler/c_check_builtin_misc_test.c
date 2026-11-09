@@ -412,9 +412,18 @@ static void check_builtin_misc_test_alignment(CheckBuiltinMiscTest* test, TypeTa
     arguments[0] = (CheckValue){ .type = type_bit_int(table, 200, true), .category = CHECK_RVALUE };
     arguments[1] = check_test_integer(BUSTER_TYPE_INT, 4);
     result = check_builtin_misc_test_action(table, CBUILTIN_ALIGN_UP, arguments, 2);
-    check_builtin_misc_test_expect(test, arguments[0].type == 0 || (result.action.diagnostic == CHECK_DIAG_UNSUPPORTED &&
-                                                                    (result.unsupported & BUSTER_CHECK_BUILTIN_MISC_UNSUPPORTED_WIDE) != 0),
-                                  "an alignment builtin of a _BitInt past 128 bits is refused by name");
+    check_builtin_misc_test_expect(test, arguments[0].type == 0 || (result.action.diagnostic == CHECK_DIAG_NONE && result.action.value.type == arguments[0].type &&
+                                                                    result.action.value.constant_kind == CHECK_CONSTANT_NONE),
+                                  "an alignment builtin of a _BitInt past 128 bits is a runtime action of its type (#1447)");
+    arguments[1] = check_test_integer(BUSTER_TYPE_INT, 3);
+    result = check_builtin_misc_test_action(table, CBUILTIN_ALIGN_UP, arguments, 2);
+    check_builtin_misc_test_expect(test, result.action.diagnostic == CHECK_DIAG_INCOMPATIBLE && result.constraint == CHECK_BUILTIN_MISC_CONSTRAINT_ALIGNMENT,
+                                  "a _BitInt past 128 bits' constant alignment is a power of 2");
+    arguments[0] = (CheckValue){ .type = BUSTER_TYPE_INT, .category = CHECK_RVALUE };
+    arguments[1] = (CheckValue){ .type = type_bit_int(table, 200, true), .category = CHECK_RVALUE };
+    result = check_builtin_misc_test_action(table, CBUILTIN_IS_ALIGNED, arguments, 2);
+    check_builtin_misc_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && result.action.value.type == BUSTER_TYPE_BOOL,
+                                  "an alignment past 128 bits is a runtime action");
     // Result types: the source's own, qualifiers kept, an array's decayed pointer, and is_aligned's bool.
     arguments[0] = (CheckValue){ .type = type_qualify(table, BUSTER_TYPE_INT, BUSTER_TYPE_CONST), .category = CHECK_LVALUE };
     arguments[1] = check_test_integer(BUSTER_TYPE_INT, 4);

@@ -45,7 +45,7 @@ requirements. [Command index](README.md).
   fixture by `--tier1`, and `tests/ir-source/overflow-builtins.c` the IR's
   lowerings, both interpreters and Tier 1. So are the alignment builtins
   (`align_up`, `align_down`, `is_aligned`, folded from a declaration's alignment
-  as clang folds them) and `expect_with_probability`, whose recipes reuse the
+  as clang folds them, and past 128 bits limb by limb, #1447) and `expect_with_probability`, whose recipes reuse the
   bit builtins' and `expect`'s; `test-checker --program-align` runs them, and
   `classify_type`, `eh_return_data_regno`, `dwarf_cfa`, `launder` and the
   generic leaves (`debugtrap`, `memcpy_inline` and the others: the guide's

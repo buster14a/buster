@@ -53,7 +53,6 @@ struct CheckOSLogItem
 #define BUSTER_CHECK_BUILTIN_MISC_UNSUPPORTED_FRAME_LEVEL 0x01u
 #define BUSTER_CHECK_BUILTIN_MISC_UNSUPPORTED_ALIGNMENT 0x02u
 #define BUSTER_CHECK_BUILTIN_MISC_UNSUPPORTED_COMPLEX 0x04u
-#define BUSTER_CHECK_BUILTIN_MISC_UNSUPPORTED_WIDE 0x08u
 
 typedef enum CheckBuiltinMiscConstraint
 {
@@ -454,8 +453,8 @@ static bool check_builtin_misc_align_integer(const TypeTable* table, TypeId type
 
 // The alignment builtins (cbuiltin_align, clang's BuiltinAlignment), of the raw arguments' types, before their lvalue
 // conversions: a source of an integer type (check_builtin_misc_align_integer) or an object pointer, an array decayed to its
-// element's pointer, a function and a function pointer neither, of up to 128 bits; then an alignment of such an integer
-// type. A constant alignment, which clang evaluates past its side effects and through const objects' constant initializers
+// element's pointer, a function and a function pointer neither, of any width (a _BitInt past 128 bits is a runtime one,
+// #1447); then an alignment of such an integer type, whose constant is checked and folds where it holds 128 bits. A constant alignment, which clang evaluates past its side effects and through const objects' constant initializers
 // (CheckBuiltinMiscAction.alignment_evaluated), must be at least 1, at most 2 to the source's width less 1 (a pointer's
 // 64), and a power of 2, in that order; 1 draws -Wtautological-compare (recorded, not reported). align_up and align_down
 // are of the source's type, its qualifiers kept, and is_aligned is a bool. Each folds, as an integer constant expression,
@@ -488,25 +487,28 @@ static void check_builtin_misc_align(TypeTable* table, const CheckBuiltinMiscAct
     {
         check_action_diagnose(&output->action, CHECK_DIAG_INTEGER_REQUIRED, 1);
     }
-    else if ((integer && !check_action_integer_type(table, source, &width, &is_signed)) ||
-             !check_action_integer_type(table, raw[1].type, &alignment_width, &alignment_signed))
-    {
-        // A _BitInt past 128 bits, which the checker's constants don't hold.
-        output->unsupported |= BUSTER_CHECK_BUILTIN_MISC_UNSUPPORTED_WIDE;
-        check_action_diagnose(&output->action, CHECK_DIAG_UNSUPPORTED, integer ? 0 : 1);
-    }
     else
     {
+        // A _BitInt past 128 bits (#1447), which clang takes: its width, and no constant of it, as the checker's constants
+        // don't hold one yet; a source's maximum alignment, 2 to its width less 1, is past every 128-bit one.
+        if (integer && !check_action_integer_type(table, source, &width, &is_signed))
+        {
+            uint64_t rank = 0;
+            uint64_t bits = 0;
+            type_integer_properties(table, type_unqualified(type_strip_aligned(table, source)), &rank, &bits, &is_signed);
+            width = (uint32_t)bits;
+        }
+        const bool wide_alignment = !check_action_integer_type(table, raw[1].type, &alignment_width, &alignment_signed);
         // The alignment as clang's evaluator reads it where the call's evidence has it, else the runtime view's constant.
         // A modification's value (`(s = 3)`) is no constant to it at all (BUSTER_CHECK_MODIFICATION), which leaves the
         // alignment unchecked.
-        const bool evaluated = input->alignment_evaluated;
-        const bool constant = evaluated || (values[1].constant_kind == CHECK_CONSTANT_INTEGER && values[1].fault == CHECK_FAULT_NONE &&
-                                            (values[1].flags & BUSTER_CHECK_MODIFICATION) == 0);
-        const unsigned __int128 bits = (evaluated ? input->alignment_value : values[1].integer) & check_action_mask(alignment_width);
+        const bool evaluated = input->alignment_evaluated && !wide_alignment;
+        const bool constant = !wide_alignment && (evaluated || (values[1].constant_kind == CHECK_CONSTANT_INTEGER && values[1].fault == CHECK_FAULT_NONE &&
+                                                                (values[1].flags & BUSTER_CHECK_MODIFICATION) == 0));
+        const unsigned __int128 bits = constant ? (evaluated ? input->alignment_value : values[1].integer) & check_action_mask(alignment_width) : 0;
         const bool effects = evaluated ? input->alignment_side_effects : (values[1].flags & BUSTER_CHECK_SIDE_EFFECT) != 0;
-        const bool negative = alignment_signed && (bits >> (alignment_width - 1)) != 0;
-        if (constant && (negative || bits == 0 || bits > (unsigned __int128)1 << (width - 1)))
+        const bool negative = constant && alignment_signed && (bits >> (alignment_width - 1)) != 0;
+        if (constant && (negative || bits == 0 || (width <= 128 && bits > (unsigned __int128)1 << (width - 1))))
         {
             output->constraint = CHECK_BUILTIN_MISC_CONSTRAINT_RANGE;
             check_action_diagnose(&output->action, CHECK_DIAG_INCOMPATIBLE, 1);
@@ -530,7 +532,7 @@ static void check_builtin_misc_align(TypeTable* table, const CheckBuiltinMiscAct
     const bool clean = known && output->action.diagnostic == CHECK_DIAG_NONE && values[0].fault == CHECK_FAULT_NONE &&
                        (values[0].flags & BUSTER_CHECK_SIDE_EFFECT) == 0;
     const unsigned __int128 mask = alignment - 1;
-    if (clean && integer && values[0].constant_kind == CHECK_CONSTANT_INTEGER)
+    if (clean && integer && width <= 128 && values[0].constant_kind == CHECK_CONSTANT_INTEGER)
     {
         const unsigned __int128 all = check_action_mask(width);
         const unsigned __int128 x = values[0].integer & all;

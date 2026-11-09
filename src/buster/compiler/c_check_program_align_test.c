@@ -4,8 +4,9 @@
 // #148's alignment builtins and __builtin_expect_with_probability (c_check_builtin_misc.c, c_builtin_misc_lower.c) in
 // test-checker: source fixtures of their result types, folds and refusals, each checked by both paths against clang
 // -fsyntax-only, then programs run natively against clang -O0's build of the same source on both paths: align_up,
-// align_down and is_aligned of every integer width, _BitInt, 128-bit and pointer sources, by alignments of other widths
-// (one that truncates to 0 in a char among them), folded and at run time, of addresses in static data and frames; expect's
+// align_down and is_aligned of every integer width, _BitInt (past 128 bits too, #1447), 128-bit and pointer sources, by
+// alignments of other widths (one that truncates to 0 in a char among them), folded and at run time, of addresses in
+// static data and frames; expect's
 // and expect_with_probability's arguments evaluated once, in order, or not at all where the first argument folds, as
 // clang's code does; and the generic builtins of c_check_program_generic_builtins_test.c, which runs with them. Include after
 // c_check_program_bits_test.c and c_check_program_generic_builtins_test.c.
@@ -203,6 +204,26 @@ static __attribute__((noinline)) void check_test_align_programs(CheckTest* test,
         "mix((unsigned long long)__builtin_align_up(i,a));}"
         "return (int)(h^(h>>32));}",
         "align-128-bit-and-wide-bit-int-sources-and-alignments", clang);
+    // _BitInts past 128 bits (#1447) as sources, limb by limb (check_lower_align_limbs), signed and unsigned, of 129, 200 and
+    // 256 bits, by alignments of every width, and as alignments of narrower sources, truncated to them; the results' bytes
+    // hashed.
+    check_test_program_source(test,
+        "typedef unsigned _BitInt(200) U;typedef _BitInt(200) S;typedef unsigned _BitInt(256) W;typedef _BitInt(129) T;\n"
+        "static unsigned long long h;static void mix(unsigned long long v){h=h*31+v;}\n"
+        "static void raw(const void*p,unsigned n){unsigned long long w[8];__builtin_memcpy(w,p,n);for(unsigned i=0;i<n/8;i++)mix(w[i]);}\n"
+        "int tested(int n){h=(unsigned)n;unsigned long long s=0x9e3779b97f4a7c15ull*(unsigned)(n+1);\n"
+        "for(unsigned i=0;i<300;i++){s^=s<<13;s^=s>>7;s^=s<<17;\n"
+        "W w=((W)s<<(s%200))^s^(i%5==0?~(W)0:0);U x=(U)w;S y=(S)w;T t=(T)w;\n"
+        "unsigned shift=(unsigned)(s%199);U a=(U)1<<shift;int ai=1<<(i%31);long al=1L<<(i%63);W aw=(W)1<<(s%255);\n"
+        "U r=__builtin_align_up(x,ai);raw(&r,32);r=__builtin_align_down(x,al);raw(&r,32);mix(__builtin_is_aligned(x,a));\n"
+        "S q=__builtin_align_up(y,a);raw(&q,32);q=__builtin_align_down(y,aw);raw(&q,32);mix(__builtin_is_aligned(y,ai));\n"
+        "W v=__builtin_align_up(w,aw);raw(&v,32);v=__builtin_align_up(w,a);raw(&v,32);mix(__builtin_is_aligned(w,aw));\n"
+        "T z=__builtin_align_up(t,(U)1<<(s%128));raw(&z,24);z=__builtin_align_down(t,ai);raw(&z,24);mix(__builtin_is_aligned(t,al));\n"
+        "mix((unsigned)__builtin_align_up((unsigned)s,(U)1<<(i%32)));mix((unsigned long)__builtin_align_down((long)s,(W)1<<(i%63)));\n"
+        "mix(__builtin_is_aligned((unsigned short)s,(U)1<<(i%16)));\n"
+        "{unsigned __int128 o=__builtin_align_up((unsigned __int128)w,(W)1<<(i%127));raw(&o,16);_BitInt(100) p=__builtin_align_down((_BitInt(100))w,(U)1<<(i%99));raw(&p,16);}\n"
+        "}return (int)(h^(h>>32));}",
+        "align-bit-int-sources-and-alignments-past-128-bits", clang);
     // Addresses in static data and frames, folded and at run time: offsets from n, and the arrays' own alignment (#978).
     check_test_program_source(test,
         "static char buf[64];static _Alignas(32) char aligned[96];char pad;static char*up=__builtin_align_up(&buf[3],8);"
