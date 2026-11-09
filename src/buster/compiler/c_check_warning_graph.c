@@ -804,8 +804,9 @@ static uint32_t check_warning_graph_void_opener(const Parser* parser, uint32_t c
 // Whether the static selection whose `)` is `close` (a _Generic's or a __builtin_choose_expr's) chooses the operand that
 // holds `token`, a token inside its parentheses: `token` and the chosen operand's token lie between the same top-level
 // commas, as the separators' tree nests the operands before each one under it. The node at its `)` is the selection's,
-// or, for one the source reader chose, the chosen operand's own, under the conversions at that `)`. True where `close`
-// closes no selection, or one whose choice the graph doesn't hold.
+// or, for one the source reader chose, the chosen operand's own, under the conversions at that `)`, or a constant the
+// reader folded there, which chose no operand that matters. True where `close` closes no selection, or one whose choice the
+// graph doesn't hold.
 static bool check_warning_graph_chooses(const CheckInput* input, const Parser* parser, uint32_t close, uint32_t token)
 {
     const CheckGraph* graph = &input->graph;
@@ -821,7 +822,8 @@ static bool check_warning_graph_chooses(const CheckInput* input, const Parser* p
         chosen = graph->operand0[chosen];
     }
     const uint32_t chosen_token = chosen < graph->count ? graph->tokens[chosen] : BUSTER_CHECK_NONE;
-    bool result = true;
+    // (A selection the reader folded to a constant at its `)` chose an operand of no side effect and no write.)
+    bool result = !(selection && chosen_token == close);
     if (selection && chosen_token > open && chosen_token < close && token > open && token < close)
     {
         const uint32_t depth = parser->tree.depths[open + 1];
