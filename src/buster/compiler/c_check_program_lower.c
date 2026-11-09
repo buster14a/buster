@@ -10908,9 +10908,23 @@ static __attribute__((noinline)) void check_lower_vector_operation(CheckLowerWri
         const TypeId vector = stream->conversions[node].operands[0].type;
         const bool shift = op == CHECK_OP_SHIFT_LEFT || op == CHECK_OP_SHIFT_RIGHT;
         const bool scalar_count = shift && check_lower_vector_bytes(types, check_stream_type(stream, b)) == 0;
+        const uint64_t evex = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512VL);
         check_lower_vector_half_chain(writer, vector, op, a, b);
-        check_lower_vector_row(writer, op, vector, 0);
-        check_lower_vector_operand(writer, node, 1, scalar_count ? vector : stream->conversions[node].operands[1].type);
+        if (scalar_count && (writer->target.features & evex) != evex)
+        {
+            // Without AVX-512, a scalar count's shift is by the count itself, as clang's code shifts by a splat (#1834):
+            // its row's integer operand, the count converted to unsigned int.
+            const TypeId count = check_stream_type(stream, b);
+            check_lower_vector_row(writer, op == CHECK_OP_SHIFT_LEFT ? BUSTER_CHECK_VECTOR_SHIFT_LEFT_BY : BUSTER_CHECK_VECTOR_SHIFT_RIGHT_BY, vector,
+                                   BUSTER_TYPED_CLASS_U32);
+            check_lower_convert(writer, count, BUSTER_TYPE_UINT);
+            check_lower_operand(writer, node, 1, false, count);
+        }
+        else
+        {
+            check_lower_vector_row(writer, op, vector, 0);
+            check_lower_vector_operand(writer, node, 1, scalar_count ? vector : stream->conversions[node].operands[1].type);
+        }
         check_lower_vector_operand(writer, node, 0, vector);
     }
 }
