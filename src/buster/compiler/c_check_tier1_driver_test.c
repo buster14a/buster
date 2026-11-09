@@ -2003,6 +2003,24 @@ static void check_test_driver_tier1_labels(CheckTest* test, const char* clang, c
                                         check_test_tier1_table_targets(object, "tier1_table_loop", records[loop_address].offset,
                                                                        records[loop_address].offset + records[loop_address].length - 4, loop_targets, false);
             const bool entry = table_resolved && check_test_tier1_table_entry(records, loop_records, loop_address, dispatch, loop_targets);
+            if (loop_addresses != 1 || loop_relocations != 1 || !entry)
+            {
+                fprintf(stderr, "test-checker: table entry: rematerialize=%u path=%s records=%u addresses=%u relocations=%u address=%u dispatch=%u resolved=%u targets=%u,%u,%u,%u\n",
+                        rematerialize, path == 0 ? "vector" : "scalar", loop_records, loop_addresses, loop_relocations, loop_address, dispatch,
+                        (uint32_t)table_resolved, loop_targets[0], loop_targets[1], loop_targets[2], loop_targets[3]);
+                for (uint32_t i = 0; i < loop_records; i += 1)
+                {
+                    const X86Instruction* instruction = &records[i].instruction;
+                    const uint32_t form = instruction->form & BUSTER_X86_FORM_NUMBER;
+                    const uint32_t control = (uint32_t)x86_effects(form)->kinds >> 4;
+                    if (i == loop_address || control != BUSTER_X86_CONTROL_NONE)
+                    {
+                        fprintf(stderr, "test-checker: table entry record=%u offset=%u form=%u control=%u relative=%u target=%" PRId64 "\n",
+                                i, records[i].offset, form, control, (uint32_t)x86_form_descriptions[form].relative_bytes,
+                                (int64_t)records[i].offset + records[i].length + instruction->displacement);
+                    }
+                }
+            }
             check_test_expect(test, loop_addresses == 1 && loop_relocations == 1 && entry,
                               "the loop's one relocated table base is reached at entry and no direct or table edge reenters it");
             if (entry && rematerialize == 0 && path == 0)
