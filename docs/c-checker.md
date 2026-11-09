@@ -7727,7 +7727,7 @@ arguments against the function. The checker now gives these as clang does.
     function's, or the unit's declaration of a library function that is its
     builtin (`check_input_checks_library`); any other argument, a name in
     parentheses too, is "'diagnose_as_builtin' attribute requires parameter 1
-    to be a builtin function" at its expression's place. Its builtin's
+    to be a builtin function" at its first token. Its builtin's
     parameters, its prototype decoded past any custom checking
     (`__builtin_va_start` takes one), must be as many as its other arguments
     ("references function '__builtin_memcpy', which takes exactly 3
@@ -7750,7 +7750,8 @@ arguments against the function. The checker now gives these as clang does.
     recovers (its first token; a lone `&name`'s after the name), or, in a
     sizeof's, alignof's or typeof's operand, which clang doesn't recover,
     nothing more: the attribute is dropped. A redeclared builtin
-    (`int __builtin_abs(int);`) is still that builtin, but a static one.
+    (`int __builtin_abs(int);`) is still that builtin, as an argument and in
+    another expression, but a static one.
     More than 32 arguments are the count's error, as no builtin takes as many.
     Refused by name are an undeclared library function's name, whose
     diagnostics are its implicit declaration's (`diagnose_as_builtin(memcpy,

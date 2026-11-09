@@ -793,12 +793,19 @@ static bool check_input_attribute_diagnose_builtin(CheckInputReader* reader, Che
     for (uint32_t token = first; !refused && uncalled == BUSTER_CHECK_NONE && !lone && !parenthesized && token < first_end; token += 1)
     {
         const uint32_t spelled = parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER ? parser->tokens.names[token] : 0;
-        const BuiltinIntrinsicInfo* named = spelled != 0 && c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, spelled) == 0 ?
+        // A builtin's name no declaration hides, or that an external redeclaration of the builtin keeps (a static one hides it).
+        const uint32_t spelled_handle = spelled != 0 ? c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, spelled) : 0;
+        const uint32_t spelled_declaration = spelled_handle != 0 ? reader->bindings.declaration[spelled_handle - 1] : BUSTER_CHECK_NONE;
+        const bool redeclared = spelled_handle != 0 && reader->bindings.kind[spelled_handle - 1] == C_BINDING_FUNCTION &&
+                                check_input_linkage(reader->declaration_bits, spelled_declaration) == 2;
+        const BuiltinIntrinsicInfo* named = spelled != 0 && (spelled_handle == 0 || redeclared) ?
                                             builtin_intrinsic_lookup((const char*)intern_bytes(table, spelled), intern_length(table, spelled)) : NULL;
         const bool called = token + 1 < first_end && parser->tokens.kinds[token + 1] == PARSE_KIND_L_PAREN && parser->tree.roles[token + 1] == PARSE_ROLE_OPEN_CALL;
         // An undeclared library function's name is its implicit declaration, which clang's diagnostics are their own.
-        refused = named != NULL && memchr(named->attributes, 'f', named->attributes_length) != NULL;
-        uncalled = named != NULL && !refused && !called ? token : BUSTER_CHECK_NONE;
+        // A declared library function is an ordinary function.
+        const bool library_name = named != NULL && memchr(named->attributes, 'f', named->attributes_length) != NULL;
+        refused = library_name && spelled_handle == 0;
+        uncalled = named != NULL && !library_name && !called ? token : BUSTER_CHECK_NONE;
     }
     // The builtin's parameters, its prototype decoded without its custom checking, as clang's declaration of it has them.
     CheckInputIntrinsicDeclaration decoded = { 0 };
@@ -879,7 +886,8 @@ static bool check_input_attribute_diagnose_builtin(CheckInputReader* reader, Che
     }
     else if (info == NULL)
     {
-        check_input_attribute_argument_error(reader, attributes, attribute, check_input_expression_location(parser, first, first_end), CHECK_ARGUMENT_BUILTIN_FUNCTION, 1);
+        // At the expression's first token, as clang gives it (a group's `(`, a binary operator's left operand).
+        check_input_attribute_argument_error(reader, attributes, attribute, first, CHECK_ARGUMENT_BUILTIN_FUNCTION, 1);
         valid = false;
     }
     else if (attribute->argument_count - 1 != decoded.types.parameter_count)
