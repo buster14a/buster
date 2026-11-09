@@ -4818,9 +4818,12 @@ static bool check_driver_edit_site(CheckDriverEditor* editor, uint32_t token)
             const TypeId bare = type != 0 ? type_strip_aligned(types, type) : 0;
             const bool unsized = bare != 0 && type_kind(types, bare) == BUSTER_TYPE_KIND_ARRAY && !type_is_complete(types, bare);
             const bool constant = (type_qualifiers(type) & BUSTER_TYPE_CONST) != 0;
+            // `__func__` is a function's alone: at file scope the value reads undeclared and the view's reading fails,
+            // so a file-scope const object's initializer is left to check_driver_rejected_declaration instead.
+            const bool function = check_sparse_get(input->declaration_bodies, declaration) != BUSTER_CHECK_NONE;
             // A const object of an arithmetic or enumeration type keeps it, as clang's stays valid, with `-*__func__`'s
             // unknown value in its place; another initializer the declaration can't do without leaves out its declarator.
-            const bool replaced = constant && bare != 0 && (type_is_arithmetic(types, bare) || type_kind(types, bare) == BUSTER_TYPE_KIND_ENUM);
+            const bool replaced = function && constant && bare != 0 && (type_is_arithmetic(types, bare) || type_kind(types, bare) == BUSTER_TYPE_KIND_ENUM);
             done = token < end && end <= count && type != 0 && !unsized && (!constant || replaced) && at + 1 < end;
             valid = !done || check_driver_edit_apply(editor, replaced ? at + 1 : at, end - 1, replaced ? CHECK_DRIVER_EDIT_VALUE : CHECK_DRIVER_EDIT_DROP);
         }
