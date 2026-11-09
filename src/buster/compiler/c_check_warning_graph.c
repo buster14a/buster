@@ -283,8 +283,9 @@ static bool check_interrupt_head(const Parser* parser, uint32_t token)
 
 // Records the full expression around a direct call's error, from its callee's first token `first` to its `)` `close`
 // (#1447, CheckInput.interrupt_ranges): out through the parentheses and brackets around it, to the `;`, `{` or `}` of its
-// statement, declaration or initializer list, or a control statement's head's parentheses. A cold scan of the tokens
-// around the rare error.
+// statement, declaration or initializer list, a separator's `,` (another declarator's, list element's or argument's,
+// each its own full expression or operand, which clang builds whatever this one is), or a control statement's head's
+// parentheses. A cold scan of the tokens around the rare error.
 static void check_interrupt_full_expression(CheckInputReader* reader, uint32_t first, uint32_t close)
 {
     CheckInput* input = reader->output;
@@ -300,7 +301,8 @@ static void check_interrupt_full_expression(CheckInputReader* reader, uint32_t f
         const bool closing = kind == PARSE_KIND_R_PAREN || kind == PARSE_KIND_R_SQUARE;
         const bool opening = kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE;
         const bool head = opening && depth == 0 && t != 0 && check_interrupt_head(parser, t - 1);
-        open = !head && !(depth == 0 && (kind == PARSE_KIND_SEMI || kind == PARSE_KIND_L_BRACE || kind == PARSE_KIND_R_BRACE));
+        const bool separator = depth == 0 && parser->tree.roles[t] == PARSE_ROLE_SEPARATOR;
+        open = !head && !separator && !(depth == 0 && (kind == PARSE_KIND_SEMI || kind == PARSE_KIND_L_BRACE || kind == PARSE_KIND_R_BRACE));
         depth += closing ? 1 : 0;
         depth -= opening && depth != 0 ? 1 : 0;
         begin = open ? t : begin;
@@ -321,7 +323,8 @@ static void check_interrupt_full_expression(CheckInputReader* reader, uint32_t f
             matched = (parser->tokens.kinds[k] == PARSE_KIND_L_PAREN || parser->tokens.kinds[k] == PARSE_KIND_L_SQUARE) && parser->tree.parents[k] == t ? k : matched;
         }
         const bool head = closing && depth == 0 && matched != t && matched != 0 && check_interrupt_head(parser, matched - 1);
-        open = !head && !(depth == 0 && (kind == PARSE_KIND_SEMI || kind == PARSE_KIND_L_BRACE || kind == PARSE_KIND_R_BRACE));
+        const bool separator = depth == 0 && parser->tree.roles[t] == PARSE_ROLE_SEPARATOR;
+        open = !head && !separator && !(depth == 0 && (kind == PARSE_KIND_SEMI || kind == PARSE_KIND_L_BRACE || kind == PARSE_KIND_R_BRACE));
         depth += opening ? 1 : 0;
         depth -= closing && depth != 0 ? 1 : 0;
         end = open ? t : end;
