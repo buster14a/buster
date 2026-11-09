@@ -7913,11 +7913,17 @@ arguments against the function. The checker now gives these as clang does.
   `checkExtParameterInfos` checks them, at the parameter: the convention
   (swiftcall or swiftasynccall, swiftcall's alone for an error result, and any
   for `swift_async_context`, whose function clang's backend gives it r14, which
-  the producer refuses by name), an indirect result first or after another, an
-  error result just after a context. A Swift parameter of another function type
-  than a declaration's own (a pointer's, a parameter's or a type name's), whose
-  convention clang takes from attributes it places otherwise, is refused by
-  name. Off a parameter, each is "only applies to parameters" (a warning).
+  the producer refuses by name; the convention's error once per function, at
+  its first incompatible parameter, as clang's `hasCheckedSwiftCall` has it), an
+  indirect result first or after another, an error result just after a
+  context. A function chunk farther from the name than the nearest one
+  (`void (*f(void))(…)`'s returned function's, `void (*(*p)(int))(…)`'s) has no
+  convention when clang builds it, as distribution gives the declaration's
+  conventions to the nearest, so its parameters are checked as System V's
+  there (#1447). The nearest chunk of a pointer's, a parameter's or a type
+  name's declarator, whose convention clang takes from attributes it places
+  otherwise (a pointer chunk's own), is refused by name. Off a parameter, each
+  is "only applies to parameters" (a warning).
 
   A definition's `-Wgcc-compat` warning comes before Sema's
   diagnostics of the same attribute.
