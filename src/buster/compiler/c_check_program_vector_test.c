@@ -849,6 +849,31 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
           "#endif\n"
           "return (int)h;}\n"
         },
+        // __builtin_convertvector's integer extensions without SSE4.1 (SSE2's unpacks and arithmetic shifts) and truncations
+        // without AVX-512 (PSHUFD, shifts and saturating packs; with AVX2 of 32 bytes too), at each element size and
+        // signedness, and between 8- and 16-bit integers and floats or doubles, through dwords (#1834).
+        { "baseline-integer-conversions",
+          "typedef signed char sb8 __attribute__((vector_size(8)));typedef unsigned char ub8 __attribute__((vector_size(8)));"
+          "typedef signed char sb4 __attribute__((vector_size(4)));typedef unsigned char ub4 __attribute__((vector_size(4)));"
+          "typedef short sw8 __attribute__((vector_size(16)));typedef unsigned short uw8 __attribute__((vector_size(16)));"
+          "typedef short sw4 __attribute__((vector_size(8)));typedef unsigned short uw4 __attribute__((vector_size(8)));"
+          "typedef short sw2 __attribute__((vector_size(4)));typedef int sd2 __attribute__((vector_size(8)));typedef unsigned ud2 __attribute__((vector_size(8)));"
+          "typedef unsigned ud4 __attribute__((vector_size(16)));typedef unsigned long long uq2 __attribute__((vector_size(16)));"
+          "typedef char c2 __attribute__((vector_size(2)));typedef signed char sb16 __attribute__((vector_size(16)));"
+          "typedef double v4df __attribute__((vector_size(32),aligned(16)));\n"
+          "#define C(T,v) do{T c_=__builtin_convertvector(v,T);FOLD(c_);}while(0)\n"
+          "int tested(int n){unsigned h=2166136261u;sb8 c;ub8 d;sb4 e;ub4 f;sw8 g;uw8 i;sw4 j;uw4 k;v4si l;ud4 m;sd2 o;ud2 p;v2di q;uq2 r;sw2 s;v4sf x;v2df y;"
+          "fill(&c,8,n);fill(&d,8,n+1);fill(&e,4,n+2);fill(&f,4,n+3);fill(&g,16,n+4);fill(&i,16,n+5);fill(&j,8,n+6);fill(&k,8,n+7);fill(&l,16,n+8);"
+          "fill(&m,16,n+9);fill(&o,8,n+10);fill(&p,8,n+11);fill(&q,16,n+12);fill(&r,16,n+13);fill(&s,4,n+14);fillf((float*)&x,4,n);filld((double*)&y,2,n);\n"
+          "C(sw8,c);C(uw8,c);C(sw8,d);C(uw8,d);C(v4si,e);C(ud4,e);C(v4si,f);C(ud4,f);C(v4si,j);C(v4si,k);C(v2di,o);C(v2di,p);C(uq2,o);C(v2di,s);C(uq2,s);\n"
+          "C(sb8,g);C(ub8,i);C(sw4,l);C(uw4,m);C(sb4,l);C(ub4,m);C(sd2,q);C(ud2,r);C(sw2,q);C(c2,r);\n"
+          "C(sb4,x);C(ub4,x+15.0f);C(sw4,x);C(sw2,y);C(c2,y);C(v4sf,e);C(v4sf,f);C(v4sf,j);C(v4sf,k);C(v2df,s);\n"
+          "#ifdef __AVX2__\n"
+          "v8si a;v16hi b;v4di t;v8sf u;v4df w;fill(&a,32,n+15);fill(&b,32,n+16);fill(&t,32,n+17);fillf((float*)&u,8,n+1);filld((double*)&w,4,n+1);\n"
+          "C(sw8,a);C(sb8,a);C(sb16,b);C(v16qu,b);C(v4si,t);C(sw4,t);C(ub4,t);C(sw8,u);C(sb8,u);C(sw4,w);C(ub4,w+151.0);\n"
+          "#endif\n"
+          "return (int)h;}\n"
+        },
         // __builtin_elementwise_min, _max and _abs of integers without their instructions (#1834): SSE2's compares and
         // blends, unsigned elements biased by their sign bits, unsigned words' saturating subtractions, bytes' and words'
         // absolute values of each and its negation and the others' by their signs; qwords' minima and maxima with SSE4.2's
@@ -961,13 +986,11 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
                   "vector shuffles of 8-bit elements without SSSE3" },
                 { 1, "typedef short V __attribute__((vector_size(16)));V tested(V a,V b){return __builtin_shufflevector(a,b,7,8,1,15,4,4,9,0);}",
                   "vector shuffles of 16-bit elements without SSSE3" },
-                { 1, "typedef char N __attribute__((vector_size(8)));typedef short V __attribute__((vector_size(16)));V tested(N a){return __builtin_convertvector(a,V);}",
-                  "vector extensions of integers without SSE4.1" },
                 { 1, "float tested(float a,float b,float c){return __builtin_elementwise_fma(a,b,c);}", "fused multiply-adds of scalars without FMA or AVX-512F" },
                 { 1, "typedef long long V __attribute__((vector_size(16)));V tested(V a,V b){return __builtin_elementwise_max(a,b);}",
                   "vector minimum and maximum of 64-bit elements without SSE4.2" },
-                { 7, "typedef int V __attribute__((vector_size(16)));typedef short N __attribute__((vector_size(8)));N tested(V a){return __builtin_convertvector(a,N);}",
-                  "vector truncations of integers without AVX-512" },
+                { 3, "typedef int V __attribute__((vector_size(32)));typedef short N __attribute__((vector_size(16)));N tested(V a){return __builtin_convertvector(a,N);}",
+                  "vector conversions wider than the target's registers" },
                 { 4, "typedef char V __attribute__((vector_size(32)));V tested(V a,V b){return __builtin_shufflevector(a,b,31,30,29,28,27,26,25,24,23,22,21,20,19,"
                      "18,17,16,15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,0);}",
                   "vector shuffles of 32-byte vectors of 8- and 16-bit elements without AVX-512" },
