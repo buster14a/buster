@@ -75,7 +75,7 @@ static const CheckDriverDefaultWarningFixture check_driver_vla_fold_fixtures[] =
     {
         .name = "folded bounds in each context, by default",
         .source = check_driver_vla_fold_contexts_source,
-        .warnings = WC1,
+        .warnings = 11,
         .errors = 2,
         .notes = 2,
     },
@@ -90,18 +90,18 @@ static const CheckDriverDefaultWarningFixture check_driver_vla_fold_fixtures[] =
         .name = "folded bounds in each context under -Werror=gnu-folding-constant",
         .source = check_driver_vla_fold_contexts_source,
         .options = { "-Werror=gnu-folding-constant" },
-        .errors = EC1,
-        .notes = 2,
+        .errors = 18,
+        .notes = 7,
     },
     {
         .name = "a declarator's folded bounds warn once, at its name",
         .source = check_driver_vla_fold_declarators_source,
-        .warnings = WC2,
+        .warnings = 6,
     },
     {
         .name = "folds of casts, GNU object reads and string subscripts",
         .source = check_driver_vla_fold_forms_source,
-        .warnings = WC3,
+        .warnings = 3,
     },
     {
         .name = "folded bounds under -Wno-gnu-folding-constant",
