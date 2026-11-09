@@ -3992,6 +3992,17 @@ do:
   implicit value restarts at 0 of `int` or of the fixed type
   (`CheckTagFrame.restart`), and an enum left with no enumerator is
   complete as `unsigned int`.
+- **An enum with a fixed underlying type.** Listed again with its base, it is
+  the redefinition above (before C23). Redeclared with another base, without
+  the base it had, or with one it hadn't, it gives clang's
+  `CheckEnumRedeclaration` error: "enumeration redeclared with different
+  underlying type 'long' (was 'int')" (each base as written, a typedef with
+  its "aka"), or "enumeration previously declared with (non)fixed underlying
+  type", with "previous declaration is here" at the earlier one
+  (`CHECK_REDECLARATION_ENUM_BASE`, `_FIXED`, `_NONFIXED`). As clang's
+  `ActOnTag` drops such a declaration, its body is skipped: its tag ends past
+  the `}` and no frame reads it, so its enumerators are undeclared, and the
+  name keeps the earlier enum.
 - **An enumerator whose name is another kind of the scope's** (an object, a
   typedef, a parameter, a local) gives clang's "redefinition of 'K'", with
   "previous definition is here" at the earlier declaration, and is dropped the
