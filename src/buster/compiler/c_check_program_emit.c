@@ -4015,11 +4015,9 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         uint64_t entry_length = 0;
         valid = check_program_emit_asm_unit(result, asms, file_unit, asm_symbols, 0, result->asm_atoms, result->asm_sections, &result->asm_atom_count, bytes,
                                             scratch, &entry_atom, &entry_bytes, &entry_length);
-        if (!valid)
-        {
-            result->status = CHECK_PROGRAM_BACKEND;
-            result->reason = "the file-scope assembly could not be published";
-        }
+        // Its atoms' bytes are the only room it takes that the link's capacity doesn't count, as the file-scope assembly's
+        // copy did before (#619): a failure is the bytes arena's.
+        result->status = valid ? result->status : CHECK_PROGRAM_RESOURCE;
     }
     // The templates of alignment and section directives alone: their data atoms and labels, without a helper to call.
     for (uint32_t s = 0; valid && asms->plans != 0 && s < program->input->asm_count; s += 1)
