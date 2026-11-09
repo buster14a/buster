@@ -38,11 +38,13 @@ predefines, while excluding its exact host-only detector and frame controls
 (#1423). The compiler executing the check remains instrumented.
 On pushes to main and the daily and dispatched runs (not on pull requests, which
 they would hold up for over an hour), each host architecture also runs the
-inventory under `BUSTER_SANITIZER=address|undefined|thread|memory`, but the
+inventory under `BUSTER_SANITIZER=address|thread|memory`, but the
 compiler's own `main.c` checking comparison in the TSan and MSan rows, whose
 measured memory (docs/ci.md) exceeds a hosted runner's; their `-c` compiles run
 in a separate step after the suite. ASan combines UBSan, bounds,
-leak and stack-lifetime checks; TSan and MSan use separate builds. Diagnostic
+leak and stack-lifetime checks; TSan and MSan use separate builds.
+Standalone `BUSTER_SANITIZER=undefined` remains available for manual diagnosis,
+but no longer repeats the full suite on every main push. Diagnostic
 builds default to `-O3`, frames and line information, with fatal symbolized detector
 proofs and child-report auditing. `BUSTER_FUZZ_AVAILABLE=1` adds in-process
 coverage and the `--fuzz` driver override; `BUSTER_FUZZ_ENTRY=FILE.c` replaces
