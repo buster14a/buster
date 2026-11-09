@@ -581,7 +581,7 @@ static AbiSimple abi_simple_current(uint8_t class, uint8_t span, uint64_t size)
 static uint32_t abi_resolved_index(const TypeTable* table, TypeId type)
 {
     uint32_t index = type >> BUSTER_TYPE_INDEX_SHIFT;
-    if (table->types.kind[index] == BUSTER_TYPE_KIND_ALIGNED)
+    while (table->types.kind[index] == BUSTER_TYPE_KIND_ALIGNED || table->types.kind[index] == BUSTER_TYPE_KIND_QUALIFIED)
     {
         index = table->types.base[index] >> BUSTER_TYPE_INDEX_SHIFT;
     }
@@ -916,7 +916,7 @@ static uint8_t abi_canonical_alignment_log2(const AbiTable* abi, const TypeTable
 {
     const uint8_t kind = table->types.kind[index];
     uint8_t result = table->types.alignment_log2[index];
-    if (kind == BUSTER_TYPE_KIND_ALIGNED || kind == BUSTER_TYPE_KIND_ARRAY)
+    if (kind == BUSTER_TYPE_KIND_ALIGNED || kind == BUSTER_TYPE_KIND_QUALIFIED || kind == BUSTER_TYPE_KIND_ARRAY)
     {
         result = abi->alignment_log2[table->types.base[index] >> BUSTER_TYPE_INDEX_SHIFT];
     }
@@ -1005,7 +1005,8 @@ static uint8_t abi_bit_field_run(const AbiTable* abi, const TypeTable* table, ui
 static uint32_t abi_wide_record(const TypeTable* table, TypeId type)
 {
     uint32_t index = type >> BUSTER_TYPE_INDEX_SHIFT;
-    while (table->types.kind[index] == BUSTER_TYPE_KIND_ARRAY || table->types.kind[index] == BUSTER_TYPE_KIND_ALIGNED || table->types.kind[index] == BUSTER_TYPE_KIND_ATOMIC)
+    while (table->types.kind[index] == BUSTER_TYPE_KIND_ARRAY || table->types.kind[index] == BUSTER_TYPE_KIND_ALIGNED || table->types.kind[index] == BUSTER_TYPE_KIND_QUALIFIED ||
+           table->types.kind[index] == BUSTER_TYPE_KIND_ATOMIC)
     {
         index = table->types.base[index] >> BUSTER_TYPE_INDEX_SHIFT;
     }
@@ -2726,7 +2727,7 @@ static bool abi_classify_vector(AbiTable* abi, const TypeTable* table, const Typ
         const uint32_t index = types[i] >> BUSTER_TYPE_INDEX_SHIFT;
         const uint8_t kind = table->types.kind[index];
         const uint64_t size = table->types.size[index];
-        if (kind == BUSTER_TYPE_KIND_ALIGNED)
+        if (kind == BUSTER_TYPE_KIND_ALIGNED || kind == BUSTER_TYPE_KIND_QUALIFIED)
         {
             abi_copy(abi, table, index);
         }
@@ -2963,7 +2964,7 @@ static void abi_classify_scalar(AbiTable* abi, const TypeTable* table, const Typ
     for (uint32_t i = 0; i < count; i += 1)
     {
         const uint32_t index = types[i] >> BUSTER_TYPE_INDEX_SHIFT;
-        if (table->types.kind[index] == BUSTER_TYPE_KIND_ALIGNED)
+        if (table->types.kind[index] == BUSTER_TYPE_KIND_ALIGNED || table->types.kind[index] == BUSTER_TYPE_KIND_QUALIFIED)
         {
             abi_copy(abi, table, index);
         }
@@ -3055,7 +3056,7 @@ static bool abi_dependencies_classified(const AbiTable* abi, const TypeTable* ta
     const uint8_t kind = table->types.kind[index];
     const bool record = kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION;
     bool result = true;
-    if (kind == BUSTER_TYPE_KIND_ALIGNED || kind == BUSTER_TYPE_KIND_ARRAY || kind == BUSTER_TYPE_KIND_ATOMIC)
+    if (kind == BUSTER_TYPE_KIND_ALIGNED || kind == BUSTER_TYPE_KIND_QUALIFIED || kind == BUSTER_TYPE_KIND_ARRAY || kind == BUSTER_TYPE_KIND_ATOMIC)
     {
         const TypeId base = table->types.base[index];
         result = abi_is_classified(abi, base) && (kind != BUSTER_TYPE_KIND_ARRAY || table->types.size[index] != 0 || abi_wide_classified(abi, table, base));
@@ -3092,13 +3093,13 @@ static bool abi_schedule_wide(const TypeTable* table, TypeId type)
     uint32_t index = type >> BUSTER_TYPE_INDEX_SHIFT;
     uint32_t probes = 0;
     uint8_t kind = table->types.kind[index];
-    bool wrapper = kind == BUSTER_TYPE_KIND_ARRAY || kind == BUSTER_TYPE_KIND_ALIGNED || kind == BUSTER_TYPE_KIND_ATOMIC;
+    bool wrapper = kind == BUSTER_TYPE_KIND_ARRAY || kind == BUSTER_TYPE_KIND_ALIGNED || kind == BUSTER_TYPE_KIND_QUALIFIED || kind == BUSTER_TYPE_KIND_ATOMIC;
     while (wrapper && probes < BUSTER_ABI_SCAN_LEVELS)
     {
         index = table->types.base[index] >> BUSTER_TYPE_INDEX_SHIFT;
         probes += 1;
         kind = table->types.kind[index];
-        wrapper = kind == BUSTER_TYPE_KIND_ARRAY || kind == BUSTER_TYPE_KIND_ALIGNED || kind == BUSTER_TYPE_KIND_ATOMIC;
+        wrapper = kind == BUSTER_TYPE_KIND_ARRAY || kind == BUSTER_TYPE_KIND_ALIGNED || kind == BUSTER_TYPE_KIND_QUALIFIED || kind == BUSTER_TYPE_KIND_ATOMIC;
     }
     const bool record = kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION;
     return wrapper || (record && table->types.size[index] > BUSTER_ABI_REGISTER_BYTES && (table->types.flags[index] & BUSTER_TYPE_FLAG_FLEXIBLE) == 0);
@@ -3144,7 +3145,7 @@ static uint32_t abi_classify_pending(AbiTable* abi, const TypeTable* table, cons
                     cursors[index] = record ? table->tags.member_begin[table->types.index[index]] : 0;
                 }
                 uint32_t dependency = UINT32_MAX;
-                if (kind == BUSTER_TYPE_KIND_ALIGNED || kind == BUSTER_TYPE_KIND_ARRAY || kind == BUSTER_TYPE_KIND_ATOMIC)
+                if (kind == BUSTER_TYPE_KIND_ALIGNED || kind == BUSTER_TYPE_KIND_QUALIFIED || kind == BUSTER_TYPE_KIND_ARRAY || kind == BUSTER_TYPE_KIND_ATOMIC)
                 {
                     dependency = cursors[index] == 0 ? table->types.base[index] >> BUSTER_TYPE_INDEX_SHIFT : UINT32_MAX;
                 }
