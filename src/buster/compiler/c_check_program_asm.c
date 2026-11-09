@@ -2924,10 +2924,12 @@ static bool check_program_asm_plan_file(CheckProgramAsms* result, const CheckPro
     const char* refused = source == 0 ? NULL : assembled.error != 0 ? "file-scope assembly the assembler doesn't take" : NULL;
     // A section of a class C's definitions have, of its type (or with bytes, PROGBITS), as the object writer takes it:
     // not an init array's (.init_array is one in a data class), a note's or a group's. CFI's frames are an EH_FRAME atom.
+    // A common symbol's atom is in no section.
     for (AtomId atom = 1; source != 0 && refused == NULL && atom < link->atoms.count; atom += 1)
     {
         const uint8_t class = link->atoms.class[atom];
-        const uint32_t type = assembled.object_options.atom_sections[atom].type;
+        const uint32_t type = assembled.object_options.atom_sections[atom].name.length != 0 ? assembled.object_options.atom_sections[atom].type :
+                                                                                               object_class_sections[class].type;
         const bool kind = class == BUSTER_LINK_CLASS_TEXT || class == BUSTER_LINK_CLASS_RODATA || class == BUSTER_LINK_CLASS_DATA ||
                           class == BUSTER_LINK_CLASS_DATA_RELRO || class == BUSTER_LINK_CLASS_BSS || class == BUSTER_LINK_CLASS_TDATA ||
                           class == BUSTER_LINK_CLASS_TBSS;
