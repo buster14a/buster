@@ -11586,7 +11586,12 @@ static bool check_lower_segment_access(const CheckLowerWriter* writer, uint32_t 
     // class that one LOAD or STORE moves (check_lower_segment_carried), in %fs or %gs.
     const bool member = (op == CHECK_OP_MEMBER || op == CHECK_OP_ARROW) && (value->flags & BUSTER_CHECK_BIT_FIELD) == 0;
     const bool reader = op == CHECK_OP_DEREFERENCE || member || (op == CHECK_OP_SUBSCRIPT && !element) || op == CHECK_OP_VALUE;
-    const bool carried = read ? reader && check_lower_segment_carried(writer, value->type) : written && check_lower_segment_carried(writer, check_stream_type(stream, target));
+    // A bit-field's store reads and writes its unit through recipes of its own (check_lower_bit_store), which don't take
+    // the override: refused, as its read is.
+    const uint32_t bit_destination = written ? check_lower_bit_destination(program, target) : BUSTER_CHECK_NONE;
+    const bool bit_field = bit_destination != BUSTER_CHECK_NONE && (check_stream_value(stream, bit_destination).flags & BUSTER_CHECK_BIT_FIELD) != 0;
+    const bool carried = read ? reader && check_lower_segment_carried(writer, value->type)
+                              : written && !bit_field && check_lower_segment_carried(writer, check_stream_type(stream, target));
     return ((read || written) && !carried) || (element && check_lower_segment(program->types, check_stream_type(stream, target))) ||
            (effect != NULL && check_lower_segment(types, check_lower_atomic_space(writer, node, effect)) &&
             !(direct && check_lower_segment_override(types, check_lower_atomic_space(writer, node, effect)) != 0));
