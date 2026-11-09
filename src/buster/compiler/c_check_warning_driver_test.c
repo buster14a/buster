@@ -1744,6 +1744,49 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .warnings = 8,
     },
     {
+        // A tag a prototype's list declares first (#1447, clang's ActOnTag): -Wvisibility at its name (an unnamed enum's
+        // keyword), in a definition's list, a nested prototype's (not one the outer list declares already), a member's, a
+        // block's and a bound's, a definition shadowing a file-scope tag; a list's redefinition, with its note, and an
+        // enum's, which is an unnamed one's too. Not one declared outside, nor an unnamed record.
+        .name = "tags declared in a prototype's list",
+        .source = "struct S6;\nvoid f1(struct S1 *p);\nvoid f2(struct S2 { int a; } *p);\nvoid f3(union U3 *p);\n"
+                  "void f4(enum E4 { A4 } e);\nvoid f5(enum { A5 } e, enum : long { B5 } f);\nvoid f6(struct S6 *p);\n"
+                  "void f7(struct S7 *p) { (void)p; }\nint f8(struct S8 (*fp)(struct S9 *q));\nvoid f9(struct S10 *p, int (*g)(struct S10 *));\n"
+                  "void (*f10)(struct S11 *);\nvoid f11(void) { void g(struct S12 *); }\nvoid f12(struct { int a; } *p, struct A { struct B *b; } *a);\n"
+                  "struct V { void (*fp)(struct U *); };\nstruct T { int b; };\nvoid g1(struct T *p, struct T { int c; } *q);\n"
+                  "int g2(struct R { int x; } a, struct R { int y; } b);\nint g3(enum F { B1 } a, enum F { B2 } b);\n"
+                  "int g4(int (*a)[sizeof(struct Q { int q; })]);\n",
+        .warnings = 22,
+        .notes = 2,
+    },
+    {
+        // C23's definitions there are no warning: a compatible definition outside may redefine them.
+        .name = "tags declared in a prototype's list under C23",
+        .source = "struct S6;\nvoid f1(struct S1 *p);\nvoid f2(struct S2 { int a; } *p);\nvoid f3(union U3 *p);\n"
+                  "void f4(enum E4 { A4 } e);\nvoid f5(enum { A5 } e, enum : long { B5 } f);\nvoid f6(struct S6 *p);\n"
+                  "void f7(struct S7 *p) { (void)p; }\nint f8(struct S8 (*fp)(struct S9 *q));\nvoid f9(struct S10 *p, int (*g)(struct S10 *));\n"
+                  "void (*f10)(struct S11 *);\nvoid f11(void) { void g(struct S12 *); }\nvoid f12(struct { int a; } *p, struct A { struct B *b; } *a);\n"
+                  "struct V { void (*fp)(struct U *); };\nstruct T { int b; };\nvoid g1(struct T *p, struct T { int c; } *q);\n"
+                  "int g4(int (*a)[sizeof(struct Q { int q; })]);\n",
+        .warnings = 10,
+        .c23 = true,
+    },
+    {
+        // -Wvisibility's policy: its option and a source pragma.
+        .name = "prototype tag visibility policy",
+        .source = "void f1(struct S1 *p);\n#pragma clang diagnostic push\n#pragma clang diagnostic ignored \"-Wvisibility\"\n"
+                  "void f2(struct S2 *p);\n#pragma clang diagnostic pop\nvoid f3(struct S3 *p, struct S3 { int a; } *q);\n",
+        .options = { "-Wno-visibility" },
+    },
+    {
+        .name = "prototype tag visibility pragma",
+        .source = "void f1(struct S1 *p);\n#pragma clang diagnostic push\n#pragma clang diagnostic ignored \"-Wvisibility\"\n"
+                  "void f2(struct S2 *p);\n#pragma clang diagnostic pop\nint f3(struct S3 { int a; } p, struct S3 { int b; } q);\n",
+        .warnings = 3,
+        .notes = 1,
+    },
+    },
+    {
         // A C23 parameter list's compatible redefinition of its own record (#1869) declares the first's type: the body
         // reads both parameters and a pointer to it as one type, compiled on every path.
         .name = "C23 parameter list redefines its record compatibly",
