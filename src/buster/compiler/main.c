@@ -692,6 +692,8 @@ int run_tier1_model_measure_tests(int argc, char** argv);
 // measure-tier1-programs (#138, #1189): speedtest1 and Lua's scripts by both tiers, clang -O0 and -O2 and tcc, as whole
 // processes in a Williams design's order, against each other.
 #include "buster/compiler/tier1_programs_measure.c"
+// test-sqlite (#146): SQLite's shell by both tiers against clang's, over SQLite's CLI tests and tests/sqlite's scripts.
+#include "buster/compiler/sqlite_test.c"
 // measure-tier1-rows (#1283): vector code (test-checker-driver's machine rows' unit, a lexer's byte scan and the compiler's
 // own lexer) by Tier 0, Tier 1 and another compiler's Tier 1, with the moves around Tier 1's machine rows counted.
 #include "buster/compiler/tier1_rows_measure.c"
@@ -1612,6 +1614,10 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "measure-tier1-programs") == 0)
     {
         result = run_tier1_programs_measure(argc - 1, argv + 1);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "test-sqlite") == 0)
+    {
+        result = run_sqlite_tests(argc - 1, argv + 1);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "measure-tier1-rows") == 0)
     {

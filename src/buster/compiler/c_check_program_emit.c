@@ -498,10 +498,11 @@ static void check_helper_report_add(CheckHelperReport* report, const CheckProgra
             report->direct[CHECK_PROGRAM_HELPER_FENCE] += kind == BUSTER_TYPED_FENCE;
         }
     }
-    // An asm statement placed in its caller (#1059): its X86 entry, once per statement as its helper's call would be.
+    // An asm statement placed in its caller (#1059, #1839): its X86 entry or its asm body, once per statement as its
+    // helper's call would be.
     for (uint32_t s = 0; lowered_all && lowered->asms.plans != 0 && s < program->input->asm_count; s += 1)
     {
-        report->direct[CHECK_PROGRAM_HELPER_ASM] += lowered->asms.plans[s].planned && lowered->asms.plans[s].row != 0;
+        report->direct[CHECK_PROGRAM_HELPER_ASM] += lowered->asms.plans[s].planned && (lowered->asms.plans[s].row != 0 || lowered->asms.plans[s].inlined);
     }
     for (uint32_t h = 0; lowered_all && h < lowered->helpers.count; h += 1)
     {

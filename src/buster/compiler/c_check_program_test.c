@@ -4077,6 +4077,30 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
             "mix(__builtin_mul_overflow(uia,uib,&w));mix((unsigned long long)w);mix(__builtin_mul_overflow(uia,uib,&r));mix(r);"
             "mix(__builtin_add_overflow(ia,uib,&c));mix(c);mix(__builtin_sub_overflow(ia,ib,&bo));mix(bo);}"
             "return (int)(h^(h>>32));}", "overflow-instruction-rows", clang);
+        // The overflow builtins of _BitInts of 65 to 127 bits (#1447), as operands and destinations, beside 128-bit, long,
+        // int and char ones, of boundary values around each width: each overflow, the stored value and the destination's
+        // bytes as clang stores them, extended from its width, hashed.
+        check_test_program_source(test,
+            "typedef _BitInt(65) S65;typedef _BitInt(100) S100;typedef _BitInt(127) S127;\n"
+            "#define U65 unsigned _BitInt(65)\n#define U127 unsigned _BitInt(127)\n"
+            "static unsigned long long h;static void mix(unsigned long long v){h=h*31+v;}"
+            "static void raw(const void*p){unsigned long long w[2];__builtin_memcpy(w,p,16);mix(w[0]);mix(w[1]);}"
+            "static const __int128 one=1;"
+            "static const __int128 values[]={0,1,2,-1,-2,one<<64,-(one<<64),(one<<64)-1,(one<<99)-1,-(one<<99),one<<99,"
+            "(one<<126)-1,-(one<<126),0x7fffffffffffffffL,((__int128)0x5555555555555555L<<40)|3,-(((__int128)0x2aaaaaaaaaaaaaaaL<<50)|7)};"
+            "int tested(int n){h=(unsigned)n;for(unsigned i=0;i<16;i++)for(unsigned j=0;j<16;j++){"
+            "__int128 x=values[i],y=values[(j+(unsigned)n)%16];S100 a=(S100)x,b=(S100)y;U127 ua=(U127)x,ub=(U127)y;S65 c=(S65)x;U65 uc=(U65)y;"
+            "S100 r100;U127 r127u;S127 r127;S65 r65;U65 ru65;int ri;long rl;unsigned char rc;__int128 rw;"
+            "mix(__builtin_add_overflow(a,b,&r100));raw(&r100);mix(__builtin_sub_overflow(a,b,&r100));raw(&r100);"
+            "mix(__builtin_mul_overflow(a,b,&r100));raw(&r100);mix(__builtin_add_overflow(ua,ub,&r127u));raw(&r127u);"
+            "mix(__builtin_sub_overflow(ua,ub,&r127u));raw(&r127u);mix(__builtin_mul_overflow(ua,ub,&r127u));raw(&r127u);"
+            "mix(__builtin_mul_overflow(a,ub,&r127));raw(&r127);mix(__builtin_sub_overflow(ua,b,&r65));raw(&r65);"
+            "mix(__builtin_add_overflow(c,uc,&ru65));raw(&ru65);mix(__builtin_mul_overflow(c,c,&r65));raw(&r65);"
+            "mix(__builtin_mul_overflow(c,uc,&ru65));raw(&ru65);mix(__builtin_sub_overflow(uc,c,&r127));raw(&r127);"
+            "mix(__builtin_mul_overflow(a,b,&ri));mix((unsigned)ri);mix(__builtin_add_overflow(a,(long)y,&rl));mix((unsigned long)rl);"
+            "mix(__builtin_sub_overflow(ua,b,&rc));mix(rc);mix(__builtin_mul_overflow(x,ub,&r100));raw(&r100);"
+            "mix(__builtin_add_overflow((long)n,a,&rw));raw(&rw);mix(__builtin_mul_overflow(y,c,&r127u));raw(&r127u);}"
+            "return (int)(h^(h>>32));}", "bit-int-65-to-127-overflow", clang);
         check_test_program_source(test,
             "int tested(int n){n+=10;typedef int A[n++];int x=n;n+=3;return (int)sizeof(A)+(int)sizeof(A)+n+x;}",
             "vla-typedef-captures-bound-once", clang);
@@ -5597,8 +5621,9 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         check_test_program_boundary(test, "int tested(int n){_Complex __float128 z=n;return __real__ z>1;}", "complex-float128", true, true, 0, 1);
         check_test_program_boundary(test, "int tested(int n){_Complex _Float16 z=n;return __real__ z>1;}", "complex-float16", true, true, 0, 1);
     }
-    // The 128-bit integers, _BitInt(65) to _BitInt(128) and those past 128 bits (in memory, #137): lowered, but the overflow
-    // builtins of a _BitInt of 65 to 127 bits, and a bit-field of them spread over more than 8 bytes, or past 128 bits.
+    // The 128-bit integers, _BitInt(65) to _BitInt(128) and those past 128 bits (in memory, #137): lowered, the overflow
+    // builtins of a _BitInt of 65 to 127 bits too (#1447), but a bit-field of them spread over more than 8 bytes, or past 128
+    // bits.
     if (check_test_takes())
     {
         check_test_program_boundary(test, "__int128 g;int tested(int n){__int128 x=n;g=x*x;return g>1;}", "int128-lowering", true, true, 1, 1);
@@ -5607,8 +5632,7 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         check_test_program_boundary(test, "_BitInt(200) g;int tested(int n){_BitInt(200) x=n;g=x*x;return g>1;}", "bit-int-200-global", true, true, 1, 1);
         check_test_program_boundary_reason(test, "struct W{unsigned _BitInt(200) x:150;};int tested(int n){struct W w;w.x=n;return w.x>1;}", "bit-int-200-bit-field", true,
                                            false, 0, 0, "bit-fields of this type or spread over more than 8 bytes");
-        check_test_program_boundary_reason(test, "int tested(int n){_BitInt(100) r;return __builtin_add_overflow(n,n,&r);}", "bit-int-100-overflow", true, false, 0, 0,
-                                           "overflow builtins of _BitInt of 65 to 127 bits");
+        check_test_program_boundary(test, "int tested(int n){_BitInt(100) r;return __builtin_add_overflow(n,n,&r);}", "bit-int-100-overflow", true, true, 0, 0);
         check_test_program_boundary(test, "struct W{unsigned __int128 x:100;};int tested(int n){struct W w;w.x=n;return w.x>1;}", "int128-bit-field-past-8-bytes", true,
                                     false, 0, 0);
         check_test_program_boundary(test,
