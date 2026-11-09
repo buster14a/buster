@@ -3844,7 +3844,9 @@ value's cut their own constructs alone, not the statement expression, whose
 value clang keeps, nor what holds it (`({ undeclared; p; }) + 1.5`'s
 "invalid operands", #1447): the cut scan steps over them. What remains
 conservative: a statement expression whose value's statement holds the name
-loses the unused-value warnings of its statements before it; an enclosing
+is still cut, where clang reads it as `void` and checks what holds it
+(`({ x; undeclared; }) + 1.5`'s "invalid operands ... 'void'"), and loses the
+unused-value warnings of its statements before it; an enclosing
 operator's warning is published before the statement expression's own
 diagnostics, where clang gives it after them, in valid units too
 (`if (x = ({ printf("%s", 1); x; }))`); a unit with an error publishes no

@@ -218,6 +218,11 @@ static __attribute__((noinline)) void check_test_undeclared(CheckTest* test, con
           "2:33: error: use of undeclared identifier 'undeclared'\n2:28: error: -\n"
           "3:36: error: use of undeclared identifier 'undeclared'\n3:54: warning: -\n"
           "4:27: error: use of undeclared identifier 'undeclared'\n4:47: error: -\n4:66: error: use of undeclared identifier 'undeclared'\n", true },
+        { "nested statement expressions: one in an earlier statement, one in the value's statement (#1447)",
+          "int f(int *p) { return ({ (void)({ missing_a; 1; }); p; }) + 1.5; }\n"
+          "int g(int *p) { return ({ missing_b; ({ missing_c; p; }); }) + 1.5; }\n",
+          "1:36: error: use of undeclared identifier 'missing_a'\n1:60: error: -\n"
+          "2:27: error: use of undeclared identifier 'missing_b'\n2:41: error: use of undeclared identifier 'missing_c'\n2:62: error: -\n", true },
         { "a duplicate case after a case whose statement has the name",
           "int f(int x) { switch (x) { case 1: undeclared; case 1: return 0; } return 1; }\n",
           "1:37: error: use of undeclared identifier 'undeclared'\n1:54: error: -\n", true },
