@@ -418,6 +418,37 @@ struct Tier0Operation
     uint8_t result_bytes;
 };
 
+// An asm statement placed in its caller (#1839): a CALL whose row has no arguments and whose callee is this body, not a
+// symbol (Tier0Function.call_asm). Its records run in the call's place, with no call and no return, and read the
+// statement's operand block, a frame object of the function's (`block`, a local): a record's base of
+// BUSTER_TIER0_ASM_BLOCK addresses it, its displacement a slot's offset in it. They write the registers of `touched`
+// (BUSTER_TIER0_XMM's layout), the flags and memory, nothing that holds the frame (rsp, rbp, r15), no opmask register
+// and no x87 register past the template's own use of its stack, which it leaves empty; they have no reference and no
+// effect on the stack, and leave control flow only by their own branches to their own records, or to their end
+// (c_check_program_asm.c's check_asm_inline_code). Tier 0 takes the call
+// as any other, its clobbers with `touched`'s: the values live across it saved and restored (every depth below it in a
+// register, where `touched` has a callee-saved one), no home in a register it touches, and a callee-saved one it touches
+// saved by the prologue.
+#define BUSTER_TIER0_ASM_BLOCK 0xc0
+// The block of an asm body that reads none: no record of its has BUSTER_TIER0_ASM_BLOCK's base.
+#define BUSTER_TIER0_ASM_NO_BLOCK UINT32_MAX
+// The target of a call row whose callee is an asm body (Tier0Function.call_asm): no symbol's.
+#define BUSTER_TIER0_CALL_ASM_TARGET UINT32_MAX
+typedef struct Tier0AsmBody Tier0AsmBody;
+struct Tier0AsmBody
+{
+    const X86Instruction* records;
+    uint32_t count;
+    uint32_t block;
+    uint32_t touched;
+    // The template's local branches (#1839): `branch_count` of its records, ascending, each a rel8 form that branch sizing
+    // sizes, and each one's target, a record of the body or its count (the body's end), as Tier0Code's branch columns
+    // have them but relative to the body's first record.
+    const uint32_t* branches;
+    const uint32_t* targets;
+    uint32_t branch_count;
+};
+
 // The most a function may have of each (the columns' indices are 32-bit), and of its objects' bytes, each object's
 // size rounded up to 16 and, aligned past 16, its alignment less 16 (the most its place may move by), so that every frame
 // displacement can fit a disp32; layout still checks the complete allocation and each displacement before emission.
@@ -593,6 +624,12 @@ struct Tier0Function
     uint32_t vector_constant_count;
     const Tier0Operation* operations;
     uint32_t operation_count;
+    // The asm statements placed in their callers (#1839), an optional column, 0 for a function without them: call_asm[c]
+    // is 1 + b for a CALL of call row c whose callee is asm body b (Tier0AsmBody) of `asm_bodies`, of asm_body_count, and 0
+    // for any other call. Such a row has no arguments, a VOID result and a target of BUSTER_TIER0_CALL_ASM_TARGET.
+    const uint32_t* call_asm;
+    const Tier0AsmBody* asm_bodies;
+    uint32_t asm_body_count;
     bool vectors;
     bool masks;
     // Whether a LOAD, STORE or SET has a segment override (#1447, BUSTER_TYPED_ACCESS_SEGMENT): a load or store in
@@ -655,7 +692,8 @@ struct Tier0Function
     // saved, so that their System V locations take them as ever (tier0_emit_interrupt). The error code's frame is 8
     // bytes out of a call's alignment, which its reservation makes up; its epilogue steps over the error code. It ends
     // with iretq. It keeps no temporary below rsp, where a nested interrupt's frame would land: its red zone's
-    // temporaries are its frame's (Tier0Frame.temporaries). Its result is void, and it takes no variadic arguments.
+    // temporaries are its frame's (Tier0Frame.temporaries). Its result is void. A variadic one's list (#1447) starts at
+    // the interrupted code's registers, which its prologue saves before its entry gives rdi and rsi its parameters.
     uint8_t interrupt;
     // Whether the prologue realigns the stack to 16 bytes at least (#1447, x86's force_align_arg_pointer, LLVM's
     // stackrealign), as a frame whose objects need more does (tier0_frame_alignment): its caller, an interrupt handler or
@@ -686,6 +724,7 @@ static bool tier0_is_object(const Tier0Function* function, uint64_t local)
 static bool tier0_parameters_valid(const Tier0Function* function);
 static bool tier0_aggregates_valid(const Tier0Function* function);
 static bool tier0_preserve_valid(const Tier0Function* function);
+static bool tier0_asm_bodies_valid(const Tier0Function* function);
 
 // The optional frame descriptors are checked even when unused. The typed stream itself retains tier0_validate's
 // valid-input precondition; these checks also let both compile paths refuse malformed optional frame metadata: the
@@ -715,7 +754,7 @@ static __attribute__((noinline)) bool tier0_frame_input_valid(const Tier0Functio
         }
     }
     valid = valid && ((incoming == 0 && function->local_sizes == 0) || tier0_parameters_valid(function));
-    return valid && tier0_preserve_valid(function) && tier0_aggregates_valid(function);
+    return valid && tier0_preserve_valid(function) && tier0_aggregates_valid(function) && tier0_asm_bodies_valid(function);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -1001,12 +1040,15 @@ static bool tier0_preserve_valid(const Tier0Function* function)
     const bool widths = (vectors == 0 && bytes == 0) || (vectors != 0 && (vectors >> 16) == 0 && (bytes == 16 || bytes == 32 || bytes == 64)) ||
                         ((vectors >> 16) != 0 && bytes == 64);
     // An interrupt service routine (Tier0Function.interrupt) keeps registers, returns nothing, and takes its frame's
-    // address, and the error code where it has one, at their System V locations, in rdi and rsi, without variadic ones.
+    // address, and the error code where it has one, at their System V locations, in rdi and rsi; a variadic one's list
+    // takes no register for them (#1447).
     const uint32_t interrupt = function->interrupt;
     const AbiLocation* parameters = function->parameters;
+    const AbiCall* incoming = function->incoming_variadic;
     const bool handler = interrupt == 0 ||
                          (interrupt <= BUSTER_TIER0_INTERRUPT_ERROR_CODE && preserving && function->parameter_count == interrupt && parameters != 0 &&
-                          function->result.kind == BUSTER_ABI_RESULT_IGNORE && function->incoming_variadic == 0 &&
+                          function->result.kind == BUSTER_ABI_RESULT_IGNORE &&
+                          (incoming == 0 || (incoming->integer_registers == 0 && incoming->vector_registers == 0)) &&
                           parameters[0].kind == BUSTER_ABI_LOCATION_REGISTERS && parameters[0].registers[0] == X86_REGISTER_RDI &&
                           (interrupt == BUSTER_TIER0_INTERRUPT_HANDLER ||
                            (parameters[1].kind == BUSTER_ABI_LOCATION_REGISTERS && parameters[1].registers[0] == X86_REGISTER_RSI)));
@@ -6389,6 +6431,139 @@ static uint32_t tier0_mask_extension(uint32_t class, uint64_t bytes)
     return form;
 }
 
+// The asm body call row `call` runs in its place (#1839, Tier0AsmBody), or 0 for a call of a callee.
+static const Tier0AsmBody* tier0_call_body(const Tier0Function* function, uint32_t call)
+{
+    const uint32_t index = function->call_asm != 0 ? function->call_asm[call] : 0;
+    return index != 0 && index <= function->asm_body_count ? &function->asm_bodies[index - 1] : 0;
+}
+
+// Whether the asm bodies (#1839) are as Tier0AsmBody has them: each named by call rows of no arguments and the body
+// target alone, which only CALL entries of class VOID make; its block an object of the function's; and its touched
+// registers none that holds the frame (rsp, rbp, r15). Out of line and cold: few functions have them.
+static __attribute__((noinline, cold)) bool tier0_asm_bodies_check(const Tier0Function* function)
+{
+    bool valid = function->call_asm != 0 && (function->asm_body_count == 0 || function->asm_bodies != 0);
+    for (uint32_t b = 0; valid && b < function->asm_body_count; b += 1)
+    {
+        const Tier0AsmBody* body = &function->asm_bodies[b];
+        valid = (body->block == BUSTER_TIER0_ASM_NO_BLOCK || (body->block < function->local_count && tier0_is_object(function, body->block))) &&
+                (body->count == 0 || body->records != 0) &&
+                (body->touched & (1u << X86_REGISTER_RSP | 1u << X86_REGISTER_RBP | 1u << X86_REGISTER_R15)) == 0;
+        valid = valid && body->branch_count <= body->count && (body->branch_count == 0 || (body->branches != 0 && body->targets != 0));
+        for (uint32_t b = 0; valid && b < body->branch_count; b += 1)
+        {
+            valid = body->branches[b] < body->count && (b == 0 || body->branches[b - 1] < body->branches[b]) && body->targets[b] <= body->count;
+        }
+        for (uint32_t r = 0; valid && r < body->count; r += 1)
+        {
+            const X86Instruction* record = &body->records[r];
+            const bool block = (record->mode & BUSTER_X86_MODE_MEMORY) != 0 && (record->mode & BUSTER_X86_MODE_BASE) != 0 && record->rm == BUSTER_TIER0_ASM_BLOCK;
+            valid = !block || body->block != BUSTER_TIER0_ASM_NO_BLOCK;
+        }
+    }
+    for (uint32_t c = 0; valid && c < function->call_count; c += 1)
+    {
+        const uint32_t index = function->call_asm[c];
+        valid = index == 0 ? function->call_targets[c] != BUSTER_TIER0_CALL_ASM_TARGET
+                           : index <= function->asm_body_count && function->call_argument_counts[c] == 0 && function->call_targets[c] == BUSTER_TIER0_CALL_ASM_TARGET &&
+                                 (function->call_tails == 0 || function->call_tails[c] == 0) && (function->call_result_objects == 0 || function->call_result_objects[c] == 0) &&
+                                 !function->call_variadic[c];
+    }
+    for (uint32_t i = 0; valid && i < function->count; i += 1)
+    {
+        const uint32_t kind = function->kinds[i];
+        const bool row = kind == BUSTER_TYPED_CALL || kind == BUSTER_TYPED_TAIL_CALL;
+        const bool body = row && function->values[i] < function->call_count && function->call_asm[function->values[i]] != 0;
+        valid = !body || (kind == BUSTER_TYPED_CALL && function->classes[i] == BUSTER_TYPED_CLASS_VOID);
+    }
+    return valid;
+}
+
+static bool tier0_asm_bodies_valid(const Tier0Function* function)
+{
+    return (function->call_asm == 0 && function->asm_body_count == 0) || tier0_asm_bodies_check(function);
+}
+
+// How many of the `below` integer depths under call row `call`'s operands it saves around itself: those in caller-saved
+// registers, which a callee may overwrite (a callee keeps the others), or every one in a register where the row is an
+// asm body that touches a callee-saved register.
+static uint32_t tier0_call_saved(const Tier0Function* function, uint32_t call, uint32_t below)
+{
+    const Tier0AsmBody* body = tier0_call_body(function, call);
+    const bool callee_saved = body != 0 && (body->touched & 0xffffu & ~BUSTER_TIER0_GENERAL_CALLER_SAVED) != 0;
+    const uint32_t limit = callee_saved ? BUSTER_TIER0_INTEGER_DEPTHS : BUSTER_TIER0_CALLER_SAVED_DEPTHS;
+    return below < limit ? below : limit;
+}
+
+// The call itself: the callee's `call` (a direct one's reference, or through r11), or an asm body's records in its place,
+// each that addresses the operand block (BUSTER_TIER0_ASM_BLOCK) addressing the block's home.
+static void tier0_emit_call_record(const Tier0Function* function, const Tier0Home* homes, uint32_t call, Tier0Writer* writer)
+{
+    const Tier0AsmBody* body = tier0_call_body(function, call);
+    if (body != 0)
+    {
+        const uint32_t first = writer->count;
+        uint32_t branch = 0;
+        for (uint32_t r = 0; r < body->count; r += 1)
+        {
+            X86Instruction record = body->records[r];
+            if ((record.mode & BUSTER_X86_MODE_MEMORY) != 0 && (record.mode & BUSTER_X86_MODE_BASE) != 0 && record.rm == BUSTER_TIER0_ASM_BLOCK)
+            {
+                const Tier0Home block = homes[body->block];
+                record.rm = block.reg;
+                record.displacement += block.displacement;
+            }
+            if (branch < body->branch_count && body->branches[branch] == r)
+            {
+                // The template's own branch, which branch sizing sizes as the function's: its target in the function's records.
+                if (writer->records != 0)
+                {
+                    writer->branches[writer->branch_count] = writer->count;
+                    writer->targets[writer->branch_count] = first + body->targets[branch];
+                }
+                writer->branch_count += 1;
+                branch += 1;
+            }
+            tier0_put(writer, record);
+        }
+    }
+    else if (function->call_targets[call] == 0)
+    {
+        tier0_put(writer, tier0_instruction(X86_FORM_CALL_RM64, 0, X86_REGISTER_R11, BUSTER_X86_REGISTER_DIRECT, 0, 0));
+    }
+    else
+    {
+        if (writer->records != 0)
+        {
+            writer->references[writer->reference_count] = (LinkReference){
+                .instruction = writer->count,
+                .field = X86_FIXUP_DISPLACEMENT,
+                .kind = BUSTER_LINK_FIXUP_CALL,
+                .target = function->call_targets[call],
+                .addend = 0,
+            };
+        }
+        writer->reference_count += 1;
+        tier0_put(writer, tier0_instruction(X86_FORM_CALL_REL32 | BUSTER_X86_FORM_FIXUP, 0, 0, 0, 0, 0));
+    }
+}
+
+// How many branches tier0_emit_call_record writes for call row `call`: an asm body's own.
+static uint32_t tier0_count_call_branches(const Tier0Function* function, uint32_t call)
+{
+    const Tier0AsmBody* body = tier0_call_body(function, call);
+    return body != 0 ? body->branch_count : 0;
+}
+
+// How many records tier0_emit_call_record writes for call row `call`, and its references into `references`.
+static uint32_t tier0_count_call_record(const Tier0Function* function, uint32_t call, uint32_t* references)
+{
+    const Tier0AsmBody* body = tier0_call_body(function, call);
+    *references += body == 0 && function->call_targets[call] != 0 ? 1 : 0;
+    return body != 0 ? body->count : 1;
+}
+
 // A call: the depths below its arguments (and an indirect call's callee) saved, the stack arguments stored, the register
 // ones moved into place, with an indirect call's callee into r11 (no argument's register, nor al's), al for a variadic
 // call, the call, the result moved to its depth, and the saved depths restored.
@@ -6433,7 +6608,7 @@ static inline __attribute__((always_inline)) void tier0_emit_call(const Tier0Fun
     const uint32_t floating_below = entries->floating_depths[i] - floating_arguments;
     // The depths below the arguments in callee-saved registers survive the call by themselves. The others go to the save
     // area, a region of the call's own in a function that calls __builtin_setjmp (tier0_layout_frame).
-    const uint32_t saved = below < BUSTER_TIER0_CALLER_SAVED_DEPTHS ? below : BUSTER_TIER0_CALLER_SAVED_DEPTHS;
+    const uint32_t saved = tier0_call_saved(function, call, below);
     const uint32_t region = frame->save_area + (function->returns_twice ? 8 * frame->save_slots * call : 0);
     for (uint32_t d = 0; d < saved; d += 1)
     {
@@ -6528,25 +6703,7 @@ static inline __attribute__((always_inline)) void tier0_emit_call(const Tier0Fun
         {
             tier0_put(writer, tier0_instruction(X86_FORM_MOV_R32_IMM32, 0, X86_REGISTER_RAX, 0, 0, function->calls[call].vector_registers));
         }
-        if (indirect)
-        {
-            tier0_put(writer, tier0_instruction(X86_FORM_CALL_RM64, 0, X86_REGISTER_R11, BUSTER_X86_REGISTER_DIRECT, 0, 0));
-        }
-        else
-        {
-            if (writer->records != 0)
-            {
-                writer->references[writer->reference_count] = (LinkReference){
-                    .instruction = writer->count,
-                    .field = X86_FIXUP_DISPLACEMENT,
-                    .kind = BUSTER_LINK_FIXUP_CALL,
-                    .target = function->call_targets[call],
-                    .addend = 0,
-                };
-            }
-            writer->reference_count += 1;
-            tier0_put(writer, tier0_instruction(X86_FORM_CALL_REL32 | BUSTER_X86_FORM_FIXUP, 0, 0, 0, 0, 0));
-        }
+        tier0_emit_call_record(function, homes, call, writer);
         const uint32_t result = tier0_stack(function->classes[i]);
         if (object != 0 && returned.kind == BUSTER_ABI_RESULT_REGISTERS)
         {
@@ -8782,25 +8939,7 @@ static void tier0_emit_deep_call(const Tier0Function* function, const Tier0Entri
         {
             tier0_put(writer, tier0_instruction(X86_FORM_MOV_R32_IMM32, 0, X86_REGISTER_RAX, 0, 0, function->calls[call].vector_registers));
         }
-        if (indirect)
-        {
-            tier0_put(writer, tier0_instruction(X86_FORM_CALL_RM64, 0, X86_REGISTER_R11, BUSTER_X86_REGISTER_DIRECT, 0, 0));
-        }
-        else
-        {
-            if (writer->records != 0)
-            {
-                writer->references[writer->reference_count] = (LinkReference){
-                    .instruction = writer->count,
-                    .field = X86_FIXUP_DISPLACEMENT,
-                    .kind = BUSTER_LINK_FIXUP_CALL,
-                    .target = function->call_targets[call],
-                    .addend = 0,
-                };
-            }
-            writer->reference_count += 1;
-            tier0_put(writer, tier0_instruction(X86_FORM_CALL_REL32 | BUSTER_X86_FORM_FIXUP, 0, 0, 0, 0, 0));
-        }
+        tier0_emit_call_record(function, homes, call, writer);
         const uint32_t result = tier0_stack(function->classes[i]);
         if (object != 0 && returned.kind == BUSTER_ABI_RESULT_REGISTERS)
         {
@@ -9123,7 +9262,7 @@ static inline __attribute__((always_inline)) uint32_t tier0_count_call(const Tie
     from[moves] = callee;
     moves += callee != X86_REGISTER_R11 ? 1 : 0;
     const uint32_t floating_below = floating_depth - floating_after;
-    const uint32_t saved = below < BUSTER_TIER0_CALLER_SAVED_DEPTHS ? below : BUSTER_TIER0_CALLER_SAVED_DEPTHS;
+    const uint32_t saved = tier0_call_saved(function, call, below);
     count += 2 * (saved + floating_below + (memory ? tier0_saved_masks(entries, i) : 0));
     // The cycles among the moves, as tier0_parallel_moves finds them: the paths' moves taken away, what is left.
     uint8_t source_of[32];
@@ -9157,7 +9296,7 @@ static inline __attribute__((always_inline)) uint32_t tier0_count_call(const Tie
     count += moves - cycles;
     count += function->call_variadic[call] ? 1 : 0;
     const uint32_t stack_bytes = function->calls[call].stack_bytes;
-    count += !tail ? 1 : (stack_bytes != 0 ? tier0_copy_records(stack_bytes) : 0) + tier0_tail_finish(function, entries, call);
+    count += !tail ? tier0_count_call_record(function, call, references) : (stack_bytes != 0 ? tier0_copy_records(stack_bytes) : 0) + tier0_tail_finish(function, entries, call);
     // A result object: its address in rdi for a hidden pointer, or a store per part of the result's registers, which
     // take the result's move's place.
     const uint32_t object = function->call_result_objects != 0 ? function->call_result_objects[call] : 0;
@@ -9166,7 +9305,7 @@ static inline __attribute__((always_inline)) uint32_t tier0_count_call(const Tie
     // A long double's result is stored into its slot at every depth.
     const uint32_t result = tier0_stack(function->classes[i]);
     count += !stored && ((result == 1 && (below != 0 || (memory && tier0_class_x87(function->classes[i])))) || (result == 2 && floating_below != 0)) ? 1 : 0;
-    *references += indirect ? 0 : 1;
+    *references += tail && !indirect ? 1 : 0;
     return count;
 }
 
@@ -9260,6 +9399,8 @@ static inline __attribute__((always_inline)) uint32_t tier0_count_deferred(const
         const uint32_t value = tier0_integer_depths[entries->depths[i] - 2];
         count = value == X86_REGISTER_RCX ? 3 : 4;
     }
+    // An asm body's own branches (#1839).
+    *branches += kind == BUSTER_TYPED_CALL ? tier0_count_call_branches(function, (uint32_t)function->values[i]) : 0;
     return count;
 }
 
@@ -9448,14 +9589,12 @@ static void tier0_emit_prologue(const Tier0Function* function, const Tier0Frame*
     {
         tier0_emit_realignment(frame, writer);
     }
-    if (frame->interrupt != 0)
-    {
-        tier0_emit_interrupt(frame, writer);
-    }
     if (function->incoming_variadic != 0)
     {
         // Snapshot before any parameter home move can overwrite an unnamed argument. Full unaligned baseline
-        // XMM stores preserve all 128 bits without reading AL, adding branches or touching FP status/control.
+        // XMM stores preserve all 128 bits without reading AL, adding branches or touching FP status/control. A variadic
+        // interrupt service routine's are the interrupted code's registers, before its entry gives rdi and rsi its
+        // parameters (#1447), as LLVM's x86_intrcc saves them.
         for (uint32_t general = 0; general < BUSTER_ABI_INTEGER_ARGUMENTS; general += 1)
         {
             tier0_put(writer, tier0_instruction(X86_FORM_MOV_RM64_R64, abi_integer_arguments[general], X86_REGISTER_RSP, BUSTER_X86_MEMORY_BASE,
@@ -9466,6 +9605,10 @@ static void tier0_emit_prologue(const Tier0Function* function, const Tier0Frame*
             tier0_put(writer, tier0_instruction(X86_FORM_MOVUPS_XM_X, vector, X86_REGISTER_RSP, BUSTER_X86_MEMORY_BASE,
                 (int32_t)(frame->variadic_area + BUSTER_ABI_SAVE_AREA_VECTOR_OFFSET + vector * BUSTER_ABI_SAVE_AREA_VECTOR_SLOT_BYTES), 0));
         }
+    }
+    if (frame->interrupt != 0)
+    {
+        tier0_emit_interrupt(frame, writer);
     }
     // Each parameter into its home: a register's moved or stored, and a register home of one on the stack loaded from its
     // incoming slot. No home is an arrival register (tier0_assign_homes), so the order doesn't matter. An aggregate's
@@ -9748,13 +9891,14 @@ static inline __attribute__((always_inline)) uint32_t tier0_select_entries(const
                     }
                     const int32_t below = depth - (int32_t)integer_arguments - (function->call_targets[call] == 0 ? 1 : 0);
                     const int32_t floating_below = floating - (int32_t)floating_arguments;
-                    const uint32_t saved = below < BUSTER_TIER0_CALLER_SAVED_DEPTHS ? (uint32_t)below : BUSTER_TIER0_CALLER_SAVED_DEPTHS;
+                    const uint32_t saved = tier0_call_saved(function, call, (uint32_t)below);
                     const uint32_t slots = saved + (uint32_t)floating_below;
                     save_slots = slots > save_slots ? slots : save_slots;
                     const uint32_t result = tier0_stack(function->classes[i]);
                     integer_top = result == 1 && below > integer_top ? below : integer_top;
                     floating_top = result == 2 && floating_below > floating_top ? floating_below : floating_top;
-                    clobbers |= BUSTER_TIER0_GENERAL_CALLER_SAVED | BUSTER_TIER0_XMM_ALL;
+                    const Tier0AsmBody* body = tier0_call_body(function, call);
+                    clobbers |= BUSTER_TIER0_GENERAL_CALLER_SAVED | BUSTER_TIER0_XMM_ALL | (body != 0 ? body->touched : 0);
                     calls = true;
                 }
                 else if (function->kinds[i] == BUSTER_TYPED_TAIL_CALL)
@@ -10140,7 +10284,7 @@ static Tier0Error tier0_select_deep(const Tier0Function* function, Tier0Entries*
                     // prefix and an enormous save area. Only ordinary calls save registers; recompute their need.
                     const uint32_t below = exit[0] - (stack == 1 ? 1 : 0);
                     const uint32_t floating_below = exit[1] - (stack == 2 ? 1 : 0);
-                    const uint32_t saved = below < BUSTER_TIER0_CALLER_SAVED_DEPTHS ? below : BUSTER_TIER0_CALLER_SAVED_DEPTHS;
+                    const uint32_t saved = tier0_call_saved(function, call, below);
                     const uint32_t needed = saved + floating_below;
                     save_slots = needed > save_slots ? needed : save_slots;
                 }
@@ -10343,10 +10487,12 @@ static uint32_t tier0_count_deep(const Tier0Function* function, const Tier0Entri
         count += indirect ? 1 : 0;
         count += object != 0 ? tier0_result_object_records(function->calls[call].result) : 0;
         count += function->call_variadic[call] ? 1 : 0;
-        count += !tail ? 1 : (stack_bytes != 0 ? tier0_copy_records(stack_bytes) : 0) + tier0_tail_finish(function, entries, call);
+        uint32_t references = tail && !indirect ? 1 : 0;
+        count += !tail ? tier0_count_call_record(function, call, &references) : (stack_bytes != 0 ? tier0_copy_records(stack_bytes) : 0) + tier0_tail_finish(function, entries, call);
         count += !stored && tier0_stack(function->classes[i]) != 0 ? 1 : 0;
         count += 2 * tier0_saved_masks(entries, i);
-        counts->references += indirect ? 0 : 1;
+        counts->references += references;
+        counts->branches += !tail ? tier0_count_call_branches(function, call) : 0;
     }
     else
     {
@@ -13203,13 +13349,14 @@ static inline __attribute__((always_inline)) uint32_t tier0_select_vector_entrie
                 }
                 const int32_t below = entry_depth - (int32_t)integer_arguments - (function->call_targets[call] == 0 ? 1 : 0);
                 const int32_t floating_below = entry_floating - (int32_t)floating_arguments;
-                const uint32_t saved = below < BUSTER_TIER0_CALLER_SAVED_DEPTHS ? (uint32_t)below : BUSTER_TIER0_CALLER_SAVED_DEPTHS;
+                const uint32_t saved = tier0_call_saved(function, call, (uint32_t)below);
                 const uint32_t slots = saved + (uint32_t)floating_below;
                 save_slots = slots > save_slots ? slots : save_slots;
                 const uint32_t result = tier0_stack(function->classes[i]);
                 deferred_integer_top = result == 1 && below > deferred_integer_top ? below : deferred_integer_top;
                 deferred_floating_top = result == 2 && floating_below > deferred_floating_top ? floating_below : deferred_floating_top;
-                clobbers |= BUSTER_TIER0_GENERAL_CALLER_SAVED | BUSTER_TIER0_XMM_ALL;
+                const Tier0AsmBody* body = tier0_call_body(function, call);
+                clobbers |= BUSTER_TIER0_GENERAL_CALLER_SAVED | BUSTER_TIER0_XMM_ALL | (body != 0 ? body->touched : 0);
                 calls = true;
             }
             else if (function->kinds[i] == BUSTER_TYPED_TAIL_CALL)
