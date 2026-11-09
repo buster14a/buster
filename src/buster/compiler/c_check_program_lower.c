@@ -9805,31 +9805,16 @@ static void check_lower_limb_bits_popcount(CheckLowerWriter* writer, const Check
 // for such a source, limb by limb, its bits zero-extended from its width, the alignment's zero-extended or truncated to
 // it, and the mask M the alignment less 1 in that width (all ones for one that truncates to 0) by a borrow chain; align_up
 // is (x + M) & ~M by a carry chain, align_down x & ~M, each a frame object of the source's type whose address it leaves,
-// and is_aligned whether (x & M)'s limbs are all zero. A narrower source's alignment past 128 bits is truncated to its
-// one or two limbs, which the recipe takes (false).
-static bool check_lower_align_limbs(CheckLowerWriter* writer, CBuiltinMiscLowerCall* call)
+// and is_aligned whether (x & M)'s limbs are all zero. An alignment past 128 bits is the checker's refusal (its constant
+// can't be checked yet).
+static bool check_lower_align_limbs(CheckLowerWriter* writer, const CBuiltinMiscLowerCall* call)
 {
     const CheckLowerLimbs x = check_lower_limb_described(call->argument_types[0]);
-    bool done = true;
+    const bool done = true;
     if (x.width <= 128)
     {
-        const bool wide = x.width > 64;
-        const uint32_t alignment = check_lower_temporary(writer, wide ? BUSTER_TYPED_CLASS_U128 : BUSTER_TYPED_CLASS_U64);
-        for (uint32_t limb = 0; limb < (wide ? 2u : 1u) && writer->output->status == CHECK_PROGRAM_OK; limb += 1)
-        {
-            if (wide)
-            {
-                check_lower_emit(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, alignment);
-                check_lower_offset(writer, 8 * (uint64_t)limb);
-            }
-            check_lower_limb_argument(writer, call->arguments[1], call->argument_types[1], limb, true);
-            check_lower_emit(writer, wide ? BUSTER_TYPED_SET : BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, wide ? 0 : alignment);
-        }
-        call->arguments[1] = alignment;
-        call->argument_types[1] = wide ? BUSTER_CBUILTIN_LOWER_WIDE : 64;
-        call->argument_types[0] = check_lower_limb_recipe_type(call->argument_types[0]);
-        call->result_type = check_lower_limb_recipe_type(call->result_type);
-        done = false;
+        // An alignment past 128 bits of a narrower source, which the checker refuses (its constant can't be checked yet).
+        check_lower_unsupported(writer, "alignments past 128 bits");
     }
     else
     {

@@ -67,6 +67,24 @@ static __attribute__((noinline)) void check_test_align_sources(CheckTest* test, 
         { .name = "align: an alignment past an int's", .source = "int f(int x)\n{\nreturn __builtin_align_up(x, 4294967296L);\n}\n", .rejected = true },
         { .name = "align: the largest alignment of an int and of a pointer", .source =
           "int f(int x, char* p)\n{\nreturn __builtin_align_up(x, 2147483648L) + (int)(long)__builtin_align_down(p, 0x8000000000000000ul);\n}\n" },
+        // A source past 128 bits (#1447): its constant alignments checked as any source's; an alignment past 128 bits refused
+        // by name, as the checker can't tell its constant (zero, negative, past the source's range or no power of 2) from a
+        // runtime one yet, at clang's error's line (a valid one's refusal, which clang takes, is test-check-builtins-misc's).
+        { .name = "align: a wide source's alignment of 0", .source = "unsigned _BitInt(200) f(unsigned _BitInt(200) x)\n{\nreturn __builtin_align_up(x, 0);\n}\n",
+          .rejected = true },
+        { .name = "align: a wide source's negative alignment", .source = "_BitInt(200) f(_BitInt(200) x)\n{\nreturn __builtin_align_down(x, -8);\n}\n", .rejected = true },
+        { .name = "align: a wide source's alignment that isn't a power of 2", .source = "int f(unsigned _BitInt(256) x)\n{\nreturn __builtin_is_aligned(x, 3);\n}\n",
+          .rejected = true },
+        { .name = "align: a wide source's alignments", .source =
+          "unsigned _BitInt(200) f(unsigned _BitInt(200) x, long a)\n{\nreturn __builtin_align_up(x, 16) + __builtin_align_down(x, (unsigned __int128)1 << 127) + __builtin_align_up(x, a);\n}\n" },
+        { .name = "align: a wide alignment that isn't a power of 2", .source = "int f(int x)\n{\nreturn __builtin_align_up(x, (unsigned _BitInt(200))3);\n}\n",
+          .rejected = true },
+        { .name = "align: a wide alignment of 0", .source = "int f(unsigned _BitInt(200) x)\n{\nreturn __builtin_is_aligned(x, (unsigned _BitInt(200))0);\n}\n",
+          .rejected = true },
+        { .name = "align: a negative wide alignment", .source = "int f(int x)\n{\nreturn __builtin_align_down(x, (_BitInt(200))-8);\n}\n",
+          .rejected = true },
+        { .name = "align: a wide alignment past an int's", .source = "int f(int x)\n{\nreturn __builtin_align_up(x, (unsigned _BitInt(200))1 << 40);\n}\n",
+          .rejected = true },
         { .name = "align: an alignment past its side effects", .source = "int g(void);\nint f(int x)\n{\nreturn __builtin_align_up(x, (g(), 3));\n}\n",
           .rejected = true },
         { .name = "align: an unknown alignment", .source = "int f(int x, int a)\n{\nreturn __builtin_align_down(x, a) + __builtin_is_aligned(x, a);\n}\n" },
@@ -205,25 +223,22 @@ static __attribute__((noinline)) void check_test_align_programs(CheckTest* test,
         "return (int)(h^(h>>32));}",
         "align-128-bit-and-wide-bit-int-sources-and-alignments", clang);
     // _BitInts past 128 bits (#1447) as sources, limb by limb (check_lower_align_limbs), signed and unsigned, of 129, 200 and
-    // 256 bits, by alignments of every width, and as alignments of narrower sources, truncated to them; the results' bytes
-    // hashed.
+    // 256 bits, by alignments of every width up to 128 bits (a wider one is refused by name); the results' bytes hashed.
     check_test_program_source(test,
-        "typedef unsigned _BitInt(200) U;typedef _BitInt(200) S;typedef unsigned _BitInt(256) W;typedef _BitInt(129) T;\n"
+        "typedef unsigned _BitInt(200) U;typedef _BitInt(200) S;typedef unsigned _BitInt(256) W;typedef _BitInt(129) T;typedef unsigned __int128 Q;\n"
         "static unsigned long long h;static void mix(unsigned long long v){h=h*31+v;}\n"
         "static void raw(const void*p,unsigned n){unsigned long long w[8];__builtin_memcpy(w,p,n);for(unsigned i=0;i<n/8;i++)mix(w[i]);}\n"
         "int tested(int n){h=(unsigned)n;unsigned long long s=0x9e3779b97f4a7c15ull*(unsigned)(n+1);\n"
         "for(unsigned i=0;i<300;i++){s^=s<<13;s^=s>>7;s^=s<<17;\n"
         "W w=((W)s<<(s%200))^s^(i%5==0?~(W)0:0);U x=(U)w;S y=(S)w;T t=(T)w;\n"
-        "unsigned shift=(unsigned)(s%199);U a=(U)1<<shift;int ai=1<<(i%31);long al=1L<<(i%63);W aw=(W)1<<(s%255);\n"
+        "Q a=(Q)1<<(s%128);int ai=1<<(i%31);long al=1L<<(i%63);unsigned char ac=(unsigned char)(1u<<(i%8));\n"
         "U r=__builtin_align_up(x,ai);raw(&r,32);r=__builtin_align_down(x,al);raw(&r,32);mix(__builtin_is_aligned(x,a));\n"
-        "S q=__builtin_align_up(y,a);raw(&q,32);q=__builtin_align_down(y,aw);raw(&q,32);mix(__builtin_is_aligned(y,ai));\n"
-        "W v=__builtin_align_up(w,aw);raw(&v,32);v=__builtin_align_up(w,a);raw(&v,32);mix(__builtin_is_aligned(w,aw));\n"
-        "T z=__builtin_align_up(t,(U)1<<(s%128));raw(&z,24);z=__builtin_align_down(t,ai);raw(&z,24);mix(__builtin_is_aligned(t,al));\n"
-        "mix((unsigned)__builtin_align_up((unsigned)s,(U)1<<(i%32)));mix((unsigned long)__builtin_align_down((long)s,(W)1<<(i%63)));\n"
-        "mix(__builtin_is_aligned((unsigned short)s,(U)1<<(i%16)));\n"
-        "{unsigned __int128 o=__builtin_align_up((unsigned __int128)w,(W)1<<(i%127));raw(&o,16);_BitInt(100) p=__builtin_align_down((_BitInt(100))w,(U)1<<(i%99));raw(&p,16);}\n"
+        "S q=__builtin_align_up(y,a);raw(&q,32);q=__builtin_align_down(y,ac);raw(&q,32);mix(__builtin_is_aligned(y,ai));\n"
+        "W v=__builtin_align_up(w,a);raw(&v,32);v=__builtin_align_down(w,al);raw(&v,32);mix(__builtin_is_aligned(w,ac));\n"
+        "T z=__builtin_align_up(t,a);raw(&z,24);z=__builtin_align_down(t,ai);raw(&z,24);mix(__builtin_is_aligned(t,al));\n"
+        "r=__builtin_align_up(x,(Q)1<<127);raw(&r,32);v=__builtin_align_up(w,16);raw(&v,32);\n"
         "}return (int)(h^(h>>32));}",
-        "align-bit-int-sources-and-alignments-past-128-bits", clang);
+        "align-bit-int-sources-past-128-bits", clang);
     // Addresses in static data and frames, folded and at run time: offsets from n, and the arrays' own alignment (#978).
     check_test_program_source(test,
         "static char buf[64];static _Alignas(32) char aligned[96];char pad;static char*up=__builtin_align_up(&buf[3],8);"
