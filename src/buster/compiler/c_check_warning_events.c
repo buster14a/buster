@@ -118,6 +118,9 @@ enum
     // statement increment or decrement (#1447, clang's CheckForLoopConditionalStatement and CheckForRedundantIteration):
     // -Wfor-loop-analysis, off by default, under -Wloop-analysis and -Wmost and so -Wall.
     CHECK_WARNING_ID_FOR_LOOP_ANALYSIS = 110,
+    // A C23 record's redefinition whose attributes differ (#1447, c_check_tag_compatible.c): clang's -Wodr, an error by
+    // default (check_input_odr_severity).
+    CHECK_WARNING_ID_ODR = 111,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -362,6 +365,10 @@ typedef enum CheckWarningEventKind
     // payload.first_type and second_type its operands' types as clang's getEnumCoercedType gives them, payload.name and
     // data their typedef spellings (0 for none). check_common_enum_arithmetic reports it as the graph's operators.
     CHECK_WARNING_EVENT_ENUM_MIX,
+    // A C23 record's redefinition whose attributes (payload.data 0) or a member's (1) differ from the earlier's, as a
+    // warning (#1447, -Wno-error=odr or a pragma's): at its name, with a CHECK_WARNING_NOTE_ATTRIBUTE_HERE at each list's
+    // differing attribute, the earlier's first.
+    CHECK_WARNING_EVENT_ODR_ATTRIBUTE,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
 
@@ -395,6 +402,8 @@ typedef enum CheckWarningNoteKind
     CHECK_WARNING_NOTE_DECLARED_HERE,
     // "from 'diagnose_if' attribute on 'f':" (#1447), payload.name the function's name.
     CHECK_WARNING_NOTE_DIAGNOSE_IF,
+    // "attribute 'packed' here" (#1447, CHECK_WARNING_EVENT_ODR_ATTRIBUTE's), payload.name the attribute's name.
+    CHECK_WARNING_NOTE_ATTRIBUTE_HERE,
     CHECK_WARNING_NOTE_KIND_COUNT,
 } CheckWarningNoteKind;
 

@@ -4054,9 +4054,14 @@ do:
   A compatible redefinition declares the earlier type. Otherwise the unit is
   refused and recovered.
 
-  Left as they were: `-Wno-odr` doesn't turn the `-Wodr` errors off. An enum
-  defined again under C23 still refuses with the generic error, which stops
-  the reader. Clang compares its enumerators, and keeps both lists' names in
+  The `-Wodr` errors follow clang's policy for a default error: `-w` leaves
+  them, `-Wno-error=odr` makes them warnings (with their notes) and `-Wno-odr`
+  drops them, as does a source pragma at the redefinition's name. A demoted or
+  ignored one doesn't make the definitions incompatible: one that is otherwise
+  compatible declares the earlier type, as in clang (`check_input_odr_severity`).
+
+  Left as they were: an enum defined again under C23 still refuses with the
+  generic error, which stops the reader. Clang compares its enumerators, and keeps both lists' names in
   scope with ambiguous references. An `_Atomic(struct { ... })` member is the
   parser's refusal, with or without a redefinition.
 - **A repeated enumerator** gives "redefinition of enumerator 'A'" with its

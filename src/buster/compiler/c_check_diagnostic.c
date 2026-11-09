@@ -147,6 +147,7 @@ static const CheckWarningDescription check_warning_descriptions[] =
     { "-Wenum-float-conversion", "-Wenum-conversion", "arithmetic between enumeration type and floating-point type" },
     { "-Wanon-enum-enum-conversion", NULL, "arithmetic between different enumeration types" },
     { "-Wfor-loop-analysis", "-Wloop-analysis", "variable used in loop condition not modified in loop body" },
+    { "-Wodr", NULL, "type has an attribute which currently causes the types to be treated as though they are incompatible" },
 };
 
 _Static_assert(BUSTER_ARRAY_LENGTH(check_warning_descriptions) == CHECK_WARNING_ID_COUNT, "every sparse policy ID has a description");
@@ -289,6 +290,21 @@ static void check_input_warning_policy(CheckInput* input, const PPOptions* optio
         input->x86_range_quiet |= x86_range.quiet;
     }
     input->x86_range_policy = true;
+    const CheckWarningCommandLine odr = check_warning_command_line(options, CHECK_WARNING_ID_ODR, false, true);
+    input->odr_severity = (uint8_t)odr.mapped;
+    input->odr_quiet = odr.quiet;
+}
+
+_Static_assert(CHECK_WARNING_WARNING == BUSTER_CHECK_ODR_WARNING && CHECK_WARNING_ERROR == BUSTER_CHECK_ODR_ERROR, "the reader reads -Wodr's severity by value");
+
+// clang's -Wodr at `token`: an error by default (DefaultError), which -w leaves; -Wno-error=odr demotes it to a warning,
+// which -w then ignores; -Wno-odr ignores it; a source pragma replaces the command line's choice at its token.
+static uint32_t check_input_odr_severity(const CheckInput* input, uint32_t token)
+{
+    const CheckWarningSeverity mapped = (CheckWarningSeverity)input->odr_severity;
+    const CheckWarningSeverity line = input->odr_quiet && mapped < CHECK_WARNING_ERROR ? CHECK_WARNING_IGNORE : mapped;
+    const CheckWarningSeverity source = check_diagnostic_severity_id_from(input, token, BUSTER_CHECK_NONE, CHECK_WARNING_ID_ODR, line);
+    return input->odr_quiet && source < CHECK_WARNING_ERROR ? CHECK_WARNING_IGNORE : source;
 }
 
 // K&R diagnostics retain call-site spelling independently of the definition's compatibility signature.
