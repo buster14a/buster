@@ -222,7 +222,9 @@ unused-warning fixtures also check exact scope-completion tokens.
   `sizeof`'s comma operands, which clang warns of when it evaluates them; `-Wunevaluated-expression`, which
   isn't implemented; and two forms the checker refuses: a statement expression in a variable-array
   `sizeof`'s operand and a statement expression as `_Generic`'s controlling expression, which the constant reader
-  reads outside a deferred typeof region.
+  reads outside a deferred typeof region. And a statement expression in a chosen `_Generic` arm
+  (`_Generic(1, int: ({ u; }))`), whose statements the selection's token range marks unselected, so that
+  `-Wuninitialized` reads none of them (#2023).
   `c_check_unused_result_driver_test.c` (#1447) compares a discarded call's result warnings (`-Wunused-result`'s
   warn_unused_result and nodiscard, a return type's, pure's and const's, the builtin table's) with Clang's whole
   output at each warning policy, both paths and one or three lanes: their spellings and messages, macros, types,

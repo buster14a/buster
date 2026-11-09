@@ -8209,7 +8209,10 @@ static void check_common_flush(const CheckGraph* graph, const uint32_t* parents,
 // evaluated (a sizeof's or an alignof's operand, a condition's arm left out), neither is any of its nodes, the run of
 // nodes just before its own whose tokens its parentheses hold, nested statement expressions' and array bounds' with
 // them (the warnings that read a context keep a bound's, constant-evaluated to clang). The reader's list of statement
-// expressions finds them, and each one left out clears its own nodes once.
+// expressions finds them, and each one left out clears its own nodes once. Scalar: it runs only in a unit with statement
+// expressions, with the uninitialized analysis enabled, and clears only the nodes of those in an unevaluated operand,
+// rare and few, where a store a node is what a vector store of 64 would save; its loop over the statement expressions
+// costs a load and a test each.
 static void check_common_region_evaluation(const CheckInput* input, const Parser* parser, uint8_t* evaluated)
 {
     const CheckGraph* graph = &input->graph;
