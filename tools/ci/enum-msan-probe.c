@@ -19,6 +19,20 @@
 #include <sanitizer/msan_interface.h>
 #endif
 
+// Diagnostic switches leave input generation and the independent scalar oracle unchanged.
+// BUSTER_PROBE_VECTORIZE requests vectorization; verify emitted IR and compiler remarks.
+#ifndef BUSTER_PROBE_INLINE
+#define BUSTER_PROBE_INLINE 0
+#endif
+#ifndef BUSTER_PROBE_VECTORIZE
+#define BUSTER_PROBE_VECTORIZE 0
+#endif
+#if BUSTER_PROBE_INLINE
+#define BUSTER_PROBE_HELPER_ATTRIBUTES inline __attribute__((always_inline))
+#else
+#define BUSTER_PROBE_HELPER_ATTRIBUTES __attribute__((noinline))
+#endif
+
 #define BUSTER_CHECK_NONE UINT32_MAX
 #define C_BINDING_ENUMERATOR 3u
 
@@ -72,9 +86,9 @@ static TypeId check_stream_type(const CheckStream* stream, uint32_t node)
     return stream->dense_values != NULL ? stream->dense_values[node].type : stream->value_types[node];
 }
 
-// This is the complete production helper body. noinline prevents query setup from
-// specializing the loop while leaving native O3 vectorization enabled inside it.
-static __attribute__((noinline)) TypeId check_common_enum_coerced(const CheckInput* input, const CheckStream* stream, uint32_t node)
+// This retains the complete production helper body. The default keeps its existing
+// noinline annotation; BUSTER_PROBE_INLINE exposes the body to the query-loop caller.
+static BUSTER_PROBE_HELPER_ATTRIBUTES TypeId check_common_enum_coerced(const CheckInput* input, const CheckStream* stream, uint32_t node)
 {
     const CheckGraph* graph = &input->graph;
     TypeId result = check_stream_type(stream, node);
@@ -83,6 +97,9 @@ static __attribute__((noinline)) TypeId check_common_enum_coerced(const CheckInp
                                  input->declarations[token] : BUSTER_CHECK_NONE;
     if (declaration < input->token_count && input->declaration_kinds[declaration] == C_BINDING_ENUMERATOR)
     {
+#if BUSTER_PROBE_VECTORIZE
+#pragma clang loop vectorize(enable)
+#endif
         for (uint32_t i = 0; i < input->enum_definition_count; i += 1)
         {
             const CheckInputEnumDefinition* definition = input->enum_definitions + i;
@@ -252,6 +269,7 @@ static __attribute__((noinline)) bool probe_case(uint32_t count, uint32_t shape,
 
 int main(int argc, char** argv)
 {
+    fprintf(stderr, "enum probe modes: inline=%u vectorize_requested=%u\n", (unsigned)BUSTER_PROBE_INLINE, (unsigned)BUSTER_PROBE_VECTORIZE);
     const bool shadow_checks = argc < 2 || strcmp(argv[1], "no-shadow-check") != 0;
     uint64_t checks = 0;
     uint64_t checksum = 0;

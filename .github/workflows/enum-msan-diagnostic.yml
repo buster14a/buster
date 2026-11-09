@@ -1,8 +1,8 @@
-name: Diagnose enum coercion MSan for 1829
+name: Diagnose enum coercion code generation for 1829
 
 on:
   push:
-    branches: [diagnostics/1829-enum-msan]
+    branches: [diagnostics/1829-enum-codegen]
 
 permissions:
   contents: read
@@ -32,7 +32,7 @@ jobs:
         run: |
           bash tools/ci/sanitizers.sh configure "$RUNNER_TEMP/sanitizer-reports"
           bash tools/ci/sanitizers.sh probe "$RUNNER_TEMP/sanitizer-probes"
-      - name: Check initialized enum records with and without auto-vectorization
+      - name: Compare ordinary, forced-vector, inline, and inline-forced code
         shell: bash
         run: |
           set -euo pipefail
@@ -40,14 +40,16 @@ jobs:
           clang --version
           lscpu
           status=0
-          for mode in native scalarized baseline; do
-            flags=(-std=gnu17 -O3 -g -fwrapv -funsigned-char -fno-strict-aliasing -fsanitize=memory -fsanitize-memory-track-origins=2 -fno-omit-frame-pointer -fPIE -pie)
+          for mode in native forced inline inline_forced; do
+            flags=(-std=gnu17 -O3 -gline-tables-only -fno-stack-protector -fno-optimize-sibling-calls -fno-sanitize-recover=all -fno-sanitize-trap=all -fwrapv -funsigned-char -fno-strict-aliasing -fsanitize=memory -fsanitize-memory-track-origins=2 -fno-omit-frame-pointer -fPIE -pie)
             case "$mode" in
               native) flags+=(-march=native) ;;
-              scalarized) flags+=(-march=native -fno-vectorize -fno-slp-vectorize) ;;
-              baseline) flags+=(-march=x86-64) ;;
+              forced) flags+=(-march=native -DBUSTER_PROBE_VECTORIZE=1) ;;
+              inline) flags+=(-march=native -DBUSTER_PROBE_INLINE=1) ;;
+              inline_forced) flags+=(-march=native -DBUSTER_PROBE_INLINE=1 -DBUSTER_PROBE_VECTORIZE=1) ;;
             esac
-            clang "${flags[@]}" tools/ci/enum-msan-probe.c -o "build/enum-msan-probe/$mode"
+            clang "${flags[@]}" -Rpass=loop-vectorize -Rpass-missed=loop-vectorize -Rpass-analysis=loop-vectorize tools/ci/enum-msan-probe.c -o "build/enum-msan-probe/$mode" 2> "build/enum-msan-probe/$mode.compile.log"
+            cat "build/enum-msan-probe/$mode.compile.log"
             clang "${flags[@]}" -S -emit-llvm tools/ci/enum-msan-probe.c -o "build/enum-msan-probe/$mode.ll"
             result=0
             "build/enum-msan-probe/$mode" > "build/enum-msan-probe/$mode.log" 2>&1 || result=$?
