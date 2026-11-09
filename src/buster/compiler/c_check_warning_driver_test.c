@@ -1778,6 +1778,100 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .options = { "-Wall", "-Wextra" },
         .warnings = 8,
     },
+    {
+        // A tag a prototype's list declares first (#1447, clang's ActOnTag): -Wvisibility at its name (an unnamed enum's
+        // keyword), in a definition's list, a nested prototype's (not one the outer list declares already), a member's, a
+        // block's and a bound's, a definition shadowing a file-scope tag; a list's redefinition, with its note, and an
+        // enum's, which is an unnamed one's too. Not one declared outside, nor an unnamed record.
+        .name = "tags declared in a prototype's list",
+        .source = "struct S6;\nvoid f1(struct S1 *p);\nvoid f2(struct S2 { int a; } *p);\nvoid f3(union U3 *p);\n"
+                  "void f4(enum E4 { A4 } e);\nvoid f5(enum { A5 } e, enum : long { B5 } f);\nvoid f6(struct S6 *p);\n"
+                  "void f7(struct S7 *p) { (void)p; }\nint f8(struct S8 (*fp)(struct S9 *q));\nvoid f9(struct S10 *p, int (*g)(struct S10 *));\n"
+                  "void (*f10)(struct S11 *);\nvoid f11(void) { void g(struct S12 *); }\nvoid f12(struct { int a; } *p, struct A { struct B *b; } *a);\n"
+                  "struct V { void (*fp)(struct U *); };\nstruct T { int b; };\nvoid g1(struct T *p, struct T { int c; } *q);\n"
+                  "int g2(struct R { int x; } a, struct R { int y; } b);\nint g3(enum F { B1 } a, enum F { B2 } b);\n"
+                  "int g4(int (*a)[sizeof(struct Q { int q; })]);\n",
+        .warnings = 22,
+        .notes = 2,
+    },
+    {
+        // C23's definitions there are no warning: a compatible definition outside may redefine them.
+        .name = "tags declared in a prototype's list under C23",
+        .source = "struct S6;\nvoid f1(struct S1 *p);\nvoid f2(struct S2 { int a; } *p);\nvoid f3(union U3 *p);\n"
+                  "void f4(enum E4 { A4 } e);\nvoid f5(enum { A5 } e, enum : long { B5 } f);\nvoid f6(struct S6 *p);\n"
+                  "void f7(struct S7 *p) { (void)p; }\nint f8(struct S8 (*fp)(struct S9 *q));\nvoid f9(struct S10 *p, int (*g)(struct S10 *));\n"
+                  "void (*f10)(struct S11 *);\nvoid f11(void) { void g(struct S12 *); }\nvoid f12(struct { int a; } *p, struct A { struct B *b; } *a);\n"
+                  "struct V { void (*fp)(struct U *); };\nstruct T { int b; };\nvoid g1(struct T *p, struct T { int c; } *q);\n"
+                  "int g4(int (*a)[sizeof(struct Q { int q; })]);\n",
+        .warnings = 10,
+        .c23 = true,
+    },
+    {
+        // -Wvisibility's policy: its option and a source pragma.
+        .name = "prototype tag visibility policy",
+        .source = "void f1(struct S1 *p);\n#pragma clang diagnostic push\n#pragma clang diagnostic ignored \"-Wvisibility\"\n"
+                  "void f2(struct S2 *p);\n#pragma clang diagnostic pop\nvoid f3(struct S3 *p, struct S3 { int a; } *q);\n",
+        .options = { "-Wno-visibility" },
+    },
+    {
+        .name = "prototype tag visibility pragma",
+        .source = "void f1(struct S1 *p);\n#pragma clang diagnostic push\n#pragma clang diagnostic ignored \"-Wvisibility\"\n"
+                  "void f2(struct S2 *p);\n#pragma clang diagnostic pop\nint f3(struct S3 { int a; } p, struct S3 { int b; } q);\n",
+        .warnings = 3,
+        .notes = 1,
+    },
+    {
+        // C23 records redefined with other attributes (#1447): clang's -Wodr is an error by default; ignored, the
+        // definitions are compatible, and the name keeps the first's type (its layout, which the assertions read).
+        .name = "odr attribute differences ignored",
+        .source = "struct S { char c; int a; } __attribute__((packed));\nstruct S { char c; int a; };\n"
+                  "_Static_assert(sizeof(struct S) == 5, \"first\");\n"
+                  "struct U { char c; int a __attribute__((aligned(16))); };\nstruct U { char c; int a; };\n"
+                  "_Static_assert(sizeof(struct U) == 32, \"first u\");\nstruct S s;\nstruct U u;\n",
+        .options = { "-Wno-odr" },
+        .c23 = true,
+    },
+    {
+        // Demoted, each is a warning with its note at the attribute the earlier list has.
+        .name = "odr attribute differences demoted",
+        .source = "struct S { char c; int a; } __attribute__((packed));\nstruct S { char c; int a; };\n"
+                  "_Static_assert(sizeof(struct S) == 5, \"first\");\n"
+                  "struct U { char c; int a __attribute__((aligned(16))); };\nstruct U { char c; int a; };\n"
+                  "_Static_assert(sizeof(struct U) == 32, \"first u\");\nstruct S s;\nstruct U u;\n",
+        .options = { "-Wno-error=odr" },
+        .warnings = 2,
+        .notes = 2,
+        .c23 = true,
+    },
+    {
+        // Source pragmas: ignored for one, a warning for another (one -Werror leaves), and the default error after them.
+        .name = "odr attribute differences under pragmas",
+        .source = "struct S { char c; int a; } __attribute__((packed));\n#pragma clang diagnostic push\n#pragma clang diagnostic ignored \"-Wodr\"\n"
+                  "struct S { char c; int a; };\n#pragma clang diagnostic pop\n_Static_assert(sizeof(struct S) == 5, \"first\");\n"
+                  "struct U { char c; int a __attribute__((aligned(16))); };\n#pragma clang diagnostic push\n#pragma clang diagnostic warning \"-Wodr\"\n"
+                  "struct U { char c; int a; };\n#pragma clang diagnostic pop\n_Static_assert(sizeof(struct U) == 32, \"first u\");\n"
+                  "struct V { int a; } __attribute__((aligned(8)));\nstruct V { int a; } __attribute__((aligned(16)));\n",
+        .warnings = 1,
+        .errors = 1,
+        .notes = 3,
+        .c23 = true,
+    },
+    {
+        // In a system header (here a line marker's), clang ignores it, error or not, without -Wsystem-headers; the name
+        // keeps the first definition's type.
+        .name = "odr attribute differences in a system header",
+        .source = "# 1 \"odr_system.h\" 1 3\nstruct S { char c; int a; } __attribute__((packed));\nstruct S { char c; int a; };\n"
+                  "# 4 \"odr_main.c\" 2\n_Static_assert(sizeof(struct S) == 5, \"first\");\nstruct S s;\n",
+        .c23 = true,
+    },
+    {
+        // A C23 parameter list's compatible redefinition of its own record (#1869) declares the first's type: the body
+        // reads both parameters and a pointer to it as one type, compiled on every path.
+        .name = "C23 parameter list redefines its record compatibly",
+        .source = "int g(struct T { int x; } a, struct T { int x; } b, struct T *c) { return a.x + b.x + c->x; }\n"
+                  "int n(struct W { int a; } *p, int (*q)(struct W { int a; } *r)) { return p->a + (q != 0); }\n",
+        .c23 = true,
+    },
 };
 
 static void check_test_driver_warning_fixtures(CheckTest* test, const char* clang, const char* executable, const char* directory,
