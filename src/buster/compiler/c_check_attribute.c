@@ -5219,7 +5219,8 @@ static bool check_input_swift_parameters(CheckInputReader* reader, TypeId functi
         const uint32_t order = abi == TYPE_PARAMETER_ABI_SWIFT_INDIRECT_RESULT && i != 0 && previous != TYPE_PARAMETER_ABI_SWIFT_INDIRECT_RESULT ?
                                CHECK_ARGUMENT_SWIFT_INDIRECT_FIRST :
                                error_result && previous != TYPE_PARAMETER_ABI_SWIFT_CONTEXT ? CHECK_ARGUMENT_SWIFT_ERROR_AFTER_CONTEXT : BUSTER_CHECK_NONE;
-        // (clang gives both, the convention's first.)
+        // (clang gives both, the convention's first: the order's is kept at the same place as a repeated report, which the
+        // driver doesn't fold into the first, #1447.)
         for (uint32_t pass = 0; pass < 2; pass += 1)
         {
             const uint32_t kind = pass == 0 ? error : order;
@@ -5230,6 +5231,7 @@ static bool check_input_swift_parameters(CheckInputReader* reader, TypeId functi
                 if (reader->output->report_count > before)
                 {
                     reader->output->reports[before].attribute = attributes[i];
+                    reader->output->reports[before].repeated |= pass == 1 && error != BUSTER_CHECK_NONE;
                 }
                 valid = false;
             }
