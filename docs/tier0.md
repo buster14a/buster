@@ -625,12 +625,16 @@ at the target's forms, by both of the checker's paths:
   qwords, `pshufd`, `shufps` of halves, pairs or three elements and one of dwords, unpacks, `pshuflw` and `pshufhw` of
   words, and with SSSE3 `pshufb` of each vector by one constant (its top bits flipped for the second), ORed; with AVX
   a lane's insertion and extraction, and with AVX2 broadcasts, each lane's unpacks and `vpermd` with `vpblendd`.
+  A shift by a scalar count (`a << n`, `a >> 3`) is by the count in an XMM register, as clang's code shifts by a splat
+  (`check_vector_baseline_shift_by`, #1834): `psll`, `psrl` and `psra` of words, dwords and qwords, a qword's arithmetic
+  one the logical one xor its sign bit shifted alike less that, and bytes' through words: masked by `0xff` shifted
+  alike for a left or logical right shift, unpacked into words' high bytes, shifted and packed for an arithmetic one.
   `__builtin_convertvector`'s integer extensions without SSE4.1 and truncations without AVX-512 are sequences too
   (`check_vector_baseline_resize`, #1834): an extension unpacks the low elements with zeros, or with themselves and
-  shifts them right arithmetically (a qword's high dword is `psrad` by 31 of a copy); a truncation takes a qword's low dword
-  (`pshufd`, or of 32 bytes `vextractf128` and `shufps`), makes each element's kept bits its whole value by shifts and
-  packs them with saturation (`packssdw`, `packsswb`, `packuswb`), 32 bytes as their two halves. Conversions between 8-
-  or 16-bit integers and floats or doubles go through dwords by them.
+  shifts them right arithmetically (a qword's high dword is `psrad` by 31 of a copy); a truncation takes a qword's low
+  dword (`pshufd`, or of 32 bytes `vextractf128` and `shufps`), makes each element's kept bits its whole value by shifts
+  and packs them with saturation (`packssdw`, `packsswb`, `packuswb`), 32 bytes as their two halves. Conversions between
+  8- or 16-bit integers and floats or doubles go through dwords by them.
 - What has no form at the target is refused by name: shuffles of bytes and words without SSSE3, their 32-byte ones
   without AVX-512, minimum and maximum of elements SSE2 hasn't (and of qwords), absolute values without SSSE3,
   conversions of vectors wider than the target's registers, and the scalars' IEEE maxima and minima (`maximum`,
@@ -640,9 +644,9 @@ at the target's forms, by both of the checker's paths:
   clang's code calls them; with SSE4.1, `roundss` and `roundsd` (round's of the value plus the largest value below 0.5
   of its sign). copysign, canonicalize, maxnum and minnum are SSE's sequences, and with AVX the IEEE maxima and minima
   `vmaxss` or `vminss`, their sign bit fixed by x's and the NaNs' operands blended in (`vblendvps`,
-  `check_vector_baseline_scalar_row`). The sign masks and
-  the conversions to integers in a general register (`movmskps`, `cvt(t)ss2si` and the others), vector results in
-  several registers and operators on vectors wider than the registers are #1193's.
+  `check_vector_baseline_scalar_row`). The sign masks and the conversions
+  to integers in a general register (`movmskps`, `cvt(t)ss2si` and the others), vector results in several registers
+  and operators on vectors wider than the registers are #1193's.
 - `test-checker --program-vectors` runs `c_check_program_vector_test.c`'s baseline programs (the SSE2 survey's
   intrinsics, shuffles of every element size, SSE4.1's and AVX2's) at the three levels natively against clang -O0's build
   at the same `-march`, and checks each refusal by name.
@@ -1072,8 +1076,13 @@ the error code below them. There is no call's return address. So:
 - **No red zone.** A nested interrupt's frame would land below rsp, so the routine's red zone temporaries
   (`tier0_temporary`, `tier0_red_zone`) are the frame's top 128 bytes, right below the pushes and the preserve block,
   from rbp. Neither a realignment nor an allocation moves them, and no other place reaches them.
-- **Its result is void, and it takes no variadic arguments.** `tier0_preserve_valid` refuses any other metadata on both
-  compile paths.
+- **Its result is void.** `tier0_preserve_valid` refuses any other metadata on both compile paths.
+- **A variadic routine** (#1447) is LLVM's `x86_intrcc` with `...`: its named parameters take no register, so its
+  `va_list` starts with `gp_offset` 0 and `fp_offset` 48 at the interrupted code's rdi and xmm0, which its prologue
+  saves before the entry overwrites rdi and rsi. Its overflow area is 40 bytes past where it was entered
+  (`Tier0Function.incoming_variadic`'s `stack_bytes` of 32, past the incoming area), as LLVM's is. Tier 0 saves the
+  XMMs whatever al says, where LLVM saves them only for a nonzero al; a list read past what was saved is garbage
+  either way.
 
 **The unwind tables** (`Tier0Code.frame_interrupt`):
 
@@ -1196,6 +1205,12 @@ rbp for the rare deeper expressions. The floating one is xmm0 to xmm15.
   the frame's save area and restores them; depths in callee-saved registers survive it by themselves.
 - **Deeper expressions:** past 15 integer or 16 floating values live at once, the values go to frame slots ("Deep
   values", below).
+- **Asm bodies (#1839):** a call row whose `Tier0Function.call_asm` names an asm body (`Tier0AsmBody`) has the body's
+  records in the call's place, with no call: an asm statement placed in its caller ([inline assembly](c-inline-assembly.md),
+  "Asm bodies"). It is a call in every other respect, its clobbers with the registers the body touches: below it, every
+  depth in a register is saved where the body touches a callee-saved one, no home is a register it touches, and the
+  prologue saves the callee-saved ones it touches. A record whose base is `BUSTER_TIER0_ASM_BLOCK` addresses the
+  statement's operand block, a frame object, which Tier 0 replaces with the block's home.
 
 **Homes.**
 
