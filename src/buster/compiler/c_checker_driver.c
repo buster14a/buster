@@ -65,6 +65,7 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_ARRAY_FUNCTIONS: result = "declared as array of functions"; break;
         case CHECK_INPUT_ARRAY_INCOMPLETE: result = "array has incomplete element type"; break;
         case CHECK_INPUT_ARRAY_TOO_LARGE: result = "array is too large"; break;
+        case CHECK_INPUT_TYPE_SPECIFIER_MISSING: result = "type name requires a specifier or qualifier"; break;
         case CHECK_INPUT_TAG_INCOMPATIBLE: result = "type has incompatible definitions"; break;
         case CHECK_INPUT_UNDECLARED_CORRECTED: result = "use of undeclared identifier"; break;
         case CHECK_INPUT_UNDECLARED: result = "use of undeclared identifier"; break;
@@ -652,6 +653,9 @@ static const char* check_driver_input_report_message(const CheckInput* input, co
            "array initializer must be an initializer list or wide string literal" :
            report->message == CHECK_INPUT_DIRECT_INITIALIZER_ARRAY && report->detail == CHECK_INPUT_ARRAY_LIST_ONLY ?
            "array initializer must be an initializer list" :
+           report->message == CHECK_INPUT_TYPE_SPECIFIER_MISSING && report->detail == 0 ?
+           "type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]" :
+           report->message == CHECK_INPUT_TYPE_SPECIFIER_MISSING && report->detail == 1 ? "a type specifier is required for all declarations" :
            report->message == CHECK_INPUT_ATTRIBUTE_ARGUMENT && (report->detail & 0xffu) == CHECK_ARGUMENT_ALIGNMENT_POWER ?
            check_driver_alignment_power : check_driver_input_message(report->message);
 }

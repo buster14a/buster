@@ -579,6 +579,25 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "    struct L { int b : yyy; int c; unsigned d : LIMTI; unsigned : xxx; } l = { 1, 2, 3 };\n"
         "    if (n = 2) return B + C + l.c;\n    return sizeof(struct L);\n}\n"
         "int g(int n) { int unused; if (n = 2) return 1; return 0; }\n",
+        // An undeclared name in a typeof operand, an array's bound or a _BitInt's width (#1447, check_constant_name): clang's
+        // error at each name, with its typo's correction, which the declaration takes (y has counter's type, v is a VLA).
+        "int counter;\nenum { WIDTH = 8 };\ntypeof(countr) y;\nint *py = &y;\n_BitInt(WIDTHX) w;\nint f(int n)\n{\n"
+        "    int unused;\n    int v[countr + n];\n    if (n = 2) return sizeof(typeof(countr)) + sizeof v;\n    return (int)w;\n"
+        "}\n",
+        // One that no correction takes still ends the unit's checking, after each name of its expression, as clang reports
+        // them: a bound's, a typedef's, a type name's typeof's, and a designator's (whose list clang drops there). A
+        // _BitInt's is no type specifier, as clang drops it: its parser's error follows, a declaration's at its first
+        // declarator's name (C23's own words, and a C23 parameter's name a type's), a member's or a type name's at the end
+        // of the list.
+        "int a[zzz + yyy];\n",
+        "typedef int T[zzz];\n",
+        "int f(void) { return sizeof(typeof(zzz)); }\n",
+        "_BitInt(zzz) const *volatile p, q;\n",
+        "int f(_BitInt(zzz) a[3]);\n",
+        "struct S { _BitInt(zzz) m; };\n",
+        "int s = sizeof(_BitInt(zzz));\n",
+        "int a[3] = { [zzz] = 1, [yyy] = 2 };\n",
+        "enum { W = 1 };\nint a[3] = { [W ... zzz + yyy] = 1 };\n",
         // Declarator errors in clang's words (#1447), each still ending the unit's checking: a function returning an array
         // or a function, a negative bound (named, and a type name's), an array of functions (by a typedef's name, with its
         // aka) or of an incomplete element (with the tag's forward declaration's note), and a variable of type void or of

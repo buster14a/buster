@@ -109,9 +109,12 @@ static bool check_input_vla_bound(CheckInputReader* reader, uint32_t open, uint3
         CheckValue value = { 0 };
         uint32_t failed = BUSTER_CHECK_NONE;
         bool negative = false;
+        // Each undeclared name in the bound is clang's error at it, with its typo's correction (#1447, check_constant_name).
         if (*job == 0 && check_input_vla_defines(reader, first, end))
         {
+            reader->constant_names = CHECK_CONSTANT_NAMES_REPORT;
             *job = check_input_constant_job(reader, first, end);
+            reader->constant_names = CHECK_CONSTANT_NAMES_NONE;
             valid = *job != 0;
         }
         if (*job != 0)
@@ -129,7 +132,9 @@ static bool check_input_vla_bound(CheckInputReader* reader, uint32_t open, uint3
         {
             TypeId unused = 0;
             const bool cached = reader->bindings.count != 0 && reader->bindings.point[reader->bindings.count - 1] >= first;
+            reader->constant_names = CHECK_CONSTANT_NAMES_REPORT;
             valid = check_input_constant_read(reader, first, end, false, cached, false, &value, &unused, &failed, NULL);
+            reader->constant_names = CHECK_CONSTANT_NAMES_NONE;
         }
         // A job that stopped at a definition has no value yet.
         const bool evaluated = *definition == BUSTER_CHECK_NONE;
