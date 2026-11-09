@@ -194,7 +194,13 @@ static void check_test_program_case_intervals(CheckTest* test)
                 }
             }
         }
-        const uint32_t ends[] = { 1000, 1001, 1002, 1003 };
+        // Each token's statement end, which the conflicts read by a switch's token (its end) and by a default's (its own
+        // statement's): every token the fixture's owners and cases take.
+        uint32_t ends[BUSTER_ARRAY_LENGTH(cases) * 7 + 1];
+        for (uint32_t t = 0; t < BUSTER_ARRAY_LENGTH(ends); t += 1)
+        {
+            ends[t] = 1000 + t;
+        }
         CheckProgram program = { .types = &types.table, .cases = cases, .case_count = count, .token = BUSTER_CHECK_NONE, .diagnostic_position = BUSTER_CHECK_NONE };
         check_program_case_conflicts(&program, 0, ends, &scratch);
         check_test_expect(test, (program.token == BUSTER_CHECK_NONE) == (expected == BUSTER_CHECK_NONE) &&
