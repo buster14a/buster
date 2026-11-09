@@ -5491,6 +5491,7 @@ static void check_driver_rejected_common(const Parser* unit, const Parser* origi
             {
                 memset(mask + ranges[b].begin, 1, ranges[b].end - ranges[b].begin);
                 memset(bodies + ranges[b].begin, 1, ranges[b].end - ranges[b].begin);
+                memset(fallback_mask + ranges[b].begin, 1, ranges[b].end - ranges[b].begin);
             }
             else
             {
