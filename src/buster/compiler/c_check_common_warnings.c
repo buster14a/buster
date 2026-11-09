@@ -4582,7 +4582,7 @@ static bool check_common_bitfield_assignment(const CheckGraph* graph, const Chec
 // outside its array, a comma the source writes. What their tests read past them only takes warnings away, so that a node it
 // rejects can't warn, and the walks needn't visit a subtree without one.
 static uint8_t check_common_candidate_bits(const Parser* parser, const CheckGraph* graph, const CheckStream* stream, const TypeTable* types,
-                                           uint32_t node, bool self_assign, bool enum_cast)
+                                           uint32_t node, bool self_assign, bool enum_names)
 {
     const CheckOp op = graph->ops[node];
     bool own = false;
@@ -4616,7 +4616,7 @@ static uint8_t check_common_candidate_bits(const Parser* parser, const CheckGrap
                 // A conversion between enumerations (#1447, check_common_enum_cast).
                 const uint32_t flags = stream->conversions[node].operands[op == CHECK_OP_ASSIGN ? 1u : 0u].flags;
                 conversion = (flags & BUSTER_CHECK_CONVERT_ASSIGNMENT) != 0 && (flags & (BUSTER_CHECK_CONVERT_CAST | BUSTER_CHECK_CONVERT_ATOMIC)) == 0 &&
-                             check_common_enum_cast_candidate(enum_cast, parser, graph, stream, types, source, check_stream_type(stream, node));
+                             check_common_enum_cast_candidate(enum_names, parser, graph, stream, types, source, check_stream_type(stream, node));
             }
             if (!conversion && check_common_bool_candidate(graph, source))
             {
@@ -4645,7 +4645,7 @@ static uint8_t check_common_candidate_bits(const Parser* parser, const CheckGrap
                 const CheckConversion cast = stream->argument_conversions[offset + i];
                 const bool enum_cast = (cast.flags & BUSTER_CHECK_CONVERT_ASSIGNMENT) != 0 &&
                                        (cast.flags & (BUSTER_CHECK_CONVERT_CAST | BUSTER_CHECK_CONVERT_ATOMIC)) == 0 &&
-                                       check_common_enum_cast_candidate(enum_cast, parser, graph, stream, types, source, cast.type);
+                                       check_common_enum_cast_candidate(enum_names, parser, graph, stream, types, source, cast.type);
                 const CheckConstantKind constant = check_stream_constant_kind(stream, source);
                 const bool arms = check_common_conversion_arms(graph, source);
                 if (check_common_conversion_source(constant, arms))
