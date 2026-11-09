@@ -2005,7 +2005,7 @@ static void check_test_driver_tier1_labels(CheckTest* test, const char* clang, c
             const bool entry = table_resolved && check_test_tier1_table_entry(records, loop_records, loop_address, dispatch, loop_targets);
             if (loop_addresses != 1 || loop_relocations != 1 || !entry)
             {
-                fprintf(stderr, "test-checker: Tier 1 loop table proof: remat=%u path=%u records=%u base=%u dispatch=%u LEAs=%u PC32s=%u ELF=%u CFG=%u targets=%u,%u,%u,%u\\n",
+                fprintf(stderr, "test-checker: Tier 1 loop table proof: remat=%u path=%u records=%u base=%u dispatch=%u LEAs=%u PC32s=%u ELF=%u CFG=%u targets=%u,%u,%u,%u\n",
                         rematerialize, path, loop_records, loop_address, dispatch, loop_addresses, loop_relocations, table_resolved, entry,
                         loop_targets[0], loop_targets[1], loop_targets[2], loop_targets[3]);
             }
