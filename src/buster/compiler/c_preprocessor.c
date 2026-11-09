@@ -841,6 +841,10 @@ struct PPLineDirective
     uint32_t name_length;
     // The range's next note, or BUSTER_PP_NONE.
     uint32_t next_in_range;
+    // Where a line marker's flag 1 entered the file its lines are presumed in, as clang's LineTableInfo keeps it (#1954):
+    // the location right before the marker's number, or for flag 2 or none the include location the marker returns to or
+    // keeps; BUSTER_PP_NONE for the range's own inclusion's.
+    uint32_t include_location;
     uint8_t system;
 };
 
@@ -1548,6 +1552,8 @@ struct Preprocessor
     uint32_t history_anchor;
     uint32_t history_spelling;
     uint32_t diagnostic_origin;
+    // The include location of the last diagnostic's file (pp_presumed_include), whose include stack a diagnostic prints
+    // only when its own differs.
     uint32_t diagnostic_include_range;
     uint32_t origin_peak[3];
     // The invocations in pp_finish_simple's invocation's arguments that it expands in place, as pp_argument_in_place
@@ -1767,6 +1773,7 @@ struct PPDiagnosticNote
 static uint32_t pp_find_range(const Preprocessor* pp, uint32_t location);
 static uint32_t pp_line_of(Preprocessor* pp, uint32_t range, uint32_t location, uint32_t* column);
 static uint32_t pp_presumed(Preprocessor* pp, uint32_t location, const char** name, uint32_t* name_length);
+static uint32_t pp_line_note_at(const Preprocessor* pp, uint32_t range, uint32_t location);
 static uint32_t pp_lexed_start(const Preprocessor* pp, uint32_t location);
 static void pp_diagnostic_lines(Preprocessor* pp, uint32_t range);
 static bool pp_diagnostic_warning_visible(Preprocessor* pp, uint32_t location, uint32_t origin);
@@ -14422,9 +14429,24 @@ static uint32_t pp_lexed_start(const Preprocessor* pp, uint32_t location)
     return record != 0 && record->file != BUSTER_PP_NONE ? record->base + pp_start_with_splices(record->bytes, location - record->base, pp->options.trigraphs) : location;
 }
 
+// The line note in effect at `location` in `range` (the latest one at or before it), or BUSTER_PP_NONE.
+static uint32_t pp_line_note_at(const Preprocessor* pp, uint32_t range, uint32_t location)
+{
+    uint32_t result = BUSTER_PP_NONE;
+    for (uint32_t i = range != BUSTER_PP_NONE ? pp->ranges[range].first_line_directive : BUSTER_PP_NONE; i != BUSTER_PP_NONE && pp->line_directives[i].location <= location;
+         i = pp->line_directives[i].next_in_range)
+    {
+        result = i;
+    }
+    return result;
+}
+
 // Adds a line note to a range, from `location` on (PPLineDirective): `name` null keeps the presumed name, the name of
 // the range's latest note, and `system` BUSTER_PP_NONE keeps the system level (that note's, else the inclusion's).
-static void pp_add_line_note(Preprocessor* pp, uint32_t range, uint32_t location, int64_t delta, const char* name, uint32_t name_length, uint32_t system)
+// `entry` is a line marker's 1 (a file entered) or 2 (one left), else 0, which set its include location as clang's
+// LineTableInfo::AddLineNote does (#1954): 1 the place right before the note, 2 the one in effect where the latest
+// note's file was entered, and 0 the latest note's.
+static void pp_add_line_note(Preprocessor* pp, uint32_t range, uint32_t location, int64_t delta, const char* name, uint32_t name_length, uint32_t system, uint32_t entry)
 {
     PPRange* record = &pp->ranges[range];
     const uint32_t latest = record->last_line_directive;
@@ -14433,6 +14455,9 @@ static void pp_add_line_note(Preprocessor* pp, uint32_t range, uint32_t location
         const uint32_t index = pp->line_directive_count;
         const bool inherits = name == 0 && latest != BUSTER_PP_NONE;
         const uint8_t level = latest != BUSTER_PP_NONE ? pp->line_directives[latest].system : record->system;
+        const uint32_t kept = latest != BUSTER_PP_NONE ? pp->line_directives[latest].include_location : BUSTER_PP_NONE;
+        const uint32_t outer = entry == 2 && kept != BUSTER_PP_NONE ? pp_line_note_at(pp, range, kept) : BUSTER_PP_NONE;
+        const uint32_t include = entry == 1 ? location - 1 : entry == 2 ? (outer != BUSTER_PP_NONE ? pp->line_directives[outer].include_location : BUSTER_PP_NONE) : kept;
         pp->line_directives[index] = (PPLineDirective){
             .range = range,
             .location = location,
@@ -14440,6 +14465,7 @@ static void pp_add_line_note(Preprocessor* pp, uint32_t range, uint32_t location
             .name = inherits ? pp->line_directives[latest].name : name,
             .name_length = inherits ? pp->line_directives[latest].name_length : name_length,
             .next_in_range = BUSTER_PP_NONE,
+            .include_location = include,
             .system = system == BUSTER_PP_NONE ? level : (uint8_t)system,
         };
         pp->line_directive_count += 1;
@@ -14574,7 +14600,7 @@ static void pp_apply_line(Preprocessor* pp, PPContext* context, uint32_t d, cons
         const uint32_t note = pp_find_range(pp, place) == context->range ? place : location + 1;
         const uint32_t physical = pp_line_of(pp, context->range, note, 0) + 1;
         // A #line without a name keeps the presumed one.
-        pp_add_line_note(pp, context->range, note, (int64_t)number - (int64_t)physical, name, name_length, system);
+        pp_add_line_note(pp, context->range, note, (int64_t)number - (int64_t)physical, name, name_length, system, entered ? 1u : left ? 2u : 0u);
         pp->file_change_token = pp->output.count;
         pp->file_change_location = pp_directive_resume(pp, context, d);
     }
@@ -15315,7 +15341,7 @@ static void pp_pragma_run(Preprocessor* pp, PPPragmaKind kind, const PPTokens* n
                 const uint32_t next = range->base + (context->position < data->token_count ? data->starts[context->position] : data->length);
                 const uint32_t at = from_operator ? next : pp_directive_resume(pp, context, context->next_directive - 1);
                 const uint32_t latest = range->last_line_directive;
-                pp_add_line_note(pp, context->range, at, latest != BUSTER_PP_NONE ? pp->line_directives[latest].delta : 0, 0, 0, BUSTER_PP_SYSTEM_FILE);
+                pp_add_line_note(pp, context->range, at, latest != BUSTER_PP_NONE ? pp->line_directives[latest].delta : 0, 0, 0, BUSTER_PP_SYSTEM_FILE, 0);
                 pp->file_change_token = pp->output.count;
                 pp->file_change_location = at;
             }
