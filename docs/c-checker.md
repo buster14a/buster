@@ -5015,13 +5015,23 @@ redeclaration's in source order, so that a call reads those up to the
 declaration its lookup finds; a call then tests one bit of its callee's first
 declaration and one byte of its name.
 A statement expression in an unevaluated operand drops them, as clang does
-(`check_common_report_discarded`). The functions stay out of line, as does
-the discarded selection's marker: inlined into the emission's loops they cost
-sqlite3.c's `-fsyntax-only` instructions even where no call warns. Left: a
-call whose callee is a member, an element, another call's result, a comma's or
-a conditional's value (`(n, g)()`, `(n ? fp : fq)()`) or a pointer to a
-pointer's dereference (`(*pp)()`), which warns of no return type's attribute, and the "expanded from macro" note clang gives a call a macro's
-argument writes (as for every warning at a macro argument here).
+(`check_common_report_discarded`). The functions stay out of line, as does the
+discarded selection's marker: inlined into the emission's loops they cost
+sqlite3.c's `-fsyntax-only` instructions even where no call warns. Left: a call
+whose callee is a member, an element, another call's result, a comma's or a
+conditional's value (`(n, g)()`, `(n ? fp : fq)()`) or a pointer to a pointer's
+dereference (`(*pp)()`), which warns of no return type's attribute. A call a
+macro's argument writes gets clang's "expanded from macro" note for each macro
+whose argument it is (#1447): clang's macro backtrace leaves an argument's own
+note out only where every range the diagnostic highlights is one token of that
+argument, and a call's range spans its callee and its parentheses. The checker
+marks such a diagnostic (`check_common_report_spanning`,
+Preprocessor.diagnostic_spans), which the renderer reads while its primary line
+renders. Left: the other warnings at a macro argument, whose ranges clang
+23.1.5 treats unevenly (an unused comparison's and a lone unused value's, and a
+comma's left operand's, get the note; an unused binary operator's and a sign
+comparison's don't), and the notes of a warning's own notes, such as the unused
+comparison's fix-it.
 `-Warray-bounds` reports a direct array object, including a nested subscript
 such as `b[1][5]` at `b`, treats a zero extent as unknown, and leaves
 struct-member arrays to a full bounds analysis. `-Wunused-function` reports a

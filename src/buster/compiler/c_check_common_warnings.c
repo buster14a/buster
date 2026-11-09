@@ -790,6 +790,16 @@ static void check_common_report_discarded(const Parser* parser, Preprocessor* pp
     check_common_report_evaluated(parser, pp, input, token, token, PP_DIAGNOSTIC_SEMANTIC, id, false, message, notes, note_count, scratch);
 }
 
+// check_common_report_discarded for a diagnostic whose highlighted range spans more than one token, a call's, which shows a
+// macro's argument's own "expanded from macro" note (Preprocessor.diagnostic_spans).
+static void check_common_report_spanning(const Parser* parser, Preprocessor* pp, const CheckInput* input, uint32_t token, uint32_t id,
+                                         const char* message, Arena* scratch)
+{
+    pp->diagnostic_spans = true;
+    check_common_report_discarded(parser, pp, input, token, id, message, NULL, 0, scratch);
+    pp->diagnostic_spans = false;
+}
+
 // A closer's opener is the token whose parent it is; the closer's own parent is the enclosing construct.
 static uint32_t check_common_cast_opener(const Parser* parser, uint32_t closer)
 {
