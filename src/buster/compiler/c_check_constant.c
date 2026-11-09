@@ -629,159 +629,197 @@ static TypeId check_constant_specifiers(CheckConstantInput* input, uint32_t* cur
     bool saw = false;
     bool valid = true;
     bool reading = true;
-    while (reading && i < end)
+    // A list that doesn't combine is read again without the specifier clang's DeclSpec drops (#1447, review on #1820:
+    // `typeof(_Complex _Bool)`), every _Complex for a _Complex's, as check_input_specifiers recovers it.
+    uint32_t skip = BUSTER_CHECK_NONE;
+    bool skip_complex = false;
+    bool attempt = true;
+    while (attempt)
     {
-        const uint32_t name = parser->tokens.names[i];
-        const uint8_t kind = parser->tokens.kinds[i];
-        bool consumed = true;
-        if (input->attribute_starts[i - input->first] != 0)
+        i = *cursor;
+        qualifiers = 0;
+        longs = 0;
+        shorts = 0;
+        signedness = 0;
+        base = 0;
+        integer_seen = false;
+        atomic = false;
+        complex = false;
+        named_type = false;
+        bit_int_specifier = false;
+        register_seen = false;
+        saw = false;
+        valid = true;
+        reading = true;
+        while (reading && i < end)
         {
-            i = input->attribute_starts[i - input->first]->end - 1;
-        }
-        else if (check_input_qualifier(parser, i, &qualifiers))
-        {
-        }
-        else if (kind == PARSE_KIND_STORAGE)
-        {
-            valid &= parameter && name == C_NAME_REGISTER && !register_seen;
-            register_seen = true;
-        }
-        else if (name == C_NAME_COMPLEX_C99 || name == C_NAME_GNU_COMPLEX || name == C_NAME_GNU_COMPLEX2)
-        {
-            complex = true;
-        }
-        else if (kind == PARSE_KIND_ATOMIC && (i + 1 >= end || parser->tokens.kinds[i + 1] != PARSE_KIND_L_PAREN))
-        {
-            atomic = true;
-        }
-        else if ((kind == PARSE_KIND_TYPEOF || kind == PARSE_KIND_ATOMIC) && i + 1 < end &&
-                 (parser->tree.roles[i + 1] == PARSE_ROLE_OPEN_SPECIFIER || (input->raw && parser->tokens.kinds[i + 1] == PARSE_KIND_L_PAREN)))
-        {
-            const uint32_t close = parser->tree.parents[i + 1];
-            const TypeId selected = close > i + 1 && close < end ? input->queries[close - input->first] : 0;
-            valid &= selected != 0 && base == 0;
-            base = selected;
-            named_type = true;
-            bit_int_specifier = name == C_NAME_BITINT || name == C_NAME_EXTINT;
-            frame->abi_origin = selected != 0 ? input->abi_origins[close - input->first] : 0;
-            frame->noderef = selected != 0 ? check_input_noderef_at(reader->output, close) : NULL;
-            i = close > i + 1 && close < end ? close : i;
-        }
-        else if (name == C_NAME_LONG)
-        {
-            longs += 1;
-        }
-        else if (name == C_NAME_SHORT)
-        {
-            shorts = 1;
-        }
-        else if (name == C_NAME_SIGNED || name == C_NAME_GNU_SIGNED || name == C_NAME_GNU_SIGNED2 || name == C_NAME_UNSIGNED)
-        {
-            const uint32_t selected = name == C_NAME_UNSIGNED ? 2 : 1;
-            valid &= signedness == 0 || signedness == selected;
-            signedness = selected;
-        }
-        else if (name == C_NAME_INT)
-        {
-            valid &= !integer_seen;
-            integer_seen = true;
-        }
-        else if (kind == PARSE_KIND_STRUCT || kind == PARSE_KIND_ENUM)
-        {
-            const TypeId selected = reader->tag_types[i];
-            valid &= selected != 0 && base == 0;
-            base = selected;
-            named_type = true;
-            i = selected != 0 ? reader->tag_ends[i] - 1 : i;
-        }
-        else if (kind == PARSE_KIND_TYPE)
-        {
-            TypeId selected = 0;
-            switch (name)
+            const uint32_t name = parser->tokens.names[i];
+            const uint8_t kind = parser->tokens.kinds[i];
+            bool consumed = true;
+            if (i == skip || (skip_complex && check_declspec_complex_name(name)))
             {
-                case C_NAME_CHAR: selected = BUSTER_TYPE_CHAR; break;
-                case C_NAME_VOID: selected = BUSTER_TYPE_VOID; break;
-                case C_NAME_BOOL: case C_NAME_BOOL_C99: selected = BUSTER_TYPE_BOOL; break;
-                case C_NAME_FLOAT: selected = BUSTER_TYPE_FLOAT; break;
-                case C_NAME_DOUBLE: selected = BUSTER_TYPE_DOUBLE; break;
-                case C_NAME_INT128: selected = BUSTER_TYPE_INT128; break;
-                case C_NAME_FP16: selected = BUSTER_TYPE_HALF; break;
-                case C_NAME_FLOAT16: selected = BUSTER_TYPE_FLOAT16; break;
-                case C_NAME_FLOAT128: selected = BUSTER_TYPE_FLOAT128; break;
-                case C_NAME_BF16: selected = BUSTER_TYPE_BF16; break;
-                default: break;
+                // (Dropped.)
             }
-            valid &= base == 0 && selected != 0;
-            base = selected;
+            else if (input->attribute_starts[i - input->first] != 0)
+            {
+                i = input->attribute_starts[i - input->first]->end - 1;
+            }
+            else if (check_input_qualifier(parser, i, &qualifiers))
+            {
+            }
+            else if (kind == PARSE_KIND_STORAGE)
+            {
+                valid &= parameter && name == C_NAME_REGISTER && !register_seen;
+                register_seen = true;
+            }
+            else if (name == C_NAME_COMPLEX_C99 || name == C_NAME_GNU_COMPLEX || name == C_NAME_GNU_COMPLEX2)
+            {
+                complex = true;
+            }
+            else if (kind == PARSE_KIND_ATOMIC && (i + 1 >= end || parser->tokens.kinds[i + 1] != PARSE_KIND_L_PAREN))
+            {
+                atomic = true;
+            }
+            else if ((kind == PARSE_KIND_TYPEOF || kind == PARSE_KIND_ATOMIC) && i + 1 < end &&
+                     (parser->tree.roles[i + 1] == PARSE_ROLE_OPEN_SPECIFIER || (input->raw && parser->tokens.kinds[i + 1] == PARSE_KIND_L_PAREN)))
+            {
+                const uint32_t close = parser->tree.parents[i + 1];
+                const TypeId selected = close > i + 1 && close < end ? input->queries[close - input->first] : 0;
+                valid &= selected != 0 && base == 0;
+                base = selected;
+                named_type = true;
+                bit_int_specifier = name == C_NAME_BITINT || name == C_NAME_EXTINT;
+                frame->abi_origin = selected != 0 ? input->abi_origins[close - input->first] : 0;
+                frame->noderef = selected != 0 ? check_input_noderef_at(reader->output, close) : NULL;
+                i = close > i + 1 && close < end ? close : i;
+            }
+            else if (name == C_NAME_LONG)
+            {
+                longs += 1;
+            }
+            else if (name == C_NAME_SHORT)
+            {
+                shorts = 1;
+            }
+            else if (name == C_NAME_SIGNED || name == C_NAME_GNU_SIGNED || name == C_NAME_GNU_SIGNED2 || name == C_NAME_UNSIGNED)
+            {
+                const uint32_t selected = name == C_NAME_UNSIGNED ? 2 : 1;
+                valid &= signedness == 0 || signedness == selected;
+                signedness = selected;
+            }
+            else if (name == C_NAME_INT)
+            {
+                valid &= !integer_seen;
+                integer_seen = true;
+            }
+            else if (kind == PARSE_KIND_STRUCT || kind == PARSE_KIND_ENUM)
+            {
+                const TypeId selected = reader->tag_types[i];
+                valid &= selected != 0 && base == 0;
+                base = selected;
+                named_type = true;
+                i = selected != 0 ? reader->tag_ends[i] - 1 : i;
+            }
+            else if (kind == PARSE_KIND_TYPE)
+            {
+                TypeId selected = 0;
+                switch (name)
+                {
+                    case C_NAME_CHAR: selected = BUSTER_TYPE_CHAR; break;
+                    case C_NAME_VOID: selected = BUSTER_TYPE_VOID; break;
+                    case C_NAME_BOOL: case C_NAME_BOOL_C99: selected = BUSTER_TYPE_BOOL; break;
+                    case C_NAME_FLOAT: selected = BUSTER_TYPE_FLOAT; break;
+                    case C_NAME_DOUBLE: selected = BUSTER_TYPE_DOUBLE; break;
+                    case C_NAME_INT128: selected = BUSTER_TYPE_INT128; break;
+                    case C_NAME_FP16: selected = BUSTER_TYPE_HALF; break;
+                    case C_NAME_FLOAT16: selected = BUSTER_TYPE_FLOAT16; break;
+                    case C_NAME_FLOAT128: selected = BUSTER_TYPE_FLOAT128; break;
+                    case C_NAME_BF16: selected = BUSTER_TYPE_BF16; break;
+                    default: break;
+                }
+                valid &= base == 0 && selected != 0;
+                base = selected;
+            }
+            else if (kind == PARSE_KIND_IDENTIFIER && (parser->tree.roles[i] == PARSE_ROLE_SPECIFIER || input->raw) && base == 0 && !integer_seen && !longs && !shorts && !signedness)
+            {
+                base = reader->declared_types[i];
+                const uint32_t declaration = reader->output->declarations[i];
+                frame->abi_origin = reader->output->explicit_abis != 0 && declaration < parser->tokens.count ? reader->output->explicit_abis[declaration] : 0;
+                frame->noderef = check_input_noderef_at(reader->output, declaration);
+                named_type = true;
+                valid &= base != 0;
+            }
+            else
+            {
+                consumed = false;
+                reading = false;
+            }
+            if (consumed)
+            {
+                saw = true;
+                i += 1;
+            }
         }
-        else if (kind == PARSE_KIND_IDENTIFIER && (parser->tree.roles[i] == PARSE_ROLE_SPECIFIER || input->raw) && base == 0 && !integer_seen && !longs && !shorts && !signedness)
+        valid &= saw && (base != 0 || integer_seen || longs || shorts || signedness || complex) && longs <= 2 && shorts <= 1 && !(longs && shorts);
+        if (named_type && !bit_int_specifier)
         {
-            base = reader->declared_types[i];
-            const uint32_t declaration = reader->output->declarations[i];
-            frame->abi_origin = reader->output->explicit_abis != 0 && declaration < parser->tokens.count ? reader->output->explicit_abis[declaration] : 0;
-            frame->noderef = check_input_noderef_at(reader->output, declaration);
-            named_type = true;
-            valid &= base != 0;
+            valid &= !longs && !shorts && !signedness && !integer_seen && !complex;
+        }
+        else if (base == 0)
+        {
+            base = complex && !integer_seen && !longs && !shorts && !signedness ? BUSTER_TYPE_DOUBLE :
+                   shorts ? (signedness == 2 ? BUSTER_TYPE_USHORT : BUSTER_TYPE_SHORT) :
+                   longs == 2 ? (signedness == 2 ? BUSTER_TYPE_ULLONG : BUSTER_TYPE_LLONG) :
+                   longs == 1 ? (signedness == 2 ? BUSTER_TYPE_ULONG : BUSTER_TYPE_LONG) :
+                                (signedness == 2 ? BUSTER_TYPE_UINT : BUSTER_TYPE_INT);
+        }
+        else if (base == BUSTER_TYPE_CHAR)
+        {
+            valid &= !longs && !shorts && !integer_seen;
+            base = signedness == 2 ? BUSTER_TYPE_UCHAR : signedness == 1 ? BUSTER_TYPE_SCHAR : base;
+        }
+        else if (base == BUSTER_TYPE_DOUBLE)
+        {
+            valid &= longs <= 1 && !shorts && !signedness && !integer_seen;
+            base = longs ? BUSTER_TYPE_LONG_DOUBLE : base;
+        }
+        else if (base == BUSTER_TYPE_INT128)
+        {
+            valid &= !longs && !shorts && !integer_seen;
+            base = signedness == 2 ? BUSTER_TYPE_UINT128 : base;
+        }
+        else if (type_kind(reader->types, base) == BUSTER_TYPE_KIND_BIT_INT)
+        {
+            valid &= !longs && !shorts && !integer_seen;
+            const uint64_t width = reader->types->types.extent[type_index(base)];
+            base = valid ? check_input_type_result(reader, type_bit_int(reader->types, (uint32_t)width, signedness == 2)) : 0;
         }
         else
         {
-            consumed = false;
-            reading = false;
+            valid &= !longs && !shorts && !signedness && !integer_seen;
         }
-        if (consumed)
+        if ((qualifiers & BUSTER_TYPE_RESTRICT) != 0)
         {
-            saw = true;
-            i += 1;
+            valid &= type_kind(reader->types, base) == BUSTER_TYPE_KIND_POINTER &&
+                     type_kind(reader->types, type_element(reader->types, base)) != BUSTER_TYPE_KIND_FUNCTION;
         }
-    }
-    valid &= saw && (base != 0 || integer_seen || longs || shorts || signedness || complex) && longs <= 2 && shorts <= 1 && !(longs && shorts);
-    if (named_type && !bit_int_specifier)
-    {
-        valid &= !longs && !shorts && !signedness && !integer_seen && !complex;
-    }
-    else if (base == 0)
-    {
-        base = complex && !integer_seen && !longs && !shorts && !signedness ? BUSTER_TYPE_DOUBLE :
-               shorts ? (signedness == 2 ? BUSTER_TYPE_USHORT : BUSTER_TYPE_SHORT) :
-               longs == 2 ? (signedness == 2 ? BUSTER_TYPE_ULLONG : BUSTER_TYPE_LLONG) :
-               longs == 1 ? (signedness == 2 ? BUSTER_TYPE_ULONG : BUSTER_TYPE_LONG) :
-                            (signedness == 2 ? BUSTER_TYPE_UINT : BUSTER_TYPE_INT);
-    }
-    else if (base == BUSTER_TYPE_CHAR)
-    {
-        valid &= !longs && !shorts && !integer_seen;
-        base = signedness == 2 ? BUSTER_TYPE_UCHAR : signedness == 1 ? BUSTER_TYPE_SCHAR : base;
-    }
-    else if (base == BUSTER_TYPE_DOUBLE)
-    {
-        valid &= longs <= 1 && !shorts && !signedness && !integer_seen;
-        base = longs ? BUSTER_TYPE_LONG_DOUBLE : base;
-    }
-    else if (base == BUSTER_TYPE_INT128)
-    {
-        valid &= !longs && !shorts && !integer_seen;
-        base = signedness == 2 ? BUSTER_TYPE_UINT128 : base;
-    }
-    else if (type_kind(reader->types, base) == BUSTER_TYPE_KIND_BIT_INT)
-    {
-        valid &= !longs && !shorts && !integer_seen;
-        const uint64_t width = reader->types->types.extent[type_index(base)];
-        base = valid ? check_input_type_result(reader, type_bit_int(reader->types, (uint32_t)width, signedness == 2)) : 0;
-    }
-    else
-    {
-        valid &= !longs && !shorts && !signedness && !integer_seen;
-    }
-    if ((qualifiers & BUSTER_TYPE_RESTRICT) != 0)
-    {
-        valid &= type_kind(reader->types, base) == BUSTER_TYPE_KIND_POINTER &&
-                 type_kind(reader->types, type_element(reader->types, base)) != BUSTER_TYPE_KIND_FUNCTION;
-    }
-    if (valid && complex)
-    {
-        const uint8_t code = type_arithmetic_code(reader->types, base);
-        valid = code < 64 && ((BUSTER_TYPE_COMPLEX_SPELLABLE >> code) & 1) != 0;
-        base = valid ? check_input_type_result(reader, type_complex(reader->types, base)) : 0;
+        if (valid && complex)
+        {
+            const uint8_t code = type_arithmetic_code(reader->types, base);
+            valid = code < 64 && ((BUSTER_TYPE_COMPLEX_SPELLABLE >> code) & 1) != 0;
+            base = valid ? check_input_type_result(reader, type_complex(reader->types, base)) : 0;
+        }
+        const uint32_t dropped = !valid && skip == BUSTER_CHECK_NONE && saw ? check_input_specifiers_dropped(parser, *cursor, end) : BUSTER_CHECK_NONE;
+        attempt = dropped != BUSTER_CHECK_NONE;
+        skip = attempt ? dropped : skip;
+        skip_complex = attempt && check_declspec_complex_name(parser->tokens.names[dropped]);
+        if (!attempt && valid && skip != BUSTER_CHECK_NONE)
+        {
+            // Read without it: clang's error, recovered (phase 1, check_input_recover_reports).
+            const uint32_t count = reader->output->report_count;
+            check_input_report_specifiers(reader, *cursor, end, *cursor);
+            valid = reader->output->report_count != count && check_input_recover_reports(reader, count);
+        }
     }
     if (valid && atomic)
     {
