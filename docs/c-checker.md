@@ -3804,9 +3804,15 @@ the same local completion cuts, and independent tentative-definition
 constraints still run at translation-unit end. `test-checker`
 (`c_check_undeclared_test.c`) compares fixtures of both orders, the parents the
 name silences and the siblings it doesn't with clang, by both paths, with
-`-fsyntax-only` and `-c`. What remains conservative: a statement expression
-that holds the name is cut whole, where clang still checks an operator on its
-value (`({ undeclared; p; }) + 1.5`); a unit with an error publishes no
+`-fsyntax-only` and `-c`. A statement expression's statements before its
+value's cut their own constructs alone, not the statement expression, whose
+value clang keeps, nor what holds it (`({ undeclared; p; }) + 1.5`'s
+"invalid operands", #1447): the cut scan steps over them. What remains
+conservative: a statement expression whose value's statement holds the name
+loses the unused-value warnings of its statements before it; an enclosing
+operator's warning is published before the statement expression's own
+diagnostics, where clang gives it after them, in valid units too
+(`if (x = ({ printf("%s", 1); x; }))`); a unit with an error publishes no
 runtime (non-constant) shift warning, where clang, which then skips their
 reachability analysis, publishes them all (`x << 40`); a missing name that
 the declaration walk reports (an enumerator's or an array bound's) is a

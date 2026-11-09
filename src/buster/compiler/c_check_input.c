@@ -2827,13 +2827,48 @@ static void check_input_diagnostic_recover(CheckInputReader* reader, bool resolv
             {
                 next[input->reports[report].token] |= 2;
             }
+            // A statement expression's statements before its value's (#1447): their reports cut their own constructs, but
+            // not the statement expression, whose value clang keeps, nor what holds it (`({ undeclared; p; }) + 1.5`'s
+            // `+`). Bit 2 marks such a region's last token, bit 3 its first; the scan saves the report after the region
+            // where it enters one, backwards, and gives it back where it leaves it, so the tokens before see past it.
+            bool regions = false;
+            for (uint32_t token = 0; token + 2 < count; token += 1)
+            {
+                const uint32_t close = parser->tree.parents[token + 1];
+                const bool statement = parser->tree.roles[token] == PARSE_ROLE_OPEN_GROUP && parser->tree.roles[token + 1] == PARSE_ROLE_OPEN_BLOCK &&
+                                       close < count && close > token + 1 && parser->tree.roles[close] == PARSE_ROLE_CLOSE_BLOCK;
+                // Its value's statement: the block's last child, the first token from its `}` back whose parent it is.
+                uint32_t last = statement ? close : count;
+                for (uint32_t at = close; statement && last == close && at-- > token + 2;)
+                {
+                    last = parser->tree.parents[at] == close ? at : last;
+                }
+                const uint32_t value = last < close ? limits[last] : count;
+                if (value < close && value > token + 2)
+                {
+                    next[value - 1] |= 4;
+                    next[token + 2] |= 8;
+                    regions = true;
+                }
+            }
+            uint32_t* saved = regions ? BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint32_t, count) : NULL;
+            input->resource |= regions && saved == NULL;
+            uint32_t depth = 0;
             uint32_t following = count;
             for (uint32_t token = count; token-- > 0;)
             {
                 const uint32_t marks = next[token];
+                if ((marks & 4) != 0 && saved != NULL)
+                {
+                    saved[depth++] = following;
+                }
                 following = (marks & 2) != 0 ? token : following;
                 next[token] = following;
                 following = (marks & 1) != 0 ? count : following;
+                if ((marks & 8) != 0 && saved != NULL && depth != 0)
+                {
+                    following = saved[--depth];
+                }
             }
             for (uint32_t token = 0; token < count; token += 1)
             {
