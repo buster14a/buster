@@ -4348,14 +4348,18 @@ enum
     // constant, so the statements after it stay as reachable as they were (a constant would change which of their
     // warnings the flushed body publishes in its walk, check_common_flush).
     CHECK_DRIVER_EDIT_VALUE = 3,
+    // A file-scope declaration's or definition's first token (check_driver_rejected_declaration): an empty declaration `;`
+    // takes its place, so that the token after the body before it is still at the declaration's place, where clang
+    // publishes the body's deferred warnings (check_driver_publication_position), before the declaration's errors.
+    CHECK_DRIVER_EDIT_EMPTY = 4,
 };
 
 // A rejected unit's private view (#1447, check_driver_rejected_common): its tokens with what holds an error left out,
 // reparsed, as a repair's view is (c_check_repair.c). `edits` gives each original token's fate (CHECK_DRIVER_EDIT_*).
-// The view's tokens keep their sources, so its diagnostics are the original places; a brace's source is its
-// statement's last token's, and a condition's `-*__func__` its first token's. `to_view` maps each original token, and the
-// count, to its view token, or a dropped one's to the next kept; `to_original` maps each view token to its original
-// one, a replacement's to BUSTER_CHECK_NONE. True where the view parses without an error.
+// The view's tokens keep their sources, so its diagnostics are the original places; a brace's source is its statement's
+// last token's, a condition's `-*__func__` its first token's, and a declaration's `;` its first token's. `to_view` maps
+// each original token, and the count, to its view token, or a dropped one's to the next kept; `to_original` maps each
+// view token to its original one, a replacement's to BUSTER_CHECK_NONE. True where the view parses without an error.
 typedef struct CheckDriverRejectedView CheckDriverRejectedView;
 struct CheckDriverRejectedView
 {
@@ -4371,7 +4375,8 @@ static bool check_driver_rejected_view(CheckDriverRejectedView* result, const Pa
     uint64_t total64 = 0;
     for (uint32_t token = 0; token < count; token += 1)
     {
-        total64 += edits[token] == CHECK_DRIVER_EDIT_KEEP ? 1u : edits[token] == CHECK_DRIVER_EDIT_DROP ? 0u : edits[token] == CHECK_DRIVER_EDIT_BLOCK ? 2u : 3u;
+        total64 += edits[token] == CHECK_DRIVER_EDIT_KEEP || edits[token] == CHECK_DRIVER_EDIT_EMPTY ? 1u : edits[token] == CHECK_DRIVER_EDIT_DROP ? 0u :
+                   edits[token] == CHECK_DRIVER_EDIT_BLOCK ? 2u : 3u;
     }
     bool valid = total64 != 0 && total64 <= BUSTER_PARSE_MAX_TOKENS;
     const uint32_t total = valid ? (uint32_t)total64 : 0;
@@ -4432,6 +4437,15 @@ static bool check_driver_rejected_view(CheckDriverRejectedView* result, const Pa
                     result->to_original[written] = BUSTER_CHECK_NONE;
                     written += 1;
                 }
+            }
+            else if (edits[token] == CHECK_DRIVER_EDIT_EMPTY)
+            {
+                view->tokens.kinds[written] = PARSE_KIND_SEMI;
+                view->tokens.names[written] = 0;
+                view->tokens.sources[written] = original->tokens.sources[token];
+                view->tokens.flags[written] = 0;
+                result->to_original[written] = BUSTER_CHECK_NONE;
+                written += 1;
             }
             else if (edits[token] == CHECK_DRIVER_EDIT_KEEP)
             {
@@ -4882,12 +4896,13 @@ static bool check_driver_rejected_edit(CheckDriverEditor* editor, uint32_t token
 }
 
 // A rejected unit's error in a file-scope declaration that check_driver_rejected_edit leaves (#1447): its specifiers',
-// its declarator's, an invalid type's, an array of unknown size's or a const object's initializer. Clang marks such a
-// declaration invalid and keeps it bound, its uses quiet; the view leaves the whole declaration out instead, from its first
-// token to its `;`, and the mask leaves out every body that names one of its names, which the reading would otherwise
-// find undeclared. False, leaving `edits` and `mask` as they were, where the error isn't in such a declaration (a function
-// definition's, a body's) or a file-scope declaration outside it names one of them: its round isn't ready, as before.
-// Only a rejected unit's rounds call it.
+// its declarator's, an invalid type's, an array of unknown size's or a const object's initializer; or in a function
+// definition outside its body (its declarator's, its parameters'). Clang marks such a declaration invalid and keeps it
+// bound, its uses quiet; the view leaves the whole declaration out instead, from its first token to its `;` or its body's
+// `}`, and the mask leaves out every body that names one of its names (its file-scope ones, not its parameters'), which
+// the reading would otherwise find undeclared. False, leaving `edits` and `mask` as they were, where the error isn't in
+// such a declaration (a body's) or a file-scope declaration outside it names one of them: its round isn't ready, as
+// before. Only a rejected unit's rounds call it.
 static bool check_driver_rejected_declaration(const Parser* parser, const CheckInput* input, const CBodyRange* ranges, uint32_t body_count, uint32_t token,
                                               uint8_t* edits, uint8_t* mask)
 {
@@ -4898,7 +4913,9 @@ static bool check_driver_rejected_declaration(const Parser* parser, const CheckI
     {
         top = parser->tree.parents[top];
     }
-    bool valid = top < count && parser->tree.roles[top] == PARSE_ROLE_TERMINATOR && input->declarations != NULL;
+    // A function definition's, whose root is its body's `}`, is left out whole, its body too.
+    const bool definition = top < count && parser->tree.roles[top] == PARSE_ROLE_CLOSE_BODY;
+    bool valid = top < count && (parser->tree.roles[top] == PARSE_ROLE_TERMINATOR || definition) && input->declarations != NULL;
     uint32_t low = 0;
     uint32_t high = valid ? top : 0;
     while (low < high)
@@ -4908,17 +4925,30 @@ static bool check_driver_rejected_declaration(const Parser* parser, const CheckI
         low = inside ? low : middle + 1;
         high = inside ? middle : high;
     }
-    // No body in it (a statement expression's), and no part of it left out otherwise.
+    // A declaration holds no body (a statement expression's), and no part of it is left out otherwise; a definition's
+    // parts already left out are its body's, which it leaves out with it.
+    uint32_t open = top;
     for (uint32_t at = low; valid && at <= top; at += 1)
     {
-        valid = edits[at] != 2 && parser->tree.roles[at] != PARSE_ROLE_OPEN_BODY;
+        const bool body = parser->tree.roles[at] == PARSE_ROLE_OPEN_BODY;
+        open = body && open == top ? at : open;
+        valid = definition || (edits[at] != CHECK_DRIVER_EDIT_BLOCK && !body);
     }
-    // The bodies that name one of its names, outside it; a file-scope use declines.
+    valid = valid && (!definition || open < top);
+    // Its names, outside its parameter lists (the parse reads a definition's as a call's): a declaration's declared
+    // identifiers; a definition's ordinary identifiers before its body, its name among them, which the reader doesn't
+    // record (and a K&R list's parameters, which mask a body needlessly).
+    const uint32_t names_last = definition ? open : top;
+    uint32_t depth = 0;
     uint32_t users = 0;
-    for (uint32_t at = low; valid && at <= top; at += 1)
+    for (uint32_t at = low; valid && at <= names_last; at += 1)
     {
+        const uint8_t role = parser->tree.roles[at];
+        depth -= (role == PARSE_ROLE_CLOSE_FUNCTION || role == PARSE_ROLE_CLOSE_CALL) && depth != 0;
         const uint32_t name = parser->tokens.names[at];
-        const bool declared = parser->tokens.kinds[at] == PARSE_KIND_IDENTIFIER && input->declarations[at] == at && name != 0;
+        const bool declared = parser->tokens.kinds[at] == PARSE_KIND_IDENTIFIER && name != 0 && depth == 0 &&
+                              (definition ? role == PARSE_ROLE_OPERAND : input->declarations[at] == at);
+        depth += role == PARSE_ROLE_OPEN_FUNCTION || role == PARSE_ROLE_OPEN_CALL;
         for (uint32_t use = 0; declared && valid && use < count; use += 1)
         {
             const bool named = (use < low || use > top) && parser->tokens.kinds[use] == PARSE_KIND_IDENTIFIER && parser->tokens.names[use] == name;
@@ -4938,10 +4968,15 @@ static bool check_driver_rejected_declaration(const Parser* parser, const CheckI
     }
     if (valid)
     {
-        for (uint32_t at = low; users != 0 && at <= top; at += 1)
+        depth = 0;
+        for (uint32_t at = low; users != 0 && at <= names_last; at += 1)
         {
+            const uint8_t role = parser->tree.roles[at];
+            depth -= (role == PARSE_ROLE_CLOSE_FUNCTION || role == PARSE_ROLE_CLOSE_CALL) && depth != 0;
             const uint32_t name = parser->tokens.names[at];
-            const bool declared = parser->tokens.kinds[at] == PARSE_KIND_IDENTIFIER && input->declarations[at] == at && name != 0;
+            const bool declared = parser->tokens.kinds[at] == PARSE_KIND_IDENTIFIER && name != 0 && depth == 0 &&
+                                  (definition ? role == PARSE_ROLE_OPERAND : input->declarations[at] == at);
+            depth += role == PARSE_ROLE_OPEN_FUNCTION || role == PARSE_ROLE_OPEN_CALL;
             for (uint32_t b = 0; declared && b < body_count; b += 1)
             {
                 bool names = false;
@@ -4955,18 +4990,20 @@ static bool check_driver_rejected_declaration(const Parser* parser, const CheckI
                 }
             }
         }
-        memset(edits + low, 1, top - low + 1);
+        memset(edits + low, CHECK_DRIVER_EDIT_DROP, top - low + 1);
+        edits[low] = CHECK_DRIVER_EDIT_EMPTY;
     }
     return valid;
 }
 
 // A rejected unit's common warnings (#1447): clang's for the bodies its errors don't reach. The bodies that hold one of
-// `errors` (tokens) are left out of a second reading of the unit (check_input_selected, as -flazy-system-headers' bodies
-// are), whose program, where it is valid, gives the -Wreturn-type and common warnings of the others: what clang gives of
-// them, the bodies after the unit's first error flushed (check_driver_flushed_bodies). Its other warnings are the first
-// reading's, which the caller published, but those the first reading lacks: its events' (by kind and token), and past
-// `stop`, where a reader's error ended its walk, its reports' and warnings'. Nothing where an error lies outside every body, or the reading isn't valid. Only
-// a rejected unit pays for it; the type table, input and program are its own, and the arenas' pushes stay to the unit's end.
+// `errors` (tokens) are left out of a second reading of the unit (check_input_selected, as -flazy-system-headers'
+// bodies are), whose program, where it is valid, gives the -Wreturn-type and common warnings of the others: what clang
+// gives of them, the bodies after the unit's first error flushed (check_driver_flushed_bodies). Its other warnings are
+// the first reading's, which the caller published, but those the first reading lacks: its events' (by kind and token),
+// and past `stop`, where a reader's error ended its walk, its reports' and warnings'. Nothing where an error lies
+// outside every body and every part the view can leave out, or the reading isn't valid. Only a rejected unit pays for
+// it; the type table, input and program are its own, and the arenas' pushes stay to the unit's end.
 // What a rejected unit's reading came to (check_driver_rejected_read).
 typedef enum CheckDriverRound
 {
@@ -4998,7 +5035,7 @@ static bool check_driver_rejected_known(const uint32_t* errors, uint32_t error_c
 // to leave out too.
 static CheckDriverRound check_driver_rejected_read(const Parser* unit, const Parser* original, Preprocessor* pp, const uint32_t* errors, uint32_t error_count,
                                                    const CBodyRange* ranges, uint32_t body_count, const uint8_t* bodies, uint8_t* mask, const uint8_t* edits,
-                                                   bool scalar, bool return_warning, CheckWarningSeverity return_baseline, CheckCommonShiftWarnings* shifts,
+                                                   bool whole, bool scalar, bool return_warning, CheckWarningSeverity return_baseline, CheckCommonShiftWarnings* shifts,
                                                    const CheckWarningEvents* first, const CheckWarningEvents* first_graph, uint32_t stop,
                                                    uint32_t publication_end, uint32_t* found, uint32_t found_capacity, uint32_t* found_count,
                                                    Arena* arena, Arena* scratch)
@@ -5096,7 +5133,8 @@ static CheckDriverRound check_driver_rejected_read(const Parser* unit, const Par
     const bool checked = valid && !errored_reading && check_program(&program, parser, &input, &stream, &types, program_options, arena, scratch);
     errored_reading = valid && (errored_reading || (!checked && program.status == CHECK_PROGRAM_INVALID));
     valid = valid && (errored_reading || checked);
-    if (errored_reading && edited)
+    // (The errors of a view that leaves out only whole declarations, `whole`, are the unit's; another's may be its own.)
+    if (errored_reading && edited && !whole)
     {
         valid = false;
     }
@@ -5341,6 +5379,12 @@ static void check_driver_rejected_common(const Parser* unit, const Parser* origi
     };
     // The bodies of every error, the mask where the view can't be made; and whether each error has one.
     uint8_t* bodies = valid ? BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, (uint64_t)count + 1) : NULL;
+    // The fallback's view and mask, where the view's reading isn't valid: each error's body left out whole, and each
+    // error outside every body its whole declaration (check_driver_rejected_declaration), whose names' users are left
+    // out too, so that what that reading reads the first did too, but for whole declarations: its errors are the unit's.
+    uint8_t* fallback_edits = bodies != NULL ? BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, (uint64_t)count + 1) : NULL;
+    uint8_t* fallback_mask = fallback_edits != NULL ? BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, (uint64_t)count + 1) : NULL;
+    valid = fallback_mask != NULL;
     // The unit's known errors: the first reading's, then each round's new ones, at most one per token.
     const uint64_t known_capacity = (uint64_t)error_count + count + 1;
     uint32_t* known = valid && bodies != NULL && known_capacity <= UINT32_MAX ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, known_capacity) : NULL;
@@ -5358,14 +5402,14 @@ static void check_driver_rejected_common(const Parser* unit, const Parser* origi
         memset(mask, 0, (uint64_t)count + 1);
         memset(edits, 0, (uint64_t)count + 1);
         memset(bodies, 0, (uint64_t)count + 1);
+        memset(fallback_edits, 0, (uint64_t)count + 1);
+        memset(fallback_mask, 0, (uint64_t)count + 1);
         bool edited = false;
-        bool bodied_all = true;
+        bool fallback_ready = true;
+        bool fallback_edited = false;
         bool ready = true;
         for (uint32_t e = 0; ready && e < known_count; e += 1)
         {
-            const bool kept = known[e] < count && (check_driver_rejected_edit(&editor, known[e]) ||
-                                                   check_driver_rejected_declaration(parser, first_input, ranges, body_count, known[e], edits, mask));
-            edited |= kept;
             // The body whose tokens hold the error: the last one to begin at or before it.
             const uint32_t token = known[e];
             uint32_t low = 0;
@@ -5378,11 +5422,26 @@ static void check_driver_rejected_common(const Parser* unit, const Parser* origi
                 high = before ? high : middle;
             }
             const bool bodied = low != 0 && token < ranges[low - 1].end;
+            // An error in a function definition outside its body (its declarator's, its parameters') leaves the definition
+            // out whole: the editor's smaller parts there (a parameter's declarator) would leave its body's uses undeclared.
+            uint32_t top = token;
+            for (uint32_t steps = 0; !bodied && top < count && parser->tree.parents[top] < count && steps < count; steps += 1)
+            {
+                top = parser->tree.parents[top];
+            }
+            const bool head = !bodied && top < count && parser->tree.roles[top] == PARSE_ROLE_CLOSE_BODY;
+            const bool kept = token < count && ((!head && check_driver_rejected_edit(&editor, token)) ||
+                                                check_driver_rejected_declaration(parser, first_input, ranges, body_count, token, edits, mask));
+            edited |= kept;
             ready = kept || bodied;
-            bodied_all &= bodied;
+            const bool dropped = !bodied && token < count &&
+                                 check_driver_rejected_declaration(parser, first_input, ranges, body_count, token, fallback_edits, fallback_mask);
+            fallback_ready &= bodied || dropped;
+            fallback_edited |= dropped;
             if (bodied)
             {
                 memset(bodies + ranges[low - 1].begin, 1, ranges[low - 1].end - ranges[low - 1].begin);
+                memset(fallback_mask + ranges[low - 1].begin, 1, ranges[low - 1].end - ranges[low - 1].begin);
             }
             if (!kept && bodied)
             {
@@ -5396,16 +5455,17 @@ static void check_driver_rejected_common(const Parser* unit, const Parser* origi
         uint32_t added = 0;
         uint32_t* fresh = known + known_count;
         const uint32_t fresh_capacity = (uint32_t)(known_capacity - known_count);
-        round = ready && edited ? check_driver_rejected_read(unit, original, pp, known, known_count, ranges, body_count, bodies, mask, edits, scalar, return_warning,
-                                                             return_baseline, shifts, first, first_graph, stop, publication_end, fresh, fresh_capacity, &added,
-                                                             arena, scratch) :
+        round = ready && edited ? check_driver_rejected_read(unit, original, pp, known, known_count, ranges, body_count, bodies, mask, edits, false, scalar,
+                                                             return_warning, return_baseline, shifts, first, first_graph, stop, publication_end, fresh,
+                                                             fresh_capacity, &added, arena, scratch) :
                                   CHECK_DRIVER_ROUND_FAILED;
-        uint8_t* fallback = !edited ? mask : bodied_all ? bodies : NULL;
+        uint8_t* fallback = !edited ? mask : fallback_ready ? fallback_mask : NULL;
+        const uint8_t* fallback_view = edited && fallback_edited ? fallback_edits : NULL;
         if (ready && round == CHECK_DRIVER_ROUND_FAILED && fallback != NULL && check_lazy_mask_valid(unit, fallback))
         {
-            round = check_driver_rejected_read(unit, original, pp, known, known_count, ranges, body_count, bodies, fallback, NULL, scalar, return_warning,
-                                               return_baseline, shifts, first, first_graph, stop, publication_end, fresh, fresh_capacity, &added, arena,
-                                               scratch);
+            round = check_driver_rejected_read(unit, original, pp, known, known_count, ranges, body_count, bodies, fallback, fallback_view, true, scalar,
+                                               return_warning, return_baseline, shifts, first, first_graph, stop, publication_end, fresh, fresh_capacity,
+                                               &added, arena, scratch);
         }
         known_count += added;
     }
