@@ -8999,33 +8999,11 @@ static bool check_common_loop_evaluated(const CheckGraph* graph, const uint32_t*
     return result;
 }
 
-// Whether the static selection whose `)` is `close` (a _Generic's or a __builtin_choose_expr's) chooses the operand whose
-// subtree's root is `child`, its child: the parse tree's climb from the chosen operand's token reaches `child`. The node
-// at its `)` is the selection's, or, for one the source reader chose, the chosen operand's own. True where `close` closes
-// no selection, or one whose choice the graph doesn't hold.
-static bool check_common_loop_selected(const Parser* parser, const CheckInput* input, uint32_t close, uint32_t child)
-{
-    const CheckGraph* graph = &input->graph;
-    const uint32_t count = parser->tokens.count;
-    const uint32_t open = parser->tree.roles[close] == PARSE_ROLE_CLOSE_KEYWORD ? check_warning_graph_void_opener(parser, close) : BUSTER_CHECK_NONE;
-    const uint32_t keyword = open != BUSTER_CHECK_NONE && open > 0 ? open - 1 : BUSTER_CHECK_NONE;
-    const bool selection = keyword != BUSTER_CHECK_NONE &&
-                           (parser->tokens.kinds[keyword] == PARSE_KIND_GENERIC || parser->tokens.names[keyword] == C_NAME_BUILTIN_CHOOSE_EXPR);
-    const uint32_t node = selection && close < input->token_count && input->token_nodes != NULL ? input->token_nodes[close] : BUSTER_CHECK_NONE;
-    const uint32_t chosen = node < graph->count && graph->ops[node] == CHECK_OP_SELECT ? graph->operand0[node] : node;
-    uint32_t at = chosen < graph->count ? graph->tokens[chosen] : child;
-    for (uint32_t steps = 0; at < count && at != child && at != close && steps < count; steps += 1)
-    {
-        at = parser->tree.parents[at];
-    }
-    return at == child;
-}
-
 // Whether the visitor reaches `token`, inside the for statement whose `)` is `close` (#1821): its node, where it has one,
 // is evaluated (check_common_loop_evaluated), and so is the value of each GNU statement expression around it there, a
 // node at its `)`, as a statement expression's statements are graph roots of their own that only the parse tree places in
 // its operand; none is in a specifier's operand (typeof's), nor has a value without a node. And each static selection
-// around it there chooses the operand it is in (check_common_loop_selected), as the visitor reads the chosen operand
+// around it there chooses the operand it is in (check_warning_graph_chooses), as the visitor reads the chosen operand
 // alone: a selection's other operands and its controlling expression are graph roots of their own too, which a selection
 // inside a statement expression inside another selection's chosen operand would hide from a test of the roots alone.
 static bool check_common_loop_reached(const Parser* parser, const CheckInput* input, const uint32_t* parents, uint32_t token, uint32_t close)
@@ -9033,11 +9011,9 @@ static bool check_common_loop_reached(const Parser* parser, const CheckInput* in
     const CheckGraph* graph = &input->graph;
     const uint32_t first = token < input->token_count && input->token_nodes != NULL ? input->token_nodes[token] : BUSTER_CHECK_NONE;
     bool result = first >= graph->count || check_common_loop_evaluated(graph, parents, first);
-    uint32_t child = token;
     for (uint32_t at = token, steps = 0; result && at < parser->tokens.count && at != close && parser->tree.parents[at] != at && steps < parser->tokens.count;
          steps += 1)
     {
-        child = at;
         at = parser->tree.parents[at];
         const bool group = at < input->token_count && parser->tree.roles[at] == PARSE_ROLE_CLOSE_GROUP && input->expression_regions != NULL &&
                            input->expression_regions[at] != 0;
@@ -9047,7 +9023,7 @@ static bool check_common_loop_reached(const Parser* parser, const CheckInput* in
         const uint8_t role = at < parser->tokens.count ? parser->tree.roles[at] : PARSE_ROLE_NONE;
         const bool unevaluated = role == PARSE_ROLE_CLOSE_SPECIFIER || role == PARSE_ROLE_CLOSE_SIZEOF ||
                                  (role == PARSE_ROLE_PREFIX && parser->tokens.kinds[at] == PARSE_KIND_SIZEOF) ||
-                                 (role == PARSE_ROLE_CLOSE_KEYWORD && !check_common_loop_selected(parser, input, at, child));
+                                 (role == PARSE_ROLE_CLOSE_KEYWORD && !check_warning_graph_chooses(input, parser, at, token));
         result = !unevaluated &&
                  (!group || (node < graph->count && graph->ops[node] == CHECK_OP_STATEMENT_VALUE && check_common_loop_evaluated(graph, parents, node)));
     }
