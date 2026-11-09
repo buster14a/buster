@@ -34,6 +34,21 @@ static uint32_t check_semantic_function(const Parser* parser, const CheckInput* 
     return result;
 }
 
+// The typedef that spells an enum's fixed underlying type after its name `token` (`enum E : my_int`), for clang's words
+// of it, or 0 for a base of no typedef (or no base). Bounded by the base's tokens, to the body's `{` or the `;`.
+static uint32_t check_semantic_enum_base_spelling(const Parser* parser, const CheckInput* input, uint32_t token)
+{
+    uint32_t result = 0;
+    const bool based = token + 1 < parser->tokens.count && parser->tokens.kinds[token + 1] == PARSE_KIND_COLON;
+    for (uint32_t t = token + 2; based && result == 0 && t < parser->tokens.count && t < input->token_count &&
+                                 parser->tokens.kinds[t] != PARSE_KIND_L_BRACE && parser->tokens.kinds[t] != PARSE_KIND_SEMI; t += 1)
+    {
+        const uint32_t resolved = parser->tokens.kinds[t] == PARSE_KIND_IDENTIFIER && input->declarations != NULL ? input->declarations[t] : 0;
+        result = resolved != 0 && resolved < input->token_count && input->declaration_kinds[resolved] == C_BINDING_TYPEDEF ? resolved : 0;
+    }
+    return result;
+}
+
 static const char* check_semantic_input(const Parser* parser, Preprocessor* pp, const CheckInput* input, const TypeTable* types,
                                        const CheckInputReport* report, CheckWarningSpelling* spell, Arena* scratch)
 {
@@ -54,6 +69,14 @@ static const char* check_semantic_input(const Parser* parser, Preprocessor* pp, 
     else if (report->message == CHECK_INPUT_ENUMERATOR_REDEFINITION && name.length != 0)
     {
         result = check_warning_text(scratch, "redefinition of enumerator '%.*s'", (int)name.length, name.pointer);
+    }
+    else if (report->message == CHECK_INPUT_ARRAY_LITERAL_MISMATCH)
+    {
+        // GNU's array initialized by a compound literal of another array type (#1447): both types as written.
+        const String8 array = check_driver_warning_type(parser, pp, input, types, spell, scratch, report->type, report->type_spelling);
+        const String8 literal = check_driver_warning_type(parser, pp, input, types, spell, scratch, (TypeId)report->value, 0);
+        result = array.length == 0 || literal.length == 0 ? NULL : check_warning_text(scratch, "cannot initialize array of type %.*s with array of type %.*s",
+                                                                                     (int)array.length, array.pointer, (int)literal.length, literal.pointer);
     }
     else if ((report->message == CHECK_INPUT_REDECLARATION || report->message == CHECK_INPUT_CONFLICTING_TYPES) && token < count && name.length != 0)
     {
@@ -79,6 +102,21 @@ static const char* check_semantic_input(const Parser* parser, Preprocessor* pp, 
             const String8 prior = check_driver_warning_type(parser, pp, input, types, spell, scratch, (TypeId)report->value, prior_spelling);
             result = current.length == 0 || prior.length == 0 ? NULL : check_warning_text(scratch, "typedef redefinition with different types (%.*s vs %.*s)",
                                                                                          (int)current.length, current.pointer, (int)prior.length, prior.pointer);
+        }
+        else if (report->detail == CHECK_REDECLARATION_ENUM_BASE)
+        {
+            // Both bases as written, a typedef's with its "aka": the new one's after this name's `:`, the earlier one's after
+            // the noted name's.
+            const uint32_t noted = report->note_token < count ? report->note_token : previous;
+            const String8 current = check_driver_warning_type(parser, pp, input, types, spell, scratch, report->type, check_semantic_enum_base_spelling(parser, input, token));
+            const String8 prior = check_driver_warning_type(parser, pp, input, types, spell, scratch, (TypeId)report->value, check_semantic_enum_base_spelling(parser, input, noted));
+            result = current.length == 0 || prior.length == 0 ? NULL : check_warning_text(scratch, "enumeration redeclared with different underlying type %.*s (was %.*s)",
+                                                                                         (int)current.length, current.pointer, (int)prior.length, prior.pointer);
+        }
+        else if (report->detail == CHECK_REDECLARATION_ENUM_FIXED || report->detail == CHECK_REDECLARATION_ENUM_NONFIXED)
+        {
+            result = report->detail == CHECK_REDECLARATION_ENUM_FIXED ? "enumeration previously declared with fixed underlying type" :
+                                                                        "enumeration previously declared with nonfixed underlying type";
         }
         else if (report->detail == CHECK_REDECLARATION_KIND)
         {

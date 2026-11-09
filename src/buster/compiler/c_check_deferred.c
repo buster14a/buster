@@ -760,6 +760,9 @@ static bool check_deferred_lane_prepare(CheckDeferred* deferred, CheckDeferredLa
     // which take the indices after the top level's and are set where each is made (check_input_tag_identity).
     reader->enum_fixed = reader->tag_completions != 0 ? check_deferred_copy(arena, top->enum_fixed, top->types->tags.count, tags, sizeof(uint8_t)) : 0;
     valid = reader->enum_fixed != 0;
+    // Each tag's latest declaration, set where a body's tag is made: a body declares none of the top level's again.
+    reader->tag_declared = valid ? check_deferred_copy(arena, 0, 0, tags, sizeof(uint32_t)) : 0;
+    valid = reader->tag_declared != 0;
     if (valid && top->intrinsic_names != 0)
     {
         // The intrinsics' tables, after the top level's of which each body appends its own declarations and calls; their
@@ -1510,15 +1513,16 @@ static bool check_deferred_warnings(CheckWarningBuffer* output, const CheckWarni
 }
 
 // A recovered report in the merged table's ids (#1447): the TypeIds it holds, the type it names, and those its `value`
-// holds: a redeclaration's prior type (c_check_redefinition.c, any detail but the generic one) and an attribute expression's
-// binary operands' second type (c_check_attribute_expression.c). Every other `value` is a token, a count or a pair of
+// holds: a redeclaration's prior type (c_check_redefinition.c, any detail but the generic one), an attribute expression's
+// binary operands' second type (c_check_attribute_expression.c) and an array's mismatched compound literal's type
+// (c_check_input_initializer.c). Every other `value` is a token, a count or a pair of
 // tokens; tokens, declarations and names are the unit's.
 static CheckInputReport check_deferred_report(const CheckInputReport* report, const TypeReplayPart* part)
 {
     CheckInputReport result = *report;
     const bool redeclaration = result.message == CHECK_INPUT_REDECLARATION || result.message == CHECK_INPUT_CONFLICTING_TYPES;
     const bool binary = result.message == CHECK_INPUT_ATTRIBUTE_ARGUMENT && (result.detail & 0xffu) == CHECK_ARGUMENT_EXPRESSION_BINARY;
-    const bool typed = (redeclaration && result.detail != CHECK_REDECLARATION_GENERIC) || binary;
+    const bool typed = (redeclaration && result.detail != CHECK_REDECLARATION_GENERIC) || binary || result.message == CHECK_INPUT_ARRAY_LITERAL_MISMATCH;
     result.type = check_deferred_type(part, result.type);
     result.value = typed ? check_deferred_type(part, (TypeId)result.value) : result.value;
     return result;

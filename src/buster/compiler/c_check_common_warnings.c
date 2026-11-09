@@ -1207,6 +1207,9 @@ struct CheckCommonFacts
     // The tokens of the bodies clang ends after the unit's first error (check_common_flush), or null: none, in a unit without
     // one.
     const uint8_t* flushed;
+    // The plain `x = y` assignments, a bit per node, -Wself-assign's candidates (check_common_self_assigns), or null where it
+    // can't warn.
+    uint64_t* self_assigns;
 };
 
 static uint8_t* check_common_evaluated(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, const Parser* parser,
@@ -2045,7 +2048,54 @@ static void check_common_conversion_own(CheckCommonEmission* emission, uint32_t 
     }
 }
 
-// A runtime warning at a node's own root: a self-assignment or a constant subscript past its bound.
+// Whether `node` is a plain `x = y`, a -Wself-assign candidate (check_common_self_assigns).
+static bool check_common_self_assign_candidate(const CheckGraph* graph, uint32_t node)
+{
+    const uint32_t left = graph->operand0[node];
+    const uint32_t right = graph->operand1[node];
+    return graph->ops[node] == CHECK_OP_ASSIGN && left < graph->count && right < graph->count && graph->ops[left] == CHECK_OP_VALUE &&
+           graph->ops[right] == CHECK_OP_VALUE;
+}
+
+// -Wself-assign: clang's DiagnoseSelfAssignment is a plain Diag where Sema builds the assignment, not a runtime-behavior
+// one, so it warns at the operator as the assignment completes, in unreachable code and a constant condition's or a
+// selection's other arm too, and only an unevaluated operand (sizeof's) drops it (check_common_report_evaluated). A variable's
+// own name alone: member, subscript and indirection lvalues never warn, whatever object they reach. The candidates are the
+// facts' (CheckCommonFacts.self_assigns), in node order.
+static void check_common_self_assigns(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, TypeTable* types,
+                                      CheckWarningSpelling* spell, const CheckCommonFacts* facts, Arena* scratch)
+{
+    const CheckGraph* graph = &input->graph;
+    for (uint32_t word = 0; facts->self_assigns != NULL && !pp->fatal && word < (graph->count + 63) / 64; word += 1)
+    {
+        for (uint64_t bits = facts->self_assigns[word]; bits != 0 && !pp->fatal; bits &= bits - 1)
+        {
+            const uint32_t node = word * 64 + (uint32_t)__builtin_ctzll(bits);
+            const uint32_t token = graph->tokens[node];
+            const CheckValue left_value = check_stream_value(stream, graph->operand0[node]);
+            const CheckValue right_value = check_stream_value(stream, graph->operand1[node]);
+            const bool volatile_object = (type_qualifiers(type_strip_aligned(types, left_value.type)) & BUSTER_TYPE_VOLATILE) != 0;
+            if (!volatile_object && left_value.category == CHECK_LVALUE && right_value.category == CHECK_LVALUE && left_value.object != 0 &&
+                left_value.object == right_value.object && left_value.offset == 0 && right_value.offset == 0 && !check_common_from_macro(parser, pp, token) &&
+                !check_common_from_macro(parser, pp, graph->tokens[graph->operand0[node]]) &&
+                !check_common_from_macro(parser, pp, graph->tokens[graph->operand1[node]]))
+            {
+                // (No mark around it: the type's spelling and the unevaluated contexts' memo, which these build lazily, are the
+                // passes', which check_driver_common_warnings gives back after them.)
+                const String8 type_name = check_driver_warning_type(parser, pp, input, types, spell, scratch, left_value.type, 0);
+                if (type_name.length != 0)
+                {
+                    const char* message = check_warning_text(scratch, "explicitly assigning value of variable of type %.*s to itself",
+                                                              (int)type_name.length, type_name.pointer);
+                    check_common_report_evaluated(parser, pp, input, token, token, PP_DIAGNOSTIC_SEMANTIC, CHECK_WARNING_ID_SELF_ASSIGN, true, message,
+                                                  NULL, 0, scratch);
+                }
+            }
+        }
+    }
+}
+
+// A runtime warning at a node's own root: a constant subscript past its bound.
 // A conditional has no warning of its own — its arms report at its slot instead.
 static void check_common_own(CheckCommonEmission* emission, uint32_t node)
 {
@@ -2058,36 +2108,8 @@ static void check_common_own(CheckCommonEmission* emission, uint32_t node)
     Arena* scratch = emission->scratch;
     const CheckGraph* graph = &input->graph;
     const CheckOp op = graph->ops[node];
-    const uint32_t token = graph->tokens[node];
     const bool evaluated = check_common_emit_evaluated(emission, node);
-    if (op == CHECK_OP_ASSIGN && evaluated)
-    {
-        const uint32_t left = graph->operand0[node];
-        const uint32_t right = graph->operand1[node];
-        const CheckValue left_value = left < graph->count ? check_stream_value(stream, left) : (CheckValue){ 0 };
-        const CheckValue right_value = right < graph->count ? check_stream_value(stream, right) : (CheckValue){ 0 };
-        const bool volatile_object = left < graph->count &&
-            (type_qualifiers(type_strip_aligned(types, left_value.type)) & BUSTER_TYPE_VOLATILE) != 0;
-        // Clang's -Wself-assign only covers a variable's own name: `x = x` warns, while member,
-        // subscript and indirection lvalues never do — so `u.a = u.b`, `s.m = s.m` and `a[i] = a[i]`
-        // all stay silent regardless of the object and offset they resolve to.
-        const bool plain_lvalues = left < graph->count && right < graph->count &&
-                                   graph->ops[left] == CHECK_OP_VALUE && graph->ops[right] == CHECK_OP_VALUE;
-        if (!volatile_object && plain_lvalues && left_value.category == CHECK_LVALUE &&
-            right_value.category == CHECK_LVALUE && left_value.object != 0 && left_value.object == right_value.object &&
-            left_value.offset == 0 && right_value.offset == 0 && !check_common_from_macro(parser, pp, token) &&
-            !check_common_from_macro(parser, pp, graph->tokens[left]) && !check_common_from_macro(parser, pp, graph->tokens[right]))
-        {
-            const String8 type_name = check_driver_warning_type(parser, pp, input, types, spell, scratch, left_value.type, 0);
-            if (type_name.length != 0)
-            {
-                const char* message = check_warning_text(scratch, "explicitly assigning value of variable of type %.*s to itself",
-                                                          (int)type_name.length, type_name.pointer);
-                check_common_report_deferred(parser, pp, input, token, CHECK_WARNING_ID_SELF_ASSIGN, true, message, NULL, 0, scratch);
-            }
-        }
-    }
-    else if (op == CHECK_OP_SUBSCRIPT && evaluated)
+    if (op == CHECK_OP_SUBSCRIPT && evaluated)
     {
         const uint32_t array = graph->operand0[node];
         const uint32_t index = graph->operand1[node];
@@ -3190,6 +3212,136 @@ static void check_common_parentheses(const Parser* parser, Preprocessor* pp, con
                                                      parser->tokens.kinds[token] == PARSE_KIND_EXCLAIMEQUAL ? "use '|=' to turn this inequality comparison into an or-assignment" : "" };
             check_common_report_discarded(parser, pp, input, token, CHECK_WARNING_ID_UNUSED_COMPARISON, message,
                                           note.message[0] != 0 ? &note : NULL, note.message[0] != 0 ? 1u : 0u, scratch);
+        }
+    }
+}
+
+// The type clang's getEnumCoercedType gives an operand: an enumerator's own enumeration where the operand names one
+// (parentheses are no nodes) and that enumeration's definition is complete, past its closing brace, else its type.
+static TypeId check_common_enum_coerced(const CheckInput* input, const CheckStream* stream, uint32_t node)
+{
+    const CheckGraph* graph = &input->graph;
+    TypeId result = check_stream_type(stream, node);
+    const uint32_t token = graph->tokens[node];
+    const uint32_t declaration = graph->ops[node] == CHECK_OP_VALUE && token < input->token_count && input->declarations != NULL ?
+                                 input->declarations[token] : BUSTER_CHECK_NONE;
+    if (declaration < input->token_count && input->declaration_kinds[declaration] == C_BINDING_ENUMERATOR)
+    {
+        for (uint32_t i = 0; i < input->enum_definition_count; i += 1)
+        {
+            const CheckInputEnumDefinition* definition = input->enum_definitions + i;
+            result = definition->open < declaration && declaration < definition->close && token > definition->close ? definition->type : result;
+        }
+    }
+    return result;
+}
+
+// Whether `type` is clang's isFloatingType: a real or complex floating type.
+static bool check_common_floating_kind(const TypeTable* types, TypeId type)
+{
+    const uint8_t kind = check_action_kind(types, type);
+    return kind == BUSTER_TYPE_KIND_FLOATING ||
+           (kind == BUSTER_TYPE_KIND_COMPLEX && check_action_kind(types, type_element(types, type_strip_aligned(types, type))) == BUSTER_TYPE_KIND_FLOATING);
+}
+
+// Clang's checkEnumArithmeticConversions (#1447): the usual arithmetic conversions of an operator whose operands are
+// enumerations of different types, or an enumeration and a floating type, warned as the operator is built, at it. The
+// operands are as written, an enumerator as its enumeration (check_common_enum_coerced). A compound assignment warns only
+// for an enumeration converted to its floating target. Only a unit where an enumerator or an enumeration's variable is
+// named as such an operator's operand (CheckInput.enum_operands) is scanned: an enumeration operand that is only a
+// member, a call's result or a cast's is not looked for without one.
+static __attribute__((noinline)) void check_common_enum_arithmetic(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, TypeTable* types,
+                                         CheckWarningSpelling* spell, Arena* scratch)
+{
+    const CheckGraph* graph = &input->graph;
+    const bool vector = !BUSTER_SCALAR_PATH(parser->options.scalar);
+    static const CheckOp ops[] =
+    {
+        CHECK_OP_ADD, CHECK_OP_SUBTRACT, CHECK_OP_MULTIPLY, CHECK_OP_DIVIDE, CHECK_OP_REMAINDER, CHECK_OP_LESS, CHECK_OP_LESS_EQUAL,
+        CHECK_OP_GREATER, CHECK_OP_GREATER_EQUAL, CHECK_OP_EQUAL, CHECK_OP_NOT_EQUAL, CHECK_OP_BIT_AND, CHECK_OP_BIT_OR, CHECK_OP_BIT_XOR,
+        CHECK_OP_CONDITIONAL, CHECK_OP_ADD_ASSIGN, CHECK_OP_SUBTRACT_ASSIGN, CHECK_OP_MULTIPLY_ASSIGN, CHECK_OP_DIVIDE_ASSIGN,
+        CHECK_OP_REMAINDER_ASSIGN, CHECK_OP_BIT_AND_ASSIGN, CHECK_OP_BIT_OR_ASSIGN, CHECK_OP_BIT_XOR_ASSIGN,
+    };
+    static const char* const kinds[] = { "arithmetic between", "bitwise operation between", "comparison of", "conditional expression between",
+                                         "compound assignment of" };
+    const CheckCommonOps set = check_common_ops(ops, BUSTER_ARRAY_LENGTH(ops));
+    CheckCommonScan scan = { 0 };
+    for (uint32_t node = input->enum_operands ? check_common_next_op(graph, &set, &scan, vector) : graph->count; node < graph->count && !pp->fatal;
+         node = check_common_next_op(graph, &set, &scan, vector))
+    {
+        const CheckOp op = graph->ops[node];
+        const bool compound = (op >= CHECK_OP_ADD_ASSIGN && op <= CHECK_OP_REMAINDER_ASSIGN) || op == CHECK_OP_BIT_AND_ASSIGN ||
+                              op == CHECK_OP_BIT_OR_ASSIGN || op == CHECK_OP_BIT_XOR_ASSIGN;
+        const uint32_t kind = op >= CHECK_OP_ADD && op <= CHECK_OP_REMAINDER ? 0 : op >= CHECK_OP_BIT_AND && op <= CHECK_OP_BIT_XOR ? 1 :
+                              op >= CHECK_OP_LESS && op <= CHECK_OP_NOT_EQUAL ? 2 : op == CHECK_OP_CONDITIONAL ? 3 : compound ? 4 : 5;
+        const uint32_t left = op == CHECK_OP_CONDITIONAL ? graph->operand1[node] : graph->operand0[node];
+        const uint32_t right = op == CHECK_OP_CONDITIONAL ? graph->operand2[node] : graph->operand1[node];
+        // The fast rejection: a mix needs an operand that may be an enumeration's, by its own kind (an aligned typedef's
+        // hides its type's), or a named constant leaf, which may be an enumerator.
+        bool enumish = false;
+        for (uint32_t i = 0; i < 2; i += 1)
+        {
+            const uint32_t operand = i == 0 ? left : right;
+            const uint8_t operand_kind = operand < graph->count ? type_kind(types, check_stream_type(stream, operand)) : BUSTER_TYPE_KIND_VOID;
+            enumish |= operand_kind == BUSTER_TYPE_KIND_ENUM || operand_kind == BUSTER_TYPE_KIND_ALIGNED ||
+                       (operand < graph->count && graph->ops[operand] == CHECK_OP_VALUE && (check_stream_flags(stream, operand) & BUSTER_CHECK_ICE) != 0 &&
+                        graph->tokens[operand] < parser->tokens.count && parser->tokens.kinds[graph->tokens[operand]] == PARSE_KIND_IDENTIFIER);
+        }
+        if (kind < 5 && left < graph->count && right < graph->count && enumish && stream->diagnostics[node] == CHECK_DIAG_NONE)
+        {
+            // A GNU `a ?: b`'s omitted middle operand is its condition promoted (clang's UsualUnaryConversions): an
+            // enumeration's is an integer then, and a floating one an rvalue. Its `?` and `:` are adjacent.
+            const uint32_t colon = graph->tokens[node];
+            uint32_t question = colon;
+            for (uint32_t at = op == CHECK_OP_CONDITIONAL ? colon : 0; at != 0 && question == colon;)
+            {
+                at -= 1;
+                question = parser->tree.parents[at] == colon && parser->tree.roles[at] == PARSE_ROLE_OPEN_TERNARY ? at : question;
+            }
+            const bool omitted = op == CHECK_OP_CONDITIONAL && question + 1 == colon;
+            // A comparison's operands are rvalues first (clang's DefaultLvalueConversion): unqualified, a typedef that
+            // carries a qualifier itself spelled as its type.
+            const bool rvalue_left = kind == 2 || omitted;
+            const bool rvalue_right = kind == 2;
+            const TypeId left_coerced = check_common_enum_coerced(input, stream, left);
+            const TypeId right_coerced = check_common_enum_coerced(input, stream, right);
+            const TypeId left_type = rvalue_left ? type_unqualified(left_coerced) : left_coerced;
+            const TypeId right_type = rvalue_right ? type_unqualified(right_coerced) : right_coerced;
+            const bool left_enum = !omitted && check_action_kind(types, left_type) == BUSTER_TYPE_KIND_ENUM;
+            const bool right_enum = check_action_kind(types, right_type) == BUSTER_TYPE_KIND_ENUM;
+            const bool floating = (!compound && left_enum && check_common_floating_kind(types, right_type)) ||
+                                  (right_enum && check_common_floating_kind(types, left_type));
+            const bool mixed = !floating && !compound && left_enum && right_enum &&
+                               type_unqualified(type_strip_aligned(types, left_type)) != type_unqualified(type_strip_aligned(types, right_type));
+            if (floating || mixed)
+            {
+                uint32_t left_spelling = left_coerced == check_stream_type(stream, left) ? check_common_operand_spelling(parser, input, graph, stream, left) : 0;
+                uint32_t right_spelling = right_coerced == check_stream_type(stream, right) ? check_common_operand_spelling(parser, input, graph, stream, right) : 0;
+                const TypeId left_alias = left_spelling < input->token_count && input->declared_types != NULL ? input->declared_types[left_spelling] : 0;
+                const TypeId right_alias = right_spelling < input->token_count && input->declared_types != NULL ? input->declared_types[right_spelling] : 0;
+                left_spelling = rvalue_left && left_alias != 0 && type_qualifiers(left_alias) != 0 ? 0 : left_spelling;
+                right_spelling = rvalue_right && right_alias != 0 && type_qualifiers(right_alias) != 0 ? 0 : right_spelling;
+                const String8 left_name = check_driver_warning_type(parser, pp, input, types, spell, scratch, left_type, left_spelling);
+                const String8 right_name = check_driver_warning_type(parser, pp, input, types, spell, scratch, right_type, right_spelling);
+                const String8 left_plain = mixed ? check_driver_warning_type(parser, pp, input, types, spell, scratch, left_type, 0) : (String8){ 0 };
+                const String8 right_plain = mixed ? check_driver_warning_type(parser, pp, input, types, spell, scratch, right_type, 0) : (String8){ 0 };
+                const bool anonymous = mixed && (memmem(left_plain.pointer, left_plain.length, "(unnamed", 8) != NULL ||
+                                                 memmem(right_plain.pointer, right_plain.length, "(unnamed", 8) != NULL);
+                const uint32_t id = floating ? CHECK_WARNING_ID_ENUM_FLOAT_CONVERSION : anonymous ? CHECK_WARNING_ID_ANON_ENUM_ENUM_CONVERSION :
+                                    kind == 3 ? CHECK_WARNING_ID_ENUM_COMPARE_CONDITIONAL : kind == 2 ? CHECK_WARNING_ID_ENUM_COMPARE :
+                                    CHECK_WARNING_ID_ENUM_ENUM_CONVERSION;
+                const char* message = floating ?
+                    check_warning_text(scratch, "%s %s type %.*s %s %s type %.*s", kinds[kind], left_enum ? "enumeration" : "floating-point",
+                                       (int)left_name.length, left_name.pointer, kind == 2 ? "with" : kind == 4 ? "from" : "and",
+                                       left_enum ? "floating-point" : "enumeration", (int)right_name.length, right_name.pointer) :
+                    check_warning_text(scratch, "%s different enumeration types (%.*s and %.*s)", kinds[kind], (int)left_name.length, left_name.pointer,
+                                       (int)right_name.length, right_name.pointer);
+                if (left_name.length != 0 && right_name.length != 0 && message != NULL)
+                {
+                    // (A conditional's node is its `:`; clang's place is its `?`, the `:`'s child.)
+                    check_common_report(parser, pp, input, question, id, id != CHECK_WARNING_ID_ENUM_COMPARE, message, NULL, 0, scratch);
+                }
+            }
         }
     }
 }
@@ -4460,7 +4612,8 @@ static uint8_t check_common_own_reach(const Parser* parser, const CheckGraph* gr
     const bool comparison = enabled->sign_compare && op >= CHECK_OP_LESS && op <= CHECK_OP_NOT_EQUAL;
     // A source comma's left-operand marker is the arithmetic scan's (check_common_arithmetic_own).
     const bool comma = op == CHECK_OP_COMMA && graph->tokens[node] < parser->tokens.count && parser->tokens.kinds[graph->tokens[node]] == PARSE_KIND_COMMA;
-    const uint8_t result = (uint8_t)(check_common_candidate_bits(parser, graph, stream, types, node, enabled->self_assign) |
+    // (A self-assignment is no walk's: check_common_self_assigns gives it, in unreachable code too.)
+    const uint8_t result = (uint8_t)(check_common_candidate_bits(parser, graph, stream, types, node, false) |
                                      (division || shift || comma ? BUSTER_CHECK_REACH_ARITHMETIC : 0u) | (comparison ? BUSTER_CHECK_REACH_SIGN : 0u) |
                                      (shift ? BUSTER_CHECK_REACH_SHIFT : 0u));
     return result;
@@ -7779,8 +7932,14 @@ static bool check_common_facts(const CheckGraph* graph, const CheckStream* strea
     uint32_t* parents = count != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : NULL;
     uint8_t* used = count != 0 && enabled->uninitialized ? CHECK_COMMON_PUSH_ARRAY(scratch, uint8_t, (uint64_t)count + 1) : NULL;
     uint8_t* reach = count != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, uint8_t, count) : NULL;
+    uint64_t* self_assigns = count != 0 && enabled->self_assign ? CHECK_COMMON_PUSH_ARRAY(scratch, uint64_t, ((uint64_t)count + 63) / 64) : NULL;
     uint8_t* evaluated = NULL;
-    const bool allocated = parents != NULL && (used != NULL || !enabled->uninitialized) && reach != NULL;
+    const bool allocated = parents != NULL && (used != NULL || !enabled->uninitialized) && reach != NULL && (self_assigns != NULL || !enabled->self_assign ||
+                           count == 0);
+    if (allocated && self_assigns != NULL)
+    {
+        memset(self_assigns, 0, (((uint64_t)count + 63) / 64) * sizeof(uint64_t));
+    }
     const bool walk = allocated && vector && check_common_facts_tree(graph, stream, types, parents, used);
     if (walk)
     {
@@ -7791,6 +7950,10 @@ static bool check_common_facts(const CheckGraph* graph, const CheckStream* strea
         for (uint32_t node = check_common_next_op(graph, &own, &owners, true); node < count; node = check_common_next_op(graph, &own, &owners, true))
         {
             uint8_t bits = check_common_own_reach(parser, graph, stream, types, node, enabled);
+            if (self_assigns != NULL && check_common_self_assign_candidate(graph, node))
+            {
+                self_assigns[node >> 6] |= UINT64_C(1) << (node & 63);
+            }
             for (uint32_t at = node; bits != 0 && at < count; at = parents[at])
             {
                 bits &= (uint8_t)~reach[at];
@@ -7813,6 +7976,10 @@ static bool check_common_facts(const CheckGraph* graph, const CheckStream* strea
             // A comma's left operand and a cast to void's, statement-level or explicit, drop their operand's result.
             const bool discards = used != NULL && check_common_discards(graph, stream, types, node);
             uint8_t bits = check_common_own_reach(parser, graph, stream, types, node, enabled);
+            if (self_assigns != NULL && check_common_self_assign_candidate(graph, node))
+            {
+                self_assigns[node >> 6] |= UINT64_C(1) << (node & 63);
+            }
             const uint32_t operands[] = { graph->operand0[node], graph->operand1[node], graph->operand2[node] };
             for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(operands); i += 1)
             {
@@ -7851,7 +8018,7 @@ static bool check_common_facts(const CheckGraph* graph, const CheckStream* strea
     {
         check_common_flush(graph, parents, flushed, parser->tokens.count, evaluated);
     }
-    *facts = (CheckCommonFacts){ .parents = parents, .used = used, .evaluated = evaluated, .reach = reach, .flushed = flushed };
+    *facts = (CheckCommonFacts){ .parents = parents, .used = used, .evaluated = evaluated, .reach = reach, .flushed = flushed, .self_assigns = self_assigns };
     const bool result = count == 0 || evaluated != NULL;
     return result;
 }
@@ -8914,7 +9081,7 @@ static void check_driver_common_warnings(const Parser* parser, Preprocessor* pp,
         .uninitialized = check_common_enabled(pp, input, CHECK_WARNING_ID_UNINITIALIZED, true) ||
                          check_common_enabled(pp, input, CHECK_WARNING_ID_UNUSED_BUT_SET_PARAMETER, true),
     };
-    check_common_parentheses(parser, pp, input, stream, types, scratch);
+    check_common_enum_arithmetic(parser, pp, input, stream, types, &spell, scratch);
     check_common_empty_bodies(parser, pp, input, scratch);
     check_common_dangling_else(parser, pp, input, scratch);
     check_common_switches(parser, pp, input, stream, types, &spell, program, scratch);
@@ -8923,6 +9090,10 @@ static void check_driver_common_warnings(const Parser* parser, Preprocessor* pp,
     {
         check_common_exhausted(pp);
     }
+    // At one assignment, clang's -Wself-assign is given as Sema builds it, before the condition that reads it gives
+    // -Wparentheses.
+    check_common_self_assigns(parser, pp, input, stream, types, &spell, &facts, scratch);
+    check_common_parentheses(parser, pp, input, stream, types, scratch);
     check_common_graph_warnings(parser, pp, input, stream, types, &spell, &facts, program, shifts, scratch);
     check_common_for_loops(parser, pp, input, stream, types, facts.parents, scratch);
     check_common_return_stack(parser, pp, input, stream, types, scratch);

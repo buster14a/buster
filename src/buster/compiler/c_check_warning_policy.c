@@ -60,6 +60,10 @@ static bool check_warning_option(uint32_t id, String8 option)
                                      id == CHECK_WARNING_ID_SINGLE_BIT_BITFIELD_CONSTANT_CONVERSION;
     matches |= id == CHECK_WARNING_ID_SINGLE_BIT_BITFIELD_CONSTANT_CONVERSION && check_diagnostic_option(option, "-Wconstant-conversion");
     matches |= constant_conversion && (check_diagnostic_option(option, "-Wconversion") || check_diagnostic_option(option, "-Wnon-gcc"));
+    // -Wenum-conversion's three are -Wconversion's, and so -Wnon-gcc's (#1447).
+    const bool enum_conversion = id == CHECK_WARNING_ID_ENUM_ENUM_CONVERSION || id == CHECK_WARNING_ID_ENUM_COMPARE_CONDITIONAL ||
+                                 id == CHECK_WARNING_ID_ENUM_FLOAT_CONVERSION;
+    matches |= enum_conversion && (check_diagnostic_option(option, "-Wconversion") || check_diagnostic_option(option, "-Wnon-gcc"));
     return matches;
 }
 
