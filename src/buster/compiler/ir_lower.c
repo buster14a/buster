@@ -717,6 +717,18 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_vector_operation(
         value = ir_typed_emit(sink, IR_VSELECT, type, mask, active, inactive, 0);
         ir_typed_lanes(sink, value, operation->lane);
     }
+    else if (operation->operation == IR_SIMD_SELECT)
+    {
+        // A masked move's select (#1840): the second operand's lanes where the mask's bits are set, the third's elsewhere.
+        value = ir_typed_emit(sink, IR_VSELECT, type, operands[0], operands[1], operands[2], 0);
+        ir_typed_lanes(sink, value, operation->lane);
+    }
+    else if (operation->zero)
+    {
+        // An undefined vector's row (#1840): the zero vector it gives.
+        const uint64_t zero[8] = {0};
+        value = ir_typed_vector_constant(sink, type, zero);
+    }
     else
     {
         value = ir_typed_emit(sink, (IrOp)ops[operation->operation], type, operands[0], operation->operand_count == 2 ? operands[1] : BUSTER_IR_NONE, BUSTER_IR_NONE, 0);

@@ -1397,9 +1397,214 @@ static void tier1_code_certificate_carry(Tier1EmitTest* test, bool vector, bool 
     arena_pop_to(&test->input, 0);
 }
 
+// Check the actual aggregate-copy records through their decoder and the value-flow checker. The initial RAX fact is
+// independent of the emitter's owner/liveness columns; an owed value starts only in its call-save row. A required RAX
+// value must survive the copy or be explicitly repaid afterwards, while a dead register starts with no known bytes.
+static bool tier1_code_certificate_aggregate_copy_checked(Tier1EmitTest* test, const Tier1EmitResult* emitted, uint32_t copied, bool live, bool owed)
+{
+    const IrFunction function = { .instruction_count = 3 };
+    const Tier1SelectPlan plan = { .function = &function };
+    Tier1CertLocation locations[64] = { 0 };
+    Tier1CertSource source[16] = { 0 };
+    Tier1CertInstruction code[24] = { 0 };
+    uint32_t references[8];
+    memset(references, 0xff, sizeof(references));
+    Tier1CertEmittedStats stats = { 0 };
+    Tier1CertEmittedBuild build = {
+        .plan = &plan,
+        .emitted = emitted,
+        .stats = &stats,
+        .locations = locations,
+        .location_count = 32,
+        .location_capacity = BUSTER_ARRAY_LENGTH(locations),
+        .low = -128,
+        .high = 64,
+        .base = X86_REGISTER_RSP,
+        .source = source,
+        .source_capacity = BUSTER_ARRAY_LENGTH(source),
+        .code = code,
+        .code_capacity = BUSTER_ARRAY_LENGTH(code),
+        .references = references,
+        .frame_pointer = INT64_MIN,
+        .frame_unit = 128,
+    };
+    for (uint32_t r = 0; r < 32; r += 1)
+    {
+        locations[r] = (Tier1CertLocation){
+            .unit = 8 * (r / 2),
+            .width = r % 2 == 0 ? 8 : 4,
+            .extent = 8,
+            .class = TIER1_CERT_GPR,
+            .reg = (uint8_t)(r / 2),
+        };
+    }
+    const Tier1CertEmittedStep step = {
+        .value = 0,
+        .pseudo = 2,
+        .size = 8,
+        .to_base = X86_REGISTER_RSP,
+        .kind = TIER1_CERT_STEP_COPY,
+        .bytes = 8,
+        .width = 8,
+    };
+    const uint32_t rax = tier1_cert_emitted_gpr(X86_REGISTER_RAX, 8);
+    const Tier1CertFact entry = { .value = 1, .location = owed ? tier1_cert_emitted_frame(&build, 32, 8) : rax };
+    const Tier1CertFact exit = { .value = 1, .location = rax };
+    uint32_t at = 0;
+    bool valid = copied <= emitted->code.count && tier1_cert_emitted_step(&build, 2, &step, &at, copied) && at == copied;
+    for (uint32_t r = copied; valid && r < emitted->code.count; r += 1)
+    {
+        valid = tier1_cert_emitted_append_move(&build, r, BUSTER_IR_NONE, rax);
+    }
+    // The emitted decoder represents an exact rematerialization, including a frame-address lea, by its value id.
+    const Tier1CertValue values[3] = {
+        { .width = 8, .class = TIER1_CERT_GPR, .recipe = TIER1_CERT_INTEGER_RECIPE },
+        { .width = 8, .class = TIER1_CERT_GPR },
+        { .width = 8, .class = TIER1_CERT_GPR },
+    };
+    const Tier1CertBlock block = {
+        .source = source,
+        .code = code,
+        .certificate = &entry,
+        .source_count = build.source_count,
+        .code_count = build.code_count,
+        .certificate_count = live ? 1 : 0,
+    };
+    const Tier1CertProgram program = {
+        .locations = locations,
+        .values = values,
+        .blocks = &block,
+        .entry = &entry,
+        .exit = &exit,
+        .unit_count = 320,
+        .location_count = build.location_count,
+        .value_count = BUSTER_ARRAY_LENGTH(values),
+        .block_count = 1,
+        .entry_count = live ? 1 : 0,
+        .exit_count = live ? 1 : 0,
+        .flags_location = BUSTER_CERT_NONE,
+    };
+    const uint64_t saved = test->scratch.length;
+    const size_t bytes = valid ? tier1_certificate_scratch_size(&program) : 0;
+    void* scratch = bytes != 0 ? arena_push(&test->scratch, bytes, 64) : NULL;
+    Tier1CertReport report = { 0 };
+    valid = valid && scratch != NULL && tier1_certificate_check(&program, scratch, bytes, &report) == TIER1_CERT_OK;
+    arena_pop_to(&test->scratch, saved);
+    return valid;
+}
+
+// #1816: a rematerialized aggregate address uses r11, so its bytes go through RAX. Controlled allocation columns
+// cover a dead RAX, a live one, a live value still owed from a call-save row, and a stale owner whose current interval
+// expired, spilled or moved to another register. The real emitter and decoder run, then the independent certificate
+// checks their records and preservation mutants.
+static void tier1_code_certificate_aggregate_copy(Tier1EmitTest* test)
+{
+    uint32_t certified = 0;
+    uint32_t refused = 0;
+    for (uint32_t state = 0; state < 6; state += 1)
+    {
+        const bool live = state == 1 || state == 2;
+        const bool owed = state == 2;
+        uint32_t node_values[3] = { 0, 1, BUSTER_TIER1_CFG_NONE };
+        uint32_t value_nodes[2] = { 0, 1 };
+        uint32_t sizes[3] = { 8, 8, 0 };
+        uint32_t value_offsets[3] = { 0, 1, 2 };
+        uint32_t starts[2] = { 0, 0 };
+        uint32_t ends[2] = { 8, state == 3 ? 4 : 8 };
+        uint32_t fragment_offsets[3] = { 0, 1, 2 };
+        uint32_t spill_ids[2] = { BUSTER_TIER1_CFG_NONE, 0 };
+        uint8_t classes[2] = { BUSTER_TIER1_ALLOCATE_GPR, BUSTER_TIER1_ALLOCATE_GPR };
+        uint8_t rematerializable[2] = { 1, 0 };
+        uint8_t kinds[2] = { BUSTER_TIER1_ALLOCATE_REMATERIALIZE, state == 4 ? BUSTER_TIER1_ALLOCATE_SPILL : BUSTER_TIER1_ALLOCATE_REGISTER };
+        uint8_t registers[2] = { UINT8_MAX, state == 5 ? X86_REGISTER_RCX : X86_REGISTER_RAX };
+        uint8_t hinted_registers[2] = { UINT8_MAX, X86_REGISTER_RAX };
+        const Tier1RematerializationInput recipes = {
+            .operations = (const uint8_t[]){ BUSTER_TIER1_REMAT_STACK, BUSTER_TIER1_REMAT_NONE, BUSTER_TIER1_REMAT_NONE },
+            .widths = (const uint8_t[]){ 8, 8, 0 },
+            .flags = (const uint8_t[]){ BUSTER_TIER1_REMAT_STABLE, 0, 0 },
+            .values = (const uint64_t[]){ 16, 0, 0 },
+            .count = 3,
+        };
+        Tier1EmitResult emitted = {
+            .prepared = { .recipes = recipes, .sizes = sizes },
+            .frame = { .base_register = X86_REGISTER_RSP },
+            .cfg_input = { .classes = classes, .rematerializable = rematerializable, .value_count = 2 },
+            .cfg = {
+                .intervals = { .starts = starts, .ends = ends, .values = node_values, .classes = classes, .count = 2, .value_count = 2 },
+                .allocation = { .fragment_offsets = fragment_offsets, .starts = starts, .ends = ends, .spill_ids = spill_ids, .kinds = kinds, .registers = registers, .interval_count = 2, .fragment_count = 2 },
+                .value_interval_offsets = value_offsets,
+            },
+            .node_values = node_values,
+            .value_nodes = value_nodes,
+        };
+        Tier1EmitTransitions transitions = { .registers = hinted_registers };
+        for (uint32_t r = 0; r < BUSTER_ARRAY_LENGTH(transitions.owners); r += 1)
+        {
+            transitions.owners[r] = BUSTER_IR_NONE;
+        }
+        transitions.owners[X86_REGISTER_RAX] = state == 0 ? BUSTER_IR_NONE : 1;
+        X86Instruction records[8] = { 0 };
+        Tier1EmitBuffer buffer = { .records = records, .capacity = BUSTER_ARRAY_LENGTH(records) };
+        const Tier1EmitError error = tier1_emit_cfg_aggregate_copy(&emitted, &transitions, owed ? 1u << X86_REGISTER_RAX : 0, 0, 4, X86_REGISTER_RSP, 0, 0, 8, &buffer);
+        const uint32_t copied = buffer.count;
+        const bool kept = state == 1;
+        tier1_emit_test_expect(test, error == TIER1_EMIT_OK && copied == (kept ? 5u : 3u), "aggregate copies preserve only a live RAX that is physically present");
+        if (error == TIER1_EMIT_OK && owed)
+        {
+            tier1_emit_append(&buffer, (X86Instruction){ .displacement = 32, .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RSP, .mode = BUSTER_X86_MEMORY_BASE, .form = X86_FORM_MOV_R64_RM64 });
+        }
+        emitted.code.records = records;
+        emitted.code.count = buffer.count;
+        const bool checked = error == TIER1_EMIT_OK && tier1_code_certificate_aggregate_copy_checked(test, &emitted, copied, live, owed);
+        tier1_emit_test_expect(test, checked, "a rematerialized aggregate copy certifies with dead, live, owed or stale RAX state");
+        certified += checked;
+        if (checked && kept)
+        {
+            X86Instruction original[5];
+            memcpy(original, records, sizeof(original));
+            for (uint32_t mutation = 0; mutation < 6; mutation += 1)
+            {
+                memcpy(records, original, sizeof(original));
+                emitted.code.count = 5;
+                if (mutation < 2)
+                {
+                    records[mutation == 0 ? 1 : 4].reg = X86_REGISTER_RCX;
+                }
+                else if (mutation == 2)
+                {
+                    memmove(records + 1, records + 2, 3 * sizeof(*records));
+                    emitted.code.count = 4;
+                }
+                else if (mutation == 3)
+                {
+                    emitted.code.count = 4;
+                }
+                else if (mutation == 4)
+                {
+                    memmove(records + 1, records + 2, 2 * sizeof(*records));
+                    emitted.code.count = 3;
+                }
+                // The last mutation removes the initial RAX fact: an unknown source is still refused by a saved pair.
+                const bool rejected = !tier1_code_certificate_aggregate_copy_checked(test, &emitted, emitted.code.count, mutation != 5, false);
+                tier1_emit_test_expect(test, rejected, "missing or corrupt aggregate preservation and saving unknown RAX remain refused");
+                refused += rejected;
+            }
+        }
+        else if (checked && owed)
+        {
+            emitted.code.count = copied;
+            const bool rejected = !tier1_code_certificate_aggregate_copy_checked(test, &emitted, copied, true, true);
+            tier1_emit_test_expect(test, rejected, "an owed RAX value must be repaid before its next use");
+            refused += rejected;
+        }
+    }
+    tier1_emit_test_expect(test, certified == 6 && refused == 7, "aggregate preservation covers all six RAX states and all seven mutants");
+}
+
 static void tier1_code_certificate_tests(Tier1EmitTest* test)
 {
     Tier1CodeCertificateCounts counts = { 0 };
+    tier1_code_certificate_aggregate_copy(test);
     for (uint32_t variant = 0; variant < 8; variant += 1)
     {
         tier1_code_certificate_carry(test, (variant & 1) != 0, (variant & 2) != 0, (variant & 4) != 0);

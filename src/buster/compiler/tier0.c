@@ -685,7 +685,8 @@ struct Tier0Function
     // saved, so that their System V locations take them as ever (tier0_emit_interrupt). The error code's frame is 8
     // bytes out of a call's alignment, which its reservation makes up; its epilogue steps over the error code. It ends
     // with iretq. It keeps no temporary below rsp, where a nested interrupt's frame would land: its red zone's
-    // temporaries are its frame's (Tier0Frame.temporaries). Its result is void, and it takes no variadic arguments.
+    // temporaries are its frame's (Tier0Frame.temporaries). Its result is void. A variadic one's list (#1447) starts at
+    // the interrupted code's registers, which its prologue saves before its entry gives rdi and rsi its parameters.
     uint8_t interrupt;
     // Whether the prologue realigns the stack to 16 bytes at least (#1447, x86's force_align_arg_pointer, LLVM's
     // stackrealign), as a frame whose objects need more does (tier0_frame_alignment): its caller, an interrupt handler or
@@ -1050,12 +1051,15 @@ static bool tier0_preserve_valid(const Tier0Function* function)
     const bool widths = (vectors == 0 && bytes == 0) || (vectors != 0 && (vectors >> 16) == 0 && (bytes == 16 || bytes == 32 || bytes == 64)) ||
                         ((vectors >> 16) != 0 && bytes == 64);
     // An interrupt service routine (Tier0Function.interrupt) keeps registers, returns nothing, and takes its frame's
-    // address, and the error code where it has one, at their System V locations, in rdi and rsi, without variadic ones.
+    // address, and the error code where it has one, at their System V locations, in rdi and rsi; a variadic one's list
+    // takes no register for them (#1447).
     const uint32_t interrupt = function->interrupt;
     const AbiLocation* parameters = function->parameters;
+    const AbiCall* incoming = function->incoming_variadic;
     const bool handler = interrupt == 0 ||
                          (interrupt <= BUSTER_TIER0_INTERRUPT_ERROR_CODE && preserving && function->parameter_count == interrupt && parameters != 0 &&
-                          function->result.kind == BUSTER_ABI_RESULT_IGNORE && function->incoming_variadic == 0 &&
+                          function->result.kind == BUSTER_ABI_RESULT_IGNORE &&
+                          (incoming == 0 || (incoming->integer_registers == 0 && incoming->vector_registers == 0)) &&
                           parameters[0].kind == BUSTER_ABI_LOCATION_REGISTERS && parameters[0].registers[0] == X86_REGISTER_RDI &&
                           (interrupt == BUSTER_TIER0_INTERRUPT_HANDLER ||
                            (parameters[1].kind == BUSTER_ABI_LOCATION_REGISTERS && parameters[1].registers[0] == X86_REGISTER_RSI)));
@@ -9604,14 +9608,12 @@ static void tier0_emit_prologue(const Tier0Function* function, const Tier0Frame*
     {
         tier0_emit_realignment(frame, writer);
     }
-    if (frame->interrupt != 0)
-    {
-        tier0_emit_interrupt(frame, writer);
-    }
     if (function->incoming_variadic != 0)
     {
         // Snapshot before any parameter home move can overwrite an unnamed argument. Full unaligned baseline
-        // XMM stores preserve all 128 bits without reading AL, adding branches or touching FP status/control.
+        // XMM stores preserve all 128 bits without reading AL, adding branches or touching FP status/control. A variadic
+        // interrupt service routine's are the interrupted code's registers, before its entry gives rdi and rsi its
+        // parameters (#1447), as LLVM's x86_intrcc saves them.
         for (uint32_t general = 0; general < BUSTER_ABI_INTEGER_ARGUMENTS; general += 1)
         {
             tier0_put(writer, tier0_instruction(X86_FORM_MOV_RM64_R64, abi_integer_arguments[general], X86_REGISTER_RSP, BUSTER_X86_MEMORY_BASE,
@@ -9622,6 +9624,10 @@ static void tier0_emit_prologue(const Tier0Function* function, const Tier0Frame*
             tier0_put(writer, tier0_instruction(X86_FORM_MOVUPS_XM_X, vector, X86_REGISTER_RSP, BUSTER_X86_MEMORY_BASE,
                 (int32_t)(frame->variadic_area + BUSTER_ABI_SAVE_AREA_VECTOR_OFFSET + vector * BUSTER_ABI_SAVE_AREA_VECTOR_SLOT_BYTES), 0));
         }
+    }
+    if (frame->interrupt != 0)
+    {
+        tier0_emit_interrupt(frame, writer);
     }
     // Each parameter into its home: a register's moved or stored, and a register home of one on the stack loaded from its
     // incoming slot. No home is an arrival register (tier0_assign_homes), so the order doesn't matter. An aggregate's

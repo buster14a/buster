@@ -623,6 +623,14 @@ The decoding:
   is a value of the certificate, defined where its copy puts it and read where
   it is consumed: a part loaded from the wrong slot, or a copy's address
   overwritten before its last piece, fails.
+  When an aggregate address is reloaded or rematerialized into r11, the copy
+  borrows rax. The emitter preserves rax only if its current allocation fragment
+  holds a live value there and no call-save row still owes its reload. The
+  decoder accepts an exact save/restore pair or no pair, independently of that
+  liveness decision. Without the pair, the copy's actual rax writes remain
+  clobbers in the certificate, so a later use of an unpreserved live value fails.
+  Ordinary moves still require known source bytes; saving a dead, unknown rax
+  is not a substitute for proving a value (#1816).
 - **Entry.** The parameters are entry facts in their ABI registers and incoming
   slots. An incoming slot is placed by the ABI from the decoded prologue (8 bytes
   past the return address per slot), and the layout's offset, which the

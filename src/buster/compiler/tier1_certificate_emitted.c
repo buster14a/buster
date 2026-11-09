@@ -1101,13 +1101,16 @@ static bool tier1_cert_emitted_step(Tier1CertEmittedBuild* build, uint32_t node,
     };
     if (valid && step->kind == TIER1_CERT_STEP_COPY)
     {
-        // Through the scratch register, or rax where the scratch register holds the address, saved meanwhile.
+        // Through the scratch register, or rax where the scratch register holds the address, optionally saved meanwhile.
         const uint8_t data = registered ? (uint8_t)BUSTER_TIER1_SELECT_SCRATCH : (uint8_t)X86_REGISTER_RAX;
         const int32_t save = tier1_emit_staging(BUSTER_TIER1_EMIT_STAGING_SAVE);
         const X86Instruction saved = { .displacement = save, .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RSP, .mode = BUSTER_X86_MEMORY_BASE, .form = X86_FORM_MOV_RM64_R64 };
         const X86Instruction restored = { .displacement = save, .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RSP, .mode = BUSTER_X86_MEMORY_BASE, .form = X86_FORM_MOV_R64_RM64 };
-        valid = registered || (at < end && tier1_cert_emitted_exactly(records[at], saved) && tier1_cert_emitted_append_move(build, at, BUSTER_IR_NONE, BUSTER_CERT_NONE));
-        at += registered ? 0 : 1;
+        // Preservation is optional when rax holds no live value. Derive the pair from the actual records, not the
+        // emitter's liveness claim: without it the copy's rax writes remain clobbers, so a later use must prove itself.
+        const bool preserved = !registered && at < end && tier1_cert_emitted_exactly(records[at], saved);
+        valid = !preserved || tier1_cert_emitted_append_move(build, at, BUSTER_IR_NONE, BUSTER_CERT_NONE);
+        at += preserved ? 1 : 0;
         const uint32_t pieces = tier1_cert_emitted_pieces(step->size);
         valid = valid && step->from <= INT32_MAX && end >= at && end - at >= 2 * pieces;
         for (uint32_t k = 0; valid && k < pieces; k += 1)
@@ -1128,8 +1131,8 @@ static bool tier1_cert_emitted_step(Tier1CertEmittedBuild* build, uint32_t node,
             const X86Instruction storage = { .displacement = step->to + (int32_t)(BUSTER_CERT_MAX_WIDTH * j), .rm = step->to_base, .mode = BUSTER_X86_MEMORY_BASE };
             valid = tier1_cert_emitted_define(build, node, step->pseudo + j, tier1_cert_emitted_memory(build, storage, width));
         }
-        valid = valid && (registered || (at < end && tier1_cert_emitted_exactly(records[at], restored) && tier1_cert_emitted_append_move(build, at, BUSTER_IR_NONE, tier1_cert_emitted_gpr(X86_REGISTER_RAX, 8))));
-        at += registered ? 0 : 1;
+        valid = valid && (!preserved || (at < end && tier1_cert_emitted_exactly(records[at], restored) && tier1_cert_emitted_append_move(build, at, BUSTER_IR_NONE, tier1_cert_emitted_gpr(X86_REGISTER_RAX, 8))));
+        at += preserved ? 1 : 0;
     }
     else if (valid && step->kind == TIER1_CERT_STEP_ZMM)
     {
