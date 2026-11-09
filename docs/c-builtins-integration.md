@@ -1770,10 +1770,12 @@ one real floating type T once lvalue-converted (`float` to `long double`, and
 `_Float16`, `__bf16` and `__float128`, as clang 23 takes them), and neither is
 converted otherwise. As clang's Sema, it checks each argument's type before its
 conversion first, so that an `_Atomic double` is refused, and an integer or a
-complex value, then the two types against each other; the checker's errors are
-its own generic ones at the call's `)`, where clang's are "argument type ... is
-not a real floating point type" at the argument and "arguments are of different
-types" at re (pending, as for the other miscellaneous builtins). It folds where both are
+complex value, then the two types against each other. Its errors are clang's
+(`check_semantic_expression`): "argument type 'T' is not a real floating point
+type" at the first such argument, its type as written (an array's, a function's,
+a qualified one's, its typedef's with its `aka`), and "arguments are of different
+types ('R' vs 'I')" at re, by the converted types, their qualifiers dropped and
+their typedefs kept. It folds where both are
 floating constants, as clang's evaluator folds it, so that glibc's `CMPLX` makes
 static data and an enumerator's `__imag__` an integer constant: the folds keep
 signed zeros, infinities and NaNs, a `static const` object's value, and long

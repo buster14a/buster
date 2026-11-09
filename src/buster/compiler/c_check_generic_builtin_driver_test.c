@@ -5,7 +5,8 @@
 // arguments, each a constant string without a `$` (check_input_verbose_trap_arguments), a literal's under parentheses
 // and casts, __func__'s, a variable's, a null pointer's and an integer's; and a FILE builtin's call in a unit without a
 // file-scope FILE (check_input_file_type), clang's "use of unknown builtin"; and memcpy_inline's and memset_inline's size
-// that is no integer constant expression, clang's error at the call. The errors are compared, their places and
+// that is no integer constant expression, clang's error at the call; and __builtin_complex's arguments of no real floating
+// type or of two types, clang's errors at the argument (check_semantic_expression). The errors are compared, their places and
 // messages, in order, with the exit status, by both paths of -fsyntax-only (each function's first error alone, as the
 // checker reports them). Warnings aren't compared. Include after c_check_label_attribute_driver_test.c.
 
@@ -32,6 +33,22 @@ static void check_test_driver_generic_builtins(CheckTest* test, const char* clan
                                                           "  __builtin_memcpy_inline(d, s, n);\n}\n" },
         { "memset_inline of a size that isn't constant", "void g(void* d, unsigned long n) {\n__builtin_memset_inline(d, 0, sizeof(int));\n"
                                                          "  __builtin_memset_inline(d, 0, n + 1);\n}\n" },
+        { "complex of no real floating type",
+          "typedef int I;\nI x;\nconst int ci;\nint a[3];\nstruct S { double m; } s;\n_Atomic double ad;\n_Complex double cd;\nenum E { A } e;\n"
+          "void g1(double d) { (void)__builtin_complex(x, d); }\nvoid g2(double d) { (void)__builtin_complex(d, ci); }\n"
+          "void g3(double d) { (void)__builtin_complex(a, d); }\nvoid g4(double d) { (void)__builtin_complex(s, d); }\n"
+          "void g5(double d) { (void)__builtin_complex(d, g1); }\nvoid g6(double d) { (void)__builtin_complex(ad, d); }\n"
+          "void g7(double d) { (void)__builtin_complex(d, cd); }\nvoid g8(double d) { (void)__builtin_complex(e, d); }\n"
+          "void g9(double d) { (void)__builtin_complex((void*)0, d); }\nvoid g10(void) { (void)__builtin_complex(1, 2); }\n"
+          "void g11(double d) { (void)__builtin_complex(d, (_Bool)1); }\nvoid g12(double d) { (void)__builtin_complex(d, (__int128)x + 1); }\n"
+          "void g13(I* p) { (void)__builtin_complex(*p, 1.0); }\n" },
+        { "complex of different types",
+          "typedef double D;\ntypedef float F;\nD dd;\nF ff;\nconst double cd;\nvolatile float vf;\nconst D cdd;\n"
+          "void g1(void) { (void)__builtin_complex(dd, ff); }\nvoid g2(void) { (void)__builtin_complex(cd, vf); }\n"
+          "void g3(void) { (void)__builtin_complex((D)1, 2.0f); }\nvoid g4(void) { (void)__builtin_complex(1.0L, (_Float16)1); }\n"
+          "void g5(void) { (void)__builtin_complex(1.0q, 1.0); }\nvoid g6(void) { (void)__builtin_complex((__bf16)1, (_Float16)1); }\n"
+          "void g7(void) { (void)__builtin_complex(cdd, ff); }\n"
+          "void g8(void) { (void)__builtin_complex(cd, dd); (void)__builtin_complex(1.0f, (F)2); (void)__builtin_complex(cdd, dd); }\n" },
     };
     char source[PATH_MAX];
     snprintf(source, sizeof(source), "%s/generic-builtins.c", directory);
