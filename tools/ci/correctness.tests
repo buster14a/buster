@@ -57,6 +57,12 @@ unset CPATH C_INCLUDE_PATH
 == Test the per-file jobs on the frozen sqlite3.c [8 CPUs]
 unset CPATH C_INCLUDE_PATH
 "$BUSTER_COMPILER" test-files $BUSTER_CORPUS/sqlite/sqlite3.c
+== Test SQLite's shell by both tiers against clang's [4 CPUs]
+# #146: the frozen corpus's sqlite3.c and shell.c built into the sqlite3 shell by Tier 0, --tier1 and clang -O0; SQLite's
+# own CLI tests (test/shellB.test's .sql files, from the tree fetch-sqlite.sh fetches) must pass, and they and
+# tests/sqlite's scripts must print clang's shell's output, byte for byte (docs/commands/sqlite.md).
+unset CPATH C_INCLUDE_PATH
+"$BUSTER_COMPILER" test-sqlite --clang clang --sqlite "$BUSTER_CORPUS/sqlite" --tests build/sqlite/test --scripts tests/sqlite
 == Test the direct path's executables [8 CPUs]
 "$BUSTER_COMPILER" test-executable
 == Test the lanes [8 CPUs]
