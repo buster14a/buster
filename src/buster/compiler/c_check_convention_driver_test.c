@@ -660,7 +660,8 @@ static void check_test_driver_preserving_frames(CheckTest* test, const char* cla
 // error code for the second kind) and jumps to the handler, whose iretq returns to it at the same privilege level; it then
 // reads every register back. Every register must come back, rsp too, the direction flag set again as the frame had it;
 // and the handlers record what they saw: the frame's rip, rsp and cs, the error code, and a cleared direction flag. The
-// handlers make calls (whose callees keep nothing for them), use vectors and floating point, and realign their frame. Both
+// handlers make calls (whose callees keep nothing for them), use vectors and floating point, and realign their frame;
+// variadic ones read the interrupted code's argument registers (#1447). Both
 // paths' code, with --verify, on x86-64 (with probes, frame pointers and -g too), x86-64-v3 where the host has AVX2 and
 // x86-64-v4 where it has AVX-512.
 static void check_test_driver_interrupt_handlers(CheckTest* test, const char* clang, const char* executable, const char* directory)
@@ -717,6 +718,8 @@ static void check_test_driver_interrupt_handlers(CheckTest* test, const char* cl
         "void handler_calls(void*);\n"
         "void handler_aligned(void*);\n"
         "void handler_vla(void*, unsigned long);\n"
+        "void handler_varargs(void*, ...);\n"
+        "void handler_varargs_error(void*, unsigned long, ...);\n"
         "static int raise_one(const char* what, void* fn, int error, int expected)\n"
         "{\n"
         "    State s;\n"
@@ -754,6 +757,8 @@ static void check_test_driver_interrupt_handlers(CheckTest* test, const char* cl
         "    bad |= raise_one(\"handler_calls\", (void*)handler_calls, 0, 5);\n"
         "    bad |= raise_one(\"handler_aligned\", (void*)handler_aligned, 0, 3);\n"
         "    bad |= raise_one(\"handler_vla\", (void*)handler_vla, 1, 0x5a);\n"
+        "    bad |= raise_one(\"handler_varargs\", (void*)handler_varargs, 0, 7);\n"
+        "    bad |= raise_one(\"handler_varargs_error\", (void*)handler_varargs_error, 1, 3);\n"
         "    printf(bad ? \"FAILED\\n\" : \"ok\\n\");\n"
         "    return bad;\n"
         "}\n";
@@ -768,7 +773,15 @@ static void check_test_driver_interrupt_handlers(CheckTest* test, const char* cl
         "__attribute__((interrupt)) void handler_error(Frame* f, unsigned long e) { record(f, e); }\n"
         "__attribute__((interrupt)) void handler_calls(Frame* f) { record(f, 0); char buf[32]; snprintf(buf, sizeof buf, \"%.1f\", 2.5); double d = 2.0; seen.rip = (uint64_t)(d * (buf[0] - '0') + 1.0); }\n"
         "__attribute__((interrupt)) void handler_aligned(Frame* f) { record(f, 0); _Alignas(64) char x[64]; __builtin_memset(x, 3, 64); seen.rip = (uint64_t)x[63]; }\n"
-        "__attribute__((interrupt)) void handler_vla(Frame* f, unsigned long e) { record(f, e); char x[e & 0xff]; __builtin_memset(x, (int)(e & 0xff), sizeof x); seen.rip = (uint64_t)(unsigned char)x[(e & 0xff) - 1]; }\n";
+        "__attribute__((interrupt)) void handler_vla(Frame* f, unsigned long e) { record(f, e); char x[e & 0xff]; __builtin_memset(x, (int)(e & 0xff), sizeof x); seen.rip = (uint64_t)(unsigned char)x[(e & 0xff) - 1]; }\n"
+        // A variadic handler's list starts at the interrupted code's rdi, rsi and xmm0 (#1447), as LLVM's x86_intrcc has it.
+        "#define REGISTER(r) (0x1111111111111111ull * (r + 1) ^ 0x0123456789abcdefull)\n"
+        "__attribute__((interrupt)) void handler_varargs(Frame* f, ...) { record(f, 0); __builtin_va_list ap; __builtin_va_start(ap, f); "
+        "unsigned long a = __builtin_va_arg(ap, unsigned long); unsigned long b = __builtin_va_arg(ap, unsigned long); double d = __builtin_va_arg(ap, double); "
+        "unsigned long bits; __builtin_memcpy(&bits, &d, 8); __builtin_va_end(ap); seen.rip = (a == REGISTER(7)) + 2 * (b == REGISTER(6)) + 4 * (bits == 0x52473c31261b1005ull); }\n"
+        "__attribute__((interrupt)) void handler_varargs_error(Frame* f, unsigned long e, ...) { record(f, e); __builtin_va_list ap; __builtin_va_start(ap, e); "
+        "unsigned long a = __builtin_va_arg(ap, unsigned long); double d = __builtin_va_arg(ap, double); unsigned long bits; __builtin_memcpy(&bits, &d, 8); "
+        "__builtin_va_end(ap); seen.rip = (a == REGISTER(7)) + 2 * (bits == 0x52473c31261b1005ull); }\n";
     char harness_path[512];
     char handler_path[512];
     char object[512];
