@@ -357,7 +357,7 @@ static ImportResult foreign_link_locals(ForeignLink* output, const ForeignObject
     }
     if (!vector)
     {
-        result = import_object_symbols(link, &input->elf, &symbols, BUSTER_LINK_SOURCE_FOREIGN_OBJECT, object);
+        result = import_object_symbols(link, &input->elf, &symbols, id, BUSTER_LINK_SOURCE_FOREIGN_OBJECT, object);
     }
     return result;
 }
