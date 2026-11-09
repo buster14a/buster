@@ -1881,6 +1881,8 @@ static void check_test_driver_unevaluated_strings(CheckTest* test, const char* c
         { "_Static_assert(1, \"\\N{DIGIT ZERO}\");\n", "-std=gnu17", NULL },
         { "__attribute__((deprecated(\"\\N{latin small letter a}\"))) void f(void);\n", "-std=gnu17", NULL },
         { "int x __asm__(\"a\\N{NOT A NAME}\");\n", "-std=gnu17", NULL },
+        // A bit-precise suffix's letters in one case (#1933): a mixed-case one is an invalid suffix, in #if as in an expression.
+        { "#if 1wB\n#endif\n#if 1Wb\n#endif\n#if 1uWb\n#endif\n#if 1WB + 1uwb\n#endif\nint x;\nint y = 1wB;\n", "-std=gnu23", NULL },
         // An unevaluated string literal's encoding prefix (#1447): -Winvalid-unevaluated-string's warning at each prefixed token, before
         // its escapes' diagnostics, and the literal read as an ordinary one (a static assertion's message, an attribute's argument), with
         // the macro argument it came from; by the option and pragmas.
