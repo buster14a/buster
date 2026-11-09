@@ -6,7 +6,10 @@ assembly" item). `c_check_program_asm.c` plans each statement, `assembler.c`'s
 `c_check_program_lower.c`'s `check_lower_asm` lowers the statement's operands.
 A statement of plain register, memory and constant operands is placed in its
 caller, as one of Tier 0's machine operations (#1059: "Placed in the caller",
-below); any other is an ordinary call of a helper. A naked function's statements
+below); most others are placed in their caller as an asm body, the helper's
+loads, template and stores in the call's place (#1839: "Asm bodies", below);
+the rest, templates of labels and branches, of directives and every statement
+under `--tier1`, are ordinary calls of a helper. A naked function's statements
 are its whole code instead, and the names templates define and refer to become
 symbols of the unit's object or executable.
 
@@ -133,6 +136,64 @@ takes keeps every statement's helper (`CheckProgramOptions.asm_helpers`): the
 C driver's `--tier1` and the IR's source tools (`test-ir-source`,
 `test-tier1-cfg-source`), whose functions call it as before. `--helper-report`
 counts each placed statement as the `asm` family's direct form.
+
+## Asm bodies (#1839)
+
+Clang places every asm statement in its caller, and the owner decided that
+this compiler does too ([#1447](https://github.com/buster14a/buster/issues/1447#issuecomment-6736401463),
+item 2). A statement that isn't a row (above), and whose template has no
+named label or reference and isn't an asm goto, is an asm body: the records a helper would have
+between its frame and its return, which run in the statement's place in its
+function (`check_asm_inline_code`, `Tier0AsmBody`):
+
+1. the operands' loads from the operand block, the x87's first, the deepest
+   first, each from the block's frame place (`BUSTER_TIER0_ASM_BLOCK`, which
+   Tier 0 replaces with the block's home);
+2. the template's records, its own branches to its numeric labels among them
+   (`1:` and `jnz 1b`), which Tier 0 emits as local branches of the function,
+   sized by branch sizing with its own (`Tier0AsmBody.branches`); a label at the
+   template's end is the first store's record, as in a helper;
+3. the flag outputs' `setcc` stores, the register outputs' stores through their
+   addresses, the x87 outputs' stores from st(0) down and the pops of the x87
+   inputs the template left, each address loaded from the block into a store
+   register that no output holds.
+
+The lowering fills the block as for a helper, then ends the statement with a
+`CALL` whose row has no arguments and whose callee is the body
+(`Tier0Function.call_asm`). Tier 0 takes it as it takes a call:
+
+- it saves the values live across it, every one in a register where the body
+  touches a callee-saved one;
+- the registers the body touches (`Tier0AsmBody.touched`) are no home's;
+- the prologue saves the callee-saved ones among them, as clang's prologue
+  saves `cpuid`'s rbx;
+- rsp is 16-byte aligned at the template, as in a function that calls.
+
+There is no call, return or frame of the template's own. `cpuid` with its four
+fixed outputs runs as two loads, `cpuid` and four stores in its function.
+`rdtsc`, `syscall` (musl's wrappers' explicit register variables among them), a
+shift's count in `"c"`, Q's class, x87 operands (`fsqrt` on `"+t"`, fprem's
+loops), flag outputs, `ldmxcsr` and the rest place the same way. Tier 0's
+always_inline splicing carries a function's bodies into its callers, each copy
+of a callee's with its block rebased to the site's locals.
+
+The touched registers are the operands', the clobbers', the stores' and what
+`x86_semantics.c` says the template's records write. Some forms common in
+inline assembly have only the tables' conservative record: `cpuid`, `rdtsc`,
+`rdtscp`, `rdpmc`, `xgetbv`, `syscall`, `fnstsw %ax`, `ldmxcsr`, `fldcw`, the
+x87's control forms, `clflush`, `serialize`, `xsetbv` and `vzeroupper`/`vzeroall`.
+These take their implicit registers from `check_asm_implicit`. An x87 operation
+(`fsqrt`, `fxch`, `fld %st(1)`, `fxsave`) writes no general register. A record
+of any other unknown form keeps the helper. So does one that touches the stack
+or control flow (a push, a call, a return, a jump or branch but the template's
+own to its labels), as `unwind_tier0_frame` refuses in a body, and one that
+writes rsp, rbp or r15, which hold the frame.
+
+What differs from the helper: the template's rsp is its function's, as clang's
+is, and the statement costs no call, return, pushes or block address.
+`--helper-report` counts each body as the `asm` family's direct form. The
+interpreter (`interpret-c`) refuses a function with a body, as it doesn't run
+machine code.
 
 ## Naked-function checking
 
@@ -293,7 +354,8 @@ loads, and stores an output's low bytes through its address (`movq` or `movd`,
 a narrower one's through a general register). As in clang's code, nothing runs
 `emms`: the template's author leaves the x87's state as the code after it needs
 it. A statement of MMX and x87 operands is refused by name (their registers are
-the same), and so is one whose template takes directives. A template of no
+the same), and so is one whose template takes directives. A statement of MMX
+operands keeps its helper: #1839's asm bodies don't load them. A template of no
 instructions has no helper, as for general registers: clang's code would move
 the values through an MMX register and back, unchanged.
 
@@ -389,7 +451,10 @@ instructions, labels and the syntax directives. It refuses:
 
 - every other directive, which the planner assembles whole instead (below);
 - its numeric labels and `.`, but as a `jmp`'s or `jcc`'s target without an
-  addend, and `loop` and `jrcxz` to any of its labels;
+  addend, and `loop` and `jrcxz` to any of its labels: the planner assembles
+  these whole too (#1845), as their failure asks (`AsmCode.directive`), so
+  that `leaq 1f(%rip)`, `.`'s address and `loop 1b` are the assembler's own
+  fixups and branches, as clang's;
 - undefined numeric labels;
 - what the matcher doesn't take.
 
@@ -703,9 +768,12 @@ has the commands, the logs and the default path's numbers against main.
     a loop's compares; XMM operands with floating values live across; fences,
     pause and prefetches in a loop. The placement test plans each statement by
     both paths into the same rows, checks their records, roles and stores, and
-    the statements that keep their helpers: fixed registers, a literal register,
-    a branch, a syntax switch, more records than a row takes, an x87 operand,
-    ldmxcsr (uncovered), an explicit register variable and `Q`'s class;
+    the statements that are asm bodies (#1839): fixed registers (cpuid's body
+    record by record, and its touched rbx), a literal register, a syntax switch,
+    more records than a row takes, an x87 operand, ldmxcsr (uncovered), an
+    explicit register variable and `Q`'s class; and the branch that keeps its
+    helper. Every native fixture below runs each statement's asm body where
+    it has one, by both paths, against clang -O0's build;
   - barriers;
   - registers, matching inputs, early clobbers, constants and modifiers;
   - named operands;
@@ -809,9 +877,10 @@ has the commands, the logs and the default path's numbers against main.
     `.weak`/`.globl` labels and an undefined `.globl` declaration,
     `.hidden`/`.type`/`.size` on a data label, `.equ` with `.set`, `.ascii`,
     `.asciz`, `.string`, `.quad`, `.word`, `.zero`, `.space` and `.bss`, a
-    `.nops` control, and a naked function's `.p2align` and `.byte`; and the
-    refusals of a `.set` used by another template, a template that returns
-    before any branch, and CFI.
+    `.nops` control, and a naked function's `.p2align` and `.byte`; numeric
+    labels and `.` as data, their distances as clang's, and a `loop` to a
+    numeric label; and the refusals of a `.set` used by another template, a
+    template that returns before any branch, and CFI.
 
   Each refusal above is checked by name, but the label with a unit symbol's
   name, which the emission refuses: `test-checker-driver` checks that one
@@ -835,21 +904,22 @@ has the commands, the logs and the default path's numbers against main.
 
 ## Pending
 
-What placement in the caller doesn't take yet (#1059), each keeping its helper:
-fixed registers and explicit register variables (cpuid, rdtsc, syscall, a
-compare-exchange's `"a"`), which a row's roles can't name; templates of labels
-and branches; the x87's operands and flag outputs; and Tier 1, whose IR has no
-operation for a row it doesn't decode, so that its lowering keeps the helpers.
+What placement in the caller doesn't take yet (#1839), each keeping its helper:
+templates of named labels (a symbol at the label's record) or references to
+names, asm goto, `loop` and `jrcxz` (which the lowering refuses by name), templates that return, templates
+that take directives, forms of unknown effects outside `check_asm_implicit`, and
+Tier 1, whose IR has no operation for an asm body or a row it doesn't decode,
+so that its lowering keeps the helpers.
 
 What the lowering still refuses of what GCC and clang take:
 
 - an asm goto's label as data or a call's target (the Linux kernel's jump
   tables), whose exits a helper has no address for;
 
-- labels in templates of no instructions (a place in the caller's code), and
-  numeric labels or `.` as data;
-- inline emission of a template that returns, which clang places in its
-  function's own code; this compiler's helper design refuses it by name;
+- labels in templates of no instructions (a place in the caller's code);
+- a template that returns, which clang places in its function's own code; the
+  helper design refuses it by name, until #1839 places such templates in their
+  callers;
 - naked functions of no instructions, and naked functions' operands other than
   integer constants (clang's `"m"(global)`, printed RIP-relative);
 - the matcher's gaps: `lock xchg`, `ffreep`, and the

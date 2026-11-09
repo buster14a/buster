@@ -1052,7 +1052,11 @@ static void asm_test_code(AsmTest* test)
     };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(refused); i += 1)
     {
-        asm_test_code_pair(test, refused[i], -1, refused[i]);
+        const AsmCode code = asm_test_code_pair(test, refused[i], -1, refused[i]);
+        // A numeric label or `.` as data or a call's target, and a loop's branch, are for the whole assembler (#1845): the
+        // failure asks for it, as a directive's does; an undefined numeric label and the matcher's refusals don't.
+        const bool whole = i < 10 || i + 1 == BUSTER_ARRAY_LENGTH(refused);
+        asm_test_check(test, code.directive == whole, refused[i], whole ? "the template is for the whole assembler" : "the template isn't for the whole assembler");
     }
     // A failure without room: nothing kept in either arena.
     Arena tiny = arena_reserve(4096);
