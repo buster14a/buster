@@ -13,6 +13,81 @@ process takes, which of the compiler's stages take that time, and which
 functions inside them. It also records why linking has no part in that figure,
 and the follow-ups that rank the work to close the gap.
 
+## Against tcc, clang -O0 and gcc -O0, per token (#146)
+
+[#146](https://github.com/buster14a/buster/issues/146)'s headline measurement:
+the same `-c` of the frozen corpus's `sqlite3.c`, with the 9700X job's options
+(#518, below), timed with `tcc -c`, `clang -O0 -c` and `gcc -O0 -c` by one
+`measure-compile` run, its 21 rounds interleaving the five compiles in a
+Williams design's order, pinned to CPU 2, under the 9700X's lock, on
+9 November at `85680a84` (main `cb608c1f` with the harness's references and the
+report's token count). [The measurement
+record](https://github.com/buster14a/buster-performance/tree/claude/146-compile-time-record/docs/measurements/compile-time-references-146-2026-11-09)
+has the whole output, the scripts and every executable's version and hash:
+tcc 0.9.28rc 2026-01-17 (the CI step's pin), Arch's clang 23.1.1-1 and gcc
+16.2.1 (20260810, with GNU as 2.47). Each reads the system's glibc headers;
+buster reads them under its default configuration. The cycles and instructions
+are perf's user-mode counters, inherited by gcc's `cc1` and `as`. The
+preprocessed tokens, 716,136, are `--time-stages`' `tokens`, the same divisor
+for every compiler.
+
+| compiler | wall ms | user cycles | user instructions | ns per token | cycles per token | instructions per token | wait4 peak |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| buster `-c` | 116.5 (115.8 to 119.3) | 557.8 M | 1,259.0 M | 162.7 | 778.9 | 1,758 | 237,912 KiB |
+| tcc `-c` | 42.3 (41.9 to 48.1) | 218.4 M | 537.6 M | 59.1 | 304.9 | 751 | 13,304 KiB |
+| clang `-O0 -c` | 567.2 (565.6 to 620.3) | 3,045.5 M | 6,645.3 M | 792.0 | 4,252.7 | 9,279 | 216,524 KiB |
+| gcc `-O0 -c` | 1,921.4 (1,916.4 to 1,930.3) | 10,486.4 M | 24,261.3 M | 2,683.1 | 14,643.0 | 33,878 | 324,024 KiB |
+
+- **2.75 times tcc** (74.2 ms apart), down from 4.44 at `1677a3b` (#518, below).
+- **4.87 times faster than clang `-O0`** and **16.5 times faster than gcc
+  `-O0`**, which retire 5.3 and 19.3 times buster's instructions.
+- **Against #115's goal**, 15 ms for a whole Tier 0 compile, about 120 cycles
+  per token: the compile takes 889 core cycles per token, 7.4 times the goal.
+
+The stages, from the `--time-stages` processes (medians of 21 runs). Their
+cycles per token are TSC ticks at the report's 3,792.8 MHz, and core cycles at
+the processes' average clock, 5,493.4 MHz: their cycles in both modes per wall
+millisecond ("How it is measured", below). Stages under 0.1 ms are left out;
+the preprocessor's and the lowering's phases are under their stages.
+
+| stage | ms | share | TSC ticks per token | core cycles per token |
+| --- | ---: | ---: | ---: | ---: |
+| setup | 0.261 | 0.2% | 1.4 | 2.0 |
+| preprocess | 9.425 | 8.1% | 49.9 | 72.3 |
+|  · read | 0.634 | 0.5% | 3.4 | 4.9 |
+|  · lex | 2.482 | 2.1% | 13.1 | 19.0 |
+|  · refine | 1.565 | 1.3% | 8.3 | 12.0 |
+|  · directives | 0.340 | 0.3% | 1.8 | 2.6 |
+|  · main loop | 4.360 | 3.8% | 23.1 | 33.4 |
+| parse | 7.202 | 6.2% | 38.1 | 55.2 |
+| check-input | 44.122 | 38.0% | 233.7 | 338.5 |
+|  · its expressions' walk | 11.883 | 10.2% | 62.9 | 91.2 |
+| check-expressions | 10.328 | 8.9% | 54.7 | 79.2 |
+| check-declarations | 2.006 | 1.7% | 10.6 | 15.4 |
+| static-data | 0.431 | 0.4% | 2.3 | 3.3 |
+| check-program | 20.786 | 17.9% | 110.1 | 159.4 |
+| select | 0.941 | 0.8% | 5.0 | 7.2 |
+| lower | 10.642 | 9.2% | 56.4 | 81.6 |
+|  · prepare | 1.017 | 0.9% | 5.4 | 7.8 |
+|  · statements | 6.886 | 5.9% | 36.5 | 52.8 |
+|  · bodies | 1.363 | 1.2% | 7.2 | 10.5 |
+|  · validate | 1.328 | 1.1% | 7.0 | 10.2 |
+| tier0 | 5.325 | 4.6% | 28.2 | 40.8 |
+| emit-setup | 1.021 | 0.9% | 5.4 | 7.8 |
+| branch-sizing | 0.542 | 0.5% | 2.9 | 4.2 |
+| encode | 0.396 | 0.3% | 2.1 | 3.0 |
+| unwind | 0.471 | 0.4% | 2.5 | 3.6 |
+| code-atoms | 0.620 | 0.5% | 3.3 | 4.8 |
+| publish-data | 0.452 | 0.4% | 2.4 | 3.5 |
+| object-build | 0.462 | 0.4% | 2.4 | 3.5 |
+| object-write | 0.178 | 0.2% | 0.9 | 1.4 |
+| span | 115.959 | | 614.1 | 889.5 |
+
+The checker's four stages take 77.2 ms, 66.6% of the span and 593 core cycles
+per token; preprocessing and parsing 128, and the backend, from `select` to the
+object's write, 161. tcc's whole compile, 305 user cycles per token, is less than the
+reader's stage alone.
+
 ## Results
 
 The 9700X job measured these at `1677a3b` (#520), which it merged into main
@@ -2677,12 +2752,30 @@ report, on standard error after the command, a row per stage.
   is a test of a null pointer; the reader's walk keeps its own counts, above. With it, the report and the objects are checked
   by `test-checker-driver --executable`.
 
-**The harness.** `measure-compile [--runs N] [--warmups N] [--reference PATH]
-[--directory DIR] [--keep] -- ARGUMENT...` (`compile_measure.c`) times
-`ARGUMENT... -o FILE` as whole processes in a Williams design's order: this compiler
-without the option, with it, and the reference compiler.
-- **Measures.** Each process's wall time runs from `fork` to `wait4`'s return,
-  and `wait4`'s rusage gives its user and system time, peak RSS and faults.
+**The harness.** `measure-compile [--runs N] [--warmups N] [--reference PATH
+[--reference-option OPTION]... | --variant OPTION]... [--directory DIR] [--keep] --
+ARGUMENT...` (`compile_measure.c`) times `ARGUMENT... -o FILE` as whole processes
+in a Williams design's order: this compiler without the option, with it, and up
+to four references (#146): other compilers, each with its own options before the
+arguments (`--reference clang --reference-option -O0`), or this compiler with an
+option (`--variant`).
+- **Measures.** Each process waits on a pipe until its counters are open; its
+  wall time runs from its release to `wait4`'s return, and `wait4`'s rusage
+  gives its user and system time, peak RSS and faults. Its user cycles and
+  instructions come from `perf_event_open`, from its exec to its exit, as
+  `time-runs`' do; where the kernel refuses them, the report says `uncounted`.
+- **Per token (#146).** `--time-stages`' report gives the preprocessed tokens,
+  `time-process tokens` (the preprocessor's output, its end of file among it),
+  which every run must give alike. Each compiler's median wall time and user
+  cycles are divided by them, and each stage's median by them twice: as TSC
+  ticks at the report's `tsc-mhz`, and as core cycles at the `--time-stages`
+  processes' average clock: the median of their cycles, user and kernel (a
+  third counter), per wall millisecond, which a pinned process spends running
+  but for its exec's and exit's waits. The core figure takes a stage as running
+  at that average clock, which a pinned, single-lane compile on a steady boost
+  clock nearly is; the TSC figure is exact but counts at the TSC's fixed rate,
+  not the core's. (`rusage`'s user time is too coarse for the clock: user cycles
+  per user millisecond came to 5.63 GHz, above the 9700X's 5.5 GHz boost.)
 - **Checks.** Every process must exit with status 0, the two objects of every
   run must be the same bytes, and every report must be whole.
 - **Coverage.** After the runs, with the medians, it prints the first

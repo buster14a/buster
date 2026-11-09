@@ -481,11 +481,73 @@ static const char* check_semantic_assert(const Parser* parser, Preprocessor* pp,
     return check_semantic_text(pp, result);
 }
 
+// The declarator name token of member `member` (a TypeMembers index) in its own record's definition (#1447), the record
+// whose members hold it (an anonymous member's record for a name found through it): as check_lower_dump_member finds one,
+// an identifier at the body's own brace depth, of the member's name, that declares itself with the kind byte a member's
+// declarator leaves 0 (TYPEDEF's). The body is the one CheckGraph.tag_completions ends. BUSTER_CHECK_NONE where the
+// record has no body in the unit or none is found. A diagnostic's cold scan: the tags, then the body.
+static uint32_t check_semantic_member_token(const Parser* parser, const CheckInput* input, const TypeTable* types, uint32_t member)
+{
+    const CheckGraph* graph = &input->graph;
+    uint32_t tag = 0;
+    for (uint32_t t = 1; tag == 0 && member != 0 && member < types->members.count && t < types->tags.count; t += 1)
+    {
+        tag = member >= types->tags.member_begin[t] && member - types->tags.member_begin[t] < types->tags.member_count[t] ? t : 0;
+    }
+    const uint32_t completion = tag != 0 && graph->tag_completions != NULL && tag < graph->tag_completion_count ? graph->tag_completions[tag] : BUSTER_CHECK_NONE;
+    const uint32_t close = completion != BUSTER_CHECK_NONE && completion > 0 && completion <= parser->tokens.count && completion <= input->token_count &&
+                           parser->tokens.kinds[completion - 1] == PARSE_KIND_R_BRACE ? completion - 1 : BUSTER_CHECK_NONE;
+    // The body's `{`, back from its `}` over the braces of the records its members define.
+    uint32_t open = close;
+    uint32_t depth = 0;
+    bool scanning = close != BUSTER_CHECK_NONE;
+    while (scanning && open > 0)
+    {
+        const uint8_t kind = parser->tokens.kinds[open];
+        depth = kind == PARSE_KIND_R_BRACE ? depth + 1 : kind == PARSE_KIND_L_BRACE ? depth - 1 : depth;
+        scanning = depth != 0;
+        open -= scanning ? 1 : 0;
+    }
+    const uint32_t name = tag != 0 ? types->members.name[member] : 0;
+    const bool known = !scanning && close != BUSTER_CHECK_NONE && name != 0 && input->declarations != NULL && input->declaration_kinds != NULL;
+    uint32_t result = BUSTER_CHECK_NONE;
+    depth = 0;
+    for (uint32_t t = known ? open + 1 : 0; known && result == BUSTER_CHECK_NONE && t < close; t += 1)
+    {
+        const uint8_t kind = parser->tokens.kinds[t];
+        depth = kind == PARSE_KIND_L_BRACE ? depth + 1 : kind == PARSE_KIND_R_BRACE && depth != 0 ? depth - 1 : depth;
+        result = depth == 0 && kind == PARSE_KIND_IDENTIFIER && parser->tokens.names[t] == name && input->declarations[t] == t &&
+                 input->declaration_kinds[t] == C_BINDING_TYPEDEF ? t : BUSTER_CHECK_NONE;
+    }
+    return result;
+}
+
+// The member a `.` or `->` node (`node`) selects (#1447), a TypeMembers index found through anonymous members as the
+// action's lookup finds it, by the name after the operator and its record operand's type; 0 for none.
+static uint32_t check_semantic_member_of(const Parser* parser, const CheckInput* input, const CheckStream* stream, const TypeTable* types, uint32_t node)
+{
+    const CheckGraph* graph = &input->graph;
+    const CheckOp op = node < graph->count ? graph->ops[node] : CHECK_OP_COUNT;
+    const bool member = op == CHECK_OP_MEMBER || op == CHECK_OP_ARROW;
+    const uint32_t base = member ? graph->operand0[node] : BUSTER_CHECK_NONE;
+    const TypeId base_type = base < stream->count ? type_unqualified(type_strip_aligned(types, check_stream_type(stream, base))) : 0;
+    const TypeId pointee = op == CHECK_OP_ARROW && base_type != 0 && type_kind(types, base_type) == BUSTER_TYPE_KIND_POINTER ?
+                           type_unqualified(type_strip_aligned(types, type_element(types, base_type))) : 0;
+    const TypeId record = op == CHECK_OP_ARROW ? pointee : base_type;
+    const uint8_t kind = record != 0 ? type_kind(types, record) : BUSTER_TYPE_KIND_VOID;
+    const uint32_t name_token = member ? graph->tokens[node] + 1 : BUSTER_CHECK_NONE;
+    const uint32_t name = name_token < parser->tokens.count && parser->tokens.kinds[name_token] == PARSE_KIND_IDENTIFIER ? parser->tokens.names[name_token] : 0;
+    uint64_t offset = 0;
+    return (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION) && name != 0 ? type_find_member(types, record, name, &offset) : 0;
+}
+
 // The typedef-specifier declaration an operand's type is spelled with (check_input_typedef_spelling), or 0: its object's
-// declaration's, through parentheses, dereferences and subscripts to the named object. Clang's type keeps that sugar:
-// `(*p)++` of a `v4si *p` prints 'v4si'. A member's own typedef isn't found (a record's members keep no declaration), so
-// `x.f++` of a member `uu f` prints its type without it.
-static uint32_t check_semantic_operand_spelling(const Parser* parser, const CheckInput* input, uint32_t node)
+// declaration's, through parentheses, dereferences and subscripts to the named object or the member a `.` or `->`
+// selects (#1447, its declarator in its record's body, check_semantic_member_token). Clang's type keeps that sugar:
+// `(*p)++` of a `v4si *p` prints 'v4si', `x.f++` of a member `uu f` 'uu'; check_driver_warning_type_at finds the
+// typedef of the declaration's chain that names the operand's level (`*p` of a `pv p`, `typedef v4si *pv`).
+static uint32_t check_semantic_operand_spelling(const Parser* parser, const CheckInput* input, const CheckStream* stream, const TypeTable* types,
+                                                uint32_t node)
 {
     const CheckGraph* graph = &input->graph;
     uint32_t result = 0;
@@ -494,7 +556,10 @@ static uint32_t check_semantic_operand_spelling(const Parser* parser, const Chec
     {
         const CheckOp op = graph->ops[at];
         const uint32_t token = graph->tokens[at];
-        const uint32_t declaration = token < input->token_count && input->declarations != NULL && parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER ?
+        const bool member = op == CHECK_OP_MEMBER || op == CHECK_OP_ARROW;
+        const uint32_t selected = member ? check_semantic_member_of(parser, input, stream, types, at) : 0;
+        const uint32_t declaration = member ? (selected != 0 ? check_semantic_member_token(parser, input, types, selected) : BUSTER_CHECK_NONE) :
+                                     token < input->token_count && input->declarations != NULL && parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER ?
                                      input->declarations[token] : 0;
         result = declaration != 0 && declaration < input->token_count ? check_input_typedef_spelling(input, parser, declaration) : 0;
         const bool through = declaration == 0 && (op == CHECK_OP_VALUE || op == CHECK_OP_DEREFERENCE || op == CHECK_OP_SUBSCRIPT);
@@ -602,10 +667,10 @@ static const char* check_semantic_address_space(const Parser* parser, Preprocess
         const uint32_t second = conditional ? graph->operand2[node] : graph->operand1[node];
         const String8 left = first < stream->count ? check_driver_warning_type(parser, pp, input, types, spell, scratch,
                                                                                 check_semantic_value_type(types, check_stream_type(stream, first), true),
-                                                                                check_semantic_operand_spelling(parser, input, first)) : (String8){ "", 0 };
+                                                                                check_semantic_operand_spelling(parser, input, stream, types, first)) : (String8){ "", 0 };
         const String8 right = second < stream->count ? check_driver_warning_type(parser, pp, input, types, spell, scratch,
                                                                                   check_semantic_value_type(types, check_stream_type(stream, second), true),
-                                                                                  check_semantic_operand_spelling(parser, input, second)) : (String8){ "", 0 };
+                                                                                  check_semantic_operand_spelling(parser, input, stream, types, second)) : (String8){ "", 0 };
         result = left.length != 0 && right.length != 0 ?
                  check_warning_text(scratch, "%s operands of type  (%.*s and %.*s) which are pointers to non-overlapping address spaces",
                                     conditional ? "conditional operator with the second and third" : "arithmetic operation with", (int)left.length, left.pointer,
@@ -667,7 +732,7 @@ static const char* check_semantic_address_space(const Parser* parser, Preprocess
     if (format != NULL)
     {
         from = from_node < stream->count ? check_semantic_value_type(types, check_stream_type(stream, from_node), false) : 0;
-        const String8 source = from != 0 ? check_driver_warning_type(parser, pp, input, types, spell, scratch, from, check_semantic_operand_spelling(parser, input, from_node)) :
+        const String8 source = from != 0 ? check_driver_warning_type(parser, pp, input, types, spell, scratch, from, check_semantic_operand_spelling(parser, input, stream, types, from_node)) :
                                            (String8){ "", 0 };
         const String8 target = to != 0 ? check_driver_warning_type(parser, pp, input, types, spell, scratch, to, 0) : (String8){ "", 0 };
         const bool initializing = op == CHECK_OP_INITIALIZE;
@@ -773,7 +838,7 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
             // an _Atomic one's value type.
             const TypeId stripped = type_strip_aligned(types, operand_type);
             const TypeId value = type_kind(types, stripped) == BUSTER_TYPE_KIND_ATOMIC ? types->types.base[type_index(stripped)] : operand_type;
-            const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, value, check_semantic_operand_spelling(parser, input, operand));
+            const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, value, check_semantic_operand_spelling(parser, input, stream, types, operand));
             const bool up = op == CHECK_OP_PRE_INCREMENT || op == CHECK_OP_POST_INCREMENT;
             result = type.length != 0 ? check_warning_text(scratch, "cannot %s value of type %.*s", up ? "increment" : "decrement", (int)type.length, type.pointer) : NULL;
         }
@@ -793,7 +858,7 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
             const TypeId bare = pointee != 0 ? type_unqualified(type_strip_aligned(types, pointee)) : 0;
             const uint8_t kind = bare != 0 ? type_kind(types, bare) : BUSTER_TYPE_KIND_VOID;
             const bool tag = kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION || kind == BUSTER_TYPE_KIND_ENUM;
-            const String8 type = tag ? check_driver_warning_type(parser, pp, input, types, spell, scratch, pointee, check_semantic_operand_spelling(parser, input, pointer)) :
+            const String8 type = tag ? check_driver_warning_type(parser, pp, input, types, spell, scratch, pointee, check_semantic_operand_spelling(parser, input, stream, types, pointer)) :
                                        (String8){ "", 0 };
             if (type.length != 0)
             {
@@ -818,7 +883,7 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
             // expression's at the expression, its type as the operand's. The tag's "forward declaration" note.
             const bool expression = operand < stream->count;
             const TypeId named = expression ? operand_type : graph->types != NULL ? graph->types[node] : 0;
-            uint32_t spelling = expression ? check_semantic_operand_spelling(parser, input, operand) : 0;
+            uint32_t spelling = expression ? check_semantic_operand_spelling(parser, input, stream, types, operand) : 0;
             const uint32_t close = !expression && token + 1 < parser->tokens.count && parser->tokens.kinds[token + 1] == PARSE_KIND_L_PAREN ?
                                    parser->tree.parents[token + 1] : token;
             for (uint32_t type_name = token + 2; !expression && spelling == 0 && type_name < close && close < parser->tokens.count; type_name += 1)
@@ -846,7 +911,7 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
             const bool decays = type_kind_is_array(callee_kind) || callee_kind == BUSTER_TYPE_KIND_FUNCTION;
             const TypeId plain = decays ? operand_type : type_unqualified(operand_type);
             const TypeId loaded = !decays && type_kind(types, plain) == BUSTER_TYPE_KIND_ATOMIC ? type_unqualified(types->types.base[type_index(plain)]) : plain;
-            const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, loaded, check_semantic_operand_spelling(parser, input, operand));
+            const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, loaded, check_semantic_operand_spelling(parser, input, stream, types, operand));
             uint32_t open = token;
             while (open != 0 && open < parser->tokens.count && !(parser->tokens.kinds[open] == PARSE_KIND_L_PAREN && parser->tree.parents[open] == token))
             {
@@ -925,7 +990,7 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
                 const String8 name = target < parser->tokens.count ? check_semantic_name(parser, pp, target) : (String8){ "", 0 };
                 const bool variable = walked && named < count && graph->ops[named] == CHECK_OP_VALUE && declaration < input->token_count && name.length != 0;
                 const String8 declared = variable ? check_driver_warning_type(parser, pp, input, types, spell, scratch, check_stream_type(stream, named),
-                                                                              check_semantic_operand_spelling(parser, input, named)) : (String8){ "", 0 };
+                                                                              check_semantic_operand_spelling(parser, input, stream, types, named)) : (String8){ "", 0 };
                 result = !variable ? "read-only variable is not assignable" :
                          declared.length != 0 ? check_warning_text(scratch, "cannot assign to variable '%.*s' with const-qualified type %.*s",
                                                                    (int)name.length, name.pointer, (int)declared.length, declared.pointer) : NULL;
