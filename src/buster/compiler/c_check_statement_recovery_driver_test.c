@@ -11,6 +11,7 @@
 // bodies on two lanes, under gnu17 and gnu23 and the warning and error-limit options; and -c of each, which must be
 // refused with no object written. The asm and control errors are compared whole too: every one, in clang's words, a
 // duplicate case's with its "previous case defined here" note, after a graph's error and in a unit without one (#1447).
+// A rejected unit's other bodies get their common warnings (check_driver_rejected_common, #1447).
 // Include after c_check_semantic_recovery_driver_test.c, whose reader this takes.
 
 static void check_test_driver_statement_recovery(CheckTest* test, const char* clang, const char* executable, const char* directory)
@@ -88,6 +89,47 @@ static void check_test_driver_statement_recovery(CheckTest* test, const char* cl
         "    __asm__(\"\" : \"=r\"((long)x), \"=r\"(x) : \"0\"(1.0));\n"
         "    __asm__(\"\" : \"=r\"((void)x));\n    __asm__(\"\" : \"=r\"((void)(int)x), \"=r\"((int)x));\n"
         "    __asm__(\"\" : \"=r\"(x) : \"r\"((void)x));\n}\n",
+        // A graph's error in one body: the others' common warnings, -Wuninitialized before it and none after it, and their
+        // -Wreturn-type, runtime, -Wswitch, -Wformat and -Wempty-body warnings (#1447: a second reading without that body).
+        "struct S { int a; } s;\n"
+        "enum E { A, B, C };\n"
+        "int printf(const char *, ...);\n"
+        "int un0(void) { int y; return y; }\n"
+        "int bad(void) { return s.b; }\n"
+        "int after(int x) { if (x = 2) return x << 40; return 0; }\n"
+        "void sw(enum E e) { switch (e) { case A: break; } }\n"
+        "void fmt(int x) { printf(\"%s\\n\", x); }\n"
+        "int ret(int x) { if (x) return 1; }\n"
+        "int un(void) { int y; return y; }\n"
+        "void empty(int x) { if (x); }\n",
+        // A control error on the valid path: its scope's unused variable and the unit-end ones are left out, the other
+        // bodies' common warnings given.
+        "int printf(const char *, ...);\n"
+        "int f(int x)\n"
+        "{\n"
+        "    int u;\n"
+        "    switch (x) { case 1: case 1: break; }\n"
+        "    return 0;\n"
+        "}\n"
+        "int g(int y) { if (y = 1) return printf(\"%d\\n\", 1.5); return 0; }\n"
+        "static int z;\n"
+        "void h(void) { int w; }\n",
+        // An asm error's body left out, the next one's warnings given.
+        "void a(void) { __asm__(\"\" : \"=r\"(1)); }\n"
+        "int g(int y) { if (y = 1) return 1; return y << 40; }\n",
+        // -Wreturn-type before a graph's error, and the next body's unused variable and -Wparentheses.
+        "int r(int x) { if (x) return 1; }\n"
+        "struct S { int a; } s;\n"
+        "int bad(void) { return s.b; }\n"
+        "int g(int y) { int w; if (y = 1) return 1; return 0; }\n",
+        // A reader's error (an undeclared name), after which the other bodies' unused variables and common warnings are given.
+        "int f(void){ return zz; }\n"
+        "int g(int y){ if (y=1) return 1; int w; return 0; }\n"
+        "int h(void) { return 1 << 40; }\n",
+        // The same with bodies before it.
+        "int g(int y){ int w; return 0; }\n"
+        "int f(void){ return zz; }\n"
+        "int g2(int y){ int w2; return 0; }\n",
     };
     static const char* const standards[] = { "-std=gnu17", "-std=gnu23" };
     static const char* const options[] = { NULL, "-Wall", "-ferror-limit=2", "-w" };

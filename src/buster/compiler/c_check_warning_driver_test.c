@@ -1721,6 +1721,15 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .warnings = 14,
         .notes = 1,
     },
+    {
+        // Clang's ActOnFinishFunctionBody gives a function's unused parameters after its body scope's unused variables
+        // and before its missing return.
+        .name = "unused parameters after the body's unused variables",
+        .source = "int f(int y, int z) { int w; { int q; } if (z) return 1; }\nint g(int y) { int a; return 0; }\n"
+                  "void h(int p, int r) { int u; (void)r; }\n",
+        .options = { "-Wall", "-Wextra" },
+        .warnings = 8,
+    },
 };
 
 static void check_test_driver_warning_fixtures(CheckTest* test, const char* clang, const char* executable, const char* directory,
