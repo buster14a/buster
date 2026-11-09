@@ -1060,6 +1060,8 @@ static bool interpreter_typed_function_valid(const Tier0Function* function)
     result = result && (function->local_count == 0 || function->local_classes != 0);
     result = result && (function->call_count == 0 || (function->call_targets != 0 && function->call_first != 0 && function->call_argument_counts != 0 && function->call_variadic != 0));
     result = result && (function->argument_count == 0 || function->argument_classes != 0);
+    // An asm statement placed in its caller (#1839, Tier0Function.call_asm) is machine code, which the interpreter doesn't run.
+    result = result && function->asm_body_count == 0;
     // A local's optional object columns describe storage, not a value. Keep scalar cells in the fixed local array
     // and allocate object representations in their invocation's arena region. No object may silently become an
     // eight-byte cell. Address-only locals hold pointers to separately registered frame storage.
