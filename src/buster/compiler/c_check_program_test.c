@@ -2175,8 +2175,13 @@ static void check_test_program_source_native_bounds(CheckTest* test, const char*
         {
             check_test_expect(test, entry_limit == 0 || code.code_bytes <= 2048,
                               "initializer native code stays bounded independently of payload size");
-            // (A unit's __builtin_dump_struct strings are pools too, which no memcpy reads.)
-            if (code.lowered.initializers.count != 0 && code.lowered.initializers.dump_count == 0)
+            // (A unit's __builtin_dump_struct strings and __builtin_clear_padding tables are pools too, which no memcpy reads.)
+            bool tables = false;
+            for (uint32_t k = 0; k < code.lowered.initializers.padding_count; k += 1)
+            {
+                tables |= code.lowered.initializers.paddings[k].pool != BUSTER_CHECK_NONE;
+            }
+            if (code.lowered.initializers.count != 0 && code.lowered.initializers.dump_count == 0 && !tables)
             {
                 const uint64_t access_mark = scratch.length;
                 uint8_t* defined = NULL;

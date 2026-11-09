@@ -743,7 +743,8 @@ static __attribute__((noinline)) void check_test_generic_builtin_programs(CheckT
     // __builtin_clear_padding (#148): the bytes of objects filled with ones, then cleared, against clang's build: a struct's
     // holes and tail, bit-fields' unused bits and an unnamed one, a union's bytes no member holds, an x87 long double's last
     // six, a _BitInt's high bits, an atomic struct's, an ext vector's tail, an anonymous member's, arrays of structs in a
-    // loop (and of arrays), a volatile object, and a variable length array, which clang's code leaves as it is.
+    // loop (and of arrays), a volatile object, and a variable length array, which clang's code leaves as it is; an element
+    // past 4 KiB, and elements whose stores are many, a table's loop's (#1842).
     check_test_program_source(test,
         "void *memset(void *, int, unsigned long);static unsigned long long h;static void mix(unsigned long long v){h=h*31+v;}\n"
         "struct A{char c;int i;short s;};struct B{int x:3;int:4;unsigned y:9;char z;long double ld;};union U{char c;int i;struct{char a;short b;}s;};\n"
@@ -751,9 +752,9 @@ static __attribute__((noinline)) void check_test_generic_builtin_programs(CheckT
         "struct D{V v;char tail;};struct E{char c;struct{char d;long e;};};struct F{char c;int a[2][2];struct{char p:1;unsigned long q:50;}bits[2];};\n"
         "static void bytes(const void* p,unsigned long n){for(unsigned long i=0;i<n;i++)mix(((const unsigned char*)p)[i]);}\n"
         "#define T(decl) do{decl;memset((void*)&v,0xff,sizeof v);__builtin_clear_padding(&v);bytes((const void*)&v,sizeof v);}while(0)\n"
-        "static struct A big[300];\n"
+        "static struct A big[300];struct G{char c[5000];int i;char d;};struct H{char c;struct A a[64];short t:3;};struct I{struct H h[3];long double x[40];};\n"
         "int tested(int n){h=(unsigned)n;T(struct A v);T(struct B v);T(union U v);T(struct C v);T(struct D v);T(struct E v);T(long double v);T(struct F v);\n"
-        "T(struct A v[3]);T(struct A v[2][3]);T(volatile struct A v);T(_Complex long double v);memset(big,0xff,sizeof big);__builtin_clear_padding(&big);bytes(big,sizeof big);\n"
+        "T(struct A v[3]);T(struct A v[2][3]);T(struct G v);T(struct H v);T(struct I v);T(struct I v[2]);T(volatile struct A v);T(_Complex long double v);memset(big,0xff,sizeof big);__builtin_clear_padding(&big);bytes(big,sizeof big);\n"
         "int k=(n&3)+1;int vla[k];memset(vla,0xff,sizeof vla);__builtin_clear_padding(&vla);bytes(vla,sizeof vla);return (int)(h^(h>>32));}\n",
         "generic-clear-padding", clang);
     // va_arg of a Microsoft list (#148, clang's EmitMSVAArg) against clang's build: 8-byte slots built by hand, read as an
