@@ -4325,8 +4325,8 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
             "variable-length-arrays-in-for-clauses-and-statement-expressions", clang);
         // #1447: C23's `= {}` of a variable-length array clears it whole, on a stack an earlier array dirtied.
         check_test_program_source(test,
-            "int tested(int n){int s=0;{char d[n+4096];for(int i=0;i<n+4096;i++)d[i]=7;s+=d[n];}"
-            "{int c[n+1000]={};for(int i=0;i<n+1000;i++)s+=c[i]+1;}{long e[2][n+3]={};s+=(int)e[1][n+2]+(int)sizeof e;}"
+            "int tested(int n){int m=n&7,s=0;{char d[m+4096];for(int i=0;i<m+4096;i++)d[i]=7;s+=d[m];}"
+            "{int c[m+1000]={};for(int i=0;i<m+1000;i++)s+=c[i]+1;}{long e[2][m+3]={};s+=(int)e[1][m+2]+(int)sizeof e;}"
             "return s;}",
             "variable-length-array-empty-initializer", clang);
         // #1447: a bound whose statement expression holds a declaration, an if, a goto and a label.
