@@ -146,9 +146,16 @@ named label or reference and isn't an asm goto, is an asm body: the records a he
 between its frame and its return, which run in the statement's place in its
 function (`check_asm_inline_code`, `Tier0AsmBody`):
 
-1. the operands' loads from the operand block, the x87's first, the deepest
-   first, each from the block's frame place (`BUSTER_TIER0_ASM_BLOCK`, which
-   Tier 0 replaces with the block's home);
+1. the x87 operands' loads from the operand block, the deepest first, each from
+   the block's frame place (`BUSTER_TIER0_ASM_BLOCK`, which Tier 0 replaces with
+   the block's home). The register operands (an input's value, a `+` output's,
+   a memory operand's address) aren't loaded: they are the call row's
+   arguments, each located in its template register, which Tier 0's moves put
+   there (`CheckProgramAsm.inline_passed`, `check_lower_asm_call`). On the
+   9700X the block's round trip cost the `"c"` shift kernel 12% against its
+   helper: a load of a slot the lowering had just stored through another base
+   register failed store-to-load forwarding once a run
+   (`ls_bad_status2.stli_other`, 99 million in 100 million iterations);
 2. the template's records, its own branches to its numeric labels among them
    (`1:` and `jnz 1b`), which Tier 0 emits as local branches of the function,
    sized by branch sizing with its own (`Tier0AsmBody.branches`); a label at the
@@ -158,9 +165,12 @@ function (`check_asm_inline_code`, `Tier0AsmBody`):
    inputs the template left, each address loaded from the block into a store
    register that no output holds.
 
-The lowering fills the block as for a helper, then ends the statement with a
-`CALL` whose row has no arguments and whose callee is the body
-(`Tier0Function.call_asm`). Tier 0 takes it as it takes a call:
+The lowering stores the outputs' addresses (and the x87 inputs) in the block
+as for a helper, leaves the register operands' values on the stack in the
+operands' order, and ends the statement with a `CALL` whose callee is the body
+(`Tier0Function.call_asm`) and whose arguments are those values, each in its
+register (a narrow integer as an unsigned one, so that it is zero-extended as
+the block's load did). Tier 0 takes it as it takes a call:
 
 - it saves the values live across it, every one in a register where the body
   touches a callee-saved one;
@@ -191,6 +201,14 @@ writes rsp, rbp or r15, which hold the frame.
 
 What differs from the helper: the template's rsp is its function's, as clang's
 is, and the statement costs no call, return, pushes or block address.
+
+On the 9700X ([the measurement record](https://github.com/buster14a/buster-performance/tree/181db9f04/docs/measurements/asm-bodies-1839-2026-11-09)),
+loops of one statement each, against the same compiler's helpers
+(`--helper-forms=asm`):
+- a flag output is 38% faster, a `"c"` shift count 43%, `mulq`'s fixed
+  registers 39% and cpuid 2%;
+- rdtsc and x87 `fsqrt`, dominated by their own latency, are level;
+- `-c` of `main.c` is unchanged (2.197 s → 2.189 s).
 `--helper-report` counts each body as the `asm` family's direct form. The
 interpreter (`interpret-c`) refuses a function with a body, as it doesn't run
 machine code.

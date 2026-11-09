@@ -548,6 +548,12 @@ struct CheckLowerAbi
     uint32_t argument_capacity;
     // The static chains among the arguments (#148): each a void argument, which check_lower_chain_location puts in r10.
     uint32_t chains;
+    // The asm bodies' arguments (#1839, check_lower_asm_call): each a void argument too, in a register of its own,
+    // `placed` the arguments' indices and `placed_registers` their registers (calling_convention.c's numbering), which
+    // check_lower_asm_locations puts them in after abi_assign.
+    uint32_t* placed;
+    uint8_t* placed_registers;
+    uint32_t placed_count;
 };
 
 // A jump table's most entries (check_lower_switch_table). clang -O0 builds one of any size (LLVM's limit is UINT_MAX
@@ -6762,6 +6768,44 @@ static uint32_t check_lower_native_call(CheckLowerWriter* writer, SymbolId symbo
             abi->arguments[abi->argument_count++] = arguments[i];
             writer->argument_sizes[writer->argument_count] = 0;
             writer->argument_classes[writer->argument_count++] = check_lower_class(writer, arguments[i]);
+        }
+    }
+    return call;
+}
+
+// An asm body's call row (#1839, check_lower_asm): `count` arguments of Tier 0 classes `classes`, each in register
+// `registers[a]` (calling_convention.c's numbering: a general register's number, or BUSTER_ABI_REGISTER_VECTOR and an XMM
+// register's), where the template finds it, no result, and the body's target. Each argument is void to abi_assign, which
+// gives it no place, and check_lower_asm_locations' patch gives it its register. Returns the call, BUSTER_CHECK_NONE for a
+// failure.
+static uint32_t check_lower_asm_call(CheckLowerWriter* writer, const uint8_t* classes, const uint8_t* registers, uint32_t count)
+{
+    CheckLowerAbi* abi = writer->abi;
+    uint32_t call = BUSTER_CHECK_NONE;
+    if (abi->count >= abi->capacity || count > abi->argument_capacity - abi->argument_count)
+    {
+        check_lower_fail(writer, CHECK_PROGRAM_RESOURCE);
+    }
+    else
+    {
+        call = writer->call_count++;
+        writer->call_targets[call] = BUSTER_TIER0_CALL_ASM_TARGET;
+        writer->call_first[call] = writer->argument_count;
+        writer->call_counts[call] = count;
+        writer->call_variadic[call] = 0;
+        writer->call_result_objects[call] = 0;
+        abi->first[abi->count] = abi->argument_count;
+        abi->results[abi->count] = BUSTER_TYPE_VOID;
+        abi->counts[abi->count] = count;
+        abi->named[abi->count] = count;
+        abi->variadic[abi->count++] = 0;
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            abi->placed[abi->placed_count] = abi->argument_count;
+            abi->placed_registers[abi->placed_count++] = registers[i];
+            abi->arguments[abi->argument_count++] = BUSTER_TYPE_VOID;
+            writer->argument_sizes[writer->argument_count] = 0;
+            writer->argument_classes[writer->argument_count++] = classes[i];
         }
     }
     return call;
@@ -13316,6 +13360,25 @@ static bool check_lower_asm_segment(const CheckLowerWriter* writer, const CheckI
     return result;
 }
 
+// Whether an asm body's operand `place` is its call row's argument (#1839, CheckProgramAsm.inline_passed): a value or an
+// address a register holds when the template starts (check_asm_loads'), a general register's, an XMM register's or a
+// memory operand's base.
+static bool check_lower_asm_passed(const CheckAsmPlace* place)
+{
+    return check_asm_loads(place);
+}
+
+// The class an asm body's argument for operand k takes: an XMM register's float or double; a memory operand's address;
+// a matching input's its output's type's; an integer of 1 or 2 bytes as an unsigned one, which Tier 0 zero-extends into
+// its register as the block's load did (tier0_extend).
+static uint8_t check_lower_asm_class(CheckLowerWriter* writer, const CheckProgramAsm* plan, uint32_t k)
+{
+    const CheckAsmPlace* place = plan->places + k;
+    const TypeId type = place->kind == BUSTER_CHECK_ASM_MEMORY ? BUSTER_TYPE_ULONG : place->tied != BUSTER_CHECK_NONE && !place->written ? plan->places[place->tied].type : place->type;
+    const uint8_t class = check_lower_class(writer, type);
+    return class == BUSTER_TYPED_CLASS_I8 ? BUSTER_TYPED_CLASS_U8 : class == BUSTER_TYPED_CLASS_I16 ? BUSTER_TYPED_CLASS_U16 : class;
+}
+
 // An asm statement (CHECK_CONTROL_ASM), as check_program_asm_plan planned it, in clang's order: each output's address,
 // with a `+` operand's value loaded through it, then each input's value (a memory input's address). With a helper,
 // they go into its operand block, a frame object, whose address the helper's call takes; a template of no
@@ -13414,9 +13477,23 @@ static void check_lower_asm(CheckLowerWriter* writer, CheckControl control)
         uint32_t call = 0;
         if (writer->output->status == CHECK_PROGRAM_OK && plan->inlined)
         {
-            // Placed in its caller as an asm body (#1839): a call row of no arguments whose callee is the body, which
-            // reads the block in its frame place.
-            call = check_lower_native_call(writer, BUSTER_TIER0_CALL_ASM_TARGET, BUSTER_TYPE_VOID, NULL, 0);
+            // Placed in its caller as an asm body (#1839): a call row whose callee is the body, which reads the block in its
+            // frame place, and whose arguments are its register operands' values, each in its register, in the order the
+            // operands are (the order they reach the stack, below).
+            uint8_t classes[BUSTER_CHECK_ASM_OPERANDS];
+            uint8_t registers[BUSTER_CHECK_ASM_OPERANDS];
+            uint32_t passed = 0;
+            for (uint32_t k = 0; plan->inline_passed && k < count; k += 1)
+            {
+                const CheckAsmPlace* place = plan->places + k;
+                if (check_lower_asm_passed(place))
+                {
+                    classes[passed] = check_lower_asm_class(writer, plan, k);
+                    registers[passed] = place->kind == BUSTER_CHECK_ASM_VECTOR ? (uint8_t)(BUSTER_ABI_REGISTER_VECTOR | place->reg) : place->reg;
+                    passed += 1;
+                }
+            }
+            call = check_lower_asm_call(writer, classes, registers, passed);
             if (writer->asm_body_count >= writer->asm_body_capacity)
             {
                 check_lower_resource(writer, "lowering asm body storage");
@@ -13445,7 +13522,68 @@ static void check_lower_asm(CheckLowerWriter* writer, CheckControl control)
         {
             check_lower_instruction(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, object);
         }
-        for (uint32_t k = count; k-- > 0 && writer->output->status == CHECK_PROGRAM_OK;)
+        for (uint32_t k = count; k-- > 0 && writer->output->status == CHECK_PROGRAM_OK && plan->inlined && plan->inline_passed;)
+        {
+            // An asm body's (#1839): each output's address into its block slot, each register operand's value left on the
+            // stack as the call's argument (a `+` one's loaded through its address in the slot, a matching input's converted
+            // to its output's type, a narrow integer as an unsigned one, as the block's loads extended it), a memory
+            // operand's address as its argument, and the x87's as a helper's block has them.
+            const CheckAsmPlace* place = plan->places + k;
+            const uint32_t node = statement->operands[k].node;
+            const bool passed = check_lower_asm_passed(place);
+            const uint8_t class = check_lower_class(writer, place->type);
+            const uint8_t argument = passed ? check_lower_asm_class(writer, plan, k) : class;
+            if (passed && argument != (place->tied != BUSTER_CHECK_NONE && k >= statement->output_count ? check_lower_class(writer, plan->places[place->tied].type) : class))
+            {
+                check_lower_instruction(writer, BUSTER_TYPED_CONVERT, argument, 0);
+            }
+            if (passed && place->written && place->kind != BUSTER_CHECK_ASM_MEMORY)
+            {
+                check_lower_instruction(writer, BUSTER_TYPED_LOAD, class, 0);
+                check_lower_instruction(writer, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_U64, 0);
+                check_lower_asm_slot(writer, object, place->slot);
+            }
+            else if (passed && place->kind == BUSTER_CHECK_ASM_MEMORY)
+            {
+                check_lower_expression(writer, node, true, 0);
+            }
+            else if (passed && place->tied != BUSTER_CHECK_NONE && k >= statement->output_count)
+            {
+                const CheckAsmPlace* output = plan->places + place->tied;
+                const TypeId placed = check_asm_tied_type(types, place->type, output->type);
+                if (placed != output->type)
+                {
+                    check_lower_instruction(writer, BUSTER_TYPED_CONVERT, check_lower_class(writer, output->type), 0);
+                }
+                check_lower_expression(writer, node, false, placed);
+            }
+            else if (passed)
+            {
+                check_lower_expression(writer, node, false, place->type);
+            }
+            else if (place->written && place->read)
+            {
+                // A `+` x87 operand's value, through its address the slot holds.
+                check_lower_instruction(writer, BUSTER_TYPED_SET, class, 0);
+                check_lower_instruction(writer, BUSTER_TYPED_LOAD, class, 0);
+                check_lower_instruction(writer, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_U64, 0);
+                check_lower_asm_slot(writer, object, place->slot);
+                check_lower_asm_slot(writer, object, place->value);
+            }
+            if (place->written)
+            {
+                check_lower_instruction(writer, BUSTER_TYPED_SET, BUSTER_TYPED_CLASS_U64, 0);
+                check_lower_expression(writer, node, true, 0);
+                check_lower_asm_slot(writer, object, place->slot);
+            }
+            else if (!passed && place->kind != BUSTER_CHECK_ASM_CONSTANT)
+            {
+                check_lower_instruction(writer, BUSTER_TYPED_SET, class, 0);
+                check_lower_expression(writer, node, false, place->type);
+                check_lower_asm_slot(writer, object, place->slot);
+            }
+        }
+        for (uint32_t k = count; k-- > 0 && writer->output->status == CHECK_PROGRAM_OK && !(plan->inlined && plan->inline_passed);)
         {
             const CheckAsmPlace* place = plan->places + k;
             const uint32_t node = statement->operands[k].node;
@@ -14750,6 +14888,8 @@ static bool check_lower_writer_begin(CheckLowerWriter* writer, CheckLowerAbi* ab
     BUSTER_CHECK_LOWER_ABI(named, uint32_t, abi_capacity);
     BUSTER_CHECK_LOWER_ABI(first, uint32_t, abi_capacity);
     BUSTER_CHECK_LOWER_ABI(variadic, uint8_t, abi_capacity);
+    BUSTER_CHECK_LOWER_ABI(placed, uint32_t, argument_capacity);
+    BUSTER_CHECK_LOWER_ABI(placed_registers, uint8_t, argument_capacity);
 #undef BUSTER_CHECK_LOWER_ABI
     *writer = (CheckLowerWriter){
         .program = program,
@@ -14907,6 +15047,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
     abi->count = 0;
     abi->argument_count = 0;
     abi->chains = 0;
+    abi->placed_count = 0;
     memset(writer->runtime_mask, 0, sizeof(writer->runtime_mask));
     writer->runtime_count = 0;
     part->stage = CHECK_LOWER_STAGE_NONE;
@@ -15671,6 +15812,14 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         if (abi->chains != 0)
         {
             check_lower_chain_location(abi, locations);
+        }
+        // The asm bodies' arguments in their registers (#1839), after the chains', which would take their void type for one.
+        for (uint32_t k = 0; k < abi->placed_count; k += 1)
+        {
+            locations[abi->placed[k]] = (AbiLocation){
+                .registers = { abi->placed_registers[k], BUSTER_ABI_REGISTER_NONE },
+                .kind = BUSTER_ABI_LOCATION_REGISTERS,
+            };
         }
         for (uint32_t b = part->first; b < part->end && status->status == CHECK_PROGRAM_OK; b += 1)
         {
