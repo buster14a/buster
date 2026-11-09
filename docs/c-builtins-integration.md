@@ -2518,8 +2518,9 @@ reads through its constant evaluator: the adapter reads its chars from the
 unit's constant objects (`check_input_verbose_trap_object`, #1843) up to the
 first NUL, of an array of plain char, with clang's errors where the string has a
 `$` or the read leaves the object (past its end, or no NUL in it). An object
-whose bytes the reader doesn't keep (an automatic const array's, which clang's
-evaluator reads too) is still refused by name.
+whose bytes the reader doesn't keep (a member array's, which clang's evaluator
+reads too), and such an argument under a cast (which through `void *` clang
+calls no constant string), are still refused by name.
 
 Two costs are accepted for now:
 - A call of `memcpy_inline` or `memset_inline` is a call of its leaf, where

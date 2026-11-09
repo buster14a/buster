@@ -54,16 +54,25 @@ static __attribute__((noinline)) void check_test_generic_builtin_sources(CheckTe
           "void f(void)\n{\n__builtin_verbose_trap(\"x\", (const char*)0);\n}\n", .rejected = true },
         { .name = "generic: verbose_trap of a dollar", .source =
           "void f(void)\n{\n__builtin_verbose_trap(\"a$b\", \"x\");\n}\n", .rejected = true },
-        // A const array's string (#1917's review): a known one with a `$` is clang's error; an automatic one's, whose bytes
-        // the reader doesn't keep, is refused by name, whether clang takes it or (its `$`) rejects it.
+        // A const array's string (#1917's review): a known one's, an automatic array's too, with a `$` is clang's error;
+        // a member array's, whose bytes the reader doesn't keep, and one through a cast are refused by name, whether clang
+        // takes it or (its `$`, its cast through void *) rejects it.
         { .name = "generic: verbose_trap of a const array's dollar", .source =
           "static const char m[] = \"a$c\";\nvoid f(void)\n{\n__builtin_verbose_trap(\"x\", m);\n}\n", .rejected = true },
         { .name = "generic: verbose_trap of a const array", .source =
           "static const char m[] = \"abc\";\nvoid f(void)\n{\n__builtin_verbose_trap(\"x\", m + 1);\n}\n" },
         { .name = "generic: verbose_trap of an automatic const array", .source =
-          "void f(void)\n{\nconst char m[] = \"abc\";\n__builtin_verbose_trap(\"x\", m);\n}\n", .unsupported = true },
+          "void f(void)\n{\nconst char m[] = \"abc\";\n__builtin_verbose_trap(\"x\", m);\n}\n" },
         { .name = "generic: verbose_trap of an automatic const array's dollar", .source =
-          "void f(void)\n{\nconst char m[] = \"a$c\";\n__builtin_verbose_trap(\"x\", m);\n}\n", .rejected = true, .unsupported = true },
+          "void f(void)\n{\nconst char m[] = \"a$c\";\n__builtin_verbose_trap(\"x\", m);\n}\n", .rejected = true },
+        { .name = "generic: verbose_trap of a member array", .source =
+          "struct S { char a[4]; };\nstatic const struct S s = { \"abc\" };\nvoid f(void)\n{\n__builtin_verbose_trap(\"x\", s.a);\n}\n", .unsupported = true },
+        { .name = "generic: verbose_trap of a member array's dollar", .source =
+          "struct S { char a[4]; };\nstatic const struct S s = { \"ab$\" };\nvoid f(void)\n{\n__builtin_verbose_trap(\"x\", s.a);\n}\n", .rejected = true,
+          .unsupported = true },
+        { .name = "generic: verbose_trap of a const array through void *", .source =
+          "static const char m[] = \"a$c\";\nvoid f(void)\n{\n__builtin_verbose_trap(\"x\", (const char*)(const void*)m);\n}\n", .rejected = true,
+          .unsupported = true },
         { .name = "generic: verbose_trap of a dollar under a cast", .source =
           "void f(void)\n{\n__builtin_verbose_trap(\"a\", (const char*)(\"x$\"));\n}\n", .rejected = true },
         { .name = "generic: verbose_trap of one argument", .source = "void f(void)\n{\n__builtin_verbose_trap(\"a\");\n}\n", .rejected = true },

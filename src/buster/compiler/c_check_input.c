@@ -11209,7 +11209,14 @@ static void check_input_verbose_trap_arguments(CheckInputReader* reader, const C
         }
         else
         {
-            const uint32_t verdict = check_input_verbose_trap_object(reader, &value, call->closing + 1);
+            // A cast on the way clang's evaluator may not read through (`(const char*)(const void*)m` it calls no constant
+            // string, #1917's review): refused by name, as the bytes of an object the reader didn't keep are.
+            bool cast = false;
+            for (uint32_t t = span.first; t < span.end; t += 1)
+            {
+                cast |= parser->tree.roles[t] == PARSE_ROLE_OPEN_CAST;
+            }
+            const uint32_t verdict = cast ? CHECK_INPUT_UNSUPPORTED : check_input_verbose_trap_object(reader, &value, call->closing + 1);
             if (verdict != BUSTER_CHECK_VERBOSE_TRAP_STRING_VALID)
             {
                 check_input_report(reader, span.first, (CheckInputMessage)verdict);
