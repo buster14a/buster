@@ -487,6 +487,28 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "enum A { X = 5 };\nenum B { Y = 3, X, Z };\n_Static_assert(Z == 0, \"z\");\n"
         "enum C : long { P };\nenum D : char { Q = 7, P, R };\n_Static_assert(R == 0 && sizeof(R) == 1, \"r\");\n"
         "enum E { M = -1 };\nenum F { M };\n_Static_assert(sizeof(enum F) == 4 && (enum F)-1 > 0, \"u\");\nint x = undeclared;\n",
+        // Declarator errors in clang's words (#1447), each still ending the unit's checking: a function returning an array
+        // or a function, a negative bound (named, and a type name's), an array of functions (by a typedef's name, with its
+        // aka) or of an incomplete element (with the tag's forward declaration's note), and a variable of type void or of
+        // an incomplete tag, a tentative definition's too.
+        "struct S;\nint f(void)[3];\n",
+        "typedef int F(void);\nF g(void);\n",
+        "int s = sizeof(int[2]);\nint a[-1];\n",
+        "int s = sizeof(int[-4]);\n",
+        "typedef int F(void);\nF *ok[2];\nF af[2];\n",
+        "struct S;\nvoid h(struct S a[]);\n",
+        "int b[2][];\n",
+        "static void v;\n",
+        "struct S;\nint k(void) { struct S local; return 0; }\n",
+        "struct S s;\nint ok(void) { return 0; }\n",
+        // An array past clang's object limit, at its bound, its count with clang's digit separators: a declaration's, an
+        // inner array's (whose outer one is past it) and a type name's.
+        "char ok[0x1fffffffffffffff];\nint a[0x2000000000000000];\n",
+        "int c[0x100000000][0x100000000];\n",
+        "int s = sizeof(int[0x4000000000000000]);\n",
+        // A parameter's bound past its `static` and qualifiers (review on #1819).
+        "void f(int a[static 0x2000000000000000]);\n",
+        "void g(int a[const volatile 0x2000000000000000]);\n",
         // A tag defined again in its scope, whose body becomes an anonymous tag's: later uses of the name find the first
         // definition, and the second's enumerators are still declared (a repeated one with its own note).
         "struct S { int a; };\nstruct S { long b; };\nunion U { int a; };\nunion U { char c; } u2;\n"

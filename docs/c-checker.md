@@ -3823,6 +3823,37 @@ deferred merge has the same complete unit as source order and uses the same cuts
 All these views remain
 diagnostic-only and preserve the original source rejection.
 
+#### Declarator errors' words (#1447)
+
+The declarator's errors that used to read "invalid or unsupported declaration"
+take clang's words and places:
+
+- **A function returning an array or a function**, at its `(`: "function
+  cannot return array type 'int[3]'" or "function cannot return function
+  type 'int (void)'"
+  (`CHECK_INPUT_FUNCTION_RETURN`).
+- **A negative constant bound**, at the bound: "'a' declared as an array with
+  a negative size", or "array size is negative" in a type name
+  (`CHECK_INPUT_ARRAY_NEGATIVE`, `check_input_vla_bound`).
+- **An array of functions**, at its `[`: "'a' declared as array of functions
+  of type 'F' (aka 'int (void)')" (`CHECK_INPUT_ARRAY_FUNCTIONS`).
+- **An incomplete element**, at its `[`: "array has incomplete element type
+  'struct S'", with the tag's "forward declaration of 'struct S'" note
+  (`CHECK_INPUT_ARRAY_INCOMPLETE`). It is the type table's own refusal
+  (`TYPE_ERROR_ELEMENT`), found before it.
+- **A variable of type `void`**, at its name: "variable has incomplete type
+  'void'". An `extern` one, which clang accepts, is still refused.
+- **The forward declaration note** of an incomplete tag's variable and
+  tentative definition (`check_input_report_typed`).
+
+- **An array past the object limit** (2^61 bytes, clang's and the type
+  table's), at its bound: "array is too large (2'305'843'009'213'693'952
+  elements)", the count with clang's digit separators
+  (`CHECK_INPUT_ARRAY_TOO_LARGE`).
+
+Each still ends the unit's checking as before. The semantic-recovery fixtures
+compare each with clang.
+
 #### Semantic error recovery (#1447)
 
 Translation-unit-wide recovery after semantic errors comes in phases. The plan
