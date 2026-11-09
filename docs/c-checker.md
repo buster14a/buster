@@ -8629,19 +8629,30 @@ conditional operator's two function operands; this gives one for each.
   pointer to an incomplete type 'struct s'" (a subscript's "subscript of
   pointer to incomplete type", at its `[`), of the pointee as written, with its
   "forward declaration of 'struct s'" note at the tag's declaring name.
+- **Type sugar** (#1447). An operand's type keeps the typedef clang's sugar
+  keeps there. A dereference or subscript follows the declaration's chain of
+  typedef specifiers to the first typedef whose type is the operand's level
+  (`check_driver_spelling_chain`): `*p` of a `pv p` (`typedef v4si *pv`) is
+  `'v4si'`, and `**b` of a `VPP b` (`typedef VP *VPP`) is
+  `'VP' (aka 'void *')`. A chain's types only shrink, so its first match is
+  clang's. A `.` or `->` operand keeps its member declarator's typedef: the
+  member's declarator is found in its record's body, which
+  `CheckGraph.tag_completions` locates (`check_semantic_member_token`), so
+  `x.f++` of a member `uu f` is `'uu' (aka 'struct u')`. An a.k.a. keeps a
+  vector's own typedef at any level (`'pv' (aka 'v4si *')`), as
+  `desugarForDiagnostic` stops there. A typedef'd array's element keeps its
+  qualified typedef (`'CI[2]' (aka 'const int[2]')`, `type_print`).
+  `c_check_type_sugar_driver_test.c` compares these whole-output with clang.
 - **Differences left.**
-  - A vector type reached through a pointer typedef (`typedef v4si *pv;`)
-    prints without its typedef's name, and so does a member's type
-    (`x.f++` of a member `uu f` prints `'struct u'` where clang's is
-    `'uu' (aka 'struct u')`): a record's members keep no declaration.
   - An assignment to a member that is const itself is "read-only variable is
-    not assignable", where clang names the member with its note: a record's
-    members keep no declaration. A typedef'd array's variable prints its
-    element's typedef unspelled (`'const int[2]'` for clang's
-    `'CI[2]' (aka 'const int[2]')`).
-  - A typedef inside another typedef (`typedef VP *VPP`) loses its inner name
-    in the void dereference's operand type (`**b`'s `'void *'` for clang's
-    `'VP'`).
+    not assignable", where clang names the member with its note.
+  - A qualifier written again over a qualified typedef's array
+    (`const CI twice[1]`) is dropped: clang prints
+    `'const CI[1]' (aka 'const int[1]')`, this `'CI[1]'`.
+  - The input-side spelling helpers (`check_input_operand_type_spelling` and
+    the others, `-Wsign-compare`'s operands among them) don't follow members:
+    `x.n < i` prints `'unsigned long'` for clang's
+    `'ul' (aka 'unsigned long')`.
 
 ## Ignorable and unsupported pragmas
 
