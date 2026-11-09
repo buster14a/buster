@@ -2019,7 +2019,24 @@ struct CheckInputReader
     // source order.
     CheckTypo* typo;
     bool typo_disabled;
+    // The next constant reading's undeclared names (#1447, check_constant_name): CHECK_CONSTANT_NAMES_*, which that reading
+    // takes and clears. The names reported so far, and those of them no correction took: a declarator's reading that
+    // reported one has its errors.
+    uint8_t constant_names;
+    uint32_t constant_named;
+    uint32_t constant_missing;
 };
+
+// What a constant's reading does with an undeclared name it binds (check_constant_name). By default nothing: its caller
+// reports its failure. A declarator's constant reports each one in clang's words, at the name, with its typo's
+// correction, which the reading then takes, its error recovered. One with no correction is recovered too where the
+// caller recovers its declaration (an enumerator's value, a bit-field's width), and otherwise ends the walk.
+typedef enum CheckConstantNames
+{
+    CHECK_CONSTANT_NAMES_NONE,
+    CHECK_CONSTANT_NAMES_REPORT,
+    CHECK_CONSTANT_NAMES_RECOVER,
+} CheckConstantNames;
 
 // Whether one of the sparse columns the expressions' walk tests first has an entry for `token`: a statement expression's
 // group, a cached constant, a runtime selection, a va_arg call, a designator, a variable array's bound or an asm statement.
