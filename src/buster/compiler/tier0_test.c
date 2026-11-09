@@ -4251,10 +4251,20 @@ static void tier0_test_segments(Tier0TestTally* tally)
         _Alignas(64) static uint8_t gs_area[64];
         uint64_t fs = 0;
         const bool based = syscall(SYS_arch_prctl, ARCH_GET_FS, &fs) == 0 && syscall(SYS_arch_prctl, ARCH_SET_GS, (uint64_t)(uintptr_t)gs_area) == 0;
+        // A vector case runs where the host has its instructions: the EVEX path's AVX-512 and AVX's 32-byte transport.
+        const uint64_t features = x86_target_native().features;
+        const uint64_t evex = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512BW) | BUSTER_X86_FEATURE(AVX512DQ) | BUSTER_X86_FEATURE(AVX512VL);
         for (uint32_t k = 0; k < count; k += 1)
         {
             const Tier0TestSegmentCase* c = cases + k;
             const bool floating = c->class == BUSTER_TYPED_CLASS_F32 || c->class == BUSTER_TYPED_CLASS_F64;
+            const bool runs = c->class != BUSTER_TYPED_CLASS_VECTOR || (c->transport == 0 ? (features & evex) == evex
+                                                                       : c->transport == 16 || (features & BUSTER_X86_FEATURE(AVX)) != 0);
+            if (!runs)
+            {
+                failures[k] = 0;
+                continue;
+            }
             for (uint32_t b = 0; b < sizeof(data); b += 1)
             {
                 data[b] = (uint8_t)(b * 37 + 11);
