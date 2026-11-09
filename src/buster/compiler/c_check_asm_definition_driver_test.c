@@ -36,10 +36,23 @@ static const char* check_test_asm_definition_target(const CheckTestElf* elf, uin
     return symbol == 0 ? "?" : ELF64_ST_TYPE(symbol->st_info) == STT_SECTION ? check_test_elf_section_name(elf, symbol->st_shndx) : name != 0 ? name : "?";
 }
 
+// Whether `name` is one of `names`, words separated by spaces.
+static bool check_test_asm_definition_named(const char* names, const char* name)
+{
+    const size_t length = strlen(name);
+    bool found = false;
+    for (const char* at = names; !found && at != 0 && *at != 0; at = strchr(at, ' ') != 0 ? strchr(at, ' ') + 1 : 0)
+    {
+        found = strncmp(at, name, length) == 0 && (at[length] == ' ' || at[length] == 0);
+    }
+    return found;
+}
+
 // The object at `path` as the comparison reads it, into `lines`: a line per named symbol but files', sections' and the
 // assembler's temporary `.L` labels, and a line per relocation of a section other than code, unwind tables and debug
-// information, sorted. False when it doesn't read or fit.
-static bool check_test_asm_definition_symbols(const char* path, char* lines, uint64_t capacity)
+// information, sorted. The sizes of the C functions `functions` names (words separated by spaces) are left out: their
+// code is each compiler's own. False when it doesn't read or fit.
+static bool check_test_asm_definition_symbols(const char* path, const char* functions, char* lines, uint64_t capacity)
 {
     Arena arena = arena_reserve(UINT64_C(1) << 24);
     CheckTestElf elf = { 0 };
@@ -61,9 +74,17 @@ static bool check_test_asm_definition_symbols(const char* path, char* lines, uin
         const char* section = symbol->st_shndx == SHN_UNDEF ? "UND" : symbol->st_shndx == SHN_COMMON ? "COM" : symbol->st_shndx == SHN_ABS ? "ABS" :
                                                                                                             check_test_elf_section_name(&elf, symbol->st_shndx);
         char line[512];
-        snprintf(line, sizeof(line), "%s type %u bind %u visibility %u in %s size %llu%s%llu\n", name, type, ELF64_ST_BIND(symbol->st_info),
-                 ELF64_ST_VISIBILITY(symbol->st_other), section != 0 ? section : "?", (unsigned long long)symbol->st_size,
-                 symbol->st_shndx == SHN_COMMON ? " aligned " : "", symbol->st_shndx == SHN_COMMON ? (unsigned long long)symbol->st_value : 0ull);
+        char size[64] = { 0 };
+        if (!check_test_asm_definition_named(functions, name))
+        {
+            snprintf(size, sizeof(size), " size %llu", (unsigned long long)symbol->st_size);
+        }
+        if (symbol->st_shndx == SHN_COMMON)
+        {
+            snprintf(size + strlen(size), sizeof(size) - strlen(size), " aligned %llu", (unsigned long long)symbol->st_value);
+        }
+        snprintf(line, sizeof(line), "%s type %u bind %u visibility %u in %s%s\n", name, type, ELF64_ST_BIND(symbol->st_info),
+                 ELF64_ST_VISIBILITY(symbol->st_other), section != 0 ? section : "?", size);
         order[count] = unsorted + used;
         valid = count < 1024 && check_test_asm_definition_append(unsorted, capacity, &used, line);
         used += valid;
@@ -114,11 +135,13 @@ static void check_test_driver_asm_definitions(CheckTest* test, const char* clang
     static const struct
     {
         const char* name;
+        // The functions C defines, whose sizes the comparison leaves out.
+        const char* functions;
         const char* source;
     } fixtures[] = {
         // A template's `.comm`s: one the unit declares and C reads and writes, one of the template's alone, and one C
         // declares that a later template defines.
-        { "a template's common symbols",
+        { "a template's common symbols", "declare later main",
           "#include <stdio.h>\n"
           "extern long counter;\n"
           "extern int pair[2];\n"
@@ -127,7 +150,7 @@ static void check_test_driver_asm_definitions(CheckTest* test, const char* clang
           "int main(void) { declare(); later(); counter += 41; pair[1] = 2; printf(\"%ld %d %d\\n\", counter, pair[0], pair[1]); return 0; }\n" },
         // A template's label defines a function the unit declares, called from C; `.globl` and `.type` make it
         // clang's global function, and another local label stays local.
-        { "a template's label defines a declared function",
+        { "a template's label defines a declared function", "jump main",
           "#include <stdio.h>\n"
           "int answer(void);\n"
           "int local_answer(void);\n"
@@ -138,7 +161,7 @@ static void check_test_driver_asm_definitions(CheckTest* test, const char* clang
           "}\n"
           "int main(void) { printf(\"%d %d %d\\n\", answer(), local_answer(), jump(3)); return 0; }\n" },
         // A template's data label defines a declared variable, in the template's own section.
-        { "a template's data label defines a declared variable",
+        { "a template's data label defines a declared variable", "data main",
           "#include <stdio.h>\n"
           "extern const char greeting[];\n"
           "extern int table[3];\n"
@@ -174,7 +197,7 @@ static void check_test_driver_asm_definitions(CheckTest* test, const char* clang
                      text != NULL ? text : "");
             free(text);
             check_test_expect(test, compiled, description);
-            const bool read = compiled && check_test_asm_definition_symbols(objects[p], listed[p], sizeof(listed[p]));
+            const bool read = compiled && check_test_asm_definition_symbols(objects[p], fixtures[f].functions, listed[p], sizeof(listed[p]));
             snprintf(description, sizeof(description), "%s: the %s object's symbols read", fixtures[f].name, p == 0 ? "clang" : p == 1 ? "vector" : "scalar");
             check_test_expect(test, read, description);
             char* const link[] = { (char*)clang, objects[p], "-o", programs[p], NULL };
