@@ -345,6 +345,11 @@ typedef enum CheckWarningEventKind
     // function's body, at its `{`.
     CHECK_WARNING_EVENT_CPU_LIST_DUPLICATE,
     CHECK_WARNING_EVENT_CPU_DISPATCH_BODY,
+    // No message: an enumeration mix the constant reader's binary or conditional operator may make (#1447), an array
+    // bound's or an enumerator value's, which no graph node holds. token the operator's (a conditional's `:`),
+    // payload.first_type and second_type its operands' types as clang's getEnumCoercedType gives them, payload.name and
+    // data their typedef spellings (0 for none). check_common_enum_arithmetic reports it as the graph's operators.
+    CHECK_WARNING_EVENT_ENUM_MIX,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
 

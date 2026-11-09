@@ -341,6 +341,113 @@ static void check_constant_warning_operands(CheckConstantInput* input, const Che
     }
 }
 
+static uint32_t check_input_enum_opening(const CheckInputReader* reader, uint32_t token);
+
+// An operand of an enumeration mix (check_constant_enum_mix) by the token whose value it is, through parentheses: its
+// type as clang's getEnumCoercedType gives it, an enumerator's enumeration where that enumeration's definition is
+// complete before the use, and else `type` with its typedef spelling in `spelling` (0 for none).
+static TypeId check_constant_enum_operand(const CheckConstantInput* input, uint32_t value, TypeId type, uint32_t* spelling)
+{
+    const CheckInputReader* reader = input->reader;
+    const Parser* parser = reader->parser;
+    uint32_t at = value;
+    for (uint32_t steps = 0; at >= input->first && at < input->end && parser->tree.roles[at] == PARSE_ROLE_CLOSE_GROUP && steps < input->end - input->first;
+         steps += 1)
+    {
+        // A group's value is its one operand's: the `(` gives none.
+        uint32_t child = reader->first_child[at];
+        while (child != BUSTER_CHECK_NONE && (child < input->first || child >= input->end || input->first_value[child - input->first] == BUSTER_CHECK_NONE))
+        {
+            child = reader->next_child[child];
+        }
+        at = child != BUSTER_CHECK_NONE ? input->first_value[child - input->first] : BUSTER_CHECK_NONE;
+    }
+    TypeId result = type;
+    *spelling = 0;
+    const uint32_t declaration = at < parser->tokens.count && parser->tokens.kinds[at] == PARSE_KIND_IDENTIFIER && parser->tree.roles[at] == PARSE_ROLE_OPERAND ?
+                                 reader->output->declarations[at] : BUSTER_CHECK_NONE;
+    if (declaration < parser->tokens.count && reader->declaration_kinds[declaration] == C_BINDING_ENUMERATOR)
+    {
+        // The enumeration's closing brace, from the enumerator's name, then its `{` and its `enum` keyword's tag.
+        uint32_t close = declaration;
+        for (uint32_t steps = 0; close < parser->tokens.count && parser->tree.roles[close] != PARSE_ROLE_CLOSE_ENUM && parser->tree.parents[close] != close &&
+                                 steps < parser->tokens.count; steps += 1)
+        {
+            close = parser->tree.parents[close];
+        }
+        uint32_t opening = BUSTER_CHECK_NONE;
+        for (uint32_t token = close < at && parser->tree.roles[close] == PARSE_ROLE_CLOSE_ENUM ? declaration : 0; token != 0 && opening == BUSTER_CHECK_NONE;)
+        {
+            token -= 1;
+            opening = parser->tokens.kinds[token] == PARSE_KIND_L_BRACE && parser->tree.parents[token] == close ? token : opening;
+        }
+        uint32_t keyword = opening;
+        while (opening != BUSTER_CHECK_NONE && keyword != 0 && parser->tokens.kinds[keyword] != PARSE_KIND_ENUM)
+        {
+            keyword -= 1;
+        }
+        const bool found = opening != BUSTER_CHECK_NONE && parser->tokens.kinds[keyword] == PARSE_KIND_ENUM && check_input_enum_opening(reader, keyword) == opening;
+        result = found ? reader->tag_types[keyword] : result;
+    }
+    else if (at < parser->tokens.count)
+    {
+        *spelling = check_input_token_type_spelling(reader->output, parser, at, true);
+    }
+    return result;
+}
+
+// Clang's checkEnumArithmeticConversions for the constant reader's operator at `token` (#1447): a binary or conditional
+// operator whose operands are enumerations of different types, or an enumeration and a floating type, as clang coerces
+// them, holds a possible mix, which a CHECK_WARNING_EVENT_ENUM_MIX keeps for check_common_enum_arithmetic. Only an
+// integer constant operand is looked at for an enumerator.
+static void check_constant_enum_mix(CheckConstantInput* input, const CheckAction* action, uint32_t first, uint32_t count, uint32_t token)
+{
+    CheckInputReader* reader = input->reader;
+    const CheckOp op = action->op;
+    const bool conditional = op == CHECK_OP_CONDITIONAL && count == 3;
+    const bool binary = ((op >= CHECK_OP_ADD && op <= CHECK_OP_REMAINDER) || (op >= CHECK_OP_LESS && op <= CHECK_OP_NOT_EQUAL) ||
+                         (op >= CHECK_OP_BIT_AND && op <= CHECK_OP_BIT_XOR)) && count == 2;
+    uint32_t values[2] = { BUSTER_CHECK_NONE, BUSTER_CHECK_NONE };
+    uint32_t value = conditional || binary ? first : BUSTER_CHECK_NONE;
+    value = conditional && value != BUSTER_CHECK_NONE ? input->next_value[value - input->first] : value;
+    for (uint32_t i = 0; i < 2 && value != BUSTER_CHECK_NONE; i += 1)
+    {
+        values[i] = value;
+        value = input->next_value[value - input->first];
+    }
+    TypeId coerced[2] = { 0, 0 };
+    uint32_t spellings[2] = { 0, 0 };
+    uint32_t enumerations = 0;
+    uint32_t floating = 0;
+    for (uint32_t i = 0; values[1] != BUSTER_CHECK_NONE && i < 2; i += 1)
+    {
+        const CheckValue* operand = action->operands + (conditional ? i + 1 : i);
+        const uint8_t kind = type_is_valid(reader->types, operand->type) ? check_action_kind(reader->types, operand->type) : BUSTER_TYPE_KIND_VOID;
+        // (Only an integer constant may be an enumerator, an int to the actions.)
+        const bool named = kind == BUSTER_TYPE_KIND_ENUM || (kind == BUSTER_TYPE_KIND_INTEGER && (operand->flags & BUSTER_CHECK_ICE) != 0);
+        coerced[i] = named ? check_constant_enum_operand(input, values[i], operand->type, &spellings[i]) : operand->type;
+        enumerations += named && check_action_kind(reader->types, coerced[i]) == BUSTER_TYPE_KIND_ENUM;
+        floating += kind == BUSTER_TYPE_KIND_FLOATING || kind == BUSTER_TYPE_KIND_COMPLEX;
+    }
+    // Enumerations of different types, or one and a floating operand: check_common_enum_mix decides the rest.
+    const bool different = enumerations == 2 && type_unqualified(type_strip_aligned(reader->types, coerced[0])) !=
+                                                type_unqualified(type_strip_aligned(reader->types, coerced[1]));
+    if (different || (enumerations == 1 && floating == 1))
+    {
+        const CheckWarningEvent event =
+        {
+            .id = CHECK_WARNING_ID_ENUM_COMPARE,
+            .kind = CHECK_WARNING_EVENT_ENUM_MIX,
+            .token = token,
+            .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+            .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+            .completion = token + 1,
+            .payload = { .first_type = coerced[0], .second_type = coerced[1], .name = spellings[0], .token = BUSTER_CHECK_WARNING_NO_SOURCE, .data = spellings[1] },
+        };
+        check_input_warning_once(reader, &event);
+    }
+}
+
 typedef struct CheckConstantPart CheckConstantPart;
 struct CheckConstantPart
 {
@@ -3182,6 +3289,10 @@ static bool check_constant_evaluate(CheckConstantInput* input)
                 check_constant_warning_operands(input, &action, first, count);
                 check_constant_runtime_query(input, &action);
                 check_constant_action(input, &action, first, NULL, &checked);
+                if (checked.diagnostic == CHECK_DIAG_NONE)
+                {
+                    check_constant_enum_mix(input, &action, first, count, token);
+                }
                 if (checked.diagnostic == CHECK_DIAG_NONE && action.op == CHECK_OP_ASSIGN && first >= input->first && first < input->end)
                 {
                     const uint32_t source = input->next_value[first - input->first];

@@ -280,7 +280,7 @@ static bool check_driver_warning_promoted(Preprocessor* pp, const CheckInput* in
     for (uint32_t i = 0; !promoted && i < view->count; i += 1)
     {
         const CheckWarningEvent* event = view->events + i;
-        promoted = event->kind != CHECK_WARNING_EVENT_MESSAGE && (repair == NULL || check_repair_warning_token(repair, event->token)) &&
+        promoted = event->kind != CHECK_WARNING_EVENT_MESSAGE && event->kind != CHECK_WARNING_EVENT_ENUM_MIX && (repair == NULL || check_repair_warning_token(repair, event->token)) &&
                    check_driver_warning_severity(pp, input, event) >= CHECK_WARNING_ERROR;
     }
     return promoted;
@@ -1367,7 +1367,7 @@ static bool check_driver_warning_events_at(const Parser* parser, Preprocessor* p
     for (uint32_t i = 0; valid && i < view->count && !pp->fatal; i += 1)
     {
         const CheckWarningEvent* event = view->events + i;
-        const bool retained = event->kind != CHECK_WARNING_EVENT_MESSAGE &&
+        const bool retained = event->kind != CHECK_WARNING_EVENT_MESSAGE && event->kind != CHECK_WARNING_EVENT_ENUM_MIX &&
                               (event->token < parser->tokens.count || (event->kind == CHECK_WARNING_EVENT_PRAGMA && event->token == parser->tokens.count)) &&
                               (repair == NULL || check_repair_warning_token(repair, event->token));
         if (retained)
