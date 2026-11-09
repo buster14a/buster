@@ -2018,6 +2018,24 @@ static void check_test_driver_tier1_labels(CheckTest* test, const char* clang, c
                                         check_test_tier1_table_targets(object, "tier1_table_loop", records[loop_address].offset,
                                                                        records[loop_address].offset + records[loop_address].length - 4, loop_targets, false);
             const bool entry = table_resolved && check_test_tier1_table_entry(records, loop_records, loop_address, dispatch, loop_targets);
+            if (loop_addresses != 1 || loop_relocations != 1 || !entry)
+            {
+                fprintf(stderr, "test-checker: table entry: rematerialize=%u path=%s records=%u addresses=%u relocations=%u address=%u dispatch=%u resolved=%u targets=%u,%u,%u,%u\n",
+                        rematerialize, path == 0 ? "vector" : "scalar", loop_records, loop_addresses, loop_relocations, loop_address, dispatch,
+                        (uint32_t)table_resolved, loop_targets[0], loop_targets[1], loop_targets[2], loop_targets[3]);
+                for (uint32_t i = 0; i < loop_records; i += 1)
+                {
+                    const X86Instruction* instruction = &records[i].instruction;
+                    const uint32_t form = instruction->form & BUSTER_X86_FORM_NUMBER;
+                    const uint32_t control = (uint32_t)x86_effects(form)->kinds >> 4;
+                    if (i == loop_address || control != BUSTER_X86_CONTROL_NONE)
+                    {
+                        fprintf(stderr, "test-checker: table entry record=%u offset=%u form=%u control=%u relative=%u target=%" PRId64 "\n",
+                                i, records[i].offset, form, control, (uint32_t)x86_form_descriptions[form].relative_bytes,
+                                (int64_t)records[i].offset + records[i].length + instruction->displacement);
+                    }
+                }
+            }
             check_test_expect(test, loop_addresses == 1 && loop_relocations == 1 && entry,
                               "the loop's one relocated table base is reached at entry and no direct or table edge reenters it");
             if (entry && rematerialize == 0 && path == 0)
@@ -3316,7 +3334,8 @@ static void check_test_driver_tier1_bits(CheckTest* test, const char* clang, con
 // the IR's saddo, ssubo and smulo, Tier 1's operation and seto), ints' 64-bit operations, unsigned longs' carries and
 // 128-bit products and mixed signedness (c_builtin_lower.c's recipes), each alone; a chain whose values and flags stay
 // live across each other; and the issue's loop of a running sum and products, on the other unit's (clang -O2's) operands,
-// many of them at the types' boundaries.
+// many of them at the types' boundaries; and _BitInts of 65 to 127 bits' sums, differences and products (#1447), passed by
+// pointer, whose destinations' 16 bytes, the padding extended from the width as clang stores it, are hashed.
 static const char check_test_tier1_overflow_header[] =
     "int o_add(long a, long b, long* r);\n"
     "int o_sub(long a, long b, long* r);\n"
@@ -3329,7 +3348,12 @@ static const char check_test_tier1_overflow_header[] =
     "int o_mulu(unsigned long a, unsigned long b, unsigned long* r);\n"
     "int o_mixed(long a, unsigned long b, int* r);\n"
     "long o_chain(long a, long b);\n"
-    "long o_sum(const long* p, unsigned n);\n";
+    "long o_sum(const long* p, unsigned n);\n"
+    "int o_add100(const _BitInt(100)* a, const _BitInt(100)* b, _BitInt(100)* r);\n"
+    "int o_mul100(const _BitInt(100)* a, long b, _BitInt(100)* r);\n"
+    "int o_mul127u(const unsigned _BitInt(127)* a, const unsigned _BitInt(127)* b, unsigned _BitInt(127)* r);\n"
+    "int o_sub65(const unsigned _BitInt(127)* a, const _BitInt(100)* b, _BitInt(65)* r);\n"
+    "int o_add_long(const _BitInt(100)* a, long b, long* r);\n";
 
 static const char check_test_tier1_overflow_source[] =
     "#include \"tier1-overflow.h\"\n"
@@ -3368,13 +3392,24 @@ static const char check_test_tier1_overflow_source[] =
     "        s ^= r;\n"
     "    }\n"
     "    return (long)((unsigned long)s + (unsigned long)ov);\n"
-    "}\n";
+    "}\n"
+    "int o_add100(const _BitInt(100)* a, const _BitInt(100)* b, _BitInt(100)* r) { return __builtin_add_overflow(*a, *b, r); }\n"
+    "int o_mul100(const _BitInt(100)* a, long b, _BitInt(100)* r) { return __builtin_mul_overflow(*a, b, r); }\n"
+    "int o_mul127u(const unsigned _BitInt(127)* a, const unsigned _BitInt(127)* b, unsigned _BitInt(127)* r) { return __builtin_mul_overflow(*a, *b, r); }\n"
+    "int o_sub65(const unsigned _BitInt(127)* a, const _BitInt(100)* b, _BitInt(65)* r) { return __builtin_sub_overflow(*a, *b, r); }\n"
+    "int o_add_long(const _BitInt(100)* a, long b, long* r) { return __builtin_add_overflow(*a, b, r); }\n";
 
 static const char check_test_tier1_overflow_other_source[] =
     "#include <stdio.h>\n"
     "#include \"tier1-overflow.h\"\n"
     "static unsigned long long state = 0x9e3779b97f4a7c15ull;\n"
     "static unsigned long long next(void) { state ^= state << 13; state ^= state >> 7; state ^= state << 17; return state; }\n"
+    "static void raw(unsigned long long* hash, const void* p)\n"
+    "{\n"
+    "    unsigned long long w[2];\n"
+    "    __builtin_memcpy(w, p, 16);\n"
+    "    *hash = (*hash * 31 + w[0]) * 31 + w[1];\n"
+    "}\n"
     "static long value(int i)\n"
     "{\n"
     "    static const long edges[] = { 0, 1, -1, 2, 0x7fffffffffffffffL, -0x7fffffffffffffffL - 1, 3037000499L, 3037000500L, -3037000500L, 0x80000000L, -0x80000000L };\n"
@@ -3411,6 +3446,26 @@ static const char check_test_tier1_overflow_other_source[] =
     "        f = o_mixed(a, (unsigned long)b, &k);\n"
     "        hash = hash * 31 + (unsigned)f + (unsigned)k;\n"
     "        hash = hash * 31 + (unsigned long long)o_chain(a, b);\n"
+    "        {\n"
+    "            unsigned _BitInt(127) ua = ((unsigned _BitInt(127))(unsigned long)a << (i % 64)) ^ (unsigned long)b;\n"
+    "            unsigned _BitInt(127) ub = ((unsigned _BitInt(127))(unsigned long)b << 63) | (unsigned long)a, ur = 0;\n"
+    "            _BitInt(100) xa = (_BitInt(100))(ua >> (i % 40)), xb = (_BitInt(100))(ub >> (i % 30)), xr = 0;\n"
+    "            _BitInt(65) sr = 0;\n"
+    "            f = o_add100(&xa, &xb, &xr);\n"
+    "            hash = hash * 31 + (unsigned)f;\n"
+    "            raw(&hash, &xr);\n"
+    "            f = o_mul100(&xa, b >> (i % 64), &xr);\n"
+    "            hash = hash * 31 + (unsigned)f;\n"
+    "            raw(&hash, &xr);\n"
+    "            f = o_mul127u(&ua, &ub, &ur);\n"
+    "            hash = hash * 31 + (unsigned)f;\n"
+    "            raw(&hash, &ur);\n"
+    "            f = o_sub65(&ua, &xb, &sr);\n"
+    "            hash = hash * 31 + (unsigned)f;\n"
+    "            raw(&hash, &sr);\n"
+    "            f = o_add_long(&xa, a, &r);\n"
+    "            hash = hash * 31 + (unsigned)f + (unsigned long long)r;\n"
+    "        }\n"
     "        p[i % 64] = a;\n"
     "        if (i % 64 == 63) hash = hash * 31 + (unsigned long long)o_sum(p, 64);\n"
     "        if (i < 2)\n"
@@ -3748,7 +3803,8 @@ static void check_test_driver_tier1_rows(CheckTest* test, const char* clang, con
     // each path, with rematerialization and without, every function Tier 1's, at most one move for every two rows (Tier 0's
     // placement moved every vector operand in and every vector result out: 150 for the unit's 58 rows). The unit's 11
     // compares into masks were rows that took no move; #1623 decodes them into the IR's comparisons, so the bound counts
-    // them with the rows still.
+    // them with the rows still. #1840 decodes its masked operations' and blends' selects into the IR's vselect, which
+    // leaves 61 rows and 33 moves by Tier 1 (75 and 39 before).
     const uint64_t compares = 11;
     char header[512];
     char unit[512];

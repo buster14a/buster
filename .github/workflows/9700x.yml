@@ -455,6 +455,12 @@ jobs:
         # fetches it from a mirror in its private cache, which Git's pack protocol checks again (fetch-c-testsuite.sh).
         run: bash tools/ci/fetch-c-testsuite.sh build/c-testsuite
 
+      - name: Fetch SQLite's sources at their pinned commit
+        # #146: SQLite 3.53.2's tree, whose amalgamation and shell are the frozen corpus's, for its tests (test-sqlite in
+        # the test list): a shallow fetch of that one commit, whose hash fixes the files, as c-testsuite's above; the 9700X
+        # fetches it from a mirror in its private cache (fetch-sqlite.sh).
+        run: bash tools/ci/fetch-sqlite.sh build/sqlite
+
       - name: Check constrained arenas, command diagnostics, and Callgrind
         if: matrix.host_arch == 'x86-64' && matrix.sanitizer == 'none' && matrix.shard == 1
         run: |
@@ -920,6 +926,12 @@ jobs:
         # whose hash fixes the files, without git's sample hooks. The test list below compiles and runs them. The 9700X
         # fetches it from a mirror in its private cache, which Git's pack protocol checks again (fetch-c-testsuite.sh).
         run: bash tools/ci/fetch-c-testsuite.sh build/c-testsuite
+
+      - name: Fetch SQLite's sources at their pinned commit
+        # #146: SQLite 3.53.2's tree, whose amalgamation and shell are the frozen corpus's, for its tests (test-sqlite in
+        # the test list): a shallow fetch of that one commit, whose hash fixes the files, as c-testsuite's above; the 9700X
+        # fetches it from a mirror in its private cache (fetch-sqlite.sh).
+        run: bash tools/ci/fetch-sqlite.sh build/sqlite
 
       - name: Parse the compiler source on the native vector build
         run: '"$BUSTER_COMPILER" parse -fsyntax-only -march="$BUSTER_HOST_ARCH" -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c'

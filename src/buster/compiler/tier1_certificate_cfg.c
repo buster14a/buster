@@ -127,7 +127,8 @@ static bool tier1_cert_cfg_shape(const Tier1CfgInput* input, const Tier1CfgAlloc
             {
                 valid = allocation->starts[f] == position && allocation->ends[f] > position && allocation->kinds[f] <= BUSTER_TIER1_ALLOCATE_REMATERIALIZE;
                 valid = valid && (allocation->kinds[f] == BUSTER_TIER1_ALLOCATE_REGISTER ? allocation->registers[f] < 32 : allocation->registers[f] == UINT8_MAX);
-                valid = valid && (allocation->kinds[f] != BUSTER_TIER1_ALLOCATE_SPILL || (allocation->spill_count != 0 && allocation->spill_ids[v] < allocation->spill_count && allocation->spill_values[allocation->spill_ids[v]] == v));
+                // Values of one class may share a slot (tier1_cfg_share_slots).
+                valid = valid && (allocation->kinds[f] != BUSTER_TIER1_ALLOCATE_SPILL || (allocation->spill_count != 0 && allocation->spill_ids[v] < allocation->spill_count && input->classes[allocation->spill_values[allocation->spill_ids[v]]] == input->classes[v]));
                 position = allocation->ends[f];
             }
             valid = valid && position == intervals->ends[i];
