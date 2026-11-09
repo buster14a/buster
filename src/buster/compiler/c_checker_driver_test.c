@@ -5157,10 +5157,15 @@ static bool check_test_driver_reports_dense(const Parser* parser, Preprocessor* 
                 const uint32_t token = input->graph.tokens[node];
                 if (token < count)
                 {
-                    const uint32_t flags = stream->warnings[node];
+                    // A folded non-ICE expression's warning is at the expression's first token (check_driver_reports).
+                    const uint32_t folded = stream->warnings[node] & CHECK_WARNING_GNU_CONSTANT;
+                    const uint32_t flags = stream->warnings[node] & ~folded;
                     const uint32_t ignored = stream->warning_ignored != NULL ? stream->warning_ignored[node] : 0;
+                    const uint32_t begin = folded != 0 ? check_common_subtree_start(parser, token) : token;
                     warnings[token].flags |= flags;
                     warnings[token].enabled |= flags & ~ignored;
+                    warnings[begin].flags |= folded;
+                    warnings[begin].enabled |= folded & ~ignored;
                 }
             }
             for (uint32_t i = 0; i < excess_count; i += 1)

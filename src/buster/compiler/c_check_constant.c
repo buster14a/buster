@@ -75,8 +75,10 @@ static void check_input_constant_warning_clear(CheckInputReader* reader, uint32_
 }
 
 // A non-ICE fold's warning. A declarator's array bound (`declarator`) or a GNU object read's is clang's
-// "variable length array folded to constant array" at `location`, its declarator's name, whatever folded it, once
-// for the declarator however many of its bounds fold.
+// "variable length array folded to constant array", once for the declarator however many of its bounds fold: at
+// `location`, its declarator's name, where clang made the array variable and then folded it for a declaration that
+// can't have one (a GNU object read, a floating cast's value), and at the bound's first token where an ICE's form
+// folded only past an overflow or a shift's limit, which clang's array type folds at once, in every context.
 static void check_input_constant_fold_warning(CheckInputReader* reader, uint32_t first, uint32_t end, const CheckValue* value, bool ignored, uint32_t location,
                                               bool declarator)
 {
@@ -88,7 +90,7 @@ static void check_input_constant_fold_warning(CheckInputReader* reader, uint32_t
             const CheckWarningEvent event = {
                 .id = CHECK_WARNING_ID_GNU_CONSTANT,
                 .kind = ignored ? CHECK_WARNING_EVENT_GNU_ICE_FOLD : CHECK_WARNING_EVENT_GNU_ARRAY_FOLD,
-                .token = location,
+                .token = declarator && (value->flags & (BUSTER_CHECK_GNU_ICE_FORM | BUSTER_CHECK_GNU_OBJECT_READ)) == BUSTER_CHECK_GNU_ICE_FORM ? first : location,
                 .source = BUSTER_CHECK_NONE,
                 .flags = ignored ? BUSTER_CHECK_WARNING_DEFAULT_IGNORED : 0,
                 .completion_kind = ignored ? CHECK_WARNING_COMPLETE_AT_TOKEN : CHECK_WARNING_COMPLETE_AFTER_DELIMITER,
