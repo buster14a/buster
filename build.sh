@@ -450,8 +450,9 @@ publish()
     flock "$publication"
     # Both files are made first, so that a failure leaves the published ones as they were.
     local commands="$root/build/.compile_commands.json.$$" next="$root/build/.compiler.$$"
-    "$cmake" "-DINPUT=$tree/compile_commands.json" "-DOUTPUT=$commands" "-DCONFIG=$config" \
-        -P "$root/cmake/BusterCompileCommands.cmake" || { rm -f -- "$commands"; return 1; }
+    # Ninja updates this configuration's database when its inputs change. Copy, never hard-link: the next build
+    # may rewrite its cached database before a later compile fails, which must leave the published files intact.
+    cp -f -- "$tree/$config/compile_commands.json" "$commands" || { rm -f -- "$commands"; return 1; }
     if [ ! "$root/build/compiler" -ef "$binary" ]; then
         ln -f -- "$binary" "$next" 2> /dev/null || cp -f -- "$binary" "$next" || { rm -f -- "$commands" "$next"; return 1; }
         mv -f -T -- "$next" "$root/build/compiler"

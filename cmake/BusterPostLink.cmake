@@ -53,9 +53,13 @@ if(NOT baked)
     endif()
 endif()
 
-execute_process(COMMAND "${NM}" "${partial}" OUTPUT_VARIABLE symbols RESULT_VARIABLE status)
-if(NOT status EQUAL 0)
-    post_link_fail("${NM} couldn't read ${partial}")
+# Only shifted links and the no-objects fallback need the executable's full symbol table. Ordinary links check
+# the compiler's objects below, so reading the linked runtime's symbols as well would produce unused work.
+if(PADDING OR NOT DEFINED OBJECTS OR OBJECTS STREQUAL "")
+    execute_process(COMMAND "${NM}" "${partial}" OUTPUT_VARIABLE symbols RESULT_VARIABLE status)
+    if(NOT status EQUAL 0)
+        post_link_fail("${NM} couldn't read ${partial}")
+    endif()
 endif()
 # The canary in the compiler's own objects (OBJECTS) where they are given: a static link's libc.a defines and calls
 # __stack_chk_fail itself, as libc.so.6 does where the executable doesn't see it. Without OBJECTS, in the executable.

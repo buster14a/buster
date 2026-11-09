@@ -170,7 +170,12 @@ build publishes nothing, and an unchanged one nothing again. CI runs the configu
 as `BUSTER_COMPILER`) and checks that `build/compiler` is that file. Ninja
 Multi-Config's `compile_commands.json` has every unit once per configuration;
 `build/compile_commands.json` has the published configuration's alone, which
-editors and static analyzers read (Release after a plain `./build.sh`).
+editors and static analyzers read (Release after a plain `./build.sh`). Ninja
+keeps that filtered database in `CONFIG/compile_commands.json`, rebuilding it
+when CMake regenerates the multi-config database, its filter changes, or the
+cached file is missing. Unchanged builds and source edits reuse it. Publication
+copies it only after the build succeeds, so a failed build leaves the published database
+intact even when its cached replacement was already generated.
 
 ## Targets and outputs
 
@@ -188,6 +193,10 @@ In `build/cmake/VARIANT/` (a preset's tree is the same):
   (`cmake/BusterPostLink.cmake`), which bakes the tables and checks the canary.
   The step writes a new file and renames it into place, removing the old one
   first, so that a failed step leaves no executable there.
+- `compiler_compile_commands`, when `CMAKE_EXPORT_COMPILE_COMMANDS` is enabled:
+  `CONFIG/compile_commands.json`, the configuration's filtered database. The
+  `compiler` target depends on it; direct CMake builds with export disabled
+  need no compilation database.
 - `call-graph-ir` and `check-call-graph`: `call-graph/NAME.ll`, the units' IR,
   one capture for both configurations, and the check by `CONFIG/compiler`.
 - `shifts`, with `BUSTER_SHIFTS`: `CONFIG/shifts/compiler-SHIFT`.
@@ -251,6 +260,24 @@ a few functions' stack slots). The checker's unit takes longest: `check` and
 the default driver, `test-checker`, and its other commands each reach the whole
 compiler, and before the homes a unit for any one of them took 84 to 88% of its
 time (clang 18, locally).
+
+### Unity test dependencies
+
+The eleven `main.c` units share the compiler implementation and the fixtures
+used across test families. Independent test files are included only by the unit
+that runs them, with the same guard around their command branches. This avoids
+parsing those tests in the other ten units during a clean build, and Ninja's
+depfiles keep their edits local: for example, `c_check_builtin_bits_test.c`
+rebuilds only `main_unit_check_builtins.c`, `profile_test.c` only `main.c`,
+`c_files_test.c` only `main_unit_frontend.c`, and `tier1_wide_test.c` only
+`main_unit_backend.c`, followed by the link and post-link checks.
+
+The test commands, their owning units and compiler optimization flags stay the
+same. Shared fixtures, including `c_checker_test.c` and `oracle_cache_test.c`,
+remain shared: removing a test from a unit must preserve both its callers and
+the references that keep shared helpers used in vector builds. Check every unit
+with scalar and vector flags after changing these guards; the build regression
+harness checks representative test edits against their exact owning units.
 
 ## Presets and CTest
 
@@ -352,3 +379,10 @@ environment variables. The focused mode cleans the selected `build.sh` tree.
 The build's clean, unchanged and edited timings come from the
 9700X under its lock, with their raw records in
 [buster-performance](https://github.com/buster14a/buster-performance).
+
+`build-regression --compile-commands-only` checks the database dependencies
+with a small CMake project: both configurations, an ordinary source edit,
+changed compile arguments, a missing cached database, an edited filter and
+export disabled. It builds only the fixture. The full harness also checks
+that missing cached or published databases are restored without recompiling
+or relinking Buster, and that configuration switches publish the right one.
