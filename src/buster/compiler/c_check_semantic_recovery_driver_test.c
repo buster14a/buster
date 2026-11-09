@@ -373,7 +373,10 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         // An undeclared function's call notes the function it may have meant; an implicit declaration is itself a name
         // of its block, which ties with the other (gnu17's: C23 has no implicit declaration).
         "/* gnu17 only */\nint compute(int);\nint counter;\nvoid f(void) { int x = compte(1); }\nvoid g(void) { int d = countr; }\n"
-        "void k(void) { { countre(1); } int e = countr; }\nvoid m(void) { countre(1); int e = countr; }\n",
+        "void k(void) { { countre(1); } int e = countr; }\nvoid m(void) { countre(1); int e = countr; }\n"
+        // No search where the name was declared with linkage before, another call's or a block's extern (ExternCPrev).
+        "int process(int);\nvoid n(void) { proces(1); }\nvoid o(void) { proces(2); }\nvoid q(void) { extern int procss(int); }\n"
+        "void r(void) { procss(3); }\n",
         // Three thousand names and fifty-three typos, written out where the fixture is (check_test_typo_stress): each
         // search reads the visible names once (c_check_typo.c).
         "/* typo stress */\n",

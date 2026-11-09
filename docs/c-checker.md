@@ -4183,8 +4183,10 @@ An undeclared name that is a typo of a visible one is clang's (#1447,
 - **An undeclared function's call** in C99 and later (`ImplicitlyDefineFunction`,
   only where its diagnostic is an error) takes a function. Its error gets
   "did you mean 'compute'?" at the call and "'compute' declared here", but not
-  where the nearest is itself implicitly declared. The call still declares
-  the function implicitly.
+  where the nearest is itself implicitly declared. No search is made where
+  the name was declared with linkage before, another call's implicit
+  declaration or a block's extern (clang's `ExternCPrev`). The call still
+  declares the function implicitly.
 - **The limit.** At most 50 searches are made in a unit
   (`-fspell-checking-limit`), counted in source order: the values', the
   calls', and clang's search at each call of a prototyped function with too

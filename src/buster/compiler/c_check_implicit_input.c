@@ -151,7 +151,9 @@ static inline __attribute__((always_inline)) void check_input_implicit_function(
                 {
                     // The function its name may have meant, before its own declaration is bound (#1447): searched where
                     // clang's ImplicitlyDefineFunction searches, a C99 unit's undeclared function that no library names.
-                    const bool searched = !eligible && parser->language.standard >= 1999;
+                    // Not where an earlier declaration of the name with linkage exists, a block's extern or another call's
+                    // implicit one (clang's ExternCPrev): no search is made then, nor counted.
+                    const bool searched = !eligible && parser->language.standard >= 1999 && linked == 0;
                     input->implicit_function_corrections[input->implicit_function_count] = searched ? check_typo_function(reader, token) : BUSTER_CHECK_TYPO_UNSEARCHED;
                     input->implicit_function_tokens[input->implicit_function_count++] = token;
                 }
