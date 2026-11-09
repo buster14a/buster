@@ -3992,6 +3992,17 @@ do:
   implicit value restarts at 0 of `int` or of the fixed type
   (`CheckTagFrame.restart`), and an enum left with no enumerator is
   complete as `unsigned int`.
+- **An enum with a fixed underlying type.** Listed again with its base, it is
+  the redefinition above (before C23). Redeclared with another base, without
+  the base it had, or with one it hadn't, it gives clang's
+  `CheckEnumRedeclaration` error: "enumeration redeclared with different
+  underlying type 'long' (was 'int')" (each base as written, a typedef with
+  its "aka"), or "enumeration previously declared with (non)fixed underlying
+  type", with "previous declaration is here" at the earlier one
+  (`CHECK_REDECLARATION_ENUM_BASE`, `_FIXED`, `_NONFIXED`). As clang's
+  `ActOnTag` drops such a declaration, its body is skipped: its tag ends past
+  the `}` and no frame reads it, so its enumerators are undeclared, and the
+  name keeps the earlier enum.
 - **An enumerator whose name is another kind of the scope's** (an object, a
   typedef, a parameter, a local) gives clang's "redefinition of 'K'", with
   "previous definition is here" at the earlier declaration, and is dropped the
@@ -4062,15 +4073,37 @@ A unit without other errors whose `check_asms_run` or `check_program` fails
 runs these diagnoses, so only a failing unit pays for them.
 `CheckDriverDiagnostic.note` carries a note through the reports' walk.
 
-A rejected unit's other bodies get the warnings clang gives them
-(`check_driver_rejected_common`). The bodies holding one of its errors (its
-reader's, its graph's, its asm, control, initializer and musttail errors) are
-left out of a second reading of the unit, by `check_input_selected` as
-`-flazy-system-headers`' bodies are. Where that reading is valid, its program
+A rejected unit gets the warnings clang gives it outside its errors
+(`check_driver_rejected_common`), from a second reading of the unit without
+them (its reader's, its graph's, its asm, control, initializer and musttail
+errors). Where it can, that reading leaves out an error's part alone, in a
+private view of the unit's tokens reparsed as a repair's is
+(`check_driver_rejected_view`): an initializer, from its `=`, where the
+declaration is complete without it (not an unsized array's, not a const
+object's), else an expression statement in a body, which `{` `}` replace
+(`check_driver_rejected_edit`). The body is then read as clang reads it, its
+warnings before and after the error given, flushed (no analysis warnings).
+Other errors leave out their bodies, by `check_input_selected` as
+`-flazy-system-headers`' bodies are, as does every error where the view
+doesn't parse or its reading isn't valid (a statement expression's last
+statement left out makes its value `void`; `check_driver_rejected_read`
+publishes nothing of an invalid reading, which is then read again with the
+bodies left out). The second reading's unused variables in a scope with an error
+are left out (its own error counts, the dropped part's at the token after
+it). A function holding an error keeps its unused parameters, as clang's
+`ActOnFinishFunctionBody` gives them whatever the body's errors, except one
+that what the reading left out of its body names, which clang's reading of that
+part takes for a use (an erroneous expression's operands are still referenced);
+a member's name of the same spelling is no use. A local of the same name
+declared in the kept part, which the left-out part's use names instead, still
+silences the parameter's warning. Where that reading is valid, its program
 gives the other bodies' `-Wreturn-type` and common warnings, the bodies after
 the unit's first error flushed as above. Where a reader's error left the first
-reading without its unused declarations' warnings, the second's are given,
-without the unit-end ones. Nothing is given where an error lies outside every
+reading without some of its warnings, the second's are given, without the
+unit-end ones: its warning events the first reading lacks (by kind and token),
+and, where a reader's error ended the first reading's walk
+(`CheckInput.walk_end`), every report and warning of the second from there on
+(`check_driver_reports_from`). Nothing is given where an error lies outside every
 body. Only a rejected unit reads twice.
 
 The driver publishes its reports after `check_program`, so that a control
@@ -4272,13 +4305,19 @@ The later phases are left:
   (`k + 1`'s `+`), and `sizeof` of an incomplete type reads "incomplete type
   is not permitted here" at the `sizeof`, where clang's names the type at its
   operand; both on main too.
-- **Errors outside the bodies, and a body's own warnings.** A rejected unit's
-  bodies that hold no error get their common warnings (above), but a unit
-  with an error outside every body (a file-scope initializer's, a
-  declaration's) still gets none. The warnings clang gives within a body that
-  holds an error (its `-Wparentheses` before or after an expression's error)
-  are still left out, and so are a reader-error unit's other reader warnings
-  than the unused declarations'.
+- **Errors no view part leaves out.** A body's error in a condition, a for
+  header, a statement expression or a declaration other than through its
+  initializer still leaves its body out, and its warnings with it. An error
+  outside every body other than an initializer's (a declaration's, an
+  unsized array's or a const object's initializer) still leaves the unit
+  without its common warnings. A function's unused parameter that its
+  left-out part names through a local of the same name gets no
+  `-Wunused-parameter`, where clang gives one.
+- **Errors past a reader's error that ends its walk.** A reader's error that
+  isn't recovered (an incomplete object's type) skips the control scan and
+  ends the first reading; a control error elsewhere (a duplicate case, a
+  label's redefinition) or a second such error then fails the second reading,
+  and the unit gets no warnings at all.
 
 ### What the lowering costs (#531)
 
