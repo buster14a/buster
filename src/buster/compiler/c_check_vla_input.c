@@ -90,15 +90,23 @@ static bool check_input_vla_defines(const CheckInputReader* reader, uint32_t fir
     return outside && !inside;
 }
 
-// Whether the array declarator that `open` opens derives the declared entity itself: only array declarators lead to it
-// from the name (`int g[2][n]`), clang's "variable length array declaration", not a pointer's (`int (*p)[n]`), its
-// "variably modified type declaration".
+// Whether the array declarator that `open` opens derives the declared entity itself: only array declarators and
+// parentheses around what came before lead to it from the name (`int g[2][n]`, `int (g)[n]`, `int (g[2])[n]`,
+// `int *(p)[n]`), clang's "variable length array declaration", not a pointer's (`int (*p)[n]`), its "variably modified
+// type declaration". A parenthesis is transparent when its `(` is just before the part read so far and its `)` just after.
 static bool check_input_vla_outermost(const Parser* parser, uint32_t name, uint32_t open)
 {
+    uint32_t left = name;
     uint32_t token = name + 1;
-    for (uint32_t steps = 0; token < open && steps < parser->tokens.count && parser->tokens.kinds[token] == PARSE_KIND_L_SQUARE; steps += 1)
+    bool step = true;
+    for (uint32_t steps = 0; step && token < open && steps < parser->tokens.count; steps += 1)
     {
-        token = parser->tree.parents[token] + 1;
+        const uint8_t kind = parser->tokens.kinds[token];
+        const bool group = kind == PARSE_KIND_R_PAREN && left > 0 && parser->tokens.kinds[left - 1] == PARSE_KIND_L_PAREN &&
+                           parser->tree.parents[left - 1] == token;
+        step = kind == PARSE_KIND_L_SQUARE || group;
+        left -= group ? 1 : 0;
+        token = kind == PARSE_KIND_L_SQUARE ? parser->tree.parents[token] + 1 : token + (group ? 1 : 0);
     }
     return name < open && token == open;
 }

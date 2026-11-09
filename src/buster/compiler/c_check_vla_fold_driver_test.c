@@ -121,6 +121,22 @@ static const char check_driver_vla_place_source_12[] =
     "int n;\n"
     "union U { int m[2][n]; };\n";
 
+static const char check_driver_vla_place_source_13[] =
+    "int n;\n"
+    "int (g)[n];\n";
+
+static const char check_driver_vla_place_source_14[] =
+    "int n;\n"
+    "int ((g))[2][n];\n";
+
+static const char check_driver_vla_place_source_15[] =
+    "int n;\n"
+    "int *(p)[n];\n";
+
+static const char check_driver_vla_place_source_16[] =
+    "int n;\n"
+    "int (*(p))[n];\n";
+
 static const CheckDriverDefaultWarningFixture check_driver_vla_fold_fixtures[] =
 {
     {
@@ -223,6 +239,26 @@ static const CheckDriverDefaultWarningFixture check_driver_vla_fold_fixtures[] =
     {
         .name = "a file-scope record's variable-length member",
         .source = check_driver_vla_place_source_12,
+        .errors = 1,
+    },
+    {
+        .name = "a parenthesized file-scope variable-length array",
+        .source = check_driver_vla_place_source_13,
+        .errors = 1,
+    },
+    {
+        .name = "a nested parenthesized file-scope variable-length array",
+        .source = check_driver_vla_place_source_14,
+        .errors = 1,
+    },
+    {
+        .name = "a parenthesized array of pointers at file scope, a variable-length array",
+        .source = check_driver_vla_place_source_15,
+        .errors = 1,
+    },
+    {
+        .name = "a parenthesized pointer to a variable-length array at file scope, a variably modified type",
+        .source = check_driver_vla_place_source_16,
         .errors = 1,
     },
 };
