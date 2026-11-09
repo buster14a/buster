@@ -418,13 +418,15 @@ static TypeId check_constant_enum_operand(const CheckConstantInput* input, uint3
 // them, holds a possible mix, which a CHECK_WARNING_EVENT_ENUM_MIX keeps for check_common_enum_arithmetic. The
 // constant reader also reads function bodies' expressions for their types, where most operators compare a variable with
 // an enumerator: only an integer constant operand is looked at for an enumerator, and only a pair that may mix is coerced.
-static void check_constant_enum_mix(CheckConstantInput* input, const CheckAction* action, uint32_t first, uint32_t count, uint32_t token)
+// Kept out of its caller, whose hot loop it would otherwise crowd: inlined, check_constant_evaluate took 1% more of
+// main.c's instructions on the 9700X.
+static __attribute__((noinline)) void check_constant_enum_mix(CheckConstantInput* input, const CheckAction* action, uint32_t first, uint32_t count,
+                                                             uint32_t token)
 {
     CheckInputReader* reader = input->reader;
     const CheckOp op = action->op;
     const bool conditional = op == CHECK_OP_CONDITIONAL && count == 3;
-    const bool binary = ((op >= CHECK_OP_ADD && op <= CHECK_OP_REMAINDER) || (op >= CHECK_OP_LESS && op <= CHECK_OP_NOT_EQUAL) ||
-                         (op >= CHECK_OP_BIT_AND && op <= CHECK_OP_BIT_XOR)) && count == 2;
+    const bool binary = op != CHECK_OP_CONDITIONAL && count == 2;
     uint32_t values[2] = { BUSTER_CHECK_NONE, BUSTER_CHECK_NONE };
     uint32_t value = conditional || binary ? first : BUSTER_CHECK_NONE;
     value = conditional && value != BUSTER_CHECK_NONE ? input->next_value[value - input->first] : value;
@@ -3325,7 +3327,9 @@ static bool check_constant_evaluate(CheckConstantInput* input)
                 check_constant_warning_operands(input, &action, first, count);
                 check_constant_runtime_query(input, &action);
                 check_constant_action(input, &action, first, NULL, &checked);
-                if (checked.diagnostic == CHECK_DIAG_NONE)
+                const CheckOp op = action.op;
+                if (checked.diagnostic == CHECK_DIAG_NONE && ((op >= CHECK_OP_ADD && op <= CHECK_OP_REMAINDER) || (op >= CHECK_OP_LESS && op <= CHECK_OP_NOT_EQUAL) ||
+                                                              (op >= CHECK_OP_BIT_AND && op <= CHECK_OP_BIT_XOR) || op == CHECK_OP_CONDITIONAL))
                 {
                     check_constant_enum_mix(input, &action, first, count, token);
                 }
