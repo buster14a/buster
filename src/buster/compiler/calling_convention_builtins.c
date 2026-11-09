@@ -250,7 +250,7 @@ _Alignas(64) static const AbiBuiltinRows abi_builtin_rows = {
         UINT64_C(0x0000000f00000007), // 19
         UINT64_C(0x000000ff00000008), // 20
         UINT64_C(0x0000ffff00000009), // 21
-        UINT64_C(0x0000ffff00000009), // 22
+        UINT64_C(0x0000ffff0000000a), // 22
         UINT64_C(0x000000ff00000004), // 23
         UINT64_C(0x0000000000000000), // 24
         UINT64_C(0x0000000000000000), // 25

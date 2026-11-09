@@ -258,6 +258,17 @@ static __attribute__((noinline)) void check_test_undeclared(CheckTest* test, con
           "1:23: error: use of undeclared identifier 'undeclared'\n1:46: error: -\n"
           "2:22: error: -\n2:27: error: use of undeclared identifier 'undeclared'\n"
           "3:22: error: -\n", true },
+        // An enumerator's value and a bit-field's width (#1447, check_constant_name): the name is clang's error and the
+        // declaration goes on, the enumerator with its implicit value and the member no bit-field, at file scope and in a
+        // body, whose statements keep their errors.
+        { "an enumerator's value and a bit-field's width",
+          "enum { A = undeclared, B = A + 1 };\n"
+          "struct S { int b : undeclared; int c : 2; };\n"
+          "int f(void) { enum { C = undeclared + 1, D = 2 }; return *D; }\n"
+          "int g(void) { struct T { int t : undeclared; } t; return *t.t; }\n",
+          "1:12: error: use of undeclared identifier 'undeclared'\n2:20: error: use of undeclared identifier 'undeclared'\n"
+          "3:26: error: use of undeclared identifier 'undeclared'\n3:58: error: -\n"
+          "4:34: error: use of undeclared identifier 'undeclared'\n4:58: error: -\n", true },
     };
     const char* temporary = oracle_temporary_directory();
     const char* base = temporary;
