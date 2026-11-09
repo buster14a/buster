@@ -60,6 +60,7 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_DECLARATION: result = "invalid or unsupported declaration"; break;
         case CHECK_INPUT_INITIALIZER_MEMBER: result = "field designator does not refer to any field in the record type"; break;
         case CHECK_INPUT_ARRAY_LITERAL_MISMATCH: result = "cannot initialize array with array of another type"; break;
+        case CHECK_INPUT_TAG_INCOMPATIBLE: result = "type has incompatible definitions"; break;
         case CHECK_INPUT_UNDECLARED: result = "use of undeclared identifier"; break;
         case CHECK_INPUT_LITERAL: result = "invalid or unsupported literal"; break;
         case CHECK_INPUT_RESOURCE: result = "type checker ran out of memory"; break;
@@ -3845,6 +3846,13 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                             };
                             pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, previous < count ? 1u : 0u, "%s", message);
                         }
+                        else if (phase == 0 && kind == CHECK_INPUT_TAG_INCOMPATIBLE && token < count)
+                        {
+                            // C23's incompatible redefinition of a record (#1447), with clang's two notes.
+                            PPOutputDiagnosticNote notes[2] = { 0 };
+                            const uint32_t noted = check_semantic_tag_notes(parser, pp, input, types, &spell, input->reports + index, notes, scratch);
+                            pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, notes, noted, "%s", message);
+                        }
                         else if (phase == 0 && input->reports[index].message == CHECK_INPUT_CPU_DISPATCH)
                         {
                             // clang's cpu_specific and cpu_dispatch errors (#1447, c_check_cpu_dispatch.c), as its messages word
@@ -4239,12 +4247,28 @@ static bool check_driver_reports(const Parser* parser, const Parser* original, P
                                      excess_count, quiet, shifts, 0, scratch);
 }
 
+// The fate of each original token in a rejected unit's private view (#1447, check_driver_rejected_view). A left out run
+// starts with its replacement, if it has one, and holds the tokens after it that are DROP: a statement's (BLOCK) or a
+// condition's (VALUE); a run without a replacement (an initializer, a for clause, a declarator) is DROP alone and
+// always follows a kept token.
+enum
+{
+    CHECK_DRIVER_EDIT_KEEP = 0,
+    CHECK_DRIVER_EDIT_DROP = 1,
+    // A statement's first token: `{` `}` take its place.
+    CHECK_DRIVER_EDIT_BLOCK = 2,
+    // A condition's first token: `-*__func__` takes its place, an int that reads no object of the unit's and is no
+    // constant, so the statements after it stay as reachable as they were (a constant would change which of their
+    // warnings the flushed body publishes in its walk, check_common_flush).
+    CHECK_DRIVER_EDIT_VALUE = 3,
+};
+
 // A rejected unit's private view (#1447, check_driver_rejected_common): its tokens with what holds an error left out,
-// reparsed, as a repair's view is (c_check_repair.c). `edits` gives each original token's fate: kept (0), dropped (1),
-// or dropped with a `{` `}` in its place (2), an expression statement's first token. The view's tokens keep their
-// sources, so its diagnostics are the original places; a brace's source is its statement's. `to_view` maps each
-// original token, and the count, to its view token, or a dropped one's to the next kept; `to_original` maps each view
-// token to its original one, a brace's to BUSTER_CHECK_NONE. True where the view parses without an error.
+// reparsed, as a repair's view is (c_check_repair.c). `edits` gives each original token's fate (CHECK_DRIVER_EDIT_*).
+// The view's tokens keep their sources, so its diagnostics are the original places; a brace's source is its
+// statement's last token's, and a condition's `-*__func__` its first token's. `to_view` maps each original token, and the
+// count, to its view token, or a dropped one's to the next kept; `to_original` maps each view token to its original
+// one, a replacement's to BUSTER_CHECK_NONE. True where the view parses without an error.
 typedef struct CheckDriverRejectedView CheckDriverRejectedView;
 struct CheckDriverRejectedView
 {
@@ -4260,7 +4284,7 @@ static bool check_driver_rejected_view(CheckDriverRejectedView* result, const Pa
     uint64_t total64 = 0;
     for (uint32_t token = 0; token < count; token += 1)
     {
-        total64 += edits[token] == 0 ? 1u : edits[token] == 2 ? 2u : 0u;
+        total64 += edits[token] == CHECK_DRIVER_EDIT_KEEP ? 1u : edits[token] == CHECK_DRIVER_EDIT_DROP ? 0u : edits[token] == CHECK_DRIVER_EDIT_BLOCK ? 2u : 3u;
     }
     bool valid = total64 != 0 && total64 <= BUSTER_PARSE_MAX_TOKENS;
     const uint32_t total = valid ? (uint32_t)total64 : 0;
@@ -4295,26 +4319,34 @@ static bool check_driver_rejected_view(CheckDriverRejectedView* result, const Pa
         for (uint32_t token = 0; valid && token < count; token += 1)
         {
             result->to_view[token] = written;
-            if (edits[token] == 2)
+            if (edits[token] == CHECK_DRIVER_EDIT_BLOCK || edits[token] == CHECK_DRIVER_EDIT_VALUE)
             {
-                // The statement's `;` is its last token, whose source the braces take.
+                const bool block = edits[token] == CHECK_DRIVER_EDIT_BLOCK;
+                // A statement's `;` is its last token, whose source the braces take.
                 uint32_t last = token;
-                while (last + 1 < count && edits[last + 1] == 1)
+                while (block && last + 1 < count && edits[last + 1] == CHECK_DRIVER_EDIT_DROP)
                 {
                     last += 1;
                 }
-                const uint8_t kinds[] = { PARSE_KIND_L_BRACE, PARSE_KIND_R_BRACE };
-                for (uint32_t b = 0; b < 2; b += 1)
+                const uint8_t kinds[2][3] = {
+                    { PARSE_KIND_L_BRACE, PARSE_KIND_R_BRACE },
+                    { PARSE_KIND_MINUS, PARSE_KIND_STAR, PARSE_KIND_NUMBER },
+                };
+                const uint32_t names[2][3] = {
+                    { 0, 0 },
+                    { 0, 0, C_NAME_FUNC },
+                };
+                for (uint32_t b = 0; b < (block ? 2u : 3u); b += 1)
                 {
-                    view->tokens.kinds[written] = kinds[b];
-                    view->tokens.names[written] = 0;
+                    view->tokens.kinds[written] = kinds[!block][b];
+                    view->tokens.names[written] = names[!block][b];
                     view->tokens.sources[written] = original->tokens.sources[last];
                     view->tokens.flags[written] = 0;
                     result->to_original[written] = BUSTER_CHECK_NONE;
                     written += 1;
                 }
             }
-            else if (edits[token] == 0)
+            else if (edits[token] == CHECK_DRIVER_EDIT_KEEP)
             {
                 view->tokens.kinds[written] = original->tokens.kinds[token];
                 view->tokens.names[written] = original->tokens.names[token];
@@ -4360,68 +4392,403 @@ static bool check_driver_descends(const Parser* parser, uint32_t token, uint32_t
     return at == root;
 }
 
-// What of a rejected unit's error at `token` its view leaves out (check_driver_rejected_common): the initializer it is
-// in, from its `=`, where the declaration is complete without it (not an array of unknown size, not const-qualified);
-// else the expression statement it is in, in a body, which `{` `}` replace (no declaration's: its declarator would be
-// lost). False where neither holds: its body is left out whole, or the view is given up.
-static bool check_driver_rejected_edit(const Parser* parser, const CheckInput* input, const TypeTable* types, const uint32_t* initializers,
-                                       uint32_t initializer_count, uint32_t token, uint8_t* edits)
+// The first token of `root`'s subtree, which is contiguous and ends at or after `root`, at or after `low`.
+static uint32_t check_driver_subtree_start(const Parser* parser, uint32_t low, uint32_t root)
 {
-    bool edited = false;
-    for (uint32_t i = 0; !edited && i < initializer_count; i += 1)
+    uint32_t first = low;
+    uint32_t high = root;
+    while (first < high)
     {
-        const uint32_t declaration = initializers[i];
-        const uint32_t begin = check_sparse_get(input->initializer_begins, declaration);
-        const uint32_t end = check_sparse_get(input->initializer_ends, declaration);
-        const TypeId type = input->declared_types != NULL ? input->declared_types[declaration] : 0;
-        const TypeId bare = type != 0 ? type_strip_aligned(types, type) : 0;
-        const bool unsized = bare != 0 && type_kind(types, bare) == BUSTER_TYPE_KIND_ARRAY && !type_is_complete(types, bare);
-        if (begin != 0 && begin <= token && token < end && end <= parser->tokens.count && parser->tokens.kinds[begin - 1] == PARSE_KIND_EQUAL && type != 0 &&
-            !unsized && (type_qualifiers(type) & BUSTER_TYPE_CONST) == 0)
+        const uint32_t middle = first + (high - first) / 2;
+        const bool inside = check_driver_descends(parser, middle, root);
+        first = inside ? first : middle + 1;
+        high = inside ? middle : high;
+    }
+    return first;
+}
+
+// The child of `parent` with `role`, the nearest before `before` and after `floor` (an opener before its closer), or
+// BUSTER_CHECK_NONE.
+static uint32_t check_driver_child_before(const Parser* parser, uint32_t parent, uint8_t role, uint32_t floor, uint32_t before)
+{
+    uint32_t result = BUSTER_CHECK_NONE;
+    for (uint32_t at = before; result == BUSTER_CHECK_NONE && at-- > floor;)
+    {
+        result = parser->tree.parents[at] == parent && parser->tree.roles[at] == role ? at : BUSTER_CHECK_NONE;
+    }
+    return result;
+}
+
+// What check_driver_rejected_edit reads and writes. `owners` maps an initializer's `=` to its declaration, else
+// BUSTER_CHECK_NONE. `work` holds the tokens whose parts are still to be left out (an error's, and its declarations'
+// uses); `log` the edits made for the current error, as (token, previous fate) pairs, to undo where it fails.
+typedef struct CheckDriverEditor CheckDriverEditor;
+struct CheckDriverEditor
+{
+    const Parser* parser;
+    const CheckInput* input;
+    const TypeTable* types;
+    const uint32_t* owners;
+    uint8_t* edits;
+    uint32_t* work;
+    uint32_t work_count;
+    uint32_t work_capacity;
+    uint32_t* log;
+    uint32_t log_count;
+    uint32_t log_capacity;
+};
+
+// Leave out the region [begin, last], `first` its first token's fate (DROP, or its run's replacement). A region already
+// left out whole is left so. A run with a replacement is left out whole or not at all: the region may hold it, or be
+// held by it, but not cross it; one without a replacement may also be crossed by one without. The region may hold no
+// label, case, goto, label address or tag definition, which the reading after it needs. False where it can't be left out.
+static bool check_driver_edit_apply(CheckDriverEditor* editor, uint32_t begin, uint32_t last, uint8_t first)
+{
+    const Parser* parser = editor->parser;
+    uint8_t* edits = editor->edits;
+    const uint32_t count = parser->tokens.count;
+    bool valid = begin <= last && last < count;
+    bool covered = valid;
+    for (uint32_t at = begin; valid && at <= last; at += 1)
+    {
+        covered &= edits[at] != CHECK_DRIVER_EDIT_KEEP;
+        const uint8_t role = parser->tree.roles[at];
+        const uint8_t kind = parser->tokens.kinds[at];
+        valid = role != PARSE_ROLE_LABEL && role != PARSE_ROLE_OPEN_CASE && role != PARSE_ROLE_CLOSE_CASE && role != PARSE_ROLE_OPEN_STRUCT &&
+                role != PARSE_ROLE_OPEN_ENUM && kind != PARSE_KIND_GOTO && kind != PARSE_KIND_CASE && kind != PARSE_KIND_DEFAULT &&
+                !(kind == PARSE_KIND_AMPAMP && role == PARSE_ROLE_PREFIX);
+    }
+    if (valid && !covered)
+    {
+        // The run its first token is in, where that run begins before it.
+        uint32_t start = begin;
+        while (edits[start] == CHECK_DRIVER_EDIT_DROP && start > 0 && edits[start - 1] != CHECK_DRIVER_EDIT_KEEP)
         {
-            memset(edits + begin - 1, 1, end - begin + 1);
-            edited = true;
+            start -= 1;
+        }
+        const bool plain = first == CHECK_DRIVER_EDIT_DROP;
+        valid = start == begin || (plain && edits[start] == CHECK_DRIVER_EDIT_DROP);
+        // The run past its last token, where it begins at or before it.
+        if (valid && edits[last + 1] == CHECK_DRIVER_EDIT_DROP)
+        {
+            uint32_t after = last;
+            while (edits[after] == CHECK_DRIVER_EDIT_DROP && after > 0 && edits[after - 1] != CHECK_DRIVER_EDIT_KEEP)
+            {
+                after -= 1;
+            }
+            valid = plain && edits[after] == CHECK_DRIVER_EDIT_DROP && edits[after] != CHECK_DRIVER_EDIT_KEEP;
+        }
+        for (uint32_t at = begin; valid && at <= last; at += 1)
+        {
+            const uint8_t fate = at == begin ? first : CHECK_DRIVER_EDIT_DROP;
+            if (edits[at] != fate)
+            {
+                valid = editor->log_count + 2 <= editor->log_capacity;
+                if (valid)
+                {
+                    editor->log[editor->log_count++] = at;
+                    editor->log[editor->log_count++] = edits[at];
+                    edits[at] = fate;
+                }
+            }
         }
     }
-    // The statement: the nearest `;` the error's parents reach, in a body.
-    uint32_t statement = token;
-    for (uint32_t steps = 0; !edited && statement < parser->tokens.count && parser->tree.roles[statement] != PARSE_ROLE_TERMINATOR &&
-         parser->tree.roles[statement] != PARSE_ROLE_CLOSE_BODY && steps < parser->tokens.count; steps += 1)
+    return valid;
+}
+
+// Queue `token`'s part to be left out.
+static bool check_driver_edit_queue(CheckDriverEditor* editor, uint32_t token)
+{
+    const bool valid = editor->work_count < editor->work_capacity;
+    if (valid)
     {
-        statement = parser->tree.parents[statement];
+        editor->work[editor->work_count++] = token;
     }
-    const bool terminated = !edited && statement < parser->tokens.count && parser->tree.roles[statement] == PARSE_ROLE_TERMINATOR &&
-                            parser->tree.parents[statement] < parser->tokens.count;
-    if (terminated)
+    return valid;
+}
+
+// Whether `role` is a declaration's specifier's, whose children after it are the declaration's.
+static bool check_driver_specifier_role(uint8_t role)
+{
+    return role == PARSE_ROLE_SPECIFIER || role == PARSE_ROLE_TAG || role == PARSE_ROLE_CLOSE_SPECIFIER || role == PARSE_ROLE_CLOSE_ATTRIBUTE_SPECIFIER ||
+           role == PARSE_ROLE_CLOSE_STRUCT || role == PARSE_ROLE_CLOSE_ENUM;
+}
+
+// The root of the declarators of the declaration that ends at `terminator`: below its specifiers, the
+// child after the innermost one; BUSTER_CHECK_NONE where it declares nothing. `head` is the terminator's child.
+static uint32_t check_driver_declarators(const Parser* parser, uint32_t head, uint32_t terminator)
+{
+    uint32_t node = head;
+    uint32_t result = BUSTER_CHECK_NONE;
+    bool searching = node < terminator && check_driver_specifier_role(parser->tree.roles[node]);
+    while (searching)
     {
-        uint32_t low = 0;
-        uint32_t high = statement;
-        while (low < high)
+        uint32_t child = BUSTER_CHECK_NONE;
+        for (uint32_t at = node + 1; child == BUSTER_CHECK_NONE && at < terminator; at += 1)
         {
-            const uint32_t middle = low + (high - low) / 2;
-            const bool inside = check_driver_descends(parser, middle, statement);
-            low = inside ? low : middle + 1;
-            high = inside ? middle : high;
+            child = parser->tree.parents[at] == node ? at : BUSTER_CHECK_NONE;
         }
-        bool declares = false;
-        for (uint32_t at = low; !declares && at <= statement; at += 1)
-        {
-            declares = input->declarations != NULL && input->declarations[at] == at;
-        }
-        bool overlaps = false;
-        for (uint32_t at = low; !overlaps && at <= statement; at += 1)
-        {
-            overlaps = edits[at] != 0;
-        }
-        if (!declares && !overlaps)
-        {
-            edits[low] = 2;
-            memset(edits + low + 1, 1, statement - low);
-            edited = true;
-        }
-        edited = edited || (overlaps && edits[low] == 2);
+        // A child after it that is a specifier too is the next level; `struct S`'s tag, `int`'s `const`.
+        searching = child != BUSTER_CHECK_NONE && check_driver_specifier_role(parser->tree.roles[child]);
+        node = searching ? child : node;
+        result = searching ? BUSTER_CHECK_NONE : child;
     }
-    return edited;
+    return result;
+}
+
+// Queue the uses of the name `declarator`'s segment [begin, last] declares, its first identifier, from after `after` to
+// its scope's end, the closing brace of the block or body it is in: every identifier of that name, as an ordinary name
+// (not a member, a tag or a label), what reads the declaration or an outer one alike, which the reading without it
+// mustn't read in its place.
+static bool check_driver_edit_uses(CheckDriverEditor* editor, uint32_t begin, uint32_t last, uint32_t after, uint32_t scope_end)
+{
+    const Parser* parser = editor->parser;
+    uint32_t name_token = BUSTER_CHECK_NONE;
+    for (uint32_t at = begin; name_token == BUSTER_CHECK_NONE && at <= last; at += 1)
+    {
+        name_token = parser->tokens.kinds[at] == PARSE_KIND_IDENTIFIER && parser->tree.roles[at] == PARSE_ROLE_OPERAND ? at : BUSTER_CHECK_NONE;
+    }
+    bool valid = true;
+    const uint32_t name = name_token != BUSTER_CHECK_NONE ? parser->tokens.names[name_token] : 0;
+    for (uint32_t at = after + 1; valid && name_token != BUSTER_CHECK_NONE && at < scope_end; at += 1)
+    {
+        const uint8_t previous = parser->tokens.kinds[at - 1];
+        const bool ordinary = parser->tokens.kinds[at] == PARSE_KIND_IDENTIFIER && parser->tokens.names[at] == name && parser->tree.roles[at] != PARSE_ROLE_TAG &&
+                              parser->tree.roles[at] != PARSE_ROLE_MEMBER && previous != PARSE_KIND_PERIOD && previous != PARSE_KIND_ARROW &&
+                              previous != PARSE_KIND_GOTO && parser->tree.roles[parser->tree.parents[at] < parser->tokens.count ? parser->tree.parents[at] : at] != PARSE_ROLE_LABEL;
+        valid = !ordinary || editor->edits[at] != CHECK_DRIVER_EDIT_KEEP || check_driver_edit_queue(editor, at);
+    }
+    return valid;
+}
+
+// Whether `at` is one of the declarator list's commas: its root `declarators`, or the left child of one, in turn.
+static bool check_driver_list_comma(const Parser* parser, uint32_t at, uint32_t declarators)
+{
+    const uint32_t count = parser->tokens.count;
+    uint32_t node = at;
+    bool chain = node < count && parser->tree.roles[node] == PARSE_ROLE_COMMA;
+    while (chain && node != declarators)
+    {
+        const uint32_t parent = parser->tree.parents[node];
+        chain = parent < count && parent > node && parser->tree.roles[parent] == PARSE_ROLE_COMMA;
+        node = parent;
+    }
+    return chain && node == declarators;
+}
+
+// Leave out the part of the declaration [low, terminator] that holds `token`: its declarator, with the comma after it
+// where a later declarator is kept, else with the comma after the last kept one before it; or the whole declaration,
+// where the token is in its specifiers or no other declarator is kept (a for clause's keeps its `;`). The uses of what
+// is left out are queued. Not a typedef's, whose name the parse reads as a type.
+static bool check_driver_edit_declaration(CheckDriverEditor* editor, uint32_t low, uint32_t head, uint32_t terminator, uint32_t token, bool clause)
+{
+    const Parser* parser = editor->parser;
+    const uint8_t* edits = editor->edits;
+    bool valid = true;
+    for (uint32_t at = low; valid && at < terminator; at += 1)
+    {
+        valid = parser->tokens.kinds[at] != PARSE_KIND_TYPEDEF;
+    }
+    // The scope's end: the brace that closes the block or body the declaration is in.
+    uint32_t scope_end = parser->tree.parents[terminator];
+    for (uint32_t steps = 0; scope_end < parser->tokens.count && parser->tree.roles[scope_end] != PARSE_ROLE_CLOSE_BLOCK &&
+         parser->tree.roles[scope_end] != PARSE_ROLE_CLOSE_BODY && steps < parser->tokens.count; steps += 1)
+    {
+        scope_end = parser->tree.parents[scope_end];
+    }
+    valid = valid && scope_end < parser->tokens.count;
+    const uint32_t declarators = valid ? check_driver_declarators(parser, head, terminator) : BUSTER_CHECK_NONE;
+    const uint32_t first = declarators != BUSTER_CHECK_NONE ? check_driver_subtree_start(parser, low, declarators) : terminator;
+    // The token's declarator, between the list's commas around it; the comma after the last kept declarator before it;
+    // and whether one after it is kept.
+    uint32_t before = BUSTER_CHECK_NONE;
+    uint32_t after = terminator;
+    uint32_t kept_comma = BUSTER_CHECK_NONE;
+    bool kept_later = false;
+    uint32_t segment = first;
+    for (uint32_t at = first; valid && declarators != BUSTER_CHECK_NONE && at <= terminator; at += 1)
+    {
+        if (at == terminator || check_driver_list_comma(parser, at, declarators))
+        {
+            const bool kept = edits[segment] == CHECK_DRIVER_EDIT_KEEP;
+            before = at < token ? at : before;
+            after = at > token && after == terminator ? at : after;
+            kept_comma = kept && at < token && at != terminator ? at : kept_comma;
+            kept_later |= kept && segment > token;
+            segment = at + 1;
+        }
+    }
+    const uint32_t segment_begin = before != BUSTER_CHECK_NONE ? before + 1 : first;
+    const uint32_t segment_last = after - 1;
+    const bool whole = declarators == BUSTER_CHECK_NONE || token < first || (!kept_later && kept_comma == BUSTER_CHECK_NONE);
+    if (valid && whole)
+    {
+        valid = clause ? low < terminator && check_driver_edit_apply(editor, low, terminator - 1, CHECK_DRIVER_EDIT_DROP) :
+                         check_driver_edit_apply(editor, low, terminator, CHECK_DRIVER_EDIT_BLOCK);
+        // Every declarator's uses, by each one's first identifier.
+        segment = first;
+        for (uint32_t at = first; valid && declarators != BUSTER_CHECK_NONE && at <= terminator; at += 1)
+        {
+            if (at == terminator || check_driver_list_comma(parser, at, declarators))
+            {
+                valid = check_driver_edit_uses(editor, segment, at - 1, terminator, scope_end);
+                segment = at + 1;
+            }
+        }
+    }
+    else if (valid)
+    {
+        const uint32_t drop_begin = kept_later ? segment_begin : kept_comma;
+        const uint32_t drop_last = kept_later ? after : segment_last;
+        valid = check_driver_edit_apply(editor, drop_begin, drop_last, CHECK_DRIVER_EDIT_DROP) &&
+                check_driver_edit_uses(editor, segment_begin, segment_last, terminator, scope_end);
+    }
+    return valid;
+}
+
+// Leave out the part of the statement ending at `terminator` that holds `token`: a for clause; a statement expression's
+// last statement's value, which is its expression's (`token` is then the expression's `(`, queued); a declaration's
+// declarator (check_driver_edit_declaration); else the statement, which `{` `}` replace. Only a body's statements.
+static bool check_driver_edit_statement(CheckDriverEditor* editor, uint32_t terminator, uint32_t token)
+{
+    const Parser* parser = editor->parser;
+    const uint32_t count = parser->tokens.count;
+    const uint32_t parent = parser->tree.parents[terminator];
+    const uint8_t parent_role = parent < count ? parser->tree.roles[parent] : PARSE_ROLE_COUNT;
+    const bool contained = parent_role == PARSE_ROLE_CLOSE_BODY || parent_role == PARSE_ROLE_CLOSE_BLOCK || parent_role == PARSE_ROLE_CLOSE_CONDITION ||
+                           parent_role == PARSE_ROLE_CLOSE_FOR || parent_role == PARSE_ROLE_LABEL || parent_role == PARSE_ROLE_ELSE ||
+                           parent_role == PARSE_ROLE_DO || parent_role == PARSE_ROLE_CLOSE_CASE;
+    const bool clause = parent_role == PARSE_ROLE_CLOSE_FOR && terminator < parent;
+    // A for statement's condition, after its init clause's `;`, is replaced, as an empty one would make it endless.
+    const uint32_t open = clause ? check_driver_child_before(parser, parent, PARSE_ROLE_OPEN_FOR, 0, terminator) : BUSTER_CHECK_NONE;
+    const bool condition = open != BUSTER_CHECK_NONE && check_driver_child_before(parser, parent, PARSE_ROLE_TERMINATOR, open, terminator) != BUSTER_CHECK_NONE;
+    const uint32_t low = contained ? check_driver_subtree_start(parser, 0, terminator) : terminator;
+    uint32_t head = BUSTER_CHECK_NONE;
+    for (uint32_t at = low; contained && head == BUSTER_CHECK_NONE && at < terminator; at += 1)
+    {
+        head = parser->tree.parents[at] == terminator ? at : BUSTER_CHECK_NONE;
+    }
+    const uint8_t head_role = head != BUSTER_CHECK_NONE ? parser->tree.roles[head] : PARSE_ROLE_COUNT;
+    bool declares = check_driver_specifier_role(head_role) || (head_role == PARSE_ROLE_CLOSE_KEYWORD && parser->tokens.kinds[low] == PARSE_KIND_STATIC_ASSERT);
+    for (uint32_t at = low; contained && !declares && at <= terminator; at += 1)
+    {
+        declares = editor->input->declarations != NULL && editor->input->declarations[at] == at;
+    }
+    // A statement expression's last statement, its labels' too: `(` `{` … `;` `}` `)`.
+    uint32_t block = parent;
+    for (uint32_t steps = 0; block < count && (parser->tree.roles[block] == PARSE_ROLE_LABEL || parser->tree.roles[block] == PARSE_ROLE_CLOSE_CASE) &&
+         steps < count; steps += 1)
+    {
+        block = parser->tree.parents[block];
+    }
+    const uint32_t group = block < count && parser->tree.roles[block] == PARSE_ROLE_CLOSE_BLOCK && terminator + 1 == block ? parser->tree.parents[block] :
+                           BUSTER_CHECK_NONE;
+    const uint32_t brace = group < count ? check_driver_child_before(parser, block, PARSE_ROLE_OPEN_BLOCK, 0, terminator) : BUSTER_CHECK_NONE;
+    const bool value = group < count && parser->tree.roles[group] == PARSE_ROLE_CLOSE_GROUP && group == block + 1 && brace != BUSTER_CHECK_NONE && brace > 0 &&
+                       parser->tree.roles[brace - 1] == PARSE_ROLE_OPEN_GROUP && parser->tree.parents[brace - 1] == group && !declares &&
+                       head_role != PARSE_ROLE_RETURN;
+    bool valid = contained;
+    if (valid && value)
+    {
+        valid = check_driver_edit_queue(editor, brace - 1);
+    }
+    else if (valid && declares)
+    {
+        valid = check_driver_edit_declaration(editor, low, head, terminator, token, clause);
+    }
+    else if (valid && clause)
+    {
+        valid = low < terminator && check_driver_edit_apply(editor, low, terminator - 1, condition ? CHECK_DRIVER_EDIT_VALUE : CHECK_DRIVER_EDIT_DROP);
+    }
+    else if (valid)
+    {
+        valid = check_driver_edit_apply(editor, low, terminator, CHECK_DRIVER_EDIT_BLOCK);
+    }
+    return valid;
+}
+
+// Leave out the nearest part around `token` that the view can leave out alone: its initializer, from its `=`, where its
+// declaration is complete without it (not an array of unknown size, not const-qualified); its statement, or the
+// part of it check_driver_edit_statement finds; its condition, which `-true` replaces; or its for statement's
+// increment. A token already left out is. False where none is.
+static bool check_driver_edit_site(CheckDriverEditor* editor, uint32_t token)
+{
+    const Parser* parser = editor->parser;
+    const CheckInput* input = editor->input;
+    const TypeTable* types = editor->types;
+    const uint32_t count = parser->tokens.count;
+    bool valid = token < count;
+    bool done = !valid || editor->edits[token] != CHECK_DRIVER_EDIT_KEEP;
+    uint32_t at = token;
+    for (uint32_t steps = 0; !done && steps <= count; steps += 1)
+    {
+        const uint8_t role = at < count ? parser->tree.roles[at] : PARSE_ROLE_COUNT;
+        const uint32_t declaration = at < count && parser->tokens.kinds[at] == PARSE_KIND_EQUAL ? editor->owners[at] : BUSTER_CHECK_NONE;
+        if (declaration != BUSTER_CHECK_NONE && token > at)
+        {
+            const uint32_t end = check_sparse_get(input->initializer_ends, declaration);
+            const TypeId type = input->declared_types != NULL ? input->declared_types[declaration] : 0;
+            const TypeId bare = type != 0 ? type_strip_aligned(types, type) : 0;
+            const bool unsized = bare != 0 && type_kind(types, bare) == BUSTER_TYPE_KIND_ARRAY && !type_is_complete(types, bare);
+            const bool constant = (type_qualifiers(type) & BUSTER_TYPE_CONST) != 0;
+            // A const object of an arithmetic or enumeration type keeps it, as clang's stays valid, with `-*__func__`'s
+            // unknown value in its place; another initializer the declaration can't do without leaves out its declarator.
+            const bool replaced = constant && bare != 0 && (type_is_arithmetic(types, bare) || type_kind(types, bare) == BUSTER_TYPE_KIND_ENUM);
+            done = token < end && end <= count && type != 0 && !unsized && (!constant || replaced) && at + 1 < end;
+            valid = !done || check_driver_edit_apply(editor, replaced ? at + 1 : at, end - 1, replaced ? CHECK_DRIVER_EDIT_VALUE : CHECK_DRIVER_EDIT_DROP);
+        }
+        else if (role == PARSE_ROLE_TERMINATOR)
+        {
+            valid = check_driver_edit_statement(editor, at, token);
+            done = true;
+        }
+        else if (role == PARSE_ROLE_CLOSE_CONDITION)
+        {
+            // `if`, `while`, `switch` or `do`'s `while`, `(` … `)`: the token is in the parentheses, or is the keyword.
+            const uint32_t open = check_driver_child_before(parser, at, PARSE_ROLE_OPEN_CONDITION, 0, at);
+            valid = open != BUSTER_CHECK_NONE && open + 1 < at && token + 1 >= open && token <= at &&
+                    check_driver_edit_apply(editor, open + 1, at - 1, CHECK_DRIVER_EDIT_VALUE);
+            done = true;
+        }
+        else if (role == PARSE_ROLE_CLOSE_FOR)
+        {
+            // The increment: after the header's second `;`, the init and condition clauses' own terminators.
+            const uint32_t open = check_driver_child_before(parser, at, PARSE_ROLE_OPEN_FOR, 0, at);
+            const uint32_t clause = open != BUSTER_CHECK_NONE ? check_driver_child_before(parser, at, PARSE_ROLE_TERMINATOR, open, at) : BUSTER_CHECK_NONE;
+            valid = clause != BUSTER_CHECK_NONE && open != BUSTER_CHECK_NONE && open < clause && clause < token && token < at && clause + 1 < at &&
+                    check_driver_edit_apply(editor, clause + 1, at - 1, CHECK_DRIVER_EDIT_DROP);
+            done = true;
+        }
+        else if (at >= count || role == PARSE_ROLE_CLOSE_BODY || role == PARSE_ROLE_CLOSE_BLOCK || role == PARSE_ROLE_CLOSE_CASE ||
+                 role == PARSE_ROLE_CLOSE_STRUCT || role == PARSE_ROLE_CLOSE_ENUM)
+        {
+            valid = false;
+            done = true;
+        }
+        at = at < count ? parser->tree.parents[at] : at;
+    }
+    return valid && done;
+}
+
+// What of a rejected unit's error at `token` its view leaves out (check_driver_rejected_common): the nearest part around
+// it check_driver_edit_site finds, and the parts around the uses of what that leaves out of a declaration, in turn. All
+// or none: where one can't be left out, what the others changed is undone, and its body is left out whole.
+static bool check_driver_rejected_edit(CheckDriverEditor* editor, uint32_t token)
+{
+    editor->work_count = 0;
+    editor->log_count = 0;
+    bool valid = check_driver_edit_queue(editor, token);
+    while (valid && editor->work_count != 0)
+    {
+        editor->work_count -= 1;
+        valid = check_driver_edit_site(editor, editor->work[editor->work_count]);
+    }
+    while (!valid && editor->log_count != 0)
+    {
+        editor->log_count -= 2;
+        editor->edits[editor->log[editor->log_count]] = (uint8_t)editor->log[editor->log_count + 1];
+    }
+    return valid;
 }
 
 // A rejected unit's common warnings (#1447): clang's for the bodies its errors don't reach. The bodies that hold one of
@@ -4612,7 +4979,15 @@ static bool check_driver_rejected_read(const Parser* unit, const Parser* origina
         check_driver_return_reports(parser, original, pp, &program, return_baseline, false);
         const uint64_t flushed_mark = scratch->length;
         const uint8_t* flushed = check_driver_flushed_bodies(parser, original, pp, &program, scratch);
-        check_driver_common_warnings(parser, pp, &input, &stream, &types, &program, flushed, shifts, scratch);
+        // The bodies that hold an error, whose reads the reading may lack: 2 (CheckCommonFacts.flushed).
+        uint8_t* errored = flushed != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, view_count) : NULL;
+        for (uint32_t token = 0; errored != NULL && token < view_count; token += 1)
+        {
+            const uint32_t at = edited ? view.to_original[token] : token;
+            const bool held = at < count ? bodies[at] != 0 : token != 0 && errored[token - 1] == 2;
+            errored[token] = flushed[token] != 0 && held ? 2 : flushed[token];
+        }
+        check_driver_common_warnings(parser, pp, &input, &stream, &types, &program, errored != NULL ? errored : flushed, shifts, scratch);
         arena_pop_to(scratch, flushed_mark);
     }
     arena_release(&type_arena);
@@ -4636,29 +5011,40 @@ static void check_driver_rejected_common(const Parser* unit, const Parser* origi
     uint8_t* mask = ranges != NULL ? BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, (uint64_t)count + 1) : NULL;
     uint32_t found = 0;
     bool valid = mask != NULL && error_count != 0 && c_environment_bodies(&parser->tree, count, ranges, body_count, &found) && found == body_count;
-    // What the view leaves out of the bodies (check_driver_rejected_edit): an error's initializer or expression statement
-    // where it can, else its whole body, which the mask leaves out.
+    // What the view leaves out of the bodies (check_driver_rejected_edit): the part around each error it can, else its
+    // whole body, which the mask leaves out. Its editor's columns: each initializer's `=`'s declaration, the work list
+    // and the undo log, each bounded by the tokens (a token is queued once a declaration, and logged at most twice).
     uint8_t* edits = valid ? BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, (uint64_t)count + 1) : NULL;
-    uint32_t initialized_count = 0;
-    for (uint32_t token = 0; edits != NULL && token < count; token += 1)
-    {
-        initialized_count += check_sparse_get(first_input->initializer_begins, token) != BUSTER_CHECK_NONE;
-    }
-    uint32_t* initialized = edits != NULL && initialized_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, initialized_count) : NULL;
-    valid = edits != NULL && (initialized_count == 0 || initialized != NULL);
+    uint32_t* owners = edits != NULL ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)count + 1) : NULL;
+    uint32_t* work = owners != NULL ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)count + 1) : NULL;
+    const uint64_t log_capacity = 4 * ((uint64_t)count + 1);
+    uint32_t* log = work != NULL && log_capacity <= UINT32_MAX ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, log_capacity) : NULL;
+    valid = log != NULL;
     if (valid)
     {
         memset(mask, 0, (uint64_t)count + 1);
         memset(edits, 0, (uint64_t)count + 1);
-        initialized_count = 0;
+        memset(owners, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
         for (uint32_t token = 0; token < count; token += 1)
         {
-            if (check_sparse_get(first_input->initializer_begins, token) != BUSTER_CHECK_NONE)
+            const uint32_t begin = check_sparse_get(first_input->initializer_begins, token);
+            if (begin != BUSTER_CHECK_NONE && begin != 0 && begin <= count && parser->tokens.kinds[begin - 1] == PARSE_KIND_EQUAL)
             {
-                initialized[initialized_count++] = token;
+                owners[begin - 1] = token;
             }
         }
     }
+    CheckDriverEditor editor = {
+        .parser = parser,
+        .input = first_input,
+        .types = first_types,
+        .owners = owners,
+        .edits = edits,
+        .work = work,
+        .work_capacity = count + 1,
+        .log = log,
+        .log_capacity = (uint32_t)(valid ? log_capacity : 0),
+    };
     bool edited = false;
     // The bodies of every error, the mask where the view can't be made; and whether each error has one.
     uint8_t* bodies = valid ? BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, (uint64_t)count + 1) : NULL;
@@ -4670,7 +5056,7 @@ static void check_driver_rejected_common(const Parser* unit, const Parser* origi
     }
     for (uint32_t e = 0; valid && e < error_count; e += 1)
     {
-        const bool kept = errors[e] < count && check_driver_rejected_edit(parser, first_input, first_types, initialized, initialized_count, errors[e], edits);
+        const bool kept = errors[e] < count && check_driver_rejected_edit(&editor, errors[e]);
         edited |= kept;
         // The body whose tokens hold the error: the last one to begin at or before it.
         const uint32_t token = errors[e];
