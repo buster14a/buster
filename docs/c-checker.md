@@ -526,12 +526,11 @@ does, each rule checked against clang's answers on probes of it:
   `.text.buster_checker` with: its statements' templates in source order, a
   line each, assembled by `assembler.c` (`asm_assemble`), whose sections'
   atoms join the unit's link before its functions', as clang emits a module's
-  `asm` first (`check_program_emit_file_asm`), each in its section in `-c`'s
-  object. Refused by name: a template the assembler doesn't take, one that
-  defines or refers to a symbol (a label, an instruction's operand, CFI),
-  which the unit's symbols don't join yet, and a section of a class C's
-  definitions don't have or of another type than its class's (an init
-  array's, a note).
+  `asm` first (`check_program_asm_plan_file`), each in its section in `-c`'s
+  object; its labels and references join the unit's symbols as a template's do
+  (#1848). Refused by name: a template the assembler doesn't take, CFI, and a
+  section of a class C's definitions don't have or of another type than its
+  class's (an init array's, a note).
 - **`#pragma clang optimize`** (`c_check_optimize_input.c`), whose `off` and
   `on` `main.c` puts around the checker unit's own tests (#681): one
   identifier, `on` or `off`, read as clang's `PragmaOptimizeHandler` reads it,

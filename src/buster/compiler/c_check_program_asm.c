@@ -221,6 +221,13 @@ struct CheckProgramAsms
     // The most placed statements in one selected body, each of at most one machine-operation row. A lane reuses
     // its operation table between bodies; helper and naked statements add no row to that table (#1359).
     uint32_t row_capacity;
+    // The unit's file-scope assembly (#619, check_program_asm_plan_file): its statements' templates assembled together,
+    // whose sections, labels and references join the templates' names and the emission's link before the functions'
+    // (`file_assembled`); or why the emission refuses it, at its first statement (`file_token`).
+    AsmResult file_unit;
+    const char* file_reason;
+    uint32_t file_token;
+    bool file_assembled;
     CheckProgramStatus status;
     uint32_t token;
 };
@@ -2508,6 +2515,9 @@ static bool check_program_asm_names(CheckProgramAsms* result, const CheckProgram
                                                                                         naked->code.reference_count) :
                                                            0;
     }
+    // The file-scope assembly (check_program_asm_plan_file), a code after the naked functions'.
+    const AsmResult* file = result->file_assembled ? &result->file_unit : 0;
+    total += file != 0 ? file->link.symbols.count + (uint64_t)file->absolute_count : 0;
     uint32_t slots = 2;
     while (slots < 2 * total && slots < (UINT32_C(1) << 31))
     {
@@ -2523,12 +2533,12 @@ static bool check_program_asm_names(CheckProgramAsms* result, const CheckProgram
         memset(table, 0, (uint64_t)slots * sizeof(uint32_t));
         // The templates' absolute (`.set`) symbols, once each: they are the template's alone, so another template's
         // reference to one is refused below by name rather than becoming an undefined global at link time.
-        for (uint32_t c = 0; c < statements + bodies; c += 1)
+        for (uint32_t c = 0; c < statements + bodies + 1; c += 1)
         {
             CheckProgramAsm* plan = c < statements ? result->plans + c : 0;
-            CheckProgramNaked* naked = c >= statements ? result->naked + (c - statements) : 0;
-            const bool planned = plan != 0 ? plan->planned && plan->reason == NULL : naked->planned && naked->reason == NULL;
-            const AsmResult* unit = !planned ? 0 : plan != 0 ? (plan->unit_assembled ? &plan->unit : 0) : (naked->unit_assembled ? &naked->unit : 0);
+            CheckProgramNaked* naked = c >= statements && c < statements + bodies ? result->naked + (c - statements) : 0;
+            const bool planned = plan != 0 ? plan->planned && plan->reason == NULL : naked != 0 ? naked->planned && naked->reason == NULL : file != 0;
+            const AsmResult* unit = !planned ? 0 : plan != 0 ? (plan->unit_assembled ? &plan->unit : 0) : naked != 0 ? (naked->unit_assembled ? &naked->unit : 0) : file;
             for (uint32_t a = 0; unit != 0 && a < unit->absolute_count; a += 1)
             {
                 const uint32_t name = check_asm_name(names, &count, table, slots - 1, unit->absolutes[a].name, BUSTER_LINK_SYMBOL_LOCAL, true);
@@ -2542,18 +2552,19 @@ static bool check_program_asm_names(CheckProgramAsms* result, const CheckProgram
         // symbols) are its pass 0's, and its other symbols its pass 1's.
         for (uint32_t pass = 0; pass < 2; pass += 1)
         {
-            for (uint32_t c = 0; c < statements + bodies; c += 1)
+            for (uint32_t c = 0; c < statements + bodies + 1; c += 1)
             {
                 CheckProgramAsm* plan = c < statements ? result->plans + c : 0;
-                CheckProgramNaked* naked = c >= statements ? result->naked + (c - statements) : 0;
-                const bool planned = plan != 0 ? plan->planned && plan->reason == NULL && (plan->helper != BUSTER_CHECK_NONE || plan->unit_assembled) :
-                                                 naked->planned && naked->reason == NULL;
-                const AsmResult* unit = !planned ? 0 : plan != 0 ? (plan->unit_assembled ? &plan->unit : 0) : (naked->unit_assembled ? &naked->unit : 0);
+                CheckProgramNaked* naked = c >= statements && c < statements + bodies ? result->naked + (c - statements) : 0;
+                const bool planned = plan != 0   ? plan->planned && plan->reason == NULL && (plan->helper != BUSTER_CHECK_NONE || plan->unit_assembled) :
+                                     naked != 0 ? naked->planned && naked->reason == NULL :
+                                                  file != 0;
+                const AsmResult* unit = !planned ? 0 : plan != 0 ? (plan->unit_assembled ? &plan->unit : 0) : naked != 0 ? (naked->unit_assembled ? &naked->unit : 0) : file;
                 const Tier0Code* code = !planned || unit != 0 ? 0 : plan != 0 ? &helpers->items[plan->helper].code : &naked->code;
-                CheckProgramAsmLabel* labels = plan != 0 ? plan->labels : naked->labels;
+                CheckProgramAsmLabel* labels = plan != 0 ? plan->labels : naked != 0 ? naked->labels : 0;
                 const uint32_t label_count = !planned || unit != 0 ? 0 : plan != 0 ? plan->label_count : naked->label_count;
-                const String8* spellings = plan != 0 ? plan->names : naked->names;
-                const char** reason = plan != 0 ? &plan->reason : &naked->reason;
+                const String8* spellings = plan != 0 ? plan->names : naked != 0 ? naked->names : 0;
+                const char** reason = plan != 0 ? &plan->reason : naked != 0 ? &naked->reason : &result->file_reason;
                 for (uint32_t k = 0; pass == 0 && k < label_count; k += 1)
                 {
                     const uint32_t name = check_asm_name(names, &count, table, slots - 1, labels[k].spelling, BUSTER_LINK_SYMBOL_LOCAL, true);
@@ -2624,6 +2635,63 @@ static bool check_program_asm_names(CheckProgramAsms* result, const CheckProgram
     return valid;
 }
 
+// The unit's file-scope assembly (#619), as clang emits a module's: its statements' templates in source order, a line
+// each, assembled by asm_assemble, the `assemble` command's assembler, into `result->file_unit`, in the output arena
+// (its section names are the source's bytes). Its labels and references join the templates' names
+// (check_program_asm_names), so that its labels define symbols C declares and its references reach C's symbols, and
+// the emission publishes its atoms before the functions' (check_program_emit_asm_unit). Refused by name, which the
+// emission reports at the first statement (`file_reason`, `file_token`): a template the assembler doesn't take, CFI,
+// whose frames the emission's unwind table doesn't merge, and a section of a class C's definitions don't have, or of
+// another type than its class's (an init array's, a note). False only for an arena without room.
+static bool check_program_asm_plan_file(CheckProgramAsms* result, const CheckProgram* program, const X86MatchIndex* index, bool scalar, Arena* output)
+{
+    const CheckInput* input = program->input;
+    uint64_t length = 0;
+    uint32_t first = BUSTER_CHECK_NONE;
+    for (uint32_t i = 0; i < input->asm_count; i += 1)
+    {
+        const CheckInputAsm* statement = input->asm_statements + i;
+        length += statement->body == BUSTER_CHECK_NONE ? (uint64_t)statement->template_text.length + 1 : 0;
+        first = statement->body == BUSTER_CHECK_NONE && first == BUSTER_CHECK_NONE ? statement->token : first;
+    }
+    char* source = first != BUSTER_CHECK_NONE && length < UINT32_MAX ? arena_push(output, length, 1) : 0;
+    const bool valid = first == BUSTER_CHECK_NONE || source != 0;
+    uint64_t at = 0;
+    for (uint32_t i = 0; source != 0 && i < input->asm_count; i += 1)
+    {
+        const CheckInputAsm* statement = input->asm_statements + i;
+        if (statement->body == BUSTER_CHECK_NONE)
+        {
+            memcpy(source + at, statement->template_text.bytes, statement->template_text.length);
+            at += statement->template_text.length;
+            source[at] = '\n';
+            at += 1;
+        }
+    }
+    const AsmResult assembled = source != 0 ? asm_assemble((String8){ .pointer = source, .length = length }, index, (AsmOptions){ .vectorized = !scalar }, output) :
+                                              (AsmResult){ 0 };
+    const Link* link = &assembled.link;
+    const char* refused = source == 0 ? NULL : assembled.error != 0 ? "file-scope assembly the assembler doesn't take" : NULL;
+    // A section of a class C's definitions have, of its type (or with bytes, PROGBITS), as the object writer takes it:
+    // not an init array's (.init_array is one in a data class), a note's or a group's. CFI's frames are an EH_FRAME atom.
+    for (AtomId atom = 1; source != 0 && refused == NULL && atom < link->atoms.count; atom += 1)
+    {
+        const uint8_t class = link->atoms.class[atom];
+        const uint32_t type = assembled.object_options.atom_sections[atom].type;
+        const bool kind = class == BUSTER_LINK_CLASS_TEXT || class == BUSTER_LINK_CLASS_RODATA || class == BUSTER_LINK_CLASS_DATA ||
+                          class == BUSTER_LINK_CLASS_DATA_RELRO || class == BUSTER_LINK_CLASS_BSS || class == BUSTER_LINK_CLASS_TDATA ||
+                          class == BUSTER_LINK_CLASS_TBSS;
+        refused = class == BUSTER_LINK_CLASS_EH_FRAME ? "file-scope assembly's CFI directives" :
+                  kind && (type == object_class_sections[class].type || (!link_class_is_zero_fill(class) && type == SHT_PROGBITS)) ? NULL :
+                                                                                                                                   "file-scope assembly's section of this kind";
+    }
+    result->file_unit = refused == NULL ? assembled : (AsmResult){ 0 };
+    result->file_assembled = source != 0 && refused == NULL;
+    result->file_reason = refused;
+    result->file_token = first;
+    return valid;
+}
+
 // Plans every asm statement of the program's bodies (CheckProgramAsms), appending a helper for each whose template
 // assembles to instructions to `helpers`, after the builtin ones, with the next symbols, and every naked function's code
 // (whatever its statements); then the names the templates define and refer to. False for an arena without room or an
@@ -2658,9 +2726,16 @@ static bool check_program_asm_plan(CheckProgramAsms* result, CheckProgramHelpers
     result->naked = valid && naked_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckProgramNaked, program->body_count) : 0;
     uint32_t* firsts = valid && statements != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)input->asm_count + 1) : 0;
     CheckProgramHelper* added = valid && statements != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckProgramHelper, statements) : 0;
-    const X86MatchIndex* index = valid && (statements != 0 || naked_count != 0) ? check_asm_matches(scratch) : 0;
+    // The file-scope statements, which have no body.
+    uint32_t file_count = 0;
+    for (uint32_t s = 0; s < input->asm_count; s += 1)
+    {
+        file_count += input->asm_statements[s].body == BUSTER_CHECK_NONE;
+    }
+    const X86MatchIndex* index = valid && (statements != 0 || naked_count != 0 || file_count != 0) ? check_asm_matches(scratch) : 0;
     uint32_t count = 0;
-    if ((statements != 0 && (result->plans == 0 || firsts == 0 || added == 0 || index == 0)) || (naked_count != 0 && (result->naked == 0 || index == 0)))
+    if ((statements != 0 && (result->plans == 0 || firsts == 0 || added == 0 || index == 0)) || (naked_count != 0 && (result->naked == 0 || index == 0)) ||
+        (file_count != 0 && index == 0))
     {
         result->status = valid ? CHECK_PROGRAM_RESOURCE : CHECK_PROGRAM_INVALID;
         valid = false;
@@ -2740,6 +2815,11 @@ static bool check_program_asm_plan(CheckProgramAsms* result, CheckProgramHelpers
             helpers->items = items;
             helpers->count += count;
         }
+    }
+    if (valid && file_count != 0 && !check_program_asm_plan_file(result, program, index, BUSTER_SCALAR_PATH(scalar), output))
+    {
+        result->status = CHECK_PROGRAM_RESOURCE;
+        valid = false;
     }
     if (valid && !check_program_asm_names(result, helpers, program, output, scratch))
     {
