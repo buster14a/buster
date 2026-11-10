@@ -5372,6 +5372,23 @@ static __attribute__((noinline, cold)) void check_input_multichar(CheckInputRead
     }
 }
 
+// A bit-precise constant's suffix before C23 (#1447): -Wc23-extensions' warning at the constant, as clang's
+// NumericLiteralParser gives it, once, as the constant evaluator may read the constant again.
+static __attribute__((noinline, cold)) void check_input_bit_int_suffix(CheckInputReader* reader, uint32_t token)
+{
+    const CheckWarningEvent event =
+    {
+        .id = CHECK_WARNING_ID_C23_PARAMETER,
+        .kind = CHECK_WARNING_EVENT_BIT_INT_SUFFIX,
+        .token = token,
+        .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+        .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+        .completion = token + 1,
+        .payload = { .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+    };
+    check_input_warning_once(reader, &event);
+}
+
 static const CheckInitString* check_input_string(CheckInputReader* reader, uint32_t token)
 {
     const Parser* parser = reader->parser;
@@ -5528,6 +5545,10 @@ static inline __attribute__((always_inline)) void check_input_literal(CheckInput
         const bool supported = result->bit_width <= BUSTER_CHECK_LITERAL_BIT_WIDTH;
         result->type = supported ? check_input_type_result(reader, type_bit_int(reader->types, result->bit_width, result->bit_unsigned)) : 0;
         result->valid = result->type != 0;
+        if (reader->parser->language.standard < 2023)
+        {
+            check_input_bit_int_suffix(reader, token);
+        }
     }
     reader->output->resource |= result->resource;
     CheckWarningEvent event;

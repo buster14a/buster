@@ -393,6 +393,9 @@ typedef enum CheckWarningEventKind
     // warning (#1447, -Wno-error=odr or a pragma's): at its name, with a CHECK_WARNING_NOTE_ATTRIBUTE_HERE at each list's
     // differing attribute, the earlier's first.
     CHECK_WARNING_EVENT_ODR_ATTRIBUTE,
+    // A bit-precise constant's suffix (wb or uwb) before C23 (#1447): -Wc23-extensions' "'_BitInt' suffix for literals is a
+    // C23 extension" (CHECK_WARNING_ID_C23_PARAMETER's option), at the constant.
+    CHECK_WARNING_EVENT_BIT_INT_SUFFIX,
     // __builtin_cpu_supports's literal of a feature clang doesn't know (#1843, check_input_cpu_supports_literal), at the
     // builtin's name: the description's message.
     CHECK_WARNING_EVENT_INVALID_CPU_SUPPORTS,
