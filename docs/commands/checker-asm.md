@@ -31,7 +31,11 @@ requirements. [Command index](README.md).
   templates are its whole code. Templates' labels are local unless a binding
   or visibility directive names them, and the other names they refer to are
   the unit's symbols of those link names or undefined globals
-  (`check_program_emit_asm_symbols`). A file-scope `asm`'s templates are
+  (`check_program_emit_asm_symbols`). A label or `.comm` (a
+  `BUSTER_LINK_SYMBOL_COMMON` symbol) of a name the unit declares without
+  defining defines that symbol (#1848); `test-checker-driver
+  --asm-definitions-only` compares such fixtures' `-c` symbols with clang's and
+  runs them. A file-scope `asm`'s templates are
   assembled by the emission into atoms of their sections before the functions'
   (`check_program_emit_file_asm`, #619), each in its section in `-c`'s object.
   `test-checker` runs each shape natively against clang -O0's build on both

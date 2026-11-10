@@ -7126,6 +7126,7 @@ static void check_test_driver_quad_literals(CheckTest* test, const char* clang, 
 // kind), a section whose name gives it another kind or type, and file-scope assembly with a symbol or of another kind
 // of section.
 #include "c_check_symbol_driver_test.c"
+#include "c_check_asm_definition_driver_test.c"
 #include "c_check_symbol_pragma_driver_test.c"
 #include "c_check_alias_driver_test.c"
 #include "c_check_common_driver_test.c"
@@ -7723,6 +7724,8 @@ static int run_checker_driver_tests(int argc, char** argv)
     bool semantic_recovery_only = false;
     // --type-sugar-only: the type sugar section alone (#1447).
     bool type_sugar_only = false;
+    // --asm-definitions-only: what inline assembly defines, against clang's objects and builds, alone (#1848).
+    bool asm_definitions_only = false;
     bool options = true;
     for (int i = 0; options && i < argc; i += 1)
     {
@@ -7750,6 +7753,10 @@ static int run_checker_driver_tests(int argc, char** argv)
         {
             type_sugar_only = true;
         }
+        else if (strcmp(argv[i], "--asm-definitions-only") == 0)
+        {
+            asm_definitions_only = true;
+        }
         else if (strcmp(argv[i], "--lazy-system-headers") == 0)
         {
             lazy = true;
@@ -7768,7 +7775,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             options = false;
         }
     }
-    const uint32_t focuses = (uint32_t)sign_compare_only + (uint32_t)cpu_dispatch_only + (uint32_t)semantic_recovery_only + (uint32_t)type_sugar_only;
+    const uint32_t focuses = (uint32_t)sign_compare_only + (uint32_t)cpu_dispatch_only + (uint32_t)semantic_recovery_only + (uint32_t)type_sugar_only + (uint32_t)asm_definitions_only;
     options &= focuses <= 1 && (focuses == 0 || (!lazy && check_driver_part.count == 1));
     // One focused section's alone: the others' gates take `focused` as --sign-compare-only's did.
     const bool focused = focuses != 0;
@@ -8275,6 +8282,10 @@ static int run_checker_driver_tests(int argc, char** argv)
     {
         check_test_driver_type_sugar(&test, clang, executable, directory);
     }
+    if (temporary && asm_definitions_only)
+    {
+        check_test_driver_asm_definitions(&test, clang, executable != NULL ? executable : "./build/compiler", directory);
+    }
     const char* clang_arguments[] = { "-std=gnu17", "-w" };
     if (temporary && !focused && !lazy && check_test_driver_takes())
     {
@@ -8543,6 +8554,10 @@ static int run_checker_driver_tests(int argc, char** argv)
             if (!lazy && check_test_driver_takes())
             {
                 check_test_driver_asm_object_symbols(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_asm_definitions(&test, clang, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
             {

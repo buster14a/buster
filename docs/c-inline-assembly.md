@@ -509,6 +509,30 @@ optional control is accepted and ignored, an undefined
 out of `-c`'s object (clang keeps its undefined symbol), and so is a
 `.set`/`.equ` absolute symbol (clang writes a local `ABS` symbol).
 
+A template's label, or its `.comm` (#1848), may define a symbol the unit
+declares without defining (`void f(void);` and `f:`, `extern long n;` and
+`.comm n,8,8`): the program's symbol is then the template's, as clang's
+assembler binds the C references to it. It has the template's type (none
+without `.type`, a `.comm`'s `SHN_COMMON` one), binding (local without a
+binding directive, as clang's object has it) and visibility, or else the
+declaration's; it is no undefined name for the direct path's runtime to
+supply, and C's code reaches it as it reaches any symbol it declares (through
+the GOT for an extern variable, as clang's code does). A `.comm` of a name the
+unit doesn't declare is the template's own common symbol. Both are
+`BUSTER_LINK_SYMBOL_COMMON` symbols of their own atoms, as C's commons are,
+which `-c`'s object writes `SHN_COMMON` and the direct path and the units' merge
+place as they place C's. A label or `.comm` of a name the unit defines, a
+tentative definition's too, stays refused ("inline assembly labels named as the
+unit's symbols"), with or without `-fcommon`: clang 23 has no coherent object
+for it. Without `-fcommon` its object makes C's `.bss` definition a common of
+C's size at the template's alignment, dropping an initializer's bytes; with
+`-fcommon` a `.comm` of C's size and alignment is the one common, and another
+size or alignment is a backend crash ("redeclared as different type").
+`test-checker-driver --asm-definitions-only`
+(`c_check_asm_definition_driver_test.c`) compares each fixture's `-c` symbols
+and data relocations with clang 23's, on both paths, and runs the objects
+linked by clang and the direct path's executables against clang's build.
+
 The matcher's index admits every form the assembler's syntax takes, whatever
 the unit's target. GNU as and clang's integrated assembler take any instruction
 in a template. The lowering makes the index on its scratch arena, once per unit
@@ -673,8 +697,6 @@ Each refusal names its feature, as the driver prints it ("unsupported: ..."):
   at st(0), a clobber below the outputs), which clang's code refuses too; and
   an integer in an x87 register. An x87 operand named in the template prints as
   its depth's register, `%st` or `%st(1)`, as GCC and clang print it;
-- a template's common symbols (`.comm` of a global, #1115), which only an
-  assembler's object holds (`SHN_COMMON`);
 - symbolic immediates, and constants outside their letter's range;
 - operands of types no general or XMM register holds by value, outside memory,
   but a vector in a template of no instructions that doesn't refer to it;
@@ -690,7 +712,8 @@ Each refusal names its feature, as the driver prints it ("unsupported: ..."):
 - templates the assembler refuses, with its message, and a template's CFI
   directives, whose frame would be the helper's own unwind entry's;
 - a label two templates define, a `.L` name no template defines, and a label
-  with one of the unit's symbols' names, which GNU as and clang reject;
+  (or a `.set`) with the name of a symbol the unit defines, which GNU as and
+  clang reject;
 - a label in a template of no instructions, which would be a place in its
   function's code;
 - a template that returns before any branch (`ret`, `rep ret`, a `leave` and
