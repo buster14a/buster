@@ -43,8 +43,8 @@
 #endif
 
 // ir_source_prepare's linkage (main.c's BUSTER_IR_SOURCE_ENTRY): main.c's units compile it in the checker's, its home,
-// whose check and emission it runs, and call it from the backend's, where the IR's commands run (#784); a unit of its own
-// has it static.
+// whose check and emission it runs. The backend's IR commands (#784) read its declaration and call that home; a unit
+// of its own has it static.
 #ifndef BUSTER_IR_SOURCE_ENTRY
 #define BUSTER_IR_SOURCE_ENTRY static
 #endif
@@ -93,6 +93,7 @@ struct IrSourceFile
     char reason[256];
 };
 
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_CHECKER
 // The semantic result type of body `b`'s function: its RETURN entries' class (each RETURN of a function returns its
 // class: tier0_validate), which for a struct or a union is the address of its bytes (U64) or nothing (an empty one's);
 // or for a function no RETURN leaves, its declared result's class, an aggregate's taken as its address's.
@@ -116,7 +117,7 @@ BUSTER_IR_SOURCE_ENTRY void ir_source_prepare(IrSourceFile* result, const char* 
     // path), its checked program made with the options' target and the predefines its functions' target attributes
     // resolve against (CheckProgram.body_targets, IrSourceFunction.target_features), its referenced definitions
     // selected and their target features checked. The source's state lives in an arena of its own that the file's end
-    // releases: an entry point, which main.c's other units see as an inline definition, holds no static object.
+    // releases: an entry point, which main.c's other units call through its declaration, holds no static object.
     CheckSource source;
     const bool chosen = check_source_prepare(&source, file, options, option_count, (CheckSourceRequest){ .select = true, .emits = true, .lifetimes = lifetimes, .asm_helpers = true });
     const bool allocated = source.pp != 0;
@@ -298,6 +299,9 @@ BUSTER_IR_SOURCE_ENTRY void ir_source_prepare(IrSourceFile* result, const char* 
     arena_release(&bytes);
     check_source_release(&source);
 }
+#else
+__attribute__((noinline)) void ir_source_prepare(IrSourceFile* result, const char* file, char** options, uint32_t option_count, Arena* lowered, Arena* arena, bool keep_program, bool lifetimes);
+#endif
 
 // Only the backend's commands need the fixtures; the preparation above also serves the checker's code certificate.
 #if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)

@@ -6,6 +6,11 @@ This inventory covers the source/fixture series based on
 build-driver work is also present. Build settings, no-op implementation,
 linking, baking and publication belong to the separate driver effort.
 
+The counts and validation results below describe that fixture series. Later
+production boundaries for the preprocessor, executable writer and source/code
+generation consumers are maintained in the
+[current build guide](commands/build.md#production-parsing-and-implementation-dependencies).
+
 ## Completed packets
 
 The drafts form an ordered stack; none is merge authorization.

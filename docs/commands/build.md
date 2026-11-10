@@ -267,8 +267,9 @@ time (clang 18, locally).
 
 ### Unity test dependencies
 
-The eleven `main.c` units share the compiler implementation and the fixtures
-used across test families. Independent test files are included only by the unit
+The eleven `main.c` units share the compiler interfaces and the fixtures
+used across test families. Production bodies are limited to their consumers,
+as described below. Independent test files are included only by the unit
 that runs them, with the same guard around their command branches. This avoids
 parsing those tests in the other ten units during a clean build, and Ninja's
 depfiles keep their edits local: for example, `c_check_builtin_bits_test.c`
@@ -283,7 +284,9 @@ compiled only by `main_unit_checker.c`. Editing `c_check_program_test.c`,
 nested `c_check_program_amx_test.c` therefore rebuilds that unit alone. Editing
 the checker driver suite `c_checker_driver_test.c` or the debug test
 `c_check_debug_tier1_parameters_test.c` also rebuilds only that unit. Editing
-the shared `c_checker_test.c` root still rebuilds all eleven units.
+the shared `c_checker_test.c` root rebuilds the checker semantic consumers
+pinned in the ownership table. Unrelated units no longer include that root;
+a configured fuzz DRIVER retains its helpers.
 
 The backend similarly owns the private IR, interpreter, optimizer and Tier 1
 fixtures. Edits to nested files such as `ir_simd_model_test.c`,
@@ -291,20 +294,20 @@ fixtures. Edits to nested files such as `ir_simd_model_test.c`,
 and `tier1_address_coalesce_test.c` rebuild only `main_unit_backend.c`.
 The optimizer roots `ir_optimize_test.c` and `ir_optimize_text_test.c`, including
 their nested if-conversion and verified-pass fixtures, also belong to BACKEND.
-Other units include the production `ir_if_convert.c` and
-`ir_optimize_verified.c` directly at the same positions. Editing those production
-passes still rebuilds all eleven main units. The source preparation interface in
-`ir_source_test.c` serves BACKEND and CHECKER; other units include production
-`ir_dataflow.c` directly at the same position. The source root and
-`tier1_select_burs_test.c` therefore rebuild those two consumers alone, while
-`ir_dataflow.c` remains a dependency of all eleven units. Four narrow semantic
-references retain production unused-function checking without emitting code.
+Production pass includes retain their positions within the units that consume
+them, so narrowing the test roots does not reorder emitted code. Source
+preparation and the BURS/selection helpers serve BACKEND and CHECKER. The
+production IR and code-generation families are also guarded for their actual
+consumers; their exact owner sets are pinned in the build regression. Narrow
+semantic references retain production unused-function checking without emitting
+code in units that omit the associated fixture callers.
 
 The backend also owns the private Tier 0 fixtures, their nested tests and vector
 baseline, the mask tests and the streaming tests and benchmark. Editing those
 files rebuilds only `main_unit_backend.c`. `tier0_test_same_code` and its unwind
 consumer belong to that same unit, so the entire `tier0_test.c` root is private.
-Production `tier0_generate.c` and `streaming.c` retain all eleven owners.
+Production `tier0_generate.c` and `streaming.c` follow the code-generation
+consumer guards rather than making unrelated units parse their bodies.
 
 Nonstandard support names follow the same rule. The differential command's
 `differential.c` belongs to BACKEND. `test_tool.c` keeps probing helpers for
@@ -412,6 +415,40 @@ benchmark. An implementation edit therefore rebuilds FRONTEND alone on a scalar
 host, and FRONTEND plus `c_parser_benchmark.c` on a vector host. Shared interface
 edits still rebuild their consumers.
 
+The preprocessor follows the same interface/body boundary. Shared state,
+declarations, feature tables and reader helpers remain in `c_preprocessor.c`;
+`c_preprocessor_impl.c` holds the private bodies, private tables and generated
+predefines. `c_preprocessor_history.c` keeps the shared history reader and
+diagnostic declarations; `c_preprocessor_history_impl.c` holds history writers
+and diagnostic rendering. The literal evaluator in `c_preprocessor_literal.c`
+is included through the private implementation. Ordinary unity builds read
+these private files only in FRONTEND and keep the same externally emitted entry
+points there. Standalone preprocessor, parser and files benchmarks keep the
+complete source through the shared interface.
+
+`executable.c` retains the writer's public types and declaration, section names,
+hash helpers and unwind/debug readers. `executable_impl.c` contains layout,
+patching, file output and the original `executable_write` body. DYNAMIC remains
+the externally emitted writer's home; EXECUTABLE also reads the private bodies
+for its direct tests, retaining the existing entry-point linkage. Other unity
+units read the shared interface. The standalone executable, snapshot and link
+benchmarks retain the complete implementation.
+
+Source checking and code-generation dependencies are guarded separately.
+CHECKER owns the source reader, graph checking, whole-program checking and
+source lowering. BACKEND calls its existing `ir_source_prepare` entry through
+a declaration, retaining the shared status, vector/x86 rows and frame verifier
+needed by its own commands. CHECKER and BACKEND both read the code-generation
+families; DRIVER retains only its existing shared IR counter and baked BURS
+table definitions. CHECK_BUILTINS keeps semantic actions, constant helpers and
+comparisons without the source reader or code-generation families. These
+boundaries keep command homes, section placement and optimization settings
+unchanged.
+`BUSTER_FUZZ_AVAILABLE=1` retains the source/checker/code-generation interfaces
+and the private preprocessor and executable bodies in DRIVER as well, so both
+the default callback and a `BUSTER_FUZZ_ENTRY` override keep their existing
+module access. Ordinary builds do not acquire that additional owner.
+
 The x86 target-form row enums, initializers and per-row policy assertions are
 also parsed only by their data owner or a standalone consumer. Other units use
 complete array declarations with two explicit bounds. The owner recomputes
@@ -420,18 +457,31 @@ a row requires updating the interface deliberately. Editing row contents rebuild
 FRONTEND and `tier1_model_measure.c`, plus `tier1_select_benchmark.c` on a vector
 host; changing a shared bound correctly rebuilds the readers too.
 
-The ownership-only check pins both production paths to FRONTEND in the unity
-graph. The full build regression also checks their exact incremental fanout,
-including standalone consumers, and rejects both kinds of target row-count
-drift. A new dependency cannot silently undo these boundaries.
+The ownership-only check pins production paths to their exact named unity
+consumers, including configured fuzz access. The full build regression also
+checks incremental fanout, including standalone consumers, and rejects both
+kinds of target row-count drift. A new dependency cannot silently undo these
+boundaries.
 
-The [validation packet](https://github.com/buster14a/buster-performance/tree/f29dc2c6616fb0530a2b21b1555507da79f7ba25/docs/measurements/build-production-codegen-2026-11-09)
+The [2026-11-10 validation packet](https://github.com/buster14a/buster-performance/tree/5223db00aaf609229db2d7911d70d1404bb1e774/docs/measurements/build-owner-boundaries-2026-11-10)
+compares this ownership pass with merged revision `39506e86`. It reduces the
+eleven unity units' preprocessed input by 43.7% for scalar and 44.0% for vector
+builds. Actual Ninja plans for private preprocessor edits shrink from eleven
+compilations to one on scalar, or fourteen to four on vector; private writer
+edits shrink from eleven to two or fourteen to five. Shared-interface positive
+controls retain their original consumers. All 86 Release objects and both
+complete baked compiler executables are byte-identical to the baseline.
+The packet includes the exact input manifest, candidate patch, dependency
+captures and validation receipts. These are structural-work measurements;
+approved Ryzen 7 9700X elapsed-time qualification remains pending.
+
+The earlier parser/target-row [validation packet](https://github.com/buster14a/buster-performance/tree/f29dc2c6616fb0530a2b21b1555507da79f7ba25/docs/measurements/build-production-codegen-2026-11-09)
 records the before/after dependencies, the parser definition and object
 preservation checks, and the optional parallel-codegen contract and runtime
-results below. Ordinary unity expansion falls by about 35 MB (10.6%) in each
-host configuration. Its elapsed-time observations are development diagnostics;
-approved-host build and runtime measurements are still required before changing
-the experimental mode's default.
+results below. That packet reduced ordinary unity expansion by about 35 MB
+(10.6%) in each host configuration. Its elapsed-time observations are
+development diagnostics; approved-host build and runtime measurements are still
+required before changing the experimental mode's default.
 
 ### Preventing dependency growth
 
@@ -450,6 +500,11 @@ closure. Every active descendant is checked regardless of suffix, extension or
 directory, including headers, `.inc` files and generated fixture data. The
 default is exactly one unity owner. A shared root never exempts a new child or
 prefix. Important nonstandard paths also assert the command's exact owner.
+Production implementation boundaries have separate exact path/owner rows even
+when their filenames do not identify fixtures. A boundary may name several
+consumers; missing, added or substituted owners all fail. Configuration-specific
+access must come from the selected build's settings, not from the dependency
+record being checked.
 
 Shared exceptions name exact paths, explicit owner sets and a reason; even the
 current eleven-unit set is explicit, so adding a unit cannot silently widen it.
@@ -470,6 +525,15 @@ not a C semantic analysis: function bodies, data initializers and macro
 replacement bodies still need review for private fixture growth. Macro-computed
 include paths need an explicit assertion if literal closure cannot discover
 them. Keep includes literal where practical.
+
+When splitting a production implementation, preserve its original definitions,
+entry-point linkage and standalone access. Register the private file and its
+private descendants in the ownership assertions, check the complete edit plan,
+and update `tools/ci/changes.c` so runtime consumers keep their benchmark
+selection. Its standalone benchmark traversal follows literal
+`#include "buster/..."` paths; use that spelling for new implementation
+includes, including nested implementation files. Compile the ordinary scalar
+and vector consumers and any configured fuzz DRIVER after changing the guards.
 
 After building the selected configuration, run the check directly with:
 

@@ -8,6 +8,17 @@ item 2, tracked in #117 and its parts #118 to #125. This document records the
 design, how it is checked against clang, the Zen 5 measurements, and what comes
 next.
 
+`c_preprocessor.c` keeps shared state, declarations, feature tables and reader
+helpers; `c_preprocessor_impl.c` contains the private bodies, private tables
+and generated predefines. `c_preprocessor_history.c` supplies the shared
+history reader and diagnostic declarations, with recording and rendering in
+`c_preprocessor_history_impl.c`. The implementation includes the private
+literal evaluator in `c_preprocessor_literal.c`. FRONTEND reads these bodies
+in ordinary unity builds; standalone consumers and the configured fuzz DRIVER
+retain the complete module. Entry-point homes and runtime algorithms are
+unchanged. The [build guide](commands/build.md#production-parsing-and-implementation-dependencies)
+describes the dependency boundary.
+
 The [2026-10-23 acceptance refresh](https://github.com/buster14a/buster-performance/blob/a00d16e47b6f1090b8a0424ab0dd8cb4e6016713/docs/measurements/preprocessor-117-2026-10-23/README.md)
 records frozen source and corpus identities, the independent scalar reference,
 lookup and final-output accounting, and the evidence for #118 through #124.
@@ -1887,7 +1898,9 @@ to the normal 9700X checks; this change makes no throughput claim.
 
 ### Expansion history and diagnostics
 
-`c_preprocessor_history.c` implements #108. The four output columns stay the
+`c_preprocessor_history.c` and `c_preprocessor_history_impl.c` implement #108:
+shared readers and declarations in the former, recording and diagnostic
+rendering in the latter. The four output columns stay the
 same: `kinds`, `flags`, `values`, and spelling `locations`. Origin handles live
 only in temporary argument, capture and expansion buffers. Completed output
 keeps sorted, maximal eight-byte `(token index, origin)` runs. Ordinary file

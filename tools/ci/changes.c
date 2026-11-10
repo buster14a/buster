@@ -426,7 +426,7 @@ struct ChangesBenchmark
 static const ChangesBenchmark changes_benchmarks[] = {
     {
         .name = "assembler",
-        .sources = "assembler[a-z0-9_]*|branch_sizing|c_intern|c_lexer|c_predefines|c_preprocessor|c_refine|lane|link|"
+        .sources = "assembler[a-z0-9_]*|branch_sizing|c_intern|c_lexer|c_predefines|c_preprocessor(_history)?(_impl)?|c_refine|lane|link|"
                    "object_writer|x86_64_encoder|x86_match|x86_semantics|x86_target[a-z0-9_]*",
     },
     {
@@ -485,21 +485,21 @@ static const ChangesBenchmark changes_benchmarks[] = {
         .name = "checker-bindings",
         .sources = "c_check[a-z0-9_]*|c_builtin[a-z0-9_]*|c_bindings|c_environment|c_gnu|c_intern|c_lexer[a-z0-9_]*|"
                    "c_lowering|c_parser[a-z0-9_]*|c_predefines[a-z0-9_]*|c_preprocessor[a-z0-9_]*|c_refine|c_types|"
-                   "c_types_transparent|preprocessor_fuzz[a-z0-9_]*|bind|dynamic|executable|import|lane|link|"
+                   "c_types_transparent|preprocessor_fuzz[a-z0-9_]*|bind|dynamic|executable(_impl)?|import|lane|link|"
                    "object_writer|runtime|snapshot|x86_64_encoder|x86_target",
     },
     {
         .name = "checker-deferred",
         .sources = "c_check[a-z0-9_]*|c_builtin[a-z0-9_]*|c_bindings|c_environment|c_gnu|c_intern|c_lexer[a-z0-9_]*|"
                    "c_lowering|c_parser[a-z0-9_]*|c_predefines[a-z0-9_]*|c_preprocessor[a-z0-9_]*|c_refine|c_types|"
-                   "c_types_transparent|preprocessor_fuzz[a-z0-9_]*|bind|dynamic|executable|import|lane|link|"
+                   "c_types_transparent|preprocessor_fuzz[a-z0-9_]*|bind|dynamic|executable(_impl)?|import|lane|link|"
                    "object_writer|runtime|snapshot|x86_64_encoder|x86_target",
     },
     {
         .name = "checker-source",
         .sources = "c_check[a-z0-9_]*|c_builtin[a-z0-9_]*|c_bindings|c_environment|c_gnu|c_intern|c_lexer[a-z0-9_]*|"
                    "c_lowering|c_parser[a-z0-9_]*|c_predefines[a-z0-9_]*|c_preprocessor[a-z0-9_]*|c_refine|c_types|"
-                   "c_types_transparent|preprocessor_fuzz[a-z0-9_]*|bind|dynamic|executable|import|lane|link|"
+                   "c_types_transparent|preprocessor_fuzz[a-z0-9_]*|bind|dynamic|executable(_impl)?|import|lane|link|"
                    "object_writer|runtime|snapshot|x86_64_encoder|x86_target",
     },
     {
@@ -539,7 +539,7 @@ static const ChangesBenchmark changes_benchmarks[] = {
     {
         .name = "gnu",
         .sources = "c_bindings|c_gnu[a-z0-9_]*|c_intern|c_lexer[a-z0-9_]*|c_parser(_impl)?|c_parser_binding_trace|"
-                   "c_predefines|c_preprocessor|c_preprocessor_history|c_builtin_catalog|c_refine|lane|x86_target",
+                   "c_predefines|c_preprocessor(_history)?(_impl)?|c_builtin_catalog|c_refine|lane|x86_target",
     },
     {
         .name = "import",
@@ -613,7 +613,7 @@ static const ChangesBenchmark changes_benchmarks[] = {
     {
         .name = "parser-bindings",
         .sources = "c_bindings[a-z0-9_]*|c_gnu|c_intern|c_lexer[a-z0-9_]*|c_parser[a-z0-9_]*|c_predefines|"
-                   "c_preprocessor|c_preprocessor_history|c_builtin_catalog|c_refine|lane|x86_target",
+                   "c_preprocessor(_history)?(_impl)?|c_builtin_catalog|c_refine|lane|x86_target",
     },
     {
         .name = "preprocessor",
@@ -638,7 +638,7 @@ static const ChangesBenchmark changes_benchmarks[] = {
     },
     {
         .name = "streaming",
-        .sources = "streaming[a-z0-9_]*|unwind[a-z0-9_]*|debug|executable|link[a-z0-9_]*|object_writer[a-z0-9_]*|"
+        .sources = "streaming[a-z0-9_]*|unwind[a-z0-9_]*|debug|executable(_impl)?|link[a-z0-9_]*|object_writer[a-z0-9_]*|"
                    "c_types|calling_convention(_builtins)?|lane|tier0|tier0_generate|x86_64_encoder|x86_semantics|branch_sizing",
     },
     {
@@ -1742,6 +1742,29 @@ static const ChangesFixture changes_fixtures[] = {
         .files = "src/buster/compiler/c_preprocessor.c",
         .outputs_false = "preprocessor_clang",
         .measured = "preprocessor",
+    },
+    {
+        .name = "the preprocessor implementation keeps its runtime consumers",
+        .files = "src/buster/compiler/c_preprocessor_impl.c",
+        .outputs_true = "code",
+        .outputs_false = "preprocessor_clang",
+        .measured = "preprocessor parser parser-bindings gnu assembler checker-source backend-source",
+        .unmeasured = "lexer x86-encoder",
+    },
+    {
+        .name = "the history implementation keeps diagnostics and source consumers",
+        .files = "src/buster/compiler/c_preprocessor_history_impl.c",
+        .outputs_true = "code",
+        .outputs_false = "preprocessor_clang",
+        .measured = "preprocessor parser parser-bindings gnu assembler checker-source backend-source",
+        .unmeasured = "lexer x86-encoder",
+    },
+    {
+        .name = "the executable implementation keeps writer and transitive consumer measurements",
+        .files = "src/buster/compiler/executable_impl.c",
+        .outputs_true = "code",
+        .measured = "executable snapshot link streaming foreign-strings checker-source checker-bindings checker-deferred",
+        .unmeasured = "lexer preprocessor parser",
     },
     {
         .name = "the preprocessor benchmark's harness, which times clang -E",

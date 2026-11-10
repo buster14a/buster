@@ -183,12 +183,14 @@ static bool check_test_value_equal(const CheckValue* a, const CheckValue* b)
 }
 
 // Whether two graphs' leaves of VALUE node `node` are the same value, whichever form each graph holds its leaves in.
+#if BUSTER_SOURCE_CONSUMER
 static __attribute__((unused)) bool check_test_leaf_equal(const CheckGraph* x, const CheckGraph* y, uint32_t node)
 {
     const CheckValue a = check_graph_leaf_value(x, node);
     const CheckValue b = check_graph_leaf_value(y, node);
     return check_test_value_equal(&a, &b);
 }
+#endif
 
 #if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) || BUSTER_IN_UNIT(BUSTER_UNIT_CHECK_BUILTINS)
 static bool check_test_action_equal(const CheckActionResult* a, const CheckActionResult* b)
@@ -1619,6 +1621,7 @@ static __attribute__((noinline)) void check_test_actions_batch(CheckTest* test, 
 
 #endif
 
+#if BUSTER_SOURCE_CONSUMER
 static bool check_test_stream_equal(const CheckStream* a, const CheckStream* b, uint32_t arguments)
 {
     bool equal = a->status == b->status && a->count == b->count && a->report_count == b->report_count && a->effect_count == b->effect_count &&
@@ -1662,6 +1665,7 @@ static bool check_test_stream_equal(const CheckStream* a, const CheckStream* b, 
     }
     return equal;
 }
+#endif
 
 #if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
 // `graph` cut to its first `count` nodes, with the leaves of the VALUE nodes among them.
