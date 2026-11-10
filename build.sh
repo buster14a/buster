@@ -149,6 +149,7 @@ settings=(
     "-DBUSTER_BAKE=${BUSTER_BAKE:-1}"
     "-DBUSTER_PGO=${BUSTER_PGO:-0}"
     "-DBUSTER_PGO_TRAIN=$pgo_train"
+    "-DBUSTER_PARALLEL_CODEGEN=${BUSTER_PARALLEL_CODEGEN:-0}"
 )
 
 # The long commands (configuring, building, testing, checking) run in a process group of their own, `child`, which an
@@ -298,6 +299,10 @@ if [ "${BUSTER_PGO:-0}" = 1 ]; then
     [ "$config" = Release ] || die "BUSTER_PGO builds the Release configuration alone"
     configurations=Release
 fi
+if [ "${BUSTER_PARALLEL_CODEGEN:-0}" = 1 ]; then
+    [ "$config" = Release ] || die "BUSTER_PARALLEL_CODEGEN builds the Release configuration alone"
+    configurations=Release
+fi
 tree="$root/build/cmake/$variant"
 binary="$tree/$config/compiler"
 
@@ -379,7 +384,7 @@ configure_arguments=(
 )
 clang_version="$("$clang" --version)"
 toolchain="clang $clang ($(realpath "$clang")): ${clang_version%%$'\n'*}"
-tools="$(command -v nm llvm-nm readelf llvm-readelf wild mold ld.lld ld.bfd | tr '\n' ' ' || true)"
+tools="$(command -v nm llvm-nm llvm-split llvm-objcopy readelf llvm-readelf wild mold ld.lld ld.bfd | tr '\n' ' ' || true)"
 stamp="$tree/build.sh.configuration"
 wanted="$(printf '%s\n' "$toolchain" "cmake $cmake $cmake_version" "ninja $ninja $ninja_version" "tools $tools" "${configure_arguments[@]}")"
 

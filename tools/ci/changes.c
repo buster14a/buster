@@ -304,7 +304,7 @@ static const ChangesModule changes_modules[] = {
     },
     {
         .name = "parser_bindings",
-        .sources = "c_parser|c_parser_binding_trace|c_parser_bindings[a-z0-9_]*|c_bindings[a-z0-9_]*",
+        .sources = "c_parser(_impl)?|c_parser_binding_trace|c_parser_bindings[a-z0-9_]*|c_bindings[a-z0-9_]*",
     },
     {
         .name = "environments",
@@ -374,7 +374,7 @@ static const ChangesModule changes_modules[] = {
     {
         .name = "compile_time",
         .sources = "c_check_clock|c_checker_driver|c_check_program_emit|c_check_program_lower|c_check_program_batch|"
-                   "compile_measure|baked|c_check_input|c_checker|c_parser|lane|c_check_program",
+                   "compile_measure|baked|c_check_input|c_checker|c_parser(_impl)?|lane|c_check_program",
     },
     // #138's and #1189's programs, speedtest1 and Lua's scripts, by both tiers, clang -O0 and -O2 and tcc
     // (measure-tier1-programs): where Tier 1's input or pipeline changes what --tier1 compiles them to (the checker's
@@ -538,7 +538,7 @@ static const ChangesBenchmark changes_benchmarks[] = {
     },
     {
         .name = "gnu",
-        .sources = "c_bindings|c_gnu[a-z0-9_]*|c_intern|c_lexer[a-z0-9_]*|c_parser|c_parser_binding_trace|"
+        .sources = "c_bindings|c_gnu[a-z0-9_]*|c_intern|c_lexer[a-z0-9_]*|c_parser(_impl)?|c_parser_binding_trace|"
                    "c_predefines|c_preprocessor|c_preprocessor_history|c_builtin_catalog|c_refine|lane|x86_target",
     },
     {
@@ -1706,6 +1706,15 @@ static const ChangesFixture changes_fixtures[] = {
         .outputs_true = "checker_bindings checker_binding_modes parser_bindings",
         .outputs_false = "checker",
         .measured = "parser-bindings",
+    },
+    {
+        .name = "the parser implementation keeps the parser, binding and compile campaigns",
+        .files = "src/buster/compiler/c_parser_impl.c",
+        .outputs_true = "code parser_bindings compile_time",
+        .outputs_false = "checker checker_bindings checker_binding_modes preprocessor_clang",
+        .measured = "parser parser-bindings gnu checker-source checker-bindings checker-deferred backend-source "
+                    "check-debug check-lanes ir-source lowering-source",
+        .unmeasured = "lexer preprocessor x86-encoder",
     },
     {
         .name = "a digit in a module's name",

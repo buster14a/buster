@@ -17,7 +17,7 @@
 // nothing, so that they have external linkage there, and in the other units BUSTER_ELSEWHERE, which makes their
 // definitions inline ones that are never inlined, which clang doesn't emit: their calls go to the home's, and the
 // static functions that only the entry points reach aren't emitted there either. A unit without main.c, a benchmark's,
-// has them static. Each unit still reads the shared implementation definitions for diagnostics. A command
+// has them static. The parser instead exposes declarations; only FRONTEND reads its implementation. A command
 // whose code calls a home's entry point runs in two units' copies of the code, so a home's code must share no static
 // variable with its callers' units: main.c's units have one lane context (lane.c), and ./build.sh check-call-graph
 // checks the rest (call_graph.c).
@@ -68,7 +68,8 @@
 // ir_source_prepare, the driver's check and emission of a file), which the backend's unit runs with the IR (#784).
 #define BUSTER_LEXER_ENTRY BUSTER_HOME_DRIVER
 #define BUSTER_PREPROCESSOR_ENTRY BUSTER_HOME_FRONTEND
-#define BUSTER_PARSER_ENTRY BUSTER_HOME_FRONTEND
+// Parser bodies are included only by their frontend home; the other units use these external declarations.
+#define BUSTER_PARSER_ENTRY
 #define BUSTER_LINKER_ENTRY BUSTER_HOME_DYNAMIC
 #define BUSTER_IR_SOURCE_ENTRY BUSTER_HOME_CHECKER
 
@@ -1070,9 +1071,6 @@ static __attribute__((unused)) void main_ir_source_interfaces(void)
 static __attribute__((unused)) void main_frontend_test_interfaces(void)
 {
     (void)&pp_test_read_output;
-    (void)&parse_kernels_reserve;
-    (void)&parse_twins;
-    (void)&parse_vector_postorder_reserve;
     (void)&parse_test_status_bytes;
     (void)&parse_test_lowest_descriptor;
     (void)&parse_test_read_capture;
@@ -1627,12 +1625,14 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
         arena_limits_fix();
         result = run_check_command_mode(argc - 2, argv + 2, false, false);
     }
+#if BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND) && argc >= 2 && strcmp(argv[1], "parse") == 0)
     {
         arena_static_base_pages();
         arena_limits_fix();
         result = run_parse_command(argc - 2, argv + 2);
     }
+#endif
 #if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "test-checker") == 0)
     {
