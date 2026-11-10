@@ -3455,12 +3455,20 @@ What the lowering covers past scalars (#145's programs):
   alignment less 16 bytes more, and its address rounds up to its alignment,
   `(address + alignment - 1) & -alignment`, where clang's code rounds rsp down:
   `ALLOCA`'s address is a multiple of 16. An array declared in a `for`
-  statement's clause or directly in a statement expression's block, and one
-  initialized (C23's `= {}`), are refused by name. The source reader doesn't yet take a bound whose
-  statement expression holds more than expression statements (a declaration,
-  an `if` or a jump: `invalid or unsupported declaration`); the control stream
-  already puts such a jump out of a block's first array's bounds before the
-  block's `STACK_SAVE`, where it needs no restore.
+  statement's clause is released where the statement ends, after its own
+  variables' cleanups, which its condition and its breaks reach; one declared
+  directly in a statement expression's block, after the expression's value is
+  kept and its block's cleanups ran, as clang's code releases them (#1447). One
+  initialized (C23's `= {}`, the only initializer one takes) is cleared whole
+  where it is allocated, by memset of its runtime size, as clang's code clears
+  it. A bound whose statement expression holds more than expression statements
+  (a declaration, an `if`, a jump or a label: `[({ int k = n; k + 1; })]`),
+  which the constant reader can't read before the walk has, makes a block-scope
+  array variable without that reading (#1447, `check_input_vla_walked`): it is
+  no integer constant expression, and the walk checks and evaluates it whole,
+  its block's declarations among its statements. The control stream puts such a
+  jump out of a block's first array's bounds before the block's `STACK_SAVE`,
+  where it needs no restore.
 - **Labels as values** (GNU C's, which Lua's interpreter dispatches with).
   `&&label` is a `void *` address constant of the label's own object (its
   token plus one, which no declaration has); a label its function doesn't

@@ -2095,7 +2095,12 @@ static void check_control_expand(CheckControlWriter* writer, CheckControlTask ta
         }
         else
         {
-            // Its own variables' cleanups run where it ends, which its condition and its breaks reach.
+            // Its own variable-length arrays are released where it ends (#1447), after its own variables' cleanups, which
+            // run there too, which its condition and its breaks reach.
+            if (writer->variable && writer->vla_blocks[token] != 0)
+            {
+                check_control_entry(writer, CHECK_CONTROL_STACK_RESTORE, token, BUSTER_CHECK_NONE, token);
+            }
             const uint32_t scope = writer->cleanup_count != 0 ? check_control_opening(writer, token, PARSE_ROLE_OPEN_FOR) : BUSTER_CHECK_NONE;
             if (scope != BUSTER_CHECK_NONE)
             {
@@ -2578,12 +2583,18 @@ static void check_control_build(CheckControlWriter* writer, uint32_t opening)
             check_control_end(writer, source->closing);
             writer->region_final = BUSTER_CHECK_NONE;
             writer->in_region = false;
-            // Its block's cleanups, after its END: they run once its value is computed (check_lower_region).
+            // Its block's cleanups, after its END: they run once its value is computed (check_lower_region), and then its
+            // variable-length arrays' release (#1447), as a block's end has them.
             const uint32_t ended = writer->count;
             const uint32_t block = writer->cleanup_count != 0 ? check_control_opening(writer, source->block, PARSE_ROLE_OPEN_BLOCK) : BUSTER_CHECK_NONE;
             if (block != BUSTER_CHECK_NONE)
             {
                 check_control_cleanups(writer, source->block, BUSTER_CHECK_NONE, block);
+                check_control_drain(writer);
+            }
+            if (writer->variable && writer->vla_blocks[source->block] != 0)
+            {
+                check_control_entry(writer, CHECK_CONTROL_STACK_RESTORE, source->block, BUSTER_CHECK_NONE, source->block);
                 check_control_drain(writer);
             }
             region->cleanups = writer->count - ended;

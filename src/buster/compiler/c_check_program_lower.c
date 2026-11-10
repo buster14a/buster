@@ -13959,11 +13959,14 @@ static void check_lower_initializer(CheckLowerWriter* writer, CheckControl contr
     const CheckProgram* program = writer->program;
     const CheckInitializers* initializers = program->initializers;
     const uint32_t declaration = control.token;
+    // A variable-length array's `= {}`, which its allocation cleared (check_lower_allocate).
+    const uint32_t array = declaration < program->input->token_count ? check_lower_local_of(writer, program->input->objects[declaration]) : BUSTER_CHECK_NONE;
+    const bool cleared_array = array < writer->local_count && writer->indirect[array] == BUSTER_CHECK_LOWER_VLA_ALLOCATED;
     if (initializers == 0 || control.target >= initializers->count || declaration >= program->input->token_count)
     {
         check_lower_fail(writer, CHECK_PROGRAM_INVALID);
     }
-    else
+    else if (!cleared_array)
     {
         const uint32_t local = check_lower_local_of(writer, program->input->objects[declaration]);
         const bool object = local != BUSTER_CHECK_NONE && writer->local_sizes[local] != 0;
@@ -14427,8 +14430,10 @@ static void check_lower_stack(CheckLowerWriter* writer, CheckControl control)
 // A variable-length array's object at its declaration (CHECK_CONTROL_ALLOCATE): its size from its type's extents,
 // taken from the stack (ALLOCA) into its local. Aligned past 16 bytes, whose multiple ALLOCA's address is, it takes its
 // alignment less 16 more and its address rounds up to its alignment, (address + alignment - 1) & -alignment, where
-// clang's code rounds rsp down. Refused in a block whose end has no control entry of its own (a for statement's
-// declaration, a statement expression's block), or initialized (C23's = {}).
+// clang's code rounds rsp down. Its block is a compound statement's, a statement expression's or a for statement's
+// (`target` its `)`), whose end releases it (check_control_expand, check_control_build). One initialized (C23's `= {}`,
+// the only initializer one takes) is cleared whole here, by memset of its runtime size as clang's code clears it, and
+// its INITIALIZE does nothing more (check_lower_initializer).
 static void check_lower_allocate(CheckLowerWriter* writer, CheckControl control)
 {
     const CheckProgram* program = writer->program;
@@ -14437,7 +14442,7 @@ static void check_lower_allocate(CheckLowerWriter* writer, CheckControl control)
     const uint32_t object = declaration < input->token_count ? input->objects[declaration] : 0;
     const uint32_t local = object != 0 && object < program->object_count ? check_lower_local_of(writer, object) : BUSTER_CHECK_NONE;
     const uint8_t role = control.target < input->token_count ? program->parser->tree.roles[control.target] : 0;
-    const bool block = (role == PARSE_ROLE_CLOSE_BLOCK || role == PARSE_ROLE_CLOSE_BODY) && input->expression_regions[control.target] == 0;
+    const bool block = role == PARSE_ROLE_CLOSE_BLOCK || role == PARSE_ROLE_CLOSE_BODY || role == PARSE_ROLE_CLOSE_FOR;
     const TypeId type = local != BUSTER_CHECK_NONE ? input->declared_types[declaration] : 0;
     const CheckInputAttributes* attributes = local != BUSTER_CHECK_NONE ? check_input_attributes_at(input, declaration) : 0;
     // Its type's alignment, or its declaration's attribute's where larger (the log2 plus one, 0 for none).
@@ -14452,11 +14457,7 @@ static void check_lower_allocate(CheckLowerWriter* writer, CheckControl control)
     }
     else if (!block)
     {
-        check_lower_unsupported(writer, "variable-length arrays declared in a for statement or in a statement expression's block");
-    }
-    else if (initialized)
-    {
-        check_lower_unsupported(writer, "initialized variable-length arrays");
+        check_lower_fail(writer, CHECK_PROGRAM_INVALID);
     }
     else
     {
@@ -14476,6 +14477,17 @@ static void check_lower_allocate(CheckLowerWriter* writer, CheckControl control)
         }
         check_lower_emit(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, local);
         writer->indirect[local] = BUSTER_CHECK_LOWER_VLA_ALLOCATED;
+        if (initialized)
+        {
+            // memset(array, 0, size), its result dropped, as check_lower_fill's call (its types are builtin ones).
+            const TypeId arguments[3] = { BUSTER_TYPE_ULONG, BUSTER_TYPE_INT, BUSTER_TYPE_ULONG };
+            const uint32_t call = check_lower_runtime_call(writer, CHECK_LOWER_RUNTIME_MEMSET, BUSTER_TYPE_ULONG, arguments, 3, BUSTER_CHECK_NONE);
+            check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, local);
+            check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I32, 0);
+            check_lower_vla_size(writer, type, BUSTER_TYPED_CLASS_U64);
+            check_lower_emit(writer, BUSTER_TYPED_CALL, BUSTER_TYPED_CLASS_U64, call);
+            check_lower_emit(writer, BUSTER_TYPED_DISCARD, BUSTER_TYPED_CLASS_U64, 0);
+        }
     }
 }
 
