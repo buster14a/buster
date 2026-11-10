@@ -7573,6 +7573,7 @@ static void check_test_driver_quad_literals(CheckTest* test, const char* clang, 
 #include "c_check_attribute_checks_driver_test.c"
 #include "c_check_patchable_driver_test.c"
 #include "c_check_cpu_dispatch_driver_test.c"
+#include "c_check_target_versions_driver_test.c"
 #include "c_check_parse_note_driver_test.c"
 #include "c_check_operand_driver_test.c"
 #include "c_check_conversion_driver_test.c"
@@ -8154,6 +8155,8 @@ static int run_checker_driver_tests(int argc, char** argv)
     bool sign_compare_only = false;
     // --cpu-dispatch-only: the cpu_specific and cpu_dispatch section alone (#1447).
     bool cpu_dispatch_only = false;
+    // --target-versions-only: GNU multiversioning's target and target_clones section alone (#1838).
+    bool target_versions_only = false;
     // --semantic-recovery-only: the semantic error recovery section alone (#1447).
     bool semantic_recovery_only = false;
     // --type-sugar-only: the type sugar section alone (#1447).
@@ -8178,6 +8181,10 @@ static int run_checker_driver_tests(int argc, char** argv)
         else if (strcmp(argv[i], "--cpu-dispatch-only") == 0)
         {
             cpu_dispatch_only = true;
+        }
+        else if (strcmp(argv[i], "--target-versions-only") == 0)
+        {
+            target_versions_only = true;
         }
         else if (strcmp(argv[i], "--semantic-recovery-only") == 0)
         {
@@ -8221,7 +8228,8 @@ static int run_checker_driver_tests(int argc, char** argv)
             options = false;
         }
     }
-    const uint32_t focuses = (uint32_t)sign_compare_only + (uint32_t)cpu_dispatch_only + (uint32_t)semantic_recovery_only + (uint32_t)type_sugar_only + (uint32_t)asm_definitions_only;
+    const uint32_t focuses = (uint32_t)sign_compare_only + (uint32_t)cpu_dispatch_only + (uint32_t)target_versions_only + (uint32_t)semantic_recovery_only +
+                             (uint32_t)type_sugar_only + (uint32_t)asm_definitions_only;
     options &= focuses <= 1 && (focuses == 0 || (!lazy && check_driver_part.count == 1));
     // One focused section's alone: the others' gates take `focused` as --sign-compare-only's did.
     const bool focused = focuses != 0;
@@ -8721,6 +8729,10 @@ static int run_checker_driver_tests(int argc, char** argv)
     {
         check_test_driver_cpu_dispatch(&test, clang, executable != NULL ? executable : "./build/compiler", directory);
     }
+    if (temporary && target_versions_only)
+    {
+        check_test_driver_target_versions(&test, clang, executable != NULL ? executable : "./build/compiler", directory);
+    }
     if (temporary && semantic_recovery_only)
     {
         check_test_driver_semantic_recovery(&test, clang, executable != NULL ? executable : "./build/compiler", directory);
@@ -9045,6 +9057,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             {
                 check_test_driver_patchable(&test, clang, executable, directory);
                 check_test_driver_cpu_dispatch(&test, clang, executable, directory);
+                check_test_driver_target_versions(&test, clang, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
             {
@@ -9223,6 +9236,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             if (!lazy && check_test_driver_takes())
             {
                 check_test_driver_frame_pointer(&test, clang, executable, directory);
+                check_test_driver_asm_return(&test, clang, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
             {

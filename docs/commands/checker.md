@@ -81,7 +81,7 @@ unused-warning fixtures also check exact scope-completion tokens.
   and the default C command (`-fsyntax-only`, `-c`) use it; `compiler parse`
   keeps the parser's driver alone. Unsupported syntax is diagnosed.
   `test-checker-driver --executable ./build/compiler [--part K/N]
-  [--lazy-system-headers | --cpu-dispatch-only | --type-sugar-only |
+  [--lazy-system-headers | --cpu-dispatch-only | --target-versions-only | --type-sugar-only |
   --asm-definitions-only] [--in-process] [--clang-server PATH]
   [--differential]` and `test-checker-asm`
   check the driver and inline assembly against Clang (named UCNs too, #1447,
@@ -101,14 +101,18 @@ unused-warning fixtures also check exact scope-completion tokens.
   shared-LLVM toolchain's, not the official release's, whose hosted rows then
   run the oracle clang as children), which runs each command line through clang's own
   driver and cc1 in its process, in the run's directory and environment;
-  every other run, and a response file's or a jobserver dry run's, is a child
-  as before. `--differential` also runs each such command as a child and
-  fails on a difference in status or output, but `--time-stages` and
-  `--lane-cpus` runs, whose report lines and lane order differ between any
-  two runs, compare their other lines in any order. The run reports the
-  counts and the warning sweep's time. CI runs the driver's parts in these
-  modes, with `--differential` in the native plain row; `--cpu-dispatch-only` runs the `cpu_specific` and
-  `cpu_dispatch` section alone, #1447; `--asm-definitions-only` runs what
+  every other run is a child as before: a response file's, a jobserver dry
+  run's, and one whose process-start inputs (`BUSTER_HUGE_PAGES`,
+  `BUSTER_TEST_HOST_BUSY`, the lanes' test hooks, the transparent huge pages
+  setting) differ from the test's own at its start. `--differential` also
+  runs each such command as a child and fails on a difference in status or
+  output, but `--time-stages` and `--lane-cpus` runs, whose numeric report
+  lines and lane order differ between any two runs, compare their other lines
+  in any order. The run reports the counts and the warning sweep's time. CI
+  runs the driver's parts in these modes, with `--differential` in the native
+  plain row; `--cpu-dispatch-only` runs the `cpu_specific` and
+  `cpu_dispatch` section alone, #1447; `--target-versions-only` runs GNU multiversioning's `target` and
+  `target_clones` section alone, #1838; `--asm-definitions-only` runs what
   inline assembly defines against clang's objects alone, #1848; `--semantic-recovery-only` runs
   `c_check_semantic_recovery_driver_test.c`, `c_check_statement_recovery_driver_test.c`,
   `c_check_type_attribute_recovery_driver_test.c` and

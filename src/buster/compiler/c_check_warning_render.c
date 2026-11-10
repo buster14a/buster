@@ -1188,6 +1188,32 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
         case CHECK_WARNING_EVENT_UNKNOWN_ESCAPE:
             result = check_warning_text(scratch, "unknown escape sequence '\\%c'", (char)payload->name);
             break;
+        case CHECK_WARNING_EVENT_TARGET_CLONES_UNSUPPORTED:
+        {
+            // A version of target_clones' string (#1838): its bytes in the string's decoded text.
+            const String8 text = check_warning_strings_value(parser, pp, payload->token, scratch);
+            const uint32_t start = payload->name <= text.length ? payload->name : (uint32_t)text.length;
+            uint32_t shown = 0;
+            while (start + shown < text.length && text.pointer[start + shown] != ',')
+            {
+                shown += 1;
+            }
+            while (shown != 0 && check_target_version_space(text.pointer[start + shown - 1]))
+            {
+                shown -= 1;
+            }
+            result = check_warning_text(scratch, "unsupported%s '%.*s' in the 'target_clones' attribute string; 'target_clones' attribute ignored",
+                                        (payload->data & BUSTER_CHECK_TARGET_CLONES_CPU) != 0 ? " CPU" : "", (int)shown,
+                                        text.pointer != NULL ? text.pointer + start : "");
+            break;
+        }
+        case CHECK_WARNING_EVENT_TARGET_CLONES_DUPLICATE:
+            result = "version list contains duplicate entries";
+            break;
+        case CHECK_WARNING_EVENT_TARGET_CLONES_MIXED:
+            result = "mixing 'target_clones' specifier mechanisms is permitted for GCC compatibility; use a comma separated sequence of string literals, or a "
+                     "string literal containing a comma-separated list of versions";
+            break;
         case CHECK_WARNING_EVENT_BIT_INT_SUFFIX:
             result = "'_BitInt' suffix for literals is a C23 extension";
             break;
@@ -1664,6 +1690,12 @@ static bool check_driver_warning_events_at(const Parser* parser, Preprocessor* p
                     {
                         // At its backslash inside the literal's token (#1447).
                         pp_diagnose_output_offset_at(pp, disposition, source, event->payload.data, boundary, "%s%s", message, suffix);
+                    }
+                    else if (event->kind == CHECK_WARNING_EVENT_TARGET_CLONES_UNSUPPORTED || event->kind == CHECK_WARNING_EVENT_TARGET_CLONES_DUPLICATE ||
+                             event->kind == CHECK_WARNING_EVENT_TARGET_CLONES_MIXED)
+                    {
+                        // At the version's offset in its trimmed string, from the literal's quote, as clang places it (#1838).
+                        pp_diagnose_output_offset_at(pp, disposition, source, event->payload.data & ~BUSTER_CHECK_TARGET_CLONES_CPU, boundary, "%s%s", message, suffix);
                     }
                     else if ((event->flags & BUSTER_CHECK_WARNING_UNLOCATED) != 0)
                     {
