@@ -298,6 +298,8 @@ struct CheckInputAttribute
     TypeId* expression_types;
     // An availability attribute's arguments as clang's parser reads them (#1447, check_input_availability_parse), or NULL.
     struct CheckInputAvailabilityParse* availability;
+    // diagnose_if's warning group (#1447), its index in pp_features_warning plus one, or 0.
+    uint16_t warning_group;
     // A specifiers' objc_gc or objc_ownership that a declarator moved to its pointer, which its later declarators don't see
     // (#1447, check_input_attribute_objc).
     bool objc_moved;
@@ -2005,7 +2007,7 @@ static bool check_input_attribute_validate(CheckInputReader* reader, CheckInputA
             valid = decoded;
             error = CHECK_ATTRIBUTE_ERROR_STRING;
             // diagnose_if's diagnostic type, and its warning group (#1447, clang's handleDiagnoseIfAttr): its error at the
-            // string. A group clang knows names the warning's option, which this checker's warnings don't take yet.
+            // string. A group clang knows names the warning's option (CheckInputAttribute.warning_group).
             if (valid && attribute->kind == CHECK_ATTRIBUTE_DIAGNOSE_IF && argument == 2 &&
                 !check_input_attribute_equal(text, "warning") && !check_input_attribute_equal(text, "error"))
             {
@@ -2021,16 +2023,13 @@ static bool check_input_attribute_validate(CheckInputReader* reader, CheckInputA
                     memcpy(group, text.pointer, text.length);
                     group[text.length] = 0;
                 }
-                const bool known = fits && pp_warning_group_known(group);
-                if (!known)
+                const uint32_t index = fits ? pp_warning_group_index(group) : UINT32_MAX;
+                if (index == UINT32_MAX)
                 {
                     check_input_attribute_argument_error(reader, attributes, attribute, string_first, CHECK_ARGUMENT_WARNING_GROUP, 0);
                 }
-                else
-                {
-                    error = CHECK_ATTRIBUTE_ERROR_UNKNOWN;
-                }
-                valid = false;
+                attribute->warning_group = index != UINT32_MAX ? (uint16_t)(index + 1) : 0;
+                valid = index != UINT32_MAX;
             }
             if (valid && argument == 0)
             {

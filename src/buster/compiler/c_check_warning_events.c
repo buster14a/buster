@@ -354,7 +354,8 @@ typedef enum CheckWarningEventKind
     CHECK_WARNING_EVENT_MULTICHAR,
     CHECK_WARNING_EVENT_CHARACTER_TOO_LONG,
     // A warning diagnose_if's condition gives (#1447, c_check_condition.c), at the call's `)` or at the function's use:
-    // payload.token the message's first string token, with a CHECK_WARNING_NOTE_DIAGNOSE_IF at the attribute.
+    // payload.token the message's first string token, with a CHECK_WARNING_NOTE_DIAGNOSE_IF at the attribute; or, of a
+    // warning group (payload.data, BUSTER_CHECK_WARNING_GROUP_ERROR), clang's custom diagnostic of that group, without it.
     CHECK_WARNING_EVENT_DIAGNOSE_IF,
     // -Wfunction-multiversion's (#1447): a CPU list's repeated mangling, at the attribute's name, and a cpu_dispatch
     // function's body, at its `{`.
@@ -452,6 +453,9 @@ typedef enum CheckWarningCompletion
 // `#pragma options align` or `#pragma align` warning).
 #define BUSTER_CHECK_WARNING_PACK_PRAGMA 0x20u
 #define BUSTER_CHECK_WARNING_NO_SOURCE UINT32_MAX
+// CHECK_WARNING_EVENT_DIAGNOSE_IF's payload.data bit of a grouped diagnose_if's "error" (#1447): its low bits are its
+// warning group's index in pp_features_warning plus one, 0 for none.
+#define BUSTER_CHECK_WARNING_GROUP_ERROR 0x80000000u
 // CHECK_WARNING_EVENT_UNKNOWN_ATTRIBUTE's payload.data bit of a C23 attribute's spelling, past its scope's identifier.
 #define BUSTER_CHECK_WARNING_STANDARD_ATTRIBUTE 0x80000000u
 

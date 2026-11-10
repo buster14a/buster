@@ -30,12 +30,37 @@ static const char* check_driver_warning_error_prefix(bool promoted)
     return result;
 }
 
+// A grouped diagnose_if's warning group (#1447, CHECK_WARNING_EVENT_DIAGNOSE_IF's payload.data), its index in
+// pp_features_warning, or UINT32_MAX.
+static uint32_t check_driver_warning_group(const CheckWarningEvent* event)
+{
+    const uint32_t group = event->kind == CHECK_WARNING_EVENT_DIAGNOSE_IF ? event->payload.data & ~BUSTER_CHECK_WARNING_GROUP_ERROR : 0;
+    return group != 0 ? group - 1 : UINT32_MAX;
+}
+
 static CheckWarningSeverity check_driver_warning_severity(Preprocessor* pp, const CheckInput* input, const CheckWarningEvent* event)
 {
-    const CheckWarningCommandLine command = check_warning_command_line(&pp->options, event->id,
-        (event->flags & BUSTER_CHECK_WARNING_DEFAULT_IGNORED) != 0, false);
-    CheckWarningSeverity severity = command.quiet || (event->flags & BUSTER_CHECK_WARNING_SUPPRESSED) != 0 ? CHECK_WARNING_IGNORE :
-        check_diagnostic_severity_id_from(input, event->token, event->source, event->id, command.severity);
+    const uint32_t group = check_driver_warning_group(event);
+    bool errors = false;
+    const CheckWarningCommandLine command = group != UINT32_MAX ?
+        check_warning_group_command_line(&pp->options, group, (event->payload.data & BUSTER_CHECK_WARNING_GROUP_ERROR) != 0, &errors) :
+        check_warning_command_line(&pp->options, event->id, (event->flags & BUSTER_CHECK_WARNING_DEFAULT_IGNORED) != 0, false);
+    CheckWarningSeverity severity = CHECK_WARNING_IGNORE;
+    if (group != UINT32_MAX && (event->flags & BUSTER_CHECK_WARNING_SUPPRESSED) == 0)
+    {
+        // clang's custom diagnostic of that group: its pragma, then -w on all but an error by default that is still one,
+        // -Werror on a warning, and -Wfatal-errors.
+        severity = check_diagnostic_group_severity_from(input, event->token, event->source, group, command.severity);
+        const bool default_error = (event->payload.data & BUSTER_CHECK_WARNING_GROUP_ERROR) != 0;
+        severity = command.quiet && (!default_error || severity == CHECK_WARNING_WARNING) ? CHECK_WARNING_IGNORE : severity;
+        severity = severity == CHECK_WARNING_WARNING && errors ? CHECK_WARNING_ERROR : severity;
+        severity = severity == CHECK_WARNING_ERROR && input->fatal_errors ? CHECK_WARNING_FATAL : severity;
+    }
+    else if (group == UINT32_MAX)
+    {
+        severity = command.quiet || (event->flags & BUSTER_CHECK_WARNING_SUPPRESSED) != 0 ? CHECK_WARNING_IGNORE :
+            check_diagnostic_severity_id_from(input, event->token, event->source, event->id, command.severity);
+    }
     if (severity != CHECK_WARNING_IGNORE && !command.system_headers)
     {
         bool system = check_graph_system_token(&input->graph, event->token);
@@ -1528,8 +1553,11 @@ static bool check_driver_warning_events_at(const Parser* parser, Preprocessor* p
                         notes[n] = (PPOutputDiagnosticNote){ .token = note->source != BUSTER_CHECK_WARNING_NO_SOURCE ? note->source : parser->tokens.sources[note->token], .message = text };
                     }
                 }
-                const char* option = check_warning_descriptions[event->id].option;
-                const char* prefix = check_driver_warning_error_prefix(severity == CHECK_WARNING_ERROR);
+                // A grouped diagnose_if's option is its group's; one that is an error by default has no -Werror (#1447).
+                const uint32_t group = check_driver_warning_group(event);
+                const char* option = group != UINT32_MAX ? pp_features_warning[group].name : check_warning_descriptions[event->id].option;
+                const bool default_error = group != UINT32_MAX && (event->payload.data & BUSTER_CHECK_WARNING_GROUP_ERROR) != 0;
+                const char* prefix = check_driver_warning_error_prefix(severity == CHECK_WARNING_ERROR && !default_error);
                 const char* suffix = option != NULL ? check_warning_text(scratch, " [%s%s]", prefix, option) : prefix[0] != 0 ? " [-Werror]" : "";
                 valid = valid && suffix != NULL;
                 if (valid)

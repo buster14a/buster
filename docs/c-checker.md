@@ -8656,8 +8656,8 @@ clang's `diagnose_if(condition, message, "warning" | "error")` and
   third argument other than `"error"` or `"warning"` is "invalid diagnostic
   type for 'diagnose_if'; use "error" or "warning" instead"; a fourth,
   clang's warning group, is "unknown warning group 'G'" where clang knows no
-  such group (`pp_warning_group_known`). A group clang knows names the
-  warning's option, which these warnings don't take yet: "not yet supported".
+  such group (`pp_warning_group_index`). A group clang knows makes the
+  diagnostic clang's custom one of that group (below, "Warning groups").
 - **The condition.** It is read once, where its function is declared, in the
   function's parameter scope: its names are looked up there
   (`check_input_thread_name`; an undeclared one is clang's error), and the
@@ -8673,12 +8673,17 @@ clang's `diagnose_if(condition, message, "warning" | "error")` and
   (`CheckConditionStep`), from the parse tree in postorder: each largest
   subexpression without a parameter, and each sizeof's or alignof's, is a
   constant the evaluator gives; a parameter is its place and type; the
-  others are casts, unary, binary, logical and conditional operators, which
-  each call runs as the checker's own actions (`check_action_scalar`). Any
-  other shape (a subscript, a call, an assignment) is "not yet supported"
-  in user code; in a system header, and on an object-size wrapper
-  (`pass_object_size`), the condition is kept and decides nothing, as these
-  wrappers had it before.
+  others are casts, unary, binary, logical, comma and conditional operators,
+  which each call runs as the checker's own actions (`check_action_scalar`).
+  A call of a declared function, which no constant evaluation gets past, is
+  an unknown value where its arguments name a parameter (its arguments are
+  still read), and an assignment or an increment one where a `&&`, a `||` or
+  a conditional can skip it; otherwise each is "never produces a constant
+  expression", its note at the call's name or the operator, as a call
+  without a parameter is (`g(1) > 0`, `h()`). Any other shape (a subscript,
+  a builtin's call) is "not yet supported" in user code; in a system header,
+  and on an object-size wrapper (`pass_object_size`), the condition is kept
+  and decides nothing, as these wrappers had it before.
 - **Lists.** Each function declaration where some condition holds has its
   list (`CheckInput.condition_declarations`, by the declaration's name
   token): its previous declaration's, then its own, as clang's
@@ -8693,7 +8698,18 @@ clang's `diagnose_if(condition, message, "warning" | "error")` and
   call's callee through parentheses and outside sizeof's, alignof's and
   typeof's operands, is "cannot take address of function 'f' because it has
   one or more non-tautological enable_if conditions", at the outermost `(`
-  around the name. `check_input_condition_uses` finds the uses once the
+  around the name. clang gives it where an operation converts the name to its
+  address (`check_condition_conversion`: the use's parent past its
+  parentheses, a call's `)` for an argument, an initializer's outermost `}`
+  for an element), not for a sizeof's, alignof's or typeof's operand (but
+  inside an operation there, `sizeof(q == r)`); and only where clang builds
+  that operation, which an operand holding a failed conversion stops
+  (`(q == s) + r`'s `r` has none). An operation that converts its operands in
+  order stops at the first that fails (`c ? q : r`, `g(q, r)` and `q == r`
+  give `q`'s alone); an initializer list converts each element on its own,
+  once none holds a failed conversion (`check_condition_addresses`). The
+  error's statement or declaration then has no later expression checks, from
+  its start. `check_input_condition_uses` finds the uses once the
   unit's names are bound: the vector path gathers 16 tokens' declarations'
   marks at a time, the scalar path its twin.
 - **Calls.** After checking, each call whose callee names a function with a
@@ -8714,19 +8730,38 @@ clang's `diagnose_if(condition, message, "warning" | "error")` and
   "candidate disabled: M" at the declaration the call found; otherwise the
   diagnose_if conditions that hold are given at the call's `)`.
 - **Several at once.** Of the conditions that hold at one use or call, an
-  error is given alone, the first in source order; otherwise every warning,
-  in source order, each with its note.
+  error of no warning group is given alone, the first in source order;
+  otherwise every warning, in source order, each with its note, and every
+  diagnostic of a warning group, without one.
+- **Warning groups.** A diagnose_if with a fourth argument is clang's custom
+  diagnostic of that group (`CHECK_WARNING_EVENT_DIAGNOSE_IF`'s payload, its
+  group's index in `pp_features_warning`): a warning, or for `"error"` an
+  error by default, named `[-WG]`, without the note. Its options are the
+  group's and those of every group that holds it in clang's tree
+  (`pp_warning_group_holds`, over `pp_warning_group_parents`: clang 23.1.5's
+  `diagtool tree`), each in turn (`check_warning_group_command_line`): `-W`
+  a warning (so `-Wall` makes `"error"`'s of `format` a warning), `-Wno-`
+  ignored, `-Werror=` an error, `-Wfatal-errors=` fatal, `-Wno-error=` an
+  error a warning; then a source pragma of such a group
+  (`check_diagnostic_group_severity_from`). clang keeps none of these as the
+  user's: `-Weverything` enables an ignored one, `-Wno-everything` leaves it,
+  and `-Werror` makes a warning an error through any `-Wno-error=`; `-w`
+  ignores a warning, not an error. An error by default has no `-Werror,` in
+  its option, however it became one.
 - **Cost.** A unit without these attributes tests a reader flag where
   declarations are read and a count where uses and calls are; the steps are
   built only for these attributes.
 
 What isn't clang's yet: an overloadable function's conditions, which take
 part in its overload resolution, are "not yet supported" in user code (a
-tautological `enable_if(1, ...)`, glibc's, aside); the fourth argument's
-known warning groups; the condition shapes above; and, as everywhere in this
-driver, the uses' errors stop the unit's later expression checks, so a call
-after one such error isn't diagnosed. clang gives one address error for a
-conditional operator's two function operands; this gives one for each.
+tautological `enable_if(1, ...)`, glibc's, aside); the condition shapes
+above (and clang's `-Wunused-value` of a comma operator's left operand in a
+condition isn't given); and, as everywhere in this driver, the uses' errors stop the unit's
+later expression checks, so a call after one such error isn't diagnosed. An
+assignment expression as an initializer list's element (`{ x = q }`) is read
+as a designation, whose value clang converts with the list's. A grouped
+diagnose_if under `-Weverything` meets every other warning that option
+enables, which this checker doesn't all give.
 
 ## Operand errors (#147)
 
