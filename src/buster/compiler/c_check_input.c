@@ -11727,11 +11727,109 @@ static uint32_t check_input_first_token(const CheckInputReader* reader, uint32_t
     return first;
 }
 
+// The string clang's constant evaluator reads at `argument` (#1843, Expr::tryEvaluateString), another address constant
+// than a literal's start for __builtin_verbose_trap: its chars from the unit's constant objects (check_const_load, at
+// `position`), up to the first NUL, of an array of plain char (a const array's initializer the reader kept, a member
+// array's of a const record, check_input_char_subobject, or a literal's), the pointee of a const pointer object. BUSTER_CHECK_VERBOSE_TRAP_STRING_VALID for a string without a `$` (no message's value: CHECK_INPUT_UNSUPPORTED
+// is 0, #1917's review), CHECK_INPUT_VERBOSE_TRAP_DOLLAR for one with, CHECK_INPUT_VERBOSE_TRAP_STRING where the read leaves
+// the array (past its end, or no NUL in it) and CHECK_INPUT_UNSUPPORTED where a char isn't known (an object whose bytes
+// the reader didn't keep, another element type), which the caller refuses by name.
+#define BUSTER_CHECK_VERBOSE_TRAP_STRING_VALID UINT32_MAX
+
+// The array of plain char of an object of `type` that holds its byte `offset`, as clang's evaluator's designator reads a
+// subobject (#1917's review): the object itself, or a member's or an element's, down records and arrays, its bytes
+// [*begin, *end). False where none holds it (another element type, a bit-field, a scalar).
+static bool check_input_char_subobject(const TypeTable* types, TypeId type, uint64_t offset, uint64_t* begin, uint64_t* end)
+{
+    TypeId at = type_strip_aligned(types, type);
+    uint64_t base = 0;
+    bool found = false;
+    bool walking = true;
+    for (uint32_t depth = 0; walking && depth < 32; depth += 1)
+    {
+        const uint8_t kind = type_kind(types, at);
+        const uint64_t size = type_size(types, at);
+        if (type_kind_is_array(kind))
+        {
+            const TypeId element = type_strip_aligned(types, type_element(types, at));
+            const uint64_t element_size = type_size(types, element);
+            found = type_unqualified(element) == BUSTER_TYPE_CHAR;
+            *begin = base;
+            *end = base + size;
+            walking = !found && element_size != 0 && offset >= base && offset - base < size;
+            base += walking ? (offset - base) / element_size * element_size : 0;
+            at = element;
+        }
+        else if (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION)
+        {
+            const uint32_t tag = types->types.index[type_index(at)];
+            const uint32_t first = types->tags.member_begin[tag];
+            const uint32_t count = types->tags.member_count[tag];
+            TypeId next = 0;
+            uint64_t next_base = 0;
+            for (uint32_t i = 0; next == 0 && i < count; i += 1)
+            {
+                const uint32_t member = first + i;
+                const uint64_t start = base + types->members.offset[member] / 8;
+                const TypeId member_type = type_strip_aligned(types, types->members.type[member]);
+                const uint64_t member_size = type_size(types, member_type);
+                const bool holds = (types->members.flags[member] & BUSTER_TYPE_MEMBER_BIT_FIELD) == 0 && start <= offset && offset - start < member_size;
+                next = holds ? member_type : 0;
+                next_base = holds ? start : next_base;
+            }
+            walking = next != 0;
+            at = next;
+            base = next_base;
+        }
+        else
+        {
+            walking = false;
+        }
+    }
+    return found;
+}
+
+static uint32_t check_input_verbose_trap_object(CheckInputReader* reader, const CheckValue* argument, uint32_t position)
+{
+    const TypeTable* types = reader->types;
+    const CheckConstValues* owner = NULL;
+    const CheckConstObject* receipt = check_const_find(&reader->output->const_values, argument->object, position, &owner);
+    // A const pointer object's value (#1917's review): the address constant its initializer kept, once.
+    const TypeId held = receipt != NULL ? type_strip_aligned(types, receipt->type) : 0;
+    CheckValue pointee = { 0 };
+    const bool pointer = held != 0 && type_kind(types, held) == BUSTER_TYPE_KIND_POINTER && argument->offset == 0 &&
+                         check_const_load(types, &reader->output->const_values, argument->object, 0, 0, 0, held, position, &pointee) &&
+                         pointee.constant_kind == CHECK_CONSTANT_ADDRESS && pointee.object != 0;
+    const CheckValue* address = pointer ? &pointee : argument;
+    receipt = pointer ? check_const_find(&reader->output->const_values, address->object, position, &owner) : receipt;
+    uint64_t begin = 0;
+    uint64_t end = 0;
+    const bool placed = receipt != NULL && address->fault == CHECK_FAULT_NONE && address->offset >= 0;
+    const bool chars = placed && check_input_char_subobject(types, receipt->type, (uint64_t)address->offset, &begin, &end) && end <= receipt->byte_size;
+    const bool inside = chars && (uint64_t)address->offset >= begin && (uint64_t)address->offset < end;
+    uint32_t result = !placed || !chars ? (placed && (uint64_t)address->offset >= receipt->byte_size ? CHECK_INPUT_VERBOSE_TRAP_STRING : CHECK_INPUT_UNSUPPORTED) :
+                                          CHECK_INPUT_VERBOSE_TRAP_STRING;
+    bool known = inside;
+    bool ended = false;
+    bool dollar = false;
+    for (uint64_t at = inside ? (uint64_t)address->offset : 0; known && !ended && at < end; at += 1)
+    {
+        CheckValue loaded = { 0 };
+        known = check_const_load(types, &reader->output->const_values, address->object, (int64_t)at, 0, 0, BUSTER_TYPE_CHAR, position, &loaded) &&
+                loaded.constant_kind == CHECK_CONSTANT_INTEGER;
+        ended = known && (uint8_t)loaded.integer == 0;
+        dollar |= known && (uint8_t)loaded.integer == '$';
+    }
+    result = !inside ? result : !known ? CHECK_INPUT_UNSUPPORTED : !ended ? CHECK_INPUT_VERBOSE_TRAP_STRING : dollar ? CHECK_INPUT_VERBOSE_TRAP_DOLLAR :
+             BUSTER_CHECK_VERBOSE_TRAP_STRING_VALID;
+    return result;
+}
+
 // __builtin_verbose_trap's two arguments as clang's Sema takes them (#148): each a constant string whose bytes hold no
 // `$`, else an error at the argument's first token. A narrow string literal or __func__'s name, under parentheses and
 // casts, is read whole; an argument that is no address constant of an object (an automatic variable's value, an
-// integer, a null pointer) is no constant string. Another address constant (a const array's, a literal's past its start) clang
-// reads through its constant evaluator, whose reading of an object's bytes this reader doesn't model: it is refused.
+// integer, a null pointer) is no constant string. Another address constant (a const array's, a literal's past its start)
+// clang reads through its constant evaluator, which reads the object's bytes (check_input_verbose_trap_object).
 static void check_input_verbose_trap_arguments(CheckInputReader* reader, const CheckInputIntrinsicCall* call)
 {
     const Parser* parser = reader->parser;
@@ -11784,7 +11882,18 @@ static void check_input_verbose_trap_arguments(CheckInputReader* reader, const C
         }
         else
         {
-            check_input_report(reader, span.first, CHECK_INPUT_UNSUPPORTED);
+            // A cast on the way clang's evaluator may not read through (`(const char*)(const void*)m` it calls no constant
+            // string, #1917's review): refused by name, as the bytes of an object the reader didn't keep are.
+            bool cast = false;
+            for (uint32_t t = span.first; t < span.end; t += 1)
+            {
+                cast |= parser->tree.roles[t] == PARSE_ROLE_OPEN_CAST;
+            }
+            const uint32_t verdict = cast ? CHECK_INPUT_UNSUPPORTED : check_input_verbose_trap_object(reader, &value, call->closing + 1);
+            if (verdict != BUSTER_CHECK_VERBOSE_TRAP_STRING_VALID)
+            {
+                check_input_report(reader, span.first, (CheckInputMessage)verdict);
+            }
         }
     }
 }
