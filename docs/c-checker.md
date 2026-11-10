@@ -8065,10 +8065,16 @@ arguments against the function. The checker now gives these as clang does.
   (`void (*f(void))(…)`'s returned function's, `void (*(*p)(int))(…)`'s) has no
   convention when clang builds it, as distribution gives the declaration's
   conventions to the nearest, so its parameters are checked as System V's
-  there (#1447). The nearest chunk of a pointer's, a parameter's or a type
-  name's declarator, whose convention clang takes from attributes it places
-  otherwise (a pointer chunk's own), is refused by name. Off a parameter, each
-  is "only applies to parameters" (a warning).
+  there (#1447). The nearest chunk of a declaration's pointer or array
+  declarator (`void (*p)(…) __attribute__((swiftcall))`) is checked once the
+  declaration's convention is final, with the conventions clang distributes to
+  it, the specifiers' and the trailing ones, but not one written in the
+  pointer's own chunk (`void (__attribute__((swiftcall)) *p)(…)`, between the
+  parentheses around the name and the name), which applies after clang builds
+  it (`check_input_declarator_conventions`, `check_input_declarator_group`).
+  The nearest chunk of a parameter's, a member's or a type name's declarator is
+  refused by name. Off a parameter, each is "only applies to parameters" (a
+  warning).
 
   A definition's `-Wgcc-compat` warning comes before Sema's
   diagnostics of the same attribute.

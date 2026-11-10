@@ -1887,6 +1887,11 @@ struct CheckInputReader
     const uint32_t* declarator_swift_places;
     const uint32_t* declarator_swift_tokens;
     uint32_t declarator_swift_count;
+    // Whether that record is the function chunk nearest the name of a pointer's or an array's declarator (#1447), not the
+    // declared function's own; and whether a declaration's declarator, which check_input_declarator_conventions checks,
+    // may have one (check_input_declaration sets it), where any other's is refused by name.
+    bool declarator_swift_wrapped;
+    bool declarator_swift_deferrable;
     uint32_t declarator_no_prototype;
     uint8_t constant_abi_origin;
     const CheckNoderefType* specifier_noderef;
@@ -6422,6 +6427,10 @@ struct CheckDeclaratorRun
     uint32_t names;
     uint32_t declarations;
     uint32_t function_part;
+    // The function chunk nearest the name, of a pointer's or an array's declarator, whose parameters have Swift ABIs and
+    // whose convention clang knows once the declaration's is final (#1447, check_input_declarator_conventions), or
+    // BUSTER_CHECK_NONE.
+    uint32_t swift_part;
     // The struct, union or enum keyword of a definition the run waits for, which ends before definition_end (a
     // parameter list's or an array bound's closing token), or BUSTER_CHECK_NONE.
     uint32_t definition;
@@ -6511,6 +6520,7 @@ static inline __attribute__((always_inline)) CheckDeclaratorRun* check_input_dec
             .names = BUSTER_CHECK_NONE,
             .declarations = BUSTER_CHECK_NONE,
             .function_part = BUSTER_CHECK_NONE,
+            .swift_part = BUSTER_CHECK_NONE,
             .definition = BUSTER_CHECK_NONE,
             .definition_end = BUSTER_CHECK_NONE,
             .overloadable = reader->declarator_overloadable,
@@ -7403,7 +7413,12 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                         // a parameter's declarator, whose convention can come from attributes clang places otherwise (in the
                         // pointer's chunk), is refused by name.
                         const bool outer = part->parameter_abis && p != innermost;
-                        if (part->parameter_abis && !outer && (frame->parameter || p != first))
+                        if (part->parameter_abis && !outer && !frame->parameter && p != first && reader->declarator_swift_deferrable)
+                        {
+                            // A declaration's pointer's or array's: checked once its convention is final (#1447).
+                            run->swift_part = p;
+                        }
+                        else if (part->parameter_abis && !outer && (frame->parameter || p != first))
                         {
                             for (uint32_t parameter = part->parameter_first; parameter != BUSTER_CHECK_NONE; parameter = parameters[parameter].next)
                             {
@@ -7732,18 +7747,74 @@ static bool check_input_capture_names(CheckInputReader* reader, const CheckDecla
     return unknown == BUSTER_CHECK_NONE;
 }
 
+// The outermost '(' of the parentheses around a declarator's name `name` (#1447): BUSTER_CHECK_NONE where there are none.
+// A backward scan over the declarator's tokens before the name, past balanced groups (attributes' among them).
+static uint32_t check_input_declarator_group(const Parser* parser, uint32_t name)
+{
+    uint32_t result = BUSTER_CHECK_NONE;
+    uint32_t depth = 0;
+    bool open = name < parser->tokens.count;
+    for (uint32_t t = name; open && t != 0;)
+    {
+        t -= 1;
+        const uint8_t kind = parser->tokens.kinds[t];
+        const bool group = kind == PARSE_KIND_L_PAREN && depth == 0 && parser->tree.roles[t] == PARSE_ROLE_OPEN_GROUP;
+        result = group ? t : result;
+        open = !(depth == 0 && ((kind == PARSE_KIND_L_PAREN && !group) || kind == PARSE_KIND_SEMI || kind == PARSE_KIND_COMMA ||
+                                kind == PARSE_KIND_L_BRACE || kind == PARSE_KIND_R_BRACE));
+        depth += kind == PARSE_KIND_R_PAREN ? 1 : 0;
+        depth -= kind == PARSE_KIND_L_PAREN && depth != 0 ? 1 : 0;
+    }
+    return result;
+}
+
 // The checks of a declaration's function type that wait for its final convention (#1447), which its specifiers' attributes
 // can give after its declarator (check_input_declarator_abi): its own parameters' Swift ABIs (check_input_swift_parameters,
 // from check_input_declarator_end's record), and for a declaration (not a definition) of a function without a prototype of a
 // convention that takes no variadic call, clang's err_cconv_knr at its name. clang gives that one after merging a
 // prototyped redeclaration, which an earlier visible declaration of the name may be: then nothing here; nor for a typedef. Whether there was
 // no error.
-static bool check_input_declarator_conventions(CheckInputReader* reader, TypeId type, bool is_typedef)
+static bool check_input_declarator_conventions(CheckInputReader* reader, TypeId type, bool is_typedef, const CheckInputAttributes* attributes,
+                                               uint32_t declared)
 {
     const TypeId function = type != 0 ? type_strip_aligned(reader->types, type) : 0;
     const bool is_function = function != 0 && type_kind(reader->types, function) == BUSTER_TYPE_KIND_FUNCTION;
-    bool valid = !is_function || reader->declarator_swift_count == 0 ||
+    bool valid = !is_function || reader->declarator_swift_count == 0 || reader->declarator_swift_wrapped ||
                  check_input_swift_parameters(reader, function, reader->declarator_swift_places, reader->declarator_swift_tokens, reader->declarator_swift_count);
+    // The function chunk nearest the name of a pointer's or an array's declarator (#1447): clang builds it with the
+    // conventions distribution gives it, the declaration's specifiers' and trailing ones, but not one written in the
+    // pointer's own chunk, between the parentheses around the name and the name (`void (__attribute__((swiftcall)) *p)(…)`),
+    // which applies after it.
+    if (reader->declarator_swift_wrapped && reader->declarator_swift_count != 0)
+    {
+        TypeId wrapped = function;
+        for (uint32_t steps = 0; wrapped != 0 && steps < 64 && type_kind(reader->types, wrapped) != BUSTER_TYPE_KIND_FUNCTION; steps += 1)
+        {
+            const uint8_t kind = type_kind(reader->types, wrapped);
+            wrapped = kind == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(kind) || kind == BUSTER_TYPE_KIND_QUALIFIED ?
+                      type_strip_aligned(reader->types, reader->types->types.base[type_index(wrapped)]) : 0;
+        }
+        const uint32_t group = check_input_declarator_group(reader->parser, declared);
+        CheckInputAttributes outside = { .calling_convention = CHECK_CALL_DEFAULT };
+        bool inside = false;
+        for (uint32_t i = 0; attributes != NULL && i < attributes->count; i += 1)
+        {
+            const CheckInputAttribute* attribute = attributes->records + i;
+            const bool convention = attribute->kind == CHECK_ATTRIBUTE_CALLING_CONVENTION && !attribute->specifier_ignored && !attribute->specifier_applied;
+            const bool grouped = group < declared && attribute->first > group && attribute->first < declared;
+            inside |= convention && grouped;
+            outside.calling_convention = convention && !grouped ?
+                                         check_input_convention_merge(outside.calling_convention, (CheckInputCallingConvention)attribute->value) :
+                                         outside.calling_convention;
+        }
+        const TypeFunctionABI requested = check_input_attribute_requested_abi(&outside);
+        const TypeFunctionABI convention = !inside ? type_function_abi_kind(reader->types, wrapped) :
+                                           requested == TYPE_FUNCTION_ABI_INVALID ? TYPE_FUNCTION_ABI_SYSV : requested;
+        valid = wrapped == 0 || type_kind(reader->types, wrapped) != BUSTER_TYPE_KIND_FUNCTION ||
+                check_input_swift_parameters_as(reader, wrapped, convention, reader->declarator_swift_places, reader->declarator_swift_tokens,
+                                                reader->declarator_swift_count);
+    }
+    reader->declarator_swift_wrapped = false;
     const uint32_t name = reader->declarator_no_prototype;
     const TypeFunctionABI convention = is_function ? type_function_abi_kind(reader->types, function) : TYPE_FUNCTION_ABI_SYSV;
     const bool unvariadic = convention == TYPE_FUNCTION_ABI_VECTOR || convention == TYPE_FUNCTION_ABI_REG || convention == TYPE_FUNCTION_ABI_SWIFT ||
@@ -7829,14 +7900,18 @@ static inline __attribute__((always_inline)) TypeId check_input_declarator_end(C
     // function's own parameters' Swift ABIs, their places and attributes kept in the reader's arena, and a declaration's
     // name where its function has no prototype.
     reader->declarator_swift_count = 0;
+    reader->declarator_swift_wrapped = false;
     reader->declarator_no_prototype = BUSTER_CHECK_NONE;
-    if (complete && own != NULL && own->parameter_abis)
+    // (Or the function chunk nearest the name of a pointer's or an array's declarator, #1447.)
+    const CheckDeclaratorPart* swift = own != NULL ? own : complete && run->swift_part != BUSTER_CHECK_NONE ? run->parts + run->swift_part : NULL;
+    if (complete && swift != NULL && swift->parameter_abis)
     {
-        uint32_t* places = BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint32_t, (uint64_t)own->parameter_count + 1);
-        uint32_t* tokens = BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint32_t, (uint64_t)own->parameter_count + 1);
+        reader->declarator_swift_wrapped = own == NULL;
+        uint32_t* places = BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint32_t, (uint64_t)swift->parameter_count + 1);
+        uint32_t* tokens = BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint32_t, (uint64_t)swift->parameter_count + 1);
         reader->output->resource |= places == NULL || tokens == NULL;
         uint32_t index = 0;
-        for (uint32_t p = own->parameter_first; tokens != NULL && places != NULL && p != BUSTER_CHECK_NONE; p = run->parameters[p].next)
+        for (uint32_t p = swift->parameter_first; tokens != NULL && places != NULL && p != BUSTER_CHECK_NONE; p = run->parameters[p].next)
         {
             places[index] = run->parameters[p].place;
             tokens[index++] = run->parameters[p].abi_token;
@@ -9476,7 +9551,9 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
         reader->specifier_noderef = base_noderef;
         reader->declarator_overloadable = (check_input_overload_flags(common_attributes) & BUSTER_CHECK_OVERLOADABLE) != 0;
         reader->declarator_common = common_attributes;
+        reader->declarator_swift_deferrable = true;
         TypeId type = check_input_declarator(reader, base, &i, count, &name, &parameters);
+        reader->declarator_swift_deferrable = false;
         reader->declarator_overloadable = false;
         const uint32_t parameter_declarations = reader->declarator_declarations;
         // The declared function's own list, where its interrupt attribute's errors are (#147), before a K&R definition's
@@ -9489,7 +9566,7 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
         const CheckNoderefType* noderef = reader->declarator_noderef;
         // (The specifiers' function-type attributes have had their warnings with the declarator's, check_input_declarator_step.)
         type = check_input_declarator_abi(reader, attributes, type, &abi_origin, false);
-        valid &= check_input_declarator_conventions(reader, type, is_typedef);
+        valid &= check_input_declarator_conventions(reader, type, is_typedef, attributes, name);
         if (is_typedef && type != 0 && attributes != 0 && attributes->alignment_log2 != 0)
         {
             type = check_input_type_result(reader, type_aligned(reader->types, type, attributes->alignment_log2 - 1));

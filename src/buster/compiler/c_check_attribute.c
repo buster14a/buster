@@ -5279,10 +5279,10 @@ static bool check_input_swift_parameter(CheckInputReader* reader, CheckInputAttr
 // one (swift_async_context of any: clang's switch checks no convention of it); an indirect result first or after another, and an error result just after a
 // context. Each error is at its parameter (`places`, its name or where an unnamed one's would be); `attributes` are each
 // parameter's attribute's first token, the report's. Whether there was none.
-static bool check_input_swift_parameters(CheckInputReader* reader, TypeId function, const uint32_t* places, const uint32_t* attributes, uint32_t count)
+static bool check_input_swift_parameters_as(CheckInputReader* reader, TypeId function, TypeFunctionABI convention, const uint32_t* places,
+                                            const uint32_t* attributes, uint32_t count)
 {
     const TypeTable* types = reader->types;
-    const TypeFunctionABI convention = type_function_abi_kind(types, function);
     const bool swift = convention == TYPE_FUNCTION_ABI_SWIFT;
     const bool either = swift || convention == TYPE_FUNCTION_ABI_SWIFT_ASYNC;
     bool valid = true;
@@ -5323,6 +5323,12 @@ static bool check_input_swift_parameters(CheckInputReader* reader, TypeId functi
         }
     }
     return valid;
+}
+
+// check_input_swift_parameters_as with the function type's own convention.
+static bool check_input_swift_parameters(CheckInputReader* reader, TypeId function, const uint32_t* places, const uint32_t* attributes, uint32_t count)
+{
+    return check_input_swift_parameters_as(reader, function, type_function_abi_kind(reader->types, function), places, attributes, count);
 }
 
 // Whether `type` is a function or wraps one in pointers, arrays and aligned typedefs, where a calling convention applies.
