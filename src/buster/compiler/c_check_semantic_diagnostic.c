@@ -232,6 +232,10 @@ static const char* check_semantic_input(const Parser* parser, Preprocessor* pp, 
                                                  "has incompatible definitions";
         result = spelled.length == 0 ? NULL : check_warning_text(scratch, "type '%.*s' %s", (int)spelled.length, spelled.pointer, what);
     }
+    else if (report->message == CHECK_INPUT_TYPE_SPECIFIER_MISSING && report->detail == 3 && name.length != 0)
+    {
+        result = check_warning_text(scratch, "unknown type name '%.*s'", (int)name.length, name.pointer);
+    }
     else if (report->message == CHECK_INPUT_ENUMERATOR_REDEFINITION && name.length != 0)
     {
         result = check_warning_text(scratch, "redefinition of enumerator '%.*s'", (int)name.length, name.pointer);

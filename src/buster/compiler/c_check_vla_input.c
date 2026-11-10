@@ -232,12 +232,16 @@ static bool check_input_vla_bound(CheckInputReader* reader, uint32_t open, uint3
     *definition = BUSTER_CHECK_NONE;
     if (valid && first != end && !star)
     {
+        const uint32_t reports = reader->output->report_count;
         CheckValue value = { 0 };
         uint32_t failed = BUSTER_CHECK_NONE;
         bool negative = false;
+        // Each undeclared name in the bound is clang's error at it, with its typo's correction (#1447, check_constant_name).
         if (*job == 0 && check_input_vla_defines(reader, first, end))
         {
+            reader->constant_names = CHECK_CONSTANT_NAMES_REPORT;
             *job = check_input_constant_job(reader, first, end);
+            reader->constant_names = CHECK_CONSTANT_NAMES_NONE;
             valid = *job != 0;
         }
         if (*job != 0)
@@ -255,7 +259,9 @@ static bool check_input_vla_bound(CheckInputReader* reader, uint32_t open, uint3
         {
             TypeId unused = 0;
             const bool cached = reader->bindings.count != 0 && reader->bindings.point[reader->bindings.count - 1] >= first;
+            reader->constant_names = CHECK_CONSTANT_NAMES_REPORT;
             valid = check_input_constant_read(reader, first, end, false, cached, false, &value, &unused, &failed, NULL);
+            reader->constant_names = CHECK_CONSTANT_NAMES_NONE;
         }
         // A job that stopped at a definition has no value yet.
         const bool evaluated = *definition == BUSTER_CHECK_NONE;
@@ -282,9 +288,13 @@ static bool check_input_vla_bound(CheckInputReader* reader, uint32_t open, uint3
             *kind = BUSTER_TYPE_KIND_VARIABLE_ARRAY;
             *extent = (uint64_t)first + 1;
         }
-        if (!valid && !reader->output->resource && reader->output->report_count == 0)
+        // A failure before the first undeclared name the reading reported is clang's error too, which its parser gives first
+        // (#1447): `sizeof(struct Missing) - sizeof(missing)`'s.
+        const uint32_t failed_at = failed < parser->tokens.count ? failed : first;
+        const bool earlier = reader->output->report_count > reports && failed_at < reader->output->reports[reports].token;
+        if (!valid && !reader->output->resource && (reader->output->report_count == 0 || earlier))
         {
-            const uint32_t token = failed < parser->tokens.count ? failed : first;
+            const uint32_t token = failed_at;
             const bool missing = parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER && reader->output->declarations[token] == BUSTER_CHECK_NONE;
             // A negative constant is clang's own error (#1447), at the bound's first token, naming the declarator's name.
             check_input_report(reader, negative ? first : token, negative ? CHECK_INPUT_ARRAY_NEGATIVE : missing ? CHECK_INPUT_UNDECLARED : CHECK_INPUT_DECLARATION);

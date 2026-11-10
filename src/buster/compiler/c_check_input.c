@@ -321,6 +321,12 @@ typedef enum CheckInputMessage
     // An array of more than BUSTER_TYPE_MAX_OBJECT_BYTES (#1447, clang's limit too), at its bound: "array is too large
     // (2'305'843'009'213'693'952 elements)", its count in `value`.
     CHECK_INPUT_ARRAY_TOO_LARGE,
+    // A list of specifiers whose only type specifier was a _BitInt with an undeclared name in its width (#1447), which clang
+    // drops: its parser's error at the list's end, by `detail`: 0 "type specifier missing, defaults to 'int'; ISO C99 and
+    // later do not support implicit int [-Wimplicit-int]", 1 C23's "a type specifier is required for all declarations",
+    // 2 a type name's or a member's "type name requires a specifier or qualifier", 3 a C23 parameter's name's "unknown type
+    // name 'a'".
+    CHECK_INPUT_TYPE_SPECIFIER_MISSING,
     // A variable-length array or variably modified type where C allows none (#1447, check_input_vla_place), each at its
     // declarator's name as clang's: at file scope, a block's static or extern object, a member.
     CHECK_INPUT_VLA_FILE_SCOPE,
@@ -4507,6 +4513,8 @@ static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor,
     bool complex = false;
     bool atomic = false;
     bool reported = false;
+    // Whether a _BitInt's width had an undeclared name, which drops it (#1447).
+    bool dropped_bit_int = false;
     // Whether a specifier that doesn't combine was dropped, as clang's DeclSpec drops it (#1447): once per list.
     bool specifiers_recovered = false;
     const uint32_t reports = reader->output->report_count;
@@ -4694,6 +4702,8 @@ static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor,
             }
             reader->constant_abi_origin = 0;
             reader->constant_noderef = NULL;
+            const uint32_t typed_reports = reader->output->report_count;
+            bool dropped = false;
             if (job != 0 && job->ready && job->keyword == i)
             {
                 selected = job->result;
@@ -4703,18 +4713,29 @@ static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor,
                 // A _BitInt's width alone, unsigned until the declaration's own signedness applies below: read as a
                 // whole type name, `_BitInt(1)` is a signed one-bit _BitInt, which C refuses, before an `unsigned` counts.
                 int64_t width = 0;
+                // Its undeclared names are clang's errors at each one (#1447, check_constant_name). A width with one
+                // that no correction took is no type specifier, as clang drops it: the list goes on without it.
+                const uint32_t missing = reader->constant_missing;
+                reader->constant_names = close > i + 2 && close < end ? CHECK_CONSTANT_NAMES_REPORT : CHECK_CONSTANT_NAMES_NONE;
                 const bool sized = close > i + 2 && close < end && check_input_constant(reader, i + 2, close, &width) && width > 0 && width <= UINT32_MAX;
+                reader->constant_names = CHECK_CONSTANT_NAMES_NONE;
                 selected = sized ? check_input_type_result(reader, type_bit_int(reader->types, (uint32_t)width, true)) : 0;
+                dropped = !sized && reader->constant_missing != missing;
             }
             else
             {
+                reader->constant_names = close > i + 1 && close < end ? CHECK_CONSTANT_NAMES_REPORT : CHECK_CONSTANT_NAMES_NONE;
                 selected = close > i + 1 && close < end ? check_input_constant_type(reader, i, close + 1) : 0;
+                reader->constant_names = CHECK_CONSTANT_NAMES_NONE;
             }
             abi_origin = job != 0 && job->ready && job->keyword == i ? job->result_abi_origin : reader->constant_abi_origin;
             noderef = job != NULL && job->ready && job->keyword == i ? job->noderef_result : reader->constant_noderef;
-            valid &= selected != 0 && base == 0;
+            valid &= (selected != 0 || dropped) && base == 0;
+            // A reading that reported its own error (an undeclared name's, #1447) needs no report here.
+            reported |= selected == 0 && reader->output->report_count != typed_reports;
+            dropped_bit_int |= dropped;
             base = selected;
-            bit_int = name == C_NAME_BITINT || name == C_NAME_EXTINT;
+            bit_int = selected != 0 && (name == C_NAME_BITINT || name == C_NAME_EXTINT);
             reader->declared_types[i] = selected;
             for (uint32_t token = i; selected != 0 && token <= close; token += 1)
             {
@@ -4728,7 +4749,7 @@ static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor,
             {
                 job->variably_modified = selected != 0 && check_input_vla_modified(reader->types, selected);
             }
-            i = selected != 0 ? close : i;
+            i = selected != 0 || dropped ? close : i;
         }
         else if (name == C_NAME_LONG)
         {
@@ -4908,6 +4929,33 @@ static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor,
     const bool typed = base != 0 || integer_seen || longs || shorts || signedness || complex;
     const bool implicit_int = !typed && (parser->language.standard < 1999 || free_standing || (parameter && parser->recovered_parameter_types));
     valid &= implicit_int || (saw && typed);
+    if (dropped_bit_int && !typed && !implicit_int)
+    {
+        // The parser's error clang then gives at the list's end, which a declaration's, a K&R one's or (before C23, whose
+        // `int f(_BitInt(zzz) a)` names a type `a`) a parameter's are; a type name's and a member's are a type name's.
+        // A declaration's is at its first declarator's name (`(*fp)(int)`'s fp); one with none has a parser error of
+        // clang's own (an unnamed parameter's "expected parameter declarator"), which this doesn't give. A C23 parameter
+        // whose name follows the list names a type there: "unknown type name 'a'".
+        const bool declaration = reader->specifier_owner == first || parameter;
+        const uint32_t count = parser->tokens.count;
+        uint32_t at = i;
+        while (declaration && at < count && at < end && parser->tokens.kinds[at] != PARSE_KIND_IDENTIFIER && parser->tokens.kinds[at] != PARSE_KIND_SEMI &&
+               parser->tokens.kinds[at] != PARSE_KIND_COMMA && parser->tokens.kinds[at] != PARSE_KIND_EQUAL && parser->tokens.kinds[at] != PARSE_KIND_L_BRACE &&
+               parser->tokens.kinds[at] != PARSE_KIND_R_PAREN && parser->tokens.kinds[at] != PARSE_KIND_L_SQUARE)
+        {
+            at += 1;
+        }
+        const bool named = !declaration || (at < count && at < end && parser->tokens.kinds[at] == PARSE_KIND_IDENTIFIER);
+        const uint32_t before = reader->output->report_count;
+        if (named)
+        {
+            check_input_report(reader, at, CHECK_INPUT_TYPE_SPECIFIER_MISSING);
+        }
+        if (reader->output->report_count == before + 1 && !reader->output->resource)
+        {
+            reader->output->reports[before].detail = !declaration ? 2u : parser->language.standard < 2023 ? 0u : parameter && at == i ? 3u : 1u;
+        }
+    }
     valid &= longs <= 2 && shorts <= 1 && !(longs && shorts);
     valid &= !*is_typedef || (storage == 0 && (!*is_inline || free_standing) && !thread_local);
     valid &= !thread_local || (storage == 0 || storage == C_NAME_STATIC || storage == C_NAME_EXTERN || storage == C_NAME_PRIVATE_EXTERN);

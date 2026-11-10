@@ -4486,9 +4486,19 @@ Left as they were:
   non-constant (`enum { B = countr + 1 }` with an `int counter`) keeps the
   generic declaration error where clang says "expression is not an integer
   constant expression" at the culprit, as any non-constant enumerator value
-  or width does. A `typeof` operand, an array's bound, a `_BitInt` width or a
-  designator's index is not corrected yet: an undeclared one there still
-  stops the reader. Lanes and deferred readers search nothing: a unit with
+  or width does. In a `typeof` operand, an array's bound, a `_BitInt` width
+  or a designator's index, a correction is taken too (`typeof(countr)` has
+  counter's type, `int v[countr]` is a VLA), and each name with none is
+  clang's error at it, in the expression's order, and stops the reader
+  there: clang keeps such a declaration invalid with quiet uses, which waits
+  for the reader's invalid binding. A `_BitInt` whose width had one is no
+  type specifier, as clang drops it, and its parser's error follows: a
+  declaration's "type specifier missing" (C23's "a type specifier is
+  required") at its first declarator's name, a C23 parameter's "unknown type
+  name" at its name, a member's or a type name's "type name requires a
+  specifier or qualifier" at the list's end; an unnamed parameter's
+  (`int f(_BitInt(zzz))`), clang's "expected parameter declarator", isn't
+  given. Lanes and deferred readers search nothing: a unit with
   such a name is read again in source order, which corrects it. A walk
   search doesn't count a value's search that the binding answers make later
   in an earlier body, which matters only past clang's 50 corrections.
