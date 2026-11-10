@@ -995,11 +995,16 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
             const uint32_t second = graph->argument_nodes[offset + 1];
             const TypeId first_type = first < stream->count ? check_stream_type(stream, first) : 0;
             const TypeId second_type = second < stream->count ? check_stream_type(stream, second) : 0;
-            // A cast's typedef is its type name's (`(D)1`'s D), any other operand's its object's.
-            const uint32_t first_spelling = first < graph->count && graph->ops[first] == CHECK_OP_CAST ? check_input_operand_type_spelling(input, parser, first) :
-                                                                                                        check_semantic_operand_spelling(parser, input, stream, types, first);
-            const uint32_t second_spelling = second < graph->count && graph->ops[second] == CHECK_OP_CAST ? check_input_operand_type_spelling(input, parser, second) :
-                                                                                                           check_semantic_operand_spelling(parser, input, stream, types, second);
+            // A cast's typedef is its type name's (`(D)1`'s D), a sizeof's or an alignof's clang's __size_t
+            // (check_input_operand_type_spelling's sentinel), any other operand's its object's.
+            const bool first_typed = first < graph->count && (graph->ops[first] == CHECK_OP_CAST || graph->ops[first] == CHECK_OP_SIZEOF ||
+                                                              graph->ops[first] == CHECK_OP_ALIGNOF);
+            const bool second_typed = second < graph->count && (graph->ops[second] == CHECK_OP_CAST || graph->ops[second] == CHECK_OP_SIZEOF ||
+                                                                graph->ops[second] == CHECK_OP_ALIGNOF);
+            const uint32_t first_spelling = first_typed ? check_input_operand_type_spelling(input, parser, first) :
+                                                          check_semantic_operand_spelling(parser, input, stream, types, first);
+            const uint32_t second_spelling = second_typed ? check_input_operand_type_spelling(input, parser, second) :
+                                                            check_semantic_operand_spelling(parser, input, stream, types, second);
             if (report->diagnostic == CHECK_DIAG_INVALID_TYPE && first_type != 0 && second_type != 0)
             {
                 const bool second_wrong = check_action_kind(types, first_type) == BUSTER_TYPE_KIND_FLOATING;
