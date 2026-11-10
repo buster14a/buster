@@ -646,17 +646,23 @@ at the target's forms, by both of the checker's paths:
   (`check_vector_baseline_shift_by`, #1834): `psll`, `psrl` and `psra` of words, dwords and qwords, a qword's arithmetic
   one the logical one xor its sign bit shifted alike less that, and bytes' through words: masked by `0xff` shifted
   alike for a left or logical right shift, unpacked into words' high bytes, shifted and packed for an arithmetic one.
+  The integers' `__builtin_elementwise_min` and `_max` without SSE4.1's (or AVX-512's qword) instructions are a
+  compare's blend (`check_vector_baseline_extremes`, #1834): the mask `pcmpgt` of a and b (of b and a for a minimum),
+  unsigned elements' biased by their sign bits first (a constant operand, `xorps`), then `pand`, `pandn` and `por`;
+  unsigned words' are `psubusw` with `paddw` or `psubw`. Absolute values without SSSE3 (or AVX-512's of qwords) are
+  bytes' `pminub` and words' `pmaxsw` of each and its negation, and dwords' and qwords' xor with their sign less it
+  (`check_vector_baseline_absolute`).
   `__builtin_convertvector`'s integer extensions without SSE4.1 and truncations without AVX-512 are sequences too
   (`check_vector_baseline_resize`, #1834): an extension unpacks the low elements with zeros, or with themselves and
-  shifts them right arithmetically (a qword's high dword is `psrad` by 31 of a copy); a truncation takes a qword's low dword
-  (`pshufd`, or of 32 bytes `vextractf128` and `shufps`), makes each element's kept bits its whole value by shifts and
-  packs them with saturation (`packssdw`, `packsswb`, `packuswb`), 32 bytes as their two halves. Conversions between 8-
-  or 16-bit integers and floats or doubles go through dwords by them.
+  shifts them right arithmetically (a qword's high dword is `psrad` by 31 of a copy); a truncation takes a qword's low
+  dword (`pshufd`, or of 32 bytes `vextractf128` and `shufps`), makes each element's kept bits its whole value by shifts
+  and packs them with saturation (`packssdw`, `packsswb`, `packuswb`), 32 bytes as their two halves. Conversions between
+  8- or 16-bit integers and floats or doubles go through dwords by them.
 - What has no form at the target is refused by name: shuffles of bytes and words without SSSE3, their 32-byte ones
-  without AVX-512, minimum and maximum of elements SSE2 hasn't (and of qwords), absolute values without SSSE3,
-  conversions of vectors wider than the target's registers, and scalar fused multiply-adds without FMA. The sign masks
-  and the conversions to integers in a general register (`movmskps`, `cvt(t)ss2si` and the others), vector results in
-  several registers and operators on vectors wider than the registers are #1193's.
+  without AVX-512, minimum and maximum of qwords without SSE4.2, conversions of vectors wider than the target's
+  registers, and scalar fused multiply-adds without FMA. The sign masks and the conversions
+  to integers in a general register (`movmskps`, `cvt(t)ss2si` and the others), vector results in several registers
+  and operators on vectors wider than the registers are #1193's.
 - `test-checker --program-vectors` runs `c_check_program_vector_test.c`'s baseline programs (the SSE2 survey's
   intrinsics, shuffles of every element size, SSE4.1's and AVX2's) at the three levels natively against clang -O0's build
   at the same `-march`, and checks each refusal by name.
