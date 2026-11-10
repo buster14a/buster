@@ -610,13 +610,22 @@ Release configuration generates those two units' native code in parallel parts:
    fourteen parts of contiguous function ranges in module order, the costliest
    (by instruction count) as cheap as the alignment rule below allows, and a
    fifteenth with the unit's global variables: a job per hardware thread of the
-   9700X. It parses the module once and forks a child per part.
+   9700X. It parses the module once and forks a child per part, as many at once
+   as the CPUs it may use and the available memory allow: each child copies
+   most of the module's pages (fifteen children of the checker came to about
+   14.8 GB, four to 4.7 GB).
 3. A Clang backend job per part (`Generating UNIT's native part N`) compiles
    it with the unit's `-march`, debug information and O3 code generation, the
    IR optimizer disabled.
 4. `cmake/BusterCodegenMerge.cmake` (`Combining UNIT's native parts`) joins
    them in order with a relocatable link and makes local again everything the
-   unit didn't export, before the ordinary final link.
+   unit didn't export, before the ordinary final link. It fails when any of the
+   unit's local names (the split's `locals.txt`) is still undefined.
+
+Each unit's parts start once its own split is done: with CMake 3.27 and later
+these commands take `DEPENDS_EXPLICIT_ONLY`, without which CMake makes a
+command the link uses wait for every unit's object (the backend's parts waited
+for the checker's bitcode, 14.5 s, then competed with its parts).
 
 The executable's code is the single object's: every function at the same
 address with the same instructions. The split keeps what the code generator
@@ -624,7 +633,11 @@ saw. A function another part refers to stays local where it is defined, so its
 jumps relax as before (a near tail call's two-byte `jmp`); a hidden alias,
 `NAME.buster_split`, names it for the other parts. A code part reads strong
 constants' initializers `available_externally`, so a string's bytes still fold
-into immediate stores. The module's inline assembly, which places
+into immediate stores; every local global such an initializer names is a
+hidden external one, since folding a pointer out of a table can name it too. A
+local definition another part owns and this one doesn't use is an ordinary
+external declaration, which emits no symbol: as a hidden one it would be an
+undefined hidden symbol, which lld ignores and GNU ld refuses. The module's inline assembly, which places
 `.text.buster_checker`, stays in the first part. A part starts, in each text
 section (`.text`, a named section, a cold function's `.text.unlikely.`), at a
 function of the greatest alignment it holds there, so that the relocatable
