@@ -6,7 +6,8 @@
 // a cleanup's scope that clang's JumpScopeChecker rejects. Then programs of each exit from a cleanup's scope, run natively
 // against clang -O0's build of the same source on both paths: blocks' ends, breaks and continues of every loop and a for
 // statement's own variables, gotos, returns of each class of value (kept before their cleanups) and the named return value
-// (after them, as clang's NRVO has it), statement expressions, switches, and the functions' kinds the lowering takes.
+// (after them, as clang's NRVO has it), statement expressions, switches, and the functions' kinds the lowering takes: their
+// parameters (a _Bool's among them) and their results (in memory, in registers, in a result object).
 // Include after c_check_program_test.c and c_check_vla_test.c.
 #ifndef BUSTER_C_CHECK_CLEANUP_TEST_INCLUDED
 #define BUSTER_C_CHECK_CLEANUP_TEST_INCLUDED
@@ -278,6 +279,23 @@ static __attribute__((noinline)) void check_test_cleanup_programs(CheckTest* tes
         "int tested(int n){trace=0;int r=0;char buffer[4]={'a','b','c',0};{__auto_type d __attribute__((cleanup(noted_d)))=n*1.5;"
         "__auto_type s __attribute__((cleanup(noted_p)))=(P){n,2*n};__auto_type c __attribute__((cleanup(noted_s)))=buffer+(n&1);"
         "r+=(int)d+s.a+s.b+c[0];}return (int)trace^r;}", "cleanup-auto-type", clang);
+    // A _Bool parameter takes the address's low bit, as clang's code passes it (an int's: 0), and results that come back in memory, in registers as a struct, or in a result
+    // object (a 128-bit integer, a vector, a complex) land in frame objects of their own, dropped.
+    check_test_program_source(test, BUSTER_CHECK_TEST_CLEANUP_TRACE
+        "typedef struct M{long a,b,c;}M;typedef struct R{int a,b;}R;typedef int V __attribute__((vector_size(16)));"
+        "static void noted_bool(_Bool b){trace=trace*31u+(unsigned)b+7000u;}static void noted_const_bool(const _Bool b){trace=trace*31u+(unsigned)b+7100u;}"
+        "static M noted_m(int*p){trace=trace*31u+(unsigned)*p;M m={*p,2,3};*p=-1;return m;}"
+        "static R noted_r(int*p){trace=trace*31u+(unsigned)*p+10u;R r={*p,4};return r;}"
+        "static __int128 noted_i(int*p){trace=trace*31u+(unsigned)*p+20u;return(__int128)*p<<70;}"
+        "static unsigned __int128 noted_u(int*p){trace=trace*31u+(unsigned)*p+30u;return(unsigned __int128)*p<<90;}"
+        "static V noted_v(int*p){trace=trace*31u+(unsigned)*p+40u;V v={*p,1,2,3};return v;}"
+        "static double _Complex noted_c(int*p){trace=trace*31u+(unsigned)*p+60u;return *p;}"
+        "static M noted_mv(int*p,...){trace=trace*31u+(unsigned)*p+70u;M m={0};return m;}"
+        "int tested(int n){trace=0;int r=0;{int a __attribute__((cleanup(noted_bool)))=n;int b __attribute__((cleanup(noted_const_bool)))=n+1;r+=a+b;}"
+        "{int c __attribute__((cleanup(noted_m)))=n+2;int d __attribute__((cleanup(noted_r)))=n+3;int e __attribute__((cleanup(noted_i)))=n+4;"
+        "int f __attribute__((cleanup(noted_u)))=n+5;int g __attribute__((cleanup(noted_v)))=n+6;"
+        "int i __attribute__((cleanup(noted_c)))=n+8;int j __attribute__((cleanup(noted_mv)))=n+9;r+=c+d+e+f+g+i+j;"
+        "if(n&1)return (int)trace^r;}return (int)trace^r;}", "cleanup-parameters-results", clang);
     check_test_program_build_release();
 }
 

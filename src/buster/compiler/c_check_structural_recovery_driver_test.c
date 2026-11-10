@@ -147,6 +147,21 @@ static void check_test_driver_structural_recovery(CheckTest* test, const char* c
         "struct S { int a; } s;\n"
         "int n(int x) { x = ({ if (x) goto out; s.b; }); out: return x; }\n"
         "int caller(int c) { int w; c = c; return n(1) + (c << 42); }\n",
+        // An unused parameter whose left-out part names it only through a declaration of the same name, whose scope holds
+        // the use (a block's, a for clause's, a statement expression's, a later declarator's, a prototype's), keeps
+        // -Wunused-parameter after a walk-ending error (#1447); a use after the block's scope, a tag's and a label's name don't
+        // count, nor does a local label's declaration shadow it, and a prototype's array bound names the parameter.
+        "struct S { int a; } s;\n"
+        "void e(void) { struct T t; }\n"
+        "void block(int p, int q) { { int p = 2; p + s.b; } q + s.b; }\n"
+        "void clause(int p, int q) { for (int p = 0; p < s.b; p++); q + s.b; }\n"
+        "void value(int p, int q) { int r = ({ int p = 3; p + s.b; }); q + s.b; }\n"
+        "void list(int p, int q) { { int x = 1, p = 3; p + s.b; } q + s.b; }\n"
+        "void prototype(int p, int q) { int r = sizeof(int (*)(int p, int a[p])) + s.b; q + s.b; }\n"
+        "void bound(int p, int q) { int r = sizeof(int (*)(int a[p])) + s.b; q + s.b; }\n"
+        "void after(int p, int q) { { int p = 2; } p + s.b; q + s.b; }\n"
+        "void names(int p, int q) { { struct p *x; p: q + s.b; goto p; } q + s.b; }\n"
+        "void local(int p, int q) { ({ __label__ p; p: q = p + s.b; }); q + s.b; }\n",
     };
     static const char* const standards[] = { "-std=gnu17", "-std=gnu23" };
     static const char* const options[][2] = { { "-Wall", NULL }, { "-Wall", "-Wextra" } };

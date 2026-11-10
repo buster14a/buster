@@ -433,7 +433,8 @@ static bool check_repair_input_report(const CheckRepair* repair, const CheckInpu
                               view->tokens.kinds[token - 2] == PARSE_KIND_ASM && view->tree.roles[token - 1] == PARSE_ROLE_OPEN_ATTRIBUTE &&
                               parent < repair->original_end && view->tree.roles[parent] == PARSE_ROLE_CLOSE_ATTRIBUTE &&
                               view->tree.parents[token - 1] == parent;
-        result = (report->message == CHECK_INPUT_UNDECLARED && kind == PARSE_KIND_IDENTIFIER && role == PARSE_ROLE_OPERAND && !label_address) ||
+        result = ((report->message == CHECK_INPUT_UNDECLARED || report->message == CHECK_INPUT_INVALID_USE || report->message == CHECK_INPUT_AMBIGUOUS) &&
+                   kind == PARSE_KIND_IDENTIFIER && role == PARSE_ROLE_OPERAND && !label_address) ||
                  ((report->message == CHECK_INPUT_LITERAL || report->message == CHECK_INPUT_WIDE_LITERAL) &&
                   (kind == PARSE_KIND_NUMBER || kind == PARSE_KIND_CHARACTER || kind == PARSE_KIND_STRING)) ||
                  ((report->message == CHECK_INPUT_REDECLARATION || report->message == CHECK_INPUT_CONFLICTING_TYPES) &&

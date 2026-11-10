@@ -310,6 +310,15 @@
 #define BUSTER_TYPED_FENCE_SIGNAL 0x08
 #define BUSTER_TYPED_FENCE_SEQ_CST 5
 #define BUSTER_TYPED_ACCESS_ATOMIC 0x10
+// A LOAD's, STORE's or SET's segment override (#1447), in its value's top two bits past what each class's value holds
+// (an atomic marker and its order, a vector's or a mask's bytes): FS (clang's address space 257, __seg_fs) or GS (256,
+// __seg_gs), numbered as the encoder's overrides are (form + segment * X86_FORM_COUNT is the form with the override). A
+// function with one says so (Tier0Function.segments); no other kind takes it (another kind's value is its own whole: a
+// constant's top bits are its own), and 3 is none.
+#define BUSTER_TYPED_ACCESS_SEGMENT_SHIFT 62
+#define BUSTER_TYPED_ACCESS_SEGMENT (UINT64_C(3) << BUSTER_TYPED_ACCESS_SEGMENT_SHIFT)
+#define BUSTER_TYPED_SEGMENT_FS 1
+#define BUSTER_TYPED_SEGMENT_GS 2
 // An ATOMIC_RMW's operation: an addition (lock xadd), and without it an exchange (xchg).
 #define BUSTER_TYPED_RMW_ADD 0x08
 // Where an ATOMIC_CAS's value has its address's local, above its order.
@@ -409,8 +418,9 @@ struct Tier0Operation
     uint8_t result_bytes;
 };
 
-// An asm statement placed in its caller (#1839): a CALL whose row has no arguments and whose callee is this body, not a
-// symbol (Tier0Function.call_asm). Its records run in the call's place, with no call and no return, and read the
+// An asm statement placed in its caller (#1839): a CALL whose callee is this body, not a symbol (Tier0Function.call_asm),
+// and whose arguments are the template's register operands, each in its register (their locations), which the call's
+// moves put there. Its records run in the call's place, with no call and no return, and read the
 // statement's operand block, a frame object of the function's (`block`, a local): a record's base of
 // BUSTER_TIER0_ASM_BLOCK addresses it, its displacement a slot's offset in it. They write the registers of `touched`
 // (BUSTER_TIER0_XMM's layout), the flags and memory, nothing that holds the frame (rsp, rbp, r15), no opmask register
@@ -617,12 +627,18 @@ struct Tier0Function
     uint32_t operation_count;
     // The asm statements placed in their callers (#1839), an optional column, 0 for a function without them: call_asm[c]
     // is 1 + b for a CALL of call row c whose callee is asm body b (Tier0AsmBody) of `asm_bodies`, of asm_body_count, and 0
-    // for any other call. Such a row has no arguments, a VOID result and a target of BUSTER_TIER0_CALL_ASM_TARGET.
+    // for any other call. Such a row has a VOID result and a target of BUSTER_TIER0_CALL_ASM_TARGET, and its arguments
+    // are in the registers the template finds them in.
     const uint32_t* call_asm;
     const Tier0AsmBody* asm_bodies;
     uint32_t asm_body_count;
     bool vectors;
     bool masks;
+    // Whether a LOAD, STORE or SET has a segment override (#1447, BUSTER_TYPED_ACCESS_SEGMENT): a load or store in
+    // __seg_fs or __seg_gs. Validation and compilation strip the overrides out of line (tier0_segments_strip), so that
+    // their paths never see one, and the compilation adds each to its entry's records after (tier0_apply_segments).
+    // ir_lower refuses such a function, which Tier 0 compiles.
+    bool segments;
     // Vector transport: 0 preserves the EVEX path; 16 uses SSE2 and 32 uses AVX.
     // This is the generated function's target, never the compiler host's ISA.
     uint8_t vector_bytes;
@@ -1520,9 +1536,9 @@ static uint32_t tier0_result_part_bytes(AbiReturn result)
 // emitters follow inside `stack_bytes` (its call's stack area, or the incoming one): a value ignored, in an argument
 // register or in an 8-byte slot, and an aggregate as tier0_aggregate_location_valid has it. `registers` gets the
 // argument registers it takes, as a register set.
-static bool tier0_place_valid(AbiLocation location, uint32_t size, uint64_t stack_bytes, uint32_t* registers)
+static bool tier0_place_valid(AbiLocation location, uint32_t size, uint64_t stack_bytes, uint32_t allowed, uint32_t* registers)
 {
-    const uint32_t first = tier0_register_bit(location.registers[0], BUSTER_TIER0_ARGUMENT_REGISTERS);
+    const uint32_t first = tier0_register_bit(location.registers[0], allowed);
     bool valid = false;
     if (size == 0)
     {
@@ -1536,7 +1552,7 @@ static bool tier0_place_valid(AbiLocation location, uint32_t size, uint64_t stac
     {
         const bool parts = location.kind == BUSTER_ABI_LOCATION_REGISTERS || location.kind == BUSTER_ABI_LOCATION_SPLIT;
         valid = tier0_aggregate_location_valid(location, size, stack_bytes);
-        *registers = parts ? first | tier0_register_bit(location.registers[1], BUSTER_TIER0_ARGUMENT_REGISTERS) : 0;
+        *registers = parts ? first | tier0_register_bit(location.registers[1], allowed) : 0;
     }
     return valid;
 }
@@ -1609,11 +1625,16 @@ static bool tier0_call_valid(const Tier0Function* function, uint32_t c)
     // realigned (tier0_frame_alignment).
     uint32_t taken = 0;
     bool valid = (uint64_t)first + count <= function->argument_count && function->calls[c].stack_alignment_log2 <= BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2;
+    // An asm body's arguments (#1839) are values in the registers its template finds them in: any general register but
+    // rsp, and xmm0 to xmm15.
+    const bool body = function->call_asm != 0 && function->call_asm[c] != 0;
+    const uint32_t allowed = body ? (0xffffu & ~(1u << X86_REGISTER_RSP)) | BUSTER_TIER0_XMM_ALL : BUSTER_TIER0_ARGUMENT_REGISTERS;
     for (uint32_t a = 0; valid && a < count; a += 1)
     {
         const uint32_t size = function->argument_sizes != 0 ? function->argument_sizes[first + a] : 0;
         uint32_t registers = 0;
-        valid = size <= BUSTER_TIER0_MAX_ARGUMENT_BYTES && tier0_place_valid(function->argument_locations[first + a], size, stack_bytes, &registers) &&
+        valid = size <= BUSTER_TIER0_MAX_ARGUMENT_BYTES && !(body && size != 0) &&
+                tier0_place_valid(function->argument_locations[first + a], size, stack_bytes, allowed, &registers) &&
                 (taken & registers) == 0;
         taken |= registers;
     }
@@ -1670,7 +1691,8 @@ static bool tier0_parameters_valid(const Tier0Function* function)
         const bool object = tier0_is_object(function, p);
         uint32_t registers = 0;
         valid = (!object || (function->local_alignments != 0 && function->local_alignments[p] <= BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2)) &&
-                tier0_place_valid(function->parameters[p], object ? function->local_sizes[p] : 0, incoming, &registers) && (taken & registers) == 0;
+                tier0_place_valid(function->parameters[p], object ? function->local_sizes[p] : 0, incoming, BUSTER_TIER0_ARGUMENT_REGISTERS, &registers) &&
+                (taken & registers) == 0;
         taken |= registers;
     }
     return valid;
@@ -6424,8 +6446,8 @@ static const Tier0AsmBody* tier0_call_body(const Tier0Function* function, uint32
     return index != 0 && index <= function->asm_body_count ? &function->asm_bodies[index - 1] : 0;
 }
 
-// Whether the asm bodies (#1839) are as Tier0AsmBody has them: each named by call rows of no arguments and the body
-// target alone, which only CALL entries of class VOID make; its block an object of the function's; and its touched
+// Whether the asm bodies (#1839) are as Tier0AsmBody has them: each named by call rows of the body target alone (whose
+// arguments are its register operands, in their registers), which only CALL entries of class VOID make; its block an object of the function's; and its touched
 // registers none that holds the frame (rsp, rbp, r15). Out of line and cold: few functions have them.
 static __attribute__((noinline, cold)) bool tier0_asm_bodies_check(const Tier0Function* function)
 {
@@ -6452,7 +6474,7 @@ static __attribute__((noinline, cold)) bool tier0_asm_bodies_check(const Tier0Fu
     {
         const uint32_t index = function->call_asm[c];
         valid = index == 0 ? function->call_targets[c] != BUSTER_TIER0_CALL_ASM_TARGET
-                           : index <= function->asm_body_count && function->call_argument_counts[c] == 0 && function->call_targets[c] == BUSTER_TIER0_CALL_ASM_TARGET &&
+                           : index <= function->asm_body_count && function->call_targets[c] == BUSTER_TIER0_CALL_ASM_TARGET &&
                                  (function->call_tails == 0 || function->call_tails[c] == 0) && (function->call_result_objects == 0 || function->call_result_objects[c] == 0) &&
                                  !function->call_variadic[c];
     }
@@ -10861,7 +10883,38 @@ static uint32_t tier0_returns_twice_saves(const Tier0Function* function, const T
 // What both paths share once the fusion and the depths are in the entries' columns, each pass in the path's version:
 // selection, the references' count, the homes and the frame (shared), measuring and positions (the vector path's
 // measuring sums them), the output, emission and the immediates' choice (x86_choose_forms or its twin).
-static Tier0Error tier0_generate(const Tier0Function* function, Tier0Entries* entries, Arena* scratch, Arena* output, Tier0Code* code, bool vector)
+// The segment overrides (#1447) of a function that has them (Tier0Function.segments), one per entry (`segments`: 0, or
+// BUSTER_TYPED_SEGMENT_FS or _GS on a LOAD, STORE or SET), on its records once the forms are chosen: each memory operand
+// of a marked entry's records (from its first to the next one's, Tier0Entries.positions) takes the override, but the
+// frame's own (based on rsp, the frame's base or the incoming arguments' base), RIP-relative ones and lea's. A marked
+// access's address is in a register: LOAD's, STORE's and SET's templates take it from their depths ([R1], [R2 + R1 *
+// 2^s], [R1 + K]), never from a home or a constant, and their deferred and deep forms (the memory classes', vectors' and
+// masks') read and write their values through the frame's slots, which the frame's registers base. A shared scalar pass,
+// which the vector path runs too: such a function is rare, and only its marked entries' records are read.
+static void tier0_apply_segments(X86Instruction* records, const uint32_t* positions, uint32_t count, const uint8_t* segments, const Tier0Frame* frame)
+{
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        const uint32_t segment = segments[i];
+        for (uint32_t r = segment != 0 ? positions[i] : positions[i + 1]; r < positions[i + 1]; r += 1)
+        {
+            X86Instruction* record = records + r;
+            const uint32_t form = record->form & BUSTER_X86_FORM_NUMBER;
+            const uint8_t mode = record->mode;
+            const bool memory = (mode & BUSTER_X86_MODE_MEMORY) != 0 && (mode & BUSTER_X86_MODE_RIP) == 0;
+            const bool slot = (mode & BUSTER_X86_MODE_BASE) != 0 &&
+                              (record->rm == X86_REGISTER_RSP || record->rm == frame->base || record->rm == frame->incoming_base);
+            const bool address = form == X86_FORM_LEA_R64_M || form == X86_FORM_LEA_R32_M || form == X86_FORM_LEA_R16_M;
+            if (memory && !slot && !address && form < X86_FORM_COUNT)
+            {
+                record->form = (uint16_t)(record->form + segment * X86_FORM_COUNT);
+            }
+        }
+    }
+}
+
+static Tier0Error tier0_generate(const Tier0Function* function, const uint8_t* segments, Tier0Entries* entries, Arena* scratch, Arena* output, Tier0Code* code,
+                                 bool vector)
 {
     (void)vector;
 
@@ -10987,6 +11040,10 @@ static Tier0Error tier0_generate(const Tier0Function* function, Tier0Entries* en
                 tier0_apply_choice(&code->records[choices.records[q]], choices.forms[q], choices.values[q]);
             }
         }
+        if (__builtin_expect(segments != 0, 0))
+        {
+            tier0_apply_segments(code->records, entries->positions, function->count, segments, &frame);
+        }
         if (function->entry_records)
         {
             Tier0Home* kept = BUSTER_ARENA_PUSH_ARRAY(output, Tier0Home, (uint64_t)locals + 1);
@@ -11077,7 +11134,8 @@ static Tier0Code tier0_conclude(Tier0Code code, Tier0Error error, Arena* output,
     return code;
 }
 
-static Tier0Code tier0_compile_scalar(const Tier0Function* function, Arena* output)
+// tier0_compile_scalar's body, with a function's segment overrides (tier0_apply_segments; 0 without them).
+static Tier0Code tier0_compile_scalar_entries(const Tier0Function* function, const uint8_t* segments, Arena* output)
 {
     Tier0Code code;
     memset(&code, 0, sizeof(code));
@@ -11107,7 +11165,7 @@ static Tier0Code tier0_compile_scalar(const Tier0Function* function, Arena* outp
         {
             error = tier0_mask_depths_scalar(function, &entries);
         }
-        error = error == TIER0_OK ? tier0_generate(function, &entries, scratch.arena, output, &code, false) : error;
+        error = error == TIER0_OK ? tier0_generate(function, segments, &entries, scratch.arena, output, &code, false) : error;
         error = error == TIER0_OK ? tier0_label_records(function, &entries, output, &code) : error;
         error = error == TIER0_OK ? tier0_tail_records(function, &entries, output, &code) : error;
     }
@@ -11844,7 +11902,8 @@ static void tier0_validate_tables(const Tier0Function* function, Tier0Validator*
 // The stream's rules an entry at a time: the twin and oracle of the vector path (tier0_validate_accepts), which gives
 // tier0_validate's verdict and rule wherever the vector path doesn't take a stream. Out of line: it runs for --scalar and
 // for the streams the vector path leaves to it, not for every function the lowering validates.
-static __attribute__((noinline)) Tier0Check tier0_validate_scalar(const Tier0Function* function)
+// tier0_validate_scalar's body, for a function without segment overrides.
+static __attribute__((noinline)) Tier0Check tier0_validate_scalar_entries(const Tier0Function* function)
 {
     Tier0Validator validator;
     memset(&validator, 0, sizeof(validator));
@@ -13747,11 +13806,10 @@ static void tier0_emit_vector(const Tier0Function* function, const Tier0Entries*
     }
 }
 
-static Tier0Code tier0_compile(const Tier0Function* function, Arena* output)
+#if BUSTER_HOST_VECTOR
+// tier0_compile's body, with a function's segment overrides (tier0_apply_segments; 0 without them).
+static Tier0Code tier0_compile_entries(const Tier0Function* function, const uint8_t* segments, Arena* output)
 {
-#if !BUSTER_HOST_VECTOR
-    return tier0_compile_scalar(function, output);
-#else
     Tier0Code code;
     memset(&code, 0, sizeof(code));
     const uint64_t output_length = output->length;
@@ -13797,13 +13855,79 @@ static Tier0Code tier0_compile(const Tier0Function* function, Arena* output)
         {
             error = tier0_vector_mask_depths(function, &entries);
         }
-        error = error == TIER0_OK ? tier0_generate(function, &entries, scratch.arena, output, &code, true) : error;
+        error = error == TIER0_OK ? tier0_generate(function, segments, &entries, scratch.arena, output, &code, true) : error;
         error = error == TIER0_OK ? tier0_label_records(function, &entries, output, &code) : error;
         error = error == TIER0_OK ? tier0_tail_records(function, &entries, output, &code) : error;
     }
     code = tier0_conclude(code, error, output, output_length);
     scratch_end(scratch);
     return code;
+}
+#endif
+
+// A function with segment overrides (#1447, Tier0Function.segments), out of line: its values without them, in a copy of
+// its values column (`values`), and each entry's override (`segments`), from a LOAD's, STORE's or SET's value. Another
+// kind's value is its own whole (a constant's top bits are its own). False where an override is 3, which no segment is.
+static bool tier0_segments_strip(const Tier0Function* function, uint64_t* values, uint8_t* segments)
+{
+    bool valid = true;
+    for (uint32_t i = 0; i < function->count; i += 1)
+    {
+        const uint8_t kind = function->kinds[i];
+        const uint64_t value = function->values[i];
+        const uint32_t segment = (uint32_t)(value >> BUSTER_TYPED_ACCESS_SEGMENT_SHIFT);
+        const bool access = kind == BUSTER_TYPED_LOAD || kind == BUSTER_TYPED_STORE || kind == BUSTER_TYPED_SET;
+        valid = valid && (!access || segment != 3);
+        values[i] = access ? value & ~BUSTER_TYPED_ACCESS_SEGMENT : value;
+        segments[i] = access ? (uint8_t)segment : 0;
+    }
+    return valid;
+}
+
+// Compiles a function with segment overrides (tier0_compile's and tier0_compile_scalar's): its stripped copy
+// (tier0_segments_strip) on the path's own passes, then the overrides on its records.
+static __attribute__((noinline)) Tier0Code tier0_compile_segments(const Tier0Function* function, Arena* output, bool vector)
+{
+    Tier0Code code;
+    memset(&code, 0, sizeof(code));
+    Scratch scratch = scratch_begin(output);
+    uint64_t* values = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint64_t, (uint64_t)function->count + 1);
+    uint8_t* segments = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint8_t, (uint64_t)function->count + 1);
+    if (values == 0 || segments == 0)
+    {
+        code.error = TIER0_ERROR_MEMORY;
+    }
+    else if (!tier0_segments_strip(function, values, segments))
+    {
+        code.error = TIER0_ERROR_UNSUPPORTED;
+    }
+    else
+    {
+        Tier0Function stripped = *function;
+        stripped.values = values;
+        stripped.segments = false;
+#if BUSTER_HOST_VECTOR
+        code = BUSTER_VECTOR_PATH(vector) ? tier0_compile_entries(&stripped, segments, output) : tier0_compile_scalar_entries(&stripped, segments, output);
+#else
+        (void)vector;
+        code = tier0_compile_scalar_entries(&stripped, segments, output);
+#endif
+    }
+    scratch_end(scratch);
+    return code;
+}
+
+static Tier0Code tier0_compile_scalar(const Tier0Function* function, Arena* output)
+{
+    return __builtin_expect(function->segments, 0) ? tier0_compile_segments(function, output, false) : tier0_compile_scalar_entries(function, 0, output);
+}
+
+static Tier0Code tier0_compile(const Tier0Function* function, Arena* output)
+{
+#if !BUSTER_HOST_VECTOR
+    return tier0_compile_scalar(function, output);
+#else
+    return __builtin_expect(function->segments, 0) ? tier0_compile_segments(function, output, true) : tier0_compile_entries(function, 0, output);
 #endif
 }
 
@@ -14897,7 +15021,8 @@ static __attribute__((noinline)) bool tier0_validate_accepts(const Tier0Function
 
 #define BUSTER_TIER0_VALIDATE_SMALL_COUNT 16
 
-static Tier0Check tier0_validate(const Tier0Function* function)
+// tier0_validate's body, for a function without segment overrides.
+static Tier0Check tier0_validate_entries(const Tier0Function* function)
 {
     Tier0Check check;
     memset(&check, 0, sizeof(check));
@@ -14908,7 +15033,47 @@ static Tier0Check tier0_validate(const Tier0Function* function)
                        function->argument_count <= BUSTER_TIER0_VALIDATE_SMALL_COUNT;
     if (small || !tier0_validate_accepts(function))
     {
-        check = tier0_validate_scalar(function);
+        check = tier0_validate_scalar_entries(function);
     }
     return check;
+}
+
+// tier0_validate and tier0_validate_scalar (`vector` false) of a function with segment overrides (#1447,
+// Tier0Function.segments), out of line: its overrides (tier0_segments_strip), then its stripped copy on the path's own
+// passes.
+static __attribute__((noinline)) Tier0Check tier0_validate_segments(const Tier0Function* function, bool vector)
+{
+    Tier0Check check;
+    memset(&check, 0, sizeof(check));
+    Scratch scratch = scratch_begin(0);
+    uint64_t* values = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint64_t, (uint64_t)function->count + 1);
+    uint8_t* segments = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint8_t, (uint64_t)function->count + 1);
+    if (values == 0 || segments == 0)
+    {
+        check.error = TIER0_ERROR_MEMORY;
+    }
+    else if (!tier0_segments_strip(function, values, segments))
+    {
+        check.error = TIER0_ERROR_INVALID;
+        check.rule = "a LOAD's, STORE's or SET's segment override that isn't FS or GS";
+    }
+    else
+    {
+        Tier0Function stripped = *function;
+        stripped.values = values;
+        stripped.segments = false;
+        check = vector ? tier0_validate_entries(&stripped) : tier0_validate_scalar_entries(&stripped);
+    }
+    scratch_end(scratch);
+    return check;
+}
+
+static Tier0Check tier0_validate(const Tier0Function* function)
+{
+    return __builtin_expect(function->segments, 0) ? tier0_validate_segments(function, true) : tier0_validate_entries(function);
+}
+
+static Tier0Check tier0_validate_scalar(const Tier0Function* function)
+{
+    return __builtin_expect(function->segments, 0) ? tier0_validate_segments(function, false) : tier0_validate_scalar_entries(function);
 }

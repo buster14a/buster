@@ -1744,6 +1744,23 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .warnings = 8,
     },
     {
+        // Clang takes the overflow builtins of _BitInts past 128 bits (#1447) but mul_overflow's of a signed one, as an
+        // operand or the destination, at that argument, the first of them alone; an unsigned one's product, and a signed
+        // one's sum and difference, are taken.
+        .name = "mul_overflow of a signed _BitInt past 128 bits",
+        .source = "typedef _BitInt(200) S; typedef unsigned _BitInt(200) U;\n"
+                  "int f1(S a, S b, S *r) { return __builtin_mul_overflow(a, b, r); }\n"
+                  "int f2(int a, int b, S *r) { return __builtin_mul_overflow(a, b, r); }\n"
+                  "int f3(U a, U b, U *r) { return __builtin_mul_overflow(a, b, r); }\n"
+                  "int f4(U a, S b, U *r) { return __builtin_mul_overflow(a, b, r); }\n"
+                  "int f5(U a, int b, U *r) { return __builtin_mul_overflow(a, b, r); }\n"
+                  "int f6(_BitInt(129) a, int b, int *r) { return __builtin_mul_overflow(a, (b), r); }\n"
+                  "int f7(__int128 a, __int128 b, _BitInt(256) *r) { return __builtin_mul_overflow(a, b, r); }\n"
+                  "int f8(S a, S b, S *r) { return __builtin_add_overflow(a, b, r) + __builtin_sub_overflow(a, b, r); }\n"
+                  "int f9(unsigned _BitInt(129) a, U *r) { return __builtin_mul_overflow(a, 3, r); }\n",
+        .errors = 5,
+    },
+    {
         // A tag a prototype's list declares first (#1447, clang's ActOnTag): -Wvisibility at its name (an unnamed enum's
         // keyword), in a definition's list, a nested prototype's (not one the outer list declares already), a member's, a
         // block's and a bound's, a definition shadowing a file-scope tag; a list's redefinition, with its note, and an
@@ -1827,6 +1844,14 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .name = "odr attribute differences in a system header",
         .source = "# 1 \"odr_system.h\" 1 3\nstruct S { char c; int a; } __attribute__((packed));\nstruct S { char c; int a; };\n"
                   "# 4 \"odr_main.c\" 2\n_Static_assert(sizeof(struct S) == 5, \"first\");\nstruct S s;\n",
+        .c23 = true,
+    },
+    {
+        // A C23 parameter list's compatible redefinition of its own record (#1869) declares the first's type: the body
+        // reads both parameters and a pointer to it as one type, compiled on every path.
+        .name = "C23 parameter list redefines its record compatibly",
+        .source = "int g(struct T { int x; } a, struct T { int x; } b, struct T *c) { return a.x + b.x + c->x; }\n"
+                  "int n(struct W { int a; } *p, int (*q)(struct W { int a; } *r)) { return p->a + (q != 0); }\n",
         .c23 = true,
     },
 };
