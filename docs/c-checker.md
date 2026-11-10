@@ -3587,15 +3587,18 @@ What the lowering covers past scalars (#145's programs):
   declaration in its scope naming it too (`check_control_named`: what
   `Scope::updateNRVOCandidate` and `applyNRVO` decide in that case). The
   lowering's call (`check_lower_cleanup`) takes the variable's address,
-  which makes its local a frame slot, and drops the result. A function of a
-  parameter other than a pointer is refused by name (clang's code bit-casts
-  the address to the `_Bool`, invalid IR that leaves the address's low bit),
-  and so is one whose result is an aggregate (including one returned in
-  registers), a 128-bit integer or a vector. The body's selection references
+  which makes its local a frame slot, and drops the result: an aggregate's
+  (in memory or in registers), a 128-bit integer's or a vector's lands in a
+  frame object of its own, as a source call's does. The one parameter other
+  than a pointer that clang's Sema takes, a `_Bool`, gets the address's low
+  bit, as clang's code passes it (it bit-casts the address to the `_Bool`);
+  an `_Atomic _Bool`'s, which clang's instruction selection can't take, is
+  refused by name. The body's selection references
   the function. `test-checker`'s sections (`c_check_cleanup_test.c`) compare
   54 fixtures' acceptance and first errors with clang's, and run programs of
   each exit, each class of returned value, the named return value's cases,
-  statement expressions, switches and the functions' kinds natively against
+  statement expressions, switches and the functions' kinds (their parameters
+  and results among them) natively against
   clang -O0's build on both paths; `test-checker-driver` compares every error
   of 39 fixtures with clang's, its place and its message, on both paths
   (`c_check_cleanup_driver_test.c`: the jumps' notes aren't the driver's),
