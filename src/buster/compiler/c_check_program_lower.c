@@ -11940,7 +11940,15 @@ static void check_lower_vector_floating(CheckLowerWriter* writer, uint32_t node,
             writer->vectors = true;
         }
     }
-    else if (class == BUSTER_TYPED_CLASS_F32 || class == BUSTER_TYPED_CLASS_F64)
+    else if ((class == BUSTER_TYPED_CLASS_F32 || class == BUSTER_TYPED_CLASS_F64) && builtin >= CBUILTIN_ELEMENTWISE_CEIL && builtin <= CBUILTIN_ELEMENTWISE_ROUND &&
+             (writer->target.features & (BUSTER_X86_FEATURE(SSE41) | BUSTER_X86_FEATURE(AVX512F))) == 0)
+    {
+        // A scalar's rounding without SSE4.1's ROUNDSS and ROUNDSD is the C library's function, as clang's code calls it
+        // (#1834).
+        check_lower_vector_calls(writer, node, builtin, arguments);
+    }
+    else if ((class == BUSTER_TYPED_CLASS_F32 || class == BUSTER_TYPED_CLASS_F64) &&
+             !(ldexp && type_size(types, exponent) <= 8 && (writer->target.features & BUSTER_X86_FEATURE(AVX512F)) == 0))
     {
         // An exponent wider than 64 bits (an __int128's, a _BitInt's) has no instruction's conversion.
         const uint64_t width = ldexp ? type_size(types, exponent) : 0;
@@ -11982,10 +11990,16 @@ static void check_lower_vector_floating(CheckLowerWriter* writer, uint32_t node,
             writer->vectors = true;
         }
     }
-    else if (class == BUSTER_TYPED_CLASS_F80 && (builtin <= CBUILTIN_ELEMENTWISE_ROUND || builtin == CBUILTIN_ELEMENTWISE_MAXNUM || builtin == CBUILTIN_ELEMENTWISE_MINNUM ||
-                                                 (ldexp && type_size(types, exponent) == 4)))
+    else if ((class == BUSTER_TYPED_CLASS_F80 && (builtin <= CBUILTIN_ELEMENTWISE_ROUND || builtin == CBUILTIN_ELEMENTWISE_MAXNUM || builtin == CBUILTIN_ELEMENTWISE_MINNUM ||
+                                                  (ldexp && type_size(types, exponent) == 4))) ||
+             ((class == BUSTER_TYPED_CLASS_F32 || class == BUSTER_TYPED_CLASS_F64) && ldexp && type_size(types, exponent) <= 8 &&
+              (writer->target.features & BUSTER_X86_FEATURE(AVX512F)) == 0))
     {
-        const CheckLowerRuntime runtime = builtin <= CBUILTIN_ELEMENTWISE_ROUND ? check_lower_libm_function(builtin, class) :
+        // A float's or double's ldexp without AVX-512F's VSCALEFSS is the C library's too, as clang's code calls it (#1834),
+        // of the exponent's low 32 bits as an int.
+        const CheckLowerRuntime runtime = class == BUSTER_TYPED_CLASS_F32 ? check_lower_library_runtime(CBUILTIN_LIBRARY_LDEXPF) :
+                                          class == BUSTER_TYPED_CLASS_F64 ? check_lower_library_runtime(CBUILTIN_LIBRARY_LDEXP) :
+                                          builtin <= CBUILTIN_ELEMENTWISE_ROUND ? check_lower_libm_function(builtin, class) :
                                           builtin == CBUILTIN_ELEMENTWISE_MAXNUM ? CHECK_LOWER_RUNTIME_FMAXL :
                                           builtin == CBUILTIN_ELEMENTWISE_MINNUM ? CHECK_LOWER_RUNTIME_FMINL :
                                                                                    CHECK_LOWER_RUNTIME_LDEXPL;
@@ -12330,11 +12344,26 @@ static __attribute__((noinline)) void check_lower_vector_builtin(CheckLowerWrite
                                      check_lower_brain_negations(program, first, result) :
                                      0;
         CheckVectorConstants constants = { 0 };
-        reason = vectors ? check_vector_elementwise_row(types, target, builtin, result, arguments, negated, rows, &constants) :
+        // A scalar's fused multiply-add without FMA or AVX-512F is the C library's, as clang's code calls it (#1834).
+        const uint64_t fused = BUSTER_X86_FEATURE(FMA) | BUSTER_X86_FEATURE(AVX512F);
+        const bool library = scalars && builtin == CBUILTIN_ELEMENTWISE_FMA && arguments == 3 && (target->features & fused) == 0;
+        reason = library ? NULL :
+                 vectors ? check_vector_elementwise_row(types, target, builtin, result, arguments, negated, rows, &constants) :
                  scalars ? check_vector_scalar_row(target, builtin, scalar, arguments, rows) :
                  check_lower_transport_type(types, result) ? check_lower_transport_refusal(types, result, CHECK_LOWER_TRANSPORT_BUILTIN) :
                            "elementwise builtins of scalars";
-        if (reason == NULL)
+        if (library)
+        {
+            const TypeId parameters[3] = { result, result, result };
+            const CBuiltinLibraryId function = scalar == BUSTER_TYPED_CLASS_F32 ? CBUILTIN_LIBRARY_FMAF : CBUILTIN_LIBRARY_FMA;
+            const uint32_t call = check_lower_runtime_call(writer, check_lower_library_runtime(function), result, parameters, 3, BUSTER_CHECK_NONE);
+            check_lower_instruction(writer, BUSTER_TYPED_CALL, scalar, call);
+            for (uint32_t a = 3; a-- > 0;)
+            {
+                check_lower_operand(writer, node, a + 3, false, stream->argument_conversions[first + a].type);
+            }
+        }
+        else if (reason == NULL)
         {
             check_lower_instruction(writer, BUSTER_TYPED_X86, vectors ? BUSTER_TYPED_CLASS_VECTOR : scalar, check_lower_operation_index(writer, rows));
             check_lower_row_constants(writer, rows, &constants, arguments);
