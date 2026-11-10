@@ -1607,7 +1607,7 @@ where every argument it reads is a constant: `clzs`, `ctzs`, and `clzg` and
 `ctzg` without a second argument, of zero are undefined (a fault, as
 `check_builtins` gives `clz` of zero), and a carry chain, whose store of its
 carry is an effect, never folds. A `_BitInt` past 128 bits, which clang takes,
-is refused by name.
+is a runtime action (#1447): no constant of one reaches the fold yet.
 
 `c_builtin_bits_lower.c`'s recipes compute them on U64 temporaries, a value
 zero-extended from its width, as clang's code computes on its `iN`: the
@@ -1630,6 +1630,28 @@ written to a frame object of its own, its high limb extended from its width,
 and read back as one I128 or U128 value. A wide rotation count's remainder
 comes from its limbs': 2^64's and 2^128's remainders are constants of the
 width.
+
+A first operand past 128 bits (#1447) goes limb by limb in the lowering
+(`check_lower_bits_limbs`), as clang's code computes on its `iN`, without
+branches: a count sums its limbs' population counts, or adds each limb's
+leading (trailing) zeros while the limbs before it are zero, from the top limb
+down (the bottom one up), less the padding past the width; a limb's counts are
+POPCNT's, LZCNT's and TZCNT's where the target has them, and otherwise SWAR's (a
+smeared limb's population count for its leading zeros, `~x & (x - 1)`'s for its
+trailing ones), all 64 for zero. A reversal or a byte swap reverses each limb
+(`bswap`, then masked swaps for the bits) into the other end of a buffer, then
+shifts the limbs down by the padding; `bit_floor`'s and `bit_ceil`'s bit `k`
+is limb `k / 64`'s bit `k % 64`; a rotation by `k` is the limbs' left shift by
+`k` ORed with their right shift by `(w - k) % w` (`check_lower_limb_shift`).
+A rotation's count, of any width, reduces modulo the width from its limbs'
+remainders, each times `2^(64 i)`'s, a negative one's plus the width less
+`2^(64 n)`'s; a narrower value's rotation by a count past 128 bits takes that
+remainder into the recipe. Clang's code generator can't compile a rotation of
+a width past 128 bits that is no power of two (its urem of the count); its
+Sema takes one, and so does this compiler, which `test-checker-driver`'s
+`tier1-bits` checks against a reference written with shifts.
+`test-checker`'s `bit-int-past-128-bit-builtins` program runs the rest against
+clang -O0's build.
 
 clang 23's code generation, and LLVM's main, evaluates `bitreverseg`'s
 argument twice, and `bswapg`'s for widths other than 1 and 8: `EmitScalarExpr`
