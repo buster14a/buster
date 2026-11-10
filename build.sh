@@ -149,7 +149,7 @@ settings=(
     "-DBUSTER_BAKE=${BUSTER_BAKE:-1}"
     "-DBUSTER_PGO=${BUSTER_PGO:-0}"
     "-DBUSTER_PGO_TRAIN=$pgo_train"
-    "-DBUSTER_PARALLEL_CODEGEN=${BUSTER_PARALLEL_CODEGEN:-0}"
+    "-DBUSTER_PARALLEL_CODEGEN=${BUSTER_PARALLEL_CODEGEN:-auto}"
 )
 
 # The long commands (configuring, building, testing, checking) run in a process group of their own, `child`, which an
@@ -297,10 +297,6 @@ esac
 configurations="Debug;Release"
 if [ "${BUSTER_PGO:-0}" = 1 ]; then
     [ "$config" = Release ] || die "BUSTER_PGO builds the Release configuration alone"
-    configurations=Release
-fi
-if [ "${BUSTER_PARALLEL_CODEGEN:-0}" = 1 ]; then
-    [ "$config" = Release ] || die "BUSTER_PARALLEL_CODEGEN builds the Release configuration alone"
     configurations=Release
 fi
 tree="$root/build/cmake/$variant"

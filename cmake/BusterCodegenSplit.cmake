@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 # Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 #
-# Split one fully optimized source module, recording its public definitions before llvm-split promotes locals.
-# Unchanged partitions and exports retain their mtimes so Ninja can reuse their native objects. Changed files are
-# renamed into place, and the stamp is written last. An interrupted split cannot publish a successful collection.
+# Split one fully optimized source module (tools/codegen/split.c: PARTITIONS code parts in module order, then its global
+# variables), recording its public definitions before the split hides local ones another part refers to. Unchanged
+# parts and exports retain their mtimes so Ninja can reuse their native objects. Changed files are renamed into place,
+# and the stamp is written last. An interrupted split cannot publish a successful collection.
 
 cmake_minimum_required(VERSION 3.25)
 foreach(name INPUT DIRECTORY SPLIT NM PARTITIONS)
@@ -33,18 +34,17 @@ execute_process(COMMAND "${NM}" --extern-only --defined-only --format=just-symbo
 if(NOT status EQUAL 0)
     message(FATAL_ERROR "BusterCodegenSplit.cmake: couldn't read ${INPUT}'s public definitions")
 endif()
-execute_process(COMMAND "${SPLIT}" -j "${PARTITIONS}" -o "${partial}/part" "${INPUT}" RESULT_VARIABLE status)
+execute_process(COMMAND "${SPLIT}" "${INPUT}" "${PARTITIONS}" "${partial}" RESULT_VARIABLE status)
 if(NOT status EQUAL 0)
     message(FATAL_ERROR "BusterCodegenSplit.cmake: couldn't split ${INPUT}")
 endif()
-math(EXPR last "${PARTITIONS} - 1")
-foreach(part RANGE ${last})
-    if(NOT EXISTS "${partial}/part${part}")
+foreach(part RANGE ${PARTITIONS})
+    if(NOT EXISTS "${partial}/part${part}.bc")
         message(FATAL_ERROR "BusterCodegenSplit.cmake: missing partition ${part} of ${INPUT}")
     endif()
 endforeach()
-foreach(part RANGE ${last})
-    buster_codegen_publish("${partial}/part${part}" "${DIRECTORY}/part${part}.bc")
+foreach(part RANGE ${PARTITIONS})
+    buster_codegen_publish("${partial}/part${part}.bc" "${DIRECTORY}/part${part}.bc")
 endforeach()
 buster_codegen_publish("${partial}/exports.txt" "${DIRECTORY}/exports.txt")
 file(REMOVE_RECURSE "${partial}")
