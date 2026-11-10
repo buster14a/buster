@@ -347,14 +347,58 @@ static bool check_tag_report(CheckInputReader* reader, uint32_t token, CheckTagM
     return !placed || (reader->output->report_count == before + 1 && check_input_recover_reports(reader, before));
 }
 
-// The attribute lists' first difference (check_tag_attributes_differ) reported at `token` as clang's -Wodr error, its
-// notes at each list's attribute there: the earlier definition's, then the second's.
+// clang's -Wodr at `token` (c_check_diagnostic.c), a CheckWarningSeverity: BUSTER_CHECK_ODR_WARNING, at least
+// BUSTER_CHECK_ODR_ERROR, or ignored.
+#define BUSTER_CHECK_ODR_WARNING 1u
+#define BUSTER_CHECK_ODR_ERROR 2u
+static uint32_t check_input_odr_severity(const CheckInput* input, uint32_t token);
+
+// The attribute lists' first difference (check_tag_attributes_differ) reported at `token` as clang's -Wodr diagnostic, its
+// notes at each list's attribute there: the earlier definition's, then the second's. An error (by default) is reported and
+// makes the definitions incompatible (`*odr`); a warning is a warning event, after which clang's comparison goes on and a
+// definition compatible otherwise declares the earlier type; an ignored one is nothing. Whether the reader goes on.
 static bool check_tag_report_attributes(CheckInputReader* reader, uint32_t token, CheckTagMismatch mismatch, const CheckInputAttributes* left,
-                                        const CheckInputAttributes* right, uint32_t at, uint32_t close)
+                                        const CheckInputAttributes* right, uint32_t at, uint32_t close, bool* odr)
 {
     const uint32_t first = left != NULL && at < left->count ? left->records[at].name_token : BUSTER_CHECK_NONE;
     const uint32_t second = right != NULL && at < right->count ? right->records[at].name_token : BUSTER_CHECK_NONE;
-    return check_tag_report(reader, token, mismatch, first, second, 0, 0, 0, close);
+    const uint32_t severity = check_input_odr_severity(reader->output, token);
+    bool result = true;
+    if (severity >= BUSTER_CHECK_ODR_ERROR)
+    {
+        *odr = true;
+        result = check_tag_report(reader, token, mismatch, first, second, 0, 0, 0, close);
+    }
+    else if (severity == BUSTER_CHECK_ODR_WARNING && token < reader->parser->tokens.count)
+    {
+        const CheckWarningEvent event =
+        {
+            .id = CHECK_WARNING_ID_ODR,
+            .kind = CHECK_WARNING_EVENT_ODR_ATTRIBUTE,
+            .token = token,
+            .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+            .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+            .completion = close < reader->parser->tokens.count ? close : token,
+            .payload = { .token = BUSTER_CHECK_WARNING_NO_SOURCE, .data = mismatch == CHECK_TAG_MISMATCH_MEMBER_ATTRIBUTE },
+        };
+        CheckWarningNote notes[2];
+        uint32_t note_count = 0;
+        const uint32_t tokens[2] = { first, second };
+        for (uint32_t n = 0; n < 2; n += 1)
+        {
+            if (tokens[n] < reader->parser->tokens.count)
+            {
+                notes[note_count++] = (CheckWarningNote){
+                    .kind = CHECK_WARNING_NOTE_ATTRIBUTE_HERE,
+                    .token = tokens[n],
+                    .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                    .payload = { .name = reader->parser->tokens.names[tokens[n]], .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+                };
+            }
+        }
+        check_input_warning_event(reader, &event, notes, note_count);
+    }
+    return result;
 }
 
 // Remembers a C23 member's attributes at its name's token, for a redefinition's comparison. Whether there was room.
@@ -485,8 +529,7 @@ static bool check_input_tag_compatible(CheckInputReader* reader, uint32_t keywor
             const uint32_t differ = check_tag_attributes_differ(left_attributes, right_attributes);
             if (differ != BUSTER_CHECK_NONE && at < parser->tokens.count)
             {
-                odr = true;
-                valid = check_tag_report_attributes(reader, at, CHECK_TAG_MISMATCH_ATTRIBUTE, left_attributes, right_attributes, differ, queue.bodies[1][1]);
+                valid = check_tag_report_attributes(reader, at, CHECK_TAG_MISMATCH_ATTRIBUTE, left_attributes, right_attributes, differ, queue.bodies[1][1], &odr);
             }
             const uint32_t old_begin = types->tags.member_begin[pair.left_tag];
             const uint32_t new_begin = types->tags.member_begin[pair.right_tag];
@@ -502,8 +545,7 @@ static bool check_input_tag_compatible(CheckInputReader* reader, uint32_t keywor
                 const uint32_t member_differ = check_tag_attributes_differ(old_list, new_list);
                 if (member_differ != BUSTER_CHECK_NONE && at < parser->tokens.count)
                 {
-                    odr = true;
-                    valid = check_tag_report_attributes(reader, at, CHECK_TAG_MISMATCH_MEMBER_ATTRIBUTE, old_list, new_list, member_differ, queue.bodies[1][1]);
+                    valid = check_tag_report_attributes(reader, at, CHECK_TAG_MISMATCH_MEMBER_ATTRIBUTE, old_list, new_list, member_differ, queue.bodies[1][1], &odr);
                 }
                 const uint32_t old_width = types->members.bit_width[old_begin + m];
                 const uint32_t new_width = types->members.bit_width[new_begin + m];

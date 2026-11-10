@@ -5,10 +5,10 @@
 // topologically ordered graph. Both schedulers retain node identities and explicit operand conversions. The
 // vector scheduler derives dependency heights from operand edges, never from the parser's bracket depths.
 // Include after c_types.c, c_check_actions.c and c_check_builtin.c. All storage belongs to caller-owned arenas;
-// no padding is read.
+// no padding is read. Builtin tests share only check_graph_builtin_op; source consumers keep the complete graph.
 #ifndef BUSTER_C_CHECKER_INCLUDED
 #define BUSTER_C_CHECKER_INCLUDED
-
+#if !defined(BUSTER_UNIT) || BUSTER_SOURCE_CONSUMER
 #include "c_check_overload.c"
 #include "c_check_builtin_atomic_c11.c"
 
@@ -1257,7 +1257,7 @@ static __attribute__((unused)) uint64_t check_graph_x86_ice_mask(const BuiltinIn
     }
     return mask;
 }
-
+#endif
 static __attribute__((unused)) CheckOp check_graph_builtin_op(CBuiltinId id)
 {
     CheckOp op = CHECK_OP_COUNT;
@@ -1300,7 +1300,7 @@ static __attribute__((unused)) CheckOp check_graph_builtin_op(CBuiltinId id)
     }
     return op;
 }
-
+#if !defined(BUSTER_UNIT) || BUSTER_SOURCE_CONSUMER
 static uint32_t check_graph_arity(CheckOp op, TypeId type)
 {
     uint32_t result = 1;
@@ -3491,9 +3491,11 @@ static void check_graph_report(const CheckGraph* graph, CheckStream* stream, uin
     {
         token = graph->argument_tokens[graph->argument_offsets[node] + operand - 1];
     }
-    else if (diagnostic == CHECK_DIAG_REGISTER_ADDRESS && graph->ops[node] != CHECK_OP_ADDRESS && graph->ops[node] != CHECK_OP_CALL && operand < 3)
+    else if ((diagnostic == CHECK_DIAG_REGISTER_ADDRESS && graph->ops[node] != CHECK_OP_ADDRESS && graph->ops[node] != CHECK_OP_CALL && operand < 3) ||
+             (diagnostic == CHECK_DIAG_OVERFLOW_BIT_INT && operand < 3))
     {
-        // A register array's decay, at its name, as clang's DefaultFunctionArrayConversion reports it (#1447).
+        // A register array's decay, at its name, as clang's DefaultFunctionArrayConversion reports it (#1447), and a
+        // mul_overflow's signed _BitInt past 128 bits at its argument, as clang's SemaBuiltinOverflow does.
         const uint32_t operands[] = { graph->operand0[node], graph->operand1[node], graph->operand2[node] };
         token = operands[operand] < graph->count && graph->tokens != 0 ? graph->tokens[operands[operand]] : token;
     }
@@ -4109,5 +4111,5 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
     arena_pop_to(scratch, scratch_start);
     return result;
 }
-
+#endif
 #endif

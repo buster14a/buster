@@ -24,6 +24,9 @@ static void pp_test_normalize_scratch(char* text)
     }
 }
 
+// The scratch normalization also serves the checker's pragma tests; only the frontend needs these fixtures.
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_FRONTEND
+
 // Clang's diagnostics for `path`, preprocessed (or with `parser`, compiled) with `directory` as an -I directory.
 static char* pp_test_clang_diagnostics(const char* path, const char* directory, bool parser)
 {
@@ -1194,3 +1197,5 @@ static bool pp_test_history(const char* directory, bool with_clang)
     const bool collection = pp_test_diagnostic_collection();
     return runs && copies && lifetimes && places && growth && diagnostic_buffer && publication && collection && failures == 0;
 }
+
+#endif
