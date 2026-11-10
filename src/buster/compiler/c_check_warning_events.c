@@ -126,6 +126,9 @@ enum
     // A C23 record's redefinition whose attributes differ (#1447, c_check_tag_compatible.c): clang's -Wodr, an error by
     // default (check_input_odr_severity).
     CHECK_WARNING_ID_ODR = 113,
+    // __builtin_cpu_supports of a feature clang doesn't know (#1843, clang's SemaX86 validateCpuSupports): its warning of no
+    // option, whose call is false.
+    CHECK_WARNING_ID_INVALID_CPU_SUPPORTS = 118,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -380,6 +383,9 @@ typedef enum CheckWarningEventKind
     // warning (#1447, -Wno-error=odr or a pragma's): at its name, with a CHECK_WARNING_NOTE_ATTRIBUTE_HERE at each list's
     // differing attribute, the earlier's first.
     CHECK_WARNING_EVENT_ODR_ATTRIBUTE,
+    // __builtin_cpu_supports's literal of a feature clang doesn't know (#1843, check_input_cpu_supports_literal), at the
+    // builtin's name: the description's message.
+    CHECK_WARNING_EVENT_INVALID_CPU_SUPPORTS,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
 
