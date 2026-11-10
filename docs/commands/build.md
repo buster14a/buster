@@ -149,7 +149,7 @@ a preset's tree with `cmake --fresh --preset NAME`, or build it with
 | `BUSTER_BAKE` | `1` | `0` leaves the tables to be built when the executable runs |
 | `BUSTER_PGO` | `0` | `1` builds Release with a profile of the compiler's own compiles (below): a `-pgo` tree, Release alone |
 | `BUSTER_PGO_TRAIN` | none | with `BUSTER_PGO=1`, a bash script that trains the profile in place of those compiles |
-| `BUSTER_PARALLEL_CODEGEN` | `0` | `1` enables experimental parallel native generation for CHECKER and BACKEND in a Release-g0 `-pcg8` tree |
+| `BUSTER_PARALLEL_CODEGEN` | `auto` | CHECKER's and BACKEND's Release native code in parallel parts (below): `auto` where the tools are, `1` requires them, `0` never |
 
 An empty value is the default, but for `BUSTER_DEBUG_INFO` and `BUSTER_LINKER`,
 which reject it; the incompatible combinations fail as they always have
@@ -594,66 +594,103 @@ calls. The inventory needs CI's tools and frozen inputs ([CI](../ci.md)) and
 every core, so it runs alone. `./build.sh test --config Debug -- -L build`
 runs the first label in Debug.
 
-## Experimental parallel native generation
+## Parallel native generation
 
-`BUSTER_PARALLEL_CODEGEN=1` makes the two longest units' native-code generation
-separate Ninja jobs, after their ordinary Clang `-O3` optimization:
+A clean build waits for its longest unit: on the 9700X, `main_unit_checker.c`
+took 99.6 s of a 100.3 s build at `fa6254e0`, with the other units done long
+before. More than half of a unit's compile is native code generation after the
+O3 IR pipeline: 57.3 of 112.5 s for the checker and 37.9 of 75.5 s for the
+backend (`-ftime-trace`, locally), single-threaded in one Clang process. So the
+Release configuration generates those two units' native code in parallel parts:
 
-```sh
-BUSTER_DEBUG_INFO=0 BUSTER_PARALLEL_CODEGEN=1 ./build.sh --jobs 8
-```
+1. The unit compiles C through the ordinary O3 pipeline to LLVM bitcode
+   (`-emit-llvm` in Release alone), keeping its depfile and its compilation
+   database record. Clang's bitcode keeps the module's use-list order.
+2. `tools/codegen/split.c` (`Partitioning UNIT's optimized IR`) writes eight
+   parts of contiguous function ranges in module order, the costliest (by
+   instruction count) as cheap as the alignment rule below allows, and a ninth
+   with the unit's global variables: one per job of `build.sh`'s default, a
+   physical core (fourteen, one per hardware thread of the 9700X, ran in two
+   waves there: 74.0 s for a clean build against 73.1 s). It parses the module
+   once and forks a child per part, as many at once as the CPUs it may use and
+   the available memory allow: each child copies most of the module's pages
+   (fifteen children of the checker came to about 14.8 GB, four to 4.7 GB).
+3. A Clang backend job per part (`Generating UNIT's native part N`) compiles
+   it with the unit's `-march`, debug information and O3 code generation, the
+   IR optimizer disabled.
+4. `cmake/BusterCodegenMerge.cmake` (`Combining UNIT's native parts`) joins
+   them in order with a relocatable link and makes local again everything the
+   unit didn't export, before the ordinary final link. It fails when any of the
+   unit's local names (the split's `locals.txt`) is still undefined.
 
-The mode is off by default. It currently accepts Release without debug information,
-sanitizers, fuzzing, PGO, an explicit host runtime, lexer variants or
-`BUSTER_BUILD_DEFINES`; unsupported explicit combinations fail. `build.sh` uses a
-separate `VARIANT-pcg8` tree with Release alone. Direct CMake configuration also
-requires `CMAKE_CONFIGURATION_TYPES=Release` and `BUSTER_DEBUG_INFO=0`. Normal
-builds retain their existing configurations, flags and tool requirements.
+Each unit's parts start once its own split is done: with CMake 3.27 and later
+these commands take `DEPENDS_EXPLICIT_ONLY`, without which CMake makes a
+command the link uses wait for every unit's object (the backend's parts waited
+for the checker's bitcode, 14.5 s, then competed with its parts).
 
-The opt-in mode needs `llvm-split`, `llvm-nm`, `llvm-objcopy` and `ld.lld` matching
-the configured Clang version, found beside Clang or on `PATH`. These tools generate
-ordinary native objects before the final link, so `BUSTER_LINKER` still selects
-any supported final linker. A missing or mismatched partition tool fails the
-explicit opt-in configuration.
+The executable's code is the single object's: every function at the same
+address with the same instructions. The split keeps what the code generator
+saw. A function another part refers to stays local where it is defined, so its
+jumps relax as before (a near tail call's two-byte `jmp`); a hidden alias,
+`NAME.buster_split`, names it for the other parts. A code part reads strong
+constants' initializers `available_externally`, so a string's bytes still fold
+into immediate stores; every local global such an initializer names is a
+hidden external one, since folding a pointer out of a table can name it too. A
+local definition another part owns and this one doesn't use is an ordinary
+external declaration, which emits no symbol: as a hidden one it would be an
+undefined hidden symbol, which lld ignores and GNU ld refuses. The module's inline assembly, which places
+`.text.buster_checker`, stays in the first part. A part starts, in each text
+section (`.text`, a named section, a cold function's `.text.unlikely.`), at a
+function of the greatest alignment it holds there, so that the relocatable
+link adds no padding. The bitcode the parts are written as keeps its use-list
+order: `split_bitcode.cpp` is the one call to LLVM's C++ API, which LLVM's C
+API lacks. The merge clears the parts' allocated `SHF_MERGE` flags first: a
+relocatable link merges those sections, which the final link at `-O0` copies
+whole from the single object (the checker's parts lost 27,904 bytes of
+duplicate constants that way). Read-only data keeps its order and each item's
+alignment, but a part's `.rodata` takes its greatest item's alignment (64), so
+items after a part boundary can move by less than that: 256 bytes in all for
+the two units (768 with fourteen parts), with `.eh_frame` 16 bytes longer. Between a part's last function
+and the next part's first, the linker's padding is `int3` where the assembler's
+was `nop`; neither is executed.
 
-The original CMake object target compiles each heavy C source to fully optimized
-LLVM bitcode with `-emit-llvm`; it does not use an LTO pre-link optimization
-pipeline. That target retains the source's original depfile and compilation
-database record. `llvm-split` writes eight fixed partitions, which eight generated
-object targets compile with the same host CPU choice and driver PIC defaults,
-`-O3` native-code generation, and the IR optimizer disabled. Ninja schedules those
-jobs normally, so `--jobs` and a `cores` grant bound their concurrency. The generated
-IR jobs are excluded from the compilation database.
+On the 9700X, against the same tree compiled whole (#2056's merged head
+`cd920bf1`), a clean build took 72.8 s against 100.3 s, and editing `main.c`,
+`c_check_input.c` or `tier0.c` rebuilt in 69.0, 62.7 and 66.0 s against 96.2,
+90.5 and 93.0 s (medians of 3). CPU time rose about 11%: every part reads the
+module's declarations again. The produced compilers ran a `-c` of `sqlite3.c`
+and a `-fsyntax-only` of the checker's unit within ±0.33% of each other, as
+noise. The [record](https://github.com/buster14a/buster-performance/tree/dc6be30185f2c22b8944f24a02c092760b96cf7a/docs/measurements/build-parallel-native-2026-11-10)
+has the runs, scripts and the comparison of the two executables' code.
 
-Each unit's eight objects are partially linked in fixed order, at ELF linker
-`-O0` with one linker thread. Partitioning promotes private functions, data and TLS
-to hidden globals; the merge restores all definitions outside the source module's
-original public export list to local binding. Actual unresolved strong and weak
-symbols are preserved and checked. No source-level unit shares new private state
-with another unit. The final native object lives at
-`Release/codegen/UNIT/native.o`; the original `CMakeFiles/.../UNIT.c.o` is bitcode
-in this mode. Linking, stack-canary checks and shifted links use the native object.
+`BUSTER_PARALLEL_CODEGEN` is `auto` by default: the build uses the parts
+wherever its flags allow and the tools are there, and otherwise says why in the
+configure step's `parallel native generation` line and compiles the units
+whole. `1` requires the parts, failing the configuration without them; `0`
+never uses them. Sanitizers, fuzzing, PGO, an explicit host runtime,
+`BUSTER_BUILD_DEFINES` and lexer variants keep the single compile. The tools,
+beside the configured Clang or on `PATH`, at its version: `llvm-config` with
+LLVM's C API headers and library (the splitter is built in the tree, at
+`codegen-tools/split`, with the flags it gives), `clang++`, `llvm-nm`,
+`llvm-objcopy`, `llvm-readobj` and `ld.lld`. LLVM's libraries link shared
+where `llvm-config` finds them, else static, as in CI's hosted release. The Debug configuration compiles
+the units as before; the final link still uses any supported `BUSTER_LINKER`.
 
-An unrelated source edit reuses both cached native objects. A change to a heavy
-unit rebuilds its source IR and split, but byte-identical partitions and the public
-export list retain their existing timestamps. Native generation runs only for
-changed or missing pieces; comment-only and timestamp-only source edits that leave
-optimized IR unchanged do not repeat native generation or linking. Changed native
-objects then link and bake as usual. Missing generated pieces are restored through
-their declared dependencies. Failed splitting, native compilation or symbol
-restoration stops the graph before a replacement executable can be published.
-
-C frontend diagnostics keep their normal source locations. Diagnostics produced
-only when compiling inline assembly remain fatal under `-Werror`, but in this
-experimental mode they report the inline assembly without the original C file
-and line. Native code layout can also differ after partitioning; this option does
-not promise byte-identical machine code or establish a runtime performance gain.
+An unrelated edit reuses both units' native objects. A change to a split unit
+compiles its bitcode and splits it again, but parts whose bytes didn't change
+keep their timestamps, so Ninja repeats only the changed parts' code generation
+(a mutable global's initializer changes the data part alone); a comment-only
+edit that leaves the optimized IR unchanged generates nothing. Failed
+splitting, native compilation or symbol restoration stops the graph before a
+replacement executable can be published. Diagnostics produced only when
+compiling inline assembly remain fatal under `-Werror`, but report the inline
+assembly without the original C file and line.
 
 `build-regression --parallel-codegen-only` exercises the production helpers on two
 translation units with identically named private functions, data and TLS, distinct
 hidden public entries, and shared strong and weak external references. It checks
 runtime isolation across threads, the source compilation database, unchanged and
-source-only edits, one-partition private data edits, missing pieces, deterministic
+source-only edits, one-part private data edits, missing pieces, deterministic
 regeneration, late assembly warnings and failed-stage recovery. The full build
 regression also builds the real opt-in compiler once and runs its baking checks.
 

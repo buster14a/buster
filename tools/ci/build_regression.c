@@ -3079,7 +3079,8 @@ static void check_parallel_codegen(void)
     const struct stat initial_binary = status_of(binary);
     const char* exports = "out/Release/codegen/main_unit_checker/exports.txt";
     const struct stat initial_exports = status_of(exports);
-    enum { BUSTER_CODEGEN_FIXTURE_PARTITIONS = 8 };
+    // BusterCodegen.cmake's eight code parts and the data part (tools/codegen/split.c).
+    enum { BUSTER_CODEGEN_FIXTURE_PARTITIONS = 9 };
     char partitions[BUSTER_CODEGEN_FIXTURE_PARTITIONS][PATH_MAX];
     struct stat initial_partitions[BUSTER_CODEGEN_FIXTURE_PARTITIONS];
     for (uint32_t part = 0; part < BUSTER_CODEGEN_FIXTURE_PARTITIONS; part += 1)
@@ -3130,7 +3131,7 @@ static void check_parallel_codegen(void)
         }
         log = capture(build);
         if (strstr(log.data, "checker_test.c.o") == 0 || strstr(log.data, "Partitioning main_unit_checker's") == 0 ||
-            strstr(log.data, "_codegen_") != 0 || strstr(log.data, "Combining") != 0 || strstr(log.data, "Linking") != 0 ||
+            strstr(log.data, "native part") != 0 || strstr(log.data, "Combining") != 0 || strstr(log.data, "Linking") != 0 ||
             !same_time(status_of(alpha), initial_alpha) || !same_time(status_of(beta), initial_beta) ||
             !same_time(status_of(binary), initial_binary) || !same_time(status_of(exports), initial_exports))
         {
@@ -3147,7 +3148,7 @@ static void check_parallel_codegen(void)
     }
 
     // Change one private data initializer without changing the module's declarations or public boundary. Exactly
-    // its defining partition must compile again; the other seven pieces and the other translation unit are reused.
+    // its defining part, the data part, must compile again; the code parts and the other translation unit are reused.
     char* initializer = strstr(original_checker.data, "private_data = 10");
     char* value = initializer != 0 ? strstr(initializer, "10") : 0;
     if (value == 0)
@@ -3164,7 +3165,7 @@ static void check_parallel_codegen(void)
     {
         changed_partitions += !same_time(status_of(partitions[part]), initial_partitions[part]);
     }
-    for (const char* cursor = log.data; (cursor = strstr(cursor, "Building C object CMakeFiles/buster_main_unit_checker_codegen_")) != 0; cursor += 1)
+    for (const char* cursor = log.data; (cursor = strstr(cursor, "Generating main_unit_checker's native part")) != 0; cursor += 1)
     {
         native_jobs += 1;
     }
