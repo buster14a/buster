@@ -883,6 +883,19 @@ static __attribute__((format(printf, 9, 10))) void pp_diagnose_source_notes_phas
     va_end(arguments);
 }
 
+// pp_diagnose_output_notes_phase at an explicit place (pp_output_macro_place's).
+BUSTER_PREPROCESSOR_ENTRY __attribute__((unused, format(printf, 9, 10))) void pp_diagnose_placed_notes_phase(Preprocessor* pp, PPSeverity severity, uint32_t location,
+                                                                                                         uint32_t origin, uint32_t position, PPDiagnosticPhase phase,
+                                                                                                         const PPOutputDiagnosticNote* notes, uint32_t note_count,
+                                                                                                         const char* format, ...)
+{
+    va_list arguments;
+    va_start(arguments, format);
+    pp_history_ensure(pp);
+    pp_diagnose_source_location(pp, severity, location, origin, position, phase, notes, note_count, NULL, 0, format, arguments);
+    va_end(arguments);
+}
+
 BUSTER_PREPROCESSOR_ENTRY __attribute__((unused, format(printf, 6, 7))) void pp_diagnose_output_phase(Preprocessor* pp, PPSeverity severity, uint32_t token, uint32_t position, PPDiagnosticPhase phase, const char* format, ...)
 {
     va_list arguments;
