@@ -1213,16 +1213,29 @@ static bool ir_typed_ignored_arguments(const Tier0Function* input, bool vector)
 // IR call then has ABI records. So does one that passes an aggregate the convention ignores (#141: an empty struct, of
 // no bytes), which a call without records would place by its type, in a register of its own, and one that passes a
 // static chain in r10 (#148), which a call without records would place in the next argument register; only a function
-// with one (`ignored`, ir_typed_ignored_arguments) reads its calls' locations.
+// with one (`ignored`, ir_typed_ignored_arguments) reads its calls' locations. And so does one that passes an aggregate
+// of no size on the stack (#1879: a record of a flexible array member alone, MEMORY, which clang passes byval in an
+// 8-byte slot), whose value, its address, a call without records would place in the next general register: in a
+// function with aggregates (argument_sizes), an argument of a general class on the stack while the call's locations
+// before it leave a general register free.
 static bool ir_typed_aggregate_call(const Tier0Function* input, uint32_t call, bool ignored)
 {
     bool aggregate = input->call_result_objects != 0 && input->call_result_objects[call] != 0;
+    const bool located = ignored || (input->argument_sizes != 0 && input->argument_locations != 0);
+    uint32_t general = 0;
     for (uint32_t a = 0; (input->argument_sizes != 0 || ignored) && a < input->call_argument_counts[call]; a += 1)
     {
         const uint32_t argument = input->call_first[call] + a;
-        const AbiLocation location = ignored ? input->argument_locations[argument] : (AbiLocation){ .kind = BUSTER_ABI_LOCATION_REGISTERS };
+        // Without locations, a stand-in in registers, which counts as two general ones (registers {0, 0}, rax) and is never
+        // on the stack, so it never asks for records.
+        const AbiLocation location = located ? input->argument_locations[argument] : (AbiLocation){ .kind = BUSTER_ABI_LOCATION_REGISTERS };
+        const uint8_t class = input->argument_classes[argument];
+        const bool general_class = class >= BUSTER_TYPED_CLASS_I8 && class <= BUSTER_TYPED_CLASS_U64;
         aggregate |= (input->argument_sizes != 0 && input->argument_sizes[argument] != 0) || location.kind == BUSTER_ABI_LOCATION_IGNORE ||
-                     (location.kind == BUSTER_ABI_LOCATION_REGISTERS && location.registers[0] == BUSTER_ABI_R10);
+                     (location.kind == BUSTER_ABI_LOCATION_REGISTERS && location.registers[0] == BUSTER_ABI_R10) ||
+                     (location.kind == BUSTER_ABI_LOCATION_STACK && general_class && general < BUSTER_ABI_INTEGER_ARGUMENTS);
+        general += location.kind != BUSTER_ABI_LOCATION_STACK && location.registers[0] < 16 ? 1 : 0;
+        general += location.kind != BUSTER_ABI_LOCATION_STACK && location.registers[1] < 16 ? 1 : 0;
     }
     return aggregate;
 }

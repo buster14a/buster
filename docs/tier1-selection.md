@@ -350,8 +350,13 @@ patterns are:
   (`TIER1_RULE_STACK_ADDRESS`). An aggregate the convention ignores (#141:
   `IGNORE`, an empty struct or one of unnamed bit-fields) is passed and returned
   nowhere: a call copies nothing for it, and a parameter's copy keeps no bytes it
-  was given. Refused: a result LLVM demotes to a hidden pointer (`DEMOTED`),
-  which only a vector type makes. A call's parts in registers take staging
+  was given. One of no size that clang passes `byval` (#1879: a record of a
+  flexible array member alone, MEMORY) takes an 8-byte stack slot, which holds
+  its address as a scalar would: its call keeps its ABI records even with no
+  other aggregate (`ir_typed_aggregate_call`, an argument of a general class on
+  the stack while a general register is free), since a call without them would
+  place that address in the next general register. Refused: a result LLVM
+  demotes to a hidden pointer (`DEMOTED`), which only a vector type makes. A call's parts in registers take staging
   slots of 8 bytes, a whole vector register's its bytes'
   (`tier1_select_part_slots`), but a 64-byte vector's, which waits in
   zmm16 and on instead (#141, `tier1_select_part_in_zmm`: Tier 1 allocates no
