@@ -90,6 +90,38 @@ static bool check_input_vla_defines(const CheckInputReader* reader, uint32_t fir
     return outside && !inside;
 }
 
+// Whether a block-scope array's bound has a statement expression that holds more than expression statements (#1447): a
+// declaration (`[({ int k = n; k + 1; })]`), an if, a loop, a jump, a label or a block, at any depth, which only the walk
+// reads (check_input_region_prepare), in source order with the bound's other names. Such a bound is no integer constant
+// expression, so that the array is variable, and the walk checks and evaluates it whole, without the constant reader,
+// whose names would bind before the statements' declarations. A scan of the bound's tokens and its blocks' statements,
+// in a rare form's declarators only (those with a statement expression in a bound).
+static bool check_input_vla_walked(const CheckInputReader* reader, uint32_t open, uint32_t first, uint32_t end, bool parameter)
+{
+    const Parser* parser = reader->parser;
+    bool statements = false;
+    for (uint32_t token = first; !statements && token + 1 < end; token += 1)
+    {
+        const bool region = parser->tree.roles[token] == PARSE_ROLE_OPEN_GROUP && parser->tree.roles[token + 1] == PARSE_ROLE_OPEN_BLOCK && parser->tree.parents[token] < end;
+        const uint32_t block = region ? parser->tree.parents[token + 1] : BUSTER_CHECK_NONE;
+        for (uint32_t child = block < end ? reader->first_child[block] : BUSTER_CHECK_NONE; !statements && child != BUSTER_CHECK_NONE; child = reader->next_child[child])
+        {
+            const uint8_t role = parser->tree.roles[child];
+            statements = role != PARSE_ROLE_OPEN_BLOCK && (role != PARSE_ROLE_TERMINATOR || reader->first_child[child] == BUSTER_CHECK_NONE);
+            for (uint32_t part = !statements && role == PARSE_ROLE_TERMINATOR ? reader->first_child[child] : BUSTER_CHECK_NONE; !statements && part != BUSTER_CHECK_NONE;
+                 part = reader->next_child[part])
+            {
+                const uint8_t part_role = parser->tree.roles[part];
+                const uint8_t kind = parser->tokens.kinds[part];
+                statements = part_role == PARSE_ROLE_SPECIFIER || part_role == PARSE_ROLE_RETURN || kind == PARSE_KIND_GOTO || kind == PARSE_KIND_BREAK ||
+                             kind == PARSE_KIND_CONTINUE || kind == PARSE_KIND_STRUCT ||
+                             kind == PARSE_KIND_ENUM || kind == PARSE_KIND_STATIC_ASSERT || check_input_attribute_starts(parser, part, child);
+            }
+        }
+    }
+    return statements && !parameter && reader->function_body != BUSTER_CHECK_NONE && !check_input_vla_force_constant(reader, open, parameter);
+}
+
 // Whether the array declarator that `open` opens derives the declared entity itself: only array declarators and
 // parentheses around what came before lead to it from the name (`int g[2][n]`, `int (g)[n]`, `int (g[2])[n]`,
 // `int *(p)[n]`), clang's "variable length array declaration", not a pointer's (`int (*p)[n]`), its "variably modified
@@ -232,12 +264,19 @@ static bool check_input_vla_bound(CheckInputReader* reader, uint32_t open, uint3
     *definition = BUSTER_CHECK_NONE;
     if (valid && first != end && !star)
     {
+        const uint32_t reports = reader->output->report_count;
         CheckValue value = { 0 };
         uint32_t failed = BUSTER_CHECK_NONE;
         bool negative = false;
+        bool walked = false;
+        // The reading's failure evidence, for its error in clang's words (#1447): a job's own, or this one.
+        CheckConstantFailure failure = { .token = BUSTER_CHECK_NONE, .callee = BUSTER_CHECK_NONE };
+        // Each undeclared name in the bound is clang's error at it, with its typo's correction (#1447, check_constant_name).
         if (*job == 0 && check_input_vla_defines(reader, first, end))
         {
+            reader->constant_names = CHECK_CONSTANT_NAMES_REPORT;
             *job = check_input_constant_job(reader, first, end);
+            reader->constant_names = CHECK_CONSTANT_NAMES_NONE;
             valid = *job != 0;
         }
         if (*job != 0)
@@ -247,22 +286,30 @@ static bool check_input_vla_bound(CheckInputReader* reader, uint32_t open, uint3
             if (*definition == BUSTER_CHECK_NONE)
             {
                 failed = input->failure;
+                failure = input->evidence;
                 *job = 0;
                 arena_pop_to(reader->scratch, input->mark);
             }
+        }
+        else if (valid && check_input_vla_walked(reader, open, first, end, parameter))
+        {
+            walked = true;
         }
         else if (valid)
         {
             TypeId unused = 0;
             const bool cached = reader->bindings.count != 0 && reader->bindings.point[reader->bindings.count - 1] >= first;
-            valid = check_input_constant_read(reader, first, end, false, cached, false, &value, &unused, &failed, NULL);
+            reader->constant_names = CHECK_CONSTANT_NAMES_REPORT;
+            valid = check_input_constant_read(reader, first, end, false, cached, false, &value, &unused, &failed, &failure);
+            reader->constant_names = CHECK_CONSTANT_NAMES_NONE;
         }
         // A job that stopped at a definition has no value yet.
         const bool evaluated = *definition == BUSTER_CHECK_NONE;
-        valid = valid && (!evaluated || check_input_const_rvalue(reader, end, &value));
-        valid = valid && (!evaluated || check_action_is_integer(reader->types, value.type));
+        valid = valid && (!evaluated || walked || check_input_const_rvalue(reader, end, &value));
+        valid = valid && (!evaluated || walked || check_action_is_integer(reader->types, value.type));
         // clang folds a GNU constant in an array bound, but not a saturated floating conversion's value.
-        const bool folded = evaluated && check_input_integer_constant(reader, &value) && (value.flags & (BUSTER_CHECK_GNU_DIVISION | BUSTER_CHECK_GNU_FLOAT_RANGE)) == 0 &&
+        const bool folded = evaluated && !walked && check_input_integer_constant(reader, &value) &&
+                            (value.flags & (BUSTER_CHECK_GNU_DIVISION | BUSTER_CHECK_GNU_FLOAT_RANGE)) == 0 &&
                             (check_input_integer_ice(reader, &value) || check_input_vla_force_constant(reader, open, parameter));
         if (valid && evaluated && (folded || (value.flags & BUSTER_CHECK_ICE) != 0))
         {
@@ -282,12 +329,23 @@ static bool check_input_vla_bound(CheckInputReader* reader, uint32_t open, uint3
             *kind = BUSTER_TYPE_KIND_VARIABLE_ARRAY;
             *extent = (uint64_t)first + 1;
         }
-        if (!valid && !reader->output->resource && reader->output->report_count == 0)
+        // A failure before the first undeclared name the reading reported is clang's error too, which its parser gives first
+        // (#1447): `sizeof(struct Missing) - sizeof(missing)`'s.
+        const uint32_t failed_at = failed < parser->tokens.count ? failed : first;
+        const bool earlier = reader->output->report_count > reports && failed_at < reader->output->reports[reports].token;
+        if (!valid && !reader->output->resource && (reader->output->report_count == 0 || earlier))
         {
-            const uint32_t token = failed < parser->tokens.count ? failed : first;
+            const uint32_t token = failed_at;
             const bool missing = parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER && reader->output->declarations[token] == BUSTER_CHECK_NONE;
             // A negative constant is clang's own error (#1447), at the bound's first token, naming the declarator's name.
-            check_input_report(reader, negative ? first : token, negative ? CHECK_INPUT_ARRAY_NEGATIVE : missing ? CHECK_INPUT_UNDECLARED : CHECK_INPUT_DECLARATION);
+            if (negative || missing)
+            {
+                check_input_report(reader, negative ? first : token, negative ? CHECK_INPUT_ARRAY_NEGATIVE : CHECK_INPUT_UNDECLARED);
+            }
+            else
+            {
+                check_input_constant_failure_report(reader, &failure, first, token);
+            }
             if (negative && reader->output->report_count == 1)
             {
                 reader->output->reports[0].value = name < parser->tokens.count && parser->tokens.kinds[name] == PARSE_KIND_IDENTIFIER ? name : BUSTER_CHECK_NONE;

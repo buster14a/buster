@@ -7,9 +7,9 @@
 # Writes OUTPUT from the linked INPUT, which it leaves as it is, so that an unchanged build links nothing. With BAKE,
 # INPUT writes itself with the backend's tables built (bake-tables, src/buster/compiler/baked.c, #590), so that a
 # compile starts with them rather than building them: about 2 ms of a small file's compile on a Xeon VM whose kernel
-# only madvises huge pages. A PIE (the sanitizers' builds) keeps building them when it runs (status 77), and so does
-# every executable with BUSTER_BAKE=0. Any other failure, an initializer's state outside the section among them, fails
-# the step.
+# only madvises huge pages. A PIE (TSan, MSan and fuzzing builds) keeps building them when it runs (status 77), and so
+# does every executable with BUSTER_BAKE=0. Any other failure, an initializer's state outside the section among them,
+# fails the step.
 #
 # The executable must not reference the stack canary's runtime (#916): -fno-stack-protector pins the policy, and this
 # checks that the toolchain's configured default didn't add it back, in the compiler's objects (-DOBJECTS=LIST), or
@@ -53,9 +53,13 @@ if(NOT baked)
     endif()
 endif()
 
-execute_process(COMMAND "${NM}" "${partial}" OUTPUT_VARIABLE symbols RESULT_VARIABLE status)
-if(NOT status EQUAL 0)
-    post_link_fail("${NM} couldn't read ${partial}")
+# Only shifted links and the no-objects fallback need the executable's full symbol table. Ordinary links check
+# the compiler's objects below, so reading the linked runtime's symbols as well would produce unused work.
+if(PADDING OR NOT DEFINED OBJECTS OR OBJECTS STREQUAL "")
+    execute_process(COMMAND "${NM}" "${partial}" OUTPUT_VARIABLE symbols RESULT_VARIABLE status)
+    if(NOT status EQUAL 0)
+        post_link_fail("${NM} couldn't read ${partial}")
+    endif()
 endif()
 # The canary in the compiler's own objects (OBJECTS) where they are given: a static link's libc.a defines and calls
 # __stack_chk_fail itself, as libc.so.6 does where the executable doesn't see it. Without OBJECTS, in the executable.

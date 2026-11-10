@@ -294,6 +294,24 @@ static void check_test_pack_pragmas(CheckTest* test, const char* clang)
             .final_log2 = 1,
         },
         {
+            // #1849: clang's `#pragma options align` and `#pragma align` share the pack stack.
+            .name = "options align packs, pushes and resets on the pack stack",
+            .source = "#pragma options align=packed\nstruct A{char c;int x;};_Static_assert(sizeof(struct A)==5,\"packed\");\n"
+                      "#pragma options align=natural\nstruct B{char c;int x;};_Static_assert(sizeof(struct B)==8,\"natural\");\n"
+                      "#pragma options align=reset\nstruct C{char c;int x;};_Static_assert(sizeof(struct C)==5,\"popped to packed\");\n"
+                      "#pragma pack(pop)\nstruct D{char c;int x;};_Static_assert(sizeof(struct D)==8,\"pack pops options\");\n"
+                      "#pragma pack(2)\n#pragma align=reset\nstruct E{char c;int x;};_Static_assert(sizeof(struct E)==8,\"reset of pack(2)\");\n"
+                      "#pragma align=packed\n#pragma align=power\nstruct F{char c;int x;};_Static_assert(sizeof(struct F)==8,\"power\");\n"
+                      "#pragma pack(pop)\n#pragma pack(pop)\n",
+            .records = 10,
+        },
+        {
+            .name = "malformed options align directives are warning-only no-ops",
+            .source = "#pragma pack(1)\n#pragma options align\n#pragma align=bogus\n#pragma options align=packed extra\n#pragma options align=reset\n"
+                      "struct S{char c;int x;};_Static_assert(sizeof(struct S)==8,\"reset of pack(1)\");\n",
+            .records = 5,
+        },
+        {
             .name = "invalid numeric pack token retains hard error",
             .source = "#pragma pack(08)\nstruct S{char c;int x;};\n",
             .records = 1,
