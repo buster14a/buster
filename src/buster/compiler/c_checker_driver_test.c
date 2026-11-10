@@ -136,9 +136,12 @@ static bool check_test_driver_run_with(const char* executable, const char* sourc
         ready = child > 0 && waited == child && WIFEXITED(status) && pp_test_read_output(diagnostics, &text, &length);
     }
     bool unlocated = false;
-    for (char* at = text; ready && at != NULL && *at != 0;)
+    // Each line's end is found within the text (memchr), as check_test_driver_diagnostic_counts's are: strchr on the
+    // rest of the text reads all of it per line under AddressSanitizer's strict string checks (#2030).
+    char* stop = text != NULL ? text + strlen(text) : NULL;
+    for (char* at = text; ready && at != NULL && at < stop;)
     {
-        char* end = strchr(at, '\n');
+        char* end = memchr(at, '\n', (size_t)(stop - at));
         if (end != NULL)
         {
             *end = 0;
@@ -543,6 +546,9 @@ static void check_test_driver_codegen_refusals(CheckTest* test, const char* exec
           "unsupported: __builtin_dump_struct whose printer returns an aggregate, a 128-bit or a half-precision value" },
         { "int g(int, const char*, ...);\nstruct S { int a; };\nvoid f(struct S* s, int n) { __builtin_dump_struct(s, g, ({ n; })); }\n",
           "unsupported: __builtin_dump_struct whose printer or other arguments have a statement expression or more than 4096 nodes, which its calls evaluate again" },
+        // A record in a segment's space (#1447), whose fields' loads would take no override.
+        { "struct S { int a; long b; };\nint printf(const char*, ...);\nvoid f(struct S __seg_fs* s) { __builtin_dump_struct(s, printf); }\n",
+          "unsupported: __builtin_dump_struct of a record in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
         { "int f(void) { return __builtin_available(macos 0.0.0, *); }\n",
           "unsupported: __builtin_available with an empty version, which clang doesn't compile either" },
     };
@@ -7117,12 +7123,13 @@ static void check_test_driver_quad_literals(CheckTest* test, const char* clang, 
 // the section type conflicts between settings and section attributes in clang's order, by -fsyntax-only. What the checker
 // refuses by name instead: a name in a place clang reads expanded that was a macro's in the unit, and an error at the
 // line's end. Then -c of the units clang takes: each function and variable in the section its attribute or a function's
-// text setting gives it, and the file-scope assembly's sections (check_program_sections, check_program_emit_file_asm),
+// text setting gives it, and the file-scope assembly's sections (check_program_sections, check_program_asm_plan_file),
 // which must be clang's -O0 -c's of the same source (check_test_driver_same_sections); and the refusals by name: a
 // static-storage definition under an active object setting (conservatively, until the emission selects its section
-// kind), a section whose name gives it another kind or type, and file-scope assembly with a symbol or of another kind
-// of section.
+// kind), a section whose name gives it another kind or type, and file-scope assembly with a section of another kind
+// (an init array's).
 #include "c_check_symbol_driver_test.c"
+#include "c_check_asm_definition_driver_test.c"
 #include "c_check_symbol_pragma_driver_test.c"
 #include "c_check_alias_driver_test.c"
 #include "c_check_common_driver_test.c"
@@ -7282,7 +7289,6 @@ static void check_test_driver_section_pragmas(CheckTest* test, const char* clang
     static const char placed[] = "unsupported: a definition under active '#pragma clang section' settings";
     static const char kind[] = "unsupported: a definition in a section whose name gives it another kind";
     static const char typed[] = "unsupported: a section name with an unsupported ELF type or reserved family";
-    static const char asm_symbol[] = "unsupported: file-scope assembly that defines or refers to a symbol";
     static const char asm_kind[] = "unsupported: file-scope assembly's section of this kind";
     static const struct
     {
@@ -7351,7 +7357,7 @@ static void check_test_driver_section_pragmas(CheckTest* test, const char* clang
           0, 0, NULL, false, ".rodata.mine", true },
         { "two file-scope statements in order", "__asm__(\".section .data.asm,\\\"aw\\\",@progbits\\n.byte 1\");\n__asm__(\".section .data.asm,\\\"aw\\\",@progbits\\n.byte 2\");\n"
                                                 "int main(void) { return 0; }\n", 0, 0, NULL, false, ".data.asm", true },
-        { "file-scope assembly's label", "__asm__(\".globl answer\\nanswer: .byte 42\");\nint main(void) { return 0; }\n", 0, 1, asm_symbol },
+        { "file-scope assembly's label", "__asm__(\".globl answer\\nanswer: .byte 42\");\nint main(void) { return 0; }\n" },
         { "file-scope assembly's init array", "__asm__(\".section .init_array,\\\"aw\\\"\\n.quad 0\");\nint main(void) { return 0; }\n", 0, 1, asm_kind },
         { "an initialized variable in a .bss", "int g __attribute__((section(\".bss.g\"))) = 1;\nint main(void) { return g - 1; }\n", 0, 1, kind },
         { "a variable in a .tdata", "int g __attribute__((section(\".tdata.g\"))) = 1;\nint main(void) { return g - 1; }\n", 0, 1, kind },
@@ -7720,6 +7726,8 @@ static int run_checker_driver_tests(int argc, char** argv)
     bool semantic_recovery_only = false;
     // --type-sugar-only: the type sugar section alone (#1447).
     bool type_sugar_only = false;
+    // --asm-definitions-only: what inline assembly defines, against clang's objects and builds, alone (#1848).
+    bool asm_definitions_only = false;
     bool options = true;
     for (int i = 0; options && i < argc; i += 1)
     {
@@ -7747,6 +7755,10 @@ static int run_checker_driver_tests(int argc, char** argv)
         {
             type_sugar_only = true;
         }
+        else if (strcmp(argv[i], "--asm-definitions-only") == 0)
+        {
+            asm_definitions_only = true;
+        }
         else if (strcmp(argv[i], "--lazy-system-headers") == 0)
         {
             lazy = true;
@@ -7765,7 +7777,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             options = false;
         }
     }
-    const uint32_t focuses = (uint32_t)sign_compare_only + (uint32_t)cpu_dispatch_only + (uint32_t)semantic_recovery_only + (uint32_t)type_sugar_only;
+    const uint32_t focuses = (uint32_t)sign_compare_only + (uint32_t)cpu_dispatch_only + (uint32_t)semantic_recovery_only + (uint32_t)type_sugar_only + (uint32_t)asm_definitions_only;
     options &= focuses <= 1 && (focuses == 0 || (!lazy && check_driver_part.count == 1));
     // One focused section's alone: the others' gates take `focused` as --sign-compare-only's did.
     const bool focused = focuses != 0;
@@ -8272,6 +8284,10 @@ static int run_checker_driver_tests(int argc, char** argv)
     {
         check_test_driver_type_sugar(&test, clang, executable, directory);
     }
+    if (temporary && asm_definitions_only)
+    {
+        check_test_driver_asm_definitions(&test, clang, executable != NULL ? executable : "./build/compiler", directory);
+    }
     const char* clang_arguments[] = { "-std=gnu17", "-w" };
     if (temporary && !focused && !lazy && check_test_driver_takes())
     {
@@ -8364,6 +8380,7 @@ static int run_checker_driver_tests(int argc, char** argv)
         if (!lazy && check_test_driver_takes())
         {
             check_test_driver_cleanup_errors(&test, clang, executable, directory);
+            check_test_driver_cleanup_chains(&test, clang, executable, directory);
         }
         if (!lazy && check_test_driver_takes())
         {
@@ -8406,6 +8423,7 @@ static int run_checker_driver_tests(int argc, char** argv)
         {
             check_test_driver_generic_builtins(&test, clang, executable, directory);
             check_test_driver_availability(&test, clang, executable, directory);
+            check_test_driver_cpu_supports(&test, clang, executable, directory);
             check_test_driver_builtin_declarations(&test, clang, executable, directory);
             check_test_driver_counted_by(&test, clang, executable, directory);
         }
@@ -8533,10 +8551,15 @@ static int run_checker_driver_tests(int argc, char** argv)
             {
                 check_test_driver_symbols(&test, clang, executable, directory);
                 check_test_driver_symbol_pragmas(&test, clang, executable, directory);
+                check_test_driver_weak_aliases(&test, clang, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
             {
                 check_test_driver_asm_object_symbols(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_asm_definitions(&test, clang, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
             {
@@ -8804,6 +8827,10 @@ static int run_checker_driver_tests(int argc, char** argv)
             if (!lazy && check_test_driver_takes())
             {
                 check_test_driver_tier1_overflow(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_tier1_extremes(&test, clang, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
             {

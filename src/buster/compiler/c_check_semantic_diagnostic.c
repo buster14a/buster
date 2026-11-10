@@ -232,6 +232,10 @@ static const char* check_semantic_input(const Parser* parser, Preprocessor* pp, 
                                                  "has incompatible definitions";
         result = spelled.length == 0 ? NULL : check_warning_text(scratch, "type '%.*s' %s", (int)spelled.length, spelled.pointer, what);
     }
+    else if (report->message == CHECK_INPUT_TYPE_SPECIFIER_MISSING && report->detail == 3 && name.length != 0)
+    {
+        result = check_warning_text(scratch, "unknown type name '%.*s'", (int)name.length, name.pointer);
+    }
     else if (report->message == CHECK_INPUT_ENUMERATOR_REDEFINITION && name.length != 0)
     {
         result = check_warning_text(scratch, "redefinition of enumerator '%.*s'", (int)name.length, name.pointer);
@@ -957,7 +961,9 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
                 }
                 const uint32_t target = named < count ? graph->tokens[named] : BUSTER_CHECK_NONE;
                 const uint32_t declaration = target < input->token_count ? input->declarations[target] : BUSTER_CHECK_NONE;
-                const String8 name = target < parser->tokens.count ? check_semantic_name(parser, pp, target) : (String8){ "", 0 };
+                const String8 name = target < parser->tokens.count ?
+                                     check_driver_warning_name(pp, check_driver_corrected_name(parser, input, target, parser->tokens.names[target])) :
+                                     (String8){ "", 0 };
                 const bool variable = walked && named < count && graph->ops[named] == CHECK_OP_VALUE && declaration < input->token_count && name.length != 0;
                 const String8 declared = variable ? check_driver_warning_type(parser, pp, input, types, spell, scratch, check_stream_type(stream, named),
                                                                               check_semantic_operand_spelling(parser, input, stream, types, named)) : (String8){ "", 0 };
@@ -991,11 +997,16 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
             const uint32_t second = graph->argument_nodes[offset + 1];
             const TypeId first_type = first < stream->count ? check_stream_type(stream, first) : 0;
             const TypeId second_type = second < stream->count ? check_stream_type(stream, second) : 0;
-            // A cast's typedef is its type name's (`(D)1`'s D), any other operand's its object's.
-            const uint32_t first_spelling = first < graph->count && graph->ops[first] == CHECK_OP_CAST ? check_input_operand_type_spelling(input, parser, first) :
-                                                                                                        check_semantic_operand_spelling(parser, input, stream, types, first);
-            const uint32_t second_spelling = second < graph->count && graph->ops[second] == CHECK_OP_CAST ? check_input_operand_type_spelling(input, parser, second) :
-                                                                                                           check_semantic_operand_spelling(parser, input, stream, types, second);
+            // A cast's typedef is its type name's (`(D)1`'s D), a sizeof's or an alignof's clang's __size_t
+            // (check_input_operand_type_spelling's sentinel), any other operand's its object's.
+            const bool first_typed = first < graph->count && (graph->ops[first] == CHECK_OP_CAST || graph->ops[first] == CHECK_OP_SIZEOF ||
+                                                              graph->ops[first] == CHECK_OP_ALIGNOF);
+            const bool second_typed = second < graph->count && (graph->ops[second] == CHECK_OP_CAST || graph->ops[second] == CHECK_OP_SIZEOF ||
+                                                                graph->ops[second] == CHECK_OP_ALIGNOF);
+            const uint32_t first_spelling = first_typed ? check_input_operand_type_spelling(input, parser, first) :
+                                                          check_semantic_operand_spelling(parser, input, stream, types, first);
+            const uint32_t second_spelling = second_typed ? check_input_operand_type_spelling(input, parser, second) :
+                                                            check_semantic_operand_spelling(parser, input, stream, types, second);
             if (report->diagnostic == CHECK_DIAG_INVALID_TYPE && first_type != 0 && second_type != 0)
             {
                 const bool second_wrong = check_action_kind(types, first_type) == BUSTER_TYPE_KIND_FLOATING;

@@ -24,6 +24,7 @@ fi
 # Every use checks the tree against the manifest written at its publication: a tree without one (published before it)
 # or whose files no longer match it is staged afresh from the verified archive.
 if [ ! -f "$destination/.correctness-complete" ] || [ ! -f "$destination/LICENSE.TXT" ] || [ ! -f "$destination/.manifest-complete" ] ||
+    [ ! -x "$destination/bin/llvm-split" ] || [ ! -x "$destination/bin/llvm-nm" ] || [ ! -x "$destination/bin/llvm-objcopy" ] ||
     ! bash "$manifest_tool" check "$destination"; then
     temporary=$(mktemp -d "$cache/.clang-${version}.XXXXXXXX")
     trap 'rm -rf "$temporary"' EXIT
@@ -42,6 +43,7 @@ if [ ! -f "$destination/.correctness-complete" ] || [ ! -f "$destination/LICENSE
         "$archive/bin/clang-23" "$archive/bin/clang" "$archive/bin/clang++" \
         "$archive/bin/lld" "$archive/bin/ld.lld" "$archive/bin/llvm-config" \
         "$archive/bin/llvm-dwarfdump" "$archive/bin/llvm-readobj" \
+        "$archive/bin/llvm-split" "$archive/bin/llvm-nm" "$archive/bin/llvm-objcopy" \
         "$archive/include/*" "$archive/lib/clang/23/*" "$archive/lib/libclang-cpp.so*"
     # The binary release omits the project license. Retain the LLVM license
     # from the exact release commit alongside the staged executable.
@@ -54,7 +56,7 @@ if [ ! -f "$destination/.correctness-complete" ] || [ ! -f "$destination/LICENSE
     test "$("$temporary/tree/bin/llvm-config" --version)" = "$version"
     test -f "$temporary/tree/lib/clang/23/include/immintrin.h"
     test -f "$temporary/tree/lib/libclang-cpp.so"
-    for tool in clang clang++ lld ld.lld llvm-config llvm-dwarfdump llvm-readobj; do
+    for tool in clang clang++ lld ld.lld llvm-config llvm-dwarfdump llvm-readobj llvm-split llvm-nm llvm-objcopy; do
         test -x "$temporary/tree/bin/$tool"
     done
     # The content manifest, before the markers it leaves out.
@@ -79,7 +81,7 @@ test "$("$destination/bin/clang" -dumpversion)" = "$version"
 test "$("$destination/bin/llvm-config" --version)" = "$version"
 test -f "$destination/lib/clang/23/include/immintrin.h"
 test -f "$destination/lib/libclang-cpp.so"
-for tool in clang clang++ lld ld.lld llvm-config llvm-dwarfdump llvm-readobj; do
+for tool in clang clang++ lld ld.lld llvm-config llvm-dwarfdump llvm-readobj llvm-split llvm-nm llvm-objcopy; do
     test -x "$destination/bin/$tool"
 done
 "$destination/bin/clang" --version

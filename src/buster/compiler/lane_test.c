@@ -129,7 +129,7 @@
 #if defined(BUSTER_HOST_STATIC) && BUSTER_HOST_STATIC
 #include <execinfo.h>
 #endif
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DRIVER
 #define BUSTER_LANE_TEST_MAX_LANES 8
 // Ranges: every count up to this, and the cost patterns of lane_test_cost.
 #define BUSTER_LANE_TEST_MAX_RANGE 1000
@@ -149,7 +149,9 @@
 #define BUSTER_LANE_TEST_STRINGIFY(value) BUSTER_LANE_TEST_STRINGIFY_(value)
 // The arenas: the large reservation, and how much of /proc/self/smaps is read.
 #define BUSTER_LANE_TEST_LARGE_ARENA (64ull << 30)
+#endif
 #define BUSTER_LANE_TEST_SMAPS_BYTES (16ull << 20)
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DRIVER
 // 2^64 divided by the golden ratio: splitmix64's increment, and the multiplier that turns --seed N into a state.
 #define BUSTER_LANE_TEST_GOLDEN_RATIO 0x9E3779B97F4A7C15ull
 // Each check prints its first problems, up to this many.
@@ -404,7 +406,8 @@ static void lane_test_expect(LaneTestTally* tally, bool condition, const char* w
         printf("  arenas: %s\n", what);
     }
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DRIVER || BUSTER_UNIT == BUSTER_UNIT_CHECKER
 // Lowercase hexadecimal digits from `text`, as /proc/self/smaps writes addresses. Returns the end of the digits.
 static const char* lane_test_parse_hex(const char* text, const char* end, uint64_t* value)
 {
@@ -491,7 +494,8 @@ static bool lane_test_huge_capable(uintptr_t address, bool* found)
     const uint64_t page = address & ~(uintptr_t)(BUSTER_ARENA_HUGE_PAGE_BYTES - 1);
     return writable && !refused && page >= first && page + BUSTER_ARENA_HUGE_PAGE_BYTES <= last;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DRIVER
 // Whether the page at `address` is resident.
 static bool lane_test_resident(const uint8_t* address)
 {
@@ -2446,7 +2450,8 @@ static uint64_t lane_test_team_affinity(LaneTeam* team, uint32_t threads_before)
     }
     return failures;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DRIVER
 // A team that keeps its workers' scratch arenas (lane_team_keep_scratch, #501): across operations of changing lane
 // counts each worker finds the arenas of its last operation, emptied (lane_test_team_main), and once the team has
 // stopped, the arenas are unmapped: mincore refuses each one's first page.
@@ -2581,7 +2586,7 @@ static uint64_t lane_test_teams(void)
 
 // The parts a session check's narrowed lanes take.
 #define BUSTER_LANE_TEST_SESSION_PARTS 29
-
+#endif
 // /proc/cpuinfo's cores (#905), an oracle of lane_cores' that doesn't read sysfs' sibling lists, for this file's tests
 // and the drivers' (test-check-lanes, test-foreign, test-parallel). A line's key is what comes before its colon, but
 // blanks, and only the processor, physical id and core id lines' values are read (#933's review: the flags line's
@@ -2695,9 +2700,10 @@ static uint32_t lane_test_cpuinfo_cores(const uint64_t* cores, const uint64_t* m
     }
     return distinct;
 }
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DRIVER
 _Static_assert(BUSTER_LANE_CPU_MASK_WORDS * 64 == 1024, "lane_test_cpuinfo_controls' texts name the room's last processor and the next");
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DRIVER
 // lane_test_cpuinfo_read on texts of /proc/cpuinfo's shape, read through fmemopen (#933's review). First four
 // processors' blocks of every line a Zen 5's has, each flags line 1,024 names with digits: two packages, processors 0
 // and 2 one core's siblings. Then texts of one processor each, which must give it its entry or none:
@@ -2813,7 +2819,7 @@ static uint64_t lane_test_cpuinfo_controls(void)
     printf("cpuinfo: four processors with 1,024 flags each and %u texts of one, %lu wrong\n", (uint32_t)BUSTER_ARRAY_LENGTH(cases), (unsigned long)failures);
     return failures;
 }
-
+#endif
 // The cores of the CPUs this process may run on by /proc/cpuinfo (lane_test_cpuinfo), or 0 where it doesn't list every
 // one of them.
 static __attribute__((unused)) uint32_t lane_test_process_cores(void)
@@ -2866,7 +2872,7 @@ static __attribute__((unused)) bool lane_test_sibling_masks(uint64_t* siblings, 
     free(ids);
     return found;
 }
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DRIVER
 // Writes CPU `cpu`'s sibling list, `length` bytes at `list`, in a test topology under `root`, where lane_cores reads it
 // in sysfs (cpuN/topology/core_cpus_list). Returns whether it could.
 static bool lane_test_topology_write(const char* root, uint32_t cpu, const char* list, uint64_t length)
@@ -2940,7 +2946,8 @@ static uint32_t lane_test_topology_process(const char* root, const uint64_t* all
     }
     return written ? (size == 0 ? 1 : (count + size - 1) / size) : 0;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DRIVER
 // lane_cores and lane_core_count (#905): see the file's comment.
 static uint64_t lane_test_cores(void)
 {
@@ -3144,7 +3151,8 @@ static uint64_t lane_test_shared_cpus(void)
            cpus > 1 ? " and of two on them" : "", (unsigned long)failures);
     return failures;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DRIVER
 // What a session's lanes share (#905): the lanes it should run, what each lane saw and did, and the failures each
 // counted.
 typedef struct LaneSessionTest LaneSessionTest;
@@ -3425,8 +3433,9 @@ static void lane_test_session_main(void* argument)
         test->failures[index] += failures;
     }
 }
-
+#endif
 #if defined(BUSTER_HOST_STATIC) && BUSTER_HOST_STATIC
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DRIVER
 // Unwinding (#652): see the file's comment. Each count is volatile, so that its call isn't a tail call, which would leave
 // its caller's frame out.
 static __attribute__((noinline)) uint32_t lane_test_unwind_inner(void)
@@ -3523,13 +3532,16 @@ static bool lane_test_unwinds(void)
     result = lane_test_forced(true) && result;
     return result;
 }
+#endif
 #else
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DRIVER
 static bool lane_test_unwinds(void)
 {
     return true;
 }
 #endif
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DRIVER
 // Sessions (#905): see the file's comment.
 static uint64_t lane_test_sessions(void)
 {
@@ -3931,3 +3943,4 @@ static int run_lane_tests(int argc, char** argv)
     arena_release(&memory);
     return result;
 }
+#endif

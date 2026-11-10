@@ -17,13 +17,17 @@ struct CheckDriverDiagnosticCounts
 
 // Ignore Clang's source excerpts and carets, but independently compare published severities, the first and last
 // original error's source line, attached notes and the complete summary. Do not infer any count from the summary.
+// Each line is found and parsed within its own bytes: strchr and sscanf on the rest of the text read all of it per
+// line (AddressSanitizer's strict string checks measure it, and the C library's sscanf too), which made this walk
+// quadratic in the output, 2,000 s of a 16th of test-checker-driver under ASan against 18 s plain (#2030).
 static CheckDriverDiagnosticCounts check_test_driver_diagnostic_counts(const char* text)
 {
     CheckDriverDiagnosticCounts counts = { 0 };
-    for (const char* at = text; at != NULL && *at != 0;)
+    const char* stop = text != NULL ? text + strlen(text) : NULL;
+    for (const char* at = text; at != NULL && at < stop;)
     {
-        const char* end = strchr(at, '\n');
-        const size_t length = end != NULL ? (size_t)(end - at) : strlen(at);
+        const char* end = memchr(at, '\n', (size_t)(stop - at));
+        const size_t length = end != NULL ? (size_t)(end - at) : (size_t)(stop - at);
         const bool warned = memmem(at, length, ": warning: ", 11) != NULL;
         const bool failed = memmem(at, length, ": error: ", 9) != NULL;
         const bool stopped = memmem(at, length, "fatal error: ", 13) != NULL;
@@ -36,10 +40,19 @@ static CheckDriverDiagnosticCounts check_test_driver_diagnostic_counts(const cha
         counts.notes += noted;
         if (failed || stopped)
         {
-            // A locationless fatal (the -ferror-limit cutoff) keeps the last located error's line.
+            // A locationless fatal (the -ferror-limit cutoff) keeps the last located error's line. The pattern stops
+            // within the line, whose first colon a space follows, so a copy of the line parses as the text does.
             uint32_t column = 0;
             uint32_t line = 0;
-            if (sscanf(at, "%*[^:]:%u:%u:", &line, &column) == 2 && line != 0)
+            char copy[256];
+            const char* parsed = at;
+            if (length < sizeof(copy))
+            {
+                memcpy(copy, at, length);
+                copy[length] = 0;
+                parsed = copy;
+            }
+            if (sscanf(parsed, "%*[^:]:%u:%u:", &line, &column) == 2 && line != 0)
             {
                 counts.first_error_line = counts.first_error_line != 0 ? counts.first_error_line : line;
                 counts.last_error_line = line;
