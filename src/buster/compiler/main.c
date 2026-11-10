@@ -1254,6 +1254,8 @@ static __attribute__((unused)) void main_checker_consumer_interfaces(void)
     (void)&cbuiltin_x86_helper_kind;
     (void)&cbuiltin_x86_helper;
     (void)&check_vector_baseline_resize;
+    (void)&check_vector_baseline_extremes;
+    (void)&check_vector_baseline_absolute;
     (void)&check_vector_baseline_shuffle_row;
     (void)&check_vector_lower_element_row;
     (void)&check_vector_lower_brain;
