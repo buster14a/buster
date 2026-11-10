@@ -670,18 +670,27 @@ without the stack restore that the scope's normal end makes.
 
 A file-scope `asm` statement (#619: `main.c`'s puts the checker's code in a
 page-aligned `.text.buster_checker`) makes no helper and no code of a function.
-The emission (`check_program_emit_file_asm`, in `c_check_program_emit.c`)
+The asm planning (`check_program_asm_plan_file`, in `c_check_program_asm.c`)
 joins the unit's file-scope templates in source order, a line each, and
 assembles them with `asm_assemble`, the `assemble` command's assembler, as
-clang emits a module's `asm` before its functions. Each section it makes is an
-atom of its class, before the functions' atoms in the link, and in `-c`'s
-object a section of its own name, type and flags
-(`CheckProgramCode.asm_sections`, `check_program_sections`); the direct path's
-executable merges it into its class's output section. Refused by name:
-templates the assembler refuses; templates that define or refer to a symbol (a
-label, an instruction's symbolic operand, CFI), which the unit's symbols don't
-join yet; and a section of a class C's definitions don't have, or of another
-type than its class's (an init array's, a note).
+clang emits a module's `asm` before its functions. Its symbols join the
+templates' names as an assembled template's do (#1848): its labels are local
+unless a binding or visibility directive names them, its `.type` and `.size`
+apply to them, a label or `.comm` of a name the unit declares without defining
+defines that symbol, so that C calls and reads what the assembly defines
+(`asm(".globl f\nf: ret")` with `void f(void);`), and its references are the
+unit's symbols of those names (its functions and variables, static ones too)
+or undefined globals. The emission publishes it with the templates' units
+(`check_program_emit_asm_unit`): each section it makes is an atom of its class,
+before the functions' atoms in the link, and in `-c`'s object a section of its
+own name, type and flags (`CheckProgramCode.asm_sections`,
+`check_program_sections`); the direct path's executable merges it into its
+class's output section. Refused by name, at the first file-scope statement:
+templates the assembler refuses; CFI, whose frames the emission's unwind table
+doesn't merge; a section of a class C's definitions don't have, or of another
+type than its class's (an init array's, a note); and what the templates' names
+refuse (a label another template defines too, or that the unit defines, a
+reference to another template's `.set` symbol).
 
 ## What the lowering refuses
 

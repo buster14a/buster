@@ -171,6 +171,33 @@ static void check_test_driver_asm_definitions(CheckTest* test, const char* clang
           "    __asm__(\".pushsection .data\\n.p2align 2\\ntable: .long 1, 2, 3\\n.popsection\");\n"
           "}\n"
           "int main(void) { data(); printf(\"%s %d\\n\", greeting, table[0] + table[1] + table[2]); return 0; }\n" },
+        // File-scope assembly (#619) that defines functions and data C declares and calls, refers to C's function and
+        // variables (a static one that C reads too, so that clang emits it), with local, `.L` and numeric labels,
+        // a `.pushsection` string, a common symbol and a weak reference.
+        { "file-scope assembly's symbols", "bump main",
+          "#include <stdio.h>\n"
+          "int counter = 5;\n"
+          "static int hidden = 9;\n"
+          "int bump(int x) { return x + 1; }\n"
+          "int twice_counter(void);\n"
+          "int plus_hidden(int);\n"
+          "extern long table[];\n"
+          "extern char shared_buffer[64];\n"
+          "extern const char* message(void);\n"
+          "extern int maybe;\n"
+          "__asm__(\".text\\n.globl twice_counter\\n.type twice_counter,@function\\ntwice_counter:\\n\\tmovl counter(%rip), %eax\\n\\taddl %eax, %eax\\n\\tret\\n"
+          ".size twice_counter, .-twice_counter\");\n"
+          "__asm__(\"plus_hidden:\\n\\tmovl hidden(%rip), %eax\\n\\ttestl %edi, %edi\\n\\tjz 1f\\n\\taddl %edi, %eax\\n1:\\tret\");\n"
+          "__asm__(\".data\\n.globl table\\n.p2align 3\\ntable: .quad bump\\n.quad .Lafter\\n.Lafter: .long 7\\n.text\");\n"
+          "__asm__(\".comm shared_buffer,64,32\\n.weak maybe\");\n"
+          "__asm__(\".globl message\\nmessage:\\n\\tleaq .Lmessage(%rip), %rax\\n\\tret\\n.pushsection .rodata\\n.Lmessage: .asciz \\\"file\\\"\\n.popsection\");\n"
+          "int main(void) {\n"
+          "    int* volatile weak = &maybe;\n"
+          "    shared_buffer[3] = 4;\n"
+          "    printf(\"%d %d %d %d %d %s %d %d\\n\", twice_counter(), plus_hidden(2), plus_hidden(0) + hidden, ((int (*)(int))table[0])(4), *(int*)table[1], message(),\n"
+          "           shared_buffer[3], weak != 0 ? *weak : -1);\n"
+          "    return 0;\n"
+          "}\n" },
     };
     for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(fixtures); f += 1)
     {

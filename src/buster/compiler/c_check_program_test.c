@@ -5669,7 +5669,7 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         check_test_program_boundary(test, "int tested(int n){asm goto(\"\"::::target);return n;target:return n+1;}",
                                     "typed-asm-goto-target", true, true, 0, 0);
     }
-    // File-scope assembly lowers no code: the emission assembles it (check_program_emit_file_asm, #619).
+    // File-scope assembly lowers no code: the planning assembles it (check_program_asm_plan_file, #619).
     if (check_test_takes())
     {
         check_test_program_boundary(test, "asm(\".byte 0\");int tested(int n){return n;}",

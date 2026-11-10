@@ -36,8 +36,9 @@ requirements. [Command index](README.md).
   defining defines that symbol (#1848); `test-checker-driver
   --asm-definitions-only` compares such fixtures' `-c` symbols with clang's and
   runs them. A file-scope `asm`'s templates are
-  assembled by the emission into atoms of their sections before the functions'
-  (`check_program_emit_file_asm`, #619), each in its section in `-c`'s object.
+  assembled together by the planning (`check_program_asm_plan_file`, #619),
+  their names joining the templates' (#1848), and published as atoms of their
+  sections before the functions', each in its section in `-c`'s object.
   `test-checker` runs each shape natively against clang -O0's build on both
   paths and checks each refusal by name (`c_check_program_asm_test.c`);
   its naked mask-save fixture uses all eight `kmovq` registers at the real

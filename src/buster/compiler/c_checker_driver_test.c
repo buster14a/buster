@@ -7120,11 +7120,11 @@ static void check_test_driver_quad_literals(CheckTest* test, const char* clang, 
 // the section type conflicts between settings and section attributes in clang's order, by -fsyntax-only. What the checker
 // refuses by name instead: a name in a place clang reads expanded that was a macro's in the unit, and an error at the
 // line's end. Then -c of the units clang takes: each function and variable in the section its attribute or a function's
-// text setting gives it, and the file-scope assembly's sections (check_program_sections, check_program_emit_file_asm),
+// text setting gives it, and the file-scope assembly's sections (check_program_sections, check_program_asm_plan_file),
 // which must be clang's -O0 -c's of the same source (check_test_driver_same_sections); and the refusals by name: a
 // static-storage definition under an active object setting (conservatively, until the emission selects its section
-// kind), a section whose name gives it another kind or type, and file-scope assembly with a symbol or of another kind
-// of section.
+// kind), a section whose name gives it another kind or type, and file-scope assembly with a section of another kind
+// (an init array's).
 #include "c_check_symbol_driver_test.c"
 #include "c_check_asm_definition_driver_test.c"
 #include "c_check_symbol_pragma_driver_test.c"
@@ -7286,7 +7286,6 @@ static void check_test_driver_section_pragmas(CheckTest* test, const char* clang
     static const char placed[] = "unsupported: a definition under active '#pragma clang section' settings";
     static const char kind[] = "unsupported: a definition in a section whose name gives it another kind";
     static const char typed[] = "unsupported: a section name with an unsupported ELF type or reserved family";
-    static const char asm_symbol[] = "unsupported: file-scope assembly that defines or refers to a symbol";
     static const char asm_kind[] = "unsupported: file-scope assembly's section of this kind";
     static const struct
     {
@@ -7355,7 +7354,7 @@ static void check_test_driver_section_pragmas(CheckTest* test, const char* clang
           0, 0, NULL, false, ".rodata.mine", true },
         { "two file-scope statements in order", "__asm__(\".section .data.asm,\\\"aw\\\",@progbits\\n.byte 1\");\n__asm__(\".section .data.asm,\\\"aw\\\",@progbits\\n.byte 2\");\n"
                                                 "int main(void) { return 0; }\n", 0, 0, NULL, false, ".data.asm", true },
-        { "file-scope assembly's label", "__asm__(\".globl answer\\nanswer: .byte 42\");\nint main(void) { return 0; }\n", 0, 1, asm_symbol },
+        { "file-scope assembly's label", "__asm__(\".globl answer\\nanswer: .byte 42\");\nint main(void) { return 0; }\n" },
         { "file-scope assembly's init array", "__asm__(\".section .init_array,\\\"aw\\\"\\n.quad 0\");\nint main(void) { return 0; }\n", 0, 1, asm_kind },
         { "an initialized variable in a .bss", "int g __attribute__((section(\".bss.g\"))) = 1;\nint main(void) { return g - 1; }\n", 0, 1, kind },
         { "a variable in a .tdata", "int g __attribute__((section(\".tdata.g\"))) = 1;\nint main(void) { return g - 1; }\n", 0, 1, kind },

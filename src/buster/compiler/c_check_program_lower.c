@@ -15868,7 +15868,8 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
     {
         shared->terminal = program->stream->misc[i].runtime_builtin == CBUILTIN_EH_RETURN;
     }
-    // File-scope assembly is the emission's (check_program_emit_file_asm, #619): it lowers no code.
+    // File-scope assembly lowers no code: the planning assembles it (check_program_asm_plan_file, #619), the emission
+    // publishes it.
     // The room __builtin_dump_struct's calls and __builtin_os_log_format's data take past the per-node bounds
     // (CheckLowerInitializers.extra_entries, check_lower_dump_prepare's).
     const uint64_t entry_room64 = capacity64 + lowered->initializers.extra_entries;
