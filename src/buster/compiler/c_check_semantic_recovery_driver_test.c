@@ -778,6 +778,27 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         // either.
         "int a[-1];\nint a(void);\nint f(void)[3];\nint f;\nstruct S;\nstruct S s;\nvoid s(void);\nint g(void) { int unused; return a + f; }\n",
         "static void v;\nint v(void);\nint w(void)[2];\ntypedef int w;\nint b[-1];\ntypedef int b;\nint h(void) { int unused; return 0; }\n",
+        // C23's redefinition of an enum at file scope (#1447, N3037): a compatible one is silent, and its names unambiguous
+        // after it; an incompatible one is clang's "incompatible definitions" at its name, with the first pair of its
+        // enumerators sorted by name that differ in name or value, or one past the other list and "no corresponding
+        // enumerator here" at the other's name. A name both lists declare is ambiguous within the second body, and after an
+        // incompatible one, with its candidates; a body with such a use keeps no unused variable, the others do.
+        "/* gnu23 only */\nenum E { A, B };\nenum E { A, B };\nint x = A;\nenum E e = B;\nenum F { F1 } f1;\nenum F { F1 } f2;\n"
+        "enum H : int { H1 };\nenum H : int { H1 };\nenum K { K1 = 5, K2 };\nenum K { K1 = 5, K2 = 6 };\nint y = undeclared;\n",
+        "/* gnu23 only */\nenum G { X, Y };\nenum G { X, Z };\nint v = Y + Z;\nint q = sizeof(enum G);\nint g(void) { int u2; return 0; }\n",
+        "/* gnu23 only */\nenum G { X, Y };\nenum G { X, Z };\nint u = X;\nvoid f(void) { int unused; int k = X; }\nint g(void) { int u2; return 0; }\n",
+        "/* gnu23 only */\nenum G { X, Y };\nenum G { X };\nint v = Y;\nenum M { M1 };\nenum M { M1, M2 };\n"
+        "enum P : int { P1 };\nenum P : int { P1, P2 };\n",
+        "/* gnu23 only */\nenum G { X = 1 };\nenum G { X = 2 };\nenum S { S1, S2 };\nenum S { S2, S1 };\nenum T { zz, B, a };\n"
+        "enum T { zz, B, A };\nenum N { N1 = -1, N2 };\nenum N { N1 = -2, N2 };\nenum U { U1 = 0xffffffffu };\nenum U { U1 = 0xfffffffeu };\n",
+        "/* gnu23 only */\nenum G { X, Y };\nenum G { X, Z = X + 1 };\nenum R { R1, R2 = R1 + 1 };\nenum R { R1, R2 = R1 + 1 };\n"
+        "int q = R2;\nint w(void) { int unused; return 0; }\n",
+        // A name only the dropped redefinition declares, though a local of another body or a later declaration spells it
+        // too (review on #1928): its uses still mask their bodies in the later readings, so the unit keeps its warnings.
+        "/* gnu23 only */\nenum E { X, Y };\nenum E { X, Z };\nvoid f(void) { int Z; }\nint g(void) { return Z; }\n"
+        "int h(void) { int unused; return 0; }\nvoid k(void) { int m = X; }\n",
+        "/* gnu23 only */\nenum E { X, Y };\nenum E { X, Z };\nint g(void) { return Z; }\nint h(void) { int unused; return X; }\n"
+        "struct Z { int a; };\nint i(void) { int u2; return 0; }\n",
         // A tag defined again in its scope, whose body becomes an anonymous tag's: later uses of the name find the first
         // definition, and the second's enumerators are still declared (a repeated one with its own note).
         "struct S { int a; };\nstruct S { long b; };\nunion U { int a; };\nunion U { char c; } u2;\n"
@@ -794,8 +815,8 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "enum FE : int { FA, FB };\nenum FE : int { FC, FD };\nint fx = FC + FB;\nvoid fg(void) { enum FL : char { FL1 }; enum FL : char { FL2 }; }\n",
     };
     static const char* const standards[] = { "-std=gnu17", "-std=gnu23" };
-    // The tag redefinitions, the last three fixtures, are gnu17's alone: C23 compares a redefined record with the
-    // earlier one (N3037, the gnu23 fixtures above), and an enum's redefinition still refuses generically there.
+    // The tag redefinitions, the last three fixtures, are gnu17's alone: C23 compares a redefined record or enum with the
+    // earlier one (N3037, the gnu23 fixtures above).
     const uint32_t before_c23 = BUSTER_ARRAY_LENGTH(fixtures) - 3;
     static const char* const options[] = { NULL, "-Wall", "-ferror-limit=2", "-w" };
     static char stress_text[65536];

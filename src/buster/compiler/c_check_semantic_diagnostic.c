@@ -52,7 +52,8 @@ static String8 check_semantic_tag_spelling(const Parser* parser, Preprocessor* p
 {
     const bool unnamed = parser->tokens.kinds[token] == PARSE_KIND_STRUCT;
     uint32_t keyword = token;
-    for (uint32_t steps = 0; !unnamed && keyword != 0 && steps < 64 && parser->tokens.kinds[keyword] != PARSE_KIND_STRUCT; steps += 1)
+    for (uint32_t steps = 0; !unnamed && keyword != 0 && steps < 64 && parser->tokens.kinds[keyword] != PARSE_KIND_STRUCT && parser->tokens.kinds[keyword] != PARSE_KIND_ENUM;
+         steps += 1)
     {
         keyword -= 1;
     }
@@ -169,6 +170,29 @@ static uint32_t check_semantic_tag_notes(const Parser* parser, Preprocessor* pp,
             texts[0] = check_warning_text(scratch, "attribute '%.*s' here", (int)first_name.length, first_name.pointer);
             texts[1] = check_warning_text(scratch, "attribute '%.*s' here", (int)second_name.length, second_name.pointer);
             break;
+        case 7: // BUSTER_CHECK_TAG_ENUM_VALUE: an enum's (#1447), the second definition's enumerator then the earlier's
+        case 8: // BUSTER_CHECK_TAG_ENUM_EXTRA: one past the other's list, and "no corresponding enumerator here"
+        {
+            const uint64_t values[2] = { report->value, (uint64_t)report->type | (uint64_t)report->type_spelling << 32 };
+            const String8 names[2] = { first_name, second_name };
+            const uint32_t tokens[2] = { first, second };
+            for (uint32_t n = 0; n < (report->detail == 7 ? 2u : 1u); n += 1)
+            {
+                // Printed as its type's signedness has it, as clang's APSInt is.
+                const TypeId type = tokens[n] < count && input->declared_types != NULL ? input->declared_types[tokens[n]] : BUSTER_TYPE_INT;
+                uint32_t width = 64;
+                bool sign = true;
+                if (!check_action_integer_type(types, type, &width, &sign) || width > 64)
+                {
+                    width = 64;
+                }
+                const uint64_t bits = width < 64 ? values[n] & ((UINT64_C(1) << width) - 1) : values[n];
+                const int64_t signed_value = sign && width < 64 && (bits >> (width - 1)) != 0 ? (int64_t)(bits | ~((UINT64_C(1) << width) - 1)) : (int64_t)bits;
+                texts[n] = sign ? check_warning_text(scratch, "enumerator '%.*s' with value %lld here", (int)names[n].length, names[n].pointer, (long long)signed_value) :
+                                  check_warning_text(scratch, "enumerator '%.*s' with value %llu here", (int)names[n].length, names[n].pointer, (unsigned long long)bits);
+            }
+            texts[1] = report->detail == 7 ? texts[1] : "no corresponding enumerator here";
+        } break;
         default: // CHECK_TAG_MISMATCH_EXTRA_NEW, CHECK_TAG_MISMATCH_EXTRA_OLD
         {
             const String8 first_type = check_driver_warning_type(parser, pp, input, types, spell, scratch, report->type,
@@ -239,6 +263,10 @@ static const char* check_semantic_input(const Parser* parser, Preprocessor* pp, 
     else if (report->message == CHECK_INPUT_ENUMERATOR_REDEFINITION && name.length != 0)
     {
         result = check_warning_text(scratch, "redefinition of enumerator '%.*s'", (int)name.length, name.pointer);
+    }
+    else if (report->message == CHECK_INPUT_AMBIGUOUS && name.length != 0)
+    {
+        result = check_warning_text(scratch, "reference to '%.*s' is ambiguous", (int)name.length, name.pointer);
     }
     else if (report->message == CHECK_INPUT_ARRAY_LITERAL_MISMATCH)
     {

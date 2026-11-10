@@ -137,6 +137,233 @@ static bool check_input_enum_fixed_value(CheckInputReader* reader, const CheckTa
     return valid;
 }
 
+// C23's redefinition of an enum (#1447, N3037), at file scope: the second body is an anonymous enum's
+// (check_input_tag_identity), whose enumerators of an earlier one's names are no redefinitions but names both declare,
+// which their uses find ambiguous; once complete, it is compared with the earlier enum (check_tag_enum_compatible). Only a
+// unit that defines an enum twice in one scope takes this, so it has no vector twin.
+
+// CHECK_INPUT_TAG_INCOMPATIBLE's details of an enum's (c_check_tag_compatible.c's CheckTagMismatch has a record's): a pair
+// of enumerators whose names or values differ, and one past the other definition's list.
+#define BUSTER_CHECK_TAG_ENUM_VALUE 7u
+#define BUSTER_CHECK_TAG_ENUM_EXTRA 8u
+
+// Whether `token` is an enumerator of the definition at `keyword`: within its body's braces.
+static bool check_tag_enum_member(const Parser* parser, uint32_t keyword, uint32_t token)
+{
+    uint32_t open = BUSTER_CHECK_NONE;
+    const bool named = keyword < parser->tokens.count;
+    if (named)
+    {
+        (void)check_tag_name_token(parser, keyword, 0, &open);
+    }
+    const bool body = named && open < parser->tokens.count && parser->tokens.kinds[open] == PARSE_KIND_L_BRACE;
+    return body && token > open && token < parser->tree.parents[open];
+}
+
+// Records that the enumerator at `token` declares the name of the earlier definition's at `earlier`: its uses are
+// ambiguous until the comparison decides (check_tag_enum_compatible). Whether there was room. Lanes take no file scope.
+static bool check_tag_enum_ambiguous(CheckInputReader* reader, uint32_t token, uint32_t earlier)
+{
+    const uint32_t count = reader->parser->tokens.count;
+    if (reader->ambiguous_index == NULL)
+    {
+        reader->ambiguous_index = BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint32_t, count);
+        if (reader->ambiguous_index != NULL)
+        {
+            memset(reader->ambiguous_index, 0, (uint64_t)count * sizeof(uint32_t));
+        }
+        reader->output->ambiguous_index = reader->ambiguous_index;
+    }
+    bool room = reader->ambiguous_index != NULL && reader->ambiguous_count < reader->ambiguous_capacity;
+    if (reader->ambiguous_index != NULL && !room)
+    {
+        const uint32_t capacity = reader->ambiguous_capacity == 0 ? 16 : reader->ambiguous_capacity * 2;
+        uint32_t* declarations = BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint32_t, capacity);
+        uint32_t* partners = BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint32_t, capacity);
+        uint32_t* ends = BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint32_t, capacity);
+        room = declarations != NULL && partners != NULL && ends != NULL;
+        if (room && reader->ambiguous_count != 0)
+        {
+            memcpy(declarations, reader->ambiguous_declarations, (uint64_t)reader->ambiguous_count * sizeof(uint32_t));
+            memcpy(partners, reader->ambiguous_partners, (uint64_t)reader->ambiguous_count * sizeof(uint32_t));
+            memcpy(ends, reader->ambiguous_ends, (uint64_t)reader->ambiguous_count * sizeof(uint32_t));
+        }
+        reader->ambiguous_declarations = room ? declarations : reader->ambiguous_declarations;
+        reader->ambiguous_partners = room ? partners : reader->ambiguous_partners;
+        reader->ambiguous_ends = room ? ends : reader->ambiguous_ends;
+        reader->ambiguous_capacity = room ? capacity : reader->ambiguous_capacity;
+    }
+    if (room && token < count)
+    {
+        reader->ambiguous_declarations[reader->ambiguous_count] = token;
+        reader->ambiguous_partners[reader->ambiguous_count] = earlier;
+        reader->ambiguous_ends[reader->ambiguous_count] = BUSTER_CHECK_NONE;
+        reader->ambiguous_count += 1;
+        reader->ambiguous_index[token] = reader->ambiguous_count;
+    }
+    reader->output->resource |= !room;
+    return room;
+}
+
+// Whether the name at `left` comes before the one at `right` in clang's order of a C23 enum's comparison: their bytes'.
+static bool check_tag_enum_before(const CheckInputReader* reader, uint32_t left, uint32_t right)
+{
+    const InternTable* table = reader->pp->table;
+    const uint32_t left_name = reader->parser->tokens.names[left];
+    const uint32_t right_name = reader->parser->tokens.names[right];
+    const uint32_t left_length = intern_length(table, left_name);
+    const uint32_t right_length = intern_length(table, right_name);
+    const int order = memcmp(intern_bytes(table, left_name), intern_bytes(table, right_name), left_length < right_length ? left_length : right_length);
+    return order < 0 || (order == 0 && left_length < right_length);
+}
+
+// Sorts `count` enumerators' tokens by their names (check_tag_enum_before), a bottom-up merge through `spare`, stable.
+static void check_tag_enum_sort(const CheckInputReader* reader, uint32_t* tokens, uint32_t* spare, uint32_t count)
+{
+    uint32_t* from = tokens;
+    uint32_t* to = spare;
+    for (uint32_t width = 1; width < count; width *= 2)
+    {
+        for (uint32_t begin = 0; begin < count; begin += 2 * width)
+        {
+            const uint32_t middle = begin + width < count ? begin + width : count;
+            const uint32_t end = begin + 2 * width < count ? begin + 2 * width : count;
+            uint32_t left = begin;
+            uint32_t right = middle;
+            for (uint32_t out = begin; out < end; out += 1)
+            {
+                const bool take_left = left < middle && (right >= end || !check_tag_enum_before(reader, from[right], from[left]));
+                to[out] = take_left ? from[left++] : from[right++];
+            }
+        }
+        uint32_t* swap = from;
+        from = to;
+        to = swap;
+    }
+    if (from != tokens)
+    {
+        memcpy(tokens, from, (uint64_t)count * sizeof(uint32_t));
+    }
+}
+
+// A recovered CHECK_INPUT_TAG_INCOMPATIBLE of an enum's redefinition at `token`, its name: the notes' enumerators, the
+// second definition's at `first` then the earlier's at `second`, or for one past the other's list, it at `first` and
+// "no corresponding enumerator here" at the other definition's name (`second`). The values the notes print: the first's
+// in `value`, the second's in `type` (its low half) and `type_spelling` (its high half). Whether the reader goes on.
+static bool check_tag_enum_report(CheckInputReader* reader, uint32_t token, uint32_t detail, uint32_t first, uint32_t second, uint32_t close)
+{
+    const uint32_t before = reader->output->report_count;
+    const bool placed = token < reader->parser->tokens.count;
+    if (placed)
+    {
+        check_input_report(reader, token, CHECK_INPUT_TAG_INCOMPATIBLE);
+    }
+    if (reader->output->report_count == before + 1 && !reader->output->resource)
+    {
+        const uint64_t second_value = detail == BUSTER_CHECK_TAG_ENUM_VALUE ? (uint64_t)reader->enum_values[second] : 0;
+        CheckInputReport* report = reader->output->reports + before;
+        report->detail = detail;
+        report->attribute = first;
+        report->note_token = second;
+        report->note_kind = CHECK_INPUT_NOTE_PREVIOUS_DEFINITION;
+        report->value = (uint64_t)reader->enum_values[first];
+        report->type = (TypeId)second_value;
+        report->type_spelling = (uint32_t)(second_value >> 32);
+        report->repeated = true;
+        report->sort = close < reader->parser->tokens.count ? close : 0;
+    }
+    return !placed || (reader->output->report_count == before + 1 && check_input_recover_reports(reader, before));
+}
+
+// A complete C23 redefinition of an enum, compared with the earlier one as clang's structural equivalence compares them:
+// each list's enumerators sorted by name, then pairwise their names and values, and past the shorter list the longer one's
+// next enumerator; the first difference is clang's "incompatible definitions". A compatible one makes its declarators take
+// the earlier type, and its names after its body no longer ambiguous; an incompatible one keeps its own type, and both
+// lists' names that both declare ambiguous. Whether the reader goes on.
+static bool check_tag_enum_compatible(CheckInputReader* reader, const CheckTagFrame* frame, const CheckTagMember* members)
+{
+    const Parser* parser = reader->parser;
+    const TypeTable* types = reader->types;
+    uint32_t earlier_keyword = BUSTER_CHECK_NONE;
+    const TypeId earlier = check_tag_compatible_earlier(reader, frame->token, &earlier_keyword);
+    bool valid = true;
+    if (earlier != 0 && earlier_keyword < parser->tokens.count)
+    {
+        const uint32_t name = types->tags.name[types->types.index[type_index(earlier)]];
+        uint32_t new_open = BUSTER_CHECK_NONE;
+        uint32_t old_open = BUSTER_CHECK_NONE;
+        const uint32_t new_name = check_tag_name_token(parser, frame->token, name, &new_open);
+        const uint32_t old_name = check_tag_name_token(parser, earlier_keyword, name, &old_open);
+        const bool bodied = old_open < parser->tokens.count && parser->tokens.kinds[old_open] == PARSE_KIND_L_BRACE;
+        const uint32_t old_close = bodied ? parser->tree.parents[old_open] : old_open;
+        // The earlier list: the identifiers of its body that declare themselves as enumerators. An enum's body holds no
+        // other declaration (a tag in an enumerator's value is a type name's, not a declarator's).
+        uint32_t old_count = 0;
+        for (uint32_t t = bodied ? old_open + 1 : old_close; t < old_close; t += 1)
+        {
+            old_count += parser->tokens.kinds[t] == PARSE_KIND_IDENTIFIER && reader->output->declarations[t] == t && reader->declaration_kinds[t] == C_BINDING_ENUMERATOR;
+        }
+        const uint32_t new_count = frame->count;
+        const uint64_t mark = reader->scratch->length;
+        const uint64_t room = (uint64_t)old_count + new_count + (old_count > new_count ? old_count : new_count) + 1;
+        uint32_t* olds = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, room);
+        valid = olds != NULL;
+        reader->output->resource |= !valid;
+        if (valid)
+        {
+            uint32_t* news = olds + old_count;
+            uint32_t* spare = news + new_count;
+            uint32_t at = 0;
+            for (uint32_t t = bodied ? old_open + 1 : old_close; t < old_close; t += 1)
+            {
+                if (parser->tokens.kinds[t] == PARSE_KIND_IDENTIFIER && reader->output->declarations[t] == t && reader->declaration_kinds[t] == C_BINDING_ENUMERATOR)
+                {
+                    olds[at++] = t;
+                }
+            }
+            at = 0;
+            for (uint32_t member = frame->first; member != BUSTER_CHECK_NONE && at < new_count; member = members[member].next)
+            {
+                news[at++] = members[member].member.name;
+            }
+            check_tag_enum_sort(reader, olds, spare, old_count);
+            check_tag_enum_sort(reader, news, spare, new_count);
+            const uint32_t shorter = old_count < new_count ? old_count : new_count;
+            uint32_t differ = 0;
+            while (differ < shorter && parser->tokens.names[olds[differ]] == parser->tokens.names[news[differ]] &&
+                   reader->enum_values[olds[differ]] == reader->enum_values[news[differ]])
+            {
+                differ += 1;
+            }
+            const bool compatible = differ == shorter && old_count == new_count;
+            const uint32_t at_name = new_name < parser->tokens.count ? new_name : frame->token;
+            if (compatible)
+            {
+                reader->tag_types[frame->token] = earlier;
+            }
+            else if (differ < shorter)
+            {
+                valid = check_tag_enum_report(reader, at_name, BUSTER_CHECK_TAG_ENUM_VALUE, news[differ], olds[differ], frame->close);
+            }
+            else
+            {
+                const bool extra_new = new_count > old_count;
+                valid = check_tag_enum_report(reader, at_name, BUSTER_CHECK_TAG_ENUM_EXTRA, extra_new ? news[differ] : olds[differ], extra_new ? old_name : new_name,
+                                              frame->close);
+            }
+            // Its enumerators' names that the earlier's declare: no longer ambiguous past its body where they agree.
+            for (uint32_t pair = 0; compatible && pair < reader->ambiguous_count; pair += 1)
+            {
+                const uint32_t token = reader->ambiguous_declarations[pair];
+                reader->ambiguous_ends[pair] = token > frame->token && token < frame->close ? frame->close : reader->ambiguous_ends[pair];
+            }
+            valid = valid && (compatible || check_tag_failed_note(reader, frame->token));
+        }
+        arena_pop_to(reader->scratch, mark);
+    }
+    return valid;
+}
+
 static bool check_input_enum_read(CheckInputReader* reader, CheckTagFrame* frame, CheckTagMember* members, uint32_t* member_count, uint32_t* nested_tag)
 {
     const Parser* parser = reader->parser;
@@ -270,6 +497,17 @@ static bool check_input_enum_read(CheckInputReader* reader, CheckTagFrame* frame
             const uint32_t old = check_input_library_binding(reader, identifier, i);
             const uint32_t depth = check_input_declaration_depth(reader);
             valid = old == 0 || reader->bindings.depth[old - 1] != depth;
+            // A C23 redefinition's enumerator of an earlier definition's name (#1447): no redefinition, but a name both
+            // declare, which its uses find ambiguous (check_tag_enum_ambiguous).
+            // (A third definition's finds the second's, itself ambiguous with the earlier's, whose candidate it names.)
+            const uint32_t bound = !valid ? reader->bindings.declaration[old - 1] : BUSTER_CHECK_NONE;
+            const uint32_t chained = !valid && bound < parser->tokens.count && reader->ambiguous_index != NULL ? reader->ambiguous_index[bound] : 0;
+            const uint32_t old_declaration = chained != 0 ? reader->ambiguous_partners[chained - 1] : bound;
+            uint32_t earlier_keyword = BUSTER_CHECK_NONE;
+            const bool ambiguous = !valid && reader->c23_count != 0 && reader->bindings.kind[old - 1] == C_BINDING_ENUMERATOR &&
+                                   check_tag_compatible_earlier(reader, frame->token, &earlier_keyword) != 0 &&
+                                   check_tag_enum_member(parser, earlier_keyword, old_declaration);
+            valid |= ambiguous;
             if (!valid)
             {
                 const CheckInputMessage message = reader->bindings.kind[old - 1] == C_BINDING_ENUMERATOR ? CHECK_INPUT_ENUMERATOR_REDEFINITION : CHECK_INPUT_REDECLARATION;
@@ -328,6 +566,7 @@ static bool check_input_enum_read(CheckInputReader* reader, CheckTagFrame* frame
                     frame->enumerator_type = value.type;
                     frame->count += 1;
                     frame->restart = false;
+                    valid = !ambiguous || check_tag_enum_ambiguous(reader, name, old_declaration);
                 }
             }
         }
