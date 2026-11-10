@@ -6,10 +6,12 @@
 # commit, whose hash fixes the files, without Git's sample hooks. Where BUSTER_CI_CACHE names a persistent directory
 # (the 9700X's), a bare mirror there holds the commit and the checkout fetches it from the mirror through Git's pack
 # protocol, which checks every object's hash again; a mirror that lacks the commit or fails is replaced from GitHub.
+# BUSTER_SQLITE_URL and BUSTER_SQLITE_COMMIT exist for tests/ci/caches.sh alone.
 set -euo pipefail
 destination=${1:?usage: fetch-sqlite.sh DESTINATION}
-commit=ccc132c5be20ab5c755c97a08d06b1b592fef330
-url=https://github.com/sqlite/sqlite
+commit=${BUSTER_SQLITE_COMMIT:-ccc132c5be20ab5c755c97a08d06b1b592fef330}
+url=${BUSTER_SQLITE_URL:-https://github.com/sqlite/sqlite}
+[[ "$commit" =~ ^[0-9a-f]{40}$ ]]
 git init -q --template= "$destination"
 cache=${BUSTER_CI_CACHE:-}
 fetched=false
