@@ -651,6 +651,13 @@ struct CheckLowerWriter
     // body's own parameters and locals, which the body writes as it starts and puts back to none as it ends.
     uint32_t* local_map;
     uint32_t* switch_locals;
+    // The cleanups' chains (#1370, CheckProgramChain): the label of each record's entry past its run's fall's store, by
+    // its CheckInput.cleanups index (BUSTER_CHECK_NONE where its CLEANUP control's own is its entry); the body's
+    // destination slot, an I32 temporary, BUSTER_CHECK_NONE until an exit or a fall stores it; and how many controls,
+    // an exit's tail, are left to leave out.
+    uint32_t* chain_labels;
+    uint32_t chain_slot;
+    uint32_t chain_skip;
     // The switch whose CASE controls come next (the last SWITCH control's token), its jump table or BUSTER_CHECK_NONE
     // where its cases' compares dispatch it (check_lower_table_of, by its control), and whether its first CASE control is
     // still to write the table's dispatch (check_lower_switch_dispatch); the tables, `table_count` of them, and the
@@ -13717,16 +13724,136 @@ static void check_lower_lifetime(CheckLowerWriter* writer, CheckControl control)
     }
 }
 
+// The label an exit jumps to that enters record `record`'s chain (#1370): past its run's fall's store where there is one,
+// else its CLEANUP control's own.
+static uint32_t check_lower_chain_entry(const CheckLowerWriter* writer, uint32_t record)
+{
+    const uint32_t fresh = writer->chain_labels[record];
+    return fresh != BUSTER_CHECK_NONE ? fresh : writer->program->chains[record].entry;
+}
+
+// The destination slot's store of `value` (#1370): an exit's destination, or 0 for a fall.
+static void check_lower_chain_store(CheckLowerWriter* writer, uint32_t value)
+{
+    if (writer->chain_slot == BUSTER_CHECK_NONE)
+    {
+        writer->chain_slot = check_lower_temporary(writer, BUSTER_TYPED_CLASS_I32);
+    }
+    check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I32, value);
+    check_lower_emit(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_I32, writer->chain_slot);
+}
+
+// An exit through its cleanups' chain (CHECK_CONTROL_EXIT, #1370): its destination's value where a dispatch on its path
+// tests it, and a jump to its first record's entry. Its tail follows it, which only its destination's dispatch reaches:
+// the first exit of a destination keeps it there, the others leave it out (`skip`). An exit that keeps its run (a `skip`
+// of BUSTER_CHECK_NONE) calls its records' functions in place, and its tail follows.
+static void check_lower_exit(CheckLowerWriter* writer, CheckControl control)
+{
+    const CheckProgram* program = writer->program;
+    const CheckProgramExit* exit = control.target < program->exit_count && writer->body->chains ? program->exits + control.target : NULL;
+    if (exit == NULL)
+    {
+        check_lower_fail(writer, CHECK_PROGRAM_INVALID);
+    }
+    else if (exit->skip == BUSTER_CHECK_NONE)
+    {
+        // Its run in place, innermost first, as before chains: its records' scopes' ends have none to share.
+        uint32_t record = exit->first;
+        for (uint32_t steps = 0; record < program->input->cleanup_count && steps < program->input->cleanup_count && writer->output->status == CHECK_PROGRAM_OK;
+             steps += 1)
+        {
+            check_lower_cleanup(writer, (CheckControl){ .kind = CHECK_CONTROL_CLEANUP, .node = BUSTER_CHECK_NONE, .token = control.token, .target = record });
+            record = record != exit->last ? program->chains[record].parent : BUSTER_CHECK_NONE;
+        }
+    }
+    else
+    {
+        if (exit->value != BUSTER_CHECK_NONE)
+        {
+            check_lower_chain_store(writer, exit->value);
+        }
+        check_lower_emit(writer, BUSTER_TYPED_JUMP, BUSTER_TYPED_CLASS_VOID, check_lower_chain_entry(writer, exit->first));
+        writer->chain_skip = exit->skip;
+    }
+}
+
+// A CLEANUP control (#147): a record's call. At its scope's end in a body with chains (#1370, CheckProgramChain), its
+// run's head first stores the fall's 0 where a dispatch tests it, before the entry the exits jump to; and after the call
+// its dispatch: each destination's test of the slot and jump to its tail (but the last continuation's, which needs none),
+// then the jump to its parent's entry for the exits that go on, then the next control.
+static void check_lower_chain_cleanup(CheckLowerWriter* writer, uint32_t index, CheckControl control)
+{
+    const CheckProgram* program = writer->program;
+    const CheckProgramChain* chain = writer->body->chains && control.target < program->input->cleanup_count && program->chains[control.target].entry == index ?
+                                         program->chains + control.target : NULL;
+    if (chain != NULL && writer->chain_labels[control.target] != BUSTER_CHECK_NONE)
+    {
+        check_lower_chain_store(writer, 0);
+        check_lower_place(writer, writer->chain_labels[control.target]);
+    }
+    check_lower_cleanup(writer, control);
+    if (chain != NULL && writer->output->status == CHECK_PROGRAM_OK)
+    {
+        const bool outward = (chain->flags & BUSTER_CHECK_CHAIN_OUTWARD) != 0;
+        const bool natural = (chain->flags & BUSTER_CHECK_CHAIN_NATURAL) != 0;
+        const uint32_t total = chain->stop_count + outward + natural;
+        if (total >= 2 && writer->chain_slot == BUSTER_CHECK_NONE)
+        {
+            writer->chain_slot = check_lower_temporary(writer, BUSTER_TYPED_CLASS_I32);
+        }
+        for (uint32_t k = 0; k < chain->stop_count; k += 1)
+        {
+            const CheckProgramStop stop = program->chain_stops[chain->stop_first + k];
+            if (k + 1 == total)
+            {
+                check_lower_emit(writer, BUSTER_TYPED_JUMP, BUSTER_TYPED_CLASS_VOID, stop.label);
+            }
+            else
+            {
+                check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_I32, writer->chain_slot);
+                check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I32, stop.value);
+                check_lower_emit(writer, BUSTER_TYPED_EQ, BUSTER_TYPED_CLASS_I32, 0);
+                check_lower_emit(writer, BUSTER_TYPED_BRANCH_TRUE, BUSTER_TYPED_CLASS_I32, stop.label);
+            }
+        }
+        if (outward && natural)
+        {
+            // The fall's 0 goes on to the next control, every exit's value (1 or more) to the parent.
+            check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_I32, writer->chain_slot);
+            check_lower_emit(writer, BUSTER_TYPED_BRANCH_TRUE, BUSTER_TYPED_CLASS_I32, check_lower_chain_entry(writer, chain->parent));
+        }
+        else if (outward)
+        {
+            check_lower_emit(writer, BUSTER_TYPED_JUMP, BUSTER_TYPED_CLASS_VOID, check_lower_chain_entry(writer, chain->parent));
+        }
+    }
+}
+
 static void check_lower_control(CheckLowerWriter* writer, uint32_t index)
 {
     const CheckProgram* program = writer->program;
     const CheckControl control = program->controls[writer->body->first + index];
-    check_lower_place(writer, index);
+    // An exit's tail that its destination's dispatch doesn't go to (#1370, check_lower_exit) writes nothing, and no
+    // branch goes to it.
+    const bool skipped = writer->chain_skip != 0;
+    writer->chain_skip -= skipped;
+    if (skipped)
+    {
+        writer->labels[index] = writer->count;
+    }
+    else
+    {
+        check_lower_place(writer, index);
+    }
     writer->token = control.token;
     // An expression statement and a branch, most of the controls, first: they are the chain's last case below, which
     // tested every other kind before them (#1048: 0.14 ms of sqlite3.c's statements on the 9700X, docs/c-lowering.md's
     // "The operands' overload tests").
-    if (control.kind == CHECK_CONTROL_EVALUATE || control.kind == CHECK_CONTROL_BRANCH_FALSE || control.kind == CHECK_CONTROL_BRANCH_TRUE)
+    if (skipped)
+    {
+        writer->statement = BUSTER_CHECK_NONE;
+    }
+    else if (control.kind == CHECK_CONTROL_EVALUATE || control.kind == CHECK_CONTROL_BRANCH_FALSE || control.kind == CHECK_CONTROL_BRANCH_TRUE)
     {
         if (control.kind != CHECK_CONTROL_EVALUATE)
         {
@@ -13790,7 +13917,11 @@ static void check_lower_control(CheckLowerWriter* writer, uint32_t index)
     }
     else if (control.kind == CHECK_CONTROL_CLEANUP)
     {
-        check_lower_cleanup(writer, control);
+        check_lower_chain_cleanup(writer, index, control);
+    }
+    else if (control.kind == CHECK_CONTROL_EXIT)
+    {
+        check_lower_exit(writer, control);
     }
     else if (control.kind == CHECK_CONTROL_LIFETIME)
     {
@@ -14016,6 +14147,7 @@ struct CheckLowerShared
     uint32_t* initializer_declarations;
     uint32_t* local_map;
     uint32_t* switch_locals;
+    uint32_t* chain_labels;
     uint32_t* vla_identities;
     uint32_t* save_locals;
     // Each body's locals, its own objects' declarations, a slice of `local_tokens` in token order from local_start[b + 1] to
@@ -14493,10 +14625,23 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
     // runtime call, independent of its byte size, within the same per-node bounds. A complex _BitInt's past 128 bits makes
     // more, which check_lower_limb_room counts. The runtime functions' provisional symbols (check_lower_runtime) follow
     // the helpers'.
+    // A cleanup's call is a CLEANUP control's (#147): one per variable at its scope's end, its chain's (#1370), and one per
+    // variable a statement expression's exit leaves; and an EXIT's that keeps its run, one per record it leaves.
+    uint64_t cleanup_calls = 0;
+    for (uint32_t i = 0; input != 0 && input->cleanup_count != 0 && program->status == CHECK_PROGRAM_OK && i < program->control_count; i += 1)
+    {
+        const CheckControl* control = program->controls + i;
+        cleanup_calls += control->kind == CHECK_CONTROL_CLEANUP;
+        if (control->kind == CHECK_CONTROL_EXIT && control->target < program->exit_count && program->exits[control->target].skip == BUSTER_CHECK_NONE)
+        {
+            const CheckProgramExit* exit = program->exits + control->target;
+            cleanup_calls += (uint64_t)program->chains[exit->first].depth - program->chains[exit->last].depth + 1;
+        }
+    }
     const uint64_t abi_capacity64 = (uint64_t)nodes * 3 + program->body_count + errno_calls + asm_statements + lowered->initializers.count + limb_room.calls +
-                                    lane_calls + lowered->initializers.extra_calls + 1;
+                                    lane_calls + lowered->initializers.extra_calls + cleanup_calls + 1;
     const uint64_t argument_capacity64 = input != 0 ? (uint64_t)input->graph.argument_count + count + (uint64_t)nodes * 4 + errno_calls + asm_statements +
-                                                    (uint64_t)lowered->initializers.count * 3 + limb_room.arguments + lane_arguments + lowered->initializers.extra_arguments + 1 : 0;
+                                                    (uint64_t)lowered->initializers.count * 3 + limb_room.arguments + lane_arguments + lowered->initializers.extra_arguments + cleanup_calls + 1 : 0;
     const uint64_t pool_base = (uint64_t)program->symbol_count + lowered->helpers.count + 1;
     const uint64_t provisional64 = pool_base + lowered->initializers.count;
     lowered->initializers.symbol_base = provisional64 < UINT32_MAX ? (SymbolId)pool_base : 0;
@@ -14512,6 +14657,7 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
 #define BUSTER_CHECK_LOWER_TABLE(field, type, length) shared->field = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, type, length) : 0; valid &= shared->field != 0
     BUSTER_CHECK_LOWER_TABLE(local_map, uint32_t, (uint64_t)count + 1);
     BUSTER_CHECK_LOWER_TABLE(switch_locals, uint32_t, (uint64_t)count + 1);
+    BUSTER_CHECK_LOWER_TABLE(chain_labels, uint32_t, (uint64_t)input->cleanup_count + 1);
     BUSTER_CHECK_LOWER_TABLE(vla_identities, uint32_t, input->vla_count != 0 ? (uint64_t)count + 1 : 1);
     BUSTER_CHECK_LOWER_TABLE(save_locals, uint32_t, input->vla_count != 0 ? (uint64_t)count + 1 : 1);
     BUSTER_CHECK_LOWER_TABLE(initializer_declarations, uint32_t, (uint64_t)nodes + 1);
@@ -14787,6 +14933,7 @@ static bool check_lower_writer_begin(CheckLowerWriter* writer, CheckLowerAbi* ab
         .type_count = shared->type_count,
         .local_map = shared->local_map,
         .switch_locals = shared->switch_locals,
+        .chain_labels = shared->chain_labels,
         .vla_identities = shared->vla_identities,
         .save_locals = shared->save_locals,
         .initializer_declarations = shared->initializer_declarations,
@@ -15013,6 +15160,13 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         writer->x87_constants[1] = 0;
         memset(writer->extent_locals, 0xff, ((uint64_t)input->vla_count + 1) * sizeof(uint32_t));
         memset(writer->labels, 0xff, ((uint64_t)body.count + 1) * sizeof(uint32_t));
+        // Its cleanups' chains (#1370): an entry label past each fall's store, which the exits jump to.
+        writer->chain_slot = BUSTER_CHECK_NONE;
+        writer->chain_skip = 0;
+        for (uint32_t r = body.cleanup_first; body.chains && r < body.cleanup_first + body.cleanup_count; r += 1)
+        {
+            writer->chain_labels[r] = (program->chains[r].flags & BUSTER_CHECK_CHAIN_FALL_STORE) != 0 ? check_lower_label(writer) : BUSTER_CHECK_NONE;
+        }
         if (writer->track)
         {
             memset(writer->label_heads, 0xff, ((uint64_t)body.count + 1) * sizeof(uint32_t));

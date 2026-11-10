@@ -3531,14 +3531,46 @@ What the lowering covers past scalars (#145's programs):
   the innermost cleanup's scope that holds the goto. The jumps' errors are
   clang's messages, for variable-length arrays too. A body read on a lane
   that declares such a variable leaves the unit to source order.
-  The control stream calls the function at each exit from the scope
-  (`CHECK_CONTROL_CLEANUP`, whose target is the record), innermost first and
-  in reverse declaration order, before the exit's `STACK_RESTORE`: the
+  The function runs at each exit from the scope, innermost first and in
+  reverse declaration order, before the exit's `STACK_RESTORE`: the
   block's end, the `break`, `continue` or `goto` that leaves it (a loop's or
   switch's token stands for where a break or a continue goes, so that a `for`
   statement's own variables' cleanups run once, after its end's label), the
   function's end, and a statement expression's end, after its value is kept
-  (`CheckProgramRegion.cleanups`). A `return` computes its value first
+  (`CheckProgramRegion.cleanups`). Each variable's call is written once
+  (#1370), as clang's is: `CHECK_CONTROL_CLEANUP` (whose target is the record)
+  at its scope's end. An exit of the function's statements is one
+  `CHECK_CONTROL_EXIT` instead of a run of calls, which names its first and
+  last record (`CheckProgramExit`); its tail (its restore, lifetime ends and
+  jump, or its return) follows it, so every walk of the controls sees the
+  paths it saw with the calls in place. `check_program_chains` plans each
+  body's chains in linear passes (`CheckProgramChain`): the lowering jumps
+  from the exit to its first record's call, and after each call a dispatch
+  goes on to the destinations that stop there (exits with the same last
+  record and the same tail share one, whose tail the first of them keeps in
+  place; a lone jump's is its target), to the parent's call for exits that go
+  on, and to the next control. Only a dispatch of two continuations or more
+  tests an I32 destination slot, which every exit and fall that crosses one
+  stores first (a fall 0, at its run's head, past which exits enter): the
+  issue's function of early returns stores none, and its calls are its
+  variables' count. An exit from a statement expression, through a record
+  whose scope's end a constant switch's kept statements leave out, or whose
+  jump no path reaches keeps its run in place. Code and call rows grow
+  linearly in exits plus cleanups, where they grew as their product (85
+  cleanups with an early return each made 3,825 calls, and 86 exhausted the
+  call rows). An exit keeps only the innermost record whose scope holds its
+  target; the planner finds its last record in one preorder sweep, and a
+  scope's end and `check_control_cleanup_at` skip closed scopes whole, so the
+  planning is linear too. On the 9700X, 10,000 cleanups with an early return
+  each compile in 36 ms by Tier 0 (`-c`), and sqlite3.c's compile is
+  unchanged ([the measurements](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/cleanup-chains-1370-2026-11-09)).
+  The planner stays scalar. It runs only for a body with an exit through a
+  cleanup, which no sqlite3.c body has, and it is a few linear passes over
+  that body's records and exits: 23–46 ms of check-program at 10,000–20,000
+  cleanups, where the parse and the input take as much again. Tier 1 refuses
+  such a body past about 800 cleanups (`cause=cfg-allocation`). Main refuses
+  the same control flow written with gotos alike: #1384's dense matrices.
+  A `return` computes its value first
   (`CHECK_CONTROL_RESULT`: into a temporary of its class, the result object,
   or for a struct or union its bytes copied into a frame object of their own
   or where the hidden pointer points), then the cleanups, then returns it
@@ -3561,7 +3593,10 @@ What the lowering covers past scalars (#145's programs):
   statement expressions, switches and the functions' kinds natively against
   clang -O0's build on both paths; `test-checker-driver` compares every error
   of 39 fixtures with clang's, its place and its message, on both paths
-  (`c_check_cleanup_driver_test.c`: the jumps' notes aren't the driver's);
+  (`c_check_cleanup_driver_test.c`: the jumps' notes aren't the driver's),
+  and builds a program of every kind of path through a chain and the issue's
+  four shapes of 100 cleanups by both tiers on both paths, run against clang
+  -O0's build, and checks that 600 cleanups' object is linear in 300's;
   the deferred reader's fixtures and the selection's take a cleanup too.
 - **A block's objects' lifetimes**, for Tier 1's frame (#177, the C driver's
   `--tier1`, `CheckProgramOptions.lifetimes`): `CHECK_CONTROL_LIFETIME` entries
