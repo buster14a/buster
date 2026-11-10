@@ -34,6 +34,15 @@ host_report()
     printf 'cpu model: %s\n' "${value:-unavailable}"
     value=$(grep -m1 '^flags[[:space:]]*:' /proc/cpuinfo 2>/dev/null | sed 's/^[^:]*:[[:space:]]*//')
     printf 'cpu flags: %s\n' "${value:-unavailable}"
+    # The CPUs, the threads of a core and the memory set what build.sh runs at once, and transparent huge pages what a
+    # read of untouched .bss costs: LeakSanitizer reads all of it as every process exits (#2030).
+    printf 'cpus: %s\n' "$(nproc 2>/dev/null || echo unavailable)"
+    value=$(cat /sys/devices/system/cpu/cpu0/topology/thread_siblings_list 2>/dev/null)
+    printf "cpu 0's core's threads: %s\n" "${value:-unavailable}"
+    value=$(grep -m1 '^MemTotal:' /proc/meminfo 2>/dev/null | sed 's/^[^:]*:[[:space:]]*//')
+    printf 'memory: %s\n' "${value:-unavailable}"
+    value=$(cat /sys/kernel/mm/transparent_hugepage/enabled 2>/dev/null)
+    printf 'transparent huge pages: %s\n' "${value:-unavailable}"
     for name in Seccomp Seccomp_filters NoNewPrivs; do
         value=$(grep -m1 "^$name:" /proc/self/status 2>/dev/null | sed 's/^[^:]*:[[:space:]]*//')
         printf '%s: %s\n' "$name" "${value:-unavailable}"

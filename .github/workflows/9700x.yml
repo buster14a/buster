@@ -359,7 +359,9 @@ jobs:
         run: |
           oracle="$RUNNER_TEMP/preprocessor-pragma-oracle"
           bash tools/build-preprocessor-pragma-oracle.sh "$oracle"
-          ./build.sh --config Release
+          # A compile per CPU: build.sh's default, one per physical core, is two on these runners' two cores of two
+          # threads, which left the address row's build waiting on CPU (#2030).
+          ./build.sh --config Release --jobs "$(nproc)"
           # The steps below run the Release configuration's own executable (BUSTER_COMPILER); build/compiler, the
           # compatibility path, is that same file, and the only executable build.sh leaves in build/ itself.
           compiler=$(./build.sh print-output --config Release)
