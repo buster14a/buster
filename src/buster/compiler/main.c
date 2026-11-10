@@ -2473,6 +2473,8 @@ static __attribute__((noinline)) int main_source_command(int argc, char** argv)
 #if BUSTER_FUZZ_AVAILABLE
 #include BUSTER_FUZZ_ENTRY
 extern int LLVMFuzzerRunDriver(int* argc, char*** argv, int (*callback)(const uint8_t*, size_t));
+// Weak: present whenever LeakSanitizer is linked (the fuzz builds' combined `address` mode), null otherwise.
+extern int __lsan_do_recoverable_leak_check(void) __attribute__((weak));
 #endif
 static int main_driver(int argc, char** argv)
 {
@@ -2586,6 +2588,16 @@ int main(int argc, char** argv)
     // signal handlers, argument parsing, crash artifacts and replay protocol.
     if (argc >= 2 && strcmp(argv[1], "--fuzz") == 0)
     {
+        // LeakSanitizer probes ptrace once per process, before its first leak scan, by forking a child and waiting
+        // for it; LLVM 23.1.4's wait neither retries EINTR nor checks its result. libFuzzer's -timeout arms a
+        // repeating SIGALRM without SA_RESTART, so an alarm during that wait reads an uninitialized status as a
+        // child killed by a signal and reports "ptrace appears to be blocked" (#2060). Scanning once here, before
+        // the engine arms its timer, runs that probe with no timer to interrupt it. A leak it finds is still
+        // reported and still fails the hosted audit.
+        if (__lsan_do_recoverable_leak_check)
+        {
+            __lsan_do_recoverable_leak_check();
+        }
         argv[1] = argv[0];
         argc -= 1;
         argv += 1;

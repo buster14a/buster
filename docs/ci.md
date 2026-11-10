@@ -710,6 +710,12 @@ runtime. `--fuzz` hands control to `LLVMFuzzerRunDriver` before ordinary command
 dispatch, preserving engine options, coverage, mutation, crash artifacts,
 minimization and replay. Other compiler commands continue to work in that
 executable. A missing runtime or incompatible TSan configuration is an error.
+Where LeakSanitizer is linked, `--fuzz` first runs one recoverable leak scan,
+before the engine arms its `-timeout` alarm. LeakSanitizer's one-time ptrace
+probe forks and waits without retrying `EINTR`, and libFuzzer's `SIGALRM` has
+no `SA_RESTART`, so an alarm during that wait printed a false "ptrace appears
+to be blocked" report that failed the audit (#2060). A leak the early scan
+finds is still reported and still fails the job.
 
 The default original callback in `src/buster/compiler/fuzz.c` accepts inputs up
 to 64 KiB. It compares scalar/native lexer output and exercises preprocessing,
