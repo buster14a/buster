@@ -1730,7 +1730,11 @@ argument, as clang's code doesn't; a folded address still evaluates both, as
 clang computes it at run time. A local array's address is no constant: the
 call runs, and gives what the fold would, since a frame places a declaration at
 least as aligned as clang declares it (#978's large arrays). A source past 128
-bits, which clang takes, is refused by name.
+bits (#1447) is a runtime action, its constant alignment checked as any
+source's (at least 1 and a power of 2; its maximum, 2 to its width less 1, is
+past every alignment of 128 bits). An alignment past 128 bits, which clang
+takes, is refused by name: clang checks a constant one, which the checker can't
+tell from a runtime one until its constants hold more than 128 bits.
 
 `c_builtin_misc_lower.c`'s `cbuiltin_misc_align` computes them as clang's code
 does, from the bit builtins' descriptors (a pointer's 64 bits): the source
@@ -1739,6 +1743,16 @@ the mask the alignment less 1 in that width (all ones for an alignment that
 truncates to 0, as a char's runtime 256 does), and a source of 65 to 128 bits
 limb by limb, with the mask's borrow and the sum's carry crossing between the
 limbs.
+
+A source past 128 bits goes limb by limb in the lowering
+(`check_lower_align_limbs`): its bits zero-extended from its width, the
+alignment's zero-extended or truncated to it, the mask its value less 1 in
+that width by a borrow chain, `align_up` `(x + mask) & ~mask` by a carry chain,
+`align_down` `x & ~mask`, each a frame object of the source's type, and
+`is_aligned` whether `(x & mask)`'s limbs are all zero. `test-checker
+--program-align`'s `align-bit-int-sources-past-128-bits` program runs them
+against clang -O0's build, and its source fixtures check the constant
+alignments of such sources and the refusals of wider alignments.
 
 `test-check-builtins-misc` checks the folds, the alignments' rules, the
 operands' types, the result types and the address folds, and
