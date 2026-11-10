@@ -135,6 +135,14 @@ endfunction()
 # the parts' code-generation options (the unit's -march and debug information).
 function(buster_codegen_unit name)
     set(scripts "${CMAKE_CURRENT_FUNCTION_LIST_DIR}")
+    # The link uses every unit's object, and CMake makes a command whose output the link uses wait for all of them as
+    # well (implicit order-only dependencies): the backend's parts, ready at 43.7 s on the 9700X, waited for the
+    # checker's bitcode until 58.2 s and then competed with the checker's parts. These commands name every input they
+    # read, so with CMake 3.27 and later they depend on those alone.
+    set(explicit "")
+    if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.27)
+        set(explicit DEPENDS_EXPLICIT_ONLY)
+    endif()
     set(directory "${CMAKE_BINARY_DIR}/$<CONFIG>/codegen/${name}")
     set(parts "")
     foreach(part RANGE ${BUSTER_CODEGEN_PARTITIONS})
@@ -151,6 +159,7 @@ function(buster_codegen_unit name)
         DEPENDS "$<TARGET_OBJECTS:buster_${name}>" "${BUSTER_CODEGEN_SPLIT}" "${BUSTER_CODEGEN_NM}"
             "${scripts}/BusterCodegenSplit.cmake"
         COMMENT "Partitioning ${name}'s optimized IR"
+        ${explicit}
         VERBATIM)
     # The target attaches the split to the build, which then knows the parts' rule; the parts' own commands depend on
     # their bitcode alone.
@@ -172,6 +181,7 @@ function(buster_codegen_unit name)
             DEPENDS "${directory}/part${part}.bc"
             COMMENT "Generating ${name}'s native part ${part}"
             COMMAND_EXPAND_LISTS
+            ${explicit}
             VERBATIM)
         list(APPEND objects "${object}")
     endforeach()
@@ -183,5 +193,6 @@ function(buster_codegen_unit name)
         DEPENDS ${objects} "${exports}" "${locals}" "${BUSTER_CODEGEN_LLD}" "${BUSTER_CODEGEN_OBJCOPY}" "${BUSTER_CODEGEN_NM}"
             "${BUSTER_CODEGEN_READELF}" "${scripts}/BusterCodegenMerge.cmake"
         COMMENT "Combining ${name}'s native parts"
+        ${explicit}
         VERBATIM)
 endfunction()
