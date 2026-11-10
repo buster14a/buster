@@ -3231,19 +3231,38 @@ for the `long double` and `_Float128` roundings, `llvm.copysign` and
 `llvm.fabs`, `llvm.fma`, `llvm.frexp`, `llvm.modf` and `llvm.abs`. On x86-64
 most come back as calls of the same library functions; the rest (`fabs`,
 `copysign`, `abs`, `maxnum` and `minnum` of `float` and `double`) are computed
-inline. The library's functions give the same values but `fmax`'s, `fmin`'s
-and their `_num` kin's of `float` and `double`: clang's code of `llvm.maxnum` and
-`llvm.minnum`, `maxsd` or `minsd` beside a select of the second operand where
-the first is a NaN, gives its first operand of two zeros and the other operand
-of a signaling NaN, where glibc's `fmax` and `fmin` give the second zero and a
-quiet NaN; and its code of `llvm.maximumnum` and `llvm.minimumnum` gives a
-signaling first operand unquieted where the other is a NaN too, where glibc's
-`fmaximum_num` and `fminimum_num` give a quiet NaN. C allows both (F.10.9.2 leaves the zero's sign open, and a
-signaling NaN's result), and the plain calls of `fmax` and `fmin` (#927's)
-differ so too; computing them as clang's code does waits for rows of those
-instructions at every target (#775). `test-checker`'s programs compare the rest
-bit for bit, on the harness's signaling and quiet NaNs, zeros of both signs,
-infinities and subnormals among them.
+inline, and so does this lowering compute `fmax`, `fmin`, `fmaximum_num` and
+`fminimum_num` of `float` and `double` (#967), as `__builtin_` calls and as
+plain calls of the unit's declarations that clang makes the builtin (the
+reader's mark, `cbuiltin_library_plain_folds`' entries of no fold, which
+`check_lower_call` takes, a musttail return's too, as clang's code computes
+it inline and returns it; such a call references no function, so that a
+program links without libm as clang's does; but a declaration with an asm
+label, which clang's code calls by its label, `check_program_call_extreme`;
+`-fno-builtin` and `-fno-builtin-NAME` keep the call, and
+`test-checker-driver`'s library runs check all three; a definition's
+`no_builtin` is #1958's): `__builtin_elementwise_maxnum`'s
+rows and its kin's
+(`check_vector_floating_scalar_row`), which glibc's functions would not match.
+clang's code of `llvm.maxnum` and `llvm.minnum` gives its first operand of two
+zeros and the other operand of a signaling NaN, where glibc's `fmax` and `fmin`
+give the second zero and a quiet NaN; and its code of `llvm.maximumnum` and
+`llvm.minimumnum` gives a signaling first operand unquieted where the other is a
+NaN too, where glibc's give a quiet NaN (C allows both: F.10.9.2 leaves the
+zero's sign open, and a signaling NaN's result). The rows are clang's
+instructions at each target where a row holds them: AVX-512's masked moves
+(`VCMPSD` into k1, `VMOVSD`), AVX's `VBLENDVPD` by `VCMPUNORDSD`, and SSE2's
+`maxnum` select (`MAXSD`, `CMPUNORDSD`, `PAND`, `PANDN`, `POR`), x86-64-v2's
+too (its `BLENDVPD` reads xmm0, which no row names). SSE2's `maximumnum` takes
+more records than a row has, so it is two rows of the same bits
+(`check_vector_extreme_scalar_rows`): `MAXSD` of x and y, its sign's mask all
+ones where x is a NaN (so that `MAXSD`'s y passes), then x where y is a NaN.
+`test-checker`'s programs compare them and the rest bit for bit, on the
+harness's signaling and quiet NaNs, zeros of both signs, infinities and
+subnormals among them, at x86-64, x86-64-v2, x86-64-v3 and x86-64-v4
+(`library-extremes-of-special-values`), and `test-checker-driver`'s
+`tier1-extremes` fixture runs them by `--tier1` at x86-64, x86-64-v3 and
+x86-64-v4.
 
 **Folds.** The rows with attribute `E` that clang's constant evaluator folds,
 this folds too, in constant contexts (static initializers, `_Static_assert`,

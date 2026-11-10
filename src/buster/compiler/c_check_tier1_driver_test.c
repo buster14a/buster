@@ -3576,6 +3576,109 @@ static void check_test_driver_tier1_overflow(CheckTest* test, const char* clang,
                                   check_test_tier1_overflow_other_source, "-march=x86-64", true, 0);
 }
 
+// The floating extremes' fixture (#967): fmax, fmin, fmaximum_num and fminimum_num of float and double, as __builtin_X's
+// and plain calls of <math.h>'s declarations, which clang -O0's code computes inline (llvm.maxnum and its kin: a row, or
+// two rows of x86-64's maximumnum and minimumnum), alone, chained, and in a loop whose values stay live across them; the
+// other unit (clang -O2's) passes zeros of both signs, infinities, quiet and signaling NaNs of both signs and subnormals,
+// and hashes every result's bits.
+static const char check_test_tier1_extremes_header[] =
+    "double e_max(double a, double b);\n"
+    "double e_min(double a, double b);\n"
+    "double e_maximum(double a, double b);\n"
+    "double e_minimum(double a, double b);\n"
+    "float e_maxf(float a, float b);\n"
+    "float e_minf(float a, float b);\n"
+    "float e_maximumf(float a, float b);\n"
+    "float e_minimumf(float a, float b);\n"
+    "double e_chain(double a, double b, float c, float d);\n"
+    "double e_fold(const double* p, unsigned n);\n";
+
+static const char check_test_tier1_extremes_source[] =
+    "#define _GNU_SOURCE\n"
+    "#include <math.h>\n"
+    "#include \"tier1-extremes.h\"\n"
+    "double e_max(double a, double b) { return fmax(a, b); }\n"
+    "double e_min(double a, double b) { return __builtin_fmin(a, b); }\n"
+    "double e_maximum(double a, double b) { return fmaximum_num(a, b); }\n"
+    "double e_minimum(double a, double b) { return __builtin_fminimum_num(a, b); }\n"
+    "float e_maxf(float a, float b) { return __builtin_fmaxf(a, b); }\n"
+    "float e_minf(float a, float b) { return fminf(a, b); }\n"
+    "float e_maximumf(float a, float b) { return __builtin_fmaximum_numf(a, b); }\n"
+    "float e_minimumf(float a, float b) { return fminimum_numf(a, b); }\n"
+    "double e_chain(double a, double b, float c, float d)\n"
+    "{\n"
+    "    double x = fmax(a, b), y = fminimum_num(b, a);\n"
+    "    float z = fmaximum_numf(c, d), w = __builtin_fminf(d, c);\n"
+    "    return fmaximum_num(fmin(fmaximum_num(x, (double)z), __builtin_fmax(y, (double)w)), fminimum_num((double)z, x));\n"
+    "}\n"
+    "double e_fold(const double* p, unsigned n)\n"
+    "{\n"
+    "    double high = p[0], low = p[0], high_number = p[0], low_number = p[0];\n"
+    "    for (unsigned i = 1; i < n; i += 1)\n"
+    "    {\n"
+    "        high = fmax(high, p[i]);\n"
+    "        low = __builtin_fmin(p[i], low);\n"
+    "        high_number = __builtin_fmaximum_num(high_number, p[i]);\n"
+    "        low_number = fminimum_num(p[i], low_number);\n"
+    "    }\n"
+    "    return high * 3 + low * 5 + high_number * 7 + low_number * 11;\n"
+    "}\n";
+
+static const char check_test_tier1_extremes_other_source[] =
+    "#include <stdio.h>\n"
+    "#include <string.h>\n"
+    "#include \"tier1-extremes.h\"\n"
+    "static const unsigned long long doubles[] = { 0, 0x8000000000000000ull, 0x7ff0000000000000ull, 0xfff0000000000000ull, 0x7ff8000000000001ull,\n"
+    "    0xfff8000000000002ull, 0x7ff0000000000003ull, 0xfff4000000000000ull, 1, 0x8000000000000001ull, 0x3ff8000000000000ull, 0xc000000000000000ull };\n"
+    "static const unsigned floats[] = { 0, 0x80000000u, 0x7f800000u, 0xff800000u, 0x7fc00001u, 0xffc00002u, 0x7f800003u, 0xffa00000u, 1, 0x80000001u,\n"
+    "    0x3fc00000u, 0xc0000000u };\n"
+    "static double d(unsigned i) { double v; memcpy(&v, &doubles[i % 12], 8); return v; }\n"
+    "static float f(unsigned i) { float v; memcpy(&v, &floats[i % 12], 4); return v; }\n"
+    "static unsigned long long hd(unsigned long long h, double v) { unsigned long long b; memcpy(&b, &v, 8); return (h ^ b) * 1099511628211ull; }\n"
+    "static unsigned long long hf(unsigned long long h, float v) { unsigned b; memcpy(&b, &v, 4); return (h ^ b) * 1099511628211ull; }\n"
+    "int main(void)\n"
+    "{\n"
+    "    unsigned long long h = 14695981039346656037ull;\n"
+    "    double p[12];\n"
+    "    for (unsigned i = 0; i < 12; i += 1)\n"
+    "    {\n"
+    "        p[i] = d(i * 5 + 3);\n"
+    "        for (unsigned j = 0; j < 12; j += 1)\n"
+    "        {\n"
+    "            h = hd(h, e_max(d(i), d(j)));\n"
+    "            h = hd(h, e_min(d(i), d(j)));\n"
+    "            h = hd(h, e_maximum(d(i), d(j)));\n"
+    "            h = hd(h, e_minimum(d(i), d(j)));\n"
+    "            h = hf(h, e_maxf(f(i), f(j)));\n"
+    "            h = hf(h, e_minf(f(i), f(j)));\n"
+    "            h = hf(h, e_maximumf(f(i), f(j)));\n"
+    "            h = hf(h, e_minimumf(f(i), f(j)));\n"
+    "            h = hd(h, e_chain(d(i), d(j), f(j), f(i)));\n"
+    "        }\n"
+    "        if (i < 2) printf(\"%a %a %a %a\\n\", e_max(d(i), 1.5), e_minimum(-0.0, d(i)), (double)e_maxf(f(i), -2.0f), e_chain(d(i), 2.5, 1.0f, f(i)));\n"
+    "    }\n"
+    "    for (unsigned n = 1; n <= 12; n += 1) h = hd(h, e_fold(p, n));\n"
+    "    printf(\"%llx\\n\", h);\n"
+    "    return 0;\n"
+    "}\n";
+
+// Its builds at x86-64's baseline (SSE2's sequences, two rows for maximumnum and minimumnum), x86-64-v3's (AVX's
+// VBLENDVPD) and x86-64-v4's (AVX-512's masked moves), each run where the host has the target's features.
+static void check_test_driver_tier1_extremes(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const char* const marches[] = { "-march=x86-64", "-march=x86-64-v3", "-march=x86-64-v4" };
+    for (uint32_t t = 0; t < BUSTER_ARRAY_LENGTH(marches); t += 1)
+    {
+        const char* level = marches[t] + strlen("-march=");
+        X86Target target = { 0 };
+        const bool parsed = x86_target_parse(level, (uint32_t)strlen(level), &target);
+        const bool host = parsed && (x86_target_native().features & target.features) == target.features;
+        check_test_expect(test, parsed, "the floating extremes' fixture's target");
+        check_test_driver_tier1_units(test, clang, executable, directory, "tier1-extremes", "floating extremes'", check_test_tier1_extremes_header,
+                                      check_test_tier1_extremes_source, check_test_tier1_extremes_other_source, marches[t], host, 0);
+    }
+}
+
 // The wide vectors' fixture (#1624): GNU C's 32- and 64-byte vectors at targets whose registers are narrower (x86-64's
 // and x86-64-v2's 16 bytes, x86-64-v3's 32), which ir_vector_split.c splits into the target's widest: the scalar host's
 // emulations' shape (host_scalar_vectors.h: a union of a vector and its lanes, the lanes computed, the vector returned),
