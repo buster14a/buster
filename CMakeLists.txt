@@ -223,7 +223,7 @@ foreach(variant IN LISTS lexer_variants)
     endif()
 endforeach()
 
-# The link of `target`, an executable of objects: fixed-address (-no-pie) but for the sanitizers' PIEs, by the
+# The link of `target`, an executable of objects: fixed-address (-no-pie) but for TSan's and MSan's PIEs, by the
 # selected linker. As a PIE, its 10.6 MB of pointer tables (.data.rel.ro) took 366,684 relative relocations at every
 # start, whose 2,800 page faults made a run that does nothing take 8 to 13 ms, where linked at its address it takes
 # 1.5 ms with 113 (#86: link-foreign and the tests run it as a process of its own, and a small link's work is 0.8 ms).

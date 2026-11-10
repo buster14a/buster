@@ -1968,7 +1968,7 @@ static void check_test_driver_tier1_labels(CheckTest* test, const char* clang, c
     check_test_expect(test, ran, "clang's build of the labels fixture runs");
     check_test_expect(test, ran && tier0_built && check_test_driver_capture(tier0, tier0_output, sizeof(tier0_output)) && strcmp(tier0_output, expected) == 0,
                       "Tier 0's build of the labels fixture prints clang's build's output");
-    // Sanitizer PIE executables aren't baked. The compiler children initialize their own tables,
+    // TSan's and MSan's PIE executables aren't baked. The compiler children initialize their own tables,
     // but the ELF object oracle below also reads x86_effects in this test process (#1829).
     const bool semantics = (x86_semantics_initialized || x86_semantics_initialize()) &&
                            x86_effects_control(x86_effects(X86_FORM_JMP_RM64)) == BUSTER_X86_CONTROL_JUMP &&
