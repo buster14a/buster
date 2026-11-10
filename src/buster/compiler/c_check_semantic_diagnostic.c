@@ -330,7 +330,9 @@ static const char* check_semantic_input(const Parser* parser, Preprocessor* pp, 
     }
     else if (token < count && (report->message == CHECK_INPUT_INCOMPLETE_OBJECT || report->message == CHECK_INPUT_INCOMPLETE_TENTATIVE))
     {
-        const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, input->declared_types[token], 0);
+        // The report's type where it has one: an invalid declaration's own is a stand-in (#1447, check_input_variable_recover).
+        const TypeId incomplete = report->type != 0 ? report->type : input->declared_types[token];
+        const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, incomplete, 0);
         result = type.length == 0 ? NULL : report->message == CHECK_INPUT_INCOMPLETE_TENTATIVE ?
                  check_warning_text(scratch, "tentative definition has type %.*s that is never completed", (int)type.length, type.pointer) :
                  check_warning_text(scratch, "variable has incomplete type %.*s", (int)type.length, type.pointer);
