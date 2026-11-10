@@ -654,6 +654,15 @@ the two units (768 with fourteen parts), with `.eh_frame` 16 bytes longer. Betwe
 and the next part's first, the linker's padding is `int3` where the assembler's
 was `nop`; neither is executed.
 
+On the 9700X, against the same tree compiled whole (#2056's merged head
+`cd920bf1`), a clean build took 72.8 s against 100.3 s, and editing `main.c`,
+`c_check_input.c` or `tier0.c` rebuilt in 69.0, 62.7 and 66.0 s against 96.2,
+90.5 and 93.0 s (medians of 3). CPU time rose about 11%: every part reads the
+module's declarations again. The produced compilers ran a `-c` of `sqlite3.c`
+and a `-fsyntax-only` of the checker's unit within ±0.33% of each other, as
+noise. The [record](https://github.com/buster14a/buster-performance/tree/dc6be30185f2c22b8944f24a02c092760b96cf7a/docs/measurements/build-parallel-native-2026-11-10)
+has the runs, scripts and the comparison of the two executables' code.
+
 `BUSTER_PARALLEL_CODEGEN` is `auto` by default: the build uses the parts
 wherever its flags allow and the tools are there, and otherwise says why in the
 configure step's `parallel native generation` line and compiles the units
