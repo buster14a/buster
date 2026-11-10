@@ -467,7 +467,8 @@ static bool check_test_unknown_attribute_lines(const char* text, char* lines, si
 
 // The diagnostic lines (errors, warnings and notes) of a compiler's output `text`, in order, into `lines`; false where they
 // don't fit. Search each bounded line alone: rescanning the whole remaining output for an absent marker is quadratic
-// in the number of lines (for example, #1443's 200,000-line diagnostic fixture).
+// in the number of lines (for example, #1443's 200,000-line diagnostic fixture). Find each line's end within the text
+// too (memchr): strchr on the rest reads all of it per line under AddressSanitizer's strict string checks (#2030).
 static bool check_test_diagnostic_lines(const char* text, char* lines, size_t capacity)
 {
     size_t length = 0;
@@ -476,10 +477,11 @@ static bool check_test_diagnostic_lines(const char* text, char* lines, size_t ca
     {
         lines[0] = 0;
     }
-    for (const char* line = text; fits && line != NULL && *line != 0;)
+    const char* stop = text != NULL ? text + strlen(text) : NULL;
+    for (const char* line = text; fits && line != NULL && line < stop;)
     {
-        const char* end = strchr(line, '\n');
-        const size_t size = end != NULL ? (size_t)(end - line) : strlen(line);
+        const char* end = memchr(line, '\n', (size_t)(stop - line));
+        const size_t size = end != NULL ? (size_t)(end - line) : (size_t)(stop - line);
         const bool kept = memmem(line, size, ": error: ", 9) != NULL || memmem(line, size, ": warning: ", 11) != NULL || memmem(line, size, ": note: ", 8) != NULL;
         fits = !kept || size + 1 < capacity - length;
         if (kept && fits)
