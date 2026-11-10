@@ -1584,6 +1584,11 @@ static void check_test_driver_attribute_arguments(CheckTest* test, const char* c
 // refused argument alone, the C23 parser's error of the attribute before a dropped standard one, the warning options and
 // pragmas, and the controls clang takes: the simple escapes, UCNs, an argument read as an expression, asm labels and
 // statements, a C23 attribute clang doesn't know.
+// Nested #pragma clang diagnostic pushes for check_test_driver_unevaluated_strings' units (#1934).
+#define BUSTER_TEST_PUSH1 "#pragma clang diagnostic push\n"
+#define BUSTER_TEST_PUSH8 BUSTER_TEST_PUSH1 BUSTER_TEST_PUSH1 BUSTER_TEST_PUSH1 BUSTER_TEST_PUSH1 BUSTER_TEST_PUSH1 BUSTER_TEST_PUSH1 BUSTER_TEST_PUSH1 BUSTER_TEST_PUSH1
+#define BUSTER_TEST_PUSH64 BUSTER_TEST_PUSH8 BUSTER_TEST_PUSH8 BUSTER_TEST_PUSH8 BUSTER_TEST_PUSH8 BUSTER_TEST_PUSH8 BUSTER_TEST_PUSH8 BUSTER_TEST_PUSH8 BUSTER_TEST_PUSH8
+
 static void check_test_driver_unevaluated_strings(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     typedef struct CheckUnevaluatedUnit CheckUnevaluatedUnit;
@@ -1592,6 +1597,8 @@ static void check_test_driver_unevaluated_strings(CheckTest* test, const char* c
         const char* source;
         const char* standard;
         const char* option;
+        // A system header's text, <h.h> in a directory -isystem names (#1934), or null.
+        const char* header;
     };
     static const CheckUnevaluatedUnit units[] = {
         // The issue's probes.
@@ -1881,19 +1888,97 @@ static void check_test_driver_unevaluated_strings(CheckTest* test, const char* c
         { "_Static_assert(1, \"\\N{DIGIT ZERO}\");\n", "-std=gnu17", NULL },
         { "__attribute__((deprecated(\"\\N{latin small letter a}\"))) void f(void);\n", "-std=gnu17", NULL },
         { "int x __asm__(\"a\\N{NOT A NAME}\");\n", "-std=gnu17", NULL },
+        // A bit-precise suffix's letters in one case (#1933): a mixed-case one is an invalid suffix, in #if as in an expression.
+        { "#if 1wB\n#endif\n#if 1Wb\n#endif\n#if 1uWb\n#endif\n#if 1WB + 1uwb\n#endif\nint x;\nint y = 1wB;\n", "-std=gnu23", NULL },
+        // A bit-precise constant's suffix before C23 (#1447): -Wc23-extensions' warning at the constant, once though the
+        // constant evaluator reads it again, through a macro, in each context that reads a constant, and by the option and
+        // pragmas; none in C23.
+        { "int a = 5wb;\nunsigned b = 7uwb + 3WBU;\n", "-std=gnu17", NULL },
+        { "int a = 5wb;\nunsigned b = 7uwb + 3WBU;\n", "-std=gnu23", NULL },
+        { "int a = 5wb;\n", "-std=gnu17", "-pedantic" },
+        { "int a = 5wb;\n", "-std=gnu17", "-pedantic-errors" },
+        { "int a = 5wb;\n", "-std=gnu17", "-Wno-c23-extensions" },
+        { "int a = 5wb;\n", "-std=gnu17", "-Wno-c2x-extensions" },
+        { "int a = 5wb;\n", "-std=gnu17", "-Werror=c23-extensions" },
+        { "#define M 2wb\nint a = M;\n", "-std=gnu17", NULL },
+        { "enum { E = 1wb };\nint a[2wb];\n_Static_assert(3wb, \"\");\nstruct S { int f : 4wb; };\n", "-std=gnu17", NULL },
+        { "void f(int x) { switch (x) { case 1wb: break; } (void)sizeof(9wb); (void)(0 ? 5wb : 6uwb); }\n", "-std=gnu17", NULL },
+        { "#pragma clang diagnostic ignored \"-Wc23-extensions\"\nint a = 5wb;\n", "-std=gnu17", NULL },
+        { "int a = 5wb;\n#pragma clang diagnostic error \"-Wc23-extensions\"\nint b = 6wb;\n", "-std=gnu17", NULL },
+        { "long a = 0x7fwb;\nlong b = 017wb;\nunsigned c = 0b1uwb;\n", "-std=gnu17", NULL },
+        { "long a = 1'0wb;\n", "-std=gnu23", NULL },
+        // Before a syntax error, from the driver's scan of what the parse left unchecked (check_driver_bit_int_suffix).
+        { "int a = 5wb;\nint b = ;\n", "-std=gnu17", NULL },
+        { "int a = 5wb;\nint b = ;\n", "-std=gnu17", "-Werror=c23-extensions" },
+        { "int a = 5wb;\nint b = ;\n", "-std=gnu17", "-Wno-c23-extensions" },
+        // In #if, the preprocessor's, with -Wc23-extensions' options and pragmas: off, promoted by -Werror, -Werror= and
+        // -pedantic-errors, silenced by -w; a pragma's mapping over the command line's, and a push's restored by its pop.
+        { "#if 1wb\n#endif\nint x;\n", "-std=gnu17", NULL },
+        { "#if 1wb\n#endif\nint x;\n", "-std=gnu23", NULL },
+        { "#if 1wb\n#endif\nint x;\n", "-std=gnu17", "-Wno-c23-extensions" },
+        { "#if 1wb\n#endif\nint x;\n", "-std=gnu17", "-Werror=c23-extensions" },
+        { "#if 1wb\n#endif\nint x;\n", "-std=gnu17", "-pedantic-errors" },
+        { "#if 1wb\n#endif\nint x;\n", "-std=gnu17", "-Werror" },
+        { "#if 1wb\n#endif\nint x;\n", "-std=gnu17", "-w" },
+        // -w and a system header silence it however it is mapped (#1934): a pragma's error, -Werror, -pedantic-errors and
+        // -Werror=; -Wsystem-headers shows a system header's.
+        { "#pragma clang diagnostic error \"-Wc23-extensions\"\n#if 1wb\n#endif\nint x;\n", "-std=gnu17", "-w" },
+        { "#pragma clang diagnostic fatal \"-Wc23-extensions\"\n#if 1wb\n#endif\nint x;\n", "-std=gnu17", "-w" },
+        { "#pragma GCC diagnostic ignored \"-Wc23-extensions\"\n#if 1wb\n#endif\nint x;\n", "-std=gnu17", NULL },
+        { "#include <h.h>\nint x;\n", "-std=gnu17", NULL, "#if 1wb\n#endif\n" },
+        { "#include <h.h>\nint x;\n", "-std=gnu17", "-Werror", "#if 1wb\n#endif\n" },
+        { "#include <h.h>\nint x;\n", "-std=gnu17", "-pedantic-errors", "#if 1wb\n#endif\n" },
+        { "#include <h.h>\nint x;\n", "-std=gnu17", "-Werror=c23-extensions", "#if 1wb\n#endif\n" },
+        { "#include <h.h>\nint x;\n", "-std=gnu17", NULL, "#pragma clang diagnostic error \"-Wc23-extensions\"\n#if 1wb\n#endif\n" },
+        { "#include <h.h>\nint x;\n", "-std=gnu17", "-Wsystem-headers", "#if 1wb\n#endif\n" },
+        { "#pragma clang diagnostic ignored \"-Wc23-extensions\"\n#if 1wb\n#endif\nint x;\n", "-std=gnu17", NULL },
+        { "#pragma clang diagnostic error \"-Wc23-extensions\"\n#if 1wb\n#endif\nint x;\n", "-std=gnu17", NULL },
+        { "#pragma clang diagnostic warning \"-Wc2x-extensions\"\n#if 1wb\n#endif\nint x;\n", "-std=gnu17", "-Werror" },
+        { "#pragma clang diagnostic push\n#pragma clang diagnostic ignored \"-Wc23-extensions\"\n#if 3wb\n#endif\n#pragma clang diagnostic pop\n#if 1wb\n#endif\nint x;\n",
+          "-std=gnu17", NULL },
+        // 64 nested pushes: the mapping inside the innermost restored by its pop (#1934), at any depth.
+        { BUSTER_TEST_PUSH64 "#pragma clang diagnostic ignored \"-Wc23-extensions\"\n#pragma clang diagnostic pop\n#if 1wb\n#endif\nint x;\n",
+          "-std=gnu17", NULL },
+        // 65.
+        { BUSTER_TEST_PUSH64 BUSTER_TEST_PUSH1 "#pragma clang diagnostic ignored \"-Wc23-extensions\"\n#pragma clang diagnostic pop\n#if 1wb\n#endif\nint x;\n",
+          "-std=gnu17", NULL },
+        // 130.
+        { BUSTER_TEST_PUSH64 BUSTER_TEST_PUSH64 BUSTER_TEST_PUSH1 BUSTER_TEST_PUSH1 "#pragma clang diagnostic ignored \"-Wc23-extensions\"\n#pragma clang diagnostic pop\n#if 1wb\n#endif\nint x;\n",
+          "-std=gnu17", NULL },
     };
     enum { LINES = 16384 };
     char* expected_lines = malloc(LINES);
     char* actual_lines = malloc(LINES);
     char source[PATH_MAX];
     snprintf(source, sizeof(source), "%s/unevaluated-strings.c", directory);
+    char system[PATH_MAX];
+    char header[PATH_MAX];
+    snprintf(system, sizeof(system), "%s/unevaluated-system", directory);
+    snprintf(header, sizeof(header), "%s/h.h", system);
     for (uint32_t unit = 0; expected_lines != NULL && actual_lines != NULL && unit < BUSTER_ARRAY_LENGTH(units); unit += 1)
     {
         const CheckUnevaluatedUnit* fixture = units + unit;
-        const bool made = parse_test_write(source, fixture->source, strlen(fixture->source));
-        // The option, where there is one, before the path's.
-        char* arguments[] = { (char*)clang, (char*)fixture->standard, "-fsyntax-only", "-fno-caret-diagnostics", source, (char*)fixture->option, NULL, NULL };
-        const uint32_t path = fixture->option != NULL ? 6 : 5;
+        bool made = parse_test_write(source, fixture->source, strlen(fixture->source));
+        if (fixture->header != NULL)
+        {
+            mkdir(system, 0755);
+            made = made && parse_test_write(header, fixture->header, strlen(fixture->header));
+        }
+        // The system headers' directory, where there is one, then the path, then the option where there is one, then
+        // --scalar's place.
+        char* arguments[10] = { (char*)clang, (char*)fixture->standard, "-fsyntax-only", "-fno-caret-diagnostics" };
+        uint32_t count = 4;
+        if (fixture->header != NULL)
+        {
+            arguments[count++] = "-isystem";
+            arguments[count++] = system;
+        }
+        arguments[count++] = source;
+        if (fixture->option != NULL)
+        {
+            arguments[count++] = (char*)fixture->option;
+        }
+        const uint32_t path = count;
         char* expected = NULL;
         const int oracle = made ? check_test_driver_spawn(arguments, &expected) : -1;
         const bool lines = expected != NULL && check_test_diagnostic_lines(expected, expected_lines, LINES);
@@ -1918,4 +2003,6 @@ static void check_test_driver_unevaluated_strings(CheckTest* test, const char* c
     free(expected_lines);
     free(actual_lines);
     unlink(source);
+    unlink(header);
+    rmdir(system);
 }

@@ -28,8 +28,9 @@
 // The most integer or pointer arguments a call passes, and parameters a function takes (#141): those past the registers
 // in the stack's 8-byte slots, the outgoing area's at a call and the incoming area's at the entry. Their values needn't
 // be in registers there: the CFG consumer stores each argument from wherever it is and loads each parameter into its
-// first fragment's place (tier1_emit_cfg.c).
-#define BUSTER_TIER1_SELECT_MAX_ARGUMENTS 16
+// first fragment's place (tier1_emit_cfg.c). 64 since #1847, from 16: _mm512_set_epi8's parameters (and the scalar
+// host's emulation's arguments) and printf's calls of the compiler's own tests, 16 of main_unit_backend.c's 25 refusals.
+#define BUSTER_TIER1_SELECT_MAX_ARGUMENTS 64
 
 typedef enum Tier1SelectError
 {
@@ -264,6 +265,10 @@ typedef enum Tier1SelectRule
 #define BUSTER_TIER1_VECTOR_COMPARE 7
 #define BUSTER_TIER1_VECTOR_SELECT 8
 #define BUSTER_TIER1_VECTOR_SCALAR_SPLAT 9
+// A width change (#1840): `operation` its kind past BUSTER_IR_INTRINSIC_EXTRACT (0 extract, 1 widen, 2 insert),
+// `source_width` the other vector's bytes (an extract's or a widen's operand's, an insert's inserted values[1]'s),
+// `immediate` its part (tier1_select_width_change).
+#define BUSTER_TIER1_VECTOR_WIDTH_CHANGE 10
 
 // TIER1_RULE_X87's kinds, its pattern's `scale` (#141):
 // - CONSTANT, its constant's index in `immediate`, and UNDEF, which stores nothing;
@@ -1155,6 +1160,42 @@ static void tier1_select_overflow(Tier1SelectRecords* result, const Tier1SelectH
 // A scalar splat (#1450): EVEX broadcasts directly from a general register or a floating scalar's xmm register.
 // The baseline sequence copies bits through xmm registers only: movd/movq, low unpacks for bytes/words, pshufd and,
 // for AVX's 32-byte result, vinsertf128. It never interprets a NaN or a signed zero as arithmetic.
+// A width change's records (#1840), EVEX's (the decoder admits one at a target with AVX512F and VL alone, and the
+// emission's allow-list refuses these forms elsewhere): an extract of part 0 the narrower width's move from the source's
+// register, which the destination's holds already where they are the same; a widen the narrower width's EVEX move
+// (vmovdqa64), which zeroes the wider register past it, even into its own register (legacy SSE's movaps would keep the
+// bytes past 16 of a register that held the wide value); an extract of another part vextracti32x4 (16 bytes of 32 or
+// 64) or vextracti64x4 (32 of 64); and an insert vinserti32x4 or vinserti64x4 of values[1] into a copy of values[0].
+static void tier1_select_width_change(Tier1SelectRecords* result, const Tier1SelectHoles* holes)
+{
+    const uint32_t kind = (uint32_t)holes->operation;
+    const uint8_t x = holes->destination & 15;
+    const uint8_t left = holes->left & 15;
+    const uint8_t right = holes->right & 15;
+    const uint32_t width = holes->width;
+    const uint32_t other = holes->source_width;
+    const uint32_t part = (uint32_t)holes->immediate;
+    if (kind == 2)
+    {
+        const uint16_t form = other == 32 ? X86_FORM_VINSERTI64X4_Z_Z_YM256_IMM8 : width == 64 ? X86_FORM_VINSERTI32X4_Z_Z_XM128_IMM8 : X86_FORM_VINSERTI32X4_Y_Y_XM128_IMM8;
+        tier1_select_append(result, (X86Instruction){ .form = form, .reg = x, .vvvv = left, .rm = right, .mode = BUSTER_X86_REGISTER_DIRECT, .immediate = (int32_t)part });
+    }
+    else if (kind == 0 && part != 0)
+    {
+        const uint16_t form = width == 32 ? X86_FORM_VEXTRACTI64X4_YM256_Z_IMM8 : other == 64 ? X86_FORM_VEXTRACTI32X4_XM128_Z_IMM8 : X86_FORM_VEXTRACTI32X4_XM128_Y_IMM8;
+        tier1_select_append(result, (X86Instruction){ .form = form, .reg = left, .rm = x, .mode = BUSTER_X86_REGISTER_DIRECT, .immediate = (int32_t)part });
+    }
+    else if (kind == 1)
+    {
+        // EVEX's move of the narrower width, never legacy SSE's movaps, which keeps the register's bytes past 16.
+        tier1_select_append(result, tier1_select_register_record(tier1_select_vector_forms(other, BUSTER_TIER1_ENCODING_EVEX)->move, x, left));
+    }
+    else if (x != left)
+    {
+        tier1_select_append(result, tier1_select_class_move(x, left, width, false));
+    }
+}
+
 static void tier1_select_scalar_splat(Tier1SelectRecords* result, const Tier1SelectHoles* holes)
 {
     const uint32_t type = holes->source_width;
@@ -1722,6 +1763,10 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         {
             tier1_select_scalar_splat(&result, holes);
         }
+        else if (kind == BUSTER_TIER1_VECTOR_WIDTH_CHANGE)
+        {
+            tier1_select_width_change(&result, holes);
+        }
         else if (holes->sse && width == 16 && kind != BUSTER_TIER1_VECTOR_COMPARE && kind != BUSTER_TIER1_VECTOR_SELECT)
         {
             tier1_select_sse_vector(&result, holes, destination);
@@ -1791,6 +1836,7 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
             const bool real = ir_simd_lane_floating((IrSimdLane)lane);
             const uint32_t condition = holes->condition < (real ? IR_GE + 1u : (uint32_t)IR_PREDICATE_COUNT) ? holes->condition : IR_EQ;
             const uint32_t index = width == 16 ? 0 : width == 32 ? 1 : 2;
+            // A masked comparison's writemask (#1847), its third value's opmask register: none, k0's encoding, without one.
             const X86Instruction record = {
                 .form = tier1_select_lane_compares[lane][!real && condition >= IR_ULT][index],
                 .reg = (uint8_t)(destination & 7),
@@ -1798,6 +1844,7 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
                 .rm = right,
                 .mode = BUSTER_X86_REGISTER_DIRECT,
                 .immediate = real ? floating[condition] : predicates[condition],
+                .decorations = (uint8_t)(holes->third & BUSTER_X86_DECORATION_MASK),
             };
             tier1_select_append(&result, record);
         }
@@ -3968,6 +4015,17 @@ static Tier1SelectAddress tier1_select_address(const Tier1SelectForest* forest, 
     return address;
 }
 
+// Whether `value`, an operand of `node`'s AND of masks, is a comparison into a mask that the AND's pattern takes as its
+// own under the other operand as its writemask (#1847): a vector comparison of the AND's mask type (the lanes' mask) and
+// one of its predicates, which only the AND reads, in its block.
+static bool tier1_select_masked_compare(const Tier1SelectForest* forest, uint32_t node, uint32_t value)
+{
+    const IrFunction* function = forest->function;
+    const bool compare = value < function->instruction_count && function->op[value] == IR_VCMP && function->type[value] == function->type[node] &&
+                         function->c[value] < IR_PREDICATE_COUNT && function->a[value] < function->instruction_count;
+    return compare && tier1_select_vector_width(function->type[function->a[value]]) != 0 && tier1_select_tree_child(forest, node, value);
+}
+
 // The memory operand of `node`'s access through `pointer`, in values[first] and values[first + 1] (its base and index),
 // with its scale and displacement. Returns whether the walk took anything.
 static inline __attribute__((always_inline)) bool tier1_select_memory(const Tier1SelectForest* forest, uint32_t node, uint32_t pointer, Tier1SelectPattern* pattern, uint32_t first)
@@ -4027,7 +4085,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
     // A vector's operations (#141), behind one test: a function without vectors pays no other here.
     const bool vector_node = (vector_width != 0 && (op == IR_VCONST || op == IR_UNDEF || op == IR_COPY || op == IR_NOT || op == IR_ADD || op == IR_SUB || op == IR_MUL || op == IR_AND ||
                                                    op == IR_OR || op == IR_XOR || op == IR_SHL || op == IR_LSHR || op == IR_ASHR || (op >= IR_FADD && op <= IR_FDIV) ||
-                                                   op == IR_VSELECT || (op == IR_INTRINSIC && c == BUSTER_IR_INTRINSIC_SPLAT))) ||
+                                                   op == IR_VSELECT || (op == IR_INTRINSIC && (c == BUSTER_IR_INTRINSIC_SPLAT || (c >= BUSTER_IR_INTRINSIC_EXTRACT && c <= BUSTER_IR_INTRINSIC_INSERT))))) ||
                              compare_width != 0;
     if (vector_node)
     {
@@ -4061,6 +4119,24 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             base.scale = BUSTER_TIER1_VECTOR_SCALAR_SPLAT;
             base.source_width = function->type[a];
             base.values[0] = a;
+            base.intrinsic_cost = 1;
+            tier1_select_add_candidate(forest, node, &candidates, base);
+        }
+        else if (vector_width != 0 && op == IR_INTRINSIC && c >= BUSTER_IR_INTRINSIC_EXTRACT && c <= BUSTER_IR_INTRINSIC_INSERT)
+        {
+            // A width change (#1840): the other vector's width, and the part in the IR's flags.
+            const uint32_t other = c == BUSTER_IR_INTRINSIC_INSERT ? b : a;
+            base.rule = TIER1_RULE_VECTOR;
+            base.width = (uint8_t)vector_width;
+            base.scale = BUSTER_TIER1_VECTOR_WIDTH_CHANGE;
+            base.operation = (uint8_t)(c - BUSTER_IR_INTRINSIC_EXTRACT);
+            base.source_width = other < function->instruction_count ? (uint8_t)tier1_select_vector_width(function->type[other]) : 0;
+            base.immediate = function->flags[node];
+            base.values[0] = a;
+            if (c == BUSTER_IR_INTRINSIC_INSERT)
+            {
+                base.values[1] = b;
+            }
             base.intrinsic_cost = 1;
             tier1_select_add_candidate(forest, node, &candidates, base);
         }
@@ -4147,6 +4223,25 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         base.values[1] = b;
         base.intrinsic_cost = 1;
         tier1_select_add_candidate(forest, node, &candidates, base);
+        // A comparison into a mask ANDed with another mask (#1847: the IR's form of a masked comparison's row,
+        // ir_simd_typed_compare_mask, whose writemask isn't every lane, ir_typed_unmasked): the comparison under that mask
+        // as its writemask, `{k}`, which leaves 0 in the lanes the writemask doesn't have, one vpcmp or vcmpps as the
+        // row's was. The comparison is the AND's tree child, either operand, the left one first.
+        const uint32_t compared = op != IR_AND ? BUSTER_IR_NONE : tier1_select_masked_compare(forest, node, a) ? a : tier1_select_masked_compare(forest, node, b) ? b : BUSTER_IR_NONE;
+        if (compared != BUSTER_IR_NONE)
+        {
+            Tier1SelectPattern masked = base;
+            masked.rule = TIER1_RULE_VECTOR;
+            masked.width = (uint8_t)tier1_select_vector_width(function->type[function->a[compared]]);
+            masked.scale = BUSTER_TIER1_VECTOR_COMPARE;
+            masked.condition = (uint8_t)function->c[compared];
+            masked.source_width = function->flags[compared];
+            masked.values[0] = function->a[compared];
+            masked.values[1] = function->b[compared];
+            masked.values[2] = compared == a ? b : a;
+            tier1_select_fold(forest, node, compared, &masked);
+            tier1_select_add_candidate(forest, node, &candidates, masked);
+        }
     }
     else if (mask_width != 0 && op == IR_NOT)
     {

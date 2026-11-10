@@ -229,7 +229,7 @@ CLANG
 chmod +x "$llvm/bin/clang-23"
 ln -s clang-23 "$llvm/bin/clang"
 ln -s clang-23 "$llvm/bin/clang++"
-for tool in lld llvm-dwarfdump llvm-readobj llvm-symbolizer; do printf '#!/bin/sh\nexit 0\n' > "$llvm/bin/$tool"; chmod +x "$llvm/bin/$tool"; done
+for tool in lld llvm-dwarfdump llvm-readobj llvm-symbolizer llvm-split llvm-nm llvm-objcopy; do printf '#!/bin/sh\nexit 0\n' > "$llvm/bin/$tool"; chmod +x "$llvm/bin/$tool"; done
 ln -s lld "$llvm/bin/ld.lld"
 printf '#!/bin/sh\necho 23.1.4\n' > "$llvm/bin/llvm-config"
 chmod +x "$llvm/bin/llvm-config"
