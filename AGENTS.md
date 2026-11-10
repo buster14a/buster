@@ -112,7 +112,7 @@ Local checkout directories, `~/buster-fast-bench/`, the shared host lock,
 `~/llm-memory/projects/buster-fast/` and its memory symlinks retain their existing
 names. Keep the `buster-fast-9700x` concurrency prefix. PR queues replace pending
 and cancel in-progress superseded runs; main pushes use separate run-id groups
-so every revision keeps full hosted CI. Hardware jobs still share the host lock.
+so every revision keeps its hosted CI. Hardware jobs still share the host lock.
 These are operational resources, not canonical repository URLs; do not rename
 them by replacing text. Source paths, executable names and object-file metadata
 are unchanged by the repository rename.
