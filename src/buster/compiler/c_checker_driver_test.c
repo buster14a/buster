@@ -8535,6 +8535,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             {
                 check_test_driver_symbols(&test, clang, executable, directory);
                 check_test_driver_symbol_pragmas(&test, clang, executable, directory);
+                check_test_driver_weak_aliases(&test, clang, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
             {
