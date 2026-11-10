@@ -202,6 +202,8 @@ struct CheckProgramAsm
     uint32_t* inline_branches;
     uint32_t* inline_targets;
     uint32_t inline_branch_count;
+    // Whether its template returns (Tier0AsmBody.leaves).
+    bool inline_leaves;
     // Whether its register operands are its call row's arguments, each in its register (check_asm_inline_code's
     // `passed`), rather than loads from its block.
     bool inline_passed;
@@ -1255,12 +1257,13 @@ static uint32_t check_asm_inline_code(const CheckAsmPlace* places, uint32_t coun
     return at;
 }
 
-// The registers an asm body touches (#1839, Tier0AsmBody.touched, in BUSTER_TIER0_XMM's layout): `taken`'s general ones
-// (its operands', its clobbers' and its stores'), the XMM registers of its vector operands and clobbers (`vectors`, a bit
-// each), and what x86_semantics.c says its template's records write; or UINT32_MAX for a template it doesn't place: a
-// record of unknown effects, or one that touches the stack or control flow (a push, a call, a jump or branch but the
-// template's own to its labels, a return, a trap), as unwind_tier0_frame refuses in a function's body, or that writes a register holding the frame (rsp, rbp, r15). A form
-// x86_semantics.c doesn't cover takes check_asm_implicit's registers, or none for an x87 form's, or keeps the helper.
+// Whether `form` returns: ret, and its imm16, 16-bit, 32-bit and prefixed forms.
+static bool check_asm_return(uint32_t form)
+{
+    return form == X86_FORM_RET || form == X86_FORM_RET_IMM16 || form == X86_FORM_RETW || form == X86_FORM_RETW_IMM16 || form == X86_FORM_RETD ||
+           form == X86_FORM_RETD_IMM16 || form == X86_FORM_REP_RET || form == X86_FORM_REPNE_RET;
+}
+
 // The forms common in inline assembly that x86_semantics.c gives only its conservative record (every register, unknown
 // control), with the registers each writes, as the instruction set's references define them: none touches the stack,
 // and each returns to the next instruction (syscall through the kernel). A form of neither keeps its statement's helper.
@@ -1298,6 +1301,13 @@ static const CheckAsmImplicit check_asm_implicit[] = {
 };
 #undef BUSTER_CHECK_ASM_GPR
 
+// The registers an asm body touches (#1839, Tier0AsmBody.touched, in BUSTER_TIER0_XMM's layout): `taken`'s general ones
+// (its operands', its clobbers' and its stores'), the XMM registers of its vector operands and clobbers (`vectors`, a bit
+// each), and what x86_semantics.c says its template's records write; or UINT32_MAX for a template it doesn't place: a
+// record of unknown effects, or one that touches the stack or control flow (a push, a call, a jump or branch but the
+// template's own to its labels, a trap), as unwind_tier0_frame refuses in a function's body, or that writes a register
+// holding the frame (rsp, rbp, r15), but on its way out of the function. A form x86_semantics.c doesn't cover takes
+// check_asm_implicit's registers, or none for an x87 form's, or keeps the helper.
 static uint32_t check_asm_inline_touched(const CheckAsmPlace* places, uint32_t count, const AsmCode* code, uint32_t taken, uint32_t vectors)
 {
     uint64_t written = (uint64_t)(taken & 0xffffu & ~(1u << X86_REGISTER_RSP)) | ((uint64_t)(vectors & 0xffffu) << 16);
@@ -1310,6 +1320,30 @@ static uint32_t check_asm_inline_touched(const CheckAsmPlace* places, uint32_t c
     {
         const X86Instruction* record = code->records + r;
         const X86Effects* effects = x86_effects(record->form);
+        // A record that leaves the function (#1839): a return, or one on a straight path to a return (no branch among them,
+        // no label after it on the way), which runs only on the way out, as `leave` and `pop %rbx` before a `ret`. Its
+        // effects on the stack, the frame's registers and control are the template's way out of its caller, as in clang's
+        // object, and what it writes no later code of the function reads: it stays out of the checks and of the set.
+        bool out = false;
+        for (uint32_t k = r; !out && k < code->count; k += 1)
+        {
+            bool branch = false;
+            bool target = false;
+            for (uint32_t b = 0; b < code->branch_count; b += 1)
+            {
+                branch |= code->branches[b] == k;
+                target |= k > r && code->targets[b] == k;
+            }
+            out = !target && check_asm_return(code->records[k].form);
+            if (branch || target)
+            {
+                break;
+            }
+        }
+        if (out)
+        {
+            continue;
+        }
         uint64_t reads = 0;
         uint64_t writes = 0;
         x86_instruction_effects_scalar(record, &reads, &writes);
@@ -2293,6 +2327,7 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
     AsmCode code = { 0 };
     AsmResult unit = { 0 };
     bool unit_assembled = false;
+    bool returns = false;
     const uint64_t code_mark = output->length;
     if (valid && reason == NULL)
     {
@@ -2353,20 +2388,19 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
             // A label with no instruction to follow in its template would be a place in the statement's function, which its
             // code (Tier 0's) doesn't mark.
             reason = reason == NULL && code.count == 0 && code.label_count != 0 ? "inline assembly labels in templates of no instructions" : reason;
-            // A template that returns before any branch would leave the helper with its frame still reserved, where clang's
-            // inline emission returns from the enclosing function. Refuse that initial flow by name; a template that jumps
-            // over its return (a called snippet's label) stays admitted, as clang's own asm labels do.
+            // A template that returns before any branch would leave a helper with its frame still reserved, where clang's
+            // inline emission returns from the enclosing function: an asm body's return does that (#1839), and a helper's
+            // is refused by name below. A template that jumps over its return (a called snippet's label) stays admitted,
+            // as clang's own asm labels do.
             for (uint32_t r = 0; reason == NULL && r < code.count; r += 1)
             {
-                const uint16_t form = code.records[r].form;
-                const bool ret = form == X86_FORM_RET || form == X86_FORM_RET_IMM16 || form == X86_FORM_RETW || form == X86_FORM_RETW_IMM16 ||
-                                 form == X86_FORM_RETD || form == X86_FORM_RETD_IMM16 || form == X86_FORM_REP_RET || form == X86_FORM_REPNE_RET;
+                const bool ret = check_asm_return(code.records[r].form);
                 bool branch = false;
                 for (uint32_t b = 0; b < code.branch_count; b += 1)
                 {
                     branch |= code.branches[b] == r;
                 }
-                reason = ret ? "inline assembly templates that return from their helper" : branch ? NULL : reason;
+                returns = ret;
                 if (ret || branch)
                 {
                     break;
@@ -2499,7 +2533,16 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
         plan->inline_records = records;
         plan->inline_count = records_count;
         plan->inline_touched = inline_touched;
+        plan->inline_leaves = returns;
+        for (uint32_t r = 0; r < code.count; r += 1)
+        {
+            plan->inline_leaves |= check_asm_return(code.records[r].form);
+        }
         plan->inlined = valid;
+    }
+    else if (valid && reason == NULL && helped && returns)
+    {
+        reason = "inline assembly templates that return from their helper";
     }
     else if (valid && reason == NULL && helped)
     {
