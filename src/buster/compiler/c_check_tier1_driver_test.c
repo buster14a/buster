@@ -478,10 +478,11 @@ static const char check_test_tier1_narrow_callee_source[] =
     "int tier1_narrow_entry(int a, int b, int c);\n"
     "int clang_calls_narrow(int x) { return tier1_narrow_entry(0x123456f0 + x, 0x7fff0000 | (x & 0xffff), 0x5a5a0000 | (x & 1)); }\n";
 
-// The stack arguments' fixture (#141): a unit by --tier1 whose functions pass 7 to 16 arguments of mixed types (longs,
-// ints, pointers, chars and shorts, extended by their types) to functions clang -O2 compiles in the other unit, which
-// read the ones past the registers from the stack, and take 7 to 12 parameters from callers clang -O2 compiles there,
-// some through function pointers. Each of the other unit's functions folds its arguments into one value.
+// The stack arguments' fixture (#141): a unit by --tier1 whose functions pass 7 to 24 arguments of mixed types (longs,
+// ints, pointers, chars and shorts, extended by their types, doubles and a float past xmm7; 21 to a variadic function)
+// to functions clang -O2 compiles in the other unit, which read the ones past the registers from the stack, and take 7
+// to 64 parameters (#1847: _mm512_set_epi8's 64 chars) from callers clang -O2 compiles there, some through function
+// pointers. Each of the other unit's functions folds its arguments into one value.
 static const char check_test_tier1_stack_caller_source[] =
     "#include <stdio.h>\n"
     "long tier1_other7(long a, int b, long c, char* d, short e, long f, long g);\n"
@@ -489,6 +490,32 @@ static const char check_test_tier1_stack_caller_source[] =
     "long tier1_other12(long a, long b, int c, long d, long e, long f, signed char g, long h, long* i, int j, long k, unsigned short l);\n"
     "long tier1_other16(long a, long b, long c, long d, long e, long f, long g, long h, long i, long j, long k, long l, long m, long n, long o, long p);\n"
     "long tier1_drive(long (*seven)(long, long, long, long, long, long, long), long (*twelve)(long, long, long, long, long, long, int, long, long, long, short, long), long x);\n"
+    "double tier1_other24(long a, double b, int c, double d, long e, double f, short g, double h, long i, double j, long k, double l, long m, double n, long o, double p, long q, double r, long s, double t, long u, float v, long w, double x);\n"
+    "long tier1_other_va(int n, ...);\n"
+    "long tier1_drive64(long (*take)(signed char, signed char, signed char, signed char, signed char, signed char, signed char, signed char, signed char, signed char, signed char, signed char, signed char, signed char, signed char, signed char,"
+    " signed char, signed char, signed char, signed char, signed char, signed char, signed char, signed char, signed char, signed char, signed char, signed char, signed char, signed char, signed char, signed char,"
+    " signed char, signed char, signed char, signed char, signed char, signed char, signed char, signed char, signed char, signed char, signed char, signed char, signed char, signed char, signed char, signed char,"
+    " signed char, signed char, signed char, signed char, signed char, signed char, signed char, signed char, signed char, signed char, signed char, signed char, signed char, signed char, signed char, signed char), long x);\n"
+    "static long tier1_many(long x, long y)\n"
+    "{\n"
+    "    double d = tier1_other24(x, 0.5 * (double)y, (int)(x + 1), (double)x - 2.25, y * 3, 1.0 / ((double)y + 0.5), (short)(x * 5), -(double)x, y ^ 9, (double)(x * y), x - 11, 3.75,\n"
+    "                             y + 13, (double)x * 0.125, x * 17, (double)y - 19.5, y * 23, 29.0, x ^ y, (double)(x + y), ~x, (float)y * 0.5f, x + y + 31, (double)(x - y) * 0.25);\n"
+    "    long v = tier1_other_va(20, x, y, x + 1, y + 1, x + 2, y + 2, x + 3, y + 3, x + 4, y + 4, x + 5, y + 5, x + 6, y + 6, x + 7, y + 7, x + 8, y + 8, x + 9, y + 9);\n"
+    "    return (long)(d * 8.0) * 31 + v;\n"
+    "}\n"
+    "long tier1_take64(signed char a0, signed char a1, signed char a2, signed char a3, signed char a4, signed char a5, signed char a6, signed char a7, signed char a8, signed char a9, signed char a10, signed char a11,"
+    " signed char a12, signed char a13, signed char a14, signed char a15, signed char a16, signed char a17, signed char a18, signed char a19, signed char a20, signed char a21, signed char a22, signed char a23,"
+    " signed char a24, signed char a25, signed char a26, signed char a27, signed char a28, signed char a29, signed char a30, signed char a31, signed char a32, signed char a33, signed char a34, signed char a35,"
+    " signed char a36, signed char a37, signed char a38, signed char a39, signed char a40, signed char a41, signed char a42, signed char a43, signed char a44, signed char a45, signed char a46, signed char a47,"
+    " signed char a48, signed char a49, signed char a50, signed char a51, signed char a52, signed char a53, signed char a54, signed char a55, signed char a56, signed char a57, signed char a58, signed char a59,"
+    " signed char a60, signed char a61, signed char a62, signed char a63)\n"
+    "{\n"
+    "    const signed char v[64] = { a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19, a20, a21, a22, a23, a24, a25, a26, a27, a28, a29, a30, a31,\n"
+    "                                a32, a33, a34, a35, a36, a37, a38, a39, a40, a41, a42, a43, a44, a45, a46, a47, a48, a49, a50, a51, a52, a53, a54, a55, a56, a57, a58, a59, a60, a61, a62, a63 };\n"
+    "    long h = 0;\n"
+    "    for (int i = 0; i < 64; i += 1) h = h * 3 + v[i] * (i + 1);\n"
+    "    return h;\n"
+    "}\n"
     "static long tier1_pass(long x, long y)\n"
     "{\n"
     "    char text[4] = { 'a', 'b', 'c', 0 };\n"
@@ -514,6 +541,7 @@ static const char check_test_tier1_stack_caller_source[] =
     "    for (long x = -40; x < 40; x += 3)\n"
     "    {\n"
     "        total = total * 31 + (unsigned long)tier1_pass(x, x * 7 - 5) + (unsigned long)tier1_drive(tier1_take7, tier1_take12, x);\n"
+    "        total = total * 31 + (unsigned long)tier1_many(x, x * 5 + 3) + (unsigned long)tier1_drive64(tier1_take64, x);\n"
     "    }\n"
     "    printf(\"%lu\\n\", total);\n"
     "    return 0;\n"
@@ -533,6 +561,20 @@ static const char check_test_tier1_stack_callee_source[] =
     "long tier1_drive(long (*seven)(long, long, long, long, long, long, long), long (*twelve)(long, long, long, long, long, long, int, long, long, long, short, long), long x)\n"
     "{\n"
     "    return seven(x, x + 1, x - 2, x * 3, x ^ 4, ~x, x * x) + twelve(x, 2, 3, x, 5, 6, (int)(x * 7), 8, x - 9, 10, (short)(x * 11), x + 12);\n"
+    "}\n"
+    "double tier1_other24(long a, double b, int c, double d, long e, double f, short g, double h, long i, double j, long k, double l, long m, double n, long o, double p, long q, double r, long s, double t, long u, float v, long w, double x)\n"
+    "{\n"
+    "    return (double)(a + c * 3 + e * 5 + g * 7 + i * 11 + k * 13 + m * 17 + o * 19 + q * 23 + s * 29 + u * 31 + w * 37) + b - d * 2 + f * 3 - h + j * 0.5 + l - n + p * 0.25 + r + t * 0.125 + v + x;\n"
+    "}\n"
+    "#include <stdarg.h>\n"
+    "long tier1_other_va(int n, ...) { va_list ap; va_start(ap, n); long h = 0; for (int i = 0; i < n; i += 1) h = h * 7 + va_arg(ap, long); va_end(ap); return h; }\n"
+    "typedef signed char sc;\n"
+    "long tier1_drive64(long (*take)(sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc,"
+    " sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc), long x)\n"
+    "{\n"
+    "    sc b = (sc)x;\n"
+    "    return take(b, b + 1, b - 2, b * 3, b ^ 4, ~b, 6, 7, b, 9, 10, b + 11, 12, 13, 14, b - 15, 16, 17, 18, 19, b, 21, 22, 23, 24, 25, b * 2, 27, 28, 29, 30, b,\n"
+    "                -1, -2, b, -4, -5, -6, -7, -8, b + 9, -10, -11, -12, -13, -14, -15, b, 100, 101, 102, b, 104, 105, 106, 107, b, 109, 110, 111, 112, 113, 114, b);\n"
     "}\n";
 
 // The floating values' fixture (#141): F32 and F64 parameters, results and arguments interleaved with integers, past
@@ -4760,7 +4802,7 @@ static void check_test_driver_tier1_stack(CheckTest* test, const char* clang, co
     char expected[256] = { 0 };
     const bool ran = referenced && callee_built && check_test_driver_capture(reference, expected, sizeof(expected)) && expected[0] != 0;
     check_test_expect(test, ran, "clang's builds of the stack arguments' fixture run");
-    static const char* const names[3] = { "tier1_pass", "tier1_take7", "tier1_take12" };
+    static const char* const names[5] = { "tier1_pass", "tier1_take7", "tier1_take12", "tier1_many", "tier1_take64" };
     for (uint32_t rematerialize = 0; ran && rematerialize < 2; rematerialize += 1)
     {
         for (uint32_t path = 0; path < 2; path += 1)

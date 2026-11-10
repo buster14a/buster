@@ -863,7 +863,7 @@ A division and a shift by a register keep their functions on the CFG consumer, a
 before the helper (`tier1_emit_cfg_chain`).
 
 Direct nonvariadic calls support up to six `I32`, `I64` or pointer arguments
-(sixteen through the CFG consumer, those past the sixth on the stack: #141)
+(64 through the CFG consumer since #1847, those past the sixth on the stack: #141)
 and a void, `I32`, `I64` or pointer result. The call pattern keeps the symbol
 ID in `immediate`; its three ordinary value holes are empty. Its complete
 ordered argument list is the effective-use CSR slice, including duplicates.
