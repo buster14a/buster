@@ -12,7 +12,8 @@
 //   scalar one, the states and the rules of both kernels, every node of a class the grammar covers with a candidate of
 //   its own (tier1_select_candidates), and the rule's candidate found for each, which it counts.
 //
-// Include after tier1_select_test.c.
+// Include after tier1_select_test.c. Keep the per-function check shared for the checker's code-certificate corpus;
+// the backend unit alone reads the fixtures below it, at their original definition and inclusion points.
 
 typedef struct Tier1BursCheck Tier1BursCheck;
 struct Tier1BursCheck
@@ -197,6 +198,7 @@ static void tier1_burs_check_function(Tier1BursCheck* check, const IrFunction* f
     arena_pop_to(scratch, mark);
 }
 
+#if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 // The most representers of any operator's child position: the largest a map's value is, plus one.
 static uint32_t tier1_burs_test_representers(void)
 {
@@ -445,3 +447,4 @@ static void tier1_select_test_burs(Tier1SelectTest* test)
     tier1_select_test_burs_fixtures(test);
     tier1_select_test_burs_addresses(test);
 }
+#endif

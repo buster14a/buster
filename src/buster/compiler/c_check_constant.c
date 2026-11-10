@@ -155,20 +155,6 @@ typedef struct CheckConstantInput CheckConstantInput;
 typedef struct CheckConstantRange CheckConstantRange;
 // Optional evidence for an attribute argument's parser diagnostics. Other constant/type queries keep their existing
 // reporting owner; this record contains no borrowed operand arrays and survives the evaluator's scratch rollback.
-typedef struct CheckConstantFailure CheckConstantFailure;
-struct CheckConstantFailure
-{
-    CheckDiagnostic diagnostic;
-    CheckOp op;
-    TypeId type;
-    TypeId second_type;
-    uint32_t token;
-    uint32_t callee;
-    uint32_t name;
-    uint32_t expected;
-    uint32_t actual;
-    bool variadic;
-};
 struct CheckConstantRange
 {
     uint32_t first;
@@ -222,6 +208,8 @@ struct CheckConstantInput
     // The undeclared names this reading reported that no correction took (check_constant_name): a job's own, which
     // a nested tag's readings between its steps don't touch.
     uint32_t missing;
+    // A job's failure evidence, where its reading reports undeclared names and its caller has no place for it (#1447).
+    CheckConstantFailure evidence;
 };
 
 static uint32_t check_constant_overload_token(const CheckConstantInput* input, uint32_t root)
@@ -1727,6 +1715,18 @@ static bool check_input_stdc_library_call(CheckInputReader* reader, uint32_t tok
     return result;
 }
 
+// Whether a catalog builtin's name `builtin` (but a <stdbit.h> function's, check_input_stdc_library_call's), bound to
+// the declaration of binding `handle`, stays the builtin (#1843): a function's declaration with external linkage, which
+// clang's FunctionDecl::getBuiltinID keeps the builtin's (__builtin_bswap32 declared `unsigned __builtin_bswap32(unsigned);`),
+// its type compatible with the builtin's or clang's error at it (check_input_builtin_declaration). A static function and an
+// object of the name are the program's.
+static bool check_input_builtin_kept(const CheckInputReader* reader, uint32_t handle, uint16_t builtin)
+{
+    const uint32_t declaration = handle != 0 ? reader->bindings.declaration[handle - 1] : BUSTER_CHECK_NONE;
+    return builtin != CBUILTIN_NONE && !cbuiltin_stdc_library(builtin) && declaration < reader->parser->tokens.count &&
+           reader->declaration_kinds[declaration] == C_BINDING_FUNCTION && check_input_linkage(reader->declaration_bits, declaration) == 2;
+}
+
 static uint16_t check_constant_integer_builtin(CheckConstantInput* input, uint32_t token, uint32_t handle)
 {
     CheckInputReader* reader = input->reader;
@@ -1739,7 +1739,7 @@ static uint16_t check_constant_integer_builtin(CheckConstantInput* input, uint32
     uint16_t builtin = CBUILTIN_NONE;
     const bool called = open < close && close < input->end && parser->tokens.kinds[open] == PARSE_KIND_L_PAREN &&
                         (input->raw || parser->tree.roles[close] == PARSE_ROLE_CLOSE_CALL);
-    if (called && handle == 0)
+    if (called && (handle == 0 || check_input_builtin_kept(reader, handle, check_constant_builtin_name(reader, parser->tokens.names[token]))))
     {
         builtin = reader->builtins[close];
         if (!input->cached)
@@ -4501,9 +4501,16 @@ static bool check_constant_input_initialize(CheckConstantInput* input, CheckInpu
         .cached = cached,
         .failed_token = failed_token,
         .names = reader->constant_names,
+        .diagnosed = reader->constant_failure,
+        .evidence = { .token = BUSTER_CHECK_NONE, .callee = BUSTER_CHECK_NONE },
     };
     // A reading that this one starts (a member's bound in a tag it defines) sets its own.
     reader->constant_names = CHECK_CONSTANT_NAMES_NONE;
+    reader->constant_failure = NULL;
+    if (input->diagnosed != NULL)
+    {
+        *input->diagnosed = (CheckConstantFailure){ .token = BUSTER_CHECK_NONE, .callee = BUSTER_CHECK_NONE };
+    }
     if (failed_token != 0)
     {
         *failed_token = BUSTER_CHECK_NONE;
@@ -4564,6 +4571,8 @@ static CheckConstantInput* check_input_constant_job(CheckInputReader* reader, ui
     {
         input->mark = mark;
         input->deferred_tags = true;
+        // A declarator's job keeps its own evidence, past the nested tags its caller reads between its steps.
+        input->diagnosed = input->diagnosed == NULL && input->names != CHECK_CONSTANT_NAMES_NONE ? &input->evidence : input->diagnosed;
         if (!input->raw)
         {
             check_constant_source_regions(input);
@@ -4660,7 +4669,7 @@ static bool check_input_constant_read(CheckInputReader* reader, uint32_t first, 
     reader->constant_abi_origin = 0;
     reader->constant_noderef = NULL;
     bool valid = check_constant_input_initialize(&input, reader, first, end, cached, failed_token);
-    input.diagnosed = diagnosed;
+    input.diagnosed = diagnosed != NULL ? diagnosed : input.diagnosed;
     input.scoped_names = scoped_names;
     if (valid)
     {

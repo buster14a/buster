@@ -557,7 +557,9 @@ static bool check_data_prepare(CheckDataPrepared* result, const CheckInput* inpu
             const uint32_t plan_index = check_initializers_plan_index(initializers, token);
             valid = plan_index <= initializers->count &&
                     (plan_index == 0 || (initializers->declaration_tokens != 0 && initializers->declaration_tokens[plan_index - 1] == token));
-            reference_capacity += valid && plan_index != 0 ? initializers->plans[plan_index - 1].count : 0;
+            // A part references an object, or a label difference two (#1447).
+            const CheckInitializer* counted = valid && plan_index != 0 ? initializers->plans + plan_index - 1 : NULL;
+            reference_capacity += counted != NULL ? (uint64_t)counted->count << (counted->label_differences ? 1 : 0) : 0;
             if (!valid)
             {
                 result->status = CHECK_DATA_INPUT_INVALID;
@@ -646,6 +648,22 @@ static bool check_data_prepare(CheckDataPrepared* result, const CheckInput* inpu
                     {
                         // A constant CFString's call is its canonical record's reference (#148).
                         result->references[result->reference_count++] = check_data_cfstring_canonical(result->cfstrings, result->cfstring_count, references[reference]);
+                    }
+                }
+                // A label difference's two labels (#1447), whose symbols its distance reads (check_data_plan_scalar): no
+                // fixup's, but objects the program must have symbols of.
+                for (uint32_t part = 0; valid && plan != 0 && plan->label_differences && part < plan->count; part += 1)
+                {
+                    const CheckValue* value = &plan->parts[part].value;
+                    if (plan->parts[part].kind == CHECK_INIT_VALUE && value->constant_kind == CHECK_CONSTANT_LABEL_DIFFERENCE)
+                    {
+                        valid = value->object != 0 && value->object <= count && value->integer != 0 && value->integer <= count &&
+                                result->reference_count + 2 <= reference_capacity;
+                        if (valid)
+                        {
+                            result->references[result->reference_count++] = value->object;
+                            result->references[result->reference_count++] = (uint32_t)value->integer;
+                        }
                     }
                 }
                 if (!valid && result->status == CHECK_DATA_INPUT_OK)
