@@ -12,8 +12,11 @@
 # of the 9700X (8). Fourteen, one per hardware thread, ran in two waves there and took 74.0 s against 73.1 s.
 set(BUSTER_CODEGEN_PARTITIONS 8)
 
-# Finds the tools: llvm-config, clang++, llvm-nm, llvm-objcopy, llvm-readelf and ld.lld matching the configured Clang,
+# Finds the tools: llvm-config, clang++, llvm-nm, llvm-objcopy, llvm-readobj and ld.lld matching the configured Clang,
 # beside it or on PATH, and LLVM's C API headers. Sets `available`, and `missing` to what is missing or mismatched.
+# llvm-readobj, not its llvm-readelf alias, which a trimmed toolchain (CI's hosted one) leaves out; the merge asks it
+# for readelf's output style. LLVM's libraries link shared where llvm-config finds them, else static (the hosted
+# release ships only the archives), only the components the splitter uses.
 function(buster_codegen_tools available missing)
     get_filename_component(directory "${compiler_file}" DIRECTORY)
     set(absent "")
@@ -22,6 +25,8 @@ function(buster_codegen_tools available missing)
             set(name ld.lld)
         elseif(tool STREQUAL "CXX")
             set(name clang++)
+        elseif(tool STREQUAL "READELF")
+            set(name llvm-readobj)
         else()
             string(TOLOWER "${tool}" suffix)
             set(name "llvm-${suffix}")
@@ -46,17 +51,34 @@ function(buster_codegen_tools available missing)
         unset(program)
     endforeach()
     if(found_CONFIG)
-        foreach(query cflags cxxflags ldflags libs system-libs includedir)
+        foreach(query cflags cxxflags ldflags includedir)
             execute_process(COMMAND "${found_CONFIG}" "--${query}" OUTPUT_VARIABLE value RESULT_VARIABLE status
                 OUTPUT_STRIP_TRAILING_WHITESPACE TIMEOUT 30)
             if(NOT status EQUAL 0)
                 list(APPEND absent "llvm-config --${query}")
             endif()
             separate_arguments(value UNIX_COMMAND "${value}")
-            string(REPLACE "-" "_" key "${query}")
-            set(BUSTER_CODEGEN_LLVM_${key} "${value}" PARENT_SCOPE)
-            set(llvm_${key} "${value}")
+            set(BUSTER_CODEGEN_LLVM_${query} "${value}" PARENT_SCOPE)
+            set(llvm_${query} "${value}")
         endforeach()
+        set(llvm_libs "")
+        foreach(mode link-shared link-static)
+            if(llvm_libs STREQUAL "")
+                execute_process(COMMAND "${found_CONFIG}" "--${mode}" --libs core bitreader bitwriter analysis passes
+                    OUTPUT_VARIABLE libraries RESULT_VARIABLE libraries_status ERROR_QUIET OUTPUT_STRIP_TRAILING_WHITESPACE TIMEOUT 30)
+                execute_process(COMMAND "${found_CONFIG}" "--${mode}" --system-libs
+                    OUTPUT_VARIABLE system RESULT_VARIABLE system_status ERROR_QUIET OUTPUT_STRIP_TRAILING_WHITESPACE TIMEOUT 30)
+                if(libraries_status EQUAL 0 AND system_status EQUAL 0 AND NOT libraries STREQUAL "")
+                    separate_arguments(llvm_libs UNIX_COMMAND "${libraries}")
+                    separate_arguments(llvm_system_libs UNIX_COMMAND "${system}")
+                endif()
+            endif()
+        endforeach()
+        if(llvm_libs STREQUAL "")
+            list(APPEND absent "LLVM libraries llvm-config can link, shared or static")
+        endif()
+        set(BUSTER_CODEGEN_LLVM_libs "${llvm_libs}" PARENT_SCOPE)
+        set(BUSTER_CODEGEN_LLVM_system_libs "${llvm_system_libs}" PARENT_SCOPE)
         if(NOT EXISTS "${llvm_includedir}/llvm-c/Core.h")
             list(APPEND absent "LLVM's C API headers (llvm-c/Core.h)")
         endif()

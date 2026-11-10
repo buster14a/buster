@@ -672,7 +672,8 @@ never uses them. Sanitizers, fuzzing, PGO, an explicit host runtime,
 beside the configured Clang or on `PATH`, at its version: `llvm-config` with
 LLVM's C API headers and library (the splitter is built in the tree, at
 `codegen-tools/split`, with the flags it gives), `clang++`, `llvm-nm`,
-`llvm-objcopy`, `llvm-readelf` and `ld.lld`. The Debug configuration compiles
+`llvm-objcopy`, `llvm-readobj` and `ld.lld`. LLVM's libraries link shared
+where `llvm-config` finds them, else static, as in CI's hosted release. The Debug configuration compiles
 the units as before; the final link still uses any supported `BUSTER_LINKER`.
 
 An unrelated edit reuses both units' native objects. A change to a split unit
