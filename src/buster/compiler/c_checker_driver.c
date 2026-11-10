@@ -5827,9 +5827,6 @@ static void check_driver_rejected_common(const Parser* unit, const Parser* origi
         bool ready = true;
         for (uint32_t e = 0; ready && e < known_count; e += 1)
         {
-            const bool kept = known[e] < count && (check_driver_rejected_edit(&editor, known[e]) ||
-                                                   check_driver_rejected_declaration(parser, first_input, ranges, body_count, known[e], quiet, edits, mask));
-            edited |= kept;
             // The body whose tokens hold the error: the last one to begin at or before it.
             const uint32_t token = known[e];
             uint32_t low = 0;
@@ -5845,7 +5842,13 @@ static void check_driver_rejected_common(const Parser* unit, const Parser* origi
             // A recovered error outside every body (#1447, CheckInputReport.recovered: a definition's parameter's, #1835)
             // needs no part left out: the reading recovers it again, its declaration valid, as clang keeps it. It still
             // counts in its scope (error_counts).
-            ready = kept || bodied || check_driver_rejected_recovered(first_input, token);
+            // (Such an error leaves nothing out: a prototype's dropped declaration would leave out the bodies that name its
+            // parameters' names too.)
+            const bool recovered = !bodied && check_driver_rejected_recovered(first_input, token);
+            const bool kept = !recovered && token < count && (check_driver_rejected_edit(&editor, token) ||
+                                                              check_driver_rejected_declaration(parser, first_input, ranges, body_count, token, quiet, edits, mask));
+            edited |= kept;
+            ready = kept || bodied || recovered;
             bodied_all &= bodied;
             if (bodied)
             {
