@@ -2086,7 +2086,7 @@ static void check_test_driver_tier1_labels(CheckTest* test, const char* clang, c
                 }
             }
             check_test_expect(test, loop_addresses == 1 && loop_relocations == 1 && entry,
-                              "the loop's one relocated table base is reached at entry and no direct or table edge reenters it");
+                              "the loop's single relocated table base dominates each dispatch and cannot be reentered");
             if (entry && rematerialize == 0 && path == 0)
             {
                 check_test_tier1_table_entry_controls(test, object, records, loop_records, loop_address, dispatch, loop_targets);

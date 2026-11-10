@@ -1586,6 +1586,12 @@ struct Preprocessor
     uint32_t pushed_count;
     // The #pragma clang (or GCC) diagnostic pushes not yet popped: a pop without one isn't printed (pp_pragma_diagnostic).
     uint32_t diagnostic_depth;
+    // -Wc23-extensions' mapping by those pragmas (#1934, pp_c23_extension_severity): a PPPragmaMapping, and the one each
+    // open push saved, which its pop restores, by depth (room for `c23_extension_capacity`, grown in the arena as the
+    // pushes nest: any depth).
+    uint8_t c23_extension_mapping;
+    uint8_t* c23_extension_saved;
+    uint32_t c23_extension_capacity;
     // Where the open #pragma clang assume_nonnull, arc_cf_code_audited and unsafe_buffer_usage regions begin, or 0.
     uint32_t region_locations[3];
     // #pragma GCC poison's names, by IdentId, and how many there are (pp_check_poison).
