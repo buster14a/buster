@@ -8,10 +8,12 @@
 //   ./build-regression --flags-only  # Just the fresh-tree ignored-flag regressions; cleans the selected build tree.
 //   ./build-regression --compile-commands-only  # Small database dependency fixture; does not build the compiler.
 //   ./build-regression --driver-only  # Small build.sh helper fixtures; does not configure or build the compiler.
+//   ./build-regression --parallel-codegen-only  # Small optimized-IR partition and dependency fixture.
 //   ./build-regression --ownership-only [COMPILER]  # Check an existing build's fixture ownership; builds nothing.
 //
 // It removes every tree under build/cmake (clean --all) and checks that
 //   - guarded test roots retain their private entry points when preprocessed without main.c's unity-unit selector;
+//   - the target policy data owner rejects either shared row-count bound when it drifts from the canonical rows;
 //   - active fixtures, headers and arbitrary include descendants have one unity owner, except justified exact sharing;
 //   - shared fixture declaration/include boundaries cannot grow silently inside existing shared roots;
 //   - each baseline CRT startup object relinks and post-links every affected executable, with no work when unchanged;
@@ -379,6 +381,71 @@ static void check_standalone_preprocessing(void)
         free(text.data);
     }
     pass("guarded roots retain their private entry points when preprocessed without a unity unit");
+}
+
+// Check copied source, never the working tree: increasing either reader bound would otherwise leave a valid but
+// incorrect array or extended-row loop. Require the owner's count assertion, not just an unrelated compile error.
+static void check_target_row_counts(void)
+{
+    Text forms = read_file("src/buster/compiler/x86_target_forms.c");
+    char source[PATH_MAX];
+    char copy[PATH_MAX];
+    char log[PATH_MAX];
+    snprintf(source, sizeof(source), "%s/target-counts.c", work);
+    snprintf(copy, sizeof(copy), "%s/target-forms.c", work);
+    snprintf(log, sizeof(log), "%s/target-counts.log", work);
+    write_file(source,
+               "#include <stdio.h>\n#include <assert.h>\n"
+               "#include \"buster/compiler/x86_64_encoder.c\"\n"
+               "#include \"target-forms.c\"\n", 0644);
+    char* changed = malloc(forms.length + 32);
+    if (changed == 0 || forms.length > INT_MAX)
+    {
+        fail("can't prepare target row-count fixtures");
+    }
+    static const struct
+    {
+        const char* declaration;
+        const char* diagnostic;
+    } cases[] = {
+        { 0, 0 },
+        { "BUSTER_X86_TARGET_CLASSIFIED_COUNT = ", "classified target row count must match its readers" },
+        { "BUSTER_X86_TARGET_COMPACT_COUNT = ", "compact target row count must match its readers" },
+    };
+    for (uint32_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i += 1)
+    {
+        memcpy(changed, forms.data, forms.length + 1);
+        if (cases[i].declaration != 0)
+        {
+            const char* declaration = strstr(forms.data, cases[i].declaration);
+            if (declaration == 0)
+            {
+                fail("can't find target count declaration: %s", cases[i].declaration);
+            }
+            const char* value = declaration + strlen(cases[i].declaration);
+            char* end = 0;
+            const unsigned long count = strtoul(value, &end, 10);
+            if (end == value || count >= UINT16_MAX)
+            {
+                fail("invalid target row-count fixture: %s", cases[i].declaration);
+            }
+            snprintf(changed, forms.length + 32, "%.*s%lu%s", (int)(value - forms.data), forms.data, count + 1, end);
+        }
+        write_file(copy, changed, 0644);
+        char* argv[] = { "clang", "-fsyntax-only", "-target", "x86_64-pc-linux-gnu", "-march=x86-64", "-Isrc", "-fwrapv", "-funsigned-char",
+                         "-fno-strict-aliasing", "-Wall", "-Werror", "-Wno-unused-function", "-Wno-psabi", source, 0 };
+        const int status = run(log, 0, argv);
+        Text diagnostics = read_file(log);
+        if ((status == 0) != (cases[i].diagnostic == 0) || (cases[i].diagnostic != 0 && strstr(diagnostics.data, cases[i].diagnostic) == 0))
+        {
+            fputs(diagnostics.data, stderr);
+            fail("target row-count fixture %u did not preserve its compile-time bound", i);
+        }
+        free(diagnostics.data);
+    }
+    free(changed);
+    free(forms.data);
+    pass("target row-count bounds compile unchanged and reject drift in either count");
 }
 
 static void snapshot(Snapshot* snapshot)
@@ -1105,26 +1172,30 @@ static void ownership_check_structure(const OwnershipUnits* units, const Ownersh
     }
 }
 
-// A few high-value nonstandard paths also pin their command's identity, not merely their owner count. Shared
-// headers and generated production data have exact assertions in the exception table above.
+// Pin these paths' owning unit, not merely their owner count. Production implementations with a separate
+// interface are checked here too, so every correctness build rejects a newly widened dependency even when the
+// build-only workflow is not selected. The fixture entries must also retain their include-closure classification.
 static void ownership_check_nonstandard(const OwnershipUnits* units, const OwnershipGraph* graph)
 {
     static const struct
     {
         const char* path;
         const char* owner;
+        bool fixture;
     } files[] = {
-        { "src/buster/compiler/tier0_vector_baseline_test.inc", "main_unit_backend.c" },
-        { "src/buster/compiler/tier1_allocate_test_cases.c", "main_unit_backend.c" },
-        { "src/buster/compiler/tier1_schedule_fixture.c", "main_unit_backend.c" },
-        { "src/buster/compiler/c_check_lower_inventory.c", "main_unit_checker.c" },
-        { "src/buster/compiler/c_driver_compatibility_test.h", "main_unit_checker.c" },
-        { "src/buster/compiler/differential.c", "main_unit_backend.c" },
-        { "src/buster/compiler/test_tool_test.c", "main.c" },
-        { "src/buster/compiler/test_process_test.c", "main_unit_frontend.c" },
-        { "src/buster/compiler/preprocessor_fuzz.c", "main_unit_frontend.c" },
-        { "src/buster/compiler/preprocessor_fuzz_generate.c", "main_unit_frontend.c" },
-        { "src/buster/compiler/preprocessor_fuzz_clang.c", "main_unit_frontend.c" },
+        { "src/buster/compiler/tier0_vector_baseline_test.inc", "main_unit_backend.c", true },
+        { "src/buster/compiler/tier1_allocate_test_cases.c", "main_unit_backend.c", true },
+        { "src/buster/compiler/tier1_schedule_fixture.c", "main_unit_backend.c", true },
+        { "src/buster/compiler/c_check_lower_inventory.c", "main_unit_checker.c", true },
+        { "src/buster/compiler/c_driver_compatibility_test.h", "main_unit_checker.c", true },
+        { "src/buster/compiler/differential.c", "main_unit_backend.c", true },
+        { "src/buster/compiler/test_tool_test.c", "main.c", true },
+        { "src/buster/compiler/test_process_test.c", "main_unit_frontend.c", true },
+        { "src/buster/compiler/preprocessor_fuzz.c", "main_unit_frontend.c", true },
+        { "src/buster/compiler/preprocessor_fuzz_generate.c", "main_unit_frontend.c", true },
+        { "src/buster/compiler/preprocessor_fuzz_clang.c", "main_unit_frontend.c", true },
+        { "src/buster/compiler/c_parser_impl.c", "main_unit_frontend.c", false },
+        { "src/buster/compiler/x86_target_rows.c", "main_unit_frontend.c", false },
     };
     for (uint32_t i = 0; i < sizeof(files) / sizeof(files[0]); i += 1)
     {
@@ -1139,9 +1210,10 @@ static void ownership_check_nonstandard(const OwnershipUnits* units, const Owner
             file += 1;
         }
         const uint64_t expected = unit < units->count ? UINT64_C(1) << unit : 0;
-        if (file == graph->count || expected == 0 || graph->files[file].owners != expected || !graph->files[file].fixture)
+        if (file == graph->count || expected == 0 || graph->files[file].owners != expected ||
+            (files[i].fixture && !graph->files[file].fixture))
         {
-            ownership_report(units, (OwnershipIssue){ .reason = "nonstandard fixture's command owner changed", .path = files[i].path,
+            ownership_report(units, (OwnershipIssue){ .reason = "named implementation's owner or classification changed", .path = files[i].path,
                                                       .actual = file < graph->count ? graph->files[file].owners : 0, .expected = expected });
         }
     }
@@ -1614,6 +1686,8 @@ static void check_incremental(void)
         { "src/buster/compiler/c_gnu_test.c", "main_unit_frontend.c " },
         { "src/buster/compiler/c_parser_bindings_test.c", "main_unit_frontend.c " },
         { "src/buster/compiler/x86_target_policy_test.c", "main_unit_frontend.c " },
+        { "src/buster/compiler/x86_target_rows.c", "main_unit_frontend.c tier1_model_measure.c " },
+        { "src/buster/compiler/c_parser_impl.c", "main_unit_frontend.c " },
         { "src/buster/compiler/c_preprocessor_history_test.c", "main_unit_checker.c main_unit_frontend.c " },
         { "src/buster/compiler/c_preprocessor_test.c", shared_main_units },
         { "src/buster/compiler/c_preprocessor_oracle.c", shared_main_units },
@@ -1698,6 +1772,18 @@ static void check_incremental(void)
         if (strcmp(source, "src/buster/compiler/tier1_schedule_fixture.c") == 0 && strcmp(expected, schedule_owners) == 0)
         {
             checked_owners = "main_unit_backend.c ";
+        }
+        // These production bodies are owned by FRONTEND in main.c. Their independent vector benchmarks keep
+        // complete standalone inputs; the model measurement owns target rows on scalar hosts too.
+        static const char target_row_owners[] = "main_unit_frontend.c tier1_model_measure.c tier1_select_benchmark.c ";
+        if (strcmp(source, "src/buster/compiler/x86_target_rows.c") == 0 && strcmp(expected, target_row_owners) == 0)
+        {
+            checked_owners = "main_unit_frontend.c tier1_model_measure.c ";
+        }
+        static const char parser_owners[] = "c_parser_benchmark.c main_unit_frontend.c ";
+        if (strcmp(source, "src/buster/compiler/c_parser_impl.c") == 0 && strcmp(expected, parser_owners) == 0)
+        {
+            checked_owners = "main_unit_frontend.c ";
         }
         if (files[i].owners != 0 && strcmp(checked_owners, files[i].owners) != 0)
         {
@@ -2619,16 +2705,307 @@ static void check_driver(void)
     pass("driver versions and descriptions retain their contracts; publication skips unchanged copies and preserves both outputs on staging failure");
 }
 
+// Exercise the real CMake split/merge helpers on two independent translation units with colliding private names.
+// Copies keep the source edits, malformed IR and export-manifest failures inside the disposable fixture tree.
+static void check_parallel_codegen(void)
+{
+    char directory[PATH_MAX];
+    snprintf(directory, sizeof(directory), "%s/codegen", work);
+    if (mkdir(directory, 0755) != 0 || chdir(directory) != 0 || mkdir("source", 0755) != 0)
+    {
+        fail("can't create the parallel-codegen fixture");
+    }
+    const char* files[] = { "CMakeLists.txt", "fixture_test.h", "checker_test.c", "backend_test.c", "main_test.c" };
+    for (uint32_t i = 0; i < sizeof(files) / sizeof(files[0]); i += 1)
+    {
+        char input[PATH_MAX];
+        char output[PATH_MAX];
+        snprintf(input, sizeof(input), "%s/tools/ci/codegen_fixture/%s", root, files[i]);
+        snprintf(output, sizeof(output), "source/%s", files[i]);
+        Text source = read_file(input);
+        write_file(output, source.data, 0644);
+        free(source.data);
+    }
+    char module[PATH_MAX];
+    snprintf(module, sizeof(module), "-DBUSTER_CODEGEN_MODULE_DIR=%s/cmake", root);
+    char* configure[] = { "cmake", "-S", "source", "-B", "out", "-G", "Ninja Multi-Config",
+        "-DCMAKE_C_COMPILER=clang", "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON", module, "-DBUSTER_FIXTURE_FAIL_SPLIT=OFF", 0 };
+    char* build[] = { "cmake", "--build", "out", "--config", "Release", "--parallel", "1", 0 };
+    char* execute[] = { "out/Release/codegen_fixture", 0 };
+    Text log = capture(configure);
+    free(log.data);
+    log = capture(build);
+    free(log.data);
+    log = capture(execute);
+    free(log.data);
+    const char* alpha = "out/Release/codegen/main_unit_checker/native.o";
+    const char* beta = "out/Release/codegen/main_unit_backend/native.o";
+    const char* binary = "out/Release/codegen_fixture";
+    const struct stat initial_alpha = status_of(alpha);
+    const struct stat initial_beta = status_of(beta);
+    const struct stat initial_binary = status_of(binary);
+    const char* exports = "out/Release/codegen/main_unit_checker/exports.txt";
+    const struct stat initial_exports = status_of(exports);
+    enum { BUSTER_CODEGEN_FIXTURE_PARTITIONS = 8 };
+    char partitions[BUSTER_CODEGEN_FIXTURE_PARTITIONS][PATH_MAX];
+    struct stat initial_partitions[BUSTER_CODEGEN_FIXTURE_PARTITIONS];
+    for (uint32_t part = 0; part < BUSTER_CODEGEN_FIXTURE_PARTITIONS; part += 1)
+    {
+        snprintf(partitions[part], sizeof(partitions[part]), "out/Release/codegen/main_unit_checker/part%u.bc", part);
+        initial_partitions[part] = status_of(partitions[part]);
+    }
+    char* copy_alpha[] = { "cp", (char*)alpha, "expected-alpha.o", 0 };
+    char* copy_beta[] = { "cp", (char*)beta, "expected-beta.o", 0 };
+    if (run(0, 0, copy_alpha) != 0 || run(0, 0, copy_beta) != 0)
+    {
+        fail("can't preserve the native-code fixture outputs");
+    }
+    Text database = read_file("out/compile_commands.json");
+    uint32_t commands = 0;
+    for (const char* cursor = database.data; (cursor = strstr(cursor, "\"command\"")) != 0; cursor += 9)
+    {
+        commands += 1;
+    }
+    if (commands != 3 || strstr(database.data, ".bc") != 0 || !compile_commands_file_of("out/compile_commands.json", "Release"))
+    {
+        fail("generated IR jobs leaked into the source compilation database");
+    }
+    free(database.data);
+    log = capture(build);
+    if (strstr(log.data, "no work to do") == 0 || !same_time(status_of(alpha), initial_alpha) ||
+        !same_time(status_of(beta), initial_beta) || !same_time(status_of(binary), initial_binary))
+    {
+        fail("an unchanged parallel-codegen graph rebuilt an output: %s", log.data);
+    }
+    free(log.data);
+    Text original_checker = read_file("source/checker_test.c");
+    // A real source-byte change with identical optimized IR, then a timestamp-only change, must both keep every
+    // partition and export mtime. Their completed split stamps alone must not schedule native work or relink.
+    for (uint32_t edit = 0; edit < 2; edit += 1)
+    {
+        if (edit == 0)
+        {
+            FILE* comment = fopen("source/checker_test.c", "a");
+            if (comment == 0 || fputs("\n// A source-only edit reuses unchanged optimized partitions.\n", comment) == EOF || fclose(comment) != 0)
+            {
+                fail("can't append the checker fixture comment");
+            }
+        }
+        else if (utimensat(AT_FDCWD, "source/checker_test.c", 0, 0) != 0)
+        {
+            fail("can't update the checker fixture timestamp");
+        }
+        log = capture(build);
+        if (strstr(log.data, "checker_test.c.o") == 0 || strstr(log.data, "Partitioning main_unit_checker's") == 0 ||
+            strstr(log.data, "_codegen_") != 0 || strstr(log.data, "Combining") != 0 || strstr(log.data, "Linking") != 0 ||
+            !same_time(status_of(alpha), initial_alpha) || !same_time(status_of(beta), initial_beta) ||
+            !same_time(status_of(binary), initial_binary) || !same_time(status_of(exports), initial_exports))
+        {
+            fail("an unchanged optimized module repeated native work or changed an export mtime: %s", log.data);
+        }
+        free(log.data);
+        for (uint32_t part = 0; part < BUSTER_CODEGEN_FIXTURE_PARTITIONS; part += 1)
+        {
+            if (!same_time(status_of(partitions[part]), initial_partitions[part]))
+            {
+                fail("a source-only edit rewrote unchanged partition %u", part);
+            }
+        }
+    }
+
+    // Change one private data initializer without changing the module's declarations or public boundary. Exactly
+    // its defining partition must compile again; the other seven pieces and the other translation unit are reused.
+    char* initializer = strstr(original_checker.data, "private_data = 10");
+    char* value = initializer != 0 ? strstr(initializer, "10") : 0;
+    if (value == 0)
+    {
+        fail("can't find the private data initializer");
+    }
+    value[1] = '1';
+    write_file("source/checker_test.c", original_checker.data, 0644);
+    value[1] = '0';
+    log = capture(build);
+    uint32_t changed_partitions = 0;
+    uint32_t native_jobs = 0;
+    for (uint32_t part = 0; part < BUSTER_CODEGEN_FIXTURE_PARTITIONS; part += 1)
+    {
+        changed_partitions += !same_time(status_of(partitions[part]), initial_partitions[part]);
+    }
+    for (const char* cursor = log.data; (cursor = strstr(cursor, "Building C object CMakeFiles/buster_main_unit_checker_codegen_")) != 0; cursor += 1)
+    {
+        native_jobs += 1;
+    }
+    if (changed_partitions != 1 || native_jobs != 1 || strstr(log.data, "main_unit_backend") != 0 ||
+        strstr(log.data, "Combining main_unit_checker's") == 0 || strstr(log.data, "Linking") == 0 ||
+        same_time(status_of(alpha), initial_alpha) || same_bytes(alpha, "expected-alpha.o") ||
+        !same_time(status_of(beta), initial_beta) || !same_time(status_of(exports), initial_exports))
+    {
+        fail("a private content edit didn't rebuild exactly its native partition and unit: %s", log.data);
+    }
+    free(log.data);
+    write_file("source/checker_test.c", original_checker.data, 0644);
+    free(original_checker.data);
+    log = capture(build);
+    free(log.data);
+    if (!same_bytes(alpha, "expected-alpha.o") || !same_time(status_of(beta), initial_beta))
+    {
+        fail("restoring the private initializer didn't restore deterministic native output");
+    }
+    const struct stat before_main_alpha = status_of(alpha);
+    if (utimensat(AT_FDCWD, "source/main_test.c", 0, 0) != 0)
+    {
+        fail("can't update the unrelated fixture source");
+    }
+    log = capture(build);
+    if (strstr(log.data, "Partitioning") != 0 || strstr(log.data, "Combining") != 0 ||
+        !same_time(status_of(alpha), before_main_alpha) || !same_time(status_of(beta), initial_beta))
+    {
+        fail("an unrelated source edit repeated cached native generation: %s", log.data);
+    }
+    free(log.data);
+    if (unlink("out/Release/codegen/main_unit_checker/part3.bc") != 0)
+    {
+        fail("can't remove a generated IR partition");
+    }
+    log = capture(build);
+    if (strstr(log.data, "Partitioning main_unit_checker's") == 0 || strstr(log.data, "main_unit_backend") != 0 ||
+        !same_bytes(alpha, "expected-alpha.o") || !same_bytes(beta, "expected-beta.o"))
+    {
+        fail("a missing partition wasn't restored in its own unit: %s", log.data);
+    }
+    free(log.data);
+
+    // A failed backend and a failed export restoration must both stop before replacing the native object or link.
+    const struct stat before_failure_alpha = status_of(alpha);
+    const struct stat before_failure_binary = status_of(binary);
+    write_file("out/Release/codegen/main_unit_checker/part3.bc", "invalid LLVM IR\n", 0644);
+    if (run("backend-failure.log", 0, build) == 0 || !same_time(status_of(alpha), before_failure_alpha) ||
+        !same_time(status_of(binary), before_failure_binary))
+    {
+        fail("a failed IR backend replaced a completed native object or executable");
+    }
+    if (unlink("out/Release/codegen/main_unit_checker/part3.bc") != 0)
+    {
+        fail("can't remove the malformed IR partition");
+    }
+    log = capture(build);
+    free(log.data);
+    Text original_exports = read_file(exports);
+    write_file(exports, "missing_public_definition\n", 0644);
+    const struct stat before_merge_alpha = status_of(alpha);
+    const struct stat before_merge_binary = status_of(binary);
+    if (run("merge-failure.log", 0, build) == 0 || !same_time(status_of(alpha), before_merge_alpha) ||
+        !same_time(status_of(binary), before_merge_binary))
+    {
+        fail("a failed public-symbol restoration replaced a completed output");
+    }
+    write_file(exports, original_exports.data, 0644);
+    free(original_exports.data);
+    log = capture(build);
+    free(log.data);
+    configure[10] = "-DBUSTER_FIXTURE_FAIL_SPLIT=ON";
+    log = capture(configure);
+    free(log.data);
+    const struct stat before_split_binary = status_of(binary);
+    if (run("split-failure.log", 0, build) == 0 || !same_time(status_of(binary), before_split_binary))
+    {
+        fail("a failed splitter replaced the completed executable");
+    }
+    configure[10] = "-DBUSTER_FIXTURE_FAIL_SPLIT=OFF";
+    log = capture(configure);
+    free(log.data);
+    log = capture(build);
+    free(log.data);
+
+    // C-to-IR cannot diagnose target assembly. The native jobs must retain -Werror for those late diagnostics.
+    Text original_source = read_file("source/checker_test.c");
+    FILE* warning = fopen("source/checker_test.c", "a");
+    if (warning == 0 || fputs("\n__attribute__((used)) static int codegen_warning(int value)\n{\n"
+        "    __asm__ volatile(\".warning \\\"codegen diagnostic fixture\\\"\" : \"+r\"(value));\n"
+        "    return value;\n}\n", warning) == EOF || fclose(warning) != 0)
+    {
+        fail("can't append the inline-assembly diagnostic fixture");
+    }
+    const struct stat before_warning_binary = status_of(binary);
+    if (run("warning-failure.log", 0, build) == 0 || !same_time(status_of(binary), before_warning_binary))
+    {
+        fail("the partition backend accepted an inline-assembly warning under -Werror");
+    }
+    Text diagnostic = read_file("warning-failure.log");
+    if (strstr(diagnostic.data, "codegen diagnostic fixture") == 0 || strstr(diagnostic.data, "-Winline-asm") == 0)
+    {
+        fail("the inline-assembly fixture failed without its intended diagnostic: %s", diagnostic.data);
+    }
+    free(diagnostic.data);
+    write_file("source/checker_test.c", original_source.data, 0644);
+    free(original_source.data);
+    log = capture(build);
+    free(log.data);
+    log = capture(execute);
+    free(log.data);
+    if (!same_bytes(alpha, "expected-alpha.o") || !same_bytes(beta, "expected-beta.o"))
+    {
+        fail("recovered native partitions weren't deterministic");
+    }
+    log = capture(build);
+    if (strstr(log.data, "no work to do") == 0)
+    {
+        fail("the recovered codegen graph was not unchanged: %s", log.data);
+    }
+    free(log.data);
+    if (chdir(root) != 0)
+    {
+        fail("can't return to %s", root);
+    }
+    pass("parallel native jobs preserve private function/data/TLS and public/weak bindings, source ownership, caching, failures and -Werror");
+}
+
+static void check_parallel_codegen_compiler(void)
+{
+    const char* const settings[] = {
+        "BUSTER_PARALLEL_CODEGEN=1", "BUSTER_DEBUG_INFO=0", "BUSTER_SANITIZER=none", "BUSTER_FUZZ_AVAILABLE=0",
+        "BUSTER_FUZZ_ENTRY=", "BUSTER_PGO=0", "BUSTER_PGO_TRAIN=", "BUSTER_HOST_RUNTIME=", "BUSTER_BUILD_DEFINES=", 0,
+    };
+    BUILD_ENV(settings, "build");
+    char path[PATH_MAX];
+    char* print[] = { "./build.sh", "print-output", 0 };
+    char log[PATH_MAX];
+    snprintf(log, sizeof(log), "%s/parallel-codegen-output.log", work);
+    if (run(log, settings, print) != 0)
+    {
+        fail("can't find the opt-in compiler");
+    }
+    Text output = read_file(log);
+    char* newline = strchr(output.data, '\n');
+    if (newline != 0)
+    {
+        *newline = 0;
+    }
+    snprintf(path, sizeof(path), "%s", output.data);
+    free(output.data);
+    char* baked[] = { path, "test-baked-tables", 0 };
+    output = capture(baked);
+    free(output.data);
+    const struct stat compiler = status_of(path);
+    BUILD_ENV(settings, "build");
+    if (!same_time(status_of(path), compiler) || !same_file("build/compiler", path))
+    {
+        fail("an unchanged opt-in compiler build regenerated or failed to publish its executable");
+    }
+    pass("the full opt-in compiler links native units, passes baking/canary checks and reuses its unchanged executable");
+}
+
 int main(int argc, char** argv)
 {
     const bool flags_only = argc == 2 && strcmp(argv[1], "--flags-only") == 0;
     const bool crt_only = argc == 2 && strcmp(argv[1], "--crt-link-only") == 0;
     const bool commands_only = argc == 2 && strcmp(argv[1], "--compile-commands-only") == 0;
     const bool driver_only = argc == 2 && strcmp(argv[1], "--driver-only") == 0;
+    const bool codegen_only = argc == 2 && strcmp(argv[1], "--parallel-codegen-only") == 0;
     const bool ownership_only = (argc == 2 || argc == 3) && strcmp(argv[1], "--ownership-only") == 0;
-    if (argc != 1 && !flags_only && !crt_only && !commands_only && !driver_only && !ownership_only)
+    if (argc != 1 && !flags_only && !crt_only && !commands_only && !driver_only && !ownership_only && !codegen_only)
     {
-        fail("usage: build-regression [--flags-only | --crt-link-only | --compile-commands-only | --driver-only | --ownership-only [COMPILER]]");
+        fail("usage: build-regression [--flags-only | --crt-link-only | --compile-commands-only | --driver-only | --parallel-codegen-only | --ownership-only [COMPILER]]");
     }
     if (getcwd(root, sizeof(root)) == 0 || access("build.sh", X_OK) != 0)
     {
@@ -2645,6 +3022,7 @@ int main(int argc, char** argv)
     if (argc == 1 || ownership_only)
     {
         check_standalone_preprocessing();
+        check_target_row_counts();
     }
     if (argc == 1 || driver_only)
     {
@@ -2654,15 +3032,19 @@ int main(int argc, char** argv)
     {
         check_existing_ownership(argc == 3 ? argv[2] : 0);
     }
-    if (!ownership_only && !driver_only && !flags_only && !commands_only)
+    if (argc == 1 || codegen_only)
+    {
+        check_parallel_codegen();
+    }
+    if (!ownership_only && !driver_only && !flags_only && !commands_only && !codegen_only)
     {
         check_crt_link_dependencies();
     }
-    if (!ownership_only && !driver_only && !flags_only && !crt_only)
+    if (!ownership_only && !driver_only && !flags_only && !crt_only && !codegen_only)
     {
         check_compile_commands();
     }
-    if (!ownership_only && !driver_only && !crt_only && !commands_only)
+    if (!ownership_only && !driver_only && !crt_only && !commands_only && !codegen_only)
     {
         BUILD("clean");
         char* output[] = { "./build.sh", "print-output", 0 };
@@ -2682,6 +3064,7 @@ int main(int argc, char** argv)
             check_failures();
             check_presets_and_prints();
             check_experiments();
+            check_parallel_codegen_compiler();
         }
     }
     char* remove[] = { "rm", "-rf", work, 0 };

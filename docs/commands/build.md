@@ -149,6 +149,7 @@ a preset's tree with `cmake --fresh --preset NAME`, or build it with
 | `BUSTER_BAKE` | `1` | `0` leaves the tables to be built when the executable runs |
 | `BUSTER_PGO` | `0` | `1` builds Release with a profile of the compiler's own compiles (below): a `-pgo` tree, Release alone |
 | `BUSTER_PGO_TRAIN` | none | with `BUSTER_PGO=1`, a bash script that trains the profile in place of those compiles |
+| `BUSTER_PARALLEL_CODEGEN` | `0` | `1` enables experimental parallel native generation for CHECKER and BACKEND in a Release-g0 `-pcg8` tree |
 
 An empty value is the default, but for `BUSTER_DEBUG_INFO` and `BUSTER_LINKER`,
 which reject it; the incompatible combinations fail as they always have
@@ -400,6 +401,38 @@ after changing these guards; the build regression harness checks representative
 private-test edits against their exact owning units and keeps shared helper and
 production dependencies explicit.
 
+### Production parsing and implementation dependencies
+
+`c_parser.c` holds the parser's shared types, declarations and small helpers;
+`c_parser_impl.c` holds its private data and function bodies. Only FRONTEND
+includes those bodies in the unity build. Other units call the same frontend
+entry points through ordinary external declarations. Standalone inclusion of
+`c_parser.c` keeps the complete implementation, including the vector parser
+benchmark. An implementation edit therefore rebuilds FRONTEND alone on a scalar
+host, and FRONTEND plus `c_parser_benchmark.c` on a vector host. Shared interface
+edits still rebuild their consumers.
+
+The x86 target-form row enums, initializers and per-row policy assertions are
+also parsed only by their data owner or a standalone consumer. Other units use
+complete array declarations with two explicit bounds. The owner recomputes
+those bounds from the canonical rows and asserts equality, so adding or removing
+a row requires updating the interface deliberately. Editing row contents rebuilds
+FRONTEND and `tier1_model_measure.c`, plus `tier1_select_benchmark.c` on a vector
+host; changing a shared bound correctly rebuilds the readers too.
+
+The ownership-only check pins both production paths to FRONTEND in the unity
+graph. The full build regression also checks their exact incremental fanout,
+including standalone consumers, and rejects both kinds of target row-count
+drift. A new dependency cannot silently undo these boundaries.
+
+The [validation packet](https://github.com/buster14a/buster-performance/tree/f29dc2c6616fb0530a2b21b1555507da79f7ba25/docs/measurements/build-production-codegen-2026-11-09)
+records the before/after dependencies, the parser definition and object
+preservation checks, and the optional parallel-codegen contract and runtime
+results below. Ordinary unity expansion falls by about 35 MB (10.6%) in each
+host configuration. Its elapsed-time observations are development diagnostics;
+approved-host build and runtime measurements are still required before changing
+the experimental mode's default.
+
 ### Preventing dependency growth
 
 Give new test, inline benchmark and measurement C files the `*_test.c`,
@@ -487,6 +520,69 @@ that executable's parallel runner, which gives each command the executable as
 calls. The inventory needs CI's tools and frozen inputs ([CI](../ci.md)) and
 every core, so it runs alone. `./build.sh test --config Debug -- -L build`
 runs the first label in Debug.
+
+## Experimental parallel native generation
+
+`BUSTER_PARALLEL_CODEGEN=1` makes the two longest units' native-code generation
+separate Ninja jobs, after their ordinary Clang `-O3` optimization:
+
+```sh
+BUSTER_DEBUG_INFO=0 BUSTER_PARALLEL_CODEGEN=1 ./build.sh --jobs 8
+```
+
+The mode is off by default. It currently accepts Release without debug information,
+sanitizers, fuzzing, PGO, an explicit host runtime, lexer variants or
+`BUSTER_BUILD_DEFINES`; unsupported explicit combinations fail. `build.sh` uses a
+separate `VARIANT-pcg8` tree with Release alone. Direct CMake configuration also
+requires `CMAKE_CONFIGURATION_TYPES=Release` and `BUSTER_DEBUG_INFO=0`. Normal
+builds retain their existing configurations, flags and tool requirements.
+
+The opt-in mode needs `llvm-split`, `llvm-nm`, `llvm-objcopy` and `ld.lld` matching
+the configured Clang version, found beside Clang or on `PATH`. These tools generate
+ordinary native objects before the final link, so `BUSTER_LINKER` still selects
+any supported final linker. A missing or mismatched partition tool fails the
+explicit opt-in configuration.
+
+The original CMake object target compiles each heavy C source to fully optimized
+LLVM bitcode with `-emit-llvm`; it does not use an LTO pre-link optimization
+pipeline. That target retains the source's original depfile and compilation
+database record. `llvm-split` writes eight fixed partitions, which eight generated
+object targets compile with the same host CPU choice and driver PIC defaults,
+`-O3` native-code generation, and the IR optimizer disabled. Ninja schedules those
+jobs normally, so `--jobs` and a `cores` grant bound their concurrency. The generated
+IR jobs are excluded from the compilation database.
+
+Each unit's eight objects are partially linked in fixed order, at ELF linker
+`-O0` with one linker thread. Partitioning promotes private functions, data and TLS
+to hidden globals; the merge restores all definitions outside the source module's
+original public export list to local binding. Actual unresolved strong and weak
+symbols are preserved and checked. No source-level unit shares new private state
+with another unit. The final native object lives at
+`Release/codegen/UNIT/native.o`; the original `CMakeFiles/.../UNIT.c.o` is bitcode
+in this mode. Linking, stack-canary checks and shifted links use the native object.
+
+An unrelated source edit reuses both cached native objects. A change to a heavy
+unit rebuilds its source IR and split, but byte-identical partitions and the public
+export list retain their existing timestamps. Native generation runs only for
+changed or missing pieces; comment-only and timestamp-only source edits that leave
+optimized IR unchanged do not repeat native generation or linking. Changed native
+objects then link and bake as usual. Missing generated pieces are restored through
+their declared dependencies. Failed splitting, native compilation or symbol
+restoration stops the graph before a replacement executable can be published.
+
+C frontend diagnostics keep their normal source locations. Diagnostics produced
+only when compiling inline assembly remain fatal under `-Werror`, but in this
+experimental mode they report the inline assembly without the original C file
+and line. Native code layout can also differ after partitioning; this option does
+not promise byte-identical machine code or establish a runtime performance gain.
+
+`build-regression --parallel-codegen-only` exercises the production helpers on two
+translation units with identically named private functions, data and TLS, distinct
+hidden public entries, and shared strong and weak external references. It checks
+runtime isolation across threads, the source compilation database, unchanged and
+source-only edits, one-partition private data edits, missing pieces, deterministic
+regeneration, late assembly warnings and failed-stage recovery. The full build
+regression also builds the real opt-in compiler once and runs its baking checks.
 
 ## A profile-guided build
 
