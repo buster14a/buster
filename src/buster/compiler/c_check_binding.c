@@ -355,6 +355,23 @@ static void check_input_unused_events(CheckInputReader* reader, const uint8_t* u
     output->resource |= !valid;
 }
 
+// An undeclared name's error, with the keyword or the type name its typo's search suggested (#1447,
+// check_typo_suggestion): the report's detail (the keyword's index + 1) and subject (the typedef's token + 1).
+static void check_input_binding_undeclared(CheckInputReader* reader, uint32_t token)
+{
+    CheckInput* output = reader->output;
+    const uint32_t before = output->report_count;
+    check_input_report(reader, token, CHECK_INPUT_UNDECLARED);
+    uint32_t keyword = 0;
+    uint32_t type = BUSTER_CHECK_NONE;
+    check_typo_suggestion(reader, token, &keyword, &type);
+    if (output->report_count == before + 1 && !output->resource)
+    {
+        output->reports[before].detail = keyword;
+        output->reports[before].subject = type < reader->parser->tokens.count ? type + 1 : 0;
+    }
+}
+
 // `resolved` has an answer for each of reader->bindings' events (only its uses' are read). Every answer is
 // checked before any is published: a use names a token, and sees no event at or after itself.
 // A use's retained answer. Declaration tokens carry immutable elaborated types; all writes belong to the use token.
@@ -382,6 +399,9 @@ static uint32_t check_input_binding_correct(CheckInputReader* reader, uint32_t t
             typo->corrected_events[typo->corrected_count] = event;
             typo->corrected_handles[typo->corrected_count] = result;
             typo->corrected_count += 1;
+            output->corrected_tokens = output->corrected_tokens == NULL ? typo->corrected_tokens : output->corrected_tokens;
+            output->corrected_tokens[output->corrected_count] = token;
+            output->corrected_count += 1;
         }
     }
     return result;
@@ -417,7 +437,7 @@ static void check_input_binding_answer(CheckInputReader* reader, const uint32_t*
         }
         if (declaration == BUSTER_CHECK_NONE)
         {
-            check_input_report(reader, token, CHECK_INPUT_UNDECLARED);
+            check_input_binding_undeclared(reader, token);
         }
     }
 }
@@ -462,17 +482,27 @@ static bool check_input_binding_answers(CheckInputReader* reader, const uint32_t
         check_input_binding_answer(reader, resolved, uses != NULL ? uses[at] : at);
     }
     // A use of an invalid declaration (#1447, check_input_invalid_declare) names none, as an undeclared one doesn't, and
-    // its report is quiet: only a unit with one pays for the pass.
-    for (uint32_t at = 0; valid && !deferred && reader->output->invalid_count != 0 && at < use_count; at += 1)
+    // its report is quiet; so does an ambiguous one of a name two C23 definitions of an enum declare
+    // (check_tag_enum_ambiguous), whose report is clang's error. Only a unit with one pays for the pass.
+    const bool invalid = reader->output->invalid_count != 0;
+    for (uint32_t at = 0; valid && !deferred && (invalid || reader->ambiguous_count != 0) && at < use_count; at += 1)
     {
         const uint32_t event = uses != NULL ? uses[at] : at;
         const uint32_t token = events->declaration[event];
         const uint32_t declaration = events->operation[event] == C_BINDING_USE && token < count ? output->declarations[token] : BUSTER_CHECK_NONE;
-        if (declaration < count && reader->output->invalid_declarations[declaration] != 0)
+        const uint32_t pair = declaration < count && reader->ambiguous_index != NULL ? reader->ambiguous_index[declaration] : 0;
+        const bool ambiguous = pair != 0 && token < reader->ambiguous_ends[pair - 1];
+        if (ambiguous || (invalid && declaration < count && reader->output->invalid_declarations[declaration] != 0))
         {
             output->declarations[token] = BUSTER_CHECK_NONE;
             reader->declared_types[token] = 0;
-            check_input_report(reader, token, CHECK_INPUT_INVALID_USE);
+            const uint32_t before = output->report_count;
+            check_input_report(reader, token, ambiguous ? CHECK_INPUT_AMBIGUOUS : CHECK_INPUT_INVALID_USE);
+            if (ambiguous && output->report_count == before + 1 && !output->resource)
+            {
+                output->reports[before].note_token = declaration;
+                output->reports[before].attribute = reader->ambiguous_partners[pair - 1];
+            }
         }
     }
     valid &= !output->resource;
@@ -656,7 +686,7 @@ static bool check_input_binding_columns(CheckInputReader* reader, const ParseBin
             }
             if (declaration == BUSTER_CHECK_NONE)
             {
-                check_input_report(reader, token, CHECK_INPUT_UNDECLARED);
+                check_input_binding_undeclared(reader, token);
             }
         }
     }

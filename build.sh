@@ -115,9 +115,16 @@ clang="$(command -v clang)" || die "clang isn't on PATH"
 cmake="$(command -v cmake)" || die "cmake (3.25 or later) isn't on PATH"
 version_at_least()
 {
-    [ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | sed -n 1p)" = "$2" ]
+    local major minor minimum_major="${2%%.*}" minimum_minor="${2#*.}"
+    [[ "$1" =~ ^([0-9]+)\.([0-9]+) ]] || return 1
+    major="${BASH_REMATCH[1]}"
+    minor="${BASH_REMATCH[2]}"
+    ((10#$major > 10#$minimum_major || (10#$major == 10#$minimum_major && 10#$minor >= 10#$minimum_minor)))
 }
-cmake_version="$("$cmake" --version | sed -n '1s/^cmake version \([0-9][0-9.]*\).*/\1/p')"
+cmake_version="$("$cmake" --version)"
+cmake_version="${cmake_version%%$'\n'*}"
+[[ "$cmake_version" =~ ^cmake\ version\ ([0-9][0-9.]*) ]] || die "couldn't read cmake's version: $cmake_version"
+cmake_version="${BASH_REMATCH[1]}"
 version_at_least "$cmake_version" 3.25 || die "cmake $cmake_version is older than 3.25"
 
 # The settings: the environment's BUSTER_* variables, each passed explicitly, so that unsetting one restores its
@@ -142,6 +149,7 @@ settings=(
     "-DBUSTER_BAKE=${BUSTER_BAKE:-1}"
     "-DBUSTER_PGO=${BUSTER_PGO:-0}"
     "-DBUSTER_PGO_TRAIN=$pgo_train"
+    "-DBUSTER_PARALLEL_CODEGEN=${BUSTER_PARALLEL_CODEGEN:-auto}"
 )
 
 # The long commands (configuring, building, testing, checking) run in a process group of their own, `child`, which an
@@ -170,17 +178,12 @@ run()
     return "$status"
 }
 
-# The description's $1 (cmake/BusterPrint.cmake) for the settings, one argument per line, to standard output. Its
-# file is removed here, since a command substitution's or pipeline's subshell can't add it to the script's cleanup.
+# The description's $1 (cmake/BusterPrint.cmake), one argument per line. Every caller captures a pipe, so the script
+# can write straight to stdout, once after successful validation, without a temporary file and another copy.
 describe()
 {
-    local output status=0
-    output="$(mktemp)"
-    "$cmake" "-DBUSTER_PRINT=$1" "-DBUSTER_PRINT_OUTPUT=$output" "-DBUSTER_PRINT_CONFIG=$config" \
-        "-DBUSTER_C_COMPILER=$clang" "${settings[@]}" -P "$root/cmake/BusterPrint.cmake" >&2 || status=$?
-    [ "$status" -ne 0 ] || cat "$output"
-    rm -f -- "$output"
-    return "$status"
+    "$cmake" "-DBUSTER_PRINT=$1" -DBUSTER_PRINT_OUTPUT=/dev/stdout "-DBUSTER_PRINT_CONFIG=$config" \
+        "-DBUSTER_C_COMPILER=$clang" "${settings[@]}" -P "$root/cmake/BusterPrint.cmake"
 }
 
 # The number of cores of the CPUs this process may run on, by their core_cpus_list, or 0 if /sys doesn't say: a build
@@ -375,18 +378,22 @@ configure_arguments=(
     "-DBUSTER_SHIFT_SOURCE=$shift_source"
     "-DBUSTER_SHIFTS=$shift_bytes"
 )
-toolchain="clang $clang ($(realpath "$clang")): $("$clang" --version | sed -n 1p)"
-tools="$(command -v nm llvm-nm readelf llvm-readelf wild mold ld.lld ld.bfd | tr '\n' ' ' || true)"
+clang_version="$("$clang" --version)"
+toolchain="clang $clang ($(realpath "$clang")): ${clang_version%%$'\n'*}"
+tools="$(command -v nm llvm-nm llvm-split llvm-objcopy readelf llvm-readelf wild mold ld.lld ld.bfd | tr '\n' ' ' || true)"
 stamp="$tree/build.sh.configuration"
 wanted="$(printf '%s\n' "$toolchain" "cmake $cmake $cmake_version" "ninja $ninja $ninja_version" "tools $tools" "${configure_arguments[@]}")"
 
+recorded=""
 if [ -d "$tree" ]; then
     previous=""
     if [ -f "$stamp" ]; then
-        previous="$(sed -n 1p "$stamp")"
+        recorded="$(<"$stamp")"
+        previous="${recorded%%$'\n'*}"
     elif [ -f "$tree/buster-toolchain.txt" ]; then
         # A tree a preset configured: CMakeLists.txt records the same identity of the clang it configured with.
-        previous="$(sed -n 1p "$tree/buster-toolchain.txt")"
+        previous="$(<"$tree/buster-toolchain.txt")"
+        previous="${previous%%$'\n'*}"
     elif [ -e "$tree" ]; then
         previous="an unknown one"
     fi
@@ -395,7 +402,7 @@ if [ -d "$tree" ]; then
         rm -rf -- "$tree"
     fi
 fi
-if [ "$command" = configure ] || [ ! -f "$stamp" ] || [ ! -f "$tree/build.ninja" ] || [ "$(cat "$stamp")" != "$wanted" ]; then
+if [ "$command" = configure ] || [ ! -f "$stamp" ] || [ ! -f "$tree/build.ninja" ] || [ "$recorded" != "$wanted" ]; then
     rm -f -- "$stamp"
     run "$cmake" "${configure_arguments[@]}" >&2
     printf '%s\n' "$wanted" > "$stamp"
@@ -449,16 +456,18 @@ publish()
     exec {publication}> "$root/build/.publish.lock"
     flock "$publication"
     # Both files are made first, so that a failure leaves the published ones as they were.
-    local commands="$root/build/.compile_commands.json.$$" next="$root/build/.compiler.$$"
-    "$cmake" "-DINPUT=$tree/compile_commands.json" "-DOUTPUT=$commands" "-DCONFIG=$config" \
-        -P "$root/cmake/BusterCompileCommands.cmake" || { rm -f -- "$commands"; return 1; }
+    local commands="$root/build/.compile_commands.json.$$" next="$root/build/.compiler.$$" changed=0
+    # Ninja updates this configuration's database when its inputs change. Copy, never hard-link: the next build
+    # may rewrite its cached database before a later compile fails, which must leave the published files intact.
+    if ! cmp -s -- "$tree/$config/compile_commands.json" "$root/build/compile_commands.json"; then
+        cp -f -- "$tree/$config/compile_commands.json" "$commands" || { rm -f -- "$commands"; return 1; }
+        changed=1
+    fi
     if [ ! "$root/build/compiler" -ef "$binary" ]; then
         ln -f -- "$binary" "$next" 2> /dev/null || cp -f -- "$binary" "$next" || { rm -f -- "$commands" "$next"; return 1; }
         mv -f -T -- "$next" "$root/build/compiler"
     fi
-    if cmp -s -- "$commands" "$root/build/compile_commands.json"; then
-        rm -f -- "$commands"
-    else
+    if [ "$changed" = 1 ]; then
         mv -f -T -- "$commands" "$root/build/compile_commands.json"
     fi
     flock -u "$publication"

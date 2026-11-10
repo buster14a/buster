@@ -52,7 +52,8 @@ static String8 check_semantic_tag_spelling(const Parser* parser, Preprocessor* p
 {
     const bool unnamed = parser->tokens.kinds[token] == PARSE_KIND_STRUCT;
     uint32_t keyword = token;
-    for (uint32_t steps = 0; !unnamed && keyword != 0 && steps < 64 && parser->tokens.kinds[keyword] != PARSE_KIND_STRUCT; steps += 1)
+    for (uint32_t steps = 0; !unnamed && keyword != 0 && steps < 64 && parser->tokens.kinds[keyword] != PARSE_KIND_STRUCT && parser->tokens.kinds[keyword] != PARSE_KIND_ENUM;
+         steps += 1)
     {
         keyword -= 1;
     }
@@ -169,6 +170,29 @@ static uint32_t check_semantic_tag_notes(const Parser* parser, Preprocessor* pp,
             texts[0] = check_warning_text(scratch, "attribute '%.*s' here", (int)first_name.length, first_name.pointer);
             texts[1] = check_warning_text(scratch, "attribute '%.*s' here", (int)second_name.length, second_name.pointer);
             break;
+        case 7: // BUSTER_CHECK_TAG_ENUM_VALUE: an enum's (#1447), the second definition's enumerator then the earlier's
+        case 8: // BUSTER_CHECK_TAG_ENUM_EXTRA: one past the other's list, and "no corresponding enumerator here"
+        {
+            const uint64_t values[2] = { report->value, (uint64_t)report->type | (uint64_t)report->type_spelling << 32 };
+            const String8 names[2] = { first_name, second_name };
+            const uint32_t tokens[2] = { first, second };
+            for (uint32_t n = 0; n < (report->detail == 7 ? 2u : 1u); n += 1)
+            {
+                // Printed as its type's signedness has it, as clang's APSInt is.
+                const TypeId type = tokens[n] < count && input->declared_types != NULL ? input->declared_types[tokens[n]] : BUSTER_TYPE_INT;
+                uint32_t width = 64;
+                bool sign = true;
+                if (!check_action_integer_type(types, type, &width, &sign) || width > 64)
+                {
+                    width = 64;
+                }
+                const uint64_t bits = width < 64 ? values[n] & ((UINT64_C(1) << width) - 1) : values[n];
+                const int64_t signed_value = sign && width < 64 && (bits >> (width - 1)) != 0 ? (int64_t)(bits | ~((UINT64_C(1) << width) - 1)) : (int64_t)bits;
+                texts[n] = sign ? check_warning_text(scratch, "enumerator '%.*s' with value %lld here", (int)names[n].length, names[n].pointer, (long long)signed_value) :
+                                  check_warning_text(scratch, "enumerator '%.*s' with value %llu here", (int)names[n].length, names[n].pointer, (unsigned long long)bits);
+            }
+            texts[1] = report->detail == 7 ? texts[1] : "no corresponding enumerator here";
+        } break;
         default: // CHECK_TAG_MISMATCH_EXTRA_NEW, CHECK_TAG_MISMATCH_EXTRA_OLD
         {
             const String8 first_type = check_driver_warning_type(parser, pp, input, types, spell, scratch, report->type,
@@ -239,6 +263,10 @@ static const char* check_semantic_input(const Parser* parser, Preprocessor* pp, 
     else if (report->message == CHECK_INPUT_ENUMERATOR_REDEFINITION && name.length != 0)
     {
         result = check_warning_text(scratch, "redefinition of enumerator '%.*s'", (int)name.length, name.pointer);
+    }
+    else if (report->message == CHECK_INPUT_AMBIGUOUS && name.length != 0)
+    {
+        result = check_warning_text(scratch, "reference to '%.*s' is ambiguous", (int)name.length, name.pointer);
     }
     else if (report->message == CHECK_INPUT_ARRAY_LITERAL_MISMATCH)
     {
@@ -963,7 +991,9 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
                 }
                 const uint32_t target = named < count ? graph->tokens[named] : BUSTER_CHECK_NONE;
                 const uint32_t declaration = target < input->token_count ? input->declarations[target] : BUSTER_CHECK_NONE;
-                const String8 name = target < parser->tokens.count ? check_semantic_name(parser, pp, target) : (String8){ "", 0 };
+                const String8 name = target < parser->tokens.count ?
+                                     check_driver_warning_name(pp, check_driver_corrected_name(parser, input, target, parser->tokens.names[target])) :
+                                     (String8){ "", 0 };
                 const bool variable = walked && named < count && graph->ops[named] == CHECK_OP_VALUE && declaration < input->token_count && name.length != 0;
                 const String8 declared = variable ? check_driver_warning_type(parser, pp, input, types, spell, scratch, check_stream_type(stream, named),
                                                                               check_semantic_operand_spelling(parser, input, stream, types, named)) : (String8){ "", 0 };
@@ -997,11 +1027,16 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
             const uint32_t second = graph->argument_nodes[offset + 1];
             const TypeId first_type = first < stream->count ? check_stream_type(stream, first) : 0;
             const TypeId second_type = second < stream->count ? check_stream_type(stream, second) : 0;
-            // A cast's typedef is its type name's (`(D)1`'s D), any other operand's its object's.
-            const uint32_t first_spelling = first < graph->count && graph->ops[first] == CHECK_OP_CAST ? check_input_operand_type_spelling(input, parser, first) :
-                                                                                                        check_semantic_operand_spelling(parser, input, stream, types, first);
-            const uint32_t second_spelling = second < graph->count && graph->ops[second] == CHECK_OP_CAST ? check_input_operand_type_spelling(input, parser, second) :
-                                                                                                           check_semantic_operand_spelling(parser, input, stream, types, second);
+            // A cast's typedef is its type name's (`(D)1`'s D), a sizeof's or an alignof's clang's __size_t
+            // (check_input_operand_type_spelling's sentinel), any other operand's its object's.
+            const bool first_typed = first < graph->count && (graph->ops[first] == CHECK_OP_CAST || graph->ops[first] == CHECK_OP_SIZEOF ||
+                                                              graph->ops[first] == CHECK_OP_ALIGNOF);
+            const bool second_typed = second < graph->count && (graph->ops[second] == CHECK_OP_CAST || graph->ops[second] == CHECK_OP_SIZEOF ||
+                                                                graph->ops[second] == CHECK_OP_ALIGNOF);
+            const uint32_t first_spelling = first_typed ? check_input_operand_type_spelling(input, parser, first) :
+                                                          check_semantic_operand_spelling(parser, input, stream, types, first);
+            const uint32_t second_spelling = second_typed ? check_input_operand_type_spelling(input, parser, second) :
+                                                            check_semantic_operand_spelling(parser, input, stream, types, second);
             if (report->diagnostic == CHECK_DIAG_INVALID_TYPE && first_type != 0 && second_type != 0)
             {
                 const bool second_wrong = check_action_kind(types, first_type) == BUSTER_TYPE_KIND_FLOATING;

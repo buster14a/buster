@@ -11,11 +11,11 @@
 // objects were compared, so that a corpus whose files the backend comes to refuse can't pass by comparing none.
 // --id-order N checks each file with its identifiers' ids in another order, as the driver's --id-order gives them (#153).
 // Include after c_checker_test.c for the shared source-oracle and exact-value comparison helpers.
-
+// Backend commands share only check_corpus_number, the numeric option reader.
 #include "buster/compiler/test_paths.h"
 #ifndef BUSTER_C_CHECK_CORPUS_INCLUDED
 #define BUSTER_C_CHECK_CORPUS_INCLUDED
-
+#if !defined(BUSTER_UNIT) || BUSTER_SOURCE_CONSUMER
 #include "c_check_prefix.c"
 #include "c_check_repair.c"
 
@@ -797,11 +797,14 @@ static void check_corpus_first_warning(CheckCorpusPath* path, const Parser* pars
         {
             const CheckWarningEvent* event = views[v].events + i;
             const CheckWarningCommandLine command = check_warning_command_line(&pp->options, event->id, (event->flags & BUSTER_CHECK_WARNING_DEFAULT_IGNORED) != 0, false);
-            if (command.quiet || (event->flags & BUSTER_CHECK_WARNING_SUPPRESSED) != 0)
+            // A grouped diagnose_if's policy is its group's (#1447).
+            const bool grouped = check_driver_warning_group(event) != UINT32_MAX;
+            if (!grouped && (command.quiet || (event->flags & BUSTER_CHECK_WARNING_SUPPRESSED) != 0))
             {
                 continue;
             }
-            const CheckWarningSeverity severity = check_diagnostic_severity_id_from(&path->input, event->token, event->source, event->id, command.severity);
+            const CheckWarningSeverity severity = grouped ? check_driver_warning_severity(pp, &path->input, event) :
+                                                  check_diagnostic_severity_id_from(&path->input, event->token, event->source, event->id, command.severity);
             if (severity == CHECK_WARNING_IGNORE || event->token >= parser->tokens.count)
             {
                 continue;
@@ -3312,7 +3315,7 @@ static bool check_corpus_generated(CheckCorpusTally* tally, char** files, uint32
     free(clang_arguments);
     return valid && done == count;
 }
-
+#endif
 static bool check_corpus_number(const char* text, uint64_t* result)
 {
     char* end = 0;
@@ -3320,7 +3323,7 @@ static bool check_corpus_number(const char* text, uint64_t* result)
     *result = strtoull(text, &end, 10);
     return errno == 0 && text[0] != '-' && end != text && *end == 0;
 }
-
+#if !defined(BUSTER_UNIT) || BUSTER_SOURCE_CONSUMER
 static int check_corpus_path_compare(const void* a, const void* b)
 {
     return strcmp(*(char* const*)a, *(char* const*)b);
@@ -3774,5 +3777,5 @@ static int run_checker_corpus(int count, char** arguments)
     oracle_cache_report(oracle_cache(), "test-checker-corpus");
     return passed ? 0 : 1;
 }
-
+#endif
 #endif

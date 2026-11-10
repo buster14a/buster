@@ -207,6 +207,17 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "void block_second(void) { extern int across; extern float across; }\n"
         "void block_file(void) { extern _Thread_local int filed; }\nint filed;\nint filed;\nfloat filed;\n"
         "int use_filed(void) { return filed; }\n",
+        // An object's redefinition stays in its chain, invalid (#1868): a later declaration's type isn't checked against
+        // it, while linkage and thread-local errors note it, and a third definition notes the first.
+        "int a = 1;\nint a = 2;\nfloat a;\n"
+        "int b = 1;\nint b = 2;\nstatic int b;\n"
+        "int c = 1;\nint c = 2;\nextern float c;\n"
+        "int d = 1;\nint d = 2;\nint d = 3;\n"
+        "int z = 1;\nint z = 2;\n_Thread_local int z;\n"
+        "_Thread_local int y = 1;\nint y = 2;\nint y;\n"
+        "void blk(void) { int l; int l; float l; (void)l; }\n"
+        "void blk2(void) { extern int m; }\nint m = 1;\nint m = 2;\nlong m;\n"
+        "int use(void) { return b + d + y + m; }\n",
         // Every declaration's failed initializer, not only the first's (#1447, phase 2): arrays, records and pointers, at
         // file and block scope, a static object's braced conversion, and an error of the walk's between them.
         "struct P { int x; int y; };\nint a[2] = 5;\nstruct P p = { .z = 1 };\nvoid f(void)\n{\n    int b[2] = 6;\n    struct P q = 3;\n"
@@ -623,6 +634,29 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         // No search where the name was declared with linkage before, another call's or a block's extern (ExternCPrev).
         "int process(int);\nvoid n(void) { proces(1); }\nvoid o(void) { proces(2); }\nvoid q(void) { extern int procss(int); }\n"
         "void r(void) { procss(3); }\n",
+        // A library function's implicit declaration stays a candidate after its block, as clang's builtin is declared at
+        // file scope; a nearer or as near name of the block still decides (review of #1822's gaps).
+        "void f(void) { printf(\"x\"); { puts(\"y\"); } }\nvoid h(void) { int x = printff; int y = putz; (void)x; (void)y; }\n"
+        "void k(void) { int printf_ = 0; int w = printff; (void)printf_; (void)w; }\nvoid m(void) { int puts = 1; int v = putz; (void)v; }\n",
+        // Later diagnostics spell the name a correction took, and a warning at the declarator or the operator whose operand
+        // holds it comes after the correction's error.
+        "const int counter = 1;\nint icount;\n__attribute__((deprecated)) int olden;\nvoid take(int *);\nvoid takeu(unsigned *);\n"
+        "void f(void)\n{\n    countr = 5;\n    ++countr;\n    int y = olde;\n    int *p = &countr;\n    unsigned *u = &icoun;\n"
+        "    take(&countr);\n    takeu(&icoun);\n    int *q;\n    q = &countr, q = 0;\n    int *r = 0, *s = &countr;\n"
+        "    (void)y; (void)p; (void)u; (void)q; (void)r; (void)s;\n}\n",
+        // Keywords within an expression (#1447): an expression's and, within a function, a statement's, `break` and
+        // `continue` in a loop's body, `case` and `default` in a switch's, a statement's none before a `)`; a value as near
+        // leaves the name uncorrected, and one taken where no keyword is offered corrects it. C23's `true` and `false`.
+        "void take(int);\nint whilf;\nint g(int a)\n{\n    int x = whil + 1;\n    int y = retrn;\n    int z = (whil);\n    int w = sizeo * 2;\n"
+        "    int arr[2] = { retrn, a };\n    take(sizeo);\n    take(retrn);\n    take(fals);\n"
+        "    for (;;) { a = brek; a = contnue + undeclared_one; }\n    switch (a) { case 1: a = defaul; a = cas; }\n    a = brek;\n"
+        "    do { a = contnue; } while (contnue + 1);\n    for (a = brek; a < 2; a += contnue) { a = 3; }\n    int n = fals;\n"
+        "    return a + x + y + z + w + n + arr[0];\n}\nint h = retrn;\n",
+        // Type names in an expression: the first name in parentheses and a cast's operand take a typedef's name or a type
+        // keyword (clang's MaybeTypeCast), which is suggested, and a cast's operand no value.
+        "typedef int myint;\nint vary;\nint f(int a)\n{\n    int b = (myin + 1);\n    int c = sizeof(myin);\n    int d = (int)myin;\n"
+        "    int e = (unsignd + 1);\n    int g = (int)retrn;\n    int h = (int)vari;\n    int i = (a + unsignd);\n    int j = (myin);\n"
+        "    int k = (unsignd);\n    int l = sizeof(myin) + __alignof__(myin);\n    return b + c + d + e + g + h + i + j + k + l;\n}\n",
         // Three thousand names and fifty-three typos, written out where the fixture is (check_test_typo_stress): each
         // search reads the visible names once (c_check_typo.c).
         "/* typo stress */\n",
@@ -757,6 +791,27 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         // either.
         "int a[-1];\nint a(void);\nint f(void)[3];\nint f;\nstruct S;\nstruct S s;\nvoid s(void);\nint g(void) { int unused; return a + f; }\n",
         "static void v;\nint v(void);\nint w(void)[2];\ntypedef int w;\nint b[-1];\ntypedef int b;\nint h(void) { int unused; return 0; }\n",
+        // C23's redefinition of an enum at file scope (#1447, N3037): a compatible one is silent, and its names unambiguous
+        // after it; an incompatible one is clang's "incompatible definitions" at its name, with the first pair of its
+        // enumerators sorted by name that differ in name or value, or one past the other list and "no corresponding
+        // enumerator here" at the other's name. A name both lists declare is ambiguous within the second body, and after an
+        // incompatible one, with its candidates; a body with such a use keeps no unused variable, the others do.
+        "/* gnu23 only */\nenum E { A, B };\nenum E { A, B };\nint x = A;\nenum E e = B;\nenum F { F1 } f1;\nenum F { F1 } f2;\n"
+        "enum H : int { H1 };\nenum H : int { H1 };\nenum K { K1 = 5, K2 };\nenum K { K1 = 5, K2 = 6 };\nint y = undeclared;\n",
+        "/* gnu23 only */\nenum G { X, Y };\nenum G { X, Z };\nint v = Y + Z;\nint q = sizeof(enum G);\nint g(void) { int u2; return 0; }\n",
+        "/* gnu23 only */\nenum G { X, Y };\nenum G { X, Z };\nint u = X;\nvoid f(void) { int unused; int k = X; }\nint g(void) { int u2; return 0; }\n",
+        "/* gnu23 only */\nenum G { X, Y };\nenum G { X };\nint v = Y;\nenum M { M1 };\nenum M { M1, M2 };\n"
+        "enum P : int { P1 };\nenum P : int { P1, P2 };\n",
+        "/* gnu23 only */\nenum G { X = 1 };\nenum G { X = 2 };\nenum S { S1, S2 };\nenum S { S2, S1 };\nenum T { zz, B, a };\n"
+        "enum T { zz, B, A };\nenum N { N1 = -1, N2 };\nenum N { N1 = -2, N2 };\nenum U { U1 = 0xffffffffu };\nenum U { U1 = 0xfffffffeu };\n",
+        "/* gnu23 only */\nenum G { X, Y };\nenum G { X, Z = X + 1 };\nenum R { R1, R2 = R1 + 1 };\nenum R { R1, R2 = R1 + 1 };\n"
+        "int q = R2;\nint w(void) { int unused; return 0; }\n",
+        // A name only the dropped redefinition declares, though a local of another body or a later declaration spells it
+        // too (review on #1928): its uses still mask their bodies in the later readings, so the unit keeps its warnings.
+        "/* gnu23 only */\nenum E { X, Y };\nenum E { X, Z };\nvoid f(void) { int Z; }\nint g(void) { return Z; }\n"
+        "int h(void) { int unused; return 0; }\nvoid k(void) { int m = X; }\n",
+        "/* gnu23 only */\nenum E { X, Y };\nenum E { X, Z };\nint g(void) { return Z; }\nint h(void) { int unused; return X; }\n"
+        "struct Z { int a; };\nint i(void) { int u2; return 0; }\n",
         // A tag defined again in its scope, whose body becomes an anonymous tag's: later uses of the name find the first
         // definition, and the second's enumerators are still declared (a repeated one with its own note).
         "struct S { int a; };\nstruct S { long b; };\nunion U { int a; };\nunion U { char c; } u2;\n"
@@ -773,8 +828,8 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "enum FE : int { FA, FB };\nenum FE : int { FC, FD };\nint fx = FC + FB;\nvoid fg(void) { enum FL : char { FL1 }; enum FL : char { FL2 }; }\n",
     };
     static const char* const standards[] = { "-std=gnu17", "-std=gnu23" };
-    // The tag redefinitions, the last three fixtures, are gnu17's alone: C23 compares a redefined record with the
-    // earlier one (N3037, the gnu23 fixtures above), and an enum's redefinition still refuses generically there.
+    // The tag redefinitions, the last three fixtures, are gnu17's alone: C23 compares a redefined record or enum with the
+    // earlier one (N3037, the gnu23 fixtures above).
     const uint32_t before_c23 = BUSTER_ARRAY_LENGTH(fixtures) - 3;
     static const char* const options[] = { NULL, "-Wall", "-ferror-limit=2", "-w" };
     static char stress_text[65536];
