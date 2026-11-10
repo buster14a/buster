@@ -5415,12 +5415,23 @@ static CheckDriverRound check_driver_rejected_read(const Parser* unit, const Par
     CheckInput input = { 0 };
     // (A reading whose reader reports an error isn't selected's valid one, but its reports are the round's.)
     const bool selected = valid && check_input_selected(&input, parser, pp, &types, arena, scratch, mask);
-    valid = valid && (selected || (input.report_count != 0 && !input.recovered_valid)) && !input.resource;
+    // A recovered reading (#1447, an invalid declaration's error, CheckInput.recovered_valid) that meets an error the unit's
+    // earlier readings don't hold has errors of its own too: an edited view reaches a definition's head error past the
+    // left-out one before it, which the next round leaves out with its definition.
+    bool fresh_recovered = false;
+    for (uint32_t i = 0; valid && !input.resource && input.recovered_valid && !fresh_recovered && i < input.report_count; i += 1)
+    {
+        const uint32_t token = input.reports[i].token;
+        const uint32_t at = token < view_count && edited ? view.to_original[token] : token;
+        fresh_recovered = input.reports[i].message != CHECK_INPUT_INVALID_USE && at < count && !check_driver_rejected_known(errors, error_count, at) &&
+                          (!edited || !check_driver_rejected_top_known(unit, errors, error_count, at));
+    }
+    valid = valid && (selected || (input.report_count != 0 && (!input.recovered_valid || fresh_recovered))) && !input.resource;
     const CheckOptions check_options = { .scalar = scalar };
     CheckStream stream = { 0 };
     // The reading's own errors: its reader's (a recovered one's unit is valid), whose reports stand without the graph, which
     // may not run after them, and its graph's.
-    const bool reader_errors = valid && input.report_count != 0 && !input.recovered_valid;
+    const bool reader_errors = valid && input.report_count != 0 && (!input.recovered_valid || fresh_recovered);
     const bool graphed = valid && check_graph_run(&types, &input.graph, arena, scratch, &check_options, &stream);
     if (!graphed)
     {
