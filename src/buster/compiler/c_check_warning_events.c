@@ -126,6 +126,9 @@ enum
     // A C23 record's redefinition whose attributes differ (#1447, c_check_tag_compatible.c): clang's -Wodr, an error by
     // default (check_input_odr_severity).
     CHECK_WARNING_ID_ODR = 113,
+    // A target_clones attribute that mixes a string of several versions with other strings (#1838, clang's
+    // SemaX86::checkTargetClonesAttr): -Wtarget-clones-mixed-specifiers, on by default, under -Wfunction-multiversion.
+    CHECK_WARNING_ID_TARGET_CLONES_MIXED_SPECIFIERS = 117,
     // __builtin_cpu_supports of a feature clang doesn't know (#1843, clang's SemaX86 validateCpuSupports): its warning of no
     // option, whose call is false.
     CHECK_WARNING_ID_INVALID_CPU_SUPPORTS = 118,
@@ -374,6 +377,12 @@ typedef enum CheckWarningEventKind
     // payload.first_type and second_type its operands' types as clang's getEnumCoercedType gives them, payload.name and
     // data their typedef spellings (0 for none). check_common_enum_arithmetic reports it as the graph's operators.
     CHECK_WARNING_EVENT_ENUM_MIX,
+    // target_clones' versions (#1838, c_check_target_versions.c), each at its string literal's quote plus its offset in
+    // the trimmed string (BUSTER_CHECK_TARGET_CLONES_CPU's payload): -Wignored-attributes' unsupported one,
+    // -Wfunction-multiversion's duplicate one, and -Wtarget-clones-mixed-specifiers' at the first string.
+    CHECK_WARNING_EVENT_TARGET_CLONES_UNSUPPORTED,
+    CHECK_WARNING_EVENT_TARGET_CLONES_DUPLICATE,
+    CHECK_WARNING_EVENT_TARGET_CLONES_MIXED,
     // A tag a prototype's parameter list (or an old-style definition's declarations) declares first, which no declaration
     // outside it names (#1447, -Wvisibility): at its name, an unnamed enum's keyword; payload.first_type the tag's type.
     CHECK_WARNING_EVENT_PROTOTYPE_TAG,
@@ -392,6 +401,11 @@ typedef enum CheckWarningEventKind
     CHECK_WARNING_EVENT_INVALID_CPU_SUPPORTS,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
+
+// CHECK_WARNING_EVENT_TARGET_CLONES_*'s payload (#1838): `name` the version's first byte in its string's decoded text (it
+// ends at the next comma, trimmed), and `data` its place's offset from the trimmed text's start, with
+// BUSTER_CHECK_TARGET_CLONES_CPU where an unsupported one is a CPU's.
+#define BUSTER_CHECK_TARGET_CLONES_CPU (1u << 31)
 
 // CHECK_WARNING_EVENT_TRANSPARENT_UNION's case, in its data's low byte (its bits above it), and its note's.
 #define BUSTER_CHECK_TRANSPARENT_INCOMPLETE 1u
