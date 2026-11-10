@@ -1871,7 +1871,9 @@ static const char* check_lower_by_value(const CheckLowerWriter* writer, TypeId t
 {
     const TypeTable* types = writer->program->types;
     const AbiReturn returned = writer->abi_table->results[type_index(type)];
-    const bool x87 = ((returned.registers[0] | returned.registers[1]) & BUSTER_ABI_REGISTER_X87) != 0;
+    // An x87 register's number has BUSTER_ABI_REGISTER_X87 among its top three bits, which NONE (0xff) has too: a result
+    // in xmm0 alone isn't a long double's (#1832, a record SSE, SSEUP of 17 to 23 bytes).
+    const bool x87 = (returned.registers[0] & 0xe0u) == BUSTER_ABI_REGISTER_X87 || (returned.registers[1] & 0xe0u) == BUSTER_ABI_REGISTER_X87;
     const char* feature = NULL;
     if (type_alignment_log2(types, type) > BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2)
     {
