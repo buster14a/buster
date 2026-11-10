@@ -425,7 +425,7 @@ graph. The full build regression also checks their exact incremental fanout,
 including standalone consumers, and rejects both kinds of target row-count
 drift. A new dependency cannot silently undo these boundaries.
 
-The [validation packet](https://github.com/buster14a/buster-performance/tree/42b78c511c5fddfe61d2183b8fb534f9e5330c71/docs/measurements/build-production-codegen-2026-11-09)
+The [validation packet](https://github.com/buster14a/buster-performance/tree/f29dc2c6616fb0530a2b21b1555507da79f7ba25/docs/measurements/build-production-codegen-2026-11-09)
 records the before/after dependencies, the parser definition and object
 preservation checks, and the optional parallel-codegen contract and runtime
 results below. Ordinary unity expansion falls by about 35 MB (10.6%) in each
