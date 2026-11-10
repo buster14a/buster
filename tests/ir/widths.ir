@@ -1,0 +1,30 @@
+function (ptr) -> void {
+b0:
+  %0 = param.ptr 0
+  %1 = load.v4i32 %0 align=16
+  %2 = load.v8i32 %0 align=32
+  %3 = load.v16i32 %0 align=64
+  %4 = intrinsic.v4i32 %2 extract 0
+  %5 = intrinsic.v4i32 %2 extract 1
+  %6 = intrinsic.v4i32 %3 extract 0
+  %7 = intrinsic.v4i32 %3 extract 3
+  %8 = intrinsic.v8i32 %3 extract 1
+  %9 = intrinsic.v8i32 %1 widen
+  %10 = intrinsic.v16i32 %1 widen
+  %11 = intrinsic.v16i32 %2 widen
+  %12 = intrinsic.v8i32 %2, %1 insert 1
+  %13 = intrinsic.v16i32 %3, %1 insert 2
+  %14 = intrinsic.v16i32 %3, %2 insert 1
+  %15 = xor.v4i32 %4, %5
+  %16 = xor.v4i32 %15, %6
+  %17 = xor.v4i32 %16, %7
+  %18 = store.void %0, %17 align=16
+  %19 = xor.v8i32 %8, %9
+  %20 = xor.v8i32 %19, %12
+  %21 = store.void %0, %20 align=32
+  %22 = xor.v16i32 %10, %11
+  %23 = xor.v16i32 %22, %13
+  %24 = xor.v16i32 %23, %14
+  %25 = store.void %0, %24 align=64
+  %26 = ret.void
+}

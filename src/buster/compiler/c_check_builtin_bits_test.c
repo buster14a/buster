@@ -820,7 +820,8 @@ static void check_builtin_bits_test_constraints(CheckBuiltinBitsTest* test, Type
         const CheckBuiltinMiscResult result = check_builtin_bits_test_action(table, CBUILTIN_STDC_ROTATE_LEFT, pair, 2);
         check_builtin_bits_test_expect(test, result.action.diagnostic != CHECK_DIAG_NONE && result.action.diagnostic_operand == 1, "a rotation's count must be an integer");
     }
-    // A float, a pointer and a complex value aren't integers; a _BitInt past 128 bits is one clang takes, refused by name.
+    // A float, a pointer and a complex value aren't integers; a _BitInt past 128 bits is one clang takes (#1447), a runtime
+    // action that never folds (type_bit_int's flag says unsigned; 208 bits, as bswapg's must be a multiple of 16).
     const CheckValue refused[] =
     {
         check_test_float(BUSTER_TYPE_DOUBLE, 3.0L),
@@ -844,12 +845,13 @@ static void check_builtin_bits_test_constraints(CheckBuiltinBitsTest* test, Type
         }
         const CheckValue wide[2] =
         {
-            check_test_integer(type_bit_int(table, 200, true), 1),
+            check_test_integer(type_bit_int(table, 208, true), 1),
             check_test_integer(rotate ? type_bit_int(table, 200, false) : BUSTER_TYPE_INT, 1),
         };
         const CheckBuiltinMiscResult result = check_builtin_bits_test_action(table, id, wide, rotate ? 2 : 1);
-        check_builtin_bits_test_expect(test, result.action.diagnostic == CHECK_DIAG_UNSUPPORTED && result.action.diagnostic_operand == 0,
-                                       "a _BitInt past 128 bits is refused by name");
+        check_builtin_bits_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && result.action.value.constant_kind == CHECK_CONSTANT_NONE &&
+                                                 result.action.value.fault == CHECK_FAULT_NONE,
+                                       "a _BitInt past 128 bits is a runtime action");
     }
     const CheckValue wide_count[2] =
     {
@@ -857,8 +859,8 @@ static void check_builtin_bits_test_constraints(CheckBuiltinBitsTest* test, Type
         check_test_integer(type_bit_int(table, 200, false), 1),
     };
     const CheckBuiltinMiscResult result = check_builtin_bits_test_action(table, CBUILTIN_STDC_ROTATE_RIGHT, wide_count, 2);
-    check_builtin_bits_test_expect(test, result.action.diagnostic == CHECK_DIAG_UNSUPPORTED && result.action.diagnostic_operand == 1,
-                                   "a rotation's count past 128 bits is refused by name");
+    check_builtin_bits_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && result.action.value.constant_kind == CHECK_CONSTANT_NONE,
+                                   "a rotation's count past 128 bits is a runtime action");
     const CheckValue fixed_refused = { .type = type_pointer(table, BUSTER_TYPE_UINT), .category = CHECK_RVALUE };
     const CBuiltinId fixed[] = { CBUILTIN_BITREVERSE32, CBUILTIN_CLRSBL, CBUILTIN_CTZS };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(fixed); i += 1)

@@ -541,8 +541,13 @@ static void check_test_cpu_model_runs(CheckTest* test, const char* clang, const 
     free(source);
 }
 
+// An option of this executable's alone, which check_test_library_run passes to its builds but not to clang's (`--tier1`,
+// #1918), or NULL.
+static const char* check_test_library_own_option = NULL;
+
 // One program built by clang and by this executable, by both paths, which must exit alike and print the same: `source`
-// in `directory`, with `standard` and `option` (NULL for none).
+// in `directory`, with `standard` and `option` (NULL for none), and this executable's builds with
+// check_test_library_own_option.
 static void check_test_library_run(CheckTest* test, const char* clang, const char* executable, const char* directory, const char* name,
                                    const char* program_source, const char* standard, const char* option)
 {
@@ -558,11 +563,15 @@ static void check_test_library_run(CheckTest* test, const char* clang, const cha
     char* outputs[3] = { NULL, NULL, NULL };
     for (uint32_t b = 0; written && b < 3; b += 1)
     {
-        char* arguments[10] = { (char*)(b == 0 ? clang : executable), (char*)standard, "-w", source, "-o", built[b], "-lm" };
+        char* arguments[12] = { (char*)(b == 0 ? clang : executable), (char*)standard, "-w", source, "-o", built[b], "-lm" };
         uint32_t count = 7;
         if (option != NULL)
         {
             arguments[count++] = (char*)option;
+        }
+        if (b != 0 && check_test_library_own_option != NULL)
+        {
+            arguments[count++] = (char*)check_test_library_own_option;
         }
         if (b == 2)
         {
@@ -642,6 +651,15 @@ static void check_test_library_run(CheckTest* test, const char* clang, const cha
     "int printf(const char*,...);\nunsigned int stdc_leading_zeros_ui(unsigned int x){(void)x;return 99;}\n" \
     "int main(void){volatile unsigned v=1;unsigned (*p)(unsigned)=(stdc_leading_zeros_ui);\n" \
     "printf(\"%u %u %u %u %u\\n\",stdc_leading_zeros_ui(1),stdc_leading_zeros_ui(v),(stdc_leading_zeros_ui)(v),((stdc_leading_zeros_ui))(1),p(v));return 0;}\n"
+
+// fmax and fmin of zeros of both signs and of a signaling NaN beside a number (#967), whose results tell clang's inline
+// llvm.maxnum and minnum (the first zero, the number) from glibc's functions (the second zero, a quiet NaN), through a
+// plain declaration of fmax that `label` follows (an asm label, or nothing).
+#define BUSTER_CHECK_TEST_EXTREMES_PROGRAM(label) \
+    "int printf(const char*,...);double fmax(double,double)" label ";double fmin(double,double);\n" \
+    "static unsigned long long bits(double d){union{double d;unsigned long long u;}x={d};return x.u;}\n" \
+    "int main(void){volatile double z=0.0,n=-0.0;union{unsigned long long u;double d;}s={0x7ff0000000000001ull};volatile double v=s.d;\n" \
+    "printf(\"%llx %llx %llx %llx\\n\",bits(fmax(n,z)),bits(fmin(z,n)),bits(fmax(v,1.0)),bits(fmin(1.0,v)));return 0;}\n"
 
 static void check_test_library_runs(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
@@ -723,6 +741,30 @@ static void check_test_library_runs(CheckTest* test, const char* clang, const ch
             "int ov(int) __attribute__((overloadable));int strcmp(const char*,const char*);int main(void){return strcmp(\"a\",\"c\")+2;}\n",
             "-std=gnu17",
             "-ffreestanding",
+        },
+        {
+            "a plain declaration's fmax and fmin compute inline (#967)",
+            BUSTER_CHECK_TEST_EXTREMES_PROGRAM(""),
+            "-std=gnu17",
+            NULL,
+        },
+        {
+            "-fno-builtin keeps a plain declaration's fmax and fmin calls",
+            BUSTER_CHECK_TEST_EXTREMES_PROGRAM(""),
+            "-std=gnu17",
+            "-fno-builtin",
+        },
+        {
+            "-fno-builtin-fmax keeps a plain declaration's fmax a call, its fmin inline",
+            BUSTER_CHECK_TEST_EXTREMES_PROGRAM(""),
+            "-std=gnu17",
+            "-fno-builtin-fmax",
+        },
+        {
+            "an asm label keeps fmax a call of the label's function (glibc's fmin)",
+            BUSTER_CHECK_TEST_EXTREMES_PROGRAM(" __asm__(\"fmin\")"),
+            "-std=gnu17",
+            NULL,
         },
         {
             "__builtin_strcmp folds whatever the options",

@@ -5463,7 +5463,8 @@ struct AsmCode
     uint32_t reference_count;
     uint32_t label_count;
     uint32_t location;
-    // The source used a directive besides the syntax switches, which needs a whole assembled unit (asm_assemble).
+    // The source used a directive besides the syntax switches, or a numeric label as data or a loop's or jrcxz's branch,
+    // which need a whole assembled unit (asm_assemble).
     bool directive;
 };
 
@@ -5473,7 +5474,9 @@ struct AsmCode
 // refuses every other directive. A jmp or jcc to a label of its own, without an addend, is a branch that branch sizing
 // sizes. Every other symbolic field refers to a symbol by name, which the caller resolves: one of the source's named
 // labels (as data, a call's target, or with an addend), a label another source defines (a `.L` one among them), or any
-// other symbol. Its numeric labels and `.` are only its own jmp's and jcc's targets. Matching is asm_assemble's, by
+// other symbol. Its numeric labels and `.` are only its own jmp's and jcc's targets: another use of one, and a loop's or
+// a jrcxz's branch to a label, fail with `directive` set, for the caller to assemble the source whole. Matching is
+// asm_assemble's, by
 // options.vectorized's path; the parser's tables come from `scratch`, which is as it was after, and the result from
 // `output`, which a failure leaves as it was too.
 static AsmCode asm_assemble_code(String8 source, const X86MatchIndex* index, AsmOptions options, Arena* output, Arena* scratch)
@@ -5564,9 +5567,11 @@ static AsmCode asm_assemble_code(String8 source, const X86MatchIndex* index, Asm
             }
             else
             {
-                // loop, loope, loopne and jrcxz have no rel32 form for a reference, and branch sizing sizes only jmp and jcc.
+                // loop, loope, loopne and jrcxz have no rel32 form for a reference, and branch sizing sizes only jmp and jcc:
+                // the caller assembles the source whole instead (`directive`, asm_assemble), as a template of directives.
                 asm_fail(&parser, instruction->location, form->relative_bytes == 1 && !sized ? "loop, loope, loopne and jrcxz in inline assembly" :
                                                                                                 "a branch to inline assembly's own numeric label must be jmp or jcc, without an addend");
+                parser.directive = true;
             }
         }
         for (uint32_t field = X86_FIXUP_DISPLACEMENT; referred && field <= X86_FIXUP_IMMEDIATE && parser.result.error == 0; field += 1)
@@ -5618,7 +5623,10 @@ static AsmCode asm_assemble_code(String8 source, const X86MatchIndex* index, Asm
                 char* name = !symbol->internal && symbol->name.length != 0 ? arena_push(output, symbol->name.length, 1) : 0;
                 if (symbol->internal && symbol->defined)
                 {
+                    // A numeric label or `.` as data, an address or a call's target is no name to refer to: the caller
+                    // assembles the source whole instead (`directive`, asm_assemble), whose own fixups take it.
                     asm_fail(&parser, instruction->location, "inline assembly's numeric labels and `.` are only its own jmp's and jcc's targets");
+                    parser.directive = true;
                 }
                 else if (symbol->internal)
                 {
