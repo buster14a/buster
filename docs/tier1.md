@@ -372,6 +372,10 @@ The masked moves' selects of the x86 builtins (every masked operation's merge)
 are the IR's `vselect` and their undefined vectors its zero vector (#1840, [the
 SIMD IR guide](ir-simd.md)'s "Selects and undefined vectors"), which Tier 1
 selects as `vpblendm` and `vpxor`.
+The x86 builtins' casts between vector widths, lane inserts and masked lane
+extracts are the IR's `extract`, `widen` and `insert` intrinsics (#1840, [the
+SIMD IR guide](ir-simd.md)'s "Width changes"), each one EVEX instruction of
+selection's `BUSTER_TIER1_VECTOR_WIDTH_CHANGE`.
 
 ### Inlining (#1282)
 
