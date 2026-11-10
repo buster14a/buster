@@ -662,6 +662,40 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "int s = sizeof(_BitInt(zzz));\n",
         "int a[3] = { [zzz] = 1, [yyy] = 2 };\n",
         "enum { W = 1 };\nint a[3] = { [W ... zzz + yyy] = 1 };\n",
+        // A declarator's constant that fails ends the walk with clang's error in its words (#1447,
+        // check_input_constant_failure_report), as an attribute argument's: a missing member, `->` of no pointer and a
+        // member access's base, pointer arithmetic on an incomplete pointee, `sizeof` of an incomplete type, a call's
+        // argument count (too many at the first extra one) and a binary operator's operands; in a bound, a typedef's, a
+        // typeof, an enumerator's value, a bit-field's width, a _BitInt's, a designator, and the attributes' own; in a body
+        // too; and a failure before a bound's undeclared name, both in source order.
+        "struct S { int a; } s; int a[s.b];\n",
+        "struct S { int a; } s; typedef int A[s.b];\n",
+        "int p; int a[p->x];\n",
+        "int *q; int a[q->x];\n",
+        "struct T; int a[sizeof(1 + (struct T*)0)];\n",
+        "struct S{int a;} s; typeof(s.b) x;\n",
+        "struct S{int a;} s; enum E { A = sizeof(s.b) };\n",
+        "struct S{int a;} s; struct R { int b : sizeof(s.b); };\n",
+        "struct S{int a;} s; _BitInt(sizeof(s.b)) x;\n",
+        "struct S{int a;} s; int a[3] = { [sizeof(s.b)] = 1 };\n",
+        "int f(int); int a[f(1, 2)];\n",
+        "int f(int, int); int a[f(1)];\n",
+        "int f(void);\nint a[f(5)];\n",
+        "int f(void);\nint x __attribute__((aligned(f(5, 6))));\n",
+        // The forward declaration's note at the diagnosed type's own declaration, which an inner definition shadows, and a
+        // sizeof's operand's typedef spelling, as clang's (review on #1900).
+        "struct T;\ntypedef struct T Outer;\nvoid f(void) {\n    struct T { int x; };\n    int a[sizeof(Outer)];\n}\n",
+        "struct T;\ntypedef struct T *OuterP;\nvoid f(void) {\n    struct T { int x; };\n    int a[sizeof((OuterP)0 + 1)];\n}\n",
+        "struct T;\ntypedef struct T Outer;\nvoid f(void) {\n    struct T { int x; };\n    int x __attribute__((aligned(sizeof(Outer))));\n}\n",
+        "struct T; int a[sizeof(struct T)];\n",
+        "struct S{int a;} s; int a[s + 1];\n",
+        "int f(int); int x __attribute__((aligned(f(1, 2))));\n",
+        "struct S { int a; } s; int x __attribute__((aligned(s.b)));\n",
+        "int p; int y __attribute__((aligned(p->x)));\n",
+        "struct T; int x __attribute__((aligned(sizeof(1 + (struct T*)0))));\n",
+        "struct S { int a; } s;\nint f(void) { int a[s.b]; return sizeof a; }\n",
+        "struct S { int a; } s;\nint f(void) { enum { A = sizeof(s.b) }; return A; }\n",
+        "struct S { char bytes[sizeof(struct Missing) -\nsizeof(missing)]; };\n",
         // Declarator errors in clang's words (#1447), each still ending the unit's checking: a function returning an array
         // or a function, a negative bound (named, and a type name's), an array of functions (by a typedef's name, with its
         // aka) or of an incomplete element (with the tag's forward declaration's note), and a variable of type void or of

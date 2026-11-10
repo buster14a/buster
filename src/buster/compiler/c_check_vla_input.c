@@ -236,6 +236,8 @@ static bool check_input_vla_bound(CheckInputReader* reader, uint32_t open, uint3
         CheckValue value = { 0 };
         uint32_t failed = BUSTER_CHECK_NONE;
         bool negative = false;
+        // The reading's failure evidence, for its error in clang's words (#1447): a job's own, or this one.
+        CheckConstantFailure failure = { .token = BUSTER_CHECK_NONE, .callee = BUSTER_CHECK_NONE };
         // Each undeclared name in the bound is clang's error at it, with its typo's correction (#1447, check_constant_name).
         if (*job == 0 && check_input_vla_defines(reader, first, end))
         {
@@ -251,6 +253,7 @@ static bool check_input_vla_bound(CheckInputReader* reader, uint32_t open, uint3
             if (*definition == BUSTER_CHECK_NONE)
             {
                 failed = input->failure;
+                failure = input->evidence;
                 *job = 0;
                 arena_pop_to(reader->scratch, input->mark);
             }
@@ -260,7 +263,7 @@ static bool check_input_vla_bound(CheckInputReader* reader, uint32_t open, uint3
             TypeId unused = 0;
             const bool cached = reader->bindings.count != 0 && reader->bindings.point[reader->bindings.count - 1] >= first;
             reader->constant_names = CHECK_CONSTANT_NAMES_REPORT;
-            valid = check_input_constant_read(reader, first, end, false, cached, false, &value, &unused, &failed, NULL);
+            valid = check_input_constant_read(reader, first, end, false, cached, false, &value, &unused, &failed, &failure);
             reader->constant_names = CHECK_CONSTANT_NAMES_NONE;
         }
         // A job that stopped at a definition has no value yet.
@@ -297,7 +300,14 @@ static bool check_input_vla_bound(CheckInputReader* reader, uint32_t open, uint3
             const uint32_t token = failed_at;
             const bool missing = parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER && reader->output->declarations[token] == BUSTER_CHECK_NONE;
             // A negative constant is clang's own error (#1447), at the bound's first token, naming the declarator's name.
-            check_input_report(reader, negative ? first : token, negative ? CHECK_INPUT_ARRAY_NEGATIVE : missing ? CHECK_INPUT_UNDECLARED : CHECK_INPUT_DECLARATION);
+            if (negative || missing)
+            {
+                check_input_report(reader, negative ? first : token, negative ? CHECK_INPUT_ARRAY_NEGATIVE : CHECK_INPUT_UNDECLARED);
+            }
+            else
+            {
+                check_input_constant_failure_report(reader, &failure, first, token);
+            }
             if (negative && reader->output->report_count == 1)
             {
                 reader->output->reports[0].value = name < parser->tokens.count && parser->tokens.kinds[name] == PARSE_KIND_IDENTIFIER ? name : BUSTER_CHECK_NONE;

@@ -327,6 +327,11 @@ typedef enum CheckInputMessage
     // 2 a type name's or a member's "type name requires a specifier or qualifier", 3 a C23 parameter's name's "unknown type
     // name 'a'".
     CHECK_INPUT_TYPE_SPECIFIER_MISSING,
+    // A declarator's constant's error in clang's words (#1447, check_input_constant_failure_report): a missing member, a
+    // member access's base, `sizeof` of an incomplete type, a call's argument count, a binary operator's operands or
+    // pointer arithmetic on an incomplete pointee, as CHECK_INPUT_ATTRIBUTE_ARGUMENT's (its CheckAttributeArgumentError in
+    // `detail`), at the failing token.
+    CHECK_INPUT_CONSTANT_EXPRESSION,
     // A variable-length array or variably modified type where C allows none (#1447, check_input_vla_place), each at its
     // declarator's name as clang's: at file scope, a block's static or extern object, a member.
     CHECK_INPUT_VLA_FILE_SCOPE,
@@ -2098,6 +2103,27 @@ struct CheckInputReader
     uint8_t constant_names;
     uint32_t constant_named;
     uint32_t constant_missing;
+    // Where the next constant reading records its failure's evidence (#1447, CheckConstantFailure), which that reading
+    // takes and clears as it does constant_names: a declarator's constant reports its error in clang's words
+    // (check_input_constant_failure_report).
+    struct CheckConstantFailure* constant_failure;
+};
+
+// A constant reading's failure evidence (c_check_constant.c, its `diagnosed`): the first failed action's diagnostic,
+// operation, operand types and names, which a caller reports in clang's words (#147, #1447).
+typedef struct CheckConstantFailure CheckConstantFailure;
+struct CheckConstantFailure
+{
+    CheckDiagnostic diagnostic;
+    CheckOp op;
+    TypeId type;
+    TypeId second_type;
+    uint32_t token;
+    uint32_t callee;
+    uint32_t name;
+    uint32_t expected;
+    uint32_t actual;
+    bool variadic;
 };
 
 // What a constant's reading does with an undeclared name it binds (check_constant_name). By default nothing: its caller
@@ -4488,6 +4514,8 @@ static __attribute__((noinline)) bool check_input_auto_type_specifiers(CheckInpu
 
 // Specifiers are retained in source order because their inherited base type precedes declarators semantically,
 // although the parser's ordinary postorder puts their nodes after those declarators.
+static void check_input_constant_failure_report(CheckInputReader* reader, const CheckConstantFailure* failure, uint32_t first, uint32_t fallback);
+
 static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor, uint32_t end, bool* is_typedef, uint32_t* storage_class, bool* is_inline,
                                     bool parameter)
 {
@@ -4704,6 +4732,8 @@ static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor,
             reader->constant_noderef = NULL;
             const uint32_t typed_reports = reader->output->report_count;
             bool dropped = false;
+            // The reading's failure evidence, for its error in clang's words (#1447).
+            CheckConstantFailure failure = { .token = BUSTER_CHECK_NONE, .callee = BUSTER_CHECK_NONE };
             if (job != 0 && job->ready && job->keyword == i)
             {
                 selected = job->result;
@@ -4717,20 +4747,28 @@ static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor,
                 // that no correction took is no type specifier, as clang drops it: the list goes on without it.
                 const uint32_t missing = reader->constant_missing;
                 reader->constant_names = close > i + 2 && close < end ? CHECK_CONSTANT_NAMES_REPORT : CHECK_CONSTANT_NAMES_NONE;
+                reader->constant_failure = close > i + 2 && close < end ? &failure : NULL;
                 const bool sized = close > i + 2 && close < end && check_input_constant(reader, i + 2, close, &width) && width > 0 && width <= UINT32_MAX;
                 reader->constant_names = CHECK_CONSTANT_NAMES_NONE;
+                reader->constant_failure = NULL;
                 selected = sized ? check_input_type_result(reader, type_bit_int(reader->types, (uint32_t)width, true)) : 0;
                 dropped = !sized && reader->constant_missing != missing;
             }
             else
             {
                 reader->constant_names = close > i + 1 && close < end ? CHECK_CONSTANT_NAMES_REPORT : CHECK_CONSTANT_NAMES_NONE;
+                reader->constant_failure = close > i + 1 && close < end ? &failure : NULL;
                 selected = close > i + 1 && close < end ? check_input_constant_type(reader, i, close + 1) : 0;
                 reader->constant_names = CHECK_CONSTANT_NAMES_NONE;
+                reader->constant_failure = NULL;
             }
             abi_origin = job != 0 && job->ready && job->keyword == i ? job->result_abi_origin : reader->constant_abi_origin;
             noderef = job != NULL && job->ready && job->keyword == i ? job->noderef_result : reader->constant_noderef;
             valid &= (selected != 0 || dropped) && base == 0;
+            if (selected == 0 && !dropped && failure.diagnostic != CHECK_DIAG_NONE && reader->output->report_count == typed_reports)
+            {
+                check_input_constant_failure_report(reader, &failure, i + 2, i);
+            }
             // A reading that reported its own error (an undeclared name's, #1447) needs no report here.
             reported |= selected == 0 && reader->output->report_count != typed_reports;
             dropped_bit_int |= dropped;
@@ -8267,10 +8305,19 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
                         // and the member isn't a bit-field (#1447, check_constant_name): `struct S { int b : zzz; int c; }`
                         // has clang's size 8.
                         const uint32_t missing = reader->constant_missing;
+                        const uint32_t width_reports = reader->output->report_count;
+                        CheckConstantFailure failure = { .token = BUSTER_CHECK_NONE, .callee = BUSTER_CHECK_NONE };
                         reader->constant_names = begin < i ? CHECK_CONSTANT_NAMES_RECOVER : CHECK_CONSTANT_NAMES_NONE;
+                        reader->constant_failure = begin < i ? &failure : NULL;
                         const bool read = check_input_constant(reader, begin, i, &bits);
                         reader->constant_names = CHECK_CONSTANT_NAMES_NONE;
+                        reader->constant_failure = NULL;
                         const bool named = reader->constant_missing != missing;
+                        // Its failure's error in clang's words (#1447).
+                        if (!read && !named && failure.diagnostic != CHECK_DIAG_NONE && reader->output->report_count == width_reports)
+                        {
+                            check_input_constant_failure_report(reader, &failure, begin, begin);
+                        }
                         valid &= named || (read && bits >= 0 && bits <= UINT32_MAX);
                         width = named ? BUSTER_TYPE_NOT_BIT_FIELD : (uint32_t)bits;
                         // An unnamed one stays a member, unnamed, of its whole type, as clang's field (`long : zzz` aligns

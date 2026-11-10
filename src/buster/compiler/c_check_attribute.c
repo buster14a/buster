@@ -809,6 +809,11 @@ typedef enum CheckAttributeArgumentError
     CHECK_ARGUMENT_EXPRESSION_SIZEOF,
     CHECK_ARGUMENT_EXPRESSION_CALL_COUNT,
     CHECK_ARGUMENT_EXPRESSION_BINARY,
+    // A constant's member access through `->` of no pointer, "member reference type 'int' is not a pointer", at the
+    // member's name; and its pointer arithmetic on an incomplete pointee, "arithmetic on a pointer to an incomplete type
+    // 'struct T'", at the operator, with the tag's note (#1447, check_constant_failure_error).
+    CHECK_ARGUMENT_EXPRESSION_ARROW_POINTER,
+    CHECK_ARGUMENT_EXPRESSION_INCOMPLETE_ARITHMETIC,
     CHECK_ARGUMENT_ANNOTATE_CONSTANT,
     CHECK_ARGUMENT_TARGET_CLONES_DEFAULT,
     CHECK_ARGUMENT_SELECTANY_LINKAGE,
