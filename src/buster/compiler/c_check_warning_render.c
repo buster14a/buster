@@ -1165,6 +1165,9 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
             result = "mixing 'target_clones' specifier mechanisms is permitted for GCC compatibility; use a comma separated sequence of string literals, or a "
                      "string literal containing a comma-separated list of versions";
             break;
+        case CHECK_WARNING_EVENT_BIT_INT_SUFFIX:
+            result = "'_BitInt' suffix for literals is a C23 extension";
+            break;
         case CHECK_WARNING_EVENT_ALIGNOF_EXPRESSION:
         {
             result = check_warning_text(scratch, "'%.*s' applied to an expression is a GNU extension", (int)name.length, name.pointer);
