@@ -606,7 +606,14 @@ static bool check_input_availability_handle(CheckInputReader* reader, CheckInput
         CheckAvailabilityEntry entry;
         if (list != NULL && check_input_availability_entry(reader, attribute, &entry))
         {
-            check_input_availability_own(reader, attributes, index, list, &count);
+            for (uint32_t i = 0; i < index; i += 1)
+            {
+                CheckAvailabilityEntry earlier;
+                if (!attributes->records[i].earlier_declaration && check_input_availability_entry(reader, attributes->records + i, &earlier))
+                {
+                    check_input_availability_merge(reader, list, &count, &earlier, false, 0);
+                }
+            }
             check_input_availability_merge(reader, list, &count, &entry, true, attribute->end);
         }
         arena_pop_to(reader->scratch, mark);
@@ -668,6 +675,35 @@ static void check_input_availability_redeclaration(CheckInputReader* reader, uin
     if (made != NULL && earlier_count != 0)
     {
         check_input_availability_own(reader, own, own != NULL ? own->count : 0, made, &made_count);
+        for (uint32_t i = 0; i < earlier_count; i += 1)
+        {
+            CheckAvailabilityEntry inherited = earlier[i];
+            inherited.inherited = true;
+            check_input_availability_merge(reader, made, &made_count, &inherited, true, point);
+        }
+    }
+    arena_pop_to(reader->scratch, mark);
+}
+
+// A tag's redeclaration's availability (#1447, mergeDeclAttributes' mergeAvailabilityAttr of the previous declaration's,
+// each inherited): its own attributes' (`own`) entries, merged as each was, and the tag's attributes so far (`previous`)
+// merged into them, with their warnings, given at `point`.
+static void check_input_availability_tag_merge(CheckInputReader* reader, const CheckInputAttributes* own, const CheckInputAttributes* previous, uint32_t point)
+{
+    const uint64_t mark = reader->scratch->length;
+    const uint64_t room = (own != NULL ? own->count : 0u) + (previous != NULL ? previous->count : 0u) + 1u;
+    CheckAvailabilityEntry* earlier = own != NULL && previous != NULL ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, CheckAvailabilityEntry, room) : NULL;
+    CheckAvailabilityEntry* made = earlier != NULL ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, CheckAvailabilityEntry, room) : NULL;
+    reader->output->resource |= own != NULL && previous != NULL && made == NULL;
+    uint32_t earlier_count = 0;
+    uint32_t made_count = 0;
+    if (made != NULL)
+    {
+        check_input_availability_own(reader, previous, previous->count, earlier, &earlier_count);
+    }
+    if (made != NULL && earlier_count != 0)
+    {
+        check_input_availability_own(reader, own, own->count, made, &made_count);
         for (uint32_t i = 0; i < earlier_count; i += 1)
         {
             CheckAvailabilityEntry inherited = earlier[i];
@@ -757,23 +793,31 @@ static bool check_input_attribute_diagnose_builtin(CheckInputReader* reader, Che
                                           (strcmp(row->language_token, "ALL_GNU_LANGUAGES") == 0 && options->language.gnu) ||
                                           (strcmp(row->language_token, "C23_LANG") == 0 && options->language.standard >= 2023));
     const BuiltinIntrinsicInfo* info = NULL;
-    bool refused = attribute->argument_count > 32;
-    if (!refused && lone && handle == 0)
+    bool refused = false;
+    if (lone && handle == 0)
     {
         info = row != NULL && !library && language ? row : NULL;
         refused = info == NULL;
     }
-    else if (!refused && lone && bound == C_BINDING_FUNCTION)
+    else if (lone && bound == C_BINDING_FUNCTION && row != NULL && !library)
+    {
+        // A redeclared builtin (`int __builtin_abs(int);`) is still that builtin where it has external linkage, as
+        // getBuiltinID finds it; a static one is no builtin. Its type clang compared where it was declared.
+        const uint32_t declaration = reader->bindings.declaration[handle - 1];
+        info = language && check_input_linkage(reader->declaration_bits, declaration) == 2 ? row : NULL;
+    }
+    else if (lone && bound == C_BINDING_FUNCTION)
     {
         info = check_input_checks_library(reader, reader->bindings.declaration[handle - 1]);
-        refused = row != NULL && !library;
     }
-    else if (!refused && lone)
+    else if (lone)
     {
         refused = bound == C_BINDING_TYPEDEF;
     }
-    // A builtin's name in parentheses alone is no builtin's reference, at its first `(`; in any other expression it is clang's
-    // "builtin functions must be directly called" first.
+    // A builtin's name in parentheses alone is no builtin's reference, at its first `(`. In any other expression, a builtin's
+    // name that isn't called is clang's "builtin functions must be directly called", at the name, the first alone; the
+    // expression clang recovers then is no builtin's, its error at its first token (a lone `&name`'s at the token after
+    // it), but in sizeof's, alignof's or typeof's operand, which clang doesn't recover, the attribute is dropped.
     uint32_t opened = 0;
     while (!lone && first + opened < first_end && parser->tokens.kinds[first + opened] == PARSE_KIND_L_PAREN)
     {
@@ -781,11 +825,23 @@ static bool check_input_attribute_diagnose_builtin(CheckInputReader* reader, Che
     }
     const bool parenthesized = opened != 0 && first + 2 * opened + 1 == first_end && parser->tokens.kinds[first + opened] == PARSE_KIND_IDENTIFIER &&
                                parser->tree.parents[first] == first_end - 1;
-    for (uint32_t token = first; !refused && !lone && !parenthesized && token < first_end; token += 1)
+    uint32_t uncalled = BUSTER_CHECK_NONE;
+    for (uint32_t token = first; !refused && uncalled == BUSTER_CHECK_NONE && !lone && !parenthesized && token < first_end; token += 1)
     {
         const uint32_t spelled = parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER ? parser->tokens.names[token] : 0;
-        refused = spelled != 0 && c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, spelled) == 0 &&
-                  builtin_intrinsic_lookup((const char*)intern_bytes(table, spelled), intern_length(table, spelled)) != NULL;
+        // A builtin's name no declaration hides, or that an external redeclaration of the builtin keeps (a static one hides it).
+        const uint32_t spelled_handle = spelled != 0 ? c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, spelled) : 0;
+        const uint32_t spelled_declaration = spelled_handle != 0 ? reader->bindings.declaration[spelled_handle - 1] : BUSTER_CHECK_NONE;
+        const bool redeclared = spelled_handle != 0 && reader->bindings.kind[spelled_handle - 1] == C_BINDING_FUNCTION &&
+                                check_input_linkage(reader->declaration_bits, spelled_declaration) == 2;
+        const BuiltinIntrinsicInfo* named = spelled != 0 && (spelled_handle == 0 || redeclared) ?
+                                            builtin_intrinsic_lookup((const char*)intern_bytes(table, spelled), intern_length(table, spelled)) : NULL;
+        const bool called = token + 1 < first_end && parser->tokens.kinds[token + 1] == PARSE_KIND_L_PAREN && parser->tree.roles[token + 1] == PARSE_ROLE_OPEN_CALL;
+        // An undeclared library function's name is its implicit declaration, which clang's diagnostics are their own.
+        // A declared library function is an ordinary function.
+        const bool library_name = named != NULL && memchr(named->attributes, 'f', named->attributes_length) != NULL;
+        refused = library_name && spelled_handle == 0;
+        uncalled = named != NULL && !library_name && !called ? token : BUSTER_CHECK_NONE;
     }
     // The builtin's parameters, its prototype decoded without its custom checking, as clang's declaration of it has them.
     CheckInputIntrinsicDeclaration decoded = { 0 };
@@ -826,19 +882,59 @@ static bool check_input_attribute_diagnose_builtin(CheckInputReader* reader, Che
             parameter_types = kr;
         }
     }
-    bool valid = !refused;
+    bool valid = !refused && uncalled == BUSTER_CHECK_NONE;
     if (refused)
     {
         check_input_attribute_error(reader, attributes, attribute->name_token, attribute->end, CHECK_ATTRIBUTE_ERROR_UNKNOWN);
     }
+    else if (uncalled != BUSTER_CHECK_NONE)
+    {
+        // At the outermost parentheses around the name, the operand clang checks.
+        uint32_t operand = uncalled;
+        uint32_t after = uncalled;
+        while (operand > first && after + 1 < first_end && parser->tokens.kinds[operand - 1] == PARSE_KIND_L_PAREN && parser->tree.parents[operand - 1] == after + 1)
+        {
+            operand -= 1;
+            after += 1;
+        }
+        check_input_report(reader, operand, CHECK_INPUT_BUILTIN_NOT_CALLED);
+        bool unevaluated = false;
+        for (uint32_t at = first; !unevaluated && at < uncalled; at += 1)
+        {
+            const uint32_t word = parser->tokens.names[at];
+            const bool keyword = word == C_NAME_SIZEOF || word == C_NAME_ALIGNOF || word == C_NAME_ALIGNOF_C11 || word == C_NAME_GNU_ALIGNOF ||
+                                 word == C_NAME_GNU_ALIGNOF2 || word == C_NAME_TYPEOF || word == C_NAME_TYPEOF_UNQUAL || word == C_NAME_GNU_TYPEOF ||
+                                 word == C_NAME_GNU_TYPEOF2 || word == C_NAME_GNU_TYPEOF_UNQUAL || word == C_NAME_GNU_TYPEOF_UNQUAL2;
+            unevaluated = keyword && (at + 1 == uncalled || (parser->tokens.kinds[at + 1] == PARSE_KIND_L_PAREN && parser->tree.parents[at + 1] > uncalled));
+        }
+        if (!unevaluated)
+        {
+            const bool address = parser->tokens.kinds[first] == PARSE_KIND_AMP && first + 2 == first_end;
+            const uint32_t before = reader->output->report_count;
+            check_input_attribute_argument_error(reader, attributes, attribute, address ? first_end : first, CHECK_ARGUMENT_BUILTIN_FUNCTION, 1);
+            // After the name's error, wherever it is.
+            for (uint32_t r = before; r < reader->output->report_count; r += 1)
+            {
+                reader->output->reports[r].sort = operand;
+                reader->output->reports[r].repeated = true;
+            }
+        }
+    }
     else if (info == NULL)
     {
-        check_input_attribute_argument_error(reader, attributes, attribute, check_input_expression_location(parser, first, first_end), CHECK_ARGUMENT_BUILTIN_FUNCTION, 1);
+        // At the expression's first token, as clang gives it (a group's `(`, a binary operator's left operand).
+        check_input_attribute_argument_error(reader, attributes, attribute, first, CHECK_ARGUMENT_BUILTIN_FUNCTION, 1);
         valid = false;
     }
     else if (attribute->argument_count - 1 != decoded.types.parameter_count)
     {
         check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_BUILTIN_COUNT, decoded.types.parameter_count);
+        valid = false;
+    }
+    else if (attribute->argument_count > 32)
+    {
+        // The argument masks hold 32; no builtin takes as many parameters.
+        check_input_attribute_error(reader, attributes, attribute->name_token, attribute->end, CHECK_ATTRIBUTE_ERROR_UNKNOWN);
         valid = false;
     }
     uint32_t argument = first_end + 1;
@@ -879,10 +975,25 @@ static bool check_input_attribute_diagnose_builtin(CheckInputReader* reader, Che
         {
             // The function's parameter's type as its declaration has it (its typedef's spelling where its adjustment kept
             // it), and the builtin's as clang spells it, which the driver spells again from its row.
+            // A named type (FILE, jmp_buf, sigjmp_buf, ucontext_t) the prototype took, the unit's typedef's, which the driver
+            // spells (CheckInput.implicit_library_types).
+            static const char* const spellings[4] = { "FILE", "jmp_buf", "sigjmp_buf", "ucontext_t" };
+            const char* jump = memchr(info->encoding, 'J', info->encoding_length);
+            const bool signal = jump != NULL && jump != info->encoding && jump[-1] == 'S';
+            const bool taken[4] = { memchr(info->encoding, 'P', info->encoding_length) != NULL, jump != NULL && !signal, signal,
+                                    memchr(info->encoding, 'K', info->encoding_length) != NULL };
+            const char* found[4] = { NULL, NULL, NULL, NULL };
+            for (uint32_t k = 0; k < 4; k += 1)
+            {
+                const TypeId named_type = taken[k] ? check_input_file_type(reader, spellings[k]) : 0;
+                reader->output->implicit_library_types[k] = named_type != 0 ? named_type : reader->output->implicit_library_types[k];
+                found[k] = named_type != 0 ? spellings[k] : NULL;
+            }
+            const CBuiltinLibraryNamed named_types = { .file = found[0], .jmp_buf = found[1], .sigjmp_buf = found[2], .ucontext = found[3] };
             char spelling[256];
             bool sized = false;
             const bool spellable = cbuiltin_library_spell_parameter(info->encoding, info->encoding_length, info->attributes, info->attributes_length, i - 1, true,
-                                                                    parser->language.standard >= 1999, spelling, sizeof(spelling), &sized);
+                                                                    parser->language.standard >= 1999, &named_types, spelling, sizeof(spelling), &sized);
             const uint32_t place = name < parser->tokens.count ? check_input_checks_parameter_place(reader, name, (uint32_t)index - 1) : BUSTER_CHECK_NONE;
             const TypeId parameter = parameter_types[index - 1];
             const bool declarator = place < parser->tokens.count && parser->tokens.kinds[place] == PARSE_KIND_IDENTIFIER && reader->declaration_kinds[place] == C_BINDING_OBJECT;

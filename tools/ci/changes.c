@@ -20,13 +20,13 @@
 //   change to such a step;
 // - measure: the plain benchmarks to run, `,NAME,NAME,` by `changes_benchmarks`' names, or `all`.
 //
-// A push sets code alone and measure to all: its pull request's run measured what it changes. A push given its first-parent
-// change (the nightly mode's, docs/ci.md) is targeted instead: it decides as a pull request on that change, but code is
-// always true: every main revision needs full hosted correctness, including documentation-only changes (#1271), and
+// A push sets code alone and measure to all. A push given its first-parent change (the nightly mode's, docs/ci.md) is
+// targeted instead: it decides as a pull request on that change, but code is always true: every main revision runs its
+// own hosted rows, including documentation-only changes (#1271; plain alone in the nightly mode, #2057), and
 // a push of several commits can bring code that its head's own change doesn't show. `changes_decide` is the
 // decision; `changes_self_test` checks it on fixtures and checks the tables against the workflow and the sources at
 // --root (the repository by default), and checks the workflow's policies: the oracle cache's (changes_oracle_policy),
-// main's trigger and full hosted scope (changes_main_policy), and the hosted test job's shards, its list and N alike
+// main's trigger and the hosted scope the evidence job decides (changes_main_policy), and the hosted test job's shards, its list and N alike
 // (changes_shard_policy). The selector is CI tooling outside the compile path and has no vector path: it reads a few
 // hundred lines and files.
 //
@@ -304,7 +304,7 @@ static const ChangesModule changes_modules[] = {
     },
     {
         .name = "parser_bindings",
-        .sources = "c_parser|c_parser_binding_trace|c_parser_bindings[a-z0-9_]*|c_bindings[a-z0-9_]*",
+        .sources = "c_parser(_impl)?|c_parser_binding_trace|c_parser_bindings[a-z0-9_]*|c_bindings[a-z0-9_]*",
     },
     {
         .name = "environments",
@@ -374,7 +374,7 @@ static const ChangesModule changes_modules[] = {
     {
         .name = "compile_time",
         .sources = "c_check_clock|c_checker_driver|c_check_program_emit|c_check_program_lower|c_check_program_batch|"
-                   "compile_measure|baked|c_check_input|c_checker|c_parser|lane|c_check_program",
+                   "compile_measure|baked|c_check_input|c_checker|c_parser(_impl)?|lane|c_check_program",
     },
     // #138's and #1189's programs, speedtest1 and Lua's scripts, by both tiers, clang -O0 and -O2 and tcc
     // (measure-tier1-programs): where Tier 1's input or pipeline changes what --tier1 compiles them to (the checker's
@@ -426,7 +426,7 @@ struct ChangesBenchmark
 static const ChangesBenchmark changes_benchmarks[] = {
     {
         .name = "assembler",
-        .sources = "assembler[a-z0-9_]*|branch_sizing|c_intern|c_lexer|c_predefines|c_preprocessor|c_refine|lane|link|"
+        .sources = "assembler[a-z0-9_]*|branch_sizing|c_intern|c_lexer|c_predefines|c_preprocessor(_history)?(_impl)?|c_refine|lane|link|"
                    "object_writer|x86_64_encoder|x86_match|x86_semantics|x86_target[a-z0-9_]*",
     },
     {
@@ -485,21 +485,21 @@ static const ChangesBenchmark changes_benchmarks[] = {
         .name = "checker-bindings",
         .sources = "c_check[a-z0-9_]*|c_builtin[a-z0-9_]*|c_bindings|c_environment|c_gnu|c_intern|c_lexer[a-z0-9_]*|"
                    "c_lowering|c_parser[a-z0-9_]*|c_predefines[a-z0-9_]*|c_preprocessor[a-z0-9_]*|c_refine|c_types|"
-                   "c_types_transparent|preprocessor_fuzz[a-z0-9_]*|bind|dynamic|executable|import|lane|link|"
+                   "c_types_transparent|preprocessor_fuzz[a-z0-9_]*|bind|dynamic|executable(_impl)?|import|lane|link|"
                    "object_writer|runtime|snapshot|x86_64_encoder|x86_target",
     },
     {
         .name = "checker-deferred",
         .sources = "c_check[a-z0-9_]*|c_builtin[a-z0-9_]*|c_bindings|c_environment|c_gnu|c_intern|c_lexer[a-z0-9_]*|"
                    "c_lowering|c_parser[a-z0-9_]*|c_predefines[a-z0-9_]*|c_preprocessor[a-z0-9_]*|c_refine|c_types|"
-                   "c_types_transparent|preprocessor_fuzz[a-z0-9_]*|bind|dynamic|executable|import|lane|link|"
+                   "c_types_transparent|preprocessor_fuzz[a-z0-9_]*|bind|dynamic|executable(_impl)?|import|lane|link|"
                    "object_writer|runtime|snapshot|x86_64_encoder|x86_target",
     },
     {
         .name = "checker-source",
         .sources = "c_check[a-z0-9_]*|c_builtin[a-z0-9_]*|c_bindings|c_environment|c_gnu|c_intern|c_lexer[a-z0-9_]*|"
                    "c_lowering|c_parser[a-z0-9_]*|c_predefines[a-z0-9_]*|c_preprocessor[a-z0-9_]*|c_refine|c_types|"
-                   "c_types_transparent|preprocessor_fuzz[a-z0-9_]*|bind|dynamic|executable|import|lane|link|"
+                   "c_types_transparent|preprocessor_fuzz[a-z0-9_]*|bind|dynamic|executable(_impl)?|import|lane|link|"
                    "object_writer|runtime|snapshot|x86_64_encoder|x86_target",
     },
     {
@@ -538,8 +538,8 @@ static const ChangesBenchmark changes_benchmarks[] = {
     },
     {
         .name = "gnu",
-        .sources = "c_bindings|c_gnu[a-z0-9_]*|c_intern|c_lexer[a-z0-9_]*|c_parser|c_parser_binding_trace|"
-                   "c_predefines|c_preprocessor|c_preprocessor_history|c_builtin_catalog|c_refine|lane|x86_target",
+        .sources = "c_bindings|c_gnu[a-z0-9_]*|c_intern|c_lexer[a-z0-9_]*|c_parser(_impl)?|c_parser_binding_trace|"
+                   "c_predefines|c_preprocessor(_history)?(_impl)?|c_builtin_catalog|c_refine|lane|x86_target",
     },
     {
         .name = "import",
@@ -613,7 +613,7 @@ static const ChangesBenchmark changes_benchmarks[] = {
     {
         .name = "parser-bindings",
         .sources = "c_bindings[a-z0-9_]*|c_gnu|c_intern|c_lexer[a-z0-9_]*|c_parser[a-z0-9_]*|c_predefines|"
-                   "c_preprocessor|c_preprocessor_history|c_builtin_catalog|c_refine|lane|x86_target",
+                   "c_preprocessor(_history)?(_impl)?|c_builtin_catalog|c_refine|lane|x86_target",
     },
     {
         .name = "preprocessor",
@@ -638,7 +638,7 @@ static const ChangesBenchmark changes_benchmarks[] = {
     },
     {
         .name = "streaming",
-        .sources = "streaming[a-z0-9_]*|unwind[a-z0-9_]*|debug|executable|link[a-z0-9_]*|object_writer[a-z0-9_]*|"
+        .sources = "streaming[a-z0-9_]*|unwind[a-z0-9_]*|debug|executable(_impl)?|link[a-z0-9_]*|object_writer[a-z0-9_]*|"
                    "c_types|calling_convention(_builtins)?|lane|tier0|tier0_generate|x86_64_encoder|x86_semantics|branch_sizing",
     },
     {
@@ -1708,6 +1708,15 @@ static const ChangesFixture changes_fixtures[] = {
         .measured = "parser-bindings",
     },
     {
+        .name = "the parser implementation keeps the parser, binding and compile campaigns",
+        .files = "src/buster/compiler/c_parser_impl.c",
+        .outputs_true = "code parser_bindings compile_time",
+        .outputs_false = "checker checker_bindings checker_binding_modes preprocessor_clang",
+        .measured = "parser parser-bindings gnu checker-source checker-bindings checker-deferred backend-source "
+                    "check-debug check-lanes ir-source lowering-source",
+        .unmeasured = "lexer preprocessor x86-encoder",
+    },
+    {
         .name = "a digit in a module's name",
         .files = "src/buster/compiler/x86_zen5.c",
         .outputs_true = "zen5",
@@ -1733,6 +1742,29 @@ static const ChangesFixture changes_fixtures[] = {
         .files = "src/buster/compiler/c_preprocessor.c",
         .outputs_false = "preprocessor_clang",
         .measured = "preprocessor",
+    },
+    {
+        .name = "the preprocessor implementation keeps its runtime consumers",
+        .files = "src/buster/compiler/c_preprocessor_impl.c",
+        .outputs_true = "code",
+        .outputs_false = "preprocessor_clang",
+        .measured = "preprocessor parser parser-bindings gnu assembler checker-source backend-source",
+        .unmeasured = "lexer x86-encoder",
+    },
+    {
+        .name = "the history implementation keeps diagnostics and source consumers",
+        .files = "src/buster/compiler/c_preprocessor_history_impl.c",
+        .outputs_true = "code",
+        .outputs_false = "preprocessor_clang",
+        .measured = "preprocessor parser parser-bindings gnu assembler checker-source backend-source",
+        .unmeasured = "lexer x86-encoder",
+    },
+    {
+        .name = "the executable implementation keeps writer and transitive consumer measurements",
+        .files = "src/buster/compiler/executable_impl.c",
+        .outputs_true = "code",
+        .measured = "executable snapshot link streaming foreign-strings checker-source checker-bindings checker-deferred",
+        .unmeasured = "lexer preprocessor parser",
     },
     {
         .name = "the preprocessor benchmark's harness, which times clang -E",
@@ -2662,9 +2694,11 @@ static void changes_test_oracle_policy(ChangesTest* test, Text workflow)
     }
 }
 
-// Every main push, including documentation alone, runs the full hosted scope (#1271). Keep its unfiltered trigger
-// and per-run concurrency separate from a PR's replaceable queue. The evidence glue tests pin scope=full/hosted=run
-// for pushes; here the workflow must consume those decisions without reducing the matrix or suppressing fuzzing.
+// Every main push, including documentation alone, runs its own hosted rows (#1271): every row before the nightly mode,
+// the plain rows in it (#2057, until the merge queue carries the full suite; the nightly snapshot runs the sanitizer
+// rows and fuzzing). Keep its unfiltered trigger and per-run concurrency separate from a PR's replaceable queue. The
+// evidence glue tests pin scope and hosted=run for pushes; here the workflow must consume those decisions without
+// reducing the matrix or suppressing fuzzing for a full scope.
 // This pins the repository's YAML spelling, as the oracle policy does; it is not a general YAML evaluator.
 static bool changes_main_policy(Text workflow)
 {
@@ -2683,7 +2717,7 @@ static bool changes_main_policy(Text workflow)
         { 1, "    if: ${{ !cancelled() && needs.prepare-hosted-tools.result == 'success' && github.repository_id == '1421805693' && needs.evidence.result == 'success' && needs.evidence.outputs.hosted == 'run' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) && (github.event_name != 'pull_request' || (needs.agent-guide-size.result == 'success' && needs.dco-hooks.result == 'success')) }}" },
         { 1, "      fail-fast: ${{ github.event_name == 'pull_request' }}" },
         { 1, "        host_arch: [x86-64, native]" },
-        { 1, "        sanitizer: ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '[\"none\"]' || '[\"none\", \"address\", \"undefined\", \"thread\", \"memory\"]') }}" },
+        { 1, "        sanitizer: ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '[\"none\"]' || '[\"none\", \"address\", \"thread\", \"memory\"]') }}" },
         { 1, "        optimization: [3]" },
         { 1, "          ref: ${{ github.sha }}" },
         { 2, "    needs: [changes, evidence, prepare-hosted-tools]" },
@@ -2774,8 +2808,10 @@ static void changes_test_main_policy(ChangesTest* test, Text workflow)
         { "  test:", "    needs: [changes, evidence, agent-guide-size, dco-hooks, prepare-hosted-tools]", "    needs: [changes, evidence, agent-guide-size, dco-hooks]", "tests omit preparation dependency" },
         { "  test:", "      fail-fast: ${{ github.event_name == 'pull_request' }}", "      fail-fast: true", "main matrix fail-fast" },
         { "  test:", "        host_arch: [x86-64, native]", "        host_arch: [native]", "missing baseline architecture" },
-        { "  test:", "        sanitizer: ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '[\"none\"]' || '[\"none\", \"address\", \"undefined\", \"thread\", \"memory\"]') }}", "        sanitizer: ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '[\"none\"]' || '[\"none\", \"address\", \"undefined\", \"thread\"]') }}", "missing memory sanitizer" },
-        { "  test:", "        sanitizer: ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '[\"none\"]' || '[\"none\", \"address\", \"undefined\", \"thread\", \"memory\"]') }}", "        sanitizer: ${{ fromJSON((github.event_name != 'schedule' || needs.evidence.outputs.scope == 'plain') && '[\"none\"]' || '[\"none\", \"address\", \"undefined\", \"thread\", \"memory\"]') }}", "push gets plain matrix" },
+        { "  test:", "        sanitizer: ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '[\"none\"]' || '[\"none\", \"address\", \"thread\", \"memory\"]') }}", "        sanitizer: ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '[\"none\"]' || '[\"none\", \"thread\", \"memory\"]') }}", "missing address sanitizer" },
+        { "  test:", "        sanitizer: ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '[\"none\"]' || '[\"none\", \"address\", \"thread\", \"memory\"]') }}", "        sanitizer: ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '[\"none\"]' || '[\"none\", \"address\", \"memory\"]') }}", "missing thread sanitizer" },
+        { "  test:", "        sanitizer: ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '[\"none\"]' || '[\"none\", \"address\", \"thread\", \"memory\"]') }}", "        sanitizer: ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '[\"none\"]' || '[\"none\", \"address\", \"thread\"]') }}", "missing memory sanitizer" },
+        { "  test:", "        sanitizer: ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '[\"none\"]' || '[\"none\", \"address\", \"thread\", \"memory\"]') }}", "        sanitizer: ${{ fromJSON((github.event_name != 'schedule' || needs.evidence.outputs.scope == 'plain') && '[\"none\"]' || '[\"none\", \"address\", \"thread\", \"memory\"]') }}", "push gets plain matrix" },
         { "  test:", "        optimization: [3]", "        optimization: [1]", "missing O3 optimization" },
         { "  test:", "          ref: ${{ github.sha }}", "          ref: main", "moving hosted revision" },
         { "  fuzz:", "    if: ${{ !cancelled() && needs.prepare-hosted-tools.result == 'success' && github.repository_id == '1421805693' && github.event_name != 'pull_request' && needs.evidence.result == 'success' && needs.evidence.outputs.hosted == 'run' && needs.evidence.outputs.scope == 'full' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) }}", "    if: ${{ !cancelled() && needs.prepare-hosted-tools.result == 'success' && github.repository_id == '1421805693' && github.event_name != 'pull_request' && needs.evidence.result == 'success' && needs.evidence.outputs.hosted == 'run' && needs.evidence.outputs.hardware == 'admit' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) }}", "native reuse suppresses fuzzing" },

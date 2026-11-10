@@ -374,6 +374,9 @@ static bool check_input_enum_read(CheckInputReader* reader, CheckTagFrame* frame
     bool valid = name < frame->close && parser->tokens.kinds[name] == PARSE_KIND_IDENTIFIER;
     CheckValue value = { 0 };
     bool missing = false;
+    // The value's failure evidence, for its error in clang's words (#1447), and its first token.
+    CheckConstantFailure failure = { .token = BUSTER_CHECK_NONE, .callee = BUSTER_CHECK_NONE };
+    uint32_t value_first = name;
     CheckInputAttributes* attributes = frame->enumerator_attributes;
     // An enum with a fixed underlying type is complete from its base on (check_input_tag_identity); one a mode completed
     // isn't fixed (BUSTER_CHECK_ENUM_MODED).
@@ -440,6 +443,8 @@ static bool check_input_enum_read(CheckInputReader* reader, CheckTagFrame* frame
         {
             i = job->end;
             failed_token = job->failure != BUSTER_CHECK_NONE ? job->failure : job->first;
+            failure = job->evidence;
+            value_first = job->first;
             if (*nested_tag == BUSTER_CHECK_NONE)
             {
                 valid = !missing && valid && check_input_const_rvalue(reader, i, &value) && check_input_integer_constant(reader, &value);
@@ -581,7 +586,7 @@ static bool check_input_enum_read(CheckInputReader* reader, CheckTagFrame* frame
     }
     if (!valid && reader->output->report_count == report_count)
     {
-        check_input_report(reader, failed_token, CHECK_INPUT_DECLARATION);
+        check_input_constant_failure_report(reader, &failure, value_first, failed_token);
     }
     return valid;
 }
