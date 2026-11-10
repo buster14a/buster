@@ -657,6 +657,12 @@ static void check_test_driver_ignored_pragmas(CheckTest* test, const char* clang
         { "#pragma align 4\nint main(void){return 0;}\n", NULL, NULL, NULL },
         { "#pragma align 4\nint main(void){return 0;}\n", "-Werror=ignored-pragmas", NULL, NULL },
         { "#pragma align 4\nint main(void){return 0;}\n", "-Wno-ignored-pragmas", "-Werror", NULL },
+        // `#pragma options align` and `#pragma align` (#1849): malformed ones and an empty stack's reset warn.
+        { "#pragma options align\n#pragma options\n#pragma align\n#pragma options foo=packed\n#pragma options align=\n#pragma align=bogus\n"
+          "#pragma align=packed x\n#pragma align=reset\n#pragma options align=reset\n#pragma options align = natural extra\n#pragma options align=12\n"
+          "#pragma options align=packed\nstruct S{char c;int n;};\n#pragma options align=reset\nint main(void){return sizeof(struct S)!=5;}\n", NULL, NULL, NULL },
+        { "#pragma options align=reset\nint main(void){return 0;}\n", "-Werror=ignored-pragmas", NULL, NULL },
+        { "#pragma pack(2)\n#pragma options align=reset\n#pragma options align=reset\nint main(void){return 0;}\n", NULL, NULL, NULL },
         { "#pragma comment(lib, \"m\")\nint main(void){return 0;}\n", "-Wall", "-Werror", NULL },
         { "#pragma comment(user, \"tooling\")\nint main(void){return 0;}\n", "-Werror=ignored-pragmas", NULL, NULL },
         { "int main(void){int sum=0;\n#pragma omp parallel for\nfor(int i=0;i<4;i++)sum+=i;return sum!=6;}\n", NULL, NULL, NULL },
@@ -740,8 +746,9 @@ static void check_test_driver_ignored_pragmas(CheckTest* test, const char* clang
         const char* barrier;
     } refused[] = {
         { "#pragma weak alias = target\nint target;\n", "weak", NULL, NULL, NULL },
-        { "#pragma align=packed\nstruct S{char c;int n;};\n", "align", NULL, NULL, NULL },
-        { "#pragma options align=packed\nstruct S{char c;int n;};\n", "options", NULL, NULL, NULL },
+        // mac68k is clang's error on this target (#1849), which the checker refuses by name.
+        { "#pragma align=mac68k\nstruct S{char c;int n;};\n", "align", NULL, NULL, NULL },
+        { "#pragma options align=mac68k\nstruct S{char c;int n;};\n", "options", NULL, NULL, NULL },
         { "#pragma omp parallel\nint object;\n", "omp", "-fopenmp", NULL, "-fopenmp" },
         { "#pragma omp parallel\nint object;\n", "omp", "-fno-openmp", "-fopenmp", "-fopenmp" },
         { "#undef _OPENMP\n#pragma omp parallel\nint object;\n", "omp", "-fopenmp", NULL, "-fopenmp" },

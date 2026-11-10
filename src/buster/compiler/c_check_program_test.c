@@ -4108,6 +4108,65 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
             "mix(__builtin_sub_overflow(ua,b,&rc));mix(rc);mix(__builtin_mul_overflow(x,ub,&r100));raw(&r100);"
             "mix(__builtin_add_overflow((long)n,a,&rw));raw(&rw);mix(__builtin_mul_overflow(y,c,&r127u));raw(&r127u);}"
             "return (int)(h^(h>>32));}", "bit-int-65-to-127-overflow", clang);
+        // The overflow builtins of _BitInts past 128 bits (#1447), as operands and destinations, beside 129-, 128-bit, long,
+        // int, char and _Bool ones: sums and differences signed and unsigned, unsigned products, of boundary values around
+        // each width; each overflow and the destination's bytes, its bits past the width extended as clang stores them,
+        // hashed.
+        check_test_program_source(test,
+            "typedef _BitInt(200) S200;typedef unsigned _BitInt(200) U200;typedef _BitInt(129) S129;typedef unsigned _BitInt(256) U256;\n"
+            "typedef unsigned _BitInt(129) U129;typedef _BitInt(300) S300;\n"
+            "static unsigned long long h;static void mix(unsigned long long v){h=h*31+v;}\n"
+            "static void raw(const void*p,unsigned n){unsigned long long w[8];__builtin_memcpy(w,p,n);for(unsigned i=0;i<n/8;i++)mix(w[i]);}\n"
+            "static U256 val(unsigned i,unsigned long long s){U256 one=1;U256 v=0;\n"
+            "switch(i%12){case 0:v=0;break;case 1:v=1;break;case 2:v=~(U256)0;break;case 3:v=(one<<199)-1;break;case 4:v=one<<199;break;\n"
+            "case 5:v=(one<<128)-1;break;case 6:v=one<<128;break;case 7:v=~((one<<199)-1);break;case 8:v=(one<<64)+s;break;\n"
+            "case 9:v=((U256)s<<130)|s;break;case 10:v=~(((U256)s)<<70);break;default:v=((U256)s<<(s%190))^s;}\n"
+            "return v;}\n"
+            "int tested(int n){h=(unsigned)n;unsigned long long s=0x9e3779b97f4a7c15ull*(unsigned)(n+1);\n"
+            "for(unsigned i=0;i<24;i++)for(unsigned j=0;j<24;j++){s^=s<<13;s^=s>>7;s^=s<<17;\n"
+            "U256 x=val(i,s),y=val(j,s*3);S200 a=(S200)x,b=(S200)y;U200 ua=(U200)x,ub=(U200)y;S129 c=(S129)x;U129 uc=(U129)y;\n"
+            "S200 r200;U200 ru200;S129 r129;U129 ru129;S300 r300;U256 ru256;int ri;long rl;unsigned char rc;__int128 rw;_BitInt(100) r100;_Bool rb;\n"
+            "mix(__builtin_add_overflow(a,b,&r200));raw(&r200,32);mix(__builtin_sub_overflow(a,b,&r200));raw(&r200,32);\n"
+            "mix(__builtin_add_overflow(ua,ub,&ru200));raw(&ru200,32);mix(__builtin_sub_overflow(ua,ub,&ru200));raw(&ru200,32);\n"
+            "mix(__builtin_mul_overflow(ua,ub,&ru200));raw(&ru200,32);mix(__builtin_mul_overflow(ua,(unsigned)i,&ru256));raw(&ru256,32);\n"
+            "mix(__builtin_add_overflow(a,ub,&r129));raw(&r129,24);mix(__builtin_sub_overflow(c,uc,&ru129));raw(&ru129,24);\n"
+            "mix(__builtin_add_overflow(c,a,&r300));raw(&r300,40);mix(__builtin_sub_overflow(ua,b,&ri));mix((unsigned)ri);\n"
+            "mix(__builtin_add_overflow(a,(long)s,&rl));mix((unsigned long)rl);mix(__builtin_sub_overflow(ua,(int)i,&rc));mix(rc);\n"
+            "mix(__builtin_add_overflow(c,(__int128)s,&rw));raw(&rw,16);mix(__builtin_sub_overflow(a,c,&r100));raw(&r100,16);\n"
+            "mix(__builtin_add_overflow((int)i,(long)j,&r200));raw(&r200,32);mix(__builtin_mul_overflow(uc,ua,&ru256));raw(&ru256,32);\n"
+            "mix(__builtin_mul_overflow(ua,ub,&ru129));raw(&ru129,24);mix(__builtin_mul_overflow(uc,uc,&rl));mix((unsigned long)rl);\n"
+            "mix(__builtin_mul_overflow(ua,(unsigned long)s,&ri));mix((unsigned)ri);mix(__builtin_add_overflow(ua,ub,&rb));mix(rb);\n"
+            "mix(__builtin_mul_overflow(ua,(unsigned __int128)s,&ru200));raw(&ru200,32);\n"
+            "}return (int)(h^(h>>32));}", "bit-int-past-128-overflow", clang);
+        // The generic and C23 bit builtins of _BitInts past 128 bits (#1447), limb by limb, of boundary values, single bits and
+        // random ones: counts, reversals, byte swaps, bit_floor and bit_ceil, and rotations of a power of two's width by
+        // counts of every width (clang's code generator can't compile another width's, which tier1-bits checks), and narrower
+        // values' by counts past 128 bits; each result and the bytes of each value, hashed.
+        check_test_program_source(test,
+            "typedef unsigned _BitInt(200) U;typedef _BitInt(208) S;typedef unsigned _BitInt(256) W;typedef unsigned _BitInt(130) V;\n"
+            "static unsigned long long h;static void mix(unsigned long long v){h=h*31+v;}\n"
+            "static void raw(const void*p,unsigned n){unsigned long long w[8];__builtin_memcpy(w,p,n);for(unsigned i=0;i<n/8;i++)mix(w[i]);}\n"
+            "static W val(unsigned i,unsigned long long s){W one=1;W v=0;\n"
+            "switch(i%14){case 0:v=0;break;case 1:v=1;break;case 2:v=~(W)0;break;case 3:v=(one<<199)-1;break;case 4:v=one<<199;break;\n"
+            "case 5:v=(one<<128)-1;break;case 6:v=one<<128;break;case 7:v=~((one<<199)-1);break;case 8:v=(one<<64)+s;break;\n"
+            "case 9:v=((W)s<<130)|s;break;case 10:v=~(((W)s)<<70);break;case 11:v=one<<(s%200);break;case 12:v=(one<<(s%200))+1;break;default:v=((W)s<<(s%190))^s;}\n"
+            "return v;}\n"
+            "int tested(int n){h=(unsigned)n;unsigned long long s=0x9e3779b97f4a7c15ull*(unsigned)(n+1);\n"
+            "for(unsigned i=0;i<28;i++){s^=s<<13;s^=s>>7;s^=s<<17;\n"
+            "W w=val(i,s);U x=(U)w;S y=(S)w;W z=w;V v=(V)w;U r;S q;W t;V rv;\n"
+            "mix(__builtin_popcountg(x));mix(__builtin_popcountg(z));mix(__builtin_clzg(x,-7));mix(__builtin_ctzg(x,-9));mix(__builtin_clzg(z,(int)i));\n"
+            "if(x){mix(__builtin_clzg(x));mix(__builtin_ctzg(x));}\n"
+            "mix(__builtin_stdc_leading_zeros(x));mix(__builtin_stdc_leading_ones(x));mix(__builtin_stdc_trailing_zeros(x));mix(__builtin_stdc_trailing_ones(x));\n"
+            "mix(__builtin_stdc_first_leading_zero(x));mix(__builtin_stdc_first_leading_one(x));mix(__builtin_stdc_first_trailing_zero(x));mix(__builtin_stdc_first_trailing_one(x));\n"
+            "mix(__builtin_stdc_count_zeros(x));mix(__builtin_stdc_count_ones(x));mix(__builtin_stdc_has_single_bit(x));mix(__builtin_stdc_bit_width(x));\n"
+            "mix(__builtin_stdc_leading_ones(z));mix(__builtin_stdc_trailing_ones(z));mix(__builtin_stdc_has_single_bit(z));\n"
+            "r=__builtin_stdc_bit_floor(x);raw(&r,32);r=__builtin_stdc_bit_ceil(x);raw(&r,32);t=__builtin_stdc_bit_ceil(z);raw(&t,32);\n"
+            "r=__builtin_bitreverseg(x);raw(&r,32);q=__builtin_bitreverseg(y);raw(&q,32);q=__builtin_bswapg(y);raw(&q,32);t=__builtin_bswapg(z);raw(&t,32);t=__builtin_bitreverseg(z);raw(&t,32);\n"
+            "t=__builtin_stdc_rotate_right(z,(U)~w);raw(&t,32);t=__builtin_stdc_rotate_left(z,i*8);raw(&t,32);t=__builtin_stdc_rotate_left(z,(int)(s%700)-350);raw(&t,32);\n"
+            "t=__builtin_stdc_rotate_right(z,(S)w);raw(&t,32);t=__builtin_stdc_rotate_left(z,(_BitInt(129))(long)s);raw(&t,32);\n"
+            "mix(__builtin_stdc_rotate_right((unsigned)s,y));mix(__builtin_stdc_rotate_left((unsigned char)s,x));mix(__builtin_stdc_rotate_left((unsigned short)s,(S)w));\n"
+            "{unsigned __int128 o=__builtin_stdc_rotate_right((unsigned __int128)w,y);raw(&o,16);unsigned _BitInt(100) p=__builtin_stdc_rotate_left((unsigned _BitInt(100))w,(V)~w);raw(&p,16);}\n"
+            "}return (int)(h^(h>>32));}", "bit-int-past-128-bit-builtins", clang);
         check_test_program_source(test,
             "int tested(int n){n+=10;typedef int A[n++];int x=n;n+=3;return (int)sizeof(A)+(int)sizeof(A)+n+x;}",
             "vla-typedef-captures-bound-once", clang);
@@ -5635,7 +5694,7 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         check_test_program_boundary(test, "int tested(int n){asm goto(\"\"::::target);return n;target:return n+1;}",
                                     "typed-asm-goto-target", true, true, 0, 0);
     }
-    // File-scope assembly lowers no code: the emission assembles it (check_program_emit_file_asm, #619).
+    // File-scope assembly lowers no code: the planning assembles it (check_program_asm_plan_file, #619).
     if (check_test_takes())
     {
         check_test_program_boundary(test, "asm(\".byte 0\");int tested(int n){return n;}",
@@ -5700,6 +5759,16 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         check_test_program_boundary_reason(test, "struct W{unsigned _BitInt(200) x:150;};int tested(int n){struct W w;w.x=n;return w.x>1;}", "bit-int-200-bit-field", true,
                                            false, 0, 0, "bit-fields of this type or spread over more than 8 bytes");
         check_test_program_boundary(test, "int tested(int n){_BitInt(100) r;return __builtin_add_overflow(n,n,&r);}", "bit-int-100-overflow", true, true, 0, 0);
+        // A result SSE, SSEUP of 22 bytes where the target's vectors are 32 bytes, which clang returns as <2 x double> in
+        // xmm0 (#1832): refused by its registers, not as a long double (an x87 register's bit, which a NONE second register
+        // has too). At x86-64's 16 bytes it is MEMORY, through a hidden pointer.
+        X86Target v3 = { 0 };
+        if (x86_target_parse("x86-64-v3", 9, &v3))
+        {
+            check_test_program_boundary_target(test, "union __attribute__((packed)) U{float v __attribute__((vector_size(16)));char c[22];};"
+                                                     "union U make(int n){union U u={0};u.c[0]=(char)n;return u;}int tested(int n){return make(n).c[0];}",
+                                               "odd-vector-union-result", true, false, 1, 1, "structs and unions returned in these registers", &v3);
+        }
         check_test_program_boundary(test, "struct W{unsigned __int128 x:100;};int tested(int n){struct W w;w.x=n;return w.x>1;}", "int128-bit-field-past-8-bytes", true,
                                     false, 0, 0);
         check_test_program_boundary(test,
