@@ -94,6 +94,36 @@ struct CheckDriverRunModes
 
 static CheckDriverRunModes check_driver_run_modes = { .server = -1, .requests = -1, .replies = -1 };
 
+// What main_driver reads as a process starts: arena_page_policy's variables and transparent huge pages setting, and the
+// lanes' test hooks. A run whose differ from this process's at its start needs a start of its own: a child.
+static const char* const check_driver_start_variables[] = { "BUSTER_HUGE_PAGES", "BUSTER_TEST_HOST_BUSY", "BUSTER_TEST_NO_LANE_THREADS",
+                                                            "BUSTER_TEST_LANE_FAIL_AT", "BUSTER_TEST_THREADS" };
+static char* check_driver_start_values[BUSTER_ARRAY_LENGTH(check_driver_start_variables)];
+static bool check_driver_start_set[BUSTER_ARRAY_LENGTH(check_driver_start_variables)];
+static int check_driver_start_huge_pages = -1;
+
+static void check_test_driver_record_start(void)
+{
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(check_driver_start_variables); i += 1)
+    {
+        const char* value = getenv(check_driver_start_variables[i]);
+        check_driver_start_set[i] = value != NULL;
+        check_driver_start_values[i] = value != NULL ? strdup(value) : NULL;
+    }
+    check_driver_start_huge_pages = prctl(PR_GET_THP_DISABLE, 0, 0, 0, 0);
+}
+
+static bool check_test_driver_same_start(void)
+{
+    bool same = prctl(PR_GET_THP_DISABLE, 0, 0, 0, 0) == check_driver_start_huge_pages;
+    for (uint32_t i = 0; same && i < BUSTER_ARRAY_LENGTH(check_driver_start_variables); i += 1)
+    {
+        const char* value = getenv(check_driver_start_variables[i]);
+        same = (value != NULL) == check_driver_start_set[i] && (value == NULL || (check_driver_start_values[i] != NULL && strcmp(value, check_driver_start_values[i]) == 0));
+    }
+    return same;
+}
+
 static uint64_t check_test_driver_nanoseconds(void)
 {
     struct timespec now = { 0 };
@@ -193,12 +223,13 @@ static int check_test_driver_child(char* const* arguments, char** text, bool std
 }
 
 // Whether --in-process takes buster's command line `arguments` (arguments[0] buster's name): a source command, an option
-// first, but the guardian's and the fuzzer's, which main_driver takes before, and not under a jobserver's dry run, which
-// main_driver honors before any command.
+// first, but the guardian's and the fuzzer's, which main_driver takes before, not under a jobserver's dry run, which
+// main_driver honors before any command, and with this process's start inputs (check_test_driver_same_start).
 static bool check_test_driver_in_process_takes(char* const* arguments)
 {
     return check_driver_run_modes.in_process && arguments[0] != NULL && arguments[1] != NULL && arguments[1][0] == '-' &&
-           strcmp(arguments[1], "--buster-worker-budget-guardian") != 0 && strcmp(arguments[1], "--fuzz") != 0 && !worker_budget_dry_run(getenv("MAKEFLAGS"));
+           strcmp(arguments[1], "--buster-worker-budget-guardian") != 0 && strcmp(arguments[1], "--fuzz") != 0 && !worker_budget_dry_run(getenv("MAKEFLAGS")) &&
+           check_test_driver_same_start();
 }
 
 // Buster's command line `arguments` as this process's main_source_command_reusable, with the selected stream captured
@@ -346,12 +377,29 @@ static int check_test_driver_clang_request(char* const* arguments, char** text, 
 // worker budget), whose times, faults, sizes and lanes that worked differ between any two runs, as two children's do.
 static bool check_test_driver_timing_line(const char* line, size_t length)
 {
-    static const char* const markers[] = { "time-stage\t", "time-check\t", "time-process\t", "time-write\t", "worker-budget\t" };
-    bool timing = false;
+    static const char* const markers[] = { "time-stage\t", "time-check\t", "time-process\t", "time-write\t" };
+    static const char budget[] = "worker-budget\t";
+    bool timing = length >= sizeof(budget) - 1 && memcmp(line, budget, sizeof(budget) - 1) == 0;
     for (uint32_t i = 0; !timing && i < BUSTER_ARRAY_LENGTH(markers); i += 1)
     {
         const size_t size = strlen(markers[i]);
         timing = length >= size && memcmp(line, markers[i], size) == 0;
+    }
+    // A report's measured value is a number: a line whose last field isn't one (time-process' huge-pages policy, a
+    // table's header) is compared as any other.
+    if (timing && !(length >= sizeof(budget) - 1 && memcmp(line, budget, sizeof(budget) - 1) == 0))
+    {
+        size_t field = length;
+        while (field > 0 && line[field - 1] != '\t')
+        {
+            field -= 1;
+        }
+        bool numeric = field < length;
+        for (size_t i = field; numeric && i < length; i += 1)
+        {
+            numeric = (line[i] >= '0' && line[i] <= '9') || line[i] == '.' || line[i] == '-' || line[i] == '%';
+        }
+        timing = numeric;
     }
     return timing;
 }
@@ -8181,6 +8229,7 @@ static int run_checker_driver_tests(int argc, char** argv)
     // The names the checks run buster and the oracle clang by, which the run modes recognize (#2071).
     check_driver_run_modes.executable = executable;
     check_driver_run_modes.clang = clang;
+    check_test_driver_record_start();
     // The library-builtin table is pinned to BUSTER_CLANG_REFERENCE_VERSION's official build: a different clang build is
     // reported with both, and the library comparisons then skip only the names that depend on its table (#1131).
     check_driver_clang_reference = clang_reference_report(clang, check_driver_clang_version, sizeof(check_driver_clang_version));
