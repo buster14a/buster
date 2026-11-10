@@ -141,9 +141,10 @@ function(buster_codegen_unit name)
         list(APPEND parts "${directory}/part${part}.bc")
     endforeach()
     set(exports "${directory}/exports.txt")
+    set(locals "${directory}/locals.txt")
     set(stamp "${directory}/split.stamp")
     add_custom_command(OUTPUT "${stamp}"
-        BYPRODUCTS ${parts} "${exports}"
+        BYPRODUCTS ${parts} "${exports}" "${locals}"
         COMMAND "${CMAKE_COMMAND}" "-DINPUT=$<TARGET_OBJECTS:buster_${name}>" "-DDIRECTORY=${directory}"
             "-DSPLIT=${BUSTER_CODEGEN_SPLIT}" "-DNM=${BUSTER_CODEGEN_NM}" "-DPARTITIONS=${BUSTER_CODEGEN_PARTITIONS}"
             -P "${scripts}/BusterCodegenSplit.cmake"
@@ -176,10 +177,10 @@ function(buster_codegen_unit name)
     endforeach()
     set(native "${directory}/native.o")
     add_custom_command(OUTPUT "${native}"
-        COMMAND "${CMAKE_COMMAND}" "-DOUTPUT=${native}" "-DEXPORTS=${exports}" "-DOBJECTS=${objects}"
+        COMMAND "${CMAKE_COMMAND}" "-DOUTPUT=${native}" "-DEXPORTS=${exports}" "-DLOCALS=${locals}" "-DOBJECTS=${objects}"
             "-DLLD=${BUSTER_CODEGEN_LLD}" "-DOBJCOPY=${BUSTER_CODEGEN_OBJCOPY}" "-DNM=${BUSTER_CODEGEN_NM}"
             "-DREADELF=${BUSTER_CODEGEN_READELF}" -P "${scripts}/BusterCodegenMerge.cmake"
-        DEPENDS ${objects} "${exports}" "${BUSTER_CODEGEN_LLD}" "${BUSTER_CODEGEN_OBJCOPY}" "${BUSTER_CODEGEN_NM}"
+        DEPENDS ${objects} "${exports}" "${locals}" "${BUSTER_CODEGEN_LLD}" "${BUSTER_CODEGEN_OBJCOPY}" "${BUSTER_CODEGEN_NM}"
             "${BUSTER_CODEGEN_READELF}" "${scripts}/BusterCodegenMerge.cmake"
         COMMENT "Combining ${name}'s native parts"
         VERBATIM)

@@ -12,7 +12,7 @@
 # parts' constants are concatenated in order, as one object's are.
 
 cmake_minimum_required(VERSION 3.25)
-foreach(name OUTPUT EXPORTS OBJECTS LLD OBJCOPY NM READELF)
+foreach(name OUTPUT EXPORTS LOCALS OBJECTS LLD OBJCOPY NM READELF)
     if(NOT DEFINED ${name})
         message(FATAL_ERROR "BusterCodegenMerge.cmake: ${name} is required")
     endif()
@@ -64,6 +64,17 @@ execute_process(COMMAND "${NM}" --extern-only --undefined-only --format=posix "$
     OUTPUT_VARIABLE undefined_before RESULT_VARIABLE status)
 if(NOT status EQUAL 0)
     message(FATAL_ERROR "BusterCodegenMerge.cmake: couldn't read ${OUTPUT}'s unresolved bindings")
+endif()
+# A name the unit defined locally (LOCALS, the split's list, with its aliases) must be defined again here: one still
+# undefined was a local definition no part kept, which lld accepts unreferenced but GNU ld refuses as a hidden symbol.
+file(WRITE "${OUTPUT}.undefined" "${undefined_names}")
+execute_process(COMMAND grep -F -x -f "${LOCALS}" "${OUTPUT}.undefined" OUTPUT_VARIABLE lost RESULT_VARIABLE status)
+file(REMOVE "${OUTPUT}.undefined")
+if(status EQUAL 0)
+    string(REGEX MATCH "^[^\n]*" first "${lost}")
+    message(FATAL_ERROR "BusterCodegenMerge.cmake: ${OUTPUT} leaves the unit's own ${first} undefined")
+elseif(NOT status EQUAL 1)
+    message(FATAL_ERROR "BusterCodegenMerge.cmake: couldn't check ${OUTPUT}'s undefined symbols against ${LOCALS}")
 endif()
 file(WRITE "${keep}" "${expected}${undefined_names}")
 execute_process(COMMAND "${OBJCOPY}" "--keep-global-symbols=${keep}" "${merged}" "${partial}" RESULT_VARIABLE status)

@@ -325,6 +325,74 @@ static void split_hide(LLVMValueRef value)
     LLVMSetVisibility(value, LLVMHiddenVisibility);
 }
 
+// Whether a code part reads `global`'s initializer, available_externally (split_part): a strong constant's, one whose
+// initializer the single module took as definitive.
+static bool split_readable(LLVMValueRef global)
+{
+    return !LLVMIsDeclaration(global) && LLVMIsGlobalConstant(global) && LLVMGetLinkage(global) == LLVMExternalLinkage &&
+           !LLVMIsThreadLocal(global) && !LLVMIsExternallyInitialized(global);
+}
+
+// What a code part reads, it may refer to: the code generator can fold a pointer out of a readable constant (a table's
+// string), so every local global such an initializer names is made a hidden external one, in turn readable where it is
+// a constant, until none is left. A local function it names already has its alias: the data part refers to it.
+static void split_readable_closure(LLVMModuleRef module)
+{
+    uint32_t capacity = 1024;
+    uint32_t depth = 0;
+    LLVMValueRef* stack = malloc(capacity * sizeof(LLVMValueRef));
+    for (LLVMValueRef global = LLVMGetFirstGlobal(module); global != 0; global = LLVMGetNextGlobal(global))
+    {
+        if (split_readable(global))
+        {
+            if (depth == capacity)
+            {
+                capacity *= 2;
+                stack = realloc(stack, capacity * sizeof(LLVMValueRef));
+            }
+            stack[depth] = LLVMGetInitializer(global);
+            depth += 1;
+        }
+    }
+    while (depth != 0)
+    {
+        depth -= 1;
+        LLVMValueRef value = stack[depth];
+        if (LLVMIsAGlobalVariable(value))
+        {
+            if (split_local(value) && !LLVMIsDeclaration(value))
+            {
+                split_hide(value);
+                if (split_readable(value))
+                {
+                    if (depth == capacity)
+                    {
+                        capacity *= 2;
+                        stack = realloc(stack, capacity * sizeof(LLVMValueRef));
+                    }
+                    stack[depth] = LLVMGetInitializer(value);
+                    depth += 1;
+                }
+            }
+        }
+        else if (!LLVMIsAGlobalValue(value) && LLVMIsAConstant(value))
+        {
+            const int operands = LLVMGetNumOperands(value);
+            for (int i = 0; i < operands; i += 1)
+            {
+                if (depth == capacity)
+                {
+                    capacity *= 2;
+                    stack = realloc(stack, capacity * sizeof(LLVMValueRef));
+                }
+                stack[depth] = LLVMGetOperand(value, (unsigned)i);
+                depth += 1;
+            }
+        }
+    }
+    free(stack);
+}
+
 // The plan's decisions every part shares, made before the parts fork: the boundaries; the appending arrays dropped
 // (they only keep definitions from the optimizer, which no longer runs, and ELF code generation ignores
 // llvm.compiler.used); names for unnamed local definitions; which functions are aliased; and the other local
@@ -413,6 +481,7 @@ static void split_plan(SplitPlan* plan)
             split_hide(global);
         }
     }
+    split_readable_closure(plan->module);
 }
 
 // Deletes a function's body, leaving a declaration.
@@ -492,8 +561,7 @@ static bool split_part(const SplitPlan* plan, uint32_t part, const char* path)
         {
             // A code part reads a constant's initializer, available_externally, where the data part defines it: one
             // whose initializer the single module took as definitive, a strong definition's, not a weak one's.
-            if (LLVMIsGlobalConstant(global) && LLVMGetLinkage(global) == LLVMExternalLinkage && !LLVMIsThreadLocal(global) &&
-                !LLVMIsExternallyInitialized(global))
+            if (split_readable(global))
             {
                 LLVMSetLinkage(global, LLVMAvailableExternallyLinkage);
             }
@@ -504,17 +572,25 @@ static bool split_part(const SplitPlan* plan, uint32_t part, const char* path)
             LLVMGlobalClearMetadata(global);
         }
     }
-    // What another part defines is a declaration here. A local one is unreferenced but by dead constants, so it emits
-    // nothing; were it referenced, the merge would find its hidden name undefined.
+    // What another part defines is a declaration here. A local one nothing live refers to (only dead constants left by
+    // the deleted bodies, and metadata such as !inline_history) is an ordinary external declaration, which the code
+    // generator doesn't name; as a hidden one, it would name it, undefined, which GNU ld refuses. One something does
+    // refer to is hidden, as the defining part's name is; the merge's check of the local names finds either undefined.
     for (int kind = 0; kind < 2; kind += 1)
     {
-        for (LLVMValueRef value = kind == 0 ? LLVMGetFirstFunction(module) : LLVMGetFirstGlobal(module); value != 0;
-             value = kind == 0 ? LLVMGetNextFunction(value) : LLVMGetNextGlobal(value))
+        LLVMValueRef value = kind == 0 ? LLVMGetFirstFunction(module) : LLVMGetFirstGlobal(module);
+        while (value != 0)
         {
+            LLVMValueRef following = kind == 0 ? LLVMGetNextFunction(value) : LLVMGetNextGlobal(value);
             const LLVMLinkage linkage = LLVMGetLinkage(value);
             if (LLVMIsDeclaration(value) && linkage != LLVMExternalLinkage && linkage != LLVMExternalWeakLinkage)
             {
-                if (split_local(value))
+                if (split_local(value) && split_references(plan, value) == 0)
+                {
+                    LLVMSetLinkage(value, LLVMExternalLinkage);
+                    LLVMSetVisibility(value, LLVMDefaultVisibility);
+                }
+                else if (split_local(value))
                 {
                     split_hide(value);
                 }
@@ -523,7 +599,19 @@ static bool split_part(const SplitPlan* plan, uint32_t part, const char* path)
                     LLVMSetLinkage(value, LLVMExternalLinkage);
                 }
             }
+            value = following;
         }
+    }
+    // A global variable declaration nothing here uses goes: the code generator would still name a hidden one.
+    LLVMValueRef global = LLVMGetFirstGlobal(module);
+    while (global != 0)
+    {
+        LLVMValueRef following = LLVMGetNextGlobal(global);
+        if (LLVMIsDeclaration(global) && LLVMGetFirstUse(global) == 0)
+        {
+            LLVMDeleteGlobal(global);
+        }
+        global = following;
     }
     if (part != 0)
     {
@@ -594,6 +682,37 @@ static uint32_t split_concurrency(uint32_t wanted)
     uint64_t limit = wanted < cpus ? wanted : cpus;
     limit = by_memory < limit ? by_memory : limit;
     return limit == 0 ? 1 : (uint32_t)limit;
+}
+
+// Writes DIRECTORY/locals.txt: the names of the module's local definitions and of the aliases the parts give them, one a
+// line, which the merge checks no part left undefined. Whether it was written.
+static bool split_locals(const SplitPlan* plan, const char* directory)
+{
+    char path[4096];
+    const int length = snprintf(path, sizeof(path), "%s/locals.txt", directory);
+    FILE* file = length > 0 && (size_t)length < sizeof(path) ? fopen(path, "w") : 0;
+    bool written = file != 0;
+    for (int kind = 0; written && kind < 2; kind += 1)
+    {
+        for (LLVMValueRef value = kind == 0 ? LLVMGetFirstFunction(plan->module) : LLVMGetFirstGlobal(plan->module); value != 0;
+             value = kind == 0 ? LLVMGetNextFunction(value) : LLVMGetNextGlobal(value))
+        {
+            const LLVMLinkage linkage = LLVMGetLinkage(value);
+            const bool hidden = LLVMGetVisibility(value) == LLVMHiddenVisibility && linkage == LLVMExternalLinkage;
+            if (!LLVMIsDeclaration(value) && (split_local(value) || hidden))
+            {
+                size_t size = 0;
+                const char* name = LLVMGetValueName2(value, &size);
+                fprintf(file, "%.*s\n", (int)size, name);
+                if (kind == 0 && split_local(value))
+                {
+                    fprintf(file, "%.*s" SPLIT_ALIAS_SUFFIX "\n", (int)size, name);
+                }
+            }
+        }
+    }
+    written = file != 0 && fclose(file) == 0 && written;
+    return written;
 }
 
 // Writes every part, a child process each, at most split_concurrency at once, and waits for them all: whether every
@@ -699,7 +818,7 @@ int main(int argc, char** argv)
             {
                 split_report(&plan);
             }
-            status = split_parts(&plan, argv[3]) ? 0 : 1;
+            status = split_locals(&plan, argv[3]) && split_parts(&plan, argv[3]) ? 0 : 1;
         }
     }
     return status;
