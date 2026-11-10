@@ -758,6 +758,15 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
         "__asm__(\"leaq .Lshared_point(%%rip), %0\" : \"=r\"(there));"
         "return r*7+s+(here==there)+external_helper(0);}",
         "asm-symbol-references", clang);
+    // Numeric labels and `.` as data (#1845), and a loop's branch to a numeric label: the template assembled whole, as
+    // a template of directives is, its labels' distances as clang's.
+    check_test_program_source(test,
+        "int tested(int n){long a,b,c,d;int e=n;"
+        "__asm__(\"leaq 1f(%%rip), %0\\n\\tleaq 2f(%%rip), %1\\n1:\\tnop\\n2:\\tsubq %0, %1\" : \"=&r\"(a), \"=&r\"(b));"
+        "__asm__(\"leaq .(%%rip), %0\\n\\tleaq .(%%rip), %1\\n\\tsubq %0, %1\" : \"=&r\"(c), \"=&r\"(d));"
+        "__asm__(\"movl $3, %%ecx\\n1:\\tincl %0\\n\\tloop 1b\" : \"+r\"(e) : : \"rcx\");"
+        "return (int)(b*1000+d*100)+e+(a!=0)+(c!=0);}",
+        "asm-numeric-data", clang);
     // A label inside a helper's template at its exact record: another statement's template calls the snippet it marks,
     // which the first template jumps over.
     check_test_program_source(test,
@@ -1050,8 +1059,24 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
                                        "asm-x87-integer", true, false, 0, 1, "inline assembly operands of this type in their constraint's registers");
     check_test_program_boundary_reason(test, "int tested(int n){long double x=n;__asm__ volatile(\"\" : : \"u\"(x));return n;}",
                                        "asm-x87-gap", true, false, 0, 1, "inline assembly's x87 operands and clobbers off the stack's top");
-    check_test_program_boundary_reason(test, "int tested(int n){long double x=n,y=n;__asm__ volatile(\"\" : : \"t\"(x), \"t\"(y));return n;}",
-                                       "asm-x87-doubled", true, false, 0, 2, "inline assembly's x87 operands and clobbers off the stack's top");
+    // Two operands at one depth (#1846), one register's as clang's code makes them: two inputs' depth takes the first
+    // matching or `+` input's value in clang's order of the inputs (the explicit ones, then the `+` outputs'), else the
+    // last other input's; two outputs at one depth each take its value, a template's push's too.
+    check_test_program_source(test,
+        "static double plus_last(double x, double y){__asm__(\"\" : \"+t\"(x) : \"t\"(y));return x;}"
+        "static double tied_first(double x, double y){double r;__asm__(\"\" : \"=t\"(r) : \"0\"(x), \"t\"(y));return r;}"
+        "static double tied_after(double x, double y){double r;__asm__(\"\" : \"=t\"(r) : \"t\"(y), \"0\"(x));return r;}"
+        "static double last_below(double x, double y, double z){double r;__asm__(\"fxch\\n\\tfstp %%st(1)\" : \"=t\"(r) : \"t\"(x), \"u\"(y), \"u\"(z) : \"st(1)\");return r;}"
+        "static long double both_out(long double x, long double y){long double r, s;__asm__(\"\" : \"=t\"(r), \"=t\"(s) : \"t\"(x), \"t\"(y));return r*10+s;}"
+        "static long double first_matching(long double x, long double y){long double r, s;__asm__(\"\" : \"=t\"(r), \"=t\"(s) : \"1\"(y), \"0\"(x));return r*10+s;}"
+        "static long double two_plus(long double x, long double y){__asm__(\"\" : \"+t\"(x), \"+t\"(y));return x*10+y;}"
+        "static long double matching_wins(long double x, long double y, long double z){long double r;__asm__(\"\" : \"=t\"(r) : \"t\"(z), \"0\"(x), \"t\"(y));return r;}"
+        "static float added(float x, float y){__asm__(\"fadd %1, %0\" : \"+t\"(x) : \"t\"(y));return x;}"
+        "static void pushed_twice(double* a, float* b){__asm__(\"fldpi\" : \"=t\"(*a), \"=t\"(*b));}"
+        "int tested(int n){double a=0;float b=0;pushed_twice(&a,&b);double x=n*0.5+1,y=n-3.25,z=n*n+0.125;"
+        "return (int)(plus_last(x,y)*8)+(int)(tied_first(x,y)*16)+(int)(tied_after(x,y)*32)+(int)(last_below(x,y,z)*4)+(int)both_out(x,y)+(int)(first_matching(x,y)*2)+"
+        "(int)(two_plus(x,y)*3)+(int)(matching_wins(x,y,z)*5)+(int)(added((float)x,(float)y)*7)+(int)(a*1000)+(int)(b*100000);}",
+        "asm-x87-doubled", clang);
     check_test_program_boundary_reason(test, "int tested(int n){long double x=n;__asm__ volatile(\"\" : : \"t\"(x) : \"st(1)\");return n;}",
                                        "asm-x87-clobber", true, false, 0, 1, "inline assembly's x87 operands and clobbers off the stack's top");
     // x87 registers named in templates (#147): %0 of t as %st, of u as %st(1), the stack's registers by name, an
@@ -1095,8 +1120,6 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
                                        "asm-local-undefined", true, false, 0, 0, "inline assembly's local labels that no template defines");
     check_test_program_boundary_reason(test, "int tested(int n){__asm__(\"lonely:\");return n;}",
                                        "asm-label-no-instructions", true, false, 0, 0, "inline assembly labels in templates of no instructions");
-    check_test_program_boundary_reason(test, "int tested(int n){long a;__asm__(\"leaq 1f(%%rip), %0\\n1:\" : \"=r\"(a));return n+(int)a;}",
-                                       "asm-numeric-data", true, false, 0, 0, "inline assembly's numeric labels and `.` are only its own jmp's and jcc's targets");
     // A vector in a vector register's constraint where the template has instructions, refers to it, or it is a volatile
     // output (whose load and store clang's code makes), which the helper doesn't place yet.
     static const char* const held[][2] = {

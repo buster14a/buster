@@ -444,7 +444,9 @@ whose phis promotion makes of the jumps' values, they are 3,555 and 6,089, and
 `lvm.c`'s promoted IR is 457,577 bytes, less than its lowered 518,569. A backend
 that wants a jump per site again, for the branch predictor, duplicates the
 dispatch block into its predecessors, as LLVM's tail duplication does.
-`FRAME_ADDRESS` and `TAIL_CALL` are refused with `IR_ERROR_UNSUPPORTED`, and the
+`FRAME_ADDRESS` and `TAIL_CALL` are refused with `IR_ERROR_UNSUPPORTED`, as is a
+function with segment overrides (#1447, `Tier0Function.segments`: loads and
+stores in `__seg_fs` and `__seg_gs`, which the IR's flags don't carry yet), and the
 vector values and `X86` rows that the [SIMD contract](ir-simd.md) doesn't admit
 for the output target (any, through the old entry points) with
 `IR_ERROR_UNSUPPORTED`, at their entry, after validation and before anything

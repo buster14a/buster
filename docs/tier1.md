@@ -374,6 +374,10 @@ The masked moves' selects of the x86 builtins (every masked operation's merge)
 are the IR's `vselect` and their undefined vectors its zero vector (#1840, [the
 SIMD IR guide](ir-simd.md)'s "Selects and undefined vectors"), which Tier 1
 selects as `vpblendm` and `vpxor`.
+The x86 builtins' casts between vector widths, lane inserts and masked lane
+extracts are the IR's `extract`, `widen` and `insert` intrinsics (#1840, [the
+SIMD IR guide](ir-simd.md)'s "Width changes"), each one EVEX instruction of
+selection's `BUSTER_TIER1_VECTOR_WIDTH_CHANGE`.
 
 ### Inlining (#1282)
 
@@ -446,7 +450,22 @@ whose scalar host's emulations of AVX2's and AVX-512's intrinsics
 x86-64-v3, every one for its wide vectors, and now refuses none, its 2,177
 functions' code certified at x86-64 (1,928 at main, uncertified 59 either way);
 `main_unit_backend.c` refused 233 at x86-64 and now refuses 25, none for a wide
-vector (the same 25 it refuses at znver5). `test-tier1-wide` takes hand-written
+vector (the same 25 it refuses at znver5).
+
+Those 25, attributed at main `cb608c1f` by `--tier1 --tier1-refusals --verify
+-c` at x86-64, x86-64-v3 and znver5 (#1847):
+- 16 were past the 16 arguments a call passed and a function took
+  (`BUSTER_TIER1_SELECT_MAX_ARGUMENTS`): 14 tests' calls of `printf` and of
+  their code through pointers with 17 to 25 arguments, and `_mm256_set_epi8`'s
+  and `_mm512_set_epi8`'s 32 and 64 parameters (at x86-64, the scalar host's
+  `host_mm512_set_epi8` and `tier0_shift_back`'s call of it). The limit is 64
+  now, and Tier 1 takes them all.
+- 5 are naked functions, whose bodies are assembly Tier 0 copies as written.
+- 4 call `__builtin_frame_address(0)` (`tier1_float_callee`,
+  `tier1_float_callee_variadic`, `tier1_stack_check_alignment` and
+  `cbuiltin_misc_lower_test_frames`), whose typed-stream entry the lowering to
+  the IR refuses: it needs a frame pointer, which Tier 1 keeps only in a
+  dynamic or realigned frame. It stays Tier 0's. `test-tier1-wide` takes hand-written
 wide vector IR through the split at both piece widths and natively at x86-64's,
 and `test-checker-driver`'s wide vectors' unit runs against clang -O0 at
 x86-64, x86-64-v2 and x86-64-v3 by both paths.
@@ -673,7 +692,7 @@ its own broader branch subset and explicitly refuses unsupported allocations
 and phis.
 
 Ordinary direct calls accept up to six register-passed `I32`, `I64` or pointer
-arguments (sixteen through the CFG consumer, those past the sixth on the stack:
+arguments (64 through the CFG consumer, #1847, those past the sixth on the stack:
 #141) and a void or matching scalar result. The native consumer preserves
 live caller registers, resolves argument cycles, aligns the stack and publishes
 ordinary symbolic CALL references. Independent hostile helpers test clobbers,

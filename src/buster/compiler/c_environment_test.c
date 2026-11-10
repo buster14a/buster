@@ -8,7 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/mman.h>
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_FRONTEND
 typedef struct CEnvironmentTest CEnvironmentTest;
 struct CEnvironmentTest
 {
@@ -49,7 +49,7 @@ static uint32_t c_environment_test_oracle(const CBindings* bindings, uint32_t ke
     }
     return result;
 }
-
+#endif
 typedef struct CEnvironmentTestJobs CEnvironmentTestJobs;
 struct CEnvironmentTestJobs
 {
@@ -77,7 +77,7 @@ static void c_environment_test_jobs(void* argument)
     }
     jobs->valid[lane] = valid;
 }
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_FRONTEND
 static void c_environment_test_histories(CEnvironmentTest* test, Arena* arena, Arena* scratch)
 {
     CBindings bindings;
@@ -557,3 +557,4 @@ static int run_c_environment_tests(int argc, char** argv)
     }
     return !valid || test.failures != 0;
 }
+#endif

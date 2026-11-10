@@ -717,6 +717,20 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_vector_operation(
         value = ir_typed_emit(sink, IR_VSELECT, type, mask, active, inactive, 0);
         ir_typed_lanes(sink, value, operation->lane);
     }
+    else if (operation->width_change != 0)
+    {
+        // A width change (#1840), its part in its flags; a masked extract's merged into its second operand under its third
+        // where the typed stream's writemask hasn't every lane.
+        const uint32_t kind = operation->width_change - 1u;
+        value = ir_typed_emit(sink, IR_INTRINSIC, type, operands[0], kind == BUSTER_IR_INTRINSIC_INSERT ? operands[1] : BUSTER_IR_NONE, kind, 0);
+        // An intrinsic's flags are its immediate, here the part, not lanes: the lanes' setter writes the flags column.
+        ir_typed_lanes(sink, value, (IrSimdLane)operation->part);
+        if (operation->merge_mask && !unmasked)
+        {
+            value = ir_typed_emit(sink, IR_VSELECT, type, operands[2], value, operands[1], 0);
+            ir_typed_lanes(sink, value, operation->lane);
+        }
+    }
     else if (operation->operation == IR_SIMD_SELECT)
     {
         // A masked move's select (#1840): the second operand's lanes where the mask's bits are set, the third's elsewhere.
@@ -742,7 +756,10 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_vector_operation(
 // operand have it (_mm512_cmpeq_epi8_mask's -1). The typed stream decides it, so both lowering passes agree.
 static bool ir_typed_unmasked(const Tier0Function* input, const IrSimdTypedOperation* operation, uint32_t i)
 {
-    const uint32_t lanes = operation->compare_mask ? 8u * operation->operand_bytes[0] / ir_simd_lane_bits(operation->lane) : 0;
+    // A comparison's lanes, or a masked extract's (#1840): its result's, the merged operand's.
+    const uint32_t lanes = operation->compare_mask ? 8u * operation->operand_bytes[0] / ir_simd_lane_bits(operation->lane) :
+                           operation->merge_mask   ? 8u * operation->operand_bytes[1] / ir_simd_lane_bits(operation->lane) :
+                                                     0;
     const uint64_t every = lanes >= 64 ? UINT64_MAX : (UINT64_C(1) << lanes) - 1;
     return lanes != 0 && i >= 2 && input->kinds[i - 1] == BUSTER_TYPED_CONVERT && input->classes[i - 1] == BUSTER_TYPED_CLASS_MASK && input->kinds[i - 2] == BUSTER_TYPED_CONST &&
            input->classes[i - 2] >= BUSTER_TYPED_CLASS_I8 && input->classes[i - 2] <= BUSTER_TYPED_CLASS_U64 && (input->values[i - 2] & every) == every;
@@ -1239,16 +1256,29 @@ static bool ir_typed_ignored_arguments(const Tier0Function* input, bool vector)
 // IR call then has ABI records. So does one that passes an aggregate the convention ignores (#141: an empty struct, of
 // no bytes), which a call without records would place by its type, in a register of its own, and one that passes a
 // static chain in r10 (#148), which a call without records would place in the next argument register; only a function
-// with one (`ignored`, ir_typed_ignored_arguments) reads its calls' locations.
+// with one (`ignored`, ir_typed_ignored_arguments) reads its calls' locations. And so does one that passes an aggregate
+// of no size on the stack (#1879: a record of a flexible array member alone, MEMORY, which clang passes byval in an
+// 8-byte slot), whose value, its address, a call without records would place in the next general register: in a
+// function with aggregates (argument_sizes), an argument of a general class on the stack while the call's locations
+// before it leave a general register free.
 static bool ir_typed_aggregate_call(const Tier0Function* input, uint32_t call, bool ignored)
 {
     bool aggregate = input->call_result_objects != 0 && input->call_result_objects[call] != 0;
+    const bool located = ignored || (input->argument_sizes != 0 && input->argument_locations != 0);
+    uint32_t general = 0;
     for (uint32_t a = 0; (input->argument_sizes != 0 || ignored) && a < input->call_argument_counts[call]; a += 1)
     {
         const uint32_t argument = input->call_first[call] + a;
-        const AbiLocation location = ignored ? input->argument_locations[argument] : (AbiLocation){ .kind = BUSTER_ABI_LOCATION_REGISTERS };
+        // Without locations, a stand-in in registers, which counts as two general ones (registers {0, 0}, rax) and is never
+        // on the stack, so it never asks for records.
+        const AbiLocation location = located ? input->argument_locations[argument] : (AbiLocation){ .kind = BUSTER_ABI_LOCATION_REGISTERS };
+        const uint8_t class = input->argument_classes[argument];
+        const bool general_class = class >= BUSTER_TYPED_CLASS_I8 && class <= BUSTER_TYPED_CLASS_U64;
         aggregate |= (input->argument_sizes != 0 && input->argument_sizes[argument] != 0) || location.kind == BUSTER_ABI_LOCATION_IGNORE ||
-                     (location.kind == BUSTER_ABI_LOCATION_REGISTERS && location.registers[0] == BUSTER_ABI_R10);
+                     (location.kind == BUSTER_ABI_LOCATION_REGISTERS && location.registers[0] == BUSTER_ABI_R10) ||
+                     (location.kind == BUSTER_ABI_LOCATION_STACK && general_class && general < BUSTER_ABI_INTEGER_ARGUMENTS);
+        general += location.kind != BUSTER_ABI_LOCATION_STACK && location.registers[0] < 16 ? 1 : 0;
+        general += location.kind != BUSTER_ABI_LOCATION_STACK && location.registers[1] < 16 ? 1 : 0;
     }
     return aggregate;
 }
@@ -1846,15 +1876,16 @@ static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType res
     {
         leaves |= input->asm_bodies[k].leaves;
     }
-    if (check.error == IR_OK && (input->unwind_init || input->returns_twice || tier0_preserving(input) || input->realign_stack || leaves))
+    if (check.error == IR_OK && (input->unwind_init || input->returns_twice || tier0_preserving(input) || input->realign_stack || input->segments || leaves))
     {
         // An asm body that returns from its function (#1839, Tier0AsmBody.leaves), whose function keeps no local and no
         // value in a callee-saved register, as __builtin_setjmp's keeps none, is Tier 0's too.
         // __builtin_unwind_init's frame, which saves every callee-saved register (Tier0Function.unwind_init),
         // __builtin_setjmp's, which keeps nothing in one (Tier0Function.returns_twice), a preserving function's, which
         // keeps registers for its caller past them (#147, Tier0Function.preserve_general), and a force_align_arg_pointer
-        // function's, which realigns its stack (#1447, Tier0Function.realign_stack), are Tier 0's: ordinary Tier 1 falls
-        // back to them.
+        // function's, which realigns its stack (#1447, Tier0Function.realign_stack), and a function with segment overrides
+        // (#1447, Tier0Function.segments: loads and stores in __seg_fs or __seg_gs, which the IR doesn't carry yet) are Tier
+        // 0's: ordinary Tier 1 falls back to them.
         check.error = IR_ERROR_UNSUPPORTED;
     }
     if (check.error == IR_OK)

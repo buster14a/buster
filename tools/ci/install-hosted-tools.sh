@@ -23,11 +23,15 @@ tar -I 'zstd -d --long=30' --extract --file "$BUSTER_HOSTED_RELEASES/llvm" \
     "$archive/bin/clang" "$archive/bin/clang-23" "$archive/bin/clang++" \
     "$archive/bin/lld" "$archive/bin/ld.lld" "$archive/bin/llvm-config" \
     "$archive/bin/llvm-dwarfdump" "$archive/bin/llvm-readobj" "$archive/bin/llvm-symbolizer" \
+    "$archive/bin/llvm-split" "$archive/bin/llvm-nm" "$archive/bin/llvm-objcopy" \
     "$archive/include/*" "$archive/lib/clang/23/*" \
     "$archive/lib/libLLVM*.a" "$archive/lib/libPolly*.a" "$archive/lib/libclang-cpp.so*"
 cp -- "$BUSTER_HOSTED_RELEASES/llvm-license" "$llvm/LICENSE.TXT"
 test "$("$llvm/bin/clang" -dumpversion)" = "$version"
 test "$("$llvm/bin/llvm-config" --version)" = "$version"
+for tool in llvm-split llvm-nm llvm-objcopy; do
+    test -x "$llvm/bin/$tool"
+done
 test -f "$("$llvm/bin/clang" -print-runtime-dir)/libclang_rt.fuzzer_no_main.a"
 bash "$here/setup-build-tools.sh" "$staging/build-tools" > /dev/null
 mold_version=$(bash "$here/hosted-release.sh" version mold)

@@ -569,6 +569,7 @@ static bool ir_source_text_tests(Arena* sources, Arena* original_output, Arena* 
         "tests/ir/bit-intrinsics.ir",
         "tests/ir/overflow-intrinsics.ir",
         "tests/ir/splats.ir",
+        "tests/ir/widths.ir",
     };
     IrSourceTextTests tests = { 0 };
     for (uint32_t f = 0; f < sizeof(fixtures) / sizeof(fixtures[0]); f += 1)
