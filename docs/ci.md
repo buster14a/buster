@@ -1,17 +1,22 @@
 # Hosted correctness, native vector correctness and Zen 5 benchmarks
 
-Every merge and direct push to `main` triggers the full hosted correctness
-suite against that push's exact `github.sha`, including documentation-only
-changes (#1271). It runs both host architectures, all four O3 build modes
-(plain and three sanitizer configurations) across four shards, and all three fuzz campaigns.
-The pre-merge PR matrix, Measurement storage, a no-code exemption and a later
-nightly run do not replace that post-merge coverage.
+Every merge and direct push to `main` triggers hosted correctness against
+that push's exact `github.sha`, including documentation-only changes (#1271).
+In the nightly mode it runs the plain rows: both host architectures, plain
+O3, four shards each (#2057, the owner's choice on 2026-11-10). The sanitizer
+rows and fuzz campaigns run once a day on the nightly snapshot's deferred run,
+until the merge queue (#1430) runs the complete suite before each merge and
+pushes to main run no checks at all. Before the nightly mode, which has no
+snapshot to cover them, a push runs all four O3 build modes (plain and three
+sanitizer configurations) across four shards, and all three fuzz campaigns.
+The pre-merge PR matrix, Measurement storage and a no-code exemption do not
+replace a push's own hosted rows.
 
 Main pushes have separate run-id concurrency groups: a later merge cannot
 replace an earlier pending main run. PRs keep their per-PR superseded-run
-cancellation. Hardware jobs still take the shared host lock. Hardware admission
-and the nightly measurement window do not reduce main's hosted suite:
-push evidence always reports `scope=full`, `hosted=run` and no hosted source.
+cancellation. Hardware jobs still take the shared host lock. Push evidence
+always reports `hosted=run` and no hosted source, with `scope=plain` in the
+nightly mode and `scope=full` before it.
 The selector's main-policy mutants and the nightly glue fixtures pin this
 contract. A push reuses no PR native evidence (#1272). In the nightly mode it
 runs no 9700X job at all (the owner's choice on 2026-11-05): its native
@@ -64,11 +69,11 @@ Standard `ubuntu-26.04` runners do not promise a particular CPU model or this
 feature set. Required vector coverage comes from the real Ryzen 7 9700X, after
 both hosted variants pass on the same triggering revision. The hardware job
 asserts `BUSTER_HOST_VECTOR=1`, builds with `BUSTER_HOST_ARCH=znver5` and runs
-the complete suite before any benchmarks, except on a pull request (#1272, the
-owner's choice on 2026-11-04): its job measures without the native suite, which
-its hosted rows cover, so that a pull request holds the shared host for its
-measurements alone. Native correctness then runs after the merge, on main's
-push of the landed commit and on the daily and nightly runs. Hosted and hardware jobs read one
+the complete suite before any benchmarks. A pull request never runs it (#2055,
+the owner's choice on 2026-11-10, after #1272 had dropped its native suite on
+2026-11-04): its hosted rows qualify it, and native correctness and
+measurements run on its merged first-parent state in the nightly window, and
+on dispatched runs. Hosted and hardware jobs read one
 suite inventory, `tools/ci/correctness.tests`, with the same counts, seeds and
 external cross-checks. There is no vector emulation or randomized runner pool.
 Hosted runners are virtual machines, so the compiler runs there with
@@ -122,9 +127,8 @@ rows only, and no fuzzing (see "Nightly main measurements"). The hardware job ch
 7 9700X identity and vector eligibility, and retains the existing host lock,
 CPU placements and benchmark selection. Native tests use eight CPUs under the
 lock, and benchmarks reuse that tested executable. A native test failure stops
-the job before measurements. A pull request's benchmarks still check their
-paths against their scalar twins, so a vector-path defect they reach fails
-them there.
+the job before measurements. The benchmarks still check their paths against
+their scalar twins, so a vector-path defect they reach fails them there.
 
 The job stages the current official stable Clang 23.1.4 release and matching
 Clang API, linker and object/DWARF tools in the runner's private cache, verifying
@@ -174,10 +178,13 @@ corruption and changed input.
 The hosted `qualification` job retains the ruleset's existing required context,
 `Build and execute on Ryzen 7 9700X`. It requires the `evidence` job's success,
 successful hosted tests and fuzzing, and the hardware job: on a push to main
-and on the daily and dispatched runs, native correctness and the measurements;
-on a ready pull request, the measurements alone, and the context's message
-says that native correctness was not run (#1272). A skipped hardware job after
-a hosted failure therefore cannot satisfy the merge gate. Documentation-only
+before the nightly mode and on the daily and dispatched runs, native
+correctness and the measurements. A pull request, draft or ready, never runs
+the hardware job (#2055, the owner's choice on 2026-11-10): the context passes
+on its hosted plain rows with fuzzing and the hardware job skipped, and its
+message says that native correctness and measurements run on the merged
+first-parent state in the nightly window. A skipped hardware job after a hosted
+failure therefore cannot satisfy the merge gate. Documentation-only
 changes keep their explicit no-code path. A nightly dispatch reports through
 its coverage record and has no such context, and neither does a scheduled run
 the nightly mode retired.
@@ -189,14 +196,13 @@ runs none in the daytime, and has no `Build and execute on Ryzen 7 9700X`
 context: its state's nightly run qualifies it on the 9700X, recorded in the
 ledger.
 
-Draft PRs still run hosted correctness, but do not queue the 9700X. Both
-`ready_for_review` and `converted_to_draft` trigger the workflow, using the
-same per-PR concurrency group: marking ready qualifies the current revision,
-and returning to draft cancels the superseded ready run. A code-changing draft
-has a **failing required qualification**, with an explicit withheld-hardware
-message, not a green skipped native job. The selector-confirmed no-code path
-is still allowed, including on drafts; it reports an exemption, not vector
-coverage. Performance-document/harness exceptions remain selector-controlled.
+Draft and ready PRs alike run hosted correctness and never queue the 9700X
+(#2055). Both `ready_for_review` and `converted_to_draft` still trigger the
+workflow, using the same per-PR concurrency group: marking ready qualifies the
+current revision, and returning to draft cancels the superseded ready run. A
+code-changing draft qualifies on its hosted rows as a ready one does; GitHub
+doesn't merge drafts. The selector-confirmed no-code path is still allowed; it
+reports an exemption, not vector coverage. Performance-document/harness exceptions remain selector-controlled.
 
 `tools/ci/qualification.c` is the aggregate's fail-closed predicate. It checks
 selector/event consistency as well as every required result; missing, invalid,
@@ -209,8 +215,7 @@ selector's own policy mutants pin the draft guard and ready/draft triggers.
 
 A pull request's run stops at its first failure. Its two test rows' shards fail
 fast, and its tests wait for the agent-guide size and DCO hook checks, which finish
-within the `changes` job's time, and don't start when either fails, so the
-9700X job never runs for a pull request whose qualification can't pass. Pushes
+within the `changes` job's time, and don't start when either fails. Pushes
 to main, the daily run and dispatched runs keep `fail-fast: false` and test
 whatever those checks report: their sanitizer rows and fuzz campaigns are main's
 coverage, and one detector's failure must not hide what the others find. The
@@ -294,14 +299,14 @@ Main's first-parent states (#1207) are measured on the 9700X between 02:00 and
 them is. Each state needs **targeted** coverage: the selector's choice against
 its own first parent, with native correctness first in the same job. A state
 whose first-parent change is documentation alone needs no targeted measurements,
-and the ledger says so; its main push still runs full hosted correctness.
+and the ledger says so; its main push still runs its own hosted rows.
 The cycle's snapshot also needs **full** coverage, which adds every benchmark,
 the isolated samples and the oracle-cache audit. Plain coverage, every plain
 run as pushes measured before the nightly mode, satisfies neither.
 
 A state is measured behind its own plain hosted rows (both architectures,
-every shard), the gate a pull request needs before the 9700X. Its sanitizer and
-fuzz results come from its pushes and the snapshot's daily run. They are
+every shard), the gate a pull request needs. Its sanitizer and fuzz results
+come from the snapshot's daily run and, before the nightly mode, its pushes. They are
 reported, but they don't block measurement, which was the owner's choice on
 2026-11-03.
 
@@ -309,15 +314,17 @@ reported, but they don't block measurement, which was the owner's choice on
 
 Every `9700x.yml` run has an `evidence` job, which must succeed:
 
-- **Pull request:** its draft state alone.
+- **Pull request:** never admitted, draft or ready (`hardware=skip`, reason
+  `pull-request`, #2055): its hosted plain rows qualify it.
 - **Push:** in the nightly mode, deferred (`hardware=skip`, reason
-  `deferred`, outcome `deferred`): the push runs its full hosted rows, and
+  `deferred`, outcome `deferred`): the push runs its plain hosted rows
+  (`scope=plain`, #2057), and
   the window runs its native correctness and targeted measurements as its
   state's backlog run. Its plain hosted rows are the state's, so the state
   is ready without a preparation. Before the nightly mode, admitted: its 9700X
   job runs native correctness and the measurements on the landed commit.
-  Since #1272 a pull request's 9700X job
-  skips native correctness, so a push reuses nothing from it; records from
+  Since #1272 a pull request's run has no native correctness, and since
+  #2055 no 9700X job, so a push reuses nothing from it; records from
   before then that say a push reused its pull request's run
   (`native-reused`, outcome `pending`) are still read by the harvest.
 

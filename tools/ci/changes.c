@@ -20,13 +20,13 @@
 //   change to such a step;
 // - measure: the plain benchmarks to run, `,NAME,NAME,` by `changes_benchmarks`' names, or `all`.
 //
-// A push sets code alone and measure to all: its pull request's run measured what it changes. A push given its first-parent
-// change (the nightly mode's, docs/ci.md) is targeted instead: it decides as a pull request on that change, but code is
-// always true: every main revision needs full hosted correctness, including documentation-only changes (#1271), and
+// A push sets code alone and measure to all. A push given its first-parent change (the nightly mode's, docs/ci.md) is
+// targeted instead: it decides as a pull request on that change, but code is always true: every main revision runs its
+// own hosted rows, including documentation-only changes (#1271; plain alone in the nightly mode, #2057), and
 // a push of several commits can bring code that its head's own change doesn't show. `changes_decide` is the
 // decision; `changes_self_test` checks it on fixtures and checks the tables against the workflow and the sources at
 // --root (the repository by default), and checks the workflow's policies: the oracle cache's (changes_oracle_policy),
-// main's trigger and full hosted scope (changes_main_policy), and the hosted test job's shards, its list and N alike
+// main's trigger and the hosted scope the evidence job decides (changes_main_policy), and the hosted test job's shards, its list and N alike
 // (changes_shard_policy). The selector is CI tooling outside the compile path and has no vector path: it reads a few
 // hundred lines and files.
 //
@@ -2671,9 +2671,11 @@ static void changes_test_oracle_policy(ChangesTest* test, Text workflow)
     }
 }
 
-// Every main push, including documentation alone, runs the full hosted scope (#1271). Keep its unfiltered trigger
-// and per-run concurrency separate from a PR's replaceable queue. The evidence glue tests pin scope=full/hosted=run
-// for pushes; here the workflow must consume those decisions without reducing the matrix or suppressing fuzzing.
+// Every main push, including documentation alone, runs its own hosted rows (#1271): every row before the nightly mode,
+// the plain rows in it (#2057, until the merge queue carries the full suite; the nightly snapshot runs the sanitizer
+// rows and fuzzing). Keep its unfiltered trigger and per-run concurrency separate from a PR's replaceable queue. The
+// evidence glue tests pin scope and hosted=run for pushes; here the workflow must consume those decisions without
+// reducing the matrix or suppressing fuzzing for a full scope.
 // This pins the repository's YAML spelling, as the oracle policy does; it is not a general YAML evaluator.
 static bool changes_main_policy(Text workflow)
 {

@@ -164,9 +164,10 @@ jobs:
           fi
 
   # What this run may reuse, and whether its 9700X job is admitted (tools/ci/nightly.c through tools/ci/nightly.sh; docs/ci.md,
-  # "Nightly main measurements"). A pull request: its draft state alone; its 9700X job measures and skips native
-  # correctness, which its hosted rows cover and which runs after the merge (#1272). A push: admitted, its own native
-  # correctness and measurements on the landed commit. A nightly
+  # "Nightly main measurements"). A pull request, draft or ready: never admitted (#2055); its plain hosted rows
+  # qualify it, and its merged first-parent state gets native correctness and measurements in the nightly window. A
+  # push: its own hosted rows, plain alone in the nightly mode (#2057), which defers its 9700X work to the window; before
+  # the nightly mode, every row and its own native correctness and measurements on the landed commit. A nightly
   # dispatch: that its commit is on the pinned snapshot's first-parent history (else it fails, and nothing runs), the
   # plain hosted rows of the commit's own earlier run, and the 02:00-08:00 Europe/Madrid window. Missing, ambiguous or
   # mismatched evidence runs the work; an API failure is missing evidence. Read-only API access.
@@ -220,7 +221,6 @@ jobs:
           EVIDENCE_HARDWARE: ${{ inputs.hardware }}
           EVIDENCE_SNAPSHOT: ${{ inputs.snapshot }}
           EVIDENCE_OVERRIDE: ${{ inputs.override }}
-          EVIDENCE_DRAFT: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft == true }}
           EVIDENCE_NIGHTLY: ${{ vars.BUSTER_NIGHTLY }}
         run: bash tools/ci/nightly.sh evidence "$RUNNER_TEMP/evidence"
 
@@ -233,9 +233,9 @@ jobs:
   test:
     name: Tests on Ubuntu 26.04 (Clang 23, ${{ matrix.host_arch }}, ${{ matrix.sanitizer }}, O${{ matrix.optimization }}, shard ${{ matrix.shard }} of 4)
     # A pull request's run stops at its first failure. GitHub has no fail-fast across jobs, so its tests wait for the
-    # policy checks, which finish within `changes`' time, and don't start when one fails: neither they nor the 9700X job
-    # after them would change a qualification that can't pass. Pushes to main, the daily run and dispatched runs test
-    # regardless, so that every row reports.
+    # policy checks, which finish within `changes`' time, and don't start when one fails: they wouldn't change a
+    # qualification that can't pass. Pushes to main, the daily run and dispatched runs test regardless, so that every
+    # row reports.
     # A nightly dispatch whose commit's earlier run qualified its plain rows reuses them (`evidence`), and runs none.
     needs: [changes, evidence, agent-guide-size, dco-hooks, prepare-hosted-tools]
     if: ${{ !cancelled() && needs.prepare-hosted-tools.result == 'success' && github.repository_id == '1421805693' && needs.evidence.result == 'success' && needs.evidence.outputs.hosted == 'run' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) && (github.event_name != 'pull_request' || (needs.agent-guide-size.result == 'success' && needs.dco-hooks.result == 'success')) }}
@@ -251,8 +251,9 @@ jobs:
       matrix:
         host_arch: [x86-64, native]
         # The sanitizer rows take far longer than the plain ones: pull requests run the plain builds alone, as nightly
-        # backlog runs and an admitted snapshot run do (the `plain` scope: the 9700X's gate), and pushes to main, the
-        # daily run, full dispatches and the snapshot's deferred daily run the whole matrix.
+        # backlog runs and an admitted snapshot run do (the `plain` scope: the 9700X's gate), and so do pushes to main
+        # in the nightly mode (#2057, until the merge queue carries the full suite). The daily run, full dispatches,
+        # pushes before the nightly mode and the snapshot's deferred daily run run the whole matrix.
         # `address` already combines ASan, UBSan, bounds and LSan; standalone UBSan remains
         # available for diagnosis but does not repeat the entire hosted suite.
         sanitizer: ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '["none"]' || '["none", "address", "thread", "memory"]') }}
@@ -331,9 +332,10 @@ jobs:
             exit 1
           fi
           # Hosted CPU models vary. The native build exercises its actual host path;
-          # the gated 9700X job below always qualifies the complete vector feature set.
+          # the 9700X job qualifies the complete vector feature set on every merged
+          # first-parent state of main in the nightly window, and on dispatched runs.
           if [ "$BUSTER_HOST_ARCH" = native ] && [ "$path" = scalar ]; then
-            printf '%s\n' 'Hosted native build uses scalar kernels; required vector correctness runs on the 9700X after hosted tests pass.'
+            printf '%s\n' 'Hosted native build uses scalar kernels; vector correctness runs on the 9700X in the nightly window.'
           fi
 
       - name: Check baseline fallback memory and arithmetic boundaries
@@ -691,16 +693,15 @@ jobs:
   benchmarks:
     name: Native tests and benchmarks on Benchpress (Ryzen 7 9700X)
     needs: [changes, evidence, test, fuzz]
-    # Both hosted variants must pass before any hardware work. Drafts keep
-    # hosted feedback but cannot occupy the hardware. This also covers
+    # Both hosted variants must pass before any hardware work. This also covers
     # scheduled/manual runs, whose selector is skipped. The `evidence` job must
-    # admit it: a nightly run outside the window or deferred, and a draft, are
-    # not admitted. A nightly run's plain rows (the `plain` scope, without
-    # fuzzing) gate it as a pull request's do, either run here or, by evidence,
-    # by its commit's earlier run. A pull request's run measures but skips the
-    # native correctness step (#1272): its hosted rows cover correctness, and
-    # native correctness runs after the merge, on main's push and the scheduled
-    # and nightly runs.
+    # admit it: a nightly run outside the window or deferred is not admitted,
+    # and neither is any pull request, draft or ready (#2055, the owner's choice
+    # on 2026-11-10). A pull request's run therefore skips this job as soon as
+    # its tests finish, and nothing waits on it; the clauses below about pull
+    # requests are inert until requested measurements (#1432) decide how they
+    # run. A nightly run's plain rows (the `plain` scope, without fuzzing) gate
+    # it, either run here or, by evidence, by its commit's earlier run.
     if: ${{ !cancelled() && github.repository_id == '1421805693' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && needs.evidence.result == 'success' && needs.evidence.outputs.hardware == 'admit' && ((needs.test.result == 'success' && (needs.fuzz.result == 'success' || ((github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && needs.evidence.outputs.scope == 'plain')) && needs.fuzz.result == 'skipped'))) || (github.event_name == 'workflow_dispatch' && needs.evidence.outputs.hosted == 'reused' && needs.test.result == 'skipped' && needs.fuzz.result == 'skipped')) }}
     runs-on:
       group: buster-9700x-service-dispatch
@@ -2175,10 +2176,12 @@ jobs:
 
   qualification:
     # Preserve the existing required context: both hosted variants and the gated
-    # 9700X job must pass on the same revision. On a ready pull request that job
-    # measures without its native correctness step (#1272), and the context
-    # says so; on the daily and dispatched runs, and on a push to main before
-    # the nightly mode, it runs native correctness before the measurements. A
+    # 9700X job must pass on the same revision. A pull request, draft or ready,
+    # never runs that job (#2055): the context passes on its hosted rows alone,
+    # and says that native correctness and measurements run on its merged
+    # first-parent state in the nightly window. On the daily and dispatched runs,
+    # and on a push to main before the nightly mode, the 9700X job runs native
+    # correctness before the measurements. A
     # nightly dispatch reports through its coverage record instead; a retired
     # scheduled run (the nightly mode's) runs nothing; and a push in the
     # nightly mode defers its 9700X work to the window. None of the three has
