@@ -290,6 +290,13 @@ jobs:
       - name: Install official Clang 23.1.4 and test tools
         run: bash tools/ci/setup-hosted.sh
 
+      # Before the build: the kernel, CPU, seccomp, ptrace and container state that a runner-side sanitizer report
+      # (#2060's LeakSanitizer ptrace warning) needs to be traced to its host. It never fails the job.
+      - name: Report sanitizer host kernel, CPU, seccomp and ptrace state
+        if: matrix.sanitizer != 'none'
+        continue-on-error: true
+        run: bash tools/ci/sanitizers.sh host
+
       - name: Set fatal sanitizer policy and verify every enabled detector
         if: matrix.sanitizer != 'none'
         run: |
@@ -604,6 +611,11 @@ jobs:
 
       - name: Install official Clang, sanitizer and libFuzzer runtimes
         run: bash tools/ci/setup-hosted.sh
+
+      # Before the build, as in the sanitizer rows (#2060). It never fails the job.
+      - name: Report sanitizer host kernel, CPU, seccomp and ptrace state
+        continue-on-error: true
+        run: bash tools/ci/sanitizers.sh host
 
       - name: Set fatal sanitizer policy and verify detectors
         run: |
