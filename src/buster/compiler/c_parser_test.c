@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
-
-//
+// Private fixtures belong to the frontend unit; common test helpers stay at their original positions for other units.
+// Standalone source preprocessing, without a unity-unit selector, keeps the whole file.
 // test-parser: c_parser.c's checks (AGENTS.md, "Parser tests"). Every unit goes through both paths, the vector path
 // (with its fallback) and the scalar parser alone, which must agree: on a valid unit the same tree, which must keep the
 // tree's invariants and whose postorder must be a depth-first walk's; and each kernel against its scalar twin. On:
@@ -83,7 +83,7 @@ static ParseTestOutcome parse_test_outcome(const Parser* parser, Preprocessor* p
     }
     return result;
 }
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_FRONTEND
 // Preprocesses and parses `path` with `options`, by the scalar parser alone if `scalar`. Diagnostics are not printed.
 static ParseTestOutcome parse_test_parse_file(const char* path, const PPOptions* options, bool scalar)
 {
@@ -110,7 +110,7 @@ static ParseTestOutcome parse_test_parse_file(const char* path, const PPOptions*
     }
     return result;
 }
-
+#endif
 // A run of the tests' pseudo-random numbers (SplitMix64, public domain).
 static uint64_t parse_test_random(uint64_t* state)
 {
@@ -409,7 +409,7 @@ static bool parse_test_clang(const char* clang_path, const char* const* argument
     }
     return result;
 }
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_FRONTEND
 // ---------------------------------------------------------------------------------------------------------------------
 // The snippets
 
@@ -1091,7 +1091,7 @@ static const ParseTestSnippet parse_test_snippets[] =
     { "void f(int a) { switch (a) { case 1:\n", "1:37: expected expression", 0 },
     { "void f(int a) { do { { a -= 1; }\n", "1:33: expected '}'", 0 },
 };
-
+#endif
 // Writes `text` to `path`. Returns false if it can't.
 static bool parse_test_write(const char* path, const char* text, size_t length)
 {
@@ -1103,7 +1103,7 @@ static bool parse_test_write(const char* path, const char* text, size_t length)
     }
     return result;
 }
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_FRONTEND
 // The options a snippet is preprocessed with: no system headers, and its language mode.
 static PPOptions parse_test_snippet_options(const ParseTestSnippet* snippet)
 {
@@ -1752,7 +1752,7 @@ static uint32_t parse_test_check_postorder_self(Arena* scratch)
     }
     return failures;
 }
-
+#endif
 // The role the paths can tell: a function declarator's parentheses look like a call's (both are postfix groups after
 // an operand, with the same tree), so they compare as one.
 static uint8_t parse_test_canonical_role(uint8_t role)
@@ -1768,7 +1768,7 @@ static uint8_t parse_test_canonical_role(uint8_t role)
     }
     return result;
 }
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_FRONTEND
 // The tokens around `token`, the token itself marked, as one report.
 static void parse_test_print_context(const Parser* parser, Preprocessor* pp, uint32_t token)
 {
@@ -3011,7 +3011,7 @@ static uint32_t parse_test_print_tree(const char* path, const PPOptions* options
     intern_release(&table);
     return failures;
 }
-
+#endif
 // ---------------------------------------------------------------------------------------------------------------------
 // The files and the mutations
 
@@ -3101,7 +3101,7 @@ static char* parse_test_preprocessed(const char* path, const PPOptions* options,
     intern_release(&table);
     return result;
 }
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_FRONTEND
 // One mutation of `text`: a token deleted, duplicated, or swapped with the next (`kind` 0, 1, 2), with a space on each
 // side of what changed, so that no two tokens join. `starts` and `ends` are the text's tokens. The result is malloc'd.
 static char* parse_test_mutate(const char* text, size_t length, const uint32_t* starts, const uint32_t* ends, uint32_t token, uint32_t kind, size_t* mutated_length)
@@ -3186,9 +3186,9 @@ static void parse_test_compare(ParseTestTally* tally, const char* label, const P
                           theirs->message, ours->errors != 0 ? "" : "accepted ", ours->line, ours->column, ours->message);
     }
 }
-
+#endif
 #define BUSTER_PARSE_TEST_BATCH 32
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_FRONTEND
 // The mutations: `count` mutated copies of the files, spread over them in turn, each checked against clang, or without
 // `clang`, by both paths, which must agree as they must on any file (parse_test_check_file).
 static uint32_t parse_test_mutations(char** files, uint32_t file_count, const PPOptions* options, const char* const* clang_arguments, uint32_t clang_argument_count,
@@ -3762,7 +3762,7 @@ static uint32_t parse_test_nesting(const PPOptions* options, const char* directo
     remove(path);
     return failures;
 }
-
+#endif
 // ---------------------------------------------------------------------------------------------------------------------
 // The driver
 
@@ -3802,7 +3802,7 @@ static void parse_test_read_capture(int capture, char* text, size_t capacity)
         text[0] = 0;
     }
 }
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_FRONTEND
 // Runs the driver on `arguments` (or with `preprocess`, -E's, run_preprocessor_command, whose arguments start with
 // "-E") with its stderr in `capture` (an empty file, which it leaves empty), and what it printed in `text`. Returns its
 // exit status.
@@ -4523,3 +4523,4 @@ static int run_parser_tests(int argument_count, char** arguments)
     oracle_epoch_end(epoch);
     return returned;
 }
+#endif

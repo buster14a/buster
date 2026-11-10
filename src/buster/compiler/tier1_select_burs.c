@@ -112,6 +112,7 @@ typedef enum Tier1BursOperator
     TIER1_BURS_OPERATORS,
 } Tier1BursOperator;
 
+#ifndef BUSTER_TIER1_BURS_STORAGE_ONLY
 // The ALU operations, the first index of an ALU operator: the address walks take a 64-bit addition alone, and the index's
 // a 64-bit subtraction too.
 #define BUSTER_TIER1_BURS_ADD32 0u
@@ -290,6 +291,7 @@ static const Tier1BursPattern tier1_burs_patterns[] = {
 };
 
 #define BUSTER_TIER1_BURS_PATTERNS (sizeof(tier1_burs_patterns) / sizeof(tier1_burs_patterns[0]))
+#endif
 // A state's costs are normalized (its cheapest nonterminal's is zero) and saturate at BUSTER_TIER1_BURS_BOUND: this grammar
 // isn't finite-state without it, since folding an address's or a truth value's chain costs nothing while computing it
 // into a register costs more for each node of it, so that a state of each chain length would be a state of its own
@@ -355,6 +357,7 @@ BUSTER_TIER1_SHARED BUSTER_BAKED uint8_t tier1_burs_goal[TIER1_BURS_OPERATORS + 
 // 0 before tier1_select_initialize, 1 while one thread builds, 2 built and 3 failed.
 BUSTER_TIER1_SHARED BUSTER_BAKED uint32_t tier1_burs_status;
 
+#ifndef BUSTER_TIER1_BURS_STORAGE_ONLY
 static uint32_t tier1_burs_alu(uint32_t operation, uint32_t kind)
 {
     return TIER1_BURS_OP_ALU + operation * BUSTER_TIER1_BURS_KINDS + kind;
@@ -1371,3 +1374,4 @@ static uint32_t tier1_burs_pick(const Tier1SelectCandidates* candidates, uint32_
     *munched = chosen == UINT32_MAX;
     return chosen != UINT32_MAX ? chosen : candidates->count != 0 ? tier1_select_munch(candidates) : UINT32_MAX;
 }
+#endif

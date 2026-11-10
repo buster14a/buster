@@ -12,19 +12,27 @@
 // benchmark-debug times validation, sizing and writing together, plus final address patching, into reused buffers.
 
 #define BUSTER_DEBUG_TEST_BYTES (1u << 20)
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_BACKEND
 static bool debug_test_native_write(const char* object_path, const char* executable_path, const DebugUnit* unit, const DebugOutput* output);
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK
 static bool debug_test_native_units(const char* object_path, const char* executable_path, const DebugUnit* units, const DebugOutput* outputs, uint32_t unit_count);
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK
 static bool debug_test_object_write(const char* object_path, const char* output_path, const DebugUnit* units, const DebugOutput* outputs, uint32_t unit_count);
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK
 static bool debug_test_same_debug(const char* a, const char* b);
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK
 // How debug_test_consumers makes the consumers' executable: GNU ld from GNU as's fixture, the native writer from the
 // fixture's code, or GNU ld or lld from the object writer's object of it.
 #define BUSTER_DEBUG_TEST_GNU_LD 0
 #define BUSTER_DEBUG_TEST_NATIVE 1
 #define BUSTER_DEBUG_TEST_OBJECT_GNU_LD 2
 #define BUSTER_DEBUG_TEST_OBJECT_LLD 3
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_BACKEND
 static uint64_t debug_test_leb(const uint8_t* bytes, uint64_t size, uint64_t* position, bool sign, bool* valid)
 {
     uint64_t value = 0;
@@ -50,7 +58,8 @@ static uint64_t debug_test_leb(const uint8_t* bytes, uint64_t size, uint64_t* po
     }
     return value;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK
 static bool debug_test_rows(void)
 {
     const uint32_t offsets[] = { 0, 1, 63, 64, 127, 128, 16383, 16384, 2097151, 2097152, 268435455, 268435456, UINT32_MAX };
@@ -133,7 +142,8 @@ static bool debug_test_random_rows(void)
     printf("debug LEB rows: 4096 deterministic random batches, %s\n", valid ? "pass" : "FAIL");
     return valid;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_BACKEND
 static DebugOutput debug_test_output(uint8_t* bytes, uint32_t* addresses, uint32_t capacity)
 {
     DebugOutput result = {
@@ -147,7 +157,8 @@ static DebugOutput debug_test_output(uint8_t* bytes, uint32_t* addresses, uint32
     }
     return result;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_BACKEND
 // Walk the line machine independently; the header is skipped by its encoded length, not by emitter constants.
 static bool debug_test_decode(const DebugUnit* unit, const DebugOutput* output, const uint64_t* addresses)
 {
@@ -226,7 +237,8 @@ static bool debug_test_decode(const DebugUnit* unit, const DebugOutput* output, 
     }
     return valid && position == section->size && function == unit->function_count;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK
 static bool debug_test_units(void)
 {
     bool valid = true;
@@ -625,7 +637,8 @@ static bool debug_test_guards(void)
     printf("debug rows: protected input and output tails through 65: %s\n", valid ? "pass" : "FAIL");
     return valid;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_BACKEND
 static bool debug_test_write_file(const char* path, const void* bytes, uint64_t size)
 {
     FILE* file = fopen(path, "wb");
@@ -637,7 +650,8 @@ static bool debug_test_write_file(const char* path, const void* bytes, uint64_t 
     }
     return result;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_BACKEND || BUSTER_UNIT == BUSTER_UNIT_CHECKER
 static bool debug_test_frame(const char* output, const char* frame, const char* function, const char* location)
 {
     const char* start = output != 0 ? strstr(output, frame) : 0;
@@ -647,7 +661,8 @@ static bool debug_test_frame(const char* output, const char* frame, const char* 
     const char* after = source != 0 ? source + strlen(location) : 0;
     return end != 0 && name != 0 && name < end && source != 0 && source < end && !(*after >= '0' && *after <= '9');
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_BACKEND
 static bool debug_test_profile(const char* output)
 {
     bool found = false;
@@ -673,7 +688,8 @@ static bool debug_test_profile(const char* output)
     }
     return found;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK
 // The consumers' checks of the fixture, as one unit or as two (`split`), its executable made `way`
 // (BUSTER_DEBUG_TEST_*): the object writer's object's links must hold GNU ld's link's of the fixture's debug sections.
 static bool debug_test_consumers(bool keep, uint32_t way, bool split, const TestTool* perf)
@@ -939,3 +955,4 @@ static int run_debug_tests(int argc, char** argv)
     }
     return valid ? 0 : 1;
 }
+#endif
