@@ -606,14 +606,15 @@ Release configuration generates those two units' native code in parallel parts:
 1. The unit compiles C through the ordinary O3 pipeline to LLVM bitcode
    (`-emit-llvm` in Release alone), keeping its depfile and its compilation
    database record. Clang's bitcode keeps the module's use-list order.
-2. `tools/codegen/split.c` (`Partitioning UNIT's optimized IR`) writes
-   fourteen parts of contiguous function ranges in module order, the costliest
-   (by instruction count) as cheap as the alignment rule below allows, and a
-   fifteenth with the unit's global variables: a job per hardware thread of the
-   9700X. It parses the module once and forks a child per part, as many at once
-   as the CPUs it may use and the available memory allow: each child copies
-   most of the module's pages (fifteen children of the checker came to about
-   14.8 GB, four to 4.7 GB).
+2. `tools/codegen/split.c` (`Partitioning UNIT's optimized IR`) writes eight
+   parts of contiguous function ranges in module order, the costliest (by
+   instruction count) as cheap as the alignment rule below allows, and a ninth
+   with the unit's global variables: one per job of `build.sh`'s default, a
+   physical core (fourteen, one per hardware thread of the 9700X, ran in two
+   waves there: 74.0 s for a clean build against 73.1 s). It parses the module
+   once and forks a child per part, as many at once as the CPUs it may use and
+   the available memory allow: each child copies most of the module's pages
+   (fifteen children of the checker came to about 14.8 GB, four to 4.7 GB).
 3. A Clang backend job per part (`Generating UNIT's native part N`) compiles
    it with the unit's `-march`, debug information and O3 code generation, the
    IR optimizer disabled.
@@ -648,8 +649,8 @@ relocatable link merges those sections, which the final link at `-O0` copies
 whole from the single object (the checker's parts lost 27,904 bytes of
 duplicate constants that way). Read-only data keeps its order and each item's
 alignment, but a part's `.rodata` takes its greatest item's alignment (64), so
-items after a part boundary can move by less than that: 768 bytes in all for
-the two units, with `.eh_frame` 56 bytes longer. Between a part's last function
+items after a part boundary can move by less than that: 256 bytes in all for
+the two units (768 with fourteen parts), with `.eh_frame` 16 bytes longer. Between a part's last function
 and the next part's first, the linker's padding is `int3` where the assembler's
 was `nop`; neither is executed.
 

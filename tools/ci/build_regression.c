@@ -3079,8 +3079,8 @@ static void check_parallel_codegen(void)
     const struct stat initial_binary = status_of(binary);
     const char* exports = "out/Release/codegen/main_unit_checker/exports.txt";
     const struct stat initial_exports = status_of(exports);
-    // BusterCodegen.cmake's fourteen code parts and the data part (tools/codegen/split.c).
-    enum { BUSTER_CODEGEN_FIXTURE_PARTITIONS = 15 };
+    // BusterCodegen.cmake's eight code parts and the data part (tools/codegen/split.c).
+    enum { BUSTER_CODEGEN_FIXTURE_PARTITIONS = 9 };
     char partitions[BUSTER_CODEGEN_FIXTURE_PARTITIONS][PATH_MAX];
     struct stat initial_partitions[BUSTER_CODEGEN_FIXTURE_PARTITIONS];
     for (uint32_t part = 0; part < BUSTER_CODEGEN_FIXTURE_PARTITIONS; part += 1)
