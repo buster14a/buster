@@ -25,6 +25,10 @@ struct PPOraclePaths
     uint32_t count;
 };
 
+// The checker corpus shares the path storage and Clang include probe. Keep the frontend's inventory and command
+// private in unity builds, while standalone preprocessing continues to read this complete file.
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_FRONTEND
+
 static bool pp_oracle_add_path(PPOraclePaths* paths, const char* path)
 {
     const size_t length = strlen(path);
@@ -145,6 +149,8 @@ static bool pp_oracle_list(PPOraclePaths* paths, const char* list, const char* r
     return result;
 }
 
+#endif
+
 // Use Clang's actual search order even when a selected Clang has a different resource directory. Frozen callers
 // provide -nostdinc and their explicit -isystem paths, so this probe is unnecessary for them.
 static bool pp_oracle_includes(const char* executable, char** arguments, int* count, int capacity, PPOraclePaths* paths)
@@ -180,6 +186,8 @@ static bool pp_oracle_includes(const char* executable, char** arguments, int* co
     free(probe.diagnostics);
     return result;
 }
+
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_FRONTEND
 
 static void pp_oracle_reason(const char* diagnostics, char* reason, size_t capacity)
 {
@@ -468,3 +476,5 @@ static int run_preprocessor_tests(int argument_count, char** arguments)
     oracle_epoch_end(epoch);
     return returned;
 }
+
+#endif
