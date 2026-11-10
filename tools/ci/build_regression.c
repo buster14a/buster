@@ -13,6 +13,7 @@
 //
 // It removes every tree under build/cmake (clean --all) and checks that
 //   - guarded test roots retain their private entry points when preprocessed without main.c's unity-unit selector;
+//   - main.c's complete driver (-DBUSTER_COMPLETE_DRIVER=1), the self-tests' input, retains the other units' code;
 //   - the target policy data owner rejects either shared row-count bound when it drifts from the canonical rows;
 //   - active fixtures, headers and arbitrary include descendants have one unity owner, except justified exact sharing;
 //   - shared fixture declaration/include boundaries cannot grow silently inside existing shared roots;
@@ -389,6 +390,55 @@ static void check_standalone_preprocessing(void)
         free(text.data);
     }
     pass("guarded roots retain their private entry points when preprocessed without a unity unit");
+}
+
+// The self-tests and benchmarks that take main.c as their input (tools/ci/correctness.tests and the 9700X workflow)
+// pass -DBUSTER_COMPLETE_DRIVER=1, so that it reads the production code of the other units as well as the driver's,
+// as a fuzz build's driver does. Check one function of each family that the ordinary driver leaves to its owners, in
+// both hosts' configurations, so that a new guard can't silently halve those inputs.
+static void check_complete_driver_preprocessing(void)
+{
+    static const struct
+    {
+        const char* source;
+        const char* entry;
+    } families[] = {
+        { "c_preprocessor_impl.c", "pp_lexed_start(" },
+        { "c_preprocessor_history_impl.c", "pp_history_initial(" },
+        { "executable_impl.c", "executable_align(" },
+        { "c_check_program.c", "check_program_fail(" },
+        { "ir_lower.c", "ir_typed_vector_bytes(" },
+        { "tier0.c", "tier0_is_object(" },
+        { "tier1_allocate.c", "tier1_allocation_input_valid(" },
+    };
+    static const char* const hosts[] = { "-march=x86-64", "-march=znver5" };
+    for (uint32_t host = 0; host < sizeof(hosts) / sizeof(hosts[0]); host += 1)
+    {
+        char* argv[] = {
+            "clang",
+            "-E",
+            "-P",
+            "-target",
+            "x86_64-pc-linux-gnu",
+            (char*)hosts[host],
+            "-Isrc",
+            "-fwrapv",
+            "-funsigned-char",
+            "-DBUSTER_COMPLETE_DRIVER=1",
+            "src/buster/compiler/main.c",
+            0,
+        };
+        Text text = capture(argv);
+        for (uint32_t i = 0; i < sizeof(families) / sizeof(families[0]); i += 1)
+        {
+            if (strstr(text.data, families[i].entry) == 0)
+            {
+                fail("main.c with -DBUSTER_COMPLETE_DRIVER=1 %s lost %s's %s", hosts[host], families[i].source, families[i].entry);
+            }
+        }
+        free(text.data);
+    }
+    pass("main.c's complete driver retains the other units' production families on both hosts");
 }
 
 // Check copied source, never the working tree: increasing either reader bound would otherwise leave a valid but
@@ -3292,6 +3342,7 @@ int main(int argc, char** argv)
     if (argc == 1 || ownership_only)
     {
         check_standalone_preprocessing();
+        check_complete_driver_preprocessing();
         check_target_row_counts();
     }
     if (argc == 1 || driver_only)

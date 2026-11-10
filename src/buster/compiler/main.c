@@ -18,7 +18,7 @@
 // definitions inline ones that are never inlined, which clang doesn't emit: their calls go to the home's, and the
 // static functions that only the entry points reach aren't emitted there either. A unit without main.c, a benchmark's,
 // has them static. The parser, preprocessor and executable writer expose declarations to other units; their bodies
-// stay with their existing homes and direct private consumers, including configured fuzz callbacks. A command
+// stay with their existing homes and direct private consumers, and the complete driver's (below). A command
 // whose code calls a home's entry point runs in two units' copies of the code, so a home's code must share no static
 // variable with its callers' units: main.c's units have one lane context (lane.c), and ./build.sh check-call-graph
 // checks the rest (call_graph.c).
@@ -38,14 +38,20 @@
 #endif
 #define BUSTER_IN_UNIT(unit) (BUSTER_UNIT == (unit))
 // Source checking is emitted only in CHECKER; code generation also has consumers in BACKEND. The backend and
-// builtin tests share semantic actions without the source reader, graph or lowering. Fuzz callbacks run in DRIVER
-// and retain the source consumers there, including a custom callback's access to the normal compiler modules.
-#if defined(BUSTER_FUZZ_AVAILABLE) && BUSTER_FUZZ_AVAILABLE && BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER)
-#define BUSTER_FUZZ_DRIVER 1
+// builtin tests share semantic actions without the source reader, graph or lowering. The complete driver is DRIVER
+// with the whole compiler as well: the source, checker and code-generation consumers and the preprocessor's and
+// executable writer's private bodies, which other units own. A fuzz build's callbacks run in DRIVER and need it,
+// including a custom callback's access to the normal compiler modules; the self-tests and benchmarks that take main.c
+// as their input pass -DBUSTER_COMPLETE_DRIVER=1 to read all of the compiler's code, not only what DRIVER emits. An
+// ordinary build passes neither, and the other units ignore both.
+#if BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && (BUSTER_FUZZ_AVAILABLE || BUSTER_COMPLETE_DRIVER)
+#undef BUSTER_COMPLETE_DRIVER
+#define BUSTER_COMPLETE_DRIVER 1
 #else
-#define BUSTER_FUZZ_DRIVER 0
+#undef BUSTER_COMPLETE_DRIVER
+#define BUSTER_COMPLETE_DRIVER 0
 #endif
-#define BUSTER_SOURCE_CONSUMER (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) || BUSTER_FUZZ_DRIVER)
+#define BUSTER_SOURCE_CONSUMER (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) || BUSTER_COMPLETE_DRIVER)
 #define BUSTER_BACKEND_CONSUMER (BUSTER_SOURCE_CONSUMER || BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND))
 #define BUSTER_CHECKER_CONSUMER (BUSTER_BACKEND_CONSUMER || BUSTER_IN_UNIT(BUSTER_UNIT_CHECK_BUILTINS))
 
@@ -79,7 +85,7 @@
 // (c_parser.c) and the linker's (link.c's); and the checker's, for the IR's commands on real C (ir_source_test.c's
 // ir_source_prepare, the driver's check and emission of a file), which the backend's unit runs with the IR (#784).
 #define BUSTER_LEXER_ENTRY BUSTER_HOME_DRIVER
-#if BUSTER_FUZZ_AVAILABLE && BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER)
+#if BUSTER_COMPLETE_DRIVER
 #define BUSTER_PREPROCESSOR_ENTRY BUSTER_HOME_FRONTEND
 #else
 #define BUSTER_PREPROCESSOR_ENTRY
@@ -1120,8 +1126,8 @@ static __attribute__((unused)) void main_checker_test_interfaces(void)
 }
 #endif
 
-#if BUSTER_FUZZ_DRIVER
-// The fuzz driver reads the source interfaces but not the checker-owned IR commands which normally call these.
+#if BUSTER_COMPLETE_DRIVER
+// The complete driver reads the source interfaces but not the checker-owned IR commands which normally call these.
 static __attribute__((unused)) void main_ir_source_interfaces(void)
 {
     (void)&check_program_access;

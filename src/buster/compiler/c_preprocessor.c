@@ -54,8 +54,8 @@
 // main.c includes this file after c_lexer.c, lane.c, c_intern.c and c_refine.c; every function is static, but for the
 // entry points that take BUSTER_PREPROCESSOR_ENTRY, which main.c's units compile in one unit alone. Shared state,
 // declarations and readers remain here. The private bodies and tables are in c_preprocessor_impl.c, included only
-// by FRONTEND and standalone consumers. A fuzz driver's callback retains the complete source interface with the
-// original nonowner linkage. The two files preserve the following logical layout:
+// by FRONTEND, standalone consumers and main.c's complete driver (BUSTER_COMPLETE_DRIVER: a fuzz build's, or a
+// self-test input's), which keeps the original nonowner linkage. The two files preserve the following logical layout:
 //   - API: PPOptions, PPTokens, the flags and internal kinds, PPStatistics, Preprocessor and the entry points.
 //   - Diagnostics, token stacks, location ranges and scratch spellings.
 //   - Files: PPFileData, PPFile, the file cache's records and paths (FileCache), the directive scan
@@ -7281,7 +7281,7 @@ static bool pp_option_takes_value(const char* argument)
     return result;
 }
 
-#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_FRONTEND || (BUSTER_FUZZ_AVAILABLE && BUSTER_UNIT == BUSTER_UNIT_DRIVER)
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_FRONTEND || BUSTER_COMPLETE_DRIVER
 #include "buster/compiler/c_preprocessor_impl.c"
 #else
 // Preserve semantic references to shared interfaces without emitting code or disabling unused-function diagnostics.

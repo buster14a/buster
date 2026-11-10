@@ -3042,7 +3042,7 @@ The configurations behind the results table:
     -I./include $(ls src/*/*.c src/*/x86_64/*.c)
 # in this repository:
 ./build/compiler test-preprocessor --clang -march=native -Isrc -fwrapv -funsigned-char \
-    src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
+    -DBUSTER_COMPLETE_DRIVER=1 src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
 # in lua-5.4.8/src:
 ../../build/compiler test-preprocessor --clang -std=gnu99 -O2 -DLUA_COMPAT_5_3 -DLUA_USE_LINUX *.c
 ```
@@ -3514,7 +3514,7 @@ spellings alone would miss this change (#272).
 ./build/compiler test-preprocessor --clang path/to/sqlite3.c
 taskset -c 2 ./build/compiler benchmark-preprocessor --clang path/to/sqlite3.c
 taskset -c 2 ./build/compiler benchmark-preprocessor --clang -march=native -Isrc -fwrapv -funsigned-char \
-    src/buster/compiler/main.c
+    -DBUSTER_COMPLETE_DRIVER=1 src/buster/compiler/main.c
 ./build/compiler -E [-P] [-dM] [-H] [-o file] [options] file.c
 ./build/compiler test-preprocessor --generate-targets   # c_predefines.c's generated tables, from clang
 ./build/compiler test-preprocessor --tables src path/to/libc

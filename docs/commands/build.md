@@ -345,8 +345,8 @@ main units.
 The frontend roots with internal guards, `foreign_test.c`, `tier0_test.c` and
 `tier1_select_source_benchmark.c` also preserve standalone preprocessing. Without
 `main.c`'s unity-unit definitions, their guards keep the complete source. The
-correctness inventory preprocesses `main.c` and every `*_benchmark.c` as independent inputs
-and compares them with Clang. The build regression also preprocesses the
+correctness inventory preprocesses `main.c` (with `-DBUSTER_COMPLETE_DRIVER=1`)
+and every `*_benchmark.c` as independent inputs and compares them with Clang. The build regression also preprocesses the
 guarded roots directly, checking that their private entry points remain in the
 output.
 
@@ -444,10 +444,18 @@ table definitions. CHECK_BUILTINS keeps semantic actions, constant helpers and
 comparisons without the source reader or code-generation families. These
 boundaries keep command homes, section placement and optimization settings
 unchanged.
-`BUSTER_FUZZ_AVAILABLE=1` retains the source/checker/code-generation interfaces
-and the private preprocessor and executable bodies in DRIVER as well, so both
-the default callback and a `BUSTER_FUZZ_ENTRY` override keep their existing
-module access. Ordinary builds do not acquire that additional owner.
+`BUSTER_COMPLETE_DRIVER`, which `main.c` defines, is DRIVER with the rest of
+the compiler as well: the source, checker and code-generation families and the
+private preprocessor and executable bodies, the closure `main.c` read before
+these boundaries. A `BUSTER_FUZZ_AVAILABLE=1` build selects it, so both the
+default callback and a `BUSTER_FUZZ_ENTRY` override keep their existing module
+access; ordinary builds do not acquire that additional owner. The self-tests and
+9700X benchmarks whose input is `main.c` (`tools/ci/correctness.tests` and
+`9700x.yml`) pass `-DBUSTER_COMPLETE_DRIVER=1`, so that they still check, compile
+and measure the whole compiler without changing any production object: with
+`-march=native`, `main.c` preprocesses to 25.76 MB with it and 12.02 MB without
+(25.75 MB before the boundaries). Pass it when running those commands by hand
+too. The build regression checks that it keeps one function of each family.
 
 The x86 target-form row enums, initializers and per-row policy assertions are
 also parsed only by their data owner or a standalone consumer. Other units use

@@ -153,7 +153,7 @@
 // main.c includes this file after lane.c, x86_64_encoder.c and link.c, and its String8. executable_write takes
 // BUSTER_LINKER_ENTRY rather than static: main.c's units emit it in DYNAMIC alone. This file keeps the shared API,
 // hash, unwind reader and debug helpers; executable_impl.c keeps the writer's private implementation. DYNAMIC and
-// the EXECUTABLE test owner include those bodies, as do standalone consumers and the DRIVER's optional fuzz callback.
+// the EXECUTABLE test owner include those bodies, as do standalone consumers and main.c's complete driver.
 // The implementation's layout is:
 //   - API: the base, the chunks, ExecutableSection, ExecutableError, ExecutableWrite, ExecutablePhase,
 //     ExecutableDynamic, ExecutableRuntime, ExecutableOptions, ExecutableResult and executable_write's prototype.
@@ -655,7 +655,7 @@ struct ExecutableResult
 // Every lane of the calling thread's group calls it, with the same arguments, and it returns once the file is written
 // and closed, with the same value on every lane: whether it succeeded. Lane 0 fills *result; read it after the call.
 // The link must have passed link_check, and must not change while it runs.
-#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE || (BUSTER_FUZZ_AVAILABLE && BUSTER_UNIT == BUSTER_UNIT_DRIVER)
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE || BUSTER_COMPLETE_DRIVER
 BUSTER_LINKER_ENTRY __attribute__((unused)) bool executable_write(Link* link, const ExecutableOptions* options, ExecutableResult* result);
 #else
 __attribute__((unused)) bool executable_write(Link* link, const ExecutableOptions* options, ExecutableResult* result);
@@ -995,6 +995,6 @@ static uint64_t executable_debug_tombstone(uint32_t section, uint8_t kind)
 }
 
 
-#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE || (BUSTER_FUZZ_AVAILABLE && BUSTER_UNIT == BUSTER_UNIT_DRIVER)
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE || BUSTER_COMPLETE_DRIVER
 #include "buster/compiler/executable_impl.c"
 #endif
