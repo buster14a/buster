@@ -220,10 +220,10 @@ comparison and all four scalar/rematerialization configurations remain checked.
 Controls reject repeated LEAs, a LEA after an initial branch, direct reentry,
 and indirect reentry from the second table entry, whose slot offset is nonzero.
 The checker-driver's own process needs its x86 control-effects tables for this
-object proof. Sanitizer PIE executables cannot bake those tables, even though
-their compiler child processes initialize their own. The test initializes
-the effects on demand and asserts jump, conditional-branch and return
-classification before applying the unchanged table-base proof (#1829).
+object proof. TSan's and MSan's PIE executables cannot bake those tables,
+even though their compiler child processes initialize their own. The test
+initializes the effects on demand and asserts jump, conditional-branch and
+return classification before applying the unchanged table-base proof (#1829).
 
 ## Address-arithmetic selection regressions
 

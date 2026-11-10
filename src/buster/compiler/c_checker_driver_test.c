@@ -136,9 +136,12 @@ static bool check_test_driver_run_with(const char* executable, const char* sourc
         ready = child > 0 && waited == child && WIFEXITED(status) && pp_test_read_output(diagnostics, &text, &length);
     }
     bool unlocated = false;
-    for (char* at = text; ready && at != NULL && *at != 0;)
+    // Each line's end is found within the text (memchr), as check_test_driver_diagnostic_counts's are: strchr on the
+    // rest of the text reads all of it per line under AddressSanitizer's strict string checks (#2030).
+    char* stop = text != NULL ? text + strlen(text) : NULL;
+    for (char* at = text; ready && at != NULL && at < stop;)
     {
-        char* end = strchr(at, '\n');
+        char* end = memchr(at, '\n', (size_t)(stop - at));
         if (end != NULL)
         {
             *end = 0;

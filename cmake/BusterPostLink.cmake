@@ -7,9 +7,9 @@
 # Writes OUTPUT from the linked INPUT, which it leaves as it is, so that an unchanged build links nothing. With BAKE,
 # INPUT writes itself with the backend's tables built (bake-tables, src/buster/compiler/baked.c, #590), so that a
 # compile starts with them rather than building them: about 2 ms of a small file's compile on a Xeon VM whose kernel
-# only madvises huge pages. A PIE (the sanitizers' builds) keeps building them when it runs (status 77), and so does
-# every executable with BUSTER_BAKE=0. Any other failure, an initializer's state outside the section among them, fails
-# the step.
+# only madvises huge pages. A PIE (TSan, MSan and fuzzing builds) keeps building them when it runs (status 77), and so
+# does every executable with BUSTER_BAKE=0. Any other failure, an initializer's state outside the section among them,
+# fails the step.
 #
 # The executable must not reference the stack canary's runtime (#916): -fno-stack-protector pins the policy, and this
 # checks that the toolchain's configured default didn't add it back, in the compiler's objects (-DOBJECTS=LIST), or
