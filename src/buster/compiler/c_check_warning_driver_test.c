@@ -1861,7 +1861,7 @@ static void check_test_driver_warning_fixtures(CheckTest* test, const char* clan
 {
     static const char* const policies[] = { NULL, "-Werror", "-w" };
     static const char* const lanes[] = { "1", "3" };
-    // #2071's prototype reports this sweep's time with each run mode (check_driver_run_modes).
+    // test-checker-driver reports this sweep's time with each run mode (#2071, check_driver_run_modes).
     const uint64_t began = check_test_driver_nanoseconds();
     char source[PATH_MAX];
     char objects[4][PATH_MAX];
@@ -1897,7 +1897,7 @@ static void check_test_driver_warning_fixtures(CheckTest* test, const char* clan
                 unlink(objects[2]);
                 char* expected = NULL;
                 unlink(objects[3]);
-                const int oracle = check_test_driver_clang_run(arguments, &expected);
+                const int oracle = check_test_driver_spawn(arguments, &expected);
                 const CheckDriverDiagnosticCounts counts = check_test_driver_diagnostic_counts(expected);
                 const bool oracle_ready = (oracle == 0 || oracle == 1) && expected != NULL;
                 char description[256];
@@ -1927,7 +1927,7 @@ static void check_test_driver_warning_fixtures(CheckTest* test, const char* clan
                         const bool preserve = mode != 0 && oracle == 1;
                         const bool prior = !preserve || parse_test_write(objects[scalar], sentinel, sizeof(sentinel));
                         char* actual = NULL;
-                        const int status = check_test_driver_buster_run(arguments, &actual);
+                        const int status = check_test_driver_spawn(arguments, &actual);
                         snprintf(description, sizeof(description), "%s policy=%u mode=%u lanes=%s %s: complete Clang diagnostics",
                                  fixture->name, policy, mode, lanes[lane], scalar != 0 ? "scalar" : "vector");
                         const char* expected_text = fixture->compare_warning_text ? strstr(expected, "warning: ") : NULL;

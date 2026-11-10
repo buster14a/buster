@@ -89,14 +89,23 @@ unused-warning fixtures also check exact scope-completion tokens.
   `--lazy-system-headers`, only the checks that pass the driver
   `-flazy-system-headers`, since the others run the same either way, and
   `--part K/N` runs the K-th of N parts its checks are dealt to in turn,
-  `CheckDriverPart`; #2071's prototype run modes, which only
-  `check_test_driver_warning_fixtures` takes so far: `--in-process` runs
-  buster's commands as this process's `run_check_command` with standard
-  error captured in memory, `--clang-server PATH` sends clang's to
-  `tools/clang-server` (one clang that runs each command line through its
-  own driver and cc1 in-process), and `--differential` also runs each such
-  command as a child and fails on any difference in status or output; the
-  run reports the sweep's time; `--cpu-dispatch-only` runs the `cpu_specific` and
+  `CheckDriverPart`; #2071's run modes, for every run of buster and of the
+  oracle clang that goes through the shared helpers
+  (`check_test_driver_spawn_stream`, `check_test_driver_run_with`):
+  `--in-process` runs buster's source commands as this process's
+  `main_source_command_reusable` (main.c's routing by the commands that
+  release what they map), with the captured stream in a `memfd`;
+  `--clang-server PATH` sends the oracle clang's runs (`--clang`'s name) to
+  `tools/clang-server` (built by `tools/clang-server/build.sh` against that
+  clang's `libclang-cpp`), which runs each command line through clang's own
+  driver and cc1 in its process, in the run's directory and environment;
+  every other run, and a response file's or a jobserver dry run's, is a child
+  as before. `--differential` also runs each such command as a child and
+  fails on a difference in status or output, but `--time-stages` and
+  `--lane-cpus` runs, whose report lines and lane order differ between any
+  two runs, compare their other lines in any order. The run reports the
+  counts and the warning sweep's time. CI runs the driver's parts in these
+  modes, with `--differential` in the native plain row; `--cpu-dispatch-only` runs the `cpu_specific` and
   `cpu_dispatch` section alone, #1447; `--asm-definitions-only` runs what
   inline assembly defines against clang's objects alone, #1848; `--semantic-recovery-only` runs
   `c_check_semantic_recovery_driver_test.c`, `c_check_statement_recovery_driver_test.c`,

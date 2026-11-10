@@ -56,189 +56,34 @@ static bool check_test_driver_takes(void)
     return taken;
 }
 
-// Runs the driver (this process's run_check_command in a child, or `executable`) on `source`, with -c into `object` or
-// without one -fsyntax-only, and `extra`'s `extra_count` arguments (at most 8) before the source: its first error, as
-// clang's oracle reads one, and its warnings' count.
-static bool check_test_driver_run_with(const char* executable, const char* source, const char* object, bool scalar, bool dump_static, bool quiet, bool lazy,
-                                       const char* const* extra, uint32_t extra_count, CheckCorpusOracle* outcome, uint32_t* warnings)
-{
-    *outcome = (CheckCorpusOracle){ 0 };
-    *warnings = 0;
-    FILE* diagnostics = tmpfile();
-    bool ready = diagnostics != NULL;
-    int status = 0;
-    pid_t child = -1;
-    char* text = NULL;
-    size_t length = 0;
-    if (ready)
-    {
-        fflush(NULL);
-        child = fork();
-        if (child == 0)
-        {
-            const int output = open("/dev/null", O_WRONLY | O_CLOEXEC);
-            if (output < 0 || dup2(output, STDOUT_FILENO) < 0 || dup2(fileno(diagnostics), STDERR_FILENO) < 0)
-            {
-                _exit(126);
-            }
-            close(output);
-            char* arguments[24] = { 0 };
-            uint32_t count = 0;
-            arguments[count++] = (char*)(executable != NULL ? executable : "checker");
-            if (scalar)
-            {
-                arguments[count++] = "--scalar";
-            }
-            if (dump_static)
-            {
-                arguments[count++] = "--dump-static";
-            }
-            if (quiet)
-            {
-                arguments[count++] = "-w";
-            }
-            if (lazy)
-            {
-                arguments[count++] = "-flazy-system-headers";
-            }
-            arguments[count++] = "-std=gnu17";
-            // Without an object, -fsyntax-only.
-            if (object != NULL)
-            {
-                arguments[count++] = "-c";
-                arguments[count++] = "-o";
-                arguments[count++] = (char*)object;
-            }
-            else
-            {
-                arguments[count++] = "-fsyntax-only";
-            }
-            for (uint32_t i = 0; i < extra_count && i < 8; i += 1)
-            {
-                arguments[count++] = (char*)extra[i];
-            }
-            arguments[count++] = (char*)source;
-            if (executable != NULL)
-            {
-                execvp(executable, arguments);
-                _exit(127);
-            }
-            const int code = run_check_command((int)count - 1, arguments + 1, true);
-            fflush(NULL);
-            _exit(code);
-        }
-        pid_t waited = -1;
-        do
-        {
-            waited = child > 0 ? waitpid(child, &status, 0) : -1;
-        }
-        while (waited < 0 && child > 0 && errno == EINTR);
-        ready = child > 0 && waited == child && WIFEXITED(status) && pp_test_read_output(diagnostics, &text, &length);
-    }
-    bool unlocated = false;
-    // Each line's end is found within the text (memchr), as check_test_driver_diagnostic_counts's are: strchr on the
-    // rest of the text reads all of it per line under AddressSanitizer's strict string checks (#2030).
-    char* stop = text != NULL ? text + strlen(text) : NULL;
-    for (char* at = text; ready && at != NULL && at < stop;)
-    {
-        char* end = memchr(at, '\n', (size_t)(stop - at));
-        if (end != NULL)
-        {
-            *end = 0;
-        }
-        if (strstr(at, "error: ") != NULL)
-        {
-            uint32_t line = 0;
-            uint32_t column = 0;
-            const bool located = sscanf(at, "%*[^:]:%u:%u:", &line, &column) == 2 && line != 0 && column != 0;
-            unlocated |= !located;
-            if (located && !outcome->rejected)
-            {
-                outcome->rejected = true;
-                outcome->line = line;
-                outcome->column = column;
-                snprintf(outcome->message, sizeof(outcome->message), "%s", strstr(at, "error: ") + 7);
-            }
-        }
-        *warnings += strstr(at, "warning: ") != NULL;
-        at = end != NULL ? end + 1 : NULL;
-    }
-    ready = ready && !unlocated && ((WEXITSTATUS(status) == 0 && !outcome->rejected) || (WEXITSTATUS(status) == 1 && outcome->rejected));
-    if (diagnostics != NULL)
-    {
-        ready = fclose(diagnostics) == 0 && ready;
-    }
-    free(text);
-    return ready;
-}
+// #2071: the checks' compiler runs without a process each. With --in-process, buster's source commands (an option
+// first, as main_driver routes to main_source_command) run as this process's main_source_command_reusable, with the
+// captured stream in a memfd. With --clang-server PATH, the oracle clang's runs (arguments[0] --clang's name) go to a
+// clang that stays up (tools/clang-server), which runs each command line through clang's own driver and cc1 in its
+// process, with the run's environment and working directory. Every other run, and a command a mode can't take (a
+// response file, a jobserver's dry run, the guardian's or the fuzzer's command), runs as a child as before. With
+// --differential, each run a mode takes also runs as a child: the child's result is the check's, and any difference
+// in status or output is counted and printed. test-checker-driver reports the counts and the warning sweep's time.
+// main.c's routing of a source command by the reusable commands, in the driver's unit (main.c includes this file
+// before its own declaration of it).
+int main_source_command_reusable(int argc, char** argv);
 
-static bool check_test_driver_run(const char* executable, const char* source, const char* object, bool scalar, bool dump_static, bool quiet, bool lazy,
-                                  CheckCorpusOracle* outcome, uint32_t* warnings)
-{
-    return check_test_driver_run_with(executable, source, object, scalar, dump_static, quiet, lazy, NULL, 0, outcome, warnings);
-}
-
-// Runs `arguments` (arguments[0] the executable), capturing the selected stream into *text and discarding the other.
-// The caller frees *text. Returns the exit status, or -1 if it didn't exit.
-static int check_test_driver_spawn_stream(char* const* arguments, char** text, bool stdout_capture)
-{
-    FILE* errors = tmpfile();
-    int status = 0;
-    pid_t child = -1;
-    size_t length = 0;
-    *text = NULL;
-    if (errors != NULL)
-    {
-        fflush(NULL);
-        child = fork();
-        if (child == 0)
-        {
-            const int output = open("/dev/null", O_WRONLY | O_CLOEXEC);
-            if (output >= 0 && dup2(stdout_capture ? fileno(errors) : output, STDOUT_FILENO) >= 0 &&
-                dup2(stdout_capture ? output : fileno(errors), STDERR_FILENO) >= 0)
-            {
-                execvp(arguments[0], arguments);
-            }
-            _exit(127);
-        }
-    }
-    pid_t waited = -1;
-    do
-    {
-        waited = child > 0 ? waitpid(child, &status, 0) : -1;
-    }
-    while (waited < 0 && child > 0 && errno == EINTR);
-    const bool read = errors != NULL && waited == child && pp_test_read_output(errors, text, &length);
-    if (errors != NULL)
-    {
-        fclose(errors);
-    }
-    return read && WIFEXITED(status) ? WEXITSTATUS(status) : -1;
-}
-
-static int check_test_driver_spawn(char* const* arguments, char** text)
-{
-    return check_test_driver_spawn_stream(arguments, text, false);
-}
-
-// #2071's prototype: the checks' compiler runs without a process each. With --in-process, buster's runs are this
-// process's run_check_command, which releases what it maps before returning, with standard error captured in memory.
-// With --clang-server PATH, clang's runs go to a clang that stays up (tools/clang-server), which runs each command line
-// through clang's own driver and cc1 in its process. With --differential, each such run also runs as a child, as
-// before: the child's result is the check's, and any difference in status or output is counted and printed.
-// check_test_driver_warning_fixtures alone takes them so far, and reports its own time.
 typedef struct CheckDriverRunModes CheckDriverRunModes;
 struct CheckDriverRunModes
 {
     bool in_process;
     bool differential;
     const char* clang_server;
+    // The names the checks run buster and the oracle clang by: --executable's (or /proc/self/exe) and --clang's.
+    const char* executable;
+    const char* clang;
     pid_t server;
     int requests;
     int replies;
     char server_version[64];
-    uint64_t buster_runs;
-    uint64_t clang_runs;
+    uint64_t in_process_runs;
+    uint64_t served_runs;
+    uint64_t child_runs;
     uint64_t differences;
     uint64_t sweep_fixtures;
     uint64_t sweep_nanoseconds;
@@ -290,10 +135,74 @@ static bool check_test_driver_read_file(int descriptor, char** text)
     return read;
 }
 
-// Buster's `arguments` (arguments[0] its executable, which this process's code is) as this process's run_check_command,
-// with standard output discarded and standard error captured into *text, which the caller frees: what
-// check_test_driver_spawn's child writes. Returns the exit status the child's would be, or -1 if the capture failed.
-static int check_test_driver_run_in_process(char* const* arguments, char** text)
+// Runs `arguments` as a child, capturing the selected stream into *text (the caller frees it) and discarding the other:
+// with `exec`, the program arguments[0] names; without, this process's run_check_command in the forked child. Returns the
+// exit status, or -1 if it didn't exit.
+static int check_test_driver_child(char* const* arguments, char** text, bool stdout_capture, bool exec)
+{
+    FILE* captured = tmpfile();
+    int status = 0;
+    pid_t child = -1;
+    size_t length = 0;
+    *text = NULL;
+    check_driver_run_modes.child_runs += 1;
+    if (captured != NULL)
+    {
+        fflush(NULL);
+        child = fork();
+        if (child == 0)
+        {
+            const int output = open("/dev/null", O_WRONLY | O_CLOEXEC);
+            if (output >= 0 && dup2(stdout_capture ? fileno(captured) : output, STDOUT_FILENO) >= 0 &&
+                dup2(stdout_capture ? output : fileno(captured), STDERR_FILENO) >= 0)
+            {
+                if (exec)
+                {
+                    execvp(arguments[0], arguments);
+                }
+                else
+                {
+                    int count = 0;
+                    while (arguments[count] != NULL)
+                    {
+                        count += 1;
+                    }
+                    const int code = run_check_command(count - 1, (char**)arguments + 1, true);
+                    fflush(NULL);
+                    _exit(code);
+                }
+            }
+            _exit(127);
+        }
+    }
+    pid_t waited = -1;
+    do
+    {
+        waited = child > 0 ? waitpid(child, &status, 0) : -1;
+    }
+    while (waited < 0 && child > 0 && errno == EINTR);
+    const bool read = captured != NULL && waited == child && pp_test_read_output(captured, text, &length);
+    if (captured != NULL)
+    {
+        fclose(captured);
+    }
+    return read && WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+
+// Whether --in-process takes buster's command line `arguments` (arguments[0] buster's name): a source command, an option
+// first, but the guardian's and the fuzzer's, which main_driver takes before, and not under a jobserver's dry run, which
+// main_driver honors before any command.
+static bool check_test_driver_in_process_takes(char* const* arguments)
+{
+    return check_driver_run_modes.in_process && arguments[0] != NULL && arguments[1] != NULL && arguments[1][0] == '-' &&
+           strcmp(arguments[1], "--buster-worker-budget-guardian") != 0 && strcmp(arguments[1], "--fuzz") != 0 && !worker_budget_dry_run(getenv("MAKEFLAGS"));
+}
+
+// Buster's command line `arguments` as this process's main_source_command_reusable, with the selected stream captured
+// into *text (the caller frees it) and the other discarded, as check_test_driver_child's child writes them: true with
+// *status the exit status the child's would be (or -1 if the capture failed), or false for a command line the reusable
+// path leaves to a process of its own (a response file).
+static bool check_test_driver_run_in_process(char* const* arguments, char** text, bool stdout_capture, int* status)
 {
     int count = 0;
     while (arguments[count] != NULL)
@@ -301,24 +210,27 @@ static int check_test_driver_run_in_process(char* const* arguments, char** text)
         count += 1;
     }
     *text = NULL;
-    int status = -1;
+    *status = -1;
+    int result = -1;
     fflush(NULL);
     // memfd_create with MFD_CLOEXEC, through syscall as parallel.c does: this unit has no _GNU_SOURCE.
-    const int capture = (int)syscall(SYS_memfd_create, "buster-check-errors", 1u);
+    const int capture = (int)syscall(SYS_memfd_create, "buster-check-run", 1u);
     const int discard = open("/dev/null", O_WRONLY | O_CLOEXEC);
     const int saved_output = dup(STDOUT_FILENO);
     const int saved_errors = dup(STDERR_FILENO);
-    const bool redirected = capture >= 0 && discard >= 0 && saved_output >= 0 && saved_errors >= 0 && dup2(discard, STDOUT_FILENO) >= 0 &&
-                            dup2(capture, STDERR_FILENO) >= 0;
+    const bool redirected = capture >= 0 && discard >= 0 && saved_output >= 0 && saved_errors >= 0 &&
+                            dup2(stdout_capture ? capture : discard, STDOUT_FILENO) >= 0 && dup2(stdout_capture ? discard : capture, STDERR_FILENO) >= 0;
     if (redirected)
     {
-        status = run_check_command(count - 1, (char**)arguments + 1, true) & 0xff;
+        result = main_source_command_reusable(count, (char**)arguments);
     }
     fflush(NULL);
     const bool restored = saved_output >= 0 && saved_errors >= 0 && dup2(saved_output, STDOUT_FILENO) >= 0 && dup2(saved_errors, STDERR_FILENO) >= 0;
-    if (!(redirected && restored && check_test_driver_read_file(capture, text)))
+    const bool taken = !redirected || result >= 0;
+    if (taken && redirected && restored && check_test_driver_read_file(capture, text))
     {
-        status = -1;
+        *status = result & 0xff;
+        check_driver_run_modes.in_process_runs += 1;
     }
     const int descriptors[] = { capture, discard, saved_output, saved_errors };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(descriptors); i += 1)
@@ -328,7 +240,7 @@ static int check_test_driver_run_in_process(char* const* arguments, char** text)
             close(descriptors[i]);
         }
     }
-    return status;
+    return taken;
 }
 
 // Starts --clang-server's server once, and asks the version of its clang libraries.
@@ -359,7 +271,7 @@ static bool check_test_driver_clang_server_start(void)
             close(from_server[1]);
             modes->requests = to_server[1];
             modes->replies = from_server[0];
-            uint32_t header[2] = { 0, 2 };
+            uint32_t header[3] = { 0, 2, 0 };
             uint32_t reply[2] = { 0, 0 };
             const bool answered = modes->server > 0 && check_test_driver_transfer(modes->requests, header, sizeof(header), true) &&
                                   check_test_driver_transfer(modes->replies, reply, sizeof(reply), false) &&
@@ -374,8 +286,17 @@ static bool check_test_driver_clang_server_start(void)
     return modes->server > 0 && modes->server_version[0] != 0;
 }
 
-// Clang's `arguments` through the server: its standard error into *text (the caller frees it), its exit status, or -1.
-static int check_test_driver_clang_request(char* const* arguments, char** text)
+// Sends one length-prefixed string to the server.
+static bool check_test_driver_clang_send(const char* text)
+{
+    const uint32_t length = (uint32_t)strlen(text);
+    return check_test_driver_transfer(check_driver_run_modes.requests, (void*)&length, sizeof(length), true) &&
+           check_test_driver_transfer(check_driver_run_modes.requests, (void*)text, length, true);
+}
+
+// The oracle clang's `arguments` through the server, with this process's working directory and environment: the
+// selected stream into *text (the caller frees it), the exit status, or -1.
+static int check_test_driver_clang_request(char* const* arguments, char** text, bool stdout_capture)
 {
     CheckDriverRunModes* modes = &check_driver_run_modes;
     *text = NULL;
@@ -384,13 +305,22 @@ static int check_test_driver_clang_request(char* const* arguments, char** text)
     {
         count += 1;
     }
-    uint32_t header[2] = { count, 2 };
-    bool sent = check_test_driver_clang_server_start() && check_test_driver_transfer(modes->requests, header, sizeof(header), true);
+    uint32_t variables = 0;
+    while (environ[variables] != NULL)
+    {
+        variables += 1;
+    }
+    char directory[PATH_MAX];
+    uint32_t header[3] = { count, stdout_capture ? 1u : 2u, variables };
+    bool sent = getcwd(directory, sizeof(directory)) != NULL && check_test_driver_clang_server_start() &&
+                check_test_driver_transfer(modes->requests, header, sizeof(header), true) && check_test_driver_clang_send(directory);
     for (uint32_t i = 0; sent && i < count; i += 1)
     {
-        const uint32_t length = (uint32_t)strlen(arguments[i]);
-        sent = check_test_driver_transfer(modes->requests, (void*)&length, sizeof(length), true) &&
-               check_test_driver_transfer(modes->requests, arguments[i], length, true);
+        sent = check_test_driver_clang_send(arguments[i]);
+    }
+    for (uint32_t i = 0; sent && i < variables; i += 1)
+    {
+        sent = check_test_driver_clang_send(environ[i]);
     }
     uint32_t reply[2] = { 0, 0 };
     const bool replied = sent && check_test_driver_transfer(modes->replies, reply, sizeof(reply), false);
@@ -399,6 +329,7 @@ static int check_test_driver_clang_request(char* const* arguments, char** text)
     if (read)
     {
         (*text)[reply[1]] = 0;
+        modes->served_runs += 1;
     }
     else
     {
@@ -408,16 +339,109 @@ static int check_test_driver_clang_request(char* const* arguments, char** text)
     return read ? (int)(int32_t)reply[0] : -1;
 }
 
-// Counts and prints (the first few) a difference between a run's two ways.
-static void check_test_driver_compare_runs(const char* kind, char* const* arguments, int status, const char* text, int other_status, const char* other_text)
+// Whether a line (of `length` bytes) is one of --time-stages' report lines (c_check_clock.c, and run_check_command_mode's
+// worker budget), whose times, faults, sizes and lanes that worked differ between any two runs, as two children's do.
+static bool check_test_driver_timing_line(const char* line, size_t length)
 {
-    const bool same = status == other_status && ((text == NULL && other_text == NULL) || (text != NULL && other_text != NULL && strcmp(text, other_text) == 0));
+    static const char* const markers[] = { "time-stage\t", "time-check\t", "time-process\t", "time-write\t", "worker-budget\t" };
+    bool timing = false;
+    for (uint32_t i = 0; !timing && i < BUSTER_ARRAY_LENGTH(markers); i += 1)
+    {
+        const size_t size = strlen(markers[i]);
+        timing = length >= size && memcmp(line, markers[i], size) == 0;
+    }
+    return timing;
+}
+
+// qsort's order of two lines.
+static int check_test_driver_compare_lines(const void* left, const void* right)
+{
+    return strcmp(*(char* const*)left, *(char* const*)right);
+}
+
+// The lines of `text` but --time-stages' report lines, each copied and sorted, into *lines (the caller frees each and
+// the array): their count.
+static uint32_t check_test_driver_sorted_lines(const char* text, char*** lines)
+{
+    const char* const stop = text + strlen(text);
+    uint32_t count = 0;
+    uint32_t capacity = 64;
+    *lines = malloc(capacity * sizeof(char*));
+    for (const char* at = text; *lines != NULL && at < stop;)
+    {
+        const char* end = memchr(at, '\n', (size_t)(stop - at));
+        const size_t length = end != NULL ? (size_t)(end - at) : (size_t)(stop - at);
+        if (!check_test_driver_timing_line(at, length))
+        {
+            if (count == capacity)
+            {
+                capacity *= 2;
+                char** grown = realloc(*lines, capacity * sizeof(char*));
+                if (grown == NULL)
+                {
+                    free(*lines);
+                }
+                *lines = grown;
+            }
+            if (*lines != NULL)
+            {
+                (*lines)[count] = strndup(at, length);
+                count += 1;
+            }
+        }
+        at += length + (end != NULL ? 1 : 0);
+    }
+    if (*lines != NULL)
+    {
+        qsort(*lines, count, sizeof(char*), check_test_driver_compare_lines);
+    }
+    return *lines != NULL ? count : 0;
+}
+
+// Whether two runs' outputs hold the same lines but for --time-stages' report lines, in any order: what a run with
+// --time-stages or --lane-cpus prints from more than one lane (lane-pin's lines among them) comes in the order the lanes
+// reach it, as two children's do.
+static bool check_test_driver_same_lines(const char* text, const char* other)
+{
+    char** lines = NULL;
+    char** other_lines = NULL;
+    const uint32_t count = check_test_driver_sorted_lines(text, &lines);
+    const uint32_t other_count = check_test_driver_sorted_lines(other, &other_lines);
+    bool same = lines != NULL && other_lines != NULL && count == other_count;
+    for (uint32_t i = 0; same && i < count; i += 1)
+    {
+        same = lines[i] != NULL && other_lines[i] != NULL && strcmp(lines[i], other_lines[i]) == 0;
+    }
+    for (uint32_t i = 0; lines != NULL && i < count; i += 1)
+    {
+        free(lines[i]);
+    }
+    for (uint32_t i = 0; other_lines != NULL && i < other_count; i += 1)
+    {
+        free(other_lines[i]);
+    }
+    free(lines);
+    free(other_lines);
+    return same;
+}
+
+// Counts and prints (the first few) a difference between a run's two ways.
+static void check_test_driver_compare_runs(char* const* arguments, int status, const char* text, int other_status, const char* other_text)
+{
+    bool reports = false;
+    for (uint32_t i = 1; !reports && arguments[i] != NULL; i += 1)
+    {
+        reports = strcmp(arguments[i], "--time-stages") == 0 || strcmp(arguments[i], "--lane-cpus") == 0;
+    }
+    const bool same_text = text != NULL && other_text != NULL &&
+                           (strcmp(text, other_text) == 0 || (reports && check_test_driver_same_lines(text, other_text)));
+    const bool same = status == other_status && ((text == NULL && other_text == NULL) || same_text);
     if (!same)
     {
         check_driver_run_modes.differences += 1;
-        if (check_driver_run_modes.differences <= 4)
+        if (check_driver_run_modes.differences <= 8)
         {
-            fprintf(stderr, "run modes: %s run differs:", kind);
+            fprintf(stderr, "run modes: a run differs:");
             for (uint32_t i = 0; arguments[i] != NULL; i += 1)
             {
                 fprintf(stderr, " %s", arguments[i]);
@@ -428,54 +452,154 @@ static void check_test_driver_compare_runs(const char* kind, char* const* argume
     }
 }
 
-// Clang's run of a check's `arguments`: through the server with --clang-server, else as a child.
-static int check_test_driver_clang_run(char* const* arguments, char** text)
+// Buster's command line `arguments` (arguments[0] its name for an exec'd child, or for !exec this process's code in a
+// forked child): in this process where --in-process takes it, else as a child, as check_test_driver_child says. With
+// --differential, a run in this process also runs as the child, whose result is returned.
+static int check_test_driver_buster_command(char* const* arguments, char** text, bool stdout_capture, bool exec)
 {
-    CheckDriverRunModes* modes = &check_driver_run_modes;
-    modes->clang_runs += 1;
+    char* inside = NULL;
+    int inside_status = -1;
+    const bool taken = check_test_driver_in_process_takes(arguments) && check_test_driver_run_in_process(arguments, &inside, stdout_capture, &inside_status);
     int status = -1;
-    if (modes->clang_server != NULL && modes->differential)
+    if (taken && !check_driver_run_modes.differential)
     {
-        char* served = NULL;
-        const int served_status = check_test_driver_clang_request(arguments, &served);
-        status = check_test_driver_spawn(arguments, text);
-        check_test_driver_compare_runs("clang", arguments, status, *text, served_status, served);
-        free(served);
-    }
-    else if (modes->clang_server != NULL)
-    {
-        status = check_test_driver_clang_request(arguments, text);
+        *text = inside;
+        status = inside_status;
     }
     else
     {
-        status = check_test_driver_spawn(arguments, text);
+        status = check_test_driver_child(arguments, text, stdout_capture, exec);
+        if (taken)
+        {
+            check_test_driver_compare_runs(arguments, status, *text, inside_status, inside);
+        }
+        free(inside);
     }
     return status;
 }
 
-// Buster's run of a check's `arguments`: in this process with --in-process, else as a child.
-static int check_test_driver_buster_run(char* const* arguments, char** text)
+// Runs `arguments` (arguments[0] the program), capturing the selected stream into *text and discarding the other. The
+// caller frees *text. Returns the exit status, or -1 if it didn't exit. Buster's runs (arguments[0] --executable's name
+// or /proc/self/exe) and the oracle clang's take the run modes above.
+static int check_test_driver_spawn_stream(char* const* arguments, char** text, bool stdout_capture)
 {
     CheckDriverRunModes* modes = &check_driver_run_modes;
-    modes->buster_runs += 1;
+    const bool buster = arguments[0] != NULL && ((modes->executable != NULL && strcmp(arguments[0], modes->executable) == 0) || strcmp(arguments[0], "/proc/self/exe") == 0);
+    const bool clang = !buster && arguments[0] != NULL && modes->clang_server != NULL && modes->clang != NULL && strcmp(arguments[0], modes->clang) == 0;
     int status = -1;
-    if (modes->in_process && modes->differential)
+    *text = NULL;
+    if (buster)
     {
-        char* inside = NULL;
-        const int inside_status = check_test_driver_run_in_process(arguments, &inside);
-        status = check_test_driver_spawn(arguments, text);
-        check_test_driver_compare_runs("buster", arguments, status, *text, inside_status, inside);
-        free(inside);
+        status = check_test_driver_buster_command(arguments, text, stdout_capture, true);
     }
-    else if (modes->in_process)
+    else if (clang && !modes->differential)
     {
-        status = check_test_driver_run_in_process(arguments, text);
+        status = check_test_driver_clang_request(arguments, text, stdout_capture);
+    }
+    else if (clang)
+    {
+        char* served = NULL;
+        const int served_status = check_test_driver_clang_request(arguments, &served, stdout_capture);
+        status = check_test_driver_child(arguments, text, stdout_capture, true);
+        check_test_driver_compare_runs(arguments, status, *text, served_status, served);
+        free(served);
     }
     else
     {
-        status = check_test_driver_spawn(arguments, text);
+        status = check_test_driver_child(arguments, text, stdout_capture, true);
     }
     return status;
+}
+
+static int check_test_driver_spawn(char* const* arguments, char** text)
+{
+    return check_test_driver_spawn_stream(arguments, text, false);
+}
+
+// Runs the driver (this process's run_check_command in a child, or `executable`, or with --in-process this process's)
+// on `source`, with -c into `object` or without one -fsyntax-only, and `extra`'s `extra_count` arguments (at most 8)
+// before the source: its first error, as clang's oracle reads one, and its warnings' count.
+static bool check_test_driver_run_with(const char* executable, const char* source, const char* object, bool scalar, bool dump_static, bool quiet, bool lazy,
+                                       const char* const* extra, uint32_t extra_count, CheckCorpusOracle* outcome, uint32_t* warnings)
+{
+    *outcome = (CheckCorpusOracle){ 0 };
+    *warnings = 0;
+    char* arguments[24] = { 0 };
+    uint32_t count = 0;
+    arguments[count++] = (char*)(executable != NULL ? executable : "checker");
+    if (scalar)
+    {
+        arguments[count++] = "--scalar";
+    }
+    if (dump_static)
+    {
+        arguments[count++] = "--dump-static";
+    }
+    if (quiet)
+    {
+        arguments[count++] = "-w";
+    }
+    if (lazy)
+    {
+        arguments[count++] = "-flazy-system-headers";
+    }
+    arguments[count++] = "-std=gnu17";
+    // Without an object, -fsyntax-only.
+    if (object != NULL)
+    {
+        arguments[count++] = "-c";
+        arguments[count++] = "-o";
+        arguments[count++] = (char*)object;
+    }
+    else
+    {
+        arguments[count++] = "-fsyntax-only";
+    }
+    for (uint32_t i = 0; i < extra_count && i < 8; i += 1)
+    {
+        arguments[count++] = (char*)extra[i];
+    }
+    arguments[count++] = (char*)source;
+    char* text = NULL;
+    const int status = check_test_driver_buster_command(arguments, &text, false, executable != NULL);
+    bool ready = status >= 0 && text != NULL;
+    bool unlocated = false;
+    // Each line's end is found within the text (memchr), as check_test_driver_diagnostic_counts's are: strchr on the
+    // rest of the text reads all of it per line under AddressSanitizer's strict string checks (#2030).
+    char* stop = text != NULL ? text + strlen(text) : NULL;
+    for (char* at = text; ready && at != NULL && at < stop;)
+    {
+        char* end = memchr(at, '\n', (size_t)(stop - at));
+        if (end != NULL)
+        {
+            *end = 0;
+        }
+        if (strstr(at, "error: ") != NULL)
+        {
+            uint32_t line = 0;
+            uint32_t column = 0;
+            const bool located = sscanf(at, "%*[^:]:%u:%u:", &line, &column) == 2 && line != 0 && column != 0;
+            unlocated |= !located;
+            if (located && !outcome->rejected)
+            {
+                outcome->rejected = true;
+                outcome->line = line;
+                outcome->column = column;
+                snprintf(outcome->message, sizeof(outcome->message), "%s", strstr(at, "error: ") + 7);
+            }
+        }
+        *warnings += strstr(at, "warning: ") != NULL;
+        at = end != NULL ? end + 1 : NULL;
+    }
+    ready = ready && !unlocated && ((status == 0 && !outcome->rejected) || (status == 1 && outcome->rejected));
+    free(text);
+    return ready;
+}
+
+static bool check_test_driver_run(const char* executable, const char* source, const char* object, bool scalar, bool dump_static, bool quiet, bool lazy,
+                                  CheckCorpusOracle* outcome, uint32_t* warnings)
+{
+    return check_test_driver_run_with(executable, source, object, scalar, dump_static, quiet, lazy, NULL, 0, outcome, warnings);
 }
 
 // Exercise the real reservation failure in a child so its address-space limit cannot affect the test process.
@@ -8051,6 +8175,9 @@ static int run_checker_driver_tests(int argc, char** argv)
     // One focused section's alone: the others' gates take `focused` as --sign-compare-only's did.
     const bool focused = focuses != 0;
     check_test_expect(&test, options, "driver test options are recognized");
+    // The names the checks run buster and the oracle clang by, which the run modes recognize (#2071).
+    check_driver_run_modes.executable = executable;
+    check_driver_run_modes.clang = clang;
     // The library-builtin table is pinned to BUSTER_CLANG_REFERENCE_VERSION's official build: a different clang build is
     // reported with both, and the library comparisons then skip only the names that depend on its table (#1131).
     check_driver_clang_reference = clang_reference_report(clang, check_driver_clang_version, sizeof(check_driver_clang_version));
@@ -9274,15 +9401,15 @@ static int run_checker_driver_tests(int argc, char** argv)
         waitpid(modes->server, &server_status, 0);
     }
     // The server's clang libraries must be the oracle's clang's release (clang_reference_report's name of it).
-    check_test_expect(&test, modes->clang_server == NULL || modes->clang_runs == 0 ||
+    check_test_expect(&test, modes->clang_server == NULL || modes->served_runs == 0 ||
                              (modes->server_version[0] != 0 && strstr(check_driver_clang_version, modes->server_version) != NULL),
                       "run modes: the clang server started, and its clang is the oracle clang's release");
     check_test_expect(&test, modes->differences == 0, "run modes: every run gave the same status and output both ways");
-    printf("checker-driver: run modes: buster %s, clang %s%s%s%s; warning sweep: %" PRIu64 " fixtures, %" PRIu64 " clang and %" PRIu64
-           " buster runs, %.3f s; %" PRIu64 " differences\n",
+    printf("checker-driver: run modes: buster %s, clang %s%s%s%s: %" PRIu64 " runs in this process, %" PRIu64 " through the server, %" PRIu64
+           " as children; warning sweep: %" PRIu64 " fixtures, %.3f s; %" PRIu64 " differences\n",
            modes->in_process ? "in-process" : "as children", modes->clang_server != NULL ? "through the server (" : "as children",
            modes->clang_server != NULL ? modes->server_version : "", modes->clang_server != NULL ? ")" : "", modes->differential ? ", differential" : "",
-           modes->sweep_fixtures, modes->clang_runs, modes->buster_runs, (double)modes->sweep_nanoseconds / 1e9, modes->differences);
+           modes->in_process_runs, modes->served_runs, modes->child_runs, modes->sweep_fixtures, (double)modes->sweep_nanoseconds / 1e9, modes->differences);
     oracle_cache_report(oracle, "test-checker-driver");
     if (check_driver_part.count > 1)
     {

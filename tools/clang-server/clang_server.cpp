@@ -8,13 +8,15 @@
 // libraries' initializers) once, not per run. It is C++ because clang's driver and frontend have no C API.
 //
 // Protocol, native-endian 32-bit integers, on standard input and output (which the requests' runs never see):
-//   request: count, stream (2: capture standard error and discard standard output; 1: the other way), then count
-//            arguments, each its length and its bytes; argument 0 names the clang, as execvp finds it. A count of 0
-//            asks for the version this server's clang libraries are (CLANG_VERSION_STRING), with status 0.
+//   request: count, stream (2: capture standard error and discard standard output; 1: the other way), variables; then
+//            the working directory, count arguments and variables environment entries (NAME=VALUE), each its length and
+//            its bytes. Argument 0 names the clang, as execvp finds it. The run takes the directory and exactly that
+//            environment, as the client's child would. A count of 0, alone, asks for the version this server's clang
+//            libraries are (CLANG_VERSION_STRING), with status 0.
 //   reply:   status (the exit status the clang process would have had), length, the captured bytes.
 //
-// Usage: clang-server, its standard input and output pipes to one client. It exits at the end of its input. Built by
-// tools/clang-server/build.sh against the libraries of the clang it stands for.
+// Usage: clang-server [--version], its standard input and output pipes to one client. It exits at the end of its input.
+// tools/clang-server/build.sh builds it against the libraries of the clang it stands for.
 
 #include <clang/Basic/Diagnostic.h>
 #include <clang/Basic/DiagnosticIDs.h>
@@ -40,6 +42,7 @@
 #include <llvm/TargetParser/Host.h>
 
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -83,6 +86,16 @@ bool write_all(int descriptor, const void* data, size_t size)
         }
     }
     return complete;
+}
+
+// One length-prefixed string of the protocol.
+bool read_string(int descriptor, std::string& text)
+{
+    uint32_t length = 0;
+    bool read = read_all(descriptor, &length, sizeof(length));
+    text.assign(read ? length : 0, '\0');
+    read = read && read_all(descriptor, text.data(), length);
+    return read;
 }
 
 // One cc1 job, as clang's cc1_main runs it, but freeing what it made: the driver's -disable-free lets a process that is
@@ -166,8 +179,14 @@ int run_clang(const std::vector<std::string>& request)
 }
 } // namespace
 
-int main()
+int main(int argc, char** argv)
 {
+    // --version: the clang release these libraries are, which tools/clang-server/build.sh checks.
+    if (argc == 2 && std::strcmp(argv[1], "--version") == 0)
+    {
+        std::printf("%s\n", CLANG_VERSION_STRING);
+        return 0;
+    }
     llvm::InitializeAllTargets();
     llvm::InitializeAllTargetMCs();
     llvm::InitializeAllAsmPrinters();
@@ -177,18 +196,38 @@ int main()
     const int replies = dup(STDOUT_FILENO);
     const int empty = open("/dev/null", O_RDWR | O_CLOEXEC);
     bool serving = requests >= 0 && replies >= 0 && empty >= 0 && dup2(empty, STDIN_FILENO) >= 0;
+    std::vector<std::string> environment;
     while (serving)
     {
-        uint32_t header[2] = { 0, 0 };
+        uint32_t header[3] = { 0, 0, 0 };
         serving = read_all(requests, header, sizeof(header));
+        std::string directory;
+        serving = serving && (header[0] == 0 || read_string(requests, directory));
         std::vector<std::string> request;
         for (uint32_t i = 0; serving && i < header[0]; i += 1)
         {
-            uint32_t length = 0;
-            serving = read_all(requests, &length, sizeof(length));
-            std::string argument(serving ? length : 0, '\0');
-            serving = serving && read_all(requests, argument.data(), length);
+            std::string argument;
+            serving = read_string(requests, argument);
             request.push_back(std::move(argument));
+        }
+        std::vector<std::string> variables;
+        for (uint32_t i = 0; serving && i < header[2]; i += 1)
+        {
+            std::string variable;
+            serving = read_string(requests, variable);
+            variables.push_back(std::move(variable));
+        }
+        if (serving && header[0] != 0)
+        {
+            // The client's environment, exactly: putenv keeps the strings, which `environment` holds until the next
+            // request's clearenv has let go of them.
+            clearenv();
+            environment = std::move(variables);
+            for (std::string& variable : environment)
+            {
+                putenv(variable.data());
+            }
+            serving = chdir(directory.c_str()) == 0;
         }
         int32_t status = 0;
         std::string captured;
