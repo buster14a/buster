@@ -4,11 +4,11 @@
 // The order-preserving partition of one unit's optimized module for parallel native code generation
 // (docs/commands/build.md, "Parallel native generation"):
 //
-//   split INPUT.bc PARTS DIRECTORY [--verify]
+//   split INPUT.bc PARTS DIRECTORY [--verify] [--report]
 //
 // writes DIRECTORY/part0.bc to DIRECTORY/partPARTS.bc. Parts 0 to PARTS - 1 hold contiguous ranges of the module's
-// function definitions in module order, of about equal instruction counts; part PARTS holds every global variable
-// definition and no function. The code generator emits a module's functions in order, each with its constant pools and
+// function definitions in module order, the costliest (by instruction count) as cheap as the alignment rule below
+// allows; part PARTS holds every global variable definition and no function. The code generator emits a module's functions in order, each with its constant pools and
 // jump tables, and its global variables after them, so the parts' sections, concatenated in index order by
 // BusterCodegenMerge.cmake's relocatable link, hold the single module's code and data in the single module's order.
 //
@@ -16,8 +16,8 @@
 // - a function another part refers to stays local where it is defined, so that the assembler resolves, and relaxes,
 //   the jumps to it there as before (a near tail call's two-byte jmp); a hidden alias, NAME.buster_split, names it for
 //   the other parts, which refer to that name. Other local symbols another part refers to become hidden external ones;
-// - a code part keeps the initializer of each constant global, available_externally, so that the code generator folds
-//   what it reads from one (a string's bytes into immediate stores) as before, and emits none of them;
+// - a code part keeps the initializer of each strong constant global, available_externally, so that the code generator
+//   folds what it reads from one (a string's bytes into immediate stores) as before, and emits none of them;
 // - the module's inline assembly (the checker section's placement, main.c) stays in part 0, before every function;
 // - a part starts, in each of its text sections, at a function of the greatest alignment it holds there, so that the
 //   relocatable link's section alignment adds no padding the single module didn't have;
@@ -27,6 +27,7 @@
 // move by less than that alignment. The build's comparison (build-regression) checks the rest: identical functions at
 // identical addresses.
 //
+// --verify runs LLVM's verifier on each part; --report prints each part's functions and estimated cost to stderr.
 // The input is parsed once; the parts are written by one child process each, forked after the plan, in parallel. It is
 // build tooling outside the compiler's compile path, using LLVM's C API (and one C++ call), with no vector path.
 
@@ -94,6 +95,7 @@ struct SplitPlan
     uint32_t* starts;
     SplitMap owners;
     bool verify;
+    bool report;
 };
 
 static SplitMap split_map_create(uint64_t minimum)
@@ -187,68 +189,85 @@ static uint64_t split_function_cost(LLVMValueRef function)
     return count + 8;
 }
 
-// Whether the part [begin, end) starts, in each text section, with a function of the greatest alignment it holds there.
-static bool split_part_valid(const SplitFunction* functions, uint32_t begin, uint32_t end)
+// The fewest parts covering the functions [0, count), each costing at most `limit` and valid: starting, in each text
+// section, with a function of the greatest alignment it holds there, so that the relocatable link's section alignment
+// adds no padding the single module didn't have. A part [i, j) that is invalid stays invalid as j grows, and one
+// function alone is valid. parts_to[j] is the fewest parts covering [0, j), previous[j] where its last part starts.
+// Returns parts_to[count], or UINT32_MAX when no cover exists.
+static uint32_t split_cover(const SplitFunction* functions, uint32_t count, uint64_t limit, uint32_t* parts_to, uint32_t* previous)
 {
-    uint32_t first[SPLIT_SECTIONS] = { 0 };
-    uint32_t greatest[SPLIT_SECTIONS] = { 0 };
-    for (uint32_t i = begin; i < end; i += 1)
+    parts_to[0] = 0;
+    for (uint32_t j = 1; j <= count; j += 1)
     {
-        if (functions[i].defined)
+        parts_to[j] = UINT32_MAX;
+    }
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        uint32_t first[SPLIT_SECTIONS] = { 0 };
+        uint32_t greatest[SPLIT_SECTIONS] = { 0 };
+        uint64_t cost = 0;
+        bool valid = parts_to[i] != UINT32_MAX;
+        for (uint32_t j = i; j < count && valid; j += 1)
         {
-            const SplitSection section = functions[i].section;
-            first[section] = first[section] == 0 ? functions[i].alignment : first[section];
-            greatest[section] = functions[i].alignment > greatest[section] ? functions[i].alignment : greatest[section];
-        }
-    }
-    bool valid = true;
-    for (uint32_t section = 0; section < SPLIT_SECTIONS; section += 1)
-    {
-        valid = valid && first[section] >= greatest[section];
-    }
-    return valid;
-}
-
-// The parts' boundaries: by cost first, contiguous in module order; then each part's start moves forward until the part
-// is valid (split_part_valid). A start only moves forward and extends the part before it, which is checked again, so the
-// loop ends, every part valid (an empty one is).
-static void split_boundaries(SplitPlan* plan)
-{
-    uint64_t total = 0;
-    for (uint32_t i = 0; i < plan->count; i += 1)
-    {
-        total += plan->functions[i].cost;
-    }
-    plan->starts[0] = 0;
-    plan->starts[plan->parts] = plan->count;
-    uint64_t running = 0;
-    uint32_t next = 1;
-    for (uint32_t i = 0; i < plan->count; i += 1)
-    {
-        while (next < plan->parts && plan->functions[i].defined && running * plan->parts >= (uint64_t)next * total)
-        {
-            plan->starts[next] = i;
-            next += 1;
-        }
-        running += plan->functions[i].cost;
-    }
-    for (; next < plan->parts; next += 1)
-    {
-        plan->starts[next] = plan->count;
-    }
-    bool changed = true;
-    while (changed)
-    {
-        changed = false;
-        for (uint32_t p = 1; p < plan->parts; p += 1)
-        {
-            while (plan->starts[p] < plan->starts[p + 1] && !split_part_valid(plan->functions, plan->starts[p], plan->starts[p + 1]))
+            const SplitFunction* function = &functions[j];
+            if (function->defined)
             {
-                plan->starts[p] += 1;
-                changed = true;
+                const SplitSection section = function->section;
+                cost += function->cost;
+                first[section] = first[section] == 0 ? function->alignment : first[section];
+                greatest[section] = function->alignment > greatest[section] ? function->alignment : greatest[section];
+                valid = cost <= limit && first[section] >= greatest[section];
+            }
+            if (valid && parts_to[i] + 1 < parts_to[j + 1])
+            {
+                parts_to[j + 1] = parts_to[i] + 1;
+                previous[j + 1] = i;
             }
         }
     }
+    return parts_to[count];
+}
+
+// The parts' boundaries: contiguous in module order, every part valid (split_cover), the costliest part as cheap as
+// the alignment rule allows, by bisection on its cost. Parts left over are empty, at the end.
+static void split_boundaries(SplitPlan* plan)
+{
+    uint64_t total = 0;
+    uint64_t largest = 0;
+    for (uint32_t i = 0; i < plan->count; i += 1)
+    {
+        total += plan->functions[i].cost;
+        largest = plan->functions[i].cost > largest ? plan->functions[i].cost : largest;
+    }
+    uint32_t* parts_to = calloc(plan->count + 1, sizeof(uint32_t));
+    uint32_t* previous = calloc(plan->count + 1, sizeof(uint32_t));
+    uint64_t low = largest;
+    uint64_t high = total > largest ? total : largest;
+    while (low < high)
+    {
+        const uint64_t middle = low + (high - low) / 2;
+        if (split_cover(plan->functions, plan->count, middle, parts_to, previous) <= plan->parts)
+        {
+            high = middle;
+        }
+        else
+        {
+            low = middle + 1;
+        }
+    }
+    const uint32_t used = split_cover(plan->functions, plan->count, low, parts_to, previous);
+    for (uint32_t p = used; p <= plan->parts; p += 1)
+    {
+        plan->starts[p] = plan->count;
+    }
+    uint32_t at = plan->count;
+    for (uint32_t p = used; p > 0; p -= 1)
+    {
+        at = previous[at];
+        plan->starts[p - 1] = at;
+    }
+    free(parts_to);
+    free(previous);
 }
 
 // The parts whose emitted code or data refers to `value`, as a mask: an instruction's function's part, and a global
@@ -468,8 +487,10 @@ static bool split_part(const SplitPlan* plan, uint32_t part, const char* path)
     {
         if (part < plan->parts && !LLVMIsDeclaration(global))
         {
-            // A code part reads a constant's initializer, available_externally, where the data part defines it.
-            if (LLVMIsGlobalConstant(global) && !split_local(global))
+            // A code part reads a constant's initializer, available_externally, where the data part defines it: one
+            // whose initializer the single module took as definitive, a strong definition's, not a weak one's.
+            if (LLVMIsGlobalConstant(global) && LLVMGetLinkage(global) == LLVMExternalLinkage && !LLVMIsThreadLocal(global) &&
+                !LLVMIsExternallyInitialized(global))
             {
                 LLVMSetLinkage(global, LLVMAvailableExternallyLinkage);
             }
@@ -559,15 +580,40 @@ static bool split_parts(const SplitPlan* plan, const char* directory)
     return done;
 }
 
+// Prints each part's function range, definitions and estimated cost.
+static void split_report(const SplitPlan* plan)
+{
+    for (uint32_t p = 0; p < plan->parts; p += 1)
+    {
+        uint64_t cost = 0;
+        uint32_t defined = 0;
+        for (uint32_t i = plan->starts[p]; i < plan->starts[p + 1]; i += 1)
+        {
+            cost += plan->functions[i].cost;
+            defined += plan->functions[i].defined;
+        }
+        fprintf(stderr, "split: part %u: functions [%u, %u), %u definitions, cost %llu\n", p, plan->starts[p], plan->starts[p + 1], defined,
+                (unsigned long long)cost);
+    }
+}
+
 int main(int argc, char** argv)
 {
     int status = 2;
-    const bool verify = argc == 5 && strcmp(argv[4], "--verify") == 0;
+    bool verify = false;
+    bool report = false;
+    bool flags = argc >= 4;
+    for (int i = 4; i < argc; i += 1)
+    {
+        verify = verify || strcmp(argv[i], "--verify") == 0;
+        report = report || strcmp(argv[i], "--report") == 0;
+        flags = flags && (strcmp(argv[i], "--verify") == 0 || strcmp(argv[i], "--report") == 0);
+    }
     char* end = 0;
     const unsigned long parts = argc >= 4 ? strtoul(argv[2], &end, 10) : 0;
-    if ((argc != 4 && !verify) || end == argv[2] || *end != 0 || parts == 0 || parts > SPLIT_MAXIMUM_PARTS)
+    if (!flags || end == argv[2] || *end != 0 || parts == 0 || parts > SPLIT_MAXIMUM_PARTS)
     {
-        fprintf(stderr, "usage: split INPUT.bc PARTS DIRECTORY [--verify]  (PARTS from 1 to %u)\n", SPLIT_MAXIMUM_PARTS);
+        fprintf(stderr, "usage: split INPUT.bc PARTS DIRECTORY [--verify] [--report]  (PARTS from 1 to %u)\n", SPLIT_MAXIMUM_PARTS);
     }
     else
     {
@@ -587,8 +633,12 @@ int main(int argc, char** argv)
         }
         else
         {
-            SplitPlan plan = { .module = module, .parts = (uint32_t)parts, .verify = verify };
+            SplitPlan plan = { .module = module, .parts = (uint32_t)parts, .verify = verify, .report = report };
             split_plan(&plan);
+            if (plan.report)
+            {
+                split_report(&plan);
+            }
             status = split_parts(&plan, argv[3]) ? 0 : 1;
         }
     }

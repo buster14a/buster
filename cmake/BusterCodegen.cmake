@@ -8,8 +8,8 @@
 # symbols before the ordinary final link. The code is the single object's, function for function, at the same
 # addresses. No C boundary or private state moves between source units. The Debug configuration compiles them as usual.
 
-# Code parts per unit; the splitter writes one more, the unit's global variables.
-set(BUSTER_CODEGEN_PARTITIONS 8)
+# Code parts per unit: with the part of its global variables, one job per hardware thread of the 9700X (15).
+set(BUSTER_CODEGEN_PARTITIONS 14)
 
 # Finds the tools: llvm-config, clang++, llvm-nm, llvm-objcopy, llvm-readelf and ld.lld matching the configured Clang,
 # beside it or on PATH, and LLVM's C API headers. Sets `available`, and `missing` to what is missing or mismatched.
@@ -73,13 +73,14 @@ endfunction()
 function(buster_codegen_splitter)
     set(directory "${CMAKE_BINARY_DIR}/codegen-tools")
     set(splitter "${directory}/split")
-    set(sources "${CMAKE_SOURCE_DIR}/tools/codegen/split.c" "${CMAKE_SOURCE_DIR}/tools/codegen/split_bitcode.cpp")
+    get_filename_component(tools "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../tools/codegen" ABSOLUTE)
+    set(sources "${tools}/split.c" "${tools}/split_bitcode.cpp")
     add_custom_command(OUTPUT "${splitter}"
         COMMAND "${CMAKE_COMMAND}" -E make_directory "${directory}"
         COMMAND "${CMAKE_C_COMPILER}" -O2 -Wall -Wextra -Werror ${BUSTER_CODEGEN_LLVM_cflags}
-            -c "${CMAKE_SOURCE_DIR}/tools/codegen/split.c" -o "${directory}/split.o"
+            -c "${tools}/split.c" -o "${directory}/split.o"
         COMMAND "${BUSTER_CODEGEN_CXX}" -O2 -Wall -Werror ${BUSTER_CODEGEN_LLVM_cxxflags}
-            -c "${CMAKE_SOURCE_DIR}/tools/codegen/split_bitcode.cpp" -o "${directory}/split_bitcode.o"
+            -c "${tools}/split_bitcode.cpp" -o "${directory}/split_bitcode.o"
         COMMAND "${BUSTER_CODEGEN_CXX}" -o "${splitter}" "${directory}/split.o" "${directory}/split_bitcode.o"
             ${BUSTER_CODEGEN_LLVM_ldflags} ${BUSTER_CODEGEN_LLVM_libs} ${BUSTER_CODEGEN_LLVM_system_libs}
         DEPENDS ${sources} "${BUSTER_CODEGEN_CONFIG}"
