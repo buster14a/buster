@@ -81,6 +81,19 @@ static String8 check_driver_warning_name(const Preprocessor* pp, uint32_t name)
     return result;
 }
 
+// The name a use at `token` took, where its spelling `name` is a typo's that the reader corrected (#1447,
+// CHECK_INPUT_UNDECLARED_CORRECTED): its declaration's, as clang's diagnostics after the correction spell it. Only a
+// unit with an error report has a correction, so a valid unit's warnings read nothing more.
+static uint32_t check_driver_corrected_name(const Parser* parser, const CheckInput* input, uint32_t token, uint32_t name)
+{
+    const uint32_t count = parser->tokens.count;
+    const bool use = input->report_count != 0 && token < count && token < input->token_count && parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER &&
+                     parser->tokens.names[token] == name;
+    const uint32_t declaration = use ? input->declarations[token] : BUSTER_CHECK_NONE;
+    const bool corrected = declaration < count && parser->tokens.kinds[declaration] == PARSE_KIND_IDENTIFIER && parser->tokens.names[declaration] != name;
+    return corrected ? parser->tokens.names[declaration] : name;
+}
+
 // A string token's complete spelling in scratch, including its quotes and encoding prefix.
 static String8 check_warning_string_spelling(const Parser* parser, Preprocessor* pp, uint32_t token, Arena* scratch)
 {
@@ -742,7 +755,7 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
                                                 CheckWarningSpelling* spell, const CheckWarningEvent* event, Arena* scratch)
 {
     const CheckWarningPayload* payload = &event->payload;
-    const String8 name = check_driver_warning_name(pp, payload->name);
+    const String8 name = check_driver_warning_name(pp, check_driver_corrected_name(parser, input, event->token, payload->name));
     const char* result = event->id < BUSTER_ARRAY_LENGTH(check_warning_descriptions) ? check_warning_descriptions[event->id].message : NULL;
     switch (event->kind)
     {

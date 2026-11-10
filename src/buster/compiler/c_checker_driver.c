@@ -778,6 +778,33 @@ static uint32_t check_driver_publication_position(const Parser* parser, const Pr
            boundary == parser->tokens.count ? publication_end : pp->output.count + 1u;
 }
 
+// A warning at a declarator or an operator `token` whose operand holds a typo's corrected use (#1447): clang gives the
+// correction's error as it reads the operand, and the warning once the declarator's initializer or the operator is
+// complete, so it is published after that use. The operand runs to the first `,` or `;` outside the brackets opened
+// after the token, or to the bracket that encloses it. Only a unit with a correction looks.
+static uint32_t check_driver_after_corrections(const Parser* parser, const Preprocessor* pp, const CheckInput* input, uint32_t token, uint32_t publication,
+                                               uint32_t publication_end)
+{
+    const uint32_t count = parser->tokens.count;
+    uint32_t after = 0;
+    for (uint32_t i = 0; token < count && i < input->corrected_count; i += 1)
+    {
+        const uint32_t used = input->corrected_tokens[i];
+        bool inside = used > token && used < count;
+        int32_t depth = 0;
+        for (uint32_t t = token + 1; inside && t < used; t += 1)
+        {
+            const uint8_t kind = parser->tokens.kinds[t];
+            depth += kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE || kind == PARSE_KIND_L_BRACE ? 1 :
+                     kind == PARSE_KIND_R_PAREN || kind == PARSE_KIND_R_SQUARE || kind == PARSE_KIND_R_BRACE ? -1 : 0;
+            inside = depth > 0 || (depth == 0 && kind != PARSE_KIND_COMMA && kind != PARSE_KIND_SEMI);
+        }
+        after = inside ? used + 1 : after;
+    }
+    const uint32_t later = after != 0 ? check_driver_publication_position(parser, pp, after, publication_end) : 0;
+    return later > publication ? later : publication;
+}
+
 // Clang defers runtime-behavior warnings until the function is complete, including the lookahead after its closing
 // brace. Required constant evaluation diagnoses immediately instead. Follow only proven parser parents for a
 // sparse warning; no clean unit acquires a token-wide completion column.
@@ -3157,8 +3184,9 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
             if (pointer_flags != 0)
             {
                 PPDiagnosticPhase phase = PP_DIAGNOSTIC_SEMANTIC;
-                const uint32_t publication = check_driver_warning_position(parser, pp, input, repair, completions, completion_count, token,
-                                                                          pointer_flags & (0u - pointer_flags), publication_end, original, &phase);
+                const uint32_t publication = check_driver_after_corrections(parser, pp, input, token,
+                    check_driver_warning_position(parser, pp, input, repair, completions, completion_count, token, pointer_flags & (0u - pointer_flags),
+                                                  publication_end, original, &phase), publication_end);
                 if (check_driver_pointer_arguments(parser, pp, input, stream, types, &spell, token, pointer_flags, enabled, publication, phase, scratch))
                 {
                     flags &= ~pointer_flags;
@@ -3174,7 +3202,9 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                     const PPSeverity pp_severity = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_MAPPED_FATAL :
                                                    severity == CHECK_WARNING_ERROR ? PP_SEVERITY_MAPPED_ERROR : PP_SEVERITY_WARNING;
                     PPDiagnosticPhase phase = PP_DIAGNOSTIC_SEMANTIC;
-                    const uint32_t publication = check_driver_warning_position(parser, pp, input, repair, completions, completion_count, token, warning_flag, publication_end, original, &phase);
+                    const uint32_t publication = check_driver_after_corrections(parser, pp, input, token,
+                        check_driver_warning_position(parser, pp, input, repair, completions, completion_count, token, warning_flag, publication_end, original, &phase),
+                        publication_end);
                     const uint32_t index = check_diagnostic_warning_index(warning_flag);
                     const char* option = index < BUSTER_ARRAY_LENGTH(check_warning_descriptions) ? check_warning_descriptions[index].option : NULL;
                     const bool promoted = severity >= CHECK_WARNING_ERROR;
@@ -3933,6 +3963,23 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                             pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, 1, "use of undeclared identifier '%.*s'; did you mean '%.*s'?",
                                                         (int)intern_length(pp->table, name), intern_bytes(pp->table, name), (int)intern_length(pp->table, other),
                                                         intern_bytes(pp->table, other));
+                        }
+                        else if (kind == CHECK_INPUT_UNDECLARED && named && (input->reports[index].detail != 0 || input->reports[index].subject != 0))
+                        {
+                            // A typo's suggestion that takes no declaration (#1447, check_typo_suggestion): a keyword, or a type
+                            // name with its note, and the name stays undeclared.
+                            const CheckInputReport* report = input->reports + index;
+                            const uint32_t name = parser->tokens.names[located];
+                            const uint32_t meant = report->subject != 0 ? report->subject - 1 : BUSTER_CHECK_NONE;
+                            const uint32_t keyword = report->detail != 0 && report->detail <= BUSTER_ARRAY_LENGTH(check_typo_keywords) ? report->detail - 1 : 0;
+                            const char* other = meant < count ? (const char*)intern_bytes(pp->table, parser->tokens.names[meant]) : check_typo_keywords[keyword];
+                            const int other_length = meant < count ? (int)intern_length(pp->table, parser->tokens.names[meant]) : (int)strlen(other);
+                            char declared[512];
+                            snprintf(declared, sizeof(declared), "'%.*s' declared here", other_length, other);
+                            const PPOutputDiagnosticNote note = { .token = meant < count ? parser->tokens.sources[meant] : 0, .message = declared };
+                            pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, meant < count ? 1u : 0u,
+                                                        "use of undeclared identifier '%.*s'; did you mean '%.*s'?", (int)intern_length(pp->table, name),
+                                                        intern_bytes(pp->table, name), other_length, other);
                         }
                         else if ((kind == CHECK_INPUT_UNDECLARED || kind == CHECK_INPUT_UNKNOWN_BUILTIN) && named)
                         {

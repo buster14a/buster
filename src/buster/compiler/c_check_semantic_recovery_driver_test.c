@@ -634,6 +634,29 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         // No search where the name was declared with linkage before, another call's or a block's extern (ExternCPrev).
         "int process(int);\nvoid n(void) { proces(1); }\nvoid o(void) { proces(2); }\nvoid q(void) { extern int procss(int); }\n"
         "void r(void) { procss(3); }\n",
+        // A library function's implicit declaration stays a candidate after its block, as clang's builtin is declared at
+        // file scope; a nearer or as near name of the block still decides (review of #1822's gaps).
+        "void f(void) { printf(\"x\"); { puts(\"y\"); } }\nvoid h(void) { int x = printff; int y = putz; (void)x; (void)y; }\n"
+        "void k(void) { int printf_ = 0; int w = printff; (void)printf_; (void)w; }\nvoid m(void) { int puts = 1; int v = putz; (void)v; }\n",
+        // Later diagnostics spell the name a correction took, and a warning at the declarator or the operator whose operand
+        // holds it comes after the correction's error.
+        "const int counter = 1;\nint icount;\n__attribute__((deprecated)) int olden;\nvoid take(int *);\nvoid takeu(unsigned *);\n"
+        "void f(void)\n{\n    countr = 5;\n    ++countr;\n    int y = olde;\n    int *p = &countr;\n    unsigned *u = &icoun;\n"
+        "    take(&countr);\n    takeu(&icoun);\n    int *q;\n    q = &countr, q = 0;\n    int *r = 0, *s = &countr;\n"
+        "    (void)y; (void)p; (void)u; (void)q; (void)r; (void)s;\n}\n",
+        // Keywords within an expression (#1447): an expression's and, within a function, a statement's, `break` and
+        // `continue` in a loop's body, `case` and `default` in a switch's, a statement's none before a `)`; a value as near
+        // leaves the name uncorrected, and one taken where no keyword is offered corrects it. C23's `true` and `false`.
+        "void take(int);\nint whilf;\nint g(int a)\n{\n    int x = whil + 1;\n    int y = retrn;\n    int z = (whil);\n    int w = sizeo * 2;\n"
+        "    int arr[2] = { retrn, a };\n    take(sizeo);\n    take(retrn);\n    take(fals);\n"
+        "    for (;;) { a = brek; a = contnue + undeclared_one; }\n    switch (a) { case 1: a = defaul; a = cas; }\n    a = brek;\n"
+        "    do { a = contnue; } while (contnue + 1);\n    for (a = brek; a < 2; a += contnue) { a = 3; }\n    int n = fals;\n"
+        "    return a + x + y + z + w + n + arr[0];\n}\nint h = retrn;\n",
+        // Type names in an expression: the first name in parentheses and a cast's operand take a typedef's name or a type
+        // keyword (clang's MaybeTypeCast), which is suggested, and a cast's operand no value.
+        "typedef int myint;\nint vary;\nint f(int a)\n{\n    int b = (myin + 1);\n    int c = sizeof(myin);\n    int d = (int)myin;\n"
+        "    int e = (unsignd + 1);\n    int g = (int)retrn;\n    int h = (int)vari;\n    int i = (a + unsignd);\n    int j = (myin);\n"
+        "    int k = (unsignd);\n    int l = sizeof(myin) + __alignof__(myin);\n    return b + c + d + e + g + h + i + j + k + l;\n}\n",
         // Three thousand names and fifty-three typos, written out where the fixture is (check_test_typo_stress): each
         // search reads the visible names once (c_check_typo.c).
         "/* typo stress */\n",

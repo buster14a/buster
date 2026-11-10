@@ -961,7 +961,9 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
                 }
                 const uint32_t target = named < count ? graph->tokens[named] : BUSTER_CHECK_NONE;
                 const uint32_t declaration = target < input->token_count ? input->declarations[target] : BUSTER_CHECK_NONE;
-                const String8 name = target < parser->tokens.count ? check_semantic_name(parser, pp, target) : (String8){ "", 0 };
+                const String8 name = target < parser->tokens.count ?
+                                     check_driver_warning_name(pp, check_driver_corrected_name(parser, input, target, parser->tokens.names[target])) :
+                                     (String8){ "", 0 };
                 const bool variable = walked && named < count && graph->ops[named] == CHECK_OP_VALUE && declaration < input->token_count && name.length != 0;
                 const String8 declared = variable ? check_driver_warning_type(parser, pp, input, types, spell, scratch, check_stream_type(stream, named),
                                                                               check_semantic_operand_spelling(parser, input, stream, types, named)) : (String8){ "", 0 };

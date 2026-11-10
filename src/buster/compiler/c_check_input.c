@@ -854,6 +854,10 @@ struct CheckInput
     // note and a "declared here" one; or BUSTER_CHECK_NONE, or BUSTER_CHECK_TYPO_UNSEARCHED where no search was made.
     uint32_t* implicit_function_corrections;
     uint32_t implicit_function_count;
+    // The uses a typo's correction recovered (#1447, c_check_typo.c), in source order, at most its search limit: a warning
+    // at an operator or a declarator whose operand holds one is published after its error (check_driver_after_corrections).
+    uint32_t* corrected_tokens;
+    uint32_t corrected_count;
     uint8_t implicit_function_diagnostic;
     uint8_t implicit_library_diagnostic;
     bool implicit_function_c99;
