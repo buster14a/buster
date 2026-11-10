@@ -228,12 +228,13 @@ static void check_builtin_library_fold_memory(TypeTable* types, CBuiltinId id, c
 }
 
 // Whether one type of a prototype's encoding, from *position, is `type`: int ('i', and wchar_t's 'w'), size_t's unsigned
-// long ('z'), char ('c') or void ('v'), each const after a 'C' and a pointer to that after a '*'. The table's
+// long ('z'), char ('c'), double ('d'), float ('f') or void ('v'), each const after a 'C' and a pointer to that after a '*'. The table's
 // queries alone read it; it interns nothing, so that a lane's reader asks it as source order's does.
 static bool check_library_plain_type(const TypeTable* types, TypeId type, const char* prototype, uint32_t* position)
 {
     const char code = prototype[*position];
-    const TypeId base = code == 'i' || code == 'w' ? BUSTER_TYPE_INT : code == 'z' ? BUSTER_TYPE_ULONG : code == 'c' ? BUSTER_TYPE_CHAR : BUSTER_TYPE_VOID;
+    const TypeId base = code == 'i' || code == 'w' ? BUSTER_TYPE_INT : code == 'z' ? BUSTER_TYPE_ULONG : code == 'c' ? BUSTER_TYPE_CHAR :
+                        code == 'd' ? BUSTER_TYPE_DOUBLE : code == 'f' ? BUSTER_TYPE_FLOAT : BUSTER_TYPE_VOID;
     *position += 1;
     const bool constant = prototype[*position] == 'C';
     *position += constant;
