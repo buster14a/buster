@@ -39,6 +39,12 @@ static bool check_condition_evaluate(TypeTable* types, const CheckGraph* graph, 
         {
             values[s] = condition->constants[step->index];
         }
+        else if (step->op == BUSTER_CHECK_CONDITION_COMMA)
+        {
+            // The right operand's value, where the left one's is known.
+            values[s] = values[step->operands[0]].constant_kind != CHECK_CONSTANT_NONE ? values[step->operands[1]] :
+                        (CheckValue){ .type = values[step->operands[1]].type, .category = CHECK_RVALUE };
+        }
         else if (step->op == BUSTER_CHECK_CONDITION_PARAMETER)
         {
             valid = step->index < arguments;

@@ -5,7 +5,8 @@
 // arguments, each a constant string without a `$` (check_input_verbose_trap_arguments), a literal's under parentheses
 // and casts, __func__'s, a variable's, a null pointer's and an integer's; and a FILE builtin's call in a unit without a
 // file-scope FILE (check_input_file_type), clang's "use of unknown builtin"; and memcpy_inline's and memset_inline's size
-// that is no integer constant expression, clang's error at the call. The errors are compared, their places and
+// that is no integer constant expression, clang's error at the call; and __builtin_complex's arguments of no real floating
+// type or of two types, clang's errors at the argument (check_semantic_expression). The errors are compared, their places and
 // messages, in order, with the exit status, by both paths of -fsyntax-only (each function's first error alone, as the
 // checker reports them). Warnings aren't compared. Include after c_check_label_attribute_driver_test.c.
 
@@ -25,6 +26,25 @@ static void check_test_driver_generic_builtins(CheckTest* test, const char* clan
         { "verbose_trap of a variable under a cast", "void g(char* p) {\n__builtin_verbose_trap(\"c\", (const char*)p);\n}\n" },
         { "verbose_trap of a null pointer", "void g(void) {\n__builtin_verbose_trap((const char*)0, \"m\");\n}\n" },
         { "verbose_trap of a call", "const char* f(void);\nvoid g(void) {\n__builtin_verbose_trap(\"c\", f());\n}\n" },
+        // Another address constant than a literal's start (#1843): a const array's, its initializer's chars read to the
+        // first NUL, as clang's constant evaluator reads them: a `$` before it, a read past the array's end or an array of
+        // no NUL is clang's error; a literal past its start reads alike, and so do a const record's member array (up to its
+        // own end) and a const pointer's pointee.
+        { "verbose_trap of const arrays", "static const char m[] = \"abc\";\nconst char n[] = \"a\\0$\";\n"
+                                          "static const char o[4] = { 'x', 'y', 0, 0 };\n"
+                                          "void g(void) {\n__builtin_verbose_trap(m, n);\n__builtin_verbose_trap(&m[1], o);\n__builtin_verbose_trap(m + 2, m + 3);\n}\n" },
+        { "verbose_trap of a member array and a const pointer", "struct S { int n; char a[4]; char b[3]; };\nstatic const struct S s = { 1, \"ab\", \"c$\" };\n"
+                                                                "static const char m[] = \"xyz\";\nstatic const char* const p = m + 1;\n"
+                                                                "void g(void) {\n__builtin_verbose_trap(s.a, &s.a[1]);\n__builtin_verbose_trap(p, s.a + 2);\n}\n" },
+        { "verbose_trap of a member array's dollar", "struct S { int n; char a[4]; char b[3]; };\nstatic const struct S s = { 1, \"ab\", \"c$\" };\n"
+                                                     "void g(void) {\n__builtin_verbose_trap(s.a, s.b);\n}\n" },
+        { "verbose_trap of a const pointer's dollar", "static const char m[] = \"x$z\";\nstatic const char* const p = m;\n"
+                                                      "void g(void) {\n__builtin_verbose_trap(\"c\", p);\n}\n" },
+        { "verbose_trap of a literal past its start", "void g(void) {\n__builtin_verbose_trap(\"ab$\" + 3, &\"c$d\"[2]);\n}\n" },
+        { "verbose_trap of a literal's dollar past its start", "void g(void) {\n__builtin_verbose_trap(\"c\", \"ab$c\" + 1);\n}\n" },
+        { "verbose_trap of a const array's dollar", "static const char m[] = \"a$c\";\nvoid g(void) {\n__builtin_verbose_trap(\"c\", m);\n}\n" },
+        { "verbose_trap past a const array's end", "static const char m[] = \"abc\";\nvoid g(void) {\n__builtin_verbose_trap(m + 4, \"m\");\n}\n" },
+        { "verbose_trap of a const array of no NUL", "static const char m[3] = \"abc\";\nvoid g(void) {\n__builtin_verbose_trap(\"c\", m);\n}\n" },
         { "verbose_trap in two functions", "void g(const char* p) {\n__builtin_verbose_trap(p, \"m\");\n}\nvoid h(void) {\n__builtin_verbose_trap(\"$\", \"m\");\n}\n" },
         { "fprintf without FILE", "int g(void* p) {\nreturn 1 + __builtin_fprintf(p, \"x\");\n}\n" },
         { "vfscanf with a FILE of block scope", "void h(void) {\ntypedef int FILE;\n}\nint g(void* p, __builtin_va_list a) {\nreturn __builtin_vfscanf(p, \"x\", a);\n}\n" },
@@ -32,6 +52,24 @@ static void check_test_driver_generic_builtins(CheckTest* test, const char* clan
                                                           "  __builtin_memcpy_inline(d, s, n);\n}\n" },
         { "memset_inline of a size that isn't constant", "void g(void* d, unsigned long n) {\n__builtin_memset_inline(d, 0, sizeof(int));\n"
                                                          "  __builtin_memset_inline(d, 0, n + 1);\n}\n" },
+        { "complex of no real floating type",
+          "typedef int I;\nI x;\nconst int ci;\nint a[3];\nstruct S { double m; } s;\n_Atomic double ad;\n_Complex double cd;\nenum E { A } e;\n"
+          "void g1(double d) { (void)__builtin_complex(x, d); }\nvoid g2(double d) { (void)__builtin_complex(d, ci); }\n"
+          "void g3(double d) { (void)__builtin_complex(a, d); }\nvoid g4(double d) { (void)__builtin_complex(s, d); }\n"
+          "void g5(double d) { (void)__builtin_complex(d, g1); }\nvoid g6(double d) { (void)__builtin_complex(ad, d); }\n"
+          "void g7(double d) { (void)__builtin_complex(d, cd); }\nvoid g8(double d) { (void)__builtin_complex(e, d); }\n"
+          "void g9(double d) { (void)__builtin_complex((void*)0, d); }\nvoid g10(void) { (void)__builtin_complex(1, 2); }\n"
+          "void g11(double d) { (void)__builtin_complex(d, (_Bool)1); }\nvoid g12(double d) { (void)__builtin_complex(d, (__int128)x + 1); }\n"
+          "void g13(I* p) { (void)__builtin_complex(*p, 1.0); }\nvoid g14(double d) { (void)__builtin_complex(d, (I)1); }\n"
+          "void g15(double d) { (void)__builtin_complex(\"s\", d); }\nvoid g16(double d) { (void)__builtin_complex(d, (struct T *)0); }\n"
+          "void g17(double d) { (void)__builtin_complex(sizeof(int), d); }\nvoid g18(double d) { (void)__builtin_complex(d, _Alignof(int)); }\n" },
+        { "complex of different types",
+          "typedef double D;\ntypedef float F;\nD dd;\nF ff;\nconst double cd;\nvolatile float vf;\nconst D cdd;\n"
+          "void g1(void) { (void)__builtin_complex(dd, ff); }\nvoid g2(void) { (void)__builtin_complex(cd, vf); }\n"
+          "void g3(void) { (void)__builtin_complex((D)1, 2.0f); }\nvoid g4(void) { (void)__builtin_complex(1.0L, (_Float16)1); }\n"
+          "void g5(void) { (void)__builtin_complex(1.0q, 1.0); }\nvoid g6(void) { (void)__builtin_complex((__bf16)1, (_Float16)1); }\n"
+          "void g7(void) { (void)__builtin_complex(cdd, ff); }\nvoid g9(float f) { (void)__builtin_complex(f, (D)2); }\n"
+          "void g8(void) { (void)__builtin_complex(cd, dd); (void)__builtin_complex(1.0f, (F)2); (void)__builtin_complex(cdd, dd); }\n" },
     };
     char source[PATH_MAX];
     snprintf(source, sizeof(source), "%s/generic-builtins.c", directory);
@@ -266,6 +304,147 @@ static void check_test_driver_counted_by(CheckTest* test, const char* clang, con
         free(expected);
         unlink(source);
     }
+    free(expected_lines);
+    free(actual_lines);
+}
+
+// Declarations of builtins' names with external linkage (#1843, check_input_builtin_declaration), by the driver against
+// clang, by both paths of -fsyntax-only: the whole output, line for line, with the exit status, a unit each. A definition
+// of a header builtin's or a catalog builtin's name is clang's "definition of builtin function", C99's inline one too; a
+// declaration of another type is clang's "conflicting types" with its note of the builtin's type, and any of a
+// custom-checked builtin clang's "cannot redeclare builtin function"; and a static
+// definition, a compatible declaration (with no prototype, a const parameter or a typedef's type) and a library
+// builtin's definition are the program's. Then a program of __builtin_bswap32 and __builtin_clz declared, at file scope
+// and at block scope, which stay the builtins (an integer constant expression's too), and of a static definition of a
+// builtin's name, which is the program's, run by clang and by both paths, by Tier 0 and by Tier 1.
+static void check_test_driver_builtin_declarations(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const char* const units[] = {
+        "void _mm_pause(void) {}\n",
+        "void _mm_pause(void);\nvoid _mm_pause(void) {}\nint g(void) { _mm_pause(); return 0; }\n",
+        "extern void _mm_sfence(void) {}\n",
+        "inline void _mm_pause(void) {}\n",
+        "unsigned int _mm_getcsr(void) { return 0; }\n",
+        "unsigned __builtin_bswap32(unsigned x) { return x; }\n",
+        "int __builtin_clz(unsigned x) { return 0; }\n",
+        "void __builtin_ia32_pause(void) {}\n",
+        "int __builtin_bswap32(int);\n",
+        "unsigned short __builtin_bswap32(unsigned);\n",
+        "void _mm_lfence(int);\n",
+        "int g(void) { long __builtin_clz(unsigned); return 0; }\n",
+        "static void _mm_pause(void) {}\nstatic unsigned __builtin_bswap32(unsigned x) { return x + 1; }\nint g(void) { _mm_pause(); return (int)__builtin_bswap32(1); }\n",
+        "unsigned __builtin_bswap32();\ntypedef unsigned U;\nU __builtin_bswap32(const U);\nint __builtin_clz(unsigned) __attribute__((const));\n"
+        "void _mm_pause(void);\nint abs(int x) { return x < 0 ? -x : x; }\n",
+        "int g(void) { int __builtin_clz = 3; return __builtin_clz; }\n",
+        // Custom-checked builtins (#1918's review): any declaration is clang's "cannot redeclare builtin function".
+        "int __builtin_add_overflow(int);\n",
+        "_Bool __builtin_add_overflow();\n",
+        "int __builtin_add_overflow(int x) { return x; }\n",
+        "int __builtin_constant_p(int);\n",
+        "void* __builtin_launder(void*);\n",
+        "int __builtin_isnan(double);\n",
+        "int __sync_fetch_and_add(int*, int);\n",
+        "int g(void) { int __builtin_classify_type(); return 0; }\n",
+        "unsigned long __builtin_object_size(const void*, int);\nint __builtin_expect(long, long);\n",
+    };
+    enum { LINES = 8192 };
+    char* expected_lines = malloc(LINES);
+    char* actual_lines = malloc(LINES);
+    char source[PATH_MAX];
+    snprintf(source, sizeof(source), "%s/builtin-declarations.c", directory);
+    for (uint32_t unit = 0; expected_lines != NULL && actual_lines != NULL && unit < BUSTER_ARRAY_LENGTH(units); unit += 1)
+    {
+        const bool made = parse_test_write(source, units[unit], strlen(units[unit]));
+        char* arguments[] = { (char*)clang, "-std=gnu17", "-fsyntax-only", "-fno-caret-diagnostics", source, NULL, NULL };
+        char* expected = NULL;
+        const int oracle = made ? check_test_driver_spawn(arguments, &expected) : -1;
+        const bool lines = expected != NULL && check_test_diagnostic_lines(expected, expected_lines, LINES);
+        char description[4096];
+        snprintf(description, sizeof(description), "builtin declarations %u: clang's lines read", unit);
+        check_test_expect(test, made && lines, description);
+        for (uint32_t scalar = 0; lines && scalar < 2; scalar += 1)
+        {
+            arguments[0] = (char*)executable;
+            arguments[5] = scalar != 0 ? "--scalar" : NULL;
+            char* actual = NULL;
+            const int status = check_test_driver_spawn(arguments, &actual);
+            const bool same = actual != NULL && check_test_diagnostic_lines(actual, actual_lines, LINES) && strcmp(expected_lines, actual_lines) == 0;
+            snprintf(description, sizeof(description), "builtin declarations %u, %s: status %d (clang %d), lines\n%s(clang\n%s)", unit,
+                     scalar != 0 ? "scalar" : "vector", status, oracle, actual_lines, expected_lines);
+            check_test_expect(test, same && (status != 0) == (oracle != 0), description);
+            free(actual);
+        }
+        free(expected);
+        unlink(source);
+    }
+    free(expected_lines);
+    free(actual_lines);
+    static const char program[] =
+        "int printf(const char*, ...);\n"
+        "unsigned __builtin_bswap32(unsigned);\n"
+        "int __builtin_clz(unsigned);\n"
+        "static unsigned long long __builtin_bswap64(unsigned long long x) { return x + 1; }\n"
+        "enum { E = __builtin_clz(1u) + __builtin_bswap32(0x01000000u) };\n"
+        "static unsigned f(unsigned x) { return __builtin_bswap32(x) ^ (unsigned)__builtin_clz(x | 1u); }\n"
+        "static int g(unsigned x) { int __builtin_ctz(unsigned); unsigned __builtin_bswap32(unsigned); return __builtin_ctz(x | 0x80000000u) + (int)(__builtin_bswap32(x) & 0xff); }\n"
+        "int main(void) {\n"
+        "    volatile unsigned v = 0x12345678u;\n"
+        "    printf(\"%u %u %d %llu %d\\n\", f(v), f(v >> 9), g(v), __builtin_bswap64(v), (int)E);\n"
+        "    return 0;\n"
+        "}\n";
+    check_test_library_run(test, clang, executable, directory, "builtins under their declarations", program, "-std=gnu17", NULL);
+    check_test_library_own_option = "--tier1";
+    check_test_library_run(test, clang, executable, directory, "builtins under their declarations by Tier 1", program, "-std=gnu17", NULL);
+    check_test_library_own_option = NULL;
+}
+
+// __builtin_cpu_supports of a feature clang doesn't know (#1843, check_input_cpu_supports_literal), by the driver against
+// clang, by both paths of -fsyntax-only: the whole output, line for line, with the exit status, under no option, -w and
+// -Werror. clang's warning of no option is at the callee's first token (a parenthesized name's outermost `(`), in a body,
+// under parentheses, in sizeof's operand and in
+// a condition; a feature it knows, a concatenated one, gives none, and an empty string and another case's spelling do.
+static void check_test_driver_cpu_supports(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const char unit[] =
+        "int s = sizeof(__builtin_cpu_supports(\"bar\"));\n"
+        "int f(void) {\n"
+        "    return __builtin_cpu_supports(\"foo\") + __builtin_cpu_supports(((\"x86-64-v9\"))) + __builtin_cpu_supports(\"avx2\") +\n"
+        "           __builtin_cpu_supports(\"avx\" \"512f\") + __builtin_cpu_supports(\"\") + __builtin_cpu_supports(\"AVX2\");\n"
+        "}\n"
+        "int g(void) { if (__builtin_cpu_supports(\"avx2,sse\")) return 1; return __builtin_cpu_supports(\"x86-64-v3\"); }\n"
+        "int h(void) { return (__builtin_cpu_supports)(\"unknown\") + ((__builtin_cpu_supports))((\"x\")) + (__builtin_cpu_supports)(\"avx2\"); }\n";
+    static const char* const options[] = { NULL, "-w", "-Werror" };
+    enum { LINES = 8192 };
+    char* expected_lines = malloc(LINES);
+    char* actual_lines = malloc(LINES);
+    char source[PATH_MAX];
+    snprintf(source, sizeof(source), "%s/cpu-supports.c", directory);
+    const bool made = expected_lines != NULL && actual_lines != NULL && parse_test_write(source, unit, strlen(unit));
+    for (uint32_t o = 0; made && o < BUSTER_ARRAY_LENGTH(options); o += 1)
+    {
+        char* arguments[] = { (char*)clang, "-std=gnu17", "-fsyntax-only", "-fno-caret-diagnostics", source, (char*)options[o], NULL, NULL };
+        char* expected = NULL;
+        const int oracle = check_test_driver_spawn(arguments, &expected);
+        const bool lines = expected != NULL && check_test_diagnostic_lines(expected, expected_lines, LINES);
+        char description[4096];
+        snprintf(description, sizeof(description), "cpu_supports %s: clang's lines read", options[o] != NULL ? options[o] : "(no option)");
+        check_test_expect(test, lines && (expected_lines[0] == 0) == (o == 1), description);
+        for (uint32_t scalar = 0; lines && scalar < 2; scalar += 1)
+        {
+            const uint32_t last = options[o] != NULL ? 6 : 5;
+            arguments[0] = (char*)executable;
+            arguments[last] = scalar != 0 ? "--scalar" : NULL;
+            char* actual = NULL;
+            const int status = check_test_driver_spawn(arguments, &actual);
+            const bool same = actual != NULL && check_test_diagnostic_lines(actual, actual_lines, LINES) && strcmp(expected_lines, actual_lines) == 0;
+            snprintf(description, sizeof(description), "cpu_supports %s, %s: status %d (clang %d), lines\n%s(clang\n%s)", options[o] != NULL ? options[o] : "(no option)",
+                     scalar != 0 ? "scalar" : "vector", status, oracle, actual_lines, expected_lines);
+            check_test_expect(test, same && (status != 0) == (oracle != 0), description);
+            free(actual);
+        }
+        free(expected);
+    }
+    unlink(source);
     free(expected_lines);
     free(actual_lines);
 }

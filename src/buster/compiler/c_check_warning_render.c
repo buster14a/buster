@@ -30,12 +30,37 @@ static const char* check_driver_warning_error_prefix(bool promoted)
     return result;
 }
 
+// A grouped diagnose_if's warning group (#1447, CHECK_WARNING_EVENT_DIAGNOSE_IF's payload.data), its index in
+// pp_features_warning, or UINT32_MAX.
+static uint32_t check_driver_warning_group(const CheckWarningEvent* event)
+{
+    const uint32_t group = event->kind == CHECK_WARNING_EVENT_DIAGNOSE_IF ? event->payload.data & ~BUSTER_CHECK_WARNING_GROUP_ERROR : 0;
+    return group != 0 ? group - 1 : UINT32_MAX;
+}
+
 static CheckWarningSeverity check_driver_warning_severity(Preprocessor* pp, const CheckInput* input, const CheckWarningEvent* event)
 {
-    const CheckWarningCommandLine command = check_warning_command_line(&pp->options, event->id,
-        (event->flags & BUSTER_CHECK_WARNING_DEFAULT_IGNORED) != 0, false);
-    CheckWarningSeverity severity = command.quiet || (event->flags & BUSTER_CHECK_WARNING_SUPPRESSED) != 0 ? CHECK_WARNING_IGNORE :
-        check_diagnostic_severity_id_from(input, event->token, event->source, event->id, command.severity);
+    const uint32_t group = check_driver_warning_group(event);
+    bool errors = false;
+    const CheckWarningCommandLine command = group != UINT32_MAX ?
+        check_warning_group_command_line(&pp->options, group, (event->payload.data & BUSTER_CHECK_WARNING_GROUP_ERROR) != 0, &errors) :
+        check_warning_command_line(&pp->options, event->id, (event->flags & BUSTER_CHECK_WARNING_DEFAULT_IGNORED) != 0, false);
+    CheckWarningSeverity severity = CHECK_WARNING_IGNORE;
+    if (group != UINT32_MAX && (event->flags & BUSTER_CHECK_WARNING_SUPPRESSED) == 0)
+    {
+        // clang's custom diagnostic of that group: its pragma, then -w on all but an error by default that is still one,
+        // -Werror on a warning, and -Wfatal-errors.
+        severity = check_diagnostic_group_severity_from(input, event->token, event->source, group, command.severity);
+        const bool default_error = (event->payload.data & BUSTER_CHECK_WARNING_GROUP_ERROR) != 0;
+        severity = command.quiet && (!default_error || severity == CHECK_WARNING_WARNING) ? CHECK_WARNING_IGNORE : severity;
+        severity = severity == CHECK_WARNING_WARNING && errors ? CHECK_WARNING_ERROR : severity;
+        severity = severity == CHECK_WARNING_ERROR && input->fatal_errors ? CHECK_WARNING_FATAL : severity;
+    }
+    else if (group == UINT32_MAX)
+    {
+        severity = command.quiet || (event->flags & BUSTER_CHECK_WARNING_SUPPRESSED) != 0 ? CHECK_WARNING_IGNORE :
+            check_diagnostic_severity_id_from(input, event->token, event->source, event->id, command.severity);
+    }
     if (severity != CHECK_WARNING_IGNORE && !command.system_headers)
     {
         bool system = check_graph_system_token(&input->graph, event->token);
@@ -54,6 +79,19 @@ static String8 check_driver_warning_name(const Preprocessor* pp, uint32_t name)
     const String8 result = name < pp->table->count ? (String8){ .pointer = (char*)intern_bytes(pp->table, name), .length = intern_length(pp->table, name) } :
                                                                   (String8){ 0 };
     return result;
+}
+
+// The name a use at `token` took, where its spelling `name` is a typo's that the reader corrected (#1447,
+// CHECK_INPUT_UNDECLARED_CORRECTED): its declaration's, as clang's diagnostics after the correction spell it. Only a
+// unit with an error report has a correction, so a valid unit's warnings read nothing more.
+static uint32_t check_driver_corrected_name(const Parser* parser, const CheckInput* input, uint32_t token, uint32_t name)
+{
+    const uint32_t count = parser->tokens.count;
+    const bool use = input->report_count != 0 && token < count && token < input->token_count && parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER &&
+                     parser->tokens.names[token] == name;
+    const uint32_t declaration = use ? input->declarations[token] : BUSTER_CHECK_NONE;
+    const bool corrected = declaration < count && parser->tokens.kinds[declaration] == PARSE_KIND_IDENTIFIER && parser->tokens.names[declaration] != name;
+    return corrected ? parser->tokens.names[declaration] : name;
 }
 
 // A string token's complete spelling in scratch, including its quotes and encoding prefix.
@@ -140,6 +178,13 @@ struct CheckWarningSpelling
 // and typedef-kind declarations per publication pass; the rows sit under the pass's event marks in the
 // caller's scratch, so they survive until the pass ends. Returns false on an allocation failure, which the
 // caller reports like the renderer's other allocations rather than dropping the spelling.
+// Whether the typedef type `type` carries qualifiers, through an aligned typedef's too: such a typedef of an anonymous tag
+// isn't its name (#1447, clang's typedef name for linkage).
+static bool check_driver_typedef_qualified(const TypeTable* types, TypeId type)
+{
+    return type_unqualified(type) != type || type_unqualified(type_strip_aligned(types, type)) != type_strip_aligned(types, type);
+}
+
 static bool check_driver_spelling_build(const Parser* parser, Preprocessor* pp, const CheckInput* input, const TypeTable* types,
                                         CheckWarningSpelling* spell, Arena* scratch)
 {
@@ -189,8 +234,10 @@ static bool check_driver_spelling_build(const Parser* parser, Preprocessor* pp, 
                         {
                             if (binding == C_BINDING_TYPEDEF)
                             {
-                                // The typedef is the anonymous record's canonical name; its first one wins.
-                                if ((named[tag / 64] & ((uint64_t)1 << (tag & 63))) == 0)
+                                // The typedef is the anonymous record's canonical name; its first one wins. A qualified
+                                // one names none (clang's typedef name for linkage is the tag's own type's, #1447).
+                                if ((named[tag / 64] & ((uint64_t)1 << (tag & 63))) == 0 &&
+                                    !check_driver_typedef_qualified(types, input->declared_types[i]))
                                 {
                                     named[tag / 64] |= (uint64_t)1 << (tag & 63);
                                     const uint32_t name = parser->tokens.names[i];
@@ -403,10 +450,47 @@ static bool check_driver_warning_parentheses(const Parser* parser, const TypeTab
     return valid;
 }
 
+// Whether `alias`, unqualified, is one of `type`'s levels, as type_print reaches them: the type itself, then through
+// pointers, arrays and functions' results to the specifier.
+static bool check_driver_spelling_level(const TypeTable* types, TypeId type, TypeId alias)
+{
+    const TypeId wanted = type_unqualified(type_strip_aligned(types, alias));
+    TypeId level = type;
+    bool found = false;
+    for (uint32_t depth = 0; !found && depth < 256 && level != 0 && type_is_valid(types, level); depth += 1)
+    {
+        const TypeId bare = type_unqualified(type_strip_aligned(types, level));
+        const uint8_t kind = type_kind(types, bare);
+        found = bare == wanted;
+        level = kind == BUSTER_TYPE_KIND_POINTER || kind == BUSTER_TYPE_KIND_FUNCTION || type_kind_is_array(kind) ? types->types.base[type_index(bare)] : 0;
+    }
+    return found;
+}
+
+// The typedef of `spelling`'s chain that names one of `type`'s levels (#1447), as clang's sugar keeps it through
+// dereferences and subscripts: a declaration's levels sit over its specifier's typedef, whose own levels sit over its
+// specifier's, and so on, so the first typedef along that chain whose type is a level of `type` is the one clang's type
+// names there (`*p` of a `pv p`, `typedef v4si *pv`, is `v4si`; `**b` of a `VPP b`, `typedef VP *VPP`, is `VP`). A
+// chain's types only shrink, so no later one can be a level above it. `spelling` where none is.
+static uint32_t check_driver_spelling_chain(const Parser* parser, const CheckInput* input, const TypeTable* types, TypeId type, uint32_t spelling)
+{
+    uint32_t result = spelling;
+    uint32_t at = spelling;
+    bool found = false;
+    for (uint32_t steps = 0; !found && at != 0 && at < input->token_count && steps < 64; steps += 1)
+    {
+        found = check_driver_spelling_level(types, type, input->declared_types[at]);
+        result = found ? at : result;
+        at = found ? at : check_input_typedef_spelling(input, parser, at);
+    }
+    return result;
+}
+
 // A warning's type spelling (#992): `spelling` is the operand's typedef specifier's declaration, so the base's
 // specifier prints the typedef's name and clang's `(aka '...')` shows the type without that sugar; the sentinel
 // BUSTER_CHECK_NONE prints `__size_t` for a sizeof/alignof operand's own type. The anonymous map prints an
-// unnamed tag's typedef name or its `(unnamed at file:line:col)`.
+// unnamed tag's typedef name or its `(unnamed at file:line:col)`. Where the typedef's own type isn't one of the
+// type's levels, a typedef its own declaration spells may be (check_driver_spelling_chain).
 static String8 check_driver_warning_type_at(const Parser* parser, Preprocessor* pp, const CheckInput* input, const TypeTable* types,
                                             CheckWarningSpelling* spell, Arena* scratch, TypeId type, uint32_t spelling,
                                             uint32_t declaration, TypeId declared)
@@ -444,6 +528,7 @@ static String8 check_driver_warning_type_at(const Parser* parser, Preprocessor* 
             }
             else if (spelling != 0 && input != NULL && input->declared_types != NULL && spelling < input->token_count)
             {
+                spelling = check_driver_spelling_chain(parser, input, types, type, spelling);
                 const TypeId declared = input->declared_types[spelling];
                 const uint32_t name = spelling < parser->tokens.count ? parser->tokens.names[spelling] : spell->count;
                 if (type_is_valid(types, declared) && name < spell->count)
@@ -463,16 +548,17 @@ static String8 check_driver_warning_type_at(const Parser* parser, Preprocessor* 
             const String8 sugared = contextual ? type_print(types, scratch, type, (String8){ 0 }, &names, options) : (String8){ 0 };
             String8 canonical = { 0 };
             // clang's desugaring stops at a vector type's own typedef, the one whose underlying type is the vector
-            // (desugarForDiagnostic: "People want their vec4"): a typedef of that typedef's a.k.a. is that one's name,
-            // and that one has none. The chain of typedef specifiers from the alias's declaration leads to it.
-            const uint8_t alias_kind = alias_type != 0 ? type_kind(types, type_strip_aligned(types, alias_type)) : 0;
-            uint32_t vector_name = alias_kind == BUSTER_TYPE_KIND_VECTOR || alias_kind == BUSTER_TYPE_KIND_EXT_VECTOR ? spelling : 0;
-            for (uint32_t steps = 0; vector_name != 0 && steps < 64; steps += 1)
+            // (desugarForDiagnostic: "People want their vec4"), at any level (#1447): a typedef of that typedef's
+            // a.k.a. is that one's name, a pointer typedef's (`typedef v4si *pv`) keeps it at the pointee
+            // (`'pv' (aka 'v4si *')`), and that one has none. It is the last vector typedef along the chain of
+            // typedef specifiers from the alias's declaration.
+            uint32_t vector_name = 0;
+            uint32_t chain = alias_type != 0 && spelling != BUSTER_CHECK_NONE ? spelling : 0;
+            for (uint32_t steps = 0; chain != 0 && chain < input->token_count && steps < 64; steps += 1)
             {
-                const uint32_t inner = check_input_typedef_spelling(input, parser, vector_name);
-                const bool same = inner != 0 && inner < input->token_count && input->declared_types[inner] == alias_type;
-                vector_name = same ? inner : vector_name;
-                steps = same ? steps : 64;
+                const uint8_t kind = type_kind(types, type_strip_aligned(types, input->declared_types[chain]));
+                vector_name = kind == BUSTER_TYPE_KIND_VECTOR || kind == BUSTER_TYPE_KIND_EXT_VECTOR ? chain : vector_name;
+                chain = check_input_typedef_spelling(input, parser, chain);
             }
             TypeId vector_type = vector_name != 0 ? input->declared_types[vector_name] : 0;
             const uint32_t vector_identifier = vector_name != 0 ? parser->tokens.names[vector_name] : 0;
@@ -481,8 +567,18 @@ static String8 check_driver_warning_type_at(const Parser* parser, Preprocessor* 
             if (names.alias_count != 0 && vector_name != spelling)
             {
                 // clang's `(aka '...')`: the same type with the typedef sugar expanded — an anonymous record's
-                // typedef stays, since it is that record's own name; a vector's own typedef stays too.
+                // typedef stays, since it is that record's own name; a vector's own typedef stays too. Where the
+                // alias's declaration spells the record's definition rather than a typedef, its type as written is the
+                // tag's, which prints its keyword (`'SP' (aka 'struct S *')`, #1447).
                 TypeNames expand = names;
+                // (The typedef that names the record is its own spelling: no a.k.a.)
+                const TypeId alias_tag = alias_type != 0 ? type_unqualified(type_strip_aligned(types, alias_type)) : 0;
+                const uint8_t alias_tag_kind = alias_tag != 0 ? type_kind(types, alias_tag) : BUSTER_TYPE_KIND_VOID;
+                const uint32_t tag = alias_tag_kind == BUSTER_TYPE_KIND_STRUCT || alias_tag_kind == BUSTER_TYPE_KIND_UNION || alias_tag_kind == BUSTER_TYPE_KIND_ENUM ?
+                                     types->types.index[type_index(alias_tag)] : names.anonymous_count;
+                const bool naming = tag < names.anonymous_count && names.anonymous[tag].length == alias_name.length &&
+                                    memcmp(names.anonymous[tag].pointer, alias_name.pointer, alias_name.length) == 0;
+                expand.anonymous_keyword = spelling != BUSTER_CHECK_NONE && !naming && check_input_typedef_spelling(input, parser, spelling) == 0;
                 expand.alias_count = vector_name != 0 ? 1 : 0;
                 expand.alias_types = &vector_type;
                 expand.alias_names = &vector_alias;
@@ -634,16 +730,39 @@ static bool check_warning_attribute_suggestion(String8 written, bool standard, S
     return corrected;
 }
 
+// The macro name clang gives an objc_gc's or objc_ownership's warning that its type doesn't take it (#1447, Sema's
+// diagnoseBadTypeAttribute): "__strong" for a strong one, "__weak" for a weak one, where the outermost macro that wrote it
+// is named so (pp_output_macro_place), and its place there into *location and *origin; else NULL, and the token's own.
+static const char* check_warning_objc_macro(const Parser* parser, Preprocessor* pp, const CheckWarningEvent* event, uint32_t* location, uint32_t* origin)
+{
+    const uint32_t count = parser->tokens.count;
+    const uint32_t argument = event->token + 2;
+    const bool argued = (event->kind == CHECK_WARNING_EVENT_OBJC_POINTER_TYPE || event->kind == CHECK_WARNING_EVENT_OBJC_OBJECT_TYPE) && argument < count &&
+                        parser->tokens.kinds[event->token + 1] == PARSE_KIND_L_PAREN && parser->tokens.kinds[argument] == PARSE_KIND_IDENTIFIER;
+    const uint32_t word = argued ? parser->tokens.names[argument] : 0;
+    const bool strong = word != 0 && intern_length(pp->table, word) == 6 && memcmp(intern_bytes(pp->table, word), "strong", 6) == 0;
+    const bool weak = word != 0 && intern_length(pp->table, word) == 4 && memcmp(intern_bytes(pp->table, word), "weak", 4) == 0;
+    const char* macro = strong ? "__strong" : weak ? "__weak" : NULL;
+    const uint32_t source = event->source != BUSTER_CHECK_WARNING_NO_SOURCE ? event->source : parser->tokens.sources[event->token];
+    const bool lifted = pp_output_macro_place(pp, source, event->kind == CHECK_WARNING_EVENT_OBJC_WEAK_TYPE ? NULL : macro != NULL ? macro : "", location, origin);
+    return lifted && event->kind != CHECK_WARNING_EVENT_OBJC_WEAK_TYPE ? macro : NULL;
+}
+
+// c_check_semantic_diagnostic.c's: a record's name as clang's -Wodr and incompatible-definition errors spell it.
+static String8 check_semantic_tag_spelling(const Parser* parser, Preprocessor* pp, uint32_t token, Arena* scratch);
+
 static const char* check_driver_warning_message(const Parser* parser, Preprocessor* pp, const CheckInput* input, const TypeTable* types,
                                                 CheckWarningSpelling* spell, const CheckWarningEvent* event, Arena* scratch)
 {
     const CheckWarningPayload* payload = &event->payload;
-    const String8 name = check_driver_warning_name(pp, payload->name);
+    const String8 name = check_driver_warning_name(pp, check_driver_corrected_name(parser, input, event->token, payload->name));
     const char* result = event->id < BUSTER_ARRAY_LENGTH(check_warning_descriptions) ? check_warning_descriptions[event->id].message : NULL;
     switch (event->kind)
     {
         case CHECK_WARNING_EVENT_DUPLICATE_DECLSPEC:
-            result = check_warning_text(scratch, "duplicate '%.*s' declaration specifier", (int)name.length, name.pointer);
+            // _Complex is "complex" in clang's words (DeclSpec::getSpecifierName), as its other errors name it.
+            result = payload->name == C_NAME_COMPLEX_C99 ? "duplicate 'complex' declaration specifier" :
+                     check_warning_text(scratch, "duplicate '%.*s' declaration specifier", (int)name.length, name.pointer);
             break;
         case CHECK_WARNING_EVENT_NORETURN_RETURN:
             result = check_warning_text(scratch, "function '%.*s' declared 'noreturn' should not return", (int)name.length, name.pointer);
@@ -655,6 +774,8 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
         {
             const CheckInputSymbolPragma* record = check_input_symbol_warning(input, event);
             const CheckInputMsPragma* layout = check_input_ms_warning(input, event);
+            const CheckInputPackPragma* packing = check_input_pack_warning(input, event);
+            result = packing != NULL ? check_input_pack_align_message(packing) : result;
             if (layout != NULL)
             {
                 result = layout->warning == 1 ? "incorrect use of '#pragma ms_struct on|off' - ignored" :
@@ -733,6 +854,22 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
                 (int)name.length, name.pointer, (int)type.length, type.pointer) : NULL;
             break;
         }
+        case CHECK_WARNING_EVENT_PROTOTYPE_TAG:
+        {
+            const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, payload->first_type, 0);
+            result = type.length != 0 ? check_warning_text(scratch, "declaration of %.*s will not be visible outside of this function", (int)type.length, type.pointer) : NULL;
+            break;
+        }
+        case CHECK_WARNING_EVENT_PROTOTYPE_REDEFINITION:
+            result = check_warning_text(scratch, "redefinition of '%.*s' will not be visible outside of this function", (int)name.length, name.pointer);
+            break;
+        case CHECK_WARNING_EVENT_ODR_ATTRIBUTE:
+        {
+            const String8 spelled = check_semantic_tag_spelling(parser, pp, event->token, scratch);
+            result = spelled.length != 0 ? check_warning_text(scratch, "type '%.*s' has %s which currently causes the types to be treated as though they are incompatible",
+                                                              (int)spelled.length, spelled.pointer, payload->data != 0 ? "a member with an attribute" : "an attribute") : NULL;
+            break;
+        }
         case CHECK_WARNING_EVENT_LIBRARY_REDECLARATION:
             result = check_warning_text(scratch, "incompatible redeclaration of library function '%.*s'", (int)name.length, name.pointer);
             break;
@@ -789,7 +926,11 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
         {
             const String8 type = check_driver_warning_type_at(parser, pp, input, types, spell, scratch, payload->first_type, payload->data,
                                                               payload->token, payload->second_type);
-            const String8 named = event->kind == CHECK_WARNING_EVENT_OBJC_WEAK_TYPE ? (String8){ "__weak", 6 } : name;
+            uint32_t location = 0;
+            uint32_t origin = 0;
+            const char* macro = check_warning_objc_macro(parser, pp, event, &location, &origin);
+            const String8 named = event->kind == CHECK_WARNING_EVENT_OBJC_WEAK_TYPE ? (String8){ "__weak", 6 } :
+                                  macro != NULL ? (String8){ (char*)macro, strlen(macro) } : name;
             result = type.length != 0 ? check_warning_text(scratch, "'%.*s' only applies to %s types; type here is %.*s", (int)named.length, named.pointer,
                                                            event->kind == CHECK_WARNING_EVENT_OBJC_POINTER_TYPE ? "pointer" : "Objective-C object or block pointer",
                                                            (int)type.length, type.pointer) : NULL;
@@ -1315,6 +1456,9 @@ static const char* check_driver_warning_note(const Parser* parser, Preprocessor*
         case CHECK_WARNING_NOTE_DECLARED_HERE:
             result = check_warning_text(scratch, "'%.*s' declared here", (int)name.length, name.pointer);
             break;
+        case CHECK_WARNING_NOTE_ATTRIBUTE_HERE:
+            result = check_warning_text(scratch, "attribute '%.*s' here", (int)name.length, name.pointer);
+            break;
         case CHECK_WARNING_NOTE_DIAGNOSE_IF:
             result = check_warning_text(scratch, "from 'diagnose_if' attribute on '%.*s':", (int)name.length, name.pointer);
             break;
@@ -1393,7 +1537,8 @@ static bool check_driver_warning_events_at(const Parser* parser, Preprocessor* p
         const bool late = event->kind == CHECK_WARNING_EVENT_UNUSED_PARAMETER && event->completion_kind != CHECK_WARNING_COMPLETE_TU_END;
         const bool retained = late == (step >= view->count) && event->kind != CHECK_WARNING_EVENT_MESSAGE && event->kind != CHECK_WARNING_EVENT_ENUM_MIX &&
                               (event->token < parser->tokens.count || (event->kind == CHECK_WARNING_EVENT_PRAGMA && event->token == parser->tokens.count)) &&
-                              (repair == NULL || check_repair_warning_token(repair, event->token));
+                              (repair == NULL || check_repair_warning_token(repair, event->token)) &&
+                              (input->interrupt_range_count == 0 || check_driver_interrupt_kept(input, event->token));
         if (retained)
         {
             valid = event->id < BUSTER_ARRAY_LENGTH(check_warning_descriptions) && event->note_first <= view->note_count &&
@@ -1421,8 +1566,11 @@ static bool check_driver_warning_events_at(const Parser* parser, Preprocessor* p
                         notes[n] = (PPOutputDiagnosticNote){ .token = note->source != BUSTER_CHECK_WARNING_NO_SOURCE ? note->source : parser->tokens.sources[note->token], .message = text };
                     }
                 }
-                const char* option = check_warning_descriptions[event->id].option;
-                const char* prefix = check_driver_warning_error_prefix(severity == CHECK_WARNING_ERROR);
+                // A grouped diagnose_if's option is its group's; one that is an error by default has no -Werror (#1447).
+                const uint32_t group = check_driver_warning_group(event);
+                const char* option = group != UINT32_MAX ? pp_features_warning[group].name : check_warning_descriptions[event->id].option;
+                const bool default_error = group != UINT32_MAX && (event->payload.data & BUSTER_CHECK_WARNING_GROUP_ERROR) != 0;
+                const char* prefix = check_driver_warning_error_prefix(severity == CHECK_WARNING_ERROR && !default_error);
                 const char* suffix = option != NULL ? check_warning_text(scratch, " [%s%s]", prefix, option) : prefix[0] != 0 ? " [-Werror]" : "";
                 valid = valid && suffix != NULL;
                 if (valid)
@@ -1441,8 +1589,12 @@ static bool check_driver_warning_events_at(const Parser* parser, Preprocessor* p
                     {
                         const CheckInputSymbolPragma* record = check_input_symbol_warning(input, event);
                         const CheckInputMsPragma* layout = check_input_ms_warning(input, event);
-                        const bool semantic = record != NULL && record->warning >= CHECK_SYMBOL_WARNING_UNDECLARED;
-                        const uint32_t location = record != NULL ? record->diagnostic_location : layout != NULL ? layout->diagnostic_location : 0;
+                        const CheckInputPackPragma* packing = check_input_pack_warning(input, event);
+                        // An align=reset's empty stack is Sema's, where the parser handles the directive (#1849).
+                        const bool semantic = (record != NULL && record->warning >= CHECK_SYMBOL_WARNING_UNDECLARED) ||
+                                              (packing != NULL && packing->align_warning == CHECK_PACK_ALIGN_RESET_EMPTY);
+                        const uint32_t location = record != NULL ? record->diagnostic_location : layout != NULL ? layout->diagnostic_location :
+                                                  packing != NULL ? packing->diagnostic_location : 0;
                         if (location != 0)
                         {
                             const uint32_t saved_position = pp->diagnostic_position;
@@ -1466,9 +1618,18 @@ static bool check_driver_warning_events_at(const Parser* parser, Preprocessor* p
                         // An implicit attribute's warning, which clang gives no location (#147: interrupt's used).
                         pp_diagnose_unlocated_notes(pp, disposition, boundary, notes, event->note_count, "%s%s", message, suffix);
                     }
+                    else if (event->kind == CHECK_WARNING_EVENT_OBJC_POINTER_TYPE || event->kind == CHECK_WARNING_EVENT_OBJC_OBJECT_TYPE ||
+                             event->kind == CHECK_WARNING_EVENT_OBJC_WEAK_TYPE)
+                    {
+                        // At the macro's expansion clang gives them (check_warning_objc_macro), before the declaration's
+                        // attributes' checks at the same boundary.
+                        uint32_t location = 0;
+                        uint32_t origin = 0;
+                        (void)check_warning_objc_macro(parser, pp, event, &location, &origin);
+                        pp_diagnose_placed_notes_phase(pp, disposition, location, origin, boundary, PP_DIAGNOSTIC_TYPE, notes, event->note_count, "%s%s", message, suffix);
+                    }
                     else if (event->kind == CHECK_WARNING_EVENT_FUNCTION_TYPE_ATTRIBUTE || event->kind == CHECK_WARNING_EVENT_CONVENTION_UNSUPPORTED ||
-                             event->kind == CHECK_WARNING_EVENT_OBJC_POINTER_TYPE || event->kind == CHECK_WARNING_EVENT_OBJC_OBJECT_TYPE ||
-                             event->kind == CHECK_WARNING_EVENT_OBJC_WEAK_TYPE || event->kind == CHECK_WARNING_EVENT_OBJC_UNSUPPORTED)
+                             event->kind == CHECK_WARNING_EVENT_OBJC_UNSUPPORTED)
                     {
                         // A declarator's type's warnings precede its declaration's attributes' checks at the same boundary.
                         pp_diagnose_output_notes_phase(pp, disposition, source, boundary, PP_DIAGNOSTIC_TYPE, notes, event->note_count, "%s%s", message, suffix);

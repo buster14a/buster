@@ -7,7 +7,7 @@
 //
 // lowering_symbols_read reads the object with the import path's reader (import_object) into a Link of its own. A
 // symbol counts when it is defined in a section the reader keeps and is a function, an object, a thread-local or an
-// IFUNC, with its binding, but not when its name starts with ".L". Those are assembler-local labels, which an object
+// IFUNC, or is a common one (SHN_COMMON, which the reader gives an atom of its own, #1849), with its binding, but not when its name starts with ".L". Those are assembler-local labels, which an object
 // keeps only where a relocation into a mergeable section needs one: clang's string literals (.L.str) and ours
 // (.Lbuster_string_N).
 //
@@ -41,7 +41,7 @@ struct LoweringSymbol
     const uint8_t* name;
     uint32_t length;
     uint32_t spelled;
-    // BUSTER_LINK_SYMBOL_FUNCTION, _OBJECT, _TLS or _IFUNC, and _LOCAL, _GLOBAL or _WEAK.
+    // BUSTER_LINK_SYMBOL_FUNCTION, _OBJECT, _TLS, _IFUNC or _COMMON, and _LOCAL, _GLOBAL or _WEAK.
     uint8_t type;
     uint8_t binding;
     bool uniqued;
@@ -141,7 +141,7 @@ static bool lowering_symbols_read(LoweringSymbols* result, String8 bytes, const 
         const uint8_t* spelling = name != 0 ? link.names.bytes[name] : 0;
         const uint32_t length = name != 0 ? link.names.length[name] : 0;
         const bool entity = type == BUSTER_LINK_SYMBOL_FUNCTION || type == BUSTER_LINK_SYMBOL_OBJECT || type == BUSTER_LINK_SYMBOL_TLS ||
-                            type == BUSTER_LINK_SYMBOL_IFUNC;
+                            type == BUSTER_LINK_SYMBOL_IFUNC || type == BUSTER_LINK_SYMBOL_COMMON;
         const bool label = length >= 2 && spelling[0] == '.' && spelling[1] == 'L';
         if (link.symbols.atom[symbol] != 0 && entity && length != 0 && !label)
         {
@@ -226,7 +226,8 @@ struct LoweringDifference
 
 static const char* lowering_symbols_type_name(uint8_t type)
 {
-    return type == BUSTER_LINK_SYMBOL_FUNCTION ? "FUNC" : type == BUSTER_LINK_SYMBOL_OBJECT ? "OBJECT" : type == BUSTER_LINK_SYMBOL_TLS ? "TLS" : "IFUNC";
+    return type == BUSTER_LINK_SYMBOL_FUNCTION ? "FUNC" : type == BUSTER_LINK_SYMBOL_OBJECT ? "OBJECT" : type == BUSTER_LINK_SYMBOL_TLS ? "TLS" :
+           type == BUSTER_LINK_SYMBOL_COMMON ? "COMMON" : "IFUNC";
 }
 
 static const char* lowering_symbols_binding_name(uint8_t binding)
@@ -330,6 +331,7 @@ static uint32_t lowering_symbols_compare_strings(const LoweringSymbols* a, const
 // static without a label of its own gets the base "function.name": its function's label, from any of its
 // declarations, or its identifier, then its own, as check_program_emit names it (CheckProgramNames). A unit with a
 // compound literal gets ".compoundliteral".
+#if !defined(BUSTER_UNIT) || BUSTER_SOURCE_CONSUMER
 static bool lowering_names_of_input(LoweringNames* result, const CheckInput* input, const Parser* parser, const InternTable* identifiers, Arena* arena)
 {
     *result = (LoweringNames){ 0 };
@@ -416,5 +418,6 @@ static bool lowering_names_of_input(LoweringNames* result, const CheckInput* inp
     }
     return valid;
 }
+#endif
 
 #endif

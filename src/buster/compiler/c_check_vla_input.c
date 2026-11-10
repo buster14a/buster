@@ -34,7 +34,9 @@ static bool check_input_vla_runtime_size(const TypeTable* types, TypeId type)
 static bool check_input_vla_force_constant(const CheckInputReader* reader, uint32_t open, bool parameter)
 {
     const Parser* parser = reader->parser;
-    bool force = !parameter && reader->function_body == BUSTER_CHECK_NONE;
+    // At file scope, and for a block's static or extern object, whose array clang can't make variable.
+    bool force = !parameter && (reader->function_body == BUSTER_CHECK_NONE || reader->declarator_storage == C_NAME_STATIC ||
+                                reader->declarator_storage == C_NAME_EXTERN);
     for (uint32_t token = open, steps = 0; !parameter && token < parser->tokens.count && steps < parser->tokens.count; steps += 1)
     {
         const uint8_t role = parser->tree.roles[token];
@@ -88,6 +90,130 @@ static bool check_input_vla_defines(const CheckInputReader* reader, uint32_t fir
     return outside && !inside;
 }
 
+// Whether the array declarator that `open` opens derives the declared entity itself: only array declarators and
+// parentheses around what came before lead to it from the name (`int g[2][n]`, `int (g)[n]`, `int (g[2])[n]`,
+// `int *(p)[n]`), clang's "variable length array declaration", not a pointer's (`int (*p)[n]`), its "variably modified
+// type declaration". A parenthesis is transparent when its `(` is just before the part read so far and its `)` just after.
+static bool check_input_vla_outermost(const Parser* parser, uint32_t name, uint32_t open)
+{
+    uint32_t left = name;
+    uint32_t token = name + 1;
+    bool step = true;
+    for (uint32_t steps = 0; step && token < open && steps < parser->tokens.count; steps += 1)
+    {
+        const uint8_t kind = parser->tokens.kinds[token];
+        const bool group = kind == PARSE_KIND_R_PAREN && left > 0 && parser->tokens.kinds[left - 1] == PARSE_KIND_L_PAREN &&
+                           parser->tree.parents[left - 1] == token;
+        step = kind == PARSE_KIND_L_SQUARE || group;
+        left -= group ? 1 : 0;
+        token = kind == PARSE_KIND_L_SQUARE ? parser->tree.parents[token] + 1 : token + (group ? 1 : 0);
+    }
+    return name < open && token == open;
+}
+
+// The first token of the file-scope initializer's element that holds `token`, where clang's "initializer element is not
+// a compile-time constant" is, or BUSTER_CHECK_NONE where `token` is in none (a declarator's bound). The element is the
+// declaration's whole initializer (`= 1 + sizeof(int[n])`, `= (1, sizeof(int[n]))`), or in a list the item past its
+// `{`, `,` or designator's `=` whose groups hold `token`.
+static uint32_t check_input_vla_initializer_element(const CheckInputReader* reader, uint32_t token)
+{
+    const Parser* parser = reader->parser;
+    uint32_t assignment = BUSTER_CHECK_NONE;
+    uint32_t depth = 0;
+    for (uint32_t t = token; t-- > 0;)
+    {
+        const uint8_t kind = parser->tokens.kinds[t];
+        if (kind == PARSE_KIND_R_PAREN || kind == PARSE_KIND_R_SQUARE || kind == PARSE_KIND_R_BRACE)
+        {
+            depth += 1;
+        }
+        else if (kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE || kind == PARSE_KIND_L_BRACE)
+        {
+            depth -= depth != 0;
+        }
+        else if (depth == 0 && kind == PARSE_KIND_SEMI)
+        {
+            break;
+        }
+        else if (depth == 0 && kind == PARSE_KIND_EQUAL && reader->initializers[t] != 0)
+        {
+            assignment = t;
+            break;
+        }
+    }
+    uint32_t element = assignment != BUSTER_CHECK_NONE ? assignment + 1 : BUSTER_CHECK_NONE;
+    bool nested = false;
+    for (uint32_t t = element; element != BUSTER_CHECK_NONE && t < token; t += 1)
+    {
+        const uint8_t kind = parser->tokens.kinds[t];
+        const bool open = kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE || kind == PARSE_KIND_L_BRACE;
+        const uint32_t close = open ? parser->tree.parents[t] : t;
+        if (open && close > token)
+        {
+            // A group that holds `token`: a list's brace starts its items, a parenthesis keeps the element.
+            nested = kind != PARSE_KIND_L_BRACE;
+            element = kind == PARSE_KIND_L_BRACE ? t + 1 : element;
+        }
+        else if (open && close > t && close < token)
+        {
+            t = close;
+        }
+        else if (!nested && (kind == PARSE_KIND_COMMA || kind == PARSE_KIND_EQUAL))
+        {
+            element = t + 1;
+        }
+    }
+    return element;
+}
+
+// clang's error for a variable-length array that a bound makes where none can be (`open` its declarator's `[`, `name`
+// the declarator's name or BUSTER_CHECK_NONE in a type name), when the reader has no report yet: a member's, at its
+// name; a declarator's at file scope, at its name; a sizeof's type name in a file-scope initializer, at the
+// initializer's element. Elsewhere (a cast's or typeof's type name) the caller's report stays.
+static void check_input_vla_place(CheckInputReader* reader, uint32_t open, uint32_t name)
+{
+    const Parser* parser = reader->parser;
+    uint8_t context = PARSE_ROLE_CLOSE_BODY;
+    uint32_t context_token = BUSTER_CHECK_NONE;
+    for (uint32_t token = open, steps = 0; token < parser->tokens.count && steps < parser->tokens.count; steps += 1)
+    {
+        const uint8_t role = parser->tree.roles[token];
+        if (role == PARSE_ROLE_CLOSE_STRUCT || role == PARSE_ROLE_CLOSE_SIZEOF || role == PARSE_ROLE_CLOSE_CAST || role == PARSE_ROLE_CLOSE_SPECIFIER ||
+            role == PARSE_ROLE_CLOSE_KEYWORD || role == PARSE_ROLE_CLOSE_BODY || role == PARSE_ROLE_CLOSE_BLOCK)
+        {
+            context = role;
+            context_token = token;
+            break;
+        }
+        token = parser->tree.parents[token];
+    }
+    const bool named = name < parser->tokens.count;
+    uint32_t at = BUSTER_CHECK_NONE;
+    CheckInputMessage message = CHECK_INPUT_DECLARATION;
+    if (context == PARSE_ROLE_CLOSE_STRUCT && named)
+    {
+        at = name;
+        message = CHECK_INPUT_VLA_FIELD;
+    }
+    else if (context == PARSE_ROLE_CLOSE_SIZEOF && !named && context_token < parser->tokens.count &&
+             parser->tokens.names[parser->tree.parents[context_token]] == C_NAME_SIZEOF)
+    {
+        // Not _Alignof's, whose variable type name clang takes at file scope.
+        at = check_input_vla_initializer_element(reader, parser->tree.parents[context_token]);
+        message = CHECK_INPUT_CONSTANT_INITIALIZER;
+    }
+    else if (context != PARSE_ROLE_CLOSE_SIZEOF && context != PARSE_ROLE_CLOSE_CAST && context != PARSE_ROLE_CLOSE_SPECIFIER &&
+             context != PARSE_ROLE_CLOSE_KEYWORD && named && reader->function_body == BUSTER_CHECK_NONE)
+    {
+        at = name;
+        message = check_input_vla_outermost(parser, name, open) ? CHECK_INPUT_VLA_FILE_SCOPE : CHECK_INPUT_VM_FILE_SCOPE;
+    }
+    if (at < parser->tokens.count && reader->output->report_count == 0 && !reader->output->resource)
+    {
+        check_input_report(reader, at, message);
+    }
+}
+
 // The bound from `first` to `end` (its `]`) of the array declarator that `open` opens. One that defines a struct, union
 // or enum (`[sizeof(struct V { int x; })]`) is evaluated by a job of the constant evaluator (check_input_constant_job),
 // which binds the bound's names in source order and stops at each definition, as an enumerator's value's does: then
@@ -106,12 +232,18 @@ static bool check_input_vla_bound(CheckInputReader* reader, uint32_t open, uint3
     *definition = BUSTER_CHECK_NONE;
     if (valid && first != end && !star)
     {
+        const uint32_t reports = reader->output->report_count;
         CheckValue value = { 0 };
         uint32_t failed = BUSTER_CHECK_NONE;
         bool negative = false;
+        // The reading's failure evidence, for its error in clang's words (#1447): a job's own, or this one.
+        CheckConstantFailure failure = { .token = BUSTER_CHECK_NONE, .callee = BUSTER_CHECK_NONE };
+        // Each undeclared name in the bound is clang's error at it, with its typo's correction (#1447, check_constant_name).
         if (*job == 0 && check_input_vla_defines(reader, first, end))
         {
+            reader->constant_names = CHECK_CONSTANT_NAMES_REPORT;
             *job = check_input_constant_job(reader, first, end);
+            reader->constant_names = CHECK_CONSTANT_NAMES_NONE;
             valid = *job != 0;
         }
         if (*job != 0)
@@ -121,6 +253,7 @@ static bool check_input_vla_bound(CheckInputReader* reader, uint32_t open, uint3
             if (*definition == BUSTER_CHECK_NONE)
             {
                 failed = input->failure;
+                failure = input->evidence;
                 *job = 0;
                 arena_pop_to(reader->scratch, input->mark);
             }
@@ -129,7 +262,9 @@ static bool check_input_vla_bound(CheckInputReader* reader, uint32_t open, uint3
         {
             TypeId unused = 0;
             const bool cached = reader->bindings.count != 0 && reader->bindings.point[reader->bindings.count - 1] >= first;
-            valid = check_input_constant_read(reader, first, end, false, cached, false, &value, &unused, &failed, NULL);
+            reader->constant_names = CHECK_CONSTANT_NAMES_REPORT;
+            valid = check_input_constant_read(reader, first, end, false, cached, false, &value, &unused, &failed, &failure);
+            reader->constant_names = CHECK_CONSTANT_NAMES_NONE;
         }
         // A job that stopped at a definition has no value yet.
         const bool evaluated = *definition == BUSTER_CHECK_NONE;
@@ -148,7 +283,7 @@ static bool check_input_vla_bound(CheckInputReader* reader, uint32_t open, uint3
             *extent = (uint64_t)number;
             if (valid)
             {
-                check_input_constant_bound_warning(reader, first, end, &value, name < parser->tokens.count ? name : open);
+                check_input_constant_bound_warning(reader, first, end, &value, name < parser->tokens.count ? name : open, true);
             }
         }
         else if (valid && evaluated)
@@ -156,12 +291,23 @@ static bool check_input_vla_bound(CheckInputReader* reader, uint32_t open, uint3
             *kind = BUSTER_TYPE_KIND_VARIABLE_ARRAY;
             *extent = (uint64_t)first + 1;
         }
-        if (!valid && !reader->output->resource && reader->output->report_count == 0)
+        // A failure before the first undeclared name the reading reported is clang's error too, which its parser gives first
+        // (#1447): `sizeof(struct Missing) - sizeof(missing)`'s.
+        const uint32_t failed_at = failed < parser->tokens.count ? failed : first;
+        const bool earlier = reader->output->report_count > reports && failed_at < reader->output->reports[reports].token;
+        if (!valid && !reader->output->resource && (reader->output->report_count == 0 || earlier))
         {
-            const uint32_t token = failed < parser->tokens.count ? failed : first;
+            const uint32_t token = failed_at;
             const bool missing = parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER && reader->output->declarations[token] == BUSTER_CHECK_NONE;
             // A negative constant is clang's own error (#1447), at the bound's first token, naming the declarator's name.
-            check_input_report(reader, negative ? first : token, negative ? CHECK_INPUT_ARRAY_NEGATIVE : missing ? CHECK_INPUT_UNDECLARED : CHECK_INPUT_DECLARATION);
+            if (negative || missing)
+            {
+                check_input_report(reader, negative ? first : token, negative ? CHECK_INPUT_ARRAY_NEGATIVE : CHECK_INPUT_UNDECLARED);
+            }
+            else
+            {
+                check_input_constant_failure_report(reader, &failure, first, token);
+            }
             if (negative && reader->output->report_count == 1)
             {
                 reader->output->reports[0].value = name < parser->tokens.count && parser->tokens.kinds[name] == PARSE_KIND_IDENTIFIER ? name : BUSTER_CHECK_NONE;
@@ -176,6 +322,10 @@ static bool check_input_vla_bound(CheckInputReader* reader, uint32_t open, uint3
     if (valid && *kind == BUSTER_TYPE_KIND_VARIABLE_ARRAY)
     {
         valid = parameter || reader->function_body != BUSTER_CHECK_NONE;
+        if (!valid && !star)
+        {
+            check_input_vla_place(reader, open, name);
+        }
         CheckInput* output = reader->output;
         const bool room = output->vla_count < output->vla_capacity;
         output->resource |= valid && !room;
@@ -322,6 +472,16 @@ static bool check_input_vla_declaration(CheckInputReader* reader, uint32_t first
                            parser->tree.parents[point + 1] == point + 2;
         valid = reader->function_body != BUSTER_CHECK_NONE && storage != C_NAME_EXTERN &&
                 (is_typedef || !array || (storage != C_NAME_STATIC && !thread_local && (!initialized || empty)));
+        // clang's errors at the name, by its order (Sema's CheckVariableDeclarationType): a file-scope declaration's,
+        // then an extern's linkage, then a static array's storage duration (a thread-local one's keeps its own error).
+        const bool file = reader->function_body == BUSTER_CHECK_NONE;
+        const CheckInputMessage message = file ? (array ? CHECK_INPUT_VLA_FILE_SCOPE : CHECK_INPUT_VM_FILE_SCOPE) :
+                                          storage == C_NAME_EXTERN ? (array ? CHECK_INPUT_VLA_EXTERN : CHECK_INPUT_VM_EXTERN) :
+                                          array && !is_typedef && storage == C_NAME_STATIC ? CHECK_INPUT_VLA_STATIC : CHECK_INPUT_DECLARATION;
+        if (!valid && message != CHECK_INPUT_DECLARATION && declaration < parser->tokens.count && reader->output->report_count == 0 && !reader->output->resource)
+        {
+            check_input_report(reader, declaration, message);
+        }
         if (valid)
         {
             check_input_rare_claim(reader, &reader->vla_scope_ends[declaration]);

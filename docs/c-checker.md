@@ -307,7 +307,12 @@ declaration of it alone (`enum E;`) too; a reference to it (`enum E x;`) needs
 none. A declaration of it with a declarator (`enum E : int x;`) is refused at
 the `:`, and an enum without a base can't be given one, nor the other way round,
 each where clang reports it. An `aligned` attribute after its body, which clang
-applies after the base completed it, is refused as unsupported. (Attributes
+applies after the base completed it, sets its alignment then (#1447,
+`type_enum_realign`), as clang's does where nothing has asked its layout yet:
+clang memoizes an enum's layout at its first query, after which the attribute
+changes nothing. So it is taken where the enum completed at this body's `{` and
+the body doesn't name it (`enum E`); one whose body names it, or one completed
+by an earlier declaration (`enum E : char;`), stays refused as unsupported. (Attributes
 after a tag's name, before a `;`, make any tag's declaration a reference to the
 visible tag, as clang has it, not a declaration of it alone.)
 
@@ -526,12 +531,11 @@ does, each rule checked against clang's answers on probes of it:
   `.text.buster_checker` with: its statements' templates in source order, a
   line each, assembled by `assembler.c` (`asm_assemble`), whose sections'
   atoms join the unit's link before its functions', as clang emits a module's
-  `asm` first (`check_program_emit_file_asm`), each in its section in `-c`'s
-  object. Refused by name: a template the assembler doesn't take, one that
-  defines or refers to a symbol (a label, an instruction's operand, CFI),
-  which the unit's symbols don't join yet, and a section of a class C's
-  definitions don't have or of another type than its class's (an init
-  array's, a note).
+  `asm` first (`check_program_asm_plan_file`), each in its section in `-c`'s
+  object; its labels and references join the unit's symbols as a template's do
+  (#1848). Refused by name: a template the assembler doesn't take, CFI, and a
+  section of a class C's definitions don't have or of another type than its
+  class's (an init array's, a note).
 - **`#pragma clang optimize`** (`c_check_optimize_input.c`), whose `off` and
   `on` `main.c` puts around the checker unit's own tests (#681): one
   identifier, `on` or `off`, read as clang's `PragmaOptimizeHandler` reads it,
@@ -571,8 +575,14 @@ does, each rule checked against clang's answers on probes of it:
   GNU C does, into a `static` array's element or a `static` struct, where its
   body's parts are constant (`(S8){ "a", 1 }`, not `(S8){ "a", n }`). The
   initializer copies the literal's parts, as it did only for a file-scope
-  literal's. A scalar compound literal (`(int){ 1 }`) stays refused there, at
-  file scope too.
+  literal's. A scalar compound literal's value (`static int x = (int){ 1 };`,
+  `(long){ 5 } + 1`, `(int){ (int){ 3 } }`), at file scope too, is its body's one
+  value converted to its type, where that is a number or a static object's
+  address constant (#1447, `check_init_scalar_literal`): the constant cache that
+  folds a vector literal's lanes folds it, and the operations around it, a
+  conditional's among them (`(int){ 5 } ? 6 : 7`). Still refused: one in a
+  file-scope array's bound (`char e[(int){ 2 }];`), which clang folds to a
+  constant array with its `-Wgnu-folding-constant` warning.
 
 Declaration specifiers and comma-separated declarators are elaborated in source
 order, including the scope of a name in its own initializer. The reader
@@ -595,9 +605,12 @@ is, in source order. A prototype's end at its `)`. A definition's are declared
 again at its body's opening, as clang has them, since the body's scope is
 theirs too: in `int f(struct T *p) { struct T *q = p; ... }` the body's
 `struct T` is the parameter's (#435), and in
-`int f(enum E { K = 7 } e) { return K; }` its `K` the list's (#438). A list's
-second definition of a tag only warns in clang, which makes it a tag of its own
-that its name doesn't name, and the checker does the same. A tag that a
+`int f(enum E { K = 7 } e) { return K; }` its `K` the list's (#438). Before
+C23, a list's second definition of a tag only warns in clang, which makes it a
+tag of its own that its name doesn't name, and the checker does the same. Under
+C23 it is a redefinition as in any other scope (#1869): a record's is compared
+with the first and declares its type when compatible, or gives clang's
+"incompatible definitions" error; an enum's keeps the C23 enum limit below. A tag that a
 declarator's array bound names or defines outside a parameter list is the
 declarator's scope's: `int a[sizeof(struct V { int x; })]; struct V v;` is
 valid. A prototype in a constant expression's type name (a typeof's, a
@@ -676,6 +689,39 @@ admit comma expressions or computed floating casts. Declaration-time warnings
 are retained by token and merged with graph warnings before rendering. Warning
 identity and default severity remain separate: an enum's GNU folding extension
 is normally quiet, while the corresponding folded file-scope array bound warns.
+As clang's do, a declarator's array bound that is no ICE but folds, wherever its
+array can't be variable (file scope, a member, a typedef at file scope, a block's
+`static` or `extern` object), warns "variable length array folded to constant
+array as an extension" once at the declarator's name, whatever folded it; a
+bit-field width, an enumerator's value, a static assertion, a case label or a
+designator folds quietly, and under `-Wgnu-folding-constant` with `-Werror` or
+`-pedantic` reads "expression is not an integer constant expression; folding it
+to a constant is a GNU extension" at the expression's first token
+(`c_check_vla_fold_driver_test.c`). A block's automatic array keeps such a bound
+variable, as does a `sizeof`'s type name anywhere.
+A variable-length array or variably modified type where C allows none takes
+clang's error at the declarator's name (`check_input_vla_place`,
+`check_input_vla_declaration`):
+- at file scope, "variable length array declaration not allowed at file
+  scope", or "variably modified type declaration …" where the declared type
+  is no array (`int (*p)[n]`);
+- a block's `extern` object, "… cannot have 'extern' linkage", by the same
+  two kinds;
+- a block's `static` array, "variable length array declaration cannot have
+  'static' storage duration";
+- a member, "fields must have a constant size: 'variable length array in
+  structure' extension will never be supported".
+
+A `sizeof` of a variable type name in a file-scope initializer
+(`int s = 1 + sizeof(int[n]);`) is "initializer element is not a compile-time
+constant", at the start of the initializer's element that holds it.
+
+Differences left: these errors stop the reader, where clang marks the
+declaration invalid and goes on. A file-scope cast to a variably modified
+type, and `_Alignof` of one, are still refused, though clang accepts them.
+A block's variable-length array with a non-empty initializer is still
+"invalid or unsupported declaration" (clang's "variable-sized object may not
+be initialized", at the bound).
 Immutable source-position diagnostic pragmas apply push/pop and exact warning
 group policy to these witnesses. Promoted warnings participate in first-error
 ordering and prevent object publication; `-w` suppresses them as Clang does.
@@ -760,7 +806,11 @@ old-style definition. The completed parameter types remain; an outer tag or
 ordinary name becomes visible again in the body and following file scope.
 These declarations are not republished into the body as prototype-definition
 tags are. The extra visibility/redefinition warning sequence is not reproduced.
-Variably modified parameters remain refused by name. An identifier list
+A variably modified parameter's bounds (`int f(n, a) int n; int a[n][n]; {}`)
+are a prototype parameter's (#1447): the list's declarators read them as a
+parameter's, each bound's record names the listed parameter, and the function's
+entry evaluates them; the walk takes their tokens, the list's only ones it
+takes. A `[*]` bound there stays an error, as clang's is. An identifier list
 outside a definition is refused, as C17 6.7.6.3p3 has it; C23 rejects identifier lists.
 Parenthesized `_Atomic(T)` starts the declaration list at the same boundary
 as the qualifier form `_Atomic T`. Its type name uses the ordinary evaluator,
@@ -2575,8 +2625,10 @@ What the lowering covers past scalars (#145's programs):
   folded to its width's bits, which the lowering extends from the width, as a
   narrower one's: a negative one's conversion to `__int128` or compare reads it
   as it is.
-  The overflow builtins of one of 65 to 127 bits are refused by name (their
-  recipes take a 128-bit operand whole).
+  The overflow builtins take one of 65 to 127 bits as an `__int128`'s limbs
+  (#1447): its descriptor is its width, its high limb extended from it, and a
+  destination's high limb is the result's extended from the width's bits past
+  64, which must give it back for the result to fit.
 - **x86 builtins (#136, #148).** The intrinsics' `__builtin_ia32_*` calls are
   X86 entries too (`c_check_program_x86.c`): a row per builtin, from a table by
   name, of its family's records with its rule's form, as clang -O0's code
@@ -3325,7 +3377,12 @@ What the lowering covers past scalars (#145's programs):
   constant; a bit-field of one is refused by name, and so is a complex one
   ("complex types of _BitInt past 128 bits"). `test-checker`'s
   `bit-int-past-128-bits` program, against clang -O0's build of it, has each of
-  them, clean under clang's UBSan on every input.
+  them, clean under clang's UBSan on every input. The overflow builtins take
+  them (#1447) as clang does, but `mul_overflow`'s of a signed one, which is
+  clang's error ("__builtin_mul_overflow does not support 'signed _BitInt'
+  operands of more than 128 bits"): the exact result in the signed `_BitInt`
+  that holds it, by these limbs' operations ([the builtins'
+  guide](c-builtins-integration.md)'s overflow section).
 - **Bit-fields.** A bit-field is read and written through the bytes that hold
   its bits and no other member's (C11 makes those other memory locations), as
   pieces of 8, 4, 2 and 1 bytes that form one little-endian unit: a read shifts
@@ -3402,9 +3459,18 @@ What the lowering covers past scalars (#145's programs):
   function's labels (`Tier0Function.label_entries`), and the emission defines
   a local symbol at each one's first record after branch sizing
   (`.Lbuster_label_N`, of no type), which `GLOBAL_ADDRESS` reaches and a static
-  table's pointers point at. Not yet: the difference of two labels' addresses
-  as a static initializer's constant (GNU's relative jump tables), which clang
-  folds and the checker refuses as not a constant.
+  table's pointers point at. The difference of two labels' addresses in a
+  static initializer (GNU's relative jump tables, `static const int t[] =
+  { &&a - &&b };`, #1447) is a constant of its own kind
+  (`CHECK_CONSTANT_LABEL_DIFFERENCE`, `check_init_label_difference`), as
+  clang's evaluator keeps an AddrLabelDiff: `&&a - &&b` of any pointer types to
+  the labels (divided by no element size, as clang's isn't), through
+  parentheses, a unary plus, `__extension__` and conversions to an integer type
+  of 32 bits or more that doesn't widen it; any other operation on it, or a
+  narrower or wider conversion, is no constant, as in clang. The static data
+  writes the labels' distance in their function's code, which the emission
+  placed before the data is planned, where an assembler resolves clang's
+  `.long .La-.Lb`; the labels are objects the program must have symbols of.
   The two control walks filter the parser's immutable kind/role columns in
   bounded 64-byte blocks and visit exact events in source order: function
   bodies, labels, `__label__` lists, cases, gotos and label addresses in the
@@ -3469,14 +3535,46 @@ What the lowering covers past scalars (#145's programs):
   the innermost cleanup's scope that holds the goto. The jumps' errors are
   clang's messages, for variable-length arrays too. A body read on a lane
   that declares such a variable leaves the unit to source order.
-  The control stream calls the function at each exit from the scope
-  (`CHECK_CONTROL_CLEANUP`, whose target is the record), innermost first and
-  in reverse declaration order, before the exit's `STACK_RESTORE`: the
+  The function runs at each exit from the scope, innermost first and in
+  reverse declaration order, before the exit's `STACK_RESTORE`: the
   block's end, the `break`, `continue` or `goto` that leaves it (a loop's or
   switch's token stands for where a break or a continue goes, so that a `for`
   statement's own variables' cleanups run once, after its end's label), the
   function's end, and a statement expression's end, after its value is kept
-  (`CheckProgramRegion.cleanups`). A `return` computes its value first
+  (`CheckProgramRegion.cleanups`). Each variable's call is written once
+  (#1370), as clang's is: `CHECK_CONTROL_CLEANUP` (whose target is the record)
+  at its scope's end. An exit of the function's statements is one
+  `CHECK_CONTROL_EXIT` instead of a run of calls, which names its first and
+  last record (`CheckProgramExit`); its tail (its restore, lifetime ends and
+  jump, or its return) follows it, so every walk of the controls sees the
+  paths it saw with the calls in place. `check_program_chains` plans each
+  body's chains in linear passes (`CheckProgramChain`): the lowering jumps
+  from the exit to its first record's call, and after each call a dispatch
+  goes on to the destinations that stop there (exits with the same last
+  record and the same tail share one, whose tail the first of them keeps in
+  place; a lone jump's is its target), to the parent's call for exits that go
+  on, and to the next control. Only a dispatch of two continuations or more
+  tests an I32 destination slot, which every exit and fall that crosses one
+  stores first (a fall 0, at its run's head, past which exits enter): the
+  issue's function of early returns stores none, and its calls are its
+  variables' count. An exit from a statement expression, through a record
+  whose scope's end a constant switch's kept statements leave out, or whose
+  jump no path reaches keeps its run in place. Code and call rows grow
+  linearly in exits plus cleanups, where they grew as their product (85
+  cleanups with an early return each made 3,825 calls, and 86 exhausted the
+  call rows). An exit keeps only the innermost record whose scope holds its
+  target; the planner finds its last record in one preorder sweep, and a
+  scope's end and `check_control_cleanup_at` skip closed scopes whole, so the
+  planning is linear too. On the 9700X, 10,000 cleanups with an early return
+  each compile in 36 ms by Tier 0 (`-c`), and sqlite3.c's compile is
+  unchanged ([the measurements](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/cleanup-chains-1370-2026-11-09)).
+  The planner stays scalar. It runs only for a body with an exit through a
+  cleanup, which no sqlite3.c body has, and it is a few linear passes over
+  that body's records and exits: 23–46 ms of check-program at 10,000–20,000
+  cleanups, where the parse and the input take as much again. Tier 1 refuses
+  such a body past about 800 cleanups (`cause=cfg-allocation`). Main refuses
+  the same control flow written with gotos alike: #1384's dense matrices.
+  A `return` computes its value first
   (`CHECK_CONTROL_RESULT`: into a temporary of its class, the result object,
   or for a struct or union its bytes copied into a frame object of their own
   or where the hidden pointer points), then the cleanups, then returns it
@@ -3488,18 +3586,24 @@ What the lowering covers past scalars (#145's programs):
   declaration in its scope naming it too (`check_control_named`: what
   `Scope::updateNRVOCandidate` and `applyNRVO` decide in that case). The
   lowering's call (`check_lower_cleanup`) takes the variable's address,
-  which makes its local a frame slot, and drops the result. A function of a
-  parameter other than a pointer is refused by name (clang's code bit-casts
-  the address to the `_Bool`, invalid IR that leaves the address's low bit),
-  and so is one whose result is an aggregate (including one returned in
-  registers), a 128-bit integer or a vector. The body's selection references
+  which makes its local a frame slot, and drops the result: an aggregate's
+  (in memory or in registers), a 128-bit integer's or a vector's lands in a
+  frame object of its own, as a source call's does. The one parameter other
+  than a pointer that clang's Sema takes, a `_Bool`, gets the address's low
+  bit, as clang's code passes it (it bit-casts the address to the `_Bool`);
+  an `_Atomic _Bool`'s, which clang's instruction selection can't take, is
+  refused by name. The body's selection references
   the function. `test-checker`'s sections (`c_check_cleanup_test.c`) compare
   54 fixtures' acceptance and first errors with clang's, and run programs of
   each exit, each class of returned value, the named return value's cases,
-  statement expressions, switches and the functions' kinds natively against
+  statement expressions, switches and the functions' kinds (their parameters
+  and results among them) natively against
   clang -O0's build on both paths; `test-checker-driver` compares every error
   of 39 fixtures with clang's, its place and its message, on both paths
-  (`c_check_cleanup_driver_test.c`: the jumps' notes aren't the driver's);
+  (`c_check_cleanup_driver_test.c`: the jumps' notes aren't the driver's),
+  and builds a program of every kind of path through a chain and the issue's
+  four shapes of 100 cleanups by both tiers on both paths, run against clang
+  -O0's build, and checks that 600 cleanups' object is linear in 300's;
   the deferred reader's fixtures and the selection's take a cleanup too.
 - **A block's objects' lifetimes**, for Tier 1's frame (#177, the C driver's
   `--tier1`, `CheckProgramOptions.lifetimes`): `CHECK_CONTROL_LIFETIME` entries
@@ -3642,9 +3746,9 @@ What the lowering covers past scalars (#145's programs):
   `__has_c_attribute(gnu::retain)` answer 1. `test-checker-driver` compares
   each retained definition's section (name, type, flags and alignment) and
   the object's OS/ABI with clang's object's, and runs the programs, linked
-  from `-c`'s objects and by the direct path. `common` stays refused by name:
-  its symbols are `SHN_COMMON`'s, which neither the link representation nor
-  the object writer has.
+  from `-c`'s objects and by the direct path. The `common` attribute and
+  `-fcommon` make common symbols (`BUSTER_LINK_SYMBOL_COMMON`, `-c`'s objects'
+  `SHN_COMMON`): [the GNU extensions' table](c-gnu-extensions.md).
 - **Switches (#136's item 7).** A switch's value goes in a temporary, and each
   case compares it, as clang -O0's code does for a sparse switch, unless clang
   would build a jump table: then the switch dispatches through one
@@ -3806,16 +3910,14 @@ constraints still run at translation-unit end. `test-checker`
 name silences and the siblings it doesn't with clang, by both paths, with
 `-fsyntax-only` and `-c`. What remains conservative: a statement expression
 that holds the name is cut whole, where clang still checks an operator on its
-value (`({ undeclared; p; }) + 1.5`); a unit with an error publishes no
-runtime (non-constant) shift warning, where clang, which then skips their
-reachability analysis, publishes them all (`x << 40`); a missing name that
-the declaration walk reports (an enumerator's or an array bound's) is a
-declarator failure, which keeps the whole unit's conservative prefix; and a
-unit with any report other than a missing name (a control-flow error such as
-a `break` outside a loop, a declaration conflict) keeps the previous
-whole-unit prefix, which starts at the unit's first report of any kind, even
-after a missing name, since these per-construct cuts are made only when the
-unit's only reports are missing operand names.
+value (`({ undeclared; p; }) + 1.5`); and a missing name that the
+declaration walk reports in an array's bound, a `typeof` operand, a
+`_BitInt` width or a file-scope designator is a declarator failure (an
+enumerator's value's and a bit-field width's are recovered: below). A
+rejected unit's later warnings, its runtime shifts' (`x << 40`) among them,
+and those of a unit with other reports (a `break` outside a loop, a
+declaration conflict), come from the reparsed view of "Semantic error
+recovery" below, whose gaps its "later phases are left" lists.
 Type-query/declarator failures, unsupported pragmas, resource failures and
 unfinished resolver states retain the conservative prefix. Repaired/deferred
 views with skipped bodies do not enable this new binding recovery. A successful
@@ -3851,9 +3953,26 @@ take clang's words and places:
   table's), at its bound: "array is too large (2'305'843'009'213'693'952
   elements)", the count with clang's digit separators
   (`CHECK_INPUT_ARRAY_TOO_LARGE`).
+- **A constant that fails** in a bound, a `typeof` operand, an enumerator's
+  value, a bit-field's width, a `_BitInt` width or a designator, at the
+  failing token, in the words an attribute argument's failure takes
+  (`CHECK_INPUT_CONSTANT_EXPRESSION`, `check_input_constant_failure_report`,
+  both from `check_constant_failure_error`'s reading of the evidence,
+  `CheckConstantFailure`): "no member named 'b' in 'struct S'" at the
+  member's name, "member reference type 'int' is not a pointer" there too,
+  "member reference base type 'int' is not a structure or union" at the
+  operator, "arithmetic on a pointer to an incomplete type 'struct T'" and
+  "invalid application of 'sizeof' to an incomplete type 'struct T'" with
+  the tag's note, a call's "too many arguments" (at the first extra
+  argument) or "too few", with the function's note, and "invalid operands to
+  binary expression". Other failures keep the generic error. A bound's
+  failure before its first undeclared name is reported with it, in source
+  order.
 
-Each still ends the unit's checking as before. The semantic-recovery fixtures
-compare each with clang.
+Each still ends the unit's checking as before: its later declarations' errors
+are lost (`struct S{int a;} s; typeof(s.b) x; enum E { A = sizeof(s.b) };`
+gives one of clang's two). The semantic-recovery fixtures compare each with
+clang.
 
 #### Extern objects of type void (#1447)
 
@@ -3987,15 +4106,30 @@ declarations. Otherwise a storage mismatch says "thread-local declaration of
 'X' follows non-thread-local declaration", or its reverse. That diagnostic
 notes the visible prior declaration, with its declaration/definition note;
 object type conflicts still note the latest prior declaration of the entity,
-including one from another block. The checks that reject and recover the
-declaration are unchanged. The semantic-recovery fixtures cover both storage
-directions, extern and static combinations, and subsequent declarations and
-uses under the same Clang comparison matrix.
-The distinct recovery behavior of a TLS-only mismatch is tracked in
-[#1786](https://github.com/buster14a/buster/issues/1786): Clang keeps that
-declaration in its chain, while the reader currently drops it. This diagnostic
-fix does not claim parity for subsequent conflicts of that same entity or a
-second initializer diagnostic on an already-defined object.
+including one from another block. The semantic-recovery fixtures cover both
+storage directions, extern and static combinations, and subsequent
+declarations and uses under the same Clang comparison matrix.
+
+A mismatch of thread-local storage alone keeps its declaration, as clang's
+`MergeVarDecl` links it after the error (#1786): the error is recovered and the
+declaration is merged, bound and linked as a valid one, with its own storage.
+The next declaration is compared with it (`_Thread_local int x; int x; int x;`
+has one error, and a third `float x;` notes the second), and its linked
+declaration's check doesn't compare the storage again, so the error is given
+once. A definition after an earlier one gives the TLS error and then "redefinition
+of 'x'", noted at the first definition, at the same name. A block extern's
+mismatch with another block's declaration is checked against the linked one.
+
+An object's second definition alone (`int x = 1; int x = 2;`) stays in its
+chain too (#1868): clang's `AddInitializerToDecl` reports "redefinition of 'x'"
+after `MergeVarDecl` has linked the declaration, which stays in lookup,
+invalid. The checker binds it and remembers it
+(`CheckInputReader.invalid_redefinitions`), and a later declaration's type
+isn't checked against it, as clang's `MergeVarDeclTypes` skips an invalid
+declaration: `float x;` after it is no error, and keeps its own type. Linkage
+and thread-local errors still note it, and a third definition's error notes
+the first. A block's duplicate local is still dropped, as clang's lookup
+finds the first there.
 
 `check_driver_rejected_warnings` follows clang's `ActOnPopScope`: a scope in
 which an error occurred gives no unused-variable warning, nested scopes'
@@ -4054,9 +4188,15 @@ do:
   A compatible redefinition declares the earlier type. Otherwise the unit is
   refused and recovered.
 
-  Left as they were: `-Wno-odr` doesn't turn the `-Wodr` errors off. An enum
-  defined again under C23 still refuses with the generic error, which stops
-  the reader. Clang compares its enumerators, and keeps both lists' names in
+  The `-Wodr` errors follow clang's policy for a default error: `-w` leaves
+  them, `-Wno-error=odr` makes them warnings (with their notes) and `-Wno-odr`
+  drops them, as does a source pragma at the redefinition's name. In a system
+  header they are ignored without `-Wsystem-headers`. A demoted or
+  ignored one doesn't make the definitions incompatible: one that is otherwise
+  compatible declares the earlier type, as in clang (`check_input_odr_severity`).
+
+  Left as they were: an enum defined again under C23 still refuses with the
+  generic error, which stops the reader. Clang compares its enumerators, and keeps both lists' names in
   scope with ambiguous references. An `_Atomic(struct { ... })` member is the
   parser's refusal, with or without a redefinition.
 - **A repeated enumerator** gives "redefinition of enumerator 'A'" with its
@@ -4080,9 +4220,19 @@ do:
   typedef, a parameter, a local) gives clang's "redefinition of 'K'", with
   "previous definition is here" at the earlier declaration, and is dropped the
   same way. (A name declared after an enumerator is the redeclaration's
-  "redefinition of 'K' as different kind of symbol" instead.) Clang's
-  `-Wvisibility` of a tag declared in a prototype, which the checker doesn't
-  give at all, is left out of its fixtures.
+  "redefinition of 'K' as different kind of symbol" instead.)
+- **A tag a prototype's list declares first** (named, or any enum), which no
+  declaration outside the function names, is clang's `-Wvisibility` warning
+  "declaration of 'struct S' will not be visible outside of this function",
+  on by default, at its name (an unnamed enum's keyword), as clang's `ActOnTag`
+  gives it: in a definition's list, a nested prototype's, a member's
+  function pointer's, a block's prototype and an array bound in the list, and
+  for a definition that shadows a file-scope tag. A C23 definition there is
+  no warning. Before C23, the list's redefinition of its own tag is "redefinition
+  of 'S' will not be visible outside of this function", noted at the earlier
+  definition; an enum's, read as an unnamed enum, gets the first warning too
+  (`c_check_warning_driver_test.c`). A C23 list's redefinition of its own
+  record is compared instead, as any scope's (#1869).
 
 Phase 3 covers statements after an error:
 
@@ -4202,16 +4352,24 @@ view's own; the bodies' reading publishes those its known errors don't hold,
 its reader's and graph's reports and its controls' constraints, in clang's
 words (its reader's alone where its graph can't run after them), and the next
 round leaves their parts out too. Each round adds an error and its parts, up
-to `BUSTER_CHECK_DRIVER_REJECTED_ROUNDS` (4) readings; past them the unit's
-warnings aren't given. The second reading's unused variables in a scope with an error
+to clang's error limit's cut (the error after `-ferror-limit`'s, the first with
+`-Wfatal-errors`), past which clang gives nothing: counted in the bodies that
+hold a known error (each at least one; an error's tokens may be several), the
+bodies after the one that brings them past the limit are left out whole, and
+`BUSTER_CHECK_DRIVER_REJECTED_ROUNDS` (4) more readings find what the body
+that holds it, or file scope after it, still hides; past them the unit's
+warnings aren't given. Without a limit (`-ferror-limit=0`) the rounds go on
+while each finds an error. Each round is a reading of the unit, so a unit of
+`n` walk-ending errors costs up to `min(n, limit) + 1` readings. The second reading's unused variables in a scope with an error
 are left out (its own error counts, the dropped part's at the token after
 it). A function holding an error keeps its unused parameters, as clang's
 `ActOnFinishFunctionBody` gives them whatever the body's errors, except one
 that what the reading left out of its body names, which clang's reading of that
 part takes for a use (an erroneous expression's operands are still referenced);
-a member's name of the same spelling is no use. A local of the same name
-declared in the kept part, which the left-out part's use names instead, still
-silences the parameter's warning. Where that reading is valid, its program
+a member's, a tag's or a label's name of the same spelling is no use, nor is
+a declarator's name or a use inside the scope of a declaration of that name: a
+block's, a `for` clause's, a statement expression's, or a prototype's parameter
+list's (`check_driver_declared_scope`, `check_driver_prototype_scope`). Where that reading is valid, its program
 gives the other bodies' `-Wreturn-type` and common warnings, the bodies after
 the unit's first error flushed as above. Where a reader's error left the first
 reading without some of its warnings, the second's are given, without the
@@ -4283,8 +4441,10 @@ An undeclared name that is a typo of a visible one is clang's (#1447,
 `c_check_typo.c`). The rules are clang 23's, as probed:
 
 - **Candidates.** The names visible at the use: the innermost declaration of
-  each, an implicitly declared function's among them in its block. A name
-  whose length differs
+  each, an implicitly declared function's among them in its block. A library
+  function's implicit declaration stays one after its block, as clang
+  declares the builtin at file scope (`printf` called in one function is
+  `printff`'s correction in the next). A name whose length differs
   from the typo's by more than a third of it is skipped
   (`TypoCorrectionConsumer::addName`), and so is one further than
   (length + 2) / 3 by Levenshtein's distance. The nearest is taken if no other
@@ -4300,8 +4460,28 @@ An undeclared name that is a typo of a visible one is clang's (#1447,
   diagnostics follow from its type: a conversion's error, a case label's
   constant, a static initializer's "not a compile-time constant" (which the
   driver keeps at the corrected name's token after its own error); the unused
-  declarations' analysis counts the use. A name just after a cast's `)`
-  isn't corrected.
+  declarations' analysis counts the use. They spell the name taken, as
+  clang's do ("cannot assign to variable 'counter'", "'olden' is
+  deprecated"; `check_driver_corrected_name`), and a warning at a declarator
+  or an operator whose operand holds the use comes after the correction's
+  error (`CheckInput.corrected_tokens`, `check_driver_after_corrections`):
+  clang gives that warning once the operand is read.
+- **Keywords and type names in an expression.** Clang offers keywords too
+  (`AddKeywordsToConsumer`): an expression's (`sizeof`, `_Alignof` from C11,
+  `true` and `false` in C23) and, within a function and not before a `)`
+  (the parser's `WantRemainingKeywords`), a statement's (`do`, `else`,
+  `for`, `goto`, `if`, `return`, `switch`, `while`), with `break` where a
+  loop's or a switch's body holds the name,
+  `continue` where a loop's does, and `case` and `default` where a switch's
+  does, not their heads or a `do`'s condition (`check_typo_scopes`). The
+  first name in parentheses, which clang reads as a cast's type or an
+  expression's (`MaybeTypeCast`), and a cast's operand also take typedef
+  names and the type specifier and storage class keywords; a cast's operand
+  takes no value. Where a keyword or a typedef name is nearest, the error
+  suggests it ("did you mean 'while'?", "did you mean 'myint'?" with
+  "'myint' declared here") and the name stays undeclared, the expression
+  rejected with no other diagnostic of it, as clang's is (the report's
+  `detail` and `subject`, `check_typo_suggestion`).
 - **An undeclared function's call** in C99 and later (`ImplicitlyDefineFunction`,
   only where its diagnostic is an error) takes a function. Its error gets
   "did you mean 'compute'?" at the call and "'compute' declared here", but not
@@ -4329,27 +4509,106 @@ with an undeclared name fails them and is read again in source order.
 
 Left as they were:
 
-- Clang also offers keywords where it reads an expression or a statement's
-  start, and on taking one parses the statement again with it (`whil;` then
-  gives "expected '(' after 'while'"). Where a keyword (`do`, `sizeof`,
-  `int`, ...) is as near as the best value, or a visible typedef is at a
-  statement's start before `(`, `[` or a name, buster suggests nothing; so
-  `int x = whil;` gets no "did you mean 'while'?".
-- Type names are clang's parser's to correct (`DiagnoseUnknownTypeName`):
-  `myin x;`, `sizeof(myin)`, `(myin)x` and `_Alignof(myin)` keep buster's
-  parse errors, with no suggestion. Neither does an implicit declaration's
-  diagnostic that `-Werror` makes an error before C99.
-- Later diagnostics spell the name as written, not the one taken
-  (`const int counter; countr = 5;`), and a function designator's
-  comparison statement keeps its `-Wunused` and `-Wparentheses` notes.
-- A name the walk itself reads, a `typeof` operand, an array's bound or an
-  enumerator's value, is not corrected: an undeclared one there still stops
-  the reader, typo or not, as on main.
-- A library function implicitly declared in an earlier function is no
-  candidate, where clang's declaration stays visible at file scope.
-- A warning at an operator or a declarator whose operand was corrected
-  (`-Wpointer-sign`, a qualifier's) comes before the correction's error,
-  where clang's comes after it.
+- At a statement's start clang parses the statement again with the keyword
+  it takes (`retrn x;` is a `return`, `whil;` then gives "expected '(' after
+  'while'", and in C23 `foo();` is a `for`). Where a keyword, or a visible
+  typedef before `(`, `[` or a name, is as near as the best value there,
+  buster suggests nothing. Clang's parser also takes a keyword before an
+  operand buster's parser can't read (`sizeo a`, `retrn 5` in an
+  initializer).
+- A declaration's type name is clang's parser's to correct
+  (`DiagnoseUnknownTypeName`): `myin x;` and a parameter's `myin v` keep
+  buster's parse errors, with no suggestion, and a parse error still ends
+  the checking. Neither does an implicit declaration's diagnostic that
+  `-Werror` makes an error before C99. A cast to one (`(myin)x`) is
+  still buster's parse error.
+- A function designator's comparison statement keeps its `-Wunused` and
+  `-Wparentheses` notes after a correction.
+- A name the walk itself reads is searched in the walk's order
+  (`check_typo_walk_value`, `check_constant_name` in `c_check_constant.c`),
+  among the declarations visible so far. In an enumerator's value or a
+  bit-field's width, the correction is taken as if it were written, and a
+  name with no correction is clang's error at the name, recovered: the
+  enumerator takes the value it would have had with no `=` (clang gives
+  `enum E { Z = 4, A = zzz, B }` A 5 and B 6, and a fixed enum's next value),
+  and the member is no bit-field, an unnamed one an unnamed member of its
+  whole type (`long : zzz` aligns the record to 8). A correction to a
+  non-constant (`enum { B = countr + 1 }` with an `int counter`) keeps the
+  generic declaration error where clang says "expression is not an integer
+  constant expression" at the culprit, as any non-constant enumerator value
+  or width does. In a `typeof` operand, an array's bound, a `_BitInt` width
+  or a designator's index, a correction is taken too (`typeof(countr)` has
+  counter's type, `int v[countr]` is a VLA), and each name with none is
+  clang's error at it, in the expression's order, and stops the reader
+  there: clang keeps such a declaration invalid with quiet uses, which waits
+  for the reader's invalid binding. A `_BitInt` whose width had one is no
+  type specifier, as clang drops it, and its parser's error follows: a
+  declaration's "type specifier missing" (C23's "a type specifier is
+  required") at its first declarator's name, a C23 parameter's "unknown type
+  name" at its name, a member's or a type name's "type name requires a
+  specifier or qualifier" at the list's end; an unnamed parameter's
+  (`int f(_BitInt(zzz))`), clang's "expected parameter declarator", isn't
+  given. Lanes and deferred readers search nothing: a unit with
+  such a name is read again in source order, which corrects it. A walk
+  search doesn't count a value's search that the binding answers make later
+  in an earlier body, which matters only past clang's 50 corrections.
+
+Declaration specifiers that don't combine don't stop the reader either
+(`check_input_specifiers_recover`). Clang's `DeclSpec` drops the specifier the
+error is about and keeps the declaration valid, so the unit goes on as in
+phase 1, in every place specifiers are read (file scope, a body, a parameter,
+a member, a cast's and `sizeof`'s type name). What is dropped:
+
+- **A second type, width or sign**, at its error ("cannot combine with
+  previous 'int' declaration specifier"): `int float` is an `int`,
+  `long long long` a `long long`, `signed unsigned` an `int`.
+- **A sign the type doesn't take** ("'float' cannot be signed or unsigned"):
+  `unsigned float` is a `float`.
+- **The type of a width it doesn't take** ("'long float' is invalid"): the
+  width stays, so `long float` is a `long`, `long long double` a
+  `long long`, `long _Bool` a `long`.
+- **`_Complex` with a type it doesn't take.**
+
+The reader finds the error where a specifier makes the list invalid. Only then
+does `check_declspec_scan` work out which token clang drops: once over the list,
+then again without that token, to check that nothing else is wrong. The
+recovery applies where:
+
+- the dropped specifier is a keyword;
+- the list without it has no other error;
+- the reader's state up to the error can be rebuilt from the scan's slots: a
+  keyword's type, or a tag's, typedef name's or `typeof`'s type that the
+  dropped token didn't replace.
+
+A `_Complex` the type doesn't take is dropped at the list's end too, where the
+reader checks it (`_Complex _Bool` is a `_Bool`), with every `_Complex` of the
+list, as `DeclSpec::Finish` unsets the slot. That holds after a type of no
+keyword too (`typeof(_Bool) _Complex`, `struct S _Complex`).
+
+The operand readers recover the same way. A `typeof`'s or an `_Atomic`'s type
+name (`check_constant_specifiers`) and an enum's fixed underlying type
+(`check_input_enum_underlying`) are read again without the dropped specifier
+(`check_input_specifiers_dropped`). So `typeof(_Complex _Bool)` is a `_Bool`
+and `enum E : long float` a `long`.
+
+An error of the list's end (a sign, a width or a `_Complex` the type doesn't
+take) is published at the token after the list. It comes after the list's
+repeated specifiers' warnings, in clang's discovery order:
+`_Complex _Complex _Bool` warns, then errs.
+
+Still stopping the reader:
+
+- a list with a second error (`int float char x;`, `_Complex _Bool int y;`,
+  `unsigned float unsigned x;`), where clang reports both;
+- a storage class's conflict;
+- a second type specifier that is no keyword (`int typeof(int)`, `int _BitInt(8)`,
+  `int _Atomic(int)`, `int struct S`), whose state the slots can't rebuild.
+
+Error-free lists never reach this. The semantic-recovery fixtures cover each
+kind at file scope, in a body, a parameter, a cast, `sizeof`, a member, a
+`typeof`, an `_Atomic` and an enum's base. They also cover a repeated
+`_Complex`'s warning, "duplicate 'complex' declaration specifier" in clang's
+words. The operand readers give no duplicate-specifier warning (#1836).
 
 Type attributes' errors don't stop the reader either (`check_input_attribute_type`).
 What clang 23 does with each is followed:
@@ -4372,8 +4631,14 @@ What clang 23 does with each is followed:
   `long`, `XF` and `TF` an `__int128`), which gives it clang's layout. Its
   conversions are clang's too: a floating value converts into it silently,
   since `-Wliteral-conversion` takes no enumeration target, and an integer
-  gets `-Wconstant-conversion` at the integer's width. A complex mode, whose
-  alignment no integer has, still stops the reader.
+  gets `-Wconstant-conversion` at the integer's width. A complex mode
+  installs the complex type: the enum gets the signed integer of its size
+  with the complex type's alignment (`SC` a `long` aligned to 4, `DC` an
+  `__int128` aligned to 8), unless an alignment attribute gives one, which replaces it
+  even downward (`mode(SC), aligned(2)` is aligned to 2); its enumerators stay
+  `int`. `XC` and `TC` (32 bytes, no integer) still stop the reader, and `HC`'s
+  complex `__fp16`, which the type table can't make, installs nothing (4 bytes
+  aligned to 4, where clang's are aligned to 2).
 
 In each case the declaration stays valid and the attribute is ignored, as in
 phase 1.
@@ -4422,8 +4687,8 @@ alignments that stand.
 `c_check_type_attribute_recovery_driver_test.c` compares its fixtures as above.
 These differences remain:
 
-- An enum's complex mode of the other kind (`enum __attribute__((mode(SC)))
-  E`) still stops the reader.
+- An enum's `XC` or `TC` mode still stops the reader, and an `HC` one has
+  the layout of an enum with no mode.
 - An enum's vector mode after its body gives its deprecation warning twice (on
   main too).
 
@@ -4455,14 +4720,11 @@ own nodes take them.
 
 The later phases are left:
 
-- **Invalid declarations.** Not covered by phase 2:
-  - C23's redefinition of an enum, compatible or not (above).
-
-  These still stop the reader. A non-constant initializer's error is at its
-  first token, where clang's is at the operand that isn't constant
-  (`k + 1`'s `+`), and `sizeof` of an incomplete type reads "incomplete type
-  is not permitted here" at the `sizeof`, where clang's names the type at its
-  operand; both on main too.
+- **Invalid declarations.** Not covered by phase 2: C23's redefinition of an
+  enum (above) reads "invalid or unsupported declaration", where clang
+  accepts a compatible one and calls an incompatible one's type "has
+  incompatible definitions", with its enumerators' notes; the unit's later
+  warnings are kept.
 - **Errors no view part leaves out.** A body's error in a part that holds a
   label, a `case`, a `goto` or a tag's definition, or in a typedef's
   declaration, still leaves its body out, and its warnings with it. A reader's
@@ -4482,12 +4744,11 @@ The later phases are left:
   initializer (`const int d = 1 / 0;`'s division). A file-scope use elsewhere,
   an error in a function definition outside its body, or an error outside
   every body other than an initializer's or a file-scope declaration's still
-  leaves the unit without its common warnings. A function's unused parameter that its
-  left-out part names through a local of the same name gets no
-  `-Wunused-parameter`, where clang gives one.
-- **Rounds past the cap.** A unit needing more than four readings' rounds
-  (each body's error ending the next reading's walk) gets its first errors
-  alone.
+  leaves the unit without its common warnings.
+- **Errors an edited reading meets.** A reading of the view that finds an error
+  of its own isn't taken (its body is left out whole instead), so a body with
+  two walk-ending errors (`struct T1 t; struct U1 v;`) loses the second, and
+  its warnings with it.
 
 ### What the lowering costs (#531)
 
@@ -6763,7 +7024,10 @@ change, it refused such a declaration by name.
   attribute 'X' has higher precedence than function attribute 'Y'" with
   "conflicting attribute is here" at that declaration's first token;
   `nomerge` on a statement that evaluates no call, "'X' attribute is ignored
-  because there exists no call expression inside the statement". The calls
+  because there exists no call expression inside the statement"; a `nomerge`
+  of arguments, clang's "'nomerge' attribute takes no arguments"; and
+  `suppress`'s arguments, string literals through parentheses
+  (`suppress(("a"))`, clang's `checkStringLiteralArgumentAttr`). The calls
   are clang's `CallExprFinder`'s (`check_input_statement_call`): a call's
   `(` (not a declarator's parameters') or an asm statement's, outside
   `sizeof`'s, `_Alignof`'s and `typeof`'s operands and GNU attributes'
@@ -7514,8 +7778,11 @@ arguments against the function. The checker now gives these as clang does.
     redeclaration's attribute for a platform its earlier declarations have
     with other versions is "availability does not match previous
     declaration", noted at the earlier one
-    (`check_input_availability_redeclaration`). No platform is Linux's, so no
-    use is deprecated or unavailable by it.
+    (`check_input_availability_redeclaration`); a tag's redeclaration's
+    against the tag's attributes so far, its definition's where it has one
+    (`check_input_availability_tag_merge`), a definition's own not against
+    those it joins. No platform is Linux's, so no use is deprecated or
+    unavailable by it.
   - `external_source_symbol`'s clauses (`language`, `defined_in`,
     `generated_declaration`, `USR`), each once, are read as clang's parser
     reads them (`check_input_external_source_parse`), with its errors at the
@@ -7557,7 +7824,12 @@ arguments against the function. The checker now gives these as clang does.
     function, in type names too. Where no pointer takes one it is "'X' only
     applies to (Objective-C object or block) pointer types; type here is 'T'",
     naming the type where it stopped, before the declaration's attributes'
-    checks. Where a pointer takes it, its argument must be an identifier;
+    checks; through macros, as clang places it: `strong` and `weak`
+    named `__strong` and `__weak` and placed at the outermost macro's
+    expansion where that macro is spelled so (findMacroSpelling), and
+    `objc_ownership(weak)`'s pointer warning at the immediate expansion of the
+    macro that wrote it (`pp_output_macro_place`). Where a pointer takes it,
+    its argument must be an identifier;
     `objc_ownership(none)` and `(weak)` (named `__weak`) warn that C has no
     Objective-C object, `strong` and `autoreleasing` change nothing outside
     ARC, and another argument is "argument not supported". On a declaration
@@ -7578,7 +7850,7 @@ arguments against the function. The checker now gives these as clang does.
     function's, or the unit's declaration of a library function that is its
     builtin (`check_input_checks_library`); any other argument, a name in
     parentheses too, is "'diagnose_as_builtin' attribute requires parameter 1
-    to be a builtin function" at its expression's place. Its builtin's
+    to be a builtin function" at its first token. Its builtin's
     parameters, its prototype decoded past any custom checking
     (`__builtin_va_start` takes one), must be as many as its other arguments
     ("references function '__builtin_memcpy', which takes exactly 3
@@ -7591,17 +7863,28 @@ arguments against the function. The checker now gives these as clang does.
     not match", at the index, naming the parameter's type as its declarator
     spells it and the builtin's as clang's declaration of it does
     (`cbuiltin_library_spell_parameter`: `'__size_t' (aka 'unsigned long')`,
-    `'const char *restrict _Nonnull'` for a nonnull one). Refused by name are
-    the cases whose diagnostics are clang's own elsewhere: an undeclared
-    library function's name (its implicit declaration's), a builtin's name in
-    another expression (`&__builtin_abs`), a redeclared builtin, a builtin
-    parameter's type the spelling doesn't cover (a vector's, `FILE`'s); an
-    index of 0, on which clang 23 crashes; and more than 32 arguments. A
-    definition's identifier list compares its parameters by their declarations'
-    types, the promoted prototype's standing aside, as clang's ParmVarDecl
-    types do. It changes nothing else here: the
+    `'const char *restrict _Nonnull'` for a nonnull one, a vector's
+    `'__attribute__((__vector_size__(8 * sizeof(short)))) short' (vector of 8
+    'short' values)`, `FILE`'s by the unit's typedef, `'FILE *restrict
+    _Nonnull' (aka 'struct F *restrict')`). A builtin's name in another
+    expression, not called (`&__builtin_abs`, `__builtin_abs + 0`), is clang's
+    "builtin functions must be directly called" at the name (at the outermost
+    parentheses around it), then the argument's error at the expression clang
+    recovers (its first token; a lone `&name`'s after the name), or, in a
+    sizeof's, alignof's or typeof's operand, which clang doesn't recover,
+    nothing more: the attribute is dropped. A redeclared builtin
+    (`int __builtin_abs(int);`) is still that builtin, as an argument and in
+    another expression, but a static one.
+    More than 32 arguments are the count's error, as no builtin takes as many.
+    Refused by name are an undeclared library function's name, whose
+    diagnostics are its implicit declaration's (`diagnose_as_builtin(memcpy,
+    ...)` with no declaration of `memcpy`), and an index of 0, on which clang
+    23 crashes. A definition's identifier list compares its parameters by
+    their declarations' types, the promoted prototype's standing aside, as
+    clang's ParmVarDecl types do. It changes nothing else here: the
     `-Wfortify-source` warnings clang gives the function's calls, as it gives
-    them a builtin's, the checker makes for no call.
+    them a builtin's, the checker makes for no call (it has no
+    `-Wfortify-source`).
 
   clang's NEON vectors (#1447), `neon_vector_type(N)` and
   `neon_polyvector_type(N)`, are vectors on x86-64 too: GNU vectors of a kind
@@ -7631,8 +7914,11 @@ arguments against the function. The checker now gives these as clang does.
   "applying attribute 'clang::neon_vector_type' to a declaration is
   deprecated; apply it to the type instead": one before the declaration (or a
   parameter's) as clang warns before applying it, one after a declarator's
-  name once its type took it (CheckInputAttribute.neon_deprecated). A
-  statement's is its error alone, and one in a tag's own list (`struct
+  name once its type took it (CheckInputAttribute.neon_deprecated). After a
+  typedef's name, it and `btf_type_tag` are ProcessDeclAttribute's "cannot be
+  applied to a declaration" instead (`check_input_attribute_typedef`), the
+  vector's after its element's, size's and count's errors
+  (CheckInputAttribute.neon_typedef). A statement's is its error alone, and one in a tag's own list (`struct
   [[clang::neon_vector_type(4)]] S`) is ProcessDeclAttribute's "cannot be
   applied to a declaration" after a count's error, as `btf_type_tag`'s now are
   too.
@@ -7689,12 +7975,27 @@ arguments against the function. The checker now gives these as clang does.
 
   Lowering: clang's x86 target maps address spaces 256, 257 and 258
   (`__seg_gs`, `__seg_fs`) to the `%gs`, `%fs` and `%ss` segments, whose loads
-  and stores need a segment override that Tier 0's and Tier 1's memory operands
-  don't carry (the encoder has the prefixes, which only thread-local storage's
-  forms use). A load or store in one of those spaces is refused by name ("a load
-  or store in a segment's address space", check_lower_segment_access, where a
-  unit has such a type at all: CheckLowerWriter.segments); taking an address
-  there is compiled. Any other space's code is the default space's, as clang's.
+  and stores take a segment override. A load or store in `%fs` or `%gs` of an
+  integer, a floating value (long double too), a 128-bit integer or a vector,
+  by indirection, member, subscript or name, and an assignment, compound
+  assignment, increment or decrement of one, takes it (check_lower_access: the
+  typed stream's `BUSTER_TYPED_ACCESS_SEGMENT` on its LOAD, STORE or SET, which
+  Tier 0 puts on the access's memory operand; docs/tier0.md); a global in one
+  goes through its address, as a memory class's does (`lea sym(%rip)` and then
+  `%gs:(%rax)`, the byte clang's `%gs:sym(%rip)` reaches). Tier 1 falls back to
+  Tier 0 for such a function. The rest is refused by name ("a load or store in a
+  segment's address space", check_lower_segment_access, where a unit has such a
+  type at all: CheckLowerWriter.segments): an aggregate's copy, a bit-field, a
+  complex, half-precision or `_BitInt` value, an `_Atomic` object, and `%ss`'s
+  space (258, whose `36` prefix no 64-bit form of the encoder's has); and so are
+  the accesses whose lvalue doesn't carry the space: a vector's element, read or
+  written (its type loses the vector's space), an atomic builtin's object
+  (`__atomic_*`, `__c11_atomic_*`, `__sync_*`, reached through the pointer
+  argument), and an asm statement's register output (stored through its
+  address; "an asm output in a segment's address space ... but a memory one").
+  Before, those compiled without the override. A memory asm operand's address is
+  the template's, without the segment, as clang's is. Taking an address there is
+  compiled. Any other space's code is the default space's, as clang's.
 
   What differs from clang: C23's spellings (`[[clang::address_space(1)]]` and
   the others), which slide from a declaration to its specifiers with clang's
@@ -7727,7 +8028,12 @@ arguments against the function. The checker now gives these as clang does.
   "'X' attribute only applies to functions and methods" (after an unsupported
   convention's warning), as clang's handlers give it to a declaration without a
   declarator; a bit-field's after its width meets its type
-  ("only applies to function types"). A variadic function's `vectorcall` or
+  ("only applies to function types"). A convention's wrong count of arguments
+  is clang's error where it meets a function or a tag ("'X' attribute takes no
+  arguments", after a definition's `-Wgcc-compat` warning), and on another
+  subject its subject's warning alone (`CheckInputAttribute.convention_count`);
+  its arguments are expressions to clang's parser first, whose errors (an
+  undeclared name's) drop it wherever it is (#1447), but `pcs`', a string's. A variadic function's `vectorcall` or
   `regcall` is clang's "variadic function cannot use vectorcall calling
   convention", and so is a `swiftcall` or `swiftasynccall` one's; a declaration
   (not a definition or a typedef) of such a function without a prototype is
@@ -7752,11 +8058,23 @@ arguments against the function. The checker now gives these as clang does.
   `checkExtParameterInfos` checks them, at the parameter: the convention
   (swiftcall or swiftasynccall, swiftcall's alone for an error result, and any
   for `swift_async_context`, whose function clang's backend gives it r14, which
-  the producer refuses by name), an indirect result first or after another, an
-  error result just after a context. A Swift parameter of another function type
-  than a declaration's own (a pointer's, a parameter's or a type name's), whose
-  convention clang takes from attributes it places otherwise, is refused by
-  name. Off a parameter, each is "only applies to parameters" (a warning).
+  the producer refuses by name; the convention's error once per function, at
+  its first incompatible parameter, as clang's `hasCheckedSwiftCall` has it), an
+  indirect result first or after another, an error result just after a
+  context. A function chunk farther from the name than the nearest one
+  (`void (*f(void))(…)`'s returned function's, `void (*(*p)(int))(…)`'s) has no
+  convention when clang builds it, as distribution gives the declaration's
+  conventions to the nearest, so its parameters are checked as System V's
+  there (#1447). The nearest chunk of a declaration's pointer or array
+  declarator (`void (*p)(…) __attribute__((swiftcall))`) is checked once the
+  declaration's convention is final, with the conventions clang distributes to
+  it, the specifiers' and the trailing ones, but not one written in the
+  pointer's own chunk (`void (__attribute__((swiftcall)) *p)(…)`, between the
+  parentheses around the name and the name), which applies after clang builds
+  it (`check_input_declarator_conventions`, `check_input_declarator_group`).
+  The nearest chunk of a parameter's, a member's or a type name's declarator is
+  refused by name. Off a parameter, each is "only applies to parameters" (a
+  warning).
 
   A definition's `-Wgcc-compat` warning comes before Sema's
   diagnostics of the same attribute.
@@ -7816,7 +8134,10 @@ arguments against the function. The checker now gives these as clang does.
   arguments are expressions to clang's parser (an undeclared name, a missing
   operand: their errors drop it) and nothing to its handler, whatever their
   count. Then, the first rule broken being the declaration's error
-  (`check_input_interrupt_handler`): a result that isn't void, at its type's
+  (`check_input_interrupt_handler`), which drops the attribute and leaves the
+  declaration valid, as clang's handler returns (#1447: its later attributes'
+  errors, `_Alignas`' among them, follow it in their order, and each
+  declarator and later declaration is checked): a result that isn't void, at its type's
   start (`check_input_interrupt_result`: past storage classes, qualifiers and
   attributes; `_Complex`'s type's, `_Atomic(T)`'s T's); a count of parameters
   but one or two (a variadic one's named ones), at the declaration's start; a
@@ -7843,7 +8164,11 @@ arguments against the function. The checker now gives these as clang does.
   address-of, as `ActOnCallExpr` finds it; in `sizeof` and `_Generic`'s
   operands too), is clang's "interrupt service routine cannot be called
   directly" at the callee (Expr::getExprLoc's place: a parenthesized one's
-  `(`, a member's name, a subscript's base's), and in the body of a function
+  `(`, a member's name, a subscript's base's). That error is the call's alone:
+  the unit's later checks run as a valid unit's do (#1447,
+  `CheckInput.recovered_valid`), and no other diagnostic of its full
+  expression is published, as clang's invalid call leaves none
+  (`CheckInput.interrupt_ranges`). In the body of a function
   either marks, any other call whose callee no `no_caller_saved_registers`
   marks (the declaration's attribute, which a typedef's function type
   doesn't give) is -Wexcessive-regsave's warning, interrupt's message where
@@ -7853,7 +8178,10 @@ arguments against the function. The checker now gives these as clang does.
   error, which clang doesn't build, has none. Builtins are calls but those
   clang parses as keywords' forms (`va_arg`, `convertvector`, `offsetof`,
   `types_compatible_p`, `choose_expr`). The calls are the graph's in its
-  postorder, clang's order: a call's callee's and arguments' calls first. An
+  postorder, clang's order: a call's callee's and arguments' calls first;
+  then those the reader's evaluator alone reads, a `typeof`'s and a constant
+  array bound's, whose `)` no graph node has, of a declared name's callee
+  (`check_interrupt_evaluated_calls`, #1447). An
   interrupt service routine's definition is Tier 0's handler frame
   (`Tier0Function.interrupt`, `docs/tier0.md`): `CheckProgram.object_interrupt`
   holds each function's first declaration with the attribute,
@@ -7874,9 +8202,10 @@ arguments against the function. The checker now gives these as clang does.
   declaration with it, and `check_program_realign(program, b)` says whether
   body `b` realigns its stack (`Tier0Function.realign_stack`,
   `docs/tier0.md`'s realigned frames: 16 bytes' at least).
-  A variadic routine, which clang compiles, is refused by name ("unsupported:
-  variadic interrupt service routines"), as are `__builtin_eh_return`,
-  `__builtin_setjmp` and musttail calls in one, as in any preserving frame.
+  A variadic routine's list starts at the interrupted code's argument
+  registers, as LLVM's `x86_intrcc` has it (#1447, `docs/tier0.md`).
+  `__builtin_eh_return`, `__builtin_setjmp` and musttail calls in one are
+  refused by name, as in any preserving frame.
 
   GCC's and clang's `patchable_function_entry(N[, M[, "section"]])`
   (`CHECK_ATTRIBUTE_PATCHABLE_FUNCTION_ENTRY`, #1447) is clang's
@@ -8231,65 +8560,60 @@ arguments against the function. The checker now gives these as clang does.
     missing-semicolon and malformed K&R-tail repairs above preserve their
     original parse errors and notes; they do not make every parser or semantic
     failure resumable (`docs/c-parser.md`).
-  - A calling convention's wrong count is clang's error where the convention
-    meets a function, after a definition's `-Wgcc-compat` warning, and on
-    another subject its warning alone (`CheckInputAttribute.convention_count`).
   - A calling convention's redeclaration and assignment messages, the same for
     `no_caller_saved_registers`:
     - a function declared with an explicit convention other than its earlier
       declaration's is clang's "function declared 'A' here was previously
       declared 'B'" (or "without calling convention", where its first
       declaration has none explicit), with its "previous declaration is here"
-      note at the first declaration (#1447, `check_input_report_redeclaration`),
-      but for `no_caller_saved_registers`, whose clang message is "function
-      declared with 'no_caller_saved_registers' attribute was previously
-      declared without the 'no_caller_saved_registers' attribute": that one is
-      "conflicting types for 'f'", without its note;
+      note at the first declaration (#1447, `check_input_report_redeclaration`).
+      A redeclaration that adds `no_caller_saved_registers` in its own
+      attribute is clang's "function declared with 'no_caller_saved_registers'
+      attribute was previously declared without the 'no_caller_saved_registers'
+      attribute" (`'gnu::no_caller_saved_registers'` for a C23 one), before a
+      type conflict, noted at the declaration its lookup found. One whose
+      typedef carries the attribute, which crashes clang 23, keeps "conflicting
+      types for 'f'";
     - a function type spelled with a macro of its convention prints without
       clang's macro name (`'MS void (void) __attribute__((ms_abi))'`), and a
-      typedef's attribute without clang's sugar
-      (`__attribute__((intel_ocl_bicc))` where its canonical type is
-      `inteloclbicc`);
-    - an assignment between pointers to functions of two conventions is
-      "incompatible operand or conversion types", where clang's is
-      "incompatible function pointer types assigning to …";
-    - a typedef's type prints without clang's `'F *' (aka '…')`.
+      type whose convention an attribute wrote prints its canonical spelling
+      (`__attribute__((inteloclbicc))`, and so in a typedef's `(aka '…')`)
+      where clang prints the attribute as written
+      (`__attribute__((intel_ocl_bicc))`, clang's AttributedType sugar).
   - x86's `interrupt` (#147):
-    - the calls in operands the reader's evaluator alone reads (a `typeof`'s,
-      a constant array bound's `sizeof`) have no graph node: a direct call of
-      an interrupt service routine there isn't clang's error, nor any call
-      there -Wexcessive-regsave's warning;
+    - of the calls in operands the reader's evaluator alone reads (a
+      `typeof`'s, a constant array bound's), those of a builtin and those
+      whose callee isn't a name (`typeof(s.f())`) are neither a direct call's
+      error nor -Wexcessive-regsave's warning;
     - a declaration's interrupt and no_caller_saved_registers are an entity's
       first declarations' with them, up to the declaration a call's name finds
       (or the definition): a block's redeclaration that clang's chain doesn't
       link is taken as linked;
-    - the checker's first error in a declaration ends it, as everywhere:
-      `_Alignas` on a handler is its error alone, where clang gives
-      interrupt's first and then `_Alignas`';
-    - a unit with a direct call's error stops before its later checks (asm
-      operands, initializers' warnings), whose diagnostics clang gives too.
+    - a direct call's error drops every other diagnostic of its full
+      expression (`CheckInput.interrupt_ranges`: its declarator's initializer
+      or its statement, but the call's other arguments and list elements),
+      where clang keeps those of the other operands that don't hold the call,
+      built before or after it (`g(1) + (f(0), 1)`'s -Wexcessive-regsave of
+      `g(1)`, `x = (f(0), 1), x = 1 / 0`'s division by zero, `(f(0), (1, 2))`'s
+      inner comma's -Wunused-value).
   - After a missing `;`'s recovery, an error the checker recovers from
     (`int x _Alignas(3) int y _Alignas(4);`'s "requested alignment is not a
     power of 2") goes on to the later declarations, as clang does ("Semantic
     error recovery", #1447). Another checker error still ends what is
     published; a unit's later parse errors are printed.
-  - The checks-only attributes (#1447): through a macro, `objc_ownership`'s
-    warning on a pointer is at the attribute with the macro's notes, where
-    clang puts it at the macro's immediate expansion, and clang names either
-    attribute `__weak` or `__strong` when the outermost macro is spelled so;
-    objc_gc's and objc_ownership's C23 spellings are refused (see above). In a
-    `_Generic` association's type their warnings aren't made, and a `typeof` type name that starts with a GNU attribute isn't read as
-    one, as for every attribute there. `availability` on a tag's
-    redeclaration isn't compared with the earlier one's. As everywhere, a
+  - The checks-only attributes (#1447): objc_gc's and objc_ownership's C23
+    spellings are refused (see above). In a `_Generic` association's type
+    their warnings aren't made, and a `typeof` type name that starts with a
+    GNU attribute isn't read as one, as for every attribute there. As everywhere, a
     declaration's first error ends the unit: a shared specifiers'
     `objc_ownership` with a count's error warns and errs for the first
     declarator alone, and a TCB function's call clang declares implicitly
     with an error (C99 and later) has no `-Wtcb-enforcement` warning after
     it.
     `diagnose_as_builtin`'s calls have no `-Wfortify-source` warnings, as no
-    call has. A C23 NEON vector attribute after a typedef's or a tag's name
-    gets the deprecation warning where clang's error is "cannot be applied to
-    a declaration", as `btf_type_tag`'s does.
+    call has. A C23 NEON vector's or `btf_type_tag`'s list after a tag's name
+    is the parser's "an attribute list cannot appear here" alone, where clang
+    goes on to "cannot be applied to a declaration".
 - **Tests.** `test-checker` checks the facts table's order and bounds, its
   counts and five rows, and conflicting conventions on a function and on
   another type (`c_check_attribute_test.c`). `test-checker-driver` compares
@@ -8367,8 +8691,8 @@ clang's `diagnose_if(condition, message, "warning" | "error")` and
   third argument other than `"error"` or `"warning"` is "invalid diagnostic
   type for 'diagnose_if'; use "error" or "warning" instead"; a fourth,
   clang's warning group, is "unknown warning group 'G'" where clang knows no
-  such group (`pp_warning_group_known`). A group clang knows names the
-  warning's option, which these warnings don't take yet: "not yet supported".
+  such group (`pp_warning_group_index`). A group clang knows makes the
+  diagnostic clang's custom one of that group (below, "Warning groups").
 - **The condition.** It is read once, where its function is declared, in the
   function's parameter scope: its names are looked up there
   (`check_input_thread_name`; an undeclared one is clang's error), and the
@@ -8384,12 +8708,17 @@ clang's `diagnose_if(condition, message, "warning" | "error")` and
   (`CheckConditionStep`), from the parse tree in postorder: each largest
   subexpression without a parameter, and each sizeof's or alignof's, is a
   constant the evaluator gives; a parameter is its place and type; the
-  others are casts, unary, binary, logical and conditional operators, which
-  each call runs as the checker's own actions (`check_action_scalar`). Any
-  other shape (a subscript, a call, an assignment) is "not yet supported"
-  in user code; in a system header, and on an object-size wrapper
-  (`pass_object_size`), the condition is kept and decides nothing, as these
-  wrappers had it before.
+  others are casts, unary, binary, logical, comma and conditional operators,
+  which each call runs as the checker's own actions (`check_action_scalar`).
+  A call of a declared function, which no constant evaluation gets past, is
+  an unknown value where its arguments name a parameter (its arguments are
+  still read), and an assignment or an increment one where a `&&`, a `||` or
+  a conditional can skip it; otherwise each is "never produces a constant
+  expression", its note at the call's name or the operator, as a call
+  without a parameter is (`g(1) > 0`, `h()`). Any other shape (a subscript,
+  a builtin's call) is "not yet supported" in user code; in a system header,
+  and on an object-size wrapper (`pass_object_size`), the condition is kept
+  and decides nothing, as these wrappers had it before.
 - **Lists.** Each function declaration where some condition holds has its
   list (`CheckInput.condition_declarations`, by the declaration's name
   token): its previous declaration's, then its own, as clang's
@@ -8404,7 +8733,18 @@ clang's `diagnose_if(condition, message, "warning" | "error")` and
   call's callee through parentheses and outside sizeof's, alignof's and
   typeof's operands, is "cannot take address of function 'f' because it has
   one or more non-tautological enable_if conditions", at the outermost `(`
-  around the name. `check_input_condition_uses` finds the uses once the
+  around the name. clang gives it where an operation converts the name to its
+  address (`check_condition_conversion`: the use's parent past its
+  parentheses, a call's `)` for an argument, an initializer's outermost `}`
+  for an element), not for a sizeof's, alignof's or typeof's operand (but
+  inside an operation there, `sizeof(q == r)`); and only where clang builds
+  that operation, which an operand holding a failed conversion stops
+  (`(q == s) + r`'s `r` has none). An operation that converts its operands in
+  order stops at the first that fails (`c ? q : r`, `g(q, r)` and `q == r`
+  give `q`'s alone); an initializer list converts each element on its own,
+  once none holds a failed conversion (`check_condition_addresses`). The
+  error's statement or declaration then has no later expression checks, from
+  its start. `check_input_condition_uses` finds the uses once the
   unit's names are bound: the vector path gathers 16 tokens' declarations'
   marks at a time, the scalar path its twin.
 - **Calls.** After checking, each call whose callee names a function with a
@@ -8425,19 +8765,38 @@ clang's `diagnose_if(condition, message, "warning" | "error")` and
   "candidate disabled: M" at the declaration the call found; otherwise the
   diagnose_if conditions that hold are given at the call's `)`.
 - **Several at once.** Of the conditions that hold at one use or call, an
-  error is given alone, the first in source order; otherwise every warning,
-  in source order, each with its note.
+  error of no warning group is given alone, the first in source order;
+  otherwise every warning, in source order, each with its note, and every
+  diagnostic of a warning group, without one.
+- **Warning groups.** A diagnose_if with a fourth argument is clang's custom
+  diagnostic of that group (`CHECK_WARNING_EVENT_DIAGNOSE_IF`'s payload, its
+  group's index in `pp_features_warning`): a warning, or for `"error"` an
+  error by default, named `[-WG]`, without the note. Its options are the
+  group's and those of every group that holds it in clang's tree
+  (`pp_warning_group_holds`, over `pp_warning_group_parents`: clang 23.1.5's
+  `diagtool tree`), each in turn (`check_warning_group_command_line`): `-W`
+  a warning (so `-Wall` makes `"error"`'s of `format` a warning), `-Wno-`
+  ignored, `-Werror=` an error, `-Wfatal-errors=` fatal, `-Wno-error=` an
+  error a warning; then a source pragma of such a group
+  (`check_diagnostic_group_severity_from`). clang keeps none of these as the
+  user's: `-Weverything` enables an ignored one, `-Wno-everything` leaves it,
+  and `-Werror` makes a warning an error through any `-Wno-error=`; `-w`
+  ignores a warning, not an error. An error by default has no `-Werror,` in
+  its option, however it became one.
 - **Cost.** A unit without these attributes tests a reader flag where
   declarations are read and a count where uses and calls are; the steps are
   built only for these attributes.
 
 What isn't clang's yet: an overloadable function's conditions, which take
 part in its overload resolution, are "not yet supported" in user code (a
-tautological `enable_if(1, ...)`, glibc's, aside); the fourth argument's
-known warning groups; the condition shapes above; and, as everywhere in this
-driver, the uses' errors stop the unit's later expression checks, so a call
-after one such error isn't diagnosed. clang gives one address error for a
-conditional operator's two function operands; this gives one for each.
+tautological `enable_if(1, ...)`, glibc's, aside); the condition shapes
+above (and clang's `-Wunused-value` of a comma operator's left operand in a
+condition isn't given); and, as everywhere in this driver, the uses' errors stop the unit's
+later expression checks, so a call after one such error isn't diagnosed. An
+assignment expression as an initializer list's element (`{ x = q }`) is read
+as a designation, whose value clang converts with the list's. A grouped
+diagnose_if under `-Weverything` meets every other warning that option
+enables, which this checker doesn't all give.
 
 ## Operand errors (#147)
 
@@ -8564,19 +8923,33 @@ conditional operator's two function operands; this gives one for each.
   pointer to an incomplete type 'struct s'" (a subscript's "subscript of
   pointer to incomplete type", at its `[`), of the pointee as written, with its
   "forward declaration of 'struct s'" note at the tag's declaring name.
+- **Type sugar** (#1447). An operand's type keeps the typedef clang's sugar
+  keeps there. A dereference or subscript follows the declaration's chain of
+  typedef specifiers to the first typedef whose type is the operand's level
+  (`check_driver_spelling_chain`): `*p` of a `pv p` (`typedef v4si *pv`) is
+  `'v4si'`, and `**b` of a `VPP b` (`typedef VP *VPP`) is
+  `'VP' (aka 'void *')`. A chain's types only shrink, so its first match is
+  clang's. A `.` or `->` operand keeps its member declarator's typedef: the
+  member's declarator is found in its record's body, which
+  `CheckGraph.tag_completions` locates (`check_semantic_member_token`), so
+  `x.f++` of a member `uu f` is `'uu' (aka 'struct u')`, and a warning's
+  member operand (`check_common_operand_spelling`) keeps it too:
+  `x.n < i` is `'ul' (aka 'unsigned long')`. An a.k.a. keeps a
+  vector's own typedef at any level (`'pv' (aka 'v4si *')`), as
+  `desugarForDiagnostic` stops there. A typedef'd array's element keeps its
+  qualified typedef (`'CI[2]' (aka 'const int[2]')`, `type_print`).
+  `c_check_type_sugar_driver_test.c` compares these whole-output with clang.
 - **Differences left.**
-  - A vector type reached through a pointer typedef (`typedef v4si *pv;`)
-    prints without its typedef's name, and so does a member's type
-    (`x.f++` of a member `uu f` prints `'struct u'` where clang's is
-    `'uu' (aka 'struct u')`): a record's members keep no declaration.
   - An assignment to a member that is const itself is "read-only variable is
-    not assignable", where clang names the member with its note: a record's
-    members keep no declaration. A typedef'd array's variable prints its
-    element's typedef unspelled (`'const int[2]'` for clang's
-    `'CI[2]' (aka 'const int[2]')`).
-  - A typedef inside another typedef (`typedef VP *VPP`) loses its inner name
-    in the void dereference's operand type (`**b`'s `'void *'` for clang's
-    `'VP'`).
+    not assignable", where clang names the member with its note.
+  - A qualifier written again over a qualified typedef's array
+    (`const CI twice[1]`) is dropped: clang prints
+    `'const CI[1]' (aka 'const int[1]')`, this `'CI[1]'`.
+  - The reader's spelling helpers (`check_input_operand_type_spelling`,
+    `check_input_object_spelling`), which run before the stream has types,
+    don't follow members. The warnings the driver spells after checking
+    (`check_common_operand_spelling`: `-Wsign-compare`, `-Wformat`,
+    `-Wenum-compare` and the like) do.
 
 ## Ignorable and unsupported pragmas
 
@@ -8639,8 +9012,25 @@ compares scalar/vector objects and poisoned multi-lane objects. The shared walk
 borrows live preprocessing options only during selection and retains no new
 pointer to a worker's preprocessor.
 
-`#pragma weak ALIAS = TARGET` remains refused because it can create a typed alias
-declaration without a C declarator. This is separate from ordinary weak binding.
+`#pragma weak ALIAS = TARGET` (#1849) declares ALIAS a weak alias of TARGET, as
+clang's Sema clones TARGET's declaration under ALIAS's name with weak and alias
+attributes: TARGET is looked up at the pragma, or at its first later external
+declaration, and one that already has an alias attribute makes it a no-op; a
+TARGET never declared is clang's "weak identifier 'TARGET' never declared" at
+ALIAS. The shapes whose ALIAS the unit declares with external linkage, of
+TARGET's kind, type and thread-local storage, without a section, alias or
+definition after the pragma and named by nothing after it, take the alias as
+attributes of ALIAS's declaration (`check_input_symbol_alias`), which the
+emission makes clang's weak alias of TARGET's definition; one whose ALIAS the
+unit defined before the pragma is clang's no-op. The rest stay refused by name:
+an ALIAS the unit doesn't declare (clang's clone is a declaration without a C
+declarator, which a later use names), one named after the pragma (clang's
+lookup then finds two declarations), one defined after it, of another kind,
+type or thread-local storage, with a section or an alias of its own, or a
+TARGET the unit doesn't define (clang's error at the pragma). This is separate
+from ordinary weak binding. `test-checker-driver`
+(`c_check_symbol_pragma_driver_test.c`) compares the supported shapes'
+symbols and programs with clang's, by both paths.
 
 With `-flazy-system-headers`, an earlier occurrence of the pragma's name in a
 deferred body is conservatively refused because its binding was not checked;
@@ -8673,8 +9063,20 @@ locations with Clang. Separately compiled Clang and Buster callers/callees excha
 ordinary, packed, zero-width and union records in both directions at `-O0` and
 `-O2`, with fixed layout assertions and scalar/vector object equality.
 
-Other unsupported semantic effects remain hard, named errors, including
-layout-changing `align=packed`.
+`#pragma options align=X` and `#pragma align=X` (#1849, clang's
+`ActOnPragmaOptionsAlign`) act on the same stack as `#pragma pack`
+(`check_input_pack_align_record`): `packed` pushes the current value and packs
+to 1; `natural`, `native` and `power` push it and set the default, whose layout
+they are on x86-64; `reset` pops the stack's top, or with an empty stack resets
+a value other than the default (a pack value, or packed or natural's mode),
+else warns "#pragma options align=reset failed: stack empty". A malformed one
+is ignored with clang's `-Wignored-pragmas` warning at its place ("expected
+'align' following '#pragma options'", "expected '='", "expected identifier",
+"invalid alignment option", "extra tokens"), as the options and pragmas map
+it. `mac68k`, clang's error on this target, is refused by name, as are other
+unsupported semantic effects. `#pragma pack`'s own warnings (`pack(show)`, a
+pop of an empty stack, an unterminated push at the end of the file, which
+clang also gives an align push) are not reported yet.
 Warning suppression cannot approve these directives. Already
 supported directives keep their original handlers and syntax validation.
 
