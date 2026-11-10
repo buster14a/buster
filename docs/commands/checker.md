@@ -82,13 +82,21 @@ unused-warning fixtures also check exact scope-completion tokens.
   keeps the parser's driver alone. Unsupported syntax is diagnosed.
   `test-checker-driver --executable ./build/compiler [--part K/N]
   [--lazy-system-headers | --cpu-dispatch-only | --type-sugar-only |
-  --asm-definitions-only]` and `test-checker-asm`
+  --asm-definitions-only] [--in-process] [--clang-server PATH]
+  [--differential]` and `test-checker-asm`
   check the driver and inline assembly against Clang (named UCNs too, #1447,
   `check_test_driver_named_ucns`; with
   `--lazy-system-headers`, only the checks that pass the driver
   `-flazy-system-headers`, since the others run the same either way, and
   `--part K/N` runs the K-th of N parts its checks are dealt to in turn,
-  `CheckDriverPart`; `--cpu-dispatch-only` runs the `cpu_specific` and
+  `CheckDriverPart`; #2071's prototype run modes, which only
+  `check_test_driver_warning_fixtures` takes so far: `--in-process` runs
+  buster's commands as this process's `run_check_command` with standard
+  error captured in memory, `--clang-server PATH` sends clang's to
+  `tools/clang-server` (one clang that runs each command line through its
+  own driver and cc1 in-process), and `--differential` also runs each such
+  command as a child and fails on any difference in status or output; the
+  run reports the sweep's time; `--cpu-dispatch-only` runs the `cpu_specific` and
   `cpu_dispatch` section alone, #1447; `--asm-definitions-only` runs what
   inline assembly defines against clang's objects alone, #1848; `--semantic-recovery-only` runs
   `c_check_semantic_recovery_driver_test.c`, `c_check_statement_recovery_driver_test.c`,
