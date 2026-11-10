@@ -448,6 +448,9 @@ typedef enum CheckWarningCompletion
 // A CHECK_WARNING_EVENT_LATE_ATTRIBUTE of an implicit attribute, which clang gives no location (#147: interrupt's used
 // after a definition), its token the attribute's that made it, for its policy's place.
 #define BUSTER_CHECK_WARNING_UNLOCATED 0x10u
+// CHECK_WARNING_EVENT_PRAGMA's payload.data indexes CheckInputPackPragmas only with this discriminator (#1849: a
+// `#pragma options align` or `#pragma align` warning).
+#define BUSTER_CHECK_WARNING_PACK_PRAGMA 0x20u
 #define BUSTER_CHECK_WARNING_NO_SOURCE UINT32_MAX
 // CHECK_WARNING_EVENT_UNKNOWN_ATTRIBUTE's payload.data bit of a C23 attribute's spelling, past its scope's identifier.
 #define BUSTER_CHECK_WARNING_STANDARD_ATTRIBUTE 0x80000000u
@@ -533,10 +536,10 @@ static __attribute__((unused)) CheckWarningEvents check_warning_view(const Check
 // pragma's payload without affecting its warning policy, and are invalid on every other event kind.
 static bool check_warning_flags_valid(uint32_t kind, uint32_t flags)
 {
-    const uint32_t histories = BUSTER_CHECK_WARNING_SYMBOL_PRAGMA | BUSTER_CHECK_WARNING_MS_PRAGMA;
+    const uint32_t histories = BUSTER_CHECK_WARNING_SYMBOL_PRAGMA | BUSTER_CHECK_WARNING_MS_PRAGMA | BUSTER_CHECK_WARNING_PACK_PRAGMA;
     const uint32_t payload = flags & histories;
     return (flags & ~(BUSTER_CHECK_WARNING_DEFAULT_IGNORED | BUSTER_CHECK_WARNING_SUPPRESSED | histories | BUSTER_CHECK_WARNING_UNLOCATED)) == 0 &&
-           (payload == 0 || kind == CHECK_WARNING_EVENT_PRAGMA) && payload != histories &&
+           (payload == 0 || kind == CHECK_WARNING_EVENT_PRAGMA) && (payload & (payload - 1)) == 0 &&
            ((flags & BUSTER_CHECK_WARNING_UNLOCATED) == 0 || kind == CHECK_WARNING_EVENT_LATE_ATTRIBUTE);
 }
 

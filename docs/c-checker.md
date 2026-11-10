@@ -8987,8 +8987,20 @@ locations with Clang. Separately compiled Clang and Buster callers/callees excha
 ordinary, packed, zero-width and union records in both directions at `-O0` and
 `-O2`, with fixed layout assertions and scalar/vector object equality.
 
-Other unsupported semantic effects remain hard, named errors, including
-layout-changing `align=packed`.
+`#pragma options align=X` and `#pragma align=X` (#1849, clang's
+`ActOnPragmaOptionsAlign`) act on the same stack as `#pragma pack`
+(`check_input_pack_align_record`): `packed` pushes the current value and packs
+to 1; `natural`, `native` and `power` push it and set the default, whose layout
+they are on x86-64; `reset` pops the stack's top, or with an empty stack resets
+a value other than the default (a pack value, or packed or natural's mode),
+else warns "#pragma options align=reset failed: stack empty". A malformed one
+is ignored with clang's `-Wignored-pragmas` warning at its place ("expected
+'align' following '#pragma options'", "expected '='", "expected identifier",
+"invalid alignment option", "extra tokens"), as the options and pragmas map
+it. `mac68k`, clang's error on this target, is refused by name, as are other
+unsupported semantic effects. `#pragma pack`'s own warnings (`pack(show)`, a
+pop of an empty stack, an unterminated push at the end of the file, which
+clang also gives an align push) are not reported yet.
 Warning suppression cannot approve these directives. Already
 supported directives keep their original handlers and syntax validation.
 

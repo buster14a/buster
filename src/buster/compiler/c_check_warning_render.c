@@ -736,6 +736,8 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
         {
             const CheckInputSymbolPragma* record = check_input_symbol_warning(input, event);
             const CheckInputMsPragma* layout = check_input_ms_warning(input, event);
+            const CheckInputPackPragma* packing = check_input_pack_warning(input, event);
+            result = packing != NULL ? check_input_pack_align_message(packing) : result;
             if (layout != NULL)
             {
                 result = layout->warning == 1 ? "incorrect use of '#pragma ms_struct on|off' - ignored" :
@@ -1546,8 +1548,12 @@ static bool check_driver_warning_events_at(const Parser* parser, Preprocessor* p
                     {
                         const CheckInputSymbolPragma* record = check_input_symbol_warning(input, event);
                         const CheckInputMsPragma* layout = check_input_ms_warning(input, event);
-                        const bool semantic = record != NULL && record->warning >= CHECK_SYMBOL_WARNING_UNDECLARED;
-                        const uint32_t location = record != NULL ? record->diagnostic_location : layout != NULL ? layout->diagnostic_location : 0;
+                        const CheckInputPackPragma* packing = check_input_pack_warning(input, event);
+                        // An align=reset's empty stack is Sema's, where the parser handles the directive (#1849).
+                        const bool semantic = (record != NULL && record->warning >= CHECK_SYMBOL_WARNING_UNDECLARED) ||
+                                              (packing != NULL && packing->align_warning == CHECK_PACK_ALIGN_RESET_EMPTY);
+                        const uint32_t location = record != NULL ? record->diagnostic_location : layout != NULL ? layout->diagnostic_location :
+                                                  packing != NULL ? packing->diagnostic_location : 0;
                         if (location != 0)
                         {
                             const uint32_t saved_position = pp->diagnostic_position;
