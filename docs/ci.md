@@ -643,8 +643,9 @@ several threads, so under it `test-lanes`' child forked from a session's lane 0
 (#905) runs a group of one.
 
 The TSan and MSan rows leave out the checking comparison of the compiler's own
-`main.c` (#129, `tools/ci/correctness.tests`). The unit's 6,323,682
-preprocessed tokens make the comparison's two paths hold 7.5 GiB resident
+`main.c` (#129, `tools/ci/correctness.tests`), with `-DBUSTER_COMPLETE_DRIVER=1`
+for the whole compiler: 4,864,411 preprocessed tokens on 2026-11-10. At
+6,323,682 tokens the comparison's two paths held 7.5 GiB resident
 unsanitized (measured with an `-O3` UBSan build on the 7940HS), and TSan's
 shadow took the same check past 20 GiB before it was stopped; that cannot share
 a 16 GiB hosted runner with any other command. The `-c` commands peak at

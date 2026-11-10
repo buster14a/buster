@@ -329,7 +329,7 @@ lane cache: both must splice the same bodies into the same bytes in every
 column, `tier0_validate` must accept each and Tier 0 compile it. Without a file
 it takes the driver fixture below at x86-64-v4 (under a second), and checks
 that at least 20 calls were inlined. On the compiler's own `main.c` (`-march=native -Isrc -fwrapv
--funsigned-char -fno-strict-aliasing -DBUSTER_COMPLETE_DRIVER=1`, as CI runs it) it splices 830 of 8,509 bodies,
+-funsigned-char -fno-strict-aliasing`) it splices 830 of 8,509 bodies,
 7,695 calls, in about 8 s on a 4-core cloud host. `test-checker-driver`'s
 fixture (`c_check_tier0_inline_driver_test.c`) builds a program of the
 splice's shapes by the vector path, the scalar twin and `--tier0-no-inline`:

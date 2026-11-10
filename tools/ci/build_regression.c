@@ -394,8 +394,9 @@ static void check_standalone_preprocessing(void)
 
 // The self-tests and benchmarks that take main.c as their input (tools/ci/correctness.tests and the 9700X workflow)
 // pass -DBUSTER_COMPLETE_DRIVER=1, so that it reads the production code of the other units as well as the driver's,
-// as a fuzz build's driver does. Check one function of each family that the ordinary driver leaves to its owners, in
-// both hosts' configurations, so that a new guard can't silently halve those inputs.
+// as a fuzz build's driver does. Check one definition from each block that the ordinary driver leaves to its owners,
+// in both hosts' configurations, so that a new guard can't silently halve those inputs. Each is a static definition's
+// text that no other source file has, so that a caller or a declaration elsewhere can't stand in for it.
 static void check_complete_driver_preprocessing(void)
 {
     static const struct
@@ -403,13 +404,25 @@ static void check_complete_driver_preprocessing(void)
         const char* source;
         const char* entry;
     } families[] = {
-        { "c_preprocessor_impl.c", "pp_lexed_start(" },
-        { "c_preprocessor_history_impl.c", "pp_history_initial(" },
-        { "executable_impl.c", "executable_align(" },
-        { "c_check_program.c", "check_program_fail(" },
-        { "ir_lower.c", "ir_typed_vector_bytes(" },
-        { "tier0.c", "tier0_is_object(" },
-        { "tier1_allocate.c", "tier1_allocation_input_valid(" },
+        { "c_preprocessor_impl.c", "static void pp_diagnostic_limit(" },
+        { "c_preprocessor_history_impl.c", "static void* pp_history_initial(" },
+        { "executable_impl.c", "static uint64_t executable_align(" },
+        { "dominators.c", "static DominatorOptions dominators_options(" },
+        { "tier1_allocate.c", "static uint32_t tier1_allocation_next_use(" },
+        { "tier1_schedule.c", "static void tier1_schedule_adjust(" },
+        { "c_check_lazy.c", "static uint32_t check_lazy_expansion_location(" },
+        { "c_check_actions.c", "static void check_value_copy_floating(" },
+        { "c_check_literals.c", "static uint32_t check_literal_digit(" },
+        { "tier1_frame.c", "static uint32_t tier1_frame_row(" },
+        { "tier0.c", "static uint8_t tier0_mask_register(" },
+        { "c_check_program.c", "static void check_program_fail(" },
+        { "c_check_prefix.c", "static void* check_prefix_column(" },
+        { "baked.c", "static uint64_t bake_section_size(" },
+        { "c_check_corpus.c", "static void check_corpus_input_diagnostic(" },
+        { "c_check_source_prepare.c", "static void check_source_print_receipt(" },
+        { "ir_lower.c", "static uint32_t ir_typed_vector_bytes(" },
+        { "tier1_select.c", "static X86Instruction tier1_select_register_record(" },
+        { "c_check_tier1.c", "static Tier1EmitCause check_tier1_fault_emission_cause(" },
     };
     static const char* const hosts[] = { "-march=x86-64", "-march=znver5" };
     for (uint32_t host = 0; host < sizeof(hosts) / sizeof(hosts[0]); host += 1)
@@ -438,7 +451,7 @@ static void check_complete_driver_preprocessing(void)
         }
         free(text.data);
     }
-    pass("main.c's complete driver retains the other units' production families on both hosts");
+    pass("main.c's complete driver retains a definition of each block the ordinary driver leaves out, on both hosts");
 }
 
 // Check copied source, never the working tree: increasing either reader bound would otherwise leave a valid but

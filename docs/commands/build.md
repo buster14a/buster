@@ -455,7 +455,8 @@ access; ordinary builds do not acquire that additional owner. The self-tests and
 and measure the whole compiler without changing any production object: with
 `-march=native`, `main.c` preprocesses to 25.76 MB with it and 12.02 MB without
 (25.75 MB before the boundaries). Pass it when running those commands by hand
-too. The build regression checks that it keeps one function of each family.
+too. The build regression checks that it keeps a definition from each block
+that the ordinary driver leaves out, on both hosts.
 
 The x86 target-form row enums, initializers and per-row policy assertions are
 also parsed only by their data owner or a standalone consumer. Other units use

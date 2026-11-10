@@ -339,9 +339,9 @@ musl="$corpus/libc/musl"
 # sanitizer and fuzzing, and -DBUSTER_COMPLETE_DRIVER=1 for the whole compiler rather than the driver unit's code
 # (the unit docs/c-lowering.md measures; docs/commands/build.md): checked by both paths, which must agree, and
 # accepted as clang -fsyntax-only accepts it, and its -c object must define what clang -O0 -c's does, but for the
-# documented reasons. The one file must be compared, except in the TSan and MSan rows: its 6,323,682 preprocessed
-# tokens hold 7.5 GiB resident unsanitized, and TSan's shadow takes the same check past 20 GiB, beyond the hosted
-# runner (docs/ci.md). Every other row and the 9700X still run it.
+# documented reasons. The one file must be compared, except in the TSan and MSan rows: it is 4,864,411 preprocessed
+# tokens (on 2026-11-10), and at 6,323,682 its two paths held 7.5 GiB resident unsanitized and TSan's shadow took the
+# same check past 20 GiB, beyond the hosted runner (docs/ci.md). Every other row and the 9700X still run it.
 if [ "${BUSTER_SANITIZER:-none}" != thread ] && [ "${BUSTER_SANITIZER:-none}" != memory ]; then
 unset CPATH C_INCLUDE_PATH
 mapfile -d '' -t flags < <(env -u BUSTER_SANITIZER -u BUSTER_SANITIZER_OPTIMIZATION -u BUSTER_FUZZ_AVAILABLE -u BUSTER_FUZZ_ENTRY \
