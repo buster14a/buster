@@ -1527,7 +1527,8 @@ static CheckInputReport check_deferred_report(const CheckInputReport* report, co
 {
     CheckInputReport result = *report;
     const bool redeclaration = result.message == CHECK_INPUT_REDECLARATION || result.message == CHECK_INPUT_CONFLICTING_TYPES;
-    const bool binary = result.message == CHECK_INPUT_ATTRIBUTE_ARGUMENT && (result.detail & 0xffu) == CHECK_ARGUMENT_EXPRESSION_BINARY;
+    const bool binary = (result.message == CHECK_INPUT_ATTRIBUTE_ARGUMENT || result.message == CHECK_INPUT_CONSTANT_EXPRESSION) &&
+                        (result.detail & 0xffu) == CHECK_ARGUMENT_EXPRESSION_BINARY;
     const bool typed = (redeclaration && result.detail != CHECK_REDECLARATION_GENERIC) || binary || result.message == CHECK_INPUT_ARRAY_LITERAL_MISMATCH || result.message == CHECK_INPUT_TAG_INCOMPATIBLE;
     result.type = check_deferred_type(part, result.type);
     result.value = typed ? check_deferred_type(part, (TypeId)result.value) : result.value;
@@ -2640,8 +2641,11 @@ static void check_deferred_bodies(CheckDeferred* deferred, CheckInputReader* rea
     // A unit whose top level reported, that has overloadable functions, or that has #pragma clang section, whose settings
     // and conflicts read the walk's declarations in source order (c_check_section_input.c), is source order's.
     bool valid = !deferred->unsupported && input->report_count == 0 && !input->resource && reader->bindings.valid && !deferred->top_changes.full &&
-                 input->overload_heads == 0 && input->sections == 0 && deferred->lanes != 0 && deferred->lanes <= BUSTER_CHECK_DEFERRED_MAX_LANES;
+                 input->overload_heads == 0 && input->sections == 0 && reader->output->invalid_count == 0 && reader->ambiguous_count == 0 && deferred->lanes != 0 &&
+                 deferred->lanes <= BUSTER_CHECK_DEFERRED_MAX_LANES;
+    // (An invalid declaration's uses are quiet in source order's binding answers, #1447: check_input_invalid_declare.)
     deferred->reason = input->report_count != 0 ? "the top level reports an error" : input->overload_heads != 0 ? "overloadable functions" :
+                       reader->output->invalid_count != 0 ? "an invalid declaration" : reader->ambiguous_count != 0 ? "an enum's C23 redefinition" :
                        input->sections != 0 ? "#pragma clang section" : deferred->unsupported && deferred->reason != 0 ? deferred->reason :
                        !valid ? "the top level ran out of room" : 0;
     deferred->top_reader = reader;
