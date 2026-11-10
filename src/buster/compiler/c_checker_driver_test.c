@@ -64,9 +64,12 @@ static bool check_test_driver_takes(void)
 // response file, a jobserver's dry run, the guardian's or the fuzzer's command), runs as a child as before. With
 // --differential, each run a mode takes also runs as a child: the child's result is the check's, and any difference
 // in status or output is counted and printed. test-checker-driver reports the counts and the warning sweep's time.
-// main.c's routing of a source command by the reusable commands, in the driver's unit (main.c includes this file
-// before its own declaration of it).
+// main.c's routing of a source command by the reusable commands, in the driver's unit, and the preprocessor's reusable
+// command in its home, the frontend's unit (main.c includes this file before its own declarations of them). The checks
+// call the frontend's, as main does, rather than this unit's copy of the preprocessor, whose command state would then
+// be split between the two units (check-call-graph's split state).
 int main_source_command_reusable(int argc, char** argv);
+int main_preprocessor_command_reusable(int count, char** arguments);
 
 typedef struct CheckDriverRunModes CheckDriverRunModes;
 struct CheckDriverRunModes
@@ -7983,10 +7986,10 @@ static void check_test_driver_reuse(CheckTest* test, const char* directory)
     for (uint32_t route = 0; written && route < 2; route += 1)
     {
         const int warm = route == 0 ? run_check_command(BUSTER_ARRAY_LENGTH(check_arguments), check_arguments, true) :
-                                     run_preprocessor_command(BUSTER_ARRAY_LENGTH(pp_arguments), pp_arguments);
+                                     main_preprocessor_command_reusable(BUSTER_ARRAY_LENGTH(pp_arguments), pp_arguments);
         const uint64_t before = parse_test_status_bytes("VmSize:");
         const int again = route == 0 ? run_check_command(BUSTER_ARRAY_LENGTH(check_arguments), check_arguments, true) :
-                                      run_preprocessor_command(BUSTER_ARRAY_LENGTH(pp_arguments), pp_arguments);
+                                      main_preprocessor_command_reusable(BUSTER_ARRAY_LENGTH(pp_arguments), pp_arguments);
         const uint64_t after = parse_test_status_bytes("VmSize:");
         check_test_expect(test, warm == 0 && again == 0 && before != 0 && after == before,
                           "reusable source and preprocessor commands release their mappings before returning");
@@ -7997,7 +8000,7 @@ static void check_test_driver_reuse(CheckTest* test, const char* directory)
         if (saved >= 0 && quiet >= 0 && dup2(quiet, STDERR_FILENO) == STDERR_FILENO)
         {
             rejected = route == 0 ? run_check_command(BUSTER_ARRAY_LENGTH(invalid_arguments), invalid_arguments, true) :
-                                    run_preprocessor_command(BUSTER_ARRAY_LENGTH(invalid_arguments), invalid_arguments);
+                                    main_preprocessor_command_reusable(BUSTER_ARRAY_LENGTH(invalid_arguments), invalid_arguments);
         }
         if (saved >= 0)
         {
@@ -8030,7 +8033,7 @@ static void check_test_preprocessor_failed_output(CheckTest* test, const char* d
     int status = 0;
     if (saved >= 0 && quiet >= 0 && dup2(quiet, STDERR_FILENO) == STDERR_FILENO)
     {
-        status = run_preprocessor_command(BUSTER_ARRAY_LENGTH(arguments), arguments);
+        status = main_preprocessor_command_reusable(BUSTER_ARRAY_LENGTH(arguments), arguments);
     }
     if (saved >= 0)
     {
