@@ -307,6 +307,12 @@ struct CheckInputAttribute
     // took it (check_input_neon_vector), as ProcessDeclAttribute gives it to a valid attribute alone.
     uint8_t neon;
     bool neon_deprecated;
+    // A NEON vector's after a typedef's name, which ProcessDeclAttribute refuses there (#1447): its error, once its count's
+    // and size's are past, where a variable's is the deprecation warning.
+    bool neon_typedef;
+    // A tag's earlier declaration's, joined to its definition's list (#1447): availability's handler merges the
+    // definition's own with each other, not with these, which the redeclaration's merge meets (check_input_availability_tag_merge).
+    bool earlier_declaration;
     // An ADDRESS_SPACE record's OpenCL space (BUSTER_TYPE_SPACE_*, 0 for address_space's), and whether a declarator's chunk
     // applied it to its pointer or its group's type, which the declarator's whole type then doesn't take (#1447).
     uint8_t space;
@@ -3143,6 +3149,27 @@ static uint32_t check_input_standard_place(const Parser* parser, uint32_t open)
 
 // Whether the C23 lists from `open` (the first's outer `[`) of a tag's own list are a tag declaration's or definition's
 // (#1447): past them, its name if it has one, then `;` or its body's `{`; not a reference's.
+// Whether the declaration whose C23 attribute list opens at `open` (its first `[`) is a typedef's (#1447): a walk back over its tokens, past
+// bracketed groups and a record's or an enumeration's body, to its start, for the `typedef` keyword.
+static bool check_input_attribute_typedef(const Parser* parser, uint32_t open)
+{
+    bool found = false;
+    bool walking = true;
+    uint32_t depth = 0;
+    for (uint32_t at = open; walking && !found && at > 0; at -= 1)
+    {
+        const uint8_t kind = parser->tokens.kinds[at - 1];
+        const uint8_t role = parser->tree.roles[at - 1];
+        const bool closer = kind == PARSE_KIND_R_PAREN || kind == PARSE_KIND_R_SQUARE || (kind == PARSE_KIND_R_BRACE && (role == PARSE_ROLE_CLOSE_STRUCT || role == PARSE_ROLE_CLOSE_ENUM));
+        const bool opener = kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE || kind == PARSE_KIND_L_BRACE;
+        walking = depth != 0 || (kind != PARSE_KIND_SEMI && !opener && (kind != PARSE_KIND_R_BRACE || closer));
+        depth += closer ? 1u : 0u;
+        depth -= opener && depth != 0 ? 1u : 0u;
+        found = walking && depth == 0 && parser->tokens.names[at - 1] == C_NAME_TYPEDEF;
+    }
+    return found;
+}
+
 static bool check_input_attribute_tag_declares(const Parser* parser, uint32_t open)
 {
     const uint32_t count = parser->tokens.count;
@@ -4033,6 +4060,15 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
             check_input_attribute_argument_error(reader, attributes, &attribute, attribute.first, CHECK_ARGUMENT_INVALID_ON_DECLARATION, 0);
             valid = false;
         }
+        else if (declaration_place && clang_scope && !reader->statement_attributes && !tag_keyword && !leading && !neon_leading &&
+                 check_input_attribute_equal(name, "btf_type_tag") && check_input_attribute_typedef(parser, list_opener >= 2 ? list_opener - 2 : 0) &&
+                 check_input_attribute_count_check(fact, check_input_attribute_count(parser, &attribute), &tag_bound) == BUSTER_CHECK_COUNT_NONE)
+        {
+            // After a typedef's name, ProcessDeclAttribute refuses such a type attribute, which a variable's slides to its
+            // type with the deprecation warning (#1447).
+            check_input_attribute_argument_error(reader, attributes, &attribute, attribute.first, CHECK_ARGUMENT_INVALID_ON_DECLARATION, 0);
+            valid = false;
+        }
         else if (declaration_place && clang_scope && !reader->statement_attributes && !tag_keyword &&
                  (check_input_attribute_equal(name, "btf_type_tag") || (neon_name && neon_leading)))
         {
@@ -4043,6 +4079,7 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
             check_input_attribute_named_event(reader, &attribute, CHECK_WARNING_ID_DEPRECATED_ATTRIBUTES, CHECK_WARNING_EVENT_TYPE_ON_DECLARATION);
         }
         attribute.neon_deprecated = valid && declaration_place && clang_scope && !reader->statement_attributes && !tag_keyword && neon_name && !neon_leading;
+        attribute.neon_typedef = attribute.neon_deprecated && check_input_attribute_typedef(parser, list_opener >= 2 ? list_opener - 2 : 0);
         if (valid && chunk_gnu && typed)
         {
             // clang's declaration path warns of a calling convention it hasn't before this, on a function's chunk.
@@ -4892,13 +4929,20 @@ static bool check_input_neon_vector(CheckInputReader* reader, CheckInputAttribut
     {
         check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_NEON_SIZE, 0);
     }
+    else if (attribute->neon_typedef)
+    {
+        check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_INVALID_ON_DECLARATION, 0);
+        attribute->neon_deprecated = false;
+    }
     else if (attribute->neon_deprecated)
     {
         check_input_attribute_named_event(reader, attribute, CHECK_WARNING_ID_DEPRECATED_ATTRIBUTES, CHECK_WARNING_EVENT_TYPE_ON_DECLARATION);
         attribute->neon_deprecated = false;
     }
     attribute->value = count;
-    return valid;
+    const bool refused = attribute->neon_typedef;
+    attribute->neon_typedef = false;
+    return valid && !refused;
 }
 
 // Mode/vector attributes change the scalar element, while a typedef's alignment wraps the resulting complete type.

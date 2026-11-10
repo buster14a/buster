@@ -4031,6 +4031,8 @@ static void check_input_tag_attribute_warning(CheckInputReader* reader, const Ch
 // - on another declaration of a defined tag, each the definition lacks is warned of as coming after it and ignored;
 // - on another declaration of an incomplete tag, kept with the earlier ones for its definition.
 // A transparent_union of no definition is warned of as clang does. False for an error.
+static void check_input_availability_tag_merge(CheckInputReader* reader, const CheckInputAttributes* own, const CheckInputAttributes* previous, uint32_t point);
+
 static bool check_input_tag_attributes(CheckInputReader* reader, uint32_t token, uint32_t declaration, TypeId type, bool body, bool bare, uint32_t after_name,
                                        uint32_t after, uint32_t point)
 {
@@ -4066,8 +4068,14 @@ static bool check_input_tag_attributes(CheckInputReader* reader, uint32_t token,
     CheckInputAttributes* earlier = canonical < parser->tokens.count ? check_input_attributes_at(reader->output, canonical) : 0;
     if (valid && body && earlier != 0)
     {
+        // A redeclaration's availability meets the tag's earlier (#1447).
+        check_input_availability_tag_merge(reader, own, earlier, point);
         CheckInputAttributes* joined = check_input_merge_attributes(reader, earlier, own);
         valid = joined != 0;
+        for (uint32_t r = 0; joined != 0 && joined != earlier && joined != own && r < earlier->count && r < joined->count; r += 1)
+        {
+            joined->records[r].earlier_declaration = true;
+        }
         check_input_set_attributes_at(reader->output, token, joined);
     }
     else if (valid && !body && own != 0 && (bare || kind != BUSTER_TYPE_KIND_ENUM))
@@ -4099,6 +4107,11 @@ static bool check_input_tag_attributes(CheckInputReader* reader, uint32_t token,
             defining -= 1;
         }
         const CheckInputAttributes* defined = defining < parser->tokens.count ? check_input_attributes_at(reader->output, defining) : 0;
+        // A redeclaration's availability meets the tag's earlier, the definition's where it has one (#1447).
+        if (valid && named && canonical != declaration)
+        {
+            check_input_availability_tag_merge(reader, own, complete ? defined : earlier, point);
+        }
         CheckInputAttributes* kept = 0;
         for (uint32_t r = 0; valid && r < own->count; r += 1)
         {
