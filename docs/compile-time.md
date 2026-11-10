@@ -3040,9 +3040,9 @@ the page cache, shared with every other process.
   ranges or GOT sections outgrow the arrays it tracks them in. Its first run
   found Tier 0's window and vector tables and the Zen 5 cost model's tables,
   which a list made by hand had missed. `test-baked-tables` makes the same
-  check in any executable, a sanitizer build's PIE too, and in a baked one that
-  a fresh build gives the file's bytes and build ID; a missing section fails it
-  instead of skipping it. Under ThreadSanitizer and MemorySanitizer the
+  check in any executable, a TSan or MSan build's PIE too, and in a baked one
+  that a fresh build gives the file's bytes and build ID; a missing section
+  fails it instead of skipping it. Under ThreadSanitizer and MemorySanitizer the
   runtimes keep the metadata of the globals they instrument in the image's
   `.bss` and write it as instrumented accesses run, so those builds check the
   section's bytes alone and say that the outside check was skipped.

@@ -126,6 +126,9 @@ enum
     // A C23 record's redefinition whose attributes differ (#1447, c_check_tag_compatible.c): clang's -Wodr, an error by
     // default (check_input_odr_severity).
     CHECK_WARNING_ID_ODR = 113,
+    // __builtin_cpu_supports of a feature clang doesn't know (#1843, clang's SemaX86 validateCpuSupports): its warning of no
+    // option, whose call is false.
+    CHECK_WARNING_ID_INVALID_CPU_SUPPORTS = 118,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -351,7 +354,8 @@ typedef enum CheckWarningEventKind
     CHECK_WARNING_EVENT_MULTICHAR,
     CHECK_WARNING_EVENT_CHARACTER_TOO_LONG,
     // A warning diagnose_if's condition gives (#1447, c_check_condition.c), at the call's `)` or at the function's use:
-    // payload.token the message's first string token, with a CHECK_WARNING_NOTE_DIAGNOSE_IF at the attribute.
+    // payload.token the message's first string token, with a CHECK_WARNING_NOTE_DIAGNOSE_IF at the attribute; or, of a
+    // warning group (payload.data, BUSTER_CHECK_WARNING_GROUP_ERROR), clang's custom diagnostic of that group, without it.
     CHECK_WARNING_EVENT_DIAGNOSE_IF,
     // -Wfunction-multiversion's (#1447): a CPU list's repeated mangling, at the attribute's name, and a cpu_dispatch
     // function's body, at its `{`.
@@ -380,6 +384,9 @@ typedef enum CheckWarningEventKind
     // warning (#1447, -Wno-error=odr or a pragma's): at its name, with a CHECK_WARNING_NOTE_ATTRIBUTE_HERE at each list's
     // differing attribute, the earlier's first.
     CHECK_WARNING_EVENT_ODR_ATTRIBUTE,
+    // __builtin_cpu_supports's literal of a feature clang doesn't know (#1843, check_input_cpu_supports_literal), at the
+    // builtin's name: the description's message.
+    CHECK_WARNING_EVENT_INVALID_CPU_SUPPORTS,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
 
@@ -442,7 +449,13 @@ typedef enum CheckWarningCompletion
 // A CHECK_WARNING_EVENT_LATE_ATTRIBUTE of an implicit attribute, which clang gives no location (#147: interrupt's used
 // after a definition), its token the attribute's that made it, for its policy's place.
 #define BUSTER_CHECK_WARNING_UNLOCATED 0x10u
+// CHECK_WARNING_EVENT_PRAGMA's payload.data indexes CheckInputPackPragmas only with this discriminator (#1849: a
+// `#pragma options align` or `#pragma align` warning).
+#define BUSTER_CHECK_WARNING_PACK_PRAGMA 0x20u
 #define BUSTER_CHECK_WARNING_NO_SOURCE UINT32_MAX
+// CHECK_WARNING_EVENT_DIAGNOSE_IF's payload.data bit of a grouped diagnose_if's "error" (#1447): its low bits are its
+// warning group's index in pp_features_warning plus one, 0 for none.
+#define BUSTER_CHECK_WARNING_GROUP_ERROR 0x80000000u
 // CHECK_WARNING_EVENT_UNKNOWN_ATTRIBUTE's payload.data bit of a C23 attribute's spelling, past its scope's identifier.
 #define BUSTER_CHECK_WARNING_STANDARD_ATTRIBUTE 0x80000000u
 
@@ -527,10 +540,10 @@ static __attribute__((unused)) CheckWarningEvents check_warning_view(const Check
 // pragma's payload without affecting its warning policy, and are invalid on every other event kind.
 static bool check_warning_flags_valid(uint32_t kind, uint32_t flags)
 {
-    const uint32_t histories = BUSTER_CHECK_WARNING_SYMBOL_PRAGMA | BUSTER_CHECK_WARNING_MS_PRAGMA;
+    const uint32_t histories = BUSTER_CHECK_WARNING_SYMBOL_PRAGMA | BUSTER_CHECK_WARNING_MS_PRAGMA | BUSTER_CHECK_WARNING_PACK_PRAGMA;
     const uint32_t payload = flags & histories;
     return (flags & ~(BUSTER_CHECK_WARNING_DEFAULT_IGNORED | BUSTER_CHECK_WARNING_SUPPRESSED | histories | BUSTER_CHECK_WARNING_UNLOCATED)) == 0 &&
-           (payload == 0 || kind == CHECK_WARNING_EVENT_PRAGMA) && payload != histories &&
+           (payload == 0 || kind == CHECK_WARNING_EVENT_PRAGMA) && (payload & (payload - 1)) == 0 &&
            ((flags & BUSTER_CHECK_WARNING_UNLOCATED) == 0 || kind == CHECK_WARNING_EVENT_LATE_ATTRIBUTE);
 }
 

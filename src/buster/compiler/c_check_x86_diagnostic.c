@@ -10,7 +10,7 @@
 // in the high, `call_count` of them, in a run nothing else pushes into while it walks; `call_room` turns false if one had
 // no room. Each item pushed carries `tag` in its high half too, for the check's loop to set it from (the statement whose
 // control reached an expression); this walk's is 0, so that its items are the bare indices. With `cleanup_tags` too, it
-// marks each variable whose cleanup's call it reaches (CHECK_CONTROL_CLEANUP) at any exit from its scope: the entry of
+// marks each variable whose cleanup's call it reaches (CHECK_CONTROL_CLEANUP, or an EXIT's records, #1370) at any exit: the entry of
 // its record (by its index in CheckInput.cleanups) takes the walk's tag where it was 0 (the check's tags are all 1 or
 // more), and `cleanup_count` counts them. A statement expression's END marks its block's own, which follow the END and
 // which it runs once its value is computed (check_lower_region).
@@ -109,6 +109,21 @@ static void check_x86_diagnostic_control(CheckX86DiagnosticWalk* walk, uint32_t 
     if (entry->kind == CHECK_CONTROL_CLEANUP && walk->cleanup_tags != NULL)
     {
         check_x86_diagnostic_cleanup(walk, index);
+    }
+    else if (entry->kind == CHECK_CONTROL_EXIT && walk->cleanup_tags != NULL && entry->target < program->exit_count)
+    {
+        // An exit through its cleanups' chain (#1370) reaches each record's call from its first to its last.
+        const CheckProgramExit* exit = program->exits + entry->target;
+        uint32_t record = exit->first;
+        for (uint32_t steps = 0; record < input->cleanup_count && steps < input->cleanup_count; steps += 1)
+        {
+            if (walk->cleanup_tags[record] == 0)
+            {
+                walk->cleanup_tags[record] = walk->tag;
+                walk->cleanup_count += 1;
+            }
+            record = record != exit->last ? program->chains[record].parent : BUSTER_CHECK_NONE;
+        }
     }
     if (entry->kind == CHECK_CONTROL_INITIALIZE)
     {
