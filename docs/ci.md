@@ -676,6 +676,16 @@ checking comparison above, for its measured memory; `parallel` reports it as
 skipped and counts it apart. Reports, detector proofs and compile commands are
 retained as workflow artifacts.
 
+Every sanitizer row and fuzz campaign first runs `tools/ci/sanitizers.sh host`,
+after `tools/ci/setup-hosted.sh` and before the build, so that a report caused
+by the runner can be traced to its host (#2060). It logs `uname -r`, one CPU's
+model name and `flags` line, the `Seccomp:`, `Seccomp_filters:` and
+`NoNewPrivs:` lines of `/proc/self/status`, `kernel.yama.ptrace_scope`, and the
+container and VM that `systemd-detect-virt` reports, with the container marker
+files and PID 1's `container=` variable. A missing file or tool prints
+`unavailable`; the command always exits 0 and the step continues on error. It
+changes no option and no audit: every non-empty report still fails the job.
+
 For example, on a supported Linux host:
 
 ```sh

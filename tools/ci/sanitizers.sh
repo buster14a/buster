@@ -3,6 +3,8 @@
 # Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 # Fixed fatal policy, detector canaries and report audit for hosted CI. A report
 # also fails the audit when an expected-failure fixture swallowed its exit code.
+# `host` logs the runner's kernel, CPU, seccomp, ptrace and container state for
+# a later report's diagnosis (#2060); it never fails the job.
 set -euo pipefail
 
 sanitizer_options()
@@ -22,7 +24,42 @@ sanitizer_options()
     export MSAN_OPTIONS="halt_on_error=1:exitcode=86:symbolize=1:external_symbolizer_path=$symbolizer:log_path=$reports/report"
 }
 
+# Every probe is optional: a missing file or tool prints "unavailable" instead.
+host_report()
+{
+    set +e +o pipefail
+    local value
+    printf 'kernel: %s\n' "$(uname -r 2>/dev/null || echo unavailable)"
+    value=$(grep -m1 '^model name[[:space:]]*:' /proc/cpuinfo 2>/dev/null | sed 's/^[^:]*:[[:space:]]*//')
+    printf 'cpu model: %s\n' "${value:-unavailable}"
+    value=$(grep -m1 '^flags[[:space:]]*:' /proc/cpuinfo 2>/dev/null | sed 's/^[^:]*:[[:space:]]*//')
+    printf 'cpu flags: %s\n' "${value:-unavailable}"
+    for name in Seccomp Seccomp_filters NoNewPrivs; do
+        value=$(grep -m1 "^$name:" /proc/self/status 2>/dev/null | sed 's/^[^:]*:[[:space:]]*//')
+        printf '%s: %s\n' "$name" "${value:-unavailable}"
+    done
+    value=$(cat /proc/sys/kernel/yama/ptrace_scope 2>/dev/null)
+    printf 'kernel.yama.ptrace_scope: %s\n' "${value:-unavailable}"
+    # systemd-detect-virt prints `none` and exits 1 outside a container or VM.
+    value=$(systemd-detect-virt --container 2>/dev/null)
+    printf 'container (systemd-detect-virt): %s\n' "${value:-unavailable}"
+    value=$(systemd-detect-virt --vm 2>/dev/null)
+    printf 'virtual machine (systemd-detect-virt): %s\n' "${value:-unavailable}"
+    value=
+    for marker in /.dockerenv /run/.containerenv; do
+        [ -e "$marker" ] && value="$value $marker"
+    done
+    printf 'container markers:%s\n' "${value:- none}"
+    value=$(tr '\0' ' ' 2>/dev/null < /proc/1/environ | grep -o 'container=[^ ]*')
+    printf 'pid 1 container variable: %s\n' "${value:-none or unreadable}"
+    return 0
+}
+
 case "${1:-}" in
+    host)
+        host_report || true
+        exit 0
+        ;;
     configure)
         sanitizer_options "$2"
         {
@@ -78,5 +115,5 @@ case "${1:-}" in
         fi
         echo 'No sanitizer reports from the compiler, test runner or child processes.'
         ;;
-    *) echo 'usage: sanitizers.sh configure|probe|audit ABSOLUTE_DIRECTORY' >&2; exit 1 ;;
+    *) echo 'usage: sanitizers.sh host | configure|probe|audit ABSOLUTE_DIRECTORY' >&2; exit 1 ;;
 esac
