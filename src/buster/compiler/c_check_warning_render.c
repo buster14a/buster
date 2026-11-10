@@ -30,12 +30,37 @@ static const char* check_driver_warning_error_prefix(bool promoted)
     return result;
 }
 
+// A grouped diagnose_if's warning group (#1447, CHECK_WARNING_EVENT_DIAGNOSE_IF's payload.data), its index in
+// pp_features_warning, or UINT32_MAX.
+static uint32_t check_driver_warning_group(const CheckWarningEvent* event)
+{
+    const uint32_t group = event->kind == CHECK_WARNING_EVENT_DIAGNOSE_IF ? event->payload.data & ~BUSTER_CHECK_WARNING_GROUP_ERROR : 0;
+    return group != 0 ? group - 1 : UINT32_MAX;
+}
+
 static CheckWarningSeverity check_driver_warning_severity(Preprocessor* pp, const CheckInput* input, const CheckWarningEvent* event)
 {
-    const CheckWarningCommandLine command = check_warning_command_line(&pp->options, event->id,
-        (event->flags & BUSTER_CHECK_WARNING_DEFAULT_IGNORED) != 0, false);
-    CheckWarningSeverity severity = command.quiet || (event->flags & BUSTER_CHECK_WARNING_SUPPRESSED) != 0 ? CHECK_WARNING_IGNORE :
-        check_diagnostic_severity_id_from(input, event->token, event->source, event->id, command.severity);
+    const uint32_t group = check_driver_warning_group(event);
+    bool errors = false;
+    const CheckWarningCommandLine command = group != UINT32_MAX ?
+        check_warning_group_command_line(&pp->options, group, (event->payload.data & BUSTER_CHECK_WARNING_GROUP_ERROR) != 0, &errors) :
+        check_warning_command_line(&pp->options, event->id, (event->flags & BUSTER_CHECK_WARNING_DEFAULT_IGNORED) != 0, false);
+    CheckWarningSeverity severity = CHECK_WARNING_IGNORE;
+    if (group != UINT32_MAX && (event->flags & BUSTER_CHECK_WARNING_SUPPRESSED) == 0)
+    {
+        // clang's custom diagnostic of that group: its pragma, then -w on all but an error by default that is still one,
+        // -Werror on a warning, and -Wfatal-errors.
+        severity = check_diagnostic_group_severity_from(input, event->token, event->source, group, command.severity);
+        const bool default_error = (event->payload.data & BUSTER_CHECK_WARNING_GROUP_ERROR) != 0;
+        severity = command.quiet && (!default_error || severity == CHECK_WARNING_WARNING) ? CHECK_WARNING_IGNORE : severity;
+        severity = severity == CHECK_WARNING_WARNING && errors ? CHECK_WARNING_ERROR : severity;
+        severity = severity == CHECK_WARNING_ERROR && input->fatal_errors ? CHECK_WARNING_FATAL : severity;
+    }
+    else if (group == UINT32_MAX)
+    {
+        severity = command.quiet || (event->flags & BUSTER_CHECK_WARNING_SUPPRESSED) != 0 ? CHECK_WARNING_IGNORE :
+            check_diagnostic_severity_id_from(input, event->token, event->source, event->id, command.severity);
+    }
     if (severity != CHECK_WARNING_IGNORE && !command.system_headers)
     {
         bool system = check_graph_system_token(&input->graph, event->token);
@@ -54,6 +79,19 @@ static String8 check_driver_warning_name(const Preprocessor* pp, uint32_t name)
     const String8 result = name < pp->table->count ? (String8){ .pointer = (char*)intern_bytes(pp->table, name), .length = intern_length(pp->table, name) } :
                                                                   (String8){ 0 };
     return result;
+}
+
+// The name a use at `token` took, where its spelling `name` is a typo's that the reader corrected (#1447,
+// CHECK_INPUT_UNDECLARED_CORRECTED): its declaration's, as clang's diagnostics after the correction spell it. Only a
+// unit with an error report has a correction, so a valid unit's warnings read nothing more.
+static uint32_t check_driver_corrected_name(const Parser* parser, const CheckInput* input, uint32_t token, uint32_t name)
+{
+    const uint32_t count = parser->tokens.count;
+    const bool use = input->report_count != 0 && token < count && token < input->token_count && parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER &&
+                     parser->tokens.names[token] == name;
+    const uint32_t declaration = use ? input->declarations[token] : BUSTER_CHECK_NONE;
+    const bool corrected = declaration < count && parser->tokens.kinds[declaration] == PARSE_KIND_IDENTIFIER && parser->tokens.names[declaration] != name;
+    return corrected ? parser->tokens.names[declaration] : name;
 }
 
 // A string token's complete spelling in scratch, including its quotes and encoding prefix.
@@ -692,11 +730,32 @@ static bool check_warning_attribute_suggestion(String8 written, bool standard, S
     return corrected;
 }
 
+// The macro name clang gives an objc_gc's or objc_ownership's warning that its type doesn't take it (#1447, Sema's
+// diagnoseBadTypeAttribute): "__strong" for a strong one, "__weak" for a weak one, where the outermost macro that wrote it
+// is named so (pp_output_macro_place), and its place there into *location and *origin; else NULL, and the token's own.
+static const char* check_warning_objc_macro(const Parser* parser, Preprocessor* pp, const CheckWarningEvent* event, uint32_t* location, uint32_t* origin)
+{
+    const uint32_t count = parser->tokens.count;
+    const uint32_t argument = event->token + 2;
+    const bool argued = (event->kind == CHECK_WARNING_EVENT_OBJC_POINTER_TYPE || event->kind == CHECK_WARNING_EVENT_OBJC_OBJECT_TYPE) && argument < count &&
+                        parser->tokens.kinds[event->token + 1] == PARSE_KIND_L_PAREN && parser->tokens.kinds[argument] == PARSE_KIND_IDENTIFIER;
+    const uint32_t word = argued ? parser->tokens.names[argument] : 0;
+    const bool strong = word != 0 && intern_length(pp->table, word) == 6 && memcmp(intern_bytes(pp->table, word), "strong", 6) == 0;
+    const bool weak = word != 0 && intern_length(pp->table, word) == 4 && memcmp(intern_bytes(pp->table, word), "weak", 4) == 0;
+    const char* macro = strong ? "__strong" : weak ? "__weak" : NULL;
+    const uint32_t source = event->source != BUSTER_CHECK_WARNING_NO_SOURCE ? event->source : parser->tokens.sources[event->token];
+    const bool lifted = pp_output_macro_place(pp, source, event->kind == CHECK_WARNING_EVENT_OBJC_WEAK_TYPE ? NULL : macro != NULL ? macro : "", location, origin);
+    return lifted && event->kind != CHECK_WARNING_EVENT_OBJC_WEAK_TYPE ? macro : NULL;
+}
+
+// c_check_semantic_diagnostic.c's: a record's name as clang's -Wodr and incompatible-definition errors spell it.
+static String8 check_semantic_tag_spelling(const Parser* parser, Preprocessor* pp, uint32_t token, Arena* scratch);
+
 static const char* check_driver_warning_message(const Parser* parser, Preprocessor* pp, const CheckInput* input, const TypeTable* types,
                                                 CheckWarningSpelling* spell, const CheckWarningEvent* event, Arena* scratch)
 {
     const CheckWarningPayload* payload = &event->payload;
-    const String8 name = check_driver_warning_name(pp, payload->name);
+    const String8 name = check_driver_warning_name(pp, check_driver_corrected_name(parser, input, event->token, payload->name));
     const char* result = event->id < BUSTER_ARRAY_LENGTH(check_warning_descriptions) ? check_warning_descriptions[event->id].message : NULL;
     switch (event->kind)
     {
@@ -715,6 +774,8 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
         {
             const CheckInputSymbolPragma* record = check_input_symbol_warning(input, event);
             const CheckInputMsPragma* layout = check_input_ms_warning(input, event);
+            const CheckInputPackPragma* packing = check_input_pack_warning(input, event);
+            result = packing != NULL ? check_input_pack_align_message(packing) : result;
             if (layout != NULL)
             {
                 result = layout->warning == 1 ? "incorrect use of '#pragma ms_struct on|off' - ignored" :
@@ -802,6 +863,13 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
         case CHECK_WARNING_EVENT_PROTOTYPE_REDEFINITION:
             result = check_warning_text(scratch, "redefinition of '%.*s' will not be visible outside of this function", (int)name.length, name.pointer);
             break;
+        case CHECK_WARNING_EVENT_ODR_ATTRIBUTE:
+        {
+            const String8 spelled = check_semantic_tag_spelling(parser, pp, event->token, scratch);
+            result = spelled.length != 0 ? check_warning_text(scratch, "type '%.*s' has %s which currently causes the types to be treated as though they are incompatible",
+                                                              (int)spelled.length, spelled.pointer, payload->data != 0 ? "a member with an attribute" : "an attribute") : NULL;
+            break;
+        }
         case CHECK_WARNING_EVENT_LIBRARY_REDECLARATION:
             result = check_warning_text(scratch, "incompatible redeclaration of library function '%.*s'", (int)name.length, name.pointer);
             break;
@@ -858,7 +926,11 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
         {
             const String8 type = check_driver_warning_type_at(parser, pp, input, types, spell, scratch, payload->first_type, payload->data,
                                                               payload->token, payload->second_type);
-            const String8 named = event->kind == CHECK_WARNING_EVENT_OBJC_WEAK_TYPE ? (String8){ "__weak", 6 } : name;
+            uint32_t location = 0;
+            uint32_t origin = 0;
+            const char* macro = check_warning_objc_macro(parser, pp, event, &location, &origin);
+            const String8 named = event->kind == CHECK_WARNING_EVENT_OBJC_WEAK_TYPE ? (String8){ "__weak", 6 } :
+                                  macro != NULL ? (String8){ (char*)macro, strlen(macro) } : name;
             result = type.length != 0 ? check_warning_text(scratch, "'%.*s' only applies to %s types; type here is %.*s", (int)named.length, named.pointer,
                                                            event->kind == CHECK_WARNING_EVENT_OBJC_POINTER_TYPE ? "pointer" : "Objective-C object or block pointer",
                                                            (int)type.length, type.pointer) : NULL;
@@ -1412,6 +1484,9 @@ static const char* check_driver_warning_note(const Parser* parser, Preprocessor*
         case CHECK_WARNING_NOTE_DECLARED_HERE:
             result = check_warning_text(scratch, "'%.*s' declared here", (int)name.length, name.pointer);
             break;
+        case CHECK_WARNING_NOTE_ATTRIBUTE_HERE:
+            result = check_warning_text(scratch, "attribute '%.*s' here", (int)name.length, name.pointer);
+            break;
         case CHECK_WARNING_NOTE_DIAGNOSE_IF:
             result = check_warning_text(scratch, "from 'diagnose_if' attribute on '%.*s':", (int)name.length, name.pointer);
             break;
@@ -1519,8 +1594,11 @@ static bool check_driver_warning_events_at(const Parser* parser, Preprocessor* p
                         notes[n] = (PPOutputDiagnosticNote){ .token = note->source != BUSTER_CHECK_WARNING_NO_SOURCE ? note->source : parser->tokens.sources[note->token], .message = text };
                     }
                 }
-                const char* option = check_warning_descriptions[event->id].option;
-                const char* prefix = check_driver_warning_error_prefix(severity == CHECK_WARNING_ERROR);
+                // A grouped diagnose_if's option is its group's; one that is an error by default has no -Werror (#1447).
+                const uint32_t group = check_driver_warning_group(event);
+                const char* option = group != UINT32_MAX ? pp_features_warning[group].name : check_warning_descriptions[event->id].option;
+                const bool default_error = group != UINT32_MAX && (event->payload.data & BUSTER_CHECK_WARNING_GROUP_ERROR) != 0;
+                const char* prefix = check_driver_warning_error_prefix(severity == CHECK_WARNING_ERROR && !default_error);
                 const char* suffix = option != NULL ? check_warning_text(scratch, " [%s%s]", prefix, option) : prefix[0] != 0 ? " [-Werror]" : "";
                 valid = valid && suffix != NULL;
                 if (valid)
@@ -1539,8 +1617,12 @@ static bool check_driver_warning_events_at(const Parser* parser, Preprocessor* p
                     {
                         const CheckInputSymbolPragma* record = check_input_symbol_warning(input, event);
                         const CheckInputMsPragma* layout = check_input_ms_warning(input, event);
-                        const bool semantic = record != NULL && record->warning >= CHECK_SYMBOL_WARNING_UNDECLARED;
-                        const uint32_t location = record != NULL ? record->diagnostic_location : layout != NULL ? layout->diagnostic_location : 0;
+                        const CheckInputPackPragma* packing = check_input_pack_warning(input, event);
+                        // An align=reset's empty stack is Sema's, where the parser handles the directive (#1849).
+                        const bool semantic = (record != NULL && record->warning >= CHECK_SYMBOL_WARNING_UNDECLARED) ||
+                                              (packing != NULL && packing->align_warning == CHECK_PACK_ALIGN_RESET_EMPTY);
+                        const uint32_t location = record != NULL ? record->diagnostic_location : layout != NULL ? layout->diagnostic_location :
+                                                  packing != NULL ? packing->diagnostic_location : 0;
                         if (location != 0)
                         {
                             const uint32_t saved_position = pp->diagnostic_position;
@@ -1570,9 +1652,18 @@ static bool check_driver_warning_events_at(const Parser* parser, Preprocessor* p
                         // An implicit attribute's warning, which clang gives no location (#147: interrupt's used).
                         pp_diagnose_unlocated_notes(pp, disposition, boundary, notes, event->note_count, "%s%s", message, suffix);
                     }
+                    else if (event->kind == CHECK_WARNING_EVENT_OBJC_POINTER_TYPE || event->kind == CHECK_WARNING_EVENT_OBJC_OBJECT_TYPE ||
+                             event->kind == CHECK_WARNING_EVENT_OBJC_WEAK_TYPE)
+                    {
+                        // At the macro's expansion clang gives them (check_warning_objc_macro), before the declaration's
+                        // attributes' checks at the same boundary.
+                        uint32_t location = 0;
+                        uint32_t origin = 0;
+                        (void)check_warning_objc_macro(parser, pp, event, &location, &origin);
+                        pp_diagnose_placed_notes_phase(pp, disposition, location, origin, boundary, PP_DIAGNOSTIC_TYPE, notes, event->note_count, "%s%s", message, suffix);
+                    }
                     else if (event->kind == CHECK_WARNING_EVENT_FUNCTION_TYPE_ATTRIBUTE || event->kind == CHECK_WARNING_EVENT_CONVENTION_UNSUPPORTED ||
-                             event->kind == CHECK_WARNING_EVENT_OBJC_POINTER_TYPE || event->kind == CHECK_WARNING_EVENT_OBJC_OBJECT_TYPE ||
-                             event->kind == CHECK_WARNING_EVENT_OBJC_WEAK_TYPE || event->kind == CHECK_WARNING_EVENT_OBJC_UNSUPPORTED)
+                             event->kind == CHECK_WARNING_EVENT_OBJC_UNSUPPORTED)
                     {
                         // A declarator's type's warnings precede its declaration's attributes' checks at the same boundary.
                         pp_diagnose_output_notes_phase(pp, disposition, source, boundary, PP_DIAGNOSTIC_TYPE, notes, event->note_count, "%s%s", message, suffix);

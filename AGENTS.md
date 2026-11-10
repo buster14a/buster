@@ -94,8 +94,8 @@ The Zen 5 requirement describes the **host compiler executable**, not necessaril
 the instruction set of every program it generates. Keep host ISA, generated-code
 ISA, and output ABI separate. Linux/x86-64 hosts without the complete AVX-512
 feature set use scalar implementations. `BUSTER_HOST_ARCH=x86-64` builds the
-baseline executable; `native` is the default and `znver5` selects benchmark
-builds. The host choice is made at build time, outside compiler hot paths.
+baseline executable; `native` is the default and `znver5` selects approved
+benchmark builds. The host choice is made at build time, outside compiler hot paths.
 Do not add other host operating systems. Broader output targets and extra
 applications are outside the current scope; but the x86 encoder encodes 16- and
 32-bit modes' instructions too, as the owner asked.
@@ -112,7 +112,7 @@ Local checkout directories, `~/buster-fast-bench/`, the shared host lock,
 `~/llm-memory/projects/buster-fast/` and its memory symlinks retain their existing
 names. Keep the `buster-fast-9700x` concurrency prefix. PR queues replace pending
 and cancel in-progress superseded runs; main pushes use separate run-id groups
-so every revision keeps full hosted CI. Hardware jobs still share the host lock.
+so every revision keeps its hosted CI. Hardware jobs still share the host lock.
 These are operational resources, not canonical repository URLs; do not rename
 them by replacing text. Source paths, executable names and object-file metadata
 are unchanged by the repository rename.
@@ -190,15 +190,16 @@ Write code in **C** unless the goal or action explicitly disallows C or requires
 another language. This applies to supporting tools, tests, and automation as
 well as compiler code.
 
-Follow [the C coding style](docs/coding-style.md) for new or modified compiler
-code. The essentials are: C and Clang on Linux/Zen 5, 4-space Allman formatting,
+Follow [the C coding style](docs/coding-style.md): 4-space Allman formatting,
 `snake_case` functions, `PascalCase` types, `BUSTER_` macros, one return per
-function, direct and explicit control flow, bounded slices, arena-oriented
-allocation, and safe SIMD memory accesses. Prefer simple data layouts and
-measured end-to-end performance improvements. Prefer single-line statements,
-declarations, and function headers where readable, and one aggregate field or
-initializer entry per line. Do not import buster-legacy's portability
-or infrastructure machinery merely to match its style.
+function, explicit control flow, bounded slices, arena allocation and safe SIMD
+memory accesses. Prefer simple layouts, measured end-to-end improvements,
+readable single-line statements, declarations and function headers, and one
+aggregate field or initializer entry per line. Do not import buster-legacy's
+portability or infrastructure to match its style.
+
+Keep private test and benchmark fixtures in their owning unity unit; follow
+the [build ownership rules](docs/commands/build.md#unity-test-dependencies).
 
 ## Data-parallel first
 
@@ -231,9 +232,9 @@ that area; do not load the whole guide directory into every session. The
 existing design guides. Commands and source paths in those guides are relative
 to the repository root. Keep detailed flags, fixtures, acceptance boundaries and
 benchmark recipes in the owning guide, not in this file. A new command adds or
-updates its guide and one compact index line here. `CLAUDE.md` imports only this
-file. CI enforces a **30,000-byte** limit here and a 1,024-byte limit on that
-import wrapper; do not raise the limits to accommodate module detail.
+updates its guide and one compact index line here. CI limits this file to
+**30,000 bytes** and `CLAUDE.md`, which imports only it, to 1,024; do not raise
+the limits to accommodate module detail.
 
 ## Sharing the 9700X
 
@@ -299,12 +300,12 @@ Where `~/llm-memory` doesn't exist, skip this.
 
 ## Build
 
-Use `./build.sh` (Clang, CMake 3.25+, Ninja): it builds Release, or
-`--config Debug`, incrementally in `build/cmake/VARIANT` and publishes that
-executable as `build/compiler`. `BUSTER_HOST_ARCH=native` is the default;
-use `x86-64` for the baseline scalar host and `znver5` for approved benchmark
-builds. Respect the lock and `cores` rules above. `BUSTER_DEBUG_INFO=0` omits
-debug information. Read [build details](docs/commands/build.md) before changing
+Use `./build.sh` (Clang, CMake 3.25+, Ninja): it builds Release (`-O3`), or
+Debug (`-O0 -g`) with `--config Debug`, incrementally in `build/cmake/VARIANT`,
+published as `build/compiler`. Pick whichever suits the job at hand: Debug to
+debug or rebuild faster, Release where runs dominate or for timings. Respect
+the lock and `cores` rules above. `BUSTER_DEBUG_INFO=0` omits debug
+information. Read [build details](docs/commands/build.md) before changing
 translation units, flags, baked tables or code-placement experiments.
 `build/` is disposable; never commit generated binaries or captures.
 
