@@ -81,7 +81,8 @@ unused-warning fixtures also check exact scope-completion tokens.
   and the default C command (`-fsyntax-only`, `-c`) use it; `compiler parse`
   keeps the parser's driver alone. Unsupported syntax is diagnosed.
   `test-checker-driver --executable ./build/compiler [--part K/N]
-  [--lazy-system-headers | --cpu-dispatch-only | --target-versions-only | --type-sugar-only]` and `test-checker-asm`
+  [--lazy-system-headers | --cpu-dispatch-only | --target-versions-only | --type-sugar-only |
+  --asm-definitions-only]` and `test-checker-asm`
   check the driver and inline assembly against Clang (named UCNs too, #1447,
   `check_test_driver_named_ucns`; with
   `--lazy-system-headers`, only the checks that pass the driver
@@ -89,7 +90,8 @@ unused-warning fixtures also check exact scope-completion tokens.
   `--part K/N` runs the K-th of N parts its checks are dealt to in turn,
   `CheckDriverPart`; `--cpu-dispatch-only` runs the `cpu_specific` and
   `cpu_dispatch` section alone, #1447; `--target-versions-only` runs GNU multiversioning's `target` and
-  `target_clones` section alone, #1838; `--semantic-recovery-only` runs
+  `target_clones` section alone, #1838; `--asm-definitions-only` runs what
+  inline assembly defines against clang's objects alone, #1848; `--semantic-recovery-only` runs
   `c_check_semantic_recovery_driver_test.c`, `c_check_statement_recovery_driver_test.c`,
   `c_check_type_attribute_recovery_driver_test.c` and
   `c_check_structural_recovery_driver_test.c` alone, the whole output and status
@@ -313,7 +315,13 @@ unused-warning fixtures also check exact scope-completion tokens.
   unevaluated-argument builtins, `check_common_loop_extract`), warn at their first use when neither the condition, the
   increment nor the body may change them (an assignment's target, an increment's operand, an address, a member's object
   or an array's decay, outside sizeof, alignof and a static selection's unchosen operands), in a loop with no return,
-  break or goto. A variable's `++` or `--` alone as both the increment and the body block's last statement, with no
+  break or goto. A GNU statement expression's statements are graph roots of their own, so a change or a jump inside one
+  counts only where the value of each statement expression around it in the loop is evaluated too, none is in a
+  specifier's operand (typeof's) or a sizeof's, and each static selection around it chooses the operand that holds it,
+  by the parse tree, as the selections' unchosen roots can't tell a statement expression's statements in a chosen arm
+  from those in another (#1821, `check_common_loop_reached`); a sizeof's type name's bounds are unvisited as well. Left:
+  a bound of a pointer to a variable array in a declaration (`int (*p)[i++];`), which clang's visitor skips and the
+  checker counts. A variable's `++` or `--` alone as both the increment and the body block's last statement, with no
   continue of the loop, warns at the body's with a note at the header's. Each check is skipped where the warning is
   ignored at the condition's or the increment's first token, as clang's are. Both are published past the statement's
   last token, after its body's own warnings.
@@ -323,7 +331,9 @@ unused-warning fixtures also check exact scope-completion tokens.
   `-Wimplicit-enum-enum-cast` (#1447, CheckImplicitConversion's last case, `check_common_enum_cast`), on by default under
   `-Wenum-conversion`: an initializer's, an assignment's, a prototype's argument's, a return's and a brace initializer's
   value's, carried to both arms of a conditional (no runtime pruning), through a selection to its selected arm and to a
-  root comma's result, warned at each leaf's expression location (an operator's, a member's name, else its first token
+  root comma's result, in clang's order (CheckConditionalOperand, #1895: the condition's conversions, then each arm's own
+  before the arm's, the true arm's first; `-Wconstant-conversion`'s in arms too, an argument's included,
+  through the walk's `BUSTER_CHECK_EMIT_ARM` frames), warned at each leaf's expression location (an operator's, a member's name, else its first token
   inside its parentheses) as the full expression completes, in unreachable code too. Both enumerations need clang's name
   for linkage: a tag, or the unqualified typedef that declares an anonymous one. Clang's range tests come first
   (`check_common_enum_cast_reached`): a leaf whose likely range (a constant's significant or active bits, a bit-field's
