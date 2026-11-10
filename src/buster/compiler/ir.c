@@ -22,6 +22,7 @@
 #include <inttypes.h>
 #include "host_isa.h"
 
+#ifndef BUSTER_IR_STORAGE_ONLY
 #define BUSTER_IR_NONE UINT32_MAX
 #define BUSTER_IR_VECTOR_COUNT 16
 #define BUSTER_IR_VOLATILE 1
@@ -1229,6 +1230,7 @@ static uint32_t ir_lane_count(uint32_t type, uint32_t lane)
     return ir_vector_type(type) && bits != 0 ? ir_type_bits[type] / bits : 0;
 }
 
+#endif
 // How many of this thread's scans for SIMD values or vectors (ir_function_has_simd_path, ir_function_has_vectors_path)
 // took the vector path: test-tier1-masks and test-ir-simd read it to check that a scalar run takes each scan's scalar
 // twin, as --scalar promises (#141's review). main.c's units share it, as lane.c's arena_small_floor, so that a command
@@ -1242,6 +1244,7 @@ _Thread_local uint64_t ir_scan_vector_paths;
 static _Thread_local uint64_t ir_scan_vector_paths;
 #endif
 
+#ifndef BUSTER_IR_STORAGE_ONLY
 // Consumers call only after structural verification. Refuse the entire function before allocating/rebuilding
 // scalar-only state, including SIMD ABI metadata and unused vector payloads rather than only executable rows. The
 // instructions' types and operations, the scan's bulk, go 64 at a time on the vector path and one at a time on its scalar
@@ -3124,3 +3127,4 @@ static IrError ir_print(const IrFunction* f, Arena* scratch, FILE* output)
     }
     return check.error;
 }
+#endif

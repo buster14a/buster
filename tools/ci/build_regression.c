@@ -13,6 +13,7 @@
 //
 // It removes every tree under build/cmake (clean --all) and checks that
 //   - guarded test roots retain their private entry points when preprocessed without main.c's unity-unit selector;
+//   - main.c's complete driver (-DBUSTER_COMPLETE_DRIVER=1), the self-tests' input, retains the other units' code;
 //   - the target policy data owner rejects either shared row-count bound when it drifts from the canonical rows;
 //   - active fixtures, headers and arbitrary include descendants have one unity owner, except justified exact sharing;
 //   - shared fixture declaration/include boundaries cannot grow silently inside existing shared roots;
@@ -100,6 +101,14 @@ struct OwnershipException
     const char* owners;
     const char* reason;
     uint64_t structure;
+};
+
+typedef struct OwnershipBoundary OwnershipBoundary;
+struct OwnershipBoundary
+{
+    const char* path;
+    const char* owners;
+    bool fixture;
 };
 
 typedef struct OwnershipIssue OwnershipIssue;
@@ -381,6 +390,68 @@ static void check_standalone_preprocessing(void)
         free(text.data);
     }
     pass("guarded roots retain their private entry points when preprocessed without a unity unit");
+}
+
+// The self-tests and benchmarks that take main.c as their input (tools/ci/correctness.tests and the 9700X workflow)
+// pass -DBUSTER_COMPLETE_DRIVER=1, so that it reads the production code of the other units as well as the driver's,
+// as a fuzz build's driver does. Check one definition from each block that the ordinary driver leaves to its owners,
+// in both hosts' configurations, so that a new guard can't silently halve those inputs. Each is a static definition's
+// text that no other source file has, so that a caller or a declaration elsewhere can't stand in for it.
+static void check_complete_driver_preprocessing(void)
+{
+    static const struct
+    {
+        const char* source;
+        const char* entry;
+    } families[] = {
+        { "c_preprocessor_impl.c", "static void pp_diagnostic_limit(" },
+        { "c_preprocessor_history_impl.c", "static void* pp_history_initial(" },
+        { "executable_impl.c", "static uint64_t executable_align(" },
+        { "dominators.c", "static DominatorOptions dominators_options(" },
+        { "tier1_allocate.c", "static uint32_t tier1_allocation_next_use(" },
+        { "tier1_schedule.c", "static void tier1_schedule_adjust(" },
+        { "c_check_lazy.c", "static uint32_t check_lazy_expansion_location(" },
+        { "c_check_actions.c", "static void check_value_copy_floating(" },
+        { "c_check_literals.c", "static uint32_t check_literal_digit(" },
+        { "tier1_frame.c", "static uint32_t tier1_frame_row(" },
+        { "tier0.c", "static uint8_t tier0_mask_register(" },
+        { "c_check_program.c", "static void check_program_fail(" },
+        { "c_check_prefix.c", "static void* check_prefix_column(" },
+        { "baked.c", "static uint64_t bake_section_size(" },
+        { "c_check_corpus.c", "static void check_corpus_input_diagnostic(" },
+        { "c_check_source_prepare.c", "static void check_source_print_receipt(" },
+        { "ir_lower.c", "static uint32_t ir_typed_vector_bytes(" },
+        { "tier1_select.c", "static X86Instruction tier1_select_register_record(" },
+        { "c_check_tier1.c", "static Tier1EmitCause check_tier1_fault_emission_cause(" },
+    };
+    static const char* const hosts[] = { "-march=x86-64", "-march=znver5" };
+    for (uint32_t host = 0; host < sizeof(hosts) / sizeof(hosts[0]); host += 1)
+    {
+        char* argv[] = {
+            "clang",
+            "-E",
+            "-P",
+            "-target",
+            "x86_64-pc-linux-gnu",
+            (char*)hosts[host],
+            "-Isrc",
+            "-fwrapv",
+            "-funsigned-char",
+            "-DBUSTER_COMPLETE_DRIVER=1",
+            "src/buster/compiler/main.c",
+            0,
+        };
+        Text text = capture(argv);
+        for (uint32_t i = 0; i < sizeof(families) / sizeof(families[0]); i += 1)
+        {
+            if (strstr(text.data, families[i].entry) == 0)
+            {
+                fail("main.c with -DBUSTER_COMPLETE_DRIVER=1 %s lost %s's %s", hosts[host], families[i].source, families[i].entry);
+            }
+        }
+        free(text.data);
+    }
+    pass("main.c's complete driver retains a definition of each block the ordinary driver leaves out, on both hosts");
 }
 
 // Check copied source, never the working tree: increasing either reader bound would otherwise leave a valid but
@@ -887,6 +958,182 @@ static void ownership_report(const OwnershipUnits* units, OwnershipIssue issue)
     }
 }
 
+// Production boundaries can have several consumers. Pin their names exactly, as for fixture sharing, while
+// allowing an implementation to be private to one unit and keeping fixture classification a separate contract.
+static OwnershipIssue ownership_boundaries(const OwnershipUnits* units, const OwnershipGraph* graph,
+                                          const OwnershipBoundary* boundaries, uint32_t count)
+{
+    OwnershipIssue issue = { 0 };
+    for (uint32_t i = 0; i < count && issue.reason == 0; i += 1)
+    {
+        const OwnershipBoundary* boundary = &boundaries[i];
+        uint64_t expected = 0;
+        const char* name = boundary->owners;
+        while (name != 0 && *name != 0 && issue.reason == 0)
+        {
+            const size_t length = strcspn(name, " ");
+            uint32_t unit = 0;
+            while (unit < units->count && (strlen(units->names[unit]) != length || strncmp(name, units->names[unit], length) != 0))
+            {
+                unit += 1;
+            }
+            if (unit == units->count)
+            {
+                issue = (OwnershipIssue){ .reason = "implementation boundary names an unknown owner", .path = boundary->path };
+            }
+            else if ((expected & (UINT64_C(1) << unit)) != 0)
+            {
+                issue = (OwnershipIssue){ .reason = "implementation boundary repeats an owner", .path = boundary->path };
+            }
+            else
+            {
+                expected |= UINT64_C(1) << unit;
+            }
+            name += length;
+            if (*name == ' ')
+            {
+                name += 1;
+            }
+        }
+        uint32_t file = 0;
+        while (file < graph->count && strcmp(graph->files[file].path, boundary->path) != 0)
+        {
+            file += 1;
+        }
+        if (issue.reason == 0 && (file == graph->count || expected == 0 || graph->files[file].owners != expected ||
+                                 (boundary->fixture && !graph->files[file].fixture)))
+        {
+            issue = (OwnershipIssue){ .reason = "named implementation's owner or classification changed", .path = boundary->path,
+                                      .actual = file < graph->count ? graph->files[file].owners : 0, .expected = expected };
+        }
+        for (uint32_t j = 0; j < i && issue.reason == 0; j += 1)
+        {
+            if (strcmp(boundaries[j].path, boundary->path) == 0)
+            {
+                issue = (OwnershipIssue){ .reason = "duplicate implementation boundary", .path = boundary->path };
+            }
+        }
+    }
+    return issue;
+}
+
+static void check_ownership_boundaries(void)
+{
+    const OwnershipUnits units = { .names = { "main.c", "main_unit_backend.c", "main_unit_checker.c" }, .count = 3 };
+    static OwnershipGraph graph;
+    graph = (OwnershipGraph){ .count = 2 };
+    graph.files[0] = (OwnershipFile){ .path = "production.c", .owners = UINT64_C(6) };
+    graph.files[1] = (OwnershipFile){ .path = "private_test.c", .owners = UINT64_C(4), .fixture = true };
+    const OwnershipBoundary boundaries[] = {
+        { "production.c", "main_unit_backend.c main_unit_checker.c", false },
+        { "private_test.c", "main_unit_checker.c", true },
+    };
+    if (ownership_boundaries(&units, &graph, boundaries, 2).reason != 0)
+    {
+        fail("implementation boundaries rejected their exact consumers");
+    }
+    const uint64_t wrong_masks[] = { 0, 2, 3, 5, 7 };
+    for (uint32_t i = 0; i < sizeof(wrong_masks) / sizeof(wrong_masks[0]); i += 1)
+    {
+        graph.files[0].owners = wrong_masks[i];
+        if (ownership_boundaries(&units, &graph, boundaries, 2).reason == 0)
+        {
+            fail("implementation boundaries accepted missing or widened consumers");
+        }
+    }
+    graph.files[0].owners = UINT64_C(6);
+    graph.files[0].fixture = true;
+    if (ownership_boundaries(&units, &graph, boundaries, 2).reason != 0)
+    {
+        fail("implementation boundaries rejected production also reached through fixture includes");
+    }
+    graph.files[1].fixture = false;
+    if (ownership_boundaries(&units, &graph, boundaries, 2).reason == 0)
+    {
+        fail("implementation boundaries accepted missing fixture classification");
+    }
+    graph.files[1].fixture = true;
+    const OwnershipBoundary invalid[] = {
+        { "production.c", 0, false },
+        { "production.c", "", false },
+        { "production.c", "main_unit_missing.c", false },
+        { "production.c", "main_unit_backend.c main_unit_backend.c main_unit_checker.c", false },
+        { "absent.c", "main_unit_checker.c", false },
+    };
+    for (uint32_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i += 1)
+    {
+        if (ownership_boundaries(&units, &graph, &invalid[i], 1).reason == 0)
+        {
+            fail("implementation boundaries accepted invalid declaration %u", i);
+        }
+    }
+    const OwnershipBoundary duplicate[] = { boundaries[0], boundaries[0] };
+    if (ownership_boundaries(&units, &graph, duplicate, 2).reason == 0)
+    {
+        fail("implementation boundaries accepted duplicate paths");
+    }
+    pass("implementation boundaries reject wider/missing owners, unknown/duplicate names and missing fixture classification");
+}
+
+static bool ownership_fuzz_setting(const char* cache, bool* fuzz)
+{
+    static const char prefix[] = "BUSTER_FUZZ_AVAILABLE:";
+    uint32_t found = 0;
+    bool valid = true;
+    for (const char* line = cache; *line != 0; )
+    {
+        const size_t length = strcspn(line, "\n");
+        if (length >= sizeof(prefix) - 1 && memcmp(line, prefix, sizeof(prefix) - 1) == 0)
+        {
+            const char* value = memchr(line + sizeof(prefix) - 1, '=', length - (sizeof(prefix) - 1));
+            found += 1;
+            if (value == 0 || value == line + sizeof(prefix) - 1 || value + 2 < line + length ||
+                (value + 1 != line + length && value[1] != '0' && value[1] != '1'))
+            {
+                valid = false;
+            }
+            else
+            {
+                // Direct CMake users may leave the cache value empty; BusterSettings.cmake normalizes it to 0.
+                *fuzz = value + 1 != line + length && value[1] == '1';
+            }
+        }
+        line += length + (line[length] == '\n');
+    }
+    return valid && found == 1;
+}
+
+static void check_ownership_configuration(void)
+{
+    const struct
+    {
+        const char* cache;
+        bool valid;
+        bool fuzz;
+    } cases[] = {
+        { "// comment\nBUSTER_FUZZ_AVAILABLE:STRING=0\n", true, false },
+        { "BUSTER_FUZZ_AVAILABLE:STRING=1", true, true },
+        { "BUSTER_FUZZ_AVAILABLE:UNINITIALIZED=1\nOTHER:STRING=0\n", true, true },
+        { "BUSTER_FUZZ_AVAILABLE:STRING=\n", true, false },
+        { "BUSTER_FUZZ_AVAILABLE:STRING=2\n", false, false },
+        { "BUSTER_FUZZ_AVAILABLE:STRING=10\n", false, false },
+        { "BUSTER_FUZZ_AVAILABLE:=1\n", false, false },
+        { "BUSTER_FUZZ_AVAILABLE:STRING=0\nBUSTER_FUZZ_AVAILABLE:STRING=1\n", false, false },
+        { "BUSTER_FUZZ_AVAILABLE:\nBUSTER_FUZZ_AVAILABLE:STRING=1\n", false, false },
+        { "OTHER:STRING=1\n", false, false },
+    };
+    for (uint32_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i += 1)
+    {
+        bool fuzz = false;
+        const bool valid = ownership_fuzz_setting(cases[i].cache, &fuzz);
+        if (valid != cases[i].valid || (valid && fuzz != cases[i].fuzz))
+        {
+            fail("ownership misread selected fuzz configuration %u", i);
+        }
+    }
+    pass("ownership selects ordinary/fuzz boundaries only from one valid selected-tree cache setting");
+}
+
 static void ownership_fixture_append(char* text, size_t size, size_t* length, const char* format, ...)
 {
     va_list arguments;
@@ -906,6 +1153,8 @@ static void ownership_fixture_append(char* text, size_t size, size_t* length, co
 
 static void check_ownership_fixtures(void)
 {
+    check_ownership_boundaries();
+    check_ownership_configuration();
     check_ownership_structure_fixtures();
     check_ownership_include_fixtures();
     check_ownership_exception_fixtures();
@@ -1027,13 +1276,16 @@ static const char ownership_main_units[] =
     "main.c main_unit_assembler.c main_unit_backend.c main_unit_check_builtins.c main_unit_checker.c "
     "main_unit_dynamic.c main_unit_executable.c main_unit_frontend.c main_unit_link.c main_unit_types.c main_unit_x86.c";
 
+static const char ownership_checker_units[] = "main_unit_backend.c main_unit_check_builtins.c main_unit_checker.c";
+static const char ownership_backend_units[] = "main_unit_backend.c main_unit_checker.c";
+
 static const OwnershipException ownership_exceptions[] = {
-    { "src/buster/compiler/c_checker_test.c", ownership_main_units, "comparison helpers used throughout checker and lowering fixtures", UINT64_C(0x4405a58eb3730e82) },
+    { "src/buster/compiler/c_checker_test.c", ownership_checker_units, "comparison helpers for checker, builtin and backend consumers", UINT64_C(0xd9302eb5f10668a6) },
     { "src/buster/compiler/c_parser_test.c", ownership_main_units, "parser construction and subprocess helpers used by shared parser/checker roots", UINT64_C(0xca0856455dddc8e6) },
     { "src/buster/compiler/c_preprocessor_test.c", ownership_main_units, "preprocessor input and result builders used by shared parser helpers", UINT64_C(0x530f34f7bb6a2975) },
     { "src/buster/compiler/c_preprocessor_history_test.c", "main_unit_frontend.c main_unit_checker.c", "history matcher for preprocessor and checker pragma tests", UINT64_C(0x338bcc2b5286ad74) },
     { "src/buster/compiler/foreign_test.c", "main_unit_executable.c main_unit_checker.c", "foreign executable and checker debug/unwind builders", UINT64_C(0x3932f8b6055a62cb) },
-    { "src/buster/compiler/ir_source_test.c", "main_unit_backend.c main_unit_checker.c", "source preparation for IR commands and checker certificate benchmarks", UINT64_C(0xccc637a93d909385) },
+    { "src/buster/compiler/ir_source_test.c", "main_unit_backend.c main_unit_checker.c", "source preparation interface for IR commands; CHECKER owns its implementation", UINT64_C(0x8366575ba00f1461) },
     { "src/buster/compiler/tier1_select_test.c", "main_unit_backend.c main_unit_checker.c", "selection equality helper for backend and certificate checks", UINT64_C(0x71c71f12f96e31e5) },
     { "src/buster/compiler/tier1_select_burs_test.c", "main_unit_backend.c main_unit_checker.c", "BURS verification for backend and checker certificate benchmarks", UINT64_C(0x35a69924196eb09e) },
     { "src/buster/compiler/tier1_select_source_benchmark.c", "main_unit_backend.c main_unit_checker.c", "source selection runner reused by checker certificate benchmarks", UINT64_C(0xc64fc7b53c7bc1e0) },
@@ -1072,8 +1324,8 @@ static const OwnershipException ownership_exceptions[] = {
     // Production implementations/data reached through fixture includes remain exact dependencies, not inherited
     // exceptions for their descendants. Their own ordinary declarations are outside the shared-fixture invariant.
     { "src/buster/compiler/host_isa.h", ownership_main_units, "production host ISA selection", 0 },
-    { "src/buster/compiler/host_math.h", ownership_main_units, "production host math interface", 0 },
-    { "src/buster/compiler/tier1_certificate.c", ownership_main_units, "production Tier 1 certificate verification", 0 },
+    { "src/buster/compiler/host_math.h", ownership_checker_units, "production host math interface", 0 },
+    { "src/buster/compiler/tier1_certificate.c", ownership_backend_units, "production Tier 1 certificate verification", 0 },
     { "src/buster/compiler/c_builtin_fortify.c", ownership_main_units, "production fortified builtin model", 0 },
     { "src/buster/compiler/c_builtin_library.c", ownership_main_units, "production library builtin model", 0 },
     { "src/buster/compiler/c_builtin_library_calls.inc", ownership_main_units, "production generated library-call declarations", 0 },
@@ -1085,10 +1337,22 @@ static const OwnershipException ownership_exceptions[] = {
     { "src/buster/compiler/c_builtin_intrinsic_filter.c", ownership_main_units, "production intrinsic spelling filter", 0 },
     { "src/buster/compiler/c_builtin_intrinsic_filter_hash.h", ownership_main_units, "production intrinsic filter hash", 0 },
     { "src/buster/compiler/generated/clang_builtin_intrinsic_filter_23_1_1.inc", ownership_main_units, "production generated filter data with recorded generator provenance", 0 },
-    { "src/buster/compiler/c_builtin_cpu.inc", ownership_main_units, "production CPU builtin declarations", 0 },
-    { "src/buster/compiler/ir_dataflow.c", ownership_main_units, "production IR dataflow implementation", 0 },
-    { "src/buster/compiler/ir_if_convert.c", ownership_main_units, "production if-conversion pass; direct non-BACKEND includes preserve its original position", 0 },
-    { "src/buster/compiler/ir_optimize_verified.c", ownership_main_units, "production verified optimizer pass; direct non-BACKEND includes preserve its original position", 0 },
+    { "src/buster/compiler/c_builtin_cpu.inc", ownership_checker_units, "production CPU builtin declarations", 0 },
+    { "src/buster/compiler/ir_dataflow.c", ownership_backend_units, "production IR dataflow implementation", 0 },
+    { "src/buster/compiler/ir_if_convert.c", ownership_backend_units, "production if-conversion pass; CHECKER retains its original include position", 0 },
+    { "src/buster/compiler/ir_optimize_verified.c", ownership_backend_units, "production verified optimizer pass; CHECKER retains its original include position", 0 },
+};
+
+// Fuzz callbacks run in DRIVER and may use the compiler's source and backend internals. This is an explicit
+// configuration boundary, read from the selected tree's cache; a widened ordinary dependency never enables it.
+static const OwnershipException ownership_fuzz_exceptions[] = {
+    { "src/buster/compiler/c_checker_test.c", "main.c main_unit_backend.c main_unit_check_builtins.c main_unit_checker.c", "comparison helpers for checker, builtin, backend and fuzz consumers", UINT64_C(0x96b1c240bd73803a) },
+    { "src/buster/compiler/host_math.h", "main.c main_unit_backend.c main_unit_check_builtins.c main_unit_checker.c", "production host math interface with fuzz source consumers", 0 },
+    { "src/buster/compiler/tier1_certificate.c", "main.c main_unit_backend.c main_unit_checker.c", "production Tier 1 certificate verification with fuzz consumers", 0 },
+    { "src/buster/compiler/c_builtin_cpu.inc", "main.c main_unit_backend.c main_unit_check_builtins.c main_unit_checker.c", "production CPU builtin declarations with fuzz source consumers", 0 },
+    { "src/buster/compiler/ir_dataflow.c", "main.c main_unit_backend.c main_unit_checker.c", "production IR dataflow implementation with fuzz consumers", 0 },
+    { "src/buster/compiler/ir_if_convert.c", "main.c main_unit_backend.c main_unit_checker.c", "production if-conversion pass with fuzz consumers", 0 },
+    { "src/buster/compiler/ir_optimize_verified.c", "main.c main_unit_backend.c main_unit_checker.c", "production verified optimizer pass with fuzz consumers", 0 },
 };
 
 static const OwnershipException ownership_scalar_exceptions[] = {
@@ -1096,10 +1360,26 @@ static const OwnershipException ownership_scalar_exceptions[] = {
     { "src/buster/compiler/host_scalar_vectors.h", ownership_main_units, "production scalar vector types, selected only without the vector host ISA", 0 },
 };
 
-static uint32_t ownership_active_exceptions(const OwnershipGraph* graph, OwnershipException* active)
+static uint32_t ownership_active_exceptions(const OwnershipGraph* graph, bool fuzz, OwnershipException* active)
 {
     memcpy(active, ownership_exceptions, sizeof(ownership_exceptions));
     uint32_t count = sizeof(ownership_exceptions) / sizeof(ownership_exceptions[0]);
+    for (uint32_t i = 0; fuzz && i < sizeof(ownership_fuzz_exceptions) / sizeof(ownership_fuzz_exceptions[0]); i += 1)
+    {
+        uint32_t found = 0;
+        for (uint32_t j = 0; j < count; j += 1)
+        {
+            if (strcmp(ownership_fuzz_exceptions[i].path, active[j].path) == 0)
+            {
+                active[j] = ownership_fuzz_exceptions[i];
+                found += 1;
+            }
+        }
+        if (found != 1)
+        {
+            fail("fuzz ownership requires one ordinary exception for %s", ownership_fuzz_exceptions[i].path);
+        }
+    }
     bool scalar = false;
     bool vectors = false;
     for (uint32_t i = 0; i < graph->count; i += 1)
@@ -1143,11 +1423,12 @@ static void ownership_classify(OwnershipGraph* graph)
     }
 }
 
-static void ownership_check_structure(const OwnershipUnits* units, const OwnershipGraph* graph)
+static void ownership_check_structure(const OwnershipUnits* units, const OwnershipGraph* graph,
+                                      const OwnershipException* exceptions, uint32_t count)
 {
-    for (uint32_t i = 0; i < sizeof(ownership_exceptions) / sizeof(ownership_exceptions[0]); i += 1)
+    for (uint32_t i = 0; i < count; i += 1)
     {
-        const OwnershipException* exception = &ownership_exceptions[i];
+        const OwnershipException* exception = &exceptions[i];
         if (ownership_fixture_name(exception->path))
         {
             uint32_t file = 0;
@@ -1175,14 +1456,14 @@ static void ownership_check_structure(const OwnershipUnits* units, const Ownersh
 // Pin these paths' owning unit, not merely their owner count. Production implementations with a separate
 // interface are checked here too, so every correctness build rejects a newly widened dependency even when the
 // build-only workflow is not selected. The fixture entries must also retain their include-closure classification.
-static void ownership_check_nonstandard(const OwnershipUnits* units, const OwnershipGraph* graph)
+static void ownership_check_nonstandard(const OwnershipUnits* units, const OwnershipGraph* graph, bool fuzz)
 {
-    static const struct
-    {
-        const char* path;
-        const char* owner;
-        bool fixture;
-    } files[] = {
+    const char* source = fuzz ? "main.c main_unit_checker.c" : "main_unit_checker.c";
+    const char* backend = fuzz ? "main.c main_unit_backend.c main_unit_checker.c" : ownership_backend_units;
+    const char* checker = fuzz ? "main.c main_unit_backend.c main_unit_check_builtins.c main_unit_checker.c" : ownership_checker_units;
+    const char* preprocessor = fuzz ? "main.c main_unit_frontend.c" : "main_unit_frontend.c";
+    const char* executable = fuzz ? "main.c main_unit_dynamic.c main_unit_executable.c" : "main_unit_dynamic.c main_unit_executable.c";
+    const OwnershipBoundary files[] = {
         { "src/buster/compiler/tier0_vector_baseline_test.inc", "main_unit_backend.c", true },
         { "src/buster/compiler/tier1_allocate_test_cases.c", "main_unit_backend.c", true },
         { "src/buster/compiler/tier1_schedule_fixture.c", "main_unit_backend.c", true },
@@ -1196,32 +1477,56 @@ static void ownership_check_nonstandard(const OwnershipUnits* units, const Owner
         { "src/buster/compiler/preprocessor_fuzz_clang.c", "main_unit_frontend.c", true },
         { "src/buster/compiler/c_parser_impl.c", "main_unit_frontend.c", false },
         { "src/buster/compiler/x86_target_rows.c", "main_unit_frontend.c", false },
+        { "src/buster/compiler/c_preprocessor_impl.c", preprocessor, false },
+        { "src/buster/compiler/c_preprocessor_history_impl.c", preprocessor, false },
+        { "src/buster/compiler/c_preprocessor_literal.c", preprocessor, false },
+        { "src/buster/compiler/executable_impl.c", executable, false },
+        { "src/buster/compiler/c_check_environment.c", source, false },
+        { "src/buster/compiler/c_check_body_bindings.c", source, false },
+        { "src/buster/compiler/c_check_lazy.c", source, false },
+        { "src/buster/compiler/c_check_actions.c", checker, false },
+        { "src/buster/compiler/c_checker.c", checker, false },
+        { "src/buster/compiler/c_check_input.c", source, false },
+        { "src/buster/compiler/c_check_deferred.c", source, false },
+        { "src/buster/compiler/c_check_program.c", backend, false },
+        { "src/buster/compiler/c_check_program_emit.c", backend, false },
+        { "src/buster/compiler/c_check_corpus.c", backend, false },
+        { "src/buster/compiler/c_check_program_lower.c", source, false },
+        { "src/buster/compiler/c_check_request.c", source, false },
+        { "src/buster/compiler/c_checker_driver.c", source, false },
+        { "src/buster/compiler/c_checker_units.c", source, false },
+        { "src/buster/compiler/c_check_tier1.c", source, false },
+        { "src/buster/compiler/c_check_source_prepare.c", source, false },
+        { "src/buster/compiler/baked.c", source, false },
+        { "src/buster/compiler/c_check_clock.c", "main.c main_unit_checker.c", false },
+        { "src/buster/compiler/c_check_clock_rss.c", "main.c main_unit_checker.c", false },
+        { "src/buster/compiler/worker_budget.c", "main.c main_unit_checker.c", false },
+        { "src/buster/compiler/c_check_constant_bytes.c", fuzz ? "main.c main_unit_check_builtins.c main_unit_checker.c" : "main_unit_check_builtins.c main_unit_checker.c", false },
+        { "src/buster/compiler/c_check_os_log_input.c", fuzz ? "main.c main_unit_check_builtins.c main_unit_checker.c" : "main_unit_check_builtins.c main_unit_checker.c", false },
+        { "src/buster/compiler/tier0.c", backend, false },
+        { "src/buster/compiler/tier1_schedule.c", backend, false },
+        { "src/buster/compiler/tier1_allocate.c", backend, false },
+        { "src/buster/compiler/tier1_frame.c", backend, false },
+        // DRIVER still owns the shared IR scan counter and baked BURS data, without their implementation bodies.
+        { "src/buster/compiler/ir.c", "main.c main_unit_backend.c main_unit_checker.c", false },
+        { "src/buster/compiler/tier1_select_burs.c", "main.c main_unit_backend.c main_unit_checker.c", false },
+        { "src/buster/compiler/interpreter.c", backend, false },
     };
-    for (uint32_t i = 0; i < sizeof(files) / sizeof(files[0]); i += 1)
-    {
-        uint32_t unit = 0;
-        while (unit < units->count && strcmp(units->names[unit], files[i].owner) != 0)
-        {
-            unit += 1;
-        }
-        uint32_t file = 0;
-        while (file < graph->count && strcmp(graph->files[file].path, files[i].path) != 0)
-        {
-            file += 1;
-        }
-        const uint64_t expected = unit < units->count ? UINT64_C(1) << unit : 0;
-        if (file == graph->count || expected == 0 || graph->files[file].owners != expected ||
-            (files[i].fixture && !graph->files[file].fixture))
-        {
-            ownership_report(units, (OwnershipIssue){ .reason = "named implementation's owner or classification changed", .path = files[i].path,
-                                                      .actual = file < graph->count ? graph->files[file].owners : 0, .expected = expected });
-        }
-    }
+    ownership_report(units, ownership_boundaries(units, graph, files, sizeof(files) / sizeof(files[0])));
 }
 
 static void check_ownership(const char* directory, const char* config)
 {
     check_ownership_fixtures();
+    char cache_path[PATH_MAX];
+    snprintf(cache_path, sizeof(cache_path), "%s/CMakeCache.txt", directory);
+    Text cache = read_file(cache_path);
+    bool fuzz = false;
+    if (!ownership_fuzz_setting(cache.data, &fuzz))
+    {
+        fail("ownership requires one valid BUSTER_FUZZ_AVAILABLE setting in %s", cache_path);
+    }
+    free(cache.data);
     char ninja_file[64];
     snprintf(ninja_file, sizeof(ninja_file), "build-%s.ninja", config);
     // Ninja's VALID mark compares the object with its recorded mtime, not the source with the object. A dry run
@@ -1254,10 +1559,10 @@ static void check_ownership(const char* directory, const char* config)
     ownership_classify(&graph);
     OwnershipException active[sizeof(ownership_exceptions) / sizeof(ownership_exceptions[0]) +
                               sizeof(ownership_scalar_exceptions) / sizeof(ownership_scalar_exceptions[0])];
-    const uint32_t exceptions = ownership_active_exceptions(&graph, active);
+    const uint32_t exceptions = ownership_active_exceptions(&graph, fuzz, active);
     ownership_report(&units, ownership_check(&units, &graph, active, exceptions));
-    ownership_check_structure(&units, &graph);
-    ownership_check_nonstandard(&units, &graph);
+    ownership_check_structure(&units, &graph, active, exceptions);
+    ownership_check_nonstandard(&units, &graph, fuzz);
     uint32_t fixtures = 0;
     for (uint32_t i = 0; i < graph.count; i += 1)
     {
@@ -1647,6 +1952,8 @@ static void check_incremental(void)
     static const char shared_main_units[] =
         "main.c main_unit_assembler.c main_unit_backend.c main_unit_check_builtins.c main_unit_checker.c "
         "main_unit_dynamic.c main_unit_executable.c main_unit_frontend.c main_unit_link.c main_unit_types.c main_unit_x86.c ";
+    static const char backend_main_units[] = "main_unit_backend.c main_unit_checker.c ";
+    static const char checker_main_units[] = "main_unit_backend.c main_unit_check_builtins.c main_unit_checker.c ";
     static const struct
     {
         const char* source;
@@ -1665,20 +1972,23 @@ static void check_incremental(void)
         { "src/buster/compiler/c_check_program_amx_test.c", "main_unit_checker.c " },
         { "src/buster/compiler/c_checker_driver_test.c", "main_unit_checker.c " },
         { "src/buster/compiler/c_check_debug_tier1_parameters_test.c", "main_unit_checker.c " },
-        { "src/buster/compiler/c_checker_test.c", shared_main_units },
+        { "src/buster/compiler/c_checker_test.c", checker_main_units },
+        { "src/buster/compiler/c_check_actions.c", checker_main_units },
+        { "src/buster/compiler/c_check_input.c", "main_unit_checker.c " },
+        { "src/buster/compiler/c_check_program_lower.c", "main_unit_checker.c " },
         { "src/buster/compiler/ir_simd_model_test.c", "main_unit_backend.c " },
         { "src/buster/compiler/interpreter_wide_test.c", "main_unit_backend.c " },
         { "src/buster/compiler/ir_optimize_simd_test.c", "main_unit_backend.c " },
         { "src/buster/compiler/ir_source_test.c", "main_unit_backend.c main_unit_checker.c " },
-        { "src/buster/compiler/ir_dataflow.c", shared_main_units },
+        { "src/buster/compiler/ir_dataflow.c", backend_main_units },
         { "src/buster/compiler/ir_optimize_test.c", "main_unit_backend.c " },
         { "src/buster/compiler/ir_if_convert_test.c", "main_unit_backend.c " },
         { "src/buster/compiler/ir_optimize_text_test.c", "main_unit_backend.c " },
         { "src/buster/compiler/ir_optimize_verified_test.c", "main_unit_backend.c " },
         { "src/buster/compiler/tier1_call_probe_test.c", "main_unit_backend.c " },
         { "src/buster/compiler/tier1_address_coalesce_test.c", "main_unit_backend.c " },
-        { "src/buster/compiler/ir_if_convert.c", shared_main_units },
-        { "src/buster/compiler/ir_optimize_verified.c", shared_main_units },
+        { "src/buster/compiler/ir_if_convert.c", backend_main_units },
+        { "src/buster/compiler/ir_optimize_verified.c", backend_main_units },
         { "src/buster/compiler/tier1_select_burs_test.c", "main_unit_backend.c main_unit_checker.c " },
         { "src/buster/compiler/preprocessor_fuzz_generate.c", "main_unit_frontend.c " },
         { "src/buster/compiler/c_preprocessor_directives_test.c", "main_unit_frontend.c " },
@@ -1688,6 +1998,10 @@ static void check_incremental(void)
         { "src/buster/compiler/x86_target_policy_test.c", "main_unit_frontend.c " },
         { "src/buster/compiler/x86_target_rows.c", "main_unit_frontend.c tier1_model_measure.c " },
         { "src/buster/compiler/c_parser_impl.c", "main_unit_frontend.c " },
+        { "src/buster/compiler/c_preprocessor_impl.c", "main_unit_frontend.c " },
+        { "src/buster/compiler/c_preprocessor_history_impl.c", "main_unit_frontend.c " },
+        { "src/buster/compiler/c_preprocessor_literal.c", "main_unit_frontend.c " },
+        { "src/buster/compiler/executable_impl.c", "main_unit_dynamic.c main_unit_executable.c " },
         { "src/buster/compiler/c_preprocessor_history_test.c", "main_unit_checker.c main_unit_frontend.c " },
         { "src/buster/compiler/c_preprocessor_test.c", shared_main_units },
         { "src/buster/compiler/c_preprocessor_oracle.c", shared_main_units },
@@ -1706,6 +2020,7 @@ static void check_incremental(void)
         { "src/buster/compiler/tier0_mask_test.c", "main_unit_backend.c " },
         { "src/buster/compiler/streaming_benchmark_test.c", "main_unit_backend.c " },
         { "src/buster/compiler/tier0_test.c", "main_unit_backend.c " },
+        { "src/buster/compiler/tier0.c", backend_main_units },
         { "src/buster/compiler/diagnostic_test.c", "main.c " },
         { "src/buster/compiler/dataflow_test.c", "main.c " },
         { "src/buster/compiler/oracle_cache_test.c", "main.c " },
@@ -1761,7 +2076,8 @@ static void check_incremental(void)
             checked_owners = "main_unit_backend.c main_unit_checker.c ";
         }
         static const char catalog_benchmark[] = "c_checker_benchmark.c ";
-        if (strcmp(source, "src/buster/compiler/c_builtin_intrinsic_catalog.c") == 0 &&
+        if ((strcmp(source, "src/buster/compiler/c_builtin_intrinsic_catalog.c") == 0 ||
+             strcmp(source, "src/buster/compiler/c_check_actions.c") == 0) &&
             strncmp(checked_owners, catalog_benchmark, sizeof(catalog_benchmark) - 1) == 0)
         {
             checked_owners += sizeof(catalog_benchmark) - 1;
@@ -1784,6 +2100,23 @@ static void check_incremental(void)
         if (strcmp(source, "src/buster/compiler/c_parser_impl.c") == 0 && strcmp(expected, parser_owners) == 0)
         {
             checked_owners = "main_unit_frontend.c ";
+        }
+        static const char preprocessor_owners[] = "c_files_benchmark.c c_parser_benchmark.c c_preprocessor_benchmark.c main_unit_frontend.c ";
+        if ((strcmp(source, "src/buster/compiler/c_preprocessor_impl.c") == 0 ||
+             strcmp(source, "src/buster/compiler/c_preprocessor_history_impl.c") == 0 ||
+             strcmp(source, "src/buster/compiler/c_preprocessor_literal.c") == 0) && strcmp(expected, preprocessor_owners) == 0)
+        {
+            checked_owners = "main_unit_frontend.c ";
+        }
+        static const char executable_owners[] = "executable_benchmark.c link_benchmark.c main_unit_dynamic.c main_unit_executable.c snapshot_benchmark.c ";
+        if (strcmp(source, "src/buster/compiler/executable_impl.c") == 0 && strcmp(expected, executable_owners) == 0)
+        {
+            checked_owners = "main_unit_dynamic.c main_unit_executable.c ";
+        }
+        static const char tier0_owners[] = "main_unit_backend.c main_unit_checker.c tier0_benchmark.c tier1_select_benchmark.c ";
+        if (strcmp(source, "src/buster/compiler/tier0.c") == 0 && strcmp(expected, tier0_owners) == 0)
+        {
+            checked_owners = backend_main_units;
         }
         if (files[i].owners != 0 && strcmp(checked_owners, files[i].owners) != 0)
         {
@@ -3022,6 +3355,7 @@ int main(int argc, char** argv)
     if (argc == 1 || ownership_only)
     {
         check_standalone_preprocessing();
+        check_complete_driver_preprocessing();
         check_target_row_counts();
     }
     if (argc == 1 || driver_only)

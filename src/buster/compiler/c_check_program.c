@@ -2,11 +2,11 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // Executable typed bodies. The source reader retains expression roots and declaration/body ownership; this
-// consumer turns parser statement structure into bounded control columns without redoing name or type lookup.
-// Expressions stay in CheckGraph/CheckStream, and control entries refer to their stable node identities. This
-// representation remains valid when the separate Tier0 lowering cannot represent a checked C type.
-// Include after c_check_input.c, calling_convention.c and tier0.c. All input storage outlives this output. Output
-// and scratch are distinct arenas; failure rolls back output and always restores scratch. No padding is required.
+// consumer turns parser statements into bounded control columns without redoing name or type lookup. Expressions
+// stay in CheckGraph/CheckStream, and control entries retain node identities even when Tier0 lowering refuses a type.
+// Include after c_check_input.c, calling_convention.c and tier0.c; all input storage outlives this output.
+// Output and scratch are disjoint; failure rolls back output and always restores scratch. No padding is required.
+// Backend tests share only CheckProgramStatus, the vector/x86 rows and the frame verifier.
 #ifndef BUSTER_C_CHECK_PROGRAM_INCLUDED
 #define BUSTER_C_CHECK_PROGRAM_INCLUDED
 
@@ -18,7 +18,7 @@ typedef enum CheckProgramStatus
     CHECK_PROGRAM_RESOURCE,
     CHECK_PROGRAM_BACKEND,
 } CheckProgramStatus;
-
+#if !defined(BUSTER_UNIT) || BUSTER_SOURCE_CONSUMER
 // Cold constraint facts survive a failed program's output rollback. No source or arena pointer is retained.
 typedef enum CheckProgramMessage
 {
@@ -4378,5 +4378,10 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
 #include "c_check_program_emit.c"
 #include "c_check_tier0_inline.c"
 
+#else
+#include "c_check_program_vectors.c"
+#include "c_check_program_x86.c"
+#include "c_check_program_emit.c"
+#endif
 #endif
 

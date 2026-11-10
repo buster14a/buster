@@ -131,7 +131,7 @@ clang -std=c17 -O2 -march="$BUSTER_HOST_ARCH" -Wall -Wextra -Werror -fno-strict-
 == Test the preprocessor on the repository's translation units against clang [2 CPUs]
 # --clang also preprocesses each unit with clang -E, with clang's predefines for its options, and compares the
 # tokens. -target and its triple (clang's default) go to both.
-"$BUSTER_COMPILER" test-preprocessor --clang -target x86_64-pc-linux-gnu -march="$BUSTER_HOST_ARCH" -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
+"$BUSTER_COMPILER" test-preprocessor --clang -target x86_64-pc-linux-gnu -march="$BUSTER_HOST_ARCH" -Isrc -fwrapv -funsigned-char -DBUSTER_COMPLETE_DRIVER=1 src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
 == Compare c-testsuite's typed streams, SSA and strict Tier 1 programs [4 CPUs]
 # #134: each function -c compiles lowered with every local in memory and promoted by both of ssa_ir.c's paths, with
 # ssa.c's verifier on each promotion and no trivial phi left, then each program run by the shared IR's interpreter
@@ -198,7 +198,7 @@ musl="$corpus/libc/musl"
   "$musl"/src/*/*.c "$musl"/src/*/x86_64/*.c
 == Test the per-file jobs on the repository's translation units
 # The predefines follow the options as clang's do (c_predefines.c).
-"$BUSTER_COMPILER" test-files -target x86_64-pc-linux-gnu -march="$BUSTER_HOST_ARCH" -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
+"$BUSTER_COMPILER" test-files -target x86_64-pc-linux-gnu -march="$BUSTER_HOST_ARCH" -Isrc -fwrapv -funsigned-char -DBUSTER_COMPLETE_DRIVER=1 src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
 == Test the parser on the repository's translation units
 # Both paths, which must agree kernel by kernel, and accept each unit the build compiles (build.sh print-sources),
 # but main_unit_*.c, which are main.c again with another BUSTER_UNIT. clang has accepted each, with -Wall -Werror, in
@@ -223,7 +223,7 @@ test "${#units[@]}" -gt 0
 # #1398: the driver fixture's bodies and the compiler's own main.c spliced by the vector path and its scalar twin,
 # which must give the same streams, each accepted by tier0_validate and compiled.
 "$BUSTER_COMPILER" test-tier0-inline
-"$BUSTER_COMPILER" test-tier0-inline -march="$BUSTER_HOST_ARCH" -Isrc -fwrapv -funsigned-char -fno-strict-aliasing src/buster/compiler/main.c
+"$BUSTER_COMPILER" test-tier0-inline -march="$BUSTER_HOST_ARCH" -Isrc -fwrapv -funsigned-char -fno-strict-aliasing -DBUSTER_COMPLETE_DRIVER=1 src/buster/compiler/main.c
 == Check the repository's translation units with the checker
 # #619: run in both hosted variants and the target suite, using the build's expanded arguments (including
 # its configured host ISA, target defaults and optimization) rather than shell text from build.sh.
@@ -336,17 +336,18 @@ musl="$corpus/libc/musl"
 "$BUSTER_COMPILER" test-lexer --raw-strings-c99
 == Compare main.c's checking and its functions and objects with clang's
 # #129: the compiler's own main.c, with build.sh's flags for a plain -march=znver5 build whatever this run's host,
-# sanitizer and fuzzing (the unit docs/c-lowering.md measures): checked by both paths, which must agree, and
+# sanitizer and fuzzing, and -DBUSTER_COMPLETE_DRIVER=1 for the whole compiler rather than the driver unit's code
+# (the unit docs/c-lowering.md measures; docs/commands/build.md): checked by both paths, which must agree, and
 # accepted as clang -fsyntax-only accepts it, and its -c object must define what clang -O0 -c's does, but for the
-# documented reasons. The one file must be compared, except in the TSan and MSan rows: its 6,323,682 preprocessed
-# tokens hold 7.5 GiB resident unsanitized, and TSan's shadow takes the same check past 20 GiB, beyond the hosted
-# runner (docs/ci.md). Every other row and the 9700X still run it.
+# documented reasons. The one file must be compared, except in the TSan and MSan rows: it is 4,864,411 preprocessed
+# tokens (on 2026-11-10), and at 6,323,682 its two paths held 7.5 GiB resident unsanitized and TSan's shadow took the
+# same check past 20 GiB, beyond the hosted runner (docs/ci.md). Every other row and the 9700X still run it.
 if [ "${BUSTER_SANITIZER:-none}" != thread ] && [ "${BUSTER_SANITIZER:-none}" != memory ]; then
 unset CPATH C_INCLUDE_PATH
 mapfile -d '' -t flags < <(env -u BUSTER_SANITIZER -u BUSTER_SANITIZER_OPTIMIZATION -u BUSTER_FUZZ_AVAILABLE -u BUSTER_FUZZ_ENTRY \
   BUSTER_HOST_ARCH=znver5 BUSTER_DEBUG_INFO=0 ./build.sh print-compile-flags)
 test "${#flags[@]}" -gt 0
-"$BUSTER_COMPILER" test-checker-corpus --clang clang --symbols-minimum 1 "${flags[@]}" src/buster/compiler/main.c
+"$BUSTER_COMPILER" test-checker-corpus --clang clang --symbols-minimum 1 "${flags[@]}" -DBUSTER_COMPLETE_DRIVER=1 src/buster/compiler/main.c
 else
 printf 'SKIP: main.c checking comparison (sanitizer memory budget; docs/ci.md)\n'
 exit 77
@@ -366,7 +367,8 @@ musl="$corpus/libc/musl"
   --files-from tests/preprocessor-oracle/musl-subset.txt --root "$musl"
 == Compile main.c by -c, its referenced definitions and all of them, by both paths
 # #129 and #619: the compiler's own main.c, with build.sh's flags for a plain -march=znver5 build whatever this
-# run's host, sanitizer and fuzzing (the unit docs/c-lowering.md measures), by -c, which lowers what its roots
+# run's host, sanitizer and fuzzing, and -DBUSTER_COMPLETE_DRIVER=1 for the whole compiler (the unit
+# docs/c-lowering.md measures), by -c, which lowers what its roots
 # reach, and by --lower-all, which lowers every definition but C's inline-only ones, the header intrinsics of
 # features znver5 lacks among them; each with --verify's checks of every function's records. The scalar path's
 # --lower-all object must be the vector path's, byte for byte. A compile takes 10 GiB under TSan and 6.6 GiB under
@@ -378,9 +380,9 @@ mapfile -d '' -t flags < <(env -u BUSTER_SANITIZER -u BUSTER_SANITIZER_OPTIMIZAT
   BUSTER_HOST_ARCH=znver5 BUSTER_DEBUG_INFO=0 ./build.sh print-compile-flags)
 test "${#flags[@]}" -gt 0
 objects=$(mktemp -d)
-"$BUSTER_COMPILER" --lanes 1 --verify -c "${flags[@]}" -o "$objects/selected.o" src/buster/compiler/main.c
-"$BUSTER_COMPILER" --lanes 1 --verify --lower-all -c "${flags[@]}" -o "$objects/all.o" src/buster/compiler/main.c
-"$BUSTER_COMPILER" --scalar --lanes 1 --verify --lower-all -c "${flags[@]}" -o "$objects/all-scalar.o" src/buster/compiler/main.c
+"$BUSTER_COMPILER" --lanes 1 --verify -c "${flags[@]}" -o "$objects/selected.o" -DBUSTER_COMPLETE_DRIVER=1 src/buster/compiler/main.c
+"$BUSTER_COMPILER" --lanes 1 --verify --lower-all -c "${flags[@]}" -o "$objects/all.o" -DBUSTER_COMPLETE_DRIVER=1 src/buster/compiler/main.c
+"$BUSTER_COMPILER" --scalar --lanes 1 --verify --lower-all -c "${flags[@]}" -o "$objects/all-scalar.o" -DBUSTER_COMPLETE_DRIVER=1 src/buster/compiler/main.c
 cmp "$objects/all.o" "$objects/all-scalar.o"
 rm -r "$objects"
 else
@@ -490,7 +492,7 @@ musl="$corpus/libc/musl"
 == Test the C lexer
 "$BUSTER_COMPILER" test-lexer
 == Compare source binding columns on main.c
-"$BUSTER_COMPILER" test-parser-bindings --clang -march="$BUSTER_HOST_ARCH" -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c
+"$BUSTER_COMPILER" test-parser-bindings --clang -march="$BUSTER_HOST_ARCH" -Isrc -fwrapv -funsigned-char --predefines build/predefines.h -DBUSTER_COMPLETE_DRIVER=1 src/buster/compiler/main.c
 == Test the x86-64 encoder
 "$BUSTER_COMPILER" test-x86-encoder
 == Test the backend's baked tables

@@ -4,8 +4,8 @@
 // The executable's entry point, main, which includes most of the compiler and all of its tests. build.sh compiles this
 // file once per unit, in parallel, so that the build waits for the largest unit rather than for all of this code in one
 // clang process (#270): main.c alone is the driver's unit, and each main_unit_*.c names another unit and includes this
-// file. Shared implementation and fixtures are read by every unit; independent tests are included only in the unit
-// that runs them, keeping their parsing and edit dependencies there. Each of main_command's branches first tests its
+// file. Shared interfaces and fixtures are read by their consumers; private implementation and independent tests
+// stay with the units that use them, keeping their parsing and edit dependencies there. Each command first tests its
 // unit (and an independent test's branch is included with its test), so the other units' branches fold to false. Clang
 // emits a static function only once emitted code refers to it, and emits none of theirs. main, in the driver's unit, asks
 // each other unit for the command in turn, then its own commands, then runs the compiler itself.
@@ -17,7 +17,8 @@
 // nothing, so that they have external linkage there, and in the other units BUSTER_ELSEWHERE, which makes their
 // definitions inline ones that are never inlined, which clang doesn't emit: their calls go to the home's, and the
 // static functions that only the entry points reach aren't emitted there either. A unit without main.c, a benchmark's,
-// has them static. The parser instead exposes declarations; only FRONTEND reads its implementation. A command
+// has them static. The parser, preprocessor and executable writer expose declarations to other units; their bodies
+// stay with their existing homes and direct private consumers, and the complete driver's (below). A command
 // whose code calls a home's entry point runs in two units' copies of the code, so a home's code must share no static
 // variable with its callers' units: main.c's units have one lane context (lane.c), and ./build.sh check-call-graph
 // checks the rest (call_graph.c).
@@ -36,6 +37,23 @@
 #define BUSTER_UNIT BUSTER_UNIT_DRIVER
 #endif
 #define BUSTER_IN_UNIT(unit) (BUSTER_UNIT == (unit))
+// Source checking is emitted only in CHECKER; code generation also has consumers in BACKEND. The backend and
+// builtin tests share semantic actions without the source reader, graph or lowering. The complete driver is DRIVER
+// with the whole compiler as well: the source, checker and code-generation consumers and the preprocessor's and
+// executable writer's private bodies, which other units own. A fuzz build's callbacks run in DRIVER and need it,
+// including a custom callback's access to the normal compiler modules; the self-tests and benchmarks that take main.c
+// as their input pass -DBUSTER_COMPLETE_DRIVER=1 to read all of the compiler's code, not only what DRIVER emits. An
+// ordinary build passes neither, and the other units ignore both.
+#if BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && (BUSTER_FUZZ_AVAILABLE || BUSTER_COMPLETE_DRIVER)
+#undef BUSTER_COMPLETE_DRIVER
+#define BUSTER_COMPLETE_DRIVER 1
+#else
+#undef BUSTER_COMPLETE_DRIVER
+#define BUSTER_COMPLETE_DRIVER 0
+#endif
+#define BUSTER_SOURCE_CONSUMER (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) || BUSTER_COMPLETE_DRIVER)
+#define BUSTER_BACKEND_CONSUMER (BUSTER_SOURCE_CONSUMER || BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND))
+#define BUSTER_CHECKER_CONSUMER (BUSTER_BACKEND_CONSUMER || BUSTER_IN_UNIT(BUSTER_UNIT_CHECK_BUILTINS))
 
 // An entry point in a unit that isn't its module's home: an inline definition, which clang emits only to inline it,
 // and noinline keeps it from that, so that the unit's calls go to the home's external definition. Calling the module's
@@ -67,7 +85,11 @@
 // (c_parser.c) and the linker's (link.c's); and the checker's, for the IR's commands on real C (ir_source_test.c's
 // ir_source_prepare, the driver's check and emission of a file), which the backend's unit runs with the IR (#784).
 #define BUSTER_LEXER_ENTRY BUSTER_HOME_DRIVER
+#if BUSTER_COMPLETE_DRIVER
 #define BUSTER_PREPROCESSOR_ENTRY BUSTER_HOME_FRONTEND
+#else
+#define BUSTER_PREPROCESSOR_ENTRY
+#endif
 // Parser bodies are included only by their frontend home; the other units use these external declarations.
 #define BUSTER_PARSER_ENTRY
 #define BUSTER_LINKER_ENTRY BUSTER_HOME_DYNAMIC
@@ -82,6 +104,7 @@
 #endif
 
 #include <stdint.h>
+#include <inttypes.h>
 #include <stdbool.h>
 #include <string.h>
 #include <stdio.h>
@@ -166,12 +189,12 @@ int run_dataflow_benchmark(int argc, char** argv);
 int run_emission_metadata_tests(int argc, char** argv);
 
 // Entry-rooted dominance, frontiers and natural loops over borrowed CFG columns.
+#if BUSTER_BACKEND_CONSUMER
 #include "buster/compiler/dominators.c"
 #include "buster/compiler/dominators_export.c"
 #if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/dominators_test.c"
 #endif
-int run_dominator_benchmark(int argc, char** argv);
 
 // Local promotion over a completed CFG: vector SSA construction, its nonrecursive scalar twin and semantic tests.
 #include "buster/compiler/ssa.c"
@@ -197,7 +220,9 @@ int run_dominator_benchmark(int argc, char** argv);
 #if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/tier1_cfg_test.c"
 #endif
+#endif
 int run_tier1_allocate_benchmark(int argc, char** argv);
+int run_dominator_benchmark(int argc, char** argv);
 
 // The preprocessor's fuzz tooling (#109): the generator, the clang oracle, the comparison and the minimizer, and their
 // self-tests, for the test-preprocessor-fuzz command. test-preprocessor --fuzz runs the preprocessor against them
@@ -440,9 +465,11 @@ int run_x86_semantics_benchmark(int argc, char** argv);
 #endif
 
 // Experimental postallocation scheduling over resolved machine-record effects and measured operand costs.
+#if BUSTER_BACKEND_CONSUMER
 #include "buster/compiler/tier1_schedule.c"
 #if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/tier1_schedule_test.c"
+#endif
 #endif
 int run_tier1_schedule_benchmark(int argc, char** argv);
 
@@ -480,15 +507,18 @@ _Static_assert(BUSTER_CHECKER_OFFSET >= 0 && BUSTER_CHECKER_OFFSET < 4096 && BUS
 #define BUSTER_CHECKER_OFFSET_TEXT(offset) BUSTER_CHECKER_OFFSET_TEXT_(offset)
 __asm__(".section .text.buster_checker,\"ax\",@progbits\n\t.p2align 12\n\t.skip " BUSTER_CHECKER_OFFSET_TEXT(BUSTER_CHECKER_OFFSET) ", 0xcc\n\t.text");
 #pragma clang section text = ".text.buster_checker"
+#if BUSTER_SOURCE_CONSUMER
 #include "buster/compiler/c_check_environment.c"
 #include "buster/compiler/c_check_body_bindings.c"
 #include "buster/compiler/c_check_lazy.c"
+#endif
 #pragma clang section text = ""
 
 #include "buster/compiler/c_builtin.c"
 #if BUSTER_IN_UNIT(BUSTER_UNIT_TYPES) || BUSTER_IN_UNIT(BUSTER_UNIT_CHECK_BUILTINS)
 #include "buster/compiler/c_builtin_test.c"
 #endif
+#if BUSTER_CHECKER_CONSUMER
 #pragma clang section text = ".text.buster_checker"
 #include "buster/compiler/c_check_actions.c"
 #pragma clang section text = ""
@@ -509,6 +539,7 @@ __asm__(".section .text.buster_checker,\"ax\",@progbits\n\t.p2align 12\n\t.skip 
 #include "buster/compiler/c_check_builtin_rounds.c"
 #pragma clang section text = ".text.buster_checker"
 #include "buster/compiler/c_checker.c"
+#if BUSTER_SOURCE_CONSUMER
 #include "buster/compiler/c_check_literals.c"
 #include "buster/compiler/c_check_warning_source.c"
 #include "buster/compiler/c_check_initializer.c"
@@ -519,7 +550,12 @@ __asm__(".section .text.buster_checker,\"ax\",@progbits\n\t.p2align 12\n\t.skip 
 #include "buster/compiler/c_check_diagnostic.c"
 #include "buster/compiler/c_check_initializer_input.c"
 #include "buster/compiler/c_check_data_input.c"
+#elif BUSTER_IN_UNIT(BUSTER_UNIT_CHECK_BUILTINS)
+#include "buster/compiler/c_check_constant_bytes.c"
+#include "buster/compiler/c_check_os_log_input.c"
+#endif
 #pragma clang section text = ""
+#endif
 int run_checker_benchmark(int argc, char** argv);
 int run_builtin_benchmark(int argc, char** argv);
 
@@ -536,6 +572,7 @@ int run_calling_convention_benchmark(int argc, char** argv);
 #include "buster/compiler/emission_metadata.c"
 
 // Frame storage, explicit prologue/epilogue planning and its native instruction consumer.
+#if BUSTER_BACKEND_CONSUMER
 #include "buster/compiler/tier1_frame.c"
 #if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/tier1_frame_test.c"
@@ -544,7 +581,6 @@ int run_calling_convention_benchmark(int argc, char** argv);
 #if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/tier1_frame_execution_test.c"
 #endif
-int run_tier1_frame_benchmark(int argc, char** argv);
 
 // Tier 0 (a function's typed stream to instruction records, by templates with registers from the value stack's
 // depths), the programs its tests and benchmark generate, and its tests, for the test-tier0 command. Its benchmark
@@ -621,17 +657,27 @@ int run_tier1_frame_benchmark(int argc, char** argv);
 #include "buster/compiler/streaming_benchmark.c"
 #include "buster/compiler/streaming_benchmark_test.c"
 #endif
+#endif
 int run_backend_benchmark(int argc, char** argv);
+int run_tier1_frame_benchmark(int argc, char** argv);
 
 // Source checking's program consumer shares the ABI and Tier 0 interfaces. Keep the source driver and its
 // integration tests after those consumers so one checked unit can retain both executable bodies and static data.
+#if BUSTER_BACKEND_CONSUMER
 #pragma clang section text = ".text.buster_checker"
 #include "buster/compiler/c_check_program.c"
 #pragma clang section text = ""
+#elif BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER)
+#pragma clang section text = ".text.buster_checker"
+#include "buster/compiler/c_check_clock.c"
+#include "buster/compiler/worker_budget.c"
+#pragma clang section text = ""
+#endif
 // #129's oracle: the functions and objects two objects define, compared (ours from -c, clang -O0 -c's), with the names
 // the checked source makes, for the checker's selection tests, test-checker-corpus --symbols and test-c-testsuite
 // --cross-check.
 #include "buster/compiler/c_lowering_symbols.c"
+#if BUSTER_SOURCE_CONSUMER
 #pragma clang section text = ".text.buster_checker"
 #include "buster/compiler/c_check_prefix.c"
 #include "buster/compiler/c_check_repair.c"
@@ -645,6 +691,7 @@ int run_backend_benchmark(int argc, char** argv);
 // bake-tables (#590): the backend's tables written into this executable's own file, built, by build.sh, from this
 // unit, whose Tier 0 and unwind copies the C driver above uses (baked.h).
 #include "buster/compiler/baked.c"
+#endif
 // The checker unit's own tests compile unoptimized, between `optimize off` and `on` (#681). On the 9700X, the measured
 // 716c980d to 4ce693ad pair's checker-unit mean fell from 33.7 to 27.35 s, and compilation-phase wall from 33.7 to
 // 28.5 s (two builds per role, excluding final linking and remaining script overhead). AGENTS.md links the frozen
@@ -652,7 +699,9 @@ int run_backend_benchmark(int argc, char** argv);
 // No benchmark's timed code calls these tests: they generate inputs and compare results outside the samples.
 // A new test of the checker's goes inside.
 #pragma clang optimize off
+#if BUSTER_CHECKER_CONSUMER
 #include "buster/compiler/c_checker_test.c"
+#endif
 #pragma clang optimize on
 #if BUSTER_IN_UNIT(BUSTER_UNIT_CHECK_BUILTINS)
 #include "buster/compiler/c_builtin_intrinsic_types_test.c"
@@ -674,9 +723,13 @@ int run_backend_benchmark(int argc, char** argv);
 #include "buster/compiler/c_check_builtin_bits_test.c"
 #include "buster/compiler/c_check_builtin_rounds_test.c"
 #endif
+#if BUSTER_BACKEND_CONSUMER
 #include "buster/compiler/c_check_corpus.c"
+#endif
+#if BUSTER_SOURCE_CONSUMER
 // #1057: a real C file prepared as -c prepares it, which the source benchmarks and the IR's commands on real C share.
 #include "buster/compiler/c_check_source_prepare.c"
+#endif
 #pragma clang optimize off
 #if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
 #include "buster/compiler/c_check_deferred_test.c"
@@ -750,6 +803,12 @@ int run_backend_benchmark(int argc, char** argv);
 #pragma clang optimize on
 
 // Tier 1's arena-backed instruction columns, exact verifier twins, stable text form and typed-stream adapter.
+#if BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && !BUSTER_SOURCE_CONSUMER
+#define BUSTER_IR_STORAGE_ONLY
+#include "buster/compiler/ir.c"
+#undef BUSTER_IR_STORAGE_ONLY
+#endif
+#if BUSTER_BACKEND_CONSUMER
 #include "buster/compiler/ir.c"
 #include "buster/compiler/ir_simd_typed.c"
 #include "buster/compiler/ir_lower.c"
@@ -865,6 +924,13 @@ int run_backend_benchmark(int argc, char** argv);
 #if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/tier1_wide_test.c"
 #endif
+#endif
+// The driver remains the baked tables' storage home; it needs their declarations without the selection kernels.
+#if BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && !BUSTER_SOURCE_CONSUMER
+#define BUSTER_TIER1_BURS_STORAGE_ONLY
+#include "buster/compiler/tier1_select_burs.c"
+#undef BUSTER_TIER1_BURS_STORAGE_ONLY
+#endif
 // #179: what a mask's spill costs, to memory against to a general register, and the programs' checks.
 #if BUSTER_IN_UNIT(BUSTER_UNIT_X86)
 #include "buster/compiler/mask_spill_measure.c"
@@ -872,6 +938,7 @@ int run_backend_benchmark(int argc, char** argv);
 #if BUSTER_IN_UNIT(BUSTER_UNIT_X86)
 #include "buster/compiler/mask_spill_measure_test.c"
 #endif
+#if BUSTER_BACKEND_CONSUMER
 #if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/tier1_pipeline_benchmark.c"
 #endif
@@ -885,7 +952,9 @@ int run_backend_benchmark(int argc, char** argv);
 #endif
 // The C driver's --tier1 (#138's piece for #140): each function Tier 1's pipeline takes compiled by it.
 #pragma clang section text = ".text.buster_checker"
+#if BUSTER_SOURCE_CONSUMER
 #include "buster/compiler/c_check_tier1.c"
+#endif
 #pragma clang optimize off
 #if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
 #include "buster/compiler/c_check_debug_tier1_parameters_test.c"
@@ -897,7 +966,6 @@ int run_backend_benchmark(int argc, char** argv);
 #if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/emitted_code_test.c"
 #endif
-bool run_x86_target_selection_tests(void);
 #if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/x86_target_selection_test.c"
 #endif
@@ -906,7 +974,9 @@ bool run_x86_target_selection_tests(void);
 #include "buster/compiler/ir_simd_typed_test.c"
 #include "buster/compiler/ir_simd_consumer_test.c"
 #endif
+#endif
 int run_tier1_select_benchmark(int argc, char** argv);
+bool run_x86_target_selection_tests(void);
 int run_tier1_model_measure(int argc, char** argv);
 int run_tier1_model_measure_tests(int argc, char** argv);
 
@@ -1021,7 +1091,7 @@ static bool main_preprocessing(int count, char** arguments)
 }
 #endif
 
-#if !BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
+#if BUSTER_SOURCE_CONSUMER && !BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
 // These shared static entry points were referenced only by the checker fixtures now read in their owning unit.
 // Keep those semantic references without parsing the fixtures: this unused function is never called or emitted.
 // Other unused-function diagnostics remain enabled, and the checker unit still checks the interfaces' real callers.
@@ -1050,12 +1120,14 @@ static __attribute__((unused)) void main_checker_test_interfaces(void)
     (void)&lowering_symbols_compare_strings;
     (void)&run_check_command;
     (void)&check_corpus_check;
+    (void)&run_bake_command;
+    (void)&run_baked_tables_test;
+    (void)&run_checker_corpus;
 }
 #endif
 
-#if !BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && !BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
-// Source preparation's real calls belong to BACKEND and CHECKER. Keep only semantic references to its production
-// dependencies in other units, with no emitted code; both consumers retain normal unused-function diagnostics.
+#if BUSTER_COMPLETE_DRIVER
+// The complete driver reads the source interfaces but not the checker-owned IR commands which normally call these.
 static __attribute__((unused)) void main_ir_source_interfaces(void)
 {
     (void)&check_program_access;
@@ -1082,7 +1154,7 @@ static __attribute__((unused)) void main_frontend_test_interfaces(void)
 }
 #endif
 
-#if !BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
+#if BUSTER_BACKEND_CONSUMER && !BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 // The backend fixtures supply these shared static entry points' callers in their owning unit. Keep their
 // semantic references in the others without parsing the fixtures or emitting code; the owner retains real callers.
 static __attribute__((unused)) void main_backend_test_interfaces(void)
@@ -1101,6 +1173,7 @@ static __attribute__((unused)) void main_backend_test_interfaces(void)
     (void)&stream_program_generate;
     (void)&stream_write;
     (void)&stream_write_link;
+    (void)&run_ir_interpreter;
 }
 #endif
 
@@ -1162,6 +1235,83 @@ static __attribute__((unused)) void main_benchmark_test_interfaces(void)
     (void)&tier0_benchmark_reserve;
     (void)&tier0_benchmark_add;
     (void)&tier0_benchmark_measure;
+}
+#endif
+
+#if !BUSTER_SOURCE_CONSUMER
+// Removing the source consumers also removes their references to shared helpers. Keep those references without
+// parsing the source closure or emitting code; the owning units still check the real calls with warnings enabled.
+static __attribute__((unused)) void main_checker_consumer_interfaces(void)
+{
+#if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
+    (void)&check_action_quad_bits;
+    (void)&check_varargs;
+    (void)&check_builtin_float_strict;
+    (void)&check_builtin_float;
+    (void)&tier0_inline;
+    (void)&tier0_inline_scalar;
+    (void)&tier0_inline_code;
+    (void)&cbuiltin_x86_helper_kind;
+    (void)&cbuiltin_x86_helper;
+    (void)&check_vector_baseline_resize;
+    (void)&check_vector_baseline_shuffle_row;
+    (void)&check_vector_lower_element_row;
+    (void)&check_vector_lower_brain;
+    (void)&check_vector_lower_brain_rows;
+    (void)&check_x86_lower_rule;
+    (void)&check_x86_lower_reduce_row;
+    (void)&check_test_value_equal;
+#endif
+#if BUSTER_CHECKER_CONSUMER
+    (void)&check_warning_set_add;
+    (void)&check_value_copy_floating;
+    (void)&check_value_static_initializer;
+    (void)&check_const_append;
+    (void)&check_vector_member_decode;
+    (void)&check_warning_null_integer;
+    (void)&check_warning_ordered_event;
+    (void)&check_builtin_atomic_c11_native;
+    (void)&check_actions;
+    (void)&check_action_integer_constant;
+    (void)&check_action_i64;
+    (void)&check_action_member_lookup;
+    (void)&check_builtin_library_fold;
+    (void)&check_builtin_library_fold_memory;
+    (void)&check_library_plain_prototype;
+    (void)&check_builtin_library_fold_plain;
+#endif
+#if BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER)
+    (void)&check_clock_start;
+    (void)&check_clock_mark;
+    (void)&check_clock_report;
+#endif
+    (void)&oracle_cache_report;
+    (void)&pp_oracle_includes;
+    (void)&parse_pragma_at;
+    (void)&parse_postorder;
+    (void)&parse_tree_columns;
+    (void)&parse_tree_links;
+    (void)&parse_release;
+    (void)&parse_test_outcome;
+    (void)&parse_test_random;
+    (void)&parse_test_canonical_role;
+    (void)&parse_test_collect;
+    (void)&parse_test_preprocessed;
+    (void)&parse_bindings_build;
+    (void)&parse_bindings_resolve;
+    (void)&asm_assemble_code;
+    (void)&debug_finalize;
+    (void)&x86_zen5_initialize;
+    (void)&x86_zen5_lookup_scalar;
+    (void)&x86_zen5_lookup;
+    (void)&c_environment_build;
+    (void)&c_environment_lookup_batch;
+    (void)&c_environment_bodies;
+    (void)&cbuiltin_fold_scalar;
+    (void)&cbuiltin_fold;
+    (void)&lowering_symbols_read_file;
+    (void)&lowering_symbols_compare;
+    (void)&lowering_symbols_compare_strings;
 }
 #endif
 
@@ -1611,6 +1761,7 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     {
         result = run_files_benchmark(argc - 1, argv + 1);
     }
+#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "bake-tables") == 0)
     {
         result = run_bake_command(argc - 1, argv + 1);
@@ -1625,6 +1776,7 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
         arena_limits_fix();
         result = run_check_command_mode(argc - 2, argv + 2, false, false);
     }
+#endif
 #if BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND) && argc >= 2 && strcmp(argv[1], "parse") == 0)
     {
@@ -1797,10 +1949,12 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
         result = run_c_environment_benchmark(argc - 2, argv + 2);
     }
 #endif
+#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "test-checker-corpus") == 0)
     {
         result = run_checker_corpus(argc - 2, argv + 2);
     }
+#endif
 #if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "test-checker-deferred") == 0)
     {
@@ -2103,10 +2257,12 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
         result = run_ir_interpreter_tests(argc - 2, argv + 2);
     }
 #endif
+#if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "interpret-ir") == 0)
     {
         result = run_ir_interpreter(argc - 2, argv + 2);
     }
+#endif
 #if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "interpret-c") == 0)
     {

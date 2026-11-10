@@ -17,9 +17,9 @@
 // returns' epilogues bracketed and open where its code doesn't end in one, #177) resolved through its records' starts
 // and ends after branch sizing (emitted_unwind), written after the last function (unwind_write) as one EH_FRAME atom,
 // a CIE and an FDE per function after it, each FDE's initial location a PC32 fixup to its function's symbol; with
-// `verify`, each proved against its records and their control flow (emitted_verify_frames), and the fixed-frame
-// analyzer's proof the same CFI where the analyzer takes the function (unwind_tier0).
-
+// `verify`, each proved against its records/control flow, with the same CFI as the fixed-frame analyzer (unwind_tier0).
+// Backend tests share only the frame verifier; source consumers retain the complete emission below.
+#if !defined(BUSTER_UNIT) || BUSTER_SOURCE_CONSUMER
 #include "worker_budget.c"
 #include "c_check_tier1_outcome.c"
 
@@ -961,7 +961,7 @@ static __attribute__((noinline)) bool check_program_emit_body_rows(CheckEmitBody
     }
     return valid;
 }
-
+#endif
 // A function's unwind descriptor, `frame`, from its emitted code's frame events after branch sizing (`offsets`, which
 // gets the length at the record count): resolved through the final layout (emitted_unwind) into `rows` (frame_count
 // room, which the tables read once the lanes are done). With `verify`, the events are proved against the records and
@@ -1033,7 +1033,7 @@ static __attribute__((unused)) CheckProgramStatus check_program_emit_frame(const
 {
     return check_program_emit_frame_checked(code, offsets, length, verify, scalar, rows, scratch, frame, reason, NULL);
 }
-
+#if !defined(BUSTER_UNIT) || BUSTER_SOURCE_CONSUMER
 // A bounded diagnostic for the selected failure only, after the lanes have joined. Numeric form and raw operand
 // fields identify the exact record; the resolved width is what the frame verifier uses to clobber saved slots.
 static void check_program_emit_frame_record(const EmittedCode* code, uint32_t body, uint32_t index)
@@ -4840,3 +4840,4 @@ static bool check_program_sections(CheckProgramCode* code, const CheckProgram* p
     }
     return valid;
 }
+#endif
