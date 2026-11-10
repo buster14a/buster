@@ -116,14 +116,15 @@
 
 // ---------------------------------------------------------------------------------------------------------------------
 // The tally
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK
 #define BUSTER_BIND_TEST_REPORTED 20
 #define BUSTER_BIND_TEST_ARENA_BYTES (1ull << 32)
+#endif
 #define BUSTER_BIND_TEST_BIND_BYTES (1ull << 30)
 #define BUSTER_BIND_TEST_PATH_BYTES 4096
 // What a dirty arena holds where binding pushes its arrays (bind_test_dirty_arena).
 #define BUSTER_BIND_TEST_DIRTY_BYTE 0xa5
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK
 typedef struct BindTestTally BindTestTally;
 struct BindTestTally
 {
@@ -163,7 +164,7 @@ static const char* const bind_test_errors[] = {
     [BIND_ERROR_LIBRARY_VERSION] = "library version",
     [BIND_ERROR_MEMBER_UNDEFINED] = "member undefined",
 };
-
+#endif
 // ---------------------------------------------------------------------------------------------------------------------
 // The programs and their comparisons
 
@@ -176,7 +177,7 @@ struct BindTestProgram
     Bind bind;
     bool bound;
 };
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 // Fills the arena's next `bytes` bytes with BUSTER_BIND_TEST_DIRTY_BYTE and pops them again, so that what binding pushes
 // there holds the pattern where a fresh mapping holds zeros, as an arena that held other data would.
 static bool bind_test_dirty_arena(Arena* arena, uint64_t bytes)
@@ -190,7 +191,8 @@ static bool bind_test_dirty_arena(Arena* arena, uint64_t bytes)
     }
     return filled != 0;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 // Generates the program with room for the runtime, joins the runtime's first objects after its symbols, adds its atoms,
 // and binds the rest, numbering the runtime's units after the program's; with `dirty`, over binding's arena dirtied that
 // far (bind_test_dirty_arena).
@@ -210,18 +212,21 @@ static bool bind_test_program_dirtied(BindTestProgram* test, const Runtime* runt
     test->bound = result;
     return result;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 static bool bind_test_program(BindTestProgram* test, const Runtime* runtime, LinkProgramOptions options, BindPath path)
 {
     return bind_test_program_dirtied(test, runtime, options, path, 0);
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 static void bind_test_release(BindTestProgram* test)
 {
     link_program_release(&test->program);
     arena_release(&test->arena);
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE
 // Whether two links hold the same records: names by their bytes, atoms by theirs, and wide addends by value.
 static bool bind_test_same_links(const Link* a, const Link* b)
 {
@@ -260,13 +265,15 @@ static bool bind_test_same_links(const Link* a, const Link* b)
     }
     return result;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE
 // The bytes to dirty for a binding again: as far as `used`, what the clean binding pushed on its arena, and as far again.
 static uint64_t bind_test_dirty_bytes(uint64_t used)
 {
     return 2 * used + 4096;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE
 // Whether the dirty arena's pattern reached Bind.symbols: an entry of a piece that didn't join keeps it, since binding
 // writes only the entries of the pieces that join.
 static bool bind_test_kept_pattern(const Bind* bind, const Runtime* runtime)
@@ -279,7 +286,8 @@ static bool bind_test_kept_pattern(const Bind* bind, const Runtime* runtime)
     }
     return kept;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE
 // Whether two bindings ended alike: the error and its name, the imports, the exports, the libraries needed and the
 // members that joined.
 static bool bind_test_same_binds(const Bind* a, const Bind* b)
@@ -295,16 +303,17 @@ static bool bind_test_same_binds(const Bind* a, const Bind* b)
     }
     return result;
 }
-
+#endif
 // ---------------------------------------------------------------------------------------------------------------------
 // The programs' checks
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 static bool bind_test_named(const Link* link, NameId name, const char* text)
 {
     const uint64_t length = strlen(text);
     return name != 0 && link->names.length[name] == length && memcmp(link->names.bytes[name], text, length) == 0;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK
 // The first symbol of the link that isn't local and has the name, or 0.
 static SymbolId bind_test_global(const Link* link, const char* text)
 {
@@ -638,7 +647,8 @@ static void bind_test_structure(BindTestTally* tally, const BindTestProgram* tes
     bind_test_expect(tally, fini_first == base + RUNTIME_OBJECT_INIT_PROLOGUE && fini_last == base + RUNTIME_OBJECT_INIT_EPILOGUE, ".fini: crti.o's first, crtn.o's last", fini_last);
     bind_test_expect(tally, eh_last == base + RUNTIME_OBJECT_END, ".eh_frame: crtendS.o's last", eh_last);
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK
 // Binds the program again by the clean binding's path, over binding's arena dirtied as far as bind_test_dirty_bytes
 // says, which must give the clean binding's link and binding: binding reads no entry of the arrays it pushes before
 // writing it, Bind.symbols's among them, which it doesn't clear (each piece's join writes its symbols' entries before
@@ -715,7 +725,7 @@ static void bind_test_names(BindTestTally* tally, const Link* link, const Runtim
     bind_test_expect(tally, wrong == 0, "the index finds what a scan finds", wrong);
     bind_test_expect(tally, found != 0, "some of the program's names among the runtime's", found);
 }
-
+#endif
 // ---------------------------------------------------------------------------------------------------------------------
 // Links made by hand
 
@@ -732,7 +742,7 @@ struct BindTestLink
 };
 
 #define BUSTER_BIND_TEST_OWN_RECORDS 32
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 static bool bind_test_link_begin(BindTestLink* test, const Runtime* runtime, uint32_t symbol_room)
 {
     uint64_t name_bytes = 0;
@@ -753,7 +763,8 @@ static bool bind_test_link_begin(BindTestLink* test, const Runtime* runtime, uin
     test->arena = arena_reserve(BUSTER_BIND_TEST_BIND_BYTES);
     return test->names.base != 0 && test->bytes.base != 0 && test->arena.base != 0 && link_initialize(&test->link, &test->tables, &test->names, capacity);
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 // The symbol room a link made by hand has: its own and the runtime's.
 static uint32_t bind_test_room(const Runtime* runtime)
 {
@@ -761,7 +772,8 @@ static uint32_t bind_test_room(const Runtime* runtime)
     uint64_t atom_bytes = 0;
     return bind_capacity(runtime, &name_bytes, &atom_bytes).symbols + BUSTER_BIND_TEST_OWN_RECORDS;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 static void bind_test_link_end(BindTestLink* test)
 {
     arena_release(&test->tables);
@@ -769,13 +781,15 @@ static void bind_test_link_end(BindTestLink* test)
     arena_release(&test->bytes);
     arena_release(&test->arena);
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 static SymbolId bind_test_symbol(BindTestLink* test, const char* name, uint8_t flags, uint8_t source)
 {
     const NameId id = link_add_name(&test->link, (const uint8_t*)name, (uint32_t)strlen(name));
     return id != 0 ? link_add_symbol(&test->link, id, 0, 0, 0, flags, source) : 0;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK
 // A weak absolute definition of `name` at 123 in the program, as an object's `.weak name` and `.set name, 123` give it:
 // its source says only that it is absolute.
 static SymbolId bind_test_weak_absolute(BindTestLink* test, const char* name)
@@ -794,7 +808,8 @@ static bool bind_test_same_place(const Link* link, SymbolId symbol, const char* 
     const SymbolId other = bind_test_global(link, name);
     return other != 0 && link->symbols.atom[symbol] != 0 && link->symbols.atom[symbol] == link->symbols.atom[other] && link->symbols.value[symbol] == link->symbols.value[other];
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 // A data atom of 8 bytes in unit 0 that defines `symbol`, which has no atom yet.
 static bool bind_test_define(BindTestLink* test, SymbolId symbol)
 {
@@ -806,7 +821,8 @@ static bool bind_test_define(BindTestLink* test, SymbolId symbol)
     }
     return atom != 0 && link_define_symbol(&test->link, symbol, atom, 0, 8);
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK
 // A data atom of `size` bytes at `alignment_log2` in unit 0, in the input section `name`: whether it was added. It
 // defines no symbol (a section's entries need none), only its input section, which __start_ and __stop_ bound.
 static bool bind_test_define_section(BindTestLink* test, const char* name, uint8_t alignment_log2, uint64_t size)
@@ -820,12 +836,13 @@ static bool bind_test_define_section(BindTestLink* test, const char* name, uint8
     }
     return atom != 0 && link_set_atom_section(&test->link, atom, section);
 }
-
+#endif
 // ---------------------------------------------------------------------------------------------------------------------
 // The rules
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 static uint32_t bind_test_member(const Runtime* runtime, const char* name);
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 // Whether binding refused a link of split-stack code as it must against a runtime without libgcc_s.so.1:
 // BIND_ERROR_MEMBER_UNDEFINED, naming _Unwind_Resume and libgcc.a's morestack.o, which joined.
 static bool bind_test_split_refused(const Bind* bind, const Link* link, const Runtime* runtime)
@@ -834,7 +851,8 @@ static bool bind_test_split_refused(const Bind* bind, const Link* link, const Ru
     return bind->error == BIND_ERROR_MEMBER_UNDEFINED && bind_test_named(link, bind->name, "_Unwind_Resume") && morestack < runtime->member_count &&
            bind->member == morestack && (bind->members_joined[morestack / 64] >> (morestack % 64) & 1) != 0;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK
 // Whether binding bound a link of split-stack code as GCC's driver links it, against a runtime with libgcc_s.so.1:
 // libgcc.a's morestack.o joined, and its strong reference to _Unwind_Resume is an import of libgcc_s.so.1's at one of
 // its versions, which makes the link need the library (bind_keep_as_needed).
@@ -851,7 +869,8 @@ static bool bind_test_split_bound(const Bind* bind, const Link* link, const Runt
     }
     return bind->error == BIND_ERROR_NONE && morestack < runtime->member_count && (bind->members_joined[morestack / 64] >> (morestack % 64) & 1) != 0 && imported;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE
 // The runtime as a system without libgcc_s.so.1 has it (runtime.c): a copy of `runtime` without the library, its
 // exports' numbers among the global names cleared, the column a copy from `arena`. False if the arena has no room.
 static bool bind_test_without_gcc_s(Runtime* copy, const Runtime* runtime, Arena* arena)
@@ -869,7 +888,8 @@ static bool bind_test_without_gcc_s(Runtime* copy, const Runtime* runtime, Arena
     copy->gcc_s_path = (String8){ 0 };
     return export != 0;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK
 typedef enum BindTestRule
 {
     BIND_TEST_RULE_START,
@@ -1442,7 +1462,7 @@ static bool bind_test_rules(const Runtime* runtime)
     bind_test_expect(&tally, bind_test_steps(runtime), "a name left to crtendS.o, and an import a member defined", 0);
     return bind_test_report(&tally);
 }
-
+#endif
 // ---------------------------------------------------------------------------------------------------------------------
 // Libraries named with -l
 //
@@ -1451,7 +1471,7 @@ static bool bind_test_rules(const Runtime* runtime)
 // libc.so.6 on the line; a weak one to cos, an import once libm is needed; one to write, libc.so.6's; and a definition
 // of cbrt, which libm exports too, which the executable exports. Then a weak reference alone, which doesn't make libm
 // needed and is left to nothing; and the import's refusals, on files of the test's own in `directory`.
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 // Writes `length` bytes into a new file at `path`: whether it could.
 static bool bind_test_write_file(const char* path, const char* bytes, uint64_t length)
 {
@@ -1463,7 +1483,8 @@ static bool bind_test_write_file(const char* path, const char* bytes, uint64_t l
     }
     return written;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK
 // Whether `version` is one of library `l`'s versions.
 static bool bind_test_library_version(const RuntimeLibraries* libraries, uint32_t l, uint16_t version)
 {
@@ -1594,7 +1615,7 @@ static void bind_test_library_import_cases(BindTestTally* tally, const Runtime* 
         unlink(path);
     }
 }
-
+#endif
 // Libraries a needed library refers to (#398's review), made by hand: libbuster_a.so and libbuster_c.so export a_func
 // and c_func and refer to b_func, which libbuster_b.so exports, without a DT_NEEDED entry for it (libbuster_a.so's names
 // libc.so.6, and it refers to weak_func weakly, which nothing defines); and libbuster_d.so exports d_func and refers to
@@ -1613,7 +1634,7 @@ static void bind_test_library_import_cases(BindTestTally* tally, const Runtime* 
 //     none, and no error;
 //   - -lbuster_d: its reference to b_func, which nothing defines, isn't checked, since its DT_NEEDED names a library the
 //     link doesn't have, as lld leaves it.
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK
 typedef enum BindTestDependency
 {
     BIND_TEST_DEPENDENCY_NONE,
@@ -1630,7 +1651,7 @@ typedef enum BindTestDependency
 #define BUSTER_BIND_TEST_CALLS_A 1u
 #define BUSTER_BIND_TEST_CALLS_C 2u
 #define BUSTER_BIND_TEST_CALLS_D 4u
-
+#endif
 // A shared library made by hand: the name -l takes (the file is lib<name>.so), its soname, the function it exports,
 // the name it refers to strongly, and optionally a name it refers to weakly and a DT_NEEDED entry.
 typedef struct BindTestLibraryFile BindTestLibraryFile;
@@ -1643,7 +1664,7 @@ struct BindTestLibraryFile
     const char* weak;
     const char* needed;
 };
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE
 // Writes `file` in `directory`, without versions: whether it could.
 static bool bind_test_write_library(const char* directory, const BindTestLibraryFile* file, Arena* arena)
 {
@@ -1684,7 +1705,8 @@ static bool bind_test_write_library(const char* directory, const BindTestLibrary
     const bool built = import_test_elf(&elf, ET_DYN, sections, BUSTER_ARRAY_LENGTH(sections), arena);
     return built && bind_test_write_file(path, (const char*)elf.bytes, elf.size);
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK
 // The link: main's strong references to the functions `calls` names, `fillers` definitions of the program's, then
 // b_func as `dependency` has it, bound by `path` against `libraries`. Returns b_func's symbol (0 for none) in *b_func,
 // and whether the link bound.
@@ -1853,7 +1875,8 @@ static void bind_test_dependencies(BindTestTally* tally, const Runtime* runtime,
     }
     arena_release(&arena);
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK
 // The loader and libgcc_s.so.1 for a needed library's references (#511's review): libraries made by hand that refer
 // strongly to _Unwind_Backtrace, which libgcc_s.so.1 alone exports, without a DT_NEEDED entry for it (u) and with one
 // (n), to __tls_get_addr, which the loader alone exports (t), and weakly to _Unwind_Backtrace (w), and one that refers
@@ -2011,7 +2034,7 @@ static bool bind_test_libraries(const Runtime* runtime, const char* directory)
     bind_test_runtime_dependencies(&tally, runtime, directory);
     return bind_test_report(&tally);
 }
-
+#endif
 // ---------------------------------------------------------------------------------------------------------------------
 // The atexit program
 //
@@ -2020,7 +2043,7 @@ static bool bind_test_libraries(const Runtime* runtime, const char* directory)
 
 #define BUSTER_BIND_TEST_MAIN_STATUS 3
 #define BUSTER_BIND_TEST_MAX_CODE 32
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 // A TEXT atom of the instructions, in unit 0, defining `symbol`: the references are each instruction's displacement.
 static bool bind_test_code(BindTestLink* test, const X86Instruction* instructions, uint32_t count, const LinkReference* references, uint32_t reference_count, SymbolId symbol)
 {
@@ -2036,7 +2059,7 @@ static bool bind_test_code(BindTestLink* test, const X86Instruction* instruction
     return atom != 0 && link_add_code_fixups(&test->link, atom, instructions, count, ends, reference_count, references, reference_count) &&
            link_define_symbol(&test->link, symbol, atom, 0, (uint64_t)length);
 }
-
+#endif
 typedef struct BindTestAtexit BindTestAtexit;
 struct BindTestAtexit
 {
@@ -2046,7 +2069,7 @@ struct BindTestAtexit
     SymbolId atexit;
     bool bound;
 };
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 // The program's symbols, then the runtime's first objects, its code, and the rest; without `bound`, only the program,
 // for a link of its own objects by cc. program->bound also needs link_check to accept the link, as the object writer
 // does of the links the cross-check writes. With `dirty`, binding's arena is dirtied that far (bind_test_dirty_arena).
@@ -2127,12 +2150,14 @@ static void bind_test_atexit_dirtied(BindTestAtexit* program, const Runtime* run
             bind_test_code(test, handler_code, BUSTER_ARRAY_LENGTH(handler_code), 0, 0, program->handler);
     program->bound = built && (!bound || bind_end(&test->bind, &test->link)) && link_check(&test->link) == LINK_ERROR_NONE;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 static void bind_test_atexit(BindTestAtexit* program, const Runtime* runtime, BindPath path, bool bound)
 {
     bind_test_atexit_dirtied(program, runtime, path, bound, 0);
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 // The index of the runtime's first member named `name` (libc_nonshared.a's, or the static runtimes' archives'), or the
 // member count.
 static uint32_t bind_test_member(const Runtime* runtime, const char* name)
@@ -2144,7 +2169,8 @@ static uint32_t bind_test_member(const Runtime* runtime, const char* name)
     }
     return result;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK
 static void bind_test_atexit_checks(BindTestTally* tally, const BindTestAtexit* program, const Runtime* runtime)
 {
     const Link* link = &program->test.link;
@@ -2202,7 +2228,7 @@ static bool bind_test_atexit_program(const Runtime* runtime)
     bind_test_link_end(&exact.test);
     return bind_test_report(&tally);
 }
-
+#endif
 // ---------------------------------------------------------------------------------------------------------------------
 // The libgcc program
 //
@@ -2230,7 +2256,7 @@ struct BindTestLibgcc
     SymbolId calls[BUSTER_BIND_TEST_LIBGCC_CALLS];
     bool bound;
 };
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 // As bind_test_atexit: the program's symbols, then the runtime's first objects, its code, and the rest; without
 // `bound`, only the program, for a link of its own objects by cc; with `dirty`, over binding's arena dirtied that far.
 static void bind_test_libgcc_dirtied(BindTestLibgcc* program, const Runtime* runtime, BindPath path, bool bound, uint64_t dirty)
@@ -2369,12 +2395,14 @@ static void bind_test_libgcc_dirtied(BindTestLibgcc* program, const Runtime* run
     built = built && bind_test_code(test, main_code, BUSTER_ARRAY_LENGTH(main_code), main_references, BUSTER_ARRAY_LENGTH(main_references), program->main);
     program->bound = built && (!bound || bind_end(&test->bind, &test->link)) && link_check(&test->link) == LINK_ERROR_NONE;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 static void bind_test_libgcc(BindTestLibgcc* program, const Runtime* runtime, BindPath path, bool bound)
 {
     bind_test_libgcc_dirtied(program, runtime, path, bound, 0);
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK
 // The members of libgcc.a that joined must be those the three names have, and no others, each defining its name,
 // hidden, as libgcc.a's helpers are; nothing is imported from libc.so.6 for them.
 static void bind_test_libgcc_checks(BindTestTally* tally, const BindTestLibgcc* program, const Runtime* runtime)
@@ -2544,10 +2572,10 @@ static bool bind_test_room_bound(const Runtime* runtime, const char* check, Aren
     bind_test_expect(&tally, linked != 0, "members linked", linked);
     return bind_test_report(&tally);
 }
-
+#endif
 // ---------------------------------------------------------------------------------------------------------------------
 // The cross-check
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 // Writes the link's objects of `unit_count` units into `directory`, named after `name`, each path into `paths` (room
 // for unit_count).
 static bool bind_test_write_objects(const Link* link, uint32_t unit_count, const char* directory, const char* name, char** paths, Arena* arena)
@@ -2569,7 +2597,8 @@ static bool bind_test_write_objects(const Link* link, uint32_t unit_count, const
     arena_pop_to(arena, length);
     return result;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 // The arguments of a link of the bound program by `linker` (ld.lld or ld.bfd): the crt objects before the program and
 // its members after it, crtendS.o and crtn.o last, with libc.so.6 and the loader. `units` has the program's unit count.
 static uint32_t bind_test_link_arguments(char** arguments, const char* linker, const Runtime* runtime, const Bind* bind, char** paths, uint32_t units, const char* output)
@@ -2622,7 +2651,8 @@ static uint32_t bind_test_link_arguments(char** arguments, const char* linker, c
     arguments[count] = 0;
     return count;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK
 // Links the bound link's objects by ld.lld and ld.bfd, without errors or warnings, and runs the program (with a
 // `harness`, the harness given the output's path, for a shared library's): it must exit with `status` having printed
 // `expected` (`expected_length` bytes).
@@ -2931,7 +2961,7 @@ static void bind_test_against_lld(BindTestTally* tally, const Link* own, uint32_
 {
     bind_test_against_lld_as(tally, own, units, bound, bind, runtime, directory, name, "-pie", keep, arena);
 }
-
+#endif
 // ---------------------------------------------------------------------------------------------------------------------
 // Programs as GNU ld and lld link them
 //
@@ -3025,7 +3055,7 @@ struct BindTestCaseProgram
     bool built;
     bool bound;
 };
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 // The case's code: main, and for a weak _init its own.
 static bool bind_test_case_code(BindTestLink* test, BindTestCase which, SymbolId main, const SymbolId* others)
 {
@@ -3279,7 +3309,8 @@ static bool bind_test_case_code(BindTestLink* test, BindTestCase which, SymbolId
     }
     return result;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 // The case's program: main and the case's symbols, then with `bound` the runtime's first objects, its code, and the
 // rest; without, only the program, for a link of its own objects by cc. program->bound also needs link_check to accept
 // the link, which the object writer needs of the links the cross-check writes.
@@ -3338,7 +3369,8 @@ static void bind_test_case_program(BindTestCaseProgram* program, const Runtime* 
     program->built = built && bind_test_case_code(test, which, main, others);
     program->bound = program->built && (!bound || bind_end(&test->bind, &test->link)) && link_check(&test->link) == LINK_ERROR_NONE;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK
 // Links the case's own objects by cc as a PIE, with GNU ld and with lld: each must link or fail as the case says, and
 // what links must run with its status.
 static void bind_test_case_linkers(BindTestTally* tally, BindTestCase which, const Link* own, const char* directory, bool keep, Arena* arena)
@@ -3572,20 +3604,21 @@ static bool bind_test_libgcc_cross_check(const Runtime* runtime, const char* dir
     bind_test_link_end(&own.test);
     return bind_test_report(&tally);
 }
-
+#endif
 // ---------------------------------------------------------------------------------------------------------------------
 // The static runtimes
 //
 // A static executable's runtime (runtime_import_static) and a static PIE's (runtime_import_static_pie), which share
 // libc.a and the rest of GCC's group: the programs' checks below take either, by its kind, and the rules are the static
 // executable's (bind_test_static_rules).
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 // Whether bit `index` of a set is set, and setting it.
 static bool bind_test_has(const uint64_t* bits, uint32_t index)
 {
     return (bits[index / 64] >> (index % 64) & 1) != 0;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK
 static void bind_test_add(uint64_t* bits, uint32_t index)
 {
     bits[index / 64] |= 1ull << (index % 64);
@@ -4087,7 +4120,8 @@ static bool bind_test_static_programs(const Runtime* runtime, uint64_t seed, boo
     }
     return bind_test_report(&tally);
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 // A link of a compiled object's records as the program's unit 0 (source PROGRAM), with room for the static runtime.
 static bool bind_test_static_import(BindTestLink* test, const Runtime* runtime, String8 object)
 {
@@ -4114,7 +4148,7 @@ static bool bind_test_static_import(BindTestLink* test, const Runtime* runtime, 
     result = result && import_object(&test->link, object, 0, BUSTER_LINK_SOURCE_PROGRAM, &test->arena, &imported).error == IMPORT_ERROR_NONE;
     return result;
 }
-
+#endif
 // The C programs the cross-check compiles: each one's name, source, an option for cc, and the status it exits with
 // (for weak-puts, whether puts's member joined).
 typedef struct BindTestStaticSource BindTestStaticSource;
@@ -4182,7 +4216,7 @@ static const BindTestStaticSource bind_test_static_sources[] = {
                   "int main(void) { return puts != 0; }\n",
     },
 };
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK
 // The C programs of bind_test_static_sources, each compiled by cc (with -fPIE for a static PIE's runtime), imported as
 // the program, bound by both paths against a static runtime (a static executable's or a static PIE's) and checked as
 // bind_test_static_structure does, with the members the oracle loads; then linked by GNU ld and lld with -static (or
@@ -5027,7 +5061,7 @@ static bool bind_test_shared_compiled(const Runtime* runtime, const char* direct
     }
     return bind_test_report(&tally);
 }
-
+#endif
 // ---------------------------------------------------------------------------------------------------------------------
 // Split-stack code
 //
@@ -5073,7 +5107,7 @@ static const char bind_test_split_harness[] = "#include <dlfcn.h>\n"
                                               "    }\n"
                                               "    return library == 0 ? 2 : entry == 0 ? 3 : entry();\n"
                                               "}\n";
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK
 // Whether readelf's dynamic section of `path` names libgcc_s.so.1 among its DT_NEEDED entries; false if readelf fails.
 static bool bind_test_needs_libgcc_s(const char* path, const char* out, const char* err, Arena* arena)
 {
@@ -5432,3 +5466,4 @@ static int run_bind_tests(int argc, char** argv)
     arena_release(&arena);
     return result;
 }
+#endif
