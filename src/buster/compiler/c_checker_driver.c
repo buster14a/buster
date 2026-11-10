@@ -284,8 +284,8 @@ static const char check_driver_alignment_power[] = "requested alignment is not a
 // (`first`) as each message names it: an applied attribute's normalized name (aligned's), the parsed attribute's (a GNU
 // one as written, a C23 one's scope and name normalized), or the parser's name as written, without its scope (a string
 // literal's); `literal` the string's text where the message quotes it (model's). Into `text`, `capacity` bytes.
-static void check_driver_attribute_argument(const Parser* parser, const Preprocessor* pp, uint32_t first, uint32_t detail, uint64_t value, String8 literal, char* text,
-                                            uint32_t capacity)
+static void check_driver_attribute_argument(const Parser* parser, const Preprocessor* pp, uint32_t first, uint32_t detail, uint64_t value, String8 literal,
+                                            const CBuiltinLibraryNamed* named_types, char* text, uint32_t capacity)
 {
     const uint32_t count = parser->tokens.count;
     const bool scoped = first + 2 < count && parser->tokens.kinds[first + 1] == PARSE_KIND_COLON;
@@ -555,11 +555,14 @@ static void check_driver_attribute_argument(const Parser* parser, const Preproce
                 bool unsugared = false;
                 const bool spelled = info != NULL &&
                                      cbuiltin_library_spell_parameter(info->encoding, info->encoding_length, info->attributes, info->attributes_length, number - 1, true, c99,
-                                                                      sugared, sizeof(sugared), &sized) &&
+                                                                      named_types, sugared, sizeof(sugared), &sized) &&
                                      cbuiltin_library_spell_parameter(info->encoding, info->encoding_length, info->attributes, info->attributes_length, number - 1, false, c99,
-                                                                      plain, sizeof(plain), &unsugared);
-                char builtin_type[560];
-                snprintf(builtin_type, sizeof(builtin_type), sized ? "'%s' (aka '%s')" : "'%s'", spelled ? sugared : "", plain);
+                                                                      named_types, plain, sizeof(plain), &unsugared);
+                // A vector's clang describes after its spelling: "(vector of 8 'short' values)".
+                char vector[96];
+                const bool described = spelled && cbuiltin_library_vector_description(info->encoding, info->encoding_length, number - 1, vector, sizeof(vector));
+                char builtin_type[700];
+                snprintf(builtin_type, sizeof(builtin_type), sized ? "'%s' (aka '%s')" : described ? "'%s' %s" : "'%s'", spelled ? sugared : "", sized ? plain : vector);
                 snprintf(text, capacity, "'%s' attribute parameter types do not match: parameter %u of function '%.*s' has type %.*s, but parameter %u of function '%.*s' has type %s",
                          parsed, index, (int)named.length, named.pointer, (int)literal.length, literal.pointer, number, (int)builtin.length, builtin.pointer, builtin_type);
             }
@@ -1938,20 +1941,13 @@ static const char* check_driver_library_type(const Preprocessor* pp, const TypeT
     return text;
 }
 
-// An implicit declaration of a plain library builtin (#148, CHECK_INPUT_FUNCTION_IMPLICIT_LIBRARY), as clang reports it:
-// C99's and later's "call to undeclared library function", or before C99 "implicitly declaring library function", each
-// with the builtin's prototype (cbuiltin_library_spell: with size_t's __size_t and FILE and ucontext_t by their typedefs,
-// and then its spelling without them, the unit's types spelled from `types`: CheckInput.implicit_library_types), and a
-// note naming the header that declares it, where its row has one.
-static void check_driver_implicit_library(Preprocessor* pp, const TypeTable* types, const CheckInput* input, PPSeverity severity, uint32_t source,
-                                          uint32_t publication, const uint8_t* name, uint32_t length, bool c99, Arena* scratch)
+// The unit's FILE, jmp_buf, sigjmp_buf and ucontext_t as a library builtin's spelling names them (CBuiltinLibraryNamed), for
+// those a prototype took (CheckInput.implicit_library_types), in `scratch`.
+static CBuiltinLibraryNamed check_driver_library_named(Preprocessor* pp, const TypeTable* types, const CheckInput* input, Arena* scratch)
 {
-    const BuiltinIntrinsicInfo* info = builtin_intrinsic_lookup((const char*)name, length);
-    const uint64_t mark = scratch->length;
     CBuiltinLibraryNamed named = { 0 };
-    const bool needs = info != NULL && (memchr(info->encoding, 'P', info->encoding_length) != NULL || memchr(info->encoding, 'J', info->encoding_length) != NULL ||
-                                        memchr(info->encoding, 'K', info->encoding_length) != NULL);
-    if (needs && types != NULL && input != NULL)
+    const TypeId* taken = input != NULL ? input->implicit_library_types : NULL;
+    if (types != NULL && taken != NULL && (taken[0] != 0 || taken[1] != 0 || taken[2] != 0 || taken[3] != 0))
     {
         // The names' spellings, as the warnings' renderer builds them (check_driver_spelling_build), for these few types.
         const uint32_t count = pp->table->count;
@@ -1963,7 +1959,6 @@ static void check_driver_implicit_library(Preprocessor* pp, const TypeTable* typ
             lengths[i] = intern_length(pp->table, i);
         }
         const TypeNames names = { .bytes = bytes, .lengths = lengths, .count = lengths != NULL ? count : 0 };
-        const TypeId* taken = input->implicit_library_types;
         named = (CBuiltinLibraryNamed){
             .file = taken[0] != 0 ? check_driver_library_type(pp, types, &names, taken[0], false, scratch) : NULL,
             .jmp_buf = taken[1] != 0 ? check_driver_library_type(pp, types, &names, taken[1], true, scratch) : NULL,
@@ -1971,6 +1966,22 @@ static void check_driver_implicit_library(Preprocessor* pp, const TypeTable* typ
             .ucontext = taken[3] != 0 ? check_driver_library_type(pp, types, &names, taken[3], false, scratch) : NULL,
         };
     }
+    return named;
+}
+
+// An implicit declaration of a plain library builtin (#148, CHECK_INPUT_FUNCTION_IMPLICIT_LIBRARY), as clang reports it:
+// C99's and later's "call to undeclared library function", or before C99 "implicitly declaring library function", each
+// with the builtin's prototype (cbuiltin_library_spell: with size_t's __size_t and FILE and ucontext_t by their typedefs,
+// and then its spelling without them, the unit's types spelled from `types`: CheckInput.implicit_library_types), and a
+// note naming the header that declares it, where its row has one.
+static void check_driver_implicit_library(Preprocessor* pp, const TypeTable* types, const CheckInput* input, PPSeverity severity, uint32_t source,
+                                          uint32_t publication, const uint8_t* name, uint32_t length, bool c99, Arena* scratch)
+{
+    const BuiltinIntrinsicInfo* info = builtin_intrinsic_lookup((const char*)name, length);
+    const uint64_t mark = scratch->length;
+    const bool needs = info != NULL && (memchr(info->encoding, 'P', info->encoding_length) != NULL || memchr(info->encoding, 'J', info->encoding_length) != NULL ||
+                                        memchr(info->encoding, 'K', info->encoding_length) != NULL);
+    const CBuiltinLibraryNamed named = needs ? check_driver_library_named(pp, types, input, scratch) : (CBuiltinLibraryNamed){ 0 };
     char sugared[256];
     char plain[256];
     bool sized = false;
@@ -4187,7 +4198,9 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                                 check_version_print(check_version_tuple(check_availability_version(spelling_bytes, spelling_length)), version_text, sizeof(version_text));
                                 literal = (String8){ version_text, strlen(version_text) };
                             }
-                            check_driver_attribute_argument(parser, pp, report->attribute, report->detail, report->value, literal, text, sizeof(text));
+                            const CBuiltinLibraryNamed library_named = (report->detail & 0xffu) == CHECK_ARGUMENT_BUILTIN_TYPES ? check_driver_library_named(pp, types, input, scratch) :
+                                                                                                                     (CBuiltinLibraryNamed){ 0 };
+                            check_driver_attribute_argument(parser, pp, report->attribute, report->detail, report->value, literal, &library_named, text, sizeof(text));
                             // (An incomplete tag's declaration, named by its type alone: preferred_type's, #147.)
                             const bool forward = report->note_kind == CHECK_INPUT_NOTE_FORWARD_DECLARATION && spelled;
                             const String8 tag = forward ? check_driver_warning_type(parser, pp, input, types, &spell, scratch, type_unqualified(report->type), 0) :
@@ -4242,7 +4255,7 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                                     for (uint32_t warning_index = 0; warning_index < (report->value == 1 ? 2u : 1u); warning_index += 1)
                                     {
                                         check_driver_attribute_argument(parser, pp, named, warning_index == 0 ? CHECK_ARGUMENT_CONVENTION_UNSUPPORTED : CHECK_ARGUMENT_FUNCTIONS_METHODS, 0,
-                                                                        (String8){ "", 0 }, text, sizeof(text));
+                                                                        (String8){ "", 0 }, NULL, text, sizeof(text));
                                         if (severity != CHECK_WARNING_IGNORE)
                                         {
                                             pp_diagnose_output_at(pp, disposition, at, publication, "%s [%s-Wignored-attributes]", text, error ? "-Werror," : "");
