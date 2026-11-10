@@ -28,17 +28,20 @@
 // identical addresses.
 //
 // --verify runs LLVM's verifier on each part; --report prints each part's functions and estimated cost to stderr.
-// The input is parsed once; the parts are written by one child process each, forked after the plan, in parallel. It is
+// The input is parsed once; the parts are written by one child process each, forked after the plan, as many at once as
+// the CPUs and memory allow (split_concurrency). It is
 // build tooling outside the compiler's compile path, using LLVM's C API (and one C++ call), with no vector path.
 
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
+#include <errno.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sched.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -553,28 +556,85 @@ static bool split_part(const SplitPlan* plan, uint32_t part, const char* path)
     return written;
 }
 
-// Forks a child per part and waits for them all: whether every part was written.
+// How many parts to write at once: no more than the CPUs this process may run on (a build's grant, through its
+// affinity), nor than the available memory holds copies of the module, since a child writing a part copies most of its
+// pages as it deletes the other parts' bodies (14 children of the checker's 1 GB module came to about 14.8 GB).
+static uint32_t split_concurrency(uint32_t wanted)
+{
+    cpu_set_t set;
+    const uint64_t cpus = sched_getaffinity(0, sizeof(set), &set) == 0 ? (uint64_t)CPU_COUNT(&set) : 1;
+    uint64_t available = 0;
+    FILE* meminfo = fopen("/proc/meminfo", "r");
+    if (meminfo != 0)
+    {
+        char line[256];
+        while (fgets(line, sizeof(line), meminfo) != 0)
+        {
+            unsigned long long kilobytes = 0;
+            if (sscanf(line, "MemAvailable: %llu kB", &kilobytes) == 1)
+            {
+                available = (uint64_t)kilobytes * 1024;
+            }
+        }
+        fclose(meminfo);
+    }
+    uint64_t resident = 0;
+    FILE* statm = fopen("/proc/self/statm", "r");
+    if (statm != 0)
+    {
+        unsigned long long size = 0;
+        unsigned long long pages = 0;
+        if (fscanf(statm, "%llu %llu", &size, &pages) == 2)
+        {
+            resident = (uint64_t)pages * (uint64_t)sysconf(_SC_PAGESIZE);
+        }
+        fclose(statm);
+    }
+    const uint64_t by_memory = resident != 0 && available != 0 ? available / (resident + resident / 4) : wanted;
+    uint64_t limit = wanted < cpus ? wanted : cpus;
+    limit = by_memory < limit ? by_memory : limit;
+    return limit == 0 ? 1 : (uint32_t)limit;
+}
+
+// Writes every part, a child process each, at most split_concurrency at once, and waits for them all: whether every
+// part was written.
 static bool split_parts(const SplitPlan* plan, const char* directory)
 {
-    pid_t* children = calloc(plan->parts + 1, sizeof(pid_t));
+    const uint32_t total = plan->parts + 1;
+    const uint32_t limit = split_concurrency(total);
+    pid_t* children = calloc(total, sizeof(pid_t));
     bool done = true;
-    for (uint32_t part = 0; part <= plan->parts; part += 1)
+    uint32_t running = 0;
+    for (uint32_t part = 0; part < total || running != 0;)
     {
-        fflush(0);
-        children[part] = fork();
-        if (children[part] == 0)
+        if (part < total && running < limit && done)
         {
-            char path[4096];
-            const int length = snprintf(path, sizeof(path), "%s/part%u.bc", directory, part);
-            _exit(length > 0 && (size_t)length < sizeof(path) && split_part(plan, part, path) ? 0 : 1);
+            fflush(0);
+            children[part] = fork();
+            if (children[part] == 0)
+            {
+                char path[4096];
+                const int length = snprintf(path, sizeof(path), "%s/part%u.bc", directory, part);
+                _exit(length > 0 && (size_t)length < sizeof(path) && split_part(plan, part, path) ? 0 : 1);
+            }
+            done = done && children[part] > 0;
+            running += children[part] > 0;
+            part += 1;
         }
-        done = done && children[part] > 0;
-    }
-    for (uint32_t part = 0; part <= plan->parts; part += 1)
-    {
-        int status = 0;
-        const bool waited = children[part] > 0 && waitpid(children[part], &status, 0) == children[part];
-        done = done && waited && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+        else if (running != 0)
+        {
+            int status = 0;
+            const pid_t child = waitpid(-1, &status, 0);
+            const bool interrupted = child < 0 && errno == EINTR;
+            done = done && (interrupted || (child > 0 && WIFEXITED(status) && WEXITSTATUS(status) == 0));
+            // No child left to wait for (ECHILD) ends the wait too.
+            running = child > 0 ? running - 1 : interrupted ? running : 0;
+        }
+        else
+        {
+            // A failed fork or child stops the remaining parts.
+            part = total;
+        }
     }
     free(children);
     return done;

@@ -60,6 +60,27 @@ function(buster_codegen_tools available missing)
             list(APPEND absent "LLVM's C API headers (llvm-c/Core.h)")
         endif()
     endif()
+    # The tools can be there and LLVM's libraries not link (a release without its shared library, or system libraries
+    # llvm-config names missing): link a small C program against LLVM here, as the splitter links, so that auto decides
+    # on what will build. A clean build configures first, so the probe stays small (about 0.3 s).
+    if(NOT absent)
+        if(NOT EXISTS "${llvm_includedir}/llvm/Bitcode/BitcodeWriter.h")
+            list(APPEND absent "LLVM's C++ headers (llvm/Bitcode/BitcodeWriter.h)")
+        endif()
+        set(probe "${CMAKE_BINARY_DIR}/codegen-tools/probe")
+        file(MAKE_DIRECTORY "${probe}")
+        file(WRITE "${probe}/probe.c" "#include <llvm-c/Core.h>\nint main(void)\n{\n    LLVMContextDispose(LLVMContextCreate());\n    return 0;\n}\n")
+        set(log "${probe}/build.log")
+        execute_process(COMMAND "${CMAKE_C_COMPILER}" -O1 ${llvm_cflags} -c "${probe}/probe.c" -o "${probe}/probe.o"
+            RESULT_VARIABLE status OUTPUT_FILE "${log}" ERROR_FILE "${log}")
+        if(status EQUAL 0)
+            execute_process(COMMAND "${found_CXX}" -o "${probe}/probe" "${probe}/probe.o" ${llvm_ldflags} ${llvm_libs} ${llvm_system_libs}
+                RESULT_VARIABLE status OUTPUT_FILE "${log}" ERROR_FILE "${log}")
+        endif()
+        if(NOT status EQUAL 0)
+            list(APPEND absent "LLVM library that links (${log})")
+        endif()
+    endif()
     if(absent)
         set(${available} FALSE PARENT_SCOPE)
     else()
