@@ -1992,8 +1992,10 @@ static bool check_input_attribute_validate(CheckInputReader* reader, CheckInputA
             String8 text = { 0 };
             uint32_t string_first = first;
             uint32_t string_end = end;
-            // Clang delays these attributes' arguments as expressions: glibc parenthesizes the message.
-            while (attribute->schema == CHECK_ATTRIBUTE_CONDITION_STRINGS && string_first + 1 < string_end &&
+            // Clang delays these attributes' arguments as expressions: glibc parenthesizes the message. suppress's are
+            // expressions too, whose string literals its handler takes through parentheses (checkStringLiteralArgumentAttr's
+            // IgnoreParenCasts: `suppress(("a"))`).
+            while ((attribute->schema == CHECK_ATTRIBUTE_CONDITION_STRINGS || attribute->kind == CHECK_ATTRIBUTE_SUPPRESS) && string_first + 1 < string_end &&
                    parser->tokens.kinds[string_first] == PARSE_KIND_L_PAREN && parser->tree.parents[string_first] == string_end - 1)
             {
                 string_first += 1;
