@@ -97,7 +97,9 @@ unused-warning fixtures also check exact scope-completion tokens.
   release what they map), with the captured stream in a `memfd`;
   `--clang-server PATH` sends the oracle clang's runs (`--clang`'s name) to
   `tools/clang-server` (built by `tools/clang-server/build.sh` against that
-  clang's `libclang-cpp`), which runs each command line through clang's own
+  clang's `libclang-cpp` where the toolchain lets it hold one copy of LLVM: a
+  shared-LLVM toolchain's, not the official release's, whose hosted rows then
+  run the oracle clang as children), which runs each command line through clang's own
   driver and cc1 in its process, in the run's directory and environment;
   every other run, and a response file's or a jobserver dry run's, is a child
   as before. `--differential` also runs each such command as a child and
