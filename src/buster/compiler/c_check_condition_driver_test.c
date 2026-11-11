@@ -703,6 +703,44 @@ static const CheckDriverDefaultWarningFixture check_driver_condition_fixtures[] 
         .errors = 1,
         .notes = 1,
     },
+    // A comma operator's left operand in a condition (#1447, check_input_attribute_unused): -Wunused-value's "has no effect"
+    // at the place clang's isUnusedResultAWarning gives (a nested comma's right operand, a conditional's else arm, a logical
+    // operator, a cast's `(`, sizeof's keyword), quiet for a call, an assignment and a literal 0 after a comma, and
+    // -Wunused-comparison's, with its note, for a comparison; and in another attribute's argument.
+    {
+        .name = "comma operators' left operands in conditions",
+        .source = "void f(int x) __attribute__((diagnose_if((x, x > 1), \"big\", \"warning\")));\n"
+                  "void g(int x) __attribute__((enable_if((1, x), \"e\")));\n"
+                  "void h(int x) __attribute__((diagnose_if((x + 1, 2, x > 1), \"big\", \"error\")));\n"
+                  "void k(void) { f(2); g(1); h(0); }\n",
+        .warnings = 5,
+        .notes = 1,
+    },
+    {
+        .name = "the shapes of a comma's discarded left operand",
+        .source = "void a(int x) __attribute__((diagnose_if((x == 1, x), \"m\", \"warning\")));\n"
+                  "void b(int x) __attribute__((diagnose_if((x < 1, x), \"m\", \"warning\")));\n"
+                  "void d(int x) __attribute__((diagnose_if((-x, x), \"m\", \"warning\")));\n"
+                  "void e(int x) __attribute__((diagnose_if((x ? 1 : 2, x), \"m\", \"warning\")));\n"
+                  "void f(int x) __attribute__((diagnose_if((sizeof x, x), \"m\", \"warning\")));\n"
+                  "void g(int x) __attribute__((diagnose_if(((long)x, x), \"m\", \"warning\")));\n"
+                  "void h(int x) __attribute__((diagnose_if((x && 1, x), \"m\", \"warning\")));\n"
+                  "void i(int x) __attribute__((diagnose_if((0, x), \"m\", \"warning\")));\n"
+                  "void j(int x) __attribute__((diagnose_if((1, 2), \"m\", \"warning\")));\n"
+                  "void k(int x) __attribute__((diagnose_if(((x, 1), x), \"m\", \"warning\")));\n"
+                  "void l(int x) __attribute__((diagnose_if(((x, 0), x > 1), \"m\", \"warning\")));\n"
+                  "void m(int x) __attribute__((diagnose_if((x != 1, x), \"m\", \"warning\")));\n"
+                  "void n(int x) __attribute__((enable_if((x, 1), \"m\")));\n"
+                  "void o(int x) __attribute__((diagnose_if((x ? 1 : x++, x), \"m\", \"warning\")));\n",
+        .warnings = 14,
+        .notes = 2,
+    },
+    {
+        .name = "a comma operator in another attribute's argument",
+        .source = "int c __attribute__((aligned((7, 8))));\n",
+        .warnings = 1,
+        .errors = 1,
+    },
 };
 
 static void check_test_driver_conditions(CheckTest* test, const char* clang, const char* executable, const char* directory)

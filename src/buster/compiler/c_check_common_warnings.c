@@ -1010,6 +1010,8 @@ struct CheckCommonEnabled
     // Whether the unit names a tagged enumeration's enumerator or variable (CheckInput.enum_names), which an implicit
     // conversion between enumerations needs (check_common_enum_cast).
     bool enum_cast;
+    // The const objects' initializer receipts a divisor's read may give zero from (check_common_zero_divisor), or null.
+    const CheckConstValues* const_values;
 };
 
 // A folded shift's runtime warnings the legacy driver words (#1394): its counts and its negative left operand, clang's
@@ -1901,6 +1903,49 @@ static bool check_common_comma_bound_operands(const CheckCommonEmission* emissio
     return (reach & BUSTER_CHECK_REACH_BOUND) != 0;
 }
 
+// Whether a division's divisor is zero as clang's EvaluateAsInt finds it (DiagnoseBadDivideOrRemainderValues): an integer
+// constant, or, through integer casts, a read of a const non-volatile object whose completed initializer gives it zero
+// (its receipt, CheckInput.const_values: `const int k = 0; 1 / k`, an element's or a member's too, #1447).
+static bool check_common_zero_divisor(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, const CheckConstValues* const_values,
+                                      uint32_t division, uint32_t divisor)
+{
+    uint32_t at = divisor;
+    bool result = false;
+    bool going = true;
+    for (uint32_t steps = 0; going && at < graph->count && steps < graph->count; steps += 1)
+    {
+        if (check_common_integer_constant(stream, at))
+        {
+            result = check_stream_value(stream, at).integer == 0;
+            going = false;
+        }
+        else if (graph->ops[at] == CHECK_OP_CAST || graph->ops[at] == CHECK_OP_CONVERT)
+        {
+            uint32_t width = 0;
+            bool sign = false;
+            going = check_common_integer(types, check_stream_type(stream, at), &width, &sign);
+            at = going ? graph->operand0[at] : at;
+        }
+        else
+        {
+            const CheckValue value = check_stream_value(stream, at);
+            const uint32_t qualifiers = type_qualifiers(value.type);
+            CheckValue loaded = { 0 };
+            uint32_t width = 0;
+            bool sign = false;
+            result = value.category == CHECK_LVALUE && value.constant_kind == CHECK_CONSTANT_ADDRESS && value.fault == CHECK_FAULT_NONE &&
+                     (qualifiers & BUSTER_TYPE_CONST) != 0 && (qualifiers & BUSTER_TYPE_VOLATILE) == 0 &&
+                     (value.flags & (BUSTER_CHECK_VOLATILE_PART | BUSTER_CHECK_INACTIVE_UNION_READ | BUSTER_CHECK_CONST_READ_RESTRICTED)) == 0 &&
+                     check_common_integer(types, value.type, &width, &sign) &&
+                     const_values != NULL && check_const_load(types, const_values, value.object, value.offset, value.object_bit_offset, value.bit_width,
+                                      value.type, graph->source_positions[division], &loaded) &&
+                     loaded.constant_kind == CHECK_CONSTANT_INTEGER && loaded.integer == 0;
+            going = false;
+        }
+    }
+    return result;
+}
+
 // The arithmetic-warning visit one scan frame runs after its subtree: `emit_children`'s other half. A null dereference's
 // too (check_common_null_dereference), which clang's DiagRuntimeBehavior defers to the body's end with them: reachable,
 // evaluated and read, as an lvalue conversion or an assignment's (or a compound one's) destination reads it, not where its
@@ -1928,7 +1973,7 @@ static void check_common_arithmetic_own(CheckCommonEmission* emission, uint32_t 
         const uint32_t divisor = graph->operand1[node];
         const uint32_t contexts = graph->contexts != NULL ? graph->contexts[node] : 0;
         const bool ice = (contexts & (BUSTER_CHECK_CONTEXT_ICE | BUSTER_CHECK_CONTEXT_ASSERT)) != 0;
-        if (!ice && check_common_integer_constant(emission->stream, divisor) && check_stream_value(emission->stream, divisor).integer == 0)
+        if (!ice && check_common_zero_divisor(graph, emission->stream, emission->types, &emission->input->const_values, node, divisor))
         {
             uint32_t width = 0;
             bool sign = false;
@@ -5373,6 +5418,8 @@ static uint8_t check_common_own_reach(const Parser* parser, const CheckGraph* gr
     // A null dereference shares the arithmetic scan with division and shifts.
     const bool division = ((op == CHECK_OP_DIVIDE || op == CHECK_OP_REMAINDER) && check_common_integer_constant(stream, divisor) &&
                            check_common_stream_integer(stream, divisor, &divisor_type) == 0) ||
+                          ((op == CHECK_OP_DIVIDE || op == CHECK_OP_REMAINDER) && !check_common_integer_constant(stream, divisor) &&
+                           check_common_zero_divisor(graph, stream, types, enabled->const_values, node, divisor)) ||
                           (op == CHECK_OP_DEREFERENCE && check_common_null_dereference(graph, stream, types, node));
     const bool shift = check_common_shift_op(op) && check_common_integer_constant(stream, divisor);
     const bool comparison = enabled->sign_compare && op >= CHECK_OP_LESS && op <= CHECK_OP_NOT_EQUAL;
@@ -10484,6 +10531,7 @@ static void check_driver_common_warnings(const Parser* parser, Preprocessor* pp,
         .uninitialized = check_common_enabled(pp, input, CHECK_WARNING_ID_UNINITIALIZED, true) ||
                          check_common_enabled(pp, input, CHECK_WARNING_ID_UNUSED_BUT_SET_PARAMETER, true),
         .enum_cast = input->enum_names,
+        .const_values = &input->const_values,
     };
     check_common_enum_arithmetic(parser, pp, input, stream, types, &spell, scratch);
     check_common_empty_bodies(parser, pp, input, scratch);
