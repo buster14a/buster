@@ -1526,6 +1526,7 @@ static __attribute__((aligned(64))) IrError ir_optimize_rewrite(IrOptimizeWork* 
         .constant_count = f->constant_count,
         .vector_constant_count = f->vector_constant_count,
         .row_count = f->row_count,
+        .asm_body_count = f->asm_body_count,
         .slot_count = f->slot_count,
         .address_count = f->address_count,
         .call_type_count = f->call_type_count,
@@ -1614,6 +1615,11 @@ static __attribute__((aligned(64))) IrError ir_optimize_rewrite(IrOptimizeWork* 
         if (f->row_count != 0)
         {
             memcpy(candidate.rows, f->rows, (uint64_t)f->row_count * sizeof(Tier0Operation));
+        }
+        // The asm bodies (#1839), which the body calls index as before.
+        if (f->asm_body_count != 0)
+        {
+            memcpy(candidate.asm_bodies, f->asm_bodies, (uint64_t)f->asm_body_count * sizeof(IrAsmBody));
         }
         if (f->slot_count != 0)
         {

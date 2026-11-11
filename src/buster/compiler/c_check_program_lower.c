@@ -11940,7 +11940,15 @@ static void check_lower_vector_floating(CheckLowerWriter* writer, uint32_t node,
             writer->vectors = true;
         }
     }
-    else if (class == BUSTER_TYPED_CLASS_F32 || class == BUSTER_TYPED_CLASS_F64)
+    else if ((class == BUSTER_TYPED_CLASS_F32 || class == BUSTER_TYPED_CLASS_F64) && builtin >= CBUILTIN_ELEMENTWISE_CEIL && builtin <= CBUILTIN_ELEMENTWISE_ROUND &&
+             (writer->target.features & (BUSTER_X86_FEATURE(SSE41) | BUSTER_X86_FEATURE(AVX512F))) == 0)
+    {
+        // A scalar's rounding without SSE4.1's ROUNDSS and ROUNDSD is the C library's function, as clang's code calls it
+        // (#1834).
+        check_lower_vector_calls(writer, node, builtin, arguments);
+    }
+    else if ((class == BUSTER_TYPED_CLASS_F32 || class == BUSTER_TYPED_CLASS_F64) &&
+             !(ldexp && type_size(types, exponent) <= 8 && (writer->target.features & BUSTER_X86_FEATURE(AVX512F)) == 0))
     {
         // An exponent wider than 64 bits (an __int128's, a _BitInt's) has no instruction's conversion.
         const uint64_t width = ldexp ? type_size(types, exponent) : 0;
@@ -11982,10 +11990,16 @@ static void check_lower_vector_floating(CheckLowerWriter* writer, uint32_t node,
             writer->vectors = true;
         }
     }
-    else if (class == BUSTER_TYPED_CLASS_F80 && (builtin <= CBUILTIN_ELEMENTWISE_ROUND || builtin == CBUILTIN_ELEMENTWISE_MAXNUM || builtin == CBUILTIN_ELEMENTWISE_MINNUM ||
-                                                 (ldexp && type_size(types, exponent) == 4)))
+    else if ((class == BUSTER_TYPED_CLASS_F80 && (builtin <= CBUILTIN_ELEMENTWISE_ROUND || builtin == CBUILTIN_ELEMENTWISE_MAXNUM || builtin == CBUILTIN_ELEMENTWISE_MINNUM ||
+                                                  (ldexp && type_size(types, exponent) == 4))) ||
+             ((class == BUSTER_TYPED_CLASS_F32 || class == BUSTER_TYPED_CLASS_F64) && ldexp && type_size(types, exponent) <= 8 &&
+              (writer->target.features & BUSTER_X86_FEATURE(AVX512F)) == 0))
     {
-        const CheckLowerRuntime runtime = builtin <= CBUILTIN_ELEMENTWISE_ROUND ? check_lower_libm_function(builtin, class) :
+        // A float's or double's ldexp without AVX-512F's VSCALEFSS is the C library's too, as clang's code calls it (#1834),
+        // of the exponent's low 32 bits as an int.
+        const CheckLowerRuntime runtime = class == BUSTER_TYPED_CLASS_F32 ? check_lower_library_runtime(CBUILTIN_LIBRARY_LDEXPF) :
+                                          class == BUSTER_TYPED_CLASS_F64 ? check_lower_library_runtime(CBUILTIN_LIBRARY_LDEXP) :
+                                          builtin <= CBUILTIN_ELEMENTWISE_ROUND ? check_lower_libm_function(builtin, class) :
                                           builtin == CBUILTIN_ELEMENTWISE_MAXNUM ? CHECK_LOWER_RUNTIME_FMAXL :
                                           builtin == CBUILTIN_ELEMENTWISE_MINNUM ? CHECK_LOWER_RUNTIME_FMINL :
                                                                                    CHECK_LOWER_RUNTIME_LDEXPL;
@@ -12345,11 +12359,26 @@ static __attribute__((noinline)) void check_lower_vector_builtin(CheckLowerWrite
                                      check_lower_brain_negations(program, first, result) :
                                      0;
         CheckVectorConstants constants = { 0 };
-        reason = vectors ? check_vector_elementwise_row(types, target, builtin, result, arguments, negated, rows, &constants) :
+        // A scalar's fused multiply-add without FMA or AVX-512F is the C library's, as clang's code calls it (#1834).
+        const uint64_t fused = BUSTER_X86_FEATURE(FMA) | BUSTER_X86_FEATURE(AVX512F);
+        const bool library = scalars && builtin == CBUILTIN_ELEMENTWISE_FMA && arguments == 3 && (target->features & fused) == 0;
+        reason = library ? NULL :
+                 vectors ? check_vector_elementwise_row(types, target, builtin, result, arguments, negated, rows, &constants) :
                  scalars ? check_vector_scalar_row(target, builtin, scalar, arguments, rows) :
                  check_lower_transport_type(types, result) ? check_lower_transport_refusal(types, result, CHECK_LOWER_TRANSPORT_BUILTIN) :
                            "elementwise builtins of scalars";
-        if (reason == NULL)
+        if (library)
+        {
+            const TypeId parameters[3] = { result, result, result };
+            const CBuiltinLibraryId function = scalar == BUSTER_TYPED_CLASS_F32 ? CBUILTIN_LIBRARY_FMAF : CBUILTIN_LIBRARY_FMA;
+            const uint32_t call = check_lower_runtime_call(writer, check_lower_library_runtime(function), result, parameters, 3, BUSTER_CHECK_NONE);
+            check_lower_instruction(writer, BUSTER_TYPED_CALL, scalar, call);
+            for (uint32_t a = 3; a-- > 0;)
+            {
+                check_lower_operand(writer, node, a + 3, false, stream->argument_conversions[first + a].type);
+            }
+        }
+        else if (reason == NULL)
         {
             check_lower_instruction(writer, BUSTER_TYPED_X86, vectors ? BUSTER_TYPED_CLASS_VECTOR : scalar, check_lower_operation_index(writer, rows));
             check_lower_row_constants(writer, rows, &constants, arguments);
@@ -13945,11 +13974,14 @@ static void check_lower_initializer(CheckLowerWriter* writer, CheckControl contr
     const CheckProgram* program = writer->program;
     const CheckInitializers* initializers = program->initializers;
     const uint32_t declaration = control.token;
+    // A variable-length array's `= {}`, which its allocation cleared (check_lower_allocate).
+    const uint32_t array = declaration < program->input->token_count ? check_lower_local_of(writer, program->input->objects[declaration]) : BUSTER_CHECK_NONE;
+    const bool cleared_array = array < writer->local_count && writer->indirect[array] == BUSTER_CHECK_LOWER_VLA_ALLOCATED;
     if (initializers == 0 || control.target >= initializers->count || declaration >= program->input->token_count)
     {
         check_lower_fail(writer, CHECK_PROGRAM_INVALID);
     }
-    else
+    else if (!cleared_array)
     {
         const uint32_t local = check_lower_local_of(writer, program->input->objects[declaration]);
         const bool object = local != BUSTER_CHECK_NONE && writer->local_sizes[local] != 0;
@@ -14413,8 +14445,10 @@ static void check_lower_stack(CheckLowerWriter* writer, CheckControl control)
 // A variable-length array's object at its declaration (CHECK_CONTROL_ALLOCATE): its size from its type's extents,
 // taken from the stack (ALLOCA) into its local. Aligned past 16 bytes, whose multiple ALLOCA's address is, it takes its
 // alignment less 16 more and its address rounds up to its alignment, (address + alignment - 1) & -alignment, where
-// clang's code rounds rsp down. Refused in a block whose end has no control entry of its own (a for statement's
-// declaration, a statement expression's block), or initialized (C23's = {}).
+// clang's code rounds rsp down. Its block is a compound statement's, a statement expression's or a for statement's
+// (`target` its `)`), whose end releases it (check_control_expand, check_control_build). One initialized (C23's `= {}`,
+// the only initializer one takes) is cleared whole here, by memset of its runtime size as clang's code clears it, and
+// its INITIALIZE does nothing more (check_lower_initializer).
 static void check_lower_allocate(CheckLowerWriter* writer, CheckControl control)
 {
     const CheckProgram* program = writer->program;
@@ -14423,7 +14457,7 @@ static void check_lower_allocate(CheckLowerWriter* writer, CheckControl control)
     const uint32_t object = declaration < input->token_count ? input->objects[declaration] : 0;
     const uint32_t local = object != 0 && object < program->object_count ? check_lower_local_of(writer, object) : BUSTER_CHECK_NONE;
     const uint8_t role = control.target < input->token_count ? program->parser->tree.roles[control.target] : 0;
-    const bool block = (role == PARSE_ROLE_CLOSE_BLOCK || role == PARSE_ROLE_CLOSE_BODY) && input->expression_regions[control.target] == 0;
+    const bool block = role == PARSE_ROLE_CLOSE_BLOCK || role == PARSE_ROLE_CLOSE_BODY || role == PARSE_ROLE_CLOSE_FOR;
     const TypeId type = local != BUSTER_CHECK_NONE ? input->declared_types[declaration] : 0;
     const CheckInputAttributes* attributes = local != BUSTER_CHECK_NONE ? check_input_attributes_at(input, declaration) : 0;
     // Its type's alignment, or its declaration's attribute's where larger (the log2 plus one, 0 for none).
@@ -14438,11 +14472,7 @@ static void check_lower_allocate(CheckLowerWriter* writer, CheckControl control)
     }
     else if (!block)
     {
-        check_lower_unsupported(writer, "variable-length arrays declared in a for statement or in a statement expression's block");
-    }
-    else if (initialized)
-    {
-        check_lower_unsupported(writer, "initialized variable-length arrays");
+        check_lower_fail(writer, CHECK_PROGRAM_INVALID);
     }
     else
     {
@@ -14462,6 +14492,17 @@ static void check_lower_allocate(CheckLowerWriter* writer, CheckControl control)
         }
         check_lower_emit(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, local);
         writer->indirect[local] = BUSTER_CHECK_LOWER_VLA_ALLOCATED;
+        if (initialized)
+        {
+            // memset(array, 0, size), its result dropped, as check_lower_fill's call (its types are builtin ones).
+            const TypeId arguments[3] = { BUSTER_TYPE_ULONG, BUSTER_TYPE_INT, BUSTER_TYPE_ULONG };
+            const uint32_t call = check_lower_runtime_call(writer, CHECK_LOWER_RUNTIME_MEMSET, BUSTER_TYPE_ULONG, arguments, 3, BUSTER_CHECK_NONE);
+            check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, local);
+            check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I32, 0);
+            check_lower_vla_size(writer, type, BUSTER_TYPED_CLASS_U64);
+            check_lower_emit(writer, BUSTER_TYPED_CALL, BUSTER_TYPED_CLASS_U64, call);
+            check_lower_emit(writer, BUSTER_TYPED_DISCARD, BUSTER_TYPED_CLASS_U64, 0);
+        }
     }
 }
 
@@ -14640,6 +14681,7 @@ static void check_lower_asm(CheckLowerWriter* writer, CheckControl control)
                     .branches = plan->inline_branches,
                     .targets = plan->inline_targets,
                     .branch_count = plan->inline_branch_count,
+                    .leaves = plan->inline_leaves,
                 };
                 writer->asm_body_calls[writer->asm_body_count] = call;
                 writer->asm_body_count += 1;

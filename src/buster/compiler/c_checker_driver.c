@@ -66,9 +66,9 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_ARRAY_FUNCTIONS: result = "declared as array of functions"; break;
         case CHECK_INPUT_ARRAY_INCOMPLETE: result = "array has incomplete element type"; break;
         case CHECK_INPUT_ARRAY_TOO_LARGE: result = "array is too large"; break;
-        case CHECK_INPUT_INVALID_USE: result = "use of an invalid declaration"; break;
         case CHECK_INPUT_AMBIGUOUS: result = "reference to identifier is ambiguous"; break;
         case CHECK_INPUT_TYPE_SPECIFIER_MISSING: result = "type name requires a specifier or qualifier"; break;
+        case CHECK_INPUT_INVALID_USE: result = "use of an invalid declaration"; break;
         // (Unreached: every such report has its attribute token, and the attribute-argument branch prints it in clang's
         // words, check_input_constant_failure_report.)
         case CHECK_INPUT_CONSTANT_EXPRESSION: result = "invalid constant expression"; break;
@@ -4734,10 +4734,70 @@ struct CheckDriverEditor
     uint32_t log_capacity;
 };
 
+// Whether the tag definition whose `{` is `open`, inside [begin, last], declares no name used outside that region: its
+// tag's, and an enumeration's enumerators', which the reading after leaving it out would read as another declaration's
+// (an outer one's) without an error. Any identifier of the same spelling outside counts, in any name space.
+static bool check_driver_tag_local(const Parser* parser, uint32_t open, uint32_t begin, uint32_t last)
+{
+    const uint32_t count = parser->tokens.count;
+    const bool enumeration = parser->tree.roles[open] == PARSE_ROLE_OPEN_ENUM;
+    const uint8_t close_role = enumeration ? PARSE_ROLE_CLOSE_ENUM : PARSE_ROLE_CLOSE_STRUCT;
+    // The definition's `}`: the first closer of its kind at its depth.
+    uint32_t close = open + 1;
+    for (uint32_t depth = 0; close <= last && !(depth == 0 && parser->tree.roles[close] == close_role); close += 1)
+    {
+        depth += parser->tree.roles[close] == PARSE_ROLE_OPEN_STRUCT || parser->tree.roles[close] == PARSE_ROLE_OPEN_ENUM;
+        depth -= (parser->tree.roles[close] == PARSE_ROLE_CLOSE_STRUCT || parser->tree.roles[close] == PARSE_ROLE_CLOSE_ENUM) && depth != 0;
+    }
+    // Its tag is the identifier right after its keyword (`struct` stands for `union` too), or it has none; anything else between them (a C23 enumeration's
+    // `: type`, an attribute) makes it not local, as its tag isn't found.
+    const uint8_t keyword = open > 0 ? parser->tokens.kinds[open - 1] : PARSE_KIND_COUNT;
+    const uint8_t before_tag = open > 1 ? parser->tokens.kinds[open - 2] : PARSE_KIND_COUNT;
+    const bool anonymous = keyword == PARSE_KIND_STRUCT || keyword == PARSE_KIND_ENUM;
+    const bool tagged = keyword == PARSE_KIND_IDENTIFIER && (before_tag == PARSE_KIND_STRUCT || before_tag == PARSE_KIND_ENUM);
+    bool local = close <= last && (anonymous || tagged);
+    // Its names: the tag before the `{`, and an enumeration's enumerators, each after its `{` or a `,` (an argument after
+    // a value's `,` too, which only makes it less often local).
+    for (uint32_t at = open > 0 ? open - 1 : open; local && at < close; at += 1)
+    {
+        const uint8_t before = at > 0 ? parser->tokens.kinds[at - 1] : PARSE_KIND_COUNT;
+        const bool tag = at + 1 == open && parser->tokens.kinds[at] == PARSE_KIND_IDENTIFIER;
+        const bool enumerator = enumeration && at > open && parser->tokens.kinds[at] == PARSE_KIND_IDENTIFIER &&
+                                (before == PARSE_KIND_L_BRACE || before == PARSE_KIND_COMMA);
+        const uint32_t name = parser->tokens.names[at];
+        for (uint32_t use = 0; (tag || enumerator) && local && use < count; use += 1)
+        {
+            local = (use >= begin && use <= last) || parser->tokens.kinds[use] != PARSE_KIND_IDENTIFIER || parser->tokens.names[use] != name;
+        }
+    }
+    return local;
+}
+
 // Leave out the region [begin, last], `first` its first token's fate (DROP, or its run's replacement). A region already
 // left out whole is left so. A run with a replacement is left out whole or not at all: the region may hold it, or be
 // held by it, but not cross it; one without a replacement may also be crossed by one without. The region may hold no
-// label, case, goto, label address or tag definition, which the reading after it needs. False where it can't be left out.
+// case label, which its switch's checks need, nor a tag definition that declares a name used outside it
+// (check_driver_tag_local), nor a goto inside a loop, whose jump `-Wfor-loop-analysis` looks for. It may hold a label,
+// another goto, a label address or a local label's declaration (#1447): a label left out that a kept goto names leaves
+// the reading an error, whose view isn't taken, and a goto left out of no loop changes no warning a flushed body gives
+// (while buster gives no -Wunused-label: one would then warn of a kept label the goto named). False where it can't be
+// left out.
+// Whether `token` is inside a loop's statement in its body: a `for`'s, a `do`'s or a `while`'s.
+static bool check_driver_in_loop(const Parser* parser, uint32_t token)
+{
+    const uint32_t count = parser->tokens.count;
+    bool loop = false;
+    uint32_t at = token < count ? parser->tree.parents[token] : BUSTER_CHECK_NONE;
+    for (uint32_t steps = 0; !loop && at < count && parser->tree.roles[at] != PARSE_ROLE_CLOSE_BODY && steps < count; steps += 1)
+    {
+        const uint8_t role = parser->tree.roles[at];
+        const uint32_t open = role == PARSE_ROLE_CLOSE_CONDITION ? check_driver_child_before(parser, at, PARSE_ROLE_OPEN_CONDITION, 0, at) : BUSTER_CHECK_NONE;
+        loop = role == PARSE_ROLE_CLOSE_FOR || role == PARSE_ROLE_DO || (open != BUSTER_CHECK_NONE && open > 0 && parser->tokens.kinds[open - 1] == PARSE_KIND_WHILE);
+        at = parser->tree.parents[at];
+    }
+    return loop;
+}
+
 static bool check_driver_edit_apply(CheckDriverEditor* editor, uint32_t begin, uint32_t last, uint8_t first)
 {
     const Parser* parser = editor->parser;
@@ -4750,9 +4810,9 @@ static bool check_driver_edit_apply(CheckDriverEditor* editor, uint32_t begin, u
         covered &= edits[at] != CHECK_DRIVER_EDIT_KEEP;
         const uint8_t role = parser->tree.roles[at];
         const uint8_t kind = parser->tokens.kinds[at];
-        valid = role != PARSE_ROLE_LABEL && role != PARSE_ROLE_OPEN_CASE && role != PARSE_ROLE_CLOSE_CASE && role != PARSE_ROLE_OPEN_STRUCT &&
-                role != PARSE_ROLE_OPEN_ENUM && kind != PARSE_KIND_GOTO && kind != PARSE_KIND_CASE && kind != PARSE_KIND_DEFAULT &&
-                !(kind == PARSE_KIND_AMPAMP && role == PARSE_ROLE_PREFIX);
+        const bool tag = role == PARSE_ROLE_OPEN_STRUCT || role == PARSE_ROLE_OPEN_ENUM;
+        valid = role != PARSE_ROLE_OPEN_CASE && role != PARSE_ROLE_CLOSE_CASE && kind != PARSE_KIND_CASE && kind != PARSE_KIND_DEFAULT &&
+                (!tag || check_driver_tag_local(parser, at, begin, last)) && (kind != PARSE_KIND_GOTO || !check_driver_in_loop(parser, at));
     }
     if (valid && !covered)
     {
@@ -7978,7 +8038,8 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         .noreturn_warnings = !quiet,
                         // Tier 1's frame shares its objects' slots by their blocks' lifetimes (#177).
                         .lifetimes = lanes != NULL && lanes->tier1 && !lanes->tier1_no_lifetimes,
-                        .asm_helpers = lanes != NULL && lanes->tier1,
+                        // Tier 1's IR takes asm bodies (#1839), not a statement's row.
+                        .asm_bodies = lanes != NULL && lanes->tier1,
                         .helper_forms = lanes != NULL ? lanes->helper_forms : 0,
                         // A units lane with a unit left to take gives its scratch's pages back in whole huge pages
                         // (#777).

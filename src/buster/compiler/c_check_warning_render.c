@@ -169,6 +169,10 @@ struct CheckWarningSpelling
     uint32_t count;
     String8* anonymous;
     uint32_t anonymous_count;
+    // The target address spaces a macro writes throughout the unit (check_driver_space_macros, #1447).
+    uint32_t* space_macro_spaces;
+    String8* space_macro_texts;
+    uint32_t space_macro_count;
     bool built;
 };
 
@@ -287,6 +291,130 @@ static bool check_driver_spelling_build(const Parser* parser, Preprocessor* pp, 
     return valid;
 }
 
+// c_check_semantic_diagnostic.c's, included after this file.
+static String8 check_semantic_token(const Parser* parser, Preprocessor* pp, uint32_t token, Arena* scratch);
+
+// The distinct spaces a unit's map holds; a space past them keeps its attribute spelled out.
+#define BUSTER_CHECK_DRIVER_SPACE_MACROS 16
+
+// The outermost macro expansion a token's origin comes from (its PPExpansion's index plus one), through the macros
+// expanded inside others; 0 for a token the source wrote or a generated one.
+static uint32_t check_driver_macro_root(const Preprocessor* pp, uint32_t origin)
+{
+    uint32_t result = 0;
+    for (uint32_t steps = 0; origin != 0 && steps < 256; steps += 1)
+    {
+        const uint32_t index = (origin & BUSTER_PP_ORIGIN_INDEX) - 1;
+        const uint32_t kind = origin & ~BUSTER_PP_ORIGIN_INDEX;
+        result = kind == 0 ? index + 1 : kind == BUSTER_PP_ORIGIN_ARGUMENT ? result : 0;
+        origin = kind == 0 ? pp->history[index].parent : kind == BUSTER_PP_ORIGIN_ARGUMENT ? pp->substitutions[index].source : 0;
+    }
+    return result;
+}
+
+// The macros that write the unit's target address spaces (#1447), as clang's MacroQualifiedType names a type whose
+// attribute list one macro's expansion wrote (`#define AS1 __attribute__((address_space(1)))`, `'AS1 int *'`): an
+// object-like macro by its name, a function-like one by its invocation as written (`'ASN(3) int *'`), the outermost
+// one where macros nest, where the list is that expansion's whole and isn't a predefined macro's (`__seg_gs`).
+// clang names each declaration's own spelling; a space this unit writes both ways, or with two
+// macros, keeps its attribute spelled out, and every space does where an operand isn't an integer constant this reads
+// (`address_space(1+0)`), whose space could be any one. One scan of the `__attribute__` tokens, with the pass's other spelling rows (check_driver_spelling_ready).
+static bool check_driver_space_macros(const Parser* parser, Preprocessor* pp, CheckWarningSpelling* spell, Arena* scratch)
+{
+    uint32_t* spaces = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, BUSTER_CHECK_DRIVER_SPACE_MACROS);
+    String8* texts = spaces != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, String8, BUSTER_CHECK_DRIVER_SPACE_MACROS) : NULL;
+    bool* mixed = texts != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, bool, BUSTER_CHECK_DRIVER_SPACE_MACROS) : NULL;
+    const bool valid = mixed != NULL;
+    // The token histories only where an `address_space` attribute is written at all: most units have none.
+    bool written = false;
+    for (uint32_t t = 0; valid && !written && t < parser->tokens.count; t += 1)
+    {
+        const String8 name = parser->tokens.kinds[t] == PARSE_KIND_IDENTIFIER ? check_driver_warning_name(pp, parser->tokens.names[t]) : (String8){ 0 };
+        written = (name.length == 13 && memcmp(name.pointer, "address_space", 13) == 0) ||
+                  (name.length == 17 && memcmp(name.pointer, "__address_space__", 17) == 0);
+    }
+    const bool history = written && pp_history_ensure(pp);
+    uint32_t count = 0;
+    bool unreadable = false;
+    const uint32_t token_count = parser->tokens.count;
+    for (uint32_t t = 0; history && t + 1 < token_count; t += 1)
+    {
+        const uint32_t close = parser->tokens.kinds[t] == PARSE_KIND_ATTRIBUTE && parser->tokens.kinds[t + 1] == PARSE_KIND_L_PAREN ? parser->tree.parents[t + 1] :
+                               BUSTER_CHECK_NONE;
+        for (uint32_t a = t + 2; close < token_count && a + 3 < close; a += 1)
+        {
+            const String8 name = parser->tokens.kinds[a] == PARSE_KIND_IDENTIFIER ? check_driver_warning_name(pp, parser->tokens.names[a]) : (String8){ 0 };
+            const bool space = (name.length == 13 && memcmp(name.pointer, "address_space", 13) == 0) ||
+                               (name.length == 17 && memcmp(name.pointer, "__address_space__", 17) == 0);
+            const String8 number = space && parser->tokens.kinds[a + 1] == PARSE_KIND_L_PAREN && parser->tokens.kinds[a + 2] == PARSE_KIND_NUMBER &&
+                                   parser->tokens.kinds[a + 3] == PARSE_KIND_R_PAREN ? check_semantic_token(parser, pp, a + 2, scratch) : (String8){ 0 };
+            char digits[24] = { 0 };
+            const bool read = number.length != 0 && number.length < sizeof(digits);
+            if (read)
+            {
+                memcpy(digits, number.pointer, number.length);
+            }
+            char* end = NULL;
+            const unsigned long long value = read ? strtoull(digits, &end, 0) : 0;
+            // An integer suffix (`1u`, `1UL`) is the same constant.
+            while (read && end != NULL && (*end == 'u' || *end == 'U' || *end == 'l' || *end == 'L'))
+            {
+                end += 1;
+            }
+            const bool constant = read && end != NULL && *end == 0 && value <= BUSTER_TYPE_SPACE_MASK - BUSTER_TYPE_SPACE_TARGET;
+            // Any other operand (`1+0`, a named constant) may write any space directly: no macro names one then.
+            unreadable |= space && !constant;
+            if (constant)
+            {
+                const uint32_t word = BUSTER_TYPE_SPACE_TARGET + (uint32_t)value;
+                // clang's FindLocsWithCommonFileID: the list is a whole expansion, its `__attribute__` that expansion's
+                // first token and its `)` the last, and not spelled in the predefines (`__seg_gs`, isWrittenInBuiltinFile).
+                const uint32_t first = parser->tokens.sources[t];
+                const uint32_t last = parser->tokens.sources[close];
+                const uint32_t root = check_driver_macro_root(pp, pp_history_at(pp, first));
+                const uint32_t range = root != 0 && first < pp->output.count ? pp_find_range(pp, pp->output.locations[first]) : BUSTER_PP_NONE;
+                const bool builtin = range != BUSTER_PP_NONE && pp->files[pp->ranges[range].file].data == pp->predefines_data;
+                const bool whole = root != 0 && !builtin && last < pp->output.count && root == check_driver_macro_root(pp, pp_history_at(pp, last)) &&
+                                   (first == 0 || check_driver_macro_root(pp, pp_history_at(pp, first - 1)) != root) &&
+                                   (last + 1 >= pp->output.count || check_driver_macro_root(pp, pp_history_at(pp, last + 1)) != root);
+                const PPExpansion* expansion = whole ? &pp->history[root - 1] : NULL;
+                const bool invocation = expansion != NULL && expansion->end > expansion->begin &&
+                                        pp_find_range(pp, expansion->begin) == pp_find_range(pp, expansion->end);
+                const uint8_t* bytes = invocation ? pp_location_bytes(pp, expansion->begin) : NULL;
+                const String8 text = bytes != NULL ? (String8){ .pointer = (char*)bytes, .length = (uint64_t)(expansion->end - expansion->begin) + 1 } :
+                                     expansion != NULL ? check_driver_warning_name(pp, expansion->name) : (String8){ 0 };
+                uint32_t entry = count;
+                for (uint32_t i = 0; entry == count && i < count; i += 1)
+                {
+                    entry = spaces[i] == word ? i : count;
+                }
+                if (entry == count && count < BUSTER_CHECK_DRIVER_SPACE_MACROS)
+                {
+                    spaces[count] = word;
+                    texts[count] = text;
+                    mixed[count] = text.length == 0;
+                    count += 1;
+                }
+                else if (entry < count)
+                {
+                    mixed[entry] |= text.length != texts[entry].length || (text.length != 0 && memcmp(text.pointer, texts[entry].pointer, text.length) != 0);
+                }
+            }
+        }
+    }
+    uint32_t kept = 0;
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        spaces[kept] = spaces[i];
+        texts[kept] = texts[i];
+        kept += mixed[i] ? 0 : 1;
+    }
+    spell->space_macro_spaces = spaces;
+    spell->space_macro_texts = texts;
+    spell->space_macro_count = unreadable ? 0 : kept;
+    return valid;
+}
+
 // One pass's spelling rows, built on its first rendered type (#992): a pass that renders none never scans the
 // token columns. A built pass keeps its rows until it ends, above every per-event mark.
 static bool check_driver_spelling_ready(const Parser* parser, Preprocessor* pp, const CheckInput* input, const TypeTable* types,
@@ -312,6 +440,11 @@ static bool check_driver_spelling_ready(const Parser* parser, Preprocessor* pp, 
         if (valid && unnamed)
         {
             valid = check_driver_spelling_build(parser, pp, input, types, spell, scratch);
+        }
+        // With the other rows, below every event's mark: a pass's later events read the map too (#1447).
+        if (valid)
+        {
+            valid = check_driver_space_macros(parser, pp, spell, scratch);
         }
         if (!valid)
         {
@@ -568,6 +701,9 @@ static String8 check_driver_warning_type_at(const Parser* parser, Preprocessor* 
                 .bound_texts = bound_texts,
                 .bound_count = check_driver_vla_bounds(parser, pp, types, type, bound_ids, bound_texts, scratch),
             };
+            names.space_macro_spaces = spell->space_macro_spaces;
+            names.space_macro_texts = spell->space_macro_texts;
+            names.space_macro_count = spell->space_macro_count;
             TypeId alias_type = 0;
             String8 alias_name = { 0 };
             if (spelling == BUSTER_CHECK_NONE)
@@ -632,13 +768,20 @@ static String8 check_driver_warning_type_at(const Parser* parser, Preprocessor* 
                 expand.alias_types = &vector_type;
                 expand.alias_names = &vector_alias;
                 expand.parenthesis_count = 0;
+                // desugarForDiagnostic strips a macro's name too: the a.k.a. spells the space out.
+                expand.space_macro_count = 0;
                 canonical = type_print(types, scratch, type, (String8){ 0 }, &expand, options);
             }
+            // A macro's name alone gives no a.k.a. (it sets no ShouldAKA): the comparison is without it.
+            TypeNames bare = names;
+            bare.space_macro_count = 0;
+            const String8 compared = canonical.length != 0 && names.space_macro_count != 0 && contextual ?
+                                     type_print(types, scratch, type, (String8){ 0 }, &bare, options) : sugared;
             // The returned text carries its own quotes: clang's `(aka '...')` sits outside the type's, so the
             // messages print `%.*s` without quoting it themselves.
             result = sugared;
             if (sugared.length != 0 && canonical.length != 0 &&
-                (canonical.length != sugared.length || memcmp(canonical.pointer, sugared.pointer, canonical.length) != 0))
+                (canonical.length != compared.length || memcmp(canonical.pointer, compared.pointer, canonical.length) != 0))
             {
                 const char* combined = check_warning_text(scratch, "'%.*s' (aka '%.*s')", (int)sugared.length, sugared.pointer,
                                                           (int)canonical.length, canonical.pointer);
@@ -1188,6 +1331,32 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
         case CHECK_WARNING_EVENT_UNKNOWN_ESCAPE:
             result = check_warning_text(scratch, "unknown escape sequence '\\%c'", (char)payload->name);
             break;
+        case CHECK_WARNING_EVENT_TARGET_CLONES_UNSUPPORTED:
+        {
+            // A version of target_clones' string (#1838): its bytes in the string's decoded text.
+            const String8 text = check_warning_strings_value(parser, pp, payload->token, scratch);
+            const uint32_t start = payload->name <= text.length ? payload->name : (uint32_t)text.length;
+            uint32_t shown = 0;
+            while (start + shown < text.length && text.pointer[start + shown] != ',')
+            {
+                shown += 1;
+            }
+            while (shown != 0 && check_target_version_space(text.pointer[start + shown - 1]))
+            {
+                shown -= 1;
+            }
+            result = check_warning_text(scratch, "unsupported%s '%.*s' in the 'target_clones' attribute string; 'target_clones' attribute ignored",
+                                        (payload->data & BUSTER_CHECK_TARGET_CLONES_CPU) != 0 ? " CPU" : "", (int)shown,
+                                        text.pointer != NULL ? text.pointer + start : "");
+            break;
+        }
+        case CHECK_WARNING_EVENT_TARGET_CLONES_DUPLICATE:
+            result = "version list contains duplicate entries";
+            break;
+        case CHECK_WARNING_EVENT_TARGET_CLONES_MIXED:
+            result = "mixing 'target_clones' specifier mechanisms is permitted for GCC compatibility; use a comma separated sequence of string literals, or a "
+                     "string literal containing a comma-separated list of versions";
+            break;
         case CHECK_WARNING_EVENT_BIT_INT_SUFFIX:
             result = "'_BitInt' suffix for literals is a C23 extension";
             break;
@@ -1664,6 +1833,12 @@ static bool check_driver_warning_events_at(const Parser* parser, Preprocessor* p
                     {
                         // At its backslash inside the literal's token (#1447).
                         pp_diagnose_output_offset_at(pp, disposition, source, event->payload.data, boundary, "%s%s", message, suffix);
+                    }
+                    else if (event->kind == CHECK_WARNING_EVENT_TARGET_CLONES_UNSUPPORTED || event->kind == CHECK_WARNING_EVENT_TARGET_CLONES_DUPLICATE ||
+                             event->kind == CHECK_WARNING_EVENT_TARGET_CLONES_MIXED)
+                    {
+                        // At the version's offset in its trimmed string, from the literal's quote, as clang places it (#1838).
+                        pp_diagnose_output_offset_at(pp, disposition, source, event->payload.data & ~BUSTER_CHECK_TARGET_CLONES_CPU, boundary, "%s%s", message, suffix);
                     }
                     else if ((event->flags & BUSTER_CHECK_WARNING_UNLOCATED) != 0)
                     {
