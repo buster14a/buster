@@ -1878,6 +1878,23 @@ stated encodings, deep signatures, allocation failures, deterministic emission,
 cross-compiler linkage in both directions and the installed `<tgmath.h>` through
 both object and direct-executable driver paths; the full checker suite runs it too.
 
+A designator of the wrong kind for its current object is clang's
+`CheckDesignatedInitializer` error, named by that object's type (#2202,
+`CHECK_INIT_ARRAY_DESIGNATOR`, `CHECK_INIT_FIELD_DESIGNATOR`): "array designator
+cannot initialize non-array type 'T'" at a `[` and "field designator cannot
+initialize a non-struct, non-union type 'T'" at a `.` (at the name of GNU's
+old-style `name:`), T the object the previous designator selected for a later
+one (`.a[0]` of an `int a`), and an array of unknown bound's as declared
+(`int[]`), through its inference. A designation in a scalar's or a vector's
+braces is "initialization of non-aggregate type 'T' with a designated
+initializer list" (`CHECK_INIT_NON_AGGREGATE_DESIGNATOR`): at the declarator
+where the list is the whole initializer, its type as the declaration spells
+it, else at the list's `{`. Each used to be "invalid initializer". The
+initializer-field fixtures (`check_test_driver_initializer_fields`) compare
+each with clang on both paths, `-fsyntax-only` and `-c`. Differences left: an
+array of unknown bound's error still stops the unit's later initializers'
+checks, as an unknown field's in one does.
+
 The source initializer adapter matches the selected language's warning policy
 for excess elements and compatible overlong string copies. Ignored tails are
 still expression-checked, but produce no stores, runtime evaluations or live
