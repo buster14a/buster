@@ -10236,7 +10236,9 @@ enables, which this checker doesn't all give.
   digits at its type's default precision with `.` where they have none and
   `F`/`L` (`0.1f` is `0.100000001F`, `2.0` is `2.`), a character one by its
   value (`'\0'` is `'\x00'`), `sizeof (x)` with a space before an expression
-  operand, `__alignof` and `_Alignof`, C23's `(bool)`. A binary requirement but
+  operand, `__alignof` and `_Alignof`, C23's `(bool)`, a call's or an
+  initializer list's `, ` between its items and a comma operator's `(3 , 4)`
+  (#2382). A binary requirement but
   `||` adds "expression evaluates to 'L op R'" at its operator where either
   operand is worth printing (DiagnoseStaticAssertDetails' UsefulToPrintExpr: no
   literal, nor a unary operator's, nor a comparison, logical or comma
@@ -10244,8 +10246,10 @@ enables, which this checker doesn't all give.
   bool's `true`, a plain char's `'A' (0x41, 65)` with a control's `<U+001B>` and
   a byte past ASCII's `<0xC8>`, a floating one's APFloat digits. Still
   separate: a type name's literals print as written (`sizeof(int[0x10])`, clang
-  `int[16]`); `_Generic`'s and a comma operator's spacing (`(A,0)`, clang
-  `(A , 0)`); a complex value's note.
+  `int[16]`, and a compound literal's `(int[]){1, 2}`, clang `(int[2])`);
+  `_Generic`'s associations (`int:1`, clang `int: 1`); a record type defined
+  in `__builtin_offsetof` (clang `struct (unnamed at f.c:1:2)`); a complex
+  value's note.
 - **A failed initializer conversion.** A scalar initializer's INITIALIZE is at
   its declarator, outside the initializer's tokens. When its conversion fails,
   that error is the only one: the initializers' walk doesn't check that
