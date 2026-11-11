@@ -667,6 +667,13 @@ at the target's forms, by both of the checker's paths:
   C library's `ceilf` ... `round`, `fmaf` and `fma` an element (`check_lower_vector_library`), as clang's code calls
   them. A fused multiply-add's product has b's register as its destination, as clang's `vfmadd213` does, so that of
   two NaNs b's is the result.
+  The reductions without AVX-512 (#1834, `check_lower_reduce_baseline`): an integer one, whose result is any order's,
+  is folded element by element (`check_lower_transport_reduce`), as is one of 8- or 16-bit elements without AVX-512BW;
+  a floating one in clang's order, by pieces of the registers' bytes whose halves are paired first, then the piece's
+  halvings (`check_vector_baseline_reduce_floating_rows`): `pshufd` (`vextractf128`, `vpermilpd` and `vmovshdup` with
+  AVX) of the high part, combined with the low one by `addps` or llvm.maximum's and minimum's sequences, which without
+  AVX take two rows a halving (the first packs the low part beside the high one, the high one replaced by the low where
+  the low is a NaN). `max` and `min` fold the piece's lanes in order by #967's scalar rows.
   `__builtin_convertvector`'s integer extensions without SSE4.1 and truncations without AVX-512 are sequences too
   (`check_vector_baseline_resize`, #1834): an extension unpacks the low elements with zeros, or with themselves and
   shifts them right arithmetically (a qword's high dword is `psrad` by 31 of a copy); a truncation takes a qword's low

@@ -11571,6 +11571,19 @@ static bool check_lower_strict_round(const CheckGraph* graph, uint32_t node, CBu
     return builtin == CBUILTIN_ELEMENTWISE_ROUND && graph->fp_environments != NULL && (graph->fp_environments[node] & BUSTER_CHECK_FP_ENV_ACCESS) != 0;
 }
 
+// Whether a reduction of a vector of `source`'s type takes the baseline's ways (#1834): at a target without AVX-512F and
+// AVX-512VL, and of 8- and 16-bit integers without AVX-512BW, whose halvings' rows are EVEX ones. An integer reduction
+// is then folded element by element (check_lower_transport_reduce), its result any order's; a floating one by pieces of
+// the registers' bytes and their halvings' rows (check_lower_transport_reduce_floating), in clang's order.
+static bool check_lower_reduce_baseline(const CheckLowerWriter* writer, TypeId source)
+{
+    const CheckVectorShape shape = check_vector_builtin_shape(writer->program->types, source);
+    const uint64_t features = writer->target.features;
+    const uint64_t evex = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512VL);
+    const bool narrow = shape.integer && shape.element != 0 && shape.element <= 2 && (features & BUSTER_X86_FEATURE(AVX512BW)) == 0;
+    return check_lower_vector_of(writer, source) != 0 && ((features & evex) != evex || narrow);
+}
+
 // Whether clang's code computes a floating elementwise builtin of a vector of floats or doubles (`result`) by the C
 // library's function for each element at the unit's target (#1834): the roundings (ceil ... round) without SSE4.1's
 // ROUNDPS and ROUNDPD, and the fused multiply-add (fmaf or fma) without FMA, as its legalization scalarizes them.
@@ -12263,7 +12276,7 @@ static __attribute__((noinline)) void check_lower_vector_builtin(CheckLowerWrite
         check_lower_fail(writer, CHECK_PROGRAM_INVALID);
     }
     else if (((builtin >= CBUILTIN_REDUCE_MAXIMUM && builtin <= CBUILTIN_REDUCE_ASSOC_FADD) &&
-              check_lower_transport_type(types, stream->argument_conversions[first].type)) ||
+              (check_lower_transport_type(types, stream->argument_conversions[first].type) || check_lower_reduce_baseline(writer, stream->argument_conversions[first].type))) ||
              ((builtin == CBUILTIN_REDUCE_MAX || builtin == CBUILTIN_REDUCE_MIN) &&
               check_vector_builtin_shape(types, stream->argument_conversions[first].type).floating))
     {
@@ -12363,9 +12376,10 @@ static __attribute__((noinline)) void check_lower_vector_builtin(CheckLowerWrite
         }
     }
     else if (((builtin >= CBUILTIN_REDUCE_ADD && builtin <= CBUILTIN_REDUCE_OR) || builtin == CBUILTIN_REDUCE_XOR) &&
-             check_lower_vector_of(writer, stream->argument_conversions[first].type) == 0)
+             (check_lower_vector_of(writer, stream->argument_conversions[first].type) == 0 || check_lower_reduce_baseline(writer, stream->argument_conversions[first].type)))
     {
-        // Of a transport vector (#137), element by element.
+        // Of a transport vector (#137), element by element; so too at a target whose vectors' rows have no reduction's
+        // (check_lower_reduce_baseline), whose integer results are any order's.
         check_lower_transport_reduce(writer, node, builtin);
     }
     else if ((builtin >= CBUILTIN_REDUCE_ADD && builtin <= CBUILTIN_REDUCE_OR) || builtin == CBUILTIN_REDUCE_XOR)
