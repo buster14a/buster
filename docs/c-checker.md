@@ -9754,15 +9754,23 @@ declaration, and one that already has an alias attribute makes it a no-op; a
 TARGET never declared is clang's "weak identifier 'TARGET' never declared" at
 ALIAS. The shapes whose ALIAS the unit declares with external linkage, of
 TARGET's kind, type and thread-local storage, without a section, alias or
-definition after the pragma and named by nothing after it, take the alias as
-attributes of ALIAS's declaration (`check_input_symbol_alias`), which the
-emission makes clang's weak alias of TARGET's definition; one whose ALIAS the
-unit defined before the pragma is clang's no-op. The rest stay refused by name:
-an ALIAS the unit doesn't declare (clang's clone is a declaration without a C
-declarator, which a later use names), one named after the pragma (clang's
-lookup then finds two declarations), one defined after it, of another kind,
-type or thread-local storage, with a section or an alias of its own, or a
-TARGET the unit doesn't define (clang's error at the pragma). This is separate
+definition after the pragma and, where it declares ALIAS before the pragma,
+named by nothing after it, take the alias as attributes of ALIAS's declaration
+(`check_input_symbol_alias`), which the emission makes clang's weak alias of
+TARGET's definition; one whose ALIAS the unit defined before the pragma, or
+declared an alias of its own before it, is clang's no-op. Clang's clone itself
+is ALIAS's symbol where the unit never declares ALIAS, or declares it only
+before the pragma, never names or defines it, and gives it another kind, type,
+thread-local storage or a section (`CheckInputSymbolPragma.alias_target`): the
+selection keeps TARGET's definition as an alias's base, and
+`check_program_define_pragma_aliases` adds a weak symbol of ALIAS's name at
+it, of its type and size, after the aliases' (in the unit of several lanes
+that has TARGET's definition). The rest stay refused by name where clang's
+Sema errors: an ALIAS declared before the pragma and named after it ("reference
+to 'ALIAS' is ambiguous", clang's lookup then finds two declarations), defined
+after it ("redefinition of 'ALIAS'"), declared after it with another kind or
+type, and a TARGET the unit doesn't define ("alias must point to a defined
+variable or function"); and an ALIAS of internal linkage. This is separate
 from ordinary weak binding. `test-checker-driver`
 (`c_check_symbol_pragma_driver_test.c`) compares the supported shapes'
 symbols and programs with clang's, by both paths.

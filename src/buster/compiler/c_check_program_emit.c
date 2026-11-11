@@ -3651,6 +3651,11 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     check_program_cpu_room(program, &cpu_atoms, &cpu_symbols, &cpu_fixups);
     // And multiversioning by target strings' (#1838).
     check_program_target_room(program, &cpu_atoms, &cpu_symbols, &cpu_fixups);
+    // And `#pragma weak A = T`'s symbols of undeclared A's (#1849, check_program_define_pragma_aliases), a name each.
+    for (uint32_t i = 0; program->input->symbol_pragmas != NULL && i < program->input->symbol_pragmas->count; i += 1)
+    {
+        cpu_symbols += program->input->symbol_pragmas->records[i].alias_target != BUSTER_CHECK_NONE ? 1u : 0u;
+    }
     const uint64_t atom_count = (uint64_t)data_capacity.atoms + count + helpers->count + pools->count + runtime.atoms + (frames != 0 ? 1 : 0) +
                                 (valid ? result->lowered.table_count : 0) + file_atoms + structor_count + unit_atoms + patched + cpu_atoms;
     const uint64_t fixup_count = (uint64_t)data_capacity.fixups + references + runtime.fixups + frames + table_entries + structor_count + unit_fixups + patched +
@@ -4578,6 +4583,42 @@ static bool check_program_define_aliases(CheckProgramCode* code, const CheckProg
     return valid;
 }
 
+// `#pragma weak A = T` whose A the unit never declares (#1849, CheckInputSymbolPragma.alias_target): a weak symbol A of
+// its own at T's definition, of T's type and size, as clang's clone of T's declaration is. No C reference names A, so it
+// is a symbol of the object alone, added once T's atom exists. Units with no such directive pay one test.
+static bool check_program_define_pragma_aliases(CheckProgramCode* code, const CheckProgram* program)
+{
+    const CheckInput* input = program->input;
+    const CheckInputSymbolPragmas* history = input->symbol_pragmas;
+    const InternTable* identifiers = program->identifiers != NULL ? program->identifiers :
+                                     program->parser->preprocessor != NULL ? program->parser->preprocessor->table : NULL;
+    Link* link = &code->link;
+    bool valid = true;
+    for (uint32_t i = 0; valid && history != NULL && i < history->count; i += 1)
+    {
+        const CheckInputSymbolPragma* record = history->records + i;
+        const uint32_t object = record->alias_target < input->token_count ? input->objects[record->alias_target] : 0;
+        const SymbolId taken = object != 0 && object < program->object_count ? program->object_symbols[object] : 0;
+        const SymbolId base = taken != 0 && program->symbol_objects[taken - 1] == object ? taken : 0;
+        const AtomId atom = base != 0 && base < link->symbols.count ? link->symbols.atom[base] : 0;
+        // A unit of several (#777) without T's definition leaves the alias to the unit with it.
+        if (record->alias_target != BUSTER_CHECK_NONE && identifiers != NULL && atom != 0)
+        {
+            const NameId name = link_add_name(link, intern_bytes(identifiers, record->name), intern_length(identifiers, record->name));
+            const uint8_t flags = (uint8_t)((link->symbols.flags[base] & BUSTER_LINK_SYMBOL_TYPE) | BUSTER_LINK_SYMBOL_WEAK);
+            const SymbolId symbol = name != 0 ? link_add_symbol(link, name, atom, link->symbols.value[base], link->symbols.size[base], flags, BUSTER_LINK_SOURCE_PROGRAM) : 0;
+            valid = symbol != 0;
+            if (!valid)
+            {
+                code->status = CHECK_PROGRAM_BACKEND;
+                code->reason = "a '#pragma weak' alias's symbol couldn't be defined at its target's definition";
+                code->token = record->token;
+            }
+        }
+    }
+    return valid;
+}
+
 // The named sections of the unit's emitted definitions (#619), once its static data is published, for -c's object
 // (ObjectOptions.atom_sections) and the direct path alike: each definition CheckInputSections.placements names a
 // section for, which the unit defines in an atom of the link, gets a descriptor of that name, of the kind LLVM gives a
@@ -4834,7 +4875,7 @@ static bool check_program_sections(CheckProgramCode* code, const CheckProgram* p
             code->link.symbols.size[symbol] = code->asm_sizes[symbol];
         }
     }
-    valid = valid && check_program_define_aliases(code, program);
+    valid = valid && check_program_define_aliases(code, program) && check_program_define_pragma_aliases(code, program);
     // A symbol of internal linkage that no definition emitted is still an undefined reference: clang writes it as a
     // global undefined symbol (GNU ld and lld report it, and an executable link fails), never as an undefined local,
     // which an ELF object can't hold. The definitions' and aliases' symbols above have their sources set.
