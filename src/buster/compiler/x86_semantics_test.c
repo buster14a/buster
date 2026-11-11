@@ -38,7 +38,7 @@
 #include <stdarg.h>
 #include <stddef.h>
 #include <signal.h>
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DRIVER
 #define BUSTER_X86_SEMANTICS_TEST_REPORTED 12
 #define BUSTER_X86_SEMANTICS_TEST_PAGE 4096
 // The data page's memory operand (aligned for the 16-byte forms that need it), and the stack's top, in the middle of its
@@ -49,7 +49,8 @@
 // A write the runs didn't show gets up to this many more, until it shows (x86_semantics_check_table).
 #define BUSTER_X86_SEMANTICS_TEST_WITNESS_RUNS 256
 #define BUSTER_X86_SEMANTICS_TEST_RFLAGS_BASE 0x202ull
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DRIVER || BUSTER_UNIT == BUSTER_UNIT_BACKEND
 #define BUSTER_X86_SEMANTICS_TEST_NAME(name, ...) #name,
 static const char* const x86_semantics_test_form_names[X86_FORM_COUNT] = { BUSTER_X86_FORMS(BUSTER_X86_SEMANTICS_TEST_NAME, BUSTER_X86_SEMANTICS_TEST_NAME) };
 #undef BUSTER_X86_SEMANTICS_TEST_NAME
@@ -58,10 +59,11 @@ static const char* x86_semantics_test_name(uint32_t form)
 {
     return x86_semantics_test_form_names[x86_semantics_row(form)];
 }
+#endif
 
 // ---------------------------------------------------------------------------------------------------------------------
 // The tally
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DRIVER
 typedef struct X86SemanticsTally X86SemanticsTally;
 struct X86SemanticsTally
 {
@@ -95,7 +97,7 @@ static bool x86_semantics_report(const X86SemanticsTally* tally)
     printf("%s: %llu checks, %llu failures\n", tally->check, (unsigned long long)tally->checks, (unsigned long long)tally->failures);
     return tally->failures == 0;
 }
-
+#endif
 // ---------------------------------------------------------------------------------------------------------------------
 // The harness
 
@@ -115,6 +117,7 @@ struct X86SemanticsState
     uint8_t x87[512] __attribute__((aligned(64)));
 };
 _Static_assert(offsetof(X86SemanticsState, flags) == 128, "x86_semantics_test_enter's offset of the flags");
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DRIVER
 _Static_assert(offsetof(X86SemanticsState, vector) == 192, "x86_semantics_test_enter's offset of the vector registers");
 _Static_assert(offsetof(X86SemanticsState, opmask) == 2240, "x86_semantics_test_enter's offset of the opmask registers");
 _Static_assert(offsetof(X86SemanticsState, x87) == 2304, "x86_semantics_test_enter's offset of the x87's state");
@@ -126,7 +129,7 @@ _Static_assert(offsetof(X86SemanticsState, x87) == 2304, "x86_semantics_test_ent
 #define BUSTER_X86_SEMANTICS_FX_TAGS 4
 #define BUSTER_X86_SEMANTICS_FX_MXCSR 24
 #define BUSTER_X86_SEMANTICS_FX_REGISTERS 32
-
+#endif
 // The trampoline's own state, which it reaches RIP-relative while every register is the test's: the C code's x87 and SSE
 // state too, which it restores after storing the test's.
 static __attribute__((used, aligned(64))) uint8_t x86_semantics_test_host[512];
@@ -135,7 +138,7 @@ static __attribute__((used)) X86SemanticsState* x86_semantics_test_state;
 static __attribute__((used)) uint64_t x86_semantics_test_code;
 static __attribute__((used)) uint64_t x86_semantics_test_scratch;
 static __attribute__((used)) uint8_t x86_semantics_test_wide;
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DRIVER
 // Saves the C code's x87 and SSE state and loads the state's x87 one, then the available vector state, the flags, then
 // the general registers (RSP last but RDI, which held the state) and jumps to x86_semantics_test_code, which ends with a
 // jump back to x86_semantics_test_return. There it stores the general registers, the flags (pushed on the C stack, after
@@ -355,7 +358,8 @@ struct X86SemanticsMachine
 
 // What the fault handler prints: the record being run.
 static char x86_semantics_test_case[256];
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DRIVER
 // The forms #180's baseline target (a zero X86Target) allows (x86_target_forms), which run_x86_semantics_tests fills.
 static uint8_t x86_semantics_test_baseline[X86_FORM_COUNT];
 static uint8_t x86_semantics_test_native[X86_FORM_COUNT];
@@ -719,8 +723,9 @@ static const X86SemanticsFixture x86_semantics_fixtures[] = {
     BUSTER_X86_FIXTURE(MOVQ_XM64_X, MOVD, BUSTER_X86_R | BUSTER_X86_V, BUSTER_X86_W | BUSTER_X86_V | BUSTER_X86_REST(ZERO), 0, 0, 0, 0, 0, 0, BUSTER_X86_EFFECT_KEEP_UPPER,
                        8, 8)
 };
+#endif
 #undef BUSTER_X86_FIXTURE
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DRIVER
 // Forms outside the subset: each must get the conservative record.
 static const uint16_t x86_semantics_uncovered[] = {
     X86_FORM_NONE,
@@ -1404,7 +1409,8 @@ static uint32_t x86_semantics_register_number(uint8_t value)
 {
     return (value & BUSTER_X86_REGISTER_HIGH_BYTE) ? (value & 3u) : (value & 15u);
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DRIVER
 // A VSIB operand's data element and index, in bytes, from the letters after a gather's or scatter's name: its index's,
 // then its element's (vpgatherdq: dword indices, qword elements), or for floating point `p` and the element's
 // (vgatherqps: qword indices, single elements; vscatterdpd: dword indices, doubles, #1115).
@@ -2049,7 +2055,8 @@ static bool x86_semantics_check_conditions(X86SemanticsMachine* machine, uint64_
     }
     return x86_semantics_report(&tally);
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DRIVER
 // push, pop and leave move RSP as they say: push writes the 8 bytes below it, pop and leave read [rsp] and [rbp].
 // Shifts' CF on the processor against a model, and x86_instruction_flags_substitutable's counts. SAR, SHR and SHL at
 // every width, by an immediate and by CL, at counts around their widths and the masks', from values with the sign bit
@@ -2622,8 +2629,9 @@ static const X86SemanticsChoiceFixture x86_semantics_choice_fixtures[] = {
     BUSTER_X86_CHOICE_FIXTURE(TEST, 2, REGISTER, BUSTER_X86_LIVE, false, 200, TEST_RM16_IMM16)
     BUSTER_X86_CHOICE_FIXTURE(TEST, 4, REGISTER, BUSTER_X86_LIVE, false, -1, TEST_RM32_IMM32)
 };
+#endif
 #undef BUSTER_X86_CHOICE_FIXTURE
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DRIVER
 static bool x86_semantics_check_choice_fixtures(void)
 {
     X86SemanticsTally tally = {
@@ -3113,10 +3121,10 @@ static bool x86_semantics_check_twins(uint64_t seed, uint32_t count)
     printf("twins: %u requests and %u records, and every count to 100 at a page's end\n", count, count);
     return x86_semantics_report(&tally);
 }
-
+#endif
 // ---------------------------------------------------------------------------------------------------------------------
 // #180's target
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DRIVER
 // Every candidate of every row must be a form the baseline target allows (x86_target_forms of a zero X86Target), so a
 // chosen record passes x86_target_validate at every target. #180's table fails closed (a form its rows don't classify is
 // unavailable), so the covered forms it doesn't allow at the baseline are listed: those that need a feature (popcnt,
@@ -3455,3 +3463,4 @@ static int run_x86_semantics_tests(int argc, char** argv)
     }
     return result ? 0 : 1;
 }
+#endif

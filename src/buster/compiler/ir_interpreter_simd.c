@@ -32,6 +32,16 @@ static IrSimdOperation ir_interpreter_simd_opcode(uint8_t op)
     return operation;
 }
 
+// A width change's model operation (#1840: extract, widen and insert), or IR_SIMD_OPERATION_COUNT for any other intrinsic.
+static IrSimdOperation ir_interpreter_simd_intrinsic(uint32_t kind)
+{
+    const IrSimdOperation operation = kind == BUSTER_IR_INTRINSIC_EXTRACT ? IR_SIMD_EXTRACT :
+                                      kind == BUSTER_IR_INTRINSIC_WIDEN   ? IR_SIMD_WIDEN :
+                                      kind == BUSTER_IR_INTRINSIC_INSERT  ? IR_SIMD_INSERT :
+                                                                            IR_SIMD_OPERATION_COUNT;
+    return operation;
+}
+
 static bool ir_interpreter_simd_supported(const IrFunction* function)
 {
     // A machine row (#141, IrFunction.rows) is x86 records, which the interpreter has no model of: Tier 1's native code
@@ -58,6 +68,7 @@ static bool ir_interpreter_simd_supported(const IrFunction* function)
             const uint8_t op = function->op[i];
             supported = op == IR_VCONST || op == IR_UNDEF || op == IR_COPY || op == IR_BITCAST || op == IR_SELECT ||
                         op == IR_PHI || op == IR_LOAD || (op == IR_INTRINSIC && function->c[i] == BUSTER_IR_INTRINSIC_SPLAT) ||
+                        (op == IR_INTRINSIC && ir_interpreter_simd_intrinsic(function->c[i]) != IR_SIMD_OPERATION_COUNT) ||
                         ir_interpreter_simd_opcode(op) != IR_SIMD_OPERATION_COUNT;
         }
     }
@@ -127,12 +138,15 @@ static InterpreterStatus ir_interpreter_simd_operation(const IrInterpreterFrame*
     {
         const uint32_t ids[3] = { function->a[i], function->b[i], function->c[i] };
         const uint32_t mask = ir_value_mask(function, i);
+        const bool intrinsic = op == IR_INTRINSIC;
         IrSimdAction action = {
-            .operation = ir_interpreter_simd_opcode(op),
+            .operation = intrinsic ? ir_interpreter_simd_intrinsic(function->c[i]) : ir_interpreter_simd_opcode(op),
             .result = ir_simd_shape(function->type[i]),
             .predicate = op == IR_VCMP ? (IrSimdPredicate)function->c[i] : IR_SIMD_EQ,
-            // Its lanes (#141's element types): a vector operation's flags, which the verifier checked.
-            .lane = (IrSimdLane)function->flags[i],
+            // Its lanes (#141's element types): a vector operation's flags, which the verifier checked; an intrinsic's
+            // flags are its part (#1840's width changes), and it reads no lanes.
+            .lane = intrinsic ? IR_SIMD_LANE_I32 : (IrSimdLane)function->flags[i],
+            .index = intrinsic ? function->flags[i] : 0,
         };
         IrSimdValue values[3] = {0};
         const IrSimdValue* operands[3] = {0};

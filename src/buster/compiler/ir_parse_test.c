@@ -701,6 +701,7 @@ static int run_ir_parse_tests(int argc, char** argv)
                 "tests/ir/bit-intrinsics.ir",
                 "tests/ir/overflow-intrinsics.ir",
                 "tests/ir/splats.ir",
+                "tests/ir/widths.ir",
                 "tests/ir/rows.ir",
                 "tests/ir/carrier-rows.ir",
             };
