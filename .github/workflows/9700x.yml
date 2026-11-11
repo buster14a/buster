@@ -239,7 +239,9 @@ jobs:
     # A nightly dispatch whose commit's earlier run qualified its plain rows reuses them (`evidence`), and runs none.
     # Each row is hosted-correctness.yml: its 4 shards, and for a portable row the job that builds its compiler once for
     # them (#2032; docs/ci.md, "Shared row products"). Their names are this one's, ` / ` and their own, which
-    # tools/ci/nightly.c reads to find the plain rows' shards.
+    # tools/ci/nightly.c reads to find the plain rows' shards. A pull request's second row is the vector row (#2033), the
+    # explicit vector target's 4 shards on runners whose CPU qualifies, which replaces its random `native` row; every
+    # other run keeps `native` (docs/ci.md, "The vector row").
     needs: [changes, evidence, agent-guide-size, dco-hooks, prepare-hosted-tools]
     if: ${{ !cancelled() && needs.prepare-hosted-tools.result == 'success' && github.repository_id == '1421805693' && needs.evidence.result == 'success' && needs.evidence.outputs.hosted == 'run' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) && (github.event_name != 'pull_request' || (needs.agent-guide-size.result == 'success' && needs.dco-hooks.result == 'success')) }}
     strategy:
@@ -248,7 +250,7 @@ jobs:
       # what the others find.
       fail-fast: ${{ github.event_name == 'pull_request' }}
       matrix:
-        host_arch: [x86-64, native]
+        host_arch: ${{ fromJSON(github.event_name == 'pull_request' && '["x86-64", "vector"]' || '["x86-64", "native"]') }}
         # The sanitizer rows take far longer than the plain ones: pull requests run the plain builds alone, as nightly
         # backlog runs and an admitted snapshot run do (the `plain` scope: the 9700X's gate), and so do pushes to main
         # in the nightly mode (#2057, until the merge queue carries the full suite). The daily run, full dispatches,
@@ -257,6 +259,11 @@ jobs:
         # available for diagnosis but does not repeat the entire hosted suite.
         sanitizer: ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '["none"]' || '["none", "address", "thread", "memory"]') }}
         optimization: [3]
+    # The vector row's candidates and collectors read the run's artifacts and jobs (their claims and decisions); nothing
+    # here writes but the artifacts.
+    permissions:
+      contents: read
+      actions: read
     uses: ./.github/workflows/hosted-correctness.yml
     with:
       host_arch: ${{ matrix.host_arch }}
