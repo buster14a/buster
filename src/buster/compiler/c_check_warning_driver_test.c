@@ -177,6 +177,15 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .c23 = true,
     },
     {
+        // An assignment's or an increment's value is no constant to clang's evaluator (#1447), in a list's element too
+        // (`{ y = 300 }`), but a comma's right operand is.
+        .name = "no constant conversion of an assignment's value",
+        .source = "void g(void) { int y; char c = y = 1000; char d[1] = { y = 300 }; unsigned char u = (y += 1, 300); char e = y++; "
+                  "char f = (y = 1, 400); _Bool b = (y = 2); float fl = (y = 16777217); "
+                  "(void)c; (void)d; (void)u; (void)e; (void)f; (void)b; (void)fl; }\n",
+        .warnings = 2,
+    },
+    {
         .name = "floating literal assignment return and call conversions",
         .source = "int f(void){int a;a=1.5;return -2.5;}\nvoid g(int);void h(void){g(3.5);}\n",
         .warnings = 3,

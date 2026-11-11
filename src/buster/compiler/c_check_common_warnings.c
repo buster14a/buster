@@ -4627,7 +4627,11 @@ static void check_common_conversion_leaf(const Parser* parser, Preprocessor* pp,
                                             TypeId target, const uint32_t* parents, uint32_t at_once, uint8_t leaves, Arena* scratch)
 {
     __int128 converted = 0;
-    const bool plain = check_common_conversion_target(types, target, false);
+    // An assignment's or an increment's value, which the stream may hold as its stored constant, is none to clang's
+    // evaluator (#1447: `char c = x = 1000;`, `{ x = 300 }`), so its conversion warns of nothing.
+    const CheckOp op = source < input->graph.count ? input->graph.ops[source] : CHECK_OP_COUNT;
+    const bool written = op == CHECK_OP_ASSIGN || (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_BIT_XOR_ASSIGN);
+    const bool plain = !written && check_common_conversion_target(types, target, false);
     const bool width = plain && value->constant_kind == CHECK_CONSTANT_INTEGER && check_common_same_width(types, value, target);
     const uint8_t kind = width ? BUSTER_CHECK_LEAVES_WIDTH : BUSTER_CHECK_LEAVES_INTEGER;
     const bool listed_character = width && (leaves & BUSTER_CHECK_LEAVES_LISTED) != 0 && check_common_character_type(types, target);

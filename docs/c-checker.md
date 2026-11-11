@@ -5870,7 +5870,10 @@ enumeration by its integer type's range (`enum Small : signed char e = 300;`).
 An `_Atomic` destination takes neither. Its conversion is to the atomic's value
 type, which the lowering needs, so the action marks it
 `BUSTER_CHECK_CONVERT_ATOMIC` wherever it strips `_Atomic`: assignments,
-initializations, brace elements, returns and prototype arguments.
+initializations, brace elements, returns and prototype arguments. An
+assignment's or an increment's value is no constant to clang's evaluator, so
+its conversion warns of nothing (`char c = x = 1000;`, `{ x = 300 }`), though a
+comma's right operand's does (`check_common_conversion_leaf`, #1447).
 
 A brace initializer's integer constants warn of their constant conversions too
 (#1447), in the reverse initializer order clang's `AnalyzeImplicitConversions`
@@ -9486,9 +9489,8 @@ part in its overload resolution, are "not yet supported" in user code (a
 tautological `enable_if(1, ...)`, glibc's, aside); the condition shapes
 above (and clang's `-Wunused-value` of a comma operator's left operand in a
 condition isn't given); and, as everywhere in this driver, the uses' errors stop the unit's
-later expression checks, so a call after one such error isn't diagnosed. An
-assignment expression as an initializer list's element (`{ x = q }`) is read
-as a designation, whose value clang converts with the list's. A grouped
+later expression checks, so a call after one such error isn't diagnosed. A
+grouped
 diagnose_if under `-Weverything` meets every other warning that option
 enables, which this checker doesn't all give.
 
