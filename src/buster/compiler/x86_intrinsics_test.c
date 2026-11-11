@@ -24,7 +24,7 @@
 
 #include "buster/compiler/test_paths.h"
 #include <elf.h>
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_X86
 // An intrinsic's result: a vector of its bytes in XMM0's, or an integer of its bytes in RAX's, or none.
 typedef enum X86IntrinsicReturn
 {
@@ -57,7 +57,8 @@ struct X86IntrinsicCase
 #define BUSTER_X86_INTRINSIC_L(name) { #name, X86_INTRINSIC_RETURN_INTEGER8 },
 #define BUSTER_X86_INTRINSIC_V(name) { #name, X86_INTRINSIC_RETURN_NONE },
 #define BUSTER_X86_INTRINSIC_INVERTED_B(name) { #name, X86_INTRINSIC_RETURN_INTEGER1, true },
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_X86
 // The controls: intrinsics whose builtins the native programs check already, unmasked, merged and zeroed, which must
 // agree with clang's code as the cases do; and the probe's own pair of functions of one intrinsic with its operands
 // swapped, whose expressions must differ (run_x86_intrinsic_tests' last check). Then the cases, which no host of the
@@ -577,7 +578,7 @@ static const X86IntrinsicCase x86_intrinsic_cases[] = {
     BUSTER_X86_INTRINSIC_X(_mm_mask3_fmsub_pbh)
     BUSTER_X86_INTRINSIC_Z(_mm512_maskz_fnmadd_pbh)
 };
-
+#endif
 #undef BUSTER_X86_INTRINSIC_X
 #undef BUSTER_X86_INTRINSIC_Y
 #undef BUSTER_X86_INTRINSIC_Z
@@ -587,7 +588,7 @@ static const X86IntrinsicCase x86_intrinsic_cases[] = {
 #undef BUSTER_X86_INTRINSIC_L
 #undef BUSTER_X86_INTRINSIC_V
 #undef BUSTER_X86_INTRINSIC_INVERTED_B
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_X86
 // The probe's own functions, after the headers: one intrinsic of two operands, called with them in each order, byte
 // funnel shifts of distinct halves, alongside _mm_rot_epi8's identical halves, and a macro's intrinsic of an immediate
 // (AVX10.2's sums of absolute differences of 64 bytes' blocks, AVX512-FP16's compares), whose address a case takes
@@ -608,7 +609,7 @@ static const char x86_intrinsic_probe_functions[] = "__m128i buster_intrinsic_su
                                                     "{return _mm512_cmp_round_ph_mask(a,b,_CMP_NEQ_US,_MM_FROUND_NO_EXC);}\n"
                                                     "__attribute__((target(\"avx512fp16\"))) __mmask8 buster_intrinsic_mask_cmp_round_sh(__mmask8 k,__m128h a,__m128h b)"
                                                     "{return _mm_mask_cmp_round_sh_mask(k,a,b,_CMP_GE_OS,_MM_FROUND_NO_EXC);}\n";
-
+#endif
 // ---------------------------------------------------------------------------------------------------------------------
 // The objects
 
@@ -695,7 +696,7 @@ static const Elf64_Sym* x86_intrinsic_function_named(const X86IntrinsicObject* o
     }
     return result;
 }
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_X86
 // The function of the object at `offset` in section `section`, or 0.
 static const Elf64_Sym* x86_intrinsic_function_at(const X86IntrinsicObject* object, uint32_t section, uint64_t offset)
 {
@@ -958,7 +959,8 @@ static bool x86_intrinsic_constant_byte(const X86IntrinsicTrace* trace, X86Intri
     *value = byte.node == BUSTER_X86_INTRINSIC_ZERO || !constant ? 0 : trace->nodes[byte.node].constant[byte.index];
     return constant;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_X86
 // A constant of `count` bytes (to 64): its text 0 where they are all zero, and otherwise # and its bytes in
 // hexadecimal, the last one first.
 static uint32_t x86_intrinsic_constant(X86IntrinsicTrace* trace, const uint8_t* bytes, uint32_t count)
@@ -2585,7 +2587,7 @@ static X86IntrinsicAction x86_intrinsic_step(X86IntrinsicTrace* trace, const X86
     }
     return action;
 }
-
+#endif
 // ---------------------------------------------------------------------------------------------------------------------
 // The walk
 
@@ -2634,7 +2636,7 @@ static bool x86_intrinsic_decode(const X86IntrinsicObject* object, const Elf64_S
     }
     return valid;
 }
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_X86
 // A path the walk has yet to follow: the trace's state where a branch left it (its stack's and stores' copies), its
 // conditions, and the walk's calls and the record it goes on at.
 typedef struct X86IntrinsicPending X86IntrinsicPending;
@@ -3439,3 +3441,4 @@ static int run_x86_intrinsic_tests(int argc, char** argv)
            (unsigned long long)checks, (unsigned long long)failures);
     return failures == 0 ? 0 : 1;
 }
+#endif

@@ -62,7 +62,8 @@
 //
 // Not decoded yet, so not certified, each counted by its reason (Tier1CertEmittedReason): stack parameters and arguments
 // where the frame base register doesn't reach them, dynamic frames (alloca, a dynamic outgoing area, a realigned frame
-// whose frame base register isn't rsp), a probe's prologue, a variadic definition's register save area, the x87's values
+// whose frame base register isn't rsp), a probe's prologue, a variadic definition's register save area, an asm body's
+// records (#1839, TIER1_RULE_ASM: a template whose effects the IR doesn't say), the x87's values
 // (a long double's, an aggregate's x87 parts), indirect jumps to several labels, an entry block that is a loop's, and a
 // machine row of a form x86 semantics' effects don't cover or whose records name a role's register implicitly. The
 // allocation's own certificate (tier1_certificate_cfg.c) still covers them. Canonical 32-bit storage (a 4-byte value's upper half zero) is the selection's contract and isn't
@@ -90,6 +91,8 @@ typedef enum Tier1CertEmittedReason
     // implicitly (#1284: its one ORIGINAL wouldn't say when); a long double's (its x87 stack).
     TIER1_CERT_EMITTED_VECTOR,
     TIER1_CERT_EMITTED_X87,
+    // An asm body's records (#1839), the front end's template, whose own branches and registers the decoding doesn't follow.
+    TIER1_CERT_EMITTED_ASM,
     // The code doesn't decode to its own certificate: a refusal.
     TIER1_CERT_EMITTED_ORIGIN,
     TIER1_CERT_EMITTED_DECODE,
@@ -120,6 +123,7 @@ static __attribute__((unused)) const char* tier1_cert_emitted_reason_name(Tier1C
         "probe",
         "vector",
         "x87",
+        "asm",
         "origin",
         "decode",
         "kernel",
@@ -1837,6 +1841,10 @@ static Tier1CertEmittedReason tier1_cert_emitted_supported(const Tier1SelectPlan
         {
             reason = TIER1_CERT_EMITTED_DYNAMIC;
         }
+        else if (!plan->covered[node] && rule == TIER1_RULE_ASM)
+        {
+            reason = TIER1_CERT_EMITTED_ASM;
+        }
         else if (op == IR_PARAM && tier1_select_entry_parameter(function, node) && tier1_select_parameter_place(function, function->a[node]).kind != BUSTER_TIER1_PLACE_GENERAL &&
                  tier1_select_parameter_place(function, function->a[node]).kind != BUSTER_TIER1_PLACE_VECTOR)
         {
@@ -2571,7 +2579,8 @@ static bool tier1_cert_emitted_result(Tier1CertEmittedBuild* build, uint32_t nod
     const uint32_t part_count = tier1_select_result_parts(result, function->result_size, parts);
     const bool hidden = result.kind == BUSTER_ABI_RESULT_MEMORY;
     uint32_t at = r;
-    bool valid = source < 16 && source != BUSTER_TIER1_SELECT_SCRATCH && value != BUSTER_TIER1_CFG_NONE && r <= end;
+    // Every part's slots in the red zone (#1847, tier1_select_result_staged), as the consumer refuses any other.
+    bool valid = source < 16 && source != BUSTER_TIER1_SELECT_SCRATCH && value != BUSTER_TIER1_CFG_NONE && r <= end && tier1_select_result_staged(parts, part_count);
     for (uint32_t k = 0; valid && k < part_count; k += 1)
     {
         const int32_t staged = tier1_emit_staging_part(tier1_select_result_slot(parts, k), parts[k].bytes);

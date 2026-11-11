@@ -6,6 +6,8 @@
 
 #include "ir_if_convert.c"
 
+#if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
+
 // Shape 0 is a diamond; 1/2 are triangles with the direct edge false/true. Every phi reverses its incoming list
 // relative to its neighbor, so neither edge order nor a particular phi-list order can determine select polarity.
 static bool ir_if_convert_test_fixture(Arena* arena, IrFunction* f, uint32_t type, uint32_t shape, uint32_t phis, uint32_t yes_rows, uint32_t no_rows)
@@ -516,3 +518,5 @@ static void ir_if_convert_tests(IrOptimizeTest* test)
     arena_release(&vector);
     arena_release(&input);
 }
+
+#endif

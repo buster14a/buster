@@ -65,9 +65,12 @@ static __attribute__((noinline)) void check_test_library_tables(CheckTest* test)
         const CBuiltinLibraryPlainFold* fold = cbuiltin_library_plain_folds + f;
         const uint32_t length = (uint32_t)strlen(fold->name);
         const BuiltinIntrinsicInfo* info = builtin_intrinsic_lookup(fold->name, length);
-        folds &= info != NULL && strcmp(info->encoding, fold->prototype) == 0 && info->constant_evaluable_attribute &&
+        // A fold's row has attribute E; an inline one's (#967) none, and its library builtin is the same function's.
+        const bool inline_call = fold->fold == CBUILTIN_LIBRARY_FOLD_NONE;
+        folds &= info != NULL && strcmp(info->encoding, fold->prototype) == 0 && info->constant_evaluable_attribute != inline_call &&
                  cbuiltin_library_plain(fold->name, length) != NULL && cbuiltin_library_plain_fold(fold->name, length) == f &&
-                 fold->fold != CBUILTIN_LIBRARY_FOLD_NONE;
+                 (inline_call ? fold->library < CBUILTIN_LIBRARY_COUNT && strcmp(cbuiltin_library_names[fold->library], fold->name) == 0 :
+                                fold->library == CBUILTIN_LIBRARY_COUNT);
     }
     // Every fold of a listed call is of a row with attribute E, which clang's evaluator folds.
     for (uint32_t l = 0; l < CBUILTIN_LIBRARY_COUNT; l += 1)
@@ -391,6 +394,60 @@ static __attribute__((noinline)) void check_test_library_sources(CheckTest* test
     "return h;}static unsigned long hd(unsigned long h, double d){return hash(h,&d,8);}static unsigned long hf(unsigned long h, float f){return hash(h,&f,4);}" \
     "static unsigned long hl(unsigned long h, long double l){return hash(h,&l,10);}static int out(unsigned long h){return (int)(h^(h>>32));}"
 
+// fmax, fmin and their _num kin of the harness's special values (zeros of both signs, infinities, quiet and signaling
+// NaNs, subnormals), of float and double, as __builtin_X's and plain calls of the unit's declarations, which clang -O0's
+// code computes inline as llvm.maxnum, minnum, maximumnum and minimumnum (#967), as it computes the elementwise builtins
+// of those intrinsics' names: of two zeros maxnum's and minnum's first operand, of a signaling NaN beside a number the
+// number, and maximumnum's and minimumnum's signaling first operand, unquieted, beside another NaN, bit for bit; a
+// musttail return of one too, which clang's code computes inline. The long double ones call fmaxl and fminl, as clang's
+// code does.
+static const char check_test_library_extremes_source[] =
+    BUSTER_CHECK_TEST_LIBRARY_FOLD
+    "double fp_special(int);float fp_specialf(int);"
+    "double fmax(double,double);double fmin(double,double);float fmaxf(float,float);float fminf(float,float);"
+    "double fmaximum_num(double,double);double fminimum_num(double,double);float fmaximum_numf(float,float);float fminimum_numf(float,float);"
+    "static double tail(double a,double b){__attribute__((musttail)) return fmax(a,b);}"
+    "int tested(int n){unsigned long h=14695981039346656037UL;for(int i=0;i<9;i++){double a=fp_special(n),b=fp_special(i);float f=fp_specialf(n),g=fp_specialf(i);"
+    "h=hd(h,tail(b,a));"
+    "h=hd(h,__builtin_fmax(a,b));h=hd(h,__builtin_fmin(a,b));h=hd(h,__builtin_fmaximum_num(a,b));h=hd(h,__builtin_fminimum_num(a,b));"
+    "h=hf(h,__builtin_fmaxf(f,g));h=hf(h,__builtin_fminf(f,g));h=hf(h,__builtin_fmaximum_numf(f,g));h=hf(h,__builtin_fminimum_numf(f,g));"
+    "h=hd(h,fmax(b,a));h=hd(h,fmin(b,a));h=hd(h,fmaximum_num(b,a));h=hd(h,fminimum_num(b,a));"
+    "h=hf(h,fmaxf(g,f));h=hf(h,fminf(g,f));h=hf(h,fmaximum_numf(g,f));h=hf(h,fminimum_numf(g,f));"
+    "h=hd(h,fmax(a,i)+fmaxf(f,1.5f));h=hd(h,__builtin_fmaximum_num(fmin(a,b),fminimum_num(b,-a)));"
+    "h=hd(h,__builtin_elementwise_maxnum(a,b));h=hf(h,__builtin_elementwise_minnum(f,g));h=hd(h,__builtin_elementwise_minimumnum(b,a));"
+    "h=hf(h,__builtin_elementwise_maximumnum(g,f));"
+    "h=hl(h,__builtin_fmaxl(a,b));h=hl(h,__builtin_fminl(a,b));h=hd(h,__builtin_round(a));h=hd(h,__builtin_roundeven(a));h=hl(h,__builtin_roundl(a));"
+    "h=hl(h,__builtin_truncl(a));h=hl(h,__builtin_floorl(a));h=hl(h,__builtin_ceill(a));int e=0;h=hd(h,__builtin_frexp(a,&e));h+=e;}return out(h);}";
+
+// The same program at the targets whose code differs (#967): x86-64-v2's (still SSE2's sequences), x86-64-v3's (AVX's
+// VBLENDVPD) and x86-64-v4's (AVX-512's masked moves), each run where the host has the target's features.
+static __attribute__((noinline)) void check_test_library_extremes_targets(CheckTest* test, const char* clang)
+{
+    static const char* const marches[] = { "-march=x86-64-v2", "-march=x86-64-v3", "-march=x86-64-v4" };
+    const X86Target native = x86_target_native();
+    for (uint32_t t = 0; t < BUSTER_ARRAY_LENGTH(marches); t += 1)
+    {
+        const char* name = marches[t] + strlen("-march=");
+        X86Target target = { 0 };
+        const bool parsed = x86_target_parse(name, (uint32_t)strlen(name), &target);
+        check_test_expect(test, parsed, "the library extremes program's target");
+        if (parsed)
+        {
+            const bool run_native = (native.features & target.features) == target.features;
+            if (!run_native)
+            {
+                printf("  library extremes for %s: native execution skipped (the host lacks the target's features); the program compiles and links\n", name);
+            }
+            check_test_program_build_release();
+            check_test_program_march = marches[t];
+            check_test_program_source_native_limits(test, check_test_library_extremes_source, "library-extremes-of-special-values", clang, false, -1, 0, &target,
+                                                    run_native);
+            check_test_program_build_release();
+            check_test_program_march = "-march=x86-64";
+        }
+    }
+}
+
 // Programs of each family of library builtins against clang -O0's build (check_test_program_source, by both paths): the
 // library's functions' results, bit for bit, and what each changes (errno, the buffers it writes), on the harness's
 // inputs; the folds' -1, 0 or 1 in code where the library's functions return differences; and powi's libgcc.
@@ -552,26 +609,7 @@ static __attribute__((noinline)) void check_test_library_programs(CheckTest* tes
         "int ov(int) __attribute__((overloadable));unsigned long strlen(const char*);"
         "int tested(int n){int calls=0;int length=(int)strlen((++calls,\"abcd\"));return n+length+10*calls;}",
         "library-folds-preserve-overload-argument-effects", clang);
-    // fmax, fmin and their _num kin of the harness's special values (zeros, infinities, quiet and signaling NaNs,
-    // subnormals), each of a call of the library's function against clang's llvm.maxnum and llvm.maximumnum. clang's
-    // x86 code of llvm.maxnum and llvm.minnum (maxsd or minsd beside a NaN's select) gives its first operand of two
-    // zeros and the other operand of a signaling NaN, where glibc's fmax and fmin give the second zero and a quiet NaN,
-    // and its code of llvm.maximumnum and minimumnum a signaling first operand unquieted where the other is a NaN too,
-    // where glibc's give a quiet NaN, which C leaves open: those pairs are left out of the float and double ones
-    // (docs/c-builtins-integration.md).
-    check_test_program_source(test,
-        BUSTER_CHECK_TEST_LIBRARY_FOLD
-        "double fp_special(int);float fp_specialf(int);"
-        "static int signalingd(double d){union{double d;unsigned long u;}x={d};return (x.u&0x7ff8000000000000UL)==0x7ff0000000000000UL&&(x.u&0xfffffffffffffUL)!=0;}"
-        "static int signalingf(float f){union{float f;unsigned u;}x={f};return (x.u&0x7fc00000u)==0x7f800000u&&(x.u&0x7fffffu)!=0;}"
-        "int tested(int n){unsigned long h=14695981039346656037UL;for(int i=0;i<9;i++){double a=fp_special(n),b=fp_special(i);float f=fp_specialf(n),g=fp_specialf(i);"
-        "if(!signalingd(a)&&!signalingd(b)&&!(a==0&&b==0)){h=hd(h,__builtin_fmax(a,b));h=hd(h,__builtin_fmin(a,b));}"
-        "if(!(signalingd(a)&&b!=b)){h=hd(h,__builtin_fmaximum_num(a,b));h=hd(h,__builtin_fminimum_num(a,b));}"
-        "if(!signalingf(f)&&!signalingf(g)&&!(f==0&&g==0)){h=hf(h,__builtin_fmaxf(f,g));h=hf(h,__builtin_fminf(f,g));}"
-        "if(!(signalingf(f)&&g!=g)){h=hf(h,__builtin_fmaximum_numf(f,g));h=hf(h,__builtin_fminimum_numf(f,g));}"
-        "h=hl(h,__builtin_fmaxl(a,b));h=hl(h,__builtin_fminl(a,b));h=hd(h,__builtin_round(a));h=hd(h,__builtin_roundeven(a));h=hl(h,__builtin_roundl(a));"
-        "h=hl(h,__builtin_truncl(a));h=hl(h,__builtin_floorl(a));h=hl(h,__builtin_ceill(a));int e=0;h=hd(h,__builtin_frexp(a,&e));h+=e;}return out(h);}",
-        "library-extremes-of-special-values", clang);
+    check_test_program_source(test, check_test_library_extremes_source, "library-extremes-of-special-values", clang);
     // errno, which the library's functions set: log of a negative number and of zero, and pow's overflow.
     check_test_program_source(test,
         "int set_math_errno(int);int get_math_errno(void);"
@@ -585,6 +623,7 @@ static void check_test_library(CheckTest* test, const char* clang)
     check_test_library_tables(test);
     check_test_library_sources(test, clang);
     check_test_library_programs(test, clang);
+    check_test_library_extremes_targets(test, clang);
 }
 
 #endif
