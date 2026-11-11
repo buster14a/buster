@@ -187,6 +187,49 @@ the contract, publication guarantees and the remaining compatibility limits,
 and `test-checker-driver`'s `c_driver_compatibility_test.c` exercises real
 executable invocations against Clang and GNU Make.
 
+## Option matching (#1444)
+
+The loops that read a compile's arguments compare option IDs, not strings:
+`main_information` and `main_preprocessing` (`main.c`'s routing),
+`check_driver_command` and `check_request_scan` (the checker's driver),
+`pp_parse_options` with `predefines_option` and `pp_take_family`, and
+`pp_option_takes_value`. `c_option_table.c` lists each spelling they match whole,
+or through an argument's first `=` (`-march=`, `-std=`), in `BUSTER_C_OPTIONS`,
+sorted as `strcmp` orders them, each with a canonical ID, `C_OPTION_<name>`: the
+spelling in capitals without its leading dashes, `-` as `_` and `=` as `EQ`
+(`-fPIC`'s and `-fpic`'s say `BIG` and `SMALL`, `-L`'s and `-l`'s `DIRECTORY` and
+`LIBRARY`, `-` is `STANDARD_INPUT` and `--` `END_OF_OPTIONS`). The spellings are
+one contiguous struct of char arrays, whose offsets `offsetof` gives at compile
+time, shared from the front end's unit like `x86_target_forms.c`'s data.
+`c_option_find` looks an argument up once per loop, by binary search, and
+returns its `COptionMatch`: the ID of its whole spelling (`exact`) and of its
+spelling through its first `=` (`joined`). `exact == C_OPTION_X` holds exactly
+where `strcmp(argument, "x") == 0` did, and `joined == C_OPTION_X_EQ` where
+`strncmp(argument, "x=", strlen("x=")) == 0` did, since `x` has no `=`, so each
+loop keeps its order of tests and its behaviour. Prefixes without a `=` at their
+end (`-I`, `-MF`, `-Wl,`, `-fno-builtin-`, `-fptrauth`) stay character tests or
+`c_option_starts`. A new option adds its spelling to the table in order;
+`test-checker --requests` fails on one out of order.
+
+The target's resolution names the predefined features by index
+(`PredefinesFeatureIndex`, generated with the feature table: the preprocessor
+guide's "The predefined macros"), where it looked fixed names up by binary search.
+On the 9700X, against main at four code placements, the two take a compile's
+user instructions down by 70,000 to 78,000 (12.8% of an empty `-fsyntax-only`,
+12.3% of a one-line `-c`) and its user cycles by 4 to 8%, and by 260,000 to
+270,000 with `-march=native`, whose host detection looked up each feature it
+lists (−33% of its instructions, −9 to −12% of its wall time); `sqlite3.c` is
+unchanged. In a one-line `-c` Callgrind counts 951 `strcmp`, 189 `strncmp` and
+about 970 `memcmp` calls of option parsing and target resolution on main, and 2,
+0 and 0 with them. The record: buster-performance's
+`docs/measurements/option-ids-1444-2026-11-11`.
+`test-checker --requests` checks the table (`c_option_table_test.c`): its order,
+offsets and lengths, `c_option_find` against a linear scan on every spelling and
+its neighbours, and every option form through the driver's routing as `main`'s,
+in a child: joined and separate values, missing values, `--`, a value spelled as
+an option, the forwarded `-W` forms, aliases, last-wins families, the predefined
+macros that options set, the information probes and the refusals' messages.
+
 ## Warning option names
 
 Unknown warning names produce the default-on `-Wunknown-warning-option`
