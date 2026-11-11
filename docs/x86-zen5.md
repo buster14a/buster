@@ -305,7 +305,10 @@ latency, the minima and maxima of bytes to doublewords 4 per cycle and the other
 width that had none (`vmovdqu32` of a zmm register's was measured): the 16- and 32-byte ones 2 per
 cycle, one macro-op, and the 64-byte ones 1 per cycle, two macro-ops, as the unmasked stores are
 ([the record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/ir-masked-memory-1840-2026-11-11)).
-A masked load merging into its destination still has no row (above).
+A masked load merging into its destination still has no row (above). Its one lane's moves then added 14: `vpextrb` to `vpextrq` (6.5 cycles' latency, 2 per
+cycle), `vpinsrb` to `vpinsrq` (4.5, 1 per cycle), and `vpmovmskb`, `vmovmskps` and `vmovmskpd` of
+an xmm and a ymm register (4.5 and 6.5, 2 per cycle)
+([the record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/ir-lane-moves-1840-2026-11-11)).
 
 What the rows say, a few families (cycles; derived values in italics):
 

@@ -740,6 +740,107 @@ static const CheckDriverDefaultWarningFixture check_driver_condition_fixtures[] 
         .source = "int c __attribute__((aligned((7, 8))));\n",
         .warnings = 1,
         .errors = 1,
+    },    // Overloadable functions' conditions in overload resolution (#1447, c_check_overload.c): an enable_if that doesn't
+    // admit the call makes its candidate not viable, the candidate whose enable_ifs are another's and more is better, and
+    // ones that differ (clang's profile: the tree, literals by value, parameters by place and type) are neither, and
+    // are two functions of one signature; diagnose_if applies to the selected candidate. A call no candidate or several are
+    // viable for has clang's error and candidate notes. And a pointer variable's argument, which is no constant.
+    {
+        .name = "overloads disabled by enable_if, and the one selected",
+        .source = "int f(int a) __attribute__((overloadable, enable_if(a > 0, \"positive\")));\n"
+                  "char f(long a) __attribute__((overloadable));\n"
+                  "_Static_assert(sizeof(f(1)) == 4, \"enabled\");\n"
+                  "_Static_assert(sizeof(f(-1)) == 1, \"disabled\");\n"
+                  "void t(int x) { (void)f(x); }\n",
+    },
+    {
+        .name = "no overload viable: a disabled candidate's note and another's argument count",
+        .source = "int g(int a) __attribute__((overloadable, enable_if(a > 0, \"pos\")));\n"
+                  "int g(int a, int b) __attribute__((overloadable));\n"
+                  "void t(int x) { g(1); g(-1); g(x); g(); g(1, 2, 3); }\n",
+        .errors = 4,
+        .notes = 8,
+    },
+    {
+        .name = "a variadic overload's count and an empty message",
+        .source = "int v(int a, ...) __attribute__((overloadable, enable_if(a > 1, \"\")));\n"
+                  "int v(int a, int b, int c) __attribute__((overloadable));\n"
+                  "void t(void) { v(); v(2, 3); v(0, 1); }\n",
+        .errors = 2,
+        .notes = 4,
+    },
+    {
+        .name = "the overload with more enable_if conditions is better",
+        .source = "int m(int a, long x) __attribute__((overloadable, enable_if(a > 0, \"a\")));\n"
+                  "int m(int a, long x) __attribute__((overloadable, enable_if(a > 0, \"a\")));\n"
+                  "char m(int b, long long y) __attribute__((overloadable, enable_if(b > 0x0, \"b\"), enable_if(b < 9, \"c\")));\n"
+                  "_Static_assert(sizeof(m(1, 0)) == 1, \"more\");\n"
+                  "_Static_assert(sizeof(m(10, 0)) == 4, \"fewer\");\n",
+    },
+    {
+        .name = "enable_if conditions that differ are ambiguous",
+        .source = "#define ONE 1\n"
+                  "int g1(int a, long x) __attribute__((overloadable, enable_if(a > (1), \"\"), enable_if(a < 9, \"\")));\n"
+                  "char g1(int b, long long y) __attribute__((overloadable, enable_if(b > 1, \"\")));\n"
+                  "int g2(int a, long x) __attribute__((overloadable, enable_if(a > 1L, \"\"), enable_if(a < 9, \"\")));\n"
+                  "char g2(int b, long long y) __attribute__((overloadable, enable_if(b > ONE, \"\")));\n"
+                  "int g3(long a) __attribute__((overloadable, enable_if(a > 0, \"\"), enable_if(a < 9, \"\")));\n"
+                  "char g3(unsigned long a) __attribute__((overloadable, enable_if(a > 0, \"\")));\n"
+                  "int g4(int a) __attribute__((overloadable, enable_if(a > 0, \"\"), enable_if(a < 9, \"\")));\n"
+                  "int g4(int a) __attribute__((overloadable, enable_if(a < 9, \"\"), enable_if(a > 0, \"\")));\n"
+                  "void t(void) { g1(3, 0); g2(3, 0); g3(1); g4(4); g4(10); }\n",
+        .errors = 5,
+        .notes = 10,
+    },
+    {
+        .name = "an overload whose enable_if conditions differ is another function",
+        .source = "int n(int a) __attribute__((overloadable, enable_if(a > 0, \"a\")));\n"
+                  "int n(int a) __attribute__((overloadable));\n"
+                  "int n(int a) __attribute__((overloadable, enable_if(a > 0, \"a\")));\n"
+                  "int n(int a) __attribute__((overloadable, enable_if(a > 0, \"a\"))) { return a; }\n"
+                  "int h(int a) __attribute__((overloadable, enable_if(a > 0, \"a\")));\n"
+                  "int h(int a) __attribute__((overloadable, enable_if(a < 10, \"b\")));\n"
+                  "void t(void) { n(1); n(-1); h(30); h(-1); h(5); }\n",
+        .errors = 1,
+        .notes = 2,
+    },
+    {
+        .name = "an ambiguous call's candidates",
+        .source = "long w(long a) __attribute__((overloadable));\n"
+                  "long w(unsigned long a) __attribute__((overloadable));\n"
+                  "long w(long long a) __attribute__((overloadable));\n"
+                  "void t(void) { w(1); }\n",
+        .errors = 1,
+        .notes = 3,
+    },
+    {
+        .name = "diagnose_if on the selected overload",
+        .source = "int k(int a) __attribute__((overloadable, diagnose_if(1, \"always\", \"warning\"), diagnose_if(a > 1, \"dep\", \"warning\")));\n"
+                  "int k(double a) __attribute__((overloadable, diagnose_if(a > 5, \"bigd\", \"error\")));\n"
+                  "int (*p)(int) = k;\n"
+                  "void t(void) { k(2); k(6.0); k(1.0); int (*q)(double) = k; (void)q; }\n",
+        .warnings = 2,
+        .errors = 1,
+        .notes = 3,
+    },
+    {
+        .name = "diagnose_if accumulates over an overload's redeclarations",
+        .source = "int r(int a) __attribute__((overloadable, enable_if(a > 0, \"e\"), diagnose_if(a > 1, \"one\", \"warning\")));\n"
+                  "int r(int a) __attribute__((overloadable, enable_if(a > 0, \"e\"), diagnose_if(a > 2, \"two\", \"warning\")));\n"
+                  "int r(double a) __attribute__((overloadable));\n"
+                  "void t(void) { r(5); r(-5); }\n",
+        .warnings = 2,
+        .notes = 2,
+    },
+    {
+        .name = "pointer arguments of enable_if, overloaded or not",
+        .source = "int p1(int *p) __attribute__((overloadable, enable_if(p != 0, \"nn\")));\n"
+                  "int p1(int *p, int n) __attribute__((overloadable));\n"
+                  "int e1(int *p) __attribute__((enable_if(p != 0, \"nn\")));\n"
+                  "int x, arr[4]; int *g;\n"
+                  "void t(int *q) { p1(&x); p1(arr); p1(0); p1(q); p1(g); p1((int *)0); e1(&x); e1(q); e1(g); }\n",
+        .errors = 6,
+        .notes = 10,
     },
 };
 

@@ -702,7 +702,8 @@ at the target's forms, by both of the checker's paths:
   AVX take two rows a halving (the first packs the low part beside the high one, the high one replaced by the low where
   the low is a NaN). `max` and `min` fold the piece's lanes in order by #967's scalar rows.
   The masked memory builtins without AVX-512F and AVX-512VL, and wherever no instruction takes them (gathers and
-  scatters of 8- and 16-bit elements, and their expanding loads and compressing stores without AVX-512 VBMI2), are
+  scatters of 8- and 16-bit elements, their expanding loads and compressing stores without AVX-512 VBMI2, and vectors
+  of a size no register holds, such as 2-lane vectors of bytes, #2216), are
   lowered element by element in the lanes' order (`check_lower_transport_masked`, #1834), as clang's legalization
   scalarizes them: a lane whose bit is set loads or stores at its address, any other reads its pass-through element or
   writes a scratch slot, the address chosen arithmetically (`other ^ ((real ^ other) & -bit)`), so that no address a
