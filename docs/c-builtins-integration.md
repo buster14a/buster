@@ -1915,8 +1915,11 @@ object p points to, as clang's `PaddingClearer` does.
   are a read-only pool of the unit's, which the recipe's loop reads
   (`cbuiltin_misc_lower_padding_table`): the same bytes cleared, by a few
   dozen typed entries whatever the element's size (#1842).
-- **Limits.** An element past 4 GiB, a type nested more than 64 levels, or
-  an element of more than 1,048,576 intervals or entries is refused by name.
+- **Limits.** An element past 4 GiB, whose entries keep 32-bit offsets, or
+  of more than 1,048,576 intervals or entries is refused by name. The walk's
+  stack grows with the type's nesting, which no limit of its own bounds
+  (#1842; before, a type nested past 64 levels was refused, and its frame
+  written past the stack).
 - **Difference.** Clang's walk doesn't look through an array type's sugar
   (`dyn_cast<ConstantArrayType>` of the sugared type), so it keeps the padding
   of an array of a typedef's type, of `typeof`'s, or that a pointer declared
