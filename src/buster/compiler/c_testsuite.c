@@ -70,14 +70,16 @@
 #include <sys/syscall.h>
 #include <sys/wait.h>
 #include <time.h>
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DRIVER
 // The most tests a directory may have, and the longest name.
 #define BUSTER_C_TESTSUITE_MAX_TESTS 4096
 #define BUSTER_C_TESTSUITE_NAME_BYTES 64
+#endif
 // The most bytes of a file the harness compares or reads a diagnostic from.
 #define BUSTER_C_TESTSUITE_FILE_BYTES (UINT64_C(64) << 20)
 // A compile's time limit (CTestsuite.compile_timeout, which the self-test shortens); a program's is --timeout.
 #define BUSTER_C_TESTSUITE_COMPILE_SECONDS 120
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DRIVER
 // The compiler's exit status for a unit with errors, a refusal among them.
 #define BUSTER_C_TESTSUITE_REFUSED_STATUS 1
 
@@ -121,7 +123,7 @@ struct CTestsuite
     uint64_t id_order;
     CTestsuiteResult* results;
 };
-
+#endif
 // ---------------------------------------------------------------------------------------------------------------------
 // The processes
 
@@ -242,7 +244,7 @@ static char* c_testsuite_read(const char* path, uint64_t* length)
     }
     return bytes;
 }
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DRIVER
 // Whether the files at `a` and `b` can both be read and have the same bytes.
 static bool c_testsuite_same(const char* a, const char* b)
 {
@@ -729,7 +731,7 @@ static bool c_testsuite_subset(CTestsuite* suite, const char* path)
     free(text);
     return valid;
 }
-
+#endif
 // ---------------------------------------------------------------------------------------------------------------------
 // Cleanup
 
@@ -754,7 +756,7 @@ static bool c_testsuite_remove_directory(const char* path)
     }
     return rmdir(path) == 0;
 }
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DRIVER
 // Removes the work directory: each test's directory and the files in it (the tests' own among them).
 static void c_testsuite_remove(const CTestsuite* suite)
 {
@@ -964,7 +966,8 @@ static pid_t c_testsuite_wait_scenario(pid_t child, int* status)
     }
     return waited;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DRIVER
 // The harness on three tests of its own, with the stand-in compiler, in six scenarios: from a DIR and a $TMPDIR relative
 // to the current directory; waiting without a pidfd, by polling; with --cross-check where -c refuses what the direct
 // path compiles, which must fail; with refusals that name their feature but are then killed by a signal or for their
@@ -1250,3 +1253,4 @@ static int run_c_testsuite_tests(int argc, char** argv)
     oracle_epoch_end(epoch);
     return result;
 }
+#endif
