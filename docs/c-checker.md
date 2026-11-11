@@ -8462,7 +8462,28 @@ arguments against the function. The checker now gives these as clang does.
     the two zero conventions one returning an integer, an enumeration or
     `bool`, each clang's error at the attribute. A first argument of no
     identifier, on which clang 23 crashes, is refused by name.
-    `c_check_swift_name_driver_test.c` compares their units as above.
+    `c_check_swift_name_driver_test.c` compares their units as above;
+  - `cfi_salt("S")` (#1447, `check_input_attribute_salt`), a prototype's
+    type's: the salt's text, interned (`intern_find_or_add`), is part of the
+    function type's identity, in its info word's bits from
+    `BUSTER_TYPE_FUNCTION_SALT_SHIFT` (`type_function_salt`), so two
+    prototypes that differ by their salt alone are different and
+    incompatible types (`type_compatible`: redeclarations' "conflicting
+    types", assignments' and initializers'
+    -Wincompatible-function-pointer-types, `_Generic`), and print alike, as
+    clang prints no salt. A type made again from another keeps its salt
+    (`type_function_like`, `type_function_extended_abi`). The list's last
+    salt applies, to the first function inside the declarator's pointers,
+    arrays and wrappers, as a calling convention does; an empty one is none.
+    A function without a prototype is clang's "only applies to non-K&R-style
+    functions". Where no function takes it, it is the function types'
+    warning ("only applies to function types; type here is T"), and its
+    subjects' error too, unless it follows the declarator's name (clang drops
+    it there) or is C23's, a type's alone; a C23 one where a declaration's
+    attributes are is "cannot be applied to a declaration", as the function
+    effects' are, after a declarator's name too. A body's lane refuses it,
+    since its salt is interned. `c_check_cfi_salt_driver_test.c` compares
+    its units as above.
 
   Every attribute's arguments are read first as clang's parser reads them,
   by their kinds (`check_input_arguments_row`, from
@@ -9196,9 +9217,8 @@ arguments against the function. The checker now gives these as clang does.
   (`check_program_emit_patchable`, both tiers' code) is the [object writer
   guide](object-writer-and-linker.md)'s "Patchable function entries".
 
-  The rest stay refused by name, where they apply: `format_matches` and
-  `cfi_salt` in either syntax, and the C23 spellings of `objc_gc` and
-  `objc_ownership`. Recognizing their
+  The rest stay refused by name, where they apply: `format_matches` in either
+  syntax, and the C23 spellings of `objc_gc` and `objc_ownership`. Recognizing their
   names does not supply their handlers.
 - **Type arguments.** The attributes clang's `attributeIsTypeArgAttr` names
   (`preferred_type`, `vec_type_hint`, `iboutletcollection`, `preferred_name`,

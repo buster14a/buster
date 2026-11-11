@@ -365,6 +365,9 @@ struct CheckInputAttribute
     // A specifiers' objc_gc or objc_ownership that a declarator moved to its pointer, which its later declarators don't see
     // (#1447, check_input_attribute_objc).
     bool objc_moved;
+    // A C23 cfi_salt after the name of a declarator that has a function (#1447): its subjects' error, or where they take it
+    // clang's "cannot be applied to a declaration" (check_input_attribute_subjects).
+    bool salt_declaration;
     // An EXT_VECTOR_TYPE record's NEON kind (#1447): BUSTER_TYPE_FLAG_NEON for neon_vector_type, BUSTER_TYPE_FLAG_NEON_POLY
     // for neon_polyvector_type, which clang's HandleNeonVectorTypeAttr checks and makes a GNU vector of that kind of;
     // 0 for ext_vector_type. A C23 one after a declarator's name has its -Wdeprecated-attributes warning once its handler
@@ -1024,6 +1027,9 @@ typedef enum CheckAttributeArgumentError
     // an integral type" (number 0) or "a pointer" (1), C the convention's identifier (the attribute's first argument).
     CHECK_ARGUMENT_SWIFT_ERROR_PARAMETER,
     CHECK_ARGUMENT_SWIFT_ERROR_RESULT,
+    // cfi_salt on a function type without a prototype (#1447, check_input_attribute_salt), "'X' attribute only applies to
+    // non-K&R-style functions", at the attribute.
+    CHECK_ARGUMENT_NON_KR,
     CHECK_ARGUMENT_COUNT,
 } CheckAttributeArgumentError;
 
@@ -3682,7 +3688,7 @@ static bool check_input_attribute_generic(String8 name, const CheckInputFactRow*
         "available_only_in_default_eval_method",
         "btf_decl_tag", "randomize_layout", "no_randomize_layout", "objc_boxable", "objc_bridge_mutable",
         "objc_bridge", "objc_bridge_related", "swift_newtype", "swift_wrapper", "swift_async_error",
-        "swift_name", "swift_async_name", "swift_error", "release_handle", "use_handle", "suppress", "swift_bridge", "unsafe_buffer_usage", "amdgpu_max_num_work_groups",
+        "swift_name", "swift_async_name", "swift_error", "cfi_salt", "release_handle", "use_handle", "suppress", "swift_bridge", "unsafe_buffer_usage", "amdgpu_max_num_work_groups",
         // The retain-ownership attributes, whose handlers' checks are check_input_attribute_ownership's.
         "cf_consumed", "ns_consumed", "os_consumed", "cf_returns_retained", "cf_returns_not_retained", "ns_returns_retained",
         "ns_returns_not_retained", "ns_returns_autoreleased", "os_returns_retained", "os_returns_not_retained",
@@ -4280,7 +4286,8 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
                              before_list == PARSE_KIND_COLON || before_list == PARSE_KIND_R_SQUARE;
         const bool declaration_place = valid && known && standard && place == BUSTER_CHECK_PLACE_DECLARATION && fact != NULL &&
                                        (fact->flags & BUSTER_CHECK_FACT_TYPE) != 0;
-        const bool effect = check_input_attribute_equal(name, "nonblocking") || check_input_attribute_equal(name, "nonallocating") ||
+        // (cfi_salt is a function type's too, #1447.)
+        const bool effect = check_input_attribute_equal(name, "cfi_salt") || check_input_attribute_equal(name, "nonblocking") || check_input_attribute_equal(name, "nonallocating") ||
                             check_input_attribute_equal(name, "blocking") || check_input_attribute_equal(name, "allocating");
         // The NEON vectors and the address spaces (#1447), whose C23 spellings slide from a declaration to its type
         // (clang's slidesFromDeclToDeclSpecLegacyBehavior).
@@ -4300,7 +4307,24 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
         const bool annotate_type = check_input_attribute_equal(name, "annotate_type");
         const bool bare = declaration_place && leading && neon_name && list_opener > 0 && parser->tree.parents[list_opener - 1] + 2 < parser->tokens.count &&
                           parser->tokens.kinds[parser->tree.parents[list_opener - 1] + 2] == PARSE_KIND_SEMI;
-        if ((declaration_place && leading && effect) || (!reader->statement_attributes && ((declaration_place && annotate_type) || bare)))
+        // A function effect or cfi_salt after a declarator's name is that error too where the declarator has a function
+        // (#1447); without one it is the function types' warning (check_input_attribute_type_warnings).
+        bool declarator_function = false;
+        uint32_t scan = declaration_place && effect && !leading ? attribute.end : parser->tokens.count;
+        const uint32_t list_depth = list_opener < parser->tokens.count ? parser->tree.depths[list_opener] : 0;
+        for (uint32_t steps = 0; !declarator_function && scan < parser->tokens.count && steps < 256; steps += 1)
+        {
+            const uint8_t kind = parser->tokens.kinds[scan];
+            const bool stop = kind == PARSE_KIND_SEMI || kind == PARSE_KIND_L_BRACE || kind == PARSE_KIND_EQUAL ||
+                              (kind == PARSE_KIND_COMMA && parser->tree.depths[scan] <= list_depth);
+            declarator_function = !stop && kind == PARSE_KIND_L_PAREN && parser->tree.roles[scan] == PARSE_ROLE_OPEN_FUNCTION;
+            scan = stop ? parser->tokens.count : scan + 1;
+        }
+        // (cfi_salt's subjects are checked first there: check_input_attribute_subjects.)
+        const bool salt_name = check_input_attribute_equal(name, "cfi_salt");
+        attribute.salt_declaration = declaration_place && salt_name && !leading && declarator_function && !reader->statement_attributes;
+        if ((declaration_place && effect && (leading || (declarator_function && !salt_name)) && !reader->statement_attributes) ||
+            (!reader->statement_attributes && ((declaration_place && annotate_type) || bare)))
         {
             check_input_attribute_argument_error(reader, attributes, &attribute, attribute.first, CHECK_ARGUMENT_INVALID_ON_DECLARATION, 0);
             valid = false;
@@ -4584,6 +4608,10 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
             // can't read (check_input_checks_library, #1447).
             check_input_lane_refuse(reader, reader->lane && check_input_attribute_equal(name, "diagnose_as_builtin"),
                                     "a body declares diagnose_as_builtin, whose builtin the unit's declarations decide");
+            // cfi_salt's salt is a function type's (check_input_attribute_salt, #1447), whose spelling the unit's intern table
+            // takes, which a body's lane can't write to.
+            reader->salt_attributes |= check_input_attribute_equal(name, "cfi_salt");
+            check_input_lane_refuse(reader, reader->lane && check_input_attribute_equal(name, "cfi_salt"), "a body declares cfi_salt, whose salt the unit interns");
             // swift_error's error parameter is the unit's first struct bridged to NSError that a check meets
             // (check_input_swift_cf_error, #1447), which a body's lane can't know.
             check_input_lane_refuse(reader, reader->lane && check_input_attribute_equal(name, "swift_error"),
@@ -8614,8 +8642,23 @@ static bool check_input_attribute_subjects(CheckInputReader* reader, CheckInputA
             valid = false;
             continue;
         }
-        const CheckInputSubjectRow* row = attribute->keyword || overflow || (attribute->ignored && !attribute->subject_ignored && !transparent && !kernel) ? NULL :
-                                          check_input_attribute_subject_of(reader, scope, attribute->name, scoped, attribute->standard);
+        // cfi_salt after a declarator's name, where no function of its type takes it (#1447): clang distributes it from the
+        // declarator and drops it with its warning, so its subjects aren't checked.
+        const bool salt_trailing = reader->salt_attributes && !attribute->keyword && attribute->kind == CHECK_ATTRIBUTE_UNKNOWN && name < parser->tokens.count &&
+                                   attribute->first > name && check_input_attribute_equal(check_input_attribute_name(reader, attribute->name), "cfi_salt");
+        TypeId salted = salt_trailing ? type : 0;
+        while (salted != 0 && (type_kind(reader->types, salted) == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(type_kind(reader->types, salted)) ||
+                               type_kind(reader->types, salted) == BUSTER_TYPE_KIND_ALIGNED || type_kind(reader->types, salted) == BUSTER_TYPE_KIND_QUALIFIED))
+        {
+            salted = reader->types->types.base[type_index(salted)];
+        }
+        // (A C23 one is a type's alone wherever it is, no subjects either, but after the name of a declarator with a
+        // function.)
+        const bool salt_type = (salt_trailing && (salted == 0 || type_kind(reader->types, salted) != BUSTER_TYPE_KIND_FUNCTION)) ||
+                               (reader->salt_attributes && attribute->standard && !attribute->salt_declaration && attribute->kind == CHECK_ATTRIBUTE_UNKNOWN &&
+                                check_input_attribute_equal(check_input_attribute_name(reader, attribute->name), "cfi_salt"));
+        const CheckInputSubjectRow* row = attribute->keyword || overflow || salt_type || (attribute->ignored && !attribute->subject_ignored && !transparent && !kernel) ?
+                                          NULL : check_input_attribute_subject_of(reader, scope, attribute->name, scoped, attribute->standard);
         // A shared record another declarator ignored applies to this one when its subjects fit (checked again below).
         attribute->ignored &= !(attribute->subject_ignored && !transparent);
         attribute->subject_ignored = false;
@@ -8648,6 +8691,11 @@ static bool check_input_attribute_subjects(CheckInputReader* reader, CheckInputA
         else if (row != NULL && (row->subjects & subjects) == 0 && row->error)
         {
             check_input_report(reader, attribute->first, CHECK_INPUT_ATTRIBUTE_SUBJECT);
+            valid = false;
+        }
+        else if (attribute->salt_declaration)
+        {
+            check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_INVALID_ON_DECLARATION, 0);
             valid = false;
         }
         else if (row != NULL && (row->subjects & subjects) == 0)
