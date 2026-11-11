@@ -29,6 +29,12 @@ pushes.
 Correctness CI runs on GitHub-hosted Ubuntu 26.04 with the official stable
 Clang/LLVM 23.1.4 release, in baseline x86-64 and native host builds. Native
 builds on CPUs without the complete vector feature set use the scalar fallback.
+On a pull request the native row is the vector row instead (#2033): the
+explicit vector target (`BUSTER_HOST_ARCH=vector`, `host_isa.h`'s predicate),
+whose 4 shards are items that hosted runners claim once a probe found their CPU
+qualifies, drawn in up to 4 levels, with no emulation; an item no qualifying CPU
+claimed fails it as incomplete ([The vector row](../ci.md#the-vector-row)).
+Its claim's race fixture is `.github/workflows/vector-claim-race.yml`.
 Each row (`.github/workflows/hosted-correctness.yml`, which the test job calls
 per row) runs its inventory as 4 shards, a runner each: `parallel --shard
 K/4 --costs tools/ci/correctness.costs` deals the commands by their hosted
@@ -182,7 +188,10 @@ there at a time, so everything takes one lock:
   job green; and when the row workflow weakens its shared products
   (`changes_row_policy`: the portable rows alone, the triggering revision, the
   ownership check on the build's tree, the shards' wait for the build, its
-  SHA-256 and their verified install, nothing from a cache or another run). The
+  SHA-256 and their verified install, nothing from a cache or another run); and
+  when the vector row's probe, `host_isa.h`'s predicate and the build's vector
+  flags fall out of step, or its claims stop being per attempt and
+  non-overwriting (`changes_vector_policy`). The
   selector doesn't read the row workflow's steps: a change to that file runs
   the steps it gates on `performance`. Run it
   locally with `cc -std=c17 -O2 -Wall -Wextra -Werror -o /tmp/changes
