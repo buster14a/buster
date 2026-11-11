@@ -5396,7 +5396,8 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                                 const String8 name = check_driver_attribute_spelling(parser, pp, report->note_token, false);
                                 snprintf(declared, sizeof(declared), "'%.*s' declared here", (int)name.length, name.pointer);
                             }
-                            const bool constant = report->note_kind == CHECK_INPUT_NOTE_CONSTANT_SUBEXPRESSION || report->note_kind == CHECK_INPUT_NOTE_CONSTANT_DIVISION;
+                            const bool constant = report->note_kind == CHECK_INPUT_NOTE_CONSTANT_SUBEXPRESSION || report->note_kind == CHECK_INPUT_NOTE_CONSTANT_DIVISION ||
+                                                  report->note_kind == CHECK_INPUT_NOTE_CONSTANT_VOID || report->note_kind == CHECK_INPUT_NOTE_CONSTANT_CONVERSION;
                             const bool matched = (report->note_kind == CHECK_INPUT_NOTE_MATCH_PAREN || report->note_kind == CHECK_INPUT_NOTE_PREVIOUS_ATTRIBUTE ||
                                                   report->note_kind == CHECK_INPUT_NOTE_CONFLICTING_ATTRIBUTE || forward || function || constant) &&
                                                  report->note_token < count;
@@ -5405,6 +5406,8 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                                 .message = forward || function ? declared : report->note_kind == CHECK_INPUT_NOTE_PREVIOUS_ATTRIBUTE ? "previous attribute is here" :
                                            report->note_kind == CHECK_INPUT_NOTE_CONFLICTING_ATTRIBUTE ? "conflicting attribute is here" :
                                            report->note_kind == CHECK_INPUT_NOTE_CONSTANT_DIVISION ? "division by zero" :
+                                           report->note_kind == CHECK_INPUT_NOTE_CONSTANT_VOID ? "non-literal type 'void' cannot be used in a constant expression" :
+                                           report->note_kind == CHECK_INPUT_NOTE_CONSTANT_CONVERSION ? "this conversion is not allowed in a constant expression" :
                                            constant ? "subexpression not valid in a constant expression" : "to match this '('",
                             };
                             // (A `,` or `=` clang's ExpectAndConsume expects just past the token before: past the identifier's end.)

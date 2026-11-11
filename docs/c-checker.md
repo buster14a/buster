@@ -10034,7 +10034,15 @@ clang's `diagnose_if(condition, message, "warning" | "error")` and
   clang drops it, and the reader goes on (phase 1 of semantic error recovery,
   below), so a later declaration's and a later call's errors are given too.
   An `enable_if` whose message is empty notes "candidate disabled: <no
-  message provided>". One that names a parameter becomes a program
+  message provided>". A cast clang's constant evaluation refuses is that
+  error too where no arguments skip it, whether the condition names a
+  parameter or not (#2253, `check_condition_cast`): a cast to void, its note
+  "non-literal type 'void' cannot be used in a constant expression", and one
+  from an integer to a pointer (but a null pointer constant's) or from a
+  pointer to an integer (but bool), "this conversion is not allowed in a
+  constant expression", at the cast's `(`; a call's evaluation discards a
+  comma's left operand cast to void. A condition of type void is "value of
+  type 'void' is not contextually convertible to 'bool'". One that names a parameter becomes a program
   (`CheckConditionStep`), from the parse tree in postorder: each largest
   subexpression without a parameter, and each sizeof's or alignof's, is a
   constant the evaluator gives; a parameter is its place and type; the
@@ -10215,9 +10223,9 @@ a `volatile` parameter's read as a comma's left operand in a condition gets
 `-Wunused-value`, which clang doesn't give a volatile read; an overload set's address that no candidate matches has
 the checker's error, not clang's "<overloaded function type>" with its
 candidates' notes ("made ineligible by enable_if" among them, #2384); the condition shapes
-above (a cast to void or to `void *` in a condition gives none of clang's
-"never produces a constant expression" errors, nor
-`-Wint-to-void-pointer-cast`); the comma warnings of a static assertion's
+above; `-Wint-to-pointer-cast` and its relatives in a condition, which this
+checker doesn't give anywhere yet
+([#1943](https://github.com/buster14a/buster/issues/1943)); the comma warnings of a static assertion's
 condition, of a type name's bound that a constant expression reads (`sizeof(int[(1, 2)])`
 within a bound, an `_Alignof`, or a file-scope initializer's `sizeof`: their check reads
 constants again, which would make the constant walk recursive), and a const builtin call's "ignoring return value"
