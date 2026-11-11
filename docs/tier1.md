@@ -443,14 +443,21 @@ or an atomic access refuses the function, which Tier 0 then compiles, as before.
 A vector passed by value is an object already; one returned in registers comes
 back split across xmm0 and xmm1, xmm0 to xmm3 or ymm0 and ymm1 (#1193), which
 selection, both consumers and the code's certificate now take as up to four
-result parts (`tier1_select_result_parts`, staged in the red zone one after
-another on the way out). At an AVX-512 target a 128-byte vector comes back in
-zmm0 and zmm1, two 64-byte parts (#1847). The parts must fit the red zone's 16
-eightbyte slots (`tier1_select_result_staged`, which the consumer and the
-certificate check too): four 32-byte parts or two 64-byte ones take all of
-them, so a 256-byte vector's four zmm parts are still refused, and Tier 0
-compiles its function. `test-checker-driver`'s wide results' unit returns a
-128-byte vector at x86-64-v3 and x86-64-v4 against clang -O0.
+result parts (`tier1_select_result_parts`). At an AVX-512 target a 128-byte
+vector comes back in zmm0 and zmm1, two 64-byte parts, and a 256-byte one in
+zmm0 to zmm3 (#1847). The function's own return loads each such part, a whole
+vector register's, straight from the result's address
+(`tier1_select_part_direct`), which is in a general register no load
+overwrites, and the code's certificate takes each load as reading the result's
+bytes through the address and defining the part in its register. Any other
+part (a record's in rax and rdx or xmm0 and xmm1, whose bytes may be fewer
+than its load's) is staged in the red zone's eightbyte slots first
+(`tier1_select_result_staged`, which the consumer and the certificate check
+too); two of them take at most two slots. `test-checker-driver`'s wide results' unit returns a
+128-byte vector at x86-64-v3 and x86-64-v4 against clang -O0, and its 256-byte
+results' unit one of 256 bytes (`make64`, called by `use64`) at x86-64-v4;
+below AVX-512 LLVM returns that one through a hidden pointer clang doesn't
+count (`DEMOTED`), which Tier 1 refuses.
 
 Measured by `--tier1 --tier1-refusals --verify` of the compiler's own units,
 whose scalar host's emulations of AVX2's and AVX-512's intrinsics
