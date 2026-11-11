@@ -1098,6 +1098,30 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
           "B(x.v,y.v);B(x.h[1],y.h[1]);B(x.q[0],y.q[0]);B(x.e[3],y.e[3]);B(p.v,q.v);B(p.h[0],q.h[0]);B(p.q[1],q.q[1]);}\n"
           "return (int)h;}\n"
         },
+        // Reductions without AVX-512 (#1834): every integer one of 8- to 64-bit elements of 4 to 64 bytes, folded element
+        // by element; and the floating maximum, minimum, max, min and associative sums of 8 to 64 bytes of floats and 16 to
+        // 64 of doubles in clang's halving order (pieces of the registers' bytes paired first), of NaNs (their payloads and
+        // signs), signed zeros, infinities and values whose sums round by their order.
+        { "baseline-reductions",
+          "typedef float v2sf __attribute__((vector_size(8)));typedef double v4df __attribute__((vector_size(32),aligned(16)));\n"
+          "#define RI(T,E,W) do{typedef E V __attribute__((vector_size(W),aligned(16)));V v;fill(&v,W,n*7+W);"
+          "E r_[]={__builtin_reduce_add(v),__builtin_reduce_mul(v),__builtin_reduce_and(v),__builtin_reduce_or(v),__builtin_reduce_xor(v),__builtin_reduce_max(v),__builtin_reduce_min(v)};FOLD(r_);}while(0)\n"
+          "#define RIS(E) RI(T,E,4);RI(T,E,8);RI(T,E,16);RI(T,E,32);RI(T,E,64)\n"
+          "#define RF(w) do{__typeof__(w) v=w;"
+          "__typeof__(v[0]) r_[]={__builtin_reduce_maximum(v),__builtin_reduce_minimum(v),__builtin_reduce_max(v),__builtin_reduce_min(v),__builtin_reduce_assoc_fadd(v),__builtin_reduce_assoc_fadd(v,(__typeof__(v[0]))n)};FOLD(r_);}while(0)\n"
+          "union F{unsigned u[16];v16sf v;v8sf h[2];v4sf q[4];v2sf e[8];};union D{unsigned long long u[8];v8df v;v4df h[2];v2df q[4];};\n"
+          "int tested(int n){unsigned h=2166136261u;\n"
+          "RIS(signed char);RIS(unsigned char);RIS(short);RIS(unsigned short);RI(T,int,8);RI(T,int,16);RI(T,int,32);RI(T,int,64);RI(T,unsigned,8);"
+          "RI(T,unsigned,16);RI(T,unsigned,32);RI(T,unsigned,64);RI(T,long long,16);RI(T,long long,32);RI(T,long long,64);RI(T,unsigned long long,16);"
+          "RI(T,unsigned long long,32);RI(T,unsigned long long,64);\n"
+          "static const unsigned fb[]={0x7fc01234u,0xffc05678u,0x80000000u,0,0x3f800000u,0xbf800000u,0x7f800000u,0xff800000u,1,0x40490fdbu,0x3f000000u,0xbf000000u,0x3fc00000u,0xc0200000u,0x3effffffu,0x4b7fffffu,0x7f812345u,0x3dcccccdu,0x4cbebc20u,0xb3d6bf95u};\n"
+          "static const unsigned long long db[]={0x7ff8000000001234ull,0xfff8000000005678ull,0x8000000000000000ull,0,0x3ff0000000000000ull,0xbff0000000000000ull,0x7ff0000000000000ull,0xfff0000000000000ull,1,0x400921fb54442d18ull,0x3fe0000000000000ull,0xbfe0000000000000ull,0x3ff8000000000000ull,0xc004000000000000ull,0x3fdfffffffffffffull,0x432fffffffffffffull,0x7ff0000000012345ull,0x3fb999999999999aull,0x4415af1d78b58c40ull,0xbcb0000000000000ull};\n"
+          "for(unsigned i=0;i<60;i++){union F x;union D p;unsigned k=i%3==0?20:4;\n"
+          "for(unsigned j=0;j<16;j++)x.u[j]=fb[(i*7+j*(i%5+1)+(unsigned)n)%k+(k==4?16:0)];\n"
+          "for(unsigned j=0;j<8;j++)p.u[j]=db[(i*7+j*(i%5+1)+(unsigned)n)%k+(k==4?16:0)];\n"
+          "RF(x.v);RF(x.h[1]);RF(x.q[2]);RF(x.e[1]);RF(p.v);RF(p.h[0]);RF(p.q[1]);}\n"
+          "return (int)h;}\n"
+        },
         // Scalars' elementwise builtins without AVX-512F (#1834): the C library's ceilf ... roundf, fmaf and fma without
         // SSE4.1 and FMA, and ldexpf and ldexp; SSE4.1's ROUNDSS and ROUNDSD (round's of the value plus the largest value
         // below 0.5 of its sign) and FMA's VFMADD213SS and SD where the target has them; halves, values near them and past

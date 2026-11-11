@@ -5704,13 +5704,13 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
             "transparent-union-call-machine-boundary", true, true, 1, 0);
         check_test_program_boundary(test,
             "typedef int V __attribute__((vector_size(16)));extern V global;int tested(int n){return __builtin_reduce_add(global);}",
-            "vector-builtin-live-reference-machine-boundary", true, false, 1, 0);
+            "vector-builtin-live-reference-machine-boundary", true, true, 1, 0);
         check_test_program_boundary(test,
             "typedef int V __attribute__((vector_size(16)));extern V global;int tested(int n){return __builtin_reduce_add(__builtin_nondeterministic_value(global));}",
-            "vector-builtin-unevaluated-type-argument", true, false, 0, 0);
+            "vector-builtin-unevaluated-type-argument", true, true, 0, 0);
         check_test_program_boundary(test,
             "typedef int V __attribute__((vector_size(16)));extern V global;int tested(int n){return __builtin_reduce_add(__builtin_shufflevector(global,global,0,1,2,3));}",
-            "vector-builtin-shuffle-prefix-reference-mask", true, false, 1, 0);
+            "vector-builtin-shuffle-prefix-reference-mask", true, true, 1, 0);
         check_test_program_boundary(test, "int tested(int n){int values[n+10];return sizeof values;}", "variable-length-array-program", true, true, 0, 0);
         check_test_program_boundary(test, "int extent;int tested(int n){typedef int A[extent+10];return sizeof(A);}",
                                     "vla-bound-reference", true, true, 1, 0);
