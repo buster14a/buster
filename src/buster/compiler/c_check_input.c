@@ -2213,6 +2213,9 @@ struct CheckInputReader
     bool merged_attributes;
     // Whether an objc_gc or objc_ownership attribute was read, for its declarators' types (#1447, check_input_attribute_objc).
     bool objc_attributes;
+    // Whether the unit names __builtin_clear_padding, whose plan reads the sugar its declarators' groups write over arrays
+    // (#1842's 1b, check_input_declarator_sugar): only then are those made.
+    bool padding_sugar;
     // Whether an argument_with_type_tag, pointer_with_type_tag or type_tag_for_datatype attribute was read, for its
     // handler's checks and its declarations' rules and tags (#1447, c_check_type_safety_input.c).
     bool type_tag_attributes;
@@ -8615,7 +8618,12 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                     const CheckInputAttributes* specifiers = frame->parameter ? frame->common_attributes : run->common_attributes;
                     if (__builtin_expect(!frame->parameter && (check_input_sugar_list(specifiers) || check_input_sugar_list(frame->attributes)), 0))
                     {
-                        check_input_declarator_sugar(reader, frame, specifiers, parts, reverse, type);
+                        check_input_declarator_sugar(reader, frame, specifiers, parts, reverse, type, true);
+                    }
+                    else if (__builtin_expect(reader->padding_sugar && frame->name != BUSTER_CHECK_NONE, 0))
+                    {
+                        // A unit that clears padding: its declarators' groups over arrays, a parameter's too (#1842's 1b).
+                        check_input_declarator_sugar(reader, frame, NULL, parts, reverse, type, false);
                     }
                     else if (__builtin_expect(reader->output->sugar_entries != 0 && !frame->parameter && frame->name != BUSTER_CHECK_NONE, 0))
                     {
@@ -12287,6 +12295,8 @@ static void check_input_bind_checked(CheckInputReader* reader, uint32_t token, u
     // was compared with the visible one's there (the latest declaration of its entity, whose storage clang compares), and
     // whether a mismatch of it alone was reported.
     bool dropped = false;
+    // Whether it is a function's invalid redefinition, kept bound (#2362, below).
+    bool kept_invalid = false;
     bool thread_local_checked = false;
     bool thread_local_reported = false;
     // Whether the visible declaration, which its linked check would compare the type with too, is an invalid redefinition.
@@ -12454,10 +12464,19 @@ static void check_input_bind_checked(CheckInputReader* reader, uint32_t token, u
                 // follows below.
                 const bool loading = has_attributes && check_input_attribute_of(check_input_attributes_at(reader->output, token), CHECK_ATTRIBUTE_LOADER_UNINITIALIZED) != NULL;
                 const bool recovered = !loading && reader->output->report_count == before + 1 && check_input_recover_reports(reader, before);
-                dropped = recovered && !redefinition_alone;
+                // A function's second definition alone (#2362): clang's ActOnStartOfFunctionDef reports it after the
+                // declaration was merged, which stays in its chain and lookup, invalid: bound, its later declarations
+                // invalid with it and its uses quiet (check_input_bind), without replacing its entity's linked one.
+                const bool function_redefinition = redefined && !mismatch && !(thread_local && !thread_local_alone) && kind == C_BINDING_FUNCTION;
+                dropped = recovered && !redefinition_alone && !function_redefinition;
                 if (recovered && redefinition_alone)
                 {
                     (void)check_input_invalid_redefinition_note(reader, token);
+                }
+                if (recovered && function_redefinition)
+                {
+                    check_input_invalid_declare(reader, token);
+                    kept_invalid = true;
                 }
                 const bool loader = has_attributes &&
                     ((definition != 0 && check_input_attribute_of(check_input_attributes_at(reader->output, definition - 1), CHECK_ATTRIBUTE_LOADER_UNINITIALIZED) != NULL) ||
@@ -12524,7 +12543,7 @@ static void check_input_bind_checked(CheckInputReader* reader, uint32_t token, u
                 }
             }
         }
-        if (!dropped && (linked == 0 || !check_input_bit(reader->declaration_bits, linked - 1, BUSTER_CHECK_BITS_DEFINED)))
+        if (!dropped && !kept_invalid && (linked == 0 || !check_input_bit(reader->declaration_bits, linked - 1, BUSTER_CHECK_BITS_DEFINED)))
         {
             reader->linked_declarations[name] = token + 1;
         }
@@ -12545,7 +12564,7 @@ static void check_input_bind_checked(CheckInputReader* reader, uint32_t token, u
                                     check_input_bit(reader->output->declaration_bits, linked - 1, BUSTER_CHECK_BITS_THREAD_LOCAL),
                                     "a body's declaration with linkage differs from the one it replaces in thread-local storage");
         }
-        reader->linked_types[name] = dropped ? reader->linked_types[name] : composite;
+        reader->linked_types[name] = dropped || kept_invalid ? reader->linked_types[name] : composite;
         // Attribute evaluation may publish a declaration's attributes after it binds. Retain its scope independently of
         // that publication, for check_input_attribute_merge_exclusions and the late masks. One without a visible
         // previous declaration records none: a later declaration that sees no other finds it, as clang's
@@ -12581,6 +12600,14 @@ static void check_input_bind_checked(CheckInputReader* reader, uint32_t token, u
             check_deferred_linked(reader, name, token);
         }
     }
+    // A version's (#2362), which the linked block above leaves out: a later redeclaration of its version is checked against
+    // its attributes as any other function's, once the masks exist.
+    if (versions && !reader->lane && reader->scope_count == 0 && reader->late_attribute_masks != NULL && reader->objects[token] != 0 &&
+        reader->output->function_flags != NULL)
+    {
+        reader->late_attribute_masks[reader->objects[token]] |= check_input_attribute_late_mask(check_input_attributes_at(reader->output, token), reader->output->function_flags[token]);
+        check_input_attribute_after_kinds(reader, check_input_attributes_at(reader->output, token), reader->late_attribute_kinds + 2 * (uint64_t)reader->objects[token]);
+    }
     if (reader->output->visibility_pragmas != NULL || (reader->declaration_storage != NULL && reader->declaration_storage[token] == C_NAME_PRIVATE_EXTERN) ||
         (check_sparse_wide_present(reader->output->attributes) && check_input_attributes_at(reader->output, token) != NULL))
     {
@@ -12613,7 +12640,21 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
                                  reader->output->invalid_declarations[old_declaration] != 0;
     // Another kind of entity's redeclaration is still clang's "redefinition of 'X' as different kind of symbol", which
     // MergeFunctionDecl and MergeVarDecl give before they look at the earlier one's invalidity: checked as any other is.
-    const bool old_invalid = visible_invalid && reader->declaration_kinds[old_declaration] == reader->declaration_kinds[token];
+    // A multiversioned function's declaration of another version than the visible invalid one is another entity's, checked
+    // as any (#2362): against its own version's declarations, an invalid redefinition among them, as clang's
+    // CheckMultiVersionAdditionalDecl finds it, so that a redefinition of that is still reported.
+    bool separate = false;
+    uint32_t version = BUSTER_CHECK_NONE;
+    if (__builtin_expect(visible_invalid && reader->declaration_kinds[token] == C_BINDING_FUNCTION && reader->target_versions, 0))
+    {
+        version = check_input_target_versions_match(reader, token, &separate);
+    }
+    if (__builtin_expect(visible_invalid && reader->declaration_kinds[token] == C_BINDING_FUNCTION && reader->cpu_dispatch && !separate, 0))
+    {
+        version = check_input_cpu_dispatch_match(reader, token, old, &separate);
+    }
+    const bool apart = separate && version != old_declaration;
+    const bool old_invalid = visible_invalid && !apart && reader->declaration_kinds[old_declaration] == reader->declaration_kinds[token];
     if (__builtin_expect(old_invalid && reader->declaration_kinds[token] == C_BINDING_FUNCTION, 0))
     {
         check_input_invalid_declare(reader, token);
@@ -12638,6 +12679,13 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
         if (c_bindings_declare(&reader->bindings, C_BINDING_ORDINARY, name, (CBindingKind)reader->declaration_kinds[token], token, point, depth) == 0)
         {
             reader->output->resource = true;
+        }
+        // Its attributes are its own entity's still (#2362): a multiversioned function's later declaration of its version
+        // redeclares it, its attributes checked against these.
+        if (!reader->lane && reader->scope_count == 0 && reader->late_attribute_masks != NULL && reader->objects[token] != 0 && reader->output->function_flags != NULL)
+        {
+            reader->late_attribute_masks[reader->objects[token]] |= check_input_attribute_late_mask(check_input_attributes_at(reader->output, token), reader->output->function_flags[token]);
+            check_input_attribute_after_kinds(reader, check_input_attributes_at(reader->output, token), reader->late_attribute_kinds + 2 * (uint64_t)reader->objects[token]);
         }
     }
     else
@@ -16315,6 +16363,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
         reader.builtin_member_names[i] = intern_find_or_add(pp->table, (const uint8_t*)builtin_members[i], (uint32_t)strlen(builtin_members[i]));
         valid &= reader.builtin_member_names[i] != 0;
     }
+    reader.padding_sugar = intern_find(pp->table, (const uint8_t*)"__builtin_clear_padding", 23) != 0;
     for (uint32_t i = 0; valid && i < BUSTER_PARSE_PREDECLARED_TYPEDEFS; i += 1)
     {
         reader.predefined_names[i] = intern_find(pp->table, (const uint8_t*)parse_predeclared_typedefs[i], (uint32_t)strlen(parse_predeclared_typedefs[i]));
@@ -16854,7 +16903,9 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
         {
             // A successful deferred merge clears its mask and supplies the same complete unit as source order.
             // Selected/private views still retain a mask and cannot establish these independent-declaration cuts.
-            const bool resolved = complete_translation_unit && input->report_count == 0 && reader.position == count && reader.expression_limit == count && input->deferred_tokens == NULL;
+            // (A whole view of a failed parse, every error of which its recovery read past, recovers as a complete unit does:
+            // its missing names don't end its checking, #2255.)
+            const bool resolved = (complete_translation_unit || parser->whole_view) && input->report_count == 0 && reader.position == count && reader.expression_limit == count && input->deferred_tokens == NULL;
             input->walk_end = reader.position;
             if (complete_translation_unit)
             {

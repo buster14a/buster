@@ -3203,6 +3203,13 @@ static const CheckSemanticFixture check_semantic_fixtures[] =
         36,
         "static assertion failed due to requirement 'VALUE == 2': value",
     },
+    // A call's arguments with ", " between them, and a grouped comma operator's " , ", as clang's printer gives them (#2382).
+    {
+        "int f(int a, long x); _Static_assert(sizeof(f(f(1,2), (3,4))) == 1, \"f\");\n",
+        "int f(int a, long x); _Static_assert(sizeof(f(f(1,2), (3,4))) == 4, \"f\");\n",
+        38,
+        "static assertion failed due to requirement 'sizeof (f(f(1, 2), (3 , 4))) == 1': f",
+    },
     // A character constant by its value, as clang's CharacterLiteral::print gives it (#1999).
     {
         "_Static_assert('ab' == 0, \"c\");\n",

@@ -196,11 +196,17 @@ enum
     CHECK_WARNING_ID_GNU_ARRAY_RANGE = 139,
     // An integer added to a string literal (#2190, clang's diagnoseStringPlusInt): -Wstring-plus-int, on by default.
     CHECK_WARNING_ID_STRING_PLUS_INT = 140,
+    // An unparenthesized `+` or `-` as a shift's operand (#2264, clang's DiagnoseAdditionInShift): -Wshift-op-parentheses,
+    // on by default, under -Wparentheses.
+    CHECK_WARNING_ID_SHIFT_OP_PARENTHESES = 141,
+    // sizeof of a binary operator whose operand is an array decayed to the operator's own pointer type (#2264, clang's
+    // warnOnSizeofOnArrayDecay): -Wsizeof-array-decay, on by default.
+    CHECK_WARNING_ID_SIZEOF_ARRAY_DECAY = 142,
     // An alignment builtin's alignment of 1 (#2221, clang's SemaBuiltinAlignment): align_up's and align_down's "aligning a
     // value to 1 byte is a no-op", is_aligned's "the result of checking whether a value is aligned to 1 byte is always
     // true", -Wtautological-compare's, on by default.
-    CHECK_WARNING_ID_ALIGNMENT_NO_OP = 141,
-    CHECK_WARNING_ID_ALIGNMENT_ALWAYS_TRUE = 142,
+    CHECK_WARNING_ID_ALIGNMENT_NO_OP = 143,
+    CHECK_WARNING_ID_ALIGNMENT_ALWAYS_TRUE = 144,
     CHECK_WARNING_ID_COUNT,
 };
 
