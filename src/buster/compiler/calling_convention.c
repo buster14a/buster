@@ -1052,6 +1052,8 @@ static AbiUnit abi_bit_field_unit(const AbiTable* abi, const TypeTable* table, u
             bits = (limit - start) * 8;
         }
     }
+    // A clipped unit's bytes need not be a power of two (3 gives ctz 0), so this alignment means something only for an
+    // integer unit; the storage drops it for a clipped one, an array of bytes aligned to 1.
     const uint8_t alignment = best_bytes >= 16 ? 4 : (uint8_t)__builtin_ctzll(best_bytes);
     const AbiUnit result = {
         .offset = start,
