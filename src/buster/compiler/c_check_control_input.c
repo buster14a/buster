@@ -2286,7 +2286,9 @@ static bool check_input_fallthrough_trap(const CheckInputReader* reader, uint32_
 }
 
 // A call's callee, the call `close` (its closing parenthesis): the identifier before its opening parenthesis, past
-// parentheses, `&` and `*` (`die`, `(die)`, `(&die)`), or BUSTER_CHECK_NONE.
+// parentheses, `&` and `*` (`die`, `(die)`, `(&die)`) and an element's subscript (`table[i]`, whose object's
+// declaration spells its elements' type), or a cast's closing parenthesis (`((N)p)`, whose type name spells the
+// callee's type), or BUSTER_CHECK_NONE.
 static uint32_t check_input_fallthrough_callee(const CheckInputReader* reader, uint32_t close)
 {
     const Parser* parser = reader->parser;
@@ -2318,16 +2320,46 @@ static uint32_t check_input_fallthrough_callee(const CheckInputReader* reader, u
             }
             inner = children == 1 ? inner : BUSTER_CHECK_NONE;
         }
+        else if (role == PARSE_ROLE_CLOSE_SUBSCRIPT)
+        {
+            // The subscripted operand: its child before the `[`.
+            uint32_t open = BUSTER_CHECK_NONE;
+            for (uint32_t child = reader->first_child[callee]; child != BUSTER_CHECK_NONE; child = reader->next_child[child])
+            {
+                open = parser->tree.roles[child] == PARSE_ROLE_OPEN_SUBSCRIPT ? child : open;
+            }
+            for (uint32_t child = reader->first_child[callee]; open < count && child != BUSTER_CHECK_NONE; child = reader->next_child[child])
+            {
+                inner = child < open && (inner >= count || child > inner) ? child : inner;
+            }
+        }
         stripping = inner < count;
         callee = stripping ? inner : callee;
     }
-    return callee < count && parser->tokens.kinds[callee] == PARSE_KIND_IDENTIFIER ? callee : BUSTER_CHECK_NONE;
+    const bool named = callee < count && (parser->tokens.kinds[callee] == PARSE_KIND_IDENTIFIER || parser->tree.roles[callee] == PARSE_ROLE_CLOSE_CAST);
+    return named ? callee : BUSTER_CHECK_NONE;
+}
+
+// Whether a function's declaration holds GNU's noreturn attribute (`__attribute__((noreturn))`, `[[gnu::noreturn]]`),
+// which clang makes its type's: not the _Noreturn keyword, nor C23's `[[noreturn]]` or `[[_Noreturn]]`, its declaration's.
+static bool check_input_fallthrough_noreturn_type(const CheckInputAttributes* attributes)
+{
+    bool noreturn = false;
+    for (uint32_t i = 0; attributes != NULL && i < attributes->count; i += 1)
+    {
+        const CheckInputAttribute* attribute = &attributes->records[i];
+        noreturn |= attribute->kind == CHECK_ATTRIBUTE_NORETURN && !attribute->ignored && !attribute->keyword &&
+                    (!attribute->standard || attribute->name_token != attribute->first);
+    }
+    return noreturn;
 }
 
 // Whether an object's (a variable's or a parameter's) function type is noreturn, as clang's CFG reads a call through it
 // (CFGBuilder::VisitCallExpr: the callee's type's noreturn): GNU's noreturn attribute, a type's in clang, on its own
 // declaration (`void (*p)(void) __attribute__((noreturn))`), or on the typedef its specifiers name, through the typedefs
-// that typedef's name in turn (`typedef void (*N)(void) __attribute__((noreturn)); N p;`), a bounded walk.
+// that typedef's name in turn (`typedef void (*N)(void) __attribute__((noreturn)); N p;`), or through a typeof of a name
+// its specifiers spell (#1844): of a function its GNU attribute marks (`__typeof__(die) *p`, `__typeof__(&die) p`; C11's
+// _Noreturn is its declaration's, not its type's), or of an object or a typedef, whose own walk goes on; a bounded walk.
 static bool check_input_fallthrough_noreturn_object(const CheckInputReader* reader, uint32_t declaration)
 {
     const CheckInput* input = reader->output;
@@ -2338,7 +2370,17 @@ static bool check_input_fallthrough_noreturn_object(const CheckInputReader* read
     for (uint32_t steps = 0; !noreturn && at < count && at != 0 && steps < 16; steps += 1)
     {
         noreturn = check_input_noreturn_attribute(check_input_attributes_at(input, at));
-        at = check_input_typedef_spelling(input, parser, at);
+        uint32_t next = check_input_typedef_spelling(input, parser, at);
+        const uint32_t keyword = !noreturn && next == 0 ? check_input_typeof_spelling(input, parser, at) : 0;
+        const uint32_t close = keyword != 0 && keyword + 1 < count ? parser->tree.parents[keyword + 1] : count;
+        // The typeof's operand: a name, or `&` and a name.
+        const uint32_t name = close < count && keyword + 3 == close ? keyword + 2 :
+                              close < count && keyword + 4 == close && parser->tokens.kinds[keyword + 2] == PARSE_KIND_AMP ? keyword + 3 : count;
+        const uint32_t named = name < count && parser->tokens.kinds[name] == PARSE_KIND_IDENTIFIER && input->declarations != NULL ? input->declarations[name] : 0;
+        const bool function = named != 0 && named < count && reader->declaration_kinds[named] == C_BINDING_FUNCTION;
+        noreturn = noreturn || (function && check_input_fallthrough_noreturn_type(check_input_attributes_at(input, named)));
+        next = next != 0 ? next : named != 0 && named < count && !function ? named : 0;
+        at = next;
     }
     return noreturn;
 }
@@ -2365,8 +2407,12 @@ static bool check_input_fallthrough_noreturn(CheckInputReader* reader, uint32_t 
     const bool library = info != NULL && memchr(info->attributes, 'f', info->attributes_length) != NULL;
     const bool builtin = marked && (!library || (function && check_input_linkage(reader->declaration_bits, declaration) == 2 &&
                                                  check_input_library_enabled(info, &reader->pp->options)));
+    // A cast's type name spells the callee's type: its typedef's walk (`((N)p)()`).
+    const bool cast = callee < count && parser->tree.roles[callee] == PARSE_ROLE_CLOSE_CAST;
+    const uint32_t cast_type = cast ? check_input_token_type_spelling(reader->output, parser, callee, true) : 0;
     bool noreturn = declared || builtin || check_input_fallthrough_trap(reader, callee) ||
-                    (declaration < count && !function && check_input_fallthrough_noreturn_object(reader, declaration));
+                    (!cast && declaration < count && !function && check_input_fallthrough_noreturn_object(reader, declaration)) ||
+                    (cast_type != 0 && check_input_fallthrough_noreturn_object(reader, cast_type));
     if (!noreturn && callee < count && declaration >= count && reader->pp != NULL)
     {
         uint8_t buffer[32];

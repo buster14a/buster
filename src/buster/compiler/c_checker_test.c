@@ -6324,6 +6324,7 @@ static CheckSparseWide check_input_attributes_from(Arena* arena, CheckInputAttri
 #include "c_check_vector_graph_test.c"
 #include "c_check_function_name_test.c"
 #include "c_check_pragma_test.c"
+#include "c_check_pack_test.c"
 #include "c_check_diagnostic_test.c"
 #include "c_check_warning_events_test.c"
 #include "c_check_const_values_test.c"
@@ -7008,6 +7009,10 @@ static int run_checker_tests(int argc, char** argv)
             if (check_test_takes())
             {
                 check_test_pragmas(&test, clang);
+            }
+            if (check_test_takes())
+            {
+                check_test_pack_pragmas(&test, clang);
             }
             if (check_test_takes())
             {

@@ -32,7 +32,7 @@ static IrSimdOperation ir_interpreter_simd_opcode(uint8_t op)
     return operation;
 }
 
-// A width change's, a permute's or a conversion's model operation (#1840: extract to truncate), or
+// A width change's, a permute's, a conversion's or a scalar shift's model operation (#1840: extract to shift), or
 // IR_SIMD_OPERATION_COUNT for any other intrinsic.
 static IrSimdOperation ir_interpreter_simd_intrinsic(uint32_t kind)
 {
@@ -48,6 +48,7 @@ static IrSimdOperation ir_interpreter_simd_intrinsic(uint32_t kind)
         case BUSTER_IR_INTRINSIC_SHUFFLE_LANES: operation = IR_SIMD_SHUFFLE_LANES; break;
         case BUSTER_IR_INTRINSIC_EXTEND: operation = IR_SIMD_EXTEND; break;
         case BUSTER_IR_INTRINSIC_TRUNCATE: operation = IR_SIMD_TRUNCATE; break;
+        case BUSTER_IR_INTRINSIC_SHIFT: operation = IR_SIMD_SHIFT; break;
         default: break;
     }
     return operation;
