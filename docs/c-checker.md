@@ -5160,7 +5160,15 @@ An undeclared name that is a typo of a visible one is clang's (#1447,
   deprecated"; `check_driver_corrected_name`), and a warning at a declarator
   or an operator whose operand holds the use comes after the correction's
   error (`CheckInput.corrected_tokens`, `check_driver_after_corrections`):
-  clang gives that warning once the operand is read.
+  clang gives that warning once the operand is read. In a unit with another
+  error, the readings that give its warnings keep the corrected use's part,
+  which they correct again, where they leave out an error's
+  (`check_driver_rejected_recovered`): `arx[5]` for `int arr[3]` still gets
+  its `-Warray-bounds` at the function's end, as a division by zero its
+  operand holds gets `-Wdivision-by-zero`. In a file-scope initializer an
+  array index's warning comes at the declarator's end, after the
+  correction's error and the operands' queued warnings, as clang checks the
+  index once the full expression is complete (`check_common_report_bounds`).
 - **Keywords and type names in an expression.** Clang offers keywords too
   (`AddKeywordsToConsumer`): an expression's (`sizeof`, `_Alignof` from C11,
   `true` and `false` in C23) and, within a function and not before a `)`
