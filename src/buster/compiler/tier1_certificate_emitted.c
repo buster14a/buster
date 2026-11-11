@@ -2659,10 +2659,14 @@ static bool tier1_cert_emitted_result(Tier1CertEmittedBuild* build, uint32_t nod
     const uint32_t part_count = tier1_select_result_parts(result, function->result_size, parts);
     const bool hidden = result.kind == BUSTER_ABI_RESULT_MEMORY;
     uint32_t at = r;
-    // Every part's slots in the red zone (#1847, tier1_select_result_staged), as the consumer refuses any other.
+    // Every staged part's slots in the red zone (#1847, tier1_select_result_staged), as the consumer refuses any other.
     bool valid = source < 16 && source != BUSTER_TIER1_SELECT_SCRATCH && value != BUSTER_TIER1_CFG_NONE && r <= end && tier1_select_result_staged(parts, part_count);
     for (uint32_t k = 0; valid && k < part_count; k += 1)
     {
+        if (tier1_select_part_direct(parts[k]))
+        {
+            continue;
+        }
         const int32_t staged = tier1_emit_staging_part(tier1_select_result_slot(parts, k), parts[k].bytes);
         const uint32_t pieces = tier1_cert_emitted_pieces(parts[k].bytes);
         const bool vector = (parts[k].reg & 0xe0) == BUSTER_ABI_REGISTER_VECTOR;
@@ -2687,14 +2691,32 @@ static bool tier1_cert_emitted_result(Tier1CertEmittedBuild* build, uint32_t nod
     for (uint32_t k = 0; valid && k < part_count; k += 1)
     {
         const bool vector = (parts[k].reg & 0xe0) == BUSTER_ABI_REGISTER_VECTOR;
+        const bool direct = tier1_select_part_direct(parts[k]);
         const X86Instruction load = {
-            .displacement = tier1_emit_staging_part(tier1_select_result_slot(parts, k), parts[k].bytes),
+            .displacement = direct ? parts[k].offset : tier1_emit_staging_part(tier1_select_result_slot(parts, k), parts[k].bytes),
             .reg = (uint8_t)(parts[k].reg & 0x1f),
-            .rm = X86_REGISTER_RSP,
+            .rm = direct ? source : X86_REGISTER_RSP,
             .mode = BUSTER_X86_MEMORY_BASE,
             .form = vector ? tier1_select_part_form(parts[k].bytes, true) : X86_FORM_MOV_R64_RM64,
         };
-        valid = at < end && tier1_cert_emitted_exactly(records[at], load) && tier1_cert_emitted_append_move(build, at, BUSTER_IR_NONE, BUSTER_CERT_NONE);
+        valid = at < end && tier1_cert_emitted_exactly(records[at], load);
+        if (valid && direct)
+        {
+            // A split vector's part (#1847): its load reads the result's bytes through the address and defines the part's
+            // value in its register, which the ret reads (tier1_cert_emitted_return).
+            Tier1CertEmittedKernel kernel = {
+                .referenced = UINT32_MAX,
+                .definition = BUSTER_TIER1_CFG_NONE,
+                .definition_location = BUSTER_CERT_NONE,
+            };
+            valid = tier1_cert_emitted_take_reference(build, at, 0) && tier1_cert_emitted_add_use(&kernel, value, tier1_cert_emitted_gpr(source, 8)) &&
+                    tier1_cert_emitted_originals(build, node, &kernel, records + at, 1);
+            valid = valid && tier1_cert_emitted_define(build, node, build->result_parts + k, tier1_cert_emitted_vector(build, parts[k].reg & 0x1f, tier1_cert_emitted_part_width(true, parts[k].bytes, false)));
+        }
+        else if (valid)
+        {
+            valid = tier1_cert_emitted_append_move(build, at, BUSTER_IR_NONE, BUSTER_CERT_NONE);
+        }
         at += 1;
     }
     int32_t hidden_offset = 0;

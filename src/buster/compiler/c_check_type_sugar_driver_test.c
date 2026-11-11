@@ -467,6 +467,27 @@ static const CheckDriverDefaultWarningFixture check_driver_vla_bound_fixtures[] 
         .errors = 5,
         .notes = 1,
     },
+    {
+        // A cast's builtin type keywords print as clang's TypePrinter spells the type (check_semantic_builtin_spelling):
+        // `(unsigned)n` is `(unsigned int)n`, `(long unsigned)n` `(unsigned long)n`, `(signed)1` `(int)1`.
+        .name = "cast type names in variable array bounds",
+        .source = "typedef long L;\n"
+                  "int printf(const char *, ...);\n"
+                  "int n;\n"
+                  "void f(void)\n"
+                  "{\n"
+                  "    int a[(unsigned)n];\n"
+                  "    int b[(long unsigned)n];\n"
+                  "    int c[(const short)n + (signed)1];\n"
+                  "    int d[(unsigned long long int)n];\n"
+                  "    int e[(L)n * (char)2];\n"
+                  "    int g[(int long)n];\n"
+                  "    int h[(unsigned char)n];\n"
+                  "    int i[(signed char)n + (short int)n];\n"
+                  "    a(); b(); c(); d(); e(); g(); h(); i();\n"
+                  "}\n",
+        .errors = 8,
+    },
 };
 
 // Calling conventions in type spellings (#1447): clang's canonical spelling in an a.k.a. (`intel_ocl_bicc`,
