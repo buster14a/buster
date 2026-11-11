@@ -7951,7 +7951,37 @@ arguments against the function. The checker now gives these as clang does.
     block parameter, which C hasn't, so its error-parameter checks never
     apply.) A first argument that is no identifier, on which clang 23 crashes
     (its handler reads it as an identifier), is refused by name.
-    `c_check_swift_attribute_driver_test.c` compares their units as above.
+    `c_check_swift_attribute_driver_test.c` compares their units as above;
+  - Swift's names, `swift_name` and `swift_async_name` (#1447,
+    `check_input_attribute_swift_name`), whose string must fit the
+    declaration as clang's SemaSwift::DiagnoseName checks it, or its
+    -Wswift-name-attribute warning (`CHECK_WARNING_ID_SWIFT_NAME_ATTRIBUTE`)
+    at the string, which ignores the attribute. A function's is a Swift
+    function name (`check_input_swift_function_name`): an optional
+    `getter:` or `setter:`, a base name with an optional context of
+    `.`-joined identifiers, and parenthesized labels each ending in `:`, with
+    clang's rules for `self:`, `newValue:` and `subscript`; its count of
+    labels must be the function's parameters' (an async name's one fewer,
+    and a function of none is its own warning), more only for a
+    single-parameter `init` of a function of none, fewer only where pointers
+    to unqualified pointees, possible out parameters, make up the rest ("too
+    few/many parameters in the signature ... (expected N; got M)"). A
+    function without a prototype is -Wignored-attributes' "only applies to
+    non-K&R-style functions". A variable's, a tag's, a member's, a typedef's
+    or an enumerator's is an identifier with an optional context; a label's
+    "cannot be applied to this declaration";
+  - `swift_error` (#1447, `check_input_attribute_swift_error`): its
+    convention, as written, `none`, `nonnull_error`, `null_result`,
+    `zero_result` or `nonzero_result` (another identifier's warning ignores
+    it); every one but `none` needs an error parameter, a pointer to a
+    pointer to CFError, which clang takes to be the first struct bridged to
+    `NSError` (`objc_bridge` or `objc_bridge_mutable`) that a check met, and
+    then that struct alone (`CheckInputReader.cf_error`, so a body's lane
+    refuses `swift_error`); `null_result` a function returning a pointer, and
+    the two zero conventions one returning an integer, an enumeration or
+    `bool`, each clang's error at the attribute. A first argument of no
+    identifier, on which clang 23 crashes, is refused by name.
+    `c_check_swift_name_driver_test.c` compares their units as above.
 
   Every attribute's arguments are read first as clang's parser reads them,
   by their kinds (`check_input_arguments_row`, from
@@ -8679,9 +8709,9 @@ arguments against the function. The checker now gives these as clang does.
   (`check_program_emit_patchable`, both tiers' code) is the [object writer
   guide](object-writer-and-linker.md)'s "Patchable function entries".
 
-  The rest stay refused by name, where they apply: `format_matches`,
-  `cfi_salt`, `swift_name`, `swift_async_name` and `swift_error` in either
-  syntax, and the C23 spellings of `objc_gc` and `objc_ownership`. Recognizing their
+  The rest stay refused by name, where they apply: `format_matches` and
+  `cfi_salt` in either syntax, and the C23 spellings of `objc_gc` and
+  `objc_ownership`. Recognizing their
   names does not supply their handlers.
 - **Type arguments.** The attributes clang's `attributeIsTypeArgAttr` names
   (`preferred_type`, `vec_type_hint`, `iboutletcollection`, `preferred_name`,

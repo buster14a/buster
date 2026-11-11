@@ -147,6 +147,9 @@ enum
     // An unevaluated operand with a side effect (#1447, clang's CheckUnaryExprOrTypeTraitOperand and
     // CreateGenericSelectionExpr): -Wunevaluated-expression, on by default, under -Wunused-value and so -Wunused and -Wall.
     CHECK_WARNING_ID_UNEVALUATED_EXPRESSION = 121,
+    // swift_name's and swift_async_name's Swift name that doesn't fit its declaration (#1447, clang's SemaSwift::DiagnoseName):
+    // -Wswift-name-attribute, on by default. (Its ID past the ones other pull requests take.)
+    CHECK_WARNING_ID_SWIFT_NAME_ATTRIBUTE = 126,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -429,8 +432,32 @@ typedef enum CheckWarningEventKind
     // at it: "'X' attribute argument not supported: 'Y'", Y the token's identifier or keyword as written (payload.token),
     // or "(null)" for another token, as clang streams the token's IdentifierInfo.
     CHECK_WARNING_EVENT_ARGUMENT_UNSUPPORTED_TOKEN,
+    // swift_name's and swift_async_name's warnings (#1447, check_input_attribute_swift_name), at the name's string literal:
+    // payload.data's low five bits the message (BUSTER_CHECK_SWIFT_NAME_*), then the expected and the given parameter
+    // counts in 13 bits each. Its K&R function's is -Wignored-attributes', the others -Wswift-name-attribute's.
+    CHECK_WARNING_EVENT_SWIFT_NAME,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
+
+// CHECK_WARNING_EVENT_SWIFT_NAME's messages (#1447), as clang's SemaSwift words them.
+#define BUSTER_CHECK_SWIFT_NAME_FUNCTION 0u
+#define BUSTER_CHECK_SWIFT_NAME_BASE 1u
+#define BUSTER_CHECK_SWIFT_NAME_CONTEXT 2u
+#define BUSTER_CHECK_SWIFT_NAME_PARAMETER 3u
+#define BUSTER_CHECK_SWIFT_NAME_DECLARATION 4u
+#define BUSTER_CHECK_SWIFT_NAME_SUBSCRIPT_ACCESSOR 5u
+#define BUSTER_CHECK_SWIFT_NAME_SUBSCRIPT_PARAMETER 6u
+#define BUSTER_CHECK_SWIFT_NAME_SUBSCRIPT_SELF 7u
+#define BUSTER_CHECK_SWIFT_NAME_MISSING_PARAMETERS 8u
+#define BUSTER_CHECK_SWIFT_NAME_SETTER 9u
+#define BUSTER_CHECK_SWIFT_NAME_SELVES 10u
+#define BUSTER_CHECK_SWIFT_NAME_GETTER 11u
+#define BUSTER_CHECK_SWIFT_NAME_NO_NEW_VALUE 12u
+#define BUSTER_CHECK_SWIFT_NAME_NEW_VALUES 13u
+#define BUSTER_CHECK_SWIFT_NAME_GETTER_NEW_VALUE 14u
+#define BUSTER_CHECK_SWIFT_NAME_COUNT 15u
+#define BUSTER_CHECK_SWIFT_NAME_NO_PARAMETERS 16u
+#define BUSTER_CHECK_SWIFT_NAME_PROTOTYPE 17u
 
 // CHECK_WARNING_EVENT_TARGET_CLONES_*'s payload (#1838): `name` the version's first byte in its string's decoded text (it
 // ends at the next comma, trimmed), and `data` its place's offset from the trimmed text's start, with

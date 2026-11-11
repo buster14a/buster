@@ -2114,6 +2114,9 @@ struct CheckInputReader
     // Whether an argument_with_type_tag, pointer_with_type_tag or type_tag_for_datatype attribute was read, for its
     // handler's checks and its declarations' rules and tags (#1447, c_check_type_safety_input.c).
     bool type_tag_attributes;
+    // The struct clang's Sema takes for CFError (#1447, swift_error's error parameter: check_input_swift_cf_error): the
+    // first one bridged to NSError that a swift_error's check met, which it then tests alone; 0 before.
+    TypeId cf_error;
     // While a function's declaration's attributes are checked (check_input_attribute_subjects): its declarator's first
     // named parameter's token plus one (its parameters linked by parameter_next), which callback's names index; else 0.
     uint32_t attribute_parameters;

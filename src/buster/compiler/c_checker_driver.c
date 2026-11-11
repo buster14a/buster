@@ -331,6 +331,17 @@ static void check_driver_attribute_argument(const Parser* parser, const Preproce
             break;
         case CHECK_ARGUMENT_EXPECTED_COMMA: snprintf(text, capacity, "expected ','"); break;
         case CHECK_ARGUMENT_REQUIRED_AFTER: snprintf(text, capacity, "argument required after attribute"); break;
+        case CHECK_ARGUMENT_SWIFT_ERROR_PARAMETER:
+            snprintf(text, capacity, "'%s' attribute can only be applied to a function with an error parameter", parsed);
+            break;
+        case CHECK_ARGUMENT_SWIFT_ERROR_RESULT:
+        {
+            const uint32_t convention = value < count && parser->tokens.kinds[value] == PARSE_KIND_IDENTIFIER ? parser->tokens.names[(uint32_t)value] : 0;
+            snprintf(text, capacity, "'%s' attribute with '%.*s' convention can only be applied to a function returning %s", parsed,
+                     convention != 0 ? (int)intern_length(pp->table, convention) : 0, convention != 0 ? (const char*)intern_bytes(pp->table, convention) : "",
+                     number != 0 ? "a pointer" : "an integral type");
+            break;
+        }
         case CHECK_ARGUMENT_SWIFT_ASYNC_NONE:
             snprintf(text, capacity, "'swift_async' attribute must be applied to a function annotated with non-'none' attribute 'swift_async'");
             break;

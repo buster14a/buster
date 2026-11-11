@@ -162,6 +162,8 @@ static const CheckWarningDescription check_warning_descriptions[] =
     [CHECK_WARNING_ID_TYPE_SAFETY] = { "-Wtype-safety", NULL, "argument type doesn't match specified type tag" },
     [CHECK_WARNING_ID_UNEVALUATED_EXPRESSION] =
         { "-Wunevaluated-expression", "-Wunused-value", "expression with side effects has no effect in an unevaluated context" },
+    // (#1447: its ID assigned past the ones other pull requests take, which their rows fill.)
+    [CHECK_WARNING_ID_SWIFT_NAME_ATTRIBUTE] = { "-Wswift-name-attribute", NULL, "'swift_name' attribute has invalid identifier for the base name" },
 };
 
 _Static_assert(BUSTER_ARRAY_LENGTH(check_warning_descriptions) == CHECK_WARNING_ID_COUNT, "every sparse policy ID has a description");
