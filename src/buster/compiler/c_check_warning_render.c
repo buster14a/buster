@@ -1985,6 +1985,9 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
         case CHECK_WARNING_EVENT_TYPEDEF_NAMELESS:
             result = "typedef requires a name";
             break;
+        case CHECK_WARNING_EVENT_TENTATIVE_ARRAY:
+            result = "tentative array definition assumed to have one element";
+            break;
         case CHECK_WARNING_EVENT_UNUSED_RESULT:
         {
             static const char* const messages[] =

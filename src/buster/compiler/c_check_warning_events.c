@@ -163,6 +163,9 @@ enum
     CHECK_WARNING_ID_VOID_POINTER_TO_INT_CAST = 126,
     CHECK_WARNING_ID_POINTER_TO_ENUM_CAST = 127,
     CHECK_WARNING_ID_VOID_POINTER_TO_ENUM_CAST = 128,
+    // An object whose tentative definitions leave it an array of unknown bound at the unit's end (#2238, clang's
+    // ActOnEndOfTranslationUnit): -Wtentative-definition-array, on by default.
+    CHECK_WARNING_ID_TENTATIVE_ARRAY = 129,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -445,6 +448,9 @@ typedef enum CheckWarningEventKind
     // type ignored", or "'const' and 'volatile' qualifiers ...", at the base's first token that isn't a qualifier;
     // payload.data the qualifiers (BUSTER_TYPE_CONST, BUSTER_TYPE_VOLATILE).
     CHECK_WARNING_EVENT_UNDERLYING_CV_QUALIFIER,
+    // An object's acting tentative definition, an array of unknown bound at the unit's end (#2238): "tentative array
+    // definition assumed to have one element", at its name.
+    CHECK_WARNING_EVENT_TENTATIVE_ARRAY,
     // swift_newtype's and swift_wrapper's argument other than `struct` or `enum` (#1447, check_input_swift_newtype_parse),
     // at it: "'X' attribute argument not supported: 'Y'", Y the token's identifier or keyword as written (payload.token),
     // or "(null)" for another token, as clang streams the token's IdentifierInfo.

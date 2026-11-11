@@ -169,6 +169,7 @@ static const CheckWarningDescription check_warning_descriptions[] =
     [CHECK_WARNING_ID_VOID_POINTER_TO_INT_CAST] = { "-Wvoid-pointer-to-int-cast", "-Wpointer-to-int-cast", "cast to smaller integer type" },
     [CHECK_WARNING_ID_POINTER_TO_ENUM_CAST] = { "-Wpointer-to-enum-cast", NULL, "cast to smaller integer type" },
     [CHECK_WARNING_ID_VOID_POINTER_TO_ENUM_CAST] = { "-Wvoid-pointer-to-enum-cast", "-Wpointer-to-enum-cast", "cast to smaller integer type" },
+    [CHECK_WARNING_ID_TENTATIVE_ARRAY] = { "-Wtentative-definition-array", NULL, "tentative array definition assumed to have one element" },
 };
 
 _Static_assert(BUSTER_ARRAY_LENGTH(check_warning_descriptions) == CHECK_WARNING_ID_COUNT, "every sparse policy ID has a description");

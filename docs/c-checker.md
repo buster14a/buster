@@ -6224,6 +6224,16 @@ driver's `check_driver_warning_events_at` orders them by completion and attaches
 compares the driver's complete diagnostics with clang's for every producer and policy, and
 `test-checker`'s catalogue compares each warning's line.
 
+The translation unit's end publishes after every other diagnostic, in clang's `ActOnEndOfTranslationUnit` order
+(#2238): `-Wundefined-internal`, unless an error has occurred; `-Wtentative-definition-array`, "tentative array
+definition assumed to have one element", for each object its tentative definitions leave an array of unknown bound
+(`check_input_tentative_arrays`: once, at its last tentative definition, unless a declaration defines it, in the
+order of its first tentative one, under the pragmas at that definition), which clang gives in a unit with errors too;
+then, unless an error has occurred, the unused file-scope declarations' warnings. A warning `-Werror` promotes counts
+as an error there, as clang's `hasErrorOccurred` has it, wherever it stands, the tentative arrays' among them
+(`check_driver_unit_end_split`). Differences left: a unit with a parse error gives none of them, and a rejected
+unit's object whose declaration the reader leaves out (`int b[] = { undeclared }; int b[];`) gets none.
+
 ## Corpus comparison and semantic mutations
 
 ```sh
