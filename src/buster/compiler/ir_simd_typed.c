@@ -114,10 +114,11 @@ struct IrSimdTypedOperation
     // A lane operation (#1840, ir_simd_typed_lane_op): whether the row is one, its flags in `immediate`.
     bool lane_op;
     // A permute of two tables (#1840, ir_simd_typed_permute2): whether the row is one, its lanes' bytes' log2 in
-    // `immediate`, and whether its indices are its third operand and its second table its second (permute2_swapped:
-    // __builtin_shufflevector's rows) rather than the other way around (the permutex2var builtins').
+    // `immediate`, and its indices' and its second table's operands (the first table is operand 0); a table narrower than
+    // the result is widened.
     bool permute2;
-    bool permute2_swapped;
+    uint8_t permute2_indices;
+    uint8_t permute2_table;
 };
 
 // The conversions' and the scalar shifts' forms (#1840), shared with Tier 1's selection.
@@ -1143,43 +1144,57 @@ static IrSimdTypedStatus ir_simd_typed_permute(const Tier0Operation* source, uin
     return status;
 }
 
-// The permutes of two tables (#1840): a row of three vectors of the result's width (16, 32 or 64 bytes) and one record of
-// a vpermt2b to vpermt2q form at that width (ir_simd_permute2_forms), register-direct and undecorated, whose destination
-// is VECTOR(0)'s register, the first table (reg), its indices VECTOR(1) (vvvv) and its second table VECTOR(2) (rm), the
-// permutex2var builtins' rows, or the indices VECTOR(2) and the table VECTOR(1), __builtin_shufflevector's of two vectors:
-// the IR's permute2 of the first table, the indices and the second table, its flags its lanes' bytes' log2. Its features
+// The permutes of two tables (#1840): a row of one record of a vpermt2b to vpermt2q form at the result's width (16, 32 or
+// 64 bytes, ir_simd_permute2_forms), register-direct and undecorated, whose destination is VECTOR(0)'s register, the
+// first table (reg), its indices a vector of the result's width (vvvv) and its second table another vector (rm): the
+// permutex2var builtins' rows (the indices VECTOR(1), the table VECTOR(2)) and __builtin_shufflevector's of two vectors
+// (the indices VECTOR(2), the table VECTOR(1)), or of one (the indices VECTOR(1), the table VECTOR(0) again). A table may
+// be narrower than the result (16 or 32 bytes: a shuffle of narrower vectors into a wider one), its register's upper
+// bytes then unspecified, which the indices never name where the result is defined: the IR's widen of it, zeros past it.
+// The IR's permute2 of the first table, the indices and the second table, its flags its lanes' bytes' log2. Its features
 // are its form's (VBMI for bytes, BW for words, VL below 64 bytes) and its vectors' moves; otherwise it stays a machine row.
 static IrSimdTypedStatus ir_simd_typed_permute2(const Tier0Operation* source, uint64_t target_features, IrSimdTypedOperation* result)
 {
-    const uint8_t v0 = BUSTER_TIER0_ROLE_VECTOR(0);
-    const uint8_t v1 = BUSTER_TIER0_ROLE_VECTOR(1);
-    const uint8_t v2 = BUSTER_TIER0_ROLE_VECTOR(2);
+    // The operands' places: the indices', the second table's and the operand count.
+    static const uint8_t shapes[3][3] = {
+        { 1, 2, 3 },
+        { 2, 1, 3 },
+        { 1, 0, 2 },
+    };
     const uint32_t bytes = source->result_bytes;
     const uint32_t width = bytes == 16 ? 0 : bytes == 32 ? 1 : 2;
-    bool admitted = source->result_class == BUSTER_TYPED_CLASS_VECTOR && (bytes == 16 || bytes == 32 || bytes == 64) && source->record_count == 1 && source->operand_count == 3;
-    for (uint32_t operand = 0; admitted && operand < 3; operand += 1)
-    {
-        admitted = source->operand_classes[operand] == BUSTER_TYPED_CLASS_VECTOR && source->operand_bytes[operand] == bytes;
-    }
+    const bool admitted = source->result_class == BUSTER_TYPED_CLASS_VECTOR && (bytes == 16 || bytes == 32 || bytes == 64) && source->record_count == 1;
     const X86Instruction* record = &source->records[0];
     IrSimdTypedOperation candidate = { .operation = IR_SIMD_OPERATION_COUNT };
-    for (uint32_t lanes = 0; admitted && lanes < 4; lanes += 1)
+    for (uint32_t shape = 0; admitted && shape < 3; shape += 1)
     {
-        for (uint32_t swapped = 0; swapped < 2; swapped += 1)
+        const uint32_t indices = shapes[shape][0];
+        const uint32_t table = shapes[shape][1];
+        bool fits = source->operand_count == shapes[shape][2];
+        uint64_t moves = 0;
+        for (uint32_t operand = 0; fits && operand < source->operand_count; operand += 1)
+        {
+            const uint32_t operand_bytes = source->operand_bytes[operand];
+            fits = source->operand_classes[operand] == BUSTER_TYPED_CLASS_VECTOR &&
+                   (operand == indices ? operand_bytes == bytes : (operand_bytes == 16 || operand_bytes == 32 || operand_bytes == 64) && operand_bytes <= bytes);
+            moves |= fits ? ir_typed_vector_moves(operand_bytes, target_features) : 0;
+        }
+        for (uint32_t lanes = 0; fits && lanes < 4; lanes += 1)
         {
             const X86Instruction expected = {
                 .form = ir_simd_permute2_forms[lanes][width],
-                .reg = v0,
-                .vvvv = swapped != 0 ? v2 : v1,
-                .rm = swapped != 0 ? v1 : v2,
+                .reg = BUSTER_TIER0_ROLE_VECTOR(0),
+                .vvvv = (uint8_t)BUSTER_TIER0_ROLE_VECTOR(indices),
+                .rm = (uint8_t)BUSTER_TIER0_ROLE_VECTOR(table),
                 .mode = BUSTER_X86_REGISTER_DIRECT,
             };
             if (memcmp(record, &expected, sizeof(expected)) == 0)
             {
                 candidate.permute2 = true;
-                candidate.permute2_swapped = swapped != 0;
+                candidate.permute2_indices = (uint8_t)indices;
+                candidate.permute2_table = (uint8_t)table;
                 candidate.immediate = (uint8_t)lanes;
-                candidate.required_features = ir_typed_vector_moves(bytes, target_features) | (x86_target_requirement(record->form) & ~BUSTER_X86_TARGET_KNOWN);
+                candidate.required_features = ir_typed_vector_moves(bytes, target_features) | moves | (x86_target_requirement(record->form) & ~BUSTER_X86_TARGET_KNOWN);
             }
         }
     }
@@ -1187,7 +1202,7 @@ static IrSimdTypedStatus ir_simd_typed_permute2(const Tier0Operation* source, ui
     if (status == IR_SIMD_TYPED_OK)
     {
         candidate.shape = (IrSimdShape)(IR_SIMD_V4I32 + width);
-        candidate.operand_count = 3;
+        candidate.operand_count = source->operand_count;
         memcpy(candidate.operand_classes, source->operand_classes, sizeof(candidate.operand_classes));
         memcpy(candidate.operand_bytes, source->operand_bytes, sizeof(candidate.operand_bytes));
         *result = candidate;

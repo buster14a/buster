@@ -927,11 +927,15 @@ it, and the interpreter, SCCP, GVN and LICM take it as they take the binary
 permutes.
 
 `ir_simd_typed_permute2` decodes the rows of the permutex2var builtins and
-`__builtin_shufflevector` of two vectors. Each row is one record of `vpermt2b`
-to `vpermt2q`, with VECTOR(0) the destination and first table (reg). The
-indices are VECTOR(1) (vvvv) and the second table VECTOR(2) (rm), or the other
-way around for `__builtin_shufflevector`. The masked builtins' rows are the same
-record and a separate select. The target needs the form's features (VBMI for
+`__builtin_shufflevector` of one or two vectors. Each row is one record of
+`vpermt2b` to `vpermt2q`, with VECTOR(0) the destination and first table (reg).
+The indices are VECTOR(1) (vvvv) and the second table VECTOR(2) (rm), or the
+other way around for `__builtin_shufflevector`; a shuffle of one vector has the
+indices VECTOR(1) and VECTOR(0) both tables. A table may be narrower than the
+result (16 or 32 bytes: a shuffle of narrower vectors into a wider one). Its
+register's upper bytes are then unspecified, and the indices never name them
+where the result is defined, so the IR takes the table's `widen` (zeros past
+it). The masked builtins' rows are the same record and a separate select. The target needs the form's features (VBMI for
 bytes, BW for words) and AVX512F's and VL's below 64 bytes.
 
 Tier 1 (`BUSTER_TIER1_VECTOR_PERMUTE2`) picks the instruction by the register
@@ -953,8 +957,10 @@ sources, against the lane operations (`f324f2ac`):
 
 | Unit | Rows before | Rows after |
 | --- | ---: | ---: |
-| `main_unit_frontend.c` | 541 | 395 |
-| `main_unit_backend.c` | 753 | 666 |
+| `main_unit_frontend.c` | 541 | 350 |
+| `main_unit_backend.c` | 753 | 642 |
+
+No `vpermt2` row is left in either unit.
 
 The tests:
 
@@ -968,12 +974,17 @@ The tests:
 - `test-ir-inline`: an inlined callee's permute2s, one of which takes the
   callee's parameter, get slots of the caller's, remapped.
 - `test-ir-simd`: the 24 rows decode at exactly their features, refused without
-  each and under 6 changes.
-- `test-tier1-masks`: the 18 rows the x86-64-v4 target allows (`vpermt2b` is
-  VBMI's) run as a program's only row, through both lowering paths, the
-  interpreter at every stage and Tier 1 natively, against a C model.
-- `test-ir-source`: the vector and scalar use lists agree on a C file of every
-  permutex2var builtin and a shufflevector of two vectors.
+  each and under 6 changes; of narrower tables, one 16-byte table twice and two
+  of half the width decode, and a table wider than the result or indices
+  narrower stay machine rows.
+- `test-tier1-masks`: the 30 rows the x86-64-v4 target allows (`vpermt2b` is
+  VBMI's), of both orders at each width and of narrower tables at 32 and 64
+  bytes, run as a program's only row, through both lowering paths, the
+  interpreter at every stage and Tier 1 natively, against a C model whose
+  narrow tables are zero-extended.
+- `test-ir-source`: the vector and scalar use lists agree on C files of every
+  permutex2var builtin and shuffles of one and two vectors, narrower ones
+  included.
 
 ## Masks to vectors and back (#1840)
 
