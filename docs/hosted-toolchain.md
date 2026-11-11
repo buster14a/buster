@@ -54,8 +54,9 @@ write denial or eviction does not invalidate a published artifact. If the
 artifact has expired and no valid cache remains, rerun the preparation job (or
 the workflow), not just a consumer. Never remove hash checks to recover a run.
 
-`setup-hosted.sh` installs system packages and applies the existing sysctl
-policy. `install-hosted-tools.sh` only extracts verified releases into a private
+`setup-hosted.sh` installs system packages from the run's offline inputs, with
+no download ([Offline inputs](#offline-inputs-2275)), and applies the existing
+sysctl policy. `install-hosted-tools.sh` only extracts verified releases into a private
 staging tree, checks versions/runtimes and publishes the completed tree. Relative
 linker links survive relocation. A failed extraction publishes no installation.
 The selected compiler, resource directory, runtime/library path and tools remain
@@ -145,8 +146,10 @@ mirror changes the lock and so the Actions cache key once; that run fills the
 cache from the mirror. GHCR, Actions caches/artifacts and GitHub release
 downloads are all GitHub services: the mirror is a separate, repository-retained
 service path, not an independent failure domain. A platform-wide GitHub outage
-still fails setup, and apt, corpus and checkout traffic remain network
-dependencies.
+still fails setup. The jobs' other inputs (apt, the corpus, the mirrors) come
+from the same preparation ([Offline inputs](#offline-inputs-2275)), so a
+consumer's remaining network dependencies are GitHub's checkout, cache and
+artifact services.
 
 ## Validation and limits
 
@@ -174,10 +177,117 @@ sequence for the first input. The weekly run also catches a pinned publication
 that has gone missing.
 
 The workflow preserves all existing hosted rows, fuzzing and aggregate failure
-semantics. Cache hits remove upstream **release** downloads, not apt, corpus,
-checkout or GitHub-service network access. What the change bought is upstream
+semantics. Cache hits remove upstream **release** downloads; the offline inputs
+below remove the apt, corpus and Git fetches, leaving checkout and GitHub's
+cache and artifact services. What the change bought is upstream
 traffic and reliability, not per-shard latency: a warm shard spends about as
 long restoring 1.2 GB from the cache as it once spent downloading it, and the
 preparation job adds a short serial step. The measured cold/warm costs, transfer
 counts and cache size are in `buster-performance`
 (`docs/measurements/hosted-toolchain-2026-11-08/`); raw evidence belongs there.
+
+## Offline inputs (#2275)
+
+The hosted jobs' other external inputs are acquired once per run too, by the
+same preparation job, and every job reads them with no network. Until this
+change each job fetched them itself, so on 2026-11-11 a 10-minute failure to
+resolve Ubuntu's mirrors failed every hosted job of four main runs in setup.
+`tools/ci/hosted-offline.sh` owns the bundle:
+
+| Input | Acquired by | Pinned by |
+| --- | --- | --- |
+| apt closure of `setup-hosted.sh`'s packages | `apt-get install --download-only` on the preparation's runner | the package list (in `hosted-offline.sh`) and the runner image |
+| baseline runtime's 4 `.deb`s | `setup-baseline-runtime.sh`, through `cached-download.sh` | their SHA-256 digests |
+| frozen corpus | `fetch-corpus.sh`, through `cached-download.sh` | its SHA-256 digest |
+| c-testsuite and SQLite | `fetch-c-testsuite.sh`, `fetch-sqlite.sh` | their commits |
+
+**Layout.** The bundle's `apt/` holds the downloaded `.deb`s and `MANIFEST`,
+which records the runner (`ImageOS`, `ImageVersion`, release, architecture),
+the package list, each `.deb`'s package, version and SHA-256 (`bundle`
+records), and the version of each listed package the image already has
+(`image` records). `ci/` is `BUSTER_CI_CACHE`'s layout, as on the 9700X:
+`downloads/DIGEST` and bare mirrors holding `refs/pinned/COMMIT`.
+
+**Preparation.** `prepare-hosted-tools.yml` restores two caches and runs
+`hosted-offline.sh prepare`:
+
+- `hosted-apt-v1-IMAGEOS-IMAGEVERSION-LIST`: the apt closure, which is the
+  image's, since it holds what that image lacks.
+- `hosted-ci-v1-SCRIPTS`: the rest, keyed by the contents of the scripts that
+  pin them. Their pins stay in those scripts: `nightly.sh` records
+  `fetch-corpus.sh`'s blob as the corpus identity.
+
+Each input is first read as a consumer reads it, offline. Only an input that
+fails so is acquired, and the log names every input's source
+(`input=NAME source=cache|network reason=...`).
+
+- **Cache hit.** Every input is the cache's, and the job contacts no external
+  host.
+- **Cache miss.** `apt-get update` and `--download-only` are tried up to 5
+  times, with pauses of 15, 30, 45 and 60 s. Each other input's script is run
+  up to 3 times; `cached-download.sh` also retries each download for 240 s.
+
+Every acquired input is checked as its consumers will use it. The corpus and
+the runtime are extracted and verified. The checkouts must be the pinned
+commits. The closure must install from the bundle alone on the preparation's
+image: an `apt-get --simulate` with no package lists. The job then publishes
+the bundle as the attempt's companion artifact, `ARTIFACT-NAME-offline`. As for
+the release inputs, only a push or dispatch on `main` saves the caches.
+
+**Consumers.** The `hosted-tools` action downloads the companion artifact. It
+reads no cache: the artifact is this run's resolution, so every job of the run
+installs the same versions. It checks the manifest
+(`hosted-offline.sh verify`): the format, the package list, the release and
+architecture, every `.deb`'s SHA-256, and no file the manifest doesn't list.
+It then sets `BUSTER_HOSTED_OFFLINE`, `BUSTER_CI_CACHE` and
+`BUSTER_CI_OFFLINE=1` for every later step.
+
+- `setup-hosted.sh` runs `hosted-offline.sh apt-install`. That is
+  `apt-get install --no-download` of the manifest's `.debs`, resolved against
+  the installed packages alone: an empty `Dir::State::Lists`, so neither the
+  image's lists nor its sources play any part, and there is no
+  `apt-get update`. It then compares every recorded version with dpkg's, and
+  lists them in the step summary.
+- With `BUSTER_CI_OFFLINE=1`, `cached-download.sh`, `fetch-c-testsuite.sh` and
+  `fetch-sqlite.sh` read the bundle alone. A missing file, a hash that doesn't
+  match or a broken mirror fails the step. Nothing is deleted or fetched again.
+- A single-job workflow (`build.yml`, an empty `artifact-name`) is its own
+  preparation. It restores the same caches and runs `prepare` itself.
+
+**Image rollouts.** GitHub rolls a new runner image out over several days, so a
+shard can draw a different image from its preparation's. It still installs the
+bundle's `.deb`s, with a warning, and every `bundle` record must hold. An image
+package whose version differs from its `image` record is reported, but only on
+another image; on the bundle's own image it fails. Where the closure no longer
+installs on the other image, the step fails, naming both images. Rerunning the
+failed jobs may draw the bundle's image; a new run resolves the closure for
+whatever image its preparation draws.
+
+**Recovery.** A corrupt restored cache entry is reacquired by the preparation.
+Actions caches are immutable, so delete that exact entry to stop reacquiring it
+on every run. A consumer never repairs anything: rerun the workflow, or its
+preparation job, not just a shard.
+
+**Validation.** `bash tests/ci/hosted-offline.sh` takes about 10 s and needs no
+network. It stands in for `apt-get`, `dpkg-query`, `sudo` and `curl`, uses real
+`.deb`s and Git upstreams, and covers:
+
+- a cold preparation through retried failures, and a warm one with every source
+  gone;
+- a consumer reading an artifact-shaped copy;
+- a missing file, a bad hash and an unlisted `.deb`;
+- a changed image, for both the preparation and a consumer;
+- a changed package list, release or format;
+- the repair of a damaged bundle.
+
+The preparation job runs it before preparing. `hosted-inputs-drill.yml` adds
+two real-runner jobs:
+
+- **A shard's setup.** It takes Ubuntu's mirrors (every host apt's sources name,
+  and plain HTTP), packages.microsoft.com and GitHub's release, raw and package
+  hosts down before the handoff's restore, and github.com and
+  codeload.github.com right after it. Setup, the baseline runtime, the corpus
+  and both mirrors must still succeed.
+- **A warm preparation.** It prepares cold, keeps the bundle in a cache of its
+  own, takes every source down, and requires a fresh restore to prepare with
+  every input from the cache.

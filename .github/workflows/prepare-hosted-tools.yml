@@ -3,14 +3,15 @@ on:
   workflow_call:
     outputs:
       artifact-name:
-        description: Use this successful attempt's artifact even when only a failed consumer is rerun.
+        description: Use this successful attempt's artifact even when only a failed consumer is rerun. The run's offline inputs are its companion, ARTIFACT-NAME-offline.
         value: ${{ jobs.prepare.outputs.artifact-name }}
 permissions:
   contents: read
 jobs:
   prepare:
     runs-on: ubuntu-26.04
-    timeout-minutes: 20
+    # A cold preparation takes about two minutes; the rest bounds the retries of every acquisition in an outage.
+    timeout-minutes: 30
     outputs:
       artifact-name: ${{ steps.identity.outputs.artifact-name }}
     steps:
@@ -25,7 +26,9 @@ jobs:
         run: printf 'artifact-name=hosted-inputs-%s-%s\n' "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
       - name: Check acquisition and installation failure fixtures
         shell: bash
-        run: bash tests/ci/hosted-tools.sh
+        run: |
+          bash tests/ci/hosted-tools.sh
+          bash tests/ci/hosted-offline.sh
       - name: Restore pinned release inputs
         id: cache
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -36,11 +39,46 @@ jobs:
       - name: Acquire missing inputs once and verify the complete set
         shell: bash
         run: bash tools/ci/hosted-release.sh prepare "$RUNNER_TEMP/hosted-release-inputs"
+      # The jobs' other external inputs (#2275; docs/hosted-toolchain.md, "Offline inputs"): the apt closure of
+      # setup-hosted.sh's packages, which is this runner image's, and the baseline runtime's .debs, the corpus and the
+      # c-testsuite and SQLite mirrors, which their scripts pin. Each is keyed by what fixes its contents.
+      - name: Name the offline inputs' caches
+        id: offline
+        shell: bash
+        run: bash tools/ci/hosted-offline.sh keys >> "$GITHUB_OUTPUT"
+      - name: Restore the apt closure resolved on this runner image
+        id: apt-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        continue-on-error: true
+        with:
+          path: ${{ runner.temp }}/hosted-offline/apt
+          key: ${{ steps.offline.outputs.apt-key }}
+      - name: Restore the pinned downloads and mirrors
+        id: ci-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        continue-on-error: true
+        with:
+          path: ${{ runner.temp }}/hosted-offline/ci
+          key: ${{ steps.offline.outputs.ci-key }}
+      # On a hit, every input checks out offline and nothing external is contacted; a miss acquires each input once,
+      # with retries, and checks it as its consumers will read it.
+      - name: Acquire missing offline inputs once and check each as the jobs read it
+        shell: bash
+        run: bash tools/ci/hosted-offline.sh prepare "$RUNNER_TEMP/hosted-offline"
       - name: Publish this attempt's fallback handoff before starting consumers
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ${{ steps.identity.outputs.artifact-name }}
           path: ${{ runner.temp }}/hosted-release-inputs/*
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 7
+      # Every consumer reads this artifact, not a cache: it is this run's resolution, the same for every job.
+      - name: Publish this attempt's offline inputs beside it
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ steps.identity.outputs.artifact-name }}-offline
+          path: ${{ runner.temp }}/hosted-offline/
           compression-level: 0
           if-no-files-found: error
           retention-days: 7
@@ -51,3 +89,17 @@ jobs:
         with:
           path: ${{ runner.temp }}/hosted-release-inputs
           key: hosted-inputs-v1-linux-x64-${{ hashFiles('tools/ci/hosted-tools.lock') }}
+      - name: Seed the apt closure's cache from the trusted default branch only
+        if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && steps.apt-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        continue-on-error: true
+        with:
+          path: ${{ runner.temp }}/hosted-offline/apt
+          key: ${{ steps.offline.outputs.apt-key }}
+      - name: Seed the downloads' and mirrors' cache from the trusted default branch only
+        if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && steps.ci-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        continue-on-error: true
+        with:
+          path: ${{ runner.temp }}/hosted-offline/ci
+          key: ${{ steps.offline.outputs.ci-key }}

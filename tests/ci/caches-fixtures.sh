@@ -9,6 +9,8 @@ work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 fail() { printf 'tests/ci/caches.sh: %s\n' "$1" >&2; exit 1; }
 export BUSTER_CI_CACHE="$work/cache"
+# The 9700X's caches, which refresh what fails: a hosted job's offline mode is tests/ci/hosted-offline.sh's.
+export BUSTER_CI_OFFLINE=0
 
 # cached-download.sh: a miss downloads and keeps the file, a hit reuses it, a corrupted copy is replaced, and a source
 # that doesn't match fails without leaving anything cached.
