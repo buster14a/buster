@@ -12585,8 +12585,8 @@ static __attribute__((noinline)) void check_lower_vector_builtin(CheckLowerWrite
             }
         }
         // Of a transport vector, or into one (#137), element by element: its entries are its own.
-        const bool transport = check_lower_vector_of(writer, operand_type) == 0 || check_lower_vector_of(writer, result) == 0 ||
-                               check_lower_vector_wide(writer, operand_type) || check_lower_vector_wide(writer, result);
+        bool transport = check_lower_vector_of(writer, operand_type) == 0 || check_lower_vector_of(writer, result) == 0 ||
+                         check_lower_vector_wide(writer, operand_type) || check_lower_vector_wide(writer, result);
         if (transport)
         {
             check_lower_transport_convertvector(writer, node);
@@ -12594,6 +12594,20 @@ static __attribute__((noinline)) void check_lower_vector_builtin(CheckLowerWrite
         else
         {
             reason = check_vector_convert_row(types, target, source, check_lower_vector_of(writer, operand_type), result, rows);
+            // Without AVX-512, a conversion between integers and floats or doubles that no row of SSE's or AVX's takes
+            // (unsigned integers', 64-bit integers' without AVX-512DQ) converts element by element, as C converts each
+            // scalar, which clang's sequences compute (#1834).
+            const CheckVectorShape in = check_vector_builtin_shape(types, source);
+            const CheckVectorShape out = check_vector_builtin_shape(types, result);
+            const uint64_t evex = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512VL);
+            const bool scalars = in.element != 0 && out.element != 0 && !in.bfloat && !out.bfloat && !(in.floating && in.element == 2) &&
+                                 !(out.floating && out.element == 2) && (in.floating != out.floating);
+            if (reason != NULL && operand_node == node && scalars && (target->features & evex) != evex)
+            {
+                reason = NULL;
+                transport = true;
+                check_lower_transport_convertvector(writer, node);
+            }
         }
         if (reason == NULL && !transport)
         {
@@ -12605,6 +12619,10 @@ static __attribute__((noinline)) void check_lower_vector_builtin(CheckLowerWrite
     else if (check_lower_bool_vector(types, result) && check_builtin_vector_elementwise(builtin))
     {
         check_lower_transport_boolean_builtin(writer, node, builtin, effect->evaluated_argument_count);
+    }
+    else if (check_lower_bits_elements(writer, builtin, result, effect->evaluated_argument_count))
+    {
+        check_lower_transport_bit_builtin(writer, node, builtin, effect->evaluated_argument_count);
     }
     else if ((check_lower_transport_type(types, result) || check_lower_vector_wide(writer, result) ||
               (builtin == CBUILTIN_ELEMENTWISE_LDEXP && count >= 2 && (check_lower_transport_type(types, stream->argument_conversions[first + 1].type) ||
@@ -15091,6 +15109,21 @@ static bool check_lower_asm_segment(const CheckLowerWriter* writer, const CheckI
     return result;
 }
 
+// An asm operand's input value (place->type's): the operand's expression's, or an __m64's 8 bytes (#1846,
+// CheckAsmPlace.m64) loaded as an unsigned long through its object's address (CheckAsmPlace.object's).
+static void check_lower_asm_value(CheckLowerWriter* writer, const CheckAsmPlace* place, uint32_t node)
+{
+    if (place->m64)
+    {
+        check_lower_instruction(writer, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_U64, 0);
+        check_lower_expression(writer, place->object, true, 0);
+    }
+    else
+    {
+        check_lower_expression(writer, node, false, place->type);
+    }
+}
+
 // Whether an asm body's operand `place` is its call row's argument (#1839, CheckProgramAsm.inline_passed): a value or an
 // address a register holds when the template starts (check_asm_loads'), a general register's, an XMM register's or a
 // memory operand's base.
@@ -15180,7 +15213,7 @@ static void check_lower_asm(CheckLowerWriter* writer, CheckControl control)
             }
             else if (place->kind != BUSTER_CHECK_ASM_CONSTANT)
             {
-                check_lower_expression(writer, node, false, place->type);
+                check_lower_asm_value(writer, place, node);
             }
         }
     }
@@ -15298,7 +15331,7 @@ static void check_lower_asm(CheckLowerWriter* writer, CheckControl control)
             }
             else if (passed)
             {
-                check_lower_expression(writer, node, false, place->type);
+                check_lower_asm_value(writer, place, node);
             }
             else if (place->written && place->read)
             {
@@ -15318,7 +15351,7 @@ static void check_lower_asm(CheckLowerWriter* writer, CheckControl control)
             else if (!passed && place->kind != BUSTER_CHECK_ASM_CONSTANT)
             {
                 check_lower_instruction(writer, BUSTER_TYPED_SET, class, 0);
-                check_lower_expression(writer, node, false, place->type);
+                check_lower_asm_value(writer, place, node);
                 check_lower_asm_slot(writer, object, place->slot);
             }
         }
@@ -15345,7 +15378,7 @@ static void check_lower_asm(CheckLowerWriter* writer, CheckControl control)
             else if (place->kind != BUSTER_CHECK_ASM_CONSTANT)
             {
                 check_lower_instruction(writer, BUSTER_TYPED_SET, class, 0);
-                check_lower_expression(writer, node, false, place->type);
+                check_lower_asm_value(writer, place, node);
                 check_lower_asm_slot(writer, object, place->slot);
             }
         }
@@ -15407,7 +15440,7 @@ static void check_lower_asm(CheckLowerWriter* writer, CheckControl control)
             else if (place->kind != BUSTER_CHECK_ASM_CONSTANT)
             {
                 check_lower_instruction(writer, BUSTER_TYPED_DISCARD, check_lower_class(writer, place->type), 0);
-                check_lower_expression(writer, node, false, place->type);
+                check_lower_asm_value(writer, place, node);
             }
         }
     }
@@ -16280,6 +16313,15 @@ static void check_lower_node_count(const CheckProgram* program, uint32_t node, C
         }
         counts->transport_entries += room;
         counts->transport_locals += room != 0 ? 12 : 0;
+        // A bit builtin's elements, each its SWAR sequence (check_lower_transport_bit_builtin): up to 144 entries an element,
+        // its sequence's 96 and its operands' reads and its store, for a vector of any width (#1834).
+        const bool bits = member == CBUILTIN_ELEMENTWISE_POPCOUNT || member == CBUILTIN_ELEMENTWISE_BITREVERSE || member == CBUILTIN_ELEMENTWISE_CLZG ||
+                          member == CBUILTIN_ELEMENTWISE_CTZG || member == CBUILTIN_ELEMENTWISE_FSHL || member == CBUILTIN_ELEMENTWISE_FSHR;
+        if (op == CHECK_OP_BUILTIN_VECTOR && bits && check_lower_transport_is_vector(types, type))
+        {
+            counts->transport_entries += 144 * (uint64_t)check_builtin_vector_lanes(types, type_conversion_operand(types, type));
+            counts->transport_locals += room != 0 ? 0 : 12;
+        }
     }
     // The roundings and the fused multiply-add are calls too where the unit's target lacks their instructions
     // (check_lower_vector_library), which the bound counts whatever the target.

@@ -149,6 +149,13 @@ struct Tier1MasksTest
     // copies renamed into a live value's register; and of each, those the code's certificate refused.
     uint32_t row_reloads;
     uint32_t row_reloads_refused;
+    // The asm bodies' code certified (#1839, tier1_masks_test_asm_mutants), and their mutants: a mask's reload after the
+    // body left out, a body's record changed; and those refused.
+    uint32_t asm_certified;
+    uint32_t asm_reloads;
+    uint32_t asm_reloads_refused;
+    uint32_t asm_records;
+    uint32_t asm_records_refused;
     uint32_t row_stagings;
     uint32_t row_stagings_refused;
     // Claimed placements whose roles share a register Tier 0's placement keeps apart, and whose opmask register named by
@@ -3755,6 +3762,66 @@ static void tier1_masks_test_row_mutants(Tier1MasksTest* test, const Tier1Select
     tier1_masks_test_expect(test, emitted->row_placements == 0 || !tier1_masks_test_refused(test, plan, emitted), "the machine rows' code, put back, is certified");
 }
 
+// The code's certificate takes an asm body's code (#1839, tier1_cert_emitted_asm) and refuses it corrupted. For each asm
+// body of the function, its code is certified as it is; then each mask's reload after it (a kmov from the frame, the
+// restore of a mask live in a register the body writes) is made its register's move into itself, the mask lost; and each
+// of its records gets another immediate, no longer the body's. Each must be refused; everything is put back after.
+static void tier1_masks_test_asm_mutants(Tier1MasksTest* test, const Tier1SelectPlan* plan, Tier1EmitResult* emitted)
+{
+    const IrFunction* function = plan->function;
+    X86Instruction* records = emitted->code.records;
+    for (uint32_t node = 0; node < function->instruction_count; node += 1)
+    {
+        const bool body = !plan->covered[node] && plan->patterns[node].rule == TIER1_RULE_ASM;
+        const uint32_t own = tier1_origin(TIER1_ORIGIN_NODE, node);
+        uint32_t first = 0;
+        while (body && first < emitted->code.count && emitted->origins[first] != own)
+        {
+            first += 1;
+        }
+        uint32_t end = first;
+        while (body && end < emitted->code.count && emitted->origins[end] == own)
+        {
+            end += 1;
+        }
+        if (body)
+        {
+            Tier1CertEmittedStats stats = { 0 };
+            const Tier1CertEmittedReason reason = tier1_certificate_emitted_check(plan, emitted, &test->output, &test->scratch, 0, &stats);
+            test->asm_certified += reason == TIER1_CERT_EMITTED_OK;
+            tier1_masks_test_expect(test, reason == TIER1_CERT_EMITTED_OK, "an asm body's code is certified (#1839)");
+        }
+        // The restores after the body, up to the next node's records.
+        for (uint32_t r = end; body && r < emitted->code.count && tier1_cert_emitted_kind(emitted->origins[r]) == TIER1_ORIGIN_MOVE; r += 1)
+        {
+            const X86Instruction record = records[r];
+            for (uint32_t width = 1; width <= 8; width *= 2)
+            {
+                const Tier1SelectMaskForms* forms = tier1_select_mask_forms(width);
+                if (record.form == forms->load && record.mode == BUSTER_X86_MEMORY_BASE && record.rm == emitted->frame.base_register)
+                {
+                    records[r] = (X86Instruction){ .form = forms->move, .reg = record.reg, .rm = record.reg };
+                    const bool refused = tier1_masks_test_refused(test, plan, emitted);
+                    records[r] = record;
+                    test->asm_reloads += 1;
+                    test->asm_reloads_refused += refused;
+                    tier1_masks_test_expect(test, refused, "a mask live across an asm body left without its reload is refused (#1839)");
+                }
+            }
+        }
+        for (uint32_t r = first; body && r < end; r += 1)
+        {
+            const X86Instruction record = records[r];
+            records[r].immediate += 1;
+            const bool refused = tier1_masks_test_refused(test, plan, emitted);
+            records[r] = record;
+            test->asm_records += 1;
+            test->asm_records_refused += refused;
+            tier1_masks_test_expect(test, refused, "an asm body's record changed from the body's is refused (#1839)");
+        }
+    }
+}
+
 static void tier1_masks_test_path(Tier1MasksTest* test, const Tier1MasksFixture* fixture, const IrFunction* function, const IrDominance* dominance, bool vector, bool rematerialize, const uint8_t* inputs,
                                   const uint64_t* counts, const uint8_t* expected)
 {
@@ -3791,6 +3858,7 @@ static void tier1_masks_test_path(Tier1MasksTest* test, const Tier1MasksFixture*
     if (ok)
     {
         tier1_masks_test_row_mutants(test, &plan, &emitted);
+        tier1_masks_test_asm_mutants(test, &plan, &emitted);
     }
     if (ok)
     {
@@ -6356,6 +6424,10 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
                test.row_splits, test.row_reloads_refused, test.row_reloads, test.row_stagings_refused, test.row_stagings, test.row_roles_refused, test.row_roles, test.row_overlaps_refused, test.row_overlaps,
                test.row_k0_refused, test.row_k0,
                test.row_split_refused, test.row_split_mutants, test.vector_moves_refused, test.vector_moves);
+        tier1_masks_test_expect(&test, test.asm_certified != 0 && test.asm_reloads != 0 && test.asm_records != 0,
+                                "the asm bodies' code is certified, and their mutants include masks' reloads left out and records changed (#1839)");
+        printf("test-tier1-masks: asm bodies' code certified %u times; mutants refused: masks' reloads after a body left out %u of %u, a body's records changed %u of %u\n", test.asm_certified,
+               test.asm_reloads_refused, test.asm_reloads, test.asm_records_refused, test.asm_records);
         printf("test-tier1-masks: %" PRIu64 " checks, %" PRIu64 " failures; %s: %" PRIu64 " runs against the interpreter; %" PRIu64 " records, %" PRIu64 " mask moves, %" PRIu64 " through k0, %" PRIu64 " mask spills, %" PRIu64 " reloads, %" PRIu64 " masks saved around calls, %" PRIu64 " through frame objects, %" PRIu64 " general values recomputed beside them; %u refusals (seed=%" PRIu64 ")\n",
                test.checks, test.failures, test.native ? "native" : "no AVX-512 here, compiled only", test.native_runs, test.records, test.mask_moves, test.scratch_moves, test.mask_stores, test.mask_loads, test.call_saves, test.frame_accesses,
                test.recomputed, test.refused, seed);

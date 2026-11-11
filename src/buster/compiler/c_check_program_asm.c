@@ -153,6 +153,11 @@ struct CheckAsmPlace
     // An x87 input whose depth another input's value takes (#1846: two operands at one depth, clang's one register),
     // which the helper doesn't load.
     bool shadowed;
+    // An __m64 in an MMX register (#1846, the owner's decision on #1447): its 8 bytes as an unsigned long (`type`),
+    // which the lowering reads through the object's address (`object`, the operand's lvalue node past its value's
+    // conversions), as Tier 0 has no 8-byte vector load.
+    bool m64;
+    uint32_t object;
 };
 
 // A label a template defines (AsmCodeLabel): its spelling, its record in its code, the helper's or the naked function's
@@ -2015,6 +2020,24 @@ static int32_t check_asm_variable_register(const CheckProgram* program, uint32_t
     return result;
 }
 
+// An __m64 input's object (#1846, CheckAsmPlace.m64): the node of the lvalue its value is read from, past the casts that
+// keep its value (check_asm_noop_cast) and its lvalue conversion, or BUSTER_CHECK_NONE for a value of no object.
+static uint32_t check_asm_m64_object(const CheckProgram* program, uint32_t node)
+{
+    const CheckStream* stream = program->stream;
+    const CheckGraph* graph = &program->input->graph;
+    uint32_t at = node;
+    bool walking = true;
+    while (walking && at < stream->count && (graph->ops[at] == CHECK_OP_CAST || graph->ops[at] == CHECK_OP_CONVERT))
+    {
+        const uint32_t inner = graph->operand0[at];
+        walking = inner < at && check_asm_noop_cast(program->types, check_stream_type(stream, inner), check_stream_type(stream, at));
+        at = walking ? inner : at;
+    }
+    const bool object = at < stream->count && check_stream_value(stream, at).category == CHECK_LVALUE;
+    return object ? at : BUSTER_CHECK_NONE;
+}
+
 // Plans statement `s` (its operands from `operands`, check_asms_run's) into `plan`: its places, and its helper's code
 // into `helper`, or the reason the lowering refuses it, its template matched against `index`. False only for an arena
 // without room, with both arenas then as they were.
@@ -2477,6 +2500,17 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
         {
             place->kind = BUSTER_CHECK_ASM_MMX;
             place->size = (uint8_t)size;
+        }
+        else if (constraint->mmx && (kind == BUSTER_TYPE_KIND_VECTOR || kind == BUSTER_TYPE_KIND_EXT_VECTOR) && size == 8)
+        {
+            // An __m64 (#1846): its 8 bytes, an object's, read through its address (CheckAsmPlace.m64), as clang's code
+            // moves them by movq. An input that isn't an object has no address to read it through.
+            place->kind = BUSTER_CHECK_ASM_MMX;
+            place->size = 8;
+            place->type = BUSTER_TYPE_ULONG;
+            place->m64 = true;
+            place->object = output ? checked->node : check_asm_m64_object(program, checked->node);
+            reason = place->object != BUSTER_CHECK_NONE ? NULL : "inline assembly __m64 inputs that aren't objects";
         }
         else if (constraint->masks != 0 && integer && registered)
         {
