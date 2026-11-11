@@ -506,43 +506,12 @@ static const char* check_semantic_builtin_spelling(const String8* parts, uint32_
     return result;
 }
 
-static const char* check_semantic_assert_floating(long double value, uint32_t precision, Arena* scratch);
-
-// A number literal's text as clang's StmtPrinter prints it (#2171): an integer's (VisitIntegerLiteral) value in decimal
-// and its type's suffix (`1u`'s `1U`, `0x7fffffffffffffffLL`'s `9223372036854775807LL`) where it is int, long or long
-// long, signed or not; a float's, a double's or a long double's (PrintFloatingLiteral) APFloat spelling, a `.` where
-// that is all digits, and `F` or `L` (`2.0`'s `2.`, `1e10`'s `1.0E+10`, `1.5f`'s `1.5F`). Empty for any other, which
-// the caller prints as written.
-static String8 check_semantic_number_literal(const Parser* parser, const CheckInput* input, const CheckStream* stream, uint32_t token, Arena* scratch)
-{
-    const CheckGraph* graph = input != NULL ? &input->graph : NULL;
-    const uint32_t node = graph != NULL && stream != NULL && input->token_nodes != NULL && token < input->token_count &&
-                          parser->tokens.kinds[token] == PARSE_KIND_NUMBER ? input->token_nodes[token] : BUSTER_CHECK_NONE;
-    const bool literal = node != BUSTER_CHECK_NONE && node < graph->count && node < stream->count && graph->ops[node] == CHECK_OP_VALUE && graph->tokens[node] == token;
-    const CheckValue value = literal ? check_stream_value(stream, node) : (CheckValue){ 0 };
-    const TypeId type = type_unqualified(value.type);
-    const char* suffix = type == BUSTER_TYPE_INT ? "" : type == BUSTER_TYPE_UINT ? "U" : type == BUSTER_TYPE_LONG ? "L" : type == BUSTER_TYPE_ULONG ? "UL" :
-                         type == BUSTER_TYPE_LLONG ? "LL" : type == BUSTER_TYPE_ULLONG ? "ULL" : NULL;
-    const bool is_signed = type == BUSTER_TYPE_INT || type == BUSTER_TYPE_LONG || type == BUSTER_TYPE_LLONG;
-    const uint64_t bits = (uint64_t)value.integer;
-    const char* text = literal && suffix != NULL && value.constant_kind == CHECK_CONSTANT_INTEGER ?
-                       (is_signed ? check_warning_text(scratch, "%" PRId64 "%s", (int64_t)bits, suffix) : check_warning_text(scratch, "%" PRIu64 "%s", bits, suffix)) : NULL;
-    const bool floating = literal && value.constant_kind == CHECK_CONSTANT_FLOATING &&
-                          (type == BUSTER_TYPE_FLOAT || type == BUSTER_TYPE_DOUBLE || type == BUSTER_TYPE_LONG_DOUBLE);
-    const char* spelled = floating ? check_semantic_assert_floating(value.floating, type == BUSTER_TYPE_FLOAT ? 24 : type == BUSTER_TYPE_DOUBLE ? 53 : 64, scratch) :
-                          NULL;
-    const bool digits = spelled != NULL && strspn(spelled, "-0123456789") == strlen(spelled);
-    text = spelled != NULL ? check_warning_text(scratch, "%s%s%s", spelled, digits ? "." : "", type == BUSTER_TYPE_FLOAT ? "F" : type == BUSTER_TYPE_LONG_DOUBLE ? "L" : "") :
-           text;
-    return text != NULL ? (String8){ .pointer = (char*)text, .length = strlen(text) } : (String8){ 0 };
-}
-
 // Spell a failed assertion's requirement with expression spacing, not the source's arbitrary whitespace, and its character
-// constants by their values (check_semantic_character); with `input` and `stream`, its number literals by value
-// (check_semantic_number_literal), as a static assertion's are. This is a bounded token pass, including macro expansions;
-// it never walks the expression recursively.
-static const char* check_semantic_requirement_printed(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, uint32_t first,
-                                                      uint32_t end, Arena* scratch)
+// constants by their values (check_semantic_character). This is a bounded token pass, including macro expansions; it never
+// walks the expression recursively. `spelled`, where not NULL, holds a token's replacement as clang's printer spells it
+// (check_semantic_literal_spelling), one for each token from `first`.
+static const char* check_semantic_requirement(const Parser* parser, Preprocessor* pp, uint32_t first, uint32_t end, const char* const* spelled,
+                                              Arena* scratch)
 {
     const uint32_t count = end - first;
     String8* parts = BUSTER_ARENA_PUSH_ARRAY(scratch, String8, count);
@@ -550,10 +519,11 @@ static const char* check_semantic_requirement_printed(const Parser* parser, Prep
     uint64_t length = 0;
     for (uint32_t i = 0; valid && i < count; i += 1)
     {
-        const String8 literal = check_semantic_number_literal(parser, input, stream, first + i, scratch);
-        parts[i] = literal.length != 0 ? literal : check_semantic_token(parser, pp, first + i, scratch);
+        const char* replacement = spelled != NULL ? spelled[i] : NULL;
+        parts[i] = replacement != NULL ? (String8){ .pointer = (char*)replacement, .length = strlen(replacement) } : check_semantic_token(parser, pp, first + i, scratch);
         // A character constant by its value, as clang prints it (#1999).
-        parts[i] = parts[i].length != 0 && parser->tokens.kinds[first + i] == PARSE_KIND_CHARACTER ? check_semantic_character(pp, parts[i], scratch) : parts[i];
+        parts[i] = replacement == NULL && parts[i].length != 0 && parser->tokens.kinds[first + i] == PARSE_KIND_CHARACTER ?
+                   check_semantic_character(pp, parts[i], scratch) : parts[i];
         valid = parts[i].length != 0 && parts[i].length < UINT64_MAX - length - 1;
         length += valid ? parts[i].length + 1 : 0;
     }
@@ -578,13 +548,12 @@ static const char* check_semantic_requirement_printed(const Parser* parser, Prep
         {
             stop += 1;
         }
-        const char* spelled = cast && stop > run ? check_semantic_builtin_spelling(parts + run, stop - run) : NULL;
-        // C23's `_Bool` is clang's `bool` (#2171).
-        const bool boolean = cast && stop == run + 1 && parts[run].length == 5 && memcmp(parts[run].pointer, "_Bool", 5) == 0;
-        spelled = spelled == NULL && boolean && parser->language.standard >= 2023 ? "bool" : spelled;
-        if (spelled != NULL)
+        // C23's bool keyword is the type _Bool spells there (clang's printer's "bool" where the language has it).
+        const bool boolean = cast && stop == run + 1 && parser->language.standard >= 2023 && parts[run].length == 5 && memcmp(parts[run].pointer, "_Bool", 5) == 0;
+        const char* builtin = boolean ? "bool" : cast && stop > run ? check_semantic_builtin_spelling(parts + run, stop - run) : NULL;
+        if (builtin != NULL)
         {
-            parts[run] = (String8){ .pointer = (char*)spelled, .length = strlen(spelled) };
+            parts[run] = (String8){ .pointer = (char*)builtin, .length = strlen(builtin) };
             length += parts[run].length;
             for (uint32_t k = run + 1; k < stop; k += 1)
             {
@@ -621,251 +590,295 @@ static const char* check_semantic_requirement_printed(const Parser* parser, Prep
     return result;
 }
 
-static const char* check_semantic_requirement(const Parser* parser, Preprocessor* pp, uint32_t first, uint32_t end, Arena* scratch)
+static void check_semantic_add_note(const Parser* parser, PPOutputDiagnosticNote* notes, uint32_t* count, uint32_t token, const char* message);
+
+// c_check_warning_number.c's printers, which c_check_common_warnings.c includes later in the unit.
+static void check_common_number(char* buffer, uint64_t capacity, __int128 value);
+static void check_common_float_number(char* output, uint64_t capacity, long double value, uint32_t precision);
+static void check_common_quad_number(char* output, uint64_t capacity, unsigned __int128 bits, uint32_t precision);
+
+// A node under its implicit conversions, clang's IgnoreParenImpCasts: parentheses have no nodes, and CONVERT is only
+// ever implicit.
+static uint32_t check_semantic_bare(const CheckGraph* graph, uint32_t node)
 {
-    return check_semantic_requirement_printed(parser, pp, NULL, NULL, first, end, scratch);
+    uint32_t result = node;
+    for (uint32_t steps = 0; result < graph->count && graph->ops[result] == CHECK_OP_CONVERT && steps < graph->count; steps += 1)
+    {
+        result = graph->operand0[result];
+    }
+    return result;
 }
 
-// A finite floating value of `precision` bits as llvm's APFloat::toString prints it with its defaults (#2171): rounded to
-// 2 + precision * 59 / 196 significant digits, its trailing zeros dropped, in plain notation unless that needs more than
-// three zeros of padding or more digits than those (`100`, `0.5`, `0.10000000000000001`, `1.0E+10`). NULL for an
-// infinity or a NaN.
-static const char* check_semantic_assert_floating(long double value, uint32_t precision, Arena* scratch)
+// Whether a bare node is an integer literal or C23's true or false (clang's IntegerLiteral and CXXBoolLiteralExpr): a
+// number token's VALUE with an integer constant. A floating or a character literal is neither.
+static bool check_semantic_integer_literal(const Parser* parser, const CheckGraph* graph, const CheckStream* stream, uint32_t node)
 {
-    const uint32_t digits = 2 + precision * 59 / 196;
-    char printed[64];
-    const int length = isfinite(value) ? snprintf(printed, sizeof(printed), "%.*Le", (int)digits - 1, value) : -1;
-    const char* result = NULL;
-    if (length > 0 && (uint32_t)length < sizeof(printed))
+    const uint32_t token = node < graph->count && graph->ops[node] == CHECK_OP_VALUE ? graph->tokens[node] : BUSTER_CHECK_NONE;
+    return token < parser->tokens.count && parser->tokens.kinds[token] == PARSE_KIND_NUMBER && check_stream_constant_kind(stream, node) == CHECK_CONSTANT_INTEGER;
+}
+
+// Whether a bare node is any literal clang's UsefulToPrintExpr finds obvious: an integer, floating or character one, or
+// true or false.
+static bool check_semantic_literal(const Parser* parser, const CheckGraph* graph, uint32_t node)
+{
+    const uint32_t token = node < graph->count && graph->ops[node] == CHECK_OP_VALUE ? graph->tokens[node] : BUSTER_CHECK_NONE;
+    return token < parser->tokens.count && (parser->tokens.kinds[token] == PARSE_KIND_NUMBER || parser->tokens.kinds[token] == PARSE_KIND_CHARACTER);
+}
+
+// Whether a node's condition is known to fail, as EvaluateAsBooleanCondition finds it: its constant is zero.
+static bool check_semantic_fails(const CheckStream* stream, uint32_t node)
+{
+    const CheckValue value = check_stream_value(stream, node);
+    const bool result = value.constant_kind == CHECK_CONSTANT_INTEGER ? value.integer == 0 :
+                        value.constant_kind == CHECK_CONSTANT_FLOATING ? value.floating == 0 :
+                        value.constant_kind == CHECK_CONSTANT_COMPLEX && value.floating == 0 && value.imaginary == 0;
+    return result;
+}
+
+// Whether parse token `token` lies in the subtree of `ancestor`: whether its parents reach it.
+static bool check_semantic_under(const Parser* parser, uint32_t token, uint32_t ancestor)
+{
+    uint32_t at = token;
+    for (uint32_t steps = 0; at != ancestor && at < parser->tokens.count && steps < parser->tokens.count; steps += 1)
     {
-        // `[-]d.ddddde[+-]x`: the significand's digits D and the exponent of D as an integer, `value = D * 10^exponent`.
-        const bool negative = printed[0] == '-';
-        const char* mantissa = printed + (negative ? 1 : 0);
-        const char* e = strchr(mantissa, 'e');
-        char significand[64];
-        uint32_t count = 0;
-        for (const char* c = mantissa; e != NULL && c < e; c += 1)
+        at = parser->tree.parents[at];
+    }
+    return at == ancestor;
+}
+
+// The least and the greatest token of the nodes of `node`'s subtree but its implicit conversions, those in [first, end),
+// and, in `literals` (one for each token from `first`), each VALUE node's at its token. `stack` holds the graph's count.
+static void check_semantic_subtree(const CheckGraph* graph, uint32_t node, uint32_t first, uint32_t end, uint32_t* literals, uint32_t* stack,
+                                   uint32_t* low, uint32_t* high)
+{
+    uint32_t top = 0;
+    stack[top++] = node;
+    while (top != 0)
+    {
+        const uint32_t at = stack[--top];
+        const CheckOp op = graph->ops[at];
+        const uint32_t token = graph->tokens[at];
+        if (op != CHECK_OP_CONVERT && token >= first && token < end)
         {
-            if (*c >= '0' && *c <= '9')
+            *low = token < *low ? token : *low;
+            *high = *high == BUSTER_CHECK_NONE || token > *high ? token : *high;
+            literals[token - first] = op == CHECK_OP_VALUE || op == CHECK_OP_SIZEOF || op == CHECK_OP_ALIGNOF ? at : literals[token - first];
+        }
+        const uint32_t operands[3] = { graph->operand0[at], graph->operand1[at], graph->operand2[at] };
+        for (uint32_t i = 0; i < 3; i += 1)
+        {
+            if (operands[i] < at && top < graph->count)
             {
-                significand[count] = *c;
-                count += 1;
+                stack[top++] = operands[i];
             }
         }
-        int exponent = e != NULL ? atoi(e + 1) - (int)count + 1 : 0;
-        while (count > 1 && significand[count - 1] == '0')
+        const bool arguments = check_graph_has_arguments(op) && graph->argument_offsets != NULL;
+        const uint32_t offset = arguments ? graph->argument_offsets[at] : 0;
+        const uint32_t count = arguments ? graph->argument_counts[at] : 0;
+        for (uint32_t i = 0; i < count && offset + i < graph->argument_count; i += 1)
         {
-            count -= 1;
-            exponent += 1;
-        }
-        const bool zero = count == 1 && significand[0] == '0';
-        exponent = zero ? 0 : exponent;
-        const int msd = exponent + (int)count - 1;
-        const bool scientific = exponent >= 0 ? ((uint32_t)exponent > 3 || count + (uint32_t)exponent > digits) : msd < 0 && (uint32_t)-msd > 3;
-        char text[96];
-        uint32_t at = 0;
-        text[at++] = negative ? '-' : 0;
-        at = negative ? 1 : 0;
-        if (scientific)
-        {
-            text[at++] = significand[0];
-            text[at++] = '.';
-            if (count == 1)
+            const uint32_t argument = graph->argument_nodes[offset + i];
+            if (argument < at && top < graph->count)
             {
-                text[at++] = '0';
-            }
-            for (uint32_t i = 1; i < count; i += 1)
-            {
-                text[at++] = significand[i];
-            }
-            at += (uint32_t)snprintf(text + at, sizeof(text) - at, "E%c%d", msd >= 0 ? '+' : '-', msd >= 0 ? msd : -msd);
-        }
-        else if (exponent >= 0)
-        {
-            for (uint32_t i = 0; i < count; i += 1)
-            {
-                text[at++] = significand[i];
-            }
-            for (int z = 0; z < exponent; z += 1)
-            {
-                text[at++] = '0';
+                stack[top++] = argument;
             }
         }
-        else
+    }
+}
+
+// A floating constant as APFloat::toString prints it at its default precision, its semantics' 2 + bits * 59 / 196 digits
+// (clang's ConvertAPValueToString and StmtPrinter's floating literals). False for a type that isn't a real floating one.
+static bool check_semantic_floating_text(char* output, uint64_t capacity, TypeId type, const CheckValue* value)
+{
+    const uint32_t bits = type == BUSTER_TYPE_BF16 ? 8 : type == BUSTER_TYPE_HALF || type == BUSTER_TYPE_FLOAT16 ? 11 : type == BUSTER_TYPE_FLOAT ? 24 :
+                          type == BUSTER_TYPE_DOUBLE ? 53 : type == BUSTER_TYPE_LONG_DOUBLE ? 64 : type == BUSTER_TYPE_FLOAT128 ? 113 : 0;
+    const uint32_t precision = 2 + bits * 59 / 196;
+    if (type == BUSTER_TYPE_FLOAT128)
+    {
+        check_common_quad_number(output, capacity, value->integer, precision);
+    }
+    else if (bits != 0)
+    {
+        check_common_float_number(output, capacity, value->floating, precision);
+    }
+    return bits != 0 && value->constant_kind == CHECK_CONSTANT_FLOATING;
+}
+
+// A code unit as escapeCStyle<EscapeChar::Single> escapes it, or NULL.
+static const char* check_semantic_escape(uint32_t unit)
+{
+    const char* result = unit == '\\' ? "\\\\" : unit == '\'' ? "\\'" : unit == '\a' ? "\\a" : unit == '\b' ? "\\b" : unit == '\f' ? "\\f" :
+                         unit == '\n' ? "\\n" : unit == '\r' ? "\\r" : unit == '\t' ? "\\t" : unit == '\v' ? "\\v" : NULL;
+    return result;
+}
+
+// A token's replacement as clang's StmtPrinter prints its node (#1447): an integer literal's value in decimal with its
+// type's suffix, a floating one's APFloat digits with a `.` where they have none and its type's suffix, a character
+// one's prefix and its value, escaped; a sizeof's or an alignof's keyword. NULL keeps the token as written (true, false,
+// an imaginary literal).
+static const char* check_semantic_literal_spelling(const Parser* parser, Preprocessor* pp, const TypeTable* types, const CheckGraph* graph,
+                                                   const CheckStream* stream, uint32_t node, Arena* scratch)
+{
+    const uint32_t token = graph->tokens[node];
+    const uint8_t kind = parser->tokens.kinds[token];
+    const CheckOp op = graph->ops[node];
+    const bool query = op == CHECK_OP_SIZEOF || op == CHECK_OP_ALIGNOF;
+    const CheckValue value = check_stream_value(stream, node);
+    const TypeId type = value.type != 0 ? type_unqualified(type_strip_aligned(types, value.type)) : 0;
+    uint32_t width = 0;
+    bool is_signed = false;
+    const bool integer = type != 0 && type != BUSTER_TYPE_BOOL && value.constant_kind == CHECK_CONSTANT_INTEGER &&
+                         check_action_integer_type(types, type, &width, &is_signed) && width != 0;
+    char text[128];
+    const char* result = NULL;
+    if (query)
+    {
+        // The keyword as UnaryExprOrTypeTraitExpr prints it: __alignof's (GNU's preferred alignment) or _Alignof's
+        // whichever C spelling, then a space before an expression operand (`sizeof (x)`), none before a type name's `(`.
+        const uint32_t name = parser->tokens.names[token];
+        const char* keyword = op == CHECK_OP_SIZEOF ? "sizeof" : name == C_NAME_GNU_ALIGNOF || name == C_NAME_GNU_ALIGNOF2 ? "__alignof" : "_Alignof";
+        result = graph->operand0[node] < graph->count ? check_warning_text(scratch, "%s ", keyword) : keyword;
+    }
+    else if (kind == PARSE_KIND_NUMBER && integer)
+    {
+        const bool bit_int = type_kind(types, type) == BUSTER_TYPE_KIND_BIT_INT;
+        const char* suffix = bit_int ? (is_signed ? "wb" : "uwb") : type == BUSTER_TYPE_INT || type == BUSTER_TYPE_INT128 || type == BUSTER_TYPE_UINT128 ? "" :
+                             type == BUSTER_TYPE_UINT ? "U" : type == BUSTER_TYPE_LONG ? "L" : type == BUSTER_TYPE_ULONG ? "UL" :
+                             type == BUSTER_TYPE_LLONG ? "LL" : type == BUSTER_TYPE_ULLONG ? "ULL" : NULL;
+        const unsigned __int128 mask = check_action_mask(width);
+        const unsigned __int128 bits = value.integer & mask;
+        const bool negative = is_signed && width <= 128 && ((bits >> (width - 1)) & 1) != 0;
+        if (suffix != NULL && width <= 128)
         {
-            const int whole = exponent + (int)count;
-            uint32_t i = 0;
-            if (whole > 0)
+            check_common_number(text, sizeof(text), negative ? (__int128)(bits | ~mask) : (__int128)bits);
+            result = check_warning_text(scratch, "%s%s", text, suffix);
+        }
+    }
+    else if (kind == PARSE_KIND_NUMBER && check_semantic_floating_text(text, sizeof(text), type, &value))
+    {
+        const char* suffix = type == BUSTER_TYPE_FLOAT ? "F" : type == BUSTER_TYPE_LONG_DOUBLE ? "L" : type == BUSTER_TYPE_FLOAT128 ? "Q" :
+                             type == BUSTER_TYPE_FLOAT16 ? "F16" : "";
+        const bool digits = strspn(text, "-0123456789") == strlen(text);
+        result = check_warning_text(scratch, "%s%s%s", text, digits ? "." : "", suffix);
+    }
+    else if (kind == PARSE_KIND_CHARACTER && integer)
+    {
+        // The prefix as the token spells it: L, u8, u, U or none (CharacterLiteral::print).
+        const String8 spelling = check_semantic_token(parser, pp, token, scratch);
+        uint32_t prefix = 0;
+        while (prefix < spelling.length && spelling.pointer[prefix] != '\'')
+        {
+            prefix += 1;
+        }
+        uint32_t unit = (uint32_t)value.integer;
+        // An ordinary literal's value, sign-extended from a char, is its byte.
+        unit = prefix == 0 && (unit & ~0xffu) == ~0xffu ? unit & 0xffu : unit;
+        const char* escaped = check_semantic_escape(unit);
+        if (prefix < spelling.length && escaped != NULL)
+        {
+            result = check_warning_text(scratch, "%.*s'%s'", (int)prefix, spelling.pointer, escaped);
+        }
+        else if (prefix < spelling.length)
+        {
+            const bool printable = unit >= 0x20 && unit < 0x7f;
+            result = printable ? check_warning_text(scratch, "%.*s'%c'", (int)prefix, spelling.pointer, (char)unit) :
+                     unit < 0x100 ? check_warning_text(scratch, "%.*s'\\x%02x'", (int)prefix, spelling.pointer, unit) :
+                     unit <= 0xffff ? check_warning_text(scratch, "%.*s'\\u%04x'", (int)prefix, spelling.pointer, unit) :
+                     check_warning_text(scratch, "%.*s'\\U%08x'", (int)prefix, spelling.pointer, unit);
+        }
+    }
+    return result;
+}
+
+// Whether clang's UsefulToPrintExpr prints a static assertion's operand: not a literal, nor a unary operator's of one, nor
+// a comparison, logical or comma operator; any other operator, a cast, a name or a sizeof is.
+static bool check_semantic_useful(const Parser* parser, const CheckGraph* graph, uint32_t node)
+{
+    uint32_t at = check_semantic_bare(graph, node);
+    bool result = true;
+    bool unary = true;
+    for (uint32_t steps = 0; unary && at < graph->count && steps < graph->count; steps += 1)
+    {
+        const CheckOp op = graph->ops[at];
+        unary = op == CHECK_OP_NEGATIVE || op == CHECK_OP_POSITIVE || op == CHECK_OP_NOT || op == CHECK_OP_BIT_NOT || op == CHECK_OP_ADDRESS ||
+                op == CHECK_OP_DEREFERENCE || op == CHECK_OP_REAL || op == CHECK_OP_IMAGINARY || op == CHECK_OP_PRE_INCREMENT ||
+                op == CHECK_OP_PRE_DECREMENT || op == CHECK_OP_POST_INCREMENT || op == CHECK_OP_POST_DECREMENT;
+        const bool arithmetic = (op >= CHECK_OP_ADD && op <= CHECK_OP_SHIFT_RIGHT) || op == CHECK_OP_BIT_AND || op == CHECK_OP_BIT_OR || op == CHECK_OP_BIT_XOR;
+        const bool other_binary = (op >= CHECK_OP_LESS && op <= CHECK_OP_NOT_EQUAL) || op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR || op == CHECK_OP_COMMA;
+        result = !unary && !check_semantic_literal(parser, graph, at) && (arithmetic || !other_binary);
+        at = unary ? check_semantic_bare(graph, graph->operand0[at]) : at;
+    }
+    return result;
+}
+
+// A static assertion operand's value as clang's ConvertAPValueToString prints it, by the operand's own type: a bool's
+// true or false; a plain char's character, its code unit and its value; an integer's value; a real floating one's
+// APFloat digits. False for any other (no note).
+static bool check_semantic_value_text(char* output, uint64_t capacity, const TypeTable* types, const CheckValue* value)
+{
+    const TypeId type = value->type != 0 ? type_unqualified(type_strip_aligned(types, value->type)) : 0;
+    uint32_t width = 0;
+    bool is_signed = false;
+    bool result = false;
+    if (value->constant_kind == CHECK_CONSTANT_INTEGER && type == BUSTER_TYPE_BOOL)
+    {
+        snprintf(output, capacity, "%s", value->integer != 0 ? "true" : "false");
+        result = true;
+    }
+    else if (value->constant_kind == CHECK_CONSTANT_INTEGER && type != 0 && check_action_integer_type(types, type, &width, &is_signed) && width != 0 &&
+             width <= 128)
+    {
+        const unsigned __int128 mask = check_action_mask(width);
+        const unsigned __int128 bits = value->integer & mask;
+        const bool negative = is_signed && ((bits >> (width - 1)) & 1) != 0;
+        char number[48];
+        check_common_number(number, sizeof(number), negative ? (__int128)(bits | ~mask) : (__int128)bits);
+        if (type == BUSTER_TYPE_CHAR)
+        {
+            // The character as the diagnostic prints its byte: an escape, the character, a control's <U+00XX> or a byte
+            // past ASCII's <0xXX> (no UTF-8 sequence of its own).
+            const uint32_t unit = (uint32_t)(bits & 0xffu);
+            const char* escaped = check_semantic_escape(unit);
+            char character[16];
+            if (escaped != NULL)
             {
-                for (; i < (uint32_t)whole; i += 1)
-                {
-                    text[at++] = significand[i];
-                }
-                text[at++] = '.';
+                snprintf(character, sizeof(character), "%s", escaped);
+            }
+            else if (unit < 0x20 || unit == 0x7f)
+            {
+                snprintf(character, sizeof(character), "<U+%04X>", unit);
+            }
+            else if (unit >= 0x80)
+            {
+                snprintf(character, sizeof(character), "<0x%02X>", unit);
             }
             else
             {
-                text[at++] = '0';
-                text[at++] = '.';
-                for (int z = 0; z < -whole; z += 1)
-                {
-                    text[at++] = '0';
-                }
+                snprintf(character, sizeof(character), "%c", (char)unit);
             }
-            for (; i < count; i += 1)
-            {
-                text[at++] = significand[i];
-            }
+            snprintf(output, capacity, "'%s' (0x%02X, %s)", character, unit, number);
         }
-        text[at] = 0;
-        result = check_warning_text(scratch, "%s", text);
+        else
+        {
+            snprintf(output, capacity, "%s", number);
+        }
+        result = true;
+    }
+    else
+    {
+        result = check_semantic_floating_text(output, capacity, type, value);
     }
     return result;
 }
 
-// A static assertion's side's value as clang's ConvertAPValueToString prints it (#2171): a bool's `true` or `false`, a
-// plain char's character literal (DiagnoseStaticAssertDetails' WriteCharValueForDiagnostic) with its code unit in hex and
-// its value, another integer's value, a float's, a double's or a long double's (check_semantic_assert_floating); NULL for
-// any other.
-static const char* check_semantic_assert_value(const TypeTable* types, const CheckValue* value, Arena* scratch)
-{
-    const TypeId type = type_unqualified(type_strip_aligned(types, value->type));
-    const uint8_t kind = type != 0 ? type_kind(types, type) : BUSTER_TYPE_KIND_NONE;
-    uint64_t rank = 0;
-    uint64_t width = 0;
-    bool is_signed = false;
-    const bool integer = value->constant_kind == CHECK_CONSTANT_INTEGER && (kind == BUSTER_TYPE_KIND_INTEGER || kind == BUSTER_TYPE_KIND_ENUM);
-    if (integer)
-    {
-        type_integer_properties(types, type, &rank, &width, &is_signed);
-    }
-    const char* result = NULL;
-    if (integer && type == BUSTER_TYPE_BOOL)
-    {
-        result = value->integer != 0 ? "true" : "false";
-    }
-    else if (integer && type == BUSTER_TYPE_CHAR)
-    {
-        const uint32_t unit = (uint32_t)(value->integer & 0xff);
-        const int64_t number = is_signed ? (int64_t)(int8_t)unit : (int64_t)unit;
-        // escapeCStyle's single-quote escapes.
-        char shown[16] = { 0 };
-        char escape = 0;
-        switch (unit)
-        {
-            case '\\': escape = '\\'; break;
-            case '\'': escape = '\''; break;
-            case '\a': escape = 'a'; break;
-            case '\b': escape = 'b'; break;
-            case '\f': escape = 'f'; break;
-            case '\n': escape = 'n'; break;
-            case '\r': escape = 'r'; break;
-            case '\t': escape = 't'; break;
-            case '\v': escape = 'v'; break;
-            default: break;
-        }
-        shown[0] = escape != 0 ? '\\' : 0;
-        shown[1] = escape;
-        if (shown[0] == 0)
-        {
-            const bool printable = unit >= 0x20 && unit < 0x7f;
-            snprintf(shown, sizeof(shown), unit >= 0x80 ? "<0x%02X>" : printable ? "%c" : "<U+%04X>", unit);
-        }
-        result = check_warning_text(scratch, "'%s' (0x%02X, %" PRId64 ")", shown, unit, number);
-    }
-    else if (integer && width != 0 && width <= 128)
-    {
-        // A decimal of up to 128 bits, from its last digit; a signed value is kept in its width's bits.
-        const unsigned __int128 sign = (unsigned __int128)1 << (width - 1);
-        const unsigned __int128 mask = width == 128 ? ~(unsigned __int128)0 : (sign << 1) - 1;
-        const unsigned __int128 bits = value->integer & mask;
-        const bool negative = is_signed && (bits & sign) != 0;
-        unsigned __int128 magnitude = negative ? ((~bits + 1) & mask) : bits;
-        char digits[48];
-        uint32_t at = sizeof(digits) - 1;
-        digits[at] = 0;
-        do
-        {
-            at -= 1;
-            digits[at] = (char)('0' + (uint32_t)(magnitude % 10));
-            magnitude /= 10;
-        } while (magnitude != 0);
-        result = check_warning_text(scratch, "%s%s", negative ? "-" : "", digits + at);
-    }
-    else if (value->constant_kind == CHECK_CONSTANT_FLOATING && (type == BUSTER_TYPE_FLOAT || type == BUSTER_TYPE_DOUBLE || type == BUSTER_TYPE_LONG_DOUBLE))
-    {
-        result = check_semantic_assert_floating(value->floating, type == BUSTER_TYPE_FLOAT ? 24 : type == BUSTER_TYPE_DOUBLE ? 53 : 64, scratch);
-    }
-    return result;
-}
-
-// A node with its implicit conversions skipped, as clang's IgnoreParenImpCasts (parentheses make no node).
-static uint32_t check_semantic_assert_bare(const CheckGraph* graph, uint32_t node)
-{
-    for (uint32_t steps = 0; node < graph->count && (graph->ops[node] == CHECK_OP_CONVERT || graph->ops[node] == CHECK_OP_CONDITION) && steps < 64; steps += 1)
-    {
-        node = graph->operand0[node];
-    }
-    return node;
-}
-
-// Whether a side is worth printing (clang's UsefulToPrintExpr): not a literal, through unary operators.
-static bool check_semantic_assert_useful(const Parser* parser, const CheckGraph* graph, uint32_t node)
-{
-    bool unary = true;
-    for (uint32_t steps = 0; unary && node < graph->count && steps < 64; steps += 1)
-    {
-        node = check_semantic_assert_bare(graph, node);
-        const CheckOp op = node < graph->count ? graph->ops[node] : CHECK_OP_COUNT;
-        unary = op == CHECK_OP_POSITIVE || op == CHECK_OP_NEGATIVE || op == CHECK_OP_NOT || op == CHECK_OP_BIT_NOT;
-        node = unary ? graph->operand0[node] : node;
-    }
-    const uint8_t kind = node < graph->count && graph->tokens[node] < parser->tokens.count ? parser->tokens.kinds[graph->tokens[node]] : PARSE_KIND_END;
-    return node < graph->count && !(graph->ops[node] == CHECK_OP_VALUE && (kind == PARSE_KIND_NUMBER || kind == PARSE_KIND_CHARACTER));
-}
-
-// Whether a side is C23's `true` or `false` (clang's CXXBoolLiteralExpr).
-static bool check_semantic_assert_bool_literal(const Parser* parser, const CheckGraph* graph, uint32_t node)
-{
-    const uint32_t token = node < graph->count ? graph->tokens[node] : BUSTER_CHECK_NONE;
-    const uint32_t name = token < parser->tokens.count ? parser->tokens.names[token] : 0;
-    return token < parser->tokens.count && graph->ops[node] == CHECK_OP_VALUE && (name == C_NAME_TRUE || name == C_NAME_FALSE);
-}
-
-// Whether a side is known to have a boolean value, as clang's Expr::isKnownToHaveBooleanValue says: a bool, a comparison,
-// a logical operator, a `!`, a literal 0 or 1, and the bitwise operators of two such.
-static bool check_semantic_assert_boolean(const Parser* parser, const TypeTable* types, const CheckGraph* graph, const CheckStream* stream, uint32_t node)
-{
-    bool result = false;
-    uint32_t pending[16];
-    uint32_t count = 0;
-    pending[count++] = node;
-    bool all = true;
-    while (all && count != 0)
-    {
-        count -= 1;
-        const uint32_t bare = check_semantic_assert_bare(graph, pending[count]);
-        const CheckOp op = bare < graph->count ? graph->ops[bare] : CHECK_OP_COUNT;
-        const TypeId type = bare < stream->count ? type_unqualified(type_strip_aligned(types, check_stream_type(stream, bare))) : 0;
-        const uint32_t token = bare < graph->count ? graph->tokens[bare] : BUSTER_CHECK_NONE;
-        const CheckValue value = bare < stream->count ? check_stream_value(stream, bare) : (CheckValue){ 0 };
-        const bool literal = op == CHECK_OP_VALUE && token < parser->tokens.count && parser->tokens.kinds[token] == PARSE_KIND_NUMBER &&
-                             value.constant_kind == CHECK_CONSTANT_INTEGER && value.integer <= 1;
-        const bool bitwise = (op == CHECK_OP_BIT_AND || op == CHECK_OP_BIT_OR || op == CHECK_OP_BIT_XOR) && count + 2 <= 16;
-        if (bitwise)
-        {
-            pending[count++] = graph->operand0[bare];
-            pending[count++] = graph->operand1[bare];
-        }
-        all = bitwise || type == BUSTER_TYPE_BOOL || literal || (op >= CHECK_OP_LESS && op <= CHECK_OP_NOT_EQUAL) || op == CHECK_OP_LOGICAL_AND ||
-              op == CHECK_OP_LOGICAL_OR || op == CHECK_OP_NOT;
-    }
-    result = all;
-    return result;
-}
-
-static const char* check_semantic_assert(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, const TypeTable* types,
-                                        const CheckReport* report, uint32_t* location, PPOutputDiagnosticNote* note, Arena* scratch)
+// A failed static assertion's error, as clang's CheckStaticAssert gives it (#1447). Its requirement is the first term of
+// the condition's conjunction that is no integer literal and is false (findFailedBooleanCondition), else the whole
+// condition, printed as clang's printer prints it; an integer literal's is the plain "static assertion failed" at the
+// condition's first token. A binary requirement but `||` notes its operands' values where either is worth printing
+// (DiagnoseStaticAssertDetails), at its operator.
+static const char* check_semantic_assert(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
+                                        const TypeTable* types, const CheckReport* report, uint32_t* location, PPOutputDiagnosticNote* notes,
+                                        uint32_t* note_count, Arena* scratch)
 {
     const uint32_t count = parser->tokens.count;
     uint32_t keyword = BUSTER_CHECK_NONE;
@@ -881,61 +894,105 @@ static const char* check_semantic_assert(const Parser* parser, Preprocessor* pp,
     const char* result = "static assertion failed";
     if (keyword < count && close < count)
     {
-        uint32_t first = keyword + 2;
+        const uint32_t begin = keyword + 2;
+        uint32_t first = begin;
         uint32_t end = check_constant_punctuation(parser, first, close, PARSE_KIND_COMMA);
         const uint32_t strings = end + 1;
-        // The first conjunct of an `&&` that fails, which clang's findFailedBooleanCondition reports, at it (#2171).
         const CheckGraph* graph = &input->graph;
-        uint32_t condition = report->node < graph->count && report->node < stream->count ? report->node : BUSTER_CHECK_NONE;
-        bool descending = condition != BUSTER_CHECK_NONE;
-        for (uint32_t steps = 0; descending && steps < 64; steps += 1)
+        const uint32_t root = report->node < graph->count && report->node < stream->count ? check_semantic_bare(graph, report->node) : BUSTER_CHECK_NONE;
+        uint32_t* stack = root != BUSTER_CHECK_NONE ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, graph->count) : NULL;
+        uint32_t* literals = stack != NULL && end > first ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, end - first) : NULL;
+        const char** spelled = literals != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, const char*, end - first) : NULL;
+        // The conjunction's terms, left to right, under the implicit conversions of each `&&`'s operands.
+        uint32_t term = BUSTER_CHECK_NONE;
+        uint32_t top = 0;
+        if (spelled != NULL)
         {
-            const uint32_t bare = check_semantic_assert_bare(graph, condition);
-            descending = bare < graph->count && graph->ops[bare] == CHECK_OP_LOGICAL_AND;
-            const uint32_t left = descending ? check_semantic_assert_bare(graph, graph->operand0[bare]) : BUSTER_CHECK_NONE;
-            const CheckValue truth = left < stream->count ? check_stream_value(stream, left) : (CheckValue){ 0 };
-            const bool failed = truth.constant_kind == CHECK_CONSTANT_FLOATING ? truth.floating == 0 : truth.integer == 0;
-            condition = !descending ? condition : failed ? graph->operand0[bare] : graph->operand1[bare];
+            stack[top++] = root;
         }
-        if (condition != BUSTER_CHECK_NONE && condition != report->node)
+        while (top != 0 && term == BUSTER_CHECK_NONE)
         {
-            first = check_warning_graph_first(graph, parser, condition);
-            end = graph->source_positions[condition];
+            const uint32_t at = check_semantic_bare(graph, stack[--top]);
+            if (at < graph->count && graph->ops[at] == CHECK_OP_LOGICAL_AND && top + 2 <= graph->count)
+            {
+                stack[top++] = graph->operand1[at];
+                stack[top++] = graph->operand0[at];
+            }
+            else if (at < stream->count && !check_semantic_integer_literal(parser, graph, stream, at) && check_semantic_fails(stream, at))
+            {
+                term = at;
+            }
+        }
+        const uint32_t failed = term != BUSTER_CHECK_NONE ? term : root;
+        for (uint32_t i = 0; spelled != NULL && i < end - first; i += 1)
+        {
+            literals[i] = BUSTER_CHECK_NONE;
+            spelled[i] = NULL;
+        }
+        // The term's tokens: its parse subtree's, which leaves out the parentheses around it.
+        uint32_t low = BUSTER_CHECK_NONE;
+        uint32_t high = BUSTER_CHECK_NONE;
+        if (spelled != NULL && failed < graph->count)
+        {
+            check_semantic_subtree(graph, failed, first, end, literals, stack, &low, &high);
+        }
+        if (term != BUSTER_CHECK_NONE && low < end && high < end)
+        {
+            uint32_t ancestor = low;
+            for (uint32_t steps = 0; ancestor < count && !check_semantic_under(parser, high, ancestor) && steps < count; steps += 1)
+            {
+                ancestor = parser->tree.parents[ancestor];
+            }
+            uint32_t term_first = low;
+            uint32_t term_last = high;
+            while (ancestor >= first && ancestor < end && term_first > first && check_semantic_under(parser, term_first - 1, ancestor))
+            {
+                term_first -= 1;
+            }
+            while (ancestor >= first && ancestor < end && term_last + 1 < end && check_semantic_under(parser, term_last + 1, ancestor))
+            {
+                term_last += 1;
+            }
+            spelled += term_first - first;
+            first = term_first;
+            end = term_last + 1;
         }
         while (first + 1 < end && parser->tree.roles[first] == PARSE_ROLE_OPEN_GROUP && parser->tree.parents[first] == end - 1)
         {
             first += 1;
+            spelled += spelled != NULL ? 1 : 0;
             end -= 1;
         }
-        *location = first;
-        const bool literal = first + 1 == end && (parser->tokens.kinds[first] == PARSE_KIND_NUMBER || parser->tokens.kinds[first] == PARSE_KIND_CHARACTER);
-        const char* requirement = literal ? NULL : check_semantic_requirement_printed(parser, pp, input, stream, first, end, scratch);
-        // clang's DiagnoseStaticAssertDetails: a binary operator's sides' values, but an `||`'s, and where both are literals.
-        const uint32_t bare = condition != BUSTER_CHECK_NONE ? check_semantic_assert_bare(graph, condition) : BUSTER_CHECK_NONE;
-        const CheckOp op = bare < graph->count ? graph->ops[bare] : CHECK_OP_COUNT;
-        static const char* const operators[] = { "+", "-", "*", "/", "%", "<<", ">>", "<", "<=", ">", ">=", "==", "!=", "&", "|", "^", "&&" };
-        _Static_assert(sizeof(operators) / sizeof(operators[0]) == CHECK_OP_LOGICAL_AND - CHECK_OP_ADD + 1, "an operator's spelling from ADD to LOGICAL_AND");
-        const bool binary = op >= CHECK_OP_ADD && op <= CHECK_OP_LOGICAL_AND;
-        const uint32_t sides[2] = { binary ? graph->operand0[bare] : BUSTER_CHECK_NONE, binary ? graph->operand1[bare] : BUSTER_CHECK_NONE };
-        // (Not a comparison of a boolean value with C23's `true` or `false`.)
-        const bool boolean = binary && ((check_semantic_assert_bool_literal(parser, graph, check_semantic_assert_bare(graph, sides[0])) &&
-                                         check_semantic_assert_boolean(parser, types, graph, stream, sides[1])) ||
-                                        (check_semantic_assert_bool_literal(parser, graph, check_semantic_assert_bare(graph, sides[1])) &&
-                                         check_semantic_assert_boolean(parser, types, graph, stream, sides[0])));
-        const bool useful = binary && !boolean && (check_semantic_assert_useful(parser, graph, sides[0]) || check_semantic_assert_useful(parser, graph, sides[1]));
-        const char* values[2] = { NULL, NULL };
-        for (uint32_t i = 0; useful && i < 2; i += 1)
+        for (uint32_t t = first; spelled != NULL && t < end; t += 1)
         {
-            const uint32_t side = check_semantic_assert_bare(graph, sides[i]);
-            const CheckValue value = side < stream->count ? check_stream_value(stream, side) : (CheckValue){ 0 };
-            values[i] = side < stream->count ? check_semantic_assert_value(types, &value, scratch) : NULL;
+            const uint32_t node = literals[t - begin];
+            spelled[t - first] = node < stream->count ? check_semantic_literal_spelling(parser, pp, types, graph, stream, node, scratch) : NULL;
         }
-        if (values[0] != NULL && values[1] != NULL && graph->tokens[bare] < parser->tokens.count)
+        const bool literal = failed < stream->count ? check_semantic_integer_literal(parser, graph, stream, failed) :
+                             first + 1 == end && parser->tokens.kinds[first] == PARSE_KIND_NUMBER;
+        *location = literal ? begin : first;
+        const char* requirement = literal ? NULL : check_semantic_requirement(parser, pp, first, end, spelled, scratch);
+        // The note of the requirement's operands' values: a binary operator's but `||`'s.
+        const CheckOp op = !literal && failed < graph->count ? graph->ops[failed] : CHECK_OP_COUNT;
+        const bool binary = ((op >= CHECK_OP_ADD && op <= CHECK_OP_LOGICAL_AND) || op == CHECK_OP_COMMA) && graph->tokens[failed] < count;
+        const uint32_t left = binary ? check_semantic_bare(graph, graph->operand0[failed]) : BUSTER_CHECK_NONE;
+        const uint32_t right = binary ? check_semantic_bare(graph, graph->operand1[failed]) : BUSTER_CHECK_NONE;
+        if (left < stream->count && right < stream->count && (check_semantic_useful(parser, graph, left) || check_semantic_useful(parser, graph, right)))
         {
-            note[0] = (PPOutputDiagnosticNote){
-                .token = parser->tokens.sources[graph->tokens[bare]],
-                .message = check_warning_text(scratch, "expression evaluates to '%s %s %s'", values[0], operators[op - CHECK_OP_ADD], values[1]),
-            };
+            const CheckValue values[2] = { check_stream_value(stream, left), check_stream_value(stream, right) };
+            char texts[2][192];
+            const String8 operator = check_semantic_token(parser, pp, graph->tokens[failed], scratch);
+            // (A comparison of a bool with C23's true or false prints nothing.)
+            const bool boolean = (check_semantic_integer_literal(parser, graph, stream, left) && values[0].type == BUSTER_TYPE_BOOL &&
+                                  type_unqualified(type_strip_aligned(types, values[1].type)) == BUSTER_TYPE_BOOL) ||
+                                 (check_semantic_integer_literal(parser, graph, stream, right) && values[1].type == BUSTER_TYPE_BOOL &&
+                                  type_unqualified(type_strip_aligned(types, values[0].type)) == BUSTER_TYPE_BOOL);
+            if (!boolean && operator.length != 0 && check_semantic_value_text(texts[0], sizeof(texts[0]), types, &values[0]) &&
+                check_semantic_value_text(texts[1], sizeof(texts[1]), types, &values[1]))
+            {
+                check_semantic_add_note(parser, notes, note_count, graph->tokens[failed],
+                                        check_warning_text(scratch, "expression evaluates to '%s %.*s %s'", texts[0], (int)operator.length, operator.pointer, texts[1]));
+            }
         }
         const bool message = strings < close;
         CheckStringPart* parts = message ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckStringPart, close - strings) : NULL;
@@ -964,6 +1021,7 @@ static const char* check_semantic_assert(const Parser* parser, Preprocessor* pp,
                                             literal ? "" : " due to requirement '", literal ? "" : requirement, literal ? "" : "'",
                                             message ? ": " : "", message ? (int)(decoded.byte_count - 1) : 0, message ? (const char*)decoded.bytes : "") : NULL;
     }
+    (void)input;
     return check_semantic_text(pp, result);
 }
 
@@ -1583,7 +1641,7 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
     uint32_t note_count = 0;
     if (report->message == CHECK_MESSAGE_STATIC_ASSERT)
     {
-        result = check_semantic_assert(parser, pp, input, stream, types, report, location, note, scratch);
+        result = check_semantic_assert(parser, pp, input, stream, types, report, location, note, &note_count, scratch);
     }
     else if (report->message == CHECK_MESSAGE_STATIC_INITIALIZER && node < count && graph->tokens[node] == token)
     {

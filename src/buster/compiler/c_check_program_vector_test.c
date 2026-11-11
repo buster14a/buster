@@ -517,12 +517,6 @@ static void check_test_program_vector_refusals(CheckTest* test, const X86Target*
             2,
         },
         {
-            "vector-divide-integers",
-            "typedef int v4si __attribute__((vector_size(16)));int tested(int n){v4si a={n},b={2};a=a/b;return a[0];}",
-            "vector division of integers",
-            2,
-        },
-        {
             "vector-shift-bytes",
             "typedef unsigned char v16qu __attribute__((vector_size(16)));int tested(int n){v16qu a={(unsigned char)n},b={1};a=a<<b;return a[0];}",
             "vector shifts of 8-bit elements",
@@ -553,12 +547,6 @@ static void check_test_program_vector_refusals(CheckTest* test, const X86Target*
             "typedef _Bool V __attribute__((ext_vector_type(8)));void tested(V*p){*p=__builtin_elementwise_ctzg(*p);}",
             "elementwise leading/trailing zero counts of boolean vectors, which clang 23 miscompiles",
             0,
-        },
-        {
-            "vector-divide-integers-past-64-bytes",
-            "typedef int w32 __attribute__((vector_size(128)));int tested(int n){w32 a={n},b={2};a=a/b;return a[0];}",
-            "vector division of integers",
-            2,
         },
         {
             "vector-bf16-arithmetic-past-64-bytes",
@@ -672,14 +660,6 @@ static void check_test_program_segment_refusals(CheckTest* test, const X86Target
           "an aggregate copy of more than 8 vector registers in a segment's address space (256, 257 or 258: %gs, %fs or %ss), which clang can't lower either" },
         { "segment-struct-store-past-limit", "struct S{char c[1025];};void tested(struct S __seg_gs*p,struct S*q){*p=*q;}",
           "an aggregate copy of more than 8 vector registers in a segment's address space (256, 257 or 258: %gs, %fs or %ss), which clang can't lower either" },
-        // What the lowering doesn't carry the override through yet (check_lower_segment_carried): a complex value's store,
-        // a _BitInt and an _Atomic object.
-        { "segment-complex-store", "void tested(_Complex double __seg_gs*p,_Complex double v){*p=v;}",
-          "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
-        { "segment-bit-int", "int tested(_BitInt(40) __seg_fs*p){return (int)*p;}",
-          "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
-        { "segment-atomic-object", "int tested(_Atomic int __seg_fs*p){return *p;}",
-          "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
     };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(refused); i += 1)
     {
@@ -818,6 +798,43 @@ static void check_test_program_segments(CheckTest* test, const char* clang)
         "_Complex float zf=*sc*2.0f;r+=(long)__real__ zf+(long)__imag__ zf;r+=sum(*fs)+(n?*ps:*fs).b;"
         "return (int)(r+gs_.a+gs_.b+gs_.c+ts.b+ts.c+gp.x+go.c[0]+go.c[11]+gu.c[1]);}",
         "segment-aggregates", clang);
+    // Complex values, __float128s and _BitInts (#1447): a complex value's store (a copy through the override), its updates
+    // and a real object's update by a complex value (check_lower_segment_update: the object copied to a frame object,
+    // updated there and copied back), its parts as lvalues (check_lower_element_segment: `__real__ *p` read, stored and
+    // updated), a __float128's and a wide _BitInt's updates the same way, and a narrow _BitInt's read, store and update,
+    // whose LOAD and STORE take the override as an integer's do. In %fs and %ss.
+    check_test_program_source(test,
+        "#define SS __attribute__((address_space(258)))\n"
+        "static _Thread_local _Complex double tc=1.5+2.5i;static _Thread_local _BitInt(40) tb=-12345;static _Thread_local unsigned _BitInt(200) tw;"
+        "static _Complex float gc=3.0f-1.0if;static _BitInt(13) gb=100;static __float128 gq=2.5;static _BitInt(130) gw;static double gd=4.0;"
+        "int tested(int n){char*tp=__builtin_thread_pointer();tw=77+n;gw=-5-n;"
+        "_Complex double __seg_fs*fc=(_Complex double __seg_fs*)((char*)&tc-tp);_BitInt(40) __seg_fs*fb=(_BitInt(40) __seg_fs*)((char*)&tb-tp);"
+        "unsigned _BitInt(200) __seg_fs*fw=(unsigned _BitInt(200) __seg_fs*)((char*)&tw-tp);_Complex float SS*sc=(_Complex float SS*)&gc;"
+        "_BitInt(13) SS*sb=(_BitInt(13) SS*)&gb;__float128 SS*sq=(__float128 SS*)&gq;_BitInt(130) SS*sw=(_BitInt(130) SS*)&gw;double SS*sd=(double SS*)&gd;"
+        "long r=0;*fc=3.0-4.0i;*fc+=n;*fc*=2.0i;_Complex double z=(*fc)++;r+=(long)__real__ z+(long)__imag__ *fc*3;"
+        "*sc=*sc/2.0f;*sc-=1.0if;r+=(long)(__real__ *sc*10)+(long)(__imag__ *sc*10);__real__ *fc=n;__imag__ *sc+=1.5f;--__imag__ *fc;"
+        "r+=(long)__real__ *fc+(long)__imag__ *fc+(long)(__imag__ *sc*4);"
+        "*fb=*fb*3+n;*fb+=100;(*fb)--;r+=(long)*fb;*sb=4000;*sb+=200;++*sb;r+=(long)*sb+(*sb>>2);"
+        "*fw=*fw*1000000007;*fw+=5;++*fw;r+=(long)(*fw%1000003);*sw=*sw*3;*sw-=1000;(*sw)++;r+=(long)*sw;"
+        "*sq=*sq*2;*sq+=n;(*sq)++;r+=(long)*sq;*sd+=1.0i;r+=(long)*sd;"
+        "return (int)(r+(long)__real__ tc+(long)(__imag__ gc*4)+(long)tb+(long)gb+(long)(tw%1000)+(long)gw+(long)gq);}",
+        "segment-complex-bit-int", clang);
+    // _Atomic lvalues (#1447): their plans' direct accesses take the override (CheckLowerAtomic.segment), as clang's code has
+    // it: a load's mov, a store's xchg, an increment's or an addition's lock xadd, another update's loop of a load and lock
+    // cmpxchg (a double's too), of 1, 2, 4 and 8 bytes; a struct's library calls (__atomic_load, __atomic_store) take its
+    // address as it is, as clang's do, which in %ss (whose base is 0) is the object's.
+    check_test_program_source(test,
+        "#define SS __attribute__((address_space(258)))\n"
+        "struct B{long a,b,c;};static _Thread_local _Atomic int ta=5;static _Thread_local _Atomic long tl=100;static _Thread_local _Atomic double td=1.5;"
+        "static _Atomic short gs_=7;static _Atomic struct B gb;static _Atomic char gc=3;"
+        "int tested(int n){char*tp=__builtin_thread_pointer();{struct B i0={1,2,n};gb=i0;}"
+        "_Atomic int __seg_fs*a=(_Atomic int __seg_fs*)((char*)&ta-tp);_Atomic long __seg_fs*l=(_Atomic long __seg_fs*)((char*)&tl-tp);"
+        "_Atomic double __seg_fs*d=(_Atomic double __seg_fs*)((char*)&td-tp);_Atomic short SS*s=(_Atomic short SS*)&gs_;"
+        "_Atomic struct B SS*b=(_Atomic struct B SS*)&gb;_Atomic char SS*c=(_Atomic char SS*)&gc;"
+        "long r=*a;*a=n;r+=++*a;r+=*a+=3;r+=(*a)--;*l*=3;r+=*l;r+=*l|=5;r+=*l<<=1;*d+=1.25;r+=(long)(*d*4);"
+        "*s-=2;r+=*s;r+=++*s;*c='x';r+=*c;(*c)++;struct B t=*b;r+=t.a+t.c;struct B u={9,8,7};*b=u;"
+        "struct B v=gb;return (int)(r+ta+tl+(long)td+gs_+v.b+gc);}",
+        "segment-atomic-lvalues", clang);
 }
 
 // Initializer validation keeps atomic rvalue identity while storage uses the underlying vector bytes.
@@ -1201,11 +1218,24 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
           "ALL(int);ALL(unsigned);ALL(long long);ALL(float);ALL(double);M(signed char,4);M(signed char,16);M(short,8);M(unsigned short,4);\n"
           "munmap(page,8192);return (int)h;}\n"
         },
+        // The bit builtins without AVX-512 (#1834), element by element: popcount, bitreverse, clzg and ctzg (with a zero's
+        // operand, and without one of nonzero elements alone, which clang leaves undefined for zero), fshl and fshr, of
+        // signed and unsigned 8- to 64-bit elements of 4 to 64 bytes, zeros and single bits among them.
+        { "baseline-bit-builtins",
+          "#define T(E,W) do{typedef E V __attribute__((vector_size(W)));V a,b,c;fill(&a,W,n*11+W);fill(&b,W,n*13+W+1);fill(&c,W,n*17+W+2);for(unsigned k_=0;"
+          "k_<W/sizeof(E);k_+=3)a[k_]=0;for(unsigned k_=1;k_<W/sizeof(E);k_+=5)a[k_]=(E)1<<(k_%(8*sizeof(E)));"
+          "V r_[]={__builtin_elementwise_popcount(a),__builtin_elementwise_bitreverse(a),__builtin_elementwise_clzg(a,b),__builtin_elementwise_ctzg(a,b),__builtin_elementwise_fshl(a,b,c),__builtin_elementwise_fshr(a,b,c)};FOLD(r_);V s_={0};for(unsigned k_=0;k_<W/sizeof(E);k_++)if(a[k_]){V t_=__builtin_elementwise_clzg(a);V u_=__builtin_elementwise_ctzg(a);s_[k_]=t_[k_]+u_[k_];}FOLD(s_);}while(0)\n"
+          "#define ALL(E) T(E,4);T(E,8);T(E,16);T(E,32);T(E,64)\n"
+          "int tested(int n){unsigned h=2166136261u;\n"
+          "ALL(signed char);ALL(unsigned char);ALL(short);ALL(unsigned short);T(int,8);T(int,16);T(int,32);T(int,64);T(unsigned,16);T(unsigned,64);\n"
+          "T(long long,16);T(long long,32);T(long long,64);T(unsigned long long,16);T(unsigned long long,64);\n"
+          "return (int)h;}\n"
+        },
         // Scalars' elementwise builtins without AVX-512F (#1834): the C library's ceilf ... roundf, fmaf and fma without
         // SSE4.1 and FMA, and ldexpf and ldexp; SSE4.1's ROUNDSS and ROUNDSD (round's of the value plus the largest value
         // below 0.5 of its sign) and FMA's VFMADD213SS and SD where the target has them; halves, values near them and past
-        // 2^23 and 2^52. copysign, canonicalize, maxnum and minnum by SSE's forms, and with AVX the IEEE maxima and minima,
-        // and the fused multiply-add (b's NaN the result's of two, as clang's VFMADD213SS has b's register its destination),
+        // 2^23 and 2^52. copysign, canonicalize, maxnum and minnum by SSE's forms, the IEEE maxima and minima (two rows
+        // without AVX, #1834), and the fused multiply-add (b's NaN the result's of two, as clang's VFMADD213SS has b's register its destination),
         // of every pair of NaNs (their payloads), signed zeros, infinities, a denormal and others.
         { "baseline-scalar-builtins",
           "#define R(v) do{__typeof__(v) r_[]={__builtin_elementwise_ceil(v),__builtin_elementwise_floor(v),__builtin_elementwise_trunc(v),"
@@ -1217,11 +1247,7 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
           "float f=__builtin_elementwise_fma(x,1.0f/3.0f,(float)n);double g=__builtin_elementwise_fma(y,1.0/3.0,-y);FOLD(f);FOLD(g);}\n"
           "#define B(x,y) do{__typeof__(x) r_[]={__builtin_elementwise_copysign(x,y),__builtin_elementwise_maxnum(x,y),__builtin_elementwise_minnum(x,y),"
           "__builtin_elementwise_canonicalize(x),__builtin_elementwise_fma(x,y,y)IEEE(x,y)};FOLD(r_);}while(0)\n"
-          "#ifdef __AVX__\n"
           "#define IEEE(x,y) ,__builtin_elementwise_maximum(x,y),__builtin_elementwise_minimum(x,y),__builtin_elementwise_maximumnum(x,y),__builtin_elementwise_minimumnum(x,y)\n"
-          "#else\n"
-          "#define IEEE(x,y)\n"
-          "#endif\n"
           "union{unsigned u;float f;}fu[]={{0x7fc01234u},{0xffc05678u},{0x80000000u},{0},{0x3f800000u},{0xbf800000u},{0x7f800000u},{0xff800000u},{1},{0x40490fdbu}};\n"
           "union{unsigned long long u;double f;}du[]={{0x7ff8000000001234ull},{0xfff8000000005678ull},{0x8000000000000000ull},{0},{0x3ff0000000000000ull},"
           "{0xbff0000000000000ull},{0x7ff0000000000000ull},{0xfff0000000000000ull},{1},{0x400921fb54442d18ull}};\n"
@@ -1299,6 +1325,32 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
           "g2=__builtin_nontemporal_load(&g);__builtin_nontemporal_store(a2+1,&a);__builtin_nontemporal_store(b2*3,&b);__builtin_nontemporal_store(c2,&c);"
           "__builtin_nontemporal_store(e2,&e);__builtin_nontemporal_store(g2^7,&g);FOLD(a);FOLD(b);FOLD(c);FOLD(e);FOLD(g);FOLD(a2);FOLD(e2);return (int)h;}\n"
         },
+        // Conversions between unsigned or 64-bit integers and floats or doubles without AVX-512 (#1834), element by
+        // element as C converts each: in range, the most negative and the largest values and halfway cases among them.
+        { "baseline-integer-floating-conversions",
+          "typedef unsigned u4 __attribute__((vector_size(16)));typedef unsigned u2 __attribute__((vector_size(8)));typedef unsigned long long uq2 __attribute__((vector_size(16)));"
+          "typedef double d4 __attribute__((vector_size(32),aligned(16)));typedef float f2 __attribute__((vector_size(8)));typedef long long q4 __attribute__((vector_size(32),aligned(16)));\n"
+          "int tested(int n){unsigned h=2166136261u;u4 a;uq2 b;v2di c;fill(&a,16,n);fill(&b,16,n+1);fill(&c,16,n+2);a[0]=0xffffffffu;a[1]=0x80000001u;b[0]=~0ull;"
+          "b[1]=(1ull<<63)+1025;c[0]=(long long)(1ull<<63);c[1]=(1ll<<53)+1;"
+          "v4sf fa=__builtin_convertvector(a,v4sf);d4 da=__builtin_convertvector(a,d4);v2df db=__builtin_convertvector(b,v2df);f2 fb=__builtin_convertvector(b,f2);"
+          "v2df dc=__builtin_convertvector(c,v2df);f2 fc=__builtin_convertvector(c,f2);FOLD(fa);FOLD(da);FOLD(db);FOLD(fb);FOLD(dc);FOLD(fc);\n"
+          "v4sf g={3e9f,1.5f,4294967040.0f,(float)(n*n)};v2df k={1.8e19,(double)(n*n)*1e15};v2df m={-9.2e18,(double)n*-3e14};v2df k2={4e9,(double)(n*n)+0.5};"
+          "u4 ga=__builtin_convertvector(g,u4);uq2 kb=__builtin_convertvector(k,uq2);v2di mc=__builtin_convertvector(m,v2di);u2 gk=__builtin_convertvector(k2,u2);"
+          "q4 gq=__builtin_convertvector(g,q4);FOLD(ga);FOLD(kb);FOLD(mc);FOLD(gk);FOLD(gq);return (int)h;}\n"
+        },
+        // Integer vectors' division and remainder, element by element at every target (#2216): of each element size and
+        // signedness, of 8 to 128 bytes and an odd length, by a splat and in place; no divisor is 0, nor INT_MIN's -1.
+        { "baseline-integer-division",
+          "typedef signed char sb8 __attribute__((vector_size(8)));typedef unsigned short uw __attribute__((vector_size(16)));"
+          "typedef unsigned ud8 __attribute__((vector_size(32),aligned(16)));typedef long long sq8 __attribute__((vector_size(64),aligned(16)));"
+          "typedef int sd32 __attribute__((vector_size(128),aligned(16)));typedef short e3 __attribute__((ext_vector_type(3)));\n"
+          "#define D(T,k) T a##k,b##k;fill(&a##k,sizeof(T),n+k);fill(&b##k,sizeof(T),n+k+50);"
+          "for(unsigned i_=0;i_<sizeof(T)/sizeof(a##k[0]);i_++){if(b##k[i_]==0||b##k[i_]==(__typeof__(b##k[0]))-1)b##k[i_]=3;"
+          "if(a##k[i_]==(__typeof__(a##k[0]))(1ull<<(8*sizeof(a##k[0])-1)))a##k[i_]=1;}"
+          "{T q_[]={a##k/b##k,a##k%b##k,a##k/(__typeof__(a##k[0]))7,a##k%(__typeof__(a##k[0]))5};a##k/=b##k;FOLD(q_);FOLD(a##k);}\n"
+          "int tested(int n){unsigned h=2166136261u;D(sb8,1)D(v16qu,2)D(uw,3)D(v4si,4)D(ud8,5)D(v2di,6)D(sq8,7)D(sd32,8)\n"
+          "e3 c={(short)n,-7,300},d={3,(short)(n|1),-9};e3 r[]={c/d,c%d};short o[]={r[0][0],r[0][1],r[0][2],r[1][0],r[1][1],r[1][2]};FOLD(o);return (int)h;}\n"
+        },
         // AVX's and AVX2's (x86-64-v3's): 256-bit unpacks, broadcasts, permutes, variable shifts, lanes' extractions and
         // insertions, extensions, gathers, FMA's (of no NaN) and F16C's conversions, and shuffles of dwords and qwords.
         { "baseline-avx2",
@@ -1369,11 +1421,6 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
         }
         if (parsed)
         {
-            // A wide operator's pieces are refused by their own reason (#1193).
-            check_test_program_boundary_target(test, "typedef int V __attribute__((vector_size(64)));V tested(V a,V b){return a/b;}",
-                                               "baseline-wide-integer-vector-division", true, false, 0, 0, "vector division of integers", &target);
-            check_test_program_boundary_target(test, "typedef int V __attribute__((vector_size(16)));V tested(V a,V b){return a/b;}",
-                                               "baseline-integer-vector-division", true, false, 0, 0, "vector division of integers", &target);
             // The builtins the baseline's rows still refuse by name (#775) are c_check_program_vector_builtins_test.c's
             // refusals; the operators' and shuffles' sequences take every one (#1834).
         }

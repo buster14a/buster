@@ -583,6 +583,23 @@ The decoding:
   opmask register, which `x86_semantics`' effects of the `call` itself don't
   say) and the outgoing area too (its callee owns it), before its result. A copy that vanishes in its own register
   is its operand's value. A return's epilogue may come before its `ret`.
+- **Asm bodies** (`TIER1_RULE_ASM`, #1839, `tier1_cert_emitted_asm`). The
+  certificate places the body's records itself from the IR's (the front end's
+  template, trusted as a row's is): each that addresses the operand block
+  (`BUSTER_TIER0_ASM_BLOCK`) addresses the block's frame object from the frame
+  base register, by the layout. It compares them byte for byte with the
+  emitted ones, which carry no reference, and the body's own branches must be
+  exactly its branches, each to its target's record (its end's for one to the
+  body's end); a branch of a node's origin is taken only from a body. The
+  records are one ORIGINAL that reads no value (the block's memory isn't a value
+  the allocation keeps) and kills every register the body touches
+  (`IrAsmBody.touched` and `.masks`, callee-saved ones too, which the prologue
+  saved) and the frame bytes its stores write; a record of a form the
+  semantics' tables don't cover (`cpuid`, the x87's, MMX's) writes no register
+  but those, since the front end placed no record of the stack's or control's
+  in a body. The saves and reloads of the values live across it in those
+  registers are moves, decoded as any: one left out loses its value and is
+  refused.
 - **Machine rows** (`TIER1_RULE_ROW`, #1284). The emitter publishes the
   placement it gave each row (`Tier1RowPlacement`: each role's register, and
   the opmask registers the row names by number, renamed). The certificate
@@ -714,9 +731,8 @@ isn't rsp; long doubles (the x87 stack, an aggregate's x87 parts among them),
 a prologue's stack probes, a variadic definition's register save area, an
 indirect jump to several labels, a call's stack arguments or a stack
 parameter where the frame base register isn't rsp's (or the incoming area's),
-an entry block that is a loop's, a machine row of an implicit register or
-an uncovered form, and an asm body (#1839, `asm`: a template's own registers and
-branches, which the decoding doesn't follow). The allocation's certificate still covers
+an entry block that is a loop's, and a machine row of an implicit register or
+an uncovered form. The allocation's certificate still covers
 them, and the straight-line consumer's functions keep the interval
 certificate. Canonical 32-bit storage (a 4-byte value's upper half zero) is the
 selection's contract and isn't checked: a 4-byte value is its low 4 bytes.

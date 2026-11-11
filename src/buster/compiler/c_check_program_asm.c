@@ -153,6 +153,11 @@ struct CheckAsmPlace
     // An x87 input whose depth another input's value takes (#1846: two operands at one depth, clang's one register),
     // which the helper doesn't load.
     bool shadowed;
+    // An __m64 in an MMX register (#1846, the owner's decision on #1447): its 8 bytes as an unsigned long (`type`),
+    // which the lowering reads through the object's address (`object`, the operand's lvalue node past its value's
+    // conversions), as Tier 0 has no 8-byte vector load.
+    bool m64;
+    uint32_t object;
 };
 
 // A label a template defines (AsmCodeLabel): its spelling, its record in its code, the helper's or the naked function's
@@ -1575,6 +1580,10 @@ static const CheckAsmImplicit check_asm_implicit[] = {
     { X86_FORM_RDPMC, BUSTER_CHECK_ASM_GPR(RAX) | BUSTER_CHECK_ASM_GPR(RDX) },
     { X86_FORM_XGETBV, BUSTER_CHECK_ASM_GPR(RAX) | BUSTER_CHECK_ASM_GPR(RDX) },
     { X86_FORM_SYSCALL, BUSTER_CHECK_ASM_GPR(RAX) | BUSTER_CHECK_ASM_GPR(RCX) | BUSTER_CHECK_ASM_GPR(R11) },
+    // loop decrements rcx (ecx with an address-size prefix) and jrcxz writes nothing: each a branch to the template's own
+    // record, whose rel8 displacement the assembler fixed (asm_assemble_code's fixed branches, #1839's item 4).
+    { X86_FORM_LOOP_REL8, BUSTER_CHECK_ASM_GPR(RCX) },
+    { X86_FORM_JRCXZ_REL8, 0 },
     { X86_FORM_FNSTSW_AX, BUSTER_CHECK_ASM_GPR(RAX) },
     { X86_FORM_FSTSW_AX, BUSTER_CHECK_ASM_GPR(RAX) },
     { X86_FORM_LDMXCSR_M32, 0 },
@@ -1634,6 +1643,18 @@ static uint32_t check_asm_inline_touched(const CheckAsmPlace* places, uint32_t c
         written |= places[k].kind == BUSTER_CHECK_ASM_PAIR ? 1ull << X86_REGISTER_RAX | 1ull << X86_REGISTER_RDX : 0;
         opmask_writes |= places[k].kind == BUSTER_CHECK_ASM_MASK ? 1u << (places[k].reg & 7) : 0;
     }
+    // A loop's or a jrcxz's (#1839's item 4): a rel8 record the assembler gave its displacement to a record of the template's
+    // own (asm_assemble_code's fixed branches). A template of one takes no straight path to a return below.
+    bool fixed = false;
+    for (uint32_t r = 0; r < code->count; r += 1)
+    {
+        bool sized = false;
+        for (uint32_t b = 0; b < code->branch_count; b += 1)
+        {
+            sized |= code->branches[b] == r;
+        }
+        fixed |= !sized && x86_form_description(code->records[r].form & BUSTER_X86_FORM_NUMBER)->relative_bytes == 1 && (code->records[r].form & BUSTER_X86_FORM_FIXUP) == 0;
+    }
     for (uint32_t r = 0; placed && r < code->count; r += 1)
     {
         const X86Instruction* record = code->records + r;
@@ -1656,7 +1677,7 @@ static uint32_t check_asm_inline_touched(const CheckAsmPlace* places, uint32_t c
             {
                 branch |= gotos[j].record == k;
             }
-            out = !target && check_asm_return(code->records[k].form);
+            out = !target && !fixed && check_asm_return(code->records[k].form);
             if (branch || target)
             {
                 break;
@@ -1714,6 +1735,8 @@ static uint32_t check_asm_inline_touched(const CheckAsmPlace* places, uint32_t c
             {
                 local |= gotos[j].record == r;
             }
+            // A fixed branch's rel8 form, to the template's own record.
+            local |= x86_form_description(record->form & BUSTER_X86_FORM_NUMBER)->relative_bytes == 1 && (record->form & BUSTER_X86_FORM_FIXUP) == 0;
             const uint32_t control = x86_effects_control(effects);
             placed = (control == BUSTER_X86_CONTROL_NONE || (local && (control == BUSTER_X86_CONTROL_JUMP || control == BUSTER_X86_CONTROL_BRANCH))) &&
                      (effects->memory & (BUSTER_X86_MEMORY_EFFECT_STACK_READ | BUSTER_X86_MEMORY_EFFECT_STACK_WRITE)) == 0 &&
@@ -2013,6 +2036,24 @@ static int32_t check_asm_variable_register(const CheckProgram* program, uint32_t
         result = reg != -1 ? reg : result;
     }
     return result;
+}
+
+// An __m64 input's object (#1846, CheckAsmPlace.m64): the node of the lvalue its value is read from, past the casts that
+// keep its value (check_asm_noop_cast) and its lvalue conversion, or BUSTER_CHECK_NONE for a value of no object.
+static uint32_t check_asm_m64_object(const CheckProgram* program, uint32_t node)
+{
+    const CheckStream* stream = program->stream;
+    const CheckGraph* graph = &program->input->graph;
+    uint32_t at = node;
+    bool walking = true;
+    while (walking && at < stream->count && (graph->ops[at] == CHECK_OP_CAST || graph->ops[at] == CHECK_OP_CONVERT))
+    {
+        const uint32_t inner = graph->operand0[at];
+        walking = inner < at && check_asm_noop_cast(program->types, check_stream_type(stream, inner), check_stream_type(stream, at));
+        at = walking ? inner : at;
+    }
+    const bool object = at < stream->count && check_stream_value(stream, at).category == CHECK_LVALUE;
+    return object ? at : BUSTER_CHECK_NONE;
 }
 
 // Plans statement `s` (its operands from `operands`, check_asms_run's) into `plan`: its places, and its helper's code
@@ -2477,6 +2518,17 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
         {
             place->kind = BUSTER_CHECK_ASM_MMX;
             place->size = (uint8_t)size;
+        }
+        else if (constraint->mmx && (kind == BUSTER_TYPE_KIND_VECTOR || kind == BUSTER_TYPE_KIND_EXT_VECTOR) && size == 8)
+        {
+            // An __m64 (#1846): its 8 bytes, an object's, read through its address (CheckAsmPlace.m64), as clang's code
+            // moves them by movq. An input that isn't an object has no address to read it through.
+            place->kind = BUSTER_CHECK_ASM_MMX;
+            place->size = 8;
+            place->type = BUSTER_TYPE_ULONG;
+            place->m64 = true;
+            place->object = output ? checked->node : check_asm_m64_object(program, checked->node);
+            reason = place->object != BUSTER_CHECK_NONE ? NULL : "inline assembly __m64 inputs that aren't objects";
         }
         else if (constraint->masks != 0 && integer && registered)
         {

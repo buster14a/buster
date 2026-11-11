@@ -30,8 +30,8 @@ owner's tailnet; a cloud session doesn't need a CI job or the owner to measure.
   disposable. On any other machine it leaves the daemon and its state alone. A
   daemon on another socket is never touched; one whose `--socket` names the
   default socket, in any of the flag's forms or through `/var/run`'s link to
-  `/run`, is on the default socket. `.claude/hooks/test-join-tailnet.sh` (the
-  `DCO hook regression` job) checks which daemons it stops and that no state
+  `/run`, is on the default socket. `.claude/hooks/test-join-tailnet.sh` (in the
+  `Measurement storage policy` job) checks which daemons it stops and that no state
   file changes, with stand-ins for the daemon and its tools.
 - **One identity per session:** the environment's image holds the state file of
   a daemon an earlier hook started in `/var/lib/tailscale`. A daemon that reads
