@@ -12597,7 +12597,9 @@ static bool check_lower_segment_carried(const CheckLowerWriter* writer, TypeId t
     const uint8_t facts = check_lower_facts(writer, type);
     const uint8_t refused = BUSTER_CHECK_LOWER_TYPE_AGGREGATE | BUSTER_CHECK_LOWER_TYPE_COMPLEX | BUSTER_CHECK_LOWER_TYPE_ADDRESS | BUSTER_CHECK_LOWER_TYPE_ATOMIC |
                             BUSTER_CHECK_LOWER_TYPE_BIT_INT;
-    const bool classed = class != BUSTER_TYPED_CLASS_VOID && class <= BUSTER_TYPED_CLASS_VECTOR;
+    // A half-precision value's loads and stores are a U16's (c_check_program_half.c), whose entries keep the access's value.
+    const bool half = class == BUSTER_CHECK_LOWER_CLASS_BINARY16 || class == BUSTER_CHECK_LOWER_CLASS_BFLOAT16;
+    const bool classed = (class != BUSTER_TYPED_CLASS_VOID && class <= BUSTER_TYPED_CLASS_VECTOR) || half;
     return check_lower_segment_override(types, type) != 0 && classed && (facts & refused) == 0 &&
            (class != BUSTER_TYPED_CLASS_VECTOR || !check_lower_transport_type(types, type));
 }

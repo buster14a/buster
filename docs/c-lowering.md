@@ -1405,7 +1405,8 @@ memory class's does: `lea sym(%rip)` and `%gs:(%rax)` reach the byte clang's
 a read by indirection, member, subscript or name, and an assignment, compound assignment, increment or
 decrement, of an integer's, a floating value's (long double's too), a 128-bit
 integer's or a vector's class (not a transport vector), which one LOAD or STORE
-moves. An array's lvalue isn't read: its value is its address. A vector's
+moves, and a half-precision value's (`_Float16`'s, `__bf16`'s), whose loads and
+stores are a U16's (`c_check_program_half.c`). An array's lvalue isn't read: its value is its address. A vector's
 element, read, assigned or updated, takes its vector lvalue's override, which the
 element's own type has lost (`check_lower_element_segment`): clang reads the
 whole vector through it and extracts the element, and writes it by a read, an
@@ -1424,7 +1425,7 @@ pointee's (`check_lower_atomic_space`: a generic builtin's object type, such as
 `__atomic_test_and_set`'s, doesn't carry it).
 
 The rest the lowering refuses by name, rather than compile it as a plain access:
-an aggregate's copy, a complex, half-precision or `_BitInt` value
+an aggregate's copy, a complex or `_BitInt` value
 and an `_Atomic` object in those spaces (read or written as an lvalue), an atomic
 builtin another plan takes (a generic one by pointer, `__atomic_clear`,
 `__sync_lock_release`, one of 16 bytes), any access in `%ss`'s (258: no 64-bit

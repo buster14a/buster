@@ -667,14 +667,12 @@ static void check_test_program_segment_refusals(CheckTest* test, const X86Target
         { "segment-asm-read-write-output", "void tested(int __seg_gs*p){__asm__(\"incl %0\":\"+r\"(*p));}",
           "an asm output in a segment's address space (256, 257 or 258: %gs, %fs or %ss) but a memory one" },
         // What the lowering doesn't carry the override through yet (check_lower_segment_carried): an aggregate's copy, a
-        // complex value, a half-precision value, a _BitInt, an _Atomic object, and %ss's space (258).
+        // complex value, a _BitInt, an _Atomic object, and %ss's space (258).
         { "segment-struct-copy", "struct S{long a,b,c;};struct S tested(struct S __seg_fs*p){return *p;}",
           "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
         { "segment-struct-store", "struct S{long a,b,c;};void tested(struct S __seg_fs*p,struct S s){*p=s;}",
           "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
         { "segment-complex", "_Complex double tested(_Complex double __seg_gs*p){return *p;}",
-          "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
-        { "segment-half", "float tested(_Float16 __seg_gs*p){return *p;}",
           "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
         { "segment-bit-int", "int tested(_BitInt(40) __seg_fs*p){return (int)*p;}",
           "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
@@ -772,6 +770,16 @@ static void check_test_program_segments(CheckTest* test, const char* clang)
         "(*h)[n&7]-=n;r+=(*h)[n&7]+(*h)[(n*3)&7];v[0][1]^=7;r+=v[0][1];"
         "return (int)(r+tv[0]+tv[1]+tv[2]+tv[3]+(long)tf[n&7]+th[n&7]);}",
         "segment-vector-elements", clang);
+    // Half-precision values, whose loads and stores are a U16's (c_check_program_half.c): _Float16's and __bf16's, read,
+    // assigned, compound-assigned, incremented and decremented, through %fs.
+    check_test_program_source(test,
+        "static _Thread_local _Float16 th[4]={1.5f16,2.25f16,-3.0f16,0.5f16};static _Thread_local __bf16 tb[2]={1.0f,2.5f};"
+        "int tested(int n){char*tp=__builtin_thread_pointer();_Float16 __seg_fs*h=(_Float16 __seg_fs*)((char*)th-tp);"
+        "__bf16 __seg_fs*b=(__bf16 __seg_fs*)((char*)tb-tp);"
+        "float r=h[n&3]+(float)*h;h[1]=(_Float16)(n*0.5f);h[2]+=h[1];h[3]*=2;h[0]++;--h[1];r+=h[0]+h[1]+h[2]+h[3];"
+        "b[0]=b[1]+n;b[1]-=1.0f;r+=(float)b[0]+(float)b[1];"
+        "return (int)(4*(r+th[0]+th[1]+th[2]+th[3]+(float)tb[0]+(float)tb[1]));}",
+        "segment-half-precision", clang);
 }
 
 // Initializer validation keeps atomic rvalue identity while storage uses the underlying vector bytes.
