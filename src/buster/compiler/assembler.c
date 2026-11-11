@@ -192,6 +192,10 @@ struct AsmOptions
 {
     bool vectorized;
     bool intel;
+    // A C unit's assembly (inline templates and file-scope asm), which follows clang's integrated assembler where it
+    // differs from GNU as: `.comm` without an alignment and `.lcomm` align to 1 (#2304). `.s` files keep GNU as's rules,
+    // which test-assembler's cross-check compares.
+    bool integrated;
 };
 
 typedef struct AsmAbsolute AsmAbsolute;
@@ -2971,7 +2975,9 @@ static uint32_t asm_note_section(const AsmParser* parser, uint32_t end)
 // up to 8 (asm_place_commons). A global's repeated .comm keeps the first size, as GNU as does (it warns of another),
 // and takes the last alignment: its third operand, or without one (or 0) the kept size's power of two; one made local
 // and declared again joins .bss's, as GNU as places it (below). A local's repeated .comm or .lcomm, or a name defined
-// otherwise, is a duplicate definition, as in GNU as, and a weak name is refused.
+// otherwise, is a duplicate definition, as in GNU as, and a weak name is refused. A C unit's assembly
+// (AsmOptions.integrated) takes clang's integrated assembler's alignment instead: 1 for a `.comm` without a third
+// operand and for every `.lcomm` (#2304).
 static void asm_common_directive(AsmParser* parser, uint32_t token, uint32_t end)
 {
     const uint32_t location = parser->tokens[token].start;
@@ -3023,8 +3029,10 @@ static void asm_common_directive(AsmParser* parser, uint32_t token, uint32_t end
             {
                 power <<= 1;
             }
-            const uint32_t placed = lcomm ? (bytes >= 8 ? 8 : bytes >= 4 ? 4 : bytes >= 2 ? 2 : 1) : alignment != 0 ? (uint32_t)alignment : 1;
-            const uint32_t chosen = local ? placed : alignment != 0 ? (uint32_t)alignment : power;
+            const bool integrated = parser->options.integrated;
+            const uint32_t sized = bytes >= 8 ? 8 : bytes >= 4 ? 4 : bytes >= 2 ? 2 : 1;
+            const uint32_t placed = lcomm && !integrated ? sized : alignment != 0 ? (uint32_t)alignment : 1;
+            const uint32_t chosen = local ? placed : alignment != 0 ? (uint32_t)alignment : integrated ? 1 : power;
             if ((symbol->common != 0 && !repeated && !relocal) || symbol->defined || symbol->absolute)
             {
                 asm_fail(parser, location, "duplicate symbol definition");

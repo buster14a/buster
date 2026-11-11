@@ -778,9 +778,9 @@ makes of it (#1848, `check_program_emit_asm_symbols`):
   (clang warns and makes it a weak common), thread-local (a `TLS` common), alias's
   or selectany definition's; and a read-only one's (`const int x = 1;`), whose
   reads clang's code folds to the initializer where the program would read the
-  common's zeros. Without an alignment operand, the assembler aligns a `.comm` as
-  GNU as does (the size's power of two up to 16) where clang's integrated
-  assembler takes 1; the fixtures give one.
+  common's zeros. Without an alignment operand, a C unit's `.comm` and every
+  `.lcomm` align to 1, as clang's integrated assembler aligns them, where GNU
+  as takes the size's power of two (#2304; `docs/assembler.md`).
 - A file-scope label of an external, non-weak definition (`int x = 1;` with
   `asm(".globl x\nx: .long 2")`, `int f(void)` with `f: ret`, `int x;` with a
   `.data` label), without a binding directive but `.globl`, is clang's

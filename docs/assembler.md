@@ -386,6 +386,15 @@ without one, or `.lcomm`'s by size) plus its first common size, and of that
 first size, so `.comm x,4,4` / `.local x` / `.comm x,8,8` reserves 8 bytes and
 puts the 4-byte `x` at the second 4. The assembler does the same
 (`AsmSymbol.common_bias`).
+
+A C unit's assembly (inline templates and file-scope `asm`, assembled with
+`AsmOptions.integrated`) instead takes clang's integrated assembler's
+alignment where GNU as's differs (#2304): 1 for a `.comm` without a third
+operand and for every `.lcomm`, so `.comm x,4` is an `SHN_COMMON` of value 1
+and `.lcomm a,3` / `.lcomm b,4` puts `b` at 3, as clang's `-c` objects have
+them. `.s` files given to `assemble` or the driver keep GNU as's rules above:
+test-assembler's cross-check compares them with GNU as, and a hand-written
+`.s` is more often written for GNU as than for clang's assembler.
 The writer automatically emits a non-executable-stack note. Both GCC's
 `.section .note.GNU-stack,"",@progbits` and Clang's quoted section name are
 accepted; the note must remain empty and non-executable.

@@ -2058,7 +2058,7 @@ static AsmResult check_asm_unit_helper(const CheckAsmPlace* places, uint32_t cou
     check_asm_unit_records(output, valid ? code.records + first + exits : 0, valid ? code.count - first - exits : 0, scalar, &valid);
     const uint64_t length = output->length - mark;
     AsmResult result = valid ? asm_assemble((String8){ .pointer = (char*)output->base + mark, .length = length }, index,
-                                            (AsmOptions){ .vectorized = !BUSTER_SCALAR_PATH(scalar) }, output) :
+                                            (AsmOptions){ .vectorized = !BUSTER_SCALAR_PATH(scalar), .integrated = true }, output) :
                                (AsmResult){ .error = "arena exhausted placing inline assembly's unit" };
     if (result.error != 0)
     {
@@ -2336,7 +2336,7 @@ static bool check_asm_row(const CheckProgram* program, uint32_t s, const CheckAs
     AsmCode code = { 0 };
     if (placed)
     {
-        code = asm_assemble_code(source, index, (AsmOptions){ .vectorized = !BUSTER_SCALAR_PATH(scalar) }, output, scratch);
+        code = asm_assemble_code(source, index, (AsmOptions){ .vectorized = !BUSTER_SCALAR_PATH(scalar), .integrated = true }, output, scratch);
         *valid = code.error == NULL || strstr(code.error, "arena exhausted") == NULL;
         placed = code.error == NULL && !code.directive && code.count != 0 && code.branch_count == 0 && code.reference_count == 0 && code.label_count == 0;
     }
@@ -3085,7 +3085,7 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
     const uint64_t code_mark = output->length;
     if (valid && reason == NULL)
     {
-        code = asm_assemble_code(text, index, (AsmOptions){ .vectorized = !BUSTER_SCALAR_PATH(scalar) }, output, scratch);
+        code = asm_assemble_code(text, index, (AsmOptions){ .vectorized = !BUSTER_SCALAR_PATH(scalar), .integrated = true }, output, scratch);
         if (code.error != NULL && code.directive)
         {
             // A template that takes a directive besides the syntax switches is assembled by the full assembler
@@ -3110,7 +3110,7 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
                 }
             }
             AsmResult body = body_valid ? asm_assemble((String8){ .pointer = body_source, .length = text.length }, index,
-                                                       (AsmOptions){ .vectorized = !BUSTER_SCALAR_PATH(scalar) }, output) :
+                                                       (AsmOptions){ .vectorized = !BUSTER_SCALAR_PATH(scalar), .integrated = true }, output) :
                                           (AsmResult){ .error = "arena exhausted placing inline assembly's unit" };
             valid = body_valid;
             // A template of directives alone has no code to call, but with x87 operands or flag outputs, whose helper
@@ -3607,11 +3607,11 @@ static bool check_program_asm_plan_naked(CheckProgramAsms* result, const CheckPr
     bool unit_assembled = false;
     if (valid && reason == NULL)
     {
-        code = asm_assemble_code((String8){ .pointer = source, .length = at }, index, (AsmOptions){ .vectorized = !BUSTER_SCALAR_PATH(scalar) }, output, scratch);
+        code = asm_assemble_code((String8){ .pointer = source, .length = at }, index, (AsmOptions){ .vectorized = !BUSTER_SCALAR_PATH(scalar), .integrated = true }, output, scratch);
         if (code.error != NULL && code.directive)
         {
             // The naked function's templates take directives: its whole code is a unit assembled by the full assembler.
-            unit = asm_assemble((String8){ .pointer = source, .length = at }, index, (AsmOptions){ .vectorized = !BUSTER_SCALAR_PATH(scalar) }, output);
+            unit = asm_assemble((String8){ .pointer = source, .length = at }, index, (AsmOptions){ .vectorized = !BUSTER_SCALAR_PATH(scalar), .integrated = true }, output);
             unit_assembled = unit.error == NULL;
             reason = unit.error != NULL && strstr(unit.error, "arena exhausted") == NULL ? unit.error : NULL;
             valid = unit.error == NULL || reason != NULL;
@@ -3917,7 +3917,7 @@ static bool check_program_asm_plan_file(CheckProgramAsms* result, const CheckPro
             at += 1;
         }
     }
-    const AsmResult assembled = source != 0 ? asm_assemble((String8){ .pointer = source, .length = length }, index, (AsmOptions){ .vectorized = !scalar }, output) :
+    const AsmResult assembled = source != 0 ? asm_assemble((String8){ .pointer = source, .length = length }, index, (AsmOptions){ .vectorized = !scalar, .integrated = true }, output) :
                                               (AsmResult){ 0 };
     const char* refused = source == 0 ? NULL : assembled.error != 0 ? "file-scope assembly the assembler doesn't take" : NULL;
     // Every section is published as the assembler made it: notes, the arrays of constructors and destructors in their
