@@ -7,7 +7,7 @@
 // measure-tier1-programs' builds), each as it compiles it (its direct forms: the typed stream's fences, atomic accesses
 // and read/modify/writes, compare-exchanges and fetch loops among them, and the asm statements placed in their callers)
 // and with --helper-forms=all, which gives each of those operations its helper's call, as the compiler made them before
-// #1059. An asm statement keeps its helper under --tier1 either way (CheckProgramOptions.asm_helpers), and an implicit
+// #1059. An asm statement placed in its caller is an asm body under --tier1 (#1839, CheckProgramOptions.asm_bodies), and an implicit
 // _Atomic object's accesses, which have no helper, are the typed stream's either way.
 //
 //   build/compiler measure-helpers [--sqlite DIR --speedtest DIR] [--runs N] [--compiles N] [--warmups N]

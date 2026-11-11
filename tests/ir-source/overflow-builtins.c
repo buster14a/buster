@@ -5,7 +5,9 @@
 // operation and seto, the IR's saddo, ssubo and smulo), ints' 64-bit operations, unsigned longs' carries and 128-bit
 // products, mixed signedness into narrower destinations, _Bool and signed char destinations and an unsigned 32-bit
 // product past 2^63 into a long, of values at each width's boundaries, and _BitInts of 65 to 127 bits (#1447) as operands
-// and destinations beside 128-bit and narrower ones. test-ir-source lowers them by both paths, promotes them and reads
+// and destinations beside 128-bit and narrower ones, and past 128 bits (their limbs' sums and differences; their
+// products are libgcc's __mulbitint3, which the IR's interpreters don't run, so test-checker's programs and Tier 1's
+// fixture run those). test-ir-source lowers them by both paths, promotes them and reads
 // their text back; test-ssa-source runs the program in the IR's forms, the typed stream's interpreter and Tier 1's builds
 // against clang -O0's build's output.
 #include <stdio.h>
@@ -123,6 +125,45 @@ static void bit_ints(long a, long b, unsigned shift)
     mix((unsigned long long)l);
 }
 
+static void mix_limbs(const void* pointer, unsigned count)
+{
+    unsigned long long words[4];
+    __builtin_memcpy(words, pointer, 8 * count);
+    for (unsigned i = 0; i < count; i += 1)
+    {
+        mix(words[i]);
+    }
+}
+
+static void past_128_bits(long a, long b, unsigned shift)
+{
+    const unsigned _BitInt(256) x = ((unsigned _BitInt(256))(unsigned long)a << (shift * 3)) ^ (unsigned long)b;
+    const unsigned _BitInt(256) y = ((unsigned _BitInt(256))(unsigned long)b << (shift * 2)) | (unsigned long)a;
+    _BitInt(200) s = (_BitInt(200))x;
+    _BitInt(200) t = (_BitInt(200))y;
+    unsigned _BitInt(200) u = (unsigned _BitInt(200))x;
+    unsigned _BitInt(129) v = (unsigned _BitInt(129))y;
+    _BitInt(200) r200 = 0;
+    unsigned _BitInt(200) u200 = 0;
+    _BitInt(129) r129 = 0;
+    __int128 w = 0;
+    long l = 0;
+    mix((unsigned long long)__builtin_add_overflow(s, t, &r200));
+    mix_limbs(&r200, 4);
+    mix((unsigned long long)__builtin_sub_overflow(s, t, &r200));
+    mix_limbs(&r200, 4);
+    mix((unsigned long long)__builtin_sub_overflow(u, a, &r129));
+    mix_limbs(&r129, 3);
+    mix((unsigned long long)__builtin_add_overflow(s, v, &w));
+    mix_bytes(&w);
+    mix((unsigned long long)__builtin_add_overflow(a, b, &r200));
+    mix_limbs(&r200, 4);
+    mix((unsigned long long)__builtin_sub_overflow(v, u, &u200));
+    mix_limbs(&u200, 4);
+    mix((unsigned long long)__builtin_add_overflow(v, (unsigned long)b, &l));
+    mix((unsigned long long)l);
+}
+
 int main(void)
 {
     const unsigned count = sizeof(values) / sizeof(values[0]);
@@ -152,5 +193,14 @@ int main(void)
         }
     }
     printf("bit-ints %llx\n", hash);
+    hash = 0;
+    for (unsigned i = 0; i < count; i += 1)
+    {
+        for (unsigned j = 0; j < count; j += 1)
+        {
+            past_128_bits(values[i], values[j], (i * 7 + j * 13) % 66);
+        }
+    }
+    printf("past-128-bits %llx\n", hash);
     return 0;
 }
