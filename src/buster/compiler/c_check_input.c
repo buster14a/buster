@@ -14428,9 +14428,8 @@ static void check_input_complete_uses(CheckInputReader* reader)
 // have none of; only then the second keeps each object's last definition, tentative or not, the third warns.
 static void check_input_tentative_arrays(CheckInputReader* reader, uint32_t limit)
 {
-    const Parser* parser = reader->parser;
     const uint8_t* bits = reader->output->declaration_bits;
-    const bool scalar = BUSTER_SCALAR_PATH(parser->options.scalar);
+    const bool scalar = BUSTER_SCALAR_PATH(reader->parser->options.scalar);
     bool candidate = false;
     for (uint32_t first = 0; !candidate && first < limit; first += 64)
     {
