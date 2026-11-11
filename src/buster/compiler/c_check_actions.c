@@ -883,8 +883,9 @@ static void check_action_convert_plain(const TypeTable* table, CheckValue* value
         value->constant_kind = known ? CHECK_CONSTANT_INTEGER : CHECK_CONSTANT_NONE;
         value->integer = truth;
     }
-    else if (__builtin_expect((!source_integer && check_action_kind(table, source) == BUSTER_TYPE_KIND_BIT_INT) ||
-                              (!target_integer && target_kind == BUSTER_TYPE_KIND_BIT_INT), 0) &&
+    else if (__builtin_expect(value->constant_kind != CHECK_CONSTANT_NONE &&
+                              ((!target_integer && target_kind == BUSTER_TYPE_KIND_BIT_INT) ||
+                               (!source_integer && check_action_kind(table, source) == BUSTER_TYPE_KIND_BIT_INT)), 0) &&
              check_wide_convert(table, value, destination, node))
     {
         // A _BitInt past 128 bits on either side (#1447, c_check_wide.c).
