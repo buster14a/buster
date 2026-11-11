@@ -131,6 +131,8 @@ jobs:
         # pattern's alternatives and units), and its decisions on fixtures. When it fails, so does this job, and the remaining jobs do not run.
         # So do the hosted rows' shard costs (tools/ci/costs.c, #2031): its self-test, then every row's table in
         # tools/ci/costs/ against the inventory, which a new or renamed heading fails until `costs refresh` fits them.
+        # And the setup re-run's allowlist (tools/ci/rerun.c, #2276), against this workflow and the row workflow: a
+        # renamed setup step, test step or caller fails it.
         shell: bash
         run: |
           set -euo pipefail
@@ -142,6 +144,8 @@ jobs:
           "$RUNNER_TEMP/qualification" --self-test
           cc -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing tools/ci/nightly.c -o "$RUNNER_TEMP/nightly"
           "$RUNNER_TEMP/nightly" --self-test
+          cc -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing tools/ci/rerun.c -o "$RUNNER_TEMP/rerun"
+          "$RUNNER_TEMP/rerun" --self-test --root .
 
       - id: files
         shell: bash
@@ -207,9 +211,10 @@ jobs:
           persist-credentials: false
 
       - name: Test the nightly glue and the 9700X's caches against fixtures
-        # On pull requests, before any hardware: the scripts this job, the record job and the 9700X job run, and the
-        # hosted vector row's draws (tools/ci/vector-draw.sh), without network access (tools/ci/nightly.c's own
-        # self-test runs in `changes`).
+        # On pull requests, before any hardware: the scripts this job, the record job and the 9700X job run, the
+        # hosted vector row's draws (tools/ci/vector-draw.sh) and the setup re-run's decisions on recorded runs
+        # (tools/ci/rerun.sh, .github/workflows/rerun.yml), without network access (tools/ci/nightly.c's own self-test
+        # runs in `changes`).
         if: github.event_name == 'pull_request'
         shell: bash
         run: |
@@ -217,6 +222,7 @@ jobs:
           bash tests/ci/caches.sh
           bash tests/ci/build-benchmarks.sh
           bash tests/ci/vector-draw.sh
+          bash tests/ci/rerun.sh
 
       - name: Decide reuse and hardware admission
         id: decide
@@ -232,15 +238,15 @@ jobs:
 
   # One verified release-input acquisition before any hosted shard starts.
   prepare-hosted-tools:
-    needs: [changes, evidence, agent-guide-size, dco-hooks]
-    if: ${{ !cancelled() && github.repository_id == '1421805693' && needs.evidence.result == 'success' && needs.evidence.outputs.hosted == 'run' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) && (github.event_name != 'pull_request' || (needs.agent-guide-size.result == 'success' && needs.dco-hooks.result == 'success')) }}
+    needs: [changes, evidence, policy]
+    if: ${{ !cancelled() && github.repository_id == '1421805693' && needs.evidence.result == 'success' && needs.evidence.outputs.hosted == 'run' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) && (github.event_name != 'pull_request' || needs.policy.result == 'success') }}
     uses: ./.github/workflows/prepare-hosted-tools.yml
 
   test:
     name: Tests on Ubuntu 26.04 (${{ matrix.host_arch }}, ${{ matrix.sanitizer }}, O${{ matrix.optimization }})
     # A pull request's run stops at its first failure. GitHub has no fail-fast across jobs, so its tests wait for the
-    # policy checks, which finish within `changes`' time, and don't start when one fails: they wouldn't change a
-    # qualification that can't pass. Pushes to main, the daily run and dispatched runs test regardless, so that every
+    # policy job (`policy`, #2334), which finishes about when `changes` does, and don't start when it fails: they wouldn't
+    # change a qualification that can't pass. Pushes to main, the daily run and dispatched runs test regardless, so that every
     # row reports.
     # A nightly dispatch whose commit's earlier run qualified its plain rows reuses them (`evidence`), and runs none.
     # Each row is hosted-correctness.yml: its shards, and for a portable row the job that builds its compiler once for
@@ -248,8 +254,8 @@ jobs:
     # tools/ci/nightly.c reads to find the plain rows' shards. A pull request's second row is the vector row (#2033), the
     # explicit vector target's 4 shards on runners whose CPU qualifies, which replaces its random `native` row; every
     # other run keeps `native` (docs/ci.md, "The vector row").
-    needs: [changes, evidence, agent-guide-size, dco-hooks, prepare-hosted-tools]
-    if: ${{ !cancelled() && needs.prepare-hosted-tools.result == 'success' && github.repository_id == '1421805693' && needs.evidence.result == 'success' && needs.evidence.outputs.hosted == 'run' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) && (github.event_name != 'pull_request' || (needs.agent-guide-size.result == 'success' && needs.dco-hooks.result == 'success')) }}
+    needs: [changes, evidence, policy, prepare-hosted-tools]
+    if: ${{ !cancelled() && needs.prepare-hosted-tools.result == 'success' && github.repository_id == '1421805693' && needs.evidence.result == 'success' && needs.evidence.outputs.hosted == 'run' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) && (github.event_name != 'pull_request' || needs.policy.result == 'success') }}
     strategy:
       # On a pull request, the first failing row cancels the others (and each row's own shards fail fast). Elsewhere
       # every row runs to its end: these rows are main's sanitizer coverage, and one detector's failure must not hide
@@ -1792,20 +1798,40 @@ jobs:
           BUILD_DIRECTORY: ${{ steps.compiler_builds.outputs.directory }}
         run: bash tools/ci/build-benchmarks.sh cleanup "$BUILD_DIRECTORY"
 
-  agent-guide-size:
-    # Fold the guide budget into the existing required context, so a separate
-    # required check isn't needed before this workflow reaches main.
-    name: Agent guide size policy
+  policy:
+    # The repository's policy checks, one job (#2334): every run of this workflow and every push used to start five small
+    # jobs and a separate workflow for them, each taking a hosted runner and its setup, and at the hosted concurrency cap
+    # each waited in the queue on its own. The job carries the name of the required context the separate Measurement
+    # storage workflow had, so branch protection doesn't change; the 9700X context (`qualification`) needs it too. Each
+    # check runs even when an earlier one failed, so that every failure reports. The tests wait for it on pull requests
+    # alone, as they waited for the guide budget and the hook fixtures.
+    name: Measurement storage policy
     runs-on: ubuntu-26.04
     timeout-minutes: 5
     permissions:
       contents: read
     steps:
+      # The pull request's whole history, for the sign-off audit; the triggering commit alone elsewhere.
       - name: Check out triggering commit
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
+          fetch-depth: ${{ github.event_name == 'pull_request' && '0' || '1' }}
           persist-credentials: false
+
+      - name: Keep measurement evidence in buster-performance
+        shell: bash
+        run: |
+          set -euo pipefail
+          git ls-files -z -- docs/measurements > "$RUNNER_TEMP/measurement-paths"
+          if test -s "$RUNNER_TEMP/measurement-paths"; then
+              echo '::error::Store evidence in buster14a/buster-performance under docs/measurements/.'
+              git ls-files -- docs/measurements
+              exit 1
+          fi
+
+      # The guide budget, in the required contexts, so that no separate required check is needed.
       - name: Keep automatically loaded instructions bounded
+        if: ${{ !cancelled() }}
         shell: bash
         run: |
           set -euo pipefail
@@ -1865,43 +1891,12 @@ jobs:
               exit 1
           fi
 
-  dco-hooks:
-    # The hook is part of the maintainer's certification path. Run its isolated
-    # fixtures in the existing required context, so a separate workflow that
-    # branch protection need not require cannot silently regress it.
-    name: DCO hook regression
-    runs-on: ubuntu-26.04
-    timeout-minutes: 5
-    permissions:
-      contents: read
-    steps:
-      - name: Check out triggering commit
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-        with:
-          persist-credentials: false
-      - name: Exercise Git hooks in isolated repositories
-        run: sh .githooks/test-sign-off.sh
-      # The sessions' tailnet hook may stop a daemon: its fixtures check which ones, with stand-ins for the daemon.
-      - name: Exercise the tailnet session hook with stand-in daemons
-        run: bash .claude/hooks/test-join-tailnet.sh
-
-  dco-audit:
-    # Informational: the pull request's own commits' sign-off trailers, pinned to its head, in the job summary
-    # (tools/dco/dco.c audit, CONTRIBUTING.md's "Auditing sign-offs"). Missing trailers don't fail it; incomplete
-    # history does. No required check needs it.
-    name: DCO sign-off audit
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-26.04
-    timeout-minutes: 5
-    permissions:
-      contents: read
-    steps:
-      - name: Check out the pull request's history
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-        with:
-          fetch-depth: 0
-          persist-credentials: false
+      # Informational: the pull request's own commits' sign-off trailers, pinned to its head, in the job summary
+      # (tools/dco/dco.c audit, CONTRIBUTING.md's "Auditing sign-offs"). Missing trailers don't fail it; incomplete
+      # history fails the step, which doesn't fail the job: no required check needs the audit.
       - name: Audit the head's commits that the base doesn't reach
+        if: ${{ !cancelled() && github.event_name == 'pull_request' }}
+        continue-on-error: true
         env:
           BASE: ${{ github.event.pull_request.base.sha }}
           HEAD: ${{ github.event.pull_request.head.sha }}
@@ -1912,6 +1907,16 @@ jobs:
           cat "$RUNNER_TEMP/audit"
           { echo '```text'; cat "$RUNNER_TEMP/audit"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           test "$status" -le 1
+
+      # The hook is part of the maintainer's certification path; its isolated fixtures run in this required context, so
+      # that a separate workflow that branch protection need not require cannot silently regress it.
+      - name: Exercise Git hooks in isolated repositories
+        if: ${{ !cancelled() }}
+        run: sh .githooks/test-sign-off.sh
+      # The sessions' tailnet hook may stop a daemon: its fixtures check which ones, with stand-ins for the daemon.
+      - name: Exercise the tailnet session hook with stand-in daemons
+        if: ${{ !cancelled() }}
+        run: bash .claude/hooks/test-join-tailnet.sh
 
   qualification:
     # Preserve the existing required context: both hosted variants and the gated
@@ -1926,7 +1931,7 @@ jobs:
     # nightly mode defers its 9700X work to the window. None of the three has
     # this context, so none can show a 9700X qualification that didn't run.
     name: Build and execute on Ryzen 7 9700X
-    needs: [changes, evidence, agent-guide-size, dco-hooks, test, fuzz, benchmarks]
+    needs: [changes, evidence, policy, test, fuzz, benchmarks]
     if: ${{ always() && needs.evidence.outputs.retired != 'true' && !(github.event_name == 'workflow_dispatch' && (inputs.purpose == 'backlog' || inputs.purpose == 'snapshot')) && !(github.event_name == 'push' && needs.evidence.outputs.hardware_reason == 'deferred') }}
     runs-on: ubuntu-26.04
     timeout-minutes: 5
@@ -1940,8 +1945,8 @@ jobs:
         env:
           CHANGES_RESULT: ${{ needs.changes.result }}
           CODE_CHANGED: ${{ needs.changes.outputs.code }}
-          SIZE_RESULT: ${{ needs.agent-guide-size.result }}
-          DCO_RESULT: ${{ needs.dco-hooks.result }}
+          SIZE_RESULT: ${{ needs.policy.result }}
+          DCO_RESULT: ${{ needs.policy.result }}
           EVIDENCE_RESULT: ${{ needs.evidence.result }}
           HARDWARE: ${{ needs.evidence.outputs.hardware }}
           HARDWARE_REASON: ${{ needs.evidence.outputs.hardware_reason }}

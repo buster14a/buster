@@ -517,6 +517,56 @@ before its level, with the level's other qualifiers after its specifier
 (`'AS1 int const *'`), as clang's printer places them; else the attribute is
 spelled out.
 
+## Type sugar
+
+`c_types_sugar.c` (#1447) keeps what a declaration wrote beyond its canonical
+type, as clang's sugar nodes do, for diagnostics alone. A sugar id
+(`uint32_t`, 0 for none) is never a `TypeId`. Identity, compatibility, layout,
+conversions and lowering read only canonical types, so no hot path changes
+and none canonicalizes.
+
+- **Nodes.** Each node keeps the canonical type it stands for
+  (`TypeSugarTable.canonical`): the `TypeId` it travels with, whose print is
+  the a.k.a. The kinds:
+  - `ATTRIBUTED`: a calling convention's `AttributedType`, with its modified
+    type;
+  - `MACRO`: its list's `MacroQualifiedType`, by the list's token, which the
+    renderer resolves;
+  - `PAREN`: a declarator group's `ParenType`;
+  - `POINTER` and `ARRAY`: structural levels, made only over sugar.
+- **Normal form.** A structural or parenthesized node over no sugar is never
+  made, so a declaration without sugar has none at any level and makes no
+  node.
+- **Hash-consing.** Nodes are hash-consed in an open-addressed index of their
+  own, and the table grows from an arena.
+- **Storage.** The checker keeps the table, and a map of the few declaring
+  tokens with sugar to their nodes (`CheckInput.sugar`, `sugar_tokens`,
+  `check_input_declared_sugar`). Both are allocated from the output arena
+  when a unit's first declarator writes sugar. A unit without any pays one
+  test of each declarator's merged convention.
+  - **Why a map:** a word per token, zeroed, cost main.c's compile 0.5 to 0.7%
+    of its user cycles on the 9700X (#2326), since main.c declares a few
+    functions with conventions.
+
+`type_sugar_print` is clang's `TypePrinter` over the nodes. It finds the
+levels that print a given type: the node itself, a node under it (a
+dereference's), or the type's own pointers and arrays above it (an
+address's). It computes clang's placeholder state from the outside in, then
+each level's text before and after the placeholder from the inside out:
+- a pointer's `*` and `(` before an array;
+- a group's `(` where the placeholder isn't empty and its type isn't a
+  function's;
+- a `preserve_*` convention before the type (`spaceBeforePlaceHolder`), any
+  other after it;
+- a macro's name before its attribute's modified type.
+
+Each sugar-free part is `type_print`'s, printed with a placeholder byte and
+split at it. Inside a convention's attribute it takes
+`BUSTER_TYPE_PRINT_INSIDE_CC` (clang's `InsideCCAttribute`); elsewhere it takes
+the canonical convention spellings. A type the nodes don't describe, or a part
+they can't print (a variable array's bound, qualifiers on an attributed
+level), gives no print, and the caller prints canonically.
+
 ## Tests
 
 `./build/compiler test-types [--seed N] [--count N] [--clang PATH] [--keep]`

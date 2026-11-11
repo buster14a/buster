@@ -317,6 +317,8 @@ static bool check_input_vla_bound(CheckInputReader* reader, uint32_t open, uint3
         // A job that stopped at a definition has no value yet.
         const bool evaluated = *definition == BUSTER_CHECK_NONE;
         valid = valid && (!evaluated || walked || check_input_const_rvalue(reader, end, &value));
+        // A bound of another type than an integer's (#2170): clang's error naming it, which drops the declaration.
+        const bool non_integer = valid && evaluated && !walked && value.type != 0 && !check_action_is_integer(reader->types, value.type);
         valid = valid && (!evaluated || walked || check_action_is_integer(reader->types, value.type));
         // clang folds a GNU constant in an array bound, but not a saturated floating conversion's value.
         const bool folded = evaluated && !walked && check_input_integer_constant(reader, &value) &&
@@ -349,7 +351,11 @@ static bool check_input_vla_bound(CheckInputReader* reader, uint32_t open, uint3
             const uint32_t token = failed_at;
             const bool missing = parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER && reader->output->declarations[token] == BUSTER_CHECK_NONE;
             // A negative constant is clang's own error (#1447), at the bound's first token, naming the declarator's name.
-            if (negative || missing)
+            if (non_integer)
+            {
+                check_input_report_typed(reader, first, CHECK_INPUT_ARRAY_NON_INTEGER, type_unqualified(value.type), BUSTER_CHECK_NONE, 0);
+            }
+            else if (negative || missing)
             {
                 check_input_report(reader, negative ? first : token, negative ? CHECK_INPUT_ARRAY_NEGATIVE : CHECK_INPUT_UNDECLARED);
             }
@@ -797,6 +803,23 @@ static bool check_input_label_address(const Parser* parser, uint32_t token);
 static bool check_input_asm_gotos(const CheckInput* input);
 static bool check_input_asm_goto_refused(const CheckInputReader* reader, uint32_t token, const CheckInputCleanup* innermost);
 
+// A jump's report (`index`, if the reader made it) completes past its function's body (#1942): clang's JumpScopeChecker
+// runs in ActOnFinishFunctionBody, after the body's scopes have given their unused variables' warnings.
+static void check_input_jump_completion(CheckInputReader* reader, uint32_t index)
+{
+    const Parser* parser = reader->parser;
+    CheckInput* input = reader->output;
+    uint32_t at = index < input->report_count ? input->reports[index].token : BUSTER_CHECK_NONE;
+    for (uint32_t steps = 0; at < parser->tokens.count && parser->tree.roles[at] != PARSE_ROLE_CLOSE_BODY && steps < parser->tokens.count; steps += 1)
+    {
+        at = parser->tree.parents[at] != at ? parser->tree.parents[at] : BUSTER_CHECK_NONE;
+    }
+    if (at < parser->tokens.count)
+    {
+        input->reports[index].completion = at + 1;
+    }
+}
+
 // The scopes a jump mustn't enter (clang's JumpScopeChecker): a variably modified declaration's, and a cleanup's
 // variable's (check_input_cleanup_declaration), from the declaration to its scope's end (vla_scope_ends).
 static void check_input_vla_finish(CheckInputReader* reader)
@@ -855,7 +878,20 @@ static void check_input_vla_finish(CheckInputReader* reader)
             const uint32_t declaration = reader->scope_marks[target] - 1;
             if (source < declaration || source >= reader->vla_scope_ends[declaration])
             {
+                // Its note at the declaration it bypasses (#1942), as clang's jump scope checker words it: a typedef's
+                // variably modified type (detail 3), a variably modified variable's (1), or a cleanup's variable (2).
+                CheckInput* input = reader->output;
+                const uint32_t before = input->report_count;
                 check_input_report(reader, token, target == token ? CHECK_INPUT_JUMP_SWITCH : CHECK_INPUT_JUMP_GOTO);
+                const bool typedef_name = input->declaration_kinds != NULL && input->declaration_kinds[declaration] == C_BINDING_TYPEDEF;
+                const bool modified = reader->declared_types != NULL && check_input_vla_modified(reader->types, reader->declared_types[declaration]);
+                if (input->report_count > before)
+                {
+                    input->reports[before].note_kind = CHECK_INPUT_NOTE_JUMP;
+                    input->reports[before].note_token = declaration;
+                    input->reports[before].detail = typedef_name ? 3u : modified ? 1u : 2u;
+                }
+                check_input_jump_completion(reader, before);
             }
         }
     }

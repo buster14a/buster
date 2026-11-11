@@ -716,6 +716,22 @@ static void check_test_driver_multiversion(CheckTest* test, const char* clang, c
           "__attribute__((noinline, target(\"avx512f\"))) int h(void);\n"
           "__attribute__((target(\"default\"))) int h(void) { return 0; }\n",
           "attribute 'target' multiversioning cannot be combined with attribute 'noinline'", true },
+        { "a version beside a plain declaration is checked when a later one causes multiversioning",
+          "int h(void);\n"
+          "__attribute__((noinline, target(\"avx2\"))) int h(void);\n"
+          "__attribute__((target(\"default\"))) int h(void) { return 0; }\n",
+          "attribute 'target' multiversioning cannot be combined with attribute 'noinline'", true },
+        { "each later version checks the first declaration again past the one that caused multiversioning",
+          "__attribute__((noinline, target(\"avx2\"))) int h(void);\n"
+          "__attribute__((target(\"avx512f\"))) int h(void);\n"
+          "__attribute__((target(\"default\"))) int h(void) { return 0; }\n",
+          "attribute 'target' multiversioning cannot be combined with attribute 'noinline'", true },
+        { "two refused redeclarations each check the first declaration",
+          "__attribute__((target(\"avx2\"))) int h(void);\n"
+          "__attribute__((noinline, target(\"avx512f\"))) int h(void);\n"
+          "__attribute__((noinline, target(\"arch=atom\"))) int h(void);\n"
+          "__attribute__((target(\"default\"))) int h(void) { return 0; }\n",
+          "attribute 'target' multiversioning cannot be combined with attribute 'noinline'", true },
     };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(cases); i += 1)
     {

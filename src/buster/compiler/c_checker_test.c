@@ -3199,9 +3199,32 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
             false
         },
         {
-            // One whose body names it, which may have asked its layout, which clang memoizes before the attribute: refused.
-            "fixed enum: aligned after a body that names it",
-            "enum G : char { C = sizeof(enum G) } __attribute__((aligned(8)));\n",
+            // One whose body asks its layout (sizeof, _Alignof), which clang memoizes before the attribute: the attribute
+            // changes nothing (#1447 C3). One whose body names it in a cast only takes it.
+            "fixed enum: aligned after a body that asks its layout",
+            "enum G : char { C = sizeof(enum G) } __attribute__((aligned(8)));\n"
+            "_Static_assert(sizeof(enum G) == 1 && _Alignof(enum G) == 1, \"G\");\n"
+            "enum H : char { D = _Alignof(enum H) } __attribute__((aligned(4)));\n"
+            "_Static_assert(sizeof(struct { enum H h; char c; }) == 2, \"H\");\n"
+            "enum J : int { E = 1, K = (enum J)0 } __attribute__((aligned(8)));\n"
+            "_Static_assert(_Alignof(enum J) == 8, \"J\");\n"
+            "enum Q : char { R = sizeof(enum Q[2]) } __attribute__((aligned(8)));\n"
+            "_Static_assert(_Alignof(enum Q) == 1, \"Q\");\n",
+            false,
+            false
+        },
+        {
+            // A pointer to it asks nothing; one whose body names it otherwise (an array's element), which this doesn't read:
+            // refused.
+            "fixed enum: aligned after a body that names a pointer to it",
+            "enum L : char { M = sizeof(enum L *) } __attribute__((aligned(8)));\n"
+            "_Static_assert(_Alignof(enum L) == 8, \"L\");\n",
+            false,
+            false
+        },
+        {
+            "fixed enum: aligned after a body that names it otherwise",
+            "enum N : char { P = sizeof(struct { enum N n; }) } __attribute__((aligned(8)));\n",
             true,
             true
         },

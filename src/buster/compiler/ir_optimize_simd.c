@@ -604,12 +604,13 @@ static uint8_t ir_optimize_simd_transfer(const IrOptimizeWork* work, uint32_t i,
             result = IROPT_OVERDEFINED;
         }
     }
-    else if (op == IR_INTRINSIC && f->c[i] >= BUSTER_IR_INTRINSIC_EXTRACT && f->c[i] <= BUSTER_IR_INTRINSIC_SHIFT)
+    else if (op == IR_INTRINSIC && f->c[i] >= BUSTER_IR_INTRINSIC_EXTRACT && f->c[i] <= BUSTER_IR_INTRINSIC_LANE_OP)
     {
-        // A width change, a permute, a conversion or a scalar shift (#1840): exact integer and bit moves, folded by the
-        // model once every operand is constant (a shift's count a scalar, its shape none).
+        // A width change, a permute, a conversion, a scalar shift or a lane operation (#1840): exact integer and bit moves,
+        // folded by the model once every operand is constant (a shift's count a scalar, its shape none).
         static const uint8_t operations[] = { IR_SIMD_EXTRACT, IR_SIMD_WIDEN,  IR_SIMD_INSERT,   IR_SIMD_PERMUTE, IR_SIMD_SHUFFLE,
-                                              IR_SIMD_ALIGN,   IR_SIMD_SHUFFLE_LANES, IR_SIMD_EXTEND, IR_SIMD_TRUNCATE, IR_SIMD_SHIFT };
+                                              IR_SIMD_ALIGN,   IR_SIMD_SHUFFLE_LANES, IR_SIMD_EXTEND, IR_SIMD_TRUNCATE, IR_SIMD_SHIFT,
+                                              IR_SIMD_LANE_OP };
         const bool binary = f->c[i] != BUSTER_IR_INTRINSIC_EXTRACT && f->c[i] != BUSTER_IR_INTRINSIC_WIDEN && f->c[i] != BUSTER_IR_INTRINSIC_EXTEND &&
                             f->c[i] != BUSTER_IR_INTRINSIC_TRUNCATE;
         const uint8_t left = work->states[a];

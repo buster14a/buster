@@ -37,6 +37,142 @@ static const char check_driver_format_attributed_source[] =
 static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtures[] =
 {
     {
+        // A failed static assertion's requirement and its operands' values (#1447, check_semantic_assert): the first
+        // false term of a conjunction, literals printed as clang's StmtPrinter prints them (`2147483648U`, `'\x00'`,
+        // `2.`, `1.0E+10`), `sizeof (x)`, `__alignof`, and the "expression evaluates to" note where an operand isn't
+        // obvious, a plain char's value as `'<0xC8>' (0xC8, -56)`, floats at APFloat's default precision.
+        .name = "static assertion requirements and their values",
+        .source = "enum { A = 3 };\n"
+                  "_Static_assert(A == 4, \"a\");\n"
+                  "_Static_assert(1 && A > 2 && (A < 3 || A > 5), \"b\");\n"
+                  "_Static_assert(-A == 4 && 1, \"c\");\n"
+                  "_Static_assert('a' == A, \"d\");\n"
+                  "_Static_assert(1.5 + A < 2.0, \"e\");\n"
+                  "_Static_assert((_Bool)A == 0, \"f\");\n"
+                  "_Static_assert(A + 0u > 5u, \"g\");\n"
+                  "_Static_assert((char)A == 'b', \"h\");\n"
+                  "_Static_assert((char)200 == (char)'\\n', \"i\");\n"
+                  "_Static_assert(A < 1 == 1, \"j\");\n"
+                  "_Static_assert(A - 3, \"k\");\n"
+                  "_Static_assert(0x80000000 == A + 3000000000, \"l\");\n"
+                  "_Static_assert(1e300 * A == 0.1f, \"m\");\n"
+                  "_Static_assert(1e-5 * A == 1e5, \"n\");\n"
+                  "_Static_assert(sizeof A == sizeof (A) + sizeof(int), \"o\");\n"
+                  "_Static_assert(__alignof__(A) == 2 * _Alignof(int), \"p\");\n",
+        .errors = 16,
+        .notes = 14,
+    },
+    {
+        // (Apart, as clang stops at 20 errors.)
+        .name = "static assertion requirements and their values, literals and conjunctions",
+        .source = "enum { A = 3 };\n"
+                  "_Static_assert('\\0' == 1 && 0, \"q\");\n"
+                  "_Static_assert((0), \"r\");\n"
+                  "_Static_assert(1 && (0), \"s\");\n"
+                  "_Static_assert(0 && 2 == 3, \"t\");\n"
+                  "_Static_assert(L'\\x263a' + u'x' == 1, \"u\");\n"
+                  "_Static_assert(-0.0 == 1.0L, \"v\");\n"
+                  "_Static_assert((A & 1) == 0 && (A | 4) == 3, \"w\");\n"
+                  "_Static_assert((A << 2) == (A >> 1), \"x\");\n"
+                  "_Static_assert(A == 3 ? 0 : 1, \"y\");\n"
+                  "_Static_assert(!A, \"z\");\n"
+                  "void f(void) { _Static_assert(A * 1000000 == 4, \"block\"); }\n",
+        .errors = 11,
+        .notes = 4,
+    },
+    {
+        .name = "static assertion requirements and their values in C23",
+        .source = "enum { A = 3 };\n"
+                  "_Static_assert((bool)A == false, \"a\");\n"
+                  "_Static_assert((_Bool)A == 0, \"b\");\n"
+                  "_Static_assert(1wb + A == 2uwb, \"c\");\n"
+                  "_Static_assert(1'000 * A == 18446744073709551615u, \"d\");\n"
+                  "_Static_assert(alignof(int) == sizeof 1 + 1, \"e\");\n"
+                  "_Static_assert(true && A == 4, \"f\");\n"
+                  "_Static_assert(u8'a' == 1.0e10, \"g\");\n"
+                  "_Static_assert((float)A / 3 == 2, \"h\");\n"
+                  "_Static_assert(false, \"i\");\n",
+        .errors = 9,
+        .notes = 6,
+        .c23 = true,
+    },
+    {
+        // A statement expression's statements are evaluated as it is (#1447, check_common_statement_roots): a
+        // short-circuited operand's, a constant conditional's other arm's, a constant if's and unreachable code's give
+        // none of their runtime or unused-value warnings, as clang's CFG leaves their blocks unreachable.
+        .name = "statements of unevaluated statement expressions",
+        .source = "int g(int);\n"
+                  "int f(int x)\n"
+                  "{\n"
+                  "    int r = 0;\n"
+                  "    r += 0 && ({ x << 40; 1; });\n"
+                  "    r += 1 || ({ 1 / 0; 1; });\n"
+                  "    r += 0 ? ({ x << 33; 1; }) : 2;\n"
+                  "    if (0) { r += ({ x << 34; 1; }); }\n"
+                  "    return r;\n"
+                  "    r += ({ x << 35; 1; });\n"
+                  "}\n",
+        .options = { "-Wall", "-Wextra" },
+    },
+    {
+        // A body with statement expressions keeps its unreachable-code proof (#1447, check_common_unreachable).
+        .name = "unreachable code in a body with statement expressions",
+        .source = "int f(int x)\n"
+                  "{\n"
+                  "    int r = 0;\n"
+                  "    return r;\n"
+                  "    r += x << 35;\n"
+                  "    x << 36;\n"
+                  "    r += ({ x << 37; 1; });\n"
+                  "    ({ x << 38; 1; });\n"
+                  "}\n",
+        .options = { "-Wall", "-Wextra" },
+    },
+    {
+        .name = "reachable statement expressions, jumps out of them and returns inside them",
+        .source = "int g(int);\n"
+                  "int f(int x, int y)\n"
+                  "{\n"
+                  "    int r = ({ x << 40; 1; });\n"
+                  "    r += y ? ({ x << 41; 2; }) : ({ x << 42; 3; });\n"
+                  "    r += 1 && ({ x / 0; 1; });\n"
+                  "    r += ({ if (x) goto out; 0; });\n"
+                  "    r += ({ int k = ({ x << 43; 4; }); k; });\n"
+                  "    for (;;) { r += ({ x << 44; 1; }); if (r) break; }\n"
+                  "    while (1) { }\n"
+                  "    r += ({ x << 45; 1; });\n"
+                  "out:\n"
+                  "    r += ({ x << 46; 1; });\n"
+                  "    r += 0 && ({ int u; u + ({ x << 47; 1; }); });\n"
+                  "    return r;\n"
+                  "}\n"
+                  "int h(int x)\n"
+                  "{\n"
+                  "    int r = ({ if (x) return 1; x << 48; 2; });\n"
+                  "    r += ({ return 2; x << 49; 3; });\n"
+                  "    return r;\n"
+                  "}\n",
+        .options = { "-Wall", "-Wextra" },
+        .warnings = 16,
+    },
+    {
+        .name = "-Wuninitialized in unevaluated statement expressions",
+        .source = "int g(int);\n"
+                  "int f(int x)\n"
+                  "{\n"
+                  "    int u;\n"
+                  "    int r = 0 && ({ u + 1; });\n"
+                  "    r += 0 ? ({ g(u); }) : 1;\n"
+                  "    int v;\n"
+                  "    r += ({ v; });\n"
+                  "    return r;\n"
+                  "    ({ int w; w; });\n"
+                  "}\n",
+        .options = { "-Wall", "-Wextra" },
+        .warnings = 2,
+        .notes = 1,
+    },
+    {
         // An enclosing construct's warning comes after the diagnostics its operands gave as clang built them (#1941): a
         // condition's -Wparentheses at its `)` or `;`, a call's -Wformat from its `)`, a bitwise operator's precedence and a
         // logical not's at their right operand's end; a statement expression's and a nested call's warnings first. A call
@@ -389,6 +525,59 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .source = "char c=1<<9;\n"
                   "void g(int x){char d=1<<9;char e=x<<40;int k=2.5;if(0.5){x<<=64;}x=!1.5?x>>99:x;(void)d;(void)e;(void)k;}\n",
         .warnings = 7,
+    },
+    {
+        // A divisor clang's EvaluateAsInt finds zero through a const object's initializer (#1447,
+        // check_common_zero_divisor): a scalar's, an element's, a member's, through parentheses and casts, at file and
+        // block scope; not a volatile's, a non-const's or one initialized at run time, and none in unreachable code.
+        .name = "division by a const object's zero",
+        .source = "const int k = 0;\n"
+                  "static const int ks = 0;\n"
+                  "const volatile int kv = 0;\n"
+                  "int nk = 0;\n"
+                  "const long kl = 0;\n"
+                  "const int ka[2] = { 0, 1 };\n"
+                  "struct P { int m; };\n"
+                  "const struct P kp = { 0 };\n"
+                  "const int one = 1;\n"
+                  "const char s[] = \"a\";\n"
+                  "int f(int x) {\n"
+                  "    const int lk = 0;\n"
+                  "    const int lk2 = x;\n"
+                  "    int r = 1 / k + 1 % ks + 1 / kv + 1 / nk + x / kl + 1 / lk + 1 / lk2 + 1 / ka[0] + 1 / kp.m + 1 / (k) + 1 / (int)k;\n"
+                  "    if (0) { r = 1 / k; }\n"
+                  "    r += (int)sizeof(1 / k) + 1 / one + 1 / s[1];\n"
+                  "    r += x ? 1 / lk : 0;\n"
+                  "    return r;\n"
+                  "    r = 1 / k;\n"
+                  "}\n",
+        .warnings = 10,
+    },
+    {
+        .name = "division by a const object's zero in C23 under -Wall",
+        .source = "const int k = 0;\n"
+                  "static const int ks = 0;\n"
+                  "const volatile int kv = 0;\n"
+                  "int nk = 0;\n"
+                  "const long kl = 0;\n"
+                  "const int ka[2] = { 0, 1 };\n"
+                  "struct P { int m; };\n"
+                  "const struct P kp = { 0 };\n"
+                  "const int one = 1;\n"
+                  "const char s[] = \"a\";\n"
+                  "int f(int x) {\n"
+                  "    const int lk = 0;\n"
+                  "    const int lk2 = x;\n"
+                  "    int r = 1 / k + 1 % ks + 1 / kv + 1 / nk + x / kl + 1 / lk + 1 / lk2 + 1 / ka[0] + 1 / kp.m + 1 / (k) + 1 / (int)k;\n"
+                  "    if (0) { r = 1 / k; }\n"
+                  "    r += (int)sizeof(1 / k) + 1 / one + 1 / s[1];\n"
+                  "    r += x ? 1 / lk : 0;\n"
+                  "    return r;\n"
+                  "    r = 1 / k;\n"
+                  "}\n",
+        .options = { "-Wall" },
+        .warnings = 10,
+        .c23 = true,
     },
     {
         .name = "literal conversions precede selection arms' shift counts and division by zero",
@@ -1893,6 +2082,46 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .options = { "-Wall" },
         .warnings = 5,
         .notes = 4,
+    },
+    {
+        // A discarded statement expression's comparison value warns as clang's DiagnoseUnusedExprResult of the statement
+        // expression does (#1447): "expression result unused", no comparison's note, queued after the statements before it,
+        // in its own -Wunused-value rather than -Wunused-comparison; a statement's own comparison keeps its warning.
+        .name = "a discarded statement expression's comparison value",
+        .source = "int g(int);\n"
+                  "int f(int x) {\n"
+                  "    ({ x; x == 1; });\n"
+                  "    ({ l: x == 2; });\n"
+                  "    (({ x == 3; }), 0);\n"
+                  "    ({ ({ x != 4; }); });\n"
+                  "    ({ x > 5; }), x;\n"
+                  "    if (x) ({ x == 6; });\n"
+                  "    ({ g(x) == 7; });\n"
+                  "    ({ (x == 8); });\n"
+                  "    x == 9;\n"
+                  "    return 0;\n"
+                  "}\n",
+        .warnings = 11,
+        .notes = 1,
+    },
+    {
+        .name = "a discarded statement expression's comparison value under -Wno-unused-comparison in C23",
+        .source = "int g(int);\n"
+                  "int f(int x) {\n"
+                  "    ({ x; x == 1; });\n"
+                  "    ({ l: x == 2; });\n"
+                  "    (({ x == 3; }), 0);\n"
+                  "    ({ ({ x != 4; }); });\n"
+                  "    ({ x > 5; }), x;\n"
+                  "    if (x) ({ x == 6; });\n"
+                  "    ({ g(x) == 7; });\n"
+                  "    ({ (x == 8); });\n"
+                  "    x == 9;\n"
+                  "    return 0;\n"
+                  "}\n",
+        .options = { "-Wno-unused-comparison" },
+        .warnings = 10,
+        .c23 = true,
     },
     {
         .name = "typeof statement expressions are unevaluated",
