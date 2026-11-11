@@ -3203,6 +3203,67 @@ static const CheckSemanticFixture check_semantic_fixtures[] =
         36,
         "static assertion failed due to requirement 'VALUE == 2': value",
     },
+    // A character constant by its value, as clang's CharacterLiteral::print gives it (#1999).
+    {
+        "_Static_assert('ab' == 0, \"c\");\n",
+        "_Static_assert('ab' != 0, \"c\");\n",
+        16,
+        "static assertion failed due to requirement ''\\u6162' == 0': c",
+    },
+    {
+        "_Static_assert('\\n' == 0, \"c\");\n",
+        "_Static_assert('\\n' != 0, \"c\");\n",
+        16,
+        "static assertion failed due to requirement ''\\n' == 0': c",
+    },
+    {
+        "_Static_assert('\\x80' == 0, \"c\");\n",
+        "_Static_assert('\\x80' != 0, \"c\");\n",
+        16,
+        "static assertion failed due to requirement ''\\x80' == 0': c",
+    },
+    {
+        "_Static_assert('\\0' == 1, \"c\");\n",
+        "_Static_assert('\\0' == 0, \"c\");\n",
+        16,
+        "static assertion failed due to requirement ''\\x00' == 1': c",
+    },
+    {
+        "_Static_assert('\\'' + '\\\\' == 0, \"c\");\n",
+        "_Static_assert('\\'' + '\\\\' != 0, \"c\");\n",
+        16,
+        "static assertion failed due to requirement ''\\'' + '\\\\' == 0': c",
+    },
+    {
+        "_Static_assert('\\x1b' == 0, \"c\");\n",
+        "_Static_assert('\\x1b' != 0, \"c\");\n",
+        16,
+        "static assertion failed due to requirement ''\\x1b' == 0': c",
+    },
+    {
+        "_Static_assert(L'\\xe9' == 0, \"c\");\n",
+        "_Static_assert(L'\\xe9' != 0, \"c\");\n",
+        16,
+        "static assertion failed due to requirement 'L'\\xe9' == 0': c",
+    },
+    {
+        "_Static_assert(u'\\xffff' == 0, \"c\");\n",
+        "_Static_assert(u'\\xffff' != 0, \"c\");\n",
+        16,
+        "static assertion failed due to requirement 'u'\\uffff' == 0': c",
+    },
+    {
+        "_Static_assert(U'\\U0001F600' == 0, \"c\");\n",
+        "_Static_assert(U'\\U0001F600' != 0, \"c\");\n",
+        16,
+        "static assertion failed due to requirement 'U'\\U0001f600' == 0': c",
+    },
+    {
+        "_Static_assert('abcd' == 0, \"c\");\n",
+        "_Static_assert('abcd' != 0, \"c\");\n",
+        16,
+        "static assertion failed due to requirement ''\\U61626364' == 0': c",
+    },
 };
 
 static void check_test_semantic_diagnostics(CheckTest* test, const char* clang)
