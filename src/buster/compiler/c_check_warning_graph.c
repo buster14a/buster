@@ -516,8 +516,8 @@ static uint32_t check_interrupt_opening(const Parser* parser, uint32_t close)
 // node has (CheckGraph.tokens), and which clang builds as it builds any call (BuildResolvedCallExpr): their direct calls
 // of interrupt service routines and their -Wexcessive-regsave warnings (check_interrupt_call_report). A call's callee is
 // the postfix expression before its `(`, and the name it names one written alone, in parentheses or after one `&`, which
-// must be a declared name's use: a builtin's (an undeclared name's) and one through another expression (`s.f()`) aren't
-// looked up here, nor warned of. The graph's tokens are marked in a bitset; the
+// must be a declared name's use or a builtin's; a callee through a member or a postfix expression (`s.f()`) names nothing,
+// and is warned of without a note (#1447). The graph's tokens are marked in a bitset; the
 // vector path then compares 64 tokens' roles at a time with PARSE_ROLE_CLOSE_CALL, the scalar path, its twin, each
 // token's.
 static void check_interrupt_evaluated_calls(CheckInputReader* reader, const CheckInterruptCalls* calls)
@@ -564,6 +564,8 @@ static void check_interrupt_evaluated_calls(CheckInputReader* reader, const Chec
             // a name or a group.
             uint32_t callee_first = open;
             bool more = open != 0 && open != close;
+            // Whether the callee goes through a member or a postfix expression's base: an expression's, never a declarator's.
+            bool through = false;
             for (uint32_t at = open, steps = 0; more && steps < count; steps += 1)
             {
                 const uint32_t last = at - 1;
@@ -576,6 +578,7 @@ static void check_interrupt_evaluated_calls(CheckInputReader* reader, const Chec
                                      (parser->tokens.kinds[opening] == PARSE_KIND_L_SQUARE || parser->tree.roles[last] == PARSE_ROLE_CLOSE_CALL);
                 callee_first = name || (closing && opening != last) ? opening : callee_first;
                 at = member ? last - 1 : postfix ? opening : at;
+                through |= member || postfix;
                 more = (member || postfix) && at != 0;
             }
             // Its name, alone, in parentheses, or after one `&` in them.
@@ -593,11 +596,18 @@ static void check_interrupt_evaluated_calls(CheckInputReader* reader, const Chec
             }
             const uint32_t named = callee_first < open && low == high && parser->tokens.kinds[low] == PARSE_KIND_IDENTIFIER ? low : BUSTER_CHECK_NONE;
             const uint32_t declaration = named < count ? input->declarations[named] : BUSTER_CHECK_NONE;
-            // A use of a declared name: not a function declarator's own name (whose parameter list's role a call's can be),
-            // nor a builtin's.
-            if (open != close && declaration < count && declaration != named)
+            // A builtin's name, which no declaration binds (#1447): clang's call of the builtin it declares, noted at its first
+            // use (check_interrupt_call_report).
+            // (In a unit the reader took, a called name no declaration binds is one: an undeclared function's call binds its
+            // implicit declaration at the name.)
+            const bool builtin = named < count && declaration >= count && !addressed;
+            // A use of a declared name: not a function declarator's own name (whose parameter list's role a call's can be), but
+            // an undeclared function's, which its call declares at the name; a builtin's; or a callee through a member or a postfix expression (`s.f()`, `t[0]()`), which names nothing.
+            const bool implicit = declaration == named && named < count && input->function_flags != NULL &&
+                                  (input->function_flags[named] & CHECK_INPUT_FUNCTION_IMPLICIT) != 0;
+            if (open != close && ((declaration < count && (declaration != named || implicit)) || builtin || (named >= count && through)))
             {
-                check_interrupt_call_report(reader, calls, callee_first, open, close, named, BUSTER_CHECK_NONE);
+                check_interrupt_call_report(reader, calls, callee_first, open, close, named, builtin ? named : BUSTER_CHECK_NONE);
             }
         }
     }
