@@ -225,6 +225,24 @@ static const CheckDriverDefaultWarningFixture check_driver_type_sugar_fixtures[]
         .options = { "-Wsign-compare" },
         .warnings = 8,
     },
+    {
+        // clang's desugarForDiagnostic doesn't look inside an _Atomic (check_driver_atomic_value): a typedef that is an
+        // atomic's value type gives no a.k.a.
+        .name = "typedefs inside _Atomic",
+        .source = "typedef int I;\n"
+                  "typedef long L;\n"
+                  "struct S { int x; };\n"
+                  "typedef struct S TS;\n"
+                  "void f(_Atomic(I) *ap, _Atomic(L) a2[2], _Atomic(TS) *sp, _Atomic I *kw)\n"
+                  "{\n"
+                  "    ap();\n"
+                  "    char *d = ap;\n"
+                  "    char *e = a2;\n"
+                  "    char *g = sp;\n"
+                  "    char *h = kw;\n"
+                  "}\n",
+        .errors = 5,
+    },
 };
 
 // A variable array's size expression as written (#1447, check_driver_vla_bounds), through pointers, arrays, typedefs

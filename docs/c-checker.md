@@ -9345,7 +9345,8 @@ enables, which this checker doesn't all give.
   member operand (`check_common_operand_spelling`) keeps it too:
   `x.n < i` is `'ul' (aka 'unsigned long')`. An a.k.a. keeps a
   vector's own typedef at any level (`'pv' (aka 'v4si *')`), as
-  `desugarForDiagnostic` stops there. A typedef'd array's element keeps its
+  `desugarForDiagnostic` stops there. It doesn't look inside an `_Atomic`
+  either: `_Atomic(I) *` has no a.k.a. (`check_driver_atomic_value`). A typedef'd array's element keeps its
   qualified typedef (`'CI[2]' (aka 'const int[2]')`, `type_print`).
   A target address space that one macro writes throughout the unit prints by
   that macro, as clang's `MacroQualifiedType` does (`check_driver_space_macros`):
@@ -9364,6 +9365,12 @@ enables, which this checker doesn't all give.
     has no space (`sizeof(x)`, clang's `sizeof (x)`; the static assertion's
     requirement shares the spacing). Only a type's first eight bounds print;
     later ones print `[]`.
+  - A typedef written in a function type's parameters prints canonically:
+    clang prints `void (*fp)(I)` as `'void (*)(I)' (aka 'void (*)(int)')`,
+    this `'void (*)(int)'`. The warning renderer takes one typedef, by type;
+    the `__builtin_dump_struct` printer's places (`check_lower_dump_places`,
+    `TypeNames.alias_order`) spell each parameter's own and would serve here
+    once they read the parser and input rather than a `CheckProgram`.
   - The reader's spelling helpers (`check_input_operand_type_spelling`,
     `check_input_object_spelling`), which run before the stream has types,
     don't follow members. The warnings the driver spells after checking
