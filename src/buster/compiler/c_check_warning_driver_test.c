@@ -2521,6 +2521,14 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .notes = 1,
     },
     {
+        // An ignored attribute's warning that -Werror promotes is an error too, so clang's ActOnEndOfTranslationUnit gives
+        // the unused file-scope variable no warning after it (#2232); without -Werror both warnings are given.
+        .name = "unit end unused declarations after a promoted ignored attribute",
+        .source = "void rel(int *p);\nstatic int q __attribute__((cleanup(rel)));\n",
+        .options = { "-Wall" },
+        .warnings = 2,
+    },
+    {
         .name = "unit end unused declarations alone",
         .source = "static int unused(void) { return 0; }\nstatic int unused_var;\nint main(void) { return 0; }\n",
         .options = { "-Wall" },
