@@ -607,6 +607,11 @@ typedef enum CheckInputNoteKind
     CHECK_INPUT_NOTE_CONSTANT_DIVISION,
     // A jump's scope it enters (#1942): a statement expression's `(`, "jump enters a statement expression".
     CHECK_INPUT_NOTE_JUMP,
+    // A condition's cast clang's constant evaluation refuses (#2253, check_condition_cast): to void, "non-literal type 'void'
+    // cannot be used in a constant expression"; between an integer and a pointer, "this conversion is not allowed in a
+    // constant expression".
+    CHECK_INPUT_NOTE_CONSTANT_VOID,
+    CHECK_INPUT_NOTE_CONSTANT_CONVERSION,
 } CheckInputNoteKind;
 
 // A version as clang's VersionTuple holds it (#1447: an availability attribute's): its components (major, minor,
