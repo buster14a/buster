@@ -16,7 +16,7 @@ struct CheckPackFixture
     bool rejected;
 };
 
-static void check_test_pack_storage(CheckTest* test, const Parser* parser, Preprocessor* pp)
+static void check_test_pack_storage(CheckTest* test, const Parser* parser, Preprocessor* pp, const uint32_t* postorder)
 {
     Arena arena = arena_reserve(UINT64_C(1) << 16);
     Arena scratch = arena_reserve(UINT64_C(1) << 16);
@@ -48,6 +48,7 @@ static void check_test_pack_storage(CheckTest* test, const Parser* parser, Prepr
                     .pp = pp,
                     .arena = &arena,
                     .scratch = &scratch,
+                    .postorder = postorder,
                 };
                 const bool valid = check_input_pack_pragmas(&reader, handled);
                 if (valid)
@@ -103,6 +104,15 @@ static void check_test_pack_history(CheckTest* test, const CheckPackFixture* fix
         {
             uint8_t* handled = arena_push_array(&scratch, (uint64_t)parser.tokens.pragma_count + 1, 1, 1);
             memset(handled, 0, (uint64_t)parser.tokens.pragma_count + 1);
+            // The reader's traversal, which the placements walk (check_input_pack_placements), in the long-lived arena.
+            const uint64_t slots = (uint64_t)parser.tokens.count + 1;
+            uint32_t* columns = arena_push_array(&arena, 9 * slots, sizeof(uint32_t), 4);
+            check_test_expect(test, columns != NULL, "packing traversal allocation");
+            if (columns != NULL)
+            {
+                parse_tree_columns(parser.tree.parents, parser.tokens.count, columns, columns + slots, columns + 2 * slots, columns + 3 * slots,
+                                   columns + 4 * slots, columns + 5 * slots, columns + 6 * slots, columns + 7 * slots, columns + 8 * slots);
+            }
             const uint64_t mark = scratch.length;
             CheckInput output = { 0 };
             CheckInputReader reader =
@@ -112,8 +122,9 @@ static void check_test_pack_history(CheckTest* test, const CheckPackFixture* fix
                 .pp = &pp,
                 .arena = &arena,
                 .scratch = &scratch,
+                .postorder = columns != NULL ? columns + 2 * slots : NULL,
             };
-            const bool valid = check_input_pack_pragmas(&reader, handled);
+            const bool valid = columns != NULL && check_input_pack_pragmas(&reader, handled);
             const CheckInputPackPragmas* history = output.pack_pragmas;
             check_test_expect(test, valid && !output.resource && scratch.length == mark && history != 0 &&
                               history->count == fixture->records && history->final_log2 == fixture->final_log2 &&
@@ -152,7 +163,7 @@ static void check_test_pack_history(CheckTest* test, const CheckPackFixture* fix
                                   history->records[8].warnings == CHECK_PACK_WARNING_NAMED_ALIGNMENT &&
                                   history->records[9].warnings == CHECK_PACK_WARNING_SHOW,
                                   "pack history retains stack matches and warning-only effects");
-                check_test_pack_storage(test, &parser, &pp);
+                check_test_pack_storage(test, &parser, &pp, reader.postorder);
             }
             if (deep && history != 0)
             {
