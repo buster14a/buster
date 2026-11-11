@@ -9788,9 +9788,40 @@ is ignored with clang's `-Wignored-pragmas` warning at its place ("expected
 'align' following '#pragma options'", "expected '='", "expected identifier",
 "invalid alignment option", "extra tokens"), as the options and pragmas map
 it. `mac68k`, clang's error on this target, is refused by name, as are other
-unsupported semantic effects. `#pragma pack`'s own warnings (`pack(show)`, a
-pop of an empty stack, an unterminated push at the end of the file, which
-clang also gives an align push) are not reported yet.
+unsupported semantic effects.
+
+`#pragma pack`'s own warnings (#1849, `check_input_pack_record` and
+`check_input_pack_align_warnings`) are clang's, whole output on both paths:
+- its parser's (`HandlePragmaPack`, `-Wignored-pragmas`), for a malformed
+  directive, which is ignored: "missing '('", "unknown action", "expected
+  integer or identifier", "missing ')'", "extra tokens", at the token it names
+  or past the line's last one. A raw client's operand that a macro spells is
+  left unhandled, as an align one's, for the checker's refusal;
+- Sema's (`ActOnPragmaPack`), at the directive's `pack`, where the parser
+  handles its annotation: after the construct before it and before the next
+  directive's line. Right after a function's body they follow that body's own
+  end-of-body warnings, which the checker publishes at the next parser token,
+  so there a later pack directive's parser warnings come before them, where
+  clang's come after. They are "expected #pragma pack parameter to be '1', '2',
+  '4', '8', or '16'", "specifying both a name and alignment to 'pop' is
+  undefined" (no option), "#pragma pack(pop, ...) failed: stack empty" and
+  `pack(show)`'s value (no option: 8 for the default, as clang prints it);
+- at the unit's end (`-Wpragma-pack`, `CHECK_WARNING_ID_PRAGMA_PACK`), one
+  "unterminated '#pragma pack (push, ...)'" per push left open, an align
+  push's too, the innermost first. The innermost has clang's note "did you
+  intend to use '#pragma pack (pop)'" where the value is the default's, at the
+  directive that last set it (clang's `CurrentPragmaLocation`, which a pop
+  restores from its push), or without a place where none did;
+- for an inclusion that leaves the value other than it found it ("the current
+  #pragma pack alignment value is modified in the included file", clang's
+  `ChangedStateAtExit`), at the include's file name, where its output ends,
+  with the note at that directive. The inclusions come from the preprocessor's
+  runs of output by range (`check_input_pack_includes`), a unit without pack
+  directives or with inexact runs walking none. clang's
+  `-Wpragma-pack-suspicious-include`, off by default, isn't reported.
+
+`test-checker-driver` compares them in the default-warning sweep (both paths,
+`-Werror`, `-w`, `-c`) and with real headers (`check_test_driver_pack_includes`).
 Warning suppression cannot approve these directives. Already
 supported directives keep their original handlers and syntax validation.
 

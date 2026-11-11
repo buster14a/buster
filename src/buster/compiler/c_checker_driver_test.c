@@ -9008,6 +9008,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             if (!lazy && check_test_driver_takes())
             {
                 check_test_driver_ignored_pragmas(&test, clang, executable, directory);
+                check_test_driver_pack_includes(&test, clang, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
             {
