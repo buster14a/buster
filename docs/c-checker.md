@@ -4011,7 +4011,7 @@ standalone `-E` command and the source driver's preprocessing, parsing and seman
 standalone `parse` command reads it too, but keeps its generated-prefix behavior after a preprocessing fatal rather
 than parsing the prefix the source driver checks. The preprocessing warnings (`#warning`,
 macro redefinition, `#pragma message` and the others) follow their own options and pragmas with their flags
-(`pp_warning_flag`, #1790, #1970); a fatal error's flag has no `-Werror,`, as clang's. An attached note's place
+(`pp_warning_flag`, #1790, #1970). An attached note's place
 (a redefinition's "previous definition is here") sets the include context the next diagnostic compares with, so
 that one in the same header as the warning repeats its "In file included from" lines, as clang's do.
 
