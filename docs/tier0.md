@@ -692,6 +692,9 @@ at the target's forms, by both of the checker's paths:
 - Minimum and maximum of qwords without SSE4.2 take two rows (`check_vector_baseline_extreme_pair`, #1834): `<`'s
   mask of a and b (of b and a for a maximum, `check_vector_baseline_compare_qwords`), then `b ^ ((a ^ b) & mask)`
   of the mask, a and b, which the lowering keeps in frame temporaries (a wide vector's pieces in memory) to read twice.
+- A division of floats or doubles narrower than a register divides its divisor with 1.0f in the lanes past its own
+  (`pcmpeqd`, `pslld` 25, `psrld` 2 and the unpacks, #1834), so that the zero lanes Tier 0 loads raise no FE_INVALID;
+  clang's code divides 0 by 0 there and raises it, a spurious exception this doesn't reproduce.
 - What has no form at the target is refused by name: the scalars' IEEE maxima and minima (`maximum`
   and `minimum`) without AVX, which need more records than a row has. A scalar's fused multiply-add without FMA is the C library's `fmaf` or `fma`, its `ldexp` `ldexpf` or
   `ldexp` (of the exponent's low 32 bits), and its roundings (ceil, floor, trunc, rint, nearbyint, roundeven and round)

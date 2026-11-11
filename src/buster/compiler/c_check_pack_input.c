@@ -802,6 +802,7 @@ static bool check_input_pack_event(CheckWarningBuffer* buffer, const CheckInputP
         .source = source,
         .completion_kind = end ? CHECK_WARNING_COMPLETE_TU_END : CHECK_WARNING_COMPLETE_AT_TOKEN,
         .completion = end ? BUSTER_CHECK_WARNING_NO_SOURCE : record->token,
+        .suborder = end ? CHECK_WARNING_UNIT_END_PACK : 0,
         .payload = { .name = message, .token = end ? note : record->source_begin, .data = index + 1 },
     };
     return check_warning_append(buffer, &event, NULL, 0);

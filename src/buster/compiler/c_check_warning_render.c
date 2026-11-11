@@ -537,7 +537,11 @@ static bool check_driver_warning_promoted(Preprocessor* pp, const CheckInput* in
     for (uint32_t i = 0; !promoted && i < view->count; i += 1)
     {
         const CheckWarningEvent* event = view->events + i;
-        promoted = event->kind != CHECK_WARNING_EVENT_MESSAGE && event->kind != CHECK_WARNING_EVENT_ENUM_MIX && (repair == NULL || check_repair_warning_token(repair, event->token)) &&
+        // An unused file-scope declaration's at the unit's end is published after every other, where none was an error
+        // (#2141): its own promotion rejects the unit then.
+        const bool unit_end = (event->kind == CHECK_WARNING_EVENT_UNUSED_VARIABLE || event->kind == CHECK_WARNING_EVENT_UNUSED_FUNCTION) &&
+                              event->completion_kind == CHECK_WARNING_COMPLETE_TU_END;
+        promoted = !unit_end && event->kind != CHECK_WARNING_EVENT_MESSAGE && event->kind != CHECK_WARNING_EVENT_ENUM_MIX && (repair == NULL || check_repair_warning_token(repair, event->token)) &&
                    check_driver_warning_severity(pp, input, event) >= CHECK_WARNING_ERROR;
     }
     return promoted;
