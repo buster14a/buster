@@ -4573,9 +4573,15 @@ do:
     earlier one's names as still declared there (`CheckInput.ambiguous_index`),
     and a body's own local of such a name as no use of it.
 
-  Left: a block's redefinition, whose notes clang qualifies (`f()::X`), still
-  refuses with the generic error; a third definition's ambiguous uses note its
-  own enumerator and the first's, where clang's candidates list all three; and a
+  - A block's redefinition is read the same way (#1826). Its ambiguity notes
+    qualify the name by its function as clang's qualified names do,
+    `g(int, char *)::B` and `k()::B` for a `(void)` prototype
+    (`check_driver_function_scope`, from the function's printed type).
+  - A later definition's ambiguous use lists every candidate, the latest first,
+    as clang's lookup does: the definitions between the use's and the first
+    are packed in its report's `value`, up to two (four definitions).
+
+  Left: a fifth definition's use lists four candidates of its five; and a
   rejected unit whose incompatible redefinition's own names are used at file
   scope next to an ambiguous use loses its later readings' warnings, as its
   view leaves the redefinition out.
@@ -5123,7 +5129,6 @@ The later phases are left:
 
 - **Invalid declarations.** Not covered by phase 2 or the invalid
   declarations above:
-  - C23's redefinition of an enum in a block, or a third time (above).
   - An initialized invalid declaration, a typedef's declarator error and a
     parameter's, which clang marks invalid too.
 

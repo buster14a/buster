@@ -723,6 +723,70 @@ static const char* check_driver_input_report_message(const CheckInput* input, co
            check_driver_alignment_power : check_driver_input_message(report->message);
 }
 
+// The function whose body holds `token` as clang's qualified names spell it before a block's name (#1826): its name and
+// parameter types, then `::` (`g(int, char *)::`, `k()::` for a `(void)` prototype), from the function's type as printed
+// with its name; empty at file scope or where the type doesn't print so. Diagnostics only.
+static String8 check_driver_function_scope(const Parser* parser, Preprocessor* pp, const CheckInput* input, const TypeTable* types, uint32_t token, Arena* scratch)
+{
+    String8 result = { 0 };
+    const uint32_t count = parser->tokens.count;
+    uint32_t close = BUSTER_CHECK_NONE;
+    for (uint32_t at = token, steps = 0; at < count && steps < count && close == BUSTER_CHECK_NONE; steps += 1)
+    {
+        close = parser->tree.roles[at] == PARSE_ROLE_CLOSE_BODY ? at : close;
+        at = parser->tree.parents[at] != at ? parser->tree.parents[at] : count;
+    }
+    uint32_t open = BUSTER_CHECK_NONE;
+    uint32_t depth = 0;
+    for (uint32_t at = close; close < count && at-- > 0 && open == BUSTER_CHECK_NONE;)
+    {
+        const uint8_t kind = parser->tokens.kinds[at];
+        depth += kind == PARSE_KIND_R_BRACE;
+        open = kind == PARSE_KIND_L_BRACE && depth == 0 ? at : open;
+        depth -= kind == PARSE_KIND_L_BRACE && depth != 0;
+    }
+    const uint32_t function = open < count ? check_sparse_get(input->body_declarations, open) : BUSTER_CHECK_NONE;
+    const TypeId type = function < input->token_count && input->declared_types != NULL ? input->declared_types[function] : 0;
+    const uint32_t name = function < count ? parser->tokens.names[function] : 0;
+    const String8 spelled = name != 0 ? (String8){ .pointer = (char*)intern_bytes(pp->table, name), .length = intern_length(pp->table, name) } : (String8){ 0 };
+    const uint32_t options = pp->options.language.standard >= 2023 ? BUSTER_TYPE_PRINT_C23 : 0;
+    const String8 printed = type != 0 && type_is_valid(types, type) && spelled.length != 0 ? type_print(types, scratch, type, spelled, NULL, options) : (String8){ 0 };
+    // The name's own parameter list: the group right after the name in the declarator as printed.
+    uint64_t at = 0;
+    bool found = false;
+    // (The printer may parenthesize the name: `void (g)(void)`.)
+    for (uint64_t i = 0; !found && printed.length > spelled.length && i + spelled.length < printed.length; i += 1)
+    {
+        uint64_t after = i + spelled.length;
+        const bool grouped = i != 0 && printed.pointer[i - 1] == '(' && after < printed.length && printed.pointer[after] == ')';
+        after += grouped ? 1 : 0;
+        found = memcmp(printed.pointer + i, spelled.pointer, spelled.length) == 0 && after < printed.length && printed.pointer[after] == '(' &&
+                (i == 0 || !(printed.pointer[i - 1] == '_' || (printed.pointer[i - 1] >= 'a' && printed.pointer[i - 1] <= 'z') ||
+                             (printed.pointer[i - 1] >= 'A' && printed.pointer[i - 1] <= 'Z') || (printed.pointer[i - 1] >= '0' && printed.pointer[i - 1] <= '9')));
+        at = found ? after : at;
+    }
+    uint64_t end = at;
+    uint32_t nesting = 0;
+    for (uint64_t i = at; found && i < printed.length && end == at; i += 1)
+    {
+        nesting += printed.pointer[i] == '(';
+        nesting -= printed.pointer[i] == ')';
+        end = nesting == 0 ? i + 1 : end;
+    }
+    if (found && end > at)
+    {
+        const bool bare = end - at == 6 && memcmp(printed.pointer + at, "(void)", 6) == 0;
+        const uint64_t length = spelled.length + (bare ? 2 : end - at) + 2;
+        char* text = BUSTER_ARENA_PUSH_ARRAY(scratch, char, length + 1);
+        if (text != NULL)
+        {
+            snprintf(text, length + 1, "%.*s%.*s::", (int)spelled.length, spelled.pointer, bare ? 2 : (int)(end - at), bare ? "()" : printed.pointer + at);
+            result = (String8){ .pointer = text, .length = length };
+        }
+    }
+    return result;
+}
+
 static const char* check_driver_report_message(const CheckReport* report)
 {
     const char* result = "invalid expression";
@@ -4457,13 +4521,32 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                             // A name two C23 definitions of an enum declare (#1447, check_tag_enum_ambiguous): clang's candidates,
                             // the second definition's enumerator first.
                             const uint32_t name = parser->tokens.names[token];
+                            // A block's names are its function's, which clang's qualified name spells before them (#1826):
+                            // `g(int, char *)::B`, with `()` for a `(void)` prototype.
+                            const uint64_t scope_mark = scratch->length;
+                            const String8 scope = check_driver_function_scope(parser, pp, input, types, input->reports[index].note_token, scratch);
                             char candidate[512];
-                            snprintf(candidate, sizeof(candidate), "candidate found by name lookup is '%.*s'", (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
-                            const PPOutputDiagnosticNote notes[2] = {
-                                { .token = parser->tokens.sources[input->reports[index].note_token], .message = candidate },
-                                { .token = parser->tokens.sources[input->reports[index].attribute], .message = candidate },
-                            };
-                            pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, notes, 2, "reference to '%.*s' is ambiguous",
+                            snprintf(candidate, sizeof(candidate), "candidate found by name lookup is '%.*s%.*s'", (int)scope.length, scope.pointer,
+                                     (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
+                            arena_pop_to(scratch, scope_mark);
+                            // (The definitions between, a third's, #1826: the reader's packed `value`, the later first.)
+                            const uint64_t between = input->reports[index].value;
+                            const uint32_t first_between = (uint32_t)between != 0 && (uint32_t)between - 1 < count ? (uint32_t)between - 1 : BUSTER_CHECK_NONE;
+                            const uint32_t second_between = (uint32_t)(between >> 32) != 0 && (uint32_t)(between >> 32) - 1 < count ? (uint32_t)(between >> 32) - 1 :
+                                                            BUSTER_CHECK_NONE;
+                            PPOutputDiagnosticNote notes[4];
+                            uint32_t note_count = 0;
+                            notes[note_count++] = (PPOutputDiagnosticNote){ .token = parser->tokens.sources[input->reports[index].note_token], .message = candidate };
+                            if (first_between != BUSTER_CHECK_NONE)
+                            {
+                                notes[note_count++] = (PPOutputDiagnosticNote){ .token = parser->tokens.sources[first_between], .message = candidate };
+                            }
+                            if (second_between != BUSTER_CHECK_NONE)
+                            {
+                                notes[note_count++] = (PPOutputDiagnosticNote){ .token = parser->tokens.sources[second_between], .message = candidate };
+                            }
+                            notes[note_count++] = (PPOutputDiagnosticNote){ .token = parser->tokens.sources[input->reports[index].attribute], .message = candidate };
+                            pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, notes, note_count, "reference to '%.*s' is ambiguous",
                                                         (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
                         }
                         else if (kind == CHECK_INPUT_UNDECLARED && named && (input->reports[index].detail != 0 || input->reports[index].subject != 0))
