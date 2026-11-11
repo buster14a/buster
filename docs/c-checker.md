@@ -9172,8 +9172,9 @@ arguments against the function. The checker now gives these as clang does.
   space throughout the unit (`check_driver_space_macros`). Its attribute is
   spelled out in three cases: a space the unit writes both ways or with two
   macros (`address_space(1u)` is space 1 written directly), every space where
-  an operand isn't an integer constant (`address_space(1+0)`), and
-  `__builtin_dump_struct`'s output. Clang spells a group's leading
+  an operand isn't an integer constant (`address_space(1+0)`), and, in
+  `__builtin_dump_struct`'s output, a member that writes several spaces or one
+  directly (`docs/c-builtins-integration.md`). Clang spells a group's leading
   space where it was
   written (`'int (__attribute__((address_space(1))) *)[3]'`); a garbage
   collection qualifier inside a function's level is refused by name, and the
