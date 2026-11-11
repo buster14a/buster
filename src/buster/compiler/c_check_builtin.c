@@ -156,7 +156,7 @@ static bool check_builtin_prepare(TypeTable* table, const CheckBuiltinAction* in
     }
     else if (input->argument_count != count)
     {
-        check_action_diagnose(result, CHECK_DIAG_ARGUMENT_COUNT, 0);
+        check_action_diagnose_count(result, input->argument_count, count, count);
     }
     CheckAction action = {
         .node = input->node,
