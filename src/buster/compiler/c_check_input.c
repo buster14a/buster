@@ -6655,19 +6655,55 @@ static CheckDeclaratorFrame check_input_declarator_frame(TypeId base, uint32_t f
     };
 }
 
+// The first token from `tag`, before `end`, that isn't a specifier's, a qualifier, __extension__ or an attribute list.
+static inline __attribute__((always_inline)) uint32_t check_input_specifiers_skip(const Parser* parser, uint32_t tag, uint32_t end)
+{
+    while (tag < end && (parser->tree.roles[tag] == PARSE_ROLE_SPECIFIER || parser->tokens.kinds[tag] == PARSE_KIND_QUALIFIER ||
+           parser->tokens.kinds[tag] == PARSE_KIND_EXTENSION || check_input_attribute_starts(parser, tag, end)))
+    {
+        tag = check_input_attribute_starts(parser, tag, end) ? check_input_skip_attributes(parser, tag, end) : tag + 1;
+    }
+    return tag;
+}
+
+// The specifiers' scan stopped at `tag`, an _Atomic's or a typeof's keyword or a `(` (#1447): where the group's type
+// name has the specifiers' scan go on, into each nested group, which ends it (`end`). `tag` itself where it is no such
+// group's (a declarator's `(`). Out of line: it is rare, and its callers' scan is hot (check_input_specifier_definition).
+static __attribute__((noinline, cold)) uint32_t check_input_specifier_group(const Parser* parser, uint32_t first, uint32_t tag, uint32_t* end)
+{
+    bool group = true;
+    while (group)
+    {
+        // The scan stops at the group's keyword or its `(`, whichever the parser didn't mark a specifier's.
+        const uint32_t opener = tag < *end && tag > first && parser->tokens.kinds[tag] == PARSE_KIND_L_PAREN ? tag - 1 : tag;
+        const uint8_t kind = opener < *end ? parser->tokens.kinds[opener] : PARSE_KIND_END;
+        group = (kind == PARSE_KIND_ATOMIC || kind == PARSE_KIND_TYPEOF) && opener + 1 < *end && parser->tokens.kinds[opener + 1] == PARSE_KIND_L_PAREN;
+        if (group)
+        {
+            const uint32_t close = parser->tree.parents[opener + 1];
+            *end = close > opener + 1 && close < *end ? close : opener + 2;
+            first = opener + 2;
+            tag = check_input_specifiers_skip(parser, first, *end);
+        }
+    }
+    return tag;
+}
+
 // The struct, union or enum keyword among the specifiers from `first`, before `end`, whose body follows it: a definition
 // that the reader hasn't read yet, which a declaration's, a member's or a parameter's reader reads before the specifiers
-// (check_input_tag_definition), and BUSTER_CHECK_NONE when there's none.
+// (check_input_tag_definition), and BUSTER_CHECK_NONE when there's none. One in an _Atomic's or a typeof's type name
+// (`_Atomic(struct { int a; }) m;`, `typeof(_Atomic(struct S { int a; }))`, #1447) is the declaration's too, as clang reads
+// it: the scan goes on into each group (check_input_specifier_group), where it stops at one's keyword or `(`.
 // Always inlined (#880), as profile-guided builds do; hot callers: check_input_declarator_step and
 // check_input_declaration.
 static inline __attribute__((always_inline)) uint32_t check_input_specifier_definition(const CheckInputReader* reader, uint32_t first, uint32_t end)
 {
     const Parser* parser = reader->parser;
-    uint32_t tag = first;
-    while (tag < end && (parser->tree.roles[tag] == PARSE_ROLE_SPECIFIER || parser->tokens.kinds[tag] == PARSE_KIND_QUALIFIER ||
-           parser->tokens.kinds[tag] == PARSE_KIND_EXTENSION || check_input_attribute_starts(parser, tag, end)))
+    uint32_t tag = check_input_specifiers_skip(parser, first, end);
+    const uint8_t stop = tag < end ? parser->tokens.kinds[tag] : PARSE_KIND_END;
+    if (__builtin_expect(stop == PARSE_KIND_ATOMIC || stop == PARSE_KIND_TYPEOF || stop == PARSE_KIND_L_PAREN, 0))
     {
-        tag = check_input_attribute_starts(parser, tag, end) ? check_input_skip_attributes(parser, tag, end) : tag + 1;
+        tag = check_input_specifier_group(parser, first, tag, &end);
     }
     const bool keyword = tag < end && (parser->tokens.kinds[tag] == PARSE_KIND_STRUCT || parser->tokens.kinds[tag] == PARSE_KIND_ENUM);
     const uint32_t body = keyword ? check_input_tag_body(parser, tag, end) : end;

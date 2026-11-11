@@ -4372,8 +4372,12 @@ do:
   ignored one doesn't make the definitions incompatible: one that is otherwise
   compatible declares the earlier type, as in clang (`check_input_odr_severity`).
 
-  Left as they were: an `_Atomic(struct { ... })` member is the parser's refusal, with or without a
-  redefinition.
+  A tag defined in an `_Atomic(...)` or a `typeof(...)` specifier
+  (`_Atomic(struct S { int a; }) m;`, `typeof(_Atomic(struct S { ... }))`) is
+  read before the specifiers, as a declaration's own definition is
+  (`check_input_specifier_definition` goes on into each group, #1447), in a
+  declaration, a member, a prototype's parameter (of prototype scope, with clang's `-Wvisibility` before C23), a typedef and a type name; it used to be
+  the reader's generic refusal.
 
   An enum defined again at file scope (#1447, c_check_enum_input.c) is read the
   same way, an enum without a fixed type after one without, or one listed again
