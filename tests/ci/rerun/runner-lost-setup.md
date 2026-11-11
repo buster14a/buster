@@ -1,0 +1,10 @@
+- `Run correctness tests within the hosted CPU budget` (7 jobs). Not setup: not a setup step.
+  - [`Tests on Ubuntu 26.04 (Clang 23, x86-64, address, O3, shard 4 of 4)`](https://github.com/buster14a/buster/actions/runs/42200505058/job/127834502198) (failure)
+  - [`Tests on Ubuntu 26.04 (Clang 23, x86-64, undefined, O3, shard 3 of 4)`](https://github.com/buster14a/buster/actions/runs/42200505058/job/127834502224) (failure)
+  - [`Tests on Ubuntu 26.04 (Clang 23, x86-64, address, O3, shard 3 of 4)`](https://github.com/buster14a/buster/actions/runs/42200505058/job/127834502327) (failure)
+  - [`Tests on Ubuntu 26.04 (Clang 23, x86-64, address, O1, shard 3 of 4)`](https://github.com/buster14a/buster/actions/runs/42200505058/job/127834502409) (failure)
+  - [`Tests on Ubuntu 26.04 (Clang 23, native, undefined, O3, shard 3 of 4)`](https://github.com/buster14a/buster/actions/runs/42200505058/job/127834502433) (failure)
+  - [`Tests on Ubuntu 26.04 (Clang 23, native, address, O1, shard 3 of 4)`](https://github.com/buster14a/buster/actions/runs/42200505058/job/127834502763) (failure)
+  - [`Tests on Ubuntu 26.04 (Clang 23, native, address, O3, shard 3 of 4)`](https://github.com/buster14a/buster/actions/runs/42200505058/job/127834502888) (failure)
+- `Install official Clang 23.1.4 and test tools` (1 job). Setup: a setup step.
+  - [`Tests on Ubuntu 26.04 (Clang 23, x86-64, address, O3, shard 2 of 4)`](https://github.com/buster14a/buster/actions/runs/42200505058/job/127834502223) (failure)

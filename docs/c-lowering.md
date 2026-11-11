@@ -1444,9 +1444,19 @@ clang, and refuses a larger copy by name ("an aggregate copy of more than 8
 vector registers in a segment's address space ..., which clang can't lower
 either").
 
+A complex value's, a `__float128`'s and a wide `_BitInt`'s update (a compound
+assignment, an increment or a decrement), and a real object's update by a
+complex value, go through a frame object (`check_lower_segment_update`): the
+update task's emitters read and write the destination through its address, so
+the object is copied there through the override, updated as any flat object,
+and copied back, its value kept in a temporary across the copy. A complex
+lvalue's part (`__real__ *p`, `__imag__ *p`) has lost its object's space, as a
+vector's element has, and takes the complex object's override on its read, store
+and update (`check_lower_element_segment`), as clang's code does. A narrow
+`_BitInt`'s read, store and update take it as an integer's do.
+
 The rest the lowering refuses by name, rather than compile it as a plain access:
-a complex value's store, a `_BitInt`'s value
-and an `_Atomic` object in those spaces (read or written as an lvalue), an atomic
+an `_Atomic` object in those spaces (read or written as an lvalue), an atomic
 builtin another plan takes (a generic one by pointer, `__atomic_clear`,
 `__sync_lock_release`, one of 16 bytes); a bit of a vector of bool in one,
 which no address reaches; and an atomic builtin's object in one, which its pointer argument reaches
