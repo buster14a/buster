@@ -425,6 +425,10 @@ typedef enum CheckWarningEventKind
     // __builtin_cpu_supports's literal of a feature clang doesn't know (#1843, check_input_cpu_supports_literal), at the
     // builtin's name: the description's message.
     CHECK_WARNING_EVENT_INVALID_CPU_SUPPORTS,
+    // swift_newtype's and swift_wrapper's argument other than `struct` or `enum` (#1447, check_input_swift_newtype_parse),
+    // at it: "'X' attribute argument not supported: 'Y'", Y the token's identifier or keyword as written (payload.token),
+    // or "(null)" for another token, as clang streams the token's IdentifierInfo.
+    CHECK_WARNING_EVENT_ARGUMENT_UNSUPPORTED_TOKEN,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
 

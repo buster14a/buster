@@ -7924,7 +7924,34 @@ arguments against the function. The checker now gives these as clang does.
     located at its name rather than its scope in every report
     (`check_diagnostic_custom_attribute_name`). `test-checker-driver`
     (`c_check_objc_bridge_driver_test.c`) compares each unit's whole output
-    with clang's, by both paths, in GNU C17 and C23.
+    with clang's, by both paths, in GNU C17 and C23;
+  - Swift's `swift_newtype` and `swift_wrapper` (GNU spellings alone) and
+    `swift_async_error` (#1447), which change nothing in C past their
+    handlers' checks. `swift_newtype`'s and `swift_wrapper`'s argument is
+    read as clang's ParseSwiftNewTypeAttribute reads it
+    (`check_input_swift_newtype_parse`, a balanced run of tokens to the
+    parser): empty parentheses are "argument required after attribute";
+    a token other than `struct` or `enum` is the warning "'X' attribute
+    argument not supported: 'Y'" (Y the identifier or keyword as written,
+    `(null)` for another token, as clang streams the token's
+    IdentifierInfo), which drops the attribute before its subjects are
+    checked, and consumes the token unless it is a parenthesis, bracket,
+    brace or string; then "expected ')'" with its note. Without parentheses
+    the handler's count, exactly one, follows the subjects' check.
+    `swift_async_error`'s convention (`check_input_attribute_swift_async_error`)
+    is `none`, `nonnull_error`, `zero_argument` or `nonzero_argument`, as
+    written; another identifier is "'X' attribute argument not supported: 'Y'"
+    at the attribute, which ignores it. The two indexed conventions take
+    exactly two arguments, the second an integer constant in 32 bits
+    (`requires an integer constant`, or the too-large error at it), and the
+    others one. A convention other than `none` on a function with
+    `swift_async(none)`, in either order, is "'swift_async' attribute must
+    be applied to a function annotated with non-'none' attribute
+    'swift_async'" at the `swift_async`. (A non-`none` `swift_async` needs a
+    block parameter, which C hasn't, so its error-parameter checks never
+    apply.) A first argument that is no identifier, on which clang 23 crashes
+    (its handler reads it as an identifier), is refused by name.
+    `c_check_swift_attribute_driver_test.c` compares their units as above.
 
   Every attribute's arguments are read first as clang's parser reads them,
   by their kinds (`check_input_arguments_row`, from
@@ -8653,9 +8680,8 @@ arguments against the function. The checker now gives these as clang does.
   guide](object-writer-and-linker.md)'s "Patchable function entries".
 
   The rest stay refused by name, where they apply: `format_matches`,
-  `cfi_salt`, `swift_name`, `swift_async_name`, `swift_error`,
-  `swift_async_error`, `swift_newtype` and `swift_wrapper` in either syntax,
-  and the C23 spellings of `objc_gc` and `objc_ownership`. Recognizing their
+  `cfi_salt`, `swift_name`, `swift_async_name` and `swift_error` in either
+  syntax, and the C23 spellings of `objc_gc` and `objc_ownership`. Recognizing their
   names does not supply their handlers.
 - **Type arguments.** The attributes clang's `attributeIsTypeArgAttr` names
   (`preferred_type`, `vec_type_hint`, `iboutletcollection`, `preferred_name`,

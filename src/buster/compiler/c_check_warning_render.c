@@ -1630,6 +1630,7 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
         case CHECK_WARNING_EVENT_INDEPENDENT_POINTER:
         case CHECK_WARNING_EVENT_CAPTURE_DEPRECATED:
         case CHECK_WARNING_EVENT_ARGUMENT_UNSUPPORTED_QUOTED:
+        case CHECK_WARNING_EVENT_ARGUMENT_UNSUPPORTED_TOKEN:
         case CHECK_WARNING_EVENT_OBJC_UNSUPPORTED:
         case CHECK_WARNING_EVENT_ASSUME_SIDE_EFFECTS:
         case CHECK_WARNING_EVENT_DIFFERENT_ARGUMENTS:
@@ -1675,6 +1676,14 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
             const uint32_t shown = offset <= whole.length ? (piece < whole.length - offset ? piece : (uint32_t)whole.length - offset) : 0u;
             static const char* const target_cases[] = { "unsupported", "duplicate", "unknown", "unknown" };
             static const char* const target_places[] = { "", " CPU", " tune CPU", "" };
+            // An identifier's or a keyword's spelling as written, which swift_newtype's warning quotes (#1447).
+            const uint32_t word = event->kind == CHECK_WARNING_EVENT_ARGUMENT_UNSUPPORTED_TOKEN && payload->token < count ? parser->tokens.names[payload->token] : 0;
+            const String8 token_word = word != 0 ? check_driver_warning_name(pp, word) : (String8){ "", 0 };
+            char token_text[160] = "(null)";
+            if (word != 0)
+            {
+                snprintf(token_text, sizeof(token_text), "'%.*s'", (int)token_word.length, token_word.pointer);
+            }
             // ns_returns_retained's type check names it by a string, and consumed's by their names alone (#147).
             const String8 plain = check_warning_attribute_normalized(name);
             const String8 variable = event->kind == CHECK_WARNING_EVENT_NOMERGE_POINTER && payload->token < count ?
@@ -1707,6 +1716,9 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
                 check_warning_text(scratch, event->kind == CHECK_WARNING_EVENT_ARGUMENT_UNSUPPORTED ? "'%.*s%s%.*s' attribute argument not supported: %s" :
                                                                                                      "'%.*s%s%.*s' attribute argument not supported: '%s'",
                                    (int)scope.length, scope.pointer, scope.length != 0 ? "::" : "", (int)attribute.length, attribute.pointer, argument) :
+                event->kind == CHECK_WARNING_EVENT_ARGUMENT_UNSUPPORTED_TOKEN ?
+                check_warning_text(scratch, "'%.*s%s%.*s' attribute argument not supported: %s", (int)scope.length, scope.pointer,
+                                   scope.length != 0 ? "::" : "", (int)attribute.length, attribute.pointer, token_text) :
                 event->kind == CHECK_WARNING_EVENT_CAPTURE_DEPRECATED ?
                 check_warning_text(scratch, "'lifetime_capture_by(%s)' is deprecated; use 'lifetime_capture_by_%s' instead", argument, argument) :
                 event->kind == CHECK_WARNING_EVENT_MIG_ROUTINE ? "'mig_server_routine' attribute only applies to routines that return a kern_return_t" :

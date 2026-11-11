@@ -74,7 +74,8 @@ static uint32_t check_input_generic_undeclared(CheckInputReader* reader, const C
     const String8 generic_name = attribute->kind == CHECK_ATTRIBUTE_UNKNOWN && !attribute->keyword ? check_input_attribute_name(reader, attribute->name) : (String8){ 0 };
     const bool custom = check_input_attribute_equal(generic_name, "availability") || check_input_attribute_equal(generic_name, "external_source_symbol") ||
                         check_input_attribute_equal(generic_name, "type_tag_for_datatype") ||
-                        check_input_attribute_equal(generic_name, "objc_bridge_related");
+                        check_input_attribute_equal(generic_name, "objc_bridge_related") || check_input_attribute_equal(generic_name, "swift_newtype") ||
+                        check_input_attribute_equal(generic_name, "swift_wrapper");
     const bool generic = attribute->kind == CHECK_ATTRIBUTE_UNKNOWN && !attribute->keyword && kept && !custom;
     const CheckInputArgumentsRow* row = generic ? check_input_arguments_row(generic_name) : NULL;
     const uint32_t flags = row != NULL ? row->flags : 0;
