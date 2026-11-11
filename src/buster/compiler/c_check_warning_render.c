@@ -1826,6 +1826,19 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
         case CHECK_WARNING_EVENT_TYPEDEF_NAMELESS:
             result = "typedef requires a name";
             break;
+        case CHECK_WARNING_EVENT_UNUSED_RESULT:
+        {
+            static const char* const messages[] =
+            {
+                "left operand of comma operator has no effect",
+                "expression result unused; should this cast be to 'void'?",
+                "equality comparison result unused",
+                "inequality comparison result unused",
+                "relational comparison result unused",
+            };
+            result = messages[payload->data < BUSTER_ARRAY_LENGTH(messages) ? payload->data : 0];
+            break;
+        }
         case CHECK_WARNING_EVENT_UNDERLYING_CV_QUALIFIER:
             result = payload->data == (BUSTER_TYPE_CONST | BUSTER_TYPE_VOLATILE) ? "'const' and 'volatile' qualifiers in enumeration underlying type ignored" :
                      payload->data == BUSTER_TYPE_VOLATILE ? "'volatile' qualifier in enumeration underlying type ignored" :
@@ -1903,6 +1916,10 @@ static const char* check_driver_warning_note(const Parser* parser, Preprocessor*
             break;
         case CHECK_WARNING_NOTE_ATTRIBUTE_HERE:
             result = check_warning_text(scratch, "attribute '%.*s' here", (int)name.length, name.pointer);
+            break;
+        case CHECK_WARNING_NOTE_COMPARISON_ASSIGNMENT:
+            result = note->payload.data == BUSTER_CHECK_UNUSED_INEQUALITY ? "use '|=' to turn this inequality comparison into an or-assignment" :
+                                                                            "use '=' to turn this equality comparison into an assignment";
             break;
         case CHECK_WARNING_NOTE_DIAGNOSE_IF:
             result = check_warning_text(scratch, "from 'diagnose_if' attribute on '%.*s':", (int)name.length, name.pointer);

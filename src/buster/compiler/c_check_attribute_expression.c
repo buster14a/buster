@@ -162,9 +162,189 @@ static void check_input_constant_failure_report(CheckInputReader* reader, const 
     }
 }
 
+// What clang's isUnusedResultAWarning reports of a discarded value (check_input_attribute_unused_of): its token and its
+// BUSTER_CHECK_UNUSED_* message, or BUSTER_CHECK_NONE where the value is quiet.
+typedef struct CheckAttributeUnused CheckAttributeUnused;
+struct CheckAttributeUnused
+{
+    uint32_t token;
+    uint32_t message;
+};
+
+// The operands of the parse tree's `node` within [first, end), in token order, but the brackets' openers and a
+// conditional's `?`: at most four, and their count.
+static uint32_t check_input_attribute_operands(const Parser* parser, uint32_t node, uint32_t first, uint32_t end, uint32_t* operands, uint32_t* opener)
+{
+    uint32_t count = 0;
+    *opener = BUSTER_CHECK_NONE;
+    for (uint32_t t = first; t < end; t += 1)
+    {
+        const uint8_t role = parser->tree.roles[t];
+        const bool open = role >= PARSE_ROLE_OPEN_GROUP && role <= PARSE_ROLE_OPEN_CASE;
+        const bool child = t != node && parser->tree.parents[t] == node;
+        *opener = child && open && *opener == BUSTER_CHECK_NONE ? t : *opener;
+        if (child && !open && count < 4)
+        {
+            operands[count] = t;
+        }
+        count += child && !open ? 1u : 0u;
+    }
+    return count;
+}
+
+// Whether the comma at `token` is a comma operator: the parser's COMMA, or in an attribute's argument, whose commas it reads
+// as separators, one in a chain of commas a group's parentheses hold (a call's separate its arguments).
+static bool check_input_attribute_comma(const Parser* parser, uint32_t token)
+{
+    uint32_t at = token;
+    while (parser->tree.roles[at] == PARSE_ROLE_SEPARATOR && parser->tree.parents[at] != at && parser->tokens.kinds[parser->tree.parents[at]] == PARSE_KIND_COMMA)
+    {
+        at = parser->tree.parents[at];
+    }
+    const uint32_t parent = parser->tree.parents[at];
+    return parser->tokens.kinds[token] == PARSE_KIND_COMMA &&
+           (parser->tree.roles[token] == PARSE_ROLE_COMMA || (parser->tree.roles[at] == PARSE_ROLE_SEPARATOR && parent != at && parser->tree.roles[parent] == PARSE_ROLE_CLOSE_GROUP));
+}
+
+// Whether `node` within [first, end) is, through parentheses, the integer literal 0.
+static bool check_input_attribute_literal_zero(CheckInputReader* reader, uint32_t node, uint32_t first, uint32_t end)
+{
+    const Parser* parser = reader->parser;
+    uint32_t at = node;
+    uint32_t operands[4];
+    uint32_t opener = BUSTER_CHECK_NONE;
+    while (parser->tree.roles[at] == PARSE_ROLE_CLOSE_GROUP && check_input_attribute_operands(parser, at, first, end, operands, &opener) == 1)
+    {
+        at = operands[0];
+    }
+    CheckValue value = { 0 };
+    TypeId unused = 0;
+    const bool literal = parser->tokens.kinds[at] == PARSE_KIND_NUMBER &&
+                         check_input_constant_read(reader, at, at + 1, false, false, false, &value, &unused, NULL, NULL);
+    return literal && value.constant_kind == CHECK_CONSTANT_INTEGER && value.integer == 0;
+}
+
+// Whether a discarded `node` (a parse tree node within [first, end)) warns, as clang's Expr::isUnusedResultAWarning
+// decides for the shapes an attribute's expression takes (#1447), and where: a group's is its operand's; a comma's its
+// right operand's, but for a literal 0, which is quiet; a conditional's where both arms' do, at the else arm's; a logical
+// operator's where both operands' do, at the operator; calls, assignments and increments are quiet; a cast is at its `(`,
+// quiet to void and clang's question to an unqualified `void *`; a comparison is -Wunused-comparison's at its operator; a
+// keyword's call (sizeof's, a builtin's keyword) at its keyword, a member's at its name, anything else at its own token.
+static CheckAttributeUnused check_input_attribute_unused_of(CheckInputReader* reader, uint32_t node, uint32_t first, uint32_t end, uint32_t depth)
+{
+    const Parser* parser = reader->parser;
+    const uint8_t role = parser->tree.roles[node];
+    const uint8_t kind = parser->tokens.kinds[node];
+    uint32_t operands[4] = { BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE };
+    uint32_t opener = BUSTER_CHECK_NONE;
+    const uint32_t count = check_input_attribute_operands(parser, node, first, end, operands, &opener);
+    CheckAttributeUnused result = { .token = node, .message = BUSTER_CHECK_UNUSED_COMMA };
+    if (depth > 64)
+    {
+        result.token = BUSTER_CHECK_NONE;
+    }
+    else if (role == PARSE_ROLE_CLOSE_GROUP && count == 1)
+    {
+        result = check_input_attribute_unused_of(reader, operands[0], first, end, depth + 1);
+    }
+    else if (kind == PARSE_KIND_COMMA && count == 2 && check_input_attribute_comma(parser, node))
+    {
+        result = check_input_attribute_literal_zero(reader, operands[1], first, end) ? (CheckAttributeUnused){ .token = BUSTER_CHECK_NONE } :
+                                                                                      check_input_attribute_unused_of(reader, operands[1], first, end, depth + 1);
+    }
+    else if (role == PARSE_ROLE_CLOSE_TERNARY && (count == 2 || count == 3))
+    {
+        // A GNU `x ?: y`'s then arm is its condition.
+        const CheckAttributeUnused then = check_input_attribute_unused_of(reader, operands[count - 2], first, end, depth + 1);
+        const CheckAttributeUnused otherwise = check_input_attribute_unused_of(reader, operands[count - 1], first, end, depth + 1);
+        result = then.token != BUSTER_CHECK_NONE ? otherwise : then;
+    }
+    else if ((role == PARSE_ROLE_LOGICAL_AND || role == PARSE_ROLE_LOGICAL_OR) && count == 2)
+    {
+        const bool left = check_input_attribute_unused_of(reader, operands[0], first, end, depth + 1).token != BUSTER_CHECK_NONE;
+        const bool right = check_input_attribute_unused_of(reader, operands[1], first, end, depth + 1).token != BUSTER_CHECK_NONE;
+        result.token = left && right ? node : BUSTER_CHECK_NONE;
+    }
+    else if (role == PARSE_ROLE_CLOSE_CALL || role == PARSE_ROLE_ASSIGN || kind == PARSE_KIND_PLUSPLUS || kind == PARSE_KIND_MINUSMINUS)
+    {
+        result.token = BUSTER_CHECK_NONE;
+    }
+    else if (role == PARSE_ROLE_CLOSE_CAST && opener != BUSTER_CHECK_NONE)
+    {
+        const TypeId type = check_input_constant_type(reader, opener + 1, node);
+        const TypeId plain = type != 0 ? type_unqualified(type_strip_aligned(reader->types, type)) : 0;
+        const TypeId element = plain != 0 && type_kind(reader->types, plain) == BUSTER_TYPE_KIND_POINTER ? type_strip_aligned(reader->types, type_element(reader->types, plain)) :
+                                                                                                          0;
+        const bool pointer = element != 0 && type_kind(reader->types, element) == BUSTER_TYPE_KIND_VOID && type_qualifiers(element) == 0;
+        result.token = plain != 0 && type_kind(reader->types, plain) == BUSTER_TYPE_KIND_VOID ? BUSTER_CHECK_NONE : opener;
+        result.message = pointer ? BUSTER_CHECK_UNUSED_VOID_POINTER : BUSTER_CHECK_UNUSED_COMMA;
+    }
+    else if (role == PARSE_ROLE_EQUALITY || role == PARSE_ROLE_RELATIONAL)
+    {
+        result.message = role == PARSE_ROLE_RELATIONAL ? BUSTER_CHECK_UNUSED_RELATIONAL :
+                         kind == PARSE_KIND_EQUALEQUAL ? BUSTER_CHECK_UNUSED_EQUALITY : BUSTER_CHECK_UNUSED_INEQUALITY;
+    }
+    else if ((role == PARSE_ROLE_CLOSE_KEYWORD || role == PARSE_ROLE_CLOSE_SIZEOF) && opener != BUSTER_CHECK_NONE && opener > first)
+    {
+        result.token = opener - 1;
+    }
+    else if (role == PARSE_ROLE_MEMBER_OPERATOR && node + 1 < end)
+    {
+        result.token = node + 1;
+    }
+    return result;
+}
+
+// clang's warnings of the comma operators' left operands in an attribute's expression argument [first, end) (#1447,
+// Sema's CheckCommaOperands), each once however often the argument is read: -Wunused-value's, or -Wunused-comparison's
+// with its note at an equality, where check_input_attribute_unused_of says the operand's value is unused.
+static void check_input_attribute_unused(CheckInputReader* reader, uint32_t first, uint32_t end)
+{
+    const Parser* parser = reader->parser;
+    for (uint32_t comma = first; comma < end && !reader->output->resource; comma += 1)
+    {
+        uint32_t operands[4] = { BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE };
+        uint32_t opener = BUSTER_CHECK_NONE;
+        const bool binary = parser->tokens.kinds[comma] == PARSE_KIND_COMMA && check_input_attribute_comma(parser, comma) &&
+                            check_input_attribute_operands(parser, comma, first, end, operands, &opener) == 2;
+        const CheckAttributeUnused unused = binary ? check_input_attribute_unused_of(reader, operands[0], first, end, 0) :
+                                                     (CheckAttributeUnused){ .token = BUSTER_CHECK_NONE };
+        const uint64_t key = (uint64_t)CHECK_WARNING_EVENT_UNUSED_RESULT << 32 | ((uint64_t)unused.token + 1);
+        if (unused.token != BUSTER_CHECK_NONE && !check_warning_set_contains(&reader->source_warning_keys, key))
+        {
+            const bool retained = check_warning_set_add(&reader->source_warning_keys, key);
+            reader->output->resource |= !retained;
+            const bool comparison = unused.message >= BUSTER_CHECK_UNUSED_EQUALITY;
+            const CheckWarningEvent event =
+            {
+                .id = comparison ? CHECK_WARNING_ID_UNUSED_COMPARISON : CHECK_WARNING_ID_UNUSED_VALUE,
+                .kind = CHECK_WARNING_EVENT_UNUSED_RESULT,
+                .token = unused.token,
+                .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+                .completion = unused.token + 1,
+                .payload = { .token = BUSTER_CHECK_WARNING_NO_SOURCE, .data = unused.message },
+            };
+            const CheckWarningNote note =
+            {
+                .kind = CHECK_WARNING_NOTE_COMPARISON_ASSIGNMENT,
+                .token = unused.token,
+                .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                .payload = { .token = BUSTER_CHECK_WARNING_NO_SOURCE, .data = unused.message },
+            };
+            const bool noted = unused.message == BUSTER_CHECK_UNUSED_EQUALITY || unused.message == BUSTER_CHECK_UNUSED_INEQUALITY;
+            if (retained)
+            {
+                check_input_warning_event(reader, &event, &note, noted ? 1u : 0u);
+            }
+        }
+    }
+}
+
 static bool check_input_attribute_expression(CheckInputReader* reader, CheckInputAttributes* attributes, const CheckInputAttribute* attribute,
                                               uint32_t first, uint32_t end, bool scoped, CheckValue* value, bool* call_failure)
 {
+    check_input_attribute_unused(reader, first, end);
     const Parser* parser = reader->parser;
     CheckConstantFailure failure = { .token = BUSTER_CHECK_NONE, .callee = BUSTER_CHECK_NONE };
     uint32_t failed = BUSTER_CHECK_NONE;

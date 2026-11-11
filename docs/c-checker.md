@@ -9406,6 +9406,20 @@ clang's `diagnose_if(condition, message, "warning" | "error")` and
   and `-Werror` makes a warning an error through any `-Wno-error=`; `-w`
   ignores a warning, not an error. An error by default has no `-Werror,` in
   its option, however it became one.
+- **Comma operators** (`check_input_attribute_unused`): a comma's left
+  operand in a condition, or in any attribute's expression argument, is
+  clang's `CheckCommaOperands` warning, once however often the argument is
+  read, where its value is unused as clang's `isUnusedResultAWarning` says:
+  a nested comma's right operand's (quiet after a literal 0), a
+  conditional's where both arms' are (at the else arm's), a logical
+  operator's where both operands' are (at the operator), quiet for a call,
+  an assignment, an increment and a cast to void, at a cast's `(`, sizeof's
+  keyword, a member's name or the operator. It is -Wunused-value's "left
+  operand of comma operator has no effect", its "should this cast be to
+  'void'?" for a cast to `void *`, and -Wunused-comparison's for a
+  comparison, with its `=` or `|=` note. The parser reads an attribute
+  argument's commas as separators; one in a chain that a group's
+  parentheses hold is the operator (`check_input_attribute_comma`).
 - **Cost.** A unit without these attributes tests a reader flag where
   declarations are read and a count where uses and calls are; the steps are
   built only for these attributes.
@@ -9413,8 +9427,11 @@ clang's `diagnose_if(condition, message, "warning" | "error")` and
 What isn't clang's yet: an overloadable function's conditions, which take
 part in its overload resolution, are "not yet supported" in user code (a
 tautological `enable_if(1, ...)`, glibc's, aside); the condition shapes
-above (and clang's `-Wunused-value` of a comma operator's left operand in a
-condition isn't given); and, as everywhere in this driver, the uses' errors stop the unit's
+above (a cast to void or to `void *` in a condition gives none of clang's
+"never produces a constant expression" errors, nor
+`-Wint-to-void-pointer-cast`); the comma warnings of the constant reader's
+other expressions (an enumerator's value, a file-scope array bound, a type
+name's bound in `sizeof`), which clang gives too; and, as everywhere in this driver, the uses' errors stop the unit's
 later expression checks, so a call after one such error isn't diagnosed. An
 assignment expression as an initializer list's element (`{ x = q }`) is read
 as a designation, whose value clang converts with the list's. A grouped

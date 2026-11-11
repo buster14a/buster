@@ -432,6 +432,11 @@ typedef enum CheckWarningEventKind
     // type ignored", or "'const' and 'volatile' qualifiers ...", at the base's first token that isn't a qualifier;
     // payload.data the qualifiers (BUSTER_TYPE_CONST, BUSTER_TYPE_VOLATILE).
     CHECK_WARNING_EVENT_UNDERLYING_CV_QUALIFIER,
+    // A comma operator's left operand in an attribute's expression argument whose value clang's isUnusedResultAWarning
+    // says is unused (#1447, check_input_attribute_unused): payload.data a BUSTER_CHECK_UNUSED_* message,
+    // -Wunused-value's "left operand of comma operator has no effect" or its `void *` cast's question, or
+    // -Wunused-comparison's, with a CHECK_WARNING_NOTE_COMPARISON_ASSIGNMENT at an equality's.
+    CHECK_WARNING_EVENT_UNUSED_RESULT,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
 
@@ -439,6 +444,13 @@ typedef enum CheckWarningEventKind
 // ends at the next comma, trimmed), and `data` its place's offset from the trimmed text's start, with
 // BUSTER_CHECK_TARGET_CLONES_CPU where an unsupported one is a CPU's.
 #define BUSTER_CHECK_TARGET_CLONES_CPU (1u << 31)
+
+// CHECK_WARNING_EVENT_UNUSED_RESULT's message (payload.data).
+#define BUSTER_CHECK_UNUSED_COMMA 0u
+#define BUSTER_CHECK_UNUSED_VOID_POINTER 1u
+#define BUSTER_CHECK_UNUSED_EQUALITY 2u
+#define BUSTER_CHECK_UNUSED_INEQUALITY 3u
+#define BUSTER_CHECK_UNUSED_RELATIONAL 4u
 
 // CHECK_WARNING_EVENT_TRANSPARENT_UNION's case, in its data's low byte (its bits above it), and its note's.
 #define BUSTER_CHECK_TRANSPARENT_INCOMPLETE 1u
@@ -472,6 +484,9 @@ typedef enum CheckWarningNoteKind
     CHECK_WARNING_NOTE_DIAGNOSE_IF,
     // "attribute 'packed' here" (#1447, CHECK_WARNING_EVENT_ODR_ATTRIBUTE's), payload.name the attribute's name.
     CHECK_WARNING_NOTE_ATTRIBUTE_HERE,
+    // "use '=' to turn this equality comparison into an assignment" (payload.data BUSTER_CHECK_UNUSED_EQUALITY), or "use '|='
+    // to turn this inequality comparison into an or-assignment" (BUSTER_CHECK_UNUSED_INEQUALITY).
+    CHECK_WARNING_NOTE_COMPARISON_ASSIGNMENT,
     CHECK_WARNING_NOTE_KIND_COUNT,
 } CheckWarningNoteKind;
 
