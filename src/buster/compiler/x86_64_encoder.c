@@ -5195,10 +5195,21 @@ static uint8_t x86_legacy_map(const X86FormDescription* form)
 // (main.c): test-ir-source's emission encodes in the checker's unit, and its IR adapter's tier0_validate reads the forms'
 // templates in the backend's (#784). A unit of its own, a benchmark's, has its own. x86_semantics.c's tables take the
 // same linkage.
+// But under AddressSanitizer, a unit of its own in the executable (BUSTER_EXECUTABLE_UNIT) takes main.c's too: every unit
+// builds the same tables, and LeakSanitizer reads every writable byte at each process's exit, where 15 units' 33 private
+// template tables were 117 MB, about 25 ms of every ASan process without transparent huge pages (#2068). Other builds,
+// whose benchmarks measure a unit's own copies, keep them.
+#if defined(__has_feature)
+#if __has_feature(address_sanitizer) && defined(BUSTER_EXECUTABLE_UNIT) && !defined(BUSTER_UNIT)
+#define BUSTER_X86_SHARED_BY_OWN_UNIT 1
+#endif
+#endif
 #if defined(BUSTER_UNIT) && BUSTER_UNIT != BUSTER_UNIT_DRIVER
 #define BUSTER_X86_SHARED extern __attribute__((visibility("hidden")))
 #elif defined(BUSTER_UNIT)
 #define BUSTER_X86_SHARED __attribute__((visibility("hidden")))
+#elif defined(BUSTER_X86_SHARED_BY_OWN_UNIT)
+#define BUSTER_X86_SHARED extern __attribute__((visibility("hidden")))
 #else
 #define BUSTER_X86_SHARED static
 #endif

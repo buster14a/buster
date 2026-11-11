@@ -153,6 +153,16 @@
     // #535's inline-assembly rows: SSE2/MMX are baseline x86-64 features.
     BUSTER_X86_SSE_PACKED_FORM(BUSTER_X86_TARGET_ROW, PCMPEQD, "pcmpeqd", 0x66, 2, 0x0f76)
     BUSTER_X86_MMX_PACKED_FORMS(BUSTER_X86_TARGET_ROW, PCMPEQD, "pcmpeqd", 2, 0x0f76)
+    // #1846's MMX moves of inline assembly's templates (MMX is baseline x86-64): movd and movq to and from general
+    // registers and memory, and movq between MMX registers, by its load's and its store's opcode.
+    BUSTER_X86_TARGET_ROW(MOVD_MM_RM32)
+    BUSTER_X86_TARGET_ROW(MOVD_RM32_MM)
+    BUSTER_X86_TARGET_ROW(MOVQ_MM_RM64)
+    BUSTER_X86_TARGET_ROW(MOVQ_RM64_MM)
+    BUSTER_X86_TARGET_ROW(MOVQ_MM_MM)
+    BUSTER_X86_TARGET_ROW(MOVQ_MM_M64)
+    BUSTER_X86_TARGET_ROW(MOVQ_M64_MM)
+    BUSTER_X86_TARGET_ROW(MOVQ_MM_MM_STORE)
     // #565's operand-free strings; its flags, SSE2 movq and x87 memory rows are already classified below.
     BUSTER_X86_STRING_FORMS(BUSTER_X86_TARGET_ROW, MOVS, "movs", 0, 0xa4, 0xa5)
     BUSTER_X86_STRING_FORMS(BUSTER_X86_TARGET_ROW, REP_MOVS, "rep movs", 0xf3, 0xa4, 0xa5)

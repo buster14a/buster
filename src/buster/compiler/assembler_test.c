@@ -123,6 +123,14 @@ static const char asm_test_segmented_movq[] =
     "movq %xmm0,%fs:(%r8)\nmovq %xmm0,%gs:(%r8)\n"
     "movq %xmm8,%fs:(%rax)\nmovq %xmm8,%gs:(%rax)\n";
 
+// MMX's registers in both syntaxes and either case (#1846): movq's and movd's forms, the load's and the store's, and the
+// MMX instructions the target table already had (emms, pxor, paddd).
+static const char asm_test_mmx[] =
+    "mmx:\n"
+    "movq %mm0,%rax\nmovq %rax,%mm1\nmovq (%rdi),%mm2\nmovq %mm3,(%rdi)\nmovq %mm4,%mm5\nmovd %mm0,%eax\nmovd (%rsi),%mm6\n"
+    "movd %mm7,4(%rsp)\nmovd %r9d,%mm3\nmovq %r10,%mm7\nmovq %MM2,%rcx\nemms\npxor %mm1,%mm1\npaddd (%rax),%mm2\n"
+    ".intel_syntax noprefix\nmovq mm1, rax\nmovq qword ptr [rdi+8], mm3\nmovq mm5, mm4\n.att_syntax prefix\n";
+
 static const char asm_test_rep_scans[] =
     ".text\nscans:\n"
     "rep bsfw %cx,%ax\nrepz bsfl %ecx,%eax\nrep; bsfq %r9,%r8\n"
@@ -966,6 +974,12 @@ static void asm_test_code(AsmTest* test)
                              "movsl\nlodsq\npushfq\npopfq\ncld",
                        20, "inline code: naked functions' instructions");
     asm_test_code_pair(test, asm_test_segmented_movq, 8, "inline code: segmented movq encoding choice");
+    // MMX's registers (#1846): movq and movd to and from general registers, memory and each other, by both paths.
+    const AsmCode mmx = asm_test_code_pair(test, asm_test_mmx, 17, "inline code: MMX's moves");
+    asm_test_check(test, mmx.count == 17 && (mmx.records[2].form & BUSTER_X86_FORM_NUMBER) == X86_FORM_MOVQ_MM_M64 &&
+                         (mmx.records[3].form & BUSTER_X86_FORM_NUMBER) == X86_FORM_MOVQ_M64_MM && (mmx.records[4].form & BUSTER_X86_FORM_NUMBER) == X86_FORM_MOVQ_MM_MM &&
+                         mmx.records[4].reg == 5 && mmx.records[4].rm == 4,
+                   "inline code: MMX's movq takes GNU as's forms", 0);
     // musl's templates (#147): its atomics' lock prefixes, as statements of their own (past a semicolon and a line) and
     // on the instruction's line, the exchanges, the bit scans, hlt and the thread pointer's load; its math's SSE
     // instructions, FMA3's and the x87's, fnstsw into %ax and fistpll among them. Each locked instruction is a record of
@@ -1790,6 +1804,7 @@ static int run_assembler_tests(int count, char** arguments)
                                        "vmovdqa64 zmm1,zmmword ptr [rax]\nvmovdqa64 zmmword ptr [rsp],zmm2\nvmovdqu64 zmm3,zmm4\npush qword ptr [rdi+128]\n"
                                        "pop qword ptr [rdi+128]\nrep movsb\nrep stosd\n", directory, X86_ARCH_V4);
                 asm_test_oracle(&test, asm_test_segmented_movq, directory, 0);
+                asm_test_oracle(&test, asm_test_mmx, directory, 0);
                 asm_test_oracle(&test, asm_test_kmov, directory, X86_ARCH_V4);
                 // And musl's (#147): the lock prefix on the instruction's line and as a statement of its own, past a
                 // semicolon and a line (but before a 16-bit instruction, whose 66 GNU as then writes after the lock it

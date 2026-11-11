@@ -266,7 +266,7 @@ static void check_builtin_test_constraints(CheckBuiltinTest* test, TypeTable* ta
     check_builtin_test_expect(test, result.action.diagnostic == CHECK_DIAG_INTEGER_REQUIRED && result.action.diagnostic_operand == 0,
                               "generic overflow rejects floating input instead of converting it");
     // Operands and destinations of 65 to 128 bits are runtime actions with their store, never folded by the 64-bit
-    // fold, even when constant; wider ones are unsupported.
+    // fold, even when constant, and so are wider ones (#1447).
     action.operands[0] = check_test_integer(BUSTER_TYPE_UINT128, (unsigned __int128)1 << 100);
     result = check_builtin_test_action(test, table, action);
     check_builtin_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && result.fold_status == BUSTER_CHECK_BUILTIN_NOT_CONSTANT && result.store &&
@@ -282,10 +282,28 @@ static void check_builtin_test_constraints(CheckBuiltinTest* test, TypeTable* ta
     check_builtin_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && result.fold_status == BUSTER_CHECK_BUILTIN_NOT_CONSTANT && result.store &&
                                   result.store_value.type == BUSTER_TYPE_INT128,
                               "__int128 overflow destination is a runtime action");
-    action.operands[2].type = type_pointer(table, type_bit_int(table, 129, true));
+    // A _BitInt past 128 bits (#1447) is a runtime action, but a signed one of mul_overflow's, which clang refuses at it
+    // (type_bit_int's flag says unsigned).
+    action.operands[2].type = type_pointer(table, type_bit_int(table, 129, false));
     result = check_builtin_test_action(test, table, action);
-    check_builtin_test_expect(test, result.action.diagnostic == CHECK_DIAG_UNSUPPORTED && result.action.diagnostic_operand == 2 && !result.store,
-                              "overflow destination past 128 bits is unsupported");
+    check_builtin_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && result.fold_status == BUSTER_CHECK_BUILTIN_NOT_CONSTANT && result.store &&
+                                  result.action.value.constant_kind == CHECK_CONSTANT_NONE,
+                              "overflow destination past 128 bits is a runtime action");
+    action.id = CBUILTIN_MUL_OVERFLOW;
+    result = check_builtin_test_action(test, table, action);
+    check_builtin_test_expect(test, result.action.diagnostic == CHECK_DIAG_OVERFLOW_BIT_INT && result.action.diagnostic_operand == 2 && !result.store,
+                              "mul_overflow's signed destination past 128 bits is clang's error");
+    action.operands[2].type = type_pointer(table, type_bit_int(table, 200, true));
+    action.operands[1] = check_test_integer(type_bit_int(table, 300, false), 3);
+    result = check_builtin_test_action(test, table, action);
+    check_builtin_test_expect(test, result.action.diagnostic == CHECK_DIAG_OVERFLOW_BIT_INT && result.action.diagnostic_operand == 1 && !result.store,
+                              "mul_overflow's signed operand past 128 bits is clang's error");
+    action.operands[1] = check_test_integer(type_bit_int(table, 300, true), 3);
+    result = check_builtin_test_action(test, table, action);
+    check_builtin_test_expect(test, result.action.diagnostic == CHECK_DIAG_NONE && result.fold_status == BUSTER_CHECK_BUILTIN_NOT_CONSTANT && result.store,
+                              "mul_overflow's unsigned _BitInts past 128 bits are a runtime action");
+    action.id = CBUILTIN_ADD_OVERFLOW;
+    action.operands[1] = check_test_integer(BUSTER_TYPE_INT, 2);
     action.operands[2].type = type_pointer(table, BUSTER_TYPE_INT);
     for (uint32_t count = 0; count <= 4; count += 1)
     {
