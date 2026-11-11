@@ -1836,7 +1836,8 @@ static void check_lower_transport_bit_operands(CheckLowerWriter* writer, uint32_
 
 // An element of a vector of bool (#137), the bit of its index's place: the byte that holds it loaded, shifted right by
 // the bit's count in it and masked to its low bit, an unsigned int's 0 or 1 converted to the element's type, as clang's
-// extractelement of an <N x i1> reads it.
+// extractelement of an <N x i1> reads it. In a segment's space (#1447) the byte's LOAD takes the vector's override
+// (check_lower_element_segment), as clang's load of the vector does.
 static __attribute__((noinline)) void check_lower_transport_bit_read(CheckLowerWriter* writer, uint32_t node)
 {
     const uint32_t vector_local = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
@@ -1847,7 +1848,7 @@ static __attribute__((noinline)) void check_lower_transport_bit_read(CheckLowerW
     check_lower_instruction(writer, BUSTER_TYPED_SHR, BUSTER_TYPED_CLASS_U32, 0);
     check_lower_transport_bit_count(writer, index_local);
     check_lower_instruction(writer, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U32, 0);
-    check_lower_instruction(writer, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_U8, 0);
+    check_lower_instruction(writer, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_U8, check_lower_element_segment(writer, node));
     check_lower_transport_bit_byte(writer, vector_local, index_local);
     check_lower_transport_bit_operands(writer, node, vector_local, index_local);
 }
@@ -1856,7 +1857,9 @@ static __attribute__((noinline)) void check_lower_transport_bit_read(CheckLowerW
 // operand's truth, as clang's insertelement of an <N x i1> and the store of the whole vector leave them; the
 // expression's value is the element's new value, at the expression's type. A compound assignment or an increment of
 // one is refused by name: clang 23's code for it extracts the element from the vector's memory integer (an
-// extractelement of an i8, invalid IR), which crashes or computes no element's value.
+// extractelement of an i8, invalid IR), which crashes or computes no element's value. In a segment's space (#1447) the
+// byte's LOAD and SET take the vector's override (check_lower_element_segment), as clang's load and store of the
+// vector do.
 static __attribute__((noinline)) void check_lower_transport_bit_store(CheckLowerWriter* writer, uint32_t node)
 {
     const CheckProgram* program = writer->program;
@@ -1873,11 +1876,12 @@ static __attribute__((noinline)) void check_lower_transport_bit_store(CheckLower
         const uint32_t index_local = check_lower_temporary(writer, BUSTER_TYPED_CLASS_I64);
         const uint32_t byte_local = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
         const uint32_t new_local = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U32);
+        const uint64_t segment = check_lower_element_segment(writer, subscript);
         // The value, the new element.
         check_lower_convert(writer, BUSTER_TYPE_UINT, check_stream_type(stream, node));
         check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U32, new_local);
         // The byte stored: (byte & ~(1 << count)) | (new << count).
-        check_lower_instruction(writer, BUSTER_TYPED_SET, BUSTER_TYPED_CLASS_U8, 0);
+        check_lower_instruction(writer, BUSTER_TYPED_SET, BUSTER_TYPED_CLASS_U8, segment);
         check_lower_instruction(writer, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U8, 0);
         check_lower_instruction(writer, BUSTER_TYPED_OR, BUSTER_TYPED_CLASS_U32, 0);
         check_lower_instruction(writer, BUSTER_TYPED_SHL, BUSTER_TYPED_CLASS_U32, 0);
@@ -1889,7 +1893,7 @@ static __attribute__((noinline)) void check_lower_transport_bit_store(CheckLower
         check_lower_transport_bit_count(writer, index_local);
         check_lower_instruction(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U32, 1);
         check_lower_instruction(writer, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U32, 0);
-        check_lower_instruction(writer, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_U8, 0);
+        check_lower_instruction(writer, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_U8, segment);
         check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, byte_local);
         check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, byte_local);
         // The new element's truth, 0 or 1, after the element's place, as the operands of an ordinary assignment run.
