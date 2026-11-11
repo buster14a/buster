@@ -414,12 +414,12 @@ build in the nightly window.
 **Items.** An item is a configuration's initial and its shard: `m2` is
 memory's shard 2 of its 4. `BUSTER_VECTOR_ITEMS` lists all 16 the costliest
 first, which is the order the collectors assign them in, across the
-configurations: memory's, thread's, address's, then the plain one's, each
+configurations: memory's, address's, thread's, then the plain one's, each
 configuration's item 1 first. `costs plan` over each configuration's table
-gives its longest shard of 4 (by the 11 November tables, 1,163, 1,156, 691 and
-447 s on the slowest CPU), and its build adds to each item (about 10, 3, 7 and
-2.5 minutes in the native rows): item 1 also builds the configuration's
-product and runs its once-only steps. The pool is one call of the row workflow,
+gives its longest shard of 4 (564, 439, 638 and 447 s by the tables of #2033's
+first full run, 43027989712), and its build adds to each item (506, 618, 204
+and 153 s there): item 1 also builds the configuration's product and runs its
+once-only steps. The pool is one call of the row workflow,
 so the four configurations share its draws: at a 41% rate, a first draw of 48
 candidates for 16 items falls short in 10.9% of runs, where four rows' draws of
 12 for 4 items each would leave at least one short in 60%.

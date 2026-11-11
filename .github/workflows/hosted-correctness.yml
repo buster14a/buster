@@ -53,11 +53,11 @@ env:
   # the sanitizer rows, whose shards are one pool of items (tools/ci/vector-draw.sh). An item is a configuration's
   # initial and its shard: `m2` is memory's shard 2 of its 4. They are listed the costliest first, the order in which the
   # collectors assign them, by `costs plan` over each configuration's table (tools/ci/costs/vector-*-O3.costs) and its
-  # build: memory's, thread's, address's and the plain row's, each the item 1 first, which builds the configuration's
-  # product and runs its once-only steps. A configuration's count of items is its N, whatever the `shards` input says:
-  # the draws are sized for them, 3 candidates per item in the first.
+  # build, as #2033's first full run measured them: memory's, address's, thread's and the plain row's, each the item 1
+  # first, which builds the configuration's product and runs its once-only steps. A configuration's count of items is
+  # its N, whatever the `shards` input says: the draws are sized for them, 3 candidates per item in the first.
   BUSTER_VECTOR_CONFIGURATIONS: ${{ inputs.sanitizer }}
-  BUSTER_VECTOR_ITEMS: 'm1 m2 m3 m4 t1 t2 t3 t4 a1 a2 a3 a4 n1 n2 n3 n4'
+  BUSTER_VECTOR_ITEMS: 'm1 m2 m3 m4 a1 a2 a3 a4 t1 t2 t3 t4 n1 n2 n3 n4'
 
 jobs:
   # The row's compiler, built once where every runner can run it: the explicitly portable x86-64 baseline, whose rows

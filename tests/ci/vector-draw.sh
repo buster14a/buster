@@ -19,7 +19,7 @@ pass() { checks=$((checks + 1)); }
 command -v jq > /dev/null || fail 'jq is required'
 
 # The row's items as hosted-correctness.yml lists them, the costliest first; a pull request's row is `none` alone.
-every='m1 m2 m3 m4 t1 t2 t3 t4 a1 a2 a3 a4 n1 n2 n3 n4'
+every='m1 m2 m3 m4 a1 a2 a3 a4 t1 t2 t3 t4 n1 n2 n3 n4'
 export LC_ALL=C GITHUB_REPOSITORY=buster14a/buster GITHUB_RUN_ID=7 BUSTER_VECTOR_CONFIGURATIONS=none BUSTER_SANITIZER_OPTIMIZATION=3
 export BUSTER_VECTOR_ITEMS="$every" VECTOR_DRAW_POLL=0 VECTOR_DRAW_COLLECT_LIMIT=2 VECTOR_DRAW_TAKE_LIMIT=2 VECTOR_DRAW_PRODUCT_LIMIT=2 VECTOR_DRAW_PRODUCT_POLL=0 GH_TOKEN=fixture
 export RUNNER_TEMP="$work/runner" FIXTURE="$work/api"
@@ -124,10 +124,10 @@ for candidate in 2 4 7 9 10 13 15 20 21 22 30 31 40; do qualifying+=("$p-1-probe
 artifacts "${qualifying[@]}"
 jobs 1
 bash "$draw_script" assign 1 48 4 > "$work/log" 2>&1
-[ "$(output name)" = "$p-1-assign-1-m1x2-m2x4-m3x7-m4x9-t1x10-t2x13-t3x15-t4x20-a1x21-a2x22-a3x30-a4x31-n1x40" ] || fail "a pool's first draw by cost: $(output name)"
+[ "$(output name)" = "$p-1-assign-1-m1x2-m2x4-m3x7-m4x9-a1x10-a2x13-a3x15-a4x20-t1x21-t2x22-t3x30-t4x31-n1x40" ] || fail "a pool's first draw by cost: $(output name)"
 [ "$(output count)" = 12 ] || fail "a pool's next draw: 4 per missing item, $(output count)"
 pass
-artifacts "$p-1-assign-1-m1x2-m2x4-m3x7-m4x9-t1x10-t2x13-t3x15-t4x20-a1x21-a2x22-a3x30-a4x31-n1x40" "$p-1-probe-2-3-yes" "$p-1-probe-2-5-yes"
+artifacts "$p-1-assign-1-m1x2-m2x4-m3x7-m4x9-a1x10-a2x13-a3x15-a4x20-t1x21-t2x22-t3x30-t4x31-n1x40" "$p-1-probe-2-3-yes" "$p-1-probe-2-5-yes"
 jobs 1 "$(draw 2 1 completed 1)" "$(draw 2 2 completed 1)" "$(draw 2 4 completed 1)" "$(draw 2 6 completed 1)" "$(draw 2 7 completed 1)" "$(draw 2 8 completed 1)" "$(draw 2 9 completed 1)" "$(draw 2 10 completed 1)" "$(draw 2 11 completed 1)" "$(draw 2 12 completed 1)"
 bash "$draw_script" assign 2 12 5 > "$work/log" 2>&1
 [ "$(output name)" = "$p-1-assign-2-n2x3-n3x5" ] && [ "$(output count)" = 5 ] || fail "a pool's second draw: $(output name), $(output count)"
