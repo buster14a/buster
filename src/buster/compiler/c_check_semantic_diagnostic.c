@@ -717,7 +717,8 @@ static const char* check_semantic_const_assignment(const Parser* parser, Preproc
         const TypeId type = at < stream->count ? check_stream_type(stream, at) : 0;
         if (declaration < input->token_count && type != 0 && !check_semantic_modifiable(types, type, dereference))
         {
-            const String8 name = check_semantic_name(parser, pp, token);
+            // (A typo's variable is the one its correction names, as clang's recovery reads it.)
+            const String8 name = check_driver_warning_name(pp, check_driver_corrected_name(parser, input, token, parser->tokens.names[token]));
             const String8 declared = name.length != 0 ? check_driver_warning_type(parser, pp, input, types, spell, scratch, type,
                                                                                    check_semantic_operand_spelling(parser, input, stream, types, at)) :
                                                         (String8){ 0 };
