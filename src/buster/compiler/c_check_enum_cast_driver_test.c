@@ -214,6 +214,49 @@ static const char check_driver_enum_cast_argument_order_source[] =
     "    if (0) take(c ? (g = h) : g);\n"
     "}\n";
 
+// A leaf a macro's argument writes shows that argument's macro, unless the conversion's context (an assignment's operator,
+// a declarator, a call, a return) is written in the same argument too (#1447, clang's rangesInsideSameMacroArgExpansion):
+// nested arguments, a two-parameter macro's, a conditional macro's arms, a brace initializer's.
+static const char check_driver_enum_cast_macro_arguments_source[] =
+    "enum A { A1 }; enum B { B1 };\n"
+                  "#define ID(v) v\n"
+                  "#define TWO(x, y) x; y\n"
+                  "void take(enum A);\n"
+                  "enum A r(void) { return ID(B1); }\n"
+                  "void f(enum A a) {\n"
+                  "    ID(a = B1);\n"
+                  "    ID(take(B1));\n"
+                  "    take(ID(B1));\n"
+                  "    TWO(a = B1, a = ID(B1));\n"
+                  "    a = ID(ID(B1));\n"
+                  "    a = ID((B1));\n"
+                  "    a = (ID(B1));\n"
+                  "    enum A arr[1] = { ID(B1) };\n"
+                  "    ID(enum A c = B1);\n"
+                  "    (void)c;\n"
+                  "}\n";
+
+static const char check_driver_enum_cast_macro_forms_source[] =
+    "enum A { A1 }; enum B { B1, B2 };\n"
+                  "#define ID(v) v\n"
+                  "#define B_VAL B1\n"
+                  "#define PICK(c, x, y) ((c) ? (x) : (y))\n"
+                  "#define INIT(v) { v }\n"
+                  "#define ASSIGN(l, r) l = r\n"
+                  "void take(enum A);\n"
+                  "enum A g(int c) {\n"
+                  "    enum A a = ID(B_VAL);\n"
+                  "    a = PICK(c, B1, A1);\n"
+                  "    a = c ? ID(B1) : ID(B2);\n"
+                  "    enum A arr[2] = INIT(B1);\n"
+                  "    ASSIGN(a, B1);\n"
+                  "    ASSIGN(a, ID(B1));\n"
+                  "    ID(enum A arr2[1] = { B1 });\n"
+                  "    take(PICK(c, B1, B2));\n"
+                  "    (void)arr; (void)arr2;\n"
+                  "    return ID(c) ? B1 : A1;\n"
+                  "}\n";
+
 static const CheckDriverDefaultWarningFixture check_driver_enum_cast_fixtures[] =
 {
     {
@@ -296,6 +339,18 @@ static const CheckDriverDefaultWarningFixture check_driver_enum_cast_fixtures[] 
         .name = "conversions in a conditional argument's arms, in clang's order",
         .source = check_driver_enum_cast_argument_order_source,
         .warnings = 35,
+    },
+    {
+        .name = "macro arguments' notes",
+        .source = check_driver_enum_cast_macro_arguments_source,
+        .warnings = 11,
+        .notes = 9,
+    },
+    {
+        .name = "macro arguments' notes in conditionals, initializers and calls",
+        .source = check_driver_enum_cast_macro_forms_source,
+        .warnings = 11,
+        .notes = 11,
     },
 };
 
