@@ -967,8 +967,8 @@ static uint32_t check_overload_explain(TypeTable* table, const CheckOverloadCand
     return result.status == CHECK_OVERLOAD_NO_MATCH || result.status == CHECK_OVERLOAD_AMBIGUOUS ? explained_count : 0;
 }
 
-// check_overload_call_with without conditions.
-static CheckOverloadResult check_overload_call(TypeTable* table, const CheckAction* action, const CheckOverloadCandidate* candidates, uint32_t count, uint32_t head,
+// check_overload_call_with without conditions (the tests' entry; the checker's calls pass the unit's conditions).
+static __attribute__((unused)) CheckOverloadResult check_overload_call(TypeTable* table, const CheckAction* action, const CheckOverloadCandidate* candidates, uint32_t count, uint32_t head,
                                                Arena* scratch, bool scalar, CheckActionResult* output, CheckOverloadResult* argument_selected, uint64_t* scratch_peak)
 {
     return check_overload_call_with(table, action, candidates, count, head, scratch, scalar, output, argument_selected, scratch_peak, NULL, NULL);
