@@ -124,7 +124,7 @@ static uint32_t check_input_sugar_groups(const Parser* parser, uint32_t token, u
     return count < capacity ? count : capacity;
 }
 
-static uint32_t check_input_declarator_sugar(CheckInputReader* reader, const CheckDeclaratorFrame* frame, const CheckInputAttributes* common,
+static __attribute__((noinline, cold)) uint32_t check_input_declarator_sugar(CheckInputReader* reader, const CheckDeclaratorFrame* frame, const CheckInputAttributes* common,
                                              const CheckDeclaratorPart* parts, uint32_t order, TypeId type)
 {
     const Parser* parser = reader->parser;
@@ -265,7 +265,7 @@ static uint32_t check_input_declarator_sugar(CheckInputReader* reader, const Che
 // type's, and a distributed ATTRIBUTED (whose modified type was its own) the function's; below an attribute written on a
 // pointer or a group the levels stay as they were. 0 where the levels don't follow the type (its type then prints as
 // before).
-static uint32_t check_input_sugar_retype(CheckInputReader* reader, uint32_t sugar, TypeId type)
+static __attribute__((noinline, cold)) uint32_t check_input_sugar_retype(CheckInputReader* reader, uint32_t sugar, TypeId type)
 {
     TypeSugarTable* table = &reader->output->sugar;
     const TypeTable* types = reader->types;

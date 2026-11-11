@@ -943,11 +943,6 @@ struct CheckInput
     // pragma's own error stays an error, as clang's does.
     bool fatal_errors;
     uint8_t* explicit_abis;
-    // Type sugar (#1447, c_types_sugar.c): the nodes, and each declaring token's (0 for none). declared_sugar is null,
-    // and the table empty, until a declarator writes sugar the canonical type doesn't keep, which few units do
-    // (check_input_declarator_sugar).
-    TypeSugarTable sugar;
-    uint32_t* declared_sugar;
     uint32_t* objects;
     // A declaring token's flags and linkage, a byte a token (BUSTER_CHECK_BITS_*, #1167).
     uint8_t* declaration_bits;
@@ -1145,6 +1140,11 @@ struct CheckInput
     // (check_deferred_bodies), whose binding events say what was used before a declaration.
     bool target_multiversion;
     bool resource;
+    // Type sugar (#1447, c_types_sugar.c), last, out of the hot fields' cache lines: the nodes, and each declaring
+    // token's (0 for none). declared_sugar is null, and the table empty, until a declarator writes sugar the canonical
+    // type doesn't keep, which few units do (check_input_declarator_sugar).
+    TypeSugarTable sugar;
+    uint32_t* declared_sugar;
 };
 
 // A declaring token's bits in CheckInput.declaration_bits (#1167), which were a byte column each: whether it defines its
