@@ -6,11 +6,11 @@
 // The group relations and extension classes are checked against Clang 23.1.4, with original differential probes.
 
 // The warnings off by default that -pedantic (or -pedantic-errors) gives: GNU constant folding's, an unevaluated
-// string literal's escapes' (#1447), and GCC's cast to a union's (#2301).
+// string literal's escapes' (#1447), GCC's cast to a union's (#2301) and a GNU array range designator's (#2202).
 static bool check_warning_pedantic(uint32_t id)
 {
     return id == CHECK_WARNING_ID_GNU_CONSTANT || id == CHECK_WARNING_ID_NONSTANDARD_ESCAPE || id == CHECK_WARNING_ID_DELIMITED_ESCAPE ||
-           id == CHECK_WARNING_ID_GNU_UNION_CAST;
+           id == CHECK_WARNING_ID_GNU_UNION_CAST || id == CHECK_WARNING_ID_GNU_ARRAY_RANGE;
 }
 
 static bool check_warning_extension(uint32_t id)
@@ -19,7 +19,7 @@ static bool check_warning_extension(uint32_t id)
                            id == CHECK_WARNING_ID_MISSING_DECLARATIONS || id == CHECK_WARNING_ID_PLAIN_COMPLEX ||
                            id == CHECK_WARNING_ID_VARIABLE_SIZED_MEMBER || id == CHECK_WARNING_ID_MANY_SCALAR_BRACES ||
                            id == CHECK_WARNING_ID_UNDEFINED_INTERNAL || id == CHECK_WARNING_ID_C23_PARAMETER ||
-                           id == CHECK_WARNING_ID_UNKNOWN_ESCAPE_SEQUENCE || check_warning_pedantic(id);
+                           id == CHECK_WARNING_ID_UNKNOWN_ESCAPE_SEQUENCE || id == CHECK_WARNING_ID_GNU_DESIGNATOR || check_warning_pedantic(id);
     return extension;
 }
 
