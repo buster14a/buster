@@ -7,8 +7,17 @@
 # The existing compiler's dependency graph keeps private fixtures, arbitrary nested includes and test headers in
 # one main unit. Exact shared exceptions and shared-root structure may not grow silently; stale/incomplete records
 # fail closed. Internally guarded roots also retain their complete standalone preprocessing.
+# It reads the build's tree, not the executable. A hosted shard that runs its row's shared compiler (BUSTER_PRODUCT,
+# docs/ci.md's "Shared row products") has no such tree: the job that built the product ran this heading on its tree
+# before packing it (tools/ci/hosted-product.sh ownership), and the product records that it passed.
+if [ -z "${BUSTER_PRODUCT:-}" ]; then
 cc -std=c17 -O2 -Wall -Wextra -Werror -o build/build-regression tools/ci/build_regression.c
 build/build-regression --ownership-only "$BUSTER_COMPILER"
+else
+test "$(head -n 1 "$BUSTER_PRODUCT/provenance/ownership")" = passed
+printf 'SKIP: unity fixture ownership, which passed on the shared product'"'"'s build tree (%s)\n' "$BUSTER_PRODUCT"
+exit 77
+fi
 == Test the foreign inputs [8 CPUs]
 # Generated programs' objects split into archives and compiled C and C++ cases, resolved by both paths on 1,
 # 2, 3 and 8 lanes; --cross-check also links each with GNU ld and lld and compares the members they load, the

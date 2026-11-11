@@ -2638,13 +2638,15 @@ static void check_deferred_bodies(CheckDeferred* deferred, CheckInputReader* rea
 {
     CheckInput* input = reader->output;
     deferred->top.changes = 0;
-    // A unit whose top level reported, that has overloadable functions, or that has #pragma clang section, whose settings
-    // and conflicts read the walk's declarations in source order (c_check_section_input.c), is source order's.
+    // A unit whose top level reported, that has overloadable functions, a function multiversioned by target strings (whose
+    // rules ask what bodies used before a declaration, #1838), or #pragma clang section, whose settings and conflicts read
+    // the walk's declarations in source order (c_check_section_input.c), is source order's.
     bool valid = !deferred->unsupported && input->report_count == 0 && !input->resource && reader->bindings.valid && !deferred->top_changes.full &&
-                 input->overload_heads == 0 && input->sections == 0 && reader->output->invalid_count == 0 && reader->ambiguous_count == 0 && deferred->lanes != 0 &&
-                 deferred->lanes <= BUSTER_CHECK_DEFERRED_MAX_LANES;
+                 input->overload_heads == 0 && input->sections == 0 && !input->target_multiversion && reader->output->invalid_count == 0 &&
+                 reader->ambiguous_count == 0 && deferred->lanes != 0 && deferred->lanes <= BUSTER_CHECK_DEFERRED_MAX_LANES;
     // (An invalid declaration's uses are quiet in source order's binding answers, #1447: check_input_invalid_declare.)
     deferred->reason = input->report_count != 0 ? "the top level reports an error" : input->overload_heads != 0 ? "overloadable functions" :
+                       input->target_multiversion ? "a function multiversioned by target strings" :
                        reader->output->invalid_count != 0 ? "an invalid declaration" : reader->ambiguous_count != 0 ? "an enum's C23 redefinition" :
                        input->sections != 0 ? "#pragma clang section" : deferred->unsupported && deferred->reason != 0 ? deferred->reason :
                        !valid ? "the top level ran out of room" : 0;
