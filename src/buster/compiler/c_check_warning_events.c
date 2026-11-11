@@ -147,6 +147,10 @@ enum
     // An unevaluated operand with a side effect (#1447, clang's CheckUnaryExprOrTypeTraitOperand and
     // CreateGenericSelectionExpr): -Wunevaluated-expression, on by default, under -Wunused-value and so -Wunused and -Wall.
     CHECK_WARNING_ID_UNEVALUATED_EXPRESSION = 121,
+    // Two unsequenced modifications of a variable, or one and a read of it (#1953, clang's SequenceChecker,
+    // c_check_unsequenced.c): -Wunsequenced, on by default, under -Wsequence-point and so -Wmost and -Wall. (Its ID past
+    // the ones #2142 takes, which its rows fill.)
+    CHECK_WARNING_ID_UNSEQUENCED = 126,
     CHECK_WARNING_ID_COUNT,
 };
 

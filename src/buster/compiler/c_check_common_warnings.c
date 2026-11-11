@@ -5244,6 +5244,8 @@ static uint32_t check_common_next_unevaluated(const uint8_t* evaluated, uint32_t
     return result;
 }
 
+#include "c_check_unsequenced.c"
+
 // One brace initializer's literal conversions (check_common_initializer_roots' plan `index`), its parts in reverse
 // initializer order, each part's target conversion, then its nested ones, then the part's own root walk.
 static void check_common_initializer_conversions(CheckCommonEmission* emission, const CheckProgram* program, uint32_t index)
@@ -5763,6 +5765,21 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
         // read, not discarded.
         // The displaced roots (check_common_displaced_root) join the roots' order at their operands, ahead of the later roots
         // their own nodes follow; a root walk skips them where they stand.
+        // -Wunsequenced's candidates and its walk's tables (c_check_unsequenced.c), where it can warn at all.
+        CheckUnseqStorage unsequenced = { 0 };
+        bool unsequenced_failed = false;
+        uint8_t* unsequenced_marks = check_common_enabled(pp, input, CHECK_WARNING_ID_UNSEQUENCED, false) ?
+                                           check_unseq_marks(graph, parents, vector, scratch, &unsequenced_failed) : NULL;
+        // The brace initializers whose lists can warn, each list one full expression (check_unseq_plans), by their last
+        // value's node, where the walk checks them.
+        uint32_t unsequenced_plan_count = 0;
+        const uint64_t* unsequenced_plans = unsequenced_marks != NULL ? check_unseq_plans(input, program, parents, unsequenced_marks, vector, scratch,
+                                                                                        &unsequenced_plan_count, &unsequenced_failed) : NULL;
+        uint32_t unsequenced_plan = 0;
+        if (unsequenced_failed)
+        {
+            check_common_exhausted(pp);
+        }
         const uint32_t displaced_capacity = graph->count / 2 + 1;
         uint64_t* displaced = CHECK_COMMON_PUSH_ARRAY(scratch, uint64_t, displaced_capacity);
         uint64_t* displaced_temporary = displaced != NULL ? CHECK_COMMON_PUSH_ARRAY(scratch, uint64_t, displaced_capacity) : NULL;
@@ -5835,10 +5852,27 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
             {
                 check_common_shift_span(pp, shifts, check_common_emission_subtree_start(&emission, graph->tokens[node]), graph->tokens[node]);
             }
+            // (A brace initializer's value: its list was checked as one, with its plan.)
+            const bool planned = unsequenced_marks != NULL && node < graph->count && (unsequenced_marks[node] & BUSTER_CHECK_UNSEQ_PLANNED) != 0;
             check_common_root_frames(&emission, node);
             if (emission.work_count != 0)
             {
                 check_common_emit_run(&emission);
+            }
+            // Its unsequenced accesses, after its conversions, as clang's CheckCompletedExpr checks them (#1953); not in
+            // unreachable code, which clang's DiagRuntimeBehavior drops.
+            const uint32_t root_token = graph->tokens[node];
+            const bool unsequenced_dropped = program != NULL && (facts->flushed == NULL || root_token >= parser->tokens.count || facts->flushed[root_token] == 0) &&
+                                             root_token < parser->tokens.count && check_program_token_dropped(program, root_token);
+            if (root && !planned && unsequenced_marks != NULL && evaluated[node] != 0 && !unsequenced_dropped && !pp->fatal)
+            {
+                check_unseq_check(&emission, &unsequenced, unsequenced_marks, &node, NULL, 1);
+            }
+            // A brace initializer's list, once its last value is walked.
+            while (unsequenced_plan < unsequenced_plan_count && (uint32_t)(unsequenced_plans[unsequenced_plan] >> 32) <= node && !pp->fatal)
+            {
+                check_unseq_plan(&emission, &unsequenced, unsequenced_marks, program, (uint32_t)unsequenced_plans[unsequenced_plan]);
+                unsequenced_plan += 1;
             }
         }
         // The plans whose first node follows every root.

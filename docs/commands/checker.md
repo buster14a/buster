@@ -265,6 +265,29 @@ unused-warning fixtures also check exact scope-completion tokens.
   variable array in a statement expression's declaration, which clang leaves out and the scan reads.
   `c_check_unevaluated_driver_test.c` compares it with complete pinned-Clang output at each policy, both paths and one
   or three lanes.
+  `-Wunsequenced` (#1953, clang's SequenceChecker, `c_check_unsequenced.c`) is on by default, under
+  `-Wsequence-point`: two modifications of a variable, or a modification and a read of it, that no sequence point
+  orders warn once per variable and full expression, "multiple unsequenced modifications to 'x'" or "unsequenced
+  modification and access to 'x'", at the earlier modification's operator (a read's later modification's), after the
+  full expression's conversions, as clang's DiagRuntimeBehavior queues them (a function's end, a file-scope
+  declarator's). The walk keeps clang's region tree (a comma's, a logical operator's and a conditional's operands
+  sequenced; an assignment's, an increment's, a call's arguments' and every other operator's not, C11's), each
+  variable's last read and modifications with their regions, sequenced operands' side effects completing when they
+  end, and its evaluation of a first operand as clang's constant evaluator finds it, ignoring side effects (`z && 0`
+  but not `0 * z`; an assignment's value never); a warning either of whose accesses clang's CFG leaves unreachable is
+  dropped (the evaluation facts). Only variables are objects, as clang's getObject in C; unevaluated operands, a
+  selection's other operands and statement expressions' statements aren't read, a statement expression's value is
+  a full expression of its own, checked first, and a brace initializer's list is one, checked once its last value
+  is walked (`check_unseq_plans`, a range's value once per element). Candidates come from one vector pass over the
+  graph's operators for a modification; the walk is scalar, an ordered tree walk with a union-find. A random
+  differential of 21,000 full expressions over three variables, without constant first operands, matches clang
+  23.1.6 exactly. Differences left: buster's evaluation facts take an assignment's or a statement expression's value
+  as a constant condition, which clang's CFG doesn't (`(y = 0) ? 1 / 0 : 2` misses `-Wdivision-by-zero` too), so a
+  warning there can be dropped; a brace initializer's constant conversions come after its list's warnings, where
+  clang gives them first; and a function holding a statement expression keeps its unreachable code's warnings, as
+  every runtime warning does (#1447).
+  `c_check_unsequenced_driver_test.c` compares it with complete pinned-Clang output at each policy, both paths and one
+  or three lanes.
   `c_check_unused_result_driver_test.c` (#1447) compares a discarded call's result warnings (`-Wunused-result`'s
   warn_unused_result and nodiscard, a return type's, pure's and const's, the builtin table's) with Clang's whole
   output at each warning policy, both paths and one or three lanes: their spellings and messages, macros, types,
