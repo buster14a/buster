@@ -1210,6 +1210,21 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
           "B(x.v,y.v);B(x.h[1],y.h[1]);B(x.q[0],y.q[0]);B(x.e[3],y.e[3]);B(p.v,q.v);B(p.h[0],q.h[0]);B(p.q[1],q.q[1]);}\n"
           "return (int)h;}\n"
         },
+        // A generic vector builtin of a member as an array's first element, before the member itself (#2111): the
+        // inferred extent took the last typed token's type, the struct's, for the call's, so the array had one element.
+        // Elementwise builtins of one and two operands, integer and floating, of struct, union and pointed-to members;
+        // and a reduction's scalar, which takes one element of a vector array's first vector.
+        { "member-operand-builtins",
+          "struct S{v4si v;v4sf f;};union M{v4si v;v4sf f;};\n"
+          "int tested(int n){unsigned h=2166136261u;struct S x;union M u;struct S*p=&x;\n"
+          "x.v=(v4si){1,-2,3,n};x.f=(v4sf){1.0f,4.0f,9.0f,(float)(n*n)};\n"
+          "v4si r[]={__builtin_elementwise_abs(x.v),x.v};v4sf q[]={__builtin_elementwise_sqrt(x.f),x.f};\n"
+          "v4si m[]={__builtin_elementwise_add_sat(x.v,x.v),x.v};u.v=x.v;v4si w[]={__builtin_elementwise_max(u.v,(v4si){0}),u.v};\n"
+          "u.f=x.f;v4sf z[]={__builtin_elementwise_minnum(p->f,u.f),p->f,__builtin_elementwise_maxnum(u.f,x.f)};\n"
+          "int s[]={__builtin_reduce_add(x.v),x.v[3]};v4si t[]={__builtin_reduce_add(p->v),7,8,9,x.v};\n"
+          "_Static_assert(sizeof r==32&&sizeof q==32&&sizeof m==32&&sizeof w==32&&sizeof z==48&&sizeof s==8&&sizeof t==32,\"extents\");\n"
+          "FOLD(r);FOLD(q);FOLD(m);FOLD(w);FOLD(z);FOLD(s);FOLD(t);return (int)h;}\n"
+        },
         // Reductions without AVX-512 (#1834): every integer one of 8- to 64-bit elements of 4 to 64 bytes, folded element
         // by element; and the floating maximum, minimum, max, min and associative sums of 8 to 64 bytes of floats and 16 to
         // 64 of doubles in clang's halving order (pieces of the registers' bytes paired first), of NaNs (their payloads and
