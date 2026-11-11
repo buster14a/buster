@@ -4552,7 +4552,11 @@ first didn't reach: past a reader's error that isn't recovered (an incomplete
 object's type), which ends the first reading's walk and skips its control
 scan, a duplicate case, a label's redefinition or another such error. A view's
 reading with errors falls back to the bodies' as above, as they may be the
-view's own; the bodies' reading publishes those its known errors don't hold,
+view's own; an error outside every body falls back to its whole declaration
+or definition left out (`check_driver_rejected_declaration`), with the bodies
+that name it, which leaves no use undeclared, so that reading's errors are the
+unit's too, unless a left-out declaration defines a tag outside every body,
+whose later uses would read an incomplete type. The bodies' reading publishes those its known errors don't hold,
 its reader's and graph's reports and its controls' constraints, in clang's
 words (its reader's alone where its graph can't run after them), and the next
 round leaves their parts out too. Each round adds an error and its parts, up
@@ -4957,7 +4961,13 @@ The later phases are left:
   initializer's) leaves the whole declaration out of the view, to its `;`
   (`check_driver_rejected_declaration`, #1447), and every body that names one
   of its names; a dropped part's error counts just before the token after it,
-  so the definition that follows keeps its unused variables. Clang instead
+  so the definition that follows keeps its unused variables. An error in a
+  function definition outside its body (its declarator's, its parameters')
+  leaves the whole definition out the same way, to its body's `}`, so its own
+  body's warnings aren't given, nor those of the bodies that name it, where
+  clang gives both. The view puts a `;` at a left-out declaration's place, so
+  the deferred warnings of the body before it, which clang gives at the token
+  after the body, still come before the declaration's errors. Clang instead
   keeps such a declaration bound and invalid, its uses quiet: the reader does
   so for the declarator errors (invalid declarations, above), whose uses are
   known errors of their own; for the others the bodies that name it lose their
@@ -4965,9 +4975,9 @@ The later phases are left:
   (`const int d = 1 / 0;`'s division). An unsized array's
   (`int y[] = undeclared;`) isn't left out alone: the first reading leaves
   out the events of the bodies that use the array, which a later reading
-  doesn't give again. A file-scope use elsewhere,
-  an error in a function definition outside its body, or an error outside
-  every body other than an initializer's or a file-scope declaration's still
+  doesn't give again. A file-scope use of a left-out declaration's name
+  elsewhere, or an error outside every body other than an initializer's, a
+  file-scope declaration's or a definition's head, still
   leaves the unit without its common warnings.
 - **Errors an edited reading meets.** A reading of the view that finds an error
   of its own isn't taken (its body is left out whole instead), so a body with
