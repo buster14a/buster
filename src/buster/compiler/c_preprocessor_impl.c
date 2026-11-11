@@ -2425,7 +2425,11 @@ static __attribute__((noinline, cold)) void pp_read_raw_errors_slow(Preprocessor
             {
                 pp->diagnostic_position = pp->diagnostic_run_first + error.token - begin;
             }
-            const uint32_t location = pp->ranges[context->range].base + error.offset;
+            // A UCN's -Wunicode warning is at its token's start, the first of any line splices before its backslash, where clang's
+            // lexer starts the token (#1447).
+            const bool spliced = error.kind >= BUSTER_PP_NAMED_UCN_INCOMPLETE && error.kind <= BUSTER_PP_UCN_NO_DIGITS;
+            const uint32_t offset = spliced ? pp_start_with_splices(data->bytes, error.offset, (pp->refine_flags & C_TOKENIZER_TRIGRAPHS) != 0) : error.offset;
+            const uint32_t location = pp->ranges[context->range].base + offset;
             switch (error.kind)
             {
                 case C_RAW_STRING_DELIMITER_LENGTH:

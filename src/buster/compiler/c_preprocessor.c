@@ -3160,7 +3160,8 @@ static bool pp_named_ucn_at(uint32_t refine_flags, const PPFileData* data, uint6
     uint64_t digit_size = 0;
     const int32_t digit = result && !named_letter && !read ? peek_char(&lexer, start + size + kind_size, &digit_size) : 0;
     const bool hex = (digit >= '0' && digit <= '9') || ((digit | 0x20) >= 'a' && (digit | 0x20) <= 'f');
-    const uint8_t numeric = !hex && !(letter == 'u' && braced) ? BUSTER_PP_UCN_NO_DIGITS : !braced ? BUSTER_PP_NAMED_UCN_INCOMPLETE :
+    // (A `\U{` is clang's error, "\U used with no following hex digits", not this warning.)
+    const uint8_t numeric = letter == 'U' && braced ? 0 : !hex && !braced ? BUSTER_PP_UCN_NO_DIGITS : !braced ? BUSTER_PP_NAMED_UCN_INCOMPLETE :
                             empty ? BUSTER_PP_NAMED_UCN_EMPTY : BUSTER_PP_NAMED_UCN_UNTERMINATED;
     *kind = !result ? 0 : !named_letter ? (read ? 0 : numeric) : read && code_point == 0 ? BUSTER_PP_NAMED_UCN_ERROR : named ? BUSTER_PP_NAMED_UCN_EXTENSION :
             read ? 0 : !braced ? BUSTER_PP_NAMED_UCN_INCOMPLETE : empty ? BUSTER_PP_NAMED_UCN_EMPTY : BUSTER_PP_NAMED_UCN_UNTERMINATED;
