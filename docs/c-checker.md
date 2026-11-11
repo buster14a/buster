@@ -4924,8 +4924,11 @@ The later phases are left:
   never saw the body's later errors, so a second reading that meets one isn't
   valid. The warnings clang gives of what a left-out part builds before its
   error aren't given, but for a folded shift's, which comes at the unit's end.
-  A file-scope declaration's error that no smaller part holds (its specifiers',
-  its declarator's, an invalid type's, an unsized array's or a const object's
+  A file-scope const object's initializer with an error is left out alone,
+  so the declaration stays bound with an unknown value (`const int c;`), as
+  clang's stays valid, and the bodies that use it keep their warnings
+  (#1447). A file-scope declaration's error that no smaller part holds (its
+  specifiers', its declarator's, an invalid type's or an unsized array's
   initializer's) leaves the whole declaration out of the view, to its `;`
   (`check_driver_rejected_declaration`, #1447), and every body that names one
   of its names; a dropped part's error counts just before the token after it,
@@ -4934,7 +4937,10 @@ The later phases are left:
   so for the declarator errors (invalid declarations, above), whose uses are
   known errors of their own; for the others the bodies that name it lose their
   warnings here, and so does the declaration's own initializer
-  (`const int d = 1 / 0;`'s division). A file-scope use elsewhere,
+  (`const int d = 1 / 0;`'s division). An unsized array's
+  (`int y[] = undeclared;`) isn't left out alone: the first reading leaves
+  out the events of the bodies that use the array, which a later reading
+  doesn't give again. A file-scope use elsewhere,
   an error in a function definition outside its body, or an error outside
   every body other than an initializer's or a file-scope declaration's still
   leaves the unit without its common warnings.
