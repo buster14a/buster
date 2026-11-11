@@ -18,7 +18,8 @@
 //
 // A function's features are predefines_apply's for its attribute, or the unit's without one (ASTContext::
 // getFunctionFeatureMap), and its attributes those of its declarations before the call (the callee's) or up to its
-// definition (the caller's), as a declaration's inherited attributes are. The calls are those clang emits: the walk
+// definition (the caller's), as a declaration's inherited attributes are. A target_clones body's features are its first
+// version's, and its errors come once per copy clang emits (#2211, check_target_feature_map). The calls are those clang emits: the walk
 // of #487's diagnostics (c_check_x86_diagnostic.c) reaches what a constant condition leaves running, not a dead
 // branch's or operand's — an operand a label can enter aside — sizeof's or what follows a return; a callee is direct
 // where it is the function's name alone, not `(*f)` or `(&f)` (CodeGenFunction::EmitCallee). A cleanup attribute's call is one too
@@ -98,6 +99,8 @@ struct CheckTargetFeatureAttributes
     const CheckInputAttribute* version;
     // A cpu_specific version's attribute (#1447), whose CPUs' features the function has (getFunctionFeatureMap's), or null.
     const CheckInputAttribute* specific;
+    // A target_clones attribute (#2211), whose first version's features every copy of the body is checked against, or null.
+    const CheckInputAttribute* clones;
     // Whether a target attribute applies: a version's or "default" (clang's hasAttr<TargetAttr>).
     bool targeted;
     // GNU's function multiversioning: target_clones, "default", or target attributes of other strings
@@ -216,6 +219,7 @@ static CheckTargetFeatureAttributes check_target_feature_attributes(const CheckP
                 result.versions |= attribute->kind == CHECK_ATTRIBUTE_TARGET_CLONES || attribute->kind == CHECK_ATTRIBUTE_CPU_SPECIFIC ||
                                    attribute->kind == CHECK_ATTRIBUTE_CPU_DISPATCH;
                 result.specific = result.specific == 0 && attribute->kind == CHECK_ATTRIBUTE_CPU_SPECIFIC ? attribute : result.specific;
+                result.clones = result.clones == 0 && attribute->kind == CHECK_ATTRIBUTE_TARGET_CLONES ? attribute : result.clones;
                 int32_t cpu = -1;
                 // What clang ignores with a warning isn't the function's attribute at all.
                 const PredefinesTargetAttribute kind = attribute->kind == CHECK_ATTRIBUTE_TARGET && attribute->text.length < UINT32_MAX ?
@@ -238,8 +242,69 @@ static CheckTargetFeatureAttributes check_target_feature_attributes(const CheckP
     return result;
 }
 
+// The `index`-th version string of a target_clones attribute, trimmed as the checker reads them
+// (check_target_version_slice), or an empty one past its last.
+static String8 check_target_feature_clone(const CheckInputAttribute* clones, uint32_t index)
+{
+    const String8 text = clones->text;
+    String8 result = { 0 };
+    uint32_t item = 0;
+    for (uint32_t cursor = 0; text.pointer != NULL && item <= index && cursor <= text.length; item += 1)
+    {
+        uint32_t end = cursor;
+        while (end < text.length && text.pointer[end] != ',')
+        {
+            end += 1;
+        }
+        result = item == index ? check_target_version_slice(text, cursor, end) : result;
+        cursor = end + 1;
+    }
+    return result;
+}
+
+// How many copies of a target_clones body clang emits, each checked (#2211): its versions, a repeated one once.
+static uint32_t check_target_feature_clone_count(const CheckInputAttribute* clones)
+{
+    uint32_t count = 0;
+    bool more = true;
+    for (uint32_t i = 0; more; i += 1)
+    {
+        const String8 item = check_target_feature_clone(clones, i);
+        more = item.pointer != NULL;
+        bool repeated = false;
+        for (uint32_t earlier = 0; more && !repeated && earlier < i; earlier += 1)
+        {
+            repeated = check_target_versions_text_equal(check_target_feature_clone(clones, earlier), item);
+        }
+        count += more && !repeated ? 1 : 0;
+    }
+    return count;
+}
+
+// The features of a target attribute's string `text` (predefines_function_target's), cached by its bytes.
+static PredefinesFeatures check_target_feature_text_map(CheckTargetFeatureMaps* maps, String8 text)
+{
+    uint32_t hash = 2166136261u;
+    for (uint64_t i = 0; i < text.length; i += 1)
+    {
+        hash = (hash ^ (uint8_t)text.pointer[i]) * 16777619u;
+    }
+    CheckTargetFeatureCached* cached = maps->cache + hash % BUSTER_CHECK_TARGET_FEATURE_CACHE;
+    if (!(cached->valid && check_program_text_equal(text, cached->text)))
+    {
+        int32_t cpu = -1;
+        predefines_target_attribute(text.pointer, (uint32_t)text.length, &cpu);
+        cached->features = predefines_apply(maps->options, &maps->host, cpu >= 0 ? cpu : maps->host.cpu, text.pointer, (uint32_t)text.length);
+        cached->text = text;
+        cached->valid = true;
+    }
+    return cached->features;
+}
+
 // The features of a function of `attributes`: its target attribute's, as predefines_function_target resolves them, or
-// the unit's.
+// the unit's. A target_clones function's are its first version's, for every copy (#2211): clang's checkTargetFeatures
+// asks getFunctionFeatureMap for the function's GlobalDecl, whose version index is 0, whichever copy it emits. Its
+// string is a target attribute's ("avx2" is "+avx2", "arch=X" X's CPU), and "default" the unit's.
 static PredefinesFeatures check_target_feature_map(CheckTargetFeatureMaps* maps, const CheckTargetFeatureAttributes* attributes)
 {
     PredefinesFeatures result = maps->unit;
@@ -253,22 +318,12 @@ static PredefinesFeatures check_target_feature_map(CheckTargetFeatureMaps* maps,
     }
     else if (attributes->version != 0)
     {
-        const String8 text = attributes->version->text;
-        uint32_t hash = 2166136261u;
-        for (uint64_t i = 0; i < text.length; i += 1)
-        {
-            hash = (hash ^ (uint8_t)text.pointer[i]) * 16777619u;
-        }
-        CheckTargetFeatureCached* cached = maps->cache + hash % BUSTER_CHECK_TARGET_FEATURE_CACHE;
-        if (!(cached->valid && check_program_text_equal(text, cached->text)))
-        {
-            int32_t cpu = -1;
-            predefines_target_attribute(text.pointer, (uint32_t)text.length, &cpu);
-            cached->features = predefines_apply(maps->options, &maps->host, cpu >= 0 ? cpu : maps->host.cpu, text.pointer, (uint32_t)text.length);
-            cached->text = text;
-            cached->valid = true;
-        }
-        result = cached->features;
+        result = check_target_feature_text_map(maps, attributes->version->text);
+    }
+    else if (attributes->clones != 0)
+    {
+        const String8 first = check_target_feature_clone(attributes->clones, 0);
+        result = first.length != 0 && !check_input_attribute_equal(first, "default") ? check_target_feature_text_map(maps, first) : maps->unit;
     }
     return result;
 }
@@ -2214,8 +2269,21 @@ static __attribute__((unused)) bool check_program_target_features(CheckProgram* 
                             sorted[j] = ((uint64_t)(place >= call_count) << 32) | (uint32_t)calls[place];
                         }
                     }
+                    const uint32_t before = *count;
                     valid = valid &&
                             check_target_feature_calls(program, &maps, b, deferred != 0, &caller, caller_map, sorted, item_count, output, errors, count);
+                    // A target_clones body's errors once per copy clang emits, each checked against the first version's
+                    // features (#2211, check_target_feature_map): its versions, a repeated one once.
+                    const uint32_t copies = valid && *count != before && caller.clones != 0 && caller.version == 0 && caller.specific == 0 ?
+                                            check_target_feature_clone_count(caller.clones) : 1;
+                    const uint32_t produced = *count - before;
+                    for (uint32_t copy = 1; valid && copy < copies; copy += 1)
+                    {
+                        for (uint32_t e = 0; valid && e < produced; e += 1)
+                        {
+                            valid = check_target_feature_report(output, errors, count, (*errors)[before + e]);
+                        }
+                    }
                     arena_pop_to(scratch, calls_mark);
                 }
             }

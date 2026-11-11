@@ -177,6 +177,15 @@ enum
     // c_check_unsequenced.c): -Wunsequenced, on by default, under -Wsequence-point and so -Wmost and -Wall. (Its ID past
     // -Wunreachable-code-generic-assoc's, 131.)
     CHECK_WARNING_ID_UNSEQUENCED = 132,
+    // A const object, or a struct with a const member, without an initializer (#2168, clang's -Wdefault-const-init-*): its
+    // automatic storage's, default on, and its static storage's, off by default.
+    CHECK_WARNING_ID_DEFAULT_CONST_INIT_VAR_UNSAFE = 133,
+    CHECK_WARNING_ID_DEFAULT_CONST_INIT_FIELD_UNSAFE = 134,
+    CHECK_WARNING_ID_DEFAULT_CONST_INIT_VAR = 135,
+    // -Wc++-compat's own policy, which no event gives: clang's fake diagnostic in that group
+    // (warn_cxx_compat_hack_fake_diagnostic_do_not_emit), whose policy makes the unsafe default-const-init words say "and
+    // is incompatible with C++" (#2168).
+    CHECK_WARNING_ID_CXX_COMPAT = 136,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -339,6 +348,9 @@ typedef enum CheckWarningEventKind
     CHECK_WARNING_EVENT_PRECEDENCE_ALWAYS_INLINE,
     CHECK_WARNING_EVENT_PRECEDENCE_FLATTEN,
     CHECK_WARNING_EVENT_PRECEDENCE_NOINLINE,
+    // An if's branches both clang::likely or both clang::unlikely (#2291, -Wignored-attributes), at the then branch's, with
+    // CHECK_WARNING_NOTE_CONFLICTING_ATTRIBUTE at the else branch's.
+    CHECK_WARNING_EVENT_LIKELIHOOD_CONFLICT,
     // An initializer's use of a member an unavailable attribute marks (#147, check_init_member_use): clang's error, which
     // no warning option maps, staged with the walk's warnings (check_driver_initializer_warning_events gives it). The
     // member's name in the payload's name, the attribute's message's string token in its token (or none); its note,
@@ -470,6 +482,9 @@ typedef enum CheckWarningEventKind
     // to smaller integer type T from P", payload.first_type the operand's type after decay and payload.name its typedef's
     // spelling, payload.second_type the cast's type and payload.data its.
     CHECK_WARNING_EVENT_POINTER_TO_INT_CAST,
+    // A default-initialized const object (#2168): payload.first_type its type, payload.data its typedef or typeof
+    // specifier's spelling (check_input_specifier_spelling); its ID chooses the words.
+    CHECK_WARNING_EVENT_DEFAULT_CONST_INIT,
     // A comma operator's left operand in an attribute's expression argument whose value clang's isUnusedResultAWarning
     // says is unused (#1447, check_input_attribute_unused): payload.data a BUSTER_CHECK_UNUSED_* message,
     // -Wunused-value's "left operand of comma operator has no effect" or its `void *` cast's question, or
@@ -554,6 +569,8 @@ typedef enum CheckWarningNoteKind
     CHECK_WARNING_NOTE_DIAGNOSE_IF,
     // "attribute 'packed' here" (#1447, CHECK_WARNING_EVENT_ODR_ATTRIBUTE's), payload.name the attribute's name.
     CHECK_WARNING_NOTE_ATTRIBUTE_HERE,
+    // "member 'm' declared 'const' here" (#2168), payload.name the member's name.
+    CHECK_WARNING_NOTE_CONST_MEMBER,
     // "use '=' to turn this equality comparison into an assignment" (payload.data BUSTER_CHECK_UNUSED_EQUALITY), or "use '|='
     // to turn this inequality comparison into an or-assignment" (BUSTER_CHECK_UNUSED_INEQUALITY).
     CHECK_WARNING_NOTE_COMPARISON_ASSIGNMENT,
@@ -573,7 +590,8 @@ typedef enum CheckWarningCompletion
 
 // The order of the warnings completed at the translation unit's end, as their `suborder` (#2141): clang's
 // Sema::ActOnEndOfTranslationUnit diagnoses unterminated pack pushes, then #pragma weak's undeclared identifiers, then
-// internal functions used but not defined, and the unused file-scope declarations last. Those keep suborder 0, which
+// internal functions used but not defined, then tentative definitions' const objects, and the unused file-scope
+// declarations last. Those keep suborder 0, which
 // orders after every nonzero one at the same boundary.
 typedef enum CheckWarningUnitEnd
 {

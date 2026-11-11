@@ -125,6 +125,9 @@ static __m512i asm_word_registers_vector(__m512i words, __m512i sizes)
     descriptions = _mm512_mask_mov_epi64(descriptions, mmx, mmx_description);
     const __mmask8 rip = three & _mm512_cmpeq_epi64_mask(words, _mm512_set1_epi64('r' | 'i' << 8 | 'p' << 16));
     descriptions = _mm512_mask_mov_epi64(descriptions, rip, _mm512_set1_epi64(X86_OPERAND_REGISTER | 255u << 16 | 8u << 24));
+    // EIP, a 32-bit address's RIP (#2339), 4 bytes wide.
+    const __mmask8 eip = three & _mm512_cmpeq_epi64_mask(words, _mm512_set1_epi64('e' | 'i' << 8 | 'p' << 16));
+    descriptions = _mm512_mask_mov_epi64(descriptions, eip, _mm512_set1_epi64(X86_OPERAND_REGISTER | 255u << 16 | 4u << 24));
     // Register numbers have canonical spelling: leading-zero names such as r08 and xmm00 are symbols.
     return _mm512_or_si512(descriptions, _mm512_set1_epi64(BUSTER_ASM_REGISTER_CACHED));
 }
