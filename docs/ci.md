@@ -245,7 +245,8 @@ workflow's `compiler` job sets its runner up as a shard does: the verified
 hosted inputs, `setup-hosted.sh`, the sanitizer host report, the fatal policy
 and detector proofs, and the baseline runtime for the plain row. The build's
 settings are the workflow's environment, the same for the build and the
-shards. The job then runs `tools/ci/hosted-product.sh` in four steps:
+shards. The job then builds and packs the product in four steps, three of them
+`tools/ci/hosted-product.sh`'s:
 
 - `build`: the pragma oracle, the clang server (status 77 still means none for
   this toolchain) and `./build.sh --config Release --jobs "$(nproc)"`, with the
@@ -308,7 +309,7 @@ the product records its pass and exits 77 (skipped); every other command runs
 as before. `check-call-graph`'s `./build.sh` call configures the tree and
 builds the IR it checks, which no product replaces.
 
-Products stay in their run. No cache is read or written. A shard downloads only
+Products stay in their run. No cache holds one. A shard downloads only
 from its own run (no `run-id` or token), by the name and SHA-256 that its
 run's build job gave, and the identity binds the product to the repository,
 run, commit and tree. A pull request's run builds and tests its own products, a
