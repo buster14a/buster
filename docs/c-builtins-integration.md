@@ -1957,7 +1957,7 @@ function yet"). The others clang does compile, but its code for them isn't
 sound, and this compiler keeps refusing them:
 
 - `__builtin___NSStringMakeConstantString` of no string literal, whose
-  object clang's code makes from what isn't one (below, "Code of no
+  object clang's code makes from what isn't one (below, "Of no
   literal");
 - `__builtin_zos_va_start` and `__builtin_zos_va_copy`, whose code clang
   writes over a `char *` that its 24-byte list overruns. The owner decided on
@@ -2116,11 +2116,16 @@ scope `sizeof`'s).
   - **The class:** the unit's file-scope declaration of
     `__CFConstantStringClassReference` (`check_input_cfstring_class`), or else
     an undefined global of that name, the program's own.
-- **Code of no literal.** An NSString of what isn't a literal stays a value:
-  clang's code makes its object from the literal its argument isn't (a
-  `cast<StringLiteral>` of another expression), and `-c` refuses it by name
-  ("unsupported: an NSString of no string literal, whose object clang's code
-  makes from the literal its argument isn't").
+- **Of no literal.** Clang's evaluator takes an NSString of what isn't a
+  literal as an address constant too (`IsOpaqueConstantCall` looks at no
+  argument), so it is one here as well, of its call's own object: a static
+  initializer of one is accepted, `(long)` of it plus an offset too, and two
+  compared aren't an initializer's constant, as clang's. But clang's code
+  makes its object from the literal its argument isn't (a `cast<StringLiteral>`
+  of another expression), so `-c` refuses the object by name, wherever the call
+  is, in the static data (`check_data_cfstring_keys`, at the call's `)`):
+  "unsupported: an NSString of no string literal, whose object clang's code
+  makes from the literal its argument isn't" (#1785).
   - What clang's object holds is another node's bytes read as a literal's,
     so it isn't defined, and an assertion-enabled clang aborts at the cast.
     Clang 23.1.5's release build (#1785) makes an empty 8-bit string (flags
@@ -2130,9 +2135,6 @@ scope `sizeof`'s).
     through casts first, so `(const char *)(void *)"zz"` makes the literal's
     own string.
 - **Differences.**
-  - Clang's evaluator takes an NSString of no literal as an address constant
-    too, and accepts a static initializer of one; this checker refuses it as
-    "initializer is not a constant expression".
   - A static `_Bool` of one is refused, as one of any address is
     (`static _Bool b = &x;`).
   - Clang's ELF object also has an `objc_imageinfo` section where it makes a

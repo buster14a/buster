@@ -297,6 +297,14 @@ static __attribute__((noinline)) void check_test_generic_builtin_sources(CheckTe
           "static const void* p = __builtin___CFStringMakeConstantString(\"x\");\nstatic long l = (long)__builtin___CFStringMakeConstantString(\"y\");\n"
           "static const char* q = (const char*)__builtin___CFStringMakeConstantString(\"w\") + 1;\n"
           "const void* f(void)\n{\nstatic const void* s = __builtin___NSStringMakeConstantString(\"v\");\n(void)p;\n(void)l;\n(void)q;\nreturn s;\n}\n" },
+        // clang's evaluator takes any NSString call as an address constant, of no literal too (#1785), whose static data -c
+        // refuses by name (c_checker_driver_test.c's code generation refusals).
+        { .name = "generic: NSString of no literal in static initializers", .source =
+          "static const char m[] = \"x\";\nconst char* g(void);\nstatic const void* p = __builtin___NSStringMakeConstantString(m);\n"
+          "static long l = (long)__builtin___NSStringMakeConstantString(m + 1) + 2;\nstatic const void* c = __builtin___NSStringMakeConstantString(g());\n"
+          "const void* f(const char* s)\n{\nstatic const void* t = __builtin___NSStringMakeConstantString(s);\n(void)p;\n(void)l;\n(void)c;\nreturn t;\n}\n" },
+        { .name = "generic: NSStrings compared in a static initializer", .source =
+          "static const char m[] = \"x\";\nint d = __builtin___NSStringMakeConstantString(m) == __builtin___NSStringMakeConstantString(m);\n", .rejected = true },
         { .name = "generic: eh_return of one", .source = "void f(void)\n{\n__builtin_eh_return(1);\n}\n", .rejected = true },
         { .name = "generic: eh_return of a pointer offset", .source = "void f(void)\n{\n__builtin_eh_return((void*)0, 0);\n}\n", .rejected = true },
         { .name = "generic: eh_return's value", .source = "int f(void)\n{\nreturn __builtin_eh_return(1, 0);\n}\n", .rejected = true },

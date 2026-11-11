@@ -1443,15 +1443,18 @@ static void check_builtin_misc_last(TypeTable* table, const CheckBuiltinMiscActi
         // CheckObjCString: "CFString literal is not a string constant" otherwise), NSString's of any const char * in C,
         // which clang checks in Objective-C alone. Of a literal, clang's evaluator takes either call as an address
         // constant (IsOpaqueConstantCall), whose code is its object's address and which no operand's evaluation runs:
-        // here its call's object (CheckBuiltinMiscAction.cfstring_object), a static one. NSString's of what is no
-        // literal stays a value, whose code clang makes from the literal its argument isn't (check_lower_unsupported).
+        // here its call's object (CheckBuiltinMiscAction.cfstring_object), a static one; NSString's of what is no literal
+        // too, whose object clang's code makes from the literal its argument isn't, which the static data refuses.
         // Its argument converts to const char * as a prototype's, and past its parentheses and casts is an ordinary
         // literal, never a UTF-8 one (u8"x", a char array before C23).
         check_builtin_misc_convert(table, input, output, values + 0, 0, type_pointer(table, type_qualify(table, BUSTER_TYPE_CHAR, BUSTER_TYPE_CONST)));
         const TypeId record = input->ns_constant_string != 0 ? type_qualify(table, input->ns_constant_string, BUSTER_TYPE_CONST) : 0;
         const TypeId result = record != 0 ? type_pointer(table, record) : 0;
         const bool ordinary = id == CBUILTIN_NSSTRING_MAKE_CONSTANT_STRING || (input->string_known && !input->string_utf8);
-        const bool literal = input->string_known && input->cfstring_object != 0;
+        // NSString's of what is no literal is an address constant too, as clang's evaluator takes any call of either
+        // (IsOpaqueConstantCall), whatever its argument: its object the static data refuses by name (#1785,
+        // check_data_cfstring_keys), clang's code making it from the literal its argument isn't.
+        const bool literal = (input->string_known || id == CBUILTIN_NSSTRING_MAKE_CONSTANT_STRING) && input->cfstring_object != 0;
         if (output->action.diagnostic == CHECK_DIAG_NONE && (!ordinary || result == 0))
         {
             check_action_diagnose(&output->action, result == 0 && ordinary ? CHECK_DIAG_RESOURCE : CHECK_DIAG_INCOMPATIBLE, 0);

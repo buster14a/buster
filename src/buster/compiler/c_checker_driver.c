@@ -8572,7 +8572,11 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     check_clock_mark(stage_clock, CHECK_STAGE_CHECK_DECLARATIONS);
                     if (result == 0 && (emit_object || link) && !prefix_only && !check_data_prepare(&data, &input, &stream, &initializers, &types, scalar, output_arena, scratch))
                     {
-                        check_driver_diagnose(checking, pp, data.token, "static-data preparation failed");
+                        // A named refusal of the static data (an NSString of no literal's object, #1785), as the code's are.
+                        char refusal[256];
+                        snprintf(refusal, sizeof(refusal), "unsupported: %s", data.reason != NULL ? data.reason : "");
+                        check_driver_diagnose(checking, pp, data.token, data.status == CHECK_DATA_INPUT_UNSUPPORTED && data.reason != NULL ? refusal :
+                                                                        "static-data preparation failed");
                         result = 1;
                     }
                     check_clock_mark(stage_clock, CHECK_STAGE_STATIC_DATA);

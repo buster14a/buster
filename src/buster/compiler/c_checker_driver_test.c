@@ -891,6 +891,10 @@ static void check_test_driver_codegen_refusals(CheckTest* test, const char* exec
           "unsupported: __builtin_clear_padding of an element past 4 GiB" },
         { "const void* f(const char* s) { return __builtin___NSStringMakeConstantString(s); }\n",
           "unsupported: an NSString of no string literal, whose object clang's code makes from the literal its argument isn't" },
+        // A static initializer of one, which clang's evaluator takes as an address constant (#1785): its object refused by the
+        // static data.
+        { "static const char m[] = \"x\";\nconst void* p = __builtin___NSStringMakeConstantString(m);\n",
+          "unsupported: an NSString of no string literal, whose object clang's code makes from the literal its argument isn't" },
         { "int f(int n, ...) { char* a; __builtin_zos_va_start(&a, n); return 0; }\n",
           "unsupported: __builtin_zos_va_start and __builtin_zos_va_copy, z/OS's lists, which clang's x86-64 code overruns" },
         { "void f(char** a, char** b) { __builtin_zos_va_copy(a, b); }\n",
