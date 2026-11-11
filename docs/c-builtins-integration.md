@@ -2674,8 +2674,14 @@ by name.
 
 Differences left: a const pointer object whose own initializer converted its
 value through such a cast is read here, where clang's stored designator is lost;
-and two warnings at such arguments, `-Wstring-plus-int` (not given here) and
-`-Wpointer-sign`'s wording for a builtin's argument, differ from clang's.
+and `-Wstring-plus-int` at such an argument isn't given here (#2190). A
+builtin's argument's `-Wpointer-sign` and qualifier warnings are clang's
+words, "passing 'const unsigned char[5]' to parameter of type 'const char *'
+converts between pointers to integer types where one is of the unique plain
+'char' type and the other is not", at the argument (#2189,
+`check_driver_pointer_arguments`, for builtins whose arguments are a list's
+or their operands); beside `__builtin_verbose_trap`'s own error at the same
+argument, clang gives the warning first and this gives it after.
 
 Two costs are accepted for now:
 - A call of `memcpy_inline` or `memset_inline` is a call of its leaf, where

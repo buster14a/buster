@@ -4090,6 +4090,85 @@ static void check_common_parentheses(const Parser* parser, Preprocessor* pp, con
     }
 }
 
+static uint32_t check_driver_pointer_spelling(const Parser* parser, const CheckInput* input, const CheckStream* stream, const TypeTable* types, uint32_t node);
+
+// The root of the operand of the binary operator `op` that holds `token`, one of its tokens, or BUSTER_CHECK_NONE.
+static uint32_t check_common_sizeof_decay_operand(const Parser* parser, uint32_t op, uint32_t token)
+{
+    const uint32_t count = parser->tokens.count;
+    uint32_t at = token;
+    for (uint32_t steps = 0; at < count && parser->tree.parents[at] != op && steps < count; steps += 1)
+    {
+        const uint32_t up = parser->tree.parents[at];
+        at = up != at ? up : count;
+    }
+    return at < count && parser->tree.parents[at] == op ? at : BUSTER_CHECK_NONE;
+}
+
+// -Wsizeof-array-decay (#2264, clang's warnOnSizeofOnArrayDecay): `sizeof` of a binary operator, through parentheses,
+// whose left or right operand is an array that decays to the operator's own type, as in `sizeof(a + 1)`: "sizeof on
+// pointer operation will return size of 'int *' instead of 'int[10]'" at the operator, once for each such operand. Given
+// as clang builds the `sizeof`: published at the token past its `)`, after the operand's -Wunevaluated-expression. The
+// additive, assignment and comma operators are the ones whose type can be an operand's decayed pointer.
+static void check_common_sizeof_array_decay(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, const TypeTable* types,
+                                            CheckWarningSpelling* spell, Arena* scratch)
+{
+    const uint32_t count = parser->tokens.count;
+    const bool vector = !BUSTER_SCALAR_PATH(parser->options.scalar);
+    static const uint8_t roles[] = { PARSE_ROLE_ADDITIVE, PARSE_ROLE_ASSIGN, PARSE_ROLE_COMMA, PARSE_ROLE_SEPARATOR };
+    CheckCommonScan scan = { 0 };
+    const bool enabled = stream != NULL && types != NULL && input->token_nodes != NULL && check_common_enabled(pp, input, CHECK_WARNING_ID_SIZEOF_ARRAY_DECAY, false);
+    for (uint32_t token = enabled ? check_common_next_token(parser, count, BUSTER_CHECK_NONE, roles, BUSTER_ARRAY_LENGTH(roles), &scan, vector) : count; token < count;
+         token = check_common_next_token(parser, count, BUSTER_CHECK_NONE, roles, BUSTER_ARRAY_LENGTH(roles), &scan, vector))
+    {
+        const uint8_t role = parser->tree.roles[token];
+        uint32_t close = check_common_parent(parser, token);
+        for (uint32_t steps = 0; close < count && parser->tree.roles[close] == PARSE_ROLE_CLOSE_GROUP && steps < count; steps += 1)
+        {
+            close = check_common_parent(parser, close);
+        }
+        // A sizeof's comma is a separator (check_common_comma_operator).
+        const bool binary = (role == PARSE_ROLE_ADDITIVE || role == PARSE_ROLE_ASSIGN || role == PARSE_ROLE_COMMA || role == PARSE_ROLE_SEPARATOR) && token > 0 &&
+                            token + 1 < count;
+        uint32_t opener = BUSTER_CHECK_NONE;
+        for (uint32_t at = binary && close < count && parser->tree.roles[close] == PARSE_ROLE_CLOSE_SIZEOF ? token : 0; at != 0 && opener == BUSTER_CHECK_NONE;)
+        {
+            at -= 1;
+            opener = parser->tree.roles[at] == PARSE_ROLE_OPEN_SIZEOF && parser->tree.parents[at] == close ? at : BUSTER_CHECK_NONE;
+        }
+        const bool sized = opener != BUSTER_CHECK_NONE && opener > 0 && parser->tokens.kinds[opener - 1] == PARSE_KIND_SIZEOF &&
+                           parser->tokens.names[opener - 1] == C_NAME_SIZEOF;
+        const uint32_t op_node = sized && token < input->token_count ? input->token_nodes[token] : BUSTER_CHECK_NONE;
+        const TypeId result = op_node < stream->count ? type_strip_aligned(types, check_stream_type(stream, op_node)) : 0;
+        const uint32_t sides[2] = {
+            result != 0 ? check_common_sizeof_decay_operand(parser, token, token - 1) : BUSTER_CHECK_NONE,
+            result != 0 ? check_common_sizeof_decay_operand(parser, token, token + 1) : BUSTER_CHECK_NONE,
+        };
+        for (uint32_t side = 0; side < 2; side += 1)
+        {
+            const uint32_t node = sides[side] < input->token_count ? input->token_nodes[sides[side]] : BUSTER_CHECK_NONE;
+            const TypeId array = node < stream->count ? type_strip_aligned(types, check_stream_type(stream, node)) : 0;
+            const TypeId decayed = array != 0 && type_kind_is_array(type_kind(types, array)) ? type_find_pointer(types, type_element(types, array)) : 0;
+            if (decayed != 0 && decayed == result)
+            {
+                const uint64_t mark = scratch->length;
+                const String8 pointer = check_driver_warning_type_sugared(parser, pp, input, types, spell, scratch, decayed, 0, 0);
+                const uint32_t walked = check_driver_pointer_spelling(parser, input, stream, types, node);
+                const String8 name = check_driver_warning_type_sugared(parser, pp, input, types, spell, scratch, array, walked == BUSTER_CHECK_NONE ? 0 : walked,
+                                                                       check_driver_operand_sugar(input, stream, node));
+                const char* message = pointer.length != 0 && name.length != 0 ?
+                    check_warning_text(scratch, "sizeof on pointer operation will return size of %.*s instead of %.*s", (int)pointer.length, pointer.pointer,
+                                       (int)name.length, name.pointer) : NULL;
+                if (message != NULL)
+                {
+                    check_common_report_at(parser, pp, input, token, close + 1, CHECK_WARNING_ID_SIZEOF_ARRAY_DECAY, false, message, NULL, 0, scratch);
+                }
+                arena_pop_to(scratch, mark);
+            }
+        }
+    }
+}
+
 // The type clang's getEnumCoercedType gives an operand: an enumerator's own enumeration where the operand names one
 // (parentheses are no nodes) and that enumeration's definition is complete, past its closing brace, else its type.
 static TypeId check_common_enum_coerced(const CheckInput* input, const CheckStream* stream, uint32_t node)
@@ -10756,6 +10835,7 @@ static void check_driver_common_warnings(const Parser* parser, Preprocessor* pp,
     check_common_parentheses(parser, pp, input, stream, types, scratch);
     check_common_shift_op_parentheses(parser, pp, input, scratch);
     check_common_string_plus_int(parser, pp, input, stream, types, &spell, scratch);
+    check_common_sizeof_array_decay(parser, pp, input, stream, types, &spell, scratch);
     check_common_graph_warnings(parser, pp, input, stream, types, &spell, &facts, program, shifts, scratch);
     check_common_for_loops(parser, pp, input, stream, types, facts.parents, scratch);
     check_common_return_stack(parser, pp, input, stream, types, scratch);

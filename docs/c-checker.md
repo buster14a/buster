@@ -5933,7 +5933,15 @@ warnings that need the completed graph or the parser's operator tree:
 `-Wlogical-not-parentheses`, `-Wparentheses` (assignment conditions and
 bitwise/equality precedence), `-Wempty-body`, `-Wself-assign`,
 `-Wreturn-stack-address`, `-Wformat`/`-Wformat-security`, `-Wswitch`,
-`-Wdangling-else` and `-Wuninitialized`. `-Wshift-op-parentheses` (#2264, on
+`-Wdangling-else` and `-Wuninitialized`. `-Wsizeof-array-decay` (#2264, on by
+default, `check_common_sizeof_array_decay`) is clang's
+`warnOnSizeofOnArrayDecay`: `sizeof` of a binary operator, through
+parentheses, whose operand is an array decayed to the operator's own type
+(`sizeof(a + 1)`, `sizeof(0, a)`, `sizeof(p = a)`), "sizeof on pointer
+operation will return size of 'int *' instead of 'int[10]'" at the operator,
+once for each such operand, the array's type as written; published past the
+`sizeof`'s `)`, after its operand's `-Wunevaluated-expression`. Not alignof's
+operand. `-Wshift-op-parentheses` (#2264, on
 by default, `-Wparentheses`' and so `-Wall`'s,
 `check_common_shift_op_parentheses`) is clang's `DiagnoseAdditionInShift`:
 each operand of a `<<` or `>>` that is an unparenthesized `+` or `-`, the left
@@ -10228,7 +10236,9 @@ enables, which this checker doesn't all give.
   digits at its type's default precision with `.` where they have none and
   `F`/`L` (`0.1f` is `0.100000001F`, `2.0` is `2.`), a character one by its
   value (`'\0'` is `'\x00'`), `sizeof (x)` with a space before an expression
-  operand, `__alignof` and `_Alignof`, C23's `(bool)`. A binary requirement but
+  operand, `__alignof` and `_Alignof`, C23's `(bool)`, a call's or an
+  initializer list's `, ` between its items and a comma operator's `(3 , 4)`
+  (#2382). A binary requirement but
   `||` adds "expression evaluates to 'L op R'" at its operator where either
   operand is worth printing (DiagnoseStaticAssertDetails' UsefulToPrintExpr: no
   literal, nor a unary operator's, nor a comparison, logical or comma
@@ -10236,8 +10246,10 @@ enables, which this checker doesn't all give.
   bool's `true`, a plain char's `'A' (0x41, 65)` with a control's `<U+001B>` and
   a byte past ASCII's `<0xC8>`, a floating one's APFloat digits. Still
   separate: a type name's literals print as written (`sizeof(int[0x10])`, clang
-  `int[16]`); `_Generic`'s and a comma operator's spacing (`(A,0)`, clang
-  `(A , 0)`); a complex value's note.
+  `int[16]`, and a compound literal's `(int[]){1, 2}`, clang `(int[2])`);
+  `_Generic`'s associations (`int:1`, clang `int: 1`); a record type defined
+  in `__builtin_offsetof` (clang `struct (unnamed at f.c:1:2)`); a complex
+  value's note.
 - **A failed initializer conversion.** A scalar initializer's INITIALIZE is at
   its declarator, outside the initializer's tokens. When its conversion fails,
   that error is the only one: the initializers' walk doesn't check that
