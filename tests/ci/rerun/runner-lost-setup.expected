@@ -1,0 +1,10 @@
+decision	keep
+jobs	59	stopped	8	setup	1	keep	7
+job	keep	outside-setup	failure	Run correctness tests within the hosted CPU budget	Tests on Ubuntu 26.04 (Clang 23, x86-64, address, O3, shard 4 of 4)
+job	setup	setup-step	failure	Install official Clang 23.1.4 and test tools	Tests on Ubuntu 26.04 (Clang 23, x86-64, address, O3, shard 2 of 4)
+job	keep	outside-setup	failure	Run correctness tests within the hosted CPU budget	Tests on Ubuntu 26.04 (Clang 23, x86-64, undefined, O3, shard 3 of 4)
+job	keep	outside-setup	failure	Run correctness tests within the hosted CPU budget	Tests on Ubuntu 26.04 (Clang 23, x86-64, address, O3, shard 3 of 4)
+job	keep	outside-setup	failure	Run correctness tests within the hosted CPU budget	Tests on Ubuntu 26.04 (Clang 23, x86-64, address, O1, shard 3 of 4)
+job	keep	outside-setup	failure	Run correctness tests within the hosted CPU budget	Tests on Ubuntu 26.04 (Clang 23, native, undefined, O3, shard 3 of 4)
+job	keep	outside-setup	failure	Run correctness tests within the hosted CPU budget	Tests on Ubuntu 26.04 (Clang 23, native, address, O1, shard 3 of 4)
+job	keep	outside-setup	failure	Run correctness tests within the hosted CPU budget	Tests on Ubuntu 26.04 (Clang 23, native, address, O3, shard 3 of 4)

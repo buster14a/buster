@@ -892,6 +892,10 @@ struct CostsTable
     // `#: samples MIN MAX`, the fewest and most samples of a measured command.
     uint32_t samples_min;
     uint32_t samples_max;
+    // `#: first-shard SECONDS`, in milliseconds: how much longer the row's shard 1 runs than its others besides their
+    // commands, its once-only steps, which the deal adds to shard 1's schedule. Absent where the logs couldn't say.
+    uint64_t first_milliseconds;
+    bool first_given;
     // The `#: revision` and `#: cpu` lines, as they are: where the measurements came from.
     CostsBuffer provenance;
     // Each command's cost in milliseconds and its kind, by its place in the list.
@@ -1012,6 +1016,16 @@ static CostsTable costs_table_parse(const CostsList* list, CostsText text)
             table.samples_min = (uint32_t)low;
             table.samples_max = (uint32_t)high;
         }
+        else if (costs_starts(content, "#: first-shard "))
+        {
+            const CostsSlice value = costs_after(content, 15);
+            uint64_t milliseconds = 0;
+            const size_t length = costs_table_seconds(value, &milliseconds);
+            const bool valid = !table.first_given && length != 0 && length == value.length;
+            table.error = valid ? NULL : "a first shard's time that isn't SECONDS, or twice";
+            table.first_milliseconds = milliseconds;
+            table.first_given = true;
+        }
         else if (costs_starts(content, "#: revision ") || costs_starts(content, "#: cpu "))
         {
             costs_append(&table.provenance, "%.*s\n", (int)content.length, content.data);
@@ -1104,8 +1118,18 @@ static void costs_table_write(const CostsTable* table, const CostsList* list, Co
     costs_append(output, "# failure, a lower bound (`lower-bound`); where it has none, the row's median per CPU times its CPUs (`unmeasured`),\n");
     costs_append(output, "# which `costs refresh` also gives a command the inventory adds. The costs only deal the commands to the shards: a\n");
     costs_append(output, "# stale cost makes a shard longer, never a test go missing.\n");
+    if (table->first_given)
+    {
+        costs_append(output, "# `first-shard` is how much longer shard 1's job ran than the others' besides their commands, the medians' difference\n");
+        costs_append(output, "# with each job scaled as its samples are: the steps the row runs once, which the deal adds to shard 1's schedule.\n");
+    }
     costs_append(output, "#: row %s %s %s\n", costs_architectures[table->row / BUSTER_COSTS_SANITIZERS], costs_sanitizers[table->row % BUSTER_COSTS_SANITIZERS], BUSTER_COSTS_OPTIMIZATION);
     costs_append(output, "#: runner-cpus %u\n", table->jobs);
+    if (table->first_given)
+    {
+        const uint64_t tenths = table->first_milliseconds / 100;
+        costs_append(output, "#: first-shard %llu.%llu\n", (unsigned long long)(tenths / 10), (unsigned long long)(tenths % 10));
+    }
     costs_append(output, "#: samples %u %u\n", table->samples_min, table->samples_max);
     costs_append(output, "%.*s", (int)table->provenance.length, table->provenance.data != NULL ? table->provenance.data : "");
     for (uint32_t i = 0; i < list->count; i += 1)
@@ -1416,6 +1440,9 @@ static bool costs_collect_rows(const CostsList* list, const CostsLog* logs, cons
     }
     CostsTally* revisions = costs_allocate(count + 1, sizeof(CostsTally));
     CostsTally* cpus = costs_allocate(count + 1, sizeof(CostsTally));
+    // Each shard's job's time besides its commands, scaled as its samples are, in tenths: shard 1's and the others'.
+    uint64_t* first_outside = costs_allocate(count + 1, sizeof(uint64_t));
+    uint64_t* other_outside = costs_allocate(count + 1, sizeof(uint64_t));
     CostsSpeeds speeds = costs_speeds(logs, count);
     for (uint32_t row = 0; valid && row < BUSTER_COSTS_ROWS; row += 1)
     {
@@ -1423,6 +1450,8 @@ static bool costs_collect_rows(const CostsList* list, const CostsLog* logs, cons
         uint32_t row_logs = 0;
         uint32_t revision_count = 0;
         uint32_t cpu_count = 0;
+        uint32_t first_count = 0;
+        uint32_t other_count = 0;
         for (uint32_t i = 0; i < list->count; i += 1)
         {
             complete_count[i] = 0;
@@ -1441,6 +1470,26 @@ static bool costs_collect_rows(const CostsList* list, const CostsLog* logs, cons
                 row_logs += 1;
                 revision_count = costs_tally(revisions, revision_count, logs[i].revision, logs[i].first);
                 cpu_count = costs_tally(cpus, cpu_count, logs[i].cpu, 0);
+                // A shard's time besides its commands: its job's (the log's first line to its last) less its step's.
+                // Only a job whose commands all passed ran its later steps; a vector row's draw also waited for its
+                // collector, so draws are left out.
+                bool passed = logs[i].summarized && !logs[i].draw && logs[i].shards > 1 && logs[i].first >= 0 && logs[i].last >= logs[i].first;
+                for (uint32_t s = 0; s < logs[i].sample_count; s += 1)
+                {
+                    passed = passed && logs[i].samples[s].complete;
+                }
+                const uint64_t job_tenths = passed ? (uint64_t)(logs[i].last - logs[i].first) / 100 : 0;
+                const uint64_t outside = costs_normalize(&speeds, i, job_tenths > logs[i].step_tenths ? job_tenths - logs[i].step_tenths : 0);
+                if (passed && logs[i].shard == 1)
+                {
+                    first_outside[first_count] = outside;
+                    first_count += 1;
+                }
+                else if (passed)
+                {
+                    other_outside[other_count] = outside;
+                    other_count += 1;
+                }
                 for (uint32_t s = 0; s < logs[i].sample_count; s += 1)
                 {
                     const CostsSample* sample = &logs[i].samples[s];
@@ -1472,6 +1521,14 @@ static bool costs_collect_rows(const CostsList* list, const CostsLog* logs, cons
                 }
             }
             table.samples_min = table.samples_min == UINT32_MAX ? 0 : table.samples_min;
+            if (first_count != 0 && other_count != 0)
+            {
+                // Shard 1's once-only steps: the medians' difference, none where shard 1's is the shorter.
+                const uint64_t first = costs_quantile(first_outside, first_count, 50);
+                const uint64_t other = costs_quantile(other_outside, other_count, 50);
+                table.first_milliseconds = first > other ? (first - other) * 100 : 0;
+                table.first_given = true;
+            }
             qsort(revisions, revision_count, sizeof(CostsTally), costs_compare_tally);
             qsort(cpus, cpu_count, sizeof(CostsTally), costs_compare_tally);
             for (uint32_t i = 0; i < revision_count; i += 1)
@@ -1516,6 +1573,8 @@ static bool costs_collect_rows(const CostsList* list, const CostsLog* logs, cons
     free(partial_count);
     free(revisions);
     free(cpus);
+    free(first_outside);
+    free(other_outside);
     costs_speeds_free(&speeds);
     return valid;
 }
@@ -1586,8 +1645,9 @@ static uint64_t costs_simulate(const CostsList* list, const uint64_t* millisecon
 
 // A costs file's milliseconds for the list as parallel_costs_parse gives them: a command without a line costs its CPUs
 // (uncapped) times 10 s. Any table, generated or not (the plan may deal by an older file's costs). *jobs is its
-// runner's CPUs (`#: runner-cpus`), or 0 without them.
-static bool costs_plan_costs(const CostsList* list, const char* path, uint64_t* milliseconds, uint32_t* jobs)
+// runner's CPUs (`#: runner-cpus`), or 0 without them, and *first its shard 1's once-only steps' milliseconds
+// (`#: first-shard`), or 0.
+static bool costs_plan_costs(const CostsList* list, const char* path, uint64_t* milliseconds, uint32_t* jobs, uint64_t* first)
 {
     CostsText text = { 0 };
     const bool read = costs_read(path, &text);
@@ -1603,6 +1663,7 @@ static bool costs_plan_costs(const CostsList* list, const char* path, uint64_t* 
         fprintf(stderr, "costs: %s: %s\n", path, !read ? strerror(errno) : table.error != NULL ? table.error : "a title twice");
     }
     *jobs = valid ? table.jobs : 0;
+    *first = valid && table.first_given ? table.first_milliseconds : 0;
     costs_table_free(&table);
     free(text.data);
     return valid;
@@ -1621,8 +1682,9 @@ struct CostsPlan
 // The deal of the list to `shards` shards by `deal` (as `parallel --shard K/N --costs` deals: by each shard's schedule
 // on `deal_cpus` CPUs where the deal's costs name them, by costs alone where 0), each shard's predicted time by
 // `milliseconds` on a runner of `jobs` CPUs, into `times` (one per shard), and the row's summary. `first` is the time of
-// the steps that a row runs on its shard 1 alone, which the deal doesn't see.
-static CostsPlan costs_plan(const CostsList* list, const uint64_t* deal, uint32_t deal_cpus, const uint64_t* milliseconds, uint32_t shards, uint32_t jobs, uint64_t first, uint64_t* times, CostsBuffer* listing)
+// the steps that a row runs on its shard 1 alone, added to its time; `deal_first` is the deal's own (its file's
+// `#: first-shard`), which the scheduled deal adds to shard 1's as parallel's does.
+static CostsPlan costs_plan(const CostsList* list, const uint64_t* deal, uint32_t deal_cpus, uint64_t deal_first, const uint64_t* milliseconds, uint32_t shards, uint32_t jobs, uint64_t first, uint64_t* times, CostsBuffer* listing)
 {
     uint64_t* order = costs_allocate(list->count + 1, sizeof(uint64_t));
     uint64_t* loads = costs_allocate(shards + 1, sizeof(uint64_t));
@@ -1637,7 +1699,7 @@ static CostsPlan costs_plan(const CostsList* list, const uint64_t* deal, uint32_
         {
             held[i] = costs_held(&list->commands[i], deal_cpus);
         }
-        test_deal_scheduled(deal, held, list->count, shards, deal_cpus, order, loads, assigned, ends, holds);
+        test_deal_scheduled(deal, held, list->count, shards, deal_cpus, deal_first, order, loads, assigned, ends, holds);
         free(held);
         free(ends);
         free(holds);
@@ -1778,8 +1840,9 @@ static const char costs_test_list[] = "# The fixture inventory.\n"
                                       "true\n";
 
 // A shard's log as GitHub serves it: a BOM, each line after its time, the job's name, its CPU, its checkout and the
-// runner's report with `report` (headings, each `TITLE: OUTCOME`) between its shard line and its summary.
-static CostsText costs_test_log(const char* name, const char* cpu, const char* revision, const char* shard, const char* report, const char* minute)
+// runner's report with `report` (headings, each `TITLE: OUTCOME`) between its shard line and its summary, and its last
+// line at `ending` (`MM:SS` past 01:00).
+static CostsText costs_test_log_ending(const char* name, const char* cpu, const char* revision, const char* shard, const char* report, const char* minute, const char* ending)
 {
     CostsBuffer buffer = { 0 };
     costs_append(&buffer, "\xEF\xBB\xBF" "2026-11-11T01:%s:00.1000000Z Current runner version: '2.338.2'\n", minute);
@@ -1800,8 +1863,16 @@ static CostsText costs_test_log(const char* name, const char* cpu, const char* r
     }
     costs_append(&buffer, "2026-11-11T01:%s:08.0000000Z parallel: 3 commands in 42.5 s, 50.0 s of CPU, at most 4 CPUs at once: 3 passed, 0 failed, 0 skipped, 0 not started\n", minute);
     costs_append(&buffer, "2026-11-11T01:%s:09.0000000Z ##[group]After the report: passed in 1.0 s, 1.0 s of CPU\n", minute);
-    costs_append(&buffer, "2026-11-11T01:%s:30.0000000Z Cleaning up orphan processes\n", minute);
+    costs_append(&buffer, "2026-11-11T01:%s.0000000Z Cleaning up orphan processes\n", ending);
     return (CostsText){ .data = buffer.data, .length = buffer.length };
+}
+
+// The same, its last line half a minute after its first.
+static CostsText costs_test_log(const char* name, const char* cpu, const char* revision, const char* shard, const char* report, const char* minute)
+{
+    char ending[16];
+    snprintf(ending, sizeof(ending), "%s:30", minute);
+    return costs_test_log_ending(name, cpu, revision, shard, report, minute, ending);
 }
 
 #define BUSTER_COSTS_TEST_SHA_A "2eff3c58125390bf06c13a681d221cc50b3643f8"
@@ -1970,6 +2041,60 @@ static bool costs_test_collect(const CostsList* list, const uint32_t* order, Cos
     return collected;
 }
 
+// Shard 1's once-only steps: two revisions' jobs, whose commands all passed, each step 42.5 s. Shard 1's jobs ran
+// 79.9 s, 37.4 s besides their step; shard 2's 49.9 and 59.9 s, 7.4 and 17.4 s besides theirs, whose median (the
+// lower of two) is 7.4 s. Shard 1 runs 30.0 s more.
+static void costs_test_first(CostsTest* test, const CostsList* list)
+{
+    static const char cpu[] = "AMD EPYC 9V45 96-Core Processor";
+    static const char first_report[] = "Alpha [4 CPUs]: passed in 10.0 s, 30.0 s of CPU\nBeta: with a colon: passed in 5.0 s, 5.0 s of CPU\n";
+    static const char other_report[] = "Gamma [2 CPUs]: passed in 3.0 s, 6.0 s of CPU\nDelta: passed in 2.0 s, 2.0 s of CPU\n";
+    CostsText texts[4] = {
+        costs_test_log_ending(BUSTER_COSTS_TEST_SHARD_1, cpu, BUSTER_COSTS_TEST_SHA_A, "1 of 2, 2 of 5 commands", first_report, "14", "15:20"),
+        costs_test_log_ending(BUSTER_COSTS_TEST_SHARD_2, cpu, BUSTER_COSTS_TEST_SHA_A, "2 of 2, 3 of 5 commands", other_report, "14", "14:50"),
+        costs_test_log_ending(BUSTER_COSTS_TEST_SHARD_1, cpu, BUSTER_COSTS_TEST_SHA_B, "1 of 2, 2 of 5 commands", first_report, "40", "41:20"),
+        costs_test_log_ending(BUSTER_COSTS_TEST_SHARD_2, cpu, BUSTER_COSTS_TEST_SHA_B, "2 of 2, 3 of 5 commands", other_report, "40", "41:00"),
+    };
+    CostsLog logs[4];
+    const char* names[4] = { "a1", "a2", "b1", "b2" };
+    bool parsed = true;
+    for (uint32_t i = 0; i < 4; i += 1)
+    {
+        logs[i] = costs_log_parse(list, texts[i]);
+        parsed = parsed && logs[i].error == NULL;
+    }
+    CostsBuffer tables[BUSTER_COSTS_ROWS] = { 0 };
+    CostsBuffer report = { 0 };
+    const bool collected = parsed && costs_collect_rows(list, logs, names, 4, tables, &report);
+    costs_expect(test, collected && costs_test_contains(&tables[0], "\n#: runner-cpus 4\n#: first-shard 30.0\n#: samples 2 2\n"), "shard 1's once-only steps: the medians' difference of the jobs' time besides their steps");
+    CostsText text = { .data = tables[0].data, .length = tables[0].length };
+    CostsBuffer problems = { 0 };
+    costs_expect(test, collected && costs_check_text(list, 0, text, &problems) == 0, "a table with a first shard's time checks");
+    CostsTable table = collected ? costs_table_parse(list, text) : (CostsTable){ 0 };
+    costs_expect(test, table.first_given && table.first_milliseconds == 30000, "and reads back");
+    costs_table_free(&table);
+    static const char* const malformed[] = { "#: first-shard 30.0s\n", "#: first-shard \n", "#: first-shard 30.0\n#: first-shard 30.0\n" };
+    for (uint32_t i = 0; collected && i < sizeof(malformed) / sizeof(malformed[0]); i += 1)
+    {
+        CostsText mutant = costs_test_replace(&tables[0], "#: first-shard 30.0\n", malformed[i]);
+        CostsTable bad = costs_table_parse(list, mutant);
+        costs_expect(test, bad.error != NULL, "a first shard's time that isn't SECONDS, or twice, is rejected");
+        costs_table_free(&bad);
+        free(mutant.data);
+    }
+    free(problems.data);
+    free(report.data);
+    for (uint32_t i = 0; i < BUSTER_COSTS_ROWS; i += 1)
+    {
+        free(tables[i].data);
+    }
+    for (uint32_t i = 0; i < 4; i += 1)
+    {
+        free(logs[i].samples);
+        free(texts[i].data);
+    }
+}
+
 static void costs_test_tables(CostsTest* test, const CostsList* list)
 {
     static const uint32_t forward[] = { 0, 1, 2, 3 };
@@ -1986,6 +2111,8 @@ static void costs_test_tables(CostsTest* test, const CostsList* list)
     costs_expect(test, costs_test_contains(&table, "\n#: lower-bound Delta\n#: unmeasured Epsilon 100%\n"), "the lower bound and the estimate are marked");
     costs_expect(test, costs_test_contains(&table, "\n#: row x86-64 none O3\n#: runner-cpus 4\n#: samples 2 2\n#: revision " BUSTER_COSTS_TEST_SHA_A " 2\n#: revision " BUSTER_COSTS_TEST_SHA_B " 2\n#: cpu 1 - AMD EPYC 7763 64-Core Processor\n#: cpu 3 1.00 AMD EPYC 9V45 96-Core Processor\n"), "the row, its runners' CPUs, its samples and its provenance");
     costs_expect(test, table.length > sizeof(costs_marker) && memcmp(table.data, costs_marker, sizeof(costs_marker) - 1) == 0, "the marker first");
+    // Every shard 2 failed a command, so its later steps didn't run: no shard 1 time is measured.
+    costs_expect(test, !costs_test_contains(&table, "#: first-shard"), "no first shard's time from jobs that failed");
     CostsText text = { .data = table.data, .length = table.length };
     CostsBuffer problems = { 0 };
     costs_expect(test, costs_check_text(list, 0, text, &problems) == 0, "a collected table checks");
@@ -2159,13 +2286,13 @@ static void costs_test_plan(CostsTest* test)
     const uint64_t milliseconds[] = { 40000, 10000, 10000, 10000, 10000, 10000 };
     uint64_t times[BUSTER_COSTS_SHARDS];
     CostsBuffer listing = { 0 };
-    const CostsPlan whole = costs_plan(&list, milliseconds, 0, milliseconds, 1, 4, 0, times, &listing);
+    const CostsPlan whole = costs_plan(&list, milliseconds, 0, 0, milliseconds, 1, 4, 0, times, &listing);
     costs_expect(test, costs_test_contains(&listing, "shard 1:     0.0 s to    10.0 s, 4 CPUs: Wide [8 CPUs]\nshard 1:    10.0 s to    20.0 s, 1 CPUs: One\n"), "the listing gives each command's start and end");
     free(listing.data);
     // One shard: Wide alone (10 s), then One to Four on 4 CPUs (10 s), then Pair (5 s).
     costs_expect(test, whole.longest == 25000 && whole.total == 25000, "one shard runs the list in its order: a wide command alone, then four, then a pair");
     costs_expect(test, whole.floor == 10000 && whole.floor_command == 0, "the floor is the longest command alone");
-    const CostsPlan two = costs_plan(&list, milliseconds, 0, milliseconds, 2, 4, 3000, times, NULL);
+    const CostsPlan two = costs_plan(&list, milliseconds, 0, 0, milliseconds, 2, 4, 3000, times, NULL);
     // The deal: Wide (40) to 0; One (10) to 1, Two to 1, Three to 1, Four to 1, Pair (10) to 0... the lightest each time.
     costs_expect(test, times[0] == 15000 + 3000 && times[1] == 10000 && two.longest == 18000 && two.longest_shard == 0, "two shards: shard 1 carries its once-only time");
     uint64_t order[8];
@@ -2178,10 +2305,14 @@ static void costs_test_plan(CostsTest* test)
     CostsText wide_text = costs_text_of("== w1 [8 CPUs]\nx\n== w2 [8 CPUs]\nx\n== w3 [8 CPUs]\nx\n== long\nx\n");
     const CostsList wide = costs_list_parse(wide_text);
     const uint64_t wide_costs[] = { 40000, 40000, 40000, 60000 };
-    const CostsPlan by_costs = costs_plan(&wide, wide_costs, 0, wide_costs, 2, 4, 0, times, NULL);
+    const CostsPlan by_costs = costs_plan(&wide, wide_costs, 0, 0, wide_costs, 2, 4, 0, times, NULL);
     costs_expect(test, by_costs.longest == 70000 && times[1] == 20000, "by costs, a wide command holds back the long one");
-    const CostsPlan by_schedule = costs_plan(&wide, wide_costs, 4, wide_costs, 2, 4, 0, times, NULL);
+    const CostsPlan by_schedule = costs_plan(&wide, wide_costs, 4, 0, wide_costs, 2, 4, 0, times, NULL);
     costs_expect(test, by_schedule.longest == 60000 && times[1] == 30000, "by schedule, the long one ends at its own time");
+    // With shard 1's once-only steps (50 s), as parallel's own fixture: long goes to shard 2, after w3; w1 and w2 to
+    // shard 1, which ends at 70 s with them, as shard 2 does.
+    const CostsPlan by_first = costs_plan(&wide, wide_costs, 4, 50000, wide_costs, 2, 4, 50000, times, NULL);
+    costs_expect(test, by_first.longest == 70000 && times[0] == 70000 && times[1] == 70000, "the deal gives shard 1 less by its once-only steps");
     // The listing's simulation and the deal's (test_deal_makespan) agree.
     const uint64_t wide_held[] = { 4, 4, 4, 1 };
     const uint64_t wide_assigned[] = { 1, 1, 0, 0 };
@@ -2292,6 +2423,7 @@ static int costs_self_test(const char* root)
     costs_test_quantiles(&test);
     costs_test_logs(&test, &list);
     costs_test_tables(&test, &list);
+    costs_test_first(&test, &list);
     costs_test_collect_rejects(&test, &list);
     costs_test_speeds(&test);
     costs_test_plan(&test);
@@ -2465,8 +2597,12 @@ static int costs_command_plan(const char* tests, const char* costs, const char* 
     // The runner the times are for: the costs' own, or --jobs where they don't say. The deal's CPUs are its file's.
     uint32_t runner = 0;
     uint32_t deal_cpus = 0;
-    valid = valid && costs_plan_costs(&list, costs, milliseconds, &runner);
-    valid = valid && costs_plan_costs(&list, deal != NULL ? deal : costs, dealt, &deal_cpus);
+    // Shard 1's once-only steps: --first's where given, else the costs' own; the deal's are its file's.
+    uint64_t table_first = 0;
+    uint64_t deal_first = 0;
+    valid = valid && costs_plan_costs(&list, costs, milliseconds, &runner, &table_first);
+    valid = valid && costs_plan_costs(&list, deal != NULL ? deal : costs, dealt, &deal_cpus, &deal_first);
+    const uint64_t first_milliseconds = first != UINT64_MAX ? first * 1000 : table_first;
     jobs = runner != 0 ? runner : jobs;
     uint64_t times[BUSTER_COSTS_SHARDS];
     if (valid)
@@ -2476,7 +2612,7 @@ static int costs_command_plan(const char* tests, const char* costs, const char* 
     for (uint32_t shards = low; valid && shards <= high; shards += 1)
     {
         CostsBuffer listing = { 0 };
-        const CostsPlan plan = costs_plan(&list, dealt, deal_cpus, milliseconds, shards, jobs, first * 1000, times, low == high ? &listing : NULL);
+        const CostsPlan plan = costs_plan(&list, dealt, deal_cpus, deal_first, milliseconds, shards, jobs, first_milliseconds, times, low == high ? &listing : NULL);
         const double mean = (double)plan.total / shards / 1000.0;
         const double runner = ((double)plan.total / 1000.0 + (double)(setup * shards)) / 60.0;
         printf("| %u | %.1f s (shard %llu) | %.1f s | %.2f | %.1f s | %.1f |\n", shards, (double)plan.longest / 1000.0, (unsigned long long)plan.longest_shard + 1, mean, mean > 0 ? (double)plan.longest / 1000.0 / mean : 0.0, (double)plan.floor / 1000.0, runner);
@@ -2532,7 +2668,8 @@ int main(int argc, char** argv)
     uint64_t high = 0;
     uint64_t jobs = 4;
     uint64_t setup = 0;
-    uint64_t first = 0;
+    // Unset: the costs' own `#: first-shard`.
+    uint64_t first = UINT64_MAX;
     bool valid = argc > 1;
     int i = 2;
     // The options, then the logs.

@@ -5532,6 +5532,14 @@ static AsmCode asm_assemble_code(String8 source, const X86MatchIndex* index, Asm
     {
         asm_fail(&parser, 0, "arena exhausted placing inline assembly's records");
     }
+    // The branches of no rel32 form (loop, loope, loopne, jrcxz) to the source's own labels, each record's index and its
+    // target's, whose displacements are fixed after the records are (#1839's item 4).
+    uint32_t* fixed = parser.result.error == 0 && count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, 2 * (uint64_t)count) : 0;
+    uint32_t fixed_count = 0;
+    if (parser.result.error == 0 && count != 0 && fixed == 0)
+    {
+        asm_fail(&parser, 0, "arena exhausted placing inline assembly's records");
+    }
     uint32_t at = 0;
     for (uint32_t f = 0; parser.result.error == 0 && f < parser.fragment_count; f += 1)
     {
@@ -5571,6 +5579,14 @@ static AsmCode asm_assemble_code(String8 source, const X86MatchIndex* index, Asm
                 result.branches[result.branch_count] = i;
                 result.targets[result.branch_count++] = positions[target->fragment];
             }
+            else if (!sized && form->relative_bytes == 1 && target->defined && instruction->expressions[0].value == 0)
+            {
+                // A loop's or a jrcxz's to a label of the source's: a record whose rel8 displacement is fixed below, where
+                // no branch that branch sizing sizes lies between it and its target.
+                fixed[2 * fixed_count] = i;
+                fixed[2 * fixed_count + 1] = positions[target->fragment];
+                fixed_count += 1;
+            }
             else if (!target->internal && (sized || form->relative_bytes == 4))
             {
                 record.form = (uint16_t)(sized ? row + 1 : row);
@@ -5579,8 +5595,9 @@ static AsmCode asm_assemble_code(String8 source, const X86MatchIndex* index, Asm
             }
             else
             {
-                // loop, loope, loopne and jrcxz have no rel32 form for a reference, and branch sizing sizes only jmp and jcc:
-                // the caller assembles the source whole instead (`directive`, asm_assemble), as a template of directives.
+                // loop, loope, loopne and jrcxz have no rel32 form for a reference (an undefined label's), and branch
+                // sizing sizes only jmp and jcc: the caller assembles the source whole instead (`directive`, asm_assemble),
+                // as a template of directives.
                 asm_fail(&parser, instruction->location, form->relative_bytes == 1 && !sized ? "loop, loope, loopne and jrcxz in inline assembly" :
                                                                                                 "a branch to inline assembly's own numeric label must be jmp or jcc, without an addend");
                 parser.directive = true;
@@ -5670,6 +5687,47 @@ static AsmCode asm_assemble_code(String8 source, const X86MatchIndex* index, Asm
             }
         }
         result.records[i] = record;
+    }
+    // The fixed branches' displacements: from the record after each to its target, by the records' lengths, where no
+    // sized branch lies between them (whose growth would move the target) and the distance fits a rel8. Otherwise the
+    // caller assembles the source whole, as before.
+    uint32_t* offsets = parser.result.error == 0 && fixed_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
+    X86Instruction* measured = offsets != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, X86Instruction, count) : 0;
+    for (uint32_t r = 0; measured != 0 && r < count; r += 1)
+    {
+        measured[r] = result.records[r];
+        measured[r].form &= (uint16_t)~BUSTER_X86_FORM_FIXUP;
+    }
+    const int64_t length = measured == 0 ? -1 : BUSTER_VECTOR_PATH(options.vectorized) ? x86_measure(measured, count, offsets) : x86_measure_scalar(measured, count, offsets);
+    if (parser.result.error == 0 && fixed_count != 0 && length < 0)
+    {
+        asm_fail(&parser, 0, measured == 0 ? "arena exhausted placing inline assembly's records" : "inline assembly's records don't encode");
+    }
+    if (offsets != 0 && length >= 0)
+    {
+        offsets[count] = (uint32_t)length;
+    }
+    for (uint32_t k = 0; parser.result.error == 0 && k < fixed_count; k += 1)
+    {
+        const uint32_t r = fixed[2 * k];
+        const uint32_t t = fixed[2 * k + 1];
+        const uint32_t low = t <= r ? t : r + 1;
+        const uint32_t high = t <= r ? r + 1 : t;
+        bool between = false;
+        for (uint32_t b = 0; b < result.branch_count; b += 1)
+        {
+            between |= result.branches[b] >= low && result.branches[b] < high;
+        }
+        const int64_t displacement = (int64_t)offsets[t] - (int64_t)offsets[r + 1];
+        if (between || displacement < INT8_MIN || displacement > INT8_MAX)
+        {
+            asm_fail(&parser, parser.instructions[r].location, "loop, loope, loopne and jrcxz in inline assembly");
+            parser.directive = true;
+        }
+        else
+        {
+            result.records[r].displacement = (int32_t)displacement;
+        }
     }
     if (parser.result.error != 0)
     {
