@@ -65,6 +65,7 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_ARRAY_NEGATIVE: result = "array size is negative"; break;
         case CHECK_INPUT_ARRAY_FUNCTIONS: result = "declared as array of functions"; break;
         case CHECK_INPUT_ARRAY_INCOMPLETE: result = "array has incomplete element type"; break;
+        case CHECK_INPUT_ARRAY_ELEMENT_ALIGNMENT: result = "size of array element isn't a multiple of its alignment"; break;
         case CHECK_INPUT_ARRAY_TOO_LARGE: result = "array is too large"; break;
         case CHECK_INPUT_ARRAY_NON_INTEGER: result = "size of array has non-integer type"; break;
         case CHECK_INPUT_AMBIGUOUS: result = "reference to identifier is ambiguous"; break;
@@ -2690,7 +2691,8 @@ static bool check_driver_in_parameters(const Parser* parser, uint32_t token)
 // body's scope before it handles the definition's declarator (ActOnStartOfFunctionDef: its own attributes, its
 // redeclaration), whose errors then keep the body's unused variables quiet; but what it gives as it parses, before that
 // (#1835), doesn't count: a specifier's (DeclSpec::Finish), a parameter's attributes' (ActOnParamDeclarator), and an
-// attribute's argument that must be a string literal (the parser's err_expected_string_literal).
+// attribute's argument that must be a string literal (the parser's err_expected_string_literal). Nor does a jump's
+// (#1942): clang's JumpScopeChecker runs in ActOnFinishFunctionBody, once the body's scopes have closed.
 static bool check_driver_error_scoped(const Parser* parser, const CheckInput* input, const CheckInputReport* report)
 {
     const CheckInputMessage message = report->message;
@@ -2700,7 +2702,9 @@ static bool check_driver_error_scoped(const Parser* parser, const CheckInput* in
     const bool parsed = message == CHECK_INPUT_ATTRIBUTE_STRING_ARGUMENT ||
                         (message == CHECK_INPUT_ATTRIBUTE_ARGUMENT && (report->detail & 0xffu) == CHECK_ARGUMENT_STRING_LITERAL);
     const bool early = report->recovered && (specifier || (attribute && (parsed || check_driver_in_parameters(parser, report->token))));
-    return !early || check_driver_in_body(parser, report->token);
+    const bool jump = message == CHECK_INPUT_JUMP_GOTO || message == CHECK_INPUT_JUMP_SWITCH || message == CHECK_INPUT_JUMP_INDIRECT ||
+                      message == CHECK_INPUT_JUMP_ASM;
+    return !jump && (!early || check_driver_in_body(parser, report->token));
 }
 
 // Each parameter has its own specifiers. Unlike a declaration's comma-separated declarators, a parameter cannot
@@ -4454,6 +4458,7 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                         }
                         else if (phase == 0 && (kind == CHECK_INPUT_VECTOR_ELEMENT || kind == CHECK_INPUT_FUNCTION_RETURN || kind == CHECK_INPUT_ARRAY_FUNCTIONS ||
                                  kind == CHECK_INPUT_ARRAY_INCOMPLETE || kind == CHECK_INPUT_ARRAY_NEGATIVE || kind == CHECK_INPUT_ARRAY_TOO_LARGE ||
+                                 kind == CHECK_INPUT_ARRAY_ELEMENT_ALIGNMENT ||
                                  kind == CHECK_INPUT_ARRAY_NON_INTEGER ||
                                  ((kind == CHECK_INPUT_INCOMPLETE_OBJECT || kind == CHECK_INPUT_INCOMPLETE_TENTATIVE) && input->reports[index].type != 0)))
                         {
@@ -4517,6 +4522,12 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                                 grouped[at] = 0;
                                 pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "array is too large (%s elements)", grouped);
                             }
+                            else if (kind == CHECK_INPUT_ARRAY_ELEMENT_ALIGNMENT)
+                            {
+                                pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication,
+                                                      "size of array element of type %.*s (%llu bytes) isn't a multiple of its alignment (%u bytes)", (int)type.length,
+                                                      type.pointer, (unsigned long long)report->value, report->detail);
+                            }
                             else if (kind == CHECK_INPUT_ARRAY_FUNCTIONS)
                             {
                                 pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "'%.*s' declared as array of functions of type %.*s",
@@ -4533,6 +4544,26 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                                 pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, forward ? 1u : 0u, format, (int)type.length, type.pointer);
                             }
                             arena_pop_to(scratch, type_mark);
+                        }
+                        else if (phase == 0 && (kind == CHECK_INPUT_JUMP_GOTO || kind == CHECK_INPUT_JUMP_SWITCH) &&
+                                 input->reports[index].note_kind == CHECK_INPUT_NOTE_JUMP && input->reports[index].note_token < count)
+                        {
+                            // A jump into a statement expression (#1942), noted at its `(` as clang's jump scope checker notes it, or
+                            // past a declaration whose scope it enters, at its name (c_check_vla_input.c's details).
+                            static const char* const bypassed[4] = {
+                                "jump enters a statement expression",
+                                "jump bypasses initialization of variable length array",
+                                "jump bypasses initialization of variable with __attribute__((cleanup))",
+                                "jump bypasses initialization of VLA typedef",
+                            };
+                            const uint32_t detail = input->reports[index].detail;
+                            const PPOutputDiagnosticNote note = {
+                                .token = parser->tokens.sources[input->reports[index].note_token],
+                                .message = bypassed[detail < 4 ? detail : 0],
+                            };
+                            pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, 1, "%s",
+                                                       kind == CHECK_INPUT_JUMP_GOTO ? "cannot jump from this goto statement to its label" :
+                                                                                       "cannot jump from switch statement to this case label");
                         }
                         else if (phase == 0 && kind == CHECK_INPUT_REDECLARATION && input->reports[index].detail == CHECK_REDECLARATION_GENERIC &&
                                  input->reports[index].note_kind == CHECK_INPUT_NOTE_PREVIOUS_DEFINITION)

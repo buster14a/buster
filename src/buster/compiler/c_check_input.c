@@ -335,6 +335,9 @@ typedef enum CheckInputMessage
     CHECK_INPUT_ARRAY_NEGATIVE,
     CHECK_INPUT_ARRAY_FUNCTIONS,
     CHECK_INPUT_ARRAY_INCOMPLETE,
+    // An array's element whose size isn't a multiple of its alignment (#1893, clang's err_array_element_alignment), at the
+    // array's `[`: the element type, its size in `value` and its alignment in `detail`.
+    CHECK_INPUT_ARRAY_ELEMENT_ALIGNMENT,
     // An array of more than BUSTER_TYPE_MAX_OBJECT_BYTES (#1447, clang's limit too), at its bound: "array is too large
     // (2'305'843'009'213'693'952 elements)", its count in `value`.
     CHECK_INPUT_ARRAY_TOO_LARGE,
@@ -594,6 +597,8 @@ typedef enum CheckInputNoteKind
     CHECK_INPUT_NOTE_FUNCTION_DECLARATION,
     CHECK_INPUT_NOTE_CONSTANT_SUBEXPRESSION,
     CHECK_INPUT_NOTE_CONSTANT_DIVISION,
+    // A jump's scope it enters (#1942): a statement expression's `(`, "jump enters a statement expression".
+    CHECK_INPUT_NOTE_JUMP,
 } CheckInputNoteKind;
 
 // A version as clang's VersionTuple holds it (#1447: an availability attribute's): its components (major, minor,
@@ -8214,6 +8219,23 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                             const uint32_t before = reader->output->report_count;
                             check_input_report_typed(reader, part->token, functions ? CHECK_INPUT_ARRAY_FUNCTIONS : CHECK_INPUT_ARRAY_INCOMPLETE, type,
                                                      type == frame->base ? frame->name : BUSTER_CHECK_NONE, frame->name);
+                            stand_in = check_input_declarator_recover(reader, run, frame, before);
+                            type = stand_in ? BUSTER_TYPE_INT : 0;
+                        }
+                        else if (__builtin_expect(type != 0 && !stand_in && type_alignment(reader->types, type) != 0 &&
+                                                  type_size(reader->types, element) % type_alignment(reader->types, type) != 0, 0))
+                        {
+                            // An element whose alignment an attribute raised past its size (#1893): clang's BuildArrayType error at
+                            // the `[`, with both, recovered as the other declarator errors are.
+                            const uint32_t before = reader->output->report_count;
+                            check_input_report_typed(reader, part->token, CHECK_INPUT_ARRAY_ELEMENT_ALIGNMENT, type, type == frame->base ? frame->name : BUSTER_CHECK_NONE,
+                                                     type_size(reader->types, element));
+                            if (reader->output->report_count > before)
+                            {
+                                reader->output->reports[before].detail = (uint32_t)type_alignment(reader->types, type);
+                                reader->output->reports[before].note_kind = 0;
+                                reader->output->reports[before].note_token = BUSTER_CHECK_NONE;
+                            }
                             stand_in = check_input_declarator_recover(reader, run, frame, before);
                             type = stand_in ? BUSTER_TYPE_INT : 0;
                         }

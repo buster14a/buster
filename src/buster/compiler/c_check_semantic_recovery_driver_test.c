@@ -451,6 +451,21 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "void h3(void) { int k4[(void*)0 == 0 ? 1.0 : 2]; (void)k4; }\n"
         "int after = undeclared;\n",
         "typedef int T, U[-1], V;\nV v;\n",
+        // An array of an element whose alignment an attribute raised past its size (#1893): clang's "size of array element
+        // of type 'enum E' (4 bytes) isn't a multiple of its alignment (8 bytes)" at the `[`, recovered, the declaration
+        // invalid and its uses quiet; arrays of pointers to it and an over-aligned record whose size grew are fine.
+        "enum __attribute__((aligned(8))) E { A };\n"
+        "enum E arr[3];\n"
+        "enum E two[2][2];\n"
+        "void f(void) { enum E loc[2]; int u = loc[0] + q; (void)u; static enum E s[4]; }\n"
+        "enum E *ptrs[3];\n"
+        "struct A8 { char c; } __attribute__((aligned(8)));\n"
+        "struct A8 ok[3];\n"
+        "int use = arr[0] + two[0][0] + sizeof(arr) + sizeof(ptrs) + sizeof(ok);\n"
+        "int x = undeclared;\n",
+        // (A typedef's and a parameter's, which recover as their other declarator errors do.)
+        "enum __attribute__((aligned(8))) E { A };\ntypedef enum E TE;\ntypedef enum E TA[2];\nTA ta;\n"
+        "int g(TE p[3]) { return p[0]; }\nint h(enum E q[2]);\nint c = h(0) + g(0);\nint x = undeclared;\n",
         // C23's enum redefinitions in a block, and a third and fourth definition (#1826): compatible ones are taken, and an
         // ambiguous use lists every candidate, a block's qualified by its function (`g(int, char *)::B`, `k()::P`).
         "/* gnu23 only */\n"
