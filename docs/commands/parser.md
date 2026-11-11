@@ -143,7 +143,15 @@ has those runs and the hosted runners' (#2078). On:
   failed in turn, in children whose address space may grow a page less than a
   run reached: the last fails, then, a page below the peak that run reached,
   the one before it, down to the first. Each run must exit with status 1 having
-  said why in a fatal error, and leave nothing behind;
+  said why in a fatal error, and leave nothing behind: the child's `VmSize`
+  must be its parent's exactly, and so must its lowest free descriptor. The
+  parent first runs each file through the children's own frame
+  (`parse_test_probe`), so that its stack has grown as far as theirs; before
+  that, a child's run reached 64 bytes deeper than any of the parent's, and
+  grew the stack by a page in about one run in 64 of a file, as the kernel
+  places the stack's top at random within a page (#2089). A child that leaves
+  something behind prints the mappings and the descriptors that differ from
+  its parent's;
 - files: every `.c` file under each path, preprocessed with -E's options, must
   parse; with `--clang`, the parser must accept exactly what `clang
   -fsyntax-only` with the same options accepts (our side reads clang's
