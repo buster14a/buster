@@ -1084,11 +1084,15 @@ static bool check_warning_graph_effect_reached(const CheckInput* input, const Pa
         const uint8_t kind = parser->tokens.kinds[at];
         const uint32_t node = at < input->token_count && input->token_nodes != NULL ? input->token_nodes[at] : BUSTER_CHECK_NONE;
         const CheckOp op = node < graph->count ? graph->ops[node] : CHECK_OP_COUNT;
-        bool blocked = role == PARSE_ROLE_CLOSE_SIZEOF || (role == PARSE_ROLE_PREFIX && kind == PARSE_KIND_SIZEOF) || role == PARSE_ROLE_CLOSE_SPECIFIER ||
-                       role == PARSE_ROLE_CLOSE_STRUCT || role == PARSE_ROLE_CLOSE_ENUM || role == PARSE_ROLE_BITFIELD || role == PARSE_ROLE_CLOSE_FUNCTION ||
+        // (A tag's body and a specifier's operand are before their closer: a declaration's declarators and initializers,
+        // which the tree hangs under its specifier's closer, are after it.)
+        const bool inside = child < at;
+        bool blocked = role == PARSE_ROLE_CLOSE_SIZEOF || (role == PARSE_ROLE_PREFIX && kind == PARSE_KIND_SIZEOF) ||
+                       ((role == PARSE_ROLE_CLOSE_SPECIFIER || role == PARSE_ROLE_CLOSE_STRUCT || role == PARSE_ROLE_CLOSE_ENUM) && inside) ||
+                       role == PARSE_ROLE_BITFIELD || role == PARSE_ROLE_CLOSE_FUNCTION ||
                        role == PARSE_ROLE_CLOSE_ATTRIBUTE || role == PARSE_ROLE_CLOSE_ATTRIBUTE_SPECIFIER || role == PARSE_ROLE_CLOSE_ATTRIBUTE_LEFT ||
                        role == PARSE_ROLE_CLOSE_ATTRIBUTE_RIGHT || role == PARSE_ROLE_CLOSE_ATTRIBUTE_LIST || role == PARSE_ROLE_CLOSE_ASM ||
-                       ((role == PARSE_ROLE_CLOSE_CAST || role == PARSE_ROLE_CLOSE_COMPOUND) && child < at);
+                       ((role == PARSE_ROLE_CLOSE_CAST || role == PARSE_ROLE_CLOSE_COMPOUND) && inside);
         // (A static selection's other operands and its controlling expression.)
         blocked |= role == PARSE_ROLE_CLOSE_KEYWORD && !check_warning_graph_chooses(input, parser, at, token);
         if (role == PARSE_ROLE_CLOSE_CALL && (op == CHECK_OP_BUILTIN_QUERY || op == CHECK_OP_BUILTIN_MISC || op == CHECK_OP_BUILTIN_UNARY) &&
@@ -1106,6 +1110,7 @@ static bool check_warning_graph_effect_reached(const CheckInput* input, const Pa
         }
         result = !blocked && !check_warning_graph_macro(parser, check_warning_graph_location(input, parser, at));
         child = at;
+        at = parser->tree.parents[at];
     }
     return result;
 }
