@@ -1392,8 +1392,8 @@ qualifiers"). clang's x86 target maps 256, 257 and 258 (`__seg_gs`, `__seg_fs`)
 to the `%gs`, `%fs` and `%ss` segments: its -O0 code loads and stores there with
 a segment override (`mov %gs:(%rax),%eax`).
 
-`check_lower_access` gives a LOAD, STORE or SET of an object in `%fs` or `%gs`
-the typed stream's override (`BUSTER_TYPED_ACCESS_SEGMENT`, docs/tier0.md's
+`check_lower_access` gives a LOAD, STORE or SET of an object in `%fs`, `%gs` or
+`%ss` the typed stream's override (`BUSTER_TYPED_ACCESS_SEGMENT`, docs/tier0.md's
 typed stream), from the accessed lvalue's type: a read's own, an assignment's
 target's (the assignment's value has lost the space), an update's stored type
 for its load and its store (the postfix one's too). It marks the function
@@ -1429,8 +1429,7 @@ The rest the lowering refuses by name, rather than compile it as a plain access:
 an aggregate's copy, a complex or `_BitInt` value
 and an `_Atomic` object in those spaces (read or written as an lvalue), an atomic
 builtin another plan takes (a generic one by pointer, `__atomic_clear`,
-`__sync_lock_release`, one of 16 bytes), any access in `%ss`'s (258: no 64-bit
-form of the encoder's has its `36` prefix); a bit of a vector of bool in one,
+`__sync_lock_release`, one of 16 bytes); a bit of a vector of bool in one,
 which no address reaches; and an atomic builtin's object in one, which its pointer argument reaches
 (`check_lower_segment_access`). An asm statement's register output in one is
 refused too (`check_lower_asm_segment`), since its value is stored through the
