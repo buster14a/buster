@@ -557,6 +557,20 @@ static const char* check_vector_lower_baseline_element(const X86Target* target, 
         check_vector_baseline_shuffle(&context, v2, v2, 0x88);
         check_vector_baseline_binary(&context, X86_FORM_PUNPCKLDQ_X_XM128, v0, v0, v2);
     }
+    else if (op == CHECK_OP_MULTIPLY && !element.floating && element.bytes == 8)
+    {
+        // No qword multiply without AVX-512DQ (#1834): a * b modulo 2^64 is lo(a) * lo(b) plus (hi(a) * lo(b) +
+        // lo(a) * hi(b)) << 32, each product PMULUDQ's of the qwords' low dwords; PSHUFD 0xF5 brings each high dword
+        // down beside a copy of itself.
+        check_vector_baseline_shuffle(&context, v2, v0, 0xf5);
+        check_vector_baseline_binary(&context, BUSTER_CHECK_BASE_PACKED(&context, PMULUDQ), v2, v2, v1);
+        check_vector_baseline_shuffle(&context, v3, v1, 0xf5);
+        check_vector_baseline_binary(&context, BUSTER_CHECK_BASE_PACKED(&context, PMULUDQ), v3, v3, v0);
+        check_vector_baseline_binary(&context, BUSTER_CHECK_BASE_PACKED(&context, PADDQ), v2, v2, v3);
+        check_vector_baseline_shift(&context, v2, 8, 32);
+        check_vector_baseline_binary(&context, BUSTER_CHECK_BASE_PACKED(&context, PMULUDQ), v0, v0, v1);
+        check_vector_baseline_binary(&context, BUSTER_CHECK_BASE_PACKED(&context, PADDQ), v0, v0, v2);
+    }
     else if (element.floating && op == CHECK_OP_DIVIDE && bytes < 16)
     {
         // Unused zero lanes would execute 0/0 and spuriously raise FE_INVALID; do not silently use a packed divide.
