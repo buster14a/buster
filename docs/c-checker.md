@@ -5413,7 +5413,10 @@ declaration) is never unused: clang's semantic context for it is the
 translation unit, not the function, so `ShouldDiagnoseUnusedDecl` passes it
 by. A use through it uses the outer declaration with linkage it redeclares,
 so `static int s; void f(void) { extern int s; (void)s; }` leaves `s` used.
-A block's own `static`, `register` and automatic objects can be unused. The
+A block's own `static`, `register` and automatic objects can be unused. A
+variable with an applied `cleanup` attribute is used, as clang treats it,
+since its cleanup takes its address (#1881); one ignored at file scope can still
+be unused. The
 graph pass adds `-Wunused-but-set-parameter` for a parameter a statement
 assignment writes and no read uses.
 

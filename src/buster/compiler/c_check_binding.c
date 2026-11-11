@@ -90,7 +90,10 @@ static bool check_input_unused_suppressed(const CheckInput* input, uint32_t toke
         const uint32_t attribute = attributes->records[i].kind;
         // x86's interrupt that its subject takes is clang's implicit used too (#147, handleAnyX86InterruptAttr).
         const bool interrupt = attribute == CHECK_ATTRIBUTE_INTERRUPT && !attributes->records[i].ignored && !attributes->records[i].subject_ignored;
-        marked = marked || attribute == CHECK_ATTRIBUTE_UNUSED || attribute == CHECK_ATTRIBUTE_USED || interrupt;
+        // An applied cleanup takes its variable's address, so clang's ShouldDiagnoseUnusedDecl skips it (#1881); one
+        // ignored at file scope still leaves the variable unused.
+        const bool cleanup = attribute == CHECK_ATTRIBUTE_CLEANUP && !attributes->records[i].ignored;
+        marked = marked || attribute == CHECK_ATTRIBUTE_UNUSED || attribute == CHECK_ATTRIBUTE_USED || interrupt || cleanup;
     }
     const bool result = kind != C_BINDING_OBJECT && kind != C_BINDING_FUNCTION ? true : marked;
     return result;
