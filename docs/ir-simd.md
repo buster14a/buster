@@ -986,6 +986,65 @@ The tests:
   permutex2var builtin and shuffles of one and two vectors, narrower ones
   included.
 
+## Bitwise functions of three vectors (#1840)
+
+`ternlog` (`BUSTER_IR_INTRINSIC_TERNLOG`) is the second ternary kind:
+
+```text
+%4 = intrinsic.v16i32 %2, %2, %2 ternlog 232
+```
+
+- Its flags are a truth table: each result bit is bit `a << 2 | b << 1 | c` of
+  the flags, where a, b and c are that bit of a, b and the third operand.
+- All three operands are of the result's type, and any flags byte is valid.
+- The model's `IR_SIMD_TERNLOG` computes it, a word at a time from the table's
+  minterms. The interpreter, SCCP, GVN and LICM take it as they take permute2.
+
+`ir_simd_typed_ternlog` decodes the ternarylogic builtins' rows. Each is one
+record of `vpternlogd` or `vpternlogq` at the result's width, with VECTOR(0) in
+reg, VECTOR(1) in vvvv and VECTOR(2) in rm, and its immediate as the table. Its
+writemask is MASK(3), with a bit per lane:
+
+- merging, for the mask builtins, into the first operand;
+- zeroing, for the maskz builtins;
+- every lane, for the unmasked builtins, which pass -1.
+
+The IR is the `ternlog`, then a `vselect` at the form's lanes into the first
+operand or a zero vector. The select is left out where the typed stream's
+writemask has every lane. The target needs AVX512F, VL below 64 bytes, and DQ
+for a one-byte mask.
+
+Tier 1 (`BUSTER_TIER1_VECTOR_TERNLOG`) emits `vpternlogd` with whichever
+operand already holds the destination's register as its first operand, the
+table's bits permuted to match the new order. Only where the destination holds
+none of them does it move the first operand in first. The forms already had
+Zen 5 rows.
+
+Machine rows at `--tier1 -march=znver5`, both compilers compiling this change's
+sources, against the permutes of two tables (`4f18b961`):
+
+| Unit | Rows before | Rows after |
+| --- | ---: | ---: |
+| `main_unit_frontend.c` | 350 | 340 |
+| `main_unit_backend.c` | 642 | 587 |
+
+No `vpternlog` row is left in either unit.
+
+The tests:
+
+- `test-ir`: both verifiers admit ternlog with every 15th table at each width,
+  and refuse a third operand of another width. The model is checked against
+  each bit's table entry.
+- `test-ir-parse` and `test-ir-optimize`: `tests/ir/widths.ir` round-trips it,
+  and SCCP folds it of three constants with 4 tables, on both paths.
+- `test-ir-simd`: the 18 rows decode at exactly their features: both lane
+  sizes, 3 widths, and no writemask, merging or zeroing. Each is refused without
+  a feature it needs and under 6 changes.
+- `test-tier1-masks`: 48 rows run as a program's only row, through both
+  lowering paths, the interpreter at every stage and Tier 1 natively, against a
+  C model. They cover 4 tables, both lane sizes and 3 widths, merging and
+  zeroing, each under a mask from the input.
+
 ## Masks to vectors and back (#1840)
 
 The masks' conversions to vectors and back need no new operation:

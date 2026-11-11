@@ -110,3 +110,14 @@ b0:
   %9 = store.void %0, %4 align=16
   %10 = ret.void
 }
+function (ptr) -> void {
+b0:
+  %0 = param.ptr 0
+  %1 = load.v4i32 %0 align=16
+  %2 = load.v16i32 %0 align=64
+  %3 = intrinsic.v4i32 %1, %1, %1 ternlog 150
+  %4 = intrinsic.v16i32 %2, %2, %2 ternlog 232
+  %5 = store.void %0, %4 align=64
+  %6 = store.void %0, %3 align=16
+  %7 = ret.void
+}

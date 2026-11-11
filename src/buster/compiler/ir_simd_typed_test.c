@@ -1591,6 +1591,90 @@ static void ir_simd_typed_test_permute2s(IrTestTally* tally)
     printf("  IR SIMD rows: %u permutes of two tables decode to the IR's permute2\n", decoded_rows);
 }
 
+// The bitwise functions of three vectors (#1840): vpternlogd and vpternlogq at each width, without a writemask, under
+// MASK(3)'s merging into the first operand and under its zeroing, decode as the IR's ternlog of its truth table, at
+// exactly the features written out; refused without each and under 6 changes.
+static void ir_simd_typed_test_ternlogs(IrTestTally* tally)
+{
+    static const uint64_t features[] = { BUSTER_X86_FEATURE(AVX512F), BUSTER_X86_FEATURE(AVX512VL), BUSTER_X86_FEATURE(AVX512BW), BUSTER_X86_FEATURE(AVX512DQ) };
+    const uint64_t all = UINT64_MAX;
+    uint32_t decoded_rows = 0;
+    const bool tables = x86_encoder_initialize() && tier0_initialize();
+    ir_test_expect(tally, tables, "the encoder's, the effects' and Tier 0's tables");
+    for (uint32_t lanes = 0; tables && lanes < 2; lanes += 1)
+    {
+        for (uint32_t width = 0; width < 3; width += 1)
+        {
+            for (uint32_t variant = 0; variant < 3; variant += 1)
+            {
+                const uint32_t bytes = 16u << width;
+                const uint32_t count = bytes / (4u << lanes);
+                const uint32_t mask_bytes = count <= 8 ? 1 : count / 8;
+                const bool masked = variant != 0;
+                Tier0Operation row;
+                memset(&row, 0, sizeof(row));
+                row.records[0] = check_vector_lower_record(ir_simd_ternlog_forms[lanes][width], BUSTER_TIER0_ROLE_VECTOR(0), BUSTER_TIER0_ROLE_VECTOR(1), BUSTER_TIER0_ROLE_VECTOR(2));
+                row.records[0].decorations = (uint8_t)(masked ? BUSTER_TIER0_DECORATION_MASK(3) | (variant == 2 ? BUSTER_X86_DECORATION_ZEROING : 0) : 0);
+                row.records[0].immediate = 0xe8;
+                row.record_count = 1;
+                row.operand_count = (uint8_t)(masked ? 4 : 3);
+                for (uint32_t o = 0; o < 3; o += 1)
+                {
+                    row.operand_classes[o] = BUSTER_TYPED_CLASS_VECTOR;
+                    row.operand_bytes[o] = (uint8_t)bytes;
+                }
+                row.operand_classes[3] = masked ? BUSTER_TYPED_CLASS_MASK : 0;
+                row.operand_bytes[3] = (uint8_t)(masked ? mask_bytes : 0);
+                row.result_class = BUSTER_TYPED_CLASS_VECTOR;
+                row.result_bytes = (uint8_t)bytes;
+                // Written out: AVX512F, VL below 64 bytes, and a byte's mask's DQ.
+                const uint64_t expected = BUSTER_X86_FEATURE(AVX512F) | (width < 2 ? BUSTER_X86_FEATURE(AVX512VL) : 0) | (masked && mask_bytes == 1 ? BUSTER_X86_FEATURE(AVX512DQ) : 0);
+                IrSimdTypedOperation decoded;
+                memset(&decoded, 0xa5, sizeof(decoded));
+                const IrSimdTypedStatus status = ir_simd_typed_row(&row, all, &decoded);
+                char description[160];
+                snprintf(description, sizeof(description), "vpternlog of %u-byte lanes (variant %u) at %u bytes: the IR's ternlog at exactly its features", 4u << lanes, variant, bytes);
+                ir_test_expect(tally, status == IR_SIMD_TYPED_OK && !decoded.machine && decoded.ternlog && decoded.immediate == 0xe8 && decoded.merge_mask == masked &&
+                                          decoded.ternlog_zero == (variant == 2) && (!masked || decoded.lane == (lanes == 0 ? IR_SIMD_LANE_I32 : IR_SIMD_LANE_I64)) &&
+                                          !decoded.permute2 && decoded.operand_count == row.operand_count && (decoded.required_features & ~BUSTER_X86_FEATURE(AVX)) == expected,
+                               description);
+                decoded_rows += status == IR_SIMD_TYPED_OK && decoded.ternlog;
+                for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(features); f += 1)
+                {
+                    IrSimdTypedOperation without;
+                    memset(&without, 0x5a, sizeof(without));
+                    const IrSimdTypedStatus refused = ir_simd_typed_row(&row, all & ~features[f], &without);
+                    const bool required = (expected & features[f]) != 0;
+                    ir_test_expect(tally, required ? ir_simd_typed_test_undecoded(refused, &without) : refused == IR_SIMD_TYPED_OK && without.ternlog,
+                                   "a bitwise function without a feature it needs stays the machine row, and needs no other");
+                }
+                for (uint32_t m = 0; m < 6; m += 1)
+                {
+                    Tier0Operation changed = row;
+                    X86Instruction* record = &changed.records[0];
+                    switch (m)
+                    {
+                    case 0: record->decorations = BUSTER_TIER0_DECORATION_MASK(2); break;
+                    case 1: record->mode = BUSTER_X86_MEMORY_BASE; break;
+                    case 2: record->vvvv = BUSTER_TIER0_ROLE_VECTOR(0); break;
+                    case 3: changed.operand_bytes[2] = (uint8_t)(bytes == 64 ? 32 : 64); break;
+                    case 4:
+                        changed.records[1] = changed.records[0];
+                        changed.record_count = 2;
+                        break;
+                    case 5: record->immediate = 256; break;
+                    }
+                    memset(&decoded, 0xa5, sizeof(decoded));
+                    const IrSimdTypedStatus refused = ir_simd_typed_row(&changed, all, &decoded);
+                    ir_test_expect(tally, ir_simd_typed_test_undecoded(refused, &decoded), "a changed bitwise function's row is not the IR's ternlog");
+                }
+            }
+        }
+    }
+    ir_test_expect(tally, decoded_rows == 2 * 3 * 3, "every bitwise function of three vectors decodes");
+    printf("  IR SIMD rows: %u bitwise functions of three vectors decode to the IR's ternlog\n", decoded_rows);
+}
+
 // The masks to vectors and back (#1840): every MASK_VECTOR rule's row (`__builtin_ia32_cvtmask2b` to `_cvtmask2q`) and
 // every VECTOR_MASK rule's (`_cvtb2mask` to `_cvtq2mask`), at each width, as the opmask conversion leaves them, decodes
 // as the IR's select of all ones and zeros or its comparison of signed lanes less than zero, at the elements' lanes and
@@ -1794,6 +1878,7 @@ static void ir_simd_typed_test(IrTestTally* tally)
     ir_simd_typed_test_mask_vectors(tally);
     ir_simd_typed_test_lane_ops(tally);
     ir_simd_typed_test_permute2s(tally);
+    ir_simd_typed_test_ternlogs(tally);
     ir_simd_typed_test_widths(tally);
     ir_simd_typed_test_splats(tally);
     ir_simd_typed_test_machine(tally);
