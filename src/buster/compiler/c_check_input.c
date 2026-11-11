@@ -10724,8 +10724,8 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
             const uint32_t previous_declaration = previous_handle != 0 ? reader->bindings.declaration[previous_handle - 1] : BUSTER_CHECK_NONE;
             const CheckInputAttributes* previous_attributes =
                 check_sparse_wide_present(reader->output->attributes) && previous_declaration < parser->tokens.count ? check_input_attributes_at(reader->output, previous_declaration) : 0;
-            // clang's multiversioning check uses the canonical (first) declaration's attributes, not the immediate
-            // previous one (#839's re-review).
+            // The first declaration's attributes, which internal_linkage's rule below reads (multiversioning's checks
+            // read the previous declaration's and its earlier ones', #2135).
             // The stream's first column has the walk's answer where it's kept (#1351): the walk is O(redeclarations).
             const bool first_kept = previous_handle != 0 && reader->bindings.first != 0;
             uint32_t first_handle = first_kept ? reader->bindings.first[previous_handle - 1] : previous_handle;
@@ -10741,9 +10741,6 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
             const uint32_t first_declaration = first_handle != 0 ? reader->bindings.declaration[first_handle - 1] : BUSTER_CHECK_NONE;
             const CheckInputAttributes* first_attributes =
                 check_sparse_wide_present(reader->output->attributes) && first_declaration < parser->tokens.count ? check_input_attributes_at(reader->output, first_declaration) : 0;
-            const bool first_inline = first_declaration != BUSTER_CHECK_NONE && reader->output->function_flags != NULL &&
-                                      first_declaration < parser->tokens.count &&
-                                      (reader->output->function_flags[first_declaration] & CHECK_INPUT_FUNCTION_INLINE) != 0;
             const bool attributes_valid = valid;
             // The declaration's subjects as clang's attributes name them (#147, check_input_attribute_subjects): a typedef, a
             // function (inline or not), or a variable of global storage (a thread's or not, an external one's at file scope)
@@ -10853,7 +10850,12 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
             if (attributes_valid && function && !is_typedef)
             {
                 const uint32_t multiversion_reports = reader->output->multiversion_report_count;
-                check_input_attribute_multiversion(reader, attributes, name, first_attributes, first_declaration, is_inline, first_inline);
+                // (The declaration before it, whose attributes include its earlier declarations', #2135.)
+                const bool previous_inline = previous_declaration != BUSTER_CHECK_NONE && reader->output->function_flags != NULL &&
+                                             previous_declaration < parser->tokens.count &&
+                                             (reader->output->function_flags[previous_declaration] & CHECK_INPUT_FUNCTION_INLINE) != 0;
+                check_input_attribute_multiversion(reader, attributes, name, previous_attributes, previous_declaration, previous_handle, is_inline,
+                                                   previous_inline);
                 if (reader->cpu_dispatch && reader->output->multiversion_report_count == multiversion_reports)
                 {
                     // clang's cpu_specific and cpu_dispatch rules against the declaration before (#1447): a declaration

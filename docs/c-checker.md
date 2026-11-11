@@ -3280,9 +3280,13 @@ What the lowering covers past scalars (#145's programs):
   declaration that makes a function multiversioned with an earlier declaration
   checks the earlier declaration's attributes first, at its name, with clang's
   "function multiversioning caused by this declaration" note at the new one.
-  A target declaration that makes a function multiversioned with an earlier one
-  checks the canonical first declaration, as clang does, and a later version
-  repeats its error with the caused-here note; a repeated `target_clones`,
+  That earlier declaration is the one before it in the name's chain, with the
+  attributes its own earlier declarations gave it (clang's `OldFD`). A
+  declaration that multiversioning refused is left out of the chain, so a
+  later version repeats its error with the caused-here note. A redeclaration
+  of an existing version (the same target string, or `target_clones` again)
+  is merged and not checked, and a new version of a function already
+  multiversioned is checked as one (#2135). A repeated `target_clones`,
   `cpu_specific` or `cpu_dispatch` reports clang's cannot-appear-more-than-once
   error with its conflicting-attribute note. `cpu_specific` and `cpu_dispatch`
   are supported in full (#1447, below). `test-checker` compares the errors'
