@@ -451,8 +451,11 @@ its register (`movzwl`, then `movq %rax, %mm0`), before the general registers'
 loads, and stores an output's low bytes through its address (`movq` or `movd`,
 a narrower one's through a general register). As in clang's code, nothing runs
 `emms`: the template's author leaves the x87's state as the code after it needs
-it. A statement of MMX and x87 operands is refused by name (their registers are
-the same), and so is one whose template takes directives. A statement of MMX
+it. A statement of MMX and x87 operands (whose registers are the same) loads its
+x87 operands first and its MMX ones after, and stores its MMX outputs before
+its x87 ones, as clang's code orders them (#1846, the owner's decision on
+#1447): what the x87's stack holds after an MMX load is the template's to know.
+One whose template takes directives is refused by name. A statement of MMX
 operands is an asm body (#1839) that loads them as the helper does, through rax
 before its other loads, from its block. MMX's forms, which `x86_semantics.c`
 doesn't cover, are taken to write the general and XMM registers their fields
@@ -836,8 +839,8 @@ Each refusal names its feature, as the driver prints it ("unsupported: ..."):
   alternative (`"=r@ccz"`, which clang takes as `r`);
 - the letters it doesn't place, and `A` of other sizes than up to 8 bytes and
   an integer's 16, and in a template that takes directives with 16 bytes;
-- MMX operands with a modifier (clang refuses each), beside x87 operands in
-  one statement, and in templates that take directives;
+- MMX operands with a modifier (clang refuses each), and in templates that
+  take directives;
 - opmask operands with a modifier, in templates that take directives, and
   without the moves' features (AVX-512F's for 1 or 2 bytes, AVX-512BW's for 4
   or 8), where clang can't place one;

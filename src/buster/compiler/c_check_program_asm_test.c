@@ -1268,8 +1268,14 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
         "asm-mmx", clang);
     check_test_program_boundary_reason(test, "int tested(int n){long m=n;__asm__(\"movq %q0, %0\" : \"+y\"(m));return (int)m;}",
                                        "asm-mmx-modifier", true, false, 0, 1, "this inline assembly operand modifier");
-    check_test_program_boundary_reason(test, "int tested(int n){long m=n;long double x=n;__asm__(\"\" : \"+y\"(m), \"+t\"(x));return (int)m+(int)x;}",
-                                       "asm-mmx-x87", true, false, 0, 2, "inline assembly x87 and MMX operands in one statement");
+    // MMX and x87 operands in one statement (#1846, the owner's decision on #1447): the x87's loaded first and the MMX
+    // ones after, the MMX outputs stored first, as clang's code orders them; the x87 output's bytes, whatever the MMX
+    // load left on its stack, are the same instructions' as clang's, compared bit for bit.
+    check_test_program_source(test,
+        "static long both(long m, long double* x){__asm__(\"paddd %0, %0\\n\\tfsqrt\" : \"+y\"(m), \"+t\"(*x));__asm__ volatile(\"emms\");return m;}"
+        "int tested(int n){long double x=(long double)(n*n);long m=both(n*3+1,&x);unsigned char b[10];__builtin_memcpy(b,&x,10);"
+        "int s=0;for(int i=0;i<10;i++)s=s*31+b[i];return (int)m+s;}",
+        "asm-mmx-x87", clang);
     check_test_program_boundary_reason(test, "int tested(int n){long m=n;__asm__(\".p2align 4\\n\\tpaddd %0, %0\" : \"+y\"(m));return (int)m;}",
                                        "asm-mmx-directives", true, false, 0, 1, "inline assembly MMX operands in templates that take directives");
     check_test_program_boundary_reason(test, "typedef long long m64 __attribute__((vector_size(8)));int tested(int n){m64 v={n};__asm__(\"paddd %0, %0\" : \"+y\"(v));return (int)v[0];}",

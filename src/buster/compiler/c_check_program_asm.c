@@ -51,7 +51,7 @@
 // What the lowering refuses, by name (CheckProgramAsm.reason): an asm goto's label as anything but a jmp's or a jcc's
 // target, flag outputs of a size no integer store covers or with other alternatives, f's x87 registers, the vector
 // register classes and the other letters it doesn't place (p, Y but Yk, the floating constants), MMX operands with a
-// modifier, beside x87 ones or in templates that take directives, opmask operands with a modifier, in templates that
+// modifier or in templates that take directives, opmask operands with a modifier, in templates that
 // take directives or without their moves' features, x87 operands and clobbers off the stack's top, symbolic immediates
 // and constants outside their
 // letter's range, operands of types no general or XMM register holds by value (but a vector in a template of no
@@ -2915,9 +2915,9 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
     reason = valid && reason == NULL && unit_assembled && masked ? "inline assembly opmask operands in templates that take directives" : reason;
     reason = valid && reason == NULL && unit_assembled && paired ? "inline assembly's 16-byte A operands in templates that take directives" : reason;
     reason = valid && reason == NULL && unit_assembled && highs ? "explicit register variables in high byte registers in templates that take directives" : reason;
-    // The MMX registers are the x87's: loading one leaves the x87's stack full, so a statement of both has no order of
-    // its loads that keeps both (#1846).
-    reason = valid && reason == NULL && x87 && mmx_used ? "inline assembly x87 and MMX operands in one statement" : reason;
+    // The MMX registers are the x87's: a statement of both (#1846, the owner's decision on #1447) loads its x87 operands
+    // first and its MMX ones after, and stores the MMX outputs before the x87 ones, as clang's code orders them; what the
+    // x87's stack holds after an MMX load is the template's to know, as in clang's object.
     reason = valid && reason == NULL && unit_assembled && held ? "inline assembly vector operands in templates that take directives" : reason;
     reason = valid && reason == NULL && unit_assembled && flagged ? "inline assembly flag outputs in templates that take directives" : reason;
     reason = valid && reason == NULL && unit_assembled && statement->is_goto ? "asm goto in templates that take directives" : reason;
