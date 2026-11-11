@@ -1964,9 +1964,12 @@ clang's build of the test's AVX `preserve_all` function that calls
   its cycles in a profile of the benchmark, 94% of them at the instruction
   where `abi_result`'s branches on the classes join (keeping the result out
   of memory changed nothing on the laptop, so it isn't a store waiting to be
-  forwarded). Pass bits and results without those branches, from a table
-  indexed by the classes and the type's kind or from the fold's vectors four
-  types at a time, are the next try.
+  forwarded). #1832 tried `abi_result`'s registers from a table of 64
+  templates indexed by the classes (branch `claude/psabi-result-table-1832`,
+  `4da833f`): on the 9700X it was within noise on classify-all and 0.5%
+  slower on batches of 16, and the mispredicts didn't move, so those branches
+  aren't where they come from, and it wasn't kept. The fold's vectors four
+  types at a time, `abi_result` and the pass bits together, are what's left.
 - **The levels.** The historical scans took 18% of this profile's vector
   classification cycles. #613 bounds the scan prefix and uses a topological
   schedule for deep graphs, retaining the shallow path and wide-record shortcut.

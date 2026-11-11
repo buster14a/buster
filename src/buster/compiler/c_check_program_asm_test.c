@@ -22,7 +22,8 @@ static void check_test_program_asm_room(CheckTest* test)
         "float through(float x){__asm__ volatile(\"\" : \"+t\"(x));return x;}"
         "long double root(long double x){__asm__(\"fsqrt\" : \"+t\"(x));return x;}"
         "int flagged(int a, float x){__int128 z;__asm__(\"cmpl $0, %2\" : \"=r\"(z), \"+t\"(x) : \"r\"(a));return (int)z+(int)x;}"
-        "int rotated(int n){int r;__asm__(\"rorxl $3, %1, %0\" : \"=r\"(r) : \"r\"(n));return r;}";
+        "int rotated(int n){int r;__asm__(\"rorxl $3, %1, %0\" : \"=r\"(r) : \"r\"(n));return r;}"
+        "int counted(int n){__asm__(\".Lcount%=:\\n\\tdecl %0\\n\\tjnz .Lcount%=\" : \"+r\"(n));return n;}";
     static InternTable identifiers;
     static Preprocessor pp;
     static Parser parser;
@@ -51,7 +52,7 @@ static void check_test_program_asm_room(CheckTest* test)
                      check_initializers_run(&plans, &input, &stream, &parser, &types.table, &input_arena, &scratch) &&
                      check_asms_run(&asms, &input, &stream, &types.table, &input_arena, &scratch);
         const CheckProgramOptions options = { .initializers = &plans, .asms = &asms, .identifiers = &identifiers, .scalar = path == 0, .predefines = &predefines };
-        ready = ready && check_program(&program, &parser, &input, &stream, &types.table, options, &output, &scratch) && input.asm_count == 4;
+        ready = ready && check_program(&program, &parser, &input, &stream, &types.table, options, &output, &scratch) && input.asm_count == 5;
         char description[256];
         snprintf(description, sizeof(description), "asm room, %s: the program is ready", path == 0 ? "scalar" : "vector");
         check_test_expect(test, ready, description);
@@ -79,8 +80,9 @@ static void check_test_program_asm_room(CheckTest* test)
                                  planned.plans[0].helper == BUSTER_CHECK_NONE && planned.plans[1].reason == NULL && planned.plans[1].inlined &&
                                  planned.plans[1].helper == BUSTER_CHECK_NONE && planned.plans[2].reason != NULL &&
                                  strcmp(planned.plans[2].reason, "inline assembly operands of this type in their constraint's registers") == 0 && planned.plans[3].reason == NULL &&
-                                 !planned.plans[3].inlined && planned.plans[3].helper != BUSTER_CHECK_NONE && helpers.count == 1;
-        snprintf(description, sizeof(description), "asm room, %s: the x87 statements are asm bodies, the __int128 operand is refused by name, rorx has a helper",
+                                 !planned.plans[3].inlined && planned.plans[3].helper != BUSTER_CHECK_NONE && planned.plans[4].reason == NULL &&
+                                 planned.plans[4].helper != BUSTER_CHECK_NONE && helpers.count == 2;
+        snprintf(description, sizeof(description), "asm room, %s: the x87 statements are asm bodies, the __int128 operand is refused by name, rorx and the named label have helpers",
                  path == 0 ? "scalar" : "vector");
         check_test_expect(test, plans_right, description);
         parse_release(&parser);

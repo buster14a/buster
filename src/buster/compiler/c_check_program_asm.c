@@ -3470,6 +3470,9 @@ static bool check_program_asm_plan(CheckProgramAsms* result, CheckProgramHelpers
     const CheckInput* input = program->input;
     const uint64_t output_mark = output->length;
     const uint64_t scratch_mark = scratch->length;
+    // The helpers as they came, restored on failure: a later step without room (the names') must not leave the
+    // statements' helpers appended to them in the popped output.
+    const CheckProgramHelpers helpers_mark = *helpers;
     // A body's controls: its statements' (entry_count of them), then its statement expressions' (to count). A unit
     // without asm statements, the usual one, has none to walk for.
     uint32_t statements = 0;
@@ -3605,6 +3608,7 @@ static bool check_program_asm_plan(CheckProgramAsms* result, CheckProgramHelpers
         const CheckProgramStatus status = result->status;
         const uint32_t token = result->token;
         arena_pop_to(output, output_mark);
+        *helpers = helpers_mark;
         *result = (CheckProgramAsms){ .status = status == CHECK_PROGRAM_OK ? CHECK_PROGRAM_RESOURCE : status, .token = token };
     }
     arena_pop_to(scratch, scratch_mark);

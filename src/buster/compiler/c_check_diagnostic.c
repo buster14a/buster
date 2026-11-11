@@ -162,6 +162,7 @@ static const CheckWarningDescription check_warning_descriptions[] =
     [CHECK_WARNING_ID_TYPE_SAFETY] = { "-Wtype-safety", NULL, "argument type doesn't match specified type tag" },
     [CHECK_WARNING_ID_UNEVALUATED_EXPRESSION] =
         { "-Wunevaluated-expression", "-Wunused-value", "expression with side effects has no effect in an unevaluated context" },
+    [CHECK_WARNING_ID_UNDERLYING_CV_QUALIFIER] = { "-Wunderlying-cv-qualifier-ignored", NULL, "qualifier in enumeration underlying type ignored" },
 };
 
 _Static_assert(BUSTER_ARRAY_LENGTH(check_warning_descriptions) == CHECK_WARNING_ID_COUNT, "every sparse policy ID has a description");
@@ -641,9 +642,31 @@ static const char* check_diagnostic_pragma_message(const CheckInputFpPragma* rec
     return result;
 }
 
+// The name of the C23 attribute whose scope is at `token`, where clang's parser reads its arguments its own way (#1447,
+// ParseClangAttributeArgs: availability's, external_source_symbol's, type_tag_for_datatype's and objc_bridge_related's,
+// with parentheses), or BUSTER_CHECK_NONE: clang's attribute is located at its name, not at its scope, as each of these
+// parsers makes it. Only a `clang::` one is known, so only one has reports at its scope. Cold: an attribute's report.
+static uint32_t check_diagnostic_custom_attribute_name(const Parser* parser, uint32_t token)
+{
+    const uint32_t count = parser->tokens.count;
+    const uint8_t* kinds = parser->tokens.kinds;
+    const bool scoped = token + 4 < count && kinds[token] == PARSE_KIND_IDENTIFIER && kinds[token + 1] == PARSE_KIND_COLON &&
+                        kinds[token + 2] == PARSE_KIND_COLON && kinds[token + 4] == PARSE_KIND_L_PAREN && token >= 1 &&
+                        (kinds[token - 1] == PARSE_KIND_L_SQUARE || kinds[token - 1] == PARSE_KIND_COMMA);
+    const uint32_t name = scoped ? parser->tokens.names[token + 3] : 0;
+    bool custom = false;
+    for (uint32_t s = 0; name != 0 && s < BUSTER_PARSE_CUSTOM_ATTRIBUTES; s += 1)
+    {
+        custom |= parser->meanings.custom_attributes[s] == name;
+    }
+    return custom ? token + 3 : BUSTER_CHECK_NONE;
+}
+
 static uint32_t check_diagnostic_input_report_source(const CheckInput* input, const Parser* parser, const CheckInputReport* report)
 {
     uint32_t source = check_input_report_source(parser, report);
+    const uint32_t custom = report->pragma == 0 && report->token < parser->tokens.count ? check_diagnostic_custom_attribute_name(parser, report->token) : BUSTER_CHECK_NONE;
+    source = custom != BUSTER_CHECK_NONE ? parser->tokens.sources[custom] : source;
     if (input->naked_diagnostic != NULL && report->pragma == 0 && report->token == input->naked_diagnostic->position)
     {
         source = parser->tokens.sources[input->naked_diagnostic->token];

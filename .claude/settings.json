@@ -42,6 +42,22 @@
             "type": "command",
             "command": "\"$CLAUDE_PROJECT_DIR\"/.githooks/enable-sign-off.sh",
             "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/llm-memory.sh start",
+            "timeout": 320
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/llm-memory.sh stop",
+            "timeout": 10
           }
         ]
       }
