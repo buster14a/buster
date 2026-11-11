@@ -11,7 +11,8 @@ requirements. [Command index](README.md).
   each with every path its processes looked at, which a seccomp listener
   traces: `BUSTER_ORACLE_CACHE=use` takes a kept result rather than run the
   tool again, and `check` runs every one and fails on a kept result that
-  differs.
+  differs. A test given `--clang-server` sends its clang runs to
+  `tools/clang-server` instead, which keeps none ([Served runs](#served-runs)).
   `oracle_cache_test.c` holds its tests (`./build/compiler test-oracle-cache`);
   [The oracle cache](#the-oracle-cache) describes both.
 ## The oracle cache
@@ -289,8 +290,9 @@ Its users:
 - the preprocessor's tests' `clang -E` (`pp_test_clang_process`): the cases,
   the header, keyword and feature sets, and the files given to it;
 - `parse_test_clang`, the parser's and the checker's `clang -fsyntax-only` of
-  their snippets and fixtures: with the cache on, a file per process, as many
-  at once as its batches have, each file's result the one a batch gives it;
+  their snippets and fixtures: with the cache on (or a clang server, below), a
+  file per process, as many at once as its batches have, each file's result the
+  one a batch gives it;
 - test-checker-corpus's clang (`check_corpus_clang_phase`, its first error,
   and `check_corpus_clang_object`, `-O0 -c`'s objects), which test-checker-asm
   and test-checker-driver use too, and its semantic mutants' preprocessed
@@ -450,3 +452,47 @@ libselinux's `/proc/filesystems` on Ubuntu), in a directory of its own under
 
 The cache is test tooling outside the compile path and has no vector path: a
 run hashes what it read. The 9700X job's test step runs its tests.
+
+### Served runs
+
+A test given `--clang-server PATH` (`test-preprocessor`, `test-parser`, #2071)
+sends its oracle runs of its clang (`oracle_serve`, by argument 0's name) to
+`tools/clang-server`, a clang that stays up: it runs each command line through
+clang's own driver with its cc1 job in its own process, in the run's working
+directory with exactly its environment and standard input, and replies with
+the exit status and both streams. A run then costs about 1.2 ms rather than a
+process's start (about 10 ms of a 12 ms `clang -E`, more under the tracing). A
+run goes there when it fits (`oracle_run_servable`): no files of its own to
+write, no time limit, nothing clang's main reads before its driver (a response
+file, a `-cc1` tool), no report of its process's statistics or times
+(`-fproc-stat-report`, `-ftime-report`, `-ftime-trace`: they would be the
+server's, and differ between any two runs) and none of the driver's debugging
+variables (`oracle_server_fits`),
+and the server's clang libraries the release `clang -dumpversion` gives, which
+a process checks once (`oracle_serve_ready`). `OracleServer` is the client,
+which `test-checker-driver --clang-server` shares: a server a process starts as
+it first needs it, on a socket pair (`MSG_NOSIGNAL`: a server that ended fails
+a request rather than raising `SIGPIPE`), which only that process uses: a
+forked part closes its copy of the socket, which leaves its parent's server as
+it was, and starts its own, as the preprocessor's cases' children do. A request it can't answer (a crash in clang ends it) stops
+it, and the next request starts another, at most four times in a process.
+
+A served run keeps the cache's contract by not entering it: the server's
+process isn't traced, so its result can't be an entry, whose every dependency a
+later take checks, and nothing the cache takes comes from an untraced run. In
+`use` mode a run takes an entry as before, and where none fits is served rather
+than run, writing none. In `check` mode it is served and compared with the
+entry it would have taken (`oracle_run_stale`), stale where that differs, as a
+run is; it writes none. With the cache off it is served. The trade-off is
+reuse: an entry's dependencies are what make a take safe, and a served run has
+none to record, so a cache that only served runs fill is never taken from. On
+the hosted rows, whose cache starts empty in every job, nothing is lost (only a
+key that one job runs twice would have been taken); where a persistent cache
+serves its pushes in `use` mode, these suites' keys would age out after two days
+of daily `check` runs that serve them, and their runs would then be served
+rather than taken. `--differential` keeps the cache as it was: each run that
+fits runs as before (taken, or run, traced and kept), is served too, and the
+first's result is the run's; a difference in status or either stream is counted
+and printed (`oracle_run_compare_served`) and fails the test
+(`oracle_serve_end`, which prints the counts: served, run both ways, differing,
+and runs that fit but that the server couldn't take, which ran as children).
