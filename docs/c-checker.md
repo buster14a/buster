@@ -5795,7 +5795,14 @@ warnings that need the completed graph or the parser's operator tree:
 `-Wlogical-not-parentheses`, `-Wparentheses` (assignment conditions and
 bitwise/equality precedence), `-Wempty-body`, `-Wself-assign`,
 `-Wreturn-stack-address`, `-Wformat`/`-Wformat-security`, `-Wswitch`,
-`-Wdangling-else` and `-Wuninitialized`. A divisor `-Wdivision-by-zero` reads
+`-Wdangling-else` and `-Wuninitialized`. `-Wshift-op-parentheses` (#2264, on
+by default, `-Wparentheses`' and so `-Wall`'s,
+`check_common_shift_op_parentheses`) is clang's `DiagnoseAdditionInShift`:
+each operand of a `<<` or `>>` that is an unparenthesized `+` or `-`, the left
+one first, "operator '<<' has lower precedence than '+'; '+' will be
+evaluated first" at the `+` with its note, given as the shift is built; a `+`
+from a macro's argument shows that macro, its range being the `+`
+expression's. A divisor `-Wdivision-by-zero` reads
 as clang's EvaluateAsInt does (`check_common_zero_divisor`): an integer
 constant, or, through integer casts, a const non-volatile object whose
 completed initializer's receipt (`CheckInput.const_values`) gives zero

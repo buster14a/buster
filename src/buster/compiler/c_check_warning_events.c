@@ -177,6 +177,9 @@ enum
     // c_check_unsequenced.c): -Wunsequenced, on by default, under -Wsequence-point and so -Wmost and -Wall. (Its ID past
     // -Wunreachable-code-generic-assoc's, 131.)
     CHECK_WARNING_ID_UNSEQUENCED = 132,
+    // An unparenthesized `+` or `-` as a shift's operand (#2264, clang's DiagnoseAdditionInShift): -Wshift-op-parentheses,
+    // on by default, under -Wparentheses.
+    CHECK_WARNING_ID_SHIFT_OP_PARENTHESES = 133,
     CHECK_WARNING_ID_COUNT,
 };
 
