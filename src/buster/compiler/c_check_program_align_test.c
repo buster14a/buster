@@ -67,9 +67,8 @@ static __attribute__((noinline)) void check_test_align_sources(CheckTest* test, 
         { .name = "align: an alignment past an int's", .source = "int f(int x)\n{\nreturn __builtin_align_up(x, 4294967296L);\n}\n", .rejected = true },
         { .name = "align: the largest alignment of an int and of a pointer", .source =
           "int f(int x, char* p)\n{\nreturn __builtin_align_up(x, 2147483648L) + (int)(long)__builtin_align_down(p, 0x8000000000000000ul);\n}\n" },
-        // A source past 128 bits (#1447): its constant alignments checked as any source's; an alignment past 128 bits refused
-        // by name, as the checker can't tell its constant (zero, negative, past the source's range or no power of 2) from a
-        // runtime one yet, at clang's error's line (a valid one's refusal, which clang takes, is test-check-builtins-misc's).
+        // A source past 128 bits (#1447): its constant alignments checked as any source's; an alignment past 128 bits checked
+        // by its constant's limbs (zero, negative, past the source's range or no power of 2), at clang's error's line.
         { .name = "align: a wide source's alignment of 0", .source = "unsigned _BitInt(200) f(unsigned _BitInt(200) x)\n{\nreturn __builtin_align_up(x, 0);\n}\n",
           .rejected = true },
         { .name = "align: a wide source's negative alignment", .source = "_BitInt(200) f(_BitInt(200) x)\n{\nreturn __builtin_align_down(x, -8);\n}\n", .rejected = true },
@@ -84,6 +83,18 @@ static __attribute__((noinline)) void check_test_align_sources(CheckTest* test, 
         { .name = "align: a negative wide alignment", .source = "int f(int x)\n{\nreturn __builtin_align_down(x, (_BitInt(200))-8);\n}\n",
           .rejected = true },
         { .name = "align: a wide alignment past an int's", .source = "int f(int x)\n{\nreturn __builtin_align_up(x, (unsigned _BitInt(200))1 << 40);\n}\n",
+          .rejected = true },
+        // Constant alignments past 128 bits (#1447), and their folds of wide and narrow sources, through const objects too.
+        { .name = "align: folds past 128 bits", .source =
+          "typedef _BitInt(200) W;\ntypedef unsigned _BitInt(300) U;\nstatic const U k = (U)1 << 250;\n"
+          "_Static_assert(__builtin_align_up((W)5, (W)8) == 8 && __builtin_align_down((U)1 << 250 | 7, (U)1 << 200) == (U)1 << 250, \"\");\n"
+          "_Static_assert(__builtin_is_aligned((U)1 << 250, (U)1 << 240) && __builtin_align_up(5, (W)16) == 16, \"\");\n"
+          "_Static_assert(__builtin_align_up((U)3, 1u << 31) == (U)1 << 31 && __builtin_align_up((U)5, k) == k, \"\");\n"
+          "U f(U x)\n{\nreturn __builtin_align_down(x, k) + __builtin_align_up(x, (W)1 << 150);\n}\n" },
+        { .name = "align: a wide alignment past a wide source's", .source = "_BitInt(200) f(_BitInt(200) x)\n{\nreturn __builtin_align_up(x, (unsigned _BitInt(300))1 << 200);\n}\n",
+          .rejected = true },
+        { .name = "align: a const object's wide alignment that isn't a power of 2", .source =
+          "static const unsigned _BitInt(300) bad = ((unsigned _BitInt(300))1 << 250) + 1;\nunsigned _BitInt(300) g(unsigned _BitInt(300) x)\n{\nreturn __builtin_align_down(x, bad);\n}\n",
           .rejected = true },
         { .name = "align: an alignment past its side effects", .source = "int g(void);\nint f(int x)\n{\nreturn __builtin_align_up(x, (g(), 3));\n}\n",
           .rejected = true },
