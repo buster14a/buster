@@ -109,14 +109,22 @@ static const SetupStep rerun_steps[] = {
         .name = "Check out reviewed first-party performance fixtures and acceptance harnesses",
         .kind = STEP_SETUP,
     },
-    // The hosted tools: .github/actions/hosted-tools (a cache, this run's artifact, or the mirror), and
-    // prepare-hosted-tools.yml's one acquisition for the run.
+    {
+        .name = "Fetch the vector draw's script from this commit",
+        .kind = STEP_SETUP,
+    },
+    // The hosted tools: .github/actions/hosted-tools (a cache, this run's artifacts, or the mirror), and
+    // prepare-hosted-tools.yml's acquisitions for the run, the release inputs' and the offline inputs'.
     {
         .name = "Restore verified hosted release inputs",
         .kind = STEP_SETUP,
     },
     {
         .name = "Acquire missing inputs once and verify the complete set",
+        .kind = STEP_SETUP,
+    },
+    {
+        .name = "Acquire missing offline inputs once and check each as the jobs read it",
         .kind = STEP_SETUP,
     },
     // tools/ci/setup-hosted.sh: the rows' and the fuzz jobs'.
