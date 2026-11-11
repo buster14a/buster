@@ -4189,6 +4189,82 @@ static const char check_test_tier1_rows_other_source[] =
     "    return 0;\n"
     "}\n";
 
+// The shared operands' fixture (#1871): machine rows that take one value as two operands, which Tier 1 places in one
+// register with their result's, and the code's certificate takes, each operand read in the record that first writes the
+// result; and import.c's import_archive_size, whose _mm_packus_epi32(fours, fours) is one. At x86-64-v4, every function
+// Tier 1's and its code certified, run against clang -O0's where the host has its features.
+static const char check_test_tier1_shared_header[] =
+    "#include <immintrin.h>\n"
+    "#include <stdint.h>\n"
+    "__m128i s_pack(__m128i a);\n"
+    "__m128i s_madd(__m128i a);\n"
+    "__m256i s_wide(__m256i a);\n"
+    "int s_size(const char* field, uint64_t* value);\n";
+
+static const char check_test_tier1_shared_source[] =
+    "#include \"tier1-shared.h\"\n"
+    "__m128i s_pack(__m128i a) { return _mm_xor_si128(_mm_packus_epi32(a, a), _mm_packs_epi16(a, a)); }\n"
+    "__m128i s_madd(__m128i a) { return _mm_add_epi32(_mm_madd_epi16(a, a), _mm_maddubs_epi16(a, a)); }\n"
+    "__m256i s_wide(__m256i a) { return _mm256_packus_epi32(a, a); }\n"
+    "int s_size(const char* field, uint64_t* value)\n"
+    "{\n"
+    "    const __mmask16 within = 0x3ff;\n"
+    "    const __m128i bytes = _mm_maskz_loadu_epi8(within, field);\n"
+    "    const __m128i values = _mm_sub_epi8(bytes, _mm_set1_epi8('0'));\n"
+    "    const uint32_t digits = _mm_mask_cmplt_epu8_mask(within, values, _mm_set1_epi8(10));\n"
+    "    const uint32_t spaces = _mm_mask_cmpeq_epi8_mask(within, bytes, _mm_set1_epi8(' '));\n"
+    "    const uint32_t count = (uint32_t)__builtin_popcount(digits);\n"
+    "    const int result = (digits | spaces) == within && digits != 0 && (digits & (digits + 1)) == 0;\n"
+    "    const __m128i positions = _mm_sub_epi8(_mm_setr_epi8(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15), _mm_set1_epi8((char)(16 - count)));\n"
+    "    const __m128i aligned = _mm_shuffle_epi8(_mm_maskz_mov_epi8((__mmask16)digits, values), positions);\n"
+    "    const __m128i pairs = _mm_maddubs_epi16(aligned, _mm_setr_epi8(10, 1, 10, 1, 10, 1, 10, 1, 10, 1, 10, 1, 10, 1, 10, 1));\n"
+    "    const __m128i fours = _mm_madd_epi16(pairs, _mm_setr_epi16(100, 1, 100, 1, 100, 1, 100, 1));\n"
+    "    const __m128i eights = _mm_madd_epi16(_mm_packus_epi32(fours, fours), _mm_setr_epi16(10000, 1, 10000, 1, 10000, 1, 10000, 1));\n"
+    "    *value = (uint64_t)(uint32_t)_mm_cvtsi128_si32(eights) * 100000000ull + (uint32_t)_mm_extract_epi32(eights, 1);\n"
+    "    return result;\n"
+    "}\n";
+
+static const char check_test_tier1_shared_other_source[] =
+    "#include \"tier1-shared.h\"\n"
+    "#include <stdio.h>\n"
+    "#include <string.h>\n"
+    "static uint64_t hash = 1469598103934665603ull;\n"
+    "static void mix(const void* p, unsigned n) { const unsigned char* b = p; for (unsigned i = 0; i < n; i += 1) { hash ^= b[i]; hash *= 1099511628211ull; } }\n"
+    "int main(void)\n"
+    "{\n"
+    "    static const char* const fields[] = { \"0         \", \"1234567890\", \"42        \", \"12 4      \", \"x         \", \"9999999   \" };\n"
+    "    for (unsigned f = 0; f < sizeof(fields) / sizeof(fields[0]); f += 1)\n"
+    "    {\n"
+    "        uint64_t value = 0;\n"
+    "        const int ok = s_size(fields[f], &value);\n"
+    "        if (ok) printf(\"%d %llu\\n\", ok, (unsigned long long)value); else printf(\"%d\\n\", ok);\n"
+    "    }\n"
+    "    uint32_t s = 1871;\n"
+    "    for (int round = 0; round < 64; round += 1)\n"
+    "    {\n"
+    "        uint32_t words[8];\n"
+    "        for (int i = 0; i < 8; i += 1) { s = s * 1664525u + 1013904223u; words[i] = s; }\n"
+    "        __m128i a;\n"
+    "        __m256i w;\n"
+    "        memcpy(&a, words, 16);\n"
+    "        memcpy(&w, words, 32);\n"
+    "        __m128i p = s_pack(a); mix(&p, 16);\n"
+    "        __m128i m = s_madd(a); mix(&m, 16);\n"
+    "        __m256i q = s_wide(w); mix(&q, 32);\n"
+    "    }\n"
+    "    printf(\"%016llx\\n\", (unsigned long long)hash);\n"
+    "    return 0;\n"
+    "}\n";
+
+static void check_test_driver_tier1_shared(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    X86Target v4 = { 0 };
+    const bool parsed = x86_target_parse("x86-64-v4", 9, &v4);
+    const bool host = parsed && (x86_target_native().features & v4.features) == v4.features;
+    check_test_driver_tier1_units(test, clang, executable, directory, "tier1-shared", "shared operands'", check_test_tier1_shared_header, check_test_tier1_shared_source,
+                                  check_test_tier1_shared_other_source, "-march=x86-64-v4", host, 0);
+}
+
 // Its builds, by x86-64-v4, run where the host has every feature of it.
 static void check_test_driver_tier1_rows(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
