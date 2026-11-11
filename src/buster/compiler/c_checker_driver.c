@@ -7462,6 +7462,7 @@ typedef struct CheckUnitsKept CheckUnitsKept;
 static bool check_units_keep_object(CheckUnitsKept* kept, const Object* object);
 static bool check_units_keep(CheckUnitsKept* kept, const Link* link, const CheckProgram* program, const Parser* parser, Preprocessor* pp,
                              const ObjectDebug* debug);
+static uint32_t check_units_group_unkept(const Link* link);
 
 // Whether `link`'s symbol `s` is a local `.L` label defined in code, which -c's object leaves out as an assembler's
 // temporary (#1845). The helpers' own functions (`.Lbuster_asm_N`, `.Lbuster_builtin_*`), which clang's code has no
@@ -7589,6 +7590,17 @@ static bool check_driver_object(const CheckProgram* program, const CheckDataPrep
         }
     }
     check_clock_mark(stage_clock, CHECK_STAGE_DEBUG);
+    // A section group of the file-scope assembly's (#1848) whose signature is no global symbol it defines, which -c's
+    // object has as clang's, has no name the units' selection keys (check_units_group_unkept): refused by name, at the
+    // first file-scope statement, in a link of several C units.
+    if (valid && kept != NULL && !foreign && check_units_group_unkept(&code.link) != 0)
+    {
+        code.status = CHECK_PROGRAM_UNSUPPORTED;
+        code.reason = "file-scope assembly's section groups whose signature isn't a global symbol defined in the group, in a link of several units";
+        code.token = code.lowered.asms.file_token;
+        check_driver_emission_failed(parser, pp, &code);
+        valid = false;
+    }
     if (valid && kept != NULL)
     {
         const LinkError checked = link_check(&code.link);

@@ -411,7 +411,10 @@ the `vpmov*` builtins', are its `extend` and `truncate` (#1840, its
 A vector's shift by one scalar count, the x86 builtins' shifts by an int, is
 its `shift` (#1840, its "Shifts by a scalar count"), `BUSTER_TIER1_VECTOR_SHIFT`:
 the immediate form where the count is a constant, else `vmovd` of the count into
-the vector scratch register and the form by that xmm count.
+the vector scratch register and the form by that xmm count. A select of all ones
+and zeros, a C comparison's expansion and a mask to a vector, is `vpmovm2b` to
+`vpmovm2q`, and a signed comparison less than a zero vector is `vpmovb2m` to
+`vpmovq2m` (#1840, its "Masks to vectors and back").
 
 ### Inlining (#1282)
 

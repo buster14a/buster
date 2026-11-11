@@ -667,7 +667,7 @@ static void check_test_program_segment_refusals(CheckTest* test, const X86Target
         { "segment-asm-read-write-output", "void tested(int __seg_gs*p){__asm__(\"incl %0\":\"+r\"(*p));}",
           "an asm output in a segment's address space (256, 257 or 258: %gs, %fs or %ss) but a memory one" },
         // What the lowering doesn't carry the override through yet (check_lower_segment_carried): an aggregate's copy, a
-        // complex value, a _BitInt, an _Atomic object, and %ss's space (258).
+        // complex value, a _BitInt and an _Atomic object.
         { "segment-struct-copy", "struct S{long a,b,c;};struct S tested(struct S __seg_fs*p){return *p;}",
           "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
         { "segment-struct-store", "struct S{long a,b,c;};void tested(struct S __seg_fs*p,struct S s){*p=s;}",
@@ -677,8 +677,6 @@ static void check_test_program_segment_refusals(CheckTest* test, const X86Target
         { "segment-bit-int", "int tested(_BitInt(40) __seg_fs*p){return (int)*p;}",
           "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
         { "segment-atomic-object", "int tested(_Atomic int __seg_fs*p){return *p;}",
-          "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
-        { "segment-ss", "int tested(int __attribute__((address_space(258)))*p){return *p;}",
           "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
     };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(refused); i += 1)
@@ -780,6 +778,24 @@ static void check_test_program_segments(CheckTest* test, const char* clang)
         "b[0]=b[1]+n;b[1]-=1.0f;r+=(float)b[0]+(float)b[1];"
         "return (int)(4*(r+th[0]+th[1]+th[2]+th[3]+(float)tb[0]+(float)tb[1]));}",
         "segment-half-precision", clang);
+    // %ss's space (258), whose base 64-bit mode ignores, so that a flat address cast to it reaches its object: clang's 36 on
+    // each access, of integers, floating values, long double, __int128, vectors and their elements, members and bit-fields,
+    // the direct atomic plans, and globals in the space (RIP-relative, `ss:x(%rip)`).
+    check_test_program_source(test,
+        "#define SS __attribute__((address_space(258)))\n"
+        "typedef int v4si __attribute__((vector_size(16)));struct S{long a;int b;char c[8];unsigned u:5;int s:11;};"
+        "static SS long gl[4]={1,2,3,4};static SS struct S gs_={5,6,\"abcdefg\",3,-4};static SS double gd=2.5;"
+        "static long tl[4]={9,8,7,6};static long double tq=1.75L;static __int128 ti=77;static v4si tv={4,5,6,7};"
+        "static _Float16 th=1.5f16;static int ta=5;static short tc=3;"
+        "int tested(int n){long SS*p=(long SS*)tl;long double SS*q=(long double SS*)&tq;__int128 SS*w=(__int128 SS*)&ti;"
+        "v4si SS*v=(v4si SS*)&tv;_Float16 SS*h=(_Float16 SS*)&th;int SS*a=(int SS*)&ta;short SS*c=(short SS*)&tc;"
+        "p[n&3]=n*7L;*p+=n;p[1]++;--p[2];long r=p[(n+1)&3]+(p[3]<<=1);gl[n&3]+=gl[0];gd*=1.5;"
+        "gs_.b+=n;gs_.c[n&7]=(char)('A'+n);gs_.u=n;gs_.s-=n;r+=gl[n&3]+gs_.b+gs_.c[(n+1)&7]+gs_.u+gs_.s+(long)gd;"
+        "*q-=n;*w+=n;*w<<=3;v4si k={n,1,2,3};*v+=k;(*v)[n&3]*=3;r+=(*v)[0]+(*v)[(n+1)&3];*h+=(_Float16)n;r+=(long)(float)*h;"
+        "r+=__atomic_fetch_add(a,3,5)+__atomic_exchange_n(a,n,5)+__atomic_load_n(a,2);int x=n;"
+        "r+=__atomic_compare_exchange_n(a,&x,9,0,5,5)+__atomic_fetch_max(c,(short)n,5)+__sync_fetch_and_or(c,6);"
+        "return (int)(r+tl[0]+tl[1]+tl[2]+tl[3]+(long)tq+(long)ti+tv[n&3]+(long)(float)th+ta+tc);}",
+        "segment-ss", clang);
 }
 
 // Initializer validation keeps atomic rvalue identity while storage uses the underlying vector bytes.
@@ -1143,6 +1159,25 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
           "for(unsigned j=0;j<8;j++)p.u[j]=db[(i*7+j*(i%5+1)+(unsigned)n)%k+(k==4?16:0)];\n"
           "RF(x.v);RF(x.h[1]);RF(x.q[2]);RF(x.e[1]);RF(p.v);RF(p.h[0]);RF(p.q[1]);}\n"
           "return (int)h;}\n"
+        },
+        // Masked memory builtins without AVX-512 (#1834), element by element: loads, stores, expanding loads, compressing
+        // stores, gathers and scatters (a scatter's indices counted in the indices' elements, as clang's code counts them)
+        // of 8- to 64-bit elements and 2 to 16 lanes; and at a page's end before an inaccessible one, lanes whose bits are
+        // clear past it, which must touch nothing there.
+        { "baseline-masked-memory",
+          "#include <sys/mman.h>\n"
+          "#define M(E,L) do{typedef E X __attribute__((ext_vector_type(L)));typedef _Bool B __attribute__((ext_vector_type(L)));"
+          "typedef int I __attribute__((ext_vector_type(L)));E mem[4*L];X w,v;I ix;unsigned bits;fill(mem,sizeof mem,n+L);fill(&w,sizeof w,n*3+L);"
+          "fill(&v,sizeof v,n*5+L);fill(&bits,4,n*7+L);B m;for(int i_=0;i_<L;i_++){m[i_]=(bits>>i_)&1;ix[i_]=(int)((bits>>(i_+3))%(sizeof(E)<4?L:4*L));"
+          "}X r1=__builtin_masked_load(m,mem,w);X r2=__builtin_masked_expand_load(m,mem+1,w);X r3=__builtin_masked_gather(m,ix,mem,w);FOLD(r1);FOLD(r2);FOLD(r3);"
+          "__builtin_masked_store(m,v,mem+L);__builtin_masked_compress_store(m,v,mem+2*L+1);__builtin_masked_scatter(m,ix,v,mem);FOLD(mem);"
+          "E*edge=(E*)(page+4096)-L/2;B lo;for(int i_=0;i_<L;i_++)lo[i_]=i_<L/2;X r4=__builtin_masked_load(lo,edge,w);FOLD(r4);__builtin_masked_store(lo,v,edge);"
+          "X r5=__builtin_masked_expand_load(lo,edge,w);FOLD(r5);__builtin_masked_compress_store(lo,v,edge);FOLD(*(X*)(edge-L/2));}while(0)\n"
+          "#define ALL(E) M(E,2);M(E,4);if(sizeof(E)<=8)M(E,8);if(sizeof(E)<=4)M(E,16)\n"
+          "int tested(int n){unsigned h=2166136261u;\n"
+          "char*page=mmap(0,8192,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);mprotect(page+4096,4096,PROT_NONE);\n"
+          "ALL(int);ALL(unsigned);ALL(long long);ALL(float);ALL(double);M(signed char,4);M(signed char,16);M(short,8);M(unsigned short,4);\n"
+          "munmap(page,8192);return (int)h;}\n"
         },
         // Scalars' elementwise builtins without AVX-512F (#1834): the C library's ceilf ... roundf, fmaf and fma without
         // SSE4.1 and FMA, and ldexpf and ldexp; SSE4.1's ROUNDSS and ROUNDSD (round's of the value plus the largest value
