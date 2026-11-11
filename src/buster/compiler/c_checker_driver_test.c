@@ -3316,6 +3316,25 @@ static void check_test_driver_members(CheckTest* test, const char* clang, const 
         free(text);
         text = NULL;
     }
+    // `p->y` (#1447's finding): the checker takes it as `(*p).y`, and the lowering refuses it as it refuses that.
+    static const char arrow[] = "typedef float v4 __attribute__((ext_vector_type(4)));\nfloat f(v4* p) { return p->y; }\n";
+    const bool arrow_written = parse_test_write(source, arrow, sizeof(arrow) - 1);
+    for (uint32_t path = 0; arrow_written && path < 4; path += 1)
+    {
+        char* const vector_arguments[] = { (char*)executable, path < 2 ? "-fsyntax-only" : "-c", "-o", objects[0], source, NULL };
+        char* const scalar_arguments[] = { (char*)executable, "--scalar", path < 2 ? "-fsyntax-only" : "-c", "-o", objects[1], source, NULL };
+        const int status = check_test_driver_spawn(path % 2 == 0 ? vector_arguments : scalar_arguments, &text);
+        const bool expected = path < 2 ? status == 0 : status == 1 && text != NULL && strstr(text, "unsupported: this member access") != NULL;
+        static const char* const names[] = {
+            "a pointer's extended vector's lane is checked",
+            "a pointer's extended vector's lane is checked, scalar",
+            "a pointer's extended vector's lane is refused as a member access",
+            "a pointer's extended vector's lane is refused as a member access, scalar",
+        };
+        check_test_expect(test, expected, names[path]);
+        free(text);
+        text = NULL;
+    }
     unlink(source);
     unlink(objects[0]);
     unlink(objects[1]);

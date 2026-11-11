@@ -2603,6 +2603,15 @@ What the lowering covers past scalars (#145's programs):
   a vector of `bool`, of 1 or 2 bytes, or of more than 64 bytes. Tiny arithmetic
   reads and writes exactly its elements; wide arithmetic uses register-sized
   pieces. Boolean bitwise operators work on the packed bits and clear padding.
+  An extended vector's lanes through a pointer to it, `p->y`, are clang's
+  `(*p).y` (`check_vector_arrow`): the source reader decodes a `->` member's
+  name as a swizzle only in a unit whose type table has an extended vector
+  (`TypeTable.ext_vectors`), growing its list past the `.` members it counted;
+  a struct's `->` member is unaffected. Swizzles aren't lowered: `-c` refuses
+  both spellings as a member access. The checker's swizzle diagnostics are its
+  own words, not clang's ("illegal vector component name", "vector is not
+  assignable (contains duplicate components)", "address of vector element
+  requested", a `vector_size` vector's "is not a structure or union"): #2096.
   Extended vectors' `!`, `&&` and `||` compare each lane with zero and return
   all-one or all-zero signed lanes. Both operands are evaluated; these vector
   operators do not short-circuit. Half-precision truth uses scalar conversions
