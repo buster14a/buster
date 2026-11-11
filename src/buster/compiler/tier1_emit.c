@@ -182,6 +182,10 @@ struct Tier1EmitPrepared
     uint32_t mask_columns;
     uint32_t vector_save_mask;
     uint32_t vector_columns;
+    // The CFG consumer's asm bodies (#1839, TIER1_RULE_ASM), which its frame takes as calls (rsp aligned at each, no leaf
+    // frame), and the callee-saved registers they touch, which its prologue saves.
+    uint32_t asm_count;
+    uint32_t asm_callee;
     // The widest vector a value of the function is (#141), 16, 32 or 64 bytes, or 0 without one: the vector class's
     // call-save rows and temporary slot take that width, and its moves of them that width's forms.
     uint32_t vector_bytes;
@@ -915,7 +919,7 @@ static uint32_t tier1_emit_owed(const Tier1SelectPlan* plan, const Tier1EmitPrep
                                 bool last, uint32_t owed)
 {
     const IrFunction* function = plan->function;
-    uint32_t needed = last || (selected && tier1_select_fixed_registers(plan->patterns[node].rule) != 0) ? owed : 0;
+    uint32_t needed = last || (selected && tier1_select_node_fixed(function, &plan->patterns[node]) != 0) ? owed : 0;
     needed |= defined < BUSTER_TIER1_EMIT_GENERAL_REGISTERS ? 1u << defined : 0;
     for (uint32_t u = plan->effective_use_offsets[node]; u < plan->effective_use_offsets[node + 1]; u += 1)
     {
@@ -1073,7 +1077,7 @@ static bool tier1_emit_save_positions(const Tier1SelectPlan* plan, uint32_t colu
     memset(saves, 0, sizeof(*saves));
     for (uint32_t node = 0; fixed_nodes != 0 && node < count; node += 1)
     {
-        uint32_t fixed = plan->covered[node] ? 0 : tier1_select_fixed_registers(plan->patterns[node].rule) & columns;
+        uint32_t fixed = plan->covered[node] ? 0 : tier1_select_node_fixed(function, &plan->patterns[node]) & columns;
         while (fixed != 0)
         {
             saves->offsets[__builtin_ctz(fixed) + 1] += 1;
@@ -1099,7 +1103,7 @@ static bool tier1_emit_save_positions(const Tier1SelectPlan* plan, uint32_t colu
         {
             saves->positions[saves->call_count++] = position;
         }
-        uint32_t fixed = fixed_nodes == 0 || plan->covered[node] ? 0 : tier1_select_fixed_registers(plan->patterns[node].rule) & columns;
+        uint32_t fixed = fixed_nodes == 0 || plan->covered[node] ? 0 : tier1_select_node_fixed(function, &plan->patterns[node]) & columns;
         while (fixed != 0)
         {
             const uint32_t reg = (uint32_t)__builtin_ctz(fixed);
@@ -1110,20 +1114,22 @@ static bool tier1_emit_save_positions(const Tier1SelectPlan* plan, uint32_t colu
     return ok;
 }
 
-// Whether general register fragment `f`, in a register of `columns` but not of `callee` (whose values survive a call),
-// covers a call's definition phase or one of a fixed register's sequence that takes its register, but its own value's
-// definition `own`: the values tier1_emit_call_saved and the CFG consumer's calls save, and those a fixed register's
-// sequence saves around it (tier1_emit_fixed), each in its register's call-save row.
+// Whether general register fragment `f`, in a register of `columns`, covers a call's definition phase, where its register
+// isn't one of `callee` (whose values survive a call), or one of a fixed register's sequence that takes its register, a
+// callee-saved one among them (an asm body's, #1839), but its own value's definition `own`: the values
+// tier1_emit_call_saved and the CFG consumer's calls save, and those a fixed register's sequence saves around it
+// (tier1_emit_fixed, tier1_emit_cfg_asm), each in its register's call-save row.
 static bool tier1_emit_fragment_saved(const Tier1Allocation* allocation, uint32_t f, uint32_t own, uint32_t columns, uint32_t callee, const Tier1EmitSavePositions* saves)
 {
     const uint32_t reg = allocation->registers[f];
-    const bool caller = allocation->kinds[f] == BUSTER_TIER1_ALLOCATE_REGISTER && reg < BUSTER_TIER1_EMIT_GENERAL_REGISTERS && ((columns >> reg) & 1) != 0 && ((callee >> reg) & 1) == 0;
+    const bool held = allocation->kinds[f] == BUSTER_TIER1_ALLOCATE_REGISTER && reg < BUSTER_TIER1_EMIT_GENERAL_REGISTERS && ((columns >> reg) & 1) != 0;
+    const bool caller = held && ((callee >> reg) & 1) == 0;
     const uint32_t start = allocation->starts[f];
     const uint32_t end = allocation->ends[f];
     const bool across_call = caller && tier1_emit_covers(saves->positions, saves->call_count, start, end, own);
-    const uint32_t first = caller ? saves->offsets[reg] : 0;
-    const uint32_t last = caller ? saves->offsets[reg + 1] : 0;
-    const bool across_fixed = caller && first < last && tier1_emit_covers(saves->positions + first, last - first, start, end, own);
+    const uint32_t first = held ? saves->offsets[reg] : 0;
+    const uint32_t last = held ? saves->offsets[reg + 1] : 0;
+    const bool across_fixed = held && first < last && tier1_emit_covers(saves->positions + first, last - first, start, end, own);
     return across_call || across_fixed;
 }
 

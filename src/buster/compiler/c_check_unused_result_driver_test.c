@@ -44,8 +44,55 @@ static const char check_driver_unused_result_conditionals[] =
     "  for (n ? w(n) : w(n); n; n ? c(n) : c(n)) { }\n"
     "}\n";
 
+// A discarded call a macro's argument writes (#1447): clang highlights the call, which spans more than the argument's one
+// token, so each macro whose argument it is gets an "expanded from macro" note, a nested one's in the order clang gives
+// them (Preprocessor.diagnostic_spans).
+static const char check_driver_unused_result_macro_arguments[] =
+    "__attribute__((pure)) int p(int);\n"
+    "__attribute__((const)) int c(int);\n"
+    "__attribute__((warn_unused_result)) int w(int);\n"
+    "struct [[nodiscard]] R { int x; };\n"
+    "struct R r(int);\n"
+    "#define ID(x) x\n"
+    "#define STMT(x) do { x; } while (0)\n"
+    "#define CALL(f) f(1)\n"
+    "#define TWO(x) ID(x)\n"
+    "#define ARG(x) p(x)\n"
+    "void g(int n) {\n"
+    "    ID(p(n)); ID(c(n)); ID(w(n)); ID(r(n));\n"
+    "    STMT(p(n)); STMT(w(n));\n"
+    "    CALL(p); CALL(w);\n"
+    "    TWO(p(n)); TWO(w(n));\n"
+    "    ARG(n);\n"
+    "    ID((p)(n));\n"
+    "    ID(n ? p(n) : c(n));\n"
+    "}\n";
+
 static const CheckDriverDefaultWarningFixture check_driver_unused_result_fixtures[] =
 {
+    {
+        .name = "ignored results of calls macros' arguments write",
+        .source = check_driver_unused_result_macro_arguments,
+        .warnings = 12,
+        .notes = 14,
+        .c23 = true,
+    },
+    {
+        .name = "ignored results of calls macros' arguments write under -Wall -Wextra",
+        .source = check_driver_unused_result_macro_arguments,
+        .options = { "-Wall", "-Wextra" },
+        .warnings = 12,
+        .notes = 14,
+        .c23 = true,
+    },
+    {
+        .name = "ignored results of calls macros' arguments write without -Wunused-result",
+        .source = check_driver_unused_result_macro_arguments,
+        .options = { "-Wno-unused-result" },
+        .warnings = 8,
+        .notes = 9,
+        .c23 = true,
+    },
     {
         // Each spelling, its message (a standard nodiscard's alone) and its flag; warn_unused_result before const; a void
         // cast; a statement's, a comma's operands', a conditional's arms' (both must warn, the else arm's reported), a for

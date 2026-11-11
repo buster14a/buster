@@ -5,13 +5,20 @@
 // mappings and source pragmas are independent: a source mapping replaces the command-line baseline at its location.
 // The group relations and extension classes are checked against Clang 23.1.4, with original differential probes.
 
+// The warnings off by default that -pedantic (or -pedantic-errors) gives: GNU constant folding's, and an unevaluated
+// string literal's escapes' (#1447).
+static bool check_warning_pedantic(uint32_t id)
+{
+    return id == CHECK_WARNING_ID_GNU_CONSTANT || id == CHECK_WARNING_ID_NONSTANDARD_ESCAPE || id == CHECK_WARNING_ID_DELIMITED_ESCAPE;
+}
+
 static bool check_warning_extension(uint32_t id)
 {
     const bool extension = id == CHECK_WARNING_ID_GNU_CONSTANT || id == CHECK_WARNING_ID_ORDERED_POINTER_INTEGER ||
                            id == CHECK_WARNING_ID_MISSING_DECLARATIONS || id == CHECK_WARNING_ID_PLAIN_COMPLEX ||
                            id == CHECK_WARNING_ID_VARIABLE_SIZED_MEMBER || id == CHECK_WARNING_ID_MANY_SCALAR_BRACES ||
                            id == CHECK_WARNING_ID_UNDEFINED_INTERNAL || id == CHECK_WARNING_ID_C23_PARAMETER ||
-                           id == CHECK_WARNING_ID_UNKNOWN_ESCAPE_SEQUENCE;
+                           id == CHECK_WARNING_ID_UNKNOWN_ESCAPE_SEQUENCE || check_warning_pedantic(id);
     return extension;
 }
 
@@ -50,9 +57,10 @@ static bool check_warning_option(uint32_t id, String8 option)
     const bool unused = id == CHECK_WARNING_ID_UNUSED_VALUE || id == CHECK_WARNING_ID_UNUSED_COMPARISON || id == CHECK_WARNING_ID_UNUSED_RESULT;
     matches |= unused && (check_diagnostic_option(option, "-Wunused") || check_diagnostic_option(option, "-Wmost") || check_diagnostic_option(option, "-Wall"));
     matches |= wextra && (check_diagnostic_option(option, "-Wextra") || check_diagnostic_option(option, "-W"));
-    // -Wint-in-bool-context and -Wtautological-compare (with -Wtautological-constant-compare under it) are -Wmost's (#1447).
+    // -Wint-in-bool-context, -Wtautological-compare (with -Wtautological-constant-compare under it) and diagnose_if's
+    // -Wuser-defined-warnings are -Wmost's (#1447).
     const bool most = id == CHECK_WARNING_ID_INT_IN_BOOL_CONTEXT || id == CHECK_WARNING_ID_TAUTOLOGICAL_CONSTANT_COMPARE ||
-                      id == CHECK_WARNING_ID_FOR_LOOP_ANALYSIS;
+                      id == CHECK_WARNING_ID_FOR_LOOP_ANALYSIS || id == CHECK_WARNING_ID_USER_DEFINED_WARNINGS;
     matches |= most && (check_diagnostic_option(option, "-Wmost") || check_diagnostic_option(option, "-Wall"));
     // -Wconstant-conversion holds -Wbitfield-constant-conversion, which holds -Wsingle-bit-bitfield-constant-conversion;
     // -Wconversion holds all three, and -Wnon-gcc -Wconversion (#1447).
@@ -124,14 +132,14 @@ static CheckWarningCommandLine check_warning_command_line(const PPOptions* optio
         else if (strcmp(argument, "-pedantic-errors") == 0)
         {
             pedantic_errors = true;
-            if (id == CHECK_WARNING_ID_GNU_CONSTANT && mapped == CHECK_WARNING_IGNORE && !explicit_mapping)
+            if (check_warning_pedantic(id) && mapped == CHECK_WARNING_IGNORE && !explicit_mapping)
             {
                 mapped = CHECK_WARNING_WARNING;
             }
         }
         else if (strcmp(argument, "-pedantic") == 0)
         {
-            if (id == CHECK_WARNING_ID_GNU_CONSTANT && mapped == CHECK_WARNING_IGNORE && !explicit_mapping)
+            if (check_warning_pedantic(id) && mapped == CHECK_WARNING_IGNORE && !explicit_mapping)
             {
                 mapped = CHECK_WARNING_WARNING;
             }
@@ -171,5 +179,56 @@ static CheckWarningCommandLine check_warning_command_line(const PPOptions* optio
     }
     result.severity = result.quiet ? CHECK_WARNING_IGNORE : mapped;
     result.mapped = mapped;
+    return result;
+}
+
+// A grouped diagnose_if's command-line mapping (#1447): clang's custom diagnostic of warning group `group` (its index in
+// pp_features_warning), a warning by default or, for an "error", an error. Each option naming the group or a group that
+// holds it (pp_warning_group_holds) maps it in turn: -W a warning, -Wno- ignored, -Werror= an error, -Wfatal-errors= fatal,
+// -Wno-error= an error a warning. clang keeps none of these as the user's: -Weverything enables an ignored one wherever
+// it is, and -Wno-everything leaves it. Its severity before a source pragma; -Werror (*errors), which makes a warning an
+// error through any -Wno-error=, and -w (quiet), which ignores it unless it is an error by default and still one, apply
+// after one.
+static __attribute__((unused)) CheckWarningCommandLine check_warning_group_command_line(const PPOptions* options, uint32_t group, bool default_error, bool* errors_out)
+{
+    CheckWarningSeverity mapped = default_error ? CHECK_WARNING_ERROR : CHECK_WARNING_WARNING;
+    bool errors = false;
+    bool everything = false;
+    CheckWarningCommandLine result = { .quiet = options->suppress_warnings, .system_headers = options->system_header_warnings };
+    for (uint32_t i = 0; i < options->semantic_warning_option_count; i += 1)
+    {
+        const char* argument = options->semantic_warning_options[i];
+        const bool error = strncmp(argument, "-Werror=", 8) == 0;
+        const bool demote = strncmp(argument, "-Wno-error=", 11) == 0;
+        const bool fatal = strncmp(argument, "-Wfatal-errors=", 15) == 0;
+        const bool disable = !demote && strncmp(argument, "-Wno-", 5) == 0;
+        const uint32_t prefix = error ? 8 : demote ? 11 : fatal ? 15 : disable ? 5 : 2;
+        const bool named = strncmp(argument, "-W", 2) == 0;
+        const uint32_t holder = named ? pp_warning_group_index(argument + prefix) : UINT32_MAX;
+        const bool matches = holder != UINT32_MAX && pp_warning_group_holds(holder, group);
+        if (strcmp(argument, "-w") == 0)
+        {
+            result.quiet = true;
+        }
+        else if (strcmp(argument, "-Wsystem-headers") == 0 || strcmp(argument, "-Wno-system-headers") == 0)
+        {
+            result.system_headers = strcmp(argument, "-Wsystem-headers") == 0;
+        }
+        else if (strcmp(argument, "-Werror") == 0 || strcmp(argument, "-Wno-error") == 0)
+        {
+            errors = strcmp(argument, "-Werror") == 0;
+        }
+        else if (strcmp(argument, "-Weverything") == 0)
+        {
+            everything = true;
+        }
+        else if (matches)
+        {
+            mapped = error ? CHECK_WARNING_ERROR : fatal ? CHECK_WARNING_FATAL : disable ? CHECK_WARNING_IGNORE :
+                     demote ? (mapped == CHECK_WARNING_ERROR ? CHECK_WARNING_WARNING : mapped) : CHECK_WARNING_WARNING;
+        }
+    }
+    result.severity = mapped == CHECK_WARNING_IGNORE && everything ? CHECK_WARNING_WARNING : mapped;
+    *errors_out = errors;
     return result;
 }

@@ -54,6 +54,26 @@ static __attribute__((noinline)) void check_test_generic_builtin_sources(CheckTe
           "void f(void)\n{\n__builtin_verbose_trap(\"x\", (const char*)0);\n}\n", .rejected = true },
         { .name = "generic: verbose_trap of a dollar", .source =
           "void f(void)\n{\n__builtin_verbose_trap(\"a$b\", \"x\");\n}\n", .rejected = true },
+        // A const array's string (#1917's review): a known one's, an automatic array's, a const record's member array's and a
+        // const pointer's pointee's too, with a `$` is clang's error; one through a cast is refused by name, which clang
+        // rejects through void *.
+        { .name = "generic: verbose_trap of a const array's dollar", .source =
+          "static const char m[] = \"a$c\";\nvoid f(void)\n{\n__builtin_verbose_trap(\"x\", m);\n}\n", .rejected = true },
+        { .name = "generic: verbose_trap of a const array", .source =
+          "static const char m[] = \"abc\";\nvoid f(void)\n{\n__builtin_verbose_trap(\"x\", m + 1);\n}\n" },
+        { .name = "generic: verbose_trap of an automatic const array", .source =
+          "void f(void)\n{\nconst char m[] = \"abc\";\n__builtin_verbose_trap(\"x\", m);\n}\n" },
+        { .name = "generic: verbose_trap of an automatic const array's dollar", .source =
+          "void f(void)\n{\nconst char m[] = \"a$c\";\n__builtin_verbose_trap(\"x\", m);\n}\n", .rejected = true },
+        { .name = "generic: verbose_trap of a member array", .source =
+          "struct S { char a[4]; };\nstatic const struct S s = { \"abc\" };\nvoid f(void)\n{\n__builtin_verbose_trap(\"x\", s.a);\n}\n" },
+        { .name = "generic: verbose_trap of a member array's dollar", .source =
+          "struct S { char a[4]; };\nstatic const struct S s = { \"ab$\" };\nvoid f(void)\n{\n__builtin_verbose_trap(\"x\", s.a);\n}\n", .rejected = true },
+        { .name = "generic: verbose_trap of a const pointer's value", .source =
+          "static const char m[] = \"abc\";\nstatic const char* const p = m + 1;\nvoid f(void)\n{\n__builtin_verbose_trap(\"x\", p);\n}\n" },
+        { .name = "generic: verbose_trap of a const array through void *", .source =
+          "static const char m[] = \"a$c\";\nvoid f(void)\n{\n__builtin_verbose_trap(\"x\", (const char*)(const void*)m);\n}\n", .rejected = true,
+          .unsupported = true, .undecided = true },
         { .name = "generic: verbose_trap of a dollar under a cast", .source =
           "void f(void)\n{\n__builtin_verbose_trap(\"a\", (const char*)(\"x$\"));\n}\n", .rejected = true },
         { .name = "generic: verbose_trap of one argument", .source = "void f(void)\n{\n__builtin_verbose_trap(\"a\");\n}\n", .rejected = true },
@@ -522,7 +542,9 @@ static __attribute__((noinline)) void check_test_generic_builtin_sources(CheckTe
     {
         char description[192];
         snprintf(description, sizeof(description), "%s: expectation differs from Clang", fixtures[i].name);
-        check_test_expect(test, outcomes[i].rejected == fixtures[i].rejected, description);
+        // A refusal by name (`unsupported`) of what clang takes, or (`undecided`) of what it rejects, as test-checker's
+        // source fixtures read them.
+        check_test_expect(test, outcomes[i].rejected == (fixtures[i].rejected && (!fixtures[i].unsupported || fixtures[i].undecided)), description);
         check_test_source(test, fixtures + i, paths[i], outcomes + i);
     }
     for (uint32_t i = 0; i < FILE_COUNT; i += 1)
@@ -743,7 +765,8 @@ static __attribute__((noinline)) void check_test_generic_builtin_programs(CheckT
     // __builtin_clear_padding (#148): the bytes of objects filled with ones, then cleared, against clang's build: a struct's
     // holes and tail, bit-fields' unused bits and an unnamed one, a union's bytes no member holds, an x87 long double's last
     // six, a _BitInt's high bits, an atomic struct's, an ext vector's tail, an anonymous member's, arrays of structs in a
-    // loop (and of arrays), a volatile object, and a variable length array, which clang's code leaves as it is.
+    // loop (and of arrays), a volatile object, and a variable length array, which clang's code leaves as it is; an element
+    // past 4 KiB, and elements whose stores are many, a table's loop's (#1842).
     check_test_program_source(test,
         "void *memset(void *, int, unsigned long);static unsigned long long h;static void mix(unsigned long long v){h=h*31+v;}\n"
         "struct A{char c;int i;short s;};struct B{int x:3;int:4;unsigned y:9;char z;long double ld;};union U{char c;int i;struct{char a;short b;}s;};\n"
@@ -751,9 +774,9 @@ static __attribute__((noinline)) void check_test_generic_builtin_programs(CheckT
         "struct D{V v;char tail;};struct E{char c;struct{char d;long e;};};struct F{char c;int a[2][2];struct{char p:1;unsigned long q:50;}bits[2];};\n"
         "static void bytes(const void* p,unsigned long n){for(unsigned long i=0;i<n;i++)mix(((const unsigned char*)p)[i]);}\n"
         "#define T(decl) do{decl;memset((void*)&v,0xff,sizeof v);__builtin_clear_padding(&v);bytes((const void*)&v,sizeof v);}while(0)\n"
-        "static struct A big[300];\n"
+        "static struct A big[300];struct G{char c[5000];int i;char d;};struct H{char c;struct A a[64];short t:3;};struct I{struct H h[3];long double x[40];};\n"
         "int tested(int n){h=(unsigned)n;T(struct A v);T(struct B v);T(union U v);T(struct C v);T(struct D v);T(struct E v);T(long double v);T(struct F v);\n"
-        "T(struct A v[3]);T(struct A v[2][3]);T(volatile struct A v);T(_Complex long double v);memset(big,0xff,sizeof big);__builtin_clear_padding(&big);bytes(big,sizeof big);\n"
+        "T(struct A v[3]);T(struct A v[2][3]);T(struct G v);T(struct H v);T(struct I v);T(struct I v[2]);T(volatile struct A v);T(_Complex long double v);memset(big,0xff,sizeof big);__builtin_clear_padding(&big);bytes(big,sizeof big);\n"
         "int k=(n&3)+1;int vla[k];memset(vla,0xff,sizeof vla);__builtin_clear_padding(&vla);bytes(vla,sizeof vla);return (int)(h^(h>>32));}\n",
         "generic-clear-padding", clang);
     // va_arg of a Microsoft list (#148, clang's EmitMSVAArg) against clang's build: 8-byte slots built by hand, read as an
