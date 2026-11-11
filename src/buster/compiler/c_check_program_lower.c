@@ -3131,6 +3131,49 @@ static uint32_t check_lower_addressed_temporary(CheckLowerWriter* writer, uint8_
     return local;
 }
 
+// A global register variable's read (#1846, check_program_global_register), emitted, of value class `class`: rsp's by
+// STACK_SAVE, rbp's by FRAME_ADDRESS (which gives its function a frame pointer, as clang's code reads rbp in one), the
+// low half for esp's and ebp's. False for an object that is no such variable.
+static bool check_lower_global_register_read(CheckLowerWriter* writer, uint32_t object, uint8_t class)
+{
+    uint32_t bytes = 0;
+    const int32_t reg = check_program_global_register(writer->program, object, &bytes);
+    if (reg >= 0)
+    {
+        check_lower_emit(writer, reg == X86_REGISTER_RSP ? BUSTER_TYPED_STACK_SAVE : BUSTER_TYPED_FRAME_ADDRESS, BUSTER_TYPED_CLASS_U64, 0);
+        if (class != BUSTER_TYPED_CLASS_U64)
+        {
+            check_lower_emit(writer, BUSTER_TYPED_CONVERT, class, 0);
+        }
+    }
+    return reg >= 0;
+}
+
+// A global register variable's assignment `node` (#1846), of value class `class`: rsp set to the value, zero-extended
+// from esp's 4 bytes as clang's movl does, by STACK_RESTORE; the value stays the expression's. rbp's is refused by name:
+// Tier 0's frame is rbp's where the function has a frame pointer. False for an object that is no such variable.
+static bool check_lower_global_register_write(CheckLowerWriter* writer, uint32_t node, uint32_t object, uint8_t class)
+{
+    uint32_t bytes = 0;
+    const int32_t reg = object != 0 && object < writer->program->object_count ? check_program_global_register(writer->program, object, &bytes) : -1;
+    if (reg == X86_REGISTER_RBP)
+    {
+        check_lower_unsupported(writer, "assignments to global register variables in rbp or ebp");
+    }
+    else if (reg >= 0)
+    {
+        check_lower_instruction(writer, BUSTER_TYPED_STACK_RESTORE, BUSTER_TYPED_CLASS_U64, 0);
+        if (class != BUSTER_TYPED_CLASS_U64)
+        {
+            check_lower_instruction(writer, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U64, 0);
+            check_lower_instruction(writer, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U32, 0);
+        }
+        check_lower_instruction(writer, BUSTER_TYPED_DUP, class, 0);
+        check_lower_operand(writer, node, 1, false, check_stream_type(writer->program->stream, node));
+    }
+    return reg >= 0;
+}
+
 static void check_lower_address(CheckLowerWriter* writer, uint32_t object, int64_t offset)
 {
     if (object == 0)
@@ -3145,7 +3188,14 @@ static void check_lower_address(CheckLowerWriter* writer, uint32_t object, int64
     {
         const uint32_t local = check_lower_local_of(writer, object);
         const SymbolId symbol = writer->program->object_symbols[object];
-        if (local != BUSTER_CHECK_NONE && writer->indirect[local] != BUSTER_CHECK_LOWER_VLA_NONE)
+        uint32_t register_bytes = 0;
+        if (local == BUSTER_CHECK_NONE && check_program_global_register(writer->program, object, &register_bytes) >= 0)
+        {
+            // A global register variable has no address (#1846): clang's Sema refuses `&sp`, and the operations that would
+            // need one (an update, a memory operand) are refused by name.
+            check_lower_unsupported(writer, "this use of a global register variable");
+        }
+        else if (local != BUSTER_CHECK_NONE && writer->indirect[local] != BUSTER_CHECK_LOWER_VLA_NONE)
         {
             // A variable-length array's address, which its local holds once its allocation came: the control stream
             // allocates an array at its declaration, before any code in its scope, which no jump enters.
@@ -13437,6 +13487,11 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
         {
             check_lower_address(writer, object, value->offset);
         }
+        else if (value->category == CHECK_LVALUE && object != 0 && object < program->object_count && check_lower_local_of(writer, object) == BUSTER_CHECK_NONE &&
+                 check_lower_global_register_read(writer, object, class))
+        {
+            // A global register variable's read (#1846): its register's value.
+        }
         else if (value->category == CHECK_LVALUE && object != 0 && object < program->object_count &&
                  (check_lower_memory_class(class) || (__builtin_expect(writer->segments, 0) && check_lower_segment_override(types, value->type) != 0)) &&
                  check_lower_local_of(writer, object) == BUSTER_CHECK_NONE)
@@ -13856,6 +13911,10 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
     else if (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_BIT_XOR_ASSIGN && (check_stream_flags(stream, a) & BUSTER_CHECK_BIT_FIELD) != 0)
     {
         check_lower_bit_update(writer, node, discard);
+    }
+    else if (op == CHECK_OP_ASSIGN && graph->ops[a] == CHECK_OP_VALUE && check_lower_global_register_write(writer, node, check_stream_object(stream, a), class))
+    {
+        // A global register variable's assignment (#1846): its register set to the value, which stays the expression's.
     }
     else if ((op == CHECK_OP_ASSIGN || op == CHECK_OP_INITIALIZE) && aggregate)
     {
@@ -15174,14 +15233,41 @@ static bool check_lower_asm_segment(const CheckLowerWriter* writer, const CheckI
     return result;
 }
 
-// An asm operand's input value (place->type's): the operand's expression's, or an __m64's 8 bytes (#1846,
-// CheckAsmPlace.m64) loaded as an unsigned long through its object's address (CheckAsmPlace.object's).
+// The address of a copy of vector expression `node`'s value, of `type` (#1846): a frame object of its bytes, which the
+// value is stored into, or a transport vector's own address, which its value already is.
+static void check_lower_asm_vector_copy(CheckLowerWriter* writer, uint32_t node, TypeId type)
+{
+    if (check_lower_transport_type(writer->program->types, type))
+    {
+        check_lower_expression(writer, node, false, type);
+    }
+    else
+    {
+        const uint32_t local = check_lower_temporary_of(writer, type);
+        check_lower_instruction(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, local);
+        check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_VECTOR, local);
+        check_lower_expression(writer, node, false, type);
+    }
+}
+
+// An asm operand's input value (place->type's): the operand's expression's; an __m64's 8 bytes (#1846,
+// CheckAsmPlace.m64) loaded as an unsigned long through its object's address (CheckAsmPlace.object's), or a copy's for a
+// value of no object; or a packed vector's address (#1846, CheckAsmPlace.packed), a copy's.
 static void check_lower_asm_value(CheckLowerWriter* writer, const CheckAsmPlace* place, uint32_t node)
 {
-    if (place->m64)
+    if (place->m64 && place->object != BUSTER_CHECK_NONE)
     {
         check_lower_instruction(writer, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_U64, 0);
         check_lower_expression(writer, place->object, true, 0);
+    }
+    else if (place->m64)
+    {
+        check_lower_instruction(writer, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_U64, 0);
+        check_lower_asm_vector_copy(writer, node, check_stream_type(writer->program->stream, node));
+    }
+    else if (place->packed)
+    {
+        check_lower_asm_vector_copy(writer, node, place->type);
     }
     else
     {
@@ -15285,6 +15371,17 @@ static void check_lower_asm(CheckLowerWriter* writer, CheckControl control)
     else if (plan->helper != BUSTER_CHECK_NONE || plan->inlined)
     {
         const CheckProgramHelper* helper = plan->inlined ? 0 : writer->output->helpers.items + plan->helper;
+        for (uint32_t k = 0; k < count; k += 1)
+        {
+            // A global register variable in rbp (#1846) is its function's frame pointer, as clang's code has it: a frame
+            // address, dropped, gives the function one. Pushed first, it runs after the statement.
+            if (plan->places[k].global && plan->places[k].reg == X86_REGISTER_RBP)
+            {
+                check_lower_instruction(writer, BUSTER_TYPED_DISCARD, BUSTER_TYPED_CLASS_U64, 0);
+                check_lower_instruction(writer, BUSTER_TYPED_FRAME_ADDRESS, BUSTER_TYPED_CLASS_U64, 0);
+                break;
+            }
+        }
         const uint32_t object = plan->block != 0 ? check_lower_object(writer, plan->block, 3) : BUSTER_CHECK_NONE;
         const TypeId argument = BUSTER_TYPE_ULONG;
         // An asm goto's helper returns its exit (0 for the fall-through, a label's index plus one), which a temporary keeps
@@ -15414,7 +15511,7 @@ static void check_lower_asm(CheckLowerWriter* writer, CheckControl control)
                 check_lower_expression(writer, node, true, 0);
                 check_lower_asm_slot(writer, object, place->slot);
             }
-            else if (!passed && place->kind != BUSTER_CHECK_ASM_CONSTANT)
+            else if (!passed && place->kind != BUSTER_CHECK_ASM_CONSTANT && !place->global)
             {
                 check_lower_instruction(writer, BUSTER_TYPED_SET, class, 0);
                 check_lower_asm_value(writer, place, node);
@@ -15425,8 +15522,21 @@ static void check_lower_asm(CheckLowerWriter* writer, CheckControl control)
         {
             const CheckAsmPlace* place = plan->places + k;
             const uint32_t node = statement->operands[k].node;
-            const uint8_t class = check_lower_class(writer, place->type);
-            if (place->written && place->read && place->kind != BUSTER_CHECK_ASM_MEMORY)
+            // A packed vector's slots hold addresses (#1846).
+            const uint8_t class = place->packed ? BUSTER_TYPED_CLASS_U64 : check_lower_class(writer, place->type);
+            if (place->written && place->read && place->packed)
+            {
+                // A `+` packed vector's value: a copy's address, the copy loaded through the output's address the slot holds.
+                const uint32_t local = check_lower_temporary_of(writer, place->type);
+                check_lower_instruction(writer, BUSTER_TYPED_SET, BUSTER_TYPED_CLASS_U64, 0);
+                check_lower_instruction(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, local);
+                check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_VECTOR, local);
+                check_lower_instruction(writer, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_VECTOR, place->size);
+                check_lower_instruction(writer, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_U64, 0);
+                check_lower_asm_slot(writer, object, place->slot);
+                check_lower_asm_slot(writer, object, place->value);
+            }
+            else if (place->written && place->read && place->kind != BUSTER_CHECK_ASM_MEMORY)
             {
                 // A `+` register operand's value, through its address the slot holds.
                 check_lower_instruction(writer, BUSTER_TYPED_SET, class, 0);
@@ -15441,7 +15551,7 @@ static void check_lower_asm(CheckLowerWriter* writer, CheckControl control)
                 check_lower_expression(writer, node, true, 0);
                 check_lower_asm_slot(writer, object, place->slot);
             }
-            else if (place->kind != BUSTER_CHECK_ASM_CONSTANT)
+            else if (place->kind != BUSTER_CHECK_ASM_CONSTANT && !place->global)
             {
                 check_lower_instruction(writer, BUSTER_TYPED_SET, class, 0);
                 check_lower_asm_value(writer, place, node);
@@ -15503,7 +15613,7 @@ static void check_lower_asm(CheckLowerWriter* writer, CheckControl control)
                 check_lower_instruction(writer, BUSTER_TYPED_DISCARD, BUSTER_TYPED_CLASS_U64, 0);
                 check_lower_expression(writer, node, true, 0);
             }
-            else if (place->kind != BUSTER_CHECK_ASM_CONSTANT)
+            else if (place->kind != BUSTER_CHECK_ASM_CONSTANT && !place->global)
             {
                 check_lower_instruction(writer, BUSTER_TYPED_DISCARD, check_lower_class(writer, place->type), 0);
                 check_lower_asm_value(writer, place, node);

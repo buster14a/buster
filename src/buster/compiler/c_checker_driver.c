@@ -303,6 +303,9 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_INTERRUPT_HANDLER: result = "x86-64 'interrupt' attribute only applies to functions that have a 'void' return type"; break;
         case CHECK_INPUT_INTERRUPT_CALLED: result = "interrupt service routine cannot be called directly"; break;
         case CHECK_INPUT_ASM_CONSTRAINT: result = "invalid constraint in asm"; break;
+        case CHECK_INPUT_FILE_REGISTER: result = "illegal storage class on file-scoped variable"; break;
+        case CHECK_INPUT_REGISTER_NAME: result = "unknown register name in asm"; break;
+        case CHECK_INPUT_REGISTER_TYPE: result = "unsupported type for named register variable"; break;
         case CHECK_INPUT_BLOCK_EXTERN_INITIALIZER: result = "declaration of block scope identifier with linkage cannot have an initializer"; break;
         case CHECK_INPUT_DIAGNOSE_IF_ERROR: result = "diagnose_if attribute error"; break;
         case CHECK_INPUT_ENABLE_IF_CALL: result = "no matching function for call"; break;
@@ -4308,6 +4311,26 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                                 pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, report->note_token < count ? 1u : 0u,
                                                             "%s%.*s%s is unavailable%s%.*s", used_quote, (int)used_text.length, used_text.pointer, used_quote,
                                                             message.length != 0 ? ": " : "", (int)message.length, message.pointer);
+                            }
+                        }
+                        else if (phase == 0 && kind == CHECK_INPUT_REGISTER_NAME)
+                        {
+                            // An explicit register variable's label (#1846), as written.
+                            const CheckInputReport* report = input->reports + index;
+                            const uint32_t length = report->detail & ~(BUSTER_CHECK_REGISTER_NAME_UNSUITABLE | BUSTER_CHECK_REGISTER_NAME_SIZE);
+                            const char* text = (const char*)(uintptr_t)report->value;
+                            if ((report->detail & BUSTER_CHECK_REGISTER_NAME_SIZE) != 0)
+                            {
+                                pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "size of register '%.*s' does not match variable size", (int)length, text);
+                            }
+                            else if ((report->detail & BUSTER_CHECK_REGISTER_NAME_UNSUITABLE) != 0)
+                            {
+                                pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "register '%.*s' unsuitable for global register variables on this target",
+                                                      (int)length, text);
+                            }
+                            else
+                            {
+                                pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "unknown register name '%.*s' in asm", (int)length, text);
                             }
                         }
                         else if (phase == 0 && kind == CHECK_INPUT_ASM_CONSTRAINT)
