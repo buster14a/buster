@@ -16655,7 +16655,8 @@ static CheckLowerNodeCounts check_lower_node_counts(const CheckProgram* program)
         const __m512i conditional = _mm512_set1_epi32(CHECK_OP_CONDITIONAL);
         // A vector type's products, divisions, remainders and shifts may run element by element (check_lower_lanewise_op):
         // the two ranges of their ops, by unsigned compares of the ops less each range's first.
-        const bool vector_types = nodes != 0 && types != NULL && (logical_types || memchr(types->types.kind, BUSTER_TYPE_KIND_VECTOR, types->types.count) != NULL);
+        const bool vector_types = nodes != 0 && types != NULL && program->stream != NULL && check_stream_has_values(program->stream) &&
+                                  (logical_types || memchr(types->types.kind, BUSTER_TYPE_KIND_VECTOR, types->types.count) != NULL);
         const __m512i products = _mm512_set1_epi32(CHECK_OP_MULTIPLY);
         const __m512i product_assigns = _mm512_set1_epi32(CHECK_OP_MULTIPLY_ASSIGN);
         const __m512i operators = _mm512_set1_epi32(CHECK_OP_SHIFT_RIGHT - CHECK_OP_MULTIPLY);
@@ -16678,11 +16679,15 @@ static CheckLowerNodeCounts check_lower_node_counts(const CheckProgram* program)
             {
                 check_lower_node_count(program, first + (uint32_t)__builtin_ctz(lanes), &counts);
             }
-            // The rules' only term of a product, division, remainder or shift is its lanes' room, its type's alone.
+            // The rules' only term of a product, division, remainder or shift is its lanes' room, its type's alone: a
+            // scalar's kind, nearly every one's, is read from the table directly, and only another (a vector's, or a
+            // type with qualifiers' or alignment's wrapping) takes check_lower_lanewise_room.
             for (uint32_t lanes = lanewise; lanes != 0; lanes &= lanes - 1)
             {
                 const uint32_t node = first + (uint32_t)__builtin_ctz(lanes);
-                counts.transport_entries += check_lower_lanewise_room(program, node, graph->ops[node]);
+                const uint8_t kind = types->types.kind[type_index(check_stream_type(program->stream, node))];
+                const bool scalar = kind == BUSTER_TYPE_KIND_INTEGER || kind == BUSTER_TYPE_KIND_FLOATING || kind == BUSTER_TYPE_KIND_POINTER;
+                counts.transport_entries += scalar ? 0 : check_lower_lanewise_room(program, node, graph->ops[node]);
             }
         }
     }
