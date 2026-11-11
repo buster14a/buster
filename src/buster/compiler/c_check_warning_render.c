@@ -2466,6 +2466,12 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
             result = messages[payload->data < BUSTER_ARRAY_LENGTH(messages) ? payload->data : 0];
             break;
         }
+        case CHECK_WARNING_EVENT_NONSCALAR_SAME_CAST:
+        {
+            const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, payload->first_type, payload->name);
+            result = type.length != 0 ? check_warning_text(scratch, "C99 forbids casting nonscalar type %.*s to the same type", (int)type.length, type.pointer) : NULL;
+            break;
+        }
         case CHECK_WARNING_EVENT_UNREACHABLE_ASSOCIATION:
         {
             const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, payload->first_type, payload->name);

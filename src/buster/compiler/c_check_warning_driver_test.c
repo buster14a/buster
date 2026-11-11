@@ -2562,6 +2562,21 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .errors = 3,
     },
     {
+        // A record's casts (#2375, clang's CheckCStyleCast): to its own type -Wpedantic's "C99 forbids casting nonscalar type
+        // 'T' to the same type" at the cast's `(`, the type as written (a typedef's and a qualified one's); and to an
+        // arithmetic or pointer type the error "operand of type 'T' where arithmetic or pointer type is required" at the
+        // operand's first token, its type after lvalue conversion (a typedef's sugar kept, a const typedef's dropped).
+        .name = "casts of records",
+        .source = "struct S{int a;struct S*n;}s;union U{int a;float f;}u;typedef struct S T;typedef const struct S CT;T t;CT ct;\n"
+                  "struct S h(void);struct W{struct S in;}w,*wp;\n"
+                  "void g(struct S*p){(void)(struct S)s;(void)(union U)u;(void)(const struct S)s;(void)(T)t;(void)(CT)s;(void)(const T)t;\n"
+                  "(void)sizeof((T)t);(void)(int)t;(void)(int)ct;(void)(long)u;(void)(char*)s;(void)(int)h();(void)(int)w.in;\n"
+                  "(void)(int)wp->in;(void)(float)p[0];(void)(_Bool)*p;(void)(int)(s);}\n",
+        .options = { "-pedantic" },
+        .warnings = 7,
+        .errors = 10,
+    },
+    {
         .name = "unit end unused declarations alone",
         .source = "static int unused(void) { return 0; }\nstatic int unused_var;\nint main(void) { return 0; }\n",
         .options = { "-Wall" },

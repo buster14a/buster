@@ -2548,14 +2548,22 @@ What the lowering covers past scalars (#145's programs):
   member's type gets clang's "cast to union type from type 'T' not present in
   union", and a cast to a struct from another type its "used type 'T' where
   arithmetic or pointer type is required", both at the `(`
-  (`check_semantic_expression`). Differences left:
+  (`check_semantic_expression`). A cast to an arithmetic or pointer type from
+  a record (#2375) is clang's "operand of type 'T' where arithmetic or pointer
+  type is required", at the operand's first token (the getExprLoc of the
+  lvalue conversion clang wraps it in, a member access's base too), T its type
+  after that conversion: a typedef's sugar kept, a qualified one's dropped
+  (`CT ct; (int)ct` is `'struct S'`), a cast's as written. A record's cast to
+  its own type (#2375, `check_warning_graph_nonscalar_cast`) is `-Wpedantic`'s
+  "C99 forbids casting nonscalar type 'T' to the same type", at the cast's
+  `(`, T as written (`'const T' (aka 'const struct S')`), off by default and
+  given by `-pedantic` and `-Wpedantic`. Differences left:
   - a function designator's decayed type in that error drops its parameters'
     typedef names, as buster's other diagnostics of a decayed function do;
-  - clang's `-Wpedantic` "C99 forbids casting nonscalar type 'T' to the same
-    type" isn't given;
-  - a cast to a scalar from a record keeps the generic error, where clang says
-    "operand of type 'T' where arithmetic or pointer type is required" at the
-    operand.
+  - where an error follows at the same expression, clang gives the cast's
+    `-Wpedantic` or `-Wgnu-union-cast` warning first, and buster after it: a
+    scalar cast of a same-type cast (`(int)(T)t`), and a file-scope
+    initializer's "initializer element is not a compile-time constant".
 
   `test-checker`'s programs (`c_check_program_union_cast_test.c`) run each
   kind of member, static initializers and a transparent union's cast against

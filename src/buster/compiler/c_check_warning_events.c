@@ -196,6 +196,9 @@ enum
     CHECK_WARNING_ID_GNU_ARRAY_RANGE = 139,
     // An integer added to a string literal (#2190, clang's diagnoseStringPlusInt): -Wstring-plus-int, on by default.
     CHECK_WARNING_ID_STRING_PLUS_INT = 140,
+    // A cast of a struct or a union to its own type (#2375, clang's CheckCStyleCast, ext_typecheck_cast_nonscalar):
+    // -Wpedantic's own, off by default.
+    CHECK_WARNING_ID_NONSCALAR_SAME_CAST = 141,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -517,6 +520,9 @@ typedef enum CheckWarningEventKind
     // A GNU designator's -Wgnu-designator warning (#2202, check_input_gnu_designator) at its token: payload.data one of the
     // BUSTER_CHECK_GNU_DESIGNATOR_* forms.
     CHECK_WARNING_EVENT_GNU_DESIGNATOR,
+    // A record's cast to its own type (#2375, check_warning_graph_nonscalar_cast), at the cast's `(`: payload.first_type the
+    // cast's type, payload.name its spelling.
+    CHECK_WARNING_EVENT_NONSCALAR_SAME_CAST,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
 

@@ -187,6 +187,7 @@ static const CheckWarningDescription check_warning_descriptions[] =
     [CHECK_WARNING_ID_GNU_DESIGNATOR] = { "-Wgnu-designator", "-Wgnu", "use of GNU 'missing =' extension in designator" },
     [CHECK_WARNING_ID_GNU_ARRAY_RANGE] = { "-Wgnu-designator", "-Wgnu", "use of GNU array range extension" },
     [CHECK_WARNING_ID_STRING_PLUS_INT] = { "-Wstring-plus-int", NULL, "adding an integer to a string does not append to the string" },
+    [CHECK_WARNING_ID_NONSCALAR_SAME_CAST] = { "-Wpedantic", NULL, "C99 forbids casting nonscalar type to the same type" },
 };
 
 _Static_assert(BUSTER_ARRAY_LENGTH(check_warning_descriptions) == CHECK_WARNING_ID_COUNT, "every sparse policy ID has a description");
