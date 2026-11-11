@@ -102,10 +102,6 @@ static const SetupStep rerun_steps[] = {
         .kind = STEP_SETUP,
     },
     {
-        .name = "Check out the pull request's history",
-        .kind = STEP_SETUP,
-    },
-    {
         .name = "Check out reviewed first-party performance fixtures and acceptance harnesses",
         .kind = STEP_SETUP,
     },
