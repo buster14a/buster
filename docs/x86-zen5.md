@@ -288,7 +288,11 @@ selects for the IR's `extract` and `insert`. They were measured by one `--missin
 BUSTER_DEBUG_INFO=0` at `cb608c1` with the change): the extracts have a latency
 of 2 cycles and a throughput of 0.25, the inserts 2 and 0.5, each one macro-op. [The
 record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/ir-width-changes-1840-2026-11-09)
-(buster-performance#354) has the process's output.
+(buster-performance#354) has the process's output. Its permutes then added 19 more,
+measured the same way: `vpermb` of xmm and ymm registers, `vpermw` and
+`vpshufb` at every width, `vpermd` of ymm and zmm registers, `vpermq` of zmm
+ones, `valignd` and `valignq` at every width, and `vshufi64x2` of ymm and zmm
+registers.
 
 What the rows say, a few families (cycles; derived values in italics):
 
