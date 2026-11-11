@@ -20,7 +20,10 @@ on the calling thread, and the collective checks run on groups of 1, 2, 3 and
 - arenas: pushes at every power-of-two alignment up to 2 MB, invalid
   alignments, a push one byte past the capacity (it fails and leaves the arena
   as it was), sizes and counts whose arithmetic overflows, the page sizes
-  asked for, read back from `/proc/self/smaps`, a measuring arena's
+  asked for, read back from `/proc/self/smaps`, both where 2 MB or more of base
+  pages are mapped `MAP_STACK` and where they are advised (#1444: an arena's,
+  a busy host's and an arena of tables', the advice splitting the reservation
+  and `MAP_STACK` not) and the kernel releases that decide which, a measuring arena's
   (`arena_measure`) random pushes, which must take what a reserved arena's do,
   and, in children of an unsanitized build, 2 TiB of tables, which must commit
   uncharged where commit charge isn't bounded, and commits refused under a

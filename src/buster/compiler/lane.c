@@ -78,6 +78,7 @@
 #include <sys/prctl.h>
 #include <sys/resource.h>
 #include <sys/syscall.h>
+#include <sys/utsname.h>
 #include <linux/futex.h>
 
 // CPU architecture dependent includes: x86intrin.h has AMD's monitorx and mwaitx besides immintrin.h (lane_wait uses
@@ -243,6 +244,7 @@ static __attribute__((unused)) void arena_pool_release(ArenaPool* pool);
 // that started this one turned them off). Elsewhere the process keeps what it was started with, but on a busy host,
 // whose tasks runnable at the start are at least a quarter of its CPUs online (#672: arena_host_busy), its own arenas
 // take base pages (arena_pages_busy). That leaves the process's other memory, and the processes it starts, as they were.
+// It also reads the kernel's release, which says whether a reservation can be mapped base pages (arena_stack_base_pages).
 static __attribute__((unused)) void arena_page_policy(const char* setting);
 // Whether arena_page_policy found the host busy (#672): then every arena the process reserves is advised base pages
 // (MADV_NOHUGEPAGE over its mapping) and never huge ones, which --time-stages reports as `busy`. Set once, before the
@@ -253,6 +255,20 @@ extern bool arena_pages_busy;
 bool arena_pages_busy;
 #else
 static bool arena_pages_busy;
+#endif
+// Whether a mapping made with MAP_STACK is VM_NOHUGEPAGE from the start, as Linux's are since 6.7 (#1444): then a
+// reservation that its layout doesn't keep in base pages (arena_reserve_policy's base pages of 2 MB or more, a busy
+// host's arenas, an arena of tables of 2 MB or more) is mapped so, rather than advised MADV_NOHUGEPAGE by a call of its
+// own, which split its mapping and took the address space's lock for writing. A later MADV_HUGEPAGE replaces it where
+// an arena's huge pages start, as it replaced the advice. arena_page_policy sets it from the kernel's release, once,
+// before the process starts any thread; elsewhere, or on an older kernel, the reservations advise as before. main.c's
+// units share it.
+#if defined(BUSTER_UNIT) && BUSTER_UNIT != BUSTER_UNIT_DRIVER
+extern bool arena_stack_base_pages;
+#elif defined(BUSTER_UNIT)
+bool arena_stack_base_pages;
+#else
+static bool arena_stack_base_pages;
 #endif
 // An arena that holds no memory, for measuring what pushes take: its pushes take room as from an arena reserved at a
 // page boundary, up to BUSTER_ARENA_MAX_CAPACITY, and its length after them is that room. Its base is past the
@@ -478,6 +494,18 @@ static Arena arena_pool_take(ArenaPool* pool, uint32_t slot, uint64_t capacity, 
     return result;
 }
 
+// The flags of the mapping (`mapping_bytes`) that reserves an arena of `capacity` bytes, the first `small` of them base
+// pages: with arena_stack_base_pages, MAP_STACK, which maps it VM_NOHUGEPAGE throughout, where arena_reserve_policy
+// would advise MADV_NOHUGEPAGE (base pages of 2 MB or more, or a busy host's arena of 2 MB or more). Its huge pages past
+// `small`, if any, are advised MADV_HUGEPAGE by the first commit that reaches them (arena_commit), as without it: until
+// then they are inaccessible, whatever their advice.
+static int arena_reservation_flags(uint64_t capacity, uint64_t small, uint64_t mapping_bytes)
+{
+    const uint64_t base_pages = capacity > small ? small : mapping_bytes;
+    const bool advised = (arena_pages_busy && mapping_bytes >= BUSTER_ARENA_HUGE_PAGE_BYTES) || base_pages >= BUSTER_ARENA_HUGE_PAGE_BYTES;
+    return MAP_PRIVATE | MAP_ANONYMOUS | (advised && arena_stack_base_pages ? MAP_STACK : 0);
+}
+
 // Past the first `small` bytes, base is placed so that base + small starts on a huge-page boundary, a page or more past
 // the mapping's start. The reservation itself is inaccessible and uncharged under strict overcommit; arena_push makes
 // only its used prefix writable.
@@ -514,7 +542,7 @@ static Arena arena_reserve_policy(uint64_t capacity, uint64_t small, bool bounde
         allowed = allowed && arena_test_reservation_allowed(arena_mapping_bytes(requested));
 #endif
         errno = ENOMEM;
-        uint8_t* mapping = allowed ? mmap(0, mapping_bytes, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0) : MAP_FAILED;
+        uint8_t* mapping = allowed ? mmap(0, mapping_bytes, PROT_NONE, arena_reservation_flags(capacity, small, mapping_bytes), -1, 0) : MAP_FAILED;
         // Do not evade an injected failure. Valgrind may reject a valid oversized mapping with EINVAL rather than
         // ENOMEM. Both layout refusals get a bounded retry, never a greedy half-limit map.
         if (bounded && allowed && mapping == MAP_FAILED && (errno == ENOMEM || errno == EINVAL) && capacity > BUSTER_ARENA_COMPACT_BYTES)
@@ -522,7 +550,7 @@ static Arena arena_reserve_policy(uint64_t capacity, uint64_t small, bool bounde
             arena_compact = true;
             capacity = BUSTER_ARENA_COMPACT_BYTES;
             mapping_bytes = arena_mapping_bytes(capacity);
-            mapping = mmap(0, mapping_bytes, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+            mapping = mmap(0, mapping_bytes, PROT_NONE, arena_reservation_flags(capacity, small, mapping_bytes), -1, 0);
         }
         if (mapping != MAP_FAILED)
         {
@@ -535,12 +563,14 @@ static Arena arena_reserve_policy(uint64_t capacity, uint64_t small, bool bounde
                 offset = huge_begin - small - (uintptr_t)mapping;
             }
             const uint64_t base_pages = capacity > small ? small : mapping_bytes;
-            if (arena_pages_busy && mapping_bytes >= BUSTER_ARENA_HUGE_PAGE_BYTES)
+            // Where arena_reservation_flags mapped it VM_NOHUGEPAGE (arena_stack_base_pages), the mapping needs no advice.
+            const bool mapped = arena_stack_base_pages;
+            if (!mapped && arena_pages_busy && mapping_bytes >= BUSTER_ARENA_HUGE_PAGE_BYTES)
             {
                 // A busy host's arenas are base pages throughout: arena_commit advises none of them huge.
                 madvise(mapping, mapping_bytes, MADV_NOHUGEPAGE);
             }
-            else if (base_pages >= BUSTER_ARENA_HUGE_PAGE_BYTES)
+            else if (!mapped && base_pages >= BUSTER_ARENA_HUGE_PAGE_BYTES)
             {
                 madvise(mapping, offset + base_pages, MADV_NOHUGEPAGE);
             }
@@ -663,14 +693,18 @@ static Arena arena_reserve_tables(ArenaTable* tables, uint32_t count)
         allowed = arena_test_reservation_allowed(mapping_bytes);
 #endif
         errno = ENOMEM;
-        uint8_t* mapping = allowed ? mmap(0, mapping_bytes, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0) : MAP_FAILED;
+        // Base pages but where a table's huge pages are advised below: from 2 MB, by the mapping itself
+        // (arena_stack_base_pages: MAP_STACK) or else by advice.
+        const bool advised = bytes >= BUSTER_ARENA_HUGE_PAGE_BYTES;
+        const int flags = MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | (advised && arena_stack_base_pages ? MAP_STACK : 0);
+        uint8_t* mapping = allowed ? mmap(0, mapping_bytes, PROT_NONE, flags, -1, 0) : MAP_FAILED;
         if (mapping != MAP_FAILED)
         {
             // The base, `phase` past a huge-page boundary, a page or more past the mapping's start (and so at most a huge
             // page past it).
             const uintptr_t after_guard = (uintptr_t)mapping + BUSTER_ARENA_PAGE_BYTES;
             const uint64_t offset = BUSTER_ARENA_PAGE_BYTES + (huge ? (phase - after_guard) & (BUSTER_ARENA_HUGE_PAGE_BYTES - 1) : 0);
-            if (bytes >= BUSTER_ARENA_HUGE_PAGE_BYTES)
+            if (advised && !arena_stack_base_pages)
             {
                 madvise(mapping + offset, bytes, MADV_NOHUGEPAGE);
             }
@@ -782,6 +816,27 @@ static bool arena_host_busy(void)
     return result;
 }
 
+// Whether `release`, the kernel's (uname's), is Linux 6.7 or later, whose MAP_STACK maps a region VM_NOHUGEPAGE: its
+// major and minor numbers, compared in order. A release that doesn't start with them is taken for an older kernel.
+static bool arena_kernel_maps_stack_base_pages(const char* release)
+{
+    uint64_t numbers[2] = { 0, 0 };
+    uint32_t at = 0;
+    bool valid = true;
+    for (uint32_t part = 0; valid && part < 2; part += 1)
+    {
+        const uint32_t start = at;
+        while (release[at] >= '0' && release[at] <= '9' && at - start < 9)
+        {
+            numbers[part] = numbers[part] * 10 + (uint64_t)(release[at] - '0');
+            at += 1;
+        }
+        valid = at > start && (part == 1 || release[at] == '.');
+        at += part == 0 && valid ? 1 : 0;
+    }
+    return valid && (numbers[0] > 6 || (numbers[0] == 6 && numbers[1] >= 7));
+}
+
 // A huge page's first touch on a virtual machine made the host back all of it, whatever the arena used of it: on #1109's
 // 4-core VM a fault took about 1 ms, and the C driver's checking of main.c ran 2 to 4 times as long as with base pages, a
 // small unit 30% longer at the median and up to 7 times at the tail. On the 9700X a huge page clears in about 40 µs, and
@@ -790,6 +845,8 @@ static bool arena_host_busy(void)
 // one starts inherits. A process started with them off keeps them off.
 static void arena_page_policy(const char* setting)
 {
+    struct utsname kernel;
+    arena_stack_base_pages = uname(&kernel) == 0 && arena_kernel_maps_stack_base_pages(kernel.release);
     uint32_t eax = 0;
     uint32_t ebx = 0;
     uint32_t ecx = 0;
