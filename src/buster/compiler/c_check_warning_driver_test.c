@@ -2539,6 +2539,29 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .notes = 1,
     },
     {
+        // An ignored attribute's warning that -Werror promotes is an error too, so clang's ActOnEndOfTranslationUnit gives
+        // the unused file-scope variable no warning after it (#2232); without -Werror both warnings are given.
+        .name = "unit end unused declarations after a promoted ignored attribute",
+        .source = "void rel(int *p);\nstatic int q __attribute__((cleanup(rel)));\n",
+        .options = { "-Wall" },
+        .warnings = 2,
+    },
+    {
+        // GCC's cast to a union (#2301, clang's CheckCStyleCast): from a member's unqualified type after the operand's
+        // lvalue conversion (a qualified, an array's and a char's), -Wgnu-union-cast at the cast's `(` under -pedantic;
+        // from no member's type the error "cast to union type from type 'T' not present in union", the operand's type
+        // with its sugar; and a cast to a struct from another type "used type 'T' where arithmetic or pointer type is
+        // required", at the `(` too.
+        .name = "casts to unions",
+        .source = "typedef short ms;\nunion U{int*p;long*q;char c;int i;};struct S{int a;};\n"
+                  "int f(int n,const int k,int arr[2]){union U u=(union U)&n;union U v=(union U)arr;(void)(union U)(char)n;\n"
+                  "(void)(union U)k;(void)v;return *u.p;}\n"
+                  "int g(ms s,double d){(void)(union U)s;(void)(union U)d;(void)(struct S)s;return 0;}\n",
+        .options = { "-pedantic" },
+        .warnings = 4,
+        .errors = 3,
+    },
+    {
         .name = "unit end unused declarations alone",
         .source = "static int unused(void) { return 0; }\nstatic int unused_var;\nint main(void) { return 0; }\n",
         .options = { "-Wall" },

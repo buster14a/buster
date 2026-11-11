@@ -186,11 +186,14 @@ enum
     // (warn_cxx_compat_hack_fake_diagnostic_do_not_emit), whose policy makes the unsafe default-const-init words say "and
     // is incompatible with C++" (#2168).
     CHECK_WARNING_ID_CXX_COMPAT = 136,
+    // GCC's cast to a union from a member's type (#2301, clang's CheckCStyleCast): -Wgnu-union-cast, an extension off by
+    // default, under -Wgnu and -Wpedantic. (Its ID past -Wc++-compat's, 136.)
+    CHECK_WARNING_ID_GNU_UNION_CAST = 137,
     // GNU's designators (#2202, clang's parser's ParseInitializerWithPotentialDesignator): an array designation without its
     // `=` and an old-style `name:` field designator, on by default, and an array range designator, -pedantic's, all
     // -Wgnu-designator's.
-    CHECK_WARNING_ID_GNU_DESIGNATOR = 137,
-    CHECK_WARNING_ID_GNU_ARRAY_RANGE = 138,
+    CHECK_WARNING_ID_GNU_DESIGNATOR = 138,
+    CHECK_WARNING_ID_GNU_ARRAY_RANGE = 139,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -353,6 +356,9 @@ typedef enum CheckWarningEventKind
     CHECK_WARNING_EVENT_PRECEDENCE_ALWAYS_INLINE,
     CHECK_WARNING_EVENT_PRECEDENCE_FLATTEN,
     CHECK_WARNING_EVENT_PRECEDENCE_NOINLINE,
+    // An if's branches both clang::likely or both clang::unlikely (#2291, -Wignored-attributes), at the then branch's, with
+    // CHECK_WARNING_NOTE_CONFLICTING_ATTRIBUTE at the else branch's.
+    CHECK_WARNING_EVENT_LIKELIHOOD_CONFLICT,
     // An initializer's use of a member an unavailable attribute marks (#147, check_init_member_use): clang's error, which
     // no warning option maps, staged with the walk's warnings (check_driver_initializer_warning_events gives it). The
     // member's name in the payload's name, the attribute's message's string token in its token (or none); its note,
@@ -504,6 +510,8 @@ typedef enum CheckWarningEventKind
     // that isn't a qualifier, payload.first_type its type, payload.name its typedef's spelling (or 0), payload.data 0 for an
     // array's, 1 for a qualified one's.
     CHECK_WARNING_EVENT_UNREACHABLE_ASSOCIATION,
+    // GCC's cast to a union (#2301, check_warning_graph_union_cast), at the cast's `(`: its description's words.
+    CHECK_WARNING_EVENT_GNU_UNION_CAST,
     // A GNU designator's -Wgnu-designator warning (#2202, check_input_gnu_designator) at its token: payload.data one of the
     // BUSTER_CHECK_GNU_DESIGNATOR_* forms.
     CHECK_WARNING_EVENT_GNU_DESIGNATOR,

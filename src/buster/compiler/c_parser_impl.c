@@ -1148,6 +1148,34 @@ static uint32_t parse_scalar_skip_group(const ParseScalar* parser, uint32_t open
     return j;
 }
 
+// Whether the expression statement before token `i` is a name alone or a name's call, `retrn` or `whil (a)`, at the
+// statement's start (ParseDiagnostic.probe): after a `;`, a block's `{` or `}`, `else`, `do`, a label's or a case's `:`, or a
+// condition's or a for header's `)` (check_typo_statement_start). The `)` of the call is matched backwards, balanced.
+static bool parse_scalar_name_statement(const ParseScalar* parser, uint32_t i)
+{
+    uint32_t name = i != 0 && parser->kinds[i - 1] == PARSE_KIND_IDENTIFIER ? i - 1 : BUSTER_PARSE_NONE;
+    if (name == BUSTER_PARSE_NONE && i != 0 && parser->kinds[i - 1] == PARSE_KIND_R_PAREN)
+    {
+        uint32_t depth = 0;
+        uint32_t k = i - 1;
+        bool open = true;
+        while (open)
+        {
+            const uint8_t kind = parser->kinds[k];
+            depth += kind == PARSE_KIND_R_PAREN ? 1u : 0u;
+            depth -= kind == PARSE_KIND_L_PAREN ? 1u : 0u;
+            open = depth != 0 && k != 0 && kind != PARSE_KIND_SEMI && kind != PARSE_KIND_L_BRACE && kind != PARSE_KIND_R_BRACE;
+            k -= open ? 1u : 0u;
+        }
+        name = depth == 0 && k != 0 && parser->kinds[k] == PARSE_KIND_L_PAREN && parser->kinds[k - 1] == PARSE_KIND_IDENTIFIER ? k - 1 : BUSTER_PARSE_NONE;
+    }
+    const uint8_t kind = name != BUSTER_PARSE_NONE && name != 0 ? parser->kinds[name - 1] : PARSE_KIND_END;
+    const uint8_t role = name != BUSTER_PARSE_NONE && name != 0 ? parser->roles[name - 1] : PARSE_ROLE_COUNT;
+    const bool block = kind == PARSE_KIND_L_BRACE && role != PARSE_ROLE_OPEN_INITIALIZER && role != PARSE_ROLE_OPEN_COMPOUND_BODY;
+    return kind == PARSE_KIND_SEMI || block || kind == PARSE_KIND_R_BRACE || kind == PARSE_KIND_ELSE || kind == PARSE_KIND_DO ||
+           role == PARSE_ROLE_CLOSE_CONDITION || role == PARSE_ROLE_CLOSE_FOR || (kind == PARSE_KIND_COLON && role != PARSE_ROLE_CLOSE_TERNARY);
+}
+
 // After the first error at `token`, where clang's balanced tracker skips to the group's `closer` (its SkipUntil, which
 // stops at a `;`) and goes on as if the tokens from `token` to it weren't there: the diagnostic-only view drops them
 // (ParseDiagnostic.resume_delete). Without the closer before a `;`, nothing is resumed.
@@ -1260,8 +1288,10 @@ static void parse_scalar_unexpected(ParseScalar* parser, uint32_t i, const Parse
     {
         const uint8_t message = (frame->flags & BUSTER_PARSE_FRAME_DECLARATION) ? PARSE_MESSAGE_EXPECTED_SEMI_AT_END_OF_DECLARATION :
                                 frame->statement == PARSE_ITEM_RETURN ? PARSE_MESSAGE_EXPECTED_SEMI_AFTER_RETURN : PARSE_MESSAGE_EXPECTED_SEMI_AFTER_EXPRESSION;
-        parser->error_resumed = parser->error_token == BUSTER_PARSE_NONE && (frame->flags & BUSTER_PARSE_FRAME_DECLARATION) &&
-                                parse_scalar_resumes(parser, i);
+        const bool probe = parser->error_token == BUSTER_PARSE_NONE && message == PARSE_MESSAGE_EXPECTED_SEMI_AFTER_EXPRESSION && parse_scalar_name_statement(parser, i);
+        parser->error_resumed = probe || (parser->error_token == BUSTER_PARSE_NONE && (frame->flags & BUSTER_PARSE_FRAME_DECLARATION) &&
+                                          parse_scalar_resumes(parser, i));
+        parser->error_probe = probe;
         parse_scalar_error(parser, i, message, BUSTER_PARSE_AFTER_PREVIOUS);
     }
     else if (frame->role == PARSE_ROLE_OPEN_STRUCT)
@@ -4744,6 +4774,7 @@ static void parse_scalar_reset(ParseScalar* parser)
     parser->error_resume_delete = false;
     parser->error_resume_end = 0;
     parser->error_resume_colon = false;
+    parser->error_probe = false;
 }
 
 // The first error of the current top-level declaration, stopped at token `stopped`: its diagnostic, then the rest of
@@ -4768,6 +4799,7 @@ static uint32_t parse_scalar_recover(ParseScalar* parser, uint32_t stopped)
             .resume_delete = parser->error_resume_delete,
             .resume_end = parser->error_resume_end,
             .resume_colon = parser->error_resume_colon,
+            .probe = parser->error_probe,
         };
         parser->diagnostic_count += 1;
     }

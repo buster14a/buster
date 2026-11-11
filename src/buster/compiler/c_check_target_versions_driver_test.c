@@ -276,6 +276,21 @@ static void check_test_target_versions_diagnostics(CheckTest* test, const char* 
         // A version refused for its attribute isn't merged: no warning (#1920).
         "__attribute__((target(\"default\"))) int f(void) { return 0; }\n"
         "__attribute__((target(\"avx2\"), cold)) int f(void) { return 1; }\n",
+        // After a version's redefinition, the rejected unit's next reading leaves out an earlier redefinition whose
+        // attribute names a word another declaration's attribute names too (`noinline`): no use of a name it declares, so
+        // the errors after both are still clang's (#2137).
+        "__attribute__((noinline)) int w(void) { return 1; }\n"
+        "__attribute__((noinline)) int w(void) { return 2; }\n"
+        "int u(void) { return 1; }\n"
+        "__attribute__((target_clones(\"avx2\",\"default\"))) int u(void) { return 2; }\n"
+        "int t(void) { return 1; }\n"
+        "long __attribute__((cold)) t(void) { return 2; }\n",
+        "[[gnu::noinline]] int w(void) { return 1; }\n"
+        "[[gnu::noinline]] int w(void) { return 2; }\n"
+        "int u(void) { return 1; }\n"
+        "__attribute__((target_clones(\"avx2\",\"default\"))) int u(void) { return 2; }\n"
+        "int t(void) { return 1; }\n"
+        "long t(void) { return 2; }\n",
     };
     // Units whose warnings each option set below changes.
     static const char* const flagged[] = {

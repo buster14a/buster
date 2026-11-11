@@ -47,7 +47,7 @@ static __attribute__((unused)) IrLicmOptions ir_licm_options(void)
 static void ir_licm_classify(IrLicmWork* work)
 {
     const IrFunction* f = work->ir.function;
-    static const uint8_t safe[64] = {
+    static const uint8_t safe[BUSTER_IR_OP_TABLE] = {
         [IR_VCONST] = 1,
         [IR_VCMP] = 2,
         [IR_VSELECT] = 1,
@@ -90,7 +90,7 @@ static void ir_licm_classify(IrLicmWork* work)
         const uint32_t count = f->instruction_count - first < 16 ? f->instruction_count - first : 16;
         const __mmask16 valid = (UINT32_C(1) << count) - 1;
         const __m128i operations = _mm_maskz_loadu_epi8(valid, f->op + first);
-        const __m128i kinds = _mm512_castsi512_si128(_mm512_permutexvar_epi8(_mm512_zextsi128_si512(operations), _mm512_loadu_si512(safe)));
+        const __m128i kinds = _mm512_castsi512_si128(_mm512_permutex2var_epi8(_mm512_loadu_si512(safe), _mm512_zextsi128_si512(operations), _mm512_loadu_si512(safe + 64)));
         const __m128i tainted = _mm_maskz_loadu_epi8(valid, work->tainted + first);
         const __m128i flags = _mm_maskz_loadu_epi8(valid, f->flags + first);
         const __m128i types = _mm_maskz_loadu_epi8(valid, f->type + first);

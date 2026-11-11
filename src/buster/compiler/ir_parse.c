@@ -983,7 +983,8 @@ static void ir_parse_instruction(IrParseState* state)
                     if (row.c == BUSTER_IR_INTRINSIC_EXTRACT || row.c == BUSTER_IR_INTRINSIC_INSERT || row.c == BUSTER_IR_INTRINSIC_PERMUTE ||
                         row.c == BUSTER_IR_INTRINSIC_ALIGN || row.c == BUSTER_IR_INTRINSIC_SHUFFLE_LANES || row.c == BUSTER_IR_INTRINSIC_EXTEND ||
                         row.c == BUSTER_IR_INTRINSIC_TRUNCATE || row.c == BUSTER_IR_INTRINSIC_SHIFT ||
-                        row.c == BUSTER_IR_INTRINSIC_LANE_OP || ir_intrinsic_ternary(row.c) || row.c == BUSTER_IR_INTRINSIC_AES)
+                        row.c == BUSTER_IR_INTRINSIC_LANE_OP || ir_intrinsic_ternary(row.c) || row.c == BUSTER_IR_INTRINSIC_AES || row.c == BUSTER_IR_INTRINSIC_LANE_EXTRACT ||
+                        row.c == BUSTER_IR_INTRINSIC_LANE_INSERT || row.c == BUSTER_IR_INTRINSIC_MOVEMASK)
                     {
                         row.flags = (uint8_t)ir_parse_unsigned(state, 255, false);
                     }
@@ -993,7 +994,7 @@ static void ir_parse_instruction(IrParseState* state)
                 {
                     row.flags = BUSTER_IR_STACK_SAVE_FRAME;
                 }
-                if (row.op == IR_LOAD || row.op == IR_STORE || row.op == IR_ATOMIC_RMW)
+                if (row.op == IR_LOAD || row.op == IR_STORE || row.op == IR_ATOMIC_RMW || row.op == IR_MASKED_LOAD || row.op == IR_MASKED_STORE)
                 {
                     ir_parse_keyword(state, "align=");
                     const uint32_t alignment = (uint32_t)ir_parse_unsigned(state, UINT32_C(1) << 31, false);
@@ -1005,6 +1006,12 @@ static void ir_parse_instruction(IrParseState* state)
                     {
                         row.alignment_log2 = (uint8_t)__builtin_ctz(alignment);
                     }
+                }
+                if (row.op == IR_MASKED_LOAD || row.op == IR_MASKED_STORE)
+                {
+                    // A masked access's lanes (#1840), after its alignment, as its flags.
+                    ir_parse_keyword(state, "lanes=");
+                    row.flags = (uint8_t)ir_parse_named(state, ir_lane_names, IR_SIMD_LANE_COUNT);
                 }
                 if (row.op == IR_ATOMIC_RMW)
                 {
