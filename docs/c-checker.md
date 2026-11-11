@@ -5918,7 +5918,15 @@ warnings that need the completed graph or the parser's operator tree:
 `-Wlogical-not-parentheses`, `-Wparentheses` (assignment conditions and
 bitwise/equality precedence), `-Wempty-body`, `-Wself-assign`,
 `-Wreturn-stack-address`, `-Wformat`/`-Wformat-security`, `-Wswitch`,
-`-Wdangling-else` and `-Wuninitialized`. A conditional's
+`-Wdangling-else` and `-Wuninitialized`. `-Wstring-plus-int` (#2190, on by
+default, `check_common_string_plus_int`) is clang's `diagnoseStringPlusInt`: a
+`+` of a string literal, not parenthesized, and an operand of integer,
+boolean or enumeration type in either order, "adding 'T' to a string does not
+append to the string" at the `+` with its note, T the operand's type as
+written (a typedef's, `__size_t`'s sugar), given as the `+` is built; a `+`
+whose neighbor is no string literal is passed at once. Left: where a C23
+`u8"ab" + 1` is returned as a `const char *`, its `-Wpointer-sign` comes
+first, which clang gives after. A conditional's
 `-Wpointer-type-mismatch` and `-Wconditional-type-mismatch` (#2292,
 `check_driver_conditional_mismatch_message`) name its arms' types as clang's
 `checkConditionalPointerCompatibility` and `checkPointerIntegerMismatch` do,
