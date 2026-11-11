@@ -329,9 +329,19 @@ static String8 type_sugar_join(Arena* arena, String8 before, String8 middle, Str
     char* bytes = length != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, char, length) : NULL;
     if (bytes != NULL)
     {
-        memcpy(bytes, before.pointer, before.length);
-        memcpy(bytes + before.length, middle.pointer, middle.length);
-        memcpy(bytes + before.length + middle.length, after.pointer, after.length);
+        // An empty String8's pointer may be null, which memcpy doesn't take even for no bytes.
+        if (before.length != 0)
+        {
+            memcpy(bytes, before.pointer, before.length);
+        }
+        if (middle.length != 0)
+        {
+            memcpy(bytes + before.length, middle.pointer, middle.length);
+        }
+        if (after.length != 0)
+        {
+            memcpy(bytes + before.length + middle.length, after.pointer, after.length);
+        }
     }
     return bytes != NULL ? (String8){ .pointer = bytes, .length = length } : (String8){ 0 };
 }
