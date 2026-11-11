@@ -1213,6 +1213,9 @@ struct CheckTestTier1Build
     // Its machine rows and the moves around them into their roles' registers and out of them (#1283).
     uint64_t machine_rows;
     uint64_t row_moves;
+    // The functions whose code --verify's certificate proved, and those it left uncertified (#939).
+    uint64_t code_certified;
+    uint64_t code_uncertified;
     bool reported;
 };
 
@@ -1271,7 +1274,8 @@ static bool check_test_tier1_build_names(const char* executable, const char* sou
                       check_test_tier1_field(text, "spill_stores", &build->stores) && check_test_tier1_field(text, "spill_loads", &build->loads) &&
                       check_test_tier1_field(text, "spill_slots", &build->slots) && check_test_tier1_field(text, "frame_bytes", &build->frame) &&
                       check_test_tier1_field(text, "call_stores", &build->call_stores) && check_test_tier1_field(text, "machine_rows", &build->machine_rows) &&
-                      check_test_tier1_field(text, "row_moves", &build->row_moves);
+                      check_test_tier1_field(text, "row_moves", &build->row_moves) && check_test_tier1_field(text, "code_certified", &build->code_certified) &&
+                      check_test_tier1_field(text, "code_uncertified", &build->code_uncertified);
     const bool taken = check_test_tier1_taken(text, names, name_count);
     if (status != 0 && text != NULL)
     {
@@ -3033,6 +3037,12 @@ static void check_test_driver_tier1_asm(CheckTest* test, const char* clang, cons
             CheckTestTier1Build build;
             const bool compiled = check_test_tier1_build(executable, unit, "", program, rematerialize != 0, path != 0, false, false, NULL, &build);
             check_test_expect(test, compiled, "the asm bodies' fixture compiles by --tier1, every function Tier 1's");
+            // --verify certifies the code of every function with an asm body (#1839, tier1_cert_emitted_asm): only the
+            // x87's long doubles' (tier1_sqrtl's, tier1_fmodl's and main's) are left uncertified.
+            char message[256];
+            snprintf(message, sizeof(message), "the asm bodies' fixture's code is certified but the long doubles' functions' (%" PRIu64 " certified, %" PRIu64 " not)", build.code_certified,
+                     build.code_uncertified);
+            check_test_expect(test, compiled && build.code_certified == 11 && build.code_uncertified == 3, message);
             char actual[4096] = { 0 };
             check_test_expect(test, compiled && check_test_driver_capture(program, actual, sizeof(actual)) && strcmp(actual, expected) == 0,
                               "Tier 1's asm bodies print clang -O0's build's output");
@@ -3123,6 +3133,8 @@ static void check_test_driver_tier1_asm_masks(CheckTest* test, const char* clang
             CheckTestTier1Build build;
             const bool compiled = check_test_tier1_build(executable, unit, "tier1_kept", program, rematerialize != 0, path != 0, false, false, "-march=x86-64-v4", &build);
             check_test_expect(test, compiled, "the asm bodies' opmask fixture compiles by --tier1, tier1_kept Tier 1's");
+            // --verify certifies every function's code (immintrin.h's among them), tier1_kept's asm body and the masks saved around it (#1839).
+            check_test_expect(test, compiled && build.code_certified == 7 && build.code_uncertified == 0, "the asm bodies' opmask fixture's code is certified, its intrinsics' functions' with it");
             char actual[256] = { 0 };
             check_test_expect(test, !host || (compiled && check_test_driver_capture(program, actual, sizeof(actual)) && strcmp(actual, expected) == 0),
                               "Tier 1 keeps the masks live across a template that writes k1 to k7, as clang -O0's build does");

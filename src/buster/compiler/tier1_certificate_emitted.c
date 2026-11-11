@@ -34,6 +34,11 @@
 //   and its class's first operand, as Tier 0's placement has them, or operands no record writes. Its records are one
 //   ORIGINAL, as a node's; the operands' staging into their roles' registers, the result's move out and the borrowed
 //   opmask registers' saves and reloads around it are moves, decoded as any.
+// - An asm body (TIER1_RULE_ASM, #1839) is its records placed by the certificate (the operand block's addresses from the
+//   frame base register, by the layout) and compared, its own branches exactly the body's; one ORIGINAL that reads no
+//   value and kills every register the body touches (IrAsmBody.touched, .masks: the front end's account of the
+//   template, trusted as the IR) and the frame bytes its stores write. A record of a form the semantics' tables don't
+//   cover writes no register but those. The saves and reloads of the values live in those registers around it are moves.
 // - A by-value aggregate (#789): a parameter's copy at entry, a call's argument copies (into staging slots, zmm16 and on,
 //   stack slots or the outgoing area), its parts' loads, the hidden pointer, the result parts' stores and the function's
 //   own result are regenerated as the emitter writes them (tier1_emit_copy_bytes', tier1_emit_store_part's) and
@@ -62,8 +67,7 @@
 //
 // Not decoded yet, so not certified, each counted by its reason (Tier1CertEmittedReason): stack parameters and arguments
 // where the frame base register doesn't reach them, dynamic frames (alloca, a dynamic outgoing area, a realigned frame
-// whose frame base register isn't rsp), a probe's prologue, a variadic definition's register save area, an asm body's
-// records (#1839, TIER1_RULE_ASM: a template whose effects the IR doesn't say), the x87's values
+// whose frame base register isn't rsp), a probe's prologue, a variadic definition's register save area, the x87's values
 // (a long double's, an aggregate's x87 parts), indirect jumps to several labels, an entry block that is a loop's, and a
 // machine row of a form x86 semantics' effects don't cover or whose records name a role's register implicitly. The
 // allocation's own certificate (tier1_certificate_cfg.c) still covers them. Canonical 32-bit storage (a 4-byte value's upper half zero) is the selection's contract and isn't
@@ -91,8 +95,6 @@ typedef enum Tier1CertEmittedReason
     // implicitly (#1284: its one ORIGINAL wouldn't say when); a long double's (its x87 stack).
     TIER1_CERT_EMITTED_VECTOR,
     TIER1_CERT_EMITTED_X87,
-    // An asm body's records (#1839), the front end's template, whose own branches and registers the decoding doesn't follow.
-    TIER1_CERT_EMITTED_ASM,
     // The code doesn't decode to its own certificate: a refusal.
     TIER1_CERT_EMITTED_ORIGIN,
     TIER1_CERT_EMITTED_DECODE,
@@ -123,7 +125,6 @@ static __attribute__((unused)) const char* tier1_cert_emitted_reason_name(Tier1C
         "probe",
         "vector",
         "x87",
-        "asm",
         "origin",
         "decode",
         "kernel",
@@ -727,6 +728,9 @@ struct Tier1CertEmittedKernel
     uint32_t outgoing;
     // A call's: every register the ABI lets its callee change is killed after its arguments are read.
     bool call;
+    // An asm body's (#1839, TIER1_RULE_ASM): its records of forms x86 semantics doesn't cover write only memory, and every
+    // register it touches (IrAsmBody.touched, .masks) is killed after it, as the front end's account of its template.
+    const IrAsmBody* body;
 };
 
 // A use of `value` at `location`: one for each distinct pair, so that a value read at two locations (a call's argument
@@ -1516,6 +1520,23 @@ static bool tier1_cert_emitted_span(Tier1CertEmittedSpans* spans, int64_t start,
     return room;
 }
 
+// Span [start, end) merged into the last span of its range (`entry`), widening it over the bytes between them: where
+// the spans have no room left.
+static bool tier1_cert_emitted_widen(Tier1CertEmittedSpans* spans, int64_t start, int64_t end, bool entry)
+{
+    uint32_t last = spans->count;
+    for (uint32_t k = 0; k < spans->count; k += 1)
+    {
+        last = spans->entries[k] == entry ? k : last;
+    }
+    if (last < spans->count)
+    {
+        spans->starts[last] = start < spans->starts[last] ? start : spans->starts[last];
+        spans->ends[last] = end > spans->ends[last] ? end : spans->ends[last];
+    }
+    return last < spans->count;
+}
+
 // The spans' frame storage, as locations of 64 bytes at most onto `clobbers` (`capacity` of them past `*count` at
 // most): each span's bytes that are in its range of units, an entry offset's the frame base register's where the frame
 // has their distance (tier1_cert_emitted_entry_frame).
@@ -1574,6 +1595,12 @@ static bool tier1_cert_emitted_originals(Tier1CertEmittedBuild* build, uint32_t 
         uint16_t opmasks = 0;
         const X86Instruction record = records[r];
         x86_instruction_effects_opmasks_scalar(&record, &read, &written, &opmasks);
+        // An asm body's record of a form the semantics' tables don't cover (cpuid, the x87's, MMX's): its registers are
+        // the body's touched ones, killed below, and of the rest it writes at most memory through its operand; the front
+        // end placed no record of the stack's or control's in a body (check_asm_inline_touched).
+        const bool unknown = kernel->body != 0 && x86_effects(record.form)->operation == X86_OPERATION_NONE;
+        written = unknown ? ((record.mode & BUSTER_X86_MODE_MEMORY) != 0 ? BUSTER_X86_RESOURCE_MEMORY : 0) : written;
+        opmasks = unknown ? 0 : opmasks;
         writes |= written;
         masks |= opmasks;
         // A copy is a 64-bit mov between general registers with no other field: its destination then holds what its
@@ -1604,13 +1631,22 @@ static bool tier1_cert_emitted_originals(Tier1CertEmittedBuild* build, uint32_t 
         if ((written & BUSTER_X86_RESOURCE_MEMORY) != 0 && tier1_cert_emitted_frame_operand(build, records[r], &at, &entry))
         {
             const X86FormDescription* description = x86_form_description(records[r].form & (BUSTER_X86_FORM_FIXUP - 1));
-            valid = valid && tier1_cert_emitted_span(&spans, at, at + (description->operand_bytes != 0 ? description->operand_bytes : BUSTER_CERT_MAX_WIDTH), entry);
+            const int64_t end = at + (description->operand_bytes != 0 ? description->operand_bytes : BUSTER_CERT_MAX_WIDTH);
+            // An asm body's stores past the spans' room widen the last one of their range (more killed, never less).
+            valid = valid && (tier1_cert_emitted_span(&spans, at, end, entry) || (kernel->body != 0 && tier1_cert_emitted_widen(&spans, at, end, entry)));
         }
     }
     for (uint32_t reg = 0; reg < 16; reg += 1)
     {
         writes &= holds[reg] == reg ? ~BUSTER_X86_RESOURCE_GPR(reg) : ~UINT64_C(0);
     }
+    // An asm body's touched registers (rax to r15 in bits 0 to 15, xmm0 to xmm15 in bits 16 to 31) and opmask ones.
+    for (uint32_t reg = 0; kernel->body != 0 && reg < 16; reg += 1)
+    {
+        writes |= ((kernel->body->touched >> reg) & 1) != 0 ? BUSTER_X86_RESOURCE_GPR(reg) : 0;
+        writes |= ((kernel->body->touched >> (16 + reg)) & 1) != 0 ? BUSTER_X86_RESOURCE_VECTOR(reg) : 0;
+    }
+    masks |= kernel->body != 0 ? (uint16_t)((uint16_t)kernel->body->masks << 8) : 0;
     // A call's callee may change every caller-saved register (the SysV ABI's: rax, rcx, rdx, rsi, rdi, r8 to r11, every
     // xmm and opmask register), which x86_semantics' effects of the call instruction itself don't say; and it owns its
     // outgoing area.
@@ -1840,10 +1876,6 @@ static Tier1CertEmittedReason tier1_cert_emitted_supported(const Tier1SelectPlan
         if (rule == TIER1_RULE_ALLOCA || rule == TIER1_RULE_ALLOCA_IMMEDIATE || rule == TIER1_RULE_STACK_RESTORE)
         {
             reason = TIER1_CERT_EMITTED_DYNAMIC;
-        }
-        else if (!plan->covered[node] && rule == TIER1_RULE_ASM)
-        {
-            reason = TIER1_CERT_EMITTED_ASM;
         }
         else if (op == IR_PARAM && tier1_select_entry_parameter(function, node) && tier1_select_parameter_place(function, function->a[node]).kind != BUSTER_TIER1_PLACE_GENERAL &&
                  tier1_select_parameter_place(function, function->a[node]).kind != BUSTER_TIER1_PLACE_VECTOR)
@@ -2563,6 +2595,54 @@ static bool tier1_cert_emitted_row(Tier1CertEmittedBuild* build, uint32_t node, 
     return valid;
 }
 
+// An asm body's node (#1839, TIER1_RULE_ASM; tier1_emit_cfg_asm) is its records [r, end), between the saves and the
+// restores of the values in the registers it touches, which are moves, decoded as any. The certificate places the body's
+// records itself, from the IR's (the front end's template, trusted as a row's is): each that addresses the operand block
+// (BUSTER_TIER0_ASM_BLOCK) addressing the block's frame object from the frame base register, by the frame's layout; and
+// compares them with the emitted ones, which carry no reference. The body's own branches are exactly its branches, each
+// to its target's record (its end's for one to the body's end), and no other branch leaves its records. The records
+// are one ORIGINAL, of no use and no definition: they read the block's memory, which isn't a value the allocation keeps,
+// and kill every register the body touches (IrAsmBody.touched and .masks: callee-saved ones too, which the prologue
+// saved) and the frame bytes their stores write.
+static bool tier1_cert_emitted_asm(Tier1CertEmittedBuild* build, uint32_t node, uint32_t r, uint32_t end)
+{
+    const IrFunction* function = build->plan->function;
+    const Tier1EmitResult* emitted = build->emitted;
+    const uint32_t index = (uint32_t)build->plan->patterns[node].immediate;
+    const IrCall* call = function->op[node] == IR_CALL ? &function->calls[function->b[node]] : 0;
+    const IrAsmBody* body = call != 0 && call->body != 0 && index < function->asm_body_count && call->body == index + 1 ? &function->asm_bodies[index] : 0;
+    const uint32_t block = body != 0 && call->argument_count == 1 ? function->extra[call->argument_first] : BUSTER_IR_NONE;
+    int32_t offset = 0;
+    bool valid = body != 0 && end >= r && end - r == body->count &&
+                 (block == BUSTER_IR_NONE || (block < function->instruction_count && function->op[block] == IR_STACK_ADDR && tier1_emit_cfg_object(function, emitted, function->a[block], &offset)));
+    uint32_t branch = 0;
+    for (uint32_t k = 0; valid && k < body->count; k += 1)
+    {
+        X86Instruction record = body->records[k];
+        const bool addressed = (record.mode & BUSTER_X86_MODE_MEMORY) != 0 && (record.mode & BUSTER_X86_MODE_BASE) != 0 && record.rm == BUSTER_TIER0_ASM_BLOCK;
+        valid = !addressed || block != BUSTER_IR_NONE;
+        record.rm = addressed ? build->base : record.rm;
+        record.displacement += addressed ? offset : 0;
+        valid = valid && tier1_cert_emitted_exactly(emitted->code.records[r + k], record) && tier1_cert_emitted_take_reference(build, r + k, 0);
+        // Its branch, exactly the body's, or none.
+        const bool branches = branch < body->branch_count && body->branches[branch] == k;
+        const uint32_t found = build->branch_of[r + k];
+        valid = valid && (branches ? found != UINT32_MAX && body->targets[branch] <= body->count && emitted->code.targets[found] == r + body->targets[branch] : found == UINT32_MAX);
+        branch += branches ? 1 : 0;
+    }
+    valid = valid && branch == body->branch_count;
+    valid = valid || tier1_cert_emitted_refuse(build, TIER1_CERT_EMITTED_KERNEL, r);
+    Tier1CertEmittedKernel kernel = {
+        .referenced = UINT32_MAX,
+        .definition = BUSTER_TIER1_CFG_NONE,
+        .definition_location = BUSTER_CERT_NONE,
+        .condition = X86_FORM_NONE,
+        .body = body,
+    };
+    // The emitted records, each now its placement's.
+    return valid && tier1_cert_emitted_originals(build, node, &kernel, emitted->code.records + r, body->count);
+}
+
 // The function's own aggregate result's records [r, end) (#789, #1284; tier1_emit_cfg_aggregate_result's, before its
 // return's epilogue), from the address `address` (a node) in general register `source`: in registers, each part's bytes
 // copied into its staging slots, defining its value there (tier1_cert_emitted_result_part), then its register loaded from
@@ -2754,6 +2834,17 @@ static bool tier1_cert_emitted_run(Tier1CertEmittedBuild* build, uint32_t node, 
         *next = end;
         return tier1_cert_emitted_row(build, node, r, end);
     }
+    // An asm body's (#1839): its records, tier1_cert_emitted_asm's.
+    if (!build->plan->covered[node] && build->plan->patterns[node].rule == TIER1_RULE_ASM)
+    {
+        uint32_t end = r;
+        while (end < tail && emitted->origins[end] == origin)
+        {
+            end += 1;
+        }
+        *next = end;
+        return tier1_cert_emitted_asm(build, node, r, end);
+    }
     Tier1CertEmittedKernel kernel = { 0 };
     // A call's by-value aggregates' steps before it, all decoded (#789, #1284).
     bool valid = !calls || (tier1_cert_emitted_steps_begin(build, node) && (build->step_next == build->step_before || tier1_cert_emitted_refuse(build, TIER1_CERT_EMITTED_KERNEL, r)));
@@ -2853,7 +2944,9 @@ static bool tier1_cert_emitted_flush(Tier1CertEmittedBuild* build, uint32_t* cur
     {
         // A machine row with no records of its node's (#1284): its moves into place alone, before it.
         const bool row = !plan->covered[n] && plan->patterns[n].rule == TIER1_RULE_ROW;
-        bool silent = row || tier1_cert_emitted_silent(build->emitted, plan, n);
+        // An asm body with no records of its node's (#1839): an empty template's, its saves and restores alone.
+        const bool body = !plan->covered[n] && plan->patterns[n].rule == TIER1_RULE_ASM;
+        bool silent = row || body || tier1_cert_emitted_silent(build->emitted, plan, n);
         const bool branch = function->op[n] == IR_CBR && !plan->covered[n] && degree == 2;
         Tier1CertEmittedKernel kernel = { 0 };
         if (!silent || branch)
@@ -2868,8 +2961,8 @@ static bool tier1_cert_emitted_flush(Tier1CertEmittedBuild* build, uint32_t* cur
             const IrFunction* f = function;
             const bool selected = !plan->covered[n] && f->op[n] != IR_PHI && !tier1_select_entry_parameter(f, n) && f->op[n] != IR_BR && f->op[n] != IR_CBR && f->op[n] != IR_BR_INDIRECT;
             const bool kept = selected && build->emitted->dropped[n] == 0;
-            valid = row ? tier1_cert_emitted_row(build, n, record, record) : !kept || (tier1_cert_emitted_kernel(build, n, &kernel) && kernel.count == 0);
-            silent = row || !kept;
+            valid = row ? tier1_cert_emitted_row(build, n, record, record) : body ? tier1_cert_emitted_asm(build, n, record, record) : !kept || (tier1_cert_emitted_kernel(build, n, &kernel) && kernel.count == 0);
+            silent = row || body || !kept;
         }
         if (valid && branch)
         {
@@ -3387,7 +3480,10 @@ static Tier1CertEmittedReason tier1_certificate_emitted_debug(const Tier1SelectP
         const uint32_t t = code->targets[k];
         valid = r < records && t <= records && build.branch_of[r] == UINT32_MAX;
         const Tier1Origin kind = valid ? tier1_cert_emitted_kind(emitted->origins[r]) : TIER1_ORIGIN_NONE;
-        valid = valid && (kind == TIER1_ORIGIN_CONTROL || (kind == TIER1_ORIGIN_FRAME && t < records && emitted->origins[t] == emitted->origins[r]));
+        // An asm body's own (#1839), which tier1_cert_emitted_asm matches with the body's branches.
+        const uint32_t node = emitted->origins[r] & BUSTER_TIER1_ORIGIN_PAYLOAD;
+        const bool body = kind == TIER1_ORIGIN_NODE && node < plan->function->instruction_count && !plan->covered[node] && plan->patterns[node].rule == TIER1_RULE_ASM;
+        valid = valid && (kind == TIER1_ORIGIN_CONTROL || body || (kind == TIER1_ORIGIN_FRAME && t < records && emitted->origins[t] == emitted->origins[r]));
         valid = valid || tier1_cert_emitted_refuse(&build, TIER1_CERT_EMITTED_CONTROL, r);
         build.branch_of[valid ? r : records] = k;
     }
