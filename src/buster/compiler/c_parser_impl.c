@@ -3288,14 +3288,16 @@ static bool parse_scalar_counted_member(const ParseScalar* parser, const ParseFr
 
 // clang's attributes whose arguments its parser reads its own way, as no expressions (#1447): availability's
 // (ParseAvailabilityAttribute), external_source_symbol's (ParseExternalSourceSymbolAttribute) and type_tag_for_datatype's
-// (ParseTypeTagForDatatypeAttribute: a kind, a type name and flags) and objc_bridge_related's (ParseObjCBridgeRelatedAttribute:
-// a class and selectors), by their GNU names, a keyword's underscores too. Their arguments are a balanced run of tokens,
+// (ParseTypeTagForDatatypeAttribute: a kind, a type name and flags), objc_bridge_related's (ParseObjCBridgeRelatedAttribute:
+// a class and selectors) and swift_newtype's and swift_wrapper's (ParseSwiftNewTypeAttribute: `struct` or `enum`), by their
+// GNU names, a keyword's underscores too. Their arguments are a balanced run of tokens,
 // which the checker reads as clang's parser does.
 static bool parse_scalar_custom_attribute(const ParseScalar* parser, IdentId name)
 {
     return parse_scalar_attribute_spelled(parser, name, true, "availability") || parse_scalar_attribute_spelled(parser, name, true, "external_source_symbol") ||
            parse_scalar_attribute_spelled(parser, name, true, "type_tag_for_datatype") ||
-           parse_scalar_attribute_spelled(parser, name, true, "objc_bridge_related");
+           parse_scalar_attribute_spelled(parser, name, true, "objc_bridge_related") || parse_scalar_attribute_spelled(parser, name, true, "swift_newtype") ||
+           parse_scalar_attribute_spelled(parser, name, true, "swift_wrapper");
 }
 
 // An expression parse failure inside a GNU attribute can follow an earlier malformed string slot. Clang's
@@ -10523,7 +10525,8 @@ static bool parse_statements_vector(ParseKernels* kernels, uint32_t count, Parse
 }
 
 // The kernels read a GNU attribute's arguments as an expression's, where the scalar parser reads availability's,
-// external_source_symbol's, type_tag_for_datatype's and objc_bridge_related's as a balanced run of tokens (#1447,
+// external_source_symbol's, type_tag_for_datatype's, objc_bridge_related's, swift_newtype's and swift_wrapper's as a balanced
+// run of tokens (#1447,
 // parse_scalar_custom_attribute):
 // a top-level declaration with such a name before a `(` goes to the scalar parser, its first token flagged. A unit whose
 // names have none (nearly every one: the interner finds no such name) looks at no token; one that has them, 16 tokens a
@@ -10819,7 +10822,7 @@ static bool parse_prepare_meanings(Parser* parser, InternTable* table)
     parser->meanings.table = table;
     static const char* const custom_spellings[BUSTER_PARSE_CUSTOM_ATTRIBUTES] = {
         "availability", "__availability__", "external_source_symbol", "__external_source_symbol__", "type_tag_for_datatype", "__type_tag_for_datatype__",
-        "objc_bridge_related", "__objc_bridge_related__",
+        "objc_bridge_related", "__objc_bridge_related__", "swift_newtype", "__swift_newtype__", "swift_wrapper", "__swift_wrapper__",
     };
     for (uint32_t s = 0; s < BUSTER_PARSE_CUSTOM_ATTRIBUTES; s += 1)
     {
