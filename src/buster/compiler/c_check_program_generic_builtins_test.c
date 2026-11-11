@@ -55,8 +55,8 @@ static __attribute__((noinline)) void check_test_generic_builtin_sources(CheckTe
         { .name = "generic: verbose_trap of a dollar", .source =
           "void f(void)\n{\n__builtin_verbose_trap(\"a$b\", \"x\");\n}\n", .rejected = true },
         // A const array's string (#1917's review): a known one's, an automatic array's, a const record's member array's and a
-        // const pointer's pointee's too, with a `$` is clang's error; one through a cast is refused by name, which clang
-        // rejects through void *.
+        // const pointer's pointee's too, with a `$` is clang's error; through a cast to void * clang's evaluator loses the
+        // array's designator, its error too, and through casts between pointers to char it reads it (#1843).
         { .name = "generic: verbose_trap of a const array's dollar", .source =
           "static const char m[] = \"a$c\";\nvoid f(void)\n{\n__builtin_verbose_trap(\"x\", m);\n}\n", .rejected = true },
         { .name = "generic: verbose_trap of a const array", .source =
@@ -72,8 +72,11 @@ static __attribute__((noinline)) void check_test_generic_builtin_sources(CheckTe
         { .name = "generic: verbose_trap of a const pointer's value", .source =
           "static const char m[] = \"abc\";\nstatic const char* const p = m + 1;\nvoid f(void)\n{\n__builtin_verbose_trap(\"x\", p);\n}\n" },
         { .name = "generic: verbose_trap of a const array through void *", .source =
-          "static const char m[] = \"a$c\";\nvoid f(void)\n{\n__builtin_verbose_trap(\"x\", (const char*)(const void*)m);\n}\n", .rejected = true,
-          .unsupported = true, .undecided = true },
+          "static const char m[] = \"abc\";\nvoid f(void)\n{\n__builtin_verbose_trap(\"x\", (const char*)(const void*)m);\n}\n", .rejected = true },
+        { .name = "generic: verbose_trap of a const array through char pointers", .source =
+          "static const char m[] = \"abc\";\nvoid f(void)\n{\n__builtin_verbose_trap(\"x\", (const char*)(char*)m + 1);\n}\n" },
+        { .name = "generic: verbose_trap of a literal through void *", .source =
+          "void f(void)\n{\n__builtin_verbose_trap(\"x\", (const char*)(const void*)\"abc\" + 1);\n}\n" },
         { .name = "generic: verbose_trap of a dollar under a cast", .source =
           "void f(void)\n{\n__builtin_verbose_trap(\"a\", (const char*)(\"x$\"));\n}\n", .rejected = true },
         { .name = "generic: verbose_trap of one argument", .source = "void f(void)\n{\n__builtin_verbose_trap(\"a\");\n}\n", .rejected = true },
