@@ -317,8 +317,9 @@ never ones that failed, so green keeps meaning the tests passed.
   running). A job that passed or was skipped didn't stop.
 - **Re-run** when at least one job stopped in setup and every stopped job did
   one of these:
-  - stopped in a setup step of the allowlist below, or failed before any step
-    ran (its provisioning);
+  - stopped in a setup step of the allowlist below, whether the step failed or
+    was interrupted (fail-fast, its timeout, a lost runner), or failed before
+    any step ran (its provisioning);
   - stopped in a step that fails because a setup failure stopped another job.
     "Require this row's compiler product" counts when the row's build job
     ("Build the compiler once for the row's shards") stopped in setup itself.
@@ -359,6 +360,15 @@ never ones that failed, so green keeps meaning the tests passed.
   it stopped at and why, re-run or not. After a re-run, the same list goes in
   a comment on the pull request, or on the commit of a push, so that repeated
   infrastructure failures stay visible.
+- **API calls.** Every run's jobs share the Actions token's hourly API
+  quota, which the vector draws' calls exhausted on 2026-11-11 (their "Take
+  the vector item the draw assigns, or end as a redraw" failed with "API
+  rate limit exceeded for installation"). So the glue asks for the jobs'
+  pages, then only the annotations that could change the decision
+  (`rerun annotations`: a cancelled job interrupted outside setup, in a run
+  that a setup failure and such jobs alone keep), and, before a re-run, the
+  run's state once. Of the 2026-11-05 to 11-11 failed first attempts, none
+  needed an annotation.
 - **Checks.** `rerun --self-test --root .` runs in `changes` and in the
   workflow before it decides. It tests the rule on synthetic runs and the
   allowlist against the workflow files: each name it holds is a step of the

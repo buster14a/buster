@@ -1213,17 +1213,18 @@ static Decision rerun_classify(const Run* run, Outcome* outcomes)
                 outcome.verdict = cancelled ? VERDICT_CANCELLED : VERDICT_KEEP;
                 outcome.reason = cancelled ? REASON_STEPS_PASSED : REASON_NO_STEP_FAILED;
             }
+            else if (kind == STEP_SETUP)
+            {
+                // Failed in setup, or stopped there by fail-fast, its timeout or a lost runner: whatever stopped it, no
+                // test ran, so its annotations don't matter.
+                outcome.verdict = VERDICT_SETUP;
+                outcome.reason = REASON_SETUP_STEP;
+            }
             else if (interrupted && cancelled && job->fail_fast && !job->timeout)
             {
                 // Another job's failure stopped it, wherever it was: that failure decides.
                 outcome.verdict = VERDICT_CANCELLED;
                 outcome.reason = REASON_FAIL_FAST;
-            }
-            else if (kind == STEP_SETUP)
-            {
-                // Failed in setup, or setup hung until the job's timeout or lost its runner.
-                outcome.verdict = VERDICT_SETUP;
-                outcome.reason = REASON_SETUP_STEP;
             }
             else if (interrupted)
             {
@@ -1267,6 +1268,28 @@ static Decision rerun_classify(const Run* run, Outcome* outcomes)
     }
     decision.rerun = decision.setup != 0 && decision.keep == 0;
     return decision;
+}
+
+// Whether job `index`'s verdict could change with its annotations: a cancelled job interrupted outside setup, which
+// fail-fast's annotation excuses and a timeout's doesn't.
+static bool rerun_interrupted(const Run* run, const Outcome* outcomes, uint32_t index)
+{
+    const Outcome* outcome = &outcomes[index];
+    return rerun_is(run->jobs[index].conclusion, "cancelled") && outcome->verdict == VERDICT_KEEP && outcome->reason == REASON_INTERRUPTED;
+}
+
+// Whether job `index`'s annotations could change the run's decision, as classified without them: it is interrupted
+// outside setup, a job stopped in setup, and no other job keeps the run. Annotations can only excuse such a job, so no
+// other run needs any. tools/ci/rerun.sh fetches no others: every run shares the Actions token's hourly API quota,
+// which the vector draws' calls exhausted on 2026-11-11.
+static bool rerun_needs_annotations(const Run* run, const Outcome* outcomes, Decision decision, uint32_t index)
+{
+    uint32_t interrupted = 0;
+    for (uint32_t i = 0; i < run->job_count; i += 1)
+    {
+        interrupted += rerun_interrupted(run, outcomes, i);
+    }
+    return decision.setup != 0 && decision.keep == interrupted && rerun_interrupted(run, outcomes, index);
 }
 
 // A name as one field of a line: tabs, newlines and other control characters become spaces.
@@ -1764,11 +1787,11 @@ static const Case rerun_cases[] = {
         .verdicts = "keep/run-not-setup",
     },
     {
-        .what = "fail-fast cancellations in setup, in a draw and in tests, and one after its steps passed, beside a setup failure",
+        .what = "fail-fast cancellations in setup and in a draw, and one after its steps passed, beside a setup failure",
         .json = BUSTER_RERUN_PAGE(4, BUSTER_RERUN_JOB(1, BUSTER_RERUN_OTHER_ROW "shard 1", "\"failure\"", BUSTER_RERUN_STEP("Install official Clang 23.1.4 and test tools", "\"failure\"")) "," BUSTER_RERUN_JOB(2, BUSTER_RERUN_OTHER_ROW "shard 2", "\"cancelled\"", BUSTER_RERUN_STEP("Install official Clang 23.1.4 and test tools", "\"cancelled\"")) "," BUSTER_RERUN_JOB(3, BUSTER_RERUN_ROW "Vector draw 1, candidate 3", "\"cancelled\"", BUSTER_RERUN_STEP("Take the vector item the draw assigns, or end as a redraw", "\"cancelled\"")) "," BUSTER_RERUN_JOB(4, BUSTER_RERUN_OTHER_ROW "shard 3", "\"cancelled\"", BUSTER_RERUN_STEP(BUSTER_RERUN_TEST_STEP, "\"success\"") "," BUSTER_RERUN_STEP("Complete job", "\"success\"")))
                 BUSTER_RERUN_ANNOTATION(2, BUSTER_RERUN_FAIL_FAST " \\\"shards.1\\\" failed") BUSTER_RERUN_ANNOTATION(2, "The operation was canceled.") BUSTER_RERUN_ANNOTATION(3, BUSTER_RERUN_FAIL_FAST " \\\"test.x86-64\\\" failed"),
         .decision = "rerun",
-        .verdicts = "setup/setup-step cancelled/fail-fast cancelled/fail-fast cancelled/steps-passed",
+        .verdicts = "setup/setup-step setup/setup-step cancelled/fail-fast cancelled/steps-passed",
     },
     {
         .what = "a fail-fast cancellation in tests beside a test failure",
@@ -2036,6 +2059,49 @@ static int rerun_test(const char* root, Run* run, Outcome* outcomes)
     const bool read = rerun_read(run, decoding->json, strlen(decoding->json), &error);
     rerun_expect(&policy, read && run->pages == 2 && run->job_count == 2 && strcmp(run->jobs[0].name, "a \"quoted\"\tname/A") == 0, "the reader decodes a name's escapes");
     rerun_expect(&policy, read && run->jobs[0].ubuntu && !run->jobs[0].self_hosted && run->jobs[0].step_count == 1 && run->jobs[1].step_count == 0, "the reader keeps each job's labels and steps");
+    // Only a cancelled job interrupted outside setup needs its annotations: the draw's candidate of the fail-fast case.
+    const Case* fail_fast = NULL;
+    for (size_t i = 0; i < sizeof(rerun_cases) / sizeof(rerun_cases[0]); i += 1)
+    {
+        fail_fast = strncmp(rerun_cases[i].what, "fail-fast cancellations in setup", 32) == 0 ? &rerun_cases[i] : fail_fast;
+    }
+    const bool fail_fast_read = fail_fast != NULL && rerun_read(run, fail_fast->json, strlen(fail_fast->json), &error);
+    uint64_t needed = 0;
+    uint32_t needed_count = 0;
+    for (uint32_t i = 0; fail_fast_read && i < run->job_count; i += 1)
+    {
+        // Without the annotations, as tools/ci/rerun.sh asks before it fetches them.
+        run->jobs[i].fail_fast = false;
+        run->jobs[i].timeout = false;
+    }
+    const Decision unannotated = fail_fast_read ? rerun_classify(run, outcomes) : (Decision){ 0 };
+    for (uint32_t i = 0; fail_fast_read && i < run->job_count; i += 1)
+    {
+        if (rerun_needs_annotations(run, outcomes, unannotated, i))
+        {
+            needed = run->jobs[i].id;
+            needed_count += 1;
+        }
+    }
+    rerun_expect(&policy, fail_fast_read && needed_count == 1 && needed == 3, "only a cancelled job interrupted outside setup needs its annotations");
+    // A run that a test failure keeps needs none: annotations could excuse only its cancelled jobs.
+    const Case* kept = NULL;
+    for (size_t i = 0; i < sizeof(rerun_cases) / sizeof(rerun_cases[0]); i += 1)
+    {
+        kept = strcmp(rerun_cases[i].what, "a fail-fast cancellation in tests beside a test failure") == 0 ? &rerun_cases[i] : kept;
+    }
+    const bool kept_read = kept != NULL && rerun_read(run, kept->json, strlen(kept->json), &error);
+    for (uint32_t i = 0; kept_read && i < run->job_count; i += 1)
+    {
+        run->jobs[i].fail_fast = false;
+    }
+    const Decision kept_decision = kept_read ? rerun_classify(run, outcomes) : (Decision){ 0 };
+    bool kept_needs = false;
+    for (uint32_t i = 0; kept_read && i < run->job_count; i += 1)
+    {
+        kept_needs = kept_needs || rerun_needs_annotations(run, outcomes, kept_decision, i);
+    }
+    rerun_expect(&policy, kept_read && !kept_needs, "a run a test failure keeps needs no annotations");
     // Each allowlisted name is listed once; the derived steps are what the rule resolves.
     for (size_t i = 0; i < BUSTER_RERUN_STEP_COUNT; i += 1)
     {
@@ -2075,12 +2141,14 @@ int main(int argc, char** argv)
     {
         status = rerun_test(argc == 4 ? argv[3] : NULL, run, outcomes);
     }
-    else if (argc >= 3 && strcmp(argv[1], "classify") == 0)
+    else if (argc >= 3 && (strcmp(argv[1], "classify") == 0 || strcmp(argv[1], "annotations") == 0))
     {
         // classify [--markdown FILE] PAGES...: the pages' files, concatenated, are one stream of JSON documents.
+        // annotations PAGES...: the IDs of the jobs whose annotations could change their verdicts, a line each.
+        const bool annotations = strcmp(argv[1], "annotations") == 0;
         int first = 2;
         const char* markdown = NULL;
-        if (argc >= 5 && strcmp(argv[2], "--markdown") == 0)
+        if (!annotations && argc >= 5 && strcmp(argv[2], "--markdown") == 0)
         {
             markdown = argv[3];
             first = 4;
@@ -2112,7 +2180,19 @@ int main(int argc, char** argv)
         }
         const char* error = NULL;
         ok = ok && rerun_read(run, input, length, &error);
-        if (ok)
+        if (ok && annotations)
+        {
+            const Decision decision = rerun_classify(run, outcomes);
+            for (uint32_t i = 0; i < run->job_count; i += 1)
+            {
+                if (rerun_needs_annotations(run, outcomes, decision, i))
+                {
+                    printf("%llu\n", (unsigned long long)run->jobs[i].id);
+                }
+            }
+            status = fflush(stdout) == 0 ? 0 : 1;
+        }
+        else if (ok)
         {
             const Decision decision = rerun_classify(run, outcomes);
             rerun_print_report(stdout, run, outcomes, decision);
@@ -2134,7 +2214,7 @@ int main(int argc, char** argv)
     }
     else
     {
-        fputs("usage: rerun --self-test [--root DIR] | rerun classify [--markdown FILE] PAGE.json...\n", stderr);
+        fputs("usage: rerun --self-test [--root DIR] | rerun classify [--markdown FILE] PAGE.json... | rerun annotations PAGE.json...\n", stderr);
     }
     if (run != NULL)
     {

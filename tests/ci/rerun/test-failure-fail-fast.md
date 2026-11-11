@@ -1,6 +1,6 @@
 - `Run correctness tests within the hosted CPU budget` (1 job). Not setup: not a setup step.
   - [`Tests on Ubuntu 26.04 (Clang 23, x86-64, none, O3, shard 2 of 4)`](https://github.com/buster14a/buster/actions/runs/42115861754/job/127557198172) (failure)
-- `Install official Clang 23.1.4 and test tools` (2 jobs). Cancelled: fail-fast cancelled it after another job failed.
+- `Install official Clang 23.1.4 and test tools` (2 jobs). Setup: a setup step.
   - [`Tests on Ubuntu 26.04 (Clang 23, x86-64, none, O3, shard 3 of 4)`](https://github.com/buster14a/buster/actions/runs/42115861754/job/127557198213) (cancelled)
   - [`Tests on Ubuntu 26.04 (Clang 23, x86-64, none, O3, shard 4 of 4)`](https://github.com/buster14a/buster/actions/runs/42115861754/job/127557198444) (cancelled)
 - `Run correctness tests within the hosted CPU budget` (5 jobs). Cancelled: fail-fast cancelled it after another job failed.
@@ -9,5 +9,5 @@
   - [`Tests on Ubuntu 26.04 (Clang 23, native, none, O3, shard 3 of 4)`](https://github.com/buster14a/buster/actions/runs/42115861754/job/127557198269) (cancelled)
   - [`Tests on Ubuntu 26.04 (Clang 23, x86-64, none, O3, shard 1 of 4)`](https://github.com/buster14a/buster/actions/runs/42115861754/job/127557198375) (cancelled)
   - [`Tests on Ubuntu 26.04 (Clang 23, native, none, O3, shard 4 of 4)`](https://github.com/buster14a/buster/actions/runs/42115861754/job/127557198420) (cancelled)
-- `Require hosted and native correctness before successful qualification` (1 job). Not setup: no job of the run stopped in setup.
+- `Require hosted and native correctness before successful qualification` (1 job). Follows setup: a job it needs stopped in setup.
   - [`Build and execute on Ryzen 7 9700X`](https://github.com/buster14a/buster/actions/runs/42115861754/job/127560560625) (failure)

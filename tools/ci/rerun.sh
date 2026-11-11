@@ -3,8 +3,8 @@
 # Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 # The API glue of the hosted correctness runs' setup re-run (#2276; docs/commands/ci.md, "Setup failures re-run once"),
 # which .github/workflows/rerun.yml runs when a run fails. The decision is tools/ci/rerun.c's: this script fetches the
-# run's first attempt's jobs, a page at a time, and the annotations of its cancelled jobs (which tell fail-fast from a
-# timeout); classifies them; requests rerun-failed-jobs once, when the run is still at its first attempt and every
+# run's first attempt's jobs, a page at a time, and the annotations (which tell fail-fast from a timeout) of the
+# cancelled jobs the classifier names; classifies them; requests rerun-failed-jobs once, when the run is still at its first attempt and every
 # stopped job stopped in setup; and writes the run's summary and, after a re-run, a note on the pull request or the
 # commit with the steps the jobs stopped in. No name read from the API reaches the shell but as data.
 #
@@ -39,21 +39,9 @@ publish_summary()
     fi
 }
 
-# The run as it is now: its attempt, status and conclusion. Only a completed, failed first attempt is re-run.
-state()
-{
-    "$gh" api "repos/$repository/actions/runs/$run" | jq -r '[.run_attempt, .status, .conclusion // "-"] | @tsv'
-}
-
-current=$(state)
-IFS=$'\t' read -r attempt status conclusion <<< "$current"
-if [ "$attempt" != 1 ] || [ "$status" != completed ] || [ "$conclusion" != failure ]; then
-    printf '### No automatic re-run of %s\n\nIt is at attempt %s, %s, %s: only a failed first attempt is re-run.\n' "$link" "$attempt" "$status" "$conclusion" > "$summary"
-    publish_summary
-    exit 0
-fi
-
-# The first attempt's jobs, page by page to total_count, and the annotations of the cancelled ones, every page.
+# The first attempt's jobs, page by page to total_count. Every run shares the Actions token's hourly API quota (the
+# vector draws' calls exhausted it on 2026-11-11), so this asks for little more: the annotations the classifier says
+# could change its decision, and, before a re-run, the run's state once.
 page=1
 pages=1
 while [ "$page" -le "$pages" ]; do
@@ -68,7 +56,9 @@ while [ "$page" -le "$pages" ]; do
     page=$((page + 1))
 done
 : > "$directory/annotations.json"
-jq -r '.jobs[] | select(.conclusion == "cancelled") | .id' "$directory"/jobs-*.json | while read -r id; do
+"$tool" annotations "$directory"/jobs-*.json > "$directory/annotate.txt"
+while read -r id; do
+    [[ "$id" =~ ^[0-9]+$ ]] || { echo "rerun: not a job ID: $id" >&2; exit 1; }
     annotation_page=1
     count=100
     while [ "$count" -eq 100 ]; do
@@ -77,7 +67,7 @@ jq -r '.jobs[] | select(.conclusion == "cancelled") | .id' "$directory"/jobs-*.j
         jq -c --argjson id "$id" '.[] | {job_id: $id, message: .message}' "$directory/annotation-page.json" >> "$directory/annotations.json"
         annotation_page=$((annotation_page + 1))
     done
-done
+done < "$directory/annotate.txt"
 
 "$tool" classify --markdown "$directory/jobs.md" "$directory"/jobs-*.json "$directory/annotations.json" > "$directory/report.tsv"
 decision=$(awk -F '\t' '$1 == "decision" { print $2 }' "$directory/report.tsv")
@@ -93,11 +83,11 @@ if [ "$decision" != rerun ]; then
     exit 0
 fi
 
-# Still the failed first attempt, just before the request: no one re-ran it meanwhile.
-current=$(state)
+# Still the completed, failed first attempt, just before the request: no one re-ran it meanwhile.
+current=$("$gh" api "repos/$repository/actions/runs/$run" | jq -r '[.run_attempt, .status, .conclusion // "-"] | @tsv')
 IFS=$'\t' read -r attempt status conclusion <<< "$current"
-if [ "$attempt" != 1 ] || [ "$status" != completed ]; then
-    printf '### No automatic re-run of %s\n\nIt stopped in setup, but is now at attempt %s, %s: someone re-ran it.\n' "$link" "$attempt" "$status" > "$summary"
+if [ "$attempt" != 1 ] || [ "$status" != completed ] || [ "$conclusion" != failure ]; then
+    printf '### No automatic re-run of %s\n\nIts jobs stopped in setup, but it is at attempt %s now (%s, %s): only a failed first attempt is re-run, once.\n' "$link" "$attempt" "$status" "$conclusion" > "$summary"
     publish_summary
     exit 0
 fi

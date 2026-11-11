@@ -109,6 +109,7 @@ case "$method $endpoint" in
     'GET repos/buster14a/buster/check-runs/'*'/annotations?per_page=100&page=1')
         id=${endpoint#repos/buster14a/buster/check-runs/}
         id=${id%%/*}
+        echo "$id" >> "$FAKE_STATE/annotations"
         jq -s -c --argjson id "$id" '[.[] | select(.job_id == $id) | {message, annotation_level: "failure"}]' "$FAKE_FIXTURE" ;;
     'GET repos/buster14a/buster/check-runs/'*'/annotations?per_page=100&page='*)
         echo '[]' ;;
@@ -126,14 +127,16 @@ esac
 FAKE
 chmod +x "$work/bin/gh"
 
-# glue NAME FIXTURE EVENT ATTEMPTS EXPECTED_LOG [PER_PAGE]: the glue on FIXTURE as run 7, whose state calls answer
-# ATTEMPTS in turn; what it asked to change must be EXPECTED_LOG.
+# glue NAME FIXTURE EVENT ATTEMPTS EXPECTED_LOG ANNOTATIONS [PER_PAGE]: the glue on FIXTURE as run 7, whose state
+# calls answer ATTEMPTS in turn; what it asked to change must be EXPECTED_LOG, and it must fetch the annotations of
+# ANNOTATIONS jobs alone.
 glue()
 {
-    local name=$1 fixture=$2 event=$3 attempts=$4 expected=$5 per_page=${6:-100}
+    local name=$1 fixture=$2 event=$3 attempts=$4 expected=$5 annotations=$6 per_page=${7:-100}
     local state="$work/glue-$name"
     mkdir -p "$state"
     : > "$state/log"
+    : > "$state/annotations"
     : > "$state/step-summary"
     if ! FAKE_FIXTURE="$fixtures/$fixture.json" FAKE_STATE="$state" FAKE_ATTEMPTS="$attempts" FAKE_CONCLUSION=failure \
         GH="$work/bin/gh" GITHUB_REPOSITORY=buster14a/buster GITHUB_STEP_SUMMARY="$state/step-summary" \
@@ -146,23 +149,23 @@ glue()
     local log
     log=$(tr '\n' ' ' < "$state/log")
     [ "${log% }" = "$expected" ] || fail "glue $name: asked for '${log% }', not '$expected'"
+    [ "$(wc -l < "$state/annotations")" = "$annotations" ] || fail "glue $name: fetched $(wc -l < "$state/annotations") jobs' annotations, not $annotations"
     cmp -s "$state/stdout" "$state/step-summary" || fail "glue $name: the step summary isn't what it printed"
 }
-glue outage-push outage-push push 1 'rerun note commits/0123456789abcdef0123456789abcdef01234567' 20
+glue outage-push outage-push push 1 'rerun note commits/0123456789abcdef0123456789abcdef01234567' 0 20
 grep -qF '### Re-ran the failed jobs of [run 6372](https://github.com/buster14a/buster/actions/runs/7), once' "$work/glue-outage-push/step-summary" || fail 'glue outage-push: no headline'
 grep -qF -- "- \`Install official Clang 23.1.4 and test tools\` (5 jobs). Setup: a setup step." "$work/glue-outage-push/note.md" || fail 'glue outage-push: the note lacks the setup step'
 grep -qF -- "- \`Require this row's compiler product\` (4 jobs). Follows setup: its row's compiler build stopped in setup." "$work/glue-outage-push/note.md" || fail "glue outage-push: the note lacks the shards' step"
 grep -qF '[Re-run hosted setup failures](https://github.com/buster14a/buster/actions/runs/99)' "$work/glue-outage-push/note.md" || fail 'glue outage-push: the note lacks its link'
-glue fail-fast-draws fail-fast-draws pull_request 1 'rerun note issues/2276'
+glue outage-pull-request outage-pull-request pull_request 1 'rerun note issues/2276' 0
+glue fail-fast-draws fail-fast-draws pull_request 1 'rerun note issues/2276' 2
 grep -qF '(2 jobs). Cancelled: fail-fast cancelled it after another job failed.' "$work/glue-fail-fast-draws/note.md" || fail 'glue fail-fast-draws: the annotations went unread'
-glue test-failure-push test-failure-push push 1 ''
-grep -qF '### Kept [run 6372]' "$work/glue-test-failure-push/step-summary" || fail 'glue test-failure-push: no headline'
-glue timeout timeout push 1 ''
-grep -qF '(1 job). Not setup: its timeout stopped it outside setup.' "$work/glue-timeout/step-summary" || fail 'glue timeout: the timeout went unread'
-glue second-attempt outage-push push 2 ''
-grep -qF 'only a failed first attempt is re-run' "$work/glue-second-attempt/step-summary" || fail 'glue second-attempt: no reason'
-glue rerun-meanwhile outage-push push '1 2' '' 20
-grep -qF 'someone re-ran it' "$work/glue-rerun-meanwhile/step-summary" || fail 'glue rerun-meanwhile: no reason'
+glue test-failure-fail-fast test-failure-fail-fast pull_request 1 '' 0
+grep -qF '### Kept [run 6372]' "$work/glue-test-failure-fail-fast/step-summary" || fail 'glue test-failure-fail-fast: no headline'
+glue timeout timeout push 1 '' 0
+grep -qF '(1 job). Not setup: interrupted outside setup, not by fail-fast.' "$work/glue-timeout/step-summary" || fail 'glue timeout: an unread timeout was excused'
+glue rerun-meanwhile outage-push push 2 '' 0 20
+grep -qF 'only a failed first attempt is re-run, once' "$work/glue-rerun-meanwhile/step-summary" || fail 'glue rerun-meanwhile: no reason'
 
 if [ "$failures" -ne 0 ]; then
     printf 'tests/ci/rerun.sh: %s failures\n' "$failures" >&2
