@@ -628,8 +628,20 @@ static const char* check_vector_lower_baseline_element(const X86Target* target, 
     }
     else if (element.floating && op == CHECK_OP_DIVIDE && bytes < 16)
     {
-        // Unused zero lanes would execute 0/0 and spuriously raise FE_INVALID; do not silently use a packed divide.
-        reason = "division of narrow floating vectors without AVX-512 masking";
+        // The register's lanes past the operands' are zeros, which a packed divide would divide by, raising FE_INVALID
+        // for 0/0 (#1834): the divisor's lanes past its own are 1.0f first (PCMPEQD's ones shifted left by 25 and right
+        // by 2, 0x3F800000; a double's high one their pair, finite and not zero), joined to it by PUNPCKLQDQ, a single
+        // float's by PUNPCKLDQ first; the quotient's lanes past its own are then zeros.
+        check_vector_baseline_ones(&context, v2);
+        check_vector_baseline_shift_kind(&context, 0, v2, 4, 25);
+        check_vector_baseline_shift_kind(&context, 1, v2, 4, 2);
+        if (bytes == 4)
+        {
+            check_vector_baseline_binary(&context, BUSTER_CHECK_BASE_PACKED(&context, PUNPCKLDQ), v1, v1, v2);
+        }
+        check_vector_baseline_binary(&context, BUSTER_CHECK_BASE_PACKED(&context, PUNPCKLQDQ), v1, v1, v2);
+        check_vector_baseline_binary(&context, element.bytes == 8 ? BUSTER_CHECK_BASE_PACKED(&context, DIVPD) : BUSTER_CHECK_BASE_PACKED(&context, DIVPS), v0,
+                                     v0, v1);
     }
     else
     {
