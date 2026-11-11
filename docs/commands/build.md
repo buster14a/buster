@@ -297,7 +297,11 @@ fixtures. Edits to nested files such as `ir_simd_model_test.c`,
 and `tier1_address_coalesce_test.c` rebuild only `main_unit_backend.c`.
 The optimizer roots `ir_optimize_test.c` and `ir_optimize_text_test.c`, including
 their nested if-conversion and verified-pass fixtures, also belong to BACKEND.
-Production pass includes retain their positions within the units that consume
+`__builtin_convertvector`'s row producer, `c_check_program_vector_convert.c`, is
+shared the same way: the checker reaches it through
+`c_check_program_vector_builtins.c`, and BACKEND includes it beside
+`c_check_program_vectors.c` and `c_check_program_x86.c` so that the IR decoder's
+conversion tests (#1840) check the real producer. Production pass includes retain their positions within the units that consume
 them, so narrowing the test roots does not reorder emitted code. Source
 preparation and the BURS/selection helpers serve BACKEND and CHECKER. The
 production IR and code-generation families are also guarded for their actual
