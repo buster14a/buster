@@ -117,8 +117,10 @@ static Tier1LivenessError tier1_liveness_validate_plan(const Tier1SelectPlan* pl
         }
         else if ((op == IR_PHI && !phis) || (op == IR_CALL_INDIRECT && !phis) ||
                  (tier1_select_function_call(function, node) && !tier1_select_call_supported(function, node)) ||
-                 // A row call (#141) is the CFG consumer's alone (tier1_emit_cfg_row).
-                 (op == IR_CALL && !tier1_select_function_call(function, node) && (!phis || !tier1_select_row_supported(function, node))) ||
+                 // A row call (#141) is the CFG consumer's alone (tier1_emit_cfg_row), and so is a body call (#1839,
+                 // tier1_emit_cfg_asm).
+                 (op == IR_CALL && !tier1_select_function_call(function, node) &&
+                  (!phis || !(tier1_select_body_call(function, node) ? tier1_select_asm_supported(function, node) : tier1_select_row_supported(function, node)))) ||
                  (type != IR_VOID && tier1_select_width(type) == 0 &&
                   !(phis && (tier1_select_mask_width(type) != 0 || tier1_select_float_width(type) != 0 || tier1_select_vector_width(type) != 0 || type == IR_F80))))
         {
@@ -129,6 +131,20 @@ static Tier1LivenessError tier1_liveness_validate_plan(const Tier1SelectPlan* pl
         else if (op == IR_PHI && (plan->covered[node] || plan->patterns[node].rule != TIER1_RULE_PHI || first != end))
         {
             error = TIER1_LIVENESS_INVALID;
+        }
+        else if (tier1_select_body_call(function, node))
+        {
+            // A body call's (#1839) asm body, its index, and no effective use: its block's address is no register's.
+            const IrCall call = function->calls[function->b[node]];
+            const Tier1SelectPattern* pattern = &plan->patterns[node];
+            if (plan->covered[node] || pattern->rule != TIER1_RULE_ASM || pattern->immediate != call.body - 1u || pattern->fold_count != 0 || end != first)
+            {
+                error = TIER1_LIVENESS_INVALID;
+            }
+            for (uint32_t operand = 0; error == TIER1_LIVENESS_OK && operand < 3; operand += 1)
+            {
+                error = pattern->values[operand] == BUSTER_IR_NONE ? error : TIER1_LIVENESS_INVALID;
+            }
         }
         else if (op == IR_CALL && !tier1_select_function_call(function, node))
         {
@@ -189,7 +205,8 @@ static Tier1LivenessError tier1_liveness_validate_plan(const Tier1SelectPlan* pl
                 }
             }
         }
-        else if (plan->patterns[node].rule == TIER1_RULE_CALL || plan->patterns[node].rule == TIER1_RULE_UNREACHABLE || plan->patterns[node].rule == TIER1_RULE_ROW)
+        else if (plan->patterns[node].rule == TIER1_RULE_CALL || plan->patterns[node].rule == TIER1_RULE_UNREACHABLE || plan->patterns[node].rule == TIER1_RULE_ROW ||
+                 plan->patterns[node].rule == TIER1_RULE_ASM)
         {
             error = TIER1_LIVENESS_INVALID;
         }

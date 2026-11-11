@@ -123,9 +123,9 @@ static bool check_input_symbol_record(CheckInputReader* reader, uint32_t pragma,
             const IdentId name = check_input_pragma_name(reader, s);
             record->supported = name == 0 || !check_input_pragma_macro(reader, macros, name);
         }
-        // An alias can synthesize a typed declaration without a C declarator. It needs its own binding integration;
-        // recognizing its spelling alone must not turn it into an ignored directive.
-        record->supported &= record->warning != CHECK_SYMBOL_WARNING_NONE || record->kind != CHECK_SYMBOL_PRAGMA_ALIAS;
+        // An alias (#1849) declares its name as a weak alias of its target, a declaration without a C declarator; the
+        // shapes the unit's own declarations of the name can carry are resolved with the bindings
+        // (check_input_symbol_alias), and the others refused there.
     }
     return matched;
 }
@@ -210,7 +210,8 @@ static bool check_input_symbol_warning_append(CheckInputReader* reader, uint32_t
         .source = record->diagnostic_source,
         .completion_kind = completion_kind,
         .completion = completion,
-        .payload = { .name = record->name, .token = record->source, .data = index + 1 },
+        .payload = { .name = record->kind == CHECK_SYMBOL_PRAGMA_ALIAS && record->warning == CHECK_SYMBOL_WARNING_UNDECLARED ? record->target : record->name,
+                     .token = record->source, .data = index + 1 },
     };
     const bool valid = check_warning_append(buffer, &event, NULL, 0);
     reader->output->resource |= !valid;
@@ -262,14 +263,20 @@ static bool check_input_symbol_attribute(CheckInputReader* reader, CheckInputSym
     {
         *attributes = (CheckInputAttributes){ 0 };
         valid = previous == NULL || check_input_attribute_copy(reader, previous, attributes);
+        const String8 target = record->kind != CHECK_SYMBOL_PRAGMA_WEAK ?
+            (String8){ (char*)intern_bytes(reader->pp->table, record->target), intern_length(reader->pp->table, record->target) } : (String8){ 0 };
         const CheckInputAttribute attribute = {
             .first = token, .end = token + 1, .name_token = token,
-            .kind = record->kind == CHECK_SYMBOL_PRAGMA_WEAK ? CHECK_ATTRIBUTE_WEAK : CHECK_ATTRIBUTE_ASM_LABEL,
-            .text = record->kind == CHECK_SYMBOL_PRAGMA_REDEFINE ?
-                (String8){ (char*)intern_bytes(reader->pp->table, record->target), intern_length(reader->pp->table, record->target) } : (String8){ 0 },
+            .kind = record->kind == CHECK_SYMBOL_PRAGMA_REDEFINE ? CHECK_ATTRIBUTE_ASM_LABEL : CHECK_ATTRIBUTE_WEAK,
+            .text = record->kind == CHECK_SYMBOL_PRAGMA_REDEFINE ? target : (String8){ 0 },
             .resolved = true,
         };
         valid = valid && check_input_attribute_append(reader, attributes, attribute);
+        // `#pragma weak A = T` (#1849): A is a weak alias of T, as clang's cloned declaration has weak and alias attributes.
+        const CheckInputAttribute alias = {
+            .first = token, .end = token + 1, .name_token = token, .argument_count = 1, .kind = CHECK_ATTRIBUTE_ALIAS, .text = target, .resolved = true,
+        };
+        valid = valid && (record->kind != CHECK_SYMBOL_PRAGMA_ALIAS || check_input_attribute_append(reader, attributes, alias));
         if (valid)
         {
             check_input_set_attributes_at(reader->output, token, attributes);
@@ -277,6 +284,109 @@ static bool check_input_symbol_attribute(CheckInputReader* reader, CheckInputSym
         }
     }
     reader->output->resource |= !valid;
+    return valid;
+}
+
+// The declarations of `name` in the sorted file-scope keys (`ordered`, `count` of them): the latest at or before `token`
+// and the first after it, BUSTER_CHECK_NONE for none, and whether any of them defines its entity before and after it.
+typedef struct CheckInputSymbolNamed CheckInputSymbolNamed;
+struct CheckInputSymbolNamed
+{
+    uint32_t previous;
+    uint32_t next;
+    bool defined_before;
+    bool defined_after;
+    bool aliased;
+    bool sectioned;
+};
+
+static CheckInputSymbolNamed check_input_symbol_named(const CheckInputReader* reader, const uint64_t* ordered, uint32_t count, uint32_t name, uint32_t token)
+{
+    const CBindings* bindings = &reader->bindings;
+    const CheckInput* input = reader->output;
+    CheckInputSymbolNamed result = { .previous = BUSTER_CHECK_NONE, .next = BUSTER_CHECK_NONE };
+    for (uint32_t i = check_input_symbol_lower(ordered, count, name); i < count && (uint32_t)(ordered[i] >> 32) == name; i += 1)
+    {
+        const uint32_t event = (uint32_t)ordered[i];
+        const uint32_t declaration = bindings->declaration[event];
+        const bool before = bindings->point[event] <= token;
+        result.previous = before ? declaration : result.previous;
+        result.next = !before && result.next == BUSTER_CHECK_NONE ? declaration : result.next;
+        const bool defines = check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_DEFINED) ||
+                             check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_TENTATIVE);
+        result.defined_before |= before && defines;
+        result.defined_after |= !before && defines;
+        const CheckInputAttributes* attributes = check_input_attributes_at(input, declaration);
+        for (uint32_t a = 0; attributes != NULL && a < attributes->count; a += 1)
+        {
+            const CheckInputAttribute* attribute = attributes->records + a;
+            result.aliased |= !attribute->ignored && (attribute->kind == CHECK_ATTRIBUTE_ALIAS || attribute->kind == CHECK_ATTRIBUTE_IFUNC ||
+                                                      attribute->kind == CHECK_ATTRIBUTE_WEAKREF);
+            result.sectioned |= !attribute->ignored && attribute->kind == CHECK_ATTRIBUTE_SECTION;
+        }
+    }
+    return result;
+}
+
+// `#pragma weak A = T` (#1849): clang's Sema looks T up at the pragma (or at its first later external declaration) and
+// declares A a weak alias of it, a clone of T's declaration, unless T already has an alias attribute; "weak identifier
+// 'T' never declared" at A otherwise. The shapes whose A the unit declares, with external linkage, of T's kind and type,
+// that nothing names after the pragma, take the alias as attributes of A's declaration (the latest before the pragma, or
+// else the first after it): weak and alias("T"), which the emission makes clang's weak alias of. One whose A the unit
+// defined before it is clang's no-op. The others (A undeclared, defined after the pragma, named after it, of another
+// kind or type, or T not defined in the unit, whose error clang reports at the pragma) are refused by name.
+static bool check_input_symbol_alias(CheckInputReader* reader, CheckInputSymbolPragma* record, uint32_t index, const uint64_t* ordered, uint32_t count,
+                                     bool complete)
+{
+    CheckInput* input = reader->output;
+    const CBindings* bindings = &reader->bindings;
+    const CheckInputSymbolNamed target = check_input_symbol_named(reader, ordered, count, record->target, record->token);
+    const uint32_t later = target.next != BUSTER_CHECK_NONE && check_input_linkage(input->declaration_bits, target.next) == 2 ? target.next : BUSTER_CHECK_NONE;
+    const uint32_t selected = target.previous != BUSTER_CHECK_NONE ? target.previous : later;
+    const uint8_t kind = selected != BUSTER_CHECK_NONE ? input->declaration_kinds[selected] : C_BINDING_KINDS;
+    bool valid = true;
+    bool refused = false;
+    if (selected == BUSTER_CHECK_NONE || (kind != C_BINDING_OBJECT && kind != C_BINDING_FUNCTION))
+    {
+        if (complete)
+        {
+            record->warning = CHECK_SYMBOL_WARNING_UNDECLARED;
+            record->diagnostic_source = record->source + 3;
+            valid = check_input_symbol_warning_append(reader, index, &reader->warning_events, record->token, CHECK_WARNING_COMPLETE_TU_END, BUSTER_CHECK_NONE);
+        }
+    }
+    else if (!target.aliased)
+    {
+        const CheckInputSymbolNamed alias = check_input_symbol_named(reader, ordered, count, record->name, record->token);
+        const uint32_t declaration = alias.previous != BUSTER_CHECK_NONE ? alias.previous : alias.next;
+        bool named_after = false;
+        for (uint32_t event = 0; declaration != BUSTER_CHECK_NONE && !named_after && event < bindings->count; event += 1)
+        {
+            named_after = bindings->operation[event] == C_BINDING_USE && bindings->key[event] == record->name && bindings->point[event] > record->token;
+        }
+        const TypeId declared = declaration != BUSTER_CHECK_NONE ? input->declared_types[declaration] : 0;
+        const TypeAnswer same = declared != 0 ? type_compatible(reader->types, declared, input->declared_types[selected]) : TYPE_ANSWER_NO;
+        reader->output->resource |= same == TYPE_ANSWER_FULL;
+        const bool no_op = declaration != BUSTER_CHECK_NONE && alias.defined_before;
+        refused = !no_op && (declaration == BUSTER_CHECK_NONE || alias.defined_after || named_after || alias.aliased || alias.sectioned ||
+                             (!target.defined_before && !target.defined_after) || input->declaration_kinds[declaration] != kind ||
+                             check_input_linkage(input->declaration_bits, declaration) != 2 || same != TYPE_ANSWER_YES ||
+                             check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_THREAD_LOCAL) !=
+                                 check_input_bit(input->declaration_bits, selected, BUSTER_CHECK_BITS_THREAD_LOCAL));
+        if (!no_op && !refused)
+        {
+            valid = check_input_symbol_attribute(reader, record, declaration);
+        }
+    }
+    if (refused)
+    {
+        const uint32_t before = input->report_count;
+        check_input_report(reader, record->token, CHECK_INPUT_PRAGMA_SEMANTICS);
+        if (input->report_count != before)
+        {
+            input->reports[before].pragma = record->pragma + 1;
+        }
+    }
     return valid;
 }
 
@@ -430,6 +540,10 @@ static void check_input_symbol_finish(CheckInputReader* reader, bool complete)
                     record->diagnostic_source = record->source + 3;
                     valid = check_input_symbol_warning_append(reader, i, &reader->warning_events, record->token, CHECK_WARNING_COMPLETE_TU_END, BUSTER_CHECK_NONE);
                 }
+            }
+            else if (record->kind == CHECK_SYMBOL_PRAGMA_ALIAS)
+            {
+                valid = check_input_symbol_alias(reader, record, i, ordered, count, complete);
             }
             else if (record->kind == CHECK_SYMBOL_PRAGMA_REDEFINE && entity)
             {

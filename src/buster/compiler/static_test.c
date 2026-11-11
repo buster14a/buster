@@ -70,7 +70,7 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 static const uint32_t static_test_lane_counts[] = { 1, 2, 3, 8 };
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -118,7 +118,7 @@ static uint64_t static_test_base(bool pie)
 {
     return pie ? 0 : BUSTER_EXECUTABLE_BASE;
 }
-
+#endif
 // ---------------------------------------------------------------------------------------------------------------------
 // Writing
 
@@ -152,7 +152,7 @@ static bool static_test_write_with(DynamicTestWrite* write, Link* link, const Bi
     *result = write->result;
     return ran && write->succeeded;
 }
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 // The writes every link gets: one per lane count of static_test_lane_counts, then the exact twins' with 1 and 8 lanes.
 #define BUSTER_STATIC_TEST_WRITES (BUSTER_ARRAY_LENGTH(static_test_lane_counts) + 2)
 
@@ -2263,3 +2263,4 @@ static int run_static_tests(int argc, char** argv)
     }
     return result;
 }
+#endif
