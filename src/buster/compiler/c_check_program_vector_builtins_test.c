@@ -63,6 +63,7 @@ static const char check_test_vector_builtin_types[] =
 static void check_test_program_vector_builtin_sources(CheckTest* test, const char* clang, const X86Target* target, bool run_native)
 {
     static const char* const programs[][2] = {
+        { "vector-floating-extremes", check_test_vector_floating_extremes },
         {
             // Masked memory builtins of vectors no register size holds (#2216): 2-lane vectors of bytes and words and a
             // 3-lane one of dwords, element by element at AVX-512 targets too (check_lower_masked_elements), under every
@@ -940,8 +941,6 @@ static void check_test_program_vector_builtin_refusals(CheckTest* test)
         { "znver5", "struct s{float a;};unsigned tested(struct s v){return __builtin_bit_cast(unsigned,v);}",
           "bit-cast builtins of types other than integers, pointers, floats, doubles, half-precision types, their complex types and vectors", 0 },
         { "znver5", "int tested(int n){v4ss a={n},i={3,2,1,0};v4ss c=__builtin_shufflevector(a,i);return c[0];}", "vector shuffles by a vector of indices", 3 },
-        { "znver5", "int tested(int n){v4sf a={(float)n},b={1};v4sf c=__builtin_elementwise_max(a,b);return (int)c[0];}",
-          "elementwise vector builtins of floating elements", 3 },
         { "x86-64-v3", "int tested(int n){v2ds a={n},b={1};v2ds c=__builtin_elementwise_clmul(a,b);return (int)c[0];}",
           "vector carry-less multiplication without AVX and PCLMUL", 3 },
         { "x86-64", "int tested(int n){v16qu a={(unsigned char)n},b={1};v16qu c=__builtin_elementwise_clmul(a,b);return c[0];}",
@@ -982,8 +981,6 @@ static void check_test_program_vector_builtin_refusals(CheckTest* test)
           "floating maximum and minimum reductions of vectors their elements don't fill", 2 },
         { "znver5", "int tested(int n){v2ds a={n};v16qs c=__builtin_shufflevector(__builtin_convertvector(a,v2qs),(v2qs){(signed char)n},0,1,2,3,3,3,3,3,3,3,3,3,3,3,3,3);"
           "return c[0];}", "narrow vector shuffle operands with nonconstant values or side effects", 2 },
-        { "x86-64-v4", "int tested(int n){v16qs a={(signed char)n},b={1};v16qs c=__builtin_shufflevector(a,b,1,0,3,2,5,4,7,6,9,8,11,10,13,12,15,14);return c[0];}",
-          "vector shuffles of 8-bit elements without AVX-512 VBMI", 3 },
     };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
     {
@@ -1015,6 +1012,15 @@ static void check_test_program_vector_builtin_refusals(CheckTest* test)
                                            "eligible-mwaitx", true, true, 0, 0, NULL, &zen);
         check_test_program_boundary_target(test, "unsigned long tested(int n){__builtin_ia32_pause();return __rdtsc()+__builtin_ia32_tzcnt_u64((unsigned long)n);}",
                                            "baseline-leaves", true, true, 0, 0, NULL, &baseline);
+        // Units whose only operators are integer vectors' that run element by element (#2216): the entry bound counts their
+        // elements (check_lower_lanewise_op), for which no other node gave room.
+        for (uint32_t t = 0; t < 2; t += 1)
+        {
+            check_test_program_boundary_target(test, "typedef signed char V __attribute__((vector_size(64)));void tested(V*p,V*q){*p=*p/ *q;}", "lanewise-room-divide", true,
+                                               true, 0, 0, NULL, t == 0 ? &baseline : &zen);
+            check_test_program_boundary_target(test, "typedef short V __attribute__((vector_size(64)));void tested(V*p,V*q){*p%=*q;*p<<=*q;}", "lanewise-room-assign", true, true,
+                                               0, 0, NULL, t == 0 ? &baseline : &zen);
+        }
         // The extensions' leaves, in functions whose target attribute has the extensions: Key Locker's on Zen 5, whose
         // AVX-512F and VL its vectors take (the attribute's target is the command line's, check_test_program_march, and
         // its features).

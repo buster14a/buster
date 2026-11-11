@@ -1554,12 +1554,14 @@ static const char* check_semantic_address_space(const Parser* parser, Preprocess
         const bool conditional = op == CHECK_OP_CONDITIONAL;
         const uint32_t first = conditional ? graph->operand1[node] : graph->operand0[node];
         const uint32_t second = conditional ? graph->operand2[node] : graph->operand1[node];
-        const String8 left = first < stream->count ? check_driver_warning_type(parser, pp, input, types, spell, scratch,
+        const String8 left = first < stream->count ? check_driver_warning_type_declared(parser, pp, input, types, spell, scratch,
                                                                                 check_semantic_value_type(types, check_stream_type(stream, first), true),
-                                                                                check_semantic_operand_spelling(parser, input, stream, types, first)) : (String8){ "", 0 };
-        const String8 right = second < stream->count ? check_driver_warning_type(parser, pp, input, types, spell, scratch,
+                                                                                check_semantic_operand_spelling(parser, input, stream, types, first),
+                                                                                check_driver_operand_declaration(input, stream, first)) : (String8){ "", 0 };
+        const String8 right = second < stream->count ? check_driver_warning_type_declared(parser, pp, input, types, spell, scratch,
                                                                                   check_semantic_value_type(types, check_stream_type(stream, second), true),
-                                                                                  check_semantic_operand_spelling(parser, input, stream, types, second)) : (String8){ "", 0 };
+                                                                                  check_semantic_operand_spelling(parser, input, stream, types, second),
+                                                                                  check_driver_operand_declaration(input, stream, second)) : (String8){ "", 0 };
         result = left.length != 0 && right.length != 0 ?
                  check_warning_text(scratch, "%s operands of type  (%.*s and %.*s) which are pointers to non-overlapping address spaces",
                                     conditional ? "conditional operator with the second and third" : "arithmetic operation with", (int)left.length, left.pointer,
@@ -1621,9 +1623,15 @@ static const char* check_semantic_address_space(const Parser* parser, Preprocess
     if (format != NULL)
     {
         from = from_node < stream->count ? check_semantic_value_type(types, check_stream_type(stream, from_node), false) : 0;
-        const String8 source = from != 0 ? check_driver_warning_type(parser, pp, input, types, spell, scratch, from, check_semantic_operand_spelling(parser, input, stream, types, from_node)) :
+        // Each with its declaration's own address space macros (#1447 item 2): the source's, and an assigned object's or an
+        // initialized declarator's.
+        const uint32_t from_declaration = check_driver_operand_declaration(input, stream, from_node);
+        const uint32_t to_declaration = op == CHECK_OP_ASSIGN ? check_driver_operand_declaration(input, stream, graph->operand0[node]) :
+                                        op == CHECK_OP_INITIALIZE ? *location : BUSTER_CHECK_NONE;
+        const String8 source = from != 0 ? check_driver_warning_type_declared(parser, pp, input, types, spell, scratch, from,
+                                                                             check_semantic_operand_spelling(parser, input, stream, types, from_node), from_declaration) :
                                            (String8){ "", 0 };
-        const String8 target = to != 0 ? check_driver_warning_type(parser, pp, input, types, spell, scratch, to, 0) : (String8){ "", 0 };
+        const String8 target = to != 0 ? check_driver_warning_type_declared(parser, pp, input, types, spell, scratch, to, 0, to_declaration) : (String8){ "", 0 };
         const bool initializing = op == CHECK_OP_INITIALIZE;
         const String8 first = initializing ? target : source;
         const String8 second = initializing ? source : target;

@@ -563,6 +563,17 @@ static void check_test_driver_asm_definitions(CheckTest* test, const char* clang
           "\\t.cfi_def_cfa_offset 16\\n\\t.cfi_offset %rbx, -16\\n\\tmovl %edi, %ebx\\n\\tcall inner\\n\\taddl %ebx, %eax\\n\\tpopq %rbx\\n"
           "\\t.cfi_def_cfa_offset 8\\n\\tret\\n.cfi_endproc\\n.size trampoline, .-trampoline\");\n"
           "int main(void) { printf(\"%d\\n\", trampoline(100)); return 0; }\n" },
+        // A naked function's CFI (#1848): its template's directives are the rows of its own frame description, as clang's
+        // implicit `.cfi_startproc` makes them, so that glibc's backtrace from a function it calls walks through it.
+        { "a naked function's CFI", "inner main",
+          "#include <execinfo.h>\n"
+          "#include <stdio.h>\n"
+          "int inner(void) { void* frames[16]; return backtrace(frames, 16); }\n"
+          "__attribute__((naked)) int through(void) {\n"
+          "    __asm__(\"pushq %rbx\\n\\t.cfi_adjust_cfa_offset 8\\n\\t.cfi_rel_offset %rbx, 0\\n\\tsubq $16, %rsp\\n\\t.cfi_adjust_cfa_offset 16\\n\\t\"\n"
+          "            \"call inner\\n\\taddq $16, %rsp\\n\\t.cfi_adjust_cfa_offset -16\\n\\tpopq %rbx\\n\\t.cfi_adjust_cfa_offset -8\\n\\t.cfi_restore %rbx\\n\\tret\");\n"
+          "}\n"
+          "int main(void) { int direct = inner(); printf(\"%d\\n\", through() - direct); return 0; }\n" },
         // A template's `.comm` of a variable the unit defines (#1848): clang's common symbol of the name, of C's size at
         // the `.comm`'s alignment, whichever comes first, an initializer's or a tentative definition's; the definition's
         // bytes stay in their section without a symbol, and C's references (a pointer's relocation among them) are the
