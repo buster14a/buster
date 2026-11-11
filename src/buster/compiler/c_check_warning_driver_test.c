@@ -467,6 +467,59 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .warnings = 7,
     },
     {
+        // A divisor clang's EvaluateAsInt finds zero through a const object's initializer (#1447,
+        // check_common_zero_divisor): a scalar's, an element's, a member's, through parentheses and casts, at file and
+        // block scope; not a volatile's, a non-const's or one initialized at run time, and none in unreachable code.
+        .name = "division by a const object's zero",
+        .source = "const int k = 0;\n"
+                  "static const int ks = 0;\n"
+                  "const volatile int kv = 0;\n"
+                  "int nk = 0;\n"
+                  "const long kl = 0;\n"
+                  "const int ka[2] = { 0, 1 };\n"
+                  "struct P { int m; };\n"
+                  "const struct P kp = { 0 };\n"
+                  "const int one = 1;\n"
+                  "const char s[] = \"a\";\n"
+                  "int f(int x) {\n"
+                  "    const int lk = 0;\n"
+                  "    const int lk2 = x;\n"
+                  "    int r = 1 / k + 1 % ks + 1 / kv + 1 / nk + x / kl + 1 / lk + 1 / lk2 + 1 / ka[0] + 1 / kp.m + 1 / (k) + 1 / (int)k;\n"
+                  "    if (0) { r = 1 / k; }\n"
+                  "    r += (int)sizeof(1 / k) + 1 / one + 1 / s[1];\n"
+                  "    r += x ? 1 / lk : 0;\n"
+                  "    return r;\n"
+                  "    r = 1 / k;\n"
+                  "}\n",
+        .warnings = 10,
+    },
+    {
+        .name = "division by a const object's zero in C23 under -Wall",
+        .source = "const int k = 0;\n"
+                  "static const int ks = 0;\n"
+                  "const volatile int kv = 0;\n"
+                  "int nk = 0;\n"
+                  "const long kl = 0;\n"
+                  "const int ka[2] = { 0, 1 };\n"
+                  "struct P { int m; };\n"
+                  "const struct P kp = { 0 };\n"
+                  "const int one = 1;\n"
+                  "const char s[] = \"a\";\n"
+                  "int f(int x) {\n"
+                  "    const int lk = 0;\n"
+                  "    const int lk2 = x;\n"
+                  "    int r = 1 / k + 1 % ks + 1 / kv + 1 / nk + x / kl + 1 / lk + 1 / lk2 + 1 / ka[0] + 1 / kp.m + 1 / (k) + 1 / (int)k;\n"
+                  "    if (0) { r = 1 / k; }\n"
+                  "    r += (int)sizeof(1 / k) + 1 / one + 1 / s[1];\n"
+                  "    r += x ? 1 / lk : 0;\n"
+                  "    return r;\n"
+                  "    r = 1 / k;\n"
+                  "}\n",
+        .options = { "-Wall" },
+        .warnings = 10,
+        .c23 = true,
+    },
+    {
         .name = "literal conversions precede selection arms' shift counts and division by zero",
         .source = "int h(int x){int a=_Generic(x,int:1,long:x<<70);int b=1.5&&(x+(x<<35));int c=__builtin_choose_expr(1,x,x>>40);short s=3.7;"
                   "return a+b+c+s+(x<<-3)/0;}\n",

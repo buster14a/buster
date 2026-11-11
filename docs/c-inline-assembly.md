@@ -458,8 +458,10 @@ does an asm body (#1839), which loads its operands from its block.
 
 `y` places an operand in an MMX register (#1846), mm0 up but the ones the
 clobbers name (`"mm0"`): an integer, a pointer, a `float` or a `double` of up
-to 8 bytes, as clang takes them (clang takes an `__m64` too, a vector whose
-8-byte loads Tier 0 doesn't have, so the lowering refuses it by name). The template
+to 8 bytes, as clang takes them, and an `__m64` (#1846, the owner's decision
+on #1447): its 8 bytes as an unsigned long, an input's read through its
+object's address (`CheckAsmPlace.m64`), since Tier 0 has no 8-byte vector load.
+An `__m64` input of no object (`v + v`) is refused by name. The template
 names it `%mm0`; clang refuses every modifier of one, and so does the lowering.
 The helper loads it as clang's code does, zero-extended into rax and moved into
 its register (`movzwl`, then `movq %rax, %mm0`), before the general registers'
@@ -1206,9 +1208,10 @@ templates of references to names, asm goto under `--tier1`, `loop` and `jrcxz` (
 templates that return but keep a helper for another reason (refused by name), templates
 that take directives, and forms of unknown effects outside `check_asm_implicit`.
 Under `--tier1`, templates of named labels keep their helpers (a body's labels
-would make its function Tier 0's), a function with a template that returns or a
-label of a template of no instructions is Tier 0's, and the
-code's certificate (`--verify`) leaves a function with an asm body uncertified.
+would make its function Tier 0's), and a function with a template that returns or a
+label of a template of no instructions is Tier 0's. The
+code's certificate (`--verify`) certifies a function with asm bodies
+([the certificate guide](tier1-certificate.md)'s "Asm bodies").
 
 What the lowering still refuses of what GCC and clang take:
 

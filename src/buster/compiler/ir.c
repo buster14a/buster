@@ -254,7 +254,13 @@ typedef enum IrOp
 // an xmm register's low quadword, which the x86 builtins' shifts by an int move there by vmovd. A count that is a
 // constant is the immediate form's (tier1_select.c).
 #define BUSTER_IR_INTRINSIC_SHIFT 24u
-#define BUSTER_IR_INTRINSIC_COUNT 25u
+// A binary operation of two vectors' integer lanes that the IR's own opcodes lack (#1840), of a and b of the result's
+// type: its flags the lanes' bytes' log2 in bits 0 and 1 (0 to 3: bytes to quadwords) and the operation in bits 2 to 4:
+// the unsigned (0) and signed (1) minimum, the unsigned (2) and signed (3) maximum, and of bytes and words alone the
+// unsigned (4) and signed (5) saturating sum, and the unsigned (6) and signed (7) saturating difference a - b
+// (vpminub to vpmaxsq, vpaddusb to vpsubsw: clang's __builtin_elementwise_min, _max, _add_sat and _sub_sat).
+#define BUSTER_IR_INTRINSIC_LANE_OP 25u
+#define BUSTER_IR_INTRINSIC_COUNT 26u
 
 // ICMP EQ/NE accept pointers too; the other integer predicates require integer operands. FCMP uses EQ through GE:
 // ordered comparisons, except NE, which is true for unordered inputs, as in C.
@@ -786,6 +792,7 @@ static const char* const ir_intrinsic_names[BUSTER_IR_INTRINSIC_COUNT] = {
     "extend",
     "truncate",
     "shift",
+    "lane_op",
 };
 
 // A fence's orders' names in the text form, C's memory_order's (BUSTER_IR_FENCE_ORDER), and its signal scope's word.
@@ -1351,6 +1358,14 @@ static bool ir_shift_flags_valid(uint32_t flags)
     return lanes != 0 && shift <= 2 && (flags >> 4) == 0;
 }
 
+// Whether a lane operation's flags (#1840, BUSTER_IR_INTRINSIC_LANE_OP) are valid: a minimum or a maximum of any integer
+// lanes, a saturating sum or difference of bytes or words.
+static bool ir_lane_op_flags_valid(uint32_t flags)
+{
+    const uint32_t operation = (flags >> 2) & 7;
+    return (flags >> 5) == 0 && (operation < 4 || (flags & 3) <= 1);
+}
+
 // The mask type of a comparison of vector type `type`'s lanes `lane`, a bit per lane (m8 for 8 lanes or fewer): IR_VOID
 // for a type that isn't a vector.
 static uint32_t ir_lane_mask(uint32_t type, uint32_t lane)
@@ -1913,6 +1928,17 @@ static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i)
                     else
                     {
                         valid = ir_vector_type(type) && ta == type && f->type[b] == type && ir_permute_flags_valid(c, type, part);
+                    }
+                }
+                else if (c == BUSTER_IR_INTRINSIC_LANE_OP)
+                {
+                    if (b >= f->instruction_count || f->type[b] == IR_VOID || f->type[b] >= IR_TYPE_COUNT)
+                    {
+                        check = ir_check(IR_ERROR_OPERAND, i, 1);
+                    }
+                    else
+                    {
+                        valid = ir_vector_type(type) && ta == type && f->type[b] == type && ir_lane_op_flags_valid(part);
                     }
                 }
                 else if (c == BUSTER_IR_INTRINSIC_SHIFT)
@@ -3317,7 +3343,7 @@ static IrError ir_print(const IrFunction* f, Arena* scratch, FILE* output)
                             // A width change's part (#1840), its immediate.
                             if (c == BUSTER_IR_INTRINSIC_EXTRACT || c == BUSTER_IR_INTRINSIC_INSERT || c == BUSTER_IR_INTRINSIC_PERMUTE || c == BUSTER_IR_INTRINSIC_ALIGN ||
                                 c == BUSTER_IR_INTRINSIC_SHUFFLE_LANES || c == BUSTER_IR_INTRINSIC_EXTEND || c == BUSTER_IR_INTRINSIC_TRUNCATE ||
-                                c == BUSTER_IR_INTRINSIC_SHIFT)
+                                c == BUSTER_IR_INTRINSIC_SHIFT || c == BUSTER_IR_INTRINSIC_LANE_OP)
                             {
                                 fprintf(output, " %u", (unsigned)f->flags[i]);
                             }

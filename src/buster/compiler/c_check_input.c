@@ -329,6 +329,9 @@ typedef enum CheckInputMessage
     // An invalid function's initializer (#1447): clang's "illegal initializer (only variables can be initialized)", at its
     // name, recovered and the initializer skipped.
     CHECK_INPUT_FUNCTION_INITIALIZER,
+    // An array's element whose size isn't a multiple of its alignment (#1893, clang's err_array_element_alignment), at the
+    // array's `[`: the element type, its size in `value` and its alignment in `detail`.
+    CHECK_INPUT_ARRAY_ELEMENT_ALIGNMENT,
     // An array of more than BUSTER_TYPE_MAX_OBJECT_BYTES (#1447, clang's limit too), at its bound: "array is too large
     // (2'305'843'009'213'693'952 elements)", its count in `value`.
     CHECK_INPUT_ARRAY_TOO_LARGE,
@@ -585,6 +588,8 @@ typedef enum CheckInputNoteKind
     CHECK_INPUT_NOTE_FUNCTION_DECLARATION,
     CHECK_INPUT_NOTE_CONSTANT_SUBEXPRESSION,
     CHECK_INPUT_NOTE_CONSTANT_DIVISION,
+    // A jump's scope it enters (#1942): a statement expression's `(`, "jump enters a statement expression".
+    CHECK_INPUT_NOTE_JUMP,
 } CheckInputNoteKind;
 
 // A version as clang's VersionTuple holds it (#1447: an availability attribute's): its components (major, minor,
@@ -7110,8 +7115,8 @@ struct CheckDeclaratorRun
     // whether it did: its type then has a stand-in where clang's has its error, and its declaration is invalid.
     bool recover;
     bool invalid;
-    // A parameter of the declared function's own list was in error (CheckDeclaratorPart.invalid_parameter): the
-    // declaration is invalid, but its group goes on.
+    // A parameter of the declared function's own list was in error (CheckDeclaratorPart.invalid_parameter), or its own bound
+    // was misplaced (a file-scope VLA's): the declaration is invalid, but its group goes on.
     bool parameter_invalid;
 };
 
@@ -7900,11 +7905,20 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                                               &part.kind, &part.extent);
                 run->definition_end = run->definition != BUSTER_CHECK_NONE ? close : run->definition_end;
                 // A negative constant bound (#1447), or one of another type than an integer's (#2170): an invalid
-                // declaration, its array a stand-in of no element.
-                if (__builtin_expect(!valid, 0) && reader->output->report_count == before + 1 &&
-                    (reader->output->reports[before].message == CHECK_INPUT_ARRAY_NEGATIVE || reader->output->reports[before].message == CHECK_INPUT_ARRAY_NON_INTEGER) &&
+                // declaration, its array a stand-in of no element. So is a variable bound where none can be, a file-scope
+                // declarator's (#1447: clang marks it invalid and goes on).
+                const CheckInputMessage bound_error = __builtin_expect(!valid, 0) && reader->output->report_count == before + 1 ? reader->output->reports[before].message :
+                                                      CHECK_INPUT_UNSUPPORTED;
+                const bool was_invalid = run->invalid;
+                const bool bound_invalid = bound_error == CHECK_INPUT_ARRAY_NEGATIVE || bound_error == CHECK_INPUT_ARRAY_NON_INTEGER;
+                if (__builtin_expect(!valid, 0) && (bound_invalid || bound_error == CHECK_INPUT_VLA_FILE_SCOPE || bound_error == CHECK_INPUT_VM_FILE_SCOPE) &&
                     check_input_declarator_recover(reader, run, frame, before))
                 {
+                    // (A misplaced one's error is Sema's CheckVariableDeclarationType's, not the declarator's: the group goes on,
+                    // CheckDeclaratorRun.parameter_invalid.)
+                    const bool placement = !bound_invalid && !frame->parameter_context;
+                    run->parameter_invalid |= placement;
+                    run->invalid = placement ? was_invalid : run->invalid;
                     valid = true;
                     part.kind = BUSTER_TYPE_KIND_ARRAY;
                     part.extent = 0;
@@ -8197,6 +8211,23 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                             const uint32_t before = reader->output->report_count;
                             check_input_report_typed(reader, part->token, functions ? CHECK_INPUT_ARRAY_FUNCTIONS : CHECK_INPUT_ARRAY_INCOMPLETE, type,
                                                      type == frame->base ? frame->name : BUSTER_CHECK_NONE, frame->name);
+                            stand_in = check_input_declarator_recover(reader, run, frame, before);
+                            type = stand_in ? BUSTER_TYPE_INT : 0;
+                        }
+                        else if (__builtin_expect(type != 0 && !stand_in && type_alignment(reader->types, type) != 0 &&
+                                                  type_size(reader->types, element) % type_alignment(reader->types, type) != 0, 0))
+                        {
+                            // An element whose alignment an attribute raised past its size (#1893): clang's BuildArrayType error at
+                            // the `[`, with both, recovered as the other declarator errors are.
+                            const uint32_t before = reader->output->report_count;
+                            check_input_report_typed(reader, part->token, CHECK_INPUT_ARRAY_ELEMENT_ALIGNMENT, type, type == frame->base ? frame->name : BUSTER_CHECK_NONE,
+                                                     type_size(reader->types, element));
+                            if (reader->output->report_count > before)
+                            {
+                                reader->output->reports[before].detail = (uint32_t)type_alignment(reader->types, type);
+                                reader->output->reports[before].note_kind = 0;
+                                reader->output->reports[before].note_token = BUSTER_CHECK_NONE;
+                            }
                             stand_in = check_input_declarator_recover(reader, run, frame, before);
                             type = stand_in ? BUSTER_TYPE_INT : 0;
                         }
@@ -10762,8 +10793,8 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
             const uint32_t previous_declaration = previous_handle != 0 ? reader->bindings.declaration[previous_handle - 1] : BUSTER_CHECK_NONE;
             const CheckInputAttributes* previous_attributes =
                 check_sparse_wide_present(reader->output->attributes) && previous_declaration < parser->tokens.count ? check_input_attributes_at(reader->output, previous_declaration) : 0;
-            // clang's multiversioning check uses the canonical (first) declaration's attributes, not the immediate
-            // previous one (#839's re-review).
+            // The first declaration's attributes, which internal_linkage's rule below reads (multiversioning's checks
+            // read the previous declaration's and its earlier ones', #2135).
             // The stream's first column has the walk's answer where it's kept (#1351): the walk is O(redeclarations).
             const bool first_kept = previous_handle != 0 && reader->bindings.first != 0;
             uint32_t first_handle = first_kept ? reader->bindings.first[previous_handle - 1] : previous_handle;
@@ -10779,9 +10810,6 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
             const uint32_t first_declaration = first_handle != 0 ? reader->bindings.declaration[first_handle - 1] : BUSTER_CHECK_NONE;
             const CheckInputAttributes* first_attributes =
                 check_sparse_wide_present(reader->output->attributes) && first_declaration < parser->tokens.count ? check_input_attributes_at(reader->output, first_declaration) : 0;
-            const bool first_inline = first_declaration != BUSTER_CHECK_NONE && reader->output->function_flags != NULL &&
-                                      first_declaration < parser->tokens.count &&
-                                      (reader->output->function_flags[first_declaration] & CHECK_INPUT_FUNCTION_INLINE) != 0;
             const bool attributes_valid = valid;
             // The declaration's subjects as clang's attributes name them (#147, check_input_attribute_subjects): a typedef, a
             // function (inline or not), or a variable of global storage (a thread's or not, an external one's at file scope)
@@ -10891,7 +10919,12 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
             if (attributes_valid && function && !is_typedef)
             {
                 const uint32_t multiversion_reports = reader->output->multiversion_report_count;
-                check_input_attribute_multiversion(reader, attributes, name, first_attributes, first_declaration, is_inline, first_inline);
+                // (The declaration before it, whose attributes include its earlier declarations', #2135.)
+                const bool previous_inline = previous_declaration != BUSTER_CHECK_NONE && reader->output->function_flags != NULL &&
+                                             previous_declaration < parser->tokens.count &&
+                                             (reader->output->function_flags[previous_declaration] & CHECK_INPUT_FUNCTION_INLINE) != 0;
+                check_input_attribute_multiversion(reader, attributes, name, previous_attributes, previous_declaration, previous_handle, is_inline,
+                                                   previous_inline);
                 if (reader->cpu_dispatch && reader->output->multiversion_report_count == multiversion_reports)
                 {
                     // clang's cpu_specific and cpu_dispatch rules against the declaration before (#1447): a declaration
@@ -10918,7 +10951,21 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                 valid = false;
             }
             reader->vla_initializer_dropped = false;
-            valid &= check_input_vla_declaration(reader, first, vla_begin, name, type, i, storage, is_typedef, initialized, thread_local);
+            const uint32_t vla_reports = reader->output->report_count;
+            const bool placed = check_input_vla_declaration(reader, first, vla_begin, name, type, i, storage, is_typedef, initialized, thread_local);
+            // A block's static or extern variable-length array or variably modified object (#1447): clang's error at its name,
+            // the declaration invalid, a stand-in int, and the reader goes on. (One with an initializer still stops.)
+            const CheckInputMessage vla_error = !placed && reader->output->report_count == vla_reports + 1 ? reader->output->reports[vla_reports].message :
+                                                CHECK_INPUT_UNSUPPORTED;
+            const bool vla_recovered = valid && !placed && !initialized && !reader->lane &&
+                                       (vla_error == CHECK_INPUT_VLA_STATIC || vla_error == CHECK_INPUT_VLA_EXTERN || vla_error == CHECK_INPUT_VM_EXTERN) &&
+                                       check_input_recover_reports(reader, vla_reports);
+            check_input_lane_refuse(reader, valid && !placed && reader->lane && (vla_error == CHECK_INPUT_VLA_STATIC || vla_error == CHECK_INPUT_VLA_EXTERN ||
+                                                                                 vla_error == CHECK_INPUT_VM_EXTERN),
+                                    "an invalid declaration's uses are quiet in source order");
+            type = vla_recovered ? BUSTER_TYPE_INT : type;
+            invalid |= vla_recovered;
+            valid &= placed || vla_recovered;
             if (__builtin_expect(valid && reader->vla_initializer_dropped, 0))
             {
                 // Its initializer, which clang doesn't check against the type (#1447): skipped, to the declarator's end.

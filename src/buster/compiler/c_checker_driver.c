@@ -7,6 +7,69 @@
 #include "linker_options.c"
 #include "c_driver_inputs.c"
 
+// The closing brace of the function body around `token`, up its tree's parents, or BUSTER_CHECK_NONE.
+static uint32_t check_driver_body_close(const Parser* parser, uint32_t token)
+{
+    const uint32_t count = parser->tokens.count;
+    uint32_t result = BUSTER_CHECK_NONE;
+    for (uint32_t parent = token, steps = 0; result == BUSTER_CHECK_NONE && parent < count && steps < count; steps += 1)
+    {
+        result = parser->tree.roles[parent] == PARSE_ROLE_CLOSE_BODY ? parent : BUSTER_CHECK_NONE;
+        parent = parser->tree.parents[parent];
+    }
+    return result;
+}
+
+// The candidates clang's notes name for an ambiguous label's reference, report `index` (#1844, its reader's
+// check_input_report_label_ambiguous), in its lookup's order, into `candidates` (`capacity` of them), their count: the
+// innermost list's entries of the name in the candidates' scope, the latest first (its note token's, then back through
+// its block's lists, which begin the block), then where the function's own labels are among them (`detail` 1), in the
+// order clang made them: the one a reference that was no ambiguity made (`attribute`), then the one each earlier
+// ambiguous reference of the function made, at its name.
+static uint32_t check_driver_label_candidates(const Parser* parser, const CheckInput* input, uint32_t index, uint32_t* candidates, uint32_t capacity)
+{
+    const uint32_t count = parser->tokens.count;
+    const CheckInputReport* report = input->reports + index;
+    const uint32_t name = parser->tokens.names[report->token];
+    uint32_t found = 0;
+    bool listed = report->note_token < count;
+    for (uint32_t token = report->note_token; listed && found < capacity; token -= 1)
+    {
+        const uint8_t kind = parser->tokens.kinds[token];
+        if (kind == PARSE_KIND_IDENTIFIER && parser->tokens.names[token] == name)
+        {
+            candidates[found++] = token;
+        }
+        listed = token != 0 && (kind == PARSE_KIND_IDENTIFIER || kind == PARSE_KIND_COMMA || kind == PARSE_KIND_SEMI || kind == PARSE_KIND_LABEL);
+    }
+    if (report->detail == 1)
+    {
+        if (report->attribute < count && found < capacity)
+        {
+            candidates[found++] = report->attribute;
+        }
+        // The earlier ambiguous references of the name in the same body, in their tokens' order.
+        const uint32_t close = check_driver_body_close(parser, report->token);
+        const uint32_t start = found;
+        for (uint32_t r = 0; r < input->report_count && found < capacity; r += 1)
+        {
+            const CheckInputReport* other = input->reports + r;
+            if (other->message == CHECK_INPUT_LABEL_AMBIGUOUS && other->token < report->token && parser->tokens.names[other->token] == name &&
+                check_driver_body_close(parser, other->token) == close)
+            {
+                uint32_t at = found++;
+                while (at > start && candidates[at - 1] > other->token)
+                {
+                    candidates[at] = candidates[at - 1];
+                    at -= 1;
+                }
+                candidates[at] = other->token;
+            }
+        }
+    }
+    return found;
+}
+
 static const char* check_driver_action_message(CheckDiagnostic diagnostic)
 {
     const char* result = "invalid expression";
@@ -66,6 +129,7 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_ARRAY_FUNCTIONS: result = "declared as array of functions"; break;
         case CHECK_INPUT_ARRAY_INCOMPLETE: result = "array has incomplete element type"; break;
         case CHECK_INPUT_FUNCTION_INITIALIZER: result = "illegal initializer (only variables can be initialized)"; break;
+        case CHECK_INPUT_ARRAY_ELEMENT_ALIGNMENT: result = "size of array element isn't a multiple of its alignment"; break;
         case CHECK_INPUT_ARRAY_TOO_LARGE: result = "array is too large"; break;
         case CHECK_INPUT_ARRAY_NON_INTEGER: result = "size of array has non-integer type"; break;
         case CHECK_INPUT_AMBIGUOUS: result = "reference to identifier is ambiguous"; break;
@@ -2688,7 +2752,8 @@ static bool check_driver_in_parameters(const Parser* parser, uint32_t token)
 // body's scope before it handles the definition's declarator (ActOnStartOfFunctionDef: its own attributes, its
 // redeclaration), whose errors then keep the body's unused variables quiet; but what it gives as it parses, before that
 // (#1835), doesn't count: a specifier's (DeclSpec::Finish), a parameter's attributes' (ActOnParamDeclarator), and an
-// attribute's argument that must be a string literal (the parser's err_expected_string_literal).
+// attribute's argument that must be a string literal (the parser's err_expected_string_literal). Nor does a jump's
+// (#1942): clang's JumpScopeChecker runs in ActOnFinishFunctionBody, once the body's scopes have closed.
 static bool check_driver_error_scoped(const Parser* parser, const CheckInput* input, const CheckInputReport* report)
 {
     const CheckInputMessage message = report->message;
@@ -2698,7 +2763,9 @@ static bool check_driver_error_scoped(const Parser* parser, const CheckInput* in
     const bool parsed = message == CHECK_INPUT_ATTRIBUTE_STRING_ARGUMENT ||
                         (message == CHECK_INPUT_ATTRIBUTE_ARGUMENT && (report->detail & 0xffu) == CHECK_ARGUMENT_STRING_LITERAL);
     const bool early = report->recovered && (specifier || (attribute && (parsed || check_driver_in_parameters(parser, report->token))));
-    return !early || check_driver_in_body(parser, report->token);
+    const bool jump = message == CHECK_INPUT_JUMP_GOTO || message == CHECK_INPUT_JUMP_SWITCH || message == CHECK_INPUT_JUMP_INDIRECT ||
+                      message == CHECK_INPUT_JUMP_ASM;
+    return !jump && (!early || check_driver_in_body(parser, report->token));
 }
 
 // Each parameter has its own specifiers. Unlike a declaration's comma-separated declarators, a parameter cannot
@@ -4432,6 +4499,7 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                         }
                         else if (phase == 0 && (kind == CHECK_INPUT_VECTOR_ELEMENT || kind == CHECK_INPUT_FUNCTION_RETURN || kind == CHECK_INPUT_ARRAY_FUNCTIONS ||
                                  kind == CHECK_INPUT_ARRAY_INCOMPLETE || kind == CHECK_INPUT_ARRAY_NEGATIVE || kind == CHECK_INPUT_ARRAY_TOO_LARGE ||
+                                 kind == CHECK_INPUT_ARRAY_ELEMENT_ALIGNMENT ||
                                  kind == CHECK_INPUT_ARRAY_NON_INTEGER ||
                                  ((kind == CHECK_INPUT_INCOMPLETE_OBJECT || kind == CHECK_INPUT_INCOMPLETE_TENTATIVE) && input->reports[index].type != 0)))
                         {
@@ -4495,6 +4563,12 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                                 grouped[at] = 0;
                                 pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "array is too large (%s elements)", grouped);
                             }
+                            else if (kind == CHECK_INPUT_ARRAY_ELEMENT_ALIGNMENT)
+                            {
+                                pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication,
+                                                      "size of array element of type %.*s (%llu bytes) isn't a multiple of its alignment (%u bytes)", (int)type.length,
+                                                      type.pointer, (unsigned long long)report->value, report->detail);
+                            }
                             else if (kind == CHECK_INPUT_ARRAY_FUNCTIONS)
                             {
                                 pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "'%.*s' declared as array of functions of type %.*s",
@@ -4511,6 +4585,26 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                                 pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, forward ? 1u : 0u, format, (int)type.length, type.pointer);
                             }
                             arena_pop_to(scratch, type_mark);
+                        }
+                        else if (phase == 0 && (kind == CHECK_INPUT_JUMP_GOTO || kind == CHECK_INPUT_JUMP_SWITCH) &&
+                                 input->reports[index].note_kind == CHECK_INPUT_NOTE_JUMP && input->reports[index].note_token < count)
+                        {
+                            // A jump into a statement expression (#1942), noted at its `(` as clang's jump scope checker notes it, or
+                            // past a declaration whose scope it enters, at its name (c_check_vla_input.c's details).
+                            static const char* const bypassed[4] = {
+                                "jump enters a statement expression",
+                                "jump bypasses initialization of variable length array",
+                                "jump bypasses initialization of variable with __attribute__((cleanup))",
+                                "jump bypasses initialization of VLA typedef",
+                            };
+                            const uint32_t detail = input->reports[index].detail;
+                            const PPOutputDiagnosticNote note = {
+                                .token = parser->tokens.sources[input->reports[index].note_token],
+                                .message = bypassed[detail < 4 ? detail : 0],
+                            };
+                            pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, 1, "%s",
+                                                       kind == CHECK_INPUT_JUMP_GOTO ? "cannot jump from this goto statement to its label" :
+                                                                                       "cannot jump from switch statement to this case label");
                         }
                         else if (phase == 0 && kind == CHECK_INPUT_REDECLARATION && input->reports[index].detail == CHECK_REDECLARATION_GENERIC &&
                                  input->reports[index].note_kind == CHECK_INPUT_NOTE_PREVIOUS_DEFINITION)
@@ -4863,6 +4957,23 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                             pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, previous < count ? 1u : 0u,
                                                         "alias definition of '%.*s' after tentative definition", (int)intern_length(pp->table, name),
                                                         intern_bytes(pp->table, name));
+                        }
+                        else if (phase == 0 && input->reports[index].message == CHECK_INPUT_LABEL_AMBIGUOUS && located < count &&
+                                 parser->tokens.kinds[located] == PARSE_KIND_IDENTIFIER)
+                        {
+                            // An ambiguous label's reference (#1844), with clang's note at each candidate its lookup found.
+                            const uint32_t name = parser->tokens.names[located];
+                            uint32_t candidates[16];
+                            const uint32_t candidate_count = check_driver_label_candidates(parser, input, index, candidates, BUSTER_ARRAY_LENGTH(candidates));
+                            char candidate[512];
+                            snprintf(candidate, sizeof(candidate), "candidate found by name lookup is '%.*s'", (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
+                            PPOutputDiagnosticNote notes[16];
+                            for (uint32_t c = 0; c < candidate_count; c += 1)
+                            {
+                                notes[c] = (PPOutputDiagnosticNote){ .token = parser->tokens.sources[candidates[c]], .message = candidate };
+                            }
+                            pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, notes, candidate_count, "reference to '%.*s' is ambiguous",
+                                                        (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
                         }
                         else if (phase == 0 && input->reports[index].message >= CHECK_INPUT_LABEL_UNDECLARED &&
                                  input->reports[index].message <= CHECK_INPUT_LABEL_AMBIGUOUS && located < count && parser->tokens.kinds[located] == PARSE_KIND_IDENTIFIER)
