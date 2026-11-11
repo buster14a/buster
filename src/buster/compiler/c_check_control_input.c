@@ -165,6 +165,29 @@ static bool check_input_declaration_after(const Parser* parser, uint32_t token)
            (kind == PARSE_KIND_IDENTIFIER && parser->tree.roles[token] == PARSE_ROLE_SPECIFIER);
 }
 
+// Whether the suppress named at `name`, an attribute list's item before `after`, has an argument that is no string literal
+// (#2332, check_input_attribute_suppress_literal; an empty list has none): clang's parser gives its "expected string
+// literal" and drops the attribute before Sema meets the label's.
+static bool check_input_label_suppress_literal(const Parser* parser, uint32_t name, uint32_t after)
+{
+    const uint8_t* kinds = parser->tokens.kinds;
+    const uint32_t close = name + 1 < after && kinds[name + 1] == PARSE_KIND_L_PAREN ? parser->tree.parents[name + 1] : 0;
+    const bool listed = close > name + 2 && close < after;
+    bool result = false;
+    for (uint32_t argument = name + 2; listed && !result && argument <= close;)
+    {
+        uint32_t stop = argument;
+        while (stop < close && kinds[stop] != PARSE_KIND_COMMA)
+        {
+            const uint32_t group = kinds[stop] == PARSE_KIND_L_PAREN ? parser->tree.parents[stop] : stop;
+            stop = group > stop && group < close ? group + 1 : stop + 1;
+        }
+        result = check_input_attribute_suppress_literal(parser, argument, stop) != BUSTER_CHECK_NONE;
+        argument = stop + 1;
+    }
+    return result;
+}
+
 // A label's attributes from `first` to `after` (#147): GNU ones right after a named label's colon, as clang's parser takes
 // every GNU attribute there in C, whatever follows it (a null statement, another statement, a declaration, C23's
 // attributes, which are the next item's), and a statement's before a label's name (`[[x]] l:`), which clang's labeled
@@ -187,7 +210,11 @@ static void check_input_label_attributes(CheckInputReader* reader, uint32_t firs
                                             (parser->tokens.kinds[token - 1] == PARSE_KIND_COMMA && parser->tree.depths[token - 1] == items));
         items = role == PARSE_ROLE_OPEN_ATTRIBUTE_LIST ? parser->tree.depths[token] + 1 : items;
         const bool named = item && parser->tokens.kinds[token] != PARSE_KIND_COMMA && role != PARSE_ROLE_CLOSE_ATTRIBUTE_LIST && parser->tokens.names[token] != 0;
-        refused = named && check_input_label_refusal(check_input_attribute_name(reader, parser->tokens.names[token])) != NULL ? token : BUSTER_CHECK_NONE;
+        const String8 name = named ? check_input_attribute_name(reader, parser->tokens.names[token]) : (String8){ 0 };
+        // (suppress's arguments are clang's parser's string literals first, whose error drops it before Sema meets the
+        // label, #2332: the reading's error.)
+        const bool dropped = named && check_input_attribute_suppress_name(name) && check_input_label_suppress_literal(parser, token, after);
+        refused = named && !dropped && check_input_label_refusal(name) != NULL ? token : BUSTER_CHECK_NONE;
     }
     if (refused != BUSTER_CHECK_NONE)
     {

@@ -136,6 +136,9 @@ static const char* check_vector_shuffle_row(const TypeTable* types, const X86Tar
         reason = (target->features & needed) != needed ? (in.element == 1 ? "vector shuffles of 8-bit elements without AVX-512 VBMI" :
                                                                   "vector shuffles of 16-bit elements without AVX-512BW") :
                                                NULL;
+        // Without VPERMT2B or VPERMT2W, the lowering takes the shuffle element by element instead, as it takes the
+        // baseline's (#1834): x86-64-v4's byte shuffles, the MMX unpacks' among them.
+        plan->elementwise = reason != NULL;
     }
     row->operand_count = (uint8_t)operands;
     return reason;
