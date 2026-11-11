@@ -1118,6 +1118,24 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
           "#endif\n"
           "return (int)h;}\n"
         },
+        // Compares of qwords without SSE4.1's PCMPEQQ and SSE4.2's PCMPGTQ (#1834): PCMPEQD's halves ANDed, the sign of
+        // the difference or of an operand, and `<=` and `>=` as complements; of 16, 32 and 64 bytes, and their uses in
+        // `?:`, `!` and `&&`. The pairs have equal elements, equal high halves, the extremes and the sign bits.
+        { "baseline-qword-compares",
+          "typedef long long sq __attribute__((vector_size(16)));typedef unsigned long long uq __attribute__((vector_size(16)));"
+          "typedef long long sq4 __attribute__((vector_size(32)));typedef unsigned long long uq4 __attribute__((vector_size(32)));"
+          "typedef long long sq8 __attribute__((vector_size(64)));typedef unsigned long long uq8 __attribute__((vector_size(64)));"
+          "typedef long long ex2 __attribute__((ext_vector_type(2)));typedef unsigned long long ux4 __attribute__((ext_vector_type(4)));\n"
+          "#define C(T,a,b) do{__typeof__(a<b) r_[]={a<b,a<=b,a>b,a>=b,a==b,a!=b};FOLD(r_);}while(0)\n"
+          "#define V(T,k) T a##k,b##k;fill(&a##k,sizeof(T),n+k);fill(&b##k,sizeof(T),n+k+50);b##k[1]=a##k[1];a##k[0]=(__typeof__(a##k[0]))(1ull<<63);"
+          "b##k[0]=(__typeof__(a##k[0]))((unsigned long long)a##k[0]+1);"
+          "if(sizeof(T)>16){a##k[2]=(__typeof__(a##k[0]))0x7fffffffffffffffull;b##k[2]=(__typeof__(a##k[0]))0x7fffffff00000000ull;a##k[3]=(__typeof__(a##k[0]))-1;b##k[3]=0;}\n"
+          "int tested(int n){unsigned h=2166136261u;V(sq,1)V(uq,2)V(sq4,3)V(uq4,4)V(sq8,5)V(uq8,6)V(ex2,7)V(ux4,8)\n"
+          "C(sq,a1,b1);C(uq,a2,b2);C(sq4,a3,b3);C(uq4,a4,b4);C(sq8,a5,b5);C(uq8,a6,b6);C(ex2,a7,b7);C(ux4,a8,b8);\n"
+          "a7[1]=0;a8[2]=0;b8[3]=0;ex2 c7=a7?b7:-b7;ux4 c8=a8?b8:~b8;__typeof__(!a7) d7=!a7,e7=a7&&b7;__typeof__(!a8) d8=!a8,e8=a8&&b8;"
+          "FOLD(c7);FOLD(c8);FOLD(d7);FOLD(e7);FOLD(d8);FOLD(e8);\n"
+          "return (int)h;}\n"
+        },
         // AVX's and AVX2's (x86-64-v3's): 256-bit unpacks, broadcasts, permutes, variable shifts, lanes' extractions and
         // insertions, extensions, gathers, FMA's (of no NaN) and F16C's conversions, and shuffles of dwords and qwords.
         { "baseline-avx2",
