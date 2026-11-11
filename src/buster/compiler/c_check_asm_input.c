@@ -521,7 +521,15 @@ static bool check_asm_constraint(CheckInputAsm* statement, uint32_t index, const
         }
         else if (strchr("inCEFGIJKLMNOseZ", byte) != NULL)
         {
-            valid = !output;
+            // An output's constant letters are clang's, which no output takes: its alternative's other letters decide
+            // (`=re`'s register; `=i` alone has none, check_asm_clang_valid's error).
+            operand->flags |= !output ? CHECK_ASM_IMMEDIATE : 0;
+            alternative |= !output;
+        }
+        else if (byte == 'W' && !output && cursor < text.length && text.bytes[cursor] == 's')
+        {
+            // x86's Ws: a symbol's address with an optional addend, an input's constant.
+            cursor += 1;
             operand->flags |= CHECK_ASM_IMMEDIATE;
             alternative = true;
         }
@@ -742,7 +750,11 @@ static void check_input_asm_prepare(CheckInputReader* reader, uint32_t keyword)
             uint32_t current = 0;
             failed = operands[operand].constraint.token;
             valid = check_asm_constraint(statement, operand, reader->pp->table, &current);
-            if (!valid && !check_asm_clang_valid(statement, operand, reader->pp->table))
+            // clang's validation first, which refuses some the checker's classes take (an early clobber of a read-write
+            // memory output, an input tied to a read-write output).
+            const bool clang_valid = check_asm_clang_valid(statement, operand, reader->pp->table);
+            valid = valid && clang_valid;
+            if (!clang_valid)
             {
                 // clang's error of a constraint it refuses (#1973), as written: its bytes stay in the reader's arena.
                 const CheckAsmText text = operands[operand].constraint;
