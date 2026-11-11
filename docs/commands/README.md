@@ -31,9 +31,10 @@ table are entry points, not an exhaustive list of every subtest or flag.
 | `test-check-debug, benchmark-check-debug` | `c_check_debug.c` | [check-debug](check-debug.md) |
 | benchpress (the 9700X) over the tailnet | `.claude/hooks/join-tailnet.sh` | [benchpress](benchpress.md) |
 | agent memory in cloud sessions | `.claude/hooks/llm-memory.sh` | [llm-memory](llm-memory.md) |
+| hooks of sessions started beside the checkout | `.claude/hooks/parent-folder.sh` | [llm-memory](llm-memory.md#sessions-that-start-beside-the-checkout) |
 | `correctness.tests, costs / CI selection` | `tools/ci/correctness.tests`, `tools/ci/costs.c` | [ci](ci.md) |
 | `measure-compile, --time-stages` | `c_check_clock.c` | [compile-time](compile-time.md) |
-| `test-c-testsuite, test-sqlite` | `c_testsuite.c`, `sqlite_test.c` | [c-testsuite](c-testsuite.md) |
+| `test-c-testsuite, test-sqlite, test-sqlite-testfixture` | `c_testsuite.c`, `sqlite_test.c`, `sqlite_testfixture.c` | [c-testsuite](c-testsuite.md) |
 | `dco status, audit, compose` | `tools/dco/dco.c` | [dco](dco.md) |
 | `test-dataflow, benchmark-dataflow` | `dataflow.c` | [dataflow](dataflow.md) |
 | `test-debug, benchmark-debug` | `debug.c` | [debug](debug.md) |

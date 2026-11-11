@@ -155,8 +155,8 @@ static bool ir_typed_plan_arrive(IrTypedPlan* plan, Arena* scratch, uint32_t blo
 }
 
 // The plan's and the emitter's default cases take every kind they don't name for a binary operation, so a kind added
-// must be lowered (or refused, as FRAME_ADDRESS and TAIL_CALL are, and the X86 rows past the SIMD subset) here before
-// tier0_validate accepts it. A FENCE (#1059) is an IR_FENCE of its value, which is the IR's operand as it is, and an
+// must be lowered (or refused, as TAIL_CALL is, and the X86 rows past the SIMD subset) here before tier0_validate accepts
+// it. A FRAME_ADDRESS is an IR_STACK_SAVE of BUSTER_IR_STACK_SAVE_FRAME (#1847). A FENCE (#1059) is an IR_FENCE of its value, which is the IR's operand as it is, and an
 // ATOMIC_RMW an IR_ATOMIC_RMW of its operation and order, and an ATOMIC_CAS one of the compare-exchange.
 _Static_assert(BUSTER_TYPED_KINDS == 52 && BUSTER_TYPED_FENCE == BUSTER_TYPED_X86 + 1 && BUSTER_TYPED_ATOMIC_RMW == BUSTER_TYPED_FENCE + 1 &&
                    BUSTER_TYPED_ATOMIC_CAS == BUSTER_TYPED_ATOMIC_RMW + 1 && BUSTER_TYPED_KINDS == BUSTER_TYPED_ATOMIC_CAS + 1,
@@ -261,6 +261,7 @@ static IrTypedPlan ir_typed_plan(const Tier0Function* input, Arena* scratch)
                 case BUSTER_TYPED_GLOBAL:
                 case BUSTER_TYPED_GLOBAL_ADDRESS:
                 case BUSTER_TYPED_STACK_SAVE:
+                case BUSTER_TYPED_FRAME_ADDRESS:
                     stack[depth] = class;
                     depth += 1;
                     break;
@@ -717,6 +718,18 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_vector_operation(
         value = ir_typed_emit(sink, IR_VSELECT, type, mask, active, inactive, 0);
         ir_typed_lanes(sink, value, operation->lane);
     }
+    else if (operation->convert != 0)
+    {
+        // A conversion (#1840), its lanes and mode in its flags; a masked truncation's merged into its second operand under
+        // its third where the typed stream's writemask hasn't every lane.
+        value = ir_typed_emit(sink, IR_INTRINSIC, type, operands[0], BUSTER_IR_NONE, operation->convert - 1u, 0);
+        ir_typed_lanes(sink, value, (IrSimdLane)operation->immediate);
+        if (operation->merge_mask && !unmasked)
+        {
+            value = ir_typed_emit(sink, IR_VSELECT, type, operands[2], value, operands[1], 0);
+            ir_typed_lanes(sink, value, operation->lane);
+        }
+    }
     else if (operation->permute != 0)
     {
         // A permute (#1840), its immediate in its flags.
@@ -762,7 +775,7 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_vector_operation(
 // operand have it (_mm512_cmpeq_epi8_mask's -1). The typed stream decides it, so both lowering passes agree.
 static bool ir_typed_unmasked(const Tier0Function* input, const IrSimdTypedOperation* operation, uint32_t i)
 {
-    // A comparison's lanes, or a masked extract's (#1840): its result's, the merged operand's.
+    // A comparison's lanes, or a masked extract's or truncation's (#1840): its result's, the merged operand's.
     const uint32_t lanes = operation->compare_mask ? 8u * operation->operand_bytes[0] / ir_simd_lane_bits(operation->lane) :
                            operation->merge_mask   ? 8u * operation->operand_bytes[1] / ir_simd_lane_bits(operation->lane) :
                                                      0;
@@ -863,6 +876,7 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_asm_body(IrTypedS
             .count = body->count,
             .branch_count = body->branch_count,
             .touched = body->touched,
+            .masks = body->masks,
         };
         output->calls[descriptor] = (IrCall){
             .argument_first = first,
@@ -1880,7 +1894,8 @@ static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType res
     bool leaves = false;
     for (uint32_t k = 0; check.error == IR_OK && k < input->asm_body_count && input->asm_bodies != 0; k += 1)
     {
-        leaves |= input->asm_bodies[k].leaves;
+        // A body's labels (#1839), which the IR's body call doesn't carry, are Tier 0's too.
+        leaves |= input->asm_bodies[k].leaves || input->asm_bodies[k].label_count != 0;
     }
     if (check.error == IR_OK && (input->unwind_init || input->returns_twice || tier0_preserving(input) || input->realign_stack || input->segments || leaves))
     {
@@ -1891,7 +1906,8 @@ static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType res
         // keeps registers for its caller past them (#147, Tier0Function.preserve_general), and a force_align_arg_pointer
         // function's, which realigns its stack (#1447, Tier0Function.realign_stack), and a function with segment overrides
         // (#1447, Tier0Function.segments: loads and stores in __seg_fs or __seg_gs, which the IR doesn't carry yet) are Tier
-        // 0's: ordinary Tier 1 falls back to them.
+        // 0's: ordinary Tier 1 falls back to them. A caller of setjmp's library kin lowers (Tier0Function.calls_returns_twice):
+        // only Tier 1's admission leaves it to Tier 0 (check_tier1_compile, #1847).
         check.error = IR_ERROR_UNSUPPORTED;
     }
     if (check.error == IR_OK)
@@ -1929,10 +1945,10 @@ static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType res
             check.error = IR_ERROR_UNSUPPORTED;
             check.instruction = i;
         }
-        else if (kind == BUSTER_TYPED_FRAME_ADDRESS || kind == BUSTER_TYPED_TAIL_CALL)
+        else if (kind == BUSTER_TYPED_TAIL_CALL)
         {
-            // These are valid typed operations, but this adapter does not lower them. Refuse before planning so
-            // neither reaches the default binary-operation case; ordinary Tier 1 may fall back to Tier 0.
+            // A valid typed operation, but this adapter does not lower it. Refuse before planning so it doesn't reach
+            // the default binary-operation case; ordinary Tier 1 may fall back to Tier 0.
             check.error = IR_ERROR_UNSUPPORTED;
             check.instruction = i;
         }
