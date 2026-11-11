@@ -60,7 +60,7 @@ static CheckTier1Outcome check_tier1_failure(CheckTier1Stage stage, CheckTier1Ca
     switch (cause)
     {
         case CHECK_TIER1_CAUSE_ADMISSION:
-            category = error == BUSTER_CHECK_TIER1_NAKED ? CHECK_TIER1_UNSUPPORTED : category;
+            category = error == BUSTER_CHECK_TIER1_NAKED || error == BUSTER_CHECK_TIER1_RETURNS_TWICE ? CHECK_TIER1_UNSUPPORTED : category;
             break;
         case CHECK_TIER1_CAUSE_IR:
             category = error == IR_ERROR_UNSUPPORTED ? CHECK_TIER1_UNSUPPORTED : error == IR_ERROR_MEMORY || error == IR_ERROR_LIMIT ? CHECK_TIER1_RESOURCE_FAILURE : category;
@@ -285,6 +285,14 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
     Arena* scratch = &lane->scratch;
     const IrType result_type = result_class == UINT8_MAX ? IR_VOID : (IrType)ir_typed_types[result_class];
     IrFunction lowered = { 0 };
+    // A caller of a function that returns twice (#1847, Tier0Function.calls_returns_twice) is Tier 0's: Tier 1 shares
+    // call-save rows and spill slots among values whose ranges don't meet on the CFG, which has no edge from a longjmp
+    // back to the call, so a second return would read another value's bytes. Its IR lowers as any other's.
+    if (stage == CHECK_TIER1_COMPILED && function->calls_returns_twice)
+    {
+        outcome = check_tier1_failure(CHECK_TIER1_LOWERING, CHECK_TIER1_CAUSE_ADMISSION, BUSTER_CHECK_TIER1_RETURNS_TWICE, UINT32_MAX, 0);
+        stage = outcome.stage;
+    }
     if (stage == CHECK_TIER1_COMPILED)
     {
         // A vector wider than the target moves whole is taken, and split below (#1624).
