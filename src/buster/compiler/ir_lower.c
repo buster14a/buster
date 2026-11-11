@@ -786,6 +786,19 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_vector_operation(
         value = ir_typed_emit(sink, IR_INTRINSIC, type, operands[0], operands[1], BUSTER_IR_INTRINSIC_SHIFT, 0);
         ir_typed_lanes(sink, value, (IrSimdLane)operation->immediate);
     }
+    else if (operation->compress != 0)
+    {
+        // A compress or an expand (#1840) of the first operand under the third, the mask, merged into the second, the
+        // third operand in a slot of the extra array; its lanes' bytes' log2 in its flags.
+        const uint32_t slot = (uint32_t)sink->sizes.extra_count;
+        if (sink->output != 0)
+        {
+            sink->output->extra[slot] = operands[1];
+        }
+        sink->sizes.extra_count += 1;
+        value = ir_typed_emit(sink, IR_INTRINSIC, type, operands[0], operands[2], ir_intrinsic_ternary_c(operation->compress - 1u, slot), 0);
+        ir_typed_lanes(sink, value, (IrSimdLane)operation->immediate);
+    }
     else if (operation->ternlog)
     {
         // A bitwise function of three vectors (#1840): its truth table in its flags, the third operand in a slot of the

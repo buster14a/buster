@@ -269,7 +269,14 @@ typedef enum IrOp
 // all of the result's type: vpternlogd and vpternlogq, whose destination is a, b in vvvv and the third operand in rm
 // (_mm512_ternarylogic_epi32(a, b, c, imm)).
 #define BUSTER_IR_INTRINSIC_TERNLOG 27u
-#define BUSTER_IR_INTRINSIC_COUNT 28u
+// compress's lanes are a's lanes whose bits b, a mask of the lanes, has set, in order from lane 0, followed by the third
+// operand's lanes from the first one past them; expand's lane i is, where b's bit i is set, a's next lane from lane 0,
+// and the third operand's lane i where it isn't. Their flags are the lanes' bytes' log2 (0 to 3), b the result's mask at
+// those lanes, a and the third operand of the result's type: vpcompressb to vpcompressq and vpexpandb to vpexpandq into a
+// register, merged into the third operand (the maskz builtins' a zero vector).
+#define BUSTER_IR_INTRINSIC_COMPRESS 28u
+#define BUSTER_IR_INTRINSIC_EXPAND 29u
+#define BUSTER_IR_INTRINSIC_COUNT 30u
 #define BUSTER_IR_INTRINSIC_TERNARY BUSTER_IR_INTRINSIC_PERMUTE2
 #define BUSTER_IR_INTRINSIC_KIND 0xffu
 #define BUSTER_IR_INTRINSIC_EXTRA_SHIFT 8u
@@ -808,6 +815,8 @@ static const char* const ir_intrinsic_names[BUSTER_IR_INTRINSIC_COUNT] = {
     "lane_op",
     "permute2",
     "ternlog",
+    "compress",
+    "expand",
 };
 
 // A fence's orders' names in the text form, C's memory_order's (BUSTER_IR_FENCE_ORDER), and its signal scope's word.
@@ -1381,6 +1390,9 @@ static bool ir_lane_op_flags_valid(uint32_t flags)
     const uint32_t operation = (flags >> 2) & 7;
     return (flags >> 5) == 0 && (operation < 4 || (flags & 3) <= 1);
 }
+
+// The lanes whose bytes' log2 an intrinsic's flags hold (#1840, compress and expand): bytes to quadwords.
+static const uint8_t ir_intrinsic_lanes[4] = { IR_SIMD_LANE_I8, IR_SIMD_LANE_I16, IR_SIMD_LANE_I32, IR_SIMD_LANE_I64 };
 
 // An intrinsic's kind (#1840) from its `c`, and whether that kind has a third operand in the extra array.
 static uint32_t ir_intrinsic_kind(uint32_t c)
@@ -1962,9 +1974,12 @@ static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i)
                     }
                     else
                     {
-                        // permute2's flags its lanes' bytes' log2; ternlog's any immediate.
-                        valid = ir_vector_type(type) && ta == type && f->type[b] == type && f->type[third] == type &&
-                                (ir_intrinsic_kind(c) == BUSTER_IR_INTRINSIC_TERNLOG || part <= 3);
+                        // permute2's flags its lanes' bytes' log2, b of its type; ternlog's any immediate, b of its type;
+                        // compress's and expand's their lanes' bytes' log2, b the mask of those lanes.
+                        const uint32_t kind = ir_intrinsic_kind(c);
+                        const bool masked = kind == BUSTER_IR_INTRINSIC_COMPRESS || kind == BUSTER_IR_INTRINSIC_EXPAND;
+                        const uint32_t expected_b = masked && part <= 3 ? ir_lane_mask(type, ir_intrinsic_lanes[part]) : type;
+                        valid = ir_vector_type(type) && ta == type && f->type[b] == expected_b && f->type[third] == type && (kind == BUSTER_IR_INTRINSIC_TERNLOG || part <= 3);
                     }
                 }
                 else if (c == BUSTER_IR_INTRINSIC_EXTRACT || c == BUSTER_IR_INTRINSIC_WIDEN)

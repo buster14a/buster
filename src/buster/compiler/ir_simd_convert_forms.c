@@ -170,6 +170,23 @@ static const uint16_t ir_simd_ternlog_forms[2][3] = {
     { X86_FORM_VPTERNLOGD_X_X_XM128_IMM8, X86_FORM_VPTERNLOGD_Y_Y_YM256_IMM8, X86_FORM_VPTERNLOGD_Z_Z_ZM512_IMM8 },
     { X86_FORM_VPTERNLOGQ_X_X_XM128_IMM8, X86_FORM_VPTERNLOGQ_Y_Y_YM256_IMM8, X86_FORM_VPTERNLOGQ_Z_Z_ZM512_IMM8 },
 };
+// The compresses and expands of a vector's lanes into a register (#1840, BUSTER_IR_INTRINSIC_COMPRESS and _EXPAND), by
+// their lanes' bytes' log2 and width: vpcompressb to vpcompressq, the source in reg and the destination in rm, and
+// vpexpandb to vpexpandq, the destination in reg and the source in rm, each merged under a writemask; and the move of a
+// whole vector at each width that the front end's rows end with.
+static const uint16_t ir_simd_compress_forms[4][3] = {
+    { X86_FORM_VPCOMPRESSB_XM128_X, X86_FORM_VPCOMPRESSB_YM256_Y, X86_FORM_VPCOMPRESSB_ZM512_Z },
+    { X86_FORM_VPCOMPRESSW_XM128_X, X86_FORM_VPCOMPRESSW_YM256_Y, X86_FORM_VPCOMPRESSW_ZM512_Z },
+    { X86_FORM_VPCOMPRESSD_XM128_X, X86_FORM_VPCOMPRESSD_YM256_Y, X86_FORM_VPCOMPRESSD_ZM512_Z },
+    { X86_FORM_VPCOMPRESSQ_XM128_X, X86_FORM_VPCOMPRESSQ_YM256_Y, X86_FORM_VPCOMPRESSQ_ZM512_Z },
+};
+static const uint16_t ir_simd_expand_forms[4][3] = {
+    { X86_FORM_VPEXPANDB_X_XM128, X86_FORM_VPEXPANDB_Y_YM256, X86_FORM_VPEXPANDB_Z_ZM512 },
+    { X86_FORM_VPEXPANDW_X_XM128, X86_FORM_VPEXPANDW_Y_YM256, X86_FORM_VPEXPANDW_Z_ZM512 },
+    { X86_FORM_VPEXPANDD_X_XM128, X86_FORM_VPEXPANDD_Y_YM256, X86_FORM_VPEXPANDD_Z_ZM512 },
+    { X86_FORM_VPEXPANDQ_X_XM128, X86_FORM_VPEXPANDQ_Y_YM256, X86_FORM_VPEXPANDQ_Z_ZM512 },
+};
+static const uint16_t ir_simd_whole_moves[3] = { X86_FORM_VMOVDQU64_X_XM128, X86_FORM_VMOVDQU64_Y_YM256, X86_FORM_VMOVDQU64_Z_ZM512 };
 // vpermi2b to vpermi2q, the same permutes whose destination is the indices, the first table in vvvv and the second in rm
 // (Tier 1's where the destination's register holds the indices).
 static const uint16_t ir_simd_permute2_index_forms[4][3] = {
