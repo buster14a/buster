@@ -2964,13 +2964,61 @@ static __attribute__((noinline)) void check_lower_vector_split(CheckLowerWriter*
 // stack's when it runs. Half-precision elements have clang's excess precision where the unit's target hasn't AVX512-FP16
 // (check_lower_vector_half_chain), and bf16 elements' operators are check_lower_vector_brain's. Where the target hasn't
 // AVX-512, an operator wider than its vector registers is split into pieces they hold (check_lower_vector_split).
+// Integer vector division and remainder (#2216), which no x86 instruction computes: element by element, as clang's code
+// divides each, the operands on the stack set into frame temporaries (the last first), then each element of the result
+// the scalar DIV or MOD of the operands' elements, promoted to int or unsigned int where they are narrower (as LLVM's
+// sdiv and udiv of i8 and i16 compute them), truncated and set at its offset; then the result read whole. A zero divisor,
+// or INT_MIN's division by -1, traps as the scalar's does, where clang's code's is undefined too. Pushed last first.
+static __attribute__((noinline)) void check_lower_vector_divide(CheckLowerWriter* writer, uint32_t op, TypeId vector)
+{
+    const CheckVectorElement element = check_vector_lower_element(writer->program->types, vector);
+    const TypeTable* types = writer->program->types;
+    // Its lanes, not its bytes: an extended vector's past its lanes are padding, which no division reads.
+    const uint32_t lanes = check_builtin_vector_lanes(types, type_conversion_operand(types, vector));
+    const uint8_t computed = element.bytes == 8 ? (element.is_signed ? BUSTER_TYPED_CLASS_I64 : BUSTER_TYPED_CLASS_U64) :
+                                                  (element.is_signed ? BUSTER_TYPED_CLASS_I32 : BUSTER_TYPED_CLASS_U32);
+    const uint8_t stored = element.bytes == 1 ? (element.is_signed ? BUSTER_TYPED_CLASS_I8 : BUSTER_TYPED_CLASS_U8) :
+                           element.bytes == 2 ? (element.is_signed ? BUSTER_TYPED_CLASS_I16 : BUSTER_TYPED_CLASS_U16) : computed;
+    const uint32_t operands[2] = { check_lower_temporary_of(writer, vector), check_lower_temporary_of(writer, vector) };
+    const uint32_t out = check_lower_temporary_of(writer, vector);
+    check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_VECTOR, out);
+    for (uint32_t i = lanes; i-- > 0 && writer->output->status == CHECK_PROGRAM_OK;)
+    {
+        check_lower_instruction(writer, BUSTER_TYPED_SET, stored, 0);
+        if (stored != computed)
+        {
+            check_lower_instruction(writer, BUSTER_TYPED_CONVERT, stored, 0);
+        }
+        check_lower_instruction(writer, op == CHECK_OP_DIVIDE ? BUSTER_TYPED_DIV : BUSTER_TYPED_MOD, computed, 0);
+        for (uint32_t a = 2; a-- > 0;)
+        {
+            if (stored != computed)
+            {
+                check_lower_instruction(writer, BUSTER_TYPED_CONVERT, computed, 0);
+            }
+            check_lower_instruction(writer, BUSTER_TYPED_LOAD, stored, 0);
+            check_lower_element_address(writer, operands[a], i * element.bytes);
+        }
+        check_lower_element_address(writer, out, i * element.bytes);
+    }
+    check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_VECTOR, operands[0]);
+    check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_VECTOR, operands[1]);
+    writer->vectors = true;
+}
+
 static void check_lower_vector_row(CheckLowerWriter* writer, uint32_t op, TypeId vector, uint8_t scalar_class)
 {
+    const CheckVectorElement divided = check_vector_lower_element(writer->program->types, vector);
+    const bool divide = (op == CHECK_OP_DIVIDE || op == CHECK_OP_REMAINDER) && !divided.floating && divided.bytes != 0;
     Tier0Operation row;
     const uint64_t evex = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512VL);
     const uint32_t width = (writer->target.features & BUSTER_X86_FEATURE(AVX)) != 0 ? 32 : 16;
     const uint32_t bytes = check_lower_vector_bytes(writer->program->types, vector);
-    if (check_vector_lower_brain(writer->program->types, vector))
+    if (divide)
+    {
+        check_lower_vector_divide(writer, op, vector);
+    }
+    else if (check_vector_lower_brain(writer->program->types, vector))
     {
         check_lower_vector_brain(writer, op, vector, scalar_class);
     }
