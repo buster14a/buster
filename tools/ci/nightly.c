@@ -2806,6 +2806,31 @@ static void nightly_test_facts(NightlyTest* test)
     nightly_expect(test, nightly_plain_verdict(&facts, 9) == NIGHTLY_PLAIN_OK, "unsharded plain rows: ok");
     nightly_facts_free(&facts);
 
+    // Each row is a called workflow (hosted-correctness.yml, #2032): its jobs' names follow the row's, and the job that
+    // builds a portable row's compiler once is no shard. Its failure fails the row through its shards, which fail
+    // without the product.
+    for (uint32_t built = 0; built < 2; built += 1)
+    {
+        buffer->length = 0;
+        nightly_test_run(buffer, 16, "push", "completed", built ? "success" : "failure", sha, 1, 2, "x");
+        for (uint32_t a = 0; a < 2; a += 1)
+        {
+            const char* architecture = a == 0 ? "x86-64" : "native";
+            const char* build = a == 0 ? (built ? "success" : "failure") : "skipped";
+            nightly_append(buffer, "job\t16\tcompleted\t%s\tTests on Ubuntu 26.04 (%s, none, O3) / Build the compiler once for the row's shards\n", build, architecture);
+            for (uint32_t k = 1; k <= 4; k += 1)
+            {
+                const char* shard = a == 0 && !built ? "failure" : "success";
+                nightly_append(buffer, "job\t16\tcompleted\t%s\tTests on Ubuntu 26.04 (%s, none, O3) / Tests on Ubuntu 26.04 (Clang 23, %s, none, O3, shard %u of 4)\n", shard, architecture, architecture, k);
+            }
+        }
+        facts = nightly_facts_new();
+        nightly_expect(test, nightly_facts_parse(&facts, nightly_buffer_text(buffer)), "a called row's facts parse");
+        const NightlyPlain verdict = nightly_plain_verdict(&facts, 16);
+        nightly_expect(test, built ? verdict == NIGHTLY_PLAIN_OK : verdict == NIGHTLY_PLAIN_FAILED, built ? "a called row's shards: ok, its build no shard" : "a called row whose build failed: failed, by its shards");
+        nightly_facts_free(&facts);
+    }
+
     // Invalid facts are refused whole.
     static const char* const invalid[] = {
         "run\t1\t1\tpush\tcompleted\tsuccess\tnot-a-sha\t.github/workflows/9700x.yml\tmain\t1\t2\t1421805693\tx\n",
