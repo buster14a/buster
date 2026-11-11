@@ -11180,10 +11180,22 @@ static inline __attribute__((always_inline)) uint32_t check_input_library_call(C
 // unit's declaration of a plain library builtin in that body rather than compute or fold it (EmitDirectCallee's
 // no-builtin-NAME and no-builtins function attributes), though its constant contexts still fold (the constant
 // evaluator doesn't read the attribute). A string clang warns names no builtin ("*" among them) matches none.
-static __attribute__((noinline)) bool check_input_no_builtin(CheckInputReader* reader, IdentId name)
+static __attribute__((noinline)) bool check_input_no_builtin(CheckInputReader* reader, IdentId name, uint32_t token)
 {
     const Parser* parser = reader->parser;
-    const uint32_t body = reader->function_body;
+    // The body the walk is in, or, where a pass after the walk asks (the reader's expression batches), the one that holds
+    // `token`: its `}` up the tree, then the `{` whose parent that is.
+    const uint32_t count = parser->tokens.count;
+    uint32_t body = reader->function_body;
+    uint32_t close = body >= count && token < count ? token : BUSTER_CHECK_NONE;
+    for (uint32_t steps = 0; close < count && parser->tree.roles[close] != PARSE_ROLE_CLOSE_BODY && steps < count; steps += 1)
+    {
+        close = parser->tree.parents[close];
+    }
+    for (uint32_t t = close < count ? token : 0; body >= count && t-- > 0;)
+    {
+        body = parser->tree.roles[t] == PARSE_ROLE_OPEN_BODY && parser->tree.parents[t] == close ? t : body;
+    }
     const uint32_t function = body < parser->tokens.count ? check_sparse_get(reader->output->body_declarations, body) : BUSTER_CHECK_NONE;
     const CheckInputAttributes* attributes = function < parser->tokens.count ? check_input_attributes_at(reader->output, function) : NULL;
     const uint8_t* spelling = name != 0 ? intern_bytes(reader->pp->table, name) : NULL;
@@ -11576,8 +11588,8 @@ static inline __attribute__((always_inline)) void check_input_resolve_name(Check
     // A catalog builtin's name that no declaration binds or a declaration with external linkage binds
     // (check_input_builtin_kept), or a call of the unit's declaration of a <stdbit.h> function that clang makes the builtin.
     // In a function whose no_builtin names the function, its call is the declaration's (#1958).
-    const bool claimed = cbuiltin_stdc_library(builtin) ? check_input_stdc_library_call(reader, i, bound, builtin) && !check_input_no_builtin(reader, identifier) :
-                         bound == 0 || (check_input_builtin_kept(reader, bound, builtin) && !check_input_no_builtin(reader, identifier));
+    const bool claimed = cbuiltin_stdc_library(builtin) ? check_input_stdc_library_call(reader, i, bound, builtin) && !check_input_no_builtin(reader, identifier, i) :
+                         bound == 0 || (check_input_builtin_kept(reader, bound, builtin) && !check_input_no_builtin(reader, identifier, i));
     if (__builtin_expect(builtin != CBUILTIN_NONE, 0) && role == PARSE_ROLE_OPERAND && claimed)
     {
         // The callee may be the name in parentheses, which clang's call looks through (check_input_callee_end): they
@@ -13476,7 +13488,7 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
                 const uint32_t use = callee < node && graph->ops[callee] == CHECK_OP_VALUE ? graph->tokens[callee] : BUSTER_CHECK_NONE;
                 uint32_t library = use != BUSTER_CHECK_NONE ? check_input_library_call(reader, use) : 0;
                 // In a function whose no_builtin names it, the call is the declaration's (#1958).
-                library = library != 0 && check_input_no_builtin(reader, parser->tokens.names[use]) ? 0 : library;
+                library = library != 0 && check_input_no_builtin(reader, parser->tokens.names[use], use) ? 0 : library;
                 graph->members[node] = library != 0 ? library : graph->members[node];
             }
             if (BUSTER_CHECK_RARE(reader, builtins, token) != 0)
