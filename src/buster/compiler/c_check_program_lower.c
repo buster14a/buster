@@ -536,6 +536,9 @@ struct CheckLowerAtomic
     bool native;
     bool postfix;
     bool discard;
+    // An _Atomic lvalue's object's segment override (#1447, BUSTER_TYPED_ACCESS_SEGMENT), which its direct accesses take
+    // (its LOAD, SET, ATOMIC_RMW and ATOMIC_CAS); a library call takes its address as it is, as clang's does.
+    uint64_t segment;
 };
 
 struct CheckLowerAbi
@@ -12395,8 +12398,8 @@ static void check_lower_vector_floating(CheckLowerWriter* writer, uint32_t node,
                                                      check_vector_floating_scalar_row(&writer->target, builtin, class, &row, &constants, &tail);
         if (reason == NULL && tail.record_count != 0)
         {
-            // Two rows (check_vector_extreme_scalar_rows' maximumnum and minimumnum without AVX): x and y in temporaries,
-            // the first row of x, y and its constant, then the tail of its value, y and x.
+            // Two rows (check_vector_extreme_scalar_rows' maximumnum and minimumnum, and maximum's and minimum's, without
+            // AVX): x and y in temporaries, the first row of x, y and its constant, then the tail of its value, y and x.
             const uint32_t x = check_lower_temporary(writer, class);
             const uint32_t y = check_lower_temporary(writer, class);
             check_lower_instruction(writer, BUSTER_TYPED_X86, class, check_lower_operation_index(writer, &tail));
@@ -13282,8 +13285,11 @@ static bool check_lower_segment_access(const CheckLowerWriter* writer, uint32_t 
     const uint8_t target_facts = written ? check_lower_facts(writer, target_type) : 0;
     const bool aggregate_store = (target_facts & BUSTER_CHECK_LOWER_TYPE_AGGREGATE) != 0 && (target_facts & BUSTER_CHECK_LOWER_TYPE_ATOMIC) == 0 &&
                                  (op == CHECK_OP_ASSIGN || !check_lower_transport_type(types, target_type));
-    const bool carried = read ? reader && check_lower_segment_carried(writer, value->type)
-                              : written && (aggregate_store || check_lower_segment_carried(writer, check_stream_type(stream, target)));
+    // An _Atomic lvalue's read, store or update goes through its plan (check_lower_atomic_prepare), whose direct accesses
+    // take the override (CheckLowerAtomic.segment).
+    const bool atomic_lvalue = (check_lower_facts(writer, read ? value->type : written ? check_stream_type(stream, target) : 0) & BUSTER_CHECK_LOWER_TYPE_ATOMIC) != 0;
+    const bool carried = atomic_lvalue || (read ? reader && check_lower_segment_carried(writer, value->type)
+                                                : written && (aggregate_store || check_lower_segment_carried(writer, check_stream_type(stream, target))));
     // A vector's element takes its vector lvalue's override (check_lower_element_segment) where the element is of a class one
     // LOAD or STORE moves, and not a bit of a vector of bool (a transport vector's, which no address reaches).
     const TypeId vector = element ? check_stream_type(stream, target) : 0;
@@ -15160,6 +15166,21 @@ static bool check_lower_asm_segment(const CheckLowerWriter* writer, const CheckI
     return result;
 }
 
+// An asm operand's input value (place->type's): the operand's expression's, or an __m64's 8 bytes (#1846,
+// CheckAsmPlace.m64) loaded as an unsigned long through its object's address (CheckAsmPlace.object's).
+static void check_lower_asm_value(CheckLowerWriter* writer, const CheckAsmPlace* place, uint32_t node)
+{
+    if (place->m64)
+    {
+        check_lower_instruction(writer, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_U64, 0);
+        check_lower_expression(writer, place->object, true, 0);
+    }
+    else
+    {
+        check_lower_expression(writer, node, false, place->type);
+    }
+}
+
 // Whether an asm body's operand `place` is its call row's argument (#1839, CheckProgramAsm.inline_passed): a value or an
 // address a register holds when the template starts (check_asm_loads'), a general register's, an XMM register's or a
 // memory operand's base.
@@ -15249,7 +15270,7 @@ static void check_lower_asm(CheckLowerWriter* writer, CheckControl control)
             }
             else if (place->kind != BUSTER_CHECK_ASM_CONSTANT)
             {
-                check_lower_expression(writer, node, false, place->type);
+                check_lower_asm_value(writer, place, node);
             }
         }
     }
@@ -15367,7 +15388,7 @@ static void check_lower_asm(CheckLowerWriter* writer, CheckControl control)
             }
             else if (passed)
             {
-                check_lower_expression(writer, node, false, place->type);
+                check_lower_asm_value(writer, place, node);
             }
             else if (place->written && place->read)
             {
@@ -15387,7 +15408,7 @@ static void check_lower_asm(CheckLowerWriter* writer, CheckControl control)
             else if (!passed && place->kind != BUSTER_CHECK_ASM_CONSTANT)
             {
                 check_lower_instruction(writer, BUSTER_TYPED_SET, class, 0);
-                check_lower_expression(writer, node, false, place->type);
+                check_lower_asm_value(writer, place, node);
                 check_lower_asm_slot(writer, object, place->slot);
             }
         }
@@ -15414,7 +15435,7 @@ static void check_lower_asm(CheckLowerWriter* writer, CheckControl control)
             else if (place->kind != BUSTER_CHECK_ASM_CONSTANT)
             {
                 check_lower_instruction(writer, BUSTER_TYPED_SET, class, 0);
-                check_lower_expression(writer, node, false, place->type);
+                check_lower_asm_value(writer, place, node);
                 check_lower_asm_slot(writer, object, place->slot);
             }
         }
@@ -15476,7 +15497,7 @@ static void check_lower_asm(CheckLowerWriter* writer, CheckControl control)
             else if (place->kind != BUSTER_CHECK_ASM_CONSTANT)
             {
                 check_lower_instruction(writer, BUSTER_TYPED_DISCARD, check_lower_class(writer, place->type), 0);
-                check_lower_expression(writer, node, false, place->type);
+                check_lower_asm_value(writer, place, node);
             }
         }
     }

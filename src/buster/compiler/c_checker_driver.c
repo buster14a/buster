@@ -7,6 +7,69 @@
 #include "linker_options.c"
 #include "c_driver_inputs.c"
 
+// The closing brace of the function body around `token`, up its tree's parents, or BUSTER_CHECK_NONE.
+static uint32_t check_driver_body_close(const Parser* parser, uint32_t token)
+{
+    const uint32_t count = parser->tokens.count;
+    uint32_t result = BUSTER_CHECK_NONE;
+    for (uint32_t parent = token, steps = 0; result == BUSTER_CHECK_NONE && parent < count && steps < count; steps += 1)
+    {
+        result = parser->tree.roles[parent] == PARSE_ROLE_CLOSE_BODY ? parent : BUSTER_CHECK_NONE;
+        parent = parser->tree.parents[parent];
+    }
+    return result;
+}
+
+// The candidates clang's notes name for an ambiguous label's reference, report `index` (#1844, its reader's
+// check_input_report_label_ambiguous), in its lookup's order, into `candidates` (`capacity` of them), their count: the
+// innermost list's entries of the name in the candidates' scope, the latest first (its note token's, then back through
+// its block's lists, which begin the block), then where the function's own labels are among them (`detail` 1), in the
+// order clang made them: the one a reference that was no ambiguity made (`attribute`), then the one each earlier
+// ambiguous reference of the function made, at its name.
+static uint32_t check_driver_label_candidates(const Parser* parser, const CheckInput* input, uint32_t index, uint32_t* candidates, uint32_t capacity)
+{
+    const uint32_t count = parser->tokens.count;
+    const CheckInputReport* report = input->reports + index;
+    const uint32_t name = parser->tokens.names[report->token];
+    uint32_t found = 0;
+    bool listed = report->note_token < count;
+    for (uint32_t token = report->note_token; listed && found < capacity; token -= 1)
+    {
+        const uint8_t kind = parser->tokens.kinds[token];
+        if (kind == PARSE_KIND_IDENTIFIER && parser->tokens.names[token] == name)
+        {
+            candidates[found++] = token;
+        }
+        listed = token != 0 && (kind == PARSE_KIND_IDENTIFIER || kind == PARSE_KIND_COMMA || kind == PARSE_KIND_SEMI || kind == PARSE_KIND_LABEL);
+    }
+    if (report->detail == 1)
+    {
+        if (report->attribute < count && found < capacity)
+        {
+            candidates[found++] = report->attribute;
+        }
+        // The earlier ambiguous references of the name in the same body, in their tokens' order.
+        const uint32_t close = check_driver_body_close(parser, report->token);
+        const uint32_t start = found;
+        for (uint32_t r = 0; r < input->report_count && found < capacity; r += 1)
+        {
+            const CheckInputReport* other = input->reports + r;
+            if (other->message == CHECK_INPUT_LABEL_AMBIGUOUS && other->token < report->token && parser->tokens.names[other->token] == name &&
+                check_driver_body_close(parser, other->token) == close)
+            {
+                uint32_t at = found++;
+                while (at > start && candidates[at - 1] > other->token)
+                {
+                    candidates[at] = candidates[at - 1];
+                    at -= 1;
+                }
+                candidates[at] = other->token;
+            }
+        }
+    }
+    return found;
+}
+
 static const char* check_driver_action_message(CheckDiagnostic diagnostic)
 {
     const char* result = "invalid expression";
@@ -2688,7 +2751,8 @@ static bool check_driver_in_parameters(const Parser* parser, uint32_t token)
 // body's scope before it handles the definition's declarator (ActOnStartOfFunctionDef: its own attributes, its
 // redeclaration), whose errors then keep the body's unused variables quiet; but what it gives as it parses, before that
 // (#1835), doesn't count: a specifier's (DeclSpec::Finish), a parameter's attributes' (ActOnParamDeclarator), and an
-// attribute's argument that must be a string literal (the parser's err_expected_string_literal).
+// attribute's argument that must be a string literal (the parser's err_expected_string_literal). Nor does a jump's
+// (#1942): clang's JumpScopeChecker runs in ActOnFinishFunctionBody, once the body's scopes have closed.
 static bool check_driver_error_scoped(const Parser* parser, const CheckInput* input, const CheckInputReport* report)
 {
     const CheckInputMessage message = report->message;
@@ -2698,7 +2762,9 @@ static bool check_driver_error_scoped(const Parser* parser, const CheckInput* in
     const bool parsed = message == CHECK_INPUT_ATTRIBUTE_STRING_ARGUMENT ||
                         (message == CHECK_INPUT_ATTRIBUTE_ARGUMENT && (report->detail & 0xffu) == CHECK_ARGUMENT_STRING_LITERAL);
     const bool early = report->recovered && (specifier || (attribute && (parsed || check_driver_in_parameters(parser, report->token))));
-    return !early || check_driver_in_body(parser, report->token);
+    const bool jump = message == CHECK_INPUT_JUMP_GOTO || message == CHECK_INPUT_JUMP_SWITCH || message == CHECK_INPUT_JUMP_INDIRECT ||
+                      message == CHECK_INPUT_JUMP_ASM;
+    return !jump && (!early || check_driver_in_body(parser, report->token));
 }
 
 // Each parameter has its own specifiers. Unlike a declaration's comma-separated declarators, a parameter cannot
@@ -3147,20 +3213,24 @@ static uint32_t check_driver_parameter_place(const Parser* parser, const CheckIn
     return result;
 }
 
-// A failed conversion of `source`'s value to `target` (spelled with `target_spelling`'s typedef) as clang words it (#147,
+// A failed conversion of `source`'s value to `target` (spelled with `target_spelling`'s typedef, or `target_sugar`'s
+// sugar) as clang words it (#147,
 // Sema::DiagnoseAssignmentResult): its kind's words (check_driver_conversion_kind), its `action`'s (0 initializing, 1
 // assigning, 2 returning, 3 passing, each putting the target or the source first as clang's does), the fix-it's
 // (check_driver_conversion_hint) and its flag. The source's type as written, with its typedef. NULL where a type has none.
 static const char* check_driver_conversion_words(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, const TypeTable* types,
-                                                 CheckWarningSpelling* spell, uint32_t source, TypeId target, uint32_t target_spelling, uint8_t action, Arena* scratch)
+                                                 CheckWarningSpelling* spell, uint32_t source, TypeId target, uint32_t target_spelling, uint32_t target_sugar,
+                                                 uint8_t action, Arena* scratch)
 {
     const char* result = NULL;
     if (source < stream->count && target != 0)
     {
         const TypeId value = check_stream_type(stream, source);
         const uint32_t source_spelling = check_driver_pointer_spelling(parser, input, stream, types, source);
-        const String8 to = check_driver_warning_type(parser, pp, input, types, spell, scratch, target, target_spelling);
-        const String8 from = check_driver_warning_type(parser, pp, input, types, spell, scratch, value, source_spelling);
+        // Each as its declaration's sugar writes it, where it has some (#1447).
+        const String8 to = check_driver_warning_type_sugared(parser, pp, input, types, spell, scratch, target, target_spelling, target_sugar);
+        const uint32_t source_sugar = check_driver_operand_sugar(input, stream, source);
+        const String8 from = check_driver_warning_type_sugared(parser, pp, input, types, spell, scratch, value, source_spelling, source_sugar);
         const CheckDriverConversion kind = check_driver_conversion_kind(types, target, value);
         const uint32_t incompatible = kind == CHECK_DRIVER_CONVERSION_INCOMPATIBLE ? 1 : 0;
         static const char* const lead[] = {
@@ -3234,7 +3304,8 @@ static const char* check_driver_initializer_conversion(const Parser* parser, Pre
     const bool narrow = element == BUSTER_TYPE_CHAR || element == BUSTER_TYPE_SCHAR || element == BUSTER_TYPE_UCHAR;
     const bool wide = element == BUSTER_TYPE_INT || element == BUSTER_TYPE_USHORT || element == BUSTER_TYPE_UINT;
     const char* result = source >= stream->count ? NULL :
-                         !array ? check_driver_conversion_words(parser, pp, input, stream, types, &spell, source, spelled, spelling, 0, scratch) :
+                         !array ? check_driver_conversion_words(parser, pp, input, stream, types, &spell, source, spelled, spelling,
+                                                                whole ? check_input_declared_sugar(input, declaration) : 0, 0, scratch) :
                          narrow ? "array initializer must be an initializer list or string literal" :
                          wide ? "array initializer must be an initializer list or wide string literal" : "array initializer must be an initializer list";
     *located = whole ? declaration : token;
@@ -3266,6 +3337,7 @@ static const char* check_driver_conversion_error(const Parser* parser, Preproces
     uint32_t source = BUSTER_CHECK_NONE;
     TypeId target = 0;
     uint32_t target_spelling = 0;
+    uint32_t target_sugar = 0;
     uint32_t at = token;
     *note_token = BUSTER_CHECK_NONE;
     *note = NULL;
@@ -3277,6 +3349,7 @@ static const char* check_driver_conversion_error(const Parser* parser, Preproces
             at = check_sparse_get(input->initializer_nodes, declaration) == node ? declaration : at;
         }
         target = check_input_object_spelling(types, input, parser, at, graph->types[node], graph->types[node], &target_spelling);
+        target_sugar = at < input->token_count ? check_input_declared_sugar(input, at) : 0;
     }
     else if (applies && op == CHECK_OP_ASSIGN)
     {
@@ -3290,6 +3363,7 @@ static const char* check_driver_conversion_error(const Parser* parser, Preproces
         const uint32_t declarator = selected != 0 ? check_semantic_member_token(parser, input, types, selected) : BUSTER_CHECK_NONE;
         target_spelling = declarator < input->token_count ? check_input_specifier_spelling(input, parser, declarator) : member ? 0 : target_spelling;
         target = member ? lvalue : target;
+        target_sugar = member ? 0 : check_driver_operand_sugar(input, stream, left);
     }
     else if (applies && returning)
     {
@@ -3332,7 +3406,8 @@ static const char* check_driver_conversion_error(const Parser* parser, Preproces
         }
     }
     const uint8_t action = op == CHECK_OP_INITIALIZE ? 0 : op == CHECK_OP_ASSIGN ? 1 : returning ? 2 : 3;
-    const char* result = applies ? check_driver_conversion_words(parser, pp, input, stream, types, spell, source, target, target_spelling, action, scratch) : NULL;
+    const char* result = applies ? check_driver_conversion_words(parser, pp, input, stream, types, spell, source, target, target_spelling, target_sugar, action,
+                                                                 scratch) : NULL;
     *located = result != NULL ? at : *located;
     return result;
 }
@@ -4519,6 +4594,26 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                             }
                             arena_pop_to(scratch, type_mark);
                         }
+                        else if (phase == 0 && (kind == CHECK_INPUT_JUMP_GOTO || kind == CHECK_INPUT_JUMP_SWITCH) &&
+                                 input->reports[index].note_kind == CHECK_INPUT_NOTE_JUMP && input->reports[index].note_token < count)
+                        {
+                            // A jump into a statement expression (#1942), noted at its `(` as clang's jump scope checker notes it, or
+                            // past a declaration whose scope it enters, at its name (c_check_vla_input.c's details).
+                            static const char* const bypassed[4] = {
+                                "jump enters a statement expression",
+                                "jump bypasses initialization of variable length array",
+                                "jump bypasses initialization of variable with __attribute__((cleanup))",
+                                "jump bypasses initialization of VLA typedef",
+                            };
+                            const uint32_t detail = input->reports[index].detail;
+                            const PPOutputDiagnosticNote note = {
+                                .token = parser->tokens.sources[input->reports[index].note_token],
+                                .message = bypassed[detail < 4 ? detail : 0],
+                            };
+                            pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, 1, "%s",
+                                                       kind == CHECK_INPUT_JUMP_GOTO ? "cannot jump from this goto statement to its label" :
+                                                                                       "cannot jump from switch statement to this case label");
+                        }
                         else if (phase == 0 && kind == CHECK_INPUT_REDECLARATION && input->reports[index].detail == CHECK_REDECLARATION_GENERIC &&
                                  input->reports[index].note_kind == CHECK_INPUT_NOTE_PREVIOUS_DEFINITION)
                         {
@@ -4870,6 +4965,23 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                             pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, previous < count ? 1u : 0u,
                                                         "alias definition of '%.*s' after tentative definition", (int)intern_length(pp->table, name),
                                                         intern_bytes(pp->table, name));
+                        }
+                        else if (phase == 0 && input->reports[index].message == CHECK_INPUT_LABEL_AMBIGUOUS && located < count &&
+                                 parser->tokens.kinds[located] == PARSE_KIND_IDENTIFIER)
+                        {
+                            // An ambiguous label's reference (#1844), with clang's note at each candidate its lookup found.
+                            const uint32_t name = parser->tokens.names[located];
+                            uint32_t candidates[16];
+                            const uint32_t candidate_count = check_driver_label_candidates(parser, input, index, candidates, BUSTER_ARRAY_LENGTH(candidates));
+                            char candidate[512];
+                            snprintf(candidate, sizeof(candidate), "candidate found by name lookup is '%.*s'", (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
+                            PPOutputDiagnosticNote notes[16];
+                            for (uint32_t c = 0; c < candidate_count; c += 1)
+                            {
+                                notes[c] = (PPOutputDiagnosticNote){ .token = parser->tokens.sources[candidates[c]], .message = candidate };
+                            }
+                            pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, notes, candidate_count, "reference to '%.*s' is ambiguous",
+                                                        (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
                         }
                         else if (phase == 0 && input->reports[index].message >= CHECK_INPUT_LABEL_UNDECLARED &&
                                  input->reports[index].message <= CHECK_INPUT_LABEL_AMBIGUOUS && located < count && parser->tokens.kinds[located] == PARSE_KIND_IDENTIFIER)

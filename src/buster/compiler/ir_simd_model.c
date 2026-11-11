@@ -78,6 +78,10 @@ typedef enum IrSimdOperation
     // logical right shift by the lane's bits or more is 0, an arithmetic one every bit the sign, as vpsllw to vpsraq
     // compute them by a count in an xmm register.
     IR_SIMD_SHIFT,
+    // A binary operation of integer lanes (#1840, ir.c's BUSTER_IR_INTRINSIC_LANE_OP), the lanes' bytes' log2 and the
+    // operation in the action's `index`: the unsigned or signed minimum or maximum, and the unsigned or signed saturating
+    // sum or difference a - b.
+    IR_SIMD_LANE_OP,
     IR_SIMD_OPERATION_COUNT,
 } IrSimdOperation;
 
@@ -221,7 +225,8 @@ static bool ir_simd_action_valid(const IrSimdAction* action)
         valid = action->operation == IR_SIMD_COMPARE || action->predicate == IR_SIMD_EQ;
         valid = valid && (action->index == 0 || action->operation == IR_SIMD_EXTRACT || action->operation == IR_SIMD_INSERT || action->operation == IR_SIMD_PERMUTE ||
                           action->operation == IR_SIMD_ALIGN || action->operation == IR_SIMD_SHUFFLE_LANES || action->operation == IR_SIMD_EXTEND ||
-                          action->operation == IR_SIMD_TRUNCATE || action->operation == IR_SIMD_SHIFT);
+                          action->operation == IR_SIMD_TRUNCATE || action->operation == IR_SIMD_SHIFT ||
+                          action->operation == IR_SIMD_LANE_OP);
         valid = valid && (!action->volatile_memory || action->operation == IR_SIMD_LOAD || action->operation == IR_SIMD_STORE);
         valid = valid && ir_simd_lane_valid(action->operation, lane);
         // A floating comparison's predicates are C's: ==, !=, <, <=, > and >= (no unsigned ones).
@@ -276,6 +281,10 @@ static bool ir_simd_action_valid(const IrSimdAction* action)
                         (extend ? result > source && mode <= 1 && lanes * (8u << source) <= ir_simd_bits(a) :
                                   result < source && mode <= 2 && ir_simd_bits(type) == (bits > 128 ? bits : 128));
             } break;
+            case IR_SIMD_LANE_OP:
+                valid = valid && ir_simd_vector(type) && a == type && b == type && c == IR_SIMD_NONE && (action->index >> 5) == 0 &&
+                        (((action->index >> 2) & 7) < 4 || (action->index & 3) <= 1);
+                break;
             case IR_SIMD_SHIFT:
                 valid = valid && ir_simd_vector(type) && a == type && b == IR_SIMD_NONE && c == IR_SIMD_NONE && (action->index & 3) != 0 &&
                         ((action->index >> 2) & 3) <= 2 && (action->index >> 4) == 0;
@@ -553,6 +562,30 @@ static bool ir_simd_evaluate(const IrSimdAction* action, const IrSimdValue* cons
                 value = raw > high ? high : raw;
             }
             ir_simd_lane_write(&staged, result, lane, result == 64 ? value : value & ((UINT64_C(1) << result) - 1));
+        }
+    }
+    else if (valid && action->operation == IR_SIMD_LANE_OP)
+    {
+        // Each lane as an unsigned or a signed integer of its bits: the minimum or maximum, or the exact sum or difference
+        // clamped to the lane's range.
+        const uint32_t lane_bits = 8u << (action->index & 3);
+        const uint32_t operation = (action->index >> 2) & 7;
+        const bool is_signed = (operation & 1) != 0;
+        const uint32_t lanes = ir_simd_bits(action->result) / lane_bits;
+        const uint64_t mask = lane_bits == 64 ? UINT64_MAX : (UINT64_C(1) << lane_bits) - 1;
+        for (uint32_t lane = 0; lane < lanes; lane += 1)
+        {
+            const uint64_t a = ir_simd_lane_read(values[0], lane_bits, lane);
+            const uint64_t b = ir_simd_lane_read(values[1], lane_bits, lane);
+            const int64_t sa = lane_bits == 64 ? (int64_t)a : (int64_t)(a << (64 - lane_bits)) >> (64 - lane_bits);
+            const int64_t sb = lane_bits == 64 ? (int64_t)b : (int64_t)(b << (64 - lane_bits)) >> (64 - lane_bits);
+            const bool less = is_signed ? sa < sb : a < b;
+            // Saturation's lanes are bytes or words, so the exact sum or difference fits an int64_t.
+            const int64_t wide = operation < 6 ? (is_signed ? sa + sb : (int64_t)(a + b)) : (is_signed ? sa - sb : (int64_t)a - (int64_t)b);
+            const int64_t high = is_signed ? (int64_t)(mask >> 1) : (int64_t)mask;
+            const int64_t low = is_signed ? -high - 1 : 0;
+            const uint64_t value = operation < 2 ? (less ? a : b) : operation < 4 ? (less ? b : a) : (uint64_t)(wide > high ? high : wide < low ? low : wide);
+            ir_simd_lane_write(&staged, lane_bits, lane, value & mask);
         }
     }
     else if (valid && action->operation == IR_SIMD_SHIFT)
