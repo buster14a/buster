@@ -368,6 +368,9 @@ struct CheckInputAttribute
     // A C23 cfi_salt after the name of a declarator that has a function (#1447): its subjects' error, or where they take it
     // clang's "cannot be applied to a declaration" (check_input_attribute_subjects).
     bool salt_declaration;
+    // A C23 objc_gc or objc_ownership where a declaration's attributes are (#1447): before its specifiers or after a
+    // declarator's name, which check_input_attribute_objc applies as GNU's after a declarator.
+    bool objc_declaration;
     // An EXT_VECTOR_TYPE record's NEON kind (#1447): BUSTER_TYPE_FLAG_NEON for neon_vector_type, BUSTER_TYPE_FLAG_NEON_POLY
     // for neon_polyvector_type, which clang's HandleNeonVectorTypeAttr checks and makes a GNU vector of that kind of;
     // 0 for ext_vector_type. A C23 one after a declarator's name has its -Wdeprecated-attributes warning once its handler
@@ -702,10 +705,10 @@ static bool check_input_attribute_text_equal(String8 a, String8 b)
     return a.length == b.length && (a.length == 0 || memcmp(a.pointer, b.pointer, a.length) == 0);
 }
 
-// Which Objective-C pointer type attribute a record is (#1447): 1 for GNU's objc_gc, 2 for GNU's objc_ownership, else 0.
+// Which Objective-C pointer type attribute a record is (#1447): 1 for objc_gc, 2 for objc_ownership, in either syntax, else 0.
 static uint32_t check_input_objc_kind(CheckInputReader* reader, const CheckInputAttribute* attribute)
 {
-    const String8 name = attribute->kind == CHECK_ATTRIBUTE_UNKNOWN && !attribute->keyword && !attribute->standard ? check_input_attribute_name(reader, attribute->name) :
+    const String8 name = attribute->kind == CHECK_ATTRIBUTE_UNKNOWN && !attribute->keyword ? check_input_attribute_name(reader, attribute->name) :
                                                                                                                       (String8){ 0 };
     return check_input_attribute_equal(name, "objc_gc") ? 1u : check_input_attribute_equal(name, "objc_ownership") ? 2u : 0u;
 }
@@ -4292,7 +4295,7 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
         // The NEON vectors and the address spaces (#1447), whose C23 spellings slide from a declaration to its type
         // (clang's slidesFromDeclToDeclSpecLegacyBehavior).
         const bool neon_name = check_input_attribute_equal(name, "neon_vector_type") || check_input_attribute_equal(name, "neon_polyvector_type") ||
-                               (rule != 0 && rule->kind == CHECK_ATTRIBUTE_ADDRESS_SPACE);
+                               (rule != 0 && rule->kind == CHECK_ATTRIBUTE_ADDRESS_SPACE) || check_input_attribute_equal(name, "objc_gc");
         // A NEON vector's list before a declaration's specifiers: a parameter's too (#1447).
         const bool neon_leading = leading || before_list == PARSE_KIND_L_PAREN || before_list == PARSE_KIND_COMMA;
         uint32_t tag_bound = 0;
@@ -4307,6 +4310,16 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
         const bool annotate_type = check_input_attribute_equal(name, "annotate_type");
         const bool bare = declaration_place && leading && neon_name && list_opener > 0 && parser->tree.parents[list_opener - 1] + 2 < parser->tokens.count &&
                           parser->tokens.kinds[parser->tree.parents[list_opener - 1] + 2] == PARSE_KIND_SEMI;
+        // C23's objc_ownership on a declaration of no declarator (#1447): clang's "only applies to variables" at its `;`.
+        const uint32_t bare_semi = declaration_place && leading && check_input_attribute_equal(name, "objc_ownership") && list_opener > 0 &&
+                                   parser->tree.parents[list_opener - 1] + 2 < parser->tokens.count &&
+                                   parser->tokens.kinds[parser->tree.parents[list_opener - 1] + 2] == PARSE_KIND_SEMI ? parser->tree.parents[list_opener - 1] + 2 :
+                                   BUSTER_CHECK_NONE;
+        if (bare_semi != BUSTER_CHECK_NONE && !reader->statement_attributes)
+        {
+            check_input_attribute_argument_error(reader, attributes, &attribute, bare_semi, CHECK_ARGUMENT_OBJC_VARIABLES, 0);
+            valid = false;
+        }
         // A function effect or cfi_salt after a declarator's name is that error too where the declarator has a function
         // (#1447); without one it is the function types' warning (check_input_attribute_type_warnings).
         bool declarator_function = false;
@@ -4357,6 +4370,7 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
         }
         attribute.neon_deprecated = valid && declaration_place && clang_scope && !reader->statement_attributes && !tag_keyword && neon_name && !neon_leading;
         attribute.neon_typedef = attribute.neon_deprecated && check_input_attribute_typedef(parser, list_opener >= 2 ? list_opener - 2 : 0);
+        attribute.objc_declaration = declaration_place && (check_input_attribute_equal(name, "objc_gc") || check_input_attribute_equal(name, "objc_ownership"));
         if (valid && chunk_gnu && typed)
         {
             // clang's declaration path warns of a calling convention it hasn't before this, on a function's chunk.
@@ -4594,15 +4608,10 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
             const bool type_tag = check_input_type_tag_rule(name) || check_input_attribute_equal(name, "type_tag_for_datatype");
             reader->type_tag_attributes |= type_tag;
             check_input_lane_refuse(reader, reader->lane && type_tag, "a body declares a type tag attribute");
-            // Objective-C's pointer type attributes are a declarator's or a type name's (check_input_attribute_objc); C23's
-            // spellings, which apply to other types than GNU's do, are refused by name.
+            // Objective-C's pointer type attributes are a declarator's or a type name's (check_input_attribute_objc), C23's
+            // spellings where they are (#1447).
             const bool objc = check_input_attribute_equal(name, "objc_gc") || check_input_attribute_equal(name, "objc_ownership");
             reader->objc_attributes |= objc;
-            if (objc && standard)
-            {
-                check_input_attribute_error(reader, attributes, attribute.name_token, attribute.end, CHECK_ATTRIBUTE_ERROR_UNKNOWN);
-                valid = false;
-            }
             check_input_lane_refuse(reader, reader->lane && merged, "a body declares an attribute its entity's redeclarations merge");
             // diagnose_as_builtin's builtin may be a library function the unit declares, whose declaration a body's lane
             // can't read (check_input_checks_library, #1447).
@@ -8070,7 +8079,7 @@ static bool check_input_attribute_checks(CheckInputReader* reader, CheckInputAtt
     {
         valid = check_input_availability_handle(reader, attributes, attribute);
     }
-    else if (check_input_attribute_equal(spelled, "objc_ownership") && !attribute->standard && attribute->count_check == BUSTER_CHECK_COUNT_NONE &&
+    else if (check_input_attribute_equal(spelled, "objc_ownership") && attribute->count_check == BUSTER_CHECK_COUNT_NONE &&
              (declaration & (BUSTER_CHECK_SUBJECT_STRUCT | BUSTER_CHECK_SUBJECT_UNION | BUSTER_CHECK_SUBJECT_ENUM | BUSTER_CHECK_SUBJECT_ENUMERATOR |
                              BUSTER_CHECK_SUBJECT_LABEL)) != 0)
     {

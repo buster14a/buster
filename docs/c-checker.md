@@ -8774,9 +8774,25 @@ arguments against the function. The checker now gives these as clang does.
     `objc_gc(strong)` on a pointer make a garbage-collection qualifier that
     changes the type (`int *__weak`, which redeclarations, `_Generic` and the
     types' spellings see): the type table's extended qualifier (#1447, "The
-    type qualifiers' attributes" below). Both attributes' C23 spellings, which
-    apply to other types than GNU's (clang 23 crashes on
-    `[[clang::objc_gc(weak)]]`), are refused by name.
+    type qualifiers' attributes" below). A parameter's qualifier isn't its
+    function type's, as clang's canonical parameter types are unqualified.
+    `objc_ownership(weak)` is named `__weak` on a pointer alone; on another
+    type clang's first test names the attribute.
+    Both attributes' C23 spellings (#1447) apply where they are written: after
+    the specifiers, a pointer or a function's or array's suffix, to that type
+    alone, never moving outward (its warning naming that type); before a
+    declaration or after a declarator's name (`CheckInputAttribute.objc_declaration`)
+    as GNU's after a declarator, objc_gc's there sliding with
+    -Wdeprecated-attributes' "applying attribute 'clang::objc_gc' to a
+    declaration is deprecated" after the type's warnings, and after a
+    typedef's name "cannot be applied to a declaration". On a declaration of no
+    declarator, objc_gc's is "cannot be applied to a declaration" and
+    objc_ownership's "only applies to variables" at the `;`. clang 23 runs out
+    of memory on `[[clang::objc_gc(weak)]]` (or `strong`) before a
+    declaration, after its deprecation warning; the checker gives that
+    warning and applies it as after the declarator's name.
+    `c_check_objc_c23_driver_test.c` compares their units with clang's in
+    GNU C17 and C23 by both paths.
   - `diagnose_as_builtin` (`check_input_attribute_diagnose_builtin`,
     `c_check_attribute_checks_input.c`), clang's handleDiagnoseAsBuiltinAttr:
     its first argument names a builtin function, as getBuiltinID finds one: a
@@ -9218,7 +9234,7 @@ arguments against the function. The checker now gives these as clang does.
   guide](object-writer-and-linker.md)'s "Patchable function entries".
 
   The rest stay refused by name, where they apply: `format_matches` in either
-  syntax, and the C23 spellings of `objc_gc` and `objc_ownership`. Recognizing their
+  syntax. Recognizing their
   names does not supply their handlers.
 - **Type arguments.** The attributes clang's `attributeIsTypeArgAttr` names
   (`preferred_type`, `vec_type_hint`, `iboutletcollection`, `preferred_name`,
@@ -9601,8 +9617,10 @@ arguments against the function. The checker now gives these as clang does.
     power of 2") goes on to the later declarations, as clang does ("Semantic
     error recovery", #1447). Another checker error still ends what is
     published; a unit's later parse errors are printed.
-  - The checks-only attributes (#1447): objc_gc's and objc_ownership's C23
-    spellings are refused (see above). In a `_Generic` association's type
+  - The checks-only attributes (#1447): a C23 attribute in a cast in a
+    file-scope `_Generic`'s controlling expression (`objc_gc`'s,
+    `address_space`'s) is "invalid or unsupported declaration". In a
+    `_Generic` association's type
     their warnings aren't made, and a `typeof` type name that starts with a
     GNU attribute isn't read as one, as for every attribute there. As everywhere, a
     declaration's first error ends the unit: a shared specifiers'
