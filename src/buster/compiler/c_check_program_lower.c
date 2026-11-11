@@ -7115,10 +7115,11 @@ static uint32_t check_lower_native_call(CheckLowerWriter* writer, SymbolId symbo
 
 // An asm body's call row (#1839, check_lower_asm): `count` arguments of Tier 0 classes `classes`, each in register
 // `registers[a]` (calling_convention.c's numbering: a general register's number, or BUSTER_ABI_REGISTER_VECTOR and an XMM
-// register's), where the template finds it, no result, and the body's target. Each argument is void to abi_assign, which
+// register's), where the template finds it, a result of type `result` (void, or an asm goto's int exit in eax, #1839's
+// item 2), and the body's target. Each argument is void to abi_assign, which
 // gives it no place, and check_lower_asm_locations' patch gives it its register. Returns the call, BUSTER_CHECK_NONE for a
 // failure.
-static uint32_t check_lower_asm_call(CheckLowerWriter* writer, const uint8_t* classes, const uint8_t* registers, uint32_t count)
+static uint32_t check_lower_asm_call(CheckLowerWriter* writer, const uint8_t* classes, const uint8_t* registers, uint32_t count, TypeId result)
 {
     CheckLowerAbi* abi = writer->abi;
     uint32_t call = BUSTER_CHECK_NONE;
@@ -7135,7 +7136,7 @@ static uint32_t check_lower_asm_call(CheckLowerWriter* writer, const uint8_t* cl
         writer->call_variadic[call] = 0;
         writer->call_result_objects[call] = 0;
         abi->first[abi->count] = abi->argument_count;
-        abi->results[abi->count] = BUSTER_TYPE_VOID;
+        abi->results[abi->count] = result;
         abi->counts[abi->count] = count;
         abi->named[abi->count] = count;
         abi->variadic[abi->count++] = 0;
@@ -14891,7 +14892,8 @@ static void check_lower_asm(CheckLowerWriter* writer, CheckControl control)
         const TypeId argument = BUSTER_TYPE_ULONG;
         // An asm goto's helper returns its exit (0 for the fall-through, a label's index plus one), which a temporary keeps
         // for a branch to each label after the call: the tasks are pushed last first.
-        const bool jumps = helper != 0 && helper->result_type == BUSTER_TYPE_INT && statement->is_goto;
+        // An asm goto's body (#1839's item 2) returns its exit in eax as its helper does.
+        const bool jumps = statement->is_goto && statement->label_count != 0 && (plan->inlined || (helper != 0 && helper->result_type == BUSTER_TYPE_INT));
         const uint32_t exit = jumps && writer->output->status == CHECK_PROGRAM_OK ? check_lower_temporary(writer, BUSTER_TYPED_CLASS_I32) : BUSTER_CHECK_NONE;
         for (uint32_t l = statement->label_count; jumps && l-- > 0 && writer->output->status == CHECK_PROGRAM_OK;)
         {
@@ -14925,7 +14927,7 @@ static void check_lower_asm(CheckLowerWriter* writer, CheckControl control)
                     passed += 1;
                 }
             }
-            call = check_lower_asm_call(writer, classes, registers, passed);
+            call = check_lower_asm_call(writer, classes, registers, passed, result);
             if (writer->asm_body_count >= writer->asm_body_capacity)
             {
                 check_lower_resource(writer, "lowering asm body storage");

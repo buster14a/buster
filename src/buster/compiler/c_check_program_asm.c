@@ -1322,8 +1322,12 @@ static Tier0Code check_asm_helper_code(const CheckAsmPlace* places, uint32_t cou
 // their registers (CheckProgramAsm.inline_passed): the body loads only the x87's. Returns the count, and the template's
 // first record in `*first` (its branches' and labels' records are past it), with 0 records and `*records` 0 without room
 // in `output`. A statement of no records but a label's (#1839) has none, and `*records` is then 0 too: `*room` says which.
+// An asm goto's (`labels` of them, #1839's item 2) has the helper's exits after the template (check_asm_helper_code's):
+// the fall-through's move of 0 into `exit` and its jump to the stores, then each label's move of its index plus one and
+// jump (the last one falling into them), and after the stores the exit's move into eax, which its call row returns; the
+// caller makes the jumps branches.
 static uint32_t check_asm_inline_code(const CheckAsmPlace* places, uint32_t count, const AsmCode* code, const uint8_t stores[2], uint32_t pops,
-                                      bool passed, X86Instruction** records, uint32_t* first, bool* room, Arena* output)
+                                      bool passed, uint32_t labels, uint8_t exit, X86Instruction** records, uint32_t* first, bool* room, Arena* output)
 {
     uint32_t loads = 0;
     uint32_t stored = 0;
@@ -1335,7 +1339,9 @@ static uint32_t check_asm_inline_code(const CheckAsmPlace* places, uint32_t coun
         flags += check_asm_flag_stores(places + k);
     }
     // An x87 output that shares its depth with a later one is stored from a copy, one record more (fld %st(0)).
-    const uint64_t capacity = (uint64_t)loads + code->count + 3 * (uint64_t)stored + 5 * (uint64_t)flags + pops;
+    // An asm goto's exits: a move and a jump each but the last one's, and the exit's move into eax after the stores.
+    const uint64_t exits = labels != 0 ? 2 * (uint64_t)labels + 1 : 0;
+    const uint64_t capacity = (uint64_t)loads + code->count + exits + 3 * (uint64_t)stored + 5 * (uint64_t)flags + pops + (labels != 0 ? 1 : 0);
     X86Instruction* written = capacity != 0 && capacity <= UINT32_MAX ? BUSTER_ARENA_PUSH_ARRAY(output, X86Instruction, capacity) : 0;
     *room = capacity == 0 || written != 0;
     uint32_t at = 0;
@@ -1374,6 +1380,14 @@ static uint32_t check_asm_inline_code(const CheckAsmPlace* places, uint32_t coun
             memcpy(written + at, code->records, (uint64_t)code->count * sizeof(X86Instruction));
         }
         at += code->count;
+        for (uint32_t e = 0; e <= labels && labels != 0; e += 1)
+        {
+            written[at++] = (X86Instruction){ .form = X86_FORM_MOV_R32_IMM32, .rm = exit, .immediate = (int32_t)e };
+            if (e != labels)
+            {
+                written[at++] = (X86Instruction){ .form = X86_FORM_JMP_REL8 };
+            }
+        }
         for (uint32_t k = 0; k < count; k += 1)
         {
             const CheckAsmPlace* place = places + k;
@@ -1434,6 +1448,10 @@ static uint32_t check_asm_inline_code(const CheckAsmPlace* places, uint32_t coun
         for (uint32_t p = 0; p < pops; p += 1)
         {
             written[at++] = (X86Instruction){ .form = X86_FORM_FSTP_ST, .rm = 0, .mode = BUSTER_X86_REGISTER_DIRECT };
+        }
+        if (labels != 0)
+        {
+            written[at++] = (X86Instruction){ .form = X86_FORM_MOV_R32_RM32, .reg = X86_REGISTER_RAX, .rm = exit, .mode = BUSTER_X86_REGISTER_DIRECT };
         }
     }
     *records = written;
@@ -1505,8 +1523,10 @@ static bool check_asm_inline_takes(const CheckAsmPlace* places, uint32_t count)
 // template's own to its labels, a trap), as unwind_tier0_frame refuses in a function's body, or that writes a register
 // holding the frame (rsp, rbp, r15), but on its way out of the function. A form x86_semantics.c doesn't cover takes
 // check_asm_implicit's registers, or none for an x87 form's, or keeps the helper. Into `*masks`, the opmask registers its
-// records write (CheckProgramAsm.inline_masks).
-static uint32_t check_asm_inline_touched(const CheckAsmPlace* places, uint32_t count, const AsmCode* code, uint32_t taken, uint32_t vectors, uint8_t* masks)
+// records write (CheckProgramAsm.inline_masks). An asm goto's jumps to its labels (`gotos`, #1839's item 2) are branches of
+// the body too, to its exits.
+static uint32_t check_asm_inline_touched(const CheckAsmPlace* places, uint32_t count, const AsmCode* code, const CheckAsmGoto* gotos, uint32_t goto_count, uint32_t taken,
+                                         uint32_t vectors, uint8_t* masks)
 {
     uint32_t opmask_writes = 0;
     uint64_t written = (uint64_t)(taken & 0xffffu & ~(1u << X86_REGISTER_RSP)) | ((uint64_t)(vectors & 0xffffu) << 16);
@@ -1532,6 +1552,10 @@ static uint32_t check_asm_inline_touched(const CheckAsmPlace* places, uint32_t c
             {
                 branch |= code->branches[b] == k;
                 target |= k > r && code->targets[b] == k;
+            }
+            for (uint32_t j = 0; j < goto_count; j += 1)
+            {
+                branch |= gotos[j].record == k;
             }
             out = !target && check_asm_return(code->records[k].form);
             if (branch || target)
@@ -1571,6 +1595,10 @@ static uint32_t check_asm_inline_touched(const CheckAsmPlace* places, uint32_t c
             for (uint32_t b = 0; b < code->branch_count; b += 1)
             {
                 local |= code->branches[b] == r;
+            }
+            for (uint32_t j = 0; j < goto_count; j += 1)
+            {
+                local |= gotos[j].record == r;
             }
             const uint32_t control = x86_effects_control(effects);
             placed = (control == BUSTER_X86_CONTROL_NONE || (local && (control == BUSTER_X86_CONTROL_JUMP || control == BUSTER_X86_CONTROL_BRANCH))) &&
@@ -2822,9 +2850,9 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
         }
     }
     else if (valid && reason == NULL && (helped || marked) && !program->asm_helpers && !check_program_helper_forced(program, CHECK_PROGRAM_HELPER_ASM) &&
-             !statement->is_goto && code.reference_count == 0 && (code.label_count == 0 || (!returns && (!program->asm_bodies || marked))) &&
-             check_asm_inline_takes(places, count) &&
-             (inline_touched = check_asm_inline_touched(places, count, &code, taken, vectors, &inline_masks)) != UINT32_MAX)
+             (!statement->is_goto || (!program->asm_bodies && !returns && statement->label_count != 0)) && code.reference_count == goto_count &&
+             (code.label_count == 0 || (!returns && (!program->asm_bodies || marked))) && check_asm_inline_takes(places, count) &&
+             (inline_touched = check_asm_inline_touched(places, count, &code, gotos, goto_count, taken, vectors, &inline_masks)) != UINT32_MAX)
     {
         // Placed in its caller as an asm body (#1839): its records run in its call row's place, with no helper.
         X86Instruction* records = 0;
@@ -2835,20 +2863,48 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
         const bool passed = !program->asm_bodies;
         uint32_t first = 0;
         bool room = false;
-        const uint32_t records_count = check_asm_inline_code(places, count, &code, stores, pops, passed, &records, &first, &room, output);
+        // An asm goto's (#1839's item 2): the helper's exits in the body, its exit number the call row's result.
+        const uint32_t labels = statement->is_goto ? statement->label_count : 0;
+        const uint32_t records_count = check_asm_inline_code(places, count, &code, stores, pops, passed, labels, exit, &records, &first, &room, output);
         plan->inline_passed = passed;
-        uint32_t* branches = code.branch_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, code.branch_count) : 0;
-        uint32_t* targets = code.branch_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, code.branch_count) : 0;
-        valid = room && (code.branch_count == 0 || (branches != 0 && targets != 0));
-        for (uint32_t b = 0; valid && b < code.branch_count; b += 1)
+        const uint32_t branch_count = code.branch_count + goto_count + labels;
+        uint32_t* branches = branch_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, branch_count) : 0;
+        uint32_t* targets = branch_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, branch_count) : 0;
+        valid = room && (branch_count == 0 || (branches != 0 && targets != 0));
+        // The template's branches and its jumps to the labels, merged in record order, past the body's loads: a jump to a
+        // label is a branch to its exit, two records a label past the fall-through's (check_asm_helper_code's), its rel8
+        // form, its reference dropped; then the exits' jumps, each to the stores past the last exit's move.
+        const uint32_t exits = first + code.count;
+        const uint32_t tail = exits + (labels != 0 ? 2 * labels + 1 : 0);
+        uint32_t branch = 0;
+        uint32_t own = 0;
+        uint32_t jump = 0;
+        while (valid && (own < code.branch_count || jump < goto_count))
         {
-            // The template's branches and their labels' records, past the body's loads.
-            branches[b] = first + code.branches[b];
-            targets[b] = first + code.targets[b];
+            const bool mine = jump >= goto_count || (own < code.branch_count && code.branches[own] < gotos[jump].record);
+            if (mine)
+            {
+                branches[branch] = first + code.branches[own];
+                targets[branch++] = first + code.targets[own++];
+            }
+            else
+            {
+                X86Instruction* record = records + first + gotos[jump].record;
+                record->form = (uint16_t)((record->form & ~BUSTER_X86_FORM_FIXUP) - 1);
+                record->displacement = 0;
+                branches[branch] = first + gotos[jump].record;
+                targets[branch++] = exits + 2 + 2 * gotos[jump].label;
+                jump += 1;
+            }
+        }
+        for (uint32_t e = 0; valid && e < labels; e += 1)
+        {
+            branches[branch] = exits + 1 + 2 * e;
+            targets[branch++] = tail;
         }
         plan->inline_branches = branches;
         plan->inline_targets = targets;
-        plan->inline_branch_count = valid ? code.branch_count : 0;
+        plan->inline_branch_count = valid ? branch_count : 0;
         // Its labels, each at its record past the body's loads (#1839): the emission defines each name's symbol at the
         // record's offset in its caller's code (Tier0Code.asm_label_records), as a helper's at its own.
         plan->labels = valid && code.label_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckProgramAsmLabel, code.label_count) : 0;
@@ -2864,7 +2920,8 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
         plan->label_count = valid ? code.label_count : 0;
         plan->inline_records = records;
         plan->inline_count = records_count;
-        plan->inline_touched = inline_touched;
+        // An asm goto's exit number in eax, its call row's result.
+        plan->inline_touched = inline_touched | (labels != 0 ? 1u << X86_REGISTER_RAX : 0);
         plan->inline_masks = inline_masks;
         plan->inline_leaves = returns;
         for (uint32_t r = 0; r < code.count; r += 1)

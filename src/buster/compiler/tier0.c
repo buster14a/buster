@@ -6498,7 +6498,7 @@ static const Tier0AsmBody* tier0_call_body(const Tier0Function* function, uint32
 }
 
 // Whether the asm bodies (#1839) are as Tier0AsmBody has them: each named by call rows of the body target alone (whose
-// arguments are its register operands, in their registers), which only CALL entries of class VOID make; its block an object of the function's; and its touched
+// arguments are its register operands, in their registers), which only CALL entries of class VOID (or I32, an asm goto's exit) make; its block an object of the function's; and its touched
 // registers none that holds the frame (rsp, rbp, r15). Out of line and cold: few functions have them.
 static __attribute__((noinline, cold)) bool tier0_asm_bodies_check(const Tier0Function* function)
 {
@@ -6539,7 +6539,8 @@ static __attribute__((noinline, cold)) bool tier0_asm_bodies_check(const Tier0Fu
         const uint32_t kind = function->kinds[i];
         const bool row = kind == BUSTER_TYPED_CALL || kind == BUSTER_TYPED_TAIL_CALL;
         const bool body = row && function->values[i] < function->call_count && function->call_asm[function->values[i]] != 0;
-        valid = !body || (kind == BUSTER_TYPED_CALL && function->classes[i] == BUSTER_TYPED_CLASS_VOID);
+        // Void, or an asm goto's exit number (#1839's item 2), an int the body leaves in eax as a call's result.
+        valid = !body || (kind == BUSTER_TYPED_CALL && (function->classes[i] == BUSTER_TYPED_CLASS_VOID || function->classes[i] == BUSTER_TYPED_CLASS_I32));
     }
     return valid;
 }
@@ -13716,7 +13717,7 @@ static inline __attribute__((always_inline)) __m512i tier0_expand(const uint64_t
 //   entries over what the lanes stored at their places.
 // `deep` is tier0_emit_body_entries': with deep entries, the branch and request counts go to their emitter in the writer
 // and back, and since a block's deep entries' branches come after its templates', the branch columns are sorted last
-// (tier0_sort_branches).
+// (tier0_sort_branches), as they are where an asm body has branches (a deferred entry's, #1839).
 static inline __attribute__((always_inline)) void tier0_emit_vector_entries(const Tier0Function* function, const Tier0Entries* entries, const Tier0Frame* frame,
                                                                            const Tier0Home* homes, const uint32_t* references, Tier0Code* code, Tier0Choices* choices,
                                                                            bool deep)
@@ -13878,7 +13879,13 @@ static inline __attribute__((always_inline)) void tier0_emit_vector_entries(cons
     }
     writer.count = positions[count];
     tier0_emit_epilogue(function, frame, &writer);
-    if (deep || frame->probe)
+    // An asm body's own branches (#1839) are a deferred entry's, written after the branches of the entries after it.
+    bool body_branches = false;
+    for (uint32_t b = 0; b < function->asm_body_count && function->asm_bodies != 0; b += 1)
+    {
+        body_branches |= function->asm_bodies[b].branch_count != 0;
+    }
+    if (deep || frame->probe || body_branches)
     {
         tier0_sort_branches(branch_records, targets, branches);
     }
