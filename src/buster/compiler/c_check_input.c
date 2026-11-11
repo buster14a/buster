@@ -6255,9 +6255,18 @@ static bool check_input_read_attributes(CheckInputReader* reader, uint32_t* curs
             }
         }
         else if (attribute->kind == CHECK_ATTRIBUTE_UNKNOWN && !attribute->keyword && attribute->argument_count >= 2 &&
-                 check_input_attribute_equal(check_input_attribute_name(reader, attribute->name), "annotate"))
+                 (check_input_attribute_equal(check_input_attribute_name(reader, attribute->name), "annotate") ||
+                  check_input_attribute_equal(check_input_attribute_name(reader, attribute->name), "annotate_type")))
         {
-            valid = check_input_attribute_annotate(reader, &parsed, attribute);
+            // (annotate_type's trailing empty argument, clang's "expected expression" at the `)`, #1447: annotate's is its
+            // expressions' reader's.)
+            const bool trailing = reader->parser->tokens.kinds[attribute->argument_end - 1] == PARSE_KIND_COMMA &&
+                                  check_input_attribute_equal(check_input_attribute_name(reader, attribute->name), "annotate_type");
+            if (trailing)
+            {
+                check_input_attribute_argument_error(reader, &parsed, attribute, attribute->argument_end, CHECK_ARGUMENT_EXPECTED_EXPRESSION, 0);
+            }
+            valid = !trailing && check_input_attribute_annotate(reader, &parsed, attribute);
         }
         else if (attribute->kind == CHECK_ATTRIBUTE_UNKNOWN && !attribute->keyword && attribute->argument_count >= 2 && attribute->argument_count <= 8 &&
                  check_input_ownership_indices(reader, attribute))
@@ -7804,7 +7813,7 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                     // Its chunk's address spaces, in their order (#1447).
                     for (uint32_t a = part->space_first; type != 0 && part->spaces != NULL && a < part->space_end; a += 1)
                     {
-                        const CheckInputAttribute* attribute = part->spaces->records + a;
+                        CheckInputAttribute* attribute = part->spaces->records + a;
                         type = attribute->kind == CHECK_ATTRIBUTE_ADDRESS_SPACE ? check_input_address_space(reader, part->spaces, attribute, type) : type;
                     }
                     noderef = part->noderef ? check_input_noderef_mark(reader, noderef) : noderef;

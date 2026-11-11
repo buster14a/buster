@@ -7924,10 +7924,13 @@ arguments against the function. The checker now gives these as clang does.
   `model`'s strings, an unknown one warned of ("argument not supported") or
   clang's "code model 'M' is not supported on this target", and those that
   change the code (`thunk-extern`, any zeroing, the large model) refused by
-  name. A C23 type attribute before a declaration is clang's: `btf_type_tag`
+  name; and C23's `annotate_type`, a type's annotation, whose string and
+  constants are checked as `annotate`'s are (at least one argument, its first
+  a string literal, the others constant expressions) and which changes no
+  type. A C23 type attribute before a declaration is clang's: `btf_type_tag`
   slides to the specifiers, with `-Wdeprecated-attributes`' warning under
-  `clang::`, and a function effect there is "cannot be applied to a
-  declaration".
+  `clang::`, and a function effect or `annotate_type` there is "cannot be
+  applied to a declaration".
 
   Static analyses' and Objective-C's annotations change nothing in C either,
   with their handlers' checks (`check_input_attribute_annotations`):
@@ -8221,9 +8224,16 @@ arguments against the function. The checker now gives these as clang does.
   the template's, without the segment, as clang's is. Taking an address there is
   compiled. Any other space's code is the default space's, as clang's.
 
-  What differs from clang: C23's spellings (`[[clang::address_space(1)]]` and
-  the others), which slide from a declaration to its specifiers with clang's
-  deprecation warning, are refused by name. Clang names a type by the macro
+  C23's spellings (`[[clang::address_space(1)]]` and the others) apply where
+  a C23 type attribute does: after the specifiers or a pointer, to that type;
+  before a declaration or after its name, to the declaration's type, which
+  clang's legacy rule lets them slide to (slidesFromDeclToDeclSpecLegacyBehavior),
+  with `-Wdeprecated-attributes`' "applying attribute 'clang::address_space' to
+  a declaration is deprecated; apply it to the type instead", before the type
+  takes it or once it took it, as the NEON vectors' (#1447). On a tag's own
+  list or a statement they are clang's errors.
+
+  What differs from clang: Clang names a type by the macro
   that wrote its space (MacroQualifiedType: `'AS1 int *'`), declaration by
   declaration. Here a space prints by its macro only where one macro writes it
   throughout the unit (`check_driver_space_macros`, #1447). Its attribute is

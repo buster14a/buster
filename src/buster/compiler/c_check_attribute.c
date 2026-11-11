@@ -3566,6 +3566,9 @@ static bool check_input_attribute_generic(String8 name, const CheckInputFactRow*
         "diagnose_as_builtin",
         // Objective-C's pointer type attributes, which change no C type but objc_gc's qualifier (check_input_attribute_objc).
         "objc_gc", "objc_ownership",
+        // A type's annotation (#1447), sugar that changes no type: its string's and its constants' checks are annotate's
+        // (check_input_attribute_annotate).
+        "annotate_type",
     };
     const bool simple = fact != NULL && (fact->flags & (BUSTER_CHECK_FACT_SIMPLE | BUSTER_CHECK_FACT_TYPE)) == BUSTER_CHECK_FACT_SIMPLE;
     const bool effect = check_input_attribute_equal(name, "selectany");
@@ -3959,7 +3962,9 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
         // One of no C subject (#147, check_input_attribute_generic).
         const CheckInputSubjectRow* subject_row = known ? check_input_attribute_subject_of(reader, scope, attribute.name, scoped, standard) : NULL;
         const bool subjectless = subject_row != NULL && subject_row->subjects == 0;
-        const bool custom = parsed != NULL && (parsed->flags & BUSTER_CHECK_FACT_CUSTOM_PARSING) != 0;
+        // (annotate_type's, which clang parses its own way for C++'s packs, are read as any attribute's in C: a string
+        // literal, then expressions, #1447.)
+        const bool custom = parsed != NULL && (parsed->flags & BUSTER_CHECK_FACT_CUSTOM_PARSING) != 0 && !check_input_attribute_equal(name, "annotate_type");
         // The compatibility conditions are retained, not evaluated here. Their expression-form messages are
         // validated by their own schema below, after peeling parentheses, rather than the eager literal pass.
         const bool condition = rule != NULL && rule->schema == CHECK_ATTRIBUTE_CONDITION_STRINGS;
@@ -4115,7 +4120,10 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
                                        (fact->flags & BUSTER_CHECK_FACT_TYPE) != 0;
         const bool effect = check_input_attribute_equal(name, "nonblocking") || check_input_attribute_equal(name, "nonallocating") ||
                             check_input_attribute_equal(name, "blocking") || check_input_attribute_equal(name, "allocating");
-        const bool neon_name = check_input_attribute_equal(name, "neon_vector_type") || check_input_attribute_equal(name, "neon_polyvector_type");
+        // The NEON vectors and the address spaces (#1447), whose C23 spellings slide from a declaration to its type
+        // (clang's slidesFromDeclToDeclSpecLegacyBehavior).
+        const bool neon_name = check_input_attribute_equal(name, "neon_vector_type") || check_input_attribute_equal(name, "neon_polyvector_type") ||
+                               (rule != 0 && rule->kind == CHECK_ATTRIBUTE_ADDRESS_SPACE);
         // A NEON vector's list before a declaration's specifiers: a parameter's too (#1447).
         const bool neon_leading = leading || before_list == PARSE_KIND_L_PAREN || before_list == PARSE_KIND_COMMA;
         uint32_t tag_bound = 0;
@@ -4123,7 +4131,12 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
         // the parser's error alone: check_input_tag_attributes).
         const bool tag_keyword = declaration_place && reader->tag_attributes && (before_list == PARSE_KIND_STRUCT || before_list == PARSE_KIND_ENUM);
         const bool tag_list = tag_keyword && check_input_attribute_tag_declares(parser, list_opener - 2);
-        if (declaration_place && leading && effect)
+        // annotate_type is a type's alone: on a declaration, clang's "cannot be applied to a declaration" (#1447); so is a
+        // sliding type attribute on a declaration of no declarator (`[[clang::address_space(1)]];`).
+        const bool annotate_type = check_input_attribute_equal(name, "annotate_type");
+        const bool bare = declaration_place && leading && neon_name && list_opener > 0 && parser->tree.parents[list_opener - 1] + 2 < parser->tokens.count &&
+                          parser->tokens.kinds[parser->tree.parents[list_opener - 1] + 2] == PARSE_KIND_SEMI;
+        if ((declaration_place && leading && effect) || (!reader->statement_attributes && ((declaration_place && annotate_type) || bare)))
         {
             check_input_attribute_argument_error(reader, attributes, &attribute, attribute.first, CHECK_ARGUMENT_INVALID_ON_DECLARATION, 0);
             valid = false;
@@ -4203,13 +4216,6 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
             attributes->error = CHECK_ATTRIBUTE_ERROR_SUBJECT;
             attributes->error_first = attribute.first;
             attributes->error_end = attribute.end;
-        }
-        else if (valid && rule != 0 && known && standard && rule->kind == CHECK_ATTRIBUTE_ADDRESS_SPACE)
-        {
-            // C23's spellings of the address spaces (#1447), which slide from a declaration to its specifiers with clang's
-            // deprecation warning as the NEON vectors' do: refused by name.
-            check_input_attribute_error(reader, attributes, attribute.name_token, attribute.end, CHECK_ATTRIBUTE_ERROR_UNKNOWN);
-            valid = false;
         }
         else if (valid && rule != 0 && known)
         {
@@ -4423,6 +4429,12 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
             if (attribute.count_check == BUSTER_CHECK_COUNT_NONE && count == 0 &&
                 ((thread != NULL && (thread->flags & BUSTER_CHECK_THREAD_LEAST_ONE) != 0) || check_input_attribute_equal(name, "abi_tag")))
             {
+                attribute.count_check = BUSTER_CHECK_COUNT_LEAST;
+                attribute.count_bound = 1;
+            }
+            else if (attribute.count_check == BUSTER_CHECK_COUNT_NONE && count == 0 && check_input_attribute_equal(name, "annotate_type"))
+            {
+                // annotate_type's handler's checkAtLeastNumArgs(1), which its custom parsing leaves to it (HandleAnnotateTypeAttr).
                 attribute.count_check = BUSTER_CHECK_COUNT_LEAST;
                 attribute.count_bound = 1;
             }
@@ -4918,7 +4930,7 @@ static bool check_input_vector_size(CheckInputReader* reader, CheckInputAttribut
 // type that has another space already, "multiple address spaces specified for type", or that space, -Wduplicate-decl-
 // specifier's warning. Each error is at the attribute, and gives 0; else the type with the space (type_extend), an
 // array's on its element.
-static TypeId check_input_address_space(CheckInputReader* reader, CheckInputAttributes* attributes, const CheckInputAttribute* attribute, TypeId type)
+static TypeId check_input_address_space(CheckInputReader* reader, CheckInputAttributes* attributes, CheckInputAttribute* attribute, TypeId type)
 {
     TypeTable* types = reader->types;
     const bool function = type_kind(types, type_strip_aligned(types, type)) == BUSTER_TYPE_KIND_FUNCTION;
@@ -4949,6 +4961,13 @@ static TypeId check_input_address_space(CheckInputReader* reader, CheckInputAttr
             check_input_attribute_named_event(reader, attribute, CHECK_WARNING_ID_DUPLICATE_DECLSPEC, CHECK_WARNING_EVENT_ADDRESS_SPACE_IDENTICAL);
         }
         result = check_input_type_result(reader, type_extend(types, type, space));
+        // A C23 one after a declarator's name, which ProcessDeclAttribute warns of once its type took it (#1447), as a NEON
+        // vector's (CheckInputAttribute.neon_deprecated).
+        if (result != 0 && attribute->neon_deprecated)
+        {
+            check_input_attribute_named_event(reader, attribute, CHECK_WARNING_ID_DEPRECATED_ATTRIBUTES, CHECK_WARNING_EVENT_TYPE_ON_DECLARATION);
+            attribute->neon_deprecated = false;
+        }
     }
     return result;
 }
