@@ -2128,7 +2128,7 @@ static void parse_scalar_block_attribute_end(ParseScalar* parser, uint32_t i, Pa
                            (kind == PARSE_KIND_IDENTIFIER && parser->kinds[i + 1] == PARSE_KIND_COLON);
     const bool expression = !gnu && kind != PARSE_KIND_R_BRACE && !parse_scalar_starts_declaration(parser, i, true);
     // A name after GNU attributes that start a declaration, which clang looks up first (parse_scalar_attribute_name).
-    const uint8_t named = !head && !attributes && !statement && !expression && gnu && kind == PARSE_KIND_IDENTIFIER && !parse_scalar_is_typedef_name(parser, i) ?
+    const uint8_t named = !head && !attributes && !statement && gnu && kind == PARSE_KIND_IDENTIFIER && !parse_scalar_is_typedef_name(parser, i) ?
                               parse_scalar_attribute_name(parser, i) : PARSE_MESSAGE_NONE;
     frame->flags &= ~BUSTER_PARSE_FRAME_BLOCK_ATTRIBUTES;
     if (kind == PARSE_KIND_ASM && gnu && !label)
