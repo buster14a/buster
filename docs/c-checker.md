@@ -2502,6 +2502,39 @@ What the lowering covers past scalars (#145's programs):
   `short`, an `unsigned short` and a `_Bool` arrive in read as 32 bits; and
   `test-checker-driver` links and runs glibc's socket calls with `_GNU_SOURCE`
   by both paths against clang's build (`c_check_transparent_driver_test.c`).
+- **Casts to a union (#2301).** GCC's cast to a union from a member's type is
+  clang's `CK_ToUnion`. `check_action_cast` takes the operand after its lvalue
+  conversion, an array's or a function's decay included, and finds the union's
+  first member of its unqualified type that is no unnamed bit-field
+  (`check_action_union_cast_member`, clang's `getTargetFieldForToUnionCast`).
+  The operand converts to that member (`BUSTER_CHECK_CONVERT_TO_UNION`), and
+  the cast's value is an rvalue of the union, never a constant of the member.
+  A vector operand's cast to a union is this cast, not a vector cast. The
+  lowering (`check_lower_union_cast`) makes a frame object of the union, stores
+  the member's value into its first bytes (copies an aggregate's), and gives
+  the object's address as the cast's value. The batch and template fast paths
+  leave such a cast to it. The union's other bytes stay as they are, as clang's
+  code leaves them. A static object's initializer (`check_init_value`) clears
+  the union, then initializes its member from the operand, as clang's constant
+  evaluator folds the cast. `-Wgnu-union-cast`
+  (`check_warning_graph_union_cast`) is at the cast's `(`, off by default and
+  given by `-pedantic`, `-Wpedantic`, `-Wgnu` and itself. A union cast from no
+  member's type gets clang's "cast to union type from type 'T' not present in
+  union", and a cast to a struct from another type its "used type 'T' where
+  arithmetic or pointer type is required", both at the `(`
+  (`check_semantic_expression`). Differences left:
+  - a function designator's decayed type in that error drops its parameters'
+    typedef names, as buster's other diagnostics of a decayed function do;
+  - clang's `-Wpedantic` "C99 forbids casting nonscalar type 'T' to the same
+    type" isn't given;
+  - a cast to a scalar from a record keeps the generic error, where clang says
+    "operand of type 'T' where arithmetic or pointer type is required" at the
+    operand.
+
+  `test-checker`'s programs (`c_check_program_union_cast_test.c`) run each
+  kind of member, static initializers and a transparent union's cast against
+  clang -O0's build. `test-checker-driver`'s default-warning sweep compares the
+  diagnostics with clang's under `-pedantic`.
 - **Aggregate control-flow ends (#670).** A bounded walk of each ordinary
   aggregate-returning body's control graph removes unreachable transfers
   without renumbering labels. A reachable implicit return supplies an address

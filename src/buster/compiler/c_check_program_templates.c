@@ -238,9 +238,10 @@ static CheckLowerTemplateUse check_lower_template_classify(const CheckLowerWrite
     const bool pointers = left_pointer || right_pointer;
     const uint64_t stride = left_pointer ? check_action_pointer_stride(types, type_a) : 0;
     CheckLowerTemplateUse use = { .kind = CHECK_LOWER_TEMPLATE_NONE };
-    if (value->overload_head != 0 || (facts & (BUSTER_CHECK_LOWER_TYPE_BIT_INT | BUSTER_CHECK_LOWER_TYPE_COMPLEX)) != 0)
+    if (value->overload_head != 0 || (facts & (BUSTER_CHECK_LOWER_TYPE_BIT_INT | BUSTER_CHECK_LOWER_TYPE_COMPLEX)) != 0 ||
+        (op == CHECK_OP_CAST && (stream->conversions[node].operands[0].flags & BUSTER_CHECK_CONVERT_TO_UNION) != 0))
     {
-        // An overload's placeholder, a _BitInt's and a complex value's are the tasks'.
+        // An overload's placeholder, a _BitInt's, a complex value's and a cast to a union (#2301) are the tasks'.
     }
     else if (op == CHECK_OP_VALUE && known && check_input_bit(program->input->declaration_bits, object - 1, BUSTER_CHECK_BITS_COMPOUND) && !check_input_bit(program->input->declaration_bits, object - 1, BUSTER_CHECK_BITS_STATIC))
     {

@@ -1887,6 +1887,26 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
             result = left.length != 0 && right.length != 0 ? check_warning_text(scratch, "invalid operands to binary expression (%.*s and %.*s)", (int)left.length,
                                                                                 left.pointer, (int)right.length, right.pointer) : NULL;
         }
+        else if (report->diagnostic == CHECK_DIAG_INCOMPATIBLE && op == CHECK_OP_CAST && operand_type != 0 && token < parser->tokens.count &&
+                 parser->tree.roles[token] == PARSE_ROLE_CLOSE_CAST && node < stream->count && graph->types != NULL &&
+                 (check_action_kind(types, graph->types[node]) == BUSTER_TYPE_KIND_UNION || check_action_kind(types, graph->types[node]) == BUSTER_TYPE_KIND_STRUCT))
+        {
+            // A cast to a record from no type compatible with it (#2301, clang's CheckCStyleCast), at the cast's `(`: to a
+            // union from no member's type, err_typecheck_cast_to_union_no_type with the operand's type after its lvalue
+            // conversion (an array's or a function's decay, its qualifiers dropped), its sugar kept; to a struct,
+            // err_typecheck_cond_expect_scalar with the struct's type as written.
+            const TypeId target = graph->types[node];
+            const bool to_union = check_action_kind(types, target) == BUSTER_TYPE_KIND_UNION;
+            const TypeId converted = stream->conversions[node].operands[0].type != 0 ? stream->conversions[node].operands[0].type : type_unqualified(operand_type);
+            const uint32_t spelling = converted == type_unqualified(operand_type) ? check_semantic_operand_spelling(parser, input, stream, types, operand) : 0;
+            const String8 type = to_union ? check_driver_warning_type(parser, pp, input, types, spell, scratch, converted, spelling) :
+                                            check_driver_warning_type(parser, pp, input, types, spell, scratch, target, check_input_operand_type_spelling(input, parser, node));
+            const uint32_t open = check_warning_graph_void_opener(parser, token);
+            *location = open < parser->tokens.count ? open : token;
+            result = type.length == 0 ? NULL :
+                     to_union ? check_warning_text(scratch, "cast to union type from type %.*s not present in union", (int)type.length, type.pointer) :
+                                check_warning_text(scratch, "used type %.*s where arithmetic or pointer type is required", (int)type.length, type.pointer);
+        }
         else if (report->diagnostic == CHECK_DIAG_INCOMPATIBLE && op == CHECK_OP_SUBTRACT && operand_type != 0 && graph->operand1[node] < stream->count &&
                  check_action_kind(types, operand_type) == BUSTER_TYPE_KIND_POINTER &&
                  check_action_kind(types, check_stream_type(stream, graph->operand1[node])) == BUSTER_TYPE_KIND_POINTER)

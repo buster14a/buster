@@ -2788,6 +2788,7 @@ static void check_test_program_tables(CheckTest* test, const char* source, const
 #include "c_check_program_x86_rest_test.c"
 #include "c_check_program_amx_test.c"
 #include "c_check_program_transparent_test.c"
+#include "c_check_program_union_cast_test.c"
 #include "c_check_program_alias_test.c"
 #include "c_check_program_vector_builtins_test.c"
 #include "c_check_program_fp16_test.c"
@@ -3803,6 +3804,7 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         check_test_program_x86_rest(test, clang);
         check_test_program_amx(test, clang);
         check_test_program_transparent(test, clang);
+        check_test_program_union_casts(test, clang);
         check_test_program_aliases(test, clang);
         check_test_program_vector_builtins(test, clang);
         check_test_program_fp16(test, clang);
