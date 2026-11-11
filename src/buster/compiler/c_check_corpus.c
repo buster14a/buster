@@ -2100,7 +2100,7 @@ static bool check_corpus_view_equal(const CheckCorpusPath* a, const CheckCorpusP
             left_parser->recovered_parameter_types == right_parser->recovered_parameter_types;
     for (uint32_t token = 0; equal && trees && token < left_parser->tokens.count; token += 1)
     {
-        equal = parse_test_canonical_role(left_parser->tree.roles[token]) == parse_test_canonical_role(right_parser->tree.roles[token]) &&
+        equal = left_parser->tree.roles[token] == right_parser->tree.roles[token] &&
                 left_parser->tree.parents[token] == right_parser->tree.parents[token] && left_parser->tree.depths[token] == right_parser->tree.depths[token] &&
                 left_parser->postorder[token] == right_parser->postorder[token] && (left_parser->sizes != 0) == (right_parser->sizes != 0) &&
                 (left_parser->sizes == 0 || left_parser->sizes[token] == right_parser->sizes[token]) &&

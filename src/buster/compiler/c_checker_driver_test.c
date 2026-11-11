@@ -84,6 +84,13 @@ struct CheckDriverRunModes
     uint64_t in_process_runs;
     uint64_t served_runs;
     uint64_t child_runs;
+    // What the runs cost (#2263): the served runs' wall time, the server's requests past their limit (each stopped the
+    // server, and its run ran as a child), and the children's wall time from fork to reap and CPU time (wait4's, theirs
+    // and their own children's).
+    uint64_t served_nanoseconds;
+    uint64_t stalls;
+    uint64_t child_nanoseconds;
+    uint64_t child_cpu_nanoseconds;
     uint64_t differences;
     uint64_t sweep_fixtures;
     uint64_t sweep_nanoseconds;
@@ -180,6 +187,7 @@ static int check_test_driver_child(char* const* arguments, char** text, bool std
     size_t length = 0;
     *text = NULL;
     check_driver_run_modes.child_runs += 1;
+    const uint64_t begun = check_test_driver_nanoseconds();
     if (captured != NULL)
     {
         fflush(NULL);
@@ -210,11 +218,18 @@ static int check_test_driver_child(char* const* arguments, char** text, bool std
         }
     }
     pid_t waited = -1;
+    struct rusage usage = { 0 };
     do
     {
-        waited = child > 0 ? waitpid(child, &status, 0) : -1;
+        waited = child > 0 ? wait4(child, &status, 0, &usage) : -1;
     }
     while (waited < 0 && child > 0 && errno == EINTR);
+    if (child > 0 && waited == child)
+    {
+        check_driver_run_modes.child_nanoseconds += check_test_driver_nanoseconds() - begun;
+        check_driver_run_modes.child_cpu_nanoseconds += ((uint64_t)usage.ru_utime.tv_sec + (uint64_t)usage.ru_stime.tv_sec) * 1000000000 +
+                                                        ((uint64_t)usage.ru_utime.tv_usec + (uint64_t)usage.ru_stime.tv_usec) * 1000;
+    }
     const bool read = captured != NULL && waited == child && pp_test_read_output(captured, text, &length);
     if (captured != NULL)
     {
@@ -279,7 +294,8 @@ static bool check_test_driver_run_in_process(char* const* arguments, char** text
 }
 
 // The oracle clang's `arguments` through the server (oracle_server_run), with this process's working directory and
-// environment: the selected stream into *text (the caller frees it), the exit status, or -1.
+// environment, within the server's limit: the selected stream into *text (the caller frees it), the exit status, or -1
+// if the server couldn't take it.
 static int check_test_driver_clang_request(char* const* arguments, char** text, bool stdout_capture)
 {
     CheckDriverRunModes* modes = &check_driver_run_modes;
@@ -289,11 +305,18 @@ static int check_test_driver_clang_request(char* const* arguments, char** text, 
     uint64_t output_length = 0;
     uint64_t errors_length = 0;
     const bool placed = getcwd(directory, sizeof(directory)) != NULL;
+    const uint64_t begun = check_test_driver_nanoseconds();
     const int status = placed ? oracle_server_run(&modes->server, arguments, environ, directory, NULL, stdout_capture ? 1u : 2u, 0, &output, &output_length, &errors, &errors_length) : -1;
     *text = stdout_capture ? output : errors;
     if (status >= 0)
     {
         modes->served_runs += 1;
+        modes->served_nanoseconds += check_test_driver_nanoseconds() - begun;
+    }
+    if (placed && modes->server.stalled)
+    {
+        modes->stalls += 1;
+        fprintf(stderr, "run modes: the clang server gave no answer within its limit: stopped, and the run runs as a child\n");
     }
     return status;
 }
@@ -470,7 +493,14 @@ static int check_test_driver_spawn_stream(char* const* arguments, char** text, b
     }
     else if (clang && !modes->differential)
     {
+        // A run the server couldn't take (it ended, or ran past its limit) runs as a child, as without the server.
         status = check_test_driver_clang_request(arguments, text, stdout_capture);
+        if (status < 0)
+        {
+            free(*text);
+            *text = NULL;
+            status = check_test_driver_child(arguments, text, stdout_capture, true);
+        }
     }
     else if (clang)
     {
@@ -8126,6 +8156,7 @@ static void check_test_driver_optimize_pragmas(CheckTest* test, const char* clan
 #include "c_check_objc_bridge_driver_test.c"
 #include "c_check_swift_attribute_driver_test.c"
 #include "c_check_unevaluated_driver_test.c"
+#include "c_check_pointer_cast_driver_test.c"
 #include "c_check_sign_compare_driver_test.c"
 #include "c_check_type_sugar_driver_test.c"
 #include "c_check_call_count_driver_test.c"
@@ -9036,6 +9067,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             check_test_driver_for_loops(&test, clang, executable, directory);
             check_test_driver_enum_casts(&test, clang, executable, directory);
             check_test_driver_unevaluated(&test, clang, executable, directory);
+            check_test_driver_pointer_casts(&test, clang, executable, directory);
         }
         if (!lazy && check_test_driver_takes())
         {
@@ -9653,6 +9685,14 @@ static int run_checker_driver_tests(int argc, char** argv)
            modes->in_process ? "in-process" : "as children", modes->server.path != NULL ? "through the server (" : "as children",
            modes->server.path != NULL ? modes->server.version : "", modes->server.path != NULL ? ")" : "", modes->differential ? ", differential" : "",
            modes->in_process_runs, modes->served_runs, modes->child_runs, modes->sweep_fixtures, (double)modes->sweep_nanoseconds / 1e9, modes->differences);
+    const double served_seconds = (double)modes->served_nanoseconds / 1e9;
+    const double child_seconds = (double)modes->child_nanoseconds / 1e9;
+    const double child_cpu_seconds = (double)modes->child_cpu_nanoseconds / 1e9;
+    printf("checker-driver: run costs: served %.3f s (%.3f ms each), %" PRIu64 " past the server's limit; children %.3f s wall (%.3f ms each), %.3f s CPU "
+           "(%.3f ms each)\n",
+           served_seconds, modes->served_runs != 0 ? served_seconds * 1e3 / (double)modes->served_runs : 0.0, modes->stalls, child_seconds,
+           modes->child_runs != 0 ? child_seconds * 1e3 / (double)modes->child_runs : 0.0, child_cpu_seconds,
+           modes->child_runs != 0 ? child_cpu_seconds * 1e3 / (double)modes->child_runs : 0.0);
     oracle_cache_report(oracle, "test-checker-driver");
     if (check_driver_part.count > 1)
     {

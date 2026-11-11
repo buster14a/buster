@@ -16,6 +16,7 @@ on:
       - 'tools/ci/build_ownership*.h'
       - tools/ci/setup-build-tools.sh
       - tools/ci/setup-hosted.sh
+      - tools/ci/hosted-offline.sh
       - tools/ci/hosted-release.sh
       - tools/ci/hosted-tools.lock
       - tools/ci/install-hosted-tools.sh
@@ -33,6 +34,7 @@ on:
       - 'tools/ci/build_ownership*.h'
       - tools/ci/setup-build-tools.sh
       - tools/ci/setup-hosted.sh
+      - tools/ci/hosted-offline.sh
       - tools/ci/hosted-release.sh
       - tools/ci/hosted-tools.lock
       - tools/ci/install-hosted-tools.sh

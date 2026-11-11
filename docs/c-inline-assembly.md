@@ -9,8 +9,8 @@ caller, as one of Tier 0's machine operations (#1059: "Placed in the caller",
 below); most others are placed in their caller as an asm body, the helper's
 loads, template and stores in the call's place (#1839: "Asm bodies", below),
 and under `--tier1` every statement placed in its caller is one; the rest,
-templates of references to names, of directives and asm goto, are
-ordinary calls of a helper. A naked function's statements
+templates of references to names and of directives (and asm goto under
+`--tier1`), are ordinary calls of a helper. A naked function's statements
 are its whole code instead, and the names templates define and refer to become
 symbols of the unit's object or executable.
 
@@ -147,7 +147,7 @@ statement as the `asm` family's direct form.
 Clang places every asm statement in its caller, and the owner decided that
 this compiler does too ([#1447](https://github.com/buster14a/buster/issues/1447#issuecomment-6736401463),
 item 2). A statement that isn't a row (above), and whose template has no
-reference to a name and isn't an asm goto, is an asm body: the records a helper would have
+reference to a name (but an asm goto's to its labels, below, outside `--tier1`) is an asm body: the records a helper would have
 between its frame and its return, which run in the statement's place in its
 function (`check_asm_inline_code`, `Tier0AsmBody`):
 
@@ -926,6 +926,20 @@ A label as anything but a jmp's or a jcc's target (data, a call's target, an
 addend) is refused by name. A template of no instructions never jumps, and has
 no helper.
 
+Outside `--tier1`, an asm goto is an asm body (#1839's item 2): the same exits
+are the body's records after the template (`check_asm_inline_code`), the
+template's jumps and the exits' jumps the body's branches, and the exit's move
+into eax its last record. Its call row returns that int (`check_lower_asm_call`'s
+result, a body call of class I32 to Tier 0's validator), and the statement's
+code dispatches on it as on the helper's. The statement costs no call, return,
+frame or block address, but still the exit's move, compare and branch: clang's
+`callbr` jumps from the template straight to the labels. Jumping straight would
+make the body's call row a block's terminator with several successors, which
+Tier 0's validator and `ir_lower` don't take yet. Under `--tier1` the statement
+keeps its helper, as the IR's body call returns nothing. Tier 0 sorts its branch
+columns where a body has branches: a body's are a deferred entry's, written after
+the branches of the entries that follow it.
+
 An asm goto's possible targets are its own labels, as clang's
 JumpScopeChecker takes them (`check_input_asm_goto_refused`). The checker
 refuses one that would enter the scope of a variable-length array or of a
@@ -964,10 +978,25 @@ as C's constructors'. Its CFI's frames are an `.eh_frame` atom of their own
 beside the functions' unwind table, its CIE and FDEs as the assembler makes them
 (clang's object shares one CIE between the module's assembly and its
 functions), which the direct path's `.eh_frame_hdr` indexes with the
-functions'. Refused by name, at the first file-scope statement: templates the
-assembler refuses; section groups (COMDAT), which the units' merge doesn't carry;
-and what the templates' names refuse (a label another template defines too, or
-that the unit defines, a reference to another template's `.set` symbol).
+functions'. Its section groups (COMDAT,
+`.section .text.f,"axG",@progbits,f,comdat`) are the link's groups beside
+selectany's (`check_program_emit_asm_groups`, `check_program_sections`), and
+`-c`'s object has clang's `.group` sections: their signatures (the program's
+symbol of the name, which may be C's, a section's, or for a name no symbol has,
+the local symbol in the group's section that clang's assembler makes), flags
+and members, a member's relocation section among them. One unit's direct path
+keeps every group's members, as a link of one object does; a link of several C
+units keeps each signature's first group in the command's order and drops the
+others' members, as a linker does (`check_units_select_groups`), and a mixed
+link's objects go to the linker whole. That selection keys groups by their
+signatures' global names, so in a link of several C units a group whose
+signature isn't a global symbol defined in it (a local label, a section, a name
+of its own, a symbol defined outside it) is refused by name. clang's
+`-Winline-asm` warning about a `.globl` symbol made weak ("changed binding to
+STB_WEAK") isn't modelled, as no assembler binding warning is. Refused by name,
+at the first file-scope statement: templates the assembler refuses, and what the
+templates' names refuse (a label another template defines too, or that the unit
+defines, a reference to another template's `.set` symbol).
 
 ## What the lowering refuses
 
@@ -1253,7 +1282,7 @@ has the commands, the logs and the default path's numbers against main.
 ## Pending
 
 What placement in the caller doesn't take yet (#1839), each keeping its helper:
-templates of references to names, asm goto, `loop` and `jrcxz` (which the lowering refuses by name),
+templates of references to names, asm goto under `--tier1`, `loop` and `jrcxz` (assembled whole, as templates that take directives are),
 templates that return but keep a helper for another reason (refused by name), templates
 that take directives, and forms of unknown effects outside `check_asm_implicit`.
 Under `--tier1`, templates of named labels keep their helpers (a body's labels
