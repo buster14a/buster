@@ -8418,7 +8418,7 @@ arguments against the function. The checker now gives these as clang does.
 
   Lowering: clang's x86 target maps address spaces 256, 257 and 258
   (`__seg_gs`, `__seg_fs`) to the `%gs`, `%fs` and `%ss` segments, whose loads
-  and stores take a segment override. A load or store in `%fs` or `%gs` of an
+  and stores take a segment override. A load or store in `%fs`, `%gs` or `%ss` of an
   integer, a floating value (long double too), a 128-bit integer or a vector,
   by indirection, member (a bit-field's unit's pieces too), subscript or name, and an assignment, compound
   assignment, increment or decrement of one, takes it (check_lower_access: the
@@ -8432,8 +8432,7 @@ arguments against the function. The checker now gives these as clang does.
   Tier 0 for such a function. The rest is refused by name ("a load or store in a
   segment's address space", check_lower_segment_access, where a unit has such a
   type at all: CheckLowerWriter.segments): an aggregate's copy, a complex,
-  half-precision or `_BitInt` value, an `_Atomic` object, and `%ss`'s
-  space (258, whose `36` prefix no 64-bit form of the encoder's has), atomic
+  half-precision or `_BitInt` value, an `_Atomic` object, atomic
   builtins of another plan (generic ones by pointer, `__atomic_clear`,
   `__sync_lock_release`); and so are the accesses whose lvalue doesn't carry the
   space: a vector's element, read or written (its type loses the vector's

@@ -1161,12 +1161,15 @@ static uint64_t check_lower_access_value(const TypeTable* types, uint8_t class, 
 }
 
 // The segment override of an access to an object of `type` (#1447): clang's x86 target maps address space 257 to %fs
-// (__seg_fs) and 256 to %gs (__seg_gs), BUSTER_TYPED_SEGMENT_FS's and _GS's (BUSTER_TYPED_ACCESS_SEGMENT); 0 for any other
-// space, 258's (%ss) among them, whose accesses the lowering refuses (check_lower_segment_access).
+// (__seg_fs), 256 to %gs (__seg_gs) and 258 to %ss, BUSTER_TYPED_SEGMENT_FS's, _GS's and _SS's
+// (BUSTER_TYPED_ACCESS_SEGMENT); 0 for any other space. SS's base is 0 in 64-bit mode, but clang still gives each access
+// its 36 and keeps the space apart from the flat one, as the override does here.
 static uint64_t check_lower_segment_override(const TypeTable* types, TypeId type)
 {
     const uint32_t space = type_address_space(type_object_qualifiers(types, type));
-    const uint64_t segment = space == BUSTER_TYPE_SPACE_TARGET + 257 ? BUSTER_TYPED_SEGMENT_FS : space == BUSTER_TYPE_SPACE_TARGET + 256 ? BUSTER_TYPED_SEGMENT_GS : 0;
+    const uint32_t target = space - BUSTER_TYPE_SPACE_TARGET;
+    static const uint8_t segments[3] = { BUSTER_TYPED_SEGMENT_GS, BUSTER_TYPED_SEGMENT_FS, BUSTER_TYPED_SEGMENT_SS };
+    const uint64_t segment = space >= BUSTER_TYPE_SPACE_TARGET && target >= 256 && target <= 258 ? segments[target - 256] : 0;
     return segment << BUSTER_TYPED_ACCESS_SEGMENT_SHIFT;
 }
 
@@ -12677,10 +12680,10 @@ static bool check_lower_segment_types(const TypeTable* types)
 }
 
 // Whether an object of `type` in a segment's space (check_lower_segment) is one whose loads and stores take its override
-// (check_lower_access, #1447): in %fs or %gs (not %ss, which no form of the encoder's has in 64-bit mode), of an integer's,
-// a floating value's (float, double or long double), a 128-bit integer's or a vector's class (one LOAD or STORE moves it,
-// whose records Tier 0 gives the override), and not an aggregate (a struct's, a union's, a complex value's), an atomic
-// object, a _BitInt or a transport vector, whose accesses go through copies, helpers or recipes of their own.
+// (check_lower_access, #1447): in %fs, %gs or %ss, of an integer's, a floating value's (float, double or long double), a
+// 128-bit integer's or a vector's class (one LOAD or STORE moves it, whose records Tier 0 gives the override), and not an
+// aggregate (a struct's, a union's, a complex value's), an atomic object, a _BitInt or a transport vector, whose accesses
+// go through copies, helpers or recipes of their own.
 static bool check_lower_segment_carried(const CheckLowerWriter* writer, TypeId type)
 {
     const TypeTable* types = writer->program->types;

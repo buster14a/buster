@@ -82,7 +82,7 @@ static bool ir_typed_access_valid(uint8_t kind, uint8_t class, uint64_t value)
 }
 
 // Whether entry `i`'s segment override (#1447, BUSTER_TYPED_ACCESS_SEGMENT), if it has one, is one the IR carries
-// (BUSTER_IR_SEGMENT): FS's or GS's, on a LOAD, STORE or SET of an integer, a float, a double or a vector (a 128-bit
+// (BUSTER_IR_SEGMENT): FS's, GS's or SS's, on a LOAD, STORE or SET of an integer, a float, a double or a vector (a 128-bit
 // integer's halves, ir_wide.c, and a wide vector's pieces, ir_vector_split.c, keep their access's flags). An atomic
 // read/modify/write's (ATOMIC_RMW, ATOMIC_CAS), whose IR flags hold its operation where a load's hold the segment, and an
 // access of a long double or a mask, which Tier 1 moves through rows of their own (the x87 stack's, kmov's), are Tier 0's.
@@ -94,7 +94,7 @@ static bool ir_typed_segment_valid(const Tier0Function* input, uint32_t i)
     const bool access = kind == BUSTER_TYPED_LOAD || kind == BUSTER_TYPED_STORE || kind == BUSTER_TYPED_SET;
     const bool atomic = kind == BUSTER_TYPED_ATOMIC_RMW || kind == BUSTER_TYPED_ATOMIC_CAS;
     const bool carried = class != BUSTER_TYPED_CLASS_F80 && class != BUSTER_TYPED_CLASS_MASK;
-    return segment == 0 || (!atomic && (!access || (segment != 3 && carried)));
+    return segment == 0 || (!atomic && (!access || carried));
 }
 
 typedef struct IrTypedPlan IrTypedPlan;
