@@ -8,7 +8,7 @@
 #   ./build.sh test [--config Debug|Release] [--jobs N] [-- CTEST_ARGUMENT...]
 #   ./build.sh clean [--config Debug|Release | --all]
 #   ./build.sh configure
-#   ./build.sh print-sources | print-compile-flags [--config C] | print-sanitizer-flags | print-output [--config C]
+#   ./build.sh print-sources | print-compile-flags [--config C] | print-sanitizer-flags | print-host-flags | print-output [--config C]
 #   ./build.sh check-call-graph [--config C] [--jobs N]
 #   ./build.sh lexer-variant [--config C] [--jobs N] NAME=SOURCE...
 #   ./build.sh lexer-variant-assembly NAME SOURCE OUTPUT.s
@@ -22,9 +22,11 @@
 # build/compiler (a hard link, the same file) and its configuration's compile commands as build/compile_commands.json,
 # once the build has succeeded. Builds of one tree, and publications, wait for each other.
 #
-# print-compile-flags, print-sanitizer-flags and print-sources print expanded arguments and source paths as
-# NUL-delimited argv, without building (cmake/BusterPrint.cmake); consumers read arrays rather than reevaluating shell
-# text from this script. print-output prints the configuration's executable's path.
+# print-compile-flags, print-sanitizer-flags, print-host-flags and print-sources print expanded arguments and source
+# paths as NUL-delimited argv, without building (cmake/BusterPrint.cmake); consumers read arrays rather than reevaluating
+# shell text from this script. print-host-flags is the host target alone: -march=BUSTER_HOST_ARCH, or the explicit
+# vector target's flags for BUSTER_HOST_ARCH=vector, which commands that compile for the build's host pass to clang and
+# to the compiler. print-output prints the configuration's executable's path.
 set -euo pipefail
 # Command substitutions fail as the commands in them do: a failed description stops the script.
 shopt -s inherit_errexit
@@ -55,7 +57,7 @@ absolute()
 
 command=build
 case "${1-}" in
-    build|test|clean|configure|print-sources|print-compile-flags|print-sanitizer-flags|print-output|check-call-graph|lexer-variant|lexer-variant-assembly|shifts)
+    build|test|clean|configure|print-sources|print-compile-flags|print-sanitizer-flags|print-host-flags|print-output|check-call-graph|lexer-variant|lexer-variant-assembly|shifts)
         command="$1"
         shift
         ;;
@@ -214,7 +216,7 @@ now()
 }
 
 case "$command" in
-    print-sources|print-compile-flags|print-sanitizer-flags)
+    print-sources|print-compile-flags|print-sanitizer-flags|print-host-flags)
         [ "${#arguments[@]}" -eq 0 ] || die "$command takes no arguments"
         describe "${command#print-}" | tr '\n' '\0'
         exit 0
