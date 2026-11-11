@@ -637,8 +637,9 @@ static bool x86_match_operand(const X86Operand* operand, uint16_t descriptor, ui
         instruction->index = operand->index;
         instruction->mode = operand->mode;
         instruction->displacement = operand->symbolic ? INT32_MIN : (int32_t)operand->value;
-        instruction->form += operand->segment == 1 ? BUSTER_X86_FORM_FS : operand->segment == 2 ? BUSTER_X86_FORM_GS
-                                                                                                : 0;
+        // An SS override (3) takes a form below BUSTER_X86_FORM_SS_ROWS (x86_form_has_segment).
+        result &= x86_form_has_segment(instruction->form, operand->segment);
+        instruction->form = result ? (uint16_t)(instruction->form + operand->segment * X86_FORM_COUNT) : instruction->form;
     }
     return result;
 }
@@ -823,7 +824,8 @@ static bool x86_match_candidate_indexed(const X86MatchIndex* index, const X86Mat
                 instruction->index = operand->index;
                 instruction->mode = operand->mode;
                 instruction->displacement = operand->symbolic ? INT32_MIN : (int32_t)operand->value;
-                instruction->form += operand->segment == 1 ? BUSTER_X86_FORM_FS : operand->segment == 2 ? BUSTER_X86_FORM_GS : 0;
+                // A form without an SS form (x86_form_has_segment) takes none: NONE, which validation refuses.
+                instruction->form = x86_form_has_segment(f, operand->segment) ? (uint16_t)(instruction->form + operand->segment * X86_FORM_COUNT) : 0;
             }
             else
             {

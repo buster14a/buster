@@ -1487,8 +1487,11 @@ static void check_data_test_complex(CheckTest* test, TypeTable* types)
                     expected = CHECK_DATA_NON_CONSTANT;
                     break;
                 case 10:
+                    // A _Complex __float128's 32 bytes of its parts' bits (#1250), past the output's room as a long double's.
                     values[1].type = objects[1].type = type_complex(types, BUSTER_TYPE_FLOAT128);
-                    expected = CHECK_DATA_UNSUPPORTED;
+                    check_quad_complex_set(&values[1], check_quad_widen(1.0L, false), check_quad_widen(2.0L, false));
+                    fixture.bytes.capacity = 35;
+                    expected = CHECK_DATA_RESOURCE;
                     break;
                 case 11:
                     values[1].type = objects[1].type = type_complex(types, BUSTER_TYPE_INT128);
