@@ -541,8 +541,13 @@ static void check_test_cpu_model_runs(CheckTest* test, const char* clang, const 
     free(source);
 }
 
+// An option of this executable's alone, which check_test_library_run passes to its builds but not to clang's (`--tier1`,
+// #1918), or NULL.
+static const char* check_test_library_own_option = NULL;
+
 // One program built by clang and by this executable, by both paths, which must exit alike and print the same: `source`
-// in `directory`, with `standard` and `option` (NULL for none).
+// in `directory`, with `standard` and `option` (NULL for none), and this executable's builds with
+// check_test_library_own_option.
 static void check_test_library_run(CheckTest* test, const char* clang, const char* executable, const char* directory, const char* name,
                                    const char* program_source, const char* standard, const char* option)
 {
@@ -558,11 +563,15 @@ static void check_test_library_run(CheckTest* test, const char* clang, const cha
     char* outputs[3] = { NULL, NULL, NULL };
     for (uint32_t b = 0; written && b < 3; b += 1)
     {
-        char* arguments[10] = { (char*)(b == 0 ? clang : executable), (char*)standard, "-w", source, "-o", built[b], "-lm" };
+        char* arguments[12] = { (char*)(b == 0 ? clang : executable), (char*)standard, "-w", source, "-o", built[b], "-lm" };
         uint32_t count = 7;
         if (option != NULL)
         {
             arguments[count++] = (char*)option;
+        }
+        if (b != 0 && check_test_library_own_option != NULL)
+        {
+            arguments[count++] = (char*)check_test_library_own_option;
         }
         if (b == 2)
         {

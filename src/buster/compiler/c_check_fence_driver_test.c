@@ -494,9 +494,9 @@ static void check_test_driver_volatile_order(CheckTest* test, const char* execut
 }
 
 // An asm statement placed in its caller (#1059, check_asm_row): -c's object of a function of a placed bswap and lfence
-// has their instructions among the function's own records, and no call, by both paths; under --tier1, whose IR has no
-// operation for a placed statement's row, both keep their helpers (CheckProgramOptions.asm_helpers), which Tier 1's
-// code of the function calls, none refused.
+// has their instructions among the function's own records, and no call, by both paths; and under --tier1, whose IR has
+// no operation for a statement's row, both are asm bodies (#1839, CheckProgramOptions.asm_bodies), which Tier 1's code
+// of the function runs in their places, no helper called and the function not refused.
 static void check_test_driver_asm_placed(CheckTest* test, const char* executable, const char* directory)
 {
     static const char program[] = "unsigned placed(unsigned x, unsigned y)\n"
@@ -549,10 +549,10 @@ static void check_test_driver_asm_placed(CheckTest* test, const char* executable
             calls += form == X86_FORM_CALL_REL32 || form == X86_FORM_CALL_RM64;
         }
         const bool taken = !tier1 || (text != NULL && strstr(text, "tier1-refused\tplaced\t") == NULL);
-        const bool placed = tier1 ? swaps == 0 && fences == 0 && calls == 2 && relocations == 2 : swaps == 1 && fences == 1 && calls == 0 && relocations == 0;
+        const bool placed = swaps == 1 && fences == 1 && calls == 0 && relocations == 0;
         char message[256];
         snprintf(message, sizeof(message), "asm placed (%s path%s): the function's own records hold bswap (%u) and lfence (%u), with %u calls%s", scalar ? "scalar" : "vector",
-                 tier1 ? ", --tier1" : "", swaps, fences, calls, tier1 ? ": Tier 1's, of the two helpers" : "");
+                 tier1 ? ", --tier1" : "", swaps, fences, calls, tier1 ? ": Tier 1's, of the two asm bodies" : "");
         check_test_expect(test, status == 0 && decoded != 0 && placed && taken, message);
         if (status != 0 && text != NULL)
         {
@@ -565,7 +565,7 @@ static void check_test_driver_asm_placed(CheckTest* test, const char* executable
 }
 
 // A function's frame and unwind entry with templates placed in it (#1059): an executable the driver builds whole, by
-// each path and with --tier1 too (whose statements keep their helpers), whose callee between two placed statements
+// each path and with --tier1 too (whose statements are asm bodies, #1839), whose callee between two placed statements
 // counts its stack by glibc's backtrace, through the function's own unwind entry: one frame more than main's own count,
 // and the placed statements' values right.
 static void check_test_driver_asm_unwind(CheckTest* test, const char* executable, const char* directory)

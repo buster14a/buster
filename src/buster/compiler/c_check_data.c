@@ -240,6 +240,29 @@ static CheckDataStatus check_data_plan_scalar(const TypeTable* types, const Chec
                     check_data_integer_bytes(plan->bytes, bits, plan->size);
                 }
             }
+            else if (integer && width >= 32 && value->constant_kind == CHECK_CONSTANT_LABEL_DIFFERENCE)
+            {
+                // GNU's difference of two labels' addresses (#1447): their distance in their function's code, which the
+                // emission placed before the static data is planned, as an assembler resolves clang's `.long .La-.Lb`.
+                const uint32_t minuend = value->object;
+                const uint32_t subtrahend = (uint32_t)value->integer;
+                const SymbolId a = minuend < object_count ? object_symbols[minuend] : 0;
+                const SymbolId b = subtrahend < object_count ? object_symbols[subtrahend] : 0;
+                const bool placed = a != 0 && b != 0 && a < link->symbols.count && b < link->symbols.count && link->symbols.atom[a] != 0 &&
+                                    link->symbols.atom[a] == link->symbols.atom[b];
+                if (!placed)
+                {
+                    status = CHECK_DATA_UNSUPPORTED;
+                }
+                else
+                {
+                    const uint64_t distance = link->symbols.value[a] - link->symbols.value[b];
+                    const unsigned __int128 mask = check_action_mask(width);
+                    const bool extend = is_signed && width < plan->size * 8u && ((distance & mask) >> (width - 1)) != 0;
+                    const unsigned __int128 bits = ((unsigned __int128)(int64_t)distance & mask) | (extend ? ~mask : 0);
+                    check_data_integer_bytes(plan->bytes, bits, plan->size);
+                }
+            }
             else if ((floating || quad) && value->constant_kind == CHECK_CONSTANT_FLOATING)
             {
                 const long double rounded = check_action_round_float(base, value->floating);
