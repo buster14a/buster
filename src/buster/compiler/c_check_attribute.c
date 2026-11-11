@@ -4242,8 +4242,10 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
         uint32_t tag_bound = 0;
         // A tag's own list, between its keyword and its name or body, of its declaration or definition (a reference's is
         // the parser's error alone: check_input_tag_attributes).
-        const bool tag_keyword = declaration_place && reader->tag_attributes && (before_list == PARSE_KIND_STRUCT || before_list == PARSE_KIND_ENUM);
-        const bool tag_list = tag_keyword && check_input_attribute_tag_declares(parser, list_opener - 2);
+        // (Or a bare declaration's list after the tag's name, as clang's Sema takes it: CheckInputReader.tag_name_list.)
+        const bool tag_keyword = declaration_place && reader->tag_attributes &&
+                                 (before_list == PARSE_KIND_STRUCT || before_list == PARSE_KIND_ENUM || reader->tag_name_list);
+        const bool tag_list = tag_keyword && (reader->tag_name_list || check_input_attribute_tag_declares(parser, list_opener - 2));
         // annotate_type is a type's alone: on a declaration, clang's "cannot be applied to a declaration" (#1447); so is a
         // sliding type attribute on a declaration of no declarator (`[[clang::address_space(1)]];`).
         const bool annotate_type = check_input_attribute_equal(name, "annotate_type");
@@ -4671,7 +4673,8 @@ static bool check_input_attributes(CheckInputReader* reader, uint32_t* cursor, u
         const uint8_t kind = parser->tokens.kinds[i];
         const uint32_t name = parser->tokens.names[i];
         const bool standard = kind == PARSE_KIND_L_SQUARE;
-        const uint32_t place = standard ? check_input_standard_place(parser, i) : BUSTER_CHECK_PLACE_DECLARATION;
+        // (A list after a bare tag declaration's name is the tag's, its declaration's: CheckInputReader.tag_name_list.)
+        const uint32_t place = standard && !reader->tag_name_list ? check_input_standard_place(parser, i) : BUSTER_CHECK_PLACE_DECLARATION;
         bool recovered = false;
         if (kind == PARSE_KIND_ATTRIBUTE || standard)
         {

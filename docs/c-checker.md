@@ -9228,9 +9228,22 @@ arguments against the function. The checker now gives these as clang does.
     with an error (C99 and later) has no `-Wtcb-enforcement` warning after
     it.
     `diagnose_as_builtin`'s calls have no `-Wfortify-source` warnings, as no
-    call has. A C23 NEON vector's or `btf_type_tag`'s list after a tag's name
-    is the parser's "an attribute list cannot appear here" alone, where clang
-    goes on to "cannot be applied to a declaration".
+    call has.
+  - A bare tag declaration's C23 lists after its name (#1447,
+    `check_input_tag_attributes`): a struct's or a union's, right after the
+    name, are clang's parser's "an attribute list cannot appear here" at the
+    first, then its Sema's of each attribute as the tag's own list's
+    (`CheckInputReader.tag_name_list`): a type attribute's count error or
+    "cannot be applied to a declaration", an unknown one's warning. The
+    declaration goes on, its errors recovered. An enum's, or lists after a
+    GNU list, are ignored with `-Wignored-attributes`' "attribute
+    'clang::neon_vector_type' is ignored, place it after "enum" ...", its
+    scope named. Not yet clang's: the tag doesn't take such a list's other
+    attributes (a later use of `struct V [[deprecated]];`'s tag isn't
+    deprecated); an enum's list's declaration attributes (`deprecated`) are
+    clang's "cannot be applied to types" error, not the warning; and a
+    definition's list (`struct S [[...]] { ... };`) is the parser's
+    "expected identifier or '('" at its `{`.
 - **Tests.** `test-checker` checks the facts table's order and bounds, its
   counts and five rows, and conflicting conventions on a function and on
   another type (`c_check_attribute_test.c`). `test-checker-driver` compares
