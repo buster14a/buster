@@ -1619,12 +1619,12 @@ struct Preprocessor
     uint32_t pushed_count;
     // The #pragma clang (or GCC) diagnostic pushes not yet popped: a pop without one isn't printed (pp_pragma_diagnostic).
     uint32_t diagnostic_depth;
-    // -Wc23-extensions' mapping by those pragmas (#1934, pp_c23_extension_severity): a PPPragmaMapping, and the one each
-    // open push saved, which its pop restores, by depth (room for `c23_extension_capacity`, grown in the arena as the
-    // pushes nest: any depth).
-    uint8_t c23_extension_mapping;
-    uint8_t* c23_extension_saved;
-    uint32_t c23_extension_capacity;
+    // The mappings those pragmas give the preprocessor's warning groups (#1934, pp_warning_severity): a PPPragmaMapping
+    // each, by PPWarningGroup, and the ones each open push saved, which its pop restores, BUSTER_PP_WARNING_GROUPS bytes a
+    // depth (room for `warning_capacity` depths, grown in the arena as the pushes nest: any depth).
+    uint8_t warning_mappings[4];
+    uint8_t* warning_saved;
+    uint32_t warning_capacity;
     // Where the open #pragma clang assume_nonnull, arc_cf_code_audited and unsafe_buffer_usage regions begin, or 0.
     uint32_t region_locations[3];
     // #pragma GCC poison's names, by IdentId, and how many there are (pp_check_poison).
@@ -5554,6 +5554,7 @@ static const PPFeature pp_implemented_c_attribute[] = {
     { "gnu::weak", 1 },
     { "gnu::weakref", 1 },
     { "maybe_unused", 202106 },
+    { "nodiscard", 202003 },
 };
 static const PPFeature pp_implemented_feature[] = {
     { "c_alignas", 1, 2011 },
