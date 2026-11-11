@@ -791,6 +791,8 @@ static void check_test_driver_interrupt_handlers(CheckTest* test, const char* cl
         "void handler_overflow_error(void*, unsigned long, ...);\n"
         "void handler_overflow_aligned(void*, ...);\n"
         "void handler_overflow_aligned_error(void*, unsigned long, ...);\n"
+        "void handler_most(void*);\n"
+        "void handler_all(void*);\n"
         "static int raise_one(const char* what, void* fn, int error, int expected)\n"
         "{\n"
         "    State s;\n"
@@ -834,6 +836,8 @@ static void check_test_driver_interrupt_handlers(CheckTest* test, const char* cl
         "    bad |= raise_one(\"handler_overflow_error\", (void*)handler_overflow_error, 1, 127);\n"
         "    bad |= raise_one(\"handler_overflow_aligned\", (void*)handler_overflow_aligned, 0, 127);\n"
         "    bad |= raise_one(\"handler_overflow_aligned_error\", (void*)handler_overflow_aligned_error, 1, 127);\n"
+        "    bad |= raise_one(\"handler_most\", (void*)handler_most, 0, 5);\n"
+        "    bad |= raise_one(\"handler_all\", (void*)handler_all, 0, 5);\n"
         "    printf(bad ? \"FAILED\\n\" : \"ok\\n\");\n"
         "    return bad;\n"
         "}\n";
@@ -847,6 +851,10 @@ static void check_test_driver_interrupt_handlers(CheckTest* test, const char* cl
         "__attribute__((interrupt)) void handler(Frame* f) { record(f, 0); }\n"
         "__attribute__((interrupt)) void handler_error(Frame* f, unsigned long e) { record(f, e); }\n"
         "__attribute__((interrupt)) void handler_calls(Frame* f) { record(f, 0); char buf[32]; snprintf(buf, sizeof buf, \"%.1f\", 2.5); double d = 2.0; seen.rip = (uint64_t)(d * (buf[0] - '0') + 1.0); }\n"
+        // preserve_most and preserve_all beside interrupt (#2014's review): clang's interrupt takes x86_intrcc whatever the
+        // convention, which keeps every register, r11 too, through the calls that clobber it.
+        "__attribute__((interrupt, preserve_most)) void handler_most(Frame* f) { record(f, 0); char buf[32]; snprintf(buf, sizeof buf, \"%.1f\", 2.5); double d = 2.0; seen.rip = (uint64_t)(d * (buf[0] - '0') + 1.0); }\n"
+        "__attribute__((interrupt, preserve_all)) void handler_all(Frame* f) { record(f, 0); char buf[32]; snprintf(buf, sizeof buf, \"%.1f\", 2.5); double d = 2.0; seen.rip = (uint64_t)(d * (buf[0] - '0') + 1.0); }\n"
         "__attribute__((interrupt)) void handler_aligned(Frame* f) { record(f, 0); _Alignas(64) char x[64]; __builtin_memset(x, 3, 64); seen.rip = (uint64_t)x[63]; }\n"
         "__attribute__((interrupt)) void handler_vla(Frame* f, unsigned long e) { record(f, e); char x[e & 0xff]; __builtin_memset(x, (int)(e & 0xff), sizeof x); seen.rip = (uint64_t)(unsigned char)x[(e & 0xff) - 1]; }\n"
         // A variadic handler's list starts at the interrupted code's rdi, rsi and xmm0 (#1447), as LLVM's x86_intrcc has it.

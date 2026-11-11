@@ -1546,6 +1546,26 @@ static void check_test_driver_attribute_arguments(CheckTest* test, const char* c
         "_Static_assert(!__builtin_types_compatible_p(N, R), \"differ\");\n",
         "void a(int, ...) __attribute__((vectorcall, no_caller_saved_registers));\n",
         "void g(void) __attribute__((ms_abi, sysv_abi, no_caller_saved_registers));\n",
+        // clang's no_caller_saved_registers rebuilds the function type without the sugar of the conventions before it, so
+        // that a later convention neither conflicts with them nor keeps them, whatever list or typedef wrote them
+        // (#2014's review); one written after it conflicts as ever.
+        "void g(void) __attribute__((sysv_abi, no_caller_saved_registers, ms_abi));\n",
+        "void g(void) __attribute__((no_caller_saved_registers, sysv_abi, ms_abi));\n",
+        "void g(void) __attribute__((no_caller_saved_registers, ms_abi, sysv_abi));\n",
+        "__attribute__((sysv_abi, no_caller_saved_registers)) void g(void) __attribute__((ms_abi));\n",
+        "__attribute__((ms_abi)) void g(void) __attribute__((preserve_most, no_caller_saved_registers));\n",
+        "__attribute__((ms_abi, no_caller_saved_registers)) void g(void); void g(void) __attribute__((preserve_most));\n",
+        "typedef void M(void) __attribute__((ms_abi)); M g __attribute__((sysv_abi, no_caller_saved_registers));\n",
+        "typedef void P(void) __attribute__((preserve_most, no_caller_saved_registers)); void g(void) __attribute__((ms_abi, no_caller_saved_registers, preserve_most));\n"
+        "_Static_assert(__builtin_types_compatible_p(__typeof__(g), P), \"replaced\");\n",
+        "typedef void N(void) __attribute__((no_caller_saved_registers)); void g(void) __attribute__((ms_abi, no_caller_saved_registers, sysv_abi));\n"
+        "_Static_assert(__builtin_types_compatible_p(__typeof__(g), N), \"replaced by sysv_abi\");\n",
+        "typedef void P(void) __attribute__((preserve_most, no_caller_saved_registers)); __attribute__((ms_abi)) void g(void) __attribute__((no_caller_saved_registers, preserve_most));\n"
+        "_Static_assert(__builtin_types_compatible_p(__typeof__(g), P), \"another list\");\n",
+        "typedef void M(void) __attribute__((ms_abi, no_caller_saved_registers)); void g(void) __attribute__((sysv_abi, no_caller_saved_registers, ms_abi));\n"
+        "_Static_assert(__builtin_types_compatible_p(__typeof__(g), M), \"sysv_abi hidden\");\n",
+        "typedef void M(void) __attribute__((ms_abi)); typedef void N(void) __attribute__((no_caller_saved_registers)); M g __attribute__((no_caller_saved_registers, sysv_abi));\n"
+        "_Static_assert(__builtin_types_compatible_p(__typeof__(g), N), \"the typedef's hidden\");\n",
         "__attribute__((intel_ocl_bicc, no_caller_saved_registers)) long f(long a) { return a; } __attribute__((no_caller_saved_registers)) long h(long a) "
         "__attribute__((preserve_all)) { return f(a); }\n",
         // target diagnostics name the decoded unsupported fragment, including permitted escapes.

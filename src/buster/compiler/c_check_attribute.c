@@ -219,38 +219,75 @@ typedef enum CheckInputCallingConvention
 } CheckInputCallingConvention;
 
 // no_caller_saved_registers beside another convention than System V's (#1447): `CHECK_CALL_X | CHECK_CALL_KEEPS_REGISTERS`,
-// TYPE_FUNCTION_ABI_KEEPS_REGISTERS' (check_input_attribute_requested_abi).
+// TYPE_FUNCTION_ABI_KEEPS_REGISTERS' (check_input_attribute_requested_abi). Explicit sysv_abi with the bit is
+// `CHECK_CALL_SYSV | CHECK_CALL_KEEPS_REGISTERS` while it is written, and TYPE_FUNCTION_ABI_NO_CALLER_SAVED's type.
 #define CHECK_CALL_KEEPS_REGISTERS 0x40u
+// clang applies no_caller_saved_registers by rebuilding the function type (adjustFunctionType through
+// FunctionTypeUnwrapper), which drops the attribute sugar of every convention written before it, so that no later
+// convention conflicts with those (getCallingConvAttributedType finds none) and a later one replaces them (#2014's
+// review): CHECK_CALL_HIDDEN marks a list's convention that a later no_caller_saved_registers hid, no explicit one for
+// a redeclaration either, and CHECK_CALL_STRIPS a list whose no_caller_saved_registers comes before its first convention,
+// which hides the conventions of the lists and the typedef before it.
+#define CHECK_CALL_HIDDEN 0x80u
+#define CHECK_CALL_STRIPS 0x100u
+
+// A convention's value without the hiding flags.
+static uint32_t check_input_convention_unflagged(uint32_t call)
+{
+    return call & ~(CHECK_CALL_HIDDEN | CHECK_CALL_STRIPS);
+}
 
 // A convention's own part (CheckInputCallingConvention): none (CHECK_CALL_DEFAULT) of no_caller_saved_registers alone,
 // which is a bit beside whatever convention the function has.
 static uint32_t check_input_convention_base(uint32_t call)
 {
-    return call == CHECK_CALL_NO_CALLER_SAVED ? CHECK_CALL_DEFAULT : call & ~CHECK_CALL_KEEPS_REGISTERS;
+    const uint32_t unflagged = check_input_convention_unflagged(call);
+    return unflagged == CHECK_CALL_NO_CALLER_SAVED ? CHECK_CALL_DEFAULT : unflagged & ~CHECK_CALL_KEEPS_REGISTERS;
+}
+
+// Whether a later convention conflicts with this one's own part: it has one, and no later no_caller_saved_registers hid it.
+static bool check_input_convention_visible(uint32_t call)
+{
+    return check_input_convention_base(call) != CHECK_CALL_DEFAULT && (call & CHECK_CALL_HIDDEN) == 0;
+}
+
+// Whether `call`, written after another convention, hides that one first (CHECK_CALL_STRIPS): no_caller_saved_registers alone
+// does.
+static bool check_input_convention_strips(uint32_t call)
+{
+    return (call & CHECK_CALL_STRIPS) != 0 || check_input_convention_unflagged(call) == CHECK_CALL_NO_CALLER_SAVED;
 }
 
 // `base` (a convention's own part) with no_caller_saved_registers' bit where `keeps`: no_caller_saved_registers' own beside
-// System V's or none.
+// none, and with an explicit convention, System V's too, that one's with the bit.
 static uint32_t check_input_convention_compose(uint32_t base, bool keeps)
 {
-    return !keeps ? base : base == CHECK_CALL_DEFAULT || base == CHECK_CALL_SYSV ? CHECK_CALL_NO_CALLER_SAVED : base | CHECK_CALL_KEEPS_REGISTERS;
+    return !keeps ? base : base == CHECK_CALL_DEFAULT ? CHECK_CALL_NO_CALLER_SAVED : base | CHECK_CALL_KEEPS_REGISTERS;
 }
 
 static bool check_input_convention_keeps(uint32_t call)
 {
-    return call == CHECK_CALL_NO_CALLER_SAVED || (call & CHECK_CALL_KEEPS_REGISTERS) != 0;
+    const uint32_t unflagged = check_input_convention_unflagged(call);
+    return unflagged == CHECK_CALL_NO_CALLER_SAVED || (unflagged & CHECK_CALL_KEEPS_REGISTERS) != 0;
 }
 
 // The convention a function asks for with `current` asked for already and `call` next (CheckInputAttributes'
-// calling_convention): the first x86-64 has, and no_caller_saved_registers' bit beside it, clang's function type bit
-// beside its convention: with System V's, no_caller_saved_registers' own (TYPE_FUNCTION_ABI_NO_CALLER_SAVED), and with
-// another, that one's with CHECK_CALL_KEEPS_REGISTERS (#1447).
+// calling_convention): the first x86-64 has that is still visible, a later one where no_caller_saved_registers hid it
+// (CHECK_CALL_HIDDEN), and no_caller_saved_registers' bit beside it, clang's function type bit beside its convention: with
+// none, no_caller_saved_registers' own (TYPE_FUNCTION_ABI_NO_CALLER_SAVED), and with another, that one's with
+// CHECK_CALL_KEEPS_REGISTERS (#1447).
 static CheckInputCallingConvention check_input_convention_merge(CheckInputCallingConvention current, CheckInputCallingConvention call)
 {
     const uint32_t current_base = check_input_convention_base(current);
-    const uint32_t base = current_base != CHECK_CALL_DEFAULT || call == CHECK_CALL_IGNORED_X86_32 ? current_base : check_input_convention_base(call);
+    const uint32_t call_base = check_input_convention_base(call);
+    const bool strips = check_input_convention_strips(call);
+    const bool takes_call = call_base != CHECK_CALL_DEFAULT && call_base != CHECK_CALL_IGNORED_X86_32 && (!check_input_convention_visible(current) || strips);
+    const uint32_t base = takes_call ? call_base : current_base;
     const bool keeps = check_input_convention_keeps(current) || check_input_convention_keeps(call);
-    return (CheckInputCallingConvention)check_input_convention_compose(base, keeps);
+    const bool hidden = takes_call ? (call & CHECK_CALL_HIDDEN) != 0 : current_base != CHECK_CALL_DEFAULT && (strips || (current & CHECK_CALL_HIDDEN) != 0);
+    const bool stripped = (current & CHECK_CALL_STRIPS) != 0 || (current_base == CHECK_CALL_DEFAULT && strips);
+    const uint32_t flags = (hidden ? CHECK_CALL_HIDDEN : 0u) | (stripped ? CHECK_CALL_STRIPS : 0u);
+    return (CheckInputCallingConvention)(check_input_convention_compose(base, keeps) | flags);
 }
 
 typedef struct CheckInputAttribute CheckInputAttribute;
@@ -1754,7 +1791,8 @@ static TypeParameterABI check_input_parameter_abi(String8 name)
 static const char* check_input_convention_name(uint32_t with)
 {
     // (A convention's own part, beside no_caller_saved_registers' bit, #1447.)
-    const uint32_t call = with == CHECK_CALL_NO_CALLER_SAVED ? with : with & ~CHECK_CALL_KEEPS_REGISTERS;
+    const uint32_t unflagged = check_input_convention_unflagged(with);
+    const uint32_t call = unflagged == CHECK_CALL_NO_CALLER_SAVED ? unflagged : unflagged & ~CHECK_CALL_KEEPS_REGISTERS;
     const char* result = call == CHECK_CALL_MICROSOFT ? "ms_abi" : call == CHECK_CALL_VECTOR ? "vectorcall" : call == CHECK_CALL_REG ? "regcall" :
                          call == CHECK_CALL_PRESERVE_MOST ? "preserve_most" : call == CHECK_CALL_PRESERVE_ALL ? "preserve_all" :
                          call == CHECK_CALL_PRESERVE_NONE ? "preserve_none" : call == CHECK_CALL_NO_CALLER_SAVED ? "no_caller_saved_registers" :
@@ -5258,9 +5296,12 @@ static uint32_t check_input_no_caller_saved_written(const CheckInput* input, uin
     return result;
 }
 
-static TypeFunctionABI check_input_attribute_requested_abi(const CheckInputAttributes* attributes)
+// The ABI of a convention (CheckInputAttributes' calling_convention): as the function type has it (`spelled` false), or as
+// an origin keeps it (`spelled` true), where explicit sysv_abi beside no_caller_saved_registers stays System V's with
+// TYPE_FUNCTION_ABI_KEEPS_REGISTERS, so that a later convention conflicts with it (#1447).
+static TypeFunctionABI check_input_convention_abi(uint32_t value, bool spelled)
 {
-    const CheckInputCallingConvention with = attributes != 0 ? attributes->calling_convention : CHECK_CALL_DEFAULT;
+    const CheckInputCallingConvention with = (CheckInputCallingConvention)check_input_convention_unflagged(value);
     // no_caller_saved_registers' bit beside another convention (#1447): that one's with TYPE_FUNCTION_ABI_KEEPS_REGISTERS.
     const bool keeps = with != CHECK_CALL_NO_CALLER_SAVED && check_input_convention_keeps(with);
     const CheckInputCallingConvention call = (CheckInputCallingConvention)(with & ~CHECK_CALL_KEEPS_REGISTERS);
@@ -5272,7 +5313,13 @@ static TypeFunctionABI check_input_attribute_requested_abi(const CheckInputAttri
                                    call == CHECK_CALL_NO_CALLER_SAVED ? TYPE_FUNCTION_ABI_NO_CALLER_SAVED :
                                    call == CHECK_CALL_INTEL_OCL ? TYPE_FUNCTION_ABI_INTEL_OCL : call == CHECK_CALL_SWIFT ? TYPE_FUNCTION_ABI_SWIFT :
                                    call == CHECK_CALL_SWIFT_ASYNC ? TYPE_FUNCTION_ABI_SWIFT_ASYNC : TYPE_FUNCTION_ABI_INVALID;
-    return keeps && result != TYPE_FUNCTION_ABI_INVALID ? (TypeFunctionABI)(result | TYPE_FUNCTION_ABI_KEEPS_REGISTERS) : result;
+    const TypeFunctionABI kept = keeps && result == TYPE_FUNCTION_ABI_SYSV && !spelled ? TYPE_FUNCTION_ABI_NO_CALLER_SAVED : result;
+    return keeps && kept != TYPE_FUNCTION_ABI_INVALID && kept != TYPE_FUNCTION_ABI_NO_CALLER_SAVED ? (TypeFunctionABI)(kept | TYPE_FUNCTION_ABI_KEEPS_REGISTERS) : kept;
+}
+
+static TypeFunctionABI check_input_attribute_requested_abi(const CheckInputAttributes* attributes)
+{
+    return check_input_convention_abi(attributes != 0 ? (uint32_t)attributes->calling_convention : CHECK_CALL_DEFAULT, false);
 }
 
 // The canonical default and explicit sysv_abi function types are identical. Keep explicitness on the spelling
@@ -5284,19 +5331,19 @@ static uint8_t check_input_attribute_abi_origin(CheckInputReader* reader, CheckI
     const TypeFunctionABI requested = check_input_attribute_requested_abi(attributes);
     // no_caller_saved_registers is a bit beside whatever convention the function has (check_input_convention_merge,
     // #1447): with the earlier origin's, they make one function type, unless their own conventions differ.
+    // (The origin is the explicit convention still visible, CHECK_CALL_HIDDEN's none: 0.)
     const uint32_t previous_call = origin != 0 ? check_input_abi_call((TypeFunctionABI)(origin - 1)) : CHECK_CALL_DEFAULT;
-    const uint32_t requested_call = requested != TYPE_FUNCTION_ABI_INVALID ? check_input_abi_call(requested) : CHECK_CALL_DEFAULT;
+    const uint32_t requested_call = requested != TYPE_FUNCTION_ABI_INVALID ? (uint32_t)attributes->calling_convention : CHECK_CALL_DEFAULT;
     const uint32_t previous_base = check_input_convention_base(previous_call);
     const uint32_t requested_base = check_input_convention_base(requested_call);
-    const bool compatible = previous_base == CHECK_CALL_DEFAULT || requested_base == CHECK_CALL_DEFAULT || previous_base == requested_base;
-    const CheckInputAttributes merged = {
-        .calling_convention = check_input_convention_merge((CheckInputCallingConvention)previous_call, (CheckInputCallingConvention)requested_call),
-    };
+    const bool compatible = previous_base == CHECK_CALL_DEFAULT || requested_base == CHECK_CALL_DEFAULT || previous_base == requested_base ||
+                            check_input_convention_strips(requested_call);
+    const uint32_t merged = check_input_convention_merge((CheckInputCallingConvention)previous_call, (CheckInputCallingConvention)requested_call);
     if (requested != TYPE_FUNCTION_ABI_INVALID && attributes->error == CHECK_ATTRIBUTE_ERROR_NONE)
     {
         if (origin == 0 || compatible)
         {
-            result = (uint8_t)(origin == 0 ? requested : check_input_attribute_requested_abi(&merged)) + 1;
+            result = (merged & CHECK_CALL_HIDDEN) != 0 ? 0 : (uint8_t)(check_input_convention_abi(merged, true) + 1);
         }
         else
         {
@@ -5494,9 +5541,10 @@ static void check_input_attribute_conventions(CheckInputReader* reader, CheckInp
             }
             // no_caller_saved_registers is clang's function type bit beside whatever convention the function has
             // (check_input_convention_merge, #1447); two conventions of their own are clang's conflict.
+            // (One a later no_caller_saved_registers hid conflicts with none after it, CHECK_CALL_HIDDEN.)
             const uint32_t base = check_input_convention_base(call);
             const uint32_t current_base = check_input_convention_base(current);
-            if (base != CHECK_CALL_DEFAULT && current_base != CHECK_CALL_DEFAULT && base != current_base)
+            if (base != CHECK_CALL_DEFAULT && check_input_convention_visible(current) && base != current_base)
             {
                 check_input_attribute_conflict(reader, attributes, attribute, base, current_base);
             }
@@ -5553,10 +5601,13 @@ static inline __attribute__((always_inline)) TypeId check_input_attribute_abi_wi
             // no_caller_saved_registers' bit beside either (check_input_convention_merge, #1447), unless their own
             // conventions differ.
             const uint32_t previous_call = previous == TYPE_FUNCTION_ABI_SYSV ? CHECK_CALL_DEFAULT : check_input_abi_call(previous);
-            const uint32_t requested_call = check_input_abi_call(abi);
+            // (The list's own, so that explicit sysv_abi with the bit is System V's, and a no_caller_saved_registers before its
+            // conventions hides the typedef's, CHECK_CALL_STRIPS.)
+            const uint32_t requested_call = (uint32_t)attributes->calling_convention;
             const uint32_t previous_base = check_input_convention_base(previous_call);
             const uint32_t requested_base = check_input_convention_base(requested_call);
-            const bool compatible = previous_base == CHECK_CALL_DEFAULT || requested_base == CHECK_CALL_DEFAULT || previous_base == requested_base;
+            const bool compatible = previous_base == CHECK_CALL_DEFAULT || requested_base == CHECK_CALL_DEFAULT || previous_base == requested_base ||
+                                    check_input_convention_strips(requested_call);
             const CheckInputAttributes merged = {
                 .calling_convention = check_input_convention_merge((CheckInputCallingConvention)previous_call, (CheckInputCallingConvention)requested_call),
             };
