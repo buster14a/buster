@@ -258,7 +258,18 @@ typedef enum IrOp
 // unsigned (4) and signed (5) saturating sum, and the unsigned (6) and signed (7) saturating difference a - b
 // (vpminub to vpmaxsq, vpaddusb to vpsubsw: clang's __builtin_elementwise_min, _max, _add_sat and _sub_sat).
 #define BUSTER_IR_INTRINSIC_LANE_OP 25u
-#define BUSTER_IR_INTRINSIC_COUNT 26u
+// The ternary kinds (#1840), from permute2 on, have a third operand, which no instruction field holds: their `c` is the
+// kind in its low 8 bits and, past them, the index in the function's extra array of the third operand's value
+// (ir_intrinsic_third), as a phi's or a call's operands are there. A binary kind's `c` is the kind alone.
+// permute2's lane i is, of the lanes of a and then of the third operand, all of the result's type, the one that b's lane i's
+// low bits name, as many bits as name twice the lanes, its lanes' bytes' log2 in flags (0 to 3): vpermt2b to vpermt2q
+// (_mm512_permutex2var_epi32(a, idx, b): a, the indices b and the third operand).
+#define BUSTER_IR_INTRINSIC_PERMUTE2 26u
+#define BUSTER_IR_INTRINSIC_COUNT 27u
+#define BUSTER_IR_INTRINSIC_TERNARY BUSTER_IR_INTRINSIC_PERMUTE2
+#define BUSTER_IR_INTRINSIC_KIND 0xffu
+#define BUSTER_IR_INTRINSIC_EXTRA_SHIFT 8u
+#define BUSTER_IR_INTRINSIC_EXTRA_LIMIT (UINT32_MAX >> BUSTER_IR_INTRINSIC_EXTRA_SHIFT)
 
 // ICMP EQ/NE accept pointers too; the other integer predicates require integer operands. FCMP uses EQ through GE:
 // ordered comparisons, except NE, which is true for unordered inputs, as in C.
@@ -791,6 +802,7 @@ static const char* const ir_intrinsic_names[BUSTER_IR_INTRINSIC_COUNT] = {
     "truncate",
     "shift",
     "lane_op",
+    "permute2",
 };
 
 // A fence's orders' names in the text form, C's memory_order's (BUSTER_IR_FENCE_ORDER), and its signal scope's word.
@@ -1365,6 +1377,43 @@ static bool ir_lane_op_flags_valid(uint32_t flags)
     return (flags >> 5) == 0 && (operation < 4 || (flags & 3) <= 1);
 }
 
+// An intrinsic's kind (#1840) from its `c`, and whether that kind has a third operand in the extra array.
+static uint32_t ir_intrinsic_kind(uint32_t c)
+{
+    return c & BUSTER_IR_INTRINSIC_KIND;
+}
+
+static bool ir_intrinsic_ternary(uint32_t c)
+{
+    const uint32_t kind = ir_intrinsic_kind(c);
+    return kind >= BUSTER_IR_INTRINSIC_TERNARY && kind < BUSTER_IR_INTRINSIC_COUNT;
+}
+
+// A ternary intrinsic's `c` for kind `kind` (a `c` whose kind bits are taken alone) with its third operand at
+// extra[extra], and the index of that operand in a ternary intrinsic's extra array. An index past
+// BUSTER_IR_INTRINSIC_EXTRA_LIMIT gives a `c` the verifier refuses (IR_ERROR_OPERAND), never another operand's.
+static uint32_t ir_intrinsic_ternary_c(uint32_t kind, uint32_t extra)
+{
+    return extra <= BUSTER_IR_INTRINSIC_EXTRA_LIMIT ? ir_intrinsic_kind(kind) | extra << BUSTER_IR_INTRINSIC_EXTRA_SHIFT : UINT32_MAX;
+}
+
+static uint32_t ir_intrinsic_extra(uint32_t c)
+{
+    return c >> BUSTER_IR_INTRINSIC_EXTRA_SHIFT;
+}
+
+// A ternary intrinsic's third operand (#1840), instruction i's.
+static uint32_t ir_intrinsic_third(const IrFunction* f, uint32_t i)
+{
+    return f->extra[ir_intrinsic_extra(f->c[i])];
+}
+
+// Whether instruction i is an intrinsic with a third operand.
+static bool ir_ternary_instruction(const IrFunction* f, uint32_t i)
+{
+    return f->op[i] == IR_INTRINSIC && ir_intrinsic_ternary(f->c[i]);
+}
+
 // The mask type of a comparison of vector type `type`'s lanes `lane`, a bit per lane (m8 for 8 lanes or fewer): IR_VOID
 // for a type that isn't a vector.
 static uint32_t ir_lane_mask(uint32_t type, uint32_t lane)
@@ -1894,7 +1943,24 @@ static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i)
             {
                 // An intrinsic's flags are its immediate: a width change's part (#1840), and 0 for every other kind.
                 const uint32_t part = f->flags[i];
-                if (c == BUSTER_IR_INTRINSIC_EXTRACT || c == BUSTER_IR_INTRINSIC_WIDEN)
+                if (c > BUSTER_IR_INTRINSIC_KIND || ir_intrinsic_ternary(c))
+                {
+                    // A ternary kind's third operand (#1840), in the extra array.
+                    const uint32_t third = ir_intrinsic_ternary(c) && ir_slice(ir_intrinsic_extra(c), 1, f->extra_count) ? f->extra[ir_intrinsic_extra(c)] : BUSTER_IR_NONE;
+                    if (b >= f->instruction_count || f->type[b] == IR_VOID || f->type[b] >= IR_TYPE_COUNT)
+                    {
+                        check = ir_check(IR_ERROR_OPERAND, i, 1);
+                    }
+                    else if (third >= f->instruction_count || f->type[third] == IR_VOID || f->type[third] >= IR_TYPE_COUNT)
+                    {
+                        check = ir_check(IR_ERROR_OPERAND, i, 3);
+                    }
+                    else
+                    {
+                        valid = ir_vector_type(type) && ta == type && f->type[b] == type && f->type[third] == type && part <= 3;
+                    }
+                }
+                else if (c == BUSTER_IR_INTRINSIC_EXTRACT || c == BUSTER_IR_INTRINSIC_WIDEN)
                 {
                     const uint32_t narrow = c == BUSTER_IR_INTRINSIC_EXTRACT ? type : ta;
                     const uint32_t wide = c == BUSTER_IR_INTRINSIC_EXTRACT ? ta : type;
@@ -2413,6 +2479,18 @@ static uint32_t ir_value_mask(const IrFunction* f, uint32_t i)
     return result;
 }
 
+// Instruction i's value in its `c` place: its c where its value mask has it, a ternary intrinsic's third operand (#1840),
+// which the extra array holds, or BUSTER_IR_NONE; and the value mask with that place.
+static uint32_t ir_value_third(const IrFunction* f, uint32_t i)
+{
+    return ir_ternary_instruction(f, i) ? ir_intrinsic_third(f, i) : (ir_value_mask(f, i) & 4) != 0 ? f->c[i] : BUSTER_IR_NONE;
+}
+
+static uint32_t ir_value_mask3(const IrFunction* f, uint32_t i)
+{
+    return ir_value_mask(f, i) | (ir_ternary_instruction(f, i) ? 4u : 0u);
+}
+
 static uint64_t ir_operand_count(const IrFunction* f, uint32_t i)
 {
     uint64_t result = (uint32_t)__builtin_popcount(ir_value_mask(f, i));
@@ -2423,6 +2501,10 @@ static uint64_t ir_operand_count(const IrFunction* f, uint32_t i)
     else if (f->op[i] == IR_PHI)
     {
         result += f->b[i];
+    }
+    else if (ir_ternary_instruction(f, i))
+    {
+        result += 1;
     }
     return result;
 }
@@ -2457,6 +2539,11 @@ static IrOperand ir_operand(const IrFunction* f, uint32_t i, uint32_t number, ui
         result.position = 3 + p;
         result.block = f->extra[f->a[i] + p * 2];
         result.value = f->extra[f->a[i] + p * 2 + 1];
+    }
+    else if (f->op[i] == IR_INTRINSIC)
+    {
+        result.position = 3;
+        result.value = ir_intrinsic_third(f, i);
     }
     else
     {
@@ -3338,11 +3425,15 @@ static IrError ir_print(const IrFunction* f, Arena* scratch, FILE* output)
                         }
                         if (op == IR_INTRINSIC)
                         {
-                            fprintf(output, " %s", c < BUSTER_IR_INTRINSIC_COUNT ? ir_intrinsic_names[c] : "invalid");
+                            if (ir_intrinsic_ternary(c) && ir_slice(ir_intrinsic_extra(c), 1, f->extra_count))
+                            {
+                                fprintf(output, ", %%%" PRIu32, ir_intrinsic_third(f, i));
+                            }
+                            fprintf(output, " %s", ir_intrinsic_kind(c) < BUSTER_IR_INTRINSIC_COUNT && (c <= BUSTER_IR_INTRINSIC_KIND || ir_intrinsic_ternary(c)) ? ir_intrinsic_names[ir_intrinsic_kind(c)] : "invalid");
                             // A width change's part (#1840), its immediate.
                             if (c == BUSTER_IR_INTRINSIC_EXTRACT || c == BUSTER_IR_INTRINSIC_INSERT || c == BUSTER_IR_INTRINSIC_PERMUTE || c == BUSTER_IR_INTRINSIC_ALIGN ||
                                 c == BUSTER_IR_INTRINSIC_SHUFFLE_LANES || c == BUSTER_IR_INTRINSIC_EXTEND || c == BUSTER_IR_INTRINSIC_TRUNCATE ||
-                                c == BUSTER_IR_INTRINSIC_SHIFT || c == BUSTER_IR_INTRINSIC_LANE_OP)
+                                c == BUSTER_IR_INTRINSIC_SHIFT || c == BUSTER_IR_INTRINSIC_LANE_OP || ir_intrinsic_ternary(c))
                             {
                                 fprintf(output, " %u", (unsigned)f->flags[i]);
                             }

@@ -1584,6 +1584,10 @@ static __attribute__((aligned(64))) IrError ir_optimize_rewrite(IrOptimizeWork* 
                         {
                             sizes.extra_count += f->c[i];
                         }
+                        else if (ir_ternary_instruction(f, i))
+                        {
+                            sizes.extra_count += 1;
+                        }
                     }
                 }
             }
@@ -1791,6 +1795,12 @@ static __attribute__((aligned(64))) IrError ir_optimize_rewrite(IrOptimizeWork* 
                                     {
                                         candidate.extra[extra++] = f->extra[f->b[i] + entry];
                                     }
+                                }
+                                else if (ir_ternary_instruction(f, i))
+                                {
+                                    // A ternary intrinsic's third operand (#1840), at its new place in the extra array.
+                                    candidate.c[out] = ir_intrinsic_ternary_c(f->c[i], extra);
+                                    candidate.extra[extra++] = values[ir_intrinsic_third(f, i)];
                                 }
                             }
                             instructions += 1;
