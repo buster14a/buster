@@ -825,6 +825,62 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .options = { "-Wno-underlying-cv-qualifier-ignored" },
     },
     {
+        // An object left an array of unknown bound by its tentative definitions (#2238): clang's
+        // -Wtentative-definition-array once per object, at its last tentative definition, in the order of its first one,
+        // before the unit's unused warnings; none for a defined or completed one, an extern one, or under the pragma.
+        .name = "tentative array definitions",
+        .source = "int a[];\nint a[];\nint b[]; int b[3];\nstatic int c[];\nextern int d[];\nint e[], f[];\nstatic void u(void) {}\n"
+                  "typedef int A[];\nA x;\nint q[3]; int q[];\nint r[]; int r[2] = { 1 };\nint s[] = { 1, 2 }; int s[];\n"
+                  "int t[]; extern int t[];\nint *p[];\nconst int k[];\nint m[][2];\n"
+                  "void g(void) { extern int z[]; static int y[2]; (void)z; (void)y; }\n"
+                  "#pragma clang diagnostic ignored \"-Wtentative-definition-array\"\nint i[];\n",
+        .options = { "-Wall" },
+        .warnings = 11,
+        .compare_warning_text = true,
+    },
+    {
+        .name = "tentative array definitions in C23",
+        .source = "int a[];\nint a[];\nint b[]; int b[3];\nstatic int c[];\nextern int d[];\nint e[], f[];\nstatic void u(void) {}\n"
+                  "typedef int A[];\nA x;\nint q[3]; int q[];\nint r[]; int r[2] = { 1 };\nint s[] = { 1, 2 }; int s[];\n"
+                  "int t[]; extern int t[];\nint *p[];\nconst int k[];\nint m[][2];\n"
+                  "void g(void) { extern int z[]; static int y[2]; (void)z; (void)y; }\n"
+                  "#pragma clang diagnostic ignored \"-Wtentative-definition-array\"\nint i[];\n",
+        .options = { "-Wall" },
+        .warnings = 11,
+        .c23 = true,
+        .compare_warning_text = true,
+    },
+    {
+        .name = "tentative array definitions under -w",
+        .source = "int a[];\nint a[];\nint b[]; int b[3];\nstatic int c[];\nextern int d[];\nint e[], f[];\nstatic void u(void) {}\n"
+                  "typedef int A[];\nA x;\nint q[3]; int q[];\nint r[]; int r[2] = { 1 };\nint s[] = { 1, 2 }; int s[];\n"
+                  "int t[]; extern int t[];\nint *p[];\nconst int k[];\nint m[][2];\n"
+                  "void g(void) { extern int z[]; static int y[2]; (void)z; (void)y; }\n"
+                  "#pragma clang diagnostic ignored \"-Wtentative-definition-array\"\nint i[];\n",
+        .options = { "-w" },
+    },
+    {
+        .name = "tentative array definitions as errors",
+        .source = "int a[];\nint b[];\n",
+        .options = { "-Werror=tentative-definition-array" },
+        .errors = 2,
+    },
+    {
+        .name = "tentative array definitions disabled",
+        .source = "int a[];\n",
+        .options = { "-Wno-tentative-definition-array" },
+    },
+    {
+        // Clang's loop over the tentative definitions has no error test: a rejected unit warns too, a definition after
+        // the error included.
+        .name = "tentative array definitions in a rejected unit",
+        .source = "int a[];\nint z[];\nint a[];\nint f(void) { return undeclared; }\nint w[];\nint g(void) { return 1 / 0; }\n",
+        .options = { "-Wall" },
+        .warnings = 4,
+        .errors = 1,
+        .compare_warning_text = true,
+    },
+    {
         .name = "duplicate declaration specifier group disabled",
         .source = "const const int value;\n",
         .options = { "-Wno-duplicate-decl-specifier" },

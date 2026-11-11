@@ -156,6 +156,9 @@ enum
     // `#pragma pack(show)`'s value, and a pop with both a name and an alignment (#1849, clang's ActOnPragmaPack): warnings
     // of no option.
     CHECK_WARNING_ID_PRAGMA_PACK_NOTICE = 124,
+    // An object whose tentative definitions leave it an array of unknown bound at the unit's end (#2238, clang's
+    // ActOnEndOfTranslationUnit): -Wtentative-definition-array, on by default.
+    CHECK_WARNING_ID_TENTATIVE_ARRAY = 125,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -438,6 +441,9 @@ typedef enum CheckWarningEventKind
     // type ignored", or "'const' and 'volatile' qualifiers ...", at the base's first token that isn't a qualifier;
     // payload.data the qualifiers (BUSTER_TYPE_CONST, BUSTER_TYPE_VOLATILE).
     CHECK_WARNING_EVENT_UNDERLYING_CV_QUALIFIER,
+    // An object's acting tentative definition, an array of unknown bound at the unit's end (#2238): "tentative array
+    // definition assumed to have one element", at its name.
+    CHECK_WARNING_EVENT_TENTATIVE_ARRAY,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
 

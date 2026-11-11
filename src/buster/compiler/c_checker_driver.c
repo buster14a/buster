@@ -2525,6 +2525,53 @@ static bool check_driver_rejected_warnings(const Parser* parser, const CheckWarn
     return valid;
 }
 
+// The class of a reader's warning event for check_driver_unit_end_split: 0 published where it stands, 1 a tentative array's
+// (#2238), 2 an unused file-scope declaration's.
+static uint32_t check_driver_unit_end_class(const CheckWarningEvent* event)
+{
+    const bool unused = (event->kind == CHECK_WARNING_EVENT_UNUSED_VARIABLE || event->kind == CHECK_WARNING_EVENT_UNUSED_FUNCTION) &&
+                        event->completion_kind == CHECK_WARNING_COMPLETE_TU_END;
+    return event->kind == CHECK_WARNING_EVENT_TENTATIVE_ARRAY ? 1u : unused ? 2u : 0u;
+}
+
+// Splits a reader's warning events (`events`) into those published where they stand (`kept`) and the unit-end ones
+// (`late`), which clang's ActOnEndOfTranslationUnit gives after every other diagnostic (#2238): late[0] the tentative
+// arrays' warnings, late[1] the unused file-scope declarations', which it leaves out once any error has occurred, a
+// warning -Werror promotes included. Each keeps its order. `kept` may be `events`; a unit with unit-end events copies
+// them into `arena`. Whether there was room.
+static bool check_driver_unit_end_split(const CheckWarningEvents* events, Arena* arena, CheckWarningEvents* kept, CheckWarningEvents late[2])
+{
+    const CheckWarningEvents source = *events;
+    uint32_t counts[3] = { 0 };
+    for (uint32_t i = 0; i < source.count; i += 1)
+    {
+        counts[check_driver_unit_end_class(source.events + i)] += 1;
+    }
+    late[0] = (CheckWarningEvents){ .notes = source.notes, .note_count = source.note_count };
+    late[1] = late[0];
+    CheckWarningEvent* copy = counts[1] + counts[2] != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, CheckWarningEvent, source.count) : NULL;
+    const bool valid = counts[1] + counts[2] == 0 || copy != NULL;
+    if (copy != NULL)
+    {
+        uint32_t cursors[3] = { 0, counts[0], counts[0] + counts[1] };
+        for (uint32_t i = 0; i < source.count; i += 1)
+        {
+            const uint32_t class = check_driver_unit_end_class(source.events + i);
+            copy[cursors[class]++] = source.events[i];
+        }
+        *kept = (CheckWarningEvents){ .events = copy, .count = counts[0], .notes = source.notes, .note_count = source.note_count };
+        late[0].events = copy + counts[0];
+        late[0].count = counts[1];
+        late[1].events = copy + counts[0] + counts[1];
+        late[1].count = counts[2];
+    }
+    else
+    {
+        *kept = source;
+    }
+    return valid;
+}
+
 // Whether `token` is inside a function's body, between its braces: a definition's head is under its body's `}` in the
 // tree too, so the body's `{` decides. Only a recovered report's scope asks it (check_driver_error_scoped).
 static bool check_driver_in_body(const Parser* parser, uint32_t token)
@@ -9109,8 +9156,11 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     const bool located = input.report_count != 0 || stream.report_count != 0 || additional_count != 0;
                     const uint32_t* error_counts = located ? check_driver_error_counts(checking, &input, &stream, &types, additional, additional_count, scratch) : NULL;
                     CheckWarningEvents input_warnings;
+                    // The unit-end warnings publish after every other diagnostic (check_driver_unit_end_split).
+                    CheckWarningEvents unit_end_warnings[2] = { 0 };
                     const bool unit_end_ready = (!located || error_counts != NULL) &&
-                        check_driver_rejected_warnings(checking, &input.warning_events, unit_errors, error_counts, scratch, &input_warnings);
+                        check_driver_rejected_warnings(checking, &input.warning_events, unit_errors, error_counts, scratch, &input_warnings) &&
+                        check_driver_unit_end_split(&input_warnings, output_arena, &input_warnings, unit_end_warnings);
                     if (!unit_end_ready ||
                         !check_driver_initializer_warning_events(checking, pp, &input, &types, &initializer_warning_view, repairing ? &repair : NULL, quiet, scratch) ||
                         !check_driver_reports(checking, recovered, pp, publication_end, &input, &stream, &types, repairing ? &repair : NULL,
@@ -9136,26 +9186,9 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     {
                         check_driver_dump(&input.graph, &stream, &types, scratch);
                     }
-                    // A warning the publication promoted to an error rejects the unit, before its final warnings.
+                    // A warning the publication promoted to an error rejects the unit.
                     result = pp->errors != 0 ? 1 : result;
                     check_driver_x86_reports(checking, recovered, pp, &input, &stream, &types, quiet);
-                    const bool final_warnings = result == 0 && program_checked && !prefix_only && !repairing && !parse_failed &&
-                                                input.deferred_tokens == NULL && !pp->diagnostic_collection_failed && !pp->history_failed;
-                    if (final_warnings)
-                    {
-                        CheckInput undefined_input;
-                        CheckWarningBuffer undefined_warnings = { .arena = output_arena };
-                        const bool completed = check_initializers_warning_uses(&undefined_input, &input, &initializer_warning_view, output_arena) &&
-                                               check_warning_undefined_internal(&undefined_warnings, &undefined_input, checking, &types, &stream, scratch);
-                        const CheckWarningEvents undefined_view = check_warning_view(&undefined_warnings);
-                        if (!completed || !check_driver_warning_events_at(checking, pp, &input, &types, &undefined_view, NULL, pp->output.count, scratch))
-                        {
-                            fprintf(errors, "fatal error: final diagnostic capacity exhausted\n");
-                            driver_fatal = true;
-                            result = 1;
-                        }
-                        result = pp->errors != 0 ? 1 : result;
-                    }
                     if (program_checked)
                     {
                         const CheckWarningSeverity baseline = !return_warning ? CHECK_WARNING_IGNORE :
@@ -9243,6 +9276,39 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     // The folded shifts' stashed runtime warnings no common walk reported or dropped (a unit with errors runs
                     // none).
                     check_common_shift_finish(pp, &shift_warnings);
+                    // The unit's end, in clang's ActOnEndOfTranslationUnit's order, after every other diagnostic (#2238):
+                    // the internal functions used but never defined, unless an error has occurred (clang's
+                    // hasErrorOccurred, which counts a warning -Werror promotes); the tentative arrays' warnings; then, again
+                    // unless an error has occurred, a promoted one among those included, the unused file-scope declarations'.
+                    const bool final_warnings = pp->errors == 0 && !pp->fatal && program_checked && !prefix_only && !repairing && !parse_failed &&
+                                                input.deferred_tokens == NULL && !pp->diagnostic_collection_failed && !pp->history_failed;
+                    if (final_warnings)
+                    {
+                        CheckInput undefined_input;
+                        CheckWarningBuffer undefined_warnings = { .arena = output_arena };
+                        const bool completed = check_initializers_warning_uses(&undefined_input, &input, &initializer_warning_view, output_arena) &&
+                                               check_warning_undefined_internal(&undefined_warnings, &undefined_input, checking, &types, &stream, scratch);
+                        const CheckWarningEvents undefined_view = check_warning_view(&undefined_warnings);
+                        if (!completed || !check_driver_warning_events_at(checking, pp, &input, &types, &undefined_view, NULL, pp->output.count, scratch))
+                        {
+                            fprintf(errors, "fatal error: final diagnostic capacity exhausted\n");
+                            driver_fatal = true;
+                            result = 1;
+                        }
+                        result = pp->errors != 0 ? 1 : result;
+                    }
+                    if (!pp->fatal && unit_end_warnings[0].count != 0 &&
+                        !check_driver_warning_events_at(checking, pp, &input, &types, unit_end_warnings, repairing ? &repair : NULL, publication_end, scratch))
+                    {
+                        fprintf(errors, "fatal error: checker diagnostic capacity exhausted\n");
+                        driver_fatal = true;
+                    }
+                    if (!pp->fatal && pp->errors == 0 && unit_end_warnings[1].count != 0 &&
+                        !check_driver_warning_events_at(checking, pp, &input, &types, unit_end_warnings + 1, repairing ? &repair : NULL, publication_end, scratch))
+                    {
+                        fprintf(errors, "fatal error: checker diagnostic capacity exhausted\n");
+                        driver_fatal = true;
+                    }
                     result = pp->errors != 0 ? 1 : result;
                     check_clock_mark(stage_clock, CHECK_STAGE_CHECK_PROGRAM);
                     // The backend reads the program, not the preprocessor's output: only its diagnostics do, which ask for it

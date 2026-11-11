@@ -14420,6 +14420,82 @@ static void check_input_complete_uses(CheckInputReader* reader)
     }
 }
 
+// An object whose acting definition at the unit's end is a tentative one of an array of unknown bound (#2238, clang's
+// ActOnEndOfTranslationUnit, whose loop over the tentative definitions has no error test): "tentative array definition
+// assumed to have one element", at that definition, its last tentative one, unless one of its declarations defines it.
+// Clang's loop visits each object once, at its first tentative definition, which orders the warnings; they come before
+// the unit's unused ones. The first scan finds whether any tentative definition is of such an array, which most units
+// have none of; only then the second keeps each object's last definition, tentative or not, the third warns.
+static void check_input_tentative_arrays(CheckInputReader* reader, uint32_t limit)
+{
+    const Parser* parser = reader->parser;
+    const uint8_t* bits = reader->output->declaration_bits;
+    const bool scalar = BUSTER_SCALAR_PATH(parser->options.scalar);
+    bool candidate = false;
+    for (uint32_t first = 0; !candidate && first < limit; first += 64)
+    {
+        uint64_t selected = scalar ? check_input_scan_all(first, limit) : check_input_scan_bit(bits, first, limit, BUSTER_CHECK_BITS_TENTATIVE);
+        for (; selected != 0; selected &= selected - 1)
+        {
+            const uint32_t token = first + (uint32_t)__builtin_ctzll(selected);
+            candidate |= check_input_bit(bits, token, BUSTER_CHECK_BITS_TENTATIVE) &&
+                         type_kind(reader->types, reader->declared_types[token]) == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY;
+        }
+    }
+    // Per object (its first declaration's token), its last definition, the top bit set once one defines it or once the
+    // third scan has decided it. Only the entries of objects with a definition are written and read.
+    uint32_t* latest = candidate ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, limit) : NULL;
+    reader->output->resource |= candidate && latest == NULL;
+    const uint32_t defined_flag = 0x80000000u;
+    for (uint32_t first = 0; latest != NULL && first < limit; first += 64)
+    {
+        uint64_t selected = scalar ? check_input_scan_all(first, limit) : check_input_scan_bit(bits, first, limit, BUSTER_CHECK_BITS_TENTATIVE | BUSTER_CHECK_BITS_DEFINED);
+        for (; selected != 0; selected &= selected - 1)
+        {
+            const uint32_t token = first + (uint32_t)__builtin_ctzll(selected);
+            const bool tentative = check_input_bit(bits, token, BUSTER_CHECK_BITS_TENTATIVE);
+            const bool defined = check_input_bit(bits, token, BUSTER_CHECK_BITS_DEFINED);
+            const uint32_t object = reader->objects[token];
+            if ((tentative || defined) && reader->declaration_kinds[token] == C_BINDING_OBJECT && object != 0 && object - 1 < limit)
+            {
+                latest[object - 1] = token | (defined ? defined_flag : 0);
+            }
+        }
+    }
+    for (uint32_t first = 0; latest != NULL && first < limit; first += 64)
+    {
+        uint64_t selected = scalar ? check_input_scan_all(first, limit) : check_input_scan_bit(bits, first, limit, BUSTER_CHECK_BITS_TENTATIVE);
+        for (; selected != 0; selected &= selected - 1)
+        {
+            const uint32_t token = first + (uint32_t)__builtin_ctzll(selected);
+            const uint32_t object = reader->objects[token];
+            if (check_input_bit(bits, token, BUSTER_CHECK_BITS_TENTATIVE) && reader->declaration_kinds[token] == C_BINDING_OBJECT && object != 0 && object - 1 < limit)
+            {
+                // The object's first tentative definition decides; its later ones find the flag set.
+                const uint32_t last = latest[object - 1];
+                const uint32_t acting = last & ~defined_flag;
+                latest[object - 1] = last | defined_flag;
+                const bool invalid = reader->output->invalid_declarations != NULL && reader->output->invalid_declarations[acting] != 0;
+                if ((last & defined_flag) == 0 && reader->definition_origins[acting] == 0 && !invalid &&
+                    type_kind(reader->types, reader->declared_types[acting]) == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY)
+                {
+                    const CheckWarningEvent event =
+                    {
+                        .id = CHECK_WARNING_ID_TENTATIVE_ARRAY,
+                        .kind = CHECK_WARNING_EVENT_TENTATIVE_ARRAY,
+                        .token = acting,
+                        .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                        .completion_kind = CHECK_WARNING_COMPLETE_TU_END,
+                        .completion = BUSTER_CHECK_NONE,
+                        .payload = { .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+                    };
+                    check_input_warning_event(reader, &event, NULL, 0);
+                }
+            }
+        }
+    }
+}
+
 #include "c_check_binding.c"
 #include "c_check_packed_input.c"
 #include "c_check_alloc_token_input.c"
@@ -15727,6 +15803,10 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
             // Selected/private views still retain a mask and cannot establish these independent-declaration cuts.
             const bool resolved = complete_translation_unit && input->report_count == 0 && reader.position == count && reader.expression_limit == count && input->deferred_tokens == NULL;
             input->walk_end = reader.position;
+            if (complete_translation_unit)
+            {
+                check_input_tentative_arrays(&reader, reader.position < count ? reader.position : count);
+            }
             check_input_bindings(&reader, binding_mode);
             check_typo_finish(&reader);
             if (reader.fallthrough_count != 0 && !input->resource)
