@@ -1,0 +1,15 @@
+decision	rerun
+jobs	41	stopped	13	setup	5	keep	0
+job	setup	setup-step	cancelled	Install official Clang 23.1.4 and test tools	Tests on Ubuntu 26.04 (x86-64, none, O3) / Build the compiler once for the row's shards
+job	setup	setup-step	failure	Install official Clang 23.1.4 and test tools	Tests on Ubuntu 26.04 (vector, none, O3) / Vector draw 1, candidate 3 (Clang 23, none, O3)
+job	setup	setup-step	cancelled	Install official Clang 23.1.4 and test tools	Tests on Ubuntu 26.04 (vector, none, O3) / Vector draw 1, candidate 1 (Clang 23, none, O3)
+job	setup	setup-step	cancelled	Install official Clang 23.1.4 and test tools	Tests on Ubuntu 26.04 (vector, none, O3) / Vector draw 1, candidate 4 (Clang 23, none, O3)
+job	setup	setup-step	cancelled	Install official Clang 23.1.4 and test tools	Tests on Ubuntu 26.04 (vector, none, O3) / Vector draw 1, candidate 2 (Clang 23, none, O3)
+job	follows-setup	row-setup	failure	Require one passing qualified execution of each vector item	Tests on Ubuntu 26.04 (vector, none, O3) / Vector row verdict (Clang 23, none, O3)
+job	cancelled	not-started	cancelled	-	Tests on Ubuntu 26.04 (x86-64, none, O3) / Vector draw 2, candidate ${{ matrix.candidate }} (Clang 23, ${{ inputs.sanitizer }}, O${{ inputs.optimization }})
+job	cancelled	not-started	cancelled	-	Tests on Ubuntu 26.04 (x86-64, none, O3) / Vector draw 1, candidate ${{ matrix.candidate }} (Clang 23, ${{ inputs.sanitizer }}, O${{ inputs.optimization }})
+job	cancelled	not-started	cancelled	-	Tests on Ubuntu 26.04 (x86-64, none, O3) / Vector draw 4, candidate ${{ matrix.candidate }} (Clang 23, ${{ inputs.sanitizer }}, O${{ inputs.optimization }})
+job	cancelled	not-started	cancelled	-	Tests on Ubuntu 26.04 (x86-64, none, O3) / Tests on Ubuntu 26.04 (Clang 23, ${{ inputs.host_arch }}, ${{ inputs.sanitizer }}, O${{ inputs.optimization }}, shard ${{ matrix.shard }} of ${{ inputs.shards }})
+job	cancelled	not-started	cancelled	-	Tests on Ubuntu 26.04 (x86-64, none, O3) / Vector draw 3, candidate ${{ matrix.candidate }} (Clang 23, ${{ inputs.sanitizer }}, O${{ inputs.optimization }})
+job	follows-setup	run-setup	failure	Require hosted and native correctness before successful qualification	Build and execute on Ryzen 7 9700X
+job	cancelled	not-started	cancelled	-	Tests on Ubuntu 26.04 (x86-64, none, O3) / Vector row verdict (Clang 23, ${{ inputs.sanitizer }}, O${{ inputs.optimization }})

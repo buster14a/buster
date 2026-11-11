@@ -688,6 +688,11 @@ at the target's forms, by both of the checker's paths:
   writes a scratch slot, the address chosen arithmetically (`other ^ ((real ^ other) & -bit)`), so that no address a
   clear bit names is touched. A scatter's index counts the index's elements' bytes, as clang's code's GEP does (and
   the AVX-512 row's).
+  The bit builtins of integer vectors (popcount, bitreverse, clzg, ctzg, fshl and fshr) without AVX-512F and AVX-512VL,
+  or where their rows' instructions are missing (GFNI's, BITALG's, VPOPCNTDQ's, CD's, VBMI2's, XOP's), are computed
+  element by element (`check_lower_transport_bit_builtin`, #1834): each element zero-extended into an unsigned int (or
+  unsigned long long), its value by SWAR (bit swaps, smears and population counts), then truncated, which is clang's
+  value; funnel shifts by `(a << s) | ((b >> 1) >> (w - 1 - s))` and its mirror.
   `__builtin_convertvector`'s integer extensions without SSE4.1 and truncations without AVX-512 are sequences too
   (`check_vector_baseline_resize`, #1834): an extension unpacks the low elements with zeros, or with themselves and
   shifts them right arithmetically (a qword's high dword is `psrad` by 31 of a copy); a truncation takes a qword's low
@@ -706,6 +711,9 @@ at the target's forms, by both of the checker's paths:
 - A nontemporal load without SSE4.1 is an ordinary one, as clang's code's is, and a nontemporal load or store wider
   than the target's moves (16 bytes without AVX, a load's 32 without AVX2: `check_vector_nontemporal_width`) moves a
   piece at a time, through temporaries of its address and its value (#1834).
+- A `__builtin_convertvector` between integers and floats or doubles that no row of SSE's or AVX's takes (of unsigned
+  integers, and of 64-bit ones without AVX-512DQ) converts element by element, as C converts each scalar
+  (`check_lower_transport_convertvector`, #1834): clang's sequences compute the same values.
 - A scalar's fused multiply-add without FMA is the C library's `fmaf` or `fma`, its `ldexp` `ldexpf` or
   `ldexp` (of the exponent's low 32 bits), and its roundings (ceil, floor, trunc, rint, nearbyint, roundeven and round)
   without SSE4.1 its `ceilf` ... `round`, as clang's code calls them; with SSE4.1, `roundss` and `roundsd` (round's of

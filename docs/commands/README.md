@@ -33,6 +33,7 @@ table are entry points, not an exhaustive list of every subtest or flag.
 | agent memory in cloud sessions | `.claude/hooks/llm-memory.sh` | [llm-memory](llm-memory.md) |
 | hooks of sessions started beside the checkout | `.claude/hooks/parent-folder.sh` | [llm-memory](llm-memory.md#sessions-that-start-beside-the-checkout) |
 | `correctness.tests, costs / CI selection` | `tools/ci/correctness.tests`, `tools/ci/costs.c` | [ci](ci.md) |
+| `rerun / setup failures re-run once` | `tools/ci/rerun.c`, `tools/ci/rerun.sh` | [ci](ci.md#setup-failures-re-run-once) |
 | `measure-compile, --time-stages` | `c_check_clock.c` | [compile-time](compile-time.md) |
 | `test-c-testsuite, test-sqlite, test-sqlite-testfixture` | `c_testsuite.c`, `sqlite_test.c`, `sqlite_testfixture.c` | [c-testsuite](c-testsuite.md) |
 | `dco status, audit, compose` | `tools/dco/dco.c` | [dco](dco.md) |
@@ -105,6 +106,7 @@ The original section titles are retained in their owning guides.
 - [C driver build-system integration](../cc-driver.md).
 - [Sharing the 9700X](ci.md#sharing-the-9700x).
 - [Shard costs](ci.md#shard-costs).
+- [Setup failures re-run once](ci.md#setup-failures-re-run-once).
 - [Reuse and the nightly backlog](ci.md#reuse-and-the-nightly-backlog).
 - [Call graph check](call-graph.md#call-graph-check).
 - [Lexer tests](lexer.md#lexer-tests).
