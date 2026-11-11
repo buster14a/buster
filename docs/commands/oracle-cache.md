@@ -483,7 +483,7 @@ and the server's clang libraries the release `clang -dumpversion` gives, which
 the test finds once as it sets the server up, before it forks any part
 (`oracle_serve`), and each process checks against its server's once
 (`oracle_serve_ready`): a part no longer runs `clang -dumpversion` of its own,
-which forked parts that served nothing in their parent each did (31 in
+which forked parts that served nothing in their parent each did (32 in
 `test-preprocessor --clang --part 3/4`). `OracleServer` is the client,
 which `test-checker-driver --clang-server` shares: a server a process starts as
 it first needs it, on a socket pair (`MSG_NOSIGNAL`: a server that ended fails
