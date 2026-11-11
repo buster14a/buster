@@ -1320,7 +1320,14 @@ the scalar results' destination a general register:
   taken for BMI instructions.
 
 The 14 forms that had no Zen 5 row (`vpextrb` to `vpextrq`, `vpinsrb` to
-`vpinsrq`, and the three movemasks at 16 and 32 bytes) ZEN5_SENTENCE
+`vpinsrq`, and the three movemasks at 16 and 32 bytes) were measured on the
+9700X ([the record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/ir-lane-moves-1840-2026-11-11)):
+
+- **`vpextrb` to `vpextrq`:** 6.5 cycles of latency (derived across the
+  register files), 2 per cycle, two macro-ops.
+- **`vpinsrb` to `vpinsrq`:** 4.5 cycles, 1 per cycle, two macro-ops.
+- **Movemasks:** 4.5 cycles of an xmm register and 6.5 of a ymm one, 2 per
+  cycle, one macro-op.
 
 Machine rows at `--tier1 -march=znver5`, both compilers (Debug builds)
 compiling this change's sources, against the masked loads and stores
