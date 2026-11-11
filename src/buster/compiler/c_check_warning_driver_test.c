@@ -881,6 +881,33 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .compare_warning_text = true,
     },
     {
+        // The unit's end in clang's order (#2238): -Wundefined-internal, the tentative arrays, the unused declarations;
+        // under -Werror the first promoted one leaves out the unused ones.
+        .name = "unit end order",
+        .source = "static int c;\nstatic void h(void);\nvoid k(void) { h(); }\nint a[];\nstatic void u(void) {}\n",
+        .options = { "-Wall" },
+        .warnings = 4,
+        .notes = 1,
+        .compare_warning_text = true,
+    },
+    {
+        // A promoted graph warning, published after the reader's, is an error before -Wundefined-internal (#2238).
+        .name = "unit end after a promoted graph warning",
+        .source = "static void h(void);\nvoid k(void) { h(); (void)(1 / 0); }\nstatic int c;\n",
+        .options = { "-Wall" },
+        .warnings = 3,
+        .notes = 1,
+        .compare_warning_text = true,
+    },
+    {
+        // A block's promoted unused variable is an error before the unit's end (#2238).
+        .name = "unit end after a promoted scope warning",
+        .source = "void f(void) { int x; }\nstatic int c;\nstatic void g(void) {}\n",
+        .options = { "-Wall" },
+        .warnings = 3,
+        .compare_warning_text = true,
+    },
+    {
         .name = "duplicate declaration specifier group disabled",
         .source = "const const int value;\n",
         .options = { "-Wno-duplicate-decl-specifier" },
