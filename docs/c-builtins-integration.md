@@ -2355,11 +2355,20 @@ record dump, as `BuiltinDumpStruct` checks it.
   union, a long double, a 128-bit integer, a half-precision value or a
   vector, or returns a complex value, passes and returns them as a call's do
   (`check_lower_dump_argument`, a result in an object of the call's, #1842).
-- **Refusals.** A printer that takes a transparent union or an `_Atomic`
-  aggregate, a complex rest argument (the checker's "expression is not yet
-  supported"), rest arguments with a statement expression or more than 4096
-  nodes, and records of more than 1 GiB of strings or 64 levels are refused
-  by name. A record's lines and strings grow as they need (the strings are
+- **The rest's conversions** are a call's (`check_action_call`'s, #1842): a
+  complex value converts to a complex or a real parameter and passes through
+  the variadic part as itself; an `_Atomic` aggregate's parameter takes the
+  argument's value, a plain or an `_Atomic` one, in an object of the atomic
+  type's padded bytes; a transparent union's parameter takes a member's value
+  (or the union's), passed as its first member is
+  (`check_lower_transparent_value`). Each line's call evaluates the rest again,
+  so an `_Atomic` object's read among them takes an atomic plan a line, which
+  the lowering's room counts (`CheckLowerInitializers.extra_atomics`, and
+  os_log's items alike); before, a dump of an `_Atomic` argument wrote past the
+  plans' table, over the function's long double constants.
+- **Refusals.** An array or a function for a transparent union's parameter,
+  rest arguments with a statement expression or more than 4096 nodes, and
+  records of more than 1 GiB of strings or 64 levels are refused by name. A record's lines and strings grow as they need (the strings are
   found again through a hash table of their offsets), so a record of any
   number of fields is dumped (#1842).
 
