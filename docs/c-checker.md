@@ -7452,8 +7452,17 @@ the body is given too. A name that a block's lists declare
 twice is ambiguous where it is defined or used, undeclared at both of its
 declarations as the block ends, and undeclared at a use as the function ends:
 clang's lookup makes a label of the function's for it, which nothing defines.
-The driver gives them in clang's order (the notes naming the candidates
-aren't given). A unit without a list builds none of it; the vector path's mask
+Each ambiguous reference makes its own (#1844, `check_input_label_lookup`), a
+definition's defined, and those labels are of the function's own scope, which
+is the body's: a body's list's names and they are one scope's candidates, so a
+reference of the function's own, or one where only the body's list declares the
+name, finds two and more after an ambiguity and is ambiguous too, while one that
+finds a single made label takes it (a later goto reaches an ambiguous
+definition's; a later definition defines an ambiguous goto's). The driver gives
+them in clang's order, each ambiguity with clang's notes "candidate found by
+name lookup is 'X'" at its candidates in its lookup's order: the list's entries,
+the latest first, then the function's labels in the order they were made
+(`check_driver_label_candidates`). A unit without a list builds none of it; the vector path's mask
 takes `__label__`'s kind among the first walk's events, which the scalar path's
 full walk meets anyway.
 

@@ -3,16 +3,17 @@
 //
 // #147: GNU C's local labels and __auto_type against clang, through the driver: each fixture's first error at clang's
 // line and column, and with clang's text where the driver's message is clang's; and where a unit has several label
-// errors, every one, in clang's order: an ambiguous name's where it is met, a list's undeclared labels as its block ends
-// and the function's (an ambiguous name's use's among them) as the function does.
+// errors, every one, in clang's order, with their notes: an ambiguous name's where it is met, its candidates in clang's
+// lookup's order, a list's undeclared labels as its block ends and the function's (each ambiguous reference's label among
+// them) as the function does.
 #ifndef BUSTER_C_CHECKER_DRIVER_GNU_TEST_INCLUDED
 #define BUSTER_C_CHECKER_DRIVER_GNU_TEST_INCLUDED
 
-// The error lines of `text` (`file:line:column: error: message`), in their order, into `errors` with a newline after
-// each. Returns false for more lines than it keeps or than `errors` has room for.
+// The error and note lines of `text` (`file:line:column: error: message`), in their order, into `errors` with a newline
+// after each. Returns false for more lines than it keeps or than `errors` has room for.
 static bool check_test_driver_gnu_errors(char* text, char* errors, size_t capacity)
 {
-    char* lines[32];
+    char* lines[64];
     uint32_t count = 0;
     bool valid = text != NULL && capacity != 0;
     for (char* at = text; valid && at != NULL && *at != 0;)
@@ -22,7 +23,7 @@ static bool check_test_driver_gnu_errors(char* text, char* errors, size_t capaci
         {
             *end = 0;
         }
-        if (strstr(at, ": error: ") != NULL)
+        if (strstr(at, ": error: ") != NULL || strstr(at, ": note: ") != NULL)
         {
             valid = count < BUSTER_ARRAY_LENGTH(lines);
             lines[valid ? count : 0] = at;
@@ -128,16 +129,33 @@ static void check_test_driver_gnu_scopes(CheckTest* test, const char* clang, con
         { "__auto_type restrict's deduced types", "void f(int *p) {\n    __auto_type restrict q = p;\n    struct S { int x; } s = q;\n"
           "    const __auto_type restrict r = p, t = p;\n    struct S u = t;\n    __auto_type * const restrict v = p;\n    struct S w = v;\n}\n" },
         { "a function's missing labels, once each, as it ends", "void f(void) {\n    goto x;\n    goto y;\n    int u = z;\n    goto x;\n    void *p = &&y;\n}\n" },
+        // Clang's lookup makes a label of the function's own scope at each ambiguous reference (#1844): a body's list's
+        // entries and those labels are one scope's candidates, in that order (the later made after the earlier); a nested
+        // list's ambiguity makes them too, so that a reference of the function's own finds two and more; a definition's is
+        // defined, which a later goto finds alone; a goto's is defined by a later definition that finds it alone, and is
+        // undeclared otherwise, each one, as the function ends.
+        { "a body's list declares a name twice: its candidates and the labels its references make",
+          "void f(int a) {\n    __label__ y, y;\n    y:;\n    if (a) goto y;\n    void *p = &&y;\n    (void)p;\n}\n" },
+        { "a nested list's ambiguity makes the function's labels",
+          "void f(void) {\n    {\n        __label__ w, w;\n        goto w;\n        goto w;\n    }\n    goto w;\n}\n" },
+        { "a body's list and the label a nested ambiguity makes",
+          "void f(void) {\n    __label__ x;\n    {\n        __label__ x, x;\n        goto x;\n    }\n    goto x;\nx:;\n}\n" },
+        { "a function's label before a nested ambiguity's",
+          "void f(void) {\n    goto q;\n    {\n        __label__ q, q;\n        goto q;\n    }\n    goto q;\n    void *p = &&q;\n    (void)p;\n}\n" },
+        { "an ambiguous definition's label found by a later goto", "void f(void) {\n    {\n        __label__ s, s;\n    s:;\n    }\n    goto s;\n}\n" },
+        { "an ambiguous goto's label defined later", "void f(void) {\n    {\n        __label__ t, t;\n        goto t;\n    }\nt:;\n}\n" },
+        { "an ambiguous definition's label redefined", "void f(void) {\n    {\n        __label__ s, s;\n    s:;\n    }\ns:;\n}\n" },
+        { "a statement expression's ambiguity", "void f(void) {\n    int v = ({ __label__ r, r; goto r; 1; });\n    goto r;\n    (void)v;\n}\n" },
     };
     for (uint32_t i = 0; executable != NULL && i < BUSTER_ARRAY_LENGTH(every); i += 1)
     {
         char source[192];
-        char description[1024];
+        char description[9216];
         snprintf(source, sizeof(source), "%s/gnu-every-%u.c", directory, i);
         const bool written = parse_test_write(source, every[i].source, strlen(every[i].source));
         char* const clang_arguments[] = { (char*)clang, "-fsyntax-only", "-std=gnu17", "-w", source, NULL };
         char* text = NULL;
-        char expected[512];
+        char expected[4096];
         const bool oracle = written && check_test_driver_spawn(clang_arguments, &text) == 1 && check_test_driver_gnu_errors(text, expected, sizeof(expected));
         free(text);
         check_test_expect(test, oracle && expected[0] != 0, every[i].name);
@@ -145,7 +163,7 @@ static void check_test_driver_gnu_scopes(CheckTest* test, const char* clang, con
         {
             char* const vector_arguments[] = { (char*)executable, "-fsyntax-only", "-std=gnu17", "-w", source, NULL };
             char* const scalar_arguments[] = { (char*)executable, "--scalar", "-fsyntax-only", "-std=gnu17", "-w", source, NULL };
-            char errors[512];
+            char errors[4096];
             const bool ran = check_test_driver_spawn(scalar != 0 ? scalar_arguments : vector_arguments, &text) == 1 &&
                              check_test_driver_gnu_errors(text, errors, sizeof(errors));
             free(text);
