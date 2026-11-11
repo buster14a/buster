@@ -275,7 +275,8 @@ static void asm_test_groups(AsmTest* test, const char* directory, bool cross_che
     }
     asm_test_check(test, array_atoms == 2, "arrays of constructors and destructors are their classes' atoms", vector_arrays.error);
     // Section types by name and by `@type`, as GNU as gives them: notes, and arrays of any name with their entries' size.
-    static const char typed[] = ".section .note.x,\"a\",@note\n.long 1\n.section .init_array.00100,\"aw\"\n.quad 0\n"
+    // (With a symbol: the hosted runners' GNU as writes no symbol table for an object without one, and the comparison wants one.)
+    static const char typed[] = ".section .note.x,\"a\",@note\n.globl buster_typed\nbuster_typed:\n.long 1\n.section .init_array.00100,\"aw\"\n.quad 0\n"
                                 ".section .fini_array,\"aw\",@fini_array\n.quad 0\n.section .note.y\n.byte 2\n";
     asm_test_pair(test, (String8){.pointer = (char*)typed, .length = sizeof(typed) - 1}, 1, X86_ARCH_BASELINE);
     if (cross_check)
