@@ -771,6 +771,27 @@ static CheckStringSpan check_literal_string_span(const CheckStringPart* part)
     return result;
 }
 
+// The length of a string literal's encoding prefix (L, u, U or u8; a raw one's R is no part of it), 0 for none: clang reads
+// an unevaluated string literal past it, with -Winvalid-unevaluated-string's warning at it (#1447), as an ordinary one.
+static __attribute__((unused)) uint32_t check_literal_encoding_prefix(const uint8_t* bytes, uint32_t length)
+{
+    const bool prefixed = length >= 2 && (bytes[0] == 'L' || bytes[0] == 'u' || bytes[0] == 'U');
+    const bool utf8 = prefixed && bytes[0] == 'u' && bytes[1] == '8';
+    return prefixed ? (utf8 ? 2u : 1u) : 0u;
+}
+
+// `count` string literal parts read as an unevaluated string literal's: each past its encoding prefix
+// (check_literal_encoding_prefix).
+static __attribute__((unused)) void check_literal_unevaluated_parts(CheckStringPart* parts, uint32_t count)
+{
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        const uint32_t prefix = parts[i].bytes != NULL ? check_literal_encoding_prefix(parts[i].bytes, parts[i].length) : 0;
+        parts[i].bytes += prefix;
+        parts[i].length -= prefix;
+    }
+}
+
 // Always inlined (#880), as profile-guided builds do; hot caller: check_literal_string_part, once per unit of a string.
 static inline __attribute__((always_inline)) bool check_literal_string_unit(uint32_t value, bool numeric, CheckStringEncoding encoding, uint8_t* output, uint64_t* length)
 {

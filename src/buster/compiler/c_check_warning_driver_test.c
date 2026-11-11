@@ -695,6 +695,14 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .warnings = 2,
     },
     {
+        .name = "duplicate specifiers in operand type names",
+        .source = "typeof(unsigned unsigned int) q;\nint r = sizeof(typeof(const const int));\nenum E : unsigned unsigned short { A };\n"
+                  "_Atomic(signed signed char) s;\ntypeof(_Atomic _Atomic int) t;\n"
+                  "int f(void) { return sizeof(short short) + (int)(typeof(volatile volatile long))1; }\n",
+        .warnings = 7,
+        .compare_warning_text = true,
+    },
+    {
         .name = "duplicate declaration specifier group disabled",
         .source = "const const int value;\n",
         .options = { "-Wno-duplicate-decl-specifier" },
@@ -1649,6 +1657,41 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .options = { "-Wsign-compare" },
     },
     {
+        // A statement expression whose value is unevaluated has no node evaluated either (check_common_region_evaluation):
+        // -Wuninitialized reads none of its reads and writes. `sizeof ({ ... })`'s `(` is the statement expression's own.
+        .name = "uninitialized variables in unevaluated statement expressions",
+        .source = "int f1(void) { int u; (void)sizeof(({ u = 1; })); return u; }\n"
+                  "int f2(void) { int u; (void)sizeof(({ u; })); u = 2; return u; }\n"
+                  "int f3(int n) { int u; (void)(n ? sizeof(({ u; })) : 0); return 0; }\n"
+                  "int f4(void) { int u; (void)({ u = 1; }); return u; }\n"
+                  "int f5(void) { int u; return (int)sizeof ({ u; }); }\n"
+                  "int f6(void) { int u; return (int)sizeof ({ int v = u; v; }) + (int)__alignof__(({ u; })); }\n"
+                  "int f8(void) { int u; return _Generic(1, long: ({ u; }), default: 0); }\n"
+                  "int f9(int n) { return sizeof ({ n; }) + sizeof({ (char)n; }) + sizeof ({ int k = n; k; }) * 2; }\n"
+                  "int f10(int n) { int u; return (int)sizeof(({ ({ u; }); })) + (int)sizeof(({ (void)sizeof(({ u = 1; })); 1; })) + u; }\n",
+        .options = { "-Wall", "-Wno-unevaluated-expression" },
+        .warnings = 2,
+        .notes = 2,
+    },
+    {
+        // A statement expression whose value is unevaluated has no node evaluated either (check_common_region_evaluation):
+        // -Wuninitialized reads none of its reads and writes. `sizeof ({ ... })`'s `(` is the statement expression's own.
+        .name = "uninitialized variables in unevaluated statement expressions under -Wextra in C23",
+        .source = "int f1(void) { int u; (void)sizeof(({ u = 1; })); return u; }\n"
+                  "int f2(void) { int u; (void)sizeof(({ u; })); u = 2; return u; }\n"
+                  "int f3(int n) { int u; (void)(n ? sizeof(({ u; })) : 0); return 0; }\n"
+                  "int f4(void) { int u; (void)({ u = 1; }); return u; }\n"
+                  "int f5(void) { int u; return (int)sizeof ({ u; }); }\n"
+                  "int f6(void) { int u; return (int)sizeof ({ int v = u; v; }) + (int)__alignof__(({ u; })); }\n"
+                  "int f8(void) { int u; return _Generic(1, long: ({ u; }), default: 0); }\n"
+                  "int f9(int n) { return sizeof ({ n; }) + sizeof({ (char)n; }) + sizeof ({ int k = n; k; }) * 2; }\n"
+                  "int f10(int n) { int u; return (int)sizeof(({ ({ u; }); })) + (int)sizeof(({ (void)sizeof(({ u = 1; })); 1; })) + u; }\n",
+        .options = { "-Wall", "-Wextra", "-Wno-unevaluated-expression" },
+        .warnings = 3,
+        .notes = 2,
+        .c23 = true,
+    },
+    {
         .name = "typeof statement expressions are unevaluated",
         .source = "int *q;\nvoid f(int x) {\n    __typeof__(({ *q; x == 1; x = x; x / 0; 1; })) t = 0;\n"
                   "    typeof(({ (0, x); (void *)q; 1; })) v = 0;\n    (void)t;\n    (void)v;\n}\n",
@@ -1754,6 +1797,36 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .warnings = 8,
     },
     {
+        // Files that line markers enter (#1954): each diagnostic in one prints clang's "In file included from" chain of the
+        // markers' lines when it differs from the last one's, nested, after a flag 2 returns, and for a system header's
+        // (silent here) and a user file's entered from the same presumed line; the main file's, the preprocessor's error
+        // after them, none.
+        .name = "include stacks of files line markers enter",
+        .source = "# 1 \"lm_main.c\"\n# 1 \"outer.h\" 1\n# 1 \"inner.h\" 1\nint f(void) { return 1 << 40; }\n"
+                  "int f2(void) { return 1 << 41; }\n# 2 \"outer.h\" 2\nint g(void) { return 1 << 33; }\n"
+                  "# 3 \"lm_main.c\" 2\nint h(void) { return 1 << 34; }\n# 1 \"again.h\" 1 3 4\nint k(void) { return 1 << 35; }\n"
+                  "# 4 \"lm_main.c\" 2\n# 1 \"user.h\" 1\nint m(void) { return 1 << 36; }\n# 5 \"lm_main.c\" 2\n#error done\n",
+        .warnings = 5,
+        .errors = 1,
+    },
+    {
+        // Clang takes the overflow builtins of _BitInts past 128 bits (#1447) but mul_overflow's of a signed one, as an
+        // operand or the destination, at that argument, the first of them alone; an unsigned one's product, and a signed
+        // one's sum and difference, are taken.
+        .name = "mul_overflow of a signed _BitInt past 128 bits",
+        .source = "typedef _BitInt(200) S; typedef unsigned _BitInt(200) U;\n"
+                  "int f1(S a, S b, S *r) { return __builtin_mul_overflow(a, b, r); }\n"
+                  "int f2(int a, int b, S *r) { return __builtin_mul_overflow(a, b, r); }\n"
+                  "int f3(U a, U b, U *r) { return __builtin_mul_overflow(a, b, r); }\n"
+                  "int f4(U a, S b, U *r) { return __builtin_mul_overflow(a, b, r); }\n"
+                  "int f5(U a, int b, U *r) { return __builtin_mul_overflow(a, b, r); }\n"
+                  "int f6(_BitInt(129) a, int b, int *r) { return __builtin_mul_overflow(a, (b), r); }\n"
+                  "int f7(__int128 a, __int128 b, _BitInt(256) *r) { return __builtin_mul_overflow(a, b, r); }\n"
+                  "int f8(S a, S b, S *r) { return __builtin_add_overflow(a, b, r) + __builtin_sub_overflow(a, b, r); }\n"
+                  "int f9(unsigned _BitInt(129) a, U *r) { return __builtin_mul_overflow(a, 3, r); }\n",
+        .errors = 5,
+    },
+    {
         // A tag a prototype's list declares first (#1447, clang's ActOnTag): -Wvisibility at its name (an unnamed enum's
         // keyword), in a definition's list, a nested prototype's (not one the outer list declares already), a member's, a
         // block's and a bound's, a definition shadowing a file-scope tag; a list's redefinition, with its note, and an
@@ -1795,6 +1868,58 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .warnings = 3,
         .notes = 1,
     },
+    {
+        // C23 records redefined with other attributes (#1447): clang's -Wodr is an error by default; ignored, the
+        // definitions are compatible, and the name keeps the first's type (its layout, which the assertions read).
+        .name = "odr attribute differences ignored",
+        .source = "struct S { char c; int a; } __attribute__((packed));\nstruct S { char c; int a; };\n"
+                  "_Static_assert(sizeof(struct S) == 5, \"first\");\n"
+                  "struct U { char c; int a __attribute__((aligned(16))); };\nstruct U { char c; int a; };\n"
+                  "_Static_assert(sizeof(struct U) == 32, \"first u\");\nstruct S s;\nstruct U u;\n",
+        .options = { "-Wno-odr" },
+        .c23 = true,
+    },
+    {
+        // Demoted, each is a warning with its note at the attribute the earlier list has.
+        .name = "odr attribute differences demoted",
+        .source = "struct S { char c; int a; } __attribute__((packed));\nstruct S { char c; int a; };\n"
+                  "_Static_assert(sizeof(struct S) == 5, \"first\");\n"
+                  "struct U { char c; int a __attribute__((aligned(16))); };\nstruct U { char c; int a; };\n"
+                  "_Static_assert(sizeof(struct U) == 32, \"first u\");\nstruct S s;\nstruct U u;\n",
+        .options = { "-Wno-error=odr" },
+        .warnings = 2,
+        .notes = 2,
+        .c23 = true,
+    },
+    {
+        // Source pragmas: ignored for one, a warning for another (one -Werror leaves), and the default error after them.
+        .name = "odr attribute differences under pragmas",
+        .source = "struct S { char c; int a; } __attribute__((packed));\n#pragma clang diagnostic push\n#pragma clang diagnostic ignored \"-Wodr\"\n"
+                  "struct S { char c; int a; };\n#pragma clang diagnostic pop\n_Static_assert(sizeof(struct S) == 5, \"first\");\n"
+                  "struct U { char c; int a __attribute__((aligned(16))); };\n#pragma clang diagnostic push\n#pragma clang diagnostic warning \"-Wodr\"\n"
+                  "struct U { char c; int a; };\n#pragma clang diagnostic pop\n_Static_assert(sizeof(struct U) == 32, \"first u\");\n"
+                  "struct V { int a; } __attribute__((aligned(8)));\nstruct V { int a; } __attribute__((aligned(16)));\n",
+        .warnings = 1,
+        .errors = 1,
+        .notes = 3,
+        .c23 = true,
+    },
+    {
+        // In a system header (here a line marker's), clang ignores it, error or not, without -Wsystem-headers; the name
+        // keeps the first definition's type.
+        .name = "odr attribute differences in a system header",
+        .source = "# 1 \"odr_system.h\" 1 3\nstruct S { char c; int a; } __attribute__((packed));\nstruct S { char c; int a; };\n"
+                  "# 4 \"odr_main.c\" 2\n_Static_assert(sizeof(struct S) == 5, \"first\");\nstruct S s;\n",
+        .c23 = true,
+    },
+    {
+        // A C23 parameter list's compatible redefinition of its own record (#1869) declares the first's type: the body
+        // reads both parameters and a pointer to it as one type, compiled on every path.
+        .name = "C23 parameter list redefines its record compatibly",
+        .source = "int g(struct T { int x; } a, struct T { int x; } b, struct T *c) { return a.x + b.x + c->x; }\n"
+                  "int n(struct W { int a; } *p, int (*q)(struct W { int a; } *r)) { return p->a + (q != 0); }\n",
+        .c23 = true,
+    },
 };
 
 static void check_test_driver_warning_fixtures(CheckTest* test, const char* clang, const char* executable, const char* directory,
@@ -1802,6 +1927,8 @@ static void check_test_driver_warning_fixtures(CheckTest* test, const char* clan
 {
     static const char* const policies[] = { NULL, "-Werror", "-w" };
     static const char* const lanes[] = { "1", "3" };
+    // test-checker-driver reports this sweep's time with each run mode (#2071, check_driver_run_modes).
+    const uint64_t began = check_test_driver_nanoseconds();
     char source[PATH_MAX];
     char objects[4][PATH_MAX];
     snprintf(source, sizeof(source), "%s/default-warning.c", directory);
@@ -1926,6 +2053,8 @@ static void check_test_driver_warning_fixtures(CheckTest* test, const char* clan
         }
     }
     unlink(source);
+    check_driver_run_modes.sweep_fixtures += fixture_count;
+    check_driver_run_modes.sweep_nanoseconds += check_test_driver_nanoseconds() - began;
 }
 
 static void check_test_driver_default_warnings(CheckTest* test, const char* clang, const char* executable, const char* directory)

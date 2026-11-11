@@ -24,7 +24,8 @@ compares an object's functions and objects with `clang -O0 -c`'s: `test-checker`
 on fixtures of each kind of definition (functions, objects and string literals),
 `test-c-testsuite --cross-check` on c-testsuite and `test-checker-corpus
 --symbols` on any corpus. Every correctness run compiles the compiler's own
-`main.c` with `build.sh`'s flags for a plain `-march=znver5` build, by `-c` and
+`main.c` with `build.sh`'s flags for a plain `-march=znver5` build and
+`-DBUSTER_COMPLETE_DRIVER=1` (all of the compiler's code; build guide), by `-c` and
 by `--lower-all` (`--verify`, and the scalar path's `--lower-all` object the
 vector path's byte for byte), and compares its symbols with clang's
 (`test-checker-corpus --symbols-minimum 1`), so that it keeps compiling both
