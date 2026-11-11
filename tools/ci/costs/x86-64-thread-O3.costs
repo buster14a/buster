@@ -17,6 +17,7 @@
 #: cpu 6 1.00 AMD EPYC 7763 64-Core Processor
 #: cpu 4 0.61 AMD EPYC 9V45 96-Core Processor
 #: cpu 4 0.79 AMD EPYC 9V74 80-Core Processor
+#: unmeasured Test SQLite's Tcl suite's pinned subset through testfixture by both tiers against clang's [4 CPUs]
 0.0 Check unity fixture ownership without rebuilding
 211.5 Test the foreign inputs [8 CPUs]
 247.2 Check the no-recursion rule on the call graph [8 CPUs]
@@ -31,6 +32,7 @@
 0.0 Test the floors' shared-libc input
 66.4 Test the per-file jobs on the frozen sqlite3.c [8 CPUs]
 134.0 Test SQLite's shell by both tiers against clang's [4 CPUs]
+134.0 Test SQLite's Tcl suite's pinned subset through testfixture by both tiers against clang's [4 CPUs]
 62.4 Test the direct path's executables [8 CPUs]
 26.2 Test the lanes [8 CPUs]
 113.5 Test the per-file jobs on the repository's sources, flat [8 CPUs]
