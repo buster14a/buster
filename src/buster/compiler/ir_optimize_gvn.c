@@ -176,11 +176,16 @@ static void ir_gvn_classify(IrGvnWork* work)
         const __m128i flags = _mm_maskz_loadu_epi8(valid, f->flags + first);
         const __mmask16 integer_compare = _mm_cmpeq_epi8_mask(kinds, _mm_set1_epi8(2)) & _mm_cmplt_epu8_mask(flags, _mm_set1_epi8(IR_SIMD_LANE_F32));
         const __m512i discriminators = _mm512_maskz_loadu_epi32(valid, f->c + first);
-        // A splat, the width changes, the permutes, the conversions, the scalar shifts and the lane operations (#1840:
-        // extract to lane_op, consecutive kinds) are pure and total.
+        // A splat, the width changes, the permutes, the conversions, the scalar shifts, the lane operations and the
+        // ternary kinds (#1840: extract to permute2, consecutive kinds, a ternary one's `c` its kind in the low byte and
+        // its third operand's place past it) are pure and total.
+        const __m512i kind_bits = _mm512_and_si512(discriminators, _mm512_set1_epi32(BUSTER_IR_INTRINSIC_KIND));
+        const __mmask16 ternary = _mm512_cmpge_epu32_mask(kind_bits, _mm512_set1_epi32(BUSTER_IR_INTRINSIC_TERNARY)) &
+                                  _mm512_cmplt_epu32_mask(kind_bits, _mm512_set1_epi32(BUSTER_IR_INTRINSIC_TERNARY_END));
         const __mmask16 splat = _mm_cmpeq_epi8_mask(kinds, _mm_set1_epi8(3)) & (_mm512_cmpeq_epi32_mask(discriminators, _mm512_set1_epi32(BUSTER_IR_INTRINSIC_SPLAT)) |
                                                                           (_mm512_cmpge_epu32_mask(discriminators, _mm512_set1_epi32(BUSTER_IR_INTRINSIC_EXTRACT)) &
-                                                                           _mm512_cmple_epu32_mask(discriminators, _mm512_set1_epi32(BUSTER_IR_INTRINSIC_LANE_OP))));
+                                                                           _mm512_cmple_epu32_mask(discriminators, _mm512_set1_epi32(BUSTER_IR_INTRINSIC_LANE_OP))) | ternary |
+                                                                           _mm512_cmpeq_epi32_mask(discriminators, _mm512_set1_epi32(BUSTER_IR_INTRINSIC_AES)));
         const __mmask16 eligible = (_mm_cmpeq_epi8_mask(kinds, _mm_set1_epi8(1)) | integer_compare | splat) & _mm_cmpeq_epi8_mask(tainted, _mm_setzero_si128());
         _mm_mask_storeu_epi8(work->pure + first, valid, _mm_maskz_set1_epi8(eligible, 1));
     }
@@ -236,9 +241,14 @@ static IrGvnPayload ir_gvn_payload(const IrGvnWork* work, uint32_t i)
     {
         payload.low = f->a[i];
     }
-    else if (op == IR_ICMP || op == IR_VCMP || op == IR_INTRINSIC)
+    else if (op == IR_ICMP || op == IR_VCMP)
     {
         payload.low = f->c[i];
+    }
+    else if (op == IR_INTRINSIC)
+    {
+        // Its kind: a ternary kind's `c` also holds its third operand's place, which is no part of its value.
+        payload.low = ir_intrinsic_kind(f->c[i]);
     }
     else if (op == IR_ADDRESS)
     {
@@ -268,7 +278,7 @@ static void ir_gvn_key(IrGvnWork* work, uint32_t position, uint32_t i, bool init
 {
     const IrFunction* f = work->ir.function;
     const uint64_t n = f->instruction_count;
-    const uint32_t mask = ir_value_mask(f, i);
+    const uint32_t mask = ir_value_mask3(f, i);
     const IrGvnPayload payload = ir_gvn_payload(work, i);
     work->fields[position] = ir_gvn_meta(f, i);
     work->fields[n + position] = parent && !initial ? work->classes[i] : 0;
@@ -276,7 +286,7 @@ static void ir_gvn_key(IrGvnWork* work, uint32_t position, uint32_t i, bool init
     work->fields[n * 3 + position] = payload.high;
     work->fields[n * 4 + position] = !initial && (mask & 1) != 0 ? work->classes[ir_gvn_resolve(work->alias, f->a[i])] : 0;
     work->fields[n * 5 + position] = !initial && (mask & 2) != 0 ? work->classes[ir_gvn_resolve(work->alias, f->b[i])] : 0;
-    work->fields[n * 6 + position] = !initial && (mask & 4) != 0 ? work->classes[ir_gvn_resolve(work->alias, f->c[i])] : 0;
+    work->fields[n * 6 + position] = !initial && (mask & 4) != 0 ? work->classes[ir_gvn_resolve(work->alias, ir_value_third(f, i))] : 0;
     work->fields[n * 7 + position] = work->pure[i] == 0 ? (uint64_t)i + 1 : 0;
 }
 
@@ -545,8 +555,8 @@ static uint32_t ir_gvn_waiting(IrGvnWork* work, uint32_t i)
     }
     else if (work->pure[i] != 0)
     {
-        const uint32_t mask = ir_value_mask(f, i);
-        const uint32_t operands[3] = { f->a[i], f->b[i], f->c[i] };
+        const uint32_t mask = ir_value_mask3(f, i);
+        const uint32_t operands[3] = { f->a[i], f->b[i], ir_value_third(f, i) };
         for (uint32_t operand = 0; operand < 3; operand += 1)
         {
             if ((mask >> operand & 1) != 0)
@@ -574,11 +584,11 @@ static bool ir_gvn_number(IrGvnWork* work, uint32_t i, uint32_t buckets, uint64_
     }
     else
     {
-        const uint32_t mask = ir_value_mask(f, i);
+        const uint32_t mask = ir_value_mask3(f, i);
         const IrGvnPayload payload = ir_gvn_payload(work, i);
         const uint64_t a = (mask & 1) != 0 ? work->classes[work->alias[f->a[i]]] : 0;
         const uint64_t b = (mask & 2) != 0 ? work->classes[work->alias[f->b[i]]] : 0;
-        const uint64_t c = (mask & 4) != 0 ? work->classes[work->alias[f->c[i]]] : 0;
+        const uint64_t c = (mask & 4) != 0 ? work->classes[work->alias[ir_value_third(f, i)]] : 0;
         const uint64_t key[BUSTER_IR_GVN_ENTRY_WORDS] = { payload.low, payload.high, ir_gvn_meta(f, i) | c << 32, a | b << 32 };
         uint64_t hash = BUSTER_IR_GVN_HASH_BASIS;
         for (uint32_t word = 0; word < BUSTER_IR_GVN_ENTRY_WORDS; word += 1)
@@ -872,6 +882,10 @@ static IrError ir_gvn_alias_view(IrGvnWork* work, Arena* scratch, IrFunction* re
             extras += f->calls[f->b[i]].argument_count;
             calls += 1;
         }
+        else if (ir_ternary_instruction(f, i))
+        {
+            extras += 1;
+        }
     }
     IrError error = extras <= UINT32_MAX && calls <= UINT32_MAX ? IR_OK : IR_ERROR_LIMIT;
     IrFunction view = *f;
@@ -952,6 +966,11 @@ static IrError ir_gvn_alias_view(IrGvnWork* work, Arena* scratch, IrFunction* re
                 view.extra[extra++] = ir_gvn_resolve(work->alias, f->extra[f->calls[f->b[i]].argument_first + argument]);
             }
             call += 1;
+        }
+        else if (ir_ternary_instruction(f, i))
+        {
+            view.c[i] = ir_intrinsic_ternary_c(f->c[i], extra);
+            view.extra[extra++] = ir_gvn_resolve(work->alias, ir_intrinsic_third(f, i));
         }
     }
     if (error == IR_OK)

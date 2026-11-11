@@ -431,7 +431,10 @@ unused-warning fixtures also check exact scope-completion tokens.
   root comma's result, in clang's order (CheckConditionalOperand, #1895: the condition's conversions, then each arm's own
   before the arm's, the true arm's first; `-Wconstant-conversion`'s in arms too, an argument's included,
   through the walk's `BUSTER_CHECK_EMIT_ARM` frames), warned at each leaf's expression location (an operator's, a member's name, else its first token
-  inside its parentheses) as the full expression completes, in unreachable code too. Both enumerations need clang's name
+  inside its parentheses) as the full expression completes, in unreachable code too. A leaf a macro's argument writes
+  shows that argument's "expanded from macro" note unless the conversion's context (the assignment's operator, the
+  declarator, the return, the call, a brace initializer's declaration) is written in the same argument occurrence
+  (clang's rangesInsideSameMacroArgExpansion; `check_common_argument_occurrence`, the innermost one). Both enumerations need clang's name
   for linkage: a tag, or the unqualified typedef that declares an anonymous one. Clang's range tests come first
   (`check_common_enum_cast_reached`): a leaf whose likely range (a constant's significant or active bits, a bit-field's
   width, else its type's) is wider than the target's integer type gives no enumeration warning, a constant's

@@ -163,6 +163,12 @@ enum
     CHECK_WARNING_ID_VOID_POINTER_TO_INT_CAST = 126,
     CHECK_WARNING_ID_POINTER_TO_ENUM_CAST = 127,
     CHECK_WARNING_ID_VOID_POINTER_TO_ENUM_CAST = 128,
+    // An object whose tentative definitions leave it an array of unknown bound at the unit's end (#2238, clang's
+    // ActOnEndOfTranslationUnit): -Wtentative-definition-array, on by default.
+    CHECK_WARNING_ID_TENTATIVE_ARRAY = 129,
+    // swift_name's and swift_async_name's Swift name that doesn't fit its declaration (#1447, clang's SemaSwift::DiagnoseName):
+    // -Wswift-name-attribute, on by default. (Its ID past the ones other pull requests take.)
+    CHECK_WARNING_ID_SWIFT_NAME_ATTRIBUTE = 130,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -445,6 +451,9 @@ typedef enum CheckWarningEventKind
     // type ignored", or "'const' and 'volatile' qualifiers ...", at the base's first token that isn't a qualifier;
     // payload.data the qualifiers (BUSTER_TYPE_CONST, BUSTER_TYPE_VOLATILE).
     CHECK_WARNING_EVENT_UNDERLYING_CV_QUALIFIER,
+    // An object's acting tentative definition, an array of unknown bound at the unit's end (#2238): "tentative array
+    // definition assumed to have one element", at its name.
+    CHECK_WARNING_EVENT_TENTATIVE_ARRAY,
     // swift_newtype's and swift_wrapper's argument other than `struct` or `enum` (#1447, check_input_swift_newtype_parse),
     // at it: "'X' attribute argument not supported: 'Y'", Y the token's identifier or keyword as written (payload.token),
     // or "(null)" for another token, as clang streams the token's IdentifierInfo.
@@ -458,8 +467,36 @@ typedef enum CheckWarningEventKind
     // -Wunused-value's "left operand of comma operator has no effect" or its `void *` cast's question, or
     // -Wunused-comparison's, with a CHECK_WARNING_NOTE_COMPARISON_ASSIGNMENT at an equality's.
     CHECK_WARNING_EVENT_UNUSED_RESULT,
+    // GNU's escape sequence (\e, \E, \(, \{, \[ or \%) in an evaluated literal (#1447, -pedantic's -Wpedantic): "use of
+    // non-standard escape character '\c'" at its backslash, payload.name the character and payload.data the backslash's
+    // offset in the token.
+    CHECK_WARNING_EVENT_NONSTANDARD_ESCAPE,
+    // swift_name's and swift_async_name's warnings (#1447, check_input_attribute_swift_name), at the name's string literal:
+    // payload.data's low five bits the message (BUSTER_CHECK_SWIFT_NAME_*), then the expected and the given parameter
+    // counts in 13 bits each. Its K&R function's is -Wignored-attributes', the others -Wswift-name-attribute's.
+    CHECK_WARNING_EVENT_SWIFT_NAME,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
+
+// CHECK_WARNING_EVENT_SWIFT_NAME's messages (#1447), as clang's SemaSwift words them.
+#define BUSTER_CHECK_SWIFT_NAME_FUNCTION 0u
+#define BUSTER_CHECK_SWIFT_NAME_BASE 1u
+#define BUSTER_CHECK_SWIFT_NAME_CONTEXT 2u
+#define BUSTER_CHECK_SWIFT_NAME_PARAMETER 3u
+#define BUSTER_CHECK_SWIFT_NAME_DECLARATION 4u
+#define BUSTER_CHECK_SWIFT_NAME_SUBSCRIPT_ACCESSOR 5u
+#define BUSTER_CHECK_SWIFT_NAME_SUBSCRIPT_PARAMETER 6u
+#define BUSTER_CHECK_SWIFT_NAME_SUBSCRIPT_SELF 7u
+#define BUSTER_CHECK_SWIFT_NAME_MISSING_PARAMETERS 8u
+#define BUSTER_CHECK_SWIFT_NAME_SETTER 9u
+#define BUSTER_CHECK_SWIFT_NAME_SELVES 10u
+#define BUSTER_CHECK_SWIFT_NAME_GETTER 11u
+#define BUSTER_CHECK_SWIFT_NAME_NO_NEW_VALUE 12u
+#define BUSTER_CHECK_SWIFT_NAME_NEW_VALUES 13u
+#define BUSTER_CHECK_SWIFT_NAME_GETTER_NEW_VALUE 14u
+#define BUSTER_CHECK_SWIFT_NAME_COUNT 15u
+#define BUSTER_CHECK_SWIFT_NAME_NO_PARAMETERS 16u
+#define BUSTER_CHECK_SWIFT_NAME_PROTOTYPE 17u
 
 // CHECK_WARNING_EVENT_TARGET_CLONES_*'s payload (#1838): `name` the version's first byte in its string's decoded text (it
 // ends at the next comma, trimmed), and `data` its place's offset from the trimmed text's start, with

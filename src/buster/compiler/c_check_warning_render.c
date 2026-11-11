@@ -1441,6 +1441,38 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
                                    NULL;
             break;
         }
+        case CHECK_WARNING_EVENT_SWIFT_NAME:
+        {
+            // swift_name's and swift_async_name's warnings (#1447, check_input_attribute_swift_name), the attribute as written.
+            static const char* const endings[] = {
+                "argument must be a string literal specifying a Swift function name",
+                "has invalid identifier for the base name",
+                "has invalid identifier for the context name",
+                "has invalid identifier for the parameter name",
+                "cannot be applied to this declaration",
+                "for 'subscript' must be a getter or setter",
+                "for 'subscript' must have at least one parameter",
+                "for 'subscript' must have a 'self:' parameter",
+                "is missing parameter label clause",
+                "for setter must have one parameter for new value",
+                "cannot specify more than one 'self:' parameter",
+                "for getter must not have any parameters besides 'self:'",
+                "for 'subscript' setter must have a 'newValue:' parameter",
+                "for 'subscript' setter cannot have multiple 'newValue:' parameters",
+                "for 'subscript' getter cannot have a 'newValue:' parameter",
+                "",
+                "cannot be applied to a function with no parameters",
+                "only applies to non-K&R-style functions",
+            };
+            const uint32_t code = payload->data & 0x1fu;
+            const uint32_t expected = (payload->data >> 5) & 0x1fffu;
+            const uint32_t given = (payload->data >> 18) & 0x1fffu;
+            result = code == BUSTER_CHECK_SWIFT_NAME_COUNT ?
+                     check_warning_text(scratch, "too %s parameters in the signature specified by the '%.*s' attribute (expected %u; got %u)",
+                                        given > expected ? "many" : "few", (int)name.length, name.pointer, expected, given) :
+                     code < BUSTER_ARRAY_LENGTH(endings) ? check_warning_text(scratch, "'%.*s' attribute %s", (int)name.length, name.pointer, endings[code]) : NULL;
+            break;
+        }
         case CHECK_WARNING_EVENT_FUNCTION_TYPE_ATTRIBUTE:
         {
             const String8 type = check_driver_warning_type_at(parser, pp, input, types, spell, scratch, payload->first_type, payload->data,
@@ -1680,6 +1712,9 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
         }
         case CHECK_WARNING_EVENT_UNKNOWN_ESCAPE:
             result = check_warning_text(scratch, "unknown escape sequence '\\%c'", (char)payload->name);
+            break;
+        case CHECK_WARNING_EVENT_NONSTANDARD_ESCAPE:
+            result = check_warning_text(scratch, "use of non-standard escape character '\\%c'", (char)payload->name);
             break;
         case CHECK_WARNING_EVENT_DELIMITED_ESCAPE:
             result = payload->data != 0 ? "named escape sequences are a Clang extension" : "delimited escape sequences are a C2y extension";
@@ -1985,6 +2020,9 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
         case CHECK_WARNING_EVENT_TYPEDEF_NAMELESS:
             result = "typedef requires a name";
             break;
+        case CHECK_WARNING_EVENT_TENTATIVE_ARRAY:
+            result = "tentative array definition assumed to have one element";
+            break;
         case CHECK_WARNING_EVENT_UNUSED_RESULT:
         {
             static const char* const messages[] =
@@ -2276,7 +2314,7 @@ static bool check_driver_warning_events_at(const Parser* parser, Preprocessor* p
                         pp_diagnose_output_offset_at(pp, disposition, source, 0, boundary, "%s%s", message, suffix);
                         pp->diagnostic_arguments = false;
                     }
-                    else if (event->kind == CHECK_WARNING_EVENT_UNKNOWN_ESCAPE)
+                    else if (event->kind == CHECK_WARNING_EVENT_UNKNOWN_ESCAPE || event->kind == CHECK_WARNING_EVENT_NONSTANDARD_ESCAPE)
                     {
                         // At its backslash inside the literal's token (#1447), with the macro argument it came from.
                         pp->diagnostic_arguments = true;

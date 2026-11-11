@@ -454,7 +454,14 @@ libselinux's `/proc/filesystems` on Ubuntu), in a directory of its own under
 - 8 processes running the same 4 runs 16 times each, whose counts add up in
   the parent's and whose entries are whole after, with nothing beside them;
 - the process's cache, from `BUSTER_ORACLE_CACHE` and `XDG_CACHE_HOME`, its
-  directory made private three levels deep, and turned off.
+  directory made private three levels deep, and turned off;
+- served runs ([Served runs](#served-runs)), through a server of the test's own
+  standing for its program: in each mode, with `--differential`, a server that
+  ends in a run, one past a run's time limit, one of another release, the runs
+  that don't fit, runs outside the cache (`oracle_serve_command`) and children's
+  (`oracle_serve_child`: each stream, `/dev/null` input and the run's
+  environment, another tool's run a child), and a forked child's own server,
+  which the child stops and waits for before it ends (`oracle_serve_exit`).
 
 The cache is test tooling outside the compile path and has no vector path: a
 run hashes what it read. The 9700X job's test step runs its tests.
@@ -472,16 +479,31 @@ run goes there when it fits (`oracle_run_servable`): no files of its own to
 write, no time limit, nothing clang's main reads before its driver (a response
 file, a `-cc1` tool), no report of its process's statistics or times
 (`-fproc-stat-report`, `-ftime-report`, `-ftime-trace`: they would be the
-server's, and differ between any two runs) and none of the driver's debugging
-variables (`oracle_server_fits`),
+server's, and differ between any two runs), none of LLVM's statistics (cc1's
+`-print-stats` and `-stats-file`, the driver's `-save-stats`, LLVM's `-stats`:
+the process's counters, which the server's runs add to one after another, so
+that three runs of one file counted 1, 2 and 3 `#includes skipped due to the
+multi-include optimization`) and none of the driver's debugging variables
+(`oracle_server_fits`),
 and the server's clang libraries the release `clang -dumpversion` gives, which
-a process checks once (`oracle_serve_ready`). `OracleServer` is the client,
+the test finds once as it sets the server up, before it forks any part
+(`oracle_serve`), and each process checks against its server's once
+(`oracle_serve_ready`): a part no longer runs `clang -dumpversion` of its own,
+which forked parts that served nothing in their parent each did (32 in
+`test-preprocessor --clang --part 3/4`). `OracleServer` is the client,
 which `test-checker-driver --clang-server` shares: a server a process starts as
 it first needs it, on a socket pair (`MSG_NOSIGNAL`: a server that ended fails
 a request rather than raising `SIGPIPE`), which only that process uses: a
 forked part closes its copy of the socket, which leaves its parent's server as
-it was, and starts its own, as the preprocessor's cases' children do. A request it can't answer (a crash in clang ends it) stops
-it, and the next request starts another, at most four times in a process.
+it was, and starts its own, as the preprocessor's cases' children do. A part
+stops its own server, killed and waited for, as it ends (`oracle_serve_exit`,
+which `test_process_exit` calls before the part exits), so that the server's
+CPU time is the part's, which its parent's wait adds to the command's and the
+runner counts; left to end at its socket's end, the server would end after the
+part, an orphan outside the command's processes. That is one wait for each
+server, not one for each request. A request it can't answer (a crash in clang
+ends it) stops it, and the next request starts another, at most four times in
+a process.
 Every request has a time limit, and so does the server's first answer: the
 run's own, or the server's (`BUSTER_ORACLE_SERVER_SECONDS`, 60 s;
 `OracleServer.seconds` overrides it, as the test does). A server that gives no
@@ -514,10 +536,22 @@ requests that ran past their limit, each also printed as it happens).
 A test that starts its clang itself, outside the cache (`test-preprocessor`'s
 fuzz batch, `preprocessor_fuzz_clang_process`), sends those runs to the same
 server: `oracle_serve_takes` says whether the server takes a command line (its
-clang's, and one that fits), and `oracle_serve_command` runs it there with its
-standard input from a file. The client keeps the run's time limit: a request
-that gets no reply in time stops the server (killed, as a child past its time
-would be), and the next request starts another. A run the server couldn't take
-runs as a child; none enters the cache, and with `--differential` each runs as
-a child too, which gives its result, and the two are compared and counted with
-the cache's runs.
+clang's, and one that fits, in the run's environment), and
+`oracle_serve_command` runs it there with its environment, its standard input
+from a file and the streams it captures. The client keeps the run's time
+limit: a request that gets no reply in time stops the server (killed, as a
+child past its time would be), and the next request starts another. A run the
+server couldn't take runs as a child; none enters the cache, and with
+`--differential` each runs as a child too, which gives its result, and the two
+are compared and counted with the cache's runs.
+
+`oracle_serve_child` is the whole of such a run for a test's other children
+(`test-preprocessor`'s history and system warnings' diagnostics and its
+directives' commands): the command line in the process's directory with the
+environment the caller gives (theirs: this process's without `CPATH` and
+`C_INCLUDE_PATH`), its standard input `/dev/null`, and the streams it captures
+in memory, the others discarded, which is what the server does with a request.
+It is served where the server takes it; otherwise (another program's run, this
+executable's, one that doesn't fit, or one the server couldn't take) it is a
+child of that same contract (`oracle_command_child`), and with
+`--differential` both, the child's result the run's.

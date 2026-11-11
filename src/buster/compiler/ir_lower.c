@@ -786,6 +786,72 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_vector_operation(
         value = ir_typed_emit(sink, IR_INTRINSIC, type, operands[0], operands[1], BUSTER_IR_INTRINSIC_SHIFT, 0);
         ir_typed_lanes(sink, value, (IrSimdLane)operation->immediate);
     }
+    else if (operation->aes)
+    {
+        // An AES round (#1840) of the state by the round key, its round in its flags.
+        value = ir_typed_emit(sink, IR_INTRINSIC, type, operands[0], operands[1], BUSTER_IR_INTRINSIC_AES, 0);
+        ir_typed_lanes(sink, value, (IrSimdLane)operation->immediate);
+    }
+    else if (operation->compress != 0)
+    {
+        // A compress or an expand (#1840) of the first operand under the third, the mask, merged into the second, the
+        // third operand in a slot of the extra array; its lanes' bytes' log2 in its flags.
+        const uint32_t slot = (uint32_t)sink->sizes.extra_count;
+        if (sink->output != 0)
+        {
+            sink->output->extra[slot] = operands[1];
+        }
+        sink->sizes.extra_count += 1;
+        value = ir_typed_emit(sink, IR_INTRINSIC, type, operands[0], operands[2], ir_intrinsic_ternary_c(operation->compress - 1u, slot), 0);
+        ir_typed_lanes(sink, value, (IrSimdLane)operation->immediate);
+    }
+    else if (operation->ternlog)
+    {
+        // A bitwise function of three vectors (#1840): its truth table in its flags, the third operand in a slot of the
+        // extra array; merged into its first operand under its fourth, the writemask, at its lanes, where the typed
+        // stream's writemask hasn't every lane.
+        const uint32_t slot = (uint32_t)sink->sizes.extra_count;
+        if (sink->output != 0)
+        {
+            sink->output->extra[slot] = operands[2];
+        }
+        sink->sizes.extra_count += 1;
+        value = ir_typed_emit(sink, IR_INTRINSIC, type, operands[0], operands[1], ir_intrinsic_ternary_c(BUSTER_IR_INTRINSIC_TERNLOG, slot), 0);
+        ir_typed_lanes(sink, value, (IrSimdLane)operation->immediate);
+        if (operation->merge_mask && !unmasked)
+        {
+            const uint64_t zero[8] = {0};
+            const uint32_t inactive = operation->ternlog_zero ? ir_typed_vector_constant(sink, type, zero) : operands[0];
+            value = ir_typed_emit(sink, IR_VSELECT, type, operands[3], value, inactive, 0);
+            ir_typed_lanes(sink, value, operation->lane);
+        }
+    }
+    else if (operation->permute2)
+    {
+        // A permute of two tables (#1840): the first table, the indices and the second table, the third operand in a
+        // slot of the extra array that its `c` names; its lanes' bytes' log2 in its flags. A table narrower than the
+        // result is the IR's widen of it first (ir_simd_typed_permute2).
+        const uint32_t indices = operands[operation->permute2_indices];
+        uint32_t tables[2] = { operands[0], operands[operation->permute2_table] };
+        const uint32_t places[2] = { 0, operation->permute2_table };
+        for (uint32_t t = 0; t < 2; t += 1)
+        {
+            if (operation->operand_bytes[places[t]] < ir_type_bits[type] / 8)
+            {
+                tables[t] = ir_typed_emit(sink, IR_INTRINSIC, type, tables[t], BUSTER_IR_NONE, BUSTER_IR_INTRINSIC_WIDEN, 0);
+            }
+        }
+        const uint32_t first = tables[0];
+        const uint32_t table = tables[1];
+        const uint32_t slot = (uint32_t)sink->sizes.extra_count;
+        if (sink->output != 0)
+        {
+            sink->output->extra[slot] = table;
+        }
+        sink->sizes.extra_count += 1;
+        value = ir_typed_emit(sink, IR_INTRINSIC, type, first, indices, ir_intrinsic_ternary_c(BUSTER_IR_INTRINSIC_PERMUTE2, slot), 0);
+        ir_typed_lanes(sink, value, (IrSimdLane)operation->immediate);
+    }
     else if (operation->permute != 0)
     {
         // A permute (#1840), its immediate in its flags.
@@ -933,6 +999,7 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_asm_body(IrTypedS
             .branch_count = body->branch_count,
             .touched = body->touched,
             .masks = body->masks,
+            .stack = body->stack,
         };
         output->calls[descriptor] = (IrCall){
             .argument_first = first,

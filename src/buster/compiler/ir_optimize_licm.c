@@ -98,11 +98,16 @@ static void ir_licm_classify(IrLicmWork* work)
         // Packed variable shifts are total even for oversized counts. Scalar shifts keep their fault exclusion.
         const __mmask16 vector_shift = _mm_cmpeq_epi8_mask(kinds, _mm_set1_epi8(3)) & _mm_cmpge_epu8_mask(types, _mm_set1_epi8(IR_V4I32)) & _mm_cmple_epu8_mask(types, _mm_set1_epi8(IR_V16I32));
         const __m512i discriminators = _mm512_maskz_loadu_epi32(valid, f->c + first);
-        // A splat, the width changes, the permutes, the conversions, the scalar shifts and the lane operations (#1840:
-        // extract to lane_op, consecutive kinds) are pure and total.
+        // A splat, the width changes, the permutes, the conversions, the scalar shifts, the lane operations and the
+        // ternary kinds (#1840: extract to permute2, consecutive kinds, a ternary one's `c` its kind in the low byte and
+        // its third operand's place past it) are pure and total.
+        const __m512i kind_bits = _mm512_and_si512(discriminators, _mm512_set1_epi32(BUSTER_IR_INTRINSIC_KIND));
+        const __mmask16 ternary = _mm512_cmpge_epu32_mask(kind_bits, _mm512_set1_epi32(BUSTER_IR_INTRINSIC_TERNARY)) &
+                                  _mm512_cmplt_epu32_mask(kind_bits, _mm512_set1_epi32(BUSTER_IR_INTRINSIC_TERNARY_END));
         const __mmask16 splat = _mm_cmpeq_epi8_mask(kinds, _mm_set1_epi8(4)) & (_mm512_cmpeq_epi32_mask(discriminators, _mm512_set1_epi32(BUSTER_IR_INTRINSIC_SPLAT)) |
                                                                           (_mm512_cmpge_epu32_mask(discriminators, _mm512_set1_epi32(BUSTER_IR_INTRINSIC_EXTRACT)) &
-                                                                           _mm512_cmple_epu32_mask(discriminators, _mm512_set1_epi32(BUSTER_IR_INTRINSIC_LANE_OP))));
+                                                                           _mm512_cmple_epu32_mask(discriminators, _mm512_set1_epi32(BUSTER_IR_INTRINSIC_LANE_OP))) | ternary |
+                                                                           _mm512_cmpeq_epi32_mask(discriminators, _mm512_set1_epi32(BUSTER_IR_INTRINSIC_AES)));
         const __mmask16 eligible = (_mm_cmpeq_epi8_mask(kinds, _mm_set1_epi8(1)) | integer_compare | vector_shift | splat) & _mm_cmpeq_epi8_mask(tainted, _mm_setzero_si128());
         _mm_mask_storeu_epi8(work->safe + first, valid, _mm_maskz_set1_epi8(eligible, 1));
     }
@@ -143,8 +148,8 @@ static void ir_licm_worklist(IrLicmWork* work)
     while (work->ir.queued_count != 0)
     {
         const uint32_t i = ir_optimize_dequeue(&work->ir);
-        const uint32_t mask = ir_value_mask(f, i);
-        const bool ready = ((mask & 1) == 0 || work->available[f->a[i]] != 0) && ((mask & 2) == 0 || work->available[f->b[i]] != 0) && ((mask & 4) == 0 || work->available[f->c[i]] != 0);
+        const uint32_t mask = ir_value_mask3(f, i);
+        const bool ready = ((mask & 1) == 0 || work->available[f->a[i]] != 0) && ((mask & 2) == 0 || work->available[f->b[i]] != 0) && ((mask & 4) == 0 || work->available[ir_value_third(f, i)] != 0);
         work->statistics.visits += 1;
         if (ready && work->available[i] == 0)
         {
@@ -323,6 +328,10 @@ static IrError ir_licm_reorder(IrLicmWork* work, Arena* scratch, IrFunction* res
             extras += f->calls[f->b[i]].argument_count;
             calls += 1;
         }
+        else if (ir_ternary_instruction(f, i))
+        {
+            extras += 1;
+        }
     }
     if (error == IR_OK && (extras > UINT32_MAX || calls > UINT32_MAX))
     {
@@ -433,6 +442,12 @@ static IrError ir_licm_reorder(IrLicmWork* work, Arena* scratch, IrFunction* res
                     view.extra[extra++] = values[f->extra[f->calls[f->b[i]].argument_first + argument]];
                 }
                 call += 1;
+            }
+            else if (ir_ternary_instruction(f, i))
+            {
+                // A ternary intrinsic's third operand (#1840), at its new place in the extra array.
+                view.c[out] = ir_intrinsic_ternary_c(f->c[i], extra);
+                view.extra[extra++] = values[ir_intrinsic_third(f, i)];
             }
         }
         *result = view;

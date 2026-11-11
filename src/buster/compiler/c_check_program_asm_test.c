@@ -1330,7 +1330,7 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
     check_test_program_source(test, "int tested(int n){long m=n;__asm__(\".p2align 4\\n\\tpaddd %0, %0\" : \"+y\"(m));__asm__ volatile(\"emms\");return (int)m;}",
                               "asm-mmx-directives", clang);
     // An __m64 in an MMX register (#1846, the owner's decision on #1447): an object's 8 bytes, read through its address,
-    // as an input, a `+` operand and an early-clobbered output; an input of no object stays refused by name.
+    // as an input, a `+` operand and an early-clobbered output; an input of no object (an rvalue, a call's) through a copy's.
     check_test_program_source(test,
         "typedef long long m64 __attribute__((vector_size(8)));"
         "static long long added(long long a, long long b){m64 x={a},y={b},r;__asm__(\"movq %1, %0\\n\\tpaddd %2, %0\" : \"=&y\"(r) : \"y\"(x), \"y\"(y));"
@@ -1338,17 +1338,35 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
         "int tested(int n){m64 v={n*65537};__asm__(\"paddd %0, %0\" : \"+y\"(v));__asm__ volatile(\"emms\");"
         "return (int)v[0]+(int)added((long long)n<<33|7,(long long)n*3);}",
         "asm-mmx-vector", clang);
-    check_test_program_boundary_reason(test, "typedef long long m64 __attribute__((vector_size(8)));int tested(int n){m64 v={n};long r;__asm__(\"movq %1, %0\" : \"=r\"(r) : \"y\"(v+v));return (int)r;}",
-                                       "asm-mmx-vector-value", true, false, 0, 1, "inline assembly __m64 inputs that aren't objects");
+    check_test_program_source(test,
+        "typedef long long m64 __attribute__((vector_size(8)));static m64 made(int n){m64 v={n*7};return v;}"
+        "int tested(int n){m64 v={n};long r;__asm__(\"movq %1, %0\" : \"=r\"(r) : \"y\"(v+v));long q;__asm__(\"movq %1, %0\" : \"=r\"(q) : \"y\"(made(n)));"
+        "__asm__ volatile(\"emms\");return (int)r+(int)q*3;}",
+        "asm-mmx-vector-value", clang);
     // A template that returns is an asm body, whose return leaves its caller (#1839, test-checker-driver's returning templates);
     // one that keeps its helper, as a named label's does, is refused by name.
     check_test_program_boundary_reason(test, "int tested(int n){__asm__ volatile(\"rep ret\\n.Lafter%=:\" ::: \"memory\");return n;}",
                                       "asm-returning-template", true, false, 0, 0, "inline assembly templates that return from their helper");
-    // Explicit register variables the lowering doesn't place: in rsp (the helper's own), in an XMM register past XMM15
-    // without AVX-512F; an input of a memory constraint, which
-    // clang's code refuses too; and an integer in an XMM register.
-    check_test_program_boundary_reason(test, "int tested(int n){register long r __asm__(\"rsp\");__asm__ volatile(\"\" : : \"r\"(r));return n;}",
-                                       "asm-register-variable-rsp", true, false, 0, 0, "explicit register variables of this register as inline assembly operands");
+    // rsp's explicit register variable (#1846, the owner's decision on #1447), as clang's code takes it: an output read
+    // from rsp after the template (one of no instructions too), an input moved into rsp before it at the variable's width
+    // (sp's movw keeps rsp's other bits), the template naming it %rsp, and an input beside an rsp output sharing it. Each
+    // input is the value rsp has, as a program's must be; a template that keeps a helper refuses it by name.
+    check_test_program_source(test,
+        "static unsigned long read_sp(void){register unsigned long sp __asm__(\"rsp\");__asm__(\"\" : \"=r\"(sp));return sp;}"
+        "static int near(void){char local;register unsigned long sp __asm__(\"rsp\");__asm__(\"nop\" : \"=r\"(sp));"
+        "long d=(long)((unsigned long)&local-sp);return d>-4096&&d<4096;}"
+        "static int kept(void){register unsigned long sp __asm__(\"rsp\");__asm__(\"\" : \"=r\"(sp));unsigned long before=sp;"
+        "__asm__ volatile(\"\" : \"+r\"(sp));unsigned long r;__asm__(\"mov %1, %0\" : \"=r\"(r) : \"r\"(sp));"
+        "__asm__(\"\" : \"=r\"(sp) : \"r\"(sp));return sp==before&&r==before;}"
+        "static int narrow(void){register unsigned short sp __asm__(\"sp\");register unsigned int esp __asm__(\"esp\");"
+        "register unsigned long full __asm__(\"rsp\");__asm__(\"\" : \"=r\"(full));__asm__(\"\" : \"=r\"(esp));__asm__(\"\" : \"=r\"(sp));"
+        "unsigned short s=sp;__asm__ volatile(\"\" : \"+r\"(sp));return (unsigned short)full==s&&sp==s&&(unsigned int)full==esp;}"
+        "int tested(int n){return n+(read_sp()!=0)+2*near()+4*kept()+8*narrow();}",
+        "asm-register-variable-rsp", clang);
+    check_test_program_boundary_reason(test, "int tested(int n){register long r __asm__(\"rsp\");__asm__ volatile(\".p2align 4\\n\\tmovq %0, %%rax\" : : \"r\"(r) : \"rax\");return n;}",
+                                       "asm-register-variable-rsp-directives", true, false, 0, 0, "explicit register variables in rsp in templates that take directives");
+    // Explicit register variables the lowering doesn't place: in an XMM register past XMM15 without AVX-512F; an input of a
+    // memory constraint, which clang's code refuses too; and an integer in an XMM register.
     check_test_program_source(test, "int tested(int n){register char r __asm__(\"ah\")=(char)n;__asm__ volatile(\".p2align 4\\n\\tincb %0\" : \"+q\"(r));return r;}",
                               "asm-register-variable-high", clang);
     check_test_program_boundary_reason(test, "int tested(int n){register double r __asm__(\"xmm16\")=n;__asm__ volatile(\"\" : : \"v\"(r));return n;}",
@@ -1363,31 +1381,64 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
                                        "asm-naked-vla-register", true, false, 0, 0, "statements other than asm statements in naked functions");
     // A constant with a register constraint reaches the planner without a forbidden parameter reference.
     check_test_program_boundary_reason(test, "__attribute__((naked)) void raw(void){__asm__(\"ret\" : : \"r\"(1));}int tested(int n){return n;}",
-                                       "asm-naked-operand", true, false, 0, 0, "naked functions' inline assembly operands other than integer constants");
-    check_test_program_boundary_reason(test, "__attribute__((naked)) void raw(void){}int tested(int n){return n;}",
-                                       "asm-naked-empty", true, false, 0, 0, "naked functions of no instructions");
+                                       "asm-naked-operand", true, false, 0, 0,
+                                       "naked functions' inline assembly operands other than integer constants or static objects' symbols");
     check_test_program_boundary_reason(test, "int tested(int n){__asm__(\"twice: nop\");__asm__(\"twice: nop\");return n;}",
                                        "asm-label-twice", true, false, 0, 0, "inline assembly labels another template defines too");
     check_test_program_boundary_reason(test, "int tested(int n){__asm__(\"jmp .Lnowhere\");return n;}",
                                        "asm-local-undefined", true, false, 0, 0, "inline assembly's local labels that no template defines");
-    // A vector in a vector register's constraint where the template has instructions, refers to it, or it is a volatile
-    // output (whose load and store clang's code makes), which the helper doesn't place yet.
-    static const char* const held[][2] = {
-        { "asm-vector-instructions", "int tested(int n){v8di a={n};__asm__(\"vpaddq %0, %0, %0\" : \"+v\"(a));return (int)a[0];}" },
-        { "asm-vector-other-instructions", "int tested(int n){v8di a={n};__asm__(\"nop\" : \"+v\"(a));return (int)a[0];}" },
-        { "asm-vector-input-instructions", "int tested(int n){v8di a={n};__asm__ volatile(\"nop\" : : \"v\"(a));return (int)a[0];}" },
-        { "asm-vector-referred", "int tested(int n){v8di a={n};__asm__(\"# %0\" : \"+v\"(a));return (int)a[0];}" },
-        { "asm-vector-volatile", "int tested(int n){volatile v8di a={n};__asm__(\"\" : \"+v\"(a));return (int)a[0];}" },
-        { "asm-vector-matched", "int tested(int n){v8di a={n},b;__asm__(\"\" : \"=v\"(b) : \"0\"(a));return (int)b[0];}" },
-    };
-    for (uint32_t i = 0; vectors_parsed && i < BUSTER_ARRAY_LENGTH(held); i += 1)
+    // Vectors of 16, 32 and 64 bytes in vector registers (#1846, the owner's decision on #1447), for x86-64-v4: in
+    // templates of instructions, through their addresses, as inputs (a call's value, an rvalue's), `+` operands, outputs,
+    // matching inputs (in a template of no instructions too, whose output takes the input's value), a volatile `+`
+    // output of no instructions (loaded and stored, as clang's code does), modifiers (%x0 of a ymm operand), a reference
+    // in a comment, and explicit register variables in an XMM register past XMM15, a YMM register and a ZMM one past
+    // ZMM15; run where the host has its features.
+    static const char asm_vector_operands[] =
+        "static v8di twice8(v8di x){return x+x;}"
+        "static v8di added(v8di a,v8di b){v8di r;__asm__(\"vpaddq %2, %1, %0\" : \"=v\"(r) : \"v\"(a), \"v\"(twice8(b)));return r;}"
+        "static v8si doubled(v8si a){__asm__(\"vpaddd %0, %0, %0\" : \"+x\"(a));return a;}"
+        "static v4sf squared(v4sf a){__asm__(\"vmulps %0, %0, %0 # %1\" : \"+x\"(a) : \"v\"(a+a));return a;}"
+        "static v8si matched(v8si a){v8si b;__asm__(\"vpaddd %0, %0, %0\" : \"=x\"(b) : \"0\"(a));return b;}"
+        "static v8di copied(v8di a){v8di b={0};__asm__(\"\" : \"=v\"(b) : \"0\"(a));return b;}"
+        "static int kept(int n){volatile v8di a={n,1};__asm__(\"# %0\" : \"+v\"(a));v8di b=a;return (int)b[0];}"
+        "static v8si low(v8si a){__asm__(\"vpaddd %x0, %x0, %x0\" : \"+x\"(a));return a;}"
+        "static v8si in_ymm(v8si a){register v8si y __asm__(\"ymm7\")=a;__asm__(\"vpaddd %0, %0, %0\" : \"+x\"(y));return y;}"
+        "static v8di in_zmm(v8di a){register v8di z __asm__(\"zmm21\")=a;__asm__(\"vpaddq %0, %0, %0\" : \"+v\"(z));return z;}"
+        "static v4sf in_xmm(v4sf a){register v4sf x __asm__(\"xmm30\")=a;v4sf r;__asm__(\"vaddps %1, %1, %0\" : \"=v\"(r) : \"v\"(x));return r;}"
+        "int tested(int n){v8di a={n,n+1,n+2,n+3,n+4,n+5,n+6,n+7};v8si b={n,2,3,4,5,6,7,n*3};v4sf c={1.5f,(float)n,2.5f,-3.0f};"
+        "v8di r=added(a,a);v8si d=doubled(b);v4sf e=squared(c);v8si f=matched(b);v8di g=copied(a);v8si h=low(b);v8si y=in_ymm(b);v8di z=in_zmm(a);"
+        "v4sf x=in_xmm(c);long long s=kept(n);"
+        "for(int i=0;i<8;i++)s+=r[i]*(i+1)+d[i]*3+f[i]*5+g[i]*7+h[i]*11+y[i]*13+z[i]*17;"
+        "for(int i=0;i<4;i++)s+=(long long)(e[i]*4)+(long long)(x[i]*8);return (int)s;}";
+    if (vectors_parsed)
     {
-        char source[512];
-        snprintf(source, sizeof(source), "%s%s", asm_vector_types, held[i][1]);
-        const char* reason = i + 1 == BUSTER_ARRAY_LENGTH(held) ? "inline assembly inputs matching an output that isn't a register's of its own" :
-                                                                  "inline assembly operands of this type in their constraint's registers";
-        check_test_program_boundary_target(test, source, held[i][0], true, false, 0, 1, reason, &vectors);
+        const bool vectors_native = (native.features & vectors.features) == vectors.features;
+        char source[4096];
+        const int length = snprintf(source, sizeof(source), "%s%s", asm_vector_types, asm_vector_operands);
+        check_test_expect(test, length > 0 && (size_t)length < sizeof(source), "the vector operands' source fits its buffer");
+        check_test_program_build_release();
+        check_test_program_march = "-march=x86-64-v4";
+        check_test_program_source_native_limits(test, source, "asm-vector-operands", clang, false, -1, 0, &vectors, vectors_native);
+        check_test_program_build_release();
+        check_test_program_march = "-march=x86-64";
     }
+    // Under SSE alone, a 16-byte vector by movups, in xmm0 up and in an explicit register variable's XMM register.
+    check_test_program_source(test,
+        "typedef float v4sf __attribute__((vector_size(16)));"
+        "static v4sf added(v4sf a,v4sf b){__asm__(\"addps %1, %0\" : \"+x\"(a) : \"x\"(b));return a;}"
+        "static v4sf fixed(v4sf a){register v4sf x __asm__(\"xmm9\")=a;__asm__(\"mulps %0, %0\" : \"+x\"(x));return x;}"
+        "int tested(int n){v4sf a={(float)n,1.5f,2.0f,-4.0f};v4sf r=fixed(added(a,a));return (int)(r[0]+r[1]*3+r[2]*5+r[3]*7);}",
+        "asm-vector-operands-sse", clang);
+    // Where clang can't place them: 32 bytes without AVX, 64 without AVX-512F, a register variable of another size than
+    // its register's (clang's "does not match required type"), and a template that takes directives.
+    check_test_program_boundary_reason(test, "typedef int v8si __attribute__((vector_size(32)));int tested(int n){v8si a={n};__asm__(\"nop\" : \"+x\"(a));return a[0];}",
+                                       "asm-vector-without-avx", true, false, 0, 1, "inline assembly vector operands of 32 bytes without AVX");
+    check_test_program_boundary_reason(test, "typedef long long v8di __attribute__((vector_size(64)));__attribute__((target(\"avx2\"))) int tested(int n){v8di a={n};__asm__(\"nop\" : \"+v\"(a));return (int)a[0];}",
+                                       "asm-vector-without-avx512", true, false, 0, 1, "inline assembly vector operands of 64 bytes without AVX-512F");
+    check_test_program_boundary_reason(test, "typedef float v4sf __attribute__((vector_size(16)));int tested(int n){register v4sf a __asm__(\"ymm3\")={(float)n};__asm__(\"nop\" : \"+x\"(a));return (int)a[0];}",
+                                       "asm-vector-register-size", true, false, 0, 1, "inline assembly operands of this type in their constraint's registers");
+    check_test_program_boundary_reason(test, "typedef float v4sf __attribute__((vector_size(16)));int tested(int n){v4sf a={(float)n};__asm__(\".p2align 4\\n\\taddps %0, %0\" : \"+x\"(a));return (int)a[0];}",
+                                       "asm-vector-directives", true, false, 0, 1, "inline assembly vector operands in templates that take directives");
 }
 
 #endif

@@ -264,11 +264,20 @@ ways: by default they answer what buster implements.
 
 `--clang-server PATH` sends the runs of `clang` to `tools/clang-server`: the
 oracle cache's (`pp_test_clang_process`'s, for the cases and for the files
-given to it, and the predefines' jobs') and the fuzz batch's, which start clang
+given to it, and the predefines' jobs'), the fuzz batch's, which start clang
 outside the cache (`preprocessor_fuzz_clang_process`: its seeds, batches and
 checks as before, its standard input a file, and its 30 s limit kept by the
-client, which stops a server past it). `--differential` also runs each as
-before and fails on a difference ([Served runs](oracle-cache.md#served-runs)).
+client, which stops a server past it), and the other checks' that start clang
+themselves (`oracle_serve_child`: the history's and the system warnings'
+diagnostics, `pp_test_clang_diagnostics` and `pp_test_system_warning_clang`,
+and the directives' commands, `pp_directive_test_command`: their diagnostics,
+`-o /dev/null`, and the guards' text). Those run in the test's directory with
+its environment without `CPATH` and `C_INCLUDE_PATH`, their standard input
+`/dev/null`, and the streams they read captured, the others discarded, served
+or as children alike. A part that started a server stops it as it ends
+(`test_process_exit`), so that the server's CPU time is the command's.
+`--differential` also runs each as before
+and fails on a difference ([Served runs](oracle-cache.md#served-runs)).
 These run as before:
 
 - the library-builtin release fixture's 17 runs (`pp_test_builtin_release`),
@@ -277,9 +286,22 @@ These run as before:
   fixture checks, and `/bin/sh` sets `PWD` where the environment's is missing
   or stale, which LLVM reads for its working directory. A served run would
   stand for clang, not for the script;
-- the checks that start clang themselves, outside the cache: the history's and
-  the system warnings' diagnostics, the directive tables' commands, the
-  predefines' shell commands, and `clang --version` for the reference report.
+- the predefines' shell commands (`predefines_test_shell`: `env -u CPATH -u
+  C_INCLUDE_PATH clang ... 2>&1` and `clang --version | head -1`), through
+  `/bin/sh` and `env`, with both streams in one pipe, and `clang --version` for
+  the reference report (`clang_reference_output`), both streams in one pipe
+  too: the server captures each stream apart, so their order within the pipe
+  isn't its to give;
+- the location option's checks, nested runs of this executable
+  (`pp_directive_test_location_option`'s `/proc/self/exe` commands), whose
+  clang runs are theirs: children of a command line the check fixes, with no
+  server, and `benchmark-preprocessor --clang`'s `-E -P -o`, which writes a
+  file;
+- the guard counts of the directives' fixtures and of the files
+  (`pp_directive_test_clang_guards`), whose `-Xclang -print-stats` prints
+  LLVM's statistics, the process's counters, which a server's runs add up: they
+  don't fit (`oracle_server_fits`), and run as children;
+- the client's `clang -dumpversion`, its check of the server's release.
 
 `--clang` also compares every case and file with `clang -E` and the same
 options (but `--predefines`, `--location-limit` and `--window-bytes`, ours alone), token spelling by token spelling, and then where clang's line markers

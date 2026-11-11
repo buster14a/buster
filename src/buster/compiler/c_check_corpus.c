@@ -2152,8 +2152,10 @@ static bool check_corpus_view_equal(const CheckCorpusPath* a, const CheckCorpusP
         const CheckInputReport* l = left->reports + report;
         const CheckInputReport* r = right->reports + report;
         // (An asm constraint's report holds its bytes' address in its path's arena, #1973: the bytes compare.)
-        const bool constraint = l->message == CHECK_INPUT_ASM_CONSTRAINT && l->detail == r->detail && l->value != 0 && r->value != 0;
-        const uint32_t constraint_length = l->detail & ~BUSTER_CHECK_ASM_OUTPUT;
+        // So does a register variable's label's (#1846).
+        const bool register_name = l->message == CHECK_INPUT_REGISTER_NAME && l->detail == r->detail && l->value != 0 && r->value != 0;
+        const bool constraint = (l->message == CHECK_INPUT_ASM_CONSTRAINT || register_name) && l->detail == r->detail && l->value != 0 && r->value != 0;
+        const uint32_t constraint_length = l->detail & ~(register_name ? BUSTER_CHECK_REGISTER_NAME_UNSUITABLE | BUSTER_CHECK_REGISTER_NAME_SIZE : BUSTER_CHECK_ASM_OUTPUT);
         const bool same_value = constraint ? memcmp((const void*)(uintptr_t)l->value, (const void*)(uintptr_t)r->value, constraint_length) == 0 : l->value == r->value;
         equal = equal && l->completion == r->completion && l->suborder == r->suborder && l->attribute == r->attribute && l->detail == r->detail &&
                 same_value && l->type == r->type && l->type_spelling == r->type_spelling && l->note_token == r->note_token &&

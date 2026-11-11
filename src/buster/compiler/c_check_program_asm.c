@@ -17,7 +17,7 @@
 //     (BUSTER_CHECK_ASM_PAIR), memory (an lvalue's:
 //     clang and the checker refuse an rvalue there), an integer constant, or an output's register (a matching input).
 //     An operand that names an explicit register variable takes the variable's register instead, as clang's code gives
-//     it (check_asm_variable_register). Every operand has a register of its own but a matching pair, none a clobber,
+//     it (check_asm_variable_register); rsp's, an asm body's alone, as clang's code moves it (check_asm_stack). Every operand has a register of its own but a matching pair, none a clobber,
 //     caller-saved ones first (check_asm_take).
 //   - Substitution (check_asm_substitute): the template with each operand as GCC and clang print it in AT&T syntax: a
 //     register by the operand's size or its modifier's (b h w k q), memory as (%reg), a constant as $value, and %%, %=,
@@ -57,7 +57,8 @@
 // and constants outside their
 // letter's range, operands of types no general or XMM register holds by value (but a vector in a template of no
 // instructions, BUSTER_CHECK_ASM_HELD), bit-fields, explicit register variables in registers it doesn't place one in
-// (rsp, APX's and the other classes'), in XMM16 up without AVX-512F, and as memory inputs, clobbers of an operand's register, APX's
+// (APX's and the other classes'), in rsp in a statement that keeps a helper, in XMM16 up without AVX-512F, and as memory
+// inputs, clobbers of an operand's register, APX's
 // registers, templates the assembler refuses, a template's CFI directives, a label two templates define, and a `.L`
 // name no template defines; and of naked functions (CheckProgramNaked.reason) statements other than asm statements,
 // operands other than integer constants, and bodies of no instructions.
@@ -100,6 +101,17 @@
 // clang's code places an __int128 there; its slots take 16 bytes. A narrower A operand is a general register's, rax
 // (CheckAsmPlace.wide).
 #define BUSTER_CHECK_ASM_PAIR 10
+// A naked function's operand that names a static object (#1845), whose name and offset (CheckAsmPlace.symbol and
+// .constant) the template prints, as clang's: an "i" operand's address constant (`$g+8`, bare `g+8` with c, p or P,
+// and `g+8(%rip)` with a), and an "m" operand of the object itself (`g+8(%rip)`, `g+16(%rip)` with H).
+#define BUSTER_CHECK_ASM_SYMBOL 11
+#define BUSTER_CHECK_ASM_SYMBOL_MEMORY 12
+
+// check_asm_variable_register's number for an explicit register variable in rsp, esp or sp (#1846), and the first of
+// ymm0 to ymm31's and of zmm0 to zmm31's.
+#define BUSTER_CHECK_ASM_VARIABLE_RSP 90
+#define BUSTER_CHECK_ASM_VARIABLE_YMM 96
+#define BUSTER_CHECK_ASM_VARIABLE_ZMM 128
 
 // The general registers but rsp, the ones the helper may take, and the callee-saved ones among them.
 #define BUSTER_CHECK_ASM_GENERAL_ALL (0xffffu & ~(1u << X86_REGISTER_RSP))
@@ -155,9 +167,21 @@ struct CheckAsmPlace
     bool shadowed;
     // An __m64 in an MMX register (#1846, the owner's decision on #1447): its 8 bytes as an unsigned long (`type`),
     // which the lowering reads through the object's address (`object`, the operand's lvalue node past its value's
-    // conversions), as Tier 0 has no 8-byte vector load.
+    // conversions), as Tier 0 has no 8-byte vector load, or through a copy's for an input of no object
+    // (BUSTER_CHECK_NONE: `v + v`).
     bool m64;
     uint32_t object;
+    // A vector of 16, 32 or 64 bytes (`size`) in an XMM, YMM or ZMM register (#1846, the owner's decision on #1447): its
+    // slots hold addresses, an output's of its object and an input's (and a `+` operand's value's) of a copy the lowering
+    // makes, which the asm body or the helper moves it through by movups (`vex`: VEX's vmovups, with AVX; EVEX's for a
+    // ZMM register and for XMM16 up), loading each address into rax before the general registers' loads.
+    bool packed;
+    bool vex;
+    // A global register variable's operand (#1846): its register, rsp or rbp, which the template names and nothing loads,
+    // stores or gives a slot.
+    bool global;
+    // A symbol operand's name (BUSTER_CHECK_ASM_SYMBOL and _SYMBOL_MEMORY, #1845).
+    String8 symbol;
 };
 
 // A label a template defines (AsmCodeLabel): its spelling, its record in its code, the helper's or the naked function's
@@ -243,6 +267,8 @@ struct CheckProgramAsm
     uint32_t inline_branch_count;
     // Whether its template returns (Tier0AsmBody.leaves).
     bool inline_leaves;
+    // Whether it moves rsp's variable's input into rsp (#1846, Tier0AsmBody.stack).
+    bool inline_stack;
     // Whether its register operands are its call row's arguments, each in its register (check_asm_inline_code's
     // `passed`), rather than loads from its block.
     bool inline_passed;
@@ -647,6 +673,18 @@ static void check_asm_emit_number(Arena* scratch, int64_t value, bool* valid)
     check_asm_emit_bytes(scratch, digits, (uint64_t)length, valid);
 }
 
+// A symbol operand's name and offset (#1845): `g`, `g+8` or `g-8`, as clang prints them.
+static void check_asm_emit_symbol(Arena* scratch, const CheckAsmPlace* place, int64_t extra, bool* valid)
+{
+    const int64_t offset = place->constant + extra;
+    check_asm_emit_bytes(scratch, place->symbol.pointer, place->symbol.length, valid);
+    check_asm_emit_text(scratch, offset > 0 ? "+" : "", valid);
+    if (offset != 0)
+    {
+        check_asm_emit_number(scratch, offset, valid);
+    }
+}
+
 // Operand `place`, as GCC and clang print it in AT&T syntax with `modifier` (0 for none): NULL, or the feature a
 // modifier the lowering doesn't print names.
 static const char* check_asm_print(Arena* scratch, const CheckAsmPlace* place, uint8_t modifier, bool* valid)
@@ -686,7 +724,9 @@ static const char* check_asm_print(Arena* scratch, const CheckAsmPlace* place, u
     {
         if (modifier == 0 || modifier == 'x' || modifier == 't' || modifier == 'g')
         {
-            check_asm_emit_text(scratch, modifier == 't' ? "%ymm" : modifier == 'g' ? "%zmm" : "%xmm", valid);
+            // Its own size's name without a modifier (#1846: a packed vector's ymm or zmm), as clang prints it.
+            const uint8_t named = modifier != 0 ? modifier : place->size == 64 ? 'g' : place->size == 32 ? 't' : 'x';
+            check_asm_emit_text(scratch, named == 't' ? "%ymm" : named == 'g' ? "%zmm" : "%xmm", valid);
             check_asm_emit_number(scratch, place->reg, valid);
         }
         else
@@ -723,6 +763,21 @@ static const char* check_asm_print(Arena* scratch, const CheckAsmPlace* place, u
                 check_asm_emit_number(scratch, place->reg, valid);
                 check_asm_emit_text(scratch, ")", valid);
             }
+        }
+        else
+        {
+            refused = "this inline assembly operand modifier";
+        }
+    }
+    else if (place->kind == BUSTER_CHECK_ASM_SYMBOL || place->kind == BUSTER_CHECK_ASM_SYMBOL_MEMORY)
+    {
+        const bool memory = place->kind == BUSTER_CHECK_ASM_SYMBOL_MEMORY;
+        const bool printed = memory ? modifier == 0 || modifier == 'H' : modifier == 0 || modifier == 'c' || modifier == 'p' || modifier == 'P' || modifier == 'a';
+        if (printed)
+        {
+            check_asm_emit_text(scratch, !memory && modifier == 0 ? "$" : "", valid);
+            check_asm_emit_symbol(scratch, place, modifier == 'H' ? 8 : 0, valid);
+            check_asm_emit_text(scratch, memory || modifier == 'a' ? "(%rip)" : "", valid);
         }
         else
         {
@@ -883,7 +938,7 @@ static const char* check_asm_substitute(const CheckInputAsm* statement, const Ch
 // value, a matching input's into its output's register, a `+` operand's) and a memory operand's address.
 static bool check_asm_loads(const CheckAsmPlace* place)
 {
-    return place->kind == BUSTER_CHECK_ASM_MEMORY || ((place->kind == BUSTER_CHECK_ASM_GENERAL || place->kind == BUSTER_CHECK_ASM_VECTOR) && place->read);
+    return place->kind == BUSTER_CHECK_ASM_MEMORY || ((place->kind == BUSTER_CHECK_ASM_GENERAL || (place->kind == BUSTER_CHECK_ASM_VECTOR && !place->packed)) && place->read);
 }
 
 // Whether the helper stores operand `place` after the template: a register output, through the address its slot holds.
@@ -927,6 +982,53 @@ static bool check_asm_pair_loads(const CheckAsmPlace* place)
 static bool check_asm_pair_stores(const CheckAsmPlace* place)
 {
     return place->kind == BUSTER_CHECK_ASM_PAIR && place->written;
+}
+
+// Whether `type` is a vector of `size` bytes, a packed operand's (CheckAsmPlace.packed): a matching input of one's.
+static bool check_asm_packed_type(const TypeTable* types, TypeId type, uint32_t size)
+{
+    const uint8_t kind = check_action_kind(types, type);
+    return (kind == BUSTER_TYPE_KIND_VECTOR || kind == BUSTER_TYPE_KIND_EXT_VECTOR) && type_is_complete(types, type) && type_size(types, type) == size;
+}
+
+// Why a vector of `size` bytes in XMM, YMM or ZMM register `reg` can't be placed under `target` (#1846), or NULL: clang
+// moves 32 bytes with AVX, 64 with AVX-512F, and XMM16 up's 16 or 32 with AVX-512VL beside it, and can't place one
+// without ("could not allocate", or Sema's "invalid output size").
+static const char* check_asm_packed_refused(const X86Target* target, uint32_t size, uint32_t reg)
+{
+    const uint64_t features = target->features;
+    const bool avx512 = (features & BUSTER_X86_FEATURE(AVX512F)) != 0;
+    const bool vl = avx512 && (features & BUSTER_X86_FEATURE(AVX512VL)) != 0;
+    return size == 32 && (features & BUSTER_X86_FEATURE(AVX)) == 0 ? "inline assembly vector operands of 32 bytes without AVX" :
+           size == 64 && !avx512                                     ? "inline assembly vector operands of 64 bytes without AVX-512F" :
+           reg >= 16 && size != 64 && !vl                            ? "inline assembly vector operands in XMM16 to XMM31 or YMM16 to YMM31 without AVX-512VL" :
+                                                                       NULL;
+}
+
+// The form that moves packed operand `place` (CheckAsmPlace.packed) from memory into its register, or with `store`, from
+// its register into memory: movups's, VEX's with AVX, EVEX's for ZMM and for XMM16 up.
+static uint32_t check_asm_packed_form(const CheckAsmPlace* place, bool store)
+{
+    const bool evex = place->reg >= 16;
+    return place->size == 64 ? (store ? X86_FORM_VMOVUPS_ZM512_Z : X86_FORM_VMOVUPS_Z_ZM512) :
+           place->size == 32 ? (evex ? (store ? X86_FORM_VMOVUPS_YM256_Y_EVEX : X86_FORM_VMOVUPS_Y_YM256_EVEX) : (store ? X86_FORM_VMOVUPS_YM256_Y : X86_FORM_VMOVUPS_Y_YM256)) :
+           evex ? (store ? X86_FORM_VMOVUPS_XM128_X_EVEX : X86_FORM_VMOVUPS_X_XM128_EVEX) :
+           place->vex ? (store ? X86_FORM_VMOVUPS_XM128_X : X86_FORM_VMOVUPS_X_XM128) : (store ? X86_FORM_MOVUPS_XM_X : X86_FORM_MOVUPS_X_XM);
+}
+
+// Whether the helper or the asm body loads packed operand `place` before the template (an input's, a matching input's, a
+// `+` operand's): its address into rax, then the vector through it (check_asm_packed_form).
+static bool check_asm_packed_loads(const CheckAsmPlace* place)
+{
+    return place->kind == BUSTER_CHECK_ASM_VECTOR && place->packed && place->read;
+}
+
+// Whether `place` is rsp's explicit register variable's (#1846): an asm body's alone, whose input is moved into rsp after
+// every other load, at its width (a narrower one keeps rsp's other bits, as clang's movw and movb do), and whose output
+// is stored from rsp after the template.
+static bool check_asm_stack(const CheckAsmPlace* place)
+{
+    return place->kind == BUSTER_CHECK_ASM_GENERAL && place->reg == X86_REGISTER_RSP && !place->global;
 }
 
 // Whether the helper stores flag output `place` after the template: its condition's value over its object.
@@ -988,7 +1090,7 @@ static Tier0Code check_asm_helper_code(const CheckAsmPlace* places, uint32_t cou
         loads += check_asm_loads(places + k) || check_asm_x87_loads(places + k);
         stored += check_asm_stores(places + k) || check_asm_x87_stores(places + k);
         flags += check_asm_flag_stores(places + k);
-        mmx_loads += check_asm_mmx_loads(places + k) || check_asm_pair_loads(places + k);
+        mmx_loads += check_asm_mmx_loads(places + k) || check_asm_pair_loads(places + k) || check_asm_packed_loads(places + k);
         mmx_stores += check_asm_mmx_stores(places + k) || check_asm_pair_stores(places + k);
     }
     // At the call, rsp is 8 past a multiple of 16; the pushes and the reservation (the block's address's slot) leave it
@@ -1070,6 +1172,18 @@ static Tier0Code check_asm_helper_code(const CheckAsmPlace* places, uint32_t cou
                                                   .displacement = (int32_t)slot };
                 written[at++] = (X86Instruction){ .form = X86_FORM_MOV_R64_RM64, .reg = X86_REGISTER_RDX, .rm = X86_REGISTER_RDI, .mode = BUSTER_X86_MEMORY_BASE,
                                                   .displacement = (int32_t)slot + 8 };
+            }
+        }
+        // The vectors of 16 bytes or more (#1846), each through its address, which rax takes before the general loads.
+        for (uint32_t k = 0; k < count; k += 1)
+        {
+            const CheckAsmPlace* place = places + k;
+            if (check_asm_packed_loads(place))
+            {
+                written[at++] = (X86Instruction){ .form = X86_FORM_MOV_R64_RM64, .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RDI, .mode = BUSTER_X86_MEMORY_BASE,
+                                                  .displacement = (int32_t)(place->written ? place->value : place->slot) };
+                written[at++] = (X86Instruction){ .form = (uint16_t)check_asm_packed_form(place, false), .reg = place->reg, .rm = X86_REGISTER_RAX,
+                                                  .mode = BUSTER_X86_MEMORY_BASE };
             }
         }
         // The loads, from the block rdi holds: the one into rdi last. Only a matching pair shares a register, and of it only
@@ -1210,7 +1324,8 @@ static Tier0Code check_asm_helper_code(const CheckAsmPlace* places, uint32_t cou
                                                   .displacement = (int32_t)place->slot };
                 // XMM16 up by EVEX's forms, and a high byte by its name, through a register of the first eight (#1846).
                 const bool evex = place->kind == BUSTER_CHECK_ASM_VECTOR && place->reg >= 16;
-                const uint32_t form = place->kind == BUSTER_CHECK_ASM_VECTOR ? (place->size == 4 ? (evex ? X86_FORM_VMOVD_RM32_X_EVEX : X86_FORM_MOVD_RM32_X) :
+                const uint32_t form = place->packed ? check_asm_packed_form(place, true) :
+                                      place->kind == BUSTER_CHECK_ASM_VECTOR ? (place->size == 4 ? (evex ? X86_FORM_VMOVD_RM32_X_EVEX : X86_FORM_MOVD_RM32_X) :
                                                                                                   (evex ? X86_FORM_VMOVQ_XM64_X_EVEX : X86_FORM_MOVQ_XM64_X)) :
                                       place->size == 1 ? X86_FORM_MOV_RM8_R8 : place->size == 2 ? X86_FORM_MOV_RM16_R16 :
                                       place->size == 4 ? X86_FORM_MOV_RM32_R32 : X86_FORM_MOV_RM64_R64;
@@ -1350,7 +1465,7 @@ static uint32_t check_asm_inline_code(const CheckAsmPlace* places, uint32_t coun
         loads += check_asm_loads(places + k) || check_asm_x87_loads(places + k);
         stored += check_asm_stores(places + k) || check_asm_x87_stores(places + k);
         flags += check_asm_flag_stores(places + k);
-        mmx_loads += check_asm_mmx_loads(places + k) || check_asm_pair_loads(places + k);
+        mmx_loads += check_asm_mmx_loads(places + k) || check_asm_pair_loads(places + k) || check_asm_packed_loads(places + k);
         mmx_stores += check_asm_mmx_stores(places + k) || check_asm_pair_stores(places + k);
     }
     // An x87 output that shares its depth with a later one is stored from a copy, one record more (fld %st(0)). An MMX or
@@ -1408,17 +1523,32 @@ static uint32_t check_asm_inline_code(const CheckAsmPlace* places, uint32_t coun
                                                   .displacement = (int32_t)slot + 8 };
             }
         }
+        // The vectors of 16 bytes or more (#1846), each through its address, which rax takes, as the helper loads them.
         for (uint32_t k = 0; k < count; k += 1)
         {
             const CheckAsmPlace* place = places + k;
-            if (check_asm_loads(place) && !passed)
+            if (check_asm_packed_loads(place))
+            {
+                written[at++] = (X86Instruction){ .form = X86_FORM_MOV_R64_RM64, .reg = X86_REGISTER_RAX, .rm = BUSTER_TIER0_ASM_BLOCK, .mode = BUSTER_X86_MEMORY_BASE,
+                                                  .displacement = (int32_t)(place->written ? place->value : place->slot) };
+                written[at++] = (X86Instruction){ .form = (uint16_t)check_asm_packed_form(place, false), .reg = place->reg, .rm = X86_REGISTER_RAX,
+                                                  .mode = BUSTER_X86_MEMORY_BASE };
+            }
+        }
+        for (uint32_t i = 0; i < 2 * count; i += 1)
+        {
+            // rsp's variable last (#1846), at its width, as the block's other loads may be rsp-relative.
+            const CheckAsmPlace* place = places + i % count;
+            const bool stack = check_asm_stack(place);
+            if (check_asm_loads(place) && !passed && stack == (i >= count))
             {
                 const uint32_t slot = place->written && place->kind != BUSTER_CHECK_ASM_MEMORY ? place->value : place->slot;
                 // XMM16 up by EVEX's forms, and a high byte by its name (#1846), as the helper loads them.
                 const bool evex = place->kind == BUSTER_CHECK_ASM_VECTOR && place->reg >= 16;
                 const uint32_t form = place->kind == BUSTER_CHECK_ASM_VECTOR ? (place->size == 4 ? (evex ? X86_FORM_VMOVD_X_RM32_EVEX : X86_FORM_MOVD_X_RM32) :
                                                                                                   (evex ? X86_FORM_VMOVQ_X_XM64_EVEX : X86_FORM_MOVQ_X_XM64)) :
-                                      place->high                            ? X86_FORM_MOV_R8_RM8 :
+                                      place->high || (stack && place->size == 1) ? X86_FORM_MOV_R8_RM8 :
+                                      stack && place->size == 2              ? X86_FORM_MOV_R16_RM16 :
                                       place->kind == BUSTER_CHECK_ASM_MEMORY ? X86_FORM_MOV_R64_RM64 :
                                       place->size == 1 ? X86_FORM_MOVZX_R32_RM8 : place->size == 2 ? X86_FORM_MOVZX_R32_RM16 :
                                       place->size == 4 ? X86_FORM_MOV_R32_RM32 : X86_FORM_MOV_R64_RM64;
@@ -1470,7 +1600,8 @@ static uint32_t check_asm_inline_code(const CheckAsmPlace* places, uint32_t coun
                                                   .displacement = (int32_t)place->slot };
                 // XMM16 up by EVEX's forms, and a high byte by its name through a store register of the first eight (#1846).
                 const bool evex = place->kind == BUSTER_CHECK_ASM_VECTOR && place->reg >= 16;
-                const uint32_t form = place->kind == BUSTER_CHECK_ASM_VECTOR ? (place->size == 4 ? (evex ? X86_FORM_VMOVD_RM32_X_EVEX : X86_FORM_MOVD_RM32_X) :
+                const uint32_t form = place->packed ? check_asm_packed_form(place, true) :
+                                      place->kind == BUSTER_CHECK_ASM_VECTOR ? (place->size == 4 ? (evex ? X86_FORM_VMOVD_RM32_X_EVEX : X86_FORM_MOVD_RM32_X) :
                                                                                                   (evex ? X86_FORM_VMOVQ_XM64_X_EVEX : X86_FORM_MOVQ_XM64_X)) :
                                       place->size == 1 ? X86_FORM_MOV_RM8_R8 : place->size == 2 ? X86_FORM_MOV_RM16_R16 :
                                       place->size == 4 ? X86_FORM_MOV_RM32_R32 : X86_FORM_MOV_RM64_R64;
@@ -1606,7 +1737,7 @@ static const CheckAsmImplicit check_asm_implicit[] = {
 
 // Whether an asm body's register operands may be its call row's arguments (check_asm_inline_code's `passed`): not with
 // #1846's MMX and opmask operands, which its records load through rax before the general registers' loads, nor A's
-// rdx:rax pairs, nor register variables in a high byte or in XMM16 up, which no argument's register is; a body of one
+// rdx:rax pairs, nor register variables in a high byte, in XMM16 up or in rsp, which no argument's register is; a body of one
 // loads every operand from its block, in the helper's order.
 static bool check_asm_inline_passes(const CheckAsmPlace* places, uint32_t count)
 {
@@ -1614,7 +1745,7 @@ static bool check_asm_inline_passes(const CheckAsmPlace* places, uint32_t count)
     for (uint32_t k = 0; k < count; k += 1)
     {
         takes &= places[k].kind != BUSTER_CHECK_ASM_MMX && places[k].kind != BUSTER_CHECK_ASM_MASK && places[k].kind != BUSTER_CHECK_ASM_PAIR &&
-                 !places[k].high && !(places[k].kind == BUSTER_CHECK_ASM_VECTOR && places[k].reg >= 16);
+                 !places[k].high && !(places[k].kind == BUSTER_CHECK_ASM_VECTOR && (places[k].reg >= 16 || places[k].packed)) && !check_asm_stack(places + k);
     }
     return takes;
 }
@@ -1639,7 +1770,7 @@ static uint32_t check_asm_inline_touched(const CheckAsmPlace* places, uint32_t c
         written |= places[k].kind == BUSTER_CHECK_ASM_VECTOR && places[k].reg < 16 ? 1ull << (16 + places[k].reg) : 0;
         // An MMX or opmask operand's load goes through rax, and A's pair is rax and rdx (#1846); an opmask operand's
         // register is written by its load (CheckProgramAsm.inline_masks).
-        written |= check_asm_mmx_loads(places + k) ? 1ull << X86_REGISTER_RAX : 0;
+        written |= check_asm_mmx_loads(places + k) || check_asm_packed_loads(places + k) ? 1ull << X86_REGISTER_RAX : 0;
         written |= places[k].kind == BUSTER_CHECK_ASM_PAIR ? 1ull << X86_REGISTER_RAX | 1ull << X86_REGISTER_RDX : 0;
         opmask_writes |= places[k].kind == BUSTER_CHECK_ASM_MASK ? 1u << (places[k].reg & 7) : 0;
     }
@@ -1966,6 +2097,31 @@ static bool check_asm_noop_cast(const TypeTable* types, TypeId source, TypeId de
     return type_unqualified(source) == type_unqualified(destination) || (from && to && sized && type_size(types, source) == type_size(types, destination));
 }
 
+// A global register variable's register (#1846, the owner's decision on #1447): `register long sp __asm__("rsp")` at file
+// scope, whose reads and writes are the register's, as clang's code makes them (llvm.read_register and write_register):
+// X86_REGISTER_RSP or X86_REGISTER_RBP, with its bytes (8, or 4 for esp's and ebp's) in `*bytes`; or -1 for an object
+// that is no such variable. The checker took only these four names (check_input_register_label).
+static int32_t check_program_global_register(const CheckProgram* program, uint32_t object, uint32_t* bytes)
+{
+    const CheckInput* input = program->input;
+    const uint32_t declaration = object != 0 && object <= input->token_count ? object - 1 : BUSTER_CHECK_NONE;
+    const bool global = declaration < input->token_count && check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_REGISTER) &&
+                        check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_STATIC);
+    const CheckInputAttributes* attributes = global ? check_input_attributes_at(input, declaration) : 0;
+    int32_t result = -1;
+    for (uint32_t i = 0; attributes != 0 && i < attributes->count; i += 1)
+    {
+        const CheckInputAttribute* attribute = attributes->records + i;
+        const String8 name = attribute->kind == CHECK_ATTRIBUTE_ASM_LABEL && !attribute->ignored ? attribute->text : (String8){ 0 };
+        if (name.length == 3 && (name.pointer[0] == 'r' || name.pointer[0] == 'e') && (memcmp(name.pointer + 1, "sp", 2) == 0 || memcmp(name.pointer + 1, "bp", 2) == 0))
+        {
+            result = name.pointer[1] == 's' ? X86_REGISTER_RSP : X86_REGISTER_RBP;
+            *bytes = name.pointer[0] == 'r' ? 8 : 4;
+        }
+    }
+    return result;
+}
+
 // The register an asm operand takes when its expression names an explicit register variable (`register long r10
 // asm("r10") = a4;` and then "r"(r10), musl's syscall wrappers'), as clang's code gives it (CodeGen's
 // AddVariableConstraints): the variable itself, through casts that keep its value (check_asm_noop_cast), so that
@@ -1973,11 +2129,12 @@ static bool check_asm_noop_cast(const TypeTable* types, TypeId source, TypeId de
 // whatever its letters: "a"(r10) is in r10, and a matching input is in it rather than in its output's register. A
 // general register's number (0 to 15, by any of its names), 16 plus an XMM register's (16 to 47: XMM16 up, #1846), 48
 // plus a high byte's register's (ah 48, ch 49, dh 50, bh 51), 64 plus an MMX register's (mm0 64 to mm7 71), 72 plus an
-// opmask register's (k0 72 to k7 79), 80 for st (st(0)) and 81 for st(1) (#1846), -1 for an operand that names no such
-// variable, or -2 for a register the lowering doesn't place one in: rsp, which is the helper's (clang moves the
-// variable's value into it), APX's r16 to r31, the x87's deeper registers, YMM's and ZMM's.
+// opmask register's (k0 72 to k7 79), 80 for st (st(0)) and 81 for st(1) (#1846), 90 for rsp (esp, sp:
+// BUSTER_CHECK_ASM_VARIABLE_RSP, #1846), 96 plus a YMM register's and 128 plus a ZMM register's (#1846), -1 for an operand
+// that names no such variable, or -2 for a register the lowering doesn't place one in: APX's r16 to r31 and the x87's
+// deeper registers.
 // An object's id is its first declaration's token plus one, which has its attributes.
-static int32_t check_asm_variable_register(const CheckProgram* program, uint32_t node)
+static int32_t check_asm_variable_register(const CheckProgram* program, uint32_t node, bool* global)
 {
     const CheckInput* input = program->input;
     const CheckStream* stream = program->stream;
@@ -1996,6 +2153,9 @@ static int32_t check_asm_variable_register(const CheckProgram* program, uint32_t
     const uint32_t declaration = value != 0 && (value->flags & BUSTER_CHECK_REGISTER) != 0 && value->object != 0 && value->object <= input->token_count ?
                                  value->object - 1 : BUSTER_CHECK_NONE;
     const CheckInputAttributes* attributes = declaration < input->token_count && check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_REGISTER) ? check_input_attributes_at(input, declaration) : 0;
+    // A global register variable's (#1846, check_program_global_register): its register itself.
+    uint32_t global_bytes = 0;
+    *global = declaration < input->token_count && check_program_global_register(program, declaration + 1, &global_bytes) >= 0;
     int32_t result = -1;
     for (uint32_t i = 0; attributes != 0 && i < attributes->count; i += 1)
     {
@@ -2012,14 +2172,20 @@ static int32_t check_asm_variable_register(const CheckProgram* program, uint32_t
             for (uint32_t r = 0; reg == -2 && r < 16; r += 1)
             {
                 const char* spelling = check_asm_registers[size][r];
-                reg = r != X86_REGISTER_RSP && name.length == strlen(spelling) && memcmp(name.pointer, spelling, name.length) == 0 ? (int32_t)r : -2;
+                const bool same = name.length == strlen(spelling) && memcmp(name.pointer, spelling, name.length) == 0;
+                // rsp, esp and sp are 90 (#1846): clang knows no "spl" as a register variable's name.
+                reg = !same ? -2 : r != X86_REGISTER_RSP ? (int32_t)r : size != 0 ? BUSTER_CHECK_ASM_VARIABLE_RSP : -2;
             }
         }
-        // xmm0 to xmm31, without leading zeros, as clang's register names spell them (#1846: XMM16 up with AVX-512F).
-        const bool digits = (name.length == 4 || name.length == 5) && memcmp(name.pointer, "xmm", 3) == 0 && name.pointer[3] >= '0' && name.pointer[3] <= '9' &&
+        // xmm0 to xmm31, without leading zeros, as clang's register names spell them (#1846: XMM16 up with AVX-512F), and
+        // ymm0 to ymm31 (96 up) and zmm0 to zmm31 (128 up) (#1846).
+        const char prefix = name.length != 0 ? name.pointer[0] : 0;
+        const bool vector_name = (prefix == 'x' || prefix == 'y' || prefix == 'z') && name.length >= 3 && name.pointer[1] == 'm' && name.pointer[2] == 'm';
+        const bool digits = (name.length == 4 || name.length == 5) && vector_name && name.pointer[3] >= '0' && name.pointer[3] <= '9' &&
                             (name.length == 4 || (name.pointer[3] != '0' && name.pointer[4] >= '0' && name.pointer[4] <= '9'));
         const int32_t number = !digits ? 99 : name.length == 4 ? name.pointer[3] - '0' : (name.pointer[3] - '0') * 10 + name.pointer[4] - '0';
-        reg = reg == -2 && number < 32 ? 16 + number : reg;
+        const int32_t first = prefix == 'x' ? 16 : prefix == 'y' ? BUSTER_CHECK_ASM_VARIABLE_YMM : BUSTER_CHECK_ASM_VARIABLE_ZMM;
+        reg = reg == -2 && number < 32 ? first + number : reg;
         // ah, ch, dh and bh (#1846): 48 plus their register's number.
         static const char* const high[4] = { "ah", "ch", "dh", "bh" };
         for (uint32_t h = 0; reg == -2 && h < 4; h += 1)
@@ -2137,7 +2303,8 @@ static bool check_asm_row(const CheckProgram* program, uint32_t s, const CheckAs
         }
         else if (place->kind == BUSTER_CHECK_ASM_VECTOR && !tied)
         {
-            placed = constraints[k].fixed_vector == 0 && vector < 16;
+            // A float or a double's alone: a vector of 16 bytes or more is moved through its address (CheckAsmPlace.packed).
+            placed = constraints[k].fixed_vector == 0 && vector < 16 && !place->packed;
             moved[k].reg = (uint8_t)vector;
             vector += 1;
         }
@@ -2340,6 +2507,8 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
     uint32_t vectors = 0;
     uint32_t mmx = 0;
     uint32_t masks = 0;
+    // The vectors of 16 bytes or more that a template of no instructions evaluates alone (CheckAsmPlace.packed), a bit each.
+    uint64_t barriers = 0;
     for (uint32_t c = 0; valid && reason == NULL && c < statement->clobber_count; c += 1)
     {
         const CheckAsmText clobber = statement->clobbers[c];
@@ -2378,6 +2547,8 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
         const bool integer = check_action_integer_type(types, type, &width, &is_signed) || kind == BUSTER_TYPE_KIND_POINTER;
         const bool floating = kind == BUSTER_TYPE_KIND_FLOATING && (size == 4 || size == 8);
         const bool registered = (integer || floating) && (size == 1 || size == 2 || size == 4 || size == 8);
+        // A vector of an XMM, YMM or ZMM register's bytes (#1846: CheckAsmPlace.packed).
+        const bool packed = (kind == BUSTER_TYPE_KIND_VECTOR || kind == BUSTER_TYPE_KIND_EXT_VECTOR) && (size == 16 || size == 32 || size == 64);
         constraints[k] = check_asm_constraint_parse(statement, program->identifiers, statement->operands[k].constraint, output);
         CheckAsmConstraint* constraint = constraints + k;
         CheckAsmPlace* place = places + k;
@@ -2399,7 +2570,8 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
         // An explicit register variable's register, whatever the constraint's letters (check_asm_variable_register): an
         // output's even of a memory constraint, which clang's code makes that register too, but not an input's of one,
         // which clang refuses as it lowers it ("cannot handle indirect register inputs yet").
-        const int32_t variable = check_asm_variable_register(program, checked->node);
+        bool global = false;
+        const int32_t variable = check_asm_variable_register(program, checked->node, &global);
         const bool memory_only = constraint->memory && constraint->general == 0 && !constraint->vector && constraint->x87 == 0 && !constraint->mmx && constraint->masks == 0;
         const uint32_t x87 = check_asm_x87_bytes(types, type);
         if (constraint->refused != NULL)
@@ -2433,6 +2605,27 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
         {
             reason = "explicit register variables as inline assembly memory inputs";
         }
+        else if (global && (variable == BUSTER_CHECK_ASM_VARIABLE_RSP || variable == X86_REGISTER_RBP))
+        {
+            // A global register variable (#1846): the register itself, whose value clang's code reads into a register and
+            // moves back, and after the template reads and writes back, the same value: the template names it, and nothing
+            // is loaded or stored. rbp's gives its function a frame pointer (check_lower_asm), as clang's reads rbp in one.
+            place->kind = BUSTER_CHECK_ASM_GENERAL;
+            place->tied = BUSTER_CHECK_NONE;
+            place->global = true;
+            place->written = false;
+            place->read = false;
+            constraint->general = 1u << (variable == BUSTER_CHECK_ASM_VARIABLE_RSP ? X86_REGISTER_RSP : X86_REGISTER_RBP);
+        }
+        else if (variable == BUSTER_CHECK_ASM_VARIABLE_RSP && integer && registered)
+        {
+            // rsp's variable (#1846, the owner's decision on #1447): an input's value moved into rsp before the template
+            // and an output's read from it after, at the variable's width (spl, sp, esp or rsp), as clang's code does
+            // (check_asm_stack).
+            place->kind = BUSTER_CHECK_ASM_GENERAL;
+            place->tied = BUSTER_CHECK_NONE;
+            constraint->general = 1u << X86_REGISTER_RSP;
+        }
         else if ((variable >= 0 && variable < 16 && registered) || (variable >= 48 && variable < 52 && registered))
         {
             // Fixed to it (taken first, below), and not a matching input's: clang gives it the variable's register. A high
@@ -2443,6 +2636,22 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
             place->tied = BUSTER_CHECK_NONE;
             place->high = variable >= 48 && size == 1;
             constraint->general = 1u << reg;
+        }
+        else if (packed && ((variable >= 16 && variable < 48 && size == 16) ||
+                            (variable >= BUSTER_CHECK_ASM_VARIABLE_YMM && variable < BUSTER_CHECK_ASM_VARIABLE_YMM + 32 && size == 32) ||
+                            (variable >= BUSTER_CHECK_ASM_VARIABLE_ZMM && variable < BUSTER_CHECK_ASM_VARIABLE_ZMM + 32 && size == 64)))
+        {
+            // A vector in its own size's register (#1846, the owner's decision on #1447): xmm's 16 bytes, ymm's 32 and zmm's
+            // 64, as clang's code takes them (another size's is its "does not match required type").
+            const uint32_t number = (uint32_t)variable - (variable < 48 ? 16 : variable < BUSTER_CHECK_ASM_VARIABLE_ZMM ? BUSTER_CHECK_ASM_VARIABLE_YMM :
+                                                                                                                        BUSTER_CHECK_ASM_VARIABLE_ZMM);
+            place->kind = BUSTER_CHECK_ASM_VECTOR;
+            place->tied = BUSTER_CHECK_NONE;
+            place->packed = true;
+            place->size = (uint8_t)size;
+            place->vex = (instruction_set->features & BUSTER_X86_FEATURE(AVX)) != 0;
+            constraint->fixed_vector = (uint8_t)(number + 1);
+            reason = check_asm_packed_refused(instruction_set, (uint32_t)size, number);
         }
         else if (variable >= 16 && variable < 48 && floating)
         {
@@ -2522,13 +2731,12 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
         else if (constraint->mmx && (kind == BUSTER_TYPE_KIND_VECTOR || kind == BUSTER_TYPE_KIND_EXT_VECTOR) && size == 8)
         {
             // An __m64 (#1846): its 8 bytes, an object's, read through its address (CheckAsmPlace.m64), as clang's code
-            // moves them by movq. An input that isn't an object has no address to read it through.
+            // moves them by movq; an input that isn't an object's, through a copy's (#1846, the owner's decision on #1447).
             place->kind = BUSTER_CHECK_ASM_MMX;
             place->size = 8;
             place->type = BUSTER_TYPE_ULONG;
             place->m64 = true;
             place->object = output ? checked->node : check_asm_m64_object(program, checked->node);
-            reason = place->object != BUSTER_CHECK_NONE ? NULL : "inline assembly __m64 inputs that aren't objects";
         }
         else if (constraint->masks != 0 && integer && registered)
         {
@@ -2546,6 +2754,18 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
         else if (constraint->memory && (output || value->category == CHECK_LVALUE))
         {
             place->kind = BUSTER_CHECK_ASM_MEMORY;
+        }
+        else if (constraint->vector && packed)
+        {
+            // A vector of 16, 32 or 64 bytes (#1846, the owner's decision on #1447), in xmm0 up, through its address. In a
+            // template of no instructions, it is evaluated alone, as a held operand was (below), but a volatile output,
+            // which clang's code loads and stores.
+            place->kind = BUSTER_CHECK_ASM_VECTOR;
+            place->packed = true;
+            place->size = (uint8_t)size;
+            place->vex = (instruction_set->features & BUSTER_X86_FEATURE(AVX)) != 0;
+            barriers |= !output || (type_qualifiers(type) & BUSTER_TYPE_VOLATILE) == 0 ? UINT64_C(1) << k : 0;
+            reason = check_asm_packed_refused(instruction_set, (uint32_t)size, 0);
         }
         else if (constraint->vector && (kind == BUSTER_TYPE_KIND_VECTOR || kind == BUSTER_TYPE_KIND_EXT_VECTOR) &&
                  (!output || (type_qualifiers(type) & BUSTER_TYPE_VOLATILE) == 0))
@@ -2565,6 +2785,7 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
     // An A output of 16 bytes that is neither early-clobbered nor `+` lets an input fixed to rax or rdx share its register,
     // as clang's code shares it (mulq's "=A"(r) : "a"(x)): the template reads the input before it writes the pair.
     uint32_t pair_shared = 0;
+    bool stack_taken = false;
     for (uint32_t o = 0; valid && reason == NULL && o < statement->output_count; o += 1)
     {
         const bool open = places[o].kind == BUSTER_CHECK_ASM_PAIR && (statement->operands[o].flags & (CHECK_ASM_EARLY | CHECK_ASM_READ)) == 0;
@@ -2590,6 +2811,12 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
             if (sharing != BUSTER_CHECK_NONE && place->tied == BUSTER_CHECK_NONE)
             {
                 place->tied = sharing;
+            }
+            else if (pass == 0 && place->kind == BUSTER_CHECK_ASM_GENERAL && place->tied == BUSTER_CHECK_NONE && allowed == 1u << X86_REGISTER_RSP)
+            {
+                // rsp's variable (#1846), which no other operand takes: an input beside an rsp output shares it (above).
+                reg = !stack_taken ? X86_REGISTER_RSP : -2;
+                stack_taken = true;
             }
             else if (pass == 0 && place->kind == BUSTER_CHECK_ASM_GENERAL && place->tied == BUSTER_CHECK_NONE && fixed)
             {
@@ -2669,7 +2896,8 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
                 if (target == 0 ||
                     (target->kind != BUSTER_CHECK_ASM_GENERAL && target->kind != BUSTER_CHECK_ASM_VECTOR && target->kind != BUSTER_CHECK_ASM_X87 && target->kind != BUSTER_CHECK_ASM_MMX &&
                      target->kind != BUSTER_CHECK_ASM_MASK && target->kind != BUSTER_CHECK_ASM_PAIR) ||
-                    target->read || (target->kind == BUSTER_CHECK_ASM_PAIR && place->size != 0 && place->size != 16))
+                    target->read || target->global || (target->kind == BUSTER_CHECK_ASM_PAIR && place->size != 0 && place->size != 16) ||
+                    (target->packed && !check_asm_packed_type(types, place->type, target->size)))
                 {
                     reason = "inline assembly inputs matching an output that isn't a register's of its own";
                 }
@@ -2680,6 +2908,8 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
                     place->size = target->kind == BUSTER_CHECK_ASM_X87 ? (uint8_t)x87 : place->size != 0 ? place->size : target->size;
                     place->wide = target->wide;
                     place->high = target->high;
+                    place->packed = target->packed;
+                    place->vex = target->vex;
                 }
             }
             if (reg >= 0)
@@ -2784,7 +3014,7 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
         CheckAsmPlace* place = places + k;
         const uint32_t bytes = (place->kind == BUSTER_CHECK_ASM_X87 || place->kind == BUSTER_CHECK_ASM_PAIR) && place->size > BUSTER_CHECK_ASM_SLOT_BYTES ? place->size :
                                BUSTER_CHECK_ASM_SLOT_BYTES;
-        if (place->kind != BUSTER_CHECK_ASM_CONSTANT && place->kind != BUSTER_CHECK_ASM_HELD)
+        if (place->kind != BUSTER_CHECK_ASM_CONSTANT && place->kind != BUSTER_CHECK_ASM_HELD && !place->global)
         {
             place->slot = block;
             block += place->written ? BUSTER_CHECK_ASM_SLOT_BYTES : bytes;
@@ -2991,22 +3221,37 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
     bool x87 = false;
     bool held = false;
     bool flagged = false;
+    bool stack = false;
+    bool stack_named = false;
+    bool moved_vectors = false;
+    bool packed_any = false;
     for (uint32_t k = 0; valid && reason == NULL && k < count; k += 1)
     {
+        stack |= check_asm_stack(places + k);
+        // rsp named by a global register variable's operand too (#1846), which a helper's rsp isn't.
+        stack_named |= places[k].kind == BUSTER_CHECK_ASM_GENERAL && places[k].reg == X86_REGISTER_RSP;
         x87 |= places[k].kind == BUSTER_CHECK_ASM_X87;
         held |= places[k].kind == BUSTER_CHECK_ASM_HELD;
+        packed_any |= places[k].packed;
+        // A packed volatile output (#1846) is loaded and stored whatever its template, as clang's code does, and so is a
+        // matching input's value moved into its output.
+        moved_vectors |= places[k].packed && ((barriers >> k & 1) == 0 || places[k].tied != BUSTER_CHECK_NONE);
         flagged |= places[k].kind == BUSTER_CHECK_ASM_FLAG;
     }
+    reason = valid && reason == NULL && unit_assembled && stack_named ? "explicit register variables in rsp in templates that take directives" : reason;
     // The MMX registers are the x87's: a statement of both (#1846, the owner's decision on #1447) loads its x87 operands
     // first and its MMX ones after, and stores the MMX outputs before the x87 ones, as clang's code orders them; what the
     // x87's stack holds after an MMX load is the template's to know, as in clang's object.
     reason = valid && reason == NULL && unit_assembled && unit.entry_code && held ? "inline assembly operands of this type in their constraint's registers" : reason;
+    // The whole helper doesn't move a vector of 16 bytes or more through its address (#1846, CheckAsmPlace.packed).
+    reason = valid && reason == NULL && unit_assembled && packed_any ? "inline assembly vector operands in templates that take directives" : reason;
     // A template of no instructions is no code at all but with x87 operands, whose helper passes their values through
     // the x87's stack as clang's code does (fld and fstp, which quiet a float's or a double's signaling NaN).
     // Only a statement whose places are all written has them to read: none with an arena that had no room for them, nor
     // past a refusal (#929's review).
-    // A flag output's object is written whatever the template, as clang's code sets it after one of no instructions too.
-    const bool helped = code.count != 0 || x87 || flagged;
+    // A flag output's object is written whatever the template, as clang's code sets it after one of no instructions too, and
+    // so is rsp's variable's (#1846: clang's code reads rsp after `asm("" : "=r"(sp))`), or rsp is set from its input's.
+    const bool helped = code.count != 0 || x87 || flagged || stack || moved_vectors;
     // A template of no instructions that defines a label (#1839): a place in its caller's code, an asm body of no records
     // (but its operands' loads and stores) at which the label's symbol is defined. A body's labels keep its function on
     // Tier 0 (the IR's body call carries none), so in a lowering for Tier 1 (CheckProgramOptions.asm_bodies) a template of
@@ -3021,7 +3266,10 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
     {
         CheckAsmPlace* place = places + k;
         reason = place->kind == BUSTER_CHECK_ASM_HELD && helped ? "inline assembly operands of this type in their constraint's registers" : NULL;
-        place->kind = place->kind != BUSTER_CHECK_ASM_HELD ? place->kind : place->written ? BUSTER_CHECK_ASM_MEMORY : BUSTER_CHECK_ASM_VECTOR;
+        // A packed vector of a template of no instructions is evaluated alone, as a held one (#1846): main.c's barriers.
+        const bool barrier = place->packed && !helped;
+        place->kind = place->kind != BUSTER_CHECK_ASM_HELD && !barrier ? place->kind : place->written ? BUSTER_CHECK_ASM_MEMORY : BUSTER_CHECK_ASM_VECTOR;
+        place->packed = place->packed && !barrier;
     }
     if (valid && reason == NULL && unit_assembled)
     {
@@ -3136,6 +3384,10 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
         plan->inline_touched = inline_touched | (labels != 0 ? 1u << X86_REGISTER_RAX : 0);
         plan->inline_masks = inline_masks;
         plan->inline_leaves = returns;
+        for (uint32_t k = 0; k < count; k += 1)
+        {
+            plan->inline_stack |= check_asm_stack(places + k) && check_asm_loads(places + k);
+        }
         for (uint32_t r = 0; r < code.count; r += 1)
         {
             plan->inline_leaves |= check_asm_return(code.records[r].form);
@@ -3145,6 +3397,11 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
     else if (valid && reason == NULL && marked)
     {
         reason = "inline assembly labels in templates of no instructions";
+    }
+    else if (valid && reason == NULL && helped && stack_named)
+    {
+        // A helper's rsp is its own: rsp's variable is an asm body's alone (#1846).
+        reason = "explicit register variables in rsp in inline assembly that keeps a helper";
     }
     else if (valid && reason == NULL && helped && returns)
     {
@@ -3231,6 +3488,22 @@ static bool check_program_asm_naked(const CheckProgram* program, uint32_t b)
     return program->object_naked != 0 && body.object < program->object_count && program->object_naked[body.object] <= body.declaration;
 }
 
+// The symbol a naked function's operand names (#1845): a static object's or a function's of the unit, by its asm label
+// or else its identifier, as clang prints it; an empty name for one whose name the emission makes (a block-scope
+// static's, a literal's or a compound literal's), which stays refused.
+static String8 check_asm_naked_symbol(const CheckProgram* program, uint32_t object)
+{
+    const CheckInput* input = program->input;
+    const uint32_t declaration = object != 0 && object < program->object_count ? program->object_declarations[object] : BUSTER_CHECK_NONE;
+    const bool named = declaration < input->token_count && check_input_linkage(input->declaration_bits, declaration) != 0 &&
+                       !check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_COMPOUND) &&
+                       !check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_REGISTER) && program->parser->tokens.names[declaration] != 0;
+    const String8 label = named ? check_program_alias_label(input, declaration) : (String8){ 0 };
+    const uint32_t identifier = named ? program->parser->tokens.names[declaration] : 0;
+    return !named ? (String8){ 0 } : label.length != 0 ? label :
+           (String8){ .pointer = (char*)intern_bytes(program->identifiers, identifier), .length = intern_length(program->identifiers, identifier) };
+}
+
 // Plans naked body `b` (CheckProgramNaked): its statements, each an asm statement whose operands are integer constants
 // (anything else is refused by name, as clang refuses statements other than asm statements), are its whole code: their
 // templates, substituted, assembled together in order, the syntax AT&T's again at each statement's start, as clang's
@@ -3288,9 +3561,21 @@ static bool check_program_asm_plan_naked(CheckProgramAsms* result, const CheckPr
                 uint32_t bits = 64;
                 const bool immediate = !output && constraint.refused == NULL && constraint.immediate &&
                                        check_asm_integer_constant(program->types, operands + firsts[s] + k, &constant, &bits);
-                places[k] = (CheckAsmPlace){ .constant = constant, .slot = BUSTER_CHECK_NONE, .value = BUSTER_CHECK_NONE, .tied = BUSTER_CHECK_NONE,
-                                             .kind = BUSTER_CHECK_ASM_CONSTANT };
-                reason = !immediate ? "naked functions' inline assembly operands other than integer constants" :
+                // An address constant of a symbol ("i"(&g), "i"(f)) and a static object ("m"(g)), which clang prints by
+                // its symbol's name (#1845).
+                const CheckValue* value = &operands[firsts[s] + k].value;
+                const bool clean = !output && constraint.refused == NULL && value->fault == CHECK_FAULT_NONE && (value->flags & BUSTER_CHECK_SIDE_EFFECT) == 0;
+                const bool address = clean && !immediate && constraint.immediate && constraint.low == INT64_MIN && constraint.high == INT64_MAX &&
+                                     value->constant_kind == CHECK_CONSTANT_ADDRESS;
+                const bool object = clean && !immediate && !address && constraint.memory && value->category == CHECK_LVALUE &&
+                                    (value->flags & BUSTER_CHECK_STATIC_OBJECT) != 0 && value->bit_width == 0;
+                const String8 symbol = address || object ? check_asm_naked_symbol(program, value->object) : (String8){ 0 };
+                const bool named = symbol.length != 0;
+                places[k] = (CheckAsmPlace){ .constant = named ? value->offset : constant, .slot = BUSTER_CHECK_NONE, .value = BUSTER_CHECK_NONE, .tied = BUSTER_CHECK_NONE,
+                                             .kind = !named ? BUSTER_CHECK_ASM_CONSTANT : address ? BUSTER_CHECK_ASM_SYMBOL : BUSTER_CHECK_ASM_SYMBOL_MEMORY,
+                                             .symbol = symbol };
+                reason = named ? NULL :
+                         !immediate ? "naked functions' inline assembly operands other than integer constants or static objects' symbols" :
                          !check_asm_constant_fits(&constraint, constant, bits) ? "inline assembly constants outside their constraint's range" : NULL;
             }
             if (valid && reason == NULL)
@@ -3334,15 +3619,11 @@ static bool check_program_asm_plan_naked(CheckProgramAsms* result, const CheckPr
             {
                 reason = unit.link.atoms.class[a] == BUSTER_LINK_CLASS_EH_FRAME ? "inline assembly's CFI directives" : NULL;
             }
-            // clang makes an empty function of none, which would have an unwind entry of no bytes.
-            reason = reason == NULL && valid && !unit.entry_code ? "naked functions of no instructions" : reason;
         }
         else
         {
             reason = code.error != NULL && strstr(code.error, "arena exhausted") == NULL ? code.error : NULL;
             valid = code.error == NULL || reason != NULL;
-            // clang makes an empty function of none, which would have an unwind entry of no bytes.
-            reason = reason == NULL && valid && code.count == 0 ? "naked functions of no instructions" : reason;
         }
     }
     if (valid && reason == NULL && unit_assembled)
