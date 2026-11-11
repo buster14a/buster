@@ -15,14 +15,18 @@
 #                                            and writes its SHA-256 and size to GITHUB_OUTPUT (digest, bytes).
 #   hosted-product.sh install DIRECTORY DIGEST
 #                                            A shard's side: DIRECTORY holds the downloaded artifact, product.tar.zst
-#                                            alone. Checks its SHA-256 against DIGEST (the producer's job output), every
-#                                            file's against the product's list, and the product's identity against this
+#                                            alone. Checks its SHA-256 against DIGEST (the producer's job output, or for
+#                                            a vector configuration the one its artifact's name holds), every file's
+#                                            against the product's list, and the product's identity against this
 #                                            checkout's and runner's, runs each executable once, and only then installs
 #                                            them where `build` puts them and exports the same paths.
 #
 # Any difference fails the shard: nothing is rebuilt and nothing is fetched again, so a bad product stops the row
-# rather than starting four builds. Only an explicitly portable row is shared: BUSTER_HOST_ARCH=x86-64, the baseline
-# that every x86-64 runner executes. A native build is its runner's CPU's and is never packed or installed.
+# rather than starting four builds. Only an explicit target is shared: BUSTER_HOST_ARCH=x86-64, the baseline that every
+# x86-64 runner executes, and BUSTER_HOST_ARCH=vector (#2033), host_isa.h's predicate, which only a runner whose probe
+# qualifies executes: there, both sides run the vector row's probe (BUSTER_VECTOR_PROBE, built with the target's flags
+# by hosted-correctness.yml) again, which must pass, and its answers are part of the identity. A native build is its
+# runner's CPU's and is never packed or installed.
 set -euo pipefail
 shopt -s inherit_errexit
 
@@ -45,9 +49,24 @@ summary()
     fi
 }
 
+# Whether this runner runs the row's explicit target: always for x86-64; for vector, when the row's probe, run again
+# here, finds every feature the target uses (status 0 and every answer `yes`), which it prints.
 portable()
 {
-    [ "${BUSTER_HOST_ARCH:-native}" = x86-64 ] || die "only the portable x86-64 baseline is shared between runners; BUSTER_HOST_ARCH=${BUSTER_HOST_ARCH:-native} is built on each shard's own runner (#2032)"
+    local answers status=0
+    case "${BUSTER_HOST_ARCH:-native}" in
+        x86-64) ;;
+        vector)
+            [ -n "${BUSTER_VECTOR_PROBE:-}" ] && [ -x "$BUSTER_VECTOR_PROBE" ] ||
+                die "a vector product needs this runner's probe (BUSTER_VECTOR_PROBE), which the vector row's draw builds: '${BUSTER_VECTOR_PROBE:-}'"
+            answers=$("$BUSTER_VECTOR_PROBE" 2>&1) || status=$?
+            if [ "$status" -ne 0 ] || [ -z "$answers" ] || grep -qv $'\tyes$' <<< "$answers"; then
+                printf '%s\n' "$answers" >&2
+                die "this runner's CPU doesn't run the vector target (its probe: status $status), so it can't run or pack a vector product"
+            fi
+            ;;
+        *) die "only the explicit x86-64 and vector targets are shared between runners; BUSTER_HOST_ARCH=${BUSTER_HOST_ARCH:-native} is built on each shard's own runner (#2032)" ;;
+    esac
 }
 
 # The SHA-256 of a tree's files and symbolic links' targets, in a stable order: `file PATH` and `link PATH TARGET` lines
@@ -98,18 +117,22 @@ toolchain_root()
 # The identity a product must share with the shard that runs it, which both sides compute with this function and
 # compare byte for byte: what it was built from (the repository, run, commit and its tree, unmodified); how (build.sh's
 # own record of the toolchain, tools and settings it configured with, and its descriptions of the flags and sources);
-# for which target (the host ISA's predefined macros, BUSTER_HOST_VECTOR's among them); with which toolchain (every
-# file of the hosted installation: clang, its resource directory and sanitizer runtimes, the linkers, libclang-cpp,
-# CMake and Ninja) and baseline runtime (BUSTER_HOST_RUNTIME's tree); and what the product's executables load on this
-# runner (ldd's resolution of each).
+# for which target (its flags, build.sh's print-host-flags, and the host ISA's predefined macros with them,
+# BUSTER_HOST_VECTOR's among them, which must be 1 for vector and 0 for x86-64; for vector, the probe's answers on this
+# runner, every feature `yes`); with which toolchain (every file of the hosted installation: clang, its resource
+# directory and sanitizer runtimes, the linkers, libclang-cpp, CMake and Ninja) and baseline runtime
+# (BUSTER_HOST_RUNTIME's tree); and what the product's executables load on this runner (ldd's resolution of each).
 identity()
 {
-    local product=$1 out=$2 stamp file revision tree root toolchain runtime=none
+    local product=$1 out=$2 stamp file revision tree root toolchain runtime=none vector
+    local -a host_flags
     mkdir -p "$out"
     git diff --quiet HEAD -- || die "the checkout's tracked files differ from its commit"
     # Each value is assigned first, so that a failure stops the script rather than leaving a field empty on both sides.
     revision=$(git rev-parse HEAD)
     tree=$(git rev-parse 'HEAD^{tree}')
+    mapfile -d '' -t host_flags < <(./build.sh print-host-flags)
+    [ "${#host_flags[@]}" -gt 0 ] || die "build.sh gave no host target's flags"
     root=$(toolchain_root)
     toolchain=$(timed tree_digest "$root")
     if [ -n "${BUSTER_HOST_RUNTIME:-}" ]; then
@@ -122,6 +145,7 @@ identity()
         printf 'revision\t%s\n' "$revision"
         printf 'tree\t%s\n' "$tree"
         printf 'row\t%s %s O%s\n' "$BUSTER_HOST_ARCH" "${BUSTER_SANITIZER:-none}" "${BUSTER_SANITIZER_OPTIMIZATION:-3}"
+        printf 'host-flags\t%s\n' "${host_flags[*]}"
         printf 'toolchain\t%s\n' "$toolchain"
         printf 'runtime\t%s\n' "$runtime"
     } > "$out/summary"
@@ -134,7 +158,13 @@ identity()
     ./build.sh print-compile-flags --config Release | tr '\0' '\n' > "$out/compile-flags"
     ./build.sh print-sanitizer-flags | tr '\0' '\n' > "$out/sanitizer-flags"
     ./build.sh print-sources | tr '\0' '\n' > "$out/sources"
-    clang -march="$BUSTER_HOST_ARCH" -Isrc -dM -E -include src/buster/compiler/host_isa.h -x c /dev/null | LC_ALL=C sort > "$out/target"
+    clang "${host_flags[@]}" -Isrc -dM -E -include src/buster/compiler/host_isa.h -x c /dev/null | LC_ALL=C sort > "$out/target"
+    vector=0
+    [ "$BUSTER_HOST_ARCH" != vector ] || vector=1
+    grep -qx "#define BUSTER_HOST_VECTOR $vector" "$out/target" || die "the $BUSTER_HOST_ARCH target (${host_flags[*]}) doesn't select BUSTER_HOST_VECTOR $vector"
+    if [ "$vector" -eq 1 ]; then
+        "$BUSTER_VECTOR_PROBE" > "$out/probe"
+    fi
     : > "$out/libraries"
     for file in "$product"/bin/*; do
         printf '%s:\n' "${file##*/}" >> "$out/libraries"

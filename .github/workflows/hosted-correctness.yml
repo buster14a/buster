@@ -4,8 +4,9 @@ name: Hosted correctness row
 # the row's inventory as its `shards` shards, a runner each, and, for a row whose compiler can run on any runner, the job that
 # builds that compiler once for them (#2032; docs/ci.md, "Shared row products"). A native row's shards build their own:
 # a `-march=native` build is the CPU's it was built on, and hosted runners' CPUs differ. The vector row (#2033; docs/ci.md,
-# "The vector row") builds the explicit vector target, which only some hosted CPUs run: its shards are items that each
-# draw's collector assigns to the runners whose CPU qualifies, drawn until each item has one (the jobs below).
+# "The vector row") builds the explicit vector target, which only some hosted CPUs run: its configurations' shards are
+# items of one pool that each draw's collector assigns to the runners whose CPU qualifies, drawn until each item has one
+# (the jobs below), and each configuration's item 1 builds the compiler that its other items install (#2032).
 on:
   workflow_call:
     inputs:
@@ -14,7 +15,7 @@ on:
         type: string
         required: true
       sanitizer:
-        description: BUSTER_SANITIZER, none, address, thread or memory
+        description: BUSTER_SANITIZER, none, address, thread or memory; for the vector row, its configurations, those sanitizers separated by spaces
         type: string
         required: true
       optimization:
@@ -48,10 +49,15 @@ env:
   # Nothing here reads the executable's debug information, which takes a fifth of the build's time; the inventory's own
   # build.sh calls (check-call-graph) configure and build in the checkout's tree.
   BUSTER_DEBUG_INFO: '0'
-  # The vector row's items (#2033): its shards, the costliest first, the order in which its collectors assign them. Shard
-  # 1 also runs the row's once-only steps, and the row's costs (tools/ci/costs/vector-none-O3.costs) deal the commands
-  # between the four. Their count is the row's N, whatever its `shards` input says: the draws are sized for them.
-  BUSTER_VECTOR_ITEMS: '1 2 3 4'
+  # The vector row's configurations (#2033): its sanitizers, `none` on a pull request and all four on the runs that run
+  # the sanitizer rows, whose shards are one pool of items (tools/ci/vector-draw.sh). An item is a configuration's
+  # initial and its shard: `m2` is memory's shard 2 of its 4. They are listed the costliest first, the order in which the
+  # collectors assign them, by `costs plan` over each configuration's table (tools/ci/costs/vector-*-O3.costs) and its
+  # build: memory's, thread's, address's and the plain row's, each the item 1 first, which builds the configuration's
+  # product and runs its once-only steps. A configuration's count of items is its N, whatever the `shards` input says:
+  # the draws are sized for them, 3 candidates per item in the first.
+  BUSTER_VECTOR_CONFIGURATIONS: ${{ inputs.sanitizer }}
+  BUSTER_VECTOR_ITEMS: 'm1 m2 m3 m4 t1 t2 t3 t4 a1 a2 a3 a4 n1 n2 n3 n4'
 
 jobs:
   # The row's compiler, built once where every runner can run it: the explicitly portable x86-64 baseline, whose rows
@@ -276,7 +282,11 @@ jobs:
           } > "$draw/record"
           printf 'Draw %s, candidate %s: %s, %s\n' "$BUSTER_DRAW_LEVEL" "$BUSTER_DRAW_CANDIDATE" "$cpu" "$verdict"
           printf 'verdict=%s\n' "${verdict%% *}" >> "$GITHUB_OUTPUT"
-          printf 'prefix=vector-%s-O%s-%s\n' "$BUSTER_SANITIZER" "$BUSTER_SANITIZER_OPTIMIZATION" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
+          # The pool's records, and its configurations' products, this attempt's (tools/ci/vector-draw.sh).
+          printf 'prefix=vector-O%s-%s\n' "$BUSTER_SANITIZER_OPTIMIZATION" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
+          printf 'product=vector-product-O%s-%s\n' "$BUSTER_SANITIZER_OPTIMIZATION" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
+          # A shared product's install runs the probe again on its runner (tools/ci/hosted-product.sh).
+          printf 'BUSTER_VECTOR_PROBE=%s\n' "$draw/probe" >> "$GITHUB_ENV"
 
       # The verdict's artifact, which the draw's collector counts: an artifact's name is no claim (when several jobs
       # upload one name at once, every upload succeeds: .github/workflows/vector-claim-race.yml's control), so the
@@ -291,9 +301,10 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-      # The item the draw's collector assigned this candidate becomes its shard (BUSTER_SHARD), which the steps below
-      # run; without one, it ends here, successfully, as a redraw. In a rerun of the failed jobs, a candidate that held
-      # an item takes it again (tools/ci/vector-draw.sh, fetched from this commit without a checkout).
+      # The item the draw's collector assigned this candidate gives its configuration (BUSTER_SANITIZER) and its shard
+      # (BUSTER_SHARD), which the steps below run; without one, it ends here, successfully, as a redraw. In a rerun of
+      # the failed jobs, a candidate that held an item takes it again (tools/ci/vector-draw.sh, fetched from this commit
+      # without a checkout).
       - name: Take the vector item the draw assigns, or end as a redraw
         if: inputs.host_arch == 'vector'
         env:
@@ -314,6 +325,30 @@ jobs:
           overwrite: false
           if-no-files-found: error
           retention-days: 14
+
+      # The settings the workflow's environment gives a row of the item's sanitizer alone: the take set its
+      # configuration, which the workflow's BUSTER_SANITIZER (the pool's list) can't be, and this checks it did.
+      - name: Set the vector item's configuration
+        if: inputs.host_arch == 'vector' && env.BUSTER_SHARD != ''
+        run: |
+          case " $BUSTER_VECTOR_CONFIGURATIONS " in
+              *" $BUSTER_SANITIZER "*) ;;
+              *)
+                  printf '::error::The vector item %s has no configuration of the row: BUSTER_SANITIZER=%s.\n' "$BUSTER_VECTOR_ITEM" "$BUSTER_SANITIZER"
+                  exit 1
+                  ;;
+          esac
+          test "${BUSTER_VECTOR_ITEM:0:1}" = "${BUSTER_SANITIZER:0:1}"
+          test "${BUSTER_VECTOR_ITEM:1}" = "$BUSTER_SHARD"
+          linker=lld
+          differential=''
+          if [ "$BUSTER_SANITIZER" = none ]; then
+              linker=auto
+              differential=1
+          fi
+          printf 'BUSTER_LINKER=%s\nBUSTER_DRIVER_DIFFERENTIAL=%s\n' "$linker" "$differential" >> "$GITHUB_ENV"
+          printf 'Item %s: %s, shard %s of %s; it %s the configuration'"'"'s compiler.\n' "$BUSTER_VECTOR_ITEM" "$BUSTER_SANITIZER" \
+              "$BUSTER_SHARD" "$BUSTER_VECTOR_SHARDS" "$([ "$BUSTER_VECTOR_BUILDER" = 1 ] && echo builds || echo installs)"
 
       - name: Require this row's compiler product
         if: env.BUSTER_SHARD != '' && inputs.host_arch == 'x86-64'
@@ -346,13 +381,13 @@ jobs:
       # runner-side sanitizer report (#2060's LeakSanitizer ptrace warning) needs to be traced to its host. It never
       # fails the job.
       - name: Report sanitizer host kernel, CPU, seccomp and ptrace state
-        if: env.BUSTER_SHARD != '' && inputs.sanitizer != 'none'
+        if: env.BUSTER_SHARD != '' && env.BUSTER_SANITIZER != 'none'
         continue-on-error: true
         run: bash tools/ci/sanitizers.sh host
 
       # On every shard, a shared row's too: the detectors are proven on the runner that runs the instrumented compiler.
       - name: Set fatal sanitizer policy and verify every enabled detector
-        if: env.BUSTER_SHARD != '' && inputs.sanitizer != 'none'
+        if: env.BUSTER_SHARD != '' && env.BUSTER_SANITIZER != 'none'
         run: |
           bash tools/ci/sanitizers.sh configure "$RUNNER_TEMP/sanitizer-reports"
           bash tools/ci/sanitizers.sh probe "$RUNNER_TEMP/sanitizer-probes"
@@ -361,7 +396,7 @@ jobs:
         # Every shard of the row, not its shard 1 alone: the step exports BUSTER_HOST_RUNTIME, which the row's compiler
         # was linked against. The product's identity includes the tree, which each shard compares with its own, and the
         # QEMU step (shard 1) runs the compiler on it.
-        if: env.BUSTER_SHARD != '' && inputs.host_arch == 'x86-64' && inputs.sanitizer == 'none'
+        if: env.BUSTER_SHARD != '' && inputs.host_arch == 'x86-64' && env.BUSTER_SANITIZER == 'none'
         run: bash tools/ci/setup-baseline-runtime.sh
 
       - name: Fetch and verify frozen corpus inputs
@@ -405,6 +440,11 @@ jobs:
             printf '%s\n' '::error::The vector row requires BUSTER_HOST_VECTOR=1; its target selected the scalar path.'
             exit 1
           fi
+          # A vector item's configuration is its own row's (the step that set it): one sanitizer and its linker.
+          if [ "$BUSTER_HOST_ARCH" = vector ]; then
+            printf 'Vector configuration: %s, linker %s\n' "$BUSTER_SANITIZER" "$BUSTER_LINKER"
+            test "$BUSTER_LINKER" = "$([ "$BUSTER_SANITIZER" = none ] && echo auto || echo lld)"
+          fi
           # Hosted CPU models vary. The native build exercises its actual host path;
           # the 9700X job qualifies the complete vector feature set on every merged
           # first-parent state of main in the nightly window, and on dispatched runs.
@@ -439,11 +479,66 @@ jobs:
           DIGEST: ${{ needs.compiler.outputs.digest }}
         run: bash tools/ci/hosted-product.sh install "$RUNNER_TEMP/compiler-product-download" "$DIGEST"
 
+      # A vector configuration's product (#2032): its item 1's holder builds it, on a CPU whose probe qualified (the
+      # build runs the executable), and publishes it in this run alone, by a name that holds its attempt and its
+      # SHA-256. Every other item waits for it here, after its own setup, and fails without it: when no candidate can
+      # hold item 1, or its holder ended without publishing (tools/ci/vector-draw.sh product). Nothing builds instead.
+      - name: Wait for the vector configuration's product
+        id: product
+        if: env.BUSTER_SHARD != '' && inputs.host_arch == 'vector' && env.BUSTER_VECTOR_BUILDER != '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash tools/ci/vector-draw.sh product "$BUSTER_SANITIZER"
+
+      - name: Download the vector configuration's product
+        if: env.BUSTER_SHARD != '' && inputs.host_arch == 'vector' && env.BUSTER_VECTOR_BUILDER != '1'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ${{ steps.product.outputs.name }}
+          path: ${{ runner.temp }}/vector-product-download
+
+      - name: Verify and install the vector configuration's product
+        # As a portable row's shard does, by the SHA-256 its name holds, with this runner's probe run again: the
+        # product's identity includes the target's flags and BUSTER_HOST_VECTOR 1, and the probe's verdict on every
+        # feature the target uses (tools/ci/hosted-product.sh install).
+        if: env.BUSTER_SHARD != '' && inputs.host_arch == 'vector' && env.BUSTER_VECTOR_BUILDER != '1'
+        env:
+          DIGEST: ${{ steps.product.outputs.digest }}
+        run: bash tools/ci/hosted-product.sh install "$RUNNER_TEMP/vector-product-download" "$DIGEST"
+
       - name: Build the external Clang pragma oracle, the clang server and the compiler
-        # A native row's shard builds its own, for the CPU it runs on; so does a vector row's item, on a CPU its probe
-        # qualified: the build runs the executable (the post-link step's baked tables, #590).
-        if: env.BUSTER_SHARD != '' && inputs.host_arch != 'x86-64'
+        # A native row's shard builds its own, for the CPU it runs on; so does a vector configuration's item 1, on a CPU
+        # its probe qualified, for the configuration's items: the build runs the executable (the post-link step's
+        # baked tables, #590).
+        if: env.BUSTER_SHARD != '' && (inputs.host_arch == 'native' || env.BUSTER_VECTOR_BUILDER == '1')
         run: bash tools/ci/hosted-product.sh build
+
+      # The vector configuration's item 1 packs its build as a portable row's build job does (tools/ci/hosted-product.sh):
+      # the ownership check on the build's tree, its sanitizer reports so far, then the product with its identity, which
+      # it publishes before its own suite runs.
+      - name: Check unity fixture ownership on the vector build's tree
+        if: env.BUSTER_SHARD != '' && env.BUSTER_VECTOR_BUILDER == '1'
+        run: bash tools/ci/hosted-product.sh ownership
+
+      - name: Reject sanitizer reports from the vector build and the ownership check
+        if: env.BUSTER_SHARD != '' && env.BUSTER_VECTOR_BUILDER == '1' && env.BUSTER_SANITIZER != 'none'
+        run: bash tools/ci/sanitizers.sh audit "$RUNNER_TEMP/sanitizer-reports"
+
+      - name: Pack the vector configuration's product with its identity
+        id: pack
+        if: env.BUSTER_SHARD != '' && env.BUSTER_VECTOR_BUILDER == '1'
+        run: bash tools/ci/hosted-product.sh pack "$RUNNER_TEMP/vector-product"
+
+      - name: Publish the product to the configuration's other items
+        if: env.BUSTER_SHARD != '' && env.BUSTER_VECTOR_BUILDER == '1'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ steps.probe.outputs.product }}-${{ env.BUSTER_SANITIZER }}-${{ steps.pack.outputs.digest }}
+          path: ${{ runner.temp }}/vector-product/product.tar.zst
+          compression-level: 0
+          overwrite: false
+          if-no-files-found: error
+          retention-days: 7
 
       - name: Confirm the vector kernels run on this CPU
         # The item's evidence that its executable runs the vector path here (#2033): the build's target selects it
@@ -466,7 +561,7 @@ jobs:
           } >> "$draw/record"
 
       - name: Compile and run baseline code on an emulated x86-64 CPU
-        if: inputs.host_arch == 'x86-64' && inputs.sanitizer == 'none' && env.BUSTER_SHARD == '1'
+        if: inputs.host_arch == 'x86-64' && env.BUSTER_SANITIZER == 'none' && env.BUSTER_SHARD == '1'
         run: |
           smoke="$RUNNER_TEMP/baseline-smoke"
           mkdir "$smoke"
@@ -574,7 +669,7 @@ jobs:
         run: bash tools/ci/fetch-sqlite.sh build/sqlite
 
       - name: Check constrained arenas, command diagnostics, and Callgrind
-        if: inputs.host_arch == 'x86-64' && inputs.sanitizer == 'none' && env.BUSTER_SHARD == '1'
+        if: inputs.host_arch == 'x86-64' && env.BUSTER_SANITIZER == 'none' && env.BUSTER_SHARD == '1'
         run: |
           clang -std=c17 -march=x86-64 -O2 -Isrc -fwrapv -funsigned-char -fno-strict-aliasing -Wall -Wextra -Werror -Wno-unused-function tests/arena/resources.c -o "$RUNNER_TEMP/memory-resources" -pthread
           mkdir -p "$RUNNER_TEMP/memory-limited" "$RUNNER_TEMP/memory-valgrind" "$RUNNER_TEMP/memory-strict"
@@ -592,7 +687,7 @@ jobs:
           "$RUNNER_TEMP/memory-resources" "$BUSTER_COMPILER" "$RUNNER_TEMP/memory-strict" --strict
 
       - name: Preserve memory admission diagnostics
-        if: ${{ always() && inputs.host_arch == 'x86-64' && inputs.sanitizer == 'none' && env.BUSTER_SHARD == '1' }}
+        if: ${{ always() && inputs.host_arch == 'x86-64' && env.BUSTER_SANITIZER == 'none' && env.BUSTER_SHARD == '1' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: memory-admission-${{ github.run_attempt }}
@@ -610,11 +705,11 @@ jobs:
           # This row's shard of the inventory: the runner deals the commands to the row's shards by the row's own costs
           # (tools/ci/costs/ROW.costs, which tools/ci/costs.c generates from the rows' logs), simulating each shard's
           # schedule on the runner the costs name, the same deal on every shard's runner, so that the row's shards run
-          # each command once. The row's N is its `shards` input, or, in the vector row's draws, its items' count.
+          # each command once. The row's N is its `shards` input, or, in the vector row's draws, its configuration's
+          # items' count (BUSTER_VECTOR_SHARDS, which the take sets with the item).
           shards=${{ inputs.shards }}
           if [ "$BUSTER_HOST_ARCH" = vector ]; then
-              read -r -a items <<< "$BUSTER_VECTOR_ITEMS"
-              shards=${#items[@]}
+              shards=$BUSTER_VECTOR_SHARDS
           fi
           "$BUSTER_COMPILER" parallel --github --jobs "$(nproc)" --timeout "$timeout" \
             --shard "$BUSTER_SHARD/$shards" \
@@ -629,7 +724,7 @@ jobs:
         if: ${{ failure() && env.BUSTER_SHARD != '' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: ssa-source-${{ inputs.host_arch }}-${{ inputs.sanitizer }}-O${{ inputs.optimization }}-shard${{ env.BUSTER_SHARD }}-${{ github.run_attempt }}
+          name: ssa-source-${{ inputs.host_arch }}-${{ env.BUSTER_SANITIZER }}-O${{ inputs.optimization }}-shard${{ env.BUSTER_SHARD }}-${{ github.run_attempt }}
           path: |
             /tmp/ssa-source-*/**/*.c
             /tmp/ssa-source-*/**/*.log
@@ -646,7 +741,7 @@ jobs:
         # The parallel list's main.c -c heading leaves its three compiles to this step under TSan and MSan: they peak
         # at 10.2 GiB and 6.6 GiB, too much beside the suite but within the runner alone. docs/ci.md records the
         # measurements and the coverage boundary.
-        if: ${{ success() && (inputs.sanitizer == 'thread' || inputs.sanitizer == 'memory') && env.BUSTER_SHARD == '1' }}
+        if: ${{ success() && (env.BUSTER_SANITIZER == 'thread' || env.BUSTER_SANITIZER == 'memory') && env.BUSTER_SHARD == '1' }}
         run: |
           set -euo pipefail
           unset CPATH C_INCLUDE_PATH
@@ -661,14 +756,14 @@ jobs:
           rm -r "$objects"
 
       - name: Reject sanitizer reports even from expected-failure subprocesses
-        if: ${{ !cancelled() && env.BUSTER_SHARD != '' && inputs.sanitizer != 'none' }}
+        if: ${{ !cancelled() && env.BUSTER_SHARD != '' && env.BUSTER_SANITIZER != 'none' }}
         run: bash tools/ci/sanitizers.sh audit "$RUNNER_TEMP/sanitizer-reports"
 
       - name: Preserve sanitizer diagnostics and detector proofs
-        if: ${{ always() && env.BUSTER_SHARD != '' && inputs.sanitizer != 'none' }}
+        if: ${{ always() && env.BUSTER_SHARD != '' && env.BUSTER_SANITIZER != 'none' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: sanitizers-${{ inputs.host_arch }}-${{ inputs.sanitizer }}-O${{ inputs.optimization }}-shard${{ env.BUSTER_SHARD }}-${{ github.run_attempt }}
+          name: sanitizers-${{ inputs.host_arch }}-${{ env.BUSTER_SANITIZER }}-O${{ inputs.optimization }}-shard${{ env.BUSTER_SHARD }}-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/sanitizer-reports
             ${{ runner.temp }}/sanitizer-probes
@@ -681,33 +776,44 @@ jobs:
           retention-days: 14
 
       # The item's evidence, which the verdict requires once per item: the probe's verdict and the CPU it ran on, the
-      # build's target and BUSTER_HOST_VECTOR, the kernels' run and the suite's pass. Only an item whose every step
-      # passed records one.
+      # build's target and BUSTER_HOST_VECTOR, the kernels' run, the product it built (item 1) or installed, and the
+      # suite's pass. Only an item whose every step passed records one.
       - name: Write the vector item's evidence
         if: ${{ success() && inputs.host_arch == 'vector' && env.BUSTER_SHARD != '' }}
+        env:
+          BUILT: ${{ steps.pack.outputs.digest }}
+          INSTALLED: ${{ steps.product.outputs.digest }}
         run: |
-          printf 'shard\t%s\nsuite\tpassed\n' "$BUSTER_SHARD" >> "$RUNNER_TEMP/vector-draw/record"
+          product="installed $INSTALLED"
+          if [ "$BUSTER_VECTOR_BUILDER" = 1 ]; then
+              product="built $BUILT"
+          fi
+          {
+              printf 'item\t%s\nconfiguration\t%s\nshard\t%s\n' "$BUSTER_VECTOR_ITEM" "$BUSTER_SANITIZER" "$BUSTER_SHARD"
+              printf 'product\t%s\nsuite\tpassed\n' "$product"
+          } >> "$RUNNER_TEMP/vector-draw/record"
           cat "$RUNNER_TEMP/vector-draw/record"
 
       - name: Record the vector item's qualified execution
         if: ${{ success() && inputs.host_arch == 'vector' && env.BUSTER_SHARD != '' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: ${{ steps.probe.outputs.prefix }}-evidence-${{ env.BUSTER_SHARD }}
+          name: ${{ steps.probe.outputs.prefix }}-evidence-${{ env.BUSTER_VECTOR_ITEM }}
           path: ${{ runner.temp }}/vector-draw/record
           overwrite: false
           if-no-files-found: error
           retention-days: 14
 
   # The vector row (#2033; docs/ci.md, "The vector row"): the explicit vector target's build, which only CPUs with
-  # every feature of host_isa.h's predicate run, and whose 4 shards are items rather than jobs. A draw starts generic
-  # candidates, each of which probes its own runner's CPU and publishes its verdict. The draw's collector, one job,
-  # assigns the items still missing to the qualifying candidates by rank (tools/ci/vector-draw.sh), and the next draw
-  # starts candidates for the items left: 3 per item in the first draw, then 4, 5 and 5 per missing item. A candidate
-  # runs the item it was assigned as a shard runs; the others end within seconds, successfully, as redraws. 4 draws are
-  # unrolled here; items without a holder after the last fail the verdict as incomplete, not as a test failure. No
-  # emulator runs. The draws run the shards' steps, which read a portable row's `compiler` job, so they need it too;
-  # this row skips it.
+  # every feature of host_isa.h's predicate run, and whose configurations' shards (4 each) are one pool of items rather
+  # than jobs. A draw starts generic candidates, each of which probes its own runner's CPU and publishes its verdict.
+  # The draw's collector, one job, assigns the items still missing, the costliest first across the configurations, to
+  # the qualifying candidates by rank (tools/ci/vector-draw.sh), and the next draw starts candidates for the items
+  # left: 3 per item in the first draw, then 4, 5 and 5 per missing item. A candidate runs the item it was assigned as
+  # a shard runs, its configuration's item 1 building the product the others install; the others end within seconds,
+  # successfully, as redraws. 4 draws are unrolled here, each with its collector; items without a holder after the last
+  # fail the verdict as incomplete, not as a test failure. No emulator runs. The draws run the shards' steps, which read
+  # a portable row's `compiler` job, so they need it too; this row skips it.
   draw-1:
     name: Vector draw 1, candidate ${{ matrix.candidate }} (Clang 23, ${{ inputs.sanitizer }}, O${{ inputs.optimization }})
     needs: compiler
@@ -721,14 +827,14 @@ jobs:
     strategy:
       fail-fast: ${{ github.event_name == 'pull_request' }}
       matrix:
-        # 3 candidates per item (BUSTER_VECTOR_ITEMS): changes_shard_policy checks the count.
-        candidate: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+        # 3 candidates per item (BUSTER_VECTOR_ITEMS): 12 for a pull request's `none`, 48 for all four configurations.
+        # changes_shard_policy checks both counts, and the collector refuses another.
+        candidate: ${{ fromJSON(inputs.sanitizer == 'none' && '[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]' || '[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48]') }}
     defaults:
       run:
         shell: bash
     env:
       BUSTER_ORACLE_CACHE: check
-      BUSTER_DRIVER_DIFFERENTIAL: ${{ inputs.sanitizer == 'none' && '1' || '' }}
       BUSTER_DRAW_LEVEL: '1'
       BUSTER_DRAW_CANDIDATE: ${{ matrix.candidate }}
     steps: *row-steps
@@ -754,7 +860,7 @@ jobs:
         shell: bash
     env:
       BUSTER_DRAW_LEVEL: '1'
-      BUSTER_DRAW_CANDIDATES: '12'
+      BUSTER_DRAW_CANDIDATES: ${{ inputs.sanitizer == 'none' && '12' || '48' }}
       BUSTER_DRAW_NEXT: '4'
     steps: &collect-steps
       - name: Assign the draw's vector items to its qualifying candidates by rank
@@ -794,7 +900,6 @@ jobs:
         shell: bash
     env:
       BUSTER_ORACLE_CACHE: check
-      BUSTER_DRIVER_DIFFERENTIAL: ${{ inputs.sanitizer == 'none' && '1' || '' }}
       BUSTER_DRAW_LEVEL: '2'
       BUSTER_DRAW_CANDIDATE: ${{ matrix.candidate }}
     steps: *row-steps
@@ -838,7 +943,6 @@ jobs:
         shell: bash
     env:
       BUSTER_ORACLE_CACHE: check
-      BUSTER_DRIVER_DIFFERENTIAL: ${{ inputs.sanitizer == 'none' && '1' || '' }}
       BUSTER_DRAW_LEVEL: '3'
       BUSTER_DRAW_CANDIDATE: ${{ matrix.candidate }}
     steps: *row-steps
@@ -882,10 +986,31 @@ jobs:
         shell: bash
     env:
       BUSTER_ORACLE_CACHE: check
-      BUSTER_DRIVER_DIFFERENTIAL: ${{ inputs.sanitizer == 'none' && '1' || '' }}
       BUSTER_DRAW_LEVEL: '4'
       BUSTER_DRAW_CANDIDATE: ${{ matrix.candidate }}
     steps: *row-steps
+
+  # The last draw's collector: what it doesn't assign stays without a holder (BUSTER_DRAW_NEXT 0).
+  collect-4:
+    name: Vector draw 4's assignment (Clang 23, ${{ inputs.sanitizer }}, O${{ inputs.optimization }})
+    needs: collect-3
+    if: needs.collect-3.outputs.count != '0'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      count: ${{ steps.assign.outputs.count }}
+      candidates: ${{ steps.assign.outputs.candidates }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      BUSTER_DRAW_LEVEL: '4'
+      BUSTER_DRAW_CANDIDATES: ${{ needs.collect-3.outputs.count }}
+      BUSTER_DRAW_NEXT: '0'
+    steps: *collect-steps
 
   # The row's result: exactly one passing qualified execution of each item, by the candidate its assignment names, in
   # the assignments' attempt or a rerun of the failed jobs after it. An item without a holder fails it as incomplete (no
@@ -893,7 +1018,7 @@ jobs:
   # failed too). Its summary lists every candidate's CPU and decision.
   verdict:
     name: Vector row verdict (Clang 23, ${{ inputs.sanitizer }}, O${{ inputs.optimization }})
-    needs: [draw-1, collect-1, draw-2, collect-2, draw-3, collect-3, draw-4]
+    needs: [draw-1, collect-1, draw-2, collect-2, draw-3, collect-3, draw-4, collect-4]
     if: ${{ !cancelled() && inputs.host_arch == 'vector' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 10
@@ -901,11 +1026,12 @@ jobs:
       run:
         shell: bash
     steps:
-      # Every attempt's: a rerun of the failed jobs keeps its earlier attempt's assignments.
+      # Every attempt's: a rerun of the failed jobs keeps its earlier attempt's assignments. Not the products
+      # (vector-product-...), which only their configurations' items read.
       - name: Download the vector row's draws, assignments and evidence
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          pattern: vector-${{ inputs.sanitizer }}-O${{ inputs.optimization }}-*
+          pattern: vector-O${{ inputs.optimization }}-*
           path: ${{ runner.temp }}/vector-records
 
       - name: Require one passing qualified execution of each vector item

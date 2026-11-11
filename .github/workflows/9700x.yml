@@ -245,9 +245,12 @@ jobs:
     # A nightly dispatch whose commit's earlier run qualified its plain rows reuses them (`evidence`), and runs none.
     # Each row is hosted-correctness.yml: its shards, and for a portable row the job that builds its compiler once for
     # them (#2032; docs/ci.md, "Shared row products"). Their names are this one's, ` / ` and their own, which
-    # tools/ci/nightly.c reads to find the plain rows' shards. A pull request's second row is the vector row (#2033), the
-    # explicit vector target's 4 shards on runners whose CPU qualifies, which replaces its random `native` row; every
-    # other run keeps `native` (docs/ci.md, "The vector row").
+    # tools/ci/nightly.c reads to find the plain rows' shards. The vector row (#2033) is the explicit vector target's
+    # items on runners whose CPU qualifies, each configuration's 4 shards: a pull request's plain row, which replaces its
+    # random `native` row, and on the runs that run the sanitizer rows, the plain and the three sanitizer
+    # configurations' 16 items as one pool, beside the `native` rows, which every run but a pull request keeps
+    # (docs/ci.md, "The vector row"). It is one call of the row workflow, which `include` adds: its `sanitizer` lists
+    # the configurations.
     needs: [changes, evidence, agent-guide-size, dco-hooks, prepare-hosted-tools]
     if: ${{ !cancelled() && needs.prepare-hosted-tools.result == 'success' && github.repository_id == '1421805693' && needs.evidence.result == 'success' && needs.evidence.outputs.hosted == 'run' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) && (github.event_name != 'pull_request' || (needs.agent-guide-size.result == 'success' && needs.dco-hooks.result == 'success')) }}
     strategy:
@@ -256,7 +259,7 @@ jobs:
       # what the others find.
       fail-fast: ${{ github.event_name == 'pull_request' }}
       matrix:
-        host_arch: ${{ fromJSON(github.event_name == 'pull_request' && '["x86-64", "vector"]' || '["x86-64", "native"]') }}
+        host_arch: ${{ fromJSON(github.event_name == 'pull_request' && '["x86-64"]' || '["x86-64", "native"]') }}
         # The sanitizer rows take far longer than the plain ones: pull requests run the plain builds alone, as nightly
         # backlog runs and an admitted snapshot run do (the `plain` scope: the 9700X's gate), and so do pushes to main
         # in the nightly mode (#2057, until the merge queue carries the full suite). The daily run, full dispatches,
@@ -265,6 +268,9 @@ jobs:
         # available for diagnosis but does not repeat the entire hosted suite.
         sanitizer: ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '["none"]' || '["none", "address", "thread", "memory"]') }}
         optimization: [3]
+        # The vector row, one pool of its configurations' items: `none` on a pull request; the four where the sanitizer
+        # rows run; none in the `plain` scope elsewhere, whose `native` rows stay until the vector row replaces them.
+        include: ${{ fromJSON(github.event_name == 'pull_request' && '[{"host_arch":"vector","sanitizer":"none","optimization":3}]' || needs.evidence.outputs.scope == 'plain' && '[]' || '[{"host_arch":"vector","sanitizer":"none address thread memory","optimization":3}]') }}
     # The vector row's candidates and collectors read the run's artifacts and jobs (their claims and decisions); nothing
     # here writes but the artifacts.
     permissions:
@@ -279,9 +285,9 @@ jobs:
       # host architectures alike (tools/ci/nightly.c counts their shards as one N). A portable row's shards share its one
       # build and a shard costs it about a minute of setup, so its TSan and MSan rows run as 6, near their longest
       # commands; a native row's shards each build their own compiler (5 to 10 minutes under a detector), so its MSan
-      # row runs as 5 and the others as 4. The vector row's N is its items' count (4, BUSTER_VECTOR_ITEMS), which its
-      # draws are sized for. tools/ci/changes.c's self-test checks each number against the row workflow's lookup
-      # (changes_shard_policy).
+      # row runs as 5 and the others as 4. The vector row's N is each configuration's items' count (4,
+      # BUSTER_VECTOR_ITEMS), which its draws are sized for. tools/ci/changes.c's self-test checks each number against
+      # the row workflow's lookup (changes_shard_policy).
       shards: ${{ matrix.host_arch == 'x86-64' && (matrix.sanitizer == 'thread' || matrix.sanitizer == 'memory') && 6 || matrix.sanitizer == 'memory' && 5 || 4 }}
       hosted-tools: ${{ needs.prepare-hosted-tools.outputs.artifact-name }}
       performance: ${{ needs.changes.outputs.performance }}
