@@ -541,6 +541,24 @@ static bool check_common_comparison_role(uint8_t role)
 // A parenthesized expression's comparison or value climbs its group closers first. A GNU statement expression's last
 // statement is its value, discarded only where the statement expression is: its `;` climbs to the expression's `)`, as
 // clang's DiagnoseUnusedExprResult goes into a StmtExpr's last expression from the statement expression's own context.
+// Whether the `;` at `token` ends a statement expression's last statement, its value (a labeled one's through its labels),
+// as check_common_statement_terminator's climb finds it.
+static bool check_common_statement_value(const Parser* parser, uint32_t token)
+{
+    const uint32_t count = parser->tokens.count;
+    const uint32_t owner = token < count && parser->tree.roles[token] == PARSE_ROLE_TERMINATOR ? parser->tree.parents[token] : count;
+    uint32_t labeled = owner;
+    for (uint32_t steps = 0; labeled < count && parser->tree.roles[labeled] == PARSE_ROLE_LABEL && steps < count; steps += 1)
+    {
+        labeled = parser->tree.parents[labeled];
+    }
+    const uint8_t block_role = labeled < count ? parser->tree.roles[labeled] : PARSE_ROLE_NONE;
+    const uint32_t close = block_role == PARSE_ROLE_OPEN_BLOCK ? parser->tree.parents[labeled] : block_role == PARSE_ROLE_CLOSE_BLOCK ? labeled : count;
+    const bool result = close < count && token + 1 == close && close + 1 < count && parser->tokens.kinds[close + 1] == PARSE_KIND_R_PAREN &&
+                        parser->tree.roles[close + 1] == PARSE_ROLE_CLOSE_GROUP;
+    return result;
+}
+
 static bool check_common_statement_terminator(const Parser* parser, uint32_t token)
 {
     const uint32_t count = parser->tokens.count;
@@ -3047,8 +3065,10 @@ static void check_common_stmt_marker(CheckCommonEmission* emission, uint32_t nod
     const CheckOp op = graph->ops[node];
     if (discarded && op >= CHECK_OP_LESS && op <= CHECK_OP_NOT_EQUAL)
     {
-        // An indirect comparison takes the generic marker; a direct one already reported as a comparison.
-        if (parent_role != PARSE_ROLE_TERMINATOR)
+        // An indirect comparison takes the generic marker; a direct one already reported as a comparison, but a discarded
+        // statement expression's value, whose warning is clang's DiagnoseUnusedExprResult's of the statement expression
+        // (#1447).
+        if (parent_role != PARSE_ROLE_TERMINATOR || check_common_statement_value(parser, parent))
         {
             check_common_report_unused(parser, emission->pp, emission->input, token, CHECK_WARNING_ID_UNUSED_VALUE,
                                        "expression result unused", NULL, 0, emission->scratch);
@@ -3786,8 +3806,12 @@ static void check_common_parentheses(const Parser* parser, Preprocessor* pp, con
                                             "relational comparison result unused";
             const CheckCommonNote note = { token, parser->tokens.kinds[token] == PARSE_KIND_EQUALEQUAL ? "use '=' to turn this equality comparison into an assignment" :
                                                      parser->tokens.kinds[token] == PARSE_KIND_EXCLAIMEQUAL ? "use '|=' to turn this inequality comparison into an or-assignment" : "" };
-            check_common_report_discarded(parser, pp, input, token, CHECK_WARNING_ID_UNUSED_COMPARISON, message,
-                                          note.message[0] != 0 ? &note : NULL, note.message[0] != 0 ? 1u : 0u, scratch);
+            // (A statement expression's value is the walk's, as the statement expression's discarded value, #1447.)
+            if (!check_common_statement_value(parser, parent))
+            {
+                check_common_report_discarded(parser, pp, input, token, CHECK_WARNING_ID_UNUSED_COMPARISON, message,
+                                              note.message[0] != 0 ? &note : NULL, note.message[0] != 0 ? 1u : 0u, scratch);
+            }
         }
     }
 }
