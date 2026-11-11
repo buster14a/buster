@@ -1554,7 +1554,14 @@ refusal: clang 23.1.4 emits a scalar zero count followed by an invalid
 scalar-to-vector `trunc`, crashing or producing incorrect code depending on
 the vector's width. Element-wise conversions, shuffles, non-boolean builtins,
 reductions and logical operations take at most 1024 elements, bounding their
-expanded entry runs; packed bit operations do not unpack those lanes.
+expanded entry runs; packed bit operations do not unpack those lanes. Past that
+(`BUSTER_CHECK_LOWER_TRANSPORT_LANES`) they stay refused by name, where clang
+compiles them (#1834's sweep: `ext_vector_type(1025)`): LLVM splits such a
+vector into its legal registers' pieces, while these lowerings expand an entry
+run per element, a function's entries growing with the lanes. Matching clang
+there takes conversions, shuffles and reductions at the registers' width, as
+the operators' pieces are (`check_lower_transport_rows`), not wider bounds;
+#2216 lists them with the other refusals that hold at every target.
 
 `test-checker --program-vectors` runs a program of all of these against clang
 -O0's build of it at x86-64-v4 (`vector-transport-compute`) and at x86-64,
