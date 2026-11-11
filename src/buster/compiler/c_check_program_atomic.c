@@ -686,7 +686,7 @@ static void check_lower_atomic_store_operand(CheckLowerWriter* writer, uint32_t 
     check_lower_push(writer, (CheckLowerTask){.kind = CHECK_LOWER_CLEAR, .type = (TypeId)bytes, .value = buffer});
 }
 
-static void check_lower_atomic_prepare(CheckLowerWriter* writer, uint32_t node, bool builtin, bool discard)
+static void check_lower_atomic_plan(CheckLowerWriter* writer, uint32_t node, bool builtin, bool discard)
 {
     const CheckProgram* program = writer->program;
     const CheckGraph* graph = &program->input->graph;
@@ -821,5 +821,20 @@ static void check_lower_atomic_prepare(CheckLowerWriter* writer, uint32_t node, 
         }
         check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, plan->address);
         check_lower_push(writer, (CheckLowerTask){.kind = CHECK_LOWER_EXPRESSION, .node = target, .address = true});
+    }
+}
+
+// An atomic operation's plan (check_lower_atomic_plan), where the function's plans have room: a node that a dump's calls or
+// os_log's items evaluate again takes one each time (CheckLowerInitializers.extra_atomics, #1842), which the shared
+// capacity counts; past it the lowering fails for its resources rather than write past the table.
+static void check_lower_atomic_prepare(CheckLowerWriter* writer, uint32_t node, bool builtin, bool discard)
+{
+    if (writer->atomic_count >= writer->atomic_room)
+    {
+        check_lower_fail(writer, CHECK_PROGRAM_RESOURCE);
+    }
+    else
+    {
+        check_lower_atomic_plan(writer, node, builtin, discard);
     }
 }
