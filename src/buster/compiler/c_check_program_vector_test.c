@@ -523,12 +523,6 @@ static void check_test_program_vector_refusals(CheckTest* test, const X86Target*
             2,
         },
         {
-            "vector-shift-bytes",
-            "typedef unsigned char v16qu __attribute__((vector_size(16)));int tested(int n){v16qu a={(unsigned char)n},b={1};a=a<<b;return a[0];}",
-            "vector shifts of 8-bit elements",
-            2,
-        },
-        {
             // Vectors passed by their bytes (#137, check_lower_transport_type) compute as clang -O0's code does
             // (c_check_program_transport.c), but where clang's own code doesn't, and as the ordinary vectors refuse.
             "vector-of-bool-element-update",
@@ -1174,6 +1168,17 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
           "int tested(int n){unsigned h=2166136261u;\n"
           "ALL(signed char);ALL(unsigned char);ALL(short);ALL(unsigned short);T(int,8);T(int,16);T(int,32);T(int,64);T(unsigned,16);T(unsigned,64);\n"
           "T(long long,16);T(long long,32);T(long long,64);T(unsigned long long,16);T(unsigned long long,64);\n"
+          "return (int)h;}\n"
+        },
+        // Shifts by a vector of counts without their rows (#2239), element by element: << and >>, and <<= and >>=, of signed
+        // and unsigned 8- to 64-bit elements of 4 to 64 bytes, each count below its element's bits.
+        { "baseline-variable-shifts",
+          "#define T(E,W) do{typedef E V __attribute__((vector_size(W)));V a,b;fill(&a,W,n*7+W);fill(&b,W,n*9+W);b&=(E)(8*sizeof(E)-1);V r_[]={a<<b,a>>b};"
+          "FOLD(r_);V c=a;c<<=b;V d=a;d>>=b;FOLD(c);FOLD(d);}while(0)\n"
+          "#define ALL(E) T(E,4);T(E,8);T(E,16);T(E,32);T(E,64)\n"
+          "int tested(int n){unsigned h=2166136261u;\n"
+          "ALL(signed char);ALL(unsigned char);ALL(short);ALL(unsigned short);T(int,8);T(int,16);T(int,32);T(int,64);T(unsigned,16);T(unsigned,64);\n"
+          "T(long long,16);T(long long,32);T(long long,64);T(unsigned long long,16);T(unsigned long long,32);T(unsigned long long,64);\n"
           "return (int)h;}\n"
         },
         // Scalars' elementwise builtins without AVX-512F (#1834): the C library's ceilf ... roundf, fmaf and fma without

@@ -7442,6 +7442,9 @@ static __attribute__((noinline)) TypeId check_lower_update_through(const CheckLo
     return half != CHECK_HALF_NONE && other && check_lower_half_excess(writer, half) ? BUSTER_TYPE_FLOAT : calculated;
 }
 
+static bool check_lower_shift_elements(const CheckLowerWriter* writer, uint32_t op, TypeId vector);
+static void check_lower_transport_shift(CheckLowerWriter* writer, uint32_t node, CheckOp op, TypeId vector, TypeId counts, bool update);
+
 static void check_lower_update(CheckLowerWriter* writer, uint32_t node)
 {
     const CheckProgram* program = writer->program;
@@ -7508,9 +7511,16 @@ static void check_lower_update(CheckLowerWriter* writer, uint32_t node)
         if (stored_class == BUSTER_TYPED_CLASS_VECTOR)
         {
             const bool scalar = check_lower_vector_bytes(program->types, check_stream_type(stream, graph->operand1[node])) == 0;
-            check_lower_vector_half_chain(writer, calculated, vector_op, BUSTER_CHECK_NONE, graph->operand1[node]);
-            check_lower_vector_row(writer, vector_op, calculated, 0);
-            check_lower_vector_operand(writer, node, 1, scalar ? calculated : right_type);
+            if (!scalar && check_lower_shift_elements(writer, vector_op, calculated))
+            {
+                check_lower_transport_shift(writer, node, (CheckOp)vector_op, calculated, right_type, true);
+            }
+            else
+            {
+                check_lower_vector_half_chain(writer, calculated, vector_op, BUSTER_CHECK_NONE, graph->operand1[node]);
+                check_lower_vector_row(writer, vector_op, calculated, 0);
+                check_lower_vector_operand(writer, node, 1, scalar ? calculated : right_type);
+            }
         }
         else
         {
@@ -11124,7 +11134,11 @@ static __attribute__((noinline)) void check_lower_vector_operation(CheckLowerWri
         const bool scalar_count = shift && check_lower_vector_bytes(types, check_stream_type(stream, b)) == 0;
         const uint64_t evex = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512VL);
         check_lower_vector_half_chain(writer, vector, op, a, b);
-        if (scalar_count && (writer->target.features & evex) != evex)
+        if (shift && !scalar_count && check_lower_shift_elements(writer, op, vector))
+        {
+            check_lower_transport_shift(writer, node, op, vector, stream->conversions[node].operands[1].type, false);
+        }
+        else if (scalar_count && (writer->target.features & evex) != evex)
         {
             // Without AVX-512, a scalar count's shift is by the count itself, as clang's code shifts by a splat (#1834):
             // its row's integer operand, the count converted to unsigned int.
@@ -11139,7 +11153,10 @@ static __attribute__((noinline)) void check_lower_vector_operation(CheckLowerWri
             check_lower_vector_row(writer, op, vector, 0);
             check_lower_vector_operand(writer, node, 1, scalar_count ? vector : stream->conversions[node].operands[1].type);
         }
-        check_lower_vector_operand(writer, node, 0, vector);
+        if (!(shift && !scalar_count && check_lower_shift_elements(writer, op, vector)))
+        {
+            check_lower_vector_operand(writer, node, 0, vector);
+        }
     }
 }
 
@@ -15950,6 +15967,13 @@ static void check_lower_node_count(const CheckProgram* program, uint32_t node, C
         counts->transport_locals += room != 0 ? 12 : 0;
         // A bit builtin's elements, each its SWAR sequence (check_lower_transport_bit_builtin): up to 144 entries an element,
         // its sequence's 96 and its operands' reads and its store, for a vector of any width (#1834).
+        // A shift by a vector of counts, element by element (check_lower_transport_shift): up to 24 entries an element.
+        const bool shift = op == CHECK_OP_SHIFT_LEFT || op == CHECK_OP_SHIFT_RIGHT || op == CHECK_OP_SHIFT_LEFT_ASSIGN || op == CHECK_OP_SHIFT_RIGHT_ASSIGN;
+        if (shift && (kind == BUSTER_TYPE_KIND_VECTOR || kind == BUSTER_TYPE_KIND_EXT_VECTOR))
+        {
+            counts->transport_entries += 24 * (uint64_t)check_builtin_vector_lanes(types, type_conversion_operand(types, type)) + 16;
+            counts->transport_locals += 4;
+        }
         const bool bits = member == CBUILTIN_ELEMENTWISE_POPCOUNT || member == CBUILTIN_ELEMENTWISE_BITREVERSE || member == CBUILTIN_ELEMENTWISE_CLZG ||
                           member == CBUILTIN_ELEMENTWISE_CTZG || member == CBUILTIN_ELEMENTWISE_FSHL || member == CBUILTIN_ELEMENTWISE_FSHR;
         if (op == CHECK_OP_BUILTIN_VECTOR && bits && check_lower_transport_is_vector(types, type))
@@ -15997,6 +16021,9 @@ static CheckLowerNodeCounts check_lower_node_counts(const CheckProgram* program)
     const uint32_t nodes = graph != NULL ? graph->count : 0;
     const bool atomic_types = nodes != 0 && types != NULL && memchr(types->types.kind, BUSTER_TYPE_KIND_ATOMIC, types->types.count) != NULL;
     const bool logical_types = nodes != 0 && types != NULL && memchr(types->types.kind, BUSTER_TYPE_KIND_EXT_VECTOR, types->types.count) != NULL;
+    // A shift of vectors by a vector of counts may be element by element (check_lower_transport_shift, #2239), which
+    // only a unit with a vector type has.
+    const bool vector_types = logical_types || (nodes != 0 && types != NULL && memchr(types->types.kind, BUSTER_TYPE_KIND_VECTOR, types->types.count) != NULL);
     // And so do a transport vector's nodes (check_lower_transport_room), which only a unit with a transport vector type
     // has: its vector types are few, and the intrinsics' headers have none.
     bool transport_types = false;
@@ -16026,6 +16053,10 @@ static CheckLowerNodeCounts check_lower_node_counts(const CheckProgram* program)
         const __m512i logical_and = _mm512_set1_epi32(CHECK_OP_LOGICAL_AND);
         const __m512i logical_or = _mm512_set1_epi32(CHECK_OP_LOGICAL_OR);
         const __m512i conditional = _mm512_set1_epi32(CHECK_OP_CONDITIONAL);
+        const __m512i shift_left = _mm512_set1_epi32(CHECK_OP_SHIFT_LEFT);
+        const __m512i shift_right = _mm512_set1_epi32(CHECK_OP_SHIFT_RIGHT);
+        const __m512i shift_left_assign = _mm512_set1_epi32(CHECK_OP_SHIFT_LEFT_ASSIGN);
+        const __m512i shift_right_assign = _mm512_set1_epi32(CHECK_OP_SHIFT_RIGHT_ASSIGN);
         for (uint32_t first = 0; first < nodes; first += 16)
         {
             const uint32_t left = nodes - first;
@@ -16038,7 +16069,11 @@ static CheckLowerNodeCounts check_lower_node_counts(const CheckProgram* program)
             counts.atomics += (uint32_t)__builtin_popcount(_mm512_mask_cmpeq_epi32_mask(active, ops, atomic));
             const __mmask16 logical = logical_types ? _mm512_mask_cmpeq_epi32_mask(active, ops, logical_not) | _mm512_mask_cmpeq_epi32_mask(active, ops, logical_and) |
                                                        _mm512_mask_cmpeq_epi32_mask(active, ops, logical_or) | _mm512_mask_cmpeq_epi32_mask(active, ops, conditional) : 0;
-            for (uint32_t lanes = _mm512_mask_cmpeq_epi32_mask(active, ops, vector) | logical; lanes != 0; lanes &= lanes - 1)
+            const __mmask16 shifts = vector_types ? _mm512_mask_cmpeq_epi32_mask(active, ops, shift_left) | _mm512_mask_cmpeq_epi32_mask(active, ops, shift_right) |
+                                                     _mm512_mask_cmpeq_epi32_mask(active, ops, shift_left_assign) |
+                                                     _mm512_mask_cmpeq_epi32_mask(active, ops, shift_right_assign) :
+                                                     0;
+            for (uint32_t lanes = _mm512_mask_cmpeq_epi32_mask(active, ops, vector) | logical | shifts; lanes != 0; lanes &= lanes - 1)
             {
                 check_lower_node_count(program, first + (uint32_t)__builtin_ctz(lanes), &counts);
             }

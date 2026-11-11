@@ -692,6 +692,10 @@ at the target's forms, by both of the checker's paths:
   element by element (`check_lower_transport_bit_builtin`, #1834): each element zero-extended into an unsigned int (or
   unsigned long long), its value by SWAR (bit swaps, smears and population counts), then truncated, which is clang's
   value; funnel shifts by `(a << s) | ((b >> 1) >> (w - 1 - s))` and its mirror.
+  A shift by a vector of counts (`a << b`, `a >>= b`) where the target's rows have none of its elements (without AVX2's
+  `vpsllvd` and its kin; of bytes and words without AVX-512BW's; a qword's arithmetic one without AVX-512F's) is element
+  by element (`check_lower_transport_shift`, #2239): each element in int (or its own type of 4 or 8 bytes), extended
+  by its signedness, shifted by its count, and converted back, as clang's legalization scalarizes it.
   `__builtin_convertvector`'s integer extensions without SSE4.1 and truncations without AVX-512 are sequences too
   (`check_vector_baseline_resize`, #1834): an extension unpacks the low elements with zeros, or with themselves and
   shifts them right arithmetically (a qword's high dword is `psrad` by 31 of a copy); a truncation takes a qword's low

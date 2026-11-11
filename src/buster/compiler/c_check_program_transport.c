@@ -2003,6 +2003,85 @@ static __attribute__((noinline)) void check_lower_transport_bit_builtin(CheckLow
     }
 }
 
+// Whether a shift of a vector of integers by a vector of counts is computed element by element
+// (check_lower_transport_shift, #2239): where the target's rows have no shift of its elements by a vector (without
+// AVX2's VPSLLVD and its kin, of bytes and words without AVX-512BW's, a qword's arithmetic one without AVX-512F's).
+static bool check_lower_shift_elements(const CheckLowerWriter* writer, uint32_t op, TypeId vector)
+{
+    const TypeTable* types = writer->program->types;
+    const CheckVectorElement element = check_vector_lower_element(types, vector);
+    const uint32_t bytes = check_lower_vector_bytes(types, vector);
+    const uint32_t width = check_lower_transport_width(writer);
+    bool result = false;
+    if ((op == CHECK_OP_SHIFT_LEFT || op == CHECK_OP_SHIFT_RIGHT) && bytes != 0 && element.bytes != 0 && !element.floating)
+    {
+        Tier0Operation row;
+        result = check_vector_lower_element_row(&writer->target, false, op, element, bytes < width ? bytes : width, 0, &row) != NULL;
+    }
+    return result;
+}
+
+// A shift of a vector of integers by a vector of counts, element by element (check_lower_shift_elements), as clang's
+// legalization scalarizes it: each element read in int (an element of 4 or 8 bytes in its own type), extended by its
+// signedness, shifted by its count (an arithmetic right shift of a signed element), and converted back to the element.
+// A count past the element's bits is undefined, as clang's code leaves it. The operands are evaluated first to last
+// into frame objects whose addresses locals hold; an update's (`a <<= b`) left one is the destination's value, which
+// the update has on the stack.
+static void check_lower_transport_shift(CheckLowerWriter* writer, uint32_t node, CheckOp op, TypeId vector, TypeId counts, bool update)
+{
+    const CheckProgram* program = writer->program;
+    const TypeTable* types = program->types;
+    const TypeId element = check_lower_transport_element(types, vector);
+    const TypeId count_element = check_lower_transport_element(types, counts);
+    const uint32_t size = (uint32_t)type_size(types, element);
+    const uint32_t lanes = check_builtin_vector_lanes(types, type_conversion_operand(types, vector));
+    const TypeId promoted = size < 4 ? BUSTER_TYPE_INT : element;
+    const TypeId count_type = type_size(types, count_element) < 4 ? BUSTER_TYPE_INT : count_element;
+    if (lanes == 0 || lanes != check_builtin_vector_lanes(types, type_conversion_operand(types, counts)) || lanes > BUSTER_CHECK_LOWER_TRANSPORT_LANES)
+    {
+        check_lower_unsupported(writer, "vector shifts of these operands");
+    }
+    else
+    {
+        const uint8_t class = check_lower_class(writer, promoted);
+        const uint32_t sources[2] = { check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64), check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64) };
+        const uint32_t out = check_lower_transport_result(writer, vector);
+        for (uint32_t i = lanes; i-- > 0 && writer->output->status == CHECK_PROGRAM_OK;)
+        {
+            check_lower_instruction(writer, BUSTER_TYPED_SET, check_lower_class(writer, element), 0);
+            check_lower_convert(writer, promoted, element);
+            check_lower_instruction(writer, op == CHECK_OP_SHIFT_LEFT ? BUSTER_TYPED_SHL : BUSTER_TYPED_SHR, class, 0);
+            check_lower_transport_read(writer, sources[1], counts, i, count_type);
+            check_lower_transport_read(writer, sources[0], vector, i, promoted);
+            check_lower_element_address(writer, out, i * size);
+        }
+        // Pushed last first. An update's left operand, the destination's old value, is on the stack already, below the
+        // count's: the count is set, then it.
+        if (update)
+        {
+            check_lower_transport_source(writer, vector, sources[0]);
+            if (check_lower_transport_register(writer, vector))
+            {
+                // Tier 0 reads an entry's last operand's class from the entry before it, here the count's address set: a
+                // temporary of the vector's read and dropped first make that entry one of the vector's class.
+                const uint32_t bridge = check_lower_temporary_of(writer, vector);
+                check_lower_instruction(writer, BUSTER_TYPED_DISCARD, BUSTER_TYPED_CLASS_VECTOR, 0);
+                check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_VECTOR, bridge);
+            }
+            check_lower_transport_source(writer, counts, sources[1]);
+            check_lower_operand(writer, node, 1, false, counts);
+        }
+        else
+        {
+            check_lower_transport_source(writer, counts, sources[1]);
+            check_lower_operand(writer, node, 1, false, counts);
+            check_lower_transport_source(writer, vector, sources[0]);
+            check_lower_operand(writer, node, 0, false, vector);
+        }
+        writer->vectors = true;
+    }
+}
+
 // The address a masked memory builtin's lane takes (check_lower_transport_masked), pushed: the real one, whose local
 // `real` (U64) holds, where the lane's bit of the mask (whose address local `mask` holds, of type `mask_type`) is set,
 // else the other, local `other`'s: other ^ ((real ^ other) & -bit), which reads no memory at either address.

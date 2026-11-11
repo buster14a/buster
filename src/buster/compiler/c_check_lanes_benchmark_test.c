@@ -3,8 +3,8 @@
 //
 // benchmark-check-lanes' preparation (#1045): the program it emits is the one -c compiles for the target its options give.
 // Original fixtures run through the command on one lane and one pass: a unit of 512-bit vectors, which the baseline x86-64
-// profile refuses (their variable shifts: "vector shifts unavailable at this target", SSE2 having none) and znver5
-// takes, must be measured with -march=znver5 and fail at its emission for the baseline, as -c does; and a baseline unit
+// profile refuses (their qwords' multiplication: "vector multiplication of 64-bit elements without AVX-512DQ"; their
+// variable shifts were #2239's) and znver5 takes, must be measured with -march=znver5 and fail at its emission for the baseline, as -c does; and a baseline unit
 // whose function's target
 // attribute ("avx2") takes a 32-byte vector must be measured, which it is only when the program has the options'
 // predefines to resolve the attribute against. Then #1057's review: a unit whose always_inline callee's target -c's
@@ -55,9 +55,10 @@ static bool check_lanes_benchmark_test_run(char** arguments, uint32_t count, int
 static __attribute__((noinline)) void check_test_check_lanes_benchmark(CheckTest* test)
 {
     static const char* const fixtures[] = {
-        // Two functions that return and shift 512-bit vectors, which -c lowers for znver5 and refuses for the baseline.
-        "typedef int V __attribute__((vector_size(64)));\n"
-        "V add(V a, V b)\n{\n    return a << b;\n}\n"
+        // Two functions that return and multiply 512-bit vectors of qwords, which -c lowers for znver5 (AVX-512DQ's
+        // VPMULLQ) and refuses for the baseline (#1834's part B has its qword multiplication).
+        "typedef long long V __attribute__((vector_size(64)));\n"
+        "V add(V a, V b)\n{\n    return a * b;\n}\n"
         "int first(V a)\n{\n    V c = add(a, a);\n    return c[0];\n}\n",
         // A 32-byte vector in a function whose target attribute adds AVX2 to the baseline: the unit's target refuses it.
         "typedef int V8 __attribute__((vector_size(32)));\n"
