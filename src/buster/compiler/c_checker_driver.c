@@ -1693,7 +1693,7 @@ static uint32_t check_driver_character_count(const uint8_t* bytes, uint32_t leng
     {
         if (bytes[at] == '\\')
         {
-            at = check_literal_evaluated_escape(bytes, at, end, c23, UINT32_MAX, NULL, &ignored, &had_error);
+            at = check_literal_evaluated_escape(bytes, at, end, c23, false, UINT32_MAX, NULL, &ignored, &had_error);
             count += 1;
         }
         else
@@ -1748,10 +1748,12 @@ static bool check_driver_literal_escapes(const Parser* parser, Preprocessor* pp,
             const String8 spelling = check_warning_string_spelling(parser, pp, t, scratch);
             const uint32_t length = (uint32_t)spelling.length;
             CheckEscapeDiagnostic* diagnostics = length != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckEscapeDiagnostic, BUSTER_CHECK_ESCAPE_DIAGNOSTICS(length)) : NULL;
-            const uint32_t count = diagnostics != NULL ? check_literal_evaluated_escapes((const uint8_t*)spelling.pointer, length, c23, diagnostics, &had_error) : 0;
+            const uint32_t count = diagnostics != NULL ? check_literal_evaluated_escapes((const uint8_t*)spelling.pointer, length, c23, true, diagnostics, &had_error) : 0;
             for (uint32_t i = 0; i < count; i += 1)
             {
-                errors |= diagnostics[i].kind != CHECK_ESCAPE_DIAGNOSTIC_UNKNOWN;
+                // (-Wunknown-escape-sequence's and -pedantic's are warnings.)
+                errors |= diagnostics[i].kind != CHECK_ESCAPE_DIAGNOSTIC_UNKNOWN && diagnostics[i].kind != CHECK_ESCAPE_DIAGNOSTIC_NONSTANDARD &&
+                          diagnostics[i].kind != CHECK_ESCAPE_DIAGNOSTIC_DELIMITED && diagnostics[i].kind != CHECK_ESCAPE_DIAGNOSTIC_NAMED;
                 if (pass == 1)
                 {
                     check_driver_escape(parser, pp, input, t, spelling, diagnostics + i, publication);

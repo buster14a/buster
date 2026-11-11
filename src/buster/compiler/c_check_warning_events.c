@@ -464,6 +464,10 @@ typedef enum CheckWarningEventKind
     // -Wunused-value's "left operand of comma operator has no effect" or its `void *` cast's question, or
     // -Wunused-comparison's, with a CHECK_WARNING_NOTE_COMPARISON_ASSIGNMENT at an equality's.
     CHECK_WARNING_EVENT_UNUSED_RESULT,
+    // GNU's escape sequence (\e, \E, \(, \{, \[ or \%) in an evaluated literal (#1447, -pedantic's -Wpedantic): "use of
+    // non-standard escape character '\c'" at its backslash, payload.name the character and payload.data the backslash's
+    // offset in the token.
+    CHECK_WARNING_EVENT_NONSTANDARD_ESCAPE,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
 

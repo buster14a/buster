@@ -2026,10 +2026,22 @@ literal's escape and prefix diagnostics show the macro argument it came from,
 (`Preprocessor.diagnostic_arguments`); a numeric constant's errors don't, nor
 clang's.
 
+An evaluated literal's escapes have the same warnings, as clang's literal
+parser gives them (`check_literal_evaluated_escapes`' `pedantic`): a GNU
+escape's at its backslash, a delimited numeric one's while the literal has no
+error, and a delimited or named universal character name's after one of no
+error of its own, whatever came before (`"\x{100}\u{e9}"` warns of the
+second). The driver words a refused literal's; the reader gives events of a
+literal its extended decoding read (`CHECK_WARNING_EVENT_NONSTANDARD_ESCAPE`,
+`CHECK_WARNING_EVENT_DELIMITED_ESCAPE`), and scans one the fast decoding read,
+which takes `\e` without a word, only where the command line may give the
+warning or the unit has a diagnostic pragma (`check_input_gnu_escapes`). A
+static assertion's message, which the reader reads too, has the unevaluated
+scan's alone (`check_input_assertion_message`).
+
 Not clang's yet: what follows `\x` without digits, which clang alone keeps
-(its attribute still applies); and -pedantic's warnings of an evaluated
-literal's escapes (`"\e"` in an initializer), which the fast decoding takes
-without a scan. A static assertion's message of an escape
+(its attribute still applies); and the warnings of the literals after one the
+checker refuses, which ends the reading. A static assertion's message of an escape
 the fast decoding refuses (a named or a delimited one, #1447) is read as clang
 reads it (`check_literal_strings_extended`). Like the checker's other errors, the
 first one ends the unit's semantic diagnostics after its declaration.
