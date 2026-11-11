@@ -536,6 +536,9 @@ struct CheckLowerAtomic
     bool native;
     bool postfix;
     bool discard;
+    // An _Atomic lvalue's object's segment override (#1447, BUSTER_TYPED_ACCESS_SEGMENT), which its direct accesses take
+    // (its LOAD, SET, ATOMIC_RMW and ATOMIC_CAS); a library call takes its address as it is, as clang's does.
+    uint64_t segment;
 };
 
 struct CheckLowerAbi
@@ -13213,8 +13216,11 @@ static bool check_lower_segment_access(const CheckLowerWriter* writer, uint32_t 
     const uint8_t target_facts = written ? check_lower_facts(writer, target_type) : 0;
     const bool aggregate_store = (target_facts & BUSTER_CHECK_LOWER_TYPE_AGGREGATE) != 0 && (target_facts & BUSTER_CHECK_LOWER_TYPE_ATOMIC) == 0 &&
                                  (op == CHECK_OP_ASSIGN || !check_lower_transport_type(types, target_type));
-    const bool carried = read ? reader && check_lower_segment_carried(writer, value->type)
-                              : written && (aggregate_store || check_lower_segment_carried(writer, check_stream_type(stream, target)));
+    // An _Atomic lvalue's read, store or update goes through its plan (check_lower_atomic_prepare), whose direct accesses
+    // take the override (CheckLowerAtomic.segment).
+    const bool atomic_lvalue = (check_lower_facts(writer, read ? value->type : written ? check_stream_type(stream, target) : 0) & BUSTER_CHECK_LOWER_TYPE_ATOMIC) != 0;
+    const bool carried = atomic_lvalue || (read ? reader && check_lower_segment_carried(writer, value->type)
+                                                : written && (aggregate_store || check_lower_segment_carried(writer, check_stream_type(stream, target))));
     // A vector's element takes its vector lvalue's override (check_lower_element_segment) where the element is of a class one
     // LOAD or STORE moves, and not a bit of a vector of bool (a transport vector's, which no address reaches).
     const TypeId vector = element ? check_stream_type(stream, target) : 0;
