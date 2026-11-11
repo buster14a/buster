@@ -1,0 +1,4 @@
+decision	keep
+jobs	18	stopped	2	setup	0	keep	2
+job	keep	not-hosted	failure	-	Native tests and benchmarks on Benchpress (Ryzen 7 9700X)
+job	keep	run-not-setup	failure	Require hosted and native correctness before successful qualification	Build and execute on Ryzen 7 9700X

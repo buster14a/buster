@@ -1,0 +1,12 @@
+- `Run correctness tests within the hosted CPU budget` (9 jobs). Not setup: not a setup step.
+  - [`Tests on Ubuntu 26.04 (Clang 23, x86-64, address, O3, shard 1 of 4)`](https://github.com/buster14a/buster/actions/runs/42613914061/job/129149320259) (failure)
+  - [`Tests on Ubuntu 26.04 (Clang 23, x86-64, undefined, O3, shard 1 of 4)`](https://github.com/buster14a/buster/actions/runs/42613914061/job/129149320300) (failure)
+  - [`Tests on Ubuntu 26.04 (Clang 23, x86-64, thread, O3, shard 1 of 4)`](https://github.com/buster14a/buster/actions/runs/42613914061/job/129149320350) (failure)
+  - [`Tests on Ubuntu 26.04 (Clang 23, x86-64, memory, O3, shard 1 of 4)`](https://github.com/buster14a/buster/actions/runs/42613914061/job/129149320363) (failure)
+  - [`Tests on Ubuntu 26.04 (Clang 23, native, thread, O3, shard 1 of 4)`](https://github.com/buster14a/buster/actions/runs/42613914061/job/129149320403) (failure)
+  - [`Tests on Ubuntu 26.04 (Clang 23, native, undefined, O3, shard 1 of 4)`](https://github.com/buster14a/buster/actions/runs/42613914061/job/129149320550) (failure)
+  - [`Tests on Ubuntu 26.04 (Clang 23, x86-64, address, O1, shard 1 of 4)`](https://github.com/buster14a/buster/actions/runs/42613914061/job/129149320617) (failure)
+  - [`Tests on Ubuntu 26.04 (Clang 23, native, memory, O3, shard 1 of 4)`](https://github.com/buster14a/buster/actions/runs/42613914061/job/129149320672) (failure)
+  - [`Tests on Ubuntu 26.04 (Clang 23, native, address, O1, shard 1 of 4)`](https://github.com/buster14a/buster/actions/runs/42613914061/job/129149320756) (failure)
+- `Run correctness tests within the hosted CPU budget` (1 job). Not setup: interrupted outside setup, not by fail-fast.
+  - [`Tests on Ubuntu 26.04 (Clang 23, native, address, O3, shard 1 of 4)`](https://github.com/buster14a/buster/actions/runs/42613914061/job/129149320295) (failure)

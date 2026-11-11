@@ -334,6 +334,101 @@ the plain rows the semantic driver's and the parser's clang checks; finer parts
 (#2030) lower it. A row's once-only steps run on its shard 1 after the deal, so
 `plan --first` adds them, but the deal doesn't see them.
 
+## Setup failures re-run once
+
+A run of `9700x.yml` ("Tests and Zen 5 benchmarks", the only workflow that
+calls `hosted-correctness.yml`) whose first attempt failed only because jobs
+stopped in setup, before any test ran, has its failed jobs re-run once,
+automatically (#2276). `.github/workflows/rerun.yml` runs when the run
+completes (`workflow_run`). `tools/ci/rerun.sh` fetches the attempt's jobs and
+steps and its cancelled jobs' annotations, `tools/ci/rerun.c` decides, and the
+script asks for `rerun-failed-jobs`. The re-run runs tests that never ran,
+never ones that failed, so green keeps meaning the tests passed.
+
+- **Which runs.** A failed first attempt (`run_attempt == 1`) of a push or a
+  pull request from this repository, checked again just before the request.
+  A second attempt is never re-run automatically, whatever stopped it. Forks'
+  pull requests and the nightly dispatches are left alone: the coordinator
+  plans the dispatches' 9700X work.
+- **Where a job stopped.** At its first step that didn't pass: one that failed,
+  or one that was cancelled or left running (a lost runner leaves its step
+  running). A job that passed or was skipped didn't stop.
+- **Re-run** when at least one job stopped in setup and every stopped job did
+  one of these:
+  - stopped in a setup step of the allowlist below, whether the step failed or
+    was interrupted (fail-fast, its timeout, a lost runner), or failed before
+    any step ran (its provisioning);
+  - stopped in a step that fails because a setup failure stopped another job.
+    "Require this row's compiler product" counts when the row's build job
+    ("Build the compiler once for the row's shards") stopped in setup itself.
+    The vector row's verdict ("Require one passing qualified execution of each
+    vector item") counts when a job of its row did, and the required aggregate
+    ("Require hosted and native correctness before successful qualification")
+    when any job did;
+  - was cancelled by fail-fast after another job failed, wherever it was, by
+    its annotation ("The strategy configuration was canceled because ..."), or
+    was cancelled before any step ran or after every step it ran passed. The
+    other job's failure decides.
+- **Never re-run** a run with any of these:
+  - a failure in any other step: a test step ("Run correctness tests within the
+    hosted CPU budget" and every check), the build ("Build the external Clang
+    pragma oracle, the clang server and the compiler"), a probe, a report, an
+    artifact's upload or download;
+  - a job interrupted outside setup by anything but fail-fast: a lost runner,
+    or its `timeout-minutes`. The jobs API reports a timeout exactly as it
+    reports a fail-fast cancellation, the job and its step `cancelled`; only
+    the annotation "The job has exceeded the maximum execution time" tells them
+    apart. A test command's own timeout (`parallel --timeout`) fails its step;
+  - a self-hosted job (the 9700X's), a job that didn't complete, or a failed
+    job none of whose steps failed.
+- **The allowlist** (`rerun_steps`), by step name, for every GitHub-hosted job
+  of the run:
+
+  | Steps | What they do |
+  | --- | --- |
+  | `Set up job` | GitHub's own: the runner, the actions' downloads |
+  | `Check out triggering commit`, `Check out the triggering commit and its parents`, `Check out the run's commit and its first parent`, `Check out the exact caller revision`, `Check out the qualification policy`, `Check out the pull request's history`, `Check out reviewed first-party performance fixtures and acceptance harnesses`, `Fetch the vector draw's script from this commit` | the checkouts |
+  | `Restore verified hosted release inputs` | `.github/actions/hosted-tools` |
+  | `Acquire missing inputs once and verify the complete set`, `Acquire missing offline inputs once and check each as the jobs read it` | `prepare-hosted-tools.yml`'s acquisitions |
+  | `Install official Clang 23.1.4 and test tools`, `Install official Clang, sanitizer and libFuzzer runtimes` | `tools/ci/setup-hosted.sh` |
+  | `Fetch generic baseline startup objects and runtime for emulation` | `tools/ci/setup-baseline-runtime.sh` |
+  | `Fetch and verify frozen corpus inputs`, `Fetch c-testsuite at its pinned commit`, `Fetch SQLite's sources at their pinned commit` | the fetches |
+
+- **Notes.** The workflow's run summary lists every stopped job by the step
+  it stopped at and why, re-run or not. After a re-run, the same list goes in
+  a comment on the pull request, or on the commit of a push, so that repeated
+  infrastructure failures stay visible.
+- **API calls.** Every run's jobs share the Actions token's hourly API
+  quota, which the vector draws' calls exhausted on 2026-11-11 (their "Take
+  the vector item the draw assigns, or end as a redraw" failed with "API
+  rate limit exceeded for installation"). So the glue asks for the jobs'
+  pages, then only the annotations that could change the decision
+  (`rerun annotations`: a cancelled job interrupted outside setup, in a run
+  that a setup failure and such jobs alone keep), and, before a re-run, the
+  run's state once. Of the 2026-11-05 to 11-11 failed first attempts, none
+  needed an annotation.
+- **Checks.** `rerun --self-test --root .` runs in `changes` and in the
+  workflow before it decides. It tests the rule on synthetic runs and the
+  allowlist against the workflow files: each name it holds is a step of the
+  watched workflows or of the reusable workflows they call, the row's build
+  job and test step keep their names, and `rerun.yml` watches exactly the
+  workflows that call `hosted-correctness.yml` and re-runs only failed first
+  attempts. A renamed setup step fails it until the list follows.
+  `bash tests/ci/rerun.sh`, in the `evidence` job's fixtures step, also runs
+  the cases recorded from the API in `tests/ci/rerun/cases.tsv` against their
+  reports and Markdown: the 2026-11-11 outage's push and pull request, test,
+  build, timeout, fail-fast, lost-runner and self-hosted failures. It checks
+  workflow mutants that the policy must refuse, and the glue against a fake
+  `gh`. Record a new case with `bash tests/ci/rerun/record.sh RUN ATTEMPT
+  NAME`, list it in `cases.tsv`, then run `bash tests/ci/rerun.sh --update`
+  and read the difference.
+
+```sh
+cc -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing tools/ci/rerun.c -o build/rerun
+build/rerun --self-test --root .
+bash tests/ci/rerun.sh
+```
+
 ## Reuse and the nightly backlog
 
 `tools/ci/nightly.c` makes the decisions, `tools/ci/nightly.sh` is their API and
