@@ -1,0 +1,18 @@
+- `Install official Clang 23.1.4 and test tools` (4 jobs). Cancelled: fail-fast cancelled it after another job failed.
+  - [`Tests on Ubuntu 26.04 (x86-64, none, O3) / Build the compiler once for the row's shards`](https://github.com/buster14a/buster/actions/runs/43032684469/job/130565353088) (cancelled)
+  - [`Tests on Ubuntu 26.04 (vector, none, O3) / Vector draw 1, candidate 1 (Clang 23, none, O3)`](https://github.com/buster14a/buster/actions/runs/43032684469/job/130565354158) (cancelled)
+  - [`Tests on Ubuntu 26.04 (vector, none, O3) / Vector draw 1, candidate 4 (Clang 23, none, O3)`](https://github.com/buster14a/buster/actions/runs/43032684469/job/130565354218) (cancelled)
+  - [`Tests on Ubuntu 26.04 (vector, none, O3) / Vector draw 1, candidate 2 (Clang 23, none, O3)`](https://github.com/buster14a/buster/actions/runs/43032684469/job/130565355456) (cancelled)
+- `Install official Clang 23.1.4 and test tools` (1 job). Setup: a setup step.
+  - [`Tests on Ubuntu 26.04 (vector, none, O3) / Vector draw 1, candidate 3 (Clang 23, none, O3)`](https://github.com/buster14a/buster/actions/runs/43032684469/job/130565354141) (failure)
+- `Require one passing qualified execution of each vector item` (1 job). Follows setup: a job of its row stopped in setup.
+  - [`Tests on Ubuntu 26.04 (vector, none, O3) / Vector row verdict (Clang 23, none, O3)`](https://github.com/buster14a/buster/actions/runs/43032684469/job/130569884648) (failure)
+- No step (6 jobs). Cancelled: cancelled before any step ran.
+  - [`Tests on Ubuntu 26.04 (x86-64, none, O3) / Vector draw 2, candidate ${{ matrix.candidate }} (Clang 23, ${{ inputs.sanitizer }}, O${{ inputs.optimization }})`](https://github.com/buster14a/buster/actions/runs/43032684469/job/130569996850) (cancelled)
+  - [`Tests on Ubuntu 26.04 (x86-64, none, O3) / Vector draw 1, candidate ${{ matrix.candidate }} (Clang 23, ${{ inputs.sanitizer }}, O${{ inputs.optimization }})`](https://github.com/buster14a/buster/actions/runs/43032684469/job/130569997239) (cancelled)
+  - [`Tests on Ubuntu 26.04 (x86-64, none, O3) / Vector draw 4, candidate ${{ matrix.candidate }} (Clang 23, ${{ inputs.sanitizer }}, O${{ inputs.optimization }})`](https://github.com/buster14a/buster/actions/runs/43032684469/job/130569997863) (cancelled)
+  - [`Tests on Ubuntu 26.04 (x86-64, none, O3) / Tests on Ubuntu 26.04 (Clang 23, ${{ inputs.host_arch }}, ${{ inputs.sanitizer }}, O${{ inputs.optimization }}, shard ${{ matrix.shard }} of ${{ inputs.shards }})`](https://github.com/buster14a/buster/actions/runs/43032684469/job/130569998276) (cancelled)
+  - [`Tests on Ubuntu 26.04 (x86-64, none, O3) / Vector draw 3, candidate ${{ matrix.candidate }} (Clang 23, ${{ inputs.sanitizer }}, O${{ inputs.optimization }})`](https://github.com/buster14a/buster/actions/runs/43032684469/job/130569998749) (cancelled)
+  - [`Tests on Ubuntu 26.04 (x86-64, none, O3) / Vector row verdict (Clang 23, ${{ inputs.sanitizer }}, O${{ inputs.optimization }})`](https://github.com/buster14a/buster/actions/runs/43032684469/job/130570000467) (cancelled)
+- `Require hosted and native correctness before successful qualification` (1 job). Follows setup: a job it needs stopped in setup.
+  - [`Build and execute on Ryzen 7 9700X`](https://github.com/buster14a/buster/actions/runs/43032684469/job/130569999808) (failure)

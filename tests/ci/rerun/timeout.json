@@ -1,0 +1,9 @@
+{"total_count": 3, "jobs": [
+{"id":130596329405,"name":"timeout","status":"completed","conclusion":"cancelled","html_url":"https://github.com/buster14a/buster/actions/runs/43042106174/job/130596329405","labels":["ubuntu-26.04"],"steps":[{"name":"Set up job","conclusion":"success"},{"name":"Prepare","conclusion":"success"},{"name":"Sleep past the job's timeout","conclusion":"cancelled"},{"name":"After the sleep","conclusion":"success"},{"name":"Complete job","conclusion":"success"}]},
+{"id":130596329769,"name":"matrix (slow)","status":"completed","conclusion":"cancelled","html_url":"https://github.com/buster14a/buster/actions/runs/43042106174/job/130596329769","labels":["ubuntu-26.04"],"steps":[{"name":"Set up job","conclusion":"success"},{"name":"Prepare","conclusion":"success"},{"name":"Fail or sleep","conclusion":"cancelled"},{"name":"Complete job","conclusion":"success"}]},
+{"id":130596329812,"name":"matrix (fail)","status":"completed","conclusion":"failure","html_url":"https://github.com/buster14a/buster/actions/runs/43042106174/job/130596329812","labels":["ubuntu-26.04"],"steps":[{"name":"Set up job","conclusion":"success"},{"name":"Prepare","conclusion":"success"},{"name":"Fail or sleep","conclusion":"failure"},{"name":"Complete job","conclusion":"success"}]}
+]}
+{"job_id":130596329405,"message":"The job has exceeded the maximum execution time of 1m0s"}
+{"job_id":130596329405,"message":"The operation was canceled."}
+{"job_id":130596329769,"message":"The strategy configuration was canceled because \"matrix.fail\" failed"}
+{"job_id":130596329769,"message":"The operation was canceled."}

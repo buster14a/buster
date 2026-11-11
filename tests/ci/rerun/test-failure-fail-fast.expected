@@ -1,0 +1,11 @@
+decision	keep
+jobs	17	stopped	9	setup	0	keep	2
+job	keep	outside-setup	failure	Run correctness tests within the hosted CPU budget	Tests on Ubuntu 26.04 (Clang 23, x86-64, none, O3, shard 2 of 4)
+job	cancelled	fail-fast	cancelled	Install official Clang 23.1.4 and test tools	Tests on Ubuntu 26.04 (Clang 23, x86-64, none, O3, shard 3 of 4)
+job	cancelled	fail-fast	cancelled	Run correctness tests within the hosted CPU budget	Tests on Ubuntu 26.04 (Clang 23, native, none, O3, shard 2 of 4)
+job	cancelled	fail-fast	cancelled	Run correctness tests within the hosted CPU budget	Tests on Ubuntu 26.04 (Clang 23, native, none, O3, shard 1 of 4)
+job	cancelled	fail-fast	cancelled	Run correctness tests within the hosted CPU budget	Tests on Ubuntu 26.04 (Clang 23, native, none, O3, shard 3 of 4)
+job	cancelled	fail-fast	cancelled	Run correctness tests within the hosted CPU budget	Tests on Ubuntu 26.04 (Clang 23, x86-64, none, O3, shard 1 of 4)
+job	cancelled	fail-fast	cancelled	Run correctness tests within the hosted CPU budget	Tests on Ubuntu 26.04 (Clang 23, native, none, O3, shard 4 of 4)
+job	cancelled	fail-fast	cancelled	Install official Clang 23.1.4 and test tools	Tests on Ubuntu 26.04 (Clang 23, x86-64, none, O3, shard 4 of 4)
+job	keep	run-not-setup	failure	Require hosted and native correctness before successful qualification	Build and execute on Ryzen 7 9700X
