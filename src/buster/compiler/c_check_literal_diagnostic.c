@@ -455,8 +455,8 @@ static void check_literal_escape_append(CheckEscapeDiagnostic* output, uint32_t*
 // delimited ones), a named one's braces and name (Unicode's exactly, #1447: unicode_name_strict; it ends at a line break
 // too), and then its value. Its diagnostics appended at the backslash, `*failed` set by any. Returns the offset past
 // what clang reads of it.
-static uint32_t check_literal_unevaluated_ucn(const uint8_t* bytes, uint32_t escape, uint32_t end, bool c23, bool pedantic, CheckEscapeDiagnostic* output, uint32_t* count,
-                                              bool* failed)
+static uint32_t check_literal_unevaluated_ucn(const uint8_t* bytes, uint32_t escape, uint32_t end, bool c23, bool pedantic, bool evaluated, CheckEscapeDiagnostic* output,
+                                              uint32_t* count, bool* failed)
 {
     const uint8_t letter = bytes[escape + 1];
     // (-pedantic's extension warning, after an escape read whole while the literal had no error: a named one of no error of
@@ -529,7 +529,9 @@ static uint32_t check_literal_unevaluated_ucn(const uint8_t* bytes, uint32_t esc
     {
         check_literal_escape_append(output, count, kind, escape, 0, character);
     }
-    if (pedantic && extension && !before)
+    // (An evaluated literal's (#1447): after one of no error of its own, whatever came before, as clang's ProcessUCNEscape.)
+    const bool warned = evaluated ? extension && kind == CHECK_ESCAPE_DIAGNOSTIC_NONE : extension && !before;
+    if (pedantic && warned)
     {
         check_literal_escape_append(output, count, letter == 'N' ? CHECK_ESCAPE_DIAGNOSTIC_NAMED : CHECK_ESCAPE_DIAGNOSTIC_DELIMITED, 0, 0, 0);
     }
@@ -556,7 +558,7 @@ static uint32_t check_literal_unevaluated_escape(const uint8_t* bytes, uint32_t 
     bool failed = *had_error;
     if (c == 'u' || c == 'U' || c == 'N')
     {
-        at = check_literal_unevaluated_ucn(bytes, escape, end, c23, pedantic, output, count, &failed);
+        at = check_literal_unevaluated_ucn(bytes, escape, end, c23, pedantic, false, output, count, &failed);
     }
     else if (c == 'x')
     {
@@ -738,7 +740,7 @@ static uint32_t check_literal_evaluated_escape(const uint8_t* bytes, uint32_t es
     bool failed = *had_error;
     if (c == 'u' || c == 'U' || c == 'N')
     {
-        at = check_literal_unevaluated_ucn(bytes, escape, end, c23, pedantic, output, count, &failed);
+        at = check_literal_unevaluated_ucn(bytes, escape, end, c23, pedantic, true, output, count, &failed);
     }
     else if (c == 'x' || c == 'o')
     {

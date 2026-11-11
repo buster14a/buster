@@ -1962,7 +1962,9 @@ static void check_test_driver_unevaluated_strings(CheckTest* test, const char* c
         // The same of an evaluated literal's escapes (#1447): GNU's \e, which the fast decoding takes, at its backslash; the
         // others, delimited and named ones at the literal while it has no error; a character constant's; by the options and
         // pragmas.
-        { "const char *a = \"\\e\\E\";\nconst char *b = \"\\x{41}\\o{101}\\u{41}\\N{LATIN CAPITAL LETTER A}\";\nint c = '\\e';\n", "-std=gnu17", "-pedantic" },
+        { "const char *a = \"\\e\\E\";\nint c = '\\e';\nconst char *b = \"\\x{41}\\o{101}\\u{41}\\N{LATIN CAPITAL LETTER A}\";\n", "-std=gnu17", "-pedantic" },
+        { "const char *a = \"\\u{41}x\\u{e9}\";\nconst char *b = \"\\u{e9}\\u{41}\";\n", "-std=gnu17", "-pedantic" },
+        { "const char *c = \"\\x{100}\\u{e9}\";\nconst char *d = \"\\x{41}\" \"\\x{100}\";\n", "-std=gnu17", "-pedantic" },
         { "const char *a = \"x\\\\e\\e\";\nconst char *b = \"\\(\\{\\[\\%\";\nint c = '\\E';\n", "-std=gnu17", "-pedantic" },
         { "const char *a = \"\\x{e9}\" \"\\N{SNOWMAN}\" \"\\u{e9}\";\nint c = '\\x{41}';\n", "-std=gnu23", "-pedantic" },
         { "const char *a = \"\\e\";\nconst char *b = \"\\u{e9}\";\n", "-std=gnu17", "-pedantic-errors" },

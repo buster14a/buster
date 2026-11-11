@@ -5705,11 +5705,10 @@ static void check_input_pragma_report(CheckInputReader* reader)
 
 static uint32_t check_constant_punctuation(const Parser* parser, uint32_t first, uint32_t end, uint8_t punctuation);
 
-// Whether the string literal from `first` to `end`, which the decoder refused, is a static assertion's message whose
-// escape sequence clang refuses there (#147, check_input_unevaluated_refused): the resolution walk reaches it before
-// check_input_constant_context marks it ignored, and the expressions' walk gives its error at the assertion
-// (check_input_expression_act), which drops the assertion, in place of the decoder's. Cold: a refused literal's.
-static bool check_input_assertion_escaped(CheckInputReader* reader, uint32_t first, uint32_t end)
+// Whether the string literal from `first` to `end` is a static assertion's message, an unevaluated string literal (its
+// first token's `(` the static assertion's, and its `,` the one after the condition), and that `(`'s token, through
+// `*open`. Cold: a refused literal's, or one with an escape -pedantic may word.
+static bool check_input_assertion_message(CheckInputReader* reader, uint32_t first, uint32_t end, uint32_t* open_out)
 {
     const Parser* parser = reader->parser;
     const uint8_t* kinds = parser->tokens.kinds;
@@ -5730,6 +5729,24 @@ static bool check_input_assertion_escaped(CheckInputReader* reader, uint32_t fir
     }
     result = result && open > 0 && kinds[open] == PARSE_KIND_L_PAREN && kinds[open - 1] == PARSE_KIND_STATIC_ASSERT &&
              check_constant_punctuation(parser, open + 1, end, PARSE_KIND_COMMA) == first - 1;
+    *open_out = open;
+    return result;
+}
+
+// Whether the string literal from `first` to `end`, which the decoder refused, is a static assertion's message whose
+// escape sequence clang refuses there (#147, check_input_unevaluated_refused): the resolution walk reaches it before
+// check_input_constant_context marks it ignored, and the expressions' walk gives its error at the assertion
+// (check_input_expression_act), which drops the assertion, in place of the decoder's. Cold: a refused literal's.
+static bool check_input_assertion_escaped(CheckInputReader* reader, uint32_t first, uint32_t end)
+{
+    const uint8_t* kinds = reader->parser->tokens.kinds;
+    // (The walk reaches each of the message's tokens while none is decoded: from its first.)
+    while (first > 0 && kinds[first - 1] == PARSE_KIND_STRING)
+    {
+        first -= 1;
+    }
+    uint32_t open = 0;
+    const bool result = check_input_assertion_message(reader, first, end, &open);
     uint32_t message_end = end;
     return result && check_input_unevaluated_refused(reader, first, &message_end, open - 1) != BUSTER_CHECK_NONE;
 }
@@ -5739,13 +5756,15 @@ static bool check_input_assertion_escaped(CheckInputReader* reader, uint32_t fir
 // and -pedantic's, off by default: a GNU escape's -Wpedantic one at its backslash (CHECK_WARNING_EVENT_NONSTANDARD_ESCAPE),
 // and a delimited or named one's -Wdelimited-escape-sequence-extension one at the literal
 // (CHECK_WARNING_EVENT_DELIMITED_ESCAPE). The cold path of a literal the extended decoding read, which has one at least, or
-// of one with a GNU escape where -pedantic's warnings may be given (check_input_gnu_escapes).
-static __attribute__((noinline, cold)) void check_input_unknown_escapes(CheckInputReader* reader, uint32_t token, const uint8_t* bytes, uint32_t length, bool once)
+// of one with a GNU escape where -pedantic's warnings may be given (check_input_gnu_escapes). `pedantic`: whether to give
+// -pedantic's: not of a static assertion's message, an unevaluated string literal, whose are the unevaluated literals'.
+static __attribute__((noinline, cold)) void check_input_unknown_escapes(CheckInputReader* reader, uint32_t token, const uint8_t* bytes, uint32_t length, bool once,
+                                                                        bool pedantic)
 {
     const uint64_t mark = reader->scratch->length;
     CheckEscapeDiagnostic* diagnostics = length != 0 ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, CheckEscapeDiagnostic, BUSTER_CHECK_ESCAPE_DIAGNOSTICS(length)) : NULL;
     bool had_error = false;
-    const uint32_t count = diagnostics != NULL ? check_literal_evaluated_escapes(bytes, length, reader->parser->language.standard >= 2023, true, diagnostics, &had_error) : 0;
+    const uint32_t count = diagnostics != NULL ? check_literal_evaluated_escapes(bytes, length, reader->parser->language.standard >= 2023, pedantic, diagnostics, &had_error) : 0;
     reader->output->resource |= length != 0 && diagnostics == NULL;
     // (A character constant's, which the constant evaluator may read again (`once`): each of its escapes', at its first
     // read alone.)
@@ -5784,8 +5803,9 @@ static __attribute__((noinline, cold)) void check_input_unknown_escapes(CheckInp
 
 // A literal the fast decoding read, `bytes` its token's spelling, with GNU's \e, which it takes without a word: its
 // -pedantic warning's (check_input_unknown_escapes), where the command line or a pragma may give it (#1447,
-// CheckInput.pedantic_escapes). A memchr for a backslash and a look past it, otherwise.
-static void check_input_gnu_escapes(CheckInputReader* reader, uint32_t token, const uint8_t* bytes, uint32_t length, bool once)
+// CheckInput.pedantic_escapes), but a static assertion's message's (`message` its tokens' end, or BUSTER_CHECK_NONE for a
+// character constant). A memchr for a backslash and a look past it, otherwise.
+static void check_input_gnu_escapes(CheckInputReader* reader, uint32_t token, const uint8_t* bytes, uint32_t length, bool once, uint32_t message)
 {
     const bool possible = reader->output->pedantic_escapes || reader->parser->tokens.pragma_count != 0;
     bool gnu = false;
@@ -5797,9 +5817,10 @@ static void check_input_gnu_escapes(CheckInputReader* reader, uint32_t token, co
         const uint32_t from = next < length && bytes[next] == '\\' ? next + 1 : next;
         at = from < length ? memchr(bytes + from, '\\', length - from) : NULL;
     }
-    if (gnu)
+    uint32_t open = 0;
+    if (gnu && (message == BUSTER_CHECK_NONE || !check_input_assertion_message(reader, token, message, &open)))
     {
-        check_input_unknown_escapes(reader, token, bytes, length, once);
+        check_input_unknown_escapes(reader, token, bytes, length, once, true);
     }
 }
 
@@ -5810,9 +5831,11 @@ static __attribute__((noinline, cold)) CheckStringLiteral check_input_strings_ex
 {
     const CheckStringLiteral literal = check_literal_strings_extended(parts, count, reader->parser->language.standard >= 2023, reader->arena);
     reader->output->resource |= literal.resource;
+    uint32_t open = 0;
+    const bool pedantic = !check_input_assertion_message(reader, token, token + count, &open);
     for (uint32_t i = 0; literal.valid && i < count; i += 1)
     {
-        check_input_unknown_escapes(reader, token + i, parts[i].bytes, parts[i].length, false);
+        check_input_unknown_escapes(reader, token + i, parts[i].bytes, parts[i].length, false, pedantic);
     }
     return literal;
 }
@@ -5911,7 +5934,7 @@ static const CheckInitString* check_input_string(CheckInputReader* reader, uint3
                     // GNU's \e, which the fast decoding takes: its -pedantic warning's.
                     for (uint32_t i = 0; valid && i < count; i += 1)
                     {
-                        check_input_gnu_escapes(reader, token + i, parts[i].bytes, parts[i].length, false);
+                        check_input_gnu_escapes(reader, token + i, parts[i].bytes, parts[i].length, false, end);
                     }
                 }
             }
@@ -6005,12 +6028,12 @@ static inline __attribute__((always_inline)) void check_input_literal(CheckInput
                 *result = check_literal_character_by(bytes, length, reader->pp->options.language.standard >= 2023, reader->types->char_unsigned, true);
                 if (result->valid)
                 {
-                    check_input_unknown_escapes(reader, token, bytes, length, true);
+                    check_input_unknown_escapes(reader, token, bytes, length, true, true);
                 }
             }
             else
             {
-                check_input_gnu_escapes(reader, token, bytes, length, true);
+                check_input_gnu_escapes(reader, token, bytes, length, true, BUSTER_CHECK_NONE);
             }
             if (result->valid && result->characters > 1 && length != 0 && bytes[0] == '\'')
             {
