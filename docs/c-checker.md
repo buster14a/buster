@@ -9381,6 +9381,14 @@ arguments against the function. The checker now gives these as clang does.
   declaration's later uses and the initializer's other elements are checked as
   clang checks them, by both paths. Differences left: without a `]` before the
   next `;` (`int z[1, 2;`) nothing is resumed, where clang reads on.
+- **A GNU attribute list's item that isn't a name** (#1447). After
+  `__attribute__((unused, __clang__::x))`'s "expected ')'" (`__clang__` is
+  the macro 1), clang's ParseGNUAttributes skips to the list's `)` and goes
+  on with the declaration: the view drops the tokens from the error to that
+  `)` (`ParseDiagnostic.resume_delete`), so the list's earlier attributes and
+  the unit's later declarations are checked, by both paths. Differences left:
+  the warnings a rejected unit drops still drop (`-Wdeprecated-declarations`
+  among them), and the caret display's "expanded from macro '__clang__'" note.
 
   Malformed K&R parameter declaration tails also have bounded repairs. The
   repaired view discards the recorded tail while preserving the original

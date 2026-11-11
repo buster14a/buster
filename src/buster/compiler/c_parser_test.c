@@ -1296,6 +1296,11 @@ static uint32_t parse_test_check_resumed(const char* directory)
         { "void f(const p);\n", "1:14 parameter type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]\n" },
         { "const p;\n", "1:7 type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]\n" },
         { "void f(Unknown p);\n", "1:8 parameter unknown type name 'Unknown'\n" },
+        // Skips to a closer (resume_delete), #1867 and #1447: a comma in an array's size, and what isn't a name in a GNU
+        // attribute list; without the closer before a `;`, none.
+        { "int u[1, 2];\nint d[3] = { [1, (2, 3)] = 3 };\n", "1:8 resumed deleting 2 expected ']'\n2:16 resumed deleting 6 expected ']'\n" },
+        { "int z[1, 2;\n", "1:8 expected ']'\n" },
+        { "int x __attribute__((unused, __clang__::x));\n", "1:29 resumed deleting 4 expected ')'\n" },
     };
     uint32_t failures = 0;
     char path[4096];
@@ -1328,7 +1333,12 @@ static uint32_t parse_test_check_resumed(const char* directory)
                 const uint32_t line = range != BUSTER_PP_NONE ? pp_line_of(&pp, range, location, &column) : 0;
                 char message[256];
                 parse_diagnostic_message(&parser, &pp, diagnostic, message, sizeof(message));
-                const int printed = snprintf(text + length, sizeof(text) - length, "%u:%u %s%s%s\n", line, column, diagnostic->resumed ? "resumed " : "",
+                char deleting[32] = "";
+                if (diagnostic->resume_delete)
+                {
+                    snprintf(deleting, sizeof(deleting), "deleting %u ", diagnostic->resume_end - diagnostic->token);
+                }
+                const int printed = snprintf(text + length, sizeof(text) - length, "%u:%u %s%s%s%s\n", line, column, diagnostic->resumed ? "resumed " : "", deleting,
                                              diagnostic->parameter_type ? "parameter " : "", message);
                 length += printed > 0 && (uint32_t)printed < sizeof(text) - length ? (uint32_t)printed : 0;
             }
