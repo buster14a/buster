@@ -80,8 +80,10 @@ through `testfixture` (below).
   - **Tcl's pin:** the distribution's package. Hosted: Ubuntu 26.04's
     `tcl8.6-dev` 8.6.17+dfsg-1build1 (`setup-hosted.sh` installs it;
     `tcl-config.sh` fails a hosted run on another version, to be pinned
-    again). Elsewhere `tcl-config.sh` prints the version it found, and a host
-    without the package skips the heading: the 9700X has none yet.
+    again). The 9700X: Arch's `tcl` 8.6.16-1 (`/usr/lib64/tclConfig.sh`),
+    installed by the owner on 2026-11-11, so native correctness runs the
+    subset too. Elsewhere `tcl-config.sh` prints the version it found, and a
+    host without the package skips the heading.
   - **Results (2026-11-11, main `d43c37e` with #2100, a 4-CPU cloud
     container, as a non-root user):** the full permutation, 1,451 scripts and
     1,031,345 tests, passed by all three builds, every script with clang's
