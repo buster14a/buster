@@ -875,7 +875,7 @@ static void check_test_driver_setjmp_held(CheckTest* test, const char* executabl
 // va_copy, which clang's x86-64 code makes over a char *; os_log's
 // data taken again across side effects, a __float128's and a 2-byte vector's, those clang's code crashes on (a 32-byte
 // vector), and a format of more than 255 items, whose count byte clang's code truncates (#1785); dump_struct's generated calls; and
-// __builtin_available with an empty version, an invalid expression of clang's, which its code generation refuses too.
+// __builtin_available with an empty version, an invalid expression of clang's, which its code generation refuses or drops.
 static void check_test_driver_codegen_refusals(CheckTest* test, const char* executable, const char* directory)
 {
     static const struct
@@ -908,7 +908,7 @@ static void check_test_driver_codegen_refusals(CheckTest* test, const char* exec
         { "struct S { int a; long b; };\nint printf(const char*, ...);\nvoid f(struct S __seg_fs* s) { __builtin_dump_struct(s, printf); }\n",
           "unsupported: __builtin_dump_struct of a record in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
         { "int f(void) { return __builtin_available(macos 0.0.0, *); }\n",
-          "unsupported: __builtin_available with an empty version, which clang doesn't compile either" },
+          "unsupported: __builtin_available with an empty version, an invalid expression whose code clang refuses or drops" },
     };
     char source[256];
     char object[256];
