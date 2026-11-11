@@ -249,6 +249,7 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_VLA_EXTERN: result = "variable length array declaration cannot have 'extern' linkage"; break;
         case CHECK_INPUT_VM_EXTERN: result = "variably modified type declaration cannot have 'extern' linkage"; break;
         case CHECK_INPUT_VLA_FIELD: result = "fields must have a constant size: 'variable length array in structure' extension will never be supported"; break;
+        case CHECK_INPUT_DROPPED_SUPPRESS_DECLARATION: result = "expected identifier or '('"; break;
     }
     return result;
 }

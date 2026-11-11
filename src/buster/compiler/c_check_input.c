@@ -352,6 +352,10 @@ typedef enum CheckInputMessage
     // object may not be initialized", at the outermost bound for a list, else at the name; recovered, the declaration
     // valid and its initializer unchecked (CheckInputReader.vla_initializer_dropped).
     CHECK_INPUT_VLA_INITIALIZER,
+    // clang's parser's second error after a GNU suppress it drops for a malformed argument (#1844,
+    // check_input_suppress_dropped): the statement after it, its block item's GNU attributes all gone, parsed as a
+    // declaration, whose first token starts no declarator.
+    CHECK_INPUT_DROPPED_SUPPRESS_DECLARATION,
 
     // A use of an invalid declaration (#1447, check_input_invalid_declare), at its name: no diagnostic of its own, as
     // clang's RecoveryExpr has none, but the uses' and their enclosing expressions' are left out as an undeclared name's
@@ -527,6 +531,7 @@ static const char* const check_input_messages[] =
     [CHECK_INPUT_VLA_EXTERN] = "variable length array declaration cannot have 'extern' linkage",
     [CHECK_INPUT_VM_EXTERN] = "variably modified type declaration cannot have 'extern' linkage",
     [CHECK_INPUT_VLA_FIELD] = "fields must have a constant size: 'variable length array in structure' extension will never be supported",
+    [CHECK_INPUT_DROPPED_SUPPRESS_DECLARATION] = "expected identifier or '('",
 };
 
 // The type/action tables currently describe one C LP64 model: 32-bit wchar_t, x87 long double stored in 16 bytes, and
