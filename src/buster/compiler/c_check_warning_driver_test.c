@@ -34,6 +34,24 @@ static const char check_driver_format_attributed_source[] =
     "int trace(int,const char*,...)__attribute__((format(printf,2,3)));\n"
     "void f(char*b){printf(\"%d\",\"str\");snprintf(b,16,\"%d\",\"str\");trace(0,\"%d\",\"str\");}\n";
 
+static const char check_driver_gnu_designator_source[] =
+    "struct P { int a, b; };\n"
+    "struct P p = { b: 1, a: 2 };\n"
+    "int g[4] = { [1 ... 2] = 3 };\n"
+    "int h[4] = { [1 ... 2] 3, [3] 4 };\n"
+    "struct P q[2] = { [1] { 1, 2 }, [0].a = 3, [0] .b = 4 };\n"
+    "int n[] = { [4] 1 };\n"
+    "int f(void)\n"
+    "{\n"
+    "    int e[3] = { [0] 2, 1, [2] 5.5 };\n"
+    "    struct P r = { a: 1.5 };\n"
+    "#pragma clang diagnostic push\n"
+    "#pragma clang diagnostic ignored \"-Wgnu-designator\"\n"
+    "    int s[2] = { [1] 1 };\n"
+    "#pragma clang diagnostic pop\n"
+    "    return e[0] + r.a + s[1];\n"
+    "}\n";
+
 static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtures[] =
 {
     {
@@ -2525,6 +2543,38 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .source = "static int unused(void) { return 0; }\nstatic int unused_var;\nint main(void) { return 0; }\n",
         .options = { "-Wall" },
         .warnings = 2,
+    },    {
+        // GNU's designators (#2202), as clang's parser warns of them: an array designation without its `=` (at the value) and
+        // an old-style field designator (at its name), on by default, before the value's own conversion warnings; an array
+        // range (at its `...`), -pedantic's; all -Wgnu-designator's, under -Wgnu, and a pragma's ignored region drops them.
+        .name = "GNU designators by default",
+        .source = check_driver_gnu_designator_source,
+        .warnings = 11,
+    },
+    {
+        .name = "GNU designators under -pedantic",
+        .source = check_driver_gnu_designator_source,
+        .options = { "-pedantic" },
+        .warnings = 13,
+    },
+    {
+        .name = "GNU designators under -pedantic-errors",
+        .source = check_driver_gnu_designator_source,
+        .options = { "-pedantic-errors" },
+        .warnings = 2,
+        .errors = 11,
+    },
+    {
+        .name = "GNU designators under -Wno-gnu-designator",
+        .source = check_driver_gnu_designator_source,
+        .options = { "-Wno-gnu-designator" },
+        .warnings = 2,
+    },
+    {
+        .name = "GNU designators under -Wno-gnu -Wgnu-designator",
+        .source = check_driver_gnu_designator_source,
+        .options = { "-Wno-gnu", "-Wgnu-designator" },
+        .warnings = 13,
     },
     {
         // Automatic const objects without an initializer (#2168): -Wdefault-const-init-var-unsafe of a const type, an

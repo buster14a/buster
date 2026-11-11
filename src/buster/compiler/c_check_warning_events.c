@@ -186,6 +186,11 @@ enum
     // (warn_cxx_compat_hack_fake_diagnostic_do_not_emit), whose policy makes the unsafe default-const-init words say "and
     // is incompatible with C++" (#2168).
     CHECK_WARNING_ID_CXX_COMPAT = 136,
+    // GNU's designators (#2202, clang's parser's ParseInitializerWithPotentialDesignator): an array designation without its
+    // `=` and an old-style `name:` field designator, on by default, and an array range designator, -pedantic's, all
+    // -Wgnu-designator's.
+    CHECK_WARNING_ID_GNU_DESIGNATOR = 137,
+    CHECK_WARNING_ID_GNU_ARRAY_RANGE = 138,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -499,8 +504,17 @@ typedef enum CheckWarningEventKind
     // that isn't a qualifier, payload.first_type its type, payload.name its typedef's spelling (or 0), payload.data 0 for an
     // array's, 1 for a qualified one's.
     CHECK_WARNING_EVENT_UNREACHABLE_ASSOCIATION,
+    // A GNU designator's -Wgnu-designator warning (#2202, check_input_gnu_designator) at its token: payload.data one of the
+    // BUSTER_CHECK_GNU_DESIGNATOR_* forms.
+    CHECK_WARNING_EVENT_GNU_DESIGNATOR,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
+
+// CHECK_WARNING_EVENT_GNU_DESIGNATOR's forms (#2202): an array designation without its `=` (at the value's first token), an
+// old-style field designator (at its name) and an array range (at its `...`).
+#define BUSTER_CHECK_GNU_DESIGNATOR_MISSING_EQUAL 0u
+#define BUSTER_CHECK_GNU_DESIGNATOR_OLD_STYLE 1u
+#define BUSTER_CHECK_GNU_DESIGNATOR_RANGE 2u
 
 // CHECK_WARNING_EVENT_SWIFT_NAME's messages (#1447), as clang's SemaSwift words them.
 #define BUSTER_CHECK_SWIFT_NAME_FUNCTION 0u
