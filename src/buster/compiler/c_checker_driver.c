@@ -6584,6 +6584,19 @@ static bool check_driver_alias_warnings(const CheckProgram* program, const Parse
 static bool check_driver_aliases(const CheckProgram* program, const Parser* parser, Preprocessor* pp, bool scalar, Arena* scratch)
 {
     const uint64_t mark = scratch->length;
+    // Two functions' definitions of one symbol name through an asm label (#1979, CheckProgram.label_conflict): clang's
+    // error at the later one as code generation emits it, before its check of the aliases.
+    const uint32_t conflict = program->label_conflict != 0 && program->label_conflict - 1 < parser->tokens.count ? program->label_conflict - 1 : BUSTER_CHECK_NONE;
+    if (conflict != BUSTER_CHECK_NONE)
+    {
+        const String8 name = program->label_conflict_name;
+        const PPOutputDiagnosticNote note = {
+            .token = parser->tokens.sources[program->label_previous < parser->tokens.count ? program->label_previous : conflict],
+            .message = "previous definition is here",
+        };
+        pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, parser->tokens.sources[conflict], pp->output.count + 1u, &note, 1,
+                                    "definition with same mangled name '%.*s' as another definition", (int)name.length, name.pointer);
+    }
     uint64_t* keys = program->alias_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (uint64_t)program->alias_count * 2) : 0;
     bool valid = program->alias_count == 0 || keys != 0;
     // The first alias or ifunc that names itself, by its first declaration with the attribute, or none.
@@ -6695,7 +6708,7 @@ static bool check_driver_aliases(const CheckProgram* program, const Parser* pars
         check_driver_diagnose(parser, pp, UINT32_MAX, "checker program capacity exhausted");
     }
     arena_pop_to(scratch, mark);
-    return valid && errors == 0;
+    return valid && errors == 0 && conflict == BUSTER_CHECK_NONE;
 }
 
 // Why check_program_emit failed, at its token: an unsupported construct names the feature it needs (#145), and the

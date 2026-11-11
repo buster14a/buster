@@ -459,6 +459,18 @@ struct CheckProgram
     CheckProgramAlias* aliases;
     uint8_t* alias_states;
     uint32_t alias_count;
+    // Asm labels that name another object's symbol (#1979, check_program_label_merges): one symbol per name, as clang's
+    // module has one global per name. Keys of an object in the high half and the object whose symbol it takes (its name's
+    // definition, else its first tentative definition, else its first object) in the low, sorted by object; null in a unit
+    // without them, the usual one, and shared by a selection. label_conflict is one more than the token of a function's
+    // second definition of a name, clang's error at code generation, and label_previous the first's; label_refused one
+    // more than the token of a variable's second definition of a name (0 for none).
+    uint64_t* label_merges;
+    uint32_t label_merge_count;
+    uint32_t label_conflict;
+    uint32_t label_previous;
+    uint32_t label_refused;
+    String8 label_conflict_name;
     // clang's cpu_specific and cpu_dispatch multiversioning (#1447, c_check_program_cpu_dispatch.c): the unit's groups and
     // versions, null in a unit without them, the usual one; a selection shares them. And each program's own symbols of the
     // versions (cpu_version_count of them, 0 for a version without a body) and of the groups' dispatchers (after them, 0
@@ -725,6 +737,7 @@ static void check_program_fail(CheckProgram* program, CheckProgramStatus status,
 #define BUSTER_CHECK_PROGRAM_ATTRIBUTE_PATCHABLE 512u
 // CheckProgram.object_inline's bits.
 #define BUSTER_CHECK_PROGRAM_ATTRIBUTE_WEAK 1024u
+#define BUSTER_CHECK_PROGRAM_ATTRIBUTE_ASM_LABEL 2048u
 #define BUSTER_CHECK_PROGRAM_INLINE_ALWAYS 1u
 #define BUSTER_CHECK_PROGRAM_INLINE_NEVER 2u
 
@@ -755,7 +768,8 @@ static uint32_t check_program_attribute_bits(const CheckInputAttributes* attribu
         const uint32_t twice = kind == CHECK_ATTRIBUTE_RETURNS_TWICE && !attribute->subject_ignored ? BUSTER_CHECK_PROGRAM_ATTRIBUTE_RETURNS_TWICE : 0;
         const uint32_t patchable = kind == CHECK_ATTRIBUTE_PATCHABLE_FUNCTION_ENTRY && !attribute->subject_ignored ? BUSTER_CHECK_PROGRAM_ATTRIBUTE_PATCHABLE : 0;
         const uint32_t weak = kind == CHECK_ATTRIBUTE_WEAK ? BUSTER_CHECK_PROGRAM_ATTRIBUTE_WEAK : 0;
-        bits |= attribute->ignored ? 0 : bit | inlining | interrupt | realign | twice | patchable | weak;
+        const uint32_t label = kind == CHECK_ATTRIBUTE_ASM_LABEL ? BUSTER_CHECK_PROGRAM_ATTRIBUTE_ASM_LABEL : 0;
+        bits |= attribute->ignored ? 0 : bit | inlining | interrupt | realign | twice | patchable | weak | label;
     }
     return bits;
 }
@@ -767,8 +781,9 @@ static uint32_t check_program_attribute_bits(const CheckInputAttributes* attribu
 // code generation's check of target features or a late symbol rename's emission walk reads (#775,
 // CheckProgram.attribute_keys); the file-scope declarations with an alias, ifunc or weakref attribute, which
 // check_program_aliases makes the unit's entries of (#147, CheckProgram.aliases); the function declarations with a
-// patchable_function_entry attribute (#1447, CheckProgram.patchable_keys); and the declarations with a weak attribute,
-// `#pragma weak`'s among them (#1849, check_program_weak_late).
+// patchable_function_entry attribute (#1447, CheckProgram.patchable_keys); the declarations with a weak attribute,
+// `#pragma weak`'s among them (#1849, check_program_weak_late); and the declarations with linkage and an asm label
+// (#1979, check_program_label_merges).
 typedef struct CheckProgramTargetEvents CheckProgramTargetEvents;
 struct CheckProgramTargetEvents
 {
@@ -789,6 +804,9 @@ struct CheckProgramTargetEvents
     uint64_t* weak_keys;
     uint32_t weak_count;
     uint32_t weak_capacity;
+    uint64_t* label_keys;
+    uint32_t label_count;
+    uint32_t label_capacity;
 };
 
 // clang's cpu_specific and cpu_dispatch multiversioning (#1447), defined in c_check_program_cpu_dispatch.c.
@@ -3835,6 +3853,11 @@ static bool check_program_static_object(CheckProgram* program, uint8_t* needed, 
         {
             check_program_event_push(events, &events->weak_keys, &events->weak_count, &events->weak_capacity, object, token);
         }
+        if ((attributes & BUSTER_CHECK_PROGRAM_ATTRIBUTE_ASM_LABEL) != 0 && check_input_linkage(input->declaration_bits, token) != 0 &&
+            !check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_REGISTER))
+        {
+            check_program_event_push(events, &events->label_keys, &events->label_count, &events->label_capacity, object, token);
+        }
         if ((attributes & BUSTER_CHECK_PROGRAM_ATTRIBUTE_ALIAS) != 0 && check_sparse_get(input->declaration_bodies, token) == BUSTER_CHECK_NONE)
         {
             check_program_event_push(events, &events->alias_keys, &events->alias_count, &events->alias_capacity, object, token);
@@ -4888,7 +4911,9 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
         // needed, and whose referenced weakrefs take their targets' symbols as the symbols are numbered.
         const bool aliased = grouped && (target_events.alias_count == 0 ||
                                          check_program_aliases(program, &target_events, needed, BUSTER_SCALAR_PATH(options.scalar), output, scratch));
-        valid = naked_room && aliased && check_program_alias_number(program, needed, program->alias_states, BUSTER_SCALAR_PATH(options.scalar), output);
+        // Asm labels naming another object's symbol (#1979), whose objects take that symbol as the symbols are numbered.
+        const bool labelled = aliased && (target_events.label_count == 0 || check_program_label_merges(program, &target_events, BUSTER_SCALAR_PATH(options.scalar), output, scratch));
+        valid = naked_room && labelled && check_program_alias_number(program, needed, program->alias_states, BUSTER_SCALAR_PATH(options.scalar), output);
     }
         valid = valid && (target_events.weak_count == 0 || check_program_weak_late(program, &target_events, BUSTER_SCALAR_PATH(options.scalar), output, scratch));
     if (valid && program->status == CHECK_PROGRAM_OK && !check_program_targets(program, &options, &target_events, output, scratch))

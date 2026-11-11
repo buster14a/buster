@@ -3197,6 +3197,15 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             const SymbolId symbol = taken != 0 && program->symbol_objects[taken - 1] == object ? taken : 0;
             weak[symbol] = symbol != 0 ? 0 : weak[symbol];
         }
+        // Two variables' definitions of one symbol name through an asm label (#1979): clang keeps the later one's storage
+        // alone, which the emission doesn't.
+        if (valid && program->label_refused != 0)
+        {
+            result->status = CHECK_PROGRAM_UNSUPPORTED;
+            result->reason = "a second definition of a variable's symbol name through an asm label";
+            result->token = program->label_refused - 1;
+            valid = false;
+        }
         if (valid && program->weak_decided && program->weak_refused != 0)
         {
             result->status = CHECK_PROGRAM_UNSUPPORTED;
