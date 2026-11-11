@@ -314,6 +314,9 @@ typedef enum CheckDiagnostic
 // or a prototype argument's. The conversion is to its value type, so this says what the type no longer does, for the
 // conversion value warnings, which clang gives no atomic destination (c_check_common_warnings.c).
 #define BUSTER_CHECK_CONVERT_ATOMIC 0x200u
+// GCC's cast to a union (#2301, clang's CK_ToUnion): the conversion's type is the member the operand initializes, the
+// first of the operand's unqualified type, and the cast's value is a union whose first bytes are that member's.
+#define BUSTER_CHECK_CONVERT_TO_UNION 0x400u
 
 #define CHECK_WARNING_DISCARDED_QUALIFIERS 0x01u
 #define CHECK_WARNING_GNU_CONSTANT 0x02u
@@ -2826,6 +2829,26 @@ static void check_action_update(TypeTable* table, const CheckAction* action, Che
 }
 
 // Always inlined (#880), as profile-guided builds do; hot caller: check_action_compute.
+// The member a cast to union `target` from a value of type `source` initializes (#2301, GCC's extension, clang's
+// CastExpr::getTargetFieldForToUnionCast): its first member of the source's unqualified type, but an unnamed bit-field.
+// 0 for none. (A named bit-field is such a member too.)
+static TypeId check_action_union_cast_member(const TypeTable* table, TypeId target, TypeId source)
+{
+    TypeId result = 0;
+    const uint32_t tag = table->types.index[type_index(target)];
+    const uint32_t first = table->tags.member_begin[tag];
+    const uint32_t count = table->tags.member_count[tag];
+    const TypeId plain = type_unqualified(type_strip_aligned(table, source));
+    for (uint32_t i = 0; result == 0 && i < count; i += 1)
+    {
+        const uint32_t member = first + i;
+        const TypeId type = table->members.type[member];
+        const bool unnamed_bit_field = table->members.name[member] == 0 && (table->members.flags[member] & BUSTER_TYPE_MEMBER_BIT_FIELD) != 0;
+        result = !unnamed_bit_field && type_unqualified(type_strip_aligned(table, type)) == plain ? type : 0;
+    }
+    return result;
+}
+
 static inline __attribute__((always_inline)) void check_action_cast(TypeTable* table, const CheckAction* action, CheckActionResult* result)
 {
     CheckValue source = check_action_operand(table, action, result, 0);
@@ -2838,9 +2861,25 @@ static inline __attribute__((always_inline)) void check_action_cast(TypeTable* t
     const bool scalar = check_action_is_scalar(table, target) && check_action_is_scalar(table, source.type) && !pointer_float;
     const bool record = (target_kind == BUSTER_TYPE_KIND_STRUCT || target_kind == BUSTER_TYPE_KIND_UNION) &&
                         target_kind == input_kind && check_action_compatible_at(table, target, type_unqualified(source.type), action, result);
-    if ((target_kind == BUSTER_TYPE_KIND_ENUM || target_kind == BUSTER_TYPE_KIND_STRUCT || target_kind == BUSTER_TYPE_KIND_UNION) && !check_action_source_complete(table, target, action))
+    const bool complete = !(target_kind == BUSTER_TYPE_KIND_ENUM || target_kind == BUSTER_TYPE_KIND_STRUCT || target_kind == BUSTER_TYPE_KIND_UNION) ||
+                          check_action_source_complete(table, target, action);
+    // GCC's cast to a union from a member's type (#2301): the member it initializes, which clang's CheckCStyleCast takes
+    // once the union is no type compatible with the operand's.
+    const TypeId member = complete && target_kind == BUSTER_TYPE_KIND_UNION && !record ? check_action_union_cast_member(table, target, source.type) : 0;
+    if (!complete)
     {
         check_action_diagnose(result, CHECK_DIAG_INCOMPLETE, 0);
+    }
+    else if (member != 0)
+    {
+        check_action_conversion(table, &source, type_unqualified(type_strip_aligned(table, member)), BUSTER_CHECK_CONVERT_CAST | BUSTER_CHECK_CONVERT_TO_UNION,
+                                &result->conversions[0], action->node);
+        // An rvalue of the union's type: neither a constant of the member's type nor an ICE.
+        result->value = source;
+        result->value.type = target;
+        result->value.category = CHECK_RVALUE;
+        result->value.constant_kind = CHECK_CONSTANT_NONE;
+        result->value.flags &= ~(BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_ICE_FORM | BUSTER_CHECK_FLOAT_LITERAL);
     }
     else if (target_kind != BUSTER_TYPE_KIND_VOID && !scalar && !record)
     {

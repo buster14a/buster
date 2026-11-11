@@ -300,7 +300,12 @@ immediate at every width, each 2 cycles' latency, one macro-op and 2 per cycle
 buster-performance#388). Its masks' conversions then added 12: `vpmovb2m` to `vpmovq2m` at every
 width, 3, 4 and 6 cycles' latency at 16, 32 and 64 bytes. Its lane operations then added 72:
 `vpminub` to `vpmaxsq` and `vpaddusb` to `vpsubsw` at every width, each 2 cycles'
-latency, the minima and maxima of bytes to doublewords 4 per cycle and the others 2.
+latency, the minima and maxima of bytes to doublewords 4 per cycle and the others 2. Its masked stores then added 11
+`MASKED_MEMORY` rows, `vmovdqu8` to `vmovdqu64` of a register to memory under an opmask at every
+width that had none (`vmovdqu32` of a zmm register's was measured): the 16- and 32-byte ones 2 per
+cycle, one macro-op, and the 64-byte ones 1 per cycle, two macro-ops, as the unmasked stores are
+([the record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/ir-masked-memory-1840-2026-11-11)).
+A masked load merging into its destination still has no row (above).
 
 What the rows say, a few families (cycles; derived values in italics):
 

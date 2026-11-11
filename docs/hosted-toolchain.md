@@ -17,14 +17,22 @@ same preparation inside that job. `build-pgo.yml` and the 9700X need only CMake
 and Ninja: `setup-build-tools.sh` without `BUSTER_HOSTED_RELEASES` acquires each
 from the mirror, then upstream, with the same checks.
 
-Preparation always publishes a run-scoped artifact, then optionally saves the
-reusable cache. Only a push or manual dispatch on main seeds that cache. Cache
-read/write service errors are nonfatal only because the verified artifact is
-available; an artifact publication failure fails preparation. Consumers try the
-cache, verify it, and fall back to that run's artifact. The artifact name is a
-job output from the successful preparation attempt, not a name reconstructed
-from the consumer's attempt number: rerunning a failed shard can still read the
-original preparation. No credentials or installed executables are cached.
+Preparation verifies the restored cache as the consumers will. Only when it
+doesn't verify (a miss or a damaged entry) does preparation publish its
+acquired inputs as a run-scoped artifact; on a verified hit every consumer
+restores the same immutable key, and the artifact would go unread. Every run
+used to publish it: 1.27 GB, uncompressed, kept 7 days, about 400 GB in the
+five hours of 2026-11-11's busiest wave (#2372). It then optionally saves the
+reusable cache. Only a push or manual dispatch on main seeds that cache. An
+artifact publication failure fails preparation. Consumers try the cache,
+verify it, and fall back to that run's artifact. On a cache-hit run there is
+none, so a consumer whose cache read fails fails its setup step, which the
+setup re-run (`rerun.yml`, #2276) retries once; an outage of the cache service
+long enough to outlast that also reaches the artifact service. The artifact
+name is a job output from the successful preparation attempt, not a name
+reconstructed from the consumer's attempt number: rerunning a failed shard can
+still read the original preparation. The run's artifacts are kept 1 day.
+No credentials or installed executables are cached.
 
 The cache key includes the exact lock-file identity and the platform/schema,
 not the Buster revision, shard, sanitizer or optimization mode. Original input
@@ -237,8 +245,9 @@ Every acquired input is checked as its consumers will use it. The corpus and
 the runtime are extracted and verified. The checkouts must be the pinned
 commits. The closure must install from the bundle alone on the preparation's
 image: an `apt-get --simulate` with no package lists. The job then publishes
-the bundle as the attempt's companion artifact, `ARTIFACT-NAME-offline`. As for
-the release inputs, only a push or dispatch on `main` saves the caches.
+the bundle as the attempt's companion artifact, `ARTIFACT-NAME-offline`, on
+every run (92 MB, kept 1 day). As for the release inputs, only a push or
+dispatch on `main` saves the caches.
 
 **Consumers.** The `hosted-tools` action downloads the companion artifact. It
 reads no cache: the artifact is this run's resolution, so every job of the run

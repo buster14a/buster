@@ -336,6 +336,30 @@ struct CheckResumed
     uint32_t diagnostic_count;
 };
 
+// A change to the original's tokens that a view starts from (#1447, check_driver_typo_edits): the name at `token` read
+// as another token (`kind` and `name`: a keyword, or a typedef's name) where `end` is 0, as clang's parser reads the
+// statement again with its typo's correction; or the tokens [token, end) left out, as clang's skips an invalid
+// expression statement's rest to its `;`. Edits are in token order and don't overlap.
+typedef struct CheckPrefixEdit CheckPrefixEdit;
+struct CheckPrefixEdit
+{
+    uint32_t token;
+    uint32_t end;
+    uint32_t name;
+    uint8_t kind;
+};
+
+// A tentative typo's tail (#1447, check_driver_typo_tail): `end` answers, for an error of a view whose tokens'
+// originals `origin` has (NULL for the original's own), the token that ends the tail the view leaves out from the
+// error's token, or 0 where the error is no such tail. The view takes each one as it takes a missing `;` (its diagnostic
+// is pending with ParseDiagnostic.tail), so that one pass finds a body's every one.
+typedef struct CheckPrefixTails CheckPrefixTails;
+struct CheckPrefixTails
+{
+    uint32_t (*end)(const Parser* view, const uint32_t* origin, const ParseDiagnostic* diagnostic, const void* context);
+    const void* context;
+};
+
 // The rounds of insertions a view takes, each a parse of the whole unit: one for the file scope's missing `;`s, which the
 // original parse reports all of, and one more for each body's in turn, so a body with k of them takes k rounds. They go
 // on until a round finds none, within a budget of this many times the unit's tokens parsed in all: past it, the last
@@ -448,14 +472,86 @@ static void check_prefix_sort_diagnostics(ParseDiagnostic* items, ParseDiagnosti
     }
 }
 
-static CheckPrefixStatus check_prefix_resume(CheckResumed* resumed, const Parser* original, Arena* output, Arena* scratch)
+// The original's tokens with `edits` applied (CheckPrefixEdit), parsed again into `view`, whose columns have room for
+// `capacity` tokens; `origin` gets each view token's original. Whether the parse ran (its errors are the view's).
+static bool check_prefix_edit(Parser* view, uint32_t* origin, const Parser* original, const CheckPrefixEdit* edits, uint32_t edit_count, uint32_t capacity,
+                              uint8_t* meanings, Arena* scratch)
+{
+    const uint32_t count = original->tokens.count;
+    bool valid = edit_count != 0 && count <= capacity;
+    for (uint32_t e = 0; valid && e < edit_count; e += 1)
+    {
+        const CheckPrefixEdit* edit = edits + e;
+        valid = edit->token < count && (edit->end == 0 || (edit->end > edit->token && edit->end <= count)) &&
+                (e == 0 || edits[e - 1].token + 1 <= edit->token) && (e == 0 || edits[e - 1].end <= edit->token);
+    }
+    uint32_t written = 0;
+    uint32_t from = 0;
+    uint32_t pragma = 0;
+    for (uint32_t e = 0; valid && e <= edit_count; e += 1)
+    {
+        const CheckPrefixEdit* edit = e < edit_count ? edits + e : NULL;
+        const uint32_t to = edit != NULL ? edit->token : count;
+        const uint32_t length = to - from;
+        memcpy(view->tokens.kinds + written, original->tokens.kinds + from, length);
+        memcpy(view->tokens.names + written, original->tokens.names + from, (uint64_t)length * sizeof(uint32_t));
+        memcpy(view->tokens.sources + written, original->tokens.sources + from, (uint64_t)length * sizeof(uint32_t));
+        memcpy(view->tokens.flags + written, original->tokens.flags + from, length);
+        for (uint32_t k = 0; k < length; k += 1)
+        {
+            origin[written + k] = from + k;
+        }
+        // A pragma before a kept token stays before it; one within a left-out range goes before the token after it.
+        const uint32_t skipped = edit != NULL ? (edit->end != 0 ? edit->end : to + 1) : to;
+        for (; pragma < view->tokens.pragma_count && original->tokens.pragma_positions[pragma] < skipped + (edit == NULL); pragma += 1)
+        {
+            const uint32_t at = original->tokens.pragma_positions[pragma];
+            view->tokens.pragma_positions[pragma] = at < to ? written + (at - from) : written + length;
+        }
+        written += length;
+        if (edit != NULL && edit->end == 0)
+        {
+            view->tokens.kinds[written] = edit->kind;
+            view->tokens.names[written] = edit->name;
+            view->tokens.sources[written] = original->tokens.sources[to];
+            view->tokens.flags[written] = original->tokens.flags[to];
+            origin[written] = to;
+            written += 1;
+        }
+        from = edit != NULL ? (edit->end != 0 ? edit->end : to + 1) : count;
+    }
+    if (valid)
+    {
+        view->tokens.count = written;
+        view->tokens.capacity = written;
+        view->diagnostic_count = 0;
+        memset(view->tokens.kinds + written, 0, BUSTER_PARSE_TOKEN_PADDING);
+        memset(view->tokens.names + written, 0, (uint64_t)BUSTER_PARSE_TOKEN_PADDING * sizeof(uint32_t));
+        memset(view->tokens.sources + written, 0, (uint64_t)BUSTER_PARSE_TOKEN_PADDING * sizeof(uint32_t));
+        memset(view->tokens.flags + written, 0, BUSTER_PARSE_TOKEN_PADDING);
+        memset(meanings, PARSE_MEANING_ORDINARY, original->meanings.capacity);
+        for (uint32_t i = 0; i < BUSTER_PARSE_PREDECLARED_TYPEDEFS; i += 1)
+        {
+            meanings[view->predeclared[i]] = PARSE_MEANING_TYPEDEF;
+        }
+        const ParseScalarResult parsed = parse_scalar(view->tokens.kinds, view->tokens.names, view->tokens.flags, written, view->language, &view->meanings,
+                                                      &view->tree, scratch, view->diagnostics, view->diagnostic_capacity, &view->diagnostic_count);
+        view->errors = parsed.errors;
+        view->fatal = PARSE_MESSAGE_NONE;
+        valid = !parsed.out_of_memory;
+    }
+    return valid;
+}
+
+static CheckPrefixStatus check_prefix_resume(CheckResumed* resumed, const Parser* original, const CheckPrefixEdit* edits, uint32_t edit_count,
+                                             const CheckPrefixTails* tails, Arena* output, Arena* scratch)
 {
     const uint64_t output_mark = output->length;
     const uint64_t scratch_mark = scratch->length;
     *resumed = (CheckResumed){ .status = CHECK_PREFIX_UNAVAILABLE };
     const Parser* current = original;
     const uint32_t original_count = original->tokens.count;
-    bool more = output != scratch && original->errors != 0 && original->fatal == PARSE_MESSAGE_NONE && original->diagnostics != 0 &&
+    bool more = output != scratch && (original->errors != 0 || edit_count != 0) && original->fatal == PARSE_MESSAGE_NONE && original->diagnostics != 0 &&
                 original->diagnostic_count <= original->diagnostic_capacity && original_count <= BUSTER_PARSE_MAX_TOKENS / 2 &&
                 original->tokens.kinds != 0 && original->tokens.names != 0 && original->tokens.sources != 0 && original->tokens.flags != 0 &&
                 original->meanings.capacity != 0 && (original->tokens.pragma_count == 0 || original->tokens.pragma_positions != 0);
@@ -468,12 +564,18 @@ static CheckPrefixStatus check_prefix_resume(CheckResumed* resumed, const Parser
     // (scratch) and the missing `;`s' errors found so far, at the original's tokens (scratch): memory of the unit's size,
     // whatever the rounds.
     const uint32_t capacity = more ? 2 * original_count + 1 : 0;
-    Parser* views = more ? BUSTER_ARENA_PUSH_ARRAY(output, Parser, 2) : 0;
+    // (A third, the edited original's, where `edits` asks for one.)
+    Parser* views = more ? BUSTER_ARENA_PUSH_ARRAY(output, Parser, 3) : 0;
     uint8_t* meanings = more ? BUSTER_ARENA_PUSH_ARRAY(output, uint8_t, original->meanings.capacity) : 0;
-    uint32_t* origins[2] = { more ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, capacity) : 0, more ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, capacity) : 0 };
+    uint32_t* origins[3] = { more ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, capacity) : 0, more ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, capacity) : 0,
+                             more && edit_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, capacity) : 0 };
     ParseDiagnostic* pending = more ? BUSTER_ARENA_PUSH_ARRAY(scratch, ParseDiagnostic, (uint64_t)original_count + 1) : 0;
-    more = more && views != 0 && meanings != 0 && origins[0] != 0 && origins[1] != 0 && pending != 0;
-    for (uint32_t v = 0; more && v < 2; v += 1)
+    // A round's diagnostics, with the tails taken as resumed ones (CheckPrefixTails).
+    const uint32_t round_capacity = original->diagnostic_capacity > capacity + 16 ? original->diagnostic_capacity : capacity + 16;
+    ParseDiagnostic* round_diagnostics = more && tails != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, ParseDiagnostic, round_capacity) : 0;
+    more = more && (tails == NULL || round_diagnostics != 0);
+    more = more && views != 0 && meanings != 0 && origins[0] != 0 && origins[1] != 0 && (edit_count == 0 || origins[2] != 0) && pending != 0;
+    for (uint32_t v = 0; more && v < (edit_count != 0 ? 3u : 2u); v += 1)
     {
         Parser* view = views + v;
         *view = (Parser){ .options = original->options, .language = original->language, .preprocessor = original->preprocessor };
@@ -501,15 +603,40 @@ static CheckPrefixStatus check_prefix_resume(CheckResumed* resumed, const Parser
     uint64_t work = 0;
     const uint32_t* origin = 0;
     uint32_t pending_count = 0;
+    if (more && edit_count != 0)
+    {
+        // The edited original, parsed again: the rounds go on from it, at its tokens' originals.
+        const bool parsed = check_prefix_edit(views + 2, origins[2], original, edits, edit_count, capacity, meanings, scratch);
+        resumed->status = parsed ? CHECK_PREFIX_READY : CHECK_PREFIX_RESOURCE;
+        current = parsed ? views + 2 : current;
+        origin = parsed ? origins[2] : origin;
+        work += parsed ? current->tokens.count : 0;
+        more = parsed && current->errors != 0;
+    }
     for (uint32_t round = 0; more; round += 1)
     {
         const uint32_t count = current->tokens.count;
+        const ParseDiagnostic* diagnostics = current->diagnostics;
+        if (tails != NULL)
+        {
+            for (uint32_t d = 0; d < current->diagnostic_count; d += 1)
+            {
+                ParseDiagnostic diagnostic = current->diagnostics[d];
+                const uint32_t end = diagnostic.error && !diagnostic.resumed ? tails->end(current, origin, &diagnostic, tails->context) : 0;
+                diagnostic.resumed = diagnostic.resumed || end != 0;
+                diagnostic.resume_delete = diagnostic.resume_delete || end != 0;
+                diagnostic.resume_end = end != 0 ? end : diagnostic.resume_end;
+                diagnostic.tail = end != 0;
+                round_diagnostics[d] = diagnostic;
+            }
+            diagnostics = round_diagnostics;
+        }
         // The resumed errors before the parse's first other one, whose tokens get a `;` before them. The diagnostics are
         // in token order, but for the notes of errors that don't stop the parse, which are taken as other errors.
         uint32_t limit = count;
         for (uint32_t d = 0; d < current->diagnostic_count; d += 1)
         {
-            const ParseDiagnostic* diagnostic = current->diagnostics + d;
+            const ParseDiagnostic* diagnostic = diagnostics + d;
             const bool other = diagnostic->error && !check_prefix_resumes(current, diagnostic, count);
             limit = other && diagnostic->token < limit ? diagnostic->token : limit;
             // The original parser abandoned this K&R header. Later diagnostics may have treated its remaining
@@ -526,7 +653,7 @@ static CheckPrefixStatus check_prefix_resume(CheckResumed* resumed, const Parser
         bool ordered = true;
         for (uint32_t d = 0; d < current->diagnostic_count; d += 1)
         {
-            const ParseDiagnostic* diagnostic = current->diagnostics + d;
+            const ParseDiagnostic* diagnostic = diagnostics + d;
             const bool taken = check_prefix_resumes(current, diagnostic, limit);
             ordered &= !taken || diagnostic->token > last;
             last = taken ? (diagnostic->resume_end != 0 ? diagnostic->resume_end - 1 : diagnostic->token) : last;
@@ -551,7 +678,7 @@ static CheckPrefixStatus check_prefix_resume(CheckResumed* resumed, const Parser
             uint32_t pragma = 0;
             for (uint32_t d = 0; d <= current->diagnostic_count; d += 1)
             {
-                const ParseDiagnostic* diagnostic = d < current->diagnostic_count ? current->diagnostics + d : 0;
+                const ParseDiagnostic* diagnostic = d < current->diagnostic_count ? diagnostics + d : 0;
                 const bool taken = diagnostic == 0 || check_prefix_resumes(current, diagnostic, limit);
                 const uint32_t to = diagnostic != 0 ? diagnostic->token : count;
                 if (taken)

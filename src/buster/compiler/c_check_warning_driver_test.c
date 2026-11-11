@@ -2521,10 +2521,180 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .notes = 1,
     },
     {
+        // An ignored attribute's warning that -Werror promotes is an error too, so clang's ActOnEndOfTranslationUnit gives
+        // the unused file-scope variable no warning after it (#2232); without -Werror both warnings are given.
+        .name = "unit end unused declarations after a promoted ignored attribute",
+        .source = "void rel(int *p);\nstatic int q __attribute__((cleanup(rel)));\n",
+        .options = { "-Wall" },
+        .warnings = 2,
+    },
+    {
+        // GCC's cast to a union (#2301, clang's CheckCStyleCast): from a member's unqualified type after the operand's
+        // lvalue conversion (a qualified, an array's and a char's), -Wgnu-union-cast at the cast's `(` under -pedantic;
+        // from no member's type the error "cast to union type from type 'T' not present in union", the operand's type
+        // with its sugar; and a cast to a struct from another type "used type 'T' where arithmetic or pointer type is
+        // required", at the `(` too.
+        .name = "casts to unions",
+        .source = "typedef short ms;\nunion U{int*p;long*q;char c;int i;};struct S{int a;};\n"
+                  "int f(int n,const int k,int arr[2]){union U u=(union U)&n;union U v=(union U)arr;(void)(union U)(char)n;\n"
+                  "(void)(union U)k;(void)v;return *u.p;}\n"
+                  "int g(ms s,double d){(void)(union U)s;(void)(union U)d;(void)(struct S)s;return 0;}\n",
+        .options = { "-pedantic" },
+        .warnings = 4,
+        .errors = 3,
+    },
+    {
         .name = "unit end unused declarations alone",
         .source = "static int unused(void) { return 0; }\nstatic int unused_var;\nint main(void) { return 0; }\n",
         .options = { "-Wall" },
         .warnings = 2,
+    },
+    {
+        // Automatic const objects without an initializer (#2168): -Wdefault-const-init-var-unsafe of a const type, an
+        // array's, a typedef's ('volatile CI[2]' (aka ...)), a pointer's; -Wdefault-const-init-field-unsafe of a struct with a
+        // const member, nested, with its note; both of a const struct; none of a union, an array of structs, an extern or
+        // an initialized one; static storage's off by default.
+        .name = "default-initialized const objects",
+        .source = "typedef const int CI;\n"
+                  "typedef const volatile int CVI;\n"
+                  "const int file_a;\n"
+                  "static const int file_b;\n"
+                  "extern const int file_c;\n"
+                  "struct M { const int m; int x; };\n"
+                  "struct N { struct M inner; int y; };\n"
+                  "union U { const int u; float f; };\n"
+                  "struct M file_m;\n"
+                  "void f(void)\n"
+                  "{\n"
+                  "    const int a;\n"
+                  "    const int b[2];\n"
+                  "    const volatile int c;\n"
+                  "    volatile CI d[2];\n"
+                  "    CVI e;\n"
+                  "    static const int s;\n"
+                  "    extern const int ex;\n"
+                  "    struct M m;\n"
+                  "    struct N n;\n"
+                  "    union U u;\n"
+                  "    const struct M cm;\n"
+                  "    struct M ms[2];\n"
+                  "    const int ok = 1;\n"
+                  "    register const int r;\n"
+                  "    struct { const int z; } anon;\n"
+                  "    const int *p;\n"
+                  "    int *const q;\n"
+                  "}\n",
+        .warnings = 12,
+        .notes = 4,
+    },
+    {
+        // A struct's const member through a union member and an anonymous struct; none of a union itself.
+        .name = "const members through unions and anonymous structs",
+        .source = "struct M { const int m; };\n"
+                  "union V { struct M s; int i; };\n"
+                  "struct W { union V v; };\n"
+                  "struct X { int a; struct { const int deep; }; };\n"
+                  "void f(void) { union V v; struct W w; struct X x; }\n",
+        .warnings = 2,
+        .notes = 2,
+    },
+    {
+        // A bit-field, a const struct member, a typedef's; not a const array member nor a flexible array member; a
+        // variable array's and an _Atomic's const objects.
+        .name = "const members' kinds",
+        .source = "struct A { const int a[2]; };\n"
+                  "struct B { int n; const int fam[]; };\n"
+                  "struct C { const int bf : 3; };\n"
+                  "struct D { struct A arr[2]; };\n"
+                  "struct E { const struct { int q; } s; };\n"
+                  "typedef const int CI;\n"
+                  "struct F { CI t; };\n"
+                  "void f(void) { struct A a; struct B b; struct C c; struct D d; struct E e; struct F g; const struct A ca; struct A *p; }\n"
+                  "void k(int n) { const int vla[n]; _Atomic const int at; const int ci = 1, cj; }\n",
+        .warnings = 7,
+        .notes = 3,
+    },
+    {
+        // -Wc++-compat adds -Wdefault-const-init-var of static storage, and the unsafe ones' "and is incompatible with
+        // C++".
+        .name = "default-initialized const objects and -Wc++-compat",
+        .source = "typedef const int CI;\n"
+                  "typedef const volatile int CVI;\n"
+                  "const int file_a;\n"
+                  "static const int file_b;\n"
+                  "extern const int file_c;\n"
+                  "struct M { const int m; int x; };\n"
+                  "struct N { struct M inner; int y; };\n"
+                  "union U { const int u; float f; };\n"
+                  "struct M file_m;\n"
+                  "void f(void)\n"
+                  "{\n"
+                  "    const int a;\n"
+                  "    const int b[2];\n"
+                  "    const volatile int c;\n"
+                  "    volatile CI d[2];\n"
+                  "    CVI e;\n"
+                  "    static const int s;\n"
+                  "    extern const int ex;\n"
+                  "    struct M m;\n"
+                  "    struct N n;\n"
+                  "    union U u;\n"
+                  "    const struct M cm;\n"
+                  "    struct M ms[2];\n"
+                  "    const int ok = 1;\n"
+                  "    register const int r;\n"
+                  "    struct { const int z; } anon;\n"
+                  "    const int *p;\n"
+                  "    int *const q;\n"
+                  "}\n",
+        .options = { "-Wc++-compat" },
+        .warnings = 15,
+        .notes = 4,
+    },
+    {
+        // A file scope's const object warns once, at the unit's end, at its last tentative definition, with its type
+        // completed (`'const int[1]'`), after its tentative array's warning, in the order of their first tentative
+        // definitions; none where a later declaration initializes it.
+        .name = "tentative const definitions",
+        .source = "const int a;\n"
+                  "const int a;\n"
+                  "int arr[];\n"
+                  "extern const int x;\n"
+                  "const int x;\n"
+                  "const int b[];\n"
+                  "const int c[];\n"
+                  "const int c[3];\n"
+                  "const int z;\n"
+                  "const int z = 2;\n"
+                  "static const int s;\n"
+                  "const int t[];\n"
+                  "void f(void) { int unused; }\n",
+        .options = { "-Wall", "-Wdefault-const-init" },
+        .warnings = 11,
+    },
+    {
+        // The words follow -Wc++-compat's pragma, which holds the unsafe warnings too.
+        .name = "-Wc++-compat by source pragma",
+        .source = "#pragma clang diagnostic warning \"-Wc++-compat\"\n"
+                  "void f(void) { const int a; }\n"
+                  "#pragma clang diagnostic ignored \"-Wc++-compat\"\n"
+                  "void g(void) { const int b; }\n",
+        .warnings = 1,
+    },
+    {
+        // A tentative definition's -Wdefault-const-init-var at the unit's end, after the undefined internal functions'
+        // and before the unused declarations'.
+        .name = "tentative definitions' const objects at the unit's end",
+        .source = "#pragma pack(push, 4)\n"
+                  "#pragma weak never_declared\n"
+                  "static void undefined_internal(void);\n"
+                  "static int unused_static;\n"
+                  "const int tentative;\n"
+                  "static const int tentative_static;\n"
+                  "void use(void) { undefined_internal(); }\n",
+        .options = { "-Wall", "-Wdefault-const-init", "-Wunused" },
+        .warnings = 7,
+        .notes = 1,
     },
 };
 

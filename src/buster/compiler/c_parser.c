@@ -792,6 +792,14 @@ struct ParseDiagnostic
     // A case's or default's missing `:` before a `;`, which clang's recovery reads as the label's empty statement
     // (check_prefix_resume puts a `:` before the `;` and parses the view again).
     bool resume_colon;
+    // An expression statement's missing `;` after a name alone or a name's call at the statement's start (#1447), which
+    // clang's ParseExprStatement reads past as if the `;` were there (it is resumed) once its parser has classified the
+    // name: a typo it corrects to a keyword or a type name parses the statement again with that (c_check_typo.c), and an
+    // undeclared one makes the expression invalid, whose rest is skipped to the `;` without this error. The checker's
+    // view decides which (check_driver_typo_edits).
+    bool probe;
+    // A tentative typo's tail that a recovery view left out (CheckPrefixTails, check_driver_typo_tail).
+    bool tail;
 };
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -1218,6 +1226,8 @@ struct ParseScalar
     uint32_t error_resume_end;
     // Whether the error is a case's or default's missing `:` before a `;` (ParseDiagnostic.resume_colon).
     bool error_resume_colon;
+    // Whether the error is an expression statement's missing `;` after its first name (ParseDiagnostic.probe).
+    bool error_probe;
     // The diagnostics, in order.
     ParseDiagnostic* diagnostics;
     uint32_t diagnostic_count;
@@ -2661,6 +2671,9 @@ struct Parser
 {
     ParseOptions options;
     CLanguage language;
+    // Beside each token, a name a diagnostic's argument there is spelled by instead of its source, or 0; or NULL for none:
+    // a statement start's typo corrected to a keyword or a type name (#1447, check_driver_typo_errors).
+    const uint32_t* respelled;
     // Borrowed through checking and emission, like the tokens' source indices. Resource bytes stay owned by pp.
     const Preprocessor* preprocessor;
     ParseTokens tokens;
@@ -2913,7 +2926,13 @@ static uint32_t parse_diagnostic_location(const Parser* parser, const Preprocess
 static void parse_diagnostic_message(const Parser* parser, const Preprocessor* pp, const ParseDiagnostic* diagnostic, char* text, uint32_t capacity)
 {
     char spelling[64] = "";
-    if (diagnostic->argument != BUSTER_PARSE_NONE && diagnostic->argument < parser->tokens.count)
+    const uint32_t respelled = parser->respelled != NULL && diagnostic->argument < parser->tokens.count ? parser->respelled[diagnostic->argument] : 0;
+    if (respelled != 0)
+    {
+        const uint32_t length = intern_length(pp->table, respelled);
+        snprintf(spelling, sizeof(spelling), "%.*s", (int)length, intern_bytes(pp->table, respelled));
+    }
+    else if (diagnostic->argument != BUSTER_PARSE_NONE && diagnostic->argument < parser->tokens.count)
     {
         const uint32_t a = diagnostic->argument;
         const uint32_t start = pp->output.locations[parser->tokens.sources[a]];
