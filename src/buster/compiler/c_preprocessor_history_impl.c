@@ -564,6 +564,9 @@ static void pp_render_diagnostic(Preprocessor* pp, PPSeverity severity, uint32_t
     }
     if (note != 0)
     {
+        // An attached note's place is the include context the next primary compares with, as a separately rendered note's
+        // (#1970): one in another header makes that primary repeat its include stack.
+        pp->diagnostic_include_range = pp_presumed_include(pp, note->location);
         pp_diagnostic_place(pp, &diagnostic, note->location);
         if (note->macro != 0)
         {
