@@ -286,7 +286,7 @@ static void check_lower_atomic_compute(CheckLowerWriter* writer, const CheckLowe
         check_lower_complex_conversion(writer, computed, plan->value_type);
         if (stored_complex)
         {
-            check_lower_copy(writer, type_size(writer->program->types, plan->value_type), false, false);
+            check_lower_copy(writer, type_size(writer->program->types, plan->value_type), false, false, 0);
         }
         else
         {
@@ -553,11 +553,11 @@ static void check_lower_atomic_emit(CheckLowerWriter* writer, uint32_t index)
             // A generic compare-exchange's desired value is where its third argument points.
             check_lower_emit(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, plan->desired);
             check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, plan->arguments[2]);
-            check_lower_copy(writer, plan->size, false, false);
+            check_lower_copy(writer, plan->size, false, false, 0);
         }
         check_lower_emit(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, plan->expected);
         check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, plan->arguments[1]);
-        check_lower_copy(writer, type_size(types, plan->value_type), false, false);
+        check_lower_copy(writer, type_size(types, plan->value_type), false, false, 0);
         check_lower_atomic_call(writer, plan, BUSTER_CHECK_ATOMIC_COMPARE);
         const uint32_t result = check_lower_temporary(writer, BUSTER_TYPED_CLASS_I32);
         const uint32_t end = check_lower_label(writer);
@@ -565,7 +565,7 @@ static void check_lower_atomic_emit(CheckLowerWriter* writer, uint32_t index)
         check_lower_emit(writer, BUSTER_TYPED_BRANCH_TRUE, BUSTER_TYPED_CLASS_I32, end);
         check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, plan->arguments[1]);
         check_lower_emit(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, plan->expected);
-        check_lower_copy(writer, type_size(types, plan->value_type), false, false);
+        check_lower_copy(writer, type_size(types, plan->value_type), false, false, 0);
         check_lower_place(writer, end);
         check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_I32, result);
         check_lower_emit(writer, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U8, 0);
@@ -578,14 +578,14 @@ static void check_lower_atomic_emit(CheckLowerWriter* writer, uint32_t index)
         {
             check_lower_emit(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, plan->desired);
             check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, plan->arguments[1]);
-            check_lower_copy(writer, plan->size, false, false);
+            check_lower_copy(writer, plan->size, false, false, 0);
         }
         check_lower_atomic_call(writer, plan, plan->operation);
         if (plan->operation != BUSTER_CHECK_ATOMIC_STORE)
         {
             check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, plan->arguments[plan->operation == BUSTER_CHECK_ATOMIC_LOAD ? 1 : 2]);
             check_lower_emit(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, plan->result);
-            check_lower_copy(writer, plan->size, false, false);
+            check_lower_copy(writer, plan->size, false, false, 0);
         }
     }
     else

@@ -26,7 +26,7 @@ static char* pp_test_system_warning_clang(const char* path, const char* director
         {
             unsetenv("CPATH");
             unsetenv("C_INCLUDE_PATH");
-            execlp("clang", "clang", "-E", "-std=gnu17", "-nostdinc", "-fno-caret-diagnostics", "-fno-diagnostics-show-option", "-fmacro-backtrace-limit=0",
+            execlp("clang", "clang", "-E", "-std=gnu17", "-nostdinc", "-fno-caret-diagnostics", "-fmacro-backtrace-limit=0",
                    "-D__INT64_C(c)=c##L", show ? "-Wsystem-headers" : "-Wno-system-headers", system ? "-isystem" : "-I", directory, path, (char*)NULL);
         }
         _exit(127);

@@ -349,7 +349,7 @@ static char* check_test_completed_pragma_clang(const char* clang, const char* pa
         const int output = open("/dev/null", O_WRONLY);
         if (output >= 0 && dup2(output, STDOUT_FILENO) >= 0 && dup2(fileno(diagnostics), STDERR_FILENO) >= 0)
         {
-            execlp(clang, clang, "-E", "-std=gnu17", "-nostdinc", "-fno-caret-diagnostics", "-fno-diagnostics-show-option",
+            execlp(clang, clang, "-E", "-std=gnu17", "-nostdinc", "-fno-caret-diagnostics",
                    "-fmacro-backtrace-limit=0", path, (char*)NULL);
         }
         _exit(127);

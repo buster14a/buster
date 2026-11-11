@@ -2316,6 +2316,27 @@ static bool check_input_attribute_validate(CheckInputReader* reader, CheckInputA
 #define BUSTER_CHECK_PARSED_ERROR 1
 #define BUSTER_CHECK_PARSED_UNSURE 2
 
+
+// Where suppress's argument from `argument` to `stop` (its `,` or the list's end) is no string literal (#1844), or
+// BUSTER_CHECK_NONE: clang's parser reads each of its string literals through any number of parentheses
+// (`suppress((("a")))`), and its "expected string literal" is at the first token inside them that starts none. What
+// follows a whole literal that is no `)` is the parser's error.
+static uint32_t check_input_attribute_suppress_literal(const Parser* parser, uint32_t argument, uint32_t stop)
+{
+    uint32_t token = argument;
+    while (token + 1 < stop && parser->tokens.kinds[token] == PARSE_KIND_L_PAREN)
+    {
+        token += 1;
+    }
+    return token < stop && parser->tokens.kinds[token] == PARSE_KIND_STRING ? BUSTER_CHECK_NONE : token;
+}
+
+// Whether a name is suppress's, as written with its keyword underscores or without.
+static bool check_input_attribute_suppress_name(String8 name)
+{
+    return check_input_attribute_equal(name, "suppress") || check_input_attribute_equal(name, "__suppress__");
+}
+
 static uint8_t check_input_attribute_parsed(CheckInputReader* reader, CheckInputAttributes* attributes, const CheckInputAttribute* attribute)
 {
     const Parser* parser = reader->parser;
@@ -2344,7 +2365,7 @@ static uint8_t check_input_attribute_parsed(CheckInputReader* reader, CheckInput
         for (uint32_t token = first; !identifier && token < end; token += 1)
         {
             const uint8_t kind = parser->tokens.kinds[token];
-            literal &= kind == PARSE_KIND_STRING;
+            literal &= kind == PARSE_KIND_STRING || (attribute->kind == CHECK_ATTRIBUTE_SUPPRESS && (kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_R_PAREN));
             const String8 spelled = kind == PARSE_KIND_IDENTIFIER ? check_input_attribute_name(reader, parser->tokens.names[token]) : (String8){ 0 };
             const uint8_t previous = token > 0 ? parser->tokens.kinds[token - 1] : PARSE_KIND_END;
             const uint8_t next = token + 1 < stop ? parser->tokens.kinds[token + 1] : PARSE_KIND_END;
@@ -2359,9 +2380,11 @@ static uint8_t check_input_attribute_parsed(CheckInputReader* reader, CheckInput
         if (identifier)
         {
         }
-        else if (string && first < end && parser->tokens.kinds[first] != PARSE_KIND_STRING)
+        else if (string && first < end && (attribute->kind == CHECK_ATTRIBUTE_SUPPRESS ? check_input_attribute_suppress_literal(parser, first, end) != BUSTER_CHECK_NONE :
+                                                                                         parser->tokens.kinds[first] != PARSE_KIND_STRING))
         {
-            check_input_attribute_argument_error(reader, attributes, attribute, first, CHECK_ARGUMENT_STRING_LITERAL, 0);
+            const uint32_t at = attribute->kind == CHECK_ATTRIBUTE_SUPPRESS ? check_input_attribute_suppress_literal(parser, first, end) : first;
+            check_input_attribute_argument_error(reader, attributes, attribute, at, CHECK_ARGUMENT_STRING_LITERAL, 0);
             result = BUSTER_CHECK_PARSED_ERROR;
         }
         else if (unsure || (string && !literal))
@@ -3016,6 +3039,7 @@ static bool check_input_attribute_ignored_lists(CheckInputReader* reader, uint32
                             BUSTER_CHECK_CUSTOM_ERROR;
                 }
                 uint32_t index = 0;
+                const bool suppress = check_input_attribute_suppress_name(check_input_attribute_name(reader, parser->tokens.names[name]));
                 for (uint32_t argument = arguments_first; pass == 0 && valid && !typed && !custom && argument < arguments_end; index += 1)
                 {
                     uint32_t stop = argument;
@@ -3051,11 +3075,13 @@ static bool check_input_attribute_ignored_lists(CheckInputReader* reader, uint32
                         // An escape sequence clang refuses in it, its error: then clang drops the attribute.
                         valid = false;
                     }
-                    else if (string && !identifier && !literals)
+                    else if (string && !identifier && !literals &&
+                             (!suppress || check_input_attribute_suppress_literal(parser, argument, stop) != BUSTER_CHECK_NONE))
                     {
                         CheckInputAttributes holder = { 0 };
                         const CheckInputAttribute item = { .first = name, .name_token = name, .name = parser->tokens.names[name], .end = items_end };
-                        check_input_attribute_argument_error(reader, &holder, &item, argument, CHECK_ARGUMENT_STRING_LITERAL, 0);
+                        const uint32_t at = suppress ? check_input_attribute_suppress_literal(parser, argument, stop) : argument;
+                        check_input_attribute_argument_error(reader, &holder, &item, at, CHECK_ARGUMENT_STRING_LITERAL, 0);
                         valid = false;
                     }
                     else if (undeclared != BUSTER_CHECK_NONE)
@@ -4091,6 +4117,7 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
         // skips. The compatibility conditions' messages are strings too, which check_input_unevaluated_strings peels.
         const CheckInputArgumentsRow* read = valid && (known || !standard) && !custom ? check_input_attribute_gnu_arguments(reader, attribute.name) : NULL;
         const uint32_t identifiers = BUSTER_CHECK_ARGUMENTS_VARIADIC_IDENTIFIER | BUSTER_CHECK_ARGUMENTS_STRICT_IDENTIFIER;
+        const bool suppress = check_input_attribute_suppress_name(name);
         uint32_t literal = BUSTER_CHECK_NONE;
         uint32_t index = 0;
         for (uint32_t argument = attribute.argument_first; read != NULL && literal == BUSTER_CHECK_NONE && !escaped && argument < attribute.argument_end; index += 1)
@@ -4106,7 +4133,9 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
             const bool identifier = lone && ((index == 0 && (read->flags & BUSTER_CHECK_ARGUMENTS_IDENTIFIER) != 0) || (read->flags & identifiers) != 0);
             const bool string = index < 32 && ((read->strings >> index) & 1u) != 0 && (read->flags & (identifiers | BUSTER_CHECK_ARGUMENTS_TYPE)) == 0;
             escaped = string && !identifier && check_input_unevaluated_strings(reader, argument, stop, BUSTER_CHECK_NONE);
-            literal = arguments != NULL && string && !identifier && !escaped && (!strings || stop == argument) ? argument : BUSTER_CHECK_NONE;
+            // suppress's through parentheses (check_input_attribute_suppress_literal).
+            const uint32_t suppressed = suppress && stop != argument ? check_input_attribute_suppress_literal(parser, argument, stop) : argument;
+            literal = arguments != NULL && string && !identifier && !escaped && (!strings || stop == argument) ? suppressed : BUSTER_CHECK_NONE;
             argument = stop + 1;
         }
         if (literal != BUSTER_CHECK_NONE)
@@ -4256,8 +4285,10 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
         uint32_t tag_bound = 0;
         // A tag's own list, between its keyword and its name or body, of its declaration or definition (a reference's is
         // the parser's error alone: check_input_tag_attributes).
-        const bool tag_keyword = declaration_place && reader->tag_attributes && (before_list == PARSE_KIND_STRUCT || before_list == PARSE_KIND_ENUM);
-        const bool tag_list = tag_keyword && check_input_attribute_tag_declares(parser, list_opener - 2);
+        // (Or a bare declaration's list after the tag's name, as clang's Sema takes it: CheckInputReader.tag_name_list.)
+        const bool tag_keyword = declaration_place && reader->tag_attributes &&
+                                 (before_list == PARSE_KIND_STRUCT || before_list == PARSE_KIND_ENUM || reader->tag_name_list);
+        const bool tag_list = tag_keyword && (reader->tag_name_list || check_input_attribute_tag_declares(parser, list_opener - 2));
         // annotate_type is a type's alone: on a declaration, clang's "cannot be applied to a declaration" (#1447); so is a
         // sliding type attribute on a declaration of no declarator (`[[clang::address_space(1)]];`).
         const bool annotate_type = check_input_attribute_equal(name, "annotate_type");
@@ -4687,7 +4718,8 @@ static bool check_input_attributes(CheckInputReader* reader, uint32_t* cursor, u
         const uint8_t kind = parser->tokens.kinds[i];
         const uint32_t name = parser->tokens.names[i];
         const bool standard = kind == PARSE_KIND_L_SQUARE;
-        const uint32_t place = standard ? check_input_standard_place(parser, i) : BUSTER_CHECK_PLACE_DECLARATION;
+        // (A list after a bare tag declaration's name is the tag's, its declaration's: CheckInputReader.tag_name_list.)
+        const uint32_t place = standard && !reader->tag_name_list ? check_input_standard_place(parser, i) : BUSTER_CHECK_PLACE_DECLARATION;
         bool recovered = false;
         if (kind == PARSE_KIND_ATTRIBUTE || standard)
         {

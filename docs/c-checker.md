@@ -315,8 +315,13 @@ applies after the base completed it, sets its alignment then (#1447,
 `type_enum_realign`), as clang's does where nothing has asked its layout yet:
 clang memoizes an enum's layout at its first query, after which the attribute
 changes nothing. So it is taken where the enum completed at this body's `{` and
-the body doesn't name it (`enum E`); one whose body names it, or one completed
-by an earlier declaration (`enum E : char;`), stays refused as unsupported. (Attributes
+the body names it (`enum E`) only as a cast's type; where the body asks its
+layout (`enum E` in a `sizeof`'s or an `_Alignof`'s operand) it changes
+nothing, as clang's does, and a pointer to it (`sizeof(enum E *)`) asks
+nothing; an array of it (`sizeof(enum E[2])`) asks. One whose body names it
+otherwise (a member's type, `sizeof(struct { enum E e; })`, which this
+doesn't read), or one completed by an earlier
+declaration (`enum E : char;`), stays refused as unsupported. (Attributes
 after a tag's name, before a `;`, make any tag's declaration a reference to the
 visible tag, as clang has it, not a declaration of it alone.)
 
@@ -593,9 +598,15 @@ does, each rule checked against clang's answers on probes of it:
   value converted to its type, where that is a number or a static object's
   address constant (#1447, `check_init_scalar_literal`): the constant cache that
   folds a vector literal's lanes folds it, and the operations around it, a
-  conditional's among them (`(int){ 5 } ? 6 : 7`). Still refused: one in a
-  file-scope array's bound (`char e[(int){ 2 }];`), which clang folds to a
-  constant array with its `-Wgnu-folding-constant` warning.
+  conditional's among them (`(int){ 5 } ? 6 : 7`). In a bound, an enumerator
+  and the constant reader's other walks (#1447), a scalar literal whose one
+  item is numbers, characters, operators and parentheses alone folds as a cast
+  of it, but no integer constant expression (`check_constant_compound_folds`):
+  `char e[(int){ 2 }];` is a constant array with clang's "variable length array
+  folded to constant array as an extension", at file scope, in a member and in
+  a block's `static` object, and `enum { E = (int){ 1 } }` is 1. One an `&`
+  takes stays its object. Left: `_Static_assert((int){ 1 }, "")`, which clang
+  folds quietly, is still "expression is not an integer constant expression".
 
 Declaration specifiers and comma-separated declarators are elaborated in source
 order, including the scope of a name in its own initializer. The reader
@@ -2428,10 +2439,15 @@ What the lowering covers past scalars (#145's programs):
   register, and glibc's
   socket calls (`bind`, `connect`, `accept`, `getsockname`, `sendto`,
   `recvfrom` and the rest) take `__SOCKADDR_ARG` and `__CONST_SOCKADDR_ARG`
-  with `_GNU_SOURCE`. Two cases are refused by name. A union sized or aligned
-  otherwise than its first member, by an `aligned` or `packed` attribute of its
-  own: clang's code takes its registers from the member and its stack slot
-  from the union (`getIndirectResult`). And a union made transparent, by a
+  with `_GNU_SOURCE`. A union sized or aligned otherwise than its first
+  member, by an `aligned` or `packed` attribute of its own, passes as clang's
+  code passes it: its registers from the member, and where none is left a stack
+  slot of the union's size and alignment (`getIndirectResult`;
+  `abi_finish_transparent` records the union in the ABI table's `transparent`
+  column, which `abi_assign_call` and its vector twin read), and `va_arg` reads
+  the member from a slot of the union's size and alignment. Such a union past
+  two eightbytes, or whose first member passes as an aggregate, a pair, a
+  vector or in memory, is refused by name. And a union made transparent, by a
   later declaration's attribute, after a function definition or a static
   object's initializer that names a function, whose first member passes
   otherwise than the union does (its registers, its stack or its extension):
@@ -3859,9 +3875,14 @@ What the lowering covers past scalars (#145's programs):
   tests an I32 destination slot, which every exit and fall that crosses one
   stores first (a fall 0, at its run's head, past which exits enter): the
   issue's function of early returns stores none, and its calls are its
-  variables' count. An exit from a statement expression, through a record
-  whose scope's end a constant switch's kept statements leave out, or whose
-  jump no path reaches keeps its run in place. Code and call rows grow
+  variables' count. An exit from a statement expression's statements takes
+  the chain through the records within its block, whose calls its region
+  lowers with its statements, from the empty evaluation stack the region
+  starts with: the dispatch's jumps and the exit's agree on the stack, out of
+  the region as within it. An exit that leaves the block's own records (their
+  calls run after its END, once its value is kept) or records outside it, one
+  through a record whose scope's end a constant switch's kept statements leave
+  out, and one whose jump no path reaches keep their runs in place. Code and call rows grow
   linearly in exits plus cleanups, where they grew as their product (85
   cleanups with an early return each made 3,825 calls, and 86 exhausted the
   call rows). An exit keeps only the innermost record whose scope holds its
@@ -4219,9 +4240,11 @@ A source pragma's `error` mapping stays an ordinary error, while its `fatal` map
 `-Wno-fatal-errors` restores the ordinary budget, and the last of the two options on the command line decides. The
 standalone `-E` command and the source driver's preprocessing, parsing and semantic groups all read the option; the
 standalone `parse` command reads it too, but keeps its generated-prefix behavior after a preprocessing fatal rather
-than parsing the prefix the source driver checks. The preprocessing warnings' own `-Werror` promotion (`#warning`,
-macro redefinition and `#pragma message`) and the stream warnings' option suffix are separate policies and are
-unchanged here.
+than parsing the prefix the source driver checks. The preprocessing warnings (`#warning`,
+macro redefinition, `#pragma message` and the others) follow their own options and pragmas with their flags
+(`pp_warning_flag`, #1790, #1970). An attached note's place
+(a redefinition's "previous definition is here") sets the include context the next diagnostic compares with, so
+that one in the same header as the warning repeats its "In file included from" lines, as clang's do.
 
 The source driver collects preprocessing, parser and checker groups before
 publication (#698). Their order follows expansion-output boundaries and proven
@@ -4302,6 +4325,11 @@ take clang's words and places:
 - **A negative constant bound**, at the bound: "'a' declared as an array with
   a negative size", or "array size is negative" in a type name
   (`CHECK_INPUT_ARRAY_NEGATIVE`, `check_input_vla_bound`).
+- **A bound of another type than an integer's** (#2170), at the bound: "size
+  of array has non-integer type 'double'" (`CHECK_INPUT_ARRAY_NON_INTEGER`).
+  A constant's (`int a[1.5]`) and a variable array's (`int a[d]` of a
+  `double d`) both get it, and the declaration recovers as a negative bound's
+  does. A member's, as a member's negative bound, still stops the unit.
 - **An array of functions**, at its `[`: "'a' declared as array of functions
   of type 'F' (aka 'int (void)')" (`CHECK_INPUT_ARRAY_FUNCTIONS`).
 - **An incomplete element**, at its `[`: "array has incomplete element type
@@ -4712,9 +4740,15 @@ do:
     earlier one's names as still declared there (`CheckInput.ambiguous_index`),
     and a body's own local of such a name as no use of it.
 
-  Left: a block's redefinition, whose notes clang qualifies (`f()::X`), still
-  refuses with the generic error; a third definition's ambiguous uses note its
-  own enumerator and the first's, where clang's candidates list all three; and a
+  - A block's redefinition is read the same way (#1826). Its ambiguity notes
+    qualify the name by its function as clang's qualified names do,
+    `g(int, char *)::B` and `k()::B` for a `(void)` prototype
+    (`check_driver_function_scope`, from the function's printed type).
+  - A later definition's ambiguous use lists every candidate, the latest first,
+    as clang's lookup does: the definitions between the use's and the first
+    are packed in its report's `value`, up to two (four definitions).
+
+  Left: a fifth definition's use lists four candidates of its five; and a
   rejected unit whose incompatible redefinition's own names are used at file
   scope next to an ambiguous use loses its later readings' warnings, as its
   view leaves the redefinition out.
@@ -4894,7 +4928,9 @@ bodies after the one that brings them past the limit are left out whole, and
 that holds it, or file scope after it, still hides; past them the unit's
 warnings aren't given. Without a limit (`-ferror-limit=0`) the rounds go on
 while each finds an error. Each round is a reading of the unit, so a unit of
-`n` walk-ending errors costs up to `min(n, limit) + 1` readings. The second reading's unused variables in a scope with an error
+`n` walk-ending errors costs up to `min(n, limit) + 1` readings. The rounds
+run under `-w` too, for the errors they find, which clang gives whatever the
+warning options; `-w`'s policy leaves out their warnings (#2162). The second reading's unused variables in a scope with an error
 are left out (its own error counts, the dropped part's at the token after
 it). A function holding an error keeps its unused parameters, as clang's
 `ActOnFinishFunctionBody` gives them whatever the body's errors, except one
@@ -5287,7 +5323,6 @@ The later phases are left:
 
 - **Invalid declarations.** Not covered by phase 2 or the invalid
   declarations above:
-  - C23's redefinition of an enum in a block, or a third time (above).
   - An initialized invalid declaration, which clang marks invalid too.
 
   These still stop the reader. (A non-constant initializer's place, `sizeof`
@@ -5305,7 +5340,20 @@ The later phases are left:
   A file-scope const object's initializer with an error is left out alone,
   so the declaration stays bound with an unknown value (`const int c;`), as
   clang's stays valid, and the bodies that use it keep their warnings
-  (#1447). A file-scope declaration's error that no smaller part holds (its
+  (#1447). A static initializer whose only error is that it is no constant
+  (`const int d = 1 / 0;`, `CHECK_INIT_NON_CONSTANT`) is kept instead: clang
+  builds it and gives its warnings. The first reading's such errors go to the
+  rounds (`check_driver_rejected_common`'s `nonconstant`), whose editor keeps
+  the initializer and marks its declaration (`CheckDriverEditor.skipped`), and
+  the reading's initializer run takes it as uninitialized, so its error isn't
+  given again. A file-scope division by zero publishes at the declarator's end
+  (`check_driver_file_initializer_end`, `PP_DIAGNOSTIC_RUNTIME`), as a comma's
+  left operand and a shift count do, after the error, as clang's queued
+  runtime warnings do. A unit of no body takes the rounds for such an
+  initializer alone. Difference left: where the initializer's top is a comma
+  (`int z = (1 / 0, 3);`, `int w = (1 << 40, 1 / 0);`), its runtime warnings
+  publish at the comma's position, before the error, which completes at the
+  initializer's end; clang gives the error first. A file-scope declaration's error that no smaller part holds (its
   specifiers', its declarator's, an invalid type's or an unsized array's
   initializer's) leaves the whole declaration out of the view, to its `;`
   (`check_driver_rejected_declaration`, #1447), and every body that names one
@@ -5320,8 +5368,7 @@ The later phases are left:
   keeps such a declaration bound and invalid, its uses quiet: the reader does
   so for the declarator errors (invalid declarations, above), whose uses are
   known errors of their own; for the others the bodies that name it lose their
-  warnings here, and so does the declaration's own initializer
-  (`const int d = 1 / 0;`'s division). An unsized array's
+  warnings here, and so does the declaration's own initializer. An unsized array's
   (`int y[] = undeclared;`) isn't left out alone: the first reading leaves
   out the events of the bodies that use the array, which a later reading
   doesn't give again. A file-scope use of a left-out declaration's name
@@ -5715,7 +5762,10 @@ declaration) is never unused: clang's semantic context for it is the
 translation unit, not the function, so `ShouldDiagnoseUnusedDecl` passes it
 by. A use through it uses the outer declaration with linkage it redeclares,
 so `static int s; void f(void) { extern int s; (void)s; }` leaves `s` used.
-A block's own `static`, `register` and automatic objects can be unused. The
+A block's own `static`, `register` and automatic objects can be unused. A
+variable with an applied `cleanup` attribute is used, as clang treats it,
+since its cleanup takes its address (#1881); one ignored at file scope can still
+be unused. The
 graph pass adds `-Wunused-but-set-parameter` for a parameter a statement
 assignment writes and no read uses.
 
@@ -8730,7 +8780,7 @@ arguments against the function. The checker now gives these as clang does.
 
   Lowering: clang's x86 target maps address spaces 256, 257 and 258
   (`__seg_gs`, `__seg_fs`) to the `%gs`, `%fs` and `%ss` segments, whose loads
-  and stores take a segment override. A load or store in `%fs` or `%gs` of an
+  and stores take a segment override. A load or store in `%fs`, `%gs` or `%ss` of an
   integer, a floating value (long double too), a 128-bit integer or a vector,
   by indirection, member (a bit-field's unit's pieces too), subscript or name, and an assignment, compound
   assignment, increment or decrement of one, takes it (check_lower_access: the
@@ -8743,9 +8793,9 @@ arguments against the function. The checker now gives these as clang does.
   argument's pointee's. Tier 1 falls back to
   Tier 0 for such a function. The rest is refused by name ("a load or store in a
   segment's address space", check_lower_segment_access, where a unit has such a
-  type at all: CheckLowerWriter.segments): an aggregate's copy, a complex,
-  half-precision or `_BitInt` value, an `_Atomic` object, and `%ss`'s
-  space (258, whose `36` prefix no 64-bit form of the encoder's has), atomic
+  type at all: CheckLowerWriter.segments): an `_Atomic` object, an
+  aggregate's copy past 8 of the
+  target's widest vector registers (as clang stops on), atomic
   builtins of another plan (generic ones by pointer, `__atomic_clear`,
   `__sync_lock_release`); and so are the accesses whose lvalue doesn't carry the
   space: a vector's element, read or written (its type loses the vector's
@@ -8971,8 +9021,11 @@ arguments against the function. The checker now gives these as clang does.
   `types_compatible_p`, `choose_expr`). The calls are the graph's in its
   postorder, clang's order: a call's callee's and arguments' calls first;
   then those the reader's evaluator alone reads, a `typeof`'s and a constant
-  array bound's, whose `)` no graph node has, of a declared name's callee
-  (`check_interrupt_evaluated_calls`, #1447). An
+  array bound's, whose `)` no graph node has (`check_interrupt_evaluated_calls`,
+  #1447): a declared name's callee, an undeclared function's (its implicit
+  declaration's), a builtin's (a called name no declaration binds, noted at
+  its first use), and one through a member or a postfix expression's base
+  (`typeof(s.f())`, `typeof(t[0]())`), with no note. An
   interrupt service routine's definition is Tier 0's handler frame
   (`Tier0Function.interrupt`, `docs/tier0.md`): `CheckProgram.object_interrupt`
   holds each function's first declaration with the attribute,
@@ -9391,9 +9444,10 @@ arguments against the function. The checker now gives these as clang does.
       through a keyword (`__regcall`), is spelled out.
   - x86's `interrupt` (#147):
     - of the calls in operands the reader's evaluator alone reads (a
-      `typeof`'s, a constant array bound's), those of a builtin and those
-      whose callee isn't a name (`typeof(s.f())`) are neither a direct call's
-      error nor -Wexcessive-regsave's warning;
+      `typeof`'s, a constant array bound's), a callee through anything but a
+      member or a postfix expression's base (`typeof((*fp)(0))`, which a
+      declarator there looks like) is no call to it, so neither
+      -Wexcessive-regsave's warning;
     - a direct call's error drops every other diagnostic of its full
       expression (`CheckInput.interrupt_ranges`: its declarator's initializer
       or its statement, but the call's other arguments and list elements),
@@ -9416,9 +9470,23 @@ arguments against the function. The checker now gives these as clang does.
     with an error (C99 and later) has no `-Wtcb-enforcement` warning after
     it.
     `diagnose_as_builtin`'s calls have no `-Wfortify-source` warnings, as no
-    call has. A C23 NEON vector's or `btf_type_tag`'s list after a tag's name
-    is the parser's "an attribute list cannot appear here" alone, where clang
-    goes on to "cannot be applied to a declaration".
+    call has.
+  - A bare tag declaration's C23 lists after its name (#1447,
+    `check_input_tag_attributes`): a struct's or a union's, right after the
+    name, are clang's parser's "an attribute list cannot appear here" at the
+    first, then its Sema's of each attribute as the tag's own list's
+    (`CheckInputReader.tag_name_list`): a type attribute's count error or
+    "cannot be applied to a declaration", an unknown one's warning. The
+    declaration goes on, its errors recovered. An enum's, or lists after a
+    GNU list, are ignored with `-Wignored-attributes`' "attribute
+    'clang::neon_vector_type' is ignored, place it after "enum" ...", its
+    scope named. Not yet clang's: the tag doesn't take such a list's other
+    attributes (a later use of `struct V [[deprecated]];`'s tag isn't
+    deprecated); an enum's list's, or a list's after a GNU list, declaration
+    attributes (`deprecated`) are clang's "cannot be applied to types" error,
+    not the warning; and a
+    definition's list (`struct S [[...]] { ... };`) is the parser's
+    "expected identifier or '('" at its `{`.
 - **Tests.** `test-checker` checks the facts table's order and bounds, its
   counts and five rows, and conflicting conventions on a function and on
   another type (`c_check_attribute_test.c`). `test-checker-driver` compares
@@ -9823,6 +9891,12 @@ enables, which this checker doesn't all give.
   A variable array prints its size expression as written, with expression
   spacing (`check_driver_vla_bounds`): `'int (*)[n + 1]'`, `'int[n][m * 2]'`.
   `c_check_type_sugar_driver_test.c` compares these whole-output with clang.
+- A failed static assertion's requirement prints a character constant by its
+  value, as clang's `CharacterLiteral::print` does (#1999,
+  `check_semantic_character`): its prefix; `\'`, `\\` and the control
+  characters' C escapes; else, with an ordinary constant's sign extension of a
+  byte taken off, a printable byte as itself, `\xNN` below 256, `\uNNNN` to
+  0xFFFF and `\UNNNNNNNN` past it (`'ab'` is `'\u6162'`).
 - **Differences left.**
   - A cast inside a variable array's bound prints its builtin type keywords
     as clang's TypePrinter does (`int[(unsigned)n]` is `'int[(unsigned int)n]'`,
@@ -9927,15 +10001,23 @@ declaration, and one that already has an alias attribute makes it a no-op; a
 TARGET never declared is clang's "weak identifier 'TARGET' never declared" at
 ALIAS. The shapes whose ALIAS the unit declares with external linkage, of
 TARGET's kind, type and thread-local storage, without a section, alias or
-definition after the pragma and named by nothing after it, take the alias as
-attributes of ALIAS's declaration (`check_input_symbol_alias`), which the
-emission makes clang's weak alias of TARGET's definition; one whose ALIAS the
-unit defined before the pragma is clang's no-op. The rest stay refused by name:
-an ALIAS the unit doesn't declare (clang's clone is a declaration without a C
-declarator, which a later use names), one named after the pragma (clang's
-lookup then finds two declarations), one defined after it, of another kind,
-type or thread-local storage, with a section or an alias of its own, or a
-TARGET the unit doesn't define (clang's error at the pragma). This is separate
+definition after the pragma and, where it declares ALIAS before the pragma,
+named by nothing after it, take the alias as attributes of ALIAS's declaration
+(`check_input_symbol_alias`), which the emission makes clang's weak alias of
+TARGET's definition; one whose ALIAS the unit defined before the pragma, or
+declared an alias of its own before it, is clang's no-op. Clang's clone itself
+is ALIAS's symbol where the unit never declares ALIAS, or declares it only
+before the pragma, never names or defines it, and gives it another kind, type,
+thread-local storage or a section (`CheckInputSymbolPragma.alias_target`): the
+selection keeps TARGET's definition as an alias's base, and
+`check_program_define_pragma_aliases` adds a weak symbol of ALIAS's name at
+it, of its type and size, after the aliases' (in the unit of several lanes
+that has TARGET's definition). The rest stay refused by name where clang's
+Sema errors: an ALIAS declared before the pragma and named after it ("reference
+to 'ALIAS' is ambiguous", clang's lookup then finds two declarations), defined
+after it ("redefinition of 'ALIAS'"), declared after it with another kind or
+type, and a TARGET the unit doesn't define ("alias must point to a defined
+variable or function"); and an ALIAS of internal linkage. This is separate
 from ordinary weak binding. `test-checker-driver`
 (`c_check_symbol_pragma_driver_test.c`) compares the supported shapes'
 symbols and programs with clang's, by both paths.
