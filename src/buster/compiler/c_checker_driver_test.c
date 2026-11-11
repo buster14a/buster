@@ -7827,8 +7827,9 @@ static void check_test_driver_section_pragmas(CheckTest* test, const char* clang
         { "two file-scope statements in order", "__asm__(\".section .data.asm,\\\"aw\\\",@progbits\\n.byte 1\");\n__asm__(\".section .data.asm,\\\"aw\\\",@progbits\\n.byte 2\");\n"
                                                 "int main(void) { return 0; }\n", 0, 0, NULL, false, ".data.asm", true },
         { "file-scope assembly's label", "__asm__(\".globl answer\\nanswer: .byte 42\");\nint main(void) { return 0; }\n" },
-        { "file-scope assembly's init array", "__asm__(\".section .init_array,\\\"aw\\\"\\n.quad 0\");\nint main(void) { return 0; }\n", 0, 0, NULL, false,
-          ".init_array", true },
+        // (An entry the startup calls: 0 would crash clang's executable too.)
+        { "file-scope assembly's init array", "int ran;\nvoid buster_init(void) { ran = 1; }\n__asm__(\".section .init_array,\\\"aw\\\"\\n.quad buster_init\");\n"
+                                              "int main(void) { return ran - 1; }\n", 0, 0, NULL, false, ".init_array", true },
         { "an initialized variable in a .bss", "int g __attribute__((section(\".bss.g\"))) = 1;\nint main(void) { return g - 1; }\n", 0, 1, kind },
         { "a variable in a .tdata", "int g __attribute__((section(\".tdata.g\"))) = 1;\nint main(void) { return g - 1; }\n", 0, 1, kind },
         { "a note's section", "int g __attribute__((section(\".note.g\"))) = 1;\nint main(void) { return g - 1; }\n", 0, 1, typed },
