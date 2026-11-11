@@ -58,7 +58,11 @@ requirements. [Command index](README.md).
   call of `puts` by the direct path, and compares a template's `-c` symbols
   with clang's; it reads a placed statement's instructions from its function's
   records (under `--tier1`, whose lowering keeps the helpers, Tier 1's calls of
-  them), and backtraces through a function of placed statements. `test-assembler` checks
+  them), and backtraces through a function of placed statements; and
+  (`c_check_register_variable_driver_test.c`, #1846) compares global register
+  variables' and register labels' errors with clang's, whole output on both
+  paths and on deferred bodies' lanes, and runs a program of rsp, rbp, esp and
+  ebp variables by both tiers against clang -O0's build. `test-assembler` checks
   `asm_assemble_code`, and with `--cross-check` compares the instructions it
   admits for templates with GNU as. [The inline assembly
   guide](../../docs/c-inline-assembly.md) has the placement, the substitution, the
