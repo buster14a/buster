@@ -3406,7 +3406,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             result->status = error == TIER0_ERROR_MEMORY ? CHECK_PROGRAM_RESOURCE :
                              error == TIER0_ERROR_UNSUPPORTED || error == TIER0_ERROR_DEPTH || twice ? CHECK_PROGRAM_UNSUPPORTED : CHECK_PROGRAM_BACKEND;
             result->reason = error == TIER0_ERROR_DEPTH ? "Tier 0 mask depth or operand register window exceeded" :
-                             twice ? "a long double, __int128, vector or mask value, or a deep expression's, held across a call in a function that calls __builtin_setjmp" :
+                             twice ? "a mask value, or a deep expression's, held across a call in a function that calls __builtin_setjmp" :
                              error != TIER0_ERROR_UNSUPPORTED ? NULL : "this operation in Tier 0";
             result->backend_error = error;
             result->backend_node = code->node;
