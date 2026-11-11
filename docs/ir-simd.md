@@ -1106,6 +1106,62 @@ The tests:
   quadwords) run under a mask from the input, through both lowering paths, the
   interpreter at every stage and Tier 1 natively, against C's lanes.
 
+## AES rounds (#1840)
+
+`aes` (`BUSTER_IR_INTRINSIC_AES`) is a binary kind of `intrinsic`:
+
+```text
+%2 = intrinsic.v16i32 %1, %1 aes 0
+```
+
+- a is the state and b the round key, both of the result's type.
+- Each 16-byte lane takes ShiftRows, SubBytes and MixColumns of a, then b is
+  xor'ed in, as FIPS 197 and x86's `vaesenc` define a round.
+- Flags 1 is the last round (`vaesenclast`), without MixColumns.
+
+The binary kinds now come after the ternary ones, which end at
+`BUSTER_IR_INTRINSIC_TERNARY_END`. The scalar intrinsics' range checks stop at
+`smulo` instead of the count.
+
+- **Model:** `IR_SIMD_AES` works on x86's byte layout. It computes the S-box
+  (the multiplicative inverse in GF(2^8), then the affine map) instead of
+  tabulating it.
+- **Passes:** the interpreter, SCCP, GVN and LICM take it as a pure binary
+  kind.
+- **Decoder:** `ir_simd_typed_aes` decodes the aesenc builtins' rows. Each is
+  one record of `vaesenc` or `vaesenclast`, EVEX at every width or VEX at 16
+  and 32 bytes, with VECTOR(0) the state (reg and vvvv) and VECTOR(1) the key
+  (rm). The target needs the form's VAES or AES.
+- **Tier 1** (`BUSTER_TIER1_VECTOR_AES`) emits the EVEX form, or the VEX form
+  where the target has no VL.
+
+The 10 forms had no Zen 5 row. On the 9700X they measured 4 cycles of
+latency at every width, 2 per cycle
+([the record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/ir-aes-1840-2026-11-11)).
+
+Machine rows at `--tier1 -march=znver5`, both compilers compiling this change's
+sources, against the compresses (`ec902c4b`):
+
+| Unit | Rows before | Rows after |
+| --- | ---: | ---: |
+| `main_unit_frontend.c` | 299 | 234 |
+| `main_unit_backend.c` | 570 | 557 |
+
+No AES row is left in either unit.
+
+The tests:
+
+- **`test-ir`:** both verifiers admit it with flags 0 and 1 alone. The model
+  gives FIPS 197 Appendix B's round 1 in every lane of each width. For the last
+  round, it gives the 9700X's `vaesenclast` of that appendix's round-10 key.
+- **`test-ir-parse` and `test-ir-optimize`:** the text form round-trips, and
+  SCCP folds both rounds of constants on both paths.
+- **`test-ir-simd`:** the 10 rows decode at their form's features. Each is
+  refused without AES and VAES and under 4 changes.
+- **No `test-tier1-masks` run:** the x86-64-v4 target it lowers for has neither
+  AES nor VAES. Instead, a C file with every width, both rounds and a chain of
+  ten rounds, compiled by `--tier1`, matches clang's results natively.
+
 ## Masks to vectors and back (#1840)
 
 The masks' conversions to vectors and back need no new operation:
