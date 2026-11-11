@@ -101,7 +101,9 @@ unused-warning fixtures also check exact scope-completion tokens.
   of LLVM: a shared-LLVM toolchain's `libclang-cpp`, or the official release's
   static clang and LLVM archives, which the hosted rows install; the build
   checks one request against a spawned clang), which runs each command line through clang's own
-  driver and cc1 in its process, in the run's directory and environment;
+  driver and cc1 in its process, in the run's directory and environment, and
+  a run the server doesn't answer (it ended, or gave no answer within its
+  limit, 60 s) runs as a child (#2263);
   every other run is a child as before: a response file's, a jobserver dry
   run's, and one whose process-start inputs (`BUSTER_HUGE_PAGES`,
   `BUSTER_TEST_HOST_BUSY`, the lanes' test hooks, the transparent huge pages
@@ -109,7 +111,9 @@ unused-warning fixtures also check exact scope-completion tokens.
   runs each such command as a child and fails on a difference in status or
   output, but `--time-stages` and `--lane-cpus` runs, whose numeric report
   lines and lane order differ between any two runs, compare their other lines
-  in any order. The run reports the counts and the warning sweep's time. CI
+  in any order. The run reports the counts and the warning sweep's time, and
+  a `run costs` line: the served runs' time, the requests past the server's
+  limit, and the children's wall and CPU time, each in total and per run. CI
   runs the driver's parts in these modes, with `--differential` in the native
   plain row; `--cpu-dispatch-only` runs the `cpu_specific` and
   `cpu_dispatch` section alone, #1447; `--target-versions-only` runs GNU multiversioning's `target` and
@@ -254,8 +258,11 @@ unused-warning fixtures also check exact scope-completion tokens.
   expression whose value is not evaluated has none of its nodes evaluated either (`check_common_region_evaluation`,
   on the analysis's own copy of the facts): clang's CFG holds none of them, so the analysis reads none of their reads
   and writes, while the warnings that read a context keep a bound's there. `sizeof ({ ... })`'s `(` is its statement
-  expression's own, as clang's parser reads a parenthesized expression there, on both parser paths. Still separate: the
-  input reader's `-Wshift-count-overflow` there; clang's runtime-warning drop in every array bound; a variable-array
+  expression's own, as clang's parser reads a parenthesized expression there, on both parser paths. A folded shift's count
+  warning there, and every runtime warning in an array bound (clang's ConstantEvaluated context, a variable array's
+  too: shift counts, divisions, sign comparisons, constant conversions, array indexes, null dereferences), is
+  dropped as clang's DiagRuntimeBehavior drops it (`check_common_bound`, the parser contexts' BOUND bit; a comma's
+  unused value stays). Still separate: a variable-array
   `sizeof`'s comma operands, which clang warns of when it evaluates them; and two forms the checker refuses: a statement expression in a variable-array
   `sizeof`'s operand and a statement expression as `_Generic`'s controlling expression, which the constant reader
   reads outside a deferred typeof region. A statement expression in a static selection's chosen operand
