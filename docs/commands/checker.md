@@ -284,6 +284,17 @@ unused-warning fixtures also check exact scope-completion tokens.
   variable array in a statement expression's declaration, which clang leaves out and the scan reads.
   `c_check_unevaluated_driver_test.c` compares it with complete pinned-Clang output at each policy, both paths and one
   or three lanes.
+  A C-style cast from a pointer (an array, a string literal or a function that decays to one) to an integer type
+  narrower than it, but `_Bool`, is clang's `-Wpointer-to-int-cast` (#1943, CheckCStyleCast,
+  `check_warning_graph_pointer_cast`), on by default: "cast to smaller integer type T from P" at the cast's `(`, as
+  soon as the cast is read, in unevaluated operands too; to an enumeration it is `-Wpointer-to-enum-cast`, under it,
+  and from a pointer to void `-Wvoid-pointer-to-int-cast` and `-Wvoid-pointer-to-enum-cast`, the last under both of
+  the others (`c_check_warning_policy.c`). The cast's type keeps its typedef; the operand's keeps a named object's.
+  Differences left: casts only the constant reader reads (an array bound's, an enumerator's or a bit-field width's,
+  where clang warns too) give none, as the warning graph has no node for them; and an operand whose type clang keeps
+  sugar for through an expression (a conditional's `VP`, a function's `U32 (*)(VP)`) prints its canonical type.
+  `c_check_pointer_cast_driver_test.c` compares it with complete pinned-Clang output at each policy, both paths and
+  one or three lanes.
   `c_check_unused_result_driver_test.c` (#1447) compares a discarded call's result warnings (`-Wunused-result`'s
   warn_unused_result and nodiscard, a return type's, pure's and const's, the builtin table's) with Clang's whole
   output at each warning policy, both paths and one or three lanes: their spellings and messages, macros, types,
