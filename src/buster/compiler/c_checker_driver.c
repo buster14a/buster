@@ -6393,9 +6393,9 @@ static void check_driver_rejected_common(const Parser* unit, const Parser* origi
     {
         body_count += parser->tree.roles[token] == PARSE_ROLE_OPEN_BODY;
     }
-    // (A unit of no body reads its file-scope initializers' warnings, #1447.)
+    // (A unit of no body reads its file-scope initializers' warnings only for an initializer that is no constant, #1447.)
     CBodyRange* ranges = body_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, CBodyRange, body_count) : NULL;
-    uint8_t* mask = ranges != NULL || body_count == 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, (uint64_t)count + 1) : NULL;
+    uint8_t* mask = ranges != NULL || (body_count == 0 && nonconstant != NULL) ? BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, (uint64_t)count + 1) : NULL;
     uint32_t found = 0;
     bool valid = mask != NULL && error_count != 0 &&
                  (body_count == 0 || (c_environment_bodies(&parser->tree, count, ranges, body_count, &found) && found == body_count));
@@ -8948,18 +8948,12 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                                     check_stream_type(&stream, failure.failed_source - 1) : 0;
                                 const bool default_error = converted != 0 && !type_kind_is_array(type_kind(&types, type_strip_aligned(&types, failure.failed_type))) &&
                                     check_driver_conversion_kind(&types, failure.failed_type, converted) != CHECK_DRIVER_CONVERSION_INCOMPATIBLE;
-                                // A file-scope initializer's non-constant error completes where clang's AddInitializerToDecl
-                                // gives it, at the declarator's end, before the runtime warnings it queued there
-                                // (PP_DIAGNOSTIC_RUNTIME, check_driver_file_initializer_end, #1447).
-                                const uint32_t declarator_end = failure.status == CHECK_INIT_NON_CONSTANT && place < tokens ?
-                                    check_driver_file_initializer_end(checking, &input, place) : BUSTER_CHECK_NONE;
-                                const uint32_t completion = declarator_end < failure.completion ? declarator_end : failure.completion;
                                 // (Its node plus one, CheckDriverDiagnostic.default_source.)
                                 additional[additional_count++] = (CheckDriverDiagnostic){
                                     .token = place,
                                     .message = message != NULL ? message : "initializer checking capacity exhausted",
                                     .position = place,
-                                    .completion = completion,
+                                    .completion = failure.completion,
                                     .default_source = default_error ? failure.failed_source : 0,
                                     .default_target = default_error ? failure.failed_type : 0,
                                 };

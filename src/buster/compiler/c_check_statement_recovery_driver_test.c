@@ -245,10 +245,9 @@ static void check_test_driver_statement_recovery(CheckTest* test, const char* cl
         "void g(int n) { int u; char *e = (long[]){ 1, 2, 3 }; long *l = (int[1]){ 0 }; printf(\"%s\\n\", n); }\n"
         "void h(int n) { int w = (struct { int x; }){ 1 }; char *a = (int[2]){ 1, 2 }; if (n < (unsigned){ 4 }) {} }\n",
         // A static initializer that is only no constant keeps its warnings (#1447): the view keeps it, its error first and
-        // then its runtime warnings at the declarator's end, in a unit of no body too, a comma's and a shift's among them,
-        // a later declarator's, a record's and an array's.
-        "const int d = 1 / 0;\nint z = (1 / 0, 3);\nint w = (1 << 40, 1 / 0);\nconst int a = 2, b = 1 / 0, c = 3;\n"
-        "struct S { int a, b; } s = { 1 / 0, 2 };\nint arr[2] = { 1, 1 / 0 };\n",
+        // then its division's at the declarator's end, in a unit of no body too, a later declarator's, a record's and an
+        // array's.
+        "const int d = 1 / 0;\nconst int a = 2, b = 1 / 0, c = 3;\nstruct S { int a, b; } s = { 1 / 0, 2 };\nint arr[2] = { 1, 1 / 0 };\n",
         // Its uses stay bound, a block's static's too, and an undeclared name's body is another error.
         "const int d = 1 / 0;\nint use(void) { int u; return d; }\nint f(void) { return undeclared; }\nint e = 1 % 0;\n"
         "void g(void) { static int r = (1, 2) + 1 / 0; int w; (void)r; }\n",

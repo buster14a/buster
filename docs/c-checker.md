@@ -5213,10 +5213,14 @@ The later phases are left:
   rounds (`check_driver_rejected_common`'s `nonconstant`), whose editor keeps
   the initializer and marks its declaration (`CheckDriverEditor.skipped`), and
   the reading's initializer run takes it as uninitialized, so its error isn't
-  given again. The error completes at the declarator's end
-  (`check_driver_file_initializer_end`), before the runtime warnings clang
-  queues there (`PP_DIAGNOSTIC_RUNTIME`, a division by zero's now too, as a
-  comma's and a shift's), and a unit of no body takes the rounds too. A file-scope declaration's error that no smaller part holds (its
+  given again. A file-scope division by zero publishes at the declarator's end
+  (`check_driver_file_initializer_end`, `PP_DIAGNOSTIC_RUNTIME`), as a comma's
+  left operand and a shift count do, after the error, as clang's queued
+  runtime warnings do. A unit of no body takes the rounds for such an
+  initializer alone. Difference left: where the initializer's top is a comma
+  (`int z = (1 / 0, 3);`, `int w = (1 << 40, 1 / 0);`), its runtime warnings
+  publish at the comma's position, before the error, which completes at the
+  initializer's end; clang gives the error first. A file-scope declaration's error that no smaller part holds (its
   specifiers', its declarator's, an invalid type's or an unsized array's
   initializer's) leaves the whole declaration out of the view, to its `;`
   (`check_driver_rejected_declaration`, #1447), and every body that names one
