@@ -6461,10 +6461,104 @@ static String8 check_driver_overload_name(const CheckProgram* program, const Par
     return spelling;
 }
 
+// One of check_driver_alias_warnings' warnings, as the warning options and the source's pragmas map it at `token`, after the
+// errors and warnings published before it: whether it is an error now (`errors` counts it).
+static void check_driver_alias_warning(const CheckProgram* program, const Parser* parser, Preprocessor* pp, uint32_t token, uint32_t id, const char* message,
+                                       const CheckCommonNote* notes, uint32_t note_count, Arena* scratch, uint32_t* errors)
+{
+    const CheckWarningSeverity severity = token < parser->tokens.count && !pp->fatal ? check_common_severity(pp, parser, program->input, token, id, false) : CHECK_WARNING_IGNORE;
+    if (severity != CHECK_WARNING_IGNORE)
+    {
+        check_common_publish(parser, pp, token, pp->output.count + 1u, PP_DIAGNOSTIC_SEMANTIC, id, severity, message, notes, note_count, scratch);
+    }
+    *errors += severity >= CHECK_WARNING_ERROR ? 1 : 0;
+}
+
+// The warnings of clang's code generation at an alias or ifunc it accepts (#1849, CodeGenModule::checkAliasedGlobal and
+// checkAliases), in its order: an alias of a function whose type isn't compatible with its aliasee's definition's
+// (-Wattribute-alias, at the alias attribute, with the definition noted); a section attribute (its first) whose name
+// isn't the aliasee's or the resolver's (the section attribute's, or none), at it; and an immediate target that is a
+// weak alias, which the symbol doesn't follow, at the attribute. Returns false without room.
+static bool check_driver_alias_warnings(const CheckProgram* program, const Parser* parser, Preprocessor* pp, const CheckProgramAlias* alias, Arena* scratch,
+                                        uint32_t* errors)
+{
+    const CheckInput* input = program->input;
+    const bool ifunc = alias->kind == CHECK_PROGRAM_IFUNC;
+    const uint32_t at = alias->attribute < parser->tokens.count ? alias->attribute : 0;
+    const uint32_t definition = alias->definition;
+    bool valid = true;
+    const bool functions = !ifunc && definition < input->token_count && input->declaration_kinds[alias->token] == C_BINDING_FUNCTION &&
+                           input->declaration_kinds[definition] == C_BINDING_FUNCTION;
+    const TypeId own = functions ? input->declared_types[alias->token] : 0;
+    const TypeId aliased = functions ? input->declared_types[definition] : 0;
+    if (functions && own != 0 && aliased != 0 && type_compatible(program->types, own, aliased) == TYPE_ANSWER_NO)
+    {
+        CheckWarningSpelling spell = { 0 };
+        const String8 left = check_driver_warning_type(parser, pp, input, program->types, &spell, scratch, own, 0);
+        const String8 right = check_driver_warning_type(parser, pp, input, program->types, &spell, scratch, aliased, 0);
+        const char* message = left.length != 0 && right.length != 0 ?
+                              check_warning_text(scratch, "alias and aliasee have different types %.*s and %.*s", (int)left.length, left.pointer, (int)right.length,
+                                                 right.pointer) : NULL;
+        valid = message != NULL;
+        const CheckCommonNote note = { .token = definition, .message = "aliasee is declared here" };
+        if (valid)
+        {
+            check_driver_alias_warning(program, parser, pp, at, CHECK_WARNING_ID_ATTRIBUTE_ALIAS, message, &note, 1, scratch, errors);
+        }
+    }
+    const CheckInputAttributes* attributes = check_input_attributes_at(input, alias->token);
+    const CheckInputAttribute* section = NULL;
+    for (uint32_t a = 0; attributes != NULL && a < attributes->count; a += 1)
+    {
+        section = section == NULL && !attributes->records[a].ignored && attributes->records[a].kind == CHECK_ATTRIBUTE_SECTION ? attributes->records + a : section;
+    }
+    const CheckInputAttributes* base_attributes = section != NULL && definition < input->token_count ? check_input_attributes_at(input, definition) : NULL;
+    String8 placed = { 0 };
+    for (uint32_t a = 0; base_attributes != NULL && placed.pointer == NULL && a < base_attributes->count; a += 1)
+    {
+        placed = !base_attributes->records[a].ignored && base_attributes->records[a].kind == CHECK_ATTRIBUTE_SECTION ? base_attributes->records[a].text : placed;
+    }
+    if (valid && section != NULL && (placed.length != section->text.length || (placed.length != 0 && memcmp(placed.pointer, section->text.pointer, placed.length) != 0)))
+    {
+        const char* message = check_warning_text(scratch, ifunc ? "ifunc will not be in section '%.*s' but in the same section as the resolver" :
+                                                                  "alias will not be in section '%.*s' but in the same section as the aliasee",
+                                                  (int)section->text.length, section->text.pointer);
+        valid = message != NULL;
+        if (valid)
+        {
+            check_driver_alias_warning(program, parser, pp, section->name_token, CHECK_WARNING_ID_IGNORED_ATTRIBUTES, message, NULL, 0, scratch, errors);
+        }
+    }
+    // The immediate target: an alias of the unit's that a weak attribute (or `#pragma weak`) makes weak.
+    const uint32_t entry = alias->target_object != 0 ? check_program_alias_of(program->aliases, program->alias_count, alias->target_object) : 0;
+    const CheckProgramAlias* target = entry != 0 && program->aliases[entry - 1].kind == CHECK_PROGRAM_ALIAS ? program->aliases + entry - 1 : NULL;
+    bool weak = false;
+    for (uint32_t d = 0; target != NULL && d < 2; d += 1)
+    {
+        const uint32_t declaration = d == 0 ? target->token : program->object_declarations[target->object];
+        const CheckInputAttributes* records = declaration < input->token_count ? check_input_attributes_at(input, declaration) : NULL;
+        for (uint32_t a = 0; records != NULL && a < records->count; a += 1)
+        {
+            weak |= !records->records[a].ignored && records->records[a].kind == CHECK_ATTRIBUTE_WEAK;
+        }
+    }
+    if (valid && weak)
+    {
+        const char* message = check_warning_text(scratch, "%s will always resolve to %.*s even if weak definition of %.*s is overridden", ifunc ? "ifunc" : "alias",
+                                                  (int)alias->aliasee_name.length, alias->aliasee_name.pointer, (int)alias->target.length, alias->target.pointer);
+        valid = message != NULL;
+        if (valid)
+        {
+            check_driver_alias_warning(program, parser, pp, at, CHECK_WARNING_ID_IGNORED_ATTRIBUTES, message, NULL, 0, scratch, errors);
+        }
+    }
+    return valid;
+}
+
 // Code generation's check of GNU's aliases and ifuncs (#147, CheckProgram.aliases): clang's errors, at -c and when it
 // links but not at -fsyntax-only, as CodeGenModule::checkAliases reports them at the unit's end, at each one's attribute,
 // in the order clang emits them (by their first declarations with the attribute), with clang's notes. A shape the
-// emission refuses by name (CHECK_PROGRAM_ALIAS_THREAD_LOCAL, CHECK_PROGRAM_ALIAS_DEFINED) is the emission's to report.
+// emission refuses by name (CHECK_PROGRAM_ALIAS_THREAD_LOCAL) is the emission's to report.
 // But an alias or ifunc that names itself stops clang's code generation at its first declaration with the attribute
 // (EmitAliasDefinition and emitIFuncDefinition report its cycle at once, after which no later declaration is emitted
 // and checkAliases doesn't run): the first such one's error is then the unit's only one. Returns false after an error.
@@ -6483,23 +6577,33 @@ static bool check_driver_aliases(const CheckProgram* program, const Parser* pars
         itself = named && alias->token < itself_token ? k : itself;
         itself_token = named && alias->token < itself_token ? alias->token : itself_token;
     }
+    // Each alias and ifunc that clang emits, with its error, or else its warnings (#1849): unless one names itself, which
+    // stops clang's code generation before its check.
     uint32_t count = 0;
+    uint32_t errors = 0;
     for (uint32_t k = 0; valid && k < program->alias_count; k += 1)
     {
         const CheckProgramAlias* alias = program->aliases + k;
         const bool unemitted = (program->alias_states[k] & BUSTER_CHECK_PROGRAM_ALIAS_UNEMITTED) != 0;
-        const bool refused = alias->error == CHECK_PROGRAM_ALIAS_THREAD_LOCAL || alias->error == CHECK_PROGRAM_ALIAS_DEFINED;
+        const bool refused = alias->error == CHECK_PROGRAM_ALIAS_THREAD_LOCAL;
         const bool reported = itself != BUSTER_CHECK_NONE ? k == itself :
                                                             alias->kind != CHECK_PROGRAM_WEAKREF && ((alias->error != CHECK_PROGRAM_ALIAS_OK && !refused) || unemitted);
-        if (reported)
+        const bool checked = itself == BUSTER_CHECK_NONE && alias->kind != CHECK_PROGRAM_WEAKREF && !refused;
+        if (reported || checked)
         {
-            keys[count++] = (uint64_t)alias->token << 32 | k;
+            keys[count++] = (uint64_t)alias->token << 32 | k << 1 | (reported ? 1u : 0u);
         }
     }
     const uint64_t* sorted = count > 1 ? c_bindings_sort(keys, keys + program->alias_count, count, !BUSTER_SCALAR_PATH(scalar), UINT32_MAX) : keys;
     for (uint32_t i = 0; valid && i < count; i += 1)
     {
-        const CheckProgramAlias* alias = program->aliases + (uint32_t)sorted[i];
+        const CheckProgramAlias* alias = program->aliases + ((uint32_t)sorted[i] >> 1);
+        if ((sorted[i] & 1) == 0)
+        {
+            valid = check_driver_alias_warnings(program, parser, pp, alias, scratch, &errors);
+            continue;
+        }
+        errors += 1;
         const bool ifunc = alias->kind == CHECK_PROGRAM_IFUNC;
         const CheckProgramAliasError error = itself != BUSTER_CHECK_NONE ? CHECK_PROGRAM_ALIAS_CYCLE :
                                              alias->error != CHECK_PROGRAM_ALIAS_OK ? (CheckProgramAliasError)alias->error : CHECK_PROGRAM_ALIAS_UNDEFINED;
@@ -6572,7 +6676,7 @@ static bool check_driver_aliases(const CheckProgram* program, const Parser* pars
         check_driver_diagnose(parser, pp, UINT32_MAX, "checker program capacity exhausted");
     }
     arena_pop_to(scratch, mark);
-    return valid && count == 0;
+    return valid && errors == 0;
 }
 
 // Why check_program_emit failed, at its token: an unsupported construct names the feature it needs (#145), and the

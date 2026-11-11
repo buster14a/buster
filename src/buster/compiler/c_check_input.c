@@ -10679,6 +10679,22 @@ static void check_input_alias_tentative(CheckInputReader* reader, uint32_t token
             reader->output->reports[before].note_token = tentative;
             reader->output->reports[before].note_kind = CHECK_INPUT_NOTE_PREVIOUS_DEFINITION;
         }
+        // clang erases the alias attribute and reads on (#1849): the report is recovered, and the declaration is a plain
+        // one, its alias attributes dropped from a copy of its list (a specifier's is each declarator's) and the
+        // definition they made with them.
+        const CheckInputAttributes* attributes = check_input_attributes_at(reader->output, token);
+        CheckInputAttributes* copy = reader->output->report_count == before + 1 ? BUSTER_ARENA_PUSH_ARRAY(reader->arena, CheckInputAttributes, 1) : NULL;
+        const bool copied = copy != NULL && check_input_attribute_copy(reader, attributes, copy);
+        reader->output->resource |= reader->output->report_count == before + 1 && !copied;
+        for (uint32_t i = 0; copied && i < copy->count; i += 1)
+        {
+            copy->records[i].ignored |= copy->records[i].kind == CHECK_ATTRIBUTE_ALIAS;
+        }
+        if (copied && check_input_recover_reports(reader, before))
+        {
+            check_input_set_attributes_at(reader->output, token, copy);
+            reader->definition_origins[token] = reader->definition_origins[previous];
+        }
     }
 }
 
