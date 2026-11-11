@@ -4342,6 +4342,14 @@ take clang's words and places:
   table's), at its bound: "array is too large (2'305'843'009'213'693'952
   elements)", the count with clang's digit separators
   (`CHECK_INPUT_ARRAY_TOO_LARGE`).
+- **An element whose size isn't a multiple of its alignment** (an `aligned`
+  typedef or enum raised it past its size, #1893), at its `[`: "size of array
+  element of type 'enum E' (4 bytes) isn't a multiple of its alignment (8
+  bytes)" (`CHECK_INPUT_ARRAY_ELEMENT_ALIGNMENT`), clang's
+  `err_array_element_alignment`. It is the type table's own refusal
+  (`TYPE_ERROR_ELEMENT_ALIGNMENT`), found before it. An aligned typedef's
+  element prints as its canonical type (`'char'`, where clang has
+  `'C' (aka 'char')`), as every diagnostic prints an aligned typedef's type.
 - **A constant that fails** in a bound, a `typeof` operand, an enumerator's
   value, a bit-field's width, a `_BitInt` width or a designator, at the
   failing token, in the words an attribute argument's failure takes
@@ -4376,7 +4384,8 @@ definition's; a typedef's and a parameter's are below):
   reader goes on, and the type has a stand-in `int` where clang's has its
   error: a function returning an array returns `int`, as clang's
   `BuildFunctionType` makes it; an array of functions, of an incomplete
-  element, past the object limit or of a negative bound, and a `void` or
+  element, of an element whose size isn't a multiple of its alignment, past
+  the object limit or of a negative bound, and a `void` or
   incomplete variable, are `int`. A constant read at the walk (a bound,
   `typeof`, an enumerator, `_Static_assert`, a bit-field's width) sees the
   stand-in; its uses there are quiet all the same.
@@ -4423,6 +4432,10 @@ definition's; a typedef's and a parameter's are below):
   `;`. A later declarator with an initializer, which is clang's parse error
   "expected ';' after top level declarator", still stops the reader without
   it.
+
+A member's declarator error, and one in a type name (`sizeof(C[4])`, but for
+a negative bound's), still stop the reader (#1893's too), where clang marks the member (and
+its record) or the expression invalid and goes on.
 
 Left as before: an initialized invalid declaration still stops the reader
 (clang checks its initializer without the declaration's type, and its
