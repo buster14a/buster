@@ -304,6 +304,132 @@ static const CheckDriverDefaultWarningFixture check_driver_type_sugar_fixtures[]
         .errors = 5,
     },
     {
+        // A typeof's operand prints as written (#1837, check_driver_typeof_text): an expression as clang's StmtPrinter
+        // does, with expression spacing (`'typeof (x + 1) *'`), and a type name with its typedef names (`'typeof(L *)'`).
+        .name = "typeof expressions and type names with typedefs",
+        .source = "typedef long L;\n"
+                  "typedef int I;\n"
+                  "int x, arr[4];\n"
+                  "struct T { int f; } t;\n"
+                  "typeof(x + 1) y;\n"
+                  "typeof(L *) z;\n"
+                  "typeof(x+1) *w;\n"
+                  "typeof(arr[1]) v;\n"
+                  "typeof(t.f) u;\n"
+                  "typeof(-x) n;\n"
+                  "typeof((x)) pq;\n"
+                  "typeof(sizeof x) sz;\n"
+                  "typeof(L const *) cz;\n"
+                  "typeof(I *) iz[2];\n"
+                  "typeof(x ? 1 : 2) cond;\n"
+                  "void f(void)\n"
+                  "{\n"
+                  "    char *a = &y;\n"
+                  "    char *b = z;\n"
+                  "    char *c = w;\n"
+                  "    char *d = &v;\n"
+                  "    char *e = &u;\n"
+                  "    char *g = &n;\n"
+                  "    char *h = &pq;\n"
+                  "    char *i = &sz;\n"
+                  "    char *j = cz;\n"
+                  "    char *k = iz;\n"
+                  "    char *l = &cond;\n"
+                  "}\n",
+        .errors = 11,
+    },
+    {
+        // The same in C23, with GNU's spellings, typeof_unqual, a nested typeof, a call, a cast and a string literal.
+        .name = "typeof expressions in C23",
+        .source = "typedef long L;\n"
+                  "int x;\n"
+                  "const int cx = 0;\n"
+                  "__typeof__(x * 2) a;\n"
+                  "__typeof(x) b2;\n"
+                  "typeof_unqual(cx + 1) c;\n"
+                  "typeof_unqual(L *) d;\n"
+                  "typeof(typeof(x + 1)) e;\n"
+                  "int f(int);\n"
+                  "typeof(f(x)) h;\n"
+                  "typeof((L)x) i;\n"
+                  "typeof(\"ab\") s;\n"
+                  "void k(void)\n"
+                  "{\n"
+                  "    char *p1 = &a; char *p3 = &c; char *p4 = d; char *p5 = &e; char *p6 = &h; char *p7 = &i; int *p8 = &s;\n"
+                  "}\n",
+        .errors = 7,
+        .c23 = true,
+    },
+    {
+        // A member's own declarator's specifiers spell its type (#1837, check_semantic_member_token): a conversion's
+        // source through `&` and `*` (check_driver_pointer_spelling), an assignment's member target, and the null pointer
+        // warning's.
+        .name = "member typedefs and typeofs in conversions",
+        .source = "typedef long L;\n"
+                  "struct S { typeof(long) m; L l; typeof(L *) p; } s;\n"
+                  "int x;\n"
+                  "typeof(x + 1) y;\n"
+                  "typeof(L *) z;\n"
+                  "void f(void)\n"
+                  "{\n"
+                  "    char *a = &s.m;\n"
+                  "    char *b = &s.l;\n"
+                  "    char *c = s.p;\n"
+                  "    char *d = &y;\n"
+                  "    char *e = z;\n"
+                  "}\n",
+        .errors = 5,
+    },
+    {
+        .name = "member typedefs as conversion sources and targets",
+        .source = "typedef long L;\n"
+                  "typedef L *LP;\n"
+                  "typedef int I;\n"
+                  "struct In { L deep; };\n"
+                  "struct S { L l; LP lp; LP *lpp; struct In in; L arr[3]; typeof(I) ti; I *ip; const L cl; } s, *ps;\n"
+                  "void take(char *);\n"
+                  "void f(void)\n"
+                  "{\n"
+                  "    char *a = &ps->l;\n"
+                  "    char *b = s.lp;\n"
+                  "    char *c = *s.lpp;\n"
+                  "    char *d = &s.in.deep;\n"
+                  "    char *e = s.arr;\n"
+                  "    char *g = &s.arr[1];\n"
+                  "    char *h = &s.ti;\n"
+                  "    char *k = &s.cl;\n"
+                  "    take(&s.l);\n"
+                  "    take(s.lp);\n"
+                  "    char *m;\n"
+                  "    m = s.ip;\n"
+                  "    s.lp = m;\n"
+                  "    s.ip = m;\n"
+                  "    ps->lp = m;\n"
+                  "    s.l = m;\n"
+                  "    return;\n"
+                  "}\n",
+        .errors = 15,
+        .notes = 2,
+    },
+    {
+        .name = "member typedefs in null pointer warnings",
+        .source = "typedef long *LP;\n"
+                  "typedef unsigned U;\n"
+                  "struct S { LP lp; U u; } s, *ps;\n"
+                  "int n;\n"
+                  "void f(void)\n"
+                  "{\n"
+                  "    s.lp = 1-1;\n"
+                  "    ps->lp = 1-1;\n"
+                  "    (s).lp = 1-1;\n"
+                  "    int r = s.u < n;\n"
+                  "    static int z = sizeof(s.u < -1);\n"
+                  "    LP local = 1-1;\n"
+                  "}\n",
+        .options = { "-Wsign-compare" },
+        .warnings = 5,
+    },
+    {
         // A compound literal's type name spells its value's type (#1812, check_input_token_type_spelling): through `&`, a
         // decay, a member, -Wformat's and -Wsign-compare's operands.
         .name = "compound literals' typedefs",

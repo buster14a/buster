@@ -15,7 +15,8 @@
 // to none and then 8 bytes more at a time until the plan succeeds: each run before it must fail for want of room
 // (CHECK_PROGRAM_RESOURCE) with both arenas as they were, among them a run whose room ends before each statement's
 // places; then the plans must be the whole arena's: an asm body each for the first two (#1839), the third refused by name,
-// and a helper for the fourth, whose form x86_semantics.c doesn't cover (rorx).
+// a helper for the fourth, whose form x86_semantics.c doesn't cover (rorx), and an asm body for the fifth, whose named label
+// the names step adds (#2090: its run without room must leave the helpers as they were).
 static void check_test_program_asm_room(CheckTest* test)
 {
     static const char source[] =
@@ -81,8 +82,8 @@ static void check_test_program_asm_room(CheckTest* test)
                                  planned.plans[1].helper == BUSTER_CHECK_NONE && planned.plans[2].reason != NULL &&
                                  strcmp(planned.plans[2].reason, "inline assembly operands of this type in their constraint's registers") == 0 && planned.plans[3].reason == NULL &&
                                  !planned.plans[3].inlined && planned.plans[3].helper != BUSTER_CHECK_NONE && planned.plans[4].reason == NULL &&
-                                 planned.plans[4].helper != BUSTER_CHECK_NONE && helpers.count == 2;
-        snprintf(description, sizeof(description), "asm room, %s: the x87 statements are asm bodies, the __int128 operand is refused by name, rorx and the named label have helpers",
+                                 planned.plans[4].inlined && planned.plans[4].helper == BUSTER_CHECK_NONE && planned.plans[4].label_count == 1 && helpers.count == 1;
+        snprintf(description, sizeof(description), "asm room, %s: the x87 statements are asm bodies, the __int128 operand is refused by name, rorx has a helper, the named label is an asm body",
                  path == 0 ? "scalar" : "vector");
         check_test_expect(test, plans_right, description);
         parse_release(&parser);
@@ -105,7 +106,8 @@ static void check_test_program_asm_room(CheckTest* test)
 // arguments, whose body runs cpuid and stores its four outputs through their addresses, and which touches rbx; rdtsc's; a shift's count
 // in cl), a literal register (`%%rsp`, read), a syntax switch, more records than a row takes, an x87 operand, a form
 // x86_semantics.c doesn't cover (ldmxcsr), an explicit register variable, and a register class narrower than the sixteen
-// (Q's), and a branch to a numeric label (a branch of the body); but a named label, which keeps its helper.
+// (Q's), a branch to a numeric label (a branch of the body), and a named label (#1839: the body's label, at the record
+// after its movl, the template's end).
 static void check_test_program_asm_placement(CheckTest* test)
 {
     static const char source[] =
@@ -182,7 +184,7 @@ static void check_test_program_asm_placement(CheckTest* test)
             const CheckProgramAsm* plan = planned.plans + s;
             const Tier0Operation* row = plan->row;
             const bool placed = s < PLACED;
-            const bool helped = s == NAMED;
+            const bool helped = false;
             bool right = plan->planned && plan->reason == NULL && (row != NULL) == placed && (plan->helper != BUSTER_CHECK_NONE) == helped &&
                          plan->inlined == (!placed && !helped) && (plan->inline_count != 0) == plan->inlined;
             if (right && s == BRANCHED)
@@ -191,6 +193,14 @@ static void check_test_program_asm_placement(CheckTest* test)
                 // its label at the template's end, the first store.
                 right = plan->inline_branch_count == 1 && plan->inline_branches[0] == 1 && plan->inline_targets[0] == 3 &&
                         plan->inline_records[0].form == X86_FORM_TEST_RM32_R32;
+            }
+            if (right && s == NAMED)
+            {
+                // The named label's body: testl, jle to the label and movl, the label at the template's end (record 3),
+                // its spelling the substituted `.Lnamed` and the statement's number.
+                right = plan->label_count == 1 && plan->labels[0].record == 3 && plan->inline_label_records != 0 && plan->inline_label_records[0] == 3 &&
+                        plan->labels[0].spelling.length > 7 && memcmp(plan->labels[0].spelling.pointer, ".Lnamed", 7) == 0 && plan->inline_branch_count == 1 &&
+                        plan->inline_targets[0] == 3;
             }
             if (right && s == PLACED)
             {
@@ -244,8 +254,8 @@ static void check_test_program_asm_placement(CheckTest* test)
                                widened->records[0].immediate == 7;
             snprintf(description, sizeof(description), "asm placement, %s: the rows' roles are the operands', scratch's and stores' as planned", path == 0 ? "scalar" : "vector");
             check_test_expect(test, roles, description);
-            snprintf(description, sizeof(description), "asm placement, %s: the branch's helper, of %u", path == 0 ? "scalar" : "vector", helpers.count);
-            check_test_expect(test, helpers.count == 1, description);
+            snprintf(description, sizeof(description), "asm placement, %s: no helper, of %u (the named label's is an asm body too)", path == 0 ? "scalar" : "vector", helpers.count);
+            check_test_expect(test, helpers.count == 0, description);
         }
         parse_release(&parser);
         check_test_types_close(&types);
@@ -510,6 +520,16 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
         "int tested(int n){int r;__asm__(\"testl %1, %1\\n\\tjle .Lneg%=\\n\\tmovl $5, %0\\n\\tjmp .Lend%=\\n.Lneg%=:\\n\\tmovl $7, %0\\n.Lend%=:\" : \"=r\"(r) : \"r\"(n));"
         "int s=0,k=(n&7)+1;__asm__(\"1:\\n\\taddl $2, %0\\n\\tdecl %1\\n\\tjnz 1b\" : \"+r\"(s), \"+r\"(k));return r*100+s+n;}",
         "asm-local-branches", clang);
+    // Named labels placed in their caller (#1839): a loop back to a %= label, a label of a template of no instructions (a
+    // place in the caller's code), and a global label another template refers to as data, each address within the
+    // caller's code.
+    check_test_program_source(test,
+        "int tested(int n){int r=0,k=(n&7)+1;__asm__(\".Lcount%=:\\n\\tincl %1\\n\\tdecl %0\\n\\tjnz .Lcount%=\" : \"+r\"(k), \"+r\"(r));"
+        "__asm__ volatile(\"buster_place_%=:\" : : : \"memory\");__asm__(\"buster_named_here:\\n\\taddl $3, %0\" : \"+r\"(r));long p,q;"
+        "__asm__(\"leaq buster_named_here(%%rip), %0\" : \"=r\"(p));q=(long)&tested;"
+        "return r*10+(p!=q&&p!=0)+n;}",
+        "asm-named-labels", clang);
+    check_test_program_source(test, "int tested(int n){__asm__(\"lonely:\");return n;}", "asm-label-no-instructions", clang);
     // Callee-saved clobbers inside a loop of live values, and a statement expression's asm under a live value.
     check_test_program_source(test,
         "int tested(int n){long a=n,b=n+1,c=n+2,d=n+3,e=n+4,f=n+5,g=n+6;long r;"
@@ -1214,8 +1234,6 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
                                        "asm-label-twice", true, false, 0, 0, "inline assembly labels another template defines too");
     check_test_program_boundary_reason(test, "int tested(int n){__asm__(\"jmp .Lnowhere\");return n;}",
                                        "asm-local-undefined", true, false, 0, 0, "inline assembly's local labels that no template defines");
-    check_test_program_boundary_reason(test, "int tested(int n){__asm__(\"lonely:\");return n;}",
-                                       "asm-label-no-instructions", true, false, 0, 0, "inline assembly labels in templates of no instructions");
     // A vector in a vector register's constraint where the template has instructions, refers to it, or it is a volatile
     // output (whose load and store clang's code makes), which the helper doesn't place yet.
     static const char* const held[][2] = {
