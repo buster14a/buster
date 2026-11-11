@@ -180,7 +180,7 @@ static __attribute__((unused)) void check_builtin_math_one(TypeTable* table, con
     }
     else if (input->argument_count != count)
     {
-        check_action_diagnose(&output->action, CHECK_DIAG_ARGUMENT_COUNT, 0);
+        check_action_diagnose_count(&output->action, input->argument_count, count, count);
     }
     else if (input->arguments == NULL)
     {

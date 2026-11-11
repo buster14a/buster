@@ -1531,7 +1531,8 @@ static CheckInputReport check_deferred_report(const CheckInputReport* report, co
                         (result.detail & 0xffu) == CHECK_ARGUMENT_EXPRESSION_BINARY;
     const bool typed = (redeclaration && result.detail != CHECK_REDECLARATION_GENERIC) || binary || result.message == CHECK_INPUT_ARRAY_LITERAL_MISMATCH || result.message == CHECK_INPUT_TAG_INCOMPATIBLE;
     result.type = check_deferred_type(part, result.type);
-    result.value = typed ? check_deferred_type(part, (TypeId)result.value) : result.value;
+    // (A value's high half isn't a type: the array literal's spelling token, #1812.)
+    result.value = typed ? (result.value & 0xffffffff00000000ull) | check_deferred_type(part, (TypeId)result.value) : result.value;
     return result;
 }
 

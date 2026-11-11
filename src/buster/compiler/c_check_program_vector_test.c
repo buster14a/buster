@@ -629,8 +629,8 @@ static void check_test_program_vector_refusals(CheckTest* test, const X86Target*
 }
 
 // Accesses in a segment's space (#1447) that the lowering refuses by name, which compiled without the segment before: a
-// vector's element (whose type loses its vector's space), an atomic builtin's object (which its pointer reaches), and an
-// asm statement's register output (stored through its address). Clang's code has %gs or %fs on each.
+// bit of a vector of bool, an atomic builtin's object (which its pointer reaches), and an asm statement's register output
+// (stored through its address). Clang's code has %gs or %fs on each.
 static void check_test_program_segment_refusals(CheckTest* test, const X86Target* target)
 {
     static const struct
@@ -639,12 +639,12 @@ static void check_test_program_segment_refusals(CheckTest* test, const X86Target
         const char* source;
         const char* reason;
     } refused[] = {
-        { "segment-vector-element-read", "typedef int V __attribute__((vector_size(16)));int tested(V __seg_gs*p){return (*p)[1];}",
+        // A vector's element takes its vector's override (check_lower_element_segment; check_test_program_segments runs
+        // those), but a bit of a vector of bool, which no address reaches, and an element of a volatile vector.
+        { "segment-bool-vector-element", "typedef _Bool B __attribute__((ext_vector_type(8)));int tested(B __seg_gs*p){return (*p)[1];}",
           "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
-        { "segment-vector-element-write", "typedef int V __attribute__((vector_size(16)));void tested(V __seg_fs*p,int x){(*p)[1]=x;}",
-          "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
-        { "segment-vector-element-update", "typedef int V __attribute__((vector_size(16)));void tested(V __seg_gs*p){(*p)[2]++;}",
-          "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
+        { "segment-volatile-vector-element", "typedef int V __attribute__((vector_size(16)));int tested(volatile V __seg_fs*p){return (*p)[1];}",
+          "element access through volatile vectors" },
         // An atomic builtin's object in a segment's space takes the override where a direct plan takes the builtin
         // (check_test_program_segments runs those); a generic one by pointer, __sync_lock_release and __atomic_clear,
         // which take another plan, are refused.
@@ -667,14 +667,12 @@ static void check_test_program_segment_refusals(CheckTest* test, const X86Target
         { "segment-asm-read-write-output", "void tested(int __seg_gs*p){__asm__(\"incl %0\":\"+r\"(*p));}",
           "an asm output in a segment's address space (256, 257 or 258: %gs, %fs or %ss) but a memory one" },
         // What the lowering doesn't carry the override through yet (check_lower_segment_carried): an aggregate's copy, a
-        // complex value, a half-precision value, a _BitInt, an _Atomic object, and %ss's space (258).
+        // complex value, a _BitInt, an _Atomic object, and %ss's space (258).
         { "segment-struct-copy", "struct S{long a,b,c;};struct S tested(struct S __seg_fs*p){return *p;}",
           "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
         { "segment-struct-store", "struct S{long a,b,c;};void tested(struct S __seg_fs*p,struct S s){*p=s;}",
           "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
         { "segment-complex", "_Complex double tested(_Complex double __seg_gs*p){return *p;}",
-          "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
-        { "segment-half", "float tested(_Float16 __seg_gs*p){return *p;}",
           "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
         { "segment-bit-int", "int tested(_BitInt(40) __seg_fs*p){return (int)*p;}",
           "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
@@ -758,6 +756,30 @@ static void check_test_program_segments(CheckTest* test, const char* clang)
         "p->y^=n*977;r+=p->y+(p->y=n);"
         "return r+tb.a+tb.b+tb.c+(int)tb.d+tb.e+(int)tp_.y+tp_.x;}",
         "segment-bit-fields", clang);
+    // A vector's elements through the vector's override (check_lower_element_segment), which their own type has lost: read,
+    // assigned, compound-assigned, incremented and decremented, of ints, floats and shorts, at constant and variable indices,
+    // through `(*p)[i]` and `p[0][i]`.
+    check_test_program_source(test,
+        "typedef int v4si __attribute__((vector_size(16)));typedef float v8sf __attribute__((vector_size(32)));"
+        "typedef short v8hi __attribute__((vector_size(16)));"
+        "static _Thread_local v4si tv={9,8,7,6};static _Thread_local v8sf tf={1,2,3,4,5,6,7,8};static _Thread_local v8hi th={1,-2,3,-4,5,-6,7,-8};"
+        "int tested(int n){char*tp=__builtin_thread_pointer();v4si __seg_fs*v=(v4si __seg_fs*)((char*)&tv-tp);"
+        "v8sf __seg_fs*f=(v8sf __seg_fs*)((char*)&tf-tp);v8hi __seg_fs*h=(v8hi __seg_fs*)((char*)&th-tp);"
+        "long r=(*v)[n&3]+(*v)[0];(*v)[(n+1)&3]=n*5;(*v)[2]+=n;(*v)[3]++;r+=--(*v)[1];r+=(*v)[0]--;"
+        "(*f)[n&7]*=1.5f;(*f)[0]=(*f)[7]+n;r+=(long)(*f)[n&7]+(long)(*f)[0];"
+        "(*h)[n&7]-=n;r+=(*h)[n&7]+(*h)[(n*3)&7];v[0][1]^=7;r+=v[0][1];"
+        "return (int)(r+tv[0]+tv[1]+tv[2]+tv[3]+(long)tf[n&7]+th[n&7]);}",
+        "segment-vector-elements", clang);
+    // Half-precision values, whose loads and stores are a U16's (c_check_program_half.c): _Float16's and __bf16's, read,
+    // assigned, compound-assigned, incremented and decremented, through %fs.
+    check_test_program_source(test,
+        "static _Thread_local _Float16 th[4]={1.5f16,2.25f16,-3.0f16,0.5f16};static _Thread_local __bf16 tb[2]={1.0f,2.5f};"
+        "int tested(int n){char*tp=__builtin_thread_pointer();_Float16 __seg_fs*h=(_Float16 __seg_fs*)((char*)th-tp);"
+        "__bf16 __seg_fs*b=(__bf16 __seg_fs*)((char*)tb-tp);"
+        "float r=h[n&3]+(float)*h;h[1]=(_Float16)(n*0.5f);h[2]+=h[1];h[3]*=2;h[0]++;--h[1];r+=h[0]+h[1]+h[2]+h[3];"
+        "b[0]=b[1]+n;b[1]-=1.0f;r+=(float)b[0]+(float)b[1];"
+        "return (int)(4*(r+th[0]+th[1]+th[2]+th[3]+(float)tb[0]+(float)tb[1]));}",
+        "segment-half-precision", clang);
 }
 
 // Initializer validation keeps atomic rvalue identity while storage uses the underlying vector bytes.
@@ -935,8 +957,9 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
           "_Alignas(16) float stream[4];_mm_stream_ps(stream,f);FOLD(stream);return (int)h;}\n"
         },
         // Shuffles of every element size by the baseline's sequences: PSHUFD's and SHUFPD's, SHUFPS's of halves, of pairs
-        // and of three elements and one, unpacks, PSHUFLW's and PSHUFHW's, and with SSSE3 PSHUFB's of any bytes; narrow
-        // results and operands.
+        // and of three elements and one, unpacks, PSHUFLW's and PSHUFHW's, and with SSSE3 PSHUFB's of any bytes, without it
+        // element by element (#1834); narrow results and operands. 32 bytes of bytes and words element by element without
+        // AVX-512 (#1834).
         { "baseline-shuffles",
           "typedef short v8hi __attribute__((vector_size(16)));typedef char v16qi __attribute__((vector_size(16)));"
           "typedef float v2sf __attribute__((vector_size(8)));typedef int v2si __attribute__((vector_size(8)));\n"
@@ -950,12 +973,19 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
           "v4sf u[]={__builtin_shufflevector(f,g,0,4,1,5),__builtin_shufflevector(f,g,6,7,2,3),__builtin_shufflevector(f,f,3,2,1,0),__builtin_shufflevector(f,g,7,0,6,1)};FOLD(u);"
           "v2df k[]={__builtin_shufflevector(d,e,1,2),__builtin_shufflevector(d,e,3,1)};FOLD(k);\n"
           "v8hi m[]={__builtin_shufflevector(w,x,0,8,1,9,2,10,3,11),__builtin_shufflevector(w,x,12,4,13,5,14,6,15,7),__builtin_shufflevector(w,w,3,2,1,0,7,7,4,5),"
-          "__builtin_shufflevector(w,x,11,10,9,8,15,14,13,12),__builtin_shufflevector(w,x,2,3,0,1,6,7,4,5)\n"
-          "#ifdef __SSSE3__\n,__builtin_shufflevector(w,x,7,8,1,15,4,4,9,0)\n#endif\n};FOLD(m);\n"
+          "__builtin_shufflevector(w,x,11,10,9,8,15,14,13,12),__builtin_shufflevector(w,x,2,3,0,1,6,7,4,5),__builtin_shufflevector(w,x,7,8,1,15,4,4,9,0),"
+          "__builtin_shufflevector(w,x,0,0,0,0,0,0,0,0),__builtin_shufflevector(w,x,1,2,3,4,5,6,7,8)};FOLD(m);\n"
           "v16qi o[]={__builtin_shufflevector(y,z,0,16,1,17,2,18,3,19,4,20,5,21,6,22,7,23),__builtin_shufflevector(z,y,8,24,9,25,10,26,11,27,12,28,13,29,14,30,15,31),"
-          "__builtin_shufflevector(y,z,2,3,0,1,6,7,4,5,10,11,8,9,14,15,12,13)\n"
-          "#ifdef __SSSE3__\n,__builtin_shufflevector(y,z,15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,0),__builtin_shufflevector(y,z,0,17,2,19,31,5,6,7,16,9,3,3,12,30,14,1)\n"
-          "#endif\n};FOLD(o);\n"
+          "__builtin_shufflevector(y,z,2,3,0,1,6,7,4,5,10,11,8,9,14,15,12,13),"
+          "__builtin_shufflevector(y,z,15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,0),__builtin_shufflevector(y,z,0,17,2,19,31,5,6,7,16,9,3,3,12,30,14,1),"
+          "__builtin_shufflevector(y,z,1,0,3,2,5,4,7,6,9,8,11,10,13,12,15,14),__builtin_shufflevector(y,z,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5,5)};FOLD(o);\n"
+          "typedef char v32qi __attribute__((vector_size(32),aligned(16)));typedef short v16hi __attribute__((vector_size(32),aligned(16)));"
+          "v32qi y2=__builtin_shufflevector(y,z,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31),z2=y2+(char)n;"
+          "v16hi w2=(v16hi)y2,x2=(v16hi)z2;"
+          "v32qi o2[]={__builtin_shufflevector(y2,z2,31,30,29,28,27,26,25,24,23,22,21,20,19,18,17,16,15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,0),"
+          "__builtin_shufflevector(y2,z2,0,33,2,35,63,5,6,7,48,9,3,3,12,62,14,1,16,40,18,19,20,21,22,23,24,25,26,27,28,29,30,32)};FOLD(o2);"
+          "v16hi m2[]={__builtin_shufflevector(w2,x2,15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,0),__builtin_shufflevector(w2,x2,0,16,1,17,8,24,9,25,31,30,2,2,3,7,4,5)};FOLD(m2);"
+          "v16qi o3=__builtin_shufflevector(y2,z2,31,0,30,1,29,2,28,3,63,32,62,33,61,34,60,35);FOLD(o3);\n"
           "v2sf p=__builtin_shufflevector(f,f,2,3);v4sf pp=__builtin_shufflevector(p,(v2sf){1.0f,2.0f},0,2,1,3);FOLD(p);FOLD(pp);"
           "v2si i2=__builtin_shufflevector((v2si){n,7},(v2si){-3,n*5},3,0);FOLD(i2);return (int)h;}\n"
         },
@@ -1063,10 +1093,62 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
           "F16 e9[]={__builtin_elementwise_sqrt(fa*fa)};FOLD(e9);D8 e10[]={__builtin_elementwise_sqrt(da*da)};FOLD(e10);\n"
           "return (int)h;}\n"
         },
+        // Vectors' floating elementwise builtins without AVX-512 (#1834), of 8, 16, 32 and 64 bytes of floats and 16, 32
+        // and 64 of doubles: SSE4.1's ROUNDPS and ROUNDPD (the C library's ceilf ... round an element without them), and
+        // FMA's VFMADD213PS and PD (fmaf and fma an element without it); canonicalize, copysign, maxnum and minnum by SSE's
+        // forms, and the IEEE maxima and minima, with AVX's blends or, without AVX, a chain of rows; of NaNs (their
+        // payloads and signs), signed zeros, infinities, a denormal, halves and values past 2^23 and 2^52.
+        { "baseline-vector-floating-builtins",
+          "typedef float v2sf __attribute__((vector_size(8)));typedef double v4df __attribute__((vector_size(32),aligned(16)));\n"
+          "#define U(w) do{__typeof__(w) v=w,r_[]={__builtin_elementwise_ceil(v),__builtin_elementwise_floor(v),__builtin_elementwise_trunc(v),"
+          "__builtin_elementwise_rint(v),__builtin_elementwise_nearbyint(v),__builtin_elementwise_roundeven(v),__builtin_elementwise_round(v),"
+          "__builtin_elementwise_canonicalize(v)};FOLD(r_);}while(0)\n"
+          "#define B(w,z) do{__typeof__(w) a=w,b=z,r_[]={__builtin_elementwise_copysign(a,b),__builtin_elementwise_maxnum(a,b),__builtin_elementwise_minnum(a,b),"
+          "__builtin_elementwise_maximum(a,b),__builtin_elementwise_minimum(a,b),__builtin_elementwise_maximumnum(a,b),__builtin_elementwise_minimumnum(a,b),"
+          "__builtin_elementwise_fma(a,b,a)};FOLD(r_);}while(0)\n"
+          "union F{unsigned u[16];v16sf v;v8sf h[2];v4sf q[4];v2sf e[8];};union D{unsigned long long u[8];v8df v;v4df h[2];v2df q[4];};\n"
+          "int tested(int n){unsigned h=2166136261u;\n"
+          "static const unsigned fb[]={0x7fc01234u,0xffc05678u,0x80000000u,0,0x3f800000u,0xbf800000u,0x7f800000u,0xff800000u,1,0x40490fdbu,0x3f000000u,"
+          "0xbf000000u,0x3fc00000u,0xc0200000u,0x3effffffu,0x4b7fffffu,0x7f812345u};\n"
+          "static const unsigned long long db[]={0x7ff8000000001234ull,0xfff8000000005678ull,0x8000000000000000ull,0,0x3ff0000000000000ull,"
+          "0xbff0000000000000ull,0x7ff0000000000000ull,0xfff0000000000000ull,1,0x400921fb54442d18ull,0x3fe0000000000000ull,0xbfe0000000000000ull,"
+          "0x3ff8000000000000ull,0xc004000000000000ull,0x3fdfffffffffffffull,0x432fffffffffffffull,0x7ff0000000012345ull};\n"
+          "for(unsigned i=0;i<17;i++){union F x,y;union D p,q;\n"
+          "for(unsigned j=0;j<16;j++){x.u[j]=fb[(i+j+(unsigned)n)%17];y.u[j]=fb[(i*3+j*5+(unsigned)n)%17];}\n"
+          "for(unsigned j=0;j<8;j++){p.u[j]=db[(i+j+(unsigned)n)%17];q.u[j]=db[(i*3+j*5+(unsigned)n)%17];}\n"
+          "U(x.v);U(x.h[0]);U(x.q[1]);U(x.e[2]);U(p.v);U(p.h[1]);U(p.q[0]);\n"
+          "B(x.v,y.v);B(x.h[1],y.h[1]);B(x.q[0],y.q[0]);B(x.e[3],y.e[3]);B(p.v,q.v);B(p.h[0],q.h[0]);B(p.q[1],q.q[1]);}\n"
+          "return (int)h;}\n"
+        },
+        // Reductions without AVX-512 (#1834): every integer one of 8- to 64-bit elements of 4 to 64 bytes, folded element
+        // by element; and the floating maximum, minimum, max, min and associative sums of 8 to 64 bytes of floats and 16 to
+        // 64 of doubles in clang's halving order (pieces of the registers' bytes paired first), of NaNs (their payloads and
+        // signs), signed zeros, infinities and values whose sums round by their order.
+        { "baseline-reductions",
+          "typedef float v2sf __attribute__((vector_size(8)));typedef double v4df __attribute__((vector_size(32),aligned(16)));\n"
+          "#define RI(T,E,W) do{typedef E V __attribute__((vector_size(W),aligned(16)));V v;fill(&v,W,n*7+W);"
+          "E r_[]={__builtin_reduce_add(v),__builtin_reduce_mul(v),__builtin_reduce_and(v),__builtin_reduce_or(v),__builtin_reduce_xor(v),__builtin_reduce_max(v),__builtin_reduce_min(v)};FOLD(r_);}while(0)\n"
+          "#define RIS(E) RI(T,E,4);RI(T,E,8);RI(T,E,16);RI(T,E,32);RI(T,E,64)\n"
+          "#define RF(w) do{__typeof__(w) v=w;"
+          "__typeof__(v[0]) r_[]={__builtin_reduce_maximum(v),__builtin_reduce_minimum(v),__builtin_reduce_max(v),__builtin_reduce_min(v),__builtin_reduce_assoc_fadd(v),__builtin_reduce_assoc_fadd(v,(__typeof__(v[0]))n)};FOLD(r_);}while(0)\n"
+          "union F{unsigned u[16];v16sf v;v8sf h[2];v4sf q[4];v2sf e[8];};union D{unsigned long long u[8];v8df v;v4df h[2];v2df q[4];};\n"
+          "int tested(int n){unsigned h=2166136261u;\n"
+          "RIS(signed char);RIS(unsigned char);RIS(short);RIS(unsigned short);RI(T,int,8);RI(T,int,16);RI(T,int,32);RI(T,int,64);RI(T,unsigned,8);"
+          "RI(T,unsigned,16);RI(T,unsigned,32);RI(T,unsigned,64);RI(T,long long,16);RI(T,long long,32);RI(T,long long,64);RI(T,unsigned long long,16);"
+          "RI(T,unsigned long long,32);RI(T,unsigned long long,64);\n"
+          "static const unsigned fb[]={0x7fc01234u,0xffc05678u,0x80000000u,0,0x3f800000u,0xbf800000u,0x7f800000u,0xff800000u,1,0x40490fdbu,0x3f000000u,0xbf000000u,0x3fc00000u,0xc0200000u,0x3effffffu,0x4b7fffffu,0x7f812345u,0x3dcccccdu,0x4cbebc20u,0xb3d6bf95u};\n"
+          "static const unsigned long long db[]={0x7ff8000000001234ull,0xfff8000000005678ull,0x8000000000000000ull,0,0x3ff0000000000000ull,0xbff0000000000000ull,0x7ff0000000000000ull,0xfff0000000000000ull,1,0x400921fb54442d18ull,0x3fe0000000000000ull,0xbfe0000000000000ull,0x3ff8000000000000ull,0xc004000000000000ull,0x3fdfffffffffffffull,0x432fffffffffffffull,0x7ff0000000012345ull,0x3fb999999999999aull,0x4415af1d78b58c40ull,0xbcb0000000000000ull};\n"
+          "for(unsigned i=0;i<60;i++){union F x;union D p;unsigned k=i%3==0?20:4;\n"
+          "for(unsigned j=0;j<16;j++)x.u[j]=fb[(i*7+j*(i%5+1)+(unsigned)n)%k+(k==4?16:0)];\n"
+          "for(unsigned j=0;j<8;j++)p.u[j]=db[(i*7+j*(i%5+1)+(unsigned)n)%k+(k==4?16:0)];\n"
+          "RF(x.v);RF(x.h[1]);RF(x.q[2]);RF(x.e[1]);RF(p.v);RF(p.h[0]);RF(p.q[1]);}\n"
+          "return (int)h;}\n"
+        },
         // Scalars' elementwise builtins without AVX-512F (#1834): the C library's ceilf ... roundf, fmaf and fma without
         // SSE4.1 and FMA, and ldexpf and ldexp; SSE4.1's ROUNDSS and ROUNDSD (round's of the value plus the largest value
         // below 0.5 of its sign) and FMA's VFMADD213SS and SD where the target has them; halves, values near them and past
         // 2^23 and 2^52. copysign, canonicalize, maxnum and minnum by SSE's forms, and with AVX the IEEE maxima and minima,
+        // and the fused multiply-add (b's NaN the result's of two, as clang's VFMADD213SS has b's register its destination),
         // of every pair of NaNs (their payloads), signed zeros, infinities, a denormal and others.
         { "baseline-scalar-builtins",
           "#define R(v) do{__typeof__(v) r_[]={__builtin_elementwise_ceil(v),__builtin_elementwise_floor(v),__builtin_elementwise_trunc(v),"
@@ -1077,7 +1159,7 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
           "for(int i=0;i<12;i++){float x=fs[i]*(float)(n+1);double y=ds[i]*(double)(n+1);R(x);R(y);"
           "float f=__builtin_elementwise_fma(x,1.0f/3.0f,(float)n);double g=__builtin_elementwise_fma(y,1.0/3.0,-y);FOLD(f);FOLD(g);}\n"
           "#define B(x,y) do{__typeof__(x) r_[]={__builtin_elementwise_copysign(x,y),__builtin_elementwise_maxnum(x,y),__builtin_elementwise_minnum(x,y),"
-          "__builtin_elementwise_canonicalize(x)IEEE(x,y)};FOLD(r_);}while(0)\n"
+          "__builtin_elementwise_canonicalize(x),__builtin_elementwise_fma(x,y,y)IEEE(x,y)};FOLD(r_);}while(0)\n"
           "#ifdef __AVX__\n"
           "#define IEEE(x,y) ,__builtin_elementwise_maximum(x,y),__builtin_elementwise_minimum(x,y),__builtin_elementwise_maximumnum(x,y),__builtin_elementwise_minimumnum(x,y)\n"
           "#else\n"
@@ -1210,28 +1292,8 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
                                                "baseline-wide-integer-vector-division", true, false, 0, 0, "vector division of integers", &target);
             check_test_program_boundary_target(test, "typedef int V __attribute__((vector_size(16)));V tested(V a,V b){return a/b;}",
                                                "baseline-integer-vector-division", true, false, 0, 0, "vector division of integers", &target);
-            // Without AVX-512, what the baseline's rows refuse by name (#775), at each level that hasn't the instructions.
-            static const struct
-            {
-                uint32_t levels;
-                const char* source;
-                const char* reason;
-            } refused[] = {
-                { 1, "typedef char V __attribute__((vector_size(16)));V tested(V a,V b){return __builtin_shufflevector(a,b,15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,0);}",
-                  "vector shuffles of 8-bit elements without SSSE3" },
-                { 1, "typedef short V __attribute__((vector_size(16)));V tested(V a,V b){return __builtin_shufflevector(a,b,7,8,1,15,4,4,9,0);}",
-                  "vector shuffles of 16-bit elements without SSSE3" },
-                { 4, "typedef char V __attribute__((vector_size(32)));V tested(V a,V b){return __builtin_shufflevector(a,b,31,30,29,28,27,26,25,24,23,22,21,20,19,"
-                     "18,17,16,15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,0);}",
-                  "vector shuffles of 32-byte vectors of 8- and 16-bit elements without AVX-512" },
-            };
-            for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(refused); i += 1)
-            {
-                if ((refused[i].levels >> level & 1) != 0)
-                {
-                    check_test_program_boundary_target(test, refused[i].source, "baseline-refusal", true, false, 0, 0, refused[i].reason, &target);
-                }
-            }
+            // The builtins the baseline's rows still refuse by name (#775) are c_check_program_vector_builtins_test.c's
+            // refusals; the operators' and shuffles' sequences take every one (#1834).
         }
     }
     check_test_program_build_release();
@@ -1242,7 +1304,10 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
         "typedef float F __attribute__((vector_size(32)));typedef int I __attribute__((vector_size(32)));"
         "__attribute__((target(\"avx,no-avx2\"))) int tested(int n){F f,g;unsigned h=2166136261u;fillf((float*)&f,8,n);fillf((float*)&g,8,n+1);g+=1.0f;"
         "F v[]={f+g,f-g,f*g,f/g,-f,f+2.5f};FOLD(v);I c[]={f<g,f>=g,f==g,f!=g};FOLD(c);"
-        "I a=(I)f,b=(I)g;I k[]={a&b,a|b,a^b};FOLD(k);return (int)h;}";
+        "I a=(I)f,b=(I)g;I k[]={a&b,a|b,a^b};FOLD(k);"
+        "F s[]={__builtin_shufflevector(f,g,7,6,5,4,3,2,1,0),__builtin_shufflevector(f,g,0,8,1,9,12,13,2,15)};FOLD(s);"
+        "typedef char C __attribute__((vector_size(32)));C x=(C)a,y=(C)b;"
+        "C t[]={__builtin_shufflevector(x,y,31,30,29,28,27,26,25,24,23,22,21,20,19,18,17,16,15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,0)};FOLD(t);return (int)h;}";
     char source[4096];
     snprintf(source, sizeof(source), "%s%s", check_test_vector_types, avx);
     check_test_program_source_native_limits(test, source, "baseline-avx-without-avx2", clang, false, -1, 0, &baseline,
