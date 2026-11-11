@@ -78,7 +78,15 @@ one created, the object `--lanes 1`'s; and by default none for the program of
 three functions' object and executable, too small to pay for a second lane
 (#1444: one source's session starts on demand); each with `--time-stages`'
 lanes asked for and run on (3 and 3, the cores' by default, 4 and 1, and 1 and
-1 for the small object); and
+1 for the small object). Then the exit helper (#1444, `lane_exit_helper_start`):
+the small program's object and `-E`, a `#warning`'s `-fsyntax-only`, a failing
+object and the large program's object, each by `BUSTER_EXIT_HELPER=0`, `=1` and
+by default, the test a subreaper for each run: the same status, output, errors
+and object each way; a helper by `=1` where the driver's lanes created no thread
+(but in a sanitizer build), by default where PID 1 reaps orphans too, none
+otherwise, each ended within 10 s of the driver; and the small object by `=1`
+held 2 s after its helper's start (`BUSTER_TEST_EXIT_HELPER_PAUSE`), whose
+streams must end while it still runs; then
 commands in one process, on a session of 4 lanes: a failing command, objects
 on 4 lanes and on 2 by `--worker-budget 2`, a `-fsyntax-only`, and two
 sources' `-fsyntax-only` by 3 lanes and by 1, three times, every lane calling

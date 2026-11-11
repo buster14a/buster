@@ -2106,6 +2106,17 @@ static __attribute__((unused)) uint32_t lane_core_count(void);
 // The session the calling thread is a lane of, or 0. A child forked from a lane of a session forgets it here, and runs as
 // one lane: its other lanes don't exist in the child.
 static __attribute__((unused)) LaneSession* lane_session_current(void);
+// A terminal command's exit (#1444), called last before the process exits, by a process that created no thread
+// (LaneProcess.threads_created): the C library's streams flushed and every descriptor closed, it starts a helper, a
+// process that shares the address space and holds nothing else, which ends as soon as the caller has, so that the
+// caller's exit leaves the address space's teardown to it rather than run it before its parent's wait returns. By
+// default only where orphans are reaped (lane_exit_reaped); BUSTER_EXIT_HELPER=1 starts it wherever it can, =0 never.
+// Never in a sanitizer build. What the caller writes after it reaches no descriptor it had.
+static __attribute__((unused)) void lane_exit_helper_start(void);
+// Whether this process's PID namespace reaps orphans, by its PID 1, which takes them where no subreaper does first:
+// whether it blocks, ignores or catches SIGCHLD (/proc/1/stat), as an init that waits does (systemd's signalfd, tini's
+// sigwait, a shell's handler), or the kernel does for it (ignored).
+static __attribute__((unused)) bool lane_exit_reaped(void);
 
 // A command's flow of rounds (#905), which every lane of a session's group runs: lane 0 runs the command alone from
 // lane_flow_begin, and each of its wide parts is a round, which lane 0 announces with its kind (the command's own,
@@ -2991,5 +3002,158 @@ static void lane_flow_end(LaneFlow* flow)
     {
         lane_restore(group);
         lane_park_broadcast(0, 0);
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// A terminal command's exit (#1444)
+//
+// A process tears its address space down in its exit (exit_mmap) before its parent's wait4 returns, unless another task
+// still holds it: on the 9700X 90 µs of a one-line -c's 1.1 ms, 130 µs of a #include <stdio.h> file's. Linux 6.18 leaves
+// it to a kworker when the process has 6 threads or more (measured, not documented), which a command whose session
+// started its lanes has, but not one that runs on lane 0 alone. lane_exit_helper_start gives such a process's teardown to
+// a helper: a process (CLONE_VM without CLONE_THREAD) that shares the address space and nothing else, started as the
+// command exits so that only a process that would tear down in its exit pays for its start. The helper ends with the
+// caller (PR_SET_PDEATHSIG's SIGKILL, or at once if the caller has already gone), and its exit tears the address space
+// down while the caller's parent goes on. Its CPU time moves rather than disappears: it is the helper's, an orphan's
+// that the nearest subreaper or init reaps, outside the caller's resource use.
+//
+// The caller flushes the C library's streams and closes every descriptor first, so that the helper holds none: a
+// reader of the caller's output, or a jobserver, sees its end as the caller exits, not as the helper does. The helper
+// runs on a stack of its own, its signal handlers cleared (CLONE_CLEAR_SIGHAND) and every signal blocked, and makes only
+// raw system calls: the C library's state, the caller's stack and its heap are the caller's. A kernel without clone3,
+// CLONE_CLEAR_SIGHAND or close_range leaves the caller to exit as before.
+//
+// An orphan stays a zombie, a process ID, until its new parent waits for it: a PID 1 that never does (a container's or
+// a virtual machine's agent run as init) would keep one per compile, and a build of tens of thousands of compiles would
+// run out of process IDs. So by default the helper starts only where PID 1 handles SIGCHLD (lane_exit_reaped): about
+// 3 µs, a read of /proc/1/stat. Without a helper, everything happens as before it.
+
+// clone3's arguments, its first version (CLONE_ARGS_SIZE_VER0), and the flags the helper takes: CLONE_VM and
+// CLONE_CLEAR_SIGHAND (Linux 5.5), no exit signal.
+typedef struct LaneExitCloneArguments LaneExitCloneArguments;
+struct LaneExitCloneArguments
+{
+    uint64_t flags;
+    uint64_t pidfd;
+    uint64_t child_tid;
+    uint64_t parent_tid;
+    uint64_t exit_signal;
+    uint64_t stack;
+    uint64_t stack_size;
+    uint64_t tls;
+};
+#define BUSTER_LANE_EXIT_CLONE_VM UINT64_C(0x100)
+#define BUSTER_LANE_EXIT_CLONE_CLEAR_SIGHAND (UINT64_C(1) << 32)
+#define BUSTER_LANE_EXIT_SYS_CLONE3 435
+#define BUSTER_LANE_EXIT_SYS_CLOSE_RANGE 436
+
+// The helper's stack, which only it touches, and its caller's process ID, which the caller writes before it starts it.
+static _Alignas(64) uint8_t lane_exit_stack[4096];
+static pid_t lane_exit_caller;
+
+// A raw system call of up to four arguments, the helper's only way into the kernel.
+static __attribute__((unused)) long lane_exit_syscall(long number, long first, long second, long third, long fourth)
+{
+    long result = number;
+    register long fourth_register __asm__("r10") = fourth;
+    __asm__ volatile("syscall" : "+a"(result) : "D"(first), "S"(second), "d"(third), "r"(fourth_register) : "rcx", "r11", "memory");
+    return result;
+}
+
+// The helper: every signal blocked, it ends with its caller, by the SIGKILL PR_SET_PDEATHSIG sends as the caller exits,
+// or at once where the caller had gone before the request took (its parent no longer the caller).
+static __attribute__((noreturn, unused)) void lane_exit_helper_main(void)
+{
+    const uint64_t blocked = UINT64_MAX;
+    lane_exit_syscall(SYS_rt_sigprocmask, SIG_SETMASK, (long)&blocked, 0, sizeof(blocked));
+    lane_exit_syscall(SYS_prctl, PR_SET_PDEATHSIG, SIGKILL, 0, 0);
+    while (lane_exit_syscall(SYS_getppid, 0, 0, 0, 0) == lane_exit_caller)
+    {
+        lane_exit_syscall(SYS_pause, 0, 0, 0, 0);
+    }
+    while (true)
+    {
+        lane_exit_syscall(SYS_exit, 0, 0, 0, 0);
+    }
+}
+
+// clone3 of `arguments`: in the caller, the helper's process ID or a negative error; the helper starts in `entry`, on the
+// arguments' stack, which it never returns from.
+static __attribute__((unused)) long lane_exit_clone(const LaneExitCloneArguments* arguments, void (*entry)(void))
+{
+    long result = BUSTER_LANE_EXIT_SYS_CLONE3;
+    __asm__ volatile("syscall\n\t"
+                     "testq %%rax, %%rax\n\t"
+                     "jnz 1f\n\t"
+                     "callq *%%rdx\n\t"
+                     "ud2\n"
+                     "1:"
+                     : "+a"(result)
+                     : "D"(arguments), "S"(sizeof(*arguments)), "d"(entry)
+                     : "rcx", "r11", "memory");
+    return result;
+}
+
+// /proc/1/stat's fields 32 to 34, the signals PID 1 blocks, ignores and catches, in decimal, after its command's
+// parenthesis (which may hold spaces) and its state (field 3, a letter).
+static bool lane_exit_reaped(void)
+{
+    char text[1024];
+    const int fd = open("/proc/1/stat", O_RDONLY | O_CLOEXEC);
+    const ssize_t length = fd >= 0 ? read(fd, text, sizeof(text) - 1) : -1;
+    if (fd >= 0)
+    {
+        close(fd);
+    }
+    text[length > 0 ? length : 0] = 0;
+    const char* parenthesis = length > 0 ? strrchr(text, ')') : 0;
+    const char* at = parenthesis != 0 ? parenthesis + 1 : 0;
+    uint64_t handled = 0;
+    uint32_t parsed = 0;
+    // Each field from 3 on follows one space: past a number's digits, or for the state, at the next space.
+    for (uint32_t field = 3; at != 0 && *at == ' ' && field <= 34; field += 1)
+    {
+        at += 1;
+        char* after = 0;
+        const unsigned long long value = strtoull(at, &after, 10);
+        const bool number = after != at;
+        handled |= field >= 32 && number ? (uint64_t)value : 0;
+        parsed += field >= 32 && number ? 1 : 0;
+        at = number ? after : strchr(at, ' ');
+    }
+    return parsed == 3 && (handled & (UINT64_C(1) << (SIGCHLD - 1))) != 0;
+}
+
+static void lane_exit_helper_start(void)
+{
+    const char* setting = getenv("BUSTER_EXIT_HELPER");
+    const bool forced = setting != 0 && strcmp(setting, "1") == 0;
+    const bool refused = setting != 0 && strcmp(setting, "0") == 0;
+    const bool wanted = !BUSTER_SANITIZER_RESOURCES && __atomic_load_n(&lane_process.threads_created, __ATOMIC_RELAXED) == 0 && !refused &&
+                        (forced || lane_exit_reaped());
+    if (wanted)
+    {
+        fflush(0);
+        const bool closed = syscall(BUSTER_LANE_EXIT_SYS_CLOSE_RANGE, 0u, ~0u, 0u) == 0;
+        lane_exit_caller = getpid();
+        const LaneExitCloneArguments arguments = {
+            .flags = BUSTER_LANE_EXIT_CLONE_VM | BUSTER_LANE_EXIT_CLONE_CLEAR_SIGHAND,
+            .stack = (uint64_t)(uintptr_t)lane_exit_stack,
+            .stack_size = sizeof(lane_exit_stack),
+        };
+        const long helper = closed ? lane_exit_clone(&arguments, lane_exit_helper_main) : -1;
+        // A test's hook (test-check-lanes): the caller waits this many milliseconds after the helper's start, so that a
+        // reader of its output can see that output end while both still run.
+        const char* pause = helper > 0 ? getenv("BUSTER_TEST_EXIT_HELPER_PAUSE") : 0;
+        const long milliseconds = pause != 0 ? strtol(pause, 0, 10) : 0;
+        if (milliseconds > 0)
+        {
+            const struct timespec wait = {
+                .tv_sec = milliseconds / 1000,
+                .tv_nsec = (milliseconds % 1000) * 1000000,
+            };
+            nanosleep(&wait, 0);
+        }
     }
 }

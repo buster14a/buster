@@ -72,6 +72,12 @@
 //   lane, writing --lanes 1's object; and none by default for the program of three functions' object and executable,
 //   too small for a second lane to pay. --time-stages reports the lanes asked for and those run on: 3 and 3 for --lanes
 //   3, the cores' for the default, 4 and 1 for that failure, and 1 and 1 for the small program's object.
+// - The exit helper (#1444, lane_exit_helper_start): the small program's object and -E, a #warning's -fsyntax-only, a
+//   failing object and the 600 functions' object, each by BUSTER_EXIT_HELPER=0, =1 and by default, this process a
+//   subreaper for each run: the same status, output, errors and object each way; one helper by =1 where the driver's
+//   lanes created no thread (none in a sanitizer build), by default where PID 1 reaps orphans too (lane_exit_reaped),
+//   none otherwise, each ended within BUSTER_CHECK_LANES_EXIT_SECONDS of the driver; and the small object by =1 with
+//   the driver held after its helper's start (BUSTER_TEST_EXIT_HELPER_PAUSE), whose streams end while it still runs.
 // - A growing team (#673's tail). The growth gate alone (check_program_emit_grow), under a jobserver pipe of 7 tokens:
 //   parts left of one token fewer than pay for a guardian don't grow a team of 1 of 8 lanes, and the least that pays
 //   grows it by 7; --lanes N grows it whatever they pay; with every part lowered, their code's share of the tokens
@@ -2601,6 +2607,288 @@ static void check_lanes_test_session_threads(CheckLanesTestTally* tally, const c
     free(environment);
 }
 
+// The exit helper's checks (#1444, lane_exit_helper_start): how long a run's helpers may take to end once the driver
+// has, and how much of each stream a run keeps.
+#define BUSTER_CHECK_LANES_EXIT_SECONDS 10
+#define BUSTER_CHECK_LANES_EXIT_STREAM (UINT64_C(1) << 20)
+
+// One run of the driver for the exit helper's checks: its status, its standard output and error, the threads its lanes
+// started (BUSTER_TEST_THREADS), the other processes that became this process's children through it (the helpers, this
+// process being a subreaper for the run) and how they ended, and whether both streams ended while the driver still ran.
+typedef struct CheckLanesExitRun CheckLanesExitRun;
+struct CheckLanesExitRun
+{
+    int status;
+    char output[BUSTER_CHECK_LANES_EXIT_STREAM];
+    uint64_t output_length;
+    char errors[BUSTER_CHECK_LANES_EXIT_STREAM];
+    uint64_t errors_length;
+    char threads[32];
+    uint32_t helpers;
+    uint32_t helpers_ended;
+    bool helpers_timed_out;
+    bool streams_ended_first;
+};
+
+// Reads what `fd` (nonblocking) has into `buffer` past *length, up to its room: false once the stream has ended.
+static bool check_lanes_test_exit_read(int fd, char* buffer, uint64_t* length)
+{
+    char scratch[4096];
+    const uint64_t room = BUSTER_CHECK_LANES_EXIT_STREAM - *length;
+    const ssize_t got = read(fd, room != 0 ? buffer + *length : scratch, room != 0 && room < sizeof(scratch) ? room : sizeof(scratch));
+    *length += got > 0 && room != 0 ? (uint64_t)got : 0;
+    return got != 0;
+}
+
+// Runs `arguments` (the driver's command line, its executable first) with this process's environment but for
+// BUSTER_EXIT_HELPER, BUSTER_TEST_EXIT_HELPER_PAUSE and BUSTER_TEST_THREADS, and `helper` and `pause` set when nonnull,
+// the thread count written to `threads_path`; its streams read until both end, then the driver waited for, then, this
+// process a subreaper for the run, every process that became its child meanwhile, up to BUSTER_CHECK_LANES_EXIT_SECONDS.
+static void check_lanes_test_exit_run(CheckLanesExitRun* run, char* const* arguments, const char* helper, const char* pause, const char* threads_path)
+{
+    run->status = -1;
+    run->output_length = 0;
+    run->errors_length = 0;
+    run->threads[0] = 0;
+    run->helpers = 0;
+    run->helpers_ended = 0;
+    run->helpers_timed_out = false;
+    run->streams_ended_first = false;
+    uint64_t inherited = 0;
+    for (char** entry = environ; entry != NULL && *entry != NULL; entry += 1)
+    {
+        inherited += 1;
+    }
+    char helper_entry[64];
+    char pause_entry[64];
+    char threads_entry[PATH_MAX + 32];
+    snprintf(helper_entry, sizeof(helper_entry), "BUSTER_EXIT_HELPER=%s", helper != NULL ? helper : "");
+    snprintf(pause_entry, sizeof(pause_entry), "BUSTER_TEST_EXIT_HELPER_PAUSE=%s", pause != NULL ? pause : "");
+    snprintf(threads_entry, sizeof(threads_entry), "BUSTER_TEST_THREADS=%s", threads_path);
+    char** environment = calloc(inherited + 4, sizeof(char*));
+    uint64_t used = 0;
+    for (uint64_t i = 0; environment != NULL && i < inherited; i += 1)
+    {
+        if (strncmp(environ[i], "BUSTER_EXIT_HELPER=", 19) != 0 && strncmp(environ[i], "BUSTER_TEST_EXIT_HELPER_PAUSE=", 30) != 0 &&
+            strncmp(environ[i], "BUSTER_TEST_THREADS=", 20) != 0)
+        {
+            environment[used] = environ[i];
+            used += 1;
+        }
+    }
+    if (environment != NULL)
+    {
+        environment[used] = threads_entry;
+        used += 1;
+        environment[used] = helper != NULL ? helper_entry : NULL;
+        used += helper != NULL ? 1 : 0;
+        environment[used] = pause != NULL ? pause_entry : NULL;
+    }
+    unlink(threads_path);
+    int output_pipe[2] = { -1, -1 };
+    int error_pipe[2] = { -1, -1 };
+    bool piped = environment != NULL && pipe(output_pipe) == 0 && pipe(error_pipe) == 0;
+    // Close-on-exec, so that the driver has only the write ends its standard streams are made of.
+    const int all[4] = { output_pipe[0], output_pipe[1], error_pipe[0], error_pipe[1] };
+    for (uint32_t i = 0; piped && i < 4; i += 1)
+    {
+        piped = fcntl(all[i], F_SETFD, FD_CLOEXEC) == 0;
+    }
+    const bool reaping = piped && prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) == 0;
+    posix_spawn_file_actions_t actions;
+    const bool acted = reaping && posix_spawn_file_actions_init(&actions) == 0;
+    pid_t child = -1;
+    const bool spawned = acted && posix_spawn_file_actions_adddup2(&actions, output_pipe[1], 1) == 0 &&
+                         posix_spawn_file_actions_adddup2(&actions, error_pipe[1], 2) == 0 &&
+                         posix_spawn(&child, arguments[0], &actions, 0, arguments, environment) == 0;
+    if (acted)
+    {
+        posix_spawn_file_actions_destroy(&actions);
+    }
+    // The write ends are the driver's alone.
+    const int ends[2] = { output_pipe[1], error_pipe[1] };
+    for (uint32_t i = 0; i < 2; i += 1)
+    {
+        if (ends[i] >= 0)
+        {
+            close(ends[i]);
+        }
+    }
+    const struct timespec pause_step = {
+        .tv_sec = 0,
+        .tv_nsec = 1000000,
+    };
+    if (spawned)
+    {
+        fcntl(output_pipe[0], F_SETFL, O_NONBLOCK);
+        fcntl(error_pipe[0], F_SETFL, O_NONBLOCK);
+        bool output_open = true;
+        bool errors_open = true;
+        pid_t waited = 0;
+        int status = 0;
+        // Both streams to their ends, for at most a minute; then, as they end, whether the driver still runs.
+        for (uint64_t milliseconds = 0; (output_open || errors_open) && milliseconds < 60000; milliseconds += 1)
+        {
+            output_open = output_open && check_lanes_test_exit_read(output_pipe[0], run->output, &run->output_length);
+            errors_open = errors_open && check_lanes_test_exit_read(error_pipe[0], run->errors, &run->errors_length);
+            if (output_open || errors_open)
+            {
+                nanosleep(&pause_step, 0);
+            }
+        }
+        waited = waitpid(child, &status, WNOHANG);
+        run->streams_ended_first = !output_open && !errors_open && waited == 0;
+        if (waited == 0)
+        {
+            waited = waitpid(child, &status, 0);
+        }
+        run->status = waited == child && WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+        // The driver's helper, if it started one, is this process's child now: the driver's exit reparented it before
+        // its parent learned of the exit.
+        bool any = true;
+        for (uint64_t milliseconds = 0; any && milliseconds < 1000ull * BUSTER_CHECK_LANES_EXIT_SECONDS; milliseconds += 1)
+        {
+            siginfo_t info;
+            memset(&info, 0, sizeof(info));
+            const int found = waitid(P_ALL, 0, &info, WEXITED | WNOHANG);
+            any = found == 0;
+            if (found == 0 && info.si_pid != 0)
+            {
+                run->helpers += 1;
+                run->helpers_ended += (info.si_code == CLD_KILLED && info.si_status == SIGKILL) || (info.si_code == CLD_EXITED && info.si_status == 0) ? 1 : 0;
+            }
+            else if (found == 0)
+            {
+                nanosleep(&pause_step, 0);
+            }
+        }
+        run->helpers_timed_out = any;
+    }
+    if (reaping)
+    {
+        prctl(PR_SET_CHILD_SUBREAPER, 0, 0, 0, 0);
+    }
+    const int reads[2] = { output_pipe[0], error_pipe[0] };
+    for (uint32_t i = 0; i < 2; i += 1)
+    {
+        if (reads[i] >= 0)
+        {
+            close(reads[i]);
+        }
+    }
+    FILE* file = fopen(threads_path, "r");
+    if (file != NULL && fgets(run->threads, sizeof(run->threads), file) == NULL)
+    {
+        run->threads[0] = 0;
+    }
+    if (file != NULL)
+    {
+        fclose(file);
+    }
+    free(environment);
+}
+
+// The exit helper (#1444, lane_exit_helper_start), on `directory`'s generated programs: each command by
+// BUSTER_EXIT_HELPER=0, =1 and by default, with the same status, standard output and error and object each way; one
+// helper by =1 where the driver's lanes created no thread (none in a sanitizer build), and by default where this
+// machine's PID 1 reaps orphans too (lane_exit_reaped), none otherwise and none by =0, each helper ended (by its SIGKILL,
+// or at once) within BUSTER_CHECK_LANES_EXIT_SECONDS of the driver; and a small object by =1 with the driver held after
+// its helper's start (BUSTER_TEST_EXIT_HELPER_PAUSE), whose streams must end while it still runs: the helper holds none
+// of its descriptors.
+static void check_lanes_test_exit_helper(CheckLanesTestTally* tally, const char* executable, const char* directory, uint32_t programs)
+{
+    char small[PATH_MAX];
+    char large[PATH_MAX];
+    char warned[PATH_MAX];
+    char failing[PATH_MAX];
+    char threads_path[PATH_MAX];
+    snprintf(small, sizeof(small), "%s/program_2.c", directory);
+    snprintf(large, sizeof(large), "%s/program_%u.c", directory, programs);
+    snprintf(warned, sizeof(warned), "%s/exit_helper_warned.c", directory);
+    snprintf(failing, sizeof(failing), "%s/exit_helper_failing.c", directory);
+    snprintf(threads_path, sizeof(threads_path), "%s/exit_helper.threads", directory);
+    static const char warned_text[] = "#warning the exit helper's stream\nint f(void) { return 1; }\n";
+    static const char failing_text[] = "int f(void) { return undeclared; }\n";
+    const bool written = parse_test_write(warned, warned_text, sizeof(warned_text) - 1) && parse_test_write(failing, failing_text, sizeof(failing_text) - 1);
+    check_lanes_test_expect(tally, written, "write the exit helper's sources", directory);
+    typedef struct CheckLanesExitCommand CheckLanesExitCommand;
+    struct CheckLanesExitCommand
+    {
+        const char* options[3];
+        const char* source;
+        bool object;
+    };
+    const CheckLanesExitCommand commands[] = {
+        { .options = { "-c" }, .source = small, .object = true },
+        { .options = { "-E" }, .source = small },
+        { .options = { "-fsyntax-only" }, .source = warned },
+        { .options = { "-c" }, .source = failing, .object = true },
+        { .options = { "-c" }, .source = large, .object = true },
+    };
+    // BUSTER_EXIT_HELPER=0, =1 and unset.
+    static const char* const ways[3] = { "0", "1", NULL };
+    static CheckLanesExitRun runs[3];
+    const bool reaped = lane_exit_reaped();
+    for (uint32_t c = 0; written && c < BUSTER_ARRAY_LENGTH(commands); c += 1)
+    {
+        const CheckLanesExitCommand* command = commands + c;
+        char objects[3][PATH_MAX];
+        for (uint32_t way = 0; way < 3; way += 1)
+        {
+            snprintf(objects[way], sizeof(objects[way]), "%s/exit_helper_%u_%u.o", directory, c, way);
+            unlink(objects[way]);
+            char* arguments[8] = { (char*)executable };
+            uint32_t count = 1;
+            for (uint32_t o = 0; o < BUSTER_ARRAY_LENGTH(command->options) && command->options[o] != NULL; o += 1)
+            {
+                arguments[count++] = (char*)command->options[o];
+            }
+            if (command->object)
+            {
+                arguments[count++] = (char*)"-o";
+                arguments[count++] = objects[way];
+            }
+            arguments[count++] = (char*)command->source;
+            arguments[count] = NULL;
+            check_lanes_test_exit_run(&runs[way], arguments, ways[way], NULL, threads_path);
+        }
+        // A helper by =1 where the driver's lanes created no thread, but in a sanitizer build, and by default where
+        // orphans are reaped too.
+        const uint32_t forced = !BUSTER_SANITIZER_RESOURCES && strcmp(runs[1].threads, "0\n") == 0 ? 1 : 0;
+        const uint32_t expected[3] = { 0, forced, reaped ? forced : 0 };
+        for (uint32_t way = 0; way < 3; way += 1)
+        {
+            const CheckLanesExitRun* off = &runs[0];
+            const CheckLanesExitRun* run = &runs[way];
+            char detail[PATH_MAX + 256];
+            snprintf(detail, sizeof(detail), "command %u (%s %s), BUSTER_EXIT_HELPER %s: status %d (%d without), %llu output bytes (%llu), %llu error bytes (%llu), lane threads %.8s, %u helpers (%u expected), %u ended%s",
+                     c, command->options[0], command->source, ways[way] != NULL ? ways[way] : "unset", run->status, off->status,
+                     (unsigned long long)run->output_length, (unsigned long long)off->output_length, (unsigned long long)run->errors_length,
+                     (unsigned long long)off->errors_length, run->threads, run->helpers, expected[way], run->helpers_ended, run->helpers_timed_out ? ", timed out" : "");
+            const bool same_streams = run->status == off->status && off->status >= 0 && run->output_length == off->output_length &&
+                                      run->errors_length == off->errors_length && memcmp(run->output, off->output, off->output_length) == 0 &&
+                                      memcmp(run->errors, off->errors, off->errors_length) == 0;
+            check_lanes_test_expect(tally, same_streams, "the driver's status, output and errors are the same with its exit helper and without", detail);
+            check_lanes_test_expect(tally, !command->object || run->status != 0 || check_test_driver_same_files(objects[0], objects[way]),
+                                    "the driver's object is the same with its exit helper and without", detail);
+            check_lanes_test_expect(tally, run->threads[0] != 0 && run->helpers == expected[way] && run->helpers_ended == expected[way] && !run->helpers_timed_out,
+                                    "the driver starts an exit helper as BUSTER_EXIT_HELPER, its lanes and PID 1 say, which ends with it", detail);
+        }
+    }
+    // Held after its helper's start, the driver's streams end while it still runs: neither it nor its helper holds them.
+    char* held[] = { (char*)executable, (char*)"-c", (char*)"-o", (char*)"/dev/null", small, NULL };
+    check_lanes_test_exit_run(&runs[0], held, "1", "2000", threads_path);
+    const bool helped = !BUSTER_SANITIZER_RESOURCES;
+    char detail[256];
+    snprintf(detail, sizeof(detail), "status %d, streams ended first: %d, %u helpers, %u ended%s", runs[0].status, runs[0].streams_ended_first, runs[0].helpers,
+             runs[0].helpers_ended, runs[0].helpers_timed_out ? ", timed out" : "");
+    check_lanes_test_expect(tally, runs[0].status == 0 && runs[0].streams_ended_first == helped && runs[0].helpers == (helped ? 1u : 0u) &&
+                                       runs[0].helpers_ended == runs[0].helpers && !runs[0].helpers_timed_out,
+                            "a reader of the driver's streams sees them end without waiting for its exit helper", detail);
+    printf("  exit helper: %u commands by BUSTER_EXIT_HELPER=0, =1 and by default (orphans %s here), and a driver held after the helper's start\n",
+           (uint32_t)BUSTER_ARRAY_LENGTH(commands), reaped ? "reaped" : "not reaped");
+}
+
 // The commands of check_lanes_test_session_commands: their arguments (but the executable's), and what each must return.
 #define BUSTER_CHECK_LANES_SESSION_COMMANDS 6
 #define BUSTER_CHECK_LANES_SESSION_ROUNDS 3
@@ -2955,6 +3243,7 @@ static int run_check_lanes_tests(int argc, char** argv)
             check_lanes_test_grow_gate(&tally);
             check_lanes_test_driver_growth(&tally, executable, directory, programs);
             check_lanes_test_session_threads(&tally, executable, directory, programs);
+            check_lanes_test_exit_helper(&tally, executable, directory, programs);
             check_lanes_test_session_commands(&tally, executable, directory);
             check_lanes_test_session_growth(&tally, directory, programs, 0, false);
             check_lanes_test_session_growth(&tally, directory, programs, 2, false);

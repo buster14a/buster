@@ -150,7 +150,9 @@ nothing creates a thread: a command's wide parts are rounds of its flow
 (`LaneFlow`), `lane_run` runs on a lane alone, and a team, a cold group of
 several or a second session is refused. A session whose lanes can't start runs on one lane,
 never retrying. A terminal command's lanes stay parked for the process's exit
-(but in sanitizer builds), a test's are joined. Other parallel commands (the
+(but in sanitizer builds), a test's are joined; a source command that started
+none leaves its address space's teardown to a helper process as it exits
+(`lane_exit_helper_start`, [driver guide](driver.md)). Other parallel commands (the
 benchmarks', the tests') own their team in the code that runs their
 operations. An operation's phases stay direct calls within its whole-operation
 lane entry. `test-checker-driver` and `test-check-units` are serial code that
