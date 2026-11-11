@@ -2,9 +2,9 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 // Real C producer acceptance for #141's machine rows: the vector operators on elements other than 32-bit integers and the
 // vector builtins, whose X86 rows the typed stream's lowering makes the IR's row calls (IrFunction.rows). Bytes, words and
-// quadwords, a compare into a mask (the IR's own vcmp since #1623, ir_simd_typed_compare_mask), a masked operation and a
-// masked store of no result, a shift by a count from a general register, a permute, and a loop whose row results cross
-// its back edge as phis.
+// quadwords, a compare into a mask (the IR's own vcmp since #1623, ir_simd_typed_compare_mask), a masked operation, a
+// masked store of no result and a masked load (the IR's own masked_store and masked_load since #1840), a shift by a
+// count from a general register, a permute, and a loop whose row results cross its back edge as phis.
 typedef char v64i8 __attribute__((vector_size(64)));
 typedef short v32i16 __attribute__((vector_size(64)));
 typedef long long v8i64 __attribute__((vector_size(64)));
@@ -33,6 +33,11 @@ u64 compare(v64i8 a, v64i8 b)
 void store(v64i8* p, v64i8 a, v64i8 b, u64 k)
 {
     __builtin_ia32_storedquqi512_mask(p, a + b, k);
+}
+
+v64i8 load(const v64i8* p, v64i8 w, u64 k)
+{
+    return __builtin_ia32_loaddquqi512_mask(p, w, k) + w;
 }
 
 v8i64 permute(v8i64 a, v8i64 i, v8i64 b)

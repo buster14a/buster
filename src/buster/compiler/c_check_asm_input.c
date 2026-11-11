@@ -58,6 +58,9 @@ struct CheckInputAsm
     uint32_t closing;
     uint32_t statement;
     uint32_t body;
+    // The widest vector register an x, v or Yz operand takes in its function (#2231): 512 bits with AVX-512F, 256 with
+    // AVX, else 128, by the function's features (the unit's, or its target attribute's).
+    uint16_t vector_bits;
     bool basic;
     bool is_volatile;
     bool is_inline;
@@ -98,113 +101,30 @@ static bool check_asm_text_equal(CheckAsmText text, const char* expected)
     return text.length == strlen(expected) && (text.length == 0 || memcmp(text.bytes, expected, text.length) == 0);
 }
 
-static bool check_asm_register(CheckAsmText text)
+// The widest vector register of the current function's features (#2231, CheckInputAsm.vector_bits), as clang's
+// validateOperandSize reads its feature map (ASTContext::getFunctionFeatureMap): the unit's, or those a target attribute
+// on the function's definition gives (predefines_function_target). Once a body: its statements share it.
+static uint16_t check_input_asm_vector_bits(CheckInputReader* reader)
 {
-    static const char* const names[] =
+    const uint32_t body = reader->function_body;
+    if (reader->asm_vector_bits == 0 || reader->asm_vector_body != body)
     {
-        "al",
-        "ah",
-        "ax",
-        "eax",
-        "rax",
-        "bl",
-        "bh",
-        "bx",
-        "ebx",
-        "rbx",
-        "cl",
-        "ch",
-        "cx",
-        "ecx",
-        "rcx",
-        "dl",
-        "dh",
-        "dx",
-        "edx",
-        "rdx",
-        "si",
-        "sil",
-        "esi",
-        "rsi",
-        "di",
-        "dil",
-        "edi",
-        "rdi",
-        "sp",
-        "spl",
-        "esp",
-        "rsp",
-        "bp",
-        "bpl",
-        "ebp",
-        "rbp",
-        "st",
-        "flags",
-        "dirflag",
-        "fpsr",
-        "fpcr",
-    };
-    bool valid = false;
-    if (text.length != 0 && (text.bytes[0] == '%' || text.bytes[0] == '#'))
-    {
-        text.bytes += 1;
-        text.length -= 1;
-    }
-    for (uint32_t i = 0; !valid && i < BUSTER_ARRAY_LENGTH(names); i += 1)
-    {
-        valid = check_asm_text_equal(text, names[i]);
-    }
-    if (!valid && text.length == 5 && memcmp(text.bytes, "st(", 3) == 0 && text.bytes[3] >= '1' && text.bytes[3] <= '7' && text.bytes[4] == ')')
-    {
-        valid = true;
-    }
-    uint32_t prefix = 0;
-    uint32_t limit = 0;
-    uint32_t minimum = 0;
-    bool general = false;
-    if (text.length >= 2 && text.bytes[0] == 'r')
-    {
-        prefix = 1;
-        minimum = 8;
-        limit = 31;
-        general = true;
-    }
-    else if (text.length >= 2 && text.bytes[0] == 'k')
-    {
-        prefix = 1;
-        limit = 7;
-    }
-    else if (text.length >= 3 && memcmp(text.bytes, "mm", 2) == 0)
-    {
-        prefix = 2;
-        limit = 7;
-    }
-    else if (text.length >= 4 && memcmp(text.bytes, "tmm", 3) == 0)
-    {
-        prefix = 3;
-        limit = 7;
-    }
-    else if (text.length >= 4 && (text.bytes[0] == 'x' || text.bytes[0] == 'y' || text.bytes[0] == 'z') && memcmp(text.bytes + 1, "mm", 2) == 0)
-    {
-        prefix = 3;
-        limit = 31;
-    }
-    if (!valid && prefix != 0)
-    {
-        uint32_t number = 0;
-        uint32_t cursor = prefix;
-        while (cursor < text.length && text.bytes[cursor] >= '0' && text.bytes[cursor] <= '9' && number <= limit)
+        X86Target target = reader->pp->options.target;
+        const uint32_t function = body < reader->parser->tokens.count ? check_sparse_get(reader->output->body_declarations, body) : BUSTER_CHECK_NONE;
+        const CheckInputAttribute* attribute = function < reader->parser->tokens.count ?
+            check_input_attribute_of(check_input_attributes_at(reader->output, function), CHECK_ATTRIBUTE_TARGET) : NULL;
+        int32_t cpu = -1;
+        const bool version = attribute != NULL && attribute->text.length < UINT32_MAX &&
+                             predefines_target_attribute(attribute->text.pointer, (uint32_t)attribute->text.length, &cpu) == PREDEFINES_TARGET_ATTRIBUTE_VERSION;
+        if (version)
         {
-            number = number * 10 + text.bytes[cursor++] - '0';
+            const PredefinesHost host = predefines_host_of(&reader->pp->options.predefines);
+            target = predefines_function_target(&reader->pp->options.predefines, &host, target, attribute->text.pointer, (uint32_t)attribute->text.length, cpu);
         }
-        const bool leading_zero = cursor > prefix + 1 && text.bytes[prefix] == '0';
-        if (general && cursor + 1 == text.length && (text.bytes[cursor] == 'b' || text.bytes[cursor] == 'w' || text.bytes[cursor] == 'd'))
-        {
-            cursor += 1;
-        }
-        valid = cursor == text.length && cursor > prefix && number >= minimum && number <= limit && !leading_zero;
+        reader->asm_vector_bits = (target.features & BUSTER_X86_FEATURE(AVX512F)) != 0 ? 512 : (target.features & BUSTER_X86_FEATURE(AVX)) != 0 ? 256 : 128;
+        reader->asm_vector_body = body;
     }
-    return valid;
+    return reader->asm_vector_bits;
 }
 
 static void check_input_asm_mark(CheckInputReader* reader, uint32_t begin, uint32_t end, uint32_t id)
@@ -639,6 +559,7 @@ static void check_input_asm_prepare(CheckInputReader* reader, uint32_t keyword)
             .closing = closing,
             .statement = closing + 1,
             .body = reader->function_body,
+            .vector_bits = check_input_asm_vector_bits(reader),
         };
         for (uint32_t token = keyword + 1; token < opening; token += 1)
         {
@@ -723,8 +644,7 @@ static void check_input_asm_prepare(CheckInputReader* reader, uint32_t keyword)
                 {
                     statement->memory_clobber |= check_asm_text_equal(*clobber, "memory");
                     statement->cc_clobber |= check_asm_text_equal(*clobber, "cc");
-                    valid = memchr(clobber->bytes, 0, clobber->length) == NULL &&
-                            (check_asm_text_equal(*clobber, "memory") || check_asm_text_equal(*clobber, "cc") || check_asm_register(*clobber));
+                    valid = memchr(clobber->bytes, 0, clobber->length) == NULL;
                     statement->clobber_count += 1;
                 }
             }
@@ -787,6 +707,35 @@ static void check_input_asm_prepare(CheckInputReader* reader, uint32_t keyword)
             for (uint32_t before = 0; valid && operands[operand].name != 0 && before < operand; before += 1)
             {
                 valid = operands[before].name != operands[operand].name;
+            }
+        }
+        // The clobbers clang's TargetInfo::isValidClobber takes (#2262): a register name clang's target knows
+        // (check_input_register_name_valid, past one '%' or '#', or an index into its names), memory, cc and unwind. The
+        // first other is clang's "unknown register name 'X' in asm" at its string, after the operands' constraints, and
+        // ends the statement, as clang returns there.
+        for (uint32_t c = 0; valid && c < statement->clobber_count; c += 1)
+        {
+            const CheckAsmText text = clobbers[c];
+            const String8 name = { .pointer = (char*)text.bytes, .length = text.length };
+            const bool known = check_asm_text_equal(text, "memory") || check_asm_text_equal(text, "cc") || check_asm_text_equal(text, "unwind") ||
+                               check_input_register_name_valid(name);
+            if (!known)
+            {
+                // Its bytes stay in the reader's arena, as a register variable's label's (CHECK_INPUT_REGISTER_NAME).
+                uint8_t* bytes = BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint8_t, (uint64_t)text.length + 1);
+                const uint32_t before = input->report_count;
+                if (bytes != NULL && text.length < BUSTER_CHECK_REGISTER_NAME_UNSUITABLE)
+                {
+                    memcpy(bytes, text.bytes, text.length);
+                    check_input_report(reader, text.token, CHECK_INPUT_REGISTER_NAME);
+                }
+                if (input->report_count > before)
+                {
+                    input->reports[before].value = (uint64_t)(uintptr_t)bytes;
+                    input->reports[before].detail = text.length;
+                }
+                failed = text.token;
+                valid = false;
             }
         }
         for (uint32_t label = 0; valid && label < statement->label_count; label += 1)
@@ -1071,7 +1020,19 @@ static void check_input_asm_labels(CheckInputReader* reader)
                                 else if (previous != NULL && (previous->text.length != attribute->text.length ||
                                          memcmp(previous->text.pointer, attribute->text.pointer, attribute->text.length) != 0))
                                 {
-                                    check_input_report(reader, token, CHECK_INPUT_DECLARATION);
+                                    // clang's "conflicting asm label" at the name, noted at the earlier label (#2262), before
+                                    // a redefinition's error there, which the reader recovered from: published too.
+                                    const uint32_t before = input->report_count;
+                                    check_input_report(reader, token, CHECK_INPUT_ASM_LABEL_CONFLICT);
+                                    if (input->report_count > before)
+                                    {
+                                        input->reports[before].note_token = previous->argument_first;
+                                        input->reports[before].note_kind = CHECK_INPUT_NOTE_PREVIOUS_DECLARATION;
+                                    }
+                                    for (uint32_t r = 0; r < input->recovered_count; r += 1)
+                                    {
+                                        input->recovered_reports[r].repeated |= input->recovered_reports[r].token == token;
+                                    }
                                 }
                                 else if (previous == NULL && (states[object] & 2) != 0)
                                 {
@@ -1218,8 +1179,40 @@ static bool check_asm_global_register(const CheckInput* input, const CheckStream
            check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_STATIC);
 }
 
+// Whether an operand of `bits` fits its constraint (#2231), as clang's X86TargetInfo::validateOperandSize checks it by the
+// constraint's first letter past `=`, `+` and `&`: k, y, Ym and Yk at most 64 bits; f, t and u 128; x, v and Yz the
+// function's widest vector register (CheckInputAsm.vector_bits); any other (Yi, Yt and Y2 with SSE2, which every target
+// here has) any size.
+static bool check_asm_operand_size_valid(const CheckInputAsm* assembly, const CheckAsmOperand* source, uint64_t bits)
+{
+    const CheckAsmText text = source->constraint;
+    uint32_t at = 0;
+    while (at < text.length && (text.bytes[at] == '=' || text.bytes[at] == '+' || text.bytes[at] == '&'))
+    {
+        at += 1;
+    }
+    const uint8_t first = at < text.length ? text.bytes[at] : 0;
+    const uint8_t second = at + 1 < text.length ? text.bytes[at + 1] : 0;
+    const bool mask = first == 'k' || first == 'y' || (first == 'Y' && (second == 'm' || second == 'k'));
+    const bool stack = first == 'f' || first == 't' || first == 'u';
+    const bool vector = first == 'x' || first == 'v' || (first == 'Y' && second == 'z');
+    const uint64_t limit = mask ? 64 : stack ? 128 : vector ? assembly->vector_bits : UINT64_MAX;
+    return bits <= limit;
+}
+
+static CheckAsmStatus check_asm_operand_checks(CheckAsmCheckedOperand* result, const CheckInput* input, const CheckStream* stream, TypeTable* types, uint32_t statement,
+                                               uint32_t operand, bool whole);
+
+// An operand's checks, clang's: its own, its size's (#2231) and its tie's.
 static CheckAsmStatus check_asm_operand(CheckAsmCheckedOperand* result, const CheckInput* input, const CheckStream* stream,
                                         TypeTable* types, uint32_t statement, uint32_t operand)
+{
+    return check_asm_operand_checks(result, input, stream, types, statement, operand, true);
+}
+
+// An operand's own checks, and with `whole` its size's and its tie's after them, as clang makes them.
+static CheckAsmStatus check_asm_operand_checks(CheckAsmCheckedOperand* result, const CheckInput* input, const CheckStream* stream, TypeTable* types, uint32_t statement,
+                                               uint32_t operand, bool whole)
 {
     const CheckInputAsm* assembly = input->asm_statements + statement;
     const CheckAsmOperand* source = assembly->operands + operand;
@@ -1268,7 +1261,10 @@ static CheckAsmStatus check_asm_operand(CheckAsmCheckedOperand* result, const Ch
         // clang refuses a _BitInt operand of any constraint ("invalid type in asm input", #147), and takes a flag
         // output of any other type, whose size its code generation (and the lowering, by name) limits.
         valid &= check_action_kind(types, type_strip_aligned(types, original.type)) != BUSTER_TYPE_KIND_BIT_INT;
-        if (valid && (source->flags & CHECK_ASM_MATCH) != 0)
+        // The operand's size, by its (converted) type's.
+        const uint64_t bits = type_is_complete(types, value.type) ? type_size(types, value.type) * 8 : 0;
+        valid = valid && (!whole || check_asm_operand_size_valid(assembly, source, bits));
+        if (valid && whole && (source->flags & CHECK_ASM_MATCH) != 0)
         {
             valid = source->match < assembly->output_count && assembly->operands[source->match].node < stream->count;
             if (valid)
@@ -1327,6 +1323,10 @@ typedef enum CheckAsmError
     // that don't change its value and goes on: "invalid use of a cast in an inline asm context requiring an lvalue
     // [-Winvalid-gnu-asm-cast]".
     CHECK_ASM_ERROR_CAST,
+    // An operand too wide for its constraint (#2231, check_asm_operand_size_valid), after its own checks and before its
+    // tie's: "invalid output|input size for constraint 'C'", the constraint as written.
+    CHECK_ASM_ERROR_OUTPUT_SIZE,
+    CHECK_ASM_ERROR_INPUT_SIZE,
 } CheckAsmError;
 
 // One statement's error (check_asms_diagnose_all): clang gives a statement's first, and returns, but after a cast's.
@@ -1375,7 +1375,15 @@ static CheckAsmError check_asm_operand_error(const CheckInput* input, const Chec
     CheckAsmError result = CHECK_ASM_ERROR_GENERIC;
     *type = value.type;
     *output_type = 0;
-    if (allows_memory && bit_field)
+    // Its own checks pass, so its size's or its tie's fails.
+    CheckAsmCheckedOperand own = { 0 };
+    const bool own_valid = check_asm_operand_checks(&own, input, stream, types, statement, operand, false) == CHECK_ASM_OK;
+    const uint64_t bits = own_valid && type_is_complete(types, own.value.type) ? type_size(types, own.value.type) * 8 : 0;
+    if (own_valid && !check_asm_operand_size_valid(assembly, source, bits))
+    {
+        result = write ? CHECK_ASM_ERROR_OUTPUT_SIZE : CHECK_ASM_ERROR_INPUT_SIZE;
+    }
+    else if (allows_memory && bit_field)
     {
         result = CHECK_ASM_ERROR_BIT_FIELD;
     }

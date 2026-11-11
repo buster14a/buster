@@ -245,6 +245,51 @@ static uint32_t check_semantic_enum_base_spelling(const Parser* parser, const Ch
     return result;
 }
 
+// An __auto_type redeclaration's type as clang's TypePrinter prints it before deduction (#1844,
+// CHECK_REDECLARATION_AUTO_TYPE), quoted: the placeholder with its qualifiers (`const __auto_type`, `_Atomic(__auto_type)`,
+// `restrict __auto_type`), then each pointer level's `*` and its qualifiers (`__auto_type *const`, `const __auto_type **`).
+static String8 check_semantic_auto_type_spelling(const TypeTable* types, TypeId type, Arena* scratch)
+{
+    TypeId levels[64];
+    uint32_t depth = 0;
+    TypeId level = type_strip_aligned(types, type);
+    while (depth < BUSTER_ARRAY_LENGTH(levels) && !check_input_auto_type(level) && type_kind(types, level) == BUSTER_TYPE_KIND_POINTER)
+    {
+        levels[depth++] = level;
+        level = type_strip_aligned(types, type_element(types, level));
+    }
+    char text[512];
+    uint32_t length = 0;
+    String8 result = { 0 };
+    if (check_input_auto_type(level))
+    {
+        const TypeId marker = level & ~(TypeId)(BUSTER_TYPE_CONST | BUSTER_TYPE_VOLATILE);
+        const uint32_t qualifiers = type_qualifiers(level);
+        length = (uint32_t)snprintf(text, sizeof(text), "'%s%s%s%s", (qualifiers & BUSTER_TYPE_CONST) != 0 ? "const " : "",
+                                    (qualifiers & BUSTER_TYPE_VOLATILE) != 0 ? "volatile " : "", marker == BUSTER_CHECK_AUTO_TYPE_RESTRICT ? "restrict " : "",
+                                    marker == BUSTER_CHECK_AUTO_TYPE_ATOMIC ? "_Atomic(__auto_type)" : "__auto_type");
+        for (uint32_t d = depth; d > 0 && length < sizeof(text); d -= 1)
+        {
+            const uint32_t pointer = type_qualifiers(levels[d - 1]);
+            const char* qualified[3] = { (pointer & BUSTER_TYPE_CONST) != 0 ? "const" : NULL, (pointer & BUSTER_TYPE_VOLATILE) != 0 ? "volatile" : NULL,
+                                         (pointer & BUSTER_TYPE_RESTRICT) != 0 ? "restrict" : NULL };
+            length += (uint32_t)snprintf(text + length, sizeof(text) - length, "%s", text[length - 1] == '*' ? "*" : " *");
+            bool first = true;
+            for (uint32_t q = 0; q < 3 && length < sizeof(text); q += 1)
+            {
+                if (qualified[q] != NULL)
+                {
+                    length += (uint32_t)snprintf(text + length, sizeof(text) - length, "%s%s", first ? "" : " ", qualified[q]);
+                    first = false;
+                }
+            }
+        }
+        const char* quoted = length + 1 < sizeof(text) ? check_warning_text(scratch, "%.*s'", (int)length, text) : NULL;
+        result = quoted != NULL ? (String8){ .pointer = (char*)quoted, .length = strlen(quoted) } : (String8){ 0 };
+    }
+    return result;
+}
+
 static const char* check_semantic_input(const Parser* parser, Preprocessor* pp, const CheckInput* input, const TypeTable* types,
                                        const CheckInputReport* report, CheckWarningSpelling* spell, Arena* scratch)
 {
@@ -302,16 +347,21 @@ static const char* check_semantic_input(const Parser* parser, Preprocessor* pp, 
     {
         const uint32_t previous = report->subject - 1;
         const uint8_t kind = input->declaration_kinds[token];
-        if (report->detail == CHECK_REDECLARATION_OBJECT_TYPE || report->detail == CHECK_REDECLARATION_OBJECT_TYPE_EXTERN)
+        if (report->detail == CHECK_REDECLARATION_OBJECT_TYPE || report->detail == CHECK_REDECLARATION_OBJECT_TYPE_EXTERN ||
+            report->detail == CHECK_REDECLARATION_AUTO_TYPE || report->detail == CHECK_REDECLARATION_AUTO_TYPE_EXTERN)
         {
-            const String8 current = check_driver_warning_type(parser, pp, input, types, spell, scratch, report->type, report->type_spelling);
+            const bool placeholder = report->detail == CHECK_REDECLARATION_AUTO_TYPE || report->detail == CHECK_REDECLARATION_AUTO_TYPE_EXTERN;
+            const String8 current = placeholder ? check_semantic_auto_type_spelling(types, report->type, scratch) :
+                                                  check_driver_warning_type(parser, pp, input, types, spell, scratch, report->type, report->type_spelling);
             // The prior type is the noted declaration's, spelled as that one spells it (review on #1453).
             const uint32_t noted = report->note_token < count ? report->note_token : previous;
             const uint32_t prior_spelling = noted < count ? check_input_typedef_spelling(input, parser, noted) : 0;
             const String8 prior = check_driver_warning_type(parser, pp, input, types, spell, scratch, (TypeId)report->value, prior_spelling);
             result = current.length == 0 || prior.length == 0 ? NULL : check_warning_text(scratch,
                 "%s of '%.*s' with a different type: %.*s vs %.*s",
-                report->detail == CHECK_REDECLARATION_OBJECT_TYPE_EXTERN ? "redeclaration" : "redefinition", (int)name.length, name.pointer,
+                report->detail == CHECK_REDECLARATION_OBJECT_TYPE_EXTERN || report->detail == CHECK_REDECLARATION_AUTO_TYPE_EXTERN ? "redeclaration" :
+                                                                                                                                 "redefinition",
+                (int)name.length, name.pointer,
                 (int)current.length, current.pointer, (int)prior.length, prior.pointer);
         }
         else if (report->detail == CHECK_REDECLARATION_TYPEDEF)
@@ -1996,6 +2046,8 @@ static const char* check_semantic_asm(const Parser* parser, Preprocessor* pp, co
         case CHECK_ASM_ERROR_GENERIC: result = "invalid assembly operand or constraint"; break;
         case CHECK_ASM_ERROR_OUTPUT_LVALUE: result = "invalid lvalue in asm output"; break;
         case CHECK_ASM_ERROR_CAST: result = "invalid use of a cast in an inline asm context requiring an lvalue [-Winvalid-gnu-asm-cast]"; break;
+        case CHECK_ASM_ERROR_OUTPUT_SIZE: result = check_warning_text(scratch, "invalid output size for constraint '%.*s'", constraint_length, constraint); break;
+        case CHECK_ASM_ERROR_INPUT_SIZE: result = check_warning_text(scratch, "invalid input size for constraint '%.*s'", constraint_length, constraint); break;
         case CHECK_ASM_ERROR_INPUT_LVALUE: result = check_warning_text(scratch, "invalid lvalue in asm input for constraint '%.*s'", constraint_length, constraint); break;
         case CHECK_ASM_ERROR_BIT_FIELD:
             result = check_warning_text(scratch, "reference to a bit-field in asm %s with a memory constraint '%.*s'", output ? "input" : "output", constraint_length,

@@ -6374,6 +6374,20 @@ static void check_test_driver_target_features(CheckTest* test, const char* clang
         { "an always_inline callee without an attribute", "-march=x86-64",
           "static inline __attribute__((always_inline)) int h(int x) { return x + 1; }\n__attribute__((target(\"avx2\"))) int caller(int x) { return h(x); }\n", false,
           true },
+        // A target_clones body is checked against its first version's features, for every copy clang emits (#2211): no
+        // error where that version has the callee's, whichever other versions lack them.
+        { "a target_clones body whose first version has the callee's features", "-march=x86-64",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x + 1; }\n"
+          "__attribute__((target_clones(\"avx2\", \"default\"))) int caller(int x) { return h(x); }\n",
+          false, true },
+        { "a target_clones body whose first version is an arch= of the callee's features", "-march=x86-64",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x + 1; }\n"
+          "__attribute__((target_clones(\"arch=haswell\", \"sse4.2\", \"default\"))) int caller(int x) { return h(x); }\n",
+          false, true },
+        { "a target_clones body whose first version lacks the callee's features", "-march=x86-64",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x + 1; }\n"
+          "__attribute__((target_clones(\"sse4.2\", \"arch=haswell\", \"default\"))) int caller(int x) { return h(x); }\n",
+          true, true },
         { "a caller's attribute that turns a feature off", "-march=x86-64-v2",
           "static inline __attribute__((always_inline)) int h(int x) { return x + 1; }\n"
           "__attribute__((target(\"no-sse4.2\"))) int caller(int x) { return h(x); }\n",
@@ -6978,6 +6992,16 @@ static void check_test_driver_target_feature_errors(CheckTest* test, const char*
           "static int c(int x) { if (sizeof(({ lbl3: 1; }))) { x = 1; } else { x = h(x + 2); } return x; }\n"
           "static int d(int x) { if (__alignof__(({ lbl4: 1; })) == 4) { x = 1; } else { x = h(x + 3); } return x; }\n"
           "int e(int x) { return a(x) + b(x) + c(x) + d(x); }\n" },
+        // A target_clones body's errors, against its first version's features, once for each copy clang emits (#2211):
+        // each distinct version, a repeated one once; a builtin's too.
+        { "a target_clones body's errors once per copy, by its first version's features",
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x + 1; }\n"
+          "__attribute__((target_clones(\"default\", \"avx2\"))) int c(int x) { return h(x) + h(x + 1); }\n" },
+        { "three copies' errors, and a repeated version's once",
+          "typedef char v16qi __attribute__((vector_size(16)));\n"
+          "static inline __attribute__((always_inline, target(\"avx2\"))) int h(int x) { return x + 1; }\n"
+          "__attribute__((target_clones(\"sse4.2\", \"arch=haswell\", \"sse4.2\", \"default\"))) int c(int x, v16qi* v) "
+          "{ *v = __builtin_ia32_pshufb128(*v, *v); return h(x); }\n" },
     };
     for (uint32_t i = 0; executable != NULL && i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
     {
@@ -9266,6 +9290,14 @@ static int run_checker_driver_tests(int argc, char** argv)
             if (!lazy && check_test_driver_takes())
             {
                 check_test_driver_asm_constraints(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_asm_clobbers(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_asm_sizes(&test, clang, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
             {
