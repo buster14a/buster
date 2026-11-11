@@ -22,9 +22,21 @@
 #define BUSTER_CBUILTIN_RMW_TEST_ORDERED 0x10u
 // GNU's byte flag (test_and_set and clear): one byte, its order its second argument.
 #define BUSTER_CBUILTIN_RMW_TEST_BYTE 0x20u
-// clang's IEEE maximum and minimum: of a float's and a double's bits alone.
+// clang's IEEE maximum and minimum: of a float's, a double's, a _Float16's and a __bf16's bits alone (#1843).
 #define BUSTER_CBUILTIN_RMW_TEST_FLOAT 0x40u
-#define BUSTER_CBUILTIN_RMW_TEST_CASES 237u
+#define BUSTER_CBUILTIN_RMW_TEST_CASES 245u
+// The 2-byte formats the host compiler's own code computes, the leaves' oracle (cbuiltin_atomic_rmw_test_oracle): a
+// _Float16's with AVX512-FP16 in half precision, a __bf16's flushed with AVX512-BF16 or AVX-NE-CONVERT.
+#if defined(__AVX512FP16__)
+#define BUSTER_CBUILTIN_RMW_TEST_F16 CBUILTIN_ATOMIC_RMW_F16_NATIVE_BITS
+#else
+#define BUSTER_CBUILTIN_RMW_TEST_F16 CBUILTIN_ATOMIC_RMW_F16_BITS
+#endif
+#if defined(__AVX512BF16__) || defined(__AVXNECONVERT__)
+#define BUSTER_CBUILTIN_RMW_TEST_BF16 CBUILTIN_ATOMIC_RMW_BF16_FLUSH_BITS
+#else
+#define BUSTER_CBUILTIN_RMW_TEST_BF16 CBUILTIN_ATOMIC_RMW_BF16_BITS
+#endif
 #define BUSTER_CBUILTIN_RMW_TEST_PAGE 4096u
 #define BUSTER_CBUILTIN_RMW_TEST_PREFIX UINT64_C(0x713596a2d84bc0ef)
 #define BUSTER_CBUILTIN_RMW_TEST_THREADS 4u
@@ -250,6 +262,40 @@ static uint64_t cbuiltin_atomic_rmw_test_oracle(const CBuiltinAtomicRmwTestCase*
         case CBUILTIN_ATOMIC_FETCH_FMINIMUM: previous.value = __atomic_fetch_fminimum(object, desired.value, order); break;
         case CBUILTIN_ATOMIC_FETCH_FMINIMUM_NUM: previous.value = __atomic_fetch_fminimum_num(object, desired.value, order); break;
         default: previous.value = __atomic_exchange_n(object, desired.value, order); break;
+        }
+        result = previous.bits;
+    }
+    else if (item->format == BUSTER_CBUILTIN_RMW_TEST_F16)
+    {
+        union
+        {
+            uint16_t bits;
+            _Float16 value;
+        } desired = { .bits = (uint16_t)value }, previous;
+        volatile _Float16* object = object_pointer;
+        switch (id)
+        {
+        case CBUILTIN_ATOMIC_FETCH_FMAXIMUM: previous.value = __atomic_fetch_fmaximum(object, desired.value, order); break;
+        case CBUILTIN_ATOMIC_FETCH_FMAXIMUM_NUM: previous.value = __atomic_fetch_fmaximum_num(object, desired.value, order); break;
+        case CBUILTIN_ATOMIC_FETCH_FMINIMUM: previous.value = __atomic_fetch_fminimum(object, desired.value, order); break;
+        default: previous.value = __atomic_fetch_fminimum_num(object, desired.value, order); break;
+        }
+        result = previous.bits;
+    }
+    else if (item->format == BUSTER_CBUILTIN_RMW_TEST_BF16)
+    {
+        union
+        {
+            uint16_t bits;
+            __bf16 value;
+        } desired = { .bits = (uint16_t)value }, previous;
+        volatile __bf16* object = object_pointer;
+        switch (id)
+        {
+        case CBUILTIN_ATOMIC_FETCH_FMAXIMUM: previous.value = __atomic_fetch_fmaximum(object, desired.value, order); break;
+        case CBUILTIN_ATOMIC_FETCH_FMAXIMUM_NUM: previous.value = __atomic_fetch_fmaximum_num(object, desired.value, order); break;
+        case CBUILTIN_ATOMIC_FETCH_FMINIMUM: previous.value = __atomic_fetch_fminimum(object, desired.value, order); break;
+        default: previous.value = __atomic_fetch_fminimum_num(object, desired.value, order); break;
         }
         result = previous.bits;
     }
@@ -698,6 +744,14 @@ static void cbuiltin_atomic_rmw_test_values(CBuiltinAtomicRmwTest* test, const C
     const uint64_t ieee64[] = { 0, UINT64_C(0x8000000000000000), UINT64_C(0x3ff0000000000000), UINT64_C(0xbff0000000000000), UINT64_C(0x7ff0000000000000),
                                 UINT64_C(0xfff0000000000000), UINT64_C(0x7ff8000000000000), UINT64_C(0xfff8000000000123), UINT64_C(0x7ff0000000000001),
                                 UINT64_C(0xfff00000abcd0000), 1, UINT64_C(0x8000000000000001), UINT64_C(0x4004000000000000), UINT64_C(0xc004000000000000) };
+    // A _Float16's and a __bf16's (#1843). The host compiler's __bf16 code, the oracle, loops forever where its float's
+    // conversion back changes the object's old value (it compares that, not the bits it loaded): a signaling NaN's,
+    // always, and a denormal's where VCVTNEPS2BF16 flushes it (BUSTER_CBUILTIN_RMW_TEST_BF16), so those are no old value.
+    const uint64_t ieee16[] = { 0, 0x8000, 0x3c00, 0xbc00, 0x7c00, 0xfc00, 0x7e00, 0xfe23, 0x7c01, 0xfd0b, 1, 0x8001, 0x4100, 0xc100 };
+    const uint64_t ieeebf[] = { 0, 0x8000, 0x3f80, 0xbf80, 0x7f80, 0xff80, 0x7fc0, 0xffc1, 0x7f81, 0xffab, 1, 0x8001, 0x4020, 0xc020 };
+    const uint64_t fp16[] = { 0, 0x8000, 0x7c00, 0xfc00, 0x7c01, 1 };
+    const uint64_t bf16[] = { 0, 0x8000, 0x7f80, 0xff80, 0x7fc1, 0x3f80 };
+    _Static_assert(BUSTER_ARRAY_LENGTH(ieee16) == BUSTER_ARRAY_LENGTH(ieee32) && BUSTER_ARRAY_LENGTH(ieeebf) == BUSTER_ARRAY_LENGTH(ieee32), "a half for each float");
     _Static_assert(BUSTER_ARRAY_LENGTH(ieee32) == BUSTER_ARRAY_LENGTH(ieee64), "a double for each float");
     for (uint32_t i = 0; i < count; i += 1)
     {
@@ -707,12 +761,17 @@ static void cbuiltin_atomic_rmw_test_values(CBuiltinAtomicRmwTest* test, const C
         // The IEEE maximum and minimum on every pair of the values, the orders in turn.
         for (uint32_t path = 0; (item->spec.flags & BUSTER_CBUILTIN_RMW_TEST_FLOAT) != 0 && path < 2; path += 1)
         {
-            const uint64_t* values = item->bytes == 4 ? ieee32 : ieee64;
+            const bool brain = item->format == BUSTER_CBUILTIN_RMW_TEST_BF16;
+            const bool flushes = item->format == CBUILTIN_ATOMIC_RMW_BF16_FLUSH_BITS;
+            const uint64_t* values = item->bytes == 4 ? ieee32 : item->bytes == 8 ? ieee64 : brain ? ieeebf : ieee16;
             for (uint32_t variant = 0; variant < 3; variant += 1)
             {
                 for (uint32_t a = 0; a < BUSTER_ARRAY_LENGTH(ieee32); a += 1)
                 {
-                    for (uint32_t b = 0; b < BUSTER_ARRAY_LENGTH(ieee32); b += 1)
+                    // The old values the oracle's __bf16 code loops forever on: a signaling NaN, and a flushed denormal.
+                    const bool signaling = brain && (values[a] & 0x7f80) == 0x7f80 && (values[a] & 0x7f) != 0 && (values[a] & 0x40) == 0;
+                    const bool denormal = flushes && (values[a] & 0x7f80) == 0 && (values[a] & 0x7f) != 0;
+                    for (uint32_t b = 0; !signaling && !denormal && b < BUSTER_ARRAY_LENGTH(ieee32); b += 1)
                     {
                         const int order = (int)((a + b) % 6);
                         cbuiltin_atomic_rmw_test_sample(test, item, path, variant, values[a], values[b], 0, false, order, __ATOMIC_RELAXED, i);
@@ -720,7 +779,8 @@ static void cbuiltin_atomic_rmw_test_values(CBuiltinAtomicRmwTest* test, const C
                 }
             }
         }
-        const uint64_t* samples = item->format == CBUILTIN_ATOMIC_RMW_F32_BITS ? fp32 : item->format == CBUILTIN_ATOMIC_RMW_F64_BITS ? fp64 : patterns;
+        const uint64_t* samples = item->format == CBUILTIN_ATOMIC_RMW_F32_BITS ? fp32 : item->format == CBUILTIN_ATOMIC_RMW_F64_BITS ? fp64 :
+                                  item->format == BUSTER_CBUILTIN_RMW_TEST_F16 ? fp16 : item->format == BUSTER_CBUILTIN_RMW_TEST_BF16 ? bf16 : patterns;
         for (uint32_t path = 0; path < 2; path += 1)
         {
             for (uint32_t variant = 0; variant < 3; variant += 1)
@@ -774,7 +834,9 @@ static void cbuiltin_atomic_rmw_test_guards(CBuiltinAtomicRmwTest* test, const C
         {
             uint8_t* object = mapping + BUSTER_CBUILTIN_RMW_TEST_PAGE - item->bytes;
             uint8_t* expected = mapping + 3 * BUSTER_CBUILTIN_RMW_TEST_PAGE - item->bytes;
-            const uint64_t initial = 1;
+            // A __bf16's 1.0 rather than the bits 1, a denormal, which the oracle's code loops forever on where it flushes
+            // (cbuiltin_atomic_rmw_test_values).
+            const uint64_t initial = item->format == BUSTER_CBUILTIN_RMW_TEST_BF16 ? 0x3f80 : 1;
             const uint64_t desired = 0;
             const uint64_t mismatch = 0;
             for (uint32_t path = 0; path < 2; path += 1)
@@ -1001,9 +1063,10 @@ static __attribute__((unused)) int run_builtin_atomic_rmw_helper_tests(int argc,
     {
         const CBuiltinAtomicRmwTestSpec spec = cbuiltin_atomic_rmw_test_specs[i];
         const bool ordered = (spec.flags & BUSTER_CBUILTIN_RMW_TEST_ORDERED) != 0;
-        // The byte flag's one byte is its only width, and the IEEE maximum and minimum's a float's and a double's.
+        // The byte flag's one byte is its only width, and the IEEE maximum and minimum's a float's, a double's, a _Float16's
+        // and a __bf16's.
         const bool ieee = (spec.flags & BUSTER_CBUILTIN_RMW_TEST_FLOAT) != 0;
-        const uint32_t variants = (spec.flags & BUSTER_CBUILTIN_RMW_TEST_BYTE) != 0 ? 1u : ieee ? 2u :
+        const uint32_t variants = (spec.flags & BUSTER_CBUILTIN_RMW_TEST_BYTE) != 0 ? 1u : ieee ? 4u :
             4 + ((spec.flags & BUSTER_CBUILTIN_RMW_TEST_BOOL) != 0) + (spec.id == CBUILTIN_ATOMIC_EXCHANGE_N ? 2u : 0u) + (ordered ? 4u : 0u);
         for (uint32_t v = 0; valid && v < variants; v += 1)
         {
@@ -1012,8 +1075,9 @@ static __attribute__((unused)) int run_builtin_atomic_rmw_helper_tests(int argc,
             {
                 CBuiltinAtomicRmwTestCase* item = items + count;
                 item->spec = spec;
-                item->bytes = ieee ? 4u << v : v < 4 ? 1u << v : v == 4 ? 1 : ordered ? 1u << (v - 5) : v == 5 ? 4 : 8;
-                item->format = ieee ? (v == 0 ? CBUILTIN_ATOMIC_RMW_F32_BITS : CBUILTIN_ATOMIC_RMW_F64_BITS) :
+                item->bytes = ieee ? (v < 2 ? 4u << v : 2u) : v < 4 ? 1u << v : v == 4 ? 1 : ordered ? 1u << (v - 5) : v == 5 ? 4 : 8;
+                item->format = ieee ? (v == 0 ? CBUILTIN_ATOMIC_RMW_F32_BITS : v == 1 ? CBUILTIN_ATOMIC_RMW_F64_BITS :
+                                       v == 2 ? BUSTER_CBUILTIN_RMW_TEST_F16 : BUSTER_CBUILTIN_RMW_TEST_BF16) :
                     v < 4 ? CBUILTIN_ATOMIC_RMW_INTEGER_BITS : v == 4 ? CBUILTIN_ATOMIC_RMW_BOOL_BITS :
                     ordered ? CBUILTIN_ATOMIC_RMW_SIGNED_BITS : v == 5 ? CBUILTIN_ATOMIC_RMW_F32_BITS : CBUILTIN_ATOMIC_RMW_F64_BITS;
                 valid = cbuiltin_atomic_rmw_test_prepare(&test, &arena, allowed, item, count);
@@ -1021,7 +1085,7 @@ static __attribute__((unused)) int run_builtin_atomic_rmw_helper_tests(int argc,
             }
         }
     }
-    cbuiltin_atomic_rmw_test_expect(&test, !valid || count == BUSTER_CBUILTIN_RMW_TEST_CASES, "all 47 IDs, four integer widths (the byte flag's one), 29 bool formats, two FP exchanges, min/max's four signed widths and the IEEE maximum and minimum's float and double are represented", count);
+    cbuiltin_atomic_rmw_test_expect(&test, !valid || count == BUSTER_CBUILTIN_RMW_TEST_CASES, "all 47 IDs, four integer widths (the byte flag's one), 29 bool formats, two FP exchanges, min/max's four signed widths and the IEEE maximum and minimum's float, double, _Float16 and __bf16 are represented", count);
     CBuiltinAtomicRmwTest* shared = MAP_FAILED;
     if (valid)
     {

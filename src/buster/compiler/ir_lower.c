@@ -1925,7 +1925,8 @@ static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType res
     bool leaves = false;
     for (uint32_t k = 0; check.error == IR_OK && k < input->asm_body_count && input->asm_bodies != 0; k += 1)
     {
-        leaves |= input->asm_bodies[k].leaves;
+        // A body's labels (#1839), which the IR's body call doesn't carry, are Tier 0's too.
+        leaves |= input->asm_bodies[k].leaves || input->asm_bodies[k].label_count != 0;
     }
     if (check.error == IR_OK && (input->unwind_init || input->returns_twice || tier0_preserving(input) || input->realign_stack || input->segments || leaves))
     {
