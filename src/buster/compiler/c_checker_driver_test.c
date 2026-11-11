@@ -8173,6 +8173,7 @@ static void check_test_driver_optimize_pragmas(CheckTest* test, const char* clan
 #include "c_check_redefinition_driver_test.c"
 #include "c_check_logical_unused_driver_test.c"
 #include "c_check_condition_driver_test.c"
+#include "c_check_alignment_builtin_driver_test.c"
 #include "c_check_string_plus_int_driver_test.c"
 #include "c_check_conditional_mismatch_driver_test.c"
 #include "c_check_generic_attribute_driver_test.c"
@@ -9112,6 +9113,7 @@ static int run_checker_driver_tests(int argc, char** argv)
         if (!lazy && check_test_driver_takes())
         {
             check_test_driver_conditions(&test, clang, executable, directory);
+            check_test_driver_alignment_builtins(&test, clang, executable, directory);
             check_test_driver_string_plus_int(&test, clang, executable, directory);
             check_test_driver_conditional_mismatches(&test, clang, executable, directory);
             check_test_driver_generic_attributes(&test, clang, executable, directory);

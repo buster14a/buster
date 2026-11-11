@@ -196,6 +196,11 @@ enum
     CHECK_WARNING_ID_GNU_ARRAY_RANGE = 139,
     // An integer added to a string literal (#2190, clang's diagnoseStringPlusInt): -Wstring-plus-int, on by default.
     CHECK_WARNING_ID_STRING_PLUS_INT = 140,
+    // An alignment builtin's alignment of 1 (#2221, clang's SemaBuiltinAlignment): align_up's and align_down's "aligning a
+    // value to 1 byte is a no-op", is_aligned's "the result of checking whether a value is aligned to 1 byte is always
+    // true", -Wtautological-compare's, on by default.
+    CHECK_WARNING_ID_ALIGNMENT_NO_OP = 141,
+    CHECK_WARNING_ID_ALIGNMENT_ALWAYS_TRUE = 142,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -517,6 +522,8 @@ typedef enum CheckWarningEventKind
     // A GNU designator's -Wgnu-designator warning (#2202, check_input_gnu_designator) at its token: payload.data one of the
     // BUSTER_CHECK_GNU_DESIGNATOR_* forms.
     CHECK_WARNING_EVENT_GNU_DESIGNATOR,
+    // An alignment builtin's alignment of 1 (#2221, check_input_alignment_one), at the alignment: its description's words.
+    CHECK_WARNING_EVENT_ALIGNMENT_ONE,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
 

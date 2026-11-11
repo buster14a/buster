@@ -187,6 +187,8 @@ static const CheckWarningDescription check_warning_descriptions[] =
     [CHECK_WARNING_ID_GNU_DESIGNATOR] = { "-Wgnu-designator", "-Wgnu", "use of GNU 'missing =' extension in designator" },
     [CHECK_WARNING_ID_GNU_ARRAY_RANGE] = { "-Wgnu-designator", "-Wgnu", "use of GNU array range extension" },
     [CHECK_WARNING_ID_STRING_PLUS_INT] = { "-Wstring-plus-int", NULL, "adding an integer to a string does not append to the string" },
+    [CHECK_WARNING_ID_ALIGNMENT_NO_OP] = { "-Wtautological-compare", NULL, "aligning a value to 1 byte is a no-op" },
+    [CHECK_WARNING_ID_ALIGNMENT_ALWAYS_TRUE] = { "-Wtautological-compare", NULL, "the result of checking whether a value is aligned to 1 byte is always true" },
 };
 
 _Static_assert(BUSTER_ARRAY_LENGTH(check_warning_descriptions) == CHECK_WARNING_ID_COUNT, "every sparse policy ID has a description");
