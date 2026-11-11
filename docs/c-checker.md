@@ -5228,6 +5228,16 @@ An undeclared name that is a typo of a visible one is clang's (#1447,
   name, clang's invalid expression, its rest is left out to its `;`, with the
   parser's error. Before C23 a name's call is an undeclared function's, which
   no search reads as a keyword (`whil (a)` stays a call).
+- **A name after a block item's GNU attributes** that no binding of the parse
+  names, which the parser reads as an implicit int's declarator
+  (`parse_scalar_attribute_name`): clang's statement reader asks Sema what it
+  is first, with its typo correction, and one it corrects to a value is
+  "use of undeclared identifier 'valu'; did you mean 'value'?" and "expected
+  identifier or '('" there, the item skipped to its `;`. The recovery view
+  leaves the attributes out, so that the reader searches the name at the
+  statement's start (`check_driver_typo_tail`); a value it takes makes the
+  next view read the item as an empty statement, with both errors. A name no
+  correction takes keeps the implicit int's error.
 - **An undeclared function's call** in C99 and later (`ImplicitlyDefineFunction`,
   only where its diagnostic is an error) takes a function. Its error gets
   "did you mean 'compute'?" at the call and "'compute' declared here", but not
@@ -5279,6 +5289,11 @@ Left as they were:
   so does a parse error within a call's parentheses (`foo (int i = 0; ...)`,
   C23's `for`, and `sizeo (int)`). A statement whose undeclared name ends
   before a `}` without a `;` keeps the parser's error.
+- After a block item's GNU attributes, a builtin's name without a call
+  (`__builtin_abs;`, clang's "expected identifier or '('") is still an
+  implicit int's declarator, and before C23 an undeclared function's call
+  there lacks clang's "call to undeclared function" error before its "expected
+  identifier or '('", whose parse error ends the body's checking.
 - A declaration's type name outside a statement's start is clang's parser's
   to correct (`DiagnoseUnknownTypeName`): a parameter's `myin v` keeps
   buster's "unknown type name" with no suggestion, and its prefix view
@@ -5919,7 +5934,14 @@ warnings that need the completed graph or the parser's operator tree:
 `-Wlogical-not-parentheses`, `-Wparentheses` (assignment conditions and
 bitwise/equality precedence), `-Wempty-body`, `-Wself-assign`,
 `-Wreturn-stack-address`, `-Wformat`/`-Wformat-security`, `-Wswitch`,
-`-Wdangling-else` and `-Wuninitialized`. `-Wstring-plus-int` (#2190, on by
+`-Wdangling-else` and `-Wuninitialized`. `-Wshift-op-parentheses` (#2264, on
+by default, `-Wparentheses`' and so `-Wall`'s,
+`check_common_shift_op_parentheses`) is clang's `DiagnoseAdditionInShift`:
+each operand of a `<<` or `>>` that is an unparenthesized `+` or `-`, the left
+one first, "operator '<<' has lower precedence than '+'; '+' will be
+evaluated first" at the `+` with its note, given as the shift is built; a `+`
+from a macro's argument shows that macro, its range being the `+`
+expression's. `-Wstring-plus-int` (#2190, on by
 default, `check_common_string_plus_int`) is clang's `diagnoseStringPlusInt`: a
 `+` of a string literal, not parenthesized, and an operand of integer,
 boolean or enumeration type in either order, "adding 'T' to a string does not

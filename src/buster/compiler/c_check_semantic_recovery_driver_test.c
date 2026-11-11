@@ -765,6 +765,8 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "int counter;\nvoid v(void)\n{\n    retrn;\n}\nint f(int x)\n{\n    retrn x;\n}\nint g(int a)\n{\n    int retrm;\n    retrn;\n"
         "    retrn a + 1;\n    brek;\n    for (;;) brek;\n    swich (a) { a = 2; }\n    iff (a) return 1;\n    whil (a) a--;\n    int unused;\n"
         "    return a;\n}\nint h(int a) { int u2; if (a = 1) return 2; return counte; }\n",
+        // The correction is its scope's error: the scope's unused variable is quiet, as clang's is.
+        "int f(int x)\n{\n    int unused;\n    retrn x;\n}\nint g(int a) { int u2; if (a = 1) return 2; return 0; }\n",
         // A type keyword or a typedef's name corrected there: the statement is a declaration of that type, clang's "unknown
         // type name" with its note for a typedef; before `;` or an operator other than `*` or `&` no type is offered.
         "typedef int myint;\nint f(void)\n{\n    unsignd x = 1;\n    myin y = 2;\n    myin *p = &y;\n    myin;\n    myin + 2;\n"
@@ -774,6 +776,16 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "void take(int, int);\nint g(int a)\n{\n    int w = sizeo * 2;\n    int v = sizeo a b, k = zzz1;\n    take(sizeo a, zzz2);\n"
         "    a = sizeo a + zzz3; zzz4;\n    if (sizeo a) zzz5;\n    a = 1 + sizeo \"abc\"; zzz6;\n    int y = retrn 5;\n    return sizeo a + zzz7;\n"
         "}\nint h(int a) { int unused; if (a = 1) return 2; return 0; }\n",
+        // A name near a keyword before an operand that no search corrects (whilx is as near as while): clang's expression is
+        // invalid all the same, its rest skipped without the parser's error.
+        "int whilx;\nint f(int a)\n{\n    int v = whilz a;\n    return v;\n}\n",
+        // A block item's GNU attributes before a name that a correction takes as a value (#1447, check_driver_typo_tail):
+        // clang's typo error, then "expected identifier or '('" there, the item skipped; the body's unused variable is quiet.
+        "int counter;\nvoid f(int n)\n{\n    int value;\n    __attribute__((unused)) valu = 1;\n"
+        "    __attribute__((unused)) __attribute__((cold)) valu;\n    __attribute__((unused)) countr = 2;\n    int unused;\n"
+        "    if (n = 1) value = 2;\n}\nint h(int a) { int u2; if (a = 1) return 2; return 0; }\n",
+        // A name no correction takes is still an implicit int's declarator, whose error ends the body here.
+        "int value;\nvoid g(void)\n{\n    __attribute__((unused)) zzzz = 2;\n    __attribute__((unused)) valu = 3;\n}\n",
         // Three thousand names and fifty-three typos, written out where the fixture is (check_test_typo_stress): each
         // search reads the visible names once (c_check_typo.c).
         "/* typo stress */\n",
