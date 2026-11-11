@@ -184,6 +184,9 @@ struct CheckAsmName
     bool absolute;
     // Whether a fixup refers to the name: an undefined global that none does is a declaration, not a reference.
     bool referenced;
+    // Whether the file-scope assembly defines it (#1848): clang's assembler reports a C definition of a label's name
+    // without a source location only for module assembly, which it streams before the module's definitions.
+    bool file;
 };
 
 // A statement's plan: its operands' places (output_count + input_count of them), its block's bytes (0 for none), its
@@ -3308,6 +3311,7 @@ static bool check_program_asm_names(CheckProgramAsms* result, const CheckProgram
                     {
                         *reason = names[name].label ? "inline assembly labels another template defines too" : *reason;
                         names[name].label = true;
+                        names[name].file = unit == file;
                     }
                     else
                     {

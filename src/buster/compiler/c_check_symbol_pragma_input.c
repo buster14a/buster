@@ -214,6 +214,7 @@ static bool check_input_symbol_warning_append(CheckInputReader* reader, uint32_t
         .source = record->diagnostic_source,
         .completion_kind = completion_kind,
         .completion = completion,
+        .suborder = completion_kind == CHECK_WARNING_COMPLETE_TU_END ? CHECK_WARNING_UNIT_END_WEAK : 0,
         .payload = { .name = record->kind == CHECK_SYMBOL_PRAGMA_ALIAS && record->warning == CHECK_SYMBOL_WARNING_UNDECLARED ? record->target : record->name,
                      .token = record->source, .data = index + 1 },
     };
