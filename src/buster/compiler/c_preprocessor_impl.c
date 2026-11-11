@@ -2336,6 +2336,18 @@ static __attribute__((noinline, cold)) void pp_diagnose_group(Preprocessor* pp, 
     }
 }
 
+// The letter of the universal character name whose backslash is byte `offset` of `data` (#1447): N, u or U, after any line
+// splices, as the lexer reads it.
+static char pp_ucn_letter(const Preprocessor* pp, const PPFileData* data, uint32_t offset)
+{
+    const ScalarLexer lexer = pp_file_lexer(pp->refine_flags, data);
+    uint64_t size = 0;
+    uint64_t at = 0;
+    get_char(&lexer, offset, &size, &at);
+    uint64_t letter_size = 0;
+    return (char)peek_char(&lexer, offset + size, &letter_size);
+}
+
 // The diagnostics of a named UCN that starts a token (BUSTER_PP_NAMED_UCN_ERROR), whose backslash is byte `offset` of
 // `data`, at `base`: as clang's tryReadNamedUCN, a name that isn't exactly Unicode's is an error at the name, with a note
 // where it is one loosely, whose character clang reads it as; then as tryReadUCN, that character (or the exact name's)
@@ -2413,7 +2425,11 @@ static __attribute__((noinline, cold)) void pp_read_raw_errors_slow(Preprocessor
             {
                 pp->diagnostic_position = pp->diagnostic_run_first + error.token - begin;
             }
-            const uint32_t location = pp->ranges[context->range].base + error.offset;
+            // A UCN's -Wunicode warning is at its token's start, the first of any line splices before its backslash, where clang's
+            // lexer starts the token (#1447).
+            const bool spliced = error.kind >= BUSTER_PP_NAMED_UCN_INCOMPLETE && error.kind <= BUSTER_PP_UCN_NO_DIGITS;
+            const uint32_t offset = spliced ? pp_start_with_splices(data->bytes, error.offset, (pp->refine_flags & C_TOKENIZER_TRIGRAPHS) != 0) : error.offset;
+            const uint32_t location = pp->ranges[context->range].base + offset;
             switch (error.kind)
             {
                 case C_RAW_STRING_DELIMITER_LENGTH:
@@ -2454,11 +2470,20 @@ static __attribute__((noinline, cold)) void pp_read_raw_errors_slow(Preprocessor
                     pp_diagnose_group(pp, PP_WARNING_UNICODE, location, "incomplete universal character name; treating as '\\' followed by identifier");
                     break;
                 case BUSTER_PP_NAMED_UCN_EMPTY:
-                    pp_diagnose_group(pp, PP_WARNING_UNICODE, location, "empty delimited universal character name; treating as '\\' 'N' '{' '}'");
-                    break;
                 case BUSTER_PP_NAMED_UCN_UNTERMINATED:
-                    pp_diagnose_group(pp, PP_WARNING_UNICODE, location, "incomplete delimited universal character name; treating as '\\' 'N' '{' identifier");
+                case BUSTER_PP_UCN_NO_DIGITS:
+                {
+                    // Its letter's words (#1447): N, u or U.
+                    const char letter = pp_ucn_letter(pp, data, error.offset);
+                    char message[96];
+                    snprintf(message, sizeof(message),
+                             error.kind == BUSTER_PP_NAMED_UCN_EMPTY ? "empty delimited universal character name; treating as '\\' '%c' '{' '}'" :
+                             error.kind == BUSTER_PP_NAMED_UCN_UNTERMINATED ? "incomplete delimited universal character name; treating as '\\' '%c' '{' identifier" :
+                                                                             "\\%c used with no following hex digits; treating as '\\' followed by identifier",
+                             letter);
+                    pp_diagnose_group(pp, PP_WARNING_UNICODE, location, message);
                     break;
+                }
                 case C_RAW_STRING_OK:
                     break;
             }
