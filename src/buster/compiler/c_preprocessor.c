@@ -3003,15 +3003,37 @@ static bool pp_record_raw_errors(const PPPrepare* prepare, Arena* arena, PPFileD
     return result;
 }
 
-// Where a file's named universal character names (\N{...}) can be: the candidates its scan counts
-// (pp_named_ucn_candidates; pp_scan_named_ucns or pp_scan_named_ucn_chunks), and the first's and the last's byte.
+// The candidates a file's scan keeps the places of (PPNamedUcnScan.kept), so that pp_record_named_ucns reads them alone.
+#define BUSTER_PP_NAMED_UCN_KEPT 256
+
+// Where a file's named universal character names (\N{...}) and the `\u`s clang reads as none can be: the candidates its
+// scan counts (pp_named_ucn_candidates; pp_scan_named_ucns or pp_scan_named_ucn_chunks), the first's and the last's byte,
+// and the first BUSTER_PP_NAMED_UCN_KEPT ones' bytes (#1447: a `\u` in a string literal is a candidate too, and they may
+// be far apart).
 typedef struct PPNamedUcnScan PPNamedUcnScan;
 struct PPNamedUcnScan
 {
     uint32_t count;
     uint64_t first;
     uint64_t last;
+    uint64_t kept[BUSTER_PP_NAMED_UCN_KEPT];
 };
+
+// Adds the candidates `bits` of the block at byte `b` to `scan`.
+BUSTER_INLINE void pp_named_ucn_keep(PPNamedUcnScan* scan, uint64_t b, uint64_t bits)
+{
+    scan->first = scan->count == 0 ? b + (uint64_t)__builtin_ctzll(bits) : scan->first;
+    scan->last = b + 63 - (uint64_t)__builtin_clzll(bits);
+    for (uint64_t rest = bits; rest != 0; rest &= rest - 1)
+    {
+        const uint32_t at = scan->count;
+        scan->count += 1;
+        if (at < BUSTER_PP_NAMED_UCN_KEPT)
+        {
+            scan->kept[at] = b + (uint64_t)__builtin_ctzll(rest);
+        }
+    }
+}
 
 // The candidates for a named UCN's backslash among bytes [b, end) of a source of `length` bytes, at most 64 of them, as
 // bits: a backslash (or with trigraphs a '/' after a '?', the end of a ??/) followed by 'N', 'u' or 'U' (#1447: a `\u`
@@ -3076,9 +3098,7 @@ static void pp_scan_named_ucns(const uint8_t* bytes, uint64_t length, uint64_t b
         const uint64_t bits = pp_named_ucn_candidates(bytes, length, b, end, trigraphs, false);
         if (BUSTER_UNLIKELY(bits != 0))
         {
-            scan->first = scan->count == 0 ? b + (uint64_t)__builtin_ctzll(bits) : scan->first;
-            scan->last = b + 63 - (uint64_t)__builtin_clzll(bits);
-            scan->count += (uint32_t)__builtin_popcountll(bits);
+            pp_named_ucn_keep(scan, b, bits);
         }
     }
 }
@@ -3103,9 +3123,7 @@ static void pp_scan_named_ucn_chunks(const uint8_t* bytes, uint64_t length, cons
             const uint64_t bits = b < length ? pp_named_ucn_candidates(bytes, length, b, length - b < 64 ? length : b + 64, trigraphs, true) : 0;
             if (BUSTER_UNLIKELY(bits != 0))
             {
-                scan->first = scan->count == 0 ? b + (uint64_t)__builtin_ctzll(bits) : scan->first;
-                scan->last = b + 63 - (uint64_t)__builtin_clzll(bits);
-                scan->count += (uint32_t)__builtin_popcountll(bits);
+                pp_named_ucn_keep(scan, b, bits);
             }
         }
     }
@@ -3201,7 +3219,20 @@ static bool pp_record_named_ucns(const PPPrepare* prepare, Arena* arena, PPFileD
         result = errors != 0;
         const bool trigraphs = (prepare->refine_flags & C_TOKENIZER_TRIGRAPHS) != 0;
         uint32_t named = 0;
-        for (uint64_t b = scan->first; result && b <= scan->last; b += 64)
+        // The kept candidates' places, or past those, every block from the first candidate to the last again.
+        const bool kept = scan->count <= BUSTER_PP_NAMED_UCN_KEPT;
+        for (uint32_t k = 0; result && kept && k < scan->count; k += 1)
+        {
+            uint32_t token = 0;
+            uint64_t position = 0;
+            uint8_t kind = 0;
+            if (pp_named_ucn_at(prepare->refine_flags, data, scan->kept[k], &token, &position, &kind))
+            {
+                errors[raw_count + named] = (PPRawError){ .token = token, .offset = (uint32_t)position, .kind = kind };
+                named += 1;
+            }
+        }
+        for (uint64_t b = scan->first; result && !kept && b <= scan->last; b += 64)
         {
             for (uint64_t bits = pp_named_ucn_candidates(data->bytes, data->length, b, scan->last + 1, trigraphs, BUSTER_VECTOR_PATH(prepare->vectorized)); bits != 0; bits &= bits - 1)
             {
