@@ -414,6 +414,11 @@ clang's code gives it (CodeGen's `AddVariableConstraints`;
   (its function's target attributes among them): the helper moves them by
   EVEX's `vmovd` and `vmovq`. Without it clang can't place one ("could not
   allocate output register"), and the lowering refuses it by name;
+- mm0 to mm7, k0 to k7, and the x87's st (st(0)) and st(1) (#1846, the owner's
+  decision on #1447): the variable's operand is an MMX, opmask or x87 one in that
+  register (st at t's depth, st(1) at u's), whatever its constraint's letters,
+  as clang's code places it, of the types that class takes (an opmask's with
+  its moves' features);
 - a high byte register (#1846), `register unsigned char c __asm__("ah")`: a
   byte's operand is the high byte, which the helper loads and stores by its
   name (through a register of the first eight, as a REX prefix can't name it)
@@ -929,9 +934,8 @@ Each refusal names its feature, as the driver prints it ("unsupported: ..."):
   but a vector in a template of no instructions that doesn't refer to it;
 - bit-fields;
 - explicit register variables in registers the helper doesn't place one in
-  (rsp, which is the helper's own, APX's r16 to r31 and the other classes'
-  registers: the x87's, MMX's, the opmasks', YMM's and ZMM's), in XMM16 to
-  XMM31 without AVX-512F,
+  (rsp, which is the helper's own, APX's r16 to r31, st(2) to st(7), YMM's and
+  ZMM's), in XMM16 to XMM31 without AVX-512F,
   as memory inputs (`"m"(r10)`, which clang's code refuses too), and of other
   types than a general register's or an XMM register's (an integer in an XMM
   register's variable);
@@ -1203,5 +1207,5 @@ What the lowering still refuses of what GCC and clang take:
   instructions outside its families (an x87 memory operand without a width,
   `fstp (%rax)`, is refused as clang refuses it);
 - explicit register variables in rsp (clang's code moves the variable's value
-  into it, a local's garbage where it has none), and in the other classes'
-  registers (the x87's, MMX's, the opmasks', YMM's and ZMM's).
+  into it, a local's garbage where it has none), and in YMM's and ZMM's
+  registers and st(2) up.

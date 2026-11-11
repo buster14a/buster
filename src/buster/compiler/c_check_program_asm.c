@@ -302,6 +302,8 @@ struct CheckAsmConstraint
     uint32_t general;
     uint32_t tied;
     uint8_t fixed_vector;
+    // An explicit register variable's MMX register's number plus one (#1846), 0 for any.
+    uint8_t fixed_mmx;
     uint8_t x87;
     // A flag output's condition code plus one (x86's, check_asm_flag_condition), 0 for none.
     uint8_t flag;
@@ -1917,9 +1919,10 @@ static bool check_asm_noop_cast(const TypeTable* types, TypeId source, TypeId de
 // "r"((unsigned long)r10) is in r10 but "r"((int)r10) and "r"(r10 + 0) aren't. Its constraint is then that register,
 // whatever its letters: "a"(r10) is in r10, and a matching input is in it rather than in its output's register. A
 // general register's number (0 to 15, by any of its names), 16 plus an XMM register's (16 to 47: XMM16 up, #1846), 48
-// plus a high byte's register's (ah 48, ch 49, dh 50, bh 51), -1 for an operand that names no such variable, or -2 for
-// a register the lowering doesn't place one in: rsp, which is the helper's (clang moves the variable's value into it),
-// APX's r16 to r31 and the other classes (the x87's, MMX's, the opmasks', YMM's and ZMM's).
+// plus a high byte's register's (ah 48, ch 49, dh 50, bh 51), 64 plus an MMX register's (mm0 64 to mm7 71), 72 plus an
+// opmask register's (k0 72 to k7 79), 80 for st (st(0)) and 81 for st(1) (#1846), -1 for an operand that names no such
+// variable, or -2 for a register the lowering doesn't place one in: rsp, which is the helper's (clang moves the
+// variable's value into it), APX's r16 to r31, the x87's deeper registers, YMM's and ZMM's.
 // An object's id is its first declaration's token plus one, which has its attributes.
 static int32_t check_asm_variable_register(const CheckProgram* program, uint32_t node)
 {
@@ -1970,6 +1973,13 @@ static int32_t check_asm_variable_register(const CheckProgram* program, uint32_t
         {
             reg = name.length == 2 && memcmp(name.pointer, high[h], 2) == 0 ? 48 + (int32_t)h : reg;
         }
+        // mm0 to mm7 (64 up) and k0 to k7 (72 up), and the x87's st and st(0) (80) and st(1) (81), as clang names them
+        // (#1846).
+        const bool numbered = name.length == 3 && name.pointer[2] >= '0' && name.pointer[2] <= '7';
+        reg = reg == -2 && numbered && name.pointer[0] == 'm' && name.pointer[1] == 'm' ? 64 + (name.pointer[2] - '0') : reg;
+        reg = reg == -2 && name.length == 2 && name.pointer[0] == 'k' && name.pointer[1] >= '0' && name.pointer[1] <= '7' ? 72 + (name.pointer[1] - '0') : reg;
+        reg = reg == -2 && ((name.length == 2 && memcmp(name.pointer, "st", 2) == 0) || (name.length == 5 && memcmp(name.pointer, "st(0)", 5) == 0)) ? 80 : reg;
+        reg = reg == -2 && name.length == 5 && memcmp(name.pointer, "st(1)", 5) == 0 ? 81 : reg;
         result = reg != -1 ? reg : result;
     }
     return result;
@@ -2352,7 +2362,7 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
         {
             reason = "explicit register variables as inline assembly memory inputs";
         }
-        else if ((variable >= 0 && variable < 16 && registered) || (variable >= 48 && registered))
+        else if ((variable >= 0 && variable < 16 && registered) || (variable >= 48 && variable < 52 && registered))
         {
             // Fixed to it (taken first, below), and not a matching input's: clang gives it the variable's register. A high
             // byte register's (48 to 51) takes its whole register: a byte's is the high byte, a wider value's the
@@ -2371,6 +2381,33 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
             constraint->fixed_vector = (uint8_t)(variable - 15);
             reason = variable >= 32 && (instruction_set->features & BUSTER_X86_FEATURE(AVX512F)) == 0 ?
                      "explicit register variables in XMM16 to XMM31 without AVX-512F" : NULL;
+        }
+        else if (variable >= 64 && variable < 72 && registered)
+        {
+            // An MMX register's variable (#1846), whatever its constraint's letters, as clang's code places it.
+            place->kind = BUSTER_CHECK_ASM_MMX;
+            place->size = (uint8_t)size;
+            place->tied = BUSTER_CHECK_NONE;
+            constraint->fixed_mmx = (uint8_t)(variable - 63);
+        }
+        else if (variable >= 72 && variable < 80 && integer && registered)
+        {
+            // An opmask register's variable (#1846), by k's moves and their features.
+            const uint64_t needed = size <= 2 ? BUSTER_X86_FEATURE(AVX512F) : BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512BW);
+            place->kind = BUSTER_CHECK_ASM_MASK;
+            place->tied = BUSTER_CHECK_NONE;
+            constraint->masks = 1u << (variable - 72);
+            reason = (instruction_set->features & needed) != needed ? size <= 2 ? "inline assembly opmask operands without AVX-512F" :
+                                                                         "inline assembly opmask operands of 4 or 8 bytes without AVX-512BW" : NULL;
+        }
+        else if ((variable == 80 || variable == 81) && x87 != 0)
+        {
+            // st or st(1)'s variable (#1846): t's depth or u's, as clang's code takes it.
+            place->kind = BUSTER_CHECK_ASM_X87;
+            place->tied = BUSTER_CHECK_NONE;
+            place->reg = (uint8_t)(variable - 80);
+            place->size = (uint8_t)x87;
+            constraint->x87 = (uint8_t)(variable - 79);
         }
         else if (variable >= 0)
         {
@@ -2492,6 +2529,19 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
                 reg = (vectors & bit) == 0 ? constraints[k].fixed_vector - 1 : -2;
                 vectors |= bit;
             }
+            else if (pass == 0 && place->kind == BUSTER_CHECK_ASM_MMX && constraints[k].fixed_mmx != 0)
+            {
+                // An explicit register variable's MMX register (#1846), before any other operand takes one.
+                const uint32_t bit = 1u << (constraints[k].fixed_mmx - 1);
+                reg = (mmx & bit) == 0 ? constraints[k].fixed_mmx - 1 : -2;
+                mmx |= bit;
+            }
+            else if (pass == 0 && place->kind == BUSTER_CHECK_ASM_MASK && place->tied == BUSTER_CHECK_NONE && (constraints[k].masks & (constraints[k].masks - 1)) == 0)
+            {
+                // One opmask register (a variable's, #1846), before the others take one.
+                reg = (masks & constraints[k].masks) == 0 ? __builtin_ctz(constraints[k].masks) : -2;
+                masks |= constraints[k].masks;
+            }
             else if (pass == 1 && place->kind == BUSTER_CHECK_ASM_GENERAL && place->tied == BUSTER_CHECK_NONE && !fixed && output)
             {
                 reg = check_asm_take(allowed, &taken);
@@ -2513,14 +2563,14 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
                 reg = free != 0 ? __builtin_ctz(free) : -3;
                 vectors |= free != 0 ? 1u << reg : 0;
             }
-            else if (pass == 3 && place->kind == BUSTER_CHECK_ASM_MMX && place->tied == BUSTER_CHECK_NONE)
+            else if (pass == 3 && place->kind == BUSTER_CHECK_ASM_MMX && place->tied == BUSTER_CHECK_NONE && constraints[k].fixed_mmx == 0)
             {
                 // mm0 up, but the clobbered ones.
                 const uint32_t free = ~mmx & 0xffu;
                 reg = free != 0 ? __builtin_ctz(free) : -3;
                 mmx |= free != 0 ? 1u << reg : 0;
             }
-            else if (pass == 3 && place->kind == BUSTER_CHECK_ASM_MASK && place->tied == BUSTER_CHECK_NONE)
+            else if (pass == 3 && place->kind == BUSTER_CHECK_ASM_MASK && place->tied == BUSTER_CHECK_NONE && (constraints[k].masks & (constraints[k].masks - 1)) != 0)
             {
                 // k0 up (Yk's k1 up), but the clobbered ones, as clang's allocation takes them.
                 const uint32_t free = ~masks & constraints[k].masks;
