@@ -163,57 +163,61 @@ static __attribute__((noinline)) bool main_information(int count, char** argumen
     for (int i = 0; i < count; i += 1)
     {
         const char* argument = arguments[i];
-        if (strcmp(argument, "--") == 0)
+        // The argument's option IDs (c_option_table.c).
+        const COptionMatch match = c_option_find(argument);
+        const COption option = match.exact;
+        if (option == C_OPTION_END_OF_OPTIONS)
         {
             input |= i + 1 < count;
             break;
         }
-        if (strcmp(argument, "-target") == 0)
+        if (option == C_OPTION_TARGET)
         {
             missing_target = i + 1 >= count;
             target = !missing_target ? arguments[++i] : NULL;
         }
-        else if (strncmp(argument, "--target=", 9) == 0)
+        else if (match.joined == C_OPTION_TARGET_EQ)
         {
             target = argument + 9;
             missing_target = false;
         }
-        else if (strcmp(argument, "--version") == 0)
+        else if (option == C_OPTION_VERSION)
         {
             version = true;
         }
-        else if (strcmp(argument, "-dumpmachine") == 0)
+        else if (option == C_OPTION_DUMPMACHINE)
         {
             machine = true;
         }
-        else if (strcmp(argument, "-dumpversion") == 0 || strcmp(argument, "-dumpfullversion") == 0)
+        else if (option == C_OPTION_DUMPVERSION || option == C_OPTION_DUMPFULLVERSION)
         {
             numeric = true;
         }
-        else if (strcmp(argument, "-print-search-dirs") == 0)
+        else if (option == C_OPTION_PRINT_SEARCH_DIRS)
         {
             directories = true;
         }
-        else if (strncmp(argument, "-print-file-name=", 17) == 0)
+        else if (match.joined == C_OPTION_PRINT_FILE_NAME_EQ)
         {
             file = argument + 17;
         }
-        else if (strncmp(argument, "-print-prog-name=", 17) == 0)
+        else if (match.joined == C_OPTION_PRINT_PROG_NAME_EQ)
         {
             program = argument + 17;
         }
-        else if (strcmp(argument, "-v") == 0)
+        else if (option == C_OPTION_V)
         {
             verbose = true;
         }
-        else if ((pp_option_takes_value(argument) || strcmp(argument, "--lanes") == 0 || strcmp(argument, "--lane-cpus") == 0 || strcmp(argument, "--worker-budget") == 0 ||
-                  strcmp(argument, "--id-order") == 0 || strcmp(argument, "-l") == 0 || strcmp(argument, "-L") == 0 || strcmp(argument, "-Xlinker") == 0) && i + 1 < count)
+        else if ((pp_option_id_takes_value(option) || option == C_OPTION_LANES || option == C_OPTION_LANE_CPUS || option == C_OPTION_WORKER_BUDGET ||
+                  option == C_OPTION_ID_ORDER || option == C_OPTION_L_LIBRARY || option == C_OPTION_L_DIRECTORY || option == C_OPTION_XLINKER) &&
+                 i + 1 < count)
         {
             i += 1;
         }
         else
         {
-            input |= argument[0] != '-' || strcmp(argument, "-") == 0;
+            input |= argument[0] != '-' || option == C_OPTION_STANDARD_INPUT;
         }
     }
     const bool information = version || machine || numeric || directories || file != NULL || program != NULL;

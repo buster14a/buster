@@ -122,8 +122,8 @@ unused-warning fixtures also check exact scope-completion tokens.
   and two-lane deferred paths, and `-c`'s refusal of each: `docs/c-checker.md`'s
   "Semantic error recovery", #1447; `--type-sugar-only` runs
   `c_check_type_sugar_driver_test.c` alone, the typedef sugar diagnostics keep
-  through typedef chains, members and qualified arrays, `docs/c-checker.md`'s
-  "Type sugar", #1447). Its library-builtin comparisons are pinned to Clang
+  through typedef chains, members and qualified arrays, and const assignment's
+  notes, `docs/c-checker.md`'s "Type sugar" and "Const assignment", #1447). Its library-builtin comparisons are pinned to Clang
   23.1.4's official build, CI's reference: it compares `clang --version` with
   it, prints `expected clang 23.1.4, found …` when another build is found, and
   skips only the plain names that build's vendor is known to classify
@@ -192,7 +192,8 @@ unused-warning fixtures also check exact scope-completion tokens.
   `--embed-initializers` selects real C23 resource files, independent and Clang object bytes, automatic native
   initialization and an 8 MiB resource whose parser tokens, graph nodes and initializer parts stay bounded. It also
   exercises the source driver and three deferred/function lanes; grant it at least three cores where `cores` is used.
-  `--requests` selects #1057's request tests (`c_check_request_test.c`) and the source benchmarks' preparation tests.
+  `--requests` selects #1057's request tests (`c_check_request_test.c`), with #1444's option IDs and option forms
+  (`c_option_table_test.c`, the driver guide's "Option matching"), and the source benchmarks' preparation tests.
   `c_check_self_assign_driver_test.c` checks #1391's macro self-assignment boundary. The warning is suppressed
   when the assignment operator or either variable-name use comes from a macro body or substituted argument;
   macro-produced parentheses or declarations alone do not suppress an ordinary source assignment. Original

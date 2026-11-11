@@ -992,6 +992,13 @@ typedef enum CheckAttributeArgumentError
     CHECK_ARGUMENT_ALIGNAS_INTEGER_CONSTANT,
     // aligned's and _Alignas's "requested alignment must be 4294967296 bytes or smaller", at the attribute (#1447).
     CHECK_ARGUMENT_ALIGNMENT_TOO_LARGE,
+    // The type tags' (#1447, c_check_type_safety_input.c): type_tag_for_datatype's parser's "expected identifier" (its kind's
+    // place, or a flag's) and "invalid comparison flag 'F'; use 'layout_compatible' or 'must_be_null'" (F's token in the
+    // value), at the token; and its variable's initializer of no integer constant, "'type_tag_for_datatype' attribute
+    // requires the initializer to be an integer constant expression", at the attribute.
+    CHECK_ARGUMENT_TYPE_TAG_IDENTIFIER,
+    CHECK_ARGUMENT_TYPE_TAG_FLAG,
+    CHECK_ARGUMENT_TYPE_TAG_INITIALIZER,
     CHECK_ARGUMENT_COUNT,
 } CheckAttributeArgumentError;
 
@@ -2892,6 +2899,13 @@ static bool check_input_type_argument(CheckInputReader* reader, const CheckInput
     return check_input_attribute_equal(name, "vec_type_hint") || check_input_attribute_equal(name, "preferred_type");
 }
 
+// Whether a generic attribute's name, without a keyword's underscores, is one of the type tags' rules (#1447,
+// c_check_type_safety_input.c): argument_with_type_tag's or pointer_with_type_tag's.
+static bool check_input_type_tag_rule(String8 name)
+{
+    return check_input_attribute_equal(name, "argument_with_type_tag") || check_input_attribute_equal(name, "pointer_with_type_tag");
+}
+
 // What clang's parser makes of a custom attribute's arguments (#1447): an error, the attribute kept, or dropped without a
 // word.
 #define BUSTER_CHECK_CUSTOM_ERROR 0u
@@ -2900,6 +2914,13 @@ static bool check_input_type_argument(CheckInputReader* reader, const CheckInput
 
 static uint32_t check_input_availability_parse(CheckInputReader* reader, CheckInputAttributes* attributes, CheckInputAttribute* attribute);
 static uint32_t check_input_external_source_parse(CheckInputReader* reader, CheckInputAttributes* attributes, CheckInputAttribute* attribute);
+static uint32_t check_input_type_tag_parse(CheckInputReader* reader, CheckInputAttributes* attributes, CheckInputAttribute* attribute);
+static bool check_input_type_tag_handled(CheckInputReader* reader, CheckInputAttributes* attributes, CheckInputAttribute* attribute, uint32_t declaration, TypeId type);
+static bool check_input_type_tag_declaration(CheckInputReader* reader, CheckInputAttributes* attributes, uint32_t name, TypeId type, uint32_t previous,
+                                             uint32_t initializer);
+static bool check_input_type_tag_finish(CheckInputReader* reader, uint32_t declaration, uint32_t begin, uint32_t end);
+struct CheckTypeTagPending;
+static struct CheckTypeTagPending* check_type_tags_pending(const CheckInput* input, uint32_t declaration);
 static bool check_input_availability_handle(CheckInputReader* reader, CheckInputAttributes* attributes, CheckInputAttribute* attribute);
 
 static const CheckInputFactRow* check_input_attribute_gnu_fact(CheckInputReader* reader, uint32_t name);
@@ -2948,10 +2969,12 @@ static bool check_input_attribute_ignored_lists(CheckInputReader* reader, uint32
                 const uint32_t strings = row != NULL ? row->strings : 0;
                 const bool typed = (flags & BUSTER_CHECK_ARGUMENTS_TYPE) != 0 || (alignas && arguments_first < arguments_end &&
                                                                                  check_constant_type_start(parser, arguments_first));
-                // availability's and external_source_symbol's arguments, which clang's parser reads its own way (#1447).
+                // availability's, external_source_symbol's and type_tag_for_datatype's arguments, which clang's parser reads its
+                // own way (#1447).
                 const String8 spelled = known && argued ? check_input_attribute_name(reader, parser->tokens.names[name]) : (String8){ 0 };
                 const bool availability = check_input_attribute_equal(spelled, "availability");
-                const bool custom = availability || check_input_attribute_equal(spelled, "external_source_symbol");
+                const bool type_tag = check_input_attribute_equal(spelled, "type_tag_for_datatype");
+                const bool custom = availability || type_tag || check_input_attribute_equal(spelled, "external_source_symbol");
                 if (pass == 0 && valid && custom)
                 {
                     CheckInputAttributes holder = { 0 };
@@ -2963,7 +2986,8 @@ static bool check_input_attribute_ignored_lists(CheckInputReader* reader, uint32
                         .argument_first = arguments_first,
                         .argument_end = arguments_end,
                     };
-                    valid = (availability ? check_input_availability_parse(reader, &holder, &item) : check_input_external_source_parse(reader, &holder, &item)) !=
+                    valid = (availability ? check_input_availability_parse(reader, &holder, &item) :
+                             type_tag ? check_input_type_tag_parse(reader, &holder, &item) : check_input_external_source_parse(reader, &holder, &item)) !=
                             BUSTER_CHECK_CUSTOM_ERROR;
                 }
                 uint32_t index = 0;
@@ -3631,6 +3655,9 @@ static bool check_input_attribute_generic(String8 name, const CheckInputFactRow*
         "diagnose_as_builtin",
         // Objective-C's pointer type attributes, which change no C type but objc_gc's qualifier (check_input_attribute_objc).
         "objc_gc", "objc_ownership",
+        // The type tags (#1447), whose handlers' checks are check_input_type_tag_handled's and whose calls' warnings are
+        // check_common_type_safety's.
+        "argument_with_type_tag", "pointer_with_type_tag", "type_tag_for_datatype",
         // A type's annotation (#1447), sugar that changes no type: its string's and its constants' checks are annotate's
         // (check_input_attribute_annotate).
         "annotate_type",
@@ -4119,8 +4146,11 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
         const bool parenthesized = attribute.argument_first == attribute.name_token + 2;
         const bool availability = valid && known && custom && parenthesized && check_input_attribute_equal(name, "availability");
         const bool external_source = valid && known && custom && parenthesized && check_input_attribute_equal(name, "external_source_symbol");
+        // type_tag_for_datatype's kind, type name and flags (#1447, check_input_type_tag_parse) too.
+        const bool type_tag = valid && known && custom && parenthesized && check_input_attribute_equal(name, "type_tag_for_datatype");
         const uint32_t custom_parse = availability ? check_input_availability_parse(reader, attributes, &attribute) :
-                                      external_source ? check_input_external_source_parse(reader, attributes, &attribute) : BUSTER_CHECK_CUSTOM_KEPT;
+                                      external_source ? check_input_external_source_parse(reader, attributes, &attribute) :
+                                      type_tag ? check_input_type_tag_parse(reader, attributes, &attribute) : BUSTER_CHECK_CUSTOM_KEPT;
         valid &= custom_parse != BUSTER_CHECK_CUSTOM_ERROR;
         const bool dropped = custom_parse == BUSTER_CHECK_CUSTOM_DROPPED;
         // A type argument's (ParseTypeName's): an identifier that names no type is "unknown type name"; any other start of
@@ -4466,6 +4496,11 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
             const bool merged = tcb || check_input_attribute_equal(name, "modular_format") || check_input_attribute_equal(name, "availability");
             reader->tcb_attributes |= tcb;
             reader->merged_attributes |= merged;
+            // The type tags (#1447), whose declarations a body's lane can't publish in source order for its calls
+            // (check_input_type_tag_declaration).
+            const bool type_tag = check_input_type_tag_rule(name) || check_input_attribute_equal(name, "type_tag_for_datatype");
+            reader->type_tag_attributes |= type_tag;
+            check_input_lane_refuse(reader, reader->lane && type_tag, "a body declares a type tag attribute");
             // Objective-C's pointer type attributes are a declarator's or a type name's (check_input_attribute_objc); C23's
             // spellings, which apply to other types than GNU's do, are refused by name.
             const bool objc = check_input_attribute_equal(name, "objc_gc") || check_input_attribute_equal(name, "objc_ownership");
@@ -8033,6 +8068,10 @@ static bool check_input_attribute_subjects(CheckInputReader* reader, CheckInputA
         if (valid && generic && !attribute->ignored && !attribute->subject_ignored)
         {
             valid = check_input_attribute_checks(reader, attributes, attribute, declaration, type, name, begin);
+        }
+        if (valid && generic && !attribute->ignored && !attribute->subject_ignored && reader->type_tag_attributes)
+        {
+            valid = check_input_type_tag_handled(reader, attributes, attribute, declaration, type);
         }
         // x86's interrupt where its subjects take it (#147): its handler's checks of the function's type. One that fails
         // them is no handler, as clang's handleAnyX86InterruptAttr returns before adding the attribute: no direct call's

@@ -7098,11 +7098,19 @@ must deduce the same type, by C23 `auto`'s deduction below
 (`check_input_c23_auto_deduce`; `BUSTER_CHECK_DECLARATION_GNU_AUTO` keeps
 `__auto_type`'s words in its errors). Declarators that deduce differently are
 clang's error at the declaration, in the checker's words ("'__auto_type'
-deduced types differ within one declaration"). Refused by name: `_Atomic`,
-`restrict` and type attributes with `__auto_type`; a variably modified deduced
-type, whose sizes the declaration would have evaluated; and a variable with
-linkage that a declaration before it declared, whose types bind before the
-deduction.
+deduced types differ within one declaration"). A variably modified deduced
+type is the initializer's, whose sizes its own declaration evaluated, and the
+declaration evaluates none, as clang's doesn't (`__auto_type p = &vla;`); a
+cast to a variably modified type in the initializer is refused by name, as the
+cached evaluator that types it doesn't take one. A redeclaration of a
+variable with linkage takes the earlier declaration's type rather than a
+deduced one, as clang's C `mergeTypes` takes the placeholder before deducing
+(`extern long p; __auto_type p = 1;` is a long, its initializer converted;
+`check_input_auto_type_merged`), through pointer declarators. Refused by
+name: `_Atomic`, `restrict` and type attributes with `__auto_type`, a
+variably modified cast in the initializer, and a
+redeclaration whose merge clang refuses (its "redefinition of 'p' with a
+different type: 'const __auto_type' vs 'int'").
 
 `test-checker`'s source fixtures compare these with clang, their acceptance and
 first error's line, on both paths, and its programs (`local-labels`,
@@ -8115,6 +8123,45 @@ arguments against the function. The checker now gives these as clang does.
     attribute", once its declaration's attributes are merged), and a
     redeclaration's other arguments are "attribute 'modular_format' is
     already applied with different arguments". It is an optimization's hint.
+  - The type tags (`c_check_type_safety_input.c`): `argument_with_type_tag`
+    and `pointer_with_type_tag`'s kind, argument index and tag index, on a
+    function or a function pointer, and `type_tag_for_datatype`'s kind, type
+    and flags (`layout_compatible`, `must_be_null`) on a variable. The tag's
+    arguments are read as clang's parser reads them
+    (`check_input_type_tag_parse`), with its errors at the token ("expected
+    identifier", "expected ','", "invalid comparison flag 'F'; use
+    'layout_compatible' or 'must_be_null'", "unknown type name 'T'", "expected
+    a type", "expected ')'"). The handlers' checks follow
+    (`check_input_type_tag_handled`): each index an integer constant naming a
+    parameter, a variadic function's past them too, `pointer_with_type_tag`'s
+    argument a pointer parameter, and the tag's declaration a variable. Each
+    function, function pointer or variable keeps its own rules and tags, or
+    its previous declaration's where it has none of that kind, as clang's
+    redeclarations merge them; a variable of an integer type with an
+    initializer registers its tags for the initializer's value (an
+    initializer that is no integer constant is "'type_tag_for_datatype'
+    attribute requires the initializer to be an integer constant expression").
+    At each call of a function or function pointer named directly,
+    `-Wtype-safety` (on by default) checks each rule as clang's
+    CheckArgumentWithTypeTag does (`check_common_type_safety`): the tag
+    argument, through casts, `&`, `*`, a comma's right operand and a
+    constant condition's arm, names a variable's tag or is an integer literal
+    whose value was registered before the call; a tag of another kind is "this
+    type tag was not designed to be used with this function"; else the
+    argument, as converted for its parameter (but a pointer's own type where
+    the parameter is `void *`, which a `void *` argument skips), must have the
+    tag's type (a pointer to it), plain `char` matching the `signed` or
+    `unsigned char` it is: "argument type 'A' doesn't match specified 'K' type
+    tag that requires 'T'"; a `layout_compatible` tag compares as clang's
+    isLayoutCompatible (`check_common_layout_compatible`), and a
+    `must_be_null` tag wants a null pointer constant ("specified K type tag
+    requires a null pointer"). Refused by name: a rule's index past a variadic
+    function's parameters (whose calls clang checks for that argument), a
+    rule on a member, a tag on a parameter, a tag whose type the constant
+    reader doesn't read, and these attributes in a body a lane reads. A
+    file-scope initializer that calls a function gives its tag's error before
+    "initializer element is not a compile-time constant", which clang gives
+    first.
   - `objc_ownership` and `objc_gc` are a declarator's type's, applied as
     clang's GetFullTypeForDeclarator distributes them
     (`check_input_attribute_objc`): the specifiers' to the declarator's
@@ -8575,9 +8622,12 @@ arguments against the function. The checker now gives these as clang does.
   (`check_program_emit_patchable`, both tiers' code) is the [object writer
   guide](object-writer-and-linker.md)'s "Patchable function entries".
 
-  The rest stay refused by name: the attributes whose handlers clang has its
-  own (`pass_object_size` and others). Recognizing their names does not
-  supply those handlers or their ABI effects.
+  The rest stay refused by name, where they apply: `format_matches`,
+  `cfi_salt`, `objc_bridge`, `objc_bridge_related`, `swift_name`,
+  `swift_async_name`, `swift_error`, `swift_async_error`, `swift_newtype` and
+  `swift_wrapper` in either syntax, and the C23 spellings of `objc_gc`,
+  `objc_ownership`, `address_space` and the OpenCL spaces, and of
+  `annotate_type`. Recognizing their names does not supply their handlers.
 - **Type arguments.** The attributes clang's `attributeIsTypeArgAttr` names
   (`preferred_type`, `vec_type_hint`, `iboutletcollection`, `preferred_name`,
   and C++'s `Owner`, `Pointer`, `contained_type` and
@@ -9256,13 +9306,28 @@ enables, which this checker doesn't all give.
   isn't constant).
   `-Wreturn-type`'s walk takes the same truth, so `if (n || 1) return 1;` ends
   a function without the warning.
-- **A const variable's assignment.** "cannot assign to variable 'x' with
-  const-qualified type 'const int'" with clang's "variable 'x' declared const
-  here" note at its name, as clang's `DiagnoseConstAssignment` walks to it:
-  through an array's subscripts (named with its declared type,
-  `'const int[2]'`), a record's `.` members that aren't const themselves, and
-  an arrow to the pointer variable (`p->a` of a `const struct s *p` names
-  `p`). A pointer's target stays "read-only variable is not assignable".
+- **Const assignment** (#1447). clang's `DiagnoseConstAssignment`
+  (`check_semantic_const_assignment`) walks an assignment's lvalue through
+  members, subscripts and vector elements to a variable or a direct call. It
+  names the first const level it meets and adds a note for each const level,
+  outermost first:
+  - "cannot assign to non-static data member 'a' with const-qualified type
+    'const int'", noted at the member's declarator, which is found in its
+    record's body;
+  - "cannot assign to variable 'x' with const-qualified type 'const int'",
+    noted at the variable's name;
+  - "cannot assign to return value because function 'f' returns a const
+    value", noted at the return type's first type specifier.
+
+  A level reached through `->` is const by its pointer's target. A record with
+  a const member somewhere in it (`DiagnoseRecursiveConstFields`,
+  `check_semantic_const_fields`) names that member's first instance,
+  breadth-first through its members' records, and adds a note for each one,
+  with "nested" past the record's own members. The lvalue is named as a
+  member, a variable, or, parenthesized or otherwise, "lvalue". Any other
+  lvalue gets "read-only variable is not assignable". A report carries up to
+  `BUSTER_CHECK_SEMANTIC_NOTES` (32) notes, and the search visits at most 64
+  records.
 - **Arithmetic on a pointer to an incomplete type**: clang's "arithmetic on a
   pointer to an incomplete type 'struct s'" (a subscript's "subscript of
   pointer to incomplete type", at its `[`), of the pointee as written, with its
@@ -9290,8 +9355,6 @@ enables, which this checker doesn't all give.
   spacing (`check_driver_vla_bounds`): `'int (*)[n + 1]'`, `'int[n][m * 2]'`.
   `c_check_type_sugar_driver_test.c` compares these whole-output with clang.
 - **Differences left.**
-  - An assignment to a member that is const itself is "read-only variable is
-    not assignable", where clang names the member with its note.
   - A qualifier written again over a qualified typedef's array
     (`const CI twice[1]`) is dropped: clang prints
     `'const CI[1]' (aka 'const int[1]')`, this `'CI[1]'`.

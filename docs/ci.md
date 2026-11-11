@@ -28,7 +28,9 @@ pre-merge PRs can use the no-code exemption.
 
 The workflow in `.github/workflows/9700x.yml` runs correctness tests on
 GitHub-hosted `ubuntu-26.04` runners. Its matrix builds the triggering revision
-with `BUSTER_HOST_ARCH=x86-64` and `BUSTER_HOST_ARCH=native`. Both use the current
+with `BUSTER_HOST_ARCH=x86-64` and `BUSTER_HOST_ARCH=native`; on a pull request,
+the second row is the vector row, `BUSTER_HOST_ARCH=vector` (see "The vector
+row", #2033). Both use the current
 official stable LLVM 23.1.4 release, including its matching C++ pragma oracle,
 LLVM object/DWARF tools and lld. Each row also builds the clang server that
 the semantic driver's checks send the oracle clang's runs to (#2071), from the
@@ -55,7 +57,8 @@ build. Generated-code ISA and ABI remain controlled by the existing target
 options. Both hosted variants log their CPU, target features and selected path.
 The baseline leg must report `scalar`; the native leg uses vector kernels when
 the full predicate in `host_isa.h` holds, and scalar kernels otherwise. A hosted
-CPU without AVX-512 therefore still runs the complete correctness suite.
+CPU without AVX-512 therefore still runs the complete correctness suite. The
+vector row must report `vector`, on CPUs its probe qualified.
 
 Each matrix row is a call of `.github/workflows/hosted-correctness.yml`, which
 runs the row's inventory as 4 shards (`matrix.shard`), a runner each, dealt by
@@ -74,7 +77,9 @@ readers and the TSan/MSan `main.c` compiles) run in its shard 1, and each
 shard's sanitizer reports are an artifact of its own.
 
 Standard `ubuntu-26.04` runners do not promise a particular CPU model or this
-feature set. Required vector coverage comes from the real Ryzen 7 9700X, after
+feature set. A pull request's vector row draws runners until one whose CPU
+qualifies runs each of its shards (see "The vector row"), with no emulation.
+Required native vector coverage of the measured `znver5` build comes from the real Ryzen 7 9700X, after
 both hosted variants pass on the same triggering revision. The hardware job
 asserts `BUSTER_HOST_VECTOR=1`, builds with `BUSTER_HOST_ARCH=znver5` and runs
 the complete suite before any benchmarks. A pull request never runs it (#2055,
@@ -83,7 +88,7 @@ the owner's choice on 2026-11-10, after #1272 had dropped its native suite on
 measurements run on its merged first-parent state in the nightly window, and
 on dispatched runs. Hosted and hardware jobs read one
 suite inventory, `tools/ci/correctness.tests`, with the same counts, seeds and
-external cross-checks. There is no vector emulation or randomized runner pool.
+external cross-checks. There is no vector emulation.
 Hosted runners are virtual machines, so the compiler runs there with
 transparent huge pages off (#1109, `arena_page_policy` in `lane.c`), and the
 9700X with them as its system has them.
@@ -349,9 +354,128 @@ notice with another clang) and the inventory's skip on a fake checkout,
 toolchain and build. `bash tests/ci/hosted-tools.sh` checks the same 77 failure
 against the tree that `install-hosted-tools.sh` installs.
 
-Native rows keep their per-shard builds until #2033 gives the vector row an
-explicit target: each hosted CPU selects its own path. Reuse across revisions
+Native rows keep their per-shard builds: each hosted CPU selects its own path.
+The vector row's explicit target makes its 4 builds one configuration, so it
+can share one product next (see "The vector row"). Reuse across revisions
 (a change to fixture data alone) is a separate extension (#2032's discussion).
+
+## The vector row
+
+Hosted `native` rows ran the vector path at random: 62 of 105 sampled jobs did
+(59%; 41% in the busiest hours). The others drew a Zen 3 EPYC 7763, or an EPYC
+9V74 VM with AVX-512 masked, and ran scalar, so a defect only the vector path
+has failed some runs and not others (#2033's review). The owner's decision D3
+(2026-11-10) replaces that row with a deterministic vector row, with **no
+emulation**: the workflow starts hosted jobs until enough of them draw a CPU
+that runs the vector path.
+
+**Pilot scope.** A pull request's plain row (its second row, in place of
+`native`): 4 items, its shards. The `x86-64` row is unchanged, and pushes to
+main, nightly dispatches and the daily runs keep their `native` rows, whose
+names `tools/ci/nightly.c` counts. The sanitizer configurations
+(vector × address, thread, memory: 16 items) are the next step.
+
+**The target.** `BUSTER_HOST_ARCH=vector` builds `-march=x86-64-v4 -maes
+-mgfni -mvaes -mavx512vbmi -mavx512vbmi2 -mavx512vpopcntdq -mavx512bitalg
+-mavx512vnni`, exactly `host_isa.h`'s predicate, never `native` or `znver5`;
+configuring fails unless it selects `BUSTER_HOST_VECTOR=1`
+(`cmake/BusterSettings.cmake`). `./build.sh print-host-flags` prints the host
+target, which the inventory's commands that compile for the build's host
+(`tools/ci/correctness.tests`) and the row's predefines and parser smoke test
+pass to clang and to the compiler, for every row. The row tests the vector
+path compiled for x86-64-v4 with generic tuning, not `znver5`'s code
+generation: the 9700X still runs native correctness of the measured `znver5`
+build in the nightly window.
+
+**Draws** (`.github/workflows/hosted-correctness.yml`, `draw-1` to `draw-4`, and
+`tools/ci/vector-draw.sh`). A hosted VM belongs to the job it runs, so the
+candidate that probes is the one that works. Each draw starts generic
+candidates, which run the shards' own steps (`*row-steps`), each step gated on
+the shard the candidate holds:
+
+1. **Probe**, before the checkout: a C probe, built by the image's `cc` with
+   the target's flags, whose `#if` is the predicate itself, asks
+   `__builtin_cpu_supports` for `x86-64-v4` and each predicate feature. It
+   reads what the OS enables too, so a VM that masks AVX-512 fails it, whatever
+   its model. A probe that stops (a CPU without AVX2 may meet an instruction
+   the flags let it use) doesn't qualify either. Its record: the level, the
+   candidate, the runner, the CPU model, the verdict and the missing features.
+2. **Publish**: every candidate uploads its record as
+   `vector-SANITIZER-OOPT-ATTEMPT-probe-LEVEL-CANDIDATE-yes|no`.
+3. **Take or redraw**: a qualifying candidate waits for its draw's assignment
+   and takes the item it names as its shard (`BUSTER_SHARD`). It builds the
+   compiler and runs the shard as any shard does, after the confirmation below.
+   A candidate without an item ends within seconds, successfully, as a redraw,
+   so that rerunning the failed jobs reruns only real failures. Every candidate
+   uploads its record with its decision (`-draw-LEVEL-CANDIDATE`).
+
+**The claim is a rendezvous by rank**, the design's fallback. Its first
+candidate was artifact-name uniqueness: GitHub refuses an upload under a name
+the run already has, and the candidates would have claimed an item by
+uploading its name. The race fixture (below) disproved it on 2026-11-11 (run
+42993863311): when 16 jobs uploaded one name within the same second, all 16
+uploads succeeded, in each of 4 rounds, and the run held 16 artifacts by that
+name. So no candidate claims anything. Each draw's **collector**
+(`collect-1` to `collect-3`, and the verdict's reading after the last) starts
+with its draw and polls the run every 5 s, through the artifacts and jobs APIs
+(`actions: read`). It waits until as many candidates qualified as items are
+missing, or every candidate has published its verdict or ended, at most 25
+minutes. Then it assigns: the qualifying candidates, by their numbers, get the
+missing items, the costliest first (`BUSTER_VECTOR_ITEMS`, `1 2 3 4`: shard 1
+also runs the row's once-only steps, and the costs deal the rest evenly). One
+job decides, and it uploads the decision once, as an artifact whose name holds
+it: `-assign-LEVEL-ITEMxCANDIDATE...`. Nothing can take an item twice. It never
+waits for an item's tests. The next draw starts candidates for the items still
+missing alone: 3 per item in the first draw (12), then 4, 5 and 5 per missing
+item. With draws independent, as #2033's 24 runs measured, a binomial model
+gives:
+
+| Rate of qualifying CPUs | Runs needing a 2nd draw | a 3rd | a 4th | Still short after 4 |
+| --- | ---: | ---: | ---: | ---: |
+| 41% (busiest hours) | 20.5% | 2.3% | 0.16% | 0.011% |
+| 59% (sampled mean) | 1.8% | 0.045% | 0.0005% | ~0 |
+
+**Evidence and verdict.** Before its suite, an item's candidate confirms that
+the build's target selects `BUSTER_HOST_VECTOR=1` and runs `benchmark-lexer`
+on `x86_64_encoder.c`, which a scalar build refuses: the vector lexer lexes
+all 592 KB on this CPU, no part needing the scalar lexer, and the tokens must
+match the scalar twin's. Once every step passed, it uploads its evidence
+(`-evidence-ITEM`): the probe's verdict and CPU, its decision, the target,
+`BUSTER_HOST_VECTOR=1`, the kernels' run and the suite's pass. The `verdict`
+job (`vector-draw.sh verdict`) requires exactly one passing qualified
+execution of each item by the candidate its assignment names. Its summary
+lists every candidate's CPU and decision and every item's runner. An item no
+candidate held fails it as **incomplete: no qualifying CPU drawn**, which is
+not a test failure; an item whose run failed fails as such (its candidate's job
+failed too).
+
+**Attempts and reruns.** Every record carries the run attempt. Rerunning all
+jobs draws and assigns every item afresh. Rerunning the failed jobs reruns no
+collector, so the earlier attempt's assignments stand: an item's candidate
+reruns it on a new runner, and if that runner doesn't qualify, the job fails,
+saying that no test failed and to rerun the failed jobs again. After an
+incomplete verdict the draws all passed: re-run all jobs to draw again.
+
+**Permissions and the race fixture.** Nothing needs write access: every record
+is the run's own artifact, which a fork's pull request can upload too.
+`.github/workflows/vector-claim-race.yml`, on pull requests that change the
+draws (the row workflow, `tools/ci/vector-draw.sh`) or the fixture and on
+dispatch, runs 16 racers, each on its own runner, as one draw's candidates at
+one instant, through the same script: about half qualify (by a hash of the
+racer and the run), the collector assigns the 4 items, and the judge requires
+each assigned item taken by exactly the racer its assignment names, only by a
+qualifying racer, no racer taking two, and min(4, qualifying racers) items
+assigned. Its control round uploads one name from every racer at once and
+reports how many succeeded. `bash tests/ci/vector-draw.sh` tests the script's
+collector, candidates (reruns among them) and verdict against a fake `gh`;
+the PR's `evidence` job runs it.
+
+**Sharing the product next (#2032).** The explicit target makes the row's 4
+builds one configuration. The build runs the executable (the baked tables), so
+it needs a qualifying CPU too: the next step makes the build an item that the
+first draw's collector assigns first, and the shards' candidates install its
+product with `tools/ci/hosted-product.sh` once their own probes qualified,
+with the probe's verdict in the product's checks in place of `portable`'s.
 
 ## CI latency baseline
 

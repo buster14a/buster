@@ -5691,9 +5691,9 @@ static bool check_test_driver_reports_dense(const Parser* parser, Preprocessor* 
                 // Share the text renderer, not the sparse walk's selection or ordering. The exact semantic
                 // catalogue separately compares this spelling and its caret against Clang (#1107).
                 uint32_t location = phase == 2 ? extra[index].token : token;
-                PPOutputDiagnosticNote note = { 0 };
+                PPOutputDiagnosticNote notes[BUSTER_CHECK_SEMANTIC_NOTES] = { 0 };
                 const char* message = phase == 2 ? extra[index].message :
-                                      phase == 1 ? check_semantic_expression(parser, pp, input, stream, types, stream->reports + index, &spell, &location, &note, scratch) :
+                                      phase == 1 ? check_semantic_expression(parser, pp, input, stream, types, stream->reports + index, &spell, &location, notes, scratch) :
                                                    check_semantic_input(parser, pp, input, types, input->reports + index, &spell, scratch);
                 const uint32_t source = phase == 0 ? check_diagnostic_input_report_source(input, parser, input->reports + index) : BUSTER_CHECK_NONE;
                 if (phase == 0 && input->reports[index].message == CHECK_INPUT_UNDECLARED && token < count && parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER)
@@ -7544,6 +7544,7 @@ static void check_test_driver_quad_literals(CheckTest* test, const char* clang, 
 #include "c_check_conversion_driver_test.c"
 #include "c_check_convention_driver_test.c"
 #include "c_check_interrupt_driver_test.c"
+#include "c_check_asm_constraint_driver_test.c"
 #include "c_check_tier1_driver_test.c"
 #include "c_check_tier0_inline_driver_test.c"
 #include "c_check_tier1_if_convert_test.c"
@@ -7984,6 +7985,7 @@ static void check_test_driver_optimize_pragmas(CheckTest* test, const char* clan
 #include "c_check_vla_fold_driver_test.c"
 #include "c_check_for_loop_driver_test.c"
 #include "c_check_enum_cast_driver_test.c"
+#include "c_check_type_safety_driver_test.c"
 #include "c_check_unevaluated_driver_test.c"
 #include "c_check_sign_compare_driver_test.c"
 #include "c_check_type_sugar_driver_test.c"
@@ -9024,6 +9026,10 @@ static int run_checker_driver_tests(int argc, char** argv)
             }
             if (!lazy && check_test_driver_takes())
             {
+                check_test_driver_type_safety(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
                 check_test_driver_patchable(&test, clang, executable, directory);
                 check_test_driver_cpu_dispatch(&test, clang, executable, directory);
                 check_test_driver_target_versions(&test, clang, executable, directory);
@@ -9042,6 +9048,10 @@ static int run_checker_driver_tests(int argc, char** argv)
             if (!lazy && check_test_driver_takes())
             {
                 check_test_driver_interrupts(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_asm_constraints(&test, clang, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
             {

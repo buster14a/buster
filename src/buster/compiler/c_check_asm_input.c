@@ -283,6 +283,112 @@ static uint32_t check_asm_named(const CheckInputAsm* statement, const InternTabl
     return found;
 }
 
+// The letters clang's x86 target takes in a constraint (#1973, X86TargetInfo::validateAsmConstraint and the generic
+// TargetInfo's): those that allow a register or memory, which an output needs one of, and those that allow neither
+// (constants), which an input may be alone; and an input's alone, x87's 'f' and an address's 'p'. Y and W take a second
+// letter.
+static const char check_asm_clang_operands[] = "abcdgklmoqrtuvxyADQRSVX<>";
+static const char check_asm_clang_others[] = "efinpsCEFGIJKLMNOZ";
+
+// Whether clang's validateOutputConstraint (an output's) or validateInputConstraint (an input's) takes operand `index`'s
+// constraint (#1973): where it doesn't, its error is clang's "invalid output|input constraint 'C' in asm", and where it
+// does but check_asm_constraint refuses it, the checker's own. A cold path, of a refused constraint alone.
+static bool check_asm_clang_valid(const CheckInputAsm* statement, uint32_t index, const InternTable* names)
+{
+    const CheckAsmText text = statement->operands[index].constraint;
+    const bool output = index < statement->output_count;
+    // (An empty constraint is neither's, an input's too: clang's "invalid input constraint '' in asm".)
+    bool valid = text.length != 0 && (!output || text.bytes[0] == '=' || text.bytes[0] == '+');
+    const bool read_write = output && valid && text.bytes[0] == '+';
+    bool operand = false;
+    bool register_allowed = false;
+    bool early = false;
+    uint32_t tied = BUSTER_CHECK_NONE;
+    for (uint32_t cursor = output ? 1 : 0; valid && cursor < text.length; cursor += 1)
+    {
+        const uint8_t byte = text.bytes[cursor];
+        const uint8_t next = cursor + 1 < text.length ? text.bytes[cursor + 1] : 0;
+        uint32_t match = BUSTER_CHECK_NONE;
+        if (byte == ',')
+        {
+            cursor += output && (next == '=' || next == '+') ? 1 : 0;
+        }
+        else if (byte == '#')
+        {
+            while (cursor + 1 < text.length && text.bytes[cursor + 1] != ',')
+            {
+                cursor += 1;
+            }
+        }
+        else if (byte == '?' || byte == '!' || byte == '*' || byte == '%' || (output && (byte == 'i' || byte == 'n' || byte == 'E' || byte == 'F')))
+        {
+        }
+        else if (byte == '&')
+        {
+            valid = output;
+            early = true;
+        }
+        else if (byte != 0 && strchr(check_asm_clang_operands, byte) != NULL)
+        {
+            operand = true;
+            register_allowed |= strchr("moV<>", byte) == NULL;
+        }
+        else if (byte != 0 && strchr(check_asm_clang_others, byte) != NULL)
+        {
+            // x87's 'f' isn't an output's, and 'p' only the generic input check knows.
+            valid = !output || (byte != 'f' && byte != 'p');
+        }
+        else if (output && byte == '@' && next == 'c' && cursor + 2 < text.length && text.bytes[cursor + 2] == 'c')
+        {
+            // A flag output (`=@ccz`), which x86's validateAsmConstraint takes with its condition: a register's
+            // (check_asm_constraint checks the condition's name).
+            operand = true;
+            register_allowed = true;
+            while (cursor + 1 < text.length && text.bytes[cursor + 1] != ',')
+            {
+                cursor += 1;
+            }
+        }
+        else if ((byte == 'Y' && next != 0 && strchr("ikmtz2", next) != NULL) || (byte == 'W' && next == 's'))
+        {
+            operand = true;
+            register_allowed = true;
+            cursor += 1;
+        }
+        else if (!output && byte >= '0' && byte <= '9')
+        {
+            match = byte - '0';
+            while (cursor + 1 < text.length && text.bytes[cursor + 1] >= '0' && text.bytes[cursor + 1] <= '9' && match < statement->output_count)
+            {
+                cursor += 1;
+                match = match * 10 + text.bytes[cursor] - '0';
+            }
+            valid = match < statement->output_count;
+        }
+        else if (!output && byte == '[')
+        {
+            const uint32_t begin = cursor + 1;
+            while (cursor < text.length && text.bytes[cursor] != ']')
+            {
+                cursor += 1;
+            }
+            match = cursor < text.length ? check_asm_named(statement, names, text.bytes + begin, cursor - begin, false) : BUSTER_CHECK_NONE;
+            valid = match < statement->output_count;
+        }
+        else
+        {
+            valid = false;
+        }
+        // A tied input's output must be an output alone, and one input is tied to one output.
+        valid = valid && (match == BUSTER_CHECK_NONE ||
+                          (statement->operands[match].constraint.length != 0 && statement->operands[match].constraint.bytes[0] != '+' &&
+                           (tied == BUSTER_CHECK_NONE || tied == match)));
+        tied = match != BUSTER_CHECK_NONE ? match : tied;
+    }
+    // An output allows a register or memory, and an early clobber of a read-write one a register.
+    return valid && (!output || (operand && !(early && read_write && !register_allowed)));
+}
+
 static bool check_asm_constraint(CheckInputAsm* statement, uint32_t index, const InternTable* names, uint32_t* alternatives)
 {
     CheckAsmOperand* operand = statement->operands + index;
@@ -426,7 +532,15 @@ static bool check_asm_constraint(CheckInputAsm* statement, uint32_t index, const
         }
         else if (strchr("inCEFGIJKLMNOseZ", byte) != NULL)
         {
-            valid = !output;
+            // An output's constant letters are clang's, which no output takes: its alternative's other letters decide
+            // (`=re`'s register; `=i` alone has none, check_asm_clang_valid's error).
+            operand->flags |= !output ? CHECK_ASM_IMMEDIATE : 0;
+            alternative |= !output;
+        }
+        else if (byte == 'W' && !output && cursor < text.length && text.bytes[cursor] == 's')
+        {
+            // x86's Ws: a symbol's address with an optional addend, an input's constant.
+            cursor += 1;
             operand->flags |= CHECK_ASM_IMMEDIATE;
             alternative = true;
         }
@@ -646,7 +760,29 @@ static void check_input_asm_prepare(CheckInputReader* reader, uint32_t keyword)
         {
             uint32_t current = 0;
             failed = operands[operand].constraint.token;
-            valid = check_asm_constraint(statement, operand, reader->pp->table, &current) && (operand == 0 || current == alternatives);
+            valid = check_asm_constraint(statement, operand, reader->pp->table, &current);
+            // clang's validation first, which refuses some the checker's classes take (an early clobber of a read-write
+            // memory output, an input tied to a read-write output).
+            const bool clang_valid = check_asm_clang_valid(statement, operand, reader->pp->table);
+            valid = valid && clang_valid;
+            if (!clang_valid)
+            {
+                // clang's error of a constraint it refuses (#1973), as written: its bytes stay in the reader's arena.
+                const CheckAsmText text = operands[operand].constraint;
+                uint8_t* bytes = BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint8_t, (uint64_t)text.length + 1);
+                const uint32_t before = input->report_count;
+                if (bytes != NULL && text.length < BUSTER_CHECK_ASM_OUTPUT)
+                {
+                    memcpy(bytes, text.bytes, text.length);
+                    check_input_report(reader, text.token, CHECK_INPUT_ASM_CONSTRAINT);
+                }
+                if (input->report_count > before)
+                {
+                    input->reports[before].value = (uint64_t)(uintptr_t)bytes;
+                    input->reports[before].detail = text.length | (operand < statement->output_count ? BUSTER_CHECK_ASM_OUTPUT : 0u);
+                }
+            }
+            valid = valid && (operand == 0 || current == alternatives);
             alternatives = current;
             for (uint32_t before = 0; valid && operands[operand].name != 0 && before < operand; before += 1)
             {

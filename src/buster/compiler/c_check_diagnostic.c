@@ -159,6 +159,7 @@ static const CheckWarningDescription check_warning_descriptions[] =
     [CHECK_WARNING_ID_INVALID_CPU_SUPPORTS] = { NULL, NULL, "invalid cpu feature string for builtin" },
     // (#1849: its ID assigned past the ones other pull requests take, which their rows fill.)
     [CHECK_WARNING_ID_ATTRIBUTE_ALIAS] = { "-Wattribute-alias", NULL, "alias and aliasee have different types" },
+    [CHECK_WARNING_ID_TYPE_SAFETY] = { "-Wtype-safety", NULL, "argument type doesn't match specified type tag" },
     [CHECK_WARNING_ID_UNEVALUATED_EXPRESSION] =
         { "-Wunevaluated-expression", "-Wunused-value", "expression with side effects has no effect in an unevaluated context" },
 };

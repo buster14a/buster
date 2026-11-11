@@ -141,6 +141,9 @@ enum
     // An alias whose function type isn't its aliasee's (#1849, clang's code generation at -c): -Wattribute-alias. (Its ID
     // past the ones other pull requests take.)
     CHECK_WARNING_ID_ATTRIBUTE_ALIAS = 119,
+    // A call's argument whose type its type tag doesn't match (#1447, clang's CheckArgumentWithTypeTag, the attributes
+    // argument_with_type_tag, pointer_with_type_tag and type_tag_for_datatype): -Wtype-safety, on by default.
+    CHECK_WARNING_ID_TYPE_SAFETY = 120,
     // An unevaluated operand with a side effect (#1447, clang's CheckUnaryExprOrTypeTraitOperand and
     // CreateGenericSelectionExpr): -Wunevaluated-expression, on by default, under -Wunused-value and so -Wunused and -Wall.
     CHECK_WARNING_ID_UNEVALUATED_EXPRESSION = 121,

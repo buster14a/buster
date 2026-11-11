@@ -80,9 +80,15 @@ on the calling thread, and the collective checks run on groups of 1, 2, 3 and
   sessions whose third lane fails to start (`LaneProcess.fail_at`), eagerly
   and lazily, and a lazy
   one whose second does, the lanes created joined and the flow on lane 0
-  alone; sessions of a lane per core (`BUSTER_LANE_SESSION_PER_CORE`), eager,
-  lazy and lazy with a flow of rounds begun before lane 0 settles, of 2 and 8
-  lanes, on test topologies of the process's CPUs (`LaneProcess.topology`) in
+  alone; on-demand sessions (`BUSTER_LANE_SESSION_ON_DEMAND`, #1444) of 3 and
+  8 lanes, lane 0 on the capacity with no thread created until it starts them
+  (`lane_session_start`, which a second call and one after the settle
+  ignore): started, the flow's rounds on every lane; settled first, no thread,
+  the rounds on lane 0 alone, one lane asked for; and with lane 1 or the third
+  lane failing as they start, the lanes created joined; sessions of a lane per
+  core (`BUSTER_LANE_SESSION_PER_CORE`), eager, lazy, lazy with a flow of
+  rounds begun before lane 0 settles and on demand, started in such a flow, of
+  2 and 8 lanes, on test topologies of the process's CPUs (`LaneProcess.topology`) in
   pairs, in fours and all one core, as many lanes as the capacity and the cores allow,
   each round on them and each lane's `lane_session_asked` as many, a lazy
   session's lane 1 created though it runs alone on one core; and in a
@@ -130,7 +136,13 @@ input, the calling thread lane 0, as many as the command may take, none for
 one lane, which run the command's flow together until it ends. Their sessions
 are lazy (`BUSTER_LANE_SESSION_LAZY`): lane 0 creates lane 1 alone and starts
 the command, while lane 1 creates the others and says how their start went,
-which lane 0 learns (`lane_session_settle`) before it first meets them. By
+which lane 0 learns (`lane_session_settle`) before it first meets them. The C
+driver's session for one source file is on demand too
+(`BUSTER_LANE_SESSION_ON_DEMAND`, #1444): lane 0 creates no thread until it
+calls `lane_session_start`, which it does once the unit is preprocessed if its
+tokens may pay for a second lane (`check_driver_start_lanes`), and the rules
+that ask for lanes do before they ask; a session that lane 0 settles or asks
+first stays on lane 0 alone, so that a small unit's `-c` creates no thread. By
 default a session asks for no more lanes than the cores of the CPUs the process
 may run on (`BUSTER_LANE_SESSION_PER_CORE`): lane 1 counts them from sysfs'
 sibling lists first (`lane_core_count`), a read per core (9.4 µs for the 9700X's
@@ -141,7 +153,9 @@ nothing creates a thread: a command's wide parts are rounds of its flow
 (`LaneFlow`), `lane_run` runs on a lane alone, and a team, a cold group of
 several or a second session is refused. A session whose lanes can't start runs on one lane,
 never retrying. A terminal command's lanes stay parked for the process's exit
-(but in sanitizer builds), a test's are joined. Other parallel commands (the
+(but in sanitizer builds), a test's are joined; a source command that started
+none leaves its address space's teardown to a helper process as it exits
+(`lane_exit_helper_start`, [driver guide](driver.md)). Other parallel commands (the
 benchmarks', the tests') own their team in the code that runs their
 operations. An operation's phases stay direct calls within its whole-operation
 lane entry. `test-checker-driver` and `test-check-units` are serial code that

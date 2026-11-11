@@ -377,7 +377,10 @@ selects as `vpblendm` and `vpxor`.
 The x86 builtins' casts between vector widths, lane inserts and masked lane
 extracts are the IR's `extract`, `widen` and `insert` intrinsics (#1840, [the
 SIMD IR guide](ir-simd.md)'s "Width changes"), each one EVEX instruction of
-selection's `BUSTER_TIER1_VECTOR_WIDTH_CHANGE`.
+selection's `BUSTER_TIER1_VECTOR_WIDTH_CHANGE`; their variable permutes, byte
+shuffles, aligns and shuffles of lanes are its `permute`, `shuffle`, `align` and
+`shuffle_lanes` (#1840, its "Permutes"), each one EVEX instruction of
+`BUSTER_TIER1_VECTOR_PERMUTE`.
 
 ### Inlining (#1282)
 

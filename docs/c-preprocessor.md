@@ -1595,7 +1595,10 @@ flags, `-march=native`, and `-O`, `-f...`, `-g`, `-pthread`, `-mcmodel` and
 **The generated tables.** The CPUs, the features and their closures and macros
 are clang's answers, and `./build/compiler test-preprocessor --generate-targets`
 prints them as `c_predefines.c`'s generated block (`predefines_features`,
-`predefines_cpus`, `predefines_tunes`). It asks clang 23 (on `PATH`, with
+`predefines_cpus`, `predefines_tunes`, and `PredefinesFeatureIndex`, each
+feature's index as `PREDEFINES_FEATURE_` and its name in capitals with `.` and
+`-` as `_`, by which the compiler's own code names a feature without looking its
+name up, #1444). It asks clang 23 (on `PATH`, with
 `CPATH` unset) these questions:
 
 - The CPUs: from its errors for an unknown `-march` (the 79 of x86-64) and an
