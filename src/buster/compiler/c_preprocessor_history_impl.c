@@ -397,6 +397,28 @@ static void pp_diagnostic_format(PPDiagnostic* diagnostic, const char* format, v
     }
 }
 
+// A fatal error's flag as clang's printer gives it (#1447): "-Werror," names a warning made an error, so a fatal one (a
+// warning -Werror promoted and -Wfatal-errors made fatal, or a pragma's fatal) has its group alone, `[-Wgroup]`. Removes
+// "-Werror," from the trailing flag of the message written from byte `start`.
+static void pp_diagnostic_fatal_flag(PPDiagnostic* diagnostic, uint64_t start)
+{
+    static const char tag[] = " [-Werror,";
+    const uint64_t size = sizeof(tag) - 1;
+    const bool closed = !diagnostic->direct && diagnostic->count > start && diagnostic->bytes[diagnostic->count - 1] == ']';
+    uint64_t open = closed ? diagnostic->count - 1 : start;
+    while (open > start && diagnostic->bytes[open] != '[')
+    {
+        open -= 1;
+    }
+    const bool tagged = closed && open > start && diagnostic->count - (open - 1) > size && memcmp(diagnostic->bytes + open - 1, tag, size) == 0;
+    if (tagged)
+    {
+        const uint64_t removed = size - 2;
+        memmove(diagnostic->bytes + open + 1, diagnostic->bytes + open + 1 + removed, diagnostic->count - (open + 1 + removed));
+        diagnostic->count -= removed;
+    }
+}
+
 static __attribute__((format(printf, 2, 3))) void pp_diagnostic_append(PPDiagnostic* diagnostic, const char* format, ...)
 {
     va_list arguments;
@@ -539,7 +561,12 @@ static void pp_render_diagnostic(Preprocessor* pp, PPSeverity severity, uint32_t
     }
     pp_diagnostic_place(pp, &diagnostic, location);
     pp_diagnostic_append(&diagnostic, "%s: ", severity == PP_SEVERITY_WARNING ? "warning" : severity == PP_SEVERITY_ERROR ? "error" : severity == PP_SEVERITY_NOTE ? "note" : "fatal error");
+    const uint64_t message = diagnostic.count;
     pp_diagnostic_format(&diagnostic, format, arguments);
+    if (severity == PP_SEVERITY_FATAL)
+    {
+        pp_diagnostic_fatal_flag(&diagnostic, message);
+    }
     pp_diagnostic_append(&diagnostic, "\n");
     for (uint32_t i = count; i > 0; i -= 1)
     {
