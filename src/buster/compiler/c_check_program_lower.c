@@ -12070,8 +12070,9 @@ static bool check_lower_strict_round(const CheckGraph* graph, uint32_t node, CBu
 
 // Whether a masked memory builtin, node `node` (its arguments from `first`, `count` of them), is lowered element by element
 // (check_lower_transport_masked), as clang's legalization scalarizes it (#1834): at a target without AVX-512F and
-// AVX-512VL; and wherever no instruction takes it, a gather or a scatter of 8- or 16-bit elements, and an expanding load
-// or a compressing store of them without AVX-512 VBMI2.
+// AVX-512VL; and wherever no instruction takes it, a gather or a scatter of 8- or 16-bit elements, an expanding load
+// or a compressing store of them without AVX-512 VBMI2, and one of a value or index vector of a size no register holds
+// (a 2-lane vector of bytes, #2216).
 static bool check_lower_masked_elements(const CheckLowerWriter* writer, uint32_t node, CBuiltinId builtin, uint32_t first, uint32_t count)
 {
     const CheckStream* stream = writer->program->stream;
@@ -12084,7 +12085,10 @@ static bool check_lower_masked_elements(const CheckLowerWriter* writer, uint32_t
     const bool narrow = element == 1 || element == 2;
     const bool addressed = builtin == CBUILTIN_MASKED_GATHER || builtin == CBUILTIN_MASKED_SCATTER;
     const bool packed = builtin == CBUILTIN_MASKED_EXPAND_LOAD || builtin == CBUILTIN_MASKED_COMPRESS_STORE;
-    return (features & evex) != evex || (narrow && (addressed || (packed && (features & BUSTER_X86_FEATURE(AVX512VBMI2)) == 0)));
+    // A value or an index vector no register size holds (2 bytes, an odd length's), which no row takes either (#2216).
+    const TypeId index = addressed && count >= 2 ? stream->argument_conversions[first + 1].type : value;
+    const bool unheld = check_lower_vector_of(writer, value) == 0 || check_lower_vector_of(writer, index) == 0;
+    return (features & evex) != evex || unheld || (narrow && (addressed || (packed && (features & BUSTER_X86_FEATURE(AVX512VBMI2)) == 0)));
 }
 
 // Whether a reduction of a vector of `source`'s type takes the baseline's ways (#1834): at a target without AVX-512F and
