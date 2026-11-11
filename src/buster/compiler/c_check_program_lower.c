@@ -3330,7 +3330,7 @@ static void check_lower_limb_conversion(CheckLowerWriter* writer, TypeId from, T
 // A conversion of the value on top of the stack between `from` and `to`, either one an aggregate (and `to` not void): a
 // _BitInt's past 128 bits to or from another type, check_lower_limb_conversion's; a __float128's to or from a scalar,
 // check_lower_quad_conversion's; any other's nothing, as an aggregate converts to its own (compatible) type alone, and
-// GNU's cast to a union isn't lowered.
+// GNU's cast to a union is check_lower_union_cast's (#2301), which converts its operand to the member alone.
 static void check_lower_transport_cast(CheckLowerWriter* writer, TypeId from, TypeId to);
 
 static __attribute__((noinline)) void check_lower_aggregate_conversion(CheckLowerWriter* writer, TypeId from, TypeId to)
@@ -12070,8 +12070,9 @@ static bool check_lower_strict_round(const CheckGraph* graph, uint32_t node, CBu
 
 // Whether a masked memory builtin, node `node` (its arguments from `first`, `count` of them), is lowered element by element
 // (check_lower_transport_masked), as clang's legalization scalarizes it (#1834): at a target without AVX-512F and
-// AVX-512VL; and wherever no instruction takes it, a gather or a scatter of 8- or 16-bit elements, and an expanding load
-// or a compressing store of them without AVX-512 VBMI2.
+// AVX-512VL; and wherever no instruction takes it, a gather or a scatter of 8- or 16-bit elements, an expanding load
+// or a compressing store of them without AVX-512 VBMI2, and one of a value or index vector of a size no register holds
+// (a 2-lane vector of bytes, #2216).
 static bool check_lower_masked_elements(const CheckLowerWriter* writer, uint32_t node, CBuiltinId builtin, uint32_t first, uint32_t count)
 {
     const CheckStream* stream = writer->program->stream;
@@ -12084,7 +12085,10 @@ static bool check_lower_masked_elements(const CheckLowerWriter* writer, uint32_t
     const bool narrow = element == 1 || element == 2;
     const bool addressed = builtin == CBUILTIN_MASKED_GATHER || builtin == CBUILTIN_MASKED_SCATTER;
     const bool packed = builtin == CBUILTIN_MASKED_EXPAND_LOAD || builtin == CBUILTIN_MASKED_COMPRESS_STORE;
-    return (features & evex) != evex || (narrow && (addressed || (packed && (features & BUSTER_X86_FEATURE(AVX512VBMI2)) == 0)));
+    // A value or an index vector no register size holds (2 bytes, an odd length's), which no row takes either (#2216).
+    const TypeId index = addressed && count >= 2 ? stream->argument_conversions[first + 1].type : value;
+    const bool unheld = check_lower_vector_of(writer, value) == 0 || check_lower_vector_of(writer, index) == 0;
+    return (features & evex) != evex || unheld || (narrow && (addressed || (packed && (features & BUSTER_X86_FEATURE(AVX512VBMI2)) == 0)));
 }
 
 // Whether a reduction of a vector of `source`'s type takes the baseline's ways (#1834): at a target without AVX-512F and
@@ -12643,8 +12647,8 @@ static __attribute__((noinline)) void check_lower_vector_builtin(CheckLowerWrite
             if (reason != NULL && plan.elementwise)
             {
                 // A shuffle no row of the target's sequences takes (bytes and words without SSSE3, 32-byte ones of them
-                // without AVX-512 or of any element without AVX2) runs element by element through memory, as a wide
-                // vector's does (#1834).
+                // without AVX-512 or of any element without AVX2, and bytes with AVX-512 but not its VBMI) runs element by
+                // element through memory, as a wide vector's does (#1834).
                 reason = NULL;
                 transport = true;
                 check_lower_transport_shuffle(writer, node);
@@ -12736,7 +12740,7 @@ static __attribute__((noinline)) void check_lower_vector_builtin(CheckLowerWrite
     {
         check_lower_transport_boolean_builtin(writer, node, builtin, effect->evaluated_argument_count);
     }
-    else if (check_lower_bits_elements(writer, builtin, result, effect->evaluated_argument_count))
+    else if (check_lower_bits_elements(writer, builtin, result, effect->evaluated_argument_count) || check_lower_integer_elements(writer, builtin, result))
     {
         check_lower_transport_bit_builtin(writer, node, builtin, effect->evaluated_argument_count);
     }
@@ -13389,6 +13393,33 @@ static __attribute__((noinline)) void check_lower_segment_read(CheckLowerWriter*
     }
 }
 
+// GCC's cast to a union (#2301, clang's CK_ToUnion), whose operand the checker converted to the member `member` it
+// initializes (BUSTER_CHECK_CONVERT_TO_UNION): a frame object of the union's type, the operand's value stored into its
+// first bytes (copied there for an aggregate's), as clang's code initializes the member of a temporary, and the cast's
+// value its address, as an aggregate's. The union's other bytes are left as they are, as clang's code leaves them. The
+// tasks run last pushed first.
+static __attribute__((noinline)) void check_lower_union_cast(CheckLowerWriter* writer, uint32_t node, TypeId to, TypeId member)
+{
+    const TypeTable* types = writer->program->types;
+    const uint32_t local = check_lower_object(writer, type_size(types, to), type_alignment_log2(types, to));
+    const uint8_t class = check_lower_class(writer, member);
+    check_lower_instruction(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, local);
+    if (check_lower_aggregate(writer, member))
+    {
+        check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_COPY, .value = type_size(types, member) });
+    }
+    else if (class == UINT8_MAX || class == BUSTER_TYPED_CLASS_VOID)
+    {
+        check_lower_unsupported(writer, check_lower_type_feature(types, member));
+    }
+    else
+    {
+        check_lower_instruction(writer, BUSTER_TYPED_SET, class, check_lower_access_value(types, class, member));
+    }
+    check_lower_operand(writer, node, 0, false, member);
+    check_lower_instruction(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, local);
+}
+
 // A node check_lower_segment_access finds: a read of an object in a segment's space whose value is an address, but an
 // _Atomic one (check_lower_segment_read), and any other refused by name.
 static __attribute__((noinline)) void check_lower_segment_refused(CheckLowerWriter* writer, uint32_t node, const CheckValue* value, bool address, bool discard)
@@ -13804,6 +13835,10 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
     {
         // VECTOR, the last of Tier 0's classes, and past it the half-precision classes and no class: out of line.
         check_lower_vector_operation(writer, node);
+    }
+    else if (op == CHECK_OP_CAST && (stream->conversions[node].operands[0].flags & BUSTER_CHECK_CONVERT_TO_UNION) != 0)
+    {
+        check_lower_union_cast(writer, node, value->type, type_a);
     }
     else if (op == CHECK_OP_CAST || op == CHECK_OP_CONVERT || op == CHECK_OP_POSITIVE)
     {
@@ -16495,13 +16530,23 @@ static void check_lower_node_count(const CheckProgram* program, uint32_t node, C
         counts->transport_entries += room;
         counts->transport_locals += room != 0 ? 12 : 0;
         // A bit builtin's elements, each its SWAR sequence (check_lower_transport_bit_builtin): up to 144 entries an element,
-        // its sequence's 96 and its operands' reads and its store, for a vector of any width (#1834).
+        // its sequence's 96 and its operands' reads and its store, for a vector of any width (#1834); and so the saturating
+        // builtins' of 32- and 64-bit elements (check_lower_integer_elements, #2216), and a scalar's one element of an
+        // integer elementwise builtin (check_lower_sequence_arithmetic's or a bit builtin's), whatever its type.
+        const bool vector = check_lower_transport_is_vector(types, type);
         const bool bits = member == CBUILTIN_ELEMENTWISE_POPCOUNT || member == CBUILTIN_ELEMENTWISE_BITREVERSE || member == CBUILTIN_ELEMENTWISE_CLZG ||
                           member == CBUILTIN_ELEMENTWISE_CTZG || member == CBUILTIN_ELEMENTWISE_FSHL || member == CBUILTIN_ELEMENTWISE_FSHR;
-        if (op == CHECK_OP_BUILTIN_VECTOR && bits && check_lower_transport_is_vector(types, type))
+        const bool saturating = member == CBUILTIN_ELEMENTWISE_ADD_SAT || member == CBUILTIN_ELEMENTWISE_SUB_SAT;
+        const bool arithmetic = saturating || member == CBUILTIN_ELEMENTWISE_ABS || member == CBUILTIN_ELEMENTWISE_MAX || member == CBUILTIN_ELEMENTWISE_MIN;
+        if (op == CHECK_OP_BUILTIN_VECTOR && ((bits && vector) || (saturating && vector && check_vector_builtin_shape(types, type).element >= 4 && !check_lower_bool_vector(types, type))))
         {
             counts->transport_entries += 144 * (uint64_t)check_builtin_vector_lanes(types, type_conversion_operand(types, type));
             counts->transport_locals += room != 0 ? 0 : 12;
+        }
+        else if (op == CHECK_OP_BUILTIN_VECTOR && (bits || arithmetic) && !vector)
+        {
+            counts->transport_entries += 144;
+            counts->transport_locals += 12;
         }
     }
     // The roundings and the fused multiply-add are calls too where the unit's target lacks their instructions

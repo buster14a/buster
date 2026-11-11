@@ -900,7 +900,7 @@ static bool check_data_input_prepared(CheckDataInput* result, const CheckInput* 
                 mangle_scratch = scratch_begin(scratch);
             }
             mangling.object_size_compat = candidate->object_sizes != NULL;
-            const CheckMangleStatus status = check_mangle_name(&mangling, candidate->type, parser->tokens.names[candidate->declaration],
+            const CheckMangleStatus status = check_mangle_name(&mangling, candidate->type, parser->tokens.names[candidate->declaration], candidate->declaration,
                                                                mangle_scratch.arena, &overload_names[object]);
             valid = status == CHECK_MANGLE_OK;
             if (!valid)

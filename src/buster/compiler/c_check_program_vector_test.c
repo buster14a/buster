@@ -279,6 +279,23 @@ static void check_test_program_vector_sources(CheckTest* test, const char* clang
             "return (int)h;}",
         },
         {
+            // Shuffles of bytes at x86-64-v4, which hasn't AVX-512 VBMI's VPERMT2B, element by element (#1834): of 8, 16,
+            // 32 and 64 bytes, of both operands, with an undefined index, and the MMX unpacks of bytes and words
+            // (_mm_unpackhi_pi8's, _mm_unpacklo_pi8's and _mm_unpackhi_pi16's shuffles).
+            "vector-shuffles-without-vbmi",
+            "typedef short s4 __attribute__((vector_size(8)));typedef char c8 __attribute__((vector_size(8)));typedef char c16 __attribute__((vector_size(16)));"
+            "typedef char c32 __attribute__((vector_size(32)));typedef char c64 __attribute__((vector_size(64)));\n"
+            "int tested(int n){unsigned h=2166136261u;c64 a,b;fill(&a,64,n);fill(&b,64,n+1);c8 a8=*(c8*)&a,b8=*(c8*)&b;c16 a16=*(c16*)&a,b16=*(c16*)&b;"
+            "c32 a32=*(c32*)&a,b32=*(c32*)&b;"
+            "c8 w=__builtin_shufflevector(a8,b8,15,0,14,1,13,2,12,3);FOLD(w);"
+            "c16 x=__builtin_shufflevector(a16,b16,31,0,30,1,29,2,28,3,27,4,26,5,25,6,24,7);FOLD(x);"
+            "c32 y=__builtin_shufflevector(a32,b32,63,0,62,1,61,2,60,3,59,4,58,5,57,6,56,7,33,34,35,36,1,2,3,4,40,41,42,43,9,9,9,-1);y[31]=0;FOLD(y);"
+            "c64 z=__builtin_shufflevector(a,b,127,0,126,1,125,2,124,3,123,4,122,5,121,6,120,7,64,65,66,67,1,2,3,4,40,41,42,43,9,9,9,9,"
+            "0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,100,101,102,103,104,105,106,107,108,109,110,111,112,113,114,115);FOLD(z);"
+            "c8 m[]={__builtin_shufflevector(a8,b8,4,12,5,13,6,14,7,15),__builtin_shufflevector(a8,b8,0,8,1,9,2,10,3,11)};"
+            "s4 u=__builtin_shufflevector((s4)a8,(s4)b8,2,6,3,7);FOLD(m);FOLD(u);return (int)h;}",
+        },
+        {
             "vector-transport-compute",
             check_test_vector_transport,
         },
@@ -1395,6 +1412,29 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
           "{T c_=b##k&(__typeof__(b##k[0]))(bits-1);T q_[]={a##k*b##k,a##k<<c_,a##k>>c_,a##k<<(n&(bits-1)),a##k>>3,a##k*(__typeof__(a##k[0]))n};a##k*=b##k;a##k<<=c_;"
           "FOLD(q_);FOLD(a##k);}\n"
           "int tested(int n){unsigned h=2166136261u;S(sb,1,8)S(v16qu,2,8)S(ub32,3,8)S(sb64,4,8)S(uw,5,16)S(v4si,6,32)S(sq4,7,64)S(sd32,8,32)return (int)h;}\n"
+        },
+        // Saturating sums and differences of 32- and 64-bit elements, element by element at every target (#2216): of 8 to 128
+        // bytes and an odd length, at the extremes; and the integer elementwise builtins of scalars, of each width and
+        // signedness, plain char's too: add_sat, sub_sat, abs, max, min, popcount, bitreverse, clzg and ctzg with their
+        // fallbacks, fshl and fshr.
+        { "baseline-integer-elements",
+          "typedef unsigned ud8 __attribute__((vector_size(32),aligned(16)));typedef long long sq8 __attribute__((vector_size(64),aligned(16)));"
+          "typedef int sd2 __attribute__((vector_size(8)));typedef int sd32 __attribute__((vector_size(128),aligned(16)));"
+          "typedef unsigned long long ux3 __attribute__((ext_vector_type(3)));\n"
+          "#define V(T,k) {T a,b;fill(&a,sizeof(T),n+k);fill(&b,sizeof(T),n+k+50);a[0]=(__typeof__(a[0]))(1ull<<(8*sizeof(a[0])-1));b[0]=a[0];"
+          "a[1]=(__typeof__(a[0]))-1;b[1]=1;a[sizeof(T)/sizeof(a[0])-1]=(__typeof__(a[0]))~a[0];b[sizeof(T)/sizeof(a[0])-1]=(__typeof__(a[0]))~a[0];"
+          "T q_[]={__builtin_elementwise_add_sat(a,b),__builtin_elementwise_sub_sat(a,b),__builtin_elementwise_sub_sat(b,a)};FOLD(q_);}\n"
+          "#define S(T,k) {T a=(T)((unsigned long long)n*0x9e3779b97f4a7c15ull>>k),b=(T)(1ull<<(8*sizeof(T)-1)),c=(T)-1;"
+          "T q_[]={__builtin_elementwise_add_sat(a,b),__builtin_elementwise_add_sat(b,b),__builtin_elementwise_add_sat(c,a),__builtin_elementwise_sub_sat(a,c),"
+          "__builtin_elementwise_sub_sat(b,a),__builtin_elementwise_max(a,b),__builtin_elementwise_min(a,c),__builtin_elementwise_popcount(a),"
+          "__builtin_elementwise_bitreverse(a),__builtin_elementwise_clzg(a,b),__builtin_elementwise_ctzg((T)(a&~a),c),__builtin_elementwise_ctzg(b),"
+          "__builtin_elementwise_fshl(a,c,(T)k),__builtin_elementwise_fshr(a,b,(T)(k*3))};FOLD(q_);}\n"
+          "#define A(T,k) S(T,k) {T a=(T)((unsigned long long)n*0x9e37ull>>k),b=(T)(1ull<<(8*sizeof(T)-1));"
+          "T q_[]={__builtin_elementwise_abs(a),__builtin_elementwise_abs(b),__builtin_elementwise_abs((T)-a)};FOLD(q_);}\n"
+          "int tested(int n){unsigned h=2166136261u;V(v4si,1)V(ud8,2)V(v2di,3)V(sq8,4)V(sd2,5)V(sd32,7)\n"
+          "{ux3 a={~0ull,1ull<<63,(unsigned long long)n},b={1,1ull<<63,7};ux3 s=__builtin_elementwise_add_sat(a,b),d=__builtin_elementwise_sub_sat(b,a);"
+          "unsigned long long o[]={s[0],s[1],s[2],d[0],d[1],d[2]};FOLD(o);}\n"
+          "A(signed char,1)S(unsigned char,2)A(short,3)S(unsigned short,4)A(int,5)S(unsigned,6)A(long long,7)S(unsigned long,8)S(char,9)return (int)h;}\n"
         },
         { "baseline-floating-extremes", check_test_vector_floating_extremes },
         // AVX's and AVX2's (x86-64-v3's): 256-bit unpacks, broadcasts, permutes, variable shifts, lanes' extractions and

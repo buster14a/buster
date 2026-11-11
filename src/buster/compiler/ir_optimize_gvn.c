@@ -108,7 +108,7 @@ static uint32_t ir_gvn_resolve(uint32_t* aliases, uint32_t value)
 static void ir_gvn_classify(IrGvnWork* work)
 {
     const IrFunction* f = work->ir.function;
-    static const uint8_t pure[64] = {
+    static const uint8_t pure[BUSTER_IR_OP_TABLE] = {
         [IR_CONST] = 1,
         [IR_VCONST] = 1,
         [IR_VCMP] = 2,
@@ -171,7 +171,7 @@ static void ir_gvn_classify(IrGvnWork* work)
         const uint32_t count = f->instruction_count - first < BUSTER_IR_OPTIMIZE_BATCH ? f->instruction_count - first : BUSTER_IR_OPTIMIZE_BATCH;
         const __mmask16 valid = (UINT32_C(1) << count) - 1;
         const __m128i operations = _mm_maskz_loadu_epi8(valid, f->op + first);
-        const __m128i kinds = _mm512_castsi512_si128(_mm512_permutexvar_epi8(_mm512_zextsi128_si512(operations), _mm512_loadu_si512(pure)));
+        const __m128i kinds = _mm512_castsi512_si128(_mm512_permutex2var_epi8(_mm512_loadu_si512(pure), _mm512_zextsi128_si512(operations), _mm512_loadu_si512(pure + 64)));
         const __m128i tainted = _mm_maskz_loadu_epi8(valid, work->tainted + first);
         const __m128i flags = _mm_maskz_loadu_epi8(valid, f->flags + first);
         const __mmask16 integer_compare = _mm_cmpeq_epi8_mask(kinds, _mm_set1_epi8(2)) & _mm_cmplt_epu8_mask(flags, _mm_set1_epi8(IR_SIMD_LANE_F32));

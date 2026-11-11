@@ -1002,6 +1002,13 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
                 // A compare-exchange's desired value (#1059), which it uses whether or not it stores it.
                 operands = 7;
             }
+            else if (op == IR_MASKED_LOAD)
+            {
+                // A masked load's passthrough (#1840) is read only where some lane's bit is clear, as a vselect's.
+                const uint32_t count = ir_lane_count(type, function->flags[i]);
+                const uint64_t lanes = count >= 64 ? UINT64_MAX : (UINT64_C(1) << count) - 1;
+                operands = 3 | ((bv.low & lanes) != lanes ? 4 : 0);
+            }
             else if (ir_ternary_instruction(function, i))
             {
                 // A ternary intrinsic's third operand (#1840), from the extra array.
@@ -1181,6 +1188,42 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
                             }
                         }
                     }
+                    break;
+                }
+                case IR_MASKED_LOAD:
+                case IR_MASKED_STORE:
+                {
+                    // A masked access (#1840): each lane whose mask bit is set accessed, its bytes alone, and a lane whose
+                    // bit is clear never, so that a masked-off lane past a binding's end is no fault. A load's other
+                    // lanes are its passthrough's. Its alignment is checked as a whole access's, whatever its mask.
+                    const bool store = op == IR_MASKED_STORE;
+                    const uint32_t vector = store ? b : c;
+                    const uint32_t mask = store ? c : b;
+                    const uint32_t vector_type = function->type[vector];
+                    const uint32_t count = ir_lane_count(vector_type, function->flags[i]);
+                    const uint32_t size = count != 0 ? ir_type_bits[vector_type] / 8 / count : 0;
+                    const uint64_t bits = frame->values[mask].low;
+                    const uint64_t alignment_mask = (1ull << function->alignment_log2[i]) - 1;
+                    IrSimdValue lanes = ir_interpreter_simd_value(frame, vector);
+                    result.status = count == 0 ? INTERPRETER_INVALID : options->check_memory && (av.low & alignment_mask) != 0 ? INTERPRETER_MEMORY : INTERPRETER_OK;
+                    for (uint32_t lane = 0; result.status == INTERPRETER_OK && lane < count; lane += 1)
+                    {
+                        if ((bits >> lane & 1) != 0)
+                        {
+                            const uint64_t address = av.low + (uint64_t)lane * size;
+                            uint8_t* bytes = (uint8_t*)lanes.words + (uint64_t)lane * size;
+                            result.status = interpreter_memory_access(&runtime, address, size, store);
+                            if (result.status == INTERPRETER_OK && store)
+                            {
+                                memcpy((void*)(uintptr_t)address, bytes, size);
+                            }
+                            else if (result.status == INTERPRETER_OK)
+                            {
+                                memcpy(bytes, (const void*)(uintptr_t)address, size);
+                            }
+                        }
+                    }
+                    wide_value = lanes;
                     break;
                 }
                 case IR_CALL:
@@ -1392,7 +1435,9 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
                     break;
                 }
                 default:
-                    if (ir_vector_type(type) || op == IR_VCMP)
+                    // A vector's lane or its lanes' sign bits (#1840): a scalar the model computes from a vector.
+                    if (ir_vector_type(type) || op == IR_VCMP ||
+                        (op == IR_INTRINSIC && (c == BUSTER_IR_INTRINSIC_LANE_EXTRACT || c == BUSTER_IR_INTRINSIC_MOVEMASK)))
                     {
                         result.status = ir_interpreter_simd_operation(frame, i, &wide_value);
                         value.low = wide_value.words[0];

@@ -39,6 +39,9 @@ struct X86Operand
     // A vector-indexed (VSIB) memory operand's index class, a gather's or scatter's (BUSTER_X86_CLASS_XMM, YMM or ZMM;
     // index its vector register), or 0 for any other memory (#1115).
     uint8_t vsib;
+    // A memory operand's address size by its general registers: 0 for none (an absolute address), 8 for 64-bit ones and
+    // RIP, 4 for 32-bit ones and EIP, which the assembler encodes with a 67 (#2339). The matcher ignores it.
+    uint8_t address_size;
     bool symbolic;
 };
 

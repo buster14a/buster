@@ -77,6 +77,18 @@ static void check_test_driver_gnu_scopes(CheckTest* test, const char* clang, con
         { "_Complex __auto_type", "void f(void) {\n    __auto_type\n        _Complex x = 1;\n}\n" },
         { "__auto_type with an _Alignas below the deduced type's", "void f(void) {\n    _Alignas(4) __auto_type x =\n        1.0;\n}\n" },
         { "__auto_type before an _Alignas below a pointer's", "void f(void) {\n    char a[3];\n    __auto_type _Alignas(1) p = a;\n}\n" },
+        // A vector's or a mode's attribute meets the undeduced placeholder (#1844): clang's errors at the attribute, the
+        // placeholder's type as the attribute's place has it (the specifiers' bare one, the declarator's whole one), a
+        // vector's before a mode's.
+        { "vector_size after an __auto_type's name", "void f(void) {\n    __auto_type a\n        __attribute__((vector_size(16))) = 1;\n}\n", true },
+        { "vector_size of a const __auto_type pointer", "void f(void) {\n    const __auto_type *a __attribute__((vector_size(16))) = 0;\n}\n", true },
+        { "vector_size of an _Atomic __auto_type", "void f(void) {\n    _Atomic __auto_type a __attribute__((vector_size(16))) = 1;\n}\n", true },
+        { "vector_size of a restrict __auto_type", "void f(void) {\n    __auto_type restrict a __attribute__((vector_size(16))) = 1;\n}\n", true },
+        { "vector_size among __auto_type's specifiers", "void f(void) {\n    const __attribute__((vector_size(16))) volatile __auto_type a = 1;\n}\n", true },
+        { "ext_vector_type of a file-scope __auto_type", "__auto_type g __attribute__((ext_vector_type(4))) = 1;\n", true },
+        { "mode of an __auto_type", "void f(void) {\n    __auto_type b __attribute__((mode(DI))) = 1;\n}\n", true },
+        { "mode among __auto_type's specifiers", "void f(void) {\n    __attribute__((mode(DI))) __auto_type b = 1;\n}\n", true },
+        { "a mode before a vector of an __auto_type", "void f(void) {\n    __auto_type a __attribute__((mode(DI), vector_size(16))) = 1;\n}\n", true },
     };
     const char* arguments[] = { "-std=gnu17", "-w" };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
@@ -146,6 +158,19 @@ static void check_test_driver_gnu_scopes(CheckTest* test, const char* clang, con
         { "an ambiguous goto's label defined later", "void f(void) {\n    {\n        __label__ t, t;\n        goto t;\n    }\nt:;\n}\n" },
         { "an ambiguous definition's label redefined", "void f(void) {\n    {\n        __label__ s, s;\n    s:;\n    }\ns:;\n}\n" },
         { "a statement expression's ambiguity", "void f(void) {\n    int v = ({ __label__ r, r; goto r; 1; });\n    goto r;\n    (void)v;\n}\n" },
+        // An __auto_type redeclaration of an entity with linkage whose type clang's mergeTypes refuses (#1844): the
+        // qualifiers of a level differ (the placeholder's, a pointer's, restrict's), a pointer declarator meets no pointer,
+        // or an _Atomic placeholder meets no atomic type. Clang's "redefinition" or, with extern, "redeclaration with a
+        // different type", the placeholder printed through its declarator, noted at the earlier definition or declaration.
+        { "a const __auto_type redefinition of a tentative definition", "int p;\nconst __auto_type p =\n    1;\n" },
+        { "a volatile __auto_type definition after an extern declaration", "extern int w;\nconst volatile __auto_type w = 2;\n" },
+        { "an __auto_type pointer over a const pointer", "extern int *const b;\n__auto_type *b = (int *)0;\n" },
+        { "a const __auto_type pointer's pointee", "int **s;\nconst __auto_type **s = 0;\n" },
+        { "a const pointer to a volatile __auto_type", "int *t;\nvolatile __auto_type *const t = 0;\n" },
+        { "an __auto_type pointer over no pointer", "int v;\n__auto_type *v = 0;\n" },
+        { "a block's extern const __auto_type", "int u;\nvoid f(void) {\n    int u;\n    {\n        extern const __auto_type u = 2;\n    }\n}\n" },
+        { "an _Atomic __auto_type over no atomic type", "int p;\n_Atomic __auto_type p = 1;\n" },
+        { "a restrict __auto_type over an unrestricted pointer", "int *q;\n__auto_type restrict q = (int *)0;\n" },
     };
     for (uint32_t i = 0; executable != NULL && i < BUSTER_ARRAY_LENGTH(every); i += 1)
     {

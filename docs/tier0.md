@@ -637,6 +637,18 @@ AVX2): `check_vector_lower_lanewise` says which, `check_lower_vector_lanewise` l
 unsigned int where narrower, combined by the scalar `DIV`, `MOD`, `MUL`, `SHL` or `SHR`, truncated and set into the
 result's temporary; an extended vector's padding lanes are not computed.
 
+**Integer elementwise builtins element by element (#2216).** `__builtin_elementwise_add_sat` and `sub_sat` of 32- and
+64-bit elements, which no x86 instruction saturates, and every integer elementwise builtin of a scalar (`add_sat`,
+`sub_sat`, `abs`, `max`, `min`, `popcount`, `bitreverse`, `clzg`, `ctzg`, `fshl`, `fshr`) of 1 to 8 bytes, which
+clang's code computes with scalar instructions, take `check_lower_transport_bit_builtin`'s element sequences at every
+target (`check_lower_integer_elements`): a vector's elements one at a time, as the bit builtins' without their rows,
+and a scalar's operands in place of the reads, its result left on the stack. The saturating, absolute and extreme
+values are `check_lower_sequence_arithmetic`'s, branch-free on each element shifted up to its class's top bits (so a
+narrow scalar's sign and carry are its class's): an unsigned sum or its carry's all ones, an unsigned difference
+masked off by its borrow, a signed sum or difference xored with `(s ^ bound) & overflow` (the bound by `a`'s sign),
+`abs` as `(x ^ m) - m`, and `max`/`min` by a compare's mask. The scalar builtins of 128-bit integers and
+`_BitInt`s, and scalar `clmul`, `pdep` and `pext`, stay refused by name.
+
 **Targets without AVX-512 (#775).** At `x86-64`, `x86-64-v2` and `x86-64-v3` a function's vector transport is 16 bytes
 of SSE2 or 32 of AVX (`vector_bytes`, #955), through the first free floating register, and its rows are the front end's
 at the target's forms, by both of the checker's paths:
@@ -690,7 +702,8 @@ at the target's forms, by both of the checker's paths:
   AVX take two rows a halving (the first packs the low part beside the high one, the high one replaced by the low where
   the low is a NaN). `max` and `min` fold the piece's lanes in order by #967's scalar rows.
   The masked memory builtins without AVX-512F and AVX-512VL, and wherever no instruction takes them (gathers and
-  scatters of 8- and 16-bit elements, and their expanding loads and compressing stores without AVX-512 VBMI2), are
+  scatters of 8- and 16-bit elements, their expanding loads and compressing stores without AVX-512 VBMI2, and vectors
+  of a size no register holds, such as 2-lane vectors of bytes, #2216), are
   lowered element by element in the lanes' order (`check_lower_transport_masked`, #1834), as clang's legalization
   scalarizes them: a lane whose bit is set loads or stores at its address, any other reads its pass-through element or
   writes a scratch slot, the address chosen arithmetically (`other ^ ((real ^ other) & -bit)`), so that no address a

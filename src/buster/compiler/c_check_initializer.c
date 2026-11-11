@@ -2230,7 +2230,7 @@ static CheckDiagnostic check_init_overload(CheckInitWalker* walker, CheckAction*
             CheckContext semantic = action->context;
             // Overload visibility belongs to this expression's end, not the containing initializer's end.
             semantic.source_position = graph->source_positions != NULL ? graph->source_positions[action->node] : BUSTER_CHECK_NONE;
-            const CheckOverloadContext context = { .semantic = semantic };
+            const CheckOverloadContext context = { .semantic = semantic, .conditions = &graph->conditions };
             CheckValue resolved = { 0 };
             const CheckOverloadResult selected = check_overload_argument(walker->types, action->operands, action->type,
                                                                          graph->overload_candidates, graph->overload_candidate_count,
@@ -2360,6 +2360,22 @@ static bool check_init_const_copy(CheckInitWalker* walker, const CheckInitSelect
 static void check_init_value(CheckInitWalker* walker, const CheckInitSelection* selected, uint32_t token, uint32_t end,
                              uint32_t node, const CheckInitString* string)
 {
+    // GCC's cast to a union (#2301, BUSTER_CHECK_CONVERT_TO_UNION) initializes its member: the union's bytes cleared, then
+    // the operand's value is the member's, at the union's offset, as clang's constant evaluator folds CK_ToUnion (a static
+    // object's initializer too). The operand starts after the cast's `)`.
+    CheckInitSelection member_selection = *selected;
+    while (!walker->infer && string == 0 && walker->graph != NULL && node < walker->stream->count && walker->graph->ops[node] == CHECK_OP_CAST &&
+           (walker->stream->conversions[node].operands[0].flags & BUSTER_CHECK_CONVERT_TO_UNION) != 0 &&
+           walker->stream->diagnostics[node] == CHECK_DIAG_NONE && walker->graph->tokens[node] + 1 < end &&
+           type_unqualified(type_strip_aligned(walker->types, check_stream_type(walker->stream, node))) ==
+           type_unqualified(type_strip_aligned(walker->types, member_selection.type)))
+    {
+        check_init_clear(walker, member_selection.type, member_selection.offset, token);
+        member_selection.type = walker->stream->conversions[node].operands[0].type;
+        token = walker->graph->tokens[node] + 1;
+        node = walker->graph->operand0[node];
+        selected = &member_selection;
+    }
     const TypeId destination = selected->type;
     CheckInitSelection value_selection = *selected;
     if (type_kind(walker->types, type_strip_aligned(walker->types, selected->type)) == BUSTER_TYPE_KIND_ATOMIC)
