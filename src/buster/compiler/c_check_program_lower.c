@@ -16655,7 +16655,8 @@ static void check_lower_node_count(const CheckProgram* program, uint32_t node, C
         else if (op == CHECK_OP_BUILTIN_VECTOR && (bits || arithmetic || member == CBUILTIN_ELEMENTWISE_PDEP || member == CBUILTIN_ELEMENTWISE_PEXT ||
                                                    member == CBUILTIN_ELEMENTWISE_CLMUL) && !vector)
         {
-            counts->transport_entries += 144;
+            // A 128-bit scalar's sequences build their constants of halves and mask its operands by shifts (#2410).
+            counts->transport_entries += type_size(types, type_unqualified(type_strip_aligned(types, type))) > 8 ? 320 : 144;
             counts->transport_locals += 12;
         }
         // An integer vector's product, division, remainder or shift, or its assignment's, that runs element by element
