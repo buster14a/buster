@@ -695,6 +695,9 @@ at the target's forms, by both of the checker's paths:
 - A shuffle no row of these sequences takes (of bytes and words without SSSE3, of 32-byte vectors of them without
   AVX-512, of any 32-byte vectors without AVX2) runs element by element through memory, as a wide vector's does
   (`check_lower_transport_shuffle`, #1834).
+- A division of floats or doubles narrower than a register divides its divisor with 1.0f in the lanes past its own
+  (`pcmpeqd`, `pslld` 25, `psrld` 2 and the unpacks, #1834), so that the zero lanes Tier 0 loads raise no FE_INVALID;
+  clang's code divides 0 by 0 there and raises it, a spurious exception this doesn't reproduce.
 - What has no form at the target is refused by name: minimum and maximum of qwords without SSE4.2, and the scalars' IEEE maxima and minima (`maximum`
   and `minimum`) without AVX, which need more records than a row has. A scalar's fused multiply-add without FMA is the C library's `fmaf` or `fma`, its `ldexp` `ldexpf` or
   `ldexp` (of the exponent's low 32 bits), and its roundings (ceil, floor, trunc, rint, nearbyint, roundeven and round)
