@@ -9916,10 +9916,12 @@ clang's `diagnose_if(condition, message, "warning" | "error")` and
 
 What isn't clang's yet: an overload call whose candidates fail by an
 argument's conversion has the checker's error, not clang's "no known
-conversion" notes; a condition that reads a `volatile` parameter is accepted,
-where clang's is "never produces a constant expression"; an overload set's address that no candidate matches has
+conversion" notes ([#2384](https://github.com/buster14a/buster/issues/2384));
+a condition that reads a `volatile` parameter is accepted, where clang's is
+"never produces a constant expression"
+([#2383](https://github.com/buster14a/buster/issues/2383)); an overload set's address that no candidate matches has
 the checker's error, not clang's "<overloaded function type>" with its
-candidates' notes ("made ineligible by enable_if" among them); the condition shapes
+candidates' notes ("made ineligible by enable_if" among them, #2384); the condition shapes
 above (a cast to void or to `void *` in a condition gives none of clang's
 "never produces a constant expression" errors, nor
 `-Wint-to-void-pointer-cast`); the comma warnings of the constant reader's
