@@ -4291,8 +4291,8 @@ Clang marks a declaration whose declarator or type is in error invalid, keeps it
 bound, and leaves its uses quiet: a `RecoveryExpr` around each, whose enclosing
 expressions give no diagnostic of their own. The reader does the same for the
 declarator errors above and a variable of type `void` or of an incomplete type,
-in a declaration's own declarator (not a deduced `auto`'s or a K&R
-definition's; a typedef's and a parameter's are below):
+in a declaration's own declarator (not a deduced `auto`'s; a typedef's, a
+parameter's and a K&R definition's are below):
 
 - **The error recovers.** `check_input_declarator_recover` and
   `check_input_variable_recover` move the report to the recovered ones, so the
@@ -4347,10 +4347,17 @@ definition's; a typedef's and a parameter's are below):
   "expected ';' after top level declarator", still stops the reader without
   it.
 
-Left as before: an initialized invalid declaration still stops the reader
-(clang checks its initializer without the declaration's type, and its
-undeclared names and warnings there), and so does an invalid function
-definition's K&R list. `-c` refuses every such unit.
+An initialized invalid object recovers too: clang checks its initializer no
+further, so the reader skips it to the declarator's end, the object invalid
+and its uses quiet. An invalid function's initializer is clang's "illegal
+initializer (only variables can be initialized)" at its name, after the
+declarator's own error (`CHECK_INPUT_FUNCTION_INITIALIZER`), recovered the
+same way. Clang still reports a skipped initializer's undeclared names, which
+the reader doesn't.
+
+An invalid K&R definition goes on too, its body checked as clang checks it, and
+its declaration list's declarator errors recover: the listed parameter is a
+stand-in, invalid and quiet in the body. `-c` refuses every such unit.
 
 #### Extern objects of type void (#1447)
 
@@ -5191,7 +5198,6 @@ The later phases are left:
 - **Invalid declarations.** Not covered by phase 2 or the invalid
   declarations above:
   - C23's redefinition of an enum in a block, or a third time (above).
-  - An initialized invalid declaration, which clang marks invalid too.
 
   These still stop the reader. (A non-constant initializer's place, `sizeof`
   of an incomplete type's words and a nested tag's redefinition are clang's,

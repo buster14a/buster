@@ -459,6 +459,19 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "void f(void) { int p[-1], r; int s = r; (void)s; }\n"
         "int x = undeclared;\n",
         "typedef int T, U[-1], V;\nV v;\n",
+        // Initialized invalid declarations (#1447): an object's initializer is skipped, the object invalid and its uses
+        // quiet; a function's is clang's "illegal initializer", after the declarator's own error.
+        "int a[-1] = {1, \"x\"};\n"
+        "int c = a[0];\n"
+        "struct X; struct X xs[2] = {0};\n"
+        "void v = 1;\n"
+        "int (fa[2])(void) = {0};\n"
+        "int big[1ull<<62] = {0};\n"
+        "void f(void) { int l[-1] = {2}; char *p = l; int m = l[0]; (void)p; (void)m; }\n"
+        "int g(void)[3] = 0;\n"
+        "int h(void)[3] = {1}, k;\n"
+        "void f2(void) { void v1 = 1, w1; int u = q; }\n"
+        "int x = undeclared;\n",
         // C23's redefinition of a record in its scope (#1447, N3037), gnu23's alone: a compatible one redeclares the
         // earlier record, typedef'd members and nested anonymous records too; an incompatible one is clang's "has
         // incompatible definitions" with its notes at the first difference (a name, a bit-field, a type, a member more or

@@ -326,6 +326,9 @@ typedef enum CheckInputMessage
     CHECK_INPUT_ARRAY_NEGATIVE,
     CHECK_INPUT_ARRAY_FUNCTIONS,
     CHECK_INPUT_ARRAY_INCOMPLETE,
+    // An invalid function's initializer (#1447): clang's "illegal initializer (only variables can be initialized)", at its
+    // name, recovered and the initializer skipped.
+    CHECK_INPUT_FUNCTION_INITIALIZER,
     // An array of more than BUSTER_TYPE_MAX_OBJECT_BYTES (#1447, clang's limit too), at its bound: "array is too large
     // (2'305'843'009'213'693'952 elements)", its count in `value`.
     CHECK_INPUT_ARRAY_TOO_LARGE,
@@ -9355,7 +9358,11 @@ static bool check_input_kr_declarations(CheckInputReader* reader, uint32_t names
             reader->declarator_common = common;
             const uint32_t declarator_vlas = reader->output->vla_count;
             reader->kr_declarator = true;
+            // Its declarator errors recover (#1447), the parameter a stand-in, invalid and quiet in the body, as a prototype
+            // parameter's are.
+            reader->declarator_recover = true;
             const TypeId type = check_input_declarator(reader, base, &i, body, &name, &parameters);
+            const bool kr_invalid = reader->declarator_invalid;
             reader->kr_declarator = false;
             CheckInputAttributes* attributes = check_input_merge_attributes(reader, common, reader->declarator_attributes);
             const uint8_t next = i < body ? parser->tokens.kinds[i] : PARSE_KIND_END;
@@ -9391,6 +9398,10 @@ static bool check_input_kr_declarations(CheckInputReader* reader, uint32_t names
                     vla->declaration = vla->declaration == name ? listed : vla->declaration;
                 }
                 check_input_set_attributes_at(reader->output, listed, attributes);
+                if (__builtin_expect(kr_invalid && valid, 0))
+                {
+                    check_input_invalid_declare(reader, listed);
+                }
                 const CheckNoderefType* noderef = check_input_noderef_adjust_parameter(reader, type, reader->declarator_noderef);
                 check_input_noderef_set(reader->output, listed, noderef);
                 check_input_noderef_declaration(reader, listed, name, noderef);
@@ -10329,9 +10340,41 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
             type = check_input_type_result(reader, type_aligned(reader->types, type, attributes->alignment_log2 - 1));
         }
         valid &= type != 0 && name != BUSTER_CHECK_NONE && i < count;
-        // An initialized invalid declaration, and a K&R definition's, still stop (#1447): clang checks such an initializer
-        // without the declaration's type, which a later phase can give.
-        if (__builtin_expect(invalid, 0) && (!valid || reader->declarator_identifier_list || check_input_has_initializer(parser, i)))
+        // An initialized invalid object (#1447): clang checks its initializer no further (but for its undeclared names, which
+        // its parser reports), so the reader skips it to the declarator's end, the object invalid. A function's, which is
+        // clang's "illegal initializer", is reported and skipped too. A K&R definition's goes on, its
+        // body checked as clang checks it.
+        const bool function_initialized = __builtin_expect(invalid, 0) && valid && !reader->declarator_identifier_list && i < count &&
+                                          parser->tokens.kinds[i] == PARSE_KIND_EQUAL && type != 0 && name < count &&
+                                          type_kind(reader->types, type_strip_aligned(reader->types, type)) == BUSTER_TYPE_KIND_FUNCTION;
+        if (__builtin_expect(function_initialized, 0))
+        {
+            const uint32_t before = reader->output->report_count;
+            check_input_report(reader, name, CHECK_INPUT_FUNCTION_INITIALIZER);
+            if (reader->output->report_count == before + 1)
+            {
+                // (After the declarator's own error, as clang finds it at the `=`.)
+                reader->output->reports[before].sort = i;
+            }
+            valid = reader->output->report_count == before + 1 && check_input_recover_reports(reader, before);
+        }
+        const bool skipped_initializer = __builtin_expect(invalid, 0) && valid && !reader->declarator_identifier_list && i < count &&
+                                         parser->tokens.kinds[i] == PARSE_KIND_EQUAL && type != 0;
+        if (__builtin_expect(skipped_initializer, 0))
+        {
+            uint32_t right = reader->first_child[i];
+            while (right != BUSTER_CHECK_NONE && right < i)
+            {
+                right = reader->next_child[right];
+            }
+            const uint32_t end = right != BUSTER_CHECK_NONE ? reader->ends[right] + 1 : i;
+            for (uint32_t skipped = i; right != BUSTER_CHECK_NONE && skipped < end && skipped < count; skipped += 1)
+            {
+                reader->ignored[skipped] = true;
+            }
+            i = right != BUSTER_CHECK_NONE ? end : i;
+        }
+        if (__builtin_expect(invalid, 0) && (!valid || check_input_has_initializer(parser, i)))
         {
             check_input_recover_undo(reader, recovered_mark);
             valid = false;
@@ -10490,7 +10533,7 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
         {
             const uint8_t kind = parser->tokens.kinds[i];
             const bool direct_initializer = parser->tree.roles[i] == PARSE_ROLE_OPEN_GROUP;
-            const bool initialized = check_input_has_initializer(parser, i);
+            bool initialized = check_input_has_initializer(parser, i);
             const uint32_t direct_close = direct_initializer ? parser->tree.parents[i] : i;
             const uint32_t direct_end = direct_initializer ? check_input_direct_initializer_end(parser, i + 1, direct_close) : i;
             if (direct_initializer && direct_end < direct_close && (c23_auto || check_input_auto_type(type)))
@@ -10521,9 +10564,23 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                 const uint32_t before = reader->output->report_count;
                 check_input_incomplete_variable(reader, name, type);
                 // Recovered, it is an invalid declaration of a stand-in int (#1447).
-                const bool recovered = check_input_variable_recover(reader, before, initialized);
+                const bool recovered = check_input_variable_recover(reader, before, initialized && direct_initializer);
                 invalid |= recovered;
                 type = recovered ? BUSTER_TYPE_INT : type;
+                // An initialized one's initializer is skipped, as clang checks it no further (#1447).
+                uint32_t right = recovered && initialized ? reader->first_child[i] : BUSTER_CHECK_NONE;
+                while (right != BUSTER_CHECK_NONE && right < i)
+                {
+                    right = reader->next_child[right];
+                }
+                const uint32_t end = right != BUSTER_CHECK_NONE ? reader->ends[right] + 1 : i;
+                for (uint32_t skipped = i; skipped < end && skipped < count; skipped += 1)
+                {
+                    reader->ignored[skipped] = true;
+                }
+                valid &= !recovered || !initialized || right != BUSTER_CHECK_NONE;
+                i = end;
+                initialized &= !recovered;
             }
             valid &= is_typedef || function || type_kind(reader->types, type) != BUSTER_TYPE_KIND_VOID || void_extern;
             // A function specifier declares a function only: clang refuses inline elsewhere, and the _Noreturn keyword
@@ -10568,7 +10625,10 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                 type = completed ? BUSTER_TYPE_INT : type;
             }
             valid &= completed;
-            valid &= initialized || kind == PARSE_KIND_COMMA || kind == PARSE_KIND_SEMI || (function && kind == PARSE_KIND_L_BRACE);
+            // (A recovered void object's skipped initializer ends at its declarator's `,` or `;`.)
+            const uint8_t ending = i < count ? parser->tokens.kinds[i] : PARSE_KIND_END;
+            valid &= initialized || kind == PARSE_KIND_COMMA || kind == PARSE_KIND_SEMI || (function && kind == PARSE_KIND_L_BRACE) ||
+                     (invalid && (ending == PARSE_KIND_COMMA || ending == PARSE_KIND_SEMI));
             // A variable's definition is its initializer or, at file scope, its tentative definition with external linkage
             // (GNU's alias attributes, #147).
             const CheckInputAttributeSubject subject = {
