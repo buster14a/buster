@@ -9200,6 +9200,16 @@ enables, which this checker doesn't all give.
   qualifiers, an `_Atomic` one's value type, spelled with the typedef its
   object was declared with (`check_semantic_operand_spelling`, through
   dereferences, subscripts and members).
+- **Binary operators' operands** (#1872). An arithmetic, shift or bitwise
+  operator, or its compound assignment, whose operands' types it doesn't take
+  is clang's `err_typecheck_invalid_operands`: "invalid operands to binary
+  expression ('int *' and 'double')", at the operator, both types as written
+  (an array's and a function's undecayed, a qualified lvalue's qualifiers and
+  a typedef's sugar kept, `check_semantic_operand_spelling`). Two pointers to
+  incompatible types subtracted are "'int *' and 'float *' are not pointers to
+  compatible types". A vector's operands keep the checker's message. What
+  isn't clang's: a compound assignment to a const lvalue with such operands
+  reports the const error, where clang reports the operands first.
 - **Vector typedefs' a.k.a.** Clang's desugaring stops at a vector type's own
   typedef: a typedef of `v4si` prints `'w4si' (aka 'v4si')`, and `v4si` itself
   `'v4si' (vector of 4 'int' values)` (`check_driver_warning_type_at`).
