@@ -2758,19 +2758,37 @@ static uint32_t check_input_operand_spelling(CheckInputReader* reader, uint32_t 
     return check_input_operand_type_spelling(reader->output, reader->parser, node);
 }
 
-static void check_input_null_warning(CheckInputReader* reader, TypeId destination, const CheckValue* value,
-                                      uint32_t first, uint32_t end, uint32_t completion)
+// c_checker_driver.c's, which a call argument's parameter spelling shares (#1100).
+static uint32_t check_driver_parameter_source(const Parser* parser, const CheckInput* input, uint32_t declaration, uint32_t index);
+static uint32_t check_driver_parameter_place(const Parser* parser, const CheckInput* input, uint32_t declaration, uint32_t index);
+static uint32_t check_driver_parameter_spelling(const Parser* parser, const CheckInput* input, uint32_t token);
+
+// The typedef that parameter `index` of a direct call's callee, named at `name`, is declared with (#1100): clang prints
+// the argument's conversion to it as the parameter's type, `'N *' (aka 'struct N *')`. The callee's visible
+// declaration's own parameter list gives it, as the driver's conversion notes find it (check_driver_parameter_source);
+// 0 where the callee isn't a function's name or its declaration lists no such parameter.
+static uint32_t check_input_parameter_spelling(const Parser* parser, const CheckInput* input, uint32_t name, uint32_t index)
 {
-    CheckWarningEvent event;
-    if (check_warning_null_event(reader->parser, reader->types, destination, value, first, end, completion, &event))
-    {
-        event.flags = check_input_warning_unevaluated(reader, event.token) ? BUSTER_CHECK_WARNING_SUPPRESSED : 0;
-        event.payload.token = reader->warning_bound_open;
-        check_input_warning_once(reader, &event);
-    }
+    const uint32_t function = name < parser->tokens.count && name < input->token_count && parser->tokens.kinds[name] == PARSE_KIND_IDENTIFIER &&
+                              input->declarations != 0 ? input->declarations[name] : BUSTER_CHECK_NONE;
+    const uint32_t kind = function < input->token_count && input->declaration_kinds != 0 ? input->declaration_kinds[function] : C_BINDING_USE;
+    const bool direct = kind == C_BINDING_FUNCTION;
+    uint32_t parameter = direct || kind == C_BINDING_OBJECT ? check_driver_parameter_source(parser, input, function, index) : BUSTER_CHECK_NONE;
+    parameter = parameter < input->token_count ? parameter : direct ? check_driver_parameter_place(parser, input, function, index) : BUSTER_CHECK_NONE;
+    // A pointer to a function its object's typedef spells (`F *gp` of `typedef void F(N *)`) has that typedef's list.
+    const uint32_t spelled = parameter >= input->token_count && kind == C_BINDING_OBJECT ? check_input_typedef_spelling(input, parser, function) : 0;
+    parameter = spelled != 0 ? check_driver_parameter_source(parser, input, spelled, index) : parameter;
+    return parameter < input->token_count ? check_driver_parameter_spelling(parser, input, parameter) : 0;
 }
 
-// The same, with the destination operand's own spelling facts (#992): `printed` is the type clang's message
+// The same for a member's declarator (`void (*m)(N *)`), its own list's.
+static uint32_t check_input_declarator_parameter_spelling(const Parser* parser, const CheckInput* input, uint32_t declarator, uint32_t index)
+{
+    const uint32_t parameter = check_driver_parameter_source(parser, input, declarator, index);
+    return parameter < input->token_count ? check_driver_parameter_spelling(parser, input, parameter) : 0;
+}
+
+// A null pointer constant warning, with the destination operand's own spelling facts (#992): `printed` is the type clang's message
 // shows (the declaration's written type, qualifiers kept) and `spelling` its typedef specifier's declaration,
 // or BUSTER_CHECK_NONE for `__size_t`, or 0 for no sugar.
 static void check_input_null_spelling(CheckInputReader* reader, TypeId destination, TypeId printed, uint32_t spelling,
