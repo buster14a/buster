@@ -5763,7 +5763,13 @@ warnings that need the completed graph or the parser's operator tree:
 `-Wlogical-not-parentheses`, `-Wparentheses` (assignment conditions and
 bitwise/equality precedence), `-Wempty-body`, `-Wself-assign`,
 `-Wreturn-stack-address`, `-Wformat`/`-Wformat-security`, `-Wswitch`,
-`-Wdangling-else` and `-Wuninitialized`. `c_check_binding.c` adds
+`-Wdangling-else` and `-Wuninitialized`. A divisor `-Wdivision-by-zero` reads
+as clang's EvaluateAsInt does (`check_common_zero_divisor`): an integer
+constant, or, through integer casts, a const non-volatile object whose
+completed initializer's receipt (`CheckInput.const_values`) gives zero
+(`const int k = 0; 1 / k`, an element's or a member's too, #1447); not yet
+arithmetic or a conditional of such reads (`1 / (k + 0)`), which clang folds
+too. `c_check_binding.c` adds
 `-Wunused-variable`, `-Wunused-const-variable`, `-Wunused-function` and
 `-Wunused-parameter` as sparse events, with the declaration's body deciding
 the completion, so they follow Clang's after-function order; a redeclaration
