@@ -207,6 +207,23 @@ static bool check_input_target_clones(CheckInputReader* reader, CheckInputAttrib
         attribute->ignored = true;
         attribute->subject_ignored = true;
     }
+    // The versions, joined by commas, are the attribute's text, which code generation reads (#1838,
+    // c_check_program_target_versions.c).
+    uint64_t joined = 0;
+    for (uint32_t s = 0; decoded && !unsupported && s < seen_count; s += 1)
+    {
+        joined += seen[s].length + 1;
+    }
+    char* text = decoded && !unsupported && joined != 0 ? BUSTER_ARENA_PUSH_ARRAY(reader->arena, char, joined) : NULL;
+    reader->output->resource |= decoded && !unsupported && joined != 0 && text == NULL;
+    uint64_t length = 0;
+    for (uint32_t s = 0; text != NULL && s < seen_count; s += 1)
+    {
+        memcpy(text + length, seen[s].pointer, seen[s].length);
+        length += seen[s].length;
+        text[length++] = ',';
+    }
+    attribute->text = text != NULL ? (String8){ text, length - 1 } : (String8){ 0 };
     arena_pop_to(reader->scratch, mark);
     return valid;
 }

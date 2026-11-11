@@ -22,6 +22,8 @@ struct CheckInitializers
     TypeId failed_type;
     // A failed conversion's source node plus one and its declaration (CheckInitializer.failed_source, #147).
     uint32_t failed_source;
+    // Its subobject's offset in bits (CheckInitializer.failed_offset).
+    uint64_t failed_offset;
     uint32_t failed_declaration;
     uint32_t token;
     uint32_t completion;
@@ -269,6 +271,8 @@ struct CheckInitFailure
     CheckInitStatus status;
     TypeId failed_type;
     uint32_t failed_source;
+    // Its subobject's offset in bits (CheckInitializer.failed_offset).
+    uint64_t failed_offset;
     uint32_t failed_declaration;
     uint32_t token;
     uint32_t completion;
@@ -285,6 +289,8 @@ struct CheckInitDiagnostic
     TypeId failed_type;
     // A failed conversion's source node plus one and its declaration (CheckInitializer.failed_source, #147).
     uint32_t failed_source;
+    // Its subobject's offset in bits (CheckInitializer.failed_offset).
+    uint64_t failed_offset;
     uint32_t failed_declaration;
     uint32_t token;
     uint32_t completion;
@@ -605,6 +611,7 @@ static bool check_initializers_diagnose_warnings(CheckInitDiagnostic* result, co
                 result->status = plan.status;
                 result->failed_type = plan.failed_type;
                 result->failed_source = plan.failed_source;
+                result->failed_offset = plan.failed_offset;
                 result->failed_declaration = declaration;
                 result->token = plan.failed_token;
                 result->completion = end;
@@ -615,6 +622,7 @@ static bool check_initializers_diagnose_warnings(CheckInitDiagnostic* result, co
                     .status = plan.status,
                     .failed_type = plan.failed_type,
                     .failed_source = plan.failed_source,
+                    .failed_offset = plan.failed_offset,
                     .failed_declaration = declaration,
                     .token = plan.failed_token,
                     .completion = end,
@@ -782,6 +790,7 @@ static bool check_initializers_run_events(CheckInitializers* result, const Check
             result->status = plan->status;
             result->failed_type = plan->failed_type;
             result->failed_source = plan->failed_source;
+            result->failed_offset = plan->failed_offset;
             result->failed_declaration = token;
             result->token = plan->failed_token;
             result->completion = check_sparse_get(input->initializer_ends, token);
@@ -800,11 +809,12 @@ static bool check_initializers_run_events(CheckInitializers* result, const Check
         const CheckInitStatus status = result->status;
         const TypeId failed_type = result->failed_type;
         const uint32_t failed_source = result->failed_source;
+        const uint64_t failed_offset = result->failed_offset;
         const uint32_t failed_declaration = result->failed_declaration;
         const uint32_t token = result->token;
         const uint32_t completion = result->completion;
         arena_pop_to(output, output_mark);
-        *result = (CheckInitializers){ .status = status, .failed_type = failed_type, .failed_source = failed_source, .failed_declaration = failed_declaration,
+        *result = (CheckInitializers){ .status = status, .failed_type = failed_type, .failed_source = failed_source, .failed_offset = failed_offset, .failed_declaration = failed_declaration,
                                        .token = token, .completion = completion };
         if (semantic != NULL)
         {

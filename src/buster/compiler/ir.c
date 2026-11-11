@@ -38,6 +38,10 @@
 #define BUSTER_IR_ACCESS_FLAGS (BUSTER_IR_VOLATILE | BUSTER_IR_ATOMIC | BUSTER_IR_ORDER)
 // The accesses every pass keeps as they are and where they are: a volatile one and an atomic one.
 #define BUSTER_IR_OBSERVABLE (BUSTER_IR_VOLATILE | BUSTER_IR_ATOMIC)
+// An IR_STACK_SAVE's flag (#1847): the function's frame address, __builtin_frame_address(0), rather than rsp: its frame
+// pointer, rbp, the address of the caller's rbp its prologue pushed, as clang's and Tier 0's frames have it. The typed
+// stream's FRAME_ADDRESS. The function keeps a frame pointer (Tier 1's frame planner, BUSTER_TIER1_FRAME_KEEP_POINTER).
+#define BUSTER_IR_STACK_SAVE_FRAME 1
 #define BUSTER_IR_SLOT_ADDRESS_TAKEN 1
 #define BUSTER_IR_SLOT_VOLATILE 2
 #define BUSTER_IR_SLOT_TEMPORARY 4
@@ -340,6 +344,9 @@ struct IrAsmBody
     uint32_t count;
     uint32_t branch_count;
     uint32_t touched;
+    // The opmask registers the records write (k0 to k7, a bit each; Tier0AsmBody.masks), whose live masks Tier 1's CFG
+    // consumer saves around the body (tier1_emit_cfg_asm).
+    uint8_t masks;
 };
 
 typedef struct IrSizes IrSizes;
@@ -1790,7 +1797,8 @@ static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i)
     }
     else if (((op == IR_LOAD || op == IR_STORE) && (!ir_access_flags_valid(op, f->flags[i]) || f->alignment_log2[i] > 31)) ||
              (op == IR_ATOMIC_RMW && (!ir_rmw_flags_valid(f->flags[i]) || f->alignment_log2[i] > 31)) ||
-             ((op != IR_LOAD && op != IR_STORE && op != IR_ATOMIC_RMW) && ((f->flags[i] != 0 && op != IR_INTRINSIC && !ir_lane_valid(op, f->flags[i])) || f->alignment_log2[i] != 0)))
+             ((op != IR_LOAD && op != IR_STORE && op != IR_ATOMIC_RMW) && ((f->flags[i] != 0 && op != IR_INTRINSIC && !ir_lane_valid(op, f->flags[i]) && (op != IR_STACK_SAVE || f->flags[i] != BUSTER_IR_STACK_SAVE_FRAME)) ||
+              f->alignment_log2[i] != 0)))
     {
         check.error = IR_ERROR_METADATA;
     }
@@ -3302,6 +3310,10 @@ static IrError ir_print(const IrFunction* f, Arena* scratch, FILE* output)
                             {
                                 fprintf(output, " %u", (unsigned)f->flags[i]);
                             }
+                        }
+                        if (op == IR_STACK_SAVE && f->flags[i] == BUSTER_IR_STACK_SAVE_FRAME)
+                        {
+                            fprintf(output, " frame");
                         }
                         if (op == IR_ATOMIC_RMW)
                         {

@@ -56,6 +56,84 @@ static uint32_t check_input_thread_argument_end(const Parser* parser, uint32_t f
     return result;
 }
 
+// The first name a generic attribute's expressions name that names nothing, or BUSTER_CHECK_NONE (#147: one this checker
+// has no rule for, as its arguments' kinds say, check_input_arguments_row: its identifier and string literal arguments
+// aside, a function declarator's parameters names only where clang parses it in the function's scope or after the
+// declaration; check_input_thread_names).
+static uint32_t check_input_generic_undeclared(CheckInputReader* reader, const CheckInputAttribute* attribute, uint32_t parameters, const CheckTagFrame* frames,
+                                               uint32_t depth, const CheckTagMember* members, uint32_t member_count)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t scoped = BUSTER_CHECK_ARGUMENTS_FUNCTION_SCOPE | BUSTER_CHECK_ARGUMENTS_LATE | BUSTER_CHECK_ARGUMENTS_LATE_EXPERIMENTAL;
+    const uint32_t identifiers = BUSTER_CHECK_ARGUMENTS_VARIADIC_IDENTIFIER | BUSTER_CHECK_ARGUMENTS_STRICT_IDENTIFIER;
+    const bool kept = !attribute->ignored && !attribute->subject_ignored;
+    uint32_t undeclared = BUSTER_CHECK_NONE;
+    // (availability's, external_source_symbol's, type_tag_for_datatype's and objc_bridge_related's arguments are no
+    // expressions: clang's parser reads them its own way, check_input_availability_parse, check_input_external_source_parse,
+    // check_input_type_tag_parse and check_input_objc_bridge_related_parse.)
+    const String8 generic_name = attribute->kind == CHECK_ATTRIBUTE_UNKNOWN && !attribute->keyword ? check_input_attribute_name(reader, attribute->name) : (String8){ 0 };
+    const bool custom = check_input_attribute_equal(generic_name, "availability") || check_input_attribute_equal(generic_name, "external_source_symbol") ||
+                        check_input_attribute_equal(generic_name, "type_tag_for_datatype") ||
+                        check_input_attribute_equal(generic_name, "objc_bridge_related");
+    const bool generic = attribute->kind == CHECK_ATTRIBUTE_UNKNOWN && !attribute->keyword && kept && !custom;
+    const CheckInputArgumentsRow* row = generic ? check_input_arguments_row(generic_name) : NULL;
+    const uint32_t flags = row != NULL ? row->flags : 0;
+    const uint32_t strings = row != NULL ? row->strings : 0;
+    const uint32_t in_scope = (flags & scoped) != 0 ? parameters : BUSTER_CHECK_NONE;
+    uint32_t index = 0;
+    for (uint32_t argument = attribute->argument_first; generic && (flags & BUSTER_CHECK_ARGUMENTS_TYPE) == 0 && undeclared == BUSTER_CHECK_NONE &&
+         argument < attribute->argument_end; index += 1)
+    {
+        const uint32_t stop = check_input_thread_argument_end(parser, argument, attribute->argument_end);
+        const bool lone = stop == argument + 1 && parser->tokens.kinds[argument] == PARSE_KIND_IDENTIFIER;
+        const bool identifier = lone && ((index == 0 && (flags & BUSTER_CHECK_ARGUMENTS_IDENTIFIER) != 0) || (flags & identifiers) != 0);
+        const bool string = index < 32 && ((strings >> index) & 1u) != 0;
+        // An argument that calls a builtin or a keyword of a type argument (__builtin_offsetof's member, _Generic's)
+        // isn't looked into.
+        bool builtin = false;
+        for (uint32_t token = argument; token < stop; token += 1)
+        {
+            const String8 spelled = parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER ? check_input_attribute_name(reader, parser->tokens.names[token]) :
+                                                                                           (String8){ 0 };
+            builtin |= (spelled.length > 10 && memcmp(spelled.pointer, "__builtin_", 10) == 0) || parser->tokens.kinds[token] == PARSE_KIND_TYPE_ARGUMENT ||
+                       parser->tokens.kinds[token] == PARSE_KIND_GENERIC;
+        }
+        for (uint32_t token = argument; !identifier && !string && !builtin && undeclared == BUSTER_CHECK_NONE && token < stop; token += 1)
+        {
+            const bool named = parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER;
+            undeclared = named && !check_input_thread_name(reader, in_scope, frames, depth, members, member_count, token) ? token : BUSTER_CHECK_NONE;
+        }
+        argument = stop + 1;
+    }
+    return undeclared;
+}
+
+// A tag's attributes' names (#1447: a generic attribute's later argument, objc_bridge's), as check_input_thread_names
+// checks them but without reading a thread-safety attribute's expressions, which a tag's attributes don't need (its
+// capability's is a string) and whose constants may name the tag's type: the first that names nothing is clang's
+// parser's error at it, which stops the declaration.
+static bool check_input_tag_names(CheckInputReader* reader, const CheckInputAttributes* attributes)
+{
+    const Parser* parser = reader->parser;
+    uint32_t undeclared = BUSTER_CHECK_NONE;
+    for (uint32_t i = 0; undeclared == BUSTER_CHECK_NONE && attributes != NULL && i < attributes->count; i += 1)
+    {
+        const CheckInputAttribute* attribute = attributes->records + i;
+        const bool thread = attribute->kind == CHECK_ATTRIBUTE_THREAD_SAFETY && !attribute->ignored && !attribute->subject_ignored;
+        for (uint32_t token = attribute->argument_first; thread && undeclared == BUSTER_CHECK_NONE && token < attribute->argument_end; token += 1)
+        {
+            const bool identifier = parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER;
+            undeclared = identifier && !check_input_thread_name(reader, BUSTER_CHECK_NONE, NULL, 0, NULL, 0, token) ? token : BUSTER_CHECK_NONE;
+        }
+        undeclared = undeclared == BUSTER_CHECK_NONE ? check_input_generic_undeclared(reader, attribute, BUSTER_CHECK_NONE, NULL, 0, NULL, 0) : undeclared;
+    }
+    if (undeclared != BUSTER_CHECK_NONE)
+    {
+        check_input_report(reader, undeclared, CHECK_INPUT_UNDECLARED);
+    }
+    return undeclared == BUSTER_CHECK_NONE;
+}
+
 // Each thread-safety attribute's argument names, as clang's parser reads them (above), and a generic attribute's
 // expressions' (#147: one this checker has no rule for, as its arguments' kinds say, check_input_arguments_row: its
 // identifier and string literal arguments aside, a function declarator's parameters names only where clang parses it in
@@ -68,8 +146,6 @@ static bool check_input_thread_names(CheckInputReader* reader, CheckInputAttribu
     const Parser* parser = reader->parser;
     uint32_t undeclared = BUSTER_CHECK_NONE;
     bool valid = true;
-    const uint32_t scoped = BUSTER_CHECK_ARGUMENTS_FUNCTION_SCOPE | BUSTER_CHECK_ARGUMENTS_LATE | BUSTER_CHECK_ARGUMENTS_LATE_EXPERIMENTAL;
-    const uint32_t identifiers = BUSTER_CHECK_ARGUMENTS_VARIADIC_IDENTIFIER | BUSTER_CHECK_ARGUMENTS_STRICT_IDENTIFIER;
     for (uint32_t i = 0; valid && undeclared == BUSTER_CHECK_NONE && attributes != NULL && i < attributes->count; i += 1)
     {
         CheckInputAttribute* attribute = attributes->records + i;
@@ -96,42 +172,8 @@ static bool check_input_thread_names(CheckInputReader* reader, CheckInputAttribu
                 argument = stop + 1;
             }
         }
-        // (availability's, external_source_symbol's and type_tag_for_datatype's arguments are no expressions: clang's parser
-        // reads them its own way, check_input_availability_parse, check_input_external_source_parse and
-        // check_input_type_tag_parse.)
-        const String8 generic_name = attribute->kind == CHECK_ATTRIBUTE_UNKNOWN && !attribute->keyword ? check_input_attribute_name(reader, attribute->name) : (String8){ 0 };
-        const bool custom = check_input_attribute_equal(generic_name, "availability") || check_input_attribute_equal(generic_name, "external_source_symbol") ||
-                            check_input_attribute_equal(generic_name, "type_tag_for_datatype");
-        const bool generic = attribute->kind == CHECK_ATTRIBUTE_UNKNOWN && !attribute->keyword && kept && !custom;
-        const CheckInputArgumentsRow* row = generic ? check_input_arguments_row(generic_name) : NULL;
-        const uint32_t flags = row != NULL ? row->flags : 0;
-        const uint32_t strings = row != NULL ? row->strings : 0;
-        const uint32_t in_scope = (flags & scoped) != 0 ? parameters : BUSTER_CHECK_NONE;
-        uint32_t index = 0;
-        for (uint32_t argument = attribute->argument_first; generic && (flags & BUSTER_CHECK_ARGUMENTS_TYPE) == 0 && undeclared == BUSTER_CHECK_NONE &&
-             argument < attribute->argument_end; index += 1)
-        {
-            const uint32_t stop = check_input_thread_argument_end(parser, argument, attribute->argument_end);
-            const bool lone = stop == argument + 1 && parser->tokens.kinds[argument] == PARSE_KIND_IDENTIFIER;
-            const bool identifier = lone && ((index == 0 && (flags & BUSTER_CHECK_ARGUMENTS_IDENTIFIER) != 0) || (flags & identifiers) != 0);
-            const bool string = index < 32 && ((strings >> index) & 1u) != 0;
-            // An argument that calls a builtin or a keyword of a type argument (__builtin_offsetof's member, _Generic's)
-            // isn't looked into.
-            bool builtin = false;
-            for (uint32_t token = argument; token < stop; token += 1)
-            {
-                const String8 spelled = parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER ? check_input_attribute_name(reader, parser->tokens.names[token]) :
-                                                                                               (String8){ 0 };
-                builtin |= (spelled.length > 10 && memcmp(spelled.pointer, "__builtin_", 10) == 0) || parser->tokens.kinds[token] == PARSE_KIND_TYPE_ARGUMENT ||
-                           parser->tokens.kinds[token] == PARSE_KIND_GENERIC;
-            }
-            for (uint32_t token = argument; !identifier && !string && !builtin && undeclared == BUSTER_CHECK_NONE && token < stop; token += 1)
-            {
-                const bool named = parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER;
-                undeclared = named && !check_input_thread_name(reader, in_scope, frames, depth, members, member_count, token) ? token : BUSTER_CHECK_NONE;
-            }
-            argument = stop + 1;
-        }
+        undeclared = undeclared == BUSTER_CHECK_NONE ? check_input_generic_undeclared(reader, attribute, parameters, frames, depth, members, member_count) :
+                                                       undeclared;
     }
     if (undeclared != BUSTER_CHECK_NONE)
     {

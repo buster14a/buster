@@ -200,7 +200,45 @@ struct Tier1MasksFixture
     // The buffer after a run, from the input and the count, where the interpreter can't run the fixture: a machine row's
     // (#141), which it has no model of. Null for the interpreter's.
     void (*model)(const uint8_t* input, uint64_t count, uint8_t* output);
+    // Its one call is an asm body's (#1839, tier1_masks_test_asm_body), which the text has no form for: after parsing,
+    // the call becomes a body call of records that write k1 to k7, around which the live masks must be saved.
+    bool asm_body;
 };
+
+// The asm body of the fixture marked `asm_body` (#1839): a template's records that zero eax and write k1 to k7 from it,
+// as `xorl %eax, %eax; kmovw %eax, %k1; ...; kmovw %eax, %k7` would assemble, touching rax and writing every opmask
+// register Tier 1 allocates (IrAsmBody.masks).
+static const X86Instruction tier1_masks_test_asm_records[] = {
+    { .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RAX, .form = X86_FORM_XOR_R32_RM32 },
+    { .reg = 1, .rm = X86_REGISTER_RAX, .form = X86_FORM_KMOVW_K_R32 },
+    { .reg = 2, .rm = X86_REGISTER_RAX, .form = X86_FORM_KMOVW_K_R32 },
+    { .reg = 3, .rm = X86_REGISTER_RAX, .form = X86_FORM_KMOVW_K_R32 },
+    { .reg = 4, .rm = X86_REGISTER_RAX, .form = X86_FORM_KMOVW_K_R32 },
+    { .reg = 5, .rm = X86_REGISTER_RAX, .form = X86_FORM_KMOVW_K_R32 },
+    { .reg = 6, .rm = X86_REGISTER_RAX, .form = X86_FORM_KMOVW_K_R32 },
+    { .reg = 7, .rm = X86_REGISTER_RAX, .form = X86_FORM_KMOVW_K_R32 },
+};
+
+static IrAsmBody tier1_masks_test_asm_body = {
+    .records = tier1_masks_test_asm_records,
+    .count = BUSTER_ARRAY_LENGTH(tier1_masks_test_asm_records),
+    .touched = 1u << X86_REGISTER_RAX,
+    .masks = 0xfe,
+};
+
+// The asm body fixture's buffer (#1839): its m16 at 0 complemented at 128, its m64 at 8 at 136 and its m8 at 16 at 144,
+// each live in an opmask register across the body that writes them all.
+static void tier1_masks_test_asm_model(const uint8_t* input, uint64_t count, uint8_t* output)
+{
+    (void)count;
+    memcpy(output, input, BUSTER_TIER1_MASKS_TEST_BUFFER);
+    uint16_t word = 0;
+    memcpy(&word, input, 2);
+    word = (uint16_t)~word;
+    memcpy(output + 128, &word, 2);
+    memcpy(output + 136, input + 8, 8);
+    output[144] = input[16];
+}
 
 static bool tier1_masks_test_expect(Tier1MasksTest* test, bool condition, const char* message)
 {
@@ -693,6 +731,32 @@ static const Tier1MasksFixture tier1_masks_test_fixtures[] = {
                 "  %56 = ret.void\n"
                 "}\n",
         .spills = true,
+    },
+    {
+        // #1839: masks live in opmask registers across an asm body whose records write k1 to k7, which Tier 1 saves
+        // and reloads around it as around a call (tier1_emit_cfg_asm).
+        .name = "masks across an asm body",
+        .text = "function (ptr) -> void {\n"
+                "b0:\n"
+                "  %0 = param.ptr 0\n"
+                "  %1 = load.m16 %0 align=2\n"
+                "  %2 = address.ptr %0 offset=8\n"
+                "  %3 = load.m64 %2 align=8\n"
+                "  %4 = address.ptr %0 offset=16\n"
+                "  %5 = load.m8 %4 align=1\n"
+                "  %6 = call.void @9() fixed=() variadic=0\n"
+                "  %7 = not.m16 %1\n"
+                "  %8 = address.ptr %0 offset=128\n"
+                "  %9 = store.void %8, %7 align=2\n"
+                "  %10 = address.ptr %0 offset=136\n"
+                "  %11 = store.void %10, %3 align=8\n"
+                "  %12 = address.ptr %0 offset=144\n"
+                "  %13 = store.void %12, %5 align=1\n"
+                "  %14 = ret.void\n"
+                "}\n",
+        .calls = true,
+        .asm_body = true,
+        .model = tier1_masks_test_asm_model,
     },
     {
         .name = "masks across calls",
@@ -3913,7 +3977,19 @@ static void tier1_masks_test_fixture(Tier1MasksTest* test, const Tier1MasksFixtu
                   fixture->baseline ? test->baseline : test->v4;
     IrFunction function;
     IrDominance dominance;
-    if (tier1_masks_test_parse(test, fixture->text, &function, &dominance))
+    bool parsed = tier1_masks_test_parse(test, fixture->text, &function, &dominance);
+    // The asm body fixture's call becomes a body call of its records (#1839): no symbol, the body's index.
+    for (uint32_t node = 0; parsed && fixture->asm_body && node < function.instruction_count; node += 1)
+    {
+        if (function.op[node] == IR_CALL)
+        {
+            function.calls[function.b[node]].body = 1;
+            function.a[node] = 0;
+            function.asm_bodies = &tier1_masks_test_asm_body;
+            function.asm_body_count = 1;
+        }
+    }
+    if (parsed)
     {
         uint8_t inputs[BUSTER_TIER1_MASKS_TEST_BUFFER * BUSTER_TIER1_MASKS_TEST_INPUTS];
         uint8_t expected[BUSTER_TIER1_MASKS_TEST_BUFFER * BUSTER_TIER1_MASKS_TEST_INPUTS];
