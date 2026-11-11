@@ -51,6 +51,17 @@ static const CheckDriverDefaultWarningFixture check_driver_unused_label_fixtures
         .warnings = 2,
         .errors = 1,
     },
+    {
+        // A goto whose jump into a statement expression is an error still uses its label, which the recovery's view
+        // leaves out with the goto; an unused variable of that function still warns, as the jump's error isn't its scope's.
+        .name = "a label an erroneous goto names",
+        .source = "void f(int x) { int y; goto in; x = ({ in: 1; }); }\n"
+                  "void g(void) { out: ; }\n",
+        .options = { "-Wall" },
+        .warnings = 2,
+        .errors = 1,
+        .notes = 1,
+    },
 };
 
 static void check_test_driver_unused_labels(CheckTest* test, const char* clang, const char* executable, const char* directory)
