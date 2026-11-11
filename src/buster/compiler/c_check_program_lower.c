@@ -12347,8 +12347,8 @@ static void check_lower_vector_floating(CheckLowerWriter* writer, uint32_t node,
                                                      check_vector_floating_scalar_row(&writer->target, builtin, class, &row, &constants, &tail);
         if (reason == NULL && tail.record_count != 0)
         {
-            // Two rows (check_vector_extreme_scalar_rows' maximumnum and minimumnum without AVX): x and y in temporaries,
-            // the first row of x, y and its constant, then the tail of its value, y and x.
+            // Two rows (check_vector_extreme_scalar_rows' maximumnum and minimumnum, and maximum's and minimum's, without
+            // AVX): x and y in temporaries, the first row of x, y and its constant, then the tail of its value, y and x.
             const uint32_t x = check_lower_temporary(writer, class);
             const uint32_t y = check_lower_temporary(writer, class);
             check_lower_instruction(writer, BUSTER_TYPED_X86, class, check_lower_operation_index(writer, &tail));
