@@ -6416,7 +6416,12 @@ declarator, at file scope and for a member), the ungrouped plain `_Complex` assu
 `-Wundefined-internal` at the declaration with its use's note at translation-unit end, and `-Wc23-extensions`
 for an unnamed parameter before C23. Since then (#147), `-Wextern-initializer` warns of a file-scope extern
 variable's initializer at its name, after its attributes' warnings, as clang's `AddInitializerToDecl` does (a block
-scope's is an error). Command-line options, `#pragma clang diagnostic` groups, `-w`, system
+scope's is an error). `-Wgnu-empty-struct` (#2409, off by default, `-pedantic`'s and `-Wgnu`'s) warns of a
+struct's or union's definition without named members at its keyword, as clang's `ActOnFields` does when it
+completes the record: "empty struct is a GNU extension", or "struct without named members is a GNU extension" where
+its members are unnamed bit-fields alone (an anonymous member counts as named). Left: clang's off-by-default
+`-Wc++-compat` "empty struct has size 0 in C, size 1 in C++" and `-Wzero-length-array` aren't given. Command-line
+options, `#pragma clang diagnostic` groups, `-w`, system
 headers and `-Werror` promotion apply through the shared sparse policy (`c_check_warning_policy.c`); the
 driver's `check_driver_warning_events_at` orders them by completion and attaches their notes. `test-checker-driver`
 compares the driver's complete diagnostics with clang's for every producer and policy, and

@@ -196,6 +196,9 @@ enum
     CHECK_WARNING_ID_GNU_ARRAY_RANGE = 139,
     // An integer added to a string literal (#2190, clang's diagnoseStringPlusInt): -Wstring-plus-int, on by default.
     CHECK_WARNING_ID_STRING_PLUS_INT = 140,
+    // A struct or union without named members (#2409, clang's ext_empty_struct_union and ext_no_named_members_in_struct_union):
+    // -Wgnu-empty-struct, off by default, -pedantic's.
+    CHECK_WARNING_ID_GNU_EMPTY_STRUCT = 141,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -474,6 +477,10 @@ typedef enum CheckWarningEventKind
     // A bit-precise constant's suffix (wb or uwb) before C23 (#1447): -Wc23-extensions' "'_BitInt' suffix for literals is a
     // C23 extension" (CHECK_WARNING_ID_C23_PARAMETER's option), at the constant.
     CHECK_WARNING_EVENT_BIT_INT_SUFFIX,
+    // A struct's or union's definition without named members (#2409), at its keyword: payload.data's bit 0 a union's, bit 1
+    // one with members (unnamed bit-fields), "struct without named members is a GNU extension", else "empty struct is a GNU
+    // extension".
+    CHECK_WARNING_EVENT_GNU_EMPTY_STRUCT,
     // __builtin_cpu_supports's literal of a feature clang doesn't know (#1843, check_input_cpu_supports_literal), at the
     // builtin's name: the description's message.
     CHECK_WARNING_EVENT_INVALID_CPU_SUPPORTS,
