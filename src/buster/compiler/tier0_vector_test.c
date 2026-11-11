@@ -2308,6 +2308,19 @@ static void tier0_test_vector_rules(Tier0TestTally* tally)
     Tier0Operation pair = tier0_test_vector_row(BUSTER_TIER0_TEST_VECTOR_ADD_D);
     pair.records[0] = (X86Instruction){ .form = X86_FORM_VP2INTERSECTD_K_Z_ZM512, .reg = 2, .vvvv = BUSTER_TIER0_ROLE_VECTOR(0), .rm = BUSTER_TIER0_ROLE_VECTOR(1) };
     tier0_test_expect(tally, tier0_operation_valid(&pair), "vectors", "VP2INTERSECT's opmask pair refused");
+    // VEX's floating logic forms (#1951), each of which needs an effects row in x86_semantics.c to be taken.
+    static const uint32_t float_logic[] = {
+        X86_FORM_VANDPS_X_X_XM128, X86_FORM_VANDPS_Y_Y_YM256, X86_FORM_VANDNPS_X_X_XM128, X86_FORM_VANDNPS_Y_Y_YM256,
+        X86_FORM_VORPS_X_X_XM128, X86_FORM_VORPS_Y_Y_YM256, X86_FORM_VXORPS_X_X_XM128, X86_FORM_VXORPS_Y_Y_YM256,
+        X86_FORM_VANDPD_X_X_XM128, X86_FORM_VANDPD_Y_Y_YM256, X86_FORM_VANDNPD_X_X_XM128, X86_FORM_VANDNPD_Y_Y_YM256,
+        X86_FORM_VORPD_X_X_XM128, X86_FORM_VORPD_Y_Y_YM256, X86_FORM_VXORPD_X_X_XM128, X86_FORM_VXORPD_Y_Y_YM256,
+    };
+    for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(float_logic); f += 1)
+    {
+        Tier0Operation logic = tier0_test_vector_row(BUSTER_TIER0_TEST_VECTOR_XOR_4);
+        logic.records[0] = tier0_test_vector_record(float_logic[f], BUSTER_TIER0_ROLE_VECTOR(0), BUSTER_TIER0_ROLE_VECTOR(0), BUSTER_TIER0_ROLE_VECTOR(1));
+        tier0_test_expect(tally, tier0_operation_valid(&logic), "vectors", "VEX floating logic form %u refused", f);
+    }
     // The narrow operands' neighbours: an address of I64, an index of U64 and of I64, and a 64-bit operand in a 32-bit
     // field (its low half).
     Tier0Operation neighbours[4] = {
