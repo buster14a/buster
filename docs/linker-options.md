@@ -16,9 +16,12 @@ The shell quotes above preserve `$ORIGIN` and commas. Buster does not expand
 runtime paths; the loader interprets them. `-L` selects libraries at link time,
 whereas `-rpath` records directories to search when the executable runs.
 
-The C driver forwards these options only through `-Wl,` or `-Xlinker`.
-For example, use `-Wl,--rpath=` for an explicitly empty path; bare `-rpath=`
-is an unsupported driver option. Compiler options such as `-Rpass=inline`
+The C driver forwards these options only through `-Wl,` or `-Xlinker`, with
+one exception: `-rpath DIRECTORY`, two arguments, which clang and GCC take
+as a driver option and SQLite's Makefile passes (#1854), is forwarded as
+`-Xlinker -rpath -Xlinker DIRECTORY` is, its operand literal (a comma is part of
+the directory). For example, use `-Wl,--rpath=` for an explicitly empty path;
+bare `-rpath=` is an unsupported driver option, as it is for clang. Compiler options such as `-Rpass=inline`
 do not enter the linker stream and cannot accidentally become runtime paths.
 If explicitly forwarded as `-Wl,-Rpass=inline`, however, the argument has the
 linker's joined `-RPATH` meaning, with the literal path `pass=inline`.
@@ -54,7 +57,7 @@ subset, not arbitrary passthrough to a system linker.
 
 Commands that do not link (`-c`, `-fsyntax-only`, `-E`, and checker-only modes)
 consume linker forwarding and leave its payload unused. A missing operand to
-`-Xlinker` remains a malformed driver command. Forwarded operands such as `-E`,
+`-Xlinker` or `-rpath` remains a malformed driver command. Forwarded operands such as `-E`,
 `-c`, `--version`, or a filename do not become driver actions or source inputs.
 
 ### Empty runtime paths (#1534)

@@ -147,9 +147,18 @@ enum
     // An unevaluated operand with a side effect (#1447, clang's CheckUnaryExprOrTypeTraitOperand and
     // CreateGenericSelectionExpr): -Wunevaluated-expression, on by default, under -Wunused-value and so -Wunused and -Wall.
     CHECK_WARNING_ID_UNEVALUATED_EXPRESSION = 121,
+    // An enum's fixed underlying type with const or volatile, which it drops (#1952, clang's ActOnTag):
+    // -Wunderlying-cv-qualifier-ignored, on by default.
+    CHECK_WARNING_ID_UNDERLYING_CV_QUALIFIER = 122,
+    // A `#pragma pack (push, ...)` left open at the unit's end, or a pack value an included file changes (#1849, clang's
+    // DiagnoseUnterminatedPragmaAlignPack): -Wpragma-pack, on by default, under -Wpragmas.
+    CHECK_WARNING_ID_PRAGMA_PACK = 123,
+    // `#pragma pack(show)`'s value, and a pop with both a name and an alignment (#1849, clang's ActOnPragmaPack): warnings
+    // of no option.
+    CHECK_WARNING_ID_PRAGMA_PACK_NOTICE = 124,
     // swift_name's and swift_async_name's Swift name that doesn't fit its declaration (#1447, clang's SemaSwift::DiagnoseName):
     // -Wswift-name-attribute, on by default. (Its ID past the ones other pull requests take.)
-    CHECK_WARNING_ID_SWIFT_NAME_ATTRIBUTE = 126,
+    CHECK_WARNING_ID_SWIFT_NAME_ATTRIBUTE = 128,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -428,6 +437,10 @@ typedef enum CheckWarningEventKind
     // __builtin_cpu_supports's literal of a feature clang doesn't know (#1843, check_input_cpu_supports_literal), at the
     // builtin's name: the description's message.
     CHECK_WARNING_EVENT_INVALID_CPU_SUPPORTS,
+    // An enum's fixed underlying type's const and volatile, dropped (#1952): "'const' qualifier in enumeration underlying
+    // type ignored", or "'const' and 'volatile' qualifiers ...", at the base's first token that isn't a qualifier;
+    // payload.data the qualifiers (BUSTER_TYPE_CONST, BUSTER_TYPE_VOLATILE).
+    CHECK_WARNING_EVENT_UNDERLYING_CV_QUALIFIER,
     // swift_newtype's and swift_wrapper's argument other than `struct` or `enum` (#1447, check_input_swift_newtype_parse),
     // at it: "'X' attribute argument not supported: 'Y'", Y the token's identifier or keyword as written (payload.token),
     // or "(null)" for another token, as clang streams the token's IdentifierInfo.
@@ -524,7 +537,7 @@ typedef enum CheckWarningCompletion
 // after a definition), its token the attribute's that made it, for its policy's place.
 #define BUSTER_CHECK_WARNING_UNLOCATED 0x10u
 // CHECK_WARNING_EVENT_PRAGMA's payload.data indexes CheckInputPackPragmas only with this discriminator (#1849: a
-// `#pragma options align` or `#pragma align` warning).
+// `#pragma pack`, `#pragma options align` or `#pragma align` warning, whose payload.name is its CheckPackMessage).
 #define BUSTER_CHECK_WARNING_PACK_PRAGMA 0x20u
 #define BUSTER_CHECK_WARNING_NO_SOURCE UINT32_MAX
 // CHECK_WARNING_EVENT_DIAGNOSE_IF's payload.data bit of a grouped diagnose_if's "error" (#1447): its low bits are its
