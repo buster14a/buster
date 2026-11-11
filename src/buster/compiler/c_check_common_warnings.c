@@ -2090,20 +2090,38 @@ static uint32_t check_common_enum_cast_location(const Parser* parser, const Chec
     return operator || binary || role == PARSE_ROLE_POSTFIX ? token : role == PARSE_ROLE_MEMBER_OPERATOR && token + 1 < parser->tokens.count ? token + 1 : first;
 }
 
+// Where an enumeration conversion's target is spelled (#1447): its conversion node (`conversion`, BUSTER_CHECK_NONE for
+// none), else a call's argument (`call` and `argument`, check_input_call_parameter_spelling), else an initializer's
+// subobject (`object`, nonzero, declared at `declaration`, `offset` bits in, check_semantic_subobject_spelling).
+typedef struct CheckCommonEnumTarget CheckCommonEnumTarget;
+struct CheckCommonEnumTarget
+{
+    uint32_t conversion;
+    uint32_t call;
+    uint32_t argument;
+    TypeId object;
+    uint32_t declaration;
+    uint64_t offset;
+};
+
 // The target's typedef as written (clang's sugar) for the conversion node `conversion` (BUSTER_CHECK_NONE for none): an
 // assignment's left operand's, an initializer's declaration's (its `=` reads the specifiers back) or a return's
-// function's. Only a warning reads it: the function's search is a scan of the unit's bodies.
+// function's; a call argument's parameter's or an initializer subobject's otherwise (CheckCommonEnumTarget). Only a
+// warning reads it: the function's search is a scan of the unit's bodies.
 static uint32_t check_common_enum_cast_spelling(const Parser* parser, const CheckInput* input, const CheckStream* stream, const TypeTable* types,
-                                                uint32_t conversion)
+                                                const CheckCommonEnumTarget* place, TypeId target)
 {
     const CheckGraph* graph = &input->graph;
+    const uint32_t conversion = place->conversion;
     const CheckOp op = conversion < graph->count ? graph->ops[conversion] : CHECK_OP_COUNT;
     const uint32_t token = conversion < graph->count ? graph->tokens[conversion] : BUSTER_CHECK_NONE;
     const bool returned = op == CHECK_OP_CONVERT && token < parser->tokens.count && parser->tokens.kinds[token] == PARSE_KIND_RETURN;
     const uint32_t function = returned ? check_semantic_function(parser, input, token) : BUSTER_CHECK_NONE;
     return op == CHECK_OP_ASSIGN ? check_common_operand_spelling(parser, input, graph, stream, types, graph->operand0[conversion]) :
            op == CHECK_OP_INITIALIZE ? check_input_typedef_spelling(input, parser, token) :
-           function < input->token_count ? check_input_typedef_spelling(input, parser, function) : 0;
+           function < input->token_count ? check_input_typedef_spelling(input, parser, function) :
+           place->call < graph->count ? check_input_call_parameter_spelling(parser, input, stream, types, place->call, place->argument) :
+           place->object != 0 ? check_semantic_subobject_spelling(parser, input, types, place->object, place->declaration, place->offset, target) : 0;
 }
 
 // Clang's conversion between different enumerations (#1447, CheckImplicitConversion's last case): `source`'s implicit
@@ -2112,8 +2130,8 @@ static uint32_t check_common_enum_cast_spelling(const Parser* parser, const Chec
 // (check_common_enum_coerced), is a named enumeration other than the target's named one. It is a plain Diag, published
 // as the full expression completes.
 static __attribute__((noinline)) void check_common_enum_cast(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, TypeTable* types,
-                                   CheckWarningSpelling* spell, uint32_t source, TypeId target, uint32_t conversion, bool arm, const uint32_t* parents,
-                                   uint32_t at_once, Arena* scratch)
+                                   CheckWarningSpelling* spell, uint32_t source, TypeId target, const CheckCommonEnumTarget* place, bool arm,
+                                   const uint32_t* parents, uint32_t at_once, Arena* scratch)
 {
     const CheckGraph* graph = &input->graph;
     const TypeId target_enum = type_unqualified(type_strip_aligned(types, target));
@@ -2148,7 +2166,7 @@ static __attribute__((noinline)) void check_common_enum_cast(const Parser* parse
         if (converts && !rendered)
         {
             rendered = true;
-            const uint32_t target_spelling = check_common_enum_cast_spelling(parser, input, stream, types, conversion);
+            const uint32_t target_spelling = check_common_enum_cast_spelling(parser, input, stream, types, place, target);
             target_name = check_driver_warning_type(parser, pp, input, types, spell, scratch, target, target_spelling);
             const String8 target_plain = check_driver_warning_type(parser, pp, input, types, spell, scratch, target_enum, 0);
             // (An unnamed target warns of nothing.)
@@ -2204,8 +2222,13 @@ static void check_common_call_argument(CheckCommonEmission* emission, uint32_t i
             check_common_enum_cast_candidate(emission->input->enum_names, emission->parser, graph, stream, emission->types, argument, conversion.type) &&
             !conditional)
         {
-            check_common_enum_cast(emission->parser, emission->pp, emission->input, stream, emission->types, emission->spell, argument, conversion.type, BUSTER_CHECK_NONE, false,
-                                   emission->parents, emission->at_once, emission->scratch);
+            // (Its parameter's typedef, #1447: the argument's parent is its CALL node.)
+            const uint32_t parent = emission->parents != NULL ? emission->parents[argument] : BUSTER_CHECK_NONE;
+            const uint32_t call = parent < graph->count && graph->ops[parent] == CHECK_OP_CALL && index >= graph->argument_offsets[parent] ? parent : BUSTER_CHECK_NONE;
+            const CheckCommonEnumTarget place = { .conversion = BUSTER_CHECK_NONE, .call = call,
+                                                  .argument = call != BUSTER_CHECK_NONE ? index - graph->argument_offsets[call] : 0 };
+            check_common_enum_cast(emission->parser, emission->pp, emission->input, stream, emission->types, emission->spell, argument, conversion.type, &place,
+                                   false, emission->parents, emission->at_once, emission->scratch);
         }
         if (argument < graph->count && (conversion.flags & BUSTER_CHECK_CONVERT_ASSIGNMENT) != 0 && !check_common_query_suppressed(graph, argument) &&
             (conversion.flags & (BUSTER_CHECK_CONVERT_CAST | BUSTER_CHECK_CONVERT_ATOMIC)) == 0 &&
@@ -2373,8 +2396,9 @@ static void check_common_conversion_own(CheckCommonEmission* emission, uint32_t 
             check_common_enum_cast_candidate(emission->input->enum_names, emission->parser, graph, stream, emission->types, source, check_stream_type(stream, node)) &&
             graph->ops[check_common_enum_cast_unselected(graph, source)] != CHECK_OP_CONDITIONAL)
         {
+            const CheckCommonEnumTarget place = { .conversion = node, .call = BUSTER_CHECK_NONE };
             check_common_enum_cast(emission->parser, emission->pp, emission->input, stream, emission->types, emission->spell, source,
-                                   check_stream_type(stream, node), node, false, emission->parents, emission->at_once, emission->scratch);
+                                   check_stream_type(stream, node), &place, false, emission->parents, emission->at_once, emission->scratch);
         }
         // (A conditional source's arms report in their own frames: check_common_constant_arms.)
         if (!bitfield && source < graph->count && (flags & BUSTER_CHECK_CONVERT_ASSIGNMENT) != 0 && (flags & BUSTER_CHECK_CONVERT_CAST) == 0 &&
@@ -3160,9 +3184,9 @@ static void check_common_emit_run(CheckCommonEmission* emission)
                     if (check_common_enum_cast_arms(emission, owner) != BUSTER_CHECK_NONE)
                     {
                         // (An argument's target has no typedef spelling here, as check_common_call_argument's had none.)
+                        const CheckCommonEnumTarget place = { .conversion = check_common_arm_argument(owner) ? BUSTER_CHECK_NONE : owner, .call = BUSTER_CHECK_NONE };
                         check_common_enum_cast(emission->parser, emission->pp, emission->input, emission->stream, emission->types, emission->spell, node,
-                                               target, check_common_arm_argument(owner) ? BUSTER_CHECK_NONE : owner, true, emission->parents, emission->at_once,
-                                               emission->scratch);
+                                               target, &place, true, emission->parents, emission->at_once, emission->scratch);
                     }
                 }
                 break;
@@ -5289,7 +5313,10 @@ static void check_common_initializer_conversions(CheckCommonEmission* emission, 
             const bool atomic = (part->conversion.flags & BUSTER_CHECK_CONVERT_ATOMIC) != 0;
             if (!atomic && check_common_enum_cast_candidate(input->enum_names, parser, graph, stream, emission->types, root, part->conversion.type))
             {
-                check_common_enum_cast(parser, pp, input, stream, emission->types, emission->spell, root, part->conversion.type, BUSTER_CHECK_NONE, false, emission->parents,
+                // (Its member's or element's typedef, #1447.)
+                const CheckCommonEnumTarget place = { .conversion = BUSTER_CHECK_NONE, .call = BUSTER_CHECK_NONE, .object = plan->type,
+                                                      .declaration = declaration, .offset = part->bit_offset };
+                check_common_enum_cast(parser, pp, input, stream, emission->types, emission->spell, root, part->conversion.type, &place, false, emission->parents,
                                        emission->at_once, emission->scratch);
             }
             if (!atomic && !check_common_query_suppressed(graph, root) && check_common_initializer_literal(parser, input, stream, emission->types, part))

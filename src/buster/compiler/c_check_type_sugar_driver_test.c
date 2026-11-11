@@ -254,6 +254,48 @@ static const CheckDriverDefaultWarningFixture check_driver_type_sugar_fixtures[]
                   "}\n",
         .warnings = 13,
     },
+    {
+        // A conversion's target keeps the typedef its declaration writes (#1447): an enumeration conversion's parameter
+        // (check_input_call_parameter_spelling), and an initializer subobject's member or element, found by its offset
+        // from the initialized object (check_semantic_subobject_spelling), in -Wimplicit-enum-enum-cast and in a failed
+        // conversion's error alike.
+        .name = "parameter, member and element targets' typedefs",
+        .source = "enum E { A, B };\n"
+                  "enum F { X, Y };\n"
+                  "typedef enum E TE;\n"
+                  "typedef long L;\n"
+                  "typedef long *LP;\n"
+                  "struct S { TE te; L l; LP lp; };\n"
+                  "void take(TE e);\n"
+                  "TE arr[2];\n"
+                  "void f(enum F v, char *c)\n"
+                  "{\n"
+                  "    take(X);\n"
+                  "    take(v);\n"
+                  "    struct S s = { .te = X };\n"
+                  "    struct S t = { v };\n"
+                  "    s.te = v;\n"
+                  "    arr[0] = v;\n"
+                  "    TE local = v;\n"
+                  "    TE ls[2] = { v, X };\n"
+                  "    struct S w = { .lp = c };\n"
+                  "    struct S z = { 0, c };\n"
+                  "    L la[2] = { c };\n"
+                  "    LP lpa[2] = { 0, c };\n"
+                  "}\n"
+                  "struct In { TE e; LP p; };\n"
+                  "struct Out { int k; struct In in[2]; union { L ul; TE ue; } u; };\n"
+                  "void g(enum F v, char *c, struct S *ps)\n"
+                  "{\n"
+                  "    struct Out o = { 0, { { X, 0 }, { .e = v } }, { .ue = v } };\n"
+                  "    struct Out q = { 0, { { A, 0 }, { .p = c } } };\n"
+                  "    void (*fp)(int, TE) = 0;\n"
+                  "    fp(0, v);\n"
+                  "    (*fp)(1, X);\n"
+                  "}\n",
+        .warnings = 14,
+        .errors = 5,
+    },
 };
 
 // A variable array's size expression as written (#1447, check_driver_vla_bounds), through pointers, arrays, typedefs
