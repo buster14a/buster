@@ -93,6 +93,82 @@ static void check_test_program_asm_room(CheckTest* test)
     intern_release(&identifiers);
 }
 
+// #1846's operand kinds placed in their callers as asm bodies (#1839's item 6), by both paths: MMX operands (`y`, and
+// movd between an MMX and a general register), opmask operands (`k`, `Yk`), A's pair, a high byte's and an XMM17
+// register variable. Each is an asm body with no helper, its register operands loaded from its block rather than passed
+// as its call's arguments (check_asm_inline_passes), the opmask ones' registers among the masks it writes, and the MMX
+// and opmask loads' rax among the registers it touches.
+static void check_test_program_asm_kinds(CheckTest* test)
+{
+    static const char source[] =
+        "long mmx(long a, long b){__asm__(\"paddd %1, %0\" : \"+y\"(a) : \"y\"(b));return a;}"
+        "int mmx_general(int a){int r;__asm__(\"movd %1, %%mm3\\n\\tpaddd %%mm3, %%mm3\\n\\tmovd %%mm3, %0\\n\\temms\" : \"=r\"(r) : \"r\"(a) : \"mm3\");return r;}"
+        "__attribute__((target(\"avx512f\"))) unsigned short mask(unsigned short a, unsigned short b){unsigned short r;"
+        "__asm__(\"kandw %1, %2, %0\" : \"=k\"(r) : \"k\"(a), \"Yk\"(b));return r;}"
+        "unsigned __int128 pair(unsigned long a, unsigned long b){unsigned __int128 r;__asm__(\"mulq %2\" : \"=A\"(r) : \"a\"(a), \"r\"(b));return r;}"
+        "int high(int n){register unsigned char h __asm__(\"ah\")=(unsigned char)n;__asm__(\"addb $3, %0\" : \"+q\"(h));return h;}"
+        "__attribute__((target(\"avx512f\"))) double upper(double x){register double r __asm__(\"xmm17\")=x;__asm__(\"vaddsd %0, %0, %0\" : \"+v\"(r));return r;}";
+    enum
+    {
+        STATEMENTS = 6,
+        MASK = 2,
+    };
+    static InternTable identifiers;
+    static Preprocessor pp;
+    static Parser parser;
+    const PPOptions pp_options = { .language = { .standard = 2017, .gnu = true }, .no_standard_includes = true };
+    const PredefinesOptions predefines = check_test_program_predefines();
+    bool preprocessed = intern_initialize(&identifiers) && pp_initialize(&pp, &pp_options, &identifiers) &&
+                        pp_run_source(&pp, "asm-kinds", (const uint8_t*)source, (uint32_t)strlen(source));
+    check_test_expect(test, preprocessed, "asm kinds: source preprocessing");
+    for (uint32_t path = 0; preprocessed && path < 2; path += 1)
+    {
+        CheckTestTypes types = { 0 };
+        Arena input_arena = arena_reserve(UINT64_C(1) << 26);
+        Arena output = arena_reserve(UINT64_C(1) << 26);
+        Arena scratch = arena_reserve(UINT64_C(1) << 26);
+        const ParseOptions parsing = { .scalar = path == 0 };
+        const CheckOptions checking = { .scalar = path == 0 };
+        CheckInput input = { 0 };
+        CheckStream stream = { 0 };
+        CheckInitializers plans = { 0 };
+        CheckAsms asms = { 0 };
+        CheckProgram program = { 0 };
+        bool ready = input_arena.base != 0 && output.base != 0 && scratch.base != 0 && check_test_types_open(&types) &&
+                     parse_initialize(&parser, &parsing, pp_options.language) && parse_translation_unit(&parser, &pp) && parser.errors == 0 &&
+                     check_input(&input, &parser, &pp, &types.table, &input_arena, &scratch) &&
+                     check_graph_run(&types.table, &input.graph, &input_arena, &scratch, &checking, &stream) && stream.report_count == 0 &&
+                     check_initializers_run(&plans, &input, &stream, &parser, &types.table, &input_arena, &scratch) &&
+                     check_asms_run(&asms, &input, &stream, &types.table, &input_arena, &scratch);
+        const CheckProgramOptions options = { .initializers = &plans, .asms = &asms, .identifiers = &identifiers, .scalar = path == 0, .predefines = &predefines };
+        ready = ready && check_program(&program, &parser, &input, &stream, &types.table, options, &output, &scratch) && input.asm_count == STATEMENTS;
+        CheckProgramAsms planned = { 0 };
+        CheckProgramHelpers helpers = { 0 };
+        ready = ready && check_program_asm_plan(&planned, &helpers, &program, path == 0, &output, &scratch) && planned.plans != NULL;
+        char description[256];
+        snprintf(description, sizeof(description), "asm kinds, %s: the statements are planned, with no helper (%u)", path == 0 ? "scalar" : "vector", helpers.count);
+        check_test_expect(test, ready && helpers.count == 0, description);
+        for (uint32_t s = 0; ready && s < STATEMENTS; s += 1)
+        {
+            const CheckProgramAsm* plan = planned.plans + s;
+            // mmx_general's operands are general registers alone: its body's operands are its call's arguments.
+            const bool passes = s == 1;
+            bool right = plan->planned && plan->reason == NULL && plan->inlined && plan->helper == BUSTER_CHECK_NONE && plan->inline_passed == passes;
+            right = right && (s != MASK || ((plan->inline_masks & 0xfe) != 0 && (plan->inline_touched & (1u << X86_REGISTER_RAX)) != 0));
+            snprintf(description, sizeof(description), "asm kinds, %s: statement %u is an asm body%s", path == 0 ? "scalar" : "vector", s,
+                     passes ? " of its call's arguments" : " that loads its block");
+            check_test_expect(test, right, description);
+        }
+        parse_release(&parser);
+        check_test_types_close(&types);
+        arena_release(&scratch);
+        arena_release(&output);
+        arena_release(&input_arena);
+    }
+    pp_release(&pp);
+    intern_release(&identifiers);
+}
+
 // The statements placed in their caller (#1059, check_asm_row) and the ones that keep their helper, as both paths plan
 // them, with the same rows: each placed statement's row by its records (its template's forms, its operands' roles, the
 // register outputs' stores) and its operands' classes; each other one's helper, and the plans' helper count. Placed:
@@ -372,6 +448,7 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
         "__asm__(\"rep bsrl %1,%0\" : \"=r\"(hi) : \"r\"(x) : \"cc\");return (int)(lo+hi*32u);}",
         "asm-rep-scans", clang);
     check_test_program_asm_room(test);
+    check_test_program_asm_kinds(test);
     check_test_program_asm_placement(test);
     // Statements placed in their caller (#1059), each run against clang's build: values live across them in Tier 0's
     // depth registers and register homes, in a loop and under an expression 18 values deep (past the depth registers,

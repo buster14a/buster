@@ -409,8 +409,9 @@ clang's code gives it (CodeGen's `AddVariableConstraints`;
   variable is refused, where clang's code loads both and the byte's load
   overwrites the other's bits 8 to 15.
 
-A statement of a high byte's or an XMM16-up variable keeps its helper: #1839's
-asm bodies don't load them by those names.
+A statement of a high byte's or an XMM16-up variable is an asm body (#1839) that
+loads its operands from its block by those names, as the helper does, rather
+than take them as its call's arguments (`check_asm_inline_passes`).
 
 rsp stays refused: clang's code moves the variable's value into rsp before the
 template (an uninitialized local's garbage), where a helper's rsp is its own;
@@ -430,8 +431,8 @@ names by rax's 64-bit name (`%rax` for an `int` too; `%k0` is `%eax`); and an
 template names `%rax` (GCC's "ax:dx pair"). An input fixed to rax or rdx shares
 its register with a pair output that isn't early-clobbered or `+`, as clang's
 code shares it: mulq's `"=A"(r) : "a"(x), "rm"(y)` multiplies x in rax. The
-helper loads and stores the pair by its halves, from a slot of 16 bytes; a
-statement of one keeps its helper (#1839's asm bodies don't move pairs).
+helper loads and stores the pair by its halves, from a slot of 16 bytes, and so
+does an asm body (#1839), which loads its operands from its block.
 
 ### MMX's operands
 
@@ -447,7 +448,10 @@ a narrower one's through a general register). As in clang's code, nothing runs
 `emms`: the template's author leaves the x87's state as the code after it needs
 it. A statement of MMX and x87 operands is refused by name (their registers are
 the same), and so is one whose template takes directives. A statement of MMX
-operands keeps its helper: #1839's asm bodies don't load them. A template of no
+operands is an asm body (#1839) that loads them as the helper does, through rax
+before its other loads, from its block. MMX's forms, which `x86_semantics.c`
+doesn't cover, are taken to write the general and XMM registers their fields
+name and nothing else, and `emms` nothing. A template of no
 instructions has no helper, as for general registers: clang's code would move
 the values through an MMX register and back, unchanged.
 
@@ -460,8 +464,9 @@ clang's code generation; the lowering refuses it by name). The template names
 it `%k0`; clang refuses every modifier of one, and so does the lowering. The
 helper loads it zero-extended into rax and moves it in by its width (`kmovw
 %eax, %k0`, `kmovd`, `kmovq`), and stores an output's bits through a general
-register, as clang's code does (a statement of one keeps its helper: #1839's
-asm bodies don't move them). kmovw needs AVX-512F, kmovd and kmovq
+register, as clang's code does, and so does an asm body (#1839), whose
+operands are then its block's and whose operands' registers are among the masks
+Tier 1 saves around it. kmovw needs AVX-512F, kmovd and kmovq
 AVX-512BW, by the body's instruction set (its function's target attributes
 among them): without them, clang can't place the operand ("could not allocate
 output register"), and the lowering refuses it by name.
