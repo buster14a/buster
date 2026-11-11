@@ -4840,11 +4840,12 @@ static TypeId check_input_tag_identity(CheckInputReader* reader, uint32_t token,
                     // An error after which clang installs no type, an unknown or unsupported mode's (#1447): the enum goes on
                     // without it, as one with no mode. One that still installs a floating or a complex type gives the enum the
                     // integer of its layout (check_input_mode_enum_integer), a complex one's alignment with it unless an
-                    // alignment attribute gives one; XC's and TC's stop the reader.
+                    // alignment attribute gives one; XC's and TC's leave it one with no mode (check_input_mode_enum_wide).
                     uint8_t stand_in_alignment = 0;
                     const TypeId stand_in = moded == 0 && installed != type ? check_input_mode_enum_integer(reader->types, installed, &stand_in_alignment) : 0;
-                    const bool recovered = moded == 0 && (installed == type || stand_in != 0) && check_input_attribute_recover(reader, own, &recovery, 0, false, false);
-                    const bool dropped = recovered && installed == type;
+                    const bool wide = moded == 0 && stand_in == 0 && check_input_mode_enum_wide(reader->types, installed);
+                    const bool recovered = moded == 0 && (installed == type || stand_in != 0 || wide) && check_input_attribute_recover(reader, own, &recovery, 0, false, false);
+                    const bool dropped = recovered && (installed == type || wide);
                     const TypeId underlying = moded != 0 ? moded : recovered ? stand_in : 0;
                     const uint8_t alignment = own->alignment_log2 != 0 ? own->alignment_log2 : moded == 0 ? stand_in_alignment : 0;
                     valid = dropped || (underlying != 0 && type_enum_complete(reader->types, type, underlying, alignment));
