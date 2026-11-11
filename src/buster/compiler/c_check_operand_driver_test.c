@@ -8,6 +8,8 @@
 // - a scalar initializer whose conversion failed: that conversion's error alone, where the initializer's walk added a
 //   second one ("invalid initializer"); a static object's still gets clang's non-constant one after a pointer or
 //   integer conversion clang warns of and makes, where its value is no constant;
+// - a binary operator's operands of no type it takes: clang's "invalid operands to binary expression" with both types as
+//   written, and two pointers' subtraction of incompatible types (#1872);
 // - `__clang__` before `::` in a GNU attribute list: a number, where clang's list ends, unlike a C23 list's.
 // Include after c_check_label_attribute_driver_test.c (check_test_diagnostic_lines).
 
@@ -48,6 +50,15 @@ static void check_test_driver_operand_errors(CheckTest* test, const char* clang,
         { "enum e { A };\nvoid f(enum e x, _Bool b, float g, int *p, void *q, _Atomic int a) { x++; b--; ++g; p++; q--; a++; }\n", "-std=gnu17" },
         { "void f(void) { (void)0++; }\n", "-std=gnu17" },
         { "int g(void);\nvoid f(void) { g()++; }\n", "-std=gnu17" },
+        // Binary operators' operands of no type they take (#1872): clang's "invalid operands to binary expression" with both
+        // types as written, and two pointers' subtraction of incompatible types.
+        { "void f(int *q, int n) { (void)(q + 1.0); int (*p)[n] = 0; (void)(p - 2.5f); (void)(1.0 + q); }\n", "-std=gnu17" },
+        { "typedef double D;\nvoid f(int *q, D d) { (void)(q + d); q += 1.0; q -= d; }\n", "-std=gnu17" },
+        { "struct S { int a; } s;\nvoid f(int *q) { (void)(s + 1); (void)(q * 2); (void)(q % 2); (void)(1.5 % 2); (void)(q + s); }\n", "-std=gnu17" },
+        { "void f(int *q) { (void)(q & 1); (void)(q << 1); (void)(1.0 << 1); (void)(q - 1.0i); }\n", "-std=gnu17" },
+        { "void g(void);\nvoid f(char c, const int *cq, volatile double vd) { int a[2]; (void)(a * 2); (void)(c % 1.0f); (void)(cq + vd); (void)(g * 2); (void)(a % 1.5); }\n", "-std=gnu17" },
+        { "void f(void) { _Bool b = 0; (void)(b ^ 1.0); const double cd = 1; (void)(cd | 1); int x = 0; x <<= 1.0; }\n", "-std=gnu17" },
+        { "typedef int I;\nstruct S { int a; };\nvoid f(int *q, float *fp, I *iq, const int *cq, void *vp, struct S *sp, int (*p)[3], int (*r)[4], long *lp)\n{ (void)(q - fp); (void)(iq - fp); (void)(q - cq); (void)(q - vp); (void)(sp - q); (void)(p - r); (void)(q - lp); }\n", "-std=gnu17" },
         // A failed initializer conversion's error alone.
         { "void f(void) { int *p = 0; long x = p; (void)x; }\n", "-std=gnu17" },
         { "void f(void) { int *p = 0; long x = (p); (void)x; }\n", "-std=gnu17" },

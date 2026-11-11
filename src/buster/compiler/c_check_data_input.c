@@ -61,6 +61,8 @@ struct CheckDataPrepared
     LinkCapacity capacity;
     uint32_t token;
     CheckDataInputStatus status;
+    // What an unsupported status lacks, for its refusal at `token` ("unsupported: ..."), or NULL.
+    const char* reason;
 };
 
 typedef struct CheckDataInput CheckDataInput;
@@ -227,7 +229,7 @@ static uint32_t check_data_cfstring_hash(const uint8_t* bytes, uint32_t count, b
 // emission names so, an undefined global. `keys` holds `capacity` keys of `*key_count` found; the UTF-16 units go in
 // `output`.
 static bool check_data_cfstring_keys(const CheckInput* input, const CheckStream* stream, bool scalar, Arena* output, Arena* scratch, CheckDataCFStringKey** keys,
-                                     uint32_t* key_count)
+                                     uint32_t* key_count, uint32_t* refused)
 {
     const CheckGraph* graph = &input->graph;
     bool valid = true;
@@ -241,7 +243,15 @@ static bool check_data_cfstring_keys(const CheckInput* input, const CheckStream*
         const bool builtin = node < graph->count && graph->ops[node] == CHECK_OP_BUILTIN_MISC &&
                              (graph->members[node] == CBUILTIN_CFSTRING_MAKE_CONSTANT_STRING || graph->members[node] == CBUILTIN_NSSTRING_MAKE_CONSTANT_STRING);
         const CheckValue value = builtin ? check_stream_value(stream, node) : (CheckValue){ 0 };
-        if (builtin && value.constant_kind == CHECK_CONSTANT_ADDRESS && value.object != 0 && (value.flags & BUSTER_CHECK_STATIC_OBJECT) != 0)
+        if (builtin && value.constant_kind == CHECK_CONSTANT_ADDRESS && value.object != 0 && (value.flags & BUSTER_CHECK_STATIC_OBJECT) != 0 &&
+            !call->nan_payload_known)
+        {
+            // An NSString of no string literal (#1785): clang's evaluator takes it as an address constant, but its code makes
+            // the object from the literal its argument isn't, another node's bytes, so it is refused by name at its call.
+            *refused = *refused == BUSTER_CHECK_NONE ? value.object - 1 : *refused;
+            valid = false;
+        }
+        else if (builtin && value.constant_kind == CHECK_CONSTANT_ADDRESS && value.object != 0 && (value.flags & BUSTER_CHECK_STATIC_OBJECT) != 0)
         {
             valid = call->nan_payload_known && call->cfstring_name != 0 && call->cfstring_name + 2 < value.object && value.object <= input->token_count &&
                     (call->nan_payload_length == 0 || call->nan_payload != 0);
@@ -531,7 +541,14 @@ static bool check_data_prepare(CheckDataPrepared* result, const CheckInput* inpu
     uint32_t cfstring_key_count = 0;
     if (valid && input->graph.ns_constant_string != 0)
     {
-        valid = check_data_cfstring_keys(input, stream, scalar, output, scratch, &cfstring_keys, &cfstring_key_count);
+        uint32_t refused = BUSTER_CHECK_NONE;
+        valid = check_data_cfstring_keys(input, stream, scalar, output, scratch, &cfstring_keys, &cfstring_key_count, &refused);
+        if (refused != BUSTER_CHECK_NONE)
+        {
+            result->status = CHECK_DATA_INPUT_UNSUPPORTED;
+            result->token = refused;
+            result->reason = "an NSString of no string literal, whose object clang's code makes from the literal its argument isn't";
+        }
         result->cfstrings = valid && cfstring_key_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckDataCFString, cfstring_key_count) : 0;
         valid = valid && (cfstring_key_count == 0 || result->cfstrings != 0) &&
                 check_data_cfstring_unique(cfstring_keys, cfstring_key_count, scalar, scratch, result->cfstrings);
@@ -544,7 +561,7 @@ static bool check_data_prepare(CheckDataPrepared* result, const CheckInput* inpu
         }
         result->cfstring_class_own = valid && lowest != 0 && input->graph.cfstring_class == 0;
         result->cfstring_class = input->graph.cfstring_class != 0 ? input->graph.cfstring_class : lowest != 0 ? cfstring_keys[lowest - 1].name + 1 : 0;
-        result->status = valid ? result->status : CHECK_DATA_INPUT_RESOURCE;
+        result->status = valid || refused != BUSTER_CHECK_NONE ? result->status : CHECK_DATA_INPUT_RESOURCE;
     }
     uint64_t object_capacity = (uint64_t)input->string_count + 2 * (uint64_t)cfstring_key_count;
     uint64_t reference_capacity = 2 * (uint64_t)cfstring_key_count;
@@ -722,8 +739,9 @@ static bool check_data_prepare(CheckDataPrepared* result, const CheckInput* inpu
     {
         const CheckDataInputStatus status = result->status;
         const uint32_t token = result->token;
+        const char* reason = result->reason;
         arena_pop_to(output, output_mark);
-        *result = (CheckDataPrepared){ .status = status, .token = token };
+        *result = (CheckDataPrepared){ .status = status, .token = token, .reason = reason };
     }
     arena_pop_to(scratch, scratch_mark);
     return valid;
