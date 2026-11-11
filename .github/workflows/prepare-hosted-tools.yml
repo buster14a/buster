@@ -36,6 +36,19 @@ jobs:
         with:
           path: ${{ runner.temp }}/hosted-release-inputs
           key: hosted-inputs-v1-linux-x64-${{ hashFiles('tools/ci/hosted-tools.lock') }}
+      # As the consumers do (.github/actions/hosted-tools): a cache that verifies here is the one every consumer of the
+      # run restores, by the same immutable key, so it needs no artifact beside it (#2372).
+      - name: Verify the restored cache as the consumers will
+        id: cached
+        shell: bash
+        run: |
+          set -euo pipefail
+          if bash tools/ci/hosted-release.sh verify "$RUNNER_TEMP/hosted-release-inputs" 2> /dev/null; then
+              echo 'usable=true' >> "$GITHUB_OUTPUT"
+          else
+              echo 'usable=false' >> "$GITHUB_OUTPUT"
+              echo 'hosted-inputs: no verified cache; this attempt publishes its release inputs for its consumers'
+          fi
       - name: Acquire missing inputs once and verify the complete set
         shell: bash
         run: bash tools/ci/hosted-release.sh prepare "$RUNNER_TEMP/hosted-release-inputs"
@@ -65,14 +78,18 @@ jobs:
       - name: Acquire missing offline inputs once and check each as the jobs read it
         shell: bash
         run: bash tools/ci/hosted-offline.sh prepare "$RUNNER_TEMP/hosted-offline"
+      # Only when the cache didn't verify: the consumers read the cache first, and on a verified hit the 1.27 GB every
+      # run used to upload, uncompressed, was never read (#2372). Kept a day: the run and its reruns read it, and #2276's
+      # setup re-run comes within minutes; a later rerun reruns the workflow (docs/hosted-toolchain.md).
       - name: Publish this attempt's fallback handoff before starting consumers
+        if: steps.cached.outputs.usable != 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ${{ steps.identity.outputs.artifact-name }}
           path: ${{ runner.temp }}/hosted-release-inputs/*
           compression-level: 0
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 1
       # Every consumer reads this artifact, not a cache: it is this run's resolution, the same for every job.
       - name: Publish this attempt's offline inputs beside it
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -81,7 +98,7 @@ jobs:
           path: ${{ runner.temp }}/hosted-offline/
           compression-level: 0
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 1
       - name: Seed reusable caches from the trusted default branch only
         if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && steps.cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4

@@ -710,6 +710,13 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
         "__asm__(\"shll %b1, %0\" : \"+r\"(y) : \"cI\"(40));int c=n;__asm__(\"subl %1, %0\" : \"+r\"(c) : \"Kr\"(-200));"
         "return a+b*3+x*5+y+c*7;}",
         "asm-register-or-immediate", clang);
+    // 32-bit addresses (#2339): int operands print as %eax-style registers in an address, which clang's integrated
+    // assembler encodes with a 67; the assembler does too, in the template's helper, as a record has no room for it.
+    check_test_program_source(test,
+        "static int add(int a,int b){int r;__asm__(\"leal (%1,%2), %0\" : \"=r\"(r) : \"r\"(a), \"r\"(b));return r;}"
+        "static int scaled(int a,int b){int r;__asm__(\"leal 3(%1,%2,4), %0\" : \"=r\"(r) : \"r\"(a), \"r\"(b));return r;}"
+        "int tested(int n){return add(n,2*n)*7+scaled(n,5)+add(-n,n);}",
+        "asm-address32", clang);
     // Naked functions: their templates, in AT&T syntax, are their whole code, with an integer constant operand.
     check_test_program_source(test,
         "__attribute__((naked)) long add3(long a,long b,long c){__asm__(\"leaq (%rdi,%rsi), %rax\\n\\taddq %rdx, %rax\\n\\tret\");}"
@@ -1432,12 +1439,9 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
         "static v4sf fixed(v4sf a){register v4sf x __asm__(\"xmm9\")=a;__asm__(\"mulps %0, %0\" : \"+x\"(x));return x;}"
         "int tested(int n){v4sf a={(float)n,1.5f,2.0f,-4.0f};v4sf r=fixed(added(a,a));return (int)(r[0]+r[1]*3+r[2]*5+r[3]*7);}",
         "asm-vector-operands-sse", clang);
-    // Where clang can't place them: 32 bytes without AVX, 64 without AVX-512F, a register variable of another size than
-    // its register's (clang's "does not match required type"), and a template that takes directives.
-    check_test_program_boundary_reason(test, "typedef int v8si __attribute__((vector_size(32)));int tested(int n){v8si a={n};__asm__(\"nop\" : \"+x\"(a));return a[0];}",
-                                       "asm-vector-without-avx", true, false, 0, 1, "inline assembly vector operands of 32 bytes without AVX");
-    check_test_program_boundary_reason(test, "typedef long long v8di __attribute__((vector_size(64)));__attribute__((target(\"avx2\"))) int tested(int n){v8di a={n};__asm__(\"nop\" : \"+v\"(a));return (int)a[0];}",
-                                       "asm-vector-without-avx512", true, false, 0, 1, "inline assembly vector operands of 64 bytes without AVX-512F");
+    // Where clang can't place them: a register variable of another size than its register's (clang's "does not match
+    // required type"), and a template that takes directives. An x or v operand of 32 bytes without AVX, or 64 without
+    // AVX-512F, is clang's Sema error now (#2231, test-checker-driver's asm operand sizes), before the lowering.
     check_test_program_boundary_reason(test, "typedef float v4sf __attribute__((vector_size(16)));int tested(int n){register v4sf a __asm__(\"ymm3\")={(float)n};__asm__(\"nop\" : \"+x\"(a));return (int)a[0];}",
                                        "asm-vector-register-size", true, false, 0, 1, "inline assembly operands of this type in their constraint's registers");
     check_test_program_boundary_reason(test, "typedef float v4sf __attribute__((vector_size(16)));int tested(int n){v4sf a={(float)n};__asm__(\".p2align 4\\n\\taddps %0, %0\" : \"+x\"(a));return (int)a[0];}",

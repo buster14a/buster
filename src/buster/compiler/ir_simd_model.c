@@ -96,6 +96,14 @@ typedef enum IrSimdOperation
     // An AES round of each 16-byte lane (#1840, ir.c's BUSTER_IR_INTRINSIC_AES): ShiftRows, SubBytes and MixColumns of a
     // (the last round, the action's `index` 1, without MixColumns), then b xor'ed: vaesenc and vaesenclast.
     IR_SIMD_AES,
+    // One lane of a vector (#1840, ir.c's BUSTER_IR_INTRINSIC_LANE_EXTRACT and _INSERT), its bytes' log2 in the action's
+    // `index` bits 0 and 1 and its index past them: a's lane zero-extended into a scalar result (its shape none, the value
+    // in words[0]); and a with the lane replaced by b's low bits, b a scalar (its shape none). And the sign bit of each of
+    // a's lanes from bit 0 of a scalar result (#1840, ir.c's BUSTER_IR_INTRINSIC_MOVEMASK), the lanes' bytes' log2 the
+    // action's `index`.
+    IR_SIMD_LANE_EXTRACT,
+    IR_SIMD_LANE_INSERT,
+    IR_SIMD_MOVEMASK,
     IR_SIMD_OPERATION_COUNT,
 } IrSimdOperation;
 
@@ -241,7 +249,8 @@ static bool ir_simd_action_valid(const IrSimdAction* action)
                           action->operation == IR_SIMD_ALIGN || action->operation == IR_SIMD_SHUFFLE_LANES || action->operation == IR_SIMD_EXTEND ||
                           action->operation == IR_SIMD_TRUNCATE || action->operation == IR_SIMD_SHIFT ||
                           action->operation == IR_SIMD_LANE_OP || action->operation == IR_SIMD_PERMUTE2 || action->operation == IR_SIMD_TERNLOG ||
-                          action->operation == IR_SIMD_COMPRESS || action->operation == IR_SIMD_EXPAND || action->operation == IR_SIMD_AES);
+                          action->operation == IR_SIMD_COMPRESS || action->operation == IR_SIMD_EXPAND || action->operation == IR_SIMD_AES ||
+                          action->operation == IR_SIMD_LANE_EXTRACT || action->operation == IR_SIMD_LANE_INSERT || action->operation == IR_SIMD_MOVEMASK);
         valid = valid && (!action->volatile_memory || action->operation == IR_SIMD_LOAD || action->operation == IR_SIMD_STORE);
         valid = valid && ir_simd_lane_valid(action->operation, lane);
         // A floating comparison's predicates are C's: ==, !=, <, <=, > and >= (no unsigned ones).
@@ -281,6 +290,18 @@ static bool ir_simd_action_valid(const IrSimdAction* action)
             case IR_SIMD_PERMUTE2: valid = valid && ir_simd_vector(type) && a == type && b == type && c == type && action->index <= 3; break;
             case IR_SIMD_TERNLOG: valid = valid && ir_simd_vector(type) && a == type && b == type && c == type; break;
             case IR_SIMD_AES: valid = valid && ir_simd_vector(type) && a == type && b == type && c == IR_SIMD_NONE && action->index <= 1; break;
+            case IR_SIMD_LANE_EXTRACT:
+                valid = valid && type == IR_SIMD_NONE && ir_simd_vector(a) && b == IR_SIMD_NONE && c == IR_SIMD_NONE &&
+                        (uint32_t)(action->index >> 2) < ir_simd_bits(a) / (8u << (action->index & 3));
+                break;
+            case IR_SIMD_LANE_INSERT:
+                valid = valid && ir_simd_vector(type) && a == type && b == IR_SIMD_NONE && c == IR_SIMD_NONE &&
+                        (uint32_t)(action->index >> 2) < ir_simd_bits(type) / (8u << (action->index & 3));
+                break;
+            case IR_SIMD_MOVEMASK:
+                valid = valid && type == IR_SIMD_NONE && ir_simd_vector(a) && ir_simd_bits(a) <= 256 && b == IR_SIMD_NONE && c == IR_SIMD_NONE && action->index <= 3 &&
+                        action->index != 1;
+                break;
             case IR_SIMD_COMPRESS:
             case IR_SIMD_EXPAND:
             {
@@ -698,6 +719,32 @@ static bool ir_simd_evaluate(const IrSimdAction* action, const IrSimdValue* cons
             {
                 out[lane + i] = (uint8_t)(state[i] ^ b[lane + i]);
             }
+        }
+    }
+    else if (valid && (action->operation == IR_SIMD_LANE_EXTRACT || action->operation == IR_SIMD_LANE_INSERT))
+    {
+        // The lane's bits zero-extended into a scalar's word, or b's low bits written over it in a's copy.
+        const uint32_t lane_bits = 8u << (action->index & 3);
+        const uint32_t lane = (uint32_t)(action->index >> 2);
+        valid = action->operation == IR_SIMD_LANE_EXTRACT || values[1] != NULL;
+        if (valid && action->operation == IR_SIMD_LANE_EXTRACT)
+        {
+            staged.words[0] = ir_simd_lane_read(values[0], lane_bits, lane);
+        }
+        else if (valid)
+        {
+            staged = *values[0];
+            ir_simd_lane_write(&staged, lane_bits, lane, lane_bits == 64 ? values[1]->words[0] : values[1]->words[0] & ((UINT64_C(1) << lane_bits) - 1));
+        }
+    }
+    else if (valid && action->operation == IR_SIMD_MOVEMASK)
+    {
+        // Each lane's top bit, lane i's into bit i.
+        const uint32_t lane_bits = 8u << action->index;
+        const uint32_t lanes = ir_simd_bits(action->operands[0]) / lane_bits;
+        for (uint32_t lane = 0; lane < lanes; lane += 1)
+        {
+            staged.words[0] |= (ir_simd_lane_read(values[0], lane_bits, lane) >> (lane_bits - 1)) << lane;
         }
     }
     else if (valid && (action->operation == IR_SIMD_COMPRESS || action->operation == IR_SIMD_EXPAND))

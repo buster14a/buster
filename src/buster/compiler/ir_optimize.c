@@ -544,7 +544,7 @@ static bool ir_optimize_equal(IrConstant a, IrConstant b)
 
 static uint32_t ir_optimize_fold_operation(const IrFunction* f, uint32_t i, bool* swap)
 {
-    static const uint8_t operations[64] = {
+    static const uint8_t operations[BUSTER_IR_OP_TABLE] = {
         [IR_ADD] = IROPT_FOLD_ADD,
         [IR_SUB] = IROPT_FOLD_SUB,
         [IR_MUL] = IROPT_FOLD_MUL,
@@ -800,7 +800,7 @@ static uint8_t ir_optimize_meet(uint8_t left, IrConstant a, uint8_t right, IrCon
 // constant, a state copy, a phi meet, a select pick, or a unary fold. The op-indexed read keeps
 // the per-instruction dispatch a load where the compare chain lowered to a jump table's indirect
 // branch (#786).
-static const uint8_t ir_optimize_transfer_kinds[64] = {
+static const uint8_t ir_optimize_transfer_kinds[BUSTER_IR_OP_TABLE] = {
     [IR_CONST] = 1,
     [IR_COPY] = 2,
     [IR_PHI] = 3,
@@ -1203,7 +1203,7 @@ static uint32_t ir_optimize_single_successor(const IrOptimizeWork* work, uint32_
 // it folds a value only where every MXCSR gives it (ir_optimize_simd.c), and the rewrite keeps the original row, with
 // its operands live, for its flags and traps.
 // An integer comparison has no such effect and goes where its mask is unused.
-static const uint8_t ir_optimize_roots[64] = {
+static const uint8_t ir_optimize_roots[BUSTER_IR_OP_TABLE] = {
         [IR_LOAD] = 1,
         [IR_STORE] = 1,
         [IR_CALL] = 1,
@@ -1214,6 +1214,8 @@ static const uint8_t ir_optimize_roots[64] = {
         [IR_LIFETIME] = 1,
         [IR_FENCE] = 1,
         [IR_ATOMIC_RMW] = 1,
+        [IR_MASKED_LOAD] = 1,
+        [IR_MASKED_STORE] = 1,
         [IR_BR] = 1,
         [IR_CBR] = 1,
         [IR_SWITCH] = 1,
@@ -1317,7 +1319,7 @@ static __attribute__((aligned(64))) void ir_optimize_dce(IrOptimizeWork* work, I
                     const uint32_t count = end - at < BUSTER_IR_OPTIMIZE_BATCH ? end - at : BUSTER_IR_OPTIMIZE_BATCH;
                     const __mmask16 valid = (UINT32_C(1) << count) - 1;
                     const __m128i op = _mm_maskz_loadu_epi8(valid, f->op + at);
-                    const __m128i kinds = _mm512_castsi512_si128(_mm512_permutexvar_epi8(_mm512_zextsi128_si512(op), _mm512_loadu_si512(ir_optimize_roots)));
+                    const __m128i kinds = _mm512_castsi512_si128(_mm512_permutex2var_epi8(_mm512_loadu_si512(ir_optimize_roots), _mm512_zextsi128_si512(op), _mm512_loadu_si512(ir_optimize_roots + 64)));
                     const __m128i states = _mm_maskz_loadu_epi8(valid, work->states + at);
                     // SIMD floating arithmetic (kind 2) and comparisons (kind 3) retain their effects, folded or not.
                     const __m128i flags = _mm_maskz_loadu_epi8(valid, f->flags + at);
@@ -1478,7 +1480,7 @@ static uint32_t ir_optimize_phi_inputs(const IrOptimizeWork* work, uint32_t inst
 // argument list, a cbr's two targets, a switch's case list, or a br_indirect's label list. The
 // op-indexed read keeps the per-instruction dispatch a load where the compare chain lowered to a
 // jump table's indirect branch (#786).
-static const uint8_t ir_optimize_rewrite_kinds[64] = {
+static const uint8_t ir_optimize_rewrite_kinds[BUSTER_IR_OP_TABLE] = {
     [IR_PHI] = 1,
     [IR_CALL] = 2,
     [IR_CALL_INDIRECT] = 2,

@@ -491,6 +491,47 @@ global register variable of a constraint that allows memory is clang's
 constraint" (its words exchanged, as for a bit-field), and `&sp` is "address of
 register variable requested".
 
+### Clobbers', operand sizes' and asm labels' errors
+
+A clobber is checked as clang's `TargetInfo::isValidClobber` checks it (#2262):
+`memory`, `cc`, `unwind`, or a register name clang's x86-64 target knows
+(`check_input_register_name_valid`, the register variables' set: past one `%`
+or `#`, GCCRegNames and AddlRegNames, or an index of up to 180 in
+`getAsInteger`'s radixes). So `sil`, `dil`, `spl`, `bpl`, the segment
+registers, `rip`, `st0` and `st(0)` are clang's "unknown register name 'X' in
+asm" at the first such clobber's string, after the operands' constraints, and
+`dr0`, `cr0`, `fpcr`, `bnd0`, `tmm0` or `"17"` are taken. The lowering reads a
+clobber as clang normalizes it (`check_asm_clobber_name`: an index becomes its
+name, `"0x10"` `argp` and `"38"` `r8`); the control, debug, bound and tile
+registers and the flags' names need nothing of a helper or a body.
+
+A redeclaration whose asm label differs from an earlier declaration's is
+clang's "conflicting asm label" at its name, noted "previous declaration is
+here" at the earlier label's string: a linked one at the unit's end
+(`check_input_asm_labels`), and one that conflicts otherwise (a redefinition,
+another type, a local register variable declared again in its scope) before
+that conflict's own error, as clang's `mergeDeclAttributes` reports it
+(`check_input_asm_label_conflict`). `test-checker-driver`'s asm units compare
+both with clang's whole output.
+
+An operand too wide for its constraint is clang's "invalid output|input size
+for constraint 'C'" (#2231, `X86TargetInfo::validateOperandSize`), at the
+operand, with the constraint as written: by its first letter past `=`, `+` and
+`&`, `x`, `v` and `Yz` take the function's widest vector register (512 bits
+with AVX-512F, 256 with AVX, else 128, by the unit's features or a `target`
+attribute's on the function's definition, `CheckInputAsm.vector_bits`); `y`,
+`k`, `Ym` and `Yk` 64 bits; `f`, `t` and `u` 128; and `Yi`, `Yt` and `Y2` any
+size, as SSE2 is every target's here. The check follows an operand's own
+(`check_asm_operand_checks` without `whole`) and precedes its tie's, and the
+statement's first error alone is given, as clang returns there.
+
+Differences left: a `target` attribute on an earlier declaration alone, not
+the definition, doesn't widen an operand's limit, where clang's
+`getFunctionFeatureMap` reads the inherited attribute; an asm statement's
+constraint or clobber error ends its function's checking, where clang goes on past the statement (#2369); and
+clang's "ignored asm label 'X' on automatic variable" warning is missing
+(#2370).
+
 Such a variable has no object and no symbol (an initializer is ignored, as
 clang's): a read is its register's value, rsp's by `STACK_SAVE` and rbp's by
 `FRAME_ADDRESS`, which gives its function a frame pointer (clang's code reads rbp
@@ -720,7 +761,9 @@ field without an addend in the template's code (`check_asm_unit_gotos`); any
 other use is refused by name, as on the record path. A template of directives
 alone with x87 operands or flag outputs has this helper too, as a template of
 no instructions does. A held vector (a vector type in a vector register) is
-refused in a helper, as on the record path.
+refused in a helper, as on the record path. A template with a 32-bit address
+(`leal (%1,%2), %0` of `int` operands, #2339) is assembled whole in such a
+helper too, since a record has no room for its 67 (`docs/assembler.md`).
 
 A template of alignment, section and symbol directives alone has no code
 (`entry_code` is false): its sections, data and defined labels are published,
@@ -796,9 +839,9 @@ makes of it (#1848, `check_program_emit_asm_symbols`):
   (clang warns and makes it a weak common), thread-local (a `TLS` common), alias's
   or selectany definition's; and a read-only one's (`const int x = 1;`), whose
   reads clang's code folds to the initializer where the program would read the
-  common's zeros. Without an alignment operand, the assembler aligns a `.comm` as
-  GNU as does (the size's power of two up to 16) where clang's integrated
-  assembler takes 1; the fixtures give one.
+  common's zeros. Without an alignment operand, a C unit's `.comm` and every
+  `.lcomm` align to 1, as clang's integrated assembler aligns them, where GNU
+  as takes the size's power of two (#2304; `docs/assembler.md`).
 - A file-scope label of an external, non-weak definition (`int x = 1;` with
   `asm(".globl x\nx: .long 2")`, `int f(void)` with `f: ret`, `int x;` with a
   `.data` label), without a binding directive but `.globl`, is clang's
@@ -1050,9 +1093,9 @@ Each refusal names its feature, as the driver prints it ("unsupported: ..."):
   but a vector of 16, 32 or 64 bytes (as clang can't place another: "could not
   allocate"), or of any size in a template of no instructions that doesn't
   refer to it; and vectors of 32 bytes without AVX or 64 without AVX-512F, or
-  in XMM16 up or YMM16 up of 16 or 32 bytes without AVX-512VL (clang's Sema
-  rejects the sizes first: "invalid input size for constraint", which the
-  checker doesn't give yet, #2231);
+  in XMM16 up or YMM16 up of 16 or 32 bytes without AVX-512VL (the checker
+  gives clang's Sema error for the sizes first, "invalid input size for
+  constraint", #2231, so only a `v` operand's register class reaches this);
 - bit-fields;
 - explicit register variables in registers the helper doesn't place one in
   (APX's r16 to r31, st(2) to st(7)), in rsp in a statement

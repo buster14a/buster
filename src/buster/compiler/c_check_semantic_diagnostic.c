@@ -245,6 +245,51 @@ static uint32_t check_semantic_enum_base_spelling(const Parser* parser, const Ch
     return result;
 }
 
+// An __auto_type redeclaration's type as clang's TypePrinter prints it before deduction (#1844,
+// CHECK_REDECLARATION_AUTO_TYPE), quoted: the placeholder with its qualifiers (`const __auto_type`, `_Atomic(__auto_type)`,
+// `restrict __auto_type`), then each pointer level's `*` and its qualifiers (`__auto_type *const`, `const __auto_type **`).
+static String8 check_semantic_auto_type_spelling(const TypeTable* types, TypeId type, Arena* scratch)
+{
+    TypeId levels[64];
+    uint32_t depth = 0;
+    TypeId level = type_strip_aligned(types, type);
+    while (depth < BUSTER_ARRAY_LENGTH(levels) && !check_input_auto_type(level) && type_kind(types, level) == BUSTER_TYPE_KIND_POINTER)
+    {
+        levels[depth++] = level;
+        level = type_strip_aligned(types, type_element(types, level));
+    }
+    char text[512];
+    uint32_t length = 0;
+    String8 result = { 0 };
+    if (check_input_auto_type(level))
+    {
+        const TypeId marker = level & ~(TypeId)(BUSTER_TYPE_CONST | BUSTER_TYPE_VOLATILE);
+        const uint32_t qualifiers = type_qualifiers(level);
+        length = (uint32_t)snprintf(text, sizeof(text), "'%s%s%s%s", (qualifiers & BUSTER_TYPE_CONST) != 0 ? "const " : "",
+                                    (qualifiers & BUSTER_TYPE_VOLATILE) != 0 ? "volatile " : "", marker == BUSTER_CHECK_AUTO_TYPE_RESTRICT ? "restrict " : "",
+                                    marker == BUSTER_CHECK_AUTO_TYPE_ATOMIC ? "_Atomic(__auto_type)" : "__auto_type");
+        for (uint32_t d = depth; d > 0 && length < sizeof(text); d -= 1)
+        {
+            const uint32_t pointer = type_qualifiers(levels[d - 1]);
+            const char* qualified[3] = { (pointer & BUSTER_TYPE_CONST) != 0 ? "const" : NULL, (pointer & BUSTER_TYPE_VOLATILE) != 0 ? "volatile" : NULL,
+                                         (pointer & BUSTER_TYPE_RESTRICT) != 0 ? "restrict" : NULL };
+            length += (uint32_t)snprintf(text + length, sizeof(text) - length, "%s", text[length - 1] == '*' ? "*" : " *");
+            bool first = true;
+            for (uint32_t q = 0; q < 3 && length < sizeof(text); q += 1)
+            {
+                if (qualified[q] != NULL)
+                {
+                    length += (uint32_t)snprintf(text + length, sizeof(text) - length, "%s%s", first ? "" : " ", qualified[q]);
+                    first = false;
+                }
+            }
+        }
+        const char* quoted = length + 1 < sizeof(text) ? check_warning_text(scratch, "%.*s'", (int)length, text) : NULL;
+        result = quoted != NULL ? (String8){ .pointer = (char*)quoted, .length = strlen(quoted) } : (String8){ 0 };
+    }
+    return result;
+}
+
 static const char* check_semantic_input(const Parser* parser, Preprocessor* pp, const CheckInput* input, const TypeTable* types,
                                        const CheckInputReport* report, CheckWarningSpelling* spell, Arena* scratch)
 {
@@ -302,16 +347,21 @@ static const char* check_semantic_input(const Parser* parser, Preprocessor* pp, 
     {
         const uint32_t previous = report->subject - 1;
         const uint8_t kind = input->declaration_kinds[token];
-        if (report->detail == CHECK_REDECLARATION_OBJECT_TYPE || report->detail == CHECK_REDECLARATION_OBJECT_TYPE_EXTERN)
+        if (report->detail == CHECK_REDECLARATION_OBJECT_TYPE || report->detail == CHECK_REDECLARATION_OBJECT_TYPE_EXTERN ||
+            report->detail == CHECK_REDECLARATION_AUTO_TYPE || report->detail == CHECK_REDECLARATION_AUTO_TYPE_EXTERN)
         {
-            const String8 current = check_driver_warning_type(parser, pp, input, types, spell, scratch, report->type, report->type_spelling);
+            const bool placeholder = report->detail == CHECK_REDECLARATION_AUTO_TYPE || report->detail == CHECK_REDECLARATION_AUTO_TYPE_EXTERN;
+            const String8 current = placeholder ? check_semantic_auto_type_spelling(types, report->type, scratch) :
+                                                  check_driver_warning_type(parser, pp, input, types, spell, scratch, report->type, report->type_spelling);
             // The prior type is the noted declaration's, spelled as that one spells it (review on #1453).
             const uint32_t noted = report->note_token < count ? report->note_token : previous;
             const uint32_t prior_spelling = noted < count ? check_input_typedef_spelling(input, parser, noted) : 0;
             const String8 prior = check_driver_warning_type(parser, pp, input, types, spell, scratch, (TypeId)report->value, prior_spelling);
             result = current.length == 0 || prior.length == 0 ? NULL : check_warning_text(scratch,
                 "%s of '%.*s' with a different type: %.*s vs %.*s",
-                report->detail == CHECK_REDECLARATION_OBJECT_TYPE_EXTERN ? "redeclaration" : "redefinition", (int)name.length, name.pointer,
+                report->detail == CHECK_REDECLARATION_OBJECT_TYPE_EXTERN || report->detail == CHECK_REDECLARATION_AUTO_TYPE_EXTERN ? "redeclaration" :
+                                                                                                                                 "redefinition",
+                (int)name.length, name.pointer,
                 (int)current.length, current.pointer, (int)prior.length, prior.pointer);
         }
         else if (report->detail == CHECK_REDECLARATION_TYPEDEF)
@@ -1622,6 +1672,145 @@ static PPOutputDiagnosticNote check_semantic_forward_note(const Parser* parser, 
     return result;
 }
 
+// The display order of a call's candidates (#1447, clang's CompareOverloadCandidatesForDisplay): whether `left` comes
+// before `right`. An ambiguous call's best and a call's non-viable candidates other than by their arguments' count by
+// their declarations' order; those by count last, the ones whose parameter count is nearer the arguments' first, at the
+// same distance the ones given too many first.
+static bool check_semantic_overload_before(const TypeTable* types, const CheckOverloadCandidate* candidates, const CheckOverloadExplained* left,
+                                           const CheckOverloadExplained* right, uint32_t argument_count)
+{
+    const bool left_arity = left->failure == CHECK_OVERLOAD_FAILURE_FEW_ARGUMENTS || left->failure == CHECK_OVERLOAD_FAILURE_MANY_ARGUMENTS;
+    const bool right_arity = right->failure == CHECK_OVERLOAD_FAILURE_FEW_ARGUMENTS || right->failure == CHECK_OVERLOAD_FAILURE_MANY_ARGUMENTS;
+    uint32_t left_count = 0;
+    uint32_t right_count = 0;
+    type_parameters(types, type_strip_aligned(types, candidates[left->candidate].type), &left_count);
+    type_parameters(types, type_strip_aligned(types, candidates[right->candidate].type), &right_count);
+    const uint32_t left_distance = left_count > argument_count ? left_count - argument_count : argument_count - left_count;
+    const uint32_t right_distance = right_count > argument_count ? right_count - argument_count : argument_count - right_count;
+    const bool located = candidates[left->candidate].declaration < candidates[right->candidate].declaration;
+    return left_arity != right_arity ? right_arity :
+           !left_arity ? located :
+           left_distance != right_distance ? left_distance < right_distance :
+           left->failure != right->failure ? left->failure == CHECK_OVERLOAD_FAILURE_MANY_ARGUMENTS : located;
+}
+
+// A call of an overload set that no candidate is viable for, or several are (#1447): clang's "no matching function for
+// call to 'f'" with each candidate's note, or "call to 'f' is ambiguous" with its best's ("candidate function"), at the
+// callee's name. The candidates' outcomes are the selection's again (check_overload_explain). NULL, and the checker's own
+// error, where a candidate failed by an argument's conversion (clang's "no known conversion" notes) or the notes are
+// more than the report holds.
+static const char* check_semantic_overload_call(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, const TypeTable* types,
+                                                uint32_t node, uint32_t* location, PPOutputDiagnosticNote* note, uint32_t* note_count, Arena* scratch)
+{
+    const CheckGraph* graph = &input->graph;
+    uint32_t low = 0;
+    uint32_t high = graph->overload_count;
+    uint32_t head = BUSTER_CHECK_NONE;
+    while (head == BUSTER_CHECK_NONE && low < high)
+    {
+        const uint32_t middle = low + (high - low) / 2;
+        const uint32_t at = graph->overload_calls[middle].node;
+        head = at == node ? graph->overload_calls[middle].head : BUSTER_CHECK_NONE;
+        high = node < at ? middle : high;
+        low = node > at ? middle + 1 : low;
+    }
+    const uint32_t callee = graph->operand0[node];
+    const uint32_t name = callee < graph->count && graph->ops[callee] == CHECK_OP_VALUE ? graph->tokens[callee] : BUSTER_CHECK_NONE;
+    const uint32_t argument_count = graph->argument_counts[node];
+    const bool found = head < graph->overload_candidate_count && name < parser->tokens.count;
+    CheckValue* arguments = found ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckValue, (uint64_t)argument_count + 1) : NULL;
+    uint8_t* nonnull = arguments != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)argument_count + 1) : NULL;
+    CheckOverloadExplained* explained = nonnull != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckOverloadExplained, (uint64_t)graph->overload_candidate_count + 1) : NULL;
+    uint32_t explained_count = 0;
+    if (explained != NULL)
+    {
+        for (uint32_t i = 0; i < argument_count; i += 1)
+        {
+            const uint32_t argument = graph->argument_nodes[graph->argument_offsets[node] + i];
+            arguments[i] = check_stream_value(stream, argument);
+            nonnull[i] = graph->ops[argument] == CHECK_OP_ADDRESS;
+        }
+        const CheckOverloadContext context = {
+            .semantic = check_graph_context(graph, node, false),
+            .conditions = &graph->conditions,
+            .argument_nonnull = nonnull,
+        };
+        // The call was checked with these values, so the selection's conversions only find types the table has.
+        explained_count = check_overload_explain((TypeTable*)types, graph->overload_candidates, graph->overload_candidate_count, head, arguments, argument_count,
+                                                 &context, scratch, explained, true);
+    }
+    bool ambiguous = false;
+    bool renderable = explained_count != 0;
+    for (uint32_t i = 0; i < explained_count; i += 1)
+    {
+        ambiguous |= explained[i].best;
+    }
+    uint32_t shown = 0;
+    for (uint32_t i = 0; renderable && i < explained_count; i += 1)
+    {
+        const uint8_t failure = explained[i].failure;
+        renderable = ambiguous || failure == CHECK_OVERLOAD_FAILURE_FEW_ARGUMENTS || failure == CHECK_OVERLOAD_FAILURE_MANY_ARGUMENTS ||
+                     failure == CHECK_OVERLOAD_FAILURE_DISABLED;
+        // (An ambiguous call's notes are its best's alone, which are listed first.)
+        explained[shown] = explained[i];
+        shown += !ambiguous || explained[i].best ? 1u : 0u;
+    }
+    renderable &= shown <= BUSTER_CHECK_SEMANTIC_NOTES;
+    // In display order, by insertion: the lists are short.
+    for (uint32_t i = 1; renderable && i < shown; i += 1)
+    {
+        const CheckOverloadExplained moved = explained[i];
+        uint32_t j = i;
+        while (j > 0 && check_semantic_overload_before(types, graph->overload_candidates, &moved, explained + j - 1, argument_count))
+        {
+            explained[j] = explained[j - 1];
+            j -= 1;
+        }
+        explained[j] = moved;
+    }
+    const char* result = NULL;
+    for (uint32_t i = 0; renderable && i < shown; i += 1)
+    {
+        const CheckOverloadCandidate* candidate = graph->overload_candidates + explained[i].candidate;
+        const char* text = "candidate function";
+        if (explained[i].failure == CHECK_OVERLOAD_FAILURE_DISABLED)
+        {
+            const String8 message = check_warning_strings_value(parser, pp, input->conditions[explained[i].condition].message, scratch);
+            text = message.length != 0 ? check_warning_text(scratch, "candidate disabled: %.*s", (int)message.length, message.pointer) :
+                                         "candidate disabled: <no message provided>";
+        }
+        else if (!ambiguous)
+        {
+            // clang's DiagnoseArityMismatch: "requires single argument 'a'" for a named parameter, else the counts. Without
+            // default arguments, fewer arguments than a variadic one's parameters need "at least" its count.
+            uint32_t parameter_count = 0;
+            const TypeId function = type_strip_aligned(types, candidate->type);
+            type_parameters(types, function, &parameter_count);
+            const bool variadic = (types->types.flags[type_index(function)] & BUSTER_TYPE_FLAG_VARIADIC) != 0;
+            const bool few = explained[i].failure == CHECK_OVERLOAD_FAILURE_FEW_ARGUMENTS;
+            const uint32_t place = parameter_count == 1 ? check_driver_parameter_place(parser, input, candidate->declaration, 0) : BUSTER_CHECK_NONE;
+            const bool named = place < parser->tokens.count && parser->tokens.kinds[place] == PARSE_KIND_IDENTIFIER;
+            const String8 parameter = named ? check_semantic_name(parser, pp, place) : (String8){ 0 };
+            char provided[32];
+            snprintf(provided, sizeof(provided), "%u", argument_count);
+            text = named ? check_warning_text(scratch, "candidate function not viable: %s argument '%.*s', but %s arguments were provided",
+                                              few && variadic ? "requires at least" : "requires single", (int)parameter.length, parameter.pointer,
+                                              argument_count == 0 ? "no" : provided) :
+                           check_warning_text(scratch, "candidate function not viable: requires%s %u argument%s, but %u %s provided", few && variadic ? " at least" : "",
+                                              parameter_count, parameter_count == 1 ? "" : "s", argument_count, argument_count == 1 ? "was" : "were");
+        }
+        check_semantic_add_note(parser, note, note_count, candidate->declaration, text);
+    }
+    if (renderable)
+    {
+        const String8 called = check_semantic_name(parser, pp, name);
+        *location = name;
+        result = ambiguous ? check_warning_text(scratch, "call to '%.*s' is ambiguous", (int)called.length, called.pointer) :
+                             check_warning_text(scratch, "no matching function for call to '%.*s'", (int)called.length, called.pointer);
+    }
+    return result;
+}
+
 // A semantic report's clang text and location, with its notes in `note`, an array of BUSTER_CHECK_SEMANTIC_NOTES
 // (check_semantic_note_count counts them): const assignment's are several (#1447).
 static const char* check_semantic_expression(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
@@ -1639,7 +1828,15 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
     *location = token;
     memset(note, 0, sizeof(*note) * BUSTER_CHECK_SEMANTIC_NOTES);
     uint32_t note_count = 0;
-    if (report->message == CHECK_MESSAGE_STATIC_ASSERT)
+    // A call of an overload set none or several of whose candidates are viable (#1447), whose text is clang's where its
+    // notes can be.
+    const char* overloaded = report->message == CHECK_MESSAGE_ACTION && report->diagnostic == CHECK_DIAG_INCOMPATIBLE && op == CHECK_OP_CALL && graph->overload_count != 0 ?
+                             check_semantic_overload_call(parser, pp, input, stream, types, node, location, note, &note_count, scratch) : NULL;
+    if (overloaded != NULL)
+    {
+        result = overloaded;
+    }
+    else if (report->message == CHECK_MESSAGE_STATIC_ASSERT)
     {
         result = check_semantic_assert(parser, pp, input, stream, types, report, location, note, &note_count, scratch);
     }
@@ -1689,6 +1886,26 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
                                                             check_semantic_operand_spelling(parser, input, stream, types, second));
             result = left.length != 0 && right.length != 0 ? check_warning_text(scratch, "invalid operands to binary expression (%.*s and %.*s)", (int)left.length,
                                                                                 left.pointer, (int)right.length, right.pointer) : NULL;
+        }
+        else if (report->diagnostic == CHECK_DIAG_INCOMPATIBLE && op == CHECK_OP_CAST && operand_type != 0 && token < parser->tokens.count &&
+                 parser->tree.roles[token] == PARSE_ROLE_CLOSE_CAST && node < stream->count && graph->types != NULL &&
+                 (check_action_kind(types, graph->types[node]) == BUSTER_TYPE_KIND_UNION || check_action_kind(types, graph->types[node]) == BUSTER_TYPE_KIND_STRUCT))
+        {
+            // A cast to a record from no type compatible with it (#2301, clang's CheckCStyleCast), at the cast's `(`: to a
+            // union from no member's type, err_typecheck_cast_to_union_no_type with the operand's type after its lvalue
+            // conversion (an array's or a function's decay, its qualifiers dropped), its sugar kept; to a struct,
+            // err_typecheck_cond_expect_scalar with the struct's type as written.
+            const TypeId target = graph->types[node];
+            const bool to_union = check_action_kind(types, target) == BUSTER_TYPE_KIND_UNION;
+            const TypeId converted = stream->conversions[node].operands[0].type != 0 ? stream->conversions[node].operands[0].type : type_unqualified(operand_type);
+            const uint32_t spelling = converted == type_unqualified(operand_type) ? check_semantic_operand_spelling(parser, input, stream, types, operand) : 0;
+            const String8 type = to_union ? check_driver_warning_type(parser, pp, input, types, spell, scratch, converted, spelling) :
+                                            check_driver_warning_type(parser, pp, input, types, spell, scratch, target, check_input_operand_type_spelling(input, parser, node));
+            const uint32_t open = check_warning_graph_void_opener(parser, token);
+            *location = open < parser->tokens.count ? open : token;
+            result = type.length == 0 ? NULL :
+                     to_union ? check_warning_text(scratch, "cast to union type from type %.*s not present in union", (int)type.length, type.pointer) :
+                                check_warning_text(scratch, "used type %.*s where arithmetic or pointer type is required", (int)type.length, type.pointer);
         }
         else if (report->diagnostic == CHECK_DIAG_INCOMPATIBLE && op == CHECK_OP_SUBTRACT && operand_type != 0 && graph->operand1[node] < stream->count &&
                  check_action_kind(types, operand_type) == BUSTER_TYPE_KIND_POINTER &&
@@ -1996,6 +2213,8 @@ static const char* check_semantic_asm(const Parser* parser, Preprocessor* pp, co
         case CHECK_ASM_ERROR_GENERIC: result = "invalid assembly operand or constraint"; break;
         case CHECK_ASM_ERROR_OUTPUT_LVALUE: result = "invalid lvalue in asm output"; break;
         case CHECK_ASM_ERROR_CAST: result = "invalid use of a cast in an inline asm context requiring an lvalue [-Winvalid-gnu-asm-cast]"; break;
+        case CHECK_ASM_ERROR_OUTPUT_SIZE: result = check_warning_text(scratch, "invalid output size for constraint '%.*s'", constraint_length, constraint); break;
+        case CHECK_ASM_ERROR_INPUT_SIZE: result = check_warning_text(scratch, "invalid input size for constraint '%.*s'", constraint_length, constraint); break;
         case CHECK_ASM_ERROR_INPUT_LVALUE: result = check_warning_text(scratch, "invalid lvalue in asm input for constraint '%.*s'", constraint_length, constraint); break;
         case CHECK_ASM_ERROR_BIT_FIELD:
             result = check_warning_text(scratch, "reference to a bit-field in asm %s with a memory constraint '%.*s'", output ? "input" : "output", constraint_length,

@@ -3539,7 +3539,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             }
             mangling.internal = check_input_linkage(program->input->declaration_bits, candidate->declaration) == 1;
             mangling.object_size_compat = candidate->object_sizes != NULL;
-            const CheckMangleStatus status = check_mangle_name(&mangling, candidate->type, parser->tokens.names[candidate->declaration],
+            const CheckMangleStatus status = check_mangle_name(&mangling, candidate->type, parser->tokens.names[candidate->declaration], candidate->declaration,
                                                                mangle_scratch.arena, &symbol_names[symbol]);
             valid = status == CHECK_MANGLE_OK;
             if (!valid)

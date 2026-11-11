@@ -661,7 +661,9 @@ static inline __attribute__((always_inline)) bool check_vector_action(TypeTable*
         } break;
         case CHECK_OP_CAST:
         {
-            handled = check_vector_type(table, action->operands[0].type) || check_vector_type(table, action->type);
+            // (A vector's cast to a union is GCC's cast to a union, check_action_cast's, #2301.)
+            handled = (check_vector_type(table, action->operands[0].type) && check_action_kind(table, action->type) != BUSTER_TYPE_KIND_UNION) ||
+                      check_vector_type(table, action->type);
             if (handled)
             {
                 check_vector_cast(table, action, result);
