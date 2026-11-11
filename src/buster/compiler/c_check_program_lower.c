@@ -5909,9 +5909,25 @@ static void check_lower_complex_constant(CheckLowerWriter* writer, const CheckVa
     const bool integer = element_kind == BUSTER_TYPE_KIND_INTEGER || element_kind == BUSTER_TYPE_KIND_BIT_INT;
     const uint64_t halves[2] = { (uint64_t)value->integer, value->constant_kind == CHECK_CONSTANT_COMPLEX ? (uint64_t)(value->integer >> 64) : 0 };
     const CheckConstantKind real = integer ? CHECK_CONSTANT_INTEGER : CHECK_CONSTANT_FLOATING;
+    // A _Complex __float128's parts are their bits (#1250, check_quad_complex_set), four words a store each; a real one's
+    // imaginary part +0.
+    const bool quad = element == BUSTER_TYPE_FLOAT128;
     if (value->constant_kind != CHECK_CONSTANT_COMPLEX && value->constant_kind != real)
     {
         check_lower_fail(writer, CHECK_PROGRAM_INVALID);
+    }
+    else if (quad)
+    {
+        const unsigned __int128 imaginary = value->constant_kind == CHECK_CONSTANT_COMPLEX ? check_quad_complex_imaginary(value) : 0;
+        const uint64_t words[4] = { (uint64_t)value->integer, (uint64_t)(value->integer >> 64), (uint64_t)imaginary, (uint64_t)(imaginary >> 64) };
+        const uint32_t result = check_lower_object(writer, 32, 4);
+        for (uint32_t word = 0; word < 4; word += 1)
+        {
+            check_lower_complex_place(writer, result, word, 8);
+            check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, words[word]);
+            check_lower_emit(writer, BUSTER_TYPED_SET, BUSTER_TYPED_CLASS_U64, 0);
+        }
+        check_lower_emit(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, result);
     }
     else
     {
