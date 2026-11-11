@@ -96,9 +96,9 @@ verification hash on the 9700X. The
 runtime comparison, with the commands and scope described in
 [the Tier 1 guide](tier1.md#where-the-gap-to-clang--o2-is-1189).
 These executions satisfy the stage's requirement to run real SQLite code.
-They do not decide the broader SQLite test-suite scope still tracked by
-[#146](https://github.com/buster14a/buster/issues/146), including its open
-choice of `testfixture` coverage.
+SQLite's whole test suite, `testfixture`'s Tcl scripts included, is
+[#146](https://github.com/buster14a/buster/issues/146)'s `test-sqlite-testfixture`
+([c-testsuite guide](commands/c-testsuite.md)).
 
 ### Strict native comparison
 
