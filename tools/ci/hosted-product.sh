@@ -28,9 +28,11 @@ shopt -s inherit_errexit
 format='buster-hosted-product 1'
 ownership_heading='== Check unity fixture ownership without rebuilding'
 
+# On standard error, which the runner reads workflow commands from too, so that a failure inside a command
+# substitution still shows.
 die()
 {
-    printf '::error title=Shared compiler product::%s\n' "$*"
+    printf '::error title=Shared compiler product::%s\n' "$*" >&2
     exit 1
 }
 
@@ -62,6 +64,16 @@ tree_digest()
     ) | sha256sum | cut -c 1-64
 }
 
+# Runs "$@", and reports its time on standard error.
+timed()
+{
+    local start end
+    start=$(date +%s%N)
+    "$@"
+    end=$(date +%s%N)
+    printf 'hosted-product: %s %s took %s ms\n' "$1" "${2##*/}" "$(((end - start) / 1000000))" >&2
+}
+
 # The hosted toolchain's installation (tools/ci/install-hosted-tools.sh): the directory above the clang on PATH that
 # holds the copy of hosted-tools.lock it was installed from.
 toolchain_root()
@@ -82,22 +94,26 @@ toolchain_root()
 # runner (ldd's resolution of each).
 identity()
 {
-    local product=$1 out=$2 stamp file
+    local product=$1 out=$2 stamp file revision tree root toolchain runtime=none
     mkdir -p "$out"
     git diff --quiet HEAD -- || die "the checkout's tracked files differ from its commit"
+    # Each value is assigned first, so that a failure stops the script rather than leaving a field empty on both sides.
+    revision=$(git rev-parse HEAD)
+    tree=$(git rev-parse 'HEAD^{tree}')
+    root=$(toolchain_root)
+    toolchain=$(timed tree_digest "$root")
+    if [ -n "${BUSTER_HOST_RUNTIME:-}" ]; then
+        runtime=$(tree_digest "$BUSTER_HOST_RUNTIME")
+    fi
     {
         printf 'format\t%s\n' "$format"
         printf 'repository\t%s\n' "${GITHUB_REPOSITORY_ID:?}"
         printf 'run\t%s\n' "${GITHUB_RUN_ID:?}"
-        printf 'revision\t%s\n' "$(git rev-parse HEAD)"
-        printf 'tree\t%s\n' "$(git rev-parse 'HEAD^{tree}')"
+        printf 'revision\t%s\n' "$revision"
+        printf 'tree\t%s\n' "$tree"
         printf 'row\t%s %s O%s\n' "$BUSTER_HOST_ARCH" "${BUSTER_SANITIZER:-none}" "${BUSTER_SANITIZER_OPTIMIZATION:-3}"
-        printf 'toolchain\t%s\n' "$(tree_digest "$(toolchain_root)")"
-        if [ -n "${BUSTER_HOST_RUNTIME:-}" ]; then
-            printf 'runtime\t%s\n' "$(tree_digest "$BUSTER_HOST_RUNTIME")"
-        else
-            printf 'runtime\tnone\n'
-        fi
+        printf 'toolchain\t%s\n' "$toolchain"
+        printf 'runtime\t%s\n' "$runtime"
     } > "$out/summary"
     # build.sh's configuration record for these settings: it writes it when it configures the tree, the same text
     # whether the tree was built or only configured.
@@ -121,20 +137,23 @@ identity()
     fi
 }
 
-# Where the product was built: reported, not compared. Runner images and the Ubuntu archive's packages can differ
-# between a row's runners, as they could between its shards when each built its own compiler.
+# Where the product was built: reported, not compared. The runner (`host`) is a shard's own anyway; its image, glibc
+# and the Ubuntu archive's packages (`environment`, `packages`) can differ between a row's runners, as they could
+# between its shards when each built its own compiler, and a shard reports where they do.
 provenance()
 {
     local out=$1
     mkdir -p "$out"
     {
         printf 'runner\t%s\n' "${RUNNER_NAME:-unknown}"
-        printf 'image\t%s %s\n' "${ImageOS:-unknown}" "${ImageVersion:-unknown}"
         printf 'cpu\t%s\n' "$(sed -n 's/^model name[[:space:]]*:[[:space:]]*//p' /proc/cpuinfo | head -n 1)"
         printf 'cpus\t%s\n' "$(nproc)"
         printf 'kernel\t%s\n' "$(uname -r)"
-        printf 'libc\t%s\n' "$(getconf GNU_LIBC_VERSION)"
     } > "$out/host"
+    {
+        printf 'image\t%s %s\n' "${ImageOS:-unknown}" "${ImageVersion:-unknown}"
+        printf 'libc\t%s\n' "$(getconf GNU_LIBC_VERSION)"
+    } > "$out/environment"
     { dpkg-query -W -f '${Package} ${Version}\n' libc6 libc6-dev linux-libc-dev binutils gcc g++ libstdc++6 \
         libzstd-dev libxml2-dev zlib1g-dev 2> /dev/null || true; } | LC_ALL=C sort > "$out/packages"
 }
@@ -217,6 +236,9 @@ pack()
     (cd "$product" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum) > "$staging/files.sha256"
     mv -- "$staging/files.sha256" "$product/files.sha256"
     unpacked=$(du -sb "$product" | cut -f 1)
+    for file in "$product"/bin/*; do
+        summary "${file##*/}: $(stat -c %s "$file") bytes"
+    done
     # Fixed names, owners, times and order: the same build packs to the same bytes.
     tar --sort=name --owner=0 --group=0 --numeric-owner --mtime=@0 --format=gnu -C "$staging" -cf - product |
         zstd -q -T0 -3 -o "$output/product.tar.zst"
@@ -266,7 +288,7 @@ install_product()
         die "this row's product was built for another configuration than this shard's (the difference is above)"
     fi
     provenance "$staging/here"
-    for file in host packages; do
+    for file in environment packages; do
         if ! diff "$product/provenance/$file" "$staging/here/$file" > "$staging/provenance-$file"; then
             printf '::notice title=Shared compiler product::the producer'"'"'s runner differs from this one (%s; reported, not compared):\n' "$file"
             cat "$staging/provenance-$file"

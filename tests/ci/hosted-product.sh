@@ -271,6 +271,16 @@ printf 'llvm 23.1.5 fixture\n' > "$toolchain/hosted-tools.lock"
 consume 1 'another toolchain' "$work/products/plain" "$digest"
 printf 'llvm 23.1.4 fixture\n' > "$toolchain/hosted-tools.lock"
 consume 0 'the same product again' "$work/products/plain" "$digest"
+# A clang that isn't the hosted toolchain's installation (no lock beside it), on either side.
+mv "$toolchain/hosted-tools.lock" "$toolchain/moved.lock"
+consume 1 'a clang outside the hosted toolchain' "$work/products/plain" "$digest"
+fresh_runner
+run build > /dev/null 2>&1
+run ownership > /dev/null 2>&1
+if run pack "$RUNNER_TEMP/product" > "$work/log" 2>&1; then fail 'packed with a clang outside the hosted toolchain'; fi
+grep -q '::error' "$work/log" || fail 'refused a clang outside the hosted toolchain without an error'
+pass
+mv "$toolchain/moved.lock" "$toolchain/hosted-tools.lock"
 # A library the shard can't load.
 mkdir -p "$work/ldd"
 printf '#!/usr/bin/env bash\nprintf "\\tlibfixture.so.1 => not found\\n"\n' > "$work/ldd/ldd"

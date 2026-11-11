@@ -123,7 +123,7 @@ jobs:
         with:
           name: ${{ steps.name.outputs.artifact }}
           path: ${{ runner.temp }}/compiler-product/product.tar.zst
-          # Already compressed: zstd at its third level takes the plain compiler from 50 MB to 15 MB.
+          # Already compressed: zstd at its third level takes the plain compiler from 48 MB to 15 MB.
           compression-level: 0
           if-no-files-found: error
           retention-days: 7

@@ -265,7 +265,10 @@ shards. The job then builds and packs the product in four steps, three of them
   ownership heading run the instrumented executable.
 - `pack`: the compiler, the pragma oracle, the clang server when built, the
   build's compile commands, the product's identity and provenance, and the
-  SHA-256 of every file, as a reproducible `product.tar.zst`.
+  SHA-256 of every file, as a reproducible `product.tar.zst`. Zstandard's
+  third level packs the plain row's 48 MB compiler into 15 MB; the static clang
+  server (#2073), about 203 MB, should add some 60 MB, estimated from LLVM's
+  shared libraries' ratio.
 
 It publishes the archive as this run's artifact
 `compiler-ARCH-SANITIZER-OOPT-ATTEMPT`, kept 7 days, and its outputs give the
@@ -277,9 +280,10 @@ function and compare byte for byte:
 - the repository, the run, the commit and its tree, with the tracked files
   unmodified;
 - the row;
-- the digest of the whole hosted toolchain installation (clang, its resource
-  directory with the sanitizer runtimes, lld, mold, wild, libclang-cpp, CMake
-  and Ninja);
+- the digest of the whole hosted toolchain installation, 2.0 GB (clang, its
+  resource directory with the sanitizer runtimes, lld, mold, wild,
+  libclang-cpp, LLVM's and clang's archives, CMake and Ninja), which the
+  install step reports the time of;
 - the baseline runtime's tree, in the plain row;
 - build.sh's own configuration record, the toolchain identity, the tools on
   PATH and every setting, which `./build.sh configure` writes;
@@ -287,10 +291,11 @@ function and compare byte for byte:
 - the target's predefined macros with `host_isa.h` (`BUSTER_HOST_VECTOR` 0);
 - `ldd`'s resolution of each executable.
 
-Its provenance is reported but not compared: the runner, its image, CPU, kernel
-and glibc, the versions of the system packages the build reads, and the
-ownership check's result. Runner images can differ between a row's jobs, as they
-could between its shards when each built its own compiler.
+Its provenance is reported but not compared: the runner, its CPU and kernel;
+its image, glibc and the versions of the system packages the build reads; and
+the ownership check's result. Runner images can differ between a row's jobs, as
+they could between its shards when each built its own compiler, so a shard
+reports where the image, glibc or packages differ from its own.
 
 A portable row's shards need its `compiler` job and start once it ends. Their
 first step fails unless the build succeeded: no shard builds the compiler or
@@ -302,7 +307,7 @@ they download the artifact by the build's output name, and
 2. that it holds only directories and regular files under `product/`;
 3. exactly the files it lists, each with its hash;
 4. the identity, which a difference fails, printed;
-5. the provenance, whose differences are a notice;
+5. the build's image, glibc and packages, whose differences are a notice;
 6. each executable, run once.
 
 Only then does it install them where `build` puts them:
