@@ -3469,10 +3469,15 @@ What the lowering covers past scalars (#145's programs):
     - A copy shares its body's locals in the lowering
       (`check_lower_local_body`) and its block-scope statics, as clang's
       clones do.
-    - A body with inline assembly, a `switch` or a label whose address it may
-      take is still compiled once, with the unit's features. Its versions'
-      names are symbols at that one code: those plans, jump tables and label
-      symbols are a body's own. A group with a reference, or a
+    - Each copy's code takes its own symbols of the body's labels whose
+      addresses it takes (#2247, `check_program_target_number`,
+      `check_lower_label_symbol`). The last copy in the options' order keeps
+      the labels' own symbols, which the program's data reaches: clang's
+      block-scope static `static void* t[] = { &&a };` holds the last clone's
+      label addresses, since that clone is emitted last.
+    - A body with inline assembly or a `switch` is still compiled once, with
+      the unit's features. Its versions' names are symbols at that one code:
+      those plans and jump tables are a body's own. A group with a reference, or a
     `target_clones` function the unit defines with external linkage, gets its
     resolver `f.resolver`, a weak function (local in a static group), and its
     IFUNCs of that binding. The resolver calls `__cpu_indicator_init` and

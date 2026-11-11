@@ -3174,6 +3174,38 @@ static bool check_lower_global_register_write(CheckLowerWriter* writer, uint32_t
     return reg >= 0;
 }
 
+// The symbol of label object `object` (a label's token plus one), of symbol `symbol`, in the body being lowered (#2247):
+// a target_clones copy's own where its option has them (CheckProgram.clone_label_symbols, by the label's place among
+// its body's), else `symbol`.
+static SymbolId check_lower_label_symbol(const CheckLowerWriter* writer, uint32_t object, SymbolId symbol)
+{
+    const CheckProgram* program = writer->program;
+    SymbolId result = symbol;
+    if (__builtin_expect(program->clone_label_symbols != NULL && symbol != 0 && writer->body != NULL, 0))
+    {
+        const uint32_t b = (uint32_t)(writer->body - program->bodies);
+        const uint32_t option = program->body_options != 0 && b < program->body_count ? program->body_options[b] : 0;
+        for (uint32_t g = 0; g < program->target_group_count; g += 1)
+        {
+            const CheckProgramTargetGroup* group = program->target_groups + g;
+            const SymbolId base = group->label_count != 0 && group->clones == writer->body->object && option < group->option_count ?
+                                  program->clone_label_symbols[group->clone_first + option] : 0;
+            const uint32_t* tokens = program->clone_label_tokens + group->label_first;
+            uint32_t first = 0;
+            uint32_t end = base != 0 ? group->label_count : 0;
+            while (first < end)
+            {
+                const uint32_t middle = first + (end - first) / 2;
+                const bool before = tokens[middle] < object - 1;
+                first = before ? middle + 1 : first;
+                end = before ? end : middle;
+            }
+            result = base != 0 && first < group->label_count && tokens[first] == object - 1 ? base + first : result;
+        }
+    }
+    return result;
+}
+
 static void check_lower_address(CheckLowerWriter* writer, uint32_t object, int64_t offset)
 {
     if (object == 0)
@@ -3187,7 +3219,7 @@ static void check_lower_address(CheckLowerWriter* writer, uint32_t object, int64
     else
     {
         const uint32_t local = check_lower_local_of(writer, object);
-        const SymbolId symbol = writer->program->object_symbols[object];
+        const SymbolId symbol = check_lower_label_symbol(writer, object, writer->program->object_symbols[object]);
         uint32_t register_bytes = 0;
         if (local == BUSTER_CHECK_NONE && check_program_global_register(writer->program, object, &register_bytes) >= 0)
         {
@@ -16013,7 +16045,7 @@ static void check_lower_control(CheckLowerWriter* writer, uint32_t index)
     else if (control.kind == CHECK_CONTROL_LABEL)
     {
         // A label whose address the selected program takes has its symbol, which the emission defines at its record.
-        const SymbolId symbol = program->object_symbols[control.token + 1];
+        const SymbolId symbol = check_lower_label_symbol(writer, control.token + 1, program->object_symbols[control.token + 1]);
         if (symbol != 0 && writer->output->label_symbol_count < writer->label_symbol_capacity)
         {
             writer->label_tables[writer->label_entry_count] = 0;

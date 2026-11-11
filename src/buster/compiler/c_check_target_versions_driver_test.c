@@ -529,6 +529,10 @@ static void check_test_target_versions_objects(CheckTest* test, const char* clan
         "typedef float w8 __attribute__((vector_size(32)));\n"
         "__attribute__((target_clones(\"avx2\", \"avx512f\", \"sse4.2\", \"default\"))) int w(int x) { w8 a = { 1, 2, 3, 4, 5, 6, 7, 8 }; "
         "a = a * (w8){ x, x, x, x, x, x, x, x }; int y = 0; for (int i = 0; i < 8; i += 1) { y += (int)a[i]; } return y; }\n"
+        // A body that takes its labels' addresses (#2247): each copy's code its own labels, the static table the last
+        // copy's, as clang's static data reaches the last clone it emits (the objects' places of code are clang's).
+        "__attribute__((target_clones(\"avx2\", \"sse4.2\", \"default\"))) long j(int x) { static void* table[] = { &&a, &&b }; "
+        "void* local[] = { &&b, &&a }; goto *(x < 0 ? table[-x & 1] : local[x & 1]); a: return 1; b: return 2; }\n"
         // A version of 41 features, its name past 200 bytes.
         "__attribute__((target(\"default\"))) int g(int x) { return x - 1; }\n"
         "__attribute__((target(\"popcnt,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2\"))) int g(int x) { return x - 2; }\n";
@@ -549,10 +553,14 @@ static void check_test_target_versions_objects(CheckTest* test, const char* clan
         // The versions compute the same values, so the function itself stands for them there.)
         "#ifndef TARGET_JOINED\n"
         "int w0(int) __asm__(\"w.avx2.0\");\nint w2(int) __asm__(\"w.sse4.2.2\");\nint w3(int) __asm__(\"w.default.3\");\n"
-        "#else\n#define w0 w\n#define w2 w\n#define w3 w\n#endif\n"
+        "long j1(int) __asm__(\"j.sse4.2.1\");\nlong j2(int) __asm__(\"j.default.2\");\n"
+        "#else\n#define w0 w\n#define w2 w\n#define w3 w\n#define j1 j\n#define j2 j\n#endif\n"
+        "__attribute__((target_clones(\"avx2\", \"sse4.2\", \"default\"))) long j(int x);\n"
         "int (*address_f)(int) = f;\nint (*address_c)(int) = c;\nint (*address_d)(int) = d;\n"
         "int main(void) { printf(\"%d %d %d %d %d %d %d %d %d %d %d %d %d\\n\", f(5), call_s(), address_f(1), c(2), address_c(3), call_t(), d(4), address_d(6), g(9),\n"
         "    w(2), w0(3), w2(4), w3(5));\n"
+        "    for (int x = -2; x < 3; x += 1) { printf(\" %ld%ld%ld\", j(x), j1(x), j2(x)); }\n"
+        "    printf(\"\\n\");\n"
         "    return 0; }\n";
     char sources[2][PATH_MAX];
     char objects[2][3][PATH_MAX];

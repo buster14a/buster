@@ -420,6 +420,9 @@ struct CheckProgramTargetGroup
     // entry per option: CheckProgram.body_targets' value) and the copies at their own symbols
     // (CheckProgram.clone_symbols from `clone_first`, 0 for the first option, a repeated one or none).
     uint32_t clone_first;
+    // Its body's labels whose addresses the program takes (CheckProgram.clone_label_tokens), where it has copies.
+    uint32_t label_first;
+    uint32_t label_count;
     bool copies;
     bool internal;
     bool resolved;
@@ -542,6 +545,12 @@ struct CheckProgram
     SymbolId* clone_symbols;
     uint32_t clone_option_count;
     uint32_t* body_options;
+    // The copies' symbols of their body's labels whose addresses the program takes (#2247, check_program_target_number):
+    // by option from clone_first, the first of its labels' symbols, in their tokens' order, or 0 where the option's code
+    // takes the labels' own (the last option with code, as clang's static data reaches the last clone emitted); and the
+    // groups' labels, each group's `label_count` from its `label_first`, by token. Null in a unit without them.
+    SymbolId* clone_label_symbols;
+    uint32_t* clone_label_tokens;
     // The exits through cleanups' chains (#1370, CHECK_CONTROL_EXIT's), each record's plan (by its CheckInput.cleanups
     // index, of a body with such an exit) and the destinations of the records' dispatches; null in a unit without cleanups.
     CheckProgramExit* exits;
