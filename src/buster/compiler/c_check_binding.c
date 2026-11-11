@@ -81,6 +81,47 @@ static bool check_input_in_main_file(const CheckInputReader* reader, uint32_t to
 
 // A declaration clang's unused warnings leave alone: one the source marks unused or used, a typedef or enumerator,
 // a label or tag, or a name whose object is never emitted. Parameters are marked from their definitions' chains.
+// Whether the use at `token` is one clang's MaybeDecrementCount takes back from the references that keep a variable from
+// -Wunused-but-set-variable (#2409): the bare left operand of an assignment, a compound assignment, an increment or a
+// decrement (not through parentheses) that is discarded: an expression statement (not a statement expression's last,
+// whose value is read), a for statement's first or third clause, or a comma's left operand. A volatile variable's read
+// and write (a compound assignment's, an increment's) is no such use.
+static bool check_input_discarded_set(const Parser* parser, uint32_t token, bool is_volatile)
+{
+    const uint32_t count = parser->tokens.count;
+    const uint32_t op = token < count ? parser->tree.parents[token] : count;
+    const uint8_t kind = op < count && op != token ? parser->tokens.kinds[op] : PARSE_KIND_SEMI;
+    const bool step = kind == PARSE_KIND_PLUSPLUS || kind == PARSE_KIND_MINUSMINUS;
+    const bool compound = kind == PARSE_KIND_STAREQUAL || kind == PARSE_KIND_SLASHEQUAL || kind == PARSE_KIND_PERCENTEQUAL ||
+                          kind == PARSE_KIND_PLUSEQUAL || kind == PARSE_KIND_MINUSEQUAL || kind == PARSE_KIND_LESSLESSEQUAL ||
+                          kind == PARSE_KIND_GREATERGREATEREQUAL || kind == PARSE_KIND_AMPEQUAL || kind == PARSE_KIND_CARETEQUAL ||
+                          kind == PARSE_KIND_PIPEEQUAL;
+    const bool assignment = kind == PARSE_KIND_EQUAL || compound;
+    // The operand is the bare name: the operator's neighbor, the left one of an assignment.
+    const bool bare = (assignment && op == token + 1) || (step && (op == token + 1 || op + 1 == token));
+    const uint32_t holder = bare ? parser->tree.parents[op] : count;
+    const uint8_t role = holder < count && holder != op ? parser->tree.roles[holder] : PARSE_ROLE_NONE;
+    bool discarded = role == PARSE_ROLE_SEPARATOR || role == PARSE_ROLE_CLOSE_FOR || (role == PARSE_ROLE_COMMA && op < holder);
+    const uint32_t header = role == PARSE_ROLE_TERMINATOR ? parser->tree.parents[holder] : count;
+    if (header < count && header != holder && parser->tree.roles[header] == PARSE_ROLE_CLOSE_FOR)
+    {
+        // A for header's first clause ends at the `;` before another; its condition, at the last, is read.
+        bool another = false;
+        for (uint32_t at = holder + 1; at < header; at += 1)
+        {
+            another |= parser->tokens.kinds[at] == PARSE_KIND_SEMI;
+        }
+        discarded = another;
+    }
+    else if (role == PARSE_ROLE_TERMINATOR)
+    {
+        // A statement expression's last statement, `({ ...; x = 1; })`, gives its value: its `}` closes a group.
+        const uint32_t next = holder + 1;
+        discarded = !(next + 1 < count && parser->tokens.kinds[next] == PARSE_KIND_R_BRACE && parser->tokens.kinds[next + 1] == PARSE_KIND_R_PAREN);
+    }
+    return discarded && !(is_volatile && (compound || step));
+}
+
 static bool check_input_unused_suppressed(const CheckInput* input, uint32_t token, uint32_t kind)
 {
     const CheckInputAttributes* attributes = token < input->token_count ? check_input_attributes_at(input, token) : NULL;
@@ -195,8 +236,8 @@ static uint32_t check_input_operation_events(const CBindings* events, uint8_t op
 // declare events (`list`, `visited` of them, check_input_operation_events), where it visited every event, most of them
 // uses, in each pass, with a branch on each one's operation; the scalar path, its twin, visits every event (`list` null
 // and `visited` the events' count, #529).
-static void check_input_unused_events(CheckInputReader* reader, const uint8_t* used, const uint8_t* used_tokens, const uint8_t* parameters,
-                                      uint8_t* reported, const uint32_t* list, uint32_t visited)
+static void check_input_unused_events(CheckInputReader* reader, const uint8_t* used, const uint8_t* used_tokens, const uint8_t* read_tokens,
+                                      const uint8_t* parameters, uint8_t* reported, const uint32_t* list, uint32_t visited)
 {
     CheckInput* output = reader->output;
     const Parser* parser = reader->parser;
@@ -271,13 +312,17 @@ static void check_input_unused_events(CheckInputReader* reader, const uint8_t* u
         // A block's declaration with linkage (an extern object, any function) belongs to the translation unit, not the
         // function, in clang (its semantic context, which ShouldDiagnoseUnusedDecl reads), so it is never unused; a
         // local's is one without linkage (#1447).
+        // A local variable whose every use sets it (clang's RefsMinusAssignments at zero): -Wunused-but-set-variable, at its
+        // scope's end with the unused ones (#2409). A static local's too; a parameter's is the -Wuninitialized pass's.
+        const bool set_only = local && !parameter && kind == C_BINDING_OBJECT && declaration_used && !invalid_declaration &&
+                              read_tokens[token] == 0;
         const bool selected = events->operation[event] == C_BINDING_DECLARE && events->key[event] / events->name_capacity == C_BINDING_ORDINARY &&
-                              token < count && !implicit && !inline_function && !declaration_used && !check_input_unused_suppressed(output, token, kind) &&
-                              chain_marked[event] == 0 && main_file &&
+                              token < count && !implicit && !inline_function && (!declaration_used || set_only) &&
+                              !check_input_unused_suppressed(output, token, kind) && chain_marked[event] == 0 && main_file &&
                               (parameter || check_input_linkage(output->declaration_bits, token) == (local ? 0u : 1u));
         const uint32_t first = events->operation[event] == C_BINDING_DECLARE ? chain_first[event] : event;
         const uint32_t chosen = chain_definition[first] != 0 ? chain_definition[first] : events->declaration[first];
-        const uint32_t id = kind == C_BINDING_FUNCTION ? CHECK_WARNING_ID_UNUSED_FUNCTION :
+        const uint32_t id = set_only ? CHECK_WARNING_ID_UNUSED_BUT_SET_VARIABLE : kind == C_BINDING_FUNCTION ? CHECK_WARNING_ID_UNUSED_FUNCTION :
                             parameter ? CHECK_WARNING_ID_UNUSED_PARAMETER :
                             const_variable ? CHECK_WARNING_ID_UNUSED_CONST_VARIABLE : CHECK_WARNING_ID_UNUSED_VARIABLE;
         const uint32_t event_kind = kind == C_BINDING_FUNCTION ? CHECK_WARNING_EVENT_UNUSED_FUNCTION :
@@ -320,6 +365,7 @@ static void check_input_unused_events(CheckInputReader* reader, const uint8_t* u
                 .payload = {
                     .name = parser->tokens.names[token],
                     .token = event_kind == CHECK_WARNING_EVENT_UNUSED_VARIABLE && for_scope ? closing : BUSTER_CHECK_WARNING_NO_SOURCE,
+                    .data = set_only ? 1u : 0u,
                 },
             };
             // From the first for initializer, stage this pass's remaining unused events privately: nested scopes
@@ -540,10 +586,13 @@ static bool check_input_binding_answers(CheckInputReader* reader, const uint32_t
         uint8_t* used_tokens = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint8_t, count);
         uint8_t* parameters = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint8_t, count);
         uint8_t* reported = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint8_t, count);
-        if (used != NULL && used_tokens != NULL && parameters != NULL && reported != NULL)
+        // The locals a use reads, past the uses that only set them (check_input_discarded_set): -Wunused-but-set-variable's.
+        uint8_t* read_tokens = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint8_t, count);
+        if (used != NULL && used_tokens != NULL && parameters != NULL && reported != NULL && read_tokens != NULL)
         {
             memset(used, 0, events->count);
             memset(used_tokens, 0, count);
+            memset(read_tokens, 0, count);
             memset(parameters, 0, count);
             memset(reported, 0, count);
             uint32_t* declares = uses != NULL ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, events->count) : NULL;
@@ -556,6 +605,13 @@ static bool check_input_binding_answers(CheckInputReader* reader, const uint32_t
                     const uint32_t handle = check_typo_handle(reader, resolved, event);
                     if (handle != 0 && handle <= events->count && events->operation[handle - 1] == C_BINDING_DECLARE)
                     {
+                        const uint32_t target = events->declaration[handle - 1];
+                        if (target < count && read_tokens[target] == 0)
+                        {
+                            const TypeId declared = reader->declared_types != NULL ? reader->declared_types[target] : 0;
+                            const bool is_volatile = declared != 0 && (type_qualifiers(type_strip_aligned(reader->types, declared)) & BUSTER_TYPE_VOLATILE) != 0;
+                            read_tokens[target] = !check_input_discarded_set(parser, events->declaration[event], is_volatile);
+                        }
                         // A use binds the whole declaration chain: a prototype and its definition are one entity,
                         // and a use of either makes every declaration in the chain used. A declaration that an earlier
                         // use's walk marked ends the walk: that walk went on from it to the chain's start, as every
@@ -606,7 +662,7 @@ static bool check_input_binding_answers(CheckInputReader* reader, const uint32_t
             }
             if (check_input_parameter_marks(output, parser, parameters))
             {
-                check_input_unused_events(reader, used, used_tokens, parameters, reported, declares, declare_count);
+                check_input_unused_events(reader, used, used_tokens, read_tokens, parameters, reported, declares, declare_count);
             }
         }
         else if (used == NULL || (count != 0 && (used_tokens == NULL || parameters == NULL || reported == NULL)))

@@ -187,6 +187,7 @@ static const CheckWarningDescription check_warning_descriptions[] =
     [CHECK_WARNING_ID_GNU_DESIGNATOR] = { "-Wgnu-designator", "-Wgnu", "use of GNU 'missing =' extension in designator" },
     [CHECK_WARNING_ID_GNU_ARRAY_RANGE] = { "-Wgnu-designator", "-Wgnu", "use of GNU array range extension" },
     [CHECK_WARNING_ID_STRING_PLUS_INT] = { "-Wstring-plus-int", NULL, "adding an integer to a string does not append to the string" },
+    [CHECK_WARNING_ID_UNUSED_BUT_SET_VARIABLE] = { "-Wunused-but-set-variable", "-Wunused", "variable set but not used" },
 };
 
 _Static_assert(BUSTER_ARRAY_LENGTH(check_warning_descriptions) == CHECK_WARNING_ID_COUNT, "every sparse policy ID has a description");

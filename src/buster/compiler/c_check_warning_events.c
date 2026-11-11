@@ -196,6 +196,9 @@ enum
     CHECK_WARNING_ID_GNU_ARRAY_RANGE = 139,
     // An integer added to a string literal (#2190, clang's diagnoseStringPlusInt): -Wstring-plus-int, on by default.
     CHECK_WARNING_ID_STRING_PLUS_INT = 140,
+    // A local variable only set (#2409, clang's DiagnoseUnusedButSetDecl): -Wunused-but-set-variable, -Wunused's, -Wall's.
+    // Its event is an UNUSED_VARIABLE one whose payload.data is 1.
+    CHECK_WARNING_ID_UNUSED_BUT_SET_VARIABLE = 141,
     CHECK_WARNING_ID_COUNT,
 };
 
