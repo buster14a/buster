@@ -366,14 +366,15 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
     },
     {
         // A variable with an applied cleanup is used, as clang's ShouldDiagnoseUnusedDecl has it (#1881): one declarator's,
-        // a specifier's on several declarators, and one never read but assigned; another declarator of the declaration
-        // and a file-scope variable whose cleanup is ignored are still unused.
+        // a specifier's on several declarators, and one never read but assigned; another declarator of the declaration is
+        // still unused. (A file-scope variable whose cleanup is ignored is unused too, but its -Wignored-attributes would
+        // be an error before it under the sweep's -Werror, after which clang gives no file-scope unused warning.)
         .name = "a cleanup variable is never unused",
         .source = "void rel(int *p);\nvoid relv(void *p);\nint f(int a) { int c __attribute__((cleanup(rel))) = a; if (a) return 1; return 2; }\n"
                   "void g(void) { __attribute__((cleanup(rel))) int c = 0, d = 1; }\nvoid h(int a) { int c __attribute__((cleanup(relv))); c = a; }\n"
-                  "void k(void) { int c __attribute__((cleanup(rel))), e; }\nstatic int q __attribute__((cleanup(rel)));\n",
+                  "void k(void) { int c __attribute__((cleanup(rel))), e; }\n",
         .options = { "-Wall" },
-        .warnings = 3,
+        .warnings = 1,
     },
     {
         // A use through a block's declaration with linkage uses the outer entity it redeclares, through nested blocks too;
