@@ -181,6 +181,86 @@ static const CheckDriverDefaultWarningFixture check_driver_type_sugar_fixtures[]
         .errors = 11,
     },
     {
+        // Each declaration's own address space macro (#1447 item 2, check_driver_space_scope): two macros of one space and a
+        // direct spelling, in the address space errors' operands (an assignment's, an initialization's, a return's, a call's,
+        // a nested pointer's, and both operands of non-overlapping spaces' arithmetic); a typedef's by the unit's.
+        .name = "address space macros per declaration",
+        .source = "#define AS1 __attribute__((address_space(1)))\n"
+                  "#define ASA __attribute__((address_space(1)))\n"
+                  "#define AS2 __attribute__((address_space(2)))\n"
+                  "typedef AS1 int T1;\n"
+                  "void g(AS2 int *q);\n"
+                  "AS1 int *ret(ASA int *x) { return x; }\n"
+                  "void f(AS1 int *pa, ASA int *pb)\n"
+                  "{\n"
+                  "    AS1 int *a = 0;\n"
+                  "    ASA int *b = 0;\n"
+                  "    __attribute__((address_space(1))) int *c = 0;\n"
+                  "    AS2 int *d = 0;\n"
+                  "    T1 *t = 0;\n"
+                  "    long *p;\n"
+                  "    int *i = a;\n"
+                  "    AS2 int *e = b;\n"
+                  "    p = a;\n"
+                  "    p = b;\n"
+                  "    p = c;\n"
+                  "    p = t;\n"
+                  "    p = pa;\n"
+                  "    p = pb;\n"
+                  "    d = a;\n"
+                  "    a = d;\n"
+                  "    b = d;\n"
+                  "    g(a);\n"
+                  "    g(b);\n"
+                  "    p = &*b;\n"
+                  "    long *q = pb;\n"
+                  "    int x = d - b;\n"
+                  "    AS1 int **pp = 0;\n"
+                  "    int **ip = pp;\n"
+                  "}\n",
+        .errors = 17,
+        .notes = 2,
+    },
+    {
+        .name = "address space macros of one declaration",
+        .source = "#define AS1 __attribute__((address_space(1)))\n"
+                  "#define ASA __attribute__((address_space(1)))\n"
+                  "void f(void)\n"
+                  "{\n"
+                  "    AS1 int *a = 0;\n"
+                  "    ASA int *b = 0;\n"
+                  "    __attribute__((address_space(1))) int *c = 0;\n"
+                  "    long *p;\n"
+                  "    p = a;\n"
+                  "    p = b;\n"
+                  "    p = c;\n"
+                  "    p = &*a;\n"
+                  "}\n",
+        .errors = 4,
+    },
+    {
+        // A failed conversion's types, by each declaration's macro, and no "dereference with *" where the pointee's space
+        // differs from the target's (compareTypesSimple's compatiblyIncludes).
+        .name = "address space macros in conversions",
+        .source = "#define AS1 __attribute__((address_space(1)))\n"
+                  "#define ASA __attribute__((address_space(1)))\n"
+                  "void h(ASA long *z);\n"
+                  "void f(void)\n"
+                  "{\n"
+                  "    AS1 int *a = 0;\n"
+                  "    ASA long *l = a;\n"
+                  "    AS1 long *m = 0;\n"
+                  "    m = a;\n"
+                  "    l = a;\n"
+                  "    h(a);\n"
+                  "    int n = a;\n"
+                  "    ASA char c = 0;\n"
+                  "    char *pc = &c;\n"
+                  "}\n",
+        .errors = 6,
+        .notes = 1,
+    },
+    {
         // No macro names a space where clang's FindLocsWithCommonFileID finds none: a predefined macro's (`__seg_gs`, and
         // a user macro over it) and an attribute list that isn't its macro's whole expansion.
         .name = "address spaces no macro names",
