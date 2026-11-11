@@ -421,6 +421,9 @@ The permutes of two tables are its `permute2`, whose third operand is in the
 extra array (#1840, its "Permutes of two tables"), `BUSTER_TIER1_VECTOR_PERMUTE2`:
 `vpermt2*` into the first table's register, `vpermi2*` into the indices', or a
 move of the first table first.
+The bitwise functions of three vectors are its `ternlog` (#1840, its "Bitwise
+functions of three vectors"), `BUSTER_TIER1_VECTOR_TERNLOG`: `vpternlogd` with
+the operand the destination's register holds first, its table permuted.
 
 ### Inlining (#1282)
 

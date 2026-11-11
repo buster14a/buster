@@ -786,6 +786,27 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_vector_operation(
         value = ir_typed_emit(sink, IR_INTRINSIC, type, operands[0], operands[1], BUSTER_IR_INTRINSIC_SHIFT, 0);
         ir_typed_lanes(sink, value, (IrSimdLane)operation->immediate);
     }
+    else if (operation->ternlog)
+    {
+        // A bitwise function of three vectors (#1840): its truth table in its flags, the third operand in a slot of the
+        // extra array; merged into its first operand under its fourth, the writemask, at its lanes, where the typed
+        // stream's writemask hasn't every lane.
+        const uint32_t slot = (uint32_t)sink->sizes.extra_count;
+        if (sink->output != 0)
+        {
+            sink->output->extra[slot] = operands[2];
+        }
+        sink->sizes.extra_count += 1;
+        value = ir_typed_emit(sink, IR_INTRINSIC, type, operands[0], operands[1], ir_intrinsic_ternary_c(BUSTER_IR_INTRINSIC_TERNLOG, slot), 0);
+        ir_typed_lanes(sink, value, (IrSimdLane)operation->immediate);
+        if (operation->merge_mask && !unmasked)
+        {
+            const uint64_t zero[8] = {0};
+            const uint32_t inactive = operation->ternlog_zero ? ir_typed_vector_constant(sink, type, zero) : operands[0];
+            value = ir_typed_emit(sink, IR_VSELECT, type, operands[3], value, inactive, 0);
+            ir_typed_lanes(sink, value, operation->lane);
+        }
+    }
     else if (operation->permute2)
     {
         // A permute of two tables (#1840): the first table, the indices and the second table, the third operand in a

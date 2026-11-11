@@ -267,7 +267,11 @@ typedef enum IrOp
 // low bits name, as many bits as name twice the lanes, its lanes' bytes' log2 in flags (0 to 3): vpermt2b to vpermt2q
 // (_mm512_permutex2var_epi32(a, idx, b): a, the indices b and the third operand).
 #define BUSTER_IR_INTRINSIC_PERMUTE2 26u
-#define BUSTER_IR_INTRINSIC_COUNT 27u
+// ternlog's every bit is bit (a << 2 | b << 1 | c) of flags, its immediate, of a's, b's and the third operand's same bit,
+// all of the result's type: vpternlogd and vpternlogq, whose destination is a, b in vvvv and the third operand in rm
+// (_mm512_ternarylogic_epi32(a, b, c, imm)).
+#define BUSTER_IR_INTRINSIC_TERNLOG 27u
+#define BUSTER_IR_INTRINSIC_COUNT 28u
 #define BUSTER_IR_INTRINSIC_TERNARY BUSTER_IR_INTRINSIC_PERMUTE2
 #define BUSTER_IR_INTRINSIC_KIND 0xffu
 #define BUSTER_IR_INTRINSIC_EXTRA_SHIFT 8u
@@ -805,6 +809,7 @@ static const char* const ir_intrinsic_names[BUSTER_IR_INTRINSIC_COUNT] = {
     "shift",
     "lane_op",
     "permute2",
+    "ternlog",
 };
 
 // A fence's orders' names in the text form, C's memory_order's (BUSTER_IR_FENCE_ORDER), and its signal scope's word.
@@ -1958,7 +1963,9 @@ static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i)
                     }
                     else
                     {
-                        valid = ir_vector_type(type) && ta == type && f->type[b] == type && f->type[third] == type && part <= 3;
+                        // permute2's flags its lanes' bytes' log2; ternlog's any immediate.
+                        valid = ir_vector_type(type) && ta == type && f->type[b] == type && f->type[third] == type &&
+                                (ir_intrinsic_kind(c) == BUSTER_IR_INTRINSIC_TERNLOG || part <= 3);
                     }
                 }
                 else if (c == BUSTER_IR_INTRINSIC_EXTRACT || c == BUSTER_IR_INTRINSIC_WIDEN)

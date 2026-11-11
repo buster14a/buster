@@ -305,6 +305,10 @@ typedef enum Tier1SelectRule
 // and values[2] the second table: vpermt2b to vpermt2q into the first table's register, which a copy fills first where the
 // destination isn't it, the scratch register keeping an operand the copy would overwrite (tier1_select_permute2).
 #define BUSTER_TIER1_VECTOR_PERMUTE2 17
+// A bitwise function of three vectors (#1840): `immediate` its truth table, values[0] to values[2] its operands:
+// vpternlogd with the operand whose register the destination holds as its first, the table's bits permuted to match, or
+// the first moved into the destination first (tier1_select_ternlog).
+#define BUSTER_TIER1_VECTOR_TERNLOG 18
 
 // TIER1_RULE_X87's kinds, its pattern's `scale` (#141):
 // - CONSTANT, its constant's index in `immediate`, and UNDEF, which stores nothing;
@@ -1413,6 +1417,50 @@ static void tier1_select_permute2(Tier1SelectRecords* result, const Tier1SelectH
     }
 }
 
+// A bitwise function of three vectors (#1840): vpternlogd (ir_simd_ternlog_forms) computes table bit (reg << 2 | vvvv << 1
+// | rm) into its first operand's register. The operand whose register the destination already holds is the first, the
+// table's bits permuted for the new order; where it holds none of them, the first operand is moved into it first.
+static void tier1_select_ternlog(Tier1SelectRecords* result, const Tier1SelectHoles* holes, uint8_t destination)
+{
+    const uint8_t x = destination & 15;
+    const uint8_t registers[3] = { (uint8_t)(holes->left & 15), (uint8_t)(holes->right & 15), (uint8_t)(holes->third & 15) };
+    // The operands in reg, vvvv and rm, by their places in the IR (a, b, c).
+    uint32_t order[3] = { 0, 1, 2 };
+    if (x != registers[0] && x == registers[1])
+    {
+        order[0] = 1;
+        order[1] = 0;
+    }
+    else if (x != registers[0] && x == registers[2])
+    {
+        order[0] = 2;
+        order[2] = 0;
+    }
+    else if (x != registers[0])
+    {
+        tier1_select_append(result, tier1_select_class_move(x, registers[0], holes->width, false));
+    }
+    const uint32_t table = (uint32_t)holes->immediate;
+    uint32_t permuted = 0;
+    for (uint32_t index = 0; index < 8; index += 1)
+    {
+        uint32_t bits[3] = { 0, 0, 0 };
+        bits[order[0]] = index >> 2 & 1;
+        bits[order[1]] = index >> 1 & 1;
+        bits[order[2]] = index & 1;
+        permuted |= (table >> (bits[0] << 2 | bits[1] << 1 | bits[2]) & 1) << index;
+    }
+    const X86Instruction record = {
+        .form = ir_simd_ternlog_forms[0][holes->width == 16 ? 0 : holes->width == 32 ? 1 : 2],
+        .reg = x,
+        .vvvv = registers[order[1]],
+        .rm = registers[order[2]],
+        .mode = BUSTER_X86_REGISTER_DIRECT,
+        .immediate = (int32_t)permuted,
+    };
+    tier1_select_append(result, record);
+}
+
 // A conversion's EVEX form (#1840), by its kind past BUSTER_IR_INTRINSIC_EXTEND, the IR's flags, the result's bytes and
 // the source's: the decoder's tables' (ir_simd_typed_extensions at the result's width, ir_simd_typed_truncations at the
 // source's), or X86_FORM_NONE for a pair the flags don't name.
@@ -2049,6 +2097,10 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         else if (kind == BUSTER_TIER1_VECTOR_PERMUTE2)
         {
             tier1_select_permute2(&result, holes, destination);
+        }
+        else if (kind == BUSTER_TIER1_VECTOR_TERNLOG)
+        {
+            tier1_select_ternlog(&result, holes, destination);
         }
         else if (kind == BUSTER_TIER1_VECTOR_CONVERT)
         {
@@ -4523,6 +4575,19 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             {
                 tier1_select_add_candidate(forest, node, &candidates, base);
             }
+        }
+        else if (vector_width != 0 && op == IR_INTRINSIC && ir_intrinsic_kind(c) == BUSTER_IR_INTRINSIC_TERNLOG && ir_intrinsic_ternary(c))
+        {
+            // A bitwise function of three vectors (#1840): its third operand the extra array's (ir_intrinsic_third).
+            base.rule = TIER1_RULE_VECTOR;
+            base.width = (uint8_t)vector_width;
+            base.scale = BUSTER_TIER1_VECTOR_TERNLOG;
+            base.immediate = function->flags[node];
+            base.values[0] = a;
+            base.values[1] = b;
+            base.values[2] = ir_intrinsic_third(function, node);
+            base.intrinsic_cost = 1;
+            tier1_select_add_candidate(forest, node, &candidates, base);
         }
         else if (vector_width != 0 && op == IR_INTRINSIC && ir_intrinsic_kind(c) == BUSTER_IR_INTRINSIC_PERMUTE2 && ir_intrinsic_ternary(c))
         {

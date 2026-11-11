@@ -163,6 +163,13 @@ static const uint16_t ir_simd_permute2_forms[4][3] = {
     { X86_FORM_VPERMT2D_X_X_XM128, X86_FORM_VPERMT2D_Y_Y_YM256, X86_FORM_VPERMT2D_Z_Z_ZM512 },
     { X86_FORM_VPERMT2Q_X_X_XM128, X86_FORM_VPERMT2Q_Y_Y_YM256, X86_FORM_VPERMT2Q_Z_Z_ZM512 },
 };
+// The bitwise functions of three vectors (#1840, BUSTER_IR_INTRINSIC_TERNLOG), by their writemask's lanes (doublewords,
+// quadwords) and width: vpternlogd and vpternlogq, the destination the first operand, the second in vvvv and the third in
+// rm. Without a writemask they compute the same bits.
+static const uint16_t ir_simd_ternlog_forms[2][3] = {
+    { X86_FORM_VPTERNLOGD_X_X_XM128_IMM8, X86_FORM_VPTERNLOGD_Y_Y_YM256_IMM8, X86_FORM_VPTERNLOGD_Z_Z_ZM512_IMM8 },
+    { X86_FORM_VPTERNLOGQ_X_X_XM128_IMM8, X86_FORM_VPTERNLOGQ_Y_Y_YM256_IMM8, X86_FORM_VPTERNLOGQ_Z_Z_ZM512_IMM8 },
+};
 // vpermi2b to vpermi2q, the same permutes whose destination is the indices, the first table in vvvv and the second in rm
 // (Tier 1's where the destination's register holds the indices).
 static const uint16_t ir_simd_permute2_index_forms[4][3] = {
