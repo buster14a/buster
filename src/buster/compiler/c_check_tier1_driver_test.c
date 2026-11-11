@@ -4074,7 +4074,8 @@ static void check_test_driver_tier1_wide_vectors(CheckTest* test, const char* cl
 
 // The wide results' fixture (#1847): a 128-byte vector returned by value, which the convention splits across the
 // target's widest vector registers (zmm0 and zmm1 at x86-64-v4, ymm0 to ymm3 at x86-64-v3), the function's own return
-// staging every part in the red zone (all 16 of its slots either way) and its caller storing them into its object.
+// loading every part straight from the result's address (#1847, tier1_select_part_direct) and its caller storing them
+// into its object.
 // The other unit (clang -O2's) passes random vectors and hashes every result.
 static const char check_test_tier1_wide_results_header[] =
     "#include <stdint.h>\n"
@@ -4140,6 +4141,68 @@ static void check_test_driver_tier1_wide_results(CheckTest* test, const char* cl
         check_test_driver_tier1_units(test, clang, executable, directory, "tier1-wide-results", what, check_test_tier1_wide_results_header, check_test_tier1_wide_results_source,
                                       check_test_tier1_wide_results_other_source, option, host, 0);
     }
+}
+
+// The 256-byte results' fixture (#1847): a 256-byte vector returned by value at x86-64-v4, in zmm0 to zmm3 (make64), the
+// function's own return loading every part straight from the result's address (tier1_select_part_direct), as the red
+// zone's 16 slots can't stage four 64-byte parts, and its caller (use64) storing them into its object. Below AVX-512 LLVM
+// returns it through a hidden pointer clang doesn't count (DEMOTED), which Tier 1 refuses, so the fixture is x86-64-v4's
+// alone. The other unit (clang -O2's) passes random vectors and hashes every result.
+static const char check_test_tier1_results256_header[] =
+    "#include <stdint.h>\n"
+    "typedef int v64si __attribute__((vector_size(256)));\n"
+    "v64si make64(const v64si* p, int k);\n"
+    "void use64(v64si* out, const v64si* p, int k);\n";
+
+static const char check_test_tier1_results256_source[] =
+    "#include \"tier1-results256.h\"\n"
+    "typedef union X2048 { v64si value; uint32_t u32[64]; } X2048;\n"
+    "__attribute__((noinline)) v64si make64(const v64si* p, int k)\n"
+    "{\n"
+    "    X2048 a = { .value = *p };\n"
+    "    X2048 r = { 0 };\n"
+    "    for (unsigned i = 0; i < 64; i += 1)\n"
+    "    {\n"
+    "        r.u32[i] = a.u32[63 - i] * 5u + (uint32_t)k + i;\n"
+    "    }\n"
+    "    return r.value;\n"
+    "}\n"
+    "void use64(v64si* out, const v64si* p, int k)\n"
+    "{\n"
+    "    v64si r = make64(p, k);\n"
+    "    *out = r;\n"
+    "}\n";
+
+static const char check_test_tier1_results256_other_source[] =
+    "#include \"tier1-results256.h\"\n"
+    "#include <stdio.h>\n"
+    "#include <string.h>\n"
+    "static uint64_t hash = 1469598103934665603ull;\n"
+    "static void mix(const void* p, unsigned n) { const unsigned char* b = p; for (unsigned i = 0; i < n; i += 1) { hash ^= b[i]; hash *= 1099511628211ull; } }\n"
+    "int main(void)\n"
+    "{\n"
+    "    uint32_t s = 1847;\n"
+    "    for (int round = 0; round < 100; round += 1)\n"
+    "    {\n"
+    "        uint32_t words[64];\n"
+    "        for (int i = 0; i < 64; i += 1) { s = s * 1664525u + 1013904223u; words[i] = s; }\n"
+    "        v64si a, out;\n"
+    "        memcpy(&a, words, 256);\n"
+    "        v64si r = make64(&a, round); mix(&r, 256);\n"
+    "        use64(&out, &a, round + 3); mix(&out, 256);\n"
+    "    }\n"
+    "    printf(\"%016llx\\n\", (unsigned long long)hash);\n"
+    "    return 0;\n"
+    "}\n";
+
+// Its build at x86-64-v4, every function Tier 1's and its code certified, run where the host has AVX-512.
+static void check_test_driver_tier1_results256(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    X86Target v4 = { 0 };
+    const bool parsed = x86_target_parse("x86-64-v4", 9, &v4);
+    const bool host = parsed && (x86_target_native().features & v4.features) == v4.features;
+    check_test_driver_tier1_units(test, clang, executable, directory, "tier1-results256", "256-byte results'", check_test_tier1_results256_header,
+                                  check_test_tier1_results256_source, check_test_tier1_results256_other_source, "-march=x86-64-v4", host, 0);
 }
 
 #include "buster/compiler/c_check_tier1_rows_fixture.h"

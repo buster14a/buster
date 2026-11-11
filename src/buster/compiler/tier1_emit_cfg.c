@@ -1994,28 +1994,29 @@ static Tier1EmitError tier1_emit_cfg_aggregate_result(const IrFunction* function
     const bool found = hidden && tier1_emit_cfg_object(function, emitted, function->slot_count + function->parameter_count, &hidden_offset);
     const bool ignored = result.kind == BUSTER_ABI_RESULT_IGNORE;
     Tier1EmitError error = ignored || (source < 16 && source != BUSTER_TIER1_SELECT_SCRATCH && (part_count != 0 || x87_parts != 0 || found)) ? TIER1_EMIT_OK : TIER1_EMIT_ALLOCATION;
-    // Every part's slots in the red zone (#1847): a split vector's four 32-byte parts, or two 64-byte ones, take all 16.
+    // Every staged part's slots in the red zone (#1847): a split vector's parts take none, loaded straight from `source`.
     error = error == TIER1_EMIT_OK && !tier1_select_result_staged(parts, part_count) ? TIER1_EMIT_UNSUPPORTED : error;
     for (uint32_t k = x87_parts; error == TIER1_EMIT_OK && k-- > 0;)
     {
         const X86Instruction load = { .form = X86_FORM_FLD_M80, .rm = source, .mode = BUSTER_X86_MEMORY_BASE, .displacement = (int32_t)(16 * k) };
         error = tier1_emit_append(buffer, load) ? error : TIER1_EMIT_MEMORY;
     }
-    // Each part staged from its slot on, after the parts before it (tier1_select_result_slot), a whole vector register's
-    // (#141) in its bytes' slots (tier1_emit_staging_part): a split vector's four xmm parts (#1624) in eight slots, its
-    // four ymm or two zmm parts in all 16.
+    // Each staged part from its slot on, after the staged parts before it (tier1_select_result_slot), a vector register's
+    // (#141) in its bytes' slots (tier1_emit_staging_part). A split vector's parts (#1624: two or four of 16, 32 or 64
+    // bytes, #1847) aren't staged: each is loaded straight from `source`, a general register no load overwrites.
     for (uint32_t k = 0; error == TIER1_EMIT_OK && k < part_count; k += 1)
     {
         const int32_t staged = tier1_emit_staging_part(tier1_select_result_slot(parts, k), parts[k].bytes);
-        error = tier1_emit_copy_bytes(buffer, BUSTER_TIER1_SELECT_SCRATCH, X86_REGISTER_RSP, staged, source, parts[k].offset, parts[k].bytes) ? error : TIER1_EMIT_MEMORY;
+        error = tier1_select_part_direct(parts[k]) || tier1_emit_copy_bytes(buffer, BUSTER_TIER1_SELECT_SCRATCH, X86_REGISTER_RSP, staged, source, parts[k].offset, parts[k].bytes) ? error : TIER1_EMIT_MEMORY;
     }
     for (uint32_t k = 0; error == TIER1_EMIT_OK && k < part_count; k += 1)
     {
         const bool vector_part = (parts[k].reg & 0xe0) == BUSTER_ABI_REGISTER_VECTOR;
+        const bool direct = tier1_select_part_direct(parts[k]);
         const X86Instruction load = {
-            .displacement = tier1_emit_staging_part(tier1_select_result_slot(parts, k), parts[k].bytes),
+            .displacement = direct ? parts[k].offset : tier1_emit_staging_part(tier1_select_result_slot(parts, k), parts[k].bytes),
             .reg = (uint8_t)(parts[k].reg & 0x1f),
-            .rm = X86_REGISTER_RSP,
+            .rm = direct ? source : X86_REGISTER_RSP,
             .mode = BUSTER_X86_MEMORY_BASE,
             .form = vector_part ? tier1_select_part_form(parts[k].bytes, true) : X86_FORM_MOV_R64_RM64,
         };
