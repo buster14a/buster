@@ -3733,11 +3733,16 @@ static TypeId check_common_enum_coerced(const CheckInput* input, const CheckStre
         const CheckInputEnumDefinition* nearest = low != 0 ? input->enum_definitions + low - 1 : NULL;
         const bool held = nearest != NULL && declaration < nearest->close;
         result = held && token > nearest->close ? nearest->type : result;
+        // An inner definition can have closed before the enumerator of an outer definition.
+        // Reduce initialized indices, not TypeId payloads from inactive vector lanes (Clang 23 MSan).
+        uint32_t selected = 0;
         for (uint32_t i = 0; !held && i < input->enum_definition_count; i += 1)
         {
             const CheckInputEnumDefinition* definition = input->enum_definitions + i;
-            result = definition->open < declaration && declaration < definition->close && token > definition->close ? definition->type : result;
+            const uint32_t candidate = definition->open < declaration && declaration < definition->close && token > definition->close ? i + 1 : 0;
+            selected = candidate > selected ? candidate : selected;
         }
+        result = selected != 0 ? input->enum_definitions[selected - 1].type : result;
     }
     return result;
 }
