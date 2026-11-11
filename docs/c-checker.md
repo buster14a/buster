@@ -5687,6 +5687,21 @@ type, which the lowering needs, so the action marks it
 `BUSTER_CHECK_CONVERT_ATOMIC` wherever it strips `_Atomic`: assignments,
 initializations, brace elements, returns and prototype arguments.
 
+A `_BitInt` constant past 128 bits (#1447, "Constants past 128 bits") warns as
+a narrow one does, by the same rules on its whole value
+(`check_wide_conversion_changes`, the twin of
+`check_common_conversion_changes`, and `check_wide_same_width` of
+`check_common_same_width`), into any narrower type, a wide one too, with both
+values printed in decimal (`check_wide_text`). A declarator past a specifier's
+parentheses (`_BitInt(100) n = e;`, `typeof(int) y = e;`, whose `=` the
+parser hangs off the specifier's `)`) is evaluated: the unevaluated-operand
+scan (`check_warning_graph_void_step`) counts only the tokens between the
+parentheses as typeof's operand, where it took every token after them, and
+dropped those declarators' conversion warnings. Still separate: clang's
+`-Wtautological-constant-out-of-range-compare`, whose values these would
+print, isn't given for any type, and neither is the static assertion's
+"expression evaluates to" note.
+
 A brace initializer's integer constants warn of their constant conversions too
 (#1447), in the reverse initializer order clang's `AnalyzeImplicitConversions`
 work list gives them. A plan whose part may change its constant
