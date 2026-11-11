@@ -454,7 +454,7 @@ static bool check_common_ignored_macro(const Parser* parser, Preprocessor* pp, u
 
 // The warning of a discarded call's result (CheckCommonIgnoredResult), at once, as clang's DiagnoseUnusedExprResult
 // gives it: the callee's warn_unused_result, then its return type's, then (outside a macro's body) its pure, then its
-// const.
+// const. Its range is the call's, so a callee a macro's argument writes gets that macro's note.
 static __attribute__((noinline)) void check_common_ignored_report(CheckCommonEmission* emission, const CheckCommonIgnoredResult* found)
 {
     const Parser* parser = emission->parser;
@@ -490,7 +490,8 @@ static __attribute__((noinline)) void check_common_ignored_report(CheckCommonEmi
     }
     if (text != NULL)
     {
-        check_common_report_discarded(parser, pp, emission->input, found->token, id, text, NULL, 0, emission->scratch);
+        // (Clang highlights the call, which spans its callee and its parentheses.)
+        check_common_report_spanning(parser, pp, emission->input, found->token, id, text, emission->scratch);
     }
 }
 

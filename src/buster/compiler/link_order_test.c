@@ -10,7 +10,7 @@ struct LinkOrderName
     uint64_t hash;
     uint32_t length;
 };
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 static bool link_test_permute_names(Link* link, uint64_t seed, Arena* arena)
 {
     const uint64_t before = arena->length;
@@ -45,3 +45,4 @@ static bool link_test_permute_names(Link* link, uint64_t seed, Arena* arena)
     arena_pop_to(arena, before);
     return result;
 }
+#endif

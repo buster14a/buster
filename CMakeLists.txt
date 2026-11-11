@@ -54,6 +54,7 @@ set(BUSTER_FUZZ_ENTRY "" CACHE FILEPATH "The fuzzing entry's C file (src/buster/
 set(BUSTER_BAKE 1 CACHE STRING "0 leaves the backend's tables to be built when the executable runs")
 set(BUSTER_PGO 0 CACHE STRING "1 builds Release with a profile of the compiler's own compiles (Release alone)")
 set(BUSTER_PGO_TRAIN "" CACHE FILEPATH "A bash script that trains BUSTER_PGO's profile in place of the default compiles")
+set(BUSTER_PARALLEL_CODEGEN auto CACHE STRING "auto, 1 or 0: the two longest Release units' native code in parallel parts")
 set(BUSTER_LEXER_VARIANTS "" CACHE STRING "NAME=SOURCE;... lexers compiled in for benchmark-lexer (build.sh lexer-variant)")
 set(BUSTER_SHIFT_SOURCE "" CACHE STRING "The source whose code the shifted links move (build.sh shifts)")
 set(BUSTER_SHIFTS "" CACHE STRING "The shifted links' padding sizes in bytes (build.sh shifts)")
@@ -68,6 +69,12 @@ if(buster_pgo AND "Debug" IN_LIST CMAKE_CONFIGURATION_TYPES)
 endif()
 if(buster_pgo AND NOT BUSTER_LEXER_VARIANTS STREQUAL "")
     message(FATAL_ERROR "buster: lexer-variant: BUSTER_PGO builds build/compiler and the shifts' executables alone")
+endif()
+if(buster_parallel_codegen AND NOT BUSTER_LEXER_VARIANTS STREQUAL "")
+    if(buster_parallel_codegen_required)
+        message(FATAL_ERROR "buster: BUSTER_PARALLEL_CODEGEN does not yet support lexer variants")
+    endif()
+    set(buster_parallel_codegen 0)
 endif()
 
 find_program(BUSTER_NM NAMES nm llvm-nm NO_CACHE REQUIRED)
@@ -156,6 +163,20 @@ function(buster_unit_options target definitions)
         "-fmacro-prefix-map=${CMAKE_SOURCE_DIR}/=")
 endfunction()
 
+include(cmake/BusterCodegen.cmake)
+if(buster_parallel_codegen)
+    buster_codegen_tools(codegen_available codegen_missing)
+    if(NOT codegen_available AND buster_parallel_codegen_required)
+        message(FATAL_ERROR "buster: BUSTER_PARALLEL_CODEGEN=1 needs ${codegen_missing}")
+    elseif(NOT codegen_available)
+        message(STATUS "buster: parallel native generation is off: no ${codegen_missing}")
+        set(buster_parallel_codegen 0)
+    else()
+        buster_codegen_splitter()
+    endif()
+endif()
+message(STATUS "buster: parallel native generation: ${buster_parallel_codegen}")
+
 # Each source is an object library of its own, defined in the compile order, which is the order a clean build starts
 # them in; the executable links their objects in the sources' order.
 buster_compile_order(order)
@@ -164,6 +185,13 @@ foreach(index IN LISTS order)
     get_filename_component(name "${source}" NAME_WE)
     add_library(buster_${name} OBJECT "${source}")
     buster_unit_options(buster_${name} "${defines_group}")
+    buster_codegen_split_unit("${name}" split)
+    if(split)
+        # This is the ordinary O3 pipeline through optimized IR, not LTO's pre-link pipeline. The source target
+        # remains the dependency owner and the sole compile database entry for this C translation unit.
+        target_compile_options(buster_${name} PRIVATE "$<$<CONFIG:Release>:-emit-llvm>")
+        buster_codegen_unit("${name}")
+    endif()
 endforeach()
 set(unit_names "")
 foreach(source IN LISTS BUSTER_SOURCES)
@@ -195,7 +223,7 @@ foreach(variant IN LISTS lexer_variants)
     endif()
 endforeach()
 
-# The link of `target`, an executable of objects: fixed-address (-no-pie) but for the sanitizers' PIEs, by the
+# The link of `target`, an executable of objects: fixed-address (-no-pie) but for TSan's and MSan's PIEs, by the
 # selected linker. As a PIE, its 10.6 MB of pointer tables (.data.rel.ro) took 366,684 relative relocations at every
 # start, whose 2,800 page faults made a run that does nothing take 8 to 13 ms, where linked at its address it takes
 # 1.5 ms with 113 (#86: link-foreign and the tests run it as a process of its own, and a small link's work is 0.8 ms).
@@ -336,7 +364,8 @@ endif()
 
 set(objects "")
 foreach(name IN LISTS unit_names)
-    list(APPEND objects "$<TARGET_OBJECTS:buster_${name}>")
+    buster_native_object(object "${name}")
+    list(APPEND objects "${object}")
 endforeach()
 set(compiler "${CMAKE_BINARY_DIR}/$<CONFIG>/compiler")
 add_executable(compiler_link ${objects} ${lexer_objects})
@@ -377,7 +406,7 @@ if(NOT BUSTER_SHIFTS STREQUAL "")
         message(FATAL_ERROR "build.sh shifts: ${BUSTER_SHIFT_SOURCE} isn't a source's file name")
     endif()
     find_program(BUSTER_READELF NAMES readelf llvm-readelf NO_CACHE REQUIRED)
-    set(shift_object "$<TARGET_OBJECTS:buster_${shift_name}>")
+    buster_native_object(shift_object "${shift_name}")
     foreach(bytes IN LISTS shifts)
         if(NOT bytes MATCHES "^(0|[1-9][0-9]?[0-9]?[0-9]?[0-9]?[0-9]?[0-9]?)$")
             message(FATAL_ERROR "build.sh shifts: ${bytes} isn't a shift of 0 to 9,999,999 bytes")
@@ -459,7 +488,8 @@ set(settings_environment
     "BUSTER_FUZZ_ENTRY=${BUSTER_FUZZ_ENTRY}"
     "BUSTER_BAKE=${BUSTER_BAKE}"
     "BUSTER_PGO=${BUSTER_PGO}"
-    "BUSTER_PGO_TRAIN=${BUSTER_PGO_TRAIN}")
+    "BUSTER_PGO_TRAIN=${BUSTER_PGO_TRAIN}"
+    "BUSTER_PARALLEL_CODEGEN=${BUSTER_PARALLEL_CODEGEN}")
 add_test(NAME baked-tables COMMAND "${compiler}" test-baked-tables)
 add_test(NAME parallel-runner COMMAND "${compiler}" test-parallel)
 set_tests_properties(baked-tables parallel-runner PROPERTIES LABELS build)

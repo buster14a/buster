@@ -57,6 +57,10 @@
 #define BUSTER_PP_TEST_CONTEXT 6
 #define BUSTER_PP_TEST_MAX_OUTPUT (1ull << 32)
 
+// Keep the frontend's fixtures out of the other unity units. The Clang release checks also serve the checker,
+// and the process helpers below serve its corpus; standalone preprocessing still reads the complete file.
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_FRONTEND || BUSTER_UNIT == BUSTER_UNIT_CHECKER
+
 // The Clang release the library-builtin table is pinned to (c_builtin_library.c's BUSTER_CLANG_REFERENCE_VERSION), read
 // from `clang --version` by test-preprocessor --clang and test-checker-driver: a clang that isn't an official build of
 // that release can answer some plain names' __has_builtin and implicit-declaration diagnostics differently, which those
@@ -290,6 +294,9 @@ static bool pp_test_clang_reference(void)
     printf("clang reference: version comparison and mismatch reporting %s\n", result ? "as expected" : "WRONG");
     return result;
 }
+
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_FRONTEND
 
 // The clang executable the oracle runs: "clang", or a fixture's wrapper that reports another release
 // (pp_test_builtin_release). The release `clang --version` named, which the library-builtin checks read for the
@@ -916,6 +923,8 @@ static bool pp_test_printed(Preprocessor* pp, const PPSpellings* ours, const cha
     return result;
 }
 
+#endif
+
 typedef enum PPClangStatus
 {
     PP_CLANG_ERROR,
@@ -1027,6 +1036,8 @@ static PPClangOutput pp_test_clang_process(const char* executable, char** argume
     free(environment);
     return result;
 }
+
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_FRONTEND
 
 // Legacy fixture callers may compare the partial output of an intentionally rejected case. File-oracle callers
 // inspect PPClangOutput.status instead: a rejection is an explicit skip, a process/I/O failure is a failed run.
@@ -5109,6 +5120,10 @@ struct PPNamedUcnCase
     const char* source;
     const char* standard;
     const char* expected;
+    // Options for both sides (PPTestCase.options), or null; and whether the warnings count too, each without its
+    // bracketed flag, which the preprocessor's warnings don't print (#1447).
+    const char* options;
+    bool warnings;
 };
 
 // Appends the places (as line << 32 | column, `shift` columns to the left) of the diagnostics of `text` whose line holds
@@ -5140,9 +5155,9 @@ static bool pp_test_named_places(const char* text, const char* message, uint32_t
     return result;
 }
 
-// The error and note lines of the diagnostics `text`, each without the path before its "line:column:", into `lines`
-// (room for `capacity`). Returns false if they don't fit.
-static bool pp_test_named_lines(const char* text, char* lines, size_t capacity)
+// The error and note lines of the diagnostics `text`, with `warnings` the warning lines too (each without its flag), each
+// without the path before its "line:column:", into `lines` (room for `capacity`). Returns false if they don't fit.
+static bool pp_test_named_lines(const char* text, char* lines, size_t capacity, bool warnings)
 {
     size_t length = 0;
     bool fits = capacity != 0;
@@ -5151,7 +5166,11 @@ static bool pp_test_named_lines(const char* text, char* lines, size_t capacity)
     {
         const char* end = strchr(at, '\n');
         const size_t size = end != 0 ? (size_t)(end - at) : strlen(at);
-        const bool kept = memmem(at, size, ": error: ", 9) != 0 || memmem(at, size, ": note: ", 8) != 0;
+        const bool warning = warnings && memmem(at, size, ": warning: ", 11) != 0;
+        const bool kept = memmem(at, size, ": error: ", 9) != 0 || memmem(at, size, ": note: ", 8) != 0 || warning;
+        // (A warning's or a promoted one's flag, " [-W...]" at its end, left out.)
+        const char* flag = warnings && size > 2 && at[size - 1] == ']' ? memmem(at, size, " [-W", 4) : 0;
+        const size_t shown = flag != 0 ? (size_t)(flag - at) : size;
         // The path ends at the colon before the line number, the first followed by a digit.
         size_t skip = 0;
         while (kept && skip + 1 < size && !(at[skip] == ':' && at[skip + 1] >= '0' && at[skip + 1] <= '9'))
@@ -5159,11 +5178,11 @@ static bool pp_test_named_lines(const char* text, char* lines, size_t capacity)
             skip += 1;
         }
         skip += kept && skip + 1 < size ? 1 : 0;
-        fits = !kept || size - skip + 1 < capacity - length;
+        fits = !kept || shown - skip + 1 < capacity - length;
         if (kept && fits)
         {
-            memcpy(lines + length, at + skip, size - skip);
-            length += size - skip;
+            memcpy(lines + length, at + skip, shown - skip);
+            length += shown - skip;
             lines[length++] = '\n';
             lines[length] = 0;
         }
@@ -5235,6 +5254,53 @@ static bool pp_test_named_ucns(const char* directory, bool with_clang)
                         "4:1: error: character ' ' cannot be specified by a universal character name\n"
                         "4:10: error: universal character name refers to a control character\n",
         },
+        {
+            // -Wunicode's warnings (#1447): a `\N` clang reads as no UCN, where a token starts or an identifier goes on, its
+            // backslash read as itself; a macro's definition's once, and none in a skipped group.
+            .name = "a \\N clang reads as no universal character name",
+            .source = "f\\N\n\\Nj\ng\\N{}\nh\\N{FOO\n#define X \\N\nX X\n#if 0\nk\\N\n#endif\n",
+            .standard = "gnu17",
+            .expected = "1:2: warning: incomplete universal character name; treating as '\\' followed by identifier\n"
+                        "2:1: warning: incomplete universal character name; treating as '\\' followed by identifier\n"
+                        "3:2: warning: empty delimited universal character name; treating as '\\' 'N' '{' '}'\n"
+                        "4:2: warning: incomplete delimited universal character name; treating as '\\' 'N' '{' identifier\n"
+                        "5:11: warning: incomplete universal character name; treating as '\\' followed by identifier\n",
+            .warnings = true,
+        },
+        {
+            // -pedantic's warning that a named UCN is clang's extension (#1447): one that starts a token, its name exactly
+            // Unicode's, at its backslash and before its character's error; none within an identifier, of a name that isn't
+            // Unicode's, in a skipped group, or in a macro's expansion (its definition's once).
+            .name = "named UCNs under -pedantic",
+            .source = "\\N{GREEK SMALL LETTER ALPHA}x a\\N{GREEK SMALL LETTER ALPHA} \\N{LATIN CAPITAL LETTER A} \\N{FOO}\n"
+                      "#define Y \\N{GREEK SMALL LETTER ALPHA}\nY Y\n#if 0\n\\N{GREEK SMALL LETTER ALPHA}\n#endif\n\\N{greek small letter alpha}\n",
+            .standard = "gnu17",
+            .expected = "1:1: warning: named escape sequences are a Clang extension\n"
+                        "1:61: warning: named escape sequences are a Clang extension\n"
+                        "1:61: error: character 'A' cannot be specified by a universal character name\n"
+                        "1:91: error: 'FOO' is not a valid Unicode character name\n"
+                        "2:11: warning: named escape sequences are a Clang extension\n"
+                        "7:4: error: 'greek small letter alpha' is not a valid Unicode character name\n"
+                        "7:4: note: character names in Unicode escape sequences are sensitive to case and whitespaces\n",
+            .options = "-pedantic",
+            .warnings = true,
+        },
+        {
+            .name = "named UCNs under -pedantic-errors",
+            .source = "\\N{GREEK SMALL LETTER ALPHA}x\n",
+            .standard = "gnu17",
+            .expected = "1:1: error: named escape sequences are a Clang extension\n",
+            .options = "-pedantic-errors",
+            .warnings = true,
+        },
+        {
+            .name = "named UCNs under -pedantic without the extension's warning",
+            .source = "\\N{GREEK SMALL LETTER ALPHA}x\n",
+            .standard = "gnu17",
+            .expected = "",
+            .options = "-pedantic -Wno-delimited-escape-sequence-extension",
+            .warnings = true,
+        },
     };
     uint32_t failures = 0;
     enum
@@ -5244,7 +5310,7 @@ static bool pp_test_named_ucns(const char* directory, bool with_clang)
     char lines[LINES];
     for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(cases); c += 1)
     {
-        const PPTestCase test = { .name = cases[c].name, .source = cases[c].source, .standard = cases[c].standard, .expected = "" };
+        const PPTestCase test = { .name = cases[c].name, .source = cases[c].source, .standard = cases[c].standard, .expected = "", .options = cases[c].options };
         char path[4096];
         bool result = pp_test_write_case(&test, directory, path, sizeof(path));
         char text[16384];
@@ -5272,8 +5338,8 @@ static bool pp_test_named_ucns(const char* directory, bool with_clang)
                 pp_release(&pp);
                 intern_release(&table);
             }
-            result = stream != 0 && fclose(stream) == 0 && ready && ran == (cases[c].expected[0] == 0);
-            result = result && pp_test_named_lines(diagnostics, lines, sizeof(lines)) && strcmp(lines, cases[c].expected) == 0;
+            result = stream != 0 && fclose(stream) == 0 && ready && ran == (strstr(cases[c].expected, ": error: ") == 0);
+            result = result && pp_test_named_lines(diagnostics, lines, sizeof(lines), cases[c].warnings) && strcmp(lines, cases[c].expected) == 0;
             if (!result)
             {
                 printf("named UCNs: %s (%s kernels): not the diagnostics written for it:\n%s", cases[c].name, k == 0 ? "vectorized" : "scalar",
@@ -5285,7 +5351,7 @@ static bool pp_test_named_ucns(const char* directory, bool with_clang)
         if (result && with_clang)
         {
             PPClangOutput clang = pp_test_clang_process("clang", arguments, argument_count, path, false);
-            result = clang.status != PP_CLANG_ERROR && pp_test_named_lines(clang.diagnostics, lines, sizeof(lines)) && strcmp(lines, cases[c].expected) == 0;
+            result = clang.status != PP_CLANG_ERROR && pp_test_named_lines(clang.diagnostics, lines, sizeof(lines), cases[c].warnings) && strcmp(lines, cases[c].expected) == 0;
             if (!result)
             {
                 printf("named UCNs: %s: clang's diagnostics aren't the ones written for it:\n%s", cases[c].name, clang.diagnostics != 0 ? clang.diagnostics : "");
@@ -7956,6 +8022,11 @@ static bool pp_test_asm_flag_predefine(const char* directory)
 }
 
 #include "c_preprocessor_feature_test.c"
+#else
+// The feature fixtures first include this shared metadata; retain that definition order in the other units.
+#include "c_builtin_intrinsic_catalog.c"
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_FRONTEND
 
 static bool pp_test_implemented_features(const char* directory)
 {
@@ -8691,7 +8762,11 @@ static bool predefines_test_print_tables(const char* directory);
 static bool predefines_test_target(void);
 static bool predefines_test_refused(void);
 
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_FRONTEND || BUSTER_UNIT == BUSTER_UNIT_CHECKER
 #include "c_preprocessor_history_test.c"
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_FRONTEND
 #include "c_preprocessor_print_test.c"
 #include "c_preprocessor_system_warning_test.c"
 #include "c_preprocessor_directives_test.c"
@@ -9312,3 +9387,5 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
     free(files);
     return passed_all ? 0 : 1;
 }
+
+#endif

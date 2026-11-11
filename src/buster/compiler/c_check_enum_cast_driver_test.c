@@ -170,6 +170,50 @@ static const char check_driver_enum_cast_nested_source[] =
     "enum Q { QA = sizeof(enum R { RX }) + sizeof(enum S { SX }), QB };\n"
     "void g(enum P p) { p = QB; p = RX; p = SX; p = QA; (void)p; }\n";
 
+// The order of conversions in a conditional's arms (#1895, clang's CheckConditionalOperand): each arm's own conversions
+// before the arm's, the condition's first and the true arm's before the false one's, through nested conditionals, comma
+// arms, a selection, a known condition's pruned arm, a _Bool target, unreachable code and a return.
+static const char check_driver_enum_cast_arm_order_source[] =
+    "enum E { A }; enum F { B }; enum G { C };\n"
+    "void f(enum E e, enum F g, enum G h, int c, signed char sc, signed char t, _Bool b) {\n"
+    "    e = c ? (g = h) : g;\n"
+    "    e = c ? g : (g = h);\n"
+    "    e = c ? (c ? (g = h) : g) : (g = h);\n"
+    "    enum E e2 = c ? (g = h) : (enum F)(h = B);\n"
+    "    sc = c ? (t = 300) : 400;\n"
+    "    sc = c ? (c ? (t = 301) : 302) : (t = 303, 304);\n"
+    "    sc = 1 ? 305 : (t = 306);\n"
+    "    sc = 0 ? (t = 307) : 308;\n"
+    "    e = c ? (g = h, (sc = 309, g)) : _Generic(c, int: (g = h));\n"
+    "    b = c ? (t = 310) : (t = c ? 2 : 3);\n"
+    "    if (0) { e = c ? (g = h) : g; sc = c ? (t = 311) : 312; }\n"
+    "    (void)e2;\n"
+    "}\n"
+    "enum E r(int c, enum F g, enum G h, signed char t) { return c ? (g = h) : (t = 313, g); }\n";
+
+// The same order for a conditional passed as an argument (review on #1967): a prototype's enumeration and constant
+// conversions, two arguments, nested arms, a known condition's pruned arm, a _Bool parameter and unreachable code; and a
+// _Generic's conditional arm, whose arms carry the conversion as a conditional's do.
+static const char check_driver_enum_cast_argument_order_source[] =
+    "enum E { A }; enum F { B }; enum G { C };\n"
+    "void take(enum E);\n"
+    "void take_char(signed char);\n"
+    "void take2(enum E, signed char);\n"
+    "void takeb(_Bool);\n"
+    "void f(int c, enum F g, enum G h, enum E e, signed char t) {\n"
+    "    take(c ? (g = h) : g);\n"
+    "    take_char(c ? (t = 300) : 400);\n"
+    "    take2(c ? g : (g = h), c ? (t = 301) : 302);\n"
+    "    take(c ? (c ? (g = h) : g) : (g = h, g));\n"
+    "    take_char(1 ? 303 : (t = 304));\n"
+    "    takeb(c ? (t = 307) : (t = 308));\n"
+    "    take2(c ? g : (c ? (g = h) : g), c ? (t = 309) : 310);\n"
+    "    e = _Generic(c, int: c ? (g = h) : g);\n"
+    "    take(_Generic(c, int: c ? (g = h) : g));\n"
+    "    take(_Generic(c, int: c ? g : g));\n"
+    "    if (0) take(c ? (g = h) : g);\n"
+    "}\n";
+
 static const CheckDriverDefaultWarningFixture check_driver_enum_cast_fixtures[] =
 {
     {
@@ -242,6 +286,16 @@ static const CheckDriverDefaultWarningFixture check_driver_enum_cast_fixtures[] 
         .name = "enumerators of definitions nested in an enumerator's value",
         .source = check_driver_enum_cast_nested_source,
         .warnings = 9,
+    },
+    {
+        .name = "conversions in a conditional's arms, in clang's order",
+        .source = check_driver_enum_cast_arm_order_source,
+        .warnings = 36,
+    },
+    {
+        .name = "conversions in a conditional argument's arms, in clang's order",
+        .source = check_driver_enum_cast_argument_order_source,
+        .warnings = 35,
     },
 };
 
