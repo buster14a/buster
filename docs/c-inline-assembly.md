@@ -330,9 +330,23 @@ with no parameters, locals or statements, which the emission doesn't compile.
 It takes the planned code instead.
 
 The function's unwind entry has no CFA instructions, as clang's has (its CIE's
-rule, the call's), whatever the templates push. `unwind_tier0_frame` and
-`--verify`'s analyzer don't see the function. Its one source row is at its
-first statement.
+rule, the call's), whatever the templates push, unless the templates give CFI
+(#1848). Clang splices a naked function's CFI directives into the FDE of its
+implicit `.cfi_startproc`, with no prologue rows. So a source with a `.cfi_`
+directive is assembled between `.cfi_startproc` and `.cfi_endproc`, and
+`check_asm_naked_frame_rows` decodes the frame description the assembler wrote
+into the emission's frame rows (`CheckProgramNaked.frame_rows`), which become
+the function's unwind entry, a row program
+(`BUSTER_UNWIND_ROWS`); the unit's own `.eh_frame` is left out
+(`check_program_emit_asm_unit`'s `omit_frames`). The rows are clang's: a
+backtrace through the function walks to its caller, which
+`test-checker-driver --asm-definitions-only` checks on both paths. The bytes
+encode the same rules with the row writer's advances (`DW_CFA_advance_loc4`
+where clang's is `DW_CFA_advance_loc`). Refused by name: CFI beyond a frame's
+rows (expressions, escapes, signed offsets) and a frame description that isn't
+a function's (another CIE, several FDEs, a template's own `.cfi_startproc`).
+`unwind_tier0_frame` and `--verify`'s analyzer don't see the function. Its one
+source row is at its first statement.
 
 `main.c`'s two naked functions, `interpreter_native_bridge` and
 `x86_semantics_test_enter`, compile into clang's bytes, at clang's offsets in an
@@ -713,9 +727,13 @@ A template of alignment, section and symbol directives alone has no code
 and the statement calls nothing, so zstd's `__asm__(".p2align 5")` before a hot loop
 adds no call. The alignment aligns a helper's own code or atom, not the
 caller's. A naked function's templates are one source too, without a prologue
-or epilogue; CFI directives stay refused, since a helper's frame is its own
-unwind entry's and a naked function's unit would carry an `EH_FRAME` atom the
-emission doesn't publish.
+or epilogue, whose CFI directives are the function's frame rows (#1848, in
+"Naked-function lowering"). A function's template's CFI is refused by name
+("inline assembly CFI directives in a function's template"): clang adds the
+directives to the enclosing function's own frame description at the
+template's place, which a helper of its own, with its own unwind entry,
+can't do. It would need the template placed in its caller as an asm body
+(#1839) and its rows merged into the caller's `EmissionFrameRow`s.
 
 The templates of a unit are assembled apart, so a directive's symbols are the
 template's: another template's reference to a `.set`/`.equ` absolute symbol is

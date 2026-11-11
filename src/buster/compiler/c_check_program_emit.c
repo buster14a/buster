@@ -2434,9 +2434,11 @@ static uint32_t check_program_emit_asm_name(const CheckProgramAsms* asms, String
 // labels and the function's or helper's `symbol` at the unit's entry atom. Its entry atom, bytes and length are
 // `*entry_atom`, `*entry_bytes` and `*entry_length`; `atoms` and `sections` (`atoms` of room, if not null) get each added
 // atom and its section descriptor. False for an arena without room or an inconsistent unit.
+// With `omit_frames`, the unit's .eh_frame atom, its symbols and its fixups are left out: a naked function's frame rows
+// are the emission's unwind entry instead (#1848, CheckProgramNaked.frame_rows).
 static bool check_program_emit_asm_unit(CheckProgramCode* result, const CheckProgramAsms* asms, const AsmResult* unit, const SymbolId* asm_symbols,
                                         SymbolId symbol, AtomId* atoms, ObjectAtomSection* sections, uint32_t* section_count, Arena* bytes, Arena* scratch,
-                                        AtomId* entry_atom, uint8_t** entry_bytes, uint64_t* entry_length)
+                                        AtomId* entry_atom, uint8_t** entry_bytes, uint64_t* entry_length, bool omit_frames)
 {
     const Link* source = &unit->link;
     const uint64_t mark = scratch->length;
@@ -2454,6 +2456,10 @@ static bool check_program_emit_asm_unit(CheckProgramCode* result, const CheckPro
     for (uint32_t a = 1; valid && a < source->atoms.count; a += 1)
     {
         const uint8_t class = source->atoms.class[a];
+        if (omit_frames && class == BUSTER_LINK_CLASS_EH_FRAME)
+        {
+            continue;
+        }
         const uint64_t size = source->atoms.size[a];
         const bool zero = link_class_is_zero_fill(class);
         uint8_t* copy = size != 0 && !zero ? arena_push(bytes, size, 16) : 0;
@@ -2475,6 +2481,11 @@ static bool check_program_emit_asm_unit(CheckProgramCode* result, const CheckPro
     {
         const uint32_t atom = source->symbols.atom[s];
         const bool defined = atom != 0;
+        if (defined && atom < source->atoms.count && mapped[atom] == 0)
+        {
+            // An omitted .eh_frame's own label.
+            continue;
+        }
         const String8 spelling = check_asm_unit_name(unit, s);
         if (spelling.length == 0)
         {
@@ -2525,7 +2536,7 @@ static bool check_program_emit_asm_unit(CheckProgramCode* result, const CheckPro
     for (uint32_t a = 1; valid && a < source->atoms.count; a += 1)
     {
         const uint32_t begin = source->atoms.fixup_begin[a];
-        for (uint32_t f = 0; valid && f < source->atoms.fixup_count[a]; f += 1)
+        for (uint32_t f = 0; valid && mapped[a] != 0 && f < source->atoms.fixup_count[a]; f += 1)
         {
             const FixupId fixup = begin + f;
             const SymbolId target = source->fixups.target[fixup] < source->symbols.count ? symbols[source->fixups.target[fixup]] : 0;
@@ -4256,7 +4267,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         uint8_t* entry_bytes = 0;
         uint64_t entry_length = 0;
         valid = check_program_emit_asm_unit(result, asms, file_unit, asm_symbols, 0, result->asm_atoms, result->asm_sections, &result->asm_atom_count, bytes,
-                                            scratch, &entry_atom, &entry_bytes, &entry_length);
+                                            scratch, &entry_atom, &entry_bytes, &entry_length, false);
         valid = valid && check_program_emit_asm_groups(result, asms, file_unit, asm_symbols, output);
         // Its atoms' bytes are the only room it takes that the link's capacity doesn't count, as the file-scope assembly's
         // copy did before (#619): a failure is the bytes arena's.
@@ -4272,7 +4283,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             uint8_t* entry_bytes = 0;
             uint64_t entry_length = 0;
             valid = check_program_emit_asm_unit(result, asms, &plan->unit, asm_symbols, 0, result->unit_atoms, result->unit_sections, &result->unit_atom_count,
-                                                bytes, scratch, &entry_atom, &entry_bytes, &entry_length);
+                                                bytes, scratch, &entry_atom, &entry_bytes, &entry_length, false);
             if (!valid)
             {
                 result->status = CHECK_PROGRAM_BACKEND;
@@ -4310,9 +4321,12 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             const char* reason = NULL;
             // (A naked function whose assembly takes directives has no NOP sled of patchable_function_entry's yet, #1447.)
             const bool patchable = source_body && patched != 0 && check_program_patchable(program, b).count != 0;
+            // A naked function's own CFI (#1848): its rows are its unwind entry's, its unit's .eh_frame left out.
+            const CheckProgramNaked* framed = source_body && asms->naked != 0 && asms->naked[b].framed ? asms->naked + b : NULL;
+            const bool naked_frames = framed != NULL;
             valid = symbol != 0 && !patchable &&
                     check_program_emit_asm_unit(result, asms, unit, asm_symbols, symbol, result->unit_atoms, result->unit_sections,
-                                                &result->unit_atom_count, bytes, scratch, &entry_atom, &entry_bytes, &entry_length);
+                                                &result->unit_atom_count, bytes, scratch, &entry_atom, &entry_bytes, &entry_length, naked_frames);
             reason = patchable ? "patchable_function_entry on a naked function whose assembly takes directives" :
                      valid ? NULL : "an inline assembly unit could not be published";
             if (valid)
@@ -4323,10 +4337,16 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
                 {
                     if (source_body)
                     {
-                        // A naked function's unit says nothing of its frame: its entry has the call's rule alone, as its
-                        // records' path does.
+                        // A naked function's unit says nothing of its frame but its own CFI's rows (#1848): without them its
+                        // entry has the call's rule alone, as its records' path does.
                         valid = entry_length <= INT32_MAX;
                         run.frames[b] = (UnwindFunction){ .size = valid ? (uint32_t)entry_length : 0 };
+                        if (valid && framed != NULL && framed->frame_row_count != 0)
+                        {
+                            run.frames[b].open = BUSTER_UNWIND_ROWS;
+                            run.frames[b].rows = framed->frame_rows;
+                            run.frames[b].row_count = framed->frame_row_count;
+                        }
                     }
                     else
                     {
