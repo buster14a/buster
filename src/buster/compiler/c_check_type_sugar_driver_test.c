@@ -192,6 +192,113 @@ static const CheckDriverDefaultWarningFixture check_driver_type_sugar_fixtures[]
                   "}\n",
         .errors = 1,
     },
+    {
+        // A multidimensional array's qualifiers pass through each element array to the typedef that names them.
+        .name = "qualified typedefs of multidimensional array elements",
+        .source = "typedef const int CI;\n"
+                  "typedef volatile int VI;\n"
+                  "void f(void) { CI b[2][3] = { 0 }; b++; b[0]++; VI c[1][2][3]; c++; c[0]++; }\n",
+        .errors = 4,
+    },
+    {
+        // Warnings' operands keep their member's typedef (check_common_operand_spelling): -Wsign-compare's, -Wformat's
+        // and -Wenum-compare's, through `.`, `->` and a member array's subscript.
+        .name = "member typedefs in warning operands",
+        .source = "int printf(const char *, ...);\n"
+                  "typedef unsigned long ul;\n"
+                  "typedef enum { A1, A2 } EA;\n"
+                  "typedef enum { B1 } EB;\n"
+                  "typedef double D;\n"
+                  "struct s { ul n; EA ea; EB eb; D d; ul arr[2]; struct s *next; };\n"
+                  "int f(struct s x, struct s *px, int i)\n"
+                  "{\n"
+                  "    int r = 0;\n"
+                  "    r += x.n < i;\n"
+                  "    r += px->next->arr[0] < i;\n"
+                  "    r += x.ea == x.eb;\n"
+                  "    r += x.ea + px->eb;\n"
+                  "    r += (x.ea < px->eb);\n"
+                  "    printf(\"%d %s %f\\n\", x.n, px->d, x.arr[1]);\n"
+                  "    printf(\"%ld\\n\", x.d);\n"
+                  "    return r + (i ? x.ea : x.eb);\n"
+                  "}\n",
+        .options = { "-Wsign-compare" },
+        .warnings = 8,
+    },
+};
+
+// A variable array's size expression as written (#1447, check_driver_vla_bounds), through pointers, arrays, typedefs
+// and conversions, and an anonymous tag's location.
+static const CheckDriverDefaultWarningFixture check_driver_vla_bound_fixtures[] =
+{
+    {
+        .name = "variable array bounds and anonymous tags in operand errors",
+        .source = "struct { int a; } anon;\n"
+                  "union { int b; } anon_u;\n"
+                  "void f(int n, int m)\n"
+                  "{\n"
+                  "    int a[n];\n"
+                  "    a++;\n"
+                  "    int (*p)[n + 1] = 0;\n"
+                  "    p();\n"
+                  "    int b[n][m * 2];\n"
+                  "    b++;\n"
+                  "    char c[sizeof(int) * n];\n"
+                  "    c++;\n"
+                  "    int d[(n)];\n"
+                  "    d();\n"
+                  "    anon++;\n"
+                  "    anon_u();\n"
+                  "    struct { int x; } loc;\n"
+                  "    loc();\n"
+                  "    enum { E1 } e;\n"
+                  "    e();\n"
+                  "}\n",
+        .errors = 9,
+    },
+    {
+        .name = "variable array bounds of macros, calls, members and typedefs",
+        .source = "#define N(x) ((x)*2)\n"
+                  "int g(int);\n"
+                  "struct S { int k; };\n"
+                  "void f(int n, int m, struct S *s, int *ip)\n"
+                  "{\n"
+                  "    int a[N(n)]; a++;\n"
+                  "    int c[g(n) + 1]; c++;\n"
+                  "    int d[n ? m : 1]; d++;\n"
+                  "    int e[-n + ~m]; e++;\n"
+                  "    int h[s->k]; h++;\n"
+                  "    int i[*ip]; i++;\n"
+                  "    int j[n++]; j++;\n"
+                  "    int k[sizeof n]; k++;\n"
+                  "    int l[n][3]; l++;\n"
+                  "    int o[3][n]; o++;\n"
+                  "    typedef int T[n * m];\n"
+                  "    T t; t++;\n"
+                  "    int p[n << 1 | m]; p++;\n"
+                  "    int q[ip[0]]; q++;\n"
+                  "    int r[(int)sizeof(struct S) * n]; r++;\n"
+                  "    int v[!n + 1]; v++;\n"
+                  "}\n",
+        .errors = 15,
+    },
+    {
+        .name = "variable array bounds in conversions",
+        .source = "void take(double *);\n"
+                  "void f(int n)\n"
+                  "{\n"
+                  "    int a[n];\n"
+                  "    int (*p)[n] = &a;\n"
+                  "    double *d = p;\n"
+                  "    take(&a);\n"
+                  "    float x = a;\n"
+                  "    int b[n + 1][2];\n"
+                  "    struct T { int z; } t = b;\n"
+                  "    a = 0;\n"
+                  "}\n",
+        .errors = 5,
+        .notes = 1,
+    },
 };
 
 // Calling conventions in type spellings (#1447): clang's canonical spelling in an a.k.a. (`intel_ocl_bicc`,
@@ -258,4 +365,5 @@ static void check_test_driver_type_sugar(CheckTest* test, const char* clang, con
     check_test_driver_warning_fixtures(test, clang, executable, directory, check_driver_type_sugar_fixtures, BUSTER_ARRAY_LENGTH(check_driver_type_sugar_fixtures));
     check_test_driver_warning_fixtures(test, clang, executable, directory, check_driver_convention_sugar_fixtures,
                                        BUSTER_ARRAY_LENGTH(check_driver_convention_sugar_fixtures));
+    check_test_driver_warning_fixtures(test, clang, executable, directory, check_driver_vla_bound_fixtures, BUSTER_ARRAY_LENGTH(check_driver_vla_bound_fixtures));
 }

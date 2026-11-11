@@ -61,7 +61,7 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_TYPES
 #define BUSTER_TYPE_TEST_REPORTED 12
 #define BUSTER_TYPE_TEST_ARENA_BYTES (1ull << 30)
 #define BUSTER_TYPE_TEST_DEFAULT_COUNT 3000
@@ -98,7 +98,8 @@ static void type_test_report(const char* check, TypeTestTally tally)
 {
     printf("%-34s %10" PRIu64 " checks, %" PRIu64 " failed\n", check, tally.checks, tally.failures);
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_TYPES || BUSTER_UNIT == BUSTER_UNIT_CHECKER
 // splitmix64 (THIRD_PARTY_NOTICES.md has its reference), from the seed times its increment.
 static uint64_t type_test_random(uint64_t* state)
 {
@@ -113,6 +114,7 @@ static uint64_t type_test_below(uint64_t* state, uint64_t bound)
 {
     return bound == 0 ? 0 : type_test_random(state) % bound;
 }
+#endif
 
 // A table with room for `types` types and as many parameters, tags and members, in arenas of its own.
 typedef struct TypeTestTable TypeTestTable;
@@ -142,6 +144,7 @@ static void type_test_table_close(TypeTestTable* test)
     arena_release(&test->index_arena);
 }
 
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_TYPES || BUSTER_UNIT == BUSTER_UNIT_CHECKER
 // A record's members from a short list, for the fixtures: name 0 is unnamed, width BUSTER_TYPE_NOT_BIT_FIELD isn't a
 // bit-field.
 static TypeMember type_test_member(uint32_t name, TypeId type, uint32_t width)
@@ -155,7 +158,7 @@ static TypeMember type_test_member(uint32_t name, TypeId type, uint32_t width)
     };
     return result;
 }
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_TYPES
 static TypeId type_test_record(TypeTable* table, uint8_t kind, const TypeMember* members, uint32_t count, TypeRecordAttributes attributes)
 {
     const TypeId record = type_tag(table, kind, 1);
@@ -1498,7 +1501,7 @@ static bool type_test_layout_fixtures_check(void)
     type_test_report("layout fixtures", tally);
     return tally.failures == 0;
 }
-
+#endif
 // The member types the random records draw from: every builtin object type, pointers, arrays (of length 0 too),
 // vectors, ALIGNED types that raise and lower alignment, atomics, _BitInts, complex types and enums of every
 // underlying type, and records of the earlier levels.
@@ -1518,7 +1521,7 @@ static void type_test_pool_add(TypeTestPool* pool, TypeId type)
         pool->count += 1;
     }
 }
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_TYPES
 static void type_test_fill_pool(TypeTable* table, TypeTestPool* pool, uint64_t* random)
 {
     for (uint32_t code = BUSTER_TYPE_CODE_BOOL; code < BUSTER_TYPE_BUILTIN_COUNT; code += 1)
@@ -1611,13 +1614,13 @@ static void type_test_fill_pool(TypeTable* table, TypeTestPool* pool, uint64_t* 
         table->last_error = TYPE_ERROR_NONE;
     }
 }
-
+#endif
 // Whether a type can be a bit-field's.
 static bool type_test_bit_field_type(const TypeTable* table, TypeId type)
 {
     return type_integer_width(table, type) != 0;
 }
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_TYPES
 // Random members for a record: count of them, each a pool type, a bit-field of a random width (0 unnamed) where its
 // type allows one, packed or aligned now and then, the last a flexible array member now and then.
 static uint32_t type_test_random_members(TypeTable* table, const TypeTestPool* pool, uint64_t* random, TypeMember* members, uint32_t count, bool flexible, uint32_t* name)
@@ -1660,12 +1663,12 @@ static uint32_t type_test_random_members(TypeTable* table, const TypeTestPool* p
     }
     return count;
 }
-
+#endif
 // Random records, level by level (each level's members may be records of the levels before), laid out one by one
 // with the scalar layout or a level at a time with type_layout_records. The same seed makes the same records either
 // way. records gets every record, in order; returns how many.
 #define BUSTER_TYPE_TEST_MEMBERS 128
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_TYPES
 static uint32_t type_test_build_records(TypeTable* table, uint64_t seed, uint32_t per_level, uint32_t levels, bool vector, TypeId* records, TypeTestPool* pool)
 {
     uint64_t random = seed;
@@ -2296,10 +2299,10 @@ static bool type_test_compatibility(void)
     type_test_report("compatibility", tally);
     return tally.failures == 0;
 }
-
+#endif
 // ---------------------------------------------------------------------------------------------------------------------
 // Printing
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_TYPES
 // The extended qualifiers (#1447, QUALIFIED): type_extend's normalizations (a space on an array is its element's, under
 // an aligned typedef's ALIGNED, with the TypeId's own qualifiers kept, and none on a function type), what the readers see
 // through it (size, alignment, completeness, kind), compatibility and composite types, clang's spellings, and the spaces'
@@ -2631,7 +2634,7 @@ static __attribute__((format(printf, 2, 3))) void type_test_format(TypeTestText*
         text->valid = false;
     }
 }
-
+#endif
 // A type's spelling: a declaration of it is left, the name, then right. sugared says a typedef name is in it, and
 // spellable that it can be written at all (not a variable length array, nullptr_t in gnu17 or an anonymous tag).
 typedef struct TypeTestSpelling TypeTestSpelling;
@@ -3031,7 +3034,7 @@ static char* type_test_join(TypeTestWorld* world, const char* a, const char* b, 
     }
     return result;
 }
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_TYPES
 // A type's spelling with qualifiers: before a specifier, after a pointer's star, and none on a function.
 static TypeTestSpelling type_test_qualified(TypeTestWorld* world, TypeId type)
 {
@@ -4644,9 +4647,12 @@ static bool type_test_batch_after_completion(void)
     type_test_report("completion", tally);
     return tally.failures == 0;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_TYPES
 // #113's deferred bodies: the change records, views and replay.
 #include "c_types_deferred_test.c"
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_TYPES
 // #591's member lookup: the index, the scan and the walk.
 #include "c_types_lookup_test.c"
 
@@ -4717,3 +4723,5 @@ static int run_type_tests(int argc, char** argv)
     arena_release(&arena);
     return result;
 }
+#endif
+#endif
