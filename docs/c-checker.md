@@ -8828,6 +8828,13 @@ arguments against the function. The checker now gives these as clang does.
   specifier (`#pragma pack`, `weak`, `GCC visibility`: any but those its
   preprocessor takes alone, such as `message` and the diagnostic ones) stops
   the recovery, as it does clang's.
+- **An array's size or a designator's index after a comma** (#1867). `int
+  u[n, m];` and `{ [1, 2] = 3 }` are clang's "expected ']'" at the comma, then
+  its parser skips to the `]` and goes on with `u[n]` and `[1]`: the view drops
+  the tokens from the comma to the `]` (`ParseDiagnostic.resume_delete`), so the
+  declaration's later uses and the initializer's other elements are checked as
+  clang checks them, by both paths. Differences left: without a `]` before the
+  next `;` (`int z[1, 2;`) nothing is resumed, where clang reads on.
 
   Malformed K&R parameter declaration tails also have bounded repairs. The
   repaired view discards the recorded tail while preserving the original

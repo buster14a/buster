@@ -1148,6 +1148,35 @@ static uint32_t parse_scalar_skip_group(const ParseScalar* parser, uint32_t open
     return j;
 }
 
+// A comma at the top of an array declarator's size or an array designator's index, whose `]` clang's balanced tracker
+// skips to (its SkipUntil, which stops at a `;`): ParseBracketDeclarator and ParseInitializerWithPotentialDesignator go
+// on with what came before the comma (#1867). The diagnostic-only view drops [comma, `]`); without a `]` before a `;`,
+// nothing is resumed.
+static void parse_scalar_resume_at_square(ParseScalar* parser, uint32_t comma)
+{
+    uint32_t tail = comma;
+    bool balanced = true;
+    while (balanced && tail < parser->count && parser->kinds[tail] != PARSE_KIND_R_SQUARE && parser->kinds[tail] != PARSE_KIND_SEMI)
+    {
+        const uint8_t next = parser->kinds[tail];
+        if (next == PARSE_KIND_L_PAREN || next == PARSE_KIND_L_SQUARE || next == PARSE_KIND_L_BRACE)
+        {
+            tail = parse_scalar_skip_group(parser, tail, &balanced);
+        }
+        else
+        {
+            balanced = !parse_kind_is_closer(next);
+            tail += 1;
+        }
+    }
+    if (balanced && tail < parser->count && parser->kinds[tail] == PARSE_KIND_R_SQUARE)
+    {
+        parser->error_resumed = true;
+        parser->error_resume_delete = true;
+        parser->error_resume_end = tail;
+    }
+}
+
 // Brackets at `i` where a declarator's name is due (`int [3] x;`), as clang reads them (ParseMisplacedBracketDeclarator):
 // the brackets, then the declarator they would follow. Where that one has a name, the brackets are in the wrong place,
 // which clang says at its end; else clang expects the name where it is due after them, but at the brackets before a
@@ -3796,11 +3825,17 @@ static void parse_scalar_operator(ParseScalar* parser, uint32_t i, ParseFrame* f
         {
             parse_scalar_error(parser, i, PARSE_MESSAGE_EXPECTED_SEMI_AT_END_OF_DECLARATION, BUSTER_PARSE_AT_TOKEN);
         }
-        else if (group == PARSE_ROLE_OPEN_CASE || (conditional && group == PARSE_ROLE_OPEN_SPECIFIER) || (flags & BUSTER_PARSE_FRAME_ARRAY_DECLARATOR))
+        else if (group == PARSE_ROLE_OPEN_CASE || (conditional && group == PARSE_ROLE_OPEN_SPECIFIER) || (flags & BUSTER_PARSE_FRAME_ARRAY_DECLARATOR) ||
+                 designator_subscript)
         {
-            // No comma at the top of a case label, of `_Alignas(` and `_BitInt(`, or of an array declarator's size (an
-            // assignment-expression).
+            // No comma at the top of a case label, of `_Alignas(` and `_BitInt(`, or of an array declarator's size or an
+            // array designator's index (an assignment-expression each).
+            const bool first_error = parser->error_token == BUSTER_PARSE_NONE;
             parse_scalar_unexpected(parser, i, frame);
+            if (first_error && ((flags & BUSTER_PARSE_FRAME_ARRAY_DECLARATOR) || designator_subscript) && parser->error_message == PARSE_MESSAGE_EXPECTED_R_SQUARE)
+            {
+                parse_scalar_resume_at_square(parser, i);
+            }
         }
         else if (flags & BUSTER_PARSE_FRAME_DECLARATION)
         {
@@ -6426,6 +6461,9 @@ static void parse_check_tables_init(void)
     BUSTER_PARSE_ADD(a[PARSE_CHECK_CASE], PARSE_ROLE_RANGE);
     a[PARSE_CHECK_SUBSCRIPT] = expression;
     BUSTER_PARSE_ADD(a[PARSE_CHECK_SUBSCRIPT], PARSE_ROLE_RANGE);
+    // An array declarator's size and an array designator's index are assignment-expressions: no comma at their top (#1867).
+    a[PARSE_CHECK_ARRAY] = a[PARSE_CHECK_SUBSCRIPT];
+    BUSTER_PARSE_REMOVE(a[PARSE_CHECK_ARRAY], PARSE_ROLE_COMMA, PARSE_ROLE_SEPARATOR);
     // Initializer lists: designators, then an initializer; or an initializer.
     a[PARSE_CHECK_INITIALIZER_START] = operand_starts;
     BUSTER_PARSE_REMOVE(a[PARSE_CHECK_INITIALIZER_START], PARSE_CLASS_OPERAND_KEYWORD);
@@ -6500,6 +6538,7 @@ static void parse_check_tables_init(void)
     BUSTER_PARSE_ADD(e[PARSE_CHECK_EXPRESSION], PARSE_ROLE_CLOSE_BLOCK);
     e[PARSE_CHECK_CASE] = operand_ends;
     e[PARSE_CHECK_SUBSCRIPT] = operand_ends;
+    e[PARSE_CHECK_ARRAY] = operand_ends;
     e[PARSE_CHECK_INITIALIZER_START] = operand_ends;
     BUSTER_PARSE_ADD(e[PARSE_CHECK_INITIALIZER_START], PARSE_ROLE_CLOSE_INITIALIZER);
     e[PARSE_CHECK_INITIALIZER] = operand_ends;
@@ -6624,6 +6663,8 @@ static uint8_t parse_check_group(uint8_t opener, uint8_t mode, uint8_t before)
     const bool declaration = ((t->declaration_modes >> mode) & 1) != 0;
     const bool named = ((t->named_modes >> mode) & 1) != 0;
     const bool abstract = mode == PARSE_CHECK_TYPE_DECLARATION || mode == PARSE_CHECK_TYPE_ARGUMENT || mode == PARSE_CHECK_SIZEOF_TYPE || mode == PARSE_CHECK_ABSTRACT;
+    // An initializer's designators: `[` starts one at an initializer's start, and goes on after one.
+    const bool designator = mode == PARSE_CHECK_INITIALIZER_START || mode == PARSE_CHECK_INITIALIZER_DESIGNATOR;
     uint8_t result = PARSE_GROUP_OTHER;
     switch (opener)
     {
@@ -6655,7 +6696,9 @@ static uint8_t parse_check_group(uint8_t opener, uint8_t mode, uint8_t before)
         case PARSE_ROLE_OPEN_CONDITION:
         case PARSE_ROLE_OPEN_TERNARY: result = PARSE_GROUP_EXPRESSION; break;
         case PARSE_ROLE_OPEN_FOR: result = PARSE_GROUP_FOR; break;
-        case PARSE_ROLE_OPEN_SUBSCRIPT: result = declaration ? PARSE_GROUP_ARRAY : PARSE_GROUP_SUBSCRIPT; break;
+        case PARSE_ROLE_OPEN_SUBSCRIPT:
+            result = declaration ? PARSE_GROUP_ARRAY : designator ? PARSE_GROUP_DESIGNATOR : PARSE_GROUP_SUBSCRIPT;
+            break;
         case PARSE_ROLE_OPEN_INITIALIZER:
         case PARSE_ROLE_OPEN_COMPOUND_BODY: result = PARSE_GROUP_INITIALIZER; break;
         case PARSE_ROLE_OPEN_CASE: result = PARSE_GROUP_CASE; break;
@@ -6734,8 +6777,9 @@ static uint8_t parse_check_mode(uint8_t group, bool start, uint8_t kind, uint8_t
         case PARSE_GROUP_ABSTRACT: result = PARSE_CHECK_ABSTRACT; break;
         case PARSE_GROUP_OPTIONAL: result = PARSE_CHECK_OPTIONAL; break;
         case PARSE_GROUP_EXPRESSION: result = PARSE_CHECK_EXPRESSION; break;
-        case PARSE_GROUP_SUBSCRIPT:
-        case PARSE_GROUP_ARRAY: result = PARSE_CHECK_SUBSCRIPT; break;
+        case PARSE_GROUP_SUBSCRIPT: result = PARSE_CHECK_SUBSCRIPT; break;
+        case PARSE_GROUP_ARRAY:
+        case PARSE_GROUP_DESIGNATOR: result = PARSE_CHECK_ARRAY; break;
         case PARSE_GROUP_CASE: result = PARSE_CHECK_CASE; break;
         case PARSE_GROUP_INITIALIZER:
             result = start ? PARSE_CHECK_INITIALIZER_START : declares && part == PARSE_PART_DECLARATION ? PARSE_CHECK_INITIALIZER_DESIGNATOR :
@@ -6952,7 +6996,7 @@ static void parse_check_range(ParseKernels* kernels, const uint32_t* names, cons
                                               BUSTER_PARSE_CHECK_CLAUSES : 0) |
                                          (role == PARSE_ROLE_ERROR || (closer && kernels->vkinds[i] != parse_check_closer_kind(role)) ? BUSTER_PARSE_CHECK_ERROR : 0) |
                                          // Only an array declarator's brackets may be empty.
-                                         (empty && inner_group == PARSE_GROUP_SUBSCRIPT ? BUSTER_PARSE_CHECK_CLAUSES : 0) |
+                                         (empty && (inner_group == PARSE_GROUP_SUBSCRIPT || inner_group == PARSE_GROUP_DESIGNATOR) ? BUSTER_PARSE_CHECK_CLAUSES : 0) |
                                          // After a tag's body (past its attributes), or a tag and a line break, what may
                                          // follow a type; and nothing postfix after `&&label`.
                                          (((after_body && !transparent) || (previous == PARSE_ROLE_TAG && (line_flags[i] & BUSTER_PP_START_OF_LINE) != 0)) &&
@@ -10132,7 +10176,7 @@ static bool parse_check_block_avx512(ParseKernels* kernels, const uint32_t* name
             failed |= parse_equal8(role, PARSE_ROLE_CLOSE_FOR) & ((terminator_before & ~parse_equal8(inner_items, 2)) | (~terminator_before & ~parse_equal8(inner_items, 3)));
             failed |= parse_equal8(role, PARSE_ROLE_CLOSE_KEYWORD) & ~parse_equal8(inner_items, 2) &
                       ~(parse_equal8(inner_group, PARSE_GROUP_ASSERT) & parse_equal8(inner_items, 1));
-            failed |= empty & parse_equal8(inner_group, PARSE_GROUP_SUBSCRIPT);
+            failed |= empty & (parse_equal8(inner_group, PARSE_GROUP_SUBSCRIPT) | parse_equal8(inner_group, PARSE_GROUP_DESIGNATOR));
             failed |= parse_equal8(role, PARSE_ROLE_ERROR) | (closers & _mm512_cmpneq_epi8_mask(vkind, parse_table8(v->closer_kind, role)));
             failed |= parse_equal8(c_before2, PARSE_CLASS_LABEL_ADDRESS) & _mm512_test_epi8_mask(bits, _mm512_set1_epi8((char)BUSTER_PARSE_CHECK_POSTFIX));
             failed |= parse_equal8(c_before, PARSE_CLASS_STAR) & ~_mm512_test_epi8_mask(mode_bits_before, _mm512_set1_epi8(BUSTER_PARSE_CHECK_DECLARATION)) &
