@@ -14,8 +14,8 @@
 // a link without the section exit with status 77, and build.sh keeps that executable as it is: its initializers build
 // the tables when it runs, as they did before.
 //
-// `test-baked-tables` makes the same build and checks in any executable, a PIE too (the sanitizers' builds, which
-// aren't baked): nothing written outside the section, a second build the same bytes as the first, and in a baked
+// `test-baked-tables` makes the same build and checks in any executable, a PIE too (TSan, MSan and fuzzing builds,
+// which aren't baked): nothing written outside the section, a second build the same bytes as the first, and in a baked
 // executable the first the bytes it started with, which are the file's, and its build ID. A link without the section
 // fails this test rather than skipping it.
 //

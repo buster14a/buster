@@ -65,6 +65,21 @@ struct CheckLowerDump
     const char* refusal;
 };
 
+// A call of __builtin_clear_padding (c_check_program_padding.c): its node, its object's elements, each of `stride` bytes
+// (none for a variable length array's), and the stores of one, `count` entries (CBuiltinMiscLowerCall.padding's), which
+// the recipe makes in place, or, where `pool` isn't BUSTER_CHECK_NONE, a loop reads from that pool; or its refusal.
+typedef struct CheckLowerPadding CheckLowerPadding;
+struct CheckLowerPadding
+{
+    uint32_t node;
+    uint32_t pool;
+    const uint64_t* entries;
+    uint32_t count;
+    uint64_t elements;
+    uint64_t stride;
+    const char* refusal;
+};
+
 typedef struct CheckLowerInitializers CheckLowerInitializers;
 struct CheckLowerInitializers
 {
@@ -77,6 +92,9 @@ struct CheckLowerInitializers
     // printer and the rest of the arguments once a call, and for __builtin_os_log_format's data, evaluated once an item.
     CheckLowerDump* dumps;
     uint32_t dump_count;
+    // The unit's __builtin_clear_padding calls, whose tables are pools after the dumps'.
+    CheckLowerPadding* paddings;
+    uint32_t padding_count;
     uint64_t extra_entries;
     uint64_t extra_calls;
     uint64_t extra_arguments;
@@ -189,6 +207,7 @@ static bool check_lower_init_image(const CheckProgram* program, const CheckIniti
 }
 
 #include "c_check_program_dump.c"
+#include "c_check_program_padding.c"
 
 static bool check_lower_init_pools(CheckLowerInitializers* pools, const CheckProgram* program, const uint8_t* type_facts, uint32_t type_count,
                                    Arena* output, Arena* scratch)
@@ -281,7 +300,7 @@ static bool check_lower_init_pools(CheckLowerInitializers* pools, const CheckPro
     pools->extra_calls += clears;
     pools->extra_arguments += clears * 3;
     arena_pop_to(scratch, mark);
-    return valid && check_lower_dump_prepare(pools, program, output, scratch);
+    return valid && check_lower_dump_prepare(pools, program, output, scratch) && check_lower_padding_prepare(pools, program, output, scratch);
 }
 
 static uint32_t check_lower_init_pool(const CheckLowerInitializers* pools, uint32_t plan, uint32_t part)

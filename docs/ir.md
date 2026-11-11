@@ -444,7 +444,9 @@ whose phis promotion makes of the jumps' values, they are 3,555 and 6,089, and
 `lvm.c`'s promoted IR is 457,577 bytes, less than its lowered 518,569. A backend
 that wants a jump per site again, for the branch predictor, duplicates the
 dispatch block into its predecessors, as LLVM's tail duplication does.
-`FRAME_ADDRESS` and `TAIL_CALL` are refused with `IR_ERROR_UNSUPPORTED`, and the
+`FRAME_ADDRESS` and `TAIL_CALL` are refused with `IR_ERROR_UNSUPPORTED`, as is a
+function with segment overrides (#1447, `Tier0Function.segments`: loads and
+stores in `__seg_fs` and `__seg_gs`, which the IR's flags don't carry yet), and the
 vector values and `X86` rows that the [SIMD contract](ir-simd.md) doesn't admit
 for the output target (any, through the old entry points) with
 `IR_ERROR_UNSUPPORTED`, at their entry, after validation and before anything
@@ -750,6 +752,39 @@ a row of a 12-byte vector, and accept an SSE carrier's of an `f64` and of an
 with VL's moves, and refuses vectors of 2 and 12 bytes. `test-ir-source --simd`
 runs `tests/ir/vector-rows.c`'s and `tests/ir/carrier-rows.c`'s functions through
 both lowerings, both promoters and the text's round trip.
+
+### Asm bodies (#1839)
+
+An asm statement the C driver places in its caller as an asm body
+([the inline assembly guide](c-inline-assembly.md)'s "Asm bodies") is a body call:
+an `IR_CALL` whose descriptor names the body (`IrCall.body`, 1 plus its index in
+`IrFunction.asm_bodies`) in place of a callee, its symbol `a` 0 and its row 0,
+void, of no ABI records and not variadic. An `IrAsmBody` holds the statement's
+records (borrowed from the producer, `Tier0AsmBody`'s), its own branches and their
+targets relative to its first record (a target may be the body's end), and the
+registers it writes (`touched`, rax to r15 in bits 0 to 15 and xmm0 to xmm15 in 16
+to 31). Its records address the statement's operand block through
+`BUSTER_TIER0_ASM_BLOCK`'s base; the block is the call's one argument, a `ptr`
+that is the block local's `stack_addr` (a body that reads no block has none).
+
+So every pass takes a body call as an unknown callee's of that pointer: the block
+escapes into it (neither SSA promotion nor SROA's `flagged` mode makes its slot
+values), its stores stay before the call, no load or store moves across it, and
+the operands' objects, whose addresses the block holds, are memory the call may
+read and write. The inliner copies a callee's bodies with it (appended to the
+caller's, `IrCall.body` rebased), its block argument the rebased slot's address,
+as a row call's row is copied. The verifier checks a body call's descriptor
+against its body (`ir_body_call_valid`): within the column, of no row, void, one
+`ptr` argument or none, and the branch columns in order within the records.
+
+The text form has no syntax for a body: the printer writes `asm #k(...)` and a
+line per body (`asm #k records=<count> branches=<count> touched=<mask>`) for
+diagnostics, which the parser doesn't read, so the source tools whose round trips
+print and parse the text (`test-ir-source`, `test-tier1-cfg-source`) keep the
+statements' helpers (`CheckSourceRequest.asm_helpers`), and the structural
+rebuild under the reducer refuses a function with bodies. The interpreter
+(`interpret-c`, `interpret-ir`) refuses one as it refuses a machine row: it has no
+model of x86 records.
 
 ### Effects through the consumers (#1059)
 

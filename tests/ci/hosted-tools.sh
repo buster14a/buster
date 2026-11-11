@@ -229,11 +229,11 @@ CLANG
 chmod +x "$llvm/bin/clang-23"
 ln -s clang-23 "$llvm/bin/clang"
 ln -s clang-23 "$llvm/bin/clang++"
-for tool in lld llvm-dwarfdump llvm-readobj llvm-symbolizer; do printf '#!/bin/sh\nexit 0\n' > "$llvm/bin/$tool"; chmod +x "$llvm/bin/$tool"; done
+for tool in lld llvm-dwarfdump llvm-readobj llvm-symbolizer llvm-split llvm-nm llvm-objcopy; do printf '#!/bin/sh\nexit 0\n' > "$llvm/bin/$tool"; chmod +x "$llvm/bin/$tool"; done
 ln -s lld "$llvm/bin/ld.lld"
 printf '#!/bin/sh\necho 23.1.4\n' > "$llvm/bin/llvm-config"
 chmod +x "$llvm/bin/llvm-config"
-touch "$llvm/include/header.h" "$llvm/lib/libLLVMfixture.a" "$llvm/lib/libPollyfixture.a" "$llvm/lib/libclang-cpp.so.23" "$llvm/lib/clang/23/lib/test/libclang_rt.fuzzer_no_main.a"
+touch "$llvm/include/header.h" "$llvm/lib/libLLVMfixture.a" "$llvm/lib/libPollyfixture.a" "$llvm/lib/libclangfixture.a" "$llvm/lib/libclang-cpp.so.23" "$llvm/lib/clang/23/lib/test/libclang_rt.fuzzer_no_main.a"
 tar --zstd -cf "$work/upstream/llvm" -C "$work/archive" LLVM-23.1.4-Linux-X64
 cmake="$work/archive/cmake-4.4.3-linux-x86_64"
 mkdir -p "$cmake/bin" "$cmake/share/cmake-4.4" "$cmake/doc/cmake"
@@ -270,6 +270,7 @@ BUSTER_HOSTED_RELEASES="$work/real-inputs" bash "$work/tools/install-hosted-tool
 [ "$("$work/installed tree/llvm-23.1.4/bin/clang" -dumpversion)" = 23.1.4 ] || fail 'relocated compiler failed'
 [ -x "$work/installed tree/bin/wild" ] && [ -x "$work/installed tree/bin/mold" ] || fail 'relocated links broke'
 [ -f "$("$work/installed tree/llvm-23.1.4/bin/clang" -print-runtime-dir)/libclang_rt.fuzzer_no_main.a" ] || fail 'relocated runtime missing'
+[ -f "$work/installed tree/llvm-23.1.4/lib/libclangfixture.a" ] && [ -f "$work/installed tree/llvm-23.1.4/lib/libclang-cpp.so.23" ] || fail 'clang libraries missing'
 # An internally incomplete but hash-pinned fixture must fail without publishing.
 rm "$llvm/lib/clang/23/lib/test/libclang_rt.fuzzer_no_main.a"
 tar --zstd -cf "$work/upstream/llvm" -C "$work/archive" LLVM-23.1.4-Linux-X64
