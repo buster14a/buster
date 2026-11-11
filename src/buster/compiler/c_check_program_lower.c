@@ -16462,10 +16462,12 @@ static bool check_lower_lanewise_op(CheckOp op)
 }
 
 // The entries node `node`, a product, division, remainder or shift, `op` (check_lower_lanewise_op), may take element by
-// element: BUSTER_CHECK_LOWER_LANEWISE_ENTRIES a lane where its type is a vector's that the unit's target computes so
-// (check_vector_lower_lanewise: a division or a remainder, a product or shift no row takes), else none; a transport
-// vector's whatever its operation, whose rows are pieces'. A function's target attribute adds features to the unit's,
-// so that what runs element by element in it does at the unit's target too. Only its type is read.
+// element: BUSTER_CHECK_LOWER_LANEWISE_ENTRIES a lane where its type is a vector's that may run so
+// (check_vector_lower_lanewise's cases, by a bound that builds no row: a division or a remainder, an operation of bytes,
+// and any of them where the unit's target hasn't AVX2 and AVX-512F, VL and BW, whose rows take every other product and
+// shift), else none; a transport vector's whatever its operation, whose rows are pieces'. A function's target attribute
+// adds features to the unit's, so that what runs element by element in it does at the unit's target too. Only its type
+// is read.
 static uint64_t check_lower_lanewise_room(const CheckProgram* program, uint32_t node, CheckOp op)
 {
     const TypeTable* types = program->types;
@@ -16475,7 +16477,10 @@ static uint64_t check_lower_lanewise_room(const CheckProgram* program, uint32_t 
     const bool vector = kind == BUSTER_TYPE_KIND_VECTOR || kind == BUSTER_TYPE_KIND_EXT_VECTOR;
     const uint32_t bytes = vector ? check_lower_vector_bytes(types, type) : 0;
     const uint32_t operator = op >= CHECK_OP_MULTIPLY_ASSIGN ? (uint32_t)op - (CHECK_OP_MULTIPLY_ASSIGN - CHECK_OP_MULTIPLY) : (uint32_t)op;
-    const bool lanewise = vector && (bytes == 0 || check_vector_lower_lanewise(&program->target, operator, check_vector_lower_element(types, type), bytes));
+    const uint64_t rows = BUSTER_X86_FEATURE(AVX2) | BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512VL) | BUSTER_X86_FEATURE(AVX512BW);
+    const CheckVectorElement element = vector ? check_vector_lower_element(types, type) : (CheckVectorElement){ 0 };
+    const bool lanewise = vector && !element.floating &&
+                          (bytes == 0 || operator == CHECK_OP_DIVIDE || operator == CHECK_OP_REMAINDER || element.bytes == 1 || (program->target.features & rows) != rows);
     return lanewise ? BUSTER_CHECK_LOWER_LANEWISE_ENTRIES * (uint64_t)check_builtin_vector_lanes(types, type) : 0;
 }
 
