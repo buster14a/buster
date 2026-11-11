@@ -3710,12 +3710,12 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
             false
         },
         {
-            // A name with linkage declared before: its types would bind before the deduction.
+            // A name with linkage declared before: the deduced type redeclares it, as clang's (#2021).
             "__auto_type: a linked name declared before",
             "extern int e;\n"
             "__auto_type e = 1;\n",
-            true,
-            true
+            false,
+            false
         },
         {
             // _Alignas against the deduced type, not int, which stands for it until the initializer (#840's review): below
