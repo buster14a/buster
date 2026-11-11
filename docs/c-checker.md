@@ -4348,6 +4348,35 @@ parameters are still warned. A per-token prefix count of
 the unit's error reports answers each scope's question in constant time, and
 only a unit with errors builds it.
 
+Clang's warnings that default to errors don't count in a scope either (#1969):
+`DiagnosticIDs::isUnrecoverable` is false for a warning's class, whatever
+its severity, so `Scope::hasUnrecoverableErrorOccurred` doesn't see them.
+They are:
+
+- a simple assignment's conversion between an integer and a pointer
+  (`-Wint-conversion`) or between pointers (`-Wincompatible-pointer-types`,
+  `-Wincompatible-function-pointer-types`), in an initializer, an assignment,
+  a return or an argument (`check_driver_report_default_error`, and an
+  initializer walk's `CheckDriverDiagnostic.default_source`);
+- a return's missing or extra value (`-Wreturn-mismatch`).
+
+So `int f(short q) { char *p = &q; return 0; }` warns of the unused `p`, as
+clang does. A rejected unit's view keeps such a conversion in a body rather
+than leaving its part out: it casts the source, through `(void *)(long)(…)`
+to a pointer target and `(long)(…)` to an integer one
+(`CheckDriverConversionSite`, `CHECK_DRIVER_CAST_*`). The reading then has
+the same expression and uses, with no error and no `-Wall`/`-Wextra` warning
+of the cast's own, so its statement's warnings are given too
+(`x = p; return x / 0;`, `int x = p + (1 / 0);`).
+
+A condition's assignment (`while (q = p)`) is still left out: clang's
+`-Wparentheses` of it follows the conversion's error, which completes after
+the source, where the common warnings publish it at the `=`. So does a
+conversion outside every body. A `return;`'s statement is left out too; its
+scope doesn't count it either. `-Wno-int-conversion` and
+`-Wno-error=int-conversion` don't reach these errors yet (#1963): they are
+the graph's reports, not warning events.
+
 For-initializer warnings retain the header's closing parenthesis as a scope
 anchor and the parser subtree's final token as their completion (#1784).
 An error after the loop therefore cannot suppress its warning; an error inside
