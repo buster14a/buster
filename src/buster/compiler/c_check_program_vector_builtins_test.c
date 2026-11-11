@@ -993,6 +993,15 @@ static void check_test_program_vector_builtin_refusals(CheckTest* test)
                                            "eligible-mwaitx", true, true, 0, 0, NULL, &zen);
         check_test_program_boundary_target(test, "unsigned long tested(int n){__builtin_ia32_pause();return __rdtsc()+__builtin_ia32_tzcnt_u64((unsigned long)n);}",
                                            "baseline-leaves", true, true, 0, 0, NULL, &baseline);
+        // Units whose only operators are integer vectors' that run element by element (#2216): the entry bound counts their
+        // elements (check_lower_lanewise_op), for which no other node gave room.
+        for (uint32_t t = 0; t < 2; t += 1)
+        {
+            check_test_program_boundary_target(test, "typedef signed char V __attribute__((vector_size(64)));void tested(V*p,V*q){*p=*p/ *q;}", "lanewise-room-divide", true,
+                                               true, 0, 0, NULL, t == 0 ? &baseline : &zen);
+            check_test_program_boundary_target(test, "typedef short V __attribute__((vector_size(64)));void tested(V*p,V*q){*p%=*q;*p<<=*q;}", "lanewise-room-assign", true, true,
+                                               0, 0, NULL, t == 0 ? &baseline : &zen);
+        }
         // The extensions' leaves, in functions whose target attribute has the extensions: Key Locker's on Zen 5, whose
         // AVX-512F and VL its vectors take (the attribute's target is the command line's, check_test_program_march, and
         // its features).
