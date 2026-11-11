@@ -130,6 +130,34 @@ static bool check_test_asm_definition_symbols(const char* path, const char* func
     return valid;
 }
 
+// Whether the object at `path` has a symbol named `.L...` defined in a code section, which an assembler never keeps
+// (#1845), its name in `found`; false when it has none or doesn't read.
+static bool check_test_asm_definition_code_temporary(const char* path, char* found, uint64_t capacity)
+{
+    Arena arena = arena_reserve(UINT64_C(1) << 24);
+    CheckTestElf elf = { 0 };
+    bool kept = false;
+    if (arena.base != 0 && check_test_elf_open(&elf, object_test_read_file(&arena, path)))
+    {
+        for (uint64_t i = 1; !kept && i < elf.symbol_count; i += 1)
+        {
+            const Elf64_Sym* symbol = &elf.symbols[i];
+            const char* name = check_test_elf_string(elf.symbol_names, elf.symbol_names_size, symbol->st_name);
+            const char* section = symbol->st_shndx != SHN_UNDEF && symbol->st_shndx < SHN_LORESERVE ? check_test_elf_section_name(&elf, symbol->st_shndx) : 0;
+            kept = name != 0 && strncmp(name, ".L", 2) == 0 && section != 0 && strncmp(section, ".text", 5) == 0;
+            if (kept)
+            {
+                snprintf(found, capacity, "%s", name);
+            }
+        }
+    }
+    if (arena.base != 0)
+    {
+        arena_release(&arena);
+    }
+    return kept;
+}
+
 static void check_test_driver_asm_definitions(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     static const struct
@@ -331,4 +359,44 @@ static void check_test_driver_asm_definitions(CheckTest* test, const char* clang
         unlink(path);
         unlink(output);
     }
+    // The `.L` labels of code (#1845): a per-statement helper template's, a naked function's, `&&label`'s and the
+    // helpers' own symbols are temporaries, which -c's object leaves out as clang's assembler does, on both paths; the
+    // objects still link and run as clang's build.
+    static const char temporaries[] =
+        "#include <stdio.h>\n"
+        "int test_zero(int x) { __asm__ volatile(\"test %0, %0\\n\\tjz .Lskip%=\\n\\tnop\\n.Lskip%=:\" : : \"r\"(x)); return x; }\n"
+        "__attribute__((naked)) int naked_three(void) { __asm__(\"jmp .Lnaked\\n.Lnaked: movl $3, %eax\\n\\tret\"); }\n"
+        "int pick(int x) { static void* table[] = { &&first, &&second }; goto *table[x]; first: return 1; second: return 2; }\n"
+        "int main(void) { printf(\"%d %d %d %d\\n\", test_zero(4), naked_three(), pick(0), pick(1)); return 0; }\n";
+    char temporary_path[512];
+    char temporary_object[512];
+    char temporary_program[512];
+    snprintf(temporary_path, sizeof(temporary_path), "%s/asm-code-temporaries.c", directory);
+    snprintf(temporary_object, sizeof(temporary_object), "%s/asm-code-temporaries.o", directory);
+    snprintf(temporary_program, sizeof(temporary_program), "%s/asm-code-temporaries", directory);
+    const bool temporary_written = parse_test_write(temporary_path, temporaries, sizeof(temporaries) - 1);
+    for (uint32_t p = 0; temporary_written && p < 2; p += 1)
+    {
+        char* text = NULL;
+        char* arguments[] = { (char*)executable, "-std=gnu17", "-c", temporary_path, "-o", temporary_object, p == 1 ? "--scalar" : NULL, NULL };
+        const bool compiled = check_test_driver_spawn(arguments, &text) == 0;
+        free(text);
+        char found[256] = { 0 };
+        char description[1024];
+        const bool kept = compiled && check_test_asm_definition_code_temporary(temporary_object, found, sizeof(found));
+        snprintf(description, sizeof(description), "code's .L labels are left out of the %s path's -c object: %s", p == 1 ? "scalar" : "vector",
+                 compiled ? found : "it didn't compile");
+        check_test_expect(test, compiled && !kept, description);
+        char* const link[] = { (char*)clang, temporary_object, "-o", temporary_program, NULL };
+        text = NULL;
+        const bool linked = compiled && check_test_driver_spawn(link, &text) == 0;
+        free(text);
+        char output[256] = { 0 };
+        const bool ran = linked && check_test_driver_capture(temporary_program, output, sizeof(output));
+        snprintf(description, sizeof(description), "the %s path's object without code's .L labels runs: %s", p == 1 ? "scalar" : "vector", output);
+        check_test_expect(test, ran && strcmp(output, "4 3 1 2\n") == 0, description);
+        unlink(temporary_object);
+        unlink(temporary_program);
+    }
+    unlink(temporary_path);
 }
