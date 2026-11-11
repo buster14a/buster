@@ -9208,8 +9208,11 @@ enables, which this checker doesn't all give.
   with a typedef name as written (`typeof(L)`), a nested typeof's own sugar,
   and `typeof (x)` for an expression that is one name
   (`check_input_typeof_spelling`, `check_driver_typeof_text`). Another
-  expression operand, and a type name that holds a typedef name, print no
-  sugar.
+  expression operand prints as clang's StmtPrinter prints it, with expression
+  spacing (`'typeof (x + 1) *'`, `'typeof ((L)x)'`, the static assertion's
+  `check_semantic_requirement`), and a type name with its typedef names as
+  written (`'typeof(L *)' (aka 'long *')`). A member's declarator spells its
+  type too (below).
 - **A failed initializer conversion.** A scalar initializer's INITIALIZE is at
   its declarator, outside the initializer's tokens. When its conversion fails,
   that error is the only one: the initializers' walk doesn't check that
@@ -9343,7 +9346,9 @@ enables, which this checker doesn't all give.
   `CheckGraph.tag_completions` locates (`check_semantic_member_token`), so
   `x.f++` of a member `uu f` is `'uu' (aka 'struct u')`, and a warning's
   member operand (`check_common_operand_spelling`) keeps it too:
-  `x.n < i` is `'ul' (aka 'unsigned long')`. An a.k.a. keeps a
+  `x.n < i` is `'ul' (aka 'unsigned long')`. A failed conversion's source and
+  target and the null pointer warning's target do too, with a member's
+  `typeof` (`&s.m` of a `typeof(long) m` is `'typeof(long) *'`, #1837). An a.k.a. keeps a
   vector's own typedef at any level (`'pv' (aka 'v4si *')`), as
   `desugarForDiagnostic` stops there. A typedef'd array's element keeps its
   qualified typedef (`'CI[2]' (aka 'const int[2]')`, `type_print`).
@@ -9366,9 +9371,13 @@ enables, which this checker doesn't all give.
     later ones print `[]`.
   - The reader's spelling helpers (`check_input_operand_type_spelling`,
     `check_input_object_spelling`), which run before the stream has types,
-    don't follow members. The warnings the driver spells after checking
+    don't follow members. Their callers that can do follow them with the
+    stream (#1837): the warnings the driver spells after checking
     (`check_common_operand_spelling`: `-Wsign-compare`, `-Wformat`,
-    `-Wenum-compare` and the like) do.
+    `-Wenum-compare` and the like), a failed conversion's source through `&`
+    and `*` (`check_driver_pointer_spelling`) and an assignment's member target,
+    and the null pointer warning's member target. An initializer's member or
+    element target (`struct S x = { .lp = c }`) still prints canonically.
 
 ## Ignorable and unsupported pragmas
 
