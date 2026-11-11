@@ -145,9 +145,9 @@ build_products()
     local oracle="$RUNNER_TEMP/preprocessor-pragma-oracle" server="$RUNNER_TEMP/clang-server" served=0 compiler
     printf 'Building on: %s, %s CPUs\n' "$(sed -n 's/^model name[[:space:]]*:[[:space:]]*//p' /proc/cpuinfo | head -n 1)" "$(nproc)"
     bash tools/build-preprocessor-pragma-oracle.sh "$oracle"
-    # The clang server that the semantic driver's checks send the oracle clang's runs to (#2071), where this toolchain
-    # lets it hold one copy of LLVM (status 77: not the official release's static LLVM); without it the oracle clang
-    # runs as children.
+    # The clang server that the semantic driver's checks send the oracle clang's runs to (#2071), linked with the
+    # release's static clang and LLVM archives, one copy of LLVM; its build checks one request against a spawned clang.
+    # Status 77 is a toolchain without what one copy needs: no server, and the oracle clang runs as children.
     bash tools/clang-server/build.sh "$server" || served=$?
     if [ "$served" -eq 77 ]; then
         echo "::notice::No clang server for this toolchain: the semantic driver's checks run the oracle clang as children."

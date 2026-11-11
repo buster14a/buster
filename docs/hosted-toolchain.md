@@ -61,6 +61,14 @@ linker links survive relocation. A failed extraction publishes no installation.
 The selected compiler, resource directory, runtime/library path and tools remain
 explicit; no runner-provided Clang is silently substituted.
 
+Of the LLVM release the tree holds the compilers, lld, the object and DWARF
+tools, the headers, clang's resource directory, the bundled `libclang-cpp` (the
+pragma oracle's) and the static archives of LLVM, Polly and clang. Clang's 93
+archives, 238 MB of the tree's 2.0 GB, are the clang server's (#2071): with
+LLVM's they link it with one copy of LLVM, which `libclang-cpp`, bundling LLVM
+without the targets' initializers, can't give it. They add no measurable
+extraction time, which decompressing the whole 12 GB stream dominates.
+
 For standalone hosted-environment preparation, first prepare a private input
 directory with `hosted-release.sh prepare DIRECTORY` and set
 `BUSTER_HOSTED_RELEASES` to it. A set-but-empty or missing input directory is an

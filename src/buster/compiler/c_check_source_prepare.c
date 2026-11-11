@@ -63,8 +63,9 @@ struct CheckSourceRequest
     // The blocks' objects' lifetimes in the checked program (CheckProgramOptions.lifetimes), as the driver's --tier1 asks
     // for them (#177), for a client whose IR carries them as lifetime markers (ir_source_prepare's, #141).
     bool lifetimes;
-    // Asm statements keep their helpers (CheckProgramOptions.asm_helpers), as the driver's --tier1 has them, for a client
-    // whose IR lowers the typed stream (ir_source_prepare's), which has no operation for a statement placed in its caller.
+    // Asm statements keep their helpers (CheckProgramOptions.asm_helpers) for a client whose IR lowers the typed stream
+    // (ir_source_prepare's), which has no operation for a statement's row, and whose text form, which its round trips
+    // print and parse, has none for an asm body (#1839) either; the driver's --tier1 places bodies instead (asm_bodies).
     bool asm_helpers;
     // The tests' injected failure: the stage it stops the file at (CHECK or PROGRAM; READY for none), as a real failure
     // there would, the checker's running out of a resource, or the program's with `fault_unsupported` a refusal by name
