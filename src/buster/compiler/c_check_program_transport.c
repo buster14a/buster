@@ -2042,6 +2042,62 @@ static __attribute__((noinline)) void check_lower_transport_bit_builtin(CheckLow
     }
 }
 
+// __builtin_ia32_maskmovdqu(d, n, p) (_mm_maskmoveu_si128's, and _mm_maskmove_si64's through it) where the target hasn't
+// AVX-512BW's byte store under a mask (#2240): MASKMOVDQU writes through rdi, an implicit register no row takes, so its
+// bytes are stored one at a time, d's byte i at p + i where n's byte i has its top bit set, else into a private scratch
+// slot, the address chosen arithmetically (check_lower_masked_choose's way), so that no byte past the selected ones is
+// touched. The non-temporal hint is a hint: the bytes written are MASKMOVDQU's. The arguments are evaluated first to last.
+static void check_lower_transport_maskmove(CheckLowerWriter* writer, uint32_t node)
+{
+    const CheckProgram* program = writer->program;
+    const CheckStream* stream = program->stream;
+    const uint32_t first = program->input->graph.argument_offsets[node];
+    if (program->input->graph.argument_counts[node] != 3)
+    {
+        check_lower_fail(writer, CHECK_PROGRAM_INVALID);
+    }
+    else
+    {
+        const TypeId data = stream->argument_conversions[first].type;
+        const TypeId selector = stream->argument_conversions[first + 1].type;
+        const uint32_t locals[3] = { check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64), check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64),
+                                     check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64) };
+        const uint32_t real = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
+        const uint32_t other = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
+        const uint32_t scratch = check_lower_addressed_temporary(writer, BUSTER_TYPED_CLASS_U64);
+        for (uint32_t i = 16; i-- > 0 && writer->output->status == CHECK_PROGRAM_OK;)
+        {
+            check_lower_instruction(writer, BUSTER_TYPED_SET, BUSTER_TYPED_CLASS_U8, 0);
+            check_lower_transport_read(writer, locals[0], data, i, BUSTER_TYPE_UCHAR);
+            // other ^ ((real ^ other) & -((n[i] >> 7) & 1)).
+            check_lower_instruction(writer, BUSTER_TYPED_XOR, BUSTER_TYPED_CLASS_U64, 0);
+            check_lower_instruction(writer, BUSTER_TYPED_AND, BUSTER_TYPED_CLASS_U64, 0);
+            check_lower_instruction(writer, BUSTER_TYPED_NEG, BUSTER_TYPED_CLASS_U64, 0);
+            check_lower_instruction(writer, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U64, 0);
+            check_lower_instruction(writer, BUSTER_TYPED_AND, BUSTER_TYPED_CLASS_U32, 0);
+            check_lower_instruction(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U32, 1);
+            check_lower_instruction(writer, BUSTER_TYPED_SHR, BUSTER_TYPED_CLASS_U32, 0);
+            check_lower_instruction(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U32, 7);
+            check_lower_transport_read(writer, locals[1], selector, i, BUSTER_TYPE_UINT);
+            check_lower_instruction(writer, BUSTER_TYPED_XOR, BUSTER_TYPED_CLASS_U64, 0);
+            check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, other);
+            check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, real);
+            check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, other);
+            check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, other);
+            check_lower_instruction(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, scratch);
+            check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, real);
+            check_lower_transport_at(writer, locals[2], i);
+        }
+        check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, locals[2]);
+        check_lower_operand(writer, node, 5, false, stream->argument_conversions[first + 2].type);
+        check_lower_transport_source(writer, selector, locals[1]);
+        check_lower_operand(writer, node, 4, false, selector);
+        check_lower_transport_source(writer, data, locals[0]);
+        check_lower_operand(writer, node, 3, false, data);
+        writer->vectors = true;
+    }
+}
+
 // The address a masked memory builtin's lane takes (check_lower_transport_masked), pushed: the real one, whose local
 // `real` (U64) holds, where the lane's bit of the mask (whose address local `mask` holds, of type `mask_type`) is set,
 // else the other, local `other`'s: other ^ ((real ^ other) & -bit), which reads no memory at either address.

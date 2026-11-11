@@ -7611,6 +7611,8 @@ static __attribute__((noinline)) TypeId check_lower_update_through(const CheckLo
     return half != CHECK_HALF_NONE && other && check_lower_half_excess(writer, half) ? BUSTER_TYPE_FLOAT : calculated;
 }
 
+static void check_lower_transport_maskmove(CheckLowerWriter* writer, uint32_t node);
+
 static void check_lower_update(CheckLowerWriter* writer, uint32_t node)
 {
     const CheckProgram* program = writer->program;
@@ -11842,6 +11844,11 @@ static __attribute__((noinline)) void check_lower_x86_builtin(CheckLowerWriter* 
         const TypeId type = stream->argument_conversions[first].type;
         check_lower_convert(writer, type, check_stream_type(stream, node));
         check_lower_operand(writer, node, 3, false, type);
+    }
+    else if (check_lower_x86_named(info, "__builtin_ia32_maskmovdqu") &&
+             (writer->target.features & (BUSTER_X86_FEATURE(AVX512BW) | BUSTER_X86_FEATURE(AVX512VL))) != (BUSTER_X86_FEATURE(AVX512BW) | BUSTER_X86_FEATURE(AVX512VL)))
+    {
+        check_lower_transport_maskmove(writer, node);
     }
     else if (!check_lower_x86_named(info, "__builtin_assume"))
     {

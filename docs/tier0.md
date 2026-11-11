@@ -701,6 +701,10 @@ at the target's forms, by both of the checker's paths:
   element by element (`check_lower_transport_bit_builtin`, #1834): each element zero-extended into an unsigned int (or
   unsigned long long), its value by SWAR (bit swaps, smears and population counts), then truncated, which is clang's
   value; funnel shifts by `(a << s) | ((b >> 1) >> (w - 1 - s))` and its mirror.
+  `__builtin_ia32_maskmovdqu` (`_mm_maskmoveu_si128`'s, and `_mm_maskmove_si64`'s through it) without AVX-512BW's
+  masked byte store, which its row takes, is byte by byte (`check_lower_transport_maskmove`, #2240): MASKMOVDQU writes
+  through rdi, which no row takes, so each byte selected by its mask byte's top bit is stored at its address and each
+  other one into a scratch slot, the address chosen arithmetically; the non-temporal hint is dropped.
   `__builtin_convertvector`'s integer extensions without SSE4.1 and truncations without AVX-512 are sequences too
   (`check_vector_baseline_resize`, #1834): an extension unpacks the low elements with zeros, or with themselves and
   shifts them right arithmetically (a qword's high dword is `psrad` by 31 of a copy); a truncation takes a qword's low
