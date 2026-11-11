@@ -9359,7 +9359,9 @@ static bool check_driver_typo_edits(CheckDriverTypoEdits* edits, const Parser* o
     };
     const uint32_t count = original->tokens.count;
     bool added = false;
-    // The tails left out (ParseDiagnostic.tail): where the name's search suggested no keyword, the next view keeps it.
+    // The tails left out (ParseDiagnostic.tail): where the name stays undeclared (a keyword suggested, a tie, or nothing
+    // near), clang's expression is invalid and its rest skipped; where it was declared or a correction took a value, the
+    // next view keeps the tail, with its error.
     for (uint32_t d = 0; d < diagnostic_count; d += 1)
     {
         const uint32_t name = diagnostics[d].tail && diagnostics[d].token != 0 ? diagnostics[d].token - 1 : BUSTER_CHECK_NONE;
@@ -9367,8 +9369,7 @@ static bool check_driver_typo_edits(CheckDriverTypoEdits* edits, const Parser* o
         for (uint32_t r = 0; name < count && r < input->report_count; r += 1)
         {
             const CheckInputReport* report = input->reports + r;
-            const uint32_t keyword = report->detail & (CHECK_TYPO_STATEMENT - 1);
-            confirmed |= report->message == CHECK_INPUT_UNDECLARED && keyword != 0 && (report->detail & CHECK_TYPO_STATEMENT) == 0 &&
+            confirmed |= report->message == CHECK_INPUT_UNDECLARED && (report->detail & CHECK_TYPO_STATEMENT) == 0 &&
                          check_driver_original_token(original, checking, report->token) == name;
         }
         if (name < count && !confirmed && edits->rejected_count < BUSTER_CHECK_DRIVER_TYPO_EDITS)

@@ -769,6 +769,9 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "void take(int, int);\nint g(int a)\n{\n    int w = sizeo * 2;\n    int v = sizeo a b, k = zzz1;\n    take(sizeo a, zzz2);\n"
         "    a = sizeo a + zzz3; zzz4;\n    if (sizeo a) zzz5;\n    a = 1 + sizeo \"abc\"; zzz6;\n    int y = retrn 5;\n    return sizeo a + zzz7;\n"
         "}\nint h(int a) { int unused; if (a = 1) return 2; return 0; }\n",
+        // A name near a keyword before an operand that no search corrects (whilx is as near as while): clang's expression is
+        // invalid all the same, its rest skipped without the parser's error.
+        "int whilx;\nint f(int a)\n{\n    int v = whilz a;\n    return v;\n}\n",
         // Three thousand names and fifty-three typos, written out where the fixture is (check_test_typo_stress): each
         // search reads the visible names once (c_check_typo.c).
         "/* typo stress */\n",
