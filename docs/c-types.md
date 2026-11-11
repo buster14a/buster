@@ -539,10 +539,14 @@ and none canonicalizes.
   node.
 - **Hash-consing.** Nodes are hash-consed in an open-addressed index of their
   own, and the table grows from an arena.
-- **Storage.** The checker keeps the table and its per-declaration column
-  (`CheckInput.sugar`, `declared_sugar`) and allocates them when a unit's
-  first declarator writes sugar. A unit without any pays one test of each
-  declarator's merged convention.
+- **Storage.** The checker keeps the table, and a map of the few declaring
+  tokens with sugar to their nodes (`CheckInput.sugar`, `sugar_tokens`,
+  `check_input_declared_sugar`). Both are allocated from the output arena
+  when a unit's first declarator writes sugar. A unit without any pays one
+  test of each declarator's merged convention.
+  - **Why a map:** a word per token, zeroed, cost main.c's compile 0.5 to 0.7%
+    of its user cycles on the 9700X (#2326), since main.c declares a few
+    functions with conventions.
 
 `type_sugar_print` is clang's `TypePrinter` over the nodes. It finds the
 levels that print a given type: the node itself, a node under it (a
