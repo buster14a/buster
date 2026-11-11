@@ -1226,7 +1226,7 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
             const CheckInputSymbolPragma* record = check_input_symbol_warning(input, event);
             const CheckInputMsPragma* layout = check_input_ms_warning(input, event);
             const CheckInputPackPragma* packing = check_input_pack_warning(input, event);
-            result = packing != NULL ? check_input_pack_align_message(packing) : result;
+            result = packing != NULL ? check_input_pack_message(packing, event, scratch) : result;
             if (layout != NULL)
             {
                 result = layout->warning == 1 ? "incorrect use of '#pragma ms_struct on|off' - ignored" :
@@ -2094,12 +2094,46 @@ static bool check_driver_warning_events_at(const Parser* parser, Preprocessor* p
                         const CheckInputSymbolPragma* record = check_input_symbol_warning(input, event);
                         const CheckInputMsPragma* layout = check_input_ms_warning(input, event);
                         const CheckInputPackPragma* packing = check_input_pack_warning(input, event);
-                        // An align=reset's empty stack is Sema's, where the parser handles the directive (#1849).
+                        // An align=reset's empty stack is Sema's, where the parser handles the directive, and so are pack's
+                        // own Sema warnings and its unterminated pushes at the unit's end (#1849).
                         const bool semantic = (record != NULL && record->warning >= CHECK_SYMBOL_WARNING_UNDECLARED) ||
-                                              (packing != NULL && packing->align_warning == CHECK_PACK_ALIGN_RESET_EMPTY);
+                                              (packing != NULL && check_input_pack_semantic(packing, event));
                         const uint32_t location = record != NULL ? record->diagnostic_location : layout != NULL ? layout->diagnostic_location :
-                                                  packing != NULL ? packing->diagnostic_location : 0;
-                        if (location != 0)
+                                                  packing != NULL && !semantic ? packing->diagnostic_location : 0;
+                        // An unterminated push's note (#1849): at the directive that set the current value, or without a
+                        // place where none did.
+                        const bool pack_note = packing != NULL && event->payload.name == CHECK_PACK_MESSAGE_UNTERMINATED && event->payload.token != BUSTER_CHECK_PACK_NO_NOTE;
+                        const bool pack_placed = pack_note && event->payload.token != BUSTER_CHECK_PACK_UNLOCATED_NOTE && event->payload.token < pp->output.count;
+                        const PPDiagnosticSourceNote pack_notes[1] = {
+                            {
+                                .location = pack_placed ? pp->output.locations[event->payload.token] : 0,
+                                .origin = pack_placed ? pp_history_at(pp, event->payload.token) : 0,
+                                .message = "did you intend to use '#pragma pack (pop)' instead of '#pragma pack()'?",
+                            },
+                        };
+                        // An inclusion that changes the value (#1849): at its file name, where its output ends, with clang's note
+                        // at the directive that set the value there, or without a place where none did.
+                        const CheckPackInclude* included = packing != NULL && event->payload.name == CHECK_PACK_MESSAGE_INCLUDE &&
+                                                           event->payload.token < input->pack_pragmas->include_count ? input->pack_pragmas->includes + event->payload.token : NULL;
+                        const bool include_placed = included != NULL && included->note < pp->output.count;
+                        const PPDiagnosticSourceNote include_notes[1] = {
+                            {
+                                .location = include_placed ? pp->output.locations[included->note] : 0,
+                                .origin = include_placed ? pp_history_at(pp, included->note) : 0,
+                                .message = "previous '#pragma pack' directive that modifies alignment is here",
+                            },
+                        };
+                        if (included != NULL)
+                        {
+                            pp_diagnose_placed_sources_phase(pp, disposition, included->location, 0, included->exit, PP_DIAGNOSTIC_LEXICAL, include_notes, 1, "%s%s",
+                                                             message, suffix);
+                        }
+                        else if (pack_note)
+                        {
+                            pp_diagnose_placed_sources_phase(pp, disposition, pp->output.locations[source], pp_history_at(pp, source), boundary, PP_DIAGNOSTIC_SEMANTIC,
+                                                             pack_notes, 1, "%s%s", message, suffix);
+                        }
+                        else if (location != 0)
                         {
                             const uint32_t saved_position = pp->diagnostic_position;
                             pp->diagnostic_position = event->payload.token;
@@ -2108,7 +2142,13 @@ static bool check_driver_warning_events_at(const Parser* parser, Preprocessor* p
                         }
                         else
                         {
-                            pp_diagnose_output_phase(pp, disposition, source, semantic ? boundary : event->payload.token,
+                            // A pack directive's own Sema warning is at the directive, which the parser consumes before it
+                            // reads on (#1849): after its own parser warnings, before the next directive's.
+                            // That is the parser's boundary at the next token, where it handles the annotation, but before the
+                            // next pack directive, whose line it lexes only after.
+                            const bool directive = packing != NULL && semantic && event->completion_kind != CHECK_WARNING_COMPLETE_TU_END && !packing->align;
+                            const uint32_t following = directive ? check_input_pack_following(parser, input->pack_pragmas, packing) : UINT32_MAX;
+                            pp_diagnose_output_phase(pp, disposition, source, directive && following < boundary ? following : semantic ? boundary : event->payload.token,
                                                      semantic ? PP_DIAGNOSTIC_SEMANTIC : PP_DIAGNOSTIC_LEXICAL, "%s%s", message, suffix);
                         }
                     }

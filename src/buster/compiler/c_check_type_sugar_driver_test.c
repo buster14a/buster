@@ -537,6 +537,48 @@ static const CheckDriverDefaultWarningFixture check_driver_type_sugar_fixtures[]
         .warnings = 14,
         .errors = 5,
     },
+    {
+        // A discarded call whose callee has no function's name keeps its return type's typedef (#1447,
+        // check_common_ignored_callee): a member's, an element's, a call's result's, a comma's and a conditional's value
+        // and a pointer to a pointer's dereference, each by the typedef past its declarator's `*`.
+        .name = "nodiscard return typedefs through nameless callees",
+        .source = "typedef int R __attribute__((warn_unused_result));\n"
+                  "struct __attribute__((warn_unused_result)) S { int x; };\n"
+                  "typedef R (*FP)(void);\n"
+                  "struct T { R (*m)(void); struct S (*sm)(void); } t, *pt;\n"
+                  "R (*arr[2])(void);\n"
+                  "FP get(void);\n"
+                  "void f(int n, R (**pp)(void), FP a, FP b, struct S (*sp)(void))\n"
+                  "{\n"
+                  "    t.m();\n"
+                  "    pt->sm();\n"
+                  "    arr[0]();\n"
+                  "    get()();\n"
+                  "    (n, a)();\n"
+                  "    (n ? a : b)();\n"
+                  "    (*pp)();\n"
+                  "    sp();\n"
+                  "    a();\n"
+                  "}\n",
+        .options = { "-Wall" },
+        .warnings = 10,
+    },
+    {
+        // The same callees whose pointer returns another type: no warning.
+        .name = "nameless callees of unmarked return types",
+        .source = "typedef int R __attribute__((warn_unused_result));\n"
+                  "typedef int Q;\n"
+                  "struct T { Q (*m)(void); R *(*rp)(void); } t;\n"
+                  "Q (*arr[2])(void);\n"
+                  "R *(*parr[2])(void);\n"
+                  "Q (*get(void))(void);\n"
+                  "void f(int n, Q (**pp)(void), R *(**rpp)(void))\n"
+                  "{\n"
+                  "    t.m(); t.rp(); arr[0](); parr[1](); get()(); (*pp)(); (*rpp)(); (n, arr[0])();\n"
+                  "}\n",
+        .options = { "-Wall" },
+        .warnings = 1,
+    },
 };
 
 // A variable array's size expression as written (#1447, check_driver_vla_bounds), through pointers, arrays, typedefs
