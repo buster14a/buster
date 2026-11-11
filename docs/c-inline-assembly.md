@@ -414,6 +414,11 @@ clang's code gives it (CodeGen's `AddVariableConstraints`;
   (its function's target attributes among them): the helper moves them by
   EVEX's `vmovd` and `vmovq`. Without it clang can't place one ("could not
   allocate output register"), and the lowering refuses it by name;
+- mm0 to mm7, k0 to k7, and the x87's st (st(0)) and st(1) (#1846, the owner's
+  decision on #1447): the variable's operand is an MMX, opmask or x87 one in that
+  register (st at t's depth, st(1) at u's), whatever its constraint's letters,
+  as clang's code places it, of the types that class takes (an opmask's with
+  its moves' features);
 - a high byte register (#1846), `register unsigned char c __asm__("ah")`: a
   byte's operand is the high byte, which the helper loads and stores by its
   name (through a register of the first eight, as a REX prefix can't name it)
@@ -886,10 +891,25 @@ as C's constructors'. Its CFI's frames are an `.eh_frame` atom of their own
 beside the functions' unwind table, its CIE and FDEs as the assembler makes them
 (clang's object shares one CIE between the module's assembly and its
 functions), which the direct path's `.eh_frame_hdr` indexes with the
-functions'. Refused by name, at the first file-scope statement: templates the
-assembler refuses; section groups (COMDAT), which the units' merge doesn't carry;
-and what the templates' names refuse (a label another template defines too, or
-that the unit defines, a reference to another template's `.set` symbol).
+functions'. Its section groups (COMDAT,
+`.section .text.f,"axG",@progbits,f,comdat`) are the link's groups beside
+selectany's (`check_program_emit_asm_groups`, `check_program_sections`), and
+`-c`'s object has clang's `.group` sections: their signatures (the program's
+symbol of the name, which may be C's, a section's, or for a name no symbol has,
+the local symbol in the group's section that clang's assembler makes), flags
+and members, a member's relocation section among them. One unit's direct path
+keeps every group's members, as a link of one object does; a link of several C
+units keeps each signature's first group in the command's order and drops the
+others' members, as a linker does (`check_units_select_groups`), and a mixed
+link's objects go to the linker whole. That selection keys groups by their
+signatures' global names, so in a link of several C units a group whose
+signature isn't a global symbol defined in it (a local label, a section, a name
+of its own, a symbol defined outside it) is refused by name. clang's
+`-Winline-asm` warning about a `.globl` symbol made weak ("changed binding to
+STB_WEAK") isn't modelled, as no assembler binding warning is. Refused by name,
+at the first file-scope statement: templates the assembler refuses, and what the
+templates' names refuse (a label another template defines too, or that the unit
+defines, a reference to another template's `.set` symbol).
 
 ## What the lowering refuses
 
@@ -914,9 +934,8 @@ Each refusal names its feature, as the driver prints it ("unsupported: ..."):
   but a vector in a template of no instructions that doesn't refer to it;
 - bit-fields;
 - explicit register variables in registers the helper doesn't place one in
-  (rsp, which is the helper's own, APX's r16 to r31 and the other classes'
-  registers: the x87's, MMX's, the opmasks', YMM's and ZMM's), in XMM16 to
-  XMM31 without AVX-512F,
+  (rsp, which is the helper's own, APX's r16 to r31, st(2) to st(7), YMM's and
+  ZMM's), in XMM16 to XMM31 without AVX-512F,
   as memory inputs (`"m"(r10)`, which clang's code refuses too), and of other
   types than a general register's or an XMM register's (an integer in an XMM
   register's variable);
@@ -1188,5 +1207,5 @@ What the lowering still refuses of what GCC and clang take:
   instructions outside its families (an x87 memory operand without a width,
   `fstp (%rax)`, is refused as clang refuses it);
 - explicit register variables in rsp (clang's code moves the variable's value
-  into it, a local's garbage where it has none), and in the other classes'
-  registers (the x87's, MMX's, the opmasks', YMM's and ZMM's).
+  into it, a local's garbage where it has none), and in YMM's and ZMM's
+  registers and st(2) up.

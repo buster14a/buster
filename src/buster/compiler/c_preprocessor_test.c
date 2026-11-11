@@ -5268,6 +5268,23 @@ static bool pp_test_named_ucns(const char* directory, bool with_clang)
             .warnings = true,
         },
         {
+            // The same of a `\u` or `\U` clang reads as no universal character name (#1447): no hex digit after it, too few, or
+            // a delimited one's empty braces or missing brace, each naming its letter; at the line splice before it, and none
+            // in a skipped group.
+            .name = "a \\u or \\U clang reads as no universal character name",
+            .source = "f\\u\n\\Uj\ng\\u{}\nh\\u{12\ni\\u12\nj\\U0000004\nk\\u{zz}\n#if 0\nl\\u\n#endif\nm\\\n\\u\n",
+            .standard = "gnu17",
+            .expected = "1:2: warning: \\u used with no following hex digits; treating as '\\' followed by identifier\n"
+                        "2:1: warning: \\U used with no following hex digits; treating as '\\' followed by identifier\n"
+                        "3:2: warning: empty delimited universal character name; treating as '\\' 'u' '{' '}'\n"
+                        "4:2: warning: incomplete delimited universal character name; treating as '\\' 'u' '{' identifier\n"
+                        "5:2: warning: incomplete universal character name; treating as '\\' followed by identifier\n"
+                        "6:2: warning: incomplete universal character name; treating as '\\' followed by identifier\n"
+                        "7:2: warning: incomplete delimited universal character name; treating as '\\' 'u' '{' identifier\n"
+                        "11:2: warning: \\u used with no following hex digits; treating as '\\' followed by identifier\n",
+            .warnings = true,
+        },
+        {
             // -pedantic's warning that a named UCN is clang's extension (#1447): one that starts a token, its name exactly
             // Unicode's, at its backslash and before its character's error; none within an identifier, of a name that isn't
             // Unicode's, in a skipped group, or in a macro's expansion (its definition's once).

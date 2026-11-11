@@ -966,15 +966,6 @@ static void check_test_program_vector_builtin_refusals(CheckTest* test)
           "vector reductions of more than 1024 elements", 0 },
         { "znver5", "typedef float V __attribute__((ext_vector_type(1025)));float tested(V*p){return __builtin_reduce_in_order_fadd(*p,0.0f);}",
           "vector reductions of more than 1024 elements", 0 },
-        { "x86-64-v3", "typedef _Bool b4 __attribute__((ext_vector_type(4)));typedef float e4 __attribute__((ext_vector_type(4)));"
-                       "void tested(b4* m,float* p,e4* r){*r=__builtin_masked_load(*m,p);}",
-          "masked vector memory builtins without AVX-512F and AVX-512VL", 0 },
-        { "znver5", "typedef _Bool b4 __attribute__((ext_vector_type(4)));typedef short e4 __attribute__((ext_vector_type(4)));"
-                    "void tested(b4* m,short* p,e4* v){__builtin_masked_scatter(*m,(v4ss){0,1,2,3},*v,p);}",
-          "masked gathers and scatters of 8- and 16-bit elements, which no x86 instruction gathers or scatters", 0 },
-        { "x86-64-v4", "typedef _Bool b16 __attribute__((ext_vector_type(16)));typedef char e16 __attribute__((ext_vector_type(16)));"
-                       "void tested(b16* m,char* p,e16* r){*r=__builtin_masked_expand_load(*m,p);}",
-          "masked expanding loads and compressing stores of 8- and 16-bit elements without AVX-512 VBMI2", 0 },
         // A floating maximum or minimum of a vector its elements don't fill, which LLVM reduces in an order of its width's.
         { "znver5", "typedef float f7 __attribute__((ext_vector_type(7)));int tested(int n){f7 a={(float)n};float c=__builtin_reduce_minimum(a);return (int)c;}",
           "floating maximum and minimum reductions of vectors their elements don't fill", 2 },

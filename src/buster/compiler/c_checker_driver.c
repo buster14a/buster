@@ -2598,10 +2598,9 @@ static bool check_driver_report_keeps_valid(const CheckInputReport* report)
     return report->recovered && (specifier || check_input_attribute_recoverable(report));
 }
 
-// Whether `token` is inside a declarator's parameter list: an enclosing `(`, matched backward over the tokens, is a
-// parameter list's, before a `;` or a brace. That `(` is one the parser marks so, or one right after a name that declares
-// itself (the vector parser marks a definition's whose first parameter starts with an attribute as a call's, #1968).
-static bool check_driver_in_parameters(const Parser* parser, const CheckInput* input, uint32_t token)
+// Whether `token` is inside a declarator's parameter list: an enclosing `(`, matched backward over the tokens, is one the
+// parser marks a parameter list's (both paths do, #1968), before a `;` or a brace.
+static bool check_driver_in_parameters(const Parser* parser, uint32_t token)
 {
     uint32_t depth = 0;
     bool inside = false;
@@ -2610,10 +2609,7 @@ static bool check_driver_in_parameters(const Parser* parser, const CheckInput* i
     {
         at -= 1;
         const uint8_t kind = parser->tokens.kinds[at];
-        const bool open = kind == PARSE_KIND_L_PAREN && depth == 0;
-        const bool declared = at > 0 && parser->tokens.kinds[at - 1] == PARSE_KIND_IDENTIFIER && input->declarations != NULL && at - 1 < input->token_count &&
-                              input->declarations[at - 1] == at - 1;
-        inside = open && (parser->tree.roles[at] == PARSE_ROLE_OPEN_FUNCTION || declared);
+        inside = kind == PARSE_KIND_L_PAREN && depth == 0 && parser->tree.roles[at] == PARSE_ROLE_OPEN_FUNCTION;
         depth += kind == PARSE_KIND_R_PAREN ? 1u : 0u;
         depth -= kind == PARSE_KIND_L_PAREN && depth != 0 ? 1u : 0u;
         scanning = !inside && !(depth == 0 && (kind == PARSE_KIND_SEMI || kind == PARSE_KIND_L_BRACE || kind == PARSE_KIND_R_BRACE));
@@ -2634,7 +2630,7 @@ static bool check_driver_error_scoped(const Parser* parser, const CheckInput* in
     const bool attribute = check_input_attribute_recoverable(report);
     const bool parsed = message == CHECK_INPUT_ATTRIBUTE_STRING_ARGUMENT ||
                         (message == CHECK_INPUT_ATTRIBUTE_ARGUMENT && (report->detail & 0xffu) == CHECK_ARGUMENT_STRING_LITERAL);
-    const bool early = report->recovered && (specifier || (attribute && (parsed || check_driver_in_parameters(parser, input, report->token))));
+    const bool early = report->recovered && (specifier || (attribute && (parsed || check_driver_in_parameters(parser, report->token))));
     return !early || check_driver_in_body(parser, report->token);
 }
 
@@ -7462,6 +7458,7 @@ typedef struct CheckUnitsKept CheckUnitsKept;
 static bool check_units_keep_object(CheckUnitsKept* kept, const Object* object);
 static bool check_units_keep(CheckUnitsKept* kept, const Link* link, const CheckProgram* program, const Parser* parser, Preprocessor* pp,
                              const ObjectDebug* debug);
+static uint32_t check_units_group_unkept(const Link* link);
 
 // Whether `link`'s symbol `s` is a local `.L` label defined in code, which -c's object leaves out as an assembler's
 // temporary (#1845). The helpers' own functions (`.Lbuster_asm_N`, `.Lbuster_builtin_*`), which clang's code has no
@@ -7589,6 +7586,17 @@ static bool check_driver_object(const CheckProgram* program, const CheckDataPrep
         }
     }
     check_clock_mark(stage_clock, CHECK_STAGE_DEBUG);
+    // A section group of the file-scope assembly's (#1848) whose signature is no global symbol it defines, which -c's
+    // object has as clang's, has no name the units' selection keys (check_units_group_unkept): refused by name, at the
+    // first file-scope statement, in a link of several C units.
+    if (valid && kept != NULL && !foreign && check_units_group_unkept(&code.link) != 0)
+    {
+        code.status = CHECK_PROGRAM_UNSUPPORTED;
+        code.reason = "file-scope assembly's section groups whose signature isn't a global symbol defined in the group, in a link of several units";
+        code.token = code.lowered.asms.file_token;
+        check_driver_emission_failed(parser, pp, &code);
+        valid = false;
+    }
     if (valid && kept != NULL)
     {
         const LinkError checked = link_check(&code.link);
