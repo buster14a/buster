@@ -71,12 +71,13 @@ through `testfixture` (below).
   isn't compared). Run it as a user other than root: as root, eleven of
   SQLite's scripts that test read-only files and directories fail for every
   build.
-  - **Per PR:** `correctness.tests` runs it with
-    `tests/sqlite/testfixture-subset.txt`, the 1,215 scripts that took under
-    100 ms each in Tier 0's full run, about a minute in all.
-  - **On main and nightly:** `hosted-correctness.yml`'s `sqlite-full` job runs
-    the whole permutation by the plain portable row's compiler, about 9
-    minutes a build on a 4-CPU runner.
+  - **Every row (pull requests and main pushes too):** `correctness.tests`
+    runs it with `tests/sqlite/testfixture-subset.txt`, the 1,215 scripts
+    that took under 100 ms each in Tier 0's full run, about a minute in all.
+  - **Nightly and dispatched runs:** `hosted-correctness.yml`'s `sqlite-full`
+    job runs the whole permutation by the plain portable row's compiler,
+    about 9 minutes a build on a 4-CPU runner. Main's pushes skip it (#2334):
+    it took 27 to 41 runner-minutes of each push run.
   - **Tcl's pin:** the distribution's package. Hosted: Ubuntu 26.04's
     `tcl8.6-dev` 8.6.17+dfsg-1build1 (`setup-hosted.sh` installs it;
     `tcl-config.sh` fails a hosted run on another version, to be pinned

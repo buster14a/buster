@@ -19,10 +19,10 @@ trap 'rm -rf "$staging"' EXIT
 fetch_package()
 {
     local path="$1" digest="$2" filename="${1##*/}"
-    # Curl's default retry policy omits transport resets (exit 35/56): a stalled download that ended in a reset failed
-    # main's x86-64 shard 3 (run 42888849321). These packages are SHA-256 checked, so retry all errors.
-    curl --fail --location --retry 8 --retry-all-errors --retry-max-time 240 "https://archive.ubuntu.com/ubuntu/$path" \
-        --output "$staging/$filename"
+    # cached-download.sh checks the SHA-256 and retries every error for 240 s (a transport reset failed main's x86-64
+    # shard 3 in run 42888849321). A hosted job reads the copy its preparation job acquired, with no network
+    # (BUSTER_CI_CACHE and BUSTER_CI_OFFLINE, tools/ci/hosted-offline.sh).
+    bash "$(dirname "$0")/cached-download.sh" "https://archive.ubuntu.com/ubuntu/$path" "$digest" "$staging/$filename"
     printf '%s  %s\n' "$digest" "$staging/$filename" | sha256sum --check --status
     ar p "$staging/$filename" data.tar.zst | tar --zstd -xf - -C "$staging" --no-same-owner
 }

@@ -422,6 +422,112 @@ static void check_test_driver_fatal_errors(CheckTest* test, const char* clang, c
     unlink(object);
 }
 
+// The diagnostic lines of a driver's output (#1970): its warnings, errors and notes, and the include stacks before them,
+// into `lines`; false where they don't fit.
+static bool check_test_driver_preprocessor_lines(const char* text, char* lines, size_t capacity)
+{
+    size_t length = 0;
+    bool fits = capacity != 0;
+    lines[0] = 0;
+    const char* stop = text != NULL ? text + strlen(text) : NULL;
+    for (const char* line = text; fits && line != NULL && line < stop;)
+    {
+        const char* end = memchr(line, '\n', (size_t)(stop - line));
+        const size_t size = end != NULL ? (size_t)(end - line) : (size_t)(stop - line);
+        const bool kept = memmem(line, size, ": error: ", 9) != NULL || memmem(line, size, ": warning: ", 11) != NULL ||
+                          memmem(line, size, ": note: ", 8) != NULL || (size > 22 && memcmp(line, "In file included from ", 22) == 0);
+        fits = !kept || size + 1 < capacity - length;
+        if (kept && fits)
+        {
+            memcpy(lines + length, line, size);
+            length += size;
+            lines[length++] = '\n';
+            lines[length] = 0;
+        }
+        line = end != NULL ? end + 1 : NULL;
+    }
+    return fits;
+}
+
+// The preprocessor's warnings with clang's flags, options and pragmas (#1790, #1970), and the include stack after an
+// attached note in another header (#1970): the whole diagnostic output, clang's and ours, of each fixture under each
+// option set, with real includes and with line markers.
+static void check_test_driver_preprocessor_flags(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    char include[512];
+    char path[640];
+    snprintf(include, sizeof(include), "%s/pp-flags", directory);
+    bool written = (mkdir(include, 0700) == 0 || errno == EEXIST);
+    snprintf(path, sizeof(path), "%s/a.h", include);
+    written = written && parse_test_write(path, "#define M 1\n", 12);
+    snprintf(path, sizeof(path), "%s/b.h", include);
+    static const char b[] = "#define M 2\nint m(void) { return 1 << 36; }\n";
+    written = written && parse_test_write(path, b, sizeof(b) - 1);
+    snprintf(path, sizeof(path), "%s/s.h", include);
+    static const char s[] = "#warning in a system header\n#pragma message(\"hidden there\")\n#define S 1\n#define S 2\n";
+    written = written && parse_test_write(path, s, sizeof(s) - 1);
+    static const char* const sources[] =
+    {
+        "#include \"pp-flags/a.h\"\n#include \"pp-flags/b.h\"\n",
+        "# 1 \"x.c\"\n# 1 \"./pp-flags/a.h\" 1\n#define M 1\n# 2 \"x.c\" 2\n# 1 \"./pp-flags/b.h\" 1\n#define M 2\n"
+        "int m(void) { return 1 << 36; }\n# 3 \"x.c\" 2\n",
+        "#include <s.h>\n#warning text\n#pragma message(\"message\")\n#pragma GCC warning \"gcc\"\n#define A 1\n#define A 2\n"
+        "#ifdef A junk\n#endif junk\n#pragma clang diagnostic push\n#pragma clang diagnostic error \"-W#pragma-messages\"\n"
+        "#pragma message(\"promoted\")\n#pragma clang diagnostic pop\n#pragma clang diagnostic ignored \"-W#warnings\"\n#warning ignored\n"
+        "#pragma clang diagnostic warning \"-W#warnings\"\n#pragma clang diagnostic pop\n#define B@\nint x = 'ab';\n",
+    };
+    static const char* const options[][3] =
+    {
+        { NULL },
+        { "-Werror", NULL },
+        { "-w", NULL },
+        { "-Wno-#warnings", "-Wno-macro-redefined", NULL },
+        { "-Werror=#pragma-messages", "-Wno-error=extra-tokens", NULL },
+        { "-Werror", "-Wno-error=#warnings", NULL },
+        { "-pedantic-errors", NULL },
+        { "-Wno-all", "-Wsystem-headers", NULL },
+        { "-std=c23", "-pedantic", NULL },
+        { "-Wno-everything", NULL },
+    };
+    char source[640];
+    snprintf(source, sizeof(source), "%s/pp-flags.c", directory);
+    for (uint32_t f = 0; written && f < BUSTER_ARRAY_LENGTH(sources); f += 1)
+    {
+        const bool fixture = parse_test_write(source, sources[f], strlen(sources[f]));
+        for (uint32_t o = 0; fixture && o < BUSTER_ARRAY_LENGTH(options); o += 1)
+        {
+            // The line markers' fixture leaves out -pedantic's sets: clang's -Wgnu-line-marker isn't given yet (#2222).
+            const bool compared = !(f == 1 && (o == 6 || o == 8));
+            char* theirs_arguments[16] = { (char*)clang, "-fsyntax-only", "-std=gnu17", "-fno-color-diagnostics", "-isystem", include };
+            char* ours_arguments[16] = { (char*)executable, "-fsyntax-only", "-std=gnu17", "-isystem", include };
+            uint32_t theirs_count = 6;
+            uint32_t ours_count = 5;
+            for (uint32_t k = 0; k < 3 && options[o][k] != NULL; k += 1)
+            {
+                theirs_arguments[theirs_count++] = (char*)options[o][k];
+                ours_arguments[ours_count++] = (char*)options[o][k];
+            }
+            theirs_arguments[theirs_count] = source;
+            ours_arguments[ours_count] = source;
+            char* theirs = NULL;
+            char* ours = NULL;
+            const int theirs_status = compared ? check_test_driver_spawn(theirs_arguments, &theirs) : 0;
+            const int ours_status = compared ? check_test_driver_spawn(ours_arguments, &ours) : 0;
+            char expected[8192];
+            char actual[8192];
+            const bool read = check_test_driver_preprocessor_lines(theirs, expected, sizeof(expected)) && check_test_driver_preprocessor_lines(ours, actual, sizeof(actual));
+            char description[20000];
+            snprintf(description, sizeof(description), "preprocessor flags: fixture %u, options %u: status %d (clang %d), diagnostics\n%s(clang's\n%s)", f, o,
+                     ours_status, theirs_status, actual, expected);
+            check_test_expect(test, !compared || (read && theirs != NULL && ours_status == theirs_status && strcmp(actual, expected) == 0), description);
+            free(theirs);
+            free(ours);
+        }
+    }
+    check_test_expect(test, written, "preprocessor flags: the fixtures are written");
+    unlink(source);
+}
+
 static void check_test_driver_error_limits(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     const uint32_t sizes[] = { 0, 1, 19, 20, 21, 2000 };
@@ -711,6 +817,10 @@ static void check_test_driver_error_limits(CheckTest* test, const char* clang, c
     if (check_test_driver_takes())
     {
         check_test_driver_fatal_errors(test, clang, executable, directory);
+    }
+    if (check_test_driver_takes())
+    {
+        check_test_driver_preprocessor_flags(test, clang, executable, directory);
     }
     if (check_test_driver_takes())
     {

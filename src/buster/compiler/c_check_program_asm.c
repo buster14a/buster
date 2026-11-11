@@ -52,7 +52,8 @@
 // What the lowering refuses, by name (CheckProgramAsm.reason): an asm goto's label as anything but a jmp's or a jcc's
 // target, flag outputs of a size no integer store covers or with other alternatives, f's x87 registers, the vector
 // register classes and the other letters it doesn't place (p, Y but Yk, the floating constants), MMX operands with a
-// modifier or beside x87 ones, opmask operands with a modifier or without their moves' features, x87 operands and clobbers off the stack's top, symbolic immediates
+// modifier, opmask operands with a modifier or without their moves' features, x87 operands and clobbers off the stack's
+// top, symbolic immediates
 // and constants outside their
 // letter's range, operands of types no general or XMM register holds by value (but a vector in a template of no
 // instructions, BUSTER_CHECK_ASM_HELD), bit-fields, explicit register variables in registers it doesn't place one in
@@ -302,6 +303,8 @@ struct CheckAsmConstraint
     uint32_t general;
     uint32_t tied;
     uint8_t fixed_vector;
+    // An explicit register variable's MMX register's number plus one (#1846), 0 for any.
+    uint8_t fixed_mmx;
     uint8_t x87;
     // A flag output's condition code plus one (x86's, check_asm_flag_condition), 0 for none.
     uint8_t flag;
@@ -1325,8 +1328,12 @@ static Tier0Code check_asm_helper_code(const CheckAsmPlace* places, uint32_t cou
 // their registers (CheckProgramAsm.inline_passed): the body loads only the x87's. Returns the count, and the template's
 // first record in `*first` (its branches' and labels' records are past it), with 0 records and `*records` 0 without room
 // in `output`. A statement of no records but a label's (#1839) has none, and `*records` is then 0 too: `*room` says which.
+// An asm goto's (`labels` of them, #1839's item 2) has the helper's exits after the template (check_asm_helper_code's):
+// the fall-through's move of 0 into `exit` and its jump to the stores, then each label's move of its index plus one and
+// jump (the last one falling into them), and after the stores the exit's move into eax, which its call row returns; the
+// caller makes the jumps branches.
 static uint32_t check_asm_inline_code(const CheckAsmPlace* places, uint32_t count, const AsmCode* code, const uint8_t stores[2], uint32_t pops,
-                                      bool passed, X86Instruction** records, uint32_t* first, bool* room, Arena* output)
+                                      bool passed, uint32_t labels, uint8_t exit, X86Instruction** records, uint32_t* first, bool* room, Arena* output)
 {
     uint32_t loads = 0;
     uint32_t stored = 0;
@@ -1343,8 +1350,11 @@ static uint32_t check_asm_inline_code(const CheckAsmPlace* places, uint32_t coun
     }
     // An x87 output that shares its depth with a later one is stored from a copy, one record more (fld %st(0)). An MMX or
     // opmask operand's load takes 2 records (into rax, then its register) and A's pair's 2; their stores 3 at most (the
-    // address, then the register's bytes through a general register, or A's two halves).
-    const uint64_t capacity = (uint64_t)loads + code->count + 3 * (uint64_t)stored + 5 * (uint64_t)flags + pops + 2 * (uint64_t)mmx_loads + 3 * (uint64_t)mmx_stores;
+    // address, then the register's bytes through a general register, or A's two halves). An asm goto's exits: a move and a
+    // jump each but the last one's, and the exit's move into eax after the stores.
+    const uint64_t exits = labels != 0 ? 2 * (uint64_t)labels + 1 : 0;
+    const uint64_t capacity = (uint64_t)loads + code->count + exits + 3 * (uint64_t)stored + 5 * (uint64_t)flags + pops + 2 * (uint64_t)mmx_loads + 3 * (uint64_t)mmx_stores +
+                              (labels != 0 ? 1 : 0);
     X86Instruction* written = capacity != 0 && capacity <= UINT32_MAX ? BUSTER_ARENA_PUSH_ARRAY(output, X86Instruction, capacity) : 0;
     *room = capacity == 0 || written != 0;
     uint32_t at = 0;
@@ -1418,6 +1428,14 @@ static uint32_t check_asm_inline_code(const CheckAsmPlace* places, uint32_t coun
             memcpy(written + at, code->records, (uint64_t)code->count * sizeof(X86Instruction));
         }
         at += code->count;
+        for (uint32_t e = 0; e <= labels && labels != 0; e += 1)
+        {
+            written[at++] = (X86Instruction){ .form = X86_FORM_MOV_R32_IMM32, .rm = exit, .immediate = (int32_t)e };
+            if (e != labels)
+            {
+                written[at++] = (X86Instruction){ .form = X86_FORM_JMP_REL8 };
+            }
+        }
         for (uint32_t k = 0; k < count; k += 1)
         {
             const CheckAsmPlace* place = places + k;
@@ -1523,6 +1541,10 @@ static uint32_t check_asm_inline_code(const CheckAsmPlace* places, uint32_t coun
         {
             written[at++] = (X86Instruction){ .form = X86_FORM_FSTP_ST, .rm = 0, .mode = BUSTER_X86_REGISTER_DIRECT };
         }
+        if (labels != 0)
+        {
+            written[at++] = (X86Instruction){ .form = X86_FORM_MOV_R32_RM32, .reg = X86_REGISTER_RAX, .rm = exit, .mode = BUSTER_X86_REGISTER_DIRECT };
+        }
     }
     *records = written;
     return at;
@@ -1595,8 +1617,10 @@ static bool check_asm_inline_passes(const CheckAsmPlace* places, uint32_t count)
 // template's own to its labels, a trap), as unwind_tier0_frame refuses in a function's body, or that writes a register
 // holding the frame (rsp, rbp, r15), but on its way out of the function. A form x86_semantics.c doesn't cover takes
 // check_asm_implicit's registers, or none for an x87 form's, or keeps the helper. Into `*masks`, the opmask registers its
-// records write (CheckProgramAsm.inline_masks).
-static uint32_t check_asm_inline_touched(const CheckAsmPlace* places, uint32_t count, const AsmCode* code, uint32_t taken, uint32_t vectors, uint8_t* masks)
+// records write (CheckProgramAsm.inline_masks). An asm goto's jumps to its labels (`gotos`, #1839's item 2) are branches of
+// the body too, to its exits.
+static uint32_t check_asm_inline_touched(const CheckAsmPlace* places, uint32_t count, const AsmCode* code, const CheckAsmGoto* gotos, uint32_t goto_count, uint32_t taken,
+                                         uint32_t vectors, uint8_t* masks)
 {
     uint32_t opmask_writes = 0;
     uint64_t written = (uint64_t)(taken & 0xffffu & ~(1u << X86_REGISTER_RSP)) | ((uint64_t)(vectors & 0xffffu) << 16);
@@ -1627,6 +1651,10 @@ static uint32_t check_asm_inline_touched(const CheckAsmPlace* places, uint32_t c
             {
                 branch |= code->branches[b] == k;
                 target |= k > r && code->targets[b] == k;
+            }
+            for (uint32_t j = 0; j < goto_count; j += 1)
+            {
+                branch |= gotos[j].record == k;
             }
             out = !target && check_asm_return(code->records[k].form);
             if (branch || target)
@@ -1681,6 +1709,10 @@ static uint32_t check_asm_inline_touched(const CheckAsmPlace* places, uint32_t c
             for (uint32_t b = 0; b < code->branch_count; b += 1)
             {
                 local |= code->branches[b] == r;
+            }
+            for (uint32_t j = 0; j < goto_count; j += 1)
+            {
+                local |= gotos[j].record == r;
             }
             const uint32_t control = x86_effects_control(effects);
             placed = (control == BUSTER_X86_CONTROL_NONE || (local && (control == BUSTER_X86_CONTROL_JUMP || control == BUSTER_X86_CONTROL_BRANCH))) &&
@@ -1917,9 +1949,10 @@ static bool check_asm_noop_cast(const TypeTable* types, TypeId source, TypeId de
 // "r"((unsigned long)r10) is in r10 but "r"((int)r10) and "r"(r10 + 0) aren't. Its constraint is then that register,
 // whatever its letters: "a"(r10) is in r10, and a matching input is in it rather than in its output's register. A
 // general register's number (0 to 15, by any of its names), 16 plus an XMM register's (16 to 47: XMM16 up, #1846), 48
-// plus a high byte's register's (ah 48, ch 49, dh 50, bh 51), -1 for an operand that names no such variable, or -2 for
-// a register the lowering doesn't place one in: rsp, which is the helper's (clang moves the variable's value into it),
-// APX's r16 to r31 and the other classes (the x87's, MMX's, the opmasks', YMM's and ZMM's).
+// plus a high byte's register's (ah 48, ch 49, dh 50, bh 51), 64 plus an MMX register's (mm0 64 to mm7 71), 72 plus an
+// opmask register's (k0 72 to k7 79), 80 for st (st(0)) and 81 for st(1) (#1846), -1 for an operand that names no such
+// variable, or -2 for a register the lowering doesn't place one in: rsp, which is the helper's (clang moves the
+// variable's value into it), APX's r16 to r31, the x87's deeper registers, YMM's and ZMM's.
 // An object's id is its first declaration's token plus one, which has its attributes.
 static int32_t check_asm_variable_register(const CheckProgram* program, uint32_t node)
 {
@@ -1970,6 +2003,13 @@ static int32_t check_asm_variable_register(const CheckProgram* program, uint32_t
         {
             reg = name.length == 2 && memcmp(name.pointer, high[h], 2) == 0 ? 48 + (int32_t)h : reg;
         }
+        // mm0 to mm7 (64 up) and k0 to k7 (72 up), and the x87's st and st(0) (80) and st(1) (81), as clang names them
+        // (#1846).
+        const bool numbered = name.length == 3 && name.pointer[2] >= '0' && name.pointer[2] <= '7';
+        reg = reg == -2 && numbered && name.pointer[0] == 'm' && name.pointer[1] == 'm' ? 64 + (name.pointer[2] - '0') : reg;
+        reg = reg == -2 && name.length == 2 && name.pointer[0] == 'k' && name.pointer[1] >= '0' && name.pointer[1] <= '7' ? 72 + (name.pointer[1] - '0') : reg;
+        reg = reg == -2 && ((name.length == 2 && memcmp(name.pointer, "st", 2) == 0) || (name.length == 5 && memcmp(name.pointer, "st(0)", 5) == 0)) ? 80 : reg;
+        reg = reg == -2 && name.length == 5 && memcmp(name.pointer, "st(1)", 5) == 0 ? 81 : reg;
         result = reg != -1 ? reg : result;
     }
     return result;
@@ -2352,7 +2392,7 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
         {
             reason = "explicit register variables as inline assembly memory inputs";
         }
-        else if ((variable >= 0 && variable < 16 && registered) || (variable >= 48 && registered))
+        else if ((variable >= 0 && variable < 16 && registered) || (variable >= 48 && variable < 52 && registered))
         {
             // Fixed to it (taken first, below), and not a matching input's: clang gives it the variable's register. A high
             // byte register's (48 to 51) takes its whole register: a byte's is the high byte, a wider value's the
@@ -2371,6 +2411,33 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
             constraint->fixed_vector = (uint8_t)(variable - 15);
             reason = variable >= 32 && (instruction_set->features & BUSTER_X86_FEATURE(AVX512F)) == 0 ?
                      "explicit register variables in XMM16 to XMM31 without AVX-512F" : NULL;
+        }
+        else if (variable >= 64 && variable < 72 && registered)
+        {
+            // An MMX register's variable (#1846), whatever its constraint's letters, as clang's code places it.
+            place->kind = BUSTER_CHECK_ASM_MMX;
+            place->size = (uint8_t)size;
+            place->tied = BUSTER_CHECK_NONE;
+            constraint->fixed_mmx = (uint8_t)(variable - 63);
+        }
+        else if (variable >= 72 && variable < 80 && integer && registered)
+        {
+            // An opmask register's variable (#1846), by k's moves and their features.
+            const uint64_t needed = size <= 2 ? BUSTER_X86_FEATURE(AVX512F) : BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512BW);
+            place->kind = BUSTER_CHECK_ASM_MASK;
+            place->tied = BUSTER_CHECK_NONE;
+            constraint->masks = 1u << (variable - 72);
+            reason = (instruction_set->features & needed) != needed ? size <= 2 ? "inline assembly opmask operands without AVX-512F" :
+                                                                         "inline assembly opmask operands of 4 or 8 bytes without AVX-512BW" : NULL;
+        }
+        else if ((variable == 80 || variable == 81) && x87 != 0)
+        {
+            // st or st(1)'s variable (#1846): t's depth or u's, as clang's code takes it.
+            place->kind = BUSTER_CHECK_ASM_X87;
+            place->tied = BUSTER_CHECK_NONE;
+            place->reg = (uint8_t)(variable - 80);
+            place->size = (uint8_t)x87;
+            constraint->x87 = (uint8_t)(variable - 79);
         }
         else if (variable >= 0)
         {
@@ -2492,6 +2559,19 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
                 reg = (vectors & bit) == 0 ? constraints[k].fixed_vector - 1 : -2;
                 vectors |= bit;
             }
+            else if (pass == 0 && place->kind == BUSTER_CHECK_ASM_MMX && constraints[k].fixed_mmx != 0)
+            {
+                // An explicit register variable's MMX register (#1846), before any other operand takes one.
+                const uint32_t bit = 1u << (constraints[k].fixed_mmx - 1);
+                reg = (mmx & bit) == 0 ? constraints[k].fixed_mmx - 1 : -2;
+                mmx |= bit;
+            }
+            else if (pass == 0 && place->kind == BUSTER_CHECK_ASM_MASK && place->tied == BUSTER_CHECK_NONE && (constraints[k].masks & (constraints[k].masks - 1)) == 0)
+            {
+                // One opmask register (a variable's, #1846), before the others take one.
+                reg = (masks & constraints[k].masks) == 0 ? __builtin_ctz(constraints[k].masks) : -2;
+                masks |= constraints[k].masks;
+            }
             else if (pass == 1 && place->kind == BUSTER_CHECK_ASM_GENERAL && place->tied == BUSTER_CHECK_NONE && !fixed && output)
             {
                 reg = check_asm_take(allowed, &taken);
@@ -2513,14 +2593,14 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
                 reg = free != 0 ? __builtin_ctz(free) : -3;
                 vectors |= free != 0 ? 1u << reg : 0;
             }
-            else if (pass == 3 && place->kind == BUSTER_CHECK_ASM_MMX && place->tied == BUSTER_CHECK_NONE)
+            else if (pass == 3 && place->kind == BUSTER_CHECK_ASM_MMX && place->tied == BUSTER_CHECK_NONE && constraints[k].fixed_mmx == 0)
             {
                 // mm0 up, but the clobbered ones.
                 const uint32_t free = ~mmx & 0xffu;
                 reg = free != 0 ? __builtin_ctz(free) : -3;
                 mmx |= free != 0 ? 1u << reg : 0;
             }
-            else if (pass == 3 && place->kind == BUSTER_CHECK_ASM_MASK && place->tied == BUSTER_CHECK_NONE)
+            else if (pass == 3 && place->kind == BUSTER_CHECK_ASM_MASK && place->tied == BUSTER_CHECK_NONE && (constraints[k].masks & (constraints[k].masks - 1)) != 0)
             {
                 // k0 up (Yk's k1 up), but the clobbered ones, as clang's allocation takes them.
                 const uint32_t free = ~masks & constraints[k].masks;
@@ -2859,17 +2939,15 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
     bool x87 = false;
     bool held = false;
     bool flagged = false;
-    bool mmx_used = false;
     for (uint32_t k = 0; valid && reason == NULL && k < count; k += 1)
     {
         x87 |= places[k].kind == BUSTER_CHECK_ASM_X87;
         held |= places[k].kind == BUSTER_CHECK_ASM_HELD;
         flagged |= places[k].kind == BUSTER_CHECK_ASM_FLAG;
-        mmx_used |= places[k].kind == BUSTER_CHECK_ASM_MMX;
     }
-    // The MMX registers are the x87's: loading one leaves the x87's stack full, so a statement of both has no order of
-    // its loads that keeps both (#1846).
-    reason = valid && reason == NULL && x87 && mmx_used ? "inline assembly x87 and MMX operands in one statement" : reason;
+    // The MMX registers are the x87's: a statement of both (#1846, the owner's decision on #1447) loads its x87 operands
+    // first and its MMX ones after, and stores the MMX outputs before the x87 ones, as clang's code orders them; what the
+    // x87's stack holds after an MMX load is the template's to know, as in clang's object.
     reason = valid && reason == NULL && unit_assembled && unit.entry_code && held ? "inline assembly operands of this type in their constraint's registers" : reason;
     // A template of no instructions is no code at all but with x87 operands, whose helper passes their values through
     // the x87's stack as clang's code does (fld and fstp, which quiet a float's or a double's signaling NaN).
@@ -2932,8 +3010,9 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
         }
     }
     else if (valid && reason == NULL && (helped || marked) && !program->asm_helpers && !check_program_helper_forced(program, CHECK_PROGRAM_HELPER_ASM) &&
-             !statement->is_goto && code.reference_count == 0 && (code.label_count == 0 || (!returns && (!program->asm_bodies || marked))) &&
-             (inline_touched = check_asm_inline_touched(places, count, &code, taken, vectors, &inline_masks)) != UINT32_MAX)
+             (!statement->is_goto || (!program->asm_bodies && !returns && statement->label_count != 0)) && code.reference_count == goto_count &&
+             (code.label_count == 0 || (!returns && (!program->asm_bodies || marked))) &&
+             (inline_touched = check_asm_inline_touched(places, count, &code, gotos, goto_count, taken, vectors, &inline_masks)) != UINT32_MAX)
     {
         // Placed in its caller as an asm body (#1839): its records run in its call row's place, with no helper.
         X86Instruction* records = 0;
@@ -2944,20 +3023,48 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
         const bool passed = !program->asm_bodies && check_asm_inline_passes(places, count);
         uint32_t first = 0;
         bool room = false;
-        const uint32_t records_count = check_asm_inline_code(places, count, &code, stores, pops, passed, &records, &first, &room, output);
+        // An asm goto's (#1839's item 2): the helper's exits in the body, its exit number the call row's result.
+        const uint32_t labels = statement->is_goto ? statement->label_count : 0;
+        const uint32_t records_count = check_asm_inline_code(places, count, &code, stores, pops, passed, labels, exit, &records, &first, &room, output);
         plan->inline_passed = passed;
-        uint32_t* branches = code.branch_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, code.branch_count) : 0;
-        uint32_t* targets = code.branch_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, code.branch_count) : 0;
-        valid = room && (code.branch_count == 0 || (branches != 0 && targets != 0));
-        for (uint32_t b = 0; valid && b < code.branch_count; b += 1)
+        const uint32_t branch_count = code.branch_count + goto_count + labels;
+        uint32_t* branches = branch_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, branch_count) : 0;
+        uint32_t* targets = branch_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, branch_count) : 0;
+        valid = room && (branch_count == 0 || (branches != 0 && targets != 0));
+        // The template's branches and its jumps to the labels, merged in record order, past the body's loads: a jump to a
+        // label is a branch to its exit, two records a label past the fall-through's (check_asm_helper_code's), its rel8
+        // form, its reference dropped; then the exits' jumps, each to the stores past the last exit's move.
+        const uint32_t exits = first + code.count;
+        const uint32_t tail = exits + (labels != 0 ? 2 * labels + 1 : 0);
+        uint32_t branch = 0;
+        uint32_t own = 0;
+        uint32_t jump = 0;
+        while (valid && (own < code.branch_count || jump < goto_count))
         {
-            // The template's branches and their labels' records, past the body's loads.
-            branches[b] = first + code.branches[b];
-            targets[b] = first + code.targets[b];
+            const bool mine = jump >= goto_count || (own < code.branch_count && code.branches[own] < gotos[jump].record);
+            if (mine)
+            {
+                branches[branch] = first + code.branches[own];
+                targets[branch++] = first + code.targets[own++];
+            }
+            else
+            {
+                X86Instruction* record = records + first + gotos[jump].record;
+                record->form = (uint16_t)((record->form & ~BUSTER_X86_FORM_FIXUP) - 1);
+                record->displacement = 0;
+                branches[branch] = first + gotos[jump].record;
+                targets[branch++] = exits + 2 + 2 * gotos[jump].label;
+                jump += 1;
+            }
+        }
+        for (uint32_t e = 0; valid && e < labels; e += 1)
+        {
+            branches[branch] = exits + 1 + 2 * e;
+            targets[branch++] = tail;
         }
         plan->inline_branches = branches;
         plan->inline_targets = targets;
-        plan->inline_branch_count = valid ? code.branch_count : 0;
+        plan->inline_branch_count = valid ? branch_count : 0;
         // Its labels, each at its record past the body's loads (#1839): the emission defines each name's symbol at the
         // record's offset in its caller's code (Tier0Code.asm_label_records), as a helper's at its own.
         plan->labels = valid && code.label_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckProgramAsmLabel, code.label_count) : 0;
@@ -2973,7 +3080,8 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
         plan->label_count = valid ? code.label_count : 0;
         plan->inline_records = records;
         plan->inline_count = records_count;
-        plan->inline_touched = inline_touched;
+        // An asm goto's exit number in eax, its call row's result.
+        plan->inline_touched = inline_touched | (labels != 0 ? 1u << X86_REGISTER_RAX : 0);
         plan->inline_masks = inline_masks;
         plan->inline_leaves = returns;
         for (uint32_t r = 0; r < code.count; r += 1)

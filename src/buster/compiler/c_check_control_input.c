@@ -925,6 +925,75 @@ static void check_input_asm_statement_attributes(CheckInputReader* reader, uint3
 // return's musttail for c_check_musttail.c and check_program. GNU attributes right after a named label are the label's
 // (check_input_label_attributes); C23's there are the statement's. At file scope an attribute-only null declaration
 // remains for check_input_declaration, which ignores GNU lists and checks C23 subjects.
+// Whether a block item's attributes, from `first` to `after`, are GNU ones alone, each a suppress whose arguments clang's
+// parser drops it for (#1844): each argument a string literal's tokens, or one in parentheses any number deep, separated
+// by commas, as clang's parser reads them; anything else is its "expected string literal" or "expected ')'" (the
+// attribute's own error, the checker's or the parser's). With none of them left, clang's ParseStatementOrDeclaration
+// parses the statement after them as a declaration. A name alone and `()` are fine, and an empty item is none.
+static bool check_input_suppress_dropped(CheckInputReader* reader, uint32_t first, uint32_t after)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t count = parser->tokens.count;
+    bool all = true;
+    uint32_t dropped = 0;
+    uint32_t token = first;
+    while (all && token < after)
+    {
+        const bool specifier = parser->tokens.kinds[token] == PARSE_KIND_ATTRIBUTE && token + 2 < after && parser->tokens.kinds[token + 1] == PARSE_KIND_L_PAREN &&
+                               parser->tokens.kinds[token + 2] == PARSE_KIND_L_PAREN;
+        const uint32_t close = specifier ? parser->tree.parents[token + 1] : count;
+        all = specifier && close < after && close > token + 3 && parser->tokens.kinds[close - 1] == PARSE_KIND_R_PAREN;
+        uint32_t item = token + 3;
+        while (all && item < close - 1)
+        {
+            uint32_t end = item;
+            uint32_t depth = 0;
+            while (end < close - 1 && !(depth == 0 && parser->tokens.kinds[end] == PARSE_KIND_COMMA))
+            {
+                const uint8_t kind = parser->tokens.kinds[end];
+                depth = kind == PARSE_KIND_L_PAREN ? depth + 1 : kind == PARSE_KIND_R_PAREN && depth != 0 ? depth - 1 : depth;
+                end += 1;
+            }
+            if (end != item)
+            {
+                const String8 name = check_input_attribute_name(reader, parser->tokens.names[item]);
+                const bool suppress = check_input_attribute_equal(name, "suppress") || check_input_attribute_equal(name, "__suppress__");
+                bool malformed = false;
+                uint32_t at = item + 2;
+                bool done = suppress && (end == item + 1 || (at < end && parser->tokens.kinds[at] == PARSE_KIND_R_PAREN));
+                while (suppress && !done && !malformed && at < end)
+                {
+                    uint32_t level = 0;
+                    while (at < end && parser->tokens.kinds[at] == PARSE_KIND_L_PAREN)
+                    {
+                        level += 1;
+                        at += 1;
+                    }
+                    const bool string = at < end && parser->tokens.kinds[at] == PARSE_KIND_STRING;
+                    while (at < end && parser->tokens.kinds[at] == PARSE_KIND_STRING)
+                    {
+                        at += 1;
+                    }
+                    while (string && level != 0 && at < end && parser->tokens.kinds[at] == PARSE_KIND_R_PAREN)
+                    {
+                        level -= 1;
+                        at += 1;
+                    }
+                    const uint8_t next = at < end ? parser->tokens.kinds[at] : PARSE_KIND_END;
+                    malformed = !string || level != 0 || (next != PARSE_KIND_COMMA && next != PARSE_KIND_R_PAREN);
+                    done = next == PARSE_KIND_R_PAREN;
+                    at += 1;
+                }
+                all = suppress && malformed && parser->tokens.kinds[item + 1] == PARSE_KIND_L_PAREN;
+                dropped += all ? 1 : 0;
+            }
+            item = end + 1;
+        }
+        token = close + 1;
+    }
+    return all && dropped != 0;
+}
+
 static void check_input_statement_attributes(CheckInputReader* reader, uint32_t first)
 {
     const Parser* parser = reader->parser;
@@ -1004,6 +1073,13 @@ static void check_input_statement_attributes(CheckInputReader* reader, uint32_t 
         reader->statement_attributes = true;
         bool valid = check_input_read_attributes(reader, &cursor, count, &attributes) && cursor == after;
         reader->statement_attributes = false;
+        // GNU suppresses that clang's parser drops, all of them (#1844): it parses the statement as a declaration, whose
+        // first token here, no `(` nor `*` that a declarator could start with, is its second error. (A `(` or a `*` makes
+        // an implicit int's declarator, whose errors and Sema's that follow are left out.)
+        if (expression && gnu && !head && next != PARSE_KIND_L_PAREN && next != PARSE_KIND_STAR && check_input_suppress_dropped(reader, first, after))
+        {
+            check_input_report(reader, after, CHECK_INPUT_DROPPED_SUPPRESS_DECLARATION);
+        }
         uint32_t musttail = BUSTER_CHECK_NONE;
         valid = valid && check_input_statement_attribute_kinds(reader, attributes, empty, returns, after, &musttail);
         bool fallthrough = false;

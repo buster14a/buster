@@ -97,6 +97,82 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .c23 = true,
     },
     {
+        // A statement expression's statements are evaluated as it is (#1447, check_common_statement_roots): a
+        // short-circuited operand's, a constant conditional's other arm's, a constant if's and unreachable code's give
+        // none of their runtime or unused-value warnings, as clang's CFG leaves their blocks unreachable.
+        .name = "statements of unevaluated statement expressions",
+        .source = "int g(int);\n"
+                  "int f(int x)\n"
+                  "{\n"
+                  "    int r = 0;\n"
+                  "    r += 0 && ({ x << 40; 1; });\n"
+                  "    r += 1 || ({ 1 / 0; 1; });\n"
+                  "    r += 0 ? ({ x << 33; 1; }) : 2;\n"
+                  "    if (0) { r += ({ x << 34; 1; }); }\n"
+                  "    return r;\n"
+                  "    r += ({ x << 35; 1; });\n"
+                  "}\n",
+        .options = { "-Wall", "-Wextra" },
+    },
+    {
+        // A body with statement expressions keeps its unreachable-code proof (#1447, check_common_unreachable).
+        .name = "unreachable code in a body with statement expressions",
+        .source = "int f(int x)\n"
+                  "{\n"
+                  "    int r = 0;\n"
+                  "    return r;\n"
+                  "    r += x << 35;\n"
+                  "    x << 36;\n"
+                  "    r += ({ x << 37; 1; });\n"
+                  "    ({ x << 38; 1; });\n"
+                  "}\n",
+        .options = { "-Wall", "-Wextra" },
+    },
+    {
+        .name = "reachable statement expressions, jumps out of them and returns inside them",
+        .source = "int g(int);\n"
+                  "int f(int x, int y)\n"
+                  "{\n"
+                  "    int r = ({ x << 40; 1; });\n"
+                  "    r += y ? ({ x << 41; 2; }) : ({ x << 42; 3; });\n"
+                  "    r += 1 && ({ x / 0; 1; });\n"
+                  "    r += ({ if (x) goto out; 0; });\n"
+                  "    r += ({ int k = ({ x << 43; 4; }); k; });\n"
+                  "    for (;;) { r += ({ x << 44; 1; }); if (r) break; }\n"
+                  "    while (1) { }\n"
+                  "    r += ({ x << 45; 1; });\n"
+                  "out:\n"
+                  "    r += ({ x << 46; 1; });\n"
+                  "    r += 0 && ({ int u; u + ({ x << 47; 1; }); });\n"
+                  "    return r;\n"
+                  "}\n"
+                  "int h(int x)\n"
+                  "{\n"
+                  "    int r = ({ if (x) return 1; x << 48; 2; });\n"
+                  "    r += ({ return 2; x << 49; 3; });\n"
+                  "    return r;\n"
+                  "}\n",
+        .options = { "-Wall", "-Wextra" },
+        .warnings = 16,
+    },
+    {
+        .name = "-Wuninitialized in unevaluated statement expressions",
+        .source = "int g(int);\n"
+                  "int f(int x)\n"
+                  "{\n"
+                  "    int u;\n"
+                  "    int r = 0 && ({ u + 1; });\n"
+                  "    r += 0 ? ({ g(u); }) : 1;\n"
+                  "    int v;\n"
+                  "    r += ({ v; });\n"
+                  "    return r;\n"
+                  "    ({ int w; w; });\n"
+                  "}\n",
+        .options = { "-Wall", "-Wextra" },
+        .warnings = 2,
+        .notes = 1,
+    },
+    {
         // An enclosing construct's warning comes after the diagnostics its operands gave as clang built them (#1941): a
         // condition's -Wparentheses at its `)` or `;`, a call's -Wformat from its `)`, a bitwise operator's precedence and a
         // logical not's at their right operand's end; a statement expression's and a nested call's warnings first. A call
@@ -1953,6 +2029,46 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .options = { "-Wall" },
         .warnings = 5,
         .notes = 4,
+    },
+    {
+        // A discarded statement expression's comparison value warns as clang's DiagnoseUnusedExprResult of the statement
+        // expression does (#1447): "expression result unused", no comparison's note, queued after the statements before it,
+        // in its own -Wunused-value rather than -Wunused-comparison; a statement's own comparison keeps its warning.
+        .name = "a discarded statement expression's comparison value",
+        .source = "int g(int);\n"
+                  "int f(int x) {\n"
+                  "    ({ x; x == 1; });\n"
+                  "    ({ l: x == 2; });\n"
+                  "    (({ x == 3; }), 0);\n"
+                  "    ({ ({ x != 4; }); });\n"
+                  "    ({ x > 5; }), x;\n"
+                  "    if (x) ({ x == 6; });\n"
+                  "    ({ g(x) == 7; });\n"
+                  "    ({ (x == 8); });\n"
+                  "    x == 9;\n"
+                  "    return 0;\n"
+                  "}\n",
+        .warnings = 11,
+        .notes = 1,
+    },
+    {
+        .name = "a discarded statement expression's comparison value under -Wno-unused-comparison in C23",
+        .source = "int g(int);\n"
+                  "int f(int x) {\n"
+                  "    ({ x; x == 1; });\n"
+                  "    ({ l: x == 2; });\n"
+                  "    (({ x == 3; }), 0);\n"
+                  "    ({ ({ x != 4; }); });\n"
+                  "    ({ x > 5; }), x;\n"
+                  "    if (x) ({ x == 6; });\n"
+                  "    ({ g(x) == 7; });\n"
+                  "    ({ (x == 8); });\n"
+                  "    x == 9;\n"
+                  "    return 0;\n"
+                  "}\n",
+        .options = { "-Wno-unused-comparison" },
+        .warnings = 10,
+        .c23 = true,
     },
     {
         .name = "typeof statement expressions are unevaluated",

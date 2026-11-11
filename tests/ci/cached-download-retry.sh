@@ -28,6 +28,7 @@ esac
 SH
 chmod +x "$work/bin/curl"
 export PATH="$work/bin:$PATH" BUSTER_CI_CACHE=''
+export BUSTER_CI_OFFLINE=0
 helper="$root/tools/ci/cached-download.sh"
 for protocol in file FILE http https; do
     bash "$helper" "$protocol://fixture.invalid/source" "$digest" "$work/output"
