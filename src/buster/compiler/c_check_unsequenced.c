@@ -164,12 +164,13 @@ static bool check_unseq_assignment(CheckOp op)
 }
 
 // Whether `node`'s operands are unevaluated, as clang's visitor leaves them: sizeof's and alignof's (but a variable
-// array's), and the builtins clang doesn't evaluate the arguments of (c_check_builtin_evidence.c's set).
+// array's), and the builtins clang doesn't evaluate the arguments of (c_check_builtin_evidence.c's set). A type's
+// variable array bound (a type name's in sizeof or a cast, #2321) is the type's, which no visit reaches.
 static bool check_unseq_unevaluated(const CheckGraph* graph, uint32_t node)
 {
     const CheckOp op = graph->ops[node];
     const CBuiltinId builtin = graph->members != NULL ? (CBuiltinId)graph->members[node] : (CBuiltinId)0;
-    const bool result = op == CHECK_OP_SIZEOF || op == CHECK_OP_ALIGNOF || op == CHECK_OP_BUILTIN_QUERY ||
+    const bool result = op == CHECK_OP_SIZEOF || op == CHECK_OP_ALIGNOF || op == CHECK_OP_BUILTIN_QUERY || op == CHECK_OP_VLA_BOUND ||
                         (op == CHECK_OP_BUILTIN_FLOAT && cbuiltin_float_nan(builtin)) ||
                         (op == CHECK_OP_BUILTIN_VECTOR && builtin == CBUILTIN_NONDETERMINISTIC_VALUE);
     return result;
