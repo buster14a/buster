@@ -3,6 +3,8 @@
 //
 // Synthetic DWARF producer + sizing + emission + address finalization. No source/codegen producer or file I/O is
 // timed: these numbers are a bounded module comparison, not whole -g compilation or streaming acceptance.
+#include <linux/perf_event.h>
+#include <sys/ioctl.h>
 
 static uint64_t debug_benchmark_time(void)
 {
@@ -11,6 +13,7 @@ static uint64_t debug_benchmark_time(void)
     return (uint64_t)value.tv_sec * 1000000000ull + value.tv_nsec;
 }
 
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK
 static int run_debug_benchmark(int argc, char** argv)
 {
     uint32_t count = 4096;
@@ -207,3 +210,4 @@ static int run_debug_benchmark(int argc, char** argv)
     arena_release(&arena);
     return valid ? 0 : 1;
 }
+#endif

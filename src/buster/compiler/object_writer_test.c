@@ -74,16 +74,20 @@
 #include <sys/wait.h>
 
 extern char** environ;
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK
 #define BUSTER_OBJECT_TEST_REPORTED 3
 #define BUSTER_OBJECT_TEST_ARENA_BYTES (1ull << 34)
 // The many-sections unit: two sections per function (its code and its relocations) take it past SHN_LORESERVE.
 #define BUSTER_OBJECT_TEST_MANY_FUNCTIONS 33000
+#endif
 // How long a tool or a program may run, and how much of a program's output is compared.
 #define BUSTER_OBJECT_TEST_RUN_SECONDS 60
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK
 #define BUSTER_OBJECT_TEST_OUTPUT_BYTES 256
+#endif
 #define BUSTER_OBJECT_TEST_PATH_BYTES 4096
 #define BUSTER_OBJECT_TEST_MAX_TOKENS 16
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK
 // The workers of link_test_program_options's set that takes --functions in test-link.
 #define BUSTER_OBJECT_TEST_FUNCTIONS 500
 // The units of the link made by hand (object_test_hand_link).
@@ -121,7 +125,7 @@ static bool object_test_report(const ObjectTestTally* tally)
     fflush(stdout);
     return tally->failures == 0;
 }
-
+#endif
 // ---------------------------------------------------------------------------------------------------------------------
 // Reading an object back
 
@@ -145,7 +149,7 @@ struct ObjectView
     const char* section_names;
     uint64_t section_names_size;
 };
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK
 // What each class's section and each kind's relocation must be, and what fills the gaps in code: written out again here
 // rather than read from object_writer.c, so that a wrong entry there shows.
 typedef struct ObjectTestSection ObjectTestSection;
@@ -260,7 +264,8 @@ static const uint32_t object_test_relocation_types[BUSTER_LINK_FIXUP_KINDS] = {
 };
 
 #define BUSTER_OBJECT_TEST_INT3 0xcc
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_ASSEMBLER || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_CHECKER
 // The bytes a relocation type patches, or 0 for a type the object writer doesn't write.
 static uint64_t object_test_relocation_width(uint32_t type)
 {
@@ -297,7 +302,8 @@ static uint64_t object_test_relocation_width(uint32_t type)
     }
     return result;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_ASSEMBLER || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_CHECKER
 // A NUL-terminated string at `offset` in a string table of `size` bytes, or 0 if it runs past the end.
 static const char* object_view_string(const char* table, uint64_t size, uint64_t offset)
 {
@@ -308,19 +314,22 @@ static const char* object_view_string(const char* table, uint64_t size, uint64_t
     }
     return result;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_ASSEMBLER || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_CHECKER
 static const char* object_view_section_name(const ObjectView* view, uint64_t index)
 {
     return object_view_string(view->section_names, view->section_names_size, view->sections[index].sh_name);
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_ASSEMBLER || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_CHECKER
 // A symbol's section index, read from .symtab_shndx for SHN_XINDEX.
 static uint64_t object_view_symbol_section(const ObjectView* view, uint64_t symbol)
 {
     const uint16_t index = view->symbols[symbol].st_shndx;
     return index == SHN_XINDEX && view->extended_indices != 0 ? view->extended_indices[symbol] : index;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_ASSEMBLER || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_CHECKER
 // The name tools show for a symbol: a section symbol's is its section's.
 static const char* object_view_symbol_name(const ObjectView* view, uint64_t symbol)
 {
@@ -336,7 +345,8 @@ static const char* object_view_symbol_name(const ObjectView* view, uint64_t symb
     }
     return result;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_ASSEMBLER || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_CHECKER
 // Parses an ET_REL file and checks what every object the writer writes keeps (the orientation comment). Returns false
 // with a description in `error` at the first problem. With `foreign`, for GNU as's objects, a section's contents may
 // start anywhere: GNU as 2.42 starts them at a multiple of their alignment, as the writer does, but 2.47 doesn't always
@@ -652,10 +662,10 @@ static bool object_view_open(ObjectView* view, const uint8_t* file, uint64_t len
     }
     return valid;
 }
-
+#endif
 // ---------------------------------------------------------------------------------------------------------------------
 // Comparing an object with the representation
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK
 // What object_test_compare finds, for the report.
 typedef struct ObjectTestCounts ObjectTestCounts;
 struct ObjectTestCounts
@@ -1025,10 +1035,10 @@ static bool object_test_compare(ObjectTestTally* tally, const ObjectView* view, 
     arena_pop_to(arena, length);
     return tally->failures == failures;
 }
-
+#endif
 // ---------------------------------------------------------------------------------------------------------------------
 // Running programs
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_ASSEMBLER || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC || BUSTER_UNIT == BUSTER_UNIT_BACKEND || BUSTER_UNIT == BUSTER_UNIT_CHECKER
 // Runs `arguments` (a program on PATH and its arguments, null-terminated) with stdout and stderr in the files at
 // `output_path` and `error_path`, using the null-terminated `environment`, for up to BUSTER_OBJECT_TEST_RUN_SECONDS,
 // and returns its exit status: -1 if it couldn't start, was killed by a signal or ran out of time. The arguments and
@@ -1072,12 +1082,13 @@ static int object_test_run_environment(char* const* arguments, const char* outpu
     }
     return result;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_ASSEMBLER || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC || BUSTER_UNIT == BUSTER_UNIT_BACKEND || BUSTER_UNIT == BUSTER_UNIT_CHECKER
 static int object_test_run(char* const* arguments, const char* output_path, const char* error_path)
 {
     return object_test_run_environment(arguments, output_path, error_path, environ);
 }
-
+#endif
 // A file's bytes, NUL-terminated, from `arena`; a null pointer if it can't be read.
 static String8 object_test_read_file(Arena* arena, const char* path)
 {
@@ -1111,7 +1122,7 @@ static String8 object_test_read_file(Arena* arena, const char* path)
 
 // ---------------------------------------------------------------------------------------------------------------------
 // The tools' listings
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK
 typedef struct ObjectListedSection ObjectListedSection;
 struct ObjectListedSection
 {
@@ -1167,7 +1178,8 @@ struct ObjectListing
     ObjectListedRelocation* relocations;
     uint64_t relocation_length;
 };
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 // The next line of `text` from *position, without its newline, advancing past it; false at the end.
 static bool object_test_next_line(String8 text, uint64_t* position, String8* line)
 {
@@ -1185,7 +1197,8 @@ static bool object_test_next_line(String8 text, uint64_t* position, String8* lin
     }
     return result;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 // A line's space-separated tokens, at most `capacity` of them; returns how many there are.
 static uint64_t object_test_tokens(String8 line, String8* tokens, uint64_t capacity)
 {
@@ -1216,17 +1229,20 @@ static uint64_t object_test_tokens(String8 line, String8* tokens, uint64_t capac
     }
     return count;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 static bool object_test_equal(String8 string, const char* text)
 {
     return text != 0 && string.length == strlen(text) && memcmp(string.pointer, text, string.length) == 0;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 static bool object_test_starts_with(String8 string, const char* text)
 {
     return string.length >= strlen(text) && memcmp(string.pointer, text, strlen(text)) == 0;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 static String8 object_test_after(String8 string, uint64_t count)
 {
     String8 result = {
@@ -1235,7 +1251,8 @@ static String8 object_test_after(String8 string, uint64_t count)
     };
     return result;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 // A number: hexadecimal with a 0x prefix or when `hexadecimal`, otherwise decimal. False if `token` isn't one.
 static bool object_test_number(String8 token, bool hexadecimal, uint64_t* value)
 {
@@ -1257,7 +1274,8 @@ static bool object_test_number(String8 token, bool hexadecimal, uint64_t* value)
     *value = number;
     return result;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK
 // The last '(' in `string`, or 0.
 static const char* object_test_last_parenthesis(String8 string)
 {
@@ -1880,14 +1898,14 @@ static bool object_compare_listing(const ObjectView* view, const ObjectListing* 
     }
     return result;
 }
-
+#endif
 // ---------------------------------------------------------------------------------------------------------------------
 // The checks
 
 // The programs are test-link's (link_test_program_options): static ones (the defaults, the smallest, many units,
 // without absolute addresses, and BUSTER_OBJECT_TEST_FUNCTIONS workers without sizes, which wild links) and two that
 // call libc (the defaults, and many units without sizes).
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 // A unit's source name for its STT_FILE: "u<unit>.c", in `buffer`.
 static String8 object_test_source_name(char* buffer, uint64_t size, uint32_t unit)
 {
@@ -1898,7 +1916,8 @@ static String8 object_test_source_name(char* buffer, uint64_t size, uint32_t uni
     };
     return result;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK
 // The DWARF's checks, in object_debug_test.c, which main.c includes after debug.c.
 static bool object_test_debug_compare(ObjectTestTally* tally, const ObjectView* view, const Link* link, const ObjectDebug* debug);
 static bool object_test_debug(uint64_t seed, Arena* arena);
@@ -1961,7 +1980,8 @@ static bool object_test_unit(ObjectTestTally* tally, const Link* link, ObjectUni
     arena_pop_to(arena, length);
     return result;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK
 // Descriptors for every atom of `link` (ObjectOptions.atom_sections, #619), on `arena`, or 0 without room: of each class
 // that C's named sections reach, every other atom in a named section of the class's kind (the second of three TEXT
 // atoms; the third with .text's own descriptor, which goes in .text; and a third of DATA's of them in a section that
@@ -2945,7 +2965,7 @@ static bool object_test_cross_check_program(ObjectTestTally* tally, const Link* 
     arena_pop_to(arena, length);
     return tally->failures == failures;
 }
-
+#endif
 // The bits of object_test_cross_check_program's linkers.
 // GNU as's objects of the same units, from link_test_print_program's source. GNU as orders sections as the source first
 // names them, always has a .text, a .data and a .bss, adds a .note.gnu.property of the x86 features the code uses where
@@ -2955,7 +2975,7 @@ static bool object_test_cross_check_program(ObjectTestTally* tally, const Link* 
 // refers to the section's symbol. So sections and named symbols are matched by name, unnamed ones (.LC and .L) by
 // section and value, and a relocation's target by where it points, but exactly where the form matters: the GOT, TLS and
 // size types, and into SHF_MERGE sections.
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_ASSEMBLER || BUSTER_UNIT == BUSTER_UNIT_LINK
 // Group identity is the signature, not the section name: GCC -g3 emits many .debug_macro and .rela.debug_macro
 // sections, and every SHT_GROUP has the name .group. The reader above has already validated all indices and words.
 static const char* object_test_section_group(const ObjectView* view, uint64_t index)
@@ -2975,7 +2995,7 @@ static const char* object_test_section_group(const ObjectView* view, uint64_t in
     }
     return group != 0 ? object_view_symbol_name(view, view->sections[group].sh_info) : 0;
 }
-
+#endif
 // Where a relocation's symbol and addend point: the symbol's section by name (0 if undefined), its value, its name (0
 // for a section symbol or an unnamed one), the addend, whether it is a section symbol and whether its section merges.
 typedef struct ObjectTestTarget ObjectTestTarget;
@@ -2989,7 +3009,7 @@ struct ObjectTestTarget
     bool section_symbol;
     bool merge;
 };
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_ASSEMBLER || BUSTER_UNIT == BUSTER_UNIT_LINK
 // Whether a view's symbol is an unnamed one: a local whose name starts with .L (.LC<n> in the writer's objects,
 // .Lsym_<id> in GNU as's).
 static bool object_test_unnamed(const ObjectView* view, uint64_t symbol)
@@ -2998,7 +3018,8 @@ static bool object_test_unnamed(const ObjectView* view, uint64_t symbol)
     const char* name = object_view_string(view->symbol_names, view->symbol_names_size, entry->st_name);
     return ELF64_ST_BIND(entry->st_info) == STB_LOCAL && ELF64_ST_TYPE(entry->st_info) != STT_SECTION && name != 0 && strncmp(name, ".L", 2) == 0;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_ASSEMBLER || BUSTER_UNIT == BUSTER_UNIT_LINK
 static ObjectTestTarget object_test_target(const ObjectView* view, const Elf64_Rela* relocation)
 {
     const uint64_t symbol = ELF64_R_SYM(relocation->r_info);
@@ -3018,12 +3039,14 @@ static ObjectTestTarget object_test_target(const ObjectView* view, const Elf64_R
     };
     return result;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_ASSEMBLER || BUSTER_UNIT == BUSTER_UNIT_LINK
 static bool object_test_same_string(const char* a, const char* b)
 {
     return (a == 0) == (b == 0) && (a == 0 || strcmp(a, b) == 0);
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_ASSEMBLER || BUSTER_UNIT == BUSTER_UNIT_LINK
 // Whether two relocations of `type` point at the same target (see above).
 static bool object_test_same_target(uint32_t type, ObjectTestTarget a, ObjectTestTarget b)
 {
@@ -3044,14 +3067,16 @@ static bool object_test_same_target(uint32_t type, ObjectTestTarget a, ObjectTes
     }
     return result;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_ASSEMBLER || BUSTER_UNIT == BUSTER_UNIT_LINK
 // Whether a view's section is one the comparison matches: not a table of symbols, strings or relocations, nor .comment.
 static bool object_test_compared_section(const ObjectView* view, uint64_t index)
 {
     const uint32_t type = view->sections[index].sh_type;
     return type != SHT_SYMTAB && type != SHT_STRTAB && type != SHT_RELA && type != SHT_SYMTAB_SHNDX && strcmp(object_view_section_name(view, index), ".comment") != 0;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_ASSEMBLER || BUSTER_UNIT == BUSTER_UNIT_LINK
 // The index of the compared section named `name`, or with `relocations` of the relocation section for it; 0 if none.
 static uint64_t object_test_section_named(const ObjectView* view, const char* name, bool relocations)
 {
@@ -3065,14 +3090,16 @@ static uint64_t object_test_section_named(const ObjectView* view, const char* na
     }
     return result;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_ASSEMBLER || BUSTER_UNIT == BUSTER_UNIT_LINK
 static bool object_test_same_section_identity(const ObjectView* a, uint64_t i, const ObjectView* b, uint64_t j)
 {
     return a->sections[i].sh_type == b->sections[j].sh_type &&
            object_test_same_string(object_view_section_name(a, i), object_view_section_name(b, j)) &&
            object_test_same_string(object_test_section_group(a, i), object_test_section_group(b, j));
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_ASSEMBLER || BUSTER_UNIT == BUSTER_UNIT_LINK
 static uint64_t object_test_matching_section(const ObjectView* view, const ObjectView* source, uint64_t index)
 {
     uint64_t result = 0;
@@ -3082,7 +3109,8 @@ static uint64_t object_test_matching_section(const ObjectView* view, const Objec
     }
     return result;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_ASSEMBLER || BUSTER_UNIT == BUSTER_UNIT_LINK
 // The group words contain section indices, so compare membership by identity rather than by on-disk numbering or
 // order. Uniqueness and the link/info/header constraints are independently checked by object_view_open.
 static bool object_test_same_group(const ObjectView* a, uint64_t i, const ObjectView* b, uint64_t j)
@@ -3103,7 +3131,8 @@ static bool object_test_same_group(const ObjectView* a, uint64_t i, const Object
     }
     return result;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_ASSEMBLER || BUSTER_UNIT == BUSTER_UNIT_LINK
 // The index of the symbol (not a section's or a file's) named `name`, or for name 0 of an unnamed one in `section` (by
 // name) at `value`; 0 if none.
 static uint64_t object_test_group_symbol(const ObjectView* view, const char* name, const char* section, const char* group, uint64_t value)
@@ -3128,18 +3157,21 @@ static uint64_t object_test_group_symbol(const ObjectView* view, const char* nam
     }
     return result;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_ASSEMBLER || BUSTER_UNIT == BUSTER_UNIT_LINK
 static uint64_t object_test_symbol(const ObjectView* view, const char* name, const char* section, uint64_t value)
 {
     return object_test_group_symbol(view, name, section, 0, value);
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_ASSEMBLER || BUSTER_UNIT == BUSTER_UNIT_LINK
 // Where a symbol is: SHN_UNDEF, SHN_COMMON or SHN_ABS, which are no section, or 1 for any section.
 static uint32_t object_test_symbol_place(const Elf64_Sym* symbol)
 {
     return symbol->st_shndx == SHN_UNDEF || symbol->st_shndx == SHN_COMMON || symbol->st_shndx == SHN_ABS ? symbol->st_shndx : 1;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_ASSEMBLER || BUSTER_UNIT == BUSTER_UNIT_LINK
 // Compares the writer's object of a unit, without function sections, with GNU as's; false, with the first difference
 // in `error`, if they differ.
 static bool object_test_same_as(const ObjectView* ours, const ObjectView* theirs, char* error, uint64_t error_size)
@@ -3274,7 +3306,8 @@ static bool object_test_same_as(const ObjectView* ours, const ObjectView* theirs
     }
     return result;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK
 // Writes a program's units as GNU as source (link_test_print_program) in a directory of `directory` named `name`,
 // assembles each with as, and compares GNU as's object with the writer's, without function sections.
 static bool object_test_against_as(ObjectTestTally* tally, const LinkProgram* program, const char* directory, const char* name, bool keep, Arena* arena)
@@ -3346,7 +3379,8 @@ static bool object_test_against_as(ObjectTestTally* tally, const LinkProgram* pr
 
 #define BUSTER_OBJECT_TEST_ALL_LINKERS 0xfu
 #define BUSTER_OBJECT_TEST_WILD 0x8u
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 // What runs a shared library of test-link's (LinkProgramOptions.shared): a program that cc builds into `path`, which
 // loads the library its first argument names (dlopen) and calls its buster_library_main with main's arguments,
 // returning its status (99 if it can't). Whether cc built it.
@@ -3392,7 +3426,8 @@ static bool object_test_harness(const char* directory, char* path, uint64_t capa
     }
     return built;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK
 static bool object_test_cross_check(uint64_t seed, const char* directory, bool keep, Arena* arena)
 {
     ObjectTestTally tally = {
@@ -3494,10 +3529,10 @@ static bool object_test_cross_check(uint64_t seed, const char* directory, bool k
     arena_pop_to(arena, length);
     return object_test_report(&tally);
 }
-
+#endif
 // ---------------------------------------------------------------------------------------------------------------------
 // The command
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK
 static bool object_test_parse_u64(const char* text, uint64_t* value)
 {
     char* end = 0;
@@ -3506,7 +3541,8 @@ static bool object_test_parse_u64(const char* text, uint64_t* value)
     *value = result ? parsed : *value;
     return result;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK
 static int run_object_writer_tests(int argc, char** argv)
 {
     uint64_t seed = 1;
@@ -3582,3 +3618,4 @@ static int run_object_writer_tests(int argc, char** argv)
     arena_release(&arena);
     return result;
 }
+#endif

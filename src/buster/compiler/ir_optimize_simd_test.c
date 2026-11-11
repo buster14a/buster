@@ -592,6 +592,82 @@ static void ir_optimize_test_simd_splats(IrOptimizeTest* test, Arena* input, Are
     }
 }
 
+// The width changes (#1840): SCCP folds a constant insert, the extract of its inserted part and the extract of a widen's
+// zeros past its operand, by both paths, through a comparison with the values written out, to its constant mask; and
+// keeps an extract of another part apart from one whose value differs.
+static void ir_optimize_test_simd_widths(IrOptimizeTest* test, Arena* input, Arena* vector, Arena* scalar, Arena* scratch)
+{
+    for (uint32_t part = 0; part < 4; part += 1)
+    {
+        const uint64_t mark = input->length;
+        const IrSizes sizes = { .instruction_count = 12, .block_count = 1, .vector_constant_count = 3 };
+        IrFunction f = { 0 };
+        const bool created = ir_create(input, &sizes, &f) == IR_OK;
+        ir_optimize_test_expect(test, created, "constant width change optimizer fixture allocation");
+        if (created)
+        {
+            f.result_type = IR_M16;
+            f.block_offsets[1] = 12;
+            for (uint32_t w = 0; w < 8; w += 1)
+            {
+                f.vector_constants[0].words[w] = UINT64_C(0x0123456789abcdef) * (w + 3);
+            }
+            f.vector_constants[1].words[0] = UINT64_C(0xfeedfacecafebeef);
+            f.vector_constants[1].words[1] = UINT64_C(0x0badf00d8badf00d);
+            ir_optimize_test_instruction(&f, 0, IR_VCONST, IR_V16I32, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_optimize_test_instruction(&f, 1, IR_VCONST, IR_V4I32, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_optimize_test_instruction(&f, 2, IR_INTRINSIC, IR_V16I32, 0, 1, BUSTER_IR_INTRINSIC_INSERT);
+            f.flags[2] = (uint8_t)part;
+            ir_optimize_test_instruction(&f, 3, IR_INTRINSIC, IR_V4I32, 2, BUSTER_IR_NONE, BUSTER_IR_INTRINSIC_EXTRACT);
+            f.flags[3] = (uint8_t)part;
+            // The inserted part back, equal to the constant inserted, every byte.
+            ir_optimize_test_instruction(&f, 4, IR_VCMP, IR_M16, 3, 1, IR_EQ);
+            f.flags[4] = IR_SIMD_LANE_I8;
+            // A widen's part 1 is zeros: equal to the zero constant.
+            ir_optimize_test_instruction(&f, 5, IR_INTRINSIC, IR_V8I32, 1, BUSTER_IR_NONE, BUSTER_IR_INTRINSIC_WIDEN);
+            ir_optimize_test_instruction(&f, 6, IR_INTRINSIC, IR_V4I32, 5, BUSTER_IR_NONE, BUSTER_IR_INTRINSIC_EXTRACT);
+            f.flags[6] = 1;
+            ir_optimize_test_instruction(&f, 7, IR_VCONST, IR_V4I32, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_optimize_test_instruction(&f, 8, IR_VCMP, IR_M16, 6, 7, IR_EQ);
+            f.flags[8] = IR_SIMD_LANE_I8;
+            // Another part of the insert's result is the first constant's, which differs from the inserted one.
+            ir_optimize_test_instruction(&f, 9, IR_INTRINSIC, IR_V4I32, 2, BUSTER_IR_NONE, BUSTER_IR_INTRINSIC_EXTRACT);
+            f.flags[9] = (uint8_t)((part + 1) & 3);
+            ir_optimize_test_instruction(&f, 10, IR_VCMP, IR_M16, 9, 3, IR_NE);
+            f.flags[10] = IR_SIMD_LANE_I8;
+            // Its bytes against the inserted ones, written out.
+            uint64_t differ = 0;
+            for (uint32_t byte = 0; byte < 16; byte += 1)
+            {
+                const uint32_t at = ((part + 1) & 3) * 16 + byte;
+                const uint8_t mine = (uint8_t)(f.vector_constants[0].words[at / 8] >> (8 * (at & 7)));
+                const uint8_t inserted = (uint8_t)(f.vector_constants[1].words[byte / 8] >> (8 * (byte & 7)));
+                differ |= (uint64_t)(mine != inserted) << byte;
+            }
+            ir_optimize_test_instruction(&f, 11, IR_RET, IR_VOID, 4, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_optimize_test_simd_rewrite(test, &f, vector, scalar, scratch, 7);
+            IrOptimizeResult result = { 0 };
+            IrOptimizeOptions options = ir_optimize_options();
+            options.path = BUSTER_IR_OPTIMIZE_VECTOR;
+            IrCheck check = ir_optimize(&f, vector, scratch, options, &result);
+            ir_optimize_test_expect(test, check.error == IR_OK && result.function.instruction_count == 2 && result.function.op[0] == IR_CONST && result.function.constants[0].low == 0xffff,
+                                    "a constant insert's inserted part folds to its every-lane-equal mask");
+            arena_pop_to(vector, 0);
+            f.a[11] = 8;
+            check = ir_optimize(&f, vector, scratch, options, &result);
+            ir_optimize_test_expect(test, check.error == IR_OK && result.function.instruction_count == 2 && result.function.op[0] == IR_CONST && result.function.constants[0].low == 0xffff,
+                                    "a widen's zeros past its operand fold");
+            arena_pop_to(vector, 0);
+            f.a[11] = 10;
+            check = ir_optimize(&f, vector, scratch, options, &result);
+            ir_optimize_test_expect(test, check.error == IR_OK && result.function.instruction_count == 2 && result.function.op[0] == IR_CONST && result.function.constants[0].low == differ && differ != 0,
+                                    "another part's extract keeps its own value");
+            arena_pop_to(vector, 0);
+        }
+        arena_pop_to(input, mark);
+    }
+}
+
 static void ir_optimize_test_simd(IrOptimizeTest* test)
 {
     Arena input = arena_reserve(UINT64_C(16) << 20);
@@ -607,6 +683,7 @@ static void ir_optimize_test_simd(IrOptimizeTest* test)
         ir_optimize_test_simd_flow(test, &input, &vector, &scalar, &scratch);
         ir_optimize_test_simd_loop(test, &input, &vector, &scalar, &scratch);
         ir_optimize_test_simd_splats(test, &input, &vector, &scalar, &scratch);
+        ir_optimize_test_simd_widths(test, &input, &vector, &scalar, &scratch);
     }
     arena_release(&input);
     arena_release(&vector);

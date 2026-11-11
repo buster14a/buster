@@ -74,24 +74,30 @@ static void check_input_constant_warning_clear(CheckInputReader* reader, uint32_
     check_input_warning_range(reader, first, end, warnings, 0);
 }
 
-static void check_input_constant_fold_warning(CheckInputReader* reader, uint32_t first, uint32_t end, const CheckValue* value, bool ignored, uint32_t location)
+// A non-ICE fold's warning. A declarator's array bound (`declarator`) or a GNU object read's is clang's
+// "variable length array folded to constant array", once for the declarator however many of its bounds fold: at
+// `location`, its declarator's name, where clang made the array variable and then folded it for a declaration that
+// can't have one (a GNU object read, a floating cast's value), and at the bound's first token where an ICE's form
+// folded only past an overflow or a shift's limit, which clang's array type folds at once, in every context.
+static void check_input_constant_fold_warning(CheckInputReader* reader, uint32_t first, uint32_t end, const CheckValue* value, bool ignored, uint32_t location,
+                                              bool declarator)
 {
     if (first < end && end <= reader->parser->tokens.count && reader->output->constant_warnings != 0 &&
         check_input_integer_constant(reader, value) && (value->flags & BUSTER_CHECK_ICE) == 0)
     {
-        if ((value->flags & BUSTER_CHECK_GNU_OBJECT_READ) != 0)
+        if ((value->flags & BUSTER_CHECK_GNU_OBJECT_READ) != 0 || (declarator && !ignored))
         {
             const CheckWarningEvent event = {
                 .id = CHECK_WARNING_ID_GNU_CONSTANT,
                 .kind = ignored ? CHECK_WARNING_EVENT_GNU_ICE_FOLD : CHECK_WARNING_EVENT_GNU_ARRAY_FOLD,
-                .token = location,
+                .token = declarator && (value->flags & (BUSTER_CHECK_GNU_ICE_FORM | BUSTER_CHECK_GNU_OBJECT_READ)) == BUSTER_CHECK_GNU_ICE_FORM ? first : location,
                 .source = BUSTER_CHECK_NONE,
                 .flags = ignored ? BUSTER_CHECK_WARNING_DEFAULT_IGNORED : 0,
                 .completion_kind = ignored ? CHECK_WARNING_COMPLETE_AT_TOKEN : CHECK_WARNING_COMPLETE_AFTER_DELIMITER,
                 .completion = end,
                 .payload = { .token = BUSTER_CHECK_NONE },
             };
-            check_input_warning_event(reader, &event, NULL, 0);
+            check_input_warning_once(reader, &event);
         }
         else
         {
@@ -118,14 +124,15 @@ static void check_input_constant_warning(CheckInputReader* reader, uint32_t firs
 {
     check_input_constant_warning_clear(reader, first, end,
         CHECK_WARNING_SHIFT_COUNT_NEGATIVE | CHECK_WARNING_SHIFT_COUNT_OVERFLOW | CHECK_WARNING_SHIFT_NEGATIVE_VALUE);
-    check_input_constant_fold_warning(reader, first, end, value, ignored, first);
+    check_input_constant_fold_warning(reader, first, end, value, ignored, first, false);
 }
 
-static void check_input_constant_bound_warning(CheckInputReader* reader, uint32_t first, uint32_t end, const CheckValue* value, uint32_t location)
+static void check_input_constant_bound_warning(CheckInputReader* reader, uint32_t first, uint32_t end, const CheckValue* value, uint32_t location,
+                                               bool declarator)
 {
     check_input_constant_warning_clear(reader, first, end,
         CHECK_WARNING_SHIFT_COUNT_NEGATIVE | CHECK_WARNING_SHIFT_COUNT_OVERFLOW | CHECK_WARNING_SHIFT_NEGATIVE_VALUE);
-    check_input_constant_fold_warning(reader, first, end, value, false, location);
+    check_input_constant_fold_warning(reader, first, end, value, false, location, declarator);
     if (reader->constant_contexts != 0 && first < end && end <= reader->parser->tokens.count)
     {
         for (uint32_t token = first; token < end; token += 1)
@@ -148,20 +155,6 @@ typedef struct CheckConstantInput CheckConstantInput;
 typedef struct CheckConstantRange CheckConstantRange;
 // Optional evidence for an attribute argument's parser diagnostics. Other constant/type queries keep their existing
 // reporting owner; this record contains no borrowed operand arrays and survives the evaluator's scratch rollback.
-typedef struct CheckConstantFailure CheckConstantFailure;
-struct CheckConstantFailure
-{
-    CheckDiagnostic diagnostic;
-    CheckOp op;
-    TypeId type;
-    TypeId second_type;
-    uint32_t token;
-    uint32_t callee;
-    uint32_t name;
-    uint32_t expected;
-    uint32_t actual;
-    bool variadic;
-};
 struct CheckConstantRange
 {
     uint32_t first;
@@ -210,6 +203,13 @@ struct CheckConstantInput
     // references already have declaration/type columns, while new type syntax and builtins still need normal binding.
     bool scoped_names;
     bool deferred_tags;
+    // CHECK_CONSTANT_NAMES_*, the reader's when the reading began (check_constant_name).
+    uint8_t names;
+    // The undeclared names this reading reported that no correction took (check_constant_name): a job's own, which
+    // a nested tag's readings between its steps don't touch.
+    uint32_t missing;
+    // A job's failure evidence, where its reading reports undeclared names and its caller has no place for it (#1447).
+    CheckConstantFailure evidence;
 };
 
 static uint32_t check_constant_overload_token(const CheckConstantInput* input, uint32_t root)
@@ -671,8 +671,9 @@ static TypeId check_constant_specifiers(CheckConstantInput* input, uint32_t* cur
             {
                 i = input->attribute_starts[i - input->first]->end - 1;
             }
-            else if (check_input_qualifier(parser, i, &qualifiers))
+            else if (check_input_read_qualifier(reader, i, &qualifiers))
             {
+                // (A repeated one warns there, as check_input_specifiers' does, #1836.)
             }
             else if (kind == PARSE_KIND_STORAGE)
             {
@@ -681,10 +682,19 @@ static TypeId check_constant_specifiers(CheckConstantInput* input, uint32_t* cur
             }
             else if (name == C_NAME_COMPLEX_C99 || name == C_NAME_GNU_COMPLEX || name == C_NAME_GNU_COMPLEX2)
             {
+                // A repeated specifier warns as check_input_specifiers' does (#1836), once a token whichever reading.
+                if (complex)
+                {
+                    check_input_duplicate_specifier(reader, i, C_NAME_COMPLEX_C99);
+                }
                 complex = true;
             }
             else if (kind == PARSE_KIND_ATOMIC && (i + 1 >= end || parser->tokens.kinds[i + 1] != PARSE_KIND_L_PAREN))
             {
+                if (atomic)
+                {
+                    check_input_duplicate_specifier(reader, i, C_NAME_ATOMIC);
+                }
                 atomic = true;
             }
             else if ((kind == PARSE_KIND_TYPEOF || kind == PARSE_KIND_ATOMIC) && i + 1 < end &&
@@ -706,11 +716,19 @@ static TypeId check_constant_specifiers(CheckConstantInput* input, uint32_t* cur
             }
             else if (name == C_NAME_SHORT)
             {
+                if (shorts != 0)
+                {
+                    check_input_duplicate_specifier(reader, i, C_NAME_SHORT);
+                }
                 shorts = 1;
             }
             else if (name == C_NAME_SIGNED || name == C_NAME_GNU_SIGNED || name == C_NAME_GNU_SIGNED2 || name == C_NAME_UNSIGNED)
             {
                 const uint32_t selected = name == C_NAME_UNSIGNED ? 2 : 1;
+                if (signedness == selected)
+                {
+                    check_input_duplicate_specifier(reader, i, name == C_NAME_UNSIGNED ? C_NAME_UNSIGNED : C_NAME_SIGNED);
+                }
                 valid &= signedness == 0 || signedness == selected;
                 signedness = selected;
             }
@@ -1056,7 +1074,7 @@ static TypeId check_constant_type(CheckConstantInput* input, uint32_t first, uin
                     part.extent = (uint64_t)extent;
                     if (valid)
                     {
-                        check_input_constant_bound_warning(reader, i + 1, close, &bound, i);
+                        check_input_constant_bound_warning(reader, i + 1, close, &bound, i, false);
                     }
                 }
                 else if (valid)
@@ -1715,6 +1733,18 @@ static bool check_input_stdc_library_call(CheckInputReader* reader, uint32_t tok
     return result;
 }
 
+// Whether a catalog builtin's name `builtin` (but a <stdbit.h> function's, check_input_stdc_library_call's), bound to
+// the declaration of binding `handle`, stays the builtin (#1843): a function's declaration with external linkage, which
+// clang's FunctionDecl::getBuiltinID keeps the builtin's (__builtin_bswap32 declared `unsigned __builtin_bswap32(unsigned);`),
+// its type compatible with the builtin's or clang's error at it (check_input_builtin_declaration). A static function and an
+// object of the name are the program's.
+static bool check_input_builtin_kept(const CheckInputReader* reader, uint32_t handle, uint16_t builtin)
+{
+    const uint32_t declaration = handle != 0 ? reader->bindings.declaration[handle - 1] : BUSTER_CHECK_NONE;
+    return builtin != CBUILTIN_NONE && !cbuiltin_stdc_library(builtin) && declaration < reader->parser->tokens.count &&
+           reader->declaration_kinds[declaration] == C_BINDING_FUNCTION && check_input_linkage(reader->declaration_bits, declaration) == 2;
+}
+
 static uint16_t check_constant_integer_builtin(CheckConstantInput* input, uint32_t token, uint32_t handle)
 {
     CheckInputReader* reader = input->reader;
@@ -1727,7 +1757,7 @@ static uint16_t check_constant_integer_builtin(CheckConstantInput* input, uint32
     uint16_t builtin = CBUILTIN_NONE;
     const bool called = open < close && close < input->end && parser->tokens.kinds[open] == PARSE_KIND_L_PAREN &&
                         (input->raw || parser->tree.roles[close] == PARSE_ROLE_CLOSE_CALL);
-    if (called && handle == 0)
+    if (called && (handle == 0 || check_input_builtin_kept(reader, handle, check_constant_builtin_name(reader, parser->tokens.names[token]))))
     {
         builtin = reader->builtins[close];
         if (!input->cached)
@@ -1806,6 +1836,69 @@ static void check_constant_prototype_open(CheckConstantInput* input, uint32_t to
     {
         input->prototype_marks[close - input->first] = c_bindings_mark(&input->reader->bindings) + 1;
         input->reader->prototype_depth += 1;
+    }
+}
+
+static uint32_t check_typo_walk_value(CheckInputReader* reader, uint32_t token);
+
+// Whether the walk has reported `token`'s undeclared name already: a declarator may read its constant again.
+static bool check_constant_name_reported(const CheckInput* output, uint32_t token)
+{
+    bool reported = false;
+    for (uint32_t i = 0; !reported && i < output->report_count; i += 1)
+    {
+        reported = output->reports[i].token == token && output->reports[i].message == CHECK_INPUT_UNDECLARED;
+    }
+    for (uint32_t i = 0; !reported && i < output->recovered_count; i += 1)
+    {
+        reported = output->recovered_reports[i].token == token && output->recovered_reports[i].message == CHECK_INPUT_UNDECLARED;
+    }
+    return reported;
+}
+
+// An undeclared name at `token` that a declarator's constant binds (#1447): an enumerator's value, a bit-field's width,
+// an array's bound, a typeof's operand, a _BitInt's width or a designator's index. Its error is clang's, at the name, as
+// its parser gives it on reading the name (Sema::DiagnoseEmptyLookup), each in the expression's order. A typo's correction
+// (c_check_typo.c) is taken as if it were written: its error is recovered, and the name binds that declaration, a use of
+// it by the declaration's own name, so that the unused declarations' analysis counts it as clang marks it referenced.
+// One with no correction is recovered where the reading's caller recovers the declaration (CHECK_CONSTANT_NAMES_RECOVER),
+// and otherwise ends the walk. None of this is done on a lane or by a deferred reader, whose unit with an undeclared name
+// is read again in source order, nor at a call's callee, whose implicit declaration is the walk's.
+static void check_constant_name(CheckConstantInput* input, uint32_t token)
+{
+    CheckInputReader* reader = input->reader;
+    CheckInput* output = reader->output;
+    const Parser* parser = reader->parser;
+    const uint32_t count = parser->tokens.count;
+    const bool callee = token + 1 < count && parser->tree.roles[token + 1] == PARSE_ROLE_OPEN_CALL;
+    const bool ordered = !reader->lane && reader->deferred == NULL && !callee && !output->resource;
+    if (ordered && output->declarations[token] == BUSTER_CHECK_NONE && !check_constant_name_reported(output, token))
+    {
+        const uint32_t event = check_typo_walk_value(reader, token);
+        const uint32_t declaration = event != BUSTER_CHECK_NONE ? reader->bindings.declaration[event] : BUSTER_CHECK_NONE;
+        const bool corrected = declaration < count;
+        const uint32_t before = output->report_count;
+        check_input_report(reader, token, corrected ? CHECK_INPUT_UNDECLARED_CORRECTED : CHECK_INPUT_UNDECLARED);
+        const bool reported = output->report_count == before + 1 && !output->resource;
+        if (reported && corrected)
+        {
+            output->reports[before].note_token = declaration;
+            output->declarations[token] = declaration;
+            reader->declared_types[token] = reader->declared_types[declaration];
+            if (output->overload_heads != 0)
+            {
+                output->overload_heads[token] = output->overload_heads[declaration];
+            }
+            const uint32_t name = parser->tokens.names[declaration];
+            output->resource |= c_bindings_use(&reader->bindings, C_BINDING_ORDINARY, name, token, check_input_use_point(reader, token)) == 0;
+        }
+        reader->constant_named += reported ? 1u : 0u;
+        reader->constant_missing += reported && !corrected ? 1u : 0u;
+        input->missing += reported && !corrected ? 1u : 0u;
+        if (reported && (corrected || input->names == CHECK_CONSTANT_NAMES_RECOVER))
+        {
+            check_input_recover_reports(reader, before);
+        }
     }
 }
 
@@ -2055,7 +2148,12 @@ static bool check_constant_bind(CheckConstantInput* input, bool type_name)
             {
                 // Preserve missing operands for the semantic pass. A later undeclared name must not hide
                 // an earlier invalid sizeof/type query in the same bound merely because binding runs first.
+                // A declarator's constant reports it here, where clang's parser reads it (#1447).
                 valid = role == PARSE_ROLE_OPERAND;
+                if (valid && input->names != CHECK_CONSTANT_NAMES_NONE)
+                {
+                    check_constant_name(input, token);
+                }
             }
         }
         if (!valid && input->failed_token != 0)
@@ -2127,7 +2225,7 @@ static bool check_constant_selection(CheckConstantInput* input, uint32_t keyword
                 const uint32_t root = check_constant_range_root(input, condition ? separator + 1 : next + 1, condition ? next : token);
                 *proof = input->proof_values[root - input->first];
             }
-            check_input_constant_fold_warning(reader, first, separator, &control, true, first);
+            check_input_constant_fold_warning(reader, first, separator, &control, true, first, false);
             check_input_warning_suppress(reader, condition ? next + 1 : separator + 1, condition ? token : next, CHECK_WARNING_INTEGER_OVERFLOW);
         }
     }
@@ -4205,6 +4303,11 @@ static bool check_constant_raw_bind(CheckConstantInput* input, bool type_name)
                         handle != 0 ? type == (input->syntax[index] != 0) : !input->syntax[index]);
             }
             valid = valid && !(!input->cached && builtin == CBUILTIN_NONE && check_input_use_shadowed(reader, token, handle));
+            if (valid && input->names != CHECK_CONSTANT_NAMES_NONE && handle == 0 && builtin == CBUILTIN_NONE && !invoke && intrinsic == 0 && !input->cached &&
+                !scoped && !input->syntax[index] && parser->tree.roles[token] == PARSE_ROLE_OPERAND)
+            {
+                check_constant_name(input, token);
+            }
             if (valid && !input->cached && builtin == CBUILTIN_NONE && handle != 0)
             {
                 const uint32_t declaration = reader->bindings.declaration[handle - 1];
@@ -4415,7 +4518,17 @@ static bool check_constant_input_initialize(CheckConstantInput* input, CheckInpu
         .prototype_depth = reader->prototype_depth,
         .cached = cached,
         .failed_token = failed_token,
+        .names = reader->constant_names,
+        .diagnosed = reader->constant_failure,
+        .evidence = { .token = BUSTER_CHECK_NONE, .callee = BUSTER_CHECK_NONE },
     };
+    // A reading that this one starts (a member's bound in a tag it defines) sets its own.
+    reader->constant_names = CHECK_CONSTANT_NAMES_NONE;
+    reader->constant_failure = NULL;
+    if (input->diagnosed != NULL)
+    {
+        *input->diagnosed = (CheckConstantFailure){ .token = BUSTER_CHECK_NONE, .callee = BUSTER_CHECK_NONE };
+    }
     if (failed_token != 0)
     {
         *failed_token = BUSTER_CHECK_NONE;
@@ -4476,6 +4589,8 @@ static CheckConstantInput* check_input_constant_job(CheckInputReader* reader, ui
     {
         input->mark = mark;
         input->deferred_tags = true;
+        // A declarator's job keeps its own evidence, past the nested tags its caller reads between its steps.
+        input->diagnosed = input->diagnosed == NULL && input->names != CHECK_CONSTANT_NAMES_NONE ? &input->evidence : input->diagnosed;
         if (!input->raw)
         {
             check_constant_source_regions(input);
@@ -4572,7 +4687,7 @@ static bool check_input_constant_read(CheckInputReader* reader, uint32_t first, 
     reader->constant_abi_origin = 0;
     reader->constant_noderef = NULL;
     bool valid = check_constant_input_initialize(&input, reader, first, end, cached, failed_token);
-    input.diagnosed = diagnosed;
+    input.diagnosed = diagnosed != NULL ? diagnosed : input.diagnosed;
     input.scoped_names = scoped_names;
     if (valid)
     {

@@ -277,6 +277,58 @@ static void check_test_driver_convention_diagnostics(CheckTest* test, const char
         { "void f(void *c __attribute__((swift_async_context)));\nvoid __attribute__((ms_abi)) g(void *__attribute__((swift_async_context)) c);\n"
           "void __attribute__((intel_ocl_bicc)) h(void *__attribute__((swift_async_context)) c, int x);\nlong k(void *__attribute__((swift_async_context)) c) { return (long)c; }\n", "-std=gnu17" },
         { "void f(void *c __attribute__((swift_async_context)));\nvoid __attribute__((preserve_most)) g(int x, void *__attribute__((swift_async_context)) c);\n", "-std=gnu23" },
+        // The convention's error once per function, at its first incompatible parameter (clang's hasCheckedSwiftCall, #1447).
+        { "void f(void *__attribute__((swift_context)) c, void **__attribute__((swift_error_result)) e);\n", "-std=gnu17" },
+        { "void f(int *__attribute__((swift_indirect_result)) a, int *__attribute__((swift_indirect_result)) b, int x);\n", "-std=gnu23" },
+        // The function chunk nearest the name of a pointer's or an array's declarator (#1447): the declaration's specifiers'
+        // and trailing conventions, but not one in the pointer's own chunk, which applies after clang builds it.
+        { "void (*p)(__attribute__((swift_context)) void *c) __attribute__((swiftcall));\n", "-std=gnu17" },
+        { "void (*p)(__attribute__((swift_context)) void *c) __attribute__((swiftcall));\n", "-std=gnu23" },
+        { "__attribute__((swiftcall)) void (*p)(__attribute__((swift_context)) void *c);\n", "-std=gnu17" },
+        { "__attribute__((swiftcall)) void (*p)(__attribute__((swift_context)) void *c);\n", "-std=gnu23" },
+        { "void (__attribute__((swiftcall)) *p)(__attribute__((swift_context)) void *c);\n", "-std=gnu17" },
+        { "void (__attribute__((swiftcall)) *p)(__attribute__((swift_context)) void *c);\n", "-std=gnu23" },
+        { "void (*p)(__attribute__((swift_context)) void *c);\n", "-std=gnu17" },
+        { "void (*p)(__attribute__((swift_context)) void *c);\n", "-std=gnu23" },
+        { "typedef void (*T)(__attribute__((swift_context)) void *c) __attribute__((swiftcall)); T t;\n", "-std=gnu17" },
+        { "typedef void (*T)(__attribute__((swift_context)) void *c) __attribute__((swiftcall)); T t;\n", "-std=gnu23" },
+        { "void (*a[2])(void *__attribute__((swift_error_result)) *e) __attribute__((swiftcall));\n", "-std=gnu17" },
+        { "void (*a[2])(void *__attribute__((swift_error_result)) *e) __attribute__((swiftcall));\n", "-std=gnu23" },
+        { "void (*a[2])(__attribute__((swift_context)) void *c, void *__attribute__((swift_error_result)) *e) __attribute__((swiftcall));\n", "-std=gnu17" },
+        { "void (*a[2])(__attribute__((swift_context)) void *c, void *__attribute__((swift_error_result)) *e) __attribute__((swiftcall));\n", "-std=gnu23" },
+        { "void (* const p)(__attribute__((swift_context)) void *c) __attribute__((swiftasynccall));\n", "-std=gnu17" },
+        { "void (* const p)(__attribute__((swift_context)) void *c) __attribute__((swiftasynccall));\n", "-std=gnu23" },
+        { "void ((*p))(__attribute__((swift_context)) void *c) __attribute__((swiftcall));\n", "-std=gnu17" },
+        { "void ((*p))(__attribute__((swift_context)) void *c) __attribute__((swiftcall));\n", "-std=gnu23" },
+        { "void (*p)(__attribute__((swift_context)) void *c) __attribute__((swiftcall)), (*q)(__attribute__((swift_context)) void *c);\n", "-std=gnu17" },
+        { "void (*p)(__attribute__((swift_context)) void *c) __attribute__((swiftcall)), (*q)(__attribute__((swift_context)) void *c);\n", "-std=gnu23" },
+        { "void (*p)(__attribute__((swift_async_context)) void *c);\n", "-std=gnu17" },
+        { "void (*p)(__attribute__((swift_async_context)) void *c);\n", "-std=gnu23" },
+        // A function chunk farther from the name than the nearest has no convention where clang builds it (#1447): its
+        // Swift ABIs are checked as System V's, whatever conventions the declaration gives.
+        { "void (*f(void))(__attribute__((swift_context)) void *) __attribute__((swiftcall));\n", "-std=gnu17" },
+        { "void (*f(void))(__attribute__((swift_context)) void *) __attribute__((swiftcall));\n", "-std=gnu23" },
+        { "void (*f(void))(__attribute__((swift_context)) void *);\n", "-std=gnu17" },
+        { "void (*f(void))(__attribute__((swift_context)) void *);\n", "-std=gnu23" },
+        { "void (*(*p)(int))(__attribute__((swift_context)) void *c) __attribute__((swiftcall));\n", "-std=gnu17" },
+        { "void (*(*p)(int))(__attribute__((swift_context)) void *c) __attribute__((swiftcall));\n", "-std=gnu23" },
+        { "__attribute__((swiftcall)) void (*(*p)(int))(void *__attribute__((swift_error_result)) *e);\n", "-std=gnu17" },
+        { "__attribute__((swiftcall)) void (*(*p)(int))(void *__attribute__((swift_error_result)) *e);\n", "-std=gnu23" },
+        { "void g(void (*(*q)(int))(int *__attribute__((swift_indirect_result)) r, int *__attribute__((swift_indirect_result)) s));\n", "-std=gnu17" },
+        { "void g(void (*(*q)(int))(int *__attribute__((swift_indirect_result)) r, int *__attribute__((swift_indirect_result)) s));\n", "-std=gnu23" },
+        { "void (*(*p)(int))(void *__attribute__((swift_async_context)) c);\n", "-std=gnu17" },
+        { "void (*(*p)(int))(void *__attribute__((swift_async_context)) c);\n", "-std=gnu23" },
+        { "void (*(*p)(int))(int x, int *__attribute__((swift_indirect_result)) r);\n", "-std=gnu17" },
+        { "void (*(*p)(int))(int x, int *__attribute__((swift_indirect_result)) r);\n", "-std=gnu23" },
+        // no_caller_saved_registers added by a redeclaration (#1447): clang's err_function_attribute_mismatch before the
+        // type's conflict, noted at the declaration its lookup found (the latest, a block's), its spelling normalized, a
+        // C23 one's with its scope; one that drops it inherits it, and a definition's after a declaration's is the error too.
+        { "void a(void);\n__attribute__((no_caller_saved_registers)) void a(void);\nvoid b(void);\n__attribute__((__no_caller_saved_registers__)) void b(void);\n"
+          "void c(void);\nvoid c(void) __attribute__((no_caller_saved_registers));\nvoid d(void);\nvoid d(void);\n__attribute__((no_caller_saved_registers)) void d(void);\n"
+          "void g(int);\n__attribute__((no_caller_saved_registers)) void g(long);\nvoid h(void) { void k(void); }\n__attribute__((no_caller_saved_registers)) void k(void);\n"
+          "__attribute__((no_caller_saved_registers)) void m(void);\nvoid m(void);\nvoid m(void) {}\nvoid n(void);\n__attribute__((no_caller_saved_registers)) void n(void) {}\n", "-std=gnu17" },
+        { "void a(void);\n[[gnu::no_caller_saved_registers]] void a(void);\nvoid b(void);\n[[gnu::no_caller_saved_registers]] void b(void) __attribute__((no_caller_saved_registers));\n"
+          "void c(void);\n__attribute__((no_caller_saved_registers)) void (c)(void);\nvoid h(void) { void k(void); __attribute__((no_caller_saved_registers)) void k(void); }\n", "-std=gnu23" },
     };
     enum { LINES = 16384 };
     char* expected_lines = malloc(LINES);
@@ -660,7 +712,8 @@ static void check_test_driver_preserving_frames(CheckTest* test, const char* cla
 // error code for the second kind) and jumps to the handler, whose iretq returns to it at the same privilege level; it then
 // reads every register back. Every register must come back, rsp too, the direction flag set again as the frame had it;
 // and the handlers record what they saw: the frame's rip, rsp and cs, the error code, and a cleared direction flag. The
-// handlers make calls (whose callees keep nothing for them), use vectors and floating point, and realign their frame. Both
+// handlers make calls (whose callees keep nothing for them), use vectors and floating point, and realign their frame;
+// variadic ones read the interrupted code's argument registers (#1447). Both
 // paths' code, with --verify, on x86-64 (with probes, frame pointers and -g too), x86-64-v3 where the host has AVX2 and
 // x86-64-v4 where it has AVX-512.
 static void check_test_driver_interrupt_handlers(CheckTest* test, const char* clang, const char* executable, const char* directory)
@@ -692,16 +745,17 @@ static void check_test_driver_interrupt_handlers(CheckTest* test, const char* cl
         "#define VECTORS 0xffffu\n"
         "#define MASKS 0u\n"
         "#endif\n"
-        "// iprobe(state) and iprobe_error(state): every register from state (but rsp; r11 the handler, state->fn), the\n"
+        "// iprobe(state) and iprobe_error(state): two words, 0x2b2b2b2b and 0x3c3c3c3c below it, which a variadic handler's\n"
+        "// overflow area reads, then every register from state (but rsp; r11 the handler, state->fn), the\n"
         "// direction flag set, then an interrupt's frame (and the error code 0x5a5a) and a jump to the handler, whose iretq comes\n"
         "// back to the resume label after the call that pushed it; then every register into state, and rflags.\n"
         "#define PROBE(name, error) \\\n"
         "    \".text\\n.globl \" name \"\\n.type \" name \",@function\\n\" name \":\\n\" \\\n"
         "    \"push %rbx\\npush %rbp\\npush %r12\\npush %r13\\npush %r14\\npush %r15\\npush %rdi\\nmov %rdi, %rax\\n\" LOAD \\\n"
-        "    \"mov %rsp, 4488(%rax)\\nmov 8(%rax), %rcx\\nmov 16(%rax), %rdx\\nmov 24(%rax), %rbx\\nmov 40(%rax), %rbp\\nmov 48(%rax), %rsi\\nmov 56(%rax), %rdi\\n\" \\\n"
+        "    \"pushq $0x2b2b2b2b\\npushq $0x3c3c3c3c\\nmov %rsp, 4488(%rax)\\nmov 8(%rax), %rcx\\nmov 16(%rax), %rdx\\nmov 24(%rax), %rbx\\nmov 40(%rax), %rbp\\nmov 48(%rax), %rsi\\nmov 56(%rax), %rdi\\n\" \\\n"
         "    \"mov 64(%rax), %r8\\nmov 72(%rax), %r9\\nmov 80(%rax), %r10\\nmov 96(%rax), %r12\\nmov 104(%rax), %r13\\nmov 112(%rax), %r14\\nmov 120(%rax), %r15\\n\" \\\n"
         "    \"mov 4480(%rax), %r11\\nmov (%rax), %rax\\nstd\\n\" \\\n"
-        "    \"pushq $0\\nmov %ss, (%rsp)\\npush %rsp\\naddq $8, (%rsp)\\npushfq\\npushq $0\\nmov %cs, (%rsp)\\ncall 2f\\n\" \\\n"
+        "    \"pushq $0\\nmov %ss, (%rsp)\\npush %rsp\\naddq $8, (%rsp)\\npushfq\\npushq $0\\nmov %cs, (%rsp)\\ncall 2f\\nlea 16(%rsp), %rsp\\n\" \\\n"
         "    \"push %rax\\npushfq\\ncld\\nmov 16(%rsp), %rax\\npop 4496(%rax)\\npop 128(%rax)\\n\" \\\n"
         "    \"mov %rcx, 136(%rax)\\nmov %rdx, 144(%rax)\\nmov %rbx, 152(%rax)\\nmov %rsp, 160(%rax)\\nmov %rbp, 168(%rax)\\nmov %rsi, 176(%rax)\\nmov %rdi, 184(%rax)\\n\" \\\n"
         "    \"mov %r8, 192(%rax)\\nmov %r9, 200(%rax)\\nmov %r10, 208(%rax)\\nmov %r11, 216(%rax)\\nmov %r12, 224(%rax)\\nmov %r13, 232(%rax)\\nmov %r14, 240(%rax)\\nmov %r15, 248(%rax)\\n\" \\\n"
@@ -717,6 +771,12 @@ static void check_test_driver_interrupt_handlers(CheckTest* test, const char* cl
         "void handler_calls(void*);\n"
         "void handler_aligned(void*);\n"
         "void handler_vla(void*, unsigned long);\n"
+        "void handler_varargs(void*, ...);\n"
+        "void handler_varargs_error(void*, unsigned long, ...);\n"
+        "void handler_overflow(void*, ...);\n"
+        "void handler_overflow_error(void*, unsigned long, ...);\n"
+        "void handler_overflow_aligned(void*, ...);\n"
+        "void handler_overflow_aligned_error(void*, unsigned long, ...);\n"
         "static int raise_one(const char* what, void* fn, int error, int expected)\n"
         "{\n"
         "    State s;\n"
@@ -727,7 +787,7 @@ static void check_test_driver_interrupt_handlers(CheckTest* test, const char* cl
         "    s.fn = fn;\n"
         "    memset((void*)&seen, 0, sizeof(seen));\n"
         "    if (error) { iprobe_error(&s); } else { iprobe(&s); }\n"
-        "    int bad = s.out[4] != s.sp || (s.flags >> 10 & 1) != 1 || seen.calls != 1 || seen.rsp != s.sp || seen.cs == 0 || (seen.flags >> 10 & 1) != 0 ||\n"
+        "    int bad = s.out[4] != s.sp + 16 || (s.flags >> 10 & 1) != 1 || seen.calls != 1 || seen.rsp != s.sp || seen.cs == 0 || (seen.flags >> 10 & 1) != 0 ||\n"
         "              (error && seen.error != 0x5a5a) || seen.rip == 0;\n"
         "    if (bad) { printf(\"%s: frame or flags (rsp %llx/%llx, seen rsp %llx, calls %d, error %llx, flags %llx/%llx)\\n\", what, (unsigned long long)s.out[4], (unsigned long long)s.sp, (unsigned long long)seen.rsp, seen.calls, (unsigned long long)seen.error, (unsigned long long)s.flags, (unsigned long long)seen.flags); }\n"
         "    for (uint32_t r = 0; r < 16; r += 1)\n"
@@ -754,6 +814,12 @@ static void check_test_driver_interrupt_handlers(CheckTest* test, const char* cl
         "    bad |= raise_one(\"handler_calls\", (void*)handler_calls, 0, 5);\n"
         "    bad |= raise_one(\"handler_aligned\", (void*)handler_aligned, 0, 3);\n"
         "    bad |= raise_one(\"handler_vla\", (void*)handler_vla, 1, 0x5a);\n"
+        "    bad |= raise_one(\"handler_varargs\", (void*)handler_varargs, 0, 7);\n"
+        "    bad |= raise_one(\"handler_varargs_error\", (void*)handler_varargs_error, 1, 3);\n"
+        "    bad |= raise_one(\"handler_overflow\", (void*)handler_overflow, 0, 127);\n"
+        "    bad |= raise_one(\"handler_overflow_error\", (void*)handler_overflow_error, 1, 127);\n"
+        "    bad |= raise_one(\"handler_overflow_aligned\", (void*)handler_overflow_aligned, 0, 127);\n"
+        "    bad |= raise_one(\"handler_overflow_aligned_error\", (void*)handler_overflow_aligned_error, 1, 127);\n"
         "    printf(bad ? \"FAILED\\n\" : \"ok\\n\");\n"
         "    return bad;\n"
         "}\n";
@@ -768,7 +834,28 @@ static void check_test_driver_interrupt_handlers(CheckTest* test, const char* cl
         "__attribute__((interrupt)) void handler_error(Frame* f, unsigned long e) { record(f, e); }\n"
         "__attribute__((interrupt)) void handler_calls(Frame* f) { record(f, 0); char buf[32]; snprintf(buf, sizeof buf, \"%.1f\", 2.5); double d = 2.0; seen.rip = (uint64_t)(d * (buf[0] - '0') + 1.0); }\n"
         "__attribute__((interrupt)) void handler_aligned(Frame* f) { record(f, 0); _Alignas(64) char x[64]; __builtin_memset(x, 3, 64); seen.rip = (uint64_t)x[63]; }\n"
-        "__attribute__((interrupt)) void handler_vla(Frame* f, unsigned long e) { record(f, e); char x[e & 0xff]; __builtin_memset(x, (int)(e & 0xff), sizeof x); seen.rip = (uint64_t)(unsigned char)x[(e & 0xff) - 1]; }\n";
+        "__attribute__((interrupt)) void handler_vla(Frame* f, unsigned long e) { record(f, e); char x[e & 0xff]; __builtin_memset(x, (int)(e & 0xff), sizeof x); seen.rip = (uint64_t)(unsigned char)x[(e & 0xff) - 1]; }\n"
+        // A variadic handler's list starts at the interrupted code's rdi, rsi and xmm0 (#1447), as LLVM's x86_intrcc has it.
+        "#define REGISTER(r) (0x1111111111111111ull * (r + 1) ^ 0x0123456789abcdefull)\n"
+        "__attribute__((interrupt)) void handler_varargs(Frame* f, ...) { record(f, 0); __builtin_va_list ap; __builtin_va_start(ap, f); "
+        "unsigned long a = __builtin_va_arg(ap, unsigned long); unsigned long b = __builtin_va_arg(ap, unsigned long); double d = __builtin_va_arg(ap, double); "
+        "unsigned long bits; __builtin_memcpy(&bits, &d, 8); __builtin_va_end(ap); seen.rip = (a == REGISTER(7)) + 2 * (b == REGISTER(6)) + 4 * (bits == 0x52473c31261b1005ull); }\n"
+        "__attribute__((interrupt)) void handler_varargs_error(Frame* f, unsigned long e, ...) { record(f, e); __builtin_va_list ap; __builtin_va_start(ap, e); "
+        "unsigned long a = __builtin_va_arg(ap, unsigned long); double d = __builtin_va_arg(ap, double); unsigned long bits; __builtin_memcpy(&bits, &d, 8); "
+        "__builtin_va_end(ap); seen.rip = (a == REGISTER(7)) + 2 * (bits == 0x52473c31261b1005ull); }\n"
+        // Past the register save area (#1929's review): the six general registers' slots, rdi, rsi, rdx, rcx, r8 and r9, then
+        // the overflow area, 40 bytes past where the routine was entered, as LLVM's x86_intrcc puts it: the probe's word
+        // above the frame without an error code, the frame's ss with one. With a realigned frame too.
+        "#define OVERFLOW(start, seventh) __builtin_va_list ap; __builtin_va_start(ap, start); unsigned long r[6]; "
+        "for (int i = 0; i < 6; i += 1) { r[i] = __builtin_va_arg(ap, unsigned long); } unsigned long last = __builtin_va_arg(ap, unsigned long); __builtin_va_end(ap); "
+        "seen.rip = (r[0] == REGISTER(7)) + 2 * (r[1] == REGISTER(6)) + 4 * (r[2] == REGISTER(2)) + 8 * (r[3] == REGISTER(1)) + 16 * (r[4] == REGISTER(8)) + "
+        "32 * (r[5] == REGISTER(9)) + 64 * (last == (seventh));\n"
+        "__attribute__((interrupt)) void handler_overflow(Frame* f, ...) { record(f, 0); OVERFLOW(f, 0x3c3c3c3cull) }\n"
+        "__attribute__((interrupt)) void handler_overflow_error(Frame* f, unsigned long e, ...) { record(f, e); OVERFLOW(e, f->ss) }\n"
+        "__attribute__((interrupt)) void handler_overflow_aligned(Frame* f, ...) { record(f, 0); _Alignas(64) char x[64]; __builtin_memset(x, 1, 64); "
+        "OVERFLOW(f, 0x3c3c3c3cull + (unsigned long)x[63] - 1) }\n"
+        "__attribute__((interrupt)) void handler_overflow_aligned_error(Frame* f, unsigned long e, ...) { record(f, e); _Alignas(64) char x[64]; "
+        "__builtin_memset(x, 1, 64); OVERFLOW(e, f->ss + (unsigned long)x[63] - 1) }\n";
     char harness_path[512];
     char handler_path[512];
     char object[512];
@@ -815,6 +902,32 @@ static void check_test_driver_interrupt_handlers(CheckTest* test, const char* cl
             snprintf(description, sizeof(description), "interrupt handlers: %s%s by the %s path return to the interrupted code with every register: %s",
                      configurations[c][0], configurations[c][1] != NULL ? " with probes, frame pointers and -g" : "", p == 1 ? "scalar" : "vector",
                      running ? ran : "(nothing ran)");
+            check_test_expect(test, running && strcmp(ran, "ok\n") == 0, description);
+            unlink(object);
+            unlink(linked);
+        }
+        // The control (#1929's review): clang's own objects of the handlers pass the same probe, so that the frame and the
+        // overflow area the checks expect are LLVM's x86_intrcc's, end to end.
+        if (runs)
+        {
+            char* text = NULL;
+            char* reference[] = { (char*)clang, "-std=gnu17", "-w", "-O0", (char*)configurations[c][0], "-c", handler_path, "-o", object, NULL, NULL, NULL, NULL };
+            uint32_t at = 9;
+            for (uint32_t k = 1; k < 4 && configurations[c][k] != NULL; k += 1)
+            {
+                reference[at++] = (char*)configurations[c][k];
+            }
+            const bool compiled = check_test_driver_spawn(reference, &text) == 0;
+            free(text);
+            text = NULL;
+            char* link[] = { (char*)clang, (char*)configurations[c][0], "-O0", "-w", harness_path, object, "-o", linked, NULL };
+            const bool built = compiled && check_test_driver_spawn(link, &text) == 0;
+            free(text);
+            char ran[4096] = { 0 };
+            const bool running = built && check_test_driver_capture(linked, ran, sizeof(ran));
+            char description[2048];
+            snprintf(description, sizeof(description), "interrupt handlers: %s%s by clang's objects pass the same probe: %s", configurations[c][0],
+                     configurations[c][1] != NULL ? " with probes, frame pointers and -g" : "", running ? ran : "(nothing ran)");
             check_test_expect(test, running && strcmp(ran, "ok\n") == 0, description);
             unlink(object);
             unlink(linked);

@@ -211,23 +211,31 @@ run_evidence()
 {
     : > "$GITHUB_OUTPUT"
     (cd "$1" && bash "$root/tools/ci/nightly.sh" evidence "$work/evidence-$RANDOM") > "$work/evidence.log" || return $?
-    # Main's hosted suite is never reused or reduced, independently of hardware admission and nightly mode.
+    # Main's hosted rows are never reused, independently of hardware admission and nightly mode. In the nightly mode a
+    # push runs the plain rows, its sanitizer rows and fuzzing the nightly snapshot's (#2057); before it, every row.
     if [ "${GITHUB_EVENT_NAME:-}" = push ]; then
-        expect_line "$GITHUB_OUTPUT" 'scope=full' 'every main push runs the full sanitizer and fuzz scope'
+        if [ "${EVIDENCE_NIGHTLY:-}" = on ]; then
+            expect_line "$GITHUB_OUTPUT" 'scope=plain' 'a main push in the nightly mode runs the plain rows'
+        else
+            expect_line "$GITHUB_OUTPUT" 'scope=full' 'a main push before the nightly mode runs the full sanitizer and fuzz scope'
+        fi
         expect_line "$GITHUB_OUTPUT" 'hosted=run' 'every main push runs its own hosted suite'
         expect_line "$GITHUB_OUTPUT" 'hosted_source=' 'PR evidence never replaces main hosted coverage'
         expect_line "$GITHUB_OUTPUT" 'retired=false' 'nightly mode never retires a main push'
     fi
 }
 
-# A draft pull request: hosted feedback, no hardware, and no API call. A ready one's 9700X job measures (it skips
-# native correctness: #1272).
-GITHUB_EVENT_NAME=pull_request GITHUB_SHA=$head EVIDENCE_DRAFT=true run_evidence "$history"
-expect_line "$GITHUB_OUTPUT" 'scope=plain' 'a pull request runs the plain rows'
-expect_line "$GITHUB_OUTPUT" 'hardware=skip' 'a draft keeps off the 9700X'
-expect_line "$GITHUB_OUTPUT" 'hardware_reason=draft' 'a draft says why'
-GITHUB_EVENT_NAME=pull_request GITHUB_SHA=$head EVIDENCE_DRAFT=false run_evidence "$history"
-expect_line "$GITHUB_OUTPUT" 'hardware=admit' 'a ready pull request is admitted'
+# A pull request, draft or ready: hosted feedback, no hardware (#2055), and no API call. The workflow no longer passes
+# the draft state; a stale EVIDENCE_DRAFT changes nothing.
+for draft in true false ''; do
+    GITHUB_EVENT_NAME=pull_request GITHUB_SHA=$head EVIDENCE_DRAFT=$draft run_evidence "$history"
+    expect_line "$GITHUB_OUTPUT" 'scope=plain' 'a pull request runs the plain rows'
+    expect_line "$GITHUB_OUTPUT" 'hosted=run' 'its own'
+    expect_line "$GITHUB_OUTPUT" 'hardware=skip' 'a pull request keeps off the 9700X'
+    expect_line "$GITHUB_OUTPUT" 'hardware_reason=pull-request' 'and says why'
+    expect_line "$GITHUB_OUTPUT" 'native=-' 'a pull request runs no native correctness'
+    expect_line "$GITHUB_OUTPUT" 'measurement=-' 'and no measurements'
+done
 expect_no_match "$fixtures/calls.log" 'commits/|actions/' 'a pull request reads no API'
 # A merge queue, and any other event, is no supported path: the job fails and nothing runs.
 for event in merge_group pull_request_target workflow_run repository_dispatch; do
@@ -245,18 +253,20 @@ expect_line "$GITHUB_OUTPUT" 'retired=false' 'without the nightly mode the daily
 expect_line "$GITHUB_OUTPUT" 'scope=full' 'the daily run runs every row'
 expect_line "$GITHUB_OUTPUT" 'hardware=admit' 'and is admitted'
 
-# Landed merges, documentation-only revisions and direct pushes all get full hosted CI in either nightly mode (#1271).
-# Each checkout and GITHUB_SHA must agree, as the workflow's do. In the nightly mode a push keeps off the 9700X, its
-# native correctness and measurements deferred to the window; before it, a push qualifies on hardware (#1272).
+# Landed merges, documentation-only revisions and direct pushes all get their own hosted rows in either nightly mode
+# (#1271). Each checkout and GITHUB_SHA must agree, as the workflow's do. In the nightly mode a push runs the plain rows
+# (#2057) and keeps off the 9700X, its native correctness and measurements deferred to the window; before it, a push
+# runs every row and qualifies on hardware (#1272).
 for revision in "$merge" "$docs" "$head"; do
     git -C "$history" worktree add -q --detach "$work/main-push" "$revision"
     GITHUB_EVENT_NAME=push GITHUB_SHA=$revision EVIDENCE_NIGHTLY=on run_evidence "$work/main-push"
-    expect_line "$GITHUB_OUTPUT" 'scope=full' 'a main push runs every hosted row in the nightly mode'
+    expect_line "$GITHUB_OUTPUT" 'scope=plain' 'a main push runs the plain rows in the nightly mode'
     expect_line "$GITHUB_OUTPUT" 'hosted=run' 'its own'
     expect_line "$GITHUB_OUTPUT" 'hardware=skip' 'and keeps off the 9700X'
     expect_line "$GITHUB_OUTPUT" 'hardware_reason=deferred' 'deferring it to the window'
     GITHUB_EVENT_NAME=push GITHUB_SHA=$revision EVIDENCE_NIGHTLY='' run_evidence "$work/main-push"
-    expect_line "$GITHUB_OUTPUT" 'hardware=admit' 'before the nightly mode a main push qualifies on hardware'
+    expect_line "$GITHUB_OUTPUT" 'scope=full' 'before the nightly mode a main push runs every hosted row'
+    expect_line "$GITHUB_OUTPUT" 'hardware=admit' 'and qualifies on hardware'
     git -C "$history" worktree remove "$work/main-push"
 done
 
