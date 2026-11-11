@@ -15334,6 +15334,7 @@ static void check_lower_asm(CheckLowerWriter* writer, CheckControl control)
                     .label_names = plan->inline_label_names,
                     .label_count = plan->label_count,
                     .leaves = plan->inline_leaves,
+                    .stack = plan->inline_stack,
                 };
                 writer->asm_body_calls[writer->asm_body_count] = call;
                 writer->asm_body_count += 1;

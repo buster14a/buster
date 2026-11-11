@@ -386,6 +386,9 @@ struct IrAsmBody
     // The opmask registers the records write (k0 to k7, a bit each; Tier0AsmBody.masks), whose live masks Tier 1's CFG
     // consumer saves around the body (tier1_emit_cfg_asm).
     uint8_t masks;
+    // Whether it moves an input into rsp (#1846: rsp's explicit register variable, Tier0AsmBody.stack): its function's
+    // frame is then the program's, which the code certificate leaves uncertified.
+    bool stack;
 };
 
 typedef struct IrSizes IrSizes;

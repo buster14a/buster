@@ -993,6 +993,7 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_asm_body(IrTypedS
             .branch_count = body->branch_count,
             .touched = body->touched,
             .masks = body->masks,
+            .stack = body->stack,
         };
         output->calls[descriptor] = (IrCall){
             .argument_first = first,
