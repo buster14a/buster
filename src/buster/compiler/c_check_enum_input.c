@@ -598,22 +598,43 @@ static bool check_input_enum_read(CheckInputReader* reader, CheckTagFrame* frame
     return valid;
 }
 
-// Whether a fixed enum's alignment after its body is clang's (#1447): clang memoizes an enum's layout at its first query
-// (a sizeof, an _Alignof, an array or a record of it) and keeps it, so that a later aligned attribute changes nothing.
-// Taken where the enum completed at this body's own `{` and the body doesn't name it (`enum E`), so that nothing could
-// have asked; a reference, or a completion at an earlier declaration (`enum E : char;`), stays refused. Its one scan is
-// of the body's tokens, of a rare form's only.
-static bool check_input_enum_late_alignment(const CheckInputReader* reader, const CheckTagFrame* frame, uint32_t tag)
+// A fixed enum's alignment after its body, as clang takes it (#1447): clang memoizes an enum's layout at its first query
+// and keeps it, so that a later aligned attribute changes nothing after one. Where the enum completed at this body's own
+// `{`, each `enum E` the body writes is read: as a sizeof's or an _Alignof's operand, or its array's element, it asked the layout (#1447 C3: the
+// alignment is ignored, BUSTER_CHECK_LATE_ALIGNMENT_KEEP); as a cast's type, or a pointer to it in either, it didn't;
+// anywhere else, or a completion at
+// an earlier declaration (`enum E : char;`), the attribute stays refused (BUSTER_CHECK_LATE_ALIGNMENT_REFUSE). Its one
+// scan is of the body's tokens, of a rare form's only.
+#define BUSTER_CHECK_LATE_ALIGNMENT_REFUSE 0u
+#define BUSTER_CHECK_LATE_ALIGNMENT_APPLY 1u
+#define BUSTER_CHECK_LATE_ALIGNMENT_KEEP 2u
+
+static uint32_t check_input_enum_late_alignment(const CheckInputReader* reader, const CheckTagFrame* frame, uint32_t tag)
 {
     const Parser* parser = reader->parser;
     const uint32_t open = reader->tag_completions[tag];
     const uint32_t name = reader->types->tags.name[tag];
     bool valid = open < frame->close && parser->tokens.kinds[open] == PARSE_KIND_L_BRACE && parser->tree.parents[open] == frame->close;
+    bool queried = false;
     for (uint32_t t = open + 1; valid && name != 0 && t + 1 < frame->close; t += 1)
     {
-        valid = parser->tokens.kinds[t] != PARSE_KIND_ENUM || parser->tokens.kinds[t + 1] != PARSE_KIND_IDENTIFIER || parser->tokens.names[t + 1] != name;
+        const bool named = parser->tokens.kinds[t] == PARSE_KIND_ENUM && parser->tokens.kinds[t + 1] == PARSE_KIND_IDENTIFIER && parser->tokens.names[t + 1] == name;
+        // The construct whose group holds the name: the nearest sizeof's, _Alignof's or cast's closing token.
+        uint8_t context = PARSE_ROLE_CLOSE_BODY;
+        for (uint32_t at = t, steps = 0; named && at < frame->close && steps < frame->close - open && context == PARSE_ROLE_CLOSE_BODY; steps += 1)
+        {
+            const uint8_t role = parser->tree.roles[at];
+            context = role == PARSE_ROLE_CLOSE_SIZEOF || role == PARSE_ROLE_CLOSE_CAST ? role : context;
+            at = parser->tree.parents[at] != at ? parser->tree.parents[at] : frame->close;
+        }
+        // The type itself (`sizeof(enum E)`, or an array of it) asks its layout; a pointer to it (`enum E *`) doesn't; anything else stays refused.
+        const uint8_t next = named && t + 2 < frame->close ? parser->tokens.kinds[t + 2] : PARSE_KIND_END;
+        const bool itself = next == PARSE_KIND_R_PAREN || next == PARSE_KIND_L_SQUARE;
+        const bool pointer = next == PARSE_KIND_STAR;
+        queried |= named && context == PARSE_ROLE_CLOSE_SIZEOF && itself;
+        valid = !named || ((context == PARSE_ROLE_CLOSE_SIZEOF || context == PARSE_ROLE_CLOSE_CAST) && (itself || pointer));
     }
-    return valid;
+    return !valid ? BUSTER_CHECK_LATE_ALIGNMENT_REFUSE : queried ? BUSTER_CHECK_LATE_ALIGNMENT_KEEP : BUSTER_CHECK_LATE_ALIGNMENT_APPLY;
 }
 
 static bool check_input_enum_complete(CheckInputReader* reader, CheckTagFrame* frame, CheckTagMember* members)
@@ -651,7 +672,8 @@ static bool check_input_enum_complete(CheckInputReader* reader, CheckTagFrame* f
         // base's before it, as clang 23 types them (Sema::ActOnEnumBody, C23 6.7.3.3p16).
         if (valid && alignment != 0 && alignment != reader->types->tags.alignment_log2[tag])
         {
-            valid = check_input_enum_late_alignment(reader, frame, tag) && type_enum_realign(reader->types, frame->type, alignment);
+            const uint32_t late = check_input_enum_late_alignment(reader, frame, tag);
+            valid = late == BUSTER_CHECK_LATE_ALIGNMENT_KEEP || (late == BUSTER_CHECK_LATE_ALIGNMENT_APPLY && type_enum_realign(reader->types, frame->type, alignment));
             if (!valid)
             {
                 check_input_report(reader, frame->close, CHECK_INPUT_UNSUPPORTED);

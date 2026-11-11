@@ -315,8 +315,13 @@ applies after the base completed it, sets its alignment then (#1447,
 `type_enum_realign`), as clang's does where nothing has asked its layout yet:
 clang memoizes an enum's layout at its first query, after which the attribute
 changes nothing. So it is taken where the enum completed at this body's `{` and
-the body doesn't name it (`enum E`); one whose body names it, or one completed
-by an earlier declaration (`enum E : char;`), stays refused as unsupported. (Attributes
+the body names it (`enum E`) only as a cast's type; where the body asks its
+layout (`enum E` in a `sizeof`'s or an `_Alignof`'s operand) it changes
+nothing, as clang's does, and a pointer to it (`sizeof(enum E *)`) asks
+nothing; an array of it (`sizeof(enum E[2])`) asks. One whose body names it
+otherwise (a member's type, `sizeof(struct { enum E e; })`, which this
+doesn't read), or one completed by an earlier
+declaration (`enum E : char;`), stays refused as unsupported. (Attributes
 after a tag's name, before a `;`, make any tag's declaration a reference to the
 visible tag, as clang has it, not a declaration of it alone.)
 
