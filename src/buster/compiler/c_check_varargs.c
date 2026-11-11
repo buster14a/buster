@@ -253,7 +253,7 @@ static void check_varargs_one(TypeTable* table, const CheckVarargsContext* conte
     }
     else if (input->argument_count < minimum || input->argument_count > maximum)
     {
-        check_action_diagnose(result, CHECK_DIAG_ARGUMENT_COUNT, 0);
+        check_action_diagnose_count(result, input->argument_count, minimum, maximum);
     }
     else if (context == NULL || !type_is_valid(table, context->va_list_type))
     {

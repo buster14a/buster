@@ -210,7 +210,9 @@ clang keeps it at `-O0`. The checked program carries the choice
 - Tier 1's frame takes `KEEP_POINTER` (`Tier1EmitOptions.frame_flags`), and
   with the leaf rule `Tier1EmitOptions.omit_leaf_frame_pointer`, which drops it
   for a function without calls to functions, a machine row's none
-  (`tier1_emit_frame_flags`, both consumers).
+  (`tier1_emit_frame_flags`, both consumers). A function that reads its frame
+  address (`__builtin_frame_address(0)`, `__builtin_return_address(0)`, #1847)
+  takes it whatever the options say.
 - Tier 0's frame keeps one as a frame that moves rsp has, though its rsp stays
   put (`tier0_kept_pointer`, `tier0_frame_registers`): rbp no depth's register
   (`tier0_integer_depth_count`'s, and the u64 conversions' scratch registers by

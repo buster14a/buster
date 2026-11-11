@@ -67,6 +67,12 @@ typedef enum IrSimdOperation
     IR_SIMD_SHUFFLE,
     IR_SIMD_ALIGN,
     IR_SIMD_SHUFFLE_LANES,
+    // The conversions (#1840), of integer lanes whose sizes and mode the action's `index` holds (ir.c's
+    // BUSTER_IR_INTRINSIC_EXTEND and _TRUNCATE): each of the result's lanes a's same lane widened, by zeros or its sign;
+    // each of a's lanes narrowed, wrapping, or saturating a signed lane to the signed range or an unsigned one to the
+    // unsigned range, into the result's low bytes, zeros past them.
+    IR_SIMD_EXTEND,
+    IR_SIMD_TRUNCATE,
     IR_SIMD_OPERATION_COUNT,
 } IrSimdOperation;
 
@@ -209,7 +215,8 @@ static bool ir_simd_action_valid(const IrSimdAction* action)
         const IrSimdLane lane = action->lane;
         valid = action->operation == IR_SIMD_COMPARE || action->predicate == IR_SIMD_EQ;
         valid = valid && (action->index == 0 || action->operation == IR_SIMD_EXTRACT || action->operation == IR_SIMD_INSERT || action->operation == IR_SIMD_PERMUTE ||
-                          action->operation == IR_SIMD_ALIGN || action->operation == IR_SIMD_SHUFFLE_LANES);
+                          action->operation == IR_SIMD_ALIGN || action->operation == IR_SIMD_SHUFFLE_LANES || action->operation == IR_SIMD_EXTEND ||
+                          action->operation == IR_SIMD_TRUNCATE);
         valid = valid && (!action->volatile_memory || action->operation == IR_SIMD_LOAD || action->operation == IR_SIMD_STORE);
         valid = valid && ir_simd_lane_valid(action->operation, lane);
         // A floating comparison's predicates are C's: ==, !=, <, <=, > and >= (no unsigned ones).
@@ -251,6 +258,19 @@ static bool ir_simd_action_valid(const IrSimdAction* action)
                 valid = valid && ir_simd_vector(type) && a == type && b == type && c == IR_SIMD_NONE && (action->index >> 4 == 2 || action->index >> 4 == 3) &&
                         (action->index & 15u) < ir_simd_bits(type) / (8u << (action->index >> 4));
                 break;
+            case IR_SIMD_EXTEND:
+            case IR_SIMD_TRUNCATE:
+            {
+                const uint32_t source = action->index & 3;
+                const uint32_t result = (action->index >> 2) & 3;
+                const uint32_t mode = action->index >> 4;
+                const bool extend = action->operation == IR_SIMD_EXTEND;
+                const uint32_t lanes = extend ? ir_simd_bits(type) / (8u << result) : ir_simd_bits(a) / (8u << source);
+                const uint32_t bits = lanes * (8u << result);
+                valid = valid && ir_simd_vector(type) && ir_simd_vector(a) && b == IR_SIMD_NONE && c == IR_SIMD_NONE &&
+                        (extend ? result > source && mode <= 1 && lanes * (8u << source) <= ir_simd_bits(a) :
+                                  result < source && mode <= 2 && ir_simd_bits(type) == (bits > 128 ? bits : 128));
+            } break;
             case IR_SIMD_SHUFFLE_LANES:
                 valid = valid && a == type && b == type && c == IR_SIMD_NONE && ((type == IR_SIMD_V8I32 && action->index < 4) || type == IR_SIMD_V16I32);
                 break;
@@ -492,6 +512,38 @@ static bool ir_simd_evaluate(const IrSimdAction* action, const IrSimdValue* cons
                                  action->operation == IR_SIMD_WIDEN   ? (word < part_words ? values[0]->words[word] : 0) :
                                  inserted                             ? values[1]->words[word - first] :
                                                                         values[0]->words[word];
+        }
+    }
+    else if (valid && (action->operation == IR_SIMD_EXTEND || action->operation == IR_SIMD_TRUNCATE))
+    {
+        // Lane by lane: the source's lane read, extended to 64 bits by its sign where a sign extension or a signed
+        // saturation reads it so, then widened or narrowed.
+        const uint32_t source = 8u << (action->index & 3);
+        const uint32_t result = 8u << ((action->index >> 2) & 3);
+        const uint32_t mode = action->index >> 4;
+        const bool extend = action->operation == IR_SIMD_EXTEND;
+        const uint32_t lanes = extend ? ir_simd_bits(action->result) / result : ir_simd_bits(action->operands[0]) / source;
+        for (uint32_t lane = 0; lane < lanes; lane += 1)
+        {
+            const uint64_t raw = ir_simd_lane_read(values[0], source, lane);
+            const int64_t signed_value = source == 64 ? (int64_t)raw : (int64_t)(raw << (64 - source)) >> (64 - source);
+            uint64_t value = raw;
+            if (extend)
+            {
+                value = mode == 1 ? (uint64_t)signed_value : raw;
+            }
+            else if (mode == 1)
+            {
+                const int64_t high = (int64_t)((UINT64_C(1) << (result - 1)) - 1);
+                const int64_t low = -high - 1;
+                value = (uint64_t)(signed_value > high ? high : signed_value < low ? low : signed_value);
+            }
+            else if (mode == 2)
+            {
+                const uint64_t high = (UINT64_C(1) << (result - 1)) * 2 - 1;
+                value = raw > high ? high : raw;
+            }
+            ir_simd_lane_write(&staged, result, lane, result == 64 ? value : value & ((UINT64_C(1) << result) - 1));
         }
     }
     else if (valid && action->operation >= IR_SIMD_PERMUTE && action->operation <= IR_SIMD_SHUFFLE_LANES)
