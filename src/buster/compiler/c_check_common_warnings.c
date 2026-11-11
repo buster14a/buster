@@ -3954,6 +3954,66 @@ static void check_common_string_plus_int(const Parser* parser, Preprocessor* pp,
     }
 }
 
+// The root of the operand of a binary operator `op` that holds `token`, climbing at most the token count's parents, or
+// BUSTER_CHECK_NONE.
+static uint32_t check_common_operand_root_of(const Parser* parser, uint32_t op, uint32_t token)
+{
+    const uint32_t count = parser->tokens.count;
+    uint32_t at = token;
+    for (uint32_t steps = 0; at < count && parser->tree.parents[at] != op && steps < count; steps += 1)
+    {
+        const uint32_t up = parser->tree.parents[at];
+        at = up != at ? up : count;
+    }
+    return at < count && parser->tree.parents[at] == op ? at : BUSTER_CHECK_NONE;
+}
+
+// -Wshift-op-parentheses (#2264, clang's DiagnoseAdditionInShift as it builds a shift): each operand of a `<<` or `>>` that
+// is a `+` or a `-`, unparenthesized, the left one first, "operator '<<' has lower precedence than '+'; '+' will be
+// evaluated first" at the `+`, with its note there; given as the shift is built, after its operands' own.
+static void check_common_shift_op_parentheses(const Parser* parser, Preprocessor* pp, const CheckInput* input, Arena* scratch)
+{
+    const uint32_t count = parser->tokens.count;
+    const bool vector = !BUSTER_SCALAR_PATH(parser->options.scalar);
+    static const uint8_t roles[] = { PARSE_ROLE_SHIFT };
+    CheckCommonScan scan = { 0 };
+    const bool enabled = check_common_enabled(pp, input, CHECK_WARNING_ID_SHIFT_OP_PARENTHESES, false);
+    for (uint32_t token = enabled ? check_common_next_token(parser, count, BUSTER_CHECK_NONE, roles, BUSTER_ARRAY_LENGTH(roles), &scan, vector) : count; token < count;
+         token = check_common_next_token(parser, count, BUSTER_CHECK_NONE, roles, BUSTER_ARRAY_LENGTH(roles), &scan, vector))
+    {
+        const uint8_t kind = parser->tokens.kinds[token];
+        const bool shift = (kind == PARSE_KIND_LESSLESS || kind == PARSE_KIND_GREATERGREATER) && token > 0 && token + 1 < count;
+        const uint32_t sides[2] = {
+            shift ? check_common_operand_root_of(parser, token, token - 1) : BUSTER_CHECK_NONE,
+            shift ? check_common_operand_root_of(parser, token, token + 1) : BUSTER_CHECK_NONE,
+        };
+        uint32_t end = BUSTER_CHECK_NONE;
+        for (uint32_t i = 0; i < 2; i += 1)
+        {
+            const uint32_t side = sides[i];
+            const uint8_t side_kind = side < count ? parser->tokens.kinds[side] : 0;
+            if (side < count && parser->tree.roles[side] == PARSE_ROLE_ADDITIVE && (side_kind == PARSE_KIND_PLUS || side_kind == PARSE_KIND_MINUS))
+            {
+                const uint64_t mark = scratch->length;
+                const char* shifted = kind == PARSE_KIND_LESSLESS ? "<<" : ">>";
+                const char* added = side_kind == PARSE_KIND_PLUS ? "+" : "-";
+                const char* message = check_warning_text(scratch, "operator '%s' has lower precedence than '%s'; '%s' will be evaluated first", shifted, added, added);
+                const CheckCommonNote note = { side, check_warning_text(scratch, "place parentheses around the '%s' expression to silence this warning", added) };
+                end = end == BUSTER_CHECK_NONE ? check_common_operand_end(parser, token) : end;
+                if (message != NULL && note.message != NULL)
+                {
+                    // Its range, and its note's, is the `+` expression's, which shows the macro a `+` from its argument came
+                    // through (Preprocessor.diagnostic_arguments, which its note keeps too).
+                    pp->diagnostic_arguments = true;
+                    check_common_report_at(parser, pp, input, side, end, CHECK_WARNING_ID_SHIFT_OP_PARENTHESES, false, message, &note, 1, scratch);
+                    pp->diagnostic_arguments = false;
+                }
+                arena_pop_to(scratch, mark);
+            }
+        }
+    }
+}
+
 static void check_common_parentheses(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, const TypeTable* types,
                                      Arena* scratch)
 {
@@ -10773,6 +10833,7 @@ static void check_driver_common_warnings(const Parser* parser, Preprocessor* pp,
     // -Wparentheses.
     check_common_self_assigns(parser, pp, input, stream, types, &spell, &facts, scratch);
     check_common_parentheses(parser, pp, input, stream, types, scratch);
+    check_common_shift_op_parentheses(parser, pp, input, scratch);
     check_common_string_plus_int(parser, pp, input, stream, types, &spell, scratch);
     check_common_sizeof_array_decay(parser, pp, input, stream, types, &spell, scratch);
     check_common_graph_warnings(parser, pp, input, stream, types, &spell, &facts, program, shifts, scratch);
