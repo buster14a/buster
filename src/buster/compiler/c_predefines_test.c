@@ -1322,7 +1322,7 @@ static bool predefines_test_options(const char* directory, uint64_t seed, uint32
     // Each -m flag that changes no macro, alone, and each hardening flag and its -mno- form.
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(predefines_neutral_flags); i += 1)
     {
-        BUSTER_PREDEFINES_TEST_SET("%s", predefines_neutral_flags[i]);
+        BUSTER_PREDEFINES_TEST_SET("%s", c_option_spelling(predefines_neutral_flags[i]));
     }
     for (uint32_t h = 0; h < PREDEFINES_HARDENING_COUNT; h += 1)
     {
@@ -1333,9 +1333,9 @@ static bool predefines_test_options(const char* directory, uint64_t seed, uint32
     // -mzvector's -fzvector, which pp_take_family refuses (test-preprocessor's option sets check it), is left out.
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(predefines_aliases); i += 1)
     {
-        if (strcmp(predefines_aliases[i][1], "-fzvector") != 0)
+        if (strcmp(predefines_aliases[i].option, "-fzvector") != 0)
         {
-            BUSTER_PREDEFINES_TEST_SET("%s", predefines_aliases[i][0]);
+            BUSTER_PREDEFINES_TEST_SET("%s", c_option_spelling(predefines_aliases[i].alias));
         }
     }
     // The sanitizers clang's incompatible pairs name and those with macros: each alone, each pair, and each pair with
@@ -1409,7 +1409,7 @@ static bool predefines_test_options(const char* directory, uint64_t seed, uint32
                 const uint64_t alias = pick - flags - 2 * PREDEFINES_HARDENING_COUNT;
                 if (pick < flags)
                 {
-                    used += (size_t)snprintf(line + used, sizeof(line) - used, " %s", predefines_neutral_flags[pick]);
+                    used += (size_t)snprintf(line + used, sizeof(line) - used, " %s", c_option_spelling(predefines_neutral_flags[pick]));
                 }
                 else if (hardening < 2 * PREDEFINES_HARDENING_COUNT)
                 {
@@ -1418,8 +1418,8 @@ static bool predefines_test_options(const char* directory, uint64_t seed, uint32
                 else
                 {
                     // -mzvector's next entry, -mno-zvector, for it (pp_take_family refuses -fzvector).
-                    const uint64_t taken = alias + (strcmp(predefines_aliases[alias][1], "-fzvector") == 0);
-                    used += (size_t)snprintf(line + used, sizeof(line) - used, " %s", predefines_aliases[taken][0]);
+                    const uint64_t taken = alias + (strcmp(predefines_aliases[alias].option, "-fzvector") == 0);
+                    used += (size_t)snprintf(line + used, sizeof(line) - used, " %s", c_option_spelling(predefines_aliases[taken].alias));
                 }
             }
         }
@@ -1646,7 +1646,7 @@ static bool predefines_test_refused(void)
     for (uint32_t i = 0; result && i < BUSTER_ARRAY_LENGTH(refused) + BUSTER_ARRAY_LENGTH(predefines_neutral_flags); i += 1)
     {
         const bool taken = i >= BUSTER_ARRAY_LENGTH(refused);
-        const char* option = taken ? predefines_neutral_flags[i - BUSTER_ARRAY_LENGTH(refused)] : refused[i];
+        const char* option = taken ? c_option_spelling(predefines_neutral_flags[i - BUSTER_ARRAY_LENGTH(refused)]) : refused[i];
         char* text = 0;
         uint32_t length = 0;
         const bool accepted = predefines_test_ours(option, "/dev/null", &text, &length);

@@ -6536,34 +6536,35 @@ typedef enum PPFamily
 #define BUSTER_PP_MODULES_REFUSED "clang's modules, which buster doesn't have"
 
 // Each family's option, its -fno- form (none for -fzvector's: clang's driver never passes -fno-zvector on, and warns
-// that it is unused), and why buster refuses the option, null where pp_settle_families models the family or decides.
+// that it is unused), by their IDs (c_option_table.c), and why buster refuses the option, null where pp_settle_families
+// models the family or decides.
 static const struct
 {
-    const char* on;
-    const char* off;
+    uint16_t on;
+    uint16_t off;
     const char* refused;
 } pp_families[PP_FAMILY_COUNT] = {
-    [PP_FAMILY_GNU_KEYWORDS] = { "-fgnu-keywords", "-fno-gnu-keywords", 0 },
-    [PP_FAMILY_ASM] = { "-fasm", "-fno-asm", 0 },
-    [PP_FAMILY_DOLLARS] = { "-fdollars-in-identifiers", "-fno-dollars-in-identifiers", 0 },
-    [PP_FAMILY_DIGRAPHS] = { "-fdigraphs", "-fno-digraphs", 0 },
-    [PP_FAMILY_RAW_STRINGS] = { "-fraw-string-literals", "-fno-raw-string-literals", 0 },
-    [PP_FAMILY_MS_EXTENSIONS] = { "-fms-extensions", "-fno-ms-extensions", BUSTER_PP_KEYWORDS_REFUSED("Microsoft's keywords, lexing and directives") },
-    [PP_FAMILY_MS_COMPATIBILITY] = { "-fms-compatibility", "-fno-ms-compatibility", BUSTER_PP_KEYWORDS_REFUSED("Microsoft's keywords, lexing and directives") },
-    [PP_FAMILY_BORLAND] = { "-fborland-extensions", "-fno-borland-extensions", BUSTER_PP_KEYWORDS_REFUSED("Borland's keywords and __declspec") },
-    [PP_FAMILY_DECLSPEC] = { "-fdeclspec", "-fno-declspec", BUSTER_PP_KEYWORDS_REFUSED("the __declspec keyword and __has_declspec_attribute") },
-    [PP_FAMILY_ZVECTOR] = { "-fzvector", 0, BUSTER_PP_KEYWORDS_REFUSED("System z's vector keywords") },
-    [PP_FAMILY_ZOS] = { "-fzos-extensions", "-fno-zos-extensions", BUSTER_PP_KEYWORDS_REFUSED("z/OS's __ptr32 keyword") },
-    [PP_FAMILY_FIXED_POINT] = { "-ffixed-point", "-fno-fixed-point", BUSTER_PP_KEYWORDS_REFUSED("the fixed-point keywords and macros") },
-    [PP_FAMILY_DEFER_TS] = { "-fdefer-ts", "-fno-defer-ts", BUSTER_PP_KEYWORDS_REFUSED("the _Defer keyword") },
-    [PP_FAMILY_DIRECTIVES_ONLY] = { "-fdirectives-only", "-fno-directives-only", BUSTER_PP_OUTPUT_REFUSED },
-    [PP_FAMILY_KEEP_SYSTEM_INCLUDES] = { "-fkeep-system-includes", "-fno-keep-system-includes", BUSTER_PP_OUTPUT_REFUSED },
-    [PP_FAMILY_MINIMIZE_WHITESPACE] = { "-fminimize-whitespace", "-fno-minimize-whitespace", BUSTER_PP_OUTPUT_REFUSED },
-    [PP_FAMILY_LINE_DIRECTIVES] = { "-fuse-line-directives", "-fno-use-line-directives", BUSTER_PP_OUTPUT_REFUSED },
-    [PP_FAMILY_REWRITE_INCLUDES] = { "-frewrite-includes", "-fno-rewrite-includes", BUSTER_PP_OUTPUT_REFUSED },
-    [PP_FAMILY_REWRITE_IMPORTS] = { "-frewrite-imports", "-fno-rewrite-imports", BUSTER_PP_OUTPUT_REFUSED },
-    [PP_FAMILY_MODULES] = { "-fmodules", "-fno-modules", BUSTER_PP_MODULES_REFUSED },
-    [PP_FAMILY_IMPLICIT_MODULE_MAPS] = { "-fimplicit-module-maps", "-fno-implicit-module-maps", BUSTER_PP_MODULES_REFUSED },
+    [PP_FAMILY_GNU_KEYWORDS] = { C_OPTION_FGNU_KEYWORDS, C_OPTION_FNO_GNU_KEYWORDS, 0 },
+    [PP_FAMILY_ASM] = { C_OPTION_FASM, C_OPTION_FNO_ASM, 0 },
+    [PP_FAMILY_DOLLARS] = { C_OPTION_FDOLLARS_IN_IDENTIFIERS, C_OPTION_FNO_DOLLARS_IN_IDENTIFIERS, 0 },
+    [PP_FAMILY_DIGRAPHS] = { C_OPTION_FDIGRAPHS, C_OPTION_FNO_DIGRAPHS, 0 },
+    [PP_FAMILY_RAW_STRINGS] = { C_OPTION_FRAW_STRING_LITERALS, C_OPTION_FNO_RAW_STRING_LITERALS, 0 },
+    [PP_FAMILY_MS_EXTENSIONS] = { C_OPTION_FMS_EXTENSIONS, C_OPTION_FNO_MS_EXTENSIONS, BUSTER_PP_KEYWORDS_REFUSED("Microsoft's keywords, lexing and directives") },
+    [PP_FAMILY_MS_COMPATIBILITY] = { C_OPTION_FMS_COMPATIBILITY, C_OPTION_FNO_MS_COMPATIBILITY, BUSTER_PP_KEYWORDS_REFUSED("Microsoft's keywords, lexing and directives") },
+    [PP_FAMILY_BORLAND] = { C_OPTION_FBORLAND_EXTENSIONS, C_OPTION_FNO_BORLAND_EXTENSIONS, BUSTER_PP_KEYWORDS_REFUSED("Borland's keywords and __declspec") },
+    [PP_FAMILY_DECLSPEC] = { C_OPTION_FDECLSPEC, C_OPTION_FNO_DECLSPEC, BUSTER_PP_KEYWORDS_REFUSED("the __declspec keyword and __has_declspec_attribute") },
+    [PP_FAMILY_ZVECTOR] = { C_OPTION_FZVECTOR, C_OPTION_NONE, BUSTER_PP_KEYWORDS_REFUSED("System z's vector keywords") },
+    [PP_FAMILY_ZOS] = { C_OPTION_FZOS_EXTENSIONS, C_OPTION_FNO_ZOS_EXTENSIONS, BUSTER_PP_KEYWORDS_REFUSED("z/OS's __ptr32 keyword") },
+    [PP_FAMILY_FIXED_POINT] = { C_OPTION_FFIXED_POINT, C_OPTION_FNO_FIXED_POINT, BUSTER_PP_KEYWORDS_REFUSED("the fixed-point keywords and macros") },
+    [PP_FAMILY_DEFER_TS] = { C_OPTION_FDEFER_TS, C_OPTION_FNO_DEFER_TS, BUSTER_PP_KEYWORDS_REFUSED("the _Defer keyword") },
+    [PP_FAMILY_DIRECTIVES_ONLY] = { C_OPTION_FDIRECTIVES_ONLY, C_OPTION_FNO_DIRECTIVES_ONLY, BUSTER_PP_OUTPUT_REFUSED },
+    [PP_FAMILY_KEEP_SYSTEM_INCLUDES] = { C_OPTION_FKEEP_SYSTEM_INCLUDES, C_OPTION_FNO_KEEP_SYSTEM_INCLUDES, BUSTER_PP_OUTPUT_REFUSED },
+    [PP_FAMILY_MINIMIZE_WHITESPACE] = { C_OPTION_FMINIMIZE_WHITESPACE, C_OPTION_FNO_MINIMIZE_WHITESPACE, BUSTER_PP_OUTPUT_REFUSED },
+    [PP_FAMILY_LINE_DIRECTIVES] = { C_OPTION_FUSE_LINE_DIRECTIVES, C_OPTION_FNO_USE_LINE_DIRECTIVES, BUSTER_PP_OUTPUT_REFUSED },
+    [PP_FAMILY_REWRITE_INCLUDES] = { C_OPTION_FREWRITE_INCLUDES, C_OPTION_FNO_REWRITE_INCLUDES, BUSTER_PP_OUTPUT_REFUSED },
+    [PP_FAMILY_REWRITE_IMPORTS] = { C_OPTION_FREWRITE_IMPORTS, C_OPTION_FNO_REWRITE_IMPORTS, BUSTER_PP_OUTPUT_REFUSED },
+    [PP_FAMILY_MODULES] = { C_OPTION_FMODULES, C_OPTION_FNO_MODULES, BUSTER_PP_MODULES_REFUSED },
+    [PP_FAMILY_IMPLICIT_MODULE_MAPS] = { C_OPTION_FIMPLICIT_MODULE_MAPS, C_OPTION_FNO_IMPLICIT_MODULE_MAPS, BUSTER_PP_MODULES_REFUSED },
 };
 
 // What pp_take_family records for pp_settle_families: each family's last option (1 for its option, 0 for its -fno- form,
@@ -6577,39 +6578,41 @@ struct PPFamilies
 
 // Takes an argument that is a family's option (PPFamily), or -fexec-charset= or -finput-charset=, or one that buster
 // refuses wherever it comes, as it changes clang's -E with no -fno- form: modules', and __FILE__'s remapping (by prefix,
-// which takes the value too). `refused` is set for those. Returns false for any other argument.
-static bool pp_take_family(PPFamilies* families, const char* argument, bool* refused)
+// which takes the value too). `match` is the argument's IDs (c_option_find). `refused` is set for those. Returns false
+// for any other argument.
+static bool pp_take_family(PPFamilies* families, const char* argument, COptionMatch match, bool* refused)
 {
+    // Each refusal's prefix: the option through its '=', by ID, or else its text.
     static const struct
     {
+        uint16_t joined;
         const char* prefix;
         const char* refused;
     } refusals[] = {
-        { "-fbuiltin-module-map", BUSTER_PP_MODULES_REFUSED },
-        { "-fmodule-name=", BUSTER_PP_MODULES_REFUSED },
-        { "-fmodule-map-file=", BUSTER_PP_MODULES_REFUSED },
-        { "-fdriver-only", "it stops clang before it preprocesses" },
-        { "-fproc-stat-report", "clang's process statistics, which buster doesn't report" },
-        { "-fmacro-prefix-map=", "a remapping of __FILE__ and __BASE_FILE__, which buster doesn't follow" },
-        { "-ffile-prefix-map=", "a remapping of __FILE__ and __BASE_FILE__, which buster doesn't follow" },
+        { C_OPTION_NONE, "-fbuiltin-module-map", BUSTER_PP_MODULES_REFUSED },
+        { C_OPTION_FMODULE_NAME_EQ, 0, BUSTER_PP_MODULES_REFUSED },
+        { C_OPTION_FMODULE_MAP_FILE_EQ, 0, BUSTER_PP_MODULES_REFUSED },
+        { C_OPTION_NONE, "-fdriver-only", "it stops clang before it preprocesses" },
+        { C_OPTION_NONE, "-fproc-stat-report", "clang's process statistics, which buster doesn't report" },
+        { C_OPTION_FMACRO_PREFIX_MAP_EQ, 0, "a remapping of __FILE__ and __BASE_FILE__, which buster doesn't follow" },
+        { C_OPTION_FFILE_PREFIX_MAP_EQ, 0, "a remapping of __FILE__ and __BASE_FILE__, which buster doesn't follow" },
     };
     bool result = false;
     for (uint32_t f = 0; !result && f < PP_FAMILY_COUNT; f += 1)
     {
-        const bool on = strcmp(argument, pp_families[f].on) == 0;
-        const bool off = pp_families[f].off != 0 && strcmp(argument, pp_families[f].off) == 0;
+        const bool on = match.exact == pp_families[f].on;
+        const bool off = pp_families[f].off != C_OPTION_NONE && match.exact == pp_families[f].off;
         families->last[f] = on ? 1 : off ? 0 : families->last[f];
         result = on || off;
     }
     for (uint32_t c = 0; !result && c < BUSTER_ARRAY_LENGTH(families->charsets); c += 1)
     {
-        const char* const prefix = c == 0 ? "-fexec-charset=" : "-finput-charset=";
-        result = strncmp(argument, prefix, strlen(prefix)) == 0;
+        result = match.joined == (c == 0 ? C_OPTION_FEXEC_CHARSET_EQ : C_OPTION_FINPUT_CHARSET_EQ);
         families->charsets[c] = result ? argument : families->charsets[c];
     }
     for (uint32_t r = 0; !result && r < BUSTER_ARRAY_LENGTH(refusals); r += 1)
     {
-        result = strncmp(argument, refusals[r].prefix, strlen(refusals[r].prefix)) == 0;
+        result = refusals[r].prefix != 0 ? c_option_starts(argument, refusals[r].prefix) : match.joined == refusals[r].joined;
         if (result)
         {
             fprintf(stderr, "error: unsupported option '%s' (%s)\n", argument, refusals[r].refused);
@@ -6639,7 +6642,7 @@ static bool pp_settle_families(const PPFamilies* families, PPOptions* options)
         const bool refuse = pp_families[f].refused != 0 && last[f] == 1 && !(f == PP_FAMILY_ZVECTOR && options->assembly);
         if (refuse)
         {
-            fprintf(stderr, "error: unsupported option '%s' (%s)\n", pp_families[f].on, pp_families[f].refused);
+            fprintf(stderr, "error: unsupported option '%s' (%s)\n", c_option_spelling(pp_families[f].on), pp_families[f].refused);
         }
         result &= !refuse;
     }
@@ -6665,9 +6668,14 @@ static bool pp_settle_families(const PPFamilies* families, PPOptions* options)
 // (--predefines FILE, --location-limit N, --window-bytes N)? The commands that split -E's options from their files take
 // the value with the option, and those that give the options to clang too (test-preprocessor's files and
 // --compare-clang, benchmark-preprocessor --clang) leave both out of clang's arguments.
+static bool pp_own_option_id_with_value(COption option)
+{
+    return option == C_OPTION_PREDEFINES || option == C_OPTION_LOCATION_LIMIT || option == C_OPTION_WINDOW_BYTES;
+}
+
 static bool pp_own_option_with_value(const char* argument)
 {
-    return strcmp(argument, "--predefines") == 0 || strcmp(argument, "--location-limit") == 0 || strcmp(argument, "--window-bytes") == 0;
+    return pp_own_option_id_with_value(c_option_exact(argument));
 }
 
 // Clang's unsigned integral option grammar accepts decimal, leading-zero octal and 0x/0b/0o prefixes, but no sign.
@@ -6744,12 +6752,14 @@ static bool pp_parse_options_inputs(int count, char** arguments, PPOptions* opti
     result = result && predefines_options_initialize(&options->predefines, arena, (uint32_t)count);
     for (int i = 0; result && i < count; i += 1)
     {
-        if (!end_options && strcmp(arguments[i], "--") == 0)
+        // The argument's option IDs (c_option_table.c), which every test below compares; none past --.
+        const COptionMatch written = end_options ? (COptionMatch){ .exact = C_OPTION_NONE, .joined = C_OPTION_NONE } : c_option_find(arguments[i]);
+        if (!end_options && written.exact == C_OPTION_END_OF_OPTIONS)
         {
             end_options = true;
             continue;
         }
-        if (end_options || arguments[i][0] != '-' || strcmp(arguments[i], "-") == 0)
+        if (end_options || arguments[i][0] != '-' || written.exact == C_OPTION_STANDARD_INPUT)
         {
             result = inputs != NULL || *input == NULL;
             if (result)
@@ -6769,26 +6779,27 @@ static bool pp_parse_options_inputs(int count, char** arguments, PPOptions* opti
             }
             continue;
         }
-        // An alias of clang's (-mpascal-strings) is read as the option it stands for (-fpascal-strings).
-        const char* argument = predefines_alias(arguments[i]);
-        const bool malformed_linker = strcmp(argument, "-Wl") == 0 || strncmp(argument, "-Wl=", 4) == 0;
-        if ((strncmp(argument, "-W", 2) == 0 && !pp_warning_transport(argument) && !malformed_linker) || strcmp(argument, "-w") == 0 ||
-            strcmp(argument, "-pedantic") == 0 || strcmp(argument, "-pedantic-errors") == 0)
+        // An alias of clang's (-mpascal-strings) is read as the option it stands for (-fpascal-strings), by its IDs.
+        const char* argument = predefines_alias(arguments[i], written.exact);
+        const COptionMatch match = argument != arguments[i] ? c_option_find(argument) : written;
+        const bool malformed_linker = match.exact == C_OPTION_WL || match.joined == C_OPTION_WL_EQ;
+        if ((argument[1] == 'W' && !pp_warning_transport(argument) && !malformed_linker) || match.exact == C_OPTION_W || match.exact == C_OPTION_PEDANTIC ||
+            match.exact == C_OPTION_PEDANTIC_ERRORS)
         {
             warnings[options->semantic_warning_option_count++] = argument;
         }
         const char* next = i + 1 < count ? arguments[i + 1] : 0;
         // The target's options and the others that change the predefined macros (c_predefines.c) come first.
-        const PredefinesParse predefined = predefines_option(&options->predefines, argument, next);
-        if (strcmp(argument, "-M") == 0 || strcmp(argument, "-MM") == 0 || strcmp(argument, "-MD") == 0 || strcmp(argument, "-MMD") == 0)
+        const PredefinesParse predefined = predefines_option_match(&options->predefines, argument, match, next);
+        if (match.exact == C_OPTION_M || match.exact == C_OPTION_MM || match.exact == C_OPTION_MD || match.exact == C_OPTION_MMD)
         {
-            dependency_modes |= strcmp(argument, "-M") == 0 ? 1u : strcmp(argument, "-MM") == 0 ? 2u : strcmp(argument, "-MD") == 0 ? 4u : 8u;
+            dependency_modes |= match.exact == C_OPTION_M ? 1u : match.exact == C_OPTION_MM ? 2u : match.exact == C_OPTION_MD ? 4u : 8u;
         }
-        else if (strcmp(argument, "-MP") == 0)
+        else if (match.exact == C_OPTION_MP)
         {
             options->dependencies.phony = true;
         }
-        else if (strncmp(argument, "-MF", 3) == 0 || strncmp(argument, "-MT", 3) == 0 || strncmp(argument, "-MQ", 3) == 0)
+        else if (argument[1] == 'M' && (argument[2] == 'F' || argument[2] == 'T' || argument[2] == 'Q'))
         {
             const char* value = argument[3] != 0 ? argument + 3 : next;
             i += argument[3] == 0;
@@ -6814,11 +6825,11 @@ static bool pp_parse_options_inputs(int count, char** arguments, PPOptions* opti
                 }
             }
         }
-        else if (strcmp(argument, "-v") == 0)
+        else if (match.exact == C_OPTION_V)
         {
             options->verbose = true;
         }
-        else if (strcmp(argument, "-static") == 0 || strcmp(argument, "-static-pie") == 0 || strcmp(argument, "-pie") == 0)
+        else if (match.exact == C_OPTION_STATIC || match.exact == C_OPTION_STATIC_PIE || match.exact == C_OPTION_PIE)
         {
             // Linker modes the C driver selects; preprocessing ignores them, as clang's driver does with -E and -M.
         }
@@ -6827,7 +6838,7 @@ static bool pp_parse_options_inputs(int count, char** arguments, PPOptions* opti
             result = predefined != PREDEFINES_PARSE_ERROR;
             i += predefined == PREDEFINES_PARSE_TAKEN_TWO;
         }
-        else if (strcmp(argument, "-Xlinker") == 0)
+        else if (match.exact == C_OPTION_XLINKER)
         {
             result = next != NULL;
             i += result;
@@ -6836,7 +6847,7 @@ static bool pp_parse_options_inputs(int count, char** arguments, PPOptions* opti
                 fprintf(stderr, "error: missing argument to linker option '-Xlinker'\n");
             }
         }
-        else if (strncmp(argument, "-Wl,", 4) == 0)
+        else if (argument[1] == 'W' && argument[2] == 'l' && argument[3] == ',')
         {
             // No linker runs for -E. Do not interpret its payload as a warning option.
         }
@@ -6845,58 +6856,58 @@ static bool pp_parse_options_inputs(int count, char** arguments, PPOptions* opti
             fprintf(stderr, "error: malformed linker option '%s' (use '-Wl,OPTION')\n", argument);
             result = false;
         }
-        else if (strcmp(argument, "-E") == 0 || strcmp(argument, "-c") == 0 || strcmp(argument, "-w") == 0 || strcmp(argument, "-fhosted") == 0 || strcmp(argument, "-pipe") == 0)
+        else if (match.exact == C_OPTION_E || match.exact == C_OPTION_C || match.exact == C_OPTION_W || match.exact == C_OPTION_FHOSTED || match.exact == C_OPTION_PIPE)
         {
-            options->freestanding &= strcmp(argument, "-fhosted") != 0;
-            options->suppress_warnings |= strcmp(argument, "-w") == 0;
+            options->freestanding &= match.exact != C_OPTION_FHOSTED;
+            options->suppress_warnings |= match.exact == C_OPTION_W;
         }
-        else if (strcmp(argument, "-pedantic") == 0 || strcmp(argument, "-pedantic-errors") == 0)
+        else if (match.exact == C_OPTION_PEDANTIC || match.exact == C_OPTION_PEDANTIC_ERRORS)
         {
             // The semantic warning consumer reads these from the ordered options above.
         }
-        else if (strncmp(argument, "-ferror-limit=", 14) == 0)
+        else if (match.joined == C_OPTION_FERROR_LIMIT_EQ)
         {
             error_limit = argument;
         }
-        else if (strcmp(argument, "-ferror-limit") == 0)
+        else if (match.exact == C_OPTION_FERROR_LIMIT)
         {
             fprintf(stderr, "error: unknown argument '-ferror-limit'; use '-ferror-limit=N'\n");
             result = false;
         }
-        else if (strcmp(argument, "-fno-caret-diagnostics") == 0 || strcmp(argument, "-fcaret-diagnostics") == 0)
+        else if (match.exact == C_OPTION_FNO_CARET_DIAGNOSTICS || match.exact == C_OPTION_FCARET_DIAGNOSTICS)
         {
-            options->no_diagnostic_summary = strcmp(argument, "-fno-caret-diagnostics") == 0;
+            options->no_diagnostic_summary = match.exact == C_OPTION_FNO_CARET_DIAGNOSTICS;
         }
-        else if (strcmp(argument, "-P") == 0)
+        else if (match.exact == C_OPTION_P)
         {
             *markers = false;
         }
-        else if (strcmp(argument, "-Wsystem-headers") == 0 || strcmp(argument, "-Wno-system-headers") == 0)
+        else if (match.exact == C_OPTION_WSYSTEM_HEADERS || match.exact == C_OPTION_WNO_SYSTEM_HEADERS)
         {
-            options->system_header_warnings = strcmp(argument, "-Wsystem-headers") == 0;
+            options->system_header_warnings = match.exact == C_OPTION_WSYSTEM_HEADERS;
             options->implicit_function_system = options->system_header_warnings;
         }
-        else if (strcmp(argument, "-Wfatal-errors") == 0 || strcmp(argument, "-Wno-fatal-errors") == 0)
+        else if (match.exact == C_OPTION_WFATAL_ERRORS || match.exact == C_OPTION_WNO_FATAL_ERRORS)
         {
-            options->fatal_errors = strcmp(argument, "-Wfatal-errors") == 0;
+            options->fatal_errors = match.exact == C_OPTION_WFATAL_ERRORS;
         }
-        else if (strcmp(argument, "-dM") == 0)
+        else if (match.exact == C_OPTION_DM)
         {
             options->dump_macros = true;
         }
-        else if (strcmp(argument, "-H") == 0)
+        else if (match.exact == C_OPTION_H)
         {
             options->show_includes = true;
         }
-        else if (strcmp(argument, "--clang-features") == 0)
+        else if (match.exact == C_OPTION_CLANG_FEATURES)
         {
             options->clang_features = true;
         }
-        else if (strcmp(argument, "-fno-builtin") == 0 || strcmp(argument, "-fbuiltin") == 0)
+        else if (match.exact == C_OPTION_FNO_BUILTIN || match.exact == C_OPTION_FBUILTIN)
         {
-            options->no_builtin = strcmp(argument, "-fno-builtin") == 0;
+            options->no_builtin = match.exact == C_OPTION_FNO_BUILTIN;
         }
-        else if (strncmp(argument, "-fno-builtin-", 13) == 0)
+        else if (c_option_starts(argument, "-fno-builtin-"))
         {
             const char** names = (const char**)options->no_builtin_functions;
             if (names == NULL)
@@ -6910,31 +6921,31 @@ static bool pp_parse_options_inputs(int count, char** arguments, PPOptions* opti
                 names[options->no_builtin_function_count++] = argument + 13;
             }
         }
-        else if (strcmp(argument, "-ffreestanding") == 0)
+        else if (match.exact == C_OPTION_FFREESTANDING)
         {
             options->freestanding = true;
         }
-        else if (strcmp(argument, "-nostdinc") == 0)
+        else if (match.exact == C_OPTION_NOSTDINC)
         {
             options->no_standard_includes = true;
         }
-        else if (strcmp(argument, "-nobuiltininc") == 0)
+        else if (match.exact == C_OPTION_NOBUILTININC)
         {
             options->no_builtin_includes = true;
         }
-        else if (strcmp(argument, "--buster-headers") == 0)
+        else if (match.exact == C_OPTION_BUSTER_HEADERS)
         {
             options->buster_headers = true;
         }
-        else if (strcmp(argument, "-undef") == 0)
+        else if (match.exact == C_OPTION_UNDEF)
         {
             options->undefine = true;
         }
-        else if (strcmp(argument, "--scalar") == 0)
+        else if (match.exact == C_OPTION_SCALAR)
         {
             options->scalar = true;
         }
-        else if (strcmp(argument, "--location-limit") == 0 && next != 0)
+        else if (match.exact == C_OPTION_LOCATION_LIMIT && next != 0)
         {
             // A test option: a location space this many bytes long, to run out of it (#124).
             char* rest;
@@ -6943,7 +6954,7 @@ static bool pp_parse_options_inputs(int count, char** arguments, PPOptions* opti
             options->location_limit = (uint32_t)limit;
             i += 1;
         }
-        else if (strcmp(argument, "--window-bytes") == 0 && next != 0)
+        else if (match.exact == C_OPTION_WINDOW_BYTES && next != 0)
         {
             // A test option: the windows a large file is lexed and refined in (pp_prepare_windows), this many bytes, so
             // that small ones send every file of two windows or more through them.
@@ -6953,84 +6964,84 @@ static bool pp_parse_options_inputs(int count, char** arguments, PPOptions* opti
             options->window_bytes = (uint32_t)bytes;
             i += 1;
         }
-        else if (strcmp(argument, "-trigraphs") == 0 || strcmp(argument, "-ftrigraphs") == 0 || strcmp(argument, "-fno-trigraphs") == 0)
+        else if (match.exact == C_OPTION_TRIGRAPHS || match.exact == C_OPTION_FTRIGRAPHS || match.exact == C_OPTION_FNO_TRIGRAPHS)
         {
-            trigraphs = strcmp(argument, "-fno-trigraphs") != 0;
+            trigraphs = match.exact != C_OPTION_FNO_TRIGRAPHS;
         }
-        else if (strncmp(argument, "-m", 2) == 0)
+        else if (argument[1] == 'm')
         {
             // predefines_option takes every -m option clang uses for x86-64 Linux: this one clang doesn't know, or
             // refuses or ignores for the target.
             fprintf(stderr, "error: unknown or unsupported option '%s' for x86-64 Linux\n", argument);
             result = false;
         }
-        else if (pp_take_family(&families, argument, &refused))
+        else if (pp_take_family(&families, argument, match, &refused))
         {
             result = !refused;
         }
-        else if (strncmp(argument, "--embed-dir=", 12) == 0)
+        else if (match.joined == C_OPTION_EMBED_DIR_EQ)
         {
             embeds[options->embed_directory_count] = argument + 12;
             options->embed_directory_count += 1;
         }
-        else if (strcmp(argument, "-Wno-implicit-function-declaration") == 0 || strcmp(argument, "-Wno-implicit") == 0 ||
-                 strcmp(argument, "-Wno-all") == 0 || strcmp(argument, "-Wno-everything") == 0)
+        else if (match.exact == C_OPTION_WNO_IMPLICIT_FUNCTION_DECLARATION || match.exact == C_OPTION_WNO_IMPLICIT ||
+                 match.exact == C_OPTION_WNO_ALL || match.exact == C_OPTION_WNO_EVERYTHING)
         {
             implicit_before_c99 = 1;
             implicit_library_before_c99 = 1;
             implicit_since_c99 = 1;
             implicit_mapped = true;
-            implicit_everything &= strcmp(argument, "-Wno-everything") != 0;
+            implicit_everything &= match.exact != C_OPTION_WNO_EVERYTHING;
         }
-        else if (strcmp(argument, "-Wno-error=implicit-function-declaration") == 0 || strcmp(argument, "-Wno-error=implicit") == 0 ||
-                 strcmp(argument, "-Wno-error-implicit-function-declaration") == 0 || strcmp(argument, "-Wno-error=all") == 0)
+        else if (match.exact == C_OPTION_WNO_ERROR_EQ_IMPLICIT_FUNCTION_DECLARATION || match.exact == C_OPTION_WNO_ERROR_EQ_IMPLICIT ||
+                 match.exact == C_OPTION_WNO_ERROR_IMPLICIT_FUNCTION_DECLARATION || match.exact == C_OPTION_WNO_ERROR_EQ_ALL)
         {
             implicit_before_c99 = implicit_before_c99 == 3 ? 2 : implicit_before_c99;
             implicit_library_before_c99 = implicit_library_before_c99 == 3 ? 2 : implicit_library_before_c99;
             implicit_since_c99 = implicit_since_c99 == 3 ? 2 : implicit_since_c99;
             implicit_no_error = true;
         }
-        else if (strcmp(argument, "-Werror=implicit-function-declaration") == 0 || strcmp(argument, "-Werror=implicit") == 0 ||
-                 strcmp(argument, "-Werror-implicit-function-declaration") == 0 || strcmp(argument, "-Werror=all") == 0)
+        else if (match.exact == C_OPTION_WERROR_EQ_IMPLICIT_FUNCTION_DECLARATION || match.exact == C_OPTION_WERROR_EQ_IMPLICIT ||
+                 match.exact == C_OPTION_WERROR_IMPLICIT_FUNCTION_DECLARATION || match.exact == C_OPTION_WERROR_EQ_ALL)
         {
             implicit_before_c99 = 3;
             implicit_library_before_c99 = 3;
             implicit_since_c99 = 3;
             implicit_mapped = true;
         }
-        else if (strcmp(argument, "-Wimplicit-function-declaration") == 0 || strcmp(argument, "-Wimplicit") == 0 || strcmp(argument, "-Wall") == 0)
+        else if (match.exact == C_OPTION_WIMPLICIT_FUNCTION_DECLARATION || match.exact == C_OPTION_WIMPLICIT || match.exact == C_OPTION_WALL)
         {
             implicit_before_c99 = implicit_before_c99 == 1 ? 2 : implicit_before_c99;
             implicit_library_before_c99 = implicit_library_before_c99 == 1 ? 2 : implicit_library_before_c99;
             implicit_since_c99 = implicit_since_c99 == 1 ? 2 : implicit_since_c99;
             implicit_mapped = true;
         }
-        else if (strcmp(argument, "-Weverything") == 0)
+        else if (match.exact == C_OPTION_WEVERYTHING)
         {
             implicit_everything = true;
         }
-        else if (strcmp(argument, "-Werror") == 0 || strcmp(argument, "-Wno-error") == 0)
+        else if (match.exact == C_OPTION_WERROR || match.exact == C_OPTION_WNO_ERROR)
         {
-            warning_errors = strcmp(argument, "-Werror") == 0;
+            warning_errors = match.exact == C_OPTION_WERROR;
         }
-        else if (strcmp(argument, "-fpreprocessed") == 0)
+        else if (match.exact == C_OPTION_FPREPROCESSED)
         {
             // Rejected as an option here, where operands of value options were already skipped, rather than by scanning
             // the filtered vector, which keeps operands and post-`--` inputs (#1552's review).
             fprintf(stderr, "error: unsupported option '-fpreprocessed' (already-preprocessed input is not read that way)\n");
             result = false;
         }
-        else if (strncmp(argument, "-f", 2) == 0 || strncmp(argument, "-W", 2) == 0)
+        else if (argument[1] == 'f' || argument[1] == 'W')
         {
             // The other code generation and warning options: none changes what -E gives (predefines_option takes the
             // ones that change macros, and refuses those buster doesn't follow, and pp_take_family those that change
             // clang's keywords, lexing or -E output).
         }
-        else if (strncmp(argument, "-std=", 5) == 0 || strcmp(argument, "-ansi") == 0)
+        else if (match.joined == C_OPTION_STD_EQ || match.exact == C_OPTION_ANSI)
         {
             standard = argument;
         }
-        else if (strncmp(argument, "-x", 2) == 0)
+        else if (argument[1] == 'x')
         {
             const char* value = argument[2] != 0 ? argument + 2 : next;
             i += argument[2] == 0;
@@ -7041,8 +7052,8 @@ static bool pp_parse_options_inputs(int count, char** arguments, PPOptions* opti
                 fprintf(stderr, "error: unsupported or missing input language '%s'\n", value != NULL ? value : "");
             }
         }
-        else if ((strcmp(argument, "-o") == 0 || strcmp(argument, "--predefines") == 0 || strcmp(argument, "-include") == 0 || strcmp(argument, "-isystem") == 0 ||
-                  strcmp(argument, "-iquote") == 0 || strcmp(argument, "-idirafter") == 0) && next != 0)
+        else if ((match.exact == C_OPTION_O || match.exact == C_OPTION_PREDEFINES || match.exact == C_OPTION_INCLUDE || match.exact == C_OPTION_ISYSTEM ||
+                  match.exact == C_OPTION_IQUOTE || match.exact == C_OPTION_IDIRAFTER) && next != 0)
         {
             if (argument[1] == 'o')
             {
@@ -7152,6 +7163,7 @@ static bool pp_parse_options_inputs(int count, char** arguments, PPOptions* opti
 // The preprocessor's single-input API. Later -x options are validated but do not change the selected input's language.
 BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPOptions* options, Arena* arena, const char** input, const char** output, bool* markers);
 
+static bool pp_option_id_takes_value(COption option);
 static bool pp_option_takes_value(const char* argument);
 
 // A failed run's -o output removed, as clang removes it: a regular file, or a symbolic link (the link alone, not what it
@@ -7326,16 +7338,37 @@ static __attribute__((unused)) int run_preprocessor_command(int count, char** ar
 // name buster's directory has, so it gets ours' whole search instead (pp_clang_arguments), with a directory of links to
 // the rest of clang's resource directory in that directory's place.
 
+// Is `option` (an argument's ID, c_option_table.c) an option whose value is the next argument (pp_parse_options)?
+static bool pp_option_id_takes_value(COption option)
+{
+    static const uint16_t options[] = {
+        C_OPTION_I,
+        C_OPTION_D,
+        C_OPTION_U,
+        C_OPTION_O,
+        C_OPTION_X,
+        C_OPTION_INCLUDE,
+        C_OPTION_ISYSTEM,
+        C_OPTION_IQUOTE,
+        C_OPTION_IDIRAFTER,
+        C_OPTION_TARGET,
+        C_OPTION_MF,
+        C_OPTION_MT,
+        C_OPTION_MQ,
+        C_OPTION_XLINKER,
+    };
+    bool result = pp_own_option_id_with_value(option);
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(options); i += 1)
+    {
+        result |= options[i] == option;
+    }
+    return result;
+}
+
 // Is `argument` an option whose value is the next argument (pp_parse_options)?
 static bool pp_option_takes_value(const char* argument)
 {
-    static const char* const options[] = { "-I", "-D", "-U", "-o", "-x", "-include", "-isystem", "-iquote", "-idirafter", "-target", "-MF", "-MT", "-MQ", "-Xlinker" };
-    bool result = pp_own_option_with_value(argument);
-    for (uint32_t i = 0; !result && i < BUSTER_ARRAY_LENGTH(options); i += 1)
-    {
-        result = strcmp(argument, options[i]) == 0;
-    }
-    return result;
+    return pp_option_id_takes_value(c_option_exact(argument));
 }
 
 #if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_FRONTEND || BUSTER_COMPLETE_DRIVER
@@ -7356,5 +7389,7 @@ static __attribute__((unused)) void pp_implementation_interfaces(void)
     (void)&pp_utf8_sequence;
     (void)&pp_word_character;
     (void)&pp_option_takes_value;
+    (void)&pp_option_id_takes_value;
+    (void)&pp_own_option_with_value;
 }
 #endif

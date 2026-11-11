@@ -23,9 +23,11 @@
 //   baseline, AVX2 and AVX-512 targets, a function's target attribute, language and predefine switches and the scalar
 //   path, the request's and --scalar's among the options (the driver's --scalar); or refused by both, at the same stage's kind: -c's emission refusal, its target-feature errors, or the
 //   request's refusal. The parity cases run in an order that changes the target from one to the next, and the first
-//   again last, whose object must be the first's: one preparation's configuration never reaches the next.
+//   again last, whose object must be the first's: one preparation's configuration never reaches the next;
+// - options: the option IDs and every option form (c_option_table_test.c, check_test_option_table).
 //
-// Include after c_check_source_prepare.c; test-checker calls check_test_requests through its forward declaration.
+// Include after c_check_source_prepare.c and c_option_table_test.c; test-checker calls check_test_requests through its
+// forward declaration.
 #ifndef BUSTER_C_CHECK_REQUEST_TEST_INCLUDED
 #define BUSTER_C_CHECK_REQUEST_TEST_INCLUDED
 
@@ -737,6 +739,8 @@ static __attribute__((noinline)) void check_test_requests(CheckTest* test)
     {
         rmdir(directory);
     }
+    // #1444: the options' IDs, against a linear scan, and every option form through the driver's routing.
+    check_test_option_table(test);
 }
 
 #endif
