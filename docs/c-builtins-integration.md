@@ -1495,9 +1495,9 @@ code whose runs equal clang -O0's on both paths.
 - clang's atomic IEEE 754-2019 maximum and minimum, `__atomic_fetch_fmaximum`,
   `_fmaximum_num`, `_fminimum` and `_fminimum_num` (and their scoped forms), are
   read/modify/write rules of clang's floating types alone (complex ones among
-  them) but long double ("must be a pointer to floating point type"). A float's
-  and a double's have leaves; the other types are valid and refused by name at
-  the lowering. clang's code computes them through LLVM's x86 expansion of
+  them) but long double ("must be a pointer to floating point type"). A
+  float's, a double's, a `_Float16`'s and a `__bf16`'s have leaves; the other
+  types are valid and refused by name at the lowering. clang's code computes them through LLVM's x86 expansion of
   `llvm.maximum` and the others on every target without AVX10.2 (baseline to
   znver5 alike, at -O0 and -O2): `maxss` or `minss` of the old value and the
   operand, the result's sign cleared where the old value's is clear (maximum) or
@@ -1507,6 +1507,26 @@ code whose runs equal clang -O0's on both paths.
   and the leaves (`cbuiltin_atomic_rmw_ieee_body`) compute the same sequence.
   With AVX10.2 clang's code takes `vminmaxss` instead, whose NaN results differ,
   so a function whose target has AVX10.2 refuses them by name.
+- Of a `_Float16` or a `__bf16` (#1843), clang's code converts both values to
+  float, computes that sequence and converts the result back (a `_Float16`
+  with AVX512-FP16 computes it in half precision with `vmaxsh`). Every result is
+  one of the two values, its sign or quiet bit changed, so the leaves compute it
+  in the integer registers (`cbuiltin_atomic_rmw_ieee_half_body`): `maxss`'s or
+  `minss`'s choice by the values' order (a signed key of the magnitude), the
+  same sign and NaN steps, then what the conversion back does on the unit's
+  target, a leaf format each (`check_program_helper_half_format`):
+  - a NaN result quieted, as `__truncsfhf2`, `vcvtps2ph`, `__truncsfbf2` and
+    `vcvtneps2bf16` quiet it, but not with AVX512-FP16, which converts none;
+  - a `__bf16` denormal result flushed to its sign's zero with AVX512-BF16 or
+    AVX-NE-CONVERT, whose `vcvtneps2bf16` flushes it.
+
+  A function whose own target differs from its unit's in those features is
+  refused by name. The leaves raise no floating-point exception, where clang's
+  code raises its conversions' and `maxss`'s. And clang's `__bf16` code keeps
+  the old value as a float and converts it back for its compare-exchange, so
+  where that changes it (an object holding a signaling NaN, or a denormal where
+  `vcvtneps2bf16` flushes it) the compare fails forever and clang's program
+  hangs; the leaves compare the bits they loaded and return.
 
 `test-check-builtins-atomic` checks the queries' constants against clang's
 evaluator's rules, the generic forms' conversions and constraints and the scoped
@@ -1514,13 +1534,16 @@ families' models (`check_builtin_atomic_test_families`);
 `test-check-builtins-atomic-rmw` the added rules
 (`check_builtin_atomic_rmw_test_added`); `test-builtin-atomic-rmw-helpers` the new
 leaves against the host compiler's own builtins at every width (the IEEE
-maximum's and minimum's on every pair of 14 values of each width);
+maximum's and minimum's on every pair of 14 values of each width and type, the
+2-byte types' in the host's own format, but the old values its `__bf16` code
+hangs on);
 `test-preprocessor` the sized names' resolution, also at a guard page; and
 `test-checker` their acceptance and first errors against clang's (35 fixtures
 of the IEEE family's among them) and five programs of them against clang -O0's
 builds (`c_check_program_atomic_test.c`: sized legacy forms, wrapping, flags and
 lock-free queries, generic forms, scoped families, and the IEEE maximum and
-minimum on every pair of 13 values, signaling NaNs among them).
+minimum on every pair of 13 values, signaling NaNs among them, of a float, a
+double, a `_Float16` and a `__bf16`).
 
 `c_builtin_terminal_helpers.c` emits one baseline UD2 record for trap and a
 conservative realization of unreachable behavior. Its source consumer must
@@ -1837,10 +1860,8 @@ their typedefs kept. It folds where both are
 floating constants, as clang's evaluator folds it, so that glibc's `CMPLX` makes
 static data and an enumerator's `__imag__` an integer constant: the folds keep
 signed zeros, infinities and NaNs, a `static const` object's value, and long
-double's and `_Float16`'s parts. `__builtin_complex` doesn't fold `__float128`
-arguments (`check_action_float_supported`), so a `_Complex __float128` of
-constants is computed at run time and refused in static data, where clang takes
-it. At run
+double's, `_Float16`'s and `__float128`'s parts (a `__float128`'s by their bits,
+#1250, `check_quad_complex_set`). At run
 time the lowering evaluates both arguments in order into temporaries and stores
 them into a frame object of the two parts, whose address is its value, as every
 complex value's is (`check_lower_complex_builtin`: a `__float128` part's 16
@@ -1917,8 +1938,11 @@ object p points to, as clang's `PaddingClearer` does.
   are a read-only pool of the unit's, which the recipe's loop reads
   (`cbuiltin_misc_lower_padding_table`): the same bytes cleared, by a few
   dozen typed entries whatever the element's size (#1842).
-- **Limits.** An element past 4 GiB, a type nested more than 64 levels, or
-  an element of more than 1,048,576 intervals or entries is refused by name.
+- **Limits.** An element past 4 GiB, whose entries keep 32-bit offsets, or
+  of more than 1,048,576 intervals or entries is refused by name. The walk's
+  stack grows with the type's nesting, which no limit of its own bounds
+  (#1842; before, a type nested past 64 levels was refused, and its frame
+  written past the stack).
 - **Difference.** Clang's walk doesn't look through an array type's sugar
   (`dyn_cast<ConstantArrayType>` of the sugared type), so it keeps the padding
   of an array of a typedef's type, of `typeof`'s, or that a pointer declared
@@ -1959,7 +1983,7 @@ function yet"). The others clang does compile, but its code for them isn't
 sound, and this compiler keeps refusing them:
 
 - `__builtin___NSStringMakeConstantString` of no string literal, whose
-  object clang's code makes from what isn't one (below, "Code of no
+  object clang's code makes from what isn't one (below, "Of no
   literal");
 - `__builtin_zos_va_start` and `__builtin_zos_va_copy`, whose code clang
   writes over a `char *` that its 24-byte list overruns. The owner decided on
@@ -2118,11 +2142,16 @@ scope `sizeof`'s).
   - **The class:** the unit's file-scope declaration of
     `__CFConstantStringClassReference` (`check_input_cfstring_class`), or else
     an undefined global of that name, the program's own.
-- **Code of no literal.** An NSString of what isn't a literal stays a value:
-  clang's code makes its object from the literal its argument isn't (a
-  `cast<StringLiteral>` of another expression), and `-c` refuses it by name
-  ("unsupported: an NSString of no string literal, whose object clang's code
-  makes from the literal its argument isn't").
+- **Of no literal.** Clang's evaluator takes an NSString of what isn't a
+  literal as an address constant too (`IsOpaqueConstantCall` looks at no
+  argument), so it is one here as well, of its call's own object: a static
+  initializer of one is accepted, `(long)` of it plus an offset too, and two
+  compared aren't an initializer's constant, as clang's. But clang's code
+  makes its object from the literal its argument isn't (a `cast<StringLiteral>`
+  of another expression), so `-c` refuses the object by name, wherever the call
+  is, in the static data (`check_data_cfstring_keys`, at the call's `)`):
+  "unsupported: an NSString of no string literal, whose object clang's code
+  makes from the literal its argument isn't" (#1785).
   - What clang's object holds is another node's bytes read as a literal's,
     so it isn't defined, and an assertion-enabled clang aborts at the cast.
     Clang 23.1.5's release build (#1785) makes an empty 8-bit string (flags
@@ -2132,9 +2161,6 @@ scope `sizeof`'s).
     through casts first, so `(const char *)(void *)"zz"` makes the literal's
     own string.
 - **Differences.**
-  - Clang's evaluator takes an NSString of no literal as an address constant
-    too, and accepts a static initializer of one; this checker refuses it as
-    "initializer is not a constant expression".
   - A static `_Bool` of one is refused, as one of any address is
     (`static _Bool b = &x;`).
   - Clang's ELF object also has an `objc_imageinfo` section where it makes a
@@ -2355,11 +2381,20 @@ record dump, as `BuiltinDumpStruct` checks it.
   union, a long double, a 128-bit integer, a half-precision value or a
   vector, or returns a complex value, passes and returns them as a call's do
   (`check_lower_dump_argument`, a result in an object of the call's, #1842).
-- **Refusals.** A printer that takes a transparent union or an `_Atomic`
-  aggregate, a complex rest argument (the checker's "expression is not yet
-  supported"), rest arguments with a statement expression or more than 4096
-  nodes, and records of more than 1 GiB of strings or 64 levels are refused
-  by name. A record's lines and strings grow as they need (the strings are
+- **The rest's conversions** are a call's (`check_action_call`'s, #1842): a
+  complex value converts to a complex or a real parameter and passes through
+  the variadic part as itself; an `_Atomic` aggregate's parameter takes the
+  argument's value, a plain or an `_Atomic` one, in an object of the atomic
+  type's padded bytes; a transparent union's parameter takes a member's value
+  (or the union's), passed as its first member is
+  (`check_lower_transparent_value`). Each line's call evaluates the rest again,
+  so an `_Atomic` object's read among them takes an atomic plan a line, which
+  the lowering's room counts (`CheckLowerInitializers.extra_atomics`, and
+  os_log's items alike); before, a dump of an `_Atomic` argument wrote past the
+  plans' table, over the function's long double constants.
+- **Refusals.** An array or a function for a transparent union's parameter,
+  rest arguments with a statement expression or more than 4096 nodes, and
+  records of more than 1 GiB of strings or 64 levels are refused by name. A record's lines and strings grow as they need (the strings are
   found again through a hash table of their offsets), so a record of any
   number of fields is dumped (#1842).
 
@@ -2599,9 +2634,27 @@ unit's constant objects (`check_input_verbose_trap_object`, #1843) up to the
 first NUL, of an array of plain char, with clang's errors where the string has a
 `$` or the read leaves the array (past its end, or no NUL in it). The address
 of a const record's member array reads its string to the member's end, and a
-const pointer object's value its pointee's. An object whose bytes the reader
-doesn't keep, and such an argument under a cast (which through `void *` clang
-calls no constant string), are still refused by name.
+const pointer object's value its pointee's.
+
+Casts on the way are clang's evaluator's (`check_input_verbose_trap_designator`,
+#1843). A narrow literal's bytes it reads at the address whatever the casts
+(`tryEvaluateString`'s fast path: `(const char *)(const void *)"m" + 1`,
+`(const char *)(const unsigned char *)p` of a pointer to a literal), up to its
+terminator: one past that is no string. Any other object's chars, `__func__`'s
+and a wide literal's among them, it reads through the lvalue's designator, which
+a conversion between pointers to different types loses (ExprConstant's
+`CK_BitCast`). So the argument's own type, each cast to a pointer and each such
+cast's operand must point to plain char (or be an array of it), qualifiers
+aside: `(const char *)(char *)m` reads `m`, but `(const char *)(const void *)m`,
+`(const char *)u` of an `unsigned char` array, `(const char *)&s` of a record
+and `(const char *)&m` of the array itself are clang's "must be a pointer to a
+constant string". An object whose bytes the reader doesn't keep is still refused
+by name.
+
+Differences left: a const pointer object whose own initializer converted its
+value through such a cast is read here, where clang's stored designator is lost;
+and two warnings at such arguments, `-Wstring-plus-int` (not given here) and
+`-Wpointer-sign`'s wording for a builtin's argument, differ from clang's.
 
 Two costs are accepted for now:
 - A call of `memcpy_inline` or `memset_inline` is a call of its leaf, where

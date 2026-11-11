@@ -1357,8 +1357,8 @@ decisions in #154 and on #117's configuration):
   and `weak`. Paired underscores are normalized. C attribute queries accept
   the corresponding `gnu::` names (`ext_vector_type` and `overloadable` use
   `clang::`) and return **201910** for standard `fallthrough`. Standard
-  `deprecated` and `maybe_unused` return **201904** and **202106** now that
-  the checker implements their diagnostics (#1475), including their paired
+  `deprecated`, `maybe_unused` and `nodiscard` return **201904**, **202106**
+  and **202003** now that the checker implements their diagnostics (#1475), including their paired
   underscore spellings and their extension use in earlier C modes.
   `c_alignas`, `c_alignof`, `c_atomic`, `c_generic_selections`, `c_static_assert`
   and `c_thread_local` are features from C11; `c_fixed_enum` from C23.
@@ -1428,12 +1428,12 @@ tag names, variable array bounds and unsupported calling conventions still
 refuse by name unless an explicit asm label supplies the ABI name. Advertising
 these implemented paths does not remove their argument, subject or ABI limits.
 
-Standard `nodiscard` still answers zero. Its discarded-result diagnostics now
-exist (#1447, `c_check_ignored_result.c`: a discarded call of a `nodiscard`
-function, or of one returning a `nodiscard` type, warns as clang's does; the
-[checker guide](c-checker.md) has the rules), but the query does not advertise
-them yet, and #1475's `nodiscard` request remains open. The `deprecated` and
-`maybe_unused` query fix does not enable other attribute spellings.
+Standard `nodiscard` answers **202003**, as clang does (#1475), now that its
+discarded-result diagnostics exist (#1447, `c_check_ignored_result.c`: a
+discarded call of a `nodiscard` function, or of one returning a `nodiscard`
+type, warns as clang's does; the [checker guide](c-checker.md) has the rules).
+The `deprecated`, `maybe_unused` and `nodiscard` query fix does not enable
+other attribute spellings.
 Generic GNU atomic load/store/exchange/compare-exchange, GNU lock-free queries
 and test-and-set/clear remain unadvertised; scalar GNU atomics and implemented
 C11 atomics are advertised.
@@ -3483,12 +3483,21 @@ spellings alone would miss this change (#272).
   `}` (`BUSTER_PP_NAMED_UCN_INCOMPLETE` and after). One that starts a token,
   its name exactly Unicode's, has -pedantic's "named escape sequences are a
   Clang extension" at the backslash, before its character's error
-  (`BUSTER_PP_NAMED_UCN_EXTENSION`), as a warning under `-pedantic`,
-  `-Wpedantic` or `-Wdelimited-escape-sequence-extension` and an error under
-  `-pedantic-errors` (`pp_pedantic_severity`, the command line's alone). Both
-  are raw errors found as the others (`pp_named_ucn_at`), so a file without a
-  candidate pays nothing more, and print no flag, as the preprocessor's other
-  warnings don't. Not clang's yet, for `\N` as for `\u`: the error of a basic
+  (`BUSTER_PP_NAMED_UCN_EXTENSION`). Both are raw errors found as the others
+  (`pp_named_ucn_at`), so a file without a candidate pays nothing more. They
+  and `#if`'s C23-extension warning are the preprocessor's warnings that
+  follow clang's options and pragmas, with their flags (#1934,
+  `pp_warning_severity`, by `PPWarningGroup`): none under `-w` or in a system
+  header without `-Wsystem-headers`, whatever promotes them; then the last
+  `-W`/`-Wno-` of the group's names (`-Wunicode`; `-Wc23-extensions` and
+  `-Wc2x-extensions`; `-Wdelimited-escape-sequence-extension` and the
+  `-Wpedantic` that holds it), `-Weverything`, and for one off by default
+  `-pedantic`; promoted by `-Werror`, `-Werror=` of the group and, for an
+  extension, `-pedantic-errors`, unless `-Wno-error=` demotes it; and the
+  source's `#pragma clang diagnostic` for the group over all of that, which
+  the preprocessor follows through push and pop at any depth
+  (`Preprocessor.warning_mappings`). Its other warnings still print no flag
+  and follow no option. Not clang's yet, for `\N` as for `\u`: the error of a basic
   or control character's UCN in a skipped group, which clang gives; a UCN of a
   character no identifier may have within one ("character <U+2603> not allowed
   in an identifier"), which clang reads into the identifier after that error;

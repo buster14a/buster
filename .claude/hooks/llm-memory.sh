@@ -28,8 +28,11 @@
 
 home=${BUSTER_LLM_MEMORY_HOME:-$HOME}
 memory=$home/llm-memory
-project=${CLAUDE_PROJECT_DIR:-$(cd "$(dirname "$0")/../.." && pwd)}
-sibling=$(dirname "$project")/llm-memory
+checkout=$(cd "$(dirname "$0")/../.." && pwd)
+# The folder Claude Code runs in: the checkout, or, in a session with several repositories, the folder that holds
+# them. Claude Code keys its memory folder by it, so that is the one to link.
+project=${CLAUDE_PROJECT_DIR:-$checkout}
+sibling=$(dirname "$checkout")/llm-memory
 state=$home/.local/state/llm-memory
 name=buster-fast
 helper='!f() { test "$1" = get && echo username=x-access-token && echo "password=${GH_TOKEN:-$GITHUB_TOKEN}"; }; f'
@@ -50,6 +53,28 @@ is_clone()
     git -C "$1" rev-parse -q --verify HEAD > /dev/null 2>&1 && [ -x "$1/bin/llm-memory" ]
 }
 
+# add_repo checks the clone out on the session's branch, and sync pushes to the branch it is on, so memories would land
+# on that branch and never reach main. Move a clone whose branch holds nothing main lacks onto main; one that does is
+# left alone, and the hook says so.
+on_main()
+{
+    local branch
+    branch=$(git -C "$memory" symbolic-ref -q --short HEAD) || branch=
+    if [ "$branch" != main ]; then
+        GIT_TERMINAL_PROMPT=0 timeout 60 git -C "$memory" fetch -q origin +refs/heads/main:refs/remotes/origin/main > /dev/null 2>&1 || true
+        if git -C "$memory" merge-base --is-ancestor HEAD refs/remotes/origin/main 2> /dev/null; then
+            if git -C "$memory" rev-parse -q --verify refs/heads/main > /dev/null; then
+                git -C "$memory" checkout -q main > /dev/null 2>&1 || true
+            else
+                git -C "$memory" checkout -q -b main --track origin/main > /dev/null 2>&1 || true
+            fi
+        fi
+        if [ "$(git -C "$memory" symbolic-ref -q --short HEAD)" != main ]; then
+            echo "Agent memory: ~/llm-memory is on ${branch:-a detached HEAD}, not main, and couldn't move; sync would push memories there. Put its commits on main by hand."
+        fi
+    fi
+}
+
 start()
 {
     if ! is_clone "$memory"; then
@@ -68,9 +93,15 @@ start()
         git -C "$memory" config user.email > /dev/null || git -C "$memory" config user.email noreply@openai.com
         git -C "$memory" config user.name > /dev/null || git -C "$memory" config user.name Codex
     fi
+    if is_clone "$memory" && claude; then
+        on_main
+    fi
     if is_clone "$memory"; then
         if claude; then
-            HOME=$home "$memory/bin/llm-memory" link "$project" "$name" > /dev/null
+            HOME=$home "$memory/bin/llm-memory" link "$checkout" "$name" > /dev/null
+            if [ "$(cd "$project" && pwd -P)" = "$(cd "$checkout/.." && pwd -P)" ]; then
+                HOME=$home "$memory/bin/llm-memory" link "$project" "$name" > /dev/null
+            fi
             echo "Agent memory: ~/llm-memory/projects/$name is this project's memory folder; the Stop hook syncs it to GitHub."
             if [ "${CLAUDE_CODE_DISABLE_AUTO_MEMORY:-}" != 0 ]; then
                 echo "Auto memory is off in this cloud session (the environment doesn't set CLAUDE_CODE_DISABLE_AUTO_MEMORY=0): read ~/llm-memory/projects/$name/MEMORY.md and save there by hand, as AGENTS.md says for other agents."

@@ -132,9 +132,11 @@ A **callee** is a body whose function is `BUSTER_CHECK_PROGRAM_INLINE_ALWAYS` an
 of internal linkage, as `check_tier1_inline_table` finds them, and whose lowered
 stream (`CheckProgramLowered.functions[b]`) has none of:
 
-- `incoming_variadic` (a variadic definition), `returns_twice`, `eh_return`,
-  `unwind_init`, `interrupt`, `preserve_general` or `preserve_vectors`,
-  `realign_stack`, or a naked body;
+- `incoming_variadic` (a variadic definition), `returns_twice`,
+  `calls_returns_twice` (a call of setjmp's library kin, or of a function
+  declared `returns_twice`, which LLVM's `isInlineViable` doesn't inline
+  either: #1847), `eh_return`, `unwind_init`, `interrupt`, `preserve_general`
+  or `preserve_vectors`, `realign_stack`, or a naked body;
 - labels or jump tables (`label_count`, `table_count`), `ALLOCA`, `STACK_SAVE`,
   `STACK_RESTORE`, `FRAME_ADDRESS`, `TAIL_CALL` or `JUMP_INDIRECT`. These are
   about the callee's own frame or code addresses, which an inlined copy doesn't

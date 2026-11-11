@@ -864,9 +864,10 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
             valid = first <= limit && count <= limit - first;
             for (uint32_t reference = 0; valid && reference < count; reference += 1)
             {
-                // A weakref's reference is its target's (#147), whose definition it reaches if the unit has one.
+                // A weakref's reference is its target's (#147), and an asm label's another object's of its name (#1979),
+                // whose definition it reaches if the unit has one.
                 const uint32_t referenced = references[first + reference];
-                const uint32_t object = full->alias_count != 0 && referenced < objects ? check_program_alias_redirect(full, referenced) : referenced;
+                const uint32_t object = (full->alias_count != 0 || full->label_merge_count != 0) && referenced < objects ? check_program_alias_redirect(full, referenced) : referenced;
                 valid = object != 0 && object < objects && edges < reference_capacity;
                 if (valid)
                 {
@@ -1003,7 +1004,10 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
                     // clang takes them as the alias's declarations, whose symbol is at its aliasee's definition.
                     const uint32_t object = definition_objects[definition];
                     const uint32_t entry = full->alias_count != 0 ? check_program_alias_of(full->aliases, full->alias_count, object) : 0;
-                    const bool aliased = entry != 0 && full->aliases[entry - 1].kind == CHECK_PROGRAM_ALIAS;
+                    // So does a tentative definition of an object an asm label makes another's symbol (#1979), whose
+                    // storage is that one's.
+                    const bool aliased = (entry != 0 && full->aliases[entry - 1].kind == CHECK_PROGRAM_ALIAS) ||
+                                         (full->label_merge_count != 0 && check_program_label_redirect(full, object) != object);
                     data_selected[raw - full->body_count] = aliased ? 0 : 1;
                     candidate.selected_objects += aliased ? 0 : 1;
                     data_references += aliased ? 0 : data->reference_counts[raw - full->body_count];
