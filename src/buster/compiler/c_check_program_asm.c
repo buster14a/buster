@@ -1257,6 +1257,26 @@ static uint32_t check_asm_inline_code(const CheckAsmPlace* places, uint32_t coun
     return at;
 }
 
+// Whether a template's records name an opmask register (k0 to k7) in any field. Tier 1's CFG consumer saves no mask value
+// around an asm body, as it saves them around a call (#1839), so that in a lowering for Tier 1
+// (CheckProgramOptions.asm_bodies) such a template keeps its helper, whose call it saves them around; Tier 0 takes an asm
+// body as a call, whose saves of the mask stack it makes.
+static bool check_asm_names_opmask(const AsmCode* code)
+{
+    bool named = false;
+    for (uint32_t r = 0; !named && r < code->count; r += 1)
+    {
+        X86Instruction record = code->records[r];
+        const Tier0Fields fields = tier0_operation_fields(&record);
+        for (uint32_t f = 0; f < fields.count; f += 1)
+        {
+            named |= fields.classes[f] == BUSTER_X86_CLASS_OPMASK;
+        }
+        named |= (record.decorations & 0x07) != 0;
+    }
+    return named;
+}
+
 // Whether `form` returns: ret, and its imm16, 16-bit, 32-bit and prefixed forms.
 static bool check_asm_return(uint32_t form)
 {
@@ -2493,7 +2513,7 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
             plan->helper = BUSTER_CHECK_NONE;
         }
     }
-    else if (valid && reason == NULL && helped && !x87 && !flagged && code.count != 0 && !program->asm_helpers &&
+    else if (valid && reason == NULL && helped && !x87 && !flagged && code.count != 0 && !program->asm_helpers && !program->asm_bodies &&
              !check_program_helper_forced(program, CHECK_PROGRAM_HELPER_ASM) &&
              check_asm_row(program, s, places, constraints, index, scalar, &row, &valid, output, scratch))
     {
@@ -2508,13 +2528,16 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
     }
     else if (valid && reason == NULL && helped && !program->asm_helpers && !check_program_helper_forced(program, CHECK_PROGRAM_HELPER_ASM) &&
              !statement->is_goto && code.reference_count == 0 && code.label_count == 0 &&
+             !(program->asm_bodies && check_asm_names_opmask(&code)) &&
              (inline_touched = check_asm_inline_touched(places, count, &code, taken, vectors)) != UINT32_MAX)
     {
         // Placed in its caller as an asm body (#1839): its records run in its call row's place, with no helper.
         X86Instruction* records = 0;
         // Its register operands are its call row's arguments (#1839's measurements: a load of the block's slot, which the
-        // lowering stored through a register a moment before, failed store-to-load forwarding once a run).
-        const bool passed = true;
+        // lowering stored through a register a moment before, failed store-to-load forwarding once a run), but in a
+        // lowering for Tier 1 (CheckProgramOptions.asm_bodies), whose body call takes the block's address alone and whose
+        // stores into the block are rsp-relative.
+        const bool passed = !program->asm_bodies;
         uint32_t first = 0;
         const uint32_t records_count = check_asm_inline_code(places, count, &code, stores, pops, passed, &records, &first, output);
         plan->inline_passed = passed;

@@ -363,9 +363,9 @@ jobs:
         run: |
           oracle="$RUNNER_TEMP/preprocessor-pragma-oracle"
           bash tools/build-preprocessor-pragma-oracle.sh "$oracle"
-          # The clang server that the semantic driver's checks send the oracle clang's runs to (#2071), where this
-          # toolchain lets it hold one copy of LLVM (status 77: not the official release's static LLVM); without it the
-          # oracle clang runs as children.
+          # The clang server that the semantic driver's checks send the oracle clang's runs to (#2071), linked with the
+          # release's static clang and LLVM archives, one copy of LLVM; its build checks one request against a spawned
+          # clang. Status 77 is a toolchain without what one copy needs: no server, and the oracle clang runs as children.
           server="$RUNNER_TEMP/clang-server"
           served=0
           bash tools/clang-server/build.sh "$server" || served=$?
