@@ -1344,11 +1344,26 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
     // one that keeps its helper, as a named label's does, is refused by name.
     check_test_program_boundary_reason(test, "int tested(int n){__asm__ volatile(\"rep ret\\n.Lafter%=:\" ::: \"memory\");return n;}",
                                       "asm-returning-template", true, false, 0, 0, "inline assembly templates that return from their helper");
-    // Explicit register variables the lowering doesn't place: in rsp (the helper's own), in an XMM register past XMM15
-    // without AVX-512F; an input of a memory constraint, which
-    // clang's code refuses too; and an integer in an XMM register.
-    check_test_program_boundary_reason(test, "int tested(int n){register long r __asm__(\"rsp\");__asm__ volatile(\"\" : : \"r\"(r));return n;}",
-                                       "asm-register-variable-rsp", true, false, 0, 0, "explicit register variables of this register as inline assembly operands");
+    // rsp's explicit register variable (#1846, the owner's decision on #1447), as clang's code takes it: an output read
+    // from rsp after the template (one of no instructions too), an input moved into rsp before it at the variable's width
+    // (sp's movw keeps rsp's other bits), the template naming it %rsp, and an input beside an rsp output sharing it. Each
+    // input is the value rsp has, as a program's must be; a template that keeps a helper refuses it by name.
+    check_test_program_source(test,
+        "static unsigned long read_sp(void){register unsigned long sp __asm__(\"rsp\");__asm__(\"\" : \"=r\"(sp));return sp;}"
+        "static int near(void){char local;register unsigned long sp __asm__(\"rsp\");__asm__(\"nop\" : \"=r\"(sp));"
+        "long d=(long)((unsigned long)&local-sp);return d>-4096&&d<4096;}"
+        "static int kept(void){register unsigned long sp __asm__(\"rsp\");__asm__(\"\" : \"=r\"(sp));unsigned long before=sp;"
+        "__asm__ volatile(\"\" : \"+r\"(sp));unsigned long r;__asm__(\"mov %1, %0\" : \"=r\"(r) : \"r\"(sp));"
+        "__asm__(\"\" : \"=r\"(sp) : \"r\"(sp));return sp==before&&r==before;}"
+        "static int narrow(void){register unsigned short sp __asm__(\"sp\");register unsigned int esp __asm__(\"esp\");"
+        "register unsigned long full __asm__(\"rsp\");__asm__(\"\" : \"=r\"(full));__asm__(\"\" : \"=r\"(esp));__asm__(\"\" : \"=r\"(sp));"
+        "unsigned short s=sp;__asm__ volatile(\"\" : \"+r\"(sp));return (unsigned short)full==s&&sp==s&&(unsigned int)full==esp;}"
+        "int tested(int n){return n+(read_sp()!=0)+2*near()+4*kept()+8*narrow();}",
+        "asm-register-variable-rsp", clang);
+    check_test_program_boundary_reason(test, "int tested(int n){register long r __asm__(\"rsp\");__asm__ volatile(\".p2align 4\\n\\tmovq %0, %%rax\" : : \"r\"(r) : \"rax\");return n;}",
+                                       "asm-register-variable-rsp-directives", true, false, 0, 0, "explicit register variables in rsp in templates that take directives");
+    // Explicit register variables the lowering doesn't place: in an XMM register past XMM15 without AVX-512F; an input of a
+    // memory constraint, which clang's code refuses too; and an integer in an XMM register.
     check_test_program_source(test, "int tested(int n){register char r __asm__(\"ah\")=(char)n;__asm__ volatile(\".p2align 4\\n\\tincb %0\" : \"+q\"(r));return r;}",
                               "asm-register-variable-high", clang);
     check_test_program_boundary_reason(test, "int tested(int n){register double r __asm__(\"xmm16\")=n;__asm__ volatile(\"\" : : \"v\"(r));return n;}",
@@ -1363,9 +1378,8 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
                                        "asm-naked-vla-register", true, false, 0, 0, "statements other than asm statements in naked functions");
     // A constant with a register constraint reaches the planner without a forbidden parameter reference.
     check_test_program_boundary_reason(test, "__attribute__((naked)) void raw(void){__asm__(\"ret\" : : \"r\"(1));}int tested(int n){return n;}",
-                                       "asm-naked-operand", true, false, 0, 0, "naked functions' inline assembly operands other than integer constants");
-    check_test_program_boundary_reason(test, "__attribute__((naked)) void raw(void){}int tested(int n){return n;}",
-                                       "asm-naked-empty", true, false, 0, 0, "naked functions of no instructions");
+                                       "asm-naked-operand", true, false, 0, 0,
+                                       "naked functions' inline assembly operands other than integer constants or static objects' symbols");
     check_test_program_boundary_reason(test, "int tested(int n){__asm__(\"twice: nop\");__asm__(\"twice: nop\");return n;}",
                                        "asm-label-twice", true, false, 0, 0, "inline assembly labels another template defines too");
     check_test_program_boundary_reason(test, "int tested(int n){__asm__(\"jmp .Lnowhere\");return n;}",

@@ -622,12 +622,14 @@ static void ir_wide_copy(IrWideWork* work, uint32_t i)
     const uint32_t op = f->op[i];
     const bool phi = op == IR_PHI;
     const bool call = op == IR_CALL || op == IR_CALL_INDIRECT;
+    // A ternary intrinsic's third operand (#1840) gets a slot of its own too, its `c` naming it.
+    const bool ternary = ir_ternary_instruction(f, i);
     const uint32_t list = (uint32_t)work->extra;
-    work->extra += phi ? (uint64_t)f->b[i] * 2 : call ? f->calls[f->b[i]].argument_count : 0;
+    work->extra += phi ? (uint64_t)f->b[i] * 2 : call ? f->calls[f->b[i]].argument_count : ternary ? 1 : 0;
     const uint32_t mask = ir_value_mask(f, i);
     const uint32_t a = phi ? list : (mask & 1) != 0 ? ir_wide_low(work, f->a[i]) : f->a[i];
     const uint32_t b = (mask & 2) != 0 ? ir_wide_low(work, f->b[i]) : f->b[i];
-    const uint32_t c = (mask & 4) != 0 ? ir_wide_low(work, f->c[i]) : f->c[i];
+    const uint32_t c = (mask & 4) != 0 ? ir_wide_low(work, f->c[i]) : ternary ? ir_intrinsic_ternary_c(f->c[i], list) : f->c[i];
     const uint32_t id = ir_wide_emit(work, op, f->type[i], a, b, c);
     if (work->output != 0)
     {
@@ -652,6 +654,10 @@ static void ir_wide_copy(IrWideWork* work, uint32_t i)
             {
                 output->extra[list + p] = ir_wide_low(work, f->extra[source.argument_first + p]);
             }
+        }
+        else if (ternary)
+        {
+            output->extra[list] = ir_wide_low(work, ir_intrinsic_third(f, i));
         }
     }
     ir_wide_place(work, i, id, 0);

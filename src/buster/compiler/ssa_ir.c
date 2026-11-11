@@ -437,6 +437,10 @@ static IrError ssa_ir_layout(SsaIrWork* work)
                 {
                     work->sizes.extra_count += f->c[i];
                 }
+                else if (ir_ternary_instruction(f, i))
+                {
+                    work->sizes.extra_count += 1;
+                }
             }
         }
         for (uint32_t block = 0; block < f->block_count; block += 1)
@@ -611,6 +615,12 @@ static void ssa_ir_fill(const SsaIrWork* work, IrFunction* f)
                     if (op == IR_STACK_ADDR || op == IR_LIFETIME)
                     {
                         f->a[instruction] = work->slots[input->a[i]];
+                    }
+                    else if (ir_ternary_instruction(input, i))
+                    {
+                        // A ternary intrinsic's third operand (#1840), in the extra array.
+                        f->c[instruction] = ir_intrinsic_ternary_c(input->c[i], extra);
+                        f->extra[extra++] = ssa_ir_value(work, ir_intrinsic_third(input, i));
                     }
                     else if (op == IR_CALL || op == IR_CALL_INDIRECT)
                     {

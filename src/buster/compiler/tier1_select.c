@@ -301,6 +301,18 @@ typedef enum Tier1SelectRule
 // A lane operation (#1840): `operation` the IR's flags (its lanes and operation), values[0] and values[1] its operands,
 // the first in vvvv (ir_simd_lane_op_forms: vpminub to vpmaxsq, vpaddusb to vpsubsw).
 #define BUSTER_TIER1_VECTOR_LANE_OP 16
+// A permute of two tables (#1840): `immediate` its lanes' bytes' log2, values[0] the first table, values[1] the indices
+// and values[2] the second table: vpermt2b to vpermt2q into the first table's register, which a copy fills first where the
+// destination isn't it, the scratch register keeping an operand the copy would overwrite (tier1_select_permute2).
+#define BUSTER_TIER1_VECTOR_PERMUTE2 17
+// A bitwise function of three vectors (#1840): `immediate` its truth table, values[0] to values[2] its operands:
+// vpternlogd with the operand whose register the destination holds as its first, the table's bits permuted to match, or
+// the first moved into the destination first (tier1_select_ternlog).
+#define BUSTER_TIER1_VECTOR_TERNLOG 18
+// A compress or an expand (#1840): `operation` 0 or 1, `immediate` the lanes' bytes' log2, values[0] the source,
+// values[1] the mask and values[2] the passthrough: vpcompressb to vpexpandq merged under the mask into the destination,
+// which takes the passthrough first (tier1_select_compress).
+#define BUSTER_TIER1_VECTOR_COMPRESS 19
 
 // TIER1_RULE_X87's kinds, its pattern's `scale` (#141):
 // - CONSTANT, its constant's index in `immediate`, and UNDEF, which stores nothing;
@@ -1364,6 +1376,125 @@ static void tier1_select_permute(Tier1SelectRecords* result, const Tier1SelectHo
     tier1_select_append(result, record);
 }
 
+// A permute of two tables (#1840): vpermt2b to vpermt2q (ir_simd_permute2_forms) overwrite their first table, and
+// vpermi2b to vpermi2q (ir_simd_permute2_index_forms) their indices. Where the destination's register holds the first
+// table, the first; where it holds the indices, the second; otherwise the destination takes the first table by a move
+// first, the vector class's scratch register keeping the second table across it where the destination holds that.
+static void tier1_select_permute2(Tier1SelectRecords* result, const Tier1SelectHoles* holes, uint8_t destination)
+{
+    const uint8_t x = destination & 15;
+    const uint8_t first = holes->left & 15;
+    const uint8_t indices = holes->right & 15;
+    uint8_t table = holes->third & 15;
+    const uint32_t width = holes->width;
+    const uint32_t at = width == 16 ? 0 : width == 32 ? 1 : 2;
+    if (x != first && x == indices)
+    {
+        const X86Instruction record = {
+            .form = ir_simd_permute2_index_forms[holes->immediate & 3][at],
+            .reg = x,
+            .vvvv = first,
+            .rm = table,
+            .mode = BUSTER_X86_REGISTER_DIRECT,
+        };
+        tier1_select_append(result, record);
+    }
+    else if (x != first)
+    {
+        if (x == table)
+        {
+            tier1_select_append(result, tier1_select_class_move(BUSTER_TIER1_SELECT_FLOAT_SCRATCH, x, width, false));
+            table = BUSTER_TIER1_SELECT_FLOAT_SCRATCH;
+        }
+        tier1_select_append(result, tier1_select_class_move(x, first, width, false));
+    }
+    if (x == first || x != indices)
+    {
+        const X86Instruction record = {
+            .form = ir_simd_permute2_forms[holes->immediate & 3][at],
+            .reg = x,
+            .vvvv = indices,
+            .rm = table,
+            .mode = BUSTER_X86_REGISTER_DIRECT,
+        };
+        tier1_select_append(result, record);
+    }
+}
+
+// A bitwise function of three vectors (#1840): vpternlogd (ir_simd_ternlog_forms) computes table bit (reg << 2 | vvvv << 1
+// | rm) into its first operand's register. The operand whose register the destination already holds is the first, the
+// table's bits permuted for the new order; where it holds none of them, the first operand is moved into it first.
+static void tier1_select_ternlog(Tier1SelectRecords* result, const Tier1SelectHoles* holes, uint8_t destination)
+{
+    const uint8_t x = destination & 15;
+    const uint8_t registers[3] = { (uint8_t)(holes->left & 15), (uint8_t)(holes->right & 15), (uint8_t)(holes->third & 15) };
+    // The operands in reg, vvvv and rm, by their places in the IR (a, b, c).
+    uint32_t order[3] = { 0, 1, 2 };
+    if (x != registers[0] && x == registers[1])
+    {
+        order[0] = 1;
+        order[1] = 0;
+    }
+    else if (x != registers[0] && x == registers[2])
+    {
+        order[0] = 2;
+        order[2] = 0;
+    }
+    else if (x != registers[0])
+    {
+        tier1_select_append(result, tier1_select_class_move(x, registers[0], holes->width, false));
+    }
+    const uint32_t table = (uint32_t)holes->immediate;
+    uint32_t permuted = 0;
+    for (uint32_t index = 0; index < 8; index += 1)
+    {
+        uint32_t bits[3] = { 0, 0, 0 };
+        bits[order[0]] = index >> 2 & 1;
+        bits[order[1]] = index >> 1 & 1;
+        bits[order[2]] = index & 1;
+        permuted |= (table >> (bits[0] << 2 | bits[1] << 1 | bits[2]) & 1) << index;
+    }
+    const X86Instruction record = {
+        .form = ir_simd_ternlog_forms[0][holes->width == 16 ? 0 : holes->width == 32 ? 1 : 2],
+        .reg = x,
+        .vvvv = registers[order[1]],
+        .rm = registers[order[2]],
+        .mode = BUSTER_X86_REGISTER_DIRECT,
+        .immediate = (int32_t)permuted,
+    };
+    tier1_select_append(result, record);
+}
+
+// A compress or an expand (#1840): vpcompressb to vpcompressq (the destination in rm) and vpexpandb to vpexpandq (in reg)
+// merge into their destination under the mask, so it takes the passthrough first by a move where it isn't already its
+// register; where it holds the source instead, the vector class's scratch register keeps the source across that move.
+static void tier1_select_compress(Tier1SelectRecords* result, const Tier1SelectHoles* holes, uint8_t destination)
+{
+    const uint8_t x = destination & 15;
+    uint8_t source = holes->left & 15;
+    const uint8_t passthrough = holes->third & 15;
+    const uint32_t width = holes->width;
+    const uint32_t at = width == 16 ? 0 : width == 32 ? 1 : 2;
+    if (x != passthrough)
+    {
+        if (x == source)
+        {
+            tier1_select_append(result, tier1_select_class_move(BUSTER_TIER1_SELECT_FLOAT_SCRATCH, x, width, false));
+            source = BUSTER_TIER1_SELECT_FLOAT_SCRATCH;
+        }
+        tier1_select_append(result, tier1_select_class_move(x, passthrough, width, false));
+    }
+    const bool expand = holes->operation != 0;
+    const X86Instruction record = {
+        .form = expand ? ir_simd_expand_forms[holes->immediate & 3][at] : ir_simd_compress_forms[holes->immediate & 3][at],
+        .reg = expand ? x : source,
+        .rm = expand ? source : x,
+        .mode = BUSTER_X86_REGISTER_DIRECT,
+        .decorations = (uint8_t)(holes->right & BUSTER_X86_DECORATION_MASK),
+    };
+    tier1_select_append(result, record);
+}
+
 // A conversion's EVEX form (#1840), by its kind past BUSTER_IR_INTRINSIC_EXTEND, the IR's flags, the result's bytes and
 // the source's: the decoder's tables' (ir_simd_typed_extensions at the result's width, ir_simd_typed_truncations at the
 // source's), or X86_FORM_NONE for a pair the flags don't name.
@@ -1996,6 +2127,18 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         else if (kind == BUSTER_TIER1_VECTOR_MASK_EXPAND || kind == BUSTER_TIER1_VECTOR_SIGN_MASK)
         {
             tier1_select_mask_vector(&result, holes);
+        }
+        else if (kind == BUSTER_TIER1_VECTOR_PERMUTE2)
+        {
+            tier1_select_permute2(&result, holes, destination);
+        }
+        else if (kind == BUSTER_TIER1_VECTOR_TERNLOG)
+        {
+            tier1_select_ternlog(&result, holes, destination);
+        }
+        else if (kind == BUSTER_TIER1_VECTOR_COMPRESS)
+        {
+            tier1_select_compress(&result, holes, destination);
         }
         else if (kind == BUSTER_TIER1_VECTOR_CONVERT)
         {
@@ -4384,7 +4527,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
     // A vector's operations (#141), behind one test: a function without vectors pays no other here.
     const bool vector_node = (vector_width != 0 && (op == IR_VCONST || op == IR_UNDEF || op == IR_COPY || op == IR_NOT || op == IR_ADD || op == IR_SUB || op == IR_MUL || op == IR_AND ||
                                                    op == IR_OR || op == IR_XOR || op == IR_SHL || op == IR_LSHR || op == IR_ASHR || (op >= IR_FADD && op <= IR_FDIV) ||
-                                                   op == IR_VSELECT || (op == IR_INTRINSIC && (c == BUSTER_IR_INTRINSIC_SPLAT || (c >= BUSTER_IR_INTRINSIC_EXTRACT && c <= BUSTER_IR_INTRINSIC_LANE_OP))))) ||
+                                                   op == IR_VSELECT || (op == IR_INTRINSIC && (c == BUSTER_IR_INTRINSIC_SPLAT || (c >= BUSTER_IR_INTRINSIC_EXTRACT && c <= BUSTER_IR_INTRINSIC_LANE_OP) || ir_intrinsic_ternary(c))))) ||
                              compare_width != 0;
     if (vector_node)
     {
@@ -4470,6 +4613,47 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             {
                 tier1_select_add_candidate(forest, node, &candidates, base);
             }
+        }
+        else if (vector_width != 0 && op == IR_INTRINSIC && (ir_intrinsic_kind(c) == BUSTER_IR_INTRINSIC_COMPRESS || ir_intrinsic_kind(c) == BUSTER_IR_INTRINSIC_EXPAND) &&
+                 ir_intrinsic_ternary(c))
+        {
+            // A compress or an expand (#1840): its mask b, its passthrough the extra array's (ir_intrinsic_third).
+            base.rule = TIER1_RULE_VECTOR;
+            base.width = (uint8_t)vector_width;
+            base.scale = BUSTER_TIER1_VECTOR_COMPRESS;
+            base.operation = (uint8_t)(ir_intrinsic_kind(c) - BUSTER_IR_INTRINSIC_COMPRESS);
+            base.immediate = function->flags[node];
+            base.values[0] = a;
+            base.values[1] = b;
+            base.values[2] = ir_intrinsic_third(function, node);
+            base.intrinsic_cost = 1;
+            tier1_select_add_candidate(forest, node, &candidates, base);
+        }
+        else if (vector_width != 0 && op == IR_INTRINSIC && ir_intrinsic_kind(c) == BUSTER_IR_INTRINSIC_TERNLOG && ir_intrinsic_ternary(c))
+        {
+            // A bitwise function of three vectors (#1840): its third operand the extra array's (ir_intrinsic_third).
+            base.rule = TIER1_RULE_VECTOR;
+            base.width = (uint8_t)vector_width;
+            base.scale = BUSTER_TIER1_VECTOR_TERNLOG;
+            base.immediate = function->flags[node];
+            base.values[0] = a;
+            base.values[1] = b;
+            base.values[2] = ir_intrinsic_third(function, node);
+            base.intrinsic_cost = 1;
+            tier1_select_add_candidate(forest, node, &candidates, base);
+        }
+        else if (vector_width != 0 && op == IR_INTRINSIC && ir_intrinsic_kind(c) == BUSTER_IR_INTRINSIC_PERMUTE2 && ir_intrinsic_ternary(c))
+        {
+            // A permute of two tables (#1840): its third operand the extra array's (ir_intrinsic_third).
+            base.rule = TIER1_RULE_VECTOR;
+            base.width = (uint8_t)vector_width;
+            base.scale = BUSTER_TIER1_VECTOR_PERMUTE2;
+            base.immediate = function->flags[node];
+            base.values[0] = a;
+            base.values[1] = b;
+            base.values[2] = ir_intrinsic_third(function, node);
+            base.intrinsic_cost = 1;
+            tier1_select_add_candidate(forest, node, &candidates, base);
         }
         else if (vector_width != 0 && op == IR_INTRINSIC && c == BUSTER_IR_INTRINSIC_LANE_OP)
         {

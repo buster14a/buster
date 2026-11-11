@@ -5,7 +5,8 @@
 // the specifier as the next declaration's, `int x _Alignas(3);`'s `_Alignas(3);` as a declaration that declares nothing,
 // and checks what follows as any declaration; and the declarations of no declarator it makes there, which have no type
 // specifier (`const;`, `_Alignas(8);`, a calling convention's keyword alone) or a function specifier or restrict, as
-// clang's ParsedFreeStandingDeclSpec takes them (check_input_declaration). And a comma at the top of an array declarator's
+// clang's ParsedFreeStandingDeclSpec takes them (check_input_declaration). What isn't a name in a GNU attribute list
+// (`__clang__::x`, whose macro is 1), after which clang's ParseGNUAttributes skips to the list's `)`. And a comma at the top of an array declarator's
 // size or an array designator's index (#1867), whose `]` clang's balanced tracker skips to, going on with the size or the
 // index before the comma. On original fixtures, the whole output, line
 // for line, by both paths of -fsyntax-only, under gnu17 and gnu23, and for one of them under the warnings' options.
@@ -52,6 +53,9 @@ static void check_test_driver_resumed_declarations(CheckTest* test, const char* 
         "void f(int n, int m)\n{\n    int u[n, m]; u++;\n    int v[!n + 1]; v++;\n}\nint w[1, 2];\n",
         "int d[3] = { [1, 2] = 3, [0] = 1 };\nvoid f(void) { int e[2] = { [0, (1, 2)] = 2 }; int *p = 1.0; }\nint x = d;\n",
         "struct S { int m[1, 2]; int k; } s;\nvoid g(int n, int p[n, f(1, 2)]) { p = 0; }\nint c = sizeof(int[1, 2]); int *q = 1.0;\n",
+        // A GNU attribute list's item that isn't a name: the list's attributes before it, the declaration and what follows.
+        "int x __attribute__((unused, __clang__::x));\nint y = 1 << 40;\nint z __attribute__((aligned(4), 1 + (2), unused)) = 1 << 40;\n"
+        "void f(void) { int a __attribute__((__clang__::x)); int b = 1 << 40; }\n",
     };
     static const char* const standards[] = { "-std=gnu17", "-std=gnu23" };
     static const char* const options[] = { NULL, "-w", "-Wno-missing-declarations", "-Werror=missing-declarations" };

@@ -865,6 +865,13 @@ static void ir_inline_descriptor(const IrFunction* source, uint32_t old, IrFunct
     destination->b[node] = cursor->descriptors++;
 }
 
+// A ternary intrinsic's third operand (#1840) in a fresh extra slot at the cursor, with its `c` naming that slot.
+static void ir_inline_third(const IrFunction* source, uint32_t old, IrFunction* destination, uint32_t node, const uint32_t* values, IrInlineCursor* cursor)
+{
+    destination->c[node] = ir_intrinsic_ternary_c(source->c[old], cursor->extra);
+    destination->extra[cursor->extra++] = values[ir_intrinsic_third(source, old)];
+}
+
 static uint32_t ir_inline_emit(IrFunction* f, IrInlineCursor* cursor, uint32_t op, uint32_t type, uint32_t a, uint32_t b, uint32_t c)
 {
     const uint32_t node = cursor->node++;
@@ -958,6 +965,10 @@ static void ir_inline_expand(const IrFunction* source, uint32_t node, const IrFu
             {
                 ir_inline_descriptor(callee, inner, rewritten, cursor->node, inner_values, bases, cursor);
             }
+            else if (ir_ternary_instruction(callee, inner))
+            {
+                ir_inline_third(callee, inner, rewritten, cursor->node, inner_values, cursor);
+            }
             cursor->node += 1;
         }
     }
@@ -1039,6 +1050,10 @@ static IrError ir_inline_rewrite(const IrInlineUnit* unit, uint32_t function, Ar
             else if (op == IR_BR_INDIRECT && source->b[node] != BUSTER_IR_NONE)
             {
                 sizes.extra_count += source->c[node];
+            }
+            else if (ir_ternary_instruction(source, node))
+            {
+                sizes.extra_count += 1;
             }
         }
         call += site;
@@ -1201,6 +1216,10 @@ static IrError ir_inline_rewrite(const IrInlineUnit* unit, uint32_t function, Ar
                         rewritten.b[cursor.node] = cursor.extra;
                         memcpy(rewritten.extra + cursor.extra, source->extra + source->b[node], (uint64_t)source->c[node] * 4);
                         cursor.extra += source->c[node];
+                    }
+                    else if (ir_ternary_instruction(source, node))
+                    {
+                        ir_inline_third(source, node, &rewritten, cursor.node, values, &cursor);
                     }
                     cursor.node += 1;
                 }

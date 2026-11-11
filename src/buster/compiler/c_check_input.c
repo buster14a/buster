@@ -326,6 +326,9 @@ typedef enum CheckInputMessage
     CHECK_INPUT_ARRAY_NEGATIVE,
     CHECK_INPUT_ARRAY_FUNCTIONS,
     CHECK_INPUT_ARRAY_INCOMPLETE,
+    // An invalid function's initializer (#1447): clang's "illegal initializer (only variables can be initialized)", at its
+    // name, recovered and the initializer skipped.
+    CHECK_INPUT_FUNCTION_INITIALIZER,
     // An array's element whose size isn't a multiple of its alignment (#1893, clang's err_array_element_alignment), at the
     // array's `[`: the element type, its size in `value` and its alignment in `detail`.
     CHECK_INPUT_ARRAY_ELEMENT_ALIGNMENT,
@@ -943,6 +946,10 @@ struct CheckInput
     bool kr_warning_policy;
     bool kr_warning_quiet;
     bool kr_warning_system;
+    // Whether the command line may give -pedantic's warning of GNU's \e in an evaluated literal (#1447,
+    // check_input_gnu_escapes): the literals the fast decoding read are scanned for one only then, or where a diagnostic
+    // pragma is.
+    bool pedantic_escapes;
     bool kr_warning_errors;
     // The x86 builtins' out-of-range immediate diagnostic is a DefaultError warning whose baseline the command line
     // maps (#1080). Its two possible intrinsic defaults (an ordinary warning at 0, DefaultError at 1) are snapshotted
@@ -2557,6 +2564,49 @@ static void check_input_alignof_expression(CheckInputReader* reader, uint32_t to
             .payload = { .name = name, .token = BUSTER_CHECK_WARNING_NO_SOURCE },
         };
         check_input_warning_once(reader, &event);
+    }
+}
+
+// clang's -Wgnu-alignof-expression of an _Alignof or alignof whose operand holds an undeclared name (#1946): clang reads
+// the operand as an expression and gives the extension's warning of it after the name's error, where the reader's walk
+// builds no node for it (check_input_alignof_expression). From each undeclared name's report, its ancestors up to the
+// operand's `)`, whose keyword is the operator; a specifier on the way makes the operand a type name, which has none. An
+// outer one's operand holds the inner one, so the climb goes on to the statement.
+static void check_input_alignof_undeclared(CheckInputReader* reader)
+{
+    const CheckInput* input = reader->output;
+    const Parser* parser = reader->parser;
+    const uint32_t count = parser->tokens.count;
+    for (uint32_t r = 0; !input->resource && r < input->report_count; r += 1)
+    {
+        uint32_t at = input->reports[r].message == CHECK_INPUT_UNDECLARED ? input->reports[r].token : BUSTER_CHECK_NONE;
+        bool typed = false;
+        for (uint32_t steps = 0; at < count && steps < count; steps += 1)
+        {
+            const uint8_t role = parser->tree.roles[at];
+            const uint32_t parent = parser->tree.parents[at];
+            typed |= role == PARSE_ROLE_SPECIFIER || role == PARSE_ROLE_TAG || role == PARSE_ROLE_CLOSE_SPECIFIER;
+            const bool closed = role == PARSE_ROLE_CLOSE_SIZEOF && parent < count && parser->tokens.kinds[parent] == PARSE_KIND_SIZEOF;
+            const uint32_t name = closed ? parser->tokens.names[parent] : 0;
+            if ((name == C_NAME_ALIGNOF_C11 || name == C_NAME_ALIGNOF) && !typed)
+            {
+                const CheckWarningEvent event =
+                {
+                    .id = CHECK_WARNING_ID_GNU_ALIGNOF_EXPRESSION,
+                    .kind = CHECK_WARNING_EVENT_ALIGNOF_EXPRESSION,
+                    .token = parent,
+                    .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                    .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+                    .completion = at + 1,
+                    .payload = { .name = name, .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+                };
+                check_input_warning_once(reader, &event);
+            }
+            // A sizeof's or an alignof's operand is an expression of the operator around it.
+            typed = closed ? false : typed;
+            const bool statement = role == PARSE_ROLE_TERMINATOR || role == PARSE_ROLE_CLOSE_BODY || role == PARSE_ROLE_CLOSE_BLOCK || parent == at;
+            at = statement ? BUSTER_CHECK_NONE : parent;
+        }
     }
 }
 
@@ -5844,11 +5894,10 @@ static void check_input_pragma_report(CheckInputReader* reader)
 
 static uint32_t check_constant_punctuation(const Parser* parser, uint32_t first, uint32_t end, uint8_t punctuation);
 
-// Whether the string literal from `first` to `end`, which the decoder refused, is a static assertion's message whose
-// escape sequence clang refuses there (#147, check_input_unevaluated_refused): the resolution walk reaches it before
-// check_input_constant_context marks it ignored, and the expressions' walk gives its error at the assertion
-// (check_input_expression_act), which drops the assertion, in place of the decoder's. Cold: a refused literal's.
-static bool check_input_assertion_escaped(CheckInputReader* reader, uint32_t first, uint32_t end)
+// Whether the string literal from `first` to `end` is a static assertion's message, an unevaluated string literal (its
+// first token's `(` the static assertion's, and its `,` the one after the condition), and that `(`'s token, through
+// `*open`. Cold: a refused literal's, or one with an escape -pedantic may word.
+static bool check_input_assertion_message(CheckInputReader* reader, uint32_t first, uint32_t end, uint32_t* open_out)
 {
     const Parser* parser = reader->parser;
     const uint8_t* kinds = parser->tokens.kinds;
@@ -5869,19 +5918,42 @@ static bool check_input_assertion_escaped(CheckInputReader* reader, uint32_t fir
     }
     result = result && open > 0 && kinds[open] == PARSE_KIND_L_PAREN && kinds[open - 1] == PARSE_KIND_STATIC_ASSERT &&
              check_constant_punctuation(parser, open + 1, end, PARSE_KIND_COMMA) == first - 1;
+    *open_out = open;
+    return result;
+}
+
+// Whether the string literal from `first` to `end`, which the decoder refused, is a static assertion's message whose
+// escape sequence clang refuses there (#147, check_input_unevaluated_refused): the resolution walk reaches it before
+// check_input_constant_context marks it ignored, and the expressions' walk gives its error at the assertion
+// (check_input_expression_act), which drops the assertion, in place of the decoder's. Cold: a refused literal's.
+static bool check_input_assertion_escaped(CheckInputReader* reader, uint32_t first, uint32_t end)
+{
+    const uint8_t* kinds = reader->parser->tokens.kinds;
+    // (The walk reaches each of the message's tokens while none is decoded: from its first.)
+    while (first > 0 && kinds[first - 1] == PARSE_KIND_STRING)
+    {
+        first -= 1;
+    }
+    uint32_t open = 0;
+    const bool result = check_input_assertion_message(reader, first, end, &open);
     uint32_t message_end = end;
     return result && check_input_unevaluated_refused(reader, first, &message_end, open - 1) != BUSTER_CHECK_NONE;
 }
 
-// The unknown escape sequences of the evaluated literal at `token` (#1447), whose spelling is `bytes`: each one's
-// -Wunknown-escape-sequence warning at its backslash (CHECK_WARNING_EVENT_UNKNOWN_ESCAPE), as clang's literal parser
-// gives it. The cold path of a literal the extended decoding read, which has one at least.
-static __attribute__((noinline, cold)) void check_input_unknown_escapes(CheckInputReader* reader, uint32_t token, const uint8_t* bytes, uint32_t length, bool once)
+// The escape sequences' warnings of the evaluated literal at `token` (#1447), whose spelling is `bytes`, as clang's literal
+// parser gives them: an unknown one's -Wunknown-escape-sequence warning at its backslash (CHECK_WARNING_EVENT_UNKNOWN_ESCAPE),
+// and -pedantic's, off by default: a GNU escape's -Wpedantic one at its backslash (CHECK_WARNING_EVENT_NONSTANDARD_ESCAPE),
+// and a delimited or named one's -Wdelimited-escape-sequence-extension one at the literal
+// (CHECK_WARNING_EVENT_DELIMITED_ESCAPE). The cold path of a literal the extended decoding read, which has one at least, or
+// of one with a GNU escape where -pedantic's warnings may be given (check_input_gnu_escapes). `pedantic`: whether to give
+// -pedantic's: not of a static assertion's message, an unevaluated string literal, whose are the unevaluated literals'.
+static __attribute__((noinline, cold)) void check_input_unknown_escapes(CheckInputReader* reader, uint32_t token, const uint8_t* bytes, uint32_t length, bool once,
+                                                                        bool pedantic)
 {
     const uint64_t mark = reader->scratch->length;
     CheckEscapeDiagnostic* diagnostics = length != 0 ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, CheckEscapeDiagnostic, BUSTER_CHECK_ESCAPE_DIAGNOSTICS(length)) : NULL;
     bool had_error = false;
-    const uint32_t count = diagnostics != NULL ? check_literal_evaluated_escapes(bytes, length, reader->parser->language.standard >= 2023, diagnostics, &had_error) : 0;
+    const uint32_t count = diagnostics != NULL ? check_literal_evaluated_escapes(bytes, length, reader->parser->language.standard >= 2023, pedantic, diagnostics, &had_error) : 0;
     reader->output->resource |= length != 0 && diagnostics == NULL;
     // (A character constant's, which the constant evaluator may read again (`once`): each of its escapes', at its first
     // read alone.)
@@ -5894,22 +5966,52 @@ static __attribute__((noinline, cold)) void check_input_unknown_escapes(CheckInp
     }
     for (uint32_t i = 0; first && i < count; i += 1)
     {
-        if (diagnostics[i].kind == CHECK_ESCAPE_DIAGNOSTIC_UNKNOWN)
+        const uint8_t kind = diagnostics[i].kind;
+        const bool unknown = kind == CHECK_ESCAPE_DIAGNOSTIC_UNKNOWN;
+        const bool nonstandard = kind == CHECK_ESCAPE_DIAGNOSTIC_NONSTANDARD;
+        const bool delimited = kind == CHECK_ESCAPE_DIAGNOSTIC_DELIMITED || kind == CHECK_ESCAPE_DIAGNOSTIC_NAMED;
+        if (unknown || nonstandard || delimited)
         {
             const CheckWarningEvent event =
             {
-                .id = CHECK_WARNING_ID_UNKNOWN_ESCAPE_SEQUENCE,
-                .kind = CHECK_WARNING_EVENT_UNKNOWN_ESCAPE,
+                .id = unknown ? CHECK_WARNING_ID_UNKNOWN_ESCAPE_SEQUENCE : nonstandard ? CHECK_WARNING_ID_NONSTANDARD_ESCAPE : CHECK_WARNING_ID_DELIMITED_ESCAPE,
+                .kind = unknown ? CHECK_WARNING_EVENT_UNKNOWN_ESCAPE : nonstandard ? CHECK_WARNING_EVENT_NONSTANDARD_ESCAPE : CHECK_WARNING_EVENT_DELIMITED_ESCAPE,
                 .token = token,
                 .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                .flags = unknown ? 0 : BUSTER_CHECK_WARNING_DEFAULT_IGNORED,
                 .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
                 .completion = token + 1,
-                .payload = { .name = diagnostics[i].character, .token = BUSTER_CHECK_WARNING_NO_SOURCE, .data = diagnostics[i].offset },
+                .payload = { .name = delimited ? 0 : diagnostics[i].character, .token = BUSTER_CHECK_WARNING_NO_SOURCE,
+                             .data = delimited ? kind == CHECK_ESCAPE_DIAGNOSTIC_NAMED : diagnostics[i].offset },
             };
             check_input_warning_event(reader, &event, NULL, 0);
         }
     }
     arena_pop_to(reader->scratch, mark);
+}
+
+// A literal the fast decoding read, `bytes` its token's spelling, with GNU's \e, which it takes without a word: its
+// -pedantic warning's (check_input_unknown_escapes), where the command line or a diagnostic pragma may give it (#1447,
+// CheckInput.pedantic_escapes), but a static assertion's message's (`message` its tokens' end, or BUSTER_CHECK_NONE for a
+// character constant). A memchr for a backslash and a look past it, otherwise.
+static void check_input_gnu_escapes(CheckInputReader* reader, uint32_t token, const uint8_t* bytes, uint32_t length, bool once, uint32_t message)
+{
+    const CheckInputDiagnosticPragmas* pragmas = reader->output->diagnostic_pragmas;
+    const bool possible = reader->output->pedantic_escapes || (pragmas != NULL && pragmas->count != 0);
+    bool gnu = false;
+    for (const uint8_t* at = possible ? memchr(bytes, '\\', length) : NULL; at != NULL && !gnu;)
+    {
+        const uint32_t next = (uint32_t)(at - bytes) + 1;
+        gnu = next < length && bytes[next] == 'e';
+        // (An escaped backslash is passed whole.)
+        const uint32_t from = next < length && bytes[next] == '\\' ? next + 1 : next;
+        at = from < length ? memchr(bytes + from, '\\', length - from) : NULL;
+    }
+    uint32_t open = 0;
+    if (gnu && (message == BUSTER_CHECK_NONE || !check_input_assertion_message(reader, token, message, &open)))
+    {
+        check_input_unknown_escapes(reader, token, bytes, length, once, true);
+    }
 }
 
 // A string literal's tokens from `token` (`count` parts) the fast decoding refused, read again with the escapes clang
@@ -5919,9 +6021,11 @@ static __attribute__((noinline, cold)) CheckStringLiteral check_input_strings_ex
 {
     const CheckStringLiteral literal = check_literal_strings_extended(parts, count, reader->parser->language.standard >= 2023, reader->arena);
     reader->output->resource |= literal.resource;
+    uint32_t open = 0;
+    const bool pedantic = !check_input_assertion_message(reader, token, token + count, &open);
     for (uint32_t i = 0; literal.valid && i < count; i += 1)
     {
-        check_input_unknown_escapes(reader, token + i, parts[i].bytes, parts[i].length, false);
+        check_input_unknown_escapes(reader, token + i, parts[i].bytes, parts[i].length, false, pedantic);
     }
     return literal;
 }
@@ -6015,6 +6119,14 @@ static const CheckInitString* check_input_string(CheckInputReader* reader, uint3
                     literal = check_input_strings_extended(reader, token, parts, count);
                     valid = literal.valid;
                 }
+                else
+                {
+                    // GNU's \e, which the fast decoding takes: its -pedantic warning's.
+                    for (uint32_t i = 0; valid && i < count; i += 1)
+                    {
+                        check_input_gnu_escapes(reader, token + i, parts[i].bytes, parts[i].length, false, end);
+                    }
+                }
             }
             const TypeId type = valid ? check_input_type_result(reader, type_array(reader->types, literal.element_type, literal.unit_count)) : 0;
             valid &= type != 0;
@@ -6106,8 +6218,12 @@ static inline __attribute__((always_inline)) void check_input_literal(CheckInput
                 *result = check_literal_character_by(bytes, length, reader->pp->options.language.standard >= 2023, reader->types->char_unsigned, true);
                 if (result->valid)
                 {
-                    check_input_unknown_escapes(reader, token, bytes, length, true);
+                    check_input_unknown_escapes(reader, token, bytes, length, true, true);
                 }
+            }
+            else
+            {
+                check_input_gnu_escapes(reader, token, bytes, length, true, BUSTER_CHECK_NONE);
             }
             if (result->valid && result->characters > 1 && length != 0 && bytes[0] == '\'')
             {
@@ -9544,7 +9660,11 @@ static bool check_input_kr_declarations(CheckInputReader* reader, uint32_t names
             reader->declarator_common = common;
             const uint32_t declarator_vlas = reader->output->vla_count;
             reader->kr_declarator = true;
+            // Its declarator errors recover (#1447), the parameter a stand-in, invalid and quiet in the body, as a prototype
+            // parameter's are.
+            reader->declarator_recover = true;
             const TypeId type = check_input_declarator(reader, base, &i, body, &name, &parameters);
+            const bool kr_invalid = reader->declarator_invalid;
             reader->kr_declarator = false;
             CheckInputAttributes* attributes = check_input_merge_attributes(reader, common, reader->declarator_attributes);
             const uint8_t next = i < body ? parser->tokens.kinds[i] : PARSE_KIND_END;
@@ -9580,6 +9700,10 @@ static bool check_input_kr_declarations(CheckInputReader* reader, uint32_t names
                     vla->declaration = vla->declaration == name ? listed : vla->declaration;
                 }
                 check_input_set_attributes_at(reader->output, listed, attributes);
+                if (__builtin_expect(kr_invalid && valid, 0))
+                {
+                    check_input_invalid_declare(reader, listed);
+                }
                 const CheckNoderefType* noderef = check_input_noderef_adjust_parameter(reader, type, reader->declarator_noderef);
                 check_input_noderef_set(reader->output, listed, noderef);
                 check_input_noderef_declaration(reader, listed, name, noderef);
@@ -10525,9 +10649,41 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
             type = check_input_type_result(reader, type_aligned(reader->types, type, attributes->alignment_log2 - 1));
         }
         valid &= type != 0 && name != BUSTER_CHECK_NONE && i < count;
-        // An initialized invalid declaration, and a K&R definition's, still stop (#1447): clang checks such an initializer
-        // without the declaration's type, which a later phase can give.
-        if (__builtin_expect(invalid, 0) && (!valid || reader->declarator_identifier_list || check_input_has_initializer(parser, i)))
+        // An initialized invalid object (#1447): clang checks its initializer no further (but for its undeclared names, which
+        // its parser reports), so the reader skips it to the declarator's end, the object invalid. A function's, which is
+        // clang's "illegal initializer", is reported and skipped too. A K&R definition's goes on, its
+        // body checked as clang checks it.
+        const bool function_initialized = __builtin_expect(invalid, 0) && valid && !reader->declarator_identifier_list && i < count &&
+                                          parser->tokens.kinds[i] == PARSE_KIND_EQUAL && type != 0 && name < count &&
+                                          type_kind(reader->types, type_strip_aligned(reader->types, type)) == BUSTER_TYPE_KIND_FUNCTION;
+        if (__builtin_expect(function_initialized, 0))
+        {
+            const uint32_t before = reader->output->report_count;
+            check_input_report(reader, name, CHECK_INPUT_FUNCTION_INITIALIZER);
+            if (reader->output->report_count == before + 1)
+            {
+                // (After the declarator's own error, as clang finds it at the `=`.)
+                reader->output->reports[before].sort = i;
+            }
+            valid = reader->output->report_count == before + 1 && check_input_recover_reports(reader, before);
+        }
+        const bool skipped_initializer = __builtin_expect(invalid, 0) && valid && !reader->declarator_identifier_list && i < count &&
+                                         parser->tokens.kinds[i] == PARSE_KIND_EQUAL && type != 0;
+        if (__builtin_expect(skipped_initializer, 0))
+        {
+            uint32_t right = reader->first_child[i];
+            while (right != BUSTER_CHECK_NONE && right < i)
+            {
+                right = reader->next_child[right];
+            }
+            const uint32_t end = right != BUSTER_CHECK_NONE ? reader->ends[right] + 1 : i;
+            for (uint32_t skipped = i; right != BUSTER_CHECK_NONE && skipped < end && skipped < count; skipped += 1)
+            {
+                reader->ignored[skipped] = true;
+            }
+            i = right != BUSTER_CHECK_NONE ? end : i;
+        }
+        if (__builtin_expect(invalid, 0) && (!valid || check_input_has_initializer(parser, i)))
         {
             check_input_recover_undo(reader, recovered_mark);
             valid = false;
@@ -10717,9 +10873,23 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                 const uint32_t before = reader->output->report_count;
                 check_input_incomplete_variable(reader, name, type);
                 // Recovered, it is an invalid declaration of a stand-in int (#1447).
-                const bool recovered = check_input_variable_recover(reader, before, initialized);
+                const bool recovered = check_input_variable_recover(reader, before, initialized && direct_initializer);
                 invalid |= recovered;
                 type = recovered ? BUSTER_TYPE_INT : type;
+                // An initialized one's initializer is skipped, as clang checks it no further (#1447).
+                uint32_t right = recovered && initialized ? reader->first_child[i] : BUSTER_CHECK_NONE;
+                while (right != BUSTER_CHECK_NONE && right < i)
+                {
+                    right = reader->next_child[right];
+                }
+                const uint32_t end = right != BUSTER_CHECK_NONE ? reader->ends[right] + 1 : i;
+                for (uint32_t skipped = i; skipped < end && skipped < count; skipped += 1)
+                {
+                    reader->ignored[skipped] = true;
+                }
+                valid &= !recovered || !initialized || right != BUSTER_CHECK_NONE;
+                i = end;
+                initialized &= !recovered;
             }
             valid &= is_typedef || function || type_kind(reader->types, type) != BUSTER_TYPE_KIND_VOID || void_extern;
             // A function specifier declares a function only: clang refuses inline elsewhere, and the _Noreturn keyword
@@ -10764,7 +10934,10 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                 type = completed ? BUSTER_TYPE_INT : type;
             }
             valid &= completed;
-            valid &= initialized || kind == PARSE_KIND_COMMA || kind == PARSE_KIND_SEMI || (function && kind == PARSE_KIND_L_BRACE);
+            // (A recovered void object's skipped initializer ends at its declarator's `,` or `;`.)
+            const uint8_t ending = i < count ? parser->tokens.kinds[i] : PARSE_KIND_END;
+            valid &= initialized || kind == PARSE_KIND_COMMA || kind == PARSE_KIND_SEMI || (function && kind == PARSE_KIND_L_BRACE) ||
+                     (invalid && (ending == PARSE_KIND_COMMA || ending == PARSE_KIND_SEMI));
             // A variable's definition is its initializer or, at file scope, its tentative definition with external linkage
             // (GNU's alias attributes, #147).
             const CheckInputAttributeSubject subject = {
@@ -14671,6 +14844,81 @@ static void check_input_complete_uses(CheckInputReader* reader)
     }
 }
 
+// An object whose acting definition at the unit's end is a tentative one of an array of unknown bound (#2238, clang's
+// ActOnEndOfTranslationUnit, whose loop over the tentative definitions has no error test): "tentative array definition
+// assumed to have one element", at that definition, its last tentative one, unless one of its declarations defines it.
+// Clang's loop visits each object once, at its first tentative definition, which orders the warnings; they come before
+// the unit's unused ones. The first scan finds whether any tentative definition is of such an array, which most units
+// have none of; only then the second keeps each object's last definition, tentative or not, the third warns.
+static void check_input_tentative_arrays(CheckInputReader* reader, uint32_t limit)
+{
+    const uint8_t* bits = reader->output->declaration_bits;
+    const bool scalar = BUSTER_SCALAR_PATH(reader->parser->options.scalar);
+    bool candidate = false;
+    for (uint32_t first = 0; !candidate && first < limit; first += 64)
+    {
+        uint64_t selected = scalar ? check_input_scan_all(first, limit) : check_input_scan_bit(bits, first, limit, BUSTER_CHECK_BITS_TENTATIVE);
+        for (; selected != 0; selected &= selected - 1)
+        {
+            const uint32_t token = first + (uint32_t)__builtin_ctzll(selected);
+            candidate |= check_input_bit(bits, token, BUSTER_CHECK_BITS_TENTATIVE) &&
+                         type_kind(reader->types, reader->declared_types[token]) == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY;
+        }
+    }
+    // Per object (its first declaration's token), its last definition, the top bit set once one defines it or once the
+    // third scan has decided it. Only the entries of objects with a definition are written and read.
+    uint32_t* latest = candidate ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, limit) : NULL;
+    reader->output->resource |= candidate && latest == NULL;
+    const uint32_t defined_flag = 0x80000000u;
+    for (uint32_t first = 0; latest != NULL && first < limit; first += 64)
+    {
+        uint64_t selected = scalar ? check_input_scan_all(first, limit) : check_input_scan_bit(bits, first, limit, BUSTER_CHECK_BITS_TENTATIVE | BUSTER_CHECK_BITS_DEFINED);
+        for (; selected != 0; selected &= selected - 1)
+        {
+            const uint32_t token = first + (uint32_t)__builtin_ctzll(selected);
+            const bool tentative = check_input_bit(bits, token, BUSTER_CHECK_BITS_TENTATIVE);
+            const bool defined = check_input_bit(bits, token, BUSTER_CHECK_BITS_DEFINED);
+            const uint32_t object = reader->objects[token];
+            if ((tentative || defined) && reader->declaration_kinds[token] == C_BINDING_OBJECT && object != 0 && object - 1 < limit)
+            {
+                latest[object - 1] = token | (defined ? defined_flag : 0);
+            }
+        }
+    }
+    for (uint32_t first = 0; latest != NULL && first < limit; first += 64)
+    {
+        uint64_t selected = scalar ? check_input_scan_all(first, limit) : check_input_scan_bit(bits, first, limit, BUSTER_CHECK_BITS_TENTATIVE);
+        for (; selected != 0; selected &= selected - 1)
+        {
+            const uint32_t token = first + (uint32_t)__builtin_ctzll(selected);
+            const uint32_t object = reader->objects[token];
+            if (check_input_bit(bits, token, BUSTER_CHECK_BITS_TENTATIVE) && reader->declaration_kinds[token] == C_BINDING_OBJECT && object != 0 && object - 1 < limit)
+            {
+                // The object's first tentative definition decides; its later ones find the flag set.
+                const uint32_t last = latest[object - 1];
+                const uint32_t acting = last & ~defined_flag;
+                latest[object - 1] = last | defined_flag;
+                const bool invalid = reader->output->invalid_declarations != NULL && reader->output->invalid_declarations[acting] != 0;
+                if ((last & defined_flag) == 0 && reader->definition_origins[acting] == 0 && !invalid &&
+                    type_kind(reader->types, reader->declared_types[acting]) == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY)
+                {
+                    const CheckWarningEvent event =
+                    {
+                        .id = CHECK_WARNING_ID_TENTATIVE_ARRAY,
+                        .kind = CHECK_WARNING_EVENT_TENTATIVE_ARRAY,
+                        .token = acting,
+                        .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                        .completion_kind = CHECK_WARNING_COMPLETE_TU_END,
+                        .completion = BUSTER_CHECK_NONE,
+                        .payload = { .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+                    };
+                    check_input_warning_event(reader, &event, NULL, 0);
+                }
+            }
+        }
+    }
+}
+
 #include "c_check_binding.c"
 #include "c_check_packed_input.c"
 #include "c_check_alloc_token_input.c"
@@ -15989,6 +16237,10 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
             // Selected/private views still retain a mask and cannot establish these independent-declaration cuts.
             const bool resolved = complete_translation_unit && input->report_count == 0 && reader.position == count && reader.expression_limit == count && input->deferred_tokens == NULL;
             input->walk_end = reader.position;
+            if (complete_translation_unit)
+            {
+                check_input_tentative_arrays(&reader, reader.position < count ? reader.position : count);
+            }
             check_input_bindings(&reader, binding_mode);
             check_typo_finish(&reader);
             if (reader.fallthrough_count != 0 && !input->resource)
@@ -15996,6 +16248,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                 check_input_fallthrough_placements(&reader);
             }
             check_input_diagnostic_recover(&reader, resolved);
+            check_input_alignof_undeclared(&reader);
             if (input->graph.ns_constant_string != 0 && !input->resource)
             {
                 check_input_cfstring_class(&reader);
