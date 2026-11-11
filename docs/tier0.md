@@ -660,7 +660,14 @@ at the target's forms, by both of the checker's paths:
   8- or 16-bit integers and floats or doubles go through dwords by them.
 - What has no form at the target is refused by name: shuffles of bytes and words without SSSE3, their 32-byte ones
   without AVX-512, minimum and maximum of qwords without SSE4.2, conversions of vectors wider than the target's
-  registers, and scalar fused multiply-adds without FMA. The sign masks and the conversions
+  registers, and the scalars' IEEE maxima and minima (`maximum` and `minimum`) without AVX, which need more records than
+  a row has. A scalar's fused multiply-add without FMA is the C library's `fmaf` or `fma`, its `ldexp` `ldexpf` or
+  `ldexp` (of the exponent's low 32 bits), and its roundings (ceil, floor, trunc, rint, nearbyint, roundeven and round)
+  without SSE4.1 its `ceilf` ... `round`, as clang's code calls them; with SSE4.1, `roundss` and `roundsd` (round's of
+  the value plus the largest value below 0.5 of its sign). copysign and canonicalize are SSE's sequences, maxnum,
+  minnum and their `_num` forms #967's (`check_vector_extreme_scalar_rows`), and with AVX the IEEE maxima and minima
+  `vmaxss` or `vminss`, their sign bit fixed by x's and the NaNs' operands blended in (`vblendvps`,
+  `check_vector_baseline_scalar_row`). The sign masks and the conversions
   to integers in a general register (`movmskps`, `cvt(t)ss2si` and the others), vector results in several registers
   and operators on vectors wider than the registers are #1193's.
 - `test-checker --program-vectors` runs `c_check_program_vector_test.c`'s baseline programs (the SSE2 survey's
