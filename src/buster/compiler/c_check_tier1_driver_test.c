@@ -3946,6 +3946,51 @@ static const char check_test_tier1_extremes_other_source[] =
     "    return 0;\n"
     "}\n";
 
+// The frame address's fixture (#1847): __builtin_frame_address(0), a stack_save of BUSTER_IR_STACK_SAVE_FRAME, read in a
+// leaf, in a function with calls and stack arguments and through __builtin_return_address(0), each Tier 1's with a frame
+// pointer kept and its code certified. What the units print doesn't depend on where the stack is: the frame address's
+// alignment, the return address in the word above it, the incoming stack arguments past the pushed rbp and the return
+// address, and a local below it.
+static const char check_test_tier1_frame_address_header[] =
+    "#include <stdint.h>\n"
+    "int fa_leaf(void);\n"
+    "int fa_return(void);\n"
+    "long fa_stack(long a, long b, long c, long d, long e, long f, long g, long h);\n"
+    "int fa_nested(int n);\n";
+
+static const char check_test_tier1_frame_address_source[] =
+    "#include \"tier1-frame-address.h\"\n"
+    "int fa_leaf(void) { uintptr_t f = (uintptr_t)__builtin_frame_address(0); return (int)(f & 15); }\n"
+    "int fa_return(void) { void* const* f = __builtin_frame_address(0); return f[1] == __builtin_return_address(0) && f[1] != 0; }\n"
+    "long fa_stack(long a, long b, long c, long d, long e, long f, long g, long h)\n"
+    "{\n"
+    "    const long* frame = __builtin_frame_address(0);\n"
+    "    return frame[2] * 1000 + frame[3] * 100 + a + b + c + d + e + f;\n"
+    "}\n"
+    "int fa_nested(int n)\n"
+    "{\n"
+    "    volatile int local = n;\n"
+    "    const char* frame = __builtin_frame_address(0);\n"
+    "    const int below = (const char*)&local < frame;\n"
+    "    return below + (n > 0 ? fa_nested(n - 1) : 0);\n"
+    "}\n";
+
+static const char check_test_tier1_frame_address_other_source[] =
+    "#include \"tier1-frame-address.h\"\n"
+    "#include <stdio.h>\n"
+    "int main(void)\n"
+    "{\n"
+    "    printf(\"%d %d %ld %d\\n\", fa_leaf(), fa_return(), fa_stack(1, 2, 3, 4, 5, 6, 7, 8), fa_nested(5));\n"
+    "    return 0;\n"
+    "}\n";
+
+// Its builds at the default target, every function Tier 1's and its code certified, run against clang -O0's.
+static void check_test_driver_tier1_frame_address(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    check_test_driver_tier1_units(test, clang, executable, directory, "tier1-frame-address", "frame address's", check_test_tier1_frame_address_header,
+                                  check_test_tier1_frame_address_source, check_test_tier1_frame_address_other_source, 0, true, 0);
+}
+
 // Its builds at x86-64's baseline (SSE2's sequences, two rows for maximumnum and minimumnum), x86-64-v3's (AVX's
 // VBLENDVPD) and x86-64-v4's (AVX-512's masked moves), each run where the host has the target's features.
 static void check_test_driver_tier1_extremes(CheckTest* test, const char* clang, const char* executable, const char* directory)

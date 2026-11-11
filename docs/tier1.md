@@ -470,11 +470,14 @@ Those 25, attributed at main `cb608c1f` by `--tier1 --tier1-refusals --verify
   `host_mm512_set_epi8` and `tier0_shift_back`'s call of it). The limit is 64
   now, and Tier 1 takes them all.
 - 5 are naked functions, whose bodies are assembly Tier 0 copies as written.
-- 4 call `__builtin_frame_address(0)` (`tier1_float_callee`,
+- 4 called `__builtin_frame_address(0)` (`tier1_float_callee`,
   `tier1_float_callee_variadic`, `tier1_stack_check_alignment` and
   `cbuiltin_misc_lower_test_frames`), whose typed-stream entry the lowering to
-  the IR refuses: it needs a frame pointer, which Tier 1 keeps only in a
-  dynamic or realigned frame. It stays Tier 0's. `test-tier1-wide` takes hand-written
+  the IR refused. It is now a `stack_save frame` (#1847): the function keeps a
+  frame pointer (`KEEP_POINTER`) and copies rbp, and the code's certificate
+  takes it. At main `d43c37e5` the unit refuses only the 5 naked functions at
+  x86-64, x86-64-v3 and znver5, and `test-checker-driver`'s frame address unit
+  runs against clang -O0. `test-tier1-wide` takes hand-written
 wide vector IR through the split at both piece widths and natively at x86-64's,
 and `test-checker-driver`'s wide vectors' unit runs against clang -O0 at
 x86-64, x86-64-v2 and x86-64-v3 by both paths.
