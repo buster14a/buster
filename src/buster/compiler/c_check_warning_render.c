@@ -1485,9 +1485,13 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
         }
         case CHECK_WARNING_EVENT_TAG_ATTRIBUTE_PLACE:
         {
+            // A C23 attribute's scope is at payload.token (#1447), its spelling normalized.
             static const char* const keywords[] = { "struct", "union", "enum" };
-            result = check_warning_text(scratch, "attribute '%.*s' is ignored, place it after \"%s\" to apply attribute to type declaration", (int)name.length,
-                                        name.pointer, keywords[payload->data < 3 ? payload->data : 0]);
+            const bool scoped = payload->token != BUSTER_CHECK_WARNING_NO_SOURCE && payload->token < parser->tokens.count;
+            const String8 scope = scoped ? check_warning_attribute_scope(check_driver_warning_name(pp, parser->tokens.names[payload->token])) : (String8){ "", 0 };
+            const String8 attribute = scoped ? check_warning_attribute_name(name, scope, true) : name;
+            result = check_warning_text(scratch, "attribute '%.*s%s%.*s' is ignored, place it after \"%s\" to apply attribute to type declaration", (int)scope.length,
+                                        scope.pointer, scoped ? "::" : "", (int)attribute.length, attribute.pointer, keywords[payload->data < 3 ? payload->data : 0]);
             break;
         }
         case CHECK_WARNING_EVENT_TAG_ATTRIBUTE_DEFINED:
@@ -1567,6 +1571,15 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
                      "function with attribute 'no_caller_saved_registers' should only call a function with attribute 'no_caller_saved_registers' or be compiled with "
                      "'-mgeneral-regs-only'";
             break;
+        case CHECK_WARNING_EVENT_POINTER_TO_INT_CAST:
+        {
+            const String8 target = check_driver_warning_type(parser, pp, input, types, spell, scratch, payload->second_type, payload->data);
+            const String8 source = check_driver_warning_type(parser, pp, input, types, spell, scratch, payload->first_type, payload->name);
+            result = target.length != 0 && source.length != 0 ?
+                     check_warning_text(scratch, "cast to smaller integer type %.*s from %.*s", (int)target.length, target.pointer, (int)source.length, source.pointer) :
+                     NULL;
+            break;
+        }
         case CHECK_WARNING_EVENT_VOID_PTR_DEREFERENCE:
         {
             const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, payload->first_type, payload->data);

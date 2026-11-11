@@ -852,6 +852,14 @@ static void check_test_driver_checks_attributes(CheckTest* test, const char* cla
         "void f([[clang::neon_vector_type(4)]] int p);\n",
         "struct S { [[clang::neon_vector_type(3)]] int m; };\n",
         "struct S { int a; };\nstruct [[clang::btf_type_tag(\"a\")]] S *p;\n",
+        // A bare tag declaration's C23 lists after its name (#1447): a struct's or a union's are clang's parser's error, then
+        // its Sema's of each type attribute (a count's, or "cannot be applied to a declaration"), and the unit goes on; an
+        // enum's, or lists after a GNU one, are ignored with -Wignored-attributes' warning of each, its scope named.
+        "struct V1 [[clang::neon_vector_type(4)]];\nstruct V2 [[gnu::aligned(8)]];\n"
+        "struct V3 [[clang::btf_type_tag(\"a\"), clang::neon_vector_type(2)]] [[clang::address_space(1)]];\n"
+        "union V4 [[clang::annotate_type(\"x\")]];\nstruct V6 [[clang::neon_vector_type]];\nint y = undeclared;\n",
+        "struct V8 [[foo]];\nunion V9 [[gnu::aligned(8)]] [[clang::btf_type_tag(\"b\")]];\nenum E1 [[clang::neon_vector_type(2)]];\n"
+        "struct V10 __attribute__((aligned(8))) [[clang::neon_vector_type(2)]];\nstruct V11 [[clang::neon_vector_type(2, 3)]];\n",
         // A type name that starts with a GNU attribute (#1447): typeof's and sizeof's, whose attributes are clang's type
         // warnings, not an expression's names.
         "typeof(__attribute__((aligned(8))) int) c;\ntypeof(__attribute__((vector_size(8))) int) v;\n_Static_assert(sizeof(v) == 8, \"\");\n"
