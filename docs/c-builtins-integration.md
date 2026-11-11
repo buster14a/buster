@@ -2357,7 +2357,15 @@ record dump, as `BuiltinDumpStruct` checks it.
   ask of that level alone (`TypePrinter.aliased`, by each TYPE frame's id and
   depth), so `int (*(*)(FP))(int)` keeps its return's `(int)`. Where the
   counts differ (a declaration its walk doesn't model), the typedefs apply by
-  type, as before. An
+  type, as before. A member's address space prints by the macro its
+  declaration writes it with, as clang's `MacroQualifiedType` names it
+  (#1447 item 2, `check_lower_dump_space_macro`): `AS1 int * f`, an
+  invocation's `ASN(3) char * i`. That holds where the declaration writes one
+  `address_space` list, which one macro's expansion wrote, and the member's
+  type has one target space. The macro comes from the unit's expansion
+  history, which the plan ensures once, before the lanes, for a unit that
+  writes `address_space` at all. Any other space is spelled out. A typedef's
+  name covers its own address space too (`T1 * t` of `typedef AS1 int T1`). An
   unnamed record's canonical name has its scope, as clang's
   `printNestedNameSpecifier` prints it: the unnamed records whose bodies hold
   it, whatever declarator it is part of (an array's, a pointer's, a

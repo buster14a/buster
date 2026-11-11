@@ -302,6 +302,7 @@ unused-warning fixtures also check exact scope-completion tokens.
   end, and its evaluation of a first operand as clang's constant evaluator finds it, ignoring side effects (`z && 0`
   but not `0 * z`; an assignment's value never); a warning either of whose accesses clang's CFG leaves unreachable is
   dropped (the evaluation facts). Only variables are objects, as clang's getObject in C; unevaluated operands, a
+  type's variable array bounds (a cast's or a sizeof's type name's, `CHECK_OP_VLA_BOUND`, #2321), a
   selection's other operands and statement expressions' statements aren't read, a statement expression's value is
   a full expression of its own, checked first, and a brace initializer's list is one, checked once its last value
   is walked (`check_unseq_plans`, a range's value once per element). Candidates come from one vector pass over the

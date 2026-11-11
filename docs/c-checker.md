@@ -759,11 +759,20 @@ as Sema's `CheckVariableDeclarationType` gives it after the declarator
 (`CheckDeclaratorRun.parameter_invalid`); a block's `static` or `extern` one's
 at the declaration, a stand-in `int` (one with an initializer still stops).
 
+In a body, a cast to a variably modified type (`(int (*)[n])v`, in `sizeof`
+too; #2321, #1852) evaluates its type name's bounds, outermost first through
+pointers and arrays, before its operand, as clang's `EmitVariablyModifiedType`
+does: the graph's cast follows a comma of the captured bounds
+(`check_input_vla_cast_bounds`), which no -Wunused-value warns of, and a
+`sizeof` of the cast's value reads the extent stored then rather than
+evaluating the bound again. In an unevaluated `sizeof` operand the bound isn't
+evaluated.
+
 Differences left: a member's error still stops the reader, where clang marks
-the field and its record invalid. In a body, a cast to a variably modified
-type (`(void)((int (*)[n])0)`, in `sizeof` too) is still "construct is not yet
-supported", though clang accepts it: the cast's captured bound is a second
-operand the graph's cast doesn't take.
+the field and its record invalid. A warning inside a `sizeof` or `typeof`
+operand of variable array type (`sizeof(*(int (*)[(1, n)])v)`'s comma) is given
+once, where clang, which transforms that operand again as potentially
+evaluated, gives it twice.
 A skipped VLA initializer's undeclared names and expression warnings
 (`{q}`, `"y" + 1`) aren't reported; clang reports them, and an undeclared name
 in a list makes the list invalid, with no "may not be initialized" error.
@@ -5218,6 +5227,16 @@ An undeclared name that is a typo of a visible one is clang's (#1447,
   name, clang's invalid expression, its rest is left out to its `;`, with the
   parser's error. Before C23 a name's call is an undeclared function's, which
   no search reads as a keyword (`whil (a)` stays a call).
+- **A name after a block item's GNU attributes** that no binding of the parse
+  names, which the parser reads as an implicit int's declarator
+  (`parse_scalar_attribute_name`): clang's statement reader asks Sema what it
+  is first, with its typo correction, and one it corrects to a value is
+  "use of undeclared identifier 'valu'; did you mean 'value'?" and "expected
+  identifier or '('" there, the item skipped to its `;`. The recovery view
+  leaves the attributes out, so that the reader searches the name at the
+  statement's start (`check_driver_typo_tail`); a value it takes makes the
+  next view read the item as an empty statement, with both errors. A name no
+  correction takes keeps the implicit int's error.
 - **An undeclared function's call** in C99 and later (`ImplicitlyDefineFunction`,
   only where its diagnostic is an error) takes a function. Its error gets
   "did you mean 'compute'?" at the call and "'compute' declared here", but not
@@ -5269,6 +5288,11 @@ Left as they were:
   so does a parse error within a call's parentheses (`foo (int i = 0; ...)`,
   C23's `for`, and `sizeo (int)`). A statement whose undeclared name ends
   before a `}` without a `;` keeps the parser's error.
+- After a block item's GNU attributes, a builtin's name without a call
+  (`__builtin_abs;`, clang's "expected identifier or '('") is still an
+  implicit int's declarator, and before C23 an undeclared function's call
+  there lacks clang's "call to undeclared function" error before its "expected
+  identifier or '('", whose parse error ends the body's checking.
 - A declaration's type name outside a statement's start is clang's parser's
   to correct (`DiagnoseUnknownTypeName`): a parameter's `myin v` keeps
   buster's "unknown type name" with no suggestion, and its prefix view
@@ -5909,7 +5933,15 @@ warnings that need the completed graph or the parser's operator tree:
 `-Wlogical-not-parentheses`, `-Wparentheses` (assignment conditions and
 bitwise/equality precedence), `-Wempty-body`, `-Wself-assign`,
 `-Wreturn-stack-address`, `-Wformat`/`-Wformat-security`, `-Wswitch`,
-`-Wdangling-else` and `-Wuninitialized`. A conditional's
+`-Wdangling-else` and `-Wuninitialized`. `-Wstring-plus-int` (#2190, on by
+default, `check_common_string_plus_int`) is clang's `diagnoseStringPlusInt`: a
+`+` of a string literal, not parenthesized, and an operand of integer,
+boolean or enumeration type in either order, "adding 'T' to a string does not
+append to the string" at the `+` with its note, T the operand's type as
+written (a typedef's, `__size_t`'s sugar), given as the `+` is built; a `+`
+whose neighbor is no string literal is passed at once. Left: where a C23
+`u8"ab" + 1` is returned as a `const char *`, its `-Wpointer-sign` comes
+first, which clang gives after. A conditional's
 `-Wpointer-type-mismatch` and `-Wconditional-type-mismatch` (#2292,
 `check_driver_conditional_mismatch_message`) name its arms' types as clang's
 `checkConditionalPointerCompatibility` and `checkPointerIntegerMismatch` do,
@@ -7714,8 +7746,8 @@ clang's error at the declaration, in the checker's words ("'__auto_type'
 deduced types differ within one declaration"). A variably modified deduced
 type is the initializer's, whose sizes its own declaration evaluated, and the
 declaration evaluates none, as clang's doesn't (`__auto_type p = &vla;`); a
-cast to a variably modified type in the initializer is refused by name, as the
-cached evaluator that types it doesn't take one. A redeclaration of a
+cast to a variably modified type in the initializer evaluates its bounds once,
+as the cast does anywhere (#2321). A redeclaration of a
 variable with linkage takes the earlier declaration's type rather than a
 deduced one, as clang's C `mergeTypes` takes the placeholder before deducing
 (`extern long p; __auto_type p = 1;` is a long, its initializer converted;
@@ -9172,8 +9204,9 @@ arguments against the function. The checker now gives these as clang does.
   space throughout the unit (`check_driver_space_macros`). Its attribute is
   spelled out in three cases: a space the unit writes both ways or with two
   macros (`address_space(1u)` is space 1 written directly), every space where
-  an operand isn't an integer constant (`address_space(1+0)`), and
-  `__builtin_dump_struct`'s output. Clang spells a group's leading
+  an operand isn't an integer constant (`address_space(1+0)`), and, in
+  `__builtin_dump_struct`'s output, a member that writes several spaces or one
+  directly (`docs/c-builtins-integration.md`). Clang spells a group's leading
   space where it was
   written (`'int (__attribute__((address_space(1))) *)[3]'`); a garbage
   collection qualifier inside a function's level is refused by name, and the

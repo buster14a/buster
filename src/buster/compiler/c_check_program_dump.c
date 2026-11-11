@@ -44,6 +44,9 @@ struct CheckLowerDumpBuilder
     uint32_t operand_count;
     uint32_t operand_room;
     const char* refusal;
+    // The unit's preprocessor, whose expansion history (check_lower_dump_prepare ensured it) names the macro that writes a
+    // member's address space (#1447 item 2); NULL where the unit writes none.
+    const Preprocessor* space_history;
 };
 
 // Room for `needed` elements of `size` bytes in `*array`, of `*room`: where it has less, a new array of the next power of
@@ -298,7 +301,9 @@ static TypeId check_lower_dump_alias(const CheckProgram* program, uint32_t use, 
     }
     const TypeId declared = type_strip_aligned(program->types, program->input->declared_types[declaration]);
     *covered = type_qualifiers(declared) & ~written;
-    return type_unqualified(declared);
+    // Its extended qualifiers stay (#1447 item 2): `typedef AS1 int T1`'s name covers its address space too, as the level
+    // `T1 *t` points to has it, where clang prints `T1 *`.
+    return type_unqualified(type_strip_alignment(program->types, program->input->declared_types[declaration]));
 }
 
 // The aliases by place of one declaration's types (TypeNames.alias_order, check_lower_dump_places): each typedef it
@@ -427,7 +432,7 @@ static String8 check_lower_dump_print_placed(CheckLowerDumpBuilder* builder, Typ
     uint32_t printed = UINT32_MAX;
     if (places->valid)
     {
-        TypeNames names = builder->names;
+        TypeNames names = *fallback;
         names.alias_types = places->types;
         names.alias_names = places->names;
         names.alias_covered = places->covered;
@@ -482,6 +487,97 @@ static void check_lower_dump_declaration(const Parser* parser, uint32_t token, u
     *end = t;
 }
 
+// The outermost macro expansion a token's origin comes from (its PPExpansion's index plus one), 0 for one the source
+// wrote: check_driver_macro_root's.
+static uint32_t check_lower_dump_macro_root(const Preprocessor* pp, uint32_t origin)
+{
+    uint32_t result = 0;
+    for (uint32_t steps = 0; origin != 0 && steps < 256; steps += 1)
+    {
+        const uint32_t index = (origin & BUSTER_PP_ORIGIN_INDEX) - 1;
+        const uint32_t kind = origin & ~BUSTER_PP_ORIGIN_INDEX;
+        result = kind == 0 ? index + 1 : kind == BUSTER_PP_ORIGIN_ARGUMENT ? result : 0;
+        origin = kind == 0 ? pp->history[index].parent : kind == BUSTER_PP_ORIGIN_ARGUMENT ? pp->substitutions[index].source : 0;
+    }
+    return result;
+}
+
+// The macro that writes the `__attribute__` list from `t` to its `)` at `close`, as clang's MacroQualifiedType names it:
+// check_driver_attribute_macro's rule (the list a whole expansion, not the predefines'), an object-like macro by its name,
+// a function-like one by its invocation; empty for none.
+static String8 check_lower_dump_attribute_macro(const Parser* parser, const Preprocessor* pp, uint32_t t, uint32_t close)
+{
+    const uint32_t first = parser->tokens.sources[t];
+    const uint32_t last = parser->tokens.sources[close];
+    const uint32_t root = check_lower_dump_macro_root(pp, pp_history_at(pp, first));
+    const uint32_t range = root != 0 && first < pp->output.count ? pp_find_range(pp, pp->output.locations[first]) : BUSTER_PP_NONE;
+    const bool builtin = range != BUSTER_PP_NONE && pp->files[pp->ranges[range].file].data == pp->predefines_data;
+    const bool whole = root != 0 && !builtin && last < pp->output.count && root == check_lower_dump_macro_root(pp, pp_history_at(pp, last)) &&
+                       (first == 0 || check_lower_dump_macro_root(pp, pp_history_at(pp, first - 1)) != root) &&
+                       (last + 1 >= pp->output.count || check_lower_dump_macro_root(pp, pp_history_at(pp, last + 1)) != root);
+    const PPExpansion* expansion = whole ? &pp->history[root - 1] : NULL;
+    const bool invocation = expansion != NULL && expansion->end > expansion->begin && pp_find_range(pp, expansion->begin) == pp_find_range(pp, expansion->end);
+    const uint8_t* bytes = invocation ? pp_location_bytes(pp, expansion->begin) : NULL;
+    const uint32_t name = expansion != NULL ? expansion->name : 0;
+    return bytes != NULL ? (String8){ .pointer = (char*)bytes, .length = (uint64_t)(expansion->end - expansion->begin) + 1 } :
+           expansion != NULL && name < pp->table->count ? (String8){ .pointer = (char*)intern_bytes(pp->table, name), .length = intern_length(pp->table, name) } :
+           (String8){ 0 };
+}
+
+// Whether identifier `name` is address_space or __address_space__.
+static bool check_lower_dump_space_name(const InternTable* identifiers, uint32_t name)
+{
+    const uint32_t length = name != 0 && name < identifiers->count ? intern_length(identifiers, name) : 0;
+    const char* bytes = length != 0 ? (const char*)intern_bytes(identifiers, name) : "";
+    return (length == 13 && memcmp(bytes, "address_space", 13) == 0) || (length == 17 && memcmp(bytes, "__address_space__", 17) == 0);
+}
+
+// The macro that writes member declaration `begin`..`end`'s address space, as clang's MacroQualifiedType names the
+// member's type (#1447 item 2, `AS1 int * f`): where the declaration writes one address_space list, which a macro
+// wrote, and the member's type has one target space, at any of its levels, that space and the macro's text. False
+// otherwise (none, several, or one written directly), where the space prints spelled out.
+static bool check_lower_dump_space_macro(const CheckLowerDumpBuilder* builder, TypeId type, uint32_t begin, uint32_t end, uint32_t* space, String8* text)
+{
+    const CheckProgram* program = builder->program;
+    const Parser* parser = program->parser;
+    const TypeTable* types = program->types;
+    uint32_t lists = 0;
+    String8 written = { 0 };
+    for (uint32_t t = begin; builder->space_history != NULL && t + 1 < end; t += 1)
+    {
+        const uint32_t close = parser->tokens.kinds[t] == PARSE_KIND_ATTRIBUTE && parser->tokens.kinds[t + 1] == PARSE_KIND_L_PAREN ? parser->tree.parents[t + 1] :
+                               BUSTER_CHECK_NONE;
+        bool spaced = false;
+        for (uint32_t a = t + 2; close < end && a < close; a += 1)
+        {
+            spaced |= parser->tokens.kinds[a] == PARSE_KIND_IDENTIFIER && check_lower_dump_space_name(program->identifiers, parser->tokens.names[a]);
+        }
+        if (spaced)
+        {
+            lists += 1;
+            written = check_lower_dump_attribute_macro(parser, builder->space_history, t, close);
+        }
+        t = close < end ? close : t;
+    }
+    // The member's type's target spaces, through its pointers and arrays.
+    uint32_t found = 0;
+    uint32_t spaces = 0;
+    TypeId level = type;
+    for (uint32_t depth = 0; lists == 1 && written.length != 0 && depth < 64 && level != 0 && type_is_valid(types, level); depth += 1)
+    {
+        const uint32_t word = type_address_space(type_object_qualifiers(types, level));
+        spaces += word >= BUSTER_TYPE_SPACE_TARGET && word != found ? 1 : 0;
+        found = word >= BUSTER_TYPE_SPACE_TARGET ? word : found;
+        const TypeId bare = type_unqualified(type_strip_aligned(types, level));
+        const uint8_t kind = type_kind(types, bare);
+        level = kind == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(kind) ? type_element(types, type_strip_aligned(types, level)) : 0;
+    }
+    const bool result = lists == 1 && written.length != 0 && spaces == 1;
+    *space = found;
+    *text = written;
+    return result;
+}
+
 // The name of `type`, a member's declared one as its declaration at `token` spells it (its typedef specifier's name kept,
 // as clang's sugared type prints), or with `token` 0 its canonical type, as clang's TypePrinter prints it.
 static uint32_t check_lower_dump_type(CheckLowerDumpBuilder* builder, TypeId type, uint32_t token)
@@ -507,12 +603,21 @@ static uint32_t check_lower_dump_type(CheckLowerDumpBuilder* builder, TypeId typ
     // By place where the declaration's places match the printer's specifiers (`int (*)(I)`), else the typedef of its
     // own specifiers wherever its type is.
     CheckLowerDumpPlaces places = { .valid = false };
+    uint32_t space = 0;
+    String8 space_text = { 0 };
     if (token != 0)
     {
         uint32_t begin = 0;
         uint32_t end = 0;
         check_lower_dump_declaration(program->parser, token, &begin, &end);
         check_lower_dump_places(program, begin, end, &places);
+        // Its address space by the macro its declaration writes it with (#1447 item 2).
+        if (check_lower_dump_space_macro(builder, type, begin, end, &space, &space_text))
+        {
+            names.space_macro_spaces = &space;
+            names.space_macro_texts = &space_text;
+            names.space_macro_count = 1;
+        }
     }
     const uint64_t mark = builder->scratch->length;
     const String8 printed = check_lower_dump_print_placed(builder, type, &places, &names);
@@ -1110,11 +1215,22 @@ static bool check_lower_dump_prepare(CheckLowerInitializers* pools, const CheckP
         const TypeTable* types = program->types;
         const InternTable* identifiers = program->identifiers;
         const uint32_t name_count = identifiers->count;
+        // A unit that writes an address space: the expansion history, which names the macro that writes a member's
+        // (#1447 item 2). This runs once a unit, before its functions lower; most units write none.
+        const Parser* parser = program->parser;
+        bool spaced = false;
+        for (uint32_t t = 0; parser->preprocessor != NULL && !spaced && t < parser->tokens.count; t += 1)
+        {
+            spaced = parser->tokens.kinds[t] == PARSE_KIND_IDENTIFIER && check_lower_dump_space_name(program->identifiers, parser->tokens.names[t]);
+        }
+        // (Ensuring it replays the unit with its history: the preprocessor's own state, which the program reads as const.)
+        const bool history = spaced && pp_history_ensure((Preprocessor*)parser->preprocessor);
         CheckLowerDumpBuilder builder = {
             .program = program,
             .scratch = scratch,
             .options = program->parser->language.standard >= 2023 ? BUSTER_TYPE_PRINT_C23 : 0,
             .c99 = program->parser->language.standard >= 1999,
+            .space_history = history ? parser->preprocessor : NULL,
         };
         const uint8_t** bytes = BUSTER_ARENA_PUSH_ARRAY(scratch, const uint8_t*, name_count);
         uint32_t* lengths = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, name_count);
