@@ -475,15 +475,6 @@ static void check_literal_number(const uint8_t* bytes, uint32_t length, Arena* s
             check_literal_number_plain(spelling, length - 1, scratch, result);
             // A bit-precise constant has no imaginary form: clang refuses 5wbi's suffix.
             result->valid &= result->bit_width == 0;
-            if (result->valid && result->type == BUSTER_TYPE_FLOAT128)
-            {
-                // A _Complex __float128 constant holds its components as long doubles (#1250): an imaginary q/Q literal
-                // is taken where its long double mirror is its value exactly, and keeps no bits.
-                const unsigned __int128 bits = (unsigned __int128)result->high << 64 | result->integer;
-                result->valid = check_quad_widen(result->floating, false) == bits;
-                result->integer = 0;
-                result->high = 0;
-            }
             if (result->valid)
             {
                 result->type = BUSTER_TYPE_COMPLEX(type_index(result->type));
@@ -503,7 +494,7 @@ static CheckValue check_literal_value(CheckLiteral literal)
     uint16_t sign_exponent;
     memcpy(&significand, &literal.floating, sizeof(significand));
     memcpy(&sign_exponent, (const uint8_t*)&literal.floating + sizeof(significand), sizeof(sign_exponent));
-    const CheckValue value = {
+    CheckValue value = {
         .type = literal.type,
         .category = CHECK_RVALUE,
         .flags = literal.imaginary ? 0 : literal.real ? BUSTER_CHECK_FLOAT_LITERAL : literal.type == BUSTER_TYPE_NULLPTR ? 0 : BUSTER_CHECK_ICE,
@@ -519,6 +510,11 @@ static CheckValue check_literal_value(CheckLiteral literal)
             literal.imaginary ? sign_exponent : 0,
         },
     };
+    if (__builtin_expect(literal.imaginary && literal.type == BUSTER_TYPE_COMPLEX(type_index(BUSTER_TYPE_FLOAT128)), 0))
+    {
+        // An imaginary q/Q literal's bits, its imaginary part's (#1250, check_quad_complex_set), its real part +0.
+        check_quad_complex_set(&value, 0, (unsigned __int128)literal.high << 64 | literal.integer);
+    }
     return value;
 }
 

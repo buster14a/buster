@@ -1837,10 +1837,8 @@ their typedefs kept. It folds where both are
 floating constants, as clang's evaluator folds it, so that glibc's `CMPLX` makes
 static data and an enumerator's `__imag__` an integer constant: the folds keep
 signed zeros, infinities and NaNs, a `static const` object's value, and long
-double's and `_Float16`'s parts. `__builtin_complex` doesn't fold `__float128`
-arguments (`check_action_float_supported`), so a `_Complex __float128` of
-constants is computed at run time and refused in static data, where clang takes
-it. At run
+double's, `_Float16`'s and `__float128`'s parts (a `__float128`'s by their bits,
+#1250, `check_quad_complex_set`). At run
 time the lowering evaluates both arguments in order into temporaries and stores
 them into a frame object of the two parts, whose address is its value, as every
 complex value's is (`check_lower_complex_builtin`: a `__float128` part's 16

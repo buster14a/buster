@@ -2409,27 +2409,25 @@ static uint32_t parse_test_compare_tokens(const ParseTokens* a, const ParseToken
 
 // Omitting the later stages' traversal must preserve every parser token, tree and diagnostic. The ordinary runs
 // above still build and independently check both traversal columns; this run also proves their arenas stay absent.
-static uint32_t parse_test_tree_only(const Parser* full, Preprocessor* pp, const char* path)
+// `tree` has `full`'s options with tree_only, and may have parsed other units before (ParseTestUnits).
+static uint32_t parse_test_tree_only(const Parser* full, Parser* tree, Preprocessor* pp, const char* path)
 {
-    static Parser tree;
-    ParseOptions options = full->options;
-    options.tree_only = true;
-    bool same = parse_initialize(&tree, &options, full->language);
+    bool same = tree->options.tree_only && tree->options.scalar == full->options.scalar && tree->options.sizes == full->options.sizes;
     if (same)
     {
-        const bool parsed = parse_translation_unit(&tree, pp);
-        same = parsed == (full->errors == 0) && tree.errors == full->errors && tree.fatal == full->fatal &&
-               tree.recovered_parameter_types == full->recovered_parameter_types &&
-               tree.diagnostic_count == full->diagnostic_count && parse_test_compare_tokens(&tree.tokens, &full->tokens) == BUSTER_PARSE_NONE &&
-               tree.postorder == 0 && tree.sizes == 0 && tree.positions == 0 && tree.ends == 0 && tree.first_children == 0 && tree.next_siblings == 0;
-        for (uint32_t column = 11; column < BUSTER_ARRAY_LENGTH(tree.columns); column += 1)
+        const bool parsed = parse_translation_unit(tree, pp);
+        same = parsed == (full->errors == 0) && tree->errors == full->errors && tree->fatal == full->fatal &&
+               tree->recovered_parameter_types == full->recovered_parameter_types &&
+               tree->diagnostic_count == full->diagnostic_count && parse_test_compare_tokens(&tree->tokens, &full->tokens) == BUSTER_PARSE_NONE &&
+               tree->postorder == 0 && tree->sizes == 0 && tree->positions == 0 && tree->ends == 0 && tree->first_children == 0 && tree->next_siblings == 0;
+        for (uint32_t column = 11; column < BUSTER_ARRAY_LENGTH(tree->columns); column += 1)
         {
-            same &= tree.columns[column].base == 0;
+            same &= tree->columns[column].base == 0;
         }
         for (uint32_t d = 0; same && d < full->diagnostic_count; d += 1)
         {
             const ParseDiagnostic* a = &full->diagnostics[d];
-            const ParseDiagnostic* b = &tree.diagnostics[d];
+            const ParseDiagnostic* b = &tree->diagnostics[d];
             same = a->token == b->token && a->argument == b->argument && a->message == b->message && a->place == b->place && a->error == b->error &&
                    a->note == b->note && a->resumed == b->resumed && a->parameter_type == b->parameter_type && a->resume_delete == b->resume_delete &&
                    a->resume_end == b->resume_end && a->resume_colon == b->resume_colon;
@@ -2437,11 +2435,10 @@ static uint32_t parse_test_tree_only(const Parser* full, Preprocessor* pp, const
         if (same && parsed)
         {
             const uint64_t count = full->tokens.count;
-            same = memcmp(tree.tree.roles, full->tree.roles, count) == 0 && memcmp(tree.tree.parents, full->tree.parents, count * sizeof(uint32_t)) == 0 &&
-                   memcmp(tree.tree.depths, full->tree.depths, count * sizeof(uint32_t)) == 0;
+            same = memcmp(tree->tree.roles, full->tree.roles, count) == 0 && memcmp(tree->tree.parents, full->tree.parents, count * sizeof(uint32_t)) == 0 &&
+                   memcmp(tree->tree.depths, full->tree.depths, count * sizeof(uint32_t)) == 0;
         }
     }
-    parse_release(&tree);
     if (!same)
     {
         parse_test_report("%s: tree-only parsing differs from the full %s parser\n", path, full->options.scalar ? "scalar" : "vector");
@@ -2740,33 +2737,124 @@ static uint32_t parse_test_check_handoff(CLanguage language, uint64_t seed)
     return failures;
 }
 
-// One file through both paths: preprocessed once, then parsed by the vector path and by the scalar parser alone, which
+// What the units of one check share, one unit after another (#2078): the intern table, reset to its predefined names
+// before each unit (intern_reset, after which each name gets the id it gets in a fresh table), and the parsers, which
+// parse unit after unit as fresh ones would (parse_test_borrowed_scratch checks that): the vector path's and the scalar
+// parser's, and each again tree-only. Each unit still gets a preprocessor of its own. Setting up a fresh table and four
+// fresh parsers for each unit, then releasing them, took most of the alignments' time: their pages faulted in again and
+// were unmapped again for each of the 34,624 units. parse_test_units_release releases them.
+typedef struct ParseTestUnits ParseTestUnits;
+struct ParseTestUnits
+{
+    InternTable table;
+    // The vector path's, the scalar parser's, then the same tree-only.
+    Parser parsers[4];
+    // The thread's pool (arena_pool) while a unit runs, as a units lane's is: the arenas the unit's preprocessor and
+    // the parsers' columns release go to it, emptied, for the next unit's, rather than being unmapped and mapped again.
+    ArenaPool pool;
+    CLanguage language;
+    bool table_ready;
+    bool parsers_ready;
+};
+
+static void parse_test_units_release(ParseTestUnits* units)
+{
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(units->parsers); i += 1)
+    {
+        parse_release(&units->parsers[i]);
+    }
+    if (units->table_ready)
+    {
+        intern_release(&units->table);
+    }
+    arena_pool_release(&units->pool);
+    *units = (ParseTestUnits){ 0 };
+}
+
+// A parser's scratch back to a fresh one's: empty, and every byte a parse pushed zero again. A few pages, as a generated
+// unit's (55 KB at the median), are cleared in place; more, as a file's (up to 480 MB of main.c's), go back to the kernel
+// from the scratch's first page boundary, as a fresh parser's mapping would: a clear touches every pushed page, written or not,
+// where the kernel frees only those a parse wrote. Then the peak goes back to 0, as no byte past it differs from a fresh
+// arena's, so that the next unit's clearing reaches only as far as that unit pushed.
+static void parse_test_units_clear(Arena* scratch)
+{
+    const uint64_t page = BUSTER_ARENA_PAGE_BYTES;
+    const uint64_t pushed = scratch->peak > scratch->length ? scratch->peak : scratch->length;
+    const uintptr_t base = (uintptr_t)scratch->base;
+    const uintptr_t first = (base + page - 1) & ~(uintptr_t)(page - 1);
+    const uintptr_t end = (base + pushed + page - 1) & ~(uintptr_t)(page - 1);
+    const bool large = scratch->base != 0 && pushed > (1ull << 20) && end > first;
+    const bool given = large && madvise((void*)first, end - first, MADV_DONTNEED) == 0;
+    if (scratch->base != 0)
+    {
+        memset(scratch->base, 0, given ? first - base : pushed);
+    }
+    scratch->length = 0;
+    scratch->peak = 0;
+}
+
+// The table, as a fresh one, and the parsers for `language`. Returns false if either can't be had.
+static bool parse_test_units_prepare(ParseTestUnits* units, CLanguage language)
+{
+    const bool table = units->table_ready ? intern_reset(&units->table) : intern_initialize(&units->table);
+    units->table_ready = units->table_ready || table;
+    const bool same_language = units->language.standard == language.standard && units->language.gnu == language.gnu &&
+                               units->language.gnu_keywords == language.gnu_keywords && units->language.digraphs == language.digraphs;
+    // Each parser's scratch as a fresh parser's (parse_test_units_clear): a parse that reads a temporary it didn't write
+    // must read what it reads on a fresh parser, for the checks to be a fresh parser's. The vector path does: on some
+    // invalid streams, K5's verdict follows what an earlier unit left in its temporaries (#2086).
+    for (uint32_t i = 0; units->parsers_ready && same_language && i < BUSTER_ARRAY_LENGTH(units->parsers); i += 1)
+    {
+        parse_test_units_clear(&units->parsers[i].scratch);
+    }
+    if (!units->parsers_ready || !same_language)
+    {
+        // The scalar parser's parse also derives the subtree sizes, which parse_test_postorders checks.
+        const ParseOptions options[4] = {
+            { .scalar = false },
+            { .scalar = true, .sizes = true },
+            { .scalar = false, .tree_only = true },
+            { .scalar = true, .sizes = true, .tree_only = true },
+        };
+        bool parsers = true;
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(units->parsers); i += 1)
+        {
+            parse_release(&units->parsers[i]);
+            const bool initialized = parse_initialize(&units->parsers[i], &options[i], language);
+            parsers &= initialized;
+        }
+        units->parsers_ready = parsers;
+        units->language = language;
+    }
+    return table && units->parsers_ready;
+}
+
+// One unit through both paths: preprocessed once, then parsed by the vector path and by the scalar parser alone, which
 // must read the same tokens and give the same outcome, and on a valid unit the same tree, with the tree's invariants
-// and postorders; then each kernel against its twin. *outcome gets the vector path's outcome. Returns the number of
-// failures.
-static uint32_t parse_test_check_file(const char* path, const PPOptions* options, ParseTestOutcome* outcome, ParseTestKernelTally* tally)
+// and postorders; then each kernel against its twin. The unit is the file at `path`, or with `source` the `length`
+// bytes there under that name. *outcome gets the vector path's outcome. Returns the number of failures.
+static uint32_t parse_test_check_unit(ParseTestUnits* units, const char* path, const char* source, size_t length, const PPOptions* options, ParseTestOutcome* outcome,
+                                      ParseTestKernelTally* tally)
 {
     uint32_t failures = 0;
-    static InternTable table;
     static Preprocessor pp;
-    static Parser vector;
-    static Parser scalar;
-    // The scalar parser's parse also derives the subtree sizes, which parse_test_postorders checks.
-    const ParseOptions vector_options = { .scalar = false };
-    const ParseOptions scalar_options = { .scalar = true, .sizes = true };
     *outcome = (ParseTestOutcome){ 0 };
-    if (intern_initialize(&table) && pp_initialize(&pp, options, &table) && parse_initialize(&vector, &vector_options, options->language) &&
-        parse_initialize(&scalar, &scalar_options, options->language))
+    ArenaPool* const pool = arena_pool;
+    arena_pool = &units->pool;
+    if (length <= UINT32_MAX && parse_test_units_prepare(units, options->language) && pp_initialize(&pp, options, &units->table))
     {
-        if (pp_run(&pp, path))
+        Parser* vector = &units->parsers[0];
+        Parser* scalar = &units->parsers[1];
+        const bool preprocessed = source != 0 ? pp_run_source(&pp, path, (const uint8_t*)source, (uint32_t)length) : pp_run(&pp, path);
+        if (preprocessed)
         {
-            parse_translation_unit(&vector, &pp);
-            parse_translation_unit(&scalar, &pp);
-            failures += parse_test_tree_only(&vector, &pp, path);
-            failures += parse_test_tree_only(&scalar, &pp, path);
-            *outcome = parse_test_outcome(&vector, &pp);
-            const ParseTestOutcome alone = parse_test_outcome(&scalar, &pp);
-            const uint32_t token = parse_test_compare_tokens(&vector.tokens, &scalar.tokens);
+            parse_translation_unit(vector, &pp);
+            parse_translation_unit(scalar, &pp);
+            failures += parse_test_tree_only(vector, &units->parsers[2], &pp, path);
+            failures += parse_test_tree_only(scalar, &units->parsers[3], &pp, path);
+            *outcome = parse_test_outcome(vector, &pp);
+            const ParseTestOutcome alone = parse_test_outcome(scalar, &pp);
+            const uint32_t token = parse_test_compare_tokens(&vector->tokens, &scalar->tokens);
             if (token != BUSTER_PARSE_NONE)
             {
                 failures += 1;
@@ -2782,22 +2870,26 @@ static uint32_t parse_test_check_file(const char* path, const PPOptions* options
             {
                 if (alone.errors == 0)
                 {
-                    failures += parse_test_compare_trees(&vector, &scalar, &pp, path, &vector.scratch);
+                    failures += parse_test_compare_trees(vector, scalar, &pp, path, &vector->scratch);
                 }
-                failures += parse_test_check_kernels(&vector, &scalar, &pp, path, tally);
+                failures += parse_test_check_kernels(vector, scalar, &pp, path, tally);
             }
         }
-        parse_release(&scalar);
-        parse_release(&vector);
         pp_release(&pp);
-        intern_release(&table);
     }
     else
     {
         outcome->out_of_memory = true;
         failures += 1;
     }
+    arena_pool = pool;
     return failures;
+}
+
+// parse_test_check_unit on the file at `path`.
+static uint32_t parse_test_check_file(ParseTestUnits* units, const char* path, const PPOptions* options, ParseTestOutcome* outcome, ParseTestKernelTally* tally)
+{
+    return parse_test_check_unit(units, path, 0, 0, options, outcome, tally);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -3209,6 +3301,7 @@ static uint32_t parse_test_mutations(char** files, uint32_t file_count, const PP
     char* batch_paths[BUSTER_PARSE_TEST_BATCH];
     char batch_details[BUSTER_PARSE_TEST_BATCH][160];
     ParseTestClang batch_results[BUSTER_PARSE_TEST_BATCH];
+    static ParseTestUnits units;
     for (uint32_t b = 0; b < BUSTER_PARSE_TEST_BATCH; b += 1)
     {
         batch_paths[b] = malloc(4096);
@@ -3261,7 +3354,7 @@ static uint32_t parse_test_mutations(char** files, uint32_t file_count, const PP
                 {
                     ParseTestOutcome ours;
                     const uint32_t budget = parse_test_report_budget;
-                    const uint32_t differences = parse_test_check_file(batch_paths[b], &plain, &ours, &kernels);
+                    const uint32_t differences = parse_test_check_file(&units, batch_paths[b], &plain, &ours, &kernels);
                     tally.files += 1;
                     rejected += ours.errors != 0;
                     differ += differences != 0;
@@ -3293,6 +3386,7 @@ static uint32_t parse_test_mutations(char** files, uint32_t file_count, const PP
     {
         free(batch_paths[b]);
     }
+    parse_test_units_release(&units);
     if (clang != 0)
     {
         printf("mutations: %llu (clang accepted %llu, a parse issue first in %llu, another issue first in %llu, of which we rejected %llu), %llu mismatches\n",
@@ -3316,6 +3410,7 @@ static uint32_t parse_test_files(char** files, uint32_t file_count, const PPOpti
     ParseTestKernelTally kernels = { 0 };
     uint32_t paths_differ = 0;
     uint64_t tokens = 0;
+    static ParseTestUnits units;
     for (uint32_t f = 0; f < file_count; f += BUSTER_PARSE_TEST_BATCH)
     {
         const uint32_t in_batch = file_count - f < BUSTER_PARSE_TEST_BATCH ? file_count - f : BUSTER_PARSE_TEST_BATCH;
@@ -3328,13 +3423,14 @@ static uint32_t parse_test_files(char** files, uint32_t file_count, const PPOpti
         for (uint32_t b = 0; b < in_batch; b += 1)
         {
             ParseTestOutcome ours;
-            const uint32_t differences = parse_test_check_file(files[f + b], options, &ours, &kernels);
+            const uint32_t differences = parse_test_check_file(&units, files[f + b], options, &ours, &kernels);
             failures += differences;
             paths_differ += differences != 0;
             tokens += ours.tokens;
             parse_test_compare(&tally, files[f + b], &ours, &theirs[b], "");
         }
     }
+    parse_test_units_release(&units);
     printf("files: %llu (%llu tokens), clang accepted %llu, rejected %llu%s, %llu mismatches\n", (unsigned long long)tally.files, (unsigned long long)tokens,
            (unsigned long long)tally.accepted, (unsigned long long)(tally.parse_issues + tally.other_issues), clang != 0 ? "" : " (without clang: every file must parse)",
            (unsigned long long)tally.mismatches);
@@ -3424,15 +3520,16 @@ static uint32_t parse_test_streams(uint64_t count, uint64_t seed, const PPOption
     ParseTestKernelTally tally = { 0 };
     uint64_t rejected = 0;
     static char text[1 << 16];
+    static ParseTestUnits units;
     char path[4200];
     snprintf(path, sizeof(path), "%s/stream.c", directory);
     for (uint64_t s = 0; s < count; s += 1)
     {
         const uint32_t pieces = 1 + (uint32_t)(parse_test_random(&state) % 300);
         const size_t length = parse_test_stream(text, sizeof(text), &state, pieces, s % 2 == 1);
-        parse_test_write(path, text, length);
+        // From memory, under the name its file would have (parse_test_check_unit).
         ParseTestOutcome ours;
-        const uint32_t differences = parse_test_check_file(path, options, &ours, &tally);
+        const uint32_t differences = parse_test_check_unit(&units, path, text, length, options, &ours, &tally);
         rejected += ours.errors != 0;
         if (differences != 0)
         {
@@ -3441,12 +3538,12 @@ static uint32_t parse_test_streams(uint64_t count, uint64_t seed, const PPOption
             {
                 char kept[4300];
                 snprintf(kept, sizeof(kept), "%s/stream_%llu.c", directory, (unsigned long long)s);
-                rename(path, kept);
+                parse_test_write(kept, text, length);
                 printf("    kept as %s\n", kept);
             }
         }
     }
-    remove(path);
+    parse_test_units_release(&units);
     printf("streams: %llu random streams (half with balanced brackets), %llu rejected, %u where the paths or a kernel and its twin differ\n", (unsigned long long)count,
            (unsigned long long)rejected, failures);
     return failures;
@@ -3662,6 +3759,7 @@ static uint32_t parse_test_alignments(const char* file, const PPOptions* options
 {
     uint32_t failures = 0;
     ParseTestKernelTally tally = { 0 };
+    static ParseTestUnits units;
     uint32_t inputs = 0;
     char path[4200];
     snprintf(path, sizeof(path), "%s/aligned.c", directory);
@@ -3685,16 +3783,15 @@ static uint32_t parse_test_alignments(const char* file, const PPOptions* options
                 text[2 * k + 1] = ' ';
             }
             memcpy(text + 2 * shift, source, length);
-            parse_test_write(path, text, 2 * shift + length);
+            // From memory, under the name its file would have: nothing is written (parse_test_check_unit).
             ParseTestOutcome ours;
-            const PPOptions* used = i < snippets ? &plain : &plain;
-            failures += parse_test_check_file(path, used, &ours, &tally) != 0;
+            failures += parse_test_check_unit(&units, path, text, 2 * shift + length, &plain, &ours, &tally) != 0;
             inputs += 1;
         }
         free(text);
     }
     free(file_text);
-    remove(path);
+    parse_test_units_release(&units);
     printf("alignments: %u inputs (the snippets%s at 64 alignments), %u where the paths or a kernel and its twin differ\n", inputs, file != 0 ? " and the file" : "",
            failures);
     return failures;
@@ -3708,6 +3805,7 @@ static uint32_t parse_test_nesting(const PPOptions* options, const char* directo
 {
     uint32_t failures = 0;
     ParseTestKernelTally tally = { 0 };
+    static ParseTestUnits units;
     enum { DEPTH = 100000 };
     static const char* const shapes[][4] =
     {
@@ -3750,7 +3848,7 @@ static uint32_t parse_test_nesting(const PPOptions* options, const char* directo
         const int length = snprintf(text, inner_length + 256, shapes[s][3], inner);
         parse_test_write(path, text, (size_t)length);
         ParseTestOutcome ours;
-        const uint32_t differences = parse_test_check_file(path, options, &ours, &tally);
+        const uint32_t differences = parse_test_check_file(&units, path, options, &ours, &tally);
         if (differences != 0)
         {
             printf("nesting: the %s...%s shape differs\n", shapes[s][0], shapes[s][2]);
@@ -3760,6 +3858,7 @@ static uint32_t parse_test_nesting(const PPOptions* options, const char* directo
         free(inner);
         free(text);
     }
+    parse_test_units_release(&units);
     remove(path);
     return failures;
 }

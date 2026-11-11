@@ -94,6 +94,66 @@ static const CheckDriverDefaultWarningFixture check_driver_type_sugar_fixtures[]
         .notes = 2,
     },
     {
+        // A qualifier written again beside a qualified typedef (check_input_typedef_sugar) prints over its name, as
+        // clang's qualifiers over a typedef's sugar do (`'const CI[1]' (aka 'const int[1]')`); a typedef of fewer
+        // qualifiers than its level's names it under the others (`'volatile CI[2]'`).
+        .name = "qualifiers written again over a qualified typedef",
+        .source = "typedef const int CI;\n"
+                  "typedef volatile int VI;\n"
+                  "typedef unsigned U;\n"
+                  "struct s { const CI m; CI n; };\n"
+                  "void f(const CI y, volatile U u, struct s *ps)\n"
+                  "{\n"
+                  "    const CI twice[1] = { 1 };\n"
+                  "    twice++;\n"
+                  "    const CI one = 1;\n"
+                  "    one = 2;\n"
+                  "    CI const after[2] = { 1 };\n"
+                  "    after++;\n"
+                  "    volatile CI mixed[2] = { 0 };\n"
+                  "    mixed++;\n"
+                  "    const VI cv[2] = { 0 };\n"
+                  "    cv++;\n"
+                  "    static const CI s2[2][3];\n"
+                  "    s2++;\n"
+                  "    const CI *p = 0;\n"
+                  "    p();\n"
+                  "    if (y < u) {}\n"
+                  "    if (ps->m < u) {}\n"
+                  "    ps->m();\n"
+                  "    ps->n();\n"
+                  "    const U a = 1, b = 2;\n"
+                  "    if (a + b < y) {}\n"
+                  "}\n",
+        .options = { "-Wsign-compare" },
+        .warnings = 3,
+        .errors = 9,
+        .notes = 1,
+    },
+    {
+        // A format argument prints its type as clang's lvalue conversion leaves it (check_common_format_value): without
+        // its top-level qualifiers, so a typedef that holds them itself prints desugared (`CI`'s `'int'`), and an array
+        // decays to a pointer to its qualified element (`'const int *'`).
+        .name = "format arguments' value types",
+        .source = "int printf(const char *, ...);\n"
+                  "typedef const int CI;\n"
+                  "typedef int I;\n"
+                  "typedef const char *CS;\n"
+                  "const int g = 1;\n"
+                  "const I gi = 2;\n"
+                  "CI gc = 3;\n"
+                  "struct s { const I m; CI n; const int k; };\n"
+                  "void f(const int l, const I x, CI y, struct s t, const CS q, const I *pi, volatile I vi)\n"
+                  "{\n"
+                  "    printf(\"%s %s %s %s %s\\n\", g, gi, gc, l, x);\n"
+                  "    printf(\"%s %s %s %s %d %d\\n\", y, t.m, t.n, t.k, q, pi);\n"
+                  "    printf(\"%s %s\\n\", vi, *pi);\n"
+                  "    const int a[2] = { 0 };\n"
+                  "    printf(\"%d\\n\", a);\n"
+                  "}\n",
+        .warnings = 14,
+    },
+    {
         // A target address space one macro writes throughout the unit prints by the macro (check_driver_space_macros,
         // clang's MacroQualifiedType): before its level, with that level's other qualifiers after its specifier; a
         // function-like macro by its invocation, nested macros by the outermost; a typedef's a.k.a. spells it out.
@@ -242,6 +302,35 @@ static const CheckDriverDefaultWarningFixture check_driver_type_sugar_fixtures[]
                   "    char *h = kw;\n"
                   "}\n",
         .errors = 5,
+    },
+    {
+        // A null pointer constant argument's warning prints its parameter's type with the typedef the callee's declaration
+        // writes (#1100, check_input_parameter_spelling): a function's, a function pointer object's (through `*`), its
+        // typedef'd function type's and a member's own parameter list; a variadic argument has none.
+        .name = "call arguments' parameter typedefs in null pointer warnings",
+        .source = "typedef struct N { int x; } N;\n"
+                  "typedef N *NP;\n"
+                  "typedef int *IP;\n"
+                  "typedef void F(N *);\n"
+                  "void a(const N *q);\n"
+                  "void b(NP);\n"
+                  "void h(int x, IP p, N *const r);\n"
+                  "void e(N *q[]);\n"
+                  "void f(int n, N *(*g)(void), NP const r);\n"
+                  "void d(int, ...);\n"
+                  "void (*fp)(N *);\n"
+                  "F *gp;\n"
+                  "struct S { void (*m)(N *); } s;\n"
+                  "static int z = sizeof(a(1-1), 0);\n"
+                  "int main(void)\n"
+                  "{\n"
+                  "    a(1-1); b(1-1); h(0, 1-1, 1-1); e(1-1); f(0, 1-1, 1-1); d(1, 1-1);\n"
+                  "    (a)(1-1); fp(1-1); (*fp)(1-1); gp(1-1); s.m(1-1);\n"
+                  "    void (*lp)(int, N *) = 0;\n"
+                  "    lp(0, 1-1);\n"
+                  "    return 0;\n"
+                  "}\n",
+        .warnings = 13,
     },
 };
 
