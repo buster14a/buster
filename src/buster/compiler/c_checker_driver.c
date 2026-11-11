@@ -322,6 +322,14 @@ static void check_driver_attribute_argument(const Parser* parser, const Preproce
         case CHECK_ARGUMENT_TYPE_TAG_FLAG:
             snprintf(text, capacity, "invalid comparison flag '%.*s'; use 'layout_compatible' or 'must_be_null'", (int)literal.length, literal.pointer);
             break;
+        case CHECK_ARGUMENT_OBJC_CLASS: snprintf(text, capacity, "parameter of '%s' attribute must be a single name of an Objective-C class", parsed); break;
+        case CHECK_ARGUMENT_OBJC_TYPEDEF_ID: snprintf(text, capacity, "parameter of '%s' attribute must be 'id' when used on a typedef", parsed); break;
+        case CHECK_ARGUMENT_OBJC_TYPEDEF_POINTER: snprintf(text, capacity, "'objc_bridge(id)' is only allowed on structs and typedefs of void pointers"); break;
+        case CHECK_ARGUMENT_OBJC_RELATED_CLASS: snprintf(text, capacity, "expected a related Objective-C class name, e.g., 'NSColor'"); break;
+        case CHECK_ARGUMENT_OBJC_RELATED_SELECTOR:
+            snprintf(text, capacity, "expected a class method selector with single argument, e.g., 'colorWithCGColor:'");
+            break;
+        case CHECK_ARGUMENT_EXPECTED_COMMA: snprintf(text, capacity, "expected ','"); break;
         case CHECK_ARGUMENT_TYPE_TAG_INITIALIZER:
             snprintf(text, capacity, "'type_tag_for_datatype' attribute requires the initializer to be an integer constant expression");
             break;

@@ -999,6 +999,19 @@ typedef enum CheckAttributeArgumentError
     CHECK_ARGUMENT_TYPE_TAG_IDENTIFIER,
     CHECK_ARGUMENT_TYPE_TAG_FLAG,
     CHECK_ARGUMENT_TYPE_TAG_INITIALIZER,
+    // Objective-C's bridges' (#1447, check_input_attribute_objc_bridge): objc_bridge's, objc_bridge_mutable's and
+    // objc_bridge_related's first argument of no identifier, "parameter of 'X' attribute must be a single name of an
+    // Objective-C class", at the declaration's first token; objc_bridge's on a typedef, "parameter of 'X' attribute must be
+    // 'id' when used on a typedef" and, of a type of no pointer to void, "'objc_bridge(id)' is only allowed on structs and
+    // typedefs of void pointers", at the attribute. objc_bridge_related's parser's (check_input_objc_bridge_related_parse):
+    // "expected a related Objective-C class name, e.g., 'NSColor'", "expected a class method selector with single argument,
+    // e.g., 'colorWithCGColor:'" and "expected ','", at the token.
+    CHECK_ARGUMENT_OBJC_CLASS,
+    CHECK_ARGUMENT_OBJC_TYPEDEF_ID,
+    CHECK_ARGUMENT_OBJC_TYPEDEF_POINTER,
+    CHECK_ARGUMENT_OBJC_RELATED_CLASS,
+    CHECK_ARGUMENT_OBJC_RELATED_SELECTOR,
+    CHECK_ARGUMENT_EXPECTED_COMMA,
     CHECK_ARGUMENT_COUNT,
 } CheckAttributeArgumentError;
 
@@ -2914,6 +2927,7 @@ static bool check_input_type_tag_rule(String8 name)
 static uint32_t check_input_availability_parse(CheckInputReader* reader, CheckInputAttributes* attributes, CheckInputAttribute* attribute);
 static uint32_t check_input_external_source_parse(CheckInputReader* reader, CheckInputAttributes* attributes, CheckInputAttribute* attribute);
 static uint32_t check_input_type_tag_parse(CheckInputReader* reader, CheckInputAttributes* attributes, CheckInputAttribute* attribute);
+static uint32_t check_input_objc_bridge_related_parse(CheckInputReader* reader, CheckInputAttributes* attributes, CheckInputAttribute* attribute);
 static bool check_input_type_tag_handled(CheckInputReader* reader, CheckInputAttributes* attributes, CheckInputAttribute* attribute, uint32_t declaration, TypeId type);
 static bool check_input_type_tag_declaration(CheckInputReader* reader, CheckInputAttributes* attributes, uint32_t name, TypeId type, uint32_t previous,
                                              uint32_t initializer);
@@ -2968,12 +2982,13 @@ static bool check_input_attribute_ignored_lists(CheckInputReader* reader, uint32
                 const uint32_t strings = row != NULL ? row->strings : 0;
                 const bool typed = (flags & BUSTER_CHECK_ARGUMENTS_TYPE) != 0 || (alignas && arguments_first < arguments_end &&
                                                                                  check_constant_type_start(parser, arguments_first));
-                // availability's, external_source_symbol's and type_tag_for_datatype's arguments, which clang's parser reads its
-                // own way (#1447).
+                // availability's, external_source_symbol's, type_tag_for_datatype's and objc_bridge_related's arguments, which
+                // clang's parser reads its own way (#1447).
                 const String8 spelled = known && argued ? check_input_attribute_name(reader, parser->tokens.names[name]) : (String8){ 0 };
                 const bool availability = check_input_attribute_equal(spelled, "availability");
                 const bool type_tag = check_input_attribute_equal(spelled, "type_tag_for_datatype");
-                const bool custom = availability || type_tag || check_input_attribute_equal(spelled, "external_source_symbol");
+                const bool related = check_input_attribute_equal(spelled, "objc_bridge_related");
+                const bool custom = availability || type_tag || related || check_input_attribute_equal(spelled, "external_source_symbol");
                 if (pass == 0 && valid && custom)
                 {
                     CheckInputAttributes holder = { 0 };
@@ -2986,7 +3001,8 @@ static bool check_input_attribute_ignored_lists(CheckInputReader* reader, uint32
                         .argument_end = arguments_end,
                     };
                     valid = (availability ? check_input_availability_parse(reader, &holder, &item) :
-                             type_tag ? check_input_type_tag_parse(reader, &holder, &item) : check_input_external_source_parse(reader, &holder, &item)) !=
+                             type_tag ? check_input_type_tag_parse(reader, &holder, &item) :
+                             related ? check_input_objc_bridge_related_parse(reader, &holder, &item) : check_input_external_source_parse(reader, &holder, &item)) !=
                             BUSTER_CHECK_CUSTOM_ERROR;
                 }
                 uint32_t index = 0;
@@ -3624,7 +3640,7 @@ static bool check_input_attribute_generic(String8 name, const CheckInputFactRow*
         // Its resolved typedef uses are checked after expression reading, including constant-only type queries.
         "available_only_in_default_eval_method",
         "btf_decl_tag", "randomize_layout", "no_randomize_layout", "objc_boxable", "objc_bridge_mutable",
-        "release_handle", "use_handle", "suppress", "swift_bridge", "unsafe_buffer_usage", "amdgpu_max_num_work_groups",
+        "objc_bridge", "objc_bridge_related", "release_handle", "use_handle", "suppress", "swift_bridge", "unsafe_buffer_usage", "amdgpu_max_num_work_groups",
         // The retain-ownership attributes, whose handlers' checks are check_input_attribute_ownership's.
         "cf_consumed", "ns_consumed", "os_consumed", "cf_returns_retained", "cf_returns_not_retained", "ns_returns_retained",
         "ns_returns_not_retained", "ns_returns_autoreleased", "os_returns_retained", "os_returns_not_retained",
@@ -4147,9 +4163,12 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
         const bool external_source = valid && known && custom && parenthesized && check_input_attribute_equal(name, "external_source_symbol");
         // type_tag_for_datatype's kind, type name and flags (#1447, check_input_type_tag_parse) too.
         const bool type_tag = valid && known && custom && parenthesized && check_input_attribute_equal(name, "type_tag_for_datatype");
+        // objc_bridge_related's class and selectors (#1447, check_input_objc_bridge_related_parse) too.
+        const bool related = valid && known && custom && parenthesized && check_input_attribute_equal(name, "objc_bridge_related");
         const uint32_t custom_parse = availability ? check_input_availability_parse(reader, attributes, &attribute) :
                                       external_source ? check_input_external_source_parse(reader, attributes, &attribute) :
-                                      type_tag ? check_input_type_tag_parse(reader, attributes, &attribute) : BUSTER_CHECK_CUSTOM_KEPT;
+                                      type_tag ? check_input_type_tag_parse(reader, attributes, &attribute) :
+                                      related ? check_input_objc_bridge_related_parse(reader, attributes, &attribute) : BUSTER_CHECK_CUSTOM_KEPT;
         valid &= custom_parse != BUSTER_CHECK_CUSTOM_ERROR;
         const bool dropped = custom_parse == BUSTER_CHECK_CUSTOM_DROPPED;
         // A type argument's (ParseTypeName's): an identifier that names no type is "unknown type name"; any other start of
@@ -7352,6 +7371,48 @@ static bool check_input_modular_same(CheckInputReader* reader, const CheckInputA
 static bool check_input_attribute_diagnose_builtin(CheckInputReader* reader, CheckInputAttributes* attributes, CheckInputAttribute* attribute, TypeId function,
                                                    uint32_t name);
 
+// Objective-C's bridges' handlers (#1447, SemaObjC's handleBridgeAttr, handleBridgeMutableAttr and handleBridgeRelatedAttr),
+// past their subjects and counts, which change nothing in C: a first argument of no identifier (an expression, or none of
+// objc_bridge_related without parentheses, whose custom parsing skips the count) is clang's error at the declaration's
+// first token, as clang's Decl::getBeginLoc gives it (a tag's keyword, a typedef's first token); on a typedef objc_bridge's
+// identifier must be `id`, as written, and its type a pointer to void, qualified or not, each clang's error at the
+// attribute. Whether the declaration goes on.
+static bool check_input_attribute_objc_bridge(CheckInputReader* reader, CheckInputAttributes* attributes, CheckInputAttribute* attribute, uint32_t declaration,
+                                              TypeId type, uint32_t begin)
+{
+    const Parser* parser = reader->parser;
+    const TypeTable* types = reader->types;
+    const uint32_t argument = attribute->argument_first;
+    const bool identifier = attribute->argument_count != 0 && argument < attribute->argument_end && parser->tokens.kinds[argument] == PARSE_KIND_IDENTIFIER;
+    const bool bridge = check_input_attribute_equal(check_input_attribute_name(reader, attribute->name), "objc_bridge");
+    const bool on_typedef = bridge && identifier && (declaration & BUSTER_CHECK_SUBJECT_TYPEDEF) != 0;
+    // (As written: clang's isStr("id"), which a keyword's underscores don't pass.)
+    const uint32_t word = on_typedef ? parser->tokens.names[argument] : 0;
+    const bool id = word != 0 && intern_length(reader->pp->table, word) == 2 && memcmp(intern_bytes(reader->pp->table, word), "id", 2) == 0;
+    const TypeId bare = on_typedef && type != 0 ? type_unqualified(type_strip_aligned(types, type)) : 0;
+    const bool pointer = bare != 0 && type_kind(types, bare) == BUSTER_TYPE_KIND_POINTER;
+    const TypeId pointee = pointer ? type_unqualified(type_strip_aligned(types, type_element(types, bare))) : 0;
+    const bool void_pointer = pointee != 0 && type_kind(types, pointee) == BUSTER_TYPE_KIND_VOID;
+    bool valid = true;
+    if (!identifier)
+    {
+        const uint32_t first = reader->attribute_declaration != 0 ? reader->attribute_declaration - 1 : begin;
+        check_input_attribute_argument_error(reader, attributes, attribute, first, CHECK_ARGUMENT_OBJC_CLASS, 0);
+        valid = false;
+    }
+    else if (on_typedef && !id)
+    {
+        check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_OBJC_TYPEDEF_ID, 0);
+        valid = false;
+    }
+    else if (on_typedef && !void_pointer)
+    {
+        check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_OBJC_TYPEDEF_POINTER, 0);
+        valid = false;
+    }
+    return valid;
+}
+
 // clang's checks-only attributes' handlers (#1447), past their subjects and counts: enforce_tcb's and enforce_tcb_leaf's
 // TCB, which no earlier attribute of the declaration has of the other kind (err_tcb_conflicting_attributes, at the later);
 // callback's (check_input_attribute_callback), swift_async's (check_input_attribute_swift_async) and diagnose_as_builtin's
@@ -7401,6 +7462,11 @@ static bool check_input_attribute_checks(CheckInputReader* reader, CheckInputAtt
         const uint32_t first = reader->attribute_declaration != 0 ? reader->attribute_declaration - 1 : begin;
         check_input_attribute_argument_error(reader, attributes, attribute, first, CHECK_ARGUMENT_OBJC_VARIABLES, 0);
         valid = false;
+    }
+    else if (check_input_attribute_equal(spelled, "objc_bridge") || check_input_attribute_equal(spelled, "objc_bridge_mutable") ||
+             check_input_attribute_equal(spelled, "objc_bridge_related"))
+    {
+        valid = check_input_attribute_objc_bridge(reader, attributes, attribute, declaration, type, begin);
     }
     else if (check_input_attribute_equal(spelled, "callback") && attribute->argument_count == 0)
     {

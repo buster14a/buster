@@ -7959,9 +7959,39 @@ arguments against the function. The checker now gives these as clang does.
     marks (see the floating-point pragmas above);
   - and these, whose handlers change nothing in C past their subjects,
     counts and arguments' kinds: `btf_decl_tag`, `randomize_layout` and `no_randomize_layout` (without
-    `-frandomize-layout-seed`), `objc_boxable`, `objc_bridge_mutable`,
+    `-frandomize-layout-seed`), `objc_boxable`,
     Fuchsia's `use_handle` and `release_handle`, `suppress`, `swift_bridge`,
-    `unsafe_buffer_usage` and `amdgpu_max_num_work_groups`.
+    `unsafe_buffer_usage` and `amdgpu_max_num_work_groups`;
+  - Objective-C's bridges, `objc_bridge`, `objc_bridge_mutable` and
+    `objc_bridge_related` (#1447), which change nothing in C past their
+    handlers' checks (`check_input_attribute_objc_bridge`): a first argument
+    that is no identifier (an expression, or no argument of
+    `objc_bridge_related` without parentheses, whose custom parsing skips the
+    count) is "parameter of 'X' attribute must be a single name of an
+    Objective-C class" at the declaration's first token (a tag's keyword, a
+    typedef's first token); on a typedef `objc_bridge`'s identifier must be
+    `id` as written ("parameter of 'X' attribute must be 'id' when used on a
+    typedef") and its type a pointer to `void` ("'objc_bridge(id)' is only
+    allowed on structs and typedefs of void pointers"), both at the
+    attribute. A later argument is an expression whose names must name
+    something, as for any generic attribute, a tag's too ("use of undeclared
+    identifier", before the count's error). `objc_bridge_related`'s arguments
+    are read as clang's ParseObjCBridgeRelatedAttribute reads them
+    (`check_input_objc_bridge_related_parse`; the parser leaves them a
+    balanced run of tokens, `parse_scalar_custom_attribute`): a class's
+    identifier ("expected a related Objective-C class name, e.g.,
+    'NSColor'"), `,` (expected past the class), an optional selector of an
+    identifier and a `:` (not half of a `::`: "expected a class method selector
+    with single argument, e.g., 'colorWithCGColor:'"), `,` ("expected ','" at
+    the token, or the selector's error at a `:`), an optional identifier
+    ("expected ')'" at another token, without a note) and the `)` ("expected
+    ')'" with its note). Its C23 spelling with arguments, like the other
+    attributes clang's ParseClangAttributeArgs reads its own way
+    (`availability`, `external_source_symbol`, `type_tag_for_datatype`), is
+    located at its name rather than its scope in every report
+    (`check_diagnostic_custom_attribute_name`). `test-checker-driver`
+    (`c_check_objc_bridge_driver_test.c`) compares each unit's whole output
+    with clang's, by both paths, in GNU C17 and C23.
 
   Every attribute's arguments are read first as clang's parser reads them,
   by their kinds (`check_input_arguments_row`, from
@@ -8690,11 +8720,10 @@ arguments against the function. The checker now gives these as clang does.
   guide](object-writer-and-linker.md)'s "Patchable function entries".
 
   The rest stay refused by name, where they apply: `format_matches`,
-  `cfi_salt`, `objc_bridge`, `objc_bridge_related`, `swift_name`,
-  `swift_async_name`, `swift_error`, `swift_async_error`, `swift_newtype` and
-  `swift_wrapper` in either syntax, and the C23 spellings of `objc_gc`,
-  `objc_ownership`, `address_space` and the OpenCL spaces, and of
-  `annotate_type`. Recognizing their names does not supply their handlers.
+  `cfi_salt`, `swift_name`, `swift_async_name`, `swift_error`,
+  `swift_async_error`, `swift_newtype` and `swift_wrapper` in either syntax,
+  and the C23 spellings of `objc_gc` and `objc_ownership`. Recognizing their
+  names does not supply their handlers.
 - **Type arguments.** The attributes clang's `attributeIsTypeArgAttr` names
   (`preferred_type`, `vec_type_hint`, `iboutletcollection`, `preferred_name`,
   and C++'s `Owner`, `Pointer`, `contained_type` and
