@@ -114,13 +114,24 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+      # The draw's script from this commit through git, as the row's jobs take it, not the REST API (#2309).
+      - name: Fetch the vector draw's script from this commit
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ github.sha }}
+          path: .vector-draw-script
+          persist-credentials: false
+          sparse-checkout: tools/ci/vector-draw.sh
+          sparse-checkout-cone-mode: false
+
       - name: Take the item the collector assigns, or nothing
         env:
           GH_TOKEN: ${{ github.token }}
           VERDICT: ${{ steps.wait.outputs.verdict }}
           CONTROL: ${{ steps.control.outcome }}
         run: |
-          gh api -H 'Accept: application/vnd.github.raw' "repos/$GITHUB_REPOSITORY/contents/tools/ci/vector-draw.sh?ref=$GITHUB_SHA" > "$RUNNER_TEMP/vector-draw.sh"
+          cp -- "$GITHUB_WORKSPACE/.vector-draw-script/tools/ci/vector-draw.sh" "$RUNNER_TEMP/vector-draw.sh"
+          rm -rf -- "$GITHUB_WORKSPACE/.vector-draw-script"
           GITHUB_ENV="$RUNNER_TEMP/race/env" bash "$RUNNER_TEMP/vector-draw.sh" take 1 "$RACER" "$VERDICT" "$RUNNER_TEMP/race/record"
           {
               printf 'control\t%s\n' "$CONTROL"
@@ -150,12 +161,23 @@ jobs:
       run:
         shell: bash
     steps:
+      # The draw's script from this commit through git, as the row's jobs take it, not the REST API (#2309).
+      - name: Fetch the vector draw's script from this commit
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ github.sha }}
+          path: .vector-draw-script
+          persist-credentials: false
+          sparse-checkout: tools/ci/vector-draw.sh
+          sparse-checkout-cone-mode: false
+
       - name: Assign the race's items to its qualifying racers by rank
         id: assign
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh api -H 'Accept: application/vnd.github.raw' "repos/$GITHUB_REPOSITORY/contents/tools/ci/vector-draw.sh?ref=$GITHUB_SHA" > "$RUNNER_TEMP/vector-draw.sh"
+          cp -- "$GITHUB_WORKSPACE/.vector-draw-script/tools/ci/vector-draw.sh" "$RUNNER_TEMP/vector-draw.sh"
+          rm -rf -- "$GITHUB_WORKSPACE/.vector-draw-script"
           bash "$RUNNER_TEMP/vector-draw.sh" assign 1 16 4
           cat "$RUNNER_TEMP/vector-assignment"
 

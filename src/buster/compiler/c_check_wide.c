@@ -1190,6 +1190,209 @@ static __attribute__((noinline, cold)) bool check_wide_fold(const TypeTable* tab
     return handled;
 }
 
+static uint32_t check_wide_decimal(const TypeTable* table, const CheckValue* value, char* out, uint32_t capacity);
+
+// --- Diagnostics. ---
+
+// Whether an implicit conversion of the integer constant `value` to the integer type `target` changes it, as
+// -Wconstant-conversion reads it (c_check_common_warnings.c's check_common_conversion_changes, whose rules these are:
+// an unsigned source changes when its bits past the target's width aren't zero; a negative signed one to an unsigned
+// target only when the target's signed half can't name it; else when the target's value differs), where one of the two
+// types is past 128 bits (*involved). A _Bool target never warns here.
+static __attribute__((noinline, cold, unused)) bool check_wide_conversion_changes(const TypeTable* table, const CheckValue* value, TypeId target, bool* involved)
+{
+    uint32_t source_width = 0;
+    uint32_t target_width = 0;
+    bool source_signed = false;
+    bool target_signed = false;
+    const bool source_wide = check_wide_type(table, value->type, &source_width, &source_signed);
+    const bool target_wide = check_wide_type(table, target, &target_width, &target_signed);
+    const bool source_integer = source_wide || check_action_integer_type(table, value->type, &source_width, &source_signed);
+    const bool target_integer = target_wide || check_action_integer_type(table, target, &target_width, &target_signed);
+    const bool boolean = type_unqualified(type_strip_aligned(table, target)) == BUSTER_TYPE_BOOL;
+    *involved = (source_wide || target_wide) && source_integer && target_integer;
+    bool changes = false;
+    const uint32_t count = check_wide_count(source_width > target_width ? source_width : target_width) + 1;
+    uint64_t* original = *involved && !boolean && value->constant_kind == CHECK_CONSTANT_INTEGER ? check_wide_allocate(count) : NULL;
+    if (original != NULL && check_wide_operand(table, value, original, count))
+    {
+        const bool negative = source_signed && (original[count - 1] >> 63) != 0;
+        if (negative)
+        {
+            check_wide_negate_in_place(original, count, count * BUSTER_CHECK_WIDE_LIMB_BITS);
+        }
+        // `original` is now the magnitude; a negative one fits a signed target of tw bits up to 2^(tw - 1).
+        const uint32_t bits = check_wide_bits(original, count);
+        bool exact_power = bits != 0 && original[(bits - 1) / BUSTER_CHECK_WIDE_LIMB_BITS] == UINT64_C(1) << ((bits - 1) % BUSTER_CHECK_WIDE_LIMB_BITS);
+        for (uint32_t i = 0; exact_power && i < (bits - 1) / BUSTER_CHECK_WIDE_LIMB_BITS; i += 1)
+        {
+            exact_power = original[i] == 0;
+        }
+        const bool fits_negative = bits < target_width || (bits == target_width && exact_power);
+        if (!source_signed || !negative)
+        {
+            changes = bits > (target_signed && source_signed ? target_width - 1 : target_width);
+        }
+        else
+        {
+            changes = !fits_negative;
+        }
+    }
+    return changes;
+}
+
+// check_common_same_width's twin where either type is past 128 bits: a signed constant converted to a narrower signed
+// type that holds its bits but not its sign, 2^(tw - 1) <= value < 2^tw, which clang diagnoses at once.
+static __attribute__((noinline, cold, unused)) bool check_wide_same_width(const TypeTable* table, const CheckValue* value, TypeId target)
+{
+    uint32_t source_width = 0;
+    uint32_t target_width = 0;
+    bool source_signed = false;
+    bool target_signed = false;
+    const bool source_wide = check_wide_type(table, value->type, &source_width, &source_signed);
+    const bool target_wide = check_wide_type(table, target, &target_width, &target_signed);
+    const bool source_integer = source_wide || check_action_integer_type(table, value->type, &source_width, &source_signed);
+    const bool target_integer = target_wide || check_action_integer_type(table, target, &target_width, &target_signed);
+    const bool shape = (source_wide || target_wide) && source_integer && target_integer && source_signed && target_signed && target_width < source_width;
+    const uint32_t count = check_wide_count(source_width);
+    uint64_t* limbs = shape && value->constant_kind == CHECK_CONSTANT_INTEGER ? check_wide_allocate(count) : NULL;
+    const bool read = limbs != NULL && check_wide_operand(table, value, limbs, count);
+    // Nonnegative, and its significant bits exactly the target's width.
+    const bool result = read && !check_wide_negative(limbs, source_width, true) && check_wide_bits(limbs, count) == target_width;
+    return result;
+}
+
+// The decimal digits of an integer constant of up to 128 bits or a wide one, in `scratch`, or null.
+static __attribute__((noinline, cold, unused)) const char* check_wide_text(const TypeTable* table, const CheckValue* value, Arena* scratch)
+{
+    uint32_t width = 0;
+    bool is_signed = false;
+    char* text = NULL;
+    if (check_wide_type(table, value->type, &width, &is_signed))
+    {
+        // log10(2) < 0.30103: digits, a sign and a terminator.
+        const uint64_t capacity = (uint64_t)width * 30103u / 100000u + 3u;
+        text = BUSTER_ARENA_PUSH_ARRAY(scratch, char, capacity);
+        const uint32_t length = text != NULL ? check_wide_decimal(table, value, text, (uint32_t)capacity - 1) : 0;
+        text = length != 0 ? text : NULL;
+        if (text != NULL)
+        {
+            text[length] = 0;
+        }
+    }
+    else if (check_action_integer_type(table, value->type, &width, &is_signed))
+    {
+        const unsigned __int128 mask = check_action_mask(width);
+        const unsigned __int128 bits = value->integer & mask;
+        const bool negative = is_signed && ((bits >> (width - 1)) & 1u) != 0;
+        unsigned __int128 magnitude = negative ? (0 - bits) & mask : bits;
+        text = BUSTER_ARENA_PUSH_ARRAY(scratch, char, 48);
+        char digits[48];
+        uint32_t count = 0;
+        do
+        {
+            digits[count] = (char)('0' + (uint32_t)(magnitude % 10));
+            count += 1;
+            magnitude /= 10;
+        }
+        while (magnitude != 0);
+        uint32_t at = 0;
+        if (text != NULL && negative)
+        {
+            text[at] = '-';
+            at += 1;
+        }
+        while (text != NULL && count != 0)
+        {
+            count -= 1;
+            text[at] = digits[count];
+            at += 1;
+        }
+        if (text != NULL)
+        {
+            text[at] = 0;
+        }
+    }
+    return text;
+}
+
+// --- The alignment builtins (#1447). ---
+
+// An integer constant's shape as an alignment: negative, zero, its magnitude's significant bits and whether it is a power
+// of 2, for a value of up to 128 bits or a wide one. False when it holds no limbs.
+static __attribute__((noinline, cold, unused)) bool check_wide_alignment_shape(const TypeTable* table, const CheckValue* value, bool* negative, bool* zero,
+                                                                                uint32_t* bits, bool* power)
+{
+    uint32_t width = 0;
+    bool is_signed = false;
+    const bool wide = check_wide_type(table, value->type, &width, &is_signed);
+    const uint32_t count = check_wide_count(width);
+    uint64_t* limbs = wide && value->constant_kind == CHECK_CONSTANT_INTEGER ? check_wide_allocate(count) : NULL;
+    const bool valid = limbs != NULL && check_wide_operand(table, value, limbs, count);
+    if (valid)
+    {
+        limbs[count - 1] &= check_wide_top_mask(width);
+        *negative = check_wide_negative(limbs, width, is_signed);
+        *zero = check_wide_is_zero(limbs, count);
+        *bits = check_wide_bits(limbs, count);
+        uint32_t ones = 0;
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            ones += (uint32_t)__builtin_popcountll(limbs[i]);
+        }
+        *power = ones == 1;
+    }
+    return valid;
+}
+
+// An alignment builtin's fold of a wide constant `source` (CheckValue of its _BitInt type) by 2^`exponent`: align_down's
+// x & ~(a - 1), align_up's (x + (a - 1)) & ~(a - 1), wrapping in the source's width, as the narrow fold's, or is_aligned's
+// (x & (a - 1)) == 0 into `value`'s integer. `kind` is 0, 1 or 2 in that order. False when it holds no limbs.
+static __attribute__((noinline, cold, unused)) bool check_wide_align_fold(const TypeTable* table, const CheckValue* source, uint32_t exponent, uint32_t kind,
+                                                                          CheckValue* value)
+{
+    uint32_t width = 0;
+    bool is_signed = false;
+    const bool wide = check_wide_type(table, source->type, &width, &is_signed);
+    const uint32_t count = check_wide_count(width);
+    uint64_t* x = wide ? check_wide_allocate(count) : NULL;
+    uint64_t* mask = x != NULL ? check_wide_allocate(count) : NULL;
+    uint64_t* answer = mask != NULL ? check_wide_allocate(count) : NULL;
+    const bool valid = answer != NULL && exponent < width && check_wide_operand(table, source, x, count);
+    if (valid)
+    {
+        const CheckWideKernels kernels = { .scalar = false };
+        x[count - 1] &= check_wide_top_mask(width);
+        // a - 1: the low `exponent` bits.
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            const uint32_t low = i * BUSTER_CHECK_WIDE_LIMB_BITS;
+            mask[i] = exponent >= low + 64 ? UINT64_MAX : exponent > low ? (UINT64_C(1) << (exponent - low)) - 1 : 0;
+        }
+        if (kind == 2)
+        {
+            check_wide_bitwise(kernels, CHECK_WIDE_AND, answer, x, mask, count);
+            value->constant_kind = CHECK_CONSTANT_INTEGER;
+            value->integer = check_wide_is_zero(answer, count);
+            value->floating_storage[0] = 0;
+        }
+        else
+        {
+            if (kind == 1)
+            {
+                check_wide_add(kernels, x, x, mask, count, false, 0);
+            }
+            for (uint32_t i = 0; i < count; i += 1)
+            {
+                answer[i] = x[i] & ~mask[i];
+            }
+            answer[count - 1] &= check_wide_top_mask(width);
+            check_wide_publish(value, answer);
+        }
+    }
+    return valid;
+}
+
 // --- Printing and bytes. ---
 
 // A wide constant's decimal digits, signed as its type says, into `out` (room for `capacity` bytes, the digits without

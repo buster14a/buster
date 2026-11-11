@@ -60,13 +60,30 @@ read -r -a every_item <<< "${BUSTER_VECTOR_ITEMS:?}"
 row="(Clang 23, ${configurations[*]}, O$optimization)"
 # The interval between polls, and how long a collector waits for its candidates, a candidate for its collector and an
 # item for its configuration's product. The draws the row unrolls (draw-1 to draw-4).
-poll=${VECTOR_DRAW_POLL:-5}
+# Each poll lists the run's artifacts (and a collector's, its jobs) through the REST API, whose hourly limit the whole
+# repository shares: polls every 5 s exhausted it with many pull requests open (#2309). A failed listing (the limit,
+# for one) doubles the pause, up to poll_limit, until a listing succeeds again.
+poll=${VECTOR_DRAW_POLL:-15}
+poll_limit=${VECTOR_DRAW_POLL_LIMIT:-60}
+
+# The pause after a listing that succeeded ($1 = 0) or failed: $poll, or the last pause doubled, at most $poll_limit.
+pause=$poll
+next_pause()
+{
+    if [ "$1" -eq 0 ]; then
+        pause=$poll
+    else
+        pause=$((pause * 2))
+        [ "$pause" -le "$poll_limit" ] || pause=$poll_limit
+        [ "$pause" -ge "$poll" ] || pause=$poll
+    fi
+}
 collect_limit=${VECTOR_DRAW_COLLECT_LIMIT:-1500}
 take_limit=${VECTOR_DRAW_TAKE_LIMIT:-1800}
 product_limit=${VECTOR_DRAW_PRODUCT_LIMIT:-5400}
 # An item polls for its product less often than a draw for its assignment: it waits for a build, minutes, and a full
-# run's twelve waiting items share the repository's API rate.
-product_poll=${VECTOR_DRAW_PRODUCT_POLL:-10}
+# run's twelve waiting items share the repository's API rate. A failed listing backs off as a draw's does.
+product_poll=${VECTOR_DRAW_PRODUCT_POLL:-30}
 levels=${VECTOR_DRAW_LEVELS:-4}
 
 # On standard error, which the runner reads workflow commands from too.
@@ -211,7 +228,12 @@ assign()
     : "${GITHUB_OUTPUT:?}" "${RUNNER_TEMP:?}"
     while true; do
         polls=$((polls + 1))
-        names=$(artifact_names) || names=''
+        if names=$(artifact_names); then
+            next_pause 0
+        else
+            names=''
+            next_pause 1
+        fi
         # The items no earlier draw of this attempt assigned, the costliest first.
         taken=''
         for ((k = 1; k < level; k += 1)); do
@@ -234,7 +256,7 @@ assign()
                 "$level" "$decided" "$candidates" "$((SECONDS - start))"
             break
         fi
-        sleep "$poll"
+        sleep "$pause"
     done
     # By rank: the i-th qualifying candidate gets the i-th missing item.
     pairs=()
@@ -279,12 +301,17 @@ take()
             # The collector decides once enough candidates qualified, or all decided.
             found=''
             while [ -z "$found" ] && [ $((SECONDS - start)) -lt "$take_limit" ]; do
-                names=$(artifact_names) || names=''
+                if names=$(artifact_names); then
+                    next_pause 0
+                else
+                    names=''
+                    next_pause 1
+                fi
                 if found=$(assignment "$names" "$attempt" "$level"); then
                     found=${found:-none}
                 else
                     found=''
-                    sleep "$poll"
+                    sleep "$pause"
                 fi
             done
             item=$(awk -v candidate="$candidate" '$2 == candidate { print $1 }' <<< "$found")
@@ -346,7 +373,12 @@ product()
     : "${GITHUB_OUTPUT:?}"
     while true; do
         polls=$((polls + 1))
-        names=$(artifact_names) || names=''
+        if names=$(artifact_names); then
+            next_pause 0
+        else
+            names=''
+            next_pause 1
+        fi
         latest=$(assigning_attempt "$names")
         holder=''
         for ((level = 1; level <= levels; level += 1)); do
@@ -388,7 +420,7 @@ product()
             die "No candidate holds item $builder, which builds $configuration's product: its last draw assigned it to none. No test failed: re-run all jobs to draw again."
         fi
         [ $((SECONDS - start)) -lt "$product_limit" ] || die "no product of $configuration in $product_limit s (its builder: item $builder, ${holder:-not yet assigned})"
-        sleep "$product_poll"
+        sleep "$((pause > product_poll ? pause : product_poll))"
     done
 }
 
