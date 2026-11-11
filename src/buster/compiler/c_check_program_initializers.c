@@ -99,6 +99,9 @@ struct CheckLowerInitializers
     uint64_t extra_calls;
     uint64_t extra_arguments;
     uint64_t extra_locals;
+    // The atomic plans (CheckLowerWriter.atomics) of the nodes a dump's calls and os_log's items evaluate again, an _Atomic
+    // object's read among them, past the one each node has (#1842).
+    uint64_t extra_atomics;
 };
 
 // Pooling and aggregate COPY share the frozen unit's by-value containment facts. Top-level qualifiers remain in

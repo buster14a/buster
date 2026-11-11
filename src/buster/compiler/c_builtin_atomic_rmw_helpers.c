@@ -37,7 +37,9 @@
 // old byte wasn't 0; clear stores 0 as a legacy release does.
 // F32/F64 support is raw GNU exchange and clang's IEEE maximum and minimum (fetch_fmaximum, fetch_fmaximum_num,
 // fetch_fminimum and fetch_fminimum_num) only, the latter computed as LLVM's x86 expansion computes them
-// (cbuiltin_atomic_rmw_ieee_body): no numeric conversion, floating arithmetic or errno handling.
+// (cbuiltin_atomic_rmw_ieee_body): no numeric conversion, floating arithmetic or errno handling. A _Float16's and a
+// __bf16's (F16/BF16 formats, 2 bytes) are those maximum and minimum alone, in the integer registers
+// (cbuiltin_atomic_rmw_ieee_half_body), which also clobbers RCX and R9 to R11.
 // BOOL_BITS requires canonical 0/1 stored values and arguments; AND/OR/XOR, min/max, exchange/CAS and release preserve
 // that representation. Bool ADD/SUB/NAND and floating arithmetic/CAS/min/max are explicitly unsupported here.
 //
@@ -54,7 +56,7 @@
 #ifndef BUSTER_C_BUILTIN_ATOMIC_RMW_HELPERS_INCLUDED
 #define BUSTER_C_BUILTIN_ATOMIC_RMW_HELPERS_INCLUDED
 
-#define BUSTER_CBUILTIN_ATOMIC_RMW_RECORDS 17u
+#define BUSTER_CBUILTIN_ATOMIC_RMW_RECORDS 48u
 
 typedef enum CBuiltinAtomicRmwFormat
 {
@@ -64,6 +66,14 @@ typedef enum CBuiltinAtomicRmwFormat
     CBUILTIN_ATOMIC_RMW_F64_BITS,
     // Integer bits that min and max order as signed ones.
     CBUILTIN_ATOMIC_RMW_SIGNED_BITS,
+    // A _Float16's and a __bf16's bits for clang's IEEE maximum and minimum (#1843), as clang's code computes them for the
+    // unit's target (cbuiltin_atomic_rmw_ieee_half_body): a _Float16's NaN result quieted, but with AVX512-FP16, which
+    // computes in half precision (F16_NATIVE); a __bf16's quieted, and a denormal result flushed to zero with AVX512-BF16
+    // or AVX-NE-CONVERT, whose VCVTNEPS2BF16 does (BF16_FLUSH).
+    CBUILTIN_ATOMIC_RMW_F16_BITS,
+    CBUILTIN_ATOMIC_RMW_F16_NATIVE_BITS,
+    CBUILTIN_ATOMIC_RMW_BF16_BITS,
+    CBUILTIN_ATOMIC_RMW_BF16_FLUSH_BITS,
 } CBuiltinAtomicRmwFormat;
 
 typedef struct CBuiltinAtomicRmwHelper CBuiltinAtomicRmwHelper;
@@ -286,16 +296,126 @@ static void cbuiltin_atomic_rmw_ieee_body(CBuiltinAtomicRmwRecipe* recipe, CBuil
     }
 }
 
-static void cbuiltin_atomic_rmw_loop(CBuiltinAtomicRmwRecipe* recipe, CBuiltinId id, CBuiltinAtomicRmwOperation operation, uint32_t bytes, bool is_signed)
+// Whether a format is a 2-byte floating type's (cbuiltin_atomic_rmw_ieee_half_body).
+static bool cbuiltin_atomic_rmw_half(CBuiltinAtomicRmwFormat format)
 {
+    return format >= CBUILTIN_ATOMIC_RMW_F16_BITS && format <= CBUILTIN_ATOMIC_RMW_BF16_FLUSH_BITS;
+}
+
+// The constants of a 2-byte format: its exponent's bits all set (an infinity's), and its quiet bit.
+static uint32_t cbuiltin_atomic_rmw_half_infinity(CBuiltinAtomicRmwFormat format)
+{
+    return format == CBUILTIN_ATOMIC_RMW_F16_BITS || format == CBUILTIN_ATOMIC_RMW_F16_NATIVE_BITS ? 0x7c00u : 0x7f80u;
+}
+
+// The operand's order key and whether it is no NaN, once before the loop (cbuiltin_atomic_rmw_ieee_half_body): its bits
+// zero-extended in ESI, its key in R10D (the magnitude, negated where the sign is set, so that a signed compare orders two
+// values as their numbers and -0 equals +0), and in R11D 1 where it is no NaN, else 0.
+static void cbuiltin_atomic_rmw_ieee_half_operand(CBuiltinAtomicRmwRecipe* recipe, CBuiltinAtomicRmwFormat format)
+{
+    const uint32_t infinity = cbuiltin_atomic_rmw_half_infinity(format);
+    cbuiltin_atomic_rmw_register(recipe, X86_FORM_MOVZX_R32_RM16, X86_REGISTER_RSI, X86_REGISTER_RSI);
+    cbuiltin_atomic_rmw_register(recipe, X86_FORM_MOV_R32_RM32, X86_REGISTER_R10, X86_REGISTER_RSI);
+    cbuiltin_atomic_rmw_append(recipe, (X86Instruction){ .form = X86_FORM_AND_RM32_IMM32, .rm = X86_REGISTER_R10, .immediate = 0x7fff });
+    cbuiltin_atomic_rmw_register(recipe, X86_FORM_MOV_R32_RM32, X86_REGISTER_R11, X86_REGISTER_R10);
+    cbuiltin_atomic_rmw_append(recipe, (X86Instruction){ .form = X86_FORM_NEG_RM32, .rm = X86_REGISTER_R11 });
+    cbuiltin_atomic_rmw_append(recipe, (X86Instruction){ .form = X86_FORM_TEST_RM32_IMM32, .rm = X86_REGISTER_RSI, .immediate = 0x8000 });
+    cbuiltin_atomic_rmw_register(recipe, X86_FORM_CMOVNE_R64_RM64, X86_REGISTER_R10, X86_REGISTER_R11);
+    // No NaN: the magnitude less one past the infinity is negative, its sign bit shifted down.
+    cbuiltin_atomic_rmw_register(recipe, X86_FORM_MOV_R32_RM32, X86_REGISTER_R11, X86_REGISTER_RSI);
+    cbuiltin_atomic_rmw_append(recipe, (X86Instruction){ .form = X86_FORM_AND_RM32_IMM32, .rm = X86_REGISTER_R11, .immediate = 0x7fff });
+    cbuiltin_atomic_rmw_append(recipe, (X86Instruction){ .form = X86_FORM_SUB_RM32_IMM32, .rm = X86_REGISTER_R11, .immediate = infinity + 1 });
+    cbuiltin_atomic_rmw_append(recipe, (X86Instruction){ .form = X86_FORM_SHR_RM32_IMM8, .rm = X86_REGISTER_R11, .immediate = 31 });
+}
+
+// clang's IEEE maximum and minimum of a _Float16 or a __bf16 (#1843), in the integer registers, as its code computes them:
+// in float (but a _Float16 with AVX512-FP16, in half precision) through the expansion of cbuiltin_atomic_rmw_ieee_body,
+// whose maxss or minss takes the old value where it orders above (maximum) or below (minimum) the operand and neither is a
+// NaN, else the operand, with the same sign and NaN steps; then the conversion back, which quiets a NaN result (not
+// AVX512-FP16's, which converts none) and, through VCVTNEPS2BF16, flushes a __bf16 denormal to zero. Every result is so
+// one of the two values, its sign or quiet bit changed, which the conversions keep exactly. RAX holds the old value, ESI
+// the operand, R10D and R11D its key and that it is no NaN (cbuiltin_atomic_rmw_ieee_half_operand), RDX the result;
+// RCX the old value's key, R8D its magnitude, R9D a step's candidate. Unlike clang's code it raises no floating-point
+// exception.
+static void cbuiltin_atomic_rmw_ieee_half_body(CBuiltinAtomicRmwRecipe* recipe, CBuiltinAtomicRmwOperation operation, CBuiltinAtomicRmwFormat format)
+{
+    const bool maximum = operation == CBUILTIN_ATOMIC_RMW_FMAXIMUM || operation == CBUILTIN_ATOMIC_RMW_FMAXIMUM_NUM;
+    const bool number = operation == CBUILTIN_ATOMIC_RMW_FMAXIMUM_NUM || operation == CBUILTIN_ATOMIC_RMW_FMINIMUM_NUM;
+    const uint32_t infinity = cbuiltin_atomic_rmw_half_infinity(format);
+    const bool quiet = format != CBUILTIN_ATOMIC_RMW_F16_NATIVE_BITS;
+    const uint32_t quiet_bit = infinity == 0x7c00u ? 0x0200u : 0x0040u;
+    // The old value's magnitude and key.
+    cbuiltin_atomic_rmw_register(recipe, X86_FORM_MOV_R32_RM32, X86_REGISTER_R8, X86_REGISTER_RAX);
+    cbuiltin_atomic_rmw_append(recipe, (X86Instruction){ .form = X86_FORM_AND_RM32_IMM32, .rm = X86_REGISTER_R8, .immediate = 0x7fff });
+    cbuiltin_atomic_rmw_register(recipe, X86_FORM_MOV_R32_RM32, X86_REGISTER_RCX, X86_REGISTER_R8);
+    cbuiltin_atomic_rmw_register(recipe, X86_FORM_MOV_R32_RM32, X86_REGISTER_R9, X86_REGISTER_R8);
+    cbuiltin_atomic_rmw_append(recipe, (X86Instruction){ .form = X86_FORM_NEG_RM32, .rm = X86_REGISTER_R9 });
+    cbuiltin_atomic_rmw_append(recipe, (X86Instruction){ .form = X86_FORM_TEST_RM32_IMM32, .rm = X86_REGISTER_RAX, .immediate = 0x8000 });
+    cbuiltin_atomic_rmw_register(recipe, X86_FORM_CMOVNE_R64_RM64, X86_REGISTER_RCX, X86_REGISTER_R9);
+    // maxss or minss: the operand, but the old value where it orders above (below) it, and the operand again where either
+    // is a NaN.
+    cbuiltin_atomic_rmw_register(recipe, X86_FORM_MOV_R32_RM32, X86_REGISTER_RDX, X86_REGISTER_RSI);
+    cbuiltin_atomic_rmw_register(recipe, X86_FORM_CMP_RM32_R32, X86_REGISTER_R10, X86_REGISTER_RCX);
+    cbuiltin_atomic_rmw_register(recipe, maximum ? X86_FORM_CMOVG_R64_RM64 : X86_FORM_CMOVL_R64_RM64, X86_REGISTER_RDX, X86_REGISTER_RAX);
+    cbuiltin_atomic_rmw_append(recipe, (X86Instruction){ .form = X86_FORM_CMP_RM32_IMM32, .rm = X86_REGISTER_R8, .immediate = infinity });
+    cbuiltin_atomic_rmw_register(recipe, X86_FORM_CMOVA_R64_RM64, X86_REGISTER_RDX, X86_REGISTER_RSI);
+    cbuiltin_atomic_rmw_register(recipe, X86_FORM_TEST_RM32_R32, X86_REGISTER_R11, X86_REGISTER_R11);
+    cbuiltin_atomic_rmw_register(recipe, X86_FORM_CMOVE_R64_RM64, X86_REGISTER_RDX, X86_REGISTER_RSI);
+    // The sign: cleared where the old value's is clear (maximum), set where it is set (minimum).
+    cbuiltin_atomic_rmw_register(recipe, X86_FORM_MOV_R32_RM32, X86_REGISTER_R9, X86_REGISTER_RDX);
+    cbuiltin_atomic_rmw_append(recipe, (X86Instruction){ .form = maximum ? X86_FORM_AND_RM32_IMM32 : X86_FORM_OR_RM32_IMM32, .rm = X86_REGISTER_R9,
+                                                         .immediate = maximum ? 0x7fff : 0x8000 });
+    cbuiltin_atomic_rmw_append(recipe, (X86Instruction){ .form = X86_FORM_TEST_RM32_IMM32, .rm = X86_REGISTER_RAX, .immediate = 0x8000 });
+    cbuiltin_atomic_rmw_register(recipe, maximum ? X86_FORM_CMOVE_R64_RM64 : X86_FORM_CMOVNE_R64_RM64, X86_REGISTER_RDX, X86_REGISTER_R9);
+    // A NaN old value: itself, or in the _num forms the operand, which a NaN operand then gives way to the old value.
+    cbuiltin_atomic_rmw_append(recipe, (X86Instruction){ .form = X86_FORM_CMP_RM32_IMM32, .rm = X86_REGISTER_R8, .immediate = infinity });
+    cbuiltin_atomic_rmw_register(recipe, X86_FORM_CMOVA_R64_RM64, X86_REGISTER_RDX, number ? X86_REGISTER_RSI : X86_REGISTER_RAX);
+    if (number)
+    {
+        cbuiltin_atomic_rmw_register(recipe, X86_FORM_TEST_RM32_R32, X86_REGISTER_R11, X86_REGISTER_R11);
+        cbuiltin_atomic_rmw_register(recipe, X86_FORM_CMOVE_R64_RM64, X86_REGISTER_RDX, X86_REGISTER_RAX);
+    }
+    if (quiet)
+    {
+        // The conversion back quiets a NaN: R8D the result quieted (the old value's magnitude no longer needed), taken where
+        // the result's magnitude is past the infinity.
+        cbuiltin_atomic_rmw_register(recipe, X86_FORM_MOV_R32_RM32, X86_REGISTER_R8, X86_REGISTER_RDX);
+        cbuiltin_atomic_rmw_append(recipe, (X86Instruction){ .form = X86_FORM_OR_RM32_IMM32, .rm = X86_REGISTER_R8, .immediate = quiet_bit });
+        cbuiltin_atomic_rmw_register(recipe, X86_FORM_MOV_R32_RM32, X86_REGISTER_R9, X86_REGISTER_RDX);
+        cbuiltin_atomic_rmw_append(recipe, (X86Instruction){ .form = X86_FORM_AND_RM32_IMM32, .rm = X86_REGISTER_R9, .immediate = 0x7fff });
+        cbuiltin_atomic_rmw_append(recipe, (X86Instruction){ .form = X86_FORM_CMP_RM32_IMM32, .rm = X86_REGISTER_R9, .immediate = infinity });
+        cbuiltin_atomic_rmw_register(recipe, X86_FORM_CMOVA_R64_RM64, X86_REGISTER_RDX, X86_REGISTER_R8);
+    }
+    if (format == CBUILTIN_ATOMIC_RMW_BF16_FLUSH_BITS)
+    {
+        // VCVTNEPS2BF16 flushes a denormal (and zero's exponent) to its sign's zero.
+        cbuiltin_atomic_rmw_register(recipe, X86_FORM_MOV_R32_RM32, X86_REGISTER_R9, X86_REGISTER_RDX);
+        cbuiltin_atomic_rmw_append(recipe, (X86Instruction){ .form = X86_FORM_AND_RM32_IMM32, .rm = X86_REGISTER_R9, .immediate = 0x8000 });
+        cbuiltin_atomic_rmw_append(recipe, (X86Instruction){ .form = X86_FORM_TEST_RM32_IMM32, .rm = X86_REGISTER_RDX, .immediate = infinity });
+        cbuiltin_atomic_rmw_register(recipe, X86_FORM_CMOVE_R64_RM64, X86_REGISTER_RDX, X86_REGISTER_R9);
+    }
+}
+
+static void cbuiltin_atomic_rmw_loop(CBuiltinAtomicRmwRecipe* recipe, CBuiltinId id, CBuiltinAtomicRmwOperation operation, uint32_t bytes, CBuiltinAtomicRmwFormat format)
+{
+    const bool is_signed = format == CBUILTIN_ATOMIC_RMW_SIGNED_BITS;
+    const bool half = cbuiltin_atomic_rmw_half(format);
     cbuiltin_atomic_rmw_memory(recipe, cbuiltin_atomic_rmw_load_form(bytes), X86_REGISTER_RAX, X86_REGISTER_RDI);
-    if (cbuiltin_atomic_rmw_ieee(operation))
+    if (cbuiltin_atomic_rmw_ieee(operation) && half)
+    {
+        cbuiltin_atomic_rmw_ieee_half_operand(recipe, format);
+    }
+    else if (cbuiltin_atomic_rmw_ieee(operation))
     {
         // The operand's bits in XMM1, once.
         cbuiltin_atomic_rmw_register(recipe, bytes == 8 ? X86_FORM_MOVQ_X_RM64 : X86_FORM_MOVD_X_RM32, 1, X86_REGISTER_RSI);
     }
     recipe->target = recipe->count;
-    if (cbuiltin_atomic_rmw_ieee(operation))
+    if (cbuiltin_atomic_rmw_ieee(operation) && half)
+    {
+        cbuiltin_atomic_rmw_ieee_half_body(recipe, operation, format);
+    }
+    else if (cbuiltin_atomic_rmw_ieee(operation))
     {
         cbuiltin_atomic_rmw_ieee_body(recipe, operation, bytes);
     }
@@ -397,8 +517,9 @@ static __attribute__((unused)) CBuiltinAtomicRmwHelper cbuiltin_atomic_rmw_helpe
     const bool integer = !ieee && (format == CBUILTIN_ATOMIC_RMW_INTEGER_BITS || (ordered && format == CBUILTIN_ATOMIC_RMW_SIGNED_BITS));
     const bool boolean = !ieee && format == CBUILTIN_ATOMIC_RMW_BOOL_BITS && bytes == 1 && operation != CBUILTIN_ATOMIC_RMW_ADD &&
                          operation != CBUILTIN_ATOMIC_RMW_SUB && operation != CBUILTIN_ATOMIC_RMW_NAND;
-    const bool floating = (id == CBUILTIN_ATOMIC_EXCHANGE_N || ieee) && ((format == CBUILTIN_ATOMIC_RMW_F32_BITS && bytes == 4) ||
-                          (format == CBUILTIN_ATOMIC_RMW_F64_BITS && bytes == 8));
+    const bool floating = ((id == CBUILTIN_ATOMIC_EXCHANGE_N || ieee) && ((format == CBUILTIN_ATOMIC_RMW_F32_BITS && bytes == 4) ||
+                                                                         (format == CBUILTIN_ATOMIC_RMW_F64_BITS && bytes == 8))) ||
+                          (ieee && cbuiltin_atomic_rmw_half(format) && bytes == 2);
     // GNU's byte flag (test_and_set and clear) is of one byte, and a clear stores 0 as a legacy release does.
     const bool byte = operation == CBUILTIN_ATOMIC_RMW_TEST_AND_SET || operation == CBUILTIN_ATOMIC_RMW_CLEAR;
     const bool store = operation == CBUILTIN_ATOMIC_RMW_RELEASE || operation == CBUILTIN_ATOMIC_RMW_CLEAR;
@@ -419,7 +540,7 @@ static __attribute__((unused)) CBuiltinAtomicRmwHelper cbuiltin_atomic_rmw_helpe
         }
         else
         {
-            cbuiltin_atomic_rmw_loop(&recipe, id, operation, bytes, format == CBUILTIN_ATOMIC_RMW_SIGNED_BITS);
+            cbuiltin_atomic_rmw_loop(&recipe, id, operation, bytes, format);
         }
         cbuiltin_atomic_rmw_append(&recipe, (X86Instruction){ .form = X86_FORM_RET });
         if (recipe.full)
