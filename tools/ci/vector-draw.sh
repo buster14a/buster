@@ -192,14 +192,17 @@ attempt_jobs()
 }
 
 # Whether draw $1's collector runs in this attempt: always in the first; in a later one, only when the attempt reran
-# every job, not the failed ones alone. A job the attempt didn't rerun lists with its own earlier attempt.
+# every job, not the failed ones alone. A job the attempt didn't rerun lists in it too, with the attempt's number but
+# its own start, before the attempt's (run 43048124249's attempt 2, 2026-11-11).
 collector_runs()
 {
-    local level=$1 jobs tries
+    local level=$1 jobs tries start
     [ "$attempt" -gt 1 ] || return 0
     for tries in 1 2 3; do
-        if jobs=$(gh api --paginate "repos/${GITHUB_REPOSITORY:?}/actions/runs/${GITHUB_RUN_ID:?}/attempts/$attempt/jobs?per_page=100" \
-            --jq ".jobs[] | select(.run_attempt == $attempt) | .name"); then
+        if start=$(gh api "repos/${GITHUB_REPOSITORY:?}/actions/runs/${GITHUB_RUN_ID:?}/attempts/$attempt" --jq '.run_started_at') &&
+            [[ "$start" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z$ ]] &&
+            jobs=$(gh api --paginate "repos/${GITHUB_REPOSITORY:?}/actions/runs/${GITHUB_RUN_ID:?}/attempts/$attempt/jobs?per_page=100" \
+            --jq ".jobs[] | select(.run_attempt == $attempt and (.started_at // \"9\") >= \"$start\") | .name"); then
             grep -qF "Vector draw $level's assignment $row" <<< "$jobs" && return 0
             # A collector the attempt runs is listed from its start, with its draw's candidates; look twice more.
         fi

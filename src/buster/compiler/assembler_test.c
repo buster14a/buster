@@ -1020,6 +1020,12 @@ static void asm_test_code(AsmTest* test)
                                              6, "inline code: naked functions' Intel instructions");
     asm_test_check(test, intel.reference_count == 1 && intel.references[0].record == 4 && intel.references[0].kind == BUSTER_LINK_FIXUP_PC32,
                    "inline code: an indirect jump's RIP-relative reference", 0);
+    // A loop's and a jrcxz's branch to a label of the source's, with no sized branch between (#1839's item 4): a record
+    // whose rel8 displacement the assembler fixed, no branch of the columns', no reference.
+    const AsmCode looped = asm_test_code_pair(test, "1:\nnop\nloop 1b\njrcxz 2f\nincl %eax\n2:", 4, "inline code: loop and jrcxz to their own labels");
+    asm_test_check(test, looped.count == 4 && looped.branch_count == 0 && looped.reference_count == 0 && looped.records[1].form == X86_FORM_LOOP_REL8 &&
+                         looped.records[1].displacement == -3 && looped.records[2].form == X86_FORM_JRCXZ_REL8 && looped.records[2].displacement == 2,
+                   "inline code: loop's and jrcxz's displacements fixed to their labels", 0);
     // What it refuses: directives but the syntax's, its numeric labels and `.` but as a jmp's or jcc's target without
     // an addend, undefined numeric labels, a dword string instruction's l in Intel syntax, and what the matcher doesn't
     // take.
@@ -1028,12 +1034,12 @@ static void asm_test_code(AsmTest* test)
         ".globl x\nx: nop",
         ".section .data\n.long 1",
         ".p2align 4\nnop",
-        "loop 1f\n1:",
+        "loop 1f\njmp 2f\n2: nop\n1:",
         "call 1f\n1:",
         "jmp 1f+2\n1: nop",
         "leaq 1f(%rip), %rax\n1:",
         "leaq .(%rip), %rax",
-        "loop here\nhere:",
+        "loop here+1\nhere: nop",
         "jmp 9f",
         ".intel_syntax noprefix\nrep movsl",
         "fstp (%rax)",
@@ -1059,8 +1065,9 @@ static void asm_test_code(AsmTest* test)
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(refused); i += 1)
     {
         const AsmCode code = asm_test_code_pair(test, refused[i], -1, refused[i]);
-        // A numeric label or `.` as data or a call's target, and a loop's branch, are for the whole assembler (#1845): the
-        // failure asks for it, as a directive's does; an undefined numeric label and the matcher's refusals don't.
+        // A numeric label or `.` as data or a call's target, and a loop's branch over a branch that branch sizing sizes or with
+        // an addend, are for the whole assembler (#1845, #1839): the failure asks for it, as a
+        // directive's does; an undefined numeric label and the matcher's refusals don't.
         const bool whole = i < 10 || i + 1 == BUSTER_ARRAY_LENGTH(refused);
         asm_test_check(test, code.directive == whole, refused[i], whole ? "the template is for the whole assembler" : "the template isn't for the whole assembler");
     }

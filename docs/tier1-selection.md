@@ -1410,9 +1410,10 @@ are a call's. Its frame is a calling function's (rsp aligned at the template, no
 leaf frame), and the prologue saves the callee-saved registers it touches
 (`Tier1EmitPrepared.asm_callee`), as clang's saves `cpuid`'s rbx. The template's
 own records aren't bounded by the target's forms (as the assembler takes any
-instruction whatever `-march` says). The code's certificate leaves a function with
-a body uncertified (`asm`), as it leaves the x87's: the decoding doesn't follow a
-template's registers and branches; the allocation's certificate still covers it.
+instruction whatever `-march` says). The code's certificate (`--verify`) places
+and compares the body's records, its own branches among them, and kills the
+registers it touches ([the certificate guide](tier1-certificate.md)'s "Asm
+bodies").
 
 Registers outside `touched` hold no value across the node: the allocator gives
 values xmm0 to xmm14 alone (xmm15 is the vector class's scratch within a node,
