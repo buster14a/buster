@@ -1547,9 +1547,11 @@ typedef enum ParseGroupType
     // A cast's or a compound literal's type name, and sizeof's, typeof's and _Atomic's type name or expression.
     PARSE_GROUP_TYPE,
     PARSE_GROUP_SIZEOF,
-    // A subscript (which has an expression), and an array declarator's (which may be empty).
+    // A subscript (which has an expression), an array declarator's (which may be empty), and an array designator's
+    // (which has an assignment-expression, #1867).
     PARSE_GROUP_SUBSCRIPT,
     PARSE_GROUP_ARRAY,
+    PARSE_GROUP_DESIGNATOR,
     PARSE_GROUP_CASE,
     PARSE_GROUP_FOR,
     PARSE_GROUP_INITIALIZER,
@@ -1623,6 +1625,7 @@ typedef enum ParsePart
     X(EXPRESSION) \
     X(CASE) \
     X(SUBSCRIPT) \
+    X(ARRAY) \
     X(INITIALIZER_START) \
     X(INITIALIZER_DESIGNATOR) \
     X(INITIALIZER) \
