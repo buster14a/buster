@@ -1139,7 +1139,7 @@ struct ParseTree
 };
 
 // The spellings of the attributes whose arguments clang's parser reads its own way (parse_scalar_custom_attribute).
-#define BUSTER_PARSE_CUSTOM_ATTRIBUTES 6u
+#define BUSTER_PARSE_CUSTOM_ATTRIBUTES 8u
 
 // The bindings a parse starts from: a meaning for every IdentId, PARSE_MEANING_ORDINARY but for clang's predeclared
 // typedef names, which every parse leaves as it found them.
@@ -1150,9 +1150,10 @@ struct ParseMeanings
     uint32_t capacity;
     // The scalar parser reads attribute spellings only where they decide declaration versus statement syntax.
     const InternTable* table;
-    // availability's, external_source_symbol's and type_tag_for_datatype's names, and their keyword spellings (#1447), found
-    // once in `table` where the meanings are made (0 for a name the unit doesn't have): parse_flag_custom_attributes reads
-    // these, not the table, which a caller may have released by then (the parser benchmark's is).
+    // availability's, external_source_symbol's, type_tag_for_datatype's and objc_bridge_related's names, and their keyword
+    // spellings (#1447), found once in `table` where the meanings are made (0 for a name the unit doesn't have):
+    // parse_flag_custom_attributes reads these, not the table, which a caller may have released by then (the parser
+    // benchmark's is).
     IdentId custom_attributes[BUSTER_PARSE_CUSTOM_ATTRIBUTES];
 };
 
@@ -1558,9 +1559,11 @@ typedef enum ParseGroupType
     // A cast's or a compound literal's type name, and sizeof's, typeof's and _Atomic's type name or expression.
     PARSE_GROUP_TYPE,
     PARSE_GROUP_SIZEOF,
-    // A subscript (which has an expression), and an array declarator's (which may be empty).
+    // A subscript (which has an expression), an array declarator's (which may be empty), and an array designator's
+    // (which has an assignment-expression, #1867).
     PARSE_GROUP_SUBSCRIPT,
     PARSE_GROUP_ARRAY,
+    PARSE_GROUP_DESIGNATOR,
     PARSE_GROUP_CASE,
     PARSE_GROUP_FOR,
     PARSE_GROUP_INITIALIZER,
@@ -1634,6 +1637,7 @@ typedef enum ParsePart
     X(EXPRESSION) \
     X(CASE) \
     X(SUBSCRIPT) \
+    X(ARRAY) \
     X(INITIALIZER_START) \
     X(INITIALIZER_DESIGNATOR) \
     X(INITIALIZER) \
