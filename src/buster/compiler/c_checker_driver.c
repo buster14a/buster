@@ -3082,6 +3082,14 @@ typedef enum CheckDriverConversion
     CHECK_DRIVER_CONVERSION_INCOMPATIBLE,
 } CheckDriverConversion;
 
+// A converted node's type as check_driver_conversion_kind takes it: an lvalue's atomic type is converted to its value's,
+// and an rvalue's is kept (a cast's, #2230).
+static TypeId check_driver_conversion_source(const TypeTable* types, const CheckStream* stream, uint32_t node)
+{
+    const TypeId type = check_stream_type(stream, node);
+    return check_stream_category(stream, node) == CHECK_RVALUE ? type : type_conversion_operand(types, type);
+}
+
 static CheckDriverConversion check_driver_conversion_kind(const TypeTable* types, TypeId target, TypeId source)
 {
     const TypeId to = type_conversion_operand(types, target);
@@ -3094,7 +3102,10 @@ static CheckDriverConversion check_driver_conversion_kind(const TypeTable* types
     const bool to_function = to_kind == BUSTER_TYPE_KIND_POINTER && type_kind(types, type_conversion_operand(types, type_element(types, to))) == BUSTER_TYPE_KIND_FUNCTION;
     const bool from_function = from_kind == BUSTER_TYPE_KIND_FUNCTION ||
                                (from_kind == BUSTER_TYPE_KIND_POINTER && type_kind(types, type_conversion_operand(types, type_element(types, from))) == BUSTER_TYPE_KIND_FUNCTION);
-    return to_kind == BUSTER_TYPE_KIND_POINTER && from_integer ? CHECK_DRIVER_CONVERSION_INT_POINTER :
+    // An atomic rvalue, a cast's (#2230), converts to nothing but an atomic type, which clang words as incompatible.
+    const bool atomic = type_kind(types, type_unqualified(type_strip_aligned(types, source))) == BUSTER_TYPE_KIND_ATOMIC;
+    return atomic ? CHECK_DRIVER_CONVERSION_INCOMPATIBLE :
+           to_kind == BUSTER_TYPE_KIND_POINTER && from_integer ? CHECK_DRIVER_CONVERSION_INT_POINTER :
            to_integer && from_pointer ? CHECK_DRIVER_CONVERSION_POINTER_INT :
            to_kind == BUSTER_TYPE_KIND_POINTER && from_pointer ? (to_function && from_function ? CHECK_DRIVER_CONVERSION_FUNCTION_POINTERS : CHECK_DRIVER_CONVERSION_POINTERS) :
            CHECK_DRIVER_CONVERSION_INCOMPATIBLE;
@@ -3140,7 +3151,7 @@ static bool check_driver_report_default_error(const Parser* parser, const CheckS
         const TypeId* parameters = function != 0 && type_kind(types, function) == BUSTER_TYPE_KIND_FUNCTION ? type_parameters(types, function, &parameter_count) : NULL;
         target = parameters != NULL && index < parameter_count ? parameters[index] : 0;
     }
-    const TypeId value = source < stream->count ? check_stream_type(stream, source) : 0;
+    const TypeId value = source < stream->count ? check_driver_conversion_source(types, stream, source) : 0;
     const bool converted = incompatible && !void_return && value != 0 && target != 0 &&
                            check_driver_conversion_kind(types, target, value) != CHECK_DRIVER_CONVERSION_INCOMPATIBLE;
     *converted_source = converted ? source : BUSTER_CHECK_NONE;
@@ -3484,7 +3495,7 @@ static const char* check_driver_conversion_words(const Parser* parser, Preproces
         const String8 from = designator.length != 0 ? designator : placed_from.length != 0 ? placed_from :
                              check_driver_warning_type_sugared(parser, pp, input, types, spell, scratch, value, source_spelling, source_sugar);
         check_driver_space_restore(spell, &scope);
-        const CheckDriverConversion kind = check_driver_conversion_kind(types, target, value);
+        const CheckDriverConversion kind = check_driver_conversion_kind(types, target, check_driver_conversion_source(types, stream, source));
         const uint32_t incompatible = kind == CHECK_DRIVER_CONVERSION_INCOMPATIBLE ? 1 : 0;
         static const char* const lead[] = {
             "incompatible integer to pointer conversion ",
@@ -10227,7 +10238,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                                     check_driver_initializer_message(failure.status);
                                 place = conversion != NULL ? place : outermost ? failure.failed_declaration : failure.token;
                                 const TypeId converted = conversion != NULL && failure.failed_source != 0 && failure.failed_source - 1 < stream.count ?
-                                    check_stream_type(&stream, failure.failed_source - 1) : 0;
+                                    check_driver_conversion_source(&types, &stream, failure.failed_source - 1) : 0;
                                 const bool default_error = converted != 0 && !type_kind_is_array(type_kind(&types, type_strip_aligned(&types, failure.failed_type))) &&
                                     check_driver_conversion_kind(&types, failure.failed_type, converted) != CHECK_DRIVER_CONVERSION_INCOMPATIBLE;
                                 // (Its node plus one, CheckDriverDiagnostic.default_source.)

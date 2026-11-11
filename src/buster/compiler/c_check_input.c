@@ -10270,10 +10270,13 @@ static TypeId check_input_auto_type_merged(const TypeTable* types, TypeId declar
         if (check_input_auto_type(stripped))
         {
             // The placeholder's const and volatile, and a restrict one's restrict (its marker's bit is the others' too), are
-            // the earlier type's; an _Atomic one is an atomic type (check_input_auto_type_refused), not modeled here.
+            // the earlier type's. A plain one takes an atomic type too, and an _Atomic one only an atomic type, whose value
+            // type it merges as clang's mergeTypes merges two atomic types' (#1844): `_Atomic int r; __auto_type r = 1;`
+            // is an `_Atomic int` (check_input_auto_type_refused refuses the others).
             const TypeId marker = stripped & ~(TypeId)(BUSTER_TYPE_CONST | BUSTER_TYPE_VOLATILE);
             const uint32_t own = (qualifiers & (BUSTER_TYPE_CONST | BUSTER_TYPE_VOLATILE)) | (marker == BUSTER_CHECK_AUTO_TYPE_RESTRICT ? BUSTER_TYPE_RESTRICT : 0);
-            result = own == type_qualifiers(prior) && marker != BUSTER_CHECK_AUTO_TYPE_ATOMIC && type_kind(types, prior) != BUSTER_TYPE_KIND_ATOMIC ? previous : 0;
+            const bool atomic_match = marker != BUSTER_CHECK_AUTO_TYPE_ATOMIC || type_kind(types, prior) == BUSTER_TYPE_KIND_ATOMIC;
+            result = own == type_qualifiers(prior) && atomic_match ? previous : 0;
             walking = false;
         }
         else if (type_kind(types, stripped) == BUSTER_TYPE_KIND_POINTER && type_kind(types, prior) == BUSTER_TYPE_KIND_POINTER && qualifiers == type_qualifiers(prior))
