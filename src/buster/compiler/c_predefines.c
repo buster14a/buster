@@ -481,6 +481,33 @@ static int32_t predefines_feature_index(const char* name, size_t length)
     return result;
 }
 
+// The features a target attribute's "apxf" item stands for (#1919): clang 23's X86TargetInfo::setFeatureEnabled turns
+// "apxf" into these, -mapxf's list, which leaves cf out.
+static const uint8_t predefines_apxf_features[] = {
+    PREDEFINES_FEATURE_EGPR,
+    PREDEFINES_FEATURE_PUSH2POP2,
+    PREDEFINES_FEATURE_PPX,
+    PREDEFINES_FEATURE_NDD,
+    PREDEFINES_FEATURE_CCMP,
+    PREDEFINES_FEATURE_NF,
+    PREDEFINES_FEATURE_ZU,
+    PREDEFINES_FEATURE_JMPABS,
+};
+
+// Whether [name, name + length) is "apxf", the name a target attribute takes for APX's features (#1919).
+static bool predefines_apxf_name(const char* name, size_t length)
+{
+    return length == 4 && memcmp(name, "apxf", 4) == 0;
+}
+
+// Whether a target attribute's item names a feature clang takes there (X86TargetInfo::isValidFeatureName): one with a
+// flag, or "apxf" (#1919).
+static bool predefines_attribute_feature(const char* name, size_t length)
+{
+    const int32_t index = predefines_feature_index(name, length);
+    return (index >= 0 && predefines_features[index].flag != PREDEFINES_FLAG_NONE) || predefines_apxf_name(name, length);
+}
+
 // The index of the feature `name` (which the tables have), for the tests: the compiler's own code names a feature by its
 // index (PredefinesFeatureIndex), without a lookup (#1444).
 static __attribute__((unused)) uint32_t predefines_feature(const char* name)
@@ -3339,7 +3366,23 @@ static PredefinesFeatures predefines_apply(const PredefinesOptions* options, con
         if (!predefines_item_starts(item, item_length, "arch=") && !predefines_item_starts(item, item_length, "tune="))
         {
             const bool on = !predefines_item_starts(item, item_length, "no-");
-            const int32_t feature = on ? predefines_feature_index(item, item_length) : predefines_feature_index(item + 3, item_length - 3);
+            const char* name = on ? item : item + 3;
+            const uint32_t name_length = on ? item_length : item_length - 3;
+            const int32_t feature = predefines_feature_index(name, name_length);
+            // "apxf" turns its features on or off together, each as its own item would (#1919).
+            for (uint32_t a = 0; predefines_apxf_name(name, name_length) && a < BUSTER_ARRAY_LENGTH(predefines_apxf_features); a += 1)
+            {
+                const uint32_t apx = predefines_apxf_features[a];
+                if (on)
+                {
+                    predefines_add(&features, predefines_features[apx].implies);
+                }
+                else
+                {
+                    predefines_remove(&features, predefines_features[apx].implied_by);
+                    explicitly_off.words[apx / 64] |= 1ull << (apx % 64);
+                }
+            }
             if (feature >= 0 && on)
             {
                 predefines_add(&features, predefines_features[feature].implies);
@@ -3615,8 +3658,8 @@ static __attribute__((unused)) PredefinesTargetAttribute predefines_target_attri
         else
         {
             const bool off = predefines_item_starts(item, item_length, "no-");
-            const int32_t feature = off ? predefines_feature_index(item + 3, item_length - 3) : predefines_feature_index(item, item_length);
-            result = feature < 0 || predefines_features[feature].flag == PREDEFINES_FLAG_NONE ? PREDEFINES_TARGET_ATTRIBUTE_IGNORED : result;
+            const bool valid = off ? predefines_attribute_feature(item + 3, item_length - 3) : predefines_attribute_feature(item, item_length);
+            result = valid ? result : PREDEFINES_TARGET_ATTRIBUTE_IGNORED;
         }
     }
     if (result == PREDEFINES_TARGET_ATTRIBUTE_VERSION && name_lengths[0] != 0)

@@ -538,6 +538,19 @@ static void check_vector_member(TypeTable* table, const CheckAction* action, Che
     }
 }
 
+// `p->y` (CHECK_OP_ARROW): check_vector_member of the lvalue `*p`, which takes the pointer's own effects but none of its
+// object's flags (a register pointer's lane isn't a register's).
+static void check_vector_arrow(TypeTable* table, const CheckAction* action, CheckActionResult* result)
+{
+    const CheckValue pointer = check_action_operand(table, action, result, 0);
+    CheckAction member = *action;
+    member.operands[0] = pointer;
+    member.operands[0].type = type_element(table, type_strip_aligned(table, pointer.type));
+    member.operands[0].category = CHECK_LVALUE;
+    member.operands[0].flags &= ~(BUSTER_CHECK_REGISTER | BUSTER_CHECK_VOLATILE_PART | BUSTER_CHECK_VECTOR_DUPLICATE | BUSTER_CHECK_VECTOR_ELEMENT);
+    check_vector_member(table, &member, result);
+}
+
 static void check_vector_conditional(TypeTable* table, const CheckAction* action, CheckActionResult* result)
 {
     CheckValue condition = check_action_operand(table, action, result, 0);
@@ -668,6 +681,18 @@ static inline __attribute__((always_inline)) bool check_vector_action(TypeTable*
             if (handled)
             {
                 check_vector_member(table, action, result);
+            }
+        } break;
+        case CHECK_OP_ARROW:
+        {
+            // `p->y`: a lane of the extended vector a pointer points to, as clang's LookupMemberExpr takes it, the
+            // lvalue `(*p).y` (a vector_size vector's pointer stays a struct's or union's error).
+            const TypeId pointer = type_strip_aligned(table, action->operands[0].type);
+            handled = action->vector_member != NULL && type_kind(table, pointer) == BUSTER_TYPE_KIND_POINTER &&
+                      check_action_kind(table, type_element(table, pointer)) == BUSTER_TYPE_KIND_EXT_VECTOR;
+            if (handled)
+            {
+                check_vector_arrow(table, action, result);
             }
         } break;
         case CHECK_OP_CONDITIONAL:

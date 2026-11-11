@@ -177,7 +177,10 @@ static CheckValue check_test_float(TypeId type, long double value)
 
 static bool check_test_value_equal(const CheckValue* a, const CheckValue* b)
 {
-    const bool floating = (isnan(a->floating) && isnan(b->floating)) ||
+    // A _BitInt past 128 bits' constant points to its limbs from the floating payload: the same number from two paths
+    // has two pointers (c_check_wide.c).
+    const int32_t wide = check_wide_same(a, b);
+    const bool floating = wide >= 0 ? wide == 1 : (isnan(a->floating) && isnan(b->floating)) ||
                           (a->floating == b->floating && signbit(a->floating) == signbit(b->floating));
     const bool imaginary = (isnan(a->imaginary) && isnan(b->imaginary)) ||
                            (a->imaginary == b->imaginary && signbit(a->imaginary) == signbit(b->imaginary));
@@ -1375,7 +1378,8 @@ static __attribute__((noinline)) void check_test_literals(CheckTest* test, Arena
         { "0x7fffffffffffffffffffffffffffffffwb", 128, false, INT64_MAX, UINT64_MAX },
         { "0xffffffffffffffffffffffffffffffffuwb", 128, true, UINT64_MAX, UINT64_MAX },
         { "0xffffffffffffffffffffffffffffffffwb", 129, false, UINT64_MAX, UINT64_MAX },
-        { "340282366920938463463374607431768211456uwb", UINT32_MAX, true, 0, 0 },
+        { "340282366920938463463374607431768211456uwb", 129, true, 0, 0 },
+        { "0x8000'0000'0000'0000'0000'0000'0000'0000'0000'0000'0000'0000'0000'0000'0000'0000wb", 257, false, 0, 0 },
     };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(bit_precise); i += 1)
     {
@@ -4799,10 +4803,16 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
             2023
         },
         {
-            "a bit-precise constant past 128 bits refused",
-            "int a;\n_BitInt(129) b = 0xffffffffffffffffffffffffffffffffwb;\n",
-            true,
-            true,
+            // Their constants past 128 bits (#1447, c_check_wide.c): literals, folds, truth and conversions, and static data.
+            "bit-precise constants past 128 bits",
+            "int a;\n_BitInt(129) b = 0xffffffffffffffffffffffffffffffffwb;\n"
+            "_Static_assert(_Generic(0xffffffffffffffffffffffffffffffffwb, _BitInt(129): 1, default: 0) && _Generic(340282366920938463463374607431768211456uwb, unsigned _BitInt(129): 1, default: 0), \"t\");\n"
+            "_Static_assert((_BitInt(200))1 << 150 > 0 && ((unsigned _BitInt(300))1 << 299) >> 297 == 4 && ((_BitInt(256))1 << 255 >> 1) < 0, \"f\");\n"
+            "_Static_assert(340282366920938463463374607431768211457wb % 1000 == 457 && (int)(340282366920938463463374607431768211457wb >> 128) == 1, \"d\");\n"
+            "int c[(_BitInt(200))3];\nenum { E = (int)((_BitInt(300))-7 * ((_BitInt(300))1 << 200) / ((_BitInt(300))1 << 199)) };\n_Static_assert(E == -14, \"e\");\n"
+            "unsigned _BitInt(300) g = ~(unsigned _BitInt(300))0 / 3;\n_BitInt(1000) h = -((_BitInt(1000))1 << 900);\n",
+            false,
+            false,
             false,
             2023
         },
@@ -5404,6 +5414,14 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
         {
             "an extension vector's logic and swizzles in an inferred array",
             "typedef int e4 __attribute__((ext_vector_type(4)));\ntypedef int e2 __attribute__((ext_vector_type(2)));\ntypedef int g4 __attribute__((vector_size(16)));\ntypedef int e3 __attribute__((ext_vector_type(3)));\ntypedef int g2 __attribute__((vector_size(8)));\nint f(int n, e4 v, e4 w, e2 t, g4 x, e3 u, g2 z)\n{\n    _Static_assert(__builtin_types_compatible_p(__typeof__(!v), e4), \"not vector\");\n    _Static_assert(__builtin_types_compatible_p(__typeof__(v && w), e4), \"and vector\");\n    _Static_assert(__builtin_types_compatible_p(__typeof__(v || w), e4), \"or vector\");\n    g4 a[] = { !v, v && w, v || w, x };\n    _Static_assert(sizeof a == 4 * sizeof(g4), \"four\");\n    g4 b[] = { v.x, 2, 3, 4, x, v.s3, t.lo, !v.x, n && v.y };\n    _Static_assert(sizeof b == 3 * sizeof(g4), \"lanes braced into vectors\");\n    g4 c[] = { v.xyzw, v.wzyx, x, !n };\n    _Static_assert(sizeof c == 4 * sizeof(g4), \"two swizzled vectors, a vector, then a scalar\");\n    g2 d[] = { u.lo, u.hi, u.even, u.odd, z };\n    _Static_assert(sizeof d == 5 * sizeof(g2), \"odd lanes' halves round up\");\n    g4 e[] = { v.xy.lo, 2, 3, 4, x, v.xy.hi, v.zw.lo, v.xyz.lo.x, 0 };\n    _Static_assert(sizeof e == 3 * sizeof(g4), \"nested swizzles' lanes braced into vectors\");\n    g2 h[] = { v.xyzw.lo, z, v.wzyx.hi };\n    _Static_assert(sizeof h == 3 * sizeof(g2), \"nested swizzles' vectors whole\");\n    return a[3][0] + b[2][1] + c[3][0] + d[4][0] + e[2][0] + h[2][0];\n}\n",
+            false,
+            false
+        },
+        // An extended vector's lanes through a pointer to it (`p->y`, clang's `(*p).y`): read, stored, swizzled, in a
+        // segment's space, and typed in a file-scope query; a struct's `->` members in the same unit stay its members.
+        {
+            "an extended vector's lanes through a pointer",
+            "typedef float v4 __attribute__((ext_vector_type(4)));\ntypedef float v2 __attribute__((ext_vector_type(2)));\nstruct s { int x, a; };\n_Static_assert(__builtin_types_compatible_p(__typeof__(((v4*)0)->xy), v2), \"xy\");\nfloat f(v4* p, __seg_gs v4* g, struct s* q, float x)\n{\n    p->w = x;\n    p->xy = p->zw;\n    _Static_assert(__builtin_types_compatible_p(__typeof__(p->wzyx), v4), \"wzyx\");\n    _Static_assert(__builtin_types_compatible_p(__typeof__(g->lo), v2), \"lo\");\n    return p->y + g->s3 + q->x + q->a;\n}\n",
             false,
             false
         },
@@ -6296,6 +6314,7 @@ static CheckSparseWide check_input_attributes_from(Arena* arena, CheckInputAttri
 #include "c_check_transparent_type_test.c"
 #include "c_check_complex_test.c"
 #include "c_check_integer_extension_test.c"
+#include "c_check_wide_test.c"
 #include "c_check_sizeof_test.c"
 #include "c_check_transitions_test.c"
 #include "c_check_integer_policy_test.c"
@@ -6949,6 +6968,10 @@ static int run_checker_tests(int argc, char** argv)
             if (check_test_takes())
             {
                 check_test_integer_extensions(&test, clang);
+            }
+            if (check_test_takes())
+            {
+                check_test_wide(&test, &types.table);
             }
             if (check_test_takes())
             {
