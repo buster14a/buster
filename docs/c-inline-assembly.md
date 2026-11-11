@@ -837,10 +837,25 @@ as C's constructors'. Its CFI's frames are an `.eh_frame` atom of their own
 beside the functions' unwind table, its CIE and FDEs as the assembler makes them
 (clang's object shares one CIE between the module's assembly and its
 functions), which the direct path's `.eh_frame_hdr` indexes with the
-functions'. Refused by name, at the first file-scope statement: templates the
-assembler refuses; section groups (COMDAT), which the units' merge doesn't carry;
-and what the templates' names refuse (a label another template defines too, or
-that the unit defines, a reference to another template's `.set` symbol).
+functions'. Its section groups (COMDAT,
+`.section .text.f,"axG",@progbits,f,comdat`) are the link's groups beside
+selectany's (`check_program_emit_asm_groups`, `check_program_sections`), and
+`-c`'s object has clang's `.group` sections: their signatures (the program's
+symbol of the name, which may be C's, a section's, or for a name no symbol has,
+the local symbol in the group's section that clang's assembler makes), flags
+and members, a member's relocation section among them. One unit's direct path
+keeps every group's members, as a link of one object does; a link of several C
+units keeps each signature's first group in the command's order and drops the
+others' members, as a linker does (`check_units_select_groups`), and a mixed
+link's objects go to the linker whole. That selection keys groups by their
+signatures' global names, so in a link of several C units a group whose
+signature isn't a global symbol defined in it (a local label, a section, a name
+of its own, a symbol defined outside it) is refused by name. clang's
+`-Winline-asm` warning about a `.globl` symbol made weak ("changed binding to
+STB_WEAK") isn't modelled, as no assembler binding warning is. Refused by name,
+at the first file-scope statement: templates the assembler refuses, and what the
+templates' names refuse (a label another template defines too, or that the unit
+defines, a reference to another template's `.set` symbol).
 
 ## What the lowering refuses
 

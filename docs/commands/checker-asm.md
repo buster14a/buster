@@ -38,7 +38,10 @@ requirements. [Command index](README.md).
   runs them. A file-scope `asm`'s templates are
   assembled together by the planning (`check_program_asm_plan_file`, #619),
   their names joining the templates' (#1848), and published as atoms of their
-  sections before the functions', each in its section in `-c`'s object.
+  sections before the functions', each in its section in `-c`'s object, and
+  its COMDAT groups as the link's groups (`check_program_emit_asm_groups`),
+  which `--asm-definitions-only` compares with clang's `.group` sections and
+  links across two units both ways.
   `test-checker` runs each shape natively against clang -O0's build on both
   paths and checks each refusal by name (`c_check_program_asm_test.c`);
   its naked mask-save fixture uses all eight `kmovq` registers at the real

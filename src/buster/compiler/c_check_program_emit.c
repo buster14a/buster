@@ -56,6 +56,12 @@ struct CheckProgramCode
     AtomId* asm_atoms;
     ObjectAtomSection* asm_sections;
     uint32_t asm_atom_count;
+    // Its section groups (COMDAT, #1848), the assembler's (asm_object_groups) with the program's names, symbols and atoms,
+    // group 0 null, and each asm atom's group (0 for none), parallel to asm_atoms; check_program_sections publishes them
+    // with selectany's in the link's LinkGroups. None for a unit whose assembly makes none.
+    LinkGroup* asm_groups;
+    uint32_t* asm_atom_groups;
+    uint32_t asm_group_count;
     // GNU's retain attribute (#147): the symbols of the program whose declarations have one before their definitions, in
     // symbol order, whose definitions -c's object puts in sections of their own with SHF_GNU_RETAIN
     // (check_program_sections); none in a unit without one.
@@ -2455,6 +2461,69 @@ static bool check_program_emit_asm_unit(CheckProgramCode* result, const CheckPro
     return valid;
 }
 
+// The file-scope assembly's section groups (#1848), once check_program_emit_asm_unit published its atoms, the unit's
+// atom a at result->asm_atoms[a - 1]: each group of the assembler's (asm_object_groups) as the program's, in `output`
+// (CheckProgramCode.asm_groups), its signature the program's symbol of its name (asm_symbols, as the unit's symbols
+// map), or, for a section's name, that section's atom, or, for a name the unit has no symbol of (a group's own, as
+// `other_group` in `.section .data.x,"awG",@progbits,other_group,comdat`), none, which asks the object writer for the
+// local symbol clang's assembler makes in the group's section. The scans are scalar: only a unit whose assembly makes
+// groups takes them, and it makes a few. False for an arena without room.
+static bool check_program_emit_asm_groups(CheckProgramCode* result, const CheckProgramAsms* asms, const AsmResult* unit, const SymbolId* asm_symbols, Arena* output)
+{
+    const Link* source = &unit->link;
+    const LinkGroups* groups = &source->groups;
+    const bool grouped = groups->count > 1 && groups->atom_count == source->atoms.count && result->asm_atom_count + 1 == source->atoms.count;
+    result->asm_groups = grouped ? BUSTER_ARENA_PUSH_ARRAY(output, LinkGroup, groups->count) : 0;
+    result->asm_atom_groups = grouped ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, result->asm_atom_count) : 0;
+    bool valid = groups->count <= 1 || (result->asm_groups != 0 && result->asm_atom_groups != 0);
+    if (valid && grouped)
+    {
+        result->asm_groups[0] = (LinkGroup){ 0 };
+        for (uint32_t a = 0; a < result->asm_atom_count; a += 1)
+        {
+            result->asm_atom_groups[a] = groups->atom_groups[a + 1];
+        }
+    }
+    for (uint32_t g = 1; valid && grouped && g < groups->count; g += 1)
+    {
+        const LinkGroup group = groups->data[g];
+        const String8 spelling = group.signature != 0 ? check_asm_unit_name(unit, group.signature) : (String8){ 0 };
+        const uint32_t n = spelling.length != 0 ? check_program_emit_asm_name(asms, spelling) : BUSTER_CHECK_NONE;
+        const AtomId signature_atom = group.signature_atom != 0 && group.signature_atom < source->atoms.count ? result->asm_atoms[group.signature_atom - 1] : 0;
+        SymbolId signature = n != BUSTER_CHECK_NONE ? asm_symbols[n] : 0;
+        // A name the assembly has no symbol of may be C's (`int sig;` beside `.section ...,sig,comdat`), whose symbol is
+        // the signature, as one module's symbol is clang's; a common one stays the group's own, which no group has.
+        const bool named = signature == 0 && signature_atom == 0 && group.name != 0 && group.name < source->names.count;
+        for (SymbolId s = 1; named && signature == 0 && s < result->link.symbols.count; s += 1)
+        {
+            const NameId other = result->link.symbols.name[s];
+            const bool same = other != 0 && result->link.names.length[other] == source->names.length[group.name] &&
+                              memcmp(result->link.names.bytes[other], source->names.bytes[group.name], source->names.length[group.name]) == 0 &&
+                              (result->link.symbols.flags[s] & BUSTER_LINK_SYMBOL_TYPE) != BUSTER_LINK_SYMBOL_COMMON;
+            signature = same ? s : 0;
+        }
+        // A member's unit, the program's.
+        AtomId member = signature_atom;
+        for (uint32_t a = 0; member == 0 && a < result->asm_atom_count; a += 1)
+        {
+            member = result->asm_atom_groups[a] == g ? result->asm_atoms[a] : 0;
+        }
+        const NameId name = signature != 0 ? result->link.symbols.name[signature] :
+                            group.name != 0 && group.name < source->names.count ? link_add_name(&result->link, source->names.bytes[group.name], source->names.length[group.name]) :
+                                                                                  0;
+        valid = name != 0 && result->link.error == LINK_ERROR_NONE;
+        result->asm_groups[g] = (LinkGroup){
+            .name = name,
+            .signature = signature,
+            .signature_atom = signature != 0 ? 0 : signature_atom,
+            .unit = member != 0 ? result->link.atoms.unit[member] : 0,
+            .flags = group.flags,
+        };
+    }
+    result->asm_group_count = valid && grouped ? groups->count : 0;
+    return valid;
+}
+
 // A unit helper's unwind entry, from the frame it published (CheckProgramAsm.saved and .frame) and its length: the pushes'
 // and the reservation's transitions at the prologue, and the reservation's release and the pops' at the epilogue, with
 // the body between them unknown. `length` is the unit's entry atom's size.
@@ -4068,6 +4137,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         uint64_t entry_length = 0;
         valid = check_program_emit_asm_unit(result, asms, file_unit, asm_symbols, 0, result->asm_atoms, result->asm_sections, &result->asm_atom_count, bytes,
                                             scratch, &entry_atom, &entry_bytes, &entry_length);
+        valid = valid && check_program_emit_asm_groups(result, asms, file_unit, asm_symbols, output);
         // Its atoms' bytes are the only room it takes that the link's capacity doesn't count, as the file-scope assembly's
         // copy did before (#619): a failure is the bytes arena's.
         result->status = valid ? result->status : CHECK_PROGRAM_RESOURCE;
@@ -4746,12 +4816,16 @@ static bool check_program_sections(CheckProgramCode* code, const CheckProgram* p
         // Retained and selectany definitions (#147) need their named section or one of their own, their
         // class's section's name and its symbol's ("<section>.<name>", as LLVM names a retained global's unique section,
         // getELFSectionNameForGlobal), of its class's type and flags. Retain adds SHF_GNU_RETAIN; selectany supplies the
-        // group signature, which also makes otherwise equal explicit section names distinct between groups.
-        const uint32_t previous_groups = link->groups.count != 0 ? link->groups.count : 1;
+        // group signature, which also makes otherwise equal explicit section names distinct between groups. The
+        // file-scope assembly's groups (#1848, CheckProgramCode.asm_groups) come first, once, as its atoms do.
+        const uint32_t base_groups = link->groups.count != 0 ? link->groups.count : 1;
+        const uint32_t asm_groups = link->groups.count == 0 && code->asm_group_count > 1 ? code->asm_group_count - 1 : 0;
+        const uint32_t previous_groups = base_groups + asm_groups;
         const uint64_t group_count = (uint64_t)previous_groups + code->selectany_count;
-        LinkGroup* groups = valid && code->selectany_count != 0 && group_count < UINT32_MAX ? BUSTER_ARENA_PUSH_ARRAY(output, LinkGroup, group_count) : NULL;
+        const bool grouping = code->selectany_count != 0 || asm_groups != 0;
+        LinkGroup* groups = valid && grouping && group_count < UINT32_MAX ? BUSTER_ARENA_PUSH_ARRAY(output, LinkGroup, group_count) : NULL;
         uint32_t* memberships = groups != NULL ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, link->atoms.count) : NULL;
-        valid = valid && (code->selectany_count == 0 || (groups != NULL && memberships != NULL));
+        valid = valid && (!grouping || (groups != NULL && memberships != NULL));
         code->status = valid ? code->status : CHECK_PROGRAM_RESOURCE;
         if (valid && groups != NULL)
         {
@@ -4761,6 +4835,15 @@ static bool check_program_sections(CheckProgramCode* code, const CheckProgram* p
             {
                 memcpy(groups, link->groups.data, (uint64_t)link->groups.count * sizeof(LinkGroup));
                 memcpy(memberships, link->groups.atom_groups, (uint64_t)link->groups.atom_count * sizeof(uint32_t));
+            }
+            for (uint32_t g = 0; g < asm_groups; g += 1)
+            {
+                groups[base_groups + g] = code->asm_groups[g + 1];
+            }
+            for (uint32_t a = 0; asm_groups != 0 && a < code->asm_atom_count; a += 1)
+            {
+                const uint32_t group = code->asm_atom_groups[a];
+                memberships[code->asm_atoms[a]] = group != 0 ? base_groups + group - 1 : 0;
             }
         }
         const uint64_t unique_count = (uint64_t)code->retained_count + code->selectany_count;

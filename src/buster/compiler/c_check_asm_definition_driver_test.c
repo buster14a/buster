@@ -9,7 +9,8 @@
 // of its sections other than code, unwind tables and debug information, which the compilers' own code makes. Both
 // objects, linked by clang, and the direct path's executables of both paths print what clang's build prints. Include
 // after the driver test's ELF reader (CheckTestElf). Asm labels that name the unit's own objects (#1979) are checked here
-// too: they make one symbol of a name, which the comparison reads the same way.
+// too: they make one symbol of a name, which the comparison reads the same way. File-scope COMDAT groups (#1848) compare
+// their `.group` sections too, and link across two units (check_test_driver_asm_comdat_units).
 
 // Appends `text` to `lines` (`*used` of `capacity`): false when it doesn't fit.
 static bool check_test_asm_definition_append(char* lines, uint64_t capacity, uint64_t* used, const char* text)
@@ -50,8 +51,8 @@ static bool check_test_asm_definition_named(const char* names, const char* name)
 }
 
 // The object at `path` as the comparison reads it, into `lines`: a line per named symbol but files', sections' and the
-// assembler's temporary `.L` labels, and a line per relocation of a section other than code, unwind tables and debug
-// information, sorted. The sizes of the C functions `functions` names (words separated by spaces) are left out: their
+// assembler's temporary `.L` labels, a line per relocation of a section other than code, unwind tables and debug
+// information, and a line per section group, sorted. The sizes of the C functions `functions` names (words separated by spaces) are left out: their
 // code is each compiler's own. False when it doesn't read or fit.
 static bool check_test_asm_definition_symbols(const char* path, const char* functions, char* lines, uint64_t capacity)
 {
@@ -111,6 +112,35 @@ static bool check_test_asm_definition_symbols(const char* path, const char* func
             count += valid;
         }
     }
+    // Each section group (#1848): its signature (a symbol's name, or a section's), its flags and its members' names in
+    // their order.
+    for (uint32_t s = 1; valid && s < elf.section_count; s += 1)
+    {
+        const Elf64_Shdr* table = &elf.sections[s];
+        if (table->sh_type != SHT_GROUP)
+        {
+            continue;
+        }
+        valid = table->sh_size >= sizeof(uint32_t) && table->sh_size % sizeof(uint32_t) == 0 && check_test_elf_range(elf.file, table->sh_offset, table->sh_size);
+        const uint32_t* words = valid ? (const uint32_t*)(elf.file.pointer + table->sh_offset) : 0;
+        char line[512];
+        int length = valid ? snprintf(line, sizeof(line), "group %s flags %u:", check_test_asm_definition_target(&elf, table->sh_info), words[0]) : 0;
+        for (uint64_t w = 1; valid && w < table->sh_size / sizeof(uint32_t) && length > 0 && (size_t)length < sizeof(line); w += 1)
+        {
+            const char* member = check_test_elf_section_name(&elf, words[w]);
+            length += snprintf(line + length, sizeof(line) - (size_t)length, " %s", member != 0 ? member : "?");
+        }
+        valid = valid && length > 0 && (size_t)length + 1 < sizeof(line);
+        if (valid)
+        {
+            line[length] = '\n';
+            line[length + 1] = 0;
+        }
+        order[count] = unsorted + used;
+        valid = valid && count < 1024 && check_test_asm_definition_append(unsorted, capacity, &used, line);
+        used += valid;
+        count += valid;
+    }
     uint64_t at = 0;
     if (valid)
     {
@@ -157,6 +187,127 @@ static bool check_test_asm_definition_code_temporary(const char* path, char* fou
         arena_release(&arena);
     }
     return kept;
+}
+
+// Two units that define the same file-scope COMDAT groups (#1848), a variable's and a function's code and data, of
+// different contents, so that the program prints which unit's group the link kept: the first in the command's order, as
+// a linker keeps it. Each unit's -c object by both paths, linked by clang in both orders, runs as clang's objects do,
+// and so does the direct path's executable of both sources, on both paths and on four lanes. A group whose signature is
+// no global symbol it defines (`other_group`'s) is refused by name in a link of several units, which selects groups
+// by their signatures' names.
+static void check_test_driver_asm_comdat_units(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const char* const sources[3] = {
+        "#include <stdio.h>\n"
+        "extern int shared_value;\n"
+        "int f(void);\n"
+        "int other(void);\n"
+        "__asm__(\".section .data.shared_value,\\\"awG\\\",@progbits,shared_value,comdat\\n.globl shared_value\\n.weak shared_value\\nshared_value: .long 42\\n.text\");\n"
+        "__asm__(\".section .text.f,\\\"axG\\\",@progbits,f,comdat\\n.weak f\\n.type f,@function\\nf: movl f_data(%rip), %eax\\n\\tret\\n.size f, .-f\\n"
+        ".section .data.f_data,\\\"awG\\\",@progbits,f,comdat\\n.weak f_data\\nf_data: .long 5\\n.text\");\n"
+        "int main(void) { printf(\"%d %d %d\\n\", shared_value, f(), other()); return 0; }\n",
+        "extern int shared_value;\n"
+        "int f(void);\n"
+        "__asm__(\".section .data.shared_value,\\\"awG\\\",@progbits,shared_value,comdat\\n.globl shared_value\\n.weak shared_value\\nshared_value: .long 43\\n.text\");\n"
+        "__asm__(\".section .text.f,\\\"axG\\\",@progbits,f,comdat\\n.weak f\\n.type f,@function\\nf: movl f_data(%rip), %eax\\n\\taddl $100, %eax\\n\\tret\\n"
+        ".size f, .-f\\n.section .data.f_data,\\\"awG\\\",@progbits,f,comdat\\n.weak f_data\\nf_data: .long 6\\n.text\");\n"
+        "int other(void) { return shared_value + f(); }\n",
+        "extern int other_value;\n"
+        "__asm__(\".section .data.other_value,\\\"awG\\\",@progbits,other_group,comdat\\n.globl other_value\\n.weak other_value\\nother_value: .long 7\\n.text\");\n"
+        "int other(void) { return other_value; }\n",
+    };
+    char paths[3][512];
+    bool written = true;
+    for (uint32_t u = 0; u < 3; u += 1)
+    {
+        snprintf(paths[u], sizeof(paths[u]), "%s/asm-comdat-unit-%u.c", directory, u);
+        written = written && parse_test_write(paths[u], sources[u], strlen(sources[u]));
+    }
+    check_test_expect(test, written, "COMDAT units: the fixtures are written");
+    // -c's objects: clang's, the vector path's and the scalar path's, of the first two units.
+    char objects[3][2][512];
+    bool compiled = written;
+    for (uint32_t p = 0; written && p < 3; p += 1)
+    {
+        for (uint32_t u = 0; u < 2; u += 1)
+        {
+            snprintf(objects[p][u], sizeof(objects[p][u]), "%s/asm-comdat-unit-%u-%u.o", directory, u, p);
+            char* text = NULL;
+            char* arguments[] = { (char*)(p == 0 ? clang : executable), "-std=gnu17", "-w", "-c", paths[u], "-o", objects[p][u], p == 2 ? "--scalar" : NULL, NULL };
+            const bool built = check_test_driver_spawn(arguments, &text) == 0;
+            char description[2048];
+            snprintf(description, sizeof(description), "COMDAT units: unit %u's -c by %s: %s", u, p == 0 ? "clang" : p == 1 ? "the vector path" : "the scalar path",
+                     text != NULL ? text : "");
+            free(text);
+            check_test_expect(test, built, description);
+            compiled = compiled && built;
+        }
+    }
+    char program[512];
+    snprintf(program, sizeof(program), "%s/asm-comdat-units", directory);
+    for (uint32_t order = 0; compiled && order < 2; order += 1)
+    {
+        // clang's objects linked in this order are the reference.
+        char expected[256] = { 0 };
+        for (uint32_t p = 0; p < 3; p += 1)
+        {
+            char* text = NULL;
+            char* const link[] = { (char*)clang, objects[p][order], objects[p][1 - order], "-o", program, NULL };
+            const bool linked = check_test_driver_spawn(link, &text) == 0;
+            free(text);
+            char output[256] = { 0 };
+            const bool ran = linked && check_test_driver_capture(program, output, sizeof(output));
+            if (p == 0)
+            {
+                memcpy(expected, output, sizeof(expected));
+            }
+            char description[1024];
+            snprintf(description, sizeof(description), "COMDAT units: the %s objects linked by clang in order %u run as clang's: %s against %s",
+                     p == 0 ? "clang" : p == 1 ? "vector" : "scalar", order, output, expected);
+            check_test_expect(test, ran && expected[0] != 0 && strcmp(output, expected) == 0, description);
+            unlink(program);
+        }
+        for (uint32_t route = 0; expected[0] != 0 && route < 3; route += 1)
+        {
+            char* text = NULL;
+            char* arguments[] = { (char*)executable, "-std=gnu17", "-w", paths[order], paths[1 - order], "-o", program, route == 1 ? "--scalar" : route == 2 ? "--lanes" : NULL,
+                                  route == 2 ? "4" : NULL, NULL };
+            const bool built = check_test_driver_spawn(arguments, &text) == 0;
+            char output[256] = { 0 };
+            const bool ran = built && check_test_driver_capture(program, output, sizeof(output));
+            char description[2048];
+            snprintf(description, sizeof(description), "COMDAT units: the direct path's %s executable of both sources in order %u runs as clang's build: %s against %s%s",
+                     route == 0 ? "vector" : route == 1 ? "scalar" : "four lanes'", order, output, expected, text != NULL ? text : "");
+            free(text);
+            check_test_expect(test, ran && strcmp(output, expected) == 0, description);
+            unlink(program);
+        }
+    }
+    for (uint32_t route = 0; written && route < 2; route += 1)
+    {
+        char* text = NULL;
+        char* arguments[] = { (char*)executable, "-std=gnu17", "-w", paths[0], paths[2], "-o", program, route == 1 ? "--scalar" : NULL, NULL };
+        const int status = check_test_driver_spawn(arguments, &text);
+        char description[2048];
+        snprintf(description, sizeof(description), "COMDAT units: a group of a signature of its own is refused by name in a link of several units (%s): %s",
+                 route == 1 ? "scalar" : "vector", text != NULL ? text : "");
+        check_test_expect(test, status == 1 && text != NULL &&
+                                    strstr(text, "unsupported: file-scope assembly's section groups whose signature isn't a global symbol defined in the group") != NULL,
+                          description);
+        free(text);
+        unlink(program);
+    }
+    for (uint32_t p = 0; written && p < 3; p += 1)
+    {
+        for (uint32_t u = 0; u < 2; u += 1)
+        {
+            unlink(objects[p][u]);
+        }
+    }
+    for (uint32_t u = 0; u < 3; u += 1)
+    {
+        unlink(paths[u]);
+    }
 }
 
 static void check_test_driver_asm_definitions(CheckTest* test, const char* clang, const char* executable, const char* directory)
@@ -253,6 +404,26 @@ static void check_test_driver_asm_definitions(CheckTest* test, const char* clang
           "\\t.cfi_def_cfa_offset 16\\n\\t.cfi_offset %rbx, -16\\n\\tmovl %edi, %ebx\\n\\tcall inner\\n\\taddl %ebx, %eax\\n\\tpopq %rbx\\n"
           "\\t.cfi_def_cfa_offset 8\\n\\tret\\n.cfi_endproc\\n.size trampoline, .-trampoline\");\n"
           "int main(void) { printf(\"%d\\n\", trampoline(100)); return 0; }\n" },
+        // File-scope COMDAT groups (#1848): a weak variable that is its group's signature; a group whose signature is a
+        // name of its own, which the object makes a local symbol of; a group of a function's code and its data, with a
+        // relocation in each, as C++'s inline functions are; one whose signature is C's variable; and an empty one.
+        { "file-scope assembly's COMDAT groups", "main",
+          "#include <stdio.h>\n"
+          "int sig = 3;\n"
+          "extern int shared_value;\n"
+          "extern int other_value;\n"
+          "int f(void);\n"
+          "extern int f_data;\n"
+          "extern int (*const f_pointer)(void);\n"
+          "extern int signed_value;\n"
+          "__asm__(\".section .data.shared_value,\\\"awG\\\",@progbits,shared_value,comdat\\n.globl shared_value\\n.weak shared_value\\n"
+          "shared_value: .long 42\\n.text\");\n"
+          "__asm__(\".section .data.other_value,\\\"awG\\\",@progbits,other_group,comdat\\n.globl other_value\\n.weak other_value\\nother_value: .long 7\\n.text\");\n"
+          "__asm__(\".section .text.f,\\\"axG\\\",@progbits,f,comdat\\n.weak f\\n.type f,@function\\nf: movl f_data(%rip), %eax\\n\\tret\\n.size f, .-f\\n"
+          ".section .data.f_data,\\\"awG\\\",@progbits,f,comdat\\n.weak f_data\\nf_data: .long 5\\n.p2align 3\\n.weak f_pointer\\nf_pointer: .quad f\\n.text\");\n"
+          "__asm__(\".section .data.signed,\\\"awG\\\",@progbits,sig,comdat\\n.globl signed_value\\nsigned_value: .long 1\\n"
+          ".section .data.empty,\\\"awG\\\",@progbits,empty_group,comdat\\n.text\");\n"
+          "int main(void) { printf(\"%d %d %d %d %d %d %d\\n\", shared_value, other_value, f(), f_data, f_pointer(), sig, signed_value); return 0; }\n" },
         // Asm labels that name the unit's own objects (#1979): a declaration labelled as a later definition, two
         // labelled declarations and an identifier of one name, variables labelled as a tentative and an initialized
         // definition, and a label naming a static function; one symbol per name, as clang's module has one global.
@@ -349,6 +520,7 @@ static void check_test_driver_asm_definitions(CheckTest* test, const char* clang
         }
         unlink(path);
     }
+    check_test_driver_asm_comdat_units(test, clang, executable, directory);
     // A template's `.comm` of a name the unit defines, a tentative definition's too, stays refused by name, whatever
     // -fcommon: clang 23 has no coherent object for it. Without -fcommon its object makes C's .bss definition a common of
     // C's size at the template's alignment (an initializer's bytes are lost); with -fcommon a `.comm` of C's size and
