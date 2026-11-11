@@ -137,7 +137,7 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_CONSTEXPR_POINTER: result = "constexpr pointer initializer is not null"; break;
         case CHECK_INPUT_CONSTEXPR_REPRESENTABLE: result = "constexpr initializer is not exactly representable in the declared type"; break;
         case CHECK_INPUT_CONSTEXPR_CONTEXT: result = "constexpr can only be used in variable declarations"; break;
-        case CHECK_INPUT_WIDE_LITERAL: result = "bit-precise integer constants wider than 128 bits are not supported"; break;
+        case CHECK_INPUT_WIDE_LITERAL: result = "bit-precise integer constants wider than 8388608 bits are not supported"; break;
         case CHECK_INPUT_PRAGMA_SEMANTICS: result = "unsupported semantic pragma"; break;
         case CHECK_INPUT_FP_EVAL_USE: result = "'__FLT_EVAL_METHOD__' cannot be expanded inside a scope containing '#pragma clang fp eval_method'"; break;
         case CHECK_INPUT_FP_EVAL_TYPE: result = "type is set according to the default eval method for the translation unit"; break;
@@ -157,6 +157,7 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_LONGJMP_ONE: result = "argument to __builtin_longjmp must be a constant 1"; break;
         case CHECK_INPUT_UNKNOWN_BUILTIN: result = "use of unknown builtin"; break;
         case CHECK_INPUT_INVOKE_ARGUMENTS: result = "too few arguments to function call, expected at least 1, have 0"; break;
+        case CHECK_INPUT_BUILTIN_ARGUMENT_COUNT: result = "incorrect number of arguments"; break;
         case CHECK_INPUT_BUILTIN_NOT_CALLED: result = "builtin functions must be directly called"; break;
         case CHECK_INPUT_BUILTIN_CONFLICT: result = "conflicting types for builtin function"; break;
         case CHECK_INPUT_BUILTIN_DEFINITION: result = "definition of builtin function"; break;
@@ -446,9 +447,31 @@ static void check_driver_attribute_argument(const Parser* parser, const Preproce
             snprintf(text, capacity, "invalid application of 'sizeof' to an incomplete type %.*s", (int)literal.length, literal.pointer);
             break;
         case CHECK_ARGUMENT_EXPRESSION_CALL_COUNT:
-            snprintf(text, capacity, "too %s arguments to function call, expected %s%u, have %u", (uint32_t)value < number ? "few" : "many",
-                     value >> 32 ? "at least " : "", number, (uint32_t)value);
+        {
+            // The value: the count, the variadic bit (32) and the named only parameter's token plus 1 (from 33), whose
+            // name clang's single-argument words give (check_constant_failure_error).
+            const uint32_t parameter = (uint32_t)(value >> 33);
+            const bool variadic = ((value >> 32) & 1) != 0;
+            const bool few = (uint32_t)value < number;
+            const uint32_t name = parameter != 0 && parameter - 1 < parser->tokens.count ? parser->tokens.names[parameter - 1] : 0;
+            const int length = (int)intern_length(pp->table, name);
+            const char* bytes = (const char*)intern_bytes(pp->table, name);
+            if (name != 0 && few)
+            {
+                snprintf(text, capacity, "too few arguments to function call, %s argument '%.*s' %s", variadic ? "at least" : "single", length, bytes,
+                         variadic ? "must be specified" : "was not specified");
+            }
+            else if (name != 0)
+            {
+                snprintf(text, capacity, "too many arguments to function call, expected single argument '%.*s', have %u arguments", length, bytes, (uint32_t)value);
+            }
+            else
+            {
+                snprintf(text, capacity, "too %s arguments to function call, expected %s%u, have %u", few ? "few" : "many", variadic ? "at least " : "", number,
+                         (uint32_t)value);
+            }
             break;
+        }
         case CHECK_ARGUMENT_EXPRESSION_BINARY:
             snprintf(text, capacity, "invalid operands to binary expression (%.*s)", (int)literal.length, literal.pointer);
             break;
@@ -2049,25 +2072,59 @@ static void check_driver_x86_reports(const Parser* parser, const Parser* origina
     }
 }
 
-static void check_driver_kr_report(const Parser* parser, Preprocessor* pp, const CheckInput* input, uint32_t token, uint32_t warning)
+// A K&R warning at `place` of the call whose callee's name is `token`.
+static void check_driver_kr_report_at(const Parser* parser, Preprocessor* pp, const CheckInput* input, uint32_t token, uint32_t place, uint32_t warning)
 {
-    const CheckWarningSeverity severity = check_diagnostic_kr_severity(input, token, warning);
-    if (token < parser->tokens.count && severity != CHECK_WARNING_IGNORE)
+    const CheckWarningSeverity severity = token < parser->tokens.count ? check_diagnostic_kr_severity(input, token, warning) : CHECK_WARNING_IGNORE;
+    if (token < parser->tokens.count && place < parser->tokens.count && severity != CHECK_WARNING_IGNORE)
     {
         const PPSeverity pp_severity = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_MAPPED_FATAL :
                                        severity == CHECK_WARNING_ERROR ? PP_SEVERITY_MAPPED_ERROR : PP_SEVERITY_WARNING;
         if (warning == CHECK_WARNING_KR_TOO_FEW || warning == CHECK_WARNING_KR_TOO_MANY)
         {
             const uint32_t name = parser->tokens.names[token];
-            pp_diagnose_output(pp, pp_severity, parser->tokens.sources[token], "%s to '%.*s'",
-                               check_diagnostic_message(warning), (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
+            // These warnings have no flag of their own: -Werror's error says only that (#1994).
+            pp_diagnose_output(pp, pp_severity, parser->tokens.sources[place], "%s to '%.*s'%s",
+                               check_diagnostic_message(warning), (int)intern_length(pp->table, name), intern_bytes(pp->table, name),
+                               severity == CHECK_WARNING_ERROR ? " [-Werror]" : "");
         }
         else
         {
-            pp_diagnose_output(pp, pp_severity, parser->tokens.sources[token], "%s [%s-Wdeprecated-non-prototype]", check_diagnostic_message(warning),
+            pp_diagnose_output(pp, pp_severity, parser->tokens.sources[place], "%s [%s-Wdeprecated-non-prototype]", check_diagnostic_message(warning),
                                check_driver_warning_error_prefix(severity == CHECK_WARNING_ERROR));
         }
     }
+}
+
+// A call's K&R warning from the graph's node (#1994): at check_diagnostic_kr_call_place, its severity at the callee's
+// name, as check_driver_kr_report's. Passing arguments without a prototype names the function where the callee is a
+// function's own name (through parentheses and `&`), as clang's FDecl, and is "a function" otherwise.
+// `token` is the callee's name and `place` the warning's (the reader's records' too, check_input_kr_call).
+static void check_driver_kr_call_at(const Parser* parser, Preprocessor* pp, const CheckInput* input, uint32_t token, uint32_t place, uint32_t warning)
+{
+    const CheckWarningSeverity severity = token < parser->tokens.count ? check_diagnostic_kr_severity(input, token, warning) : CHECK_WARNING_IGNORE;
+    if (warning != CHECK_WARNING_NON_PROTOTYPE_CALL)
+    {
+        check_driver_kr_report_at(parser, pp, input, token, place, warning);
+    }
+    else if (place < parser->tokens.count && severity != CHECK_WARNING_IGNORE)
+    {
+        const PPSeverity pp_severity = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_MAPPED_FATAL :
+                                       severity == CHECK_WARNING_ERROR ? PP_SEVERITY_MAPPED_ERROR : PP_SEVERITY_WARNING;
+        const uint32_t declaration = input->declarations != NULL && token < input->token_count ? input->declarations[token] : BUSTER_CHECK_NONE;
+        const bool direct = parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER && declaration < input->token_count && input->declaration_kinds != NULL &&
+                            input->declaration_kinds[declaration] == C_BINDING_FUNCTION;
+        const uint32_t name = direct ? parser->tokens.names[token] : 0;
+        pp_diagnose_output(pp, pp_severity, parser->tokens.sources[place],
+                           "passing arguments to %s%.*s%s without a prototype is deprecated in all versions of C and is not supported in C23 [%s-Wdeprecated-non-prototype]",
+                           direct ? "'" : "a function", direct ? (int)intern_length(pp->table, name) : 0, direct ? (const char*)intern_bytes(pp->table, name) : "", direct ? "'" : "",
+                           check_driver_warning_error_prefix(severity == CHECK_WARNING_ERROR));
+    }
+}
+
+static void check_driver_kr_call(const Parser* parser, Preprocessor* pp, const CheckInput* input, uint32_t node, uint32_t warning)
+{
+    check_driver_kr_call_at(parser, pp, input, check_diagnostic_kr_call_token(input, node), check_diagnostic_kr_call_place(input, parser, node, warning), warning);
 }
 
 // Clang completes a K&R definition's warning when the function's checking does, including the lookahead past its
@@ -2101,7 +2158,8 @@ static void check_driver_kr_definition(const Parser* parser, const Parser* origi
         const uint32_t publication = check_driver_publication_position(publication_parser, pp, boundary,
                                                                        publication_parser == parser ? publication_end : pp->output.count);
         pp_diagnose_output_phase(pp, pp_severity, parser->tokens.sources[token], publication, PP_DIAGNOSTIC_LEXICAL,
-                                 "%s [-Wdeprecated-non-prototype]", check_diagnostic_message(diagnostic->warning));
+                                 "%s [%s-Wdeprecated-non-prototype]", check_diagnostic_message(diagnostic->warning),
+                                 check_driver_warning_error_prefix(severity == CHECK_WARNING_ERROR));
     }
 }
 
@@ -2213,9 +2271,14 @@ static uint32_t check_driver_pointer_spelling(const Parser* parser, const CheckI
     uint32_t spelling = 0;
     for (uint32_t steps = 0; spelling == 0 && node < graph->count && steps < graph->count; steps += 1)
     {
-        spelling = check_input_operand_type_spelling(input, parser, node);
         const CheckOp op = graph->ops[node];
-        uint32_t next = op == CHECK_OP_ADDRESS || op == CHECK_OP_DEREFERENCE || op == CHECK_OP_SUBSCRIPT ? graph->operand0[node] : BUSTER_CHECK_NONE;
+        // A member's own declarator's specifiers (#1837): its typedef or typeof (`&s.m` of a `typeof(long) m`).
+        const bool member = op == CHECK_OP_MEMBER || op == CHECK_OP_ARROW;
+        const uint32_t selected = member ? check_semantic_member_of(parser, input, stream, types, node) : 0;
+        const uint32_t declarator = selected != 0 ? check_semantic_member_token(parser, input, types, selected) : BUSTER_CHECK_NONE;
+        spelling = !member ? check_input_operand_type_spelling(input, parser, node) :
+                   declarator < input->token_count ? check_input_specifier_spelling(input, parser, declarator) : 0;
+        uint32_t next = !member && (op == CHECK_OP_ADDRESS || op == CHECK_OP_DEREFERENCE || op == CHECK_OP_SUBSCRIPT) ? graph->operand0[node] : BUSTER_CHECK_NONE;
         if (op == CHECK_OP_ADD || op == CHECK_OP_SUBTRACT)
         {
             const uint32_t first = graph->operand0[node];
@@ -2826,7 +2889,12 @@ static bool check_driver_conversion_site(const Parser* parser, const CheckStream
     const uint8_t parent_role = parent < count ? parser->tree.roles[parent] : PARSE_ROLE_NONE;
     const bool condition = parent_role == PARSE_ROLE_CLOSE_CONDITION || parent_role == PARSE_ROLE_CLOSE_FOR;
     const bool known = source < stream->count && target != 0 && token < count && !condition && check_driver_in_body(parser, token);
-    const uint32_t first = known ? check_warning_graph_first(graph, parser, source) : BUSTER_CHECK_NONE;
+    const uint32_t operand = known ? check_warning_graph_first(graph, parser, source) : BUSTER_CHECK_NONE;
+    // An array compound literal's node is its body's `}` (its decay's too), so its own first token is its type name's `(`:
+    // a cast before the `}` would break the view's reading and lose the body's warnings (`char *b = (int[2]){ 1, 2 };`).
+    const uint8_t operand_role = operand < count ? parser->tree.roles[operand] : PARSE_ROLE_NONE;
+    const bool compound = operand_role == PARSE_ROLE_CLOSE_COMPOUND_BODY || operand_role == PARSE_ROLE_CLOSE_COMPOUND;
+    const uint32_t first = compound ? check_warning_graph_start(parser, operand) : operand;
     const uint32_t end = known ? graph->source_positions[source] : 0;
     const bool valid = first < end && end <= count;
     *site = (CheckDriverConversionSite){
@@ -3112,6 +3180,12 @@ static const char* check_driver_conversion_error(const Parser* parser, Preproces
         const uint32_t left = graph->operand0[node];
         const TypeId lvalue = left < stream->count ? check_stream_type(stream, left) : 0;
         target = left < stream->count ? check_input_object_spelling(types, input, parser, graph->tokens[left], 0, lvalue, &target_spelling) : 0;
+        // A member's own declarator's specifiers (#1837): `s.lp = m` of a member `LP lp` assigns to 'LP'.
+        const bool member = left < stream->count && (graph->ops[left] == CHECK_OP_MEMBER || graph->ops[left] == CHECK_OP_ARROW);
+        const uint32_t selected = member ? check_semantic_member_of(parser, input, stream, types, left) : 0;
+        const uint32_t declarator = selected != 0 ? check_semantic_member_token(parser, input, types, selected) : BUSTER_CHECK_NONE;
+        target_spelling = declarator < input->token_count ? check_input_specifier_spelling(input, parser, declarator) : member ? 0 : target_spelling;
+        target = member ? lvalue : target;
     }
     else if (applies && returning)
     {
@@ -3155,6 +3229,105 @@ static const char* check_driver_conversion_error(const Parser* parser, Preproces
     }
     const uint8_t action = op == CHECK_OP_INITIALIZE ? 0 : op == CHECK_OP_ASSIGN ? 1 : returning ? 2 : 3;
     const char* result = applies ? check_driver_conversion_words(parser, pp, input, stream, types, spell, source, target, target_spelling, action, scratch) : NULL;
+    *located = result != NULL ? at : *located;
+    return result;
+}
+
+// A call's wrong argument count as clang words it (#1860, #1921, Sema::ConvertArgumentsForCall): "too few/too many arguments
+// to function call, expected [at least|at most] N, have M". An ordinary call's count is its callee's type's, with clang's
+// "'h' declared here" note at its declaration where the callee is a function's name (through parentheses and `&`), and
+// clang's single-argument words where that declaration names its only parameter; a builtin's is the one its check
+// carried in the diagnostic's operand (check_action_diagnose_count), "too many" at its first extra argument, as an
+// ordinary call's (check_graph_report). NULL for any other report, which keeps the generic message.
+static const char* check_driver_call_count(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, const TypeTable* types,
+                                           const CheckReport* report, uint32_t* located, uint32_t* note_token, const char** note, Arena* scratch)
+{
+    const CheckGraph* graph = stream->graph;
+    const uint32_t node = report->node;
+    const bool applies = report->message == CHECK_MESSAGE_ACTION && report->diagnostic == CHECK_DIAG_ARGUMENT_COUNT && node < stream->count &&
+                         graph->argument_counts != NULL;
+    const CheckOp op = applies ? graph->ops[node] : CHECK_OP_COUNT;
+    const uint32_t operand = applies ? stream->diagnostic_operands[node] : 0;
+    const uint32_t have = applies ? graph->argument_counts[node] : 0;
+    uint32_t at = report->token;
+    const char* result = NULL;
+    if (op == CHECK_OP_CALL)
+    {
+        const uint32_t callee = graph->operand0[node];
+        TypeId function = callee < stream->count ? type_strip_aligned(types, check_stream_type(stream, callee)) : 0;
+        function = function != 0 && type_kind(types, function) == BUSTER_TYPE_KIND_POINTER ? type_strip_aligned(types, type_element(types, function)) : function;
+        const bool typed = function != 0 && type_kind(types, function) == BUSTER_TYPE_KIND_FUNCTION;
+        const bool variadic = typed && (types->types.flags[type_index(function)] & BUSTER_TYPE_FLAG_VARIADIC) != 0;
+        uint32_t expected = 0;
+        if (typed)
+        {
+            type_parameters(types, function, &expected);
+        }
+        // The function the callee names, as clang's getCalleeDecl finds it: `h`, `(h)` and `(&h)`.
+        const uint32_t named = callee < stream->count && graph->ops[callee] == CHECK_OP_ADDRESS ? graph->operand0[callee] : callee;
+        const uint32_t name = named < stream->count && graph->ops[named] == CHECK_OP_VALUE ? graph->tokens[named] : BUSTER_CHECK_NONE;
+        const uint32_t declaration = name < input->token_count && input->declarations != NULL ? input->declarations[name] : BUSTER_CHECK_NONE;
+        const bool direct = declaration < input->token_count && input->declaration_kinds != NULL && input->declaration_kinds[declaration] == C_BINDING_FUNCTION;
+        const uint32_t parameter = direct && expected == 1 ? check_driver_parameter_place(parser, input, declaration, 0) : BUSTER_CHECK_NONE;
+        const bool single = parameter < input->token_count && parser->tokens.kinds[parameter] == PARSE_KIND_IDENTIFIER &&
+                            input->declarations[parameter] == parameter && input->declaration_kinds[parameter] == C_BINDING_OBJECT;
+        const String8 parameter_name = single ? check_semantic_name(parser, pp, parameter) : (String8){ 0 };
+        const bool few = have < expected;
+        if (!typed || (few ? false : variadic || have == expected))
+        {
+            result = NULL;
+        }
+        else if (single && few)
+        {
+            result = check_warning_text(scratch, "too few arguments to function call, %s argument '%.*s' %s", variadic ? "at least" : "single",
+                                        (int)parameter_name.length, parameter_name.pointer, variadic ? "must be specified" : "was not specified");
+        }
+        else if (single)
+        {
+            result = check_warning_text(scratch, "too many arguments to function call, expected single argument '%.*s', have %u arguments",
+                                        (int)parameter_name.length, parameter_name.pointer, have);
+        }
+        else
+        {
+            result = check_warning_text(scratch, "too %s arguments to function call, expected %s%u, have %u", few ? "few" : "many", variadic ? "at least " : "",
+                                        expected, have);
+        }
+        if (result != NULL && direct)
+        {
+            const String8 function_name = check_semantic_name(parser, pp, name);
+            *note_token = declaration;
+            *note = check_warning_text(scratch, "'%.*s' declared here", (int)function_name.length, function_name.pointer);
+        }
+    }
+    else if (applies && op != CHECK_OP_BUILTIN_X86 && (operand & 0x80u) != 0)
+    {
+        const uint32_t expected = operand & 0x3fu;
+        const bool bound = (operand & 0x40u) != 0;
+        const bool few = have < expected;
+        result = check_warning_text(scratch, "too %s arguments to function call, expected %s%u, have %u", few ? "few" : "many",
+                                    !bound ? "" : few ? "at least " : "at most ", expected, have);
+        // Too many is at the first extra argument, but clang's "at most" is at the call's `)`, the report's token. A builtin
+        // whose arguments are its operands (va_start's) has no list: the argument after the expected count's commas.
+        const bool listed = check_graph_has_arguments(op) && graph->argument_tokens != NULL;
+        uint32_t extra = !few && !bound && expected < have && listed ? graph->argument_tokens[graph->argument_offsets[node] + expected] : at;
+        const uint32_t close = at;
+        uint32_t open = !few && !bound && expected < have && !listed && close < parser->tokens.count ? close : 0;
+        while (open != 0 && !(parser->tokens.kinds[open] == PARSE_KIND_L_PAREN && parser->tree.parents[open] == close))
+        {
+            open -= 1;
+        }
+        uint32_t commas = 0;
+        for (uint32_t k = open + 1; open != 0 && k < close && commas < expected; k += 1)
+        {
+            const uint8_t kind = parser->tokens.kinds[k];
+            const bool nested = (kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE || kind == PARSE_KIND_L_BRACE) && parser->tree.parents[k] > k &&
+                                parser->tree.parents[k] < close;
+            commas += kind == PARSE_KIND_COMMA ? 1u : 0u;
+            extra = kind == PARSE_KIND_COMMA && commas == expected ? k + 1 : extra;
+            k = nested ? parser->tree.parents[k] : k;
+        }
+        at = extra < parser->tokens.count ? extra : at;
+    }
     *located = result != NULL ? at : *located;
     return result;
 }
@@ -3243,8 +3416,9 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
         {
             const CheckInputKrDiagnostic diagnostic = input->kr_diagnostics[i];
             const uint32_t token = diagnostic.token;
-            if (token < count && check_diagnostic_kr_severity(input, token, diagnostic.warning) != CHECK_WARNING_IGNORE &&
-                (repair == NULL || check_repair_warning_token(repair, token)))
+            const uint32_t name = check_diagnostic_kr_name(&diagnostic);
+            if (token < count && name < count && check_diagnostic_kr_severity(input, name, diagnostic.warning) != CHECK_WARNING_IGNORE &&
+                (repair == NULL || check_repair_warning_token(repair, name)))
             {
                 report_keys[report_total++] = (uint64_t)token << 32 | ((uint32_t)kr_offset64 + i);
             }
@@ -3277,10 +3451,11 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                 if (flags != 0)
                 {
                     const uint32_t token = check_diagnostic_kr_call_token(input, node);
-                    if (token < count && check_diagnostic_kr_severity(input, token, flags) != CHECK_WARNING_IGNORE &&
+                    const uint32_t place = check_diagnostic_kr_call_place(input, parser, node, flags);
+                    if (token < count && place < count && check_diagnostic_kr_severity(input, token, flags) != CHECK_WARNING_IGNORE &&
                         (repair == NULL || check_repair_warning_token(repair, token)))
                     {
-                        report_keys[report_total++] = (uint64_t)token << 32 | ((uint32_t)call_offset64 + node);
+                        report_keys[report_total++] = (uint64_t)place << 32 | ((uint32_t)call_offset64 + node);
                     }
                 }
             }
@@ -3562,7 +3737,14 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                         }
                         else
                         {
+                            const PPDiagnosticRecord* previous = pp->diagnostic_last;
                             pp_diagnose_output_phase(pp, pp_severity, parser->tokens.sources[located], publication, phase, "%s%s", message, suffix);
+                            // A file-scope declarator's queue keeps the order clang builds its expressions in, the shift
+                            // before a comma that holds it (#1943, check_common_report_comma_left): by its node's end.
+                            if (phase == PP_DIAGNOSTIC_RUNTIME && node < input->graph.count && input->graph.source_positions != NULL)
+                            {
+                                pp_diagnostic_suborder(pp, previous, (uint64_t)input->graph.source_positions[node] + 1);
+                            }
                         }
                     }
                 }
@@ -3587,7 +3769,8 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                 const uint32_t offset = input->report_count + stream_reports + extra_count;
                 if (sequence >= (uint32_t)call_offset64)
                 {
-                    check_driver_kr_report(parser, pp, input, token, stream->warnings[sequence - (uint32_t)call_offset64] & CHECK_WARNING_KR_CALLS);
+                    const uint32_t call = sequence - (uint32_t)call_offset64;
+                    check_driver_kr_call(parser, pp, input, call, stream->warnings[call] & CHECK_WARNING_KR_CALLS);
                 }
                 else if (sequence >= (uint32_t)kr_offset64)
                 {
@@ -3598,7 +3781,7 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                     }
                     else
                     {
-                        check_driver_kr_report(parser, pp, input, token, diagnostic->warning);
+                        check_driver_kr_call_at(parser, pp, input, check_diagnostic_kr_name(diagnostic), diagnostic->token, diagnostic->warning);
                     }
                 }
                 else if (sequence >= offset)
@@ -3682,6 +3865,11 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                     {
                         x86_message = check_driver_conversion_error(parser, pp, input, stream, types, &spell, stream->reports + index, &x86_location,
                                                                     &conversion_note_token, &conversion_note, scratch);
+                    }
+                    if (x86_message == NULL && phase == 1)
+                    {
+                        x86_message = check_driver_call_count(parser, pp, input, stream, types, stream->reports + index, &x86_location, &conversion_note_token,
+                                                              &conversion_note, scratch);
                     }
                     if (x86_message == NULL && phase == 1)
                     {
@@ -6813,6 +7001,19 @@ static bool check_driver_alias_warnings(const CheckProgram* program, const Parse
 static bool check_driver_aliases(const CheckProgram* program, const Parser* parser, Preprocessor* pp, bool scalar, Arena* scratch)
 {
     const uint64_t mark = scratch->length;
+    // Two functions' definitions of one symbol name through an asm label (#1979, CheckProgram.label_conflict): clang's
+    // error at the later one as code generation emits it, before its check of the aliases.
+    const uint32_t conflict = program->label_conflict != 0 && program->label_conflict - 1 < parser->tokens.count ? program->label_conflict - 1 : BUSTER_CHECK_NONE;
+    if (conflict != BUSTER_CHECK_NONE)
+    {
+        const String8 name = program->label_conflict_name;
+        const PPOutputDiagnosticNote note = {
+            .token = parser->tokens.sources[program->label_previous < parser->tokens.count ? program->label_previous : conflict],
+            .message = "previous definition is here",
+        };
+        pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, parser->tokens.sources[conflict], pp->output.count + 1u, &note, 1,
+                                    "definition with same mangled name '%.*s' as another definition", (int)name.length, name.pointer);
+    }
     uint64_t* keys = program->alias_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (uint64_t)program->alias_count * 2) : 0;
     bool valid = program->alias_count == 0 || keys != 0;
     // The first alias or ifunc that names itself, by its first declaration with the attribute, or none.
@@ -6924,7 +7125,7 @@ static bool check_driver_aliases(const CheckProgram* program, const Parser* pars
         check_driver_diagnose(parser, pp, UINT32_MAX, "checker program capacity exhausted");
     }
     arena_pop_to(scratch, mark);
-    return valid && errors == 0;
+    return valid && errors == 0 && conflict == BUSTER_CHECK_NONE;
 }
 
 // Why check_program_emit failed, at its token: an unsupported construct names the feature it needs (#145), and the
@@ -6993,6 +7194,19 @@ static bool check_units_keep_object(CheckUnitsKept* kept, const Object* object);
 static bool check_units_keep(CheckUnitsKept* kept, const Link* link, const CheckProgram* program, const Parser* parser, Preprocessor* pp,
                              const ObjectDebug* debug);
 
+// Whether `link`'s symbol `s` is a local `.L` label defined in code, which -c's object leaves out as an assembler's
+// temporary (#1845). The helpers' own functions (`.Lbuster_asm_N`, `.Lbuster_builtin_*`), which clang's code has no
+// counterpart of, keep their symbols: the tools that read -c's objects find the helpers' calls by them.
+static bool check_driver_code_temporary(const Link* link, uint32_t s)
+{
+    const NameId name = link->symbols.name[s];
+    const AtomId atom = link->symbols.atom[s];
+    return (link->symbols.flags[s] & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_LOCAL &&
+           (link->symbols.flags[s] & BUSTER_LINK_SYMBOL_TYPE) != BUSTER_LINK_SYMBOL_FUNCTION && atom != 0 && atom < link->atoms.count &&
+           link->atoms.class[atom] == BUSTER_LINK_CLASS_TEXT && name != 0 && link->names.length[name] >= 2 && link->names.bytes[name][0] == '.' &&
+           link->names.bytes[name][1] == 'L';
+}
+
 // The object of a unit's emitted code (`code`, its static data published and its sections placed: `sections`, one per
 // atom, or null), as -c writes it: its link checked, its temporaries (the jump tables' symbols and their labels', the
 // unit's own) left out, as clang's .L labels are, with `debug`'s DWARF (or none), named after `source_path`. Its error
@@ -7007,8 +7221,17 @@ static Object check_driver_object_build(CheckProgramCode* code, ObjectAtomSectio
     // temporaries, as clang's .LJTI and .LBB labels are the assembler's: the object leaves them out, and its
     // relocations name their sections' symbols instead (ObjectOptions.temporary_symbols). So are the patchable function
     // entries' labels (#1447, CheckProgramCode.patchable_symbol_base), as clang's .Ltmp ones.
+    // And every local `.L` label in code (#1845): the labels of asm templates assembled by their own statements and of
+    // naked functions and the address-taken labels' `.Lbuster_label_N` (clang's `.Ltmp`), all places in a function's
+    // code, which an assembler never keeps.
     const uint32_t switch_symbols = code->lowered.table_count + code->lowered.case_symbol_count;
-    const bool temporaries = switch_symbols != 0 || code->unit_temporary_count != 0 || code->patchable_count != 0;
+    const Link* link = &code->link;
+    bool coded = false;
+    for (uint32_t s = 1; valid && !coded && s < link->symbols.count; s += 1)
+    {
+        coded = check_driver_code_temporary(link, s);
+    }
+    const bool temporaries = switch_symbols != 0 || code->unit_temporary_count != 0 || code->patchable_count != 0 || coded;
     uint8_t* temporary = valid && temporaries ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, code->link.symbols.count) : 0;
     valid = valid && (!temporaries || temporary != 0);
     if (temporary != 0)
@@ -7019,6 +7242,10 @@ static Object check_driver_object_build(CheckProgramCode* code, ObjectAtomSectio
         for (uint32_t s = 0; s < code->unit_temporary_count; s += 1)
         {
             temporary[code->unit_temporary[s]] = 1;
+        }
+        for (uint32_t s = 1; coded && s < link->symbols.count; s += 1)
+        {
+            temporary[s] |= check_driver_code_temporary(link, s);
         }
     }
     Object result = { .error = OBJECT_ERROR_FULL };
