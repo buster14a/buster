@@ -14130,9 +14130,12 @@ BUSTER_PREPROCESSOR_ENTRY void pp_release_file_columns(Preprocessor* pp, bool po
                 pp_forget_prepared(&pp->datas[d], false);
             }
         }
+        // The lanes whose arenas were reserved alone (FileCache.lanes_reserved): the others' are zero, and on pages a unit
+        // on one lane never touches.
         for (uint32_t lane = 0; lane < BUSTER_LANE_MAX_COUNT; lane += 1)
         {
-            for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(cache->lanes[lane].columns); i += 1)
+            const bool reserved = (cache->lanes_reserved[lane / 64] >> (lane % 64) & 1) != 0;
+            for (uint32_t i = 0; reserved && i < BUSTER_ARRAY_LENGTH(cache->lanes[lane].columns); i += 1)
             {
                 Arena* columns = &cache->lanes[lane].columns[i];
                 if (poison && columns->base != NULL && columns->mapping_bytes != 0 && columns->peak != 0)

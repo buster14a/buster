@@ -169,8 +169,9 @@ clang -std=c17 -O2 -march="$BUSTER_HOST_ARCH" -Wall -Wextra -Werror -fno-strict-
 "$BUSTER_COMPILER" test-ssa-source --tier1 --generate 24 --seed 141 --lifetimes --clang clang
 == Test the preprocessor on the repository's translation units against clang [2 CPUs]
 # --clang also preprocesses each unit with clang -E, with clang's predefines for its options, and compares the
-# tokens. -target and its triple (clang's default) go to both.
-"$BUSTER_COMPILER" test-preprocessor --clang -target x86_64-pc-linux-gnu -march="$BUSTER_HOST_ARCH" -Isrc -fwrapv -funsigned-char -DBUSTER_COMPLETE_DRIVER=1 src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
+# tokens. -target and its triple (clang's default) go to both. clang's runs go to the job's clang server where it built
+# one (#2071), compared as the cases' parts' are.
+"$BUSTER_COMPILER" test-preprocessor --clang -target x86_64-pc-linux-gnu -march="$BUSTER_HOST_ARCH" -Isrc -fwrapv -funsigned-char -DBUSTER_COMPLETE_DRIVER=1 src/buster/compiler/main.c src/buster/compiler/*_benchmark.c ${BUSTER_CLANG_SERVER:+--clang-server "$BUSTER_CLANG_SERVER"} ${BUSTER_DRIVER_DIFFERENTIAL:+--differential}
 == Compare c-testsuite's typed streams, SSA and strict Tier 1 programs [4 CPUs]
 # #134: each function -c compiles lowered with every local in memory and promoted by both of ssa_ir.c's paths, with
 # ssa.c's verifier on each promotion and no trivial phi left, then each program run by the shared IR's interpreter
@@ -192,8 +193,11 @@ clang -std=c17 -O2 -march="$BUSTER_HOST_ARCH" -Wall -Wextra -Werror -fno-strict-
 # to 4 parts by their weights (pp_test_sections), one CPU each, which the runner packs beside the other commands:
 # whole, on 2 CPUs, the command took 295 s on a hosted runner and 44 s on the 9700X, the list's longest. The four
 # parts together run each check once. A part's fuzz workers and clang processes run on its CPU (--jobs, and
-# test_process_cpus from BUSTER_PARALLEL_CPUS); the fuzz cases don't depend on --jobs.
-"$BUSTER_COMPILER" test-preprocessor --clang --jobs "$BUSTER_PARALLEL_CPUS" --part 1/4
+# test_process_cpus from BUSTER_PARALLEL_CPUS); the fuzz cases don't depend on --jobs. The oracle cache's clang runs and
+# the fuzz batch's go to the job's clang server where it built one (#2071), and with BUSTER_DRIVER_DIFFERENTIAL each
+# also runs as before: a difference fails the command. The release fixture's wrapper script, another program, runs its
+# clang as before.
+"$BUSTER_COMPILER" test-preprocessor --clang --jobs "$BUSTER_PARALLEL_CPUS" --part 1/4 ${BUSTER_CLANG_SERVER:+--clang-server "$BUSTER_CLANG_SERVER"} ${BUSTER_DRIVER_DIFFERENTIAL:+--differential}
 # --part's refusals, each before any check runs: no value, a part outside 1 to N, N past the checks' 128, other than
 # digits on either side of one '/', and a second --part.
 if "$BUSTER_COMPILER" test-preprocessor --part; then exit 1; fi
@@ -202,16 +206,17 @@ for part in '' 4 0/4 5/4 1/0 1/129 x/4 1/ /4 1/4/4 '1/ 4' 1/+4 +1/4 ' 1/4'; do
 done
 if "$BUSTER_COMPILER" test-preprocessor --part 1/4 --part 2/4; then exit 1; fi
 == Test the preprocessor's cases against clang (part 2 of 4)
-"$BUSTER_COMPILER" test-preprocessor --clang --jobs "$BUSTER_PARALLEL_CPUS" --part 2/4
+"$BUSTER_COMPILER" test-preprocessor --clang --jobs "$BUSTER_PARALLEL_CPUS" --part 2/4 ${BUSTER_CLANG_SERVER:+--clang-server "$BUSTER_CLANG_SERVER"} ${BUSTER_DRIVER_DIFFERENTIAL:+--differential}
 == Test the preprocessor's cases against clang (part 3 of 4)
-"$BUSTER_COMPILER" test-preprocessor --clang --jobs "$BUSTER_PARALLEL_CPUS" --part 3/4
+"$BUSTER_COMPILER" test-preprocessor --clang --jobs "$BUSTER_PARALLEL_CPUS" --part 3/4 ${BUSTER_CLANG_SERVER:+--clang-server "$BUSTER_CLANG_SERVER"} ${BUSTER_DRIVER_DIFFERENTIAL:+--differential}
 == Test the preprocessor's cases against clang (part 4 of 4)
-"$BUSTER_COMPILER" test-preprocessor --clang --jobs "$BUSTER_PARALLEL_CPUS" --part 4/4
+"$BUSTER_COMPILER" test-preprocessor --clang --jobs "$BUSTER_PARALLEL_CPUS" --part 4/4 ${BUSTER_CLANG_SERVER:+--clang-server "$BUSTER_CLANG_SERVER"} ${BUSTER_DRIVER_DIFFERENTIAL:+--differential}
 == Test the parser's snippets against clang
 # The snippets, each also checked against clang, the generated inputs and the driver's checks. The second command
 # checks the file alone (--files-only): the checks without input are the first's, with the same language and seed.
-"$BUSTER_COMPILER" test-parser --clang
-"$BUSTER_COMPILER" test-parser --clang --files-only tests/parser-handoff/pragma-heavy.c
+# clang's runs go to the job's clang server where it built one (#2071), compared as the preprocessor's parts are.
+"$BUSTER_COMPILER" test-parser --clang ${BUSTER_CLANG_SERVER:+--clang-server "$BUSTER_CLANG_SERVER"} ${BUSTER_DRIVER_DIFFERENTIAL:+--differential}
+"$BUSTER_COMPILER" test-parser --clang --files-only tests/parser-handoff/pragma-heavy.c ${BUSTER_CLANG_SERVER:+--clang-server "$BUSTER_CLANG_SERVER"} ${BUSTER_DRIVER_DIFFERENTIAL:+--differential}
 == Test the semantic driver's diagnostics and emission against clang (part 1 of 4)
 # --part deals the driver test's checks (sections, and the cases of its two long sweeps) in turn to 4 parts, one CPU
 # each, which the runner packs beside the other commands: alone, the command took 197 s on a hosted runner and 48 s

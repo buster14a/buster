@@ -195,9 +195,9 @@ static bool check_input_initializer_designator(CheckInputReader* reader, uint32_
 // inference_end), as clang deduces it: the initializer's, converted as an lvalue's (its qualifiers dropped, but not
 // _Atomic) and decayed, with the specifiers' const and volatile. A use of the variable in its initializer is an error
 // there, a bit-field's value one at the member's name, an incomplete type one at the variable's name, and an _Alignas
-// below the type's own alignment one at the _Alignas (the specifiers and the declarator left it to this); a variably
-// modified type, whose sizes the declaration would have evaluated, is refused by name. The declaration's columns take the
-// type, which is returned, or 0.
+// below the type's own alignment one at the _Alignas (the specifiers and the declarator left it to this). A variably
+// modified type is the initializer's, whose sizes its own declaration or cast evaluated: the declaration evaluates none,
+// as clang's evaluates none for a deduced type. The declaration's columns take the type, which is returned, or 0.
 static __attribute__((noinline)) TypeId check_input_auto_type_finish(CheckInputReader* reader, uint32_t declaration, uint32_t begin, uint32_t end,
                                                                      TypeId placeholder)
 {
@@ -275,10 +275,6 @@ static __attribute__((noinline)) TypeId check_input_auto_type_finish(CheckInputR
         if (deduced != 0 && !type_is_complete(types, deduced))
         {
             check_input_report(reader, declaration, CHECK_INPUT_INCOMPLETE_OBJECT);
-        }
-        else if (deduced != 0 && (type_inherited_flags(types, deduced) & BUSTER_TYPE_FLAG_VARIABLY_MODIFIED) != 0)
-        {
-            check_input_report(reader, declaration, CHECK_INPUT_UNSUPPORTED);
         }
         else if (deduced != 0 && required != 0 && required - 1 < type_alignment_log2(types, deduced))
         {

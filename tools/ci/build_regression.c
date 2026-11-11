@@ -1311,7 +1311,7 @@ static const OwnershipException ownership_exceptions[] = {
     { "src/buster/compiler/x86_64_encoder_test.c", "main.c main_unit_x86.c main_unit_frontend.c main_unit_assembler.c main_unit_link.c main_unit_backend.c", "encoding/execute helpers for these six test families", UINT64_C(0xb84cf97ab4156949) },
     { "src/buster/compiler/x86_intrinsics_test.c", "main_unit_checker.c main_unit_x86.c", "object reading and instruction decoding for checker AMX and intrinsic tests", UINT64_C(0x83a1dc58c44b290a) },
     { "src/buster/compiler/x86_semantics_test.c", ownership_main_units, "form names for DRIVER/BACKEND and six forced-emission globals retained in all units", UINT64_C(0x929ee4e6ddcf62ef) },
-    { "src/buster/compiler/test_paths.h", ownership_main_units, "temporary-directory normalization for production/profile and test subprocesses", UINT64_C(0xe425875a65b829de) },
+    { "src/buster/compiler/test_paths.h", ownership_main_units, "temporary-directory normalization for production/profile and test subprocesses", UINT64_C(0x433189fdd139cffd) },
     { "src/buster/compiler/test_tool.c", "main.c main_unit_x86.c main_unit_frontend.c main_unit_link.c main_unit_types.c main_unit_backend.c", "external tool probes for these six test families", UINT64_C(0xfc1a967b31b9b4af) },
     { "src/buster/compiler/test_tool.h", "main.c main_unit_x86.c main_unit_frontend.c main_unit_link.c main_unit_types.c main_unit_backend.c", "tool probe interface for its six implementation consumers", UINT64_C(0x398696e707640aa9) },
     { "src/buster/compiler/test_process.c", ownership_main_units, "CPU grant and capture-file helpers used by shared parser/process interfaces", UINT64_C(0x72b4864f47979300) },

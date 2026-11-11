@@ -2474,6 +2474,8 @@ static __attribute__((noinline)) int main_source_command(int argc, char** argv)
     {
         result = main_preprocessing(argc - 1, argv + 1) ? main_preprocessor_command(argc - 1, argv + 1) : run_source_check_command(argc - 1, argv + 1);
     }
+    // The process exits next: one that started no lane leaves its address space's teardown to a helper (#1444).
+    lane_exit_helper_start();
     return result;
 }
 

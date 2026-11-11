@@ -9,7 +9,9 @@ requirements. [Command index](README.md).
 - `src/buster/compiler/preprocessor_fuzz.c` provides bounded output comparison
   and the minimizer for the independent preprocessor test harness.
   `preprocessor_fuzz_generate.c` generates cases, `preprocessor_fuzz_clang.c`
-  runs the Clang oracle, and `preprocessor_fuzz_test.c` provides
+  runs the Clang oracle (a process per run, or under `test-preprocessor
+  --clang-server` a request to `tools/clang-server`), and
+  `preprocessor_fuzz_test.c` provides
   `test-preprocessor-fuzz`, the harness's own checks; `main.c` includes all
   four. `preprocessor_fuzz_benchmark.c` provides `benchmark-preprocessor-fuzz`,
   measuring the external test harness. `c_preprocessor_fuzz.c` attaches the

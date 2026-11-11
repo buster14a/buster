@@ -6,8 +6,9 @@
 # Run from the checkout's root, after tools/ci/setup-hosted.sh, with the row's BUSTER_* settings in the environment:
 #
 #   hosted-product.sh build                  Builds the external Clang pragma oracle, the clang server (status 77: none
-#                                            for this toolchain) and the compiler, as each shard did before, and exports
-#                                            their paths (GITHUB_ENV). A native row's shards still run this themselves.
+#                                            for this toolchain, which fails on the hosted one) and the compiler, as each
+#                                            shard did before, and exports their paths (GITHUB_ENV). A native row's
+#                                            shards still run this themselves.
 #   hosted-product.sh ownership              Runs the inventory's unity fixture ownership check on the build's tree,
 #                                            the one check that reads the tree rather than the executable.
 #   hosted-product.sh pack DIRECTORY         Packs what `build` built, with its identity, as DIRECTORY/product.tar.zst,
@@ -75,13 +76,22 @@ timed()
 }
 
 # The hosted toolchain's installation (tools/ci/install-hosted-tools.sh): the directory above the clang on PATH that
-# holds the copy of hosted-tools.lock it was installed from.
+# holds the copy of hosted-tools.lock it was installed from. hosted_root prints it, or nothing for another toolchain;
+# toolchain_root requires it.
+hosted_root()
+{
+    local root
+    root=$(cd "$(dirname "$(realpath "$(command -v clang)")")/../.." && pwd)
+    if [ -f "$root/hosted-tools.lock" ]; then
+        printf '%s\n' "$root"
+    fi
+}
+
 toolchain_root()
 {
-    local clang root
-    clang=$(realpath "$(command -v clang)")
-    root=$(cd "$(dirname "$clang")/../.." && pwd)
-    test -f "$root/hosted-tools.lock" || die "the clang on PATH ($clang) is not the hosted toolchain's installation"
+    local root
+    root=$(hosted_root)
+    [ -n "$root" ] || die "the clang on PATH ($(realpath "$(command -v clang)")) is not the hosted toolchain's installation"
     printf '%s\n' "$root"
 }
 
@@ -161,14 +171,19 @@ provenance()
 build_products()
 {
     : "${RUNNER_TEMP:?}" "${GITHUB_ENV:?}"
-    local oracle="$RUNNER_TEMP/preprocessor-pragma-oracle" server="$RUNNER_TEMP/clang-server" served=0 compiler
+    local oracle="$RUNNER_TEMP/preprocessor-pragma-oracle" server="$RUNNER_TEMP/clang-server" served=0 compiler hosted
     printf 'Building on: %s, %s CPUs\n' "$(sed -n 's/^model name[[:space:]]*:[[:space:]]*//p' /proc/cpuinfo | head -n 1)" "$(nproc)"
     bash tools/build-preprocessor-pragma-oracle.sh "$oracle"
     # The clang server that the semantic driver's checks send the oracle clang's runs to (#2071), linked with the
     # release's static clang and LLVM archives, one copy of LLVM; its build checks one request against a spawned clang.
-    # Status 77 is a toolchain without what one copy needs: no server, and the oracle clang runs as children.
+    # Status 77 is a toolchain without what one copy needs: no server, and the oracle clang runs as children. The
+    # hosted installation has what it needs (install-hosted-tools.sh extracts the archives), so there 77 is a regression,
+    # a change to the extracted files or the release's layout, which would leave the row green but much slower: it fails.
+    hosted=$(hosted_root)
     bash tools/clang-server/build.sh "$server" || served=$?
-    if [ "$served" -eq 77 ]; then
+    if [ "$served" -eq 77 ] && [ -n "$hosted" ]; then
+        die "the clang server didn't build with the hosted toolchain ($hosted): status 77, no server, is a regression there (#2071), not a toolchain without one"
+    elif [ "$served" -eq 77 ]; then
         echo "::notice::No clang server for this toolchain: the semantic driver's checks run the oracle clang as children."
     elif [ "$served" -ne 0 ]; then
         exit "$served"
@@ -225,9 +240,8 @@ pack()
     mkdir -p "$product/bin"
     cp -- "${BUSTER_COMPILER:?}" "$product/bin/compiler"
     cp -- "${BUSTER_PPF_PRAGMA_ORACLE:?}" "$product/bin/preprocessor-pragma-oracle"
-    if [ -n "${BUSTER_CLANG_SERVER:-}" ]; then
-        cp -- "$BUSTER_CLANG_SERVER" "$product/bin/clang-server"
-    fi
+    [ -n "${BUSTER_CLANG_SERVER:-}" ] || die "no clang server to pack: the hosted toolchain's build gives one (#2071)"
+    cp -- "$BUSTER_CLANG_SERVER" "$product/bin/clang-server"
     chmod 0755 "$product"/bin/*
     cp -- build/compile_commands.json "$product/compile_commands.json"
     identity "$product" "$product/identity"
@@ -280,7 +294,9 @@ install_product()
         die "the product's files aren't the ones it lists"
     fi
     (cd "$product" && sha256sum --check --strict --quiet files.sha256) || die "a product file's SHA-256 differs from its list"
-    test -x "$product/bin/compiler" && test -x "$product/bin/preprocessor-pragma-oracle" || die "the product lacks its executables"
+    # The server too: a product is built with the hosted toolchain, where `build` fails without one.
+    test -x "$product/bin/compiler" && test -x "$product/bin/preprocessor-pragma-oracle" && test -x "$product/bin/clang-server" ||
+        die "the product lacks its executables"
     # The same identity, computed here from this checkout, these settings, this toolchain and this runner.
     identity "$product" "$staging/expected"
     if ! diff -r "$product/identity" "$staging/expected" > "$staging/difference"; then
@@ -297,9 +313,7 @@ install_product()
     # Each executable runs here before the suite does.
     "$product/bin/compiler" --version > /dev/null || die "the product's compiler doesn't run on this runner"
     "$product/bin/preprocessor-pragma-oracle" --version > /dev/null || die "the product's pragma oracle doesn't run on this runner"
-    if [ -e "$product/bin/clang-server" ]; then
-        [ "$("$product/bin/clang-server" --version)" = "$(clang -dumpversion)" ] || die "the product's clang server doesn't run as this clang"
-    fi
+    [ "$("$product/bin/clang-server" --version)" = "$(clang -dumpversion)" ] || die "the product's clang server doesn't run as this clang"
     # Where `build` puts them. The compiler finds its headers from its own path (build/ in the checkout), so it goes in
     # build/ itself; build.sh's tree is left to the commands that build in it.
     mkdir -p build
@@ -311,10 +325,8 @@ install_product()
     {
         printf 'BUSTER_COMPILER=%s\n' "$PWD/build/compiler"
         printf 'BUSTER_PPF_PRAGMA_ORACLE=%s\n' "$RUNNER_TEMP/preprocessor-pragma-oracle"
-        if [ -e "$product/bin/clang-server" ]; then
-            mv -- "$product/bin/clang-server" "$RUNNER_TEMP/clang-server"
-            printf 'BUSTER_CLANG_SERVER=%s\n' "$RUNNER_TEMP/clang-server"
-        fi
+        mv -- "$product/bin/clang-server" "$RUNNER_TEMP/clang-server"
+        printf 'BUSTER_CLANG_SERVER=%s\n' "$RUNNER_TEMP/clang-server"
         # The product's identity and provenance, which the inventory's ownership heading reads.
         printf 'BUSTER_PRODUCT=%s\n' "$product"
     } >> "$GITHUB_ENV"
