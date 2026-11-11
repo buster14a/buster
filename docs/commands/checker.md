@@ -355,7 +355,9 @@ unused-warning fixtures also check exact scope-completion tokens.
   driver stashes both (`CheckCommonShiftWarnings`) rather than reporting them, the common walk reports each at its
   shift and drops one it proves unevaluated (after a return, a `goto` or an endless loop, in a constant condition's
   other branch), so that a dropped `-Werror` one neither counts nor rejects the unit, and whatever no walk reached is
-  reported at the end (a unit with errors runs none). `-Wshift-overflow` is no runtime warning, and stays. Two
+  reported at the end (a unit with errors runs none). `-Wshift-overflow` is no runtime warning, and stays. Under
+  `-fwrapv` (or `-fno-strict-overflow` without `-fno-wrapv`) neither warns, as clang's DiagnoseBadShiftValues defines
+  signed overflow there (`isSignedOverflowDefined`); the counts' warnings stay. Two
   unevaluated places still warn, as clang's do: an unselected `_Generic` or `__builtin_choose_expr` arm, which has no CFG
   block, whose warnings keep the selection's order, and a reachable statement's condition that folds to a constant,
   whose range the program drops. That statement is reached by its keyword and by the first kept root of its executed arm

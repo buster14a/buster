@@ -3445,6 +3445,9 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
     const bool scalar = parser->options.scalar;
     const uint32_t count = parser->tokens.count;
     CheckWarningSpelling spell = { 0 };
+    // Whether signed overflow is defined (-fwrapv, or -fno-strict-overflow without -fno-wrapv), as the predefines read it.
+    const PredefinesOptions* predefines = &pp->options.predefines;
+    const bool wrapv = predefines->wrapv != 0 ? predefines->wrapv == BUSTER_PREDEFINES_ON : predefines->strict_overflow == BUSTER_PREDEFINES_OFF;
     // (The parser contexts a folded shift's warning asks, check_common_context's memo, are this function's own.)
     check_common_contexts = (CheckCommonContexts){ 0 };
     // Every token key is at most count, so all of its possible radix digits are known without gather-loop state.
@@ -3790,7 +3793,10 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
             {
                 const uint32_t warning_flag = flags & (0u - flags);
                 const bool ignored = (enabled & warning_flag) == 0;
-                const CheckWarningSeverity severity = check_driver_legacy_severity(pp, input, token, warning_flag, ignored);
+                // Under -fwrapv (or -fno-strict-overflow) a shift's result and a negative left operand are defined, and clang's
+                // DiagnoseBadShiftValues warns of neither (isSignedOverflowDefined, #1447); a count's warnings stay.
+                const bool defined = wrapv && (warning_flag & (CHECK_WARNING_SHIFT_NEGATIVE_VALUE | CHECK_WARNING_SHIFT_OVERFLOW)) != 0;
+                const CheckWarningSeverity severity = defined ? CHECK_WARNING_IGNORE : check_driver_legacy_severity(pp, input, token, warning_flag, ignored);
                 if (severity != CHECK_WARNING_IGNORE)
                 {
                     const PPSeverity pp_severity = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_MAPPED_FATAL :
