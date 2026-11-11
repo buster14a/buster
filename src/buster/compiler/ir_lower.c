@@ -755,6 +755,25 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_vector_operation(
             ir_typed_lanes(sink, value, operation->lane);
         }
     }
+    else if (operation->mask_expand)
+    {
+        // A mask to a vector (#1840): all ones in each lane whose bit is set, zeros elsewhere.
+        const uint64_t zero[8] = {0};
+        const uint64_t ones[8] = { UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX };
+        const uint32_t active = ir_typed_vector_constant(sink, type, ones);
+        const uint32_t inactive = ir_typed_vector_constant(sink, type, zero);
+        value = ir_typed_emit(sink, IR_VSELECT, type, operands[0], active, inactive, 0);
+        ir_typed_lanes(sink, value, operation->lane);
+    }
+    else if (operation->sign_mask)
+    {
+        // A vector's sign bits as a mask (#1840): its signed lanes less than zero, at the vector's width.
+        const uint64_t zero[8] = {0};
+        const IrType vector = (IrType)(IR_V4I32 + (operation->shape - IR_SIMD_V4I32));
+        const uint32_t inactive = ir_typed_vector_constant(sink, vector, zero);
+        value = ir_typed_emit(sink, IR_VCMP, type, operands[0], inactive, IR_LT, 0);
+        ir_typed_lanes(sink, value, operation->lane);
+    }
     else if (operation->shift)
     {
         // A shift by a scalar count (#1840), its lanes and shift in its flags.
