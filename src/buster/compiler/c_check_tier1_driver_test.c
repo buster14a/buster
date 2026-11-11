@@ -3069,8 +3069,8 @@ static void check_test_driver_tier1_asm(CheckTest* test, const char* clang, cons
 }
 
 // The asm bodies' opmask fixture (#1839): two masks live across a template that writes k1 to k7, its clobbers, in a
-// function Tier 1 compiles. Tier 1's CFG consumer saves no mask value around an asm body, so such a template keeps its
-// helper (check_asm_names_opmask), whose call saves them; the masks then pick the lanes the sum adds.
+// function Tier 1 compiles. The template is an asm body, around which Tier 1's CFG consumer saves the masks live in the
+// opmask registers it writes (IrAsmBody.masks, tier1_emit_cfg_asm); the masks then pick the lanes the sum adds.
 static const char check_test_tier1_asm_masks_source[] =
     "#include <immintrin.h>\n"
     "#include <stdio.h>\n"
@@ -3128,6 +3128,32 @@ static void check_test_driver_tier1_asm_masks(CheckTest* test, const char* clang
                               "Tier 1 keeps the masks live across a template that writes k1 to k7, as clang -O0's build does");
             unlink(program);
         }
+    }
+    // The template is an asm body: tier1_kept's own records write k7 and hold no call.
+    char object[512];
+    snprintf(object, sizeof(object), "%s/tier1-asm-masks.o", directory);
+    for (uint32_t path = 0; referenced && path < 2; path += 1)
+    {
+        CheckTestTier1Build build;
+        const bool compiled = check_test_tier1_build(executable, unit, "tier1_kept", object, true, path != 0, true, false, "-march=x86-64-v4", &build);
+        X86Decoded records[1024];
+        uint32_t offsets[1024];
+        uint32_t types[1024];
+        uint32_t relocations = 0;
+        const uint32_t decoded = compiled ? check_test_tier1_function(object, "tier1_kept", records, 1024, offsets, types, &relocations) : 0;
+        uint32_t written_k7 = 0;
+        uint32_t calls = 0;
+        for (uint32_t r = 0; r < decoded; r += 1)
+        {
+            const X86Instruction* record = &records[r].instruction;
+            written_k7 += record->form == X86_FORM_KMOVW_K_R32 && record->reg == 7;
+            calls += record->form == X86_FORM_CALL_REL32 || record->form == X86_FORM_CALL_RM64;
+        }
+        char message[256];
+        snprintf(message, sizeof(message), "asm bodies' opmask fixture (%s path, --tier1): tier1_kept's own records write k7 %u times and hold %u calls", path != 0 ? "scalar" : "vector",
+                 written_k7, calls);
+        check_test_expect(test, compiled && decoded != 0 && written_k7 == 1 && calls == 0, message);
+        unlink(object);
     }
     unlink(unit);
     unlink(reference);
@@ -3919,6 +3945,51 @@ static const char check_test_tier1_extremes_other_source[] =
     "    printf(\"%llx\\n\", h);\n"
     "    return 0;\n"
     "}\n";
+
+// The frame address's fixture (#1847): __builtin_frame_address(0), a stack_save of BUSTER_IR_STACK_SAVE_FRAME, read in a
+// leaf, in a function with calls and stack arguments and through __builtin_return_address(0), each Tier 1's with a frame
+// pointer kept and its code certified. What the units print doesn't depend on where the stack is: the frame address's
+// alignment, the return address in the word above it, the incoming stack arguments past the pushed rbp and the return
+// address, and a local below it.
+static const char check_test_tier1_frame_address_header[] =
+    "#include <stdint.h>\n"
+    "int fa_leaf(void);\n"
+    "int fa_return(void);\n"
+    "long fa_stack(long a, long b, long c, long d, long e, long f, long g, long h);\n"
+    "int fa_nested(int n);\n";
+
+static const char check_test_tier1_frame_address_source[] =
+    "#include \"tier1-frame-address.h\"\n"
+    "int fa_leaf(void) { uintptr_t f = (uintptr_t)__builtin_frame_address(0); return (int)(f & 15); }\n"
+    "int fa_return(void) { void* const* f = __builtin_frame_address(0); return f[1] == __builtin_return_address(0) && f[1] != 0; }\n"
+    "long fa_stack(long a, long b, long c, long d, long e, long f, long g, long h)\n"
+    "{\n"
+    "    const long* frame = __builtin_frame_address(0);\n"
+    "    return frame[2] * 1000 + frame[3] * 100 + a + b + c + d + e + f;\n"
+    "}\n"
+    "int fa_nested(int n)\n"
+    "{\n"
+    "    volatile int local = n;\n"
+    "    const char* frame = __builtin_frame_address(0);\n"
+    "    const int below = (const char*)&local < frame;\n"
+    "    return below + (n > 0 ? fa_nested(n - 1) : 0);\n"
+    "}\n";
+
+static const char check_test_tier1_frame_address_other_source[] =
+    "#include \"tier1-frame-address.h\"\n"
+    "#include <stdio.h>\n"
+    "int main(void)\n"
+    "{\n"
+    "    printf(\"%d %d %ld %d\\n\", fa_leaf(), fa_return(), fa_stack(1, 2, 3, 4, 5, 6, 7, 8), fa_nested(5));\n"
+    "    return 0;\n"
+    "}\n";
+
+// Its builds at the default target, every function Tier 1's and its code certified, run against clang -O0's.
+static void check_test_driver_tier1_frame_address(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    check_test_driver_tier1_units(test, clang, executable, directory, "tier1-frame-address", "frame address's", check_test_tier1_frame_address_header,
+                                  check_test_tier1_frame_address_source, check_test_tier1_frame_address_other_source, 0, true, 0);
+}
 
 // Its builds at x86-64's baseline (SSE2's sequences, two rows for maximumnum and minimumnum), x86-64-v3's (AVX's
 // VBLENDVPD) and x86-64-v4's (AVX-512's masked moves), each run where the host has the target's features.

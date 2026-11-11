@@ -1107,7 +1107,8 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
                     result.status = interpreter_stack_allocate(&frame->dynamic, av.low, depth, &runtime, arena, &value.low);
                     break;
                 case IR_STACK_SAVE:
-                    result.status = interpreter_stack_save(&frame->dynamic, &runtime, arena, &value.low);
+                    // A frame address (#1847) is a machine frame's, which the interpreter's frames don't have.
+                    result.status = function->flags[i] == BUSTER_IR_STACK_SAVE_FRAME ? INTERPRETER_UNSUPPORTED : interpreter_stack_save(&frame->dynamic, &runtime, arena, &value.low);
                     break;
                 case IR_STACK_RESTORE:
                     result.status = interpreter_stack_restore(&frame->dynamic, av.low, &runtime, arena);

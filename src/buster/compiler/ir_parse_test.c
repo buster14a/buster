@@ -689,6 +689,7 @@ static int run_ir_parse_tests(int argc, char** argv)
                 "tests/ir/control.ir",
                 "tests/ir/memory-calls.ir",
                 "tests/ir/dynamic-stack.ir",
+                "tests/ir/frame-address.ir",
                 "tests/ir/labels.ir",
                 "tests/ir/aggregates.ir",
                 "tests/ir/vector-mask.ir",

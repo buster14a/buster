@@ -2707,8 +2707,11 @@ static void check_constant_action(CheckConstantInput* input, const CheckAction* 
         check_x86_action(reader->types, &call, &typed, &result);
         *checked = result.action;
     }
-    else if (action->op == CHECK_OP_MEMBER && check_vector_type(reader->types, action->operands[0].type))
+    else if ((action->op == CHECK_OP_MEMBER && check_vector_type(reader->types, action->operands[0].type)) ||
+             (action->op == CHECK_OP_ARROW && check_action_kind(reader->types, type_strip_aligned(reader->types, action->operands[0].type)) == BUSTER_TYPE_KIND_POINTER &&
+              check_action_kind(reader->types, type_element(reader->types, type_strip_aligned(reader->types, action->operands[0].type))) == BUSTER_TYPE_KIND_EXT_VECTOR))
     {
+        // (`p->y` too, through a pointer to an extended vector: check_vector_arrow.)
         // Type queries run before the retained graph supplies its vector-member records. Give the ordinary
         // member action the same decoded selector here, with lane storage borrowed only for this action.
         const uint64_t mark = reader->scratch->length;
@@ -2828,7 +2831,7 @@ static void check_constant_action(CheckConstantInput* input, const CheckAction* 
     const uint32_t warning = checked->warnings & CHECK_WARNING_KR_CALLS;
     if (warning != 0)
     {
-        check_input_kr_diagnostic(reader, source < reader->parser->tokens.count ? source : action->node, warning, BUSTER_CHECK_NONE);
+        check_input_kr_call(reader, source, action->node, warning);
     }
     if (action->op != CHECK_OP_VALUE && action->op != CHECK_OP_SELECT)
     {
@@ -2838,12 +2841,19 @@ static void check_constant_action(CheckConstantInput* input, const CheckAction* 
     {
         const uint32_t close = reader->parser->tokens.kinds[action->node] == PARSE_KIND_L_PAREN ?
                                reader->parser->tree.parents[action->node] : action->node;
+        // A direct call's parameter keeps its declaration's typedef (#1100, check_input_parameter_spelling).
+        const CheckConstantRange named = check_constant_action_source(input, callee, ranges, 0);
+        const uint32_t name = named.first < named.end && named.end == named.first + 1 ? named.first : BUSTER_CHECK_NONE;
         for (uint32_t i = 0; i < action->argument_count; i += 1)
         {
             const CheckConstantRange source = check_constant_action_source(input, callee, ranges, i + 1);
             if (source.first >= input->first && source.first < source.end && source.end <= input->end)
             {
-                check_input_null_warning(reader, action->argument_conversions[i].type, action->arguments + i, source.first, source.end, close);
+                const TypeId destination = action->argument_conversions[i].type;
+                CheckWarningEvent probe;
+                const bool warns = check_warning_null_event(reader->parser, reader->types, destination, action->arguments + i, source.first, source.end, close, &probe);
+                const uint32_t spelling = warns ? check_input_parameter_spelling(reader->parser, reader->output, name, i) : 0;
+                check_input_null_spelling(reader, destination, destination, spelling, action->arguments + i, source.first, source.end, close);
             }
         }
     }

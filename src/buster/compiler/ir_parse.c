@@ -964,6 +964,11 @@ static void ir_parse_instruction(IrParseState* state)
                         row.flags = (uint8_t)ir_parse_unsigned(state, 255, false);
                     }
                 }
+                // A frame address's save (#1847).
+                if (row.op == IR_STACK_SAVE && ir_parse_word(state, "frame"))
+                {
+                    row.flags = BUSTER_IR_STACK_SAVE_FRAME;
+                }
                 if (row.op == IR_LOAD || row.op == IR_STORE || row.op == IR_ATOMIC_RMW)
                 {
                     ir_parse_keyword(state, "align=");
