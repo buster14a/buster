@@ -663,6 +663,9 @@ at the target's forms, by both of the checker's paths:
   dword (`pshufd`, or of 32 bytes `vextractf128` and `shufps`), makes each element's kept bits its whole value by shifts
   and packs them with saturation (`packssdw`, `packsswb`, `packuswb`), 32 bytes as their two halves. Conversions between
   8- or 16-bit integers and floats or doubles go through dwords by them.
+- A `__builtin_convertvector` between integers and floats or doubles that no row of SSE's or AVX's takes (of unsigned
+  integers, and of 64-bit ones without AVX-512DQ) converts element by element, as C converts each scalar
+  (`check_lower_transport_convertvector`, #1834): clang's sequences compute the same values.
 - What has no form at the target is refused by name: shuffles of bytes and words without SSSE3, their 32-byte ones
   without AVX-512, minimum and maximum of qwords without SSE4.2, and the scalars' IEEE maxima and minima (`maximum`
   and `minimum`) without AVX, which need more records than a row has. A scalar's fused multiply-add without FMA is the C library's `fmaf` or `fma`, its `ldexp` `ldexpf` or
