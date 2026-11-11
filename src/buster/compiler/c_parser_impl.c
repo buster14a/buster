@@ -3231,15 +3231,23 @@ static bool parse_scalar_type_argument_attribute(const ParseScalar* parser, Iden
 // another grouping `(` (`int (n);`, `int ((n));`); any others (a function declarator's parameters, an attribute's
 // arguments, sizeof's operand) hold no member's name. The bodies of named records nested in it hold their own records'
 // members; each body's own scan finds the members of a named record still open.
-static bool parse_scalar_counted_member(const ParseScalar* parser, const ParseFrame* frame, uint32_t token)
+// Which counted_by family attribute's argument group `frame` is (#1842): 1 to 4 for counted_by, sized_by,
+// counted_by_or_null and sized_by_or_null (the order of their PARSE_MESSAGE_*_INTEGER), 0 for none.
+static uint32_t parse_scalar_counted_attribute(const ParseScalar* parser, const ParseFrame* frame)
 {
     static const char* const names[] = { "counted_by", "sized_by", "counted_by_or_null", "sized_by_or_null" };
-    bool counted = frame->role == PARSE_ROLE_OPEN_CALL && frame->opener > 0 && parse_scalar_gnu_attribute_group(parser, frame);
-    bool spelled = false;
-    for (uint32_t n = 0; counted && !spelled && n < sizeof(names) / sizeof(names[0]); n += 1)
+    const bool counted = frame->role == PARSE_ROLE_OPEN_CALL && frame->opener > 0 && parse_scalar_gnu_attribute_group(parser, frame);
+    uint32_t spelled = 0;
+    for (uint32_t n = 0; counted && spelled == 0 && n < sizeof(names) / sizeof(names[0]); n += 1)
     {
-        spelled = parse_scalar_attribute_spelled(parser, parser->names[frame->opener - 1], true, names[n]);
+        spelled = parse_scalar_attribute_spelled(parser, parser->names[frame->opener - 1], true, names[n]) ? n + 1 : 0;
     }
+    return spelled;
+}
+
+static bool parse_scalar_counted_member(const ParseScalar* parser, const ParseFrame* frame, uint32_t token)
+{
+    const bool spelled = parse_scalar_counted_attribute(parser, frame) != 0;
     bool found = false;
     for (uint32_t f = 0; spelled && !found && f < parser->frame_count; f += 1)
     {
@@ -3453,7 +3461,40 @@ static void parse_scalar_operand(ParseScalar* parser, uint32_t i, ParseFrame* fr
         }
         else if (ordinary && parse_scalar_is_typedef_name(parser, i))
         {
-            parse_scalar_error_argument(parser, i, PARSE_MESSAGE_UNEXPECTED_TYPE_NAME_EXPRESSION, BUSTER_PARSE_AT_TOKEN, i);
+            // In a counted_by family's argument, at any depth, clang's invalid expression has no integer type: its second
+            // error, at the argument's first token (#1842). Past the argument's top-level `,` clang reads nothing, its
+            // "expected ')'" there the checker's (CHECK_INPUT_COUNTED_PAREN): the name is an operand here.
+            uint32_t counted = 0;
+            uint32_t group = 0;
+            for (uint32_t f = parser->frame_count; counted == 0 && f > 0; f -= 1)
+            {
+                counted = parse_scalar_counted_attribute(parser, parser->frames + f - 1);
+                group = counted != 0 ? parser->frames[f - 1].opener : group;
+            }
+            uint32_t depth = 0;
+            bool listed = false;
+            for (uint32_t t = group + 1; counted != 0 && !listed && t < i; t += 1)
+            {
+                const uint8_t at = parser->kinds[t];
+                depth += at == PARSE_KIND_L_PAREN || at == PARSE_KIND_L_SQUARE || at == PARSE_KIND_L_BRACE;
+                depth -= depth != 0 && (at == PARSE_KIND_R_PAREN || at == PARSE_KIND_R_SQUARE || at == PARSE_KIND_R_BRACE);
+                listed = depth == 0 && at == PARSE_KIND_COMMA;
+            }
+            if (listed)
+            {
+                step->role = PARSE_ROLE_OPERAND;
+                frame->mode = PARSE_MODE_OPERATOR;
+                frame->flags &= ~BUSTER_PARSE_FRAME_EMPTY_OK;
+            }
+            else
+            {
+                const bool first = parser->error_token == BUSTER_PARSE_NONE;
+                parse_scalar_error_argument(parser, i, PARSE_MESSAGE_UNEXPECTED_TYPE_NAME_EXPRESSION, BUSTER_PARSE_AT_TOKEN, i);
+                static const uint8_t follows[] = { PARSE_MESSAGE_COUNTED_BY_INTEGER, PARSE_MESSAGE_SIZED_BY_INTEGER, PARSE_MESSAGE_COUNTED_BY_OR_NULL_INTEGER,
+                                                   PARSE_MESSAGE_SIZED_BY_OR_NULL_INTEGER };
+                parser->error_follow_token = first && counted != 0 ? group + 1 : parser->error_follow_token;
+                parser->error_follow_message = first && counted != 0 ? follows[counted - 1] : parser->error_follow_message;
+            }
         }
         else
         {
@@ -4688,6 +4729,7 @@ static void parse_scalar_reset(ParseScalar* parser)
     parser->typeless_function = 0;
     parser->kept_count = 0;
     parser->error_token = BUSTER_PARSE_NONE;
+    parser->error_follow_token = BUSTER_PARSE_NONE;
     parser->error_resumed = false;
     parser->error_resume_delete = false;
     parser->error_resume_end = 0;
@@ -4720,6 +4762,20 @@ static uint32_t parse_scalar_recover(ParseScalar* parser, uint32_t stopped)
         parser->diagnostic_count += 1;
     }
     parser->errors += 1;
+    if (parser->error_follow_token != BUSTER_PARSE_NONE && parser->diagnostic_count < parser->diagnostic_capacity)
+    {
+        parser->diagnostics[parser->diagnostic_count] = (ParseDiagnostic){
+            .token = parser->error_follow_token,
+            .publication = parser->error_token,
+            .argument = BUSTER_PARSE_NONE,
+            .message = parser->error_follow_message,
+            .place = BUSTER_PARSE_AT_TOKEN,
+            .error = true,
+            .note = BUSTER_PARSE_NONE,
+        };
+        parser->diagnostic_count += 1;
+        parser->errors += 1;
+    }
     const uint32_t end = resumed ? stopped - 1 : parse_scalar_skip(parser, stopped, parser->brackets);
     parse_scalar_attribute_tail(parser, stopped, end);
     for (uint32_t t = parser->item_begin; t <= end && t < parser->count; t += 1)
@@ -4776,6 +4832,7 @@ BUSTER_PARSER_ENTRY ParseScalarResult parse_scalar_traced(const uint8_t* kinds, 
         .item_log = 0,
         .error_token = BUSTER_PARSE_NONE,
         .error_argument = BUSTER_PARSE_NONE,
+        .error_follow_token = BUSTER_PARSE_NONE,
         .error_message = PARSE_MESSAGE_NONE,
         .error_place = BUSTER_PARSE_AT_TOKEN,
         .diagnostics = diagnostics,
@@ -11004,7 +11061,9 @@ BUSTER_PARSER_ENTRY void parse_print_diagnostics(const Parser* parser, Preproces
                 .message = opener_kind == PARSE_KIND_L_SQUARE ? "to match this '['" : opener_kind == PARSE_KIND_L_BRACE ? "to match this '{'" : "to match this '('",
             };
             const uint32_t source = parser->tokens.sources[diagnostic->token];
-            pp_diagnose_output_notes_at(pp, diagnostic->error ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING, source, source, &note, opener_kind != PARSE_KIND_END ? 1u : 0u, "%s", text);
+            // Published where the parser knew it (ParseDiagnostic.publication), after an earlier error of its token's.
+            const uint32_t known = diagnostic->publication != 0 && diagnostic->publication < parser->tokens.count ? parser->tokens.sources[diagnostic->publication] : source;
+            pp_diagnose_output_notes_at(pp, diagnostic->error ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING, source, known, &note, opener_kind != PARSE_KIND_END ? 1u : 0u, "%s", text);
         }
         else
         {
