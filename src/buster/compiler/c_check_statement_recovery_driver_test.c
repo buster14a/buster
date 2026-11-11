@@ -238,6 +238,12 @@ static void check_test_driver_statement_recovery(CheckTest* test, const char* cl
         "int k(int *p) { int q; q = p; return q + (1 << 40); }\n"
         "int m(void) { int u; return undeclared; }\n"
         "int n(int *p) { int u; int x = p; return x / 0; }\n",
+        // An array compound literal's conversion: the view's cast starts at its type name's `(`, not its body's `}`, so the
+        // function's later warnings stay (#2146 with #2132).
+        "int printf(const char *, ...);\n"
+        "void f(int n) { char *b = (int[2]){ 1, 2 }; printf(\"%s\\n\", n); }\n"
+        "void g(int n) { int u; char *e = (long[]){ 1, 2, 3 }; long *l = (int[1]){ 0 }; printf(\"%s\\n\", n); }\n"
+        "void h(int n) { int w = (struct { int x; }){ 1 }; char *a = (int[2]){ 1, 2 }; if (n < (unsigned){ 4 }) {} }\n",
     };
     static const char* const standards[] = { "-std=gnu17", "-std=gnu23" };
     // Each run's options: none, one or two.
