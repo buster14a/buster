@@ -95,6 +95,7 @@ static const char* check_driver_action_message(CheckDiagnostic diagnostic)
         case CHECK_DIAG_ADDRESS_SPACE_OVERLAP: result = "pointers to non-overlapping address spaces"; break;
         case CHECK_DIAG_ADDRESS_SPACE_NESTED: result = "conversion changes address space of nested pointer"; break;
         case CHECK_DIAG_OVERFLOW_BIT_INT: result = "__builtin_mul_overflow does not support 'signed _BitInt' operands of more than 128 bits"; break;
+        case CHECK_DIAG_COUNTED_INCOMPLETE: result = "cannot use a '__counted_by' attributed pointer whose pointee type is incomplete"; break;
         case CHECK_DIAG_NONE: break;
     }
     return result;
