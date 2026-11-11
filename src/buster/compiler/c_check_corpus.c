@@ -2151,8 +2151,12 @@ static bool check_corpus_view_equal(const CheckCorpusPath* a, const CheckCorpusP
         // Every field that orders or spells a report, whose recovered ones a deferred reading merges (#1447).
         const CheckInputReport* l = left->reports + report;
         const CheckInputReport* r = right->reports + report;
+        // (An asm constraint's report holds its bytes' address in its path's arena, #1973: the bytes compare.)
+        const bool constraint = l->message == CHECK_INPUT_ASM_CONSTRAINT && l->detail == r->detail && l->value != 0 && r->value != 0;
+        const uint32_t constraint_length = l->detail & ~BUSTER_CHECK_ASM_OUTPUT;
+        const bool same_value = constraint ? memcmp((const void*)(uintptr_t)l->value, (const void*)(uintptr_t)r->value, constraint_length) == 0 : l->value == r->value;
         equal = equal && l->completion == r->completion && l->suborder == r->suborder && l->attribute == r->attribute && l->detail == r->detail &&
-                l->value == r->value && l->type == r->type && l->type_spelling == r->type_spelling && l->note_token == r->note_token &&
+                same_value && l->type == r->type && l->type_spelling == r->type_spelling && l->note_token == r->note_token &&
                 l->note_kind == r->note_kind && l->multiversion == r->multiversion && l->specifier == r->specifier &&
                 l->specifier_type == r->specifier_type && l->sort == r->sort && l->repeated == r->repeated && l->recovered == r->recovered &&
                 l->pending == r->pending;

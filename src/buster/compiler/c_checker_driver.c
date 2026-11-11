@@ -235,6 +235,7 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_MS_STRUCT_ALIGNMENT: result = "ms_struct bit-field storage with non-power-of-two size is not supported"; break;
         case CHECK_INPUT_INTERRUPT_HANDLER: result = "x86-64 'interrupt' attribute only applies to functions that have a 'void' return type"; break;
         case CHECK_INPUT_INTERRUPT_CALLED: result = "interrupt service routine cannot be called directly"; break;
+        case CHECK_INPUT_ASM_CONSTRAINT: result = "invalid constraint in asm"; break;
         case CHECK_INPUT_BLOCK_EXTERN_INITIALIZER: result = "declaration of block scope identifier with linkage cannot have an initializer"; break;
         case CHECK_INPUT_DIAGNOSE_IF_ERROR: result = "diagnose_if attribute error"; break;
         case CHECK_INPUT_ENABLE_IF_CALL: result = "no matching function for call"; break;
@@ -3783,6 +3784,15 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                                                             "%s%.*s%s is unavailable%s%.*s", used_quote, (int)used_text.length, used_text.pointer, used_quote,
                                                             message.length != 0 ? ": " : "", (int)message.length, message.pointer);
                             }
+                        }
+                        else if (phase == 0 && kind == CHECK_INPUT_ASM_CONSTRAINT)
+                        {
+                            // An asm operand's constraint clang's validation refuses (#1973), as written.
+                            const CheckInputReport* report = input->reports + index;
+                            const uint32_t length = report->detail & ~BUSTER_CHECK_ASM_OUTPUT;
+                            pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "invalid %s constraint '%.*s' in asm",
+                                                  (report->detail & BUSTER_CHECK_ASM_OUTPUT) != 0 ? "output" : "input", (int)length,
+                                                  (const char*)(uintptr_t)report->value);
                         }
                         else if (phase == 0 && kind == CHECK_INPUT_INTERRUPT_HANDLER && (input->reports[index].detail & BUSTER_CHECK_INTERRUPT_UNLOCATED) != 0)
                         {

@@ -288,6 +288,10 @@ typedef enum CheckInputMessage
     // service routine, at its callee (check_input_interrupt_calls).
     CHECK_INPUT_INTERRUPT_HANDLER,
     CHECK_INPUT_INTERRUPT_CALLED,
+    // An asm operand's constraint that clang's validateOutputConstraint or validateInputConstraint refuses (#1973,
+    // check_asm_clang_valid), at its string: `value` its bytes' address in the reader's arena, `detail` their length and
+    // BUSTER_CHECK_ASM_OUTPUT for an output's.
+    CHECK_INPUT_ASM_CONSTRAINT,
     // A function's redeclaration with another explicit calling convention (#1447, check_input_report_redeclaration): the
     // new and the first declaration's conventions in the detail's low bytes, and in its bit 16 whether the first's is explicit.
     CHECK_INPUT_CONVENTION_CHANGE,
@@ -503,6 +507,7 @@ static const char* const check_input_messages[] =
     [CHECK_INPUT_UNEVALUATED_ESCAPE] = "invalid escape sequence in an unevaluated string literal",
     [CHECK_INPUT_INTERRUPT_HANDLER] = "x86-64 'interrupt' attribute only applies to functions that have a 'void' return type",
     [CHECK_INPUT_INTERRUPT_CALLED] = "interrupt service routine cannot be called directly",
+    [CHECK_INPUT_ASM_CONSTRAINT] = "invalid constraint in asm",
     [CHECK_INPUT_CONVENTION_CHANGE] = "function declared here was previously declared with another calling convention",
     [CHECK_INPUT_DIAGNOSE_IF_ERROR] = "diagnose_if attribute error",
     [CHECK_INPUT_ENABLE_IF_CALL] = "no matching function for call",
@@ -1162,6 +1167,8 @@ static __attribute__((unused)) void check_input_set_linkage(uint8_t* bits, uint3
 }
 
 #define BUSTER_CHECK_INTERRUPT_KEEP 0x80000000u
+// CHECK_INPUT_ASM_CONSTRAINT's detail bit of an output's constraint, above its length (#1973).
+#define BUSTER_CHECK_ASM_OUTPUT 0x80000000u
 
 // Whether a diagnostic at `token` is published (#1447): not where it is inside a direct call's full expression, of an
 // interrupt service routine, whose error is clang's invalid call alone there, but in that call's other arguments or
