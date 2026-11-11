@@ -5,7 +5,9 @@
 // previous is an earlier dense index in the same lexical scope, and every use retains its own head. Redeclarations
 // keep their canonical declaration/object, with inherited attributes, so later declarations never alter an earlier
 // call. The caller owns name lookup, linkage and publication. This module checks signatures and selects by the
-// partial order of per-argument conversions; it never sums ranks. The matrix is bounded by candidates * arguments,
+// partial order of per-argument conversions; it never sums ranks. enable_if conditions (#1447, c_check_condition_eval.c)
+// remove the candidates they don't admit and break ties of equal conversions, as clang's CheckEnableIf and
+// compareEnableIfAttrs do. The matrix is bounded by candidates * arguments,
 // and scalar/masked-vector comparisons consume the same rows without padding. All scratch is restored on exit.
 // Original implementation and fixtures. Clang 23.1.1 SemaOverload.cpp and AttributeReference describe behavior;
 // installed Clang is an external oracle. No upstream implementation or tests are incorporated.
@@ -39,6 +41,11 @@ struct CheckOverloadContext
 {
     CheckContext semantic;
     uint64_t* scratch_peak;
+    // The unit's enable_if and diagnose_if conditions (#1447, c_check_condition_eval.c), null or empty for none: an
+    // enable_if that doesn't admit a call makes its candidate not viable, and one that isn't always true makes its
+    // candidate's address ineligible. A call's arguments that are addresses never null (`&x`), one byte each, or null.
+    const CheckConditionTable* conditions;
+    const uint8_t* argument_nonnull;
 };
 
 typedef enum CheckOverloadStatus
@@ -67,6 +74,28 @@ struct CheckOverloadResult
     uint32_t flags;
 };
 
+// Why one candidate of a call isn't selected, for clang's notes of a call none or several are viable for (a diagnosis's
+// cold path, check_overload_explain).
+typedef enum CheckOverloadFailure
+{
+    CHECK_OVERLOAD_FAILURE_NONE,
+    CHECK_OVERLOAD_FAILURE_FEW_ARGUMENTS,
+    CHECK_OVERLOAD_FAILURE_MANY_ARGUMENTS,
+    CHECK_OVERLOAD_FAILURE_CONVERSION,
+    CHECK_OVERLOAD_FAILURE_DISABLED,
+} CheckOverloadFailure;
+
+typedef struct CheckOverloadExplained CheckOverloadExplained;
+struct CheckOverloadExplained
+{
+    // The candidate (each distinct function's latest visible declaration), its enable_if that disables it (an index into
+    // the unit's conditions) and whether it is among an ambiguous call's best (clang's OverloadCandidate.Best).
+    uint32_t candidate;
+    uint32_t condition;
+    uint8_t failure;
+    bool best;
+};
+
 typedef struct CheckOverloadRequest CheckOverloadRequest;
 struct CheckOverloadRequest
 {
@@ -77,6 +106,9 @@ struct CheckOverloadRequest
     uint32_t argument_count;
     CheckOverloadContext context;
     bool scalar;
+    // Where not null, each distinct candidate's outcome, in the walk's order (room for every candidate), and its count.
+    CheckOverloadExplained* explained;
+    uint32_t* explained_count;
 };
 
 typedef enum CheckOverloadRank
@@ -169,6 +201,16 @@ static bool check_overload_object_sizes_same(const CheckOverloadCandidate* left,
                                             memcmp(left->object_sizes, right->object_sizes, left->object_size_count) == 0));
 }
 
+// Whether two declarations of one signature are one function by their enable_if conditions (#1447): clang's IsOverload
+// makes overloadable ones whose enable_ifs differ (check_condition_compare_enable) two overloads.
+static bool check_overload_enables_same(const CheckOverloadContext* context, const CheckOverloadCandidate* left, const CheckOverloadCandidate* right)
+{
+    const CheckConditionTable* conditions = context != NULL ? context->conditions : NULL;
+    const bool compared = conditions != NULL && conditions->declaration_count != 0 && (left->flags & right->flags & BUSTER_CHECK_OVERLOADABLE) != 0;
+    return !compared || check_condition_compare_enable(conditions, check_condition_find(conditions, left->declaration),
+                                                       check_condition_find(conditions, right->declaration)) == 0;
+}
+
 static CheckOverloadResult check_overload_declare_chain(const TypeTable* table, const CheckOverloadCandidate* candidates, uint32_t count, uint32_t head, const CheckOverloadCandidate* candidate, const CheckOverloadContext* context, const uint32_t* next, const uint8_t* checked, uint32_t unmarked)
 {
     CheckOverloadResult result = check_overload_result(CHECK_OVERLOAD_OK);
@@ -204,7 +246,8 @@ static CheckOverloadResult check_overload_declare_chain(const TypeTable* table, 
             }
             else
             {
-                const TypeAnswer signature = check_overload_candidate_signature(table, candidate, prior);
+                const TypeAnswer compared = check_overload_candidate_signature(table, candidate, prior);
+                const TypeAnswer signature = compared == TYPE_ANSWER_YES && !check_overload_enables_same(context, candidate, prior) ? TYPE_ANSWER_NO : compared;
                 if (signature == TYPE_ANSWER_FULL)
                 {
                     result.status = CHECK_OVERLOAD_FULL;
@@ -469,6 +512,44 @@ static uint32_t check_overload_rank_order(const uint8_t* left, const uint8_t* ri
     return bad_order != 0 ? bad_order | 4u : rank_order;
 }
 
+// Whether the call's arguments are admitted by `candidate`'s enable_if conditions (#1447), clang's CheckEnableIf: each of
+// its parameters bound to its argument's checked value (as the call's, before its own conversion) converted to the
+// parameter's type (check_condition_bind), the
+// conditions checked in clang's order (check_condition_disabled). A unit without conditions doesn't call it.
+static bool check_overload_enabled(TypeTable* table, const CheckOverloadRequest* request, const CheckOverloadCandidate* candidate, const TypeId* parameters,
+                                   uint32_t parameter_count, Arena* scratch, bool* full, uint32_t* disabled)
+{
+    const CheckConditionTable* conditions = request->context.conditions;
+    const CheckConditionDeclaration* entry = check_condition_find(conditions, candidate->declaration);
+    bool enabled = true;
+    if (entry != NULL && entry->restricted)
+    {
+        const uint64_t mark = scratch->length;
+        const uint32_t bound_count = parameter_count < request->argument_count ? parameter_count : request->argument_count;
+        CheckValue* bound = BUSTER_ARENA_PUSH_ARRAY(scratch, CheckValue, (uint64_t)bound_count + 1);
+        CheckValue* values = BUSTER_ARENA_PUSH_ARRAY(scratch, CheckValue, (uint64_t)check_condition_steps_needed(conditions, entry) + 1);
+        *full |= bound == NULL || values == NULL;
+        for (uint32_t p = 0; !*full && p < bound_count; p += 1)
+        {
+            // An object's or a function's address is never null, as clang's evaluation knows: `&x`, an array or a function
+            // that decays, an address constant the checker marked so.
+            const CheckValue* original = request->arguments + p;
+            const bool pointer = check_action_kind(table, type_strip_aligned(table, parameters[p])) == BUSTER_TYPE_KIND_POINTER;
+            const bool nonnull = pointer && original->fault == CHECK_FAULT_NONE &&
+                                 ((request->context.argument_nonnull != NULL && request->context.argument_nonnull[p] != 0) || original->category == CHECK_FUNCTION ||
+                                  original->overload_head != 0 ||
+                                  (original->category == CHECK_LVALUE && type_kind_is_array(check_action_kind(table, type_strip_aligned(table, original->type)))) ||
+                                  (original->constant_kind == CHECK_CONSTANT_ADDRESS && (original->flags & BUSTER_CHECK_NONNULL_ADDRESS) != 0 &&
+                                   original->category != CHECK_LVALUE));
+            bound[p] = check_condition_bind(table, *original, nonnull, parameters[p], 0);
+        }
+        *disabled = *full ? UINT32_MAX : check_condition_disabled(table, conditions, entry, bound, bound_count, request->context.semantic.extensions, 0, values);
+        enabled = *disabled == UINT32_MAX;
+        arena_pop_to(scratch, mark);
+    }
+    return enabled;
+}
+
 static uint32_t check_overload_better(const TypeTable* table, const CheckOverloadRequest* request, const CheckValue* arguments, const uint8_t* left, const uint8_t* right, uint32_t li, uint32_t ri, bool* full)
 {
     uint32_t order = check_overload_rank_order(left, right, request->argument_count, BUSTER_SCALAR_PATH(request->scalar));
@@ -511,6 +592,14 @@ static uint32_t check_overload_better(const TypeTable* table, const CheckOverloa
                 }
             }
         }
+    }
+    // Then clang's enable_if comparison (compareEnableIfAttrs): the candidate whose enable_ifs are the other's and more
+    // is better, and ones that differ are neither; then pass_object_size's.
+    const CheckConditionTable* conditions = request->context.conditions;
+    if (order == 0 && conditions != NULL && conditions->declaration_count != 0)
+    {
+        order = check_condition_compare_enable(conditions, check_condition_find(conditions, request->candidates[li].declaration),
+                                               check_condition_find(conditions, request->candidates[ri].declaration));
     }
     if (order == 0 && (request->candidates[li].object_sizes != NULL) != (request->candidates[ri].object_sizes != NULL))
     {
@@ -619,6 +708,25 @@ static CheckOverloadResult check_overload_select(TypeTable* table, const CheckOv
                 row[i] = viable ? (fixed ? check_overload_conversion(table, &argument, parameters[i], &request->context, &full) : CHECK_OVERLOAD_ELLIPSIS) : CHECK_OVERLOAD_IMPOSSIBLE;
                 viable = row[i] != CHECK_OVERLOAD_IMPOSSIBLE;
             }
+            const uint8_t arity = prototype && request->argument_count < parameter_count ? CHECK_OVERLOAD_FAILURE_FEW_ARGUMENTS :
+                                  prototype && !variadic && request->argument_count > parameter_count ? CHECK_OVERLOAD_FAILURE_MANY_ARGUMENTS :
+                                  CHECK_OVERLOAD_FAILURE_NONE;
+            const bool converted = viable;
+            uint32_t disabled = UINT32_MAX;
+            if (viable && !full && request->context.conditions != NULL && request->context.conditions->declaration_count != 0)
+            {
+                viable = check_overload_enabled(table, request, candidate, parameters, parameter_count, scratch, &full, &disabled);
+            }
+            if (request->explained != NULL)
+            {
+                request->explained[*request->explained_count] = (CheckOverloadExplained){
+                    .candidate = current,
+                    .condition = disabled,
+                    .failure = arity != CHECK_OVERLOAD_FAILURE_NONE ? arity : !converted ? CHECK_OVERLOAD_FAILURE_CONVERSION :
+                               disabled != UINT32_MAX ? CHECK_OVERLOAD_FAILURE_DISABLED : CHECK_OVERLOAD_FAILURE_NONE,
+                };
+                *request->explained_count += 1;
+            }
             if (viable && !full)
             {
                 indices[active_count++] = current;
@@ -645,6 +753,39 @@ static CheckOverloadResult check_overload_select(TypeTable* table, const CheckOv
             wins = check_overload_better(table, request, arguments, left, right, indices[best_row], indices[i], &full) == 1;
         }
     }
+    // An ambiguous call's best, for its notes: clang's closure from the first best of the candidates the ones in it aren't
+    // better than (BestViableFunction's PendingBest).
+    uint8_t* marked = request->explained != NULL && !wins && active_count != 0 && !full ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, active_count) : 0;
+    uint32_t* pending = marked != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, active_count) : 0;
+    full |= marked != 0 && pending == 0;
+    uint32_t pending_count = 0;
+    if (pending != 0)
+    {
+        memset(marked, 0, active_count);
+        marked[best_row] = 1;
+        pending[pending_count++] = best_row;
+    }
+    while (!full && pending_count != 0)
+    {
+        const uint32_t current = pending[--pending_count];
+        for (uint32_t i = 0; !full && i < active_count; i += 1)
+        {
+            const uint8_t* left = ranks + (uint64_t)current * request->argument_count;
+            const uint8_t* right = ranks + (uint64_t)i * request->argument_count;
+            if (marked[i] == 0 && check_overload_better(table, request, arguments, left, right, indices[current], indices[i], &full) != 1)
+            {
+                marked[i] = 1;
+                pending[pending_count++] = i;
+            }
+        }
+    }
+    for (uint32_t i = 0; pending != 0 && !full && i < *request->explained_count; i += 1)
+    {
+        for (uint32_t j = 0; j < active_count; j += 1)
+        {
+            request->explained[i].best |= marked[j] != 0 && indices[j] == request->explained[i].candidate;
+        }
+    }
     const uint32_t best = wins ? indices[best_row] : UINT32_MAX;
     result.status = full ? CHECK_OVERLOAD_FULL : !valid ? CHECK_OVERLOAD_INVALID : best == UINT32_MAX ?
                     (active_count == 0 ? CHECK_OVERLOAD_NO_MATCH : CHECK_OVERLOAD_AMBIGUOUS) : CHECK_OVERLOAD_OK;
@@ -668,8 +809,12 @@ static CheckOverloadResult check_overload_select(TypeTable* table, const CheckOv
 }
 
 // The selected call uses ordinary CALL constraints and conversions. Only certified standard multilevel pointer
-// qualifications need an adjusted argument view; their original lvalue/volatile/effect conversion is retained.
-static CheckOverloadResult check_overload_call(TypeTable* table, const CheckAction* action, const CheckOverloadCandidate* candidates, uint32_t count, uint32_t head, Arena* scratch, bool scalar, CheckActionResult* output, CheckOverloadResult* argument_selected, uint64_t* scratch_peak)
+// qualifications need an adjusted argument view; their original lvalue/volatile/effect conversion is retained. The
+// candidates' enable_if conditions are `conditions` (null for none), the arguments that are addresses never null
+// `argument_nonnull` (null for none known).
+static CheckOverloadResult check_overload_call_with(TypeTable* table, const CheckAction* action, const CheckOverloadCandidate* candidates, uint32_t count, uint32_t head,
+                                                    Arena* scratch, bool scalar, CheckActionResult* output, CheckOverloadResult* argument_selected,
+                                                    uint64_t* scratch_peak, const CheckConditionTable* conditions, const uint8_t* argument_nonnull)
 {
     (void)scalar;
 
@@ -682,6 +827,8 @@ static CheckOverloadResult check_overload_call(TypeTable* table, const CheckActi
         .context = {
             .semantic = action->context,
             .scratch_peak = scratch_peak,
+            .conditions = conditions,
+            .argument_nonnull = argument_nonnull,
         },
         .scalar = BUSTER_SCALAR_PATH(scalar),
     };
@@ -796,6 +943,35 @@ static CheckOverloadResult check_overload_call(TypeTable* table, const CheckActi
     }
     arena_pop_to(scratch, mark);
     return selected;
+}
+
+// A call's candidates' outcomes (CheckOverloadExplained), for the notes of a call that no candidate or several are viable
+// for: the selection again, with the checked arguments `arguments`, into `explained` (room for `count`), giving how many.
+// A diagnosis's cold path: the call was checked with these values, so the conversions find the types they made then.
+static uint32_t check_overload_explain(TypeTable* table, const CheckOverloadCandidate* candidates, uint32_t count, uint32_t head, const CheckValue* arguments,
+                                       uint32_t argument_count, const CheckOverloadContext* context, Arena* scratch, CheckOverloadExplained* explained, bool scalar)
+{
+    uint32_t explained_count = 0;
+    const CheckOverloadRequest request = {
+        .candidates = candidates,
+        .count = count,
+        .head = head,
+        .arguments = arguments,
+        .argument_count = argument_count,
+        .context = *context,
+        .scalar = BUSTER_SCALAR_PATH(scalar),
+        .explained = explained,
+        .explained_count = &explained_count,
+    };
+    const CheckOverloadResult result = check_overload_select(table, &request, scratch);
+    return result.status == CHECK_OVERLOAD_NO_MATCH || result.status == CHECK_OVERLOAD_AMBIGUOUS ? explained_count : 0;
+}
+
+// check_overload_call_with without conditions.
+static CheckOverloadResult check_overload_call(TypeTable* table, const CheckAction* action, const CheckOverloadCandidate* candidates, uint32_t count, uint32_t head,
+                                               Arena* scratch, bool scalar, CheckActionResult* output, CheckOverloadResult* argument_selected, uint64_t* scratch_peak)
+{
+    return check_overload_call_with(table, action, candidates, count, head, scratch, scalar, output, argument_selected, scratch_peak, NULL, NULL);
 }
 
 #endif

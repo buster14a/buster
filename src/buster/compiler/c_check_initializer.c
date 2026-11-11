@@ -2230,7 +2230,7 @@ static CheckDiagnostic check_init_overload(CheckInitWalker* walker, CheckAction*
             CheckContext semantic = action->context;
             // Overload visibility belongs to this expression's end, not the containing initializer's end.
             semantic.source_position = graph->source_positions != NULL ? graph->source_positions[action->node] : BUSTER_CHECK_NONE;
-            const CheckOverloadContext context = { .semantic = semantic };
+            const CheckOverloadContext context = { .semantic = semantic, .conditions = &graph->conditions };
             CheckValue resolved = { 0 };
             const CheckOverloadResult selected = check_overload_argument(walker->types, action->operands, action->type,
                                                                          graph->overload_candidates, graph->overload_candidate_count,
