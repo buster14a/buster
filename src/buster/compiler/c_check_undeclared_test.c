@@ -6,8 +6,8 @@
 // after it, and the statements after it, keep theirs. Each fixture is a translation unit of its own (the driver gives
 // one control-flow diagnostic a unit), which clang -fsyntax-only and the driver's two paths, with -fsyntax-only and with
 // -c, compile. Their diagnostics are compared line for line: each error's and warning's line, column and severity, and
-// an undeclared identifier's whole message. Other messages are this checker's own (`integer operands required` for
-// clang's `invalid operands to binary expression`), which #1077 leaves. Clang's lines must also be the fixture's, so
+// an undeclared identifier's whole message. Other messages are compared by their places alone, as #1077 left their words
+// (clang's `invalid operands to binary expression` is since #1872's). Clang's lines must also be the fixture's, so
 // that a fixture keeps testing what it says. Include after c_check_x86_diagnostic_test.c, whose helpers it uses.
 
 #include "buster/compiler/test_paths.h"
