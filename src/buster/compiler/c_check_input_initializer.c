@@ -573,7 +573,8 @@ static bool check_input_initializer_finish(CheckInputReader* reader, uint32_t de
         {
             reader->output->reports[before].type = reader->declared_types[declaration];
             reader->output->reports[before].type_spelling = check_input_typedef_spelling(reader->output, parser, declaration);
-            reader->output->reports[before].value = literal;
+            // (The literal's type name's typedef in the high half, #1812: `'A2' (aka 'int[2]')`.)
+            reader->output->reports[before].value = (uint64_t)literal | (uint64_t)check_input_token_type_spelling(reader->output, parser, begin, false) << 32;
             reader->output->reports[before].completion = end;
         }
         mismatched = reader->output->report_count == before + 1 && check_input_recover_reports(reader, before);
