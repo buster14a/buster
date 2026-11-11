@@ -334,8 +334,12 @@ unused-warning fixtures also check exact scope-completion tokens.
   initializer's is warned once. A comparison's operands are rvalues, as clang's DefaultLvalueConversion makes them: unqualified, a typedef
   that carries a qualifier itself spelled as its type; a GNU `a ?: b`'s omitted operand is its condition promoted, never
   an enumeration.
-  `c_check_enum_arithmetic_driver_test.c` compares them with complete pinned-Clang output at each policy, both paths and
-  with `-c`.
+  `check_common_enum_coerced` first finds the nearest enclosing definition by its ordered opening token. Nested
+  enum definitions inside enumerator values can close before a later outer enumerator, so the fallback scans all
+  definitions. It takes the maximum one-based matching index (zero for nonmatching SIMD lanes), then loads that type
+  once, avoiding Clang 23 MSan checking inactive poison TypeId lanes before `llvm.experimental.vector.extract.last.active`
+  (#1829). `c_check_enum_arithmetic_driver_test.c` compares complete pinned-Clang output at each policy, both paths
+  and with `-c`, including 9/17-definition vector-chunk cases and nested-definition fallback coverage.
   `-Wfor-loop-analysis` (#1447, clang's CheckForLoopConditionalStatement and CheckForRedundantIteration,
   `check_common_for_loops`) is off by default, under `-Wloop-analysis` and `-Wmost` and so `-Wall`; a unit where nothing
   enables it skips the scan. The condition is its truth test's operand. Its variables, where it is simple (operators,
