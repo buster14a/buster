@@ -9405,9 +9405,11 @@ static bool check_driver_typo_edits(CheckDriverTypoEdits* edits, const Parser* o
     };
     const uint32_t count = original->tokens.count;
     bool added = false;
-    // The tails left out (ParseDiagnostic.tail, check_driver_typo_tail): where the name's search suggested no keyword, the
-    // next view keeps an expression's; and where it took no value, a block item's attributes. One that took a value
-    // leaves the whole item out of the next view, to its `;`, with its errors.
+    // The tails left out (ParseDiagnostic.tail, check_driver_typo_tail): an expression's stands where the name stays
+    // undeclared (a keyword suggested, a tie, or nothing near), as clang's expression is invalid and its rest skipped, and
+    // the next view keeps it, with its error, where the name was declared or a correction took a value. A block item's
+    // attributes stand where a correction took a value: the next view leaves the whole item out, to its `;`, with its
+    // errors; otherwise the next view keeps them.
     for (uint32_t d = 0; d < diagnostic_count; d += 1)
     {
         const ParseDiagnostic* diagnostic = diagnostics + d;
@@ -9418,10 +9420,9 @@ static bool check_driver_typo_edits(CheckDriverTypoEdits* edits, const Parser* o
         for (uint32_t r = 0; name < count && r < input->report_count; r += 1)
         {
             const CheckInputReport* report = input->reports + r;
-            const uint32_t keyword = report->detail & (CHECK_TYPO_STATEMENT - 1);
             const bool at_name = check_driver_original_token(original, checking, report->token) == name;
             const bool value = attributes && report->message == CHECK_INPUT_UNDECLARED_CORRECTED;
-            confirmed |= at_name && (value || (!attributes && report->message == CHECK_INPUT_UNDECLARED && keyword != 0 && (report->detail & CHECK_TYPO_STATEMENT) == 0));
+            confirmed |= at_name && (value || (!attributes && report->message == CHECK_INPUT_UNDECLARED && (report->detail & CHECK_TYPO_STATEMENT) == 0));
             taken = at_name && value ? check_driver_original_token(original, checking, report->note_token) : taken;
         }
         const uint32_t end = confirmed && attributes ? check_driver_skip_end(original, name) : BUSTER_CHECK_NONE;
