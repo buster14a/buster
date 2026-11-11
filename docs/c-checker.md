@@ -9252,8 +9252,10 @@ arguments against the function. The checker now gives these as clang does.
     spellings are refused (see above). A `_Generic` association's type in a
     body is read as a cast's (`check_input_selection_type_name`), with its
     attributes' warnings; one the constant reader reads (a file-scope
-    initializer's) gives none. A `typeof` type name that starts with a GNU
-    attribute isn't read as one, as for every attribute there. As everywhere, a
+    initializer's) gives none. A `typeof`'s or `sizeof`'s type name that
+    starts with a GNU attribute is read as one (`check_constant_type_start`),
+    with its attributes' type warnings ("'aligned' attribute ignored when
+    parsing type"). As everywhere, a
     declaration's first error ends the unit: a shared specifiers'
     `objc_ownership` with a count's error warns and errs for the first
     declarator alone, and a TCB function's call clang declares implicitly

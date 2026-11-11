@@ -1422,11 +1422,13 @@ static TypeId check_constant_intrinsic_type(CheckConstantInput* input, uint32_t 
     return type;
 }
 
+// Whether a type name starts at `token`: a specifier, a tag, typeof, _Atomic, or a GNU attribute (#1447:
+// `typeof(__attribute__((aligned(8))) int)`), which no expression starts with.
 static bool check_constant_type_start(const Parser* parser, uint32_t token)
 {
     const uint8_t kind = parser->tokens.kinds[token];
     return parser->tree.roles[token] == PARSE_ROLE_SPECIFIER || kind == PARSE_KIND_STRUCT || kind == PARSE_KIND_ENUM ||
-           kind == PARSE_KIND_TYPEOF || kind == PARSE_KIND_ATOMIC;
+           kind == PARSE_KIND_TYPEOF || kind == PARSE_KIND_ATOMIC || kind == PARSE_KIND_ATTRIBUTE;
 }
 
 static bool check_constant_raw_type_start(CheckConstantInput* input, uint32_t token);
