@@ -586,7 +586,7 @@ static uint32_t check_semantic_operand_spelling(const Parser* parser, const Chec
         const uint32_t declaration = member ? (selected != 0 ? check_semantic_member_token(parser, input, types, selected) : BUSTER_CHECK_NONE) :
                                      token < input->token_count && input->declarations != NULL && parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER ?
                                      input->declarations[token] : 0;
-        result = declaration != 0 && declaration < input->token_count ? check_input_typedef_spelling(input, parser, declaration) : 0;
+        result = declaration != 0 && declaration < input->token_count ? check_input_typedef_sugar(input, parser, declaration) : 0;
         const bool through = declaration == 0 && (op == CHECK_OP_VALUE || op == CHECK_OP_DEREFERENCE || op == CHECK_OP_SUBSCRIPT);
         at = result == 0 && through ? graph->operand0[at] : BUSTER_CHECK_NONE;
     }
