@@ -14584,14 +14584,41 @@ static bool check_lower_asm_segment(const CheckLowerWriter* writer, const CheckI
     return result;
 }
 
-// An asm operand's input value (place->type's): the operand's expression's, or an __m64's 8 bytes (#1846,
-// CheckAsmPlace.m64) loaded as an unsigned long through its object's address (CheckAsmPlace.object's).
+// The address of a copy of vector expression `node`'s value, of `type` (#1846): a frame object of its bytes, which the
+// value is stored into, or a transport vector's own address, which its value already is.
+static void check_lower_asm_vector_copy(CheckLowerWriter* writer, uint32_t node, TypeId type)
+{
+    if (check_lower_transport_type(writer->program->types, type))
+    {
+        check_lower_expression(writer, node, false, type);
+    }
+    else
+    {
+        const uint32_t local = check_lower_temporary_of(writer, type);
+        check_lower_instruction(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, local);
+        check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_VECTOR, local);
+        check_lower_expression(writer, node, false, type);
+    }
+}
+
+// An asm operand's input value (place->type's): the operand's expression's; an __m64's 8 bytes (#1846,
+// CheckAsmPlace.m64) loaded as an unsigned long through its object's address (CheckAsmPlace.object's), or a copy's for a
+// value of no object; or a packed vector's address (#1846, CheckAsmPlace.packed), a copy's.
 static void check_lower_asm_value(CheckLowerWriter* writer, const CheckAsmPlace* place, uint32_t node)
 {
-    if (place->m64)
+    if (place->m64 && place->object != BUSTER_CHECK_NONE)
     {
         check_lower_instruction(writer, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_U64, 0);
         check_lower_expression(writer, place->object, true, 0);
+    }
+    else if (place->m64)
+    {
+        check_lower_instruction(writer, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_U64, 0);
+        check_lower_asm_vector_copy(writer, node, check_stream_type(writer->program->stream, node));
+    }
+    else if (place->packed)
+    {
+        check_lower_asm_vector_copy(writer, node, place->type);
     }
     else
     {
@@ -14831,8 +14858,21 @@ static void check_lower_asm(CheckLowerWriter* writer, CheckControl control)
         {
             const CheckAsmPlace* place = plan->places + k;
             const uint32_t node = statement->operands[k].node;
-            const uint8_t class = check_lower_class(writer, place->type);
-            if (place->written && place->read && place->kind != BUSTER_CHECK_ASM_MEMORY)
+            // A packed vector's slots hold addresses (#1846).
+            const uint8_t class = place->packed ? BUSTER_TYPED_CLASS_U64 : check_lower_class(writer, place->type);
+            if (place->written && place->read && place->packed)
+            {
+                // A `+` packed vector's value: a copy's address, the copy loaded through the output's address the slot holds.
+                const uint32_t local = check_lower_temporary_of(writer, place->type);
+                check_lower_instruction(writer, BUSTER_TYPED_SET, BUSTER_TYPED_CLASS_U64, 0);
+                check_lower_instruction(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, local);
+                check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_VECTOR, local);
+                check_lower_instruction(writer, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_VECTOR, place->size);
+                check_lower_instruction(writer, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_U64, 0);
+                check_lower_asm_slot(writer, object, place->slot);
+                check_lower_asm_slot(writer, object, place->value);
+            }
+            else if (place->written && place->read && place->kind != BUSTER_CHECK_ASM_MEMORY)
             {
                 // A `+` register operand's value, through its address the slot holds.
                 check_lower_instruction(writer, BUSTER_TYPED_SET, class, 0);

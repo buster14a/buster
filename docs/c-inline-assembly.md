@@ -38,15 +38,16 @@ from its own width, as GCC and clang place it (`"=r"(long) : "0"(-1)` is
 loaded and stored back, as clang's code does. An output that nothing writes
 keeps its value; GCC and clang leave it unspecified.
 
-Such a template also takes a vector in a vector register's constraint, which a
-helper doesn't load or store yet: `main.c`'s barriers `__asm__("" : "+v"(x))`
-of an `__m512i` (`c_lexer.c`'s `shift_in_previous`, `x86_64_encoder.c`'s
-`encode_group`). The planning holds such an operand aside
-(`BUSTER_CHECK_ASM_HELD`) until the template is assembled. A template of
-instructions, or one that refers to the operand, is then refused. In one of
-none, an output is evaluated as its object's address, which the template leaves
-as it was, and an input as its value, which is dropped. A volatile output isn't
-held, since clang's code loads and stores it.
+Such a template also takes a vector in a vector register's constraint without
+moving it: `main.c`'s barriers `__asm__("" : "+v"(x))` of an `__m512i`
+(`c_lexer.c`'s `shift_in_previous`, `x86_64_encoder.c`'s `encode_group`). An
+output is then evaluated as its object's address, which the template leaves as
+it was, and an input as its value, which is dropped. A vector of 16, 32 or 64
+bytes is otherwise moved through its register as clang's code moves it ("Vector
+operands", below): a volatile output (clang's code loads and stores it), and an
+input matching an output (whose value its output takes). A vector of another size
+(`BUSTER_CHECK_ASM_HELD`) is held aside until the template is assembled, and
+refused in a template of instructions or one that refers to it.
 
 Why a call, for what isn't placed in the caller:
 
@@ -358,7 +359,7 @@ alternative (`check_asm_constraint_parse`):
 | `r`, `q`, `l`, `R`, `Q` | a general register of the class (`Q`: rax, rbx, rcx, rdx; `R`: the first eight) |
 | `a b c d S D` | that register |
 | `A` | rax for up to 8 bytes, printed by its 64-bit name; rdx:rax for an `__int128` |
-| `x`, `v` | an XMM register, for a `float` or a `double`; a vector in a template of no instructions |
+| `x`, `v` | an XMM register, for a `float` or a `double`; an XMM, YMM or ZMM register for a vector of 16, 32 or 64 bytes |
 | `t`, `u` | the x87's st(0) and st(1), for a `float`, a `double` or a `long double` |
 | `y` | an MMX register, mm0 up, for an integer, a pointer, a `float` or a `double` of up to 8 bytes |
 | `k`, `Yk` | an opmask register, k0 up (`Yk`: k1 up), for an integer or a pointer of up to 8 bytes |
@@ -394,11 +395,13 @@ clang's code gives it (CodeGen's `AddVariableConstraints`;
   output of a memory constraint (`"=m"(r10)`) is r10 too, and a matching input
   is in its variable's register rather than its output's;
 - a general register by any of its names (`"ebx"` is rbx; an `int`'s operand
-  prints `%r10d`), and xmm0 to xmm15 for a `float` or a `double`;
+  prints `%r10d`), and xmm0 to xmm15 for a `float`, a `double` or a 16-byte vector;
 - xmm16 to xmm31 too (#1846), where the body's instruction set has AVX-512F
   (its function's target attributes among them): the helper moves them by
   EVEX's `vmovd` and `vmovq`. Without it clang can't place one ("could not
   allocate output register"), and the lowering refuses it by name;
+- ymm0 to ymm31 and zmm0 to zmm31 (#1846), for a vector of their size ("Vector
+  operands", below);
 - mm0 to mm7, k0 to k7, and the x87's st (st(0)) and st(1) (#1846, the owner's
   decision on #1447): the variable's operand is an MMX, opmask or x87 one in that
   register (st at t's depth, st(1) at u's), whatever its constraint's letters,
@@ -451,6 +454,26 @@ code shares it: mulq's `"=A"(r) : "a"(x), "rm"(y)` multiplies x in rax. The
 helper loads and stores the pair by its halves, from a slot of 16 bytes, and so
 does an asm body (#1839), which loads its operands from its block.
 
+### Vector operands
+
+A vector of 16, 32 or 64 bytes in `x` or `v` (#1846, the owner's decision on
+#1447) takes an XMM, YMM or ZMM register, xmm0 up, as clang's code places it:
+32 bytes need AVX and 64 AVX-512F (clang's Sema refuses the sizes otherwise),
+and the template names it by its size, `%xmm0`, `%ymm0` or `%zmm0` (`%x0`,
+`%t0` and `%g0` name the others). So does an explicit register variable in
+its size's register (`register __m256 y __asm__("ymm7")`, xmm16 up's and
+ymm16 up's with AVX-512VL); one of another size is clang's "does not match
+required type", refused by name. Its block slots hold addresses
+(`CheckAsmPlace.packed`): an output's of its object, an input's of a copy the
+lowering stores its value into (a transport vector's own), and a `+`
+operand's value's of a copy loaded through the output's address, so that the
+operands are evaluated in clang's order. The asm body, or the helper, loads
+each address into rax before the general registers' loads and the vector
+through it by movups (VEX's with AVX, EVEX's for ZMM and for XMM16 up), and
+stores an output through its address after the template. clang's code moves
+them by movaps; the slots' addresses needn't be aligned. A template that takes
+directives refuses them by name.
+
 ### MMX's operands
 
 `y` places an operand in an MMX register (#1846), mm0 up but the ones the
@@ -458,7 +481,8 @@ clobbers name (`"mm0"`): an integer, a pointer, a `float` or a `double` of up
 to 8 bytes, as clang takes them, and an `__m64` (#1846, the owner's decision
 on #1447): its 8 bytes as an unsigned long, an input's read through its
 object's address (`CheckAsmPlace.m64`), since Tier 0 has no 8-byte vector load.
-An `__m64` input of no object (`v + v`) is refused by name. The template
+An `__m64` input of no object (`v + v`, a call's) is read through a copy's
+address, which the lowering stores it into (#1846). The template
 names it `%mm0`; clang refuses every modifier of one, and so does the lowering.
 The helper loads it as clang's code does, zero-extended into rax and moved into
 its register (`movzwl`, then `movq %rax, %mm0`), before the general registers'
@@ -865,10 +889,15 @@ Each refusal names its feature, as the driver prints it ("unsupported: ..."):
   its depth's register, `%st` or `%st(1)`, as GCC and clang print it;
 - symbolic immediates, and constants outside their letter's range;
 - operands of types no general or XMM register holds by value, outside memory,
-  but a vector in a template of no instructions that doesn't refer to it;
+  but a vector of 16, 32 or 64 bytes (as clang can't place another: "could not
+  allocate"), or of any size in a template of no instructions that doesn't
+  refer to it; and vectors of 32 bytes without AVX or 64 without AVX-512F, or
+  in XMM16 up or YMM16 up of 16 or 32 bytes without AVX-512VL (clang's Sema
+  rejects the sizes first: "invalid input size for constraint", which the
+  checker doesn't give yet, #2231);
 - bit-fields;
 - explicit register variables in registers the helper doesn't place one in
-  (APX's r16 to r31, st(2) to st(7), YMM's and ZMM's), in rsp in a statement
+  (APX's r16 to r31, st(2) to st(7)), in rsp in a statement
   that keeps a helper (a template that takes directives among them), in XMM16 to
   XMM31 without AVX-512F, in a high byte in a template that takes directives,
   as memory inputs (`"m"(r10)`, which clang's code refuses too), and of other
@@ -987,9 +1016,13 @@ has the commands, the logs and the default path's numbers against main.
   - vectors in vector registers' constraints in templates of no instructions,
     for x86-64-v4: `+v` and `+x` outputs of 64, 32 and 16 bytes that keep their
     values, one through a call's pointer, evaluated once, an input that is
-    evaluated and dropped, and a comment without operands. Their refusals: a
-    template of instructions with an output or an input, a comment that refers
-    to the vector, a volatile output, and an input matching a vector output;
+    evaluated and dropped, and a comment without operands;
+  - vectors of 16, 32 and 64 bytes in templates of instructions (#1846): inputs,
+    `+` operands, outputs, matching inputs (in a template of no instructions
+    too), a volatile output, `%x0` of a YMM operand, and explicit register
+    variables in xmm30, ymm7 and zmm21; and 16-byte ones under SSE alone. Their
+    refusals: 32 bytes without AVX, 64 without AVX-512F, a variable of another
+    size than its register's, and a template that takes directives;
   - the operands' order of evaluation, each once, through functions that
     record their calls;
   - rdi and rsi as operands, constants sign-extended as clang prints them, a
@@ -1134,4 +1167,4 @@ What the lowering still refuses of what GCC and clang take:
   instructions outside its families (an x87 memory operand without a width,
   `fstp (%rax)`, is refused as clang refuses it);
 - explicit register variables in rsp in statements that keep a helper (a
-  template that takes directives), and in YMM's and ZMM's registers and st(2) up.
+  template that takes directives), and in st(2) up.
