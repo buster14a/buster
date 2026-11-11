@@ -920,46 +920,34 @@ static const PPDirectiveTestStructure pp_directive_test_definitions[] = {
       0, 0 },
 };
 
-// Runs a command (`argv`, ended by a null) with CPATH and C_INCLUDE_PATH unset: what it writes to standard output and
-// to standard error go to `*output` and `*errors` (each may be null to drop it), in memory (null if it doesn't run).
-// Returns its exit status, or -1.
+// Runs a command (`argv`, ended by a null) with CPATH and C_INCLUDE_PATH unset and its standard input /dev/null: what
+// it writes to standard output and to standard error go to `*output` and `*errors` (each may be null to drop it), in
+// memory (null if it doesn't run). A clang run goes through the clang server where test-preprocessor has one
+// (oracle_serve_child), others (this executable's) run as children. Returns its exit status, or -1 (127 too: it
+// couldn't run).
 static int pp_directive_test_command(char* const* argv, char** output, char** errors)
 {
-    FILE* files[2] = { tmpfile(), tmpfile() };
-    const pid_t child = files[0] != 0 && files[1] != 0 ? fork() : -1;
-    if (child == 0)
-    {
-        if (dup2(fileno(files[0]), STDOUT_FILENO) < 0 || dup2(fileno(files[1]), STDERR_FILENO) < 0)
-        {
-            _exit(127);
-        }
-        unsetenv("CPATH");
-        unsetenv("C_INCLUDE_PATH");
-        execvp(argv[0], argv);
-        _exit(127);
-    }
-    int status = 0;
-    const bool ran = child > 0 && waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) != 127;
-    char** texts[2] = { output, errors };
+    char** environment = pp_test_clang_environment();
+    char* texts[2] = { 0, 0 };
+    uint64_t lengths[2] = { 0, 0 };
+    const uint32_t streams = (output != 0 ? 1u : 0u) | (errors != 0 ? 2u : 0u);
+    const int status = environment != 0 ? oracle_serve_child("preprocessor: directives' command", argv, environment, streams, &texts[0], &lengths[0], &texts[1], &lengths[1]) : -1;
+    const bool ran = status >= 0 && status != 127;
+    char** results[2] = { output, errors };
     for (uint32_t k = 0; k < 2; k += 1)
     {
-        const long length = ran && texts[k] != 0 && fseek(files[k], 0, SEEK_END) == 0 ? ftell(files[k]) : -1;
-        char* text = length >= 0 && length < (1l << 30) && fseek(files[k], 0, SEEK_SET) == 0 ? calloc((size_t)length + 1, 1) : 0;
-        if (text != 0 && fread(text, 1, (size_t)length, files[k]) != (size_t)length)
+        const bool kept = ran && results[k] != 0 && texts[k] != 0 && lengths[k] < (1ull << 30);
+        if (results[k] != 0)
         {
-            free(text);
-            text = 0;
+            *results[k] = kept ? texts[k] : 0;
         }
-        if (texts[k] != 0)
+        if (!kept)
         {
-            *texts[k] = text;
-        }
-        if (files[k] != 0)
-        {
-            fclose(files[k]);
+            free(texts[k]);
         }
     }
-    return ran ? WEXITSTATUS(status) : -1;
+    free(environment);
+    return ran ? status : -1;
 }
 
 // Runs clang -E on `path` in the mode (`standard`, or gnu17), and returns what it writes to stderr (without its "N
@@ -995,7 +983,9 @@ static char* pp_directive_test_clang(const char* path, const char* standard)
 }
 
 // How many inclusions clang skips by their guards (its multiple-include optimization: -print-stats' "#includes
-// skipped due to the multi-include optimization"), preprocessing `path` with the arguments; -1 if it can't say.
+// skipped due to the multi-include optimization"), preprocessing `path` with the arguments; -1 if it can't say. A
+// child even with a clang server: -print-stats prints LLVM's counters, the process's, which a server's runs add up
+// (oracle_server_fits).
 static int64_t pp_directive_test_clang_guards(char** arguments, int argument_count, const char* path)
 {
     char* argv[256];

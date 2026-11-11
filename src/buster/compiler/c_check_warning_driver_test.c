@@ -322,6 +322,37 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .warnings = 2,
     },
     {
+        // -Wunreachable-code-generic-assoc (#1447): an association of array type or a qualified one (an address space's,
+        // restrict, a typedef's const spelled as its typedef), at its type's first token past the qualifiers, at file
+        // scope and in a body, in sizeof's operand too; not _Atomic.
+        .name = "generic associations never selected",
+        .source = "typedef const int CI;\n"
+                  "void g(void) { int x; int b[2];\n"
+                  "int c = _Generic(b, int[2]: 1, default: 2);\nint d = _Generic(x, _Atomic int: 1, default: 2);\n"
+                  "int e = _Generic(x, int const: 1, volatile long: 3, default: 2);\nint f = _Generic(x, CI: 1, default: 2);\n"
+                  "int h = _Generic(&x, int * __attribute__((address_space(1))): 1, int * restrict: 4, default: 2);\n"
+                  "int i = sizeof(_Generic(x, const char: 1, default: 2));\n"
+                  "(void)c; (void)d; (void)e; (void)f; (void)h; (void)i; }\n"
+                  "int k = _Generic(1, const int: 1, int[3]: 2, default: 0);\n",
+        .warnings = 9,
+    },
+    {
+        .name = "generic associations never selected, without -Wunreachable-code",
+        .source = "void g(void) { int x; int b[2]; int c = _Generic(b, int[2]: 1, const int: 3, default: 2); (void)c; (void)x; }\n",
+        .options = { "-Wno-unreachable-code" },
+    },
+    {
+        // An association's type name is read as a cast's (#1447): objc_gc's qualifier, which the warning names, and
+        // objc_ownership's warning on a type it doesn't apply to.
+        .name = "attributes in generic association types",
+        .source = "void g(void) { int x;\nint a = _Generic(x, const int: 1, default: 2);\n"
+                  "int c = _Generic(&x, int __attribute__((objc_gc(weak))) *: 1, default: 2);\n"
+                  "int e = _Generic(&x, int __attribute__((objc_gc(strong))) *: 1, default: 2);\n"
+                  "int f = _Generic(&x, int __attribute__((objc_ownership(weak))) *: 1, default: 2);\n"
+                  "(void)a; (void)c; (void)e; (void)f; }\n",
+        .warnings = 4,
+    },
+    {
         .name = "floating literal assignment return and call conversions",
         .source = "int f(void){int a;a=1.5;return -2.5;}\nvoid g(int);void h(void){g(3.5);}\n",
         .warnings = 3,

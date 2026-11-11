@@ -27,45 +27,26 @@ static void pp_test_normalize_scratch(char* text)
 // The scratch normalization also serves the checker's pragma tests; only the frontend needs these fixtures.
 #if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_FRONTEND
 
-// Clang's diagnostics for `path`, preprocessed (or with `parser`, compiled) with `directory` as an -I directory.
+// Clang's diagnostics for `path`, preprocessed (or with `parser`, compiled) with `directory` as an -I directory, without
+// CPATH and C_INCLUDE_PATH, its output discarded: null unless it exits with status 1. Through the clang server where
+// test-preprocessor has one (oracle_serve_child), else as a child.
 static char* pp_test_clang_diagnostics(const char* path, const char* directory, bool parser)
 {
+    char* const arguments[] = { "clang", parser ? "-fsyntax-only" : "-E", "-std=gnu17", "-fno-caret-diagnostics",
+                                "-fmacro-backtrace-limit=0", "-I", (char*)directory, (char*)path, 0 };
+    char** environment = pp_test_clang_environment();
+    char* output = 0;
     char* result = 0;
-    FILE* errors = tmpfile();
-    const pid_t child = errors != 0 ? fork() : -1;
-    if (child == 0)
+    uint64_t output_length = 0;
+    uint64_t length = 0;
+    const int status = environment != 0 ? oracle_serve_child("preprocessor: history's clang diagnostics", arguments, environment, 2, &output, &output_length, &result, &length) : -1;
+    if (status != 1 || length >= (1 << 20))
     {
-        const int null = open("/dev/null", O_WRONLY);
-        if (null < 0 || dup2(null, STDOUT_FILENO) < 0 || dup2(fileno(errors), STDERR_FILENO) < 0)
-        {
-            _exit(127);
-        }
-        close(null);
-        unsetenv("CPATH");
-        unsetenv("C_INCLUDE_PATH");
-        execlp("clang", "clang", parser ? "-fsyntax-only" : "-E", "-std=gnu17", "-fno-caret-diagnostics",
-               "-fmacro-backtrace-limit=0", "-I", directory, path, (char*)0);
-        _exit(127);
+        free(result);
+        result = 0;
     }
-    int status = 0;
-    const bool ran = child > 0 && waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 1;
-    if (ran && fseek(errors, 0, SEEK_END) == 0)
-    {
-        const long length = ftell(errors);
-        if (length >= 0 && length < (1 << 20) && fseek(errors, 0, SEEK_SET) == 0)
-        {
-            result = calloc((size_t)length + 1, 1);
-            if (result != 0 && fread(result, 1, (size_t)length, errors) != (size_t)length)
-            {
-                free(result);
-                result = 0;
-            }
-        }
-    }
-    if (errors != 0)
-    {
-        fclose(errors);
-    }
+    free(output);
+    free(environment);
     return result;
 }
 

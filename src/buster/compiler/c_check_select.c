@@ -92,10 +92,30 @@ static bool check_input_selection_prepare(CheckInputReader* reader, uint32_t key
     return valid;
 }
 
+static TypeId check_input_declarator(CheckInputReader* reader, TypeId base, uint32_t* cursor, uint32_t end, uint32_t* name, uint32_t* names);
+
+// An association's type name [first, end), read as a cast's is (#1447): by the declaration's specifiers and declarator,
+// so that its attributes' type warnings are given (objc_gc's, objc_ownership's, noderef's), and its qualifiers kept. Zero
+// where it isn't a type name: one with a storage class, `inline`, `typedef` or a declarator's name.
+static TypeId check_input_selection_type_name(CheckInputReader* reader, uint32_t first, uint32_t end)
+{
+    uint32_t cursor = first;
+    bool is_typedef = false;
+    bool is_inline = false;
+    uint32_t storage = 0;
+    TypeId type = check_input_specifiers(reader, &cursor, end, &is_typedef, &storage, &is_inline, false);
+    uint32_t name = BUSTER_CHECK_NONE;
+    uint32_t parameters = BUSTER_CHECK_NONE;
+    reader->declarator_common = reader->specifier_attributes;
+    type = type != 0 ? check_input_declarator(reader, type, &cursor, end, &name, &parameters) : 0;
+    return cursor == end && name == BUSTER_CHECK_NONE && !is_typedef && storage == 0 && !is_inline ? type : 0;
+}
+
 static bool check_input_selection_type(CheckInputReader* reader, uint32_t first)
 {
     const uint32_t end = reader->selection_type_ends[first];
-    const TypeId type = end > first ? check_input_constant_type(reader, first, end) : 0;
+    const uint32_t reports = reader->output->report_count;
+    const TypeId type = end > first ? check_input_selection_type_name(reader, first, end) : 0;
     const uint8_t kind = type_kind(reader->types, type_strip_aligned(reader->types, type));
     // An incomplete type, void's too, is a C2y extension clang takes (-Wc2y-extensions): it matches no control.
     const bool valid = type != 0 && kind != BUSTER_TYPE_KIND_FUNCTION && (type_inherited_flags(reader->types, type) & BUSTER_TYPE_FLAG_VARIABLY_MODIFIED) == 0;
@@ -104,7 +124,7 @@ static bool check_input_selection_type(CheckInputReader* reader, uint32_t first)
         check_input_rare_claim(reader, &reader->selection_types[end]);
         reader->selection_types[end] = type;
     }
-    else
+    else if (reader->output->report_count == reports)
     {
         check_input_report(reader, first, CHECK_INPUT_DECLARATION);
     }
@@ -137,6 +157,10 @@ static bool check_input_selection_generic(CheckInputReader* reader, uint32_t sep
         {
             const TypeId type = reader->selection_types[colon];
             valid = type != 0;
+            if (valid)
+            {
+                check_generic_unreachable(reader, association, colon, type);
+            }
             bool matches = false;
             valid = valid && check_generic_association(reader, &seen, type, &matches);
             if (valid)

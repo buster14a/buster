@@ -169,10 +169,14 @@ enum
     // swift_name's and swift_async_name's Swift name that doesn't fit its declaration (#1447, clang's SemaSwift::DiagnoseName):
     // -Wswift-name-attribute, on by default. (Its ID past the ones other pull requests take.)
     CHECK_WARNING_ID_SWIFT_NAME_ATTRIBUTE = 130,
+    // A generic selection's association of array type or of a qualified type, which its controlling expression's lvalue
+    // conversion never selects (#1447, clang's CreateGenericSelectionExpr): -Wunreachable-code-generic-assoc, on by
+    // default, under -Wunreachable-code.
+    CHECK_WARNING_ID_UNREACHABLE_GENERIC_ASSOC = 131,
     // Two unsequenced modifications of a variable, or one and a read of it (#1953, clang's SequenceChecker,
     // c_check_unsequenced.c): -Wunsequenced, on by default, under -Wsequence-point and so -Wmost and -Wall. (Its ID past
-    // -Wswift-name-attribute's, 130.)
-    CHECK_WARNING_ID_UNSEQUENCED = 131,
+    // -Wunreachable-code-generic-assoc's, 131.)
+    CHECK_WARNING_ID_UNSEQUENCED = 132,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -479,6 +483,10 @@ typedef enum CheckWarningEventKind
     // payload.data's low five bits the message (BUSTER_CHECK_SWIFT_NAME_*), then the expected and the given parameter
     // counts in 13 bits each. Its K&R function's is -Wignored-attributes', the others -Wswift-name-attribute's.
     CHECK_WARNING_EVENT_SWIFT_NAME,
+    // A generic association that is never selected (#1447, check_generic_unreachable): at its type name's first token
+    // that isn't a qualifier, payload.first_type its type, payload.name its typedef's spelling (or 0), payload.data 0 for an
+    // array's, 1 for a qualified one's.
+    CHECK_WARNING_EVENT_UNREACHABLE_ASSOCIATION,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
 
