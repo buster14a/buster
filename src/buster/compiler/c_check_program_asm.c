@@ -287,6 +287,12 @@ struct CheckProgramNaked
     uint32_t label_count;
     // Its templates use a directive besides the syntax switches: the whole function, assembled by asm_assemble.
     AsmResult unit;
+    // Its templates' CFI (#1848): the unit's frame description, decoded into the rows its unwind entry takes
+    // (check_asm_naked_frame_rows); 0 of them without CFI.
+    EmissionFrameRow* frame_rows;
+    uint32_t frame_row_count;
+    // Whether its unit's frame description is replaced so: its .eh_frame is left out of the emission.
+    bool framed;
     bool unit_assembled;
     bool planned;
 };
@@ -3176,7 +3182,11 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
             }
             else if (body.error != NULL)
             {
-                reason = strstr(body.error, "arena exhausted") == NULL ? body.error : NULL;
+                // A function's template's CFI (#1848): clang splices it into the function's own frame description at the
+                // template's place, which a helper of its own, with its own unwind entry, can't be.
+                const bool cfi = strstr(body.error, "CFI directive outside a procedure") != NULL;
+                reason = cfi ? "inline assembly CFI directives in a function's template (clang adds them to the function's frame)" :
+                         strstr(body.error, "arena exhausted") == NULL ? body.error : NULL;
                 valid = body.error == NULL || reason != NULL;
             }
             else if (entry_code && body.ret_first)
@@ -3559,6 +3569,146 @@ static String8 check_asm_naked_symbol(const CheckProgram* program, uint32_t obje
 // integrated assembler parses each statement afresh; without a prologue, an epilogue or a trap of the compiler's. Their
 // plans have no helper. Its one entry, the lowering's return of a function it doesn't compile, is the code's start. False
 // only for an arena without room or an inconsistent input, with both arenas then as they were.
+// One unsigned LEB128 of a frame description at `*at`, below `end`; `*ok` false past it.
+static uint64_t check_asm_frame_uleb(const uint8_t* bytes, uint64_t end, uint64_t* at, bool* ok)
+{
+    uint64_t value = 0;
+    uint32_t shift = 0;
+    bool more = true;
+    while (*ok && more)
+    {
+        *ok = *at < end && shift < 64;
+        const uint8_t byte = *ok ? bytes[*at] : 0;
+        value |= *ok ? (uint64_t)(byte & 0x7f) << shift : 0;
+        shift += 7;
+        *at += *ok ? 1 : 0;
+        more = (byte & 0x80) != 0;
+    }
+    return value;
+}
+
+// A naked function's CFI (#1848), as clang splices a naked function's template into the FDE of its implicit
+// `.cfi_startproc`, with no prologue rows: the rows of the frame description the assembler wrote for its unit, which
+// check_program_asm_plan_naked assembled between `.cfi_startproc` and `.cfi_endproc`, decoded from its .eh_frame atom
+// into the emission's frame rows (`rows`, `*count` of them, in `output`). Its CIE must be the one every function's has
+// (code alignment 1, data alignment -8, the return address in 16, CFA rsp + 8), and its one FDE's instructions those a
+// row program writes; anything else is refused by name (the returned reason).
+static const char* check_asm_naked_frame_rows(const AsmResult* unit, Arena* output, EmissionFrameRow** rows, uint32_t* count)
+{
+    static const uint8_t cie[] = { 1, 'z', 'R', 0, 1, 0x78, 16, 1, 0x1b, 0x0c, 7, 8, 0x90, 1 };
+    const char* reason = NULL;
+    const uint8_t* bytes = NULL;
+    uint64_t size = 0;
+    for (uint32_t a = 1; a < unit->link.atoms.count; a += 1)
+    {
+        reason = unit->link.atoms.class[a] == BUSTER_LINK_CLASS_EH_FRAME && bytes != NULL ? "inline assembly CFI of several frame descriptions in a naked function" : reason;
+        bytes = unit->link.atoms.class[a] == BUSTER_LINK_CLASS_EH_FRAME ? unit->link.atoms.bytes[a] : bytes;
+        size = unit->link.atoms.class[a] == BUSTER_LINK_CLASS_EH_FRAME ? unit->link.atoms.size[a] : size;
+    }
+    *rows = NULL;
+    *count = 0;
+    uint32_t cie_length = 0;
+    if (bytes != NULL && size >= 8)
+    {
+        memcpy(&cie_length, bytes, 4);
+    }
+    const uint64_t fde = (uint64_t)cie_length + 4;
+    bool ok = bytes != NULL && reason == NULL && cie_length >= sizeof(cie) + 4 && fde + 24 <= size && memcmp(bytes + 8, cie, sizeof(cie)) == 0;
+    for (uint64_t at = 8 + sizeof(cie); ok && at < fde; at += 1)
+    {
+        ok = bytes[at] == 0;
+    }
+    uint32_t fde_length = 0;
+    if (ok)
+    {
+        memcpy(&fde_length, bytes + fde, 4);
+    }
+    const uint64_t end = fde + 4 + fde_length;
+    ok = ok && end <= size && fde_length >= 16 && bytes[fde + 16] == 0;
+    for (uint64_t at = end; ok && at < size; at += 1)
+    {
+        ok = bytes[at] == 0;
+    }
+    reason = reason != NULL ? reason : !ok ? "inline assembly CFI of a naked function whose frame description isn't a function's" : NULL;
+    // At most an instruction a row each, in the output arena.
+    EmissionFrameRow* list = reason == NULL ? BUSTER_ARENA_PUSH_ARRAY(output, EmissionFrameRow, end - fde) : NULL;
+    reason = reason == NULL && list == NULL ? "arena exhausted decoding a naked function's CFI" : reason;
+    uint64_t at = fde + 17;
+    uint32_t offset = 0;
+    uint32_t written = 0;
+    while (reason == NULL && at < end)
+    {
+        const uint8_t op = bytes[at++];
+        const uint8_t high = op & 0xc0;
+        const uint8_t low = op & 0x3f;
+        EmissionFrameRow row = { .offset = offset, .kind = UINT8_MAX };
+        if (high == 0x40)
+        {
+            offset += low;
+        }
+        else if (high == 0x80)
+        {
+            row = (EmissionFrameRow){ .offset = offset, .kind = EMISSION_FRAME_OFFSET, .reg = low, .value = -8 * (int64_t)check_asm_frame_uleb(bytes, end, &at, &ok) };
+        }
+        else if (high == 0xc0)
+        {
+            row = (EmissionFrameRow){ .offset = offset, .kind = EMISSION_FRAME_RESTORE, .reg = low };
+        }
+        else if (op == 0x02 || op == 0x03 || op == 0x04)
+        {
+            const uint32_t width = op == 0x02 ? 1 : op == 0x03 ? 2 : 4;
+            uint32_t delta = 0;
+            ok = at + width <= end;
+            if (ok)
+            {
+                memcpy(&delta, bytes + at, width);
+            }
+            at += width;
+            offset += delta;
+        }
+        else if (op == 0x0c || op == 0x0d || op == 0x0e)
+        {
+            const uint64_t first = check_asm_frame_uleb(bytes, end, &at, &ok);
+            const uint64_t second = op == 0x0c ? check_asm_frame_uleb(bytes, end, &at, &ok) : 0;
+            row = op == 0x0e ? (EmissionFrameRow){ .offset = offset, .kind = EMISSION_FRAME_CFA_OFFSET, .value = (int64_t)first } :
+                  (EmissionFrameRow){ .offset = offset, .kind = op == 0x0c ? EMISSION_FRAME_CFA : EMISSION_FRAME_CFA, .reg = (uint16_t)first, .value = (int64_t)second };
+            // def_cfa_register keeps the offset: the rows' CFA carries it, from the last CFA row's.
+            for (uint32_t r = written; op == 0x0d && r != 0; r -= 1)
+            {
+                const EmissionFrameRow* previous = list + r - 1;
+                row.value = previous->kind == EMISSION_FRAME_CFA || previous->kind == EMISSION_FRAME_CFA_OFFSET ? previous->value : row.value;
+                r = previous->kind == EMISSION_FRAME_CFA || previous->kind == EMISSION_FRAME_CFA_OFFSET ? 1 : r;
+            }
+            row.value = op == 0x0d && written == 0 ? 8 : row.value;
+        }
+        else if (op == 0x05 || op == 0x06 || op == 0x07 || op == 0x08 || op == 0x09)
+        {
+            const uint64_t reg = check_asm_frame_uleb(bytes, end, &at, &ok);
+            const uint64_t second = op == 0x05 || op == 0x09 ? check_asm_frame_uleb(bytes, end, &at, &ok) : 0;
+            const uint8_t kind = op == 0x05 ? EMISSION_FRAME_OFFSET : op == 0x06 ? EMISSION_FRAME_RESTORE : op == 0x07 ? EMISSION_FRAME_UNDEFINED :
+                                 op == 0x08 ? EMISSION_FRAME_SAME_VALUE : EMISSION_FRAME_REGISTER;
+            row = (EmissionFrameRow){ .offset = offset, .kind = kind, .reg = (uint16_t)reg, .value = op == 0x05 ? -8 * (int64_t)second : (int64_t)second };
+            ok = ok && reg <= UINT16_MAX;
+        }
+        else if (op == 0x0a || op == 0x0b)
+        {
+            row = (EmissionFrameRow){ .offset = offset, .kind = op == 0x0a ? EMISSION_FRAME_REMEMBER_STATE : EMISSION_FRAME_RESTORE_STATE };
+        }
+        else if (op != 0)
+        {
+            reason = "inline assembly CFI of a naked function beyond a frame's rows (expressions, escapes or signed offsets)";
+        }
+        reason = reason == NULL && !ok ? "inline assembly CFI of a naked function whose frame description isn't a function's" : reason;
+        if (reason == NULL && row.kind != UINT8_MAX)
+        {
+            list[written++] = row;
+        }
+    }
+    *rows = reason == NULL ? list : NULL;
+    *count = reason == NULL ? written : 0;
+    return reason;
+}
+
 static bool check_program_asm_plan_naked(CheckProgramAsms* result, const CheckProgram* program, uint32_t b, const CheckAsmCheckedOperand* operands,
                                          const uint32_t* firsts, const X86MatchIndex* index, bool scalar, Arena* output, Arena* scratch)
 {
@@ -3660,11 +3810,35 @@ static bool check_program_asm_plan_naked(CheckProgramAsms* result, const CheckPr
         if (code.error != NULL && code.directive)
         {
             // The naked function's templates take directives: its whole code is a unit assembled by the full assembler.
-            unit = asm_assemble((String8){ .pointer = source, .length = at }, index, (AsmOptions){ .vectorized = !BUSTER_SCALAR_PATH(scalar), .integrated = true }, output);
-            unit_assembled = unit.error == NULL;
-            reason = unit.error != NULL && strstr(unit.error, "arena exhausted") == NULL ? unit.error : NULL;
-            valid = unit.error == NULL || reason != NULL;
-            for (uint32_t a = 1; unit_assembled && reason == NULL && a < unit.link.atoms.count; a += 1)
+            // Its CFI directives (#1848) are its function's frame, as clang's implicit `.cfi_startproc` makes them: the
+            // source goes between `.cfi_startproc` and `.cfi_endproc`, and the frame description's rows become its
+            // unwind entry's (check_asm_naked_frame_rows), the unit's .eh_frame left out.
+            static const char start[] = ".cfi_startproc\n";
+            static const char finish[] = ".cfi_endproc\n";
+            bool framed = false;
+            for (uint64_t i = 0; !framed && i + 5 <= at; i += 1)
+            {
+                framed = memcmp(source + i, ".cfi_", 5) == 0;
+            }
+            char* wrapped = framed ? arena_push(output, at + sizeof(start) + sizeof(finish), 1) : NULL;
+            valid = !framed || wrapped != NULL;
+            if (wrapped != NULL)
+            {
+                memcpy(wrapped, start, sizeof(start) - 1);
+                memcpy(wrapped + sizeof(start) - 1, source, at);
+                memcpy(wrapped + sizeof(start) - 1 + at, finish, sizeof(finish) - 1);
+            }
+            const String8 text = wrapped != NULL ? (String8){ .pointer = wrapped, .length = at + sizeof(start) + sizeof(finish) - 2 } : (String8){ .pointer = source, .length = at };
+            unit = valid ? asm_assemble(text, index, (AsmOptions){ .vectorized = !BUSTER_SCALAR_PATH(scalar), .integrated = true }, output) : unit;
+            unit_assembled = valid && unit.error == NULL;
+            reason = valid && unit.error != NULL && strstr(unit.error, "arena exhausted") == NULL ? unit.error : NULL;
+            valid = valid && (unit.error == NULL || reason != NULL);
+            if (unit_assembled && framed)
+            {
+                reason = check_asm_naked_frame_rows(&unit, output, &naked->frame_rows, &naked->frame_row_count);
+                naked->framed = reason == NULL;
+            }
+            for (uint32_t a = 1; unit_assembled && !framed && reason == NULL && a < unit.link.atoms.count; a += 1)
             {
                 reason = unit.link.atoms.class[a] == BUSTER_LINK_CLASS_EH_FRAME ? "inline assembly's CFI directives" : NULL;
             }
