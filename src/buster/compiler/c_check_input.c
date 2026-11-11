@@ -7247,10 +7247,27 @@ static bool check_input_attribute_objc(CheckInputReader* reader, CheckInputAttri
                 // An argument after the first that names nothing is clang's parser's error first (check_input_thread_names).
                 const bool named = kind != 0 && check_input_objc_undeclared(reader, attribute) == BUSTER_CHECK_NONE;
                 const bool considered = named && !attribute->ignored && !(pass == 0 && attribute->objc_moved);
-                // Where it starts: the specifiers', a chunk's (its pointer's step), or after the declarator.
+                // Where it starts: the specifiers', a chunk's (its pointer's step), or after the declarator. A C23 one (#1447)
+                // where a declaration's attributes are starts as GNU's after the declarator; elsewhere it is its place's type's
+                // alone, which it doesn't leave: after the specifiers their type, after a `*` its pointer, after a function's
+                // or an array's suffix that one.
+                const bool fixed = attribute->standard && !attribute->objc_declaration;
+                const bool declared = attribute->standard ? attribute->objc_declaration : pass == 1 && attribute->first >= split;
                 uint32_t start = 0;
                 bool trailing = false;
-                if (considered && pass == 1 && attribute->first < split)
+                if (considered && fixed && pass == 1)
+                {
+                    for (uint32_t s = 1; s < steps; s += 1)
+                    {
+                        start = step_kinds[s] != BUSTER_TYPE_KIND_NONE && step_tokens[s] < attribute->first &&
+                                (start == 0 || step_tokens[s] > step_tokens[start]) ? s : start;
+                    }
+                }
+                else if (considered && fixed)
+                {
+                    start = 0;
+                }
+                else if (considered && !declared && pass == 1 && attribute->first < split)
                 {
                     // A pointer's chunk (after its `*`), or a group's (after its `(`, before any `*` in it), whose type is
                     // the pointers' before the group and the suffixes' after it.
@@ -7272,7 +7289,7 @@ static bool check_input_attribute_objc(CheckInputReader* reader, CheckInputAttri
                         start = before && step_kinds[s] != BUSTER_TYPE_KIND_NONE ? s : start;
                     }
                 }
-                else if (considered && pass == 1)
+                else if (considered && declared)
                 {
                     // After the declarator: the innermost pointer outside its outermost function, the specifiers' type first
                     // where it has no function.
@@ -7293,7 +7310,7 @@ static bool check_input_attribute_objc(CheckInputReader* reader, CheckInputAttri
                 // Moving outward from where it starts, to the step where it is handled or stays.
                 uint32_t at = start;
                 bool taken = considered && !trailing && check_input_objc_takes(types, kind, step_types[at]);
-                bool moving = considered && !trailing && !taken;
+                bool moving = considered && !trailing && !taken && !fixed;
                 while (moving)
                 {
                     uint32_t next = at + 1;
@@ -7320,7 +7337,9 @@ static bool check_input_attribute_objc(CheckInputReader* reader, CheckInputAttri
                     const bool quiet = strong || check_input_checks_spelled(reader, word, "autoreleasing");
                     const TypeId here = trailing ? type : step_types[at];
                     const uint32_t spelling = here == base && name < parser->tokens.count ? check_input_typedef_spelling(reader->output, parser, name) : 0;
-                    const CheckWarningEventKind warned = kind == 1 ? CHECK_WARNING_EVENT_OBJC_POINTER_TYPE : weak ? CHECK_WARNING_EVENT_OBJC_WEAK_TYPE :
+                    // (weak's is named '__weak' on a pointer alone: clang's first test names the attribute, #1447.)
+                    const bool pointer = here != 0 && type_kind(types, type_strip_aligned(types, here)) == BUSTER_TYPE_KIND_POINTER;
+                    const CheckWarningEventKind warned = kind == 1 ? CHECK_WARNING_EVENT_OBJC_POINTER_TYPE : weak && pointer ? CHECK_WARNING_EVENT_OBJC_WEAK_TYPE :
                                                                                                                  CHECK_WARNING_EVENT_OBJC_OBJECT_TYPE;
                     const CheckWarningEvent event =
                     {
@@ -7371,12 +7390,36 @@ static bool check_input_attribute_objc(CheckInputReader* reader, CheckInputAttri
                     {
                         CheckWarningEvent unsupported = event;
                         unsupported.kind = CHECK_WARNING_EVENT_OBJC_UNSUPPORTED;
-                        unsupported.payload = (CheckWarningPayload){ .name = attribute->name, .token = first };
+                        // (A C23 one named with its scope, #1447.)
+                        const uint32_t scope_name = attribute->standard && attribute->first != attribute->name_token ? parser->tokens.names[attribute->first] : 0;
+                        unsupported.payload = (CheckWarningPayload){ .name = attribute->name, .token = first,
+                                                                     .data = scope_name | (attribute->standard ? BUSTER_CHECK_WARNING_STANDARD_ATTRIBUTE : 0) };
                         check_input_warning_event(reader, &unsupported, NULL, 0);
                     }
                     else if (none || weak)
                     {
                         check_input_warning_event(reader, &event, NULL, 0);
+                    }
+                    // A C23 objc_gc after a declarator's name, which slides to the declaration's type with -Wdeprecated-
+                    // attributes' warning once its handler took it (#1447, CheckInputAttribute.neon_deprecated).
+                    // After a typedef's name it is clang's "cannot be applied to a declaration" instead (neon_typedef).
+                    if (valid && attribute->neon_typedef)
+                    {
+                        check_input_attribute_argument_error(reader, list, attribute, attribute->first, CHECK_ARGUMENT_INVALID_ON_DECLARATION, 0);
+                        attribute->neon_deprecated = false;
+                        valid = false;
+                    }
+                    else if (valid && attribute->neon_deprecated)
+                    {
+                        // (Completing where the type's warnings do, after them.)
+                        CheckWarningEvent deprecated = event;
+                        deprecated.id = CHECK_WARNING_ID_DEPRECATED_ATTRIBUTES;
+                        deprecated.kind = CHECK_WARNING_EVENT_TYPE_ON_DECLARATION;
+                        const uint32_t scope_name = attribute->first != attribute->name_token ? parser->tokens.names[attribute->first] : 0;
+                        deprecated.payload = (CheckWarningPayload){ .name = attribute->name, .token = BUSTER_CHECK_WARNING_NO_SOURCE,
+                                                                    .data = scope_name | BUSTER_CHECK_WARNING_STANDARD_ATTRIBUTE };
+                        check_input_warning_event(reader, &deprecated, NULL, 0);
+                        attribute->neon_deprecated = false;
                     }
                 }
             }

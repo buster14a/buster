@@ -2917,11 +2917,16 @@ static TypeId type_function_full(TypeTable* table, TypeId result_type, const Typ
     const bool info = abi != TYPE_FUNCTION_ABI_SYSV || any;
     const uint32_t abi_words = any ? (count + BUSTER_TYPE_PARAMETER_ABIS_PER_WORD - 1) / BUSTER_TYPE_PARAMETER_ABIS_PER_WORD : 0;
     const uint64_t words = (uint64_t)count + (info ? 1 + abi_words : 0);
+    // A parameter's qualifiers aren't its function type's, objc_gc's garbage collection qualifier among them (#1447, as clang's
+    // canonical parameter types are unqualified).
     bool qualified = false;
+    bool collected = false;
     for (uint32_t i = 0; valid && i < count; i += 1)
     {
         qualified = qualified || type_qualifiers(parameters[i]) != 0;
+        collected = collected || (table->extended && (type_extended_qualifiers(table, parameters[i]) & BUSTER_TYPE_GC_MASK) != 0);
     }
+    qualified |= collected;
     const TypeId* normal = parameters;
     if (valid && (qualified || info))
     {
@@ -2931,6 +2936,8 @@ static TypeId type_function_full(TypeTable* table, TypeId result_type, const Typ
             for (uint32_t i = 0; i < count; i += 1)
             {
                 copy[i] = type_unqualified(parameters[i]);
+                copy[i] = collected && (type_extended_qualifiers(table, copy[i]) & BUSTER_TYPE_GC_MASK) != 0 ? type_unextend(table, copy[i], BUSTER_TYPE_GC_MASK) :
+                                                                                                         copy[i];
             }
             if (info)
             {

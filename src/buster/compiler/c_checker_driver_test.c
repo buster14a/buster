@@ -7990,6 +7990,7 @@ static void check_test_driver_optimize_pragmas(CheckTest* test, const char* clan
 #include "c_check_swift_attribute_driver_test.c"
 #include "c_check_swift_name_driver_test.c"
 #include "c_check_cfi_salt_driver_test.c"
+#include "c_check_objc_c23_driver_test.c"
 #include "c_check_unevaluated_driver_test.c"
 #include "c_check_sign_compare_driver_test.c"
 #include "c_check_type_sugar_driver_test.c"
@@ -9047,6 +9048,10 @@ static int run_checker_driver_tests(int argc, char** argv)
             if (!lazy && check_test_driver_takes())
             {
                 check_test_driver_cfi_salt(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_objc_c23(&test, clang, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
             {
