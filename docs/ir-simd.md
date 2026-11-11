@@ -1236,6 +1236,13 @@ which takes the passthrough first unless it holds it. The address is a base
 register alone; the mask takes the index's pattern value, so no address folds
 until the patterns have a fourth value (item 5).
 
+The 11 masked stores that had no Zen 5 row (`vmovdqu8` to `vmovdqu64` at
+every width but `vmovdqu32`'s zmm one) were measured on the 9700X: 2 per cycle
+at 16 and 32 bytes, 1 at 64, as the unmasked stores
+([the record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/ir-masked-memory-1840-2026-11-11)).
+A masked load merging into its destination has no row in the model, which
+measures a load's row zeroing ([the model's guide](x86-zen5.md)).
+
 Machine rows at `--tier1 -march=znver5`, both compilers (Debug builds)
 compiling this change's sources, against main `e43dfc10`:
 
