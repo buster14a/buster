@@ -3409,6 +3409,7 @@ struct CheckTagFrame;
 struct CheckTagMember;
 static bool check_input_thread_names(CheckInputReader* reader, CheckInputAttributes* attributes, uint32_t parameters, const struct CheckTagFrame* frames,
                                      uint32_t depth, const struct CheckTagMember* members, uint32_t member_count);
+static bool check_input_tag_names(CheckInputReader* reader, const CheckInputAttributes* attributes);
 
 // A report at `token` naming `type` (#1447): spelled by the typedef name that `spelling`'s declaration's specifiers give it
 // (BUSTER_CHECK_NONE for none), with `value`, and an incomplete tag's forward declaration's note.
@@ -4330,8 +4331,9 @@ static bool check_input_tag_attributes(CheckInputReader* reader, uint32_t token,
     {
         const uint32_t subjects = kind == BUSTER_TYPE_KIND_ENUM ? BUSTER_CHECK_SUBJECT_ENUM : kind == BUSTER_TYPE_KIND_UNION ? BUSTER_CHECK_SUBJECT_UNION :
                                   BUSTER_CHECK_SUBJECT_STRUCT;
-        // (The tag's keyword is its declaration's first token, where some handlers warn.)
-        valid = check_input_attribute_subjects(reader, own, subjects, 0, token, BUSTER_CHECK_NONE);
+        // (The tag's keyword is its declaration's first token, where some handlers warn.) Its attributes' expressions' names
+        // first, which clang's parser looks up (#1447: objc_bridge's second argument).
+        valid = check_input_tag_names(reader, own) && check_input_attribute_subjects(reader, own, subjects, 0, token, BUSTER_CHECK_NONE);
         // Complete before this declaration: a fixed enum's first declaration completes it with its attributes.
         const bool complete = type_is_complete(reader->types, type) && canonical != declaration;
         for (uint32_t r = 0; valid && kind == BUSTER_TYPE_KIND_UNION && !complete && r < own->count; r += 1)
@@ -8561,7 +8563,8 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
             reader->tag_attributes = false;
             // The tag's subjects as clang's attributes name them (#147).
             const uint32_t subjects = kind == BUSTER_TYPE_KIND_ENUM ? BUSTER_CHECK_SUBJECT_ENUM : kind == BUSTER_TYPE_KIND_UNION ? BUSTER_CHECK_SUBJECT_UNION : BUSTER_CHECK_SUBJECT_STRUCT;
-            valid = valid && check_input_attribute_subjects(reader, frame->attributes, subjects, 0, frame->token, BUSTER_CHECK_NONE);
+            valid = valid && check_input_tag_names(reader, frame->attributes) &&
+                    check_input_attribute_subjects(reader, frame->attributes, subjects, 0, frame->token, BUSTER_CHECK_NONE);
             check_input_set_attributes_at(reader->output, frame->token, frame->attributes);
             for (uint32_t attribute = 0; valid && frame->attributes != 0 && attribute < frame->attributes->count; attribute += 1)
             {

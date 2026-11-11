@@ -7986,6 +7986,7 @@ static void check_test_driver_optimize_pragmas(CheckTest* test, const char* clan
 #include "c_check_for_loop_driver_test.c"
 #include "c_check_enum_cast_driver_test.c"
 #include "c_check_type_safety_driver_test.c"
+#include "c_check_objc_bridge_driver_test.c"
 #include "c_check_unevaluated_driver_test.c"
 #include "c_check_sign_compare_driver_test.c"
 #include "c_check_type_sugar_driver_test.c"
@@ -9027,6 +9028,10 @@ static int run_checker_driver_tests(int argc, char** argv)
             if (!lazy && check_test_driver_takes())
             {
                 check_test_driver_type_safety(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_objc_bridge(&test, clang, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
             {
