@@ -1398,7 +1398,8 @@ typed stream), from the accessed lvalue's type: a read's own, an assignment's
 target's (the assignment's value has lost the space), an update's stored type
 for its load and its store (the postfix one's too). It marks the function
 (`Tier0Function.segments`), which Tier 0 compiles with the override on the
-access's memory operand, and which Tier 1 leaves to Tier 0. A global in one of
+access's memory operand, and which Tier 1 compiles with it too (docs/ir.md's
+"Segment overrides"; an atomic read/modify/write's stays Tier 0's). A global in one of
 those spaces goes through its address (GLOBAL_ADDRESS, then LOAD or STORE), as a
 memory class's does: `lea sym(%rip)` and `%gs:(%rax)` reach the byte clang's
 `%gs:sym(%rip)` does. What takes the override (`check_lower_segment_carried`):
