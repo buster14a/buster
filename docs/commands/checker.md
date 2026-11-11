@@ -101,7 +101,9 @@ unused-warning fixtures also check exact scope-completion tokens.
   of LLVM: a shared-LLVM toolchain's `libclang-cpp`, or the official release's
   static clang and LLVM archives, which the hosted rows install; the build
   checks one request against a spawned clang), which runs each command line through clang's own
-  driver and cc1 in its process, in the run's directory and environment;
+  driver and cc1 in its process, in the run's directory and environment, and
+  a run the server doesn't answer (it ended, or gave no answer within its
+  limit, 60 s) runs as a child (#2263);
   every other run is a child as before: a response file's, a jobserver dry
   run's, and one whose process-start inputs (`BUSTER_HUGE_PAGES`,
   `BUSTER_TEST_HOST_BUSY`, the lanes' test hooks, the transparent huge pages
@@ -109,7 +111,9 @@ unused-warning fixtures also check exact scope-completion tokens.
   runs each such command as a child and fails on a difference in status or
   output, but `--time-stages` and `--lane-cpus` runs, whose numeric report
   lines and lane order differ between any two runs, compare their other lines
-  in any order. The run reports the counts and the warning sweep's time. CI
+  in any order. The run reports the counts and the warning sweep's time, and
+  a `run costs` line: the served runs' time, the requests past the server's
+  limit, and the children's wall and CPU time, each in total and per run. CI
   runs the driver's parts in these modes, with `--differential` in the native
   plain row; `--cpu-dispatch-only` runs the `cpu_specific` and
   `cpu_dispatch` section alone, #1447; `--target-versions-only` runs GNU multiversioning's `target` and
@@ -280,6 +284,17 @@ unused-warning fixtures also check exact scope-completion tokens.
   variable array in a statement expression's declaration, which clang leaves out and the scan reads.
   `c_check_unevaluated_driver_test.c` compares it with complete pinned-Clang output at each policy, both paths and one
   or three lanes.
+  A C-style cast from a pointer (an array, a string literal or a function that decays to one) to an integer type
+  narrower than it, but `_Bool`, is clang's `-Wpointer-to-int-cast` (#1943, CheckCStyleCast,
+  `check_warning_graph_pointer_cast`), on by default: "cast to smaller integer type T from P" at the cast's `(`, as
+  soon as the cast is read, in unevaluated operands too; to an enumeration it is `-Wpointer-to-enum-cast`, under it,
+  and from a pointer to void `-Wvoid-pointer-to-int-cast` and `-Wvoid-pointer-to-enum-cast`, the last under both of
+  the others (`c_check_warning_policy.c`). The cast's type keeps its typedef; the operand's keeps a named object's.
+  Differences left: casts only the constant reader reads (an array bound's, an enumerator's or a bit-field width's,
+  where clang warns too) give none, as the warning graph has no node for them; and an operand whose type clang keeps
+  sugar for through an expression (a conditional's `VP`, a function's `U32 (*)(VP)`) prints its canonical type.
+  `c_check_pointer_cast_driver_test.c` compares it with complete pinned-Clang output at each policy, both paths and
+  one or three lanes.
   `c_check_unused_result_driver_test.c` (#1447) compares a discarded call's result warnings (`-Wunused-result`'s
   warn_unused_result and nodiscard, a return type's, pure's and const's, the builtin table's) with Clang's whole
   output at each warning policy, both paths and one or three lanes: their spellings and messages, macros, types,
