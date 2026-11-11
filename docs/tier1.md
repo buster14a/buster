@@ -390,7 +390,9 @@ the immediate form where the count is a constant, else `vmovd` of the count into
 the vector scratch register and the form by that xmm count. A select of all ones
 and zeros, a C comparison's expansion and a mask to a vector, is `vpmovm2b` to
 `vpmovm2q`, and a signed comparison less than a zero vector is `vpmovb2m` to
-`vpmovq2m` (#1840, its "Masks to vectors and back").
+`vpmovq2m` (#1840, its "Masks to vectors and back"). The integer lanes' minima, maxima and
+saturating sums and differences are its `lane_op`, one EVEX instruction of
+`BUSTER_TIER1_VECTOR_LANE_OP` (#1840, its "Lane operations").
 
 ### Inlining (#1282)
 

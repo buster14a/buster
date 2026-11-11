@@ -23,12 +23,6 @@
 
 #include "c_check_program_vector_convert.c"
 
-// An element's bytes' place in the four-entry tables below: 1, 2, 4 and 8.
-static uint32_t check_vector_builtin_element(uint32_t bytes)
-{
-    return bytes == 1 ? 0 : bytes == 2 ? 1 : bytes == 4 ? 2 : 3;
-}
-
 // The most elements a shuffle's index vector has (64 bytes of 1-byte elements), and an index of no element (clang's -1:
 // the result's element is undefined).
 #define BUSTER_CHECK_VECTOR_SHUFFLE_LANES 64u
@@ -223,90 +217,6 @@ static const char* check_vector_narrow_shuffle_row(const TypeTable* types, const
         }
     }
     return reason;
-}
-
-// The forms of an integer elementwise operation at an element's bytes, two operands' (dest, first, second: reg, vvvv,
-// rm) or one's (dest, source: reg, rm): forms 0 for none. `features` gets what they need past AVX-512F and AVX-512VL.
-static CheckVectorForms check_vector_elementwise_forms(CBuiltinId builtin, CheckVectorShape shape, uint64_t* features)
-{
-    const uint32_t e = check_vector_builtin_element(shape.element);
-    CheckVectorForms forms = { { 0, 0, 0 } };
-    uint64_t needed = shape.element <= 2 ? BUSTER_X86_FEATURE(AVX512BW) : 0;
-    if (builtin == CBUILTIN_ELEMENTWISE_MAX || builtin == CBUILTIN_ELEMENTWISE_MIN || builtin == CBUILTIN_REDUCE_MAX || builtin == CBUILTIN_REDUCE_MIN)
-    {
-        const bool max = builtin == CBUILTIN_ELEMENTWISE_MAX || builtin == CBUILTIN_REDUCE_MAX;
-        static const CheckVectorForms signed_max[4] = { BUSTER_CHECK_VECTOR_EVEX(VPMAXSB), BUSTER_CHECK_VECTOR_EVEX(VPMAXSW), BUSTER_CHECK_VECTOR_EVEX(VPMAXSD),
-                                                        BUSTER_CHECK_VECTOR_PACKED(VPMAXSQ) };
-        static const CheckVectorForms unsigned_max[4] = { BUSTER_CHECK_VECTOR_EVEX(VPMAXUB), BUSTER_CHECK_VECTOR_EVEX(VPMAXUW), BUSTER_CHECK_VECTOR_EVEX(VPMAXUD),
-                                                          BUSTER_CHECK_VECTOR_PACKED(VPMAXUQ) };
-        static const CheckVectorForms signed_min[4] = { BUSTER_CHECK_VECTOR_EVEX(VPMINSB), BUSTER_CHECK_VECTOR_EVEX(VPMINSW), BUSTER_CHECK_VECTOR_EVEX(VPMINSD),
-                                                        BUSTER_CHECK_VECTOR_PACKED(VPMINSQ) };
-        static const CheckVectorForms unsigned_min[4] = { BUSTER_CHECK_VECTOR_EVEX(VPMINUB), BUSTER_CHECK_VECTOR_EVEX(VPMINUW), BUSTER_CHECK_VECTOR_EVEX(VPMINUD),
-                                                          BUSTER_CHECK_VECTOR_PACKED(VPMINUQ) };
-        forms = max ? (shape.is_signed ? signed_max[e] : unsigned_max[e]) : (shape.is_signed ? signed_min[e] : unsigned_min[e]);
-    }
-    else if (builtin == CBUILTIN_ELEMENTWISE_ADD_SAT || builtin == CBUILTIN_ELEMENTWISE_SUB_SAT)
-    {
-        // AVX-512 saturates 8- and 16-bit elements alone.
-        const bool add = builtin == CBUILTIN_ELEMENTWISE_ADD_SAT;
-        static const CheckVectorForms saturating[2][2][2] = {
-            { { BUSTER_CHECK_VECTOR_EVEX(VPADDSB), BUSTER_CHECK_VECTOR_EVEX(VPADDSW) }, { BUSTER_CHECK_VECTOR_EVEX(VPADDUSB), BUSTER_CHECK_VECTOR_EVEX(VPADDUSW) } },
-            { { BUSTER_CHECK_VECTOR_EVEX(VPSUBSB), BUSTER_CHECK_VECTOR_EVEX(VPSUBSW) }, { BUSTER_CHECK_VECTOR_EVEX(VPSUBUSB), BUSTER_CHECK_VECTOR_EVEX(VPSUBUSW) } },
-        };
-        forms = shape.element <= 2 ? saturating[add ? 0 : 1][shape.is_signed ? 0 : 1][e] : forms;
-    }
-    else if (builtin == CBUILTIN_ELEMENTWISE_ABS)
-    {
-        static const CheckVectorForms abs[4] = { BUSTER_CHECK_VECTOR_UNARY_EVEX(VPABSB), BUSTER_CHECK_VECTOR_UNARY_EVEX(VPABSW), BUSTER_CHECK_VECTOR_UNARY_EVEX(VPABSD),
-                                                 BUSTER_CHECK_VECTOR_UNARY_PACKED(VPABSQ) };
-        forms = abs[e];
-    }
-    else if (builtin == CBUILTIN_ELEMENTWISE_POPCOUNT)
-    {
-        static const CheckVectorForms counts[4] = { BUSTER_CHECK_VECTOR_UNARY_PACKED(VPOPCNTB), BUSTER_CHECK_VECTOR_UNARY_PACKED(VPOPCNTW),
-                                                    BUSTER_CHECK_VECTOR_UNARY_PACKED(VPOPCNTD), BUSTER_CHECK_VECTOR_UNARY_PACKED(VPOPCNTQ) };
-        forms = counts[e];
-        needed = shape.element <= 2 ? BUSTER_X86_FEATURE(AVX512BITALG) : BUSTER_X86_FEATURE(AVX512VPOPCNTDQ);
-    }
-    else if (builtin == CBUILTIN_ELEMENTWISE_CLZG)
-    {
-        // AVX-512CD counts 32- and 64-bit elements' leading zeros alone.
-        forms = shape.element == 4 ? BUSTER_CHECK_VECTOR_UNARY_PACKED(VPLZCNTD) : shape.element == 8 ? BUSTER_CHECK_VECTOR_UNARY_PACKED(VPLZCNTQ) : forms;
-        needed = BUSTER_X86_FEATURE(AVX512CD);
-    }
-    else if (builtin == CBUILTIN_ELEMENTWISE_FSHL || builtin == CBUILTIN_ELEMENTWISE_FSHR)
-    {
-        // AVX-512 VBMI2 shifts pairs of 16-, 32- and 64-bit elements alone.
-        const bool left = builtin == CBUILTIN_ELEMENTWISE_FSHL;
-        static const CheckVectorForms shifts[2][3] = {
-            { BUSTER_CHECK_VECTOR_PACKED(VPSHLDVW), BUSTER_CHECK_VECTOR_PACKED(VPSHLDVD), BUSTER_CHECK_VECTOR_PACKED(VPSHLDVQ) },
-            { BUSTER_CHECK_VECTOR_PACKED(VPSHRDVW), BUSTER_CHECK_VECTOR_PACKED(VPSHRDVD), BUSTER_CHECK_VECTOR_PACKED(VPSHRDVQ) },
-        };
-        forms = shape.element >= 2 ? shifts[left ? 0 : 1][e - 1] : forms;
-        needed = BUSTER_X86_FEATURE(AVX512VBMI2);
-    }
-    else if (builtin == CBUILTIN_REDUCE_ADD)
-    {
-        static const CheckVectorForms add[4] = { BUSTER_CHECK_VECTOR_EVEX(VPADDB), BUSTER_CHECK_VECTOR_EVEX(VPADDW), BUSTER_CHECK_VECTOR_EVEX(VPADDD),
-                                                 BUSTER_CHECK_VECTOR_EVEX(VPADDQ) };
-        forms = add[e];
-    }
-    else if (builtin == CBUILTIN_REDUCE_MUL)
-    {
-        // AVX-512 multiplies 16-, 32- and 64-bit elements alone, the last with AVX-512DQ.
-        forms = shape.element == 2 ? BUSTER_CHECK_VECTOR_EVEX(VPMULLW) : shape.element == 4 ? BUSTER_CHECK_VECTOR_EVEX(VPMULLD) :
-                shape.element == 8 ? BUSTER_CHECK_VECTOR_PACKED(VPMULLQ) : forms;
-        needed = shape.element == 2 ? BUSTER_X86_FEATURE(AVX512BW) : shape.element == 8 ? BUSTER_X86_FEATURE(AVX512DQ) : 0;
-    }
-    else if (builtin == CBUILTIN_REDUCE_AND || builtin == CBUILTIN_REDUCE_OR || builtin == CBUILTIN_REDUCE_XOR)
-    {
-        // Every element's bits at once: the 64-bit forms whatever the elements.
-        forms = builtin == CBUILTIN_REDUCE_AND ? BUSTER_CHECK_VECTOR_PACKED(VPANDQ) : builtin == CBUILTIN_REDUCE_OR ? BUSTER_CHECK_VECTOR_PACKED(VPORQ) :
-                                                                                                                  BUSTER_CHECK_VECTOR_PACKED(VPXORQ);
-        needed = 0;
-    }
-    *features = needed;
-    return forms;
 }
 
 // The reason a row's features refuse it, by the builtin: what the target hasn't of `needed`.

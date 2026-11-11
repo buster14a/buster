@@ -960,7 +960,8 @@ static void ir_parse_instruction(IrParseState* state)
                     // A width change's part (#1840), its flags.
                     if (row.c == BUSTER_IR_INTRINSIC_EXTRACT || row.c == BUSTER_IR_INTRINSIC_INSERT || row.c == BUSTER_IR_INTRINSIC_PERMUTE ||
                         row.c == BUSTER_IR_INTRINSIC_ALIGN || row.c == BUSTER_IR_INTRINSIC_SHUFFLE_LANES || row.c == BUSTER_IR_INTRINSIC_EXTEND ||
-                        row.c == BUSTER_IR_INTRINSIC_TRUNCATE || row.c == BUSTER_IR_INTRINSIC_SHIFT)
+                        row.c == BUSTER_IR_INTRINSIC_TRUNCATE || row.c == BUSTER_IR_INTRINSIC_SHIFT ||
+                        row.c == BUSTER_IR_INTRINSIC_LANE_OP)
                     {
                         row.flags = (uint8_t)ir_parse_unsigned(state, 255, false);
                     }

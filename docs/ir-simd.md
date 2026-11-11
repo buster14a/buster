@@ -825,6 +825,69 @@ The tests:
 Rotates (`vprold` and the rest by an immediate) stay machine rows: the
 compiler's own units have one.
 
+## Lane operations (#1840)
+
+One more binary kind of `intrinsic`, `lane_op` (`BUSTER_IR_INTRINSIC_LANE_OP`),
+computes what the IR's opcodes lack on two vectors' integer lanes:
+
+```text
+%6 = intrinsic.v16i32 %3, %3 lane_op 29
+```
+
+- a and b are of the result's type.
+- `flags` hold the lanes' bytes' log2 (bits 0 and 1: bytes to quadwords) and
+  the operation (bits 2 to 4): the unsigned (0) and signed (1) minimum, the
+  unsigned (2) and signed (3) maximum, and, of bytes and words alone, the
+  unsigned (4) and signed (5) saturating sum and the unsigned (6) and signed (7)
+  saturating difference a − b.
+
+`ir_lane_op_flags_valid` is the verifier's rule. The model's `IR_SIMD_LANE_OP`
+computes each lane, and the interpreter, SCCP, GVN and LICM take it as they
+take the shifts.
+
+`ir_simd_typed_lane_op` decodes clang's `__builtin_elementwise_min`, `_max`,
+`_add_sat` and `_sub_sat` of integer vectors, which clang's headers'
+`_mm512_min_epu8` to `_mm512_subs_epi16` call. Their rows are one record of
+`vpminub` to `vpmaxsq` or `vpaddusb` to `vpsubsw`, VECTOR(0) (vvvv) and
+VECTOR(1) (rm) into VECTOR(0). The target needs the form's features (BW for
+bytes and words), AVX512F's and VL's below 64 bytes. Tier 1 selects the form
+back (`BUSTER_TIER1_VECTOR_LANE_OP`), from the table the decoder shares
+(`ir_simd_lane_op_forms`). Their 72 register forms had no Zen 5 row; they were
+measured on the 9700X: 2 cycles of latency, the minima and maxima of bytes to
+doublewords 4 per cycle and the others 2
+([the record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/ir-shifts-1840-2026-11-11),
+buster-performance#388). The reductions (`__builtin_reduce_min` and the rest,
+several records) stay machine rows.
+
+The producer's forms (`check_vector_elementwise_forms`) moved to
+`c_check_program_vector_convert.c` with the conversions' row, so that the
+backend unit's tests read them.
+
+Measured by `--tier1 --tier1-report -march=znver5`, both compilers compiling
+#1972's sources (`2461071`), against the masks' conversions:
+
+| Unit | Rows before | Rows after | Records |
+| --- | ---: | ---: | ---: |
+| `main_unit_frontend.c` | 596 | 541 | 543,612 both |
+| `main_unit_backend.c` | 784 | 752 | 1,541,683 both |
+
+The tests:
+
+- `test-ir`: both verifiers admit `lane_op` at each vector width, for every
+  flags byte below 64 and a second operand of the result's type or another
+  width's, exactly where operation, lanes and operands agree (72 forms). The
+  model is checked against C's minimum, maximum and clamped sum and difference
+  of each lane, on random vectors with extreme lanes.
+- `test-ir-parse` and `test-ir-optimize`: the text, and SCCP's folds of two
+  constant vectors by both paths.
+- `test-ir-simd`: every form the producer has decodes (72: minima and maxima
+  of 4 element sizes, both signs, 3 widths; saturations of bytes and words),
+  checked against flags and features written out. Each row is refused without
+  each feature it needs and under 6 changes.
+- `test-tier1-masks`: each of the 72 rows runs as a program's only row, through
+  both lowering paths, the interpreter at every stage and Tier 1 natively,
+  against C's operations on inputs with lanes at the saturations' edges.
+
 ## Masks to vectors and back (#1840)
 
 The masks' conversions to vectors and back need no new operation:
@@ -972,8 +1035,8 @@ take but the target refuses stays refused. So the decoders' refusals above are
 now each a machine row, or a refusal by class or target: `test-ir-simd`'s
 mutations of the `_k*` and BMI rows check that none decodes as the front end's
 operation, and that the decoder of its family refuses it. `test-ir-simd` also
-decodes a saturating byte addition's, a masked store's of no result and a shift's
-of a count from a general register as machine rows, with their classes and exactly their
+decodes a byte average's, a masked store's of no result and a shift's of a 64-bit
+count from a general register as machine rows, with their classes and exactly their
 features, each refused without each feature it needs.
 
 Consumers classify vectors with `ir_function_has_vectors`, 64
