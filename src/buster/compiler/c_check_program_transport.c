@@ -1571,10 +1571,13 @@ static __attribute__((noinline)) void check_lower_transport_reduce_floating(Chec
         uint32_t count = 0;
         const uint8_t class = shape.element == 8 ? BUSTER_TYPED_CLASS_F64 : BUSTER_TYPED_CLASS_F32;
         Tier0Operation scalar;
+        Tier0Operation scalar_tail;
         CheckVectorConstants scalar_constants = { 0 };
-        const char* reason = number ? check_vector_floating_scalar_row(&writer->target, maximum ? CBUILTIN_ELEMENTWISE_MAXNUM : CBUILTIN_ELEMENTWISE_MINNUM,
-                                                                       class, &scalar, &scalar_constants) :
-                                     check_vector_reduce_floating_shape_rows(builtin, piece, tail, &count);
+        // The lanes' fold is LLVM's where its legal vectors are AVX-512's; a narrower target's legalization isn't modelled.
+        const char* reason = number && (writer->target.features & BUSTER_X86_FEATURE(AVX512F)) == 0 ? "elementwise builtins of scalars without AVX-512F" :
+                             number ? check_vector_floating_scalar_row(&writer->target, maximum ? CBUILTIN_ELEMENTWISE_MAXNUM : CBUILTIN_ELEMENTWISE_MINNUM,
+                                                                       class, &scalar, &scalar_constants, &scalar_tail) :
+                                      check_vector_reduce_floating_shape_rows(builtin, piece, tail, &count);
         Tier0Operation combine;
         CheckVectorConstants constants = { 0 };
         if (reason == NULL && shape.bytes > bytes)

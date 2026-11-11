@@ -5,12 +5,12 @@
 // --self-test exhausts the state space against an explicit list of green cases.
 // This administrative predicate is outside compiler/measurement hot paths.
 //
-// The `evidence` job (tools/ci/nightly.c) must succeed in every run, and says
-// whether the 9700X job was admitted. On a ready pull request that job
-// measures without its native correctness step (#1272): the context passes on
-// hosted correctness and the 9700X measurements, and says that native
-// correctness was not run. Every other green run with code ran the 9700X job
-// in full, native correctness first.
+// The `evidence` job (tools/ci/nightly.sh) must succeed in every run, and says
+// whether the 9700X job was admitted. A pull request, draft or ready, never is
+// (#2055): the context passes on its hosted correctness alone and says that
+// native correctness and measurements run on its merged state in the nightly
+// window. Every other green run with code ran the 9700X job in full, native
+// correctness first.
 // A nightly dispatch (backlog, snapshot) reports through its coverage record,
 // not this context; one that reaches this predicate fails.
 
@@ -114,13 +114,13 @@ static Result qualification_result(const char* name)
 
 static bool qualification_no_code(const Qualification* input)
 {
-    // Only pre-merge PRs may claim the no-code exemption; every main push needs full hosted CI (#1271).
+    // Only pre-merge PRs may claim the no-code exemption; every main push runs its hosted rows (#1271, #2057).
     bool selected = input->event == EVENT_PR;
     bool result = selected && input->changes == RESULT_SUCCESS && input->code == CODE_NO;
     result = result && input->size == RESULT_SUCCESS && input->hooks == RESULT_SUCCESS;
     result = result && input->tests == RESULT_SKIPPED && input->fuzz == RESULT_SKIPPED && input->native == RESULT_SKIPPED;
-    // The evidence job doesn't know the selector's verdict: it admits a ready pull request and skips a draft.
-    result = result && input->hardware == (input->event == EVENT_PR && input->draft ? HARDWARE_SKIP : HARDWARE_ADMIT);
+    // The evidence job skips the 9700X for every pull request (#2055).
+    result = result && input->hardware == HARDWARE_SKIP;
     return result;
 }
 
@@ -133,10 +133,13 @@ static bool qualification_pass(const Qualification* input)
     bool selected = (event == EVENT_PR || event == EVENT_PUSH) && input->changes == RESULT_SUCCESS && input->code == CODE_YES;
     bool periodic = (event == EVENT_SCHEDULE || event == EVENT_DISPATCH) && input->changes == RESULT_SKIPPED && input->code == CODE_UNSET;
     bool hosted = (selected || periodic) && input->size == RESULT_SUCCESS && input->hooks == RESULT_SUCCESS && input->tests == RESULT_SUCCESS;
-    bool native = hosted && input->hardware == HARDWARE_ADMIT && input->native == RESULT_SUCCESS;
-    native = native && (input->fuzz == RESULT_SUCCESS || (event == EVENT_PR && input->fuzz == RESULT_SKIPPED));
-    native = native && !(event == EVENT_PR && input->draft);
-    return valid && (qualification_no_code(input) || native);
+    // A pull request, draft or ready, qualifies on its hosted plain rows alone: no fuzzing, no 9700X job (#2055).
+    bool pull_request = event == EVENT_PR && hosted && input->hardware == HARDWARE_SKIP;
+    pull_request = pull_request && input->fuzz == RESULT_SKIPPED && input->native == RESULT_SKIPPED;
+    // Every other run with code passes only through the 9700X job's native correctness and measurements.
+    bool native = event != EVENT_PR && hosted && input->hardware == HARDWARE_ADMIT && input->native == RESULT_SUCCESS;
+    native = native && input->fuzz == RESULT_SUCCESS;
+    return valid && (qualification_no_code(input) || pull_request || native);
 }
 
 // Each input's place in a mixed-radix index over every combination, for the self-test's table of allowed tuples.
@@ -158,15 +161,16 @@ static uint32_t qualification_index(const Qualification* input)
 static int qualification_test(void)
 {
     // These are all allowed tuples, independently of the predicate's branches.
-    // The only green draft is the explicit no-code exemption, not native coverage;
-    // no green tuple with code skipped the 9700X job.
+    // A pull request, draft or ready, is green on its hosted rows with the 9700X
+    // job and fuzzing skipped (#2055); no other green tuple with code skipped
+    // the 9700X job.
     const Qualification allowed[] = {
-        { EVENT_PR, CODE_YES, false, PURPOSE_UNSET, HARDWARE_ADMIT, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SKIPPED, RESULT_SUCCESS },
-        { EVENT_PR, CODE_YES, false, PURPOSE_UNSET, HARDWARE_ADMIT, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS },
+        { EVENT_PR, CODE_YES, false, PURPOSE_UNSET, HARDWARE_SKIP, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SKIPPED, RESULT_SKIPPED },
+        { EVENT_PR, CODE_YES, true, PURPOSE_UNSET, HARDWARE_SKIP, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SKIPPED, RESULT_SKIPPED },
         { EVENT_PUSH, CODE_YES, false, PURPOSE_UNSET, HARDWARE_ADMIT, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS },
         { EVENT_SCHEDULE, CODE_UNSET, false, PURPOSE_UNSET, HARDWARE_ADMIT, RESULT_SKIPPED, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS },
         { EVENT_DISPATCH, CODE_UNSET, false, PURPOSE_FULL, HARDWARE_ADMIT, RESULT_SKIPPED, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS },
-        { EVENT_PR, CODE_NO, false, PURPOSE_UNSET, HARDWARE_ADMIT, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SKIPPED, RESULT_SKIPPED, RESULT_SKIPPED },
+        { EVENT_PR, CODE_NO, false, PURPOSE_UNSET, HARDWARE_SKIP, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SKIPPED, RESULT_SKIPPED, RESULT_SKIPPED },
         { EVENT_PR, CODE_NO, true, PURPOSE_UNSET, HARDWARE_SKIP, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SUCCESS, RESULT_SKIPPED, RESULT_SKIPPED, RESULT_SKIPPED },
     };
     // Seven job results, five values each (including missing/unknown), and every event, selector output, draft
@@ -276,15 +280,11 @@ int main(int argc, char** argv)
         }
         else if (passed && input.event == EVENT_PR)
         {
-            puts("Hosted correctness and the 9700X measurements passed. Native correctness was NOT run on the 9700X: pull requests skip it (#1272); it runs after the merge, on main's push and the scheduled runs.");
+            puts("Hosted correctness passed. Pull requests don't use the 9700X (#2055): native correctness and measurements were NOT run here; they run on the merged first-parent state in the nightly window.");
         }
         else if (passed)
         {
             puts("Hosted and native correctness and required measurements passed.");
-        }
-        else if (input.event == EVENT_PR && input.draft)
-        {
-            fputs("::error::Draft code change: hardware qualification withheld. Mark ready for review to qualify the current revision.\n", stderr);
         }
         else
         {

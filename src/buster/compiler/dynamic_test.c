@@ -85,7 +85,7 @@ struct DynamicTestTally
     uint64_t checked;
     uint64_t failures;
 };
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 static void dynamic_test_expect(DynamicTestTally* tally, bool condition, const char* what, uint64_t index)
 {
     tally->checked += 1;
@@ -98,13 +98,14 @@ static void dynamic_test_expect(DynamicTestTally* tally, bool condition, const c
         tally->failures += 1;
     }
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 static bool dynamic_test_report(const DynamicTestTally* tally)
 {
     printf("%s: %llu checks, %llu failed\n", tally->check, (unsigned long long)tally->checked, (unsigned long long)tally->failures);
     return tally->failures == 0;
 }
-
+#endif
 // ---------------------------------------------------------------------------------------------------------------------
 // Writing
 
@@ -131,7 +132,7 @@ struct DynamicTestWrite
     uint64_t room;
     bool succeeded;
 };
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 static void dynamic_test_lane_main(void* argument)
 {
     DynamicTestWrite* write = argument;
@@ -163,10 +164,10 @@ static void dynamic_test_lane_main(void* argument)
         write->succeeded = succeeded;
     }
 }
-
+#endif
 // The soname the tests give their shared libraries (DT_SONAME).
 #define BUSTER_DYNAMIC_TEST_SONAME "libbuster-test.so"
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 // The writer's inputs must omit an unused GCC catalog. Decide from the bound symbols and forced named-library
 // dependencies, independently of Bind.gcc_s_needed and the production range classifier.
 static bool dynamic_test_gcc_s_inputs(const ExecutableDynamic* dynamic, const Link* link, const Bind* bind, const Runtime* runtime)
@@ -194,7 +195,8 @@ static bool dynamic_test_gcc_s_inputs(const ExecutableDynamic* dynamic, const Li
     }
     return valid;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 // Writes a bound link to `path` with a group of `lanes` lanes, its inputs from `bind` and `runtime`: as a dynamic PIE
 // from _start, or against a shared library's runtime (RUNTIME_KIND_SHARED) as a shared library without an entry point,
 // whose soname is BUSTER_DYNAMIC_TEST_SONAME: whether executable_write succeeded, and its result. `write` holds the
@@ -226,7 +228,8 @@ static bool dynamic_test_write_with(DynamicTestWrite* write, Link* link, const B
     scratch_end(scratch);
     return ran && write->succeeded;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 // The link's general- and local-dynamic TLS accesses (TLSGD and TLSLD fixups), which a dynamic PIE relaxes (#515).
 static uint64_t dynamic_test_tls_accesses(const Link* link)
 {
@@ -238,7 +241,8 @@ static uint64_t dynamic_test_tls_accesses(const Link* link)
     }
     return result;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 // Writes the link with every lane count, each from zeroed fields over the last file scribbled over, and each but the
 // first over the instructions that the last write relaxed, which a write takes for its own, but in a link with general-
 // or local-dynamic TLS accesses, whose relaxation can't be repeated (#515), from its bytes as binding left them: whether
@@ -294,7 +298,7 @@ static bool dynamic_test_lanes(DynamicTestTally* tally, Link* link, const Bind* 
     }
     return same && saved != 0;
 }
-
+#endif
 // ---------------------------------------------------------------------------------------------------------------------
 // The structure
 //
@@ -351,7 +355,7 @@ static const uint8_t* dynamic_test_bytes(const DynamicTestImage* image, const El
 {
     return section != 0 ? (const uint8_t*)image->file.pointer + section->sh_offset : 0;
 }
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 static const Elf64_Phdr* dynamic_test_segment(const DynamicTestImage* image, uint32_t type)
 {
     const Elf64_Phdr* result = 0;
@@ -361,7 +365,7 @@ static const Elf64_Phdr* dynamic_test_segment(const DynamicTestImage* image, uin
     }
     return result;
 }
-
+#endif
 // The value of a .dynamic tag, and whether it is there.
 static bool dynamic_test_tag(const DynamicTestImage* image, int64_t tag, uint64_t* value)
 {
@@ -376,7 +380,7 @@ static bool dynamic_test_tag(const DynamicTestImage* image, int64_t tag, uint64_
     }
     return found;
 }
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 // The names of .dynamic's DT_NEEDED entries, in order, up to `capacity` of them: how many there are.
 static uint32_t dynamic_test_needed(const DynamicTestImage* image, const char** names, uint32_t capacity)
 {
@@ -397,7 +401,8 @@ static uint32_t dynamic_test_needed(const DynamicTestImage* image, const char** 
     }
     return result;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 // .gnu.version_r as text, to compare two files': each entry's library and its needed versions' names, sorted (GNU ld
 // and lld order them differently), as "library:version,version;", into `text` of `capacity` bytes. False if it doesn't
 // fit or the section is malformed.
@@ -461,7 +466,8 @@ static bool dynamic_test_version_needs(const DynamicTestImage* image, char* text
     }
     return result;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 // Whether an import of the link's comes from `library`, the loader or libgcc_s.so.1 rather than libc.so.6: whether its
 // version is the library's (runtime.c numbers the three libraries' apart).
 static bool dynamic_test_from(const ImportLibrary* library, const Link* link, SymbolId symbol)
@@ -469,12 +475,14 @@ static bool dynamic_test_from(const ImportLibrary* library, const Link* link, Sy
     const bool import = link->symbols.source[symbol] == BUSTER_LINK_SOURCE_RUNTIME_SHARED;
     return import && import_test_version_name(library, link->symbols.version[symbol]).length != 0;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 static bool dynamic_test_from_loader(const Runtime* runtime, const Link* link, SymbolId symbol)
 {
     return dynamic_test_from(&runtime->loader, link, symbol);
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 // The file offset of an address, from the PT_LOAD whose file bytes have it, or UINT64_MAX.
 static uint64_t dynamic_test_file_offset(const DynamicTestImage* image, uint64_t address)
 {
@@ -487,7 +495,8 @@ static uint64_t dynamic_test_file_offset(const DynamicTestImage* image, uint64_t
     }
     return result;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 // .relr.dyn's addresses, decoded as the loader does: an even word an address, an odd one a bitmap of the 63 words after
 // the last address's (or the last bitmap's). Into `addresses` (room for `capacity`): how many, or UINT64_MAX if they
 // don't fit or a bitmap comes before any address.
@@ -534,7 +543,8 @@ static uint64_t dynamic_test_relr(const DynamicTestImage* image, uint64_t* addre
     }
     return result;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 // A symbol's address in the image (at base 0), or a TLS symbol's offset in the TLS segment; 0 for one defined nowhere,
 // for one of the linker's its reference, and for an absolute one its value.
 static uint64_t dynamic_test_address(const Link* link, SymbolId symbol)
@@ -544,7 +554,8 @@ static uint64_t dynamic_test_address(const Link* link, SymbolId symbol)
     const uint64_t address = atom != 0 ? link->atoms.address[atom] + link->symbols.value[symbol] : source == BUSTER_LINK_SOURCE_ABSOLUTE ? link->symbols.value[symbol] : 0;
     return atom == 0 && source == BUSTER_LINK_SOURCE_LINKER ? (uint64_t)(int64_t)(int32_t)link->symbols.reference[symbol] : address;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 // The test's own rules. A symbol is dynamic, and the loader looks it up, if it is an import or a weak reference to
 // nothing with default visibility, a name and a type other than TLS; and in a shared library (`library`), any global or
 // weak symbol with default visibility and a name that is a reference to nothing, strong or weak (the loader binds it:
@@ -567,7 +578,8 @@ static bool dynamic_test_is_dynamic(const Link* link, SymbolId symbol, bool libr
     const bool defined = link->symbols.atom[symbol] != 0 || source == BUSTER_LINK_SOURCE_ABSOLUTE;
     return source == BUSTER_LINK_SOURCE_RUNTIME_SHARED || (nowhere && weak && visible && !tls && named) || (library && global && visible && named && (defined || nowhere));
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 // A dynamic symbol that .dynsym has as undefined: an import or a reference to nothing. A shared library's preemptible
 // definitions are its exports.
 static bool dynamic_test_is_undefined(const Link* link, SymbolId symbol, bool library)
@@ -575,7 +587,8 @@ static bool dynamic_test_is_undefined(const Link* link, SymbolId symbol, bool li
     const bool defined = link->symbols.atom[symbol] != 0 || link->symbols.source[symbol] == BUSTER_LINK_SOURCE_ABSOLUTE;
     return dynamic_test_is_dynamic(link, symbol, library) && !defined;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 static bool dynamic_test_is_relative(const Link* link, SymbolId symbol, bool library)
 {
     const AtomId atom = link->symbols.atom[symbol];
@@ -584,14 +597,16 @@ static bool dynamic_test_is_relative(const Link* link, SymbolId symbol, bool lib
     const bool absolute = link->symbols.source[symbol] == BUSTER_LINK_SOURCE_ABSOLUTE;
     return !dynamic_test_is_dynamic(link, symbol, library) && !tls && !nowhere && !absolute;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 // A shared library's own TLS symbol: defined in an atom of TLS, and not dynamic.
 static bool dynamic_test_is_own_tls(const Link* link, SymbolId symbol, bool library)
 {
     const AtomId atom = link->symbols.atom[symbol];
     return library && atom != 0 && link_class_is_tls(link->atoms.class[atom]) && !dynamic_test_is_dynamic(link, symbol, library);
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 // Whether fixup `fixup` of `atom` is a call of __tls_get_addr that a dynamic PIE's general- or local-dynamic access
 // consumed with its relaxation: the fixup before it in the atom is the access's (executable_relaxed_call's rule). A
 // shared library (`library`) keeps the calls.
@@ -600,7 +615,8 @@ static bool dynamic_test_consumed_call(const Link* link, AtomId atom, FixupId fi
     const uint8_t previous = fixup > link->atoms.fixup_begin[atom] ? link->fixups.kind[fixup - 1] & BUSTER_LINK_FIXUP_KIND : 0;
     return !library && (previous == BUSTER_LINK_FIXUP_TLSGD || previous == BUSTER_LINK_FIXUP_TLSLD);
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 // A PIE's GOT slots of its own thread-locals' offsets from the thread pointer, which no relocation fills and lld's
 // relaxation to local-exec leaves out: test-executable's count (executable_test_tls_slots) but for the imported
 // thread-locals, whose slots TPOFF64 relocations fill (#515's general-dynamic accesses to libc.so.6's errno).
@@ -614,7 +630,7 @@ static uint64_t dynamic_test_own_tls_slots(const Link* link)
     }
     return executable_test_tls_slots(link) - imported;
 }
-
+#endif
 // A relocation the loader needs: where, its type, its symbol's .dynsym name (or 0) and its addend.
 typedef struct DynamicTestRelocation DynamicTestRelocation;
 struct DynamicTestRelocation
@@ -624,14 +640,15 @@ struct DynamicTestRelocation
     SymbolId symbol;
     int64_t addend;
 };
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 static int dynamic_test_by_offset(const void* a, const void* b)
 {
     const uint64_t x = ((const DynamicTestRelocation*)a)->offset;
     const uint64_t y = ((const DynamicTestRelocation*)b)->offset;
     return x < y ? -1 : x > y ? 1 : 0;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 // The GNU hash of a name, h * 33 + c from 5381, and a .gnu.hash lookup of it as the loader does it (glibc's
 // do_lookup_x): the Bloom filter's two bits, the bucket's chain until a hash with its low bit set. Returns the .dynsym
 // index of the entry named `name`, or 0.
@@ -683,7 +700,8 @@ static uint32_t dynamic_test_lookup(const DynamicTestImage* image, const char* n
     }
     return result;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 // .gnu.hash's structure, as lld writes it: a bucket per four exports (at least one) and the next power of two of
 // 64-bit Bloom words above 12 bits per export, with shift 26; the exports from symoffset on, sorted by bucket; each
 // bucket's first index, or 0; each export's hash with its low bit set only for the last of its bucket; and both of
@@ -766,7 +784,8 @@ static void dynamic_test_gnu_hash(DynamicTestTally* tally, const DynamicTestImag
         dynamic_test_expect(tally, used || first == 0, "an empty bucket 0", b);
     }
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 // Every dynamic symbol of the link once in .dynsym, undefined, at its binding and type, an import at its version and a
 // weak reference to nothing unversioned, before the exports; each export defined at its address, size and section,
 // and found through .gnu.hash, which finds no undefined one. Fills `indices` (room for every symbol) with each one's
@@ -892,7 +911,8 @@ static void dynamic_test_symbols(DynamicTestTally* tally, const Link* link, cons
     }
     dynamic_test_expect(tally, count == 1 + undefined + bind->export_count, "every dynamic symbol and export in .dynsym", index);
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 // .rela.dyn and .relr.dyn against the relocations the test's rules ask for: one for each GOT slot of a dynamic or
 // relocated symbol (GLOB_DAT, TPOFF64 for a TLS one, or RELATIVE to the symbol's address), and in a shared library
 // (`library`) of its own TLS symbol (TPOFF64 without a symbol, its offset in the TLS segment as the addend), and for
@@ -1136,7 +1156,8 @@ static void dynamic_test_relocations(DynamicTestTally* tally, const Link* link, 
         }
     }
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 // The loads and calls through the GOT, by the test's own rule (executable_test_relaxes, which in a shared library
 // leaves its dynamic symbols out: another object may define them): each that relaxes rewritten in the file
 // (executable_test_relaxed), and each other keeping its instruction, but a PIE's calls of __tls_get_addr that its TLS
@@ -1215,7 +1236,8 @@ static uint64_t dynamic_test_got(DynamicTestTally* tally, const Link* link, cons
     arena_pop_to(arena, length);
     return relaxed;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 // A dynamic PIE's general- and local-dynamic TLS accesses, relaxed as GNU ld and lld relax them in an executable (#515),
 // each read from the file: a general-dynamic one (66 48 8d 3d <x@tlsgd> and its call, 16 bytes) to its own thread-local
 // as mov %fs:0, %rax; lea x@tpoff(%rax), %rax, and to an import as mov %fs:0, %rax; add x@gottpoff(%rip), %rax, whose
@@ -1287,7 +1309,8 @@ static void dynamic_test_tls(DynamicTestTally* tally, const Link* link, const Dy
     }
     dynamic_test_expect(tally, mismatched == 0, "each general- and local-dynamic TLS access relaxed, to initial-exec for an import", index * 1000000 + first);
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 // The headers and .dynamic: ET_DYN from _start, PT_INTERP the interpreter, PT_DYNAMIC .dynamic; DT_NEEDED libgcc_s.so.1
 // exactly when an import is its, libc.so.6, then the loader exactly when an import is its, as GNU ld and lld take
 // libc.so's AS_NEEDED and GCC's driver's -lgcc_s_asneeded, and DT_VERNEEDNUM those
@@ -1401,7 +1424,8 @@ static void dynamic_test_headers(DynamicTestTally* tally, const Link* link, cons
                             ".gnu.version_r's entries: its sh_info and its chain, DT_VERNEEDNUM's", verneed_section != 0 ? verneed_section->sh_info * 100 + chain : 0);
     }
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 // All of the structure's checks of one file, written with `relr` or without. Returns how many loads and calls through
 // the GOT relaxed.
 static uint64_t dynamic_test_structure(DynamicTestTally* tally, const Link* link, const Bind* bind, const Runtime* runtime, String8 file, bool relr, uint64_t index)
@@ -1429,7 +1453,8 @@ static uint64_t dynamic_test_structure(DynamicTestTally* tally, const Link* link
     scratch_end(scratch);
     return relaxed;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 // Whether the runtime's libc.so.6 defines GLIBC_ABI_DT_RELR, with which the writer puts RELATIVE relocations in
 // .relr.dyn.
 static bool dynamic_test_relr_supported(const Runtime* runtime)
@@ -1441,10 +1466,10 @@ static bool dynamic_test_relr_supported(const Runtime* runtime)
     }
     return result;
 }
-
+#endif
 // ---------------------------------------------------------------------------------------------------------------------
 // The variants
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 // Whether the harness (object_test_harness) at `harness` loads the library at `library`, whose buster_library_main
 // exits with status 0 having written exactly `expected`.
 static bool dynamic_test_loads(const char* harness, const char* library, const uint8_t* expected, uint64_t expected_length)
@@ -2310,7 +2335,8 @@ static uint64_t dynamic_test_read_references(const DynamicTestImage* image, Dyna
     }
     return result;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 // How many of a file's .rela.dyn and .rela.plt relocations are of `type`.
 static uint64_t dynamic_test_count_relocations(const DynamicTestImage* image, uint32_t type)
 {
@@ -2331,7 +2357,8 @@ static uint64_t dynamic_test_count_relocations(const DynamicTestImage* image, ui
     }
     return result;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 static void dynamic_test_against_lld(DynamicTestTally* tally, const Link* link, const Bind* bind, const Runtime* runtime, uint32_t units, String8 file, const char* directory,
                                      const char* name, bool keep, Arena* arena)
 {
@@ -2952,7 +2979,7 @@ static bool dynamic_test_exports(const ExecutableTestDirectory* directory, const
     bind_test_link_end(test);
     return dynamic_test_report(&tally);
 }
-
+#endif
 // ---------------------------------------------------------------------------------------------------------------------
 // The imports
 
@@ -2965,6 +2992,7 @@ static bool dynamic_test_exports(const ExecutableTestDirectory* directory, const
 #define BUSTER_DYNAMIC_TEST_IMPORTS 256
 #define BUSTER_DYNAMIC_TEST_POINTERS 8
 
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 typedef struct DynamicTestImports DynamicTestImports;
 struct DynamicTestImports
 {
@@ -2972,7 +3000,8 @@ struct DynamicTestImports
     uint32_t count;
     bool bound;
 };
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 static void dynamic_test_imports_program(DynamicTestImports* program, const Runtime* runtime)
 {
     BindTestLink* test = &program->test;
@@ -3056,7 +3085,8 @@ static void dynamic_test_imports_program(DynamicTestImports* program, const Runt
     }
     program->bound = built && bind_end(&test->bind, &test->link) && link_check(&test->link) == LINK_ERROR_NONE;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 // The imports' program: each import a stub and an R_X86_64_64, written alike by every lane count, and it runs, the
 // loader having bound every import.
 static bool dynamic_test_imports(const ExecutableTestDirectory* directory, const Runtime* runtime, bool cross_check)
@@ -4150,7 +4180,7 @@ static bool dynamic_test_shared_compiled(const ExecutableTestDirectory* director
     }
     return dynamic_test_report(&tally);
 }
-
+#endif
 // ---------------------------------------------------------------------------------------------------------------------
 // libgcc_s.so.1
 //
@@ -4166,7 +4196,7 @@ static bool dynamic_test_shared_compiled(const ExecutableTestDirectory* director
 // the exact twins and a write without RELR must write and run it alike (dynamic_test_variants). Every import of
 // libgcc_s.so.1's names must be strong, and binding must have made one. With `cross_check`, the bound link's objects as
 // dynamic_test_against_lld compares them.
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 static const char dynamic_test_backtrace_source[] = "#include <unwind.h>\n"
                                                     "static _Unwind_Reason_Code buster_frame(struct _Unwind_Context* context, void* argument)\n"
                                                     "{\n"
@@ -4326,7 +4356,8 @@ static bool dynamic_test_libgcc_s(const ExecutableTestDirectory* directory, cons
     }
     return dynamic_test_report(&tally);
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 // #1122: __start_ and __stop_ of a section of C identifier atoms, and a weak reference to a missing one, in a dynamic
 // PIE compiled by cc, imported, bound and written here: its checks must hold, as cc's own PIE's do.
 static const char dynamic_test_section_bounds_source[] =
@@ -4404,7 +4435,7 @@ static bool dynamic_test_section_bounds(const ExecutableTestDirectory* directory
     }
     return dynamic_test_report(&tally);
 }
-
+#endif
 // ---------------------------------------------------------------------------------------------------------------------
 // General- and local-dynamic TLS (#515)
 //
@@ -4414,7 +4445,7 @@ static bool dynamic_test_section_bounds(const ExecutableTestDirectory* directory
 // status 53. Assembled by cc, imported as the program, bound, written by every lane count and by the exact twins,
 // read back by the structure's rules (dynamic_test_tls among them: every access relaxed, and errno's to initial-exec),
 // compared with lld's link with `cross_check`, and run.
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 #define BUSTER_DYNAMIC_TEST_TLS_STATUS 53
 
 static const char dynamic_test_tls_source[] = "    .section .tdata,\"awT\",@progbits\n"
@@ -4457,7 +4488,8 @@ static const char dynamic_test_tls_source[] = "    .section .tdata,\"awT\",@prog
                                               "    ret\n"
                                               "    .size main, .-main\n"
                                               "    .section .note.GNU-stack,\"\",@progbits\n";
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 // Calls of __tls_get_addr that no access makes (#511's review), through the PLT and the GOT, with the executable's own
 // module (1, the main program's in glibc's numbering) at offset 0 of its TLS block, where `value` is: imports' calls,
 // through the stub and the slot, beside a general-dynamic access whose call the relaxation consumes. 40 + 40 + 40.
@@ -4593,7 +4625,8 @@ static bool dynamic_test_tls_program(const ExecutableTestDirectory* directory, c
     }
     return dynamic_test_report(&tally);
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 // What a dynamic PIE refuses of general- and local-dynamic TLS (#515's review), each by every lane count and by the
 // exact twins with 1 and 8 lanes, without an output:
 //   - the TLS fixture written without __tls_get_addr named (DynamicTestWrite.no_tls_get_addr, as a producer that
@@ -4819,3 +4852,4 @@ static int run_dynamic_tests(int argc, char** argv)
     }
     return result;
 }
+#endif

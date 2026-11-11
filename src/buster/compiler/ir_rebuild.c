@@ -7,7 +7,7 @@
 // and the function ABI stay stable. Input, output and scratch are disjoint. Both verifier paths, including reachable
 // SSA dominance, must approve before a new view is published. Unknown operations and new vector/mask types fail
 // closed, and so does metadata the rebuild doesn't remap (labels, by-value aggregates' ABI records, a variadic
-// definition's incoming frame).
+// definition's incoming frame, asm bodies, #1839, which the text form these tools read has no form for).
 #ifndef BUSTER_IR_REBUILD_INCLUDED
 #define BUSTER_IR_REBUILD_INCLUDED
 
@@ -178,7 +178,7 @@ static __attribute__((unused)) IrCheck ir_rebuild(const IrFunction* source, cons
     {
         const bool paired = plan == NULL || ((plan->blocks == NULL) == (plan->rows == NULL) &&
                             (plan->rows == NULL || plan->offsets != NULL));
-        if (ir_function_has_simd(source))
+        if (ir_function_has_simd(source) || source->asm_body_count != 0)
         {
             check.error = IR_ERROR_TYPE;
         }
