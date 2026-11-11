@@ -455,6 +455,8 @@ static bool check_input_enum_read(CheckInputReader* reader, CheckTagFrame* frame
                 valid = !missing && valid && check_input_const_rvalue(reader, i, &value) && check_input_integer_constant(reader, &value);
                 if (valid)
                 {
+                    // Its comma operators' left operands' -Wunused-value, as a constant array bound's (#2202).
+                    check_input_attribute_unused(reader, job->first, i, true);
                     check_input_constant_warning(reader, job->first, i, &value, true);
                 }
                 const uint64_t mark = job->mark;
