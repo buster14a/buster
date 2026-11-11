@@ -1169,12 +1169,15 @@ static uint64_t check_lower_access_value(const TypeTable* types, uint8_t class, 
 }
 
 // The segment override of an access to an object of `type` (#1447): clang's x86 target maps address space 257 to %fs
-// (__seg_fs) and 256 to %gs (__seg_gs), BUSTER_TYPED_SEGMENT_FS's and _GS's (BUSTER_TYPED_ACCESS_SEGMENT); 0 for any other
-// space, 258's (%ss) among them, whose accesses the lowering refuses (check_lower_segment_access).
+// (__seg_fs), 256 to %gs (__seg_gs) and 258 to %ss, BUSTER_TYPED_SEGMENT_FS's, _GS's and _SS's
+// (BUSTER_TYPED_ACCESS_SEGMENT); 0 for any other space. SS's base is 0 in 64-bit mode, but clang still gives each access
+// its 36 and keeps the space apart from the flat one, as the override does here.
 static uint64_t check_lower_segment_override(const TypeTable* types, TypeId type)
 {
     const uint32_t space = type_address_space(type_object_qualifiers(types, type));
-    const uint64_t segment = space == BUSTER_TYPE_SPACE_TARGET + 257 ? BUSTER_TYPED_SEGMENT_FS : space == BUSTER_TYPE_SPACE_TARGET + 256 ? BUSTER_TYPED_SEGMENT_GS : 0;
+    const uint32_t target = space - BUSTER_TYPE_SPACE_TARGET;
+    static const uint8_t segments[3] = { BUSTER_TYPED_SEGMENT_GS, BUSTER_TYPED_SEGMENT_FS, BUSTER_TYPED_SEGMENT_SS };
+    const uint64_t segment = space >= BUSTER_TYPE_SPACE_TARGET && target >= 256 && target <= 258 ? segments[target - 256] : 0;
     return segment << BUSTER_TYPED_ACCESS_SEGMENT_SHIFT;
 }
 
@@ -11808,6 +11811,25 @@ static bool check_lower_strict_round(const CheckGraph* graph, uint32_t node, CBu
     return builtin == CBUILTIN_ELEMENTWISE_ROUND && graph->fp_environments != NULL && (graph->fp_environments[node] & BUSTER_CHECK_FP_ENV_ACCESS) != 0;
 }
 
+// Whether a masked memory builtin, node `node` (its arguments from `first`, `count` of them), is lowered element by element
+// (check_lower_transport_masked), as clang's legalization scalarizes it (#1834): at a target without AVX-512F and
+// AVX-512VL; and wherever no instruction takes it, a gather or a scatter of 8- or 16-bit elements, and an expanding load
+// or a compressing store of them without AVX-512 VBMI2.
+static bool check_lower_masked_elements(const CheckLowerWriter* writer, uint32_t node, CBuiltinId builtin, uint32_t first, uint32_t count)
+{
+    const CheckStream* stream = writer->program->stream;
+    const uint64_t features = writer->target.features;
+    const uint64_t evex = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512VL);
+    const bool loads = builtin == CBUILTIN_MASKED_LOAD || builtin == CBUILTIN_MASKED_EXPAND_LOAD || builtin == CBUILTIN_MASKED_GATHER;
+    const uint32_t stored = builtin == CBUILTIN_MASKED_SCATTER ? 2 : 1;
+    const TypeId value = loads ? check_stream_type(stream, node) : stored < count ? stream->argument_conversions[first + stored].type : BUSTER_TYPE_VOID;
+    const uint32_t element = check_vector_builtin_shape(writer->program->types, value).element;
+    const bool narrow = element == 1 || element == 2;
+    const bool addressed = builtin == CBUILTIN_MASKED_GATHER || builtin == CBUILTIN_MASKED_SCATTER;
+    const bool packed = builtin == CBUILTIN_MASKED_EXPAND_LOAD || builtin == CBUILTIN_MASKED_COMPRESS_STORE;
+    return (features & evex) != evex || (narrow && (addressed || (packed && (features & BUSTER_X86_FEATURE(AVX512VBMI2)) == 0)));
+}
+
 // Whether a reduction of a vector of `source`'s type takes the baseline's ways (#1834): at a target without AVX-512F and
 // AVX-512VL, and of 8- and 16-bit integers without AVX-512BW, whose halvings' rows are EVEX ones. An integer reduction
 // is then folded element by element (check_lower_transport_reduce), its result any order's; a floating one by pieces of
@@ -12479,6 +12501,11 @@ static __attribute__((noinline)) void check_lower_vector_builtin(CheckLowerWrite
     {
         check_lower_vector_lanes(writer, node, builtin);
     }
+    else if (builtin >= CBUILTIN_MASKED_LOAD && builtin <= CBUILTIN_MASKED_SCATTER && count >= 2 &&
+             check_lower_bool_vector(types, stream->argument_conversions[first].type) && check_lower_masked_elements(writer, node, builtin, first, count))
+    {
+        check_lower_transport_masked(writer, node, builtin);
+    }
     else if (builtin >= CBUILTIN_MASKED_LOAD && builtin <= CBUILTIN_MASKED_SCATTER)
     {
         // check_vector_masked_row's row, its operands the arguments in their order: the mask's bits loaded from its object
@@ -12883,10 +12910,10 @@ static bool check_lower_segment_types(const TypeTable* types)
 }
 
 // Whether an object of `type` in a segment's space (check_lower_segment) is one whose loads and stores take its override
-// (check_lower_access, #1447): in %fs or %gs (not %ss, which no form of the encoder's has in 64-bit mode), of an integer's,
-// a floating value's (float, double or long double), a 128-bit integer's or a vector's class (one LOAD or STORE moves it,
-// whose records Tier 0 gives the override), and not an aggregate (a struct's, a union's, a complex value's), an atomic
-// object, a _BitInt or a transport vector, whose accesses go through copies, helpers or recipes of their own.
+// (check_lower_access, #1447): in %fs, %gs or %ss, of an integer's, a floating value's (float, double or long double), a
+// 128-bit integer's or a vector's class (one LOAD or STORE moves it, whose records Tier 0 gives the override), and not an
+// aggregate (a struct's, a union's, a complex value's), an atomic object, a _BitInt or a transport vector, whose accesses
+// go through copies, helpers or recipes of their own.
 static bool check_lower_segment_carried(const CheckLowerWriter* writer, TypeId type)
 {
     const TypeTable* types = writer->program->types;
