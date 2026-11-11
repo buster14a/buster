@@ -1425,8 +1425,27 @@ its LOAD or SET (a seq_cst store's `xchg`), `ATOMIC_RMW` (`lock xadd`, `xchg`),
 pointee's (`check_lower_atomic_space`: a generic builtin's object type, such as
 `__atomic_test_and_set`'s, doesn't carry it).
 
+An object whose value is an address (a struct's, a union's, a complex value's, a
+`__float128`'s, a wide `_BitInt`'s limbs, a transport vector's) is read by a
+copy of its bytes through the override to a frame object of its own
+(`check_lower_segment_read`), whose address its consumers then take as any
+flat one: a copy, a call's argument, a register return, a complex operation, a
+comma's or a conditional's forwarding. A struct's or union's assignment into a
+segment copies through the override (`CheckLowerTask.segments`, the
+destination's in bits 2 and 3, `check_lower_copy_segmented`), and its value is
+the stored bytes at the source's address. Each copy is pieces of 8, 4, 2 and 1
+bytes, a `LOAD` and a `SET` each with its side's override. Clang lowers such a
+copy (an `llvm.memcpy` in a segment's address space, which no library
+function takes) inline as at most 8 stores of its widest vector (4 at `-Os`)
+and stops with "cannot lower memory intrinsic in address space" past them: 128
+bytes for SSE, 256 for AVX and 512 for znver5's AVX-512. The lowering takes up to 8
+of the function's target's widest vector registers' bytes, never fewer than
+clang, and refuses a larger copy by name ("an aggregate copy of more than 8
+vector registers in a segment's address space ..., which clang can't lower
+either").
+
 The rest the lowering refuses by name, rather than compile it as a plain access:
-an aggregate's copy, a complex or `_BitInt` value
+a complex value's store, a `_BitInt`'s value
 and an `_Atomic` object in those spaces (read or written as an lvalue), an atomic
 builtin another plan takes (a generic one by pointer, `__atomic_clear`,
 `__sync_lock_release`, one of 16 bytes); a bit of a vector of bool in one,
