@@ -3259,7 +3259,8 @@ static Tier1CertEmittedReason tier1_certificate_emitted_debug(const Tier1SelectP
     // Aggregate parts need their own locations and sources (#789, #1284), in addition to carried-row facts.
     valid = valid && (value_total >= build.parameter_parts || tier1_cert_emitted_refuse(&build, TIER1_CERT_EMITTED_CAPACITY, UINT32_MAX));
     const uint64_t parts = valid ? (uint64_t)value_total - build.parameter_parts : 0;
-    const uint64_t location_capacity = BUSTER_CERT_EMITTED_REGISTERS + 4 * (uint64_t)records + 8 * (uint64_t)blocks + 2 * (uint64_t)function->parameter_count + 64 + row_facts + 16 * parts;
+    // A block's entry fact of a spilled value takes a frame location of its own (#1871): fact_capacity bounds them.
+    const uint64_t location_capacity = BUSTER_CERT_EMITTED_REGISTERS + 4 * (uint64_t)records + 8 * (uint64_t)blocks + 2 * (uint64_t)function->parameter_count + 64 + fact_capacity + 16 * parts;
     const uint64_t source_capacity = BUSTER_CERT_EMITTED_NODE_SOURCES * (uint64_t)count + 16 + 24 * parts;
     const uint64_t code_capacity = records + source_capacity;
     const uint64_t facts_capacity = fact_capacity + count + BUSTER_CERT_EMITTED_PSEUDO * ((uint64_t)blocks + 1) + build.entry_count + 1;
