@@ -12,7 +12,11 @@
 #   hosted-product.sh ownership              Runs the inventory's unity fixture ownership check on the build's tree,
 #                                            the one check that reads the tree rather than the executable.
 #   hosted-product.sh pack DIRECTORY         Packs what `build` built, with its identity, as DIRECTORY/product.tar.zst,
-#                                            and writes its SHA-256 and size to GITHUB_OUTPUT (digest, bytes).
+#                                            and writes its SHA-256 and size to GITHUB_OUTPUT (digest, bytes). Keeps
+#                                            the product's identity and provenance in DIRECTORY/record and exports it as
+#                                            BUSTER_PRODUCT, as an install does: a suite this runner runs next (a vector
+#                                            configuration's item 1) reads its ownership check's pass there, since the
+#                                            identity's `./build.sh configure` leaves the tree's build out of date.
 #   hosted-product.sh install DIRECTORY DIGEST
 #                                            A shard's side: DIRECTORY holds the downloaded artifact, product.tar.zst
 #                                            alone. Checks its SHA-256 against DIGEST (the producer's job output, or for
@@ -277,6 +281,9 @@ pack()
     identity "$product" "$product/identity"
     provenance "$product/provenance"
     cp -- "$RUNNER_TEMP/product-ownership" "$product/provenance/ownership"
+    test ! -e "$output/record" || die "$output already holds a product's record"
+    mkdir -p "$output/record"
+    cp -R -- "$product/identity" "$product/provenance" "$output/record/"
     (cd "$product" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum) > "$staging/files.sha256"
     mv -- "$staging/files.sha256" "$product/files.sha256"
     unpacked=$(du -sb "$product" | cut -f 1)
@@ -290,6 +297,7 @@ pack()
     digest=$(sha256sum < "$output/product.tar.zst" | cut -c 1-64)
     bytes=$(stat -c %s "$output/product.tar.zst")
     printf 'digest=%s\nbytes=%s\n' "$digest" "$bytes" >> "$GITHUB_OUTPUT"
+    printf 'BUSTER_PRODUCT=%s\n' "$output/record" >> "${GITHUB_ENV:?}"
     summary "packed product.tar.zst: $bytes bytes ($unpacked unpacked), SHA-256 $digest, in $((SECONDS - start)) s"
 }
 

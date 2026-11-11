@@ -515,7 +515,8 @@ jobs:
 
       # The vector configuration's item 1 packs its build as a portable row's build job does (tools/ci/hosted-product.sh):
       # the ownership check on the build's tree, its sanitizer reports so far, then the product with its identity, which
-      # it publishes before its own suite runs.
+      # it publishes before its own suite runs. Its suite, as its other items', reads the ownership check's pass from the
+      # product's record (BUSTER_PRODUCT, which the pack exports): the identity's configure leaves the tree out of date.
       - name: Check unity fixture ownership on the vector build's tree
         if: env.BUSTER_SHARD != '' && env.BUSTER_VECTOR_BUILDER == '1'
         run: bash tools/ci/hosted-product.sh ownership

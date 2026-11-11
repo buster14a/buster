@@ -185,6 +185,11 @@ consume()
 # The product holds the compiler, the pragma oracle, the clang server and the build's commands, and installs.
 export FIXTURE_SERVER=0
 produce plain
+# The packing runner's own suite (a vector configuration's item 1) reads the ownership check's pass from the record the
+# pack keeps, as a shard's does from its install: the pack's configure leaves the tree's build out of date.
+packed=$(sed -n 's/^BUSTER_PRODUCT=//p' "$GITHUB_ENV")
+[ "$packed" = "$RUNNER_TEMP/product/record" ] && [ "$(head -n 1 "$packed/provenance/ownership")" = passed ] && [ -f "$packed/identity/summary" ] || fail "the pack's record of its product: '$packed'"
+pass
 consume 0 'a verified product' "$work/products/plain" "$(cat "$work/products/plain.digest")"
 grep -qx "BUSTER_COMPILER=$checkout/build/compiler" "$GITHUB_ENV" || fail 'BUSTER_COMPILER is not build/compiler'
 grep -q '^BUSTER_PPF_PRAGMA_ORACLE=' "$GITHUB_ENV" || fail 'no pragma oracle exported'
