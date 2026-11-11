@@ -9594,6 +9594,18 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
             reader->ignored[i] = true;
             frame->cursor = i + 1;
         }
+        else if (kind != BUSTER_TYPE_KIND_ENUM && frame->member_base == 0 && parser->tokens.kinds[i] == PARSE_KIND_STATIC_ASSERT)
+        {
+            // A static assertion among the members (#2264), which declares none: the walk checks it as it checks a
+            // block's, and the members go on past its `;`. (Clang's parser refuses `__extension__` before one here.)
+            const uint32_t close = i + 1 < frame->close ? parser->tree.parents[i + 1] : BUSTER_CHECK_NONE;
+            valid = close < frame->close && close + 1 < frame->close && parser->tokens.kinds[close + 1] == PARSE_KIND_SEMI;
+            if (valid)
+            {
+                reader->ignored[close + 1] = true;
+                frame->cursor = close + 2;
+            }
+        }
         else if (kind == BUSTER_TYPE_KIND_ENUM)
         {
             uint32_t nested = BUSTER_CHECK_NONE;
