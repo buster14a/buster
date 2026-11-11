@@ -241,6 +241,38 @@ static void check_test_target_versions_diagnostics(CheckTest* test, const char* 
         "__attribute__((target(\"avx2\"))) int f(void) { return 1; }\n"
         "__attribute__((target(\"avx2\"), used)) int f(void);\n"
         "__attribute__((target(\"avx2\"), used)) int f(void) { return 2; }\n",
+        // A redeclaration of an existing version isn't checked against multiversioning's attributes, but a new version
+        // is, and so is the declaration before one that makes the function multiversioned, with what earlier ones gave it
+        // (#2135).
+        "__attribute__((target(\"default\"))) int f(void);\n"
+        "__attribute__((target(\"default\"), cold)) int f(void);\n"
+        "__attribute__((target(\"avx2\"))) int f(void);\n"
+        "__attribute__((target(\"avx2\"), noinline)) int f(void);\n"
+        "__attribute__((target(\"sse4.2\"), cold)) int f(void);\n"
+        "__attribute__((target_clones(\"avx2\",\"default\"))) int g(void);\n"
+        "__attribute__((target_clones(\"avx2\",\"default\"), cold)) int g(void);\n"
+        "__attribute__((target(\"avx2\"))) int h(void);\n"
+        "__attribute__((target(\"avx2\"), cold)) int h(void);\n"
+        "__attribute__((target(\"default\"))) int h(void);\n",
+        "__attribute__((target(\"default\"))) int f(void) { return 0; }\n"
+        "__attribute__((target(\"avx2\"))) int f(void) { return 1; }\n"
+        "__attribute__((target(\"avx2\"), cold)) int f(void);\n"
+        "__attribute__((target(\"avx2\"), noinline)) int f(void) { return 2; }\n",
+        // A declaration refused as the one that caused multiversioning doesn't make the function multiversioned: the
+        // next version causes it again, with the error repeated.
+        "__attribute__((target(\"avx2\"), cold)) int f(void);\n"
+        "__attribute__((target(\"default\"))) int f(void);\n"
+        "__attribute__((target(\"sse4.2\"))) int f(void);\n"
+        "__attribute__((cold, target(\"avx2\"))) int g(void);\n"
+        "__attribute__((target(\"sse4.2\"))) int g(void);\n"
+        "__attribute__((target(\"bmi\"))) int g(void);\n"
+        "__attribute__((target(\"avx2\"))) int h(void);\n"
+        "__attribute__((target(\"avx2\"), cold)) int h(void);\n"
+        "__attribute__((target(\"sse4.2\"))) int h(void);\n"
+        "__attribute__((target(\"bmi\"))) int h(void);\n",
+        "__attribute__((target_clones(\"sse4.2\",\"default\"))) int k(void) { return 0; }\n"
+        "__attribute__((target_clones(\"sse4.2\",\"default\"), used)) int k(void);\n"
+        "__attribute__((target_clones(\"sse4.2\",\"default\"), used)) int k(void) { return 1; }\n",
         // A version refused for its attribute isn't merged: no warning (#1920).
         "__attribute__((target(\"default\"))) int f(void) { return 0; }\n"
         "__attribute__((target(\"avx2\"), cold)) int f(void) { return 1; }\n",
@@ -405,6 +437,29 @@ static bool check_test_target_versions_symbols(const char* path, char* text, siz
     return valid;
 }
 
+// The number of distinct places (section and value) of the object at `path`'s defined functions, or -1: each version
+// of a target_clones body has code of its own, as clang compiles one per version (#1838).
+static int64_t check_test_target_versions_places(const char* path)
+{
+    Arena arena = arena_reserve(UINT64_C(1) << 24);
+    CheckTestElf elf = { 0 };
+    bool valid = arena.base != 0 && check_test_elf_open(&elf, object_test_read_file(&arena, path));
+    int64_t places = 0;
+    for (uint64_t i = 1; valid && i < elf.symbol_count; i += 1)
+    {
+        const Elf64_Sym* symbol = elf.symbols + i;
+        bool seen = ELF64_ST_TYPE(symbol->st_info) != STT_FUNC || symbol->st_shndx == SHN_UNDEF;
+        for (uint64_t j = 1; !seen && j < i; j += 1)
+        {
+            const Elf64_Sym* other = elf.symbols + j;
+            seen = ELF64_ST_TYPE(other->st_info) == STT_FUNC && other->st_shndx == symbol->st_shndx && other->st_value == symbol->st_value;
+        }
+        places += seen ? 0 : 1;
+    }
+    arena_release(&arena);
+    return valid ? places : -1;
+}
+
 // Whether every line of `expected` is a line of `actual` and the other way round (the symbols, in any order).
 static bool check_test_target_versions_same_lines(const char* expected, const char* actual)
 {
@@ -445,14 +500,20 @@ static void check_test_target_versions_objects(CheckTest* test, const char* clan
         "__attribute__((target(\"arch=znver4\"))) int f(int x) { return x + 4; }\n"
         "__attribute__((target(\"popcnt,sse4.2\"))) int f(int x) { return x + 42; }\n"
         "__attribute__((target(\"apxf\"))) int f(int x) { return x + 36; }\n"
-        "static __attribute__((target(\"default\"))) int s(void) { return 10; }\n"
-        "static __attribute__((target(\"avx512f\"))) int s(void) { return 20; }\n"
+        "static __attribute__((target(\"default\"))) int s(void) { static int n = 10; return n; }\n"
+        "static __attribute__((target(\"avx512f\"))) int s(void) { static int n = 20; return n; }\n"
         "int call_s(void) { return s(); }\n"
         "__attribute__((target_clones(\"avx2\", \"arch=x86-64-v3\", \"sse4.1\", \"default\"))) int c(int x) { return x * 3; }\n"
         "static __attribute__((target_clones(\"gfni\", \"default\"))) int t(void) { return 7; }\n"
         "int call_t(void) { return t(); }\n"
         // A repeated version (kept for its index, without a symbol of its own) and a default that isn't last.
-        "__attribute__((target_clones(\"default\", \"avx2\", \"sse4.2\", \"avx2\"))) int d(int x) { return x * 5; }\n"
+        "__attribute__((target_clones(\"default\", \"avx2\", \"sse4.2\", \"avx2\"))) int d(int x) { static int m = 5; return x * m; }\n"
+        // A body of vector code, compiled once per version: the avx2, sse4.2 and default ones are called directly too. Its
+        // AVX-512 version is chosen by the feature, not by arch=znver4: a hosted runner's virtual Zen 4 is znver4 to
+        // __builtin_cpu_is but exposes no AVX-512, and that version's copy has EVEX code.
+        "typedef float w8 __attribute__((vector_size(32)));\n"
+        "__attribute__((target_clones(\"avx2\", \"avx512f\", \"sse4.2\", \"default\"))) int w(int x) { w8 a = { 1, 2, 3, 4, 5, 6, 7, 8 }; "
+        "a = a * (w8){ x, x, x, x, x, x, x, x }; int y = 0; for (int i = 0; i < 8; i += 1) { y += (int)a[i]; } return y; }\n"
         // A version of 41 features, its name past 200 bytes.
         "__attribute__((target(\"default\"))) int g(int x) { return x - 1; }\n"
         "__attribute__((target(\"popcnt,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2\"))) int g(int x) { return x - 2; }\n";
@@ -468,8 +529,15 @@ static void check_test_target_versions_objects(CheckTest* test, const char* clan
         "__attribute__((target(\"default\"))) int g(int x);\n"
         "__attribute__((target(\"popcnt,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2\"))) int g(int x);\n"
         "int call_s(void);\nint call_t(void);\n"
+        "__attribute__((target_clones(\"avx2\", \"avx512f\", \"sse4.2\", \"default\"))) int w(int x);\n"
+        // (In one unit with the definition, the direct path's link doesn't take a label of a symbol the unit defines: #2204.
+        // The versions compute the same values, so the function itself stands for them there.)
+        "#ifndef TARGET_JOINED\n"
+        "int w0(int) __asm__(\"w.avx2.0\");\nint w2(int) __asm__(\"w.sse4.2.2\");\nint w3(int) __asm__(\"w.default.3\");\n"
+        "#else\n#define w0 w\n#define w2 w\n#define w3 w\n#endif\n"
         "int (*address_f)(int) = f;\nint (*address_c)(int) = c;\nint (*address_d)(int) = d;\n"
-        "int main(void) { printf(\"%d %d %d %d %d %d %d %d %d\\n\", f(5), call_s(), address_f(1), c(2), address_c(3), call_t(), d(4), address_d(6), g(9));\n"
+        "int main(void) { printf(\"%d %d %d %d %d %d %d %d %d %d %d %d %d\\n\", f(5), call_s(), address_f(1), c(2), address_c(3), call_t(), d(4), address_d(6), g(9),\n"
+        "    w(2), w0(3), w2(4), w3(5));\n"
         "    return 0; }\n";
     char sources[2][PATH_MAX];
     char objects[2][3][PATH_MAX];
@@ -503,6 +571,15 @@ static void check_test_target_versions_objects(CheckTest* test, const char* clan
         }
         check_test_expect(test, built[u][1] && built[u][2] && check_test_driver_same_files(objects[u][1], objects[u][2]),
                           "target versions: the scalar and vector objects match byte for byte");
+        const int64_t places = built[u][0] ? check_test_target_versions_places(objects[u][0]) : -1;
+        for (uint32_t p = 1; p < 3; p += 1)
+        {
+            const int64_t own = built[u][p] ? check_test_target_versions_places(objects[u][p]) : -2;
+            char description[256];
+            snprintf(description, sizeof(description), "target versions: the %s object's functions have clang's %lld places of code, by the %s path: %lld",
+                     u == 0 ? "versions'" : "callers'", (long long)places, p == 1 ? "vector" : "scalar", (long long)own);
+            check_test_expect(test, places >= 0 && own == places, description);
+        }
     }
     for (uint32_t i = 0; i < 3; i += 1)
     {
@@ -525,8 +602,8 @@ static void check_test_target_versions_objects(CheckTest* test, const char* clan
     // The direct path's executable of both units, by both paths, and -g's object linked by cc.
     char together[PATH_MAX];
     snprintf(together, sizeof(together), "%s/target-together.c", directory);
-    char text[sizeof(versions) + sizeof(callers)];
-    snprintf(text, sizeof(text), "%s%s", versions, callers);
+    char text[sizeof(versions) + sizeof(callers) + 32];
+    snprintf(text, sizeof(text), "#define TARGET_JOINED 1\n%s%s", versions, callers);
     const bool joined = written && parse_test_write(together, text, strlen(text));
     for (uint32_t p = 0; joined && p < 4; p += 1)
     {
@@ -580,7 +657,12 @@ static void check_test_target_versions_models(CheckTest* test, const char* clang
     static const char model[] =
         "int printf(const char*, ...);\n"
         "struct M { unsigned vendor, type, subtype; unsigned features[1]; } __cpu_model = { VENDOR, TYPE, SUBTYPE, { W0 } };\n"
-        "unsigned __cpu_features2[3] = { W1, W2, W3 };\nvoid __cpu_indicator_init(void) {}\n"
+        "unsigned __cpu_features2[3] = { W1, W2, W3 };\n"
+        // Once main calls a resolver, the frames an unwinder walks from inside it: through the resolver's unwind entry.
+        "int _Unwind_Backtrace(int (*)(void*, void*), void*);\n"
+        "static int armed;\nstatic int frames;\n"
+        "static int frame(void* context, void* count) { (void)context; *(int*)count += 1; return 0; }\n"
+        "void __cpu_indicator_init(void) { int count = 0; if (armed) { _Unwind_Backtrace(frame, &count); frames = count; } }\n"
         "__attribute__((target(\"avx2\"))) int f(void) { return 1; }\n"
         "__attribute__((target(\"default\"))) int f(void) { return 0; }\n"
         "__attribute__((target(\"arch=znver4\"))) int f(void) { return 2; }\n"
@@ -611,12 +693,12 @@ static void check_test_target_versions_models(CheckTest* test, const char* clang
         "int e0(void) __asm__(\"e.arch_skx.0\");\nint e1(void) __asm__(\"e.arch_corei7-avx.1\");\nint e2(void) __asm__(\"e.sse4.2.2\");\n"
         "int e3(void) __asm__(\"e.default.3\");\n"
         "int (*address_e)(void) = e;\n"
-        "int main(void)\n{\n    void* chosen = resolve();\n    void* versions[] = { (void*)c0, (void*)c1, (void*)c2, (void*)c3, (void*)c4, (void*)c5, (void*)c6, (void*)c7 };\n"
+        "int main(void)\n{\n    armed = 1;\n    void* chosen = resolve();\n    void* versions[] = { (void*)c0, (void*)c1, (void*)c2, (void*)c3, (void*)c4, (void*)c5, (void*)c6, (void*)c7 };\n"
         "    int index = -1;\n    for (int i = 0; i < 8; i += 1) { index = versions[i] == chosen ? i : index; }\n"
         "    void* chosen_d = resolve_d();\n    int index_d = chosen_d == (void*)d0 ? 0 : chosen_d == (void*)d1 ? 1 : chosen_d == (void*)d3 ? 3 : -1;\n"
         "    void* chosen_e = resolve_e();\n"
         "    int index_e = chosen_e == (void*)e0 ? 0 : chosen_e == (void*)e1 ? 1 : chosen_e == (void*)e2 ? 2 : chosen_e == (void*)e3 ? 3 : -1;\n"
-        "    printf(\"%d %d %d %d %d\\n\", f(), index, index_d, h(), index_e);\n    return 0;\n}\n";
+        "    printf(\"%d %d %d %d %d %d\\n\", f(), index, index_d, h(), index_e, frames);\n    return 0;\n}\n";
     static const char clones[] =
         "__attribute__((target_clones(\"avx2,bmi\", \"bmi2\", \"arch=x86-64-v4\", \"arch=znver5\", \"avx10.1\", \"sse4.1\", \"default\"))) int c(void) { return 1; }\n"
         "__attribute__((target_clones(\"default\", \"avx2\", \"sse4.2\", \"avx2\"))) int d(void) { return 2; }\n"

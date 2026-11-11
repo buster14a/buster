@@ -665,7 +665,8 @@ static bool check_driver_warning_parentheses(const Parser* parser, const TypeTab
 }
 
 // c_check_semantic_diagnostic.c's, included after this file: an expression's text with expression spacing.
-static const char* check_semantic_requirement(const Parser* parser, Preprocessor* pp, uint32_t first, uint32_t end, Arena* scratch);
+static const char* check_semantic_requirement(const Parser* parser, Preprocessor* pp, uint32_t first, uint32_t end, const char* const* spelled,
+                                              Arena* scratch);
 
 // The sugar a typeof specifier prints as (#1837), clang's TypePrinter's: `typeof(T)` (`typeof_unqual(T)`) with its operand
 // type T as clang prints it, a typedef name as written and a nested typeof as its own sugar; `typeof (x)` of an expression
@@ -752,7 +753,7 @@ static String8 check_driver_typeof_text(const Parser* parser, Preprocessor* pp, 
         }
         else if (operand)
         {
-            const char* printed = check_semantic_requirement(parser, pp, first, close, scratch);
+            const char* printed = check_semantic_requirement(parser, pp, first, close, NULL, scratch);
             inner = printed != NULL ? (String8){ .pointer = (char*)printed, .length = strlen(printed) } : (String8){ 0 };
             expression = inner.length != 0;
         }
@@ -812,7 +813,8 @@ static uint32_t check_driver_spelling_chain(const Parser* parser, const CheckInp
 }
 
 // c_check_semantic_diagnostic.c's, included after this file.
-static const char* check_semantic_requirement(const Parser* parser, Preprocessor* pp, uint32_t first, uint32_t end, Arena* scratch);
+static const char* check_semantic_requirement(const Parser* parser, Preprocessor* pp, uint32_t first, uint32_t end, const char* const* spelled,
+                                              Arena* scratch);
 
 #define BUSTER_CHECK_DRIVER_VLA_BOUNDS 8
 
@@ -843,7 +845,7 @@ static uint32_t check_driver_vla_bounds(const Parser* parser, Preprocessor* pp, 
             close += scanning ? 1 : 0;
         }
         const char* text = !scanning && first != BUSTER_CHECK_NONE && close > first && count < BUSTER_CHECK_DRIVER_VLA_BOUNDS ?
-                           check_semantic_requirement(parser, pp, first, close, scratch) : NULL;
+                           check_semantic_requirement(parser, pp, first, close, NULL, scratch) : NULL;
         if (text != NULL)
         {
             ids[count] = extent;
@@ -1075,6 +1077,75 @@ static String8 check_driver_warning_type(const Parser* parser, Preprocessor* pp,
                                          CheckWarningSpelling* spell, Arena* scratch, TypeId type, uint32_t spelling)
 {
     return check_driver_warning_type_at(parser, pp, input, types, spell, scratch, type, spelling, BUSTER_CHECK_NONE, 0);
+}
+
+// The type sugar of a warning operand (#1447, c_types_sugar.c): its declaration's (check_input_declared_sugar), through the
+// addresses, indirections and subscripts whose levels the sugar's printer finds (type_sugar_print); 0 for none.
+static uint32_t check_driver_operand_sugar(const CheckInput* input, const CheckStream* stream, uint32_t node)
+{
+    const CheckGraph* graph = stream->graph;
+    uint32_t result = 0;
+    bool walking = input->sugar_entries != 0;
+    for (uint32_t steps = 0; walking && node < graph->count && steps < 16; steps += 1)
+    {
+        const CheckOp op = graph->ops[node];
+        const uint32_t token = graph->tokens[node];
+        const uint32_t declaration = op == CHECK_OP_VALUE && token < input->token_count && input->declarations != NULL ? input->declarations[token] : BUSTER_CHECK_NONE;
+        result = declaration < input->token_count ? check_input_declared_sugar(input, declaration) : 0;
+        walking = op == CHECK_OP_ADDRESS || op == CHECK_OP_DEREFERENCE || op == CHECK_OP_SUBSCRIPT;
+        node = walking ? graph->operand0[node] : node;
+    }
+    return result;
+}
+
+// A warning's type as its declaration's sugar writes it (#1447, type_sugar_print), quoted: `'MS void (*)(void)'`, with
+// each MACRO node's list resolved by the macro that writes it (check_driver_attribute_macro). Like clang's, no a.k.a.:
+// desugarForDiagnostic doesn't look through attributed, macro-qualified or parenthesized types. Empty where `sugar` is 0
+// or doesn't describe `type`, where the caller prints it as before.
+static String8 check_driver_sugar_type(const Parser* parser, Preprocessor* pp, const CheckInput* input, const TypeTable* types, CheckWarningSpelling* spell,
+                                       Arena* scratch, TypeId type, uint32_t sugar)
+{
+    String8 result = { 0 };
+    if (sugar != 0 && input != NULL && input->sugar.slots != NULL && type != 0 && check_driver_spelling_ready(parser, pp, input, types, spell, scratch))
+    {
+        uint32_t tokens[8];
+        String8 texts[8];
+        const uint32_t count = type_sugar_macro_tokens(types, &input->sugar, sugar, type, tokens, 8);
+        const bool history = count != 0 && pp_history_ensure(pp);
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            // (A MACRO node's word is its list's token plus one.)
+            const uint32_t token = tokens[i] - 1;
+            const bool list = token + 1 < parser->tokens.count && parser->tokens.kinds[token] == PARSE_KIND_ATTRIBUTE &&
+                              parser->tokens.kinds[token + 1] == PARSE_KIND_L_PAREN;
+            const uint32_t close = list ? parser->tree.parents[token + 1] : token;
+            texts[i] = history && token < parser->tokens.count && close < parser->tokens.count ? check_driver_attribute_macro(parser, pp, token, close) : (String8){ 0 };
+        }
+        const TypeNames names = {
+            .bytes = spell->bytes,
+            .lengths = spell->lengths,
+            .count = spell->count,
+            .anonymous = spell->anonymous,
+            .anonymous_count = spell->anonymous_count,
+            .sugar_macro_tokens = tokens,
+            .sugar_macro_texts = texts,
+            .sugar_macro_count = count,
+        };
+        const uint32_t options = pp->options.language.standard >= 2023 ? BUSTER_TYPE_PRINT_C23 : 0;
+        const String8 text = type_sugar_print(types, &input->sugar, scratch, sugar, type, (String8){ 0 }, &names, options);
+        const char* quoted = text.length != 0 ? check_warning_text(scratch, "'%.*s'", (int)text.length, text.pointer) : NULL;
+        result = quoted != NULL ? (String8){ .pointer = (char*)quoted, .length = (uint64_t)strlen(quoted) } : (String8){ 0 };
+    }
+    return result;
+}
+
+// A warning operand's type (check_driver_warning_type), as its sugar writes it where it has some and no typedef or typeof
+// spelling (check_driver_sugar_type).
+static String8 check_driver_warning_type_sugared(const Parser* parser, Preprocessor* pp, const CheckInput* input, const TypeTable* types,
+                                                 CheckWarningSpelling* spell, Arena* scratch, TypeId type, uint32_t spelling, uint32_t sugar)
+{
+    const String8 sugared = spelling == 0 ? check_driver_sugar_type(parser, pp, input, types, spell, scratch, type, sugar) : (String8){ 0 };
+    return sugared.length != 0 ? sugared : check_driver_warning_type(parser, pp, input, types, spell, scratch, type, spelling);
 }
 
 // An attribute's spelling without a keyword's surrounding underscores (__packed__ as packed), as clang normalizes one.
@@ -1517,9 +1588,13 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
         }
         case CHECK_WARNING_EVENT_TAG_ATTRIBUTE_PLACE:
         {
+            // A C23 attribute's scope is at payload.token (#1447), its spelling normalized.
             static const char* const keywords[] = { "struct", "union", "enum" };
-            result = check_warning_text(scratch, "attribute '%.*s' is ignored, place it after \"%s\" to apply attribute to type declaration", (int)name.length,
-                                        name.pointer, keywords[payload->data < 3 ? payload->data : 0]);
+            const bool scoped = payload->token != BUSTER_CHECK_WARNING_NO_SOURCE && payload->token < parser->tokens.count;
+            const String8 scope = scoped ? check_warning_attribute_scope(check_driver_warning_name(pp, parser->tokens.names[payload->token])) : (String8){ "", 0 };
+            const String8 attribute = scoped ? check_warning_attribute_name(name, scope, true) : name;
+            result = check_warning_text(scratch, "attribute '%.*s%s%.*s' is ignored, place it after \"%s\" to apply attribute to type declaration", (int)scope.length,
+                                        scope.pointer, scoped ? "::" : "", (int)attribute.length, attribute.pointer, keywords[payload->data < 3 ? payload->data : 0]);
             break;
         }
         case CHECK_WARNING_EVENT_TAG_ATTRIBUTE_DEFINED:
@@ -1599,6 +1674,15 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
                      "function with attribute 'no_caller_saved_registers' should only call a function with attribute 'no_caller_saved_registers' or be compiled with "
                      "'-mgeneral-regs-only'";
             break;
+        case CHECK_WARNING_EVENT_POINTER_TO_INT_CAST:
+        {
+            const String8 target = check_driver_warning_type(parser, pp, input, types, spell, scratch, payload->second_type, payload->data);
+            const String8 source = check_driver_warning_type(parser, pp, input, types, spell, scratch, payload->first_type, payload->name);
+            result = target.length != 0 && source.length != 0 ?
+                     check_warning_text(scratch, "cast to smaller integer type %.*s from %.*s", (int)target.length, target.pointer, (int)source.length, source.pointer) :
+                     NULL;
+            break;
+        }
         case CHECK_WARNING_EVENT_VOID_PTR_DEREFERENCE:
         {
             const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, payload->first_type, payload->data);
@@ -1933,6 +2017,19 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
         case CHECK_WARNING_EVENT_TYPEDEF_NAMELESS:
             result = "typedef requires a name";
             break;
+        case CHECK_WARNING_EVENT_UNUSED_RESULT:
+        {
+            static const char* const messages[] =
+            {
+                "left operand of comma operator has no effect",
+                "expression result unused; should this cast be to 'void'?",
+                "equality comparison result unused",
+                "inequality comparison result unused",
+                "relational comparison result unused",
+            };
+            result = messages[payload->data < BUSTER_ARRAY_LENGTH(messages) ? payload->data : 0];
+            break;
+        }
         case CHECK_WARNING_EVENT_UNDERLYING_CV_QUALIFIER:
             result = payload->data == (BUSTER_TYPE_CONST | BUSTER_TYPE_VOLATILE) ? "'const' and 'volatile' qualifiers in enumeration underlying type ignored" :
                      payload->data == BUSTER_TYPE_VOLATILE ? "'volatile' qualifier in enumeration underlying type ignored" :
@@ -2010,6 +2107,10 @@ static const char* check_driver_warning_note(const Parser* parser, Preprocessor*
             break;
         case CHECK_WARNING_NOTE_ATTRIBUTE_HERE:
             result = check_warning_text(scratch, "attribute '%.*s' here", (int)name.length, name.pointer);
+            break;
+        case CHECK_WARNING_NOTE_COMPARISON_ASSIGNMENT:
+            result = note->payload.data == BUSTER_CHECK_UNUSED_INEQUALITY ? "use '|=' to turn this inequality comparison into an or-assignment" :
+                                                                            "use '=' to turn this equality comparison into an assignment";
             break;
         case CHECK_WARNING_NOTE_DIAGNOSE_IF:
             result = check_warning_text(scratch, "from 'diagnose_if' attribute on '%.*s':", (int)name.length, name.pointer);
