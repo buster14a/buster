@@ -137,8 +137,25 @@ static const char check_driver_vla_place_source_16[] =
     "int n;\n"
     "int (*(p))[n];\n";
 
+// Misplaced variable-length arrays and variably modified types (#1447): each error recovers, the declaration invalid and
+// its uses quiet, a file-scope one's group going on.
+static const char check_driver_vla_misplaced_source[] =
+    "int n;\n"
+    "int a[n];\n"
+    "int (*vp)[n];\n"
+    "int b[n], c;\n"
+    "int use = a[0] + c + *vp[0];\n"
+    "void f(int k) { static int s[k]; extern int e[k]; extern int (*ep)[k]; int u = q + s[0] + e[0]; (void)u; }\n"
+    "typedef int T[n];\n"
+    "int z = w;\n";
+
 static const CheckDriverDefaultWarningFixture check_driver_vla_fold_fixtures[] =
 {
+    {
+        .name = "misplaced variable-length arrays recover",
+        .source = check_driver_vla_misplaced_source,
+        .errors = 9,
+    },
     {
         .name = "folded bounds in each context, by default",
         .source = check_driver_vla_fold_contexts_source,

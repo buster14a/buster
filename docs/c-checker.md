@@ -729,8 +729,15 @@ A `sizeof` of a variable type name in a file-scope initializer
 (`int s = 1 + sizeof(int[n]);`) is "initializer element is not a compile-time
 constant", at the start of the initializer's element that holds it.
 
-Differences left: these errors stop the reader, where clang marks the
-declaration invalid and goes on. A file-scope cast to a variably modified
+These errors recover, as clang marks the declaration invalid and goes on
+(#1447): a file-scope declarator's like a negative bound's
+(`check_input_declarator_recover`), but keeping its group's later declarators,
+as Sema's `CheckVariableDeclarationType` gives it after the declarator
+(`CheckDeclaratorRun.parameter_invalid`); a block's `static` or `extern` one's
+at the declaration, a stand-in `int` (one with an initializer still stops).
+
+Differences left: a member's error still stops the reader, where clang marks
+the field and its record invalid. A file-scope cast to a variably modified
 type, and `_Alignof` of one, are still refused, though clang accepts them.
 A block's variable-length array with a non-empty initializer is still
 "invalid or unsupported declaration" (clang's "variable-sized object may not
