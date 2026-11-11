@@ -82,7 +82,8 @@ through `testfixture` (below).
     `tcl-config.sh` fails a hosted run on another version, to be pinned
     again). Elsewhere `tcl-config.sh` prints the version it found, and a host
     without the package skips the heading: the 9700X has none yet.
-  - **Results (2026-11-11, main `d43c37e` with #2100):** the full permutation,
-    1,031,228 tests, passed by all three builds as a non-root user, every
-    script with clang's errors and counts. SQLite's own `SQLITE_DEBUG` isn't
+  - **Results (2026-11-11, main `d43c37e` with #2100, a 4-CPU cloud
+    container, as a non-root user):** the full permutation, 1,451 scripts and
+    1,031,345 tests, passed by all three builds, every script with clang's
+    state, errors and count; the per-PR subset took 47 s. SQLite's own `SQLITE_DEBUG` isn't
     in testfixture's flags, so #1360's slow `-c` doesn't apply.
