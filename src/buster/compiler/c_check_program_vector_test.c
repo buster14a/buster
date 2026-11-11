@@ -1217,6 +1217,19 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
           "ALL(int);ALL(unsigned);ALL(long long);ALL(float);ALL(double);M(signed char,4);M(signed char,16);M(short,8);M(unsigned short,4);\n"
           "munmap(page,8192);return (int)h;}\n"
         },
+        // The bit builtins without AVX-512 (#1834), element by element: popcount, bitreverse, clzg and ctzg (with a zero's
+        // operand, and without one of nonzero elements alone, which clang leaves undefined for zero), fshl and fshr, of
+        // signed and unsigned 8- to 64-bit elements of 4 to 64 bytes, zeros and single bits among them.
+        { "baseline-bit-builtins",
+          "#define T(E,W) do{typedef E V __attribute__((vector_size(W)));V a,b,c;fill(&a,W,n*11+W);fill(&b,W,n*13+W+1);fill(&c,W,n*17+W+2);for(unsigned k_=0;"
+          "k_<W/sizeof(E);k_+=3)a[k_]=0;for(unsigned k_=1;k_<W/sizeof(E);k_+=5)a[k_]=(E)1<<(k_%(8*sizeof(E)));"
+          "V r_[]={__builtin_elementwise_popcount(a),__builtin_elementwise_bitreverse(a),__builtin_elementwise_clzg(a,b),__builtin_elementwise_ctzg(a,b),__builtin_elementwise_fshl(a,b,c),__builtin_elementwise_fshr(a,b,c)};FOLD(r_);V s_={0};for(unsigned k_=0;k_<W/sizeof(E);k_++)if(a[k_]){V t_=__builtin_elementwise_clzg(a);V u_=__builtin_elementwise_ctzg(a);s_[k_]=t_[k_]+u_[k_];}FOLD(s_);}while(0)\n"
+          "#define ALL(E) T(E,4);T(E,8);T(E,16);T(E,32);T(E,64)\n"
+          "int tested(int n){unsigned h=2166136261u;\n"
+          "ALL(signed char);ALL(unsigned char);ALL(short);ALL(unsigned short);T(int,8);T(int,16);T(int,32);T(int,64);T(unsigned,16);T(unsigned,64);\n"
+          "T(long long,16);T(long long,32);T(long long,64);T(unsigned long long,16);T(unsigned long long,64);\n"
+          "return (int)h;}\n"
+        },
         // Scalars' elementwise builtins without AVX-512F (#1834): the C library's ceilf ... roundf, fmaf and fma without
         // SSE4.1 and FMA, and ldexpf and ldexp; SSE4.1's ROUNDSS and ROUNDSD (round's of the value plus the largest value
         // below 0.5 of its sign) and FMA's VFMADD213SS and SD where the target has them; halves, values near them and past
@@ -1314,6 +1327,19 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
           "fill(&g,32,n+4);a2=__builtin_nontemporal_load(&a);b2=__builtin_nontemporal_load(&b);c2=__builtin_nontemporal_load(&c);e2=__builtin_nontemporal_load(&e);"
           "g2=__builtin_nontemporal_load(&g);__builtin_nontemporal_store(a2+1,&a);__builtin_nontemporal_store(b2*3,&b);__builtin_nontemporal_store(c2,&c);"
           "__builtin_nontemporal_store(e2,&e);__builtin_nontemporal_store(g2^7,&g);FOLD(a);FOLD(b);FOLD(c);FOLD(e);FOLD(g);FOLD(a2);FOLD(e2);return (int)h;}\n"
+        },
+        // Conversions between unsigned or 64-bit integers and floats or doubles without AVX-512 (#1834), element by
+        // element as C converts each: in range, the most negative and the largest values and halfway cases among them.
+        { "baseline-integer-floating-conversions",
+          "typedef unsigned u4 __attribute__((vector_size(16)));typedef unsigned u2 __attribute__((vector_size(8)));typedef unsigned long long uq2 __attribute__((vector_size(16)));"
+          "typedef double d4 __attribute__((vector_size(32),aligned(16)));typedef float f2 __attribute__((vector_size(8)));typedef long long q4 __attribute__((vector_size(32),aligned(16)));\n"
+          "int tested(int n){unsigned h=2166136261u;u4 a;uq2 b;v2di c;fill(&a,16,n);fill(&b,16,n+1);fill(&c,16,n+2);a[0]=0xffffffffu;a[1]=0x80000001u;b[0]=~0ull;"
+          "b[1]=(1ull<<63)+1025;c[0]=(long long)(1ull<<63);c[1]=(1ll<<53)+1;"
+          "v4sf fa=__builtin_convertvector(a,v4sf);d4 da=__builtin_convertvector(a,d4);v2df db=__builtin_convertvector(b,v2df);f2 fb=__builtin_convertvector(b,f2);"
+          "v2df dc=__builtin_convertvector(c,v2df);f2 fc=__builtin_convertvector(c,f2);FOLD(fa);FOLD(da);FOLD(db);FOLD(fb);FOLD(dc);FOLD(fc);\n"
+          "v4sf g={3e9f,1.5f,4294967040.0f,(float)(n*n)};v2df k={1.8e19,(double)(n*n)*1e15};v2df m={-9.2e18,(double)n*-3e14};v2df k2={4e9,(double)(n*n)+0.5};"
+          "u4 ga=__builtin_convertvector(g,u4);uq2 kb=__builtin_convertvector(k,uq2);v2di mc=__builtin_convertvector(m,v2di);u2 gk=__builtin_convertvector(k2,u2);"
+          "q4 gq=__builtin_convertvector(g,q4);FOLD(ga);FOLD(kb);FOLD(mc);FOLD(gk);FOLD(gq);return (int)h;}\n"
         },
         // AVX's and AVX2's (x86-64-v3's): 256-bit unpacks, broadcasts, permutes, variable shifts, lanes' extractions and
         // insertions, extensions, gathers, FMA's (of no NaN) and F16C's conversions, and shuffles of dwords and qwords.

@@ -1318,8 +1318,17 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
         "asm-mmx-x87", clang);
     check_test_program_source(test, "int tested(int n){long m=n;__asm__(\".p2align 4\\n\\tpaddd %0, %0\" : \"+y\"(m));__asm__ volatile(\"emms\");return (int)m;}",
                               "asm-mmx-directives", clang);
-    check_test_program_boundary_reason(test, "typedef long long m64 __attribute__((vector_size(8)));int tested(int n){m64 v={n};__asm__(\"paddd %0, %0\" : \"+y\"(v));return (int)v[0];}",
-                                       "asm-mmx-vector", true, false, 0, 1, "inline assembly operands of this type in their constraint's registers");
+    // An __m64 in an MMX register (#1846, the owner's decision on #1447): an object's 8 bytes, read through its address,
+    // as an input, a `+` operand and an early-clobbered output; an input of no object stays refused by name.
+    check_test_program_source(test,
+        "typedef long long m64 __attribute__((vector_size(8)));"
+        "static long long added(long long a, long long b){m64 x={a},y={b},r;__asm__(\"movq %1, %0\\n\\tpaddd %2, %0\" : \"=&y\"(r) : \"y\"(x), \"y\"(y));"
+        "__asm__ volatile(\"emms\");return r[0];}"
+        "int tested(int n){m64 v={n*65537};__asm__(\"paddd %0, %0\" : \"+y\"(v));__asm__ volatile(\"emms\");"
+        "return (int)v[0]+(int)added((long long)n<<33|7,(long long)n*3);}",
+        "asm-mmx-vector", clang);
+    check_test_program_boundary_reason(test, "typedef long long m64 __attribute__((vector_size(8)));int tested(int n){m64 v={n};long r;__asm__(\"movq %1, %0\" : \"=r\"(r) : \"y\"(v+v));return (int)r;}",
+                                       "asm-mmx-vector-value", true, false, 0, 1, "inline assembly __m64 inputs that aren't objects");
     // A template that returns is an asm body, whose return leaves its caller (#1839, test-checker-driver's returning templates);
     // one that keeps its helper, as a named label's does, is refused by name.
     check_test_program_boundary_reason(test, "int tested(int n){__asm__ volatile(\"rep ret\\n.Lafter%=:\" ::: \"memory\");return n;}",
