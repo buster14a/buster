@@ -143,6 +143,215 @@ BUSTER_PREPROCESSOR_ENTRY __attribute__((format(printf, 4, 5))) void pp_diagnose
     }
 }
 
+// The answer of pp_warning_severity for a warning that isn't given (#1934): no severity a diagnostic is given with.
+#define BUSTER_PP_IGNORED PP_SEVERITY_NOTE
+
+// What a #pragma clang diagnostic made of a warning group (#1934): nothing, or its severity from there on.
+typedef enum PPPragmaMapping
+{
+    PP_PRAGMA_MAPPING_NONE,
+    PP_PRAGMA_MAPPING_IGNORED,
+    PP_PRAGMA_MAPPING_WARNING,
+    PP_PRAGMA_MAPPING_ERROR,
+    PP_PRAGMA_MAPPING_FATAL,
+} PPPragmaMapping;
+
+// The preprocessor's warnings that follow clang's options and pragmas (#1934, #1790, #1970, pp_warning_severity): each a
+// kind of clang's diagnostic, named by its group's flag, the kinds of one group mapped alike by its options and pragmas.
+typedef enum PPWarning
+{
+    // A bit-precise constant's suffix in #if, #elifdef and #elifndef before C23, and #embed before C23.
+    PP_WARNING_C23_EXTENSIONS,
+    // A \N read as no UCN (#1447), and a UCN before C99 (an extension).
+    PP_WARNING_UNICODE,
+    PP_WARNING_UNICODE_C99,
+    // A named UCN that starts a token (#1447).
+    PP_WARNING_DELIMITED_ESCAPE,
+    // #warning's text, and #pragma message's and #pragma GCC warning's (#1790).
+    PP_WARNING_WARNINGS,
+    PP_WARNING_PRAGMA_MESSAGES,
+    // #warning itself, before C23 an extension and in C23 incompatible with earlier standards.
+    PP_WARNING_PEDANTIC,
+    PP_WARNING_PRE_C23_COMPAT,
+    // The directives' (#1970).
+    PP_WARNING_EXTRA_TOKENS,
+    PP_WARNING_C99_EXTENSIONS,
+    PP_WARNING_MACRO_REDEFINED,
+    PP_WARNING_BUILTIN_MACRO_REDEFINED,
+    PP_WARNING_VARIADIC_MACROS,
+    PP_WARNING_UNKNOWN_PRAGMAS,
+    PP_WARNING_UNKNOWN_WARNING_OPTION,
+    PP_WARNING_PRAGMA_ONCE_OUTSIDE_HEADER,
+    PP_WARNING_PRAGMA_SYSTEM_HEADER_OUTSIDE_HEADER,
+    PP_WARNING_NONPORTABLE_INCLUDE_PATH,
+    // The literals' in #if and in pragmas' strings (#1970).
+    PP_WARNING_MULTICHAR,
+    PP_WARNING_UNKNOWN_ESCAPE_SEQUENCE,
+    PP_WARNING_IMPLICITLY_UNSIGNED_LITERAL,
+    PP_WARNING_INVALID_SOURCE_ENCODING,
+    // A warning of no group (poisoning an existing macro, a character constant too long for its type), and an extension
+    // of no group (a C90 macro name with no whitespace after it before a character outside its basic set): only -w,
+    // -Wno-everything, -Werror and an extension's -pedantic-errors map it, its flag "[-Werror]" where promoted.
+    PP_WARNING_PLAIN,
+    PP_WARNING_PLAIN_EXTENSION,
+    BUSTER_PP_WARNINGS,
+} PPWarning;
+
+typedef struct PPWarningKind PPWarningKind;
+struct PPWarningKind
+{
+    // Its group's names without -W: its own (null for none), its old one, and the groups that hold it, separated by spaces.
+    const char* name;
+    const char* alias;
+    const char* parents;
+    // Whether it is clang's extension (-pedantic-errors promotes it), and whether it is on by default (else -Weverything
+    // or its names give it, and -pedantic one that is an extension).
+    bool extension;
+    bool on;
+    // Whether it is seen in a system header too (clang's ShowInSystemHeader), and whether -Werror leaves it a warning
+    // (DefaultWarnNoWerror: only -Werror= of it and a pragma make it an error).
+    bool system;
+    bool no_werror;
+};
+
+static const PPWarningKind pp_warnings[BUSTER_PP_WARNINGS] =
+{
+    { "c23-extensions", "c2x-extensions", NULL, true, true, false, false },
+    { "unicode", NULL, NULL, false, true, false, false },
+    { "unicode", NULL, NULL, true, true, false, false },
+    { "delimited-escape-sequence-extension", NULL, "pedantic", true, false, false, false },
+    { "#warnings", NULL, NULL, false, true, true, false },
+    { "#pragma-messages", NULL, NULL, false, true, false, true },
+    { "pedantic", NULL, NULL, true, false, false, false },
+    { "pre-c23-compat", "pre-c2x-compat", NULL, false, false, false, false },
+    { "extra-tokens", NULL, NULL, true, true, false, false },
+    { "c99-extensions", NULL, NULL, true, true, false, false },
+    { "macro-redefined", NULL, NULL, true, true, false, false },
+    { "builtin-macro-redefined", NULL, NULL, true, true, false, false },
+    { "variadic-macros", NULL, NULL, true, true, false, false },
+    { "unknown-pragmas", NULL, "pragmas most all", true, true, false, false },
+    { "unknown-warning-option", NULL, NULL, true, true, false, false },
+    { "pragma-once-outside-header", NULL, NULL, false, true, false, false },
+    { "pragma-system-header-outside-header", NULL, NULL, false, true, false, false },
+    { "nonportable-include-path", NULL, NULL, false, true, false, false },
+    { "multichar", NULL, "most all", false, true, false, false },
+    { "unknown-escape-sequence", NULL, NULL, true, true, false, false },
+    { "implicitly-unsigned-literal", NULL, NULL, true, true, false, false },
+    { "invalid-source-encoding", NULL, NULL, true, true, false, false },
+    { NULL, NULL, NULL, false, true, false, false },
+    { NULL, NULL, NULL, true, true, false, false },
+};
+
+_Static_assert(BUSTER_PP_WARNINGS <= sizeof(((Preprocessor*)0)->warning_mappings), "a mapping for each warning");
+
+// Whether `length` bytes at `name` (an option's name without -W) name warning `w`'s group: its own name, its old one, a
+// group that holds it, or everything.
+static bool pp_warning_group_named(uint32_t w, const char* name, uint32_t length)
+{
+    const PPWarningKind* kind = pp_warnings + w;
+    const char* names[3] = { kind->name, kind->alias, "everything" };
+    bool result = false;
+    for (uint32_t k = 0; k < 3; k += 1)
+    {
+        result |= names[k] != NULL && strlen(names[k]) == length && memcmp(names[k], name, length) == 0;
+    }
+    for (const char* parent = kind->parents; parent != NULL && *parent != 0;)
+    {
+        const char* space = strchr(parent, ' ');
+        const uint32_t size = space != NULL ? (uint32_t)(space - parent) : (uint32_t)strlen(parent);
+        result |= size == length && memcmp(parent, name, length) == 0;
+        parent = space != NULL ? space + 1 : parent + size;
+    }
+    return result;
+}
+
+// The severity a warning of `warning` at `location` is given with, as clang maps it (#1934); BUSTER_PP_IGNORED for none.
+// First whether it is seen at all, as a warning, before any promotion counts: none under -w, and none in a system header
+// without -Wsystem-headers, unless its kind is seen there (PPWarningKind.system). Then the command line's: its last -W or
+// -Wno- of its group's names (pp_warning_group_named), or for an extension off by default -pedantic, -Wpedantic or
+// -pedantic-errors, promoted by -Werror (unless -Werror leaves it alone), -Werror= of the group, or -pedantic-errors of an
+// extension, unless -Wno-error= of it demotes it. The source's #pragma clang diagnostic for it replaces that
+// (Preprocessor.warning_mappings).
+static PPSeverity pp_warning_severity(Preprocessor* pp, PPWarning warning, uint32_t location)
+{
+    const PPWarningKind* info = pp_warnings + warning;
+    bool enabled = info->on;
+    bool errors = false;
+    bool group_error = false;
+    bool demoted = false;
+    bool pedantic_errors = false;
+    for (uint32_t i = 0; i < pp->options.semantic_warning_option_count; i += 1)
+    {
+        const char* option = pp->options.semantic_warning_options[i];
+        const uint32_t length = (uint32_t)strlen(option);
+        const bool pedantic = strcmp(option, "-pedantic") == 0 || strcmp(option, "-pedantic-errors") == 0 || strcmp(option, "-Wpedantic") == 0;
+        const bool on = (length > 2 && option[0] == '-' && option[1] == 'W' && strncmp(option, "-Wno-", 5) != 0 && strncmp(option, "-Werror", 7) != 0 &&
+                         pp_warning_group_named(warning, option + 2, length - 2)) ||
+                        (pedantic && info->extension && !info->on);
+        const bool off = strncmp(option, "-Wno-", 5) == 0 && strncmp(option, "-Wno-error", 10) != 0 && pp_warning_group_named(warning, option + 5, length - 5);
+        const bool promote = strncmp(option, "-Werror=", 8) == 0 && pp_warning_group_named(warning, option + 8, length - 8);
+        const bool demote = strncmp(option, "-Wno-error=", 11) == 0 && pp_warning_group_named(warning, option + 11, length - 11);
+        enabled = on || promote ? true : off ? false : enabled;
+        group_error = promote ? true : demote ? false : group_error;
+        demoted = demote ? true : promote ? false : demoted;
+        errors = strcmp(option, "-Werror") == 0 ? !info->no_werror : strcmp(option, "-Wno-error") == 0 ? false : errors;
+        pedantic_errors |= strcmp(option, "-pedantic-errors") == 0;
+    }
+    PPSeverity result = !enabled ? BUSTER_PP_IGNORED :
+                        group_error || ((errors || (pedantic_errors && info->extension)) && !demoted) ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING;
+    const uint8_t mapping = pp->warning_mappings[warning];
+    result = mapping == PP_PRAGMA_MAPPING_IGNORED ? BUSTER_PP_IGNORED : mapping == PP_PRAGMA_MAPPING_WARNING ? PP_SEVERITY_WARNING :
+             mapping == PP_PRAGMA_MAPPING_ERROR ? PP_SEVERITY_MAPPED_ERROR : mapping == PP_PRAGMA_MAPPING_FATAL ? PP_SEVERITY_MAPPED_FATAL : result;
+    const bool seen = !pp->options.suppress_warnings && (info->system || pp_diagnostic_warning_visible(pp, location, location != 0 ? pp->diagnostic_origin : 0));
+    return seen ? result : BUSTER_PP_IGNORED;
+}
+
+// The room for a warning's flag (pp_warning_flag): " [-Werror,-W" and the longest group's name.
+#define BUSTER_PP_WARNING_FLAG_BYTES 64
+
+// The severity a warning of `warning` at `location` is given with (pp_warning_severity), PP_SEVERITY_WARNING_ALWAYS for a
+// warning seen in system headers too, and its flag as clang prints it after the message, into `flag`: " [-Wgroup]", or
+// " [-Werror,-Wgroup]" where promoted; for one of no group " [-Werror]" where promoted, else nothing.
+static PPSeverity pp_warning_flag(Preprocessor* pp, PPWarning warning, uint32_t location, char flag[BUSTER_PP_WARNING_FLAG_BYTES])
+{
+    const PPWarningKind* kind = pp_warnings + warning;
+    const PPSeverity severity = pp_warning_severity(pp, warning, location);
+    const bool promoted = severity == PP_SEVERITY_ERROR || severity == PP_SEVERITY_MAPPED_ERROR;
+    flag[0] = 0;
+    if (kind->name != NULL)
+    {
+        snprintf(flag, BUSTER_PP_WARNING_FLAG_BYTES, " [%s-W%s]", promoted ? "-Werror," : "", kind->name);
+    }
+    else if (promoted)
+    {
+        snprintf(flag, BUSTER_PP_WARNING_FLAG_BYTES, " [-Werror]");
+    }
+    return severity == PP_SEVERITY_WARNING && kind->system ? PP_SEVERITY_WARNING_ALWAYS : severity;
+}
+
+// A warning of `warning` (pp_warning_flag) at `location`, the `length` bytes of its message at `message` with its flag.
+static __attribute__((noinline, cold)) void pp_diagnose_group_text(Preprocessor* pp, PPWarning warning, uint32_t location, const char* message, uint32_t length)
+{
+    char flag[BUSTER_PP_WARNING_FLAG_BYTES];
+    const PPSeverity severity = pp_warning_flag(pp, warning, location, flag);
+    if (severity != BUSTER_PP_IGNORED)
+    {
+        pp_diagnose(pp, severity, location, "%.*s%s", (int)length, message, flag);
+    }
+}
+
+// A warning of `warning` at `location` (pp_diagnose_group_text), its message formatted from `format`.
+static __attribute__((noinline, cold, format(printf, 4, 5))) void pp_diagnose_group(Preprocessor* pp, PPWarning warning, uint32_t location, const char* format, ...)
+{
+    char message[512];
+    va_list arguments;
+    va_start(arguments, format);
+    const int written = vsnprintf(message, sizeof(message), format, arguments);
+    va_end(arguments);
+    const uint32_t length = written < 0 ? 0 : (uint32_t)written < sizeof(message) ? (uint32_t)written : (uint32_t)sizeof(message) - 1;
+    pp_diagnose_group_text(pp, warning, location, message, length);
+}
+
 // The line marker's note that a location in range `range` is in (#1954), defined below; the history's include stacks
 // read it.
 static uint32_t pp_line_note_at(const Preprocessor* pp, uint32_t range, uint32_t location);
@@ -792,7 +1001,7 @@ static void pp_poison(Preprocessor* pp, IdentId name, uint32_t location)
     {
         if (pp_is_defined(pp, name))
         {
-            pp_diagnose(pp, PP_SEVERITY_WARNING, location, "poisoning existing macro");
+            pp_diagnose_group(pp, PP_WARNING_PLAIN, location, "poisoning existing macro");
         }
         else if (!pp_is_macro(pp, name))
         {
@@ -1674,7 +1883,9 @@ static void pp_define(Preprocessor* pp, uint32_t data_index, uint32_t base, uint
             const char* message = pp->options.language.standard >= 1999 ? "ISO C99 requires whitespace after the macro name"
                                   : unknown                              ? "whitespace required after macro name"
                                                                          : "whitespace recommended after macro name";
-            pp_diagnose(pp, PP_SEVERITY_WARNING, pp_define_location(pp, data, base, begin + 1, end), "%s", message);
+            // C99's -Wc99-extensions, and C90's of no group, an extension for a character outside its basic set.
+            pp_diagnose_group(pp, pp->options.language.standard >= 1999 ? PP_WARNING_C99_EXTENSIONS : unknown ? PP_WARNING_PLAIN_EXTENSION : PP_WARNING_PLAIN,
+                              pp_define_location(pp, data, base, begin + 1, end), "%s", message);
         }
         // ## can't begin or end a replacement list, and in a function-like macro # must precede a parameter and
         // __VA_OPT__ a '(' (pp_check_replacement_list): clang rejects such a definition when it reads it, used or not,
@@ -1698,7 +1909,7 @@ static void pp_define(Preprocessor* pp, uint32_t data_index, uint32_t base, uint
             {
                 if ((data->kinds[t] & 0x7F) == C_TOKEN_RAW_IDENTIFIER && data->values[t] == C_NAME_VA_OPT)
                 {
-                    pp_diagnose(pp, PP_SEVERITY_WARNING, pp_define_location(pp, data, base, t, end), "__VA_OPT__ can only appear in the expansion of a variadic macro");
+                    pp_diagnose_group(pp, PP_WARNING_VARIADIC_MACROS, pp_define_location(pp, data, base, t, end), "__VA_OPT__ can only appear in the expansion of a variadic macro");
                 }
             }
             if ((data->kinds[macro.body_begin] & 0x7F) == C_TOKEN_HASHHASH)
@@ -1721,7 +1932,7 @@ static void pp_define(Preprocessor* pp, uint32_t data_index, uint32_t base, uint
             const PPMacroId previous = pp_is_defined(pp, name) ? pp->macro_of[name] : 0;
             if (previous != 0 && pp_language_defined(pp, &pp->macros[previous]))
             {
-                pp_diagnose(pp, PP_SEVERITY_WARNING, location, "redefining builtin macro");
+                pp_diagnose_group(pp, PP_WARNING_BUILTIN_MACRO_REDEFINED, location, "redefining builtin macro");
             }
             else if (previous != 0 && !(pp->macros[previous].flags & BUSTER_PP_MACRO_REDEFINABLE) && !pp_same_definition(pp, &pp->macros[previous], &macro))
             {
@@ -1730,7 +1941,12 @@ static void pp_define(Preprocessor* pp, uint32_t data_index, uint32_t base, uint
                     .location = pp->macros[previous].location,
                     .message = "previous definition is here",
                 };
-                pp_diagnose_note(pp, PP_SEVERITY_WARNING, location, &note, "'%.*s' macro redefined", (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
+                char flag[BUSTER_PP_WARNING_FLAG_BYTES];
+                const PPSeverity severity = pp_warning_flag(pp, PP_WARNING_MACRO_REDEFINED, location, flag);
+                if (severity != BUSTER_PP_IGNORED)
+                {
+                    pp_diagnose_note(pp, severity, location, &note, "'%.*s' macro redefined%s", (int)intern_length(pp->table, name), intern_bytes(pp->table, name), flag);
+                }
             }
             const PPMacroId id = pp_new_macro(pp, name);
             if (id != 0)
@@ -2226,116 +2442,6 @@ static void pp_diagnose_ucn_basic(Preprocessor* pp, uint32_t location, uint32_t 
     }
 }
 
-// The answer of pp_warning_severity for a warning that isn't given (#1934): no severity a diagnostic is given with.
-#define BUSTER_PP_IGNORED PP_SEVERITY_NOTE
-
-// What a #pragma clang diagnostic made of a warning group (#1934): nothing, or its severity from there on.
-typedef enum PPPragmaMapping
-{
-    PP_PRAGMA_MAPPING_NONE,
-    PP_PRAGMA_MAPPING_IGNORED,
-    PP_PRAGMA_MAPPING_WARNING,
-    PP_PRAGMA_MAPPING_ERROR,
-    PP_PRAGMA_MAPPING_FATAL,
-} PPPragmaMapping;
-
-// The preprocessor's warnings that follow clang's options and pragmas (#1934, pp_warning_severity), by their group:
-// -Wc23-extensions' (a bit-precise constant's suffix in #if), -Wunicode's (a \N read as no UCN) and
-// -Wdelimited-escape-sequence-extension's (a named UCN that starts a token, #1447).
-typedef enum PPWarningGroup
-{
-    PP_WARNING_C23_EXTENSIONS,
-    PP_WARNING_UNICODE,
-    PP_WARNING_DELIMITED_ESCAPE,
-    BUSTER_PP_WARNING_GROUPS,
-} PPWarningGroup;
-
-typedef struct PPWarningGroupName PPWarningGroupName;
-struct PPWarningGroupName
-{
-    // Its names without -W: its own, its old one and a group that holds it (or null), and its flag as printed.
-    const char* name;
-    const char* alias;
-    const char* parent;
-    // Whether it is clang's extension (-pedantic-errors promotes it), and whether it is on by default (else -pedantic
-    // gives it).
-    bool extension;
-    bool on;
-};
-
-static const PPWarningGroupName pp_warning_groups[BUSTER_PP_WARNING_GROUPS] =
-{
-    { "c23-extensions", "c2x-extensions", NULL, true, true },
-    { "unicode", NULL, NULL, false, true },
-    { "delimited-escape-sequence-extension", NULL, "pedantic", true, false },
-};
-
-_Static_assert(BUSTER_PP_WARNING_GROUPS <= sizeof(((Preprocessor*)0)->warning_mappings), "a mapping for each warning group");
-
-// Whether `length` bytes at `name` (an option's name without -W) name warning group `g`: its own name, its old one, a group
-// that holds it, or everything.
-static bool pp_warning_group_named(uint32_t g, const char* name, uint32_t length)
-{
-    const PPWarningGroupName* group = pp_warning_groups + g;
-    const char* names[4] = { group->name, group->alias, group->parent, "everything" };
-    bool result = false;
-    for (uint32_t k = 0; k < 4; k += 1)
-    {
-        result |= names[k] != NULL && strlen(names[k]) == length && memcmp(names[k], name, length) == 0;
-    }
-    return result;
-}
-
-// The severity a warning of group `group` at `location` is given with, as clang maps it (#1934); BUSTER_PP_IGNORED for none.
-// First whether it is seen at all, as a warning, before any promotion counts: none under -w, and none in a system header
-// without -Wsystem-headers. Then the command line's: its last -W or -Wno- of the group's names (pp_warning_group_named), or
-// for one off by default -pedantic or -pedantic-errors, promoted by -Werror, -Werror= of the group, or -pedantic-errors of
-// an extension, unless -Wno-error= of it demotes it. The source's #pragma clang diagnostic for it replaces that
-// (Preprocessor.warning_mappings).
-static PPSeverity pp_warning_severity(Preprocessor* pp, PPWarningGroup group, uint32_t location)
-{
-    const PPWarningGroupName* info = pp_warning_groups + group;
-    bool enabled = info->on;
-    bool errors = false;
-    bool group_error = false;
-    bool demoted = false;
-    bool pedantic_errors = false;
-    for (uint32_t i = 0; i < pp->options.semantic_warning_option_count; i += 1)
-    {
-        const char* option = pp->options.semantic_warning_options[i];
-        const uint32_t length = (uint32_t)strlen(option);
-        const bool pedantic = strcmp(option, "-pedantic") == 0 || strcmp(option, "-pedantic-errors") == 0;
-        const bool on = (length > 2 && option[0] == '-' && option[1] == 'W' && strncmp(option, "-Wno-", 5) != 0 && strncmp(option, "-Werror", 7) != 0 &&
-                         pp_warning_group_named(group, option + 2, length - 2)) || (pedantic && !info->on);
-        const bool off = strncmp(option, "-Wno-", 5) == 0 && strncmp(option, "-Wno-error", 10) != 0 && pp_warning_group_named(group, option + 5, length - 5);
-        const bool promote = strncmp(option, "-Werror=", 8) == 0 && pp_warning_group_named(group, option + 8, length - 8);
-        const bool demote = strncmp(option, "-Wno-error=", 11) == 0 && pp_warning_group_named(group, option + 11, length - 11);
-        enabled = on || promote ? true : off ? false : enabled;
-        group_error = promote ? true : demote ? false : group_error;
-        demoted = demote ? true : promote ? false : demoted;
-        errors = strcmp(option, "-Werror") == 0 ? true : strcmp(option, "-Wno-error") == 0 ? false : errors;
-        pedantic_errors |= strcmp(option, "-pedantic-errors") == 0;
-    }
-    PPSeverity result = !enabled ? BUSTER_PP_IGNORED :
-                        group_error || ((errors || (pedantic_errors && info->extension)) && !demoted) ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING;
-    const uint8_t mapping = pp->warning_mappings[group];
-    result = mapping == PP_PRAGMA_MAPPING_IGNORED ? BUSTER_PP_IGNORED : mapping == PP_PRAGMA_MAPPING_WARNING ? PP_SEVERITY_WARNING :
-             mapping == PP_PRAGMA_MAPPING_ERROR ? PP_SEVERITY_MAPPED_ERROR : mapping == PP_PRAGMA_MAPPING_FATAL ? PP_SEVERITY_MAPPED_FATAL : result;
-    const bool seen = !pp->options.suppress_warnings && pp_diagnostic_warning_visible(pp, location, location != 0 ? pp->diagnostic_origin : 0);
-    return seen ? result : BUSTER_PP_IGNORED;
-}
-
-// A warning of group `group` (pp_warning_severity) at `location`, its message with clang's flag after it.
-static __attribute__((noinline, cold)) void pp_diagnose_group(Preprocessor* pp, PPWarningGroup group, uint32_t location, const char* message)
-{
-    const PPSeverity severity = pp_warning_severity(pp, group, location);
-    if (severity != BUSTER_PP_IGNORED)
-    {
-        const bool promoted = severity == PP_SEVERITY_ERROR || severity == PP_SEVERITY_MAPPED_ERROR;
-        pp_diagnose(pp, severity, location, "%s [%s-W%s]", message, promoted ? "-Werror," : "", pp_warning_groups[group].name);
-    }
-}
-
 // The letter of the universal character name whose backslash is byte `offset` of `data` (#1447): N, u or U, after any line
 // splices, as the lexer reads it.
 static char pp_ucn_letter(const Preprocessor* pp, const PPFileData* data, uint32_t offset)
@@ -2346,6 +2452,49 @@ static char pp_ucn_letter(const Preprocessor* pp, const PPFileData* data, uint32
     get_char(&lexer, offset, &size, &at);
     uint64_t letter_size = 0;
     return (char)peek_char(&lexer, offset + size, &letter_size);
+}
+
+// The error of a `\u` or `\U` that starts a token (BUSTER_PP_UCN_ERROR, #1447), whose backslash is byte `offset` of `data`,
+// at `location`: its value from its digits (braced or not), as clang's tryReadUCN words it there, a surrogate's
+// "invalid universal character", a control character's (below U+0020, or U+007F to U+009F) that it refers to one, and
+// any other's below U+00A0 that it "cannot be specified by a universal character name". Cold: such a UCN's alone.
+static __attribute__((noinline, cold)) void pp_diagnose_ucn(Preprocessor* pp, const PPFileData* data, uint32_t offset, uint32_t location)
+{
+    const ScalarLexer lexer = pp_file_lexer(pp->refine_flags, data);
+    uint64_t size = 0;
+    uint64_t at = 0;
+    get_char(&lexer, offset, &size, &at);
+    uint64_t p = offset + size;
+    uint64_t step = 0;
+    const int32_t letter = peek_char(&lexer, p, &step);
+    p += step;
+    const bool braced = peek_char(&lexer, p, &step) == '{';
+    p += braced ? step : 0;
+    uint32_t value = 0;
+    uint32_t digits = 0;
+    bool reading = true;
+    while (reading && digits < (braced ? 8u : letter == 'u' ? 4u : 8u))
+    {
+        const int32_t c = peek_char(&lexer, p, &step);
+        const bool decimal = c >= '0' && c <= '9';
+        const bool hex = decimal || ((c | 0x20) >= 'a' && (c | 0x20) <= 'f');
+        value = hex ? value << 4 | (uint32_t)(decimal ? c - '0' : (c | 0x20) - 'a' + 10) : value;
+        digits += hex ? 1 : 0;
+        p += hex ? step : 0;
+        reading = hex;
+    }
+    if (value >= 0xD800 && value <= 0xDFFF)
+    {
+        pp_diagnose(pp, PP_SEVERITY_ERROR, location, "invalid universal character");
+    }
+    else if (value < 0x20 || (value >= 0x7F && value < 0xA0))
+    {
+        pp_diagnose(pp, PP_SEVERITY_ERROR, location, "universal character name refers to a control character");
+    }
+    else
+    {
+        pp_diagnose(pp, PP_SEVERITY_ERROR, location, "character '%c' cannot be specified by a universal character name", (char)value);
+    }
 }
 
 // The diagnostics of a named UCN that starts a token (BUSTER_PP_NAMED_UCN_ERROR), whose backslash is byte `offset` of
@@ -2427,7 +2576,7 @@ static __attribute__((noinline, cold)) void pp_read_raw_errors_slow(Preprocessor
             }
             // A UCN's -Wunicode warning is at its token's start, the first of any line splices before its backslash, where clang's
             // lexer starts the token (#1447).
-            const bool spliced = error.kind >= BUSTER_PP_NAMED_UCN_INCOMPLETE && error.kind <= BUSTER_PP_UCN_NO_DIGITS;
+            const bool spliced = error.kind >= BUSTER_PP_NAMED_UCN_INCOMPLETE && error.kind <= BUSTER_PP_UCN_ERROR;
             const uint32_t offset = spliced ? pp_start_with_splices(data->bytes, error.offset, (pp->refine_flags & C_TOKENIZER_TRIGRAPHS) != 0) : error.offset;
             const uint32_t location = pp->ranges[context->range].base + offset;
             switch (error.kind)
@@ -2481,9 +2630,12 @@ static __attribute__((noinline, cold)) void pp_read_raw_errors_slow(Preprocessor
                              error.kind == BUSTER_PP_NAMED_UCN_UNTERMINATED ? "incomplete delimited universal character name; treating as '\\' '%c' '{' identifier" :
                                                                              "\\%c used with no following hex digits; treating as '\\' followed by identifier",
                              letter);
-                    pp_diagnose_group(pp, PP_WARNING_UNICODE, location, message);
+                    pp_diagnose_group(pp, PP_WARNING_UNICODE, location, "%s", message);
                     break;
                 }
+                case BUSTER_PP_UCN_ERROR:
+                    pp_diagnose_ucn(pp, data, error.offset, location);
+                    break;
                 case C_RAW_STRING_OK:
                     break;
             }
@@ -3303,7 +3455,7 @@ static PPToken pp_stringize(Preprocessor* pp, const PPTokens* tokens, uint32_t b
         if ((backslashes & 1) != 0)
         {
             length -= 1;
-            pp_diagnose(pp, PP_SEVERITY_WARNING, end != begin ? tokens->locations[end - 1] : 0, "invalid string literal, ignoring final '\\'");
+            pp_diagnose_group(pp, PP_WARNING_PLAIN, end != begin ? tokens->locations[end - 1] : 0, "invalid string literal, ignoring final '\\'");
         }
         text[length] = '"';
         length += 1;
@@ -8715,8 +8867,9 @@ static bool pp_recover_diagnostic_line(Preprocessor* pp, PPContext* context, uin
 }
 
 // #error and #warning read text, not tokens: retain comments, quote characters and trailing blanks, removing only
-// translation phases 1 and 2 and the leading blanks after the directive name, as clang does.
-static void pp_diagnostic_text(Preprocessor* pp, const PPFileData* data, uint32_t name, uint32_t location, PPSeverity severity)
+// translation phases 1 and 2 and the leading blanks after the directive name, as clang does. #error's is an error, and
+// #warning's a warning of -W#warnings (#1790), which its options and pragmas map and which is seen in system headers.
+static void pp_diagnostic_text(Preprocessor* pp, const PPFileData* data, uint32_t name, uint32_t location, bool error)
 {
     const uint32_t begin = pp_file_token_end(pp, data, name);
     const ScalarLexer lexer = { .source = data->bytes, .length = data->length, .trigraphs = pp->options.trigraphs };
@@ -8732,7 +8885,14 @@ static void pp_diagnostic_text(Preprocessor* pp, const PPFileData* data, uint32_
         {
             first += 1;
         }
-        pp_diagnose(pp, severity, location, "%.*s", (int)(length - first), (const char*)text + first);
+        if (error)
+        {
+            pp_diagnose(pp, PP_SEVERITY_ERROR, location, "%.*s", (int)(length - first), (const char*)text + first);
+        }
+        else
+        {
+            pp_diagnose_group_text(pp, PP_WARNING_WARNINGS, location, (const char*)text + first, length - first);
+        }
     }
     else
     {
@@ -8776,7 +8936,7 @@ static void pp_report_skipped(Preprocessor* pp, const PPContext* context, const 
         const char* spelling = pp_conditional_name(data->directive_kind[d]);
         if ((notes & BUSTER_PP_NOTE_ELIFDEF) != 0 && pp->options.language.standard < 2023)
         {
-            pp_diagnose(pp, PP_SEVERITY_WARNING, name, "use of a '#%s' directive is a C23 extension", spelling);
+            pp_diagnose_group(pp, PP_WARNING_C23_EXTENSIONS, name, "use of a '#%s' directive is a C23 extension", spelling);
         }
         if ((notes & BUSTER_PP_NOTE_AFTER_ELSE) != 0)
         {
@@ -8829,7 +8989,7 @@ static uint32_t pp_skip_relexed_group(Preprocessor* pp, const PPContext* context
             const char* name = pp_conditional_name(kind);
             if ((kind == PP_DIRECTIVE_ELIFDEF || kind == PP_DIRECTIVE_ELIFNDEF) && pp->options.language.standard < 2023)
             {
-                pp_diagnose(pp, PP_SEVERITY_WARNING, location, "use of a '#%s' directive is a C23 extension", name);
+                pp_diagnose_group(pp, PP_WARNING_C23_EXTENSIONS, location, "use of a '#%s' directive is a C23 extension", name);
             }
             if (seen_else[depth - 1])
             {
@@ -9206,7 +9366,7 @@ static void pp_conditional(Preprocessor* pp, PPContext* context, uint32_t d, uin
             }
             else if (hash + 3 < end)
             {
-                pp_diagnose(pp, PP_SEVERITY_WARNING, pp_token_location(pp, context, data, hash + 3), "extra tokens at end of #%s directive", kind == PP_DIRECTIVE_IFDEF ? "ifdef" : "ifndef");
+                pp_diagnose_group(pp, PP_WARNING_EXTRA_TOKENS, pp_token_location(pp, context, data, hash + 3), "extra tokens at end of #%s directive", kind == PP_DIRECTIVE_IFDEF ? "ifdef" : "ifndef");
             }
             const bool defined = named && pp_is_defined(pp, data->values[hash + 2]);
             pp_apply_condition(pp, context, d, kind, named && (kind == PP_DIRECTIVE_IFDEF ? defined : !defined));
@@ -9217,7 +9377,7 @@ static void pp_conditional(Preprocessor* pp, PPContext* context, uint32_t d, uin
         case PP_DIRECTIVE_ELIFNDEF:
             if (kind != PP_DIRECTIVE_ELIF && pp->options.language.standard < 2023)
             {
-                pp_diagnose(pp, PP_SEVERITY_WARNING, pp_token_location(pp, context, data, hash + 1), "use of a '#%s' directive is a C23 extension", pp_conditional_name(kind));
+                pp_diagnose_group(pp, PP_WARNING_C23_EXTENSIONS, pp_token_location(pp, context, data, hash + 1), "use of a '#%s' directive is a C23 extension", pp_conditional_name(kind));
             }
             if (!open)
             {
@@ -9246,7 +9406,7 @@ static void pp_conditional(Preprocessor* pp, PPContext* context, uint32_t d, uin
                 }
                 else if (hash + 3 < end)
                 {
-                    pp_diagnose(pp, PP_SEVERITY_WARNING, pp_token_location(pp, context, data, hash + 3), "extra tokens at end of #%s directive", pp_conditional_name(kind));
+                    pp_diagnose_group(pp, PP_WARNING_EXTRA_TOKENS, pp_token_location(pp, context, data, hash + 3), "extra tokens at end of #%s directive", pp_conditional_name(kind));
                 }
                 const bool defined = named && pp_is_defined(pp, data->values[hash + 2]);
                 pp_apply_condition(pp, context, d, kind, named && (kind == PP_DIRECTIVE_ELIFDEF ? defined : !defined));
@@ -9260,7 +9420,7 @@ static void pp_conditional(Preprocessor* pp, PPContext* context, uint32_t d, uin
             const bool extra = hash + 2 < end && !(open && group->taken && group->skipping);
             if (extra && !entering)
             {
-                pp_diagnose(pp, PP_SEVERITY_WARNING, pp_token_location(pp, context, data, hash + 2), "extra tokens at end of #else directive");
+                pp_diagnose_group(pp, PP_WARNING_EXTRA_TOKENS, pp_token_location(pp, context, data, hash + 2), "extra tokens at end of #else directive");
             }
             if (!open)
             {
@@ -9275,7 +9435,7 @@ static void pp_conditional(Preprocessor* pp, PPContext* context, uint32_t d, uin
                 }
                 if (extra && entering)
                 {
-                    pp_diagnose(pp, PP_SEVERITY_WARNING, pp_token_location(pp, context, data, hash + 2), "extra tokens at end of #else directive");
+                    pp_diagnose_group(pp, PP_WARNING_EXTRA_TOKENS, pp_token_location(pp, context, data, hash + 2), "extra tokens at end of #else directive");
                 }
                 group->seen_else = true;
                 if (group->taken)
@@ -9290,7 +9450,7 @@ static void pp_conditional(Preprocessor* pp, PPContext* context, uint32_t d, uin
         case PP_DIRECTIVE_ENDIF:
             if (hash + 2 < end)
             {
-                pp_diagnose(pp, PP_SEVERITY_WARNING, pp_token_location(pp, context, data, hash + 2), "extra tokens at end of #endif directive");
+                pp_diagnose_group(pp, PP_WARNING_EXTRA_TOKENS, pp_token_location(pp, context, data, hash + 2), "extra tokens at end of #endif directive");
             }
             if (!open)
             {
@@ -9334,7 +9494,7 @@ static void pp_include_file(Preprocessor* pp, PPContext* context, uint8_t kind, 
     {
         if (name[length - 1] == ' ' || name[length - 1] == '.')
         {
-            pp_diagnose(pp, PP_SEVERITY_WARNING, name_location, "non-portable path to file '%.*s'; specified path contains trailing %s", (int)length, (const char*)name,
+            pp_diagnose_group(pp, PP_WARNING_NONPORTABLE_INCLUDE_PATH, name_location, "non-portable path to file '%.*s'; specified path contains trailing %s", (int)length, (const char*)name,
                         name[length - 1] == ' ' ? "whitespace" : "dot");
         }
         pp->diagnostic_origin = 0;
@@ -9463,7 +9623,7 @@ static void pp_finish_include(Preprocessor* pp)
         if (extra)
         {
             pp->diagnostic_origin = extra_origin;
-            pp_diagnose(pp, PP_SEVERITY_WARNING, extra_location, "extra tokens at end of #%s directive", pp_include_name(capture.directive_kind));
+            pp_diagnose_group(pp, PP_WARNING_EXTRA_TOKENS, extra_location, "extra tokens at end of #%s directive", pp_include_name(capture.directive_kind));
         }
         pp->diagnostic_origin = saved_origin;
         pp_include_file(pp, context, capture.directive_kind, name, length, angled, capture.location, name_location, name_origin);
@@ -9576,7 +9736,7 @@ static void pp_include(Preprocessor* pp, PPContext* context, uint32_t d, uint8_t
         const uint64_t next = pp_skip_blanks(&lexer, stop);
         if (next < data->length && data->bytes[next] != '\n' && data->bytes[next] != '\r')
         {
-            pp_diagnose(pp, PP_SEVERITY_WARNING, base + (uint32_t)next, "extra tokens at end of #%s directive", pp_include_name(kind));
+            pp_diagnose_group(pp, PP_WARNING_EXTRA_TOKENS, base + (uint32_t)next, "extra tokens at end of #%s directive", pp_include_name(kind));
         }
         // The file goes on past the line as clang lexes it (pp_resume_after), before the header is entered.
         uint32_t relex;
@@ -9618,11 +9778,11 @@ static uint32_t pp_decode_file_name(Preprocessor* pp, const uint8_t* spelling, u
                     // As the preprocessor's other warnings, and its pragmas' strings' unknown escapes (pp_string_value).
                     if (character >= 0x20 && character < 0x7f)
                     {
-                        pp_diagnose(pp, PP_SEVERITY_WARNING, at, "unknown escape sequence '\\%c'", (char)character);
+                        pp_diagnose_group(pp, PP_WARNING_UNKNOWN_ESCAPE_SEQUENCE, at, "unknown escape sequence '\\%c'", (char)character);
                     }
                     else
                     {
-                        pp_diagnose(pp, PP_SEVERITY_WARNING, at, "unknown escape sequence '\\x%X'", (unsigned)(int32_t)(int8_t)character);
+                        pp_diagnose_group(pp, PP_WARNING_UNKNOWN_ESCAPE_SEQUENCE, at, "unknown escape sequence '\\x%X'", (unsigned)(int32_t)(int8_t)character);
                     }
                     break;
                 case CHECK_ESCAPE_DIAGNOSTIC_HEX_DIGITS:
@@ -9837,7 +9997,7 @@ static bool pp_line_value(Preprocessor* pp, const PPTokens* tokens, uint32_t i, 
     }
     if (result && digits[0] == '0' && value != 0)
     {
-        pp_diagnose(pp, PP_SEVERITY_WARNING, tokens->locations[i], "%s directive interprets number as decimal, not octal", marker ? "GNU line marker" : "#line");
+        pp_diagnose_group(pp, PP_WARNING_PLAIN, tokens->locations[i], "%s directive interprets number as decimal, not octal", marker ? "GNU line marker" : "#line");
     }
     scratch_end(scratch);
     *number = value;
@@ -9912,7 +10072,7 @@ static void pp_apply_line(Preprocessor* pp, PPContext* context, uint32_t d, cons
     }
     if (valid && !marker && begin + 2 < stop)
     {
-        pp_diagnose(pp, PP_SEVERITY_WARNING, location, "extra tokens at end of #line directive");
+        pp_diagnose_group(pp, PP_WARNING_EXTRA_TOKENS, location, "extra tokens at end of #line directive");
     }
     if (!valid && !name_reported && !flags_reported)
     {
@@ -10192,7 +10352,7 @@ static uint32_t pp_string_value(Preprocessor* pp, const uint8_t* spelling, uint3
         }
         else
         {
-            pp_diagnose(pp, PP_SEVERITY_WARNING, location, "unknown escape sequence '\\%c'", e != 0 ? (char)e : '\\');
+            pp_diagnose_group(pp, PP_WARNING_UNKNOWN_ESCAPE_SEQUENCE, location, "unknown escape sequence '\\%c'", e != 0 ? (char)e : '\\');
             out[result] = e != 0 ? e : c;
             result += 1;
             i += e != 0;
@@ -10281,7 +10441,15 @@ static void pp_pragma_message(Preprocessor* pp, PPPragmaKind kind, const PPToken
         }
         if (!pp->fatal)
         {
-            pp_diagnose(pp, kind == PP_PRAGMA_ERROR ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING, diagnostic_location, "%.*s", (int)length, (const char*)text + 1);
+            if (kind == PP_PRAGMA_ERROR)
+            {
+                pp_diagnose(pp, PP_SEVERITY_ERROR, diagnostic_location, "%.*s", (int)length, (const char*)text + 1);
+            }
+            else
+            {
+                // -W#pragma-messages' (#1790), which its options and pragmas map but -Werror leaves a warning.
+                pp_diagnose_group_text(pp, PP_WARNING_PRAGMA_MESSAGES, diagnostic_location, (const char*)text + 1, length);
+            }
         }
         pp->diagnostic_origin = saved_origin;
         uint32_t n = 0;
@@ -10338,12 +10506,12 @@ static __attribute__((noinline, cold)) void pp_grow_pragma_mappings(Preprocessor
     const uint64_t wanted = (uint64_t)depth + 1;
     uint64_t capacity = pp->warning_capacity != 0 ? (uint64_t)pp->warning_capacity * 2 : 64;
     capacity = capacity > wanted ? capacity : wanted;
-    uint8_t* grown = capacity <= UINT32_MAX / BUSTER_PP_WARNING_GROUPS ? arena_push(&pp->arena, capacity * BUSTER_PP_WARNING_GROUPS, 1) : 0;
+    uint8_t* grown = capacity <= UINT32_MAX / BUSTER_PP_WARNINGS ? arena_push(&pp->arena, capacity * BUSTER_PP_WARNINGS, 1) : 0;
     if (grown != 0)
     {
         if (pp->warning_capacity != 0)
         {
-            memcpy(grown, pp->warning_saved, (uint64_t)pp->warning_capacity * BUSTER_PP_WARNING_GROUPS);
+            memcpy(grown, pp->warning_saved, (uint64_t)pp->warning_capacity * BUSTER_PP_WARNINGS);
         }
         pp->warning_saved = grown;
         pp->warning_capacity = (uint32_t)capacity;
@@ -10376,9 +10544,9 @@ static void pp_pragma_diagnostic(Preprocessor* pp, const PPTokens* tokens, uint3
         {
             pp_grow_pragma_mappings(pp, saved);
         }
-        for (uint32_t g = 0; saved < pp->warning_capacity && g < BUSTER_PP_WARNING_GROUPS; g += 1)
+        for (uint32_t g = 0; saved < pp->warning_capacity && g < BUSTER_PP_WARNINGS; g += 1)
         {
-            uint8_t* slot = pp->warning_saved + (uint64_t)saved * BUSTER_PP_WARNING_GROUPS + g;
+            uint8_t* slot = pp->warning_saved + (uint64_t)saved * BUSTER_PP_WARNINGS + g;
             *slot = push ? pp->warning_mappings[g] : *slot;
             pp->warning_mappings[g] = *slot;
         }
@@ -10386,7 +10554,7 @@ static void pp_pragma_diagnostic(Preprocessor* pp, const PPTokens* tokens, uint3
         printed = true;
         if (begin + 1 < end)
         {
-            pp_diagnose(pp, PP_SEVERITY_WARNING, tokens->locations[begin + 1], "unexpected token in pragma diagnostic");
+            pp_diagnose_group(pp, PP_WARNING_UNKNOWN_PRAGMAS, tokens->locations[begin + 1], "unexpected token in pragma diagnostic");
         }
     }
     else if (severity)
@@ -10404,12 +10572,13 @@ static void pp_pragma_diagnostic(Preprocessor* pp, const PPTokens* tokens, uint3
         }
         if (other)
         {
-            pp_diagnose(pp, PP_SEVERITY_WARNING, tokens->locations[i], "unexpected token in pragma diagnostic");
+            pp_diagnose_group(pp, PP_WARNING_UNKNOWN_PRAGMAS, tokens->locations[i], "unexpected token in pragma diagnostic");
         }
         else if (length != BUSTER_PP_NONE && !known)
         {
-            pp_diagnose(pp, PP_SEVERITY_WARNING, location, option ? "unknown warning group '%.*s', ignored" : "pragma diagnostic expected option name (e.g. \"-W%.*s\")",
-                        (int)length, (const char*)name);
+            pp_diagnose_group(pp, option ? PP_WARNING_UNKNOWN_WARNING_OPTION : PP_WARNING_UNKNOWN_PRAGMAS, location, "%s%.*s%s",
+                              option ? "unknown warning group '" : "pragma diagnostic expected option name (e.g. \"-W", (int)length, (const char*)name,
+                              option ? "', ignored" : "\")");
         }
         printed = known;
         // The mapping from here on of each warning group it names (#1934): by its name, its old one, a group that holds it, or
@@ -10417,7 +10586,7 @@ static void pp_pragma_diagnostic(Preprocessor* pp, const PPTokens* tokens, uint3
         const uint8_t mapping = pp_token_is_name(pp, tokens, begin, end, "ignored") ? PP_PRAGMA_MAPPING_IGNORED :
                                 pp_token_is_name(pp, tokens, begin, end, "warning") ? PP_PRAGMA_MAPPING_WARNING :
                                 pp_token_is_name(pp, tokens, begin, end, "error") ? PP_PRAGMA_MAPPING_ERROR : PP_PRAGMA_MAPPING_FATAL;
-        for (uint32_t g = 0; known && name[1] == 'W' && g < BUSTER_PP_WARNING_GROUPS; g += 1)
+        for (uint32_t g = 0; known && name[1] == 'W' && g < BUSTER_PP_WARNINGS; g += 1)
         {
             pp->warning_mappings[g] = pp_warning_group_named(g, (const char*)name + 2, length - 2) ? mapping : pp->warning_mappings[g];
         }
@@ -10433,8 +10602,8 @@ static void pp_pragma_diagnostic(Preprocessor* pp, const PPTokens* tokens, uint3
             const ScalarLexer lexer = { .source = source->bytes, .length = source->length, .trigraphs = pp->options.trigraphs };
             diagnostic_location = source->base + (uint32_t)pp_skip_blanks(&lexer, after);
         }
-        pp_diagnose(pp, PP_SEVERITY_WARNING, diagnostic_location, pop ? "pragma diagnostic pop could not pop, no matching push"
-                                                           : "pragma diagnostic expected 'error', 'warning', 'ignored', 'fatal', 'push', or 'pop'");
+        pp_diagnose_group(pp, PP_WARNING_UNKNOWN_PRAGMAS, diagnostic_location, "%s",
+                          pop ? "pragma diagnostic pop could not pop, no matching push" : "pragma diagnostic expected 'error', 'warning', 'ignored', 'fatal', 'push', or 'pop'");
     }
     if (printed)
     {
@@ -10503,7 +10672,7 @@ static void pp_ident(Preprocessor* pp, const PPTokens* tokens, uint32_t begin, u
     {
         if (begin + 1 < end)
         {
-            pp_diagnose(pp, PP_SEVERITY_WARNING, tokens->locations[begin + 1], "extra tokens at end of #ident directive");
+            pp_diagnose_group(pp, PP_WARNING_EXTRA_TOKENS, tokens->locations[begin + 1], "extra tokens at end of #ident directive");
         }
         pp_emit_pragma(pp, tokens, begin, begin + 1, C_NAME_IDENT, location, false);
     }
@@ -10552,7 +10721,7 @@ static void pp_pragma_region(Preprocessor* pp, const PPTokens* tokens, uint32_t 
     }
     if (printed && region != BUSTER_PP_REGION_UNSAFE_BUFFER && begin + 1 < end)
     {
-        pp_diagnose(pp, PP_SEVERITY_WARNING, tokens->locations[begin + 1], "extra tokens at end of #pragma directive");
+        pp_diagnose_group(pp, PP_WARNING_EXTRA_TOKENS, tokens->locations[begin + 1], "extra tokens at end of #pragma directive");
     }
     if (printed && region == BUSTER_PP_REGION_ASSUME_NONNULL)
     {
@@ -10626,7 +10795,7 @@ static void pp_pragma_run(Preprocessor* pp, PPPragmaKind kind, const PPTokens* n
         {
             if (begin < end)
             {
-                pp_diagnose(pp, PP_SEVERITY_WARNING, location, "extra tokens at end of #pragma once directive");
+                pp_diagnose_group(pp, PP_WARNING_EXTRA_TOKENS, location, "extra tokens at end of #pragma once directive");
             }
             if (file != BUSTER_PP_NONE && file != pp->main_file)
             {
@@ -10634,7 +10803,7 @@ static void pp_pragma_run(Preprocessor* pp, PPPragmaKind kind, const PPTokens* n
             }
             else
             {
-                pp_diagnose(pp, PP_SEVERITY_WARNING, location, "#pragma once in main file");
+                pp_diagnose_group(pp, PP_WARNING_PRAGMA_ONCE_OUTSIDE_HEADER, location, "#pragma once in main file");
             }
         } break;
         case PP_PRAGMA_QUIET:
@@ -10691,7 +10860,7 @@ static void pp_pragma_run(Preprocessor* pp, PPPragmaKind kind, const PPTokens* n
             }
             else
             {
-                pp_diagnose(pp, PP_SEVERITY_WARNING, location, "#pragma system_header ignored in main file");
+                pp_diagnose_group(pp, PP_WARNING_PRAGMA_SYSTEM_HEADER_OUTSIDE_HEADER, location, "#pragma system_header ignored in main file");
             }
         } break;
         case PP_PRAGMA_DEPENDENCY:
@@ -10915,12 +11084,12 @@ static void pp_prepared_directive(Preprocessor* pp, PPContext* context)
                 {
                     if (hash + 3 < end)
                     {
-                        pp_diagnose(pp, PP_SEVERITY_WARNING, pp_define_location(pp, data, base, hash + 3, end), "extra tokens at end of #undef directive");
+                        pp_diagnose_group(pp, PP_WARNING_EXTRA_TOKENS, pp_define_location(pp, data, base, hash + 3, end), "extra tokens at end of #undef directive");
                     }
                     const PPMacroId previous = pp->macro_of[name];
                     if (previous != 0 && pp_language_defined(pp, &pp->macros[previous]))
                     {
-                        pp_diagnose(pp, PP_SEVERITY_WARNING, name_location, "undefining builtin macro");
+                        pp_diagnose_group(pp, PP_WARNING_BUILTIN_MACRO_REDEFINED, name_location, "undefining builtin macro");
                     }
                     pp_set_macro(pp, name, 0);
                 }
@@ -10956,8 +11125,15 @@ static void pp_prepared_directive(Preprocessor* pp, PPContext* context)
         case PP_DIRECTIVE_ERROR:
         case PP_DIRECTIVE_WARNING:
         {
-            pp_diagnostic_text(pp, data, hash + 1, pp_token_location(pp, context, data, hash + 1),
-                               kind == PP_DIRECTIVE_ERROR ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING_ALWAYS);
+            const uint32_t location = pp_token_location(pp, context, data, hash + 1);
+            if (kind == PP_DIRECTIVE_WARNING)
+            {
+                // The directive itself, before its text (#1790): C23's, an extension before it.
+                const bool c23 = pp->options.language.standard >= 2023;
+                pp_diagnose_group(pp, c23 ? PP_WARNING_PRE_C23_COMPAT : PP_WARNING_PEDANTIC, location, "%s",
+                                  c23 ? "#warning is incompatible with C standards before C23" : "#warning is a C23 extension");
+            }
+            pp_diagnostic_text(pp, data, hash + 1, location, kind == PP_DIRECTIVE_ERROR);
             break;
         }
         case PP_DIRECTIVE_PRAGMA:
@@ -11173,7 +11349,7 @@ static bool pp_parse_integer(Preprocessor* pp, const uint8_t* spelling, uint32_t
         is_unsigned = true;
         if (radix == 10)
         {
-            pp_diagnose(pp, PP_SEVERITY_WARNING, location, "integer literal is too large to be represented in a signed integer type, interpreting as unsigned");
+            pp_diagnose_group(pp, PP_WARNING_IMPLICITLY_UNSIGNED_LITERAL, location, "integer literal is too large to be represented in a signed integer type, interpreting as unsigned");
         }
     }
     *value = (PPValue){ .bits = (uint64_t)accumulated, .is_unsigned = is_unsigned };
@@ -11251,7 +11427,7 @@ static bool pp_parse_ucn(Preprocessor* pp, const uint8_t* spelling, uint32_t end
         }
         else if (result && pp->options.language.standard < 1999)
         {
-            pp_diagnose(pp, PP_SEVERITY_WARNING, escape, "universal character names are only valid in C99 or C++");
+            pp_diagnose_group(pp, PP_WARNING_UNICODE_C99, escape, "universal character names are only valid in C99 or C++");
         }
     }
     else
@@ -11333,7 +11509,7 @@ static bool pp_parse_ucn(Preprocessor* pp, const uint8_t* spelling, uint32_t end
                 result = !invalid;
                 if (result && pp->options.language.standard < 1999)
                 {
-                    pp_diagnose(pp, PP_SEVERITY_WARNING, location, "universal character names are only valid in C99 or C++");
+                    pp_diagnose_group(pp, PP_WARNING_UNICODE_C99, location, "universal character names are only valid in C99 or C++");
                 }
             }
         }
@@ -11455,11 +11631,11 @@ static uint32_t pp_parse_escape(Preprocessor* pp, const uint8_t* spelling, uint3
                 result = (uint32_t)(int32_t)(int8_t)e;
                 if (e >= 0x20 && e < 0x7F)
                 {
-                    pp_diagnose(pp, PP_SEVERITY_WARNING, location, "unknown escape sequence '\\%c'", e);
+                    pp_diagnose_group(pp, PP_WARNING_UNKNOWN_ESCAPE_SEQUENCE, location, "unknown escape sequence '\\%c'", e);
                 }
                 else
                 {
-                    pp_diagnose(pp, PP_SEVERITY_WARNING, location, "unknown escape sequence '\\x%X'", result);
+                    pp_diagnose_group(pp, PP_WARNING_UNKNOWN_ESCAPE_SEQUENCE, location, "unknown escape sequence '\\x%X'", result);
                 }
             }
             break;
@@ -11516,7 +11692,14 @@ static bool pp_parse_character(Preprocessor* pp, uint8_t kind, const uint8_t* sp
             }
             if (!decoded)
             {
-                pp_diagnose(pp, ordinary ? PP_SEVERITY_WARNING : PP_SEVERITY_ERROR, location, "illegal character encoding in character literal");
+                if (ordinary)
+                {
+                    pp_diagnose_group(pp, PP_WARNING_INVALID_SOURCE_ENCODING, location, "illegal character encoding in character literal");
+                }
+                else
+                {
+                    pp_diagnose(pp, PP_SEVERITY_ERROR, location, "illegal character encoding in character literal");
+                }
                 error |= !ordinary;
             }
             for (uint32_t k = i; k < run;)
@@ -11558,7 +11741,7 @@ static bool pp_parse_character(Preprocessor* pp, uint8_t kind, const uint8_t* sp
     else if (characters.count > 1 && ordinary && characters.count != 4)
     {
         // Four characters have a warning of their own, which clang leaves off.
-        pp_diagnose(pp, PP_SEVERITY_WARNING, location, "multi-character character constant");
+        pp_diagnose_group(pp, PP_WARNING_MULTICHAR, location, "multi-character character constant");
     }
     else if (characters.count > 1 && !ordinary)
     {
@@ -11567,7 +11750,7 @@ static bool pp_parse_character(Preprocessor* pp, uint8_t kind, const uint8_t* sp
     }
     if (!error && ordinary && characters.count > 1 && characters.too_long)
     {
-        pp_diagnose(pp, PP_SEVERITY_WARNING, location, "character constant too long for its type");
+        pp_diagnose_group(pp, PP_WARNING_PLAIN, location, "character constant too long for its type");
     }
     int64_t bits;
     switch (kind)
@@ -11648,14 +11831,16 @@ static bool pp_reduce(Preprocessor* pp, PPValue* values, uint32_t* value_count, 
             // A promoted warning must still obey -w and system-header suppression before it becomes an error.
             const bool promoted = pp->options.negative_conversion_error && !pp->options.suppress_warnings &&
                                   pp_diagnostic_warning_visible(pp, context.location, context.origin);
-            const PPSeverity severity = promoted ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING;
-            if (!a.is_unsigned && sa < 0)
+            // Otherwise a warning of no group (#1970), which -Werror promotes.
+            char flag[BUSTER_PP_WARNING_FLAG_BYTES] = { 0 };
+            const PPSeverity severity = promoted ? PP_SEVERITY_ERROR : pp_warning_flag(pp, PP_WARNING_PLAIN, context.location, flag);
+            if (severity != BUSTER_PP_IGNORED && !a.is_unsigned && sa < 0)
             {
-                pp_diagnose(pp, severity, context.location, "left side of operator converted from negative value to unsigned: %ld to %lu", (long)sa, (unsigned long)a.bits);
+                pp_diagnose(pp, severity, context.location, "left side of operator converted from negative value to unsigned: %ld to %lu%s", (long)sa, (unsigned long)a.bits, flag);
             }
-            if (!b.is_unsigned && sb < 0)
+            if (severity != BUSTER_PP_IGNORED && !b.is_unsigned && sb < 0)
             {
-                pp_diagnose(pp, severity, context.location, "right side of operator converted from negative value to unsigned: %ld to %lu", (long)sb, (unsigned long)b.bits);
+                pp_diagnose(pp, severity, context.location, "right side of operator converted from negative value to unsigned: %ld to %lu%s", (long)sb, (unsigned long)b.bits, flag);
             }
             pp->diagnostic_origin = saved_origin;
         }
@@ -12470,7 +12655,7 @@ static void pp_embed(Preprocessor* pp, PPContext* context, uint32_t d)
     const uint32_t location = base + data->starts[hash];
     if (pp->options.language.standard < 2023)
     {
-        pp_diagnose(pp, PP_SEVERITY_WARNING, base + data->starts[hash + 1], "#embed is a C23 extension");
+        pp_diagnose_group(pp, PP_WARNING_C23_EXTENSIONS, base + data->starts[hash + 1], "#embed is a C23 extension");
     }
     uint8_t name[PATH_MAX];
     uint32_t length = 0;
