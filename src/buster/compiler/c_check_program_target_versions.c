@@ -14,10 +14,13 @@
 //   f.ifunc, an IFUNC (weak, local in a static group) at the resolver f.resolver, which the unit emits where it has a
 //   reference.
 // - target_clones: the function's own symbol f is the IFUNC (weak, local where it's static) at f.resolver, with f.ifunc
-//   an alias of it, which the unit emits where it defines or references the function. Its body is compiled once, with
-//   the unit's features, as each version is valid there (clang compiles a copy per version, with its features), at the
-//   first version's name (f.avx2.0: the version, arch_CPU for arch=, and its place among the versions that aren't
-//   "default", which takes their count) and the others' names, a synthetic object's symbol at the attribute's name.
+//   an alias of it, which the unit emits where it defines or references the function. Its body is compiled once per
+//   version, as clang compiles it, each copy with that version's instruction set at its version's name (f.avx2.0: the
+//   version, arch_CPU for arch=, and its place among the versions that aren't "default", which takes their count): the
+//   body itself at the first version's (a synthetic object's symbol at the attribute's name) and copies at symbols after
+//   the program's (check_program_target_copies, check_program_target_number). A body whose copies the lowering can't
+//   make yet (check_program_target_copy_refused) is compiled once, with the unit's features, valid for every version,
+//   and the other versions' names are symbols at its code.
 // - The resolver calls __cpu_indicator_init and returns the first version whose condition libgcc's CPU model meets, the
 //   versions sorted as clang's llvm::stable_sort sorts them, by their priorities (getFMVPriority: the highest of their
 //   features' priorities, doubled, and an arch='s key feature's, doubled plus one), the highest first, in their
@@ -581,12 +584,15 @@ static void check_program_target_needed(const CheckProgram* program, uint8_t* ne
 }
 
 // After the symbols are numbered: each version's own symbol and each target_clones body's (CheckProgram.target_symbols,
-// in `output`; 0 for none), and every version's references at R's symbol. Returns false where there was no room.
+// in `output`; 0 for none), and every version's references at R's symbol. And target_clones' copies' symbols
+// (CheckProgram.clone_symbols): where a group has copies and the program its body, a symbol after the program's for
+// each option but the first and the repeated ones, of the body's object (its declaration's binding), which
+// check_program_target_names names. Returns false where there was no room.
 static bool check_program_target_number(CheckProgram* program, Arena* output)
 {
     const uint32_t count = program->target_version_count + program->target_group_count;
     SymbolId* symbols = count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, SymbolId, count) : NULL;
-    const bool valid = count == 0 || symbols != NULL;
+    bool valid = count == 0 || symbols != NULL;
     for (uint32_t g = 0; valid && g < program->target_group_count; g += 1)
     {
         const CheckProgramTargetGroup* group = program->target_groups + g;
@@ -600,6 +606,45 @@ static bool check_program_target_number(CheckProgram* program, Arena* output)
         symbols[program->target_version_count + g] = group->body != 0 ? program->object_symbols[group->body] : 0;
     }
     program->target_symbols = valid ? symbols : NULL;
+    // The copies' symbols, numbered after the program's.
+    SymbolId* clone_symbols = valid && program->clone_option_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, SymbolId, program->clone_option_count) : NULL;
+    valid = valid && (program->clone_option_count == 0 || clone_symbols != NULL);
+    program->clone_symbols = clone_symbols;
+    uint32_t extra = 0;
+    for (uint32_t g = 0; valid && clone_symbols != NULL && g < program->target_group_count; g += 1)
+    {
+        const CheckProgramTargetGroup* group = program->target_groups + g;
+        const bool copied = group->clones != 0 && group->copies && symbols[program->target_version_count + g] != 0;
+        for (uint32_t o = 0; group->clones != 0 && o < group->option_count; o += 1)
+        {
+            const bool own = copied && program->clone_copied[group->clone_first + o] != 0;
+            clone_symbols[group->clone_first + o] = own ? program->symbol_count + 1 + extra : 0;
+            extra += own;
+        }
+    }
+    uint32_t* objects = valid && extra != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)program->symbol_count + extra) : NULL;
+    valid = valid && (extra == 0 || objects != NULL);
+    if (valid && extra != 0)
+    {
+        if (program->symbol_count != 0)
+        {
+            memcpy(objects, program->symbol_objects, (uint64_t)program->symbol_count * sizeof(uint32_t));
+        }
+        for (uint32_t g = 0; g < program->target_group_count; g += 1)
+        {
+            const CheckProgramTargetGroup* group = program->target_groups + g;
+            for (uint32_t o = 0; group->clones != 0 && o < group->option_count; o += 1)
+            {
+                const SymbolId symbol = clone_symbols[group->clone_first + o];
+                if (symbol != 0)
+                {
+                    objects[symbol - 1] = group->body;
+                }
+            }
+        }
+        program->symbol_objects = objects;
+        program->symbol_count += extra;
+    }
     return valid;
 }
 
@@ -612,9 +657,14 @@ static SymbolId check_program_target_body_symbol(const CheckProgram* program, ui
     {
         symbol = program->target_versions[v].object == object ? program->target_symbols[v] : symbol;
     }
+    // A target_clones body's, or its copy's (CheckProgram.body_options).
+    const uint32_t option = program->body_options != NULL ? program->body_options[b] : 0;
     for (uint32_t g = 0; program->target_symbols != NULL && g < program->target_group_count; g += 1)
     {
-        symbol = program->target_groups[g].clones != 0 && program->target_groups[g].clones == object ? program->target_symbols[program->target_version_count + g] : symbol;
+        const CheckProgramTargetGroup* group = program->target_groups + g;
+        const bool own = group->clones != 0 && group->clones == object;
+        const SymbolId copy = own && option != 0 && program->clone_symbols != NULL ? program->clone_symbols[group->clone_first + option] : 0;
+        symbol = own ? (copy != 0 ? copy : program->target_symbols[program->target_version_count + g]) : symbol;
     }
     return symbol;
 }
@@ -642,6 +692,113 @@ static CheckProgramTargetOption* check_program_target_options(const CheckProgram
         (void)check_program_target_condition(options + o);
     }
     return options;
+}
+
+// Whether target_clones' body `b` is one the copies leave as it was, compiled once (#1838): one with inline assembly,
+// whose plans are a body's own (check_program_asm), a switch, whose jump tables are (check_lower_switch_tables), or a
+// label whose address it may take (&&, its symbol the label's own), which a copy would define again.
+static bool check_program_target_copy_refused(const CheckProgram* program, uint32_t b)
+{
+    const Parser* parser = program->parser;
+    const CheckProgramBody* body = program->bodies + b;
+    const uint32_t closing = parser != NULL && body->opening < parser->tokens.count ? parser->tree.parents[body->opening] : 0;
+    bool refused = parser == NULL || closing <= body->opening || closing >= parser->tokens.count;
+    for (uint32_t token = body->opening; !refused && token < closing; token += 1)
+    {
+        const uint8_t kind = parser->tokens.kinds[token];
+        refused = kind == PARSE_KIND_ASM || kind == PARSE_KIND_SWITCH || (kind == PARSE_KIND_AMPAMP && body->label_count != 0);
+    }
+    return refused;
+}
+
+// target_clones' body copies (#1838), as clang compiles its body once per version, with that version's instruction set:
+// for each group whose body the program has (CheckProgramTargetGroup.copies, unless check_program_target_copy_refused),
+// each option's instruction set (CheckProgram.clone_targets: 0 for "default", the unit's; otherwise a target of the
+// version's string, arch= its CPU's, made as check_program_targets makes a target attribute's) and the body's own, its
+// first option's (CheckProgram.body_targets). Called at the end of check_program_targets, for a unit with a group.
+// Returns false where there was no room.
+static bool check_program_target_copies(CheckProgram* program, const PredefinesOptions* predefines, Arena* output)
+{
+    uint32_t total = 0;
+    for (uint32_t g = 0; g < program->target_group_count; g += 1)
+    {
+        total += program->target_groups[g].clones != 0 ? program->target_groups[g].option_count : 0;
+    }
+    bool valid = true;
+    uint32_t* clone_targets = total != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, total) : NULL;
+    uint8_t* clone_copied = total != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint8_t, total) : NULL;
+    X86Target* targets = total != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, X86Target, (uint64_t)program->target_count + total) : NULL;
+    valid = total == 0 || (clone_targets != NULL && clone_copied != NULL && targets != NULL);
+    if (valid && total != 0)
+    {
+        memset(clone_targets, 0, (uint64_t)total * sizeof(uint32_t));
+        memset(clone_copied, 0, total);
+        program->clone_copied = clone_copied;
+        if (program->target_count != 0)
+        {
+            memcpy(targets, program->targets, (uint64_t)program->target_count * sizeof(X86Target));
+        }
+        program->targets = targets;
+        program->clone_targets = clone_targets;
+        program->clone_option_count = total;
+        if (!program->host_read)
+        {
+            program->host = predefines_host_of(predefines);
+            program->host_read = true;
+        }
+    }
+    uint32_t at = 0;
+    for (uint32_t g = 0; valid && g < program->target_group_count; g += 1)
+    {
+        CheckProgramTargetGroup* group = program->target_groups + g;
+        if (group->clones == 0)
+        {
+            continue;
+        }
+        group->clone_first = at;
+        at += group->option_count;
+        uint32_t body = program->body_count;
+        for (uint32_t b = 0; body == program->body_count && b < program->body_count; b += 1)
+        {
+            body = program->bodies[b].object == group->clones ? b : body;
+        }
+        group->copies = body < program->body_count && group->option_count > 1 && !check_program_target_copy_refused(program, body);
+        const CheckProgramTargetOption* options = group->copies ? check_program_target_options(program, group, output) : NULL;
+        valid = !group->copies || options != NULL;
+        for (uint32_t o = 0; valid && options != NULL && o < group->option_count; o += 1)
+        {
+            const CheckProgramTargetOption* option = options + o;
+            program->clone_copied[group->clone_first + o] = o != 0 && !option->repeated;
+            // The version's string: arch=CPU, or its feature.
+            char text[128];
+            const int length = option->is_default ? 0 :
+                               option->arch.length != 0 ? snprintf(text, sizeof(text), "arch=%.*s", (int)option->arch.length, option->arch.pointer) :
+                                                          snprintf(text, sizeof(text), "%.*s", (int)option->features[0].length, option->features[0].pointer);
+            int32_t cpu = -1;
+            const bool version = length > 0 && length < (int)sizeof(text) &&
+                                 predefines_target_attribute(text, (uint32_t)length, &cpu) == PREDEFINES_TARGET_ATTRIBUTE_VERSION;
+            if (version)
+            {
+                program->targets[program->target_count] = predefines_function_target(predefines, &program->host, program->target, text, (uint32_t)length, cpu);
+                program->target_count += 1;
+                program->clone_targets[group->clone_first + o] = program->target_count;
+            }
+        }
+        if (valid && group->copies && program->body_targets == NULL)
+        {
+            program->body_targets = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, program->body_count);
+            valid = program->body_targets != NULL;
+            if (valid)
+            {
+                memset(program->body_targets, 0, (uint64_t)program->body_count * sizeof(uint32_t));
+            }
+        }
+        if (valid && group->copies)
+        {
+            program->body_targets[body] = program->clone_targets[group->clone_first];
+        }
+    }
+    return valid;
 }
 
 // The names of the groups' symbols before the emission adds them (`names` by symbol, CheckProgramCode's symbol_names):
@@ -677,8 +834,50 @@ static bool check_program_target_names(const CheckProgram* program, String8* nam
             names[body] = check_program_target_option_name(program, group, options, output);
             valid = names[body].length != 0;
         }
+        // Its copies', each its version's.
+        for (uint32_t o = 1; valid && group->clones != 0 && program->clone_symbols != NULL && o < count; o += 1)
+        {
+            const SymbolId copy = program->clone_symbols[group->clone_first + o];
+            if (copy != 0)
+            {
+                names[copy] = check_program_target_option_name(program, group, options + o, output);
+                valid = names[copy].length != 0;
+            }
+        }
     }
     return valid;
+}
+
+// The symbol whose name a block-scope static of function `object` takes before its own, where `object` is one of the
+// groups' (clang names it by its function's mangled name where clang emits the function): a target version's own
+// (s.avx512f.n) where the function was multiversioned there, as a static group's are when its deferred versions are
+// emitted, or as one declared after another version is; otherwise none, the function's identifier alone (f.n, a version
+// defined before the function became multiversioned). A target_clones function's is its body's first version's
+// (c.avx2.0.n). Whether `object` is one of theirs.
+static bool check_program_target_static_context(const CheckProgram* program, uint32_t object, SymbolId* symbol)
+{
+    bool found = false;
+    *symbol = 0;
+    for (uint32_t g = 0; !found && g < program->target_group_count; g += 1)
+    {
+        const CheckProgramTargetGroup* group = program->target_groups + g;
+        for (uint32_t v = group->version_first; !found && v < group->version_first + group->version_count; v += 1)
+        {
+            found = program->target_versions[v].object == object;
+            bool later = group->internal;
+            for (uint32_t other = group->version_first; found && other < group->version_first + group->version_count; other += 1)
+            {
+                later |= other != v && program->target_versions[other].declaration < program->target_versions[v].declaration;
+            }
+            *symbol = found && later && program->target_symbols != NULL ? program->target_symbols[v] : 0;
+        }
+    }
+    for (uint32_t g = 0; !found && g < program->target_group_count; g += 1)
+    {
+        found = program->target_groups[g].clones != 0 && program->target_groups[g].clones == object;
+        *symbol = found && program->target_symbols != NULL ? program->target_symbols[program->target_version_count + g] : 0;
+    }
+    return found;
 }
 
 // The link room the groups' code takes beyond the program's symbols: the resolvers' atoms; their symbols (the resolver,
@@ -735,7 +934,9 @@ static bool check_program_target_symbols(CheckProgramCode* code, const CheckProg
         // The other versions' names at a target_clones body.
         for (uint32_t o = 1; valid && body != 0 && o < count; o += 1)
         {
-            if (!options[o].repeated)
+            // (A version of a copy of its own has its symbol, the copy's.)
+            const bool copied = program->clone_symbols != NULL && program->clone_symbols[group->clone_first + o] != 0;
+            if (!options[o].repeated && !copied)
             {
                 valid = check_program_cpu_add(link, check_program_target_option_name(program, group, options + o, output), link->symbols.flags[body], true) != 0;
             }
@@ -826,8 +1027,9 @@ static bool check_program_target_atoms(CheckProgramCode* code, const CheckProgra
         const AtomId body_atom = body != 0 && body < link->symbols.count ? link->symbols.atom[body] : 0;
         for (uint32_t o = 1; valid && body_atom != 0 && o < count; o += 1)
         {
-            const SymbolId symbol = options[o].repeated ? 0 : check_program_cpu_find(link, code->target_first, check_program_target_option_name(program, group, options + o, bytes));
-            valid = options[o].repeated || (symbol != 0 && link_define_symbol(link, symbol, body_atom, link->symbols.value[body], link->symbols.size[body]));
+            const bool skipped = options[o].repeated || (program->clone_symbols != NULL && program->clone_symbols[group->clone_first + o] != 0);
+            const SymbolId symbol = skipped ? 0 : check_program_cpu_find(link, code->target_first, check_program_target_option_name(program, group, options + o, bytes));
+            valid = skipped || (symbol != 0 && link_define_symbol(link, symbol, body_atom, link->symbols.value[body], link->symbols.size[body]));
         }
         const SymbolId reference = program->object_symbols[group->reference];
         if (!valid || !group->resolved || reference == 0)

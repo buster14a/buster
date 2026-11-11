@@ -9,8 +9,8 @@ caller, as one of Tier 0's machine operations (#1059: "Placed in the caller",
 below); most others are placed in their caller as an asm body, the helper's
 loads, template and stores in the call's place (#1839: "Asm bodies", below),
 and under `--tier1` every statement placed in its caller is one; the rest,
-templates of references to names, of directives and asm goto, are
-ordinary calls of a helper. A naked function's statements
+templates of references to names and of directives (and asm goto under
+`--tier1`), are ordinary calls of a helper. A naked function's statements
 are its whole code instead, and the names templates define and refer to become
 symbols of the unit's object or executable.
 
@@ -146,7 +146,7 @@ statement as the `asm` family's direct form.
 Clang places every asm statement in its caller, and the owner decided that
 this compiler does too ([#1447](https://github.com/buster14a/buster/issues/1447#issuecomment-6736401463),
 item 2). A statement that isn't a row (above), and whose template has no
-reference to a name and isn't an asm goto, is an asm body: the records a helper would have
+reference to a name (but an asm goto's to its labels, below, outside `--tier1`) is an asm body: the records a helper would have
 between its frame and its return, which run in the statement's place in its
 function (`check_asm_inline_code`, `Tier0AsmBody`):
 
@@ -458,16 +458,21 @@ does an asm body (#1839), which loads its operands from its block.
 
 `y` places an operand in an MMX register (#1846), mm0 up but the ones the
 clobbers name (`"mm0"`): an integer, a pointer, a `float` or a `double` of up
-to 8 bytes, as clang takes them (clang takes an `__m64` too, a vector whose
-8-byte loads Tier 0 doesn't have, so the lowering refuses it by name). The template
+to 8 bytes, as clang takes them, and an `__m64` (#1846, the owner's decision
+on #1447): its 8 bytes as an unsigned long, an input's read through its
+object's address (`CheckAsmPlace.m64`), since Tier 0 has no 8-byte vector load.
+An `__m64` input of no object (`v + v`) is refused by name. The template
 names it `%mm0`; clang refuses every modifier of one, and so does the lowering.
 The helper loads it as clang's code does, zero-extended into rax and moved into
 its register (`movzwl`, then `movq %rax, %mm0`), before the general registers'
 loads, and stores an output's low bytes through its address (`movq` or `movd`,
 a narrower one's through a general register). As in clang's code, nothing runs
 `emms`: the template's author leaves the x87's state as the code after it needs
-it. A statement of MMX and x87 operands is refused by name (their registers are
-the same), and so is one whose template takes directives. A statement of MMX
+it. A statement of MMX and x87 operands (whose registers are the same) loads its
+x87 operands first and its MMX ones after, and stores its MMX outputs before
+its x87 ones, as clang's code orders them (#1846, the owner's decision on
+#1447): what the x87's stack holds after an MMX load is the template's to know.
+A statement of MMX
 operands is an asm body (#1839) that loads them as the helper does, through rax
 before its other loads, from its block. MMX's forms, which `x86_semantics.c`
 doesn't cover, are taken to write the general and XMM registers their fields
@@ -577,12 +582,23 @@ instructions, labels and the syntax directives. It refuses:
 
 - every other directive, which the planner assembles whole instead (below);
 - its numeric labels and `.`, but as a `jmp`'s or `jcc`'s target without an
-  addend, and `loop` and `jrcxz` to any of its labels: the planner assembles
-  these whole too (#1845), as their failure asks (`AsmCode.directive`), so
-  that `leaq 1f(%rip)`, `.`'s address and `loop 1b` are the assembler's own
-  fixups and branches, as clang's;
+  addend, and `loop` and `jrcxz` to its labels with an addend or across a `jmp`
+  or `jcc` that branch sizing sizes: the planner assembles these whole too
+  (#1845), as their failure asks (`AsmCode.directive`), so that `leaq
+  1f(%rip)`, `.`'s address and such a `loop 1b` are the assembler's own fixups
+  and branches, as clang's;
 - undefined numeric labels;
 - what the matcher doesn't take.
+
+A `loop` or a `jrcxz` to a label of the template's own, without an addend and
+with no `jmp` or `jcc` that branch sizing sizes between it and its label, is a
+record whose rel8 displacement the assembler fixes once the records are, by
+their lengths (#1839's item 4: these have no rel32 form, which branch sizing
+would need to grow them, and nothing between them can grow). A body or a
+helper takes it as any record; `check_asm_implicit` gives `loop` its rcx and
+`jrcxz` nothing, and `check_asm_inline_touched` takes it as the template's
+own branch. So `1: addq %rcx, %0; loop 1b` is an asm body in its caller, as
+clang places it.
 
 ### Templates that take directives
 
@@ -853,6 +869,20 @@ A label as anything but a jmp's or a jcc's target (data, a call's target, an
 addend) is refused by name. A template of no instructions never jumps, and has
 no helper.
 
+Outside `--tier1`, an asm goto is an asm body (#1839's item 2): the same exits
+are the body's records after the template (`check_asm_inline_code`), the
+template's jumps and the exits' jumps the body's branches, and the exit's move
+into eax its last record. Its call row returns that int (`check_lower_asm_call`'s
+result, a body call of class I32 to Tier 0's validator), and the statement's
+code dispatches on it as on the helper's. The statement costs no call, return,
+frame or block address, but still the exit's move, compare and branch: clang's
+`callbr` jumps from the template straight to the labels. Jumping straight would
+make the body's call row a block's terminator with several successors, which
+Tier 0's validator and `ir_lower` don't take yet. Under `--tier1` the statement
+keeps its helper, as the IR's body call returns nothing. Tier 0 sorts its branch
+columns where a body has branches: a body's are a deferred entry's, written after
+the branches of the entries that follow it.
+
 An asm goto's possible targets are its own labels, as clang's
 JumpScopeChecker takes them (`check_input_asm_goto_refused`). The checker
 refuses one that would enter the scope of a variable-length array or of a
@@ -920,8 +950,7 @@ Each refusal names its feature, as the driver prints it ("unsupported: ..."):
   alternative (`"=r@ccz"`, which clang takes as `r`);
 - the letters it doesn't place, and `A` of other sizes than up to 8 bytes and
   an integer's 16;
-- MMX operands with a modifier (clang refuses each), and beside x87 operands in
-  one statement;
+- MMX operands with a modifier (clang refuses each);
 - opmask operands with a modifier, and
   without the moves' features (AVX-512F's for 1 or 2 bytes, AVX-512BW's for 4
   or 8), where clang can't place one;
@@ -1186,13 +1215,14 @@ has the commands, the logs and the default path's numbers against main.
 ## Pending
 
 What placement in the caller doesn't take yet (#1839), each keeping its helper:
-templates of references to names, asm goto, `loop` and `jrcxz` (which the lowering refuses by name),
+templates of references to names, asm goto under `--tier1`, `loop` and `jrcxz` across a sized branch (assembled whole, as templates that take directives are),
 templates that return but keep a helper for another reason (refused by name), templates
 that take directives, and forms of unknown effects outside `check_asm_implicit`.
 Under `--tier1`, templates of named labels keep their helpers (a body's labels
-would make its function Tier 0's), a function with a template that returns or a
-label of a template of no instructions is Tier 0's, and the
-code's certificate (`--verify`) leaves a function with an asm body uncertified.
+would make its function Tier 0's), and a function with a template that returns or a
+label of a template of no instructions is Tier 0's. The
+code's certificate (`--verify`) certifies a function with asm bodies
+([the certificate guide](tier1-certificate.md)'s "Asm bodies").
 
 What the lowering still refuses of what GCC and clang take:
 

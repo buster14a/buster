@@ -3,7 +3,10 @@
 Every merge and direct push to `main` triggers hosted correctness against
 that push's exact `github.sha`, including documentation-only changes (#1271).
 In the nightly mode it runs the plain rows: both host architectures, plain
-O3, four shards each (#2057, the owner's choice on 2026-11-10). The sanitizer
+O3, four shards each (#2057, the owner's choice on 2026-11-10). Every row
+runs SQLite's pinned Tcl subset; the whole suite (`hosted-correctness.yml`'s
+`sqlite-full`) runs on the nightly and dispatched runs alone, not on pushes
+(#2334). The sanitizer
 rows and fuzz campaigns run once a day on the nightly snapshot's deferred run,
 until the merge queue (#1430) runs the complete suite before each merge and
 pushes to main run no checks at all. Before the nightly mode, which has no
@@ -77,7 +80,8 @@ below). A `native` row's shards each build the compiler themselves, since a
 native build must run on the CPU model it was built for, which hosted runners
 don't share. A row's once-only steps (the baseline fallback checks, the QEMU
 smoke test, the constrained arenas, the parser smoke test, the performance
-readers and the TSan/MSan `main.c` compiles) run in its shard 1, and each
+readers and the TSan/MSan `main.c` compiles) run in its shard 1, which the deal
+gives that much less of the inventory (its table's `#: first-shard`), and each
 shard's sanitizer reports are an artifact of its own.
 
 Standard `ubuntu-26.04` runners do not promise a particular CPU model or this
@@ -236,8 +240,9 @@ The hosted selector job runs that test before any hardware admission, and the
 selector's own policy mutants pin the draft guard and ready/draft triggers.
 
 A pull request's run stops at its first failure. Its two test rows' shards fail
-fast, and its tests wait for the agent-guide size and DCO hook checks, which finish
-within the `changes` job's time, and don't start when either fails. Pushes
+fast, and its tests wait for the policy job (`Measurement storage policy`: the
+measurement storage, agent-guide size and DCO hook checks in one job, #2334), which
+finishes about when the `changes` job does, and don't start when it fails. Pushes
 to main, the daily run and dispatched runs keep `fail-fast: false` and test
 whatever those checks report: their sanitizer rows and fuzz campaigns are main's
 coverage, and one detector's failure must not hide what the others find. The
