@@ -680,8 +680,8 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "int counter;\nenum { WIDTH = 8 };\ntypeof(countr) y;\nint *py = &y;\n_BitInt(WIDTHX) w;\nint f(int n)\n{\n"
         "    int unused;\n    int v[countr + n];\n    if (n = 2) return sizeof(typeof(countr)) + sizeof v;\n    return (int)w;\n"
         "}\n",
-        // One that no correction takes still ends the unit's checking, after each name of its expression, as clang reports
-        // them: a bound's, a typedef's, a type name's typeof's, and a designator's (whose list clang drops there). A
+        // One that no correction takes is clang's error at each name of its expression, in its order: a bound's, a
+        // typedef's, a type name's typeof's, and a designator's (whose list clang drops there). A
         // _BitInt's is no type specifier, as clang drops it: its parser's error follows, a declaration's at its first
         // declarator's name (C23's own words, and a C23 parameter's name a type's), a member's or a type name's at the end
         // of the list.
@@ -696,6 +696,19 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "int s = sizeof(_BitInt(zzz));\n",
         "int a[3] = { [zzz] = 1, [yyy] = 2 };\n",
         "enum { W = 1 };\nint a[3] = { [W ... zzz + yyy] = 1 };\n",
+        // A declaration's last declarator whose bound or typeof has undeclared names that no correction takes is invalid,
+        // as clang's, and stays bound, its uses quiet (#1447, check_input_declarator_recover_names, the specifiers'
+        // typeof): the unit goes on with its later errors and warnings, at file scope and in a body. A typedef's, a type
+        // name's or a designator's still ends the walk, and so does a declarator before another, whose rest clang's parser
+        // skips (`int a[zzz], b;` declares no b).
+        "typeof(zzz) x; int *p = &x; int y(void) { return x.foo + sizeof x; }\n",
+        "int a[zzz]; int *p = a; int f(void) { int u; return sizeof a + a[1]; }\n",
+        "int f(void) { int v[zzz]; return v[0] + nope; }\n",
+        "int f(void) { typeof(zzz) v; int u; return v + nope; }\n",
+        "int a[zzz]; int b[yyy]; int g(int n) { if (n = 2) return 1; return 0; }\n",
+        "typeof(zzz) x; typeof(yyy) w; int f(void) { int unused; return 0; }\n",
+        "int a[zzz]; int a[3];\n",
+        "static int a[zzz]; int f(void) { return a[0]; }\n",
         // A declarator's constant that fails ends the walk with clang's error in its words (#1447,
         // check_input_constant_failure_report), as an attribute argument's: a missing member, `->` of no pointer and a
         // member access's base, pointer arithmetic on an incomplete pointee, `sizeof` of an incomplete type, a call's
@@ -730,10 +743,10 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "struct S { int a; } s;\nint f(void) { int a[s.b]; return sizeof a; }\n",
         "struct S { int a; } s;\nint f(void) { enum { A = sizeof(s.b) }; return A; }\n",
         "struct S { char bytes[sizeof(struct Missing) -\nsizeof(missing)]; };\n",
-        // Declarator errors in clang's words (#1447), each still ending the unit's checking: a function returning an array
-        // or a function, a negative bound (named, and a type name's), an array of functions (by a typedef's name, with its
-        // aka) or of an incomplete element (with the tag's forward declaration's note), and a variable of type void or of
-        // an incomplete tag, a tentative definition's too.
+        // Declarator errors in clang's words (#1447): a function returning an array or a function, a negative bound
+        // (named, and a type name's), an array of functions (by a typedef's name, with its aka) or of an incomplete element
+        // (with the tag's forward declaration's note), and a variable of type void or of an incomplete tag, a tentative
+        // definition's too. Each declaration is invalid and stays bound, its uses quiet (check_input_invalid_declare).
         "struct S;\nint f(void)[3];\n",
         "typedef int F(void);\nF g(void);\n",
         "int s = sizeof(int[2]);\nint a[-1];\n",
@@ -752,6 +765,53 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         // A parameter's bound past its `static` and qualifiers (review on #1819).
         "void f(int a[static 0x2000000000000000]);\n",
         "void g(int a[const volatile 0x2000000000000000]);\n",
+        // Invalid declarations in a row, whose uses are quiet: in later bodies, which keep their -Wall warnings, in a body's
+        // own invalid declarations, and in constant contexts (a bound, typeof, an enumerator, _Static_assert, a bit-field's
+        // width, a case label), which read a stand-in int.
+        "struct S;\nint a[-1];\nint f(void)[3];\ntypedef int F(void);\nF af[2];\nstruct S s;\nstatic void v;\n"
+        "int use1(void) { return a[0] + f()[1] + af[0](); }\nint use2(void) { int unused; return sizeof s; }\nint b[sizeof a];\n"
+        "enum { E = sizeof a };\n_Static_assert(sizeof a, \"\");\nint w(int x) { switch (x) { case sizeof a: return 1; } return 0; }\n",
+        "struct S;\nint a[-1];\nint b[sizeof a];\ntypeof(a) t;\nenum { E = sizeof a };\n_Static_assert(sizeof a, \"\");\n"
+        "struct B { int w : sizeof a; };\nint w(int x) { switch (x) { case sizeof a: return 1; } return 0; }\n",
+        "int a[-1];\nint g(void) { int unused; return a[0]; }\nint h(void) { int unused2; return 0; }\n"
+        "void m(void) { int c[-2]; int unused3; c[0] = 1; float y = c; }\n",
+        "struct S;\nvoid m(void) { int c[-2]; int unused3; c[0] = 1; }\nint g(void) { int u; struct S local; return sizeof local; }\n"
+        "int h(void) { int u2; return 0; }\nint k(int q) { void v; int *p = &v; return q; }\n",
+        "int f(void)[2] { int unused; return 0; }\nint g(void)[3];\nint use(void) { int x = g()[1]; return x; }\ntypedef int F(void);\n"
+        "F af[2];\nint call(void) { return af[0](); }\nint c[0x100000000][0x100000000];\nint cu(void) { return c[1][2]; }\n",
+        "int ok(void) { return 1; }\nvoid body1(void) { int c[-2]; c[0] = 1; int u; }\nvoid body2(void) { int fine; }\n"
+        "void body3(void) { struct Q q; (void)q; }\nint tail(int z) { if (z = 3) return 1; return 0; }\n",
+        // A redeclaration after an invalid one: an object's is checked as if nothing were visible, but for its linkage; a
+        // function's is invalid too, its uses as quiet.
+        "int a[-1]; int a[2]; float a;\nstruct S s1; int s1; float s1;\nstatic void v; int v;\nint f(void)[3]; int f(void); float f(int);\n"
+        "int u(void) { return f(1, 2); }\nint y(void) { int unused; return 0; }\n",
+        "int f(void)[3]; int f(void); float f(int);\nint u(void) { return f(1, 2); }\nint y(void) { int unused; return 0; }\n",
+        // Another kind of entity's redeclaration after an invalid one is still clang's "redefinition of 'a' as different
+        // kind of symbol" (review on #1884): an object after a function, a function after an object, and a typedef after
+        // either.
+        "int a[-1];\nint a(void);\nint f(void)[3];\nint f;\nstruct S;\nstruct S s;\nvoid s(void);\nint g(void) { int unused; return a + f; }\n",
+        "static void v;\nint v(void);\nint w(void)[2];\ntypedef int w;\nint b[-1];\ntypedef int b;\nint h(void) { int unused; return 0; }\n",
+        // C23's redefinition of an enum at file scope (#1447, N3037): a compatible one is silent, and its names unambiguous
+        // after it; an incompatible one is clang's "incompatible definitions" at its name, with the first pair of its
+        // enumerators sorted by name that differ in name or value, or one past the other list and "no corresponding
+        // enumerator here" at the other's name. A name both lists declare is ambiguous within the second body, and after an
+        // incompatible one, with its candidates; a body with such a use keeps no unused variable, the others do.
+        "/* gnu23 only */\nenum E { A, B };\nenum E { A, B };\nint x = A;\nenum E e = B;\nenum F { F1 } f1;\nenum F { F1 } f2;\n"
+        "enum H : int { H1 };\nenum H : int { H1 };\nenum K { K1 = 5, K2 };\nenum K { K1 = 5, K2 = 6 };\nint y = undeclared;\n",
+        "/* gnu23 only */\nenum G { X, Y };\nenum G { X, Z };\nint v = Y + Z;\nint q = sizeof(enum G);\nint g(void) { int u2; return 0; }\n",
+        "/* gnu23 only */\nenum G { X, Y };\nenum G { X, Z };\nint u = X;\nvoid f(void) { int unused; int k = X; }\nint g(void) { int u2; return 0; }\n",
+        "/* gnu23 only */\nenum G { X, Y };\nenum G { X };\nint v = Y;\nenum M { M1 };\nenum M { M1, M2 };\n"
+        "enum P : int { P1 };\nenum P : int { P1, P2 };\n",
+        "/* gnu23 only */\nenum G { X = 1 };\nenum G { X = 2 };\nenum S { S1, S2 };\nenum S { S2, S1 };\nenum T { zz, B, a };\n"
+        "enum T { zz, B, A };\nenum N { N1 = -1, N2 };\nenum N { N1 = -2, N2 };\nenum U { U1 = 0xffffffffu };\nenum U { U1 = 0xfffffffeu };\n",
+        "/* gnu23 only */\nenum G { X, Y };\nenum G { X, Z = X + 1 };\nenum R { R1, R2 = R1 + 1 };\nenum R { R1, R2 = R1 + 1 };\n"
+        "int q = R2;\nint w(void) { int unused; return 0; }\n",
+        // A name only the dropped redefinition declares, though a local of another body or a later declaration spells it
+        // too (review on #1928): its uses still mask their bodies in the later readings, so the unit keeps its warnings.
+        "/* gnu23 only */\nenum E { X, Y };\nenum E { X, Z };\nvoid f(void) { int Z; }\nint g(void) { return Z; }\n"
+        "int h(void) { int unused; return 0; }\nvoid k(void) { int m = X; }\n",
+        "/* gnu23 only */\nenum E { X, Y };\nenum E { X, Z };\nint g(void) { return Z; }\nint h(void) { int unused; return X; }\n"
+        "struct Z { int a; };\nint i(void) { int u2; return 0; }\n",
         // A tag defined again in its scope, whose body becomes an anonymous tag's: later uses of the name find the first
         // definition, and the second's enumerators are still declared (a repeated one with its own note).
         "struct S { int a; };\nstruct S { long b; };\nunion U { int a; };\nunion U { char c; } u2;\n"
@@ -768,8 +828,8 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "enum FE : int { FA, FB };\nenum FE : int { FC, FD };\nint fx = FC + FB;\nvoid fg(void) { enum FL : char { FL1 }; enum FL : char { FL2 }; }\n",
     };
     static const char* const standards[] = { "-std=gnu17", "-std=gnu23" };
-    // The tag redefinitions, the last three fixtures, are gnu17's alone: C23 compares a redefined record with the
-    // earlier one (N3037, the gnu23 fixtures above), and an enum's redefinition still refuses generically there.
+    // The tag redefinitions, the last three fixtures, are gnu17's alone: C23 compares a redefined record or enum with the
+    // earlier one (N3037, the gnu23 fixtures above).
     const uint32_t before_c23 = BUSTER_ARRAY_LENGTH(fixtures) - 3;
     static const char* const options[] = { NULL, "-Wall", "-ferror-limit=2", "-w" };
     static char stress_text[65536];

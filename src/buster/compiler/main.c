@@ -1065,6 +1065,11 @@ int main_unit_check_builtins(int argc, char** argv, bool* found);
 int main_unit_backend(int argc, char** argv, bool* found);
 int run_source_check_command(int count, char** arguments);
 int main_preprocessor_command(int count, char** arguments);
+// Their modes that release what they map before returning, and main_source_command's work through them, for a caller
+// that goes on running: the driver tests' in-process runs (#2071).
+int run_source_check_command_reusable(int count, char** arguments);
+int main_preprocessor_command_reusable(int count, char** arguments);
+int main_source_command_reusable(int argc, char** argv);
 
 #if BUSTER_UNIT == BUSTER_UNIT_DRIVER
 #include "buster/compiler/c_driver_information.c"
@@ -2472,6 +2477,24 @@ static __attribute__((noinline)) int main_source_command(int argc, char** argv)
     return result;
 }
 
+// main_source_command's routing, by the commands' reusable modes, for a caller that goes on running (#2071): the
+// process's page policy and address limit stay the caller's, and a response file (@FILE), whose expansion keeps its
+// storage until the process exits, is left to a process of its own: -1 for one, else the command's exit status.
+int main_source_command_reusable(int argc, char** argv)
+{
+    int result = -1;
+    bool response = false;
+    for (int i = 1; !response && i < argc; i += 1)
+    {
+        response = argv[i][0] == '@' && argv[i][1] != 0;
+    }
+    if (!response && !main_information(argc - 1, argv + 1, &result))
+    {
+        result = main_preprocessing(argc - 1, argv + 1) ? main_preprocessor_command_reusable(argc - 1, argv + 1) : run_source_check_command_reusable(argc - 1, argv + 1);
+    }
+    return result;
+}
+
 #if BUSTER_FUZZ_AVAILABLE
 #include BUSTER_FUZZ_ENTRY
 extern int LLVMFuzzerRunDriver(int* argc, char*** argv, int (*callback)(const uint8_t*, size_t));
@@ -2623,6 +2646,11 @@ int main_preprocessor_command(int count, char** arguments)
     return run_preprocessor_command_mode(count, arguments, false);
 }
 
+int main_preprocessor_command_reusable(int count, char** arguments)
+{
+    return run_preprocessor_command_mode(count, arguments, true);
+}
+
 int main_unit_frontend(int argc, char** argv, bool* found)
 {
     return main_command(argc, argv, found);
@@ -2656,6 +2684,11 @@ int main_unit_types(int argc, char** argv, bool* found)
 int run_source_check_command(int count, char** arguments)
 {
     return run_check_command_mode(count, arguments, true, false);
+}
+
+int run_source_check_command_reusable(int count, char** arguments)
+{
+    return run_check_command_mode(count, arguments, true, true);
 }
 
 int main_unit_checker(int argc, char** argv, bool* found)

@@ -206,17 +206,19 @@ if "$BUSTER_COMPILER" test-preprocessor --part 1/4 --part 2/4; then exit 1; fi
 == Test the semantic driver's diagnostics and emission against clang (part 1 of 4)
 # --part deals the driver test's checks (sections, and the cases of its two long sweeps) in turn to 4 parts, one CPU
 # each, which the runner packs beside the other commands: alone, the command took 197 s on a hosted runner and 48 s
-# on the 9700X, the list's longest. The four parts together run each check once.
-"$BUSTER_COMPILER" test-checker-driver --executable "$BUSTER_COMPILER" --part 1/4
+# on the 9700X, the list's longest. The four parts together run each check once. Buster's runs are this process's,
+# and the oracle clang's go to the job's clang server where it built one (#2071); with BUSTER_DRIVER_DIFFERENTIAL, each
+# also runs as a child, and a difference fails the command.
+"$BUSTER_COMPILER" test-checker-driver --executable "$BUSTER_COMPILER" --part 1/4 --in-process ${BUSTER_CLANG_SERVER:+--clang-server "$BUSTER_CLANG_SERVER"} ${BUSTER_DRIVER_DIFFERENTIAL:+--differential}
 == Test the semantic driver's diagnostics and emission against clang (part 2 of 4)
-"$BUSTER_COMPILER" test-checker-driver --executable "$BUSTER_COMPILER" --part 2/4
+"$BUSTER_COMPILER" test-checker-driver --executable "$BUSTER_COMPILER" --part 2/4 --in-process ${BUSTER_CLANG_SERVER:+--clang-server "$BUSTER_CLANG_SERVER"} ${BUSTER_DRIVER_DIFFERENTIAL:+--differential}
 == Test the semantic driver's diagnostics and emission against clang (part 3 of 4)
-"$BUSTER_COMPILER" test-checker-driver --executable "$BUSTER_COMPILER" --part 3/4
+"$BUSTER_COMPILER" test-checker-driver --executable "$BUSTER_COMPILER" --part 3/4 --in-process ${BUSTER_CLANG_SERVER:+--clang-server "$BUSTER_CLANG_SERVER"} ${BUSTER_DRIVER_DIFFERENTIAL:+--differential}
 == Test the semantic driver's diagnostics and emission against clang (part 4 of 4)
-"$BUSTER_COMPILER" test-checker-driver --executable "$BUSTER_COMPILER" --part 4/4
+"$BUSTER_COMPILER" test-checker-driver --executable "$BUSTER_COMPILER" --part 4/4 --in-process ${BUSTER_CLANG_SERVER:+--clang-server "$BUSTER_CLANG_SERVER"} ${BUSTER_DRIVER_DIFFERENTIAL:+--differential}
 == Check narrow-unsigned sign comparisons and admitted deferred diagnostics [2 CPUs]
 # This focused route compiles two bodies, requests two lanes and asserts the reported deferred admission.
-"$BUSTER_COMPILER" test-checker-driver --executable "$BUSTER_COMPILER" --sign-compare-only
+"$BUSTER_COMPILER" test-checker-driver --executable "$BUSTER_COMPILER" --sign-compare-only --in-process ${BUSTER_CLANG_SERVER:+--clang-server "$BUSTER_CLANG_SERVER"} ${BUSTER_DRIVER_DIFFERENTIAL:+--differential}
 == Test the per-file jobs on the frozen musl units
 # #262's corpora: musl's 1,355 units with its build's options, the cache filled on 1, 2, 3 and 8 lanes and with
 # the ids in another order, as test-files does for the repository's units.
@@ -436,7 +438,7 @@ fi
 == Test the semantic driver's diagnostics and emission against clang, with lazy system headers
 # Only the checks that run the driver with -flazy-system-headers; the parts above run the others, which are the
 # same either way.
-"$BUSTER_COMPILER" test-checker-driver --executable "$BUSTER_COMPILER" --lazy-system-headers
+"$BUSTER_COMPILER" test-checker-driver --executable "$BUSTER_COMPILER" --lazy-system-headers --in-process ${BUSTER_CLANG_SERVER:+--clang-server "$BUSTER_CLANG_SERVER"} ${BUSTER_DRIVER_DIFFERENTIAL:+--differential}
 == Allocate every function of c-testsuite's programs and the frozen SQLite and musl sources over its CFG
 # #140: each function -c compiles, lowered and promoted as test-ir-source does, adapted to an allocation problem
 # (tier1_cfg_ir.c's machine model), allocated by both of tier1_cfg.c's paths and checked by tier1_cfg_verify.

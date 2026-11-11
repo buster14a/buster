@@ -836,6 +836,49 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_machine_row(IrTyp
     return ir_typed_emit(sink, IR_CALL, type, 0, descriptor, BUSTER_IR_NONE, 0);
 }
 
+// An asm body's call (#1839, Tier0Function.call_asm): the body into IrFunction.asm_bodies, and a body call (IrCall.body)
+// whose one argument is its operand block's address, the block local's preheader IR_STACK_ADDR (none for a body that
+// reads no block). Every pass takes the call as an unknown callee's of that pointer: the block escapes into it, its stores
+// stay before it, and no access moves across it.
+static __attribute__((always_inline)) inline uint32_t ir_typed_asm_body(IrTypedSink* sink, const Tier0AsmBody* body)
+{
+    const uint32_t descriptor = (uint32_t)sink->sizes.call_count;
+    const uint32_t first = (uint32_t)sink->sizes.extra_count;
+    const uint32_t type_first = (uint32_t)sink->sizes.call_type_count;
+    const uint32_t index = (uint32_t)sink->sizes.asm_body_count;
+    const uint32_t count = body->block != BUSTER_TIER0_ASM_NO_BLOCK ? 1 : 0;
+    if (sink->output != 0)
+    {
+        IrFunction* output = sink->output;
+        output->asm_bodies[index] = (IrAsmBody){
+            .records = body->records,
+            .branches = body->branches,
+            .targets = body->targets,
+            .count = body->count,
+            .branch_count = body->branch_count,
+            .touched = body->touched,
+        };
+        output->calls[descriptor] = (IrCall){
+            .argument_first = first,
+            .argument_count = count,
+            .type_first = type_first,
+            .parameter_count = count,
+            .result_type = IR_VOID,
+            .body = index + 1,
+        };
+        if (count != 0)
+        {
+            output->extra[first] = body->block;
+            output->call_types[type_first] = IR_PTR;
+        }
+    }
+    sink->sizes.call_count += 1;
+    sink->sizes.extra_count += count;
+    sink->sizes.call_type_count += count;
+    sink->sizes.asm_body_count += 1;
+    return ir_typed_emit(sink, IR_CALL, IR_VOID, 0, descriptor, BUSTER_IR_NONE, 0);
+}
+
 // A mask's bits as an integer of at least 32 bits, which Tier 1's arithmetic takes (an m8's or m16's zero-extended past
 // its bitcast), and back: the mask of `mask`'s width of that integer's low bits.
 static __attribute__((always_inline)) inline uint32_t ir_typed_mask_integer(IrTypedSink* sink, uint32_t value, IrType mask)
@@ -1828,11 +1871,15 @@ static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType res
             check.instruction = entry;
         }
     }
-    if (check.error == IR_OK && (input->unwind_init || input->returns_twice || tier0_preserving(input) || input->realign_stack || input->segments ||
-                                 input->asm_body_count != 0))
+    bool leaves = false;
+    for (uint32_t k = 0; check.error == IR_OK && k < input->asm_body_count && input->asm_bodies != 0; k += 1)
     {
-        // An asm statement placed in its caller as an asm body (#1839, Tier0Function.call_asm) is Tier 0's too, until the
-        // IR has a form for one.
+        leaves |= input->asm_bodies[k].leaves;
+    }
+    if (check.error == IR_OK && (input->unwind_init || input->returns_twice || tier0_preserving(input) || input->realign_stack || input->segments || leaves))
+    {
+        // An asm body that returns from its function (#1839, Tier0AsmBody.leaves), whose function keeps no local and no
+        // value in a callee-saved register, as __builtin_setjmp's keeps none, is Tier 0's too.
         // __builtin_unwind_init's frame, which saves every callee-saved register (Tier0Function.unwind_init),
         // __builtin_setjmp's, which keeps nothing in one (Tier0Function.returns_twice), a preserving function's, which
         // keeps registers for its caller past them (#147, Tier0Function.preserve_general), and a force_align_arg_pointer
@@ -1862,7 +1909,7 @@ static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType res
             check.error = IR_ERROR_TYPE;
             check.instruction = i;
         }
-        else if (kind == BUSTER_TYPED_CALL && input->call_targets[value] >= symbol_count)
+        else if (kind == BUSTER_TYPED_CALL && input->call_targets[value] >= symbol_count && (input->call_asm == 0 || input->call_asm[value] == 0))
         {
             check.error = IR_ERROR_OPERAND;
             check.instruction = i;
