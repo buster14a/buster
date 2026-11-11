@@ -3781,9 +3781,17 @@ What the lowering covers past scalars (#145's programs):
   low limbs, then the sign's or zeros past them; a conversion between such
   types copies the limbs both have. Compound assignments and increments
   convert the destination to the calculation's type, compute and convert
-  back, a postfix one keeping a copy of the old value. A global without an
+  back, a postfix one keeping a copy of the old value. A switch on such a
+  type (#2220) keeps its cases' limbs (`CheckProgramCase.wide_lower` and
+  `wide_upper`, `check_program_case_value`), orders and finds its duplicate
+  cases and overlapping GNU ranges by them (`check_program_case_compare`,
+  clang's words with the value's decimal digits), and dispatches through a
+  chain of compares, never a jump table: a case's limbs XORed with the value's
+  and ORed together, a range's two orders against its constants
+  (`check_lower_case_limbs`). A global without an
   initializer is zeros. A unit with such a type has room for 64 entries a
-  limb for each node that touches one (`check_lower_limb_room`), so the stream
+  limb for each node that touches one, and 32 a limb for each such switch's
+  case (`check_lower_limb_room`), so the stream
   grows with the width as clang's code does: a `_BitInt(1048576)`'s sum and
   product compile, and a `_BitInt(8388608)`'s too, whose frames need more than
   the default 8 MB stack. Their constants fold (#1447, "Constants past 128

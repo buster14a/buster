@@ -3144,6 +3144,18 @@ static const CheckSemanticFixture check_semantic_fixtures[] =
         "duplicate case value '4294967295'",
     },
     {
+        "void f(_BitInt(256) x) { switch(x) { case (_BitInt(256))1 << 200: break; case (_BitInt(256))1 << 200: break; } }\n",
+        "void f(_BitInt(256) x) { switch(x) { case (_BitInt(256))1 << 200: break; case (_BitInt(256))1 << 201: break; } }\n",
+        79,
+        "duplicate case value '1606938044258990275541962092341162602522202993782792835301376'",
+    },
+    {
+        "void f(unsigned _BitInt(200) x) { switch(x) { case -1: break; case 3 ... -1: break; } }\n",
+        "void f(unsigned _BitInt(200) x) { switch(x) { case -2: break; case 3 ... -3: break; } }\n",
+        68,
+        "duplicate case value '1606938044258990275541962092341162602522202993782792835301375'",
+    },
+    {
         "_Static_assert(0, \"hello \" \"world\");\n",
         "_Static_assert(1, \"hello \" \"world\");\n",
         16,
@@ -3342,7 +3354,7 @@ static void check_test_semantic_diagnostics(CheckTest* test, const char* clang)
                     }
                     check_test_expect(test, passed, description);
                     // Newlines in the assertion payload are real decoded bytes, not a lost or escaped message.
-                    if (violation && i == 20)
+                    if (violation && strstr(fixture->violation, "hello\\nworld") != NULL)
                     {
                         check_test_expect(test, text != NULL && strstr(text, "hello\nworld") != NULL, "static assertion preserves the decoded multiline payload");
                     }
