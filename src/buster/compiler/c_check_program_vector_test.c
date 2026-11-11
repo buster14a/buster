@@ -1176,6 +1176,22 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
           "T(long long,16);T(long long,32);T(long long,64);T(unsigned long long,16);T(unsigned long long,64);\n"
           "return (int)h;}\n"
         },
+        // _mm_maskmoveu_si128 and _mm_maskmove_si64 without AVX-512BW (#2240), byte by byte: random masks, none and every
+        // byte selected, at every offset of a buffer, and _mm_maskmove_si64 at a page's end before an inaccessible one (its
+        // header backs the 16-byte store up there; MASKMOVDQU itself may fault on bytes it doesn't store, so
+        // _mm_maskmoveu_si128 isn't tested there).
+        { "baseline-maskmove",
+          "#include <immintrin.h>\n"
+          "#include <sys/mman.h>\n"
+          "int tested(int n){unsigned h=2166136261u;char buf[64];\n"
+          "char*page=mmap(0,8192,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);mprotect(page+4096,4096,PROT_NONE);\n"
+          "for(int k=0;k<8;k++){__m128i d,m;fill(&d,16,n*3+k);fill(&m,16,n*5+k);if(k==0)m=_mm_setzero_si128();if(k==1)m=_mm_set1_epi8(-1);\n"
+          "fill(buf,64,n+k);_mm_maskmoveu_si128(d,m,buf+k);h=fold(h,buf,64);\n"
+          "__m64 e,q;fill(&e,8,n*7+k);fill(&q,8,n*11+k);fill(buf,64,n+k+1);_mm_maskmove_si64(e,q,buf+k*3);h=fold(h,buf,64);\n"
+          "char*edge=page+4096-8;for(int i=0;i<8;i++)edge[i]=(char)(i+n);\n"
+          "_mm_maskmove_si64(e,_mm_set1_pi8(-1),page+4096-8);h=fold(h,page+4096-8,8);}\n"
+          "munmap(page,8192);return (int)h;}\n"
+        },
         // Scalars' elementwise builtins without AVX-512F (#1834): the C library's ceilf ... roundf, fmaf and fma without
         // SSE4.1 and FMA, and ldexpf and ldexp; SSE4.1's ROUNDSS and ROUNDSD (round's of the value plus the largest value
         // below 0.5 of its sign) and FMA's VFMADD213SS and SD where the target has them; halves, values near them and past
