@@ -58,6 +58,14 @@ static void check_test_driver_cfi_salt(CheckTest* test, const char* clang, const
         "void (*p [[clang::nonblocking]])(void);\n",
         "struct S { void (*m [[clang::cfi_salt(\"a\")]])(void); };\n",
         "void g(void (*p [[clang::cfi_salt(\"a\")]])(void));\n",
+        "int x [[clang::nonblocking]];\n",
+        "int x [[clang::cfi_salt(\"a\")]];\n",
+        "void f [[clang::cfi_salt(\"a\")]] (void);\n",
+        "int *p [[clang::cfi_salt(\"a\")]];\n",
+        "void (**p [[clang::cfi_salt(\"a\")]])(void);\n",
+        "void (*a [[clang::cfi_salt(\"a\")]] [2])(void);\n",
+        "typedef void (*T [[clang::cfi_salt(\"a\")]])(void);\n",
+        "int x [[clang::cfi_salt(\"a\")]], y(void);\n",
     };
     static const char* const standards[] = { "-std=gnu17", "-std=gnu23" };
     enum { LINES = 16384 };
