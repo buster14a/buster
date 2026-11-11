@@ -724,6 +724,18 @@ struct TypeNames
     bool anonymous_keyword;
     const TypePrintParen* parentheses;
     uint32_t parenthesis_count;
+    // Optional (#1447): the macro that writes a target address space, as clang's MacroQualifiedType names it
+    // (`'AS1 int *'`): a level whose space is `space_macro_spaces[i]` (its BUSTER_TYPE_SPACE_TARGET-based word) prints
+    // `space_macro_texts[i]` before the level, with its other qualifiers after the level's specifier.
+    const uint32_t* space_macro_spaces;
+    const String8* space_macro_texts;
+    uint32_t space_macro_count;
+    // Optional (#1447): a variable array's size expression as written, which the table doesn't keep: a VARIABLE_ARRAY
+    // level whose extent (the caller's id for its expression) is `bound_ids[i]` prints `[bound_texts[i]]`, as clang's
+    // `int[n]`; any other prints `[]`.
+    const uint64_t* bound_ids;
+    const String8* bound_texts;
+    uint32_t bound_count;
 };
 
 // The printer's options: BUSTER_TYPE_PRINT_C23 spells bool as C23 and clang in C23 mode do (bool, not _Bool), and
@@ -731,6 +743,10 @@ struct TypeNames
 // unnamed tag's row, `(unnamed struct at file:line:col)`, then carries its kind itself).
 #define BUSTER_TYPE_PRINT_C23 0x01
 #define BUSTER_TYPE_PRINT_NO_TAG_KEYWORD 0x02
+// BUSTER_TYPE_PRINT_CANONICAL_CC spells a calling convention as clang's canonical function type does (printFunctionAfter,
+// #1447): an a.k.a.'s or a macro's (`intel_ocl_bicc`, and swiftasynccall without its space), where the attribute a
+// declaration wrote prints by its AttributedType (`inteloclbicc`).
+#define BUSTER_TYPE_PRINT_CANONICAL_CC 0x04
 
 // At most how many bytes type_initialize pushes from its arena for `capacity`, and how many the index arena needs to
 // grow to the largest index those types can use.
@@ -3574,6 +3590,41 @@ static bool type_enum_complete(TypeTable* table, TypeId enumeration, TypeId unde
     return error == TYPE_ERROR_NONE;
 }
 
+// A fixed enum's aligned attribute after its body (#1447), where nothing has asked its layout since its completion at the
+// body's `{`: clang applies it then (ASTContext::getTypeInfo of an enum takes its declaration's largest alignment, and
+// memoizes it at the first query, which the caller rules out). The completion's record, the table's last ENUM of the
+// tag, takes the alignment too, so that a replay completes it so from the start, which nothing could tell apart.
+static __attribute__((unused)) bool type_enum_realign(TypeTable* table, TypeId enumeration, uint8_t alignment_log2)
+{
+    const bool valid = type_is_valid(table, enumeration) && type_kind(table, enumeration) == BUSTER_TYPE_KIND_ENUM && type_is_complete(table, enumeration) &&
+                       alignment_log2 != 0 && alignment_log2 <= BUSTER_TYPE_MAX_ALIGNMENT_LOG2 + 1;
+    if (valid)
+    {
+        const uint32_t index = type_index(enumeration);
+        const uint32_t tag = table->types.index[index];
+        table->types.alignment_log2[index] = (uint8_t)(alignment_log2 - 1);
+        table->tags.alignment_log2[tag] = alignment_log2;
+        TypeChanges* changes = table->changes;
+        bool amended = changes == 0 || changes->full;
+        for (uint32_t i = amended ? 0 : changes->count; !amended && i-- > 0;)
+        {
+            TypeChange* change = changes->items + i;
+            amended = change->operation == BUSTER_TYPE_CHANGE_ENUM && change->tag == tag;
+            change->alignment_log2 = amended ? alignment_log2 : change->alignment_log2;
+        }
+        // A record without the completion can't be replayed.
+        if (!amended)
+        {
+            changes->full = true;
+        }
+    }
+    else
+    {
+        type_set_error(table, TYPE_ERROR_ALIGNMENT);
+    }
+    return valid;
+}
+
 // The lookup: through each record's own lookup, a scan or a probe of its index, which gives the member that finds the
 // name, and into that member's record when it is an anonymous member, until a named member has the name. Each step goes
 // into a record that was complete before the record that holds it was defined, so there are never more steps than
@@ -6043,6 +6094,9 @@ struct TypePrinter
     uint32_t aliased_count;
     uint32_t frames_typed;
     uint32_t step;
+    // A qualified array level's qualifiers, which its element takes where a sugar alias names the qualified element
+    // (type_print_element_qualifiers): the array kind's BEFORE and AFTER push that element.
+    uint32_t element_qualifiers;
 };
 
 // The output's bytes, pushed in order so that they stay contiguous.
@@ -6094,6 +6148,19 @@ static void type_print_space(TypePrinter* printer)
 
 // Qualifiers::print: AppendTypeQualList, in C99 and later (restrict spelled as such), then the extended qualifiers
 // (#1447): an OpenCL address space by its keyword, a target's as its attribute, and the garbage collection qualifier.
+// The space macro (TypeNames.space_macro_spaces) of a level's extended qualifiers, or UINT32_MAX.
+static uint32_t type_print_space_macro(const TypePrinter* printer, uint32_t extended)
+{
+    const TypeNames* names = printer->names;
+    const uint32_t space = type_address_space(extended);
+    uint32_t result = UINT32_MAX;
+    for (uint32_t i = 0; space >= BUSTER_TYPE_SPACE_TARGET && names != 0 && result == UINT32_MAX && i < names->space_macro_count; i += 1)
+    {
+        result = names->space_macro_spaces[i] == space ? i : UINT32_MAX;
+    }
+    return result;
+}
+
 static void type_print_qualifiers(TypePrinter* printer, uint32_t qualifiers, uint32_t extended)
 {
     const char* names[3] = {
@@ -6125,7 +6192,12 @@ static void type_print_qualifiers(TypePrinter* printer, uint32_t qualifiers, uin
     if (space != BUSTER_TYPE_SPACE_DEFAULT)
     {
         type_print_text(printer, first ? "" : " ");
-        if (space >= BUSTER_TYPE_SPACE_TARGET)
+        const uint32_t macro = type_print_space_macro(printer, extended);
+        if (macro != UINT32_MAX)
+        {
+            type_print_bytes(printer, printer->names->space_macro_texts[macro].pointer, printer->names->space_macro_texts[macro].length);
+        }
+        else if (space >= BUSTER_TYPE_SPACE_TARGET)
         {
             type_print_text(printer, "__attribute__((address_space(");
             type_print_number(printer, space - BUSTER_TYPE_SPACE_TARGET);
@@ -6210,6 +6282,28 @@ static uint32_t type_print_sugar(const TypePrinter* printer, TypeId type, uint32
         sugar = *whole != UINT32_MAX ? *whole : type_print_alias(names, unqualified);
     }
     return sugar;
+}
+
+// The qualifiers a qualified array level (`type`, not ALIGNED) leaves to its element, as clang's array types keep them
+// (#1447): where a sugar alias names that element with them, the typedef `CI` of `CI a[2]` or `CI b[2][3]` (`const int`), which the
+// array's `const int[2]` would otherwise print as `const int[2]`; 0 where none does, or the level has extended
+// qualifiers, which stay as they print.
+static uint32_t type_print_element_qualifiers(const TypePrinter* printer, TypeId type)
+{
+    const TypeTable* table = printer->table;
+    const uint32_t qualifiers = type_qualifiers(type);
+    const bool array = qualifiers != 0 && type_kind_is_array(type_kind(table, type)) && type_extended_qualifiers(table, type) == 0;
+    // Through the arrays of a multidimensional one (`CI b[2][3]`), whose element arrays pass them on in turn.
+    TypeId element = array && printer->names != 0 ? type_element(table, type) : 0;
+    bool named = false;
+    for (uint32_t depth = 0; !named && depth < 64 && element != 0; depth += 1)
+    {
+        uint32_t whole = UINT32_MAX;
+        named = type_print_sugar(printer, element, &whole) != UINT32_MAX;
+        const bool deeper = !named && type_kind_is_array(type_kind(table, element)) && type_extended_qualifiers(table, element) == 0;
+        element = deeper ? type_element(table, element) : 0;
+    }
+    return named ? qualifiers : 0;
 }
 
 // Whether an alias named a level, which then has no suffix of its own: by type, or by place, the level `step` whose
@@ -6397,7 +6491,7 @@ static void type_print_before_kind(TypePrinter* printer, TypeId type)
     }
     else if (type_kind_is_array(kind) || kind == BUSTER_TYPE_KIND_EXT_VECTOR)
     {
-        type_print_push(printer, BUSTER_TYPE_PRINT_BEFORE, base, false, false, printer->step + 1);
+        type_print_push(printer, BUSTER_TYPE_PRINT_BEFORE, base | printer->element_qualifiers, false, false, printer->step + 1);
     }
     else if (kind == BUSTER_TYPE_KIND_FUNCTION)
     {
@@ -6463,9 +6557,21 @@ static void type_print_after_kind(TypePrinter* printer, TypeId type)
         }
         else
         {
-            type_print_text(printer, kind == BUSTER_TYPE_KIND_VARIABLE_ARRAY && table->types.extent[index] == 0 ? "[*]" : "[]");
+            const uint64_t extent = table->types.extent[index];
+            const TypeNames* names = printer->names;
+            uint32_t bound = UINT32_MAX;
+            for (uint32_t i = 0; kind == BUSTER_TYPE_KIND_VARIABLE_ARRAY && extent != 0 && names != 0 && bound == UINT32_MAX && i < names->bound_count; i += 1)
+            {
+                bound = names->bound_ids[i] == extent ? i : UINT32_MAX;
+            }
+            type_print_text(printer, kind == BUSTER_TYPE_KIND_VARIABLE_ARRAY && extent == 0 ? "[*]" : bound != UINT32_MAX ? "[" : "[]");
+            if (bound != UINT32_MAX)
+            {
+                type_print_bytes(printer, names->bound_texts[bound].pointer, names->bound_texts[bound].length);
+                type_print_text(printer, "]");
+            }
         }
-        type_print_push(printer, BUSTER_TYPE_PRINT_AFTER, base, false, false, printer->step + 1);
+        type_print_push(printer, BUSTER_TYPE_PRINT_AFTER, base | printer->element_qualifiers, false, false, printer->step + 1);
     }
     else if (kind == BUSTER_TYPE_KIND_FUNCTION)
     {
@@ -6562,28 +6668,44 @@ static void type_print_step(TypePrinter* printer, TypePrintFrame frame)
         }
         else
         {
-            const uint32_t qualifiers = type_qualifiers(type);
-            const bool prefix = type_print_can_prefix(table, type);
-            if (prefix && (qualifiers | extended) != 0)
+            // A qualified array whose element an alias names leaves its qualifiers to that element.
+            const uint32_t delegated = type_print_element_qualifiers(printer, type);
+            const uint32_t qualifiers = type_qualifiers(type) & ~delegated;
+            // A space a macro writes names the level by the macro, before it, and its other qualifiers follow it, as
+            // clang's MacroQualifiedType prints (`'AS1 int const *'`, `int *AS1 *`'s `'AS1 int **'`).
+            const uint32_t macro = type_print_space_macro(printer, extended);
+            if (macro != UINT32_MAX)
             {
-                type_print_qualifiers(printer, qualifiers, extended);
+                type_print_bytes(printer, printer->names->space_macro_texts[macro].pointer, printer->names->space_macro_texts[macro].length);
                 type_print_text(printer, " ");
             }
-            const bool after = !prefix && (qualifiers | extended) != 0;
+            const uint32_t shown = macro != UINT32_MAX ? extended & ~BUSTER_TYPE_SPACE_MASK : extended;
+            const bool prefix = macro == UINT32_MAX && type_print_can_prefix(table, type);
+            if (prefix && (qualifiers | shown) != 0)
+            {
+                type_print_qualifiers(printer, qualifiers, shown);
+                type_print_text(printer, " ");
+            }
+            const bool after = !prefix && (qualifiers | shown) != 0;
             type_print_push(printer, BUSTER_TYPE_PRINT_BEFORE_END, spelled, printer->empty, after, 0);
             if (after)
             {
                 printer->empty = false;
             }
             printer->step = frame.step;
+            printer->element_qualifiers = delegated;
             type_print_before_kind(printer, unqualified);
+            printer->element_qualifiers = 0;
         }
     }
     else if (frame.operation == BUSTER_TYPE_PRINT_BEFORE_END)
     {
         if (frame.after)
         {
-            type_print_qualifiers(printer, type_qualifiers(frame.type), type_extended_qualifiers(table, frame.type));
+            // A macro's level (BEFORE) prints its qualifiers after its specifier, without its space.
+            const uint32_t extended = type_extended_qualifiers(table, frame.type);
+            const bool macro = type_print_space_macro(printer, extended) != UINT32_MAX;
+            type_print_qualifiers(printer, type_qualifiers(frame.type), macro ? extended & ~BUSTER_TYPE_SPACE_MASK : extended);
             if (!frame.saved)
             {
                 type_print_text(printer, " ");
@@ -6607,7 +6729,11 @@ static void type_print_step(TypePrinter* printer, TypePrintFrame frame)
         if (!aliased)
         {
             printer->step = frame.step;
+            // (By place, the element's AFTER asks after its BEFORE's step, and the place has moved on since.)
+            const bool by_type = printer->names != 0 && printer->names->alias_order == 0;
+            printer->element_qualifiers = by_type ? type_print_element_qualifiers(printer, type) : 0;
             type_print_after_kind(printer, unqualified);
+            printer->element_qualifiers = 0;
         }
     }
     else if (frame.operation == BUSTER_TYPE_PRINT_POINTER_END)
@@ -6683,10 +6809,11 @@ static void type_print_step(TypePrinter* printer, TypePrintFrame frame)
         };
         _Static_assert(sizeof(spellings) / sizeof(spellings[0]) == TYPE_FUNCTION_ABI_COUNT, "every convention has a spelling");
         const TypeFunctionABI abi = type_function_abi_kind(table, frame.type);
+        const bool canonical = (printer->options & BUSTER_TYPE_PRINT_CANONICAL_CC) != 0;
         if ((uint32_t)abi < sizeof(spellings) / sizeof(spellings[0]))
         {
-            type_print_text(printer, " __attribute__((");
-            type_print_text(printer, spellings[abi]);
+            type_print_text(printer, canonical && abi == TYPE_FUNCTION_ABI_SWIFT_ASYNC ? "__attribute__((" : " __attribute__((");
+            type_print_text(printer, canonical && abi == TYPE_FUNCTION_ABI_INTEL_OCL ? "intel_ocl_bicc" : spellings[abi]);
             type_print_text(printer, "))");
         }
     }

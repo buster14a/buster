@@ -10,7 +10,7 @@
 #include <inttypes.h>
 #include <sys/mman.h>
 #include <unistd.h>
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_TYPES
 _Static_assert(__builtin_bswap16(0x1234) == 0x3412, "Clang bswap16 fold");
 _Static_assert(__builtin_bswap32(0x12345678) == 0x78563412, "Clang bswap32 fold");
 _Static_assert(__builtin_bswap64(UINT64_C(0x123456789abcdef0)) == UINT64_C(0xf0debc9a78563412), "Clang bswap64 fold");
@@ -33,7 +33,7 @@ struct CBuiltinTestRows
     uint32_t overflow[2][BUSTER_CBUILTIN_TEST_ROWS];
     uint32_t status[2][BUSTER_CBUILTIN_TEST_ROWS];
 };
-
+#endif
 static uint64_t cbuiltin_test_random(uint64_t* state)
 {
     *state ^= *state << 13;
@@ -164,7 +164,7 @@ static uint64_t cbuiltin_test_bits(uint32_t id, uint64_t a)
     }
     return value;
 }
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_TYPES
 static bool cbuiltin_test_check(CBuiltinIntegers input, CBuiltinIntegerResults scalar, CBuiltinIntegerResults vector, uint32_t count)
 {
     cbuiltin_fold_scalar(input, scalar, count);
@@ -509,3 +509,4 @@ static int run_builtin_tests(int argc, char** argv)
     }
     return passed ? 0 : 1;
 }
+#endif

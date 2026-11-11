@@ -30,12 +30,37 @@ static const char* check_driver_warning_error_prefix(bool promoted)
     return result;
 }
 
+// A grouped diagnose_if's warning group (#1447, CHECK_WARNING_EVENT_DIAGNOSE_IF's payload.data), its index in
+// pp_features_warning, or UINT32_MAX.
+static uint32_t check_driver_warning_group(const CheckWarningEvent* event)
+{
+    const uint32_t group = event->kind == CHECK_WARNING_EVENT_DIAGNOSE_IF ? event->payload.data & ~BUSTER_CHECK_WARNING_GROUP_ERROR : 0;
+    return group != 0 ? group - 1 : UINT32_MAX;
+}
+
 static CheckWarningSeverity check_driver_warning_severity(Preprocessor* pp, const CheckInput* input, const CheckWarningEvent* event)
 {
-    const CheckWarningCommandLine command = check_warning_command_line(&pp->options, event->id,
-        (event->flags & BUSTER_CHECK_WARNING_DEFAULT_IGNORED) != 0, false);
-    CheckWarningSeverity severity = command.quiet || (event->flags & BUSTER_CHECK_WARNING_SUPPRESSED) != 0 ? CHECK_WARNING_IGNORE :
-        check_diagnostic_severity_id_from(input, event->token, event->source, event->id, command.severity);
+    const uint32_t group = check_driver_warning_group(event);
+    bool errors = false;
+    const CheckWarningCommandLine command = group != UINT32_MAX ?
+        check_warning_group_command_line(&pp->options, group, (event->payload.data & BUSTER_CHECK_WARNING_GROUP_ERROR) != 0, &errors) :
+        check_warning_command_line(&pp->options, event->id, (event->flags & BUSTER_CHECK_WARNING_DEFAULT_IGNORED) != 0, false);
+    CheckWarningSeverity severity = CHECK_WARNING_IGNORE;
+    if (group != UINT32_MAX && (event->flags & BUSTER_CHECK_WARNING_SUPPRESSED) == 0)
+    {
+        // clang's custom diagnostic of that group: its pragma, then -w on all but an error by default that is still one,
+        // -Werror on a warning, and -Wfatal-errors.
+        severity = check_diagnostic_group_severity_from(input, event->token, event->source, group, command.severity);
+        const bool default_error = (event->payload.data & BUSTER_CHECK_WARNING_GROUP_ERROR) != 0;
+        severity = command.quiet && (!default_error || severity == CHECK_WARNING_WARNING) ? CHECK_WARNING_IGNORE : severity;
+        severity = severity == CHECK_WARNING_WARNING && errors ? CHECK_WARNING_ERROR : severity;
+        severity = severity == CHECK_WARNING_ERROR && input->fatal_errors ? CHECK_WARNING_FATAL : severity;
+    }
+    else if (group == UINT32_MAX)
+    {
+        severity = command.quiet || (event->flags & BUSTER_CHECK_WARNING_SUPPRESSED) != 0 ? CHECK_WARNING_IGNORE :
+            check_diagnostic_severity_id_from(input, event->token, event->source, event->id, command.severity);
+    }
     if (severity != CHECK_WARNING_IGNORE && !command.system_headers)
     {
         bool system = check_graph_system_token(&input->graph, event->token);
@@ -54,6 +79,19 @@ static String8 check_driver_warning_name(const Preprocessor* pp, uint32_t name)
     const String8 result = name < pp->table->count ? (String8){ .pointer = (char*)intern_bytes(pp->table, name), .length = intern_length(pp->table, name) } :
                                                                   (String8){ 0 };
     return result;
+}
+
+// The name a use at `token` took, where its spelling `name` is a typo's that the reader corrected (#1447,
+// CHECK_INPUT_UNDECLARED_CORRECTED): its declaration's, as clang's diagnostics after the correction spell it. Only a
+// unit with an error report has a correction, so a valid unit's warnings read nothing more.
+static uint32_t check_driver_corrected_name(const Parser* parser, const CheckInput* input, uint32_t token, uint32_t name)
+{
+    const uint32_t count = parser->tokens.count;
+    const bool use = input->report_count != 0 && token < count && token < input->token_count && parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER &&
+                     parser->tokens.names[token] == name;
+    const uint32_t declaration = use ? input->declarations[token] : BUSTER_CHECK_NONE;
+    const bool corrected = declaration < count && parser->tokens.kinds[declaration] == PARSE_KIND_IDENTIFIER && parser->tokens.names[declaration] != name;
+    return corrected ? parser->tokens.names[declaration] : name;
 }
 
 // A string token's complete spelling in scratch, including its quotes and encoding prefix.
@@ -131,6 +169,12 @@ struct CheckWarningSpelling
     uint32_t count;
     String8* anonymous;
     uint32_t anonymous_count;
+    // The target address spaces a macro writes throughout the unit (check_driver_space_macros, #1447).
+    uint32_t* space_macro_spaces;
+    String8* space_macro_texts;
+    uint32_t space_macro_count;
+    // The macro that writes each calling convention throughout the unit, by TypeFunctionABI (check_driver_convention_macros).
+    String8 convention_macros[TYPE_FUNCTION_ABI_COUNT];
     bool built;
 };
 
@@ -249,6 +293,201 @@ static bool check_driver_spelling_build(const Parser* parser, Preprocessor* pp, 
     return valid;
 }
 
+// c_check_semantic_diagnostic.c's, included after this file.
+static String8 check_semantic_token(const Parser* parser, Preprocessor* pp, uint32_t token, Arena* scratch);
+
+// The distinct spaces a unit's map holds; a space past them keeps its attribute spelled out.
+#define BUSTER_CHECK_DRIVER_SPACE_MACROS 16
+
+// The outermost macro expansion a token's origin comes from (its PPExpansion's index plus one), through the macros
+// expanded inside others; 0 for a token the source wrote or a generated one.
+static uint32_t check_driver_macro_root(const Preprocessor* pp, uint32_t origin)
+{
+    uint32_t result = 0;
+    for (uint32_t steps = 0; origin != 0 && steps < 256; steps += 1)
+    {
+        const uint32_t index = (origin & BUSTER_PP_ORIGIN_INDEX) - 1;
+        const uint32_t kind = origin & ~BUSTER_PP_ORIGIN_INDEX;
+        result = kind == 0 ? index + 1 : kind == BUSTER_PP_ORIGIN_ARGUMENT ? result : 0;
+        origin = kind == 0 ? pp->history[index].parent : kind == BUSTER_PP_ORIGIN_ARGUMENT ? pp->substitutions[index].source : 0;
+    }
+    return result;
+}
+
+// The macro that writes an `__attribute__` list (#1447: `t` its keyword, `close` its last `)`), as clang's parser names one
+// for a MacroQualifiedType (FindLocsWithCommonFileID): the list is a whole expansion, its `__attribute__` that
+// expansion's first token and its `)` the last, and not spelled in the predefines (`__seg_gs`, isWrittenInBuiltinFile).
+// An object-like macro by its name, a function-like one by its invocation as written, the outermost where macros nest;
+// empty for none. The caller has ensured the token histories.
+static String8 check_driver_attribute_macro(const Parser* parser, Preprocessor* pp, uint32_t t, uint32_t close)
+{
+    const uint32_t first = parser->tokens.sources[t];
+    const uint32_t last = parser->tokens.sources[close];
+    const uint32_t root = check_driver_macro_root(pp, pp_history_at(pp, first));
+    const uint32_t range = root != 0 && first < pp->output.count ? pp_find_range(pp, pp->output.locations[first]) : BUSTER_PP_NONE;
+    const bool builtin = range != BUSTER_PP_NONE && pp->files[pp->ranges[range].file].data == pp->predefines_data;
+    const bool whole = root != 0 && !builtin && last < pp->output.count && root == check_driver_macro_root(pp, pp_history_at(pp, last)) &&
+                       (first == 0 || check_driver_macro_root(pp, pp_history_at(pp, first - 1)) != root) &&
+                       (last + 1 >= pp->output.count || check_driver_macro_root(pp, pp_history_at(pp, last + 1)) != root);
+    const PPExpansion* expansion = whole ? &pp->history[root - 1] : NULL;
+    const bool invocation = expansion != NULL && expansion->end > expansion->begin && pp_find_range(pp, expansion->begin) == pp_find_range(pp, expansion->end);
+    const uint8_t* bytes = invocation ? pp_location_bytes(pp, expansion->begin) : NULL;
+    return bytes != NULL ? (String8){ .pointer = (char*)bytes, .length = (uint64_t)(expansion->end - expansion->begin) + 1 } :
+           expansion != NULL ? check_driver_warning_name(pp, expansion->name) : (String8){ 0 };
+}
+
+// The macros that write the unit's target address spaces (#1447), as clang's MacroQualifiedType names a type whose
+// attribute list one macro's expansion wrote (`#define AS1 __attribute__((address_space(1)))`, `'AS1 int *'`,
+// check_driver_attribute_macro). clang names each declaration's own spelling; a space this unit writes both ways, or
+// with two macros, keeps its attribute spelled out, and every space does where an operand isn't an integer constant
+// this reads (`address_space(1+0)`), whose space could be any one. One scan of the `__attribute__` tokens, with the
+// pass's other spelling rows (check_driver_spelling_ready).
+static bool check_driver_space_macros(const Parser* parser, Preprocessor* pp, CheckWarningSpelling* spell, Arena* scratch)
+{
+    uint32_t* spaces = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, BUSTER_CHECK_DRIVER_SPACE_MACROS);
+    String8* texts = spaces != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, String8, BUSTER_CHECK_DRIVER_SPACE_MACROS) : NULL;
+    bool* mixed = texts != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, bool, BUSTER_CHECK_DRIVER_SPACE_MACROS) : NULL;
+    const bool valid = mixed != NULL;
+    // The token histories only where an `address_space` attribute is written at all: most units have none.
+    bool written = false;
+    for (uint32_t t = 0; valid && !written && t < parser->tokens.count; t += 1)
+    {
+        const String8 name = parser->tokens.kinds[t] == PARSE_KIND_IDENTIFIER ? check_driver_warning_name(pp, parser->tokens.names[t]) : (String8){ 0 };
+        written = (name.length == 13 && memcmp(name.pointer, "address_space", 13) == 0) ||
+                  (name.length == 17 && memcmp(name.pointer, "__address_space__", 17) == 0);
+    }
+    const bool history = written && pp_history_ensure(pp);
+    uint32_t count = 0;
+    bool unreadable = false;
+    const uint32_t token_count = parser->tokens.count;
+    for (uint32_t t = 0; history && t + 1 < token_count; t += 1)
+    {
+        const uint32_t close = parser->tokens.kinds[t] == PARSE_KIND_ATTRIBUTE && parser->tokens.kinds[t + 1] == PARSE_KIND_L_PAREN ? parser->tree.parents[t + 1] :
+                               BUSTER_CHECK_NONE;
+        for (uint32_t a = t + 2; close < token_count && a + 3 < close; a += 1)
+        {
+            const String8 name = parser->tokens.kinds[a] == PARSE_KIND_IDENTIFIER ? check_driver_warning_name(pp, parser->tokens.names[a]) : (String8){ 0 };
+            const bool space = (name.length == 13 && memcmp(name.pointer, "address_space", 13) == 0) ||
+                               (name.length == 17 && memcmp(name.pointer, "__address_space__", 17) == 0);
+            const String8 number = space && parser->tokens.kinds[a + 1] == PARSE_KIND_L_PAREN && parser->tokens.kinds[a + 2] == PARSE_KIND_NUMBER &&
+                                   parser->tokens.kinds[a + 3] == PARSE_KIND_R_PAREN ? check_semantic_token(parser, pp, a + 2, scratch) : (String8){ 0 };
+            char digits[24] = { 0 };
+            const bool read = number.length != 0 && number.length < sizeof(digits);
+            if (read)
+            {
+                memcpy(digits, number.pointer, number.length);
+            }
+            char* end = NULL;
+            const unsigned long long value = read ? strtoull(digits, &end, 0) : 0;
+            // An integer suffix (`1u`, `1UL`) is the same constant.
+            while (read && end != NULL && (*end == 'u' || *end == 'U' || *end == 'l' || *end == 'L'))
+            {
+                end += 1;
+            }
+            const bool constant = read && end != NULL && *end == 0 && value <= BUSTER_TYPE_SPACE_MASK - BUSTER_TYPE_SPACE_TARGET;
+            // Any other operand (`1+0`, a named constant) may write any space directly: no macro names one then.
+            unreadable |= space && !constant;
+            if (constant)
+            {
+                const uint32_t word = BUSTER_TYPE_SPACE_TARGET + (uint32_t)value;
+                const String8 text = check_driver_attribute_macro(parser, pp, t, close);
+                uint32_t entry = count;
+                for (uint32_t i = 0; entry == count && i < count; i += 1)
+                {
+                    entry = spaces[i] == word ? i : count;
+                }
+                if (entry == count && count < BUSTER_CHECK_DRIVER_SPACE_MACROS)
+                {
+                    spaces[count] = word;
+                    texts[count] = text;
+                    mixed[count] = text.length == 0;
+                    count += 1;
+                }
+                else if (entry < count)
+                {
+                    mixed[entry] |= text.length != texts[entry].length || (text.length != 0 && memcmp(text.pointer, texts[entry].pointer, text.length) != 0);
+                }
+            }
+        }
+    }
+    uint32_t kept = 0;
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        spaces[kept] = spaces[i];
+        texts[kept] = texts[i];
+        kept += mixed[i] ? 0 : 1;
+    }
+    spell->space_macro_spaces = spaces;
+    spell->space_macro_texts = texts;
+    spell->space_macro_count = unreadable ? 0 : kept;
+    return valid;
+}
+
+// A calling convention attribute's TypeFunctionABI by its name, `__name__` too; TYPE_FUNCTION_ABI_COUNT for none.
+static TypeFunctionABI check_driver_convention_name(String8 name)
+{
+    static const char* const names[] = {
+        "sysv_abi", "ms_abi", "vectorcall", "regcall", "preserve_most", "preserve_all", "preserve_none", "no_caller_saved_registers",
+        "intel_ocl_bicc", "swiftcall", "swiftasynccall",
+    };
+    _Static_assert(sizeof(names) / sizeof(names[0]) == TYPE_FUNCTION_ABI_COUNT, "every convention has a name");
+    const bool wrapped = name.length > 4 && memcmp(name.pointer, "__", 2) == 0 && memcmp(name.pointer + name.length - 2, "__", 2) == 0;
+    const char* bare = wrapped ? name.pointer + 2 : name.pointer;
+    const uint64_t length = wrapped ? name.length - 4 : name.length;
+    TypeFunctionABI result = TYPE_FUNCTION_ABI_COUNT;
+    for (uint32_t i = 0; result == TYPE_FUNCTION_ABI_COUNT && i < TYPE_FUNCTION_ABI_COUNT; i += 1)
+    {
+        result = strlen(names[i]) == length && memcmp(names[i], bare, length) == 0 ? (TypeFunctionABI)i : TYPE_FUNCTION_ABI_COUNT;
+    }
+    return result;
+}
+
+// The macros that write the unit's calling conventions (#1447), as clang names a function type by the macro its
+// convention's attribute list came from (MacroQualifiedType: `#define MS __attribute__((ms_abi))`,
+// `'MS void (void) __attribute__((ms_abi))'`; check_driver_attribute_macro). As for spaces, a convention this unit
+// writes both ways, or with two macros, has none, and none has one where a convention keyword (`__regcall`, which
+// clang names by no macro) is written at all. sysv_abi and no_caller_saved_registers aren't named: the type table
+// keeps no sysv_abi, and the other is no convention of clang's.
+static void check_driver_convention_macros(const Parser* parser, Preprocessor* pp, CheckWarningSpelling* spell)
+{
+    bool written = false;
+    bool keyword = false;
+    for (uint32_t t = 0; !keyword && t < parser->tokens.count; t += 1)
+    {
+        const uint8_t kind = parser->tokens.kinds[t];
+        keyword = kind == PARSE_KIND_CALLING_CONVENTION;
+        written |= kind == PARSE_KIND_IDENTIFIER && check_driver_convention_name(check_driver_warning_name(pp, parser->tokens.names[t])) < TYPE_FUNCTION_ABI_COUNT;
+    }
+    bool mixed[TYPE_FUNCTION_ABI_COUNT] = { 0 };
+    const bool history = written && !keyword && pp_history_ensure(pp);
+    const uint32_t token_count = parser->tokens.count;
+    for (uint32_t t = 0; history && t + 1 < token_count; t += 1)
+    {
+        const uint32_t close = parser->tokens.kinds[t] == PARSE_KIND_ATTRIBUTE && parser->tokens.kinds[t + 1] == PARSE_KIND_L_PAREN ? parser->tree.parents[t + 1] :
+                               BUSTER_CHECK_NONE;
+        String8 text = { 0 };
+        bool read = false;
+        for (uint32_t a = t + 2; close < token_count && a < close; a += 1)
+        {
+            const TypeFunctionABI abi = parser->tokens.kinds[a] == PARSE_KIND_IDENTIFIER ?
+                                        check_driver_convention_name(check_driver_warning_name(pp, parser->tokens.names[a])) : TYPE_FUNCTION_ABI_COUNT;
+            if (abi < TYPE_FUNCTION_ABI_COUNT)
+            {
+                text = read ? text : check_driver_attribute_macro(parser, pp, t, close);
+                read = true;
+                const String8 known = spell->convention_macros[abi];
+                mixed[abi] |= text.length == 0 || (known.length != 0 && (known.length != text.length || memcmp(known.pointer, text.pointer, text.length) != 0));
+                spell->convention_macros[abi] = text;
+            }
+        }
+    }
+    for (uint32_t i = 0; i < TYPE_FUNCTION_ABI_COUNT; i += 1)
+    {
+        const bool named = history && !mixed[i] && i != TYPE_FUNCTION_ABI_SYSV && i != TYPE_FUNCTION_ABI_NO_CALLER_SAVED;
+        spell->convention_macros[i] = named ? spell->convention_macros[i] : (String8){ 0 };
+    }
+}
+
 // One pass's spelling rows, built on its first rendered type (#992): a pass that renders none never scans the
 // token columns. A built pass keeps its rows until it ends, above every per-event mark.
 static bool check_driver_spelling_ready(const Parser* parser, Preprocessor* pp, const CheckInput* input, const TypeTable* types,
@@ -274,6 +513,15 @@ static bool check_driver_spelling_ready(const Parser* parser, Preprocessor* pp, 
         if (valid && unnamed)
         {
             valid = check_driver_spelling_build(parser, pp, input, types, spell, scratch);
+        }
+        // With the other rows, below every event's mark: a pass's later events read the map too (#1447).
+        if (valid)
+        {
+            valid = check_driver_space_macros(parser, pp, spell, scratch);
+        }
+        if (valid)
+        {
+            check_driver_convention_macros(parser, pp, spell);
         }
         if (!valid)
         {
@@ -412,10 +660,166 @@ static bool check_driver_warning_parentheses(const Parser* parser, const TypeTab
     return valid;
 }
 
+// The sugar a typeof specifier prints as (#1837), clang's TypePrinter's: `typeof(T)` (`typeof_unqual(T)`) with its operand
+// type T as clang prints it, a typedef name as written and a nested typeof as its own sugar; `typeof (x)` of an expression
+// that is one name. Empty where it can't tell (another expression, or a type name that spells a typedef inside it), which
+// prints no sugar. `keyword` is the typeof's keyword; `names` prints the operand's type, its aliases unused.
+static String8 check_driver_typeof_text(const Parser* parser, Preprocessor* pp, const CheckInput* input, const TypeTable* types, Arena* scratch,
+                                        const TypeNames* names, uint32_t keyword, uint32_t options)
+{
+    const uint32_t count = parser->tokens.count;
+    // The keywords from the outermost in, while each one's operand is exactly the next typeof.
+    uint32_t chain[8];
+    uint32_t depth = 0;
+    String8 inner = { 0 };
+    bool expression = false;
+    bool walking = keyword + 1 < count && parser->tokens.kinds[keyword + 1] == PARSE_KIND_L_PAREN;
+    while (walking && depth < BUSTER_ARRAY_LENGTH(chain))
+    {
+        chain[depth++] = keyword;
+        const uint32_t close = parser->tree.parents[keyword + 1];
+        const uint32_t first = keyword + 2;
+        walking = false;
+        const bool one = close < count && first + 1 == close;
+        const uint32_t resolved = one && parser->tokens.kinds[first] == PARSE_KIND_IDENTIFIER && input->declarations != NULL ? input->declarations[first] : 0;
+        const bool typedef_name = resolved != 0 && resolved < input->token_count && input->declaration_kinds[resolved] == C_BINDING_TYPEDEF;
+        const bool nested = close < count && first < close && parser->tokens.kinds[first] == PARSE_KIND_TYPEOF && check_input_typeof_name(parser->tokens.names[first]) &&
+                            first + 1 < close && parser->tokens.kinds[first + 1] == PARSE_KIND_L_PAREN && parser->tree.parents[first + 1] + 1 == close;
+        // A type name of keywords and tags alone: its type prints as clang prints it.
+        bool keywords = close < count && first < close;
+        for (uint32_t token = first; keywords && token < close; token += 1)
+        {
+            const uint8_t kind = parser->tokens.kinds[token];
+            keywords = kind == PARSE_KIND_TYPE || kind == PARSE_KIND_QUALIFIER || kind == PARSE_KIND_STRUCT || kind == PARSE_KIND_ENUM ||
+                       kind == PARSE_KIND_STAR || (kind == PARSE_KIND_ATOMIC && !(token + 1 < close && parser->tokens.kinds[token + 1] == PARSE_KIND_L_PAREN)) ||
+                       (kind == PARSE_KIND_IDENTIFIER && token > first && (parser->tokens.kinds[token - 1] == PARSE_KIND_STRUCT || parser->tokens.kinds[token - 1] == PARSE_KIND_ENUM));
+        }
+        if (typedef_name)
+        {
+            const uint32_t name = parser->tokens.names[first];
+            inner = (String8){ .pointer = (char*)intern_bytes(pp->table, name), .length = intern_length(pp->table, name) };
+        }
+        else if (one && parser->tokens.kinds[first] == PARSE_KIND_IDENTIFIER && resolved != 0)
+        {
+            const uint32_t name = parser->tokens.names[first];
+            inner = (String8){ .pointer = (char*)intern_bytes(pp->table, name), .length = intern_length(pp->table, name) };
+            expression = true;
+        }
+        else if (nested)
+        {
+            keyword = first;
+            walking = true;
+        }
+        else if (keywords && chain[0] < input->token_count && type_is_valid(types, input->declared_types[chain[0]]))
+        {
+            // The outermost keyword's type: a nested typeof's own is read by the constant reader, which records none, and
+            // is that one's.
+            inner = type_print(types, scratch, input->declared_types[chain[0]], (String8){ 0 }, names, options);
+        }
+    }
+    String8 result = { 0 };
+    const char* text = NULL;
+    if (inner.length != 0 && !walking)
+    {
+        // From the innermost out: `typeof(` ... `)`, the innermost `typeof (` for an expression.
+        text = check_warning_text(scratch, "%.*s", (int)inner.length, inner.pointer);
+        for (uint32_t level = depth; text != NULL && level > 0; level -= 1)
+        {
+            const uint32_t name = parser->tokens.names[chain[level - 1]];
+            const bool unqualified = name == C_NAME_TYPEOF_UNQUAL || name == C_NAME_GNU_TYPEOF_UNQUAL || name == C_NAME_GNU_TYPEOF_UNQUAL2;
+            const bool spaced = expression && level == depth;
+            text = check_warning_text(scratch, "%s%s(%s)", unqualified ? "typeof_unqual" : "typeof", spaced ? " " : "", text);
+        }
+    }
+    result = text != NULL ? (String8){ .pointer = (char*)text, .length = (uint64_t)strlen(text) } : (String8){ 0 };
+    return result;
+}
+
+// Whether `alias`, unqualified, is one of `type`'s levels, as type_print reaches them: the type itself, then through
+// pointers, arrays and functions' results to the specifier.
+static bool check_driver_spelling_level(const TypeTable* types, TypeId type, TypeId alias)
+{
+    const TypeId wanted = type_unqualified(type_strip_aligned(types, alias));
+    TypeId level = type;
+    bool found = false;
+    for (uint32_t depth = 0; !found && depth < 256 && level != 0 && type_is_valid(types, level); depth += 1)
+    {
+        const TypeId bare = type_unqualified(type_strip_aligned(types, level));
+        const uint8_t kind = type_kind(types, bare);
+        found = bare == wanted;
+        level = kind == BUSTER_TYPE_KIND_POINTER || kind == BUSTER_TYPE_KIND_FUNCTION || type_kind_is_array(kind) ? types->types.base[type_index(bare)] : 0;
+    }
+    return found;
+}
+
+// The typedef of `spelling`'s chain that names one of `type`'s levels (#1447), as clang's sugar keeps it through
+// dereferences and subscripts: a declaration's levels sit over its specifier's typedef, whose own levels sit over its
+// specifier's, and so on, so the first typedef along that chain whose type is a level of `type` is the one clang's type
+// names there (`*p` of a `pv p`, `typedef v4si *pv`, is `v4si`; `**b` of a `VPP b`, `typedef VP *VPP`, is `VP`). A
+// chain's types only shrink, so no later one can be a level above it. `spelling` where none is.
+static uint32_t check_driver_spelling_chain(const Parser* parser, const CheckInput* input, const TypeTable* types, TypeId type, uint32_t spelling)
+{
+    uint32_t result = spelling;
+    uint32_t at = spelling;
+    bool found = false;
+    for (uint32_t steps = 0; !found && at != 0 && at < input->token_count && steps < 64; steps += 1)
+    {
+        found = check_driver_spelling_level(types, type, input->declared_types[at]);
+        result = found ? at : result;
+        at = found ? at : check_input_typedef_spelling(input, parser, at);
+    }
+    return result;
+}
+
+// c_check_semantic_diagnostic.c's, included after this file.
+static const char* check_semantic_requirement(const Parser* parser, Preprocessor* pp, uint32_t first, uint32_t end, Arena* scratch);
+
+#define BUSTER_CHECK_DRIVER_VLA_BOUNDS 8
+
+// The size expressions of `type`'s variable array levels (#1447), through pointers, arrays and functions' results, as
+// clang prints them (`int (*)[n + 1]`): a VARIABLE_ARRAY's extent is its expression's first token plus one
+// (check_input_vla_bound), which ends at its `]`, spelled with expression spacing (check_semantic_requirement). At most
+// BUSTER_CHECK_DRIVER_VLA_BOUNDS; the rest print `[]`. Returns how many it wrote.
+static uint32_t check_driver_vla_bounds(const Parser* parser, Preprocessor* pp, const TypeTable* types, TypeId type, uint64_t* ids, String8* texts,
+                                        Arena* scratch)
+{
+    uint32_t count = 0;
+    TypeId level = type;
+    for (uint32_t depth = 0; depth < 256 && level != 0 && type_is_valid(types, level); depth += 1)
+    {
+        const TypeId bare = type_unqualified(type_strip_aligned(types, level));
+        const uint8_t kind = type_kind(types, bare);
+        const uint64_t extent = kind == BUSTER_TYPE_KIND_VARIABLE_ARRAY ? types->types.extent[type_index(bare)] : 0;
+        const uint32_t first = extent != 0 && extent - 1 < parser->tokens.count ? (uint32_t)(extent - 1) : BUSTER_CHECK_NONE;
+        uint32_t close = first;
+        uint32_t nesting = 0;
+        bool scanning = first != BUSTER_CHECK_NONE;
+        while (scanning && close < parser->tokens.count)
+        {
+            const uint8_t token = parser->tokens.kinds[close];
+            scanning = !(token == PARSE_KIND_R_SQUARE && nesting == 0);
+            nesting = token == PARSE_KIND_L_PAREN || token == PARSE_KIND_L_SQUARE || token == PARSE_KIND_L_BRACE ? nesting + 1 :
+                      (token == PARSE_KIND_R_PAREN || token == PARSE_KIND_R_SQUARE || token == PARSE_KIND_R_BRACE) && nesting != 0 ? nesting - 1 : nesting;
+            close += scanning ? 1 : 0;
+        }
+        const char* text = !scanning && first != BUSTER_CHECK_NONE && close > first && count < BUSTER_CHECK_DRIVER_VLA_BOUNDS ?
+                           check_semantic_requirement(parser, pp, first, close, scratch) : NULL;
+        if (text != NULL)
+        {
+            ids[count] = extent;
+            texts[count] = (String8){ .pointer = (char*)text, .length = strlen(text) };
+            count += 1;
+        }
+        level = kind == BUSTER_TYPE_KIND_POINTER || kind == BUSTER_TYPE_KIND_FUNCTION || type_kind_is_array(kind) ? types->types.base[type_index(bare)] : 0;
+    }
+    return count;
+}
+
 // A warning's type spelling (#992): `spelling` is the operand's typedef specifier's declaration, so the base's
 // specifier prints the typedef's name and clang's `(aka '...')` shows the type without that sugar; the sentinel
 // BUSTER_CHECK_NONE prints `__size_t` for a sizeof/alignof operand's own type. The anonymous map prints an
-// unnamed tag's typedef name or its `(unnamed at file:line:col)`.
+// unnamed tag's typedef name or its `(unnamed at file:line:col)`. Where the typedef's own type isn't one of the
+// type's levels, a typedef its own declaration spells may be (check_driver_spelling_chain).
 static String8 check_driver_warning_type_at(const Parser* parser, Preprocessor* pp, const CheckInput* input, const TypeTable* types,
                                             CheckWarningSpelling* spell, Arena* scratch, TypeId type, uint32_t spelling,
                                             uint32_t declaration, TypeId declared)
@@ -437,13 +841,21 @@ static String8 check_driver_warning_type_at(const Parser* parser, Preprocessor* 
         // The pass's columns live in `spell`, built on the pass's first rendered type below its marks (#992).
         else if (check_driver_spelling_ready(parser, pp, input, types, spell, scratch))
         {
+            uint64_t bound_ids[BUSTER_CHECK_DRIVER_VLA_BOUNDS];
+            String8 bound_texts[BUSTER_CHECK_DRIVER_VLA_BOUNDS];
             TypeNames names = {
                 .bytes = spell->bytes,
                 .lengths = spell->lengths,
                 .count = spell->count,
                 .anonymous = spell->anonymous,
                 .anonymous_count = spell->anonymous_count,
+                .bound_ids = bound_ids,
+                .bound_texts = bound_texts,
+                .bound_count = check_driver_vla_bounds(parser, pp, types, type, bound_ids, bound_texts, scratch),
             };
+            names.space_macro_spaces = spell->space_macro_spaces;
+            names.space_macro_texts = spell->space_macro_texts;
+            names.space_macro_count = spell->space_macro_count;
             TypeId alias_type = 0;
             String8 alias_name = { 0 };
             if (spelling == BUSTER_CHECK_NONE)
@@ -451,8 +863,18 @@ static String8 check_driver_warning_type_at(const Parser* parser, Preprocessor* 
                 alias_type = type_unqualified(type_strip_aligned(types, type));
                 alias_name = BUSTER_S8("__size_t");
             }
+            else if (spelling != 0 && input != NULL && input->declared_types != NULL && spelling < input->token_count &&
+                     parser->tokens.kinds[spelling] == PARSE_KIND_TYPEOF)
+            {
+                // A typeof specifier's sugar (#1837): its type prints as `typeof(...)`.
+                const TypeId declared = input->declared_types[spelling];
+                const uint32_t options = pp->options.language.standard >= 2023 ? BUSTER_TYPE_PRINT_C23 : 0;
+                alias_name = type_is_valid(types, declared) ? check_driver_typeof_text(parser, pp, input, types, scratch, &names, spelling, options) : (String8){ 0 };
+                alias_type = alias_name.length != 0 ? declared : 0;
+            }
             else if (spelling != 0 && input != NULL && input->declared_types != NULL && spelling < input->token_count)
             {
+                spelling = check_driver_spelling_chain(parser, input, types, type, spelling);
                 const TypeId declared = input->declared_types[spelling];
                 const uint32_t name = spelling < parser->tokens.count ? parser->tokens.names[spelling] : spell->count;
                 if (type_is_valid(types, declared) && name < spell->count)
@@ -469,19 +891,53 @@ static String8 check_driver_warning_type_at(const Parser* parser, Preprocessor* 
                 names.alias_count = 1;
             }
             const bool contextual = check_driver_warning_parentheses(parser, types, declaration, declared, scratch, &names);
-            const String8 sugared = contextual ? type_print(types, scratch, type, (String8){ 0 }, &names, options) : (String8){ 0 };
+            // A calling convention one macro writes names the type by the macro, before the canonical spelling clang's
+            // MacroQualifiedType prints under it (`'MS void (void) __attribute__((ms_abi))'`, #1447): the first function
+            // level's, through pointers and arrays.
+            TypeId level = type;
+            TypeFunctionABI abi = TYPE_FUNCTION_ABI_COUNT;
+            for (uint32_t depth = 0; abi == TYPE_FUNCTION_ABI_COUNT && depth < 64 && level != 0 && type_is_valid(types, level); depth += 1)
+            {
+                const TypeId bare = type_unqualified(type_strip_aligned(types, level));
+                const uint8_t kind = type_kind(types, bare);
+                abi = kind == BUSTER_TYPE_KIND_FUNCTION ? type_function_abi_kind(types, bare) : TYPE_FUNCTION_ABI_COUNT;
+                level = kind == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(kind) ? types->types.base[type_index(bare)] : 0;
+            }
+            const String8 convention = abi < TYPE_FUNCTION_ABI_COUNT && alias_type == 0 ? spell->convention_macros[abi] : (String8){ 0 };
+            const uint32_t sugar_options = convention.length != 0 ? options | BUSTER_TYPE_PRINT_CANONICAL_CC : options;
+            String8 sugared = contextual ? type_print(types, scratch, type, (String8){ 0 }, &names, sugar_options) : (String8){ 0 };
+            const char* macro_named = sugared.length != 0 && convention.length != 0 ?
+                                      check_warning_text(scratch, "%.*s %.*s", (int)convention.length, convention.pointer, (int)sugared.length, sugared.pointer) : NULL;
+            sugared = macro_named != NULL ? (String8){ .pointer = (char*)macro_named, .length = strlen(macro_named) } : sugared;
+            // A function designator's own preserve_* convention prints before it, as its AttributedType's
+            // printAttributedBefore puts it (`'__attribute__((preserve_most)) void (void)'`): a function's convention is
+            // the last thing its type prints.
+            const uint8_t top = type_is_valid(types, type) ? type_kind(types, type_unqualified(type_strip_aligned(types, type))) : BUSTER_TYPE_KIND_NONE;
+            const char* preserve = convention.length == 0 && top == BUSTER_TYPE_KIND_FUNCTION ?
+                                   (abi == TYPE_FUNCTION_ABI_PRESERVE_MOST ? "preserve_most" : abi == TYPE_FUNCTION_ABI_PRESERVE_ALL ? "preserve_all" :
+                                    abi == TYPE_FUNCTION_ABI_PRESERVE_NONE ? "preserve_none" : NULL) : NULL;
+            const char* suffix = preserve != NULL ? check_warning_text(scratch, " __attribute__((%s))", preserve) : NULL;
+            const uint64_t suffix_length = suffix != NULL ? strlen(suffix) : 0;
+            const bool trailing = suffix != NULL && sugared.length > suffix_length &&
+                                  memcmp(sugared.pointer + sugared.length - suffix_length, suffix, suffix_length) == 0;
+            const char* moved = trailing ? check_warning_text(scratch, "__attribute__((%s)) %.*s", preserve, (int)(sugared.length - suffix_length), sugared.pointer) :
+                                NULL;
+            sugared = moved != NULL ? (String8){ .pointer = (char*)moved, .length = strlen(moved) } : sugared;
             String8 canonical = { 0 };
             // clang's desugaring stops at a vector type's own typedef, the one whose underlying type is the vector
-            // (desugarForDiagnostic: "People want their vec4"): a typedef of that typedef's a.k.a. is that one's name,
-            // and that one has none. The chain of typedef specifiers from the alias's declaration leads to it.
-            const uint8_t alias_kind = alias_type != 0 ? type_kind(types, type_strip_aligned(types, alias_type)) : 0;
-            uint32_t vector_name = alias_kind == BUSTER_TYPE_KIND_VECTOR || alias_kind == BUSTER_TYPE_KIND_EXT_VECTOR ? spelling : 0;
-            for (uint32_t steps = 0; vector_name != 0 && steps < 64; steps += 1)
+            // (desugarForDiagnostic: "People want their vec4"), at any level (#1447): a typedef of that typedef's
+            // a.k.a. is that one's name, a pointer typedef's (`typedef v4si *pv`) keeps it at the pointee
+            // (`'pv' (aka 'v4si *')`), and that one has none. It is the last vector typedef along the chain of
+            // typedef specifiers from the alias's declaration.
+            // (A typeof's sugar has no typedef chain, #1837.)
+            const bool typeof_spelling = spelling != BUSTER_CHECK_NONE && spelling < parser->tokens.count && parser->tokens.kinds[spelling] == PARSE_KIND_TYPEOF;
+            uint32_t vector_name = 0;
+            uint32_t chain = alias_type != 0 && spelling != BUSTER_CHECK_NONE && !typeof_spelling ? spelling : 0;
+            for (uint32_t steps = 0; chain != 0 && chain < input->token_count && steps < 64; steps += 1)
             {
-                const uint32_t inner = check_input_typedef_spelling(input, parser, vector_name);
-                const bool same = inner != 0 && inner < input->token_count && input->declared_types[inner] == alias_type;
-                vector_name = same ? inner : vector_name;
-                steps = same ? steps : 64;
+                const uint8_t kind = type_kind(types, type_strip_aligned(types, input->declared_types[chain]));
+                vector_name = kind == BUSTER_TYPE_KIND_VECTOR || kind == BUSTER_TYPE_KIND_EXT_VECTOR ? chain : vector_name;
+                chain = check_input_typedef_spelling(input, parser, chain);
             }
             TypeId vector_type = vector_name != 0 ? input->declared_types[vector_name] : 0;
             const uint32_t vector_identifier = vector_name != 0 ? parser->tokens.names[vector_name] : 0;
@@ -501,18 +957,25 @@ static String8 check_driver_warning_type_at(const Parser* parser, Preprocessor* 
                                      types->types.index[type_index(alias_tag)] : names.anonymous_count;
                 const bool naming = tag < names.anonymous_count && names.anonymous[tag].length == alias_name.length &&
                                     memcmp(names.anonymous[tag].pointer, alias_name.pointer, alias_name.length) == 0;
-                expand.anonymous_keyword = spelling != BUSTER_CHECK_NONE && !naming && check_input_typedef_spelling(input, parser, spelling) == 0;
+                expand.anonymous_keyword = spelling != BUSTER_CHECK_NONE && !naming && (typeof_spelling || check_input_typedef_spelling(input, parser, spelling) == 0);
                 expand.alias_count = vector_name != 0 ? 1 : 0;
                 expand.alias_types = &vector_type;
                 expand.alias_names = &vector_alias;
                 expand.parenthesis_count = 0;
-                canonical = type_print(types, scratch, type, (String8){ 0 }, &expand, options);
+                // desugarForDiagnostic strips a macro's name too: the a.k.a. spells the space out.
+                expand.space_macro_count = 0;
+                canonical = type_print(types, scratch, type, (String8){ 0 }, &expand, options | BUSTER_TYPE_PRINT_CANONICAL_CC);
             }
+            // A macro's name alone gives no a.k.a. (it sets no ShouldAKA): the comparison is without it.
+            TypeNames bare = names;
+            bare.space_macro_count = 0;
+            const String8 compared = canonical.length != 0 && contextual ? type_print(types, scratch, type, (String8){ 0 }, &bare, options | BUSTER_TYPE_PRINT_CANONICAL_CC) :
+                                     sugared;
             // The returned text carries its own quotes: clang's `(aka '...')` sits outside the type's, so the
             // messages print `%.*s` without quoting it themselves.
             result = sugared;
             if (sugared.length != 0 && canonical.length != 0 &&
-                (canonical.length != sugared.length || memcmp(canonical.pointer, sugared.pointer, canonical.length) != 0))
+                (canonical.length != compared.length || memcmp(canonical.pointer, compared.pointer, canonical.length) != 0))
             {
                 const char* combined = check_warning_text(scratch, "'%.*s' (aka '%.*s')", (int)sugared.length, sugared.pointer,
                                                           (int)canonical.length, canonical.pointer);
@@ -653,11 +1116,32 @@ static bool check_warning_attribute_suggestion(String8 written, bool standard, S
     return corrected;
 }
 
+// The macro name clang gives an objc_gc's or objc_ownership's warning that its type doesn't take it (#1447, Sema's
+// diagnoseBadTypeAttribute): "__strong" for a strong one, "__weak" for a weak one, where the outermost macro that wrote it
+// is named so (pp_output_macro_place), and its place there into *location and *origin; else NULL, and the token's own.
+static const char* check_warning_objc_macro(const Parser* parser, Preprocessor* pp, const CheckWarningEvent* event, uint32_t* location, uint32_t* origin)
+{
+    const uint32_t count = parser->tokens.count;
+    const uint32_t argument = event->token + 2;
+    const bool argued = (event->kind == CHECK_WARNING_EVENT_OBJC_POINTER_TYPE || event->kind == CHECK_WARNING_EVENT_OBJC_OBJECT_TYPE) && argument < count &&
+                        parser->tokens.kinds[event->token + 1] == PARSE_KIND_L_PAREN && parser->tokens.kinds[argument] == PARSE_KIND_IDENTIFIER;
+    const uint32_t word = argued ? parser->tokens.names[argument] : 0;
+    const bool strong = word != 0 && intern_length(pp->table, word) == 6 && memcmp(intern_bytes(pp->table, word), "strong", 6) == 0;
+    const bool weak = word != 0 && intern_length(pp->table, word) == 4 && memcmp(intern_bytes(pp->table, word), "weak", 4) == 0;
+    const char* macro = strong ? "__strong" : weak ? "__weak" : NULL;
+    const uint32_t source = event->source != BUSTER_CHECK_WARNING_NO_SOURCE ? event->source : parser->tokens.sources[event->token];
+    const bool lifted = pp_output_macro_place(pp, source, event->kind == CHECK_WARNING_EVENT_OBJC_WEAK_TYPE ? NULL : macro != NULL ? macro : "", location, origin);
+    return lifted && event->kind != CHECK_WARNING_EVENT_OBJC_WEAK_TYPE ? macro : NULL;
+}
+
+// c_check_semantic_diagnostic.c's: a record's name as clang's -Wodr and incompatible-definition errors spell it.
+static String8 check_semantic_tag_spelling(const Parser* parser, Preprocessor* pp, uint32_t token, Arena* scratch);
+
 static const char* check_driver_warning_message(const Parser* parser, Preprocessor* pp, const CheckInput* input, const TypeTable* types,
                                                 CheckWarningSpelling* spell, const CheckWarningEvent* event, Arena* scratch)
 {
     const CheckWarningPayload* payload = &event->payload;
-    const String8 name = check_driver_warning_name(pp, payload->name);
+    const String8 name = check_driver_warning_name(pp, check_driver_corrected_name(parser, input, event->token, payload->name));
     const char* result = event->id < BUSTER_ARRAY_LENGTH(check_warning_descriptions) ? check_warning_descriptions[event->id].message : NULL;
     switch (event->kind)
     {
@@ -676,6 +1160,8 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
         {
             const CheckInputSymbolPragma* record = check_input_symbol_warning(input, event);
             const CheckInputMsPragma* layout = check_input_ms_warning(input, event);
+            const CheckInputPackPragma* packing = check_input_pack_warning(input, event);
+            result = packing != NULL ? check_input_pack_align_message(packing) : result;
             if (layout != NULL)
             {
                 result = layout->warning == 1 ? "incorrect use of '#pragma ms_struct on|off' - ignored" :
@@ -754,6 +1240,22 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
                 (int)name.length, name.pointer, (int)type.length, type.pointer) : NULL;
             break;
         }
+        case CHECK_WARNING_EVENT_PROTOTYPE_TAG:
+        {
+            const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, payload->first_type, 0);
+            result = type.length != 0 ? check_warning_text(scratch, "declaration of %.*s will not be visible outside of this function", (int)type.length, type.pointer) : NULL;
+            break;
+        }
+        case CHECK_WARNING_EVENT_PROTOTYPE_REDEFINITION:
+            result = check_warning_text(scratch, "redefinition of '%.*s' will not be visible outside of this function", (int)name.length, name.pointer);
+            break;
+        case CHECK_WARNING_EVENT_ODR_ATTRIBUTE:
+        {
+            const String8 spelled = check_semantic_tag_spelling(parser, pp, event->token, scratch);
+            result = spelled.length != 0 ? check_warning_text(scratch, "type '%.*s' has %s which currently causes the types to be treated as though they are incompatible",
+                                                              (int)spelled.length, spelled.pointer, payload->data != 0 ? "a member with an attribute" : "an attribute") : NULL;
+            break;
+        }
         case CHECK_WARNING_EVENT_LIBRARY_REDECLARATION:
             result = check_warning_text(scratch, "incompatible redeclaration of library function '%.*s'", (int)name.length, name.pointer);
             break;
@@ -810,7 +1312,11 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
         {
             const String8 type = check_driver_warning_type_at(parser, pp, input, types, spell, scratch, payload->first_type, payload->data,
                                                               payload->token, payload->second_type);
-            const String8 named = event->kind == CHECK_WARNING_EVENT_OBJC_WEAK_TYPE ? (String8){ "__weak", 6 } : name;
+            uint32_t location = 0;
+            uint32_t origin = 0;
+            const char* macro = check_warning_objc_macro(parser, pp, event, &location, &origin);
+            const String8 named = event->kind == CHECK_WARNING_EVENT_OBJC_WEAK_TYPE ? (String8){ "__weak", 6 } :
+                                  macro != NULL ? (String8){ (char*)macro, strlen(macro) } : name;
             result = type.length != 0 ? check_warning_text(scratch, "'%.*s' only applies to %s types; type here is %.*s", (int)named.length, named.pointer,
                                                            event->kind == CHECK_WARNING_EVENT_OBJC_POINTER_TYPE ? "pointer" : "Objective-C object or block pointer",
                                                            (int)type.length, type.pointer) : NULL;
@@ -1019,6 +1525,42 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
         case CHECK_WARNING_EVENT_UNKNOWN_ESCAPE:
             result = check_warning_text(scratch, "unknown escape sequence '\\%c'", (char)payload->name);
             break;
+        case CHECK_WARNING_EVENT_DELIMITED_ESCAPE:
+            result = payload->data != 0 ? "named escape sequences are a Clang extension" : "delimited escape sequences are a C2y extension";
+            break;
+        case CHECK_WARNING_EVENT_UNEVALUATED_PREFIX:
+            result = check_warning_text(scratch, "encoding prefix '%s' on an unevaluated string literal has no effect",
+                                        payload->data == 2 ? "u8" : payload->name == 'L' ? "L" : payload->name == 'U' ? "U" : "u");
+            break;
+        case CHECK_WARNING_EVENT_TARGET_CLONES_UNSUPPORTED:
+        {
+            // A version of target_clones' string (#1838): its bytes in the string's decoded text.
+            const String8 text = check_warning_strings_value(parser, pp, payload->token, scratch);
+            const uint32_t start = payload->name <= text.length ? payload->name : (uint32_t)text.length;
+            uint32_t shown = 0;
+            while (start + shown < text.length && text.pointer[start + shown] != ',')
+            {
+                shown += 1;
+            }
+            while (shown != 0 && check_target_version_space(text.pointer[start + shown - 1]))
+            {
+                shown -= 1;
+            }
+            result = check_warning_text(scratch, "unsupported%s '%.*s' in the 'target_clones' attribute string; 'target_clones' attribute ignored",
+                                        (payload->data & BUSTER_CHECK_TARGET_CLONES_CPU) != 0 ? " CPU" : "", (int)shown,
+                                        text.pointer != NULL ? text.pointer + start : "");
+            break;
+        }
+        case CHECK_WARNING_EVENT_TARGET_CLONES_DUPLICATE:
+            result = "version list contains duplicate entries";
+            break;
+        case CHECK_WARNING_EVENT_TARGET_CLONES_MIXED:
+            result = "mixing 'target_clones' specifier mechanisms is permitted for GCC compatibility; use a comma separated sequence of string literals, or a "
+                     "string literal containing a comma-separated list of versions";
+            break;
+        case CHECK_WARNING_EVENT_BIT_INT_SUFFIX:
+            result = "'_BitInt' suffix for literals is a C23 extension";
+            break;
         case CHECK_WARNING_EVENT_ALIGNOF_EXPRESSION:
         {
             result = check_warning_text(scratch, "'%.*s' applied to an expression is a GNU extension", (int)name.length, name.pointer);
@@ -1122,10 +1664,12 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
                 length += copied;
                 token = string ? token : count;
             }
-            // target's warning's piece of its string (check_input_target_warning's data).
+            // target's warning's piece of its string (check_input_target_warning's data), from the whole string, which can be
+            // longer than `argument`.
+            const String8 whole = target ? check_warning_strings_value(parser, pp, payload->token, scratch) : (String8){ "", 0 };
             const uint32_t offset = (payload->data >> 4) & 0x3fffu;
-            const uint32_t piece = offset <= length ? ((payload->data >> 18) & 0x3fffu) : 0u;
-            const uint32_t shown = offset <= length ? (piece < length - offset ? piece : length - offset) : 0u;
+            const uint32_t piece = offset <= whole.length ? ((payload->data >> 18) & 0x3fffu) : 0u;
+            const uint32_t shown = offset <= whole.length ? (piece < whole.length - offset ? piece : (uint32_t)whole.length - offset) : 0u;
             static const char* const target_cases[] = { "unsupported", "duplicate", "unknown", "unknown" };
             static const char* const target_places[] = { "", " CPU", " tune CPU", "" };
             // ns_returns_retained's type check names it by a string, and consumed's by their names alone (#147).
@@ -1150,7 +1694,7 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
                                    event->kind == CHECK_WARNING_EVENT_CONSUMED_OBJECT ? "Objective-C object" : "pointer") :
                 event->kind == CHECK_WARNING_EVENT_TARGET_UNSUPPORTED ?
                 check_warning_text(scratch, "%s%s '%.*s' in the 'target' attribute string; 'target' attribute ignored", target_cases[payload->data & 3u],
-                                   target_places[(payload->data >> 2) & 3u], (int)shown, argument + (offset <= length ? offset : 0)) :
+                                   target_places[(payload->data >> 2) & 3u], (int)shown, whole.pointer + (offset <= whole.length ? offset : 0)) :
                 event->kind == CHECK_WARNING_EVENT_UNKNOWN_SANITIZER ? check_warning_text(scratch, "unknown sanitizer '%s' ignored", argument) :
                 event->kind == CHECK_WARNING_EVENT_SANITIZER_GLOBAL ?
                 check_warning_text(scratch, "'%.*s%s%.*s' attribute argument '%s' not supported on a global variable", (int)scope.length, scope.pointer,
@@ -1235,9 +1779,16 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
             result = "body of cpu_dispatch function will be ignored";
             break;
         case CHECK_WARNING_EVENT_ADDRESS_SPACE_DEPRECATED:
-            // (clang's message quotes the quoted name again.)
-            result = check_warning_text(scratch, "''%.*s'' attribute is deprecated and may be removed in a future version of Clang", (int)name.length, name.pointer);
+        {
+            // (clang's message quotes the quoted name again; a C23 one's with its scope, #1447.)
+            const bool standard = (payload->data & BUSTER_CHECK_WARNING_STANDARD_ATTRIBUTE) != 0;
+            const uint32_t scope_name = payload->data & ~BUSTER_CHECK_WARNING_STANDARD_ATTRIBUTE;
+            const String8 scope = scope_name != 0 ? check_warning_attribute_scope(check_driver_warning_name(pp, scope_name)) : (String8){ "", 0 };
+            const String8 attribute = standard ? check_warning_attribute_name(name, scope, true) : name;
+            result = check_warning_text(scratch, "''%.*s%s%.*s'' attribute is deprecated and may be removed in a future version of Clang", (int)scope.length,
+                                        scope.pointer, scope.length != 0 ? "::" : "", (int)attribute.length, attribute.pointer);
             break;
+        }
         case CHECK_WARNING_EVENT_ADDRESS_SPACE_IDENTICAL:
             result = "multiple identical address spaces specified for type";
             break;
@@ -1336,6 +1887,9 @@ static const char* check_driver_warning_note(const Parser* parser, Preprocessor*
         case CHECK_WARNING_NOTE_DECLARED_HERE:
             result = check_warning_text(scratch, "'%.*s' declared here", (int)name.length, name.pointer);
             break;
+        case CHECK_WARNING_NOTE_ATTRIBUTE_HERE:
+            result = check_warning_text(scratch, "attribute '%.*s' here", (int)name.length, name.pointer);
+            break;
         case CHECK_WARNING_NOTE_DIAGNOSE_IF:
             result = check_warning_text(scratch, "from 'diagnose_if' attribute on '%.*s':", (int)name.length, name.pointer);
             break;
@@ -1414,7 +1968,8 @@ static bool check_driver_warning_events_at(const Parser* parser, Preprocessor* p
         const bool late = event->kind == CHECK_WARNING_EVENT_UNUSED_PARAMETER && event->completion_kind != CHECK_WARNING_COMPLETE_TU_END;
         const bool retained = late == (step >= view->count) && event->kind != CHECK_WARNING_EVENT_MESSAGE && event->kind != CHECK_WARNING_EVENT_ENUM_MIX &&
                               (event->token < parser->tokens.count || (event->kind == CHECK_WARNING_EVENT_PRAGMA && event->token == parser->tokens.count)) &&
-                              (repair == NULL || check_repair_warning_token(repair, event->token));
+                              (repair == NULL || check_repair_warning_token(repair, event->token)) &&
+                              (input->interrupt_range_count == 0 || check_driver_interrupt_kept(input, event->token));
         if (retained)
         {
             valid = event->id < BUSTER_ARRAY_LENGTH(check_warning_descriptions) && event->note_first <= view->note_count &&
@@ -1442,8 +1997,11 @@ static bool check_driver_warning_events_at(const Parser* parser, Preprocessor* p
                         notes[n] = (PPOutputDiagnosticNote){ .token = note->source != BUSTER_CHECK_WARNING_NO_SOURCE ? note->source : parser->tokens.sources[note->token], .message = text };
                     }
                 }
-                const char* option = check_warning_descriptions[event->id].option;
-                const char* prefix = check_driver_warning_error_prefix(severity == CHECK_WARNING_ERROR);
+                // A grouped diagnose_if's option is its group's; one that is an error by default has no -Werror (#1447).
+                const uint32_t group = check_driver_warning_group(event);
+                const char* option = group != UINT32_MAX ? pp_features_warning[group].name : check_warning_descriptions[event->id].option;
+                const bool default_error = group != UINT32_MAX && (event->payload.data & BUSTER_CHECK_WARNING_GROUP_ERROR) != 0;
+                const char* prefix = check_driver_warning_error_prefix(severity == CHECK_WARNING_ERROR && !default_error);
                 const char* suffix = option != NULL ? check_warning_text(scratch, " [%s%s]", prefix, option) : prefix[0] != 0 ? " [-Werror]" : "";
                 valid = valid && suffix != NULL;
                 if (valid)
@@ -1462,8 +2020,12 @@ static bool check_driver_warning_events_at(const Parser* parser, Preprocessor* p
                     {
                         const CheckInputSymbolPragma* record = check_input_symbol_warning(input, event);
                         const CheckInputMsPragma* layout = check_input_ms_warning(input, event);
-                        const bool semantic = record != NULL && record->warning >= CHECK_SYMBOL_WARNING_UNDECLARED;
-                        const uint32_t location = record != NULL ? record->diagnostic_location : layout != NULL ? layout->diagnostic_location : 0;
+                        const CheckInputPackPragma* packing = check_input_pack_warning(input, event);
+                        // An align=reset's empty stack is Sema's, where the parser handles the directive (#1849).
+                        const bool semantic = (record != NULL && record->warning >= CHECK_SYMBOL_WARNING_UNDECLARED) ||
+                                              (packing != NULL && packing->align_warning == CHECK_PACK_ALIGN_RESET_EMPTY);
+                        const uint32_t location = record != NULL ? record->diagnostic_location : layout != NULL ? layout->diagnostic_location :
+                                                  packing != NULL ? packing->diagnostic_location : 0;
                         if (location != 0)
                         {
                             const uint32_t saved_position = pp->diagnostic_position;
@@ -1477,19 +2039,43 @@ static bool check_driver_warning_events_at(const Parser* parser, Preprocessor* p
                                                      semantic ? PP_DIAGNOSTIC_SEMANTIC : PP_DIAGNOSTIC_LEXICAL, "%s%s", message, suffix);
                         }
                     }
+                    else if (event->kind == CHECK_WARNING_EVENT_UNEVALUATED_PREFIX || event->kind == CHECK_WARNING_EVENT_DELIMITED_ESCAPE)
+                    {
+                        // At the literal, with the macro argument it came from (#1447).
+                        pp->diagnostic_arguments = true;
+                        pp_diagnose_output_offset_at(pp, disposition, source, 0, boundary, "%s%s", message, suffix);
+                        pp->diagnostic_arguments = false;
+                    }
                     else if (event->kind == CHECK_WARNING_EVENT_UNKNOWN_ESCAPE)
                     {
-                        // At its backslash inside the literal's token (#1447).
+                        // At its backslash inside the literal's token (#1447), with the macro argument it came from.
+                        pp->diagnostic_arguments = true;
                         pp_diagnose_output_offset_at(pp, disposition, source, event->payload.data, boundary, "%s%s", message, suffix);
+                        pp->diagnostic_arguments = false;
+                    }
+                    else if (event->kind == CHECK_WARNING_EVENT_TARGET_CLONES_UNSUPPORTED || event->kind == CHECK_WARNING_EVENT_TARGET_CLONES_DUPLICATE ||
+                             event->kind == CHECK_WARNING_EVENT_TARGET_CLONES_MIXED)
+                    {
+                        // At the version's offset in its trimmed string, from the literal's quote, as clang places it (#1838).
+                        pp_diagnose_output_offset_at(pp, disposition, source, event->payload.data & ~BUSTER_CHECK_TARGET_CLONES_CPU, boundary, "%s%s", message, suffix);
                     }
                     else if ((event->flags & BUSTER_CHECK_WARNING_UNLOCATED) != 0)
                     {
                         // An implicit attribute's warning, which clang gives no location (#147: interrupt's used).
                         pp_diagnose_unlocated_notes(pp, disposition, boundary, notes, event->note_count, "%s%s", message, suffix);
                     }
+                    else if (event->kind == CHECK_WARNING_EVENT_OBJC_POINTER_TYPE || event->kind == CHECK_WARNING_EVENT_OBJC_OBJECT_TYPE ||
+                             event->kind == CHECK_WARNING_EVENT_OBJC_WEAK_TYPE)
+                    {
+                        // At the macro's expansion clang gives them (check_warning_objc_macro), before the declaration's
+                        // attributes' checks at the same boundary.
+                        uint32_t location = 0;
+                        uint32_t origin = 0;
+                        (void)check_warning_objc_macro(parser, pp, event, &location, &origin);
+                        pp_diagnose_placed_notes_phase(pp, disposition, location, origin, boundary, PP_DIAGNOSTIC_TYPE, notes, event->note_count, "%s%s", message, suffix);
+                    }
                     else if (event->kind == CHECK_WARNING_EVENT_FUNCTION_TYPE_ATTRIBUTE || event->kind == CHECK_WARNING_EVENT_CONVENTION_UNSUPPORTED ||
-                             event->kind == CHECK_WARNING_EVENT_OBJC_POINTER_TYPE || event->kind == CHECK_WARNING_EVENT_OBJC_OBJECT_TYPE ||
-                             event->kind == CHECK_WARNING_EVENT_OBJC_WEAK_TYPE || event->kind == CHECK_WARNING_EVENT_OBJC_UNSUPPORTED)
+                             event->kind == CHECK_WARNING_EVENT_OBJC_UNSUPPORTED)
                     {
                         // A declarator's type's warnings precede its declaration's attributes' checks at the same boundary.
                         pp_diagnose_output_notes_phase(pp, disposition, source, boundary, PP_DIAGNOSTIC_TYPE, notes, event->note_count, "%s%s", message, suffix);

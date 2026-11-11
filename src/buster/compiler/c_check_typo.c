@@ -12,10 +12,11 @@
 // name the callback accepts is as near (CorrectTypo's second best) and the typo's length is at least three times its
 // distance. At most 50 searches are made in a unit (-fspell-checking-limit), counted in source order.
 //
-// Clang also offers keywords where it reads an expression or a statement's start, and on taking one parses the
-// statement again with it (`whil;` gives "expected '(' after 'while'"); the bindings pass cannot follow that. Where a
-// keyword, or a visible typedef's name that a statement's start would take, is as near as the best value, the name is
-// left undeclared, without a suggestion, as clang leaves it only where it offers neither (docs/c-checker.md).
+// Clang also offers keywords, and the first name in parentheses or a cast's operand may be a typedef's name
+// (check_typo_place). Within an expression, a keyword or a type name taken is suggested and the name stays undeclared,
+// as clang's expression is then rejected. At a statement's start clang parses the statement again with a keyword or a
+// type it takes (`whil;` gives "expected '(' after 'while'"), which the bindings pass cannot follow: there a keyword or
+// a typedef's name as near as the best value leaves the name undeclared, without a suggestion (docs/c-checker.md).
 //
 // Only a unit with an undeclared name pays: the search replays the binding stream's scope stack once (CheckTypoScope),
 // with no per-typo walk of the stream. The vector path prefilters the visible names by length in AVX-512 and finds each
@@ -36,7 +37,9 @@ typedef enum CheckTypoMode
 } CheckTypoMode;
 
 // The declarations visible at `cursor`, the binding stream's declare events replayed in order as c_bindings_replay does:
-// the scope stack, innermost last, with each one's key and its name's length beside it.
+// the scope stack, innermost last, with each one's key and its name's length beside it. A library function's implicit
+// declaration is also listed past the stack, from `capacity` on, where no block's end removes it: clang declares the
+// builtin at file scope (Sema::LazilyCreateBuiltin), so it stays a candidate after its block.
 typedef struct CheckTypoScope CheckTypoScope;
 struct CheckTypoScope
 {
@@ -46,6 +49,7 @@ struct CheckTypoScope
     uint32_t count;
     uint32_t cursor;
     uint32_t capacity;
+    uint32_t library_count;
 };
 
 typedef struct CheckTypoCalls CheckTypoCalls;
@@ -75,11 +79,22 @@ struct CheckTypo
     // analysis counts as a use as clang marks the declaration referenced.
     uint32_t corrected_events[BUSTER_CHECK_TYPO_LIMIT];
     uint32_t corrected_handles[BUSTER_CHECK_TYPO_LIMIT];
+    // Their tokens, which CheckInput.corrected_tokens lists for the driver.
+    uint32_t corrected_tokens[BUSTER_CHECK_TYPO_LIMIT];
     uint32_t corrected_count;
     uint32_t value_count;
     uint32_t function_cursor;
     uint32_t function_searches;
     uint32_t walk_searches;
+    // The latest value search's suggestion that takes no declaration: a keyword's index + 1 or 0, and a type name's
+    // declaration token or BUSTER_CHECK_NONE (check_typo_suggestion).
+    uint32_t suggested_token;
+    uint32_t suggested_keyword;
+    uint32_t suggested_type;
+    // The walk's own values' searches (check_typo_walk_value), in its order, and how many of them the answers' have passed.
+    uint32_t walk_value_tokens[BUSTER_CHECK_TYPO_LIMIT];
+    uint32_t walk_value_count;
+    uint32_t walk_value_cursor;
     // The calls of a prototyped function with too few arguments or too many before the latest value's, each a search of
     // clang's own (TryTypoCorrectionForCall's, which suggests nothing in C): counted once a search needs them.
     CheckTypoCalls value_calls;
@@ -105,6 +120,36 @@ static const char* const check_typo_keywords[] =
     "char", "const", "double", "enum", "float", "int", "long", "short", "signed", "struct", "union", "unsigned", "void",
     "volatile", "_Complex", "_Imaginary", "extern", "inline", "static", "typedef", "restrict", "_Bool", "bool", "typeof",
 };
+
+// Which of clang's keyword lists each keyword is in (AddKeywordsToConsumer): a statement's, offered within a function;
+// `break` where a loop or a switch encloses the name (Scope::getBreakParent), `continue` where a loop does, `case` and
+// `default` where a switch does (the function's SwitchStack); an expression's (WantExpressionKeywords); a type
+// specifier's or a storage class's (WantTypeSpecifiers).
+enum
+{
+    CHECK_TYPO_KEYWORD_STATEMENT = 1u << 0,
+    CHECK_TYPO_KEYWORD_BREAK = 1u << 1,
+    CHECK_TYPO_KEYWORD_CONTINUE = 1u << 2,
+    CHECK_TYPO_KEYWORD_SWITCH = 1u << 3,
+    CHECK_TYPO_KEYWORD_EXPRESSION = 1u << 4,
+    CHECK_TYPO_KEYWORD_TYPE = 1u << 5,
+    CHECK_TYPO_KEYWORD_REMAINING = CHECK_TYPO_KEYWORD_STATEMENT | CHECK_TYPO_KEYWORD_BREAK | CHECK_TYPO_KEYWORD_CONTINUE | CHECK_TYPO_KEYWORD_SWITCH,
+};
+
+static const uint8_t check_typo_keyword_kinds[] =
+{
+    CHECK_TYPO_KEYWORD_STATEMENT, CHECK_TYPO_KEYWORD_STATEMENT, CHECK_TYPO_KEYWORD_STATEMENT, CHECK_TYPO_KEYWORD_STATEMENT,
+    CHECK_TYPO_KEYWORD_STATEMENT, CHECK_TYPO_KEYWORD_STATEMENT, CHECK_TYPO_KEYWORD_STATEMENT, CHECK_TYPO_KEYWORD_STATEMENT,
+    CHECK_TYPO_KEYWORD_BREAK, CHECK_TYPO_KEYWORD_CONTINUE, CHECK_TYPO_KEYWORD_SWITCH, CHECK_TYPO_KEYWORD_SWITCH,
+    CHECK_TYPO_KEYWORD_EXPRESSION, CHECK_TYPO_KEYWORD_EXPRESSION, CHECK_TYPO_KEYWORD_EXPRESSION, CHECK_TYPO_KEYWORD_EXPRESSION,
+    CHECK_TYPO_KEYWORD_TYPE, CHECK_TYPO_KEYWORD_TYPE, CHECK_TYPO_KEYWORD_TYPE, CHECK_TYPO_KEYWORD_TYPE, CHECK_TYPO_KEYWORD_TYPE,
+    CHECK_TYPO_KEYWORD_TYPE, CHECK_TYPO_KEYWORD_TYPE, CHECK_TYPO_KEYWORD_TYPE, CHECK_TYPO_KEYWORD_TYPE, CHECK_TYPO_KEYWORD_TYPE,
+    CHECK_TYPO_KEYWORD_TYPE, CHECK_TYPO_KEYWORD_TYPE, CHECK_TYPO_KEYWORD_TYPE, CHECK_TYPO_KEYWORD_TYPE, CHECK_TYPO_KEYWORD_TYPE,
+    CHECK_TYPO_KEYWORD_TYPE, CHECK_TYPO_KEYWORD_TYPE, CHECK_TYPO_KEYWORD_TYPE, CHECK_TYPO_KEYWORD_TYPE, CHECK_TYPO_KEYWORD_TYPE,
+    CHECK_TYPO_KEYWORD_TYPE, CHECK_TYPO_KEYWORD_TYPE, CHECK_TYPO_KEYWORD_TYPE, CHECK_TYPO_KEYWORD_TYPE,
+};
+
+_Static_assert(BUSTER_ARRAY_LENGTH(check_typo_keyword_kinds) == BUSTER_ARRAY_LENGTH(check_typo_keywords), "each typo keyword has its lists");
 
 static bool check_typo_reserve(Arena* arena, uint32_t** column, uint32_t* capacity, uint32_t needed, uint32_t used)
 {
@@ -132,10 +177,12 @@ static bool check_typo_scope_advance(CheckInputReader* reader, CheckTypoScope* s
     bool valid = scope->events != NULL || bindings->capacity == 0;
     if (scope->events == NULL && bindings->capacity != 0)
     {
+        // The stack's room, then the library functions' (each one a declare event too).
         scope->capacity = bindings->capacity;
-        scope->events = BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint32_t, scope->capacity);
-        scope->keys = scope->events != NULL ? BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint32_t, scope->capacity) : NULL;
-        scope->lengths = scope->keys != NULL ? BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint32_t, scope->capacity) : NULL;
+        const uint64_t room = (uint64_t)scope->capacity * 2;
+        scope->events = BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint32_t, room);
+        scope->keys = scope->events != NULL ? BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint32_t, room) : NULL;
+        scope->lengths = scope->keys != NULL ? BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint32_t, room) : NULL;
         valid = scope->lengths != NULL;
     }
     const uint32_t end = limit < bindings->count ? limit : bindings->count;
@@ -151,13 +198,22 @@ static bool check_typo_scope_advance(CheckInputReader* reader, CheckTypoScope* s
         {
             const uint32_t key = bindings->key[e];
             const uint32_t name = key % bindings->name_capacity;
-            valid = scope->count < scope->capacity;
+            const uint32_t token = bindings->declaration[e];
+            const bool library = token < reader->parser->tokens.count && reader->output->function_flags != NULL &&
+                                 (reader->output->function_flags[token] & CHECK_INPUT_FUNCTION_IMPLICIT_LIBRARY) != 0;
+            valid = scope->count < scope->capacity && scope->library_count < scope->capacity;
             if (valid)
             {
+                const uint32_t length = intern_length(reader->pp->table, name);
                 scope->events[scope->count] = e;
                 scope->keys[scope->count] = key;
-                scope->lengths[scope->count] = intern_length(reader->pp->table, name);
+                scope->lengths[scope->count] = length;
                 scope->count += 1;
+                const uint32_t listed = scope->capacity + scope->library_count;
+                scope->events[listed] = e;
+                scope->keys[listed] = key;
+                scope->lengths[listed] = length;
+                scope->library_count += library ? 1u : 0u;
             }
         }
     }
@@ -225,11 +281,13 @@ static uint32_t check_typo_distance(CheckTypo* typo, bool vector, const uint8_t*
            check_typo_distance_table(a, a_length, b, b_length, typo->row);
 }
 
-// The scope's names near enough to the typo's `length` to be taken (3 * |difference| <= length), in stack order.
-static uint32_t check_typo_prefilter(const CheckTypoScope* scope, uint32_t name_capacity, uint32_t length, bool vector, uint32_t* candidates)
+// The scope's names from `begin` to `end` near enough to the typo's `length` to be taken (3 * |difference| <= length),
+// in stack order, their positions written from `candidates` on.
+static uint32_t check_typo_prefilter(const CheckTypoScope* scope, uint32_t begin, uint32_t end, uint32_t name_capacity, uint32_t length, bool vector,
+                                     uint32_t* candidates)
 {
     uint32_t count = 0;
-    uint32_t i = 0;
+    uint32_t i = begin;
     if (vector)
     {
         const __m512i wanted = _mm512_set1_epi32((int)length);
@@ -237,9 +295,9 @@ static uint32_t check_typo_prefilter(const CheckTypoScope* scope, uint32_t name_
         const __m512i three = _mm512_set1_epi32(3);
         const __m512i names = _mm512_set1_epi32((int)name_capacity);
         const __m512i lanes = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
-        for (; i < scope->count; i += 16)
+        for (; i < end; i += 16)
         {
-            const uint32_t left = scope->count - i;
+            const uint32_t left = end - i;
             const __mmask16 live = left >= 16 ? (__mmask16)0xffff : (__mmask16)((1u << left) - 1);
             const __m512i keys = _mm512_maskz_loadu_epi32(live, scope->keys + i);
             const __m512i lengths = _mm512_maskz_loadu_epi32(live, scope->lengths + i);
@@ -252,7 +310,7 @@ static uint32_t check_typo_prefilter(const CheckTypoScope* scope, uint32_t name_
     }
     else
     {
-        for (; i < scope->count; i += 1)
+        for (; i < end; i += 1)
         {
             const uint32_t difference = scope->lengths[i] > length ? scope->lengths[i] - length : length - scope->lengths[i];
             if (scope->keys[i] < name_capacity && 3 * difference <= length)
@@ -282,17 +340,92 @@ static bool check_typo_accepted(uint8_t kind, CheckTypoMode mode, CheckTypoTakes
 }
 
 // Whether the name at `token` starts a statement, where clang's parser classifies it (ClassifyName, StatementFilterCCC):
-// after a `;`, a `{` or a `}`, a condition's or a for header's `)`, `else`, `do`, or a label's or a case's `:`.
+// after a `;`, a `{` (not an initializer's) or a `}`, a condition's or a for header's `)`, `else`, `do`, or a label's or a
+// case's `:`.
 static bool check_typo_statement_start(const Parser* parser, uint32_t token)
 {
     const uint8_t kind = token != 0 ? parser->tokens.kinds[token - 1] : PARSE_KIND_END;
     const uint8_t role = token != 0 ? parser->tree.roles[token - 1] : PARSE_ROLE_COUNT;
-    return kind == PARSE_KIND_SEMI || kind == PARSE_KIND_L_BRACE || kind == PARSE_KIND_R_BRACE || kind == PARSE_KIND_ELSE || kind == PARSE_KIND_DO ||
+    const bool block = kind == PARSE_KIND_L_BRACE && role != PARSE_ROLE_OPEN_INITIALIZER && role != PARSE_ROLE_OPEN_COMPOUND_BODY;
+    return kind == PARSE_KIND_SEMI || block || kind == PARSE_KIND_R_BRACE || kind == PARSE_KIND_ELSE || kind == PARSE_KIND_DO ||
            role == PARSE_ROLE_CLOSE_CONDITION || role == PARSE_ROLE_CLOSE_FOR || (kind == PARSE_KIND_COLON && role != PARSE_ROLE_CLOSE_TERNARY);
 }
 
+// What a value's name at `token` may be corrected to, by its place (clang's callback there and the keywords it wants).
+typedef struct CheckTypoPlace CheckTypoPlace;
+struct CheckTypoPlace
+{
+    CheckTypoTakes takes;
+    // CHECK_TYPO_KEYWORD_* of the keywords offered.
+    uint32_t keywords;
+    // Whether objects, functions and enumerators are taken (not after a cast's `)`), and typedef names: a cast's operand,
+    // and the first name in parentheses, which clang's parser reads as a type cast's or an expression's (MaybeTypeCast).
+    bool values;
+    bool types;
+    // A statement's start (StatementFilterCCC), where clang parses the statement again with a keyword or a type it
+    // takes: neither is suggested here, but either as near as the nearest value leaves the name uncorrected.
+    bool statement;
+    bool rival_types;
+};
+
+// The loops and switches around `token`, and whether it is in a function's body (CHECK_TYPO_KEYWORD_*): the parse
+// tree's ancestors, the statements a head owns after it, as check_input_statements finds a `break`'s.
+static uint32_t check_typo_scopes(const CheckInputReader* reader, uint32_t token)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t count = parser->tokens.count;
+    uint32_t result = 0;
+    uint32_t steps = 0;
+    // A do statement's condition, read after its body's scope ends: the `do` that owns the condition the name is in.
+    uint32_t condition_of = BUSTER_CHECK_NONE;
+    for (uint32_t ancestor = parser->tree.parents[token]; ancestor < count && steps < count; ancestor = parser->tree.parents[ancestor])
+    {
+        const uint8_t role = parser->tree.roles[ancestor];
+        const uint32_t keyword = reader->first_child != NULL ? reader->first_child[ancestor] : BUSTER_CHECK_NONE;
+        const uint8_t head = keyword < count ? parser->tokens.kinds[keyword] : PARSE_KIND_END;
+        const bool owned = token > ancestor || (role == PARSE_ROLE_DO && ancestor != condition_of);
+        condition_of = role == PARSE_ROLE_CLOSE_CONDITION && token < ancestor && head == PARSE_KIND_WHILE ? parser->tree.parents[ancestor] : condition_of;
+        const bool loop = owned && (role == PARSE_ROLE_CLOSE_FOR || role == PARSE_ROLE_DO || (role == PARSE_ROLE_CLOSE_CONDITION && head == PARSE_KIND_WHILE));
+        const bool selection = owned && role == PARSE_ROLE_CLOSE_CONDITION && head == PARSE_KIND_SWITCH;
+        result |= (loop ? CHECK_TYPO_KEYWORD_BREAK | CHECK_TYPO_KEYWORD_CONTINUE : 0u) | (selection ? CHECK_TYPO_KEYWORD_BREAK | CHECK_TYPO_KEYWORD_SWITCH : 0u) |
+                  (role == PARSE_ROLE_CLOSE_BODY ? CHECK_TYPO_KEYWORD_STATEMENT : 0u);
+        steps += 1;
+    }
+    return result;
+}
+
+static CheckTypoPlace check_typo_place(const CheckInputReader* reader, uint32_t token)
+{
+    const Parser* parser = reader->parser;
+    const uint8_t next = token + 1 < parser->tokens.count ? parser->tokens.kinds[token + 1] : PARSE_KIND_END;
+    const uint8_t before = token != 0 ? parser->tree.roles[token - 1] : PARSE_ROLE_COUNT;
+    const bool statement = check_typo_statement_start(parser, token);
+    const bool member = next == PARSE_KIND_ARROW || next == PARSE_KIND_PERIOD;
+    const bool cast = before == PARSE_ROLE_CLOSE_CAST;
+    const bool parenthesized = before == PARSE_ROLE_OPEN_GROUP || before == PARSE_ROLE_OPEN_SIZEOF;
+    // A statement's start: StatementFilterCCC's keywords by the next token. Within an expression, CastExpressionIdValidator's,
+    // with a statement's keywords only where no `)` follows (the parser's WantRemainingKeywords).
+    const bool type_keywords = statement ? next == PARSE_KIND_L_PAREN || next == PARSE_KIND_L_SQUARE || next == PARSE_KIND_IDENTIFIER : cast || parenthesized;
+    const bool expression_keywords = statement ? next == PARSE_KIND_L_PAREN || next == PARSE_KIND_IDENTIFIER || member : true;
+    const bool remaining_keywords = statement ? next == PARSE_KIND_L_PAREN || next == PARSE_KIND_SEMI || next == PARSE_KIND_IDENTIFIER || next == PARSE_KIND_L_BRACE :
+                                    next != PARSE_KIND_R_PAREN;
+    const uint32_t wanted = (type_keywords ? CHECK_TYPO_KEYWORD_TYPE : 0u) | (expression_keywords ? CHECK_TYPO_KEYWORD_EXPRESSION : 0u) |
+                            (remaining_keywords ? CHECK_TYPO_KEYWORD_REMAINING : 0u);
+    const uint32_t scoped = remaining_keywords ? check_typo_scopes(reader, token) | ~(uint32_t)CHECK_TYPO_KEYWORD_REMAINING : ~(uint32_t)CHECK_TYPO_KEYWORD_REMAINING;
+    return (CheckTypoPlace){
+        .takes = statement && next == PARSE_KIND_EQUAL ? CHECK_TYPO_TAKES_OBJECT :
+                 !statement && (next == PARSE_KIND_EQUAL || member) ? CHECK_TYPO_TAKES_NO_FUNCTION : CHECK_TYPO_TAKES_VALUES,
+        .keywords = wanted & scoped,
+        .values = !cast,
+        .types = !statement && (cast || parenthesized),
+        .statement = statement,
+        .rival_types = statement && type_keywords,
+    };
+}
+
 // The declaration a typo at `token` corrects to, its declare event's, from the declarations visible at `limit` (an event
-// index); or BUSTER_CHECK_NONE.
+// index); or BUSTER_CHECK_NONE. A value's search also leaves what it would suggest without taking it in CheckTypo's
+// suggested_* (a keyword, or a type name where the place takes one).
 static uint32_t check_typo_search(CheckInputReader* reader, CheckTypoScope* scope, uint32_t token, uint32_t limit, CheckTypoMode mode)
 {
     const Parser* parser = reader->parser;
@@ -306,14 +439,17 @@ static uint32_t check_typo_search(CheckInputReader* reader, CheckTypoScope* scop
     uint32_t result = BUSTER_CHECK_NONE;
     // The prefilter's compressed stores write whole vectors: room for one past the stack's.
     bool valid = length >= 3 && check_typo_scope_advance(reader, scope, limit) &&
-                 check_typo_reserve(reader->arena, &typo->candidates, &typo->candidate_capacity, scope->count + 16, 0) &&
-                 check_typo_reserve(reader->arena, &typo->distances, &typo->distance_capacity, scope->count + 16, 0) &&
+                 check_typo_reserve(reader->arena, &typo->candidates, &typo->candidate_capacity, scope->library_count + scope->count + 32, 0) &&
+                 check_typo_reserve(reader->arena, &typo->distances, &typo->distance_capacity, scope->library_count + scope->count + 32, 0) &&
                  check_typo_reserve(reader->arena, &typo->row, &typo->row_capacity, length + 1, 0);
     reader->output->resource |= length >= 3 && !valid;
     if (valid)
     {
         const uint32_t name_capacity = bindings->name_capacity;
-        const uint32_t filtered = check_typo_prefilter(scope, name_capacity, length, vector, typo->candidates);
+        // The library functions first, as file scope's, so that a declaration of the stack shadows them.
+        const uint32_t libraries = check_typo_prefilter(scope, scope->capacity, scope->capacity + scope->library_count, name_capacity, length, vector,
+                                                        typo->candidates);
+        const uint32_t filtered = libraries + check_typo_prefilter(scope, 0, scope->count, name_capacity, length, vector, typo->candidates + libraries);
         // The names within the bound, their distances beside them.
         uint32_t kept = 0;
         for (uint32_t c = 0; c < filtered; c += 1)
@@ -328,22 +464,15 @@ static uint32_t check_typo_search(CheckInputReader* reader, CheckTypoScope* scop
                 kept += 1;
             }
         }
-        // Each name's innermost declaration (the latest kept of its key), and of those the nearest the mode takes; a
-        // keyword or a typedef as near, the conservative refusal above, where clang's callback would offer one: a
-        // typedef only at a statement's start before `(`, `[` or a name, a keyword within an expression or at a
-        // statement's start before `(`, a name, `->`, `.`, `;` or `{`.
-        const uint8_t next = token + 1 < parser->tokens.count ? parser->tokens.kinds[token + 1] : PARSE_KIND_END;
-        const bool statement = mode == CHECK_TYPO_VALUE && check_typo_statement_start(parser, token);
-        const bool member = next == PARSE_KIND_ARROW || next == PARSE_KIND_PERIOD;
-        const CheckTypoTakes takes = statement && next == PARSE_KIND_EQUAL ? CHECK_TYPO_TAKES_OBJECT :
-                                     !statement && (next == PARSE_KIND_EQUAL || member) ? CHECK_TYPO_TAKES_NO_FUNCTION : CHECK_TYPO_TAKES_VALUES;
-        const bool typedefs = statement && (next == PARSE_KIND_L_PAREN || next == PARSE_KIND_L_SQUARE || next == PARSE_KIND_IDENTIFIER);
-        const bool keywords = !statement || next == PARSE_KIND_L_PAREN || next == PARSE_KIND_IDENTIFIER || member || next == PARSE_KIND_SEMI ||
-                              next == PARSE_KIND_L_BRACE;
+        // Each name's innermost declaration (the latest kept of its key) that the place takes, and the keywords it offers
+        // (check_typo_place); the nearest is taken where it is the only one that near, a statement start's typedef or
+        // keyword counting as near without being taken.
+        const CheckTypoPlace place = mode == CHECK_TYPO_VALUE ? check_typo_place(reader, token) : (CheckTypoPlace){ .values = true };
         uint32_t best = UINT32_MAX;
         uint32_t best_at = BUSTER_CHECK_NONE;
+        uint32_t best_keyword = 0;
+        bool best_taken = false;
         uint32_t ties = 0;
-        uint32_t other_best = UINT32_MAX;
         for (uint32_t k = 0; k < kept; k += 1)
         {
             const uint32_t at = typo->candidates[k];
@@ -354,26 +483,38 @@ static uint32_t check_typo_search(CheckInputReader* reader, CheckTypoScope* scop
             }
             const uint8_t kind = bindings->kind[scope->events[at]];
             const uint32_t distance = typo->distances[k];
-            const bool accepted = !shadowed && distance != 0 && check_typo_accepted(kind, mode, takes);
-            const bool rival = !shadowed && distance != 0 && mode == CHECK_TYPO_VALUE && kind == C_BINDING_TYPEDEF && typedefs;
-            ties = accepted && distance == best ? ties + 1 : accepted && distance < best ? 1 : ties;
-            best_at = accepted && distance < best ? at : best_at;
-            best = accepted && distance < best ? distance : best;
-            other_best = rival && distance < other_best ? distance : other_best;
+            const bool type = mode == CHECK_TYPO_VALUE && kind == C_BINDING_TYPEDEF;
+            const bool taken = (type && place.types) || (!type && place.values && check_typo_accepted(kind, mode, place.takes));
+            const bool near = !shadowed && distance != 0 && (taken || (type && place.rival_types));
+            ties = near && distance == best ? ties + 1 : near && distance < best ? 1 : ties;
+            best_at = near && distance < best ? at : best_at;
+            best_taken = near && distance < best ? taken : best_taken;
+            best = near && distance < best ? distance : best;
         }
-        for (uint32_t w = 0; mode == CHECK_TYPO_VALUE && keywords && best != UINT32_MAX && w < BUSTER_ARRAY_LENGTH(check_typo_keywords); w += 1)
+        for (uint32_t w = 0; mode == CHECK_TYPO_VALUE && place.keywords != 0 && w < BUSTER_ARRAY_LENGTH(check_typo_keywords); w += 1)
         {
             const char* keyword = check_typo_keywords[w];
             const uint32_t keyword_length = (uint32_t)strlen(keyword);
             const uint32_t difference = keyword_length > length ? keyword_length - length : length - keyword_length;
-            if (3 * difference <= length && check_typo_keyword_offered(keyword, parser->language.standard, parser->language.gnu))
+            if (3 * difference <= length && (place.keywords & check_typo_keyword_kinds[w]) != 0 &&
+                check_typo_keyword_offered(keyword, parser->language.standard, parser->language.gnu))
             {
                 const uint32_t distance = check_typo_distance(typo, vector, (const uint8_t*)keyword, keyword_length, spelling, length);
-                other_best = distance <= bound && distance < other_best ? distance : other_best;
+                const bool near = distance <= bound;
+                ties = near && distance == best ? ties + 1 : near && distance < best ? 1 : ties;
+                best_keyword = near && distance < best ? w + 1 : near && distance == best ? best_keyword : best_keyword;
+                best_at = near && distance < best ? BUSTER_CHECK_NONE : best_at;
+                best_taken = near && distance < best ? !place.statement : best_taken;
+                best = near && distance < best ? distance : best;
             }
         }
-        const bool unique = best != UINT32_MAX && ties == 1 && length / best >= 3 && other_best > best;
-        result = unique ? scope->events[best_at] : BUSTER_CHECK_NONE;
+        const bool unique = best != UINT32_MAX && ties == 1 && length / best >= 3 && best_taken;
+        const bool keyword = unique && best_at == BUSTER_CHECK_NONE;
+        const bool type = unique && !keyword && bindings->kind[scope->events[best_at]] == C_BINDING_TYPEDEF;
+        result = unique && !keyword && !type ? scope->events[best_at] : BUSTER_CHECK_NONE;
+        typo->suggested_token = token;
+        typo->suggested_keyword = keyword ? best_keyword : 0;
+        typo->suggested_type = type ? bindings->declaration[scope->events[best_at]] : BUSTER_CHECK_NONE;
     }
     return result;
 }
@@ -438,8 +579,8 @@ static uint32_t check_typo_calls_before(const CheckInputReader* reader, CheckTyp
 }
 
 // A value's undeclared name at `token`, its use event `event` (the binding answers', in source order): the declare event
-// of the name it corrects to, or BUSTER_CHECK_NONE. A name just after a cast's `)` isn't corrected, as clang's validator
-// there takes no value; it is searched all the same, toward the limit.
+// of the name it corrects to, or BUSTER_CHECK_NONE. A name just after a cast's `)` takes no value, as clang's validator
+// there takes a type or a keyword alone (check_typo_place).
 static uint32_t check_typo_value(CheckInputReader* reader, uint32_t token, uint32_t event)
 {
     const Parser* parser = reader->parser;
@@ -447,7 +588,6 @@ static uint32_t check_typo_value(CheckInputReader* reader, uint32_t token, uint3
     const bool roles = parser->tree.roles != NULL && parser->tokens.kinds != NULL;
     const bool operand = roles && token < parser->tokens.count && parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER &&
                          parser->tree.roles[token] == PARSE_ROLE_OPERAND;
-    const bool cast = operand && token != 0 && parser->tree.roles[token - 1] == PARSE_ROLE_CLOSE_CAST;
     uint32_t result = BUSTER_CHECK_NONE;
     if (operand && !reader->typo_disabled && check_typo_ready(reader))
     {
@@ -459,15 +599,30 @@ static uint32_t check_typo_value(CheckInputReader* reader, uint32_t token, uint3
             typo->function_searches += input->implicit_function_corrections[typo->function_cursor] != BUSTER_CHECK_TYPO_UNSEARCHED ? 1u : 0u;
             typo->function_cursor += 1;
         }
-        const bool room = typo->value_count + typo->function_searches < BUSTER_CHECK_TYPO_LIMIT &&
-                          typo->value_count + typo->function_searches + check_typo_calls_before(reader, &typo->value_calls, token) < BUSTER_CHECK_TYPO_LIMIT;
+        // And the walk's values' before it (check_typo_walk_value).
+        while (typo->walk_value_cursor < typo->walk_value_count && typo->walk_value_tokens[typo->walk_value_cursor] < token)
+        {
+            typo->walk_value_cursor += 1;
+        }
+        const uint32_t searches = typo->value_count + typo->function_searches + typo->walk_value_cursor;
+        const bool room = searches < BUSTER_CHECK_TYPO_LIMIT && searches + check_typo_calls_before(reader, &typo->value_calls, token) < BUSTER_CHECK_TYPO_LIMIT;
         if (room)
         {
             typo->value_tokens[typo->value_count++] = token;
         }
-        result = room && !cast ? check_typo_search(reader, &typo->answers, token, event, CHECK_TYPO_VALUE) : BUSTER_CHECK_NONE;
+        result = room ? check_typo_search(reader, &typo->answers, token, event, CHECK_TYPO_VALUE) : BUSTER_CHECK_NONE;
     }
     return result;
+}
+
+// What a value's search at `token` suggested without taking a declaration (#1447): `*keyword`, a keyword's index in
+// check_typo_keywords + 1, or 0; `*type`, a typedef's declaration token, or BUSTER_CHECK_NONE. The name stays undeclared,
+// as clang's does once it reports the suggestion.
+static void check_typo_suggestion(const CheckInputReader* reader, uint32_t token, uint32_t* keyword, uint32_t* type)
+{
+    const bool searched = reader->typo != NULL && reader->typo->suggested_token == token;
+    *keyword = searched ? reader->typo->suggested_keyword : 0;
+    *type = searched ? reader->typo->suggested_type : BUSTER_CHECK_NONE;
 }
 
 // An undeclared function's call at `token`, read by the walk before its implicit declaration is bound: the declaration
@@ -486,6 +641,24 @@ static uint32_t check_typo_function(CheckInputReader* reader, uint32_t token)
         const bool implicit = declaration < reader->parser->tokens.count && reader->output->function_flags != NULL &&
                               (reader->output->function_flags[declaration] & CHECK_INPUT_FUNCTION_IMPLICIT) != 0;
         result = implicit ? BUSTER_CHECK_NONE : declaration;
+    }
+    return result;
+}
+
+// A value's undeclared name at `token` that the walk reads (#1447, check_constant_name): a declarator's constant's, whose
+// value or type the declaration needs before the walk goes on, so that it can't wait for the binding answers. The
+// declarations visible are the stream's so far, as for an undeclared function's call. The declare event of the name it
+// corrects to, or BUSTER_CHECK_NONE. It counts toward the limit with the walk's calls, in the walk's order; a value's
+// search that the answers make later in a body before it isn't counted there.
+static uint32_t check_typo_walk_value(CheckInputReader* reader, uint32_t token)
+{
+    uint32_t result = BUSTER_CHECK_NONE;
+    if (!reader->typo_disabled && check_typo_ready(reader) && reader->typo->walk_searches < BUSTER_CHECK_TYPO_LIMIT)
+    {
+        CheckTypo* typo = reader->typo;
+        typo->walk_searches += 1;
+        typo->walk_value_tokens[typo->walk_value_count++] = token;
+        result = check_typo_search(reader, &typo->walk, token, reader->bindings.count, CHECK_TYPO_VALUE);
     }
     return result;
 }

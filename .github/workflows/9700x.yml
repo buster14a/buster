@@ -164,9 +164,10 @@ jobs:
           fi
 
   # What this run may reuse, and whether its 9700X job is admitted (tools/ci/nightly.c through tools/ci/nightly.sh; docs/ci.md,
-  # "Nightly main measurements"). A pull request: its draft state alone; its 9700X job measures and skips native
-  # correctness, which its hosted rows cover and which runs after the merge (#1272). A push: admitted, its own native
-  # correctness and measurements on the landed commit. A nightly
+  # "Nightly main measurements"). A pull request, draft or ready: never admitted (#2055); its plain hosted rows
+  # qualify it, and its merged first-parent state gets native correctness and measurements in the nightly window. A
+  # push: its own hosted rows, plain alone in the nightly mode (#2057), which defers its 9700X work to the window; before
+  # the nightly mode, every row and its own native correctness and measurements on the landed commit. A nightly
   # dispatch: that its commit is on the pinned snapshot's first-parent history (else it fails, and nothing runs), the
   # plain hosted rows of the commit's own earlier run, and the 02:00-08:00 Europe/Madrid window. Missing, ambiguous or
   # mismatched evidence runs the work; an API failure is missing evidence. Read-only API access.
@@ -220,7 +221,6 @@ jobs:
           EVIDENCE_HARDWARE: ${{ inputs.hardware }}
           EVIDENCE_SNAPSHOT: ${{ inputs.snapshot }}
           EVIDENCE_OVERRIDE: ${{ inputs.override }}
-          EVIDENCE_DRAFT: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft == true }}
           EVIDENCE_NIGHTLY: ${{ vars.BUSTER_NIGHTLY }}
         run: bash tools/ci/nightly.sh evidence "$RUNNER_TEMP/evidence"
 
@@ -233,9 +233,9 @@ jobs:
   test:
     name: Tests on Ubuntu 26.04 (Clang 23, ${{ matrix.host_arch }}, ${{ matrix.sanitizer }}, O${{ matrix.optimization }}, shard ${{ matrix.shard }} of 4)
     # A pull request's run stops at its first failure. GitHub has no fail-fast across jobs, so its tests wait for the
-    # policy checks, which finish within `changes`' time, and don't start when one fails: neither they nor the 9700X job
-    # after them would change a qualification that can't pass. Pushes to main, the daily run and dispatched runs test
-    # regardless, so that every row reports.
+    # policy checks, which finish within `changes`' time, and don't start when one fails: they wouldn't change a
+    # qualification that can't pass. Pushes to main, the daily run and dispatched runs test regardless, so that every
+    # row reports.
     # A nightly dispatch whose commit's earlier run qualified its plain rows reuses them (`evidence`), and runs none.
     needs: [changes, evidence, agent-guide-size, dco-hooks, prepare-hosted-tools]
     if: ${{ !cancelled() && needs.prepare-hosted-tools.result == 'success' && github.repository_id == '1421805693' && needs.evidence.result == 'success' && needs.evidence.outputs.hosted == 'run' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) && (github.event_name != 'pull_request' || (needs.agent-guide-size.result == 'success' && needs.dco-hooks.result == 'success')) }}
@@ -251,17 +251,18 @@ jobs:
       matrix:
         host_arch: [x86-64, native]
         # The sanitizer rows take far longer than the plain ones: pull requests run the plain builds alone, as nightly
-        # backlog runs and an admitted snapshot run do (the `plain` scope: the 9700X's gate), and pushes to main, the
-        # daily run, full dispatches and the snapshot's deferred daily run the whole matrix.
-        sanitizer: ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '["none"]' || '["none", "address", "undefined", "thread", "memory"]') }}
+        # backlog runs and an admitted snapshot run do (the `plain` scope: the 9700X's gate), and so do pushes to main
+        # in the nightly mode (#2057, until the merge queue carries the full suite). The daily run, full dispatches,
+        # pushes before the nightly mode and the snapshot's deferred daily run run the whole matrix.
+        # `address` already combines ASan, UBSan, bounds and LSan; standalone UBSan remains
+        # available for diagnosis but does not repeat the entire hosted suite.
+        sanitizer: ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '["none"]' || '["none", "address", "thread", "memory"]') }}
         optimization: [3]
         # Each row's inventory runs as 4 shards, a runner each (`parallel --shard K/4`, dealt by
         # tools/ci/correctness.costs): a plain row's test step took about 14.5 minutes on one 4-CPU runner, and its
-        # shards take about 2 to 4. The job's name, the run step's `/4` and the O1 rows' shards below must match this
+        # shards take about 2 to 4. The job's name and the run step's `/4` must match this
         # list, which tools/ci/changes.c's self-test checks (changes_shard_policy).
         shard: [1, 2, 3, 4]
-        include: >-
-          ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '[]' || '[{"host_arch": "x86-64", "sanitizer": "address", "optimization": 1, "shard": 1}, {"host_arch": "x86-64", "sanitizer": "address", "optimization": 1, "shard": 2}, {"host_arch": "x86-64", "sanitizer": "address", "optimization": 1, "shard": 3}, {"host_arch": "x86-64", "sanitizer": "address", "optimization": 1, "shard": 4}, {"host_arch": "native", "sanitizer": "address", "optimization": 1, "shard": 1}, {"host_arch": "native", "sanitizer": "address", "optimization": 1, "shard": 2}, {"host_arch": "native", "sanitizer": "address", "optimization": 1, "shard": 3}, {"host_arch": "native", "sanitizer": "address", "optimization": 1, "shard": 4}]') }}
     defaults:
       run:
         shell: bash
@@ -274,6 +275,9 @@ jobs:
       # inventory's own build.sh calls (check-call-graph) share the build's tree.
       BUSTER_DEBUG_INFO: '0'
       BUSTER_ORACLE_CACHE: check
+      # The native plain row also runs each of the semantic driver's in-process and served runs as a child and fails on
+      # a difference (test-checker-driver --differential, #2071); the other rows run them in-process and served alone.
+      BUSTER_DRIVER_DIFFERENTIAL: ${{ matrix.host_arch == 'native' && matrix.sanitizer == 'none' && '1' || '' }}
     steps:
       - name: Check out triggering commit
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -288,6 +292,13 @@ jobs:
 
       - name: Install official Clang 23.1.4 and test tools
         run: bash tools/ci/setup-hosted.sh
+
+      # Before the build: the kernel, CPU, seccomp, ptrace and container state that a runner-side sanitizer report
+      # (#2060's LeakSanitizer ptrace warning) needs to be traced to its host. It never fails the job.
+      - name: Report sanitizer host kernel, CPU, seccomp and ptrace state
+        if: matrix.sanitizer != 'none'
+        continue-on-error: true
+        run: bash tools/ci/sanitizers.sh host
 
       - name: Set fatal sanitizer policy and verify every enabled detector
         if: matrix.sanitizer != 'none'
@@ -331,9 +342,10 @@ jobs:
             exit 1
           fi
           # Hosted CPU models vary. The native build exercises its actual host path;
-          # the gated 9700X job below always qualifies the complete vector feature set.
+          # the 9700X job qualifies the complete vector feature set on every merged
+          # first-parent state of main in the nightly window, and on dispatched runs.
           if [ "$BUSTER_HOST_ARCH" = native ] && [ "$path" = scalar ]; then
-            printf '%s\n' 'Hosted native build uses scalar kernels; required vector correctness runs on the 9700X after hosted tests pass.'
+            printf '%s\n' 'Hosted native build uses scalar kernels; vector correctness runs on the 9700X in the nightly window.'
           fi
 
       - name: Check baseline fallback memory and arithmetic boundaries
@@ -350,7 +362,20 @@ jobs:
         run: |
           oracle="$RUNNER_TEMP/preprocessor-pragma-oracle"
           bash tools/build-preprocessor-pragma-oracle.sh "$oracle"
-          ./build.sh --config Release
+          # The clang server that the semantic driver's checks send the oracle clang's runs to (#2071), linked with the
+          # release's static clang and LLVM archives, one copy of LLVM; its build checks one request against a spawned
+          # clang. Status 77 is a toolchain without what one copy needs: no server, and the oracle clang runs as children.
+          server="$RUNNER_TEMP/clang-server"
+          served=0
+          bash tools/clang-server/build.sh "$server" || served=$?
+          if [ "$served" -eq 77 ]; then
+              echo "::notice::No clang server for this toolchain: the semantic driver's checks run the oracle clang as children."
+          elif [ "$served" -ne 0 ]; then
+              exit "$served"
+          fi
+          # A compile per CPU: build.sh's default, one per physical core, is two on these runners' two cores of two
+          # threads, which left the address row's build waiting on CPU (#2030).
+          ./build.sh --config Release --jobs "$(nproc)"
           # The steps below run the Release configuration's own executable (BUSTER_COMPILER); build/compiler, the
           # compatibility path, is that same file, and the only executable build.sh leaves in build/ itself.
           compiler=$(./build.sh print-output --config Release)
@@ -359,6 +384,9 @@ jobs:
           test "$(find build -maxdepth 1 -type f -executable | wc -l)" -eq 1
           printf 'BUSTER_COMPILER=%s\n' "$compiler" >> "$GITHUB_ENV"
           printf 'BUSTER_PPF_PRAGMA_ORACLE=%s\n' "$oracle" >> "$GITHUB_ENV"
+          if [ "$served" -eq 0 ]; then
+              printf 'BUSTER_CLANG_SERVER=%s\n' "$server" >> "$GITHUB_ENV"
+          fi
           clang --version
           llvm-config --version
 
@@ -447,13 +475,19 @@ jobs:
         # Preserve this parser smoke test explicitly now that the default C command performs semantic checking.
         # Default C checking and object emission have their own external-oracle tests below.
         if: matrix.shard == 1
-        run: '"$BUSTER_COMPILER" parse -fsyntax-only -march="$BUSTER_HOST_ARCH" -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c'
+        run: '"$BUSTER_COMPILER" parse -fsyntax-only -march="$BUSTER_HOST_ARCH" -Isrc -fwrapv -funsigned-char --predefines build/predefines.h -DBUSTER_COMPLETE_DRIVER=1 src/buster/compiler/main.c'
 
       - name: Fetch c-testsuite at its pinned commit
         # #145's programs, at the commit tests/c-testsuite/subset.txt was declared for: a shallow fetch of that one commit,
         # whose hash fixes the files, without git's sample hooks. The test list below compiles and runs them. The 9700X
         # fetches it from a mirror in its private cache, which Git's pack protocol checks again (fetch-c-testsuite.sh).
         run: bash tools/ci/fetch-c-testsuite.sh build/c-testsuite
+
+      - name: Fetch SQLite's sources at their pinned commit
+        # #146: SQLite 3.53.2's tree, whose amalgamation and shell are the frozen corpus's, for its tests (test-sqlite in
+        # the test list): a shallow fetch of that one commit, whose hash fixes the files, as c-testsuite's above; the 9700X
+        # fetches it from a mirror in its private cache (fetch-sqlite.sh).
+        run: bash tools/ci/fetch-sqlite.sh build/sqlite
 
       - name: Check constrained arenas, command diagnostics, and Callgrind
         if: matrix.host_arch == 'x86-64' && matrix.sanitizer == 'none' && matrix.shard == 1
@@ -527,9 +561,9 @@ jobs:
             BUSTER_HOST_ARCH=znver5 BUSTER_DEBUG_INFO=0 ./build.sh print-compile-flags)
           test "${#flags[@]}" -gt 0
           objects=$(mktemp -d)
-          "$BUSTER_COMPILER" --lanes 1 --verify -c "${flags[@]}" -o "$objects/selected.o" src/buster/compiler/main.c
-          "$BUSTER_COMPILER" --lanes 1 --verify --lower-all -c "${flags[@]}" -o "$objects/all.o" src/buster/compiler/main.c
-          "$BUSTER_COMPILER" --scalar --lanes 1 --verify --lower-all -c "${flags[@]}" -o "$objects/all-scalar.o" src/buster/compiler/main.c
+          "$BUSTER_COMPILER" --lanes 1 --verify -c "${flags[@]}" -o "$objects/selected.o" -DBUSTER_COMPLETE_DRIVER=1 src/buster/compiler/main.c
+          "$BUSTER_COMPILER" --lanes 1 --verify --lower-all -c "${flags[@]}" -o "$objects/all.o" -DBUSTER_COMPLETE_DRIVER=1 src/buster/compiler/main.c
+          "$BUSTER_COMPILER" --scalar --lanes 1 --verify --lower-all -c "${flags[@]}" -o "$objects/all-scalar.o" -DBUSTER_COMPLETE_DRIVER=1 src/buster/compiler/main.c
           cmp "$objects/all.o" "$objects/all-scalar.o"
           rm -r "$objects"
 
@@ -596,6 +630,11 @@ jobs:
 
       - name: Install official Clang, sanitizer and libFuzzer runtimes
         run: bash tools/ci/setup-hosted.sh
+
+      # Before the build, as in the sanitizer rows (#2060). It never fails the job.
+      - name: Report sanitizer host kernel, CPU, seccomp and ptrace state
+        continue-on-error: true
+        run: bash tools/ci/sanitizers.sh host
 
       - name: Set fatal sanitizer policy and verify detectors
         run: |
@@ -685,16 +724,15 @@ jobs:
   benchmarks:
     name: Native tests and benchmarks on Benchpress (Ryzen 7 9700X)
     needs: [changes, evidence, test, fuzz]
-    # Both hosted variants must pass before any hardware work. Drafts keep
-    # hosted feedback but cannot occupy the hardware. This also covers
+    # Both hosted variants must pass before any hardware work. This also covers
     # scheduled/manual runs, whose selector is skipped. The `evidence` job must
-    # admit it: a nightly run outside the window or deferred, and a draft, are
-    # not admitted. A nightly run's plain rows (the `plain` scope, without
-    # fuzzing) gate it as a pull request's do, either run here or, by evidence,
-    # by its commit's earlier run. A pull request's run measures but skips the
-    # native correctness step (#1272): its hosted rows cover correctness, and
-    # native correctness runs after the merge, on main's push and the scheduled
-    # and nightly runs.
+    # admit it: a nightly run outside the window or deferred is not admitted,
+    # and neither is any pull request, draft or ready (#2055, the owner's choice
+    # on 2026-11-10). A pull request's run therefore skips this job as soon as
+    # its tests finish, and nothing waits on it; the clauses below about pull
+    # requests are inert until requested measurements (#1432) decide how they
+    # run. A nightly run's plain rows (the `plain` scope, without fuzzing) gate
+    # it, either run here or, by evidence, by its commit's earlier run.
     if: ${{ !cancelled() && github.repository_id == '1421805693' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && needs.evidence.result == 'success' && needs.evidence.outputs.hardware == 'admit' && ((needs.test.result == 'success' && (needs.fuzz.result == 'success' || ((github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && needs.evidence.outputs.scope == 'plain')) && needs.fuzz.result == 'skipped'))) || (github.event_name == 'workflow_dispatch' && needs.evidence.outputs.hosted == 'reused' && needs.test.result == 'skipped' && needs.fuzz.result == 'skipped')) }}
     runs-on:
       group: buster-9700x-service-dispatch
@@ -921,8 +959,14 @@ jobs:
         # fetches it from a mirror in its private cache, which Git's pack protocol checks again (fetch-c-testsuite.sh).
         run: bash tools/ci/fetch-c-testsuite.sh build/c-testsuite
 
+      - name: Fetch SQLite's sources at their pinned commit
+        # #146: SQLite 3.53.2's tree, whose amalgamation and shell are the frozen corpus's, for its tests (test-sqlite in
+        # the test list): a shallow fetch of that one commit, whose hash fixes the files, as c-testsuite's above; the 9700X
+        # fetches it from a mirror in its private cache (fetch-sqlite.sh).
+        run: bash tools/ci/fetch-sqlite.sh build/sqlite
+
       - name: Parse the compiler source on the native vector build
-        run: '"$BUSTER_COMPILER" parse -fsyntax-only -march="$BUSTER_HOST_ARCH" -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c'
+        run: '"$BUSTER_COMPILER" parse -fsyntax-only -march="$BUSTER_HOST_ARCH" -Isrc -fwrapv -funsigned-char --predefines build/predefines.h -DBUSTER_COMPLETE_DRIVER=1 src/buster/compiler/main.c'
 
       - name: Run complete native vector correctness before benchmarks
         id: native
@@ -1325,7 +1369,7 @@ jobs:
         if: needs.changes.outputs.preprocessor_clang != 'false'
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
-          taskset -c "$cpu" ./build/compiler benchmark-preprocessor --clang -target x86_64-pc-linux-gnu -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c
+          taskset -c "$cpu" ./build/compiler benchmark-preprocessor --clang -target x86_64-pc-linux-gnu -march=native -Isrc -fwrapv -funsigned-char -DBUSTER_COMPLETE_DRIVER=1 src/buster/compiler/main.c
 
       - name: Benchmark the preprocessor on main.c
         # Every other pull request's and every push's: the preprocessor's times by the vectorized kernels and their
@@ -1333,7 +1377,7 @@ jobs:
         if: needs.changes.outputs.preprocessor_clang == 'false' && (env.MEASURE == 'all' || contains(env.MEASURE, ',preprocessor,'))
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
-          taskset -c "$cpu" ./build/compiler benchmark-preprocessor -target x86_64-pc-linux-gnu -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c
+          taskset -c "$cpu" ./build/compiler benchmark-preprocessor -target x86_64-pc-linux-gnu -march=native -Isrc -fwrapv -funsigned-char -DBUSTER_COMPLETE_DRIVER=1 src/buster/compiler/main.c
 
       - name: Benchmark the printer on main.c and the frozen sqlite3.c, with line markers and without
         # #649: -E -P's and -E's printing (--markers runs and prints as the -E driver does) by pp_print_spellings against
@@ -1345,8 +1389,8 @@ jobs:
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           corpus=/var/lib/buster-9700x/corpora/preprocessor-391e729af658
           sqlite=(--predefines "$corpus/provenance/gnu17-pinned-predefines.txt" --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include" "$corpus/sqlite/sqlite3.c")
-          taskset -c "$cpu" ./build/compiler benchmark-preprocessor --spelling-cost -target x86_64-pc-linux-gnu -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c
-          taskset -c "$cpu" ./build/compiler benchmark-preprocessor --markers --spelling-cost -target x86_64-pc-linux-gnu -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c
+          taskset -c "$cpu" ./build/compiler benchmark-preprocessor --spelling-cost -target x86_64-pc-linux-gnu -march=native -Isrc -fwrapv -funsigned-char -DBUSTER_COMPLETE_DRIVER=1 src/buster/compiler/main.c
+          taskset -c "$cpu" ./build/compiler benchmark-preprocessor --markers --spelling-cost -target x86_64-pc-linux-gnu -march=native -Isrc -fwrapv -funsigned-char -DBUSTER_COMPLETE_DRIVER=1 src/buster/compiler/main.c
           taskset -c "$cpu" ./build/compiler benchmark-preprocessor --spelling-cost "${sqlite[@]}"
           taskset -c "$cpu" ./build/compiler benchmark-preprocessor --markers --spelling-cost "${sqlite[@]}"
 
@@ -1360,7 +1404,7 @@ jobs:
         # With the walk round by round (#262), from the same runs. Without taskset: it pins each lane to an allowed CPU
         # of its own.
         if: env.MEASURE == 'all' || contains(env.MEASURE, ',files,')
-        run: ./build/compiler benchmark-files --rounds -target x86_64-pc-linux-gnu -march=native -Isrc -fwrapv -funsigned-char src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
+        run: ./build/compiler benchmark-files --rounds -target x86_64-pc-linux-gnu -march=native -Isrc -fwrapv -funsigned-char -DBUSTER_COMPLETE_DRIVER=1 src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
 
       - name: Benchmark the per-file jobs on musl, sqlite3.c and the flat C library corpus
         # Where `changes` doesn't rule it out (the module's sources): docs/c-files.md's tables, on the preprocessor
@@ -1381,7 +1425,7 @@ jobs:
         if: env.MEASURE == 'all' || contains(env.MEASURE, ',parser,')
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
-          taskset -c "$cpu" ./build/compiler benchmark-parser -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c
+          taskset -c "$cpu" ./build/compiler benchmark-parser -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h -DBUSTER_COMPLETE_DRIVER=1 src/buster/compiler/main.c
           taskset -c "$cpu" ./build/compiler benchmark-parser --passes 1 --only vector tests/parser-handoff/pragma-heavy.c
 
       - name: Benchmark selective lowering on synthetic graphs
@@ -1396,13 +1440,13 @@ jobs:
         if: env.MEASURE == 'all' || contains(env.MEASURE, ',gnu,')
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
-          taskset -c "$cpu" ./build/compiler benchmark-gnu -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c
+          taskset -c "$cpu" ./build/compiler benchmark-gnu -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h -DBUSTER_COMPLETE_DRIVER=1 src/buster/compiler/main.c
 
       - name: Benchmark C-source binding production and resolution
         if: env.MEASURE == 'all' || contains(env.MEASURE, ',parser-bindings,')
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
-          taskset -c "$cpu" ./build/compiler benchmark-parser-bindings -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h src/buster/compiler/main.c
+          taskset -c "$cpu" ./build/compiler benchmark-parser-bindings -march=native -Isrc -fwrapv -funsigned-char --predefines build/predefines.h -DBUSTER_COMPLETE_DRIVER=1 src/buster/compiler/main.c
           corpus=/var/lib/buster-9700x/corpora/preprocessor-391e729af658
           system=(-march=znver5 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include")
           taskset -c "$cpu" ./build/compiler benchmark-parser-bindings "${system[@]}" "$corpus/sqlite/sqlite3.c"
@@ -2163,10 +2207,12 @@ jobs:
 
   qualification:
     # Preserve the existing required context: both hosted variants and the gated
-    # 9700X job must pass on the same revision. On a ready pull request that job
-    # measures without its native correctness step (#1272), and the context
-    # says so; on the daily and dispatched runs, and on a push to main before
-    # the nightly mode, it runs native correctness before the measurements. A
+    # 9700X job must pass on the same revision. A pull request, draft or ready,
+    # never runs that job (#2055): the context passes on its hosted rows alone,
+    # and says that native correctness and measurements run on its merged
+    # first-parent state in the nightly window. On the daily and dispatched runs,
+    # and on a push to main before the nightly mode, the 9700X job runs native
+    # correctness before the measurements. A
     # nightly dispatch reports through its coverage record instead; a retired
     # scheduled run (the nightly mode's) runs nothing; and a push in the
     # nightly mode defers its 9700X work to the window. None of the three has

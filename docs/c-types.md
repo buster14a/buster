@@ -494,9 +494,15 @@ name when given one. clang's printer recurses (`printBefore`, the name,
 `printAfter`, with one flag, `HasEmptyPlaceHolder`, saved and restored around
 parts); `type_print` runs the same steps from an explicit stack of frames. It
 prints `_Bool` in C17 and `bool` with `BUSTER_TYPE_PRINT_C23`, as clang does in
-each mode. Two things it can't spell as clang does: a variable array's size
-expression (it prints `[]`, and `[*]` for `[*]`) and an anonymous tag's
-location (it prints `(unnamed)` where clang names the file and line).
+each mode. The table keeps neither a variable array's size expression nor an
+anonymous tag's location, so its caller gives them: `TypeNames.bound_ids` and
+`bound_texts` spell a variable array's expression by its extent
+(`int (*)[n + 1]`, #1447), else it prints `[]` (`[*]` for `[*]`). `anonymous`
+names an unnamed tag `(unnamed at file:line:col)`, else it prints `(unnamed)`.
+A qualified array whose element a sugar alias names with those qualifiers
+leaves them to the element (`type_print_element_qualifiers`, #1447): clang's
+array type keeps `CI arr[2]`'s qualifiers on its element, so it prints
+`CI[2]`, not `const int[2]`.
 
 Extended qualifiers print after const, volatile and restrict, as clang's
 `Qualifiers::print` has them (#1447): a target's space as its attribute
@@ -505,8 +511,11 @@ Extended qualifiers print after const, volatile and restrict, as clang's
 after a pointer's `*` (`int *const __attribute__((address_space(2)))`). A
 typedef's name under a space prints after it
 (`__attribute__((address_space(1))) T *`). clang's name of a type whose space
-a macro wrote (its `MacroQualifiedType`, `'AS1 int *'`) isn't given: the
-attribute is spelled out.
+a macro wrote (its `MacroQualifiedType`, `'AS1 int *'`) prints by the macro
+where the caller gives one by space (`TypeNames.space_macro_spaces`, #1447):
+before its level, with the level's other qualifiers after its specifier
+(`'AS1 int const *'`), as clang's printer places them; else the attribute is
+spelled out.
 
 ## Tests
 

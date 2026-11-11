@@ -41,4 +41,6 @@ endif()
 if(selected STREQUAL "")
     message(FATAL_ERROR "BusterCompileCommands.cmake: ${INPUT} has no ${CONFIG} commands")
 endif()
-file(WRITE "${OUTPUT}" "${selected}\n]\n")
+# Keep an interrupted write from leaving a newer, partial cached output that Ninja could consider up to date.
+file(WRITE "${OUTPUT}.tmp" "${selected}\n]\n")
+file(RENAME "${OUTPUT}.tmp" "${OUTPUT}")

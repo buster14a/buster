@@ -1129,11 +1129,13 @@ static __attribute__((noinline)) void check_test_bindings(CheckTest* test)
         2,
     };
     check_test_binding_source(test, "extern int x[]; int f(void) { return sizeof x; } int x[2];", "x", earlier_array, BUSTER_ARRAY_LENGTH(earlier_array), true, false);
+    // A builtin's name a static function declares is the program's (#1918: one with external linkage, of another type, is
+    // clang's conflicting types).
     const uint32_t builtin_shadow[] = {
         0,
         0,
     };
-    check_test_binding_source(test, "int __builtin_popcount(int); int f(void) { return __builtin_popcount(1); }", "__builtin_popcount",
+    check_test_binding_source(test, "static int __builtin_popcount(int x) { return x; } int f(void) { return __builtin_popcount(1); }", "__builtin_popcount",
                               builtin_shadow, BUSTER_ARRAY_LENGTH(builtin_shadow), true, false);
     check_test_binding_source(test, "typedef __int128_t Wide; int f(void) { { typedef long __int128_t; __int128_t x = 0; } Wide y = 0; return y; }", "Wide",
                               builtin_shadow, BUSTER_ARRAY_LENGTH(builtin_shadow), true, false);

@@ -478,10 +478,11 @@ static const char check_test_tier1_narrow_callee_source[] =
     "int tier1_narrow_entry(int a, int b, int c);\n"
     "int clang_calls_narrow(int x) { return tier1_narrow_entry(0x123456f0 + x, 0x7fff0000 | (x & 0xffff), 0x5a5a0000 | (x & 1)); }\n";
 
-// The stack arguments' fixture (#141): a unit by --tier1 whose functions pass 7 to 16 arguments of mixed types (longs,
-// ints, pointers, chars and shorts, extended by their types) to functions clang -O2 compiles in the other unit, which
-// read the ones past the registers from the stack, and take 7 to 12 parameters from callers clang -O2 compiles there,
-// some through function pointers. Each of the other unit's functions folds its arguments into one value.
+// The stack arguments' fixture (#141): a unit by --tier1 whose functions pass 7 to 24 arguments of mixed types (longs,
+// ints, pointers, chars and shorts, extended by their types, doubles and a float past xmm7; 21 to a variadic function)
+// to functions clang -O2 compiles in the other unit, which read the ones past the registers from the stack, and take 7
+// to 64 parameters (#1847: _mm512_set_epi8's 64 chars) from callers clang -O2 compiles there, some through function
+// pointers. Each of the other unit's functions folds its arguments into one value.
 static const char check_test_tier1_stack_caller_source[] =
     "#include <stdio.h>\n"
     "long tier1_other7(long a, int b, long c, char* d, short e, long f, long g);\n"
@@ -489,6 +490,32 @@ static const char check_test_tier1_stack_caller_source[] =
     "long tier1_other12(long a, long b, int c, long d, long e, long f, signed char g, long h, long* i, int j, long k, unsigned short l);\n"
     "long tier1_other16(long a, long b, long c, long d, long e, long f, long g, long h, long i, long j, long k, long l, long m, long n, long o, long p);\n"
     "long tier1_drive(long (*seven)(long, long, long, long, long, long, long), long (*twelve)(long, long, long, long, long, long, int, long, long, long, short, long), long x);\n"
+    "double tier1_other24(long a, double b, int c, double d, long e, double f, short g, double h, long i, double j, long k, double l, long m, double n, long o, double p, long q, double r, long s, double t, long u, float v, long w, double x);\n"
+    "long tier1_other_va(int n, ...);\n"
+    "long tier1_drive64(long (*take)(signed char, signed char, signed char, signed char, signed char, signed char, signed char, signed char, signed char, signed char, signed char, signed char, signed char, signed char, signed char, signed char,"
+    " signed char, signed char, signed char, signed char, signed char, signed char, signed char, signed char, signed char, signed char, signed char, signed char, signed char, signed char, signed char, signed char,"
+    " signed char, signed char, signed char, signed char, signed char, signed char, signed char, signed char, signed char, signed char, signed char, signed char, signed char, signed char, signed char, signed char,"
+    " signed char, signed char, signed char, signed char, signed char, signed char, signed char, signed char, signed char, signed char, signed char, signed char, signed char, signed char, signed char, signed char), long x);\n"
+    "static long tier1_many(long x, long y)\n"
+    "{\n"
+    "    double d = tier1_other24(x, 0.5 * (double)y, (int)(x + 1), (double)x - 2.25, y * 3, 1.0 / ((double)y + 0.5), (short)(x * 5), -(double)x, y ^ 9, (double)(x * y), x - 11, 3.75,\n"
+    "                             y + 13, (double)x * 0.125, x * 17, (double)y - 19.5, y * 23, 29.0, x ^ y, (double)(x + y), ~x, (float)y * 0.5f, x + y + 31, (double)(x - y) * 0.25);\n"
+    "    long v = tier1_other_va(20, x, y, x + 1, y + 1, x + 2, y + 2, x + 3, y + 3, x + 4, y + 4, x + 5, y + 5, x + 6, y + 6, x + 7, y + 7, x + 8, y + 8, x + 9, y + 9);\n"
+    "    return (long)(d * 8.0) * 31 + v;\n"
+    "}\n"
+    "long tier1_take64(signed char a0, signed char a1, signed char a2, signed char a3, signed char a4, signed char a5, signed char a6, signed char a7, signed char a8, signed char a9, signed char a10, signed char a11,"
+    " signed char a12, signed char a13, signed char a14, signed char a15, signed char a16, signed char a17, signed char a18, signed char a19, signed char a20, signed char a21, signed char a22, signed char a23,"
+    " signed char a24, signed char a25, signed char a26, signed char a27, signed char a28, signed char a29, signed char a30, signed char a31, signed char a32, signed char a33, signed char a34, signed char a35,"
+    " signed char a36, signed char a37, signed char a38, signed char a39, signed char a40, signed char a41, signed char a42, signed char a43, signed char a44, signed char a45, signed char a46, signed char a47,"
+    " signed char a48, signed char a49, signed char a50, signed char a51, signed char a52, signed char a53, signed char a54, signed char a55, signed char a56, signed char a57, signed char a58, signed char a59,"
+    " signed char a60, signed char a61, signed char a62, signed char a63)\n"
+    "{\n"
+    "    const signed char v[64] = { a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19, a20, a21, a22, a23, a24, a25, a26, a27, a28, a29, a30, a31,\n"
+    "                                a32, a33, a34, a35, a36, a37, a38, a39, a40, a41, a42, a43, a44, a45, a46, a47, a48, a49, a50, a51, a52, a53, a54, a55, a56, a57, a58, a59, a60, a61, a62, a63 };\n"
+    "    long h = 0;\n"
+    "    for (int i = 0; i < 64; i += 1) h = h * 3 + v[i] * (i + 1);\n"
+    "    return h;\n"
+    "}\n"
     "static long tier1_pass(long x, long y)\n"
     "{\n"
     "    char text[4] = { 'a', 'b', 'c', 0 };\n"
@@ -514,6 +541,7 @@ static const char check_test_tier1_stack_caller_source[] =
     "    for (long x = -40; x < 40; x += 3)\n"
     "    {\n"
     "        total = total * 31 + (unsigned long)tier1_pass(x, x * 7 - 5) + (unsigned long)tier1_drive(tier1_take7, tier1_take12, x);\n"
+    "        total = total * 31 + (unsigned long)tier1_many(x, x * 5 + 3) + (unsigned long)tier1_drive64(tier1_take64, x);\n"
     "    }\n"
     "    printf(\"%lu\\n\", total);\n"
     "    return 0;\n"
@@ -533,6 +561,20 @@ static const char check_test_tier1_stack_callee_source[] =
     "long tier1_drive(long (*seven)(long, long, long, long, long, long, long), long (*twelve)(long, long, long, long, long, long, int, long, long, long, short, long), long x)\n"
     "{\n"
     "    return seven(x, x + 1, x - 2, x * 3, x ^ 4, ~x, x * x) + twelve(x, 2, 3, x, 5, 6, (int)(x * 7), 8, x - 9, 10, (short)(x * 11), x + 12);\n"
+    "}\n"
+    "double tier1_other24(long a, double b, int c, double d, long e, double f, short g, double h, long i, double j, long k, double l, long m, double n, long o, double p, long q, double r, long s, double t, long u, float v, long w, double x)\n"
+    "{\n"
+    "    return (double)(a + c * 3 + e * 5 + g * 7 + i * 11 + k * 13 + m * 17 + o * 19 + q * 23 + s * 29 + u * 31 + w * 37) + b - d * 2 + f * 3 - h + j * 0.5 + l - n + p * 0.25 + r + t * 0.125 + v + x;\n"
+    "}\n"
+    "#include <stdarg.h>\n"
+    "long tier1_other_va(int n, ...) { va_list ap; va_start(ap, n); long h = 0; for (int i = 0; i < n; i += 1) h = h * 7 + va_arg(ap, long); va_end(ap); return h; }\n"
+    "typedef signed char sc;\n"
+    "long tier1_drive64(long (*take)(sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc,"
+    " sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc, sc), long x)\n"
+    "{\n"
+    "    sc b = (sc)x;\n"
+    "    return take(b, b + 1, b - 2, b * 3, b ^ 4, ~b, 6, 7, b, 9, 10, b + 11, 12, 13, 14, b - 15, 16, 17, 18, 19, b, 21, 22, 23, 24, 25, b * 2, 27, 28, 29, 30, b,\n"
+    "                -1, -2, b, -4, -5, -6, -7, -8, b + 9, -10, -11, -12, -13, -14, -15, b, 100, 101, 102, b, 104, 105, 106, 107, b, 109, 110, 111, 112, 113, 114, b);\n"
     "}\n";
 
 // The floating values' fixture (#141): F32 and F64 parameters, results and arguments interleaved with integers, past
@@ -879,7 +921,10 @@ static const char check_test_tier1_wide_source[] =
 // way round; and ones the convention ignores, passed and returned nowhere: an empty struct, and one of unnamed
 // bit-fields. Each crosses between this unit (Tier 1's) and the other (clang -O2's) both ways, as arguments and results:
 // the other unit's b_empty, by --tier1, once passed its empty struct's address in rdi, x's register (a call without
-// records, ir_typed_aggregate_call).
+// records, ir_typed_aggregate_call). And (#1879) a struct of a flexible array member alone, of no size and MEMORY, which
+// clang passes byval in an 8-byte slot: after five longs in rdi to r8 and a double in xmm0, then a long in r9 and one
+// on the stack after its slot, where a call without records once put its address in r9 and the rest one place on;
+// first too, before a long in rdi.
 static const char check_test_tier1_shapes_header[] =
     "#include <stdio.h>\n"
     "typedef struct { long x; long : 64; } Low;\n"
@@ -890,6 +935,7 @@ static const char check_test_tier1_shapes_header[] =
     "typedef struct { long a, b; } LL;\n"
     "typedef struct {} Empty;\n"
     "typedef struct { int : 32; } Bits;\n"
+    "typedef struct { long *p[]; } Flex;\n"
     "long b_low(Low s);\n"
     "long b_high(High s);\n"
     "long b_high_mixed(HighMixed s);\n"
@@ -919,7 +965,12 @@ static const char check_test_tier1_shapes_header[] =
     "long a_empty(Empty e, long x);\n"
     "long a_bits(long a, Bits b, long c);\n"
     "Empty a_make_empty(long x);\n"
-    "long a_empty_chain(long x);\n";
+    "long a_empty_chain(long x);\n"
+    "long b_flex(long a, long b, long c, long d, long e, double f, Flex s, long t, long u);\n"
+    "long b_flex_first(Flex s, long x);\n"
+    "long a_flex(long a, long b, long c, long d, long e, double f, Flex s, long t, long u);\n"
+    "long a_flex_first(Flex s, long x);\n"
+    "long a_flex_chain(long k);\n";
 
 static const char check_test_tier1_shapes_other_source[] =
     "#include \"tier1-shapes.h\"\n"
@@ -937,7 +988,9 @@ static const char check_test_tier1_shapes_other_source[] =
     "long b_back(int k) { return a_make_low(k).x * 3 + a_make_high(k + 1).y * 5 + a_make_high_mixed(k + 2).i + (long)(a_make_high_mixed(k).f * 8); }\n"
     "long b_empty(Empty e, long x) { return a_empty(e, x) * 2 + x; }\n"
     "long b_bits(long a, Bits b, long c) { return a_bits(a, b, c) + 1; }\n"
-    "Empty b_make_empty(long x) { Empty e = { }; (void)x; return e; }\n";
+    "Empty b_make_empty(long x) { Empty e = { }; (void)x; return e; }\n"
+    "long b_flex(long a, long b, long c, long d, long e, double f, Flex s, long t, long u) { return a_flex(a, b, c, d, e, f, s, t, u) * 3 + a + t * 5 + u * 7; }\n"
+    "long b_flex_first(Flex s, long x) { return a_flex_first(s, x) * 2 + x; }\n";
 
 static const char check_test_tier1_shapes_source[] =
     "#include \"tier1-shapes.h\"\n"
@@ -956,6 +1009,9 @@ static const char check_test_tier1_shapes_source[] =
     "long a_bits(long a, Bits b, long c) { Bits copy = b; (void)copy; return a * 5 + c; }\n"
     "Empty a_make_empty(long x) { Empty e; (void)x; return e; }\n"
     "long a_empty_chain(long x) { Empty e = b_make_empty(x); Bits b = { }; return b_empty(e, x) + b_bits(x, b, x + 1) + a_empty(a_make_empty(x), x); }\n"
+    "long a_flex(long a, long b, long c, long d, long e, double f, Flex s, long t, long u) { (void)s; return a + b * 2 + c * 3 + d * 4 + e * 5 + (long)(f * 6) + t * 7 + u * 8; }\n"
+    "long a_flex_first(Flex s, long x) { (void)s; return x * 9 + 4; }\n"
+    "long a_flex_chain(long k) { Flex s; return b_flex(k, k + 1, k + 2, k + 3, k + 4, k * 0.5, s, k + 5, k + 6) + b_flex_first(s, k); }\n"
     "int main(void)\n"
     "{\n"
     "    for (int k = 1; k < 4; k += 1)\n"
@@ -972,6 +1028,7 @@ static const char check_test_tier1_shapes_source[] =
     "        printf(\"%ld %ld %ld\\n\", a_make_low(k).x, a_make_high(k).y, (long)a_make_high_mixed(k).i);\n"
     "        Empty e = { };\n"
     "        printf(\"%ld %ld\\n\", b_empty(e, k), a_empty_chain(k));\n"
+    "        printf(\"%ld\\n\", a_flex_chain(k));\n"
     "    }\n"
     "    return 0;\n"
     "}\n";
@@ -1911,7 +1968,14 @@ static void check_test_driver_tier1_labels(CheckTest* test, const char* clang, c
     check_test_expect(test, ran, "clang's build of the labels fixture runs");
     check_test_expect(test, ran && tier0_built && check_test_driver_capture(tier0, tier0_output, sizeof(tier0_output)) && strcmp(tier0_output, expected) == 0,
                       "Tier 0's build of the labels fixture prints clang's build's output");
-    const bool ready = ran && x86_disassembler_initialize();
+    // TSan's and MSan's PIE executables aren't baked. The compiler children initialize their own tables,
+    // but the ELF object oracle below also reads x86_effects in this test process (#1829).
+    const bool semantics = (x86_semantics_initialized || x86_semantics_initialize()) &&
+                           x86_effects_control(x86_effects(X86_FORM_JMP_RM64)) == BUSTER_X86_CONTROL_JUMP &&
+                           x86_effects_control(x86_effects(X86_FORM_JNE_REL8)) == BUSTER_X86_CONTROL_BRANCH &&
+                           x86_effects_control(x86_effects(X86_FORM_RET)) == BUSTER_X86_CONTROL_RETURN;
+    check_test_expect(test, semantics, "the Tier 1 table-label oracle has initialized x86 control effects");
+    const bool ready = ran && semantics && x86_disassembler_initialize();
     X86Decoded* records = calloc(CHECK_TEST_TIER1_LABELS_RECORDS, sizeof(X86Decoded));
     uint32_t* offsets = calloc(CHECK_TEST_TIER1_LABELS_RECORDS, sizeof(uint32_t));
     uint32_t* types = calloc(CHECK_TEST_TIER1_LABELS_RECORDS, sizeof(uint32_t));
@@ -2022,7 +2086,7 @@ static void check_test_driver_tier1_labels(CheckTest* test, const char* clang, c
                 }
             }
             check_test_expect(test, loop_addresses == 1 && loop_relocations == 1 && entry,
-                              "the loop's one relocated table base is reached at entry and no direct or table edge reenters it");
+                              "the loop's single relocated table base dominates each dispatch and cannot be reentered");
             if (entry && rematerialize == 0 && path == 0)
             {
                 check_test_tier1_table_entry_controls(test, object, records, loop_records, loop_address, dispatch, loop_targets);
@@ -2811,6 +2875,264 @@ static void check_test_driver_tier1_dynamic(CheckTest* test, const char* clang, 
     unlink(reference);
 }
 
+// The asm bodies' fixture (#1839): asm statements placed in their callers as asm bodies, which --tier1 compiles itself
+// (TIER1_RULE_ASM), each function Tier 1's: cpuid in a loop of eight live values (rbx a callee-saved register the
+// prologue saves) and in always_inline wrappers beside rdtsc's, musl's syscall wrappers' shapes (r10, r8 and r9 explicit
+// register variables) on system calls whose results don't vary, the x87's fsqrt on `+t` and fprem's loop with the
+// status word in %ax, flag outputs, a template's own loop (`1: decl; jnz 1b`), a bswap and an lfence (Tier 0's rows,
+// asm bodies under --tier1), callee-saved clobbers inside a loop of live values across a call, xmm clobbers beside live
+// floating values, and rsp's alignment at the template. Clang -O0's build is its oracle.
+static const char check_test_tier1_asm_source[] =
+    "int printf(const char* format, ...);\n"
+    "static inline __attribute__((always_inline)) unsigned long tier1_rdtsc(void)\n"
+    "{\n"
+    "    unsigned lo, hi;\n"
+    "    __asm__ volatile(\"rdtsc\" : \"=a\"(lo), \"=d\"(hi));\n"
+    "    return (unsigned long)hi << 32 | lo;\n"
+    "}\n"
+    "static inline __attribute__((always_inline)) unsigned tier1_vendor(void)\n"
+    "{\n"
+    "    unsigned a, b, c, d;\n"
+    "    __asm__ volatile(\"cpuid\" : \"=a\"(a), \"=b\"(b), \"=c\"(c), \"=d\"(d) : \"a\"(0u), \"c\"(0u));\n"
+    "    return ((b == 0x756e6547u) | (b == 0x68747541u)) + (a != 0);\n"
+    "}\n"
+    "unsigned __attribute__((noinline)) tier1_cpuid(unsigned n, unsigned a1, unsigned a2, unsigned a3, unsigned a4, unsigned a5, unsigned a6, unsigned a7)\n"
+    "{\n"
+    "    unsigned total = 0;\n"
+    "    for (unsigned i = 0; i < n; i += 1)\n"
+    "    {\n"
+    "        unsigned a, b, c, d;\n"
+    "        __asm__ volatile(\"cpuid\" : \"=a\"(a), \"=b\"(b), \"=c\"(c), \"=d\"(d) : \"a\"(0u), \"c\"(0u));\n"
+    "        total += (b == 0x756e6547u || b == 0x68747541u) + (a != 0) + a1 + a2 + a3 + a4 + a5 + a6 + a7 + i;\n"
+    "        a1 += 1;\n"
+    "        a2 += 2;\n"
+    "        a3 += a1;\n"
+    "        a4 ^= a2;\n"
+    "        a5 += a4;\n"
+    "        a6 -= a5;\n"
+    "        a7 *= 3;\n"
+    "    }\n"
+    "    return total + tier1_vendor() + (tier1_rdtsc() != 0);\n"
+    "}\n"
+    "static long tier1_syscall1(long n, long a)\n"
+    "{\n"
+    "    unsigned long ret;\n"
+    "    __asm__ __volatile__(\"syscall\" : \"=a\"(ret) : \"a\"(n), \"D\"(a) : \"rcx\", \"r11\", \"memory\");\n"
+    "    return (long)ret;\n"
+    "}\n"
+    "static long tier1_syscall6(long n, long a, long b, long c, long d, long e, long f)\n"
+    "{\n"
+    "    unsigned long ret;\n"
+    "    register long r10 __asm__(\"r10\") = d;\n"
+    "    register long r8 __asm__(\"r8\") = e;\n"
+    "    register long r9 __asm__(\"r9\") = f;\n"
+    "    __asm__ __volatile__(\"syscall\" : \"=a\"(ret) : \"a\"(n), \"D\"(a), \"S\"(b), \"d\"(c), \"r\"(r10), \"r\"(r8), \"r\"(r9) : \"rcx\", \"r11\", \"memory\");\n"
+    "    return (long)ret;\n"
+    "}\n"
+    "static long double tier1_sqrtl(long double x)\n"
+    "{\n"
+    "    __asm__(\"fsqrt\" : \"+t\"(x));\n"
+    "    return x;\n"
+    "}\n"
+    "static long double tier1_fmodl(long double x, long double y)\n"
+    "{\n"
+    "    unsigned short status;\n"
+    "    do\n"
+    "    {\n"
+    "        __asm__(\"fprem; fnstsw %%ax\" : \"+t\"(x), \"=a\"(status) : \"u\"(y));\n"
+    "    } while (status & 0x400);\n"
+    "    return x;\n"
+    "}\n"
+    "static int tier1_flags(long a, long b)\n"
+    "{\n"
+    "    int below, zero, sign;\n"
+    "    __asm__(\"cmpq %3, %4\" : \"=@ccb\"(below), \"=@ccz\"(zero), \"=@ccs\"(sign) : \"r\"(b), \"r\"(a));\n"
+    "    return below * 4 + zero * 2 + sign;\n"
+    "}\n"
+    "static int tier1_count(int n)\n"
+    "{\n"
+    "    int r = n;\n"
+    "    __asm__(\"1: decl %0; jnz 1b\" : \"+r\"(r));\n"
+    "    return r + n;\n"
+    "}\n"
+    "static unsigned tier1_swap(unsigned x, unsigned y)\n"
+    "{\n"
+    "    __asm__(\"bswap %0\" : \"+r\"(x));\n"
+    "    __asm__ volatile(\"lfence\" ::: \"memory\");\n"
+    "    return x + y;\n"
+    "}\n"
+    "static int __attribute__((noinline)) tier1_callee(int x)\n"
+    "{\n"
+    "    return x * 3 + 1;\n"
+    "}\n"
+    "static long tier1_callee_saved(long n)\n"
+    "{\n"
+    "    long a = n, b = n * 2, c = n * 3, d = n * 4, e = n * 5, f = n * 6, g = n * 7, h = n * 8;\n"
+    "    long total = 0;\n"
+    "    for (long i = 0; i < n; i += 1)\n"
+    "    {\n"
+    "        total += tier1_callee((int)(a + i));\n"
+    "        __asm__ volatile(\"movq $1, %%rbx; movq $2, %%r12; movq $3, %%r13; movq $4, %%r14\" ::: \"rbx\", \"r12\", \"r13\", \"r14\");\n"
+    "        total += a + b + c + d + e + f + g + h;\n"
+    "        a += 1;\n"
+    "        h ^= a;\n"
+    "    }\n"
+    "    return total;\n"
+    "}\n"
+    "static double tier1_vectors(double x, int k)\n"
+    "{\n"
+    "    double y = x * 2.0;\n"
+    "    float z = (float)x + 0.5f;\n"
+    "    long r = k;\n"
+    "    __asm__ volatile(\"xorps %%xmm0, %%xmm0; xorps %%xmm1, %%xmm1; xorps %%xmm2, %%xmm2; addq $3, %0\" : \"+r\"(r) : : \"xmm0\", \"xmm1\", \"xmm2\");\n"
+    "    return y + x + (double)r + (double)z;\n"
+    "}\n"
+    "static int tier1_aligned(void)\n"
+    "{\n"
+    "    unsigned long sp;\n"
+    "    __asm__ volatile(\"movq %%rsp, %0\" : \"=r\"(sp));\n"
+    "    return (int)(sp & 15);\n"
+    "}\n"
+    "int main(void)\n"
+    "{\n"
+    "    printf(\"cpuid %u\\n\", tier1_cpuid(7, 1, 2, 3, 4, 5, 6, 7));\n"
+    "    printf(\"syscall %ld %ld\\n\", tier1_syscall1(3, -1), tier1_syscall6(100000, 1, 2, 3, 4, 5, 6));\n"
+    "    printf(\"x87 %.6Lf %.6Lf\\n\", tier1_sqrtl(2.0L), tier1_fmodl(1000.75L, 7.25L));\n"
+    "    printf(\"flags %d %d %d %d\\n\", tier1_flags(1, 2), tier1_flags(2, 2), tier1_flags(-5, 3), tier1_flags(7, -1));\n"
+    "    printf(\"count %d swap %u\\n\", tier1_count(10), tier1_swap(0x01020304u, 5));\n"
+    "    printf(\"saved %ld\\n\", tier1_callee_saved(9));\n"
+    "    printf(\"vectors %.3f aligned %d\\n\", tier1_vectors(1.25, 4), tier1_aligned());\n"
+    "    return 0;\n"
+    "}\n";
+
+// The asm bodies' fixture (#1839) compiled by --tier1 --verify into an executable by each path, with and without
+// rematerialization, with no function refused: it must print what clang -O0's build prints. Its -c object's
+// tier1_cpuid holds its cpuid among its own records, with no call, and pushes rbx in its prologue.
+static void check_test_driver_tier1_asm(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    char unit[512];
+    char reference[512];
+    char object[512];
+    snprintf(unit, sizeof(unit), "%s/tier1-asm.c", directory);
+    snprintf(reference, sizeof(reference), "%s/tier1-asm-clang", directory);
+    snprintf(object, sizeof(object), "%s/tier1-asm.o", directory);
+    const bool written = parse_test_write(unit, check_test_tier1_asm_source, sizeof(check_test_tier1_asm_source) - 1);
+    char* reference_arguments[] = { (char*)clang, "-O0", "-w", "-o", reference, unit, NULL };
+    char* text = NULL;
+    const bool referenced = written && check_test_driver_spawn(reference_arguments, &text) == 0;
+    free(text);
+    char expected[4096] = { 0 };
+    const bool ran = referenced && check_test_driver_capture(reference, expected, sizeof(expected)) && expected[0] != 0;
+    check_test_expect(test, ran, "clang's build of the asm bodies' fixture runs");
+    for (uint32_t rematerialize = 0; ran && rematerialize < 2; rematerialize += 1)
+    {
+        for (uint32_t path = 0; path < 2; path += 1)
+        {
+            char program[512];
+            snprintf(program, sizeof(program), "%s/tier1-asm-%u-%u", directory, rematerialize, path);
+            CheckTestTier1Build build;
+            const bool compiled = check_test_tier1_build(executable, unit, "", program, rematerialize != 0, path != 0, false, false, NULL, &build);
+            check_test_expect(test, compiled, "the asm bodies' fixture compiles by --tier1, every function Tier 1's");
+            char actual[4096] = { 0 };
+            check_test_expect(test, compiled && check_test_driver_capture(program, actual, sizeof(actual)) && strcmp(actual, expected) == 0,
+                              "Tier 1's asm bodies print clang -O0's build's output");
+            unlink(program);
+        }
+    }
+    for (uint32_t path = 0; written && path < 2; path += 1)
+    {
+        CheckTestTier1Build build;
+        const bool compiled = check_test_tier1_build(executable, unit, "", object, true, path != 0, true, false, NULL, &build);
+        X86Decoded records[512];
+        uint32_t offsets[512];
+        uint32_t types[512];
+        uint32_t relocations = 0;
+        const uint32_t decoded = compiled ? check_test_tier1_function(object, "tier1_cpuid", records, 512, offsets, types, &relocations) : 0;
+        uint32_t cpuids = 0;
+        uint32_t calls = 0;
+        bool pushed = false;
+        for (uint32_t r = 0; r < decoded; r += 1)
+        {
+            const X86Instruction* record = &records[r].instruction;
+            cpuids += record->form == X86_FORM_CPUID;
+            calls += record->form == X86_FORM_CALL_REL32 || record->form == X86_FORM_CALL_RM64;
+            pushed |= r < 4 && (record->form == X86_FORM_PUSH_R64 || record->form == X86_FORM_PUSH_RM64) && (record->reg == X86_REGISTER_RBX || record->rm == X86_REGISTER_RBX);
+        }
+        char message[256];
+        snprintf(message, sizeof(message), "asm bodies (%s path, --tier1): tier1_cpuid's own records hold %u cpuids and %u calls, rbx %s by its prologue", path != 0 ? "scalar" : "vector", cpuids,
+                 calls, pushed ? "pushed" : "not pushed");
+        check_test_expect(test, compiled && decoded != 0 && cpuids == 2 && calls == 0 && pushed, message);
+        unlink(object);
+    }
+    unlink(unit);
+    unlink(reference);
+}
+
+// The asm bodies' opmask fixture (#1839): two masks live across a template that writes k1 to k7, its clobbers, in a
+// function Tier 1 compiles. Tier 1's CFG consumer saves no mask value around an asm body, so such a template keeps its
+// helper (check_asm_names_opmask), whose call saves them; the masks then pick the lanes the sum adds.
+static const char check_test_tier1_asm_masks_source[] =
+    "#include <immintrin.h>\n"
+    "#include <stdio.h>\n"
+    "__attribute__((noinline)) int tier1_kept(const int* p, int x)\n"
+    "{\n"
+    "    __m512i v = _mm512_loadu_si512(p);\n"
+    "    __mmask16 m = _mm512_cmpgt_epi32_mask(v, _mm512_set1_epi32(x));\n"
+    "    __mmask16 n = _mm512_cmplt_epi32_mask(v, _mm512_set1_epi32(x + 6));\n"
+    "    __asm__ volatile(\"xorl %%eax, %%eax\\n\\tkmovw %%eax, %%k1\\n\\tkmovw %%eax, %%k2\\n\\tkmovw %%eax, %%k3\\n\\tkmovw %%eax, %%k4\\n\\t\"\n"
+    "                     \"kmovw %%eax, %%k5\\n\\tkmovw %%eax, %%k6\\n\\tkmovw %%eax, %%k7\"\n"
+    "                     ::: \"eax\", \"k1\", \"k2\", \"k3\", \"k4\", \"k5\", \"k6\", \"k7\");\n"
+    "    return _mm512_mask_reduce_add_epi32(m & n, v) + __builtin_popcount(m) * 100 + __builtin_popcount(n) * 10000;\n"
+    "}\n"
+    "int main(void)\n"
+    "{\n"
+    "    int a[16];\n"
+    "    for (int i = 0; i < 16; i += 1)\n"
+    "    {\n"
+    "        a[i] = i * 3 - 7;\n"
+    "    }\n"
+    "    printf(\"kept %d %d\\n\", tier1_kept(a, 2), tier1_kept(a, -5));\n"
+    "    return 0;\n"
+    "}\n";
+
+// The opmask fixture above by --tier1 --verify for x86-64-v4, by each path, with and without rematerialization: it
+// compiles, tier1_kept Tier 1's, and where the host has AVX-512 F, BW, DQ and VL prints clang -O0's build's output.
+static void check_test_driver_tier1_asm_masks(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    char unit[512];
+    char reference[512];
+    snprintf(unit, sizeof(unit), "%s/tier1-asm-masks.c", directory);
+    snprintf(reference, sizeof(reference), "%s/tier1-asm-masks-clang", directory);
+    const bool written = parse_test_write(unit, check_test_tier1_asm_masks_source, sizeof(check_test_tier1_asm_masks_source) - 1);
+    char* reference_arguments[] = { (char*)clang, "-O0", "-w", "-march=x86-64-v4", "-o", reference, unit, NULL };
+    char* text = NULL;
+    const bool referenced = written && check_test_driver_spawn(reference_arguments, &text) == 0;
+    free(text);
+    check_test_expect(test, referenced, "clang builds the asm bodies' opmask fixture");
+    const uint64_t needed = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512BW) | BUSTER_X86_FEATURE(AVX512DQ) | BUSTER_X86_FEATURE(AVX512VL);
+    const bool host = (x86_target_native().features & needed) == needed;
+    char expected[256] = { 0 };
+    const bool ran = referenced && host && check_test_driver_capture(reference, expected, sizeof(expected)) && expected[0] != 0;
+    check_test_expect(test, !host || ran, "clang's build of the asm bodies' opmask fixture runs");
+    for (uint32_t rematerialize = 0; referenced && rematerialize < 2; rematerialize += 1)
+    {
+        for (uint32_t path = 0; path < 2; path += 1)
+        {
+            char program[512];
+            snprintf(program, sizeof(program), "%s/tier1-asm-masks-%u-%u", directory, rematerialize, path);
+            CheckTestTier1Build build;
+            const bool compiled = check_test_tier1_build(executable, unit, "tier1_kept", program, rematerialize != 0, path != 0, false, false, "-march=x86-64-v4", &build);
+            check_test_expect(test, compiled, "the asm bodies' opmask fixture compiles by --tier1, tier1_kept Tier 1's");
+            char actual[256] = { 0 };
+            check_test_expect(test, !host || (compiled && check_test_driver_capture(program, actual, sizeof(actual)) && strcmp(actual, expected) == 0),
+                              "Tier 1 keeps the masks live across a template that writes k1 to k7, as clang -O0's build does");
+            unlink(program);
+        }
+    }
+    unlink(unit);
+    unlink(reference);
+}
+
 // A fixture of two units sharing a header, `name`.h (#789, #141): its unit by --tier1 -c, by each path with and without
 // rematerialization, every function Tier 1's, linked with its other unit compiled by clang -O2, prints what clang -O0's
 // build of both prints; and both units by --tier1, every function of both Tier 1's, print it too. `what` names it in the
@@ -3167,7 +3489,9 @@ static void check_test_driver_tier1_bmi(CheckTest* test, const char* clang, cons
 // The classic bit builtins' fixture (#1374, check_lower_bits_row): every one of them alone, a chain of them whose values
 // stay live across each other, and a loop that iterates a word's set bits by ctz, each count's IR intrinsic (bsf, bsr,
 // tzcnt, lzcnt, popcnt, bswap) by the target's form, on the other unit's (clang -O2's) operands, never 0 for ctz and clz.
-// The generic/C23 recipes (#1652) also take zero, negative fallback results, narrow and wide _BitInts and one-zero limbs.
+// The generic/C23 recipes (#1652) also take zero, negative fallback results, narrow and wide _BitInts and one-zero limbs,
+// and _BitInts past 128 bits (#1447) limb by limb, a rotation of a width no power of two against a reference in clang's
+// build, whose code generator can't compile one.
 static const char check_test_tier1_bits_header[] =
     "unsigned b_bswap16(unsigned short x);\n"
     "unsigned b_bswap32(unsigned x);\n"
@@ -3189,7 +3513,8 @@ static const char check_test_tier1_bits_header[] =
     "unsigned long b_bits(unsigned long a);\n"
     "unsigned long b_generic(unsigned long a, int f);\n"
     "unsigned long b_stdc(unsigned long a);\n"
-    "unsigned long b_generic_wide(unsigned long low, unsigned long high, int f);\n";
+    "unsigned long b_generic_wide(unsigned long low, unsigned long high, int f);\n"
+    "unsigned long b_generic_limbs(unsigned long low, unsigned long high, int f, int k);\n";
 
 static const char check_test_tier1_bits_source[] =
     "#include \"tier1-bits.h\"\n"
@@ -3268,6 +3593,26 @@ static const char check_test_tier1_bits_source[] =
     "    swap=__builtin_stdc_bit_floor(u); h=h*31+(unsigned long)swap+(unsigned long)(swap>>64);\n"
     "    swap=__builtin_stdc_bit_ceil(u); h=h*31+(unsigned long)swap+(unsigned long)(swap>>64);\n"
     "    return h;\n"
+    "}\n"
+    "#define LIMBS(p,n) for(unsigned j=0;j<(n);j++){unsigned long w;__builtin_memcpy(&w,(const char*)(p)+8*j,8);h=h*31+w;}\n"
+    "#ifdef __BUSTER__\n"
+    "#define ROTL(x,c,w) __builtin_stdc_rotate_left(x,c)\n"
+    "#else\n"
+    "#define ROTL(x,c,w) ({__typeof__(x) x_=(x);unsigned k_=(unsigned)((((c)%(w))+(w))%(w));k_?(x_<<k_)|(x_>>((w)-k_)):x_;})\n"
+    "#endif\n"
+    "unsigned long b_generic_limbs(unsigned long low, unsigned long high, int f, int k)\n"
+    "{\n"
+    "    unsigned _BitInt(256) w=((unsigned _BitInt(256))high<<((unsigned)k%190))^((unsigned _BitInt(256))low<<64)^high;\n"
+    "    unsigned _BitInt(200) a=(unsigned _BitInt(200))w; unsigned _BitInt(129) b=(unsigned _BitInt(129))(w>>(unsigned)k%128); _BitInt(208) c=(_BitInt(208))~w;\n"
+    "    unsigned long h=__builtin_popcountg(w)+__builtin_popcountg(a)+__builtin_popcountg(b);\n"
+    "    h=h*31+(unsigned)__builtin_clzg(a,f)+(unsigned)__builtin_ctzg(a,f)+(unsigned)__builtin_clzg(w,f)+(unsigned)__builtin_ctzg(b,f);\n"
+    "    STDC(a); STDC(b); STDC(w);\n"
+    "    unsigned _BitInt(200) r=__builtin_bitreverseg(a); LIMBS(&r,4);\n"
+    "    _BitInt(208) q=__builtin_bswapg(c); LIMBS(&q,4); q=__builtin_bitreverseg(c); LIMBS(&q,4);\n"
+    "    unsigned _BitInt(256) t=__builtin_stdc_rotate_left(w,k); LIMBS(&t,4); t=__builtin_stdc_rotate_right(w,c); LIMBS(&t,4);\n"
+    "    r=ROTL(a,k,200); LIMBS(&r,4); unsigned _BitInt(129) s=ROTL(b,(long)f,129); LIMBS(&s,3);\n"
+    "    h=h*31+__builtin_stdc_rotate_left((unsigned)low,c)+__builtin_stdc_rotate_right((unsigned short)high,a);\n"
+    "    return h;\n"
     "}\n";
 
 static const char check_test_tier1_bits_other_source[] =
@@ -3292,6 +3637,7 @@ static const char check_test_tier1_bits_other_source[] =
     "        hash = hash * 31 + b_generic(a, f) + b_generic(0, f) + b_stdc(a) + b_stdc(0);\n"
     "        hash = hash * 31 + b_generic_wide(a, 0, f) + b_generic_wide(0, a, f) + b_generic_wide(a, ~a, f);\n"
     "        if (i == 0) hash = hash * 31 + b_generic_wide(0, 0, f);\n"
+    "        hash = hash * 31 + b_generic_limbs(a, ~a >> (i % 7), f, i - 2048) + b_generic_limbs(0, 0, f, i) + b_generic_limbs(~0ull, ~0ull, f, -i);\n"
     "        if (i < 2) printf(\"%llx %x %d %d %lx %lx\\n\", a, b_bswap32((unsigned)a), b_ctzl(n), b_clzl(n), b_chain(a, (unsigned)a), b_bits(a));\n"
     "    }\n"
     "    printf(\"%llx\\n\", hash);\n"
@@ -3319,7 +3665,9 @@ static void check_test_driver_tier1_bits(CheckTest* test, const char* clang, con
 // the IR's saddo, ssubo and smulo, Tier 1's operation and seto), ints' 64-bit operations, unsigned longs' carries and
 // 128-bit products and mixed signedness (c_builtin_lower.c's recipes), each alone; a chain whose values and flags stay
 // live across each other; and the issue's loop of a running sum and products, on the other unit's (clang -O2's) operands,
-// many of them at the types' boundaries.
+// many of them at the types' boundaries; and _BitInts of 65 to 127 bits' sums, differences and products (#1447), passed by
+// pointer, whose destinations' 16 bytes, the padding extended from the width as clang stores it, are hashed; and a
+// _BitInt(200)'s difference and an unsigned one's product into an unsigned _BitInt(130), past 128 bits, so hashed.
 static const char check_test_tier1_overflow_header[] =
     "int o_add(long a, long b, long* r);\n"
     "int o_sub(long a, long b, long* r);\n"
@@ -3332,7 +3680,14 @@ static const char check_test_tier1_overflow_header[] =
     "int o_mulu(unsigned long a, unsigned long b, unsigned long* r);\n"
     "int o_mixed(long a, unsigned long b, int* r);\n"
     "long o_chain(long a, long b);\n"
-    "long o_sum(const long* p, unsigned n);\n";
+    "long o_sum(const long* p, unsigned n);\n"
+    "int o_add100(const _BitInt(100)* a, const _BitInt(100)* b, _BitInt(100)* r);\n"
+    "int o_mul100(const _BitInt(100)* a, long b, _BitInt(100)* r);\n"
+    "int o_mul127u(const unsigned _BitInt(127)* a, const unsigned _BitInt(127)* b, unsigned _BitInt(127)* r);\n"
+    "int o_sub65(const unsigned _BitInt(127)* a, const _BitInt(100)* b, _BitInt(65)* r);\n"
+    "int o_add_long(const _BitInt(100)* a, long b, long* r);\n"
+    "int o_sub200(const _BitInt(200)* a, const _BitInt(200)* b, _BitInt(200)* r);\n"
+    "int o_mul200u(const unsigned _BitInt(200)* a, const unsigned _BitInt(200)* b, unsigned _BitInt(130)* r);\n";
 
 static const char check_test_tier1_overflow_source[] =
     "#include \"tier1-overflow.h\"\n"
@@ -3371,13 +3726,26 @@ static const char check_test_tier1_overflow_source[] =
     "        s ^= r;\n"
     "    }\n"
     "    return (long)((unsigned long)s + (unsigned long)ov);\n"
-    "}\n";
+    "}\n"
+    "int o_add100(const _BitInt(100)* a, const _BitInt(100)* b, _BitInt(100)* r) { return __builtin_add_overflow(*a, *b, r); }\n"
+    "int o_mul100(const _BitInt(100)* a, long b, _BitInt(100)* r) { return __builtin_mul_overflow(*a, b, r); }\n"
+    "int o_mul127u(const unsigned _BitInt(127)* a, const unsigned _BitInt(127)* b, unsigned _BitInt(127)* r) { return __builtin_mul_overflow(*a, *b, r); }\n"
+    "int o_sub65(const unsigned _BitInt(127)* a, const _BitInt(100)* b, _BitInt(65)* r) { return __builtin_sub_overflow(*a, *b, r); }\n"
+    "int o_add_long(const _BitInt(100)* a, long b, long* r) { return __builtin_add_overflow(*a, b, r); }\n"
+    "int o_sub200(const _BitInt(200)* a, const _BitInt(200)* b, _BitInt(200)* r) { return __builtin_sub_overflow(*a, *b, r); }\n"
+    "int o_mul200u(const unsigned _BitInt(200)* a, const unsigned _BitInt(200)* b, unsigned _BitInt(130)* r) { return __builtin_mul_overflow(*a, *b, r); }\n";
 
 static const char check_test_tier1_overflow_other_source[] =
     "#include <stdio.h>\n"
     "#include \"tier1-overflow.h\"\n"
     "static unsigned long long state = 0x9e3779b97f4a7c15ull;\n"
     "static unsigned long long next(void) { state ^= state << 13; state ^= state >> 7; state ^= state << 17; return state; }\n"
+    "static void raw(unsigned long long* hash, const void* p)\n"
+    "{\n"
+    "    unsigned long long w[2];\n"
+    "    __builtin_memcpy(w, p, 16);\n"
+    "    *hash = (*hash * 31 + w[0]) * 31 + w[1];\n"
+    "}\n"
     "static long value(int i)\n"
     "{\n"
     "    static const long edges[] = { 0, 1, -1, 2, 0x7fffffffffffffffL, -0x7fffffffffffffffL - 1, 3037000499L, 3037000500L, -3037000500L, 0x80000000L, -0x80000000L };\n"
@@ -3414,6 +3782,38 @@ static const char check_test_tier1_overflow_other_source[] =
     "        f = o_mixed(a, (unsigned long)b, &k);\n"
     "        hash = hash * 31 + (unsigned)f + (unsigned)k;\n"
     "        hash = hash * 31 + (unsigned long long)o_chain(a, b);\n"
+    "        {\n"
+    "            unsigned _BitInt(127) ua = ((unsigned _BitInt(127))(unsigned long)a << (i % 64)) ^ (unsigned long)b;\n"
+    "            unsigned _BitInt(127) ub = ((unsigned _BitInt(127))(unsigned long)b << 63) | (unsigned long)a, ur = 0;\n"
+    "            _BitInt(100) xa = (_BitInt(100))(ua >> (i % 40)), xb = (_BitInt(100))(ub >> (i % 30)), xr = 0;\n"
+    "            _BitInt(65) sr = 0;\n"
+    "            f = o_add100(&xa, &xb, &xr);\n"
+    "            hash = hash * 31 + (unsigned)f;\n"
+    "            raw(&hash, &xr);\n"
+    "            f = o_mul100(&xa, b >> (i % 64), &xr);\n"
+    "            hash = hash * 31 + (unsigned)f;\n"
+    "            raw(&hash, &xr);\n"
+    "            f = o_mul127u(&ua, &ub, &ur);\n"
+    "            hash = hash * 31 + (unsigned)f;\n"
+    "            raw(&hash, &ur);\n"
+    "            f = o_sub65(&ua, &xb, &sr);\n"
+    "            hash = hash * 31 + (unsigned)f;\n"
+    "            raw(&hash, &sr);\n"
+    "            f = o_add_long(&xa, a, &r);\n"
+    "            hash = hash * 31 + (unsigned)f + (unsigned long long)r;\n"
+    "            {\n"
+    "                _BitInt(200) wa = (_BitInt(200))((unsigned _BitInt(200))ua << (i % 80)), wb = (_BitInt(200))(-(unsigned _BitInt(200))ub << (i % 70)), wr = 0;\n"
+    "                unsigned _BitInt(200) va = (unsigned _BitInt(200))ua >> (i % 64), vb = (unsigned _BitInt(200))xb;\n"
+    "                unsigned _BitInt(130) vr = 0;\n"
+    "                unsigned long long w[4];\n"
+    "                f = o_sub200(&wa, &wb, &wr);\n"
+    "                __builtin_memcpy(w, &wr, 32);\n"
+    "                hash = (((hash * 31 + (unsigned)f) * 31 + w[0]) * 31 + w[1] + w[2]) * 31 + w[3];\n"
+    "                f = o_mul200u(&va, &vb, &vr);\n"
+    "                __builtin_memcpy(w, &vr, 24);\n"
+    "                hash = ((hash * 31 + (unsigned)f) * 31 + w[0]) * 31 + w[1] + w[2];\n"
+    "            }\n"
+    "        }\n"
     "        p[i % 64] = a;\n"
     "        if (i % 64 == 63) hash = hash * 31 + (unsigned long long)o_sum(p, 64);\n"
     "        if (i < 2)\n"
@@ -3432,6 +3832,109 @@ static void check_test_driver_tier1_overflow(CheckTest* test, const char* clang,
 {
     check_test_driver_tier1_units(test, clang, executable, directory, "tier1-overflow", "overflow builtins'", check_test_tier1_overflow_header, check_test_tier1_overflow_source,
                                   check_test_tier1_overflow_other_source, "-march=x86-64", true, 0);
+}
+
+// The floating extremes' fixture (#967): fmax, fmin, fmaximum_num and fminimum_num of float and double, as __builtin_X's
+// and plain calls of <math.h>'s declarations, which clang -O0's code computes inline (llvm.maxnum and its kin: a row, or
+// two rows of x86-64's maximumnum and minimumnum), alone, chained, and in a loop whose values stay live across them; the
+// other unit (clang -O2's) passes zeros of both signs, infinities, quiet and signaling NaNs of both signs and subnormals,
+// and hashes every result's bits.
+static const char check_test_tier1_extremes_header[] =
+    "double e_max(double a, double b);\n"
+    "double e_min(double a, double b);\n"
+    "double e_maximum(double a, double b);\n"
+    "double e_minimum(double a, double b);\n"
+    "float e_maxf(float a, float b);\n"
+    "float e_minf(float a, float b);\n"
+    "float e_maximumf(float a, float b);\n"
+    "float e_minimumf(float a, float b);\n"
+    "double e_chain(double a, double b, float c, float d);\n"
+    "double e_fold(const double* p, unsigned n);\n";
+
+static const char check_test_tier1_extremes_source[] =
+    "#define _GNU_SOURCE\n"
+    "#include <math.h>\n"
+    "#include \"tier1-extremes.h\"\n"
+    "double e_max(double a, double b) { return fmax(a, b); }\n"
+    "double e_min(double a, double b) { return __builtin_fmin(a, b); }\n"
+    "double e_maximum(double a, double b) { return fmaximum_num(a, b); }\n"
+    "double e_minimum(double a, double b) { return __builtin_fminimum_num(a, b); }\n"
+    "float e_maxf(float a, float b) { return __builtin_fmaxf(a, b); }\n"
+    "float e_minf(float a, float b) { return fminf(a, b); }\n"
+    "float e_maximumf(float a, float b) { return __builtin_fmaximum_numf(a, b); }\n"
+    "float e_minimumf(float a, float b) { return fminimum_numf(a, b); }\n"
+    "double e_chain(double a, double b, float c, float d)\n"
+    "{\n"
+    "    double x = fmax(a, b), y = fminimum_num(b, a);\n"
+    "    float z = fmaximum_numf(c, d), w = __builtin_fminf(d, c);\n"
+    "    return fmaximum_num(fmin(fmaximum_num(x, (double)z), __builtin_fmax(y, (double)w)), fminimum_num((double)z, x));\n"
+    "}\n"
+    "double e_fold(const double* p, unsigned n)\n"
+    "{\n"
+    "    double high = p[0], low = p[0], high_number = p[0], low_number = p[0];\n"
+    "    for (unsigned i = 1; i < n; i += 1)\n"
+    "    {\n"
+    "        high = fmax(high, p[i]);\n"
+    "        low = __builtin_fmin(p[i], low);\n"
+    "        high_number = __builtin_fmaximum_num(high_number, p[i]);\n"
+    "        low_number = fminimum_num(p[i], low_number);\n"
+    "    }\n"
+    "    return high * 3 + low * 5 + high_number * 7 + low_number * 11;\n"
+    "}\n";
+
+static const char check_test_tier1_extremes_other_source[] =
+    "#include <stdio.h>\n"
+    "#include <string.h>\n"
+    "#include \"tier1-extremes.h\"\n"
+    "static const unsigned long long doubles[] = { 0, 0x8000000000000000ull, 0x7ff0000000000000ull, 0xfff0000000000000ull, 0x7ff8000000000001ull,\n"
+    "    0xfff8000000000002ull, 0x7ff0000000000003ull, 0xfff4000000000000ull, 1, 0x8000000000000001ull, 0x3ff8000000000000ull, 0xc000000000000000ull };\n"
+    "static const unsigned floats[] = { 0, 0x80000000u, 0x7f800000u, 0xff800000u, 0x7fc00001u, 0xffc00002u, 0x7f800003u, 0xffa00000u, 1, 0x80000001u,\n"
+    "    0x3fc00000u, 0xc0000000u };\n"
+    "static double d(unsigned i) { double v; memcpy(&v, &doubles[i % 12], 8); return v; }\n"
+    "static float f(unsigned i) { float v; memcpy(&v, &floats[i % 12], 4); return v; }\n"
+    "static unsigned long long hd(unsigned long long h, double v) { unsigned long long b; memcpy(&b, &v, 8); return (h ^ b) * 1099511628211ull; }\n"
+    "static unsigned long long hf(unsigned long long h, float v) { unsigned b; memcpy(&b, &v, 4); return (h ^ b) * 1099511628211ull; }\n"
+    "int main(void)\n"
+    "{\n"
+    "    unsigned long long h = 14695981039346656037ull;\n"
+    "    double p[12];\n"
+    "    for (unsigned i = 0; i < 12; i += 1)\n"
+    "    {\n"
+    "        p[i] = d(i * 5 + 3);\n"
+    "        for (unsigned j = 0; j < 12; j += 1)\n"
+    "        {\n"
+    "            h = hd(h, e_max(d(i), d(j)));\n"
+    "            h = hd(h, e_min(d(i), d(j)));\n"
+    "            h = hd(h, e_maximum(d(i), d(j)));\n"
+    "            h = hd(h, e_minimum(d(i), d(j)));\n"
+    "            h = hf(h, e_maxf(f(i), f(j)));\n"
+    "            h = hf(h, e_minf(f(i), f(j)));\n"
+    "            h = hf(h, e_maximumf(f(i), f(j)));\n"
+    "            h = hf(h, e_minimumf(f(i), f(j)));\n"
+    "            h = hd(h, e_chain(d(i), d(j), f(j), f(i)));\n"
+    "        }\n"
+    "        if (i < 2) printf(\"%a %a %a %a\\n\", e_max(d(i), 1.5), e_minimum(-0.0, d(i)), (double)e_maxf(f(i), -2.0f), e_chain(d(i), 2.5, 1.0f, f(i)));\n"
+    "    }\n"
+    "    for (unsigned n = 1; n <= 12; n += 1) h = hd(h, e_fold(p, n));\n"
+    "    printf(\"%llx\\n\", h);\n"
+    "    return 0;\n"
+    "}\n";
+
+// Its builds at x86-64's baseline (SSE2's sequences, two rows for maximumnum and minimumnum), x86-64-v3's (AVX's
+// VBLENDVPD) and x86-64-v4's (AVX-512's masked moves), each run where the host has the target's features.
+static void check_test_driver_tier1_extremes(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const char* const marches[] = { "-march=x86-64", "-march=x86-64-v3", "-march=x86-64-v4" };
+    for (uint32_t t = 0; t < BUSTER_ARRAY_LENGTH(marches); t += 1)
+    {
+        const char* level = marches[t] + strlen("-march=");
+        X86Target target = { 0 };
+        const bool parsed = x86_target_parse(level, (uint32_t)strlen(level), &target);
+        const bool host = parsed && (x86_target_native().features & target.features) == target.features;
+        check_test_expect(test, parsed, "the floating extremes' fixture's target");
+        check_test_driver_tier1_units(test, clang, executable, directory, "tier1-extremes", "floating extremes'", check_test_tier1_extremes_header,
+                                      check_test_tier1_extremes_source, check_test_tier1_extremes_other_source, marches[t], host, 0);
+    }
 }
 
 // The wide vectors' fixture (#1624): GNU C's 32- and 64-byte vectors at targets whose registers are narrower (x86-64's
@@ -3569,130 +4072,77 @@ static void check_test_driver_tier1_wide_vectors(CheckTest* test, const char* cl
     }
 }
 
-// The machine rows' fixture (#141): x86-64-v4's vector builtins and the vector operators on elements other than 32-bit
-// integers, whose X86 rows the IR's row calls run (tier1_emit_cfg_row): bytes, words and quadwords; compares into masks
-// of every width, unmasked and masked, which the IR decodes into its own comparisons (#1623); masked and zero-masked
-// operations and blends; two-source permutes and shuffles; shifts by an
-// immediate, by a count in a general register and by vectors; masked loads and stores, a store of no result and a
-// compress; inserts, extracts and widening conversions of 16-, 32- and 64-byte vectors; broadcasts from general registers,
-// reductions and extractions into them; a loop whose row results cross its back edge, with values live across rows; and
-// AVX2's VEX forms, which name no register past 15 (a blend's /is4 register, a byte mask's extraction, tests of flags), on
-// the other unit's (clang -O2's) bytes, which it hashes.
-static const char check_test_tier1_rows_header[] =
-    "#include <immintrin.h>\n"
+// The wide results' fixture (#1847): a 128-byte vector returned by value, which the convention splits across the
+// target's widest vector registers (zmm0 and zmm1 at x86-64-v4, ymm0 to ymm3 at x86-64-v3), the function's own return
+// staging every part in the red zone (all 16 of its slots either way) and its caller storing them into its object.
+// The other unit (clang -O2's) passes random vectors and hashes every result.
+static const char check_test_tier1_wide_results_header[] =
     "#include <stdint.h>\n"
-    "__m512i r_bytes(__m512i a, __m512i b);\n"
-    "uint64_t r_compares(__m512i a, __m512i b);\n"
-    "__m512i r_masked(__m512i a, __m512i b, __mmask64 k, __mmask16 k16);\n"
-    "__m512i r_permutes(__m512i a, __m512i b, __m512i idx);\n"
-    "__m512i r_shifts(__m512i a, __m512i b, int n);\n"
-    "void r_memory(unsigned char* out, const unsigned char* in, __mmask64 k, __mmask16 k16);\n"
-    "__m512i r_lanes(__m512i a, __m256i h, __m128i l, long long g, int i);\n"
-    "long long r_reduce(__m512i a, __m512i b);\n"
-    "__m256i r_narrow(__m256i a, __m256i b, __m128i c);\n"
-    "uint32_t r_loop(const unsigned char* p, unsigned n, unsigned char* out);\n"
-    "int r_vex(__m256i a, __m256i b, __m256i m);\n";
+    "typedef int v32si __attribute__((vector_size(128)));\n"
+    "v32si x_mix(const v32si* p, int k);\n"
+    "void x_call(v32si* out, const v32si* p, int k);\n";
 
-static const char check_test_tier1_rows_source[] =
-    "#include \"tier1-rows.h\"\n"
-    "__m512i r_bytes(__m512i a, __m512i b)\n"
+static const char check_test_tier1_wide_results_source[] =
+    "#include \"tier1-wide-results.h\"\n"
+    "typedef union X1024 { v32si value; uint32_t u32[32]; } X1024;\n"
+    "__attribute__((noinline)) v32si x_mix(const v32si* p, int k)\n"
     "{\n"
-    "    __m512i s = _mm512_add_epi8(a, b);\n"
-    "    __m512i d = _mm512_sub_epi16(s, b);\n"
-    "    __m512i m = _mm512_mullo_epi16(d, a);\n"
-    "    __m512i q = _mm512_add_epi64(m, _mm512_sub_epi64(a, b));\n"
-    "    return _mm512_xor_si512(q, _mm512_shuffle_epi8(a, b));\n"
-    "}\n"
-    "uint64_t r_compares(__m512i a, __m512i b)\n"
-    "{\n"
-    "    __mmask64 eq = _mm512_cmpeq_epi8_mask(a, b);\n"
-    "    __mmask64 lt = _mm512_cmplt_epu8_mask(a, b);\n"
-    "    __mmask32 w = _mm512_cmpgt_epi16_mask(a, b);\n"
-    "    __mmask16 d = _mm512_cmple_epi32_mask(a, b);\n"
-    "    __mmask8 q = _mm512_cmpneq_epi64_mask(a, b);\n"
-    "    __mmask16 f = _mm512_cmp_ps_mask(_mm512_castsi512_ps(a), _mm512_castsi512_ps(b), _CMP_LE_OS);\n"
-    "    return eq ^ (lt << 1) ^ ((uint64_t)w << 7) ^ ((uint64_t)d << 23) ^ ((uint64_t)q << 40) ^ ((uint64_t)f << 47);\n"
-    "}\n"
-    "__m512i r_masked(__m512i a, __m512i b, __mmask64 k, __mmask16 k16)\n"
-    "{\n"
-    "    __m512i x = _mm512_mask_add_epi8(a, k, a, b);\n"
-    "    __m512i y = _mm512_maskz_sub_epi32(_mm512_mask_cmpgt_epi32_mask(k16, x, b) | (k16 >> 4), x, b);\n"
-    "    __m512i z = _mm512_mask_blend_epi8(_mm512_mask_cmplt_epu8_mask(k, y, a) ^ (k >> 5), y, b);\n"
-    "    return _mm512_mask_mov_epi16(z, (__mmask32)(k >> 3), a);\n"
-    "}\n"
-    "__m512i r_permutes(__m512i a, __m512i b, __m512i idx)\n"
-    "{\n"
-    "    __m512i p = _mm512_permutex2var_epi64(a, idx, b);\n"
-    "    __m512i q = _mm512_permutexvar_epi16(idx, a);\n"
-    "    __m512i r = _mm512_permutex2var_epi16(a, idx, b);\n"
-    "    __m512i s = _mm512_shuffle_epi32(p, 0x1b);\n"
-    "    return _mm512_ternarylogic_epi64(q, r, s, 0x96);\n"
-    "}\n"
-    "__m512i r_shifts(__m512i a, __m512i b, int n)\n"
-    "{\n"
-    "    __m512i x = _mm512_srli_epi16(a, n);\n"
-    "    __m512i y = _mm512_slli_epi64(a, 3);\n"
-    "    __m512i z = _mm512_srlv_epi64(b, _mm512_set1_epi64(n));\n"
-    "    __m512i w = _mm512_sllv_epi32(b, a);\n"
-    "    __m512i v = _mm512_srai_epi32(b, n);\n"
-    "    return _mm512_or_si512(_mm512_or_si512(x, y), _mm512_xor_si512(z, _mm512_add_epi32(w, v)));\n"
-    "}\n"
-    "void r_memory(unsigned char* out, const unsigned char* in, __mmask64 k, __mmask16 k16)\n"
-    "{\n"
-    "    __m512i a = _mm512_maskz_loadu_epi8(k, in);\n"
-    "    __m512i b = _mm512_loadu_si512(in + 3);\n"
-    "    _mm512_mask_storeu_epi8(out, k, _mm512_add_epi8(a, b));\n"
-    "    _mm512_mask_storeu_epi32(out + 64, k16, _mm512_maskz_compress_epi32(k16, b));\n"
-    "    _mm512_storeu_si512(out + 128, _mm512_mask_loadu_epi16(a, (__mmask32)k, in + 1));\n"
-    "}\n"
-    "__m512i r_lanes(__m512i a, __m256i h, __m128i l, long long g, int i)\n"
-    "{\n"
-    "    __m512i x = _mm512_inserti64x4(a, h, 1);\n"
-    "    __m512i y = _mm512_inserti32x4(x, l, 2);\n"
-    "    __m128i e = _mm512_extracti32x4_epi32(y, 3);\n"
-    "    __m256i f = _mm512_extracti64x4_epi64(a, 1);\n"
-    "    __m512i z = _mm512_add_epi64(y, _mm512_set1_epi64(g));\n"
-    "    __m512i w = _mm512_add_epi32(z, _mm512_set1_epi32(i));\n"
-    "    __m512i u = _mm512_cvtepu8_epi16(_mm256_add_epi8(f, _mm256_zextsi128_si256(e)));\n"
-    "    return _mm512_xor_si512(w, u);\n"
-    "}\n"
-    "long long r_reduce(__m512i a, __m512i b)\n"
-    "{\n"
-    "    __m512i c = _mm512_lzcnt_epi64(a);\n"
-    "    __m512i d = _mm512_max_epi64(a, b);\n"
-    "    __m512i e = _mm512_min_epu32(a, b);\n"
-    "    long long s = _mm512_reduce_add_epi64(_mm512_add_epi64(c, d));\n"
-    "    return s ^ _mm512_reduce_or_epi64(e) ^ _mm_cvtsi128_si64(_mm512_castsi512_si128(d)) ^ _mm_cvtsi128_si32(_mm512_castsi512_si128(e));\n"
-    "}\n"
-    "__m256i r_narrow(__m256i a, __m256i b, __m128i c)\n"
-    "{\n"
-    "    __m256i x = _mm256_add_epi8(a, b);\n"
-    "    __m256i y = _mm256_mask_sub_epi16(x, (__mmask16)_mm256_cmpgt_epi8_mask(a, b), a, b);\n"
-    "    __m128i z = _mm_add_epi64(c, _mm256_castsi256_si128(y));\n"
-    "    __m128i w = _mm_maskz_mov_epi8(_mm_cmpeq_epi8_mask(c, z), z);\n"
-    "    return _mm256_inserti128_si256(y, w, 1);\n"
-    "}\n"
-    "uint32_t r_loop(const unsigned char* p, unsigned n, unsigned char* out)\n"
-    "{\n"
-    "    __m512i acc = _mm512_setzero_si512();\n"
-    "    uint32_t count = 0;\n"
-    "    for (unsigned i = 0; i + 64 <= n; i += 64)\n"
+    "    X1024 a = { .value = *p };\n"
+    "    X1024 r = { 0 };\n"
+    "    for (unsigned i = 0; i < 32; i += 1)\n"
     "    {\n"
-    "        __m512i v = _mm512_loadu_si512(p + i);\n"
-    "        __mmask64 k = _mm512_cmpeq_epi8_mask(v, _mm512_set1_epi8('a'));\n"
-    "        count += (uint32_t)__builtin_popcountll(k);\n"
-    "        acc = _mm512_add_epi8(acc, _mm512_maskz_mov_epi8(k, _mm512_set1_epi8(1)));\n"
-    "        acc = _mm512_max_epu8(acc, v);\n"
+    "        r.u32[i] = a.u32[31 - i] * 3u + (uint32_t)k + i;\n"
     "    }\n"
-    "    _mm512_storeu_si512(out, acc);\n"
-    "    return count;\n"
+    "    return r.value;\n"
     "}\n"
-    "int r_vex(__m256i a, __m256i b, __m256i m)\n"
+    "void x_call(v32si* out, const v32si* p, int k)\n"
     "{\n"
-    "    __m256i x = _mm256_blendv_epi8(a, b, m);\n"
-    "    int mask = _mm256_movemask_epi8(x);\n"
-    "    return mask ^ _mm256_testz_si256(a, b) ^ (_mm256_testc_si256(x, m) << 1) ^ (_mm256_movemask_epi8(_mm256_add_epi8(x, m)) << 3);\n"
+    "    v32si r = x_mix(p, k);\n"
+    "    *out = r;\n"
     "}\n";
+
+static const char check_test_tier1_wide_results_other_source[] =
+    "#include \"tier1-wide-results.h\"\n"
+    "#include <stdio.h>\n"
+    "#include <string.h>\n"
+    "static uint64_t hash = 1469598103934665603ull;\n"
+    "static void mix(const void* p, unsigned n) { const unsigned char* b = p; for (unsigned i = 0; i < n; i += 1) { hash ^= b[i]; hash *= 1099511628211ull; } }\n"
+    "int main(void)\n"
+    "{\n"
+    "    uint32_t s = 2024;\n"
+    "    for (int round = 0; round < 100; round += 1)\n"
+    "    {\n"
+    "        uint32_t words[32];\n"
+    "        for (int i = 0; i < 32; i += 1) { s = s * 1664525u + 1013904223u; words[i] = s; }\n"
+    "        v32si a, out;\n"
+    "        memcpy(&a, words, 128);\n"
+    "        v32si r = x_mix(&a, round); mix(&r, 128);\n"
+    "        x_call(&out, &a, round + 7); mix(&out, 128);\n"
+    "    }\n"
+    "    printf(\"%016llx\\n\", (unsigned long long)hash);\n"
+    "    return 0;\n"
+    "}\n";
+
+// Its builds by x86-64-v3 and x86-64-v4, every function Tier 1's and its code certified, run where the host has each
+// target's features.
+static void check_test_driver_tier1_wide_results(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const char* const targets[2] = { "x86-64-v3", "x86-64-v4" };
+    for (uint32_t t = 0; t < 2; t += 1)
+    {
+        X86Target target = { 0 };
+        const bool parsed = x86_target_parse(targets[t], (uint32_t)strlen(targets[t]), &target);
+        const bool host = parsed && (x86_target_native().features & target.features) == target.features;
+        char option[32];
+        char what[64];
+        snprintf(option, sizeof(option), "-march=%s", targets[t]);
+        snprintf(what, sizeof(what), "wide results' (%s)", targets[t]);
+        check_test_driver_tier1_units(test, clang, executable, directory, "tier1-wide-results", what, check_test_tier1_wide_results_header, check_test_tier1_wide_results_source,
+                                      check_test_tier1_wide_results_other_source, option, host, 0);
+    }
+}
+
+#include "buster/compiler/c_check_tier1_rows_fixture.h"
 
 static const char check_test_tier1_rows_other_source[] =
     "#include <stdio.h>\n"
@@ -3751,7 +4201,9 @@ static void check_test_driver_tier1_rows(CheckTest* test, const char* clang, con
     // each path, with rematerialization and without, every function Tier 1's, at most one move for every two rows (Tier 0's
     // placement moved every vector operand in and every vector result out: 150 for the unit's 58 rows). The unit's 11
     // compares into masks were rows that took no move; #1623 decodes them into the IR's comparisons, so the bound counts
-    // them with the rows still.
+    // them with the rows still. #1840 decodes its masked operations' and blends' selects into the IR's vselect, and its
+    // inserts, extracts and casts between widths into the IR's own intrinsics, which leaves 51 rows and 26 moves by Tier
+    // 1 (75 and 39 before).
     const uint64_t compares = 11;
     char header[512];
     char unit[512];
@@ -4805,7 +5257,7 @@ static void check_test_driver_tier1_stack(CheckTest* test, const char* clang, co
     char expected[256] = { 0 };
     const bool ran = referenced && callee_built && check_test_driver_capture(reference, expected, sizeof(expected)) && expected[0] != 0;
     check_test_expect(test, ran, "clang's builds of the stack arguments' fixture run");
-    static const char* const names[3] = { "tier1_pass", "tier1_take7", "tier1_take12" };
+    static const char* const names[5] = { "tier1_pass", "tier1_take7", "tier1_take12", "tier1_many", "tier1_take64" };
     for (uint32_t rematerialize = 0; ran && rematerialize < 2; rematerialize += 1)
     {
         for (uint32_t path = 0; path < 2; path += 1)

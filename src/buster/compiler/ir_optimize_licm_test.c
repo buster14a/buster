@@ -462,6 +462,76 @@ static void ir_licm_test_simd(IrOptimizeTest* test)
     arena_release(&scratch);
 }
 
+// The width changes (#1840) in a loop, on values SCCP can't fold, a parameter's splat: LICM hoists the loop-invariant widen
+// and the extract of its zeros, keeps the insert of the loop's phi and its extract inside, by both paths, and the
+// interpreter's mask is unchanged.
+static void ir_licm_test_widths(IrOptimizeTest* test)
+{
+    static const char text[] = "function (i32) -> m16 {\n"
+                               "b0:\n"
+                               "  %0 = param.i32 0\n"
+                               "  %1 = intrinsic.v4i32 %0 splat\n"
+                               "  %2 = const.i32 0x00000000000000000000000000000000\n"
+                               "  %3 = const.i32 0x00000000000000000000000000000001\n"
+                               "  %4 = const.i32 0x00000000000000000000000000000004\n"
+                               "  %5 = br.void b1\n"
+                               "b1:\n"
+                               "  %6 = br.void b2\n"
+                               "b2:\n"
+                               "  %7 = phi.i32 [%2, b1], [%12, b3]\n"
+                               "  %8 = phi.v4i32 [%1, b1], [%14, b3]\n"
+                               "  %9 = intrinsic.v8i32 %1 widen\n"
+                               "  %10 = intrinsic.v4i32 %9 extract 1\n"
+                               "  %11 = intrinsic.v8i32 %9, %8 insert 1\n"
+                               "  %12 = add.i32 %7, %3\n"
+                               "  %13 = intrinsic.v4i32 %11 extract 1\n"
+                               "  %14 = add.v4i32 %13, %1\n"
+                               "  %15 = icmp.i1 %12, %4 lt\n"
+                               "  %16 = cbr.void %15, b3, b4\n"
+                               "b3:\n"
+                               "  %17 = br.void b2\n"
+                               "b4:\n"
+                               "  %18 = add.v4i32 %14, %10\n"
+                               "  %19 = vcmp.m16 %18, %1 ugt lanes=i8\n"
+                               "  %20 = ret.void %19\n"
+                               "}\n";
+    Arena input = arena_reserve(UINT64_C(16) << 20);
+    Arena vector = arena_reserve(UINT64_C(16) << 20);
+    Arena scalar = arena_reserve(UINT64_C(16) << 20);
+    Arena scratch = arena_reserve(UINT64_C(16) << 20);
+    IrFunction f = { 0 };
+    const bool ready = input.base != NULL && vector.base != NULL && scalar.base != NULL && scratch.base != NULL;
+    const IrParseResult parsed = ready ? ir_parse((String8){ .pointer = (char*)text, .length = sizeof(text) - 1 }, &input, &scratch, &f) : (IrParseResult){ .error = IR_PARSE_END };
+    ir_optimize_test_expect(test, parsed.error == IR_PARSE_OK && parsed.check.error == IR_OK, "LICM's width change fixture parses");
+    IrLicmResult results[2] = { 0 };
+    for (uint32_t path = 0; parsed.error == IR_PARSE_OK && parsed.check.error == IR_OK && path < 2; path += 1)
+    {
+        IrLicmOptions options = ir_licm_options();
+        options.scalar = path != 0;
+        const IrCheck check = ir_optimize_licm(&f, path != 0 ? &scalar : &vector, &scratch, options, results + path);
+        ir_optimize_test_expect(test, check.error == IR_OK && results[path].moved == 2, "LICM hoists the invariant widen and its extract");
+        if (check.error == IR_OK)
+        {
+            // The loop's header (b2) keeps the insert and the extract of the phi's part alone.
+            const IrFunction* out = &results[path].function;
+            uint32_t inside = 0;
+            for (uint32_t i = out->block_offsets[2]; i < out->block_offsets[3]; i += 1)
+            {
+                const bool intrinsic = out->op[i] == IR_INTRINSIC;
+                inside += intrinsic && (out->c[i] == BUSTER_IR_INTRINSIC_INSERT || out->c[i] == BUSTER_IR_INTRINSIC_EXTRACT || out->c[i] == BUSTER_IR_INTRINSIC_WIDEN);
+            }
+            ir_optimize_test_expect(test, inside == 2, "LICM keeps the loop-variant insert and extract inside the loop");
+            ir_optimize_test_simd_semantics(test, &f, out, &scratch);
+        }
+    }
+    ir_optimize_test_expect(test, results[0].function.instruction_count != 0 && results[1].function.instruction_count != 0 &&
+                            ir_optimize_test_equal(&results[0].function, &results[1].function), "LICM's paths hoist the width changes alike");
+    arena_release(&input);
+    arena_release(&vector);
+    arena_release(&scalar);
+    arena_release(&scratch);
+}
+
 static __attribute__((unused)) int run_ir_licm_tests(int argc, char** argv)
 {
     IrOptimizeTest test = { .random = 139 };
@@ -487,6 +557,7 @@ static __attribute__((unused)) int run_ir_licm_tests(int argc, char** argv)
         ir_licm_test_ir(&test);
         ir_licm_test_progress(&test);
         ir_licm_test_simd(&test);
+        ir_licm_test_widths(&test);
         printf("ir-licm: %" PRIu64 " checks, %" PRIu64 " failures\n", test.checks, test.failures);
         result = test.failures == 0 ? 0 : 1;
     }
