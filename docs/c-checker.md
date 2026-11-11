@@ -4896,7 +4896,13 @@ own completed type where it had none (`(int[]){1, 2}`). Any other array type
 is clang's "cannot initialize array of type 'int[3]' with array of type
 'int[2]'" at the name (`CHECK_INPUT_ARRAY_LITERAL_MISMATCH`, its value the
 literal's TypeId, which lanes remap), recovered, the array keeping its type and
-no initializer.
+no initializer. A file-scope array's mismatch is left out where the literal's body
+holds a value that is no constant (#1812): clang's file-scope literal is then
+invalid, and its initialization of the array gives no error of its own. The
+body's own "initializer element is not a compile-time constant" is given once
+at its place, though both the literal's declaration and the array check it. At
+block scope the mismatch still comes before the body's conversion error, where
+clang gives it after.
 
 An undeclared name that is a typo of a visible one is clang's (#1447,
 `c_check_typo.c`). The rules are clang 23's, as probed:
