@@ -2830,9 +2830,12 @@ Its results and the locked-9700X configuration are summarized there and in
 the record's `analysis/summary.md`; no performance gate consumes the split.
 
 **The 9700X step.** "Attribute sqlite3.c's compile time to the compiler's
-stages, against tcc" runs, pinned to CPU 2 under the host's lock:
-- `measure-compile --runs 11 --reference tcc` on the frozen corpus's
-  `sqlite3.c`;
+stages, against tcc, clang -O0 and gcc -O0" runs, pinned to CPU 2 under the
+host's lock:
+- `measure-compile --runs 11 --reference tcc --reference clang
+  --reference-option -O0 --reference gcc --reference-option -O0` on the frozen
+  corpus's `sqlite3.c` (clang's and gcc's rows since #146's decision of
+  2026-11-11);
 - `perf stat -r 11` of both compilers;
 - `perf record` of 5 compiles, reported by DSO and by symbol.
 
@@ -2841,7 +2844,9 @@ clock, the stages' marks or the harness (the `changes` job's `compile_time`).
 It fails rather than report part of the attribution:
 - without tcc, or with a tcc whose sha256 isn't the reference's below. An
   upgrade changes the reference, so it updates the hash here and in the step
-  together, and starts a new series of ratios;
+  together, and starts a new series of ratios. clang and gcc are unpinned, by
+  the owner's choice: the step prints their versions and hashes, and an Arch
+  upgrade of either changes their rows without failing it;
 - when perf can't run, a counter reads `<not supported>` or `<not counted>`, or
   the profile comes out empty.
 

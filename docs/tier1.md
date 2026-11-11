@@ -337,7 +337,31 @@ register parts exceed the red zone's 14 eightbyte staging slots reserve one
 frame object for the largest call (#1450), addressed through the stable frame
 base even in a dynamic frame. Four or more 32-byte vector arguments therefore
 work on both v3 and v4 policies; the checker driver's overflow-staging fixture
-cross-links them with clang under `--verify`. Still refused: a
+cross-links them with clang under `--verify`. A function that calls a function
+that returns twice is Tier 0's (#1847): `__builtin_setjmp`'s callers since
+#148, and since #1847 the callers of setjmp's library kin (the catalogue's
+entries with clang's `j` attribute: `setjmp`, `_setjmp`, `__sigsetjmp`,
+`sigsetjmp`, `savectx`, `vfork`, `getcontext` and `_setjmpex`) and of any
+function a declaration gives `returns_twice` (`Tier0Function.calls_returns_twice`),
+and the callers through a pointer whose function's first parameter is a
+`jmp_buf`'s or a `sigjmp_buf`'s element (glibc's `struct __jmp_buf_tag *`), as
+setjmp's is (`check_lower_indirect_twice`). C invokes `setjmp` by its name alone
+(C17 7.13.1.1), and neither clang nor LLVM marks a call through a pointer
+`returns_twice`; clang's -O0 code survives one only because it gives every value
+its own stack home. A call through a pointer of any other type is an ordinary
+call.
+Tier 1 shares call-save rows and spill slots among values whose ranges don't
+meet on the CFG, which has no edge from a `longjmp` back to the call, so a
+second return would read another value's bytes; LLVM's StackSlotColoring stays
+out of such a function for the same reason. Their `longjmp` restores the
+callee-saved registers, and C's contexts for `setjmp` hold no value of Tier 0's
+stacks across its call, so Tier 0's code needs nothing more. Such a caller's IR
+lowers as any other's, so that the IR's corpus checks still take every function:
+Tier 1's admission (`check_tier1_compile`) is what refuses it, `--tier1-refusals`
+naming it at the lowering stage with `cause=admission error=2`, and neither
+inliner takes it as a callee, as LLVM's `isInlineViable` doesn't.
+`test-checker-driver`'s returns-twice unit runs each kind, the pointer's too,
+against clang -O0's build. Still refused: a
 vector result LLVM demotes to a hidden pointer, naked functions, whose bodies
 are assembly Tier 0 copies as written, an address whose offset alone is past 32
 bits. Asm statements placed in their callers are Tier 1's as asm bodies (#1839,
@@ -381,6 +405,9 @@ selection's `BUSTER_TIER1_VECTOR_WIDTH_CHANGE`; their variable permutes, byte
 shuffles, aligns and shuffles of lanes are its `permute`, `shuffle`, `align` and
 `shuffle_lanes` (#1840, its "Permutes"), each one EVEX instruction of
 `BUSTER_TIER1_VECTOR_PERMUTE`.
+Their integer lanes' extensions and truncations, `__builtin_convertvector`'s and
+the `vpmov*` builtins', are its `extend` and `truncate` (#1840, its
+"Conversions"), each one EVEX instruction of `BUSTER_TIER1_VECTOR_CONVERT`.
 
 ### Inlining (#1282)
 
@@ -443,14 +470,21 @@ or an atomic access refuses the function, which Tier 0 then compiles, as before.
 A vector passed by value is an object already; one returned in registers comes
 back split across xmm0 and xmm1, xmm0 to xmm3 or ymm0 and ymm1 (#1193), which
 selection, both consumers and the code's certificate now take as up to four
-result parts (`tier1_select_result_parts`, staged in the red zone one after
-another on the way out). At an AVX-512 target a 128-byte vector comes back in
-zmm0 and zmm1, two 64-byte parts (#1847). The parts must fit the red zone's 16
-eightbyte slots (`tier1_select_result_staged`, which the consumer and the
-certificate check too): four 32-byte parts or two 64-byte ones take all of
-them, so a 256-byte vector's four zmm parts are still refused, and Tier 0
-compiles its function. `test-checker-driver`'s wide results' unit returns a
-128-byte vector at x86-64-v3 and x86-64-v4 against clang -O0.
+result parts (`tier1_select_result_parts`). At an AVX-512 target a 128-byte
+vector comes back in zmm0 and zmm1, two 64-byte parts, and a 256-byte one in
+zmm0 to zmm3 (#1847). The function's own return loads each such part, a whole
+vector register's, straight from the result's address
+(`tier1_select_part_direct`), which is in a general register no load
+overwrites, and the code's certificate takes each load as reading the result's
+bytes through the address and defining the part in its register. Any other
+part (a record's in rax and rdx or xmm0 and xmm1, whose bytes may be fewer
+than its load's) is staged in the red zone's eightbyte slots first
+(`tier1_select_result_staged`, which the consumer and the certificate check
+too); two of them take at most two slots. `test-checker-driver`'s wide results' unit returns a
+128-byte vector at x86-64-v3 and x86-64-v4 against clang -O0, and its 256-byte
+results' unit one of 256 bytes (`make64`, called by `use64`) at x86-64-v4;
+below AVX-512 LLVM returns that one through a hidden pointer clang doesn't
+count (`DEMOTED`), which Tier 1 refuses.
 
 Measured by `--tier1 --tier1-refusals --verify` of the compiler's own units,
 whose scalar host's emulations of AVX2's and AVX-512's intrinsics
@@ -470,11 +504,14 @@ Those 25, attributed at main `cb608c1f` by `--tier1 --tier1-refusals --verify
   `host_mm512_set_epi8` and `tier0_shift_back`'s call of it). The limit is 64
   now, and Tier 1 takes them all.
 - 5 are naked functions, whose bodies are assembly Tier 0 copies as written.
-- 4 call `__builtin_frame_address(0)` (`tier1_float_callee`,
+- 4 called `__builtin_frame_address(0)` (`tier1_float_callee`,
   `tier1_float_callee_variadic`, `tier1_stack_check_alignment` and
   `cbuiltin_misc_lower_test_frames`), whose typed-stream entry the lowering to
-  the IR refuses: it needs a frame pointer, which Tier 1 keeps only in a
-  dynamic or realigned frame. It stays Tier 0's. `test-tier1-wide` takes hand-written
+  the IR refused. It is now a `stack_save frame` (#1847): the function keeps a
+  frame pointer (`KEEP_POINTER`) and copies rbp, and the code's certificate
+  takes it. At main `d43c37e5` the unit refuses only the 5 naked functions at
+  x86-64, x86-64-v3 and znver5, and `test-checker-driver`'s frame address unit
+  runs against clang -O0. `test-tier1-wide` takes hand-written
 wide vector IR through the split at both piece widths and natively at x86-64's,
 and `test-checker-driver`'s wide vectors' unit runs against clang -O0 at
 x86-64, x86-64-v2 and x86-64-v3 by both paths.
