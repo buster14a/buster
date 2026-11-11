@@ -44,6 +44,13 @@ typedef enum CheckInitStatus
     CHECK_INIT_NON_CONSTANT,
     CHECK_INIT_UNSUPPORTED,
     CHECK_INIT_RESOURCE,
+    // A designator of the wrong kind for its current object (#2202, clang's CheckDesignatedInitializer), whose type
+    // failed_type keeps: an array designator of a non-array, and a field designator of a non-record.
+    CHECK_INIT_ARRAY_DESIGNATOR,
+    CHECK_INIT_FIELD_DESIGNATOR,
+    // A designation in a scalar's or a vector's braced list (#2202, clang's err_designator_for_scalar_or_sizeless_init), at
+    // the list's `{`, failed_type the list's type.
+    CHECK_INIT_NON_AGGREGATE_DESIGNATOR,
 } CheckInitStatus;
 
 typedef struct CheckInitPart CheckInitPart;
@@ -73,7 +80,9 @@ struct CheckInitializer
     uint32_t count;
     CheckInitStatus status;
     uint32_t failed_token;
-    TypeId failed_type; // The record named by CHECK_INIT_MEMBER, or a failed conversion's target (failed_source's); else zero.
+    // The record named by CHECK_INIT_MEMBER, the current object of a designator of the wrong kind (CHECK_INIT_ARRAY_DESIGNATOR,
+    // CHECK_INIT_FIELD_DESIGNATOR, CHECK_INIT_NON_AGGREGATE_DESIGNATOR), or a failed conversion's target (failed_source's); else zero.
+    TypeId failed_type;
     // A failed conversion's source node plus one (check_init_fail_conversion), or zero: the driver words its error as clang's
     // initialization's (#147).
     uint32_t failed_source;
@@ -1197,6 +1206,17 @@ static uint32_t check_init_member(const TypeTable* types, uint32_t tag, uint32_t
     return member;
 }
 
+// A designator whose kind its current object of type `type` doesn't take (#2202): the driver words it as clang's
+// "array designator cannot initialize non-array type" or "field designator cannot initialize a non-struct, non-union type".
+static void check_init_designator_kind(CheckInitWalker* walker, CheckInitStatus status, uint32_t token, TypeId type)
+{
+    if (walker->result->status == CHECK_INIT_OK)
+    {
+        walker->result->failed_type = type;
+    }
+    check_init_fail(walker, status, token);
+}
+
 static void check_init_designate(CheckInitWalker* walker, uint32_t* position, uint32_t end)
 {
     const Parser* parser = walker->parser;
@@ -1207,9 +1227,31 @@ static void check_init_designate(CheckInitWalker* walker, uint32_t* position, ui
     {
         walker->depth -= 1;
     }
-    if (!walker->frames[walker->depth - 1].braced)
+    const CheckInitFrame* list = &walker->frames[walker->depth - 1];
+    const uint8_t list_kind = type_kind(walker->types, type_strip_aligned(walker->types, list->type));
+    if (!list->braced)
     {
         check_init_fail(walker, CHECK_INIT_INVALID, token);
+    }
+    else if (list_kind != BUSTER_TYPE_KIND_ARRAY && list_kind != BUSTER_TYPE_KIND_INCOMPLETE_ARRAY && list_kind != BUSTER_TYPE_KIND_STRUCT &&
+             list_kind != BUSTER_TYPE_KIND_UNION)
+    {
+        // A designation in a scalar's or a vector's braces (#2202): clang's "initialization of non-aggregate type T with a
+        // designated initializer list", at the list's `{`, which the driver moves to the declarator for the outermost list.
+        uint32_t open = token;
+        uint32_t depth = 0;
+        bool found = false;
+        while (open > 0 && !found)
+        {
+            open -= 1;
+            const uint8_t kind = parser->tokens.kinds[open];
+            const bool closing = kind == PARSE_KIND_R_BRACE || kind == PARSE_KIND_R_PAREN || kind == PARSE_KIND_R_SQUARE;
+            const bool opening = kind == PARSE_KIND_L_BRACE || kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE;
+            found = opening && depth == 0 && kind == PARSE_KIND_L_BRACE;
+            depth += closing ? 1u : 0u;
+            depth -= opening && depth != 0 ? 1u : 0u;
+        }
+        check_init_designator_kind(walker, CHECK_INIT_NON_AGGREGATE_DESIGNATOR, found ? open : token, list->type);
     }
     const uint32_t base_depth = walker->depth;
     CheckInitRepeat* repeat = walker->repeat != 0 && walker->repeat->token == token ? walker->repeat : 0;
@@ -1242,9 +1284,12 @@ static void check_init_designate(CheckInitWalker* walker, uint32_t* position, ui
             }
             uint64_t index = 0;
             uint64_t last = 0;
-            if ((kind != BUSTER_TYPE_KIND_ARRAY && kind != BUSTER_TYPE_KIND_INCOMPLETE_ARRAY) || close == end ||
-                !check_init_index(walker, token, ellipsis != BUSTER_CHECK_NONE ? ellipsis : close, &index) ||
-                (ellipsis != BUSTER_CHECK_NONE && (!check_init_index(walker, ellipsis, close, &last) || last < index)))
+            if (kind != BUSTER_TYPE_KIND_ARRAY && kind != BUSTER_TYPE_KIND_INCOMPLETE_ARRAY)
+            {
+                check_init_designator_kind(walker, CHECK_INIT_ARRAY_DESIGNATOR, token, frame->type);
+            }
+            else if (close == end || !check_init_index(walker, token, ellipsis != BUSTER_CHECK_NONE ? ellipsis : close, &index) ||
+                     (ellipsis != BUSTER_CHECK_NONE && (!check_init_index(walker, ellipsis, close, &last) || last < index)))
             {
                 check_init_fail(walker, CHECK_INIT_INVALID, token);
             }
@@ -1322,8 +1367,11 @@ static void check_init_designate(CheckInitWalker* walker, uint32_t* position, ui
         {
             const uint32_t name_token = token + !old_style;
             const TypeId field_type = frame->type;
-            if ((kind != BUSTER_TYPE_KIND_STRUCT && kind != BUSTER_TYPE_KIND_UNION) || name_token >= end ||
-                parser->tokens.kinds[name_token] != PARSE_KIND_IDENTIFIER)
+            if (kind != BUSTER_TYPE_KIND_STRUCT && kind != BUSTER_TYPE_KIND_UNION)
+            {
+                check_init_designator_kind(walker, CHECK_INIT_FIELD_DESIGNATOR, old_style ? name_token : token, field_type);
+            }
+            else if (name_token >= end || parser->tokens.kinds[name_token] != PARSE_KIND_IDENTIFIER)
             {
                 check_init_fail(walker, CHECK_INIT_INVALID, token);
             }
@@ -1388,8 +1436,16 @@ static void check_init_designate(CheckInitWalker* walker, uint32_t* position, ui
                 more = token < end && (parser->tokens.kinds[token] == PARSE_KIND_PERIOD || parser->tokens.kinds[token] == PARSE_KIND_L_SQUARE);
                 if (more)
                 {
-                    if (!check_init_aggregate(walker->types, selected.type) ||
-                        type_kind(walker->types, type_strip_aligned(walker->types, selected.type)) == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY)
+                    const uint8_t selected_kind = type_kind(walker->types, type_strip_aligned(walker->types, selected.type));
+                    const bool square = parser->tokens.kinds[token] == PARSE_KIND_L_SQUARE;
+                    const bool fits = square ? selected_kind == BUSTER_TYPE_KIND_ARRAY || selected_kind == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY :
+                                               selected_kind == BUSTER_TYPE_KIND_STRUCT || selected_kind == BUSTER_TYPE_KIND_UNION;
+                    if (!fits)
+                    {
+                        // The next designator of the wrong kind for the subobject this one selected (#2202).
+                        check_init_designator_kind(walker, square ? CHECK_INIT_ARRAY_DESIGNATOR : CHECK_INIT_FIELD_DESIGNATOR, token, selected.type);
+                    }
+                    else if (!check_init_aggregate(walker->types, selected.type) || selected_kind == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY)
                     {
                         check_init_fail(walker, CHECK_INIT_INVALID, token);
                     }
@@ -2230,7 +2286,7 @@ static CheckDiagnostic check_init_overload(CheckInitWalker* walker, CheckAction*
             CheckContext semantic = action->context;
             // Overload visibility belongs to this expression's end, not the containing initializer's end.
             semantic.source_position = graph->source_positions != NULL ? graph->source_positions[action->node] : BUSTER_CHECK_NONE;
-            const CheckOverloadContext context = { .semantic = semantic };
+            const CheckOverloadContext context = { .semantic = semantic, .conditions = &graph->conditions };
             CheckValue resolved = { 0 };
             const CheckOverloadResult selected = check_overload_argument(walker->types, action->operands, action->type,
                                                                          graph->overload_candidates, graph->overload_candidate_count,
@@ -2360,6 +2416,22 @@ static bool check_init_const_copy(CheckInitWalker* walker, const CheckInitSelect
 static void check_init_value(CheckInitWalker* walker, const CheckInitSelection* selected, uint32_t token, uint32_t end,
                              uint32_t node, const CheckInitString* string)
 {
+    // GCC's cast to a union (#2301, BUSTER_CHECK_CONVERT_TO_UNION) initializes its member: the union's bytes cleared, then
+    // the operand's value is the member's, at the union's offset, as clang's constant evaluator folds CK_ToUnion (a static
+    // object's initializer too). The operand starts after the cast's `)`.
+    CheckInitSelection member_selection = *selected;
+    while (!walker->infer && string == 0 && walker->graph != NULL && node < walker->stream->count && walker->graph->ops[node] == CHECK_OP_CAST &&
+           (walker->stream->conversions[node].operands[0].flags & BUSTER_CHECK_CONVERT_TO_UNION) != 0 &&
+           walker->stream->diagnostics[node] == CHECK_DIAG_NONE && walker->graph->tokens[node] + 1 < end &&
+           type_unqualified(type_strip_aligned(walker->types, check_stream_type(walker->stream, node))) ==
+           type_unqualified(type_strip_aligned(walker->types, member_selection.type)))
+    {
+        check_init_clear(walker, member_selection.type, member_selection.offset, token);
+        member_selection.type = walker->stream->conversions[node].operands[0].type;
+        token = walker->graph->tokens[node] + 1;
+        node = walker->graph->operand0[node];
+        selected = &member_selection;
+    }
     const TypeId destination = selected->type;
     CheckInitSelection value_selection = *selected;
     if (type_kind(walker->types, type_strip_aligned(walker->types, selected->type)) == BUSTER_TYPE_KIND_ATOMIC)

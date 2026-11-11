@@ -9,6 +9,7 @@
 #ifndef BUSTER_C_CHECKER_INCLUDED
 #define BUSTER_C_CHECKER_INCLUDED
 #if !defined(BUSTER_UNIT) || BUSTER_SOURCE_CONSUMER
+#include "c_check_condition_eval.c"
 #include "c_check_overload.c"
 #include "c_check_builtin_atomic_c11.c"
 
@@ -346,6 +347,9 @@ struct CheckGraph
     CheckOverloadCall* overload_calls;
     uint32_t overload_count;
     uint32_t overload_capacity;
+    // The unit's enable_if and diagnose_if conditions (#1447), which overload resolution reads: the reader's
+    // (check_condition_table), empty in a unit without them.
+    CheckConditionTable conditions;
     // Optional typed prefix control for statement expressions. Sorted owners consume contiguous step slices;
     // every expression dependency precedes the owning STATEMENT_VALUE. Runtime execution still uses the body.
     CheckRegionProof* region_proofs;

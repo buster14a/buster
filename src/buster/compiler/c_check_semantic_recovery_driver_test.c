@@ -738,6 +738,13 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "void f(void)\n{\n    countr = 5;\n    ++countr;\n    int y = olde;\n    int *p = &countr;\n    unsigned *u = &icoun;\n"
         "    take(&countr);\n    takeu(&icoun);\n    int *q;\n    q = &countr, q = 0;\n    int *r = 0, *s = &countr;\n"
         "    (void)y; (void)p; (void)u; (void)q; (void)r; (void)s;\n}\n",
+        // A corrected use's warnings stay in a unit with another error (check_driver_rejected_recovered): an array index's
+        // at the function's end, after the body's later errors, or at a file-scope declarator's end, after its correction's
+        // error; a division's. An operand of an uncorrected name's expression gives none, as clang's, nor does pointer
+        // arithmetic past the end (-Warray-bounds-pointer-arithmetic, off by default).
+        "int arr[3];\nint *p = &arx[5], *q = &arx[7];\nint f(void)\n{\n    int x = arx[5];\n    int *r = &arx[4];\n    int *s = arx + 5;\n"
+        "    int y = zzz;\n    return x + y + *r + *s + arx[-1];\n}\nint g(void) { return yyy + arx[3]; }\n"
+        "int h(void) { return arx[1] / 0 + 1 / 0; }\n",
         // Keywords within an expression (#1447): an expression's and, within a function, a statement's, `break` and
         // `continue` in a loop's body, `case` and `default` in a switch's, a statement's none before a `)`; a value as near
         // leaves the name uncorrected, and one taken where no keyword is offered corrects it. C23's `true` and `false`.
@@ -751,6 +758,22 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "typedef int myint;\nint vary;\nint f(int a)\n{\n    int b = (myin + 1);\n    int c = sizeof(myin);\n    int d = (int)myin;\n"
         "    int e = (unsignd + 1);\n    int g = (int)retrn;\n    int h = (int)vari;\n    int i = (a + unsignd);\n    int j = (myin);\n"
         "    int k = (unsignd);\n    int l = sizeof(myin) + __alignof__(myin);\n    return b + c + d + e + g + h + i + j + k + l;\n}\n",
+        // A statement's start (#1447, check_driver_typo_edits): a name clang's parser corrects to a keyword is read again as
+        // that keyword (`retrn x;` returns x), with no error of the parse's; a tie (retrm) or a keyword not offered there
+        // (`brek` outside a loop) leaves it undeclared, and a statement whose name stays undeclared is skipped to its `;`
+        // (`retrn a + 1`). Before C23 an undeclared function's call is no typo (`whil (a)`); C23 reads it as the keyword.
+        "int counter;\nvoid v(void)\n{\n    retrn;\n}\nint f(int x)\n{\n    retrn x;\n}\nint g(int a)\n{\n    int retrm;\n    retrn;\n"
+        "    retrn a + 1;\n    brek;\n    for (;;) brek;\n    swich (a) { a = 2; }\n    iff (a) return 1;\n    whil (a) a--;\n    int unused;\n"
+        "    return a;\n}\nint h(int a) { int u2; if (a = 1) return 2; return counte; }\n",
+        // A type keyword or a typedef's name corrected there: the statement is a declaration of that type, clang's "unknown
+        // type name" with its note for a typedef; before `;` or an operator other than `*` or `&` no type is offered.
+        "typedef int myint;\nint f(void)\n{\n    unsignd x = 1;\n    myin y = 2;\n    myin *p = &y;\n    myin;\n    myin + 2;\n"
+        "    return x + y + *p;\n}\nint g(int a) { int unused; if (a = 1) return 2; return 0; }\n",
+        // A name before an operand within an expression (`sizeo a`, `retrn 5`): its keyword's suggestion, and the
+        // expression's rest skipped to its `,`, `;` or closer without the parser's error (check_driver_typo_tail).
+        "void take(int, int);\nint g(int a)\n{\n    int w = sizeo * 2;\n    int v = sizeo a b, k = zzz1;\n    take(sizeo a, zzz2);\n"
+        "    a = sizeo a + zzz3; zzz4;\n    if (sizeo a) zzz5;\n    a = 1 + sizeo \"abc\"; zzz6;\n    int y = retrn 5;\n    return sizeo a + zzz7;\n"
+        "}\nint h(int a) { int unused; if (a = 1) return 2; return 0; }\n",
         // Three thousand names and fifty-three typos, written out where the fixture is (check_test_typo_stress): each
         // search reads the visible names once (c_check_typo.c).
         "/* typo stress */\n",

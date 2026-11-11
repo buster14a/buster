@@ -162,12 +162,16 @@ static uint32_t check_overload_index_head(const CheckOverloadIndex* index, uint3
     return slot != UINT32_MAX && index->keys[slot] != 0 ? index->heads[slot] : UINT32_MAX;
 }
 
-// Replace an identical type's representative with its newly validated snapshot. Its inherited flags and canonical
-// identity summarize the older record; source-time uses still follow the untouched candidates[].previous chain.
-static uint32_t check_overload_index_previous(const CheckOverloadCandidate* candidates, TypeId type, bool object_size, uint32_t head, const uint32_t* next)
+// Replace an identical type's representative of the same function (`canonical`) with its newly validated snapshot. Its
+// inherited flags and canonical identity summarize the older record; source-time uses still follow the untouched
+// candidates[].previous chain. Another function of the identical type (an overload whose enable_if conditions differ,
+// #1447) stays in the chain.
+static uint32_t check_overload_index_previous(const CheckOverloadCandidate* candidates, TypeId type, bool object_size, uint32_t canonical, uint32_t head,
+                                              const uint32_t* next)
 {
     uint32_t previous = head;
-    while (previous != UINT32_MAX && candidates[previous].type == type && (candidates[previous].object_sizes != NULL) == object_size)
+    while (previous != UINT32_MAX && candidates[previous].type == type && (candidates[previous].object_sizes != NULL) == object_size &&
+           candidates[previous].canonical == canonical)
     {
         previous = next[previous];
     }

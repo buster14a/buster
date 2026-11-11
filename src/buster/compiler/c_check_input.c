@@ -2158,6 +2158,10 @@ struct CheckInputReader
     TypeId function_result;
     uint32_t function_end;
     uint32_t function_body;
+    // The body whose asm statements' vector register width was found last, and that width, 0 before the first (#2231,
+    // check_input_asm_vector_bits): a body's statements share it.
+    uint32_t asm_vector_body;
+    uint16_t asm_vector_bits;
     bool naked_functions;
     // Whether a function's declaration has a cpu_specific or cpu_dispatch attribute (#1447): only then does binding ask
     // whether a declaration is a version apart (check_input_cpu_dispatch_match).
@@ -5889,8 +5893,12 @@ static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor,
     }
     if (attributes != 0 && valid)
     {
-        // (_Alignas against the declarator's type, not the specifiers': check_input_alignas_underaligned.)
-        base = check_input_attribute_type(reader, attributes, base, false, true);
+        // (_Alignas against the declarator's type, not the specifiers': check_input_alignas_underaligned.) __auto_type's
+        // attributes meet its bare placeholder, as clang's specifiers' type attributes meet the undeduced type (#1844:
+        // a vector's and a mode's errors, check_input_attribute_auto_type); one that leaves it so is int's below.
+        const bool placeholder = auto_type != BUSTER_CHECK_NONE && base == BUSTER_TYPE_INT;
+        base = check_input_attribute_type(reader, attributes, placeholder ? BUSTER_CHECK_AUTO_TYPE : base, false, true);
+        base = placeholder && base == BUSTER_CHECK_AUTO_TYPE ? BUSTER_TYPE_INT : base;
         // C23 attributes belong to the specifier type, not an enclosing declarator's function.
         // The ordering pass emits their ignored-type warnings after the parameter list.
         attributes->calling_convention = CHECK_CALL_DEFAULT;
@@ -9586,6 +9594,18 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
             reader->ignored[i] = true;
             frame->cursor = i + 1;
         }
+        else if (kind != BUSTER_TYPE_KIND_ENUM && frame->member_base == 0 && parser->tokens.kinds[i] == PARSE_KIND_STATIC_ASSERT)
+        {
+            // A static assertion among the members (#2264), which declares none: the walk checks it as it checks a
+            // block's, and the members go on past its `;`. (Clang's parser refuses `__extension__` before one here.)
+            const uint32_t close = i + 1 < frame->close ? parser->tree.parents[i + 1] : BUSTER_CHECK_NONE;
+            valid = close < frame->close && close + 1 < frame->close && parser->tokens.kinds[close + 1] == PARSE_KIND_SEMI;
+            if (valid)
+            {
+                reader->ignored[close + 1] = true;
+                frame->cursor = close + 2;
+            }
+        }
         else if (kind == BUSTER_TYPE_KIND_ENUM)
         {
             uint32_t nested = BUSTER_CHECK_NONE;
@@ -10244,7 +10264,11 @@ static TypeId check_input_auto_type_merged(const TypeTable* types, TypeId declar
         const uint32_t qualifiers = type_qualifiers(stripped);
         if (check_input_auto_type(stripped))
         {
-            result = (qualifiers & (BUSTER_TYPE_CONST | BUSTER_TYPE_VOLATILE)) == type_qualifiers(prior) && type_kind(types, prior) != BUSTER_TYPE_KIND_ATOMIC ? previous : 0;
+            // The placeholder's const and volatile, and a restrict one's restrict (its marker's bit is the others' too), are
+            // the earlier type's; an _Atomic one is an atomic type (check_input_auto_type_refused), not modeled here.
+            const TypeId marker = stripped & ~(TypeId)(BUSTER_TYPE_CONST | BUSTER_TYPE_VOLATILE);
+            const uint32_t own = (qualifiers & (BUSTER_TYPE_CONST | BUSTER_TYPE_VOLATILE)) | (marker == BUSTER_CHECK_AUTO_TYPE_RESTRICT ? BUSTER_TYPE_RESTRICT : 0);
+            result = own == type_qualifiers(prior) && marker != BUSTER_CHECK_AUTO_TYPE_ATOMIC && type_kind(types, prior) != BUSTER_TYPE_KIND_ATOMIC ? previous : 0;
             walking = false;
         }
         else if (type_kind(types, stripped) == BUSTER_TYPE_KIND_POINTER && type_kind(types, prior) == BUSTER_TYPE_KIND_POINTER && qualifiers == type_qualifiers(prior))
@@ -10260,13 +10284,62 @@ static TypeId check_input_auto_type_merged(const TypeTable* types, TypeId declar
     return result;
 }
 
+// Whether clang's C mergeTypes refuses an __auto_type redeclaration's type, `declared`, against the earlier declaration's
+// with linkage, `previous` (#1844), as ASTContext::mergeTypes compares them: at each level the qualifiers first (const,
+// volatile and restrict alike), then a pointer's pointee, and a plain placeholder matches any type (`return RHS`); an
+// _Atomic one (`_Atomic(__auto_type)`) is an atomic type, which matches only another's. Where it is refused, clang gives
+// "redefinition of 'p' with a different type: 'const __auto_type' vs 'int'" (err_redefinition_different_type).
+static bool check_input_auto_type_refused(const TypeTable* types, TypeId declared, TypeId previous)
+{
+    bool result = false;
+    TypeId level = declared;
+    TypeId earlier = previous;
+    bool walking = previous != 0;
+    for (uint32_t steps = 0; walking && steps < 64; steps += 1)
+    {
+        const TypeId stripped = type_strip_aligned(types, level);
+        const TypeId prior = type_strip_aligned(types, earlier);
+        const bool placeholder = check_input_auto_type(stripped);
+        const TypeId marker = stripped & ~(TypeId)(BUSTER_TYPE_CONST | BUSTER_TYPE_VOLATILE);
+        // A placeholder's restrict bit is its marker's but the restrict one's, which is its qualifier.
+        const uint32_t qualifiers = placeholder ? (type_qualifiers(stripped) & (BUSTER_TYPE_CONST | BUSTER_TYPE_VOLATILE)) |
+                                                  (marker == BUSTER_CHECK_AUTO_TYPE_RESTRICT ? BUSTER_TYPE_RESTRICT : 0) :
+                                                  type_qualifiers(stripped);
+        const uint8_t prior_kind = type_kind(types, prior);
+        if (qualifiers != type_qualifiers(prior))
+        {
+            result = true;
+            walking = false;
+        }
+        else if (placeholder)
+        {
+            result = marker == BUSTER_CHECK_AUTO_TYPE_ATOMIC && prior_kind != BUSTER_TYPE_KIND_ATOMIC;
+            walking = false;
+        }
+        else if (type_kind(types, stripped) == BUSTER_TYPE_KIND_POINTER)
+        {
+            result = prior_kind != BUSTER_TYPE_KIND_POINTER;
+            walking = !result;
+            level = type_element(types, stripped);
+            earlier = walking ? type_element(types, prior) : earlier;
+        }
+        else
+        {
+            walking = false;
+        }
+    }
+    return result;
+}
+
 // An __auto_type declarator, as clang takes it before deducing its type: a redeclaration of a variable with linkage that
 // an earlier declaration declared takes that one's type (check_input_auto_type_merged, `*merged`), and isn't deduced; a
 // typedef's and a function's are errors at the keyword, one without an initializer at its name, an array's and an
 // initializer list's at the initializer. A pointer declarator and a declaration's later declarators are deduced as clang
 // deduces them, as C++ deduces a declarator's type (GCC refuses them). Refused by name: a redeclaration whose merge
 // clang's mergeTypes refuses (its "redefinition with a different type" error), or of a name the earlier declaration
-// gave no linkage.
+// gave no linkage. A redeclaration whose merge clang's mergeTypes refuses (check_input_auto_type_refused) gets clang's
+// "redefinition with a different type" error at its name, with its note at the entity's latest earlier declaration, as
+// clang's MergeVarDecl notes it ("previous definition is here" for a definition or a tentative one).
 static __attribute__((noinline)) bool check_input_auto_type_declarator(CheckInputReader* reader, TypeId base, TypeId type, uint32_t name, uint32_t next,
                                                                          bool is_typedef, uint32_t storage, TypeId* merged)
 {
@@ -10281,7 +10354,25 @@ static __attribute__((noinline)) bool check_input_auto_type_declarator(CheckInpu
     CheckInputMessage message = CHECK_INPUT_UNSUPPORTED;
     (void)base;
     *merged = earlier && reader->linked_declarations[spelled] != 0 ? check_input_auto_type_merged(reader->types, type, reader->linked_types[spelled]) : 0;
-    if (earlier)
+    const uint32_t previous = earlier && reader->linked_declarations[spelled] != 0 ? reader->linked_declarations[spelled] - 1 : BUSTER_CHECK_NONE;
+    const bool refused = previous < reader->output->token_count && *merged == 0 && check_input_auto_type_refused(reader->types, type, reader->linked_types[spelled]);
+    if (refused)
+    {
+        const uint32_t before = reader->output->report_count;
+        check_input_report_subject(reader, name, CHECK_INPUT_REDECLARATION, previous);
+        if (reader->output->report_count > before)
+        {
+            CheckInputReport* report = reader->output->reports + before;
+            const bool defined = check_input_bit(reader->declaration_bits, previous, BUSTER_CHECK_BITS_DEFINED) ||
+                                 check_input_bit(reader->declaration_bits, previous, BUSTER_CHECK_BITS_TENTATIVE);
+            report->detail = check_input_redeclaration_extern(parser, name) ? CHECK_REDECLARATION_AUTO_TYPE_EXTERN : CHECK_REDECLARATION_AUTO_TYPE;
+            report->note_token = previous;
+            report->note_kind = defined ? CHECK_INPUT_NOTE_PREVIOUS_DEFINITION : CHECK_INPUT_NOTE_PREVIOUS_DECLARATION;
+            report->type = type;
+            report->value = reader->linked_types[spelled];
+        }
+    }
+    else if (earlier)
     {
         token = *merged == 0 ? name : BUSTER_CHECK_NONE;
     }
@@ -10309,7 +10400,7 @@ static __attribute__((noinline)) bool check_input_auto_type_declarator(CheckInpu
     {
         check_input_report(reader, token, message);
     }
-    return token == BUSTER_CHECK_NONE;
+    return token == BUSTER_CHECK_NONE && !refused;
 }
 
 // Whether these attributes include GNU's gnu_inline, which makes inline functions follow GNU89's rules in any mode.
@@ -14913,7 +15004,13 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
     }
     else if (role == PARSE_ROLE_CLOSE_CASE)
     {
-        const uint32_t keyword = reader->first_child[token];
+        // The label's keyword, past the C23 attributes before it, whose list the parser makes the colon's child too (#2291).
+        uint32_t keyword = reader->first_child[token];
+        while (keyword < parser->tokens.count && parser->tokens.kinds[keyword] != PARSE_KIND_CASE && parser->tokens.kinds[keyword] != PARSE_KIND_DEFAULT)
+        {
+            keyword = reader->next_child[keyword];
+        }
+        keyword = keyword < parser->tokens.count ? keyword : reader->first_child[token];
         const bool fallback = keyword < parser->tokens.count && parser->tokens.kinds[keyword] == PARSE_KIND_DEFAULT;
         supported = check_sparse_get(reader->output->control_owners, token) != BUSTER_CHECK_NONE && (fallback ? count == 0 : count == 1 || count == 2);
         if (supported && !fallback)

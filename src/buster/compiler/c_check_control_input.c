@@ -165,6 +165,29 @@ static bool check_input_declaration_after(const Parser* parser, uint32_t token)
            (kind == PARSE_KIND_IDENTIFIER && parser->tree.roles[token] == PARSE_ROLE_SPECIFIER);
 }
 
+// Whether the suppress named at `name`, an attribute list's item before `after`, has an argument that is no string literal
+// (#2332, check_input_attribute_suppress_literal; an empty list has none): clang's parser gives its "expected string
+// literal" and drops the attribute before Sema meets the label's.
+static bool check_input_label_suppress_literal(const Parser* parser, uint32_t name, uint32_t after)
+{
+    const uint8_t* kinds = parser->tokens.kinds;
+    const uint32_t close = name + 1 < after && kinds[name + 1] == PARSE_KIND_L_PAREN ? parser->tree.parents[name + 1] : 0;
+    const bool listed = close > name + 2 && close < after;
+    bool result = false;
+    for (uint32_t argument = name + 2; listed && !result && argument <= close;)
+    {
+        uint32_t stop = argument;
+        while (stop < close && kinds[stop] != PARSE_KIND_COMMA)
+        {
+            const uint32_t group = kinds[stop] == PARSE_KIND_L_PAREN ? parser->tree.parents[stop] : stop;
+            stop = group > stop && group < close ? group + 1 : stop + 1;
+        }
+        result = check_input_attribute_suppress_literal(parser, argument, stop) != BUSTER_CHECK_NONE;
+        argument = stop + 1;
+    }
+    return result;
+}
+
 // A label's attributes from `first` to `after` (#147): GNU ones right after a named label's colon, as clang's parser takes
 // every GNU attribute there in C, whatever follows it (a null statement, another statement, a declaration, C23's
 // attributes, which are the next item's), and a statement's before a label's name (`[[x]] l:`), which clang's labeled
@@ -187,7 +210,11 @@ static void check_input_label_attributes(CheckInputReader* reader, uint32_t firs
                                             (parser->tokens.kinds[token - 1] == PARSE_KIND_COMMA && parser->tree.depths[token - 1] == items));
         items = role == PARSE_ROLE_OPEN_ATTRIBUTE_LIST ? parser->tree.depths[token] + 1 : items;
         const bool named = item && parser->tokens.kinds[token] != PARSE_KIND_COMMA && role != PARSE_ROLE_CLOSE_ATTRIBUTE_LIST && parser->tokens.names[token] != 0;
-        refused = named && check_input_label_refusal(check_input_attribute_name(reader, parser->tokens.names[token])) != NULL ? token : BUSTER_CHECK_NONE;
+        const String8 name = named ? check_input_attribute_name(reader, parser->tokens.names[token]) : (String8){ 0 };
+        // (suppress's arguments are clang's parser's string literals first, whose error drops it before Sema meets the
+        // label, #2332: the reading's error.)
+        const bool dropped = named && check_input_attribute_suppress_name(name) && check_input_label_suppress_literal(parser, token, after);
+        refused = named && !dropped && check_input_label_refusal(name) != NULL ? token : BUSTER_CHECK_NONE;
     }
     if (refused != BUSTER_CHECK_NONE)
     {
@@ -631,6 +658,9 @@ static bool check_input_statement_attribute_kinds(CheckInputReader* reader, Chec
     bool valid = true;
     *musttail = BUSTER_CHECK_NONE;
     uint32_t aligned = BUSTER_CHECK_NONE;
+    // The first clang::likely or clang::unlikely, which excludes the other (#2291).
+    uint32_t likelihood = BUSTER_CHECK_NONE;
+    bool likely = false;
     for (uint32_t i = 0; valid && attributes != 0 && i < attributes->count; i += 1)
     {
         CheckInputAttribute* attribute = attributes->records + i;
@@ -890,6 +920,30 @@ static bool check_input_statement_attribute_kinds(CheckInputReader* reader, Chec
                                                  BUSTER_CHECK_WARNING_NO_SOURCE);
             attribute->ignored = true;
         }
+        else if (check_input_attribute_equal(generic, "likely") || check_input_attribute_equal(generic, "unlikely"))
+        {
+            // C23's clang::likely and clang::unlikely (#2291), branch hints that change nothing at -O0 and that clang takes on
+            // any statement without a word, after their count's error.
+            // The other one after one of them is clang's mutual exclusion error, with its note at the first.
+            const bool this_likely = check_input_attribute_equal(generic, "likely");
+            valid = attribute->count_check == BUSTER_CHECK_COUNT_NONE && (likelihood == BUSTER_CHECK_NONE || likely == this_likely);
+            if (attribute->count_check != BUSTER_CHECK_COUNT_NONE)
+            {
+                check_input_report_argument(reader, attribute->first, CHECK_INPUT_ATTRIBUTE_ARGUMENT_COUNT, attribute->count_check | attribute->count_bound << 8);
+            }
+            else if (!valid)
+            {
+                check_input_report_argument(reader, attribute->first, CHECK_INPUT_ATTRIBUTE_EXCLUSION, 0);
+                if (reader->output->report_count > reported)
+                {
+                    reader->output->reports[reported].note_token = likelihood;
+                    reader->output->reports[reported].note_kind = CHECK_INPUT_NOTE_CONFLICTING_ATTRIBUTE;
+                }
+            }
+            likely = likelihood == BUSTER_CHECK_NONE ? this_likely : likely;
+            likelihood = likelihood == BUSTER_CHECK_NONE && valid ? attribute->first : likelihood;
+            attribute->ignored = true;
+        }
         else if (kind == CHECK_ATTRIBUTE_NOMERGE || kind == CHECK_ATTRIBUTE_SUPPRESS)
         {
             // clang's nomerge keeps the statement's calls from merging, which -O0's code never does, and suppress is the
@@ -918,6 +972,37 @@ static bool check_input_statement_attribute_kinds(CheckInputReader* reader, Chec
         }
     }
     return valid;
+}
+
+// The first clang::likely or clang::unlikely among the C23 attribute lists from `token` on, as clang's
+// Stmt::getLikelihood reads a statement's attributes (#2291): its first token (its scope's), BUSTER_CHECK_NONE if none,
+// and in *likely which one.
+static uint32_t check_input_statement_likelihood(CheckInputReader* reader, uint32_t token, bool* likely)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t count = parser->tokens.count;
+    uint32_t result = BUSTER_CHECK_NONE;
+    *likely = false;
+    while (result == BUSTER_CHECK_NONE && token + 1 < count && parser->tokens.kinds[token] == PARSE_KIND_L_SQUARE &&
+           parser->tokens.kinds[token + 1] == PARSE_KIND_L_SQUARE && parser->tree.parents[token] < count)
+    {
+        const uint32_t close = parser->tree.parents[token + 1];
+        for (uint32_t item = token + 2; result == BUSTER_CHECK_NONE && item + 3 < close && close < count; item += 1)
+        {
+            const bool scoped = parser->tokens.kinds[item + 1] == PARSE_KIND_COLON && parser->tokens.kinds[item + 2] == PARSE_KIND_COLON &&
+                                parser->tokens.names[item] != 0 && parser->tokens.names[item + 3] != 0 &&
+                                (item == token + 2 || parser->tokens.kinds[item - 1] == PARSE_KIND_COMMA);
+            const String8 scope = scoped ? check_input_attribute_name(reader, parser->tokens.names[item]) : (String8){ 0 };
+            const String8 name = scoped ? check_input_attribute_name(reader, parser->tokens.names[item + 3]) : (String8){ 0 };
+            const bool clang = check_input_attribute_equal(scope, "clang") || check_input_attribute_equal(scope, "_Clang");
+            const bool is_likely = clang && (check_input_attribute_equal(name, "likely") || check_input_attribute_equal(name, "__likely__"));
+            const bool is_unlikely = clang && (check_input_attribute_equal(name, "unlikely") || check_input_attribute_equal(name, "__unlikely__"));
+            result = is_likely || is_unlikely ? item : BUSTER_CHECK_NONE;
+            *likely = is_likely;
+        }
+        token = parser->tree.parents[token] + 1;
+    }
+    return result;
 }
 
 // The C23 attributes of an asm statement, from `first` to `end` (#147): each item's "'X' attribute ignored", at its first
@@ -1115,6 +1200,39 @@ static void check_input_statement_attributes(CheckInputReader* reader, uint32_t 
         }
         uint32_t musttail = BUSTER_CHECK_NONE;
         valid = valid && check_input_statement_attribute_kinds(reader, attributes, empty, returns, after, &musttail);
+        if (valid && before == PARSE_ROLE_ELSE && parser->tree.parents[first - 1] < count)
+        {
+            // An else branch as likely or unlikely as its if's then branch: clang's warning at the then branch's, with its
+            // note at this one (#2291).
+            bool else_likely = false;
+            bool then_likely = false;
+            const uint32_t otherwise = check_input_statement_likelihood(reader, first, &else_likely);
+            const uint32_t then = otherwise != BUSTER_CHECK_NONE ? check_input_statement_likelihood(reader, parser->tree.parents[first - 1] + 1, &then_likely) :
+                                                                   BUSTER_CHECK_NONE;
+            if (then != BUSTER_CHECK_NONE && then_likely == else_likely)
+            {
+                const CheckWarningEvent event =
+                {
+                    .id = CHECK_WARNING_ID_IGNORED_ATTRIBUTES,
+                    .kind = CHECK_WARNING_EVENT_LIKELIHOOD_CONFLICT,
+                    .token = then,
+                    .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                    // Once the if's statement is read, after its branches' own warnings, as clang's ActOnIfStmt gives it.
+                    .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+                    .completion = after < count ? check_input_loop_statement_end(reader, after) : then,
+                    .payload = { .name = parser->tokens.names[then + 3], .token = BUSTER_CHECK_WARNING_NO_SOURCE,
+                                 .data = parser->tokens.names[then] | BUSTER_CHECK_WARNING_STANDARD_ATTRIBUTE },
+                };
+                const CheckWarningNote note =
+                {
+                    .kind = CHECK_WARNING_NOTE_CONFLICTING_ATTRIBUTE,
+                    .token = otherwise,
+                    .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                    .payload = { .name = 0, .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+                };
+                check_input_warning_event(reader, &event, &note, 1);
+            }
+        }
         bool fallthrough = false;
         for (uint32_t i = 0; valid && attributes != 0 && i < attributes->count; i += 1)
         {

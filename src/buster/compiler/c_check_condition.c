@@ -22,90 +22,33 @@
 // the only one given, the first, else every warning. An enable_if whose condition doesn't hold makes the call "no matching
 // function", naming the first in the order clang checks them: the latest declaration's first, each declaration's in source
 // order. A use of a function with an enable_if that isn't always true, other than a call's callee, is clang's "cannot take
-// address" error. An overloadable function's conditions, which take part in overload resolution, are left unsupported.
+// address" error. An overloadable function's conditions take part in its overload resolution (c_check_overload.c): an
+// enable_if that doesn't admit a call makes its candidate not viable, more of them rank it better, and ones that differ
+// make two overloads of one signature (check_condition_same, clang's profile of the expression); a call reads its
+// selected candidate's list.
 //
 // A unit without these attributes pays a flag test (CheckInputReader.condition_attributes) where declarations are read
 // and a count test where uses and calls are.
 
-#define BUSTER_CHECK_CONDITION_CONSTANT 0xffffffffu
-#define BUSTER_CHECK_CONDITION_PARAMETER 0xfffffffeu
-#define BUSTER_CHECK_CONDITION_COMMA 0xfffffffdu
 #define CHECK_CONDITION_OPAQUE_CALL 1u
 #define CHECK_CONDITION_OPAQUE_WRITE 2u
 
-typedef enum CheckConditionKind
+// The unit's conditions as the checker reads them (c_check_condition_eval.c), kept in its graph for overload resolution.
+static CheckConditionTable check_condition_table(const CheckInput* input)
 {
-    CHECK_CONDITION_WARNING,
-    CHECK_CONDITION_ERROR,
-    CHECK_CONDITION_ENABLE,
-} CheckConditionKind;
-
-typedef enum CheckConditionState
-{
-    // A condition that names no parameter, false or true once and for all.
-    CHECK_CONDITION_FALSE,
-    CHECK_CONDITION_TRUE,
-    // A condition each call evaluates with its arguments (CheckCondition.steps).
-    CHECK_CONDITION_DEPENDENT,
-    // A system header's condition whose shape the steps don't take: it decides nothing.
-    CHECK_CONDITION_OPAQUE,
-} CheckConditionState;
-
-// One step of a condition's program, in postorder: a constant (`index` into CheckCondition.constants), a parameter (its
-// place `index`, of type `type`) or a CheckOp on earlier steps' values (`operands`, a cast's destination `type`).
-typedef struct CheckConditionStep CheckConditionStep;
-struct CheckConditionStep
-{
-    uint32_t op;
-    uint32_t operands[3];
-    uint32_t index;
-    TypeId type;
-};
-
-typedef struct CheckCondition CheckCondition;
-struct CheckCondition
-{
-    const CheckConditionStep* steps;
-    const CheckValue* constants;
-    uint32_t step_count;
-    // The attribute's first token (its note's place), the message's first string token and the declaration's name.
-    uint32_t attribute;
-    uint32_t message;
-    uint32_t declaration;
-    // diagnose_if's warning group (CheckInputAttribute.warning_group): its index in pp_features_warning plus one, or 0.
-    uint16_t group;
-    uint8_t kind;
-    uint8_t state;
-};
-
-typedef struct CheckConditionDeclaration CheckConditionDeclaration;
-struct CheckConditionDeclaration
-{
-    uint32_t declaration;
-    uint32_t count;
-    const uint32_t* conditions;
-    // Whether some diagnose_if holds at every use, some enable_if isn't always true, and some condition needs a call's
-    // arguments.
-    bool independent;
-    bool restricted;
-    bool dependent;
-};
+    const CheckConditionTable table = {
+        .conditions = input->conditions,
+        .declarations = input->condition_declarations,
+        .declaration_count = input->condition_declaration_count,
+    };
+    return table;
+}
 
 // The list of declaration `declaration` (CheckInput.condition_declarations, by binary search), or NULL.
 static const CheckConditionDeclaration* check_condition_declaration(const CheckInput* input, uint32_t declaration)
 {
-    uint32_t low = 0;
-    uint32_t high = input->condition_declaration_count;
-    const CheckConditionDeclaration* result = NULL;
-    while (result == NULL && low < high)
-    {
-        const uint32_t middle = low + (high - low) / 2;
-        const uint32_t at = input->condition_declarations[middle].declaration;
-        result = at == declaration ? input->condition_declarations + middle : NULL;
-        high = declaration < at ? middle : high;
-        low = declaration > at ? middle + 1 : low;
-    }
-    return result;
+    const CheckConditionTable table = check_condition_table(input);
+    return check_condition_find(&table, declaration);
 }
 
 // The place among the function's parameters (from 0) of the parameter `token`'s name names, or BUSTER_CHECK_NONE: the
@@ -542,6 +485,10 @@ static CheckConditionBuild check_condition_build(CheckInputReader* reader, Check
         .attribute = attribute->first,
         .message = valid ? check_condition_string(parser, message_first, message_end) : BUSTER_CHECK_NONE,
         .declaration = name,
+        .first = first,
+        .end = end,
+        .function = function,
+        .profile = BUSTER_CHECK_NONE,
         .group = attribute->kind == CHECK_ATTRIBUTE_DIAGNOSE_IF ? attribute->warning_group : 0,
         .kind = CHECK_CONDITION_ENABLE,
         .state = CHECK_CONDITION_OPAQUE,
@@ -555,17 +502,23 @@ static CheckConditionBuild check_condition_build(CheckInputReader* reader, Check
         valid = check_input_attribute_string(reader, string, type_end - (string - type_first), false, &type_text);
         condition->kind = check_input_attribute_equal(type_text, "error") ? CHECK_CONDITION_ERROR : CHECK_CONDITION_WARNING;
     }
-    // The names, a function parameter's first.
+    // The names, a function parameter's first, and the place of the parameter each names.
     bool dependent = false;
+    uint32_t* places = valid && end > first ? BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint32_t, end - first) : NULL;
+    reader->output->resource |= valid && end > first && places == NULL;
+    valid &= end <= first || places != NULL;
     for (uint32_t t = first; valid && t < end; t += 1)
     {
         const uint8_t previous = t > 0 ? parser->tokens.kinds[t - 1] : PARSE_KIND_END;
+        places[t - first] = BUSTER_CHECK_NONE;
         if (parser->tokens.kinds[t] == PARSE_KIND_IDENTIFIER && previous != PARSE_KIND_PERIOD && previous != PARSE_KIND_ARROW)
         {
             (void)check_input_thread_name(reader, parameters, NULL, 0, NULL, 0, t);
-            dependent |= check_condition_parameter(reader, parameters, list, t) != BUSTER_CHECK_NONE;
+            places[t - first] = check_condition_parameter(reader, parameters, list, t);
+            dependent |= places[t - first] != BUSTER_CHECK_NONE;
         }
     }
+    condition->places = dependent ? places : NULL;
     CheckValue value = { 0 };
     bool call_failure = false;
     valid = valid && check_input_attribute_expression(reader, attributes, attribute, first, end, true, &value, &call_failure);
@@ -603,6 +556,86 @@ static CheckConditionBuild check_condition_build(CheckInputReader* reader, Check
     return result;
 }
 
+// Whether conditions `a` and `b` are the same expression as clang's profile of it says (StmtProfiler, canonical, which
+// compareEnableIfAttrs compares): token for token, as the tree follows the tokens, a parameter's name by its place and
+// type, a literal by its value and type (`0x1` is `1`, `'\1'` is `'\x01'`, a macro is what it expands to; `1L` isn't
+// `1`), a string by its spelling, any other name by what it names and any other token by its kind. Parentheses are a
+// tree's node, as clang's ParenExpr is: `(1)` isn't `1`.
+static bool check_condition_same(CheckInputReader* reader, const CheckCondition* a, const CheckCondition* b)
+{
+    const Parser* parser = reader->parser;
+    uint32_t a_count = 0;
+    uint32_t b_count = 0;
+    const TypeId* a_types = type_parameters(reader->types, a->function, &a_count);
+    const TypeId* b_types = type_parameters(reader->types, b->function, &b_count);
+    const uint32_t length = a->end - a->first;
+    bool same = length == b->end - b->first;
+    for (uint32_t k = 0; same && k < length; k += 1)
+    {
+        const uint32_t at = a->first + k;
+        const uint32_t bt = b->first + k;
+        const uint8_t kind = parser->tokens.kinds[at];
+        same = kind == parser->tokens.kinds[bt];
+        const uint32_t a_place = same && a->places != NULL ? a->places[k] : BUSTER_CHECK_NONE;
+        const uint32_t b_place = same && b->places != NULL ? b->places[k] : BUSTER_CHECK_NONE;
+        if (same && kind == PARSE_KIND_IDENTIFIER && (a_place != BUSTER_CHECK_NONE || b_place != BUSTER_CHECK_NONE))
+        {
+            const TypeAnswer typed = a_place < a_count && b_place < b_count ? type_same_canonical(reader->types, a_types[a_place], b_types[b_place]) : TYPE_ANSWER_NO;
+            reader->output->resource |= typed == TYPE_ANSWER_FULL;
+            same = a_place == b_place && typed == TYPE_ANSWER_YES;
+        }
+        else if (same && kind == PARSE_KIND_IDENTIFIER)
+        {
+            same = parser->tokens.names[at] == parser->tokens.names[bt] && reader->output->declarations[at] == reader->output->declarations[bt];
+        }
+        else if (same && (kind == PARSE_KIND_NUMBER || kind == PARSE_KIND_CHARACTER))
+        {
+            CheckLiteral a_literal;
+            CheckLiteral b_literal;
+            check_input_literal(reader, at, &a_literal);
+            check_input_literal(reader, bt, &b_literal);
+            same = a_literal.valid && b_literal.valid && a_literal.type == b_literal.type && a_literal.bit_width == b_literal.bit_width &&
+                   a_literal.integer == b_literal.integer && a_literal.real == b_literal.real &&
+                   a_literal.floating_storage[0] == b_literal.floating_storage[0] && a_literal.floating_storage[1] == b_literal.floating_storage[1];
+        }
+        else if (same && kind != PARSE_KIND_STRING)
+        {
+            same = parser->tokens.names[at] == parser->tokens.names[bt];
+        }
+        else if (same)
+        {
+            const uint64_t mark = reader->scratch->length;
+            const uint8_t* a_bytes = NULL;
+            const uint8_t* b_bytes = NULL;
+            uint32_t a_length = 0;
+            uint32_t b_length = 0;
+            same = check_input_spelling(reader, at, &a_bytes, &a_length) && check_input_spelling(reader, bt, &b_bytes, &b_length) && a_length == b_length &&
+                   memcmp(a_bytes, b_bytes, a_length) == 0;
+            arena_pop_to(reader->scratch, mark);
+        }
+    }
+    return same;
+}
+
+// The profile of the unit's last condition, `index` (CheckCondition.profile): the first earlier enable_if condition that is
+// the same expression (check_condition_same), else its own. Only enable_if's are compared (compareEnableIfAttrs).
+static void check_condition_profile(CheckInputReader* reader, uint32_t index)
+{
+    CheckInput* input = reader->output;
+    CheckCondition* condition = input->conditions + index;
+    uint32_t profile = index;
+    for (uint32_t i = 0; condition->kind == CHECK_CONDITION_ENABLE && condition->end > condition->first && profile == index && i < index; i += 1)
+    {
+        const CheckCondition* earlier = input->conditions + i;
+        const bool candidate = earlier->kind == CHECK_CONDITION_ENABLE && earlier->profile == i && earlier->end - earlier->first == condition->end - condition->first &&
+                               reader->parser->tokens.kinds[earlier->first] == reader->parser->tokens.kinds[condition->first];
+        profile = candidate && check_condition_same(reader, earlier, condition) ? i : profile;
+    }
+    condition->profile = profile;
+}
+
+#include "c_check_condition_mangle.c"
+
 // Appends `condition` to the unit's (CheckInput.conditions), giving its index, or BUSTER_CHECK_NONE where memory failed.
 static uint32_t check_condition_append(CheckInputReader* reader, const CheckCondition* condition)
 {
@@ -627,6 +660,36 @@ static uint32_t check_condition_append(CheckInputReader* reader, const CheckCond
     return room ? input->condition_count++ : BUSTER_CHECK_NONE;
 }
 
+// The previous declaration of overloadable function `token` of type `type`, whose own conditions are `own`'s, or
+// BUSTER_CHECK_NONE: the latest declaration of its signature in the unit (check_input_overload_prior's walk) whose
+// enable_ifs are the same expressions in the same order (check_condition_compare_enable), as clang's IsOverload compares
+// them.
+static uint32_t check_condition_overload_prior(CheckInputReader* reader, uint32_t token, TypeId type, const CheckConditionDeclaration* own)
+{
+    const uint32_t name = reader->parser->tokens.names[token];
+    const CheckInputAttributes* attributes = check_input_attributes_at(reader->output, token);
+    const bool object_size = attributes != NULL && attributes->object_sizes != NULL;
+    uint64_t signature_hash = 0;
+    const bool hashed = reader->overload_candidates != NULL &&
+                        check_overload_signature_hash(&reader->overload_index, reader->types, type, reader->scratch, &signature_hash);
+    signature_hash = object_size ? type_hash_mix(signature_hash, 1) : signature_hash;
+    reader->output->resource |= reader->overload_candidates != NULL && !hashed;
+    const uint64_t key = check_overload_index_key(signature_hash, name, UINT32_MAX);
+    const uint32_t slot = hashed ? check_overload_index_find(&reader->overload_index, key, name, UINT32_MAX, reader->parser->options.scalar) : UINT32_MAX;
+    const CheckConditionTable table = check_condition_table(reader->output);
+    uint32_t prior = BUSTER_CHECK_NONE;
+    for (uint32_t linked = hashed ? check_overload_index_head(&reader->overload_index, slot) : UINT32_MAX; prior == BUSTER_CHECK_NONE && linked != UINT32_MAX;
+         linked = reader->overload_index.linked_next[linked])
+    {
+        const CheckOverloadCandidate* candidate = reader->overload_candidates + linked;
+        const TypeAnswer signature = (candidate->object_sizes != NULL) == object_size ? check_overload_signature(reader->types, candidate->type, type) : TYPE_ANSWER_NO;
+        reader->output->resource |= signature == TYPE_ANSWER_FULL;
+        const bool same = signature == TYPE_ANSWER_YES && check_condition_compare_enable(&table, check_condition_find(&table, candidate->declaration), own) == 0;
+        prior = same ? candidate->declaration : BUSTER_CHECK_NONE;
+    }
+    return prior;
+}
+
 // The conditions of function declaration `name` (above): its own attributes' (`attributes`, null for none) after those
 // its previous declaration `previous` has, the list kept where any holds. The function's type is `type`, its parameters'
 // names `parameters` and its parameter list's `(` `list`. False after an error.
@@ -636,9 +699,8 @@ static bool check_input_conditions(CheckInputReader* reader, CheckInputAttribute
     CheckInput* input = reader->output;
     const Parser* parser = reader->parser;
     const TypeId function = type_strip_aligned(reader->types, type);
-    const CheckConditionDeclaration* inherited = previous < parser->tokens.count && input->condition_declaration_count != 0 ?
-                                                 check_condition_declaration(input, previous) : NULL;
-    const uint32_t inherited_count = inherited != NULL ? inherited->count : 0;
+    const bool overloadable = (attributes != NULL && (check_input_overload_flags(attributes) & BUSTER_CHECK_OVERLOADABLE) != 0) ||
+                              (reader->overload_candidates != NULL && reader->overload_index.active[parser->tokens.names[name]]);
     uint32_t own = 0;
     for (uint32_t i = 0; attributes != NULL && i < attributes->count; i += 1)
     {
@@ -647,41 +709,65 @@ static bool check_input_conditions(CheckInputReader* reader, CheckInputAttribute
     }
     // #1361's object-size wrappers keep their conditions unevaluated, as before.
     const bool sized = attributes != NULL && attributes->object_sizes != NULL;
-    const bool overloadable = attributes != NULL && (check_input_overload_flags(attributes) & BUSTER_CHECK_OVERLOADABLE) != 0;
     const bool system = check_graph_system_token(&input->graph, name);
-    uint32_t* list_indices = own + inherited_count != 0 && !sized ? BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint32_t, own + inherited_count) : NULL;
-    input->resource |= own + inherited_count != 0 && !sized && list_indices == NULL;
+    // Its own conditions first, in source order.
+    uint32_t* own_indices = own != 0 && !sized ? BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint32_t, own) : NULL;
+    input->resource |= own != 0 && !sized && own_indices == NULL;
     bool valid = !input->resource;
-    uint32_t count = 0;
-    if (list_indices != NULL && inherited_count != 0)
-    {
-        memcpy(list_indices, inherited->conditions, (uint64_t)inherited_count * sizeof(uint32_t));
-        count = inherited_count;
-    }
-    for (uint32_t i = 0; valid && list_indices != NULL && attributes != NULL && i < attributes->count; i += 1)
+    uint32_t own_count = 0;
+    for (uint32_t i = 0; valid && own_indices != NULL && attributes != NULL && i < attributes->count; i += 1)
     {
         CheckInputAttribute* attribute = attributes->records + i;
         if ((attribute->kind == CHECK_ATTRIBUTE_DIAGNOSE_IF || attribute->kind == CHECK_ATTRIBUTE_ENABLE_IF) && !attribute->ignored && !attribute->subject_ignored)
         {
             CheckCondition condition;
             const CheckConditionBuild built = check_condition_build(reader, attributes, attribute, parameters, list, function, name, system, &condition);
-            // An overloadable function's conditions take part in its overload resolution, which isn't supported; a system
-            // header's are kept and decide nothing.
-            const bool trivial = condition.kind == CHECK_CONDITION_ENABLE && condition.state == CHECK_CONDITION_TRUE;
-            const bool unsupported = built == CHECK_CONDITION_UNSUPPORTED || (built == CHECK_CONDITION_BUILT && overloadable && !trivial && !system);
-            if (unsupported)
+            // A system header's condition whose shape the steps don't take is kept and decides nothing.
+            if (built == CHECK_CONDITION_UNSUPPORTED)
             {
                 check_input_attribute_error(reader, attributes, attribute->first, attribute->end, CHECK_ATTRIBUTE_ERROR_UNKNOWN);
             }
-            valid = built == CHECK_CONDITION_BUILT && !unsupported;
-            condition.state = overloadable && !trivial ? CHECK_CONDITION_OPAQUE : condition.state;
+            valid = built == CHECK_CONDITION_BUILT;
             const uint32_t index = valid ? check_condition_append(reader, &condition) : BUSTER_CHECK_NONE;
             valid &= index != BUSTER_CHECK_NONE;
             if (valid)
             {
-                list_indices[count++] = index;
+                check_condition_profile(reader, index);
+                if (overloadable && condition.kind == CHECK_CONDITION_ENABLE)
+                {
+                    const String8 mangled = check_condition_mangle(reader, input->conditions + index);
+                    input->conditions[index].mangled = mangled.pointer;
+                    input->conditions[index].mangled_length = (uint32_t)mangled.length;
+                }
+                own_indices[own_count++] = index;
             }
         }
+    }
+    // Then the ones of the previous declaration it inherits. An overloadable function's is the latest of its signature and
+    // its enable_ifs (check_condition_overload_prior): clang's IsOverload makes a declaration whose enable_ifs differ another
+    // overload, and a redeclaration's are its own again, so only the previous one's others are inherited.
+    const CheckConditionDeclaration own_entry = { .declaration = name, .count = own_count, .conditions = own_indices };
+    previous = valid && overloadable && !sized ? check_condition_overload_prior(reader, name, type, &own_entry) : previous;
+    const CheckConditionDeclaration* inherited = valid && !sized && previous < parser->tokens.count && input->condition_declaration_count != 0 ?
+                                                 check_condition_declaration(input, previous) : NULL;
+    uint32_t inherited_count = 0;
+    for (uint32_t i = 0; inherited != NULL && i < inherited->count; i += 1)
+    {
+        inherited_count += !overloadable || input->conditions[inherited->conditions[i]].kind != CHECK_CONDITION_ENABLE ? 1u : 0u;
+    }
+    uint32_t* list_indices = inherited_count == 0 ? own_indices :
+                             valid ? BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint32_t, (uint64_t)inherited_count + own_count) : NULL;
+    input->resource |= valid && inherited_count != 0 && list_indices == NULL;
+    valid &= !input->resource;
+    uint32_t count = inherited_count == 0 ? own_count : 0;
+    for (uint32_t i = 0; valid && inherited_count != 0 && i < inherited->count; i += 1)
+    {
+        list_indices[count] = inherited->conditions[i];
+        count += !overloadable || input->conditions[inherited->conditions[i]].kind != CHECK_CONDITION_ENABLE ? 1u : 0u;
+    }
+    for (uint32_t i = 0; valid && inherited_count != 0 && i < own_count; i += 1)
+    {
+        list_indices[count++] = own_indices[i];
     }
     if (valid && count != 0)
     {
@@ -728,6 +814,7 @@ static bool check_input_conditions(CheckInputReader* reader, CheckInputAttribute
             input->condition_declaration_count += 1;
         }
     }
+    input->graph.conditions = check_condition_table(input);
     return valid;
 }
 
@@ -979,8 +1066,11 @@ static void check_input_condition_uses(CheckInputReader* reader)
         memset(marked, 0, (uint64_t)count + 4);
         for (uint32_t i = 0; i < input->condition_declaration_count; i += 1)
         {
+            // An overloadable function's are the selected candidate's at a call (check_input_condition_call), and its
+            // address is resolved among the candidates its enable_ifs leave eligible (check_overload_address).
             const CheckConditionDeclaration* entry = input->condition_declarations + i;
-            marked[entry->declaration] = entry->independent || entry->restricted ? 1u : 0u;
+            const bool overloadable = (check_input_overload_flags(check_input_attributes_at(input, entry->declaration)) & BUSTER_CHECK_OVERLOADABLE) != 0;
+            marked[entry->declaration] = (entry->independent || entry->restricted) && !overloadable ? 1u : 0u;
         }
         const bool vector = BUSTER_VECTOR_PATH(!parser->options.scalar) && count <= INT32_MAX;
         uint32_t first = 0;

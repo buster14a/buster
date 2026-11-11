@@ -64,6 +64,29 @@ static void check_test_program_vector_builtin_sources(CheckTest* test, const cha
 {
     static const char* const programs[][2] = {
         {
+            // Masked memory builtins of vectors no register size holds (#2216): 2-lane vectors of bytes and words and a
+            // 3-lane one of dwords, element by element at AVX-512 targets too (check_lower_masked_elements), under every
+            // mask; the lanes past a cleared bit read their pass-through element or write nothing.
+            "vector-narrow-masked",
+            "typedef signed char c2 __attribute__((ext_vector_type(2)));typedef unsigned char u2 __attribute__((ext_vector_type(2)));"
+            "typedef short s2 __attribute__((ext_vector_type(2)));typedef int i3 __attribute__((ext_vector_type(3)));typedef int x2 __attribute__((ext_vector_type(2)));"
+            "typedef _Bool b2 __attribute__((ext_vector_type(2)));typedef _Bool b3 __attribute__((ext_vector_type(3)));\n"
+            "static c2 gather_c(b2 k,x2 i,signed char*p,c2 w){return __builtin_masked_gather(k,i,p,w);}\n"
+            "static s2 gather_s(b2 k,x2 i,short*p,s2 w){return __builtin_masked_gather(k,i,p,w);}\n"
+            "static void scatter_s(b2 k,x2 i,s2 v,short*p){__builtin_masked_scatter(k,i,v,p);}\n"
+            "int tested(int n){unsigned h=2166136261u;for(int m=0;m<8;m++){b2 k={(m^n)&1,((m^n)>>1)&1};b3 k3={m&1,(m>>1)&1,(m>>2)&1};"
+            "signed char cb[4]={11,-22,(signed char)n,-44};unsigned char ub[4]={200,100,50,25};short sb[4]={1000,-2000,(short)(n*7),-4000};int ib[4]={7,8,9,n};"
+            "c2 w={5,6};u2 uw={7,8};s2 sw={9,10};i3 iw={1,2,3};"
+            "c2 e1=__builtin_masked_expand_load(k,cb,w);u2 e2=__builtin_masked_expand_load(k,ub,uw);s2 e3=__builtin_masked_expand_load(k,sb,sw);"
+            "i3 e4=__builtin_masked_expand_load(k3,ib,iw);c2 l1=__builtin_masked_load(k,cb,w);s2 l3=__builtin_masked_load(k,sb,sw);"
+            "signed char o1[4]={0};unsigned char o2[4]={0};short o3[4]={0};int o4[4]={0};short o5[4]={0};short o6[8]={0};"
+            "__builtin_masked_compress_store(k,(c2){-1,(signed char)n},o1);__builtin_masked_compress_store(k,(u2){250,251},o2);"
+            "__builtin_masked_compress_store(k,(s2){-3,-4},o3);__builtin_masked_compress_store(k3,(i3){-5,n,-7},o4);__builtin_masked_store(k,(s2){77,88},o5);"
+            "x2 idx={2,0};c2 g1=gather_c(k,idx,cb,w);s2 g2=gather_s(k,idx,sb,sw);scatter_s(k,idx,(s2){5,6},o6);"
+            "signed char a[]={e1[0],e1[1],l1[0],l1[1],g1[0],g1[1]};unsigned char b[]={e2[0],e2[1]};short c[]={e3[0],e3[1],l3[0],l3[1],g2[0],g2[1]};"
+            "int d[]={e4[0],e4[1],e4[2]};FOLD(a);FOLD(b);FOLD(c);FOLD(d);FOLD(o1);FOLD(o2);FOLD(o3);FOLD(o4);FOLD(o5);FOLD(o6);}return (int)h;}",
+        },
+        {
             // The same elementwise rows on transport pieces, with exact 1/2-byte accesses and wider operands than
             // any hardware register. The per-lane BMI2/PCLMUL paths also take these address-valued vectors.
             "vector-transport-elementwise",
@@ -959,8 +982,6 @@ static void check_test_program_vector_builtin_refusals(CheckTest* test)
           "floating maximum and minimum reductions of vectors their elements don't fill", 2 },
         { "znver5", "int tested(int n){v2ds a={n};v16qs c=__builtin_shufflevector(__builtin_convertvector(a,v2qs),(v2qs){(signed char)n},0,1,2,3,3,3,3,3,3,3,3,3,3,3,3,3);"
           "return c[0];}", "narrow vector shuffle operands with nonconstant values or side effects", 2 },
-        { "x86-64-v4", "int tested(int n){v16qs a={(signed char)n},b={1};v16qs c=__builtin_shufflevector(a,b,1,0,3,2,5,4,7,6,9,8,11,10,13,12,15,14);return c[0];}",
-          "vector shuffles of 8-bit elements without AVX-512 VBMI", 3 },
     };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
     {

@@ -1,0 +1,15 @@
+function (ptr, m64, m16, m8) -> v16i32 {
+b0:
+  %0 = param.ptr 0
+  %1 = param.m64 1
+  %2 = param.m16 2
+  %3 = param.m8 3
+  %4 = vconst.v16i32 0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+  %5 = masked_load.v16i32 %0, %1, %4 align=1 lanes=i8
+  %6 = masked_load.v16i32 %0, %2, %5 align=64 lanes=i32
+  %7 = vconst.v4i32 0x00000000000000000000000000000000
+  %8 = masked_load.v4i32 %0, %3, %7 align=1 lanes=i64
+  %9 = masked_store.void %0, %6, %1 align=1 lanes=i8
+  %10 = masked_store.void %0, %8, %3 align=16 lanes=i16
+  %11 = ret.void %6
+}

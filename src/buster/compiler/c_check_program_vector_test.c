@@ -258,6 +258,23 @@ static void check_test_program_vector_sources(CheckTest* test, const char* clang
             "return (int)h;}",
         },
         {
+            // Shuffles of bytes at x86-64-v4, which hasn't AVX-512 VBMI's VPERMT2B, element by element (#1834): of 8, 16,
+            // 32 and 64 bytes, of both operands, with an undefined index, and the MMX unpacks of bytes and words
+            // (_mm_unpackhi_pi8's, _mm_unpacklo_pi8's and _mm_unpackhi_pi16's shuffles).
+            "vector-shuffles-without-vbmi",
+            "typedef short s4 __attribute__((vector_size(8)));typedef char c8 __attribute__((vector_size(8)));typedef char c16 __attribute__((vector_size(16)));"
+            "typedef char c32 __attribute__((vector_size(32)));typedef char c64 __attribute__((vector_size(64)));\n"
+            "int tested(int n){unsigned h=2166136261u;c64 a,b;fill(&a,64,n);fill(&b,64,n+1);c8 a8=*(c8*)&a,b8=*(c8*)&b;c16 a16=*(c16*)&a,b16=*(c16*)&b;"
+            "c32 a32=*(c32*)&a,b32=*(c32*)&b;"
+            "c8 w=__builtin_shufflevector(a8,b8,15,0,14,1,13,2,12,3);FOLD(w);"
+            "c16 x=__builtin_shufflevector(a16,b16,31,0,30,1,29,2,28,3,27,4,26,5,25,6,24,7);FOLD(x);"
+            "c32 y=__builtin_shufflevector(a32,b32,63,0,62,1,61,2,60,3,59,4,58,5,57,6,56,7,33,34,35,36,1,2,3,4,40,41,42,43,9,9,9,-1);y[31]=0;FOLD(y);"
+            "c64 z=__builtin_shufflevector(a,b,127,0,126,1,125,2,124,3,123,4,122,5,121,6,120,7,64,65,66,67,1,2,3,4,40,41,42,43,9,9,9,9,"
+            "0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,100,101,102,103,104,105,106,107,108,109,110,111,112,113,114,115);FOLD(z);"
+            "c8 m[]={__builtin_shufflevector(a8,b8,4,12,5,13,6,14,7,15),__builtin_shufflevector(a8,b8,0,8,1,9,2,10,3,11)};"
+            "s4 u=__builtin_shufflevector((s4)a8,(s4)b8,2,6,3,7);FOLD(m);FOLD(u);return (int)h;}",
+        },
+        {
             "vector-transport-compute",
             check_test_vector_transport,
         },

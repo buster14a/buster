@@ -261,7 +261,8 @@ machine row.
 
 ## Scalar splats (#1450)
 
-The opcode table already fills its 64-entry byte-permute register. A scalar
+The opcode table then filled its 64-entry byte-permute register (two registers'
+128 entries since the masked loads and stores, below). A scalar
 broadcast therefore uses a unary kind of `intrinsic`, retaining every opcode
 number and the existing instruction columns:
 
@@ -1073,8 +1074,8 @@ rows. Each is two records:
 
 The target needs VBMI2 and BW for bytes and words, VL below 64 bytes, and DQ
 for a one-byte mask or BW for a mask of 4 bytes or more. The memory forms, the
-compress-stores, stay machine rows until the masked stores' design is decided
-([#1840](https://github.com/buster14a/buster/issues/1840#issuecomment-6802134965)).
+compress-stores, stay machine rows; the masked stores are now the IR's
+`masked_store` ("Masked loads and stores" below), which they could follow.
 
 Tier 1 (`BUSTER_TIER1_VECTOR_COMPRESS`) merges into the destination under the
 mask's k register, with a move of the passthrough there first unless the
@@ -1161,6 +1162,198 @@ The tests:
 - **No `test-tier1-masks` run:** the x86-64-v4 target it lowers for has neither
   AES nor VAES. Instead, a C file with every width, both rounds and a chain of
   ten rounds, compiled by `--tier1`, matches clang's results natively.
+
+## Masked loads and stores (#1840)
+
+`masked_load` and `masked_store` are memory opcodes of their own (the owner's
+"Option B",
+[#1840](https://github.com/buster14a/buster/issues/1840#issuecomment-6802289363)),
+`IR_MASKED_LOAD` and `IR_MASKED_STORE`, not intrinsic kinds: an intrinsic stays
+pure and total.
+
+```text
+%5 = masked_load.v16i32 %0, %1, %4 align=1 lanes=i8
+%9 = masked_store.void %0, %6, %1 align=64 lanes=i32
+```
+
+- **Operands:** a load's `a` is the address, `b` the mask and `c` the
+  passthrough, of the result's type; a store's `a` is the address, `b` the
+  stored vector and `c` the mask.
+- **Flags:** the lanes, an `IrSimdLane` of integers (`i8` to `i64`) whose mask
+  (`ir_lane_mask`) the mask operand is. The alignment is a load's or a store's.
+  The text always names both.
+- **Semantics:** a load's lane i is memory's lane i where the mask's bit i is
+  set and the passthrough's lane i where it isn't; a store writes lane i where
+  the bit is set. A lane whose bit is clear is never accessed, so it can't
+  fault: the masked builtins' tail reads past an array's end are defined. A
+  masked load is therefore not a load followed by a `vselect`.
+
+**The opcode tables.** They were full at 64 entries, each one byte-permute
+register. They now hold 128 entries (`BUSTER_IR_OP_TABLE`), two registers each,
+which `vpermi2b` looks up in one instruction where `vpermb` did: the verifier's
+operand, field, rule and terminator tables, the dataflow's, SCCP's roots, GVN's
+pure and LICM's safe operations. The result-type table's 128 words take four
+`vpermi2d` and three blends instead of two and one.
+
+**Passes.** Each pass that treats a load or a store specially learns them:
+
+- **Verifiers:** their own rules (`IR_RULE_MASKED_LOAD`, `_STORE`), which the
+  batch verifier defers to the scalar check.
+- **Dead code:** both are roots, as a load and a store are. SCCP never folds
+  them; GVN and LICM never merge or move them (they aren't pure or safe).
+- **SSA promotion and SROA:** a slot whose address one takes is escaped, as for
+  any operation that isn't a plain load or store.
+- **Interpreter:** each set lane's bytes are checked against the bindings and
+  accessed, and no other byte. Its alignment is checked as a whole access's. A
+  load's passthrough must be defined only where some lane's bit is clear, as a
+  `vselect`'s inactive input.
+- **Tier 1:** a masked store is a barrier, and both are fold barriers, as a
+  load is. Its scheduler keeps both in place, and every operand is in a register.
+
+**Decoder.** `ir_simd_typed_masked_memory` decodes the masked load and store
+builtins' rows (`loaddqu*`, `storedqu*`, `loadups`, `loadupd`, `loadaps`,
+`loadapd`, `movdqa32load`, `movdqa64load`, their stores, and `loadss128` and
+`loadsd128` of the whole vector):
+
+- A load is the move of the vector's width from `[INTEGER(0)]` into VECTOR(1),
+  the passthrough, under MASK(2), then VECTOR(1) moved whole into VECTOR(0).
+- A store is the move of VECTOR(1) to `[INTEGER(0)]` under MASK(2).
+- The lanes are the move's element: `vmovdqu8` to `vmovdqu64`'s, and
+  doublewords or quadwords for `vmovdqa32`, `vmovdqa64` and the floating moves.
+- An aligned move's (`vmovdqa`, `vmovaps`, `vmovapd`) alignment is the vector's
+  bytes, which it faults without.
+- The target needs the forms' features (BW for bytes and words, VL below 64
+  bytes) and the mask's: DQ for a byte mask, BW for one of 4 bytes or more.
+- Under the typed stream's mask of every lane (a constant), the lowering emits
+  the plain `load` or `store` of the whole vector.
+- The expanding loads stay machine rows (an `expand` of a plain load would read
+  lanes past the selected ones).
+
+**Tier 1** selects them as `TIER1_RULE_FLOAT_LOAD`'s and `_STORE`'s with their
+lanes in `condition` (`tier1_select_masked_move`): `vmovdqu8` to `vmovdqu64`
+by the lanes, under the mask's k register. A load merges into the destination,
+which takes the passthrough first unless it holds it. The address is a base
+register alone; the mask takes the index's pattern value, so no address folds
+until the patterns have a fourth value (item 5).
+
+The 11 masked stores that had no Zen 5 row (`vmovdqu8` to `vmovdqu64` at
+every width but `vmovdqu32`'s zmm one) were measured on the 9700X: 2 per cycle
+at 16 and 32 bytes, 1 at 64, as the unmasked stores
+([the record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/ir-masked-memory-1840-2026-11-11)).
+A masked load merging into its destination has no row in the model, which
+measures a load's row zeroing ([the model's guide](x86-zen5.md)).
+
+Machine rows at `--tier1 -march=znver5`, both compilers (Debug builds)
+compiling this change's sources, against main `e43dfc10`:
+
+| Unit | Rows before | Rows after |
+| --- | ---: | ---: |
+| `main_unit_frontend.c` | 241 | 38 |
+| `main_unit_backend.c` | 558 | 218 |
+
+The tests:
+
+- **`test-ir`:** both verifiers admit them exactly at integer lanes whose mask
+  is their mask operand, a `ptr` address and an alignment's log2 up to 31; the
+  float lanes, an invalid lane, another mask, a vector address and 2^32 are
+  refused, at every width.
+- **`test-ir-parse`:** `tests/ir/masked-memory.ir` round-trips, every lane
+  width and both opcodes among it.
+- **`test-ir-simd`:** the 60 rows (10 moves, load and store, 3 widths) decode
+  at exactly their features. Each is refused without a feature it needs and
+  under 7 changes. A compress-store is now the machine-row test's row of no
+  result.
+- **`test-tier1-masks`:** `vmovdqu8` to `vmovdqu64` at each width, load and
+  store (24 rows), under a mask from the input, through both lowering paths,
+  the interpreter at every stage and Tier 1 natively, against C's lanes. Each
+  program's fourth access starts half a vector before its buffer's end with
+  its mask's upper half cleared, so the interpreter's binding checks prove a
+  masked-off lane is never read or written. An interpreter that read every
+  lane is refused on every one of them.
+
+## One lane's moves and movemasks (#1840)
+
+Three more `intrinsic` kinds move one lane between a vector and a general
+register, or gather the lanes' sign bits:
+
+```text
+%6 = intrinsic.i32 %3 lane_extract 2
+%10 = intrinsic.v4i32 %3, %1 lane_insert 14
+%12 = intrinsic.i32 %3 movemask 0
+```
+
+- **`lane_extract`** (unary): a's lane, zero-extended into an `i32` (a lane of
+  1, 2 or 4 bytes) or an `i64` (8 bytes). Its flags hold the lane's bytes' log2
+  in bits 0 and 1 and its index in bits 2 to 7, below the vector's lanes.
+- **`lane_insert`** (binary): a, of the result's type, with that lane replaced
+  by b's low bits. b is an `i32`, or an `i64` for a quadword. Same flags.
+- **`movemask`** (unary): an `i32` whose bit i is the sign bit of a's lane i, a
+  of 16 or 32 bytes. Its flags are the lanes' bytes' log2: 0, 2 or 3.
+- **Model:** `IR_SIMD_LANE_EXTRACT`, `_LANE_INSERT` and `_MOVEMASK`. A scalar
+  result is the model's word 0, its shape none, as a shift's count is. The
+  interpreter runs the scalar-result kinds through the model too.
+- **Passes:** SCCP leaves them overdefined, and GVN and LICM treat them as
+  impure (neither merges nor moves them). Folding them is left for later.
+
+**Decoder** (`ir_simd_typed_lane`):
+
+- An extraction is `vmovd`/`vmovq` of lane 0, or `vpextrb` to `vpextrq` of a
+  lane of the low 16 bytes. A lane past them takes `vextracti32x4` into
+  VECTOR(1) first. Its integer is the lane's bytes, or 4 for a narrower lane
+  (the instruction zero-extends); the lowering narrows the kind's `i32` to it.
+- An insertion is `vpinsrb` to `vpinsrq` into a 16-byte vector. A narrower
+  integer is zero-extended to the kind's `i32` first.
+- A movemask is `vpmovmskb`, `vmovmskps` or `vmovmskpd` of a 16- or 32-byte
+  vector.
+- The target needs the records' features and the vector's moves.
+
+**Tier 1** selects each as a `TIER1_RULE_VECTOR` kind (`tier1_select_lane`),
+the scalar results' destination a general register:
+
+- `vmovd` or `vmovq` for lane 0 of 4 or 8 bytes, else `vpextr*`, after
+  `vextracti32x4` into the vector scratch register for a lane past the low 16
+  bytes.
+- `vpinsr*` in place in a 16-byte vector's low lane; otherwise through the
+  scratch register and `vinserti32x4`.
+- `vpmovmskb`, `vmovmskps` or `vmovmskpd`.
+- The integer intrinsics' rule now stops at `smulo`, so these kinds can't be
+  taken for BMI instructions.
+
+The 14 forms that had no Zen 5 row (`vpextrb` to `vpextrq`, `vpinsrb` to
+`vpinsrq`, and the three movemasks at 16 and 32 bytes) were measured on the
+9700X ([the record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/ir-lane-moves-1840-2026-11-11)):
+
+- **`vpextrb` to `vpextrq`:** 6.5 cycles of latency (derived across the
+  register files), 2 per cycle, two macro-ops.
+- **`vpinsrb` to `vpinsrq`:** 4.5 cycles, 1 per cycle, two macro-ops.
+- **Movemasks:** 4.5 cycles of an xmm register and 6.5 of a ymm one, 2 per
+  cycle, one macro-op.
+
+Machine rows at `--tier1 -march=znver5`, both compilers (Debug builds)
+compiling this change's sources, against the masked loads and stores
+(`3b4e02cc`):
+
+| Unit | Rows before | Rows after |
+| --- | ---: | ---: |
+| `main_unit_frontend.c` | 38 | 15 |
+| `main_unit_backend.c` | 218 | 193 |
+
+The tests:
+
+- **`test-ir`:** both verifiers admit the three kinds exactly at a lane below
+  the vector's lanes, with the scalar of the lane's width, and a movemask's
+  flags 0, 2 or 3 of a 16- or 32-byte vector, at every width and all 256 flags.
+  The model gives C's lane, replaced lane and sign bits on random vectors.
+- **`test-ir-parse`:** `tests/ir/lane-moves.ir` round-trips.
+- **`test-ir-simd`:** the 246 rows (210 extractions over every lane of every
+  part and width, 30 insertions, 6 movemasks) decode at exactly their features.
+  Each is refused without each feature it needs, and under 4 changes.
+- **`test-tier1-masks`:** 50 rows run through both lowering paths, the
+  interpreter at every stage and Tier 1 natively, against C's lanes: 36
+  extractions, 8 insertions, 6 movemasks.
+- **Native check:** a C file of `_mm_extract_epi*`, `_mm_insert_epi*`,
+  `_mm*_movemask_*` and `_mm_cvtsi128_si*`, compiled by `--tier1
+  -march=x86-64-v4`, matches clang's output; its 17 machine rows are all gone.
 
 ## Masks to vectors and back (#1840)
 

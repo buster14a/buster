@@ -175,7 +175,10 @@ static void check_test_driver_symbols(CheckTest* test, const char* clang, const 
 // leaves it global; a deferred body's or data's, emitted at the unit's end, sees a pragma on the declaration it names),
 // a defined one's weak, and a tentative one's by its last tentative definition. Each symbol's binding must be clang's,
 // with and without -fcommon, by both paths, whose objects must be the same bytes, and they must link with the
-// definitions of the undefined names and run as clang's. A unit whose deferred references disagree is refused by name.
+// definitions of the undefined names and run as clang's. Where only deferred code refers to an object and its
+// references disagree, clang's order of deferred emission decides (check_program_weak_deferred): the order of the eager
+// references that schedule the deferred functions (dx, dy), depth first through the functions they reach (dz), and a
+// static function pointer's initializer, deferred data (c).
 static void check_test_driver_weak_late(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     static const char source[] =
@@ -197,28 +200,28 @@ static void check_test_driver_weak_late(CheckTest* test, const char* clang, cons
         "void b(void);\nvoid gb(void)\n{\n    b();\n#pragma weak b\n}\n"
         "void early(void) __attribute__((weak));\nvoid ge(void) { early(); }\n"
         "void ta(void) {}\nvoid fa(void);\nvoid gfa(void) { fa(); }\nvoid fa(void) __attribute__((weak, alias(\"ta\")));\n"
+        "extern int dx;\nstatic int dxf(void) { return dx; }\nextern int dx __attribute__((weak));\nstatic int dxg(void) { return dx; }\nint gdx(void) { return dxg() + dxf(); }\n"
+        "extern int dy;\nstatic int dyf(void) { return dy; }\nextern int dy __attribute__((weak));\nstatic int dyg(void) { return dy; }\nint gdy(void) { return dyf() + dyg(); }\n"
+        "extern int dz;\nstatic int dzf(void) { return dz; }\nstatic int dzk(void) { return dzf(); }\nextern int dz __attribute__((weak));\nstatic int dzg(void) { return dz; }\n"
+        "static int dzh(void) { return dzk() + dzg(); }\nint gdz(void) { return dzh() + dzg(); }\n"
+        "void c(void);\nstatic void uc(void) { c(); }\nvoid c(void) __attribute__((weak));\nstatic void (*pc)(void) = c;\nvoid g4(void) { pc(); uc(); }\n"
         "int printf(const char*, ...);\n"
-        "int main(void) { g(); k(); g2(); g6(); g3(); gp1(); gp2(); gp3(); gq(); gb(); ge(); gfa(); return printf(\" %d\\n\", *pv + *pw + gu() + *gr() + t1 + t2 + t3 + t4 + (pm != 0)) < 0; }\n";
+        "int main(void) { g(); k(); g2(); g6(); g3(); gp1(); gp2(); gp3(); gq(); gb(); ge(); gfa(); g4(); return printf(\" %d\\n\", *pv + *pw + gu() + *gr() + t1 + t2 + t3 + t4 + (pm != 0) +\n"
+        "    gdx() + gdy() + gdz()) < 0; }\n";
     static const char definitions[] =
         "#include <stdio.h>\nint v = 1;\nint r = 2;\n"
         "void f(void) { putchar('f'); }\nvoid m(void) { putchar('m'); }\nvoid a(void) { putchar('a'); }\nvoid d(void) { putchar('d'); }\n"
         "void e(void) { putchar('e'); }\nvoid p1(void) { putchar('1'); }\nvoid p2(void) { putchar('2'); }\nvoid p3(void) { putchar('3'); }\n"
-        "void q(void) { putchar('q'); }\nvoid b(void) { putchar('b'); }\nvoid early(void) { putchar('y'); }\n";
-    static const char* const names[] = { "f", "v", "h", "w", "u", "m", "a", "d", "e", "t1", "t2", "t3", "t4", "p1", "p2", "p3", "r", "q", "b", "early", "fa" };
-    static const char refused[] = "void c(void);\nstatic void u(void) { c(); }\nvoid c(void) __attribute__((weak));\nstatic void (*pc)(void) = c;\n"
-                                  "void g4(void) { pc(); u(); }\n";
+        "void q(void) { putchar('q'); }\nvoid b(void) { putchar('b'); }\nvoid early(void) { putchar('y'); }\n"
+        "int dx = 10;\nint dy = 20;\nint dz = 30;\nvoid c(void) { putchar('c'); }\n";
+    static const char* const names[] = { "f", "v", "h", "w", "u", "m", "a", "d", "e", "t1", "t2", "t3", "t4", "p1", "p2", "p3", "r", "q", "b", "early", "fa", "dx", "dy", "dz", "c" };
     char path[512];
     char defined_path[512];
     char defined_object[512];
-    char refused_path[512];
-    char refused_object[512];
     snprintf(path, sizeof(path), "%s/weak-late.c", directory);
     snprintf(defined_path, sizeof(defined_path), "%s/weak-late-definitions.c", directory);
     snprintf(defined_object, sizeof(defined_object), "%s/weak-late-definitions.o", directory);
-    snprintf(refused_path, sizeof(refused_path), "%s/weak-late-refused.c", directory);
-    snprintf(refused_object, sizeof(refused_object), "%s/weak-late-refused.o", directory);
-    const bool written = parse_test_write(path, source, sizeof(source) - 1) && parse_test_write(defined_path, definitions, sizeof(definitions) - 1) &&
-                         parse_test_write(refused_path, refused, sizeof(refused) - 1);
+    const bool written = parse_test_write(path, source, sizeof(source) - 1) && parse_test_write(defined_path, definitions, sizeof(definitions) - 1);
     check_test_expect(test, written, "the late weak declarations' fixtures are written");
     char* text = NULL;
     char* const define_arguments[] = { (char*)clang, "-std=gnu17", "-O0", "-c", defined_path, "-o", defined_object, NULL };
@@ -262,20 +265,9 @@ static void check_test_driver_weak_late(CheckTest* test, const char* clang, cons
             unlink(programs[p]);
         }
     }
-    for (uint32_t p = 0; written && p < 2; p += 1)
-    {
-        char* arguments[] = { (char*)executable, "-std=gnu17", "-O0", "-c", refused_path, "-o", refused_object, p == 1 ? "--scalar" : NULL, NULL };
-        const int status = check_test_driver_spawn(arguments, &text);
-        check_test_expect(test, status != 0 && text != NULL && strstr(text, "a weak declaration after a use that only code clang emits at the unit's end makes") != NULL,
-                          "deferred references that disagree on a late weak declaration are refused by name");
-        free(text);
-        text = NULL;
-    }
     unlink(path);
     unlink(defined_path);
     unlink(defined_object);
-    unlink(refused_path);
-    unlink(refused_object);
 }
 
 // A template's symbols in -c's object (#812): its `.L` and numeric labels are the assembler's temporary symbols, which
