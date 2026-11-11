@@ -1257,8 +1257,7 @@ static bool check_input_target_warning(CheckInputReader* reader, const CheckInpu
         {
             const bool off = last - first >= 3 && memcmp(text.pointer + first, "no-", 3) == 0;
             const uint32_t name = off ? first + 3 : first;
-            const int32_t index = predefines_feature_index(text.pointer + name, last - name);
-            feature = index < 0 || predefines_features[index].flag == PREDEFINES_FLAG_NONE ? (name << 4 | (last - name) << 18) : feature;
+            feature = predefines_attribute_feature(text.pointer + name, last - name) ? feature : (name << 4 | (last - name) << 18);
         }
         cursor = end + 1;
     }

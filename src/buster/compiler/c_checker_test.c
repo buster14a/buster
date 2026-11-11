@@ -5407,6 +5407,14 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
             false,
             false
         },
+        // An extended vector's lanes through a pointer to it (`p->y`, clang's `(*p).y`): read, stored, swizzled, in a
+        // segment's space, and typed in a file-scope query; a struct's `->` members in the same unit stay its members.
+        {
+            "an extended vector's lanes through a pointer",
+            "typedef float v4 __attribute__((ext_vector_type(4)));\ntypedef float v2 __attribute__((ext_vector_type(2)));\nstruct s { int x, a; };\n_Static_assert(__builtin_types_compatible_p(__typeof__(((v4*)0)->xy), v2), \"xy\");\nfloat f(v4* p, __seg_gs v4* g, struct s* q, float x)\n{\n    p->w = x;\n    p->xy = p->zw;\n    _Static_assert(__builtin_types_compatible_p(__typeof__(p->wzyx), v4), \"wzyx\");\n    _Static_assert(__builtin_types_compatible_p(__typeof__(g->lo), v2), \"lo\");\n    return p->y + g->s3 + q->x + q->a;\n}\n",
+            false,
+            false
+        },
         // An intrinsic's result, from its prototype, which the reader keeps at the call's `)`, whatever the last operand the
         // call names: a vector after a scalar count, and a scalar after a vector.
         {

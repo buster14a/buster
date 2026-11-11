@@ -2848,7 +2848,13 @@ static __attribute__((noinline)) void check_lower_vector_split(CheckLowerWriter*
                                                                 uint32_t width)
 {
     Tier0Operation row;
-    const char* reason = check_vector_lower_baseline_piece(writer->program->types, &writer->target, op, vector, width, scalar_class, &row);
+    Tier0Operation not_row;
+    const uint32_t complement = check_vector_baseline_complement(&writer->target, op, check_vector_lower_element(writer->program->types, vector));
+    const char* reason = check_vector_lower_baseline_piece(writer->program->types, &writer->target, complement != 0 ? complement : op, vector, width, scalar_class, &row);
+    if (reason == NULL && complement != 0)
+    {
+        reason = check_vector_lower_baseline_piece(writer->program->types, &writer->target, CHECK_OP_BIT_NOT, vector, width, scalar_class, &not_row);
+    }
     if (reason != NULL)
     {
         check_lower_unsupported(writer, reason);
@@ -2856,6 +2862,7 @@ static __attribute__((noinline)) void check_lower_vector_split(CheckLowerWriter*
     else
     {
         const uint32_t index = check_lower_operation_index(writer, &row);
+        const uint32_t not_index = complement != 0 ? check_lower_operation_index(writer, &not_row) : BUSTER_CHECK_NONE;
         const uint32_t operands = row.operand_count;
         uint32_t temporaries[BUSTER_TIER0_OPERATION_OPERANDS] = { 0 };
         for (uint32_t j = 0; j < operands; j += 1)
@@ -2868,6 +2875,10 @@ static __attribute__((noinline)) void check_lower_vector_split(CheckLowerWriter*
         for (uint32_t piece = bytes / width; piece-- > 0 && writer->output->status == CHECK_PROGRAM_OK;)
         {
             check_lower_instruction(writer, BUSTER_TYPED_SET, BUSTER_TYPED_CLASS_VECTOR, width);
+            if (not_index != BUSTER_CHECK_NONE)
+            {
+                check_lower_instruction(writer, BUSTER_TYPED_X86, BUSTER_TYPED_CLASS_VECTOR, not_index);
+            }
             check_lower_instruction(writer, BUSTER_TYPED_X86, BUSTER_TYPED_CLASS_VECTOR, index);
             for (uint32_t j = operands; j-- > 0;)
             {
@@ -2919,13 +2930,24 @@ static void check_lower_vector_row(CheckLowerWriter* writer, uint32_t op, TypeId
     else
     {
         const bool excess = (writer->program->target.extensions & BUSTER_X86_EXTENSION(AVX512FP16)) == 0;
-        const char* reason = check_vector_lower_row(writer->program->types, &writer->target, excess, op, vector, scalar_class, &row);
+        const uint32_t complement = check_vector_baseline_complement(&writer->target, op, check_vector_lower_element(writer->program->types, vector));
+        Tier0Operation not_row;
+        const char* reason = check_vector_lower_row(writer->program->types, &writer->target, excess, complement != 0 ? complement : op, vector, scalar_class, &row);
+        if (reason == NULL && complement != 0)
+        {
+            reason = check_vector_lower_row(writer->program->types, &writer->target, excess, CHECK_OP_BIT_NOT, vector, scalar_class, &not_row);
+        }
         if (reason != NULL)
         {
             check_lower_unsupported(writer, reason);
         }
         else
         {
+            // A complement's row runs after its compare's: pushed first.
+            if (complement != 0)
+            {
+                check_lower_instruction(writer, BUSTER_TYPED_X86, BUSTER_TYPED_CLASS_VECTOR, check_lower_operation_index(writer, &not_row));
+            }
             const uint32_t index = check_lower_operation_index(writer, &row);
             check_lower_instruction(writer, BUSTER_TYPED_X86, BUSTER_TYPED_CLASS_VECTOR, index);
         }
@@ -5909,9 +5931,25 @@ static void check_lower_complex_constant(CheckLowerWriter* writer, const CheckVa
     const bool integer = element_kind == BUSTER_TYPE_KIND_INTEGER || element_kind == BUSTER_TYPE_KIND_BIT_INT;
     const uint64_t halves[2] = { (uint64_t)value->integer, value->constant_kind == CHECK_CONSTANT_COMPLEX ? (uint64_t)(value->integer >> 64) : 0 };
     const CheckConstantKind real = integer ? CHECK_CONSTANT_INTEGER : CHECK_CONSTANT_FLOATING;
+    // A _Complex __float128's parts are their bits (#1250, check_quad_complex_set), four words a store each; a real one's
+    // imaginary part +0.
+    const bool quad = element == BUSTER_TYPE_FLOAT128;
     if (value->constant_kind != CHECK_CONSTANT_COMPLEX && value->constant_kind != real)
     {
         check_lower_fail(writer, CHECK_PROGRAM_INVALID);
+    }
+    else if (quad)
+    {
+        const unsigned __int128 imaginary = value->constant_kind == CHECK_CONSTANT_COMPLEX ? check_quad_complex_imaginary(value) : 0;
+        const uint64_t words[4] = { (uint64_t)value->integer, (uint64_t)(value->integer >> 64), (uint64_t)imaginary, (uint64_t)(imaginary >> 64) };
+        const uint32_t result = check_lower_object(writer, 32, 4);
+        for (uint32_t word = 0; word < 4; word += 1)
+        {
+            check_lower_complex_place(writer, result, word, 8);
+            check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, words[word]);
+            check_lower_emit(writer, BUSTER_TYPED_SET, BUSTER_TYPED_CLASS_U64, 0);
+        }
+        check_lower_emit(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, result);
     }
     else
     {
@@ -9211,11 +9249,12 @@ static void check_lower_miscellaneous_prepare(CheckLowerWriter* writer, uint32_t
     else if (runtime == CBUILTIN_AVAILABLE)
     {
         // clang's code for a check that names no Linux platform (#148): the constant 1, whatever the specs say. An empty
-        // version (`0.0.0`) makes clang's expression invalid without a diagnostic, and its code generation refuses it.
+        // version (`0.0.0`) makes clang's expression invalid without a diagnostic. Its code generation refuses it where it
+        // reaches it, and drops a whole return value's, initializer's or conditional's statement silently, which isn't sound.
         const CheckBuiltinCall* witness = check_graph_builtin_call(graph, node);
         if (witness == NULL || witness->availability_silent)
         {
-            check_lower_unsupported(writer, "__builtin_available with an empty version, which clang doesn't compile either");
+            check_lower_unsupported(writer, "__builtin_available with an empty version, an invalid expression whose code clang refuses or drops");
         }
         else
         {
@@ -14625,6 +14664,7 @@ static void check_lower_asm(CheckLowerWriter* writer, CheckControl control)
                     .count = plan->inline_count,
                     .block = plan->block != 0 ? object : BUSTER_TIER0_ASM_NO_BLOCK,
                     .touched = plan->inline_touched,
+                    .masks = plan->inline_masks,
                     .branches = plan->inline_branches,
                     .targets = plan->inline_targets,
                     .branch_count = plan->inline_branch_count,
@@ -17294,6 +17334,23 @@ static bool check_lower_finish(CheckProgramLowered* lowered, const CheckLowerSha
             // The unit's own declaration of the name is the symbol, as a call's would be (check_lower_runtime).
             lowered->runtime_symbols[model[m]] = lowered->runtime_symbols[model[m]] == 0 ? shared->declared_runtimes[model[m]] : lowered->runtime_symbols[model[m]];
             if (lowered->runtime_symbols[model[m]] == 0)
+            {
+                lowered->runtime_symbols[model[m]] = (SymbolId)((uint64_t)program->symbol_count + lowered->helpers.count + lowered->initializers.count + lowered->runtime_symbol_count + 1);
+                lowered->runtime_order[lowered->runtime_symbol_count++] = (uint16_t)model[m];
+            }
+        }
+    }
+    // So do the resolvers of multiversioning by target strings (#1838, check_program_target_atoms), the model's and its
+    // second array of features where an option tests them.
+    for (uint32_t g = 0; valid && g < program->target_group_count; g += 1)
+    {
+        const CheckProgramTargetGroup* group = program->target_groups + g;
+        const bool used[3] = { group->resolved, group->resolved && group->model, group->resolved && group->features2 };
+        static const CheckLowerRuntime model[3] = { CHECK_LOWER_RUNTIME_CPU_INDICATOR_INIT, CHECK_LOWER_RUNTIME_CPU_MODEL, CHECK_LOWER_RUNTIME_CPU_FEATURES2 };
+        for (uint32_t m = 0; m < 3; m += 1)
+        {
+            lowered->runtime_symbols[model[m]] = used[m] && lowered->runtime_symbols[model[m]] == 0 ? shared->declared_runtimes[model[m]] : lowered->runtime_symbols[model[m]];
+            if (used[m] && lowered->runtime_symbols[model[m]] == 0)
             {
                 lowered->runtime_symbols[model[m]] = (SymbolId)((uint64_t)program->symbol_count + lowered->helpers.count + lowered->initializers.count + lowered->runtime_symbol_count + 1);
                 lowered->runtime_order[lowered->runtime_symbol_count++] = (uint16_t)model[m];
