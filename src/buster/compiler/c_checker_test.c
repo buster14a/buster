@@ -157,15 +157,20 @@ static CheckValue check_test_integer(TypeId type, unsigned __int128 bits)
     return result;
 }
 
+// A floating constant of `type`: a __float128's of `value`'s bits exactly, with its mirror (c_check_quad.c).
 static CheckValue check_test_float(TypeId type, long double value)
 {
-    const CheckValue result = {
+    CheckValue result = {
         .type = type,
         .category = CHECK_RVALUE,
         .flags = BUSTER_CHECK_FLOAT_LITERAL,
         .constant_kind = CHECK_CONSTANT_FLOATING,
         .floating = value,
     };
+    if (type_unqualified(type) == BUSTER_TYPE_FLOAT128)
+    {
+        check_quad_set(&result, check_quad_widen(value, false));
+    }
     return result;
 }
 #endif

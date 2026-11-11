@@ -4462,15 +4462,11 @@ static void check_lower_quad_call(CheckLowerWriter* writer, CheckLowerRuntime ru
     }
 }
 
-// A folded __float128 constant: a frame object of its 16 bytes, whose address it leaves, the value converted from the
-// checker's long double exactly, or a NaN's bits from its place there (check_action_quad_bits). The checker folds none of
-// __float128's arithmetic (check_action_float_supported), but gives a real value's __imag__ as a constant zero of its
-// type (c_check_complex.c), and __builtin_inff128, __builtin_nanf128 and the others their values, which come here.
+// A folded __float128 constant: a frame object of its 16 bytes, its bits (c_check_quad.c), whose address it leaves.
 static void check_lower_quad_constant(CheckLowerWriter* writer, const CheckValue* value)
 {
     const uint32_t result = check_lower_quad_object(writer);
-    uint64_t halves[2] = { 0 };
-    check_action_quad_bits(value->floating, halves);
+    const uint64_t halves[2] = { (uint64_t)value->integer, (uint64_t)(value->integer >> 64) };
     for (uint32_t half = 0; half < 2; half += 1)
     {
         check_lower_complex_place(writer, result, half, 8);
@@ -4664,7 +4660,8 @@ static void check_lower_quad_update_emit(CheckLowerWriter* writer, uint32_t node
     const uint32_t destination = (uint32_t)(locals >> 32);
     if (increment)
     {
-        const CheckValue one = { .floating = 1.0L };
+        CheckValue one = { .type = BUSTER_TYPE_FLOAT128 };
+        check_quad_set(&one, check_quad_widen(1.0L, false));
         value = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
         check_lower_quad_constant(writer, &one);
         check_lower_emit(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, value);

@@ -15,12 +15,11 @@ static void check_data_integer_bytes(uint8_t* bytes, unsigned __int128 value, ui
     }
 }
 
-// The checker uses Linux/x86-64 binary16, bfloat16, binary32, binary64 and x87 extended values, and binary128 ones from
-// the constant builtins (#148). The half-precision ones are check_action_half_bits', and the other two IEEE encodings are
-// copied into integer values, then serialized explicitly little-endian. x87 is built from numeric fields, never host
-// padding. A NaN keeps its sign, payload and quiet bit as the long double holds them (check_action_nan_bits, and
-// check_action_quad_bits for binary128), so that a signaling NaN of __builtin_nans and a payload of __builtin_nan's are
-// clang's bytes.
+// The checker uses Linux/x86-64 binary16, bfloat16, binary32, binary64, x87 extended and binary128 values (#1250). The
+// half-precision ones are check_action_half_bits', and the other two IEEE encodings are copied into integer values,
+// then serialized explicitly little-endian. x87 is built from numeric fields, never host padding. A NaN keeps its sign,
+// payload and quiet bit as the long double holds them (check_action_nan_bits), so that a signaling NaN of
+// __builtin_nans and a payload of __builtin_nan's are clang's bytes.
 static void check_data_float_bytes(uint8_t bytes[16], TypeId type, long double value)
 {
     _Static_assert(CHAR_BIT == 8 && sizeof(float) == 4 && FLT_RADIX == 2 && FLT_MANT_DIG == 24 && FLT_MAX_EXP == 128, "checker target requires binary32");
@@ -57,10 +56,9 @@ static void check_data_float_bytes(uint8_t bytes[16], TypeId type, long double v
     }
     else if (type == BUSTER_TYPE_FLOAT128)
     {
-        uint64_t halves[2] = { 0 };
-        check_action_quad_bits(value, halves);
-        check_data_integer_bytes(bytes, halves[0], 8);
-        check_data_integer_bytes(bytes + 8, halves[1], 8);
+        // A long double's value exactly; a __float128 constant's own bytes are its bits
+        // (check_data_scalar_float_bytes).
+        check_data_integer_bytes(bytes, check_quad_widen(value, false), 16);
     }
     else
     {
@@ -90,6 +88,20 @@ static void check_data_float_bytes(uint8_t bytes[16], TypeId type, long double v
         }
         check_data_integer_bytes(bytes, significand, 8);
         check_data_integer_bytes(bytes + 8, exponent | ((uint32_t)negative << 15), 2);
+    }
+}
+
+// A real floating constant's bytes in `type`'s format: a __float128's its bits (c_check_quad.c), any other's its long
+// double's (check_data_float_bytes).
+static void check_data_scalar_float_bytes(uint8_t bytes[16], TypeId type, const CheckValue* value)
+{
+    if (type == BUSTER_TYPE_FLOAT128)
+    {
+        check_data_integer_bytes(bytes, value->integer, 16);
+    }
+    else
+    {
+        check_data_float_bytes(bytes, type, value->floating);
     }
 }
 
