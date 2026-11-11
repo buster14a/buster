@@ -9227,6 +9227,24 @@ static uint32_t check_driver_original_token(const Parser* original, const Parser
     return low < count && original->tokens.sources[low] == source ? low : BUSTER_CHECK_NONE;
 }
 
+// The view's token whose source the original's `token` has (the first, past a `;` a view put before it), or
+// BUSTER_CHECK_NONE.
+static uint32_t check_driver_view_token(const Parser* view, const Parser* original, uint32_t token)
+{
+    const uint32_t count = view->tokens.count;
+    const uint32_t source = token < original->tokens.count ? original->tokens.sources[token] : UINT32_MAX;
+    uint32_t low = 0;
+    uint32_t high = count;
+    while (low < high)
+    {
+        const uint32_t middle = low + (high - low) / 2;
+        const bool before = view->tokens.sources[middle] < source;
+        low = before ? middle + 1 : low;
+        high = before ? high : middle;
+    }
+    return low < count && view->tokens.sources[low] == source ? low : BUSTER_CHECK_NONE;
+}
+
 // Inserts an edit in token order, unless one is at its token or overlaps it. Whether it was added.
 static bool check_driver_typo_add(CheckDriverTypoEdits* edits, CheckPrefixEdit edit, uint32_t keyword, uint32_t type)
 {
@@ -9428,34 +9446,52 @@ static bool check_driver_typo_edits(CheckDriverTypoEdits* edits, const Parser* o
     return added;
 }
 
-// Each statement start's correction's error (CheckDriverTypoEdits): clang's diagnoseTypo of ClassifyName's, "use of
-// undeclared identifier" with a keyword, or "unknown type name" with a typedef and its note.
-static void check_driver_typo_errors(const CheckDriverTypoEdits* edits, const Parser* original, Preprocessor* pp)
+// Each statement start's correction's error (CheckDriverTypoEdits), at its name in the view `checking`: clang's
+// diagnoseTypo of ClassifyName's, "use of undeclared identifier" with a keyword, or "unknown type name" with a typedef and
+// its note, as the driver's own diagnostics (CheckDriverDiagnostic), appended to `additional` from `count`, whose room
+// has two for each edit; their texts in `arena`. Returns the new count.
+// One whose name the view left out (a body a later parse error ended) is printed at once, before the parse's errors.
+static uint32_t check_driver_typo_errors(const CheckDriverTypoEdits* edits, const Parser* original, const Parser* checking, Preprocessor* pp,
+                                         CheckDriverDiagnostic* additional, uint32_t count, Arena* arena)
 {
-    if (edits->count != 0)
-    {
-        pp_history_ensure(pp);
-    }
+    uint32_t result = count;
     for (uint32_t e = 0; e < edits->count; e += 1)
     {
         const CheckPrefixEdit* edit = edits->edits + e;
         const uint32_t keyword = edits->keywords[e];
         const uint32_t type = edits->types[e];
-        if (edit->end == 0 && edit->token < original->tokens.count)
+        const uint32_t token = edit->end == 0 ? check_driver_view_token(checking, original, edit->token) : BUSTER_CHECK_NONE;
+        const bool typedef_name = keyword == 0 && type < original->tokens.count;
+        const uint32_t declared = typedef_name ? check_driver_view_token(checking, original, type) : BUSTER_CHECK_NONE;
+        const bool viewed = token < checking->tokens.count && (keyword != 0 || declared < checking->tokens.count);
+        char* message = edit->end == 0 && (keyword != 0 || typedef_name) ? arena_push_array(arena, 512, 1, 1) : NULL;
+        char* note = message != NULL && typedef_name ? arena_push_array(arena, 512, 1, 1) : NULL;
+        if (message != NULL && (!typedef_name || note != NULL))
         {
             const uint32_t name = original->tokens.names[edit->token];
-            const uint32_t source = original->tokens.sources[edit->token];
-            const bool typedef_name = keyword == 0 && type < original->tokens.count;
             const char* other = typedef_name ? (const char*)intern_bytes(pp->table, original->tokens.names[type]) : check_typo_keywords[keyword - 1];
             const int other_length = typedef_name ? (int)intern_length(pp->table, original->tokens.names[type]) : (int)strlen(other);
-            char declared[512];
-            snprintf(declared, sizeof(declared), "'%.*s' declared here", other_length, other);
-            const PPOutputDiagnosticNote note = { .token = typedef_name ? original->tokens.sources[type] : 0, .message = declared };
-            pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, source, &note, typedef_name ? 1u : 0u, "%s '%.*s'; did you mean '%.*s'?",
-                                        typedef_name ? "unknown type name" : "use of undeclared identifier", (int)intern_length(pp->table, name),
-                                        intern_bytes(pp->table, name), other_length, other);
+            snprintf(message, 512, "%s '%.*s'; did you mean '%.*s'?", typedef_name ? "unknown type name" : "use of undeclared identifier",
+                     (int)intern_length(pp->table, name), intern_bytes(pp->table, name), other_length, other);
+            if (note != NULL)
+            {
+                snprintf(note, 512, "'%.*s' declared here", other_length, other);
+            }
+            if (viewed)
+            {
+                additional[result] = (CheckDriverDiagnostic){ .token = token, .message = message, .position = token, .note_token = declared, .note = note };
+                result += 1;
+            }
+            else
+            {
+                const uint32_t source = original->tokens.sources[edit->token];
+                const PPOutputDiagnosticNote printed = { .token = typedef_name ? original->tokens.sources[type] : 0, .message = note };
+                pp_history_ensure(pp);
+                pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, source, &printed, note != NULL ? 1u : 0u, "%s", message);
+            }
         }
     }
+    return result;
 }
 
 // One translation unit, `path`, with `options` (the command's, with the unit's file cache and diagnostics' stream):
@@ -9764,11 +9800,6 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     }
                 }
             }
-            // (Their errors come first at their tokens, as clang's classification gives them before the statement's.)
-            if (!pp->fatal)
-            {
-                check_driver_typo_errors(&typo_edits, parser, pp);
-            }
             check_clock_mark(stage_clock, CHECK_STAGE_CHECK_INPUT);
             // The parse's and the reader's pages of the scratch, 82 MB of sqlite3.c's, which check-expressions and
             // check-declarations would otherwise hold to static-data's end (check_driver_discard_scratch, #628), but for
@@ -9854,9 +9885,9 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     const bool expression_valid = checked_valid && stream.report_count == 0 && (input.report_count == 0 || input.recovered_valid);
                     const bool musttails_checked = !expression_valid || repairing || check_musttail_run(&musttails, &input, checking, &stream, &types, output_arena, scratch);
                     CheckDriverDiagnostic fallback[5] = { 0 };
-                    CheckDriverDiagnostic* pushed = BUSTER_ARENA_PUSH_ARRAY(output_arena, CheckDriverDiagnostic, 5 + (uint64_t)musttails.count);
+                    CheckDriverDiagnostic* pushed = BUSTER_ARENA_PUSH_ARRAY(output_arena, CheckDriverDiagnostic, 5 + (uint64_t)musttails.count + 2 * typo_edits.count);
                     CheckDriverDiagnostic* additional = pushed != NULL ? pushed : fallback;
-                    uint32_t additional_capacity = pushed != NULL ? 5 + musttails.count : 5;
+                    uint32_t additional_capacity = pushed != NULL ? 5 + musttails.count + 2 * typo_edits.count : 5;
                     uint32_t additional_count = 0;
                     if (pushed == NULL || !musttails_checked)
                     {
@@ -9869,6 +9900,9 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         additional[additional_count++] = (CheckDriverDiagnostic){ musttail->token, message != NULL ? message : "musttail checking capacity exhausted",
                                                                                  musttail->position, musttail->completion, musttail->error == CHECK_MUSTTAIL_SCOPE };
                     }
+                    // A statement start's typo corrections' errors (check_driver_typo_errors).
+                    additional_count = pushed != NULL ? check_driver_typo_errors(&typo_edits, parser, checking, pp, additional, additional_count, output_arena) :
+                                                        additional_count;
                     const uint32_t* excess_tokens = NULL;
                     uint32_t excess_count = 0;
                     CheckAsms asms = { 0 };
@@ -10453,8 +10487,11 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
             }
             else
             {
+                // (With a statement start's typo corrections' errors, check_driver_typo_errors.)
+                CheckDriverDiagnostic* typo_errors = typo_edits.count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output_arena, CheckDriverDiagnostic, 2 * typo_edits.count) : NULL;
+                const uint32_t typo_count = typo_errors != NULL ? check_driver_typo_errors(&typo_edits, parser, checking, pp, typo_errors, 0, output_arena) : 0;
                 if (!check_driver_reports(checking, recovered, pp, publication_end, &input, NULL, &types, repairing ? &repair : NULL,
-                                          original_pragmas_ready ? &original_pragmas : NULL, NULL, 0, NULL, 0, quiet, NULL, scratch) ||
+                                          original_pragmas_ready ? &original_pragmas : NULL, typo_errors, typo_count, NULL, 0, quiet, NULL, scratch) ||
                     !check_driver_warning_events_at(checking, pp, &input, &types, &input.warning_events, repairing ? &repair : NULL, publication_end, scratch))
                 {
                     fprintf(errors, "fatal error: checker diagnostic capacity exhausted\n");

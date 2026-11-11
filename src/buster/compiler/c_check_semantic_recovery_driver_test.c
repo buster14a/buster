@@ -758,6 +758,8 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "int counter;\nvoid v(void)\n{\n    retrn;\n}\nint f(int x)\n{\n    retrn x;\n}\nint g(int a)\n{\n    int retrm;\n    retrn;\n"
         "    retrn a + 1;\n    brek;\n    for (;;) brek;\n    swich (a) { a = 2; }\n    iff (a) return 1;\n    whil (a) a--;\n    int unused;\n"
         "    return a;\n}\nint h(int a) { int u2; if (a = 1) return 2; return counte; }\n",
+        // The correction is its scope's error: the scope's unused variable is quiet, as clang's is.
+        "int f(int x)\n{\n    int unused;\n    retrn x;\n}\nint g(int a) { int u2; if (a = 1) return 2; return 0; }\n",
         // A type keyword or a typedef's name corrected there: the statement is a declaration of that type, clang's "unknown
         // type name" with its note for a typedef; before `;` or an operator other than `*` or `&` no type is offered.
         "typedef int myint;\nint f(void)\n{\n    unsignd x = 1;\n    myin y = 2;\n    myin *p = &y;\n    myin;\n    myin + 2;\n"
