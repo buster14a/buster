@@ -3699,6 +3699,27 @@ static bool check_common_bitwise_precedence(const Parser* parser, uint32_t compa
     return result;
 }
 
+// The token past the binary operator `op`'s right operand, its subtree's last token's next: the tokens after it that climb
+// to it are its right operand's. Only a warning asks, so the climbs' cost is a warning's.
+static uint32_t check_common_operand_end(const Parser* parser, uint32_t op)
+{
+    const uint32_t count = parser->tokens.count;
+    uint32_t end = op < count ? op + 1 : count;
+    bool inside = true;
+    while (inside && end < count)
+    {
+        uint32_t at = end;
+        for (uint32_t steps = 0; at < count && at != op && steps < count; steps += 1)
+        {
+            const uint32_t up = parser->tree.parents[at];
+            at = up != at ? up : count;
+        }
+        inside = at == op;
+        end += inside ? 1u : 0u;
+    }
+    return end;
+}
+
 static void check_common_parentheses(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, const TypeTable* types,
                                      Arena* scratch)
 {
@@ -3725,8 +3746,10 @@ static void check_common_parentheses(const Parser* parser, Preprocessor* pp, con
                 { token, "place parentheses around the assignment to silence this warning" },
                 { token, "use '==' to turn this assignment into an equality comparison" },
             };
-            check_common_report(parser, pp, input, token, CHECK_WARNING_ID_PARENTHESES, false,
-                                "using the result of an assignment as a condition without parentheses", notes, 2, scratch);
+            // Clang checks the condition once it is whole (CheckBooleanCondition): after the diagnostics its operands gave as
+            // they were built, a call's format or a statement expression's own (#1941), so published at its `)` or `;`.
+            check_common_report_at(parser, pp, input, token, parent, CHECK_WARNING_ID_PARENTHESES, false,
+                                   "using the result of an assignment as a condition without parentheses", notes, 2, scratch);
         }
         else if (parent_role == PARSE_ROLE_BITWISE_AND || parent_role == PARSE_ROLE_BITWISE_OR || parent_role == PARSE_ROLE_BITWISE_XOR)
         {
@@ -3739,7 +3762,9 @@ static void check_common_parentheses(const Parser* parser, Preprocessor* pp, con
                     { parent, check_warning_text(scratch, "place parentheses around the '%s' expression to silence this warning", upper) },
                     { parent, check_warning_text(scratch, "place parentheses around the %s expression to evaluate it first", lower) },
                 };
-                check_common_report(parser, pp, input, parent, CHECK_WARNING_ID_PARENTHESES, false, message, notes, 2, scratch);
+                // Clang warns as it builds the bitwise operator, after its right operand's own diagnostics (#1941).
+                check_common_report_at(parser, pp, input, parent, check_common_operand_end(parser, parent), CHECK_WARNING_ID_PARENTHESES, false, message,
+                                       notes, 2, scratch);
             }
         }
         else if (role == PARSE_ROLE_PREFIX && parser->tokens.kinds[token] == PARSE_KIND_EXCLAIM && check_common_comparison_role(parent_role) && token < parent)
@@ -3748,8 +3773,9 @@ static void check_common_parentheses(const Parser* parser, Preprocessor* pp, con
                 { token, "add parentheses after the '!' to evaluate the comparison first" },
                 { token, "add parentheses around left hand side expression to silence this warning" },
             };
-            check_common_report(parser, pp, input, token, CHECK_WARNING_ID_LOGICAL_NOT_PARENTHESES, false,
-                                "logical not is only applied to the left hand side of this comparison", notes, 2, scratch);
+            // Clang warns as it builds the comparison, after its right operand's own diagnostics (#1941).
+            check_common_report_at(parser, pp, input, token, check_common_operand_end(parser, parent), CHECK_WARNING_ID_LOGICAL_NOT_PARENTHESES, false,
+                                   "logical not is only applied to the left hand side of this comparison", notes, 2, scratch);
         }
         else if ((role == PARSE_ROLE_EQUALITY || role == PARSE_ROLE_RELATIONAL) &&
                  parent < parser->tokens.count && parser->tree.roles[parent] == PARSE_ROLE_TERMINATOR &&
@@ -6234,7 +6260,8 @@ static uint32_t check_common_argument_start(const Parser* parser, uint32_t token
 {
     uint32_t result = token;
     uint32_t depth = 0;
-    for (uint32_t at = token; at < parser->tokens.count && at-- > 0;)
+    // (From the node's token itself: a call's is its `)`, whose arguments' commas are no argument's end, #1941.)
+    for (uint32_t at = token < parser->tokens.count ? token + 1 : 0; at-- > 0;)
     {
         const uint8_t kind = parser->tokens.kinds[at];
         if (kind == PARSE_KIND_R_PAREN)
@@ -6589,7 +6616,9 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
             {
                 check_common_exhausted(pp);
             }
-            uint32_t order = 0;
+            // Clang checks the format as it builds the call, once its arguments are: after the diagnostics they gave as they
+            // were built, a statement expression's own or a nested call's (#1941), so published from the call's `)` on.
+            uint32_t order = graph->tokens[node] < parser->tokens.count ? parser->tokens.sources[graph->tokens[node]] : 0;
             uint32_t max_uncovered = BUSTER_CHECK_NONE;
             bool all_covered = false;
             bool nonliteral_leaf = false;

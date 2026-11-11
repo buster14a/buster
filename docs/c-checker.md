@@ -9636,9 +9636,10 @@ enables, which this checker doesn't all give.
   spacing (`check_driver_vla_bounds`): `'int (*)[n + 1]'`, `'int[n][m * 2]'`.
   `c_check_type_sugar_driver_test.c` compares these whole-output with clang.
 - **Differences left.**
-  - A cast inside a variable array's bound prints its type name as written
-    (`int[(unsigned)n]`), where clang prints the type's own spelling
-    (`'int[(unsigned int)n]'`), and `sizeof` of a parenthesized expression
+  - A cast inside a variable array's bound prints its builtin type keywords
+    as clang's TypePrinter does (`int[(unsigned)n]` is `'int[(unsigned int)n]'`,
+    `check_semantic_builtin_spelling`), but other type names as written: a
+    complex's, a `_BitInt`'s, a pointer's own qualifier order. `sizeof` of a parenthesized expression
     has no space (`sizeof(x)`, clang's `sizeof (x)`; the static assertion's
     requirement shares the spacing). Only a type's first eight bounds print;
     later ones print `[]`.
