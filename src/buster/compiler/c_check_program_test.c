@@ -5304,6 +5304,40 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
             "if(w)h+=17;if(!u)h+=19;h+=(a&&u)*23+(q||0)*29;S200 sel=n>3?a:b;FOLD(sel,200);\n"
             "return (int)(h%1000003)^cmp;}\n",
             "bit-int-past-128-bits", clang);
+        // Their constants (#1447, c_check_wide.c): literals past 128 bits in every radix and with separators, and the 129-bit
+        // ones a signed value with its top bit set needs; globals, statics, members and array elements initialized with
+        // folded constants (the static data writes their limbs, extended past the width); and locals the lowering takes
+        // as folded limbs. Every operator folds: sums, differences and negations, products, quotients and remainders of
+        // either sign, the bitwise ones, shifts by narrow and wide counts and narrow values by wide ones, compares, truth
+        // (!, &&, ||, ?:, if) and conversions to and from narrower integers, other widths, the floating types and back,
+        // with integer constant expressions of them as array bounds and enumerators.
+        check_test_program_source(test,
+            "typedef _BitInt(129) S129;typedef _BitInt(200) S200;typedef unsigned _BitInt(200) U200;typedef _BitInt(256) S256;\n"
+            "typedef unsigned _BitInt(300) U300;typedef unsigned _BitInt(1000) U1000;typedef _BitInt(4100) S4100;\n"
+            "static unsigned long fold(unsigned long h,const void*p,unsigned bytes){const unsigned char*b=(const unsigned char*)p;\n"
+            "for(unsigned i=0;i<bytes;i++)h=(h^b[i])*1099511628211ul;return h;}\n"
+            "#define FOLD(x) do{__typeof__(x) t_=(x);h=fold(h,&t_,sizeof t_);}while(0)\n"
+            "struct M{int a;S200 w;char c;U1000 u;};\n"
+            "S200 g1=5,g2=-7,g3=(S200)1<<199>>3,g4=-((S200)1<<150)/12345,g5=(S200)-123456789012345678901234567890wb%997;\n"
+            "U300 g6=0x123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123uwb,g7=~(U300)0/3,g8=(U300)1<<299,g9=0b1011wb;\n"
+            "S129 g10=340282366920938463463374607431768211455wb,g11=-340282366920938463463374607431768211455wb-1;\n"
+            "S256 g12=(S256)0777777777777777777777777777777777777777777777777777777777777wb*3,g13=1000000000000000000000000000000000000000000000wb;\n"
+            "U1000 g14=~(U1000)0>>17^(U1000)0xdeadbeefuwb<<900;S4100 g15=-((S4100)1<<4000)+(S4100)3;\n"
+            "struct M gm={1,-((S200)5<<100),'x',~(U1000)0/3};S256 ga[3]={1,(S256)1<<254>>1,-1};\n"
+            "double gd=(double)((S200)1<<150);float gf=(float)-((U300)1<<200);long double gl=(long double)(U300)0x123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123uwb;S200 gfd=(S200)-1.5e50,gfl=(S200)1e40L;\n"
+            "int gc[8]={(S200)3<(S200)4,(S200)-3<(S200)2,(U200)3<(U200)-1,(S200)1<<150==(S200)1<<150,!(S200)0,(S200)1<<140&&(S200)0,(S200)0||(S200)1<<190,(int)((U1000)1<<999>>990)};\n"
+            "enum{E1=(S200)1<<180>>178,E2=(int)(((U300)1<<299)>>295)};\n"
+            "long gn=(long)(-((S200)77<<130)>>130);unsigned gu=(unsigned)((U300)0x123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123uwb>>200);_Bool gb=(S200)1<<160;__int128 gq=(__int128)-((S256)5<<100);\n"
+            "int gs1=1<<(S200)30,gs2=(int)((S200)1<<(_BitInt(300))70>>(unsigned char)64);S200 gs3=(S200)-1>>(U300)150;\n"
+            "int tested(int n){unsigned long h=2166136261u;\n"
+            "static S256 s1=(S256)1<<255>>200;S200 l1=((S200)1<<150)+12345,l2=-(S200)3*(S200)1000000000000000000000000000000000000000wb;\n"
+            "S200 l3=l2/7,l4=l2%7,l5=(S200)1<<150?(S200)3:(S200)4;U1000 l6=~(U1000)0>>5;char arr[(int)((S200)1<<140>>137)];\n"
+            "FOLD(g1);FOLD(g2);FOLD(g3);FOLD(g4);FOLD(g5);FOLD(g6);FOLD(g7);FOLD(g8);FOLD(g9);FOLD(g10);FOLD(g11);FOLD(g12);FOLD(g13);FOLD(g14);FOLD(g15);\n"
+            "FOLD(gm);h=fold(h,ga,sizeof ga);FOLD(gd);FOLD(gf);h=fold(h,&gl,10);FOLD(gfd);FOLD(gfl);h=fold(h,gc,sizeof gc);FOLD(gn);FOLD(gu);FOLD(gb);FOLD(gq);FOLD(gs1);FOLD(gs2);FOLD(gs3);\n"
+            "FOLD(s1);FOLD(l1);FOLD(l2);FOLD(l3);FOLD(l4);FOLD(l5);FOLD(l6);h+=sizeof arr+E1*3+E2*5;\n"
+            "if((S200)0)h+=7;if((S200)1<<140)h+=11;S200 v=(S200)n<<150;FOLD(v+((S200)1<<160));FOLD(v<((S200)1<<151));\n"
+            "return (int)(h%1000003);}\n",
+            "bit-int-past-128-bits-constants", clang);
     }
     // _Complex __float128 (#137): a frame object of two __float128s, whose parts are values as a __float128 is. Each part's
     // sum, difference, negation, product with and quotient by a real value is __float128's (libgcc's __addtf3 ...), a
