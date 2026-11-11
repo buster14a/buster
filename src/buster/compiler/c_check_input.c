@@ -113,7 +113,7 @@ typedef enum CheckInputMessage
     CHECK_INPUT_CONSTEXPR_POINTER,
     CHECK_INPUT_CONSTEXPR_REPRESENTABLE,
     CHECK_INPUT_CONSTEXPR_CONTEXT,
-    // A bit-precise constant wider than the checker's values (BUSTER_CHECK_LITERAL_BIT_WIDTH, #768).
+    // A bit-precise constant wider than BITINT_MAXWIDTH (BUSTER_CHECK_WIDE_MAX_WIDTH, #768, #1447).
     CHECK_INPUT_WIDE_LITERAL,
     CHECK_INPUT_PRAGMA_SEMANTICS,
     // clang's musttail attribute (#147) where it doesn't go, at the attribute: with arguments, on a declaration (a label
@@ -5964,9 +5964,9 @@ static inline __attribute__((always_inline)) void check_input_literal(CheckInput
     }
     if (result->valid && result->bit_width != 0)
     {
-        // A bit-precise constant (#768): its _BitInt, of up to 128 bits, the most the checker's values hold; a wider one
-        // is refused by name (check_input_literal_report).
-        const bool supported = result->bit_width <= BUSTER_CHECK_LITERAL_BIT_WIDTH;
+        // A bit-precise constant (#768): its _BitInt, of up to BITINT_MAXWIDTH bits, past 128 with its limbs
+        // (c_check_wide.c, #1447); a wider one is refused by name (check_input_literal_report).
+        const bool supported = result->bit_width <= BUSTER_CHECK_WIDE_MAX_WIDTH;
         result->type = supported ? check_input_type_result(reader, type_bit_int(reader->types, result->bit_width, result->bit_unsigned)) : 0;
         result->valid = result->type != 0;
         if (reader->parser->language.standard < 2023)
@@ -5987,7 +5987,7 @@ static inline __attribute__((always_inline)) void check_input_literal(CheckInput
 // an invalid or unsupported literal.
 static CheckInputMessage check_input_literal_report(const CheckLiteral* literal)
 {
-    return literal->bit_width > BUSTER_CHECK_LITERAL_BIT_WIDTH ? CHECK_INPUT_WIDE_LITERAL : CHECK_INPUT_LITERAL;
+    return literal->bit_width > BUSTER_CHECK_WIDE_MAX_WIDTH && literal->bit_width != 0 ? CHECK_INPUT_WIDE_LITERAL : CHECK_INPUT_LITERAL;
 }
 
 // A numeric zero literal's source provenance: parentheses and selections keep it; a character, enum, object read,
