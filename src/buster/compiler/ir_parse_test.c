@@ -709,6 +709,7 @@ static int run_ir_parse_tests(int argc, char** argv)
                 "tests/ir/rows.ir",
                 "tests/ir/carrier-rows.ir",
                 "tests/ir/masked-memory.ir",
+                "tests/ir/lane-moves.ir",
             };
             for (uint32_t i = 0; i < sizeof(fixtures) / sizeof(fixtures[0]); i += 1)
             {

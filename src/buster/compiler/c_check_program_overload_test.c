@@ -6,6 +6,120 @@
 #ifndef BUSTER_C_CHECK_PROGRAM_OVERLOAD_TEST_INCLUDED
 #define BUSTER_C_CHECK_PROGRAM_OVERLOAD_TEST_INCLUDED
 
+// #1447: overloadable functions' enable_if conditions in their names (c_check_condition_mangle.c), as clang 23 mangles
+// them (clang 23.1.6 gives `_Z1rUa9enable_ifIXgtclL_Z1gEfL0p_ELi0EEEi` for the last); a condition of a shape the
+// names don't take (a call) leaves its function without one.
+static void check_test_mangling_enable_if(CheckTest* test)
+{
+    static const char source[] =
+        "#define O __attribute__((overloadable))\n"
+        "#define E(c) __attribute__((enable_if(c, \"\")))\n"
+        "enum { EN = 3 }; int g(int);\n"
+        "int a1(int a, long b, const int c) O E(a > 0 && (b < 10L || !c));\n"
+        "int a2(int a, unsigned u) O E(-a + ~a * 2 / 3 % 4 - (a << 1) >= ((a >> 2) & 1 | 2 ^ 3));\n"
+        "int a3(int a) O E(a ? a == 1 : a != 2);\n"
+        "int a4(int a) O E(a > 'A') E(a < 1u) E(a < 2ul) E(a < 3ll) E(a < 4ull);\n"
+        "int a5(double d, float f) O E(d > 1.5 && f < 2.5f);\n"
+        "int a6(int a) O E((a, 1));\n"
+        "int a7(int *p) O E(p != 0) E(!p == 0);\n"
+        "int a8(int a) O E(a > EN);\n"
+        "int a9(int a) O E((long)a > 0);\n"
+        "int b1(int a) O E(sizeof(a) > 2);\n"
+        "int b2(int a) O E(0) E(1);\n"
+        "int b3(int a) O E(a > -1);\n"
+        "int b4(int a) O E((0));\n"
+        "int b5(int a) O E(EN);\n"
+        "int b7(const volatile int *a, int *restrict p) O E(a != 0 && p != 0);\n"
+        "int b8(int a) O E(a > (char)1);\n"
+        "int b9(int a) O E(a > sizeof(int));\n"
+        "int c1(int a) O E(a > 1.0L);\n"
+        "int h(int a) O E(a > 0);\n"
+        "int h(int a) O E(a < 10);\n"
+        "int r(int a) O E(g(a) > 0);\n";
+    static const char* const expected[] = {
+        "_Z2a1Ua9enable_ifIXaagtfL0p_Li0EooltfL0p0_Ll10EntfL0pK1_EEili",
+        "_Z2a2Ua9enable_ifIXgemiplngfL0p_rmdvmlcofL0p_Li2ELi3ELi4ElsfL0p_Li1EoranrsfL0p_Li2ELi1EeoLi2ELi3EEEij",
+        "_Z2a3Ua9enable_ifIXqufL0p_eqfL0p_Li1EnefL0p_Li2EEEi",
+        "_Z2a4Ua9enable_ifIXgtfL0p_Li65EEXltfL0p_Lj1EEXltfL0p_Lm2EEXltfL0p_Lx3EEXltfL0p_Ly4EEEi",
+        "_Z2a5Ua9enable_ifIXaagtfL0p_Ld3ff8000000000000EltfL0p0_Lf40200000EEEdf",
+        "_Z2a6Ua9enable_ifIXcmfL0p_Li1EEEi",
+        "_Z2a7Ua9enable_ifIXnefL0p_Li0EEXeqntfL0p_Li0EEEPi",
+        "_Z2a8Ua9enable_ifIXgtfL0p_Li3EEEi",
+        "_Z2a9Ua9enable_ifIXgtcvlfL0p_Li0EEEi",
+        "_Z2b1Ua9enable_ifIXgtLm4ELi2EEEi",
+        "_Z2b2Ua9enable_ifILi0ELi1EEi",
+        "_Z2b3Ua9enable_ifIXgtfL0p_ngLi1EEEi",
+        "_Z2b4Ua9enable_ifILi0EEi",
+        "_Z2b5Ua9enable_ifILi3EEi",
+        "_Z2b7Ua9enable_ifIXaanefL0p_Li0EnefL0pr0_Li0EEEPVKiPi",
+        "_Z2b8Ua9enable_ifIXgtfL0p_cvcLi1EEEi",
+        "_Z2b9Ua9enable_ifIXgtfL0p_Lm4EEEi",
+        "_Z2c1Ua9enable_ifIXgtfL0p_Le3fff8000000000000000EEEi",
+        "_Z1hUa9enable_ifIXgtfL0p_Li0EEEi",
+        "_Z1hUa9enable_ifIXltfL0p_Li10EEEi",
+        NULL,
+    };
+    static InternTable identifiers;
+    static Preprocessor pp;
+    static Parser parser;
+    const PPOptions preprocessing = { .language = { .standard = 2017, .gnu = true }, .no_standard_includes = true };
+    const ParseOptions parsing = { .extension_metadata = true };
+    bool ready = intern_initialize(&identifiers) && pp_initialize(&pp, &preprocessing, &identifiers) &&
+                 parse_initialize(&parser, &parsing, preprocessing.language) &&
+                 pp_run_source(&pp, "overload-enable-if-mangling.c", (const uint8_t*)source, sizeof(source) - 1) && parse_translation_unit(&parser, &pp);
+    check_test_expect(test, ready, "enable_if mangling signatures parse");
+    for (uint32_t path = 0; ready && path < 2; path += 1)
+    {
+        CheckTestTypes types = { 0 };
+        Arena retained = arena_reserve(1u << 24);
+        Arena output = arena_reserve(1u << 20);
+        Arena scratch = arena_reserve(1u << 24);
+        CheckInput input = { 0 };
+        parser.options.scalar = path == 0;
+        bool checked = check_test_types_open(&types) && retained.base != NULL && output.base != NULL && scratch.base != NULL &&
+                       check_input(&input, &parser, &pp, &types.table, &retained, &scratch) && input.report_count == 0;
+        // (The plain `g` is a candidate too, which has no overloadable name.)
+        uint32_t overloadable = 0;
+        for (uint32_t i = 0; checked && i < input.graph.overload_candidate_count; i += 1)
+        {
+            overloadable += (input.graph.overload_candidates[i].flags & BUSTER_CHECK_OVERLOADABLE) != 0 ? 1u : 0u;
+        }
+        check_test_expect(test, checked && overloadable == BUSTER_ARRAY_LENGTH(expected), "enable_if overloads are distinct candidates");
+        CheckMangleSource mangling = {
+            .input = &input,
+            .parser = &parser,
+            .identifiers = &identifiers,
+            .types = &types.table,
+            .output = &output,
+            .scalar = path == 0,
+        };
+        uint32_t i = 0;
+        for (uint32_t c = 0; checked && c < input.graph.overload_candidate_count && i < BUSTER_ARRAY_LENGTH(expected); c += 1)
+        {
+            const CheckOverloadCandidate* candidate = input.graph.overload_candidates + c;
+            if ((candidate->flags & BUSTER_CHECK_OVERLOADABLE) != 0)
+            {
+                String8 name = { 0 };
+                const CheckMangleStatus status = check_mangle_name(&mangling, candidate->type, parser.tokens.names[candidate->declaration], candidate->declaration, &scratch, &name);
+                const bool matches = expected[i] != NULL ? status == CHECK_MANGLE_OK && name.length == strlen(expected[i]) && memcmp(name.pointer, expected[i], name.length) == 0 :
+                                                           status == CHECK_MANGLE_UNSUPPORTED && name.length == 0;
+                char description[256];
+                snprintf(description, sizeof(description), "enable_if ABI name %s on %s path (got %.*s, status %u)", expected[i] != NULL ? expected[i] : "(refused)",
+                         path == 0 ? "scalar" : "vector", (int)name.length, name.pointer != NULL ? name.pointer : "", status);
+                check_test_expect(test, matches && scratch.length == 0, description);
+                i += 1;
+            }
+        }
+        check_test_types_close(&types);
+        arena_release(&retained);
+        arena_release(&output);
+        arena_release(&scratch);
+    }
+    parse_release(&parser);
+    pp_release(&pp);
+    intern_release(&identifiers);
+}
+
 static void check_test_mangling(CheckTest* test)
 {
     static const char source[] =
@@ -84,7 +198,7 @@ static void check_test_mangling(CheckTest* test)
         {
             const CheckOverloadCandidate* candidate = input.graph.overload_candidates + i;
             String8 name = { 0 };
-            const CheckMangleStatus status = check_mangle_name(&mangling, candidate->type, parser.tokens.names[candidate->declaration], &scratch, &name);
+            const CheckMangleStatus status = check_mangle_name(&mangling, candidate->type, parser.tokens.names[candidate->declaration], candidate->declaration, &scratch, &name);
             const bool matches = status == CHECK_MANGLE_OK && name.length == strlen(expected[i]) && memcmp(name.pointer, expected[i], name.length) == 0;
             char description[256];
             snprintf(description, sizeof(description), "overload ABI name %s on %s path (got %.*s, status %u)", expected[i], path == 0 ? "scalar" : "vector",
@@ -102,7 +216,7 @@ static void check_test_mangling(CheckTest* test)
             }
             const TypeId deep = type_function(&types.table, BUSTER_TYPE_VOID, &pointer, 1, BUSTER_TYPE_FLAG_PROTOTYPE);
             String8 name = { 0 };
-            const CheckMangleStatus deep_status = check_mangle_name(&mangling, deep, identifier, &scratch, &name);
+            const CheckMangleStatus deep_status = check_mangle_name(&mangling, deep, identifier, UINT32_MAX, &scratch, &name);
             bool matches = deep_status == CHECK_MANGLE_OK && name.length == 1029 && memcmp(name.pointer, "_Z1a", 4) == 0 && name.pointer[1028] == 'i';
             for (uint32_t i = 4; matches && i < 1028; i += 1)
             {
@@ -118,18 +232,18 @@ static void check_test_mangling(CheckTest* test)
             }
             parameters[40] = pointer;
             const TypeId repeated = type_function(&types.table, BUSTER_TYPE_VOID, parameters, BUSTER_ARRAY_LENGTH(parameters), BUSTER_TYPE_FLAG_PROTOTYPE);
-            const CheckMangleStatus repeated_status = check_mangle_name(&mangling, repeated, identifier, &scratch, &name);
+            const CheckMangleStatus repeated_status = check_mangle_name(&mangling, repeated, identifier, UINT32_MAX, &scratch, &name);
             check_test_expect(test, repeated_status == CHECK_MANGLE_OK && name.length >= 4 && memcmp(name.pointer + name.length - 4, "S12_", 4) == 0,
                               "overload substitution ids pass multiple vector groups and use base 36");
             Arena exhausted = arena_reserve(32);
             exhausted.length = 17;
             exhausted.capacity = 17;
             const uint64_t mark = output.length;
-            const CheckMangleStatus no_work = check_mangle_name(&mangling, deep, identifier, &exhausted, &name);
+            const CheckMangleStatus no_work = check_mangle_name(&mangling, deep, identifier, UINT32_MAX, &exhausted, &name);
             check_test_expect(test, no_work == CHECK_MANGLE_RESOURCE && name.length == 0 && exhausted.length == 17 && output.length == mark,
                               "overload mangling worklist exhaustion publishes no partial name");
             mangling.output = &exhausted;
-            const CheckMangleStatus no_name = check_mangle_name(&mangling, deep, identifier, &scratch, &name);
+            const CheckMangleStatus no_name = check_mangle_name(&mangling, deep, identifier, UINT32_MAX, &scratch, &name);
             check_test_expect(test, no_name == CHECK_MANGLE_RESOURCE && name.length == 0 && exhausted.length == 17 && scratch.length == 0,
                               "overload name allocation exhaustion restores scratch");
             arena_release(&exhausted);
@@ -262,6 +376,7 @@ static void check_test_overload_driver(CheckTest* test, const char* clang)
 static void check_test_program_overloads(CheckTest* test, const char* clang)
 {
     check_test_mangling(test);
+    check_test_mangling_enable_if(test);
     check_test_overload_driver(test, clang);
     check_test_program_selection_case(test,
         "#define O __attribute__((overloadable))\n"

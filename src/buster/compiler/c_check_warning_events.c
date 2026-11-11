@@ -186,9 +186,12 @@ enum
     // (warn_cxx_compat_hack_fake_diagnostic_do_not_emit), whose policy makes the unsafe default-const-init words say "and
     // is incompatible with C++" (#2168).
     CHECK_WARNING_ID_CXX_COMPAT = 136,
+    // GCC's cast to a union from a member's type (#2301, clang's CheckCStyleCast): -Wgnu-union-cast, an extension off by
+    // default, under -Wgnu and -Wpedantic. (Its ID past -Wc++-compat's, 136.)
+    CHECK_WARNING_ID_GNU_UNION_CAST = 137,
     // A relational comparison whose left operand is one, unparenthesized (#2264, clang's diagnoseChainedComparison):
     // -Wparentheses', an error by default.
-    CHECK_WARNING_ID_CHAINED_COMPARISON = 137,
+    CHECK_WARNING_ID_CHAINED_COMPARISON = 138,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -505,6 +508,8 @@ typedef enum CheckWarningEventKind
     // that isn't a qualifier, payload.first_type its type, payload.name its typedef's spelling (or 0), payload.data 0 for an
     // array's, 1 for a qualified one's.
     CHECK_WARNING_EVENT_UNREACHABLE_ASSOCIATION,
+    // GCC's cast to a union (#2301, check_warning_graph_union_cast), at the cast's `(`: its description's words.
+    CHECK_WARNING_EVENT_GNU_UNION_CAST,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
 

@@ -792,6 +792,31 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_vector_operation(
         value = ir_typed_emit(sink, IR_INTRINSIC, type, operands[0], operands[1], BUSTER_IR_INTRINSIC_AES, 0);
         ir_typed_lanes(sink, value, (IrSimdLane)operation->immediate);
     }
+    else if (operation->lane_move != 0)
+    {
+        // One lane of a vector or its lanes' sign bits (#1840), its flags the lane: an extraction's I32 or I64 narrowed to
+        // the row's integer, and an insertion's integer widened to its I32 first.
+        const uint32_t kind = operation->lane_move - 1u;
+        const uint32_t size = operation->immediate & 3;
+        const IrType scalar = size == 3 ? IR_I64 : IR_I32;
+        if (kind == BUSTER_IR_INTRINSIC_LANE_INSERT)
+        {
+            const IrType given = (IrType)ir_typed_types[operation->operand_classes[1]];
+            const uint32_t inserted = given == scalar ? operands[1] : ir_typed_emit(sink, IR_ZEXT, scalar, operands[1], BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+            value = ir_typed_emit(sink, IR_INTRINSIC, type, operands[0], inserted, kind, 0);
+            ir_typed_lanes(sink, value, (IrSimdLane)operation->immediate);
+        }
+        else
+        {
+            const IrType produced = kind == BUSTER_IR_INTRINSIC_MOVEMASK ? IR_I32 : scalar;
+            value = ir_typed_emit(sink, IR_INTRINSIC, produced, operands[0], BUSTER_IR_NONE, kind, 0);
+            ir_typed_lanes(sink, value, (IrSimdLane)operation->immediate);
+            if (type != produced)
+            {
+                value = ir_typed_emit(sink, IR_TRUNC, type, value, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+            }
+        }
+    }
     else if (operation->masked_memory != 0)
     {
         // A masked load or store (#1840) of the vector at the address, the first operand, under the third, the mask: a
