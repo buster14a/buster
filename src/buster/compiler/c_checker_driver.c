@@ -331,6 +331,7 @@ static void check_driver_attribute_argument(const Parser* parser, const Preproce
             break;
         case CHECK_ARGUMENT_EXPECTED_COMMA: snprintf(text, capacity, "expected ','"); break;
         case CHECK_ARGUMENT_REQUIRED_AFTER: snprintf(text, capacity, "argument required after attribute"); break;
+        case CHECK_ARGUMENT_NON_KR: snprintf(text, capacity, "'%s' attribute only applies to non-K&R-style functions", parsed); break;
         case CHECK_ARGUMENT_SWIFT_ERROR_PARAMETER:
             snprintf(text, capacity, "'%s' attribute can only be applied to a function with an error parameter", parsed);
             break;

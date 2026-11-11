@@ -2117,6 +2117,8 @@ struct CheckInputReader
     // The struct clang's Sema takes for CFError (#1447, swift_error's error parameter: check_input_swift_cf_error): the
     // first one bridged to NSError that a swift_error's check met, which it then tests alone; 0 before.
     TypeId cf_error;
+    // Whether a cfi_salt attribute was read, for the function types its declarators make (#1447, check_input_attribute_salt).
+    bool salt_attributes;
     // While a function's declaration's attributes are checked (check_input_attribute_subjects): its declarator's first
     // named parameter's token plus one (its parameters linked by parameter_next), which callback's names index; else 0.
     uint32_t attribute_parameters;
@@ -3464,10 +3466,11 @@ static const CheckInputAttribute* check_input_attribute_of(const CheckInputAttri
     return result;
 }
 
-// Whether a generic attribute is a function type's (#147): ns_returns_retained, cfi_unchecked_callee and the function effects'.
+// Whether a generic attribute is a function type's (#147): ns_returns_retained, cfi_unchecked_callee, the function effects'
+// and cfi_salt (#1447).
 static bool check_input_function_type_name(CheckInputReader* reader, const CheckInputAttribute* attribute)
 {
-    static const char* const names[] = { "ns_returns_retained", "cfi_unchecked_callee", "allocating", "blocking", "nonallocating", "nonblocking" };
+    static const char* const names[] = { "ns_returns_retained", "cfi_unchecked_callee", "allocating", "blocking", "nonallocating", "nonblocking", "cfi_salt" };
     const String8 name = check_input_attribute_name(reader, attribute->name);
     bool result = false;
     for (uint32_t i = 0; !result && i < BUSTER_ARRAY_LENGTH(names); i += 1)
@@ -3540,6 +3543,83 @@ static void check_input_attribute_function_types(CheckInputReader* reader, const
     }
 }
 
+// A declarator's type with its list's cfi_salt (#1447, clang's handleCFISaltAttr: the last of the list's kept ones, a string
+// whose text is the salt, an empty one none) on the first function inside its pointers, arrays and aligned or qualified
+// wrappers, made again with them: the salt is part of the function type's identity (BUSTER_TYPE_FUNCTION_SALT_SHIFT, the
+// text's interned id). A function without a prototype is clang's error at the attribute ("only applies to non-K&R-style
+// functions"); a salt's id past the type's bits is refused by name; and a list's attribute on no function is its
+// subjects' warning (check_input_attribute_function_type_warning). Cold: only a unit with a cfi_salt asks.
+static TypeId check_input_attribute_salt(CheckInputReader* reader, CheckInputAttributes* attributes, TypeId type)
+{
+    TypeTable* types = reader->types;
+    const Parser* parser = reader->parser;
+    CheckInputAttribute* salt = NULL;
+    for (uint32_t i = 0; attributes->error == CHECK_ATTRIBUTE_ERROR_NONE && i < attributes->count; i += 1)
+    {
+        CheckInputAttribute* attribute = attributes->records + i;
+        const bool kept = attribute->kind == CHECK_ATTRIBUTE_UNKNOWN && !attribute->keyword && !attribute->ignored && !attribute->subject_ignored &&
+                          attribute->count_check == BUSTER_CHECK_COUNT_NONE && attribute->argument_count == 1 &&
+                          parser->tokens.kinds[attribute->argument_first] == PARSE_KIND_STRING;
+        salt = kept && check_input_attribute_equal(check_input_attribute_name(reader, attribute->name), "cfi_salt") ? attribute : salt;
+    }
+    TypeId function = type;
+    uint32_t depth = 0;
+    bool wrapped = salt != NULL;
+    while (wrapped)
+    {
+        const uint8_t kind = type_kind(types, function);
+        wrapped = kind == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(kind) || kind == BUSTER_TYPE_KIND_ALIGNED || kind == BUSTER_TYPE_KIND_QUALIFIED;
+        function = wrapped ? types->types.base[type_index(function)] : function;
+        depth += wrapped ? 1u : 0u;
+    }
+    const bool is_function = salt != NULL && type_kind(types, function) == BUSTER_TYPE_KIND_FUNCTION;
+    const bool prototyped = is_function && (types->types.flags[type_index(function)] & BUSTER_TYPE_FLAG_PROTOTYPE) != 0;
+    const String8 text = prototyped ? check_input_checks_string(reader, salt->argument_first, salt->argument_end) : (String8){ "", 0 };
+    const uint32_t id = text.length != 0 ? intern_find_or_add(reader->pp->table, (const uint8_t*)text.pointer, (uint32_t)text.length) : 0;
+    TypeId result = type;
+    if (is_function && !prototyped)
+    {
+        check_input_attribute_argument_error(reader, attributes, salt, salt->first, CHECK_ARGUMENT_NON_KR, 0);
+        result = 0;
+    }
+    else if (prototyped && (id >= BUSTER_TYPE_FUNCTION_SALT_LIMIT || (text.length != 0 && id == 0)))
+    {
+        check_input_attribute_error(reader, attributes, salt->name_token, salt->end, CHECK_ATTRIBUTE_ERROR_UNKNOWN);
+        result = 0;
+    }
+    else if (prototyped && id != type_function_salt(types, function))
+    {
+        uint32_t count = 0;
+        const TypeId* parameters = type_parameters(types, function, &count);
+        const uint32_t abi = (uint32_t)type_function_abi_kind(types, function) | id << BUSTER_TYPE_FUNCTION_SALT_SHIFT;
+        // (An empty salt removes the model's: no parameter ABIs then, which a salt and a Swift convention seldom meet.)
+        result = id != 0 ? type_function_like(types, type_return(types, function), parameters, count, types->types.flags[type_index(function)] & BUSTER_TYPE_FLAG_KEY,
+                                              (TypeFunctionABI)abi, function) :
+                           type_function_abi(types, type_return(types, function), parameters, count, types->types.flags[type_index(function)] & BUSTER_TYPE_FLAG_KEY,
+                                             (TypeFunctionABI)abi);
+        result = check_input_type_result(reader, result);
+        // The wrappers again, outermost last, with their qualifiers.
+        for (uint32_t level = depth; result != 0 && level != 0; level -= 1)
+        {
+            TypeId wrapper = type;
+            for (uint32_t i = 1; i < level; i += 1)
+            {
+                wrapper = types->types.base[type_index(wrapper)];
+            }
+            const uint32_t index = type_index(wrapper);
+            const uint8_t kind = types->types.kind[index];
+            const uint64_t extent = types->types.extent[index];
+            result = kind == BUSTER_TYPE_KIND_POINTER ? type_pointer(types, result) : kind == BUSTER_TYPE_KIND_ARRAY ? type_array(types, result, extent) :
+                     kind == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY ? type_incomplete_array(types, result) :
+                     kind == BUSTER_TYPE_KIND_VARIABLE_ARRAY ? type_variable_array(types, result, (uint32_t)extent) :
+                     kind == BUSTER_TYPE_KIND_QUALIFIED ? type_extend(types, result, (uint32_t)extent) : type_aligned(types, result, (uint32_t)extent);
+            result = check_input_type_result(reader, result);
+            result = result != 0 ? type_qualify(types, result, type_qualifiers(wrapper)) : 0;
+        }
+    }
+    return result;
+}
+
 // Always inlined (#880), as profile-guided builds do; hot callers: check_input_declarator_step and
 // check_input_declaration.
 // Without attributes it gives back the type and the origin (#1671): no list requests an ABI
@@ -3569,6 +3649,8 @@ static inline __attribute__((always_inline)) TypeId check_input_declarator_abi(C
             *origin = check_input_attribute_abi_origin(reader, attributes, *origin);
         }
         result = check_input_attribute_abi_with_override(reader, attributes, type, replace_wrapped_abi);
+        // A function type's cfi_salt (#1447), where the unit has one.
+        result = reader->salt_attributes && result != 0 ? check_input_attribute_salt(reader, attributes, result) : result;
     }
     return result;
 }
@@ -10786,8 +10868,10 @@ static void check_input_inherit_abi(CheckInputReader* reader, uint32_t token, ui
         {
             uint32_t count = 0;
             const TypeId* parameters = type_parameters(reader->types, type, &count);
+            // (Its cfi_salt kept, #1447.)
+            const TypeFunctionABI salted = (TypeFunctionABI)((uint32_t)abi | type_function_salt(reader->types, type) << BUSTER_TYPE_FUNCTION_SALT_SHIFT);
             reader->declared_types[token] = check_input_type_result(reader, type_function_abi(reader->types, type_return(reader->types, type),
-                                                    parameters, count, reader->types->types.flags[type_index(type)] & BUSTER_TYPE_FLAG_KEY, abi));
+                                                    parameters, count, reader->types->types.flags[type_index(type)] & BUSTER_TYPE_FLAG_KEY, salted));
         }
     }
 }
@@ -11499,7 +11583,8 @@ struct CheckC23AutoLevel
     uint32_t alignment_log2;
     uint8_t kind;
     uint8_t function_flags;
-    uint8_t abi;
+    // Its convention with its cfi_salt (#1447, type_function_extended_abi).
+    uint32_t abi;
 };
 
 static CheckC23AutoLevel* check_input_c23_auto_level(CheckInputReader* reader, CheckC23AutoLevel** top, uint8_t kind)
@@ -11640,7 +11725,7 @@ static __attribute__((noinline)) TypeId check_input_c23_auto_deduce(CheckInputRe
                 level->parameters = declared_parameters;
                 level->parameter_count = declared_count;
                 level->function_flags = (uint8_t)(declared_flags & (BUSTER_TYPE_FLAG_PROTOTYPE | BUSTER_TYPE_FLAG_VARIADIC));
-                level->abi = (uint8_t)type_function_abi_kind(types, declared_level);
+                level->abi = type_function_extended_abi(types, declared_level);
                 level->qualifiers = type_qualifiers(declared_level) & ~BUSTER_TYPE_RESTRICT;
                 declared_level = type_return(types, declared_level);
                 deduced = type_return(types, deduced);
