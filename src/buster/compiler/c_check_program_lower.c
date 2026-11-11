@@ -1181,6 +1181,24 @@ static uint64_t check_lower_access(CheckLowerWriter* writer, uint8_t class, Type
     return check_lower_access_value(types, class, type) | segment;
 }
 
+// A vector's element's segment override (#1447): where `node` is an element of a vector lvalue in %fs or %gs, which its
+// own type has lost (check_vector_subscript), the vector's (check_lower_segment_override), which the element's LOAD or
+// STORE takes; 0 otherwise. clang reads the whole vector through the override and extracts the element, and writes it by
+// a read, an insertion and a store of the whole vector: one access of the element's bytes through the same override is
+// the same access of a vector that isn't volatile (an element of a volatile one is refused by name).
+static uint64_t check_lower_element_segment(CheckLowerWriter* writer, uint32_t node)
+{
+    const CheckProgram* program = writer->program;
+    const CheckGraph* graph = &program->input->graph;
+    const CheckStream* stream = program->stream;
+    const uint32_t vector = node < stream->count ? graph->operand0[node] : BUSTER_CHECK_NONE;
+    const bool element = __builtin_expect(writer->segments, 0) && vector < stream->count && graph->ops[node] == CHECK_OP_SUBSCRIPT &&
+                         (check_stream_flags(stream, node) & BUSTER_CHECK_VECTOR_ELEMENT) != 0 && check_stream_category(stream, vector) == CHECK_LVALUE;
+    const uint64_t segment = element ? check_lower_segment_override(program->types, check_stream_type(stream, vector)) : 0;
+    writer->segment_entries = writer->segment_entries || segment != 0;
+    return segment;
+}
+
 // The widest vector register the convention passes a vector in (abi_initialize's vector_bytes), as clang's x86-64 ABI
 // takes it from the target's features (X86AVXABILevel): AVX-512F's 64 bytes, AVX's 32, or else 16.
 static uint32_t check_lower_vector_register_bytes(uint64_t features)
@@ -7323,7 +7341,9 @@ static void check_lower_update(CheckLowerWriter* writer, uint32_t node)
         address_temporary = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
         old_temporary = check_lower_temporary(writer, stored_class);
     }
-    check_lower_instruction(writer, store, stored_class, direct ? destination : check_lower_access(writer, stored_class, stored));
+    // An element of a vector in a segment takes the vector's override (check_lower_element_segment).
+    const uint64_t element_segment = check_lower_element_segment(writer, left);
+    check_lower_instruction(writer, store, stored_class, direct ? destination : check_lower_access(writer, stored_class, stored) | element_segment);
     check_lower_convert(writer, through, stored);
     if (vector)
     {
@@ -7423,7 +7443,7 @@ static void check_lower_update(CheckLowerWriter* writer, uint32_t node)
         {
             check_lower_bit_int_extend(writer, stored, false, true);
         }
-        check_lower_instruction(writer, BUSTER_TYPED_LOAD, stored_class, check_lower_access(writer, stored_class, stored));
+        check_lower_instruction(writer, BUSTER_TYPED_LOAD, stored_class, check_lower_access(writer, stored_class, stored) | element_segment);
         check_lower_instruction(writer, BUSTER_TYPED_DUP, BUSTER_TYPED_CLASS_U64, 0);
         check_lower_operand(writer, node, 0, true, 0);
     }
@@ -7436,7 +7456,7 @@ static void check_lower_update(CheckLowerWriter* writer, uint32_t node)
         {
             check_lower_bit_int_extend(writer, stored, false, true);
         }
-        check_lower_instruction(writer, BUSTER_TYPED_LOAD, stored_class, check_lower_access(writer, stored_class, stored));
+        check_lower_instruction(writer, BUSTER_TYPED_LOAD, stored_class, check_lower_access(writer, stored_class, stored) | element_segment);
         check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, address_temporary);
         check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, address_temporary);
         check_lower_operand(writer, node, 0, true, 0);
@@ -12623,8 +12643,8 @@ static bool check_lower_atomic_other_segment(const CheckLowerWriter* writer, uin
 
 // A node that loads from or stores to a segment's space (check_lower_segment), which the lowering refuses by name: an
 // lvalue read (not an address taken, `&` or a member's or a subscript's base), or an assignment's, a compound
-// assignment's or an increment's or decrement's operand; a vector's element, read or written, whose type has lost its
-// vector's space; and an atomic builtin's object, which its pointer argument reaches (its object type's space, or its
+// assignment's or an increment's or decrement's operand; a bit of a vector of bool, read or written, whose type has lost
+// its vector's space (another element takes its vector's override: check_lower_element_segment); and an atomic builtin's object, which its pointer argument reaches (its object type's space, or its
 // pointer's pointee's: check_lower_atomic_pointee).
 static bool check_lower_segment_access(const CheckLowerWriter* writer, uint32_t node, const CheckValue* value, bool address)
 {
@@ -12659,7 +12679,13 @@ static bool check_lower_segment_access(const CheckLowerWriter* writer, uint32_t 
     // A bit-field's read and store take it on its unit's pieces (check_lower_bit_unit, check_lower_bit_store), from its
     // place (check_lower_bit_member).
     const bool carried = read ? reader && check_lower_segment_carried(writer, value->type) : written && check_lower_segment_carried(writer, check_stream_type(stream, target));
-    return ((read || written) && !carried) || (element && check_lower_segment(program->types, check_stream_type(stream, target))) ||
+    // A vector's element takes its vector lvalue's override (check_lower_element_segment) where the element is of a class one
+    // LOAD or STORE moves, and not a bit of a vector of bool (a transport vector's, which no address reaches).
+    const TypeId vector = element ? check_stream_type(stream, target) : 0;
+    const bool element_carried = element && check_stream_category(stream, target) == CHECK_LVALUE && check_lower_segment_override(types, vector) != 0 &&
+                                 !check_lower_bool_vector(types, vector) && check_lower_class(writer, value->type) != BUSTER_TYPED_CLASS_VOID &&
+                                 check_lower_class(writer, value->type) <= BUSTER_TYPED_CLASS_VECTOR;
+    return ((read || written) && !carried) || (element && check_lower_segment(program->types, vector) && !element_carried) ||
            (effect != NULL && ((check_lower_segment(types, atomic_space) && !(direct && check_lower_segment_override(types, atomic_space) != 0)) ||
                                check_lower_atomic_other_segment(writer, node)));
 }
@@ -13206,7 +13232,8 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
         }
         else if (op == CHECK_OP_ASSIGN)
         {
-            check_lower_instruction(writer, BUSTER_TYPED_STORE, class, check_lower_access_value(types, class, value->type) | (check_lower_access(writer, class, target) & BUSTER_TYPED_ACCESS_SEGMENT));
+            check_lower_instruction(writer, BUSTER_TYPED_STORE, class, check_lower_access_value(types, class, value->type) | (check_lower_access(writer, class, target) & BUSTER_TYPED_ACCESS_SEGMENT) |
+                                                                          check_lower_element_segment(writer, a));
             check_lower_operand(writer, node, 1, false, value->type);
             check_lower_operand(writer, node, 0, true, 0);
         }
@@ -13260,7 +13287,7 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
         {
             if (!address && !address_value)
             {
-                check_lower_instruction(writer, BUSTER_TYPED_LOAD, class, 0);
+                check_lower_instruction(writer, BUSTER_TYPED_LOAD, class, check_lower_element_segment(writer, node));
             }
             check_lower_instruction(writer, BUSTER_TYPED_PTR_ADD, BUSTER_TYPED_CLASS_U64, type_size(types, value->type));
             check_lower_operand(writer, node, 1, false, BUSTER_TYPE_LONG);

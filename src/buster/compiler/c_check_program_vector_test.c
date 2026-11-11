@@ -629,8 +629,8 @@ static void check_test_program_vector_refusals(CheckTest* test, const X86Target*
 }
 
 // Accesses in a segment's space (#1447) that the lowering refuses by name, which compiled without the segment before: a
-// vector's element (whose type loses its vector's space), an atomic builtin's object (which its pointer reaches), and an
-// asm statement's register output (stored through its address). Clang's code has %gs or %fs on each.
+// bit of a vector of bool, an atomic builtin's object (which its pointer reaches), and an asm statement's register output
+// (stored through its address). Clang's code has %gs or %fs on each.
 static void check_test_program_segment_refusals(CheckTest* test, const X86Target* target)
 {
     static const struct
@@ -639,12 +639,12 @@ static void check_test_program_segment_refusals(CheckTest* test, const X86Target
         const char* source;
         const char* reason;
     } refused[] = {
-        { "segment-vector-element-read", "typedef int V __attribute__((vector_size(16)));int tested(V __seg_gs*p){return (*p)[1];}",
+        // A vector's element takes its vector's override (check_lower_element_segment; check_test_program_segments runs
+        // those), but a bit of a vector of bool, which no address reaches, and an element of a volatile vector.
+        { "segment-bool-vector-element", "typedef _Bool B __attribute__((ext_vector_type(8)));int tested(B __seg_gs*p){return (*p)[1];}",
           "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
-        { "segment-vector-element-write", "typedef int V __attribute__((vector_size(16)));void tested(V __seg_fs*p,int x){(*p)[1]=x;}",
-          "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
-        { "segment-vector-element-update", "typedef int V __attribute__((vector_size(16)));void tested(V __seg_gs*p){(*p)[2]++;}",
-          "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
+        { "segment-volatile-vector-element", "typedef int V __attribute__((vector_size(16)));int tested(volatile V __seg_fs*p){return (*p)[1];}",
+          "element access through volatile vectors" },
         // An atomic builtin's object in a segment's space takes the override where a direct plan takes the builtin
         // (check_test_program_segments runs those); a generic one by pointer, __sync_lock_release and __atomic_clear,
         // which take another plan, are refused.
@@ -758,6 +758,20 @@ static void check_test_program_segments(CheckTest* test, const char* clang)
         "p->y^=n*977;r+=p->y+(p->y=n);"
         "return r+tb.a+tb.b+tb.c+(int)tb.d+tb.e+(int)tp_.y+tp_.x;}",
         "segment-bit-fields", clang);
+    // A vector's elements through the vector's override (check_lower_element_segment), which their own type has lost: read,
+    // assigned, compound-assigned, incremented and decremented, of ints, floats and shorts, at constant and variable indices,
+    // through `(*p)[i]` and `p[0][i]`.
+    check_test_program_source(test,
+        "typedef int v4si __attribute__((vector_size(16)));typedef float v8sf __attribute__((vector_size(32)));"
+        "typedef short v8hi __attribute__((vector_size(16)));"
+        "static _Thread_local v4si tv={9,8,7,6};static _Thread_local v8sf tf={1,2,3,4,5,6,7,8};static _Thread_local v8hi th={1,-2,3,-4,5,-6,7,-8};"
+        "int tested(int n){char*tp=__builtin_thread_pointer();v4si __seg_fs*v=(v4si __seg_fs*)((char*)&tv-tp);"
+        "v8sf __seg_fs*f=(v8sf __seg_fs*)((char*)&tf-tp);v8hi __seg_fs*h=(v8hi __seg_fs*)((char*)&th-tp);"
+        "long r=(*v)[n&3]+(*v)[0];(*v)[(n+1)&3]=n*5;(*v)[2]+=n;(*v)[3]++;r+=--(*v)[1];r+=(*v)[0]--;"
+        "(*f)[n&7]*=1.5f;(*f)[0]=(*f)[7]+n;r+=(long)(*f)[n&7]+(long)(*f)[0];"
+        "(*h)[n&7]-=n;r+=(*h)[n&7]+(*h)[(n*3)&7];v[0][1]^=7;r+=v[0][1];"
+        "return (int)(r+tv[0]+tv[1]+tv[2]+tv[3]+(long)tf[n&7]+th[n&7]);}",
+        "segment-vector-elements", clang);
 }
 
 // Initializer validation keeps atomic rvalue identity while storage uses the underlying vector bytes.
