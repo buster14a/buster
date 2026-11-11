@@ -924,7 +924,8 @@ struct CheckInput
     bool kr_warning_quiet;
     bool kr_warning_system;
     // Whether the command line may give -pedantic's warning of GNU's \e in an evaluated literal (#1447,
-    // check_input_gnu_escapes): the literals the fast decoding read are scanned for one only then, or where a pragma is.
+    // check_input_gnu_escapes): the literals the fast decoding read are scanned for one only then, or where a diagnostic
+    // pragma is.
     bool pedantic_escapes;
     bool kr_warning_errors;
     // The x86 builtins' out-of-range immediate diagnostic is a DefaultError warning whose baseline the command line
@@ -5802,12 +5803,13 @@ static __attribute__((noinline, cold)) void check_input_unknown_escapes(CheckInp
 }
 
 // A literal the fast decoding read, `bytes` its token's spelling, with GNU's \e, which it takes without a word: its
-// -pedantic warning's (check_input_unknown_escapes), where the command line or a pragma may give it (#1447,
+// -pedantic warning's (check_input_unknown_escapes), where the command line or a diagnostic pragma may give it (#1447,
 // CheckInput.pedantic_escapes), but a static assertion's message's (`message` its tokens' end, or BUSTER_CHECK_NONE for a
 // character constant). A memchr for a backslash and a look past it, otherwise.
 static void check_input_gnu_escapes(CheckInputReader* reader, uint32_t token, const uint8_t* bytes, uint32_t length, bool once, uint32_t message)
 {
-    const bool possible = reader->output->pedantic_escapes || reader->parser->tokens.pragma_count != 0;
+    const CheckInputDiagnosticPragmas* pragmas = reader->output->diagnostic_pragmas;
+    const bool possible = reader->output->pedantic_escapes || (pragmas != NULL && pragmas->count != 0);
     bool gnu = false;
     for (const uint8_t* at = possible ? memchr(bytes, '\\', length) : NULL; at != NULL && !gnu;)
     {
