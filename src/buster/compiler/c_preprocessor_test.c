@@ -5268,6 +5268,38 @@ static bool pp_test_named_ucns(const char* directory, bool with_clang)
             .warnings = true,
         },
         {
+            // The same of a `\u` or `\U` clang reads as no universal character name (#1447): no hex digit after it, too few, or
+            // a delimited one's empty braces or missing brace, each naming its letter; at the line splice before it, and none
+            // in a skipped group.
+            .name = "a \\u or \\U clang reads as no universal character name",
+            .source = "f\\u\n\\Uj\ng\\u{}\nh\\u{12\ni\\u12\nj\\U0000004\nk\\u{zz}\n#if 0\nl\\u\n#endif\nm\\\n\\u\n",
+            .standard = "gnu17",
+            .expected = "1:2: warning: \\u used with no following hex digits; treating as '\\' followed by identifier\n"
+                        "2:1: warning: \\U used with no following hex digits; treating as '\\' followed by identifier\n"
+                        "3:2: warning: empty delimited universal character name; treating as '\\' 'u' '{' '}'\n"
+                        "4:2: warning: incomplete delimited universal character name; treating as '\\' 'u' '{' identifier\n"
+                        "5:2: warning: incomplete universal character name; treating as '\\' followed by identifier\n"
+                        "6:2: warning: incomplete universal character name; treating as '\\' followed by identifier\n"
+                        "7:2: warning: incomplete delimited universal character name; treating as '\\' 'u' '{' identifier\n"
+                        "11:2: warning: \\u used with no following hex digits; treating as '\\' followed by identifier\n",
+            .warnings = true,
+        },
+        {
+            // A `\u` or `\U` clang reads whole that starts a token, of a character below U+00A0 or a surrogate (#1447): its
+            // error at the backslash, whatever its digits' form; none of one past U+00A0 or past U+10FFFF.
+            .name = "a \\u or \\U of a basic or control character, or a surrogate",
+            .source = "\\u0041x g\\uD800 \\u0024a \\u0001b \\u{41}d e\\u0041 \\u{D800}h \\u007Fi \\u00e9j \\U00110000\n",
+            .standard = "gnu17",
+            .expected = "1:1: error: character 'A' cannot be specified by a universal character name\n"
+                        "1:10: error: invalid universal character\n"
+                        "1:17: error: character '$' cannot be specified by a universal character name\n"
+                        "1:25: error: universal character name refers to a control character\n"
+                        "1:33: error: character 'A' cannot be specified by a universal character name\n"
+                        "1:42: error: character 'A' cannot be specified by a universal character name\n"
+                        "1:49: error: invalid universal character\n"
+                        "1:59: error: universal character name refers to a control character\n",
+        },
+        {
             // -pedantic's warning that a named UCN is clang's extension (#1447): one that starts a token, its name exactly
             // Unicode's, at its backslash and before its character's error; none within an identifier, of a name that isn't
             // Unicode's, in a skipped group, or in a macro's expansion (its definition's once).

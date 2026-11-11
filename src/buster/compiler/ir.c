@@ -35,15 +35,17 @@
 #define BUSTER_IR_ATOMIC 2
 #define BUSTER_IR_ORDER_SHIFT 2
 #define BUSTER_IR_ORDER (7u << BUSTER_IR_ORDER_SHIFT)
-// A load's or a store's segment override (#1447): FS (clang's address space 257, __seg_fs) or GS (256, __seg_gs), numbered
-// as the typed stream's (BUSTER_TYPED_SEGMENT_FS, _GS) and the encoder's overrides are (form + segment * X86_FORM_COUNT).
+// A load's or a store's segment override (#1447): FS (clang's address space 257, __seg_fs), GS (256, __seg_gs) or SS (258,
+// whose base 64-bit mode ignores but whose 36 clang emits), numbered as the typed stream's (BUSTER_TYPED_SEGMENT_FS, _GS,
+// _SS) and the encoder's overrides are (form + segment * X86_FORM_COUNT).
 // Its address is an offset from the segment's base, not a flat address: no pass relates it to another access's, so such
 // an access is observable (BUSTER_IR_OBSERVABLE), kept as it is and where it is, and no load folds into its consumer.
-// 3 is none. An atomic read/modify/write's operation has these bits; a function with one in a segment stays Tier 0's.
+// An atomic read/modify/write's operation has these bits; a function with one in a segment stays Tier 0's.
 #define BUSTER_IR_SEGMENT_SHIFT 5
 #define BUSTER_IR_SEGMENT (3u << BUSTER_IR_SEGMENT_SHIFT)
 #define BUSTER_IR_SEGMENT_FS 1u
 #define BUSTER_IR_SEGMENT_GS 2u
+#define BUSTER_IR_SEGMENT_SS 3u
 #define BUSTER_IR_ACCESS_FLAGS (BUSTER_IR_VOLATILE | BUSTER_IR_ATOMIC | BUSTER_IR_ORDER | BUSTER_IR_SEGMENT)
 // The accesses every pass keeps as they are and where they are: a volatile one, an atomic one and one in a segment.
 #define BUSTER_IR_OBSERVABLE (BUSTER_IR_VOLATILE | BUSTER_IR_ATOMIC | BUSTER_IR_SEGMENT)
@@ -819,8 +821,7 @@ static bool ir_access_flags_valid(uint32_t op, uint8_t flags)
 {
     const uint32_t order = (flags & BUSTER_IR_ORDER) >> BUSTER_IR_ORDER_SHIFT;
     const uint32_t orders = op == IR_LOAD ? 0x27u : 0x29u;
-    return (flags & ~BUSTER_IR_ACCESS_FLAGS) == 0 && (flags & BUSTER_IR_SEGMENT) != BUSTER_IR_SEGMENT &&
-           ((flags & BUSTER_IR_ATOMIC) != 0 ? (orders >> order & 1) != 0 : order == 0);
+    return (flags & ~BUSTER_IR_ACCESS_FLAGS) == 0 && ((flags & BUSTER_IR_ATOMIC) != 0 ? (orders >> order & 1) != 0 : order == 0);
 }
 
 // Whether an atomic read/modify/write's flags are an atomic access's of a C order, any of them (#1059): the locked access
@@ -3370,7 +3371,7 @@ static IrError ir_print(const IrFunction* f, Arena* scratch, FILE* output)
                             const uint32_t segment = (f->flags[i] & BUSTER_IR_SEGMENT) >> BUSTER_IR_SEGMENT_SHIFT;
                             if (segment != 0)
                             {
-                                fprintf(output, " %s", segment == BUSTER_IR_SEGMENT_FS ? "fs" : segment == BUSTER_IR_SEGMENT_GS ? "gs" : "invalid");
+                                fprintf(output, " %s", segment == BUSTER_IR_SEGMENT_FS ? "fs" : segment == BUSTER_IR_SEGMENT_GS ? "gs" : "ss");
                             }
                         }
                     } break;

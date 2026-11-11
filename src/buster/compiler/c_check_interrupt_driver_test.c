@@ -210,6 +210,16 @@ static void check_test_driver_interrupts(CheckTest* test, const char* clang, con
           { NULL } },
         { "int g(void); void k(void *f) { typeof(g()) y = 0; int b[sizeof(g())]; (void)y; (void)b; }\n", NULL, { NULL } },
         { "__attribute__((interrupt)) void h(void *f); int (*q(int (*)(void *)))(void); void (*r(void))(void *);\n", NULL, { NULL } },
+        // A builtin's (noted at its first use), an undeclared function's, and a callee through a member or a postfix
+        // expression's (no note), in a typeof's or an array bound's operand; a declarator there is no call (#1447).
+        { "struct S { int (*g)(void); } s, *ps, arr[2]; int (*fs[2])(void); int (*mk(void))(void); int h(void);\n"
+          "__attribute__((no_caller_saved_registers)) void k(void) { typeof(s.g()) a = 0; typeof(__builtin_abs(1)) b = 0; "
+          "typeof(ps->g()) c = 0; typeof(fs[0]()) d = 0; typeof(mk()()) e = 0; typeof(arr[1].g()) w = 0; int n[sizeof(s.g())]; "
+          "typeof(int (*)(int)) p = 0; typeof(void (*[2])(void)) q; int m[sizeof(int (*)(int))]; typeof(__builtin_expect(1, 1)) x = 0; "
+          "(void)a; (void)b; (void)c; (void)d; (void)e; (void)w; (void)n; (void)p; (void)q; (void)m; (void)x; }\n", NULL, { NULL } },
+        { "__attribute__((interrupt)) void k(void *f) { typeof(undeclared_fn(1)) a = 0; (void)a; }\n", "-std=gnu17",
+          { "-Wno-implicit-function-declaration", NULL } },
+        { "__attribute__((interrupt)) void k(void *f) { typeof(undeclared_fn(1)) a = 0; (void)a; }\n", "-std=gnu17", { NULL } },
         // A direct call's error leaves the unit's later checks to run, as clang's invalid call does (#1447).
         { "__attribute__((interrupt)) void f(void *p); void g(void) { f(0); } char c = 1000;\n", NULL, { NULL } },
         { "__attribute__((interrupt)) void f(void *p); void g(void) { f(0); } struct S { int a; } s = { 1, 2 };\n", NULL, { NULL } },
