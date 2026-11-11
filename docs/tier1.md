@@ -424,6 +424,9 @@ move of the first table first.
 The bitwise functions of three vectors are its `ternlog` (#1840, its "Bitwise
 functions of three vectors"), `BUSTER_TIER1_VECTOR_TERNLOG`: `vpternlogd` with
 the operand the destination's register holds first, its table permuted.
+The compresses and expands are its `compress` and `expand` (#1840, its
+"Compresses and expands"), `BUSTER_TIER1_VECTOR_COMPRESS`: the form merged under
+the mask into the destination, which takes the passthrough first.
 
 ### Inlining (#1282)
 

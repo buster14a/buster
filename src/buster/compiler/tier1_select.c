@@ -309,6 +309,10 @@ typedef enum Tier1SelectRule
 // vpternlogd with the operand whose register the destination holds as its first, the table's bits permuted to match, or
 // the first moved into the destination first (tier1_select_ternlog).
 #define BUSTER_TIER1_VECTOR_TERNLOG 18
+// A compress or an expand (#1840): `operation` 0 or 1, `immediate` the lanes' bytes' log2, values[0] the source,
+// values[1] the mask and values[2] the passthrough: vpcompressb to vpexpandq merged under the mask into the destination,
+// which takes the passthrough first (tier1_select_compress).
+#define BUSTER_TIER1_VECTOR_COMPRESS 19
 
 // TIER1_RULE_X87's kinds, its pattern's `scale` (#141):
 // - CONSTANT, its constant's index in `immediate`, and UNDEF, which stores nothing;
@@ -1461,6 +1465,36 @@ static void tier1_select_ternlog(Tier1SelectRecords* result, const Tier1SelectHo
     tier1_select_append(result, record);
 }
 
+// A compress or an expand (#1840): vpcompressb to vpcompressq (the destination in rm) and vpexpandb to vpexpandq (in reg)
+// merge into their destination under the mask, so it takes the passthrough first by a move where it isn't already its
+// register; where it holds the source instead, the vector class's scratch register keeps the source across that move.
+static void tier1_select_compress(Tier1SelectRecords* result, const Tier1SelectHoles* holes, uint8_t destination)
+{
+    const uint8_t x = destination & 15;
+    uint8_t source = holes->left & 15;
+    const uint8_t passthrough = holes->third & 15;
+    const uint32_t width = holes->width;
+    const uint32_t at = width == 16 ? 0 : width == 32 ? 1 : 2;
+    if (x != passthrough)
+    {
+        if (x == source)
+        {
+            tier1_select_append(result, tier1_select_class_move(BUSTER_TIER1_SELECT_FLOAT_SCRATCH, x, width, false));
+            source = BUSTER_TIER1_SELECT_FLOAT_SCRATCH;
+        }
+        tier1_select_append(result, tier1_select_class_move(x, passthrough, width, false));
+    }
+    const bool expand = holes->operation != 0;
+    const X86Instruction record = {
+        .form = expand ? ir_simd_expand_forms[holes->immediate & 3][at] : ir_simd_compress_forms[holes->immediate & 3][at],
+        .reg = expand ? x : source,
+        .rm = expand ? source : x,
+        .mode = BUSTER_X86_REGISTER_DIRECT,
+        .decorations = (uint8_t)(holes->right & BUSTER_X86_DECORATION_MASK),
+    };
+    tier1_select_append(result, record);
+}
+
 // A conversion's EVEX form (#1840), by its kind past BUSTER_IR_INTRINSIC_EXTEND, the IR's flags, the result's bytes and
 // the source's: the decoder's tables' (ir_simd_typed_extensions at the result's width, ir_simd_typed_truncations at the
 // source's), or X86_FORM_NONE for a pair the flags don't name.
@@ -2101,6 +2135,10 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         else if (kind == BUSTER_TIER1_VECTOR_TERNLOG)
         {
             tier1_select_ternlog(&result, holes, destination);
+        }
+        else if (kind == BUSTER_TIER1_VECTOR_COMPRESS)
+        {
+            tier1_select_compress(&result, holes, destination);
         }
         else if (kind == BUSTER_TIER1_VECTOR_CONVERT)
         {
@@ -4575,6 +4613,21 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             {
                 tier1_select_add_candidate(forest, node, &candidates, base);
             }
+        }
+        else if (vector_width != 0 && op == IR_INTRINSIC && (ir_intrinsic_kind(c) == BUSTER_IR_INTRINSIC_COMPRESS || ir_intrinsic_kind(c) == BUSTER_IR_INTRINSIC_EXPAND) &&
+                 ir_intrinsic_ternary(c))
+        {
+            // A compress or an expand (#1840): its mask b, its passthrough the extra array's (ir_intrinsic_third).
+            base.rule = TIER1_RULE_VECTOR;
+            base.width = (uint8_t)vector_width;
+            base.scale = BUSTER_TIER1_VECTOR_COMPRESS;
+            base.operation = (uint8_t)(ir_intrinsic_kind(c) - BUSTER_IR_INTRINSIC_COMPRESS);
+            base.immediate = function->flags[node];
+            base.values[0] = a;
+            base.values[1] = b;
+            base.values[2] = ir_intrinsic_third(function, node);
+            base.intrinsic_cost = 1;
+            tier1_select_add_candidate(forest, node, &candidates, base);
         }
         else if (vector_width != 0 && op == IR_INTRINSIC && ir_intrinsic_kind(c) == BUSTER_IR_INTRINSIC_TERNLOG && ir_intrinsic_ternary(c))
         {
