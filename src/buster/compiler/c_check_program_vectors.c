@@ -344,6 +344,26 @@ static const char* check_vector_lower_element_row(const X86Target* target, bool 
                                              check_vector_lower_baseline_element(target, op, element, bytes, scalar_class, row);
 }
 
+// Whether an operator of integer vectors of `bytes` bytes of `element`s runs element by element (#2216): division and
+// remainder at every target, which no x86 instruction computes, and a product or a shift by a vector that no row of the
+// target's takes at its registers' width (of bytes; and by a vector's counts without AVX2's VPSLLV and VPSRAV).
+static bool check_vector_lower_lanewise(const X86Target* target, uint32_t op, CheckVectorElement element, uint32_t bytes)
+{
+    bool lanewise = false;
+    if (!element.floating && element.bytes != 0 && (op == CHECK_OP_DIVIDE || op == CHECK_OP_REMAINDER))
+    {
+        lanewise = true;
+    }
+    else if (!element.floating && element.bytes != 0 && (op == CHECK_OP_MULTIPLY || op == CHECK_OP_SHIFT_LEFT || op == CHECK_OP_SHIFT_RIGHT))
+    {
+        const uint64_t evex = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512VL);
+        const uint32_t width = (target->features & evex) == evex ? 64 : (target->features & BUSTER_X86_FEATURE(AVX)) != 0 ? 32 : 16;
+        Tier0Operation row;
+        lanewise = check_vector_lower_element_row(target, false, op, element, bytes < width ? bytes : width, 0, &row) != NULL;
+    }
+    return lanewise;
+}
+
 static const char* check_vector_lower_row(const TypeTable* types, const X86Target* target, bool excess, uint32_t op, TypeId vector, uint8_t scalar_class,
                                          Tier0Operation* row)
 {

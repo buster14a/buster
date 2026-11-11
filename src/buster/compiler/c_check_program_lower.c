@@ -2964,12 +2964,15 @@ static __attribute__((noinline)) void check_lower_vector_split(CheckLowerWriter*
 // stack's when it runs. Half-precision elements have clang's excess precision where the unit's target hasn't AVX512-FP16
 // (check_lower_vector_half_chain), and bf16 elements' operators are check_lower_vector_brain's. Where the target hasn't
 // AVX-512, an operator wider than its vector registers is split into pieces they hold (check_lower_vector_split).
-// Integer vector division and remainder (#2216), which no x86 instruction computes: element by element, as clang's code
-// divides each, the operands on the stack set into frame temporaries (the last first), then each element of the result
-// the scalar DIV or MOD of the operands' elements, promoted to int or unsigned int where they are narrower (as LLVM's
-// sdiv and udiv of i8 and i16 compute them), truncated and set at its offset; then the result read whole. A zero divisor,
-// or INT_MIN's division by -1, traps as the scalar's does, where clang's code's is undefined too. Pushed last first.
-static __attribute__((noinline)) void check_lower_vector_divide(CheckLowerWriter* writer, uint32_t op, TypeId vector)
+static uint8_t check_lower_binary(CheckOp op);
+
+// An operator of integer vectors that runs element by element (check_vector_lower_lanewise, #2216): division and
+// remainder, and products and shifts no row takes, as clang's code computes them lane by lane: the operands on the stack
+// set into frame temporaries (the last first), then each element of the result the scalar operation (DIV, MOD, MUL, SHL
+// or SHR) of the operands' elements, promoted to int or unsigned int where they are narrower (as LLVM's i8 and i16
+// operations compute them), truncated and set at its offset; then the result read whole. A zero divisor, or INT_MIN's
+// division by -1, traps as the scalar's does, where clang's code's is undefined too. Pushed last first.
+static __attribute__((noinline)) void check_lower_vector_lanewise(CheckLowerWriter* writer, uint32_t op, TypeId vector)
 {
     const CheckVectorElement element = check_vector_lower_element(writer->program->types, vector);
     const TypeTable* types = writer->program->types;
@@ -2989,7 +2992,7 @@ static __attribute__((noinline)) void check_lower_vector_divide(CheckLowerWriter
         {
             check_lower_instruction(writer, BUSTER_TYPED_CONVERT, stored, 0);
         }
-        check_lower_instruction(writer, op == CHECK_OP_DIVIDE ? BUSTER_TYPED_DIV : BUSTER_TYPED_MOD, computed, 0);
+        check_lower_instruction(writer, check_lower_binary((CheckOp)op), computed, 0);
         for (uint32_t a = 2; a-- > 0;)
         {
             if (stored != computed)
@@ -3008,15 +3011,15 @@ static __attribute__((noinline)) void check_lower_vector_divide(CheckLowerWriter
 
 static void check_lower_vector_row(CheckLowerWriter* writer, uint32_t op, TypeId vector, uint8_t scalar_class)
 {
-    const CheckVectorElement divided = check_vector_lower_element(writer->program->types, vector);
-    const bool divide = (op == CHECK_OP_DIVIDE || op == CHECK_OP_REMAINDER) && !divided.floating && divided.bytes != 0;
+    const bool lanewise = check_vector_lower_lanewise(&writer->target, op, check_vector_lower_element(writer->program->types, vector),
+                                                      check_lower_vector_bytes(writer->program->types, vector));
     Tier0Operation row;
     const uint64_t evex = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512VL);
     const uint32_t width = (writer->target.features & BUSTER_X86_FEATURE(AVX)) != 0 ? 32 : 16;
     const uint32_t bytes = check_lower_vector_bytes(writer->program->types, vector);
-    if (divide)
+    if (lanewise)
     {
-        check_lower_vector_divide(writer, op, vector);
+        check_lower_vector_lanewise(writer, op, vector);
     }
     else if (check_vector_lower_brain(writer->program->types, vector))
     {
