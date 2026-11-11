@@ -457,15 +457,21 @@ static uint32_t check_input_cpu_dispatch_match(CheckInputReader* reader, uint32_
     return result;
 }
 
+static void check_input_attribute_late(CheckInputReader* reader, uint32_t token, uint32_t previous, uint32_t point, bool visible, bool redefinition);
+
 // The redeclaration `token` of the version declared at `version` (#1447), which binding keeps apart from other versions:
 // its object; clang's redefinition error where both define it, at `token` with its note at the version's definition;
 // otherwise the definition it inherits and the composite type, or clang's conflicting-types error where the types aren't
 // compatible.
-static void check_input_cpu_dispatch_redeclare(CheckInputReader* reader, uint32_t token, uint32_t version)
+static void check_input_cpu_dispatch_redeclare(CheckInputReader* reader, uint32_t token, uint32_t version, uint32_t point)
 {
     reader->objects[token] = reader->objects[version];
     const uint32_t definition = reader->definition_origins[version];
-    if (reader->definition_origins[token] != 0 && definition != 0)
+    const bool redefinition = reader->definition_origins[token] != 0 && definition != 0;
+    // clang merges the redeclaration's attributes into its version's (mergeDeclAttributes): those after the version's
+    // definition are dropped with their warning, a redefinition's before its error (#1920).
+    check_input_attribute_late(reader, token, version, point, true, redefinition);
+    if (redefinition)
     {
         const uint32_t before = reader->output->report_count;
         check_input_report_subject(reader, token, CHECK_INPUT_REDECLARATION, version);
