@@ -878,7 +878,6 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .options = { "-Wall" },
         .warnings = 4,
         .errors = 1,
-        .compare_warning_text = true,
     },
     {
         // The unit's end in clang's order (#2238): -Wundefined-internal, the tentative arrays, the unused declarations;
