@@ -33,7 +33,8 @@ The workflow in `.github/workflows/9700x.yml` runs correctness tests on
 GitHub-hosted `ubuntu-26.04` runners. Its matrix builds the triggering revision
 with `BUSTER_HOST_ARCH=x86-64` and `BUSTER_HOST_ARCH=native`; on a pull request,
 the second row is the vector row, `BUSTER_HOST_ARCH=vector` (see "The vector
-row", #2033). Both use the current
+row", #2033), which the runs that run the sanitizer rows have too, beside
+`native`, with its sanitizer configurations. All use the current
 official stable LLVM 23.1.4 release, including its matching C++ pragma oracle,
 LLVM object/DWARF tools and lld. Each row also builds the clang server that
 the semantic driver's checks send the oracle clang's runs to (#2071), from the
@@ -85,8 +86,8 @@ gives that much less of the inventory (its table's `#: first-shard`), and each
 shard's sanitizer reports are an artifact of its own.
 
 Standard `ubuntu-26.04` runners do not promise a particular CPU model or this
-feature set. A pull request's vector row draws runners until one whose CPU
-qualifies runs each of its shards (see "The vector row"), with no emulation.
+feature set. The vector row draws runners until one whose CPU qualifies runs
+each of its items (see "The vector row"), with no emulation.
 Required native vector coverage of the measured `znver5` build comes from the real Ryzen 7 9700X, after
 both hosted variants pass on the same triggering revision. The hardware job
 asserts `BUSTER_HOST_VECTOR=1`, builds with `BUSTER_HOST_ARCH=znver5` and runs
@@ -292,8 +293,11 @@ shards. The job then builds and packs the product in four steps, three of them
   build's compile commands, the product's identity and provenance, and the
   SHA-256 of every file, as a reproducible `product.tar.zst`. Zstandard's
   third level packs the plain row's 48 MB compiler into 15 MB; the static clang
-  server (#2073), about 203 MB, should add some 60 MB, estimated from LLVM's
-  shared libraries' ratio.
+  server (#2073), about 203 MB, adds some 60 MB (the MSan row's product, with
+  its 183 MB compiler, packs 387 MB into 128 MB). It keeps the identity and
+  provenance beside the archive and exports them as `BUSTER_PRODUCT`, as an
+  install does, for a suite on the same runner (a vector configuration's
+  item 1).
 
 It publishes the archive as this run's artifact
 `compiler-ARCH-SANITIZER-OOPT-ATTEMPT`, kept 7 days, and its outputs give the
@@ -313,7 +317,10 @@ function and compare byte for byte:
 - build.sh's own configuration record, the toolchain identity, the tools on
   PATH and every setting, which `./build.sh configure` writes;
 - `print-compile-flags`, `print-sanitizer-flags` and `print-sources`;
-- the target's predefined macros with `host_isa.h` (`BUSTER_HOST_VECTOR` 0);
+- the target's flags (`print-host-flags`) and its predefined macros with
+  `host_isa.h` (`BUSTER_HOST_VECTOR` 0, or 1 for the vector target);
+- for the vector target, the row's probe's answers on the runner, every
+  feature `yes`;
 - `ldd`'s resolution of each executable.
 
 Its provenance is reported but not compared: the runner, its CPU and kernel;
@@ -367,9 +374,10 @@ toolchain and build. `bash tests/ci/hosted-tools.sh` checks the same 77 failure
 against the tree that `install-hosted-tools.sh` installs.
 
 Native rows keep their per-shard builds: each hosted CPU selects its own path.
-The vector row's explicit target makes its 4 builds one configuration, so it
-can share one product next (see "The vector row"). Reuse across revisions
-(a change to fixture data alone) is a separate extension (#2032's discussion).
+The vector row's explicit target makes each configuration's builds one, so
+each configuration shares one product too, built by its item 1's holder on a
+CPU its probe qualified (see "The vector row"). Reuse across revisions (a
+change to fixture data alone) is a separate extension (#2032's discussion).
 
 ## The vector row
 
@@ -381,11 +389,23 @@ has failed some runs and not others (#2033's review). The owner's decision D3
 emulation**: the workflow starts hosted jobs until enough of them draw a CPU
 that runs the vector path.
 
-**Pilot scope.** A pull request's plain row (its second row, in place of
-`native`): 4 items, its shards. The `x86-64` row is unchanged, and pushes to
-main, nightly dispatches and the daily runs keep their `native` rows, whose
-names `tools/ci/nightly.c` counts. The sanitizer configurations
-(vector × address, thread, memory: 16 items) are the next step.
+**Scope.** The row's configurations are its sanitizers, each with 4 items,
+its shards, which one pool of draws holds:
+
+- A pull request: the plain configuration alone (`none`, 4 items), its second
+  row, in place of `native`.
+- The runs that run the sanitizer rows (full dispatches, the nightly
+  snapshot's deferred run, pushes before the nightly mode): the plain and the
+  three sanitizer configurations (`none address thread memory`, 16 items),
+  beside the `native` rows.
+- Elsewhere (pushes in the nightly mode, nightly backlog runs and admitted
+  snapshot runs, the `plain` scope): no vector row. Their `native` rows stay,
+  and `tools/ci/nightly.c` counts the plain rows' shards by their names, which
+  the vector row's jobs don't have, so its jobs never count.
+
+The test job's matrix adds the row with `include`: one call of the row
+workflow, whose `sanitizer` lists the configurations
+(`BUSTER_VECTOR_CONFIGURATIONS`).
 
 **The target.** `BUSTER_HOST_ARCH=vector` builds `-march=x86-64-v4 -maes
 -mgfni -mvaes -mavx512vbmi -mavx512vbmi2 -mavx512vpopcntdq -mavx512bitalg
@@ -399,11 +419,24 @@ path compiled for x86-64-v4 with generic tuning, not `znver5`'s code
 generation: the 9700X still runs native correctness of the measured `znver5`
 build in the nightly window.
 
+**Items.** An item is a configuration's initial and its shard: `m2` is
+memory's shard 2 of its 4. `BUSTER_VECTOR_ITEMS` lists all 16 the costliest
+first, which is the order the collectors assign them in, across the
+configurations: memory's, address's, thread's, then the plain one's, each
+configuration's item 1 first. `costs plan` over each configuration's table
+gives its longest shard of 4 (564, 439, 638 and 447 s by the tables of #2033's
+first full run, 43027989712), and its build adds to each item (506, 618, 204
+and 153 s there): item 1 also builds the configuration's product and runs its
+once-only steps. The pool is one call of the row workflow,
+so the four configurations share its draws: at a 41% rate, a first draw of 48
+candidates for 16 items falls short in 10.9% of runs, where four rows' draws of
+12 for 4 items each would leave at least one short in 60%.
+
 **Draws** (`.github/workflows/hosted-correctness.yml`, `draw-1` to `draw-4`, and
 `tools/ci/vector-draw.sh`). A hosted VM belongs to the job it runs, so the
 candidate that probes is the one that works. Each draw starts generic
 candidates, which run the shards' own steps (`*row-steps`), each step gated on
-the shard the candidate holds:
+the item the candidate holds:
 
 1. **Probe**, before the checkout: a C probe, built by the image's `cc` with
    the target's flags, whose `#if` is the predicate itself, asks
@@ -413,10 +446,16 @@ the shard the candidate holds:
    the flags let it use) doesn't qualify either. Its record: the level, the
    candidate, the runner, the CPU model, the verdict and the missing features.
 2. **Publish**: every candidate uploads its record as
-   `vector-SANITIZER-OOPT-ATTEMPT-probe-LEVEL-CANDIDATE-yes|no`.
+   `vector-OOPT-ATTEMPT-probe-LEVEL-CANDIDATE-yes|no`.
 3. **Take or redraw**: a qualifying candidate waits for its draw's assignment
-   and takes the item it names as its shard (`BUSTER_SHARD`). It builds the
-   compiler and runs the shard as any shard does, after the confirmation below.
+   and takes the item it names: its configuration (`BUSTER_SANITIZER`), its
+   shard (`BUSTER_SHARD`) of its configuration's items (`BUSTER_VECTOR_SHARDS`)
+   and whether it builds (`BUSTER_VECTOR_BUILDER`, item 1), which a step checks
+   before setting the configuration's linker and differential checks as the
+   workflow's environment gives a row of that sanitizer. The take prints
+   `Vector item ITEM: SANITIZER, shard K of N`, which `tools/ci/costs.c` reads
+   for the row of the candidate's log. The candidate then gets its compiler
+   (below) and runs its shard as any shard does, after the confirmation below.
    A candidate without an item ends within seconds, successfully, as a redraw,
    so that rerunning the failed jobs reruns only real failures. Every candidate
    uploads its record with its decision (`-draw-LEVEL-CANDIDATE`).
@@ -428,27 +467,71 @@ uploading its name. The race fixture (below) disproved it on 2026-11-11 (run
 42993863311): when 16 jobs uploaded one name within the same second, all 16
 uploads succeeded, in each of 4 rounds, and the run held 16 artifacts by that
 name. So no candidate claims anything. Each draw's **collector**
-(`collect-1` to `collect-3`, and the verdict's reading after the last) starts
-with its draw and polls the run every 15 s, through the artifacts and jobs APIs
+(`collect-1` to `collect-4`, one per draw: the pilot had none for the last
+draw, whose candidates would have waited 30 minutes for nothing) starts with
+its draw and polls the run every 15 s, through the artifacts and jobs APIs
 (`actions: read`). Those calls share the repository's hourly REST limit with
 every other run, so a failed listing doubles the pause, up to 60 s, and the
 jobs fetch `tools/ci/vector-draw.sh` by a one-file checkout rather than the
 contents API (#2309). It waits until as many candidates qualified as items are
 missing, or every candidate has published its verdict or ended, at most 25
 minutes. Then it assigns: the qualifying candidates, by their numbers, get the
-missing items, the costliest first (`BUSTER_VECTOR_ITEMS`, `1 2 3 4`: shard 1
-also runs the row's once-only steps, and the costs deal the rest evenly). One
+missing items, the costliest first (`BUSTER_VECTOR_ITEMS`). One
 job decides, and it uploads the decision once, as an artifact whose name holds
 it: `-assign-LEVEL-ITEMxCANDIDATE...`. Nothing can take an item twice. It never
 waits for an item's tests. The next draw starts candidates for the items still
-missing alone: 3 per item in the first draw (12), then 4, 5 and 5 per missing
+missing alone: 3 per item in the first draw (12 on a pull request, 48 for the
+four configurations; the collector refuses fewer), then 4, 5 and 5 per missing
 item. With draws independent, as #2033's 24 runs measured, a binomial model
-gives:
+gives, for a pull request's 4 items:
 
 | Rate of qualifying CPUs | Runs needing a 2nd draw | a 3rd | a 4th | Still short after 4 |
 | --- | ---: | ---: | ---: | ---: |
 | 41% (busiest hours) | 20.5% | 2.3% | 0.16% | 0.011% |
 | 59% (sampled mean) | 1.8% | 0.045% | 0.0005% | ~0 |
+
+and, by the same model, for the pool's 16 items:
+
+| Rate of qualifying CPUs | Runs needing a 2nd draw | a 3rd | a 4th | Still short after 4 |
+| --- | ---: | ---: | ---: | ---: |
+| 41% (busiest hours) | 10.9% | 1.05% | 0.072% | 0.005% |
+| 59% (sampled mean) | 0.0094% | 0.0002% | ~0 | ~0 |
+
+**One product per configuration** (#2032). The build runs the executable (the
+post-link step's baked tables), so it needs a qualifying CPU too. The holder of
+a configuration's item 1 builds it (`hosted-product.sh build`), checks unity
+fixture ownership on the build's tree, rejects any sanitizer report so far,
+packs it with its identity (`hosted-product.sh pack`) and publishes it as
+`vector-product-OOPT-ATTEMPT-CONFIGURATION-SHA256`, kept 7 days, before its own
+suite. The configuration's other items build nothing. After their own setup
+(the checkout, the hosted toolchain, the detectors' proofs, the corpus) they
+wait for it (`vector-draw.sh product`, polling every 30 s and backing off as
+the draws do), in the attempt its holder last ran in (in a rerun of the failed
+jobs that didn't rerun the holder, the latest earlier attempt's: the API lists
+such a job with the rerun's number, #2276), download it by that name and
+install it by the SHA-256 the
+name holds (`hosted-product.sh install`), as a portable row's shard does. Every
+item's suite, item 1's too, skips the inventory's ownership heading on the
+product's record of its pass (`BUSTER_PRODUCT`, which the install exports, and
+the pack, for item 1, whose tree the identity's `./build.sh configure` leaves
+out of date: a check there failed in #2033's first full run). An
+explicit target is shared only where it runs: `hosted-product.sh` packs or
+installs a vector product only where the row's probe (`BUSTER_VECTOR_PROBE`),
+run again, passes, and the identity holds the target's flags
+(`./build.sh print-host-flags`), `BUSTER_HOST_VECTOR 1` and the probe's
+answers, every feature `yes`. An item fails, never builds, when no candidate
+can hold item 1 any more (the last draw assigned it to none), when item 1's
+holder ended without publishing, when its attempt has two products, or after
+90 minutes. Products stay in their run, as the portable rows' do: no cache,
+and a download by name from the run alone.
+
+The trade-off is latency against one tested binary. A waiting item's runner
+is idle while item 1 builds, as long as it would have taken to build its own;
+it then spends the pack, the upload, a poll and the install (about 20 s in the
+portable rows: 8 s of ownership check, 3 s of pack, 2 s of upload, 2 s of
+download and 4 s of install) before its suite. So sharing saves no
+runner-minutes and costs each waiting item about half a minute, against four
+builds that each test their own binary.
 
 **Evidence and verdict.** Before its suite, an item's candidate confirms that
 the build's target selects `BUSTER_HOST_VECTOR=1` and runs `benchmark-lexer`
@@ -456,20 +539,25 @@ on `x86_64_encoder.c`, which a scalar build refuses: the vector lexer lexes
 all 592 KB on this CPU, no part needing the scalar lexer, and the tokens must
 match the scalar twin's. Once every step passed, it uploads its evidence
 (`-evidence-ITEM`): the probe's verdict and CPU, its decision, the target,
-`BUSTER_HOST_VECTOR=1`, the kernels' run and the suite's pass. The `verdict`
-job (`vector-draw.sh verdict`) requires exactly one passing qualified
-execution of each item by the candidate its assignment names. Its summary
-lists every candidate's CPU and decision and every item's runner. An item no
-candidate held fails it as **incomplete: no qualifying CPU drawn**, which is
-not a test failure; an item whose run failed fails as such (its candidate's job
-failed too).
+`BUSTER_HOST_VECTOR=1`, the kernels' run, its item and configuration, the
+product it built (item 1) or installed, with its SHA-256, and the suite's pass.
+The `verdict` job (`vector-draw.sh verdict`) requires exactly one passing
+qualified execution of each item by the candidate its assignment names, item 1
+with the product it built and the others with one they installed. Its summary
+lists every candidate's CPU and decision and every item's configuration,
+runner and product. An item no candidate held fails it as **incomplete: no
+qualifying CPU drawn**, which is not a test failure; an item whose run failed
+fails as such (its candidate's job failed too).
 
-**Attempts and reruns.** Every record carries the run attempt. Rerunning all
-jobs draws and assigns every item afresh. Rerunning the failed jobs reruns no
-collector, so the earlier attempt's assignments stand: an item's candidate
-reruns it on a new runner, and if that runner doesn't qualify, the job fails,
-saying that no test failed and to rerun the failed jobs again. After an
-incomplete verdict the draws all passed: re-run all jobs to draw again.
+**Attempts and reruns.** Every record and product carries the run attempt.
+Rerunning all jobs draws and assigns every item afresh, and every item 1
+builds again. Rerunning the failed jobs reruns no collector, so the earlier
+attempt's assignments stand: an item's candidate reruns it on a new runner, and
+if that runner doesn't qualify, the job fails, saying that no test failed and
+to rerun the failed jobs again. A rerun item installs the product its
+configuration's item 1 last published: the earlier attempt's when item 1
+passed, or the new one when item 1 reruns too. After an incomplete verdict the
+draws all passed: re-run all jobs to draw again.
 
 **Permissions and the race fixture.** Nothing needs write access: every record
 is the run's own artifact, which a fork's pull request can upload too.
@@ -477,20 +565,17 @@ is the run's own artifact, which a fork's pull request can upload too.
 draws (the row workflow, `tools/ci/vector-draw.sh`) or the fixture and on
 dispatch, runs 16 racers, each on its own runner, as one draw's candidates at
 one instant, through the same script: about half qualify (by a hash of the
-racer and the run), the collector assigns the 4 items, and the judge requires
+racer and the run), the collector assigns the 4 items of its one configuration
+(`race`: `r1` to `r4`), and the judge requires
 each assigned item taken by exactly the racer its assignment names, only by a
 qualifying racer, no racer taking two, and min(4, qualifying racers) items
 assigned. Its control round uploads one name from every racer at once and
 reports how many succeeded. `bash tests/ci/vector-draw.sh` tests the script's
-collector, candidates (reruns among them) and verdict against a fake `gh`;
-the PR's `evidence` job runs it.
-
-**Sharing the product next (#2032).** The explicit target makes the row's 4
-builds one configuration. The build runs the executable (the baked tables), so
-it needs a qualifying CPU too: the next step makes the build an item that the
-first draw's collector assigns first, and the shards' candidates install its
-product with `tools/ci/hosted-product.sh` once their own probes qualified,
-with the probe's verdict in the product's checks in place of `portable`'s.
+collector, candidates (reruns among them), a pool's order, the product waits
+(an earlier attempt's product, a rerun builder's, a builder that ended without
+one, an item 1 no draw can assign) and the verdict against a fake `gh`; the
+PR's `evidence` job runs it. `bash tests/ci/hosted-product.sh` tests a vector
+product's install on a qualifying runner and its refusals.
 
 ## CI latency baseline
 

@@ -628,9 +628,7 @@ static void check_test_program_segment_refusals(CheckTest* test, const X86Target
         const char* reason;
     } refused[] = {
         // A vector's element takes its vector's override (check_lower_element_segment; check_test_program_segments runs
-        // those), but a bit of a vector of bool, which no address reaches, and an element of a volatile vector.
-        { "segment-bool-vector-element", "typedef _Bool B __attribute__((ext_vector_type(8)));int tested(B __seg_gs*p){return (*p)[1];}",
-          "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
+        // those), but an element of a volatile vector.
         { "segment-volatile-vector-element", "typedef int V __attribute__((vector_size(16)));int tested(volatile V __seg_fs*p){return (*p)[1];}",
           "element access through volatile vectors" },
         // An atomic builtin's object in a segment's space takes the override where a direct plan takes the builtin
@@ -835,6 +833,17 @@ static void check_test_program_segments(CheckTest* test, const char* clang)
         "*s-=2;r+=*s;r+=++*s;*c='x';r+=*c;(*c)++;struct B t=*b;r+=t.a+t.c;struct B u={9,8,7};*b=u;"
         "struct B v=gb;return (int)(r+ta+tl+(long)td+gs_+v.b+gc);}",
         "segment-atomic-lvalues", clang);
+    // A vector of bool's elements (#1447): the byte that holds each bit read, and read and written for an assignment,
+    // through the vector's override (check_lower_transport_bit_read, check_lower_transport_bit_store), of 8 and 64 bits, in
+    // %fs and %ss.
+    check_test_program_source(test,
+        "#define SS __attribute__((address_space(258)))\n"
+        "typedef _Bool B8 __attribute__((ext_vector_type(8)));typedef _Bool B64 __attribute__((ext_vector_type(64)));"
+        "static _Thread_local B8 tb={1,0,1,1,0,0,1,0};static B64 gb;"
+        "int tested(int n){B8 __seg_fs*p=(B8 __seg_fs*)((char*)&tb-(char*)__builtin_thread_pointer());B64 SS*q=(B64 SS*)&gb;int r=0;"
+        "for(int i=0;i<8;i++)r=r*2+(*p)[i];(*p)[1]=n&1;(*p)[2]=0;(*q)[40]=1;(*q)[n&63]=(*p)[3];"
+        "for(int i=0;i<8;i++)r=r*3+(*p)[i];r+=(*q)[40]*5+(*q)[n&63]*7+(*q)[0];return r+tb[1]+gb[40];}",
+        "segment-bool-vectors", clang);
 }
 
 // Initializer validation keeps atomic rvalue identity while storage uses the underlying vector bytes.

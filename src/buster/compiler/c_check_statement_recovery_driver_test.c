@@ -221,6 +221,12 @@ static void check_test_driver_statement_recovery(CheckTest* test, const char* cl
         "void m(void) { M: { M: ; } N: ; N: ; goto N; }\n"
         "void n(void) { P: Q: P: ; goto Q; }\n"
         "int g(int y) { if (y = 1) return 1; int w; return 0; }\n",
+        // An _Alignof whose operand holds an undeclared name gives -Wgnu-alignof-expression after the name's error (#1946), an
+        // expression's in parentheses and an inner sizeof's or _Alignof's too, but a type name's none.
+        "int f(void) { return _Alignof(undecl); }\n"
+        "int g(void) { return _Alignof((undecl2 + 1)); }\n"
+        "int h(void) { return _Alignof(int[undecl3]); }\n",
+        "int k(void) { return _Alignof(sizeof(undecl4)) + _Alignof(_Alignof(undecl5)); }\n",
         // A goto or a case that enters a statement expression, and one that bypasses a variable length array's, a cleanup
         // variable's or a VLA typedef's initialization: clang's jump scope errors, each with its note (#1942).
         "void f(int x) { goto in; x = ({ in: 1; }); }\n",

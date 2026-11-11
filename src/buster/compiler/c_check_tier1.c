@@ -615,6 +615,8 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
             .frames = emitted.frame_event_count != 0 ? frames : 0,
             .frame_count = emitted.frame_event_count,
             .frame_status = EMITTED_FRAME_DESCRIBED,
+            // An asm body that moves a value into rsp (#1846) leaves the frame to the program, which the verifier doesn't read.
+            .assembly = tier0_asm_stack(function),
         };
         // Its unwind table's shape (#177): open where its code doesn't end in its last return's ret, and the returns
         // whose epilogues' rules are brackets of their own (all of an open frame's, all but the last of a closed one's).

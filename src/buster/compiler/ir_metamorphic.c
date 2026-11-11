@@ -484,6 +484,12 @@ static IrMetaFailure ir_meta_transform(const IrFunction* source, uint32_t varian
                     built.extra[at + 1] = values[source->extra[at + 1]];
                 }
             }
+            else if (built.op[row] == IR_INTRINSIC && ir_intrinsic_ternary(built.c[row]))
+            {
+                // A ternary intrinsic's third operand (#1840), read from the source's extra array as a phi's values are.
+                const uint32_t at = ir_intrinsic_extra(built.c[row]);
+                built.extra[at] = values[source->extra[at]];
+            }
             else if (built.op[row] == IR_SWITCH)
             {
                 const uint32_t at = built.b[row];

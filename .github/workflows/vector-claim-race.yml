@@ -29,11 +29,12 @@ concurrency:
   group: vector-claim-race-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
-# The script's settings: its artifacts are vector-race-O0-ATTEMPT-..., apart from the row's.
+# The script's settings: one configuration, `race`, of 4 items (r1 to r4); its artifacts are vector-O0-ATTEMPT-...,
+# apart from the row's (O3).
 env:
-  BUSTER_SANITIZER: race
+  BUSTER_VECTOR_CONFIGURATIONS: race
   BUSTER_SANITIZER_OPTIMIZATION: '0'
-  BUSTER_VECTOR_ITEMS: '1 2 3 4'
+  BUSTER_VECTOR_ITEMS: 'r1 r2 r3 r4'
 
 jobs:
   start:
@@ -107,7 +108,7 @@ jobs:
       - name: Publish the racer's verdict
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: vector-race-O0-${{ github.run_attempt }}-probe-1-${{ matrix.racer }}-${{ steps.wait.outputs.yes }}
+          name: vector-O0-${{ github.run_attempt }}-probe-1-${{ matrix.racer }}-${{ steps.wait.outputs.yes }}
           path: ${{ runner.temp }}/race/record
           overwrite: false
           if-no-files-found: error
@@ -134,7 +135,7 @@ jobs:
           GITHUB_ENV="$RUNNER_TEMP/race/env" bash "$RUNNER_TEMP/vector-draw.sh" take 1 "$RACER" "$VERDICT" "$RUNNER_TEMP/race/record"
           {
               printf 'control\t%s\n' "$CONTROL"
-              printf 'took\t%s\n' "$(sed -n 's/^BUSTER_SHARD=//p' "$RUNNER_TEMP/race/env" 2> /dev/null)"
+              printf 'took\t%s\n' "$(sed -n 's/^BUSTER_VECTOR_ITEM=//p' "$RUNNER_TEMP/race/env" 2> /dev/null)"
           } >> "$RUNNER_TEMP/race/outcomes"
           cat "$RUNNER_TEMP/race/outcomes"
 
@@ -215,8 +216,8 @@ jobs:
           race="$RUNNER_TEMP/race"
           names=$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts?per_page=100" --jq '.artifacts[].name')
           field() { sed -n "s/^$1\t//p" "$2" | head -n 1; }
-          prefix="vector-race-O0-$GITHUB_RUN_ATTEMPT"
-          assignment=$(grep -E "^$prefix-assign-1(-[0-9]+x[0-9]+)*\$" <<< "$names" || true)
+          prefix="vector-O0-$GITHUB_RUN_ATTEMPT"
+          assignment=$(grep -E "^$prefix-assign-1(-[a-z][0-9]+x[0-9]+)*\$" <<< "$names" || true)
           failures=()
           [ "$(grep -c . <<< "$assignment")" -eq 1 ] || failures+=("$(grep -c . <<< "$assignment") assignments")
           declare -A holder=()

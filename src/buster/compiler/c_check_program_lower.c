@@ -13288,11 +13288,12 @@ static bool check_lower_segment_access(const CheckLowerWriter* writer, uint32_t 
     const bool carried = atomic_lvalue || (read ? reader && check_lower_segment_carried(writer, value->type)
                                                 : written && (aggregate_store || check_lower_segment_carried(writer, check_stream_type(stream, target))));
     // A vector's element takes its vector lvalue's override (check_lower_element_segment) where the element is of a class one
-    // LOAD or STORE moves, and not a bit of a vector of bool (a transport vector's, which no address reaches).
+    // LOAD or STORE moves, or a bit of a vector of bool, whose byte's LOAD and SET take it (check_lower_transport_bit_read,
+    // check_lower_transport_bit_store).
     const TypeId vector = element ? check_stream_type(stream, target) : 0;
     const bool element_carried = element && check_stream_category(stream, target) == CHECK_LVALUE && check_lower_segment_override(types, vector) != 0 &&
-                                 !check_lower_bool_vector(types, vector) && check_lower_class(writer, value->type) != BUSTER_TYPED_CLASS_VOID &&
-                                 check_lower_class(writer, value->type) <= BUSTER_TYPED_CLASS_VECTOR;
+                                 (check_lower_bool_vector(types, vector) ||
+                                  (check_lower_class(writer, value->type) != BUSTER_TYPED_CLASS_VOID && check_lower_class(writer, value->type) <= BUSTER_TYPED_CLASS_VECTOR));
     return ((read || written) && !carried) || (element && check_lower_segment(program->types, vector) && !element_carried) ||
            (effect != NULL && ((check_lower_segment(types, atomic_space) && !(direct && check_lower_segment_override(types, atomic_space) != 0)) ||
                                check_lower_atomic_other_segment(writer, node)));
@@ -15333,6 +15334,7 @@ static void check_lower_asm(CheckLowerWriter* writer, CheckControl control)
                     .label_names = plan->inline_label_names,
                     .label_count = plan->label_count,
                     .leaves = plan->inline_leaves,
+                    .stack = plan->inline_stack,
                 };
                 writer->asm_body_calls[writer->asm_body_count] = call;
                 writer->asm_body_count += 1;
