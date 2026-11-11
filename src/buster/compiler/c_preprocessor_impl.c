@@ -2240,13 +2240,16 @@ typedef enum PPPragmaMapping
 } PPPragmaMapping;
 
 // The preprocessor's warnings that follow clang's options and pragmas (#1934, pp_warning_severity), by their group:
-// -Wc23-extensions' (a bit-precise constant's suffix in #if), -Wunicode's (a \N read as no UCN) and
-// -Wdelimited-escape-sequence-extension's (a named UCN that starts a token, #1447).
+// -Wc23-extensions' (a bit-precise constant's suffix in #if), -Wunicode's (a \N read as no UCN),
+// -Wdelimited-escape-sequence-extension's (a named UCN that starts a token, #1447), -W#warnings' (#warning's text, #1790)
+// and -W#pragma-messages' (#pragma message's and #pragma GCC warning's).
 typedef enum PPWarningGroup
 {
     PP_WARNING_C23_EXTENSIONS,
     PP_WARNING_UNICODE,
     PP_WARNING_DELIMITED_ESCAPE,
+    PP_WARNING_WARNINGS,
+    PP_WARNING_PRAGMA_MESSAGES,
     BUSTER_PP_WARNING_GROUPS,
 } PPWarningGroup;
 
@@ -2261,13 +2264,19 @@ struct PPWarningGroupName
     // gives it).
     bool extension;
     bool on;
+    // Whether it is seen in a system header too (clang's ShowInSystemHeader), and whether -Werror leaves it a warning
+    // (DefaultWarnNoWerror: only -Werror= of it and a pragma make it an error).
+    bool system;
+    bool no_werror;
 };
 
 static const PPWarningGroupName pp_warning_groups[BUSTER_PP_WARNING_GROUPS] =
 {
-    { "c23-extensions", "c2x-extensions", NULL, true, true },
-    { "unicode", NULL, NULL, false, true },
-    { "delimited-escape-sequence-extension", NULL, "pedantic", true, false },
+    { "c23-extensions", "c2x-extensions", NULL, true, true, false, false },
+    { "unicode", NULL, NULL, false, true, false, false },
+    { "delimited-escape-sequence-extension", NULL, "pedantic", true, false, false, false },
+    { "#warnings", NULL, NULL, false, true, true, false },
+    { "#pragma-messages", NULL, NULL, false, true, false, true },
 };
 
 _Static_assert(BUSTER_PP_WARNING_GROUPS <= sizeof(((Preprocessor*)0)->warning_mappings), "a mapping for each warning group");
@@ -2288,9 +2297,9 @@ static bool pp_warning_group_named(uint32_t g, const char* name, uint32_t length
 
 // The severity a warning of group `group` at `location` is given with, as clang maps it (#1934); BUSTER_PP_IGNORED for none.
 // First whether it is seen at all, as a warning, before any promotion counts: none under -w, and none in a system header
-// without -Wsystem-headers. Then the command line's: its last -W or -Wno- of the group's names (pp_warning_group_named), or
+// without -Wsystem-headers, unless the group is seen there (PPWarningGroupName.system). Then the command line's: its last -W or -Wno- of the group's names (pp_warning_group_named), or
 // for one off by default -pedantic or -pedantic-errors, promoted by -Werror, -Werror= of the group, or -pedantic-errors of
-// an extension, unless -Wno-error= of it demotes it. The source's #pragma clang diagnostic for it replaces that
+// an extension, unless -Wno-error= of it demotes it (-Werror not one -Werror leaves alone). The source's #pragma clang diagnostic for it replaces that
 // (Preprocessor.warning_mappings).
 static PPSeverity pp_warning_severity(Preprocessor* pp, PPWarningGroup group, uint32_t location)
 {
@@ -2313,7 +2322,7 @@ static PPSeverity pp_warning_severity(Preprocessor* pp, PPWarningGroup group, ui
         enabled = on || promote ? true : off ? false : enabled;
         group_error = promote ? true : demote ? false : group_error;
         demoted = demote ? true : promote ? false : demoted;
-        errors = strcmp(option, "-Werror") == 0 ? true : strcmp(option, "-Wno-error") == 0 ? false : errors;
+        errors = strcmp(option, "-Werror") == 0 ? !info->no_werror : strcmp(option, "-Wno-error") == 0 ? false : errors;
         pedantic_errors |= strcmp(option, "-pedantic-errors") == 0;
     }
     PPSeverity result = !enabled ? BUSTER_PP_IGNORED :
@@ -2321,19 +2330,27 @@ static PPSeverity pp_warning_severity(Preprocessor* pp, PPWarningGroup group, ui
     const uint8_t mapping = pp->warning_mappings[group];
     result = mapping == PP_PRAGMA_MAPPING_IGNORED ? BUSTER_PP_IGNORED : mapping == PP_PRAGMA_MAPPING_WARNING ? PP_SEVERITY_WARNING :
              mapping == PP_PRAGMA_MAPPING_ERROR ? PP_SEVERITY_MAPPED_ERROR : mapping == PP_PRAGMA_MAPPING_FATAL ? PP_SEVERITY_MAPPED_FATAL : result;
-    const bool seen = !pp->options.suppress_warnings && pp_diagnostic_warning_visible(pp, location, location != 0 ? pp->diagnostic_origin : 0);
+    const bool seen = !pp->options.suppress_warnings && (info->system || pp_diagnostic_warning_visible(pp, location, location != 0 ? pp->diagnostic_origin : 0));
     return seen ? result : BUSTER_PP_IGNORED;
 }
 
-// A warning of group `group` (pp_warning_severity) at `location`, its message with clang's flag after it.
-static __attribute__((noinline, cold)) void pp_diagnose_group(Preprocessor* pp, PPWarningGroup group, uint32_t location, const char* message)
+// A warning of group `group` (pp_warning_severity) at `location`, the `length` bytes of its message at `message` with
+// clang's flag after them; a warning of a group seen in system headers is one there too (PP_SEVERITY_WARNING_ALWAYS).
+static __attribute__((noinline, cold)) void pp_diagnose_group_text(Preprocessor* pp, PPWarningGroup group, uint32_t location, const char* message, uint32_t length)
 {
-    const PPSeverity severity = pp_warning_severity(pp, group, location);
+    PPSeverity severity = pp_warning_severity(pp, group, location);
     if (severity != BUSTER_PP_IGNORED)
     {
         const bool promoted = severity == PP_SEVERITY_ERROR || severity == PP_SEVERITY_MAPPED_ERROR;
-        pp_diagnose(pp, severity, location, "%s [%s-W%s]", message, promoted ? "-Werror," : "", pp_warning_groups[group].name);
+        severity = severity == PP_SEVERITY_WARNING && pp_warning_groups[group].system ? PP_SEVERITY_WARNING_ALWAYS : severity;
+        pp_diagnose(pp, severity, location, "%.*s [%s-W%s]", (int)length, message, promoted ? "-Werror," : "", pp_warning_groups[group].name);
     }
+}
+
+// A warning of group `group` at `location` (pp_diagnose_group_text), of the message `message`.
+static __attribute__((noinline, cold)) void pp_diagnose_group(Preprocessor* pp, PPWarningGroup group, uint32_t location, const char* message)
+{
+    pp_diagnose_group_text(pp, group, location, message, (uint32_t)strlen(message));
 }
 
 // The diagnostics of a named UCN that starts a token (BUSTER_PP_NAMED_UCN_ERROR), whose backslash is byte `offset` of
@@ -8690,8 +8707,9 @@ static bool pp_recover_diagnostic_line(Preprocessor* pp, PPContext* context, uin
 }
 
 // #error and #warning read text, not tokens: retain comments, quote characters and trailing blanks, removing only
-// translation phases 1 and 2 and the leading blanks after the directive name, as clang does.
-static void pp_diagnostic_text(Preprocessor* pp, const PPFileData* data, uint32_t name, uint32_t location, PPSeverity severity)
+// translation phases 1 and 2 and the leading blanks after the directive name, as clang does. #error's is an error, and
+// #warning's a warning of -W#warnings (#1790), which its options and pragmas map and which is seen in system headers.
+static void pp_diagnostic_text(Preprocessor* pp, const PPFileData* data, uint32_t name, uint32_t location, bool error)
 {
     const uint32_t begin = pp_file_token_end(pp, data, name);
     const ScalarLexer lexer = { .source = data->bytes, .length = data->length, .trigraphs = pp->options.trigraphs };
@@ -8707,7 +8725,14 @@ static void pp_diagnostic_text(Preprocessor* pp, const PPFileData* data, uint32_
         {
             first += 1;
         }
-        pp_diagnose(pp, severity, location, "%.*s", (int)(length - first), (const char*)text + first);
+        if (error)
+        {
+            pp_diagnose(pp, PP_SEVERITY_ERROR, location, "%.*s", (int)(length - first), (const char*)text + first);
+        }
+        else
+        {
+            pp_diagnose_group_text(pp, PP_WARNING_WARNINGS, location, (const char*)text + first, length - first);
+        }
     }
     else
     {
@@ -10256,7 +10281,15 @@ static void pp_pragma_message(Preprocessor* pp, PPPragmaKind kind, const PPToken
         }
         if (!pp->fatal)
         {
-            pp_diagnose(pp, kind == PP_PRAGMA_ERROR ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING, diagnostic_location, "%.*s", (int)length, (const char*)text + 1);
+            if (kind == PP_PRAGMA_ERROR)
+            {
+                pp_diagnose(pp, PP_SEVERITY_ERROR, diagnostic_location, "%.*s", (int)length, (const char*)text + 1);
+            }
+            else
+            {
+                // -W#pragma-messages' (#1790), which its options and pragmas map but -Werror leaves a warning.
+                pp_diagnose_group_text(pp, PP_WARNING_PRAGMA_MESSAGES, diagnostic_location, (const char*)text + 1, length);
+            }
         }
         pp->diagnostic_origin = saved_origin;
         uint32_t n = 0;
@@ -10931,8 +10964,7 @@ static void pp_prepared_directive(Preprocessor* pp, PPContext* context)
         case PP_DIRECTIVE_ERROR:
         case PP_DIRECTIVE_WARNING:
         {
-            pp_diagnostic_text(pp, data, hash + 1, pp_token_location(pp, context, data, hash + 1),
-                               kind == PP_DIRECTIVE_ERROR ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING_ALWAYS);
+            pp_diagnostic_text(pp, data, hash + 1, pp_token_location(pp, context, data, hash + 1), kind == PP_DIRECTIVE_ERROR);
             break;
         }
         case PP_DIRECTIVE_PRAGMA:

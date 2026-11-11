@@ -1622,7 +1622,7 @@ struct Preprocessor
     // The mappings those pragmas give the preprocessor's warning groups (#1934, pp_warning_severity): a PPPragmaMapping
     // each, by PPWarningGroup, and the ones each open push saved, which its pop restores, BUSTER_PP_WARNING_GROUPS bytes a
     // depth (room for `warning_capacity` depths, grown in the arena as the pushes nest: any depth).
-    uint8_t warning_mappings[4];
+    uint8_t warning_mappings[8];
     uint8_t* warning_saved;
     uint32_t warning_capacity;
     // Where the open #pragma clang assume_nonnull, arc_cf_code_audited and unsafe_buffer_usage regions begin, or 0.
