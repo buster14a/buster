@@ -67,3 +67,18 @@ b0:
   %15 = store.void %0, %9 align=16
   %16 = ret.void
 }
+function (ptr, i32) -> void {
+b0:
+  %0 = param.ptr 0
+  %1 = param.i32 1
+  %2 = load.v4i32 %0 align=16
+  %3 = load.v8i32 %0 align=32
+  %4 = load.v16i32 %0 align=64
+  %5 = intrinsic.v4i32 %2, %1 shift 1
+  %6 = intrinsic.v8i32 %3, %1 shift 6
+  %7 = intrinsic.v16i32 %4, %1 shift 11
+  %8 = store.void %0, %7 align=64
+  %9 = store.void %0, %6 align=32
+  %10 = store.void %0, %5 align=16
+  %11 = ret.void
+}

@@ -301,6 +301,13 @@ static CheckInputIntrinsicDeclaration check_input_intrinsic_decode(CheckInputRea
     return declaration;
 }
 
+// Whether clang's table row is a builtin in the unit's language mode: of its non-library rows, __builtin_c23_va_start's
+// C23_LANG alone is narrower than every language this checker reads (#2121). Before C23 its name is an unknown builtin's.
+static bool check_input_builtin_language(const BuiltinIntrinsicInfo* info, const PPOptions* options)
+{
+    return strcmp(info->language_token, "C23_LANG") != 0 || options->language.standard >= 2023;
+}
+
 static CheckInputIntrinsicStatus check_input_intrinsic_prepare(CheckInputReader* reader, uint32_t keyword)
 {
     const Parser* parser = reader->parser;
@@ -375,7 +382,7 @@ static CheckInputIntrinsicStatus check_input_intrinsic_prepare(CheckInputReader*
             info = output->intrinsic_declarations[cached - 1].info;
         }
         // Plain library names belong to C's declaration path, including disabled or language-ineligible ones.
-        if (info != 0 && memchr(info->attributes, 'f', info->attributes_length) == NULL)
+        if (info != 0 && memchr(info->attributes, 'f', info->attributes_length) == NULL && check_input_builtin_language(info, &reader->pp->options))
         {
             status = CHECK_INPUT_INTRINSIC_FAILED;
             const uint32_t index = fresh ? output->intrinsic_declaration_count : cached - 1;
