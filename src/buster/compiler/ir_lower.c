@@ -1280,12 +1280,14 @@ static bool ir_typed_ignored_arguments(const Tier0Function* input, bool vector)
 // of no size on the stack (#1879: a record of a flexible array member alone, MEMORY, which clang passes byval in an
 // 8-byte slot), whose value, its address, a call without records would place in the next general register: in a
 // function with aggregates (argument_sizes), an argument of a general class on the stack while the call's locations
-// before it leave a general register free.
+// before it leave a general register free. And so does one whose value is on the stack past the next 8-byte slot (#1844:
+// a transparent union's member, which takes the union's own slot, aligned to 16, where clang has no register for it).
 static bool ir_typed_aggregate_call(const Tier0Function* input, uint32_t call, bool ignored)
 {
     bool aggregate = input->call_result_objects != 0 && input->call_result_objects[call] != 0;
     const bool located = ignored || (input->argument_sizes != 0 && input->argument_locations != 0);
     uint32_t general = 0;
+    uint32_t slots = 0;
     for (uint32_t a = 0; (input->argument_sizes != 0 || ignored) && a < input->call_argument_counts[call]; a += 1)
     {
         const uint32_t argument = input->call_first[call] + a;
@@ -1296,7 +1298,9 @@ static bool ir_typed_aggregate_call(const Tier0Function* input, uint32_t call, b
         const bool general_class = class >= BUSTER_TYPED_CLASS_I8 && class <= BUSTER_TYPED_CLASS_U64;
         aggregate |= (input->argument_sizes != 0 && input->argument_sizes[argument] != 0) || location.kind == BUSTER_ABI_LOCATION_IGNORE ||
                      (location.kind == BUSTER_ABI_LOCATION_REGISTERS && location.registers[0] == BUSTER_ABI_R10) ||
-                     (location.kind == BUSTER_ABI_LOCATION_STACK && general_class && general < BUSTER_ABI_INTEGER_ARGUMENTS);
+                     (location.kind == BUSTER_ABI_LOCATION_STACK && general_class && general < BUSTER_ABI_INTEGER_ARGUMENTS) ||
+                     (located && location.kind == BUSTER_ABI_LOCATION_STACK && location.stack_offset != slots * BUSTER_ABI_SLOT_BYTES);
+        slots += location.kind == BUSTER_ABI_LOCATION_STACK ? 1 : 0;
         general += location.kind != BUSTER_ABI_LOCATION_STACK && location.registers[0] < 16 ? 1 : 0;
         general += location.kind != BUSTER_ABI_LOCATION_STACK && location.registers[1] < 16 ? 1 : 0;
     }

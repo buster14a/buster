@@ -2411,10 +2411,15 @@ What the lowering covers past scalars (#145's programs):
   register, and glibc's
   socket calls (`bind`, `connect`, `accept`, `getsockname`, `sendto`,
   `recvfrom` and the rest) take `__SOCKADDR_ARG` and `__CONST_SOCKADDR_ARG`
-  with `_GNU_SOURCE`. Two cases are refused by name. A union sized or aligned
-  otherwise than its first member, by an `aligned` or `packed` attribute of its
-  own: clang's code takes its registers from the member and its stack slot
-  from the union (`getIndirectResult`). And a union made transparent, by a
+  with `_GNU_SOURCE`. A union sized or aligned otherwise than its first
+  member, by an `aligned` or `packed` attribute of its own, passes as clang's
+  code passes it: its registers from the member, and where none is left a stack
+  slot of the union's size and alignment (`getIndirectResult`;
+  `abi_finish_transparent` records the union in the ABI table's `transparent`
+  column, which `abi_assign_call` and its vector twin read), and `va_arg` reads
+  the member from a slot of the union's size and alignment. Such a union past
+  two eightbytes, or whose first member passes as an aggregate, a pair, a
+  vector or in memory, is refused by name. And a union made transparent, by a
   later declaration's attribute, after a function definition or a static
   object's initializer that names a function, whose first member passes
   otherwise than the union does (its registers, its stack or its extension):
