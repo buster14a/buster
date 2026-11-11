@@ -2598,7 +2598,8 @@ static void changes_test_split(ChangesTest* test)
 // correctness step (#1272); every other run's runs it before the measurements. Nightly backlog runs reuse the oracle cache, as
 // pull requests do; the snapshot's comprehensive run checks it, as the daily run did. The hosted rows are the row
 // workflow's jobs (`row`), which the test job calls for both host architectures: its shards check the oracle cache, and
-// they and the build of a shared compiler check out the triggering revision.
+// they and the build of a shared compiler check out the triggering revision, in every checkout of this repository there
+// (a `ref` that doesn't follow a `repository`), such as the shards' one-file checkout of the vector draw's script (#2309).
 // Keep the periodic/manual full recheck explicit; changes to this policy must update its counterexamples below too.
 static bool changes_oracle_policy(Text workflow, Text row)
 {
@@ -2608,6 +2609,8 @@ static bool changes_oracle_policy(Text workflow, Text row)
     bool hosted_calls = false;
     bool build_revision = false;
     bool shard_revision = false;
+    bool other_revision = false;
+    bool after_repository = false;
     bool native_needs = false;
     bool native_success = false;
     bool native_modes = false;
@@ -2656,8 +2659,10 @@ static bool changes_oracle_policy(Text workflow, Text row)
         hosted_check |= job == 2 && text_equal_c(line, "      BUSTER_ORACLE_CACHE: check");
         build_revision |= job == 1 && text_equal_c(line, "          ref: ${{ github.sha }}");
         shard_revision |= job == 2 && text_equal_c(line, "          ref: ${{ github.sha }}");
+        other_revision |= job != 0 && !after_repository && text_starts_with(line, "          ref: ") && !text_equal_c(line, "          ref: ${{ github.sha }}");
+        after_repository = text_starts_with(line, "          repository: ");
     }
-    return hosted_check && hosted_variants && hosted_calls && build_revision && shard_revision && native_needs && native_success && native_modes && native_revision && native_step;
+    return hosted_check && hosted_variants && hosted_calls && build_revision && shard_revision && !other_revision && native_needs && native_success && native_modes && native_revision && native_step;
 }
 
 // The text with its first `before` from `from` on replaced by `after`, and whether there was one: a mutant for the
@@ -2750,7 +2755,8 @@ static void changes_test_oracle_policy(ChangesTest* test, Text workflow, Text ro
         }
         changes_expect(test, found != NULL && !changes_oracle_policy(changed, row), "oracle policy rejects weakened check/reuse boundary", text_c(mutants[i].before));
     }
-    // Each job's first checkout, until the next job: the row's build and shards, and the 9700X job.
+    // Each job's first checkout, until the next job: the row's build and shards, and the 9700X job; and the shards' own
+    // checkout after the one-file checkout of the vector draw's script.
     static const struct
     {
         bool row;
@@ -2758,6 +2764,7 @@ static void changes_test_oracle_policy(ChangesTest* test, Text workflow, Text ro
     } jobs[] = {
         { true, "\n  compiler:\n" },
         { true, "\n  shards:\n" },
+        { true, "\n      - name: Check out triggering commit\n        if: env.BUSTER_SHARD != ''\n" },
         { false, "\n  benchmarks:\n" },
     };
     for (uint32_t i = 0; i < sizeof(jobs) / sizeof(jobs[0]); i += 1)
