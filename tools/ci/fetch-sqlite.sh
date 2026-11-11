@@ -14,6 +14,14 @@ url=${BUSTER_SQLITE_URL:-https://github.com/sqlite/sqlite}
 [[ "$commit" =~ ^[0-9a-f]{40}$ ]]
 git init -q --template= "$destination"
 cache=${BUSTER_CI_CACHE:-}
+# A hosted job's BUSTER_CI_CACHE is the bundle its preparation job acquired (tools/ci/hosted-offline.sh): with
+# BUSTER_CI_OFFLINE=1 its mirror is used as it is, or this fails; it is never replaced, nor GitHub reached.
+offline=${BUSTER_CI_OFFLINE:-0}
+case "$offline" in
+    0) ;;
+    1) [ -n "$cache" ] || { printf 'fetch-sqlite.sh: BUSTER_CI_OFFLINE needs the prepared bundle, BUSTER_CI_CACHE\n' >&2; exit 1; } ;;
+    *) printf 'fetch-sqlite.sh: BUSTER_CI_OFFLINE must be 0 or 1, not %s\n' "$offline" >&2; exit 1 ;;
+esac
 fetched=false
 if [ -n "$cache" ]; then
     mkdir -p "$cache"
@@ -22,6 +30,9 @@ if [ -n "$cache" ]; then
     flock 8
     for attempt in reuse refresh; do
         if [ "$attempt" = refresh ] || ! git -C "$mirror" cat-file -e "refs/pinned/$commit^{commit}" 2> /dev/null; then
+            if [ "$offline" = 1 ]; then
+                break
+            fi
             rm -rf "$mirror"
             git init -q --bare --template= "$mirror"
             git -C "$mirror" fetch -q --depth 1 "$url" "$commit"
@@ -32,8 +43,16 @@ if [ -n "$cache" ]; then
             fetched=true
             break
         fi
+        if [ "$offline" = 1 ]; then
+            printf 'fetch-sqlite.sh: the prepared mirror failed\n' >&2
+            break
+        fi
         printf 'fetch-sqlite.sh: the cached mirror failed; fetching it again\n' >&2
     done
+fi
+if [ "$fetched" = false ] && [ "$offline" = 1 ]; then
+    printf 'fetch-sqlite.sh: the prepared bundle holds no usable mirror of %s, and BUSTER_CI_OFFLINE forbids fetching it\n' "$commit" >&2
+    exit 1
 fi
 if [ "$fetched" = false ]; then
     git -C "$destination" fetch -q --depth 1 "$url" "$commit"

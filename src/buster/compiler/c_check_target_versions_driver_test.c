@@ -580,7 +580,12 @@ static void check_test_target_versions_models(CheckTest* test, const char* clang
     static const char model[] =
         "int printf(const char*, ...);\n"
         "struct M { unsigned vendor, type, subtype; unsigned features[1]; } __cpu_model = { VENDOR, TYPE, SUBTYPE, { W0 } };\n"
-        "unsigned __cpu_features2[3] = { W1, W2, W3 };\nvoid __cpu_indicator_init(void) {}\n"
+        "unsigned __cpu_features2[3] = { W1, W2, W3 };\n"
+        // Once main calls a resolver, the frames an unwinder walks from inside it: through the resolver's unwind entry.
+        "int _Unwind_Backtrace(int (*)(void*, void*), void*);\n"
+        "static int armed;\nstatic int frames;\n"
+        "static int frame(void* context, void* count) { (void)context; *(int*)count += 1; return 0; }\n"
+        "void __cpu_indicator_init(void) { int count = 0; if (armed) { _Unwind_Backtrace(frame, &count); frames = count; } }\n"
         "__attribute__((target(\"avx2\"))) int f(void) { return 1; }\n"
         "__attribute__((target(\"default\"))) int f(void) { return 0; }\n"
         "__attribute__((target(\"arch=znver4\"))) int f(void) { return 2; }\n"
@@ -611,12 +616,12 @@ static void check_test_target_versions_models(CheckTest* test, const char* clang
         "int e0(void) __asm__(\"e.arch_skx.0\");\nint e1(void) __asm__(\"e.arch_corei7-avx.1\");\nint e2(void) __asm__(\"e.sse4.2.2\");\n"
         "int e3(void) __asm__(\"e.default.3\");\n"
         "int (*address_e)(void) = e;\n"
-        "int main(void)\n{\n    void* chosen = resolve();\n    void* versions[] = { (void*)c0, (void*)c1, (void*)c2, (void*)c3, (void*)c4, (void*)c5, (void*)c6, (void*)c7 };\n"
+        "int main(void)\n{\n    armed = 1;\n    void* chosen = resolve();\n    void* versions[] = { (void*)c0, (void*)c1, (void*)c2, (void*)c3, (void*)c4, (void*)c5, (void*)c6, (void*)c7 };\n"
         "    int index = -1;\n    for (int i = 0; i < 8; i += 1) { index = versions[i] == chosen ? i : index; }\n"
         "    void* chosen_d = resolve_d();\n    int index_d = chosen_d == (void*)d0 ? 0 : chosen_d == (void*)d1 ? 1 : chosen_d == (void*)d3 ? 3 : -1;\n"
         "    void* chosen_e = resolve_e();\n"
         "    int index_e = chosen_e == (void*)e0 ? 0 : chosen_e == (void*)e1 ? 1 : chosen_e == (void*)e2 ? 2 : chosen_e == (void*)e3 ? 3 : -1;\n"
-        "    printf(\"%d %d %d %d %d\\n\", f(), index, index_d, h(), index_e);\n    return 0;\n}\n";
+        "    printf(\"%d %d %d %d %d %d\\n\", f(), index, index_d, h(), index_e, frames);\n    return 0;\n}\n";
     static const char clones[] =
         "__attribute__((target_clones(\"avx2,bmi\", \"bmi2\", \"arch=x86-64-v4\", \"arch=znver5\", \"avx10.1\", \"sse4.1\", \"default\"))) int c(void) { return 1; }\n"
         "__attribute__((target_clones(\"default\", \"avx2\", \"sse4.2\", \"avx2\"))) int d(void) { return 2; }\n"

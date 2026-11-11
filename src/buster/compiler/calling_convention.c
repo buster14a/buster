@@ -431,6 +431,11 @@ struct AbiTable
     uint8_t* storage;
     uint64_t* layout;
     AbiReturn* results;
+    // Per type, a transparent union's first member's index where the union's stack slot is another's than the member's
+    // (its own aligned or packed attribute), else 0 (#1844, abi_finish_transparent): clang classifies and passes the
+    // argument as the member, but where it has no register for it, gives the union's bytes their own slot
+    // (getIndirectResult), byval.
+    uint32_t* transparent;
     uint32_t capacity;
     uint32_t vector_bytes;
     uint32_t larger;
@@ -2339,6 +2344,29 @@ __attribute__((cold, noinline)) static AbiRare abi_finish_rare(AbiTable* abi, co
     return result;
 }
 
+// A transparent union's first member's index where the union's stack slot differs from the member's (#1844,
+// AbiTable.transparent), or 0: a union whose own attribute aligns or packs it otherwise, of a member that passes as one
+// value in its registers' eightbytes (a scalar, not an aggregate, a pair, a vector, or a value in memory), the union of
+// 16 bytes at most, which clang's classification of the member puts in a register, or else gives the union's bytes their
+// own byval slot. Another member keeps its refusal (check_lower_transparent_passed).
+static uint32_t abi_finish_transparent(const AbiTable* abi, const TypeTable* table, uint32_t index)
+{
+    uint32_t result = 0;
+    if ((table->types.flags[index] & BUSTER_TYPE_FLAG_TRANSPARENT_UNION) != 0)
+    {
+        const uint32_t tag = table->types.index[index];
+        const uint32_t member = table->tags.member_count[tag] != 0 ? table->members.type[table->tags.member_begin[tag]] >> BUSTER_TYPE_INDEX_SHIFT : 0;
+        const uint32_t refused = BUSTER_ABI_PASS_AGGREGATE | BUSTER_ABI_PASS_PAIR | BUSTER_ABI_PASS_VECTOR | BUSTER_ABI_PASS_WIDE | BUSTER_ABI_PASS_MEMORY |
+                                 BUSTER_ABI_PASS_UNCOUNTED | BUSTER_ABI_PASS_IGNORE | BUSTER_ABI_PASS_LARGER | BUSTER_ABI_PASS_UNSUPPORTED | BUSTER_ABI_PASS_EMPTY;
+        const bool simple = member != 0 && member < abi->capacity && (abi->pass[member] & BUSTER_ABI_PASS_CLASSIFIED) != 0 && (abi->pass[member] & refused) == 0;
+        // Of 16 bytes at most, whose register parts a parameter's object of the union's size takes.
+        const bool differs = simple && table->types.size[index] <= BUSTER_ABI_REGISTER_BYTES &&
+                             (abi->stack_bytes[index] != abi->stack_bytes[member] || abi->alignment_log2[index] != abi->alignment_log2[member]);
+        result = differs ? member : 0;
+    }
+    return result;
+}
+
 // The pass bits and the rest of a type whose row, storage and layout are in place, but for a vector LLVM packs, whose
 // storage and layout abi_vector_llvm gives (abi_finish_rare): every record holding one is finished later.
 static void abi_finish_passing(AbiTable* abi, const TypeTable* table, uint32_t index)
@@ -2418,6 +2446,7 @@ static void abi_finish_passing(AbiTable* abi, const TypeTable* table, uint32_t i
     }
     abi->stack_bytes[index] = rare.slot > UINT32_MAX ? UINT32_MAX : (uint32_t)rare.slot;
     abi->pass[index] = rare.pass;
+    abi->transparent[index] = kind == BUSTER_TYPE_KIND_UNION ? abi_finish_transparent(abi, table, index) : 0;
 }
 
 // What follows from a type's row and what it is (the twin's finishing step, and the vector path's for the types it
@@ -2444,6 +2473,7 @@ static void abi_copy(AbiTable* abi, const TypeTable* table, uint32_t index)
     abi->storage[index] = abi->storage[base];
     abi->layout[index] = abi->layout[base];
     abi->results[index] = abi->results[base];
+    abi->transparent[index] = abi->transparent[base];
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -3033,7 +3063,7 @@ static bool abi_classify_vector(AbiTable* abi, const TypeTable* table, const Typ
 static uint64_t abi_capacity_bytes(uint32_t types)
 {
     const uint64_t count = types;
-    return count * BUSTER_ABI_ROW_BYTES + count * sizeof(uint32_t) * 2 + count * 2 + count * sizeof(uint64_t) + count * sizeof(AbiReturn) + 7 * 64;
+    return count * BUSTER_ABI_ROW_BYTES + count * sizeof(uint32_t) * 3 + count * 2 + count * sizeof(uint64_t) + count * sizeof(AbiReturn) + 8 * 64;
 }
 
 static bool abi_initialize_types(AbiTable* abi, Arena* arena, const TypeTable* table, uint32_t vector_bytes, uint32_t types)
@@ -3047,11 +3077,12 @@ static bool abi_initialize_types(AbiTable* abi, Arena* arena, const TypeTable* t
     abi->storage = abi->alignment_log2 != 0 ? arena_push(arena, capacity, 64) : 0;
     abi->layout = abi->storage != 0 ? arena_push(arena, (uint64_t)capacity * sizeof(uint64_t), 64) : 0;
     abi->results = abi->layout != 0 ? arena_push(arena, (uint64_t)capacity * sizeof(AbiReturn), 64) : 0;
+    abi->transparent = abi->results != 0 ? arena_push(arena, (uint64_t)capacity * sizeof(uint32_t), 64) : 0;
     abi->capacity = capacity;
     abi->vector_bytes = vector_bytes;
     abi->larger = 0;
     abi->rare = 0;
-    const bool result = abi->results != 0 && (vector_bytes == 16 || vector_bytes == 32 || vector_bytes == 64) && types >= table->types.count &&
+    const bool result = abi->transparent != 0 && (vector_bytes == 16 || vector_bytes == 32 || vector_bytes == 64) && types >= table->types.count &&
                         types <= table->types.capacity;
     if (result)
     {
@@ -3068,6 +3099,7 @@ static bool abi_initialize_types(AbiTable* abi, Arena* arena, const TypeTable* t
         memcpy(abi->results, abi_builtin_rows.results, (uint64_t)builtins * sizeof(*abi->results));
         memcpy(abi->merge, abi_builtin_rows.merge, sizeof(abi->merge));
         memset(abi->pass + builtins, 0, (uint64_t)(capacity - builtins) * sizeof(*abi->pass));
+        memset(abi->transparent, 0, (uint64_t)capacity * sizeof(*abi->transparent));
         memset(abi->storage + builtins, 0, capacity - builtins);
         memset(abi->layout + builtins, 0, (uint64_t)(capacity - builtins) * sizeof(*abi->layout));
         const uint32_t character = BUSTER_TYPE_CHAR >> BUSTER_TYPE_INDEX_SHIFT;
@@ -3550,7 +3582,11 @@ static AbiCall abi_assign_call(const AbiTable* abi, const TypeId* arguments, uin
     }
     for (uint32_t i = 0; i < count; i += 1)
     {
-        const uint32_t index = arguments[i] >> BUSTER_TYPE_INDEX_SHIFT;
+        // A transparent union of a slot of its own (AbiTable.transparent) passes as its first member, but for its byval
+        // slot where clang has no register for it.
+        const uint32_t own = arguments[i] >> BUSTER_TYPE_INDEX_SHIFT;
+        const uint32_t member = abi->transparent[own];
+        const uint32_t index = member != 0 ? member : own;
         const uint32_t pass = abi->pass[index];
         const uint32_t bytes = abi->stack_bytes[index];
         const uint32_t alignment_log2 = (pass & BUSTER_ABI_PASS_ALIGNMENT) >> BUSTER_ABI_PASS_ALIGNMENT_SHIFT;
@@ -3644,8 +3680,9 @@ static AbiCall abi_assign_call(const AbiTable* abi, const TypeId* arguments, uin
             location.kind = vanishes ? BUSTER_ABI_LOCATION_IGNORE : in_register ? BUSTER_ABI_LOCATION_REGISTERS : BUSTER_ABI_LOCATION_STACK;
             location.registers[0] = in_register ? abi_integer_arguments[integers] : BUSTER_ABI_REGISTER_NONE;
             integers += in_register ? 1 : 0;
-            location.stack_offset =
-                vanishes || in_register ? 0 : abi_stack_place(&stack, &call.stack_alignment_log2, integer ? BUSTER_ABI_SLOT_BYTES : bytes, alignment_log2);
+            const uint32_t own_log2 = abi->alignment_log2[own] > BUSTER_ABI_SLOT_LOG2 ? abi->alignment_log2[own] : BUSTER_ABI_SLOT_LOG2;
+            const uint32_t slot_bytes = member != 0 ? abi->stack_bytes[own] : integer ? BUSTER_ABI_SLOT_BYTES : bytes;
+            location.stack_offset = vanishes || in_register ? 0 : abi_stack_place(&stack, &call.stack_alignment_log2, slot_bytes, member != 0 ? own_log2 : alignment_log2);
         }
         else if ((pass & (BUSTER_ABI_PASS_VECTOR | BUSTER_ABI_PASS_PAIR)) != 0)
         {
@@ -3947,7 +3984,10 @@ static void abi_assign(const AbiTable* abi, AbiSignatures signatures, AbiLocatio
             // DEMOTED and LONG mark a call's first lane, and its ORed alignments take them to its last.
             const __mmask16 demoted = _mm512_test_epi32_mask(lane_marks, _mm512_set1_epi32(BUSTER_ABI_LANE_DEMOTED));
             const __mmask16 long_call = _mm512_test_epi32_mask(lane_marks, _mm512_set1_epi32(BUSTER_ABI_LANE_LONG));
-            const __mmask16 deferred_lanes = valid & (uncounted | inexact | padded | huge | wide_named | empty | general_low | demoted | long_call);
+            // A transparent union of a slot of its own (AbiTable.transparent): its member's classes, the twin's.
+            const __m512i transparent = _mm512_mask_i32gather_epi32(zero, valid, indices, abi->transparent, 4);
+            const __mmask16 transparent_lanes = _mm512_test_epi32_mask(transparent, transparent);
+            const __mmask16 deferred_lanes = valid & (uncounted | inexact | padded | huge | wide_named | empty | general_low | demoted | long_call | transparent_lanes);
             // The alignments ORed (the highest bit is the largest), with DEFERRED for a lane the twin must assign.
             const __m512i stacked_alignment = _mm512_maskz_mov_epi32(on_stack, slot_alignment);
             const __m512i alignments = _mm512_mask_or_epi32(stacked_alignment, deferred_lanes, stacked_alignment, _mm512_set1_epi32(BUSTER_ABI_LANE_DEFERRED));

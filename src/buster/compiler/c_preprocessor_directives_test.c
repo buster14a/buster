@@ -968,7 +968,7 @@ static char* pp_directive_test_clang(const char* path, const char* standard)
 {
     char mode[32];
     snprintf(mode, sizeof(mode), "-std=%s", standard != 0 ? standard : "gnu17");
-    char* const argv[] = { "clang", "-E", mode, "-fno-caret-diagnostics", "-fno-diagnostics-show-option", "-fno-color-diagnostics", "-o", "/dev/null", (char*)path, 0 };
+    char* const argv[] = { "clang", "-E", mode, "-fno-caret-diagnostics", "-fno-color-diagnostics", "-o", "/dev/null", (char*)path, 0 };
     char* result = 0;
     const int status = pp_directive_test_command(argv, 0, &result);
     if (status != 0 && status != 1)
