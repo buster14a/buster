@@ -126,6 +126,47 @@ static long double check_builtin_library_extreme(long double x, long double y, b
     return x != x ? y : y != y ? x : extreme;
 }
 
+// The __float128 folds (#1250): fabsf128 and copysignf128 of their bits' signs, and fmaxf128, fminf128 and their _num
+// kin of their values (c_check_quad.c), as check_builtin_library_extreme decides them. Whether it folded.
+static __attribute__((noinline)) bool check_builtin_library_fold_quad(CBuiltinLibraryFold fold, const CheckValue* converted, uint32_t count, CheckValue* folded)
+{
+    const bool floating = count >= 1 && converted[0].constant_kind == CHECK_CONSTANT_FLOATING &&
+                          (count == 1 || converted[1].constant_kind == CHECK_CONSTANT_FLOATING);
+    const unsigned __int128 x = converted[0].integer;
+    const unsigned __int128 y = count == 2 ? converted[1].integer : 0;
+    bool done = false;
+    if (floating && fold == CBUILTIN_LIBRARY_FOLD_ABSOLUTE && count == 1)
+    {
+        check_quad_set(folded, x & ~BUSTER_CHECK_QUAD_SIGN);
+        done = true;
+    }
+    else if (floating && fold == CBUILTIN_LIBRARY_FOLD_COPY_SIGN && count == 2)
+    {
+        check_quad_set(folded, (x & ~BUSTER_CHECK_QUAD_SIGN) | (y & BUSTER_CHECK_QUAD_SIGN));
+        done = true;
+    }
+    else if (floating && count == 2)
+    {
+        // Of a quiet NaN and a number, the number; a signaling NaN, or two NaNs, isn't folded (the long double's rule).
+        const bool x_nan = check_quad_is_nan(x);
+        const bool y_nan = check_quad_is_nan(y);
+        const bool x_quiet = (x & BUSTER_CHECK_QUAD_QUIET) != 0;
+        const bool y_quiet = (y & BUSTER_CHECK_QUAD_QUIET) != 0;
+        done = (!x_nan || (!y_nan && x_quiet)) && (!y_nan || (!x_nan && y_quiet));
+        const bool minimum = fold == CBUILTIN_LIBRARY_FOLD_MINIMUM;
+        const __float128 a = x_nan ? 0 : check_quad_host(x);
+        const __float128 b = y_nan ? 0 : check_quad_host(y);
+        // Two zeros of opposite signs: +0 the maximum, -0 the minimum, by their sign bits.
+        const bool zeros = a == 0 && b == 0 && ((x ^ y) & BUSTER_CHECK_QUAD_SIGN) != 0;
+        const bool x_negative = (x & BUSTER_CHECK_QUAD_SIGN) != 0;
+        const unsigned __int128 larger = zeros ? (x_negative ? y : x) : a >= b ? x : y;
+        const unsigned __int128 smaller = zeros ? (x_negative ? x : y) : a <= b ? x : y;
+        const unsigned __int128 extreme = minimum ? smaller : larger;
+        check_quad_set(folded, x_nan ? y : y_nan ? x : extreme);
+    }
+    return done;
+}
+
 // A call's checked value, `result`, folded by `fold` where clang folds it (the header's list), from its arguments
 // converted as its check converted them (`conversions`): an integer fold is an integer constant expression, a floating
 // one a constant of the call's type. Any other call keeps its value.
@@ -169,6 +210,12 @@ static void check_builtin_library_fold_call(TypeTable* types, CBuiltinLibraryFol
         done = count == 1 && check_builtin_library_length(types, converted, wide, values, position, &length);
         folded.constant_kind = CHECK_CONSTANT_INTEGER;
         folded.integer = length;
+    }
+    else if (clean && type_unqualified(type_strip_aligned(types, folded.type)) == BUSTER_TYPE_FLOAT128 &&
+             (fold == CBUILTIN_LIBRARY_FOLD_ABSOLUTE || fold == CBUILTIN_LIBRARY_FOLD_MAXIMUM || fold == CBUILTIN_LIBRARY_FOLD_MINIMUM ||
+              fold == CBUILTIN_LIBRARY_FOLD_COPY_SIGN))
+    {
+        done = check_builtin_library_fold_quad(fold, converted, count, &folded);
     }
     else if (clean && fold == CBUILTIN_LIBRARY_FOLD_ABSOLUTE)
     {
@@ -228,12 +275,13 @@ static void check_builtin_library_fold_memory(TypeTable* types, CBuiltinId id, c
 }
 
 // Whether one type of a prototype's encoding, from *position, is `type`: int ('i', and wchar_t's 'w'), size_t's unsigned
-// long ('z'), char ('c') or void ('v'), each const after a 'C' and a pointer to that after a '*'. The table's
+// long ('z'), char ('c'), double ('d'), float ('f') or void ('v'), each const after a 'C' and a pointer to that after a '*'. The table's
 // queries alone read it; it interns nothing, so that a lane's reader asks it as source order's does.
 static bool check_library_plain_type(const TypeTable* types, TypeId type, const char* prototype, uint32_t* position)
 {
     const char code = prototype[*position];
-    const TypeId base = code == 'i' || code == 'w' ? BUSTER_TYPE_INT : code == 'z' ? BUSTER_TYPE_ULONG : code == 'c' ? BUSTER_TYPE_CHAR : BUSTER_TYPE_VOID;
+    const TypeId base = code == 'i' || code == 'w' ? BUSTER_TYPE_INT : code == 'z' ? BUSTER_TYPE_ULONG : code == 'c' ? BUSTER_TYPE_CHAR :
+                        code == 'd' ? BUSTER_TYPE_DOUBLE : code == 'f' ? BUSTER_TYPE_FLOAT : BUSTER_TYPE_VOID;
     *position += 1;
     const bool constant = prototype[*position] == 'C';
     *position += constant;

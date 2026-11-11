@@ -1554,7 +1554,9 @@ static bool check_test_data_prepare_dense(CheckTestDataPrepared* result, const C
             const uint32_t plan_index = check_test_initializer_index_dense(initializers, token);
             valid = plan_index <= initializers->count &&
                     (plan_index == 0 || (initializers->declaration_tokens != 0 && initializers->declaration_tokens[plan_index - 1] == token));
-            reference_capacity += valid && plan_index != 0 ? initializers->plans[plan_index - 1].count : 0;
+            // A label difference's part references two objects (#1447), as check_data_input_prepared counts it.
+            const CheckInitializer* counted = valid && plan_index != 0 ? initializers->plans + plan_index - 1 : NULL;
+            reference_capacity += counted != NULL ? (uint64_t)counted->count * (counted->label_differences ? 2u : 1u) : 0;
             if (!valid)
             {
                 result->status = CHECK_DATA_INPUT_INVALID;
@@ -1641,6 +1643,20 @@ static bool check_test_data_prepare_dense(CheckTestDataPrepared* result, const C
                     if (valid)
                     {
                         result->references[result->reference_count++] = references[reference];
+                    }
+                }
+                // Each label difference's two labels, after the parts' references (#1447).
+                for (uint32_t part = 0; valid && plan != 0 && part < plan->count; part += 1)
+                {
+                    const CheckValue* value = &plan->parts[part].value;
+                    if (plan->parts[part].kind == CHECK_INIT_VALUE && value->constant_kind == CHECK_CONSTANT_LABEL_DIFFERENCE)
+                    {
+                        valid = result->reference_count + 2 <= reference_capacity;
+                        if (valid)
+                        {
+                            result->references[result->reference_count++] = value->object;
+                            result->references[result->reference_count++] = (uint32_t)value->integer;
+                        }
                     }
                 }
                 if (!valid && result->status == CHECK_DATA_INPUT_OK)
@@ -2175,8 +2191,13 @@ static void check_test_program_source_native_bounds(CheckTest* test, const char*
         {
             check_test_expect(test, entry_limit == 0 || code.code_bytes <= 2048,
                               "initializer native code stays bounded independently of payload size");
-            // (A unit's __builtin_dump_struct strings are pools too, which no memcpy reads.)
-            if (code.lowered.initializers.count != 0 && code.lowered.initializers.dump_count == 0)
+            // (A unit's __builtin_dump_struct strings and __builtin_clear_padding tables are pools too, which no memcpy reads.)
+            bool tables = false;
+            for (uint32_t k = 0; k < code.lowered.initializers.padding_count; k += 1)
+            {
+                tables |= code.lowered.initializers.paddings[k].pool != BUSTER_CHECK_NONE;
+            }
+            if (code.lowered.initializers.count != 0 && code.lowered.initializers.dump_count == 0 && !tables)
             {
                 const uint64_t access_mark = scratch.length;
                 uint8_t* defined = NULL;
@@ -4092,6 +4113,65 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
             "mix(__builtin_sub_overflow(ua,b,&rc));mix(rc);mix(__builtin_mul_overflow(x,ub,&r100));raw(&r100);"
             "mix(__builtin_add_overflow((long)n,a,&rw));raw(&rw);mix(__builtin_mul_overflow(y,c,&r127u));raw(&r127u);}"
             "return (int)(h^(h>>32));}", "bit-int-65-to-127-overflow", clang);
+        // The overflow builtins of _BitInts past 128 bits (#1447), as operands and destinations, beside 129-, 128-bit, long,
+        // int, char and _Bool ones: sums and differences signed and unsigned, unsigned products, of boundary values around
+        // each width; each overflow and the destination's bytes, its bits past the width extended as clang stores them,
+        // hashed.
+        check_test_program_source(test,
+            "typedef _BitInt(200) S200;typedef unsigned _BitInt(200) U200;typedef _BitInt(129) S129;typedef unsigned _BitInt(256) U256;\n"
+            "typedef unsigned _BitInt(129) U129;typedef _BitInt(300) S300;\n"
+            "static unsigned long long h;static void mix(unsigned long long v){h=h*31+v;}\n"
+            "static void raw(const void*p,unsigned n){unsigned long long w[8];__builtin_memcpy(w,p,n);for(unsigned i=0;i<n/8;i++)mix(w[i]);}\n"
+            "static U256 val(unsigned i,unsigned long long s){U256 one=1;U256 v=0;\n"
+            "switch(i%12){case 0:v=0;break;case 1:v=1;break;case 2:v=~(U256)0;break;case 3:v=(one<<199)-1;break;case 4:v=one<<199;break;\n"
+            "case 5:v=(one<<128)-1;break;case 6:v=one<<128;break;case 7:v=~((one<<199)-1);break;case 8:v=(one<<64)+s;break;\n"
+            "case 9:v=((U256)s<<130)|s;break;case 10:v=~(((U256)s)<<70);break;default:v=((U256)s<<(s%190))^s;}\n"
+            "return v;}\n"
+            "int tested(int n){h=(unsigned)n;unsigned long long s=0x9e3779b97f4a7c15ull*(unsigned)(n+1);\n"
+            "for(unsigned i=0;i<24;i++)for(unsigned j=0;j<24;j++){s^=s<<13;s^=s>>7;s^=s<<17;\n"
+            "U256 x=val(i,s),y=val(j,s*3);S200 a=(S200)x,b=(S200)y;U200 ua=(U200)x,ub=(U200)y;S129 c=(S129)x;U129 uc=(U129)y;\n"
+            "S200 r200;U200 ru200;S129 r129;U129 ru129;S300 r300;U256 ru256;int ri;long rl;unsigned char rc;__int128 rw;_BitInt(100) r100;_Bool rb;\n"
+            "mix(__builtin_add_overflow(a,b,&r200));raw(&r200,32);mix(__builtin_sub_overflow(a,b,&r200));raw(&r200,32);\n"
+            "mix(__builtin_add_overflow(ua,ub,&ru200));raw(&ru200,32);mix(__builtin_sub_overflow(ua,ub,&ru200));raw(&ru200,32);\n"
+            "mix(__builtin_mul_overflow(ua,ub,&ru200));raw(&ru200,32);mix(__builtin_mul_overflow(ua,(unsigned)i,&ru256));raw(&ru256,32);\n"
+            "mix(__builtin_add_overflow(a,ub,&r129));raw(&r129,24);mix(__builtin_sub_overflow(c,uc,&ru129));raw(&ru129,24);\n"
+            "mix(__builtin_add_overflow(c,a,&r300));raw(&r300,40);mix(__builtin_sub_overflow(ua,b,&ri));mix((unsigned)ri);\n"
+            "mix(__builtin_add_overflow(a,(long)s,&rl));mix((unsigned long)rl);mix(__builtin_sub_overflow(ua,(int)i,&rc));mix(rc);\n"
+            "mix(__builtin_add_overflow(c,(__int128)s,&rw));raw(&rw,16);mix(__builtin_sub_overflow(a,c,&r100));raw(&r100,16);\n"
+            "mix(__builtin_add_overflow((int)i,(long)j,&r200));raw(&r200,32);mix(__builtin_mul_overflow(uc,ua,&ru256));raw(&ru256,32);\n"
+            "mix(__builtin_mul_overflow(ua,ub,&ru129));raw(&ru129,24);mix(__builtin_mul_overflow(uc,uc,&rl));mix((unsigned long)rl);\n"
+            "mix(__builtin_mul_overflow(ua,(unsigned long)s,&ri));mix((unsigned)ri);mix(__builtin_add_overflow(ua,ub,&rb));mix(rb);\n"
+            "mix(__builtin_mul_overflow(ua,(unsigned __int128)s,&ru200));raw(&ru200,32);\n"
+            "}return (int)(h^(h>>32));}", "bit-int-past-128-overflow", clang);
+        // The generic and C23 bit builtins of _BitInts past 128 bits (#1447), limb by limb, of boundary values, single bits and
+        // random ones: counts, reversals, byte swaps, bit_floor and bit_ceil, and rotations of a power of two's width by
+        // counts of every width (clang's code generator can't compile another width's, which tier1-bits checks), and narrower
+        // values' by counts past 128 bits; each result and the bytes of each value, hashed.
+        check_test_program_source(test,
+            "typedef unsigned _BitInt(200) U;typedef _BitInt(208) S;typedef unsigned _BitInt(256) W;typedef unsigned _BitInt(130) V;\n"
+            "static unsigned long long h;static void mix(unsigned long long v){h=h*31+v;}\n"
+            "static void raw(const void*p,unsigned n){unsigned long long w[8];__builtin_memcpy(w,p,n);for(unsigned i=0;i<n/8;i++)mix(w[i]);}\n"
+            "static W val(unsigned i,unsigned long long s){W one=1;W v=0;\n"
+            "switch(i%14){case 0:v=0;break;case 1:v=1;break;case 2:v=~(W)0;break;case 3:v=(one<<199)-1;break;case 4:v=one<<199;break;\n"
+            "case 5:v=(one<<128)-1;break;case 6:v=one<<128;break;case 7:v=~((one<<199)-1);break;case 8:v=(one<<64)+s;break;\n"
+            "case 9:v=((W)s<<130)|s;break;case 10:v=~(((W)s)<<70);break;case 11:v=one<<(s%200);break;case 12:v=(one<<(s%200))+1;break;default:v=((W)s<<(s%190))^s;}\n"
+            "return v;}\n"
+            "int tested(int n){h=(unsigned)n;unsigned long long s=0x9e3779b97f4a7c15ull*(unsigned)(n+1);\n"
+            "for(unsigned i=0;i<28;i++){s^=s<<13;s^=s>>7;s^=s<<17;\n"
+            "W w=val(i,s);U x=(U)w;S y=(S)w;W z=w;V v=(V)w;U r;S q;W t;V rv;\n"
+            "mix(__builtin_popcountg(x));mix(__builtin_popcountg(z));mix(__builtin_clzg(x,-7));mix(__builtin_ctzg(x,-9));mix(__builtin_clzg(z,(int)i));\n"
+            "if(x){mix(__builtin_clzg(x));mix(__builtin_ctzg(x));}\n"
+            "mix(__builtin_stdc_leading_zeros(x));mix(__builtin_stdc_leading_ones(x));mix(__builtin_stdc_trailing_zeros(x));mix(__builtin_stdc_trailing_ones(x));\n"
+            "mix(__builtin_stdc_first_leading_zero(x));mix(__builtin_stdc_first_leading_one(x));mix(__builtin_stdc_first_trailing_zero(x));mix(__builtin_stdc_first_trailing_one(x));\n"
+            "mix(__builtin_stdc_count_zeros(x));mix(__builtin_stdc_count_ones(x));mix(__builtin_stdc_has_single_bit(x));mix(__builtin_stdc_bit_width(x));\n"
+            "mix(__builtin_stdc_leading_ones(z));mix(__builtin_stdc_trailing_ones(z));mix(__builtin_stdc_has_single_bit(z));\n"
+            "r=__builtin_stdc_bit_floor(x);raw(&r,32);r=__builtin_stdc_bit_ceil(x);raw(&r,32);t=__builtin_stdc_bit_ceil(z);raw(&t,32);\n"
+            "r=__builtin_bitreverseg(x);raw(&r,32);q=__builtin_bitreverseg(y);raw(&q,32);q=__builtin_bswapg(y);raw(&q,32);t=__builtin_bswapg(z);raw(&t,32);t=__builtin_bitreverseg(z);raw(&t,32);\n"
+            "t=__builtin_stdc_rotate_right(z,(U)~w);raw(&t,32);t=__builtin_stdc_rotate_left(z,i*8);raw(&t,32);t=__builtin_stdc_rotate_left(z,(int)(s%700)-350);raw(&t,32);\n"
+            "t=__builtin_stdc_rotate_right(z,(S)w);raw(&t,32);t=__builtin_stdc_rotate_left(z,(_BitInt(129))(long)s);raw(&t,32);\n"
+            "mix(__builtin_stdc_rotate_right((unsigned)s,y));mix(__builtin_stdc_rotate_left((unsigned char)s,x));mix(__builtin_stdc_rotate_left((unsigned short)s,(S)w));\n"
+            "{unsigned __int128 o=__builtin_stdc_rotate_right((unsigned __int128)w,y);raw(&o,16);unsigned _BitInt(100) p=__builtin_stdc_rotate_left((unsigned _BitInt(100))w,(V)~w);raw(&p,16);}\n"
+            "}return (int)(h^(h>>32));}", "bit-int-past-128-bit-builtins", clang);
         check_test_program_source(test,
             "int tested(int n){n+=10;typedef int A[n++];int x=n;n+=3;return (int)sizeof(A)+(int)sizeof(A)+n+x;}",
             "vla-typedef-captures-bound-once", clang);
@@ -4335,6 +4415,31 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
             "int j=0;again:{char v[(n&3)+1];char*p=__builtin_alloca(8192);p[2]=(char)j;v[0]=p[2];s+=v[0];if(++j<20000)goto again;}"
             "return (int)(s&0x7fffffff);}",
             "alloca-released-with-variable-length-arrays", clang);
+        // #1447: a variable-length array declared in a for statement's clause is released where the statement ends, and
+        // one in a statement expression's block after the expression's value is kept: 20,000 arrays of 4 KB each would take
+        // 80 MB of stack without the releases. A break, a continue and a goto leave them.
+        check_test_program_source(test,
+            "int tested(int n){long s=0;for(int k=0;k<20000;k++){for(char v[(n&7)+4096],*p=v;p<v+3;p++){*p=(char)(k+(p-v));s+=*p;"
+            "if(p==v+1&&k==n+3)break;}if(k==n+5)continue;}"
+            "for(int k=0;k<20000;k++){s+=({char w[(n&7)+4096];w[0]=(char)k;w[4095]=1;w[0]+w[4095]+(int)sizeof w;});}"
+            "for(int k=0;k<20000;k++){int t=({char w[(n&3)+4096];w[1]=(char)(k*3);w[1]+(int)(sizeof w&1);});s+=t;"
+            "if(k==n+9)goto next;next:;}"
+            "int j=0;again:for(char u[(n&3)+4096],*q=u;q<u+1;q++){*q=(char)j;s+=*q;if(++j<20000)goto again;}"
+            "return (int)(s&0x7fffffff);}",
+            "variable-length-arrays-in-for-clauses-and-statement-expressions", clang);
+        // #1447: C23's `= {}` of a variable-length array clears it whole, on a stack an earlier array dirtied.
+        check_test_program_source(test,
+            "int tested(int n){int m=n&7,s=0;{char d[m+4096];for(int i=0;i<m+4096;i++)d[i]=7;s+=d[m];}"
+            "{int c[m+1000]={};for(int i=0;i<m+1000;i++)s+=c[i]+1;}{long e[2][m+3]={};s+=(int)e[1][m+2]+(int)sizeof e;}"
+            "return s;}",
+            "variable-length-array-empty-initializer", clang);
+        // #1447: a bound whose statement expression holds a declaration, an if, a goto and a label.
+        check_test_program_source(test,
+            "int tested(int n){int d[({int k=n&7;k+1;})];"
+            "int e[({int r=2;if(n>3)goto out;r=5;out:r;})];"
+            "long f[n&1][({int w=3;for(int i=0;i<n;i++)w+=i&1;w;})];"
+            "return (int)(sizeof d*100+sizeof e*10+sizeof f);}",
+            "variable-length-array-bounds-with-statements", clang);
         // Allocations in a realigned frame (an object aligned to 64) and in a variadic definition, whose va_arg reads the
         // incoming areas the allocation moved rsp past.
         check_test_program_source(test,
@@ -4453,6 +4558,21 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
             "{struct S s={7};return x+(int)sizeof(*p)+(int)sizeof(*q)+(int)s.outer+A;}"
             "int tested(int n){return tags(n&127,0,0);}",
             "kr-header-tag-layout-enum-abi-and-outer-scope", clang);
+        // #1447: a K&R definition's variably modified parameters, their bounds evaluated at its entry.
+        check_test_program_source(test,
+            "int sum(n,m,a)int n,m;int a[n][m];{int s=0;for(int i=0;i<n;i++)for(int j=0;j<m;j++)s+=a[i][j];return s+(int)sizeof(a[0]);}"
+            "int last(a,n)int n;int a[n];{return a[n-1];}"
+            "int fp(n,p)int n;int (*p)[n+1];{return (int)sizeof(*p)+(*p)[n];}"
+            "int tested(int n){int a[2][3]={{1,2,3},{4,5,n}};int b[4]={1,2,3,n};return sum(2,3,a)*1000+last(b,4)*100+fp(3,&b);}",
+            "kr-variably-modified-parameters", clang);
+        // #1447's review: a K&R parameter's bounds with side effects run at its function's entry, its own and a pointer's to
+        // an array's, but a nested prototype's parameter's don't (clang 23 returns 4 for f(3, a) and 3 for g(3, p)).
+        check_test_program_source(test,
+            "int f(n,a)int n;int a[n++];{return n;}int h(int*x){return x[0];}"
+            "int g(n,p)int n;int (*p)(int a[n++]);{return n*10+p(&n);}"
+            "int e(n,a,m)int n,m;int (*a)[n++][m++];{return n*100+m*10+(int)(sizeof(*a)/sizeof(int));}"
+            "int tested(int k){int a[8]={0};int b[5][6];return f((k&3)+3,a)*1000+g((k&3)+3,h)*10+e((k&3)+3,&b,5);}",
+            "kr-variably-modified-parameter-side-effects", clang);
         // The comparison builtins (#148) in each format on the harness's special values (zeros, infinities, quiet and signaling
         // NaNs, subnormals): their results and the exceptions their quiet compares raise, their arguments' conversions and
         // order, and mingw's fmaxl, which the libc corpus's comparison found.
@@ -5440,6 +5560,26 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
             "last:if(r>12)goto*r++,&&done;goto*p=&&done;"
             "done:return r*100+k*10+(p==&&done);}",
             "labels-as-values-whole-operand", clang);
+        // #1447: a scalar compound literal's value in a static object's initializer, at file scope and in a function.
+        check_test_program_source(test,
+            "static int x=(int){1};static double d=(double){2.5};int vv;int*pp=(int*){&vv};void*np=(void*){0};"
+            "long n2=(long){1}<<40;int nested=(int){(int){3}};unsigned char narrow=(unsigned char){300};"
+            "int arr[]={(int){4},(int){5}+1};struct S{int a;long b;}st={(int){6},(long){7}};"
+            "static int braced0=(int){{}};static int braced3=(int){{3}};static int braced4=(int){{4},};"
+            "int tested(int n){static int y=(int){4};static long z=(long){5}+1;static float f=(float){1.5};"
+            "return x+(int)d+(pp==&vv)+(np==0)+(int)(n2>>40)+nested+narrow+arr[0]+arr[1]+st.a+(int)st.b+y+(int)z+(int)(f*2)+n+"
+            "braced0*1000+braced3*10000+braced4*100000;}",
+            "scalar-compound-literals-in-static-initializers", clang);
+        // #1447: GNU's relative jump table, the difference of two labels' addresses in a static initializer, through the
+        // conversions clang keeps (to unsigned, through long, in a long array), dispatched by a computed goto.
+        check_test_program_source(test,
+            "int tested(int n){static const int t[]={&&add-&&add,&&sub-&&add,&&mul-&&add};"
+            "static const long l[]={(char*)&&mul-(char*)&&add,(int*)&&sub-(int*)&&add};"
+            "static const unsigned u=(unsigned)(long)(&&add-&&sub);static const int v=+(__extension__(&&sub-&&add));"
+            "int x=n+10,r=0;for(int k=0;k<5;k++){goto*(&&add+t[((n&7)+k)%3]);"
+            "add:r+=x+1;continue;sub:r+=x-1;continue;mul:r+=x*2;}"
+            "return r+(l[0]==t[2])+(l[1]==t[1])*2+((int)u==-t[1])*4+(v==t[1])*8;}",
+            "label-differences-in-static-initializers", clang);
         // GNU C's local labels (#147): a macro's statement expression with a label of its own, expanded twice, whose value is
         // its labeled last statement's; nested blocks' lists beside the function's label of the same name; a local label's
         // address; and a goto to a statement expression's last statement under two labels.
@@ -5481,6 +5621,17 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
             "int tested(int n){static __auto_type bp=(P){3,4L};__auto_type lp=(P){n,7L};bp.x+=n;"
             "return auto_sp.x+(int)auto_sp.y*3+auto_gp.x*5+(int)auto_gp.y*7+bp.x*11+(int)bp.y*13+lp.x*17+(int)lp.y*19;}",
             "auto-type-static-structures", clang);
+        // A variably modified deduction (#1844): a pointer to a variable-length array, whose sizes the array's declaration
+        // evaluated once; and redeclarations of variables with linkage,
+        // which take the earlier declarations' types (a long, a pointer's, a typedef's) rather than deduce theirs.
+        check_test_program_source(test,
+            "typedef unsigned short U;extern long merged_l;__auto_type merged_l=1;extern int*merged_p;__auto_type*merged_p=0;"
+            "extern U merged_u;__auto_type merged_u=700;"
+            "int tested(int n){int k=(n&3)+2;int vla[k];for(int i=0;i<k;i++)vla[i]=i*n;__auto_type p=&vla;int m=k;"
+            "__auto_type q=p+0;m++;extern long merged_l;"
+            "return (int)sizeof(*p)*3+(*p)[1]+(int)sizeof(*q)*5+m*7+(int)sizeof(merged_l)*11+(int)merged_l+(merged_p==0)*13+"
+            "(int)sizeof(merged_u)*17+merged_u;}",
+            "auto-type-variably-modified-merged", clang);
         {
             char source[4096];
             uint32_t length = 0;
@@ -5559,7 +5710,7 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         check_test_program_boundary(test, "int tested(int n){asm goto(\"\"::::target);return n;target:return n+1;}",
                                     "typed-asm-goto-target", true, true, 0, 0);
     }
-    // File-scope assembly lowers no code: the emission assembles it (check_program_emit_file_asm, #619).
+    // File-scope assembly lowers no code: the planning assembles it (check_program_asm_plan_file, #619).
     if (check_test_takes())
     {
         check_test_program_boundary(test, "asm(\".byte 0\");int tested(int n){return n;}",
@@ -5624,6 +5775,16 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         check_test_program_boundary_reason(test, "struct W{unsigned _BitInt(200) x:150;};int tested(int n){struct W w;w.x=n;return w.x>1;}", "bit-int-200-bit-field", true,
                                            false, 0, 0, "bit-fields of this type or spread over more than 8 bytes");
         check_test_program_boundary(test, "int tested(int n){_BitInt(100) r;return __builtin_add_overflow(n,n,&r);}", "bit-int-100-overflow", true, true, 0, 0);
+        // A result SSE, SSEUP of 22 bytes where the target's vectors are 32 bytes, which clang returns as <2 x double> in
+        // xmm0 (#1832): refused by its registers, not as a long double (an x87 register's bit, which a NONE second register
+        // has too). At x86-64's 16 bytes it is MEMORY, through a hidden pointer.
+        X86Target v3 = { 0 };
+        if (x86_target_parse("x86-64-v3", 9, &v3))
+        {
+            check_test_program_boundary_target(test, "union __attribute__((packed)) U{float v __attribute__((vector_size(16)));char c[22];};"
+                                                     "union U make(int n){union U u={0};u.c[0]=(char)n;return u;}int tested(int n){return make(n).c[0];}",
+                                               "odd-vector-union-result", true, false, 1, 1, "structs and unions returned in these registers", &v3);
+        }
         check_test_program_boundary(test, "struct W{unsigned __int128 x:100;};int tested(int n){struct W w;w.x=n;return w.x>1;}", "int128-bit-field-past-8-bytes", true,
                                     false, 0, 0);
         check_test_program_boundary(test,

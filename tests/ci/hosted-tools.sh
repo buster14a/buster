@@ -229,11 +229,11 @@ CLANG
 chmod +x "$llvm/bin/clang-23"
 ln -s clang-23 "$llvm/bin/clang"
 ln -s clang-23 "$llvm/bin/clang++"
-for tool in lld llvm-dwarfdump llvm-readobj llvm-symbolizer; do printf '#!/bin/sh\nexit 0\n' > "$llvm/bin/$tool"; chmod +x "$llvm/bin/$tool"; done
+for tool in lld llvm-dwarfdump llvm-readobj llvm-symbolizer llvm-split llvm-nm llvm-objcopy; do printf '#!/bin/sh\nexit 0\n' > "$llvm/bin/$tool"; chmod +x "$llvm/bin/$tool"; done
 ln -s lld "$llvm/bin/ld.lld"
 printf '#!/bin/sh\necho 23.1.4\n' > "$llvm/bin/llvm-config"
 chmod +x "$llvm/bin/llvm-config"
-touch "$llvm/include/header.h" "$llvm/lib/libLLVMfixture.a" "$llvm/lib/libPollyfixture.a" "$llvm/lib/libclang-cpp.so.23" "$llvm/lib/clang/23/lib/test/libclang_rt.fuzzer_no_main.a"
+touch "$llvm/include/header.h" "$llvm/lib/libLLVMfixture.a" "$llvm/lib/libPollyfixture.a" "$llvm/lib/libclangfixture.a" "$llvm/lib/libclang-cpp.so.23" "$llvm/lib/clang/23/lib/test/libclang_rt.fuzzer_no_main.a"
 tar --zstd -cf "$work/upstream/llvm" -C "$work/archive" LLVM-23.1.4-Linux-X64
 cmake="$work/archive/cmake-4.4.3-linux-x86_64"
 mkdir -p "$cmake/bin" "$cmake/share/cmake-4.4" "$cmake/doc/cmake"
@@ -270,6 +270,22 @@ BUSTER_HOSTED_RELEASES="$work/real-inputs" bash "$work/tools/install-hosted-tool
 [ "$("$work/installed tree/llvm-23.1.4/bin/clang" -dumpversion)" = 23.1.4 ] || fail 'relocated compiler failed'
 [ -x "$work/installed tree/bin/wild" ] && [ -x "$work/installed tree/bin/mold" ] || fail 'relocated links broke'
 [ -f "$("$work/installed tree/llvm-23.1.4/bin/clang" -print-runtime-dir)/libclang_rt.fuzzer_no_main.a" ] || fail 'relocated runtime missing'
+[ -f "$work/installed tree/llvm-23.1.4/lib/libclangfixture.a" ] && [ -f "$work/installed tree/llvm-23.1.4/lib/libclang-cpp.so.23" ] || fail 'clang libraries missing'
+# The tree as installed is the hosted toolchain to hosted-product.sh: a clang server build that exits 77 (no server)
+# with this clang on PATH fails the row's build loudly rather than leaving it green without the server (#2071). A
+# change to where the installation puts clang or its lock, which would hide it from that check, fails here.
+mkdir -p "$work/product/tools/ci" "$work/product/tools/clang-server" "$work/product/runner"
+cp "$root/tools/ci/hosted-product.sh" "$work/product/tools/ci/"
+printf '#!/usr/bin/env bash\nprintf "#!/bin/sh\\n" > "$1"\nchmod +x "$1"\n' > "$work/product/tools/build-preprocessor-pragma-oracle.sh"
+printf '#!/usr/bin/env bash\necho "clang-server: no static clang archives: no server" >&2\nexit 77\n' > "$work/product/tools/clang-server/build.sh"
+: > "$work/product/runner/env"
+if (cd "$work/product" && PATH="$work/installed tree/llvm-23.1.4/bin:$PATH" RUNNER_TEMP="$work/product/runner" \
+    GITHUB_ENV="$work/product/runner/env" bash tools/ci/hosted-product.sh build) > "$work/product/log" 2>&1; then
+    cat "$work/product/log"
+    fail 'no clang server on the installed hosted toolchain passed the build'
+fi
+grep -q "::error.*hosted toolchain ($work/installed tree).*status 77" "$work/product/log" || { cat "$work/product/log"; fail 'no clang server on the installed hosted toolchain failed without its error'; }
+[ ! -s "$work/product/runner/env" ] || fail 'no clang server on the installed hosted toolchain exported paths'
 # An internally incomplete but hash-pinned fixture must fail without publishing.
 rm "$llvm/lib/clang/23/lib/test/libclang_rt.fuzzer_no_main.a"
 tar --zstd -cf "$work/upstream/llvm" -C "$work/archive" LLVM-23.1.4-Linux-X64
@@ -279,4 +295,4 @@ bash "$release" prepare "$work/real-inputs"
 if BUSTER_HOSTED_RELEASES="$work/real-inputs" bash "$work/tools/install-hosted-tools.sh" "$work/incomplete"; then fail 'missing runtime was accepted'; fi
 [ ! -e "$work/incomplete" ] || fail 'incomplete install was published'
 if compgen -G "$work/incomplete.install.*" > /dev/null; then fail 'incomplete extraction staging survived'; fi
-printf 'hosted-tools: extraction, relocation, runtime probes and incomplete-publication fixtures passed\n'
+printf 'hosted-tools: extraction, relocation, runtime probes, the missing-server failure and incomplete-publication fixtures passed\n'

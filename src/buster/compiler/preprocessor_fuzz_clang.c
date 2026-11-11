@@ -85,34 +85,24 @@ static bool preprocessor_fuzz_clang_read(Arena* arena, int descriptor, uint64_t 
     return result;
 }
 
-// Regular files avoid pipe backpressure. A pidfd wakes the parent immediately on completion, while the timeout also
-// bounds a stuck oracle. The periodic size check bounds runaway output without imposing a polling delay per launch.
-static PreprocessorFuzzProcess preprocessor_fuzz_clang_process(Arena* arena, char* const* arguments, String8 input, uint64_t output_limit)
+// oracle_cache.c's, which main.c includes after this file: the process's clang server (test-preprocessor
+// --clang-server, oracle_serve), which takes these runs where it can (oracle_serve_takes) and runs them
+// (oracle_serve_command), and with --differential the comparison of each with its child's (oracle_serve_compare).
+static bool oracle_serve_takes(char* const* arguments, bool* both);
+static int oracle_serve_command(char* const* arguments, const char* input, uint32_t timeout, bool both, char** output, uint64_t* output_length, char** errors, uint64_t* errors_length);
+static void oracle_serve_compare(const char* purpose, char* const* arguments, const char* input, int status, const char* const* texts, const uint64_t* lengths, int served_status,
+                                 const char* const* served, const uint64_t* served_lengths);
+
+// A run's files in `directory`, from `first` up to `end`: 0 its standard input, 1 its standard output, 2 its errors, each
+// new, read and written, and above the standard descriptors, whose paths and descriptors go to paths[i] and
+// descriptors[i]. False if one can't be made.
+static bool preprocessor_fuzz_clang_files(const char* directory, char (*paths)[PATH_MAX], int* descriptors, uint64_t first, uint64_t end)
 {
-    PreprocessorFuzzProcess result = {0};
-    // A batch of rejected cases gives diagnostics for each (-ferror-limit=0): as much room as its output has.
-    const uint64_t diagnostic_limit = output_limit > BUSTER_PPF_CLANG_DIAGNOSTIC_BYTES ? output_limit : BUSTER_PPF_CLANG_DIAGNOSTIC_BYTES;
-    char directory[PATH_MAX];
-    char paths[3][PATH_MAX] = {0};
-    int descriptors[3] =
+    bool valid = true;
+    for (uint64_t i = first; valid && i < end; i += 1)
     {
-        -1,
-        -1,
-        -1,
-    };
-    const char* temporary = oracle_temporary_directory();
-    if (temporary == 0 || temporary[0] == 0)
-    {
-        temporary = "/tmp";
-    }
-    const int directory_length = snprintf(directory, sizeof(directory), "%s/buster-ppf-XXXXXX", temporary);
-    bool valid = directory_length > 0 && (uint64_t)directory_length < sizeof(directory);
-    bool directory_created = valid && mkdtemp(directory) != 0;
-    valid = valid && directory_created;
-    for (uint64_t i = 0; valid && i < 3; ++i)
-    {
-        const int length = snprintf(paths[i], sizeof(paths[i]), "%s/%llu", directory, (unsigned long long)i);
-        valid = length > 0 && (uint64_t)length < sizeof(paths[i]);
+        const int length = snprintf(paths[i], PATH_MAX, "%s/%llu", directory, (unsigned long long)i);
+        valid = length > 0 && length < PATH_MAX;
         if (valid)
         {
             descriptors[i] = open(paths[i], O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
@@ -125,28 +115,20 @@ static PreprocessorFuzzProcess preprocessor_fuzz_clang_process(Arena* arena, cha
             }
         }
     }
-    uint64_t written = 0;
-    while (valid && written < input.length)
-    {
-        const ssize_t amount = write(descriptors[0], input.pointer + written, input.length - written);
-        if (amount > 0)
-        {
-            written += (uint64_t)amount;
-        }
-        else if (amount == 0 || errno != EINTR)
-        {
-            valid = false;
-        }
-    }
-    if (valid)
-    {
-        valid = lseek(descriptors[0], 0, SEEK_SET) == 0;
-    }
+    return valid;
+}
+
+// The run as a child, its standard streams `descriptors` (preprocessor_fuzz_clang_files), in a process group of its own.
+// Regular files avoid pipe backpressure. A pidfd wakes the parent immediately on completion, while the timeout also
+// bounds a stuck oracle. The periodic size check bounds runaway output without imposing a polling delay per launch.
+static PreprocessorFuzzProcess preprocessor_fuzz_clang_spawn(Arena* arena, char* const* arguments, const int* descriptors, uint64_t output_limit, uint64_t diagnostic_limit)
+{
+    PreprocessorFuzzProcess result = {0};
     posix_spawn_file_actions_t actions;
     posix_spawnattr_t attributes;
-    const bool actions_ready = valid && posix_spawn_file_actions_init(&actions) == 0;
-    const bool attributes_ready = valid && posix_spawnattr_init(&attributes) == 0;
-    valid = valid && actions_ready && attributes_ready;
+    const bool actions_ready = posix_spawn_file_actions_init(&actions) == 0;
+    const bool attributes_ready = posix_spawnattr_init(&attributes) == 0;
+    bool valid = actions_ready && attributes_ready;
     for (int i = 0; valid && i < 3; ++i)
     {
         valid = posix_spawn_file_actions_adddup2(&actions, descriptors[i], i) == 0;
@@ -241,6 +223,101 @@ static PreprocessorFuzzProcess preprocessor_fuzz_clang_process(Arena* arena, cha
     {
         valid = close(child_descriptor) == 0 && valid;
     }
+    result.valid = valid;
+    return result;
+}
+
+// A served stream, `length` bytes of `text`, into `arena` with a NUL after them, as preprocessor_fuzz_clang_read reads a
+// child's: false past `limit`, which would have stopped the child.
+static bool preprocessor_fuzz_clang_copy(Arena* arena, const char* text, uint64_t length, uint64_t limit, String8* copy)
+{
+    char* data = length <= limit && (length == 0 || text != 0) ? arena_push(arena, length + 1, 1) : 0;
+    if (data != 0)
+    {
+        memcpy(data, text, length);
+        data[length] = 0;
+        *copy = (String8){
+            .pointer = data,
+            .length = length,
+        };
+    }
+    return data != 0;
+}
+
+// `arguments` (argument 0 the clang) on `input`, its exit code and its streams, each within its limit, into `arena`:
+// invalid if it couldn't run, ran past BUSTER_PPF_CLANG_TIMEOUT_SECONDS or past a limit, or didn't exit. Its input is a
+// file, which the run reads as its standard input. With test-preprocessor's --clang-server, a run the server takes goes
+// there (oracle_serve_takes), within the same time and limits, and a run it couldn't take runs as a child. With
+// --differential the run runs as a child too, which gives its result, and the two are compared.
+static PreprocessorFuzzProcess preprocessor_fuzz_clang_process(Arena* arena, char* const* arguments, String8 input, uint64_t output_limit)
+{
+    PreprocessorFuzzProcess result = {0};
+    // A batch of rejected cases gives diagnostics for each (-ferror-limit=0): as much room as its output has.
+    const uint64_t diagnostic_limit = output_limit > BUSTER_PPF_CLANG_DIAGNOSTIC_BYTES ? output_limit : BUSTER_PPF_CLANG_DIAGNOSTIC_BYTES;
+    bool both = false;
+    const bool takes = oracle_serve_takes(arguments, &both);
+    char directory[PATH_MAX];
+    char paths[3][PATH_MAX] = {0};
+    int descriptors[3] =
+    {
+        -1,
+        -1,
+        -1,
+    };
+    const char* temporary = oracle_temporary_directory();
+    if (temporary == 0 || temporary[0] == 0)
+    {
+        temporary = "/tmp";
+    }
+    const int directory_length = snprintf(directory, sizeof(directory), "%s/buster-ppf-XXXXXX", temporary);
+    bool valid = directory_length > 0 && (uint64_t)directory_length < sizeof(directory);
+    bool directory_created = valid && mkdtemp(directory) != 0;
+    valid = valid && directory_created && preprocessor_fuzz_clang_files(directory, paths, descriptors, 0, 1);
+    uint64_t written = 0;
+    while (valid && written < input.length)
+    {
+        const ssize_t amount = write(descriptors[0], input.pointer + written, input.length - written);
+        if (amount > 0)
+        {
+            written += (uint64_t)amount;
+        }
+        else if (amount == 0 || errno != EINTR)
+        {
+            valid = false;
+        }
+    }
+    if (valid)
+    {
+        valid = lseek(descriptors[0], 0, SEEK_SET) == 0;
+    }
+    // The server's result: the run's, unless the server couldn't take it or --differential runs it as a child too.
+    char* served[2] = { 0, 0 };
+    uint64_t served_lengths[2] = { 0, 0 };
+    const int served_status = valid && takes ? oracle_serve_command(arguments, paths[0], BUSTER_PPF_CLANG_TIMEOUT_SECONDS, both, &served[0], &served_lengths[0], &served[1], &served_lengths[1]) : -1;
+    const bool within = served_status >= 0 && served_lengths[0] <= output_limit && served_lengths[1] <= diagnostic_limit;
+    if (valid && (!takes || both || served_status < 0))
+    {
+        // The child's output and errors in files of their own, made only for a child.
+        valid = preprocessor_fuzz_clang_files(directory, paths, descriptors, 1, 3);
+        result = valid ? preprocessor_fuzz_clang_spawn(arena, arguments, descriptors, output_limit, diagnostic_limit) : result;
+        valid = valid && result.valid;
+    }
+    else if (valid)
+    {
+        result.exit_code = served_status;
+        valid = within && preprocessor_fuzz_clang_copy(arena, served[0], served_lengths[0], output_limit, &result.output) &&
+                preprocessor_fuzz_clang_copy(arena, served[1], served_lengths[1], diagnostic_limit, &result.diagnostic);
+    }
+    if (takes && both)
+    {
+        const char* const texts[2] = { result.output.pointer, result.diagnostic.pointer };
+        const uint64_t lengths[2] = { valid ? result.output.length : 0, valid ? result.diagnostic.length : 0 };
+        const char* const answers[2] = { served[0], served[1] };
+        oracle_serve_compare("preprocessor fuzz: clang", arguments, paths[0], valid ? result.exit_code << 8 : -1, texts, lengths, within ? served_status << 8 : -1, answers,
+                             served_lengths);
+    }
+    free(served[0]);
+    free(served[1]);
     for (uint64_t i = 0; i < 3; ++i)
     {
         if (descriptors[i] >= 0)

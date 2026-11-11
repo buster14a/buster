@@ -12,12 +12,20 @@ writer, the direct path's executables (static ones without libc and with it,
 and dynamic PIEs against glibc) and the import, binding and snapshot of the C
 runtime they need are implemented (`src/buster/compiler/lane.c`, `x86_64_encoder.c`,
 `link.c`, `object_writer.c`, `import.c`, `runtime.c`, `bind.c`,
-`executable.c`, `dynamic.c` and `snapshot.c`, with generated test programs in
-`link_program.c`), and `benchmark-link` measures the whole link against the
+`executable.c`, `executable_impl.c`, `dynamic.c` and `snapshot.c`, with generated
+test programs in `link_program.c`), and `benchmark-link` measures the whole link against the
 linkers ("The whole link"); the rest of the linker isn't yet. The document
 records the measurements on the Ryzen 7 9700X that the design rests on, the
 design itself, and the order to build it in, as `docs/x86-64-encoder.md` does
 for the encoder.
+
+`executable.c` retains the shared writer interface, hash helpers and
+unwind/debug readers. `executable_impl.c` contains its private layout, patching
+and output code. DYNAMIC keeps the externally emitted writer and EXECUTABLE
+keeps access to the private bodies for its tests; standalone consumers and a
+configured fuzz DRIVER retain the full module. The
+[build guide](commands/build.md#production-parsing-and-implementation-dependencies)
+records the dependency boundary.
 
 The premise is that most of what mold and wild do on every link is work this
 compiler can avoid altogether. What remains is memory traffic, and the design
@@ -1754,7 +1762,7 @@ for a new file against 7.4–7.7, the one case where a single writer can win.
 
 Step 4's executables are static and use no libc: no crt objects, no dynamic
 sections, and a `_start` that makes its own system calls, as with `-nostdlib
--static`. `executable_write` (`executable.c`) lays them out, patches them and
+-static`. `executable_write` (`executable_impl.c`) lays them out, patches them and
 writes them from the representation, at GNU ld's fixed base, 0x400000:
 
 - **Sections and segments:** the layout above without the dynamic sections.
@@ -4621,8 +4629,8 @@ step 8's question, with the exchange's and the winners' first touches.
 #### Foreign executables, as built
 
 `foreign_link.c` turns `foreign_run`'s result into the representation, and
-`executable.c` writes it; `link-foreign` ([the command](foreign-driver.md))
-puts the two behind a GNU ld command line, as GCC's and clang's drivers give
+`executable_write` in `executable_impl.c` writes it; `link-foreign`
+([the command](foreign-driver.md)) puts the two behind a GNU ld command line, as GCC's and clang's drivers give
 it. It writes every kind the direct path writes: static executables (with
 `libc.a`, or without libc), static PIEs, dynamic PIEs and shared libraries
 (#394, after the dynamic PIEs of #86).
@@ -4941,7 +4949,10 @@ them. The compiler's commands ask by default for no more lanes than the cores of
 the CPUs they may run on (`BUSTER_LANE_SESSION_PER_CORE`), which lane 1 counts
 from sysfs' sibling lists before it creates the others, a read per core off
 lane 0's path; lane 0 reads the count when a wide part first needs it
-(`lane_session_asked`). A session whose
+(`lane_session_asked`). An on-demand session (`BUSTER_LANE_SESSION_ON_DEMAND`,
+#1444, the C driver's for one source file) creates no thread until lane 0
+starts its lanes (`lane_session_start`), once its input pays for them; one that
+lane 0 settles first runs on lane 0 alone. A session whose
 lanes can't start runs the flow on lane 0 alone and never tries again; a
 terminal command's lanes stay parked when its flow ends, for the process's exit
 to end them (a sanitizer build joins them), and a test's are joined. The

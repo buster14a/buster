@@ -7,56 +7,77 @@ requirements. [Command index](README.md).
 ## Every main revision
 
 Every merge or direct push to `main`, including documentation/Markdown-only
-changes, starts the full hosted correctness matrix and fuzz campaigns against
-that push's `github.sha` (#1271). Main pushes use a separate run-id concurrency
+changes, starts hosted correctness against that push's `github.sha` (#1271).
+In the nightly mode it runs the plain rows only (#2057, the owner's choice on
+2026-11-10); the sanitizer rows and fuzz campaigns run on the nightly
+snapshot's daily run, until the merge queue (#1430) runs the complete suite
+before each merge and pushes run no checks. Before the nightly mode a push runs
+the full matrix and fuzzing. Main pushes use a separate run-id concurrency
 group each, so rapid merges do not replace pending main runs. PRs still cancel
 only their own superseded runs; the hardware lock still serializes the 9700X.
 
 Do not add main-push path filters, treat a successful PR run or Measurement
-storage as full main CI, or let native-evidence reuse or nightly mode suppress
-main's hosted suite. `changes --self-test` checks the trigger, concurrency and
-full hosted policy with counterexamples; `tests/ci/nightly.sh` checks that every
-push's evidence retains `scope=full`, `hosted=run` and no hosted reuse source,
-including documentation-only pushes with nightly mode on and off.
+storage as a push's own hosted rows, or let native-evidence reuse suppress
+them. `changes --self-test` checks the trigger, concurrency and hosted-scope
+policy with counterexamples; `tests/ci/nightly.sh` checks that every push's
+evidence keeps `hosted=run` and no hosted reuse source, with `scope=plain` in
+the nightly mode and `scope=full` before it, including documentation-only
+pushes.
 
 ## Sharing the 9700X
 
 Correctness CI runs on GitHub-hosted Ubuntu 26.04 with the official stable
 Clang/LLVM 23.1.4 release, in baseline x86-64 and native host builds. Native
 builds on CPUs without the complete vector feature set use the scalar fallback.
-Each row's inventory runs as 4 shards, a runner each that builds the compiler
-itself (a native build must run on the CPU it was built for): `parallel --shard
-K/4 --costs tools/ci/correctness.costs` deals the commands by their hosted
-costs, the same deal on every shard's runner, so the shards run each command
-once. A plain row's test step took 14.6 minutes on one 4-CPU runner; its shards
-take about 4 to 5. The steps a row needs once (the baseline fallback, QEMU and
-arena checks, the parser smoke test, the performance readers and the TSan/MSan
-`main.c` compiles) run in its shard 1. Refresh the costs from a hosted run's
-report when the shards' times drift apart ([the runner guide](parallel.md)).
+On a pull request the native row is the vector row instead (#2033): the
+explicit vector target (`BUSTER_HOST_ARCH=vector`, `host_isa.h`'s predicate),
+whose 4 shards are items that each draw's collector assigns, by rank, to the
+hosted runners whose probe found their CPU qualifies (`tools/ci/vector-draw.sh`,
+tested by `bash tests/ci/vector-draw.sh`), drawn in up to 4 levels, with no
+emulation; an item no qualifying CPU held fails it as incomplete ([The vector
+row](../ci.md#the-vector-row)). Its race fixture is
+`.github/workflows/vector-claim-race.yml`.
+Each row (`.github/workflows/hosted-correctness.yml`, which the test job calls
+per row) runs its inventory as its own number of shards, a runner each:
+`parallel --shard K/N --costs tools/ci/costs/ROW.costs` deals the commands by
+the row's hosted costs, the same deal on every shard's runner, so the shards run
+each command once ([Shard costs](#shard-costs)). A portable `x86-64` row
+builds its compiler once, and its shards verify and run that product
+(`tools/ci/hosted-product.sh`; [Shared row
+products](../ci.md#shared-row-products), #2032); a `native` row's shards each
+build their own (a native build must run on the CPU it was built for). Run
+`bash tests/ci/hosted-product.sh` after changing the product's packing, identity
+or checks. A plain row's test step took 14.6 minutes on one 4-CPU runner; its
+4 shards take about 4 to 6. The steps a row needs once (the baseline fallback,
+QEMU and arena checks, the parser smoke test, the performance readers and the
+TSan/MSan `main.c` compiles) run in its shard 1.
 The repository syntax check retains each build's sanitizer feature flags and
 predefines, while excluding its exact host-only detector and frame controls
 (#1423). The compiler executing the check remains instrumented.
-On pushes to main and the daily and dispatched runs (not on pull requests, which
-they would hold up for over an hour), each host architecture also runs the
-inventory under `BUSTER_SANITIZER=address|undefined|thread|memory`, but the
+On the daily and dispatched runs, the nightly snapshot's daily run and pushes
+before the nightly mode (not on pull requests, which they would hold up for over
+an hour, nor on pushes in the nightly mode, #2057), each host architecture also runs the
+inventory under `BUSTER_SANITIZER=address|thread|memory`, but the
 compiler's own `main.c` checking comparison in the TSan and MSan rows, whose
 measured memory (docs/ci.md) exceeds a hosted runner's; their `-c` compiles run
 in a separate step after the suite. ASan combines UBSan, bounds,
-leak and stack-lifetime checks; TSan and MSan use separate builds. Diagnostic
+leak and stack-lifetime checks; TSan and MSan use separate builds.
+Standalone `BUSTER_SANITIZER=undefined` remains available for manual diagnosis,
+but no longer repeats the full suite on every main push. Diagnostic
 builds default to `-O3`, frames and line information, with fatal symbolized detector
 proofs and child-report auditing. `BUSTER_FUZZ_AVAILABLE=1` adds in-process
 coverage and the `--fuzz` driver override; `BUSTER_FUZZ_ENTRY=FILE.c` replaces
 its byte-input callback. Hosted frontend, ELF and crash/replay campaigns gate
-the same runs. Additional full ASan/UBSan suites run at `-O1`;
-`BUSTER_SANITIZER_OPTIMIZATION=1|2|3` selects an explicit level.
+the same runs. The hosted matrix runs at `-O3` throughout;
+`BUSTER_SANITIZER_OPTIMIZATION=1|2|3` remains available for explicit diagnostic builds.
 See `docs/ci.md` for usage and the precise coverage boundaries.
 After all the hosted variants and fuzz jobs a run has pass on the same triggering revision, Benchpress
 requires the complete vector feature set and runs native correctness before
-benchmarks, reusing one build and the existing shared lock. On a pull request
-it runs the benchmarks without the native correctness step (#1272): hosted
-correctness covers the pull request, and native correctness runs after the
-merge, on main's push of the landed commit and on the daily and nightly runs.
-The required aggregate's message then says native correctness was not run. All correctness builds run
+benchmarks, reusing one build and the existing shared lock. Pull requests never
+run it (#2055, the owner's choice on 2026-11-10): hosted correctness qualifies a
+pull request, and native correctness and measurements run on its merged
+first-parent state in the nightly window. The required aggregate passes a pull
+request on its hosted rows and says so. All correctness builds run
 the same suite inventory, `tools/ci/correctness.tests`. Failed, cancelled or
 skipped hosted tests cannot queue the hardware job; failed native tests cannot
 start benchmarks. A pull request's run stops at its first failure: its test rows
@@ -64,10 +85,11 @@ fail fast, and its tests don't start when the guide-size or DCO hook check
 fails. Pushes to main, the daily and dispatched runs report every row. The
 existing required check name is retained by a hosted aggregation job that fails
 when either stage fails.
-Draft PRs retain hosted feedback but cannot queue hardware. Ready/draft transitions
-start a new run and cancel the superseded run in the same PR group. The required
-aggregate explicitly fails a code-changing draft until ready; the selector's
-legitimate no-code exemption still passes. Its C predicate in
+Draft and ready PRs alike get hosted feedback and never queue hardware.
+Ready/draft transitions start a new run and cancel the superseded run in the
+same PR group. The required aggregate passes a code-changing draft on its hosted
+rows as it does a ready PR, and the selector's legitimate no-code exemption
+still passes. Its C predicate in
 `tools/ci/qualification.c` exhaustively tests the allowed outcomes, including
 missing/invalid/skipped results and event/selector consistency.
 See [the CI guide](../../docs/ci.md) for tool and frozen-input setup.
@@ -160,15 +182,27 @@ there at a time, so everything takes one lock:
   unit that names no source; or when a fixture's decision changes (docs alone,
   `docs/performance`, `web/perf`, tests alone, the binding events' producers,
   `zen5`'s digit, closures through includes, the build's description, pushes).
-  It also fails when the hosted test job's shards disagree
-  (`changes_shard_policy`): its matrix's `shard: [1, ..., N]` must count from 1
-  without a gap, and the same N must be in the job's name, the run step's
-  `--shard "${{ matrix.shard }}/N"` and the O1 rows' include entries (shards 1
-  to N of each architecture), since a list and an N that disagree would leave a
-  shard's commands unrun with every job green. Run it
+  It also fails when the hosted rows' shards disagree
+  (`changes_shard_policy`, on `hosted-correctness.yml` and its caller): the
+  row workflow's required number input `shards` must be N throughout, its
+  matrix's lookup `fromJSON('[[], [1], [1, 2], ...]')[inputs.shards]` must give
+  1 to N for every N it has, the job's name and the run step's
+  `--shard "${{ matrix.shard }}/${{ inputs.shards }}"` must take the same
+  input, and every number the test job's `shards:` passes must be one the
+  lookup has, since a list and an N that disagree would leave a shard's
+  commands unrun with every job green; and when the row workflow weakens its shared products
+  (`changes_row_policy`: the portable rows alone, the triggering revision, the
+  ownership check on the build's tree, the shards' wait for the build, its
+  SHA-256 and their verified install, nothing from a cache or another run); and
+  when the vector row's probe, `host_isa.h`'s predicate and the build's vector
+  flags fall out of step, or its records stop being per attempt and
+  non-overwriting, or its candidates take items without their collector's
+  assignment (`changes_vector_policy`). The
+  selector doesn't read the row workflow's steps: a change to that file runs
+  the steps it gates on `performance`. Run it
   locally with `cc -std=c17 -O2 -Wall -Wextra -Werror -o /tmp/changes
   tools/ci/changes.c && /tmp/changes --self-test` after changing a gate, a
-  benchmark's step, the tables or the shards. Its oracle policy pins the 9700X
+  benchmark's step, the tables, the rows or the shards. Its oracle policy pins the 9700X
   job's `needs` (`[changes, evidence, test, fuzz]`), its `if:` (the `evidence`
   job's success and admission, hosted rows skipped only by evidenced reuse on a
   dispatch, fuzzing only in the plain scope), the native correctness step's
@@ -176,6 +210,91 @@ there at a time, so everything takes one lock:
   counterexamples for each.
 - `~/buster-fast-bench/README-9700x.md` on the host describes the setup and how
   to undo it.
+
+## Shard costs
+
+Each hosted row deals its inventory to its shards by a table of its own,
+`tools/ci/costs/ARCH-SANITIZER-O3.costs` (#2031): the `x86-64` and `native`
+rows, each sanitizer, and the plain `vector` row that pull requests run (#2033).
+Each table is
+`tools/ci/costs.c`'s output alone, never edited by hand. Its first line says
+so, and `costs --self-test --root .`, which the selector's job runs on every
+pull request, fails a table that differs in any byte from what `costs refresh`
+would write. In particular it fails a table that lacks an inventory heading or
+names one the inventory doesn't have:
+
+```sh
+cc -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing tools/ci/costs.c -o build/costs
+build/costs --self-test --root .
+```
+
+- **What a cost is.** A command's time times the CPUs it held (its heading's
+  `[N CPUs]`, at most the runner's 4), in seconds: `parallel`'s unit. A
+  measured cost is the 90th percentile (nearest rank) of the command's samples
+  in that row. Each sample is first scaled to the slowest CPU's time.
+- **CPU speeds.** Hosted runners draw EPYC 7763, 9V74 and 9V45 and Xeon 8370C,
+  8573C and 6973P-C, and a deal can't choose one. The scale is each CPU's
+  speed against the reference CPU's (the one most jobs drew): the median, over
+  the commands both ran in one row, of the ratio of their median times. On
+  11 November the 9V45 and the 6973P-C took 0.64 of the 7763's time, the 9V74
+  0.79, the 8573C 0.80 and the 8370C 0.89. A CPU that shares fewer than five
+  commands with the reference keeps its samples as they are (`-`).
+- **Commands without a good sample.** A command whose samples all failed costs
+  its longest failure, a lower bound (`#: lower-bound`). One without any sample
+  costs the row's median per CPU times its CPUs (`#: unmeasured`).
+- **Provenance.** The `#:` lines record the row, the runner's CPUs, the
+  revisions measured and the CPUs drawn, each with its jobs.
+- **Collect.** After a full run (the nightly snapshot's, or a dispatched
+  `full` run), `bash tools/ci/costs.sh LOGS_DIRECTORY RUN...` fetches the given
+  runs' shard logs (`gh api repos/buster14a/buster/actions/jobs/ID/logs`, each
+  shard whose test step ran) and runs `costs collect --tests
+  tools/ci/correctness.tests --output tools/ci/costs LOG...`, then `costs
+  check`. Give it full runs together with recent main pushes, for more plain
+  samples. `collect` writes each row the logs have. A log is data. One that
+  lacks the job's name, its CPU, its checkout, or the runner's shard line and
+  summary is rejected, and so is the same job twice. A vector row's draw
+  (`Vector draw L, candidate C`) takes its row from its caller's name and its
+  shard from its report, which names the item its collector assigned; a
+  candidate that took no item has no report, and `costs.sh` skips it.
+- **Refresh.** A pull request that adds, renames or removes a heading runs
+  `build/costs refresh --tests tools/ci/correctness.tests --costs
+  tools/ci/costs`. It keeps every measurement, estimates the new commands and
+  drops the removed ones; no logs are needed.
+- **Plan.** `build/costs plan --tests tools/ci/correctness.tests --costs
+  tools/ci/costs/ROW.costs --shards 2-8 [--setup S] [--first S] [--deal
+  FILE]` predicts the runner's deal and schedule for each shard count. For
+  each N it prints the longest shard, the mean, the imbalance, the floor (the
+  longest command alone) and the runner-minutes. A single N lists each
+  command's start and end. `--deal` deals by another file, such as an older
+  table, and times the deal by `--costs`.
+- **Report.** `build/costs report LOG...` gives a run's rows as they ran: each
+  row's longest shard, mean, imbalance, span, runner-minutes and the CPUs drawn.
+
+The tables name their runner's CPUs (`#: runner-cpus 4`). With that line,
+`parallel` deals as `test_deal_scheduled` (`test_deal.h`) does: the costliest
+command first, each to the shard that, run on 4 CPUs in the list's order as
+the runner runs it, would end the earliest with it. A deal by costs alone
+couldn't see that the shard holding a row's longest command also started its
+8-CPU commands first, which hold every CPU. With the 11 November tables, that
+deal predicted 389 s for the plain `x86-64` row's longest shard against 321 s
+by schedule, and 527 s against 454 s for the plain `native` row. `plan` shares
+the function, so its deal is the runner's.
+
+The test job in `9700x.yml` gives each row its count (`shards`):
+
+| Row | Shards | Why |
+| --- | ---: | --- |
+| plain, both | 4 | `tools/ci/nightly.c` counts the plain rows' shards as one N; more native shards each rebuild the compiler for under a minute less |
+| `x86-64` TSan, MSan | 6 | a portable row's extra shard costs a minute of setup; 6 reach the rows' longest commands |
+| `native` MSan | 5 | each extra native shard rebuilds the instrumented compiler (about 10 minutes) |
+| `vector` (plain) | 4 | its items, `BUSTER_VECTOR_ITEMS`, which its draws are sized for; the run step counts them |
+| others | 4 | already shorter than the run's longest row |
+
+No deal beats a row's longest command. In the MSan rows that is a part of the
+preprocessor's cases against clang (about 20 minutes on an EPYC 7763), and in
+the plain rows the semantic driver's and the parser's clang checks; finer parts
+(#2030) lower it. A row's once-only steps run on its shard 1 after the deal, so
+`plan --first` adds them, but the deal doesn't see them.
 
 ## Reuse and the nightly backlog
 

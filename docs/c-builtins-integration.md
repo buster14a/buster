@@ -54,8 +54,12 @@ input program's object.
 Clang's generic overflow builtins accept non-const integer destinations,
 including `_Bool` and enums. This differs from GCC's documented exclusion of
 boolean and enumerated destinations. Bit-precise descriptors through 64 bits
-are accepted by the action kernel; wider overflow operands are refused
-explicitly. The runtime memory representation has a narrower contract below.
+are accepted by the action kernel; wider overflow operands are runtime actions,
+never folded, and past 128 bits a signed `_BitInt` of `mul_overflow`'s, as an
+operand or the destination, is clang's error at that argument ("__builtin_mul_overflow
+does not support 'signed _BitInt' operands of more than 128 bits",
+`CHECK_DIAG_OVERFLOW_BIT_INT`, #1447). The runtime memory representation has a
+narrower contract below.
 
 The input and output arrays are disjoint, naturally aligned C arrays with
 exactly `count` logical entries and no padding. They must also be disjoint from
@@ -278,7 +282,16 @@ operations are the same everywhere; 128-bit operands and destinations, and
 `_BitInt`s of 65 to 127 bits (#1447: their descriptor is their width, their
 high limb extended from it, and a destination fits where its high limb extended
 from the width's bits past 64 gives the result's back), keep their limbs' recipe
-(`cbuiltin_lower_overflow_wide`), and the destination stores its
+(`cbuiltin_lower_overflow_wide`). Where an operand or the destination is a
+`_BitInt` past 128 bits (#1447), the lowering computes the exact result in the
+signed `_BitInt` that holds it and every destination value
+(`check_lower_overflow_encompassing`: a sum's or difference's one bit past the
+widest operand's signed width, a product's the signed widths' sum), as clang's
+code does: both operands extended into its limbs, their sum or difference a limb
+at a time, their product by libgcc's `__mulbitint3`, as GCC -O0's code makes
+one; the destination takes its low limbs extended from its width, and the flag
+is whether the bits from its top bit up (past its width, unsigned) differ from
+its sign's (`check_lower_overflow_limbs`). Otherwise the destination stores its
 value before the recipe's last entry, the flag, which stays on the value stack.
 
 `test-builtin-lowering` runs every recipe natively against clang's builtins:
@@ -292,8 +305,11 @@ of the low bits alone would give them back). `test-checker`'s
 and mixed calls of boundary values by both paths against clang -O0's build and
 checks that the signed longs' rows are `add`, `imul` and `cmp` with `seto`;
 `test-checker`'s `bit-int-65-to-127-overflow` program runs `_BitInt`s of 65 to
-127 bits' and hashes their destinations' bytes; `test-checker-driver`'s Tier 1
-fixture `tier1-overflow` runs them by `--tier1`,
+127 bits' and hashes their destinations' bytes, and `bit-int-past-128-overflow`
+those past 128 bits' (to 300 bits, beside 129-bit, 128-bit, narrower and `_Bool`
+ones); `test-checker-driver`'s Tier 1 fixture `tier1-overflow` runs them by
+`--tier1` (a `_BitInt(200)` difference and an unsigned product among them), its
+default warnings' fixture checks the signed `mul_overflow` error against clang's,
 and `tests/ir-source/overflow-builtins.c` through the IR's lowerings, both
 interpreters and Tier 1 (`test-ssa-source --typed --tier1`).
 
@@ -813,14 +829,13 @@ without a payload given the bit below the quiet one (`nans("")` is
 
 The checker's long double holds every format's NaN as the x87's own loads
 place it: the format's fraction at the significand's top, so that bit 62 is
-every format's quiet bit (`check_action_nan_bits`). A `__float128`'s 112
-fraction bits don't fit, so its NaN keeps its quiet bit at 62, its fraction's
-bit 110 (a signaling NaN without a payload's) at 61 and its payload's low 61
-bits below (`check_action_quad_bits`). A payload past 61 bits is refused:
-in a static initializer as an initializer that is not a constant expression,
-and in a function as an unsupported floating builtin. The value keeps its bits until a conversion to another format quiets it,
-as APFloat's does (`check_action_convert_nan`, which first re-encodes a
-`__float128` NaN as a narrowing reads it), so a conversion to the value's own
+every format's quiet bit (`check_action_nan_bits`). A `__float128` keeps its
+own bits (#1250, `c_check_quad.c`), a NaN's whole 111-bit payload among them
+(payloads are read modulo 2^128), and its long double mirror holds its
+fraction's top 63 bits there. The value keeps its bits until a conversion to another format quiets it,
+as APFloat's does (`check_action_convert_nan`, which also truncates the
+payload to the narrower format's fraction, so that a NaN narrowed then widened
+keeps only what the narrow format held), so a conversion to the value's own
 format, the rounding of a NaN, and a unary `+` or `-` (a sign change alone, as
 `changeSign` makes it) leave a signaling NaN signaling.
 
@@ -829,10 +844,10 @@ that encoding, its payload and quiet bit among them (`check_data_float_bytes`,
 `check_lower_float_bits`). Main wrote the canonical NaN, so `static double d =
 __builtin_nan("5")` lost its payload (`0x7ff8000000000000` where clang writes
 `0x7ff8000000000005`), and so did `nanf` and `nanl` in static data and `nanl`
-in code. The classifications fold of `_Float16` constants, their least normal
-`0x1p-14`, and of `__float128` infinities, NaNs and zeros, the values these
-builtins make, which are exact in the long double. They still refuse a
-run-time `_Float16` or `__float128` argument by name, as before.
+in code. The classifications and comparisons fold of `_Float16` constants,
+their least normal `0x1p-14`, and of every `__float128` constant, by its
+mirror's class or its bits' order. They still refuse a run-time `_Float16` or
+`__float128` argument by name, as before.
 
 `test-check-builtins-float` checks the constructions and refusals, and
 `test-checker --program-float-constants` (`c_check_program_constants_test.c`)
@@ -1591,7 +1606,7 @@ where every argument it reads is a constant: `clzs`, `ctzs`, and `clzg` and
 `ctzg` without a second argument, of zero are undefined (a fault, as
 `check_builtins` gives `clz` of zero), and a carry chain, whose store of its
 carry is an effect, never folds. A `_BitInt` past 128 bits, which clang takes,
-is refused by name.
+is a runtime action (#1447): no constant of one reaches the fold yet.
 
 `c_builtin_bits_lower.c`'s recipes compute them on U64 temporaries, a value
 zero-extended from its width, as clang's code computes on its `iN`: the
@@ -1614,6 +1629,28 @@ written to a frame object of its own, its high limb extended from its width,
 and read back as one I128 or U128 value. A wide rotation count's remainder
 comes from its limbs': 2^64's and 2^128's remainders are constants of the
 width.
+
+A first operand past 128 bits (#1447) goes limb by limb in the lowering
+(`check_lower_bits_limbs`), as clang's code computes on its `iN`, without
+branches: a count sums its limbs' population counts, or adds each limb's
+leading (trailing) zeros while the limbs before it are zero, from the top limb
+down (the bottom one up), less the padding past the width; a limb's counts are
+POPCNT's, LZCNT's and TZCNT's where the target has them, and otherwise SWAR's (a
+smeared limb's population count for its leading zeros, `~x & (x - 1)`'s for its
+trailing ones), all 64 for zero. A reversal or a byte swap reverses each limb
+(`bswap`, then masked swaps for the bits) into the other end of a buffer, then
+shifts the limbs down by the padding; `bit_floor`'s and `bit_ceil`'s bit `k`
+is limb `k / 64`'s bit `k % 64`; a rotation by `k` is the limbs' left shift by
+`k` ORed with their right shift by `(w - k) % w` (`check_lower_limb_shift`).
+A rotation's count, of any width, reduces modulo the width from its limbs'
+remainders, each times `2^(64 i)`'s, a negative one's plus the width less
+`2^(64 n)`'s; a narrower value's rotation by a count past 128 bits takes that
+remainder into the recipe. Clang's code generator can't compile a rotation of
+a width past 128 bits that is no power of two (its urem of the count); its
+Sema takes one, and so does this compiler, which `test-checker-driver`'s
+`tier1-bits` checks against a reference written with shifts.
+`test-checker`'s `bit-int-past-128-bit-builtins` program runs the rest against
+clang -O0's build.
 
 clang 23's code generation, and LLVM's main, evaluates `bitreverseg`'s
 argument twice, and `bswapg`'s for widths other than 1 and 8: `EmitScalarExpr`
@@ -1692,7 +1729,11 @@ argument, as clang's code doesn't; a folded address still evaluates both, as
 clang computes it at run time. A local array's address is no constant: the
 call runs, and gives what the fold would, since a frame places a declaration at
 least as aligned as clang declares it (#978's large arrays). A source past 128
-bits, which clang takes, is refused by name.
+bits (#1447) is a runtime action, its constant alignment checked as any
+source's (at least 1 and a power of 2; its maximum, 2 to its width less 1, is
+past every alignment of 128 bits). An alignment past 128 bits, which clang
+takes, is refused by name: clang checks a constant one, which the checker can't
+tell from a runtime one until its constants hold more than 128 bits.
 
 `c_builtin_misc_lower.c`'s `cbuiltin_misc_align` computes them as clang's code
 does, from the bit builtins' descriptors (a pointer's 64 bits): the source
@@ -1701,6 +1742,16 @@ the mask the alignment less 1 in that width (all ones for an alignment that
 truncates to 0, as a char's runtime 256 does), and a source of 65 to 128 bits
 limb by limb, with the mask's borrow and the sum's carry crossing between the
 limbs.
+
+A source past 128 bits goes limb by limb in the lowering
+(`check_lower_align_limbs`): its bits zero-extended from its width, the
+alignment's zero-extended or truncated to it, the mask its value less 1 in
+that width by a borrow chain, `align_up` `(x + mask) & ~mask` by a carry chain,
+`align_down` `x & ~mask`, each a frame object of the source's type, and
+`is_aligned` whether `(x & mask)`'s limbs are all zero. `test-checker
+--program-align`'s `align-bit-int-sources-past-128-bits` program runs them
+against clang -O0's build, and its source fixtures check the constant
+alignments of such sources and the refusals of wider alignments.
 
 `test-check-builtins-misc` checks the folds, the alignments' rules, the
 operands' types, the result types and the address folds, and
@@ -1852,19 +1903,29 @@ object p points to, as clang's `PaddingClearer` does.
   - an atomic type's bits past its value's;
   - a vector's past its elements (a bool ext vector's past one bit each).
 
-  `check_lower_padding` walks the type with an explicit stack and sets each
-  held bit in a bitmap of the object's.
+  `check_lower_padding_entries` (`c_check_program_padding.c`) walks the
+  element's type with an explicit stack before the function lanes run, once a
+  call, each held piece an interval of bits; an inner array's first element is
+  walked and its intervals copied for the others, or merged into one where the
+  element has no padding (#1842). The intervals are sorted and merged.
 - **Stores.** A byte with no bit held is a zero, in runs stored 8, 4, 2 and 1
   bytes at a time. A byte with some is its load ANDed with their mask. An
   array's elements, through arrays of arrays, are cleared in a loop by their
   element's stores. A variable length array is left as it is, as clang's code
-  leaves it.
-- **Limits.** An element past 4 KiB, or one whose stores pass a builtin's
-  entries (about 40 runs or bytes), is refused by name.
-- **Difference.** Clang's walk doesn't look through a typedef of an array
-  type (`dyn_cast<ConstantArrayType>` of the sugared type), so it keeps such
-  an array's padding. The type table here has no typedef sugar, so the
-  padding is cleared.
+  leaves it. Where an element's stores would pass about 460 of a builtin's
+  entries (some 40 runs), its entries (offset, bytes and mask, 8 bytes each)
+  are a read-only pool of the unit's, which the recipe's loop reads
+  (`cbuiltin_misc_lower_padding_table`): the same bytes cleared, by a few
+  dozen typed entries whatever the element's size (#1842).
+- **Limits.** An element past 4 GiB, a type nested more than 64 levels, or
+  an element of more than 1,048,576 intervals or entries is refused by name.
+- **Difference.** Clang's walk doesn't look through an array type's sugar
+  (`dyn_cast<ConstantArrayType>` of the sugared type), so it keeps the padding
+  of an array of a typedef's type, of `typeof`'s, or that a pointer declared
+  with parentheses points to (`struct S (*p)[2]`, `ParenType` sugar), and of
+  such an array member; a complex typedef's padding is cleared (`getAs`). The
+  type table here has no sugar, so the padding is cleared (#1842 asks which
+  way to take).
 
 `__builtin_invoke(f, a...)` (0x455, #148) is the call `f(a...)` in C, as
 clang's Sema builds it.
@@ -2207,8 +2268,12 @@ clang's os_log buffers, as `BuiltinOSLogFormat`, `OSLog.cpp` and
     the item's temporaries as it is evaluated.
   - A 32- or 64-byte vector and a `_BitInt` past 128 bits are refused by
     name: clang's code generation crashes on them.
-- **Limits.** At most 31 arguments are taken, and clang takes up to the
-  format's plus 255.
+- **Limits.** Up to 255 data arguments are taken, as clang's Sema takes
+  them (the required arguments plus 0xff): "too many arguments to function
+  call, expected at most 256" (257 for `__builtin_os_log_format`) past them.
+  Those past the operands' 32-bit mask are evaluated and reached through its
+  full mask (#1785). A format of more than 255 items, whose count byte clang's
+  code truncates (300 items store 0x2c), is refused by name.
 
 `__builtin_dump_struct(pointer, printer, rest...)` (0x4b3, #148) is clang's
 record dump, as `BuiltinDumpStruct` checks it.
@@ -2286,11 +2351,17 @@ record dump, as `BuiltinDumpStruct` checks it.
   (`CheckLowerInitializers.dumps`), each string once. A field's value is
   read through the record's address (a bit-field's from its first byte) and
   promoted as a variadic argument; a vector passes as a call's does. A
-  call's result is discarded.
-- **Refusals.** A printer that returns an aggregate, a 128-bit or a
-  half-precision value, or takes such values, rest arguments with a
-  statement expression or more than 4096 nodes, and records of more than
-  4096 lines, 1 MiB of strings or 64 levels are refused by name.
+  call's result is discarded. A printer that returns or takes a struct, a
+  union, a long double, a 128-bit integer, a half-precision value or a
+  vector, or returns a complex value, passes and returns them as a call's do
+  (`check_lower_dump_argument`, a result in an object of the call's, #1842).
+- **Refusals.** A printer that takes a transparent union or an `_Atomic`
+  aggregate, a complex rest argument (the checker's "expression is not yet
+  supported"), rest arguments with a statement expression or more than 4096
+  nodes, and records of more than 1 GiB of strings or 64 levels are refused
+  by name. A record's lines and strings grow as they need (the strings are
+  found again through a hash table of their offsets), so a record of any
+  number of fields is dumped (#1842).
 
 `__builtin_available(spec, ...)` (0x4b4, #148) is clang's availability check,
 a keyword whose specs are no expressions: each a `*`, or a platform's name and
@@ -2425,7 +2496,8 @@ calls `__cpu_indicator_init`, which is also the model's constructor;
 (parenthesized at most, never cast, as `allow_runtime_check`'s)
 names in its word (`__cpu_model.features[0]` at 12, or `__cpu_features2`'s),
 and is false for a feature clang doesn't know, where clang also warns
-(pending here); `cpu_is(s)` compares the model's vendor, type or subtype with
+("invalid cpu feature string for builtin", of no option, at the builtin's name:
+`check_input_cpu_supports_literal`, #1843); `cpu_is(s)` compares the model's vendor, type or subtype with
 the value of the name s, which clang must know (an error otherwise). The names
 and their words, bits, fields and values are `c_builtin_cpu.inc`, derived
 LLVM data that `tools/generate_x86_cpu_model.c` generates: the strings and ABI
@@ -2522,8 +2594,14 @@ narrow string literal or `__func__`'s name, under parentheses and casts, is read
 whole; an argument that is no address constant of an object (an automatic
 variable's value, an integer, a null pointer) is no constant string. Another
 address constant, a `static const char[]`'s or a literal's past its start, clang
-reads through its constant evaluator, whose reading of an object's bytes the
-adapter doesn't model: it is refused by name, where clang takes it.
+reads through its constant evaluator: the adapter reads its chars from the
+unit's constant objects (`check_input_verbose_trap_object`, #1843) up to the
+first NUL, of an array of plain char, with clang's errors where the string has a
+`$` or the read leaves the array (past its end, or no NUL in it). The address
+of a const record's member array reads its string to the member's end, and a
+const pointer object's value its pointee's. An object whose bytes the reader
+doesn't keep, and such an argument under a cast (which through `void *` clang
+calls no constant string), are still refused by name.
 
 Two costs are accepted for now:
 - A call of `memcpy_inline` or `memset_inline` is a call of its leaf, where
@@ -2867,11 +2945,16 @@ the existing families or of new ones:
   scope or at block scope, as clang keeps it (`check_input_intrinsic_prepare`,
   each catalogue row's verdict remembered in `CheckInputReader.intrinsic_source`);
   a definition with internal linkage is the program's function, and a local
-  object of the name hides it. Pending: clang refuses a definition of one with
-  external linkage (`definition of builtin function`), which this compiler
-  takes as the builtin; and the builtins of the dedicated paths
-  (`__builtin_bswap32`, `__builtin_clz`), which clang keeps under a matching
-  declaration too, become calls of their names here.
+  object of the name hides it. A declaration with external linkage of a
+  builtin's name (an x86 builtin of those rows and leaves, or a catalog builtin
+  such as `__builtin_bswap32` or `__builtin_clz`; not a library builtin, which a
+  program may define) is checked as clang's Sema checks it
+  (`check_input_builtin_declaration`, #1843): a type that isn't compatible with
+  the builtin's is clang's "conflicting types", with its note of the builtin's
+  type, and a definition, C99's inline one too, is clang's "definition of builtin
+  function". A compatible declaration keeps a catalog builtin the builtin, its
+  calls the builtin's, an integer constant expression's too
+  (`check_input_builtin_kept`), as clang keeps it.
   `_mm_prefetch` is `<xmmintrin.h>`'s macro over `__builtin_prefetch` where
   the header is included, and without it clang's builtin (a
   `TARGET_HEADER_BUILTIN` of no features), which is a leaf too: its hint a
@@ -3181,19 +3264,38 @@ for the `long double` and `_Float128` roundings, `llvm.copysign` and
 `llvm.fabs`, `llvm.fma`, `llvm.frexp`, `llvm.modf` and `llvm.abs`. On x86-64
 most come back as calls of the same library functions; the rest (`fabs`,
 `copysign`, `abs`, `maxnum` and `minnum` of `float` and `double`) are computed
-inline. The library's functions give the same values but `fmax`'s, `fmin`'s
-and their `_num` kin's of `float` and `double`: clang's code of `llvm.maxnum` and
-`llvm.minnum`, `maxsd` or `minsd` beside a select of the second operand where
-the first is a NaN, gives its first operand of two zeros and the other operand
-of a signaling NaN, where glibc's `fmax` and `fmin` give the second zero and a
-quiet NaN; and its code of `llvm.maximumnum` and `llvm.minimumnum` gives a
-signaling first operand unquieted where the other is a NaN too, where glibc's
-`fmaximum_num` and `fminimum_num` give a quiet NaN. C allows both (F.10.9.2 leaves the zero's sign open, and a
-signaling NaN's result), and the plain calls of `fmax` and `fmin` (#927's)
-differ so too; computing them as clang's code does waits for rows of those
-instructions at every target (#775). `test-checker`'s programs compare the rest
-bit for bit, on the harness's signaling and quiet NaNs, zeros of both signs,
-infinities and subnormals among them.
+inline, and so does this lowering compute `fmax`, `fmin`, `fmaximum_num` and
+`fminimum_num` of `float` and `double` (#967), as `__builtin_` calls and as
+plain calls of the unit's declarations that clang makes the builtin (the
+reader's mark, `cbuiltin_library_plain_folds`' entries of no fold, which
+`check_lower_call` takes, a musttail return's too, as clang's code computes
+it inline and returns it; such a call references no function, so that a
+program links without libm as clang's does; but a declaration with an asm
+label, which clang's code calls by its label, `check_program_call_extreme`;
+`-fno-builtin` and `-fno-builtin-NAME` keep the call, and
+`test-checker-driver`'s library runs check all three; a definition's
+`no_builtin` keeps it too, below): `__builtin_elementwise_maxnum`'s
+rows and its kin's
+(`check_vector_floating_scalar_row`), which glibc's functions would not match.
+clang's code of `llvm.maxnum` and `llvm.minnum` gives its first operand of two
+zeros and the other operand of a signaling NaN, where glibc's `fmax` and `fmin`
+give the second zero and a quiet NaN; and its code of `llvm.maximumnum` and
+`llvm.minimumnum` gives a signaling first operand unquieted where the other is a
+NaN too, where glibc's give a quiet NaN (C allows both: F.10.9.2 leaves the
+zero's sign open, and a signaling NaN's result). The rows are clang's
+instructions at each target where a row holds them: AVX-512's masked moves
+(`VCMPSD` into k1, `VMOVSD`), AVX's `VBLENDVPD` by `VCMPUNORDSD`, and SSE2's
+`maxnum` select (`MAXSD`, `CMPUNORDSD`, `PAND`, `PANDN`, `POR`), x86-64-v2's
+too (its `BLENDVPD` reads xmm0, which no row names). SSE2's `maximumnum` takes
+more records than a row has, so it is two rows of the same bits
+(`check_vector_extreme_scalar_rows`): `MAXSD` of x and y, its sign's mask all
+ones where x is a NaN (so that `MAXSD`'s y passes), then x where y is a NaN.
+`test-checker`'s programs compare them and the rest bit for bit, on the
+harness's signaling and quiet NaNs, zeros of both signs, infinities and
+subnormals among them, at x86-64, x86-64-v2, x86-64-v3 and x86-64-v4
+(`library-extremes-of-special-values`), and `test-checker-driver`'s
+`tier1-extremes` fixture runs them by `--tier1` at x86-64, x86-64-v3 and
+x86-64-v4.
 
 **Folds.** The rows with attribute `E` that clang's constant evaluator folds,
 this folds too, in constant contexts (static initializers, `_Static_assert`,
@@ -3203,10 +3305,11 @@ builtin call whose operands evaluate (its CodeGen's `EmitBuiltinExpr` tries
 kin (`wcscmp`, `wcsncmp`, `wmemcmp`, which compare `wchar_t`s as `int`s) to
 clang's -1, 0 or 1, not the library's differences; `strlen` and `wcslen`;
 `abs`, `labs` and `llabs`; the `fmax`, `fmin`, `fmaximum_num` and
-`fminimum_num` families; and `copysignl`. Strings are literals, at constant
+`fminimum_num` families, their `f128` forms among them (of a `__float128`'s bits, #1250); and
+`copysignl` and `copysignf128`, and `fabsf128`. Strings are literals, at constant
 offsets, and `const` arrays whose initializers are constant (clang's GNU
 folding, for which its `-pedantic` warns; this doesn't). Pointer results
-(`strchr`, `memchr`) and `_Float128` constants aren't folded, and calls with
+(`strchr`, `memchr`) and the other `_Float128` functions aren't folded, and calls with
 side effects never are. `__has_constexpr_builtin` answers 1 for these.
 
 **Plain names.** `c_builtin_library_plain.inc` lists the 446 `f` rows of C's
@@ -3219,7 +3322,17 @@ no C library has. Each is a builtin of the unit unless `-fno-builtin`,
 and one of `C23_LANG` (`<stdbit.h>`'s 70 functions) in C23 and later
 (`pp_library_builtin`, from `PPOptions.no_builtin`, `freestanding` and
 `no_builtin_functions`, which the driver's options set), which `__has_builtin`
-answers by. The list is pinned to Clang 23.1.4's official build, CI's
+answers by. In a function whose definition has clang's `no_builtin`
+attribute (#1958), with no arguments or with a string naming the function
+(`no_builtin("strlen")`), a call of the unit's declaration of one is that
+declaration's call, as clang's code makes it (`EmitDirectCallee`'s
+`no-builtin-NAME` and `no-builtins`): no fold, no inline `fmax` and no inline
+`<stdbit.h>` function (`check_input_no_builtin`, which the reader asks where it
+marks such a call); a string clang warns names no builtin (`"*"`) covers
+nothing, and the `__builtin_` forms are builtins still. clang's constant
+contexts still fold such a call (its evaluator doesn't read the attribute),
+which this doesn't in the function's own static initializers. The list is
+pinned to Clang 23.1.4's official build, CI's
 reference: its GNU rows include `strlcat` and `strlcpy`, as every upstream 23.x
 release's do (the `llvmorg-23.1.4` and `llvmorg-23.1.5` tags' `Builtins.td` and
 `release/23.x` keep them). Debian's and Ubuntu's clang packages, apt.llvm.org's

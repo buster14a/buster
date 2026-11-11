@@ -13,10 +13,11 @@
 //     alignments; a push that fills the arena exactly, and one more byte, which fails and leaves the arena as it was;
 //     sizes and counts whose arithmetic overflows; pop_to; arenas that couldn't be reserved; a 64 GB reservation of which
 //     only the touched page is committed (mincore); and the page sizes asked for, read back from /proc/self/smaps: base
-//     pages up to base + BUSTER_ARENA_SMALL_BYTES, which is on a huge page boundary, and huge pages from there. An arena
-//     of tables (#1128): its tables zero, writable, apart and each in the pages an arena of its own would have, and in a
-//     pool for the same tables alone; for random tables, a layout that maps no more than their own arenas; and tables
-//     refused for their size under RLIMIT_AS, which past 64 MB switch the thread to compact reservations.
+//     pages up to base + BUSTER_ARENA_SMALL_BYTES, which is on a huge page boundary, and huge pages from there, the same
+//     where 2 MB or more of base pages are mapped MAP_STACK as where they are advised (#1444). An arena of tables
+//     (#1128): its tables zero, writable, apart and each in the pages an arena of its own would have, and in a pool for
+//     the same tables alone; for random tables, a layout that maps no more than their own arenas; and tables refused
+//     for their size under RLIMIT_AS, which past 64 MB switch the thread to compact reservations.
 //   - Ranges: lane_range for every count from 0 to BUSTER_LANE_TEST_MAX_RANGE, and lane_range_by_cost for the same
 //     counts with each pattern of lane_test_cost: the parts must cover [0, count) in lane order, lane_range's first
 //     count % lanes parts must be the longer ones, and lane_range_by_cost must give each item to the lane whose share of
@@ -77,8 +78,13 @@
 //     of several refused where they would create a thread; and a child forked
 //     from lane 0, which forgets the session and runs as one lane. Then sessions whose third lane fails to start
 //     (LaneProcess.fail_at), eagerly and lazily, and a lazy one whose second does: the lanes created joined, the flow on
-//     lane 0 alone; sessions of a lane per core at most (BUSTER_LANE_SESSION_PER_CORE), eagerly, lazily and lazily with
-//     a flow of rounds that lane 0 begins before it settles, of 2 and 8 lanes, on test topologies (LaneProcess.topology)
+//     lane 0 alone; on-demand sessions (BUSTER_LANE_SESSION_ON_DEMAND, #1444) of 3 and 8 lanes, whose lane 0 runs on the
+//     capacity with no lane created until it starts them (lane_session_start, which a second call and a call after the
+//     session settled ignore): one that starts them, its flow's rounds on every lane, one that settles first, which
+//     creates no thread and runs its rounds on lane 0 alone, asking for one lane, and ones whose lane 1 and third lane
+//     fail as it starts them, the lanes created joined, the rounds on lane 0 alone; sessions of a lane per core at most
+//     (BUSTER_LANE_SESSION_PER_CORE), eagerly, lazily, lazily with a flow of rounds that lane 0 begins before it settles
+//     and on demand, started in such a flow, of 2 and 8 lanes, on test topologies (LaneProcess.topology)
 //     of this process's CPUs in pairs, in fours and all one core: as many lanes as the capacity and the cores allow, each
 //     round on them, each lane's lane_session_asked as many, a lazy session's lane 1 created though it runs on one,
 //     where one core leaves it no other lane; a lazy session of three lanes on one CPU, whose flow of rounds lane 0 begins
@@ -129,7 +135,7 @@
 #if defined(BUSTER_HOST_STATIC) && BUSTER_HOST_STATIC
 #include <execinfo.h>
 #endif
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DRIVER
 #define BUSTER_LANE_TEST_MAX_LANES 8
 // Ranges: every count up to this, and the cost patterns of lane_test_cost.
 #define BUSTER_LANE_TEST_MAX_RANGE 1000
@@ -149,7 +155,9 @@
 #define BUSTER_LANE_TEST_STRINGIFY(value) BUSTER_LANE_TEST_STRINGIFY_(value)
 // The arenas: the large reservation, and how much of /proc/self/smaps is read.
 #define BUSTER_LANE_TEST_LARGE_ARENA (64ull << 30)
+#endif
 #define BUSTER_LANE_TEST_SMAPS_BYTES (16ull << 20)
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DRIVER
 // 2^64 divided by the golden ratio: splitmix64's increment, and the multiplier that turns --seed N into a state.
 #define BUSTER_LANE_TEST_GOLDEN_RATIO 0x9E3779B97F4A7C15ull
 // Each check prints its first problems, up to this many.
@@ -404,7 +412,8 @@ static void lane_test_expect(LaneTestTally* tally, bool condition, const char* w
         printf("  arenas: %s\n", what);
     }
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DRIVER || BUSTER_UNIT == BUSTER_UNIT_CHECKER
 // Lowercase hexadecimal digits from `text`, as /proc/self/smaps writes addresses. Returns the end of the digits.
 static const char* lane_test_parse_hex(const char* text, const char* end, uint64_t* value)
 {
@@ -491,7 +500,8 @@ static bool lane_test_huge_capable(uintptr_t address, bool* found)
     const uint64_t page = address & ~(uintptr_t)(BUSTER_ARENA_HUGE_PAGE_BYTES - 1);
     return writable && !refused && page >= first && page + BUSTER_ARENA_HUGE_PAGE_BYTES <= last;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DRIVER
 // Whether the page at `address` is resident.
 static bool lane_test_resident(const uint8_t* address)
 {
@@ -499,9 +509,91 @@ static bool lane_test_resident(const uint8_t* address)
     return mincore((void*)address, BUSTER_ARENA_PAGE_BYTES, &vector) == 0 && (vector & 1) != 0;
 }
 
+// The reservations that keep 2 MB or more in base pages (#1444), mapped VM_NOHUGEPAGE (arena_stack_base_pages:
+// MAP_STACK) where the kernel maps MAP_STACK so, and advised MADV_NOHUGEPAGE by a call of their own elsewhere: the same
+// pages either way. An arena with 8 MB of base pages, before its first commit and as it commits past them; a busy host's
+// arena (arena_pages_busy); and an arena of tables, a table of base pages throughout beside one with huge pages past
+// its first 2 MB. MAP_STACK splits no mapping: before its first commit, the wide arena's base pages are one mapping with
+// the rest of its reservation, where the advice split them off. And the kernel releases arena_page_policy reads.
+static void lane_test_stack_base_pages(LaneTestTally* tally)
+{
+    static const struct
+    {
+        const char* release;
+        bool maps;
+    } releases[] = {
+        { "6.18.50-2-lts", true }, { "6.7.0", true }, { "6.7", true }, { "6.07.1", true }, { "7.0.0", true }, { "10.1", true },
+        { "6.6.69", false },       { "5.15.0-91-generic", false }, { "6", false }, { "6.", false }, { "6.x", false },
+        { "", false },             { "abc", false }, { "16000000000.1", false },
+    };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(releases); i += 1)
+    {
+        lane_test_expect(tally, arena_kernel_maps_stack_base_pages(releases[i].release) == releases[i].maps, "a kernel's release was misread");
+    }
+    struct utsname kernel;
+    const bool supported = uname(&kernel) == 0 && arena_kernel_maps_stack_base_pages(kernel.release);
+    const bool was_stack = arena_stack_base_pages;
+    const bool was_busy = arena_pages_busy;
+    for (uint32_t mode = 0; mode < (supported ? 2u : 1u); mode += 1)
+    {
+        arena_stack_base_pages = mode == 1;
+        bool found = false;
+        uint64_t first = 0;
+        uint64_t last = 0;
+        const uint64_t wide_small = 4 * BUSTER_ARENA_HUGE_PAGE_BYTES;
+        Arena wide = arena_reserve_small(BUSTER_LANE_TEST_LARGE_ARENA, wide_small);
+        if (wide.base != 0)
+        {
+            const bool head = lane_test_vm_flag_in((uintptr_t)wide.base, "nh", &found, &first, &last) && found;
+            const bool whole = last > (uintptr_t)wide.base + wide_small;
+            lane_test_expect(tally, head && whole == arena_stack_base_pages, "an arena's 8 MB of base pages weren't mapped or advised as asked");
+            const bool pushed = arena_push(&wide, wide_small, 1) == wide.base;
+            const bool base_pages = lane_test_vm_flag((uintptr_t)wide.base + wide_small - 1, "nh", &found) && found &&
+                                    !(lane_test_huge_capable((uintptr_t)wide.base + wide_small / 2, &found) || !found);
+            const bool past = arena_push(&wide, 1, 1) != 0 && lane_test_vm_flag((uintptr_t)wide.base + wide_small, "hg", &found) && found &&
+                              lane_test_vm_flag((uintptr_t)wide.base + BUSTER_LANE_TEST_LARGE_ARENA - 1, "hg", &found) && found;
+            const bool kept = lane_test_vm_flag((uintptr_t)wide.base, "nh", &found) && found;
+            lane_test_expect(tally, pushed && base_pages && past && kept && wide.huge, "an arena with 8 MB of base pages took other pages than it asked for");
+        }
+        lane_test_expect(tally, wide.base != 0, "an arena with 8 MB of base pages couldn't be reserved");
+        arena_release(&wide);
+        arena_pages_busy = true;
+        Arena busy = arena_reserve(BUSTER_LANE_TEST_LARGE_ARENA);
+        const bool busy_pushed = busy.base != 0 && arena_push(&busy, 3 * BUSTER_ARENA_HUGE_PAGE_BYTES, 1) == busy.base;
+        const bool busy_base = busy_pushed && lane_test_vm_flag((uintptr_t)busy.base, "nh", &found) && found &&
+                               lane_test_vm_flag((uintptr_t)busy.base + 2 * BUSTER_ARENA_HUGE_PAGE_BYTES, "nh", &found) && found &&
+                               lane_test_vm_flag((uintptr_t)busy.base + BUSTER_LANE_TEST_LARGE_ARENA - 1, "nh", &found) && found &&
+                               !(lane_test_huge_capable((uintptr_t)busy.base + 2 * BUSTER_ARENA_HUGE_PAGE_BYTES, &found) || !found) && !busy.huge;
+        lane_test_expect(tally, busy_base, "a busy host's arena may take huge pages");
+        arena_release(&busy);
+        arena_pages_busy = was_busy;
+        ArenaTable tables[] = {
+            { .bytes = 2 * BUSTER_ARENA_HUGE_PAGE_BYTES + 5, .small = 4 * BUSTER_ARENA_HUGE_PAGE_BYTES },
+            { .bytes = 3 * BUSTER_ARENA_HUGE_PAGE_BYTES, .small = BUSTER_ARENA_HUGE_PAGE_BYTES },
+        };
+        Arena held = arena_reserve_tables(tables, BUSTER_ARRAY_LENGTH(tables));
+        if (held.base != 0)
+        {
+            const uintptr_t plain = (uintptr_t)tables[0].base;
+            const uintptr_t split = (uintptr_t)tables[1].base;
+            const bool plain_base = lane_test_vm_flag(plain, "nh", &found) && found && lane_test_vm_flag(plain + tables[0].bytes - 1, "nh", &found) && found &&
+                                    !(lane_test_huge_capable(plain + BUSTER_ARENA_HUGE_PAGE_BYTES, &found) || !found);
+            const bool split_head = lane_test_vm_flag(split, "nh", &found) && found && !(lane_test_huge_capable(split, &found) || !found);
+            const bool split_tail = (split + BUSTER_ARENA_HUGE_PAGE_BYTES) % BUSTER_ARENA_HUGE_PAGE_BYTES == 0 &&
+                                    lane_test_vm_flag(split + BUSTER_ARENA_HUGE_PAGE_BYTES, "hg", &found) && found &&
+                                    lane_test_huge_capable(split + BUSTER_ARENA_HUGE_PAGE_BYTES, &found) && found;
+            lane_test_expect(tally, plain_base && split_head && split_tail, "an arena of tables' pages aren't each table's own arena's");
+        }
+        lane_test_expect(tally, held.base != 0, "an arena of tables couldn't be reserved");
+        arena_release(&held);
+    }
+    arena_stack_base_pages = was_stack;
+}
+
 static bool lane_test_arenas(void)
 {
     LaneTestTally tally = { 0 };
+    lane_test_stack_base_pages(&tally);
 
     // /proc/loadavg's runnable tasks, which arena_host_busy compares with the CPUs online (#672).
     static const struct
@@ -2446,7 +2538,8 @@ static uint64_t lane_test_team_affinity(LaneTeam* team, uint32_t threads_before)
     }
     return failures;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DRIVER
 // A team that keeps its workers' scratch arenas (lane_team_keep_scratch, #501): across operations of changing lane
 // counts each worker finds the arenas of its last operation, emptied (lane_test_team_main), and once the team has
 // stopped, the arenas are unmapped: mincore refuses each one's first page.
@@ -2581,7 +2674,7 @@ static uint64_t lane_test_teams(void)
 
 // The parts a session check's narrowed lanes take.
 #define BUSTER_LANE_TEST_SESSION_PARTS 29
-
+#endif
 // /proc/cpuinfo's cores (#905), an oracle of lane_cores' that doesn't read sysfs' sibling lists, for this file's tests
 // and the drivers' (test-check-lanes, test-foreign, test-parallel). A line's key is what comes before its colon, but
 // blanks, and only the processor, physical id and core id lines' values are read (#933's review: the flags line's
@@ -2695,9 +2788,10 @@ static uint32_t lane_test_cpuinfo_cores(const uint64_t* cores, const uint64_t* m
     }
     return distinct;
 }
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DRIVER
 _Static_assert(BUSTER_LANE_CPU_MASK_WORDS * 64 == 1024, "lane_test_cpuinfo_controls' texts name the room's last processor and the next");
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DRIVER
 // lane_test_cpuinfo_read on texts of /proc/cpuinfo's shape, read through fmemopen (#933's review). First four
 // processors' blocks of every line a Zen 5's has, each flags line 1,024 names with digits: two packages, processors 0
 // and 2 one core's siblings. Then texts of one processor each, which must give it its entry or none:
@@ -2813,7 +2907,7 @@ static uint64_t lane_test_cpuinfo_controls(void)
     printf("cpuinfo: four processors with 1,024 flags each and %u texts of one, %lu wrong\n", (uint32_t)BUSTER_ARRAY_LENGTH(cases), (unsigned long)failures);
     return failures;
 }
-
+#endif
 // The cores of the CPUs this process may run on by /proc/cpuinfo (lane_test_cpuinfo), or 0 where it doesn't list every
 // one of them.
 static __attribute__((unused)) uint32_t lane_test_process_cores(void)
@@ -2866,7 +2960,7 @@ static __attribute__((unused)) bool lane_test_sibling_masks(uint64_t* siblings, 
     free(ids);
     return found;
 }
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DRIVER
 // Writes CPU `cpu`'s sibling list, `length` bytes at `list`, in a test topology under `root`, where lane_cores reads it
 // in sysfs (cpuN/topology/core_cpus_list). Returns whether it could.
 static bool lane_test_topology_write(const char* root, uint32_t cpu, const char* list, uint64_t length)
@@ -2940,7 +3034,8 @@ static uint32_t lane_test_topology_process(const char* root, const uint64_t* all
     }
     return written ? (size == 0 ? 1 : (count + size - 1) / size) : 0;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DRIVER
 // lane_cores and lane_core_count (#905): see the file's comment.
 static uint64_t lane_test_cores(void)
 {
@@ -3144,7 +3239,8 @@ static uint64_t lane_test_shared_cpus(void)
            cpus > 1 ? " and of two on them" : "", (unsigned long)failures);
     return failures;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DRIVER
 // What a session's lanes share (#905): the lanes it should run, what each lane saw and did, and the failures each
 // counted.
 typedef struct LaneSessionTest LaneSessionTest;
@@ -3167,6 +3263,11 @@ struct LaneSessionTest
     // Whether the lanes of a narrowed group or a round must read their group as sharing the CPUs they run on
     // (LaneGroup.shares_cpus), as the session's lanes do: true for a session of more lanes than the CPUs it may run on.
     bool shares_cpus;
+    // An on-demand session's (BUSTER_LANE_SESSION_ON_DEMAND, lane_test_session_demand_flow): its capacity, the threads
+    // the process had created as it started, and whether lane 0 starts its lanes before it settles.
+    uint32_t capacity;
+    uint64_t threads_before;
+    bool starts;
 };
 
 // The thread that handled the sessions check's signal.
@@ -3279,6 +3380,62 @@ static void lane_test_session_early_flow(void* argument)
             failures += test->round_calls[0][lane] != (lane < test->expected ? 1u : 0u) ? 1 : 0;
         }
         lane_flow_end(&test->flow);
+    }
+    else
+    {
+        void* operation = NULL;
+        for (uint32_t kind = lane_flow_next(&test->flow, &operation); kind != 0; kind = lane_flow_next(&test->flow, &operation))
+        {
+            if (operation != NULL)
+            {
+                lane_test_session_round(operation, kind);
+            }
+            lane_widen();
+        }
+    }
+    failures += lane_count() != test->expected || lane_session_asked() != test->asked ? 1 : 0;
+    if (index < BUSTER_LANE_TEST_MAX_LANES)
+    {
+        test->calls[index] += 1;
+        test->failures[index] += failures;
+    }
+}
+
+// An on-demand session's flow (BUSTER_LANE_SESSION_ON_DEMAND, #1444): lane 0 runs on the capacity with no lane created,
+// begins a flow of rounds and, where the test says, starts its lanes (lane_session_start, twice: the second does
+// nothing), after which its two rounds run on the lanes the session settles at; where it doesn't, its first round
+// settles the session on lane 0 alone, which asks for one lane, and both rounds run there. A start after the session
+// settled does nothing. The others, which exist only once lane 0 starts them, follow its rounds.
+static void lane_test_session_demand_flow(void* argument)
+{
+    LaneSessionTest* test = argument;
+    const uint32_t index = lane_index();
+    uint64_t failures = 0;
+    if (index == 0)
+    {
+        failures += lane_count() != test->capacity || lane_process.threads_created != test->threads_before ? 1 : 0;
+        lane_flow_begin(&test->flow);
+        if (test->starts)
+        {
+            lane_session_start();
+            lane_session_start();
+        }
+        memset(test->round_calls, 0, sizeof(test->round_calls));
+        for (uint32_t kind = 1; kind <= 2; kind += 1)
+        {
+            lane_flow_round_begin(&test->flow, kind, test, BUSTER_LANE_TEST_MAX_LANES + 9);
+            lane_test_session_round(test, kind);
+            lane_flow_round_end(&test->flow);
+            lane_session_start();
+        }
+        for (uint32_t lane = 0; lane < BUSTER_LANE_TEST_MAX_LANES; lane += 1)
+        {
+            const uint32_t once = lane < test->expected ? 1u : 0u;
+            failures += test->round_calls[0][lane] != once || test->round_calls[1][lane] != once ? 1 : 0;
+        }
+        lane_flow_end(&test->flow);
+        // No lane started after the session settled.
+        failures += !test->starts && lane_process.threads_created != test->threads_before ? 1 : 0;
     }
     else
     {
@@ -3425,8 +3582,9 @@ static void lane_test_session_main(void* argument)
         test->failures[index] += failures;
     }
 }
-
+#endif
 #if defined(BUSTER_HOST_STATIC) && BUSTER_HOST_STATIC
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DRIVER
 // Unwinding (#652): see the file's comment. Each count is volatile, so that its call isn't a tail call, which would leave
 // its caller's frame out.
 static __attribute__((noinline)) uint32_t lane_test_unwind_inner(void)
@@ -3523,13 +3681,16 @@ static bool lane_test_unwinds(void)
     result = lane_test_forced(true) && result;
     return result;
 }
+#endif
 #else
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DRIVER
 static bool lane_test_unwinds(void)
 {
     return true;
 }
 #endif
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DRIVER
 // Sessions (#905): see the file's comment.
 static uint64_t lane_test_sessions(void)
 {
@@ -3610,10 +3771,45 @@ static uint64_t lane_test_sessions(void)
         const bool restored = syscall(SYS_sched_getaffinity, 0, sizeof(after), after) > 0 && memcmp(before, after, sizeof(before)) == 0;
         failures += worker != 0 || failed.calls[0] != 0 || failed.calls[1] != 0 || !restored || !lane_test_threads_stopped(threads_before) ? 1 : 0;
     }
-    // Sessions of a lane per core at most (BUSTER_LANE_SESSION_PER_CORE), eager, lazy and lazy with a flow begun before
-    // lane 0 settles, of 2 and 8 lanes, on test topologies of this process's CPUs in pairs, in fours and all in one core:
-    // as many lanes as the capacity and the cores allow, asked for as many, and a lazy session's lane 1 created even
-    // where it runs on one.
+    // On-demand sessions (BUSTER_LANE_SESSION_ON_DEMAND, #1444) of 3 and 8 lanes: one whose lane 0 starts its lanes, each
+    // lane running the flow once and its rounds on every lane, and one whose lane 0 settles first, which creates no thread
+    // and runs its flow on lane 0 alone, asking for one lane; then ones whose lane 1, and whose third lane, fail to start
+    // as lane 0 starts them: the lanes created joined, the flow on lane 0 alone, asking for the capacity.
+    static const uint32_t demand[] = { 3, BUSTER_LANE_TEST_MAX_LANES };
+    static const uint32_t demand_failing[] = { 1, 3 };
+    for (uint32_t i = 0; handled && i < 2 * BUSTER_ARRAY_LENGTH(demand) + BUSTER_ARRAY_LENGTH(demand_failing); i += 1)
+    {
+        const bool failing_start = i >= 2 * BUSTER_ARRAY_LENGTH(demand);
+        const uint32_t capacity = failing_start ? BUSTER_LANE_TEST_MAX_LANES : demand[i / 2];
+        const bool starts = failing_start || i % 2 == 0;
+        const uint32_t fail_at = failing_start ? demand_failing[i - 2 * BUSTER_ARRAY_LENGTH(demand)] : UINT32_MAX;
+        const uint32_t expected = starts && !failing_start ? capacity : 1;
+        LaneSessionTest test = {
+            .caller = caller,
+            .expected = expected,
+            .asked = starts ? capacity : 1,
+            .shares_cpus = lane_group_shares_cpus(expected, false),
+            .capacity = capacity,
+            .threads_before = lane_process.threads_created,
+            .starts = starts,
+        };
+        lane_process.fail_at = fail_at;
+        const uint32_t flags = BUSTER_LANE_SESSION_LAZY | BUSTER_LANE_SESSION_ON_DEMAND;
+        const uint32_t ran = lane_session_run(&session, capacity, 0, lane_test_session_demand_flow, &test, flags);
+        lane_process.fail_at = UINT32_MAX;
+        const uint64_t threads = failing_start ? fail_at - 1 : starts ? capacity - 1 : 0;
+        failures += ran != expected || lane_process.threads_created != test.threads_before + threads ? 1 : 0;
+        for (uint32_t lane = 0; lane < BUSTER_LANE_TEST_MAX_LANES; lane += 1)
+        {
+            failures += test.calls[lane] != (lane < expected ? 1u : 0u) || test.failures[lane] != 0 ? 1 : 0;
+        }
+        failures += lane_session_current() != 0 ? 1 : 0;
+        failures += lane_test_threads_stopped(threads_before) ? 0 : 1;
+    }
+    // Sessions of a lane per core at most (BUSTER_LANE_SESSION_PER_CORE), eager, lazy, lazy with a flow begun before lane
+    // 0 settles and on demand, its lanes started in such a flow, of 2 and 8 lanes, on test topologies of this process's
+    // CPUs in pairs, in fours and all in one core: as many lanes as the capacity and the cores allow, asked for as many,
+    // and a lazy session's lane 1 created even where it runs on one.
     uint64_t allowed[BUSTER_LANE_CPU_MASK_WORDS] = { 0 };
     const bool known = syscall(SYS_sched_getaffinity, 0, sizeof(allowed), allowed) > 0;
     failures += known ? 0 : 1;
@@ -3627,21 +3823,26 @@ static uint64_t lane_test_sessions(void)
         failures += cores != 0 ? 0 : 1;
         lane_process.topology = root;
         static const uint32_t per_core[] = { 2, BUSTER_LANE_TEST_MAX_LANES };
-        for (uint32_t i = 0; cores != 0 && i < 3 * BUSTER_ARRAY_LENGTH(per_core); i += 1)
+        for (uint32_t i = 0; cores != 0 && i < 4 * BUSTER_ARRAY_LENGTH(per_core); i += 1)
         {
-            const uint32_t capacity = per_core[i / 3];
-            const bool lazy = i % 3 != 0;
-            const bool early = i % 3 == 2;
+            const uint32_t capacity = per_core[i / 4];
+            const bool lazy = i % 4 != 0;
+            const bool early = i % 4 == 2;
+            const bool on_demand = i % 4 == 3;
             const uint32_t expected = cores < capacity ? cores : capacity;
             LaneSessionTest test = {
                 .caller = caller,
                 .expected = expected,
                 .asked = expected,
                 .shares_cpus = lane_group_shares_cpus(expected, false),
+                .capacity = capacity,
+                .threads_before = lane_process.threads_created,
+                .starts = true,
             };
             const uint64_t created = lane_process.threads_created;
-            const uint32_t flags = BUSTER_LANE_SESSION_PER_CORE | (lazy ? BUSTER_LANE_SESSION_LAZY : 0);
-            const uint32_t ran = lane_session_run(&session, capacity, 0, early ? lane_test_session_early_flow : lane_test_session_main, &test, flags);
+            const uint32_t flags = BUSTER_LANE_SESSION_PER_CORE | (lazy ? BUSTER_LANE_SESSION_LAZY : 0) | (on_demand ? BUSTER_LANE_SESSION_ON_DEMAND : 0);
+            void (*flow)(void* argument) = on_demand ? lane_test_session_demand_flow : early ? lane_test_session_early_flow : lane_test_session_main;
+            const uint32_t ran = lane_session_run(&session, capacity, 0, flow, &test, flags);
             const uint64_t threads = lazy && expected == 1 ? 1 : expected - 1;
             failures += ran != expected || lane_process.threads_created != created + threads ? 1 : 0;
             for (uint32_t lane = 0; lane < BUSTER_LANE_TEST_MAX_LANES; lane += 1)
@@ -3715,8 +3916,9 @@ static uint64_t lane_test_sessions(void)
         sigaction(SIGUSR1, &previous_action, 0);
     }
     failures += lane_test_unwatch() ? 0 : 1;
-    printf("sessions: sessions of 1, 2, 3 and %u lanes, eager and lazy, three whose lanes didn't start, eighteen of a lane per core on three topologies, one of three "
-           "lanes on one CPU whose flow began before lane 0 settled and one parked at its end, %lu wrong\n",
+    printf("sessions: sessions of 1, 2, 3 and %u lanes, eager and lazy, three whose lanes didn't start, four on demand, started and not, and two whose lanes "
+           "didn't start on demand, twenty-four of a lane per core on three topologies, one of three lanes on one CPU whose flow began before lane 0 settled "
+           "and one parked at its end, %lu wrong\n",
            BUSTER_LANE_TEST_MAX_LANES, (unsigned long)failures);
     return failures;
 }
@@ -3931,3 +4133,4 @@ static int run_lane_tests(int argc, char** argv)
     arena_release(&memory);
     return result;
 }
+#endif

@@ -16,6 +16,7 @@
 #   assembly-flags   a lexer variant's assembly's arguments (build.sh lexer-variant-assembly): -g, the flags and the
 #                    configuration's optimization
 #   variant          the name of the build tree for these settings (build/cmake/NAME)
+#   host-flags       the host target's flags: -march=BUSTER_HOST_ARCH, or the explicit vector target's (`vector`)
 # The settings are build.sh's environment variables' values, an unset or empty one its default.
 
 cmake_minimum_required(VERSION 3.25)
@@ -35,6 +36,8 @@ buster_settings_normalize()
 set(arguments "")
 if(BUSTER_PRINT STREQUAL "variant")
     set(arguments "${buster_variant}")
+elseif(BUSTER_PRINT STREQUAL "host-flags")
+    set(arguments ${buster_host_flags})
 elseif(BUSTER_PRINT STREQUAL "sources")
     set(arguments ${BUSTER_SOURCES})
 elseif(BUSTER_PRINT MATCHES "^(compile|sanitizer|assembly)-flags$")
@@ -56,7 +59,7 @@ elseif(BUSTER_PRINT MATCHES "^(compile|sanitizer|assembly)-flags$")
         set(arguments ${buster_optimization} ${buster_debug} ${buster_sanitizer_flags} ${buster_link_mode})
     endif()
 else()
-    message(FATAL_ERROR "BusterPrint.cmake: BUSTER_PRINT must be variant, sources, compile-flags, sanitizer-flags or assembly-flags")
+    message(FATAL_ERROR "BusterPrint.cmake: BUSTER_PRINT must be variant, host-flags, sources, compile-flags, sanitizer-flags or assembly-flags")
 endif()
 
 set(text "")

@@ -50,6 +50,20 @@ static CheckQueryNumber check_query_float(long double value)
     return check_query_normalize(number);
 }
 
+// A __float128's number, from its bits (c_check_quad.c): its 113-bit significand.
+static CheckQueryNumber check_query_quad(unsigned __int128 bits)
+{
+    const uint32_t field = (uint32_t)(bits >> 112) & 0x7fffu;
+    const unsigned __int128 fraction = bits & BUSTER_CHECK_QUAD_FRACTION;
+    CheckQueryNumber number = {
+        .magnitude = fraction | (field != 0 && field != 0x7fff ? ((unsigned __int128)1) << 112 : 0),
+        .exponent = (int32_t)(field != 0 ? field : 1) - 16383 - 112,
+        .special = field != 0x7fff ? 0 : fraction == 0 ? 1 : (fraction & BUSTER_CHECK_QUAD_QUIET) != 0 ? 2 : 3,
+        .negative = (bits & BUSTER_CHECK_QUAD_SIGN) != 0,
+    };
+    return check_query_normalize(number);
+}
+
 static bool check_query_number_equal(CheckQueryNumber a, CheckQueryNumber b)
 {
     a = check_query_normalize(a);
@@ -94,11 +108,15 @@ static bool check_query_sum_exact(CheckQueryNumber a, CheckQueryNumber b, CheckQ
     return check_query_number_equal(sum, result);
 }
 
-static bool check_query_float_exact(CheckOp op, long double left, long double right, long double value)
+// Whether a product of two normalized (odd) magnitudes fits 128 bits; one that doesn't has more significant bits than
+// any format's result, a __float128's 113, so that it is inexact.
+static bool check_query_product_fits(unsigned __int128 a, unsigned __int128 b)
 {
-    const CheckQueryNumber a = check_query_float(left);
-    CheckQueryNumber b = check_query_float(right);
-    const CheckQueryNumber result = check_query_float(value);
+    return check_vector_active_bits(a) + check_vector_active_bits(b) <= 128;
+}
+
+static bool check_query_float_exact(CheckOp op, CheckQueryNumber a, CheckQueryNumber b, CheckQueryNumber result)
+{
     if (result.special >= 2)
     {
         // Clang's C constant folder admits its folded NaN result before checking arithmetic operation status.
@@ -118,12 +136,12 @@ static bool check_query_float_exact(CheckOp op, long double left, long double ri
     else if (op == CHECK_OP_MULTIPLY)
     {
         const CheckQueryNumber product = { .magnitude = a.magnitude * b.magnitude, .exponent = a.exponent + b.exponent, .negative = a.negative != b.negative };
-        exact = check_query_number_equal(product, result);
+        exact = check_query_product_fits(a.magnitude, b.magnitude) && check_query_number_equal(product, result);
     }
     else if (op == CHECK_OP_DIVIDE)
     {
         const CheckQueryNumber product = { .magnitude = result.magnitude * b.magnitude, .exponent = result.exponent + b.exponent, .negative = result.negative != b.negative };
-        exact = b.magnitude != 0 && check_query_number_equal(a, product);
+        exact = b.magnitude != 0 && check_query_product_fits(result.magnitude, b.magnitude) && check_query_number_equal(a, product);
     }
     return exact;
 }
@@ -133,7 +151,16 @@ static bool check_query_scalar_conversion_exact(const TypeTable* types, const Ch
     const uint8_t target = check_action_kind(types, after->type);
     const uint8_t source = check_action_kind(types, before->type);
     bool exact = true;
-    if (target == BUSTER_TYPE_KIND_FLOATING && source == BUSTER_TYPE_KIND_FLOATING && before->constant_kind == CHECK_CONSTANT_FLOATING && after->constant_kind == CHECK_CONSTANT_FLOATING)
+    const bool quad_from = type_unqualified(type_strip_aligned(types, before->type)) == BUSTER_TYPE_FLOAT128;
+    const bool quad_to = type_unqualified(type_strip_aligned(types, after->type)) == BUSTER_TYPE_FLOAT128;
+    if ((quad_from || quad_to) && target == BUSTER_TYPE_KIND_FLOATING && source == BUSTER_TYPE_KIND_FLOATING &&
+        before->constant_kind == CHECK_CONSTANT_FLOATING && after->constant_kind == CHECK_CONSTANT_FLOATING && !isnan(before->floating))
+    {
+        // A __float128 by its bits (c_check_quad.c), which its mirror rounds: exact where the value is the same
+        // binary128.
+        exact = (quad_from ? before->integer : check_quad_widen(before->floating, false)) == (quad_to ? after->integer : check_quad_widen(after->floating, false));
+    }
+    else if (target == BUSTER_TYPE_KIND_FLOATING && source == BUSTER_TYPE_KIND_FLOATING && before->constant_kind == CHECK_CONSTANT_FLOATING && after->constant_kind == CHECK_CONSTANT_FLOATING)
     {
         const CheckQueryNumber from = check_query_float(before->floating);
         const CheckQueryNumber to = check_query_float(after->floating);
@@ -151,7 +178,16 @@ static bool check_query_scalar_conversion_exact(const TypeTable* types, const Ch
             const unsigned __int128 bits = before->integer & mask;
             const bool negative = sign && (bits >> (width - 1)) != 0;
             const CheckQueryNumber integer = { .magnitude = negative ? (0 - bits) & mask : bits, .negative = negative };
-            exact = check_query_number_equal(integer, check_query_float(after->floating));
+            if (quad_to)
+            {
+                // A __float128's magnitude, its bits' (c_check_quad.c): exact where it is the integer's, below 2^128.
+                const __float128 magnitude = check_quad_host(after->integer & ~BUSTER_CHECK_QUAD_SIGN);
+                exact = magnitude < (__float128)0x1p128 && (unsigned __int128)magnitude == integer.magnitude;
+            }
+            else
+            {
+                exact = check_query_number_equal(integer, check_query_float(after->floating));
+            }
         }
     }
     // C floating-to-integer constant evaluation uses truncation and separately checks its representable range.
@@ -451,7 +487,12 @@ static bool check_query_lane(TypeTable* types, const CheckGraph* graph, const Ch
     if (binary_real && converted[0].constant_kind == CHECK_CONSTANT_FLOATING && converted[1].constant_kind == CHECK_CONSTANT_FLOATING &&
         result.value.constant_kind == CHECK_CONSTANT_FLOATING)
     {
-        exact &= check_query_float_exact(action.op, converted[0].floating, converted[1].floating, result.value.floating);
+        // A __float128's numbers are its bits' (c_check_quad.c), any other's its long double's.
+        const bool quad = type_unqualified(type_strip_aligned(types, converted[0].type)) == BUSTER_TYPE_FLOAT128;
+        exact &= quad ? check_query_float_exact(action.op, check_query_quad(converted[0].integer), check_query_quad(converted[1].integer),
+                                                check_query_quad(result.value.integer)) :
+                        check_query_float_exact(action.op, check_query_float(converted[0].floating), check_query_float(converted[1].floating),
+                                                check_query_float(result.value.floating));
     }
     if (strict)
     {

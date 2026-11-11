@@ -153,9 +153,7 @@ static CheckDataStatus check_data_plan_scalar(const TypeTable* types, const Chec
         floating = base == BUSTER_TYPE_FLOAT || base == BUSTER_TYPE_DOUBLE || base == BUSTER_TYPE_LONG_DOUBLE || check_action_half_format(base) != CHECK_HALF_NONE;
         complex = kind == BUSTER_TYPE_KIND_COMPLEX;
         pointer = kind == BUSTER_TYPE_KIND_POINTER;
-        // A __float128 object's bytes are zeros without an initializer (#137). The checker folds none of its arithmetic or
-        // conversions, so that one with such an initializer is refused below as not constant; the constant builtins'
-        // values are its constants (__builtin_inff128, __builtin_nanf128 and the others, #148).
+        // A __float128 object's bytes are zeros without an initializer (#137), or its constant's bits (#1250).
         quad = base == BUSTER_TYPE_FLOAT128;
         const uint64_t size = type_size(types, object->type);
         const uint32_t natural = type_alignment_log2(types, object->type);
@@ -240,6 +238,29 @@ static CheckDataStatus check_data_plan_scalar(const TypeTable* types, const Chec
                     check_data_integer_bytes(plan->bytes, bits, plan->size);
                 }
             }
+            else if (integer && width >= 32 && value->constant_kind == CHECK_CONSTANT_LABEL_DIFFERENCE)
+            {
+                // GNU's difference of two labels' addresses (#1447): their distance in their function's code, which the
+                // emission placed before the static data is planned, as an assembler resolves clang's `.long .La-.Lb`.
+                const uint32_t minuend = value->object;
+                const uint32_t subtrahend = (uint32_t)value->integer;
+                const SymbolId a = minuend < object_count ? object_symbols[minuend] : 0;
+                const SymbolId b = subtrahend < object_count ? object_symbols[subtrahend] : 0;
+                const bool placed = a != 0 && b != 0 && a < link->symbols.count && b < link->symbols.count && link->symbols.atom[a] != 0 &&
+                                    link->symbols.atom[a] == link->symbols.atom[b];
+                if (!placed)
+                {
+                    status = CHECK_DATA_UNSUPPORTED;
+                }
+                else
+                {
+                    const uint64_t distance = link->symbols.value[a] - link->symbols.value[b];
+                    const unsigned __int128 mask = check_action_mask(width);
+                    const bool extend = is_signed && width < plan->size * 8u && ((distance & mask) >> (width - 1)) != 0;
+                    const unsigned __int128 bits = ((unsigned __int128)(int64_t)distance & mask) | (extend ? ~mask : 0);
+                    check_data_integer_bytes(plan->bytes, bits, plan->size);
+                }
+            }
             else if ((floating || quad) && value->constant_kind == CHECK_CONSTANT_FLOATING)
             {
                 const long double rounded = check_action_round_float(base, value->floating);
@@ -249,7 +270,7 @@ static CheckDataStatus check_data_plan_scalar(const TypeTable* types, const Chec
                 }
                 else
                 {
-                    check_data_float_bytes(plan->bytes, base, value->floating);
+                    check_data_scalar_float_bytes(plan->bytes, base, value);
                 }
             }
             else if (complex && value->constant_kind == CHECK_CONSTANT_COMPLEX)

@@ -77,7 +77,8 @@ static bool ir_source_text_call(const IrFunction* a, uint32_t x, const IrFunctio
     const IrCall* left = &a->calls[x];
     const IrCall* right = &b->calls[y];
     bool equal = left->argument_count == right->argument_count && left->parameter_count == right->parameter_count &&
-                 left->result_type == right->result_type && left->variadic == right->variadic && (left->abi != 0) == (right->abi != 0) && (left->row != 0) == (right->row != 0);
+                 left->result_type == right->result_type && left->variadic == right->variadic && (left->abi != 0) == (right->abi != 0) && (left->row != 0) == (right->row != 0) &&
+                 (left->body != 0) == (right->body != 0);
     equal = equal && ir_source_text_range(a->extra, left->argument_first, b->extra, right->argument_first, left->argument_count, sizeof(uint32_t)) &&
             ir_source_text_range(a->call_types, left->type_first, b->call_types, right->type_first, left->parameter_count, sizeof(uint8_t));
     if (equal && left->abi != 0)

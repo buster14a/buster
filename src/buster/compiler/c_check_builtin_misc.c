@@ -3,7 +3,7 @@
 //
 // #148 miscellaneous builtin semantic actions. Include after c_builtin_catalog.c and c_check_actions.c.
 // Arguments are already elaborated source values. The caller retains their graph identities and evaluation order;
-// evaluated_operands is a bit mask, never permission to evaluate an operand twice. No action reads source memory.
+// evaluated_operands is a bit mask (all ones also takes the arguments past its 32), never permission to evaluate an operand twice. No action reads source memory.
 // Tag completions are immutable source positions, separate from diagnostic node identities. A null completion
 // slice uses the current table for direct action callers. Batches run in order because decay types may be interned.
 // Input/output slices require ordinary C alignment, no padding, and must be disjoint from each other/type storage.
@@ -454,8 +454,9 @@ static bool check_builtin_misc_align_integer(const TypeTable* table, TypeId type
 
 // The alignment builtins (cbuiltin_align, clang's BuiltinAlignment), of the raw arguments' types, before their lvalue
 // conversions: a source of an integer type (check_builtin_misc_align_integer) or an object pointer, an array decayed to its
-// element's pointer, a function and a function pointer neither, of up to 128 bits; then an alignment of such an integer
-// type. A constant alignment, which clang evaluates past its side effects and through const objects' constant initializers
+// element's pointer, a function and a function pointer neither, of any width (a _BitInt past 128 bits is a runtime one,
+// #1447); then an alignment of such an integer type of up to 128 bits (a wider one is refused by name, as its constant
+// can't be checked yet). A constant alignment, which clang evaluates past its side effects and through const objects' constant initializers
 // (CheckBuiltinMiscAction.alignment_evaluated), must be at least 1, at most 2 to the source's width less 1 (a pointer's
 // 64), and a power of 2, in that order; 1 draws -Wtautological-compare (recorded, not reported). align_up and align_down
 // are of the source's type, its qualifiers kept, and is_aligned is a bool. Each folds, as an integer constant expression,
@@ -488,15 +489,26 @@ static void check_builtin_misc_align(TypeTable* table, const CheckBuiltinMiscAct
     {
         check_action_diagnose(&output->action, CHECK_DIAG_INTEGER_REQUIRED, 1);
     }
-    else if ((integer && !check_action_integer_type(table, source, &width, &is_signed)) ||
-             !check_action_integer_type(table, raw[1].type, &alignment_width, &alignment_signed))
+    else if (!check_action_integer_type(table, raw[1].type, &alignment_width, &alignment_signed))
     {
-        // A _BitInt past 128 bits, which the checker's constants don't hold.
+        // An alignment past 128 bits, which clang takes, refused by name: clang checks a constant one (at least 1, at most
+        // 2 to the source's width less 1, a power of 2), which the checker can't tell from a runtime one until its
+        // constants hold more than 128 bits (#1447's review on #1912).
         output->unsupported |= BUSTER_CHECK_BUILTIN_MISC_UNSUPPORTED_WIDE;
-        check_action_diagnose(&output->action, CHECK_DIAG_UNSUPPORTED, integer ? 0 : 1);
+        check_action_diagnose(&output->action, CHECK_DIAG_UNSUPPORTED, 1);
     }
     else
     {
+        // A source past 128 bits (#1447), which clang takes: its width; no constant of it reaches the fold, as the
+        // checker's constants don't hold one yet, and its maximum alignment, 2 to its width less 1, is past every 128-bit
+        // one.
+        if (integer && !check_action_integer_type(table, source, &width, &is_signed))
+        {
+            uint64_t rank = 0;
+            uint64_t bits = 0;
+            type_integer_properties(table, type_unqualified(type_strip_aligned(table, source)), &rank, &bits, &is_signed);
+            width = (uint32_t)bits;
+        }
         // The alignment as clang's evaluator reads it where the call's evidence has it, else the runtime view's constant.
         // A modification's value (`(s = 3)`) is no constant to it at all (BUSTER_CHECK_MODIFICATION), which leaves the
         // alignment unchecked.
@@ -506,7 +518,7 @@ static void check_builtin_misc_align(TypeTable* table, const CheckBuiltinMiscAct
         const unsigned __int128 bits = (evaluated ? input->alignment_value : values[1].integer) & check_action_mask(alignment_width);
         const bool effects = evaluated ? input->alignment_side_effects : (values[1].flags & BUSTER_CHECK_SIDE_EFFECT) != 0;
         const bool negative = alignment_signed && (bits >> (alignment_width - 1)) != 0;
-        if (constant && (negative || bits == 0 || bits > (unsigned __int128)1 << (width - 1)))
+        if (constant && (negative || bits == 0 || (width <= 128 && bits > (unsigned __int128)1 << (width - 1))))
         {
             output->constraint = CHECK_BUILTIN_MISC_CONSTRAINT_RANGE;
             check_action_diagnose(&output->action, CHECK_DIAG_INCOMPATIBLE, 1);
@@ -530,7 +542,7 @@ static void check_builtin_misc_align(TypeTable* table, const CheckBuiltinMiscAct
     const bool clean = known && output->action.diagnostic == CHECK_DIAG_NONE && values[0].fault == CHECK_FAULT_NONE &&
                        (values[0].flags & BUSTER_CHECK_SIDE_EFFECT) == 0;
     const unsigned __int128 mask = alignment - 1;
-    if (clean && integer && values[0].constant_kind == CHECK_CONSTANT_INTEGER)
+    if (clean && integer && width <= 128 && values[0].constant_kind == CHECK_CONSTANT_INTEGER)
     {
         const unsigned __int128 all = check_action_mask(width);
         const unsigned __int128 x = values[0].integer & all;
@@ -1459,7 +1471,7 @@ static void check_builtin_misc_last(TypeTable* table, const CheckBuiltinMiscActi
     {
         // clang's void(void*) of custom checks (#148): a pointer as written (an array isn't one), to a complete object type
         // that isn't const ("read-only variable is not assignable"), whose padding bits its code zeroes
-        // (check_lower_padding). An incomplete pointee (void's among them) is clang's "variable has incomplete type".
+        // (c_check_program_padding.c). An incomplete pointee (void's among them) is clang's "variable has incomplete type".
         const TypeId written = type_strip_aligned(table, input->arguments[0].type);
         const TypeId pointee = check_action_kind(table, written) == BUSTER_TYPE_KIND_POINTER ? type_element(table, written) : 0;
         const uint8_t kind = pointee != 0 ? check_action_kind(table, pointee) : 0;
@@ -1612,9 +1624,10 @@ static __attribute__((unused)) void check_builtin_misc_one(TypeTable* table, con
         // size_t(...), at least one argument.
         case CBUILTIN_INFER_ALLOC_TOKEN: minimum = 1; maximum = 31; break;
         case CBUILTIN_CALL_WITH_STATIC_CHAIN: minimum = maximum = 2; break;
-        // A format, past __builtin_os_log_format's buffer, and its data, as many as the operands' mask holds.
-        case CBUILTIN_OS_LOG_FORMAT_BUFFER_SIZE: minimum = 1; maximum = 31; break;
-        case CBUILTIN_OS_LOG_FORMAT: minimum = 2; maximum = 31; break;
+        // A format, past __builtin_os_log_format's buffer, and up to 255 data arguments, as clang's BuiltinOSLogFormat
+        // takes them (its required arguments plus 0xff); data past the operands' mask is evaluated (evaluated_operands).
+        case CBUILTIN_OS_LOG_FORMAT_BUFFER_SIZE: minimum = 1; maximum = 1 + 255; break;
+        case CBUILTIN_OS_LOG_FORMAT: minimum = 2; maximum = 2 + 255; break;
         // A record's pointer, a printing function, and that function's leading arguments.
         case CBUILTIN_DUMP_STRUCT: minimum = 2; maximum = 31; break;
         case CBUILTIN_COUNTED_BY_REF: minimum = maximum = 1; break;
@@ -1656,7 +1669,8 @@ static __attribute__((unused)) void check_builtin_misc_one(TypeTable* table, con
     {
         CheckValue values[4] = { 0 };
         output->runtime_builtin = input->id;
-        output->evaluated_operands = (UINT32_C(1) << input->argument_count) - 1;
+        // Every argument; a full mask holds those past its 32 bits too (os_log's data).
+        output->evaluated_operands = input->argument_count >= 32 ? UINT32_MAX : (UINT32_C(1) << input->argument_count) - 1;
         // __builtin_classify_type's operand is its type alone, of any expression, which no conversion reaches, and
         // addressof's and function_start's are their designators. allow_runtime_check's and allow_sanitize_check's string
         // and annotation's second argument are their literals (CheckBuiltinMiscAction.string_known), never converted.

@@ -47,7 +47,9 @@
 //     times 10 s) and a line for a command the list doesn't have, each shard's commands in the list's order and every
 //     command in exactly one; 2 shards without costs; a shard without commands, which passes; the most shards
 //     (4294967295), the first with the costliest command and the last with none, dealt without room for each shard;
-//     and each error of the options (with the usage) and of the costs (at its line), and costs that can't be read;
+//     costs that name their runner's CPUs (`#: runner-cpus N`), dealt by each shard's schedule, against the same costs
+//     without them; and each error of the options (with the usage), of the costs and of the runner's CPUs (at its
+//     line), and costs that can't be read;
 //   - the command: build/compiler parallel's report and exit status, for lists on standard input and in a file that
 //     pass and fail, a report with no reader (its failed write stops the run, and the runner ends at once), with SIGPIPE
 //     at its default and ignored, a reader that leaves after the first line, which fails a run whose command passes, a
@@ -1469,6 +1471,77 @@ static void parallel_test_shards(ParallelTest* test)
         snprintf(expected, sizeof(expected), "parallel: %s:%s\n", costs, cost_cases[i].error);
         char name[128];
         snprintf(name, sizeof(name), "shards, invalid costs %llu", (unsigned long long)i);
+        parallel_test_check(test, name, status == 1, parallel_test_read(&test->arena, errors), expected);
+        test->arena.length = 0;
+    }
+    // Costs that name their runner's CPUs deal by each shard's schedule (test_deal_scheduled, #2031): three commands that
+    // hold all of a 4-CPU runner for 10 s each, and one of 60 s on one CPU. By costs alone (60, 40, 40, 40), long goes
+    // to shard 1, w1 and w2 to shard 2 and w3 to shard 1 again, where long starts after it, at 10 s. By schedule, long
+    // keeps shard 1 to itself, ending at 60 s, and the three wide ones end at 30 s on shard 2.
+    const bool scheduled_ready = parallel_test_write(list, parallel_test_string("== w1 [8 CPUs]\necho w1\n== w2 [8 CPUs]\necho w2\n== w3 [8 CPUs]\necho w3\n== long\necho long\n"));
+    static const ParallelTestShard scheduled_cases[] = {
+        {
+            "1/2",
+            true,
+            "parallel: shard 1 of 2, 1 of 4 commands, at most 4 CPUs at once\n"
+            "== long: passed in * s, * s of CPU\nlong\n"
+            "parallel: 1 commands in * s, * s of CPU, at most 4 CPUs at once: 1 passed, 0 failed, 0 skipped, 0 not started\n",
+        },
+        {
+            "2/2",
+            true,
+            "parallel: shard 2 of 2, 3 of 4 commands, at most 4 CPUs at once\n"
+            "== w1 [8 CPUs]: passed in * s, * s of CPU\nw1\n"
+            "== w2 [8 CPUs]: passed in * s, * s of CPU\nw2\n"
+            "== w3 [8 CPUs]: passed in * s, * s of CPU\nw3\n"
+            "parallel: 3 commands in * s, * s of CPU, at most 4 CPUs at once: 3 passed, 0 failed, 0 skipped, 0 not started\n",
+        },
+        {
+            "1/2",
+            false,
+            "parallel: shard 1 of 2, 2 of 4 commands, at most 4 CPUs at once\n"
+            "== w3 [8 CPUs]: passed in * s, * s of CPU\nw3\n"
+            "== long: passed in * s, * s of CPU\nlong\n"
+            "parallel: 2 commands in * s, * s of CPU, at most 4 CPUs at once: 2 passed, 0 failed, 0 skipped, 0 not started\n",
+        },
+    };
+    for (uint64_t i = 0; i < sizeof(scheduled_cases) / sizeof(scheduled_cases[0]); i += 1)
+    {
+        // The same costs, with and without their runner's CPUs (blanks around the line are a line's own).
+        const char* text = scheduled_cases[i].costs ? "# Seconds of the CPUs each held, on a runner of 4.\n  #: runner-cpus 4  \n40 w1 [8 CPUs]\n40 w2 [8 CPUs]\n40 w3 [8 CPUs]\n60 long\n"
+                                                    : "40 w1 [8 CPUs]\n40 w2 [8 CPUs]\n40 w3 [8 CPUs]\n60 long\n";
+        const bool written = scheduled_ready && parallel_test_write(costs, parallel_test_string(text));
+        char* arguments[] = { "compiler", "parallel", "--jobs", "4", "--shard", (char*)scheduled_cases[i].shard, "--costs", costs, list, 0 };
+        const int status = written ? parallel_test_command(test, arguments, "/dev/null", -1) : -1;
+        char name[128];
+        snprintf(name, sizeof(name), "shards, %s %s the runner's CPUs", scheduled_cases[i].shard, scheduled_cases[i].costs ? "by schedule, with" : "by costs, without");
+        parallel_test_check(test, name, status == 0, parallel_test_normalize(&test->arena, parallel_test_read(&test->arena, output)), scheduled_cases[i].expected);
+        test->arena.length = 0;
+    }
+#define BUSTER_PARALLEL_TEST_COST(literal, message) \
+    {                                            \
+        .text = literal,                         \
+        .length = sizeof(literal) - 1,           \
+        .error = message,                        \
+    }
+    static const ParallelTestCosts runner_cases[] = {
+        BUSTER_PARALLEL_TEST_COST("#: runner-cpus 0\n", "1: a runner's CPUs that aren't a count from 1 to 1024"),
+        BUSTER_PARALLEL_TEST_COST("#: runner-cpus 1025\n", "1: a runner's CPUs that aren't a count from 1 to 1024"),
+        BUSTER_PARALLEL_TEST_COST("#: runner-cpus 99999999999999999999\n", "1: a runner's CPUs that aren't a count from 1 to 1024"),
+        BUSTER_PARALLEL_TEST_COST("#: runner-cpus 4x\n", "1: a runner's CPUs that aren't a count from 1 to 1024"),
+        BUSTER_PARALLEL_TEST_COST("#: runner-cpus \n", "1: a runner's CPUs that aren't a count from 1 to 1024"),
+        BUSTER_PARALLEL_TEST_COST("#: runner-cpus 4\n\n#: runner-cpus 4\n", "3: a runner's CPUs that an earlier line gives"),
+    };
+#undef BUSTER_PARALLEL_TEST_COST
+    for (uint64_t i = 0; i < sizeof(runner_cases) / sizeof(runner_cases[0]); i += 1)
+    {
+        const bool written = scheduled_ready && parallel_test_write(costs, (String8){ .pointer = (char*)runner_cases[i].text, .length = runner_cases[i].length });
+        char* arguments[] = { "compiler", "parallel", "--shard", "1/2", "--costs", costs, list, 0 };
+        const int status = written ? parallel_test_command(test, arguments, "/dev/null", -1) : -1;
+        char expected[1024];
+        snprintf(expected, sizeof(expected), "parallel: %s:%s\n", costs, runner_cases[i].error);
+        char name[128];
+        snprintf(name, sizeof(name), "shards, invalid runner's CPUs %llu", (unsigned long long)i);
         parallel_test_check(test, name, status == 1, parallel_test_read(&test->arena, errors), expected);
         test->arena.length = 0;
     }

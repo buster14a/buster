@@ -91,6 +91,52 @@ static const char check_driver_enum_constants_source[] =
 static const CheckDriverDefaultWarningFixture check_driver_enum_arithmetic_fixtures[] =
 {
     {
+        // #1829: exercise vector chunks and a scalar tail while preserving same-enum and integer fallbacks.
+        .name = "enumerator coercion across 9 completed definitions",
+        .source = "enum E0 { V0 };\n"
+                  "enum E1 { V1 };\n"
+                  "enum E2 { V2 };\n"
+                  "enum E3 { V3 };\n"
+                  "enum E4 { V4 };\n"
+                  "enum E5 { V5 };\n"
+                  "enum E6 { V6 };\n"
+                  "enum E7 { V7 };\n"
+                  "enum E8 { V8 };\n"
+                  "int f(enum E4 mid, int x) { return (V0 == V8) + (V8 == V0) + (mid == V4) + (x == V8); }\n",
+        .warnings = 2,
+    },
+    {
+        .name = "enumerator coercion across 17 completed definitions",
+        .source = "enum E0 { V0 };\n"
+                  "enum E1 { V1 };\n"
+                  "enum E2 { V2 };\n"
+                  "enum E3 { V3 };\n"
+                  "enum E4 { V4 };\n"
+                  "enum E5 { V5 };\n"
+                  "enum E6 { V6 };\n"
+                  "enum E7 { V7 };\n"
+                  "enum E8 { V8 };\n"
+                  "enum E9 { V9 };\n"
+                  "enum E10 { V10 };\n"
+                  "enum E11 { V11 };\n"
+                  "enum E12 { V12 };\n"
+                  "enum E13 { V13 };\n"
+                  "enum E14 { V14 };\n"
+                  "enum E15 { V15 };\n"
+                  "enum E16 { V16 };\n"
+                  "int f(enum E8 mid, int x) { return (V0 == V16) + (V16 == V0) + (V7 == V8) + (mid == V8) + (x == V16); }\n",
+        .warnings = 3,
+    },
+    {
+        // The nearest opening definition is an already-closed inner enum for OuterLast and PeerLast.
+        // This exercises check_common_enum_coerced's linear fallback, not its binary-search fast path.
+        .name = "enumerator coercion with nested definitions and closed inner scopes",
+        .source = "enum Outer { OuterFirst = sizeof(enum Inner { InnerOnly }), OuterLast };\n"
+                  "enum Peer { PeerFirst = sizeof(enum PeerInner { PeerInnerOnly }), PeerLast };\n"
+                  "int f(enum Outer a, enum Peer b) { return (OuterLast == PeerLast) + (a == OuterLast) + (b == PeerLast); }\n",
+        .warnings = 1,
+    },
+    {
         .name = "comparisons of different enumerations warn by default, at their operators",
         .source = check_driver_enum_mix_source,
         .warnings = 3,

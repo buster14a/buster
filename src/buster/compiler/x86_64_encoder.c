@@ -3980,6 +3980,11 @@ typedef enum X86Syntax
     BUSTER_X86_LOCK_BIT_TEST_FORMS(X, BTS, "bts", 0xab, 5) \
     BUSTER_X86_LOCK_BIT_TEST_FORMS(X, BTR, "btr", 0xb3, 6) \
     BUSTER_X86_LOCK_BIT_TEST_FORMS(X, BTC, "btc", 0xbb, 7) \
+    /* XCHG to memory with the LOCK prefix it doesn't need (#1846: GNU as and clang take `lock xchg`, 66 before F0). */ \
+    X(LOCK_XCHG_M8_R8, "lock xchg", 0xf0, 1, 0x86, R, 0, 0, 0, GB, M, 1, RM_REG) \
+    X(LOCK_XCHG_M16_R16, "lock xchg", 0xf066, 1, 0x87, R, 0, 0, 0, GW, M, 2, RM_REG) \
+    X(LOCK_XCHG_M32_R32, "lock xchg", 0xf0, 1, 0x87, R, 0, 0, 0, GD, M, 4, RM_REG) \
+    X(LOCK_XCHG_M64_R64, "lock xchg", 0xf0, 1, 0x87, R, 0, 0, 1, GQ, M, 8, RM_REG) \
     /* HLE: XACQUIRE and XRELEASE on the locked forms and XCHG to memory, and XRELEASE on MOV to memory. */ \
     BUSTER_X86_HLE_FORMS(X, XACQUIRE, "xacquire", 0xf2) \
     BUSTER_X86_HLE_FORMS(X, XRELEASE, "xrelease", 0xf3) \
@@ -5190,10 +5195,21 @@ static uint8_t x86_legacy_map(const X86FormDescription* form)
 // (main.c): test-ir-source's emission encodes in the checker's unit, and its IR adapter's tier0_validate reads the forms'
 // templates in the backend's (#784). A unit of its own, a benchmark's, has its own. x86_semantics.c's tables take the
 // same linkage.
+// But under AddressSanitizer, a unit of its own in the executable (BUSTER_EXECUTABLE_UNIT) takes main.c's too: every unit
+// builds the same tables, and LeakSanitizer reads every writable byte at each process's exit, where 15 units' 33 private
+// template tables were 117 MB, about 25 ms of every ASan process without transparent huge pages (#2068). Other builds,
+// whose benchmarks measure a unit's own copies, keep them.
+#if defined(__has_feature)
+#if __has_feature(address_sanitizer) && defined(BUSTER_EXECUTABLE_UNIT) && !defined(BUSTER_UNIT)
+#define BUSTER_X86_SHARED_BY_OWN_UNIT 1
+#endif
+#endif
 #if defined(BUSTER_UNIT) && BUSTER_UNIT != BUSTER_UNIT_DRIVER
 #define BUSTER_X86_SHARED extern __attribute__((visibility("hidden")))
 #elif defined(BUSTER_UNIT)
 #define BUSTER_X86_SHARED __attribute__((visibility("hidden")))
+#elif defined(BUSTER_X86_SHARED_BY_OWN_UNIT)
+#define BUSTER_X86_SHARED extern __attribute__((visibility("hidden")))
 #else
 #define BUSTER_X86_SHARED static
 #endif

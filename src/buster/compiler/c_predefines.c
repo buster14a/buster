@@ -29,7 +29,8 @@
 //   - The options: PredefinesOptions, predefines_options_initialize, the -m options that change no macro
 //     (predefines_neutral, the flags and value options clang uses for x86-64 Linux, beside which pp_parse_options
 //     refuses every other -m option, and predefines_finish_neutral, their values and combinations checked as clang
-//     checks them), clang's -m aliases of other options (predefines_alias) and predefines_option (one argument).
+//     checks them), clang's -m aliases of other options (predefines_alias) and predefines_option (one argument, by its
+//     option IDs: c_option_table.c).
 //   - The sanitizers: clang's sanitizers and groups, predefines_sanitizers (clang's SanitizerArgs), predefines_finish
 //     (what the whole command line decides, after every option: the sanitizers and the options clang's driver reads
 //     only the last of) and predefines_sanitizer_feature (the sanitizer features of the oracle's mode).
@@ -43,6 +44,7 @@
 #include <cpuid.h>
 #include "host_isa.h"
 #include "buster/compiler/x86_target.c"
+#include "buster/compiler/c_option_table.c"
 
 // ---------------------------------------------------------------------------------------------------------------------
 // Features and the generated tables
@@ -209,6 +211,129 @@ static const PredefinesFeature predefines_features[] = {
     { "zu", PREDEFINES_FLAG_APX, { { 0x0ull, 0x10000000000000ull } }, { { 0x0ull, 0x10000000000000ull } }, "#define __ZU__ 1\n" },
 };
 
+// Each feature's index in predefines_features: PREDEFINES_FEATURE_ and its name in capitals, with '.' and '-' as '_'.
+typedef enum PredefinesFeatureIndex
+{
+    PREDEFINES_FEATURE_64BIT,
+    PREDEFINES_FEATURE_ADX,
+    PREDEFINES_FEATURE_AES,
+    PREDEFINES_FEATURE_AMX_AVX512,
+    PREDEFINES_FEATURE_AMX_BF16,
+    PREDEFINES_FEATURE_AMX_COMPLEX,
+    PREDEFINES_FEATURE_AMX_FP16,
+    PREDEFINES_FEATURE_AMX_FP8,
+    PREDEFINES_FEATURE_AMX_INT8,
+    PREDEFINES_FEATURE_AMX_MOVRS,
+    PREDEFINES_FEATURE_AMX_TILE,
+    PREDEFINES_FEATURE_AVX,
+    PREDEFINES_FEATURE_AVX10_1,
+    PREDEFINES_FEATURE_AVX10_2,
+    PREDEFINES_FEATURE_AVX2,
+    PREDEFINES_FEATURE_AVX512BF16,
+    PREDEFINES_FEATURE_AVX512BITALG,
+    PREDEFINES_FEATURE_AVX512BMM,
+    PREDEFINES_FEATURE_AVX512BW,
+    PREDEFINES_FEATURE_AVX512CD,
+    PREDEFINES_FEATURE_AVX512DQ,
+    PREDEFINES_FEATURE_AVX512F,
+    PREDEFINES_FEATURE_AVX512FP16,
+    PREDEFINES_FEATURE_AVX512IFMA,
+    PREDEFINES_FEATURE_AVX512VBMI,
+    PREDEFINES_FEATURE_AVX512VBMI2,
+    PREDEFINES_FEATURE_AVX512VL,
+    PREDEFINES_FEATURE_AVX512VNNI,
+    PREDEFINES_FEATURE_AVX512VP2INTERSECT,
+    PREDEFINES_FEATURE_AVX512VPOPCNTDQ,
+    PREDEFINES_FEATURE_AVXIFMA,
+    PREDEFINES_FEATURE_AVXNECONVERT,
+    PREDEFINES_FEATURE_AVXVNNI,
+    PREDEFINES_FEATURE_AVXVNNIINT16,
+    PREDEFINES_FEATURE_AVXVNNIINT8,
+    PREDEFINES_FEATURE_BMI,
+    PREDEFINES_FEATURE_BMI2,
+    PREDEFINES_FEATURE_CCMP,
+    PREDEFINES_FEATURE_CF,
+    PREDEFINES_FEATURE_CLDEMOTE,
+    PREDEFINES_FEATURE_CLFLUSHOPT,
+    PREDEFINES_FEATURE_CLWB,
+    PREDEFINES_FEATURE_CLZERO,
+    PREDEFINES_FEATURE_CMOV,
+    PREDEFINES_FEATURE_CMPCCXADD,
+    PREDEFINES_FEATURE_CRC32,
+    PREDEFINES_FEATURE_CX16,
+    PREDEFINES_FEATURE_CX8,
+    PREDEFINES_FEATURE_EGPR,
+    PREDEFINES_FEATURE_ENQCMD,
+    PREDEFINES_FEATURE_F16C,
+    PREDEFINES_FEATURE_FMA,
+    PREDEFINES_FEATURE_FMA4,
+    PREDEFINES_FEATURE_FSGSBASE,
+    PREDEFINES_FEATURE_FXSR,
+    PREDEFINES_FEATURE_GFNI,
+    PREDEFINES_FEATURE_HRESET,
+    PREDEFINES_FEATURE_INLINE_ASM_USE_GPR32,
+    PREDEFINES_FEATURE_INVPCID,
+    PREDEFINES_FEATURE_JMPABS,
+    PREDEFINES_FEATURE_KL,
+    PREDEFINES_FEATURE_LWP,
+    PREDEFINES_FEATURE_LZCNT,
+    PREDEFINES_FEATURE_MMX,
+    PREDEFINES_FEATURE_MOVBE,
+    PREDEFINES_FEATURE_MOVDIR64B,
+    PREDEFINES_FEATURE_MOVDIRI,
+    PREDEFINES_FEATURE_MOVRS,
+    PREDEFINES_FEATURE_MWAITX,
+    PREDEFINES_FEATURE_NDD,
+    PREDEFINES_FEATURE_NF,
+    PREDEFINES_FEATURE_PCLMUL,
+    PREDEFINES_FEATURE_PCONFIG,
+    PREDEFINES_FEATURE_PKU,
+    PREDEFINES_FEATURE_POPCNT,
+    PREDEFINES_FEATURE_PPX,
+    PREDEFINES_FEATURE_PREFETCHI,
+    PREDEFINES_FEATURE_PRFCHW,
+    PREDEFINES_FEATURE_PTWRITE,
+    PREDEFINES_FEATURE_PUSH2POP2,
+    PREDEFINES_FEATURE_RAOINT,
+    PREDEFINES_FEATURE_RDPID,
+    PREDEFINES_FEATURE_RDPRU,
+    PREDEFINES_FEATURE_RDRND,
+    PREDEFINES_FEATURE_RDSEED,
+    PREDEFINES_FEATURE_RTM,
+    PREDEFINES_FEATURE_SAHF,
+    PREDEFINES_FEATURE_SERIALIZE,
+    PREDEFINES_FEATURE_SGX,
+    PREDEFINES_FEATURE_SHA,
+    PREDEFINES_FEATURE_SHA512,
+    PREDEFINES_FEATURE_SHSTK,
+    PREDEFINES_FEATURE_SM3,
+    PREDEFINES_FEATURE_SM4,
+    PREDEFINES_FEATURE_SSE,
+    PREDEFINES_FEATURE_SSE2,
+    PREDEFINES_FEATURE_SSE3,
+    PREDEFINES_FEATURE_SSE4_1,
+    PREDEFINES_FEATURE_SSE4_2,
+    PREDEFINES_FEATURE_SSE4A,
+    PREDEFINES_FEATURE_SSSE3,
+    PREDEFINES_FEATURE_TBM,
+    PREDEFINES_FEATURE_TSXLDTRK,
+    PREDEFINES_FEATURE_UINTR,
+    PREDEFINES_FEATURE_USERMSR,
+    PREDEFINES_FEATURE_VAES,
+    PREDEFINES_FEATURE_VPCLMULQDQ,
+    PREDEFINES_FEATURE_WAITPKG,
+    PREDEFINES_FEATURE_WBNOINVD,
+    PREDEFINES_FEATURE_WIDEKL,
+    PREDEFINES_FEATURE_X87,
+    PREDEFINES_FEATURE_XOP,
+    PREDEFINES_FEATURE_XSAVE,
+    PREDEFINES_FEATURE_XSAVEC,
+    PREDEFINES_FEATURE_XSAVEOPT,
+    PREDEFINES_FEATURE_XSAVES,
+    PREDEFINES_FEATURE_ZU,
+    PREDEFINES_FEATURE_COUNT,
+} PredefinesFeatureIndex;
+
 static const PredefinesCPU predefines_cpus[] = {
     { "nocona", "nocona", { { 0x8040c80000000000ull, 0x4001c0000000ull } } },
     { "core2", "core2", { { 0x8040c80000000000ull, 0x4011c0400000ull } } },
@@ -304,6 +429,7 @@ static const char* const predefines_tunes[] = {
     "bdver4", "znver1", "znver2", "znver3", "znver4", "znver5", "znver6", "c86-4g-m4", "c86-4g-m6", "c86-4g-m7", "c86-4g-m8", "x86-64", "geode",
 };
 // END GENERATED
+_Static_assert(PREDEFINES_FEATURE_COUNT == BUSTER_ARRAY_LENGTH(predefines_features), "an index for each feature, in the table's order");
 
 static bool predefines_has(PredefinesFeatures set, uint32_t feature)
 {
@@ -355,18 +481,21 @@ static int32_t predefines_feature_index(const char* name, size_t length)
     return result;
 }
 
-// The index of the feature `name` (which the tables have).
-static uint32_t predefines_feature(const char* name)
+// The index of the feature `name` (which the tables have), for the tests: the compiler's own code names a feature by its
+// index (PredefinesFeatureIndex), without a lookup (#1444).
+static __attribute__((unused)) uint32_t predefines_feature(const char* name)
 {
     return (uint32_t)predefines_feature_index(name, strlen(name));
 }
 
+// The index in predefines_cpus of the CPU `name`, or -1: the first of the same name, compared without a call (#1444),
+// since a unit without -march looks up x86-64, near the table's end, at each resolution.
 static int32_t predefines_cpu_index(const char* name)
 {
     int32_t result = -1;
     for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(predefines_cpus) && result < 0; c += 1)
     {
-        result = strcmp(predefines_cpus[c].name, name) == 0 ? (int32_t)c : -1;
+        result = c_option_is(predefines_cpus[c].name, name) ? (int32_t)c : -1;
     }
     return result;
 }
@@ -392,9 +521,8 @@ BUSTER_INLINE bool predefines_bit(uint32_t value, uint32_t bit)
 }
 
 // One feature of the host's: `listed` gets it (-march=native gives it as +name or -name), and `detected` gets it if on.
-static void predefines_host_feature(PredefinesFeatures* listed, PredefinesFeatures* detected, const char* name, bool on)
+static void predefines_host_feature(PredefinesFeatures* listed, PredefinesFeatures* detected, uint32_t feature, bool on)
 {
-    const uint32_t feature = predefines_feature(name);
     listed->words[feature / 64] |= 1ull << (feature % 64);
     detected->words[feature / 64] |= (uint64_t)on << (feature % 64);
 }
@@ -418,23 +546,23 @@ static const char* predefines_host(PredefinesFeatures* listed, PredefinesFeature
         const uint32_t signature = r[0];
         const uint32_t ecx1 = r[2];
         const uint32_t edx1 = r[3];
-        predefines_host_feature(listed, detected, "cx8", predefines_bit(edx1, 8));
-        predefines_host_feature(listed, detected, "cmov", predefines_bit(edx1, 15));
-        predefines_host_feature(listed, detected, "mmx", predefines_bit(edx1, 23));
-        predefines_host_feature(listed, detected, "fxsr", predefines_bit(edx1, 24));
-        predefines_host_feature(listed, detected, "sse", predefines_bit(edx1, 25));
-        predefines_host_feature(listed, detected, "sse2", predefines_bit(edx1, 26));
-        predefines_host_feature(listed, detected, "sse3", predefines_bit(ecx1, 0));
-        predefines_host_feature(listed, detected, "pclmul", predefines_bit(ecx1, 1));
-        predefines_host_feature(listed, detected, "ssse3", predefines_bit(ecx1, 9));
-        predefines_host_feature(listed, detected, "cx16", predefines_bit(ecx1, 13));
-        predefines_host_feature(listed, detected, "sse4.1", predefines_bit(ecx1, 19));
-        predefines_host_feature(listed, detected, "sse4.2", predefines_bit(ecx1, 20));
-        predefines_host_feature(listed, detected, "crc32", predefines_bit(ecx1, 20));
-        predefines_host_feature(listed, detected, "movbe", predefines_bit(ecx1, 22));
-        predefines_host_feature(listed, detected, "popcnt", predefines_bit(ecx1, 23));
-        predefines_host_feature(listed, detected, "aes", predefines_bit(ecx1, 25));
-        predefines_host_feature(listed, detected, "rdrnd", predefines_bit(ecx1, 30));
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_CX8, predefines_bit(edx1, 8));
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_CMOV, predefines_bit(edx1, 15));
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_MMX, predefines_bit(edx1, 23));
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_FXSR, predefines_bit(edx1, 24));
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_SSE, predefines_bit(edx1, 25));
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_SSE2, predefines_bit(edx1, 26));
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_SSE3, predefines_bit(ecx1, 0));
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_PCLMUL, predefines_bit(ecx1, 1));
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_SSSE3, predefines_bit(ecx1, 9));
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_CX16, predefines_bit(ecx1, 13));
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_SSE4_1, predefines_bit(ecx1, 19));
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_SSE4_2, predefines_bit(ecx1, 20));
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_CRC32, predefines_bit(ecx1, 20));
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_MOVBE, predefines_bit(ecx1, 22));
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_POPCNT, predefines_bit(ecx1, 23));
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_AES, predefines_bit(ecx1, 25));
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_RDRND, predefines_bit(ecx1, 30));
         // The OS saves the registers' state: XCR0's bits for SSE and AVX, AVX-512's three, AMX's two and APX's.
         const bool xsave = predefines_bit(ecx1, 27);
         const uint64_t xcr0 = xsave ? _xgetbv(0) : 0;
@@ -442,131 +570,141 @@ static const char* predefines_host(PredefinesFeatures* listed, PredefinesFeature
         const bool avx512_save = avx_save && (xcr0 & 0xe0) == 0xe0;
         const bool amx_save = xsave && (xcr0 & 0x60000) == 0x60000;
         const bool apx_save = xsave && ((xcr0 >> 19) & 1) != 0;
-        predefines_host_feature(listed, detected, "avx", avx_save);
-        predefines_host_feature(listed, detected, "fma", predefines_bit(ecx1, 12) && avx_save);
-        predefines_host_feature(listed, detected, "xsave", predefines_bit(ecx1, 26) && avx_save);
-        predefines_host_feature(listed, detected, "f16c", predefines_bit(ecx1, 29) && avx_save);
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_AVX, avx_save);
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_FMA, predefines_bit(ecx1, 12) && avx_save);
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_XSAVE, predefines_bit(ecx1, 26) && avx_save);
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_F16C, predefines_bit(ecx1, 29) && avx_save);
         predefines_cpuid(0x80000000, 0, r);
         const uint32_t max_extended = r[0];
         const bool extended1 = max_extended >= 0x80000001 && predefines_cpuid(0x80000001, 0, r);
         const uint32_t ecx81 = extended1 ? r[2] : 0;
         const uint32_t edx81 = extended1 ? r[3] : 0;
-        predefines_host_feature(listed, detected, "sahf", predefines_bit(ecx81, 0));
-        predefines_host_feature(listed, detected, "lzcnt", predefines_bit(ecx81, 5));
-        predefines_host_feature(listed, detected, "sse4a", predefines_bit(ecx81, 6));
-        predefines_host_feature(listed, detected, "prfchw", predefines_bit(ecx81, 8));
-        predefines_host_feature(listed, detected, "xop", predefines_bit(ecx81, 11) && avx_save);
-        predefines_host_feature(listed, detected, "lwp", predefines_bit(ecx81, 15));
-        predefines_host_feature(listed, detected, "fma4", predefines_bit(ecx81, 16) && avx_save);
-        predefines_host_feature(listed, detected, "tbm", predefines_bit(ecx81, 21));
-        predefines_host_feature(listed, detected, "mwaitx", predefines_bit(ecx81, 29));
-        predefines_host_feature(listed, detected, "64bit", predefines_bit(edx81, 29));
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_SAHF, predefines_bit(ecx81, 0));
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_LZCNT, predefines_bit(ecx81, 5));
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_SSE4A, predefines_bit(ecx81, 6));
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_PRFCHW, predefines_bit(ecx81, 8));
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_XOP, predefines_bit(ecx81, 11) && avx_save);
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_LWP, predefines_bit(ecx81, 15));
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_FMA4, predefines_bit(ecx81, 16) && avx_save);
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_TBM, predefines_bit(ecx81, 21));
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_MWAITX, predefines_bit(ecx81, 29));
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_64BIT, predefines_bit(edx81, 29));
         const bool extended8 = max_extended >= 0x80000008 && predefines_cpuid(0x80000008, 0, r);
         const uint32_t ebx88 = extended8 ? r[1] : 0;
-        predefines_host_feature(listed, detected, "clzero", predefines_bit(ebx88, 0));
-        predefines_host_feature(listed, detected, "rdpru", predefines_bit(ebx88, 4));
-        predefines_host_feature(listed, detected, "wbnoinvd", predefines_bit(ebx88, 9));
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_CLZERO, predefines_bit(ebx88, 0));
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_RDPRU, predefines_bit(ebx88, 4));
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_WBNOINVD, predefines_bit(ebx88, 9));
         const bool extended21 = max_extended >= 0x80000021 && predefines_cpuid(0x80000021, 0, r);
         const uint32_t eax821 = extended21 ? r[0] : 0;
         // prefetchi is AMD's bit here, or Intel's in leaf 7's subleaf 1.
         bool prefetchi = predefines_bit(eax821, 20);
-        predefines_host_feature(listed, detected, "avx512bmm", predefines_bit(eax821, 23) && avx512_save);
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_AVX512BMM, predefines_bit(eax821, 23) && avx512_save);
         const bool leaf7 = max_level >= 7 && predefines_cpuid(7, 0, r);
         const uint32_t eax7 = leaf7 ? r[0] : 0;
         const uint32_t ebx7 = leaf7 ? r[1] : 0;
         const uint32_t ecx7 = leaf7 ? r[2] : 0;
         const uint32_t edx7 = leaf7 ? r[3] : 0;
-        predefines_host_feature(listed, detected, "fsgsbase", predefines_bit(ebx7, 0));
-        predefines_host_feature(listed, detected, "sgx", predefines_bit(ebx7, 2));
-        predefines_host_feature(listed, detected, "bmi", predefines_bit(ebx7, 3));
-        predefines_host_feature(listed, detected, "avx2", predefines_bit(ebx7, 5) && avx_save);
-        predefines_host_feature(listed, detected, "bmi2", predefines_bit(ebx7, 8));
-        predefines_host_feature(listed, detected, "invpcid", predefines_bit(ebx7, 10));
-        predefines_host_feature(listed, detected, "rtm", predefines_bit(ebx7, 11));
-        predefines_host_feature(listed, detected, "avx512f", predefines_bit(ebx7, 16) && avx512_save);
-        predefines_host_feature(listed, detected, "avx512dq", predefines_bit(ebx7, 17) && avx512_save);
-        predefines_host_feature(listed, detected, "rdseed", predefines_bit(ebx7, 18));
-        predefines_host_feature(listed, detected, "adx", predefines_bit(ebx7, 19));
-        predefines_host_feature(listed, detected, "avx512ifma", predefines_bit(ebx7, 21) && avx512_save);
-        predefines_host_feature(listed, detected, "clflushopt", predefines_bit(ebx7, 23));
-        predefines_host_feature(listed, detected, "clwb", predefines_bit(ebx7, 24));
-        predefines_host_feature(listed, detected, "avx512cd", predefines_bit(ebx7, 28) && avx512_save);
-        predefines_host_feature(listed, detected, "sha", predefines_bit(ebx7, 29));
-        predefines_host_feature(listed, detected, "avx512bw", predefines_bit(ebx7, 30) && avx512_save);
-        predefines_host_feature(listed, detected, "avx512vl", predefines_bit(ebx7, 31) && avx512_save);
-        predefines_host_feature(listed, detected, "avx512vbmi", predefines_bit(ecx7, 1) && avx512_save);
-        predefines_host_feature(listed, detected, "pku", predefines_bit(ecx7, 4));
-        predefines_host_feature(listed, detected, "waitpkg", predefines_bit(ecx7, 5));
-        predefines_host_feature(listed, detected, "avx512vbmi2", predefines_bit(ecx7, 6) && avx512_save);
-        predefines_host_feature(listed, detected, "shstk", predefines_bit(ecx7, 7));
-        predefines_host_feature(listed, detected, "gfni", predefines_bit(ecx7, 8));
-        predefines_host_feature(listed, detected, "vaes", predefines_bit(ecx7, 9) && avx_save);
-        predefines_host_feature(listed, detected, "vpclmulqdq", predefines_bit(ecx7, 10) && avx_save);
-        predefines_host_feature(listed, detected, "avx512vnni", predefines_bit(ecx7, 11) && avx512_save);
-        predefines_host_feature(listed, detected, "avx512bitalg", predefines_bit(ecx7, 12) && avx512_save);
-        predefines_host_feature(listed, detected, "avx512vpopcntdq", predefines_bit(ecx7, 14) && avx512_save);
-        predefines_host_feature(listed, detected, "rdpid", predefines_bit(ecx7, 22));
-        predefines_host_feature(listed, detected, "kl", predefines_bit(ecx7, 23));
-        predefines_host_feature(listed, detected, "cldemote", predefines_bit(ecx7, 25));
-        predefines_host_feature(listed, detected, "movdiri", predefines_bit(ecx7, 27));
-        predefines_host_feature(listed, detected, "movdir64b", predefines_bit(ecx7, 28));
-        predefines_host_feature(listed, detected, "enqcmd", predefines_bit(ecx7, 29));
-        predefines_host_feature(listed, detected, "uintr", predefines_bit(edx7, 5));
-        predefines_host_feature(listed, detected, "avx512vp2intersect", predefines_bit(edx7, 8) && avx512_save);
-        predefines_host_feature(listed, detected, "serialize", predefines_bit(edx7, 14));
-        predefines_host_feature(listed, detected, "tsxldtrk", predefines_bit(edx7, 16));
-        predefines_host_feature(listed, detected, "pconfig", predefines_bit(edx7, 18));
-        predefines_host_feature(listed, detected, "amx-bf16", predefines_bit(edx7, 22) && amx_save);
-        predefines_host_feature(listed, detected, "avx512fp16", predefines_bit(edx7, 23) && avx512_save);
-        predefines_host_feature(listed, detected, "amx-tile", predefines_bit(edx7, 24) && amx_save);
-        predefines_host_feature(listed, detected, "amx-int8", predefines_bit(edx7, 25) && amx_save);
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_FSGSBASE, predefines_bit(ebx7, 0));
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_SGX, predefines_bit(ebx7, 2));
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_BMI, predefines_bit(ebx7, 3));
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_AVX2, predefines_bit(ebx7, 5) && avx_save);
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_BMI2, predefines_bit(ebx7, 8));
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_INVPCID, predefines_bit(ebx7, 10));
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_RTM, predefines_bit(ebx7, 11));
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_AVX512F, predefines_bit(ebx7, 16) && avx512_save);
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_AVX512DQ, predefines_bit(ebx7, 17) && avx512_save);
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_RDSEED, predefines_bit(ebx7, 18));
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_ADX, predefines_bit(ebx7, 19));
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_AVX512IFMA, predefines_bit(ebx7, 21) && avx512_save);
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_CLFLUSHOPT, predefines_bit(ebx7, 23));
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_CLWB, predefines_bit(ebx7, 24));
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_AVX512CD, predefines_bit(ebx7, 28) && avx512_save);
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_SHA, predefines_bit(ebx7, 29));
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_AVX512BW, predefines_bit(ebx7, 30) && avx512_save);
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_AVX512VL, predefines_bit(ebx7, 31) && avx512_save);
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_AVX512VBMI, predefines_bit(ecx7, 1) && avx512_save);
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_PKU, predefines_bit(ecx7, 4));
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_WAITPKG, predefines_bit(ecx7, 5));
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_AVX512VBMI2, predefines_bit(ecx7, 6) && avx512_save);
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_SHSTK, predefines_bit(ecx7, 7));
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_GFNI, predefines_bit(ecx7, 8));
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_VAES, predefines_bit(ecx7, 9) && avx_save);
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_VPCLMULQDQ, predefines_bit(ecx7, 10) && avx_save);
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_AVX512VNNI, predefines_bit(ecx7, 11) && avx512_save);
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_AVX512BITALG, predefines_bit(ecx7, 12) && avx512_save);
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_AVX512VPOPCNTDQ, predefines_bit(ecx7, 14) && avx512_save);
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_RDPID, predefines_bit(ecx7, 22));
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_KL, predefines_bit(ecx7, 23));
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_CLDEMOTE, predefines_bit(ecx7, 25));
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_MOVDIRI, predefines_bit(ecx7, 27));
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_MOVDIR64B, predefines_bit(ecx7, 28));
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_ENQCMD, predefines_bit(ecx7, 29));
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_UINTR, predefines_bit(edx7, 5));
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_AVX512VP2INTERSECT, predefines_bit(edx7, 8) && avx512_save);
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_SERIALIZE, predefines_bit(edx7, 14));
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_TSXLDTRK, predefines_bit(edx7, 16));
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_PCONFIG, predefines_bit(edx7, 18));
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_AMX_BF16, predefines_bit(edx7, 22) && amx_save);
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_AVX512FP16, predefines_bit(edx7, 23) && avx512_save);
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_AMX_TILE, predefines_bit(edx7, 24) && amx_save);
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_AMX_INT8, predefines_bit(edx7, 25) && amx_save);
         // Subleaf 0's EAX is the last subleaf: some CPUs don't give zeros past it.
         const bool leaf7_1 = leaf7 && eax7 >= 1 && predefines_cpuid(7, 1, r);
         const uint32_t eax71 = leaf7_1 ? r[0] : 0;
         const uint32_t edx71 = leaf7_1 ? r[3] : 0;
-        predefines_host_feature(listed, detected, "sha512", predefines_bit(eax71, 0));
-        predefines_host_feature(listed, detected, "sm3", predefines_bit(eax71, 1));
-        predefines_host_feature(listed, detected, "sm4", predefines_bit(eax71, 2));
-        predefines_host_feature(listed, detected, "raoint", predefines_bit(eax71, 3));
-        predefines_host_feature(listed, detected, "avxvnni", predefines_bit(eax71, 4) && avx_save);
-        predefines_host_feature(listed, detected, "avx512bf16", predefines_bit(eax71, 5) && avx512_save);
-        predefines_host_feature(listed, detected, "amx-fp16", predefines_bit(eax71, 21) && amx_save);
-        predefines_host_feature(listed, detected, "cmpccxadd", predefines_bit(eax71, 7));
-        predefines_host_feature(listed, detected, "hreset", predefines_bit(eax71, 22));
-        predefines_host_feature(listed, detected, "avxifma", predefines_bit(eax71, 23) && avx_save);
-        predefines_host_feature(listed, detected, "movrs", predefines_bit(eax71, 31));
-        predefines_host_feature(listed, detected, "avxvnniint8", predefines_bit(edx71, 4) && avx_save);
-        predefines_host_feature(listed, detected, "avxneconvert", predefines_bit(edx71, 5) && avx_save);
-        predefines_host_feature(listed, detected, "amx-complex", predefines_bit(edx71, 8) && amx_save);
-        predefines_host_feature(listed, detected, "avxvnniint16", predefines_bit(edx71, 10) && avx_save);
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_SHA512, predefines_bit(eax71, 0));
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_SM3, predefines_bit(eax71, 1));
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_SM4, predefines_bit(eax71, 2));
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_RAOINT, predefines_bit(eax71, 3));
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_AVXVNNI, predefines_bit(eax71, 4) && avx_save);
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_AVX512BF16, predefines_bit(eax71, 5) && avx512_save);
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_AMX_FP16, predefines_bit(eax71, 21) && amx_save);
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_CMPCCXADD, predefines_bit(eax71, 7));
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_HRESET, predefines_bit(eax71, 22));
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_AVXIFMA, predefines_bit(eax71, 23) && avx_save);
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_MOVRS, predefines_bit(eax71, 31));
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_AVXVNNIINT8, predefines_bit(edx71, 4) && avx_save);
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_AVXNECONVERT, predefines_bit(edx71, 5) && avx_save);
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_AMX_COMPLEX, predefines_bit(edx71, 8) && amx_save);
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_AVXVNNIINT16, predefines_bit(edx71, 10) && avx_save);
         prefetchi |= predefines_bit(edx71, 14);
-        predefines_host_feature(listed, detected, "prefetchi", prefetchi);
-        predefines_host_feature(listed, detected, "usermsr", predefines_bit(edx71, 15));
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_PREFETCHI, prefetchi);
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_USERMSR, predefines_bit(edx71, 15));
         const bool avx10 = predefines_bit(edx71, 19);
         const bool apx = predefines_bit(edx71, 21) && apx_save;
-        static const char* const apx_features[] = { "egpr", "push2pop2", "ppx", "ndd", "ccmp", "nf", "cf", "zu", "jmpabs" };
+        static const uint8_t apx_features[] = {
+            PREDEFINES_FEATURE_EGPR,
+            PREDEFINES_FEATURE_PUSH2POP2,
+            PREDEFINES_FEATURE_PPX,
+            PREDEFINES_FEATURE_NDD,
+            PREDEFINES_FEATURE_CCMP,
+            PREDEFINES_FEATURE_NF,
+            PREDEFINES_FEATURE_CF,
+            PREDEFINES_FEATURE_ZU,
+            PREDEFINES_FEATURE_JMPABS,
+        };
         for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(apx_features); i += 1)
         {
             predefines_host_feature(listed, detected, apx_features[i], apx);
         }
         const bool leaf_d = max_level >= 0xd && predefines_cpuid(0xd, 1, r);
         const uint32_t eaxd1 = leaf_d ? r[0] : 0;
-        predefines_host_feature(listed, detected, "xsaveopt", predefines_bit(eaxd1, 0) && avx_save);
-        predefines_host_feature(listed, detected, "xsavec", predefines_bit(eaxd1, 1) && avx_save);
-        predefines_host_feature(listed, detected, "xsaves", predefines_bit(eaxd1, 3) && avx_save);
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_XSAVEOPT, predefines_bit(eaxd1, 0) && avx_save);
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_XSAVEC, predefines_bit(eaxd1, 1) && avx_save);
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_XSAVES, predefines_bit(eaxd1, 3) && avx_save);
         const bool leaf14 = max_level >= 0x14 && predefines_cpuid(0x14, 0, r);
-        predefines_host_feature(listed, detected, "ptwrite", leaf14 && predefines_bit(r[1], 4));
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_PTWRITE, leaf14 && predefines_bit(r[1], 4));
         const bool leaf19 = max_level >= 0x19 && predefines_cpuid(0x19, 0, r);
-        predefines_host_feature(listed, detected, "widekl", leaf7 && leaf19 && predefines_bit(r[1], 2));
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_WIDEKL, leaf7 && leaf19 && predefines_bit(r[1], 2));
         const bool leaf1e = max_level >= 0x1e && predefines_cpuid(0x1e, 1, r);
         const uint32_t eax1e1 = leaf1e ? r[0] : 0;
-        predefines_host_feature(listed, detected, "amx-fp8", predefines_bit(eax1e1, 4) && amx_save);
-        predefines_host_feature(listed, detected, "amx-avx512", predefines_bit(eax1e1, 7) && amx_save);
-        predefines_host_feature(listed, detected, "amx-movrs", predefines_bit(eax1e1, 8) && amx_save);
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_AMX_FP8, predefines_bit(eax1e1, 4) && amx_save);
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_AMX_AVX512, predefines_bit(eax1e1, 7) && amx_save);
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_AMX_MOVRS, predefines_bit(eax1e1, 8) && amx_save);
         const bool leaf24 = max_level >= 0x24 && predefines_cpuid(0x24, 0, r);
         const uint32_t avx10_version = leaf24 ? r[1] & 0xff : 0;
-        predefines_host_feature(listed, detected, "avx10.1", avx10 && avx10_version >= 1);
-        predefines_host_feature(listed, detected, "avx10.2", avx10 && avx10_version >= 2);
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_AVX10_1, avx10 && avx10_version >= 1);
+        predefines_host_feature(listed, detected, PREDEFINES_FEATURE_AVX10_2, avx10 && avx10_version >= 2);
         // The CPU's name, by vendor, family and model (LLVM's get*ProcessorTypeAndSubtype), with the features the
         // fallbacks look at.
         uint32_t family = (signature >> 8) & 0xf;
@@ -577,7 +715,7 @@ static const char* predefines_host(PredefinesFeatures* listed, PredefinesFeature
             model += ((signature >> 16) & 0xf) << 4;
         }
         const PredefinesFeatures d = *detected;
-#define BUSTER_PREDEFINES_HOST_HAS(name) predefines_has(d, predefines_feature(name))
+#define BUSTER_PREDEFINES_HOST_HAS(name) predefines_has(d, PREDEFINES_FEATURE_##name)
         const char* cpu = 0;
         if (intel)
         {
@@ -596,7 +734,7 @@ static const char* predefines_host(PredefinesFeatures* listed, PredefinesFeature
                     case 0x4e: case 0x5e: case 0x8e: case 0x9e: case 0xa5: case 0xa6: cpu = "skylake"; break;
                     case 0xa7: cpu = "rocketlake"; break;
                     case 0x55:
-                        cpu = BUSTER_PREDEFINES_HOST_HAS("avx512bf16") ? "cooperlake" : BUSTER_PREDEFINES_HOST_HAS("avx512vnni") ? "cascadelake" : "skylake-avx512";
+                        cpu = BUSTER_PREDEFINES_HOST_HAS(AVX512BF16) ? "cooperlake" : BUSTER_PREDEFINES_HOST_HAS(AVX512VNNI) ? "cascadelake" : "skylake-avx512";
                         break;
                     case 0x66: cpu = "cannonlake"; break;
                     case 0x7d: case 0x7e: cpu = "icelake-client"; break;
@@ -628,31 +766,31 @@ static const char* predefines_host(PredefinesFeatures* listed, PredefinesFeature
                     default:
                         // An unknown family 6 model: guessed from its features. The 32-bit names aren't -march values for
                         // x86-64, so -march=native fails there, as clang's does.
-                        cpu = BUSTER_PREDEFINES_HOST_HAS("avx512vp2intersect") ? "tigerlake"
-                              : BUSTER_PREDEFINES_HOST_HAS("avx512vbmi2")      ? "icelake-client"
-                              : BUSTER_PREDEFINES_HOST_HAS("avx512vbmi")       ? "cannonlake"
-                              : BUSTER_PREDEFINES_HOST_HAS("avx512bf16")       ? "cooperlake"
-                              : BUSTER_PREDEFINES_HOST_HAS("avx512vnni")       ? "cascadelake"
-                              : BUSTER_PREDEFINES_HOST_HAS("avx512vl")         ? "skylake-avx512"
-                              : BUSTER_PREDEFINES_HOST_HAS("clflushopt")       ? (BUSTER_PREDEFINES_HOST_HAS("sha") ? "goldmont" : "skylake")
-                              : BUSTER_PREDEFINES_HOST_HAS("adx")              ? "broadwell"
-                              : BUSTER_PREDEFINES_HOST_HAS("avx2")             ? "haswell"
-                              : BUSTER_PREDEFINES_HOST_HAS("avx")              ? "sandybridge"
-                              : BUSTER_PREDEFINES_HOST_HAS("sse4.2")           ? (BUSTER_PREDEFINES_HOST_HAS("movbe") ? "silvermont" : "nehalem")
-                              : BUSTER_PREDEFINES_HOST_HAS("sse4.1")           ? "penryn"
-                              : BUSTER_PREDEFINES_HOST_HAS("ssse3")            ? (BUSTER_PREDEFINES_HOST_HAS("movbe") ? "bonnell" : "core2")
-                              : BUSTER_PREDEFINES_HOST_HAS("64bit")            ? "core2"
-                              : BUSTER_PREDEFINES_HOST_HAS("sse3")             ? "yonah"
-                              : BUSTER_PREDEFINES_HOST_HAS("sse2")             ? "pentium-m"
-                              : BUSTER_PREDEFINES_HOST_HAS("sse")              ? "pentium3"
-                              : BUSTER_PREDEFINES_HOST_HAS("mmx")              ? "pentium2"
+                        cpu = BUSTER_PREDEFINES_HOST_HAS(AVX512VP2INTERSECT) ? "tigerlake"
+                              : BUSTER_PREDEFINES_HOST_HAS(AVX512VBMI2)      ? "icelake-client"
+                              : BUSTER_PREDEFINES_HOST_HAS(AVX512VBMI)       ? "cannonlake"
+                              : BUSTER_PREDEFINES_HOST_HAS(AVX512BF16)       ? "cooperlake"
+                              : BUSTER_PREDEFINES_HOST_HAS(AVX512VNNI)       ? "cascadelake"
+                              : BUSTER_PREDEFINES_HOST_HAS(AVX512VL)         ? "skylake-avx512"
+                              : BUSTER_PREDEFINES_HOST_HAS(CLFLUSHOPT)       ? (BUSTER_PREDEFINES_HOST_HAS(SHA) ? "goldmont" : "skylake")
+                              : BUSTER_PREDEFINES_HOST_HAS(ADX)              ? "broadwell"
+                              : BUSTER_PREDEFINES_HOST_HAS(AVX2)             ? "haswell"
+                              : BUSTER_PREDEFINES_HOST_HAS(AVX)              ? "sandybridge"
+                              : BUSTER_PREDEFINES_HOST_HAS(SSE4_2)           ? (BUSTER_PREDEFINES_HOST_HAS(MOVBE) ? "silvermont" : "nehalem")
+                              : BUSTER_PREDEFINES_HOST_HAS(SSE4_1)           ? "penryn"
+                              : BUSTER_PREDEFINES_HOST_HAS(SSSE3)            ? (BUSTER_PREDEFINES_HOST_HAS(MOVBE) ? "bonnell" : "core2")
+                              : BUSTER_PREDEFINES_HOST_HAS(64BIT)            ? "core2"
+                              : BUSTER_PREDEFINES_HOST_HAS(SSE3)             ? "yonah"
+                              : BUSTER_PREDEFINES_HOST_HAS(SSE2)             ? "pentium-m"
+                              : BUSTER_PREDEFINES_HOST_HAS(SSE)              ? "pentium3"
+                              : BUSTER_PREDEFINES_HOST_HAS(MMX)              ? "pentium2"
                                                                                : "pentiumpro";
                         break;
                 }
             }
             else if (family == 0xf)
             {
-                cpu = BUSTER_PREDEFINES_HOST_HAS("64bit") ? "nocona" : BUSTER_PREDEFINES_HOST_HAS("sse3") ? "prescott" : "pentium4";
+                cpu = BUSTER_PREDEFINES_HOST_HAS(64BIT) ? "nocona" : BUSTER_PREDEFINES_HOST_HAS(SSE3) ? "prescott" : "pentium4";
             }
             else if (family == 0x13)
             {
@@ -664,7 +802,7 @@ static const char* predefines_host(PredefinesFeatures* listed, PredefinesFeature
             }
             else
             {
-                cpu = family == 3 ? "i386" : family == 4 ? "i486" : family == 5 ? (BUSTER_PREDEFINES_HOST_HAS("mmx") ? "pentium-mmx" : "pentium") : 0;
+                cpu = family == 3 ? "i386" : family == 4 ? "i486" : family == 5 ? (BUSTER_PREDEFINES_HOST_HAS(MMX) ? "pentium-mmx" : "pentium") : 0;
             }
         }
         else if (amd)
@@ -675,8 +813,8 @@ static const char* predefines_host(PredefinesFeatures* listed, PredefinesFeature
                 case 5:
                     cpu = model == 6 || model == 7 ? "k6" : model == 8 ? "k6-2" : model == 9 || model == 13 ? "k6-3" : model == 10 ? "geode" : "pentium";
                     break;
-                case 6: cpu = BUSTER_PREDEFINES_HOST_HAS("sse") ? "athlon-xp" : "athlon"; break;
-                case 15: cpu = BUSTER_PREDEFINES_HOST_HAS("sse3") ? "k8-sse3" : "k8"; break;
+                case 6: cpu = BUSTER_PREDEFINES_HOST_HAS(SSE) ? "athlon-xp" : "athlon"; break;
+                case 15: cpu = BUSTER_PREDEFINES_HOST_HAS(SSE3) ? "k8-sse3" : "k8"; break;
                 case 16: case 18: cpu = "amdfam10"; break;
                 case 20: cpu = "btver1"; break;
                 case 21:
@@ -1084,43 +1222,50 @@ static bool predefines_apx_features(PredefinesOptions* options, const char* argu
 
 // The options clang rejects or that change what clang compiles past what buster follows: rejected by name, so that
 // a run never silently differs from clang's. Those that change clang's keywords (-fms-compatibility, -ffixed-point,
-// -fdefer-ts, ...) are pp_take_family's, refused only where the last of their family turns them on.
-static bool predefines_unsupported(const char* argument)
+// -fdefer-ts, ...) are pp_take_family's, refused only where the last of their family turns them on. `match` is
+// `argument`'s (c_option_find): the exact names and the prefixes that end in '=' are its IDs.
+static bool predefines_unsupported(const char* argument, COptionMatch match)
 {
-    static const char* const exact[] = {
-        "-m32",
-        "-mx32",
-        "-m16",
-        "-miamcu",
-        "-mkernel",
-        "-fapple-kext",
-        "-foffload-via-llvm",
-        "-fstack-protector-explicit",
-        "-fprofile-use",
-        "-fprofile-instr-use",
-        "-fcs-profile-use",
+    static const uint16_t exact[] = {
+        C_OPTION_M32,
+        C_OPTION_MX32,
+        C_OPTION_M16,
+        C_OPTION_MIAMCU,
+        C_OPTION_MKERNEL,
+        C_OPTION_FAPPLE_KEXT,
+        C_OPTION_FOFFLOAD_VIA_LLVM,
+        C_OPTION_FSTACK_PROTECTOR_EXPLICIT,
+        C_OPTION_FPROFILE_USE,
+        C_OPTION_FPROFILE_INSTR_USE,
+        C_OPTION_FCS_PROFILE_USE,
+    };
+    static const uint16_t joined[] = {
+        C_OPTION_MCPU_EQ,
+        C_OPTION_FMS_COMPATIBILITY_VERSION_EQ,
+        C_OPTION_FPROFILE_USE_EQ,
+        C_OPTION_FPROFILE_INSTR_USE_EQ,
+        C_OPTION_FOPENMP_TARGETS_EQ,
     };
     static const char* const prefixes[] = {
-        "-mcpu=",
-        "-fms-compatibility-version=",
         "-fexperimental-pointer-field-protection",
-        "-fprofile-use=",
-        "-fprofile-instr-use=",
         "-fptrauth",
         "-fsycl",
         "-fcuda",
         "-fgpu",
         "-fhip",
-        "-fopenmp-targets=",
     };
     bool result = false;
-    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(exact) && !result; i += 1)
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(exact); i += 1)
     {
-        result = strcmp(argument, exact[i]) == 0;
+        result |= exact[i] == match.exact;
+    }
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(joined); i += 1)
+    {
+        result |= joined[i] == match.joined;
     }
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(prefixes) && !result; i += 1)
     {
-        result = predefines_starts(argument, prefixes[i]);
+        result = c_option_starts(argument, prefixes[i]);
     }
     return result;
 }
@@ -1129,54 +1274,54 @@ static bool predefines_unsupported(const char* argument)
 // The -m options that change no macro
 
 // The -m options clang 23.1.3 uses for x86-64 Linux that change nothing `clang -E -dM` gives, beside those predefines_option
-// reads for their macros: predefines_neutral takes them, and pp_parse_options refuses every other -m option, as clang
+// reads for their macros (by option ID, c_option_table.c): predefines_neutral takes them, and pp_parse_options refuses every other -m option, as clang
 // refuses one it doesn't know (-mavx512) or doesn't support for the target (-mfpu=), rather than keep the baseline's
 // macros. Found from `clang --autocomplete=-m`, each option tried alone with `clang -E -dM`: accepted, with the same
 // macros and no warning. Another target's options, which clang takes on x86-64 with a warning that it ignores them
 // (-mthumb, -moutline-atomics), are refused too. test-preprocessor --clang compares each with clang, alone and among the
 // other options. The flags without a value (but the hardening ones below):
-static const char* const predefines_neutral_flags[] = {
-    "-m64",
-    "-malign-double",
-    "-mbranches-within-32B-boundaries",
-    "-mcmse",
-    "-mfentry",
-    "-mimplicit-float",
-    "-mincremental-linker-compatible",
-    "-mindirect-branch-cs-prefix",
-    "-mlittle-endian",
-    "-mms-bitfields",
-    "-mno-gather",
-    "-mno-iamcu",
-    "-mno-implicit-float",
-    "-mno-incremental-linker-compatible",
-    "-mno-ms-bitfields",
-    "-mno-omit-leaf-frame-pointer",
-    "-mno-outline",
-    "-mno-red-zone",
-    "-mno-relax-all",
-    "-mno-reserve-frame-pointer-reg",
-    "-mno-restrict-it",
-    "-mno-rtd",
-    "-mno-scatter",
-    "-mno-skip-rax-setup",
-    "-mno-soft-float",
-    "-mno-stack-arg-probe",
-    "-mno-stackrealign",
-    "-mno-tls-direct-seg-refs",
-    "-mno-vzeroupper",
-    "-momit-leaf-frame-pointer",
-    "-moutline",
-    "-mred-zone",
-    "-mrelax-all",
-    "-mreserve-frame-pointer-reg",
-    "-mrestrict-it",
-    "-mskip-rax-setup",
-    "-msoft-float",
-    "-mstack-arg-probe",
-    "-mstackrealign",
-    "-mtls-direct-seg-refs",
-    "-mvzeroupper",
+static const uint16_t predefines_neutral_flags[] = {
+    C_OPTION_M64,
+    C_OPTION_MALIGN_DOUBLE,
+    C_OPTION_MBRANCHES_WITHIN_32B_BOUNDARIES,
+    C_OPTION_MCMSE,
+    C_OPTION_MFENTRY,
+    C_OPTION_MIMPLICIT_FLOAT,
+    C_OPTION_MINCREMENTAL_LINKER_COMPATIBLE,
+    C_OPTION_MINDIRECT_BRANCH_CS_PREFIX,
+    C_OPTION_MLITTLE_ENDIAN,
+    C_OPTION_MMS_BITFIELDS,
+    C_OPTION_MNO_GATHER,
+    C_OPTION_MNO_IAMCU,
+    C_OPTION_MNO_IMPLICIT_FLOAT,
+    C_OPTION_MNO_INCREMENTAL_LINKER_COMPATIBLE,
+    C_OPTION_MNO_MS_BITFIELDS,
+    C_OPTION_MNO_OMIT_LEAF_FRAME_POINTER,
+    C_OPTION_MNO_OUTLINE,
+    C_OPTION_MNO_RED_ZONE,
+    C_OPTION_MNO_RELAX_ALL,
+    C_OPTION_MNO_RESERVE_FRAME_POINTER_REG,
+    C_OPTION_MNO_RESTRICT_IT,
+    C_OPTION_MNO_RTD,
+    C_OPTION_MNO_SCATTER,
+    C_OPTION_MNO_SKIP_RAX_SETUP,
+    C_OPTION_MNO_SOFT_FLOAT,
+    C_OPTION_MNO_STACK_ARG_PROBE,
+    C_OPTION_MNO_STACKREALIGN,
+    C_OPTION_MNO_TLS_DIRECT_SEG_REFS,
+    C_OPTION_MNO_VZEROUPPER,
+    C_OPTION_MOMIT_LEAF_FRAME_POINTER,
+    C_OPTION_MOUTLINE,
+    C_OPTION_MRED_ZONE,
+    C_OPTION_MRELAX_ALL,
+    C_OPTION_MRESERVE_FRAME_POINTER_REG,
+    C_OPTION_MRESTRICT_IT,
+    C_OPTION_MSKIP_RAX_SETUP,
+    C_OPTION_MSOFT_FLOAT,
+    C_OPTION_MSTACK_ARG_PROBE,
+    C_OPTION_MSTACKREALIGN,
+    C_OPTION_MTLS_DIRECT_SEG_REFS,
+    C_OPTION_MVZEROUPPER,
 };
 
 // The hardening flags' names, each with its -mno- form, by PredefinesHardening.
@@ -1189,6 +1334,17 @@ static const char* const predefines_hardening_names[] = {
     "seses",
 };
 _Static_assert(BUSTER_ARRAY_LENGTH(predefines_hardening_names) == PREDEFINES_HARDENING_COUNT, "a name per pair");
+
+// The hardening flags' options, -mNAME and -mno-NAME, by PredefinesHardening.
+static const uint16_t predefines_hardening_options[][2] = {
+    { C_OPTION_MRETPOLINE, C_OPTION_MNO_RETPOLINE },
+    { C_OPTION_MSPECULATIVE_LOAD_HARDENING, C_OPTION_MNO_SPECULATIVE_LOAD_HARDENING },
+    { C_OPTION_MRETPOLINE_EXTERNAL_THUNK, C_OPTION_MNO_RETPOLINE_EXTERNAL_THUNK },
+    { C_OPTION_MLVI_HARDENING, C_OPTION_MNO_LVI_HARDENING },
+    { C_OPTION_MLVI_CFI, C_OPTION_MNO_LVI_CFI },
+    { C_OPTION_MSESES, C_OPTION_MNO_SESES },
+};
+_Static_assert(BUSTER_ARRAY_LENGTH(predefines_hardening_options) == PREDEFINES_HARDENING_COUNT, "a pair of options per name");
 
 // How clang checks a value option's last value, as its driver reads it and then cc1, which reads an option's number in
 // any radix (0x, 0b, 0o, or a leading 0 for octal).
@@ -1213,7 +1369,8 @@ typedef enum PredefinesRule
 typedef struct PredefinesNeutralValue PredefinesNeutralValue;
 struct PredefinesNeutralValue
 {
-    const char* option;
+    // The option, through its '=' (c_option_table.c's ID).
+    uint16_t option;
     PredefinesRule rule;
     const char* names;
 };
@@ -1222,25 +1379,25 @@ struct PredefinesNeutralValue
 // without one), and their rules, from clang's driver (Clang.cpp, CommonArgs.cpp, X86.cpp and OptionUtils.cpp) and cc1
 // (CompilerInvocation.cpp and Options.td's marshalling).
 static const PredefinesNeutralValue predefines_neutral_values[] = {
-    { "-malign-branch-boundary=", PREDEFINES_RULE_BOUNDARY, 0 },
-    { "-malign-branch=", PREDEFINES_RULE_NAMES, "fused,jcc,jmp,call,ret,indirect" },
-    { "-masm=", PREDEFINES_RULE_NAME, "att,intel" },
-    { "-mfunction-return=", PREDEFINES_RULE_FUNCTION_RETURN, "keep,thunk-extern" },
-    { "-mharden-sls=", PREDEFINES_RULE_NAME, "none,all,return,indirect-jmp" },
-    { "-mlarge-data-threshold=", PREDEFINES_RULE_THRESHOLD, 0 },
-    { "-mlinker-version=", PREDEFINES_RULE_ANY, 0 },
-    { "-mpad-max-prefix-size=", PREDEFINES_RULE_UNSIGNED, 0 },
-    { "-mprefer-vector-width=", PREDEFINES_RULE_WIDTH, 0 },
-    { "-mprintf-kind=", PREDEFINES_RULE_ANY, 0 },
-    { "-mrecip=", PREDEFINES_RULE_RECIP, 0 },
-    { "-mregparm=", PREDEFINES_RULE_CC1_UNSIGNED, 0 },
-    { "-mstack-alignment=", PREDEFINES_RULE_ALIGNMENT, 0 },
-    { "-mstack-probe-size=", PREDEFINES_RULE_PROBE_SIZE, 0 },
-    { "-mstack-protector-guard-offset=", PREDEFINES_RULE_OFFSET, 0 },
-    { "-mstack-protector-guard-reg=", PREDEFINES_RULE_NAME, "fs,gs" },
-    { "-mstack-protector-guard-symbol=", PREDEFINES_RULE_SYMBOL, 0 },
-    { "-mstack-protector-guard=", PREDEFINES_RULE_NAME, "tls,global" },
-    { "-mtls-dialect=", PREDEFINES_RULE_NAME, "gnu,gnu2" },
+    { C_OPTION_MALIGN_BRANCH_BOUNDARY_EQ, PREDEFINES_RULE_BOUNDARY, 0 },
+    { C_OPTION_MALIGN_BRANCH_EQ, PREDEFINES_RULE_NAMES, "fused,jcc,jmp,call,ret,indirect" },
+    { C_OPTION_MASM_EQ, PREDEFINES_RULE_NAME, "att,intel" },
+    { C_OPTION_MFUNCTION_RETURN_EQ, PREDEFINES_RULE_FUNCTION_RETURN, "keep,thunk-extern" },
+    { C_OPTION_MHARDEN_SLS_EQ, PREDEFINES_RULE_NAME, "none,all,return,indirect-jmp" },
+    { C_OPTION_MLARGE_DATA_THRESHOLD_EQ, PREDEFINES_RULE_THRESHOLD, 0 },
+    { C_OPTION_MLINKER_VERSION_EQ, PREDEFINES_RULE_ANY, 0 },
+    { C_OPTION_MPAD_MAX_PREFIX_SIZE_EQ, PREDEFINES_RULE_UNSIGNED, 0 },
+    { C_OPTION_MPREFER_VECTOR_WIDTH_EQ, PREDEFINES_RULE_WIDTH, 0 },
+    { C_OPTION_MPRINTF_KIND_EQ, PREDEFINES_RULE_ANY, 0 },
+    { C_OPTION_MRECIP_EQ, PREDEFINES_RULE_RECIP, 0 },
+    { C_OPTION_MREGPARM_EQ, PREDEFINES_RULE_CC1_UNSIGNED, 0 },
+    { C_OPTION_MSTACK_ALIGNMENT_EQ, PREDEFINES_RULE_ALIGNMENT, 0 },
+    { C_OPTION_MSTACK_PROBE_SIZE_EQ, PREDEFINES_RULE_PROBE_SIZE, 0 },
+    { C_OPTION_MSTACK_PROTECTOR_GUARD_OFFSET_EQ, PREDEFINES_RULE_OFFSET, 0 },
+    { C_OPTION_MSTACK_PROTECTOR_GUARD_REG_EQ, PREDEFINES_RULE_NAME, "fs,gs" },
+    { C_OPTION_MSTACK_PROTECTOR_GUARD_SYMBOL_EQ, PREDEFINES_RULE_SYMBOL, 0 },
+    { C_OPTION_MSTACK_PROTECTOR_GUARD_EQ, PREDEFINES_RULE_NAME, "tls,global" },
+    { C_OPTION_MTLS_DIALECT_EQ, PREDEFINES_RULE_NAME, "gnu,gnu2" },
 };
 _Static_assert(BUSTER_ARRAY_LENGTH(predefines_neutral_values) == BUSTER_PREDEFINES_NEUTRAL_VALUES, "a slot per value option");
 
@@ -1249,69 +1406,79 @@ _Static_assert(BUSTER_ARRAY_LENGTH(predefines_neutral_values) == BUSTER_PREDEFIN
 // wins. clang's messages name -mpure-code as written, and -msse4, -m80387 and -mapxf stand for values of their own:
 // predefines_option reads those under their own spellings. The others clang 23.1.3 has are other targets' (-marm,
 // -mfix-cortex-*, Darwin's version options, -mmfcrf, -mv5...: refused like their options) or -mllvm's (refused).
-static const char* const predefines_aliases[][2] = {
-    { "-mpascal-strings", "-fpascal-strings" },
-    { "-mno-pascal-strings", "-fno-pascal-strings" },
-    { "-mzvector", "-fzvector" },
-    { "-mno-zvector", "-fno-zvector" },
-    { "-munsafe-fp-atomics", "-fatomic-ignore-denormal-mode" },
-    { "-mno-unsafe-fp-atomics", "-fno-atomic-ignore-denormal-mode" },
-    { "-mno-fp-ret-in-387", "-mno-x87" },
-    { "-mips1", "-march=mips1" },
-    { "-mips2", "-march=mips2" },
-    { "-mips3", "-march=mips3" },
-    { "-mips4", "-march=mips4" },
-    { "-mips5", "-march=mips5" },
-    { "-mips32", "-march=mips32" },
-    { "-mips32r2", "-march=mips32r2" },
-    { "-mips32r3", "-march=mips32r3" },
-    { "-mips32r5", "-march=mips32r5" },
-    { "-mips32r6", "-march=mips32r6" },
-    { "-mips64", "-march=mips64" },
-    { "-mips64r2", "-march=mips64r2" },
-    { "-mips64r3", "-march=mips64r3" },
-    { "-mips64r5", "-march=mips64r5" },
-    { "-mips64r6", "-march=mips64r6" },
+typedef struct PredefinesAlias PredefinesAlias;
+struct PredefinesAlias
+{
+    // The alias's option ID (c_option_table.c).
+    uint16_t alias;
+    // The option it stands for.
+    const char* option;
 };
 
-// `argument`, or the option it is clang's alias of (predefines_aliases).
-static __attribute__((unused)) const char* predefines_alias(const char* argument)
+static const PredefinesAlias predefines_aliases[] = {
+    { C_OPTION_MPASCAL_STRINGS, "-fpascal-strings" },
+    { C_OPTION_MNO_PASCAL_STRINGS, "-fno-pascal-strings" },
+    { C_OPTION_MZVECTOR, "-fzvector" },
+    { C_OPTION_MNO_ZVECTOR, "-fno-zvector" },
+    { C_OPTION_MUNSAFE_FP_ATOMICS, "-fatomic-ignore-denormal-mode" },
+    { C_OPTION_MNO_UNSAFE_FP_ATOMICS, "-fno-atomic-ignore-denormal-mode" },
+    { C_OPTION_MNO_FP_RET_IN_387, "-mno-x87" },
+    { C_OPTION_MIPS1, "-march=mips1" },
+    { C_OPTION_MIPS2, "-march=mips2" },
+    { C_OPTION_MIPS3, "-march=mips3" },
+    { C_OPTION_MIPS4, "-march=mips4" },
+    { C_OPTION_MIPS5, "-march=mips5" },
+    { C_OPTION_MIPS32, "-march=mips32" },
+    { C_OPTION_MIPS32R2, "-march=mips32r2" },
+    { C_OPTION_MIPS32R3, "-march=mips32r3" },
+    { C_OPTION_MIPS32R5, "-march=mips32r5" },
+    { C_OPTION_MIPS32R6, "-march=mips32r6" },
+    { C_OPTION_MIPS64, "-march=mips64" },
+    { C_OPTION_MIPS64R2, "-march=mips64r2" },
+    { C_OPTION_MIPS64R3, "-march=mips64r3" },
+    { C_OPTION_MIPS64R5, "-march=mips64r5" },
+    { C_OPTION_MIPS64R6, "-march=mips64r6" },
+};
+
+// `argument`, or the option it is clang's alias of (predefines_aliases), by `option`, `argument`'s ID.
+static __attribute__((unused)) const char* predefines_alias(const char* argument, COption option)
 {
     const char* result = argument;
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(predefines_aliases) && result == argument; i += 1)
     {
-        result = strcmp(argument, predefines_aliases[i][0]) == 0 ? predefines_aliases[i][1] : result;
+        result = predefines_aliases[i].alias == option ? predefines_aliases[i].option : result;
     }
     return result;
 }
 
-// predefines_option's -m options that change no macro: true where `argument` (an -m option) is one, keeping what
-// predefines_finish_neutral checks.
-static bool predefines_neutral(PredefinesOptions* options, const char* argument)
+// predefines_option's -m options that change no macro: true where `argument` (an -m option, `match` its IDs) is one,
+// keeping what predefines_finish_neutral checks.
+static bool predefines_neutral(PredefinesOptions* options, const char* argument, COptionMatch match)
 {
     bool result = false;
-    for (uint32_t i = 0; !result && i < BUSTER_ARRAY_LENGTH(predefines_neutral_flags); i += 1)
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(predefines_neutral_flags); i += 1)
     {
-        result = strcmp(argument, predefines_neutral_flags[i]) == 0;
+        result |= predefines_neutral_flags[i] == match.exact;
     }
     // The frame pointer's leaf rule (#177, predefines_frame_pointer): the last of the pair.
-    options->omit_leaf_frame_pointer = strcmp(argument, "-momit-leaf-frame-pointer") == 0      ? BUSTER_PREDEFINES_ON
-                                       : strcmp(argument, "-mno-omit-leaf-frame-pointer") == 0 ? BUSTER_PREDEFINES_OFF
-                                                                                               : options->omit_leaf_frame_pointer;
-    const bool no = predefines_starts(argument, "-mno-");
+    options->omit_leaf_frame_pointer = match.exact == C_OPTION_MOMIT_LEAF_FRAME_POINTER      ? BUSTER_PREDEFINES_ON
+                                       : match.exact == C_OPTION_MNO_OMIT_LEAF_FRAME_POINTER ? BUSTER_PREDEFINES_OFF
+                                                                                             : options->omit_leaf_frame_pointer;
+    // A hardening flag, -mNAME or its -mno-NAME.
     for (uint32_t h = 0; !result && h < PREDEFINES_HARDENING_COUNT; h += 1)
     {
-        result = strcmp(argument + (no ? 5 : 2), predefines_hardening_names[h]) == 0;
+        const bool no = match.exact == predefines_hardening_options[h][1];
+        result = no || match.exact == predefines_hardening_options[h][0];
         options->hardening[h] = result ? (no ? 2 : 1) : options->hardening[h];
         options->no_lvi_cfi |= result && no && h == PREDEFINES_HARDENING_LVI_CFI;
     }
     // -mrecip is -mrecip= without a value: all estimates.
-    const bool recip = !result && strcmp(argument, "-mrecip") == 0;
+    const bool recip = !result && match.exact == C_OPTION_MRECIP;
     for (uint32_t v = 0; !result && v < BUSTER_ARRAY_LENGTH(predefines_neutral_values); v += 1)
     {
-        const char* option = predefines_neutral_values[v].option;
-        const bool taken = recip ? strcmp(option, "-mrecip=") == 0 : predefines_starts(argument, option);
-        options->neutral_values[v] = taken ? (recip ? "" : argument + strlen(option)) : options->neutral_values[v];
+        const uint16_t option = predefines_neutral_values[v].option;
+        const bool taken = recip ? option == C_OPTION_MRECIP_EQ : option == match.joined;
+        options->neutral_values[v] = taken ? (recip ? "" : argument + c_option_length(option)) : options->neutral_values[v];
         result = taken;
     }
     return result;
@@ -1482,7 +1649,7 @@ static bool predefines_neutral_value(const PredefinesOptions* options, const Pre
     }
     else if (!result)
     {
-        fprintf(stderr, "error: invalid value '%s' in '%s%s'\n", value, entry->option, value);
+        fprintf(stderr, "error: invalid value '%s' in '%s%s'\n", value, c_option_spelling(entry->option), value);
     }
     return result;
 }
@@ -1567,12 +1734,13 @@ static void predefines_target_triple(const PredefinesOptions* options, char* buf
     snprintf(buffer, capacity, "%.*s-%.*s-linux-gnu", architecture_length, architecture, (int)vendor_length, vendor);
 }
 
-// One argument (`next` is the one after it, or null). Reports an error on stderr, as clang's driver words it.
-static __attribute__((unused)) PredefinesParse predefines_option(PredefinesOptions* options, const char* argument, const char* next)
+// One argument, whose option IDs are `match` (c_option_find's; `next` is the argument after it, or null). Reports an
+// error on stderr, as clang's driver words it.
+static __attribute__((unused)) PredefinesParse predefines_option_match(PredefinesOptions* options, const char* argument, COptionMatch match, const char* next)
 {
     PredefinesParse result = PREDEFINES_PARSE_TAKEN;
     const bool m = argument[0] == '-' && argument[1] == 'm';
-    const bool no = m && predefines_starts(argument, "-mno-");
+    const bool no = m && c_option_starts(argument, "-mno-");
     // A plain feature flag: -mNAME or -mno-NAME.
     const char* feature_name = no ? argument + 5 : m ? argument + 2 : 0;
     const int32_t feature = feature_name != 0 ? predefines_feature_index(feature_name, strlen(feature_name)) : -1;
@@ -1580,80 +1748,80 @@ static __attribute__((unused)) PredefinesParse predefines_option(PredefinesOptio
     {
         result = predefines_push_feature(options, (uint32_t)feature, !no) ? result : PREDEFINES_PARSE_ERROR;
     }
-    else if (predefines_unsupported(argument))
+    else if (predefines_unsupported(argument, match))
     {
         fprintf(stderr, "error: unsupported option '%s' (it changes what clang predefines or compiles, which buster doesn't follow)\n", argument);
         result = PREDEFINES_PARSE_ERROR;
     }
-    else if (predefines_starts(argument, "-march="))
+    else if (match.joined == C_OPTION_MARCH_EQ)
     {
         // clang's driver reads only the last -march: predefines_resolve checks its CPU.
         options->march = argument + 7;
     }
-    else if (predefines_starts(argument, "-mtune="))
+    else if (match.joined == C_OPTION_MTUNE_EQ)
     {
         // Only the last, which predefines_finish checks.
         options->mtune = argument + 7;
     }
-    else if (strcmp(argument, "-msse4") == 0 || strcmp(argument, "-mno-sse4") == 0)
+    else if (match.exact == C_OPTION_MSSE4 || match.exact == C_OPTION_MNO_SSE4)
     {
         // The aliases: -msse4 is -msse4.2, and -mno-sse4 is -mno-sse4.1.
         const bool on = argument[2] != 'n';
-        result = predefines_push_feature(options, predefines_feature(on ? "sse4.2" : "sse4.1"), on) ? result : PREDEFINES_PARSE_ERROR;
+        result = predefines_push_feature(options, (on ? PREDEFINES_FEATURE_SSE4_2 : PREDEFINES_FEATURE_SSE4_1), on) ? result : PREDEFINES_PARSE_ERROR;
     }
-    else if (strcmp(argument, "-m80387") == 0 || strcmp(argument, "-mno-80387") == 0)
+    else if (match.exact == C_OPTION_M80387 || match.exact == C_OPTION_MNO_80387)
     {
-        result = predefines_push_feature(options, predefines_feature("x87"), argument[2] != 'n') ? result : PREDEFINES_PARSE_ERROR;
+        result = predefines_push_feature(options, PREDEFINES_FEATURE_X87, argument[2] != 'n') ? result : PREDEFINES_PARSE_ERROR;
     }
-    else if (strcmp(argument, "-mapxf") == 0 || strcmp(argument, "-mno-apxf") == 0)
+    else if (match.exact == C_OPTION_MAPXF || match.exact == C_OPTION_MNO_APXF)
     {
         // -mapxf is -mapx-features= with the APX features but cf.
         result = predefines_apx_features(options, argument, "egpr,push2pop2,ppx,ndd,ccmp,nf,zu,jmpabs", argument[2] != 'n') ? result : PREDEFINES_PARSE_ERROR;
     }
-    else if (predefines_starts(argument, "-mapx-features=") || predefines_starts(argument, "-mno-apx-features="))
+    else if (match.joined == C_OPTION_MAPX_FEATURES_EQ || match.joined == C_OPTION_MNO_APX_FEATURES_EQ)
     {
         result = predefines_apx_features(options, argument, strchr(argument, '=') + 1, argument[2] != 'n') ? result : PREDEFINES_PARSE_ERROR;
     }
-    else if (strcmp(argument, "-mgeneral-regs-only") == 0)
+    else if (match.exact == C_OPTION_MGENERAL_REGS_ONLY)
     {
-        const bool pushed = predefines_push_feature(options, predefines_feature("x87"), false) && predefines_push_feature(options, predefines_feature("mmx"), false) &&
-                            predefines_push_feature(options, predefines_feature("sse"), false);
+        const bool pushed = predefines_push_feature(options, PREDEFINES_FEATURE_X87, false) && predefines_push_feature(options, PREDEFINES_FEATURE_MMX, false) &&
+                            predefines_push_feature(options, PREDEFINES_FEATURE_SSE, false);
         result = pushed ? result : PREDEFINES_PARSE_ERROR;
     }
-    else if (strcmp(argument, "-mapx-inline-asm-use-gpr32") == 0)
+    else if (match.exact == C_OPTION_MAPX_INLINE_ASM_USE_GPR32)
     {
         options->inline_asm_use_gpr32 = true;
     }
-    else if (strcmp(argument, "-mexecute-only") == 0 || strcmp(argument, "-mno-execute-only") == 0 || strcmp(argument, "-mpure-code") == 0 ||
-             strcmp(argument, "-mno-pure-code") == 0)
+    else if (match.exact == C_OPTION_MEXECUTE_ONLY || match.exact == C_OPTION_MNO_EXECUTE_ONLY || match.exact == C_OPTION_MPURE_CODE ||
+             match.exact == C_OPTION_MNO_PURE_CODE)
     {
         // ARM's, which clang leaves unused on x86-64 but for the sanitizers' rules (predefines_sanitizers).
         options->execute_only = argument;
     }
-    else if (predefines_starts(argument, "-mfpmath="))
+    else if (match.joined == C_OPTION_MFPMATH_EQ)
     {
         // Only the last, which predefines_finish reads.
         options->fpmath_name = argument + 9;
     }
-    else if (predefines_starts(argument, "-mcmodel="))
+    else if (match.joined == C_OPTION_MCMODEL_EQ)
     {
         // Only the last, which predefines_finish reads.
         options->code_model_name = argument + 9;
     }
-    else if (strcmp(argument, "-mlong-double-64") == 0 || strcmp(argument, "-mlong-double-80") == 0 || strcmp(argument, "-mlong-double-128") == 0)
+    else if (match.exact == C_OPTION_MLONG_DOUBLE_64 || match.exact == C_OPTION_MLONG_DOUBLE_80 || match.exact == C_OPTION_MLONG_DOUBLE_128)
     {
         options->long_double = argument[14] == '6' ? BUSTER_PREDEFINES_LONG_DOUBLE_64 : argument[14] == '8' ? BUSTER_PREDEFINES_LONG_DOUBLE_80 : BUSTER_PREDEFINES_LONG_DOUBLE_128;
     }
-    else if (predefines_starts(argument, "-mabi="))
+    else if (match.joined == C_OPTION_MABI_EQ)
     {
         // Only the last, which predefines_finish checks.
         options->abi = argument + 6;
     }
-    else if (m && predefines_neutral(options, argument))
+    else if (m && predefines_neutral(options, argument, match))
     {
         // An option that changes no macro, which predefines_finish_neutral checks.
     }
-    else if (strcmp(argument, "-target") == 0 || predefines_starts(argument, "--target="))
+    else if (match.exact == C_OPTION_TARGET || match.joined == C_OPTION_TARGET_EQ)
     {
         // Only the last, which predefines_finish checks.
         const char* triple = argument[1] == 't' ? next : argument + 9;
@@ -1667,7 +1835,7 @@ static __attribute__((unused)) PredefinesParse predefines_option(PredefinesOptio
     else if (argument[0] == '-' && argument[1] == 'O')
     {
         const char* level = argument + 2;
-        options->optimization_flag = strcmp(argument, "-O0") != 0;
+        options->optimization_flag = match.exact != C_OPTION_O0;
         options->optimization_invalid = 0;
         if (strcmp(level, "s") == 0 || strcmp(level, "z") == 0)
         {
@@ -1705,47 +1873,47 @@ static __attribute__((unused)) PredefinesParse predefines_option(PredefinesOptio
             options->ofast = false;
         }
     }
-    else if (strcmp(argument, "-finline") == 0 || strcmp(argument, "-fno-inline") == 0)
+    else if (match.exact == C_OPTION_FINLINE || match.exact == C_OPTION_FNO_INLINE)
     {
         options->inline_option = argument[2] == 'n' && argument[3] == 'o' ? BUSTER_PREDEFINES_OFF : BUSTER_PREDEFINES_ON;
     }
-    else if (strcmp(argument, "-finline-functions") == 0)
+    else if (match.exact == C_OPTION_FINLINE_FUNCTIONS)
     {
         options->inline_functions = BUSTER_PREDEFINES_INLINE_FUNCTIONS;
     }
-    else if (strcmp(argument, "-finline-hint-functions") == 0)
+    else if (match.exact == C_OPTION_FINLINE_HINT_FUNCTIONS)
     {
         options->inline_functions = BUSTER_PREDEFINES_INLINE_HINT_FUNCTIONS;
     }
-    else if (strcmp(argument, "-fno-inline-functions") == 0)
+    else if (match.exact == C_OPTION_FNO_INLINE_FUNCTIONS)
     {
         options->inline_functions = BUSTER_PREDEFINES_NO_INLINE_FUNCTIONS;
     }
-    else if (strcmp(argument, "-fsigned-char") == 0 || strcmp(argument, "-fno-unsigned-char") == 0)
+    else if (match.exact == C_OPTION_FSIGNED_CHAR || match.exact == C_OPTION_FNO_UNSIGNED_CHAR)
     {
         options->char_unsigned = false;
     }
-    else if (strcmp(argument, "-funsigned-char") == 0 || strcmp(argument, "-fno-signed-char") == 0)
+    else if (match.exact == C_OPTION_FUNSIGNED_CHAR || match.exact == C_OPTION_FNO_SIGNED_CHAR)
     {
         options->char_unsigned = true;
     }
-    else if (strcmp(argument, "-fshort-wchar") == 0 || strcmp(argument, "-fno-short-wchar") == 0)
+    else if (match.exact == C_OPTION_FSHORT_WCHAR || match.exact == C_OPTION_FNO_SHORT_WCHAR)
     {
         options->short_wchar = argument[2] == 's';
     }
-    else if (strcmp(argument, "-fPIC") == 0 || strcmp(argument, "-fpic") == 0 || strcmp(argument, "-fPIE") == 0 || strcmp(argument, "-fpie") == 0)
+    else if (match.exact == C_OPTION_FPIC_BIG || match.exact == C_OPTION_FPIC_SMALL || match.exact == C_OPTION_FPIE_BIG || match.exact == C_OPTION_FPIE_SMALL)
     {
-        options->pic = strcmp(argument, "-fPIC") == 0   ? BUSTER_PREDEFINES_PIC_BIG
-                       : strcmp(argument, "-fpic") == 0 ? BUSTER_PREDEFINES_PIC_SMALL
-                       : strcmp(argument, "-fPIE") == 0 ? BUSTER_PREDEFINES_PIE_BIG
-                                                        : BUSTER_PREDEFINES_PIE_SMALL;
+        options->pic = match.exact == C_OPTION_FPIC_BIG     ? BUSTER_PREDEFINES_PIC_BIG
+                       : match.exact == C_OPTION_FPIC_SMALL ? BUSTER_PREDEFINES_PIC_SMALL
+                       : match.exact == C_OPTION_FPIE_BIG   ? BUSTER_PREDEFINES_PIE_BIG
+                                                            : BUSTER_PREDEFINES_PIE_SMALL;
     }
-    else if (strcmp(argument, "-fno-PIC") == 0 || strcmp(argument, "-fno-pic") == 0 || strcmp(argument, "-fno-PIE") == 0 || strcmp(argument, "-fno-pie") == 0)
+    else if (match.exact == C_OPTION_FNO_PIC_BIG || match.exact == C_OPTION_FNO_PIC_SMALL || match.exact == C_OPTION_FNO_PIE_BIG || match.exact == C_OPTION_FNO_PIE_SMALL)
     {
         options->pic = BUSTER_PREDEFINES_PIC_OFF;
     }
-    else if (strcmp(argument, "-fno-stack-protector") == 0 || strcmp(argument, "-fstack-protector") == 0 || strcmp(argument, "-fstack-protector-strong") == 0 ||
-             strcmp(argument, "-fstack-protector-all") == 0)
+    else if (match.exact == C_OPTION_FNO_STACK_PROTECTOR || match.exact == C_OPTION_FSTACK_PROTECTOR || match.exact == C_OPTION_FSTACK_PROTECTOR_STRONG ||
+             match.exact == C_OPTION_FSTACK_PROTECTOR_ALL)
     {
         // "-fstack-protector" is 17 bytes, and its -strong and -all forms go on after it.
         options->stack_protector = argument[2] == 'n'    ? BUSTER_PREDEFINES_SSP_OFF
@@ -1753,40 +1921,40 @@ static __attribute__((unused)) PredefinesParse predefines_option(PredefinesOptio
                                    : argument[18] == 's' ? BUSTER_PREDEFINES_SSP_STRONG
                                                          : BUSTER_PREDEFINES_SSP_ALL;
     }
-    else if (strcmp(argument, "-fdwarf2-cfi-asm") == 0 || strcmp(argument, "-fno-dwarf2-cfi-asm") == 0)
+    else if (match.exact == C_OPTION_FDWARF2_CFI_ASM || match.exact == C_OPTION_FNO_DWARF2_CFI_ASM)
     {
         options->dwarf2_cfi_asm = argument[2] == 'n' ? BUSTER_PREDEFINES_OFF : BUSTER_PREDEFINES_ON;
     }
-    else if (strcmp(argument, "-fasynchronous-unwind-tables") == 0 || strcmp(argument, "-fno-asynchronous-unwind-tables") == 0)
+    else if (match.exact == C_OPTION_FASYNCHRONOUS_UNWIND_TABLES || match.exact == C_OPTION_FNO_ASYNCHRONOUS_UNWIND_TABLES)
     {
         options->asynchronous_unwind_tables = argument[2] == 'n' ? BUSTER_PREDEFINES_OFF : BUSTER_PREDEFINES_ON;
     }
-    else if (strcmp(argument, "-funwind-tables") == 0 || strcmp(argument, "-fno-unwind-tables") == 0)
+    else if (match.exact == C_OPTION_FUNWIND_TABLES || match.exact == C_OPTION_FNO_UNWIND_TABLES)
     {
         options->unwind_tables = argument[2] == 'n' ? BUSTER_PREDEFINES_OFF : BUSTER_PREDEFINES_ON;
     }
-    else if (strcmp(argument, "-fomit-frame-pointer") == 0 || strcmp(argument, "-fno-omit-frame-pointer") == 0)
+    else if (match.exact == C_OPTION_FOMIT_FRAME_POINTER || match.exact == C_OPTION_FNO_OMIT_FRAME_POINTER)
     {
         options->omit_frame_pointer = argument[2] == 'n' ? BUSTER_PREDEFINES_OFF : BUSTER_PREDEFINES_ON;
     }
-    else if (strcmp(argument, "-fstack-clash-protection") == 0 || strcmp(argument, "-fno-stack-clash-protection") == 0)
+    else if (match.exact == C_OPTION_FSTACK_CLASH_PROTECTION || match.exact == C_OPTION_FNO_STACK_CLASH_PROTECTION)
     {
         options->stack_clash_protection = argument[2] == 'n' ? BUSTER_PREDEFINES_OFF : BUSTER_PREDEFINES_ON;
     }
-    else if (predefines_starts(argument, "-fpatchable-function-entry="))
+    else if (match.joined == C_OPTION_FPATCHABLE_FUNCTION_ENTRY_EQ)
     {
         options->patchable_function_entry = argument + sizeof("-fpatchable-function-entry=") - 1;
     }
-    else if (strcmp(argument, "-fcommon") == 0 || strcmp(argument, "-fno-common") == 0)
+    else if (match.exact == C_OPTION_FCOMMON || match.exact == C_OPTION_FNO_COMMON)
     {
         options->common = argument[2] == 'c';
     }
-    else if (strcmp(argument, "-fexceptions") == 0 || strcmp(argument, "-fno-exceptions") == 0)
+    else if (match.exact == C_OPTION_FEXCEPTIONS || match.exact == C_OPTION_FNO_EXCEPTIONS)
     {
         options->exceptions = argument[2] == 'e';
     }
-    else if (strcmp(argument, "-fsjlj-exceptions") == 0 || strcmp(argument, "-fseh-exceptions") == 0 || strcmp(argument, "-fdwarf-exceptions") == 0 ||
-             strcmp(argument, "-fwasm-exceptions") == 0)
+    else if (match.exact == C_OPTION_FSJLJ_EXCEPTIONS || match.exact == C_OPTION_FSEH_EXCEPTIONS || match.exact == C_OPTION_FDWARF_EXCEPTIONS ||
+             match.exact == C_OPTION_FWASM_EXCEPTIONS)
     {
         options->exception_model = argument[2] == 's' && argument[3] == 'j' ? BUSTER_PREDEFINES_EXCEPTIONS_SJLJ
                                    : argument[2] == 's'                     ? BUSTER_PREDEFINES_EXCEPTIONS_SEH
@@ -1798,48 +1966,48 @@ static __attribute__((unused)) PredefinesParse predefines_option(PredefinesOptio
         // The -g options of clang's g_Group, which choose a debug information kind: the last one turns it on or off.
         // -gmodules is one, and turns it on whatever comes last unless -gno-modules follows it. The others (-gz,
         // -gsplit-dwarf, -gno-column-info, ...) change no macro, and clang refuses the old formats' options.
-        static const char* const enabling[] = {
-            "-g",
-            "-g1",
-            "-g2",
-            "-g3",
-            "-ggdb",
-            "-ggdb1",
-            "-ggdb2",
-            "-ggdb3",
-            "-glldb",
-            "-gsce",
-            "-gdbx",
-            "-gline-tables-only",
-            "-gline-directives-only",
-            "-gmlt",
-            "-gdwarf",
-            "-gdwarf-2",
-            "-gdwarf-3",
-            "-gdwarf-4",
-            "-gdwarf-5",
-            "-gdwarf-6",
-            "-gdwarf32",
-            "-gdwarf64",
-            "-gcodeview",
-            "-gfull",
-            "-gused",
-            "-gmodules",
+        static const uint16_t enabling[] = {
+            C_OPTION_G,
+            C_OPTION_G1,
+            C_OPTION_G2,
+            C_OPTION_G3,
+            C_OPTION_GGDB,
+            C_OPTION_GGDB1,
+            C_OPTION_GGDB2,
+            C_OPTION_GGDB3,
+            C_OPTION_GLLDB,
+            C_OPTION_GSCE,
+            C_OPTION_GDBX,
+            C_OPTION_GLINE_TABLES_ONLY,
+            C_OPTION_GLINE_DIRECTIVES_ONLY,
+            C_OPTION_GMLT,
+            C_OPTION_GDWARF,
+            C_OPTION_GDWARF_2,
+            C_OPTION_GDWARF_3,
+            C_OPTION_GDWARF_4,
+            C_OPTION_GDWARF_5,
+            C_OPTION_GDWARF_6,
+            C_OPTION_GDWARF32,
+            C_OPTION_GDWARF64,
+            C_OPTION_GCODEVIEW,
+            C_OPTION_GFULL,
+            C_OPTION_GUSED,
+            C_OPTION_GMODULES,
         };
         static const char* const refused[] = { "-gstabs", "-gcoff", "-gxcoff", "-gvms" };
         bool enables = false;
         for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(enabling); i += 1)
         {
-            enables |= strcmp(argument, enabling[i]) == 0;
+            enables |= enabling[i] == match.exact;
         }
-        const bool disables = strcmp(argument, "-g0") == 0 || strcmp(argument, "-ggdb0") == 0;
+        const bool disables = match.exact == C_OPTION_G0 || match.exact == C_OPTION_GGDB0;
         options->debug = enables || (options->debug && !disables);
-        options->debug_modules = strcmp(argument, "-gmodules") == 0 || (options->debug_modules && strcmp(argument, "-gno-modules") != 0);
+        options->debug_modules = match.exact == C_OPTION_GMODULES || (options->debug_modules && match.exact != C_OPTION_GNO_MODULES);
         // The refused ones are prefixes (-gstabs+ is one too), and -gtoggle.
-        bool unsupported = strcmp(argument, "-gtoggle") == 0;
+        bool unsupported = match.exact == C_OPTION_GTOGGLE;
         for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(refused); i += 1)
         {
-            unsupported |= predefines_starts(argument, refused[i]);
+            unsupported |= c_option_starts(argument, refused[i]);
         }
         if (unsupported)
         {
@@ -1847,7 +2015,7 @@ static __attribute__((unused)) PredefinesParse predefines_option(PredefinesOptio
             result = PREDEFINES_PARSE_ERROR;
         }
     }
-    else if (predefines_starts(argument, "-fgnuc-version="))
+    else if (match.joined == C_OPTION_FGNUC_VERSION_EQ)
     {
         // major[.minor[.patch]], minor and patch below 100; empty is 0, which turns the GNU macros off.
         const char* p = argument + 15;
@@ -1878,107 +2046,107 @@ static __attribute__((unused)) PredefinesParse predefines_option(PredefinesOptio
         options->gnuc_minor = (uint8_t)parts[1];
         options->gnuc_patch = (uint8_t)parts[2];
     }
-    else if (strcmp(argument, "-fgnu89-inline") == 0 || strcmp(argument, "-fno-gnu89-inline") == 0)
+    else if (match.exact == C_OPTION_FGNU89_INLINE || match.exact == C_OPTION_FNO_GNU89_INLINE)
     {
         options->gnu89_inline = argument[2] == 'g' ? BUSTER_PREDEFINES_ON : BUSTER_PREDEFINES_OFF;
     }
-    else if (strcmp(argument, "-pthread") == 0)
+    else if (match.exact == C_OPTION_PTHREAD)
     {
         options->pthread = true;
     }
-    else if (strcmp(argument, "-no-pthread") == 0)
+    else if (match.exact == C_OPTION_NO_PTHREAD)
     {
         // clang ignores it in a compile (it warns that it is unused).
     }
-    else if (strcmp(argument, "-fcf-protection") == 0 || predefines_starts(argument, "-fcf-protection="))
+    else if (match.exact == C_OPTION_FCF_PROTECTION || match.joined == C_OPTION_FCF_PROTECTION_EQ)
     {
         const char* value = argument[15] == '=' ? argument + 16 : "full";
         options->cf_protection = strcmp(value, "full") == 0 ? 3 : strcmp(value, "branch") == 0 ? 1 : strcmp(value, "return") == 0 ? 2 : strcmp(value, "none") == 0 ? 0 : 0xff;
         // Only the last counts, so predefines_finish reports an invalid one.
         options->cf_protection_invalid = options->cf_protection == 0xff ? argument : 0;
     }
-    else if (predefines_starts(argument, "-fsanitize=") || predefines_starts(argument, "-fno-sanitize=") ||
-             predefines_starts(argument, "-fsanitize-ignore-for-ubsan-feature=") || predefines_starts(argument, "-fsanitize-coverage=") ||
-             predefines_starts(argument, "-fno-sanitize-coverage="))
+    else if (match.joined == C_OPTION_FSANITIZE_EQ || match.joined == C_OPTION_FNO_SANITIZE_EQ ||
+             match.joined == C_OPTION_FSANITIZE_IGNORE_FOR_UBSAN_FEATURE_EQ || match.joined == C_OPTION_FSANITIZE_COVERAGE_EQ ||
+             match.joined == C_OPTION_FNO_SANITIZE_COVERAGE_EQ)
     {
         // Resolved after every option (predefines_finish): clang's driver reads them from the last back.
         result = predefines_push_sanitize(options, argument) ? result : PREDEFINES_PARSE_ERROR;
     }
-    else if (strcmp(argument, "-fsanitize-cfi-cross-dso") == 0 || strcmp(argument, "-fno-sanitize-cfi-cross-dso") == 0)
+    else if (match.exact == C_OPTION_FSANITIZE_CFI_CROSS_DSO || match.exact == C_OPTION_FNO_SANITIZE_CFI_CROSS_DSO)
     {
         options->cfi_cross_dso = argument[2] == 'n' ? BUSTER_PREDEFINES_OFF : BUSTER_PREDEFINES_ON;
     }
-    else if (strcmp(argument, "-frtti") == 0 || strcmp(argument, "-fno-rtti") == 0)
+    else if (match.exact == C_OPTION_FRTTI || match.exact == C_OPTION_FNO_RTTI)
     {
         options->rtti = argument[2] == 'n' ? BUSTER_PREDEFINES_OFF : BUSTER_PREDEFINES_ON;
     }
-    else if (strcmp(argument, "-fwrapv") == 0 || strcmp(argument, "-fno-wrapv") == 0)
+    else if (match.exact == C_OPTION_FWRAPV || match.exact == C_OPTION_FNO_WRAPV)
     {
         options->wrapv = argument[2] == 'n' ? BUSTER_PREDEFINES_OFF : BUSTER_PREDEFINES_ON;
     }
-    else if (strcmp(argument, "-fwrapv-pointer") == 0 || strcmp(argument, "-fno-wrapv-pointer") == 0)
+    else if (match.exact == C_OPTION_FWRAPV_POINTER || match.exact == C_OPTION_FNO_WRAPV_POINTER)
     {
         options->wrapv_pointer = argument[2] == 'n' ? BUSTER_PREDEFINES_OFF : BUSTER_PREDEFINES_ON;
     }
-    else if (strcmp(argument, "-fstrict-overflow") == 0 || strcmp(argument, "-fno-strict-overflow") == 0)
+    else if (match.exact == C_OPTION_FSTRICT_OVERFLOW || match.exact == C_OPTION_FNO_STRICT_OVERFLOW)
     {
         options->strict_overflow = argument[2] == 'n' ? BUSTER_PREDEFINES_OFF : BUSTER_PREDEFINES_ON;
     }
-    else if (strcmp(argument, "-flto") == 0 || predefines_starts(argument, "-flto=") || strcmp(argument, "-fno-lto") == 0)
+    else if (match.exact == C_OPTION_FLTO || match.joined == C_OPTION_FLTO_EQ || match.exact == C_OPTION_FNO_LTO)
     {
         // -flto, -flto=jobserver and -flto=auto are -flto=full; predefines_finish checks the value.
-        const bool full = strcmp(argument, "-flto") == 0 || strcmp(argument, "-flto=jobserver") == 0 || strcmp(argument, "-flto=auto") == 0;
+        const bool full = match.exact == C_OPTION_FLTO || match.exact == C_OPTION_FLTO_EQ_JOBSERVER || match.exact == C_OPTION_FLTO_EQ_AUTO;
         options->lto = argument[2] == 'n' ? 0 : full ? "full" : argument + 6;
     }
-    else if (predefines_starts(argument, "-fvisibility=") || strcmp(argument, "-fvisibility-ms-compat") == 0)
+    else if (match.joined == C_OPTION_FVISIBILITY_EQ || match.exact == C_OPTION_FVISIBILITY_MS_COMPAT)
     {
         // The last of them is checked (only -fvisibility= has a value); CFI's checks need any -fvisibility=.
         const bool value = argument[12] == '=';
         options->visibility = value ? argument + 13 : 0;
         options->visibility_given |= value;
     }
-    else if (strcmp(argument, "-fblocks") == 0 || strcmp(argument, "-fno-blocks") == 0)
+    else if (match.exact == C_OPTION_FBLOCKS || match.exact == C_OPTION_FNO_BLOCKS)
     {
         options->blocks = argument[2] == 'b';
     }
-    else if (strcmp(argument, "-fopenmp") == 0 || strcmp(argument, "-fno-openmp") == 0 || predefines_starts(argument, "-fopenmp="))
+    else if (match.exact == C_OPTION_FOPENMP || match.exact == C_OPTION_FNO_OPENMP || match.joined == C_OPTION_FOPENMP_EQ)
     {
         // On unless -fno-openmp comes last; the runtime is the last -fopenmp='s (libomp without one), whichever comes
         // after it. predefines_finish reads them.
         options->openmp_enabled = argument[2] == 'o';
         options->openmp_runtime = argument[8] == '=' ? argument + 9 : options->openmp_runtime;
     }
-    else if (predefines_starts(argument, "-fopenmp-version="))
+    else if (match.joined == C_OPTION_FOPENMP_VERSION_EQ)
     {
         options->openmp_version = (uint32_t)strtoul(argument + 17, 0, 10);
     }
-    else if (strcmp(argument, "-fopenacc") == 0)
+    else if (match.exact == C_OPTION_FOPENACC)
     {
         options->openacc = true;
     }
-    else if (strcmp(argument, "-fdefine-target-os-macros") == 0 || strcmp(argument, "-fno-define-target-os-macros") == 0)
+    else if (match.exact == C_OPTION_FDEFINE_TARGET_OS_MACROS || match.exact == C_OPTION_FNO_DEFINE_TARGET_OS_MACROS)
     {
         options->target_os_macros = argument[2] == 'd';
     }
-    else if (strcmp(argument, "-fpascal-strings") == 0 || strcmp(argument, "-fno-pascal-strings") == 0)
+    else if (match.exact == C_OPTION_FPASCAL_STRINGS || match.exact == C_OPTION_FNO_PASCAL_STRINGS)
     {
         options->pascal_strings = argument[2] == 'p';
     }
-    else if (strcmp(argument, "-fconstant-cfstrings") == 0 || strcmp(argument, "-fno-constant-cfstrings") == 0)
+    else if (match.exact == C_OPTION_FCONSTANT_CFSTRINGS || match.exact == C_OPTION_FNO_CONSTANT_CFSTRINGS)
     {
         options->no_constant_cfstrings = argument[2] == 'n';
     }
-    else if (strcmp(argument, "-mconstant-cfstrings") == 0 || strcmp(argument, "-mno-constant-cfstrings") == 0)
+    else if (match.exact == C_OPTION_MCONSTANT_CFSTRINGS || match.exact == C_OPTION_MNO_CONSTANT_CFSTRINGS)
     {
         options->no_constant_cfstrings_m = argument[2] == 'n';
     }
-    else if (predefines_starts(argument, "-municode"))
+    else if (c_option_starts(argument, "-municode"))
     {
         options->unicode = true;
     }
-    else if (predefines_starts(argument, "-fprofile-generate") || predefines_starts(argument, "-fprofile-instr-generate") ||
-             predefines_starts(argument, "-fcs-profile-generate") || strcmp(argument, "-fno-profile-generate") == 0 ||
-             strcmp(argument, "-fno-profile-instr-generate") == 0)
+    else if (c_option_starts(argument, "-fprofile-generate") || c_option_starts(argument, "-fprofile-instr-generate") ||
+             c_option_starts(argument, "-fcs-profile-generate") || match.exact == C_OPTION_FNO_PROFILE_GENERATE ||
+             match.exact == C_OPTION_FNO_PROFILE_INSTR_GENERATE)
     {
         // Four families, each read by its last option: -fprofile-generate[=], -fprofile-instr-generate[=],
         // -fcs-profile-generate[=] and -fprofile-generate-cold-function-coverage[=]. -fno-profile-generate ends the first
@@ -1992,7 +2160,7 @@ static __attribute__((unused)) PredefinesParse predefines_option(PredefinesOptio
         options->profile_generate[family] = on ? BUSTER_PREDEFINES_ON : BUSTER_PREDEFINES_OFF;
         options->profile_generate[2] = !on && family == 0 ? BUSTER_PREDEFINES_OFF : options->profile_generate[2];
     }
-    else if (predefines_starts(argument, "-ffp-model="))
+    else if (match.joined == C_OPTION_FFP_MODEL_EQ)
     {
         const char* value = argument + 11;
         const int event = strcmp(value, "fast") == 0         ? PREDEFINES_FLOAT_MODEL_FAST
@@ -2005,7 +2173,7 @@ static __attribute__((unused)) PredefinesParse predefines_option(PredefinesOptio
         const PredefinesFloat model = event < 0 ? PREDEFINES_FLOAT_MODEL_PRECISE : (PredefinesFloat)event;
         result = predefines_push_float(options, model) ? result : PREDEFINES_PARSE_ERROR;
     }
-    else if (predefines_starts(argument, "-ffp-exception-behavior="))
+    else if (match.joined == C_OPTION_FFP_EXCEPTION_BEHAVIOR_EQ)
     {
         const char* value = argument + 24;
         const int event = strcmp(value, "ignore") == 0 || strcmp(value, "maytrap") == 0 ? PREDEFINES_FLOAT_EXCEPTIONS_IGNORE
@@ -2017,7 +2185,7 @@ static __attribute__((unused)) PredefinesParse predefines_option(PredefinesOptio
         }
         result = event >= 0 && predefines_push_float(options, (PredefinesFloat)event) ? result : PREDEFINES_PARSE_ERROR;
     }
-    else if (predefines_starts(argument, "-ffp-eval-method="))
+    else if (match.joined == C_OPTION_FFP_EVAL_METHOD_EQ)
     {
         const char* value = argument + 17;
         options->fp_eval_method = strcmp(value, "source") == 0     ? BUSTER_PREDEFINES_EVAL_SOURCE
@@ -2030,7 +2198,7 @@ static __attribute__((unused)) PredefinesParse predefines_option(PredefinesOptio
             result = PREDEFINES_PARSE_ERROR;
         }
     }
-    else if (predefines_starts(argument, "-fveclib="))
+    else if (match.joined == C_OPTION_FVECLIB_EQ)
     {
         // Of the vector libraries, ArmPL and SLEEF turn math errno off where they come among the floating-point options
         // (clang's state machine, whatever -fveclib= follows). predefines_finish checks the last one: clang refuses
@@ -2044,42 +2212,48 @@ static __attribute__((unused)) PredefinesParse predefines_option(PredefinesOptio
     {
         static const struct
         {
-            const char* name;
+            uint16_t option;
             PredefinesFloat event;
         } floats[] = {
-            { "-fhonor-infinities", PREDEFINES_FLOAT_HONOR_INFINITIES },
-            { "-fno-honor-infinities", PREDEFINES_FLOAT_NO_HONOR_INFINITIES },
-            { "-fhonor-nans", PREDEFINES_FLOAT_HONOR_NANS },
-            { "-fno-honor-nans", PREDEFINES_FLOAT_NO_HONOR_NANS },
-            { "-fapprox-func", PREDEFINES_FLOAT_APPROX_FUNC },
-            { "-fno-approx-func", PREDEFINES_FLOAT_NO_APPROX_FUNC },
-            { "-fmath-errno", PREDEFINES_FLOAT_MATH_ERRNO },
-            { "-fno-math-errno", PREDEFINES_FLOAT_NO_MATH_ERRNO },
-            { "-fassociative-math", PREDEFINES_FLOAT_ASSOCIATIVE },
-            { "-fno-associative-math", PREDEFINES_FLOAT_NO_ASSOCIATIVE },
-            { "-freciprocal-math", PREDEFINES_FLOAT_RECIPROCAL },
-            { "-fno-reciprocal-math", PREDEFINES_FLOAT_NO_RECIPROCAL },
-            { "-fsigned-zeros", PREDEFINES_FLOAT_SIGNED_ZEROS },
-            { "-fno-signed-zeros", PREDEFINES_FLOAT_NO_SIGNED_ZEROS },
-            { "-ftrapping-math", PREDEFINES_FLOAT_TRAPPING },
-            { "-fno-trapping-math", PREDEFINES_FLOAT_NO_TRAPPING },
-            { "-frounding-math", PREDEFINES_FLOAT_ROUNDING },
-            { "-fno-rounding-math", PREDEFINES_FLOAT_NO_ROUNDING },
-            { "-ffinite-math-only", PREDEFINES_FLOAT_FINITE },
-            { "-fno-finite-math-only", PREDEFINES_FLOAT_NO_FINITE },
-            { "-funsafe-math-optimizations", PREDEFINES_FLOAT_UNSAFE },
-            { "-fno-unsafe-math-optimizations", PREDEFINES_FLOAT_NO_UNSAFE },
-            { "-ffast-math", PREDEFINES_FLOAT_FAST },
-            { "-fno-fast-math", PREDEFINES_FLOAT_NO_FAST },
+            { C_OPTION_FHONOR_INFINITIES, PREDEFINES_FLOAT_HONOR_INFINITIES },
+            { C_OPTION_FNO_HONOR_INFINITIES, PREDEFINES_FLOAT_NO_HONOR_INFINITIES },
+            { C_OPTION_FHONOR_NANS, PREDEFINES_FLOAT_HONOR_NANS },
+            { C_OPTION_FNO_HONOR_NANS, PREDEFINES_FLOAT_NO_HONOR_NANS },
+            { C_OPTION_FAPPROX_FUNC, PREDEFINES_FLOAT_APPROX_FUNC },
+            { C_OPTION_FNO_APPROX_FUNC, PREDEFINES_FLOAT_NO_APPROX_FUNC },
+            { C_OPTION_FMATH_ERRNO, PREDEFINES_FLOAT_MATH_ERRNO },
+            { C_OPTION_FNO_MATH_ERRNO, PREDEFINES_FLOAT_NO_MATH_ERRNO },
+            { C_OPTION_FASSOCIATIVE_MATH, PREDEFINES_FLOAT_ASSOCIATIVE },
+            { C_OPTION_FNO_ASSOCIATIVE_MATH, PREDEFINES_FLOAT_NO_ASSOCIATIVE },
+            { C_OPTION_FRECIPROCAL_MATH, PREDEFINES_FLOAT_RECIPROCAL },
+            { C_OPTION_FNO_RECIPROCAL_MATH, PREDEFINES_FLOAT_NO_RECIPROCAL },
+            { C_OPTION_FSIGNED_ZEROS, PREDEFINES_FLOAT_SIGNED_ZEROS },
+            { C_OPTION_FNO_SIGNED_ZEROS, PREDEFINES_FLOAT_NO_SIGNED_ZEROS },
+            { C_OPTION_FTRAPPING_MATH, PREDEFINES_FLOAT_TRAPPING },
+            { C_OPTION_FNO_TRAPPING_MATH, PREDEFINES_FLOAT_NO_TRAPPING },
+            { C_OPTION_FROUNDING_MATH, PREDEFINES_FLOAT_ROUNDING },
+            { C_OPTION_FNO_ROUNDING_MATH, PREDEFINES_FLOAT_NO_ROUNDING },
+            { C_OPTION_FFINITE_MATH_ONLY, PREDEFINES_FLOAT_FINITE },
+            { C_OPTION_FNO_FINITE_MATH_ONLY, PREDEFINES_FLOAT_NO_FINITE },
+            { C_OPTION_FUNSAFE_MATH_OPTIMIZATIONS, PREDEFINES_FLOAT_UNSAFE },
+            { C_OPTION_FNO_UNSAFE_MATH_OPTIMIZATIONS, PREDEFINES_FLOAT_NO_UNSAFE },
+            { C_OPTION_FFAST_MATH, PREDEFINES_FLOAT_FAST },
+            { C_OPTION_FNO_FAST_MATH, PREDEFINES_FLOAT_NO_FAST },
         };
         int event = -1;
         for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(floats) && event < 0; i += 1)
         {
-            event = strcmp(argument, floats[i].name) == 0 ? (int)floats[i].event : -1;
+            event = floats[i].option == match.exact ? (int)floats[i].event : -1;
         }
         result = event >= 0 ? (predefines_push_float(options, (PredefinesFloat)event) ? PREDEFINES_PARSE_TAKEN : PREDEFINES_PARSE_ERROR) : PREDEFINES_PARSE_UNKNOWN;
     }
     return result;
+}
+
+// predefines_option_match of `argument`, looked up.
+static __attribute__((unused)) PredefinesParse predefines_option(PredefinesOptions* options, const char* argument, const char* next)
+{
+    return predefines_option_match(options, argument, c_option_find(argument), next);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -3105,7 +3279,7 @@ static bool predefines_item_starts(const char* item, uint32_t length, const char
 static PredefinesFeatures predefines_apply(const PredefinesOptions* options, const PredefinesHost* host, int32_t cpu, const char* extra, uint32_t extra_length)
 {
     // x86-64 always has sse2, then the CPU's features.
-    PredefinesFeatures features = predefines_features[predefines_feature("sse2")].implies;
+    PredefinesFeatures features = predefines_features[PREDEFINES_FEATURE_SSE2].implies;
     if (cpu >= 0)
     {
         predefines_add(&features, predefines_cpus[cpu].features);
@@ -3154,7 +3328,7 @@ static PredefinesFeatures predefines_apply(const PredefinesOptions* options, con
     }
     if (options->inline_asm_use_gpr32)
     {
-        predefines_add(&features, predefines_features[predefines_feature("inline-asm-use-gpr32")].implies);
+        predefines_add(&features, predefines_features[PREDEFINES_FEATURE_INLINE_ASM_USE_GPR32].implies);
     }
     // The target attribute's features: every item but its CPUs (which predefines_target_attribute found valid), in order.
     uint32_t cursor = 0;
@@ -3178,11 +3352,16 @@ static PredefinesFeatures predefines_apply(const PredefinesOptions* options, con
         }
     }
     // The soft rules: popcnt and crc32 come with sse4.2, mmx with sse and xsave with avx, unless turned off explicitly.
-    static const char* const soft[4][2] = { { "sse4.2", "popcnt" }, { "sse", "mmx" }, { "avx", "xsave" }, { "sse4.2", "crc32" } };
+    static const uint8_t soft[4][2] = {
+        { PREDEFINES_FEATURE_SSE4_2, PREDEFINES_FEATURE_POPCNT },
+        { PREDEFINES_FEATURE_SSE, PREDEFINES_FEATURE_MMX },
+        { PREDEFINES_FEATURE_AVX, PREDEFINES_FEATURE_XSAVE },
+        { PREDEFINES_FEATURE_SSE4_2, PREDEFINES_FEATURE_CRC32 },
+    };
     for (uint32_t s = 0; s < BUSTER_ARRAY_LENGTH(soft); s += 1)
     {
-        const uint32_t trigger = predefines_feature(soft[s][0]);
-        const uint32_t added = predefines_feature(soft[s][1]);
+        const uint32_t trigger = soft[s][0];
+        const uint32_t added = soft[s][1];
         if (predefines_has(features, trigger) && !predefines_has(explicitly_off, added))
         {
             features.words[added / 64] |= 1ull << (added % 64);
@@ -3206,7 +3385,7 @@ static bool predefines_resolve(const PredefinesOptions* options, PredefinesFeatu
     }
     *features = predefines_apply(options, &host, *cpu, 0, 0);
     // -mfpmath must agree with the features: 387 without SSE, sse with it.
-    const bool sse = predefines_has(*features, predefines_feature("sse"));
+    const bool sse = predefines_has(*features, PREDEFINES_FEATURE_SSE);
     if ((options->fpmath == BUSTER_PREDEFINES_FPMATH_387 && sse) || (options->fpmath == BUSTER_PREDEFINES_FPMATH_SSE && !sse))
     {
         fprintf(stderr, "error: the '%s' unit is not supported with this instruction set\n", options->fpmath == BUSTER_PREDEFINES_FPMATH_387 ? "387" : "sse");
@@ -3216,67 +3395,68 @@ static bool predefines_resolve(const PredefinesOptions* options, PredefinesFeatu
 }
 
 // The clang feature behind each of x86_target.c's features (X86Feature), by which predefines_target finds it among the
-// resolved ones: none for RDTSCP and CLFLUSH, which clang has no feature for.
-static const char* const predefines_x86_features[X86_FEATURE_COUNT] = {
-    [X86_FEATURE_SSE3] = "sse3",
-    [X86_FEATURE_SSSE3] = "ssse3",
-    [X86_FEATURE_SSE41] = "sse4.1",
-    [X86_FEATURE_SSE42] = "sse4.2",
-    [X86_FEATURE_CRC32] = "crc32",
-    [X86_FEATURE_POPCNT] = "popcnt",
-    [X86_FEATURE_CX16] = "cx16",
-    [X86_FEATURE_SAHF] = "sahf",
-    [X86_FEATURE_AVX] = "avx",
-    [X86_FEATURE_AVX2] = "avx2",
-    [X86_FEATURE_BMI] = "bmi",
-    [X86_FEATURE_BMI2] = "bmi2",
-    [X86_FEATURE_F16C] = "f16c",
-    [X86_FEATURE_FMA] = "fma",
-    [X86_FEATURE_LZCNT] = "lzcnt",
-    [X86_FEATURE_MOVBE] = "movbe",
-    [X86_FEATURE_XSAVE] = "xsave",
-    [X86_FEATURE_AVX512F] = "avx512f",
-    [X86_FEATURE_AVX512BW] = "avx512bw",
-    [X86_FEATURE_AVX512CD] = "avx512cd",
-    [X86_FEATURE_AVX512DQ] = "avx512dq",
-    [X86_FEATURE_AVX512VL] = "avx512vl",
-    [X86_FEATURE_ADX] = "adx",
-    [X86_FEATURE_AES] = "aes",
-    [X86_FEATURE_AVX512BF16] = "avx512bf16",
-    [X86_FEATURE_AVX512BITALG] = "avx512bitalg",
-    [X86_FEATURE_AVX512IFMA] = "avx512ifma",
-    [X86_FEATURE_AVX512VBMI] = "avx512vbmi",
-    [X86_FEATURE_AVX512VBMI2] = "avx512vbmi2",
-    [X86_FEATURE_AVX512VNNI] = "avx512vnni",
-    [X86_FEATURE_AVX512VP2INTERSECT] = "avx512vp2intersect",
-    [X86_FEATURE_AVX512VPOPCNTDQ] = "avx512vpopcntdq",
-    [X86_FEATURE_AVXVNNI] = "avxvnni",
-    [X86_FEATURE_CLFLUSHOPT] = "clflushopt",
-    [X86_FEATURE_CLWB] = "clwb",
-    [X86_FEATURE_CLZERO] = "clzero",
-    [X86_FEATURE_FSGSBASE] = "fsgsbase",
-    [X86_FEATURE_GFNI] = "gfni",
-    [X86_FEATURE_INVPCID] = "invpcid",
-    [X86_FEATURE_MOVDIR64B] = "movdir64b",
-    [X86_FEATURE_MOVDIRI] = "movdiri",
-    [X86_FEATURE_MWAITX] = "mwaitx",
-    [X86_FEATURE_PCLMUL] = "pclmul",
-    [X86_FEATURE_PKU] = "pku",
-    [X86_FEATURE_PREFETCHI] = "prefetchi",
-    [X86_FEATURE_PRFCHW] = "prfchw",
-    [X86_FEATURE_RDPID] = "rdpid",
-    [X86_FEATURE_RDPRU] = "rdpru",
-    [X86_FEATURE_RDRND] = "rdrnd",
-    [X86_FEATURE_RDSEED] = "rdseed",
-    [X86_FEATURE_SHA] = "sha",
-    [X86_FEATURE_SHSTK] = "shstk",
-    [X86_FEATURE_SSE4A] = "sse4a",
-    [X86_FEATURE_VAES] = "vaes",
-    [X86_FEATURE_VPCLMULQDQ] = "vpclmulqdq",
-    [X86_FEATURE_WBNOINVD] = "wbnoinvd",
-    [X86_FEATURE_XSAVEC] = "xsavec",
-    [X86_FEATURE_XSAVEOPT] = "xsaveopt",
-    [X86_FEATURE_XSAVES] = "xsaves",
+// resolved ones: its index (PredefinesFeatureIndex) plus one, and 0, none, for RDTSCP and CLFLUSH, which clang has no
+// feature for.
+static const uint8_t predefines_x86_features[X86_FEATURE_COUNT] = {
+    [X86_FEATURE_SSE3] = PREDEFINES_FEATURE_SSE3 + 1,
+    [X86_FEATURE_SSSE3] = PREDEFINES_FEATURE_SSSE3 + 1,
+    [X86_FEATURE_SSE41] = PREDEFINES_FEATURE_SSE4_1 + 1,
+    [X86_FEATURE_SSE42] = PREDEFINES_FEATURE_SSE4_2 + 1,
+    [X86_FEATURE_CRC32] = PREDEFINES_FEATURE_CRC32 + 1,
+    [X86_FEATURE_POPCNT] = PREDEFINES_FEATURE_POPCNT + 1,
+    [X86_FEATURE_CX16] = PREDEFINES_FEATURE_CX16 + 1,
+    [X86_FEATURE_SAHF] = PREDEFINES_FEATURE_SAHF + 1,
+    [X86_FEATURE_AVX] = PREDEFINES_FEATURE_AVX + 1,
+    [X86_FEATURE_AVX2] = PREDEFINES_FEATURE_AVX2 + 1,
+    [X86_FEATURE_BMI] = PREDEFINES_FEATURE_BMI + 1,
+    [X86_FEATURE_BMI2] = PREDEFINES_FEATURE_BMI2 + 1,
+    [X86_FEATURE_F16C] = PREDEFINES_FEATURE_F16C + 1,
+    [X86_FEATURE_FMA] = PREDEFINES_FEATURE_FMA + 1,
+    [X86_FEATURE_LZCNT] = PREDEFINES_FEATURE_LZCNT + 1,
+    [X86_FEATURE_MOVBE] = PREDEFINES_FEATURE_MOVBE + 1,
+    [X86_FEATURE_XSAVE] = PREDEFINES_FEATURE_XSAVE + 1,
+    [X86_FEATURE_AVX512F] = PREDEFINES_FEATURE_AVX512F + 1,
+    [X86_FEATURE_AVX512BW] = PREDEFINES_FEATURE_AVX512BW + 1,
+    [X86_FEATURE_AVX512CD] = PREDEFINES_FEATURE_AVX512CD + 1,
+    [X86_FEATURE_AVX512DQ] = PREDEFINES_FEATURE_AVX512DQ + 1,
+    [X86_FEATURE_AVX512VL] = PREDEFINES_FEATURE_AVX512VL + 1,
+    [X86_FEATURE_ADX] = PREDEFINES_FEATURE_ADX + 1,
+    [X86_FEATURE_AES] = PREDEFINES_FEATURE_AES + 1,
+    [X86_FEATURE_AVX512BF16] = PREDEFINES_FEATURE_AVX512BF16 + 1,
+    [X86_FEATURE_AVX512BITALG] = PREDEFINES_FEATURE_AVX512BITALG + 1,
+    [X86_FEATURE_AVX512IFMA] = PREDEFINES_FEATURE_AVX512IFMA + 1,
+    [X86_FEATURE_AVX512VBMI] = PREDEFINES_FEATURE_AVX512VBMI + 1,
+    [X86_FEATURE_AVX512VBMI2] = PREDEFINES_FEATURE_AVX512VBMI2 + 1,
+    [X86_FEATURE_AVX512VNNI] = PREDEFINES_FEATURE_AVX512VNNI + 1,
+    [X86_FEATURE_AVX512VP2INTERSECT] = PREDEFINES_FEATURE_AVX512VP2INTERSECT + 1,
+    [X86_FEATURE_AVX512VPOPCNTDQ] = PREDEFINES_FEATURE_AVX512VPOPCNTDQ + 1,
+    [X86_FEATURE_AVXVNNI] = PREDEFINES_FEATURE_AVXVNNI + 1,
+    [X86_FEATURE_CLFLUSHOPT] = PREDEFINES_FEATURE_CLFLUSHOPT + 1,
+    [X86_FEATURE_CLWB] = PREDEFINES_FEATURE_CLWB + 1,
+    [X86_FEATURE_CLZERO] = PREDEFINES_FEATURE_CLZERO + 1,
+    [X86_FEATURE_FSGSBASE] = PREDEFINES_FEATURE_FSGSBASE + 1,
+    [X86_FEATURE_GFNI] = PREDEFINES_FEATURE_GFNI + 1,
+    [X86_FEATURE_INVPCID] = PREDEFINES_FEATURE_INVPCID + 1,
+    [X86_FEATURE_MOVDIR64B] = PREDEFINES_FEATURE_MOVDIR64B + 1,
+    [X86_FEATURE_MOVDIRI] = PREDEFINES_FEATURE_MOVDIRI + 1,
+    [X86_FEATURE_MWAITX] = PREDEFINES_FEATURE_MWAITX + 1,
+    [X86_FEATURE_PCLMUL] = PREDEFINES_FEATURE_PCLMUL + 1,
+    [X86_FEATURE_PKU] = PREDEFINES_FEATURE_PKU + 1,
+    [X86_FEATURE_PREFETCHI] = PREDEFINES_FEATURE_PREFETCHI + 1,
+    [X86_FEATURE_PRFCHW] = PREDEFINES_FEATURE_PRFCHW + 1,
+    [X86_FEATURE_RDPID] = PREDEFINES_FEATURE_RDPID + 1,
+    [X86_FEATURE_RDPRU] = PREDEFINES_FEATURE_RDPRU + 1,
+    [X86_FEATURE_RDRND] = PREDEFINES_FEATURE_RDRND + 1,
+    [X86_FEATURE_RDSEED] = PREDEFINES_FEATURE_RDSEED + 1,
+    [X86_FEATURE_SHA] = PREDEFINES_FEATURE_SHA + 1,
+    [X86_FEATURE_SHSTK] = PREDEFINES_FEATURE_SHSTK + 1,
+    [X86_FEATURE_SSE4A] = PREDEFINES_FEATURE_SSE4A + 1,
+    [X86_FEATURE_VAES] = PREDEFINES_FEATURE_VAES + 1,
+    [X86_FEATURE_VPCLMULQDQ] = PREDEFINES_FEATURE_VPCLMULQDQ + 1,
+    [X86_FEATURE_WBNOINVD] = PREDEFINES_FEATURE_WBNOINVD + 1,
+    [X86_FEATURE_XSAVEC] = PREDEFINES_FEATURE_XSAVEC + 1,
+    [X86_FEATURE_XSAVEOPT] = PREDEFINES_FEATURE_XSAVEOPT + 1,
+    [X86_FEATURE_XSAVES] = PREDEFINES_FEATURE_XSAVES + 1,
 };
 
 // x86_target.c's architecture for a -march or -mtune name: one of its six profiles, or X86_ARCH_OTHER for clang's other
@@ -3284,60 +3464,61 @@ static const char* const predefines_x86_features[X86_FEATURE_COUNT] = {
 static X86Architecture predefines_x86_architecture(const char* name)
 {
     static const char* const profiles[] = { "x86-64", "x86-64-v2", "x86-64-v3", "x86-64-v4", "znver5", "native" };
-    X86Architecture result = strcmp(name, "generic") == 0 ? X86_ARCH_BASELINE : X86_ARCH_OTHER;
+    X86Architecture result = c_option_is(name, "generic") ? X86_ARCH_BASELINE : X86_ARCH_OTHER;
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(profiles); i += 1)
     {
-        result = strcmp(name, profiles[i]) == 0 ? (X86Architecture)i : result;
+        result = c_option_is(name, profiles[i]) ? (X86Architecture)i : result;
     }
     return result;
 }
 
-// The clang feature behind each of x86_target.c's extensions (X86Extension).
-static const char* const predefines_x86_extensions[X86_EXTENSION_COUNT] = {
-    [X86_EXTENSION_AVX512FP16] = "avx512fp16",
-    [X86_EXTENSION_AVXNECONVERT] = "avxneconvert",
-    [X86_EXTENSION_AVX10_2] = "avx10.2",
-    [X86_EXTENSION_XOP] = "xop",
-    [X86_EXTENSION_SHA512] = "sha512",
-    [X86_EXTENSION_SM3] = "sm3",
-    [X86_EXTENSION_SM4] = "sm4",
-    [X86_EXTENSION_MOVRS] = "movrs",
-    [X86_EXTENSION_AVX512BMM] = "avx512bmm",
-    [X86_EXTENSION_RAOINT] = "raoint",
-    [X86_EXTENSION_CLDEMOTE] = "cldemote",
-    [X86_EXTENSION_SERIALIZE] = "serialize",
-    [X86_EXTENSION_UINTR] = "uintr",
-    [X86_EXTENSION_PTWRITE] = "ptwrite",
-    [X86_EXTENSION_WAITPKG] = "waitpkg",
-    [X86_EXTENSION_LWP] = "lwp",
-    [X86_EXTENSION_RTM] = "rtm",
-    [X86_EXTENSION_TSXLDTRK] = "tsxldtrk",
-    [X86_EXTENSION_AMXTILE] = "amx-tile",
-    [X86_EXTENSION_AMXINT8] = "amx-int8",
-    [X86_EXTENSION_AMXBF16] = "amx-bf16",
-    [X86_EXTENSION_AMXFP16] = "amx-fp16",
-    [X86_EXTENSION_AMXCOMPLEX] = "amx-complex",
-    [X86_EXTENSION_AMXFP8] = "amx-fp8",
-    [X86_EXTENSION_AMXAVX512] = "amx-avx512",
-    [X86_EXTENSION_AMXMOVRS] = "amx-movrs",
-    [X86_EXTENSION_ENQCMD] = "enqcmd",
-    [X86_EXTENSION_USERMSR] = "usermsr",
-    [X86_EXTENSION_KL] = "kl",
-    [X86_EXTENSION_WIDEKL] = "widekl",
+// The clang feature behind each of x86_target.c's extensions (X86Extension), as predefines_x86_features gives them.
+static const uint8_t predefines_x86_extensions[X86_EXTENSION_COUNT] = {
+    [X86_EXTENSION_AVX512FP16] = PREDEFINES_FEATURE_AVX512FP16 + 1,
+    [X86_EXTENSION_AVXNECONVERT] = PREDEFINES_FEATURE_AVXNECONVERT + 1,
+    [X86_EXTENSION_AVX10_2] = PREDEFINES_FEATURE_AVX10_2 + 1,
+    [X86_EXTENSION_XOP] = PREDEFINES_FEATURE_XOP + 1,
+    [X86_EXTENSION_SHA512] = PREDEFINES_FEATURE_SHA512 + 1,
+    [X86_EXTENSION_SM3] = PREDEFINES_FEATURE_SM3 + 1,
+    [X86_EXTENSION_SM4] = PREDEFINES_FEATURE_SM4 + 1,
+    [X86_EXTENSION_MOVRS] = PREDEFINES_FEATURE_MOVRS + 1,
+    [X86_EXTENSION_AVX512BMM] = PREDEFINES_FEATURE_AVX512BMM + 1,
+    [X86_EXTENSION_RAOINT] = PREDEFINES_FEATURE_RAOINT + 1,
+    [X86_EXTENSION_CLDEMOTE] = PREDEFINES_FEATURE_CLDEMOTE + 1,
+    [X86_EXTENSION_SERIALIZE] = PREDEFINES_FEATURE_SERIALIZE + 1,
+    [X86_EXTENSION_UINTR] = PREDEFINES_FEATURE_UINTR + 1,
+    [X86_EXTENSION_PTWRITE] = PREDEFINES_FEATURE_PTWRITE + 1,
+    [X86_EXTENSION_WAITPKG] = PREDEFINES_FEATURE_WAITPKG + 1,
+    [X86_EXTENSION_LWP] = PREDEFINES_FEATURE_LWP + 1,
+    [X86_EXTENSION_RTM] = PREDEFINES_FEATURE_RTM + 1,
+    [X86_EXTENSION_TSXLDTRK] = PREDEFINES_FEATURE_TSXLDTRK + 1,
+    [X86_EXTENSION_AMXTILE] = PREDEFINES_FEATURE_AMX_TILE + 1,
+    [X86_EXTENSION_AMXINT8] = PREDEFINES_FEATURE_AMX_INT8 + 1,
+    [X86_EXTENSION_AMXBF16] = PREDEFINES_FEATURE_AMX_BF16 + 1,
+    [X86_EXTENSION_AMXFP16] = PREDEFINES_FEATURE_AMX_FP16 + 1,
+    [X86_EXTENSION_AMXCOMPLEX] = PREDEFINES_FEATURE_AMX_COMPLEX + 1,
+    [X86_EXTENSION_AMXFP8] = PREDEFINES_FEATURE_AMX_FP8 + 1,
+    [X86_EXTENSION_AMXAVX512] = PREDEFINES_FEATURE_AMX_AVX512 + 1,
+    [X86_EXTENSION_AMXMOVRS] = PREDEFINES_FEATURE_AMX_MOVRS + 1,
+    [X86_EXTENSION_ENQCMD] = PREDEFINES_FEATURE_ENQCMD + 1,
+    [X86_EXTENSION_USERMSR] = PREDEFINES_FEATURE_USERMSR + 1,
+    [X86_EXTENSION_KL] = PREDEFINES_FEATURE_KL + 1,
+    [X86_EXTENSION_WIDEKL] = PREDEFINES_FEATURE_WIDEKL + 1,
 };
 
 // Adds to `target` x86_target.c's features and extensions that clang's `features` have, as predefines_x86_features and
-// predefines_x86_extensions name them.
+// predefines_x86_extensions map them.
 static void predefines_x86_bits(PredefinesFeatures features, X86Target* target)
 {
     for (uint32_t f = 0; f < X86_FEATURE_COUNT; f += 1)
     {
-        const char* name = predefines_x86_features[f];
-        target->features |= (uint64_t)(name != 0 && predefines_has(features, predefines_feature(name))) << f;
+        const uint32_t feature = predefines_x86_features[f];
+        target->features |= (uint64_t)(feature != 0 && predefines_has(features, feature - 1)) << f;
     }
     for (uint32_t e = 0; e < X86_EXTENSION_COUNT; e += 1)
     {
-        target->extensions |= (uint64_t)predefines_has(features, predefines_feature(predefines_x86_extensions[e])) << e;
+        const uint32_t feature = predefines_x86_extensions[e];
+        target->extensions |= (uint64_t)(feature != 0 && predefines_has(features, feature - 1)) << e;
     }
 }
 
@@ -3614,7 +3795,7 @@ static __attribute__((unused)) uint32_t predefines_eval_method(const PredefinesO
         PredefinesFeatures features;
         int32_t cpu;
         predefines_resolve(options, &features, &cpu);
-        result = predefines_has(features, predefines_feature("sse")) ? 0 : 2;
+        result = predefines_has(features, PREDEFINES_FEATURE_SSE) ? 0 : 2;
     }
     return result;
 }
@@ -3741,7 +3922,7 @@ static __attribute__((unused)) uint32_t predefines_text(const PredefinesOptions*
     PredefinesFeatures features;
     int32_t cpu;
     const bool resolved = predefines_resolve(options, &features, &cpu);
-    const bool sse = predefines_has(features, predefines_feature("sse"));
+    const bool sse = predefines_has(features, PREDEFINES_FEATURE_SSE);
     *flt_eval_method = options->fp_eval_method != BUSTER_PREDEFINES_EVAL_DEFAULT ? (uint32_t)(options->fp_eval_method - BUSTER_PREDEFINES_EVAL_SOURCE) : sse ? 0 : 2;
     uint32_t length = 0;
     char line[256];
@@ -3759,14 +3940,23 @@ static __attribute__((unused)) uint32_t predefines_text(const PredefinesOptions*
         }
     }
     // The two macros that need several features.
-    static const char* const apx[] = { "egpr", "push2pop2", "ppx", "ndd", "ccmp", "nf", "zu", "jmpabs" };
+    static const uint8_t apx[] = {
+        PREDEFINES_FEATURE_EGPR,
+        PREDEFINES_FEATURE_PUSH2POP2,
+        PREDEFINES_FEATURE_PPX,
+        PREDEFINES_FEATURE_NDD,
+        PREDEFINES_FEATURE_CCMP,
+        PREDEFINES_FEATURE_NF,
+        PREDEFINES_FEATURE_ZU,
+        PREDEFINES_FEATURE_JMPABS,
+    };
     bool apx_f = true;
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(apx); i += 1)
     {
-        apx_f &= predefines_has(features, predefines_feature(apx[i]));
+        apx_f &= predefines_has(features, apx[i]);
     }
     length = resolved && apx_f ? predefines_append(buffer, length, capacity, "#define __APX_F__ 1\n") : length;
-    const bool gpr32 = predefines_has(features, predefines_feature("egpr")) && predefines_has(features, predefines_feature("inline-asm-use-gpr32"));
+    const bool gpr32 = predefines_has(features, PREDEFINES_FEATURE_EGPR) && predefines_has(features, PREDEFINES_FEATURE_INLINE_ASM_USE_GPR32);
     length = resolved && gpr32 ? predefines_append(buffer, length, capacity, "#define __APX_INLINE_ASM_USE_GPR32__ 1\n") : length;
     // The code model.
     static const char* const code_models[4] = { "small", "kernel", "medium", "large" };

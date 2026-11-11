@@ -6,14 +6,19 @@ requirements. [Command index](README.md).
 
 ## Module overview
 
-- `src/buster/compiler/c_parser.c` is the parser (#127): the preprocessor's
-  token stream to a tree, a parent, a role and a node depth for every token,
-  and for a unit without errors its postorder and the tree's columns
+- `src/buster/compiler/c_parser.c` is the parser's shared interface (#127):
+  token and tree types, entry-point declarations, diagnostic formatting,
+  resource release and the tree's columns
   (`parse_tree_columns`, #186/#544: each token's position in the postorder,
   subtree end, first child and next sibling; with `ParseOptions.sizes` each
   subtree's size), which the checker's reader derives itself from the C
-  driver's `tree_only` parse. The
-  vector path builds it with kernels in AVX-512, each with an exact scalar
+  driver's `tree_only` parse. It includes `c_parser_impl.c` in the FRONTEND
+  unity unit and standalone parser consumers; other unity units call the
+  same external entry points without reading their implementation.
+- `src/buster/compiler/c_parser_impl.c` turns the preprocessor's token
+  stream into a tree, a parent, a role and a node depth for every token,
+  and for a unit without errors its postorder and the tree's columns. The
+  vector path uses kernels in AVX-512, each with an exact scalar
   twin, and a pass of checks that flags what C's grammar doesn't allow, whose
   top-level declarations go to the scalar parser; the scalar parser alone
   (`--scalar`) builds the same tree and gives the diagnostics, at clang's
@@ -24,12 +29,22 @@ requirements. [Command index](README.md).
   fragments, the alternative to the postorder that #104–#107 measured end to
   end beside the checker's tree walk, lost and were removed: [the
   decision](../../docs/c-parser-fragments.md).
+
+Implementation edits rebuild FRONTEND alone on a scalar host and FRONTEND
+plus the standalone parser benchmark on a vector host. Shared interface
+edits still rebuild every consumer. The standalone vector benchmark retains
+its own static parser so that its kernel measurements use the same code.
+
 ## Parser tests
 
-`./build/compiler test-parser [--clang [PATH]] [--mutations N] [--seed N]
-[--streams N] [--reports N] [--keep] [--files-only] [options] [file or directory...]`
-(about 7 s on the 9700X without files, with `--clang`) checks `c_parser.c`; `--clang` needs
-clang 23 on `PATH`, or the one PATH names. Each unit goes through both paths,
+`./build/compiler test-parser [--clang [PATH] [--clang-server PATH [--differential]]]
+[--mutations N] [--seed N] [--streams N] [--reports N] [--keep] [--files-only] [options]
+[file or directory...]` (about 7 s on the 9700X without files, with `--clang`)
+checks the parser interface and implementation; `--clang` needs
+clang 23 on `PATH`, or the one PATH names. `--clang-server PATH` sends that
+clang's `-fsyntax-only` runs (`parse_test_clang`, a file each through the oracle
+cache's runs) to `tools/clang-server`, and `--differential` also runs each as
+before and fails on a difference ([Served runs](oracle-cache.md#served-runs)). Each unit goes through both paths,
 the vector path with its fallback and the scalar parser alone, which must read
 the same tokens and give the same outcome, and on a unit without errors the same
 tree: the same parent, node depth and role on every token. The tree must keep

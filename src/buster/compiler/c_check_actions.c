@@ -34,6 +34,10 @@ typedef enum CheckConstantKind
     CHECK_CONSTANT_FLOATING,
     CHECK_CONSTANT_ADDRESS,
     CHECK_CONSTANT_COMPLEX,
+    // GNU's difference of two labels' addresses in a static initializer (#1447, check_init_label_difference): the
+    // minuend label's object in `object`, the subtrahend's in `integer`. Only a static initializer's constants and parts
+    // hold one, which the static data writes as the labels' distance in their function's code (check_data_label_distance).
+    CHECK_CONSTANT_LABEL_DIFFERENCE,
 } CheckConstantKind;
 
 typedef enum CheckFault
@@ -182,6 +186,8 @@ static void check_value_copy_floating(CheckValue* destination, const CheckValue*
     destination->imaginary_storage[1] = source->imaginary_storage[1] & UINT64_C(0xffff);
 }
 
+#include "c_check_quad.c"
+
 typedef enum CheckOp
 {
     CHECK_OP_VALUE,
@@ -290,6 +296,9 @@ typedef enum CheckDiagnostic
     // A pointer to pointers whose levels' address spaces differ (#1447): clang's "changes address space of nested
     // pointer", worded by the conversion (c_check_semantic_diagnostic.c).
     CHECK_DIAG_ADDRESS_SPACE_NESTED,
+    // A signed _BitInt past 128 bits as one of mul_overflow's operands or its destination (#1447): clang's
+    // "__builtin_mul_overflow does not support 'signed _BitInt' operands of more than 128 bits", at that argument.
+    CHECK_DIAG_OVERFLOW_BIT_INT,
 } CheckDiagnostic;
 
 #define BUSTER_CHECK_CONVERT_LVALUE 0x01u
@@ -672,8 +681,8 @@ static uint16_t check_action_half_round(CheckHalf format, bool negative, unsigne
 // its bits until a conversion to another format quiets it (check_action_convert_nan). A NaN's bits in a format of
 // `fraction` fraction bits and `exponent` exponent bits are its fraction's top bits; a fraction that narrowing would
 // empty is quiet, as APFloat's conversion leaves a NaN. For the formats of 64 bits or fewer (float, double, _Float16 and
-// __bf16: fraction + exponent below 64); a long double's NaN is its significand as it is, and a __float128's
-// check_action_quad_bits'.
+// __bf16: fraction + exponent below 64); a long double's NaN is its significand as it is, and a __float128's its bits
+// (c_check_quad.c), whose mirror holds its top 63 fraction bits here.
 static uint64_t check_action_nan_bits(long double value, uint32_t fraction, uint32_t exponent)
 {
     uint64_t significand = 0;
@@ -684,42 +693,21 @@ static uint64_t check_action_nan_bits(long double value, uint32_t fraction, uint
     return sign | (((UINT64_C(1) << exponent) - 1) << fraction) | bits;
 }
 
-// A __float128 NaN's place in the long double, whose 63 fraction bits can't hold the format's 112 (check_builtin_float
-// _special): bit 62 its quiet bit, bit 61 its fraction's bit 110 (a signaling NaN without a payload's), and bits 0 to 60
-// its fraction's low bits, which hold __builtin_nanf128's and __builtin_nansf128's payloads (a larger one is refused).
-// A value's 16 bytes as a __float128: a NaN's from that place, any other's converted exactly.
-static void check_action_quad_bits(long double value, uint64_t halves[2])
-{
-    if (isnan(value))
-    {
-        uint64_t significand = 0;
-        memcpy(&significand, &value, sizeof(significand));
-        const uint64_t sign = signbit(value) != 0 ? UINT64_C(1) << 63 : 0;
-        halves[0] = significand & ((UINT64_C(1) << 61) - 1);
-        halves[1] = sign | (UINT64_C(0x7fff) << 48) | (((significand >> 61) & 3) << 46);
-    }
-    else
-    {
-        const __float128 quad = (__float128)value;
-        memcpy(halves, &quad, 2 * sizeof(uint64_t));
-    }
-}
-
 // A floating constant converted from `from` to `to`, before its rounding: a NaN converted to another format is quiet, as
-// APFloat's conversion makes it, and to its own format keeps its bits (a signaling NaN of __builtin_nans's stays one). A
-// __float128 NaN's fraction first takes the others' place (check_action_quad_bits): its top 63 bits at the
-// significand's, as a narrowing keeps them.
+// APFloat's conversion makes it, its payload the top bits `to`'s fraction holds (a float's 23, a double's 52, a
+// _Float16's 10, a __bf16's 7, a long double's 63), and to its own format keeps its bits (a signaling NaN of __builtin
+// _nans's stays one). A __float128 NaN's mirror (c_check_quad.c) holds its fraction's top bits in the others' place, as
+// a narrowing keeps them.
 static long double check_action_convert_nan(TypeId from, TypeId to, long double value)
 {
     long double result = value;
     if (isnan(value) && from != to)
     {
+        const CheckHalf half = check_action_half_format(to);
+        const uint32_t fraction = to == BUSTER_TYPE_FLOAT ? 23 : to == BUSTER_TYPE_DOUBLE ? 52 : half == CHECK_HALF_IEEE ? 10 : half == CHECK_HALF_BRAIN ? 7 : 63;
         uint64_t significand = 0;
         memcpy(&significand, &result, sizeof(significand));
-        if (from == BUSTER_TYPE_FLOAT128)
-        {
-            significand = (significand & UINT64_C(0xe000000000000000)) | ((significand & ((UINT64_C(1) << 61) - 1)) >> 49);
-        }
+        significand &= ~((UINT64_C(1) << (63 - fraction)) - 1);
         significand |= UINT64_C(1) << 62;
         memcpy(&result, &significand, sizeof(significand));
     }
@@ -828,6 +816,34 @@ static __attribute__((noinline)) bool check_action_convert_half(const TypeTable*
     return integer || floating;
 }
 
+// A __float128 constant converted to an integer type of `width` bits (#1250): truncated toward zero from its bits, or,
+// past the type's range or a NaN, saturated as check_action_convert_plain's other floating sources are. Its least value
+// below -2^(width-1) is -2^(width-1) - 1 where that's a binary128 value (a width to 112), and -2^(width-1) itself
+// otherwise, as no binary128 value lies between the two there.
+static __attribute__((noinline)) void check_action_convert_quad_integer(CheckValue* value, uint32_t width, bool is_signed)
+{
+    const unsigned __int128 high_bit = (unsigned __int128)1 << (width - 1);
+    const __float128 limit = (__float128)high_bit * (is_signed ? 1 : 2);
+    const __float128 minimum = is_signed ? -limit : 0;
+    const bool nan = check_quad_is_nan(value->integer);
+    const __float128 input = nan ? 0 : check_quad_host(value->integer);
+    const bool lower = width > 112 && is_signed ? input >= minimum : input > minimum - 1;
+    const bool infinite = (value->integer & ~BUSTER_CHECK_QUAD_SIGN) == BUSTER_CHECK_QUAD_EXPONENT;
+    if (nan || infinite || !lower || input >= limit)
+    {
+        const bool negative = (value->integer & BUSTER_CHECK_QUAD_SIGN) != 0;
+        value->integer = nan ? 0 : negative ? (is_signed ? high_bit : 0) : (is_signed ? high_bit - 1 : check_action_mask(width));
+        value->flags &= ~(BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_ICE_FORM);
+        value->flags |= BUSTER_CHECK_GNU_CONSTANT | BUSTER_CHECK_GNU_FLOAT_RANGE;
+    }
+    else
+    {
+        value->integer = input < 0 ? (unsigned __int128)(__int128)input : (unsigned __int128)input;
+        value->integer &= check_action_mask(width);
+    }
+    value->constant_kind = CHECK_CONSTANT_INTEGER;
+}
+
 // Convert a constant's representation after type checking has authorized the conversion. Every integer operation
 // uses unsigned bits, and every floating-to-integer cast is range checked before host C is allowed to evaluate it.
 static void check_action_convert_plain(const TypeTable* table, CheckValue* value, TypeId destination, uint32_t node)
@@ -864,6 +880,10 @@ static void check_action_convert_plain(const TypeTable* table, CheckValue* value
             bits |= ~mask;
         }
         value->integer = bits & check_action_mask(target_width);
+    }
+    else if (target_integer && value->constant_kind == CHECK_CONSTANT_FLOATING && type_unqualified(type_strip_aligned(table, source)) == BUSTER_TYPE_FLOAT128)
+    {
+        check_action_convert_quad_integer(value, target_width, target_signed);
     }
     else if (target_integer && value->constant_kind == CHECK_CONSTANT_FLOATING)
     {
@@ -908,36 +928,33 @@ static void check_action_convert_plain(const TypeTable* table, CheckValue* value
              type_unqualified(type_strip_aligned(table, destination)) == BUSTER_TYPE_FLOAT128 &&
              (value->constant_kind == CHECK_CONSTANT_INTEGER || value->constant_kind == CHECK_CONSTANT_FLOATING))
     {
-        // A __float128 constant from an integer or a narrower floating constant (#1250). CheckValue holds a long
-        // double, so accept only a value that conversion preserves exactly; a 128-bit integer may not be exact.
-        // A __float128 source (a constant builtin's, check_action_quad_bits) to its own type changes nothing.
-        bool exact = true;
-        long double number = value->floating;
-        if (value->constant_kind == CHECK_CONSTANT_INTEGER)
+        // A __float128 constant (#1250, c_check_quad.c): an integer's magnitude rounded once, another format's value
+        // exactly, its NaN quieted with its payload at the fraction's top, as APFloat converts them; a __float128's own
+        // bits unchanged.
+        const TypeId from = type_unqualified(type_strip_aligned(table, source));
+        if (value->constant_kind == CHECK_CONSTANT_INTEGER && source_integer)
         {
             const unsigned __int128 mask = check_action_mask(source_width);
             const unsigned __int128 bits = value->integer & mask;
             const bool negative = source_signed && (bits >> (source_width - 1)) != 0;
-            const unsigned __int128 magnitude = negative ? (0 - bits) & mask : bits;
-            const long double rounded = (long double)magnitude;
-            // A 128-bit integer is exact here only when its magnitude survives the long double exactly; a value that
-            // rounds to 2^128 is past the cast's range and is refused.
-            exact = rounded < 0x1p128L && (unsigned __int128)rounded == magnitude;
-            number = negative ? -rounded : rounded;
+            check_quad_set(value, check_quad_from_integer(negative, negative ? (0 - bits) & mask : bits));
         }
-        // The compact quad NaN representation cannot preserve the top-aligned payload of a narrower format.
-        // Refuse these conversions until the checker can represent all binary128 fraction bits.
-        const TypeId from = type_unqualified(type_strip_aligned(table, source));
-        const bool narrow_nan = value->constant_kind == CHECK_CONSTANT_FLOATING && from != BUSTER_TYPE_FLOAT128 && isnan(number);
-        if (exact && !narrow_nan && (isnan(number) || (long double)(__float128)number == number))
+        else if (value->constant_kind == CHECK_CONSTANT_FLOATING && from != BUSTER_TYPE_FLOAT128)
         {
-            value->floating = number;
-            value->constant_kind = CHECK_CONSTANT_FLOATING;
+            check_quad_set(value, check_quad_widen(value->floating, true));
         }
-        else
+        else if (value->constant_kind != CHECK_CONSTANT_FLOATING)
         {
             check_action_set_fault(value, CHECK_FAULT_UNSUPPORTED_CONSTANT, node);
         }
+    }
+    else if (target_kind == BUSTER_TYPE_KIND_FLOATING && value->constant_kind == CHECK_CONSTANT_FLOATING &&
+             type_unqualified(type_strip_aligned(table, source)) == BUSTER_TYPE_FLOAT128 &&
+             type_unqualified(type_strip_aligned(table, destination)) == BUSTER_TYPE_LONG_DOUBLE)
+    {
+        // A __float128 narrowed to long double, rounded once from its bits; to the narrower formats its mirror rounds
+        // once more as the exact value would (c_check_quad.c), below.
+        value->floating = check_quad_narrow(value->integer);
     }
     else if (target_kind == BUSTER_TYPE_KIND_FLOATING && (value->constant_kind == CHECK_CONSTANT_INTEGER || value->constant_kind == CHECK_CONSTANT_FLOATING))
     {
@@ -1568,6 +1585,28 @@ static uint32_t check_action_fold_integer(CheckIntegerFold fold, CheckValue* val
     return check_action_fold_integer_result(fold, value, answer, fault);
 }
 
+// A __float128 operation's bits (#1250): the host's binary128 arithmetic, rounded once to nearest, ties to even, as
+// APFloat's, with its NaNs (check_action_fold_nan's rule): the first NaN operand's bits, quieted, or for an invalid
+// operation on numbers the positive canonical NaN. `op` is +, -, * or /, the only ones C applies to a real floating
+// type.
+static __attribute__((noinline)) unsigned __int128 check_quad_arithmetic(CheckOp op, unsigned __int128 left, unsigned __int128 right)
+{
+    unsigned __int128 result = 0;
+    if (check_quad_is_nan(left) || check_quad_is_nan(right))
+    {
+        result = (check_quad_is_nan(left) ? left : right) | BUSTER_CHECK_QUAD_QUIET;
+    }
+    else
+    {
+        const __float128 a = check_quad_host(left);
+        const __float128 b = check_quad_host(right);
+        const __float128 value = op == CHECK_OP_ADD ? a + b : op == CHECK_OP_SUBTRACT ? a - b : op == CHECK_OP_MULTIPLY ? a * b : a / b;
+        result = check_quad_from_host(value);
+        result = check_quad_is_nan(result) ? BUSTER_CHECK_QUAD_EXPONENT | BUSTER_CHECK_QUAD_QUIET : result;
+    }
+    return result;
+}
+
 // A folded operation's NaN as clang's APFloat makes it, in every floating format (#1473): the first NaN operand's sign
 // and payload, quieted, or for an invalid operation on non-NaNs (inf + -inf, 0 * inf, 0 / 0, inf / inf) the positive
 // canonical NaN. The host's SSE and x87 give their negative indefinite NaN instead, and may take either NaN operand.
@@ -1610,15 +1649,39 @@ static void check_action_fold_floating(CheckOp op, const CheckValue* a, const Ch
             default: supported = false; break; \
         } \
     } while (0)
-    // A unary + or - of a NaN, or of a __float128 constant (an infinity, a NaN or a zero: check_action_quad_bits), is its
-    // sign alone, as APFloat's changeSign makes it: converting a NaN to its format first would quiet a signaling one.
-    const bool sign = (op == CHECK_OP_POSITIVE || op == CHECK_OP_NEGATIVE) && (isnan(a->floating) || a->type == BUSTER_TYPE_FLOAT128);
+    // A unary + or - of a NaN, or of a __float128 constant, is its sign alone, as APFloat's changeSign makes it:
+    // converting a NaN to its format first would quiet a signaling one. A __float128's sign is its bits' and its
+    // mirror's.
+    const bool quad = a->type == BUSTER_TYPE_FLOAT128;
+    const bool sign = (op == CHECK_OP_POSITIVE || op == CHECK_OP_NEGATIVE) && (isnan(a->floating) || quad);
+    unsigned __int128 quad_bits = a->integer;
     if (sign)
     {
         uint8_t bytes[16] = { 0 };
         memcpy(bytes, &a->floating, 10);
         bytes[9] ^= op == CHECK_OP_NEGATIVE ? 0x80u : 0;
         memcpy(&number, bytes, sizeof(number));
+        quad_bits ^= op == CHECK_OP_NEGATIVE ? BUSTER_CHECK_QUAD_SIGN : 0;
+    }
+    else if (quad && integer)
+    {
+        // A __float128 comparison, of its bits as the host's binary128 (an unordered NaN compares false but for !=).
+        const bool unordered = check_quad_is_nan(a->integer) || check_quad_is_nan(b->integer);
+        const __float128 left = unordered ? 0 : check_quad_host(a->integer);
+        const __float128 right = unordered ? 0 : check_quad_host(b->integer);
+        switch (op)
+        {
+            case CHECK_OP_LESS: number = !unordered && left < right; break;
+            case CHECK_OP_LESS_EQUAL: number = !unordered && left <= right; break;
+            case CHECK_OP_GREATER: number = !unordered && left > right; break;
+            case CHECK_OP_GREATER_EQUAL: number = !unordered && left >= right; break;
+            case CHECK_OP_EQUAL: number = !unordered && left == right; break;
+            default: number = unordered || left != right; break;
+        }
+    }
+    else if (quad && op >= CHECK_OP_ADD && op <= CHECK_OP_DIVIDE)
+    {
+        quad_bits = check_quad_arithmetic(op, a->integer, b->integer);
     }
     else if (a->type == BUSTER_TYPE_FLOAT)
     {
@@ -1656,6 +1719,10 @@ static void check_action_fold_floating(CheckOp op, const CheckValue* a, const Ch
     {
         value->constant_kind = CHECK_CONSTANT_INTEGER;
         value->integer = number != 0;
+    }
+    else if (quad)
+    {
+        check_quad_set(value, quad_bits);
     }
     else
     {
