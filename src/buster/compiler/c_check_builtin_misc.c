@@ -1668,7 +1668,9 @@ static __attribute__((unused)) void check_builtin_misc_one(TypeTable* table, con
     }
     if (output->action.diagnostic == CHECK_DIAG_NONE && (input->argument_count < minimum || input->argument_count > maximum))
     {
-        check_action_diagnose(&output->action, CHECK_DIAG_ARGUMENT_COUNT, 0);
+        // prefetch's prototype is variadic: its too few is clang's call's "expected at least".
+        const bool variadic = input->id == CBUILTIN_PREFETCH && input->argument_count < minimum;
+        check_action_diagnose_count(&output->action, input->argument_count, minimum, variadic ? UINT32_MAX : maximum);
     }
     if (output->action.diagnostic == CHECK_DIAG_NONE && input->argument_count != 0 && input->arguments == NULL)
     {

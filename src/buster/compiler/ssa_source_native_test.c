@@ -338,9 +338,9 @@ static bool ssa_source_native_tests(const char* work, const SsaSourceLimits* lim
         },
         {
             .name = "strict-refusal",
-            .source = "void *frame(void) { return __builtin_frame_address(0); } int main(void) { return frame() != 0; }\n",
+            .source = "long next(long x) { return x + 1; } long tail(long x) { __attribute__((musttail)) return next(x); } int main(void) { return tail(1) != 2; }\n",
             .output = "",
-            .functions = 2,
+            .functions = 3,
             .status = SSA_SOURCE_NATIVE_BUILD,
             .refused = true,
         },

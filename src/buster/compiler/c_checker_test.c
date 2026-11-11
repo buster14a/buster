@@ -177,7 +177,10 @@ static CheckValue check_test_float(TypeId type, long double value)
 
 static bool check_test_value_equal(const CheckValue* a, const CheckValue* b)
 {
-    const bool floating = (isnan(a->floating) && isnan(b->floating)) ||
+    // A _BitInt past 128 bits' constant points to its limbs from the floating payload: the same number from two paths
+    // has two pointers (c_check_wide.c).
+    const int32_t wide = check_wide_same(a, b);
+    const bool floating = wide >= 0 ? wide == 1 : (isnan(a->floating) && isnan(b->floating)) ||
                           (a->floating == b->floating && signbit(a->floating) == signbit(b->floating));
     const bool imaginary = (isnan(a->imaginary) && isnan(b->imaginary)) ||
                            (a->imaginary == b->imaginary && signbit(a->imaginary) == signbit(b->imaginary));
@@ -1375,7 +1378,8 @@ static __attribute__((noinline)) void check_test_literals(CheckTest* test, Arena
         { "0x7fffffffffffffffffffffffffffffffwb", 128, false, INT64_MAX, UINT64_MAX },
         { "0xffffffffffffffffffffffffffffffffuwb", 128, true, UINT64_MAX, UINT64_MAX },
         { "0xffffffffffffffffffffffffffffffffwb", 129, false, UINT64_MAX, UINT64_MAX },
-        { "340282366920938463463374607431768211456uwb", UINT32_MAX, true, 0, 0 },
+        { "340282366920938463463374607431768211456uwb", 129, true, 0, 0 },
+        { "0x8000'0000'0000'0000'0000'0000'0000'0000'0000'0000'0000'0000'0000'0000'0000'0000wb", 257, false, 0, 0 },
     };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(bit_precise); i += 1)
     {
@@ -4799,10 +4803,16 @@ static __attribute__((noinline)) void check_test_sources(CheckTest* test, const 
             2023
         },
         {
-            "a bit-precise constant past 128 bits refused",
-            "int a;\n_BitInt(129) b = 0xffffffffffffffffffffffffffffffffwb;\n",
-            true,
-            true,
+            // Their constants past 128 bits (#1447, c_check_wide.c): literals, folds, truth and conversions, and static data.
+            "bit-precise constants past 128 bits",
+            "int a;\n_BitInt(129) b = 0xffffffffffffffffffffffffffffffffwb;\n"
+            "_Static_assert(_Generic(0xffffffffffffffffffffffffffffffffwb, _BitInt(129): 1, default: 0) && _Generic(340282366920938463463374607431768211456uwb, unsigned _BitInt(129): 1, default: 0), \"t\");\n"
+            "_Static_assert((_BitInt(200))1 << 150 > 0 && ((unsigned _BitInt(300))1 << 299) >> 297 == 4 && ((_BitInt(256))1 << 255 >> 1) < 0, \"f\");\n"
+            "_Static_assert(340282366920938463463374607431768211457wb % 1000 == 457 && (int)(340282366920938463463374607431768211457wb >> 128) == 1, \"d\");\n"
+            "int c[(_BitInt(200))3];\nenum { E = (int)((_BitInt(300))-7 * ((_BitInt(300))1 << 200) / ((_BitInt(300))1 << 199)) };\n_Static_assert(E == -14, \"e\");\n"
+            "unsigned _BitInt(300) g = ~(unsigned _BitInt(300))0 / 3;\n_BitInt(1000) h = -((_BitInt(1000))1 << 900);\n",
+            false,
+            false,
             false,
             2023
         },
@@ -6304,6 +6314,7 @@ static CheckSparseWide check_input_attributes_from(Arena* arena, CheckInputAttri
 #include "c_check_transparent_type_test.c"
 #include "c_check_complex_test.c"
 #include "c_check_integer_extension_test.c"
+#include "c_check_wide_test.c"
 #include "c_check_sizeof_test.c"
 #include "c_check_transitions_test.c"
 #include "c_check_integer_policy_test.c"
@@ -6957,6 +6968,10 @@ static int run_checker_tests(int argc, char** argv)
             if (check_test_takes())
             {
                 check_test_integer_extensions(&test, clang);
+            }
+            if (check_test_takes())
+            {
+                check_test_wide(&test, &types.table);
             }
             if (check_test_takes())
             {
