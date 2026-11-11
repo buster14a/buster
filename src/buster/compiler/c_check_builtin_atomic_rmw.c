@@ -499,7 +499,9 @@ static __attribute__((unused)) void check_builtin_atomic_rmw_one(TypeTable* tabl
     }
     else if (source->argument_count < rule->fixed_count || ((!rule->legacy || rule->prototype != 0) && source->argument_count != rule->fixed_count))
     {
-        check_action_diagnose(&atomic->action, CHECK_DIAG_ARGUMENT_COUNT, 0);
+        // A legacy builtin with no prototype takes more (clang's "expected at least").
+        const uint32_t maximum = rule->legacy && rule->prototype == 0 ? UINT32_MAX : rule->fixed_count;
+        check_action_diagnose_count(&atomic->action, source->argument_count, rule->fixed_count, maximum);
     }
     else if (source->arguments == NULL)
     {
