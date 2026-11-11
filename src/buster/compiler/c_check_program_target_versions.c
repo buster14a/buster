@@ -681,6 +681,38 @@ static bool check_program_target_names(const CheckProgram* program, String8* nam
     return valid;
 }
 
+// The symbol whose name a block-scope static of function `object` takes before its own, where `object` is one of the
+// groups' (clang names it by its function's mangled name where clang emits the function): a target version's own
+// (s.avx512f.n) where the function was multiversioned there, as a static group's are when its deferred versions are
+// emitted, or as one declared after another version is; otherwise none, the function's identifier alone (f.n, a version
+// defined before the function became multiversioned). A target_clones function's is its body's first version's
+// (c.avx2.0.n). Whether `object` is one of theirs.
+static bool check_program_target_static_context(const CheckProgram* program, uint32_t object, SymbolId* symbol)
+{
+    bool found = false;
+    *symbol = 0;
+    for (uint32_t g = 0; !found && g < program->target_group_count; g += 1)
+    {
+        const CheckProgramTargetGroup* group = program->target_groups + g;
+        for (uint32_t v = group->version_first; !found && v < group->version_first + group->version_count; v += 1)
+        {
+            found = program->target_versions[v].object == object;
+            bool later = group->internal;
+            for (uint32_t other = group->version_first; found && other < group->version_first + group->version_count; other += 1)
+            {
+                later |= other != v && program->target_versions[other].declaration < program->target_versions[v].declaration;
+            }
+            *symbol = found && later && program->target_symbols != NULL ? program->target_symbols[v] : 0;
+        }
+    }
+    for (uint32_t g = 0; !found && g < program->target_group_count; g += 1)
+    {
+        found = program->target_groups[g].clones != 0 && program->target_groups[g].clones == object;
+        *symbol = found && program->target_symbols != NULL ? program->target_symbols[program->target_version_count + g] : 0;
+    }
+    return found;
+}
+
 // The link room the groups' code takes beyond the program's symbols: the resolvers' atoms; their symbols (the resolver,
 // f.ifunc's alias, each option's version) and their fixups.
 static void check_program_target_room(const CheckProgram* program, uint64_t* atoms, uint64_t* symbols, uint64_t* fixups)
@@ -693,6 +725,19 @@ static void check_program_target_room(const CheckProgram* program, uint64_t* ato
         *symbols += 2 + count;
         *fixups += group->resolved ? 1 + 6 * (uint64_t)count : 0;
     }
+}
+
+// The resolvers' unwind entries (one per group whose resolver the unit emits, check_program_target_atoms), which the
+// unwind table writes after the functions' and the helpers'.
+static uint32_t check_program_target_frames(const CheckProgram* program)
+{
+    uint32_t frames = 0;
+    for (uint32_t g = 0; g < program->target_group_count; g += 1)
+    {
+        const CheckProgramTargetGroup* group = program->target_groups + g;
+        frames += group->resolved && program->object_symbols[group->reference] != 0;
+    }
+    return frames;
 }
 
 // The symbol of the version of `option` in group `group`: its own (target's version with a body, CheckProgram.
@@ -798,10 +843,11 @@ static void check_program_target_word(uint8_t* text, uint32_t* length, uint32_t 
 //
 // An option of no condition is taken unconditionally (clang's default, which sorts last), and none after it is reached.
 // Returns false with `code`'s status and reason set.
-static bool check_program_target_atoms(CheckProgramCode* code, const CheckProgram* program, Arena* bytes)
+static bool check_program_target_atoms(CheckProgramCode* code, const CheckProgram* program, UnwindFunction* frames, SymbolId* frame_symbols, Arena* bytes)
 {
     Link* link = &code->link;
     bool valid = true;
+    uint32_t frame_count = 0;
     for (uint32_t g = 0; valid && g < program->target_group_count; g += 1)
     {
         const CheckProgramTargetGroup* group = program->target_groups + g;
@@ -862,6 +908,11 @@ static bool check_program_target_atoms(CheckProgramCode* code, const CheckProgra
         SymbolId* fixup_targets = fixup_kinds != NULL ? BUSTER_ARENA_PUSH_ARRAY(bytes, SymbolId, fixup_room) : NULL;
         int32_t* fixup_addends = fixup_targets != NULL ? BUSTER_ARENA_PUSH_ARRAY(bytes, int32_t, fixup_room) : NULL;
         valid = valid && fixup_addends != NULL;
+        // Its unwind entry's rows (clang's CFI): the CFA at rsp + 16 after the push, at rsp + 8 after each return's pop,
+        // and at rsp + 16 again where the next test (or the trap) begins.
+        EmissionFrameRow* rows = valid && frames != NULL ? BUSTER_ARENA_PUSH_ARRAY(bytes, EmissionFrameRow, 1 + 2 * (uint64_t)sorted_count) : NULL;
+        valid = valid && (frames == NULL || rows != NULL);
+        uint32_t row_count = 0;
         uint32_t fixups = 0;
         uint32_t length = 0;
         if (valid)
@@ -873,6 +924,10 @@ static bool check_program_target_atoms(CheckProgramCode* code, const CheckProgra
             fixup_targets[fixups] = indicator;
             fixup_addends[fixups] = -4;
             fixups += 1;
+            if (rows != NULL)
+            {
+                rows[row_count++] = (EmissionFrameRow){ .offset = 1, .kind = EMISSION_FRAME_CFA_OFFSET, .value = 16 };
+            }
         }
         bool taken = false;
         for (uint32_t o = 0; valid && !taken && o < sorted_count; o += 1)
@@ -880,6 +935,10 @@ static bool check_program_target_atoms(CheckProgramCode* code, const CheckProgra
             const CheckProgramTargetOption* option = sorted + o;
             uint32_t branches[5];
             uint32_t branch_count = 0;
+            if (rows != NULL && o != 0)
+            {
+                rows[row_count++] = (EmissionFrameRow){ .offset = length, .kind = EMISSION_FRAME_CFA_OFFSET, .value = 16 };
+            }
             if (option->cpu_is)
             {
                 // cmp dword [rip + __cpu_model + 4 * field], value; jne next.
@@ -909,6 +968,10 @@ static bool check_program_target_atoms(CheckProgramCode* code, const CheckProgra
             fixup_targets[fixups] = option->symbol;
             fixup_addends[fixups] = -4;
             fixups += 1;
+            if (rows != NULL)
+            {
+                rows[row_count++] = (EmissionFrameRow){ .offset = length - 1, .kind = EMISSION_FRAME_CFA_OFFSET, .value = 8 };
+            }
             for (uint32_t b = 0; b < branch_count; b += 1)
             {
                 check_program_cpu_u32(text, branches[b], length - (branches[b] + 4));
@@ -917,6 +980,10 @@ static bool check_program_target_atoms(CheckProgramCode* code, const CheckProgra
         }
         if (valid && !taken)
         {
+            if (rows != NULL && sorted_count != 0)
+            {
+                rows[row_count++] = (EmissionFrameRow){ .offset = length, .kind = EMISSION_FRAME_CFA_OFFSET, .value = 16 };
+            }
             static const uint8_t trap[] = { 0x0f, 0x0b };
             check_program_cpu_bytes(text, &length, trap, sizeof(trap));
         }
@@ -931,6 +998,12 @@ static bool check_program_target_atoms(CheckProgramCode* code, const CheckProgra
         for (uint32_t d = 0; valid && d < 3; d += 1)
         {
             valid = defined[d] == 0 ? d == 2 && group->clones == 0 : link_define_symbol(link, defined[d], atom, 0, length);
+        }
+        if (valid && frames != NULL)
+        {
+            frames[frame_count] = (UnwindFunction){ .size = length, .open = BUSTER_UNWIND_ROWS, .rows = rows, .row_count = row_count };
+            frame_symbols[frame_count] = resolver;
+            frame_count += 1;
         }
     }
     if (!valid)

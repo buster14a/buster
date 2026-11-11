@@ -156,15 +156,22 @@ enum
     // `#pragma pack(show)`'s value, and a pop with both a name and an alignment (#1849, clang's ActOnPragmaPack): warnings
     // of no option.
     CHECK_WARNING_ID_PRAGMA_PACK_NOTICE = 124,
+    // A C-style cast from a pointer to a narrower integer type (#1943, clang's CheckCStyleCast), on by default:
+    // -Wpointer-to-int-cast's, with -Wvoid-pointer-to-int-cast's from a pointer to void under it, and to an enumeration
+    // -Wpointer-to-enum-cast's, with -Wvoid-pointer-to-enum-cast's under it.
+    CHECK_WARNING_ID_POINTER_TO_INT_CAST = 125,
+    CHECK_WARNING_ID_VOID_POINTER_TO_INT_CAST = 126,
+    CHECK_WARNING_ID_POINTER_TO_ENUM_CAST = 127,
+    CHECK_WARNING_ID_VOID_POINTER_TO_ENUM_CAST = 128,
     // A const object, or a struct with a const member, without an initializer (#2168, clang's -Wdefault-const-init-*): its
     // automatic storage's, default on, and its static storage's, off by default.
-    CHECK_WARNING_ID_DEFAULT_CONST_INIT_VAR_UNSAFE = 125,
-    CHECK_WARNING_ID_DEFAULT_CONST_INIT_FIELD_UNSAFE = 126,
-    CHECK_WARNING_ID_DEFAULT_CONST_INIT_VAR = 127,
+    CHECK_WARNING_ID_DEFAULT_CONST_INIT_VAR_UNSAFE = 129,
+    CHECK_WARNING_ID_DEFAULT_CONST_INIT_FIELD_UNSAFE = 130,
+    CHECK_WARNING_ID_DEFAULT_CONST_INIT_VAR = 131,
     // -Wc++-compat's own policy, which no event gives: clang's fake diagnostic in that group
     // (warn_cxx_compat_hack_fake_diagnostic_do_not_emit), whose policy makes the unsafe default-const-init words say "and
     // is incompatible with C++" (#2168).
-    CHECK_WARNING_ID_CXX_COMPAT = 128,
+    CHECK_WARNING_ID_CXX_COMPAT = 132,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -451,6 +458,10 @@ typedef enum CheckWarningEventKind
     // at it: "'X' attribute argument not supported: 'Y'", Y the token's identifier or keyword as written (payload.token),
     // or "(null)" for another token, as clang streams the token's IdentifierInfo.
     CHECK_WARNING_EVENT_ARGUMENT_UNSUPPORTED_TOKEN,
+    // A cast from a pointer to a narrower integer type (#1943, check_warning_graph_pointer_cast), at the cast's `(`: "cast
+    // to smaller integer type T from P", payload.first_type the operand's type after decay and payload.name its typedef's
+    // spelling, payload.second_type the cast's type and payload.data its.
+    CHECK_WARNING_EVENT_POINTER_TO_INT_CAST,
     // A default-initialized const object (#2168): payload.first_type its type, payload.data its typedef or typeof
     // specifier's spelling (check_input_specifier_spelling); its ID chooses the words.
     CHECK_WARNING_EVENT_DEFAULT_CONST_INIT,
