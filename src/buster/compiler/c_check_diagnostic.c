@@ -165,6 +165,13 @@ static const CheckWarningDescription check_warning_descriptions[] =
     [CHECK_WARNING_ID_UNDERLYING_CV_QUALIFIER] = { "-Wunderlying-cv-qualifier-ignored", NULL, "qualifier in enumeration underlying type ignored" },
     [CHECK_WARNING_ID_PRAGMA_PACK] = { "-Wpragma-pack", "-Wpragmas", "unterminated '#pragma pack (push, ...)' at end of file" },
     [CHECK_WARNING_ID_PRAGMA_PACK_NOTICE] = { NULL, NULL, "value of #pragma pack(show)" },
+    [CHECK_WARNING_ID_DEFAULT_CONST_INIT_VAR_UNSAFE] = { "-Wdefault-const-init-var-unsafe", "-Wdefault-const-init-unsafe",
+                                                         "default initialization of an object of const type leaves the object uninitialized" },
+    [CHECK_WARNING_ID_DEFAULT_CONST_INIT_FIELD_UNSAFE] = { "-Wdefault-const-init-field-unsafe", "-Wdefault-const-init-unsafe",
+                                                           "default initialization of an object with const member leaves the object uninitialized" },
+    [CHECK_WARNING_ID_DEFAULT_CONST_INIT_VAR] = { "-Wdefault-const-init-var", "-Wdefault-const-init",
+                                                  "default initialization of an object of const type is incompatible with C++" },
+    [CHECK_WARNING_ID_CXX_COMPAT] = { "-Wc++-compat", NULL, "-Wc++-compat is on" },
 };
 
 _Static_assert(BUSTER_ARRAY_LENGTH(check_warning_descriptions) == CHECK_WARNING_ID_COUNT, "every sparse policy ID has a description");

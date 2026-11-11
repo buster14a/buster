@@ -46,6 +46,11 @@ static bool check_warning_option(uint32_t id, String8 option)
     {
         matches |= check_diagnostic_option(option, "-Wall");
     }
+    // -Wdefault-const-init holds -Wdefault-const-init-unsafe's two and -Wdefault-const-init-var, and -Wc++-compat holds it
+    // (#2168).
+    const bool default_const = id == CHECK_WARNING_ID_DEFAULT_CONST_INIT_VAR_UNSAFE || id == CHECK_WARNING_ID_DEFAULT_CONST_INIT_FIELD_UNSAFE ||
+                               id == CHECK_WARNING_ID_DEFAULT_CONST_INIT_VAR;
+    matches |= default_const && (check_diagnostic_option(option, "-Wdefault-const-init") || check_diagnostic_option(option, "-Wc++-compat"));
     const bool wall = id == CHECK_WARNING_ID_UNUSED_VARIABLE || id == CHECK_WARNING_ID_UNUSED_CONST_VARIABLE ||
                       id == CHECK_WARNING_ID_UNUSED_FUNCTION ||
                       id == CHECK_WARNING_ID_UNINITIALIZED || id == CHECK_WARNING_ID_SWITCH || id == CHECK_WARNING_ID_DANGLING_ELSE ||

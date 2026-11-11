@@ -5643,7 +5643,26 @@ the completion, so they follow Clang's after-function order; a redeclaration
 inherits an earlier `unused` or `used` attribute. A file-scope variable's
 unused warning is given only in the main file, as Clang leaves a header's
 file-scope variables alone because every unit that includes the header shares
-them. A block's declaration with linkage (an `extern` object, any function
+them. `check_input_default_const` (#2168, clang's `ActOnUninitializedDecl`) adds a
+const object without an initializer, at its name, with its type as declared.
+- **Automatic storage:**
+  - `-Wdefault-const-init-var-unsafe` where its type is const-qualified (an
+    array's elements', an `_Atomic`'s, a variable array's too);
+  - `-Wdefault-const-init-field-unsafe` where it is a struct whose first
+    const member, found depth first through its structs and unions
+    (`getConstField`), isn't an array of const elements nor a flexible array
+    member. Its note, "member 'm' declared 'const' here", is at that member's
+    declarator (`check_input_member_declarator`);
+  - both, for a const struct;
+  - none, for a union or an array of structs.
+- **Static storage:** `-Wdefault-const-init-var` alone, off by default (in
+  `-Wdefault-const-init` and `-Wc++-compat`). A tentative definition's comes
+  at the unit's end, after the undefined internal functions' warnings
+  (`CHECK_WARNING_UNIT_END_TENTATIVE`).
+- **The C++ words.** The unsafe ones say "and is incompatible with C++" where
+  `-Wc++-compat` is on there, as clang selects them by that group's fake
+  diagnostic: `CHECK_WARNING_ID_CXX_COMPAT`, a policy no event gives.
+A block's declaration with linkage (an `extern` object, any function
 declaration) is never unused: clang's semantic context for it is the
 translation unit, not the function, so `ShouldDiagnoseUnusedDecl` passes it
 by. A use through it uses the outer declaration with linkage it redeclares,

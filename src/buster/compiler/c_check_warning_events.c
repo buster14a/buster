@@ -156,6 +156,15 @@ enum
     // `#pragma pack(show)`'s value, and a pop with both a name and an alignment (#1849, clang's ActOnPragmaPack): warnings
     // of no option.
     CHECK_WARNING_ID_PRAGMA_PACK_NOTICE = 124,
+    // A const object, or a struct with a const member, without an initializer (#2168, clang's -Wdefault-const-init-*): its
+    // automatic storage's, default on, and its static storage's, off by default.
+    CHECK_WARNING_ID_DEFAULT_CONST_INIT_VAR_UNSAFE = 125,
+    CHECK_WARNING_ID_DEFAULT_CONST_INIT_FIELD_UNSAFE = 126,
+    CHECK_WARNING_ID_DEFAULT_CONST_INIT_VAR = 127,
+    // -Wc++-compat's own policy, which no event gives: clang's fake diagnostic in that group
+    // (warn_cxx_compat_hack_fake_diagnostic_do_not_emit), whose policy makes the unsafe default-const-init words say "and
+    // is incompatible with C++" (#2168).
+    CHECK_WARNING_ID_CXX_COMPAT = 128,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -442,6 +451,9 @@ typedef enum CheckWarningEventKind
     // at it: "'X' attribute argument not supported: 'Y'", Y the token's identifier or keyword as written (payload.token),
     // or "(null)" for another token, as clang streams the token's IdentifierInfo.
     CHECK_WARNING_EVENT_ARGUMENT_UNSUPPORTED_TOKEN,
+    // A default-initialized const object (#2168): payload.first_type its type, payload.data its typedef or typeof
+    // specifier's spelling (check_input_specifier_spelling); its ID chooses the words.
+    CHECK_WARNING_EVENT_DEFAULT_CONST_INIT,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
 
@@ -482,6 +494,8 @@ typedef enum CheckWarningNoteKind
     CHECK_WARNING_NOTE_DIAGNOSE_IF,
     // "attribute 'packed' here" (#1447, CHECK_WARNING_EVENT_ODR_ATTRIBUTE's), payload.name the attribute's name.
     CHECK_WARNING_NOTE_ATTRIBUTE_HERE,
+    // "member 'm' declared 'const' here" (#2168), payload.name the member's name.
+    CHECK_WARNING_NOTE_CONST_MEMBER,
     CHECK_WARNING_NOTE_KIND_COUNT,
 } CheckWarningNoteKind;
 
@@ -498,7 +512,8 @@ typedef enum CheckWarningCompletion
 
 // The order of the warnings completed at the translation unit's end, as their `suborder` (#2141): clang's
 // Sema::ActOnEndOfTranslationUnit diagnoses unterminated pack pushes, then #pragma weak's undeclared identifiers, then
-// internal functions used but not defined, and the unused file-scope declarations last. Those keep suborder 0, which
+// internal functions used but not defined, then tentative definitions' const objects, and the unused file-scope
+// declarations last. Those keep suborder 0, which
 // orders after every nonzero one at the same boundary.
 typedef enum CheckWarningUnitEnd
 {
@@ -506,6 +521,8 @@ typedef enum CheckWarningUnitEnd
     CHECK_WARNING_UNIT_END_PACK,
     CHECK_WARNING_UNIT_END_WEAK,
     CHECK_WARNING_UNIT_END_UNDEFINED,
+    // A tentative definition's default-initialized const object (#2168, -Wdefault-const-init-var).
+    CHECK_WARNING_UNIT_END_TENTATIVE,
 } CheckWarningUnitEnd;
 
 // Per-event source policy is independent of the ID: GNU array-bound folds warn by default, whereas an accepted
