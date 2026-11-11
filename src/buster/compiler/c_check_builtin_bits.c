@@ -244,6 +244,228 @@ static bool check_builtin_bits_fold(CBuiltinId id, unsigned __int128 bits, uint3
     return defined;
 }
 
+// --- Operands past 128 bits (#1447): their constants' limbs (c_check_wide.c). ---
+
+// The set bits of `count` limbs: 8 a zmm (vpopcntq), with its scalar twin.
+static __attribute__((unused)) uint32_t check_builtin_bits_popcount_scalar(const uint64_t* limbs, uint32_t count)
+{
+    uint32_t total = 0;
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        total += (uint32_t)__builtin_popcountll(limbs[i]);
+    }
+    return total;
+}
+
+static uint32_t check_builtin_bits_popcount_vector(const uint64_t* limbs, uint32_t count)
+{
+#if BUSTER_HOST_VECTOR
+    __m512i sums = _mm512_setzero_si512();
+    for (uint32_t i = 0; i < count; i += BUSTER_CHECK_WIDE_VECTOR_LIMBS)
+    {
+        const uint32_t left = count - i;
+        const __mmask8 mask = left >= BUSTER_CHECK_WIDE_VECTOR_LIMBS ? (__mmask8)0xff : (__mmask8)((1u << left) - 1);
+        sums = _mm512_add_epi64(sums, _mm512_popcnt_epi64(_mm512_maskz_loadu_epi64(mask, limbs + i)));
+    }
+    const uint32_t total = (uint32_t)_mm512_reduce_add_epi64(sums);
+#else
+    const uint32_t total = check_builtin_bits_popcount_scalar(limbs, count);
+#endif
+    return total;
+}
+
+// The trailing zeros of `count` limbs, `width` for none set.
+static uint32_t check_builtin_bits_trailing_limbs(const uint64_t* limbs, uint32_t count, uint32_t width)
+{
+    uint32_t result = width;
+    for (uint32_t i = 0; result == width && i < count; i += 1)
+    {
+        result = limbs[i] != 0 ? i * 64u + (uint32_t)__builtin_ctzll(limbs[i]) : width;
+    }
+    return result;
+}
+
+// `count` limbs masked to `width` bits, complemented.
+static void check_builtin_bits_invert_limbs(uint64_t* destination, const uint64_t* limbs, uint32_t count, uint32_t width)
+{
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        destination[i] = ~limbs[i];
+    }
+    destination[count - 1] &= check_wide_top_mask(width);
+}
+
+// A count of any width modulo `width`, a negative one's mathematical remainder, as check_builtin_bits_amount's: by the
+// limbs' residues, 2^64 mod width a limb at a time from the top.
+static bool check_builtin_bits_wide_amount(const TypeTable* table, const CheckValue* count, uint32_t width, uint32_t* amount)
+{
+    uint32_t count_width = 0;
+    bool count_signed = false;
+    bool valid = count->constant_kind == CHECK_CONSTANT_INTEGER && count->fault == CHECK_FAULT_NONE;
+    if (valid && check_action_integer_type(table, count->type, &count_width, &count_signed))
+    {
+        *amount = check_builtin_bits_amount((unsigned __int128)count->integer & check_action_mask(count_width), count_width, count_signed, width);
+    }
+    else if (valid && check_wide_type(table, count->type, &count_width, &count_signed))
+    {
+        const uint32_t limbs = check_wide_count(count_width);
+        uint64_t* magnitude = check_wide_allocate(limbs);
+        valid = magnitude != NULL && check_wide_operand(table, count, magnitude, limbs);
+        if (valid)
+        {
+            magnitude[limbs - 1] &= check_wide_top_mask(count_width);
+            const bool negative = check_wide_negative(magnitude, count_width, count_signed);
+            if (negative)
+            {
+                check_wide_negate_in_place(magnitude, limbs, count_width);
+            }
+            unsigned __int128 remainder = 0;
+            for (uint32_t i = limbs; i != 0; i -= 1)
+            {
+                remainder = ((remainder << 64) | magnitude[i - 1]) % width;
+            }
+            *amount = negative && remainder != 0 ? width - (uint32_t)remainder : (uint32_t)remainder;
+        }
+    }
+    else
+    {
+        valid = false;
+    }
+    return valid;
+}
+
+// check_builtin_bits_fold where the first operand is past 128 bits (`width`): its constant `first`, the second argument's
+// value `second` (clzg's and ctzg's for zero) or a rotation's `amount`, into `value` of type `result`, a wide one's limbs
+// or a narrow one's integer. False where clang's evaluator finds it undefined or a constant has no limbs. One constant
+// a call: the set bits take vpopcntq (with a scalar twin, test-checker's check_test_wide); the rest are a pass over the
+// limbs, as the shifts' kernels.
+static __attribute__((noinline, cold)) bool check_builtin_bits_fold_wide(const TypeTable* table, CBuiltinId id, const CheckValue* first, uint32_t width,
+                                                                         bool has_second, unsigned __int128 second, uint32_t amount, TypeId result,
+                                                                         CheckValue* value)
+{
+    const uint32_t count = check_wide_count(width);
+    uint64_t* bits = check_wide_allocate(count);
+    uint64_t* other = bits != NULL ? check_wide_allocate(count) : NULL;
+    uint64_t* answer = other != NULL ? check_wide_allocate(count) : NULL;
+    bool defined = answer != NULL && check_wide_operand(table, first, bits, count);
+    const CheckWideKernels kernels = { .scalar = false };
+    unsigned __int128 narrow = 0;
+    bool wide_result = false;
+    if (defined)
+    {
+        bits[count - 1] &= check_wide_top_mask(width);
+        check_builtin_bits_invert_limbs(other, bits, count, width);
+        const bool zero = check_wide_is_zero(bits, count);
+        const uint32_t leading = width - check_wide_bits(bits, count);
+        const uint32_t trailing = check_builtin_bits_trailing_limbs(bits, count, width);
+        const uint32_t inverse_leading = width - check_wide_bits(other, count);
+        const uint32_t inverse_trailing = check_builtin_bits_trailing_limbs(other, count, width);
+        const bool inverse_zero = check_wide_is_zero(other, count);
+        const uint32_t ones = check_builtin_bits_popcount_vector(bits, count);
+        switch (id)
+        {
+            case CBUILTIN_BITREVERSEG:
+            {
+                // The limbs in the other order, each reversed, then down by the bits past the width.
+                for (uint32_t i = 0; i < count; i += 1)
+                {
+                    other[i] = __builtin_bitreverse64(bits[count - 1 - i]);
+                }
+                check_wide_shift(kernels, false, answer, other, count, count * 64u - width);
+                wide_result = true;
+            } break;
+            case CBUILTIN_BSWAPG:
+            {
+                // Its width / 8 bytes in the other order (a multiple of 16 bits past 128).
+                const uint8_t* from = (const uint8_t*)bits;
+                uint8_t* to = (uint8_t*)answer;
+                for (uint32_t i = 0; i < count * 8u; i += 1)
+                {
+                    to[i] = i < width / 8 ? from[width / 8 - 1 - i] : 0;
+                }
+                wide_result = true;
+            } break;
+            case CBUILTIN_CLZG:
+            {
+                defined = !zero || has_second;
+                narrow = zero ? second : leading;
+            } break;
+            case CBUILTIN_CTZG:
+            {
+                defined = !zero || has_second;
+                narrow = zero ? second : trailing;
+            } break;
+            case CBUILTIN_POPCOUNTG:
+            case CBUILTIN_STDC_COUNT_ONES: narrow = ones; break;
+            case CBUILTIN_STDC_COUNT_ZEROS: narrow = width - ones; break;
+            case CBUILTIN_STDC_LEADING_ZEROS: narrow = leading; break;
+            case CBUILTIN_STDC_LEADING_ONES: narrow = inverse_leading; break;
+            case CBUILTIN_STDC_TRAILING_ZEROS: narrow = trailing; break;
+            case CBUILTIN_STDC_TRAILING_ONES: narrow = inverse_trailing; break;
+            case CBUILTIN_STDC_FIRST_LEADING_ZERO: narrow = !inverse_zero ? inverse_leading + 1 : 0; break;
+            case CBUILTIN_STDC_FIRST_LEADING_ONE: narrow = !zero ? leading + 1 : 0; break;
+            case CBUILTIN_STDC_FIRST_TRAILING_ZERO: narrow = !inverse_zero ? inverse_trailing + 1 : 0; break;
+            case CBUILTIN_STDC_FIRST_TRAILING_ONE: narrow = !zero ? trailing + 1 : 0; break;
+            case CBUILTIN_STDC_HAS_SINGLE_BIT: narrow = ones == 1; break;
+            case CBUILTIN_STDC_BIT_WIDTH: narrow = width - leading; break;
+            case CBUILTIN_STDC_BIT_FLOOR:
+            case CBUILTIN_STDC_BIT_CEIL:
+            {
+                // The power of two at or below the value, or (clang's wrap) the least at or above it, 0 where it doesn't fit.
+                uint32_t place = UINT32_MAX;
+                if (id == CBUILTIN_STDC_BIT_FLOOR)
+                {
+                    place = !zero ? width - 1 - leading : UINT32_MAX;
+                }
+                else
+                {
+                    const bool small = check_wide_bits(bits, count) <= 1;
+                    // value - 1's significant bits: its own, but one fewer for a power of two.
+                    const uint32_t below = ones == 1 ? check_wide_bits(bits, count) - 1 : check_wide_bits(bits, count);
+                    place = small ? 0 : below < width ? below : UINT32_MAX;
+                }
+                for (uint32_t i = 0; i < count; i += 1)
+                {
+                    answer[i] = place != UINT32_MAX && i == place / 64u ? UINT64_C(1) << (place % 64u) : 0;
+                }
+                wide_result = true;
+            } break;
+            case CBUILTIN_STDC_ROTATE_LEFT:
+            case CBUILTIN_STDC_ROTATE_RIGHT:
+            {
+                const uint32_t left = id == CBUILTIN_STDC_ROTATE_LEFT || amount == 0 ? amount : width - amount;
+                check_wide_shift(kernels, true, answer, bits, count, left);
+                answer[count - 1] &= check_wide_top_mask(width);
+                if (left != 0)
+                {
+                    check_wide_shift(kernels, false, other, bits, count, width - left);
+                    check_wide_bitwise(kernels, CHECK_WIDE_OR, answer, answer, other, count);
+                }
+                wide_result = true;
+            } break;
+            default: defined = false; break;
+        }
+    }
+    uint32_t result_width = 0;
+    bool result_signed = false;
+    if (defined && wide_result && check_wide_type(table, result, &result_width, &result_signed) && result_width == width)
+    {
+        answer[count - 1] &= check_wide_top_mask(width);
+        check_wide_publish(value, answer);
+    }
+    else if (defined && !wide_result && check_action_integer_type(table, result, &result_width, &result_signed))
+    {
+        value->constant_kind = CHECK_CONSTANT_INTEGER;
+        value->integer = narrow & check_action_mask(result_width);
+        value->floating_storage[0] = 0;
+    }
+    else
+    {
+        defined = false;
+    }
+    return defined;
+}
+
 static void check_builtin_bits(TypeTable* table, const CheckBuiltinMiscAction* input, CheckBuiltinMiscResult* output, CheckValue* values)
 {
     // A stdc library builtin is its generic builtin's operation of its parameter's type.
@@ -312,13 +534,48 @@ static void check_builtin_bits(TypeTable* table, const CheckBuiltinMiscAction* i
     {
         check_action_inherit(value, values + i);
     }
-    // A _BitInt past 128 bits' value or count is no constant the fold reads (#1447).
-    bool constant = output->action.diagnostic == CHECK_DIAG_NONE && !carry && value->fault == CHECK_FAULT_NONE && width <= 128 && second_width <= 128;
+    bool constant = output->action.diagnostic == CHECK_DIAG_NONE && !carry && value->fault == CHECK_FAULT_NONE;
     for (uint32_t i = 0; i < input->argument_count; i += 1)
     {
         constant = constant && values[i].constant_kind == CHECK_CONSTANT_INTEGER && values[i].fault == CHECK_FAULT_NONE;
     }
-    if (constant)
+    // A rotation's count past 128 bits, or any of a value past 128 bits, modulo the width (#1447).
+    uint32_t amount = 0;
+    const bool wide = width > 128 || second_width > 128;
+    if (constant && wide && rotate)
+    {
+        constant = check_builtin_bits_wide_amount(table, values + 1, width, &amount);
+    }
+    if (constant && wide)
+    {
+        // A _BitInt past 128 bits (#1447): its limbs' fold, or, for a narrow value, the narrow one's with the count's
+        // remainder.
+        const bool second = input->argument_count == 2 && !rotate;
+        const unsigned __int128 second_bits = second ? (unsigned __int128)values[1].integer & check_action_mask(second_width) : 0;
+        unsigned __int128 folded = 0;
+        uint32_t result_width = 0;
+        bool result_signed = false;
+        const bool defined = width > 128 ? check_builtin_bits_fold_wide(table, id, values, width, second, second_bits, amount, result, value) :
+                                           check_builtin_bits_fold(id, (unsigned __int128)values[0].integer & check_action_mask(width), width, true, amount, 32, false,
+                                                                   &folded) && check_action_integer_type(table, result, &result_width, &result_signed);
+        if (defined && width <= 128)
+        {
+            value->constant_kind = CHECK_CONSTANT_INTEGER;
+            value->integer = (__int128)(folded & check_action_mask(result_width));
+        }
+        if (defined)
+        {
+            check_action_builtin_ice(value);
+        }
+        else
+        {
+            const bool unevaluated = (value->flags & BUSTER_CHECK_SIDE_EFFECT) == 0;
+            check_action_set_fault(value, CHECK_FAULT_UNSUPPORTED_CONSTANT, input->node);
+            value->flags &= ~(BUSTER_CHECK_ICE | BUSTER_CHECK_ICE_UNEVALUATED);
+            value->flags |= unevaluated ? BUSTER_CHECK_ICE_UNEVALUATED : 0;
+        }
+    }
+    else if (constant)
     {
         uint32_t result_width = 0;
         bool result_signed = false;
