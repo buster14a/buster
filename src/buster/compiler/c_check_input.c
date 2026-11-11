@@ -6106,6 +6106,11 @@ static TypeId check_input_attribute_argument_type(CheckInputReader* reader, cons
     return result;
 }
 
+// A type_tag_for_datatype whose parser took it and whose type check_input_type_tag_type hasn't read yet (#1447,
+// c_check_type_safety_input.c): a bit of its value's low half, beside its flags.
+#define BUSTER_CHECK_TYPE_TAG_PENDING 0x4u
+static void check_input_type_tag_type(CheckInputReader* reader, CheckInputAttributes* attributes, CheckInputAttribute* attribute);
+
 static bool check_input_read_attributes(CheckInputReader* reader, uint32_t* cursor, uint32_t end, CheckInputAttributes** attributes)
 {
     if (!check_input_attribute_starts(reader->parser, *cursor, end))
@@ -6117,6 +6122,12 @@ static bool check_input_read_attributes(CheckInputReader* reader, uint32_t* curs
     for (uint32_t i = 0; valid && i < parsed.count; i += 1)
     {
         CheckInputAttribute* attribute = &parsed.records[i];
+        // type_tag_for_datatype's type name, which its parser leaves to the list's reading (#1447, BUSTER_CHECK_TYPE_TAG_PENDING).
+        if (attribute->kind == CHECK_ATTRIBUTE_UNKNOWN && !attribute->keyword && ((uint64_t)attribute->value & BUSTER_CHECK_TYPE_TAG_PENDING) != 0 &&
+            attribute->argument_type == 0 && check_input_attribute_equal(check_input_attribute_name(reader, attribute->name), "type_tag_for_datatype"))
+        {
+            check_input_type_tag_type(reader, &parsed, attribute);
+        }
         const bool expressions = attribute->parse_arguments || attribute->schema == CHECK_ATTRIBUTE_INTEGER ||
                                  attribute->schema == CHECK_ATTRIBUTE_INTEGER_LIST || attribute->schema == CHECK_ATTRIBUTE_IDENTIFIER_INTEGERS;
         if (expressions && attribute->kind != CHECK_ATTRIBUTE_ALIGNAS)

@@ -165,8 +165,9 @@ static bool check_type_tags_reserve(CheckInputReader* reader, void** items, uint
 // a `,` and a type name; then each `,` and a flag, layout_compatible or must_be_null; then its `)`. Its errors are clang's
 // parser's, at the token ("expected identifier", "expected ','" past the kind, "unknown type name 'T'" or "expected a type",
 // "invalid comparison flag 'F'; use 'layout_compatible' or 'must_be_null'", "expected ')'" with its note), each of which
-// drops the attribute. The type is CheckInputAttribute.argument_type (a lone typedef name's by its binding, its
-// declaration in `value`'s high half for the type's spelling), the flags `value`'s low half.
+// drops the attribute. The flags are `value`'s low half, with BUSTER_CHECK_TYPE_TAG_PENDING: the type name is read after the
+// list, by check_input_type_tag_type, which the constant reader's own attribute lists don't reach (the no-recursion rule:
+// a type name's constants may hold declarations with attributes).
 static uint32_t check_input_type_tag_parse(CheckInputReader* reader, CheckInputAttributes* attributes, CheckInputAttribute* attribute)
 {
     const Parser* parser = reader->parser;
@@ -199,33 +200,6 @@ static uint32_t check_input_type_tag_parse(CheckInputReader* reader, CheckInputA
                                              named ? type_first - attribute->first : 0);
         result = BUSTER_CHECK_CUSTOM_ERROR;
     }
-    TypeId type = 0;
-    uint32_t spelling = 0;
-    if (result == BUSTER_CHECK_CUSTOM_KEPT)
-    {
-        // A lone typedef name, which the constant reader would take for an expression's operand, by its binding.
-        const bool lone = type_first + 1 == type_end && parser->tokens.kinds[type_first] == PARSE_KIND_IDENTIFIER;
-        const uint32_t name = parser->tokens.names[type_first];
-        const uint32_t handle = lone ? c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, name) : 0;
-        if (handle != 0 && reader->bindings.kind[handle - 1] == C_BINDING_TYPEDEF)
-        {
-            spelling = reader->bindings.declaration[handle - 1];
-            type = reader->declared_types[spelling];
-            reader->output->declarations[type_first] = spelling;
-            reader->declared_types[type_first] = type;
-            reader->output->resource |= c_bindings_use(&reader->bindings, C_BINDING_ORDINARY, name, type_first, check_input_use_point(reader, type_first)) == 0;
-        }
-        else
-        {
-            type = check_input_constant_type(reader, type_first, type_end);
-        }
-        if (type == 0)
-        {
-            // A type name the constant reader doesn't read (a tag's definition, a declarator it refuses), refused by name.
-            check_input_attribute_error(reader, attributes, attribute->name_token, attribute->end, CHECK_ATTRIBUTE_ERROR_UNKNOWN);
-            result = BUSTER_CHECK_CUSTOM_ERROR;
-        }
-    }
     uint32_t flags = 0;
     uint32_t t = type_end;
     while (result == BUSTER_CHECK_CUSTOM_KEPT && t < end && parser->tokens.kinds[t] == PARSE_KIND_COMMA)
@@ -255,9 +229,50 @@ static uint32_t check_input_type_tag_parse(CheckInputReader* reader, CheckInputA
         check_input_custom_close(reader, attributes, attribute, t, open);
         result = BUSTER_CHECK_CUSTOM_ERROR;
     }
-    attribute->argument_type = result == BUSTER_CHECK_CUSTOM_KEPT ? type : 0;
-    attribute->value = result == BUSTER_CHECK_CUSTOM_KEPT ? (int64_t)((uint64_t)spelling << 32 | flags) : 0;
+    attribute->argument_type = 0;
+    attribute->value = result == BUSTER_CHECK_CUSTOM_KEPT ? (int64_t)(flags | BUSTER_CHECK_TYPE_TAG_PENDING) : 0;
     return result;
+}
+
+// A type_tag_for_datatype's type name, once check_input_read_attributes has its list (#1447, BUSTER_CHECK_TYPE_TAG_PENDING):
+// CheckInputAttribute.argument_type (a lone typedef name's by its binding, its declaration in `value`'s high half for the
+// type's spelling), or, for a type name the constant reader doesn't read (a tag's definition, a declarator it refuses),
+// the attribute refused by name.
+static void check_input_type_tag_type(CheckInputReader* reader, CheckInputAttributes* attributes, CheckInputAttribute* attribute)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t end = attribute->argument_end;
+    const uint32_t type_first = attribute->argument_first + 2;
+    uint32_t type_end = type_first;
+    while (type_end < end && parser->tokens.kinds[type_end] != PARSE_KIND_COMMA)
+    {
+        type_end = check_input_attribute_after_group(parser, type_end, end);
+    }
+    // A lone typedef name, which the constant reader would take for an expression's operand, by its binding.
+    const bool lone = type_first + 1 == type_end && parser->tokens.kinds[type_first] == PARSE_KIND_IDENTIFIER;
+    const uint32_t name = parser->tokens.names[type_first];
+    const uint32_t handle = lone ? c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, name) : 0;
+    TypeId type = 0;
+    uint32_t spelling = 0;
+    if (handle != 0 && reader->bindings.kind[handle - 1] == C_BINDING_TYPEDEF)
+    {
+        spelling = reader->bindings.declaration[handle - 1];
+        type = reader->declared_types[spelling];
+        reader->output->declarations[type_first] = spelling;
+        reader->declared_types[type_first] = type;
+        reader->output->resource |= c_bindings_use(&reader->bindings, C_BINDING_ORDINARY, name, type_first, check_input_use_point(reader, type_first)) == 0;
+    }
+    else
+    {
+        type = check_input_constant_type(reader, type_first, type_end);
+    }
+    const uint32_t flags = (uint32_t)attribute->value & (BUSTER_CHECK_TYPE_TAG_LAYOUT | BUSTER_CHECK_TYPE_TAG_NULL);
+    if (type == 0)
+    {
+        check_input_attribute_error(reader, attributes, attribute->name_token, attribute->end, CHECK_ATTRIBUTE_ERROR_UNKNOWN);
+    }
+    attribute->argument_type = type;
+    attribute->value = type != 0 ? (int64_t)((uint64_t)spelling << 32 | flags) : 0;
 }
 
 // The type tags' handlers' checks past their subjects and counts (#1447, clang's handleArgumentWithTypeTagAttr and
