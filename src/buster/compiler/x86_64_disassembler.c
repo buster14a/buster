@@ -339,17 +339,17 @@ static void x86_decode_checks_initialize(void)
             {
                 for (uint32_t address32 = 0; address32 < 2; address32 += 1)
                 {
-                    for (uint32_t segment = 0; segment < 3; segment += 1)
+                    for (uint32_t segment = 0; segment <= BUSTER_X86_SEGMENT_SS; segment += 1)
                     {
                         const uint32_t number = row + segment * X86_FORM_COUNT;
-                        if (!x86_form_lacks_room(number, address32 ? X86_ENCODER_MODE_ADDRESS32 : X86_ENCODER_MODE_64))
+                        if (x86_form_has_segment(row, segment) && !x86_form_lacks_room(number, address32 ? X86_ENCODER_MODE_ADDRESS32 : X86_ENCODER_MODE_64))
                         {
-                            check->flags |= 1u << (2 + address32 * 3 + segment);
+                            check->flags |= 1u << (2 + address32 * 4 + segment);
                         }
                     }
                 }
             }
-            check->flags |= (form->syntax == X86_SYNTAX_RM_REG || form->syntax == X86_SYNTAX_RM_REG_IMM) ? 1u << 8 : 0;
+            check->flags |= (form->syntax == X86_SYNTAX_RM_REG || form->syntax == X86_SYNTAX_RM_REG_IMM) ? 1u << 10 : 0;
         }
     }
 }
@@ -596,10 +596,11 @@ static X86DecodeStatus x86_decode_header(const uint8_t* bytes, uint32_t size, ui
         {
             header->rex = byte;
         }
-        else if (byte == 0x64 || byte == 0x65)
+        else if (byte == 0x64 || byte == 0x65 || byte == 0x36)
         {
+            // FS's, GS's or SS's override (BUSTER_X86_SEGMENT_FS, _GS or _SS), the encoder's (x86_segment_bytes).
             status = header->segment != 0 ? X86_DECODE_UNSUPPORTED : status;
-            header->segment = byte - 0x63;
+            header->segment = byte == 0x36 ? BUSTER_X86_SEGMENT_SS : byte - 0x63;
         }
         else if (byte == 0x67)
         {
@@ -747,10 +748,10 @@ static bool x86_decode_valid(const X86Instruction* instruction, uint16_t row, ui
         const bool memory = (instruction->mode & BUSTER_X86_MODE_MEMORY) != 0;
         const uint32_t fields = instruction->reg | ((uint32_t)instruction->rm << 8) |
                                 ((uint32_t)instruction->vvvv << 16) | ((uint32_t)instruction->decorations << 24);
-        const uint32_t allowed = memory ? 1u << (2 + address32 * 3 + segment) : segment == 0 ? 2 : 0;
+        const uint32_t allowed = memory ? 1u << (2 + address32 * 4 + segment) : segment == 0 ? 2 : 0;
         const bool zeroing = (instruction->decorations & BUSTER_X86_DECORATION_ZEROING) != 0;
         valid = (check.flags & allowed) != 0 && (fields & (memory ? check.memory : check.registers)) == 0 &&
-                !(zeroing && ((instruction->decorations & BUSTER_X86_DECORATION_MASK) == 0 || (memory && (check.flags & (1u << 8)))));
+                !(zeroing && ((instruction->decorations & BUSTER_X86_DECORATION_MASK) == 0 || (memory && (check.flags & (1u << 10)))));
     }
     else
     {
@@ -764,7 +765,7 @@ static X86DecodeStatus x86_decode_candidate(const uint8_t* bytes, uint32_t size,
     const X86FormDescription* form = &x86_form_descriptions[row];
     X86Instruction instruction = {.form = (uint16_t)(row + header->segment * X86_FORM_COUNT)};
     const bool address32 = header->address32 && !x86_form_has_prefix(form, 0x67);
-    bool valid = header->address32 || !x86_form_has_prefix(form, 0x67);
+    bool valid = (header->address32 || !x86_form_has_prefix(form, 0x67)) && x86_form_has_segment(row, header->segment);
     // REX.B turns opcode 90 into XCHG with R8D: the one-byte NOP alias must not swallow that register.
     valid = valid && (row != X86_FORM_NOP || header->b == 0);
     bool complete = true;
@@ -1334,7 +1335,7 @@ static void x86_disassembly_memory(X86DisassemblyText* text, const X86Decoded* d
     const uint32_t segment = x86_form_segment(instruction->form);
     if (segment != 0)
     {
-        x86_disassembly_append(text, segment == 1 ? "fs:" : "gs:");
+        x86_disassembly_append(text, segment == BUSTER_X86_SEGMENT_FS ? "fs:" : segment == BUSTER_X86_SEGMENT_GS ? "gs:" : "ss:");
     }
     const bool hidden_index = (form->rm & BUSTER_X86_OPERAND_SIB) && instruction->index == 4;
     const bool absolute = !(instruction->mode & (BUSTER_X86_MODE_BASE | BUSTER_X86_MODE_RIP)) && (!(instruction->mode & BUSTER_X86_MODE_INDEX) || hidden_index);

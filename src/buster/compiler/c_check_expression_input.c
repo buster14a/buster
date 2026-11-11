@@ -1152,7 +1152,8 @@ static bool check_input_expression_member(CheckInputReader* reader, CheckInputBa
         if (node != BUSTER_CHECK_NONE)
         {
             batch->members[node - batch->base] = parser->tokens.names[token + 1];
-            if (!arrow)
+            // `p->y` names an extended vector's lane only through a pointer to one, which only a unit with one has.
+            if (!arrow || __builtin_expect(reader->types->ext_vectors, 0))
             {
                 check_input_vector_member(reader, node, token + 1);
             }
