@@ -81,6 +81,16 @@ static void check_test_driver_label_attributes(CheckTest* test, const char* clan
         { "nomerge before a call", "int g(int (*p)(void)) {\n__attribute__((nomerge)) p();\nreturn 0;\n}\n" },
         { "suppress before an expression", "int g(int x) {\n__attribute__((suppress(\"x\"))) x++;\nreturn x;\n}\n" },
         { "suppress without strings", "int g(int x) {\n__attribute__((suppress)) x++;\nreturn x;\n}\n" },
+        // A suppress whose argument is no string literal, which clang's parser drops (#1844): with no GNU attribute left, the
+        // statement is a declaration, whose first token is clang's parser's second error; one left keeps it a statement.
+        { "malformed suppress before an expression", "int g(int x) {\n__attribute__((suppress(1))) x++;\nreturn x;\n}\n" },
+        { "malformed __suppress__ before a call", "int f(int);\nint g(int x) {\n__attribute__((__suppress__(x))) f(x);\nreturn x;\n}\n" },
+        { "two malformed suppresses before an increment", "int g(int x) {\n__attribute__((suppress(1), suppress(2))) ++x;\nreturn x;\n}\n" },
+        { "malformed suppresses in two lists before a constant", "int g(int x) {\n__attribute__((suppress(1))) __attribute__((suppress(\"a\", 2))) 3;\nreturn x;\n}\n" },
+        { "malformed suppress beside a kept one", "typedef int T;\nint g(int x) {\n__attribute__((suppress(\"a\"), suppress(1))) x++;\n"
+                                                  "__attribute__((suppress(1))) __attribute__((suppress)) x++;\n__attribute__((suppress(((\"a\"))))) x++;\n"
+                                                  "__attribute__((suppress(1))) T y = x;\n__attribute__((suppress(1))) return y;\n}\n" },
+        { "malformed suppress after a control head", "int g(int x) {\nif (x) __attribute__((suppress(1))) x++;\nreturn x;\n}\n" },
         { "nomerge and suppress before an if", "int g(int x) {\n__attribute__((nomerge, suppress(\"a\", \"b\"))) if (x) x++;\nreturn x;\n}\n" },
         { "clang::nomerge before a return", "int g(int (*p)(void)) {\n[[clang::nomerge]] return p();\n}\n" },
         { "fallthrough in a switch, beside noinline", "int f(int);\nint g(int x) {\nswitch (x) {\ncase 0:\nx = f(x);\n__attribute__((noinline, fallthrough));\n"
