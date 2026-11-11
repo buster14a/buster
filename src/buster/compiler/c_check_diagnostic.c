@@ -165,6 +165,10 @@ static const CheckWarningDescription check_warning_descriptions[] =
     [CHECK_WARNING_ID_UNDERLYING_CV_QUALIFIER] = { "-Wunderlying-cv-qualifier-ignored", NULL, "qualifier in enumeration underlying type ignored" },
     [CHECK_WARNING_ID_PRAGMA_PACK] = { "-Wpragma-pack", "-Wpragmas", "unterminated '#pragma pack (push, ...)' at end of file" },
     [CHECK_WARNING_ID_PRAGMA_PACK_NOTICE] = { NULL, NULL, "value of #pragma pack(show)" },
+    [CHECK_WARNING_ID_POINTER_TO_INT_CAST] = { "-Wpointer-to-int-cast", NULL, "cast to smaller integer type" },
+    [CHECK_WARNING_ID_VOID_POINTER_TO_INT_CAST] = { "-Wvoid-pointer-to-int-cast", "-Wpointer-to-int-cast", "cast to smaller integer type" },
+    [CHECK_WARNING_ID_POINTER_TO_ENUM_CAST] = { "-Wpointer-to-enum-cast", NULL, "cast to smaller integer type" },
+    [CHECK_WARNING_ID_VOID_POINTER_TO_ENUM_CAST] = { "-Wvoid-pointer-to-enum-cast", "-Wpointer-to-enum-cast", "cast to smaller integer type" },
     // (#1953: its ID assigned past the ones #2142 takes (125 to 128), which its rows fill.)
     [CHECK_WARNING_ID_UNSEQUENCED] = { "-Wunsequenced", "-Wsequence-point", "multiple unsequenced modifications" },
 };

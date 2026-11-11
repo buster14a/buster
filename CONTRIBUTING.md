@@ -263,12 +263,13 @@ authorized session's own new commits, the session fixes its submission; other
 gaps are review items. The tool never changes history, adds trailers or posts
 anything.
 
-The pull request workflow's `DCO sign-off audit` job publishes the head-pinned
-report in its summary. It is informational: missing trailers don't fail it,
-and no required check depends on it. The isolated fixtures for the hooks and
-the tool (`sh .githooks/test-sign-off.sh`, which builds the tool with `cc`)
-run in the required `DCO hook regression` job; they exercise only disposable
-repositories and change no branch protection.
+The pull request workflow's `Measurement storage policy` job, which holds the
+repository's policy checks, publishes the head-pinned audit report in its
+summary. The audit is informational: its step can't fail the job, and no
+required check depends on it. The isolated fixtures for the hooks and the tool
+(`sh .githooks/test-sign-off.sh`, which builds the tool with `cc`) run in the
+same required job; they exercise only disposable repositories and change no
+branch protection.
 
 ## Imports and generated material
 
