@@ -718,6 +718,8 @@ struct CheckLowerWriter
     CBuiltinFloatLowerCall* floating;
     CheckLowerAtomic* atomics;
     uint32_t atomic_count;
+    // The plans' room: the shared capacity's (CheckLowerShared.atomic_capacity) plus one.
+    uint32_t atomic_room;
     uint32_t count;
     uint32_t depth;
     uint32_t capacity;
@@ -6929,8 +6931,17 @@ static void check_lower_helper(CheckLowerWriter* writer, uint32_t node)
     const uint32_t parameters = count + compare + init;
     // clang's code computes the IEEE maximum and minimum by AVX10.2's vminmax in a function whose target has it, whose NaN
     // results aren't the expansion's that the leaves compute (cbuiltin_atomic_rmw_ieee_body).
-    const bool minmax = source_id >= CBUILTIN_ATOMIC_FETCH_FMAXIMUM && source_id <= CBUILTIN_ATOMIC_FETCH_FMINIMUM_NUM &&
-                        (writer->target.extensions & BUSTER_X86_EXTENSION(AVX10_2)) != 0;
+    const bool ieee = source_id >= CBUILTIN_ATOMIC_FETCH_FMAXIMUM && source_id <= CBUILTIN_ATOMIC_FETCH_FMINIMUM_NUM;
+    const bool minmax = ieee && (writer->target.extensions & BUSTER_X86_EXTENSION(AVX10_2)) != 0;
+    // A _Float16's and a __bf16's leaf follows the unit's target (check_program_helper_half_format): a function whose own
+    // target differs in what decides it is refused.
+    const uint64_t half_extensions = BUSTER_X86_EXTENSION(AVX512FP16) | BUSTER_X86_EXTENSION(AVXNECONVERT);
+    const bool half_target = ieee && selected != BUSTER_CHECK_NONE && helpers->uses[selected].helper < helpers->count &&
+                             helpers->items[helpers->uses[selected].helper].rmw_format >= CBUILTIN_ATOMIC_RMW_F16_BITS &&
+                             ((writer->target.extensions ^ program->target.extensions) & half_extensions) != 0;
+    const bool half_feature = ieee && selected != BUSTER_CHECK_NONE && helpers->uses[selected].helper < helpers->count &&
+                              helpers->items[helpers->uses[selected].helper].rmw_format >= CBUILTIN_ATOMIC_RMW_F16_BITS &&
+                              ((writer->target.features ^ program->target.features) & BUSTER_X86_FEATURE(AVX512BF16)) != 0;
     CheckLowerAbi* abi = writer->abi;
     if (selected == BUSTER_CHECK_NONE || helpers->uses[selected].helper >= helpers->count)
     {
@@ -6939,6 +6950,11 @@ static void check_lower_helper(CheckLowerWriter* writer, uint32_t node)
     else if (minmax)
     {
         check_lower_unsupported(writer, "clang's atomic IEEE maximum and minimum for a target with AVX10.2");
+    }
+    else if (half_target || half_feature)
+    {
+        check_lower_unsupported(writer, "clang's atomic IEEE maximum and minimum of a _Float16 or a __bf16 in a function whose target's AVX512-FP16, "
+                                        "AVX512-BF16 or AVX-NE-CONVERT differs from its unit's");
     }
     else if (abi->count >= abi->capacity || parameters > abi->argument_capacity - abi->argument_count)
     {
@@ -6987,6 +7003,11 @@ static void check_lower_helper(CheckLowerWriter* writer, uint32_t node)
             {
                 check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_TERMINATE });
             }
+            else if (helper->result_type == BUSTER_TYPE_ULONG && check_lower_class_half(result_class) != CHECK_HALF_NONE)
+            {
+                // A half-precision value is its bits, a U16's (check_lower_storage_class), the leaf's result's low 16.
+                check_lower_convert(writer, BUSTER_TYPE_ULONG, BUSTER_TYPE_USHORT);
+            }
             else if (helper->result_type == BUSTER_TYPE_ULONG && (result_class == BUSTER_TYPED_CLASS_F32 || result_class == BUSTER_TYPED_CLASS_F64))
             {
                 const uint32_t result = check_lower_addressed_temporary(writer, BUSTER_TYPED_CLASS_U64);
@@ -7023,6 +7044,11 @@ static void check_lower_helper(CheckLowerWriter* writer, uint32_t node)
                     check_lower_instruction(writer, BUSTER_TYPED_LOAD, class == BUSTER_TYPED_CLASS_F32 ? BUSTER_TYPED_CLASS_U32 : BUSTER_TYPED_CLASS_U64, 0);
                     check_lower_instruction(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, local);
                     check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, class, local);
+                }
+                else if (helper->parameter_types[a] == BUSTER_TYPE_ULONG && check_lower_class_half(class) != CHECK_HALF_NONE)
+                {
+                    // A half-precision value's bits, a U16's, zero-extended (#1843).
+                    check_lower_convert(writer, BUSTER_TYPE_USHORT, BUSTER_TYPE_ULONG);
                 }
                 else if (check_lower_vector_of(writer, helper->parameter_types[a]) != 0)
                 {
@@ -9113,15 +9139,12 @@ static void check_lower_dump_field_address(CheckLowerWriter* writer, uint32_t ba
 }
 
 // What a value of `type` passed to a dump's printer needs that isn't lowered here: check_lower_passed's (a half-precision
-// value passes as a call's does, check_lower_call_halves'), a transparent union's or an _Atomic aggregate's, which a
-// call converts as an argument's conversion says; NULL where none. A struct's, a union's, a complex value's, a 128-bit
-// integer's and a vector's pass as a call's do (check_lower_dump_argument).
+// value passes as a call's does, check_lower_call_halves'); NULL where none. A struct's, a union's, a complex value's, a
+// 128-bit integer's and a vector's pass as a call's do (check_lower_dump_argument), and a transparent union's and an
+// _Atomic aggregate's parameter as a call's converted argument does (check_lower_dump_struct, #1842).
 static const char* check_lower_dump_passed(CheckLowerWriter* writer, TypeId type)
 {
-    const char* passed = check_lower_passed(writer, type);
-    const bool converted = check_lower_aggregate(writer, type) &&
-                           (check_lower_transparent(writer, type) != 0 || check_action_kind(writer->program->types, type) == BUSTER_TYPE_KIND_ATOMIC);
-    return passed != NULL ? passed : converted ? "__builtin_dump_struct whose printer takes a transparent union or an _Atomic aggregate" : NULL;
+    return check_lower_passed(writer, type);
 }
 
 // An argument of `type` of a dump's printer's call, as check_lower_call_body records a call's: a struct's, a union's or a
@@ -9189,7 +9212,14 @@ static void check_lower_dump_struct(CheckLowerWriter* writer, uint32_t node)
                         (value.flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT)) == 0;
     // The rest's targets (a parameter's type, or the promoted type of a variadic argument; an array's or a function's
     // address), and the format's: a parameter's pointer, or a char *'s.
+    // A transparent union's parameter passes as its first member (`members`, 0 for another), the argument converted to the
+    // member a call's conversion selects, here its own type (`sources`: its value's bits are the member's, of the first's
+    // size, check_lower_transparent_value); an _Atomic aggregate's from an object of its padded bytes, the argument's value
+    // copied into it, as a call's (`sources`: the parameter's operand type, an _Atomic argument's value's after its lvalue
+    // conversion too).
     TypeId targets[32] = { 0 };
+    TypeId members[32] = { 0 };
+    TypeId sources[32] = { 0 };
     bool addresses[32] = { false };
     const char* refused = dump == NULL || !callable || rest + 1 > 31 ? NULL : dump->refusal;
     bool valid = dump != NULL && callable && rest + 1 <= 31;
@@ -9201,7 +9231,12 @@ static void check_lower_dump_struct(CheckLowerWriter* writer, uint32_t node)
         targets[r] = addresses[r] ? BUSTER_TYPE_ULONG : r < parameters ? parameter_types[r] :
                      type == BUSTER_TYPE_FLOAT || type == BUSTER_TYPE_HALF ? BUSTER_TYPE_DOUBLE :
                      kind == BUSTER_TYPE_KIND_INTEGER || kind == BUSTER_TYPE_KIND_ENUM ? type_promote(types, type) : type;
-        refused = addresses[r] ? NULL : check_lower_dump_passed(writer, targets[r]);
+        const TypeId parameter = r < parameters ? parameter_types[r] : 0;
+        members[r] = parameter != 0 && type_kind(types, type_strip_aligned(types, parameter)) == BUSTER_TYPE_KIND_UNION ? check_lower_transparent(writer, parameter) : 0;
+        const bool atomic = parameter != 0 && check_action_kind(types, parameter) == BUSTER_TYPE_KIND_ATOMIC && check_lower_aggregate(writer, parameter);
+        sources[r] = members[r] != 0 ? type : atomic ? type_conversion_operand(types, parameter) : 0;
+        refused = members[r] != 0 && addresses[r] ? "__builtin_dump_struct of an array or a function for a printer's transparent union" :
+                  addresses[r] ? NULL : check_lower_dump_passed(writer, members[r] != 0 ? members[r] : targets[r]);
     }
     const TypeId format = rest < parameters ? parameter_types[rest] : BUSTER_TYPE_ULONG;
     if (valid && refused == NULL && type_kind(types, type_strip_aligned(types, format)) != BUSTER_TYPE_KIND_POINTER && format != BUSTER_TYPE_ULONG)
@@ -9278,7 +9313,8 @@ static void check_lower_dump_struct(CheckLowerWriter* writer, uint32_t node)
             for (uint32_t a = 0; a < arguments; a += 1)
             {
                 const CheckLowerDumpOperand* operand = a > rest ? dump->operands + line->first + (a - rest - 1) : NULL;
-                const TypeId type = a < rest ? targets[a] : a == rest ? format : operand->kind == CHECK_LOWER_DUMP_VALUE ? operand->promoted : BUSTER_TYPE_ULONG;
+                const TypeId type = a < rest ? (members[a] != 0 ? members[a] : targets[a]) : a == rest ? format :
+                                    operand->kind == CHECK_LOWER_DUMP_VALUE ? operand->promoted : BUSTER_TYPE_ULONG;
                 abi->arguments[abi->argument_count++] = type;
                 check_lower_dump_argument(writer, type);
             }
@@ -9340,11 +9376,30 @@ static void check_lower_dump_struct(CheckLowerWriter* writer, uint32_t node)
             check_lower_dump_string_address(writer, dump, line->format);
             for (uint32_t r = rest; r-- > 0;)
             {
-                if (!addresses[r])
+                if (members[r] != 0)
                 {
-                    check_lower_dump_value(writer, targets[r]);
+                    check_lower_transparent_value(writer, node, 3 + 2 + r, sources[r], members[r]);
                 }
-                check_lower_operand(writer, node, 3 + 2 + r, addresses[r], targets[r]);
+                else if (sources[r] != 0)
+                {
+                    // The atomic parameter's padded object, the argument's value's bytes copied in (check_lower_call_body's).
+                    const uint64_t bytes = type_size(types, targets[r]);
+                    const uint32_t local = check_lower_object(writer, bytes, type_alignment_log2(types, targets[r]));
+                    check_lower_instruction(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, local);
+                    check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_COPY, .value = type_size(types, type_conversion_operand(types, targets[r])),
+                                                             .volatile_copy = check_lower_copy_node_volatile(writer, graph->argument_nodes[first + 2 + r], sources[r]) });
+                    check_lower_operand(writer, node, 3 + 2 + r, false, sources[r]);
+                    check_lower_instruction(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, local);
+                    check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_CLEAR, .type = (TypeId)bytes, .value = local });
+                }
+                else
+                {
+                    if (!addresses[r])
+                    {
+                        check_lower_dump_value(writer, targets[r]);
+                    }
+                    check_lower_operand(writer, node, 3 + 2 + r, addresses[r], targets[r]);
+                }
             }
             if (!direct)
             {
@@ -14909,6 +14964,9 @@ static void check_lower_asm(CheckLowerWriter* writer, CheckControl control)
                     .branches = plan->inline_branches,
                     .targets = plan->inline_targets,
                     .branch_count = plan->inline_branch_count,
+                    .label_records = plan->inline_label_records,
+                    .label_names = plan->inline_label_names,
+                    .label_count = plan->label_count,
                     .leaves = plan->inline_leaves,
                 };
                 writer->asm_body_calls[writer->asm_body_count] = call;
@@ -16168,7 +16226,8 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
     // (CheckLowerInitializers.extra_entries, check_lower_dump_prepare's).
     const uint64_t entry_room64 = capacity64 + lowered->initializers.extra_entries;
     const uint64_t local_room64 = local_capacity64 + lowered->initializers.extra_locals;
-    if (valid && (entry_room64 > UINT32_MAX || local_room64 > UINT32_MAX))
+    const uint64_t atomic_room64 = (uint64_t)atomic_capacity + lowered->initializers.extra_atomics;
+    if (valid && (entry_room64 > UINT32_MAX || local_room64 > UINT32_MAX || atomic_room64 >= UINT32_MAX))
     {
         lowered->status = CHECK_PROGRAM_RESOURCE;
         valid = false;
@@ -16177,7 +16236,7 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
     shared->local_capacity = valid ? (uint32_t)local_room64 : 0;
     shared->x87_constant_capacity = valid ? (uint32_t)x87_capacity64 : 0;
     shared->builtin_count = builtin_count;
-    shared->atomic_capacity = atomic_capacity;
+    shared->atomic_capacity = valid ? (uint32_t)atomic_room64 : 0;
     shared->integer_builtin_count = integer_builtin_count;
     // A node makes a call of its own, and with 128-bit integers up to two of libgcc's more (a division, its conversions to
     // or from a floating type, an update's two), each of up to two arguments. An aggregate copy makes one three-argument
@@ -16481,6 +16540,7 @@ static bool check_lower_writer_begin(CheckLowerWriter* writer, CheckLowerAbi* ab
         .scalar = BUSTER_SCALAR_PATH(shared->scalar),
         .sources = sources,
         .x87_constant_capacity = shared->x87_constant_capacity,
+        .atomic_room = shared->atomic_capacity + 1,
         .label_symbol_capacity = shared->label_symbol_capacity,
         .class_limit = BUSTER_TYPED_CLASSES,
         .target = program->target,
