@@ -1013,6 +1013,8 @@ static void check_driver_escape(const Parser* parser, Preprocessor* pp, const Ch
     const uint32_t source = parser->tokens.sources[token];
     const uint32_t offset = diagnostic->offset;
     const char character = (char)diagnostic->character;
+    // A macro argument's literal: its escape's diagnostics show the argument (#1447, Preprocessor.diagnostic_arguments).
+    pp->diagnostic_arguments = true;
     switch (diagnostic->kind)
     {
         case CHECK_ESCAPE_DIAGNOSTIC_UNKNOWN:
@@ -1036,6 +1038,29 @@ static void check_driver_escape(const Parser* parser, Preprocessor* pp, const Ch
             {
                 pp_diagnose_output_offset_at(pp, disposition, source, offset, publication, "unknown escape sequence '\\%s' [%s-Wunknown-escape-sequence]", escaped,
                                              error ? "-Werror," : "");
+            }
+            break;
+        }
+        case CHECK_ESCAPE_DIAGNOSTIC_NONSTANDARD:
+        case CHECK_ESCAPE_DIAGNOSTIC_DELIMITED:
+        case CHECK_ESCAPE_DIAGNOSTIC_NAMED:
+        {
+            // -pedantic's warnings (#1447), off by default.
+            const bool nonstandard = diagnostic->kind == CHECK_ESCAPE_DIAGNOSTIC_NONSTANDARD;
+            const CheckWarningSeverity severity = check_common_severity(pp, parser, input, token, nonstandard ? CHECK_WARNING_ID_NONSTANDARD_ESCAPE :
+                                                                                                                CHECK_WARNING_ID_DELIMITED_ESCAPE, true);
+            const bool error = severity == CHECK_WARNING_ERROR;
+            const PPSeverity disposition = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_MAPPED_FATAL : error ? PP_SEVERITY_MAPPED_ERROR : PP_SEVERITY_WARNING;
+            if (severity != CHECK_WARNING_IGNORE && nonstandard)
+            {
+                pp_diagnose_output_offset_at(pp, disposition, source, offset, publication, "use of non-standard escape character '\\%c' [%s-Wpedantic]", character,
+                                             error ? "-Werror," : "");
+            }
+            else if (severity != CHECK_WARNING_IGNORE)
+            {
+                pp_diagnose_output_offset_at(pp, disposition, source, offset, publication, "%s escape sequences are a %s extension [%s-Wdelimited-escape-sequence-extension]",
+                                             diagnostic->kind == CHECK_ESCAPE_DIAGNOSTIC_NAMED ? "named" : "delimited",
+                                             diagnostic->kind == CHECK_ESCAPE_DIAGNOSTIC_NAMED ? "Clang" : "C2y", error ? "-Werror," : "");
             }
             break;
         }
@@ -1100,6 +1125,35 @@ static void check_driver_escape(const Parser* parser, Preprocessor* pp, const Ch
                                          (int)diagnostic->length, spelling.pointer + offset);
             break;
     }
+    pp->diagnostic_arguments = false;
+}
+
+// The encoding prefixes of an unevaluated string literal's tokens from `first` to `end` (#1447): each one's
+// -Winvalid-unevaluated-string warning at it, as the warning options and `input`'s pragmas map it, with the macro argument
+// the token came from.
+static void check_driver_unevaluated_prefixes(const Parser* parser, Preprocessor* pp, const CheckInput* input, uint32_t first, uint32_t end, uint32_t publication,
+                                              Arena* scratch)
+{
+    for (uint32_t token = first; token < end && token < parser->tokens.count && !pp->fatal; token += 1)
+    {
+        const uint64_t mark = scratch->length;
+        const String8 spelling = check_warning_string_spelling(parser, pp, token, scratch);
+        const uint32_t prefix = check_literal_encoding_prefix((const uint8_t*)spelling.pointer, (uint32_t)spelling.length);
+        const char* written = prefix == 2 ? "u8" : prefix != 0 && spelling.pointer[0] == 'L' ? "L" : prefix != 0 && spelling.pointer[0] == 'U' ? "U" : "u";
+        arena_pop_to(scratch, mark);
+        const CheckWarningSeverity severity = prefix != 0 ? check_common_severity(pp, parser, input, token, CHECK_WARNING_ID_INVALID_UNEVALUATED_STRING, false) :
+                                                            CHECK_WARNING_IGNORE;
+        const bool error = severity == CHECK_WARNING_ERROR;
+        const PPSeverity disposition = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_MAPPED_FATAL : error ? PP_SEVERITY_MAPPED_ERROR : PP_SEVERITY_WARNING;
+        if (severity != CHECK_WARNING_IGNORE)
+        {
+            pp->diagnostic_arguments = true;
+            pp_diagnose_output_offset_at(pp, disposition, parser->tokens.sources[token], 0, publication,
+                                         "encoding prefix '%s' on an unevaluated string literal has no effect [%s-Winvalid-unevaluated-string]", written,
+                                         error ? "-Werror," : "");
+            pp->diagnostic_arguments = false;
+        }
+    }
 }
 
 // The escape sequences' diagnostics of an unevaluated string literal's tokens from `first` to `end` (#147), each at its
@@ -1108,6 +1162,14 @@ static void check_driver_escape(const Parser* parser, Preprocessor* pp, const Ch
 // (check_literal_unevaluated_escapes). The tokens before `first` have no escape clang refuses: none set its error state.
 static void check_driver_escapes(const Parser* parser, Preprocessor* pp, const CheckInput* input, uint32_t first, uint32_t end, uint32_t publication, Arena* scratch)
 {
+    // Clang's unevaluated string literal warns of each token's encoding prefix first (#1447), its tokens before `first`
+    // (adjacent string literals, which concatenate) too.
+    uint32_t begin = first;
+    while (begin > 0 && begin <= parser->tokens.count && parser->tokens.kinds[begin - 1] == PARSE_KIND_STRING)
+    {
+        begin -= 1;
+    }
+    check_driver_unevaluated_prefixes(parser, pp, input, begin, end, publication, scratch);
     bool had_error = false;
     for (uint32_t token = first; token < end && token < parser->tokens.count && !pp->fatal; token += 1)
     {
@@ -1115,7 +1177,7 @@ static void check_driver_escapes(const Parser* parser, Preprocessor* pp, const C
         const String8 spelling = check_warning_string_spelling(parser, pp, token, scratch);
         const uint32_t length = (uint32_t)spelling.length;
         CheckEscapeDiagnostic* diagnostics = length != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckEscapeDiagnostic, BUSTER_CHECK_ESCAPE_DIAGNOSTICS(length)) : NULL;
-        const uint32_t count = diagnostics != NULL ? check_literal_unevaluated_escapes((const uint8_t*)spelling.pointer, length, pp->options.language.standard >= 2023, diagnostics, &had_error) : 0;
+        const uint32_t count = diagnostics != NULL ? check_literal_unevaluated_escapes((const uint8_t*)spelling.pointer, length, pp->options.language.standard >= 2023, true, diagnostics, &had_error) : 0;
         for (uint32_t i = 0; i < count && !pp->fatal; i += 1)
         {
             check_driver_escape(parser, pp, input, token, spelling, diagnostics + i, publication);
@@ -1219,6 +1281,30 @@ static void check_driver_unparsed_literals(const Parser* parser, Preprocessor* p
     }
 }
 
+static void check_driver_unparsed_strings(const Parser* parser, Preprocessor* pp, uint32_t begin, Arena* scratch);
+
+// The literals a rejected unit's reader left unread (#1447): from where its error stopped the walk
+// (CheckInput.walk_end), and past its last report's token and the string literals adjacent to it, read as the unchecked
+// rest of a failed parse is (check_driver_unparsed_literals, check_driver_unparsed_strings): each literal's errors and
+// warnings, which clang's literal parsers give whatever came before.
+static void check_driver_unread_literals(const Parser* parser, Preprocessor* pp, const CheckInput* input, Arena* scratch)
+{
+    uint32_t begin = input->walk_end;
+    for (uint32_t r = 0; r < input->report_count; r += 1)
+    {
+        begin = input->reports[r].token < parser->tokens.count && input->reports[r].token + 1 > begin ? input->reports[r].token + 1 : begin;
+    }
+    while (begin > 0 && begin < parser->tokens.count && parser->tokens.kinds[begin] == PARSE_KIND_STRING && parser->tokens.kinds[begin - 1] == PARSE_KIND_STRING)
+    {
+        begin += 1;
+    }
+    if (begin < parser->tokens.count)
+    {
+        check_driver_unparsed_literals(parser, pp, begin, scratch);
+        check_driver_unparsed_strings(parser, pp, begin, scratch);
+    }
+}
+
 // Whether the tokens from `first` to `end`, any parentheses around them peeled, are string literals whose escape sequences
 // clang refuses in an unevaluated string literal (#147): then their diagnostics (check_driver_escapes), from the first
 // token that has one, published at it, the warning's severity the command line's (`input` holds no pragmas).
@@ -1241,12 +1327,16 @@ static bool check_driver_unparsed_escapes(const Parser* parser, Preprocessor* pp
         const uint64_t mark = scratch->length;
         const String8 spelling = check_warning_string_spelling(parser, pp, token, scratch);
         bool had_error = false;
-        refused = spelling.length != 0 && check_literal_unevaluated_escapes((const uint8_t*)spelling.pointer, (uint32_t)spelling.length, pp->options.language.standard >= 2023, NULL, &had_error) != 0 ? token : end;
+        refused = spelling.length != 0 && check_literal_unevaluated_escapes((const uint8_t*)spelling.pointer, (uint32_t)spelling.length, pp->options.language.standard >= 2023, false, NULL, &had_error) != 0 ? token : end;
         arena_pop_to(scratch, mark);
     }
     if (refused != end)
     {
         check_driver_escapes(parser, pp, input, refused, end, parser->tokens.sources[refused], scratch);
+    }
+    else if (strings)
+    {
+        check_driver_unevaluated_prefixes(parser, pp, input, first, end, parser->tokens.sources[first], scratch);
     }
     return refused != end;
 }
@@ -2339,8 +2429,80 @@ static bool check_driver_rejected_warnings(const Parser* parser, const CheckWarn
     return valid;
 }
 
+// Whether `token` is inside a function's body, between its braces: a definition's head is under its body's `}` in the
+// tree too, so the body's `{` decides. Only a recovered report's scope asks it (check_driver_error_scoped).
+static bool check_driver_in_body(const Parser* parser, uint32_t token)
+{
+    const uint32_t count = parser->tokens.count;
+    uint32_t ancestor = token;
+    uint32_t steps = 0;
+    while (ancestor < count && parser->tree.roles[ancestor] != PARSE_ROLE_CLOSE_BODY && steps < count)
+    {
+        ancestor = parser->tree.parents[ancestor];
+        steps += 1;
+    }
+    const bool closed = ancestor < count && parser->tree.roles[ancestor] == PARSE_ROLE_CLOSE_BODY;
+    uint32_t open = closed ? ancestor : 0;
+    while (open > 0 && !(parser->tree.roles[open] == PARSE_ROLE_OPEN_BODY && parser->tree.parents[open] == ancestor))
+    {
+        open -= 1;
+    }
+    return closed && open < token;
+}
+
+// Whether a recovered report is one whose declaration stays valid (#1835): a dropped attribute's
+// (check_input_attribute_recoverable) or a dropped specifier's (check_input_specifiers_recover). A rejected unit's rounds
+// read past it (check_driver_rejected_common).
+static bool check_driver_report_keeps_valid(const CheckInputReport* report)
+{
+    const CheckInputMessage message = report->message;
+    const bool specifier = message == CHECK_INPUT_SPECIFIER_COMBINE || message == CHECK_INPUT_SPECIFIER_SIGN || message == CHECK_INPUT_SPECIFIER_WIDTH ||
+                           message == CHECK_INPUT_SPECIFIER_COMPLEX;
+    return report->recovered && (specifier || check_input_attribute_recoverable(report));
+}
+
+// Whether `token` is inside a declarator's parameter list: an enclosing `(`, matched backward over the tokens, is a
+// parameter list's, before a `;` or a brace. That `(` is one the parser marks so, or one right after a name that declares
+// itself (the vector parser marks a definition's whose first parameter starts with an attribute as a call's, #1968).
+static bool check_driver_in_parameters(const Parser* parser, const CheckInput* input, uint32_t token)
+{
+    uint32_t depth = 0;
+    bool inside = false;
+    bool scanning = token < parser->tokens.count;
+    for (uint32_t at = token; scanning && at > 0;)
+    {
+        at -= 1;
+        const uint8_t kind = parser->tokens.kinds[at];
+        const bool open = kind == PARSE_KIND_L_PAREN && depth == 0;
+        const bool declared = at > 0 && parser->tokens.kinds[at - 1] == PARSE_KIND_IDENTIFIER && input->declarations != NULL && at - 1 < input->token_count &&
+                              input->declarations[at - 1] == at - 1;
+        inside = open && (parser->tree.roles[at] == PARSE_ROLE_OPEN_FUNCTION || declared);
+        depth += kind == PARSE_KIND_R_PAREN ? 1u : 0u;
+        depth -= kind == PARSE_KIND_L_PAREN && depth != 0 ? 1u : 0u;
+        scanning = !inside && !(depth == 0 && (kind == PARSE_KIND_SEMI || kind == PARSE_KIND_L_BRACE || kind == PARSE_KIND_R_BRACE));
+    }
+    return inside;
+}
+
+// Whether a reader's report counts in the scopes around it (check_driver_rejected_warnings). Clang opens a definition's
+// body's scope before it handles the definition's declarator (ActOnStartOfFunctionDef: its own attributes, its
+// redeclaration), whose errors then keep the body's unused variables quiet; but what it gives as it parses, before that
+// (#1835), doesn't count: a specifier's (DeclSpec::Finish), a parameter's attributes' (ActOnParamDeclarator), and an
+// attribute's argument that must be a string literal (the parser's err_expected_string_literal).
+static bool check_driver_error_scoped(const Parser* parser, const CheckInput* input, const CheckInputReport* report)
+{
+    const CheckInputMessage message = report->message;
+    const bool specifier = message == CHECK_INPUT_SPECIFIER_COMBINE || message == CHECK_INPUT_SPECIFIER_SIGN || message == CHECK_INPUT_SPECIFIER_WIDTH ||
+                           message == CHECK_INPUT_SPECIFIER_COMPLEX;
+    const bool attribute = check_input_attribute_recoverable(report);
+    const bool parsed = message == CHECK_INPUT_ATTRIBUTE_STRING_ARGUMENT ||
+                        (message == CHECK_INPUT_ATTRIBUTE_ARGUMENT && (report->detail & 0xffu) == CHECK_ARGUMENT_STRING_LITERAL);
+    const bool early = report->recovered && (specifier || (attribute && (parsed || check_driver_in_parameters(parser, input, report->token))));
+    return !early || check_driver_in_body(parser, report->token);
+}
+
 // The prefix count of the unit's errors' tokens (check_driver_rejected_warnings): its reader's reports, its graph's and the
-// driver's own. NULL without any, or without room.
+// driver's own, but a recovered report outside every body (check_driver_error_scoped). NULL without any, or without room.
 static uint32_t* check_driver_error_counts(const Parser* parser, const CheckInput* input, const CheckStream* stream, const CheckDriverDiagnostic* extra,
                                            uint32_t extra_count, Arena* scratch)
 {
@@ -2353,7 +2515,8 @@ static uint32_t* check_driver_error_counts(const Parser* parser, const CheckInpu
         // (An invalid declaration's quiet use is no error of its scope's, #1447: clang warns of its unused variables.)
         for (uint32_t i = 0; i < input->report_count; i += 1)
         {
-            errors[(input->reports[i].token < count ? input->reports[i].token : count) + 1] += input->reports[i].message != CHECK_INPUT_INVALID_USE;
+            errors[(input->reports[i].token < count ? input->reports[i].token : count) + 1] +=
+                check_driver_error_scoped(parser, input, input->reports + i) && input->reports[i].message != CHECK_INPUT_INVALID_USE ? 1u : 0u;
         }
         for (uint32_t i = 0; i < stream->report_count; i += 1)
         {
@@ -4190,6 +4353,43 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                                 case CHECK_CPU_DISPATCH_LINKAGE:
                                     pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "multiversioned function declaration has a different %s", different);
                                     break;
+                                case CHECK_CPU_DISPATCH_TARGET_FEATURE:
+                                case CHECK_CPU_DISPATCH_TARGET_ARCHITECTURE:
+                                {
+                                    // The item of the target string (#1838), its bytes in the string's decoded text.
+                                    const String8 text = report->attribute < count ? check_warning_strings_value(parser, pp, report->attribute, scratch) : (String8){ 0 };
+                                    const uint64_t start = report->value & 0xffffffffu;
+                                    const uint64_t length = report->value >> 32;
+                                    const bool inside = start <= text.length && length <= text.length - start;
+                                    pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, noted ? 1u : 0u,
+                                                                "function multiversioning doesn't support %s '%.*s'",
+                                                                report->detail == CHECK_CPU_DISPATCH_TARGET_FEATURE ? "feature" : "architecture", inside ? (int)length : 0,
+                                                                inside ? text.pointer + start : "");
+                                    break;
+                                }
+                                case CHECK_CPU_DISPATCH_TARGET_DUPLICATE:
+                                    pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, noted ? 1u : 0u,
+                                                                "multiversioned function redeclarations require identical target attributes");
+                                    break;
+                                case CHECK_CPU_DISPATCH_AFTER_USE:
+                                    pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, noted ? 1u : 0u,
+                                                                "function declaration cannot become a multiversioned function after first usage");
+                                    break;
+                                case CHECK_CPU_DISPATCH_TARGET_REQUIRED:
+                                    pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, noted ? 1u : 0u,
+                                                                "function declaration is missing 'target' attribute in a multiversioned function");
+                                    break;
+                                case CHECK_CPU_DISPATCH_CLONES_MISMATCH:
+                                    pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, noted ? 1u : 0u,
+                                                                "'target_clones' attribute does not match previous declaration");
+                                    break;
+                                case CHECK_CPU_DISPATCH_NO_MATCH:
+                                {
+                                    const uint32_t function = report->attribute < count ? parser->tokens.names[report->attribute] : 0;
+                                    pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "no matching function for call to '%.*s'",
+                                                          (int)intern_length(pp->table, function), intern_bytes(pp->table, function));
+                                    break;
+                                }
                             }
                         }
                         else if (phase == 0 && input->reports[index].message == CHECK_INPUT_ALIAS_TENTATIVE && token < count)
@@ -5078,7 +5278,7 @@ static bool check_driver_edit_statement(CheckDriverEditor* editor, uint32_t term
 }
 
 // Leave out the nearest part around `token` that the view can leave out alone: its initializer, from its `=`, where its
-// declaration is complete without it (not an array of unknown size, not const-qualified); its statement, or the
+// declaration is complete without it (not an array of unknown size, not const-qualified but at file scope); its statement, or the
 // part of it check_driver_edit_statement finds; its condition, which `-true` replaces; or its for statement's
 // increment. A token already left out is. False where none is.
 static bool check_driver_edit_site(CheckDriverEditor* editor, uint32_t token)
@@ -5107,7 +5307,11 @@ static bool check_driver_edit_site(CheckDriverEditor* editor, uint32_t token)
             // A const object of an arithmetic or enumeration type keeps it, as clang's stays valid, with `-*__func__`'s
             // unknown value in its place; another initializer the declaration can't do without leaves out its declarator.
             const bool replaced = function && constant && bare != 0 && (type_is_arithmetic(types, bare) || type_kind(types, bare) == BUSTER_TYPE_KIND_ENUM);
-            done = token < end && end <= count && type != 0 && !unsized && (!constant || replaced) && at + 1 < end;
+            // At file scope, a const object's initializer is left out alone (#1447): clang keeps such a declaration valid,
+            // its uses warning as before, its value unknown (`const int c;`). (An array of unknown size's isn't: the first
+            // reading leaves out the events of the bodies that use it, which a later reading doesn't give again.)
+            const bool alone = !function && constant && !unsized;
+            done = token < end && end <= count && type != 0 && ((!unsized && (!constant || replaced)) || alone) && at + 1 < end;
             valid = !done || check_driver_edit_apply(editor, replaced ? at + 1 : at, end - 1, replaced ? CHECK_DRIVER_EDIT_VALUE : CHECK_DRIVER_EDIT_DROP);
         }
         else if (role == PARSE_ROLE_TERMINATOR)
@@ -5317,6 +5521,37 @@ static bool check_driver_rejected_top_known(const Parser* parser, const uint32_t
     return known;
 }
 
+// Whether the first reading's errors at `token` all leave their declaration valid (check_driver_report_keeps_valid,
+// #1835): no other error is there. Only a rejected unit's rounds call it.
+static bool check_driver_rejected_recovered(const CheckInput* input, uint32_t token)
+{
+    bool recovered = false;
+    bool stopped = false;
+    for (uint32_t i = 0; i < input->report_count; i += 1)
+    {
+        const bool at = input->reports[i].token == token;
+        const bool keeps = check_driver_report_keeps_valid(input->reports + i);
+        recovered |= at && keeps;
+        stopped |= at && !keeps;
+    }
+    return recovered && !stopped;
+}
+
+// Whether the first reading's errors at `token` count in the scopes around it (check_driver_error_scoped): one does, or
+// none is a report's (a graph's or a control's, which count).
+static bool check_driver_rejected_scoped(const Parser* parser, const CheckInput* input, uint32_t token)
+{
+    bool reported = false;
+    bool scoped = false;
+    for (uint32_t i = 0; i < input->report_count; i += 1)
+    {
+        const bool at = input->reports[i].token == token;
+        reported |= at;
+        scoped |= at && check_driver_error_scoped(parser, input, input->reports + i);
+    }
+    return scoped || !reported;
+}
+
 // The scope of the block-scope declaration whose declarator `token` names, else BUSTER_CHECK_NONE: the `}` of the block
 // or body it is in, or its for statement's `)` for a clause's. A declarator's name is the first ordinary identifier of
 // its segment of the declaration's list (check_driver_edit_uses'), so a prototype's parameters and a record's members
@@ -5401,7 +5636,8 @@ static bool check_driver_rejected_known(const uint32_t* errors, uint32_t error_c
 // may be the view's own (a statement expression's value left void); the unit's, with bodies alone left out, publishes those
 // not among `errors`, in clang's words, and puts their tokens in `found` (room for `found_capacity`), for the next round
 // to leave out too.
-static CheckDriverRound check_driver_rejected_read(const Parser* unit, const Parser* original, Preprocessor* pp, const uint32_t* errors, uint32_t error_count,
+static CheckDriverRound check_driver_rejected_read(const Parser* unit, const Parser* original, Preprocessor* pp, const CheckInput* first_input,
+                                                   const uint32_t* errors, uint32_t error_count,
                                                    const CBodyRange* ranges, uint32_t body_count, const uint8_t* bodies, uint8_t* mask, const uint8_t* edits,
                                                    bool whole, bool scalar, bool return_warning, CheckWarningSeverity return_baseline, CheckCommonShiftWarnings* shifts,
                                                    const CheckWarningEvents* first, const CheckWarningEvents* first_graph, uint32_t stop,
@@ -5453,7 +5689,9 @@ static CheckDriverRound check_driver_rejected_read(const Parser* unit, const Par
             // declaration's at file scope, and not in the definition that follows it.
             const bool dropped = edited && errors[e] < count && edits[errors[e]] != 0;
             // (An invalid declaration's quiet use, 1 in `quiet`, is no error of its scope's, #1447, check_driver_error_counts.)
-            error_counts[(at < view_count ? at : view_count) + (dropped ? 0u : 1u)] += quiet == NULL || errors[e] >= count || quiet[errors[e]] != 1;
+            // A recovered error clang gives before a body's scope opens counts in none (check_driver_error_scoped, #1835).
+            const bool scoped = errors[e] >= count || check_driver_rejected_scoped(unit, first_input, errors[e]);
+            error_counts[(at < view_count ? at : view_count) + (dropped ? 0u : 1u)] += scoped && (quiet == NULL || errors[e] >= count || quiet[errors[e]] != 1) ? 1u : 0u;
         }
         for (uint32_t t = 1; t < view_count + 2; t += 1)
         {
@@ -5473,7 +5711,9 @@ static CheckDriverRound check_driver_rejected_read(const Parser* unit, const Par
     TypeTable types = { 0 };
     valid = valid && capacity.types != 0 && type_initialize(&types, &type_arena, &index_arena, capacity);
     CheckInput input = { 0 };
-    // (A reading whose reader reports an error isn't selected's valid one, but its reports are the round's.)
+    // (A reading whose reader reports an error isn't selected's valid one, but its reports are the round's. One whose only
+    // reports are recovered ones, a recovered error the round left in (#1835), reads on as a valid one, as the unit's first
+    // reading does: CheckInput.recovered_valid.)
     const bool selected = valid && check_input_selected(&input, parser, pp, &types, arena, scratch, mask);
     // A recovered reading (#1447, an invalid declaration's error, CheckInput.recovered_valid) that meets an error the unit's
     // earlier readings don't hold has errors of its own too: an edited view reaches a definition's head error past the
@@ -5499,7 +5739,7 @@ static CheckDriverRound check_driver_rejected_read(const Parser* unit, const Par
             fresh_recovered = input.invalid_declarations[t] != 0;
         }
     }
-    valid = valid && (selected || (input.report_count != 0 && (!input.recovered_valid || fresh_recovered))) && !input.resource;
+    valid = valid && (selected || input.report_count != 0) && !input.resource;
     const CheckOptions check_options = { .scalar = scalar };
     CheckStream stream = { 0 };
     // The reading's own errors: its reader's (a recovered one's unit is valid), whose reports stand without the graph, which
@@ -5897,14 +6137,20 @@ static void check_driver_rejected_common(const Parser* unit, const Parser* origi
                 top = parser->tree.parents[top];
             }
             const bool head = !bodied && top < count && parser->tree.roles[top] == PARSE_ROLE_CLOSE_BODY;
+            // A recovered error outside every body (#1447, CheckInputReport.recovered: a definition's parameter's, #1835)
+            // needs no part left out: the reading recovers it again, its declaration valid, as clang keeps it. It still
+            // counts in its scope (error_counts). (A prototype's dropped declaration would leave out the bodies that name
+            // its parameters' names too.)
+            const bool recovered = !bodied && check_driver_rejected_recovered(first_input, token);
             // (A body's error the editor refuses leaves its body out alone, below, not its whole definition.)
-            const bool kept = token < count && ((!head && check_driver_rejected_edit(&editor, token)) ||
-                                                (!bodied && check_driver_rejected_declaration(parser, first_input, ranges, body_count, token, quiet, edits, mask)));
+            const bool kept = !recovered && token < count &&
+                              ((!head && check_driver_rejected_edit(&editor, token)) ||
+                               (!bodied && check_driver_rejected_declaration(parser, first_input, ranges, body_count, token, quiet, edits, mask)));
             edited |= kept;
-            ready = kept || bodied;
-            const bool dropped = !bodied && token < count &&
+            ready = kept || bodied || recovered;
+            const bool dropped = !recovered && !bodied && token < count &&
                                  check_driver_rejected_declaration(parser, first_input, ranges, body_count, token, quiet, fallback_edits, fallback_mask);
-            fallback_ready &= bodied || dropped;
+            fallback_ready &= bodied || dropped || recovered;
             fallback_edited |= dropped;
             if (bodied)
             {
@@ -5943,7 +6189,7 @@ static void check_driver_rejected_common(const Parser* unit, const Parser* origi
         uint32_t added = 0;
         uint32_t* fresh = known + known_count;
         const uint32_t fresh_capacity = (uint32_t)(known_capacity - known_count);
-        round = ready && edited ? check_driver_rejected_read(unit, original, pp, known, known_count, ranges, body_count, bodies, mask, edits, false, scalar,
+        round = ready && edited ? check_driver_rejected_read(unit, original, pp, first_input, known, known_count, ranges, body_count, bodies, mask, edits, false, scalar,
                                                              return_warning, return_baseline, shifts, first, first_graph, stop, publication_end, fresh,
                                                              fresh_capacity, &added, quiet, arena, scratch) :
                                   CHECK_DRIVER_ROUND_FAILED;
@@ -5974,7 +6220,7 @@ static void check_driver_rejected_common(const Parser* unit, const Parser* origi
         }
         if (ready && round == CHECK_DRIVER_ROUND_FAILED && fallback != NULL && check_lazy_mask_valid(unit, fallback))
         {
-            round = check_driver_rejected_read(unit, original, pp, known, known_count, ranges, body_count, bodies, fallback, fallback_view, whole, scalar,
+            round = check_driver_rejected_read(unit, original, pp, first_input, known, known_count, ranges, body_count, bodies, fallback, fallback_view, whole, scalar,
                                                return_warning, return_baseline, shifts, first, first_graph, stop, publication_end, fresh, fresh_capacity,
                                                &added, quiet, arena, scratch);
         }
@@ -8251,6 +8497,13 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         result = 1;
                     }
                     original_pragmas_printed = true;
+                    if (ready && !quiet && !parse_failed && !repairing && !prefix_only && checking == recovered && input.report_count != 0 &&
+                        input.walk_end != 0 && input.walk_end < tokens && !pp->fatal)
+                    {
+                        // The literals past where the reader's error stopped it (#1447): clang's literal parsers diagnose them as
+                        // they do the unchecked rest of a failed parse.
+                        check_driver_unread_literals(checking, pp, &input, scratch);
+                    }
                     if (input_valid && dump && !prefix_only)
                     {
                         check_driver_dump(&input.graph, &stream, &types, scratch);

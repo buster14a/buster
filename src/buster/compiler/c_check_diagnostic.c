@@ -150,6 +150,9 @@ static const CheckWarningDescription check_warning_descriptions[] =
     { "-Wimplicit-enum-enum-cast", "-Wenum-conversion", "implicit conversion from enumeration type to different enumeration type" },
     { "-Wvisibility", NULL, "declaration will not be visible outside of this function" },
     { "-Wodr", NULL, "type has an attribute which currently causes the types to be treated as though they are incompatible" },
+    { "-Winvalid-unevaluated-string", NULL, "encoding prefix on an unevaluated string literal has no effect" },
+    { "-Wpedantic", NULL, "use of non-standard escape character" },
+    { "-Wdelimited-escape-sequence-extension", "-Wpedantic", "delimited escape sequences are a C2y extension" },
     // (#1838: its ID assigned past the ones other pull requests take, which their rows fill.)
     [CHECK_WARNING_ID_TARGET_CLONES_MIXED_SPECIFIERS] = { "-Wtarget-clones-mixed-specifiers", "-Wfunction-multiversion", "mixing 'target_clones' specifier mechanisms is permitted for GCC compatibility" },
     // (#1843: its ID assigned past the ones other pull requests take, which their rows fill.)

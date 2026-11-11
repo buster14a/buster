@@ -211,4 +211,746 @@ static bool check_input_target_clones(CheckInputReader* reader, CheckInputAttrib
     return valid;
 }
 
+static uint32_t check_input_callee_end(const Parser* parser, uint32_t token, uint32_t* first);
+static bool check_input_warning_unevaluated(CheckInputReader* reader, uint32_t token);
+
+// The rest is multiversioning's rules for a function's declarations (clang's CheckMultiVersionFunction and its helpers in
+// SemaDecl.cpp, for target and target_clones), each declaration against the visible one before it (O), and binding's
+// answer to it:
+//
+// - A function becomes multiversioned at its first declaration of target("default") or target_clones, or where a target
+//   declaration follows one of another target string (CheckDeclarationCausesMultiVersioning). Its versions are entities
+//   of their own, which share the name: binding keeps each apart (check_input_target_versions_match), and a declaration
+//   of a version's string (or of the same target_clones list) redeclares that version.
+// - A declaration it refuses is invalid (CheckInputReader.cpu_invalid, shared with cpu_specific's): the later
+//   declarations' rules skip it, as clang's lookup does.
+// - Whether O's function was used before (clang's isUsed) is read from the binding events: an evaluated use of its name
+//   that reached one of its declarations. A unit with a multiversioned function is read in source order for it
+//   (CheckInput.target_multiversion, check_deferred_bodies), so that its bodies' uses are there when a later
+//   declaration is read.
+// - A call reached by no default version (target("default") or target_clones) of a multiversioned function visible
+//   there is "no matching function for call to 'f'" (check_input_target_versions_calls), as clang's overload set has
+//   no viable candidate.
+
+// A declaration's multiversioning by target strings: none, target or target_clones.
+typedef enum CheckTargetVersionKind
+{
+    CHECK_TARGET_VERSION_NONE,
+    CHECK_TARGET_VERSION_TARGET,
+    CHECK_TARGET_VERSION_CLONES,
+} CheckTargetVersionKind;
+
+// `attributes`' first attribute of `kind` that isn't ignored, or NULL.
+static const CheckInputAttribute* check_target_versions_own(const CheckInputAttributes* attributes, CheckInputAttributeKind kind)
+{
+    const CheckInputAttribute* result = NULL;
+    for (uint32_t i = 0; attributes != NULL && result == NULL && i < attributes->count; i += 1)
+    {
+        const CheckInputAttribute* attribute = attributes->records + i;
+        result = !attribute->ignored && attribute->kind == kind ? attribute : NULL;
+    }
+    return result;
+}
+
+// The attribute of `kind` declaration `declaration` has, its own or one an earlier declaration of its function gave it
+// (clang's inherited attribute), searched along its name's chain from binding `handle` (the most recent first), or NULL.
+static const CheckInputAttribute* check_target_versions_attribute(const CheckInputReader* reader, uint32_t handle, uint32_t declaration, CheckInputAttributeKind kind)
+{
+    const Parser* parser = reader->parser;
+    const CheckInputAttribute* result = check_target_versions_own(check_input_attributes_at(reader->output, declaration), kind);
+    for (uint32_t h = handle; result == NULL && h != 0; h = reader->bindings.previous[h - 1])
+    {
+        const uint32_t earlier = reader->bindings.declaration[h - 1];
+        const bool same = earlier < declaration && earlier < parser->tokens.count && reader->declaration_kinds[earlier] == C_BINDING_FUNCTION &&
+                          reader->objects[earlier] == reader->objects[declaration];
+        result = same ? check_target_versions_own(check_input_attributes_at(reader->output, earlier), kind) : NULL;
+    }
+    return result;
+}
+
+static bool check_target_versions_default(const CheckInputAttribute* target)
+{
+    return target != NULL && check_input_attribute_equal(target->text, "default");
+}
+
+// The declaration that made the function of `object` multiversioned, or BUSTER_CHECK_NONE where it isn't.
+static uint32_t check_target_versions_since(const CheckInputReader* reader, uint32_t object)
+{
+    uint32_t result = BUSTER_CHECK_NONE;
+    for (uint32_t i = 0; result == BUSTER_CHECK_NONE && i < reader->target_mv_count; i += 1)
+    {
+        result = reader->objects[reader->target_mv_tokens[i]] == object ? reader->target_mv_since[i] : BUSTER_CHECK_NONE;
+    }
+    return result;
+}
+
+// Appends `value` to a growable list of the reader's arena (its `count` and `capacity`), and `second` to its twin where
+// that isn't NULL.
+static void check_target_versions_append(CheckInputReader* reader, uint32_t** list, uint32_t** twin, uint32_t* count, uint32_t* capacity, uint32_t value, uint32_t second)
+{
+    if (*count == *capacity)
+    {
+        const uint32_t grown_capacity = *capacity != 0 ? *capacity * 2 : 8;
+        uint32_t* grown = BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint32_t, grown_capacity);
+        uint32_t* grown_twin = grown != NULL && twin != NULL ? BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint32_t, grown_capacity) : NULL;
+        const bool valid = grown != NULL && (twin == NULL || grown_twin != NULL);
+        reader->output->resource |= !valid;
+        if (valid && *count != 0)
+        {
+            memcpy(grown, *list, (uint64_t)*count * sizeof(uint32_t));
+            if (twin != NULL)
+            {
+                memcpy(grown_twin, *twin, (uint64_t)*count * sizeof(uint32_t));
+            }
+        }
+        if (valid)
+        {
+            *list = grown;
+            *twin = twin != NULL ? grown_twin : NULL;
+            *capacity = grown_capacity;
+        }
+    }
+    if (*count < *capacity)
+    {
+        (*list)[*count] = value;
+        if (twin != NULL)
+        {
+            (*twin)[*count] = second;
+        }
+        *count += 1;
+    }
+}
+
+// Records that the function of declaration `declaration` is multiversioned from declaration `since` on.
+static void check_target_versions_mark(CheckInputReader* reader, uint32_t declaration, uint32_t since)
+{
+    uint32_t* twin = reader->target_mv_since;
+    check_target_versions_append(reader, &reader->target_mv_tokens, &twin, &reader->target_mv_count, &reader->target_mv_capacity, declaration, since);
+    reader->target_mv_since = twin;
+    reader->output->target_multiversion = true;
+}
+
+// Records binding's answer for declaration `token`: a version apart (`redeclared` BUSTER_CHECK_NONE) or the redeclaration
+// of the earlier declaration `redeclared`.
+static void check_target_versions_bind(CheckInputReader* reader, uint32_t token, uint32_t redeclared)
+{
+    uint32_t* twin = reader->target_bind_redeclares;
+    check_target_versions_append(reader, &reader->target_bind_tokens, &twin, &reader->target_bind_count, &reader->target_bind_capacity, token, redeclared);
+    reader->target_bind_redeclares = twin;
+}
+
+// A target string's parse, as clang's TargetInfo::parseTargetAttr gives it: its items between commas, trimmed, fpmath=
+// left out; arch= and tune= (a second of either is its duplicate), branch-protection=, and the features (no-X as -X).
+// Each piece is bytes of the string's text; the features' arrays are in scratch, one entry for each item of the string.
+
+typedef struct CheckTargetVersionParse CheckTargetVersionParse;
+struct CheckTargetVersionParse
+{
+    String8 cpu;
+    String8 tune;
+    String8 branch;
+    // 0 for none, 1 a duplicate arch=, 2 a duplicate tune=.
+    uint32_t duplicate;
+    // Each feature's item, with whether it is negated (no-), in the string's order, then sorted.
+    String8* features;
+    bool* negated;
+    uint32_t feature_count;
+    // Whether scratch had room for the arrays (the output's resource flag set where it hadn't).
+    bool parsed;
+};
+
+static String8 check_target_version_slice(String8 text, uint32_t first, uint32_t last)
+{
+    check_target_version_trim(text, &first, &last);
+    return (String8){ text.pointer + first, last - first };
+}
+
+static bool check_target_version_prefix(String8 item, const char* prefix)
+{
+    const uint64_t length = strlen(prefix);
+    return item.length >= length && memcmp(item.pointer, prefix, length) == 0;
+}
+
+// The caller pops scratch back past the arrays.
+static void check_target_versions_parse(CheckInputReader* reader, String8 text, CheckTargetVersionParse* parse)
+{
+    *parse = (CheckTargetVersionParse){ 0 };
+    const bool is_default = check_input_attribute_equal(text, "default");
+    uint64_t items = 1;
+    for (uint64_t i = 0; i < text.length; i += 1)
+    {
+        items += text.pointer[i] == ',';
+    }
+    parse->features = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, String8, items);
+    parse->negated = parse->features != NULL ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, bool, items) : NULL;
+    parse->parsed = parse->negated != NULL;
+    reader->output->resource |= !parse->parsed;
+    for (uint32_t cursor = 0; parse->parsed && !is_default && cursor <= text.length;)
+    {
+        uint32_t end = cursor;
+        while (end < text.length && text.pointer[end] != ',')
+        {
+            end += 1;
+        }
+        const String8 item = check_target_version_slice(text, cursor, end);
+        cursor = end + 1;
+        // The value after an item's first '=', trimmed.
+        uint32_t equals = 0;
+        while (equals < item.length && item.pointer[equals] != '=')
+        {
+            equals += 1;
+        }
+        const String8 value = equals < item.length ? check_target_version_slice(item, equals + 1, (uint32_t)item.length) : (String8){ 0 };
+        if (check_target_version_prefix(item, "fpmath="))
+        {
+        }
+        else if (check_target_version_prefix(item, "branch-protection="))
+        {
+            parse->branch = value;
+        }
+        else if (check_target_version_prefix(item, "arch=") || check_target_version_prefix(item, "tune="))
+        {
+            String8* slot = item.pointer[0] == 'a' ? &parse->cpu : &parse->tune;
+            parse->duplicate = slot->pointer != NULL ? (item.pointer[0] == 'a' ? 1u : 2u) : parse->duplicate;
+            *slot = slot->pointer != NULL ? *slot : value;
+        }
+        else
+        {
+            const bool negated = check_target_version_prefix(item, "no-");
+            // clang's "-" + the item after its first '-'.
+            uint32_t dash = 0;
+            while (negated && dash < item.length && item.pointer[dash] != '-')
+            {
+                dash += 1;
+            }
+            parse->features[parse->feature_count] = negated ? (String8){ item.pointer + dash + 1, item.length - dash - 1 } : item;
+            parse->negated[parse->feature_count] = negated;
+            parse->feature_count += 1;
+        }
+    }
+}
+
+static int check_target_versions_compare(String8 a, bool a_negated, String8 b, bool b_negated)
+{
+    // "+X" sorts after "-X" ('+' 0x2b is below '-' 0x2d: clang's llvm::sort of the strings with their signs).
+    const char a_sign = a_negated ? '-' : '+';
+    const char b_sign = b_negated ? '-' : '+';
+    int result = a_sign < b_sign ? -1 : a_sign > b_sign ? 1 : 0;
+    const uint64_t shorter = a.length < b.length ? a.length : b.length;
+    const int bytes = result == 0 && shorter != 0 ? memcmp(a.pointer, b.pointer, shorter) : 0;
+    result = result != 0 ? result : bytes != 0 ? bytes : a.length < b.length ? -1 : a.length > b.length ? 1 : 0;
+    return result;
+}
+
+static bool check_target_versions_text_equal(String8 a, String8 b)
+{
+    return a.length == b.length && (a.length == 0 || memcmp(a.pointer, b.pointer, a.length) == 0);
+}
+
+// Whether two target strings parse the same (clang's ParsedTargetAttr ==, each one's features sorted).
+static bool check_target_versions_same(CheckInputReader* reader, String8 a, String8 b)
+{
+    const uint64_t mark = reader->scratch->length;
+    CheckTargetVersionParse left;
+    CheckTargetVersionParse right;
+    check_target_versions_parse(reader, a, &left);
+    check_target_versions_parse(reader, b, &right);
+    CheckTargetVersionParse* parses[2] = { &left, &right };
+    for (uint32_t p = 0; p < 2; p += 1)
+    {
+        CheckTargetVersionParse* parse = parses[p];
+        for (uint32_t i = 1; i < parse->feature_count; i += 1)
+        {
+            const String8 feature = parse->features[i];
+            const bool negated = parse->negated[i];
+            uint32_t at = i;
+            while (at > 0 && check_target_versions_compare(parse->features[at - 1], parse->negated[at - 1], feature, negated) > 0)
+            {
+                parse->features[at] = parse->features[at - 1];
+                parse->negated[at] = parse->negated[at - 1];
+                at -= 1;
+            }
+            parse->features[at] = feature;
+            parse->negated[at] = negated;
+        }
+    }
+    bool same = left.parsed && right.parsed && left.duplicate == right.duplicate && left.feature_count == right.feature_count &&
+                check_target_versions_text_equal(left.cpu, right.cpu) && check_target_versions_text_equal(left.tune, right.tune) &&
+                check_target_versions_text_equal(left.branch, right.branch);
+    for (uint32_t i = 0; same && i < left.feature_count; i += 1)
+    {
+        same = check_target_versions_compare(left.features[i], left.negated[i], right.features[i], right.negated[i]) == 0;
+    }
+    arena_pop_to(reader->scratch, mark);
+    return same;
+}
+
+// Whether `name` is one clang's validateCpuIs takes: a vendor, a CPU type or a subtype of libgcc's CPU model.
+static bool check_target_versions_cpu_is(String8 name)
+{
+    static const char* const names[] =
+    {
+#define BUSTER_CBUILTIN_CPU_FEATURE(NAME, WORD, BIT)
+#define BUSTER_CBUILTIN_CPU_NAME(NAME, FIELD, VALUE) NAME,
+#include "c_builtin_cpu.inc"
+#undef BUSTER_CBUILTIN_CPU_FEATURE
+#undef BUSTER_CBUILTIN_CPU_NAME
+    };
+    bool found = false;
+    for (uint32_t i = 0; !found && i < BUSTER_ARRAY_LENGTH(names); i += 1)
+    {
+        found = strlen(names[i]) == name.length && memcmp(names[i], name.pointer, name.length) == 0;
+    }
+    return found;
+}
+
+// clang's CheckMultiVersionValue for the target attribute `target`: an arch= that validateCpuIs doesn't take, a negated
+// feature, or a feature a version can't name, its error at `name` (with the caused-here note at `caused` where it isn't
+// BUSTER_CHECK_NONE). Whether it was refused.
+static bool check_target_versions_value(CheckInputReader* reader, const CheckInputAttribute* target, uint32_t name, uint32_t caused)
+{
+    const uint64_t mark = reader->scratch->length;
+    CheckTargetVersionParse parse;
+    check_target_versions_parse(reader, target->text, &parse);
+    CheckCpuDispatchError error = CHECK_CPU_DISPATCH_INVALID_OPTION;
+    String8 item = { 0 };
+    if (parse.cpu.length != 0 && !check_target_versions_cpu_is(parse.cpu))
+    {
+        error = CHECK_CPU_DISPATCH_TARGET_ARCHITECTURE;
+        item = parse.cpu;
+    }
+    for (uint32_t i = 0; error == CHECK_CPU_DISPATCH_INVALID_OPTION && i < parse.feature_count; i += 1)
+    {
+        const bool refused = parse.negated[i] || check_target_version_feature(parse.features[i]) < 0;
+        error = refused ? CHECK_CPU_DISPATCH_TARGET_FEATURE : error;
+        // A negated one is named as written: "no-" and the rest.
+        item = refused ? (parse.negated[i] ? (String8){ parse.features[i].pointer - 3, parse.features[i].length + 3 } : parse.features[i]) : item;
+    }
+    if (error != CHECK_CPU_DISPATCH_INVALID_OPTION)
+    {
+        const uint32_t before = reader->output->multiversion_report_count;
+        check_input_cpu_dispatch_report(reader, name, error, caused, caused != BUSTER_CHECK_NONE ? CHECK_INPUT_NOTE_MULTIVERSIONING_CAUSED : CHECK_INPUT_NOTE_NONE,
+                                        target->argument_first);
+        if (reader->output->multiversion_report_count != before)
+        {
+            const uint64_t start = (uint64_t)(item.pointer - target->text.pointer);
+            reader->output->multiversion_reports[before].value = start | (uint64_t)item.length << 32;
+        }
+    }
+    arena_pop_to(reader->scratch, mark);
+    return error != CHECK_CPU_DISPATCH_INVALID_OPTION;
+}
+
+// Whether `token` is in the body of the definition of the function of declaration `declaration` (where clang's use doesn't
+// mark the function used).
+static bool check_target_versions_inside(const CheckInputReader* reader, uint32_t declaration, uint32_t token)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t definition = reader->definition_origins[declaration] != 0 ? reader->definition_origins[declaration] - 1 : BUSTER_CHECK_NONE;
+    uint32_t brace = definition;
+    while (brace < token && parser->tree.roles[brace] != PARSE_ROLE_OPEN_BODY)
+    {
+        brace += 1;
+    }
+    return brace < token && token < parser->tree.parents[brace];
+}
+
+// Whether the function of declaration `declaration` had an evaluated use before the binding events' end: a use event
+// of `name` that reached a declaration of its function (clang's isUsed).
+static bool check_target_versions_used(CheckInputReader* reader, uint32_t name, uint32_t declaration)
+{
+    const CBindings* bindings = &reader->bindings;
+    const uint32_t key = (uint32_t)C_BINDING_ORDINARY * bindings->name_capacity + name;
+    const uint32_t object = reader->objects[declaration];
+    bool used = false;
+    for (uint32_t e = bindings->count; !used && e > bindings->base; e -= 1)
+    {
+        const uint32_t event = e - 1;
+        const uint32_t reached = bindings->operation[event] == C_BINDING_USE && bindings->key[event] == key && bindings->previous[event] != 0 ?
+                                 bindings->declaration[bindings->previous[event] - 1] : BUSTER_CHECK_NONE;
+        used = reached < reader->parser->tokens.count && reader->objects[reached] == object && !check_input_warning_unevaluated(reader, bindings->declaration[event]) &&
+               !check_target_versions_inside(reader, reached, bindings->declaration[event]);
+    }
+    return used;
+}
+
+// The rules against the declaration before (clang's CheckMultiVersionAdditionalRules after its attribute and use checks,
+// areMultiversionVariantFunctionsCompatible): `previous`'s prototype (with the note at `name` where `causes`), the
+// new one's, then the return type, inline specification and linkage. Whether one refused it.
+static bool check_target_versions_compatible(CheckInputReader* reader, uint32_t previous, uint32_t name, TypeId type, bool is_inline, bool is_static)
+{
+    const TypeTable* types = reader->types;
+    bool refused = true;
+    if (previous == BUSTER_CHECK_NONE)
+    {
+        refused = (types->types.flags[type_index(type)] & BUSTER_TYPE_FLAG_PROTOTYPE) == 0;
+        if (refused)
+        {
+            check_input_cpu_dispatch_report(reader, name, CHECK_CPU_DISPATCH_PROTOTYPE, BUSTER_CHECK_NONE, CHECK_INPUT_NOTE_NONE, BUSTER_CHECK_NONE);
+        }
+    }
+    else if ((types->types.flags[type_index(reader->declared_types[previous])] & BUSTER_TYPE_FLAG_PROTOTYPE) == 0)
+    {
+        check_input_cpu_dispatch_report(reader, previous, CHECK_CPU_DISPATCH_PROTOTYPE, name, CHECK_INPUT_NOTE_MULTIVERSIONING_CAUSED, BUSTER_CHECK_NONE);
+    }
+    else if ((types->types.flags[type_index(type)] & BUSTER_TYPE_FLAG_PROTOTYPE) == 0)
+    {
+        check_input_cpu_dispatch_report(reader, name, CHECK_CPU_DISPATCH_PROTOTYPE, BUSTER_CHECK_NONE, CHECK_INPUT_NOTE_NONE, BUSTER_CHECK_NONE);
+    }
+    else
+    {
+        const uint8_t previous_flags = reader->output->function_flags != NULL ? reader->output->function_flags[previous] : 0;
+        const bool previous_static = check_input_linkage(reader->declaration_bits, previous) == 1;
+        const TypeAnswer same = type_same_canonical(types, type_return(types, reader->declared_types[previous]), type_return(types, type));
+        reader->output->resource |= same == TYPE_ANSWER_FULL;
+        const CheckCpuDispatchError different = same != TYPE_ANSWER_YES                                         ? CHECK_CPU_DISPATCH_RETURN_TYPE :
+                                                ((previous_flags & CHECK_INPUT_FUNCTION_INLINE) != 0) != is_inline ? CHECK_CPU_DISPATCH_INLINE :
+                                                previous_static != is_static                                     ? CHECK_CPU_DISPATCH_LINKAGE :
+                                                                                                                   CHECK_CPU_DISPATCH_INVALID_OPTION;
+        refused = different != CHECK_CPU_DISPATCH_INVALID_OPTION;
+        if (refused)
+        {
+            check_input_cpu_dispatch_report(reader, name, different, BUSTER_CHECK_NONE, CHECK_INPUT_NOTE_NONE, BUSTER_CHECK_NONE);
+        }
+    }
+    return refused;
+}
+
+// A walk over a target_clones attribute's versions: each string argument's items between commas, trimmed, in order.
+typedef struct CheckTargetClonesWalk CheckTargetClonesWalk;
+struct CheckTargetClonesWalk
+{
+    const CheckInputAttribute* attribute;
+    String8 text;
+    uint32_t argument;
+    uint32_t cursor;
+    bool valid;
+};
+
+// The walk's next version into `item`; false at its end or on an argument that is not a string.
+static bool check_target_clones_next(CheckInputReader* reader, CheckTargetClonesWalk* walk, String8* item)
+{
+    while (walk->valid && walk->cursor >= walk->text.length && walk->argument < walk->attribute->argument_count)
+    {
+        uint32_t first = 0;
+        uint32_t end = 0;
+        walk->text = (String8){ 0 };
+        walk->valid = check_input_attribute_argument(walk->attribute, walk->argument, &first, &end) && check_input_attribute_string(reader, first, end, false, &walk->text);
+        walk->argument += 1;
+        walk->cursor = 0;
+    }
+    const bool found = walk->valid && walk->cursor < walk->text.length;
+    if (found)
+    {
+        uint32_t item_end = walk->cursor;
+        while (item_end < walk->text.length && walk->text.pointer[item_end] != ',')
+        {
+            item_end += 1;
+        }
+        *item = check_target_version_slice(walk->text, walk->cursor, item_end);
+        walk->cursor = item_end + 1;
+    }
+    return found;
+}
+
+// Whether the target_clones lists of `a` and `b` are the same strings (clang's std::equal of their versions, each string
+// of several versions its versions, as checkTargetClonesAttr split them); any number of versions, walked side by side.
+static bool check_target_versions_same_clones(CheckInputReader* reader, const CheckInputAttribute* a, const CheckInputAttribute* b)
+{
+    CheckTargetClonesWalk walks[2] = {
+        { .attribute = a, .valid = true },
+        { .attribute = b, .valid = true },
+    };
+    bool same = true;
+    bool more = true;
+    while (same && more)
+    {
+        String8 items[2] = { 0 };
+        const bool has_a = check_target_clones_next(reader, &walks[0], &items[0]);
+        const bool has_b = check_target_clones_next(reader, &walks[1], &items[1]);
+        same = has_a == has_b && (!has_a || check_target_versions_text_equal(items[0], items[1]));
+        more = has_a;
+    }
+    return same && walks[0].valid && walks[1].valid;
+}
+
+// clang's CheckMultiVersionFunction for a function's declaration at `name`, of `type` and `attributes`, against the
+// visible declaration of a function before it (`handle` its name's binding), where either is multiversioned by target
+// strings; a cpu_specific or cpu_dispatch one is c_check_cpu_dispatch.c's. Records binding's answer
+// (check_target_versions_bind) and the functions it makes multiversioned.
+static void check_target_versions_rules(CheckInputReader* reader, const CheckInputAttribute* target, const CheckInputAttribute* clones, CheckTargetVersionKind kind,
+                                        const CheckInputAttributes* attributes, uint32_t name, TypeId type, uint32_t handle, bool is_inline, bool is_static, bool main)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t previous = check_cpu_dispatch_visible(reader, handle);
+    const bool function_previous = previous < parser->tokens.count && reader->declaration_kinds[previous] == C_BINDING_FUNCTION;
+    const bool cpu = check_cpu_dispatch_kind(attributes) != CHECK_CPU_DISPATCH_NONE ||
+                     (function_previous && check_cpu_dispatch_kind(check_input_attributes_at(reader->output, previous)) != CHECK_CPU_DISPATCH_NONE);
+    // The previous declaration's attributes, its own or inherited, and whether its function is multiversioned.
+    const CheckInputAttribute* previous_target = function_previous ? check_target_versions_attribute(reader, handle, previous, CHECK_ATTRIBUTE_TARGET) : NULL;
+    const CheckInputAttribute* previous_clones = function_previous ? check_target_versions_attribute(reader, handle, previous, CHECK_ATTRIBUTE_TARGET_CLONES) : NULL;
+    const CheckTargetVersionKind previous_kind = previous_clones != NULL ? CHECK_TARGET_VERSION_CLONES :
+                                                 previous_target != NULL ? CHECK_TARGET_VERSION_TARGET : CHECK_TARGET_VERSION_NONE;
+    const bool multiversioned = function_previous && check_target_versions_since(reader, reader->objects[previous]) != BUSTER_CHECK_NONE;
+    const uint32_t reports = reader->output->multiversion_report_count;
+    bool valid = true;
+    // Binding's answer: BUSTER_CHECK_NONE for the visible declaration's (no record), `name` for a version apart, or the
+    // earlier declaration redeclared.
+    uint32_t bind = BUSTER_CHECK_NONE;
+    if (cpu || (kind == CHECK_TARGET_VERSION_NONE && !multiversioned))
+    {
+    }
+    else if (main)
+    {
+        // main may have a target attribute of a string other than "default" (an optimization hint).
+        valid = kind == CHECK_TARGET_VERSION_TARGET && !check_target_versions_default(target);
+        if (!valid)
+        {
+            check_input_cpu_dispatch_report(reader, name, CHECK_CPU_DISPATCH_MAIN, BUSTER_CHECK_NONE, CHECK_INPUT_NOTE_NONE, BUSTER_CHECK_NONE);
+        }
+    }
+    else if (!function_previous)
+    {
+        // The function's first declaration (CheckMultiVersionFirstFunction): a target other than "default" alone isn't
+        // multiversioning.
+        if (kind == CHECK_TARGET_VERSION_CLONES || check_target_versions_default(target))
+        {
+            valid = !check_target_versions_compatible(reader, BUSTER_CHECK_NONE, name, type, is_inline, is_static);
+            if (valid)
+            {
+                check_target_versions_mark(reader, name, name);
+            }
+        }
+    }
+    else if (multiversioned && kind == CHECK_TARGET_VERSION_NONE)
+    {
+        // A redeclaration of a target_clones function may leave its attribute out; one of target's may not.
+        if (previous_kind != CHECK_TARGET_VERSION_CLONES)
+        {
+            check_input_cpu_dispatch_report(reader, name, CHECK_CPU_DISPATCH_TARGET_REQUIRED, BUSTER_CHECK_NONE, CHECK_INPUT_NOTE_NONE, BUSTER_CHECK_NONE);
+            valid = false;
+        }
+    }
+    else if (!multiversioned && kind == CHECK_TARGET_VERSION_TARGET)
+    {
+        // CheckDeclarationCausesMultiVersioning: another string than the previous one's, or "default", makes the function
+        // multiversioned.
+        const bool causes = check_target_versions_default(target) || (previous_target != NULL && !check_target_versions_text_equal(previous_target->text, target->text));
+        if (!causes)
+        {
+        }
+        else if (check_target_versions_used(reader, parser->tokens.names[name], previous))
+        {
+            check_input_cpu_dispatch_report(reader, name, CHECK_CPU_DISPATCH_AFTER_USE, previous, CHECK_INPUT_NOTE_PREVIOUS_DECLARATION, BUSTER_CHECK_NONE);
+            valid = false;
+        }
+        else if (check_target_versions_compatible(reader, previous, name, type, is_inline, is_static) ||
+                 check_target_versions_value(reader, target, name, BUSTER_CHECK_NONE))
+        {
+            valid = false;
+        }
+        else if (check_target_versions_default(target) && previous_target == NULL)
+        {
+            // The default after a plain declaration redeclares it.
+            check_target_versions_mark(reader, previous, name);
+        }
+        else if (previous_target != NULL && check_target_versions_value(reader, previous_target, previous, name))
+        {
+            valid = false;
+        }
+        else if (previous_target != NULL && check_target_versions_same(reader, previous_target->text, target->text))
+        {
+            check_input_cpu_dispatch_report(reader, name, CHECK_CPU_DISPATCH_TARGET_DUPLICATE, previous, CHECK_INPUT_NOTE_PREVIOUS_DECLARATION, BUSTER_CHECK_NONE);
+            valid = false;
+        }
+        else
+        {
+            // A declaration of the function without its own target attribute after one with it (most recent first).
+            uint32_t missing = BUSTER_CHECK_NONE;
+            for (uint32_t h = handle; missing == BUSTER_CHECK_NONE && h != 0; h = reader->bindings.previous[h - 1])
+            {
+                const uint32_t declaration = reader->bindings.declaration[h - 1];
+                const bool same = declaration < parser->tokens.count && reader->declaration_kinds[declaration] == C_BINDING_FUNCTION &&
+                                  reader->objects[declaration] == reader->objects[previous];
+                const bool own = same && check_target_versions_own(check_input_attributes_at(reader->output, declaration), CHECK_ATTRIBUTE_TARGET) != NULL;
+                const uint32_t earlier = h - 1 < reader->bindings.count ? reader->bindings.previous[h - 1] : 0;
+                missing = same && !own && earlier != 0 &&
+                          check_target_versions_attribute(reader, earlier, declaration, CHECK_ATTRIBUTE_TARGET) != NULL ? declaration : BUSTER_CHECK_NONE;
+            }
+            if (missing != BUSTER_CHECK_NONE)
+            {
+                check_input_cpu_dispatch_report(reader, missing, CHECK_CPU_DISPATCH_TARGET_REQUIRED, name, CHECK_INPUT_NOTE_MULTIVERSIONING_CAUSED, BUSTER_CHECK_NONE);
+                valid = false;
+            }
+            else
+            {
+                check_target_versions_mark(reader, previous, name);
+                check_target_versions_mark(reader, name, name);
+                bind = name;
+            }
+        }
+    }
+    else
+    {
+        // CheckMultiVersionAdditionalDecl, after a target_clones declaration made the function multiversioned (where a use
+        // before refuses it).
+        const bool clones_causes = !multiversioned && kind == CHECK_TARGET_VERSION_CLONES;
+        if (clones_causes && check_target_versions_used(reader, parser->tokens.names[name], previous))
+        {
+            check_input_cpu_dispatch_report(reader, name, CHECK_CPU_DISPATCH_AFTER_USE, BUSTER_CHECK_NONE, CHECK_INPUT_NOTE_NONE, BUSTER_CHECK_NONE);
+            valid = false;
+        }
+        else if (clones_causes)
+        {
+            // clang makes the earlier function multiversioned before the rules below.
+            check_target_versions_mark(reader, previous, name);
+        }
+        if (valid && kind != CHECK_TARGET_VERSION_NONE && previous_kind != CHECK_TARGET_VERSION_NONE && kind != previous_kind)
+        {
+            check_input_cpu_dispatch_report(reader, name, CHECK_CPU_DISPATCH_MIXED, previous, CHECK_INPUT_NOTE_PREVIOUS_DECLARATION, BUSTER_CHECK_NONE);
+            valid = false;
+        }
+        // The earlier versions, most recent first: a redeclaration of one, or a duplicate of it. Any number of them, in
+        // scratch, room for each binding of the name's chain.
+        const uint64_t mark = reader->scratch->length;
+        uint32_t chain = 0;
+        for (uint32_t h = handle; valid && kind != CHECK_TARGET_VERSION_NONE && h != 0; h = reader->bindings.previous[h - 1])
+        {
+            chain += 1;
+        }
+        uint32_t* visited = chain != 0 ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, chain) : NULL;
+        reader->output->resource |= chain != 0 && visited == NULL;
+        const uint32_t count = visited != NULL ? check_cpu_dispatch_previous(reader, handle, visited, chain) : 0;
+        bool redeclaration = false;
+        for (uint32_t v = 0; valid && !redeclaration && v < count; v += 1)
+        {
+            const uint32_t current = visited[v];
+            if (kind == CHECK_TARGET_VERSION_TARGET)
+            {
+                const CheckInputAttribute* current_target = check_target_versions_attribute(reader, handle, current, CHECK_ATTRIBUTE_TARGET);
+                redeclaration = current_target != NULL && check_target_versions_text_equal(current_target->text, target->text);
+                if (!redeclaration && current_target != NULL && check_target_versions_same(reader, current_target->text, target->text))
+                {
+                    check_input_cpu_dispatch_report(reader, name, CHECK_CPU_DISPATCH_TARGET_DUPLICATE, current, CHECK_INPUT_NOTE_PREVIOUS_DECLARATION, BUSTER_CHECK_NONE);
+                    valid = false;
+                }
+            }
+            else
+            {
+                const CheckInputAttribute* current_clones = check_target_versions_attribute(reader, handle, current, CHECK_ATTRIBUTE_TARGET_CLONES);
+                if (current_clones != NULL && !check_target_versions_same_clones(reader, current_clones, clones))
+                {
+                    check_input_cpu_dispatch_report(reader, name, CHECK_CPU_DISPATCH_CLONES_MISMATCH, current, CHECK_INPUT_NOTE_PREVIOUS_DECLARATION, BUSTER_CHECK_NONE);
+                    valid = false;
+                }
+                redeclaration = valid;
+            }
+            bind = redeclaration ? current : bind;
+        }
+        arena_pop_to(reader->scratch, mark);
+        if (!valid || redeclaration || kind == CHECK_TARGET_VERSION_NONE)
+        {
+        }
+        else if (kind == CHECK_TARGET_VERSION_TARGET && check_target_versions_value(reader, target, name, BUSTER_CHECK_NONE))
+        {
+            valid = false;
+        }
+        else if (check_target_versions_compatible(reader, previous, name, type, is_inline, is_static))
+        {
+            valid = false;
+        }
+        else
+        {
+            // A new version of its own.
+            check_target_versions_mark(reader, name, name);
+            bind = name;
+        }
+    }
+    if (!valid || reader->output->multiversion_report_count != reports)
+    {
+        check_cpu_dispatch_invalidate(reader, name);
+    }
+    else if (bind != BUSTER_CHECK_NONE)
+    {
+        check_target_versions_bind(reader, name, bind == name ? BUSTER_CHECK_NONE : bind);
+    }
+}
+
+static void check_input_target_versions_declaration(CheckInputReader* reader, const CheckInputAttributes* attributes, uint32_t name, TypeId type,
+                                                    uint32_t handle, bool is_inline, bool is_static, bool main)
+{
+    const CheckInputAttribute* target = check_target_versions_own(attributes, CHECK_ATTRIBUTE_TARGET);
+    const CheckInputAttribute* clones = check_target_versions_own(attributes, CHECK_ATTRIBUTE_TARGET_CLONES);
+    const CheckTargetVersionKind kind = clones != NULL ? CHECK_TARGET_VERSION_CLONES : target != NULL ? CHECK_TARGET_VERSION_TARGET : CHECK_TARGET_VERSION_NONE;
+    // The usual declaration, of neither attribute in a unit of no multiversioned function (a header's intrinsics are
+    // target functions of their own names), asks nothing more.
+    if (kind != CHECK_TARGET_VERSION_NONE || reader->target_mv_count != 0)
+    {
+        check_target_versions_rules(reader, target, clones, kind, attributes, name, type, handle, is_inline, is_static, main);
+    }
+}
+
+// For check_input_bind: the earlier declaration a declaration `token` of a function multiversioned by target strings
+// redeclares, or BUSTER_CHECK_NONE; *separate is whether it is an entity apart from the visible declaration before it (a
+// version of its own, or one its rules refused).
+static uint32_t check_input_target_versions_match(CheckInputReader* reader, uint32_t token, bool* separate)
+{
+    uint32_t result = BUSTER_CHECK_NONE;
+    bool found = false;
+    for (uint32_t i = reader->target_bind_count; !found && i > 0; i -= 1)
+    {
+        found = reader->target_bind_tokens[i - 1] == token;
+        result = found ? reader->target_bind_redeclares[i - 1] : result;
+    }
+    // A redeclaration of a version is apart from the visible declaration too: check_input_cpu_dispatch_redeclare joins it
+    // to its version.
+    *separate = found || check_cpu_dispatch_invalid(reader, token);
+    return result;
+}
+
+// The calls of a function multiversioned by target strings that no default version reaches (#1838): for each use event
+// of a multiversioned function's name that is a call's callee, the function's versions visible there (along its name's
+// chain), one of which must be target("default") or target_clones once the function is multiversioned there; clang's
+// "no matching function for call to 'f'" at the callee otherwise. Run once the walk is done, for a unit with one.
+static void check_input_target_versions_calls(CheckInputReader* reader)
+{
+    const Parser* parser = reader->parser;
+    const CBindings* bindings = &reader->bindings;
+    for (uint32_t event = bindings->base; reader->output->target_multiversion && bindings->valid && event < bindings->count; event += 1)
+    {
+        const uint32_t reached = bindings->operation[event] == C_BINDING_USE && bindings->previous[event] != 0 ? bindings->declaration[bindings->previous[event] - 1] : BUSTER_CHECK_NONE;
+        const uint32_t use = bindings->declaration[event];
+        const bool function = reached < parser->tokens.count && reader->declaration_kinds[reached] == C_BINDING_FUNCTION && use < parser->tokens.count;
+        uint32_t group = use;
+        const uint32_t end = function ? check_input_callee_end(parser, use, &group) : use;
+        const uint32_t close = function ? parser->tree.parents[end] : BUSTER_CHECK_NONE;
+        const bool call = close < parser->tokens.count && parser->tree.roles[close] == PARSE_ROLE_CLOSE_CALL && end + 1 < close &&
+                          parser->tree.roles[end + 1] == PARSE_ROLE_OPEN_CALL;
+        bool multiversioned = false;
+        bool reachable = false;
+        for (uint32_t h = call ? bindings->previous[event] : 0; h != 0; h = bindings->previous[h - 1])
+        {
+            const uint32_t declaration = bindings->declaration[h - 1];
+            const bool version = declaration < parser->tokens.count && declaration < use && reader->declaration_kinds[declaration] == C_BINDING_FUNCTION &&
+                                 !check_cpu_dispatch_invalid(reader, declaration);
+            const uint32_t since = version ? check_target_versions_since(reader, reader->objects[declaration]) : BUSTER_CHECK_NONE;
+            multiversioned |= since < use;
+            const CheckInputAttributes* attributes = version ? check_input_attributes_at(reader->output, declaration) : NULL;
+            reachable |= check_target_versions_default(check_target_versions_own(attributes, CHECK_ATTRIBUTE_TARGET)) ||
+                         check_target_versions_own(attributes, CHECK_ATTRIBUTE_TARGET_CLONES) != NULL;
+        }
+        if (call && multiversioned && !reachable)
+        {
+            // At the callee's outermost parenthesis, as clang's call begins; the name is `attribute`'s.
+            const uint32_t before = reader->output->multiversion_report_count;
+            check_input_cpu_dispatch_report(reader, group, CHECK_CPU_DISPATCH_NO_MATCH, BUSTER_CHECK_NONE, CHECK_INPUT_NOTE_NONE, use);
+            if (reader->output->multiversion_report_count != before)
+            {
+                // Published where the call is (no declaration's attributes complete it).
+                reader->output->multiversion_reports[before].completion = 0;
+            }
+        }
+    }
+}
+
 #endif

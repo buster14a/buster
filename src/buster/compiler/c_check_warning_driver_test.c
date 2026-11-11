@@ -695,6 +695,14 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .warnings = 2,
     },
     {
+        .name = "duplicate specifiers in operand type names",
+        .source = "typeof(unsigned unsigned int) q;\nint r = sizeof(typeof(const const int));\nenum E : unsigned unsigned short { A };\n"
+                  "_Atomic(signed signed char) s;\ntypeof(_Atomic _Atomic int) t;\n"
+                  "int f(void) { return sizeof(short short) + (int)(typeof(volatile volatile long))1; }\n",
+        .warnings = 7,
+        .compare_warning_text = true,
+    },
+    {
         .name = "duplicate declaration specifier group disabled",
         .source = "const const int value;\n",
         .options = { "-Wno-duplicate-decl-specifier" },
@@ -1649,6 +1657,41 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .options = { "-Wsign-compare" },
     },
     {
+        // A statement expression whose value is unevaluated has no node evaluated either (check_common_region_evaluation):
+        // -Wuninitialized reads none of its reads and writes. `sizeof ({ ... })`'s `(` is the statement expression's own.
+        .name = "uninitialized variables in unevaluated statement expressions",
+        .source = "int f1(void) { int u; (void)sizeof(({ u = 1; })); return u; }\n"
+                  "int f2(void) { int u; (void)sizeof(({ u; })); u = 2; return u; }\n"
+                  "int f3(int n) { int u; (void)(n ? sizeof(({ u; })) : 0); return 0; }\n"
+                  "int f4(void) { int u; (void)({ u = 1; }); return u; }\n"
+                  "int f5(void) { int u; return (int)sizeof ({ u; }); }\n"
+                  "int f6(void) { int u; return (int)sizeof ({ int v = u; v; }) + (int)__alignof__(({ u; })); }\n"
+                  "int f8(void) { int u; return _Generic(1, long: ({ u; }), default: 0); }\n"
+                  "int f9(int n) { return sizeof ({ n; }) + sizeof({ (char)n; }) + sizeof ({ int k = n; k; }) * 2; }\n"
+                  "int f10(int n) { int u; return (int)sizeof(({ ({ u; }); })) + (int)sizeof(({ (void)sizeof(({ u = 1; })); 1; })) + u; }\n",
+        .options = { "-Wall", "-Wno-unevaluated-expression" },
+        .warnings = 2,
+        .notes = 2,
+    },
+    {
+        // A statement expression whose value is unevaluated has no node evaluated either (check_common_region_evaluation):
+        // -Wuninitialized reads none of its reads and writes. `sizeof ({ ... })`'s `(` is the statement expression's own.
+        .name = "uninitialized variables in unevaluated statement expressions under -Wextra in C23",
+        .source = "int f1(void) { int u; (void)sizeof(({ u = 1; })); return u; }\n"
+                  "int f2(void) { int u; (void)sizeof(({ u; })); u = 2; return u; }\n"
+                  "int f3(int n) { int u; (void)(n ? sizeof(({ u; })) : 0); return 0; }\n"
+                  "int f4(void) { int u; (void)({ u = 1; }); return u; }\n"
+                  "int f5(void) { int u; return (int)sizeof ({ u; }); }\n"
+                  "int f6(void) { int u; return (int)sizeof ({ int v = u; v; }) + (int)__alignof__(({ u; })); }\n"
+                  "int f8(void) { int u; return _Generic(1, long: ({ u; }), default: 0); }\n"
+                  "int f9(int n) { return sizeof ({ n; }) + sizeof({ (char)n; }) + sizeof ({ int k = n; k; }) * 2; }\n"
+                  "int f10(int n) { int u; return (int)sizeof(({ ({ u; }); })) + (int)sizeof(({ (void)sizeof(({ u = 1; })); 1; })) + u; }\n",
+        .options = { "-Wall", "-Wextra", "-Wno-unevaluated-expression" },
+        .warnings = 3,
+        .notes = 2,
+        .c23 = true,
+    },
+    {
         .name = "typeof statement expressions are unevaluated",
         .source = "int *q;\nvoid f(int x) {\n    __typeof__(({ *q; x == 1; x = x; x / 0; 1; })) t = 0;\n"
                   "    typeof(({ (0, x); (void *)q; 1; })) v = 0;\n    (void)t;\n    (void)v;\n}\n",
@@ -1742,6 +1785,19 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
                   "void h(int p, int r) { int u; (void)r; }\n",
         .options = { "-Wall", "-Wextra" },
         .warnings = 8,
+    },
+    {
+        // Files that line markers enter (#1954): each diagnostic in one prints clang's "In file included from" chain of the
+        // markers' lines when it differs from the last one's, nested, after a flag 2 returns, and for a system header's
+        // (silent here) and a user file's entered from the same presumed line; the main file's, the preprocessor's error
+        // after them, none.
+        .name = "include stacks of files line markers enter",
+        .source = "# 1 \"lm_main.c\"\n# 1 \"outer.h\" 1\n# 1 \"inner.h\" 1\nint f(void) { return 1 << 40; }\n"
+                  "int f2(void) { return 1 << 41; }\n# 2 \"outer.h\" 2\nint g(void) { return 1 << 33; }\n"
+                  "# 3 \"lm_main.c\" 2\nint h(void) { return 1 << 34; }\n# 1 \"again.h\" 1 3 4\nint k(void) { return 1 << 35; }\n"
+                  "# 4 \"lm_main.c\" 2\n# 1 \"user.h\" 1\nint m(void) { return 1 << 36; }\n# 5 \"lm_main.c\" 2\n#error done\n",
+        .warnings = 5,
+        .errors = 1,
     },
     {
         // Clang takes the overflow builtins of _BitInts past 128 bits (#1447) but mul_overflow's of a signed one, as an

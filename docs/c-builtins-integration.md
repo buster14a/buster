@@ -1904,19 +1904,29 @@ object p points to, as clang's `PaddingClearer` does.
   - an atomic type's bits past its value's;
   - a vector's past its elements (a bool ext vector's past one bit each).
 
-  `check_lower_padding` walks the type with an explicit stack and sets each
-  held bit in a bitmap of the object's.
+  `check_lower_padding_entries` (`c_check_program_padding.c`) walks the
+  element's type with an explicit stack before the function lanes run, once a
+  call, each held piece an interval of bits; an inner array's first element is
+  walked and its intervals copied for the others, or merged into one where the
+  element has no padding (#1842). The intervals are sorted and merged.
 - **Stores.** A byte with no bit held is a zero, in runs stored 8, 4, 2 and 1
   bytes at a time. A byte with some is its load ANDed with their mask. An
   array's elements, through arrays of arrays, are cleared in a loop by their
   element's stores. A variable length array is left as it is, as clang's code
-  leaves it.
-- **Limits.** An element past 4 KiB, or one whose stores pass a builtin's
-  entries (about 40 runs or bytes), is refused by name.
-- **Difference.** Clang's walk doesn't look through a typedef of an array
-  type (`dyn_cast<ConstantArrayType>` of the sugared type), so it keeps such
-  an array's padding. The type table here has no typedef sugar, so the
-  padding is cleared.
+  leaves it. Where an element's stores would pass about 460 of a builtin's
+  entries (some 40 runs), its entries (offset, bytes and mask, 8 bytes each)
+  are a read-only pool of the unit's, which the recipe's loop reads
+  (`cbuiltin_misc_lower_padding_table`): the same bytes cleared, by a few
+  dozen typed entries whatever the element's size (#1842).
+- **Limits.** An element past 4 GiB, a type nested more than 64 levels, or
+  an element of more than 1,048,576 intervals or entries is refused by name.
+- **Difference.** Clang's walk doesn't look through an array type's sugar
+  (`dyn_cast<ConstantArrayType>` of the sugared type), so it keeps the padding
+  of an array of a typedef's type, of `typeof`'s, or that a pointer declared
+  with parentheses points to (`struct S (*p)[2]`, `ParenType` sugar), and of
+  such an array member; a complex typedef's padding is cleared (`getAs`). The
+  type table here has no sugar, so the padding is cleared (#1842 asks which
+  way to take).
 
 `__builtin_invoke(f, a...)` (0x455, #148) is the call `f(a...)` in C, as
 clang's Sema builds it.
@@ -2338,11 +2348,17 @@ record dump, as `BuiltinDumpStruct` checks it.
   (`CheckLowerInitializers.dumps`), each string once. A field's value is
   read through the record's address (a bit-field's from its first byte) and
   promoted as a variadic argument; a vector passes as a call's does. A
-  call's result is discarded.
-- **Refusals.** A printer that returns an aggregate, a 128-bit or a
-  half-precision value, or takes such values, rest arguments with a
-  statement expression or more than 4096 nodes, and records of more than
-  4096 lines, 1 MiB of strings or 64 levels are refused by name.
+  call's result is discarded. A printer that returns or takes a struct, a
+  union, a long double, a 128-bit integer, a half-precision value or a
+  vector, or returns a complex value, passes and returns them as a call's do
+  (`check_lower_dump_argument`, a result in an object of the call's, #1842).
+- **Refusals.** A printer that takes a transparent union or an `_Atomic`
+  aggregate, a complex rest argument (the checker's "expression is not yet
+  supported"), rest arguments with a statement expression or more than 4096
+  nodes, and records of more than 1 GiB of strings or 64 levels are refused
+  by name. A record's lines and strings grow as they need (the strings are
+  found again through a hash table of their offsets), so a record of any
+  number of fields is dumped (#1842).
 
 `__builtin_available(spec, ...)` (0x4b4, #148) is clang's availability check,
 a keyword whose specs are no expressions: each a `*`, or a platform's name and

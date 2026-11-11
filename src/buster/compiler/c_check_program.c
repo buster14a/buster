@@ -4054,6 +4054,16 @@ static bool check_program_targets(CheckProgram* program, const CheckProgramOptio
                 }
             }
         }
+        // A version of a function multiversioned by target strings (#1838): a function of its name another object with a
+        // target attribute has (the checker keeps each version apart). A lone "default" is still compiled as the function.
+        for (uint32_t e = low; input->target_multiversion && !versions && e < count && (uint32_t)(keys[e] >> 32) == body.object; e += 1)
+        {
+            const uint32_t token = (uint32_t)keys[e];
+            for (uint32_t other = 0; !versions && other < count; other += 1)
+            {
+                versions = (uint32_t)(keys[other] >> 32) != body.object && program->parser->tokens.names[(uint32_t)keys[other]] == program->parser->tokens.names[token];
+            }
+        }
         uint32_t target = versions ? BUSTER_CHECK_PROGRAM_TARGET_VERSIONS : 0;
         const String8 text = specific != 0 && !versions ? check_program_cpu_version_features(program, specific, output) : applied != 0 ? applied->text : (String8){ 0 };
         valid &= specific == 0 || versions || text.pointer != 0;
