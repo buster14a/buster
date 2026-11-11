@@ -391,18 +391,35 @@ units, `--lanes N` and pinned lanes start as before.
 
 On the 9700X a one-line `-c` then made 129 system calls rather than 233 (no
 `clone3` against 7, no `futex` against 14), about 430 page faults rather than
-610 and no context switch against 19, in 0.63 ms of task clock rather than 0.99
-(36% less). Run 8 at a time, 400 of them took 70 ms rather than 94, with 32%
-fewer cycles on every CPU, and 400 of a `#include <stdio.h>` file 122 ms rather
-than 143. Run one at a time, as a configure script runs its tests, they took
-22% to 28% longer, with 24% to 38% fewer cycles: on Linux 6.18 a process exits
-before its address space is torn down, in a kworker, only if it has 6 threads
-or more, so a process of one tears it down in its exit (90 µs of the one-line
-`-c`'s, 130 µs of the `stdio.h` file's), and, most likely, the lanes had kept
-cores out of deep idle for the next process, which now starts and runs on an
-idle one (140 and 260 µs). `sqlite3.c`'s `-c`, a unit of 200 functions on several lanes and
-four units' objects didn't change beyond their floors. The
-[measurements](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/lazy-lanes-1444-2026-11-11)
+610 and no context switch against 19, in 0.58 ms of task clock rather than
+0.99. Run 8 at a time, 400 of them took 70 ms rather than 96, with 36% fewer
+cycles on every CPU. Run one at a time, as a configure script runs its tests,
+they took 16% longer (a `#include <stdio.h>` file's 20%): on Linux 6.18 a
+process exits before its address space is torn down, in a kworker, only if it
+has 6 threads or more, so a process of one tears it down in its exit (90 µs of
+the one-line `-c`'s, 130 µs of the `stdio.h` file's), and, most likely, the
+lanes had kept cores out of deep idle for the next process, which now starts
+and runs on an idle one ([measurements](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/lazy-lanes-1444-2026-11-11)).
+
+So a source command whose lanes created no thread leaves its teardown to a
+helper as it exits (`lane_exit_helper_start`, `lane.c`): its streams flushed and
+every descriptor closed, it starts a process that shares its address space and
+holds nothing else, which ends as it does, so that its parent's wait returns
+before `exit_mmap` runs. It starts only where PID 1 reaps orphans
+(`lane_exit_reaped`, a read of `/proc/1/stat` of about 3 µs), or by
+`BUSTER_EXIT_HELPER=1`: a PID 1 that never waits, as in some containers and
+virtual machines, would keep each helper as a zombie, a process ID per compile.
+With it the one-line `-c`'s process took 0.31% longer than main's run one at a
+time (`time-runs`, the floor −0.23%), a `stdio.h` file's 1.43% less, and an empty
+file's `-fsyntax-only`, which never had lanes, 3.5% less. 400 one-line compiles in
+a row took 305 ms against main's 307 and 357 without the helper; the `stdio.h`
+file's 840 ms against 767 and 921, its next process still starting on an idle
+core; 8 at a time 72 and 125 ms against main's 96 and 146, with 31% and 20%
+fewer cycles on every CPU, the helpers' among them. The helper's start costs
+about 0.7 million cycles of a serial compile's, on a second core.
+`sqlite3.c`'s `-c`, a unit of 200 functions on several lanes and four units'
+objects start their lanes, start no helper and didn't change beyond their
+floors. The [measurements](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/exit-helper-1444-2026-11-11)
 have the runs.
 
 ### Memory
