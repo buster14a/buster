@@ -378,7 +378,11 @@ static bool pp_test_builtin_targets(const char* directory)
 // strlcat's and strlcpy's __has_builtin as Debian's patched table does (none, which -fno-builtin-NAME gives), so the whole
 // builtin-targets run under it must pass while skipping only those two names — every other answer still compares. It
 // reaches the configured clang through a path with a space and the shell's metacharacters (clang_release_wrapper).
-// CI's clang is the reference, whose own run skips nothing and can't reach this path.
+// CI's clang is the reference, whose own run skips nothing and can't reach this path. Its runs stay children under
+// --clang-server, whose server stands for "clang" alone (oracle_run_servable): the wrapper is another program, with a
+// --version of its own, which reaches clang through its trampoline's exec, the path this check is for, and /bin/sh
+// sets PWD where the environment's is missing or stale, which LLVM reads for its working directory. A served run would
+// stand for clang, not for the script.
 static bool pp_test_builtin_release(const char* directory)
 {
     char wrapper[4200];
