@@ -660,6 +660,9 @@ static bool check_driver_warning_parentheses(const Parser* parser, const TypeTab
     return valid;
 }
 
+// c_check_semantic_diagnostic.c's, included after this file: an expression's text with expression spacing.
+static const char* check_semantic_requirement(const Parser* parser, Preprocessor* pp, uint32_t first, uint32_t end, Arena* scratch);
+
 // The sugar a typeof specifier prints as (#1837), clang's TypePrinter's: `typeof(T)` (`typeof_unqual(T)`) with its operand
 // type T as clang prints it, a typedef name as written and a nested typeof as its own sugar; `typeof (x)` of an expression
 // that is one name. Empty where it can't tell (another expression, or a type name that spells a typedef inside it), which
@@ -685,15 +688,38 @@ static String8 check_driver_typeof_text(const Parser* parser, Preprocessor* pp, 
         const bool typedef_name = resolved != 0 && resolved < input->token_count && input->declaration_kinds[resolved] == C_BINDING_TYPEDEF;
         const bool nested = close < count && first < close && parser->tokens.kinds[first] == PARSE_KIND_TYPEOF && check_input_typeof_name(parser->tokens.names[first]) &&
                             first + 1 < close && parser->tokens.kinds[first + 1] == PARSE_KIND_L_PAREN && parser->tree.parents[first + 1] + 1 == close;
-        // A type name of keywords and tags alone: its type prints as clang prints it.
+        // A type name of keywords, tags and typedef names alone: its type prints as clang prints it, each typedef name as
+        // written (`typeof(L *)`, #1837).
         bool keywords = close < count && first < close;
+        TypeId alias_types[4];
+        String8 alias_names[4];
+        uint32_t alias_count = 0;
         for (uint32_t token = first; keywords && token < close; token += 1)
         {
             const uint8_t kind = parser->tokens.kinds[token];
+            const uint32_t named = kind == PARSE_KIND_IDENTIFIER && input->declarations != NULL && token < input->token_count ? input->declarations[token] : 0;
+            const bool alias = named != 0 && named != token && named < input->token_count && input->declaration_kinds[named] == C_BINDING_TYPEDEF &&
+                               !(token > first && (parser->tokens.kinds[token - 1] == PARSE_KIND_STRUCT || parser->tokens.kinds[token - 1] == PARSE_KIND_ENUM));
             keywords = kind == PARSE_KIND_TYPE || kind == PARSE_KIND_QUALIFIER || kind == PARSE_KIND_STRUCT || kind == PARSE_KIND_ENUM ||
                        kind == PARSE_KIND_STAR || (kind == PARSE_KIND_ATOMIC && !(token + 1 < close && parser->tokens.kinds[token + 1] == PARSE_KIND_L_PAREN)) ||
-                       (kind == PARSE_KIND_IDENTIFIER && token > first && (parser->tokens.kinds[token - 1] == PARSE_KIND_STRUCT || parser->tokens.kinds[token - 1] == PARSE_KIND_ENUM));
+                       (kind == PARSE_KIND_IDENTIFIER && token > first && (parser->tokens.kinds[token - 1] == PARSE_KIND_STRUCT || parser->tokens.kinds[token - 1] == PARSE_KIND_ENUM)) ||
+                       (alias && alias_count < BUSTER_ARRAY_LENGTH(alias_types) && type_is_valid(types, input->declared_types[named]));
+            if (keywords && alias)
+            {
+                const uint32_t name = parser->tokens.names[token];
+                alias_types[alias_count] = input->declared_types[named];
+                alias_names[alias_count] = (String8){ .pointer = (char*)intern_bytes(pp->table, name), .length = intern_length(pp->table, name) };
+                alias_count += 1;
+            }
         }
+        // Any other operand that is an expression prints as clang's StmtPrinter does, with expression spacing
+        // (`typeof (x + 1)`, check_semantic_requirement).
+        const uint8_t lead = close < count && first < close ? parser->tokens.kinds[first] : PARSE_KIND_SEMI;
+        const uint32_t lead_named = lead == PARSE_KIND_IDENTIFIER && input->declarations != NULL && first < input->token_count ? input->declarations[first] : 0;
+        const bool lead_type = lead == PARSE_KIND_TYPE || lead == PARSE_KIND_QUALIFIER || lead == PARSE_KIND_STRUCT || lead == PARSE_KIND_ENUM ||
+                               lead == PARSE_KIND_ATOMIC || lead == PARSE_KIND_TYPEOF ||
+                               (lead_named != 0 && lead_named < input->token_count && input->declaration_kinds[lead_named] == C_BINDING_TYPEDEF);
+        const bool operand = close < count && first < close && !lead_type && !nested && !(one && lead == PARSE_KIND_IDENTIFIER);
         if (typedef_name)
         {
             const uint32_t name = parser->tokens.names[first];
@@ -714,7 +740,17 @@ static String8 check_driver_typeof_text(const Parser* parser, Preprocessor* pp, 
         {
             // The outermost keyword's type: a nested typeof's own is read by the constant reader, which records none, and
             // is that one's.
-            inner = type_print(types, scratch, input->declared_types[chain[0]], (String8){ 0 }, names, options);
+            TypeNames written = *names;
+            written.alias_types = alias_count != 0 ? alias_types : names->alias_types;
+            written.alias_names = alias_count != 0 ? alias_names : names->alias_names;
+            written.alias_count = alias_count != 0 ? alias_count : names->alias_count;
+            inner = type_print(types, scratch, input->declared_types[chain[0]], (String8){ 0 }, &written, options);
+        }
+        else if (operand)
+        {
+            const char* printed = check_semantic_requirement(parser, pp, first, close, scratch);
+            inner = printed != NULL ? (String8){ .pointer = (char*)printed, .length = strlen(printed) } : (String8){ 0 };
+            expression = inner.length != 0;
         }
     }
     String8 result = { 0 };
@@ -1167,7 +1203,7 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
             const CheckInputSymbolPragma* record = check_input_symbol_warning(input, event);
             const CheckInputMsPragma* layout = check_input_ms_warning(input, event);
             const CheckInputPackPragma* packing = check_input_pack_warning(input, event);
-            result = packing != NULL ? check_input_pack_align_message(packing) : result;
+            result = packing != NULL ? check_input_pack_message(packing, event, scratch) : result;
             if (layout != NULL)
             {
                 result = layout->warning == 1 ? "incorrect use of '#pragma ms_struct on|off' - ignored" :
@@ -2039,12 +2075,46 @@ static bool check_driver_warning_events_at(const Parser* parser, Preprocessor* p
                         const CheckInputSymbolPragma* record = check_input_symbol_warning(input, event);
                         const CheckInputMsPragma* layout = check_input_ms_warning(input, event);
                         const CheckInputPackPragma* packing = check_input_pack_warning(input, event);
-                        // An align=reset's empty stack is Sema's, where the parser handles the directive (#1849).
+                        // An align=reset's empty stack is Sema's, where the parser handles the directive, and so are pack's
+                        // own Sema warnings and its unterminated pushes at the unit's end (#1849).
                         const bool semantic = (record != NULL && record->warning >= CHECK_SYMBOL_WARNING_UNDECLARED) ||
-                                              (packing != NULL && packing->align_warning == CHECK_PACK_ALIGN_RESET_EMPTY);
+                                              (packing != NULL && check_input_pack_semantic(packing, event));
                         const uint32_t location = record != NULL ? record->diagnostic_location : layout != NULL ? layout->diagnostic_location :
-                                                  packing != NULL ? packing->diagnostic_location : 0;
-                        if (location != 0)
+                                                  packing != NULL && !semantic ? packing->diagnostic_location : 0;
+                        // An unterminated push's note (#1849): at the directive that set the current value, or without a
+                        // place where none did.
+                        const bool pack_note = packing != NULL && event->payload.name == CHECK_PACK_MESSAGE_UNTERMINATED && event->payload.token != BUSTER_CHECK_PACK_NO_NOTE;
+                        const bool pack_placed = pack_note && event->payload.token != BUSTER_CHECK_PACK_UNLOCATED_NOTE && event->payload.token < pp->output.count;
+                        const PPDiagnosticSourceNote pack_notes[1] = {
+                            {
+                                .location = pack_placed ? pp->output.locations[event->payload.token] : 0,
+                                .origin = pack_placed ? pp_history_at(pp, event->payload.token) : 0,
+                                .message = "did you intend to use '#pragma pack (pop)' instead of '#pragma pack()'?",
+                            },
+                        };
+                        // An inclusion that changes the value (#1849): at its file name, where its output ends, with clang's note
+                        // at the directive that set the value there, or without a place where none did.
+                        const CheckPackInclude* included = packing != NULL && event->payload.name == CHECK_PACK_MESSAGE_INCLUDE &&
+                                                           event->payload.token < input->pack_pragmas->include_count ? input->pack_pragmas->includes + event->payload.token : NULL;
+                        const bool include_placed = included != NULL && included->note < pp->output.count;
+                        const PPDiagnosticSourceNote include_notes[1] = {
+                            {
+                                .location = include_placed ? pp->output.locations[included->note] : 0,
+                                .origin = include_placed ? pp_history_at(pp, included->note) : 0,
+                                .message = "previous '#pragma pack' directive that modifies alignment is here",
+                            },
+                        };
+                        if (included != NULL)
+                        {
+                            pp_diagnose_placed_sources_phase(pp, disposition, included->location, 0, included->exit, PP_DIAGNOSTIC_LEXICAL, include_notes, 1, "%s%s",
+                                                             message, suffix);
+                        }
+                        else if (pack_note)
+                        {
+                            pp_diagnose_placed_sources_phase(pp, disposition, pp->output.locations[source], pp_history_at(pp, source), boundary, PP_DIAGNOSTIC_SEMANTIC,
+                                                             pack_notes, 1, "%s%s", message, suffix);
+                        }
+                        else if (location != 0)
                         {
                             const uint32_t saved_position = pp->diagnostic_position;
                             pp->diagnostic_position = event->payload.token;
@@ -2053,7 +2123,13 @@ static bool check_driver_warning_events_at(const Parser* parser, Preprocessor* p
                         }
                         else
                         {
-                            pp_diagnose_output_phase(pp, disposition, source, semantic ? boundary : event->payload.token,
+                            // A pack directive's own Sema warning is at the directive, which the parser consumes before it
+                            // reads on (#1849): after its own parser warnings, before the next directive's.
+                            // That is the parser's boundary at the next token, where it handles the annotation, but before the
+                            // next pack directive, whose line it lexes only after.
+                            const bool directive = packing != NULL && semantic && event->completion_kind != CHECK_WARNING_COMPLETE_TU_END && !packing->align;
+                            const uint32_t following = directive ? check_input_pack_following(parser, input->pack_pragmas, packing) : UINT32_MAX;
+                            pp_diagnose_output_phase(pp, disposition, source, directive && following < boundary ? following : semantic ? boundary : event->payload.token,
                                                      semantic ? PP_DIAGNOSTIC_SEMANTIC : PP_DIAGNOSTIC_LEXICAL, "%s%s", message, suffix);
                         }
                     }

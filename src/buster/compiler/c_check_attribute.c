@@ -4990,6 +4990,14 @@ static TypeId check_input_attribute_mode(CheckInputReader* reader, CheckInputAtt
 // bytes), which gives the enum clang's layout. 0 for another type (XC's and TC's 32 bytes, which no integer has), which
 // still stops the reader. (HC's complex __fp16, which the type table can't make, installs nothing: its enum is one with no
 // mode, 4 bytes aligned to 4 where clang's are aligned to 2.)
+// Whether `installed` is a complex type no integer stands in for (#1447: XC's and TC's 32 bytes): its error recovers all
+// the same, the enum one with no mode, as HC's is.
+static bool check_input_mode_enum_wide(const TypeTable* types, TypeId installed)
+{
+    const TypeId bare = installed != 0 ? type_strip_aligned(types, installed) : 0;
+    return bare != 0 && type_kind(types, bare) == BUSTER_TYPE_KIND_COMPLEX && type_size(types, bare) > 16;
+}
+
 static TypeId check_input_mode_enum_integer(const TypeTable* types, TypeId installed, uint8_t* alignment_log2)
 {
     const TypeId bare = installed != 0 ? type_strip_aligned(types, installed) : 0;
