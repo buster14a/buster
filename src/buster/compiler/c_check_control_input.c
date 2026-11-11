@@ -1182,6 +1182,36 @@ static bool check_input_local_label_ambiguous(const CheckLocalLabels* locals, ui
     return shadowed != 0 && locals->ends[shadowed - 1] == locals->ends[entry];
 }
 
+// clang's "use of undeclared label" at `token`, a label's name, given where clang gives it: as the scope that declares the
+// label pops, at `close` (a block's closing brace for a local label's list, the function body's for a label of the
+// function's own), after the errors before it. A function's label (`function`) is reported once: clang's function scope
+// creates a name's label at its first reference, which the later ones find (CheckInputReport.detail marks it, and a later
+// one of the same name at the same close is none). An error's path alone.
+static void check_input_report_label_undeclared(CheckInputReader* reader, uint32_t token, uint32_t close, bool function)
+{
+    const CheckInput* input = reader->output;
+    const Parser* parser = reader->parser;
+    const uint32_t name = parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER ? parser->tokens.names[token] : BUSTER_CHECK_NONE;
+    bool reported = false;
+    for (uint32_t r = input->report_count; !reported && name != BUSTER_CHECK_NONE && close != 0 && r-- > 0;)
+    {
+        const CheckInputReport* report = input->reports + r;
+        reported = function && report->message == CHECK_INPUT_LABEL_UNDECLARED && report->detail == 1 && report->sort == close && report->token < parser->tokens.count &&
+                   parser->tokens.kinds[report->token] == PARSE_KIND_IDENTIFIER && parser->tokens.names[report->token] == name;
+    }
+    const uint32_t before = input->report_count;
+    if (!reported)
+    {
+        check_input_report(reader, token, CHECK_INPUT_LABEL_UNDECLARED);
+    }
+    if (reader->output->report_count > before)
+    {
+        reader->output->reports[before].sort = close;
+        reader->output->reports[before].repeated = true;
+        reader->output->reports[before].detail = function ? 1 : 0;
+    }
+}
+
 // Pops the local labels whose blocks end before `token`: every label of a block, a run of entries at the stack's top,
 // together, and each one its block doesn't define (an ambiguous one never) reported at its name, in its block's lists'
 // order, as clang reports them where it leaves the block. In a prefix's pass, only a block that ends before the limit.
@@ -1201,7 +1231,7 @@ static void check_input_local_label_pop(CheckInputReader* reader, CheckLocalLabe
             const uint32_t name_token = locals->tokens[entry];
             if (check_input_find_label(reader, locals, labels, capacity, name_token, locals->names[entry]) == BUSTER_CHECK_NONE)
             {
-                check_input_report(reader, name_token, CHECK_INPUT_LABEL_UNDECLARED);
+                check_input_report_label_undeclared(reader, name_token, end, false);
             }
         }
         for (uint32_t entry = locals->count; entry-- > first;)
@@ -3111,9 +3141,13 @@ static __attribute__((always_inline)) void check_input_controls_range(CheckInput
                         check_input_report(reader, token, CHECK_INPUT_DECLARATION);
                     }
                 }
-                if (target == BUSTER_CHECK_NONE && !unfinished && !local)
+                // A missing label of the function's, and an ambiguous local one's use, for which clang's lookup creates a
+                // label of the function's that nothing defines, as the function ends (check_input_report_label_undeclared).
+                if (target == BUSTER_CHECK_NONE && !unfinished && (!local || ambiguous))
                 {
-                    check_input_report(reader, operand < count && parser->tokens.kinds[operand] == PARSE_KIND_IDENTIFIER ? operand : token, CHECK_INPUT_LABEL_UNDECLARED);
+                    const uint32_t close = body < count && parser->tree.roles[body] == PARSE_ROLE_OPEN_BODY ? parser->tree.parents[body] : 0;
+                    check_input_report_label_undeclared(reader, operand < count && parser->tokens.kinds[operand] == PARSE_KIND_IDENTIFIER ? operand : token,
+                                                        close < count ? close : 0, true);
                 }
             }
             else if (kind == PARSE_KIND_SEMI && check_input_attributes_at(reader->output, token) != 0)

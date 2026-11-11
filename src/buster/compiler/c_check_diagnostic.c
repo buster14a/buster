@@ -160,6 +160,8 @@ static const CheckWarningDescription check_warning_descriptions[] =
     // (#1849: its ID assigned past the ones other pull requests take, which their rows fill.)
     [CHECK_WARNING_ID_ATTRIBUTE_ALIAS] = { "-Wattribute-alias", NULL, "alias and aliasee have different types" },
     [CHECK_WARNING_ID_TYPE_SAFETY] = { "-Wtype-safety", NULL, "argument type doesn't match specified type tag" },
+    [CHECK_WARNING_ID_UNEVALUATED_EXPRESSION] =
+        { "-Wunevaluated-expression", "-Wunused-value", "expression with side effects has no effect in an unevaluated context" },
 };
 
 _Static_assert(BUSTER_ARRAY_LENGTH(check_warning_descriptions) == CHECK_WARNING_ID_COUNT, "every sparse policy ID has a description");
@@ -489,7 +491,7 @@ static const char* check_diagnostic_varargs(const CheckInput* input, const Parse
     {
         const CheckVarargsContext* context = &graph->varargs_calls[graph->argument_offsets[report->node]].context;
         const bool function = type_is_valid(types, context->function_type) && type_kind(types, type_strip_aligned(types, context->function_type)) == BUSTER_TYPE_KIND_FUNCTION;
-        const bool win64 = function && type_function_abi_kind(types, type_strip_aligned(types, context->function_type)) == TYPE_FUNCTION_ABI_MICROSOFT;
+        const bool win64 = function && type_function_convention(types, type_strip_aligned(types, context->function_type)) == TYPE_FUNCTION_ABI_MICROSOFT;
         const bool microsoft = graph->members[report->node] == CBUILTIN_MS_VA_START;
         result = microsoft && !win64 ? "'__builtin_ms_va_start' used in System V ABI function" : !microsoft && win64 ? "'va_start' used in Win64 ABI function" :
                  "'va_start' used in function with fixed args";

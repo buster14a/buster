@@ -391,6 +391,20 @@ static __attribute__((noinline)) void check_test_generic_builtin_sources(CheckTe
         { .name = "generic: os_log of a big argument", .source = "struct T { char c[300]; };\nunsigned long f(struct T t)\n{\nreturn __builtin_os_log_format_buffer_size(\"%d\", t);\n}\n", .rejected = true },
         { .name = "generic: os_log of no buffer", .source = "void* f(void)\n{\nreturn __builtin_os_log_format(\"%d\");\n}\n", .rejected = true },
         { .name = "generic: os_log of no format", .source = "unsigned long f(void)\n{\nreturn __builtin_os_log_format_buffer_size();\n}\n", .rejected = true },
+        // Up to 255 data arguments past the operands' 32-bit mask, as clang's BuiltinOSLogFormat takes them, and no more (#1785).
+        { .name = "generic: os_log of 255 data arguments", .source =
+          "#define A8 1, 2, 3, 4, 5, 6, 7, 8\n#define A64 A8, A8, A8, A8, A8, A8, A8, A8\n#define A255 A64, A64, A64, A8, A8, A8, A8, A8, A8, A8, 1, 2, 3, 4, 5, 6, 7\n"
+          "#define F8 \"%d %d %d %d %d %d %d %d \"\n#define F64 F8 F8 F8 F8 F8 F8 F8 F8\n"
+          "_Static_assert(__builtin_os_log_format_buffer_size(F64 F64 F64 F8 F8 F8 F8 F8 F8 F8 \"%d %d %d %d %d %d %d\", A255) == 1532, \"\");\n"
+          "_Static_assert(__builtin_os_log_format_buffer_size(\"%255$lld %40$d\", A255) == 14, \"\");\n"
+          "void* f(void* b, int n)\n{\nreturn __builtin_os_log_format(b, F8 F8 F8 F8 \"%d %d %s\", A8, A8, A8, A8, n, n + 1, \"x\");\n}\n"
+          "void* g(void* b)\n{\nreturn __builtin_os_log_format(b, \"%d\", A255);\n}\n" },
+        { .name = "generic: os_log of 256 data arguments", .source =
+          "#define A8 1, 2, 3, 4, 5, 6, 7, 8\n#define A64 A8, A8, A8, A8, A8, A8, A8, A8\nunsigned long f(void)\n{\n"
+          "return __builtin_os_log_format_buffer_size(\"%d\", A64, A64, A64, A64);\n}\n", .rejected = true },
+        { .name = "generic: os_log_format of 256 data arguments", .source =
+          "#define A8 1, 2, 3, 4, 5, 6, 7, 8\n#define A64 A8, A8, A8, A8, A8, A8, A8, A8\nvoid* f(void* b)\n{\n"
+          "return __builtin_os_log_format(b, \"%d\", A64, A64, A64, A64);\n}\n", .rejected = true },
         // dump_struct (#148): a pointer to a complete struct or union and a function or a function pointer that takes clang's
         // generated calls (variadic past the rest of the arguments and the format, or without a prototype).
         { .name = "generic: dump_struct", .source =
@@ -894,6 +908,29 @@ static __attribute__((noinline)) void check_test_generic_builtin_programs(CheckT
         "__builtin_os_log_format(buffer, \"%f %d %2$d %1$f\", q, v); bytes(__builtin_os_log_format_buffer_size(\"%f %d %2$d %1$f\", q, v));\n"
         "return (int)(h ^ (h >> 32)); }\n",
         "generic-os-log-reevaluated", clang);
+    // __builtin_os_log_format past the operands' 32-bit mask (#1785, clang's BuiltinOSLogFormat takes up to 255 data
+    // arguments): 40 data arguments, those past the 32nd of other types and one a call of a static function nothing else
+    // names (so the program reaches it through the full mask), positions past the 32nd, and 255 data arguments, the most
+    // clang takes, each with its buffer's size.
+    check_test_program_source(test,
+        "static unsigned long long h; static void mix(unsigned long long v) { h = h * 31 + v; }\n"
+        "static unsigned char buffer[2048]; static int made;\n"
+        "static int late(int v) { made++; return v * 5 + made; }\n"
+        "static void bytes(unsigned long n) { for (unsigned long i = 0; i < n; i++) mix(buffer[i]); }\n"
+        "#define F8 \"%d %d %d %d %d %d %d %d \"\n#define A8(x) x, x + 1, x + 2, x + 3, x + 4, x + 5, x + 6, x + 7\n"
+        "#define F32 F8 F8 F8 F8\n#define A32(x) A8(x), A8(x + 8), A8(x + 16), A8(x + 24)\n"
+        "#define F255 F32 F32 F32 F32 F32 F32 F32 F8 F8 F8 \"%d %d %d %d %d %d %d\"\n"
+        "int tested(int n) { h = (unsigned)n; long long q = -n; double d = 0.5 * n;\n"
+        "__builtin_os_log_format(buffer, F32 \"%d %lld %f %{private}d %hhd %hd %d %d\", A32(n), late(n), q, d, n * 3, (char)n, (short)-n, made, n);\n"
+        "bytes(__builtin_os_log_format_buffer_size(F32 \"%d %lld %f %{private}d %hhd %hd %d %d\", A32(n), late(n), q, d, n * 3, (char)n, (short)-n, made, n));\n"
+        "__builtin_os_log_format(buffer, \"%40$d %33$d %1$d %35$f\", A32(n), late(n), 0, d, 0, 0, 0, 0, n - 9);\n"
+        "bytes(__builtin_os_log_format_buffer_size(\"%40$d %33$d %1$d %35$f\", A32(n), late(n), 0, d, 0, 0, 0, 0, n - 9)); mix(made);\n"
+        "__builtin_os_log_format(buffer, F255, A32(n), A32(n + 1), A32(n + 2), A32(n + 3), A32(n + 4), A32(n + 5), A32(n + 6),\n"
+        "A8(n), A8(-n), A8(n * 2), n, n + 1, n + 2, n + 3, n + 4, n + 5, late(n));\n"
+        "unsigned long size = __builtin_os_log_format_buffer_size(F255, A32(0), A32(1), A32(2), A32(3), A32(4), A32(5), A32(6),\n"
+        "A8(0), A8(1), A8(2), 0, 1, 2, 3, 4, 5, 6); mix(size); bytes(size); mix(made);\n"
+        "return (int)(h ^ (h >> 32)); }\n",
+        "generic-os-log-many", clang);
     // __builtin_dump_struct (#148): clang's calls of the printer, a line each, hashed by a printer that reads each format's
     // operands as its conversions say (a pointer as its offset from the record): the record's name, each field's type
     // name as its declaration spells it (typedefs kept, an unnamed record's "struct (unnamed)"), its name, a bit-field's

@@ -900,7 +900,7 @@ static String8 check_driver_warning_type_at(const Parser* parser, Preprocessor* 
             {
                 const TypeId bare = type_unqualified(type_strip_aligned(types, level));
                 const uint8_t kind = type_kind(types, bare);
-                abi = kind == BUSTER_TYPE_KIND_FUNCTION ? type_function_abi_kind(types, bare) : TYPE_FUNCTION_ABI_COUNT;
+                abi = kind == BUSTER_TYPE_KIND_FUNCTION ? type_function_convention(types, bare) : TYPE_FUNCTION_ABI_COUNT;
                 level = kind == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(kind) ? types->types.base[type_index(bare)] : 0;
             }
             const String8 convention = abi < TYPE_FUNCTION_ABI_COUNT && alias_type == 0 ? spell->convention_macros[abi] : (String8){ 0 };

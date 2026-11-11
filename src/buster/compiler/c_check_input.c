@@ -1023,6 +1023,14 @@ struct CheckInput
     // Whether the unit read x86's interrupt or no_caller_saved_registers (#147): only then are its calls looked through
     // after checking, for the direct calls of interrupt service routines and -Wexcessive-regsave (check_input_interrupt_calls).
     bool interrupt_calls;
+    // The function declarations whose lookup found a declaration of their entity other than its latest (#1447): pairs of
+    // the declaration and the one it found, in source order. clang merges a redeclaration with the declaration its lookup
+    // finds (MergeFunctionDecl's Old), whose attributes it inherits, not with a later one in a closed or hidden scope:
+    // `void f(void *); void g(void) { { __attribute__((interrupt)) void f(void *); } } void f(void *);`'s third declaration
+    // is the first's alone. check_input_interrupt_calls reads them; a lane refuses to make one.
+    uint32_t* redeclaration_links;
+    uint32_t redeclaration_link_count;
+    uint32_t redeclaration_link_capacity;
     // The full expressions of those direct calls (#1447): triples of a range's first token (with BUSTER_CHECK_INTERRUPT_KEEP
     // for one of the call's other arguments or list elements), its last and the call's callee's first, in which clang's
     // invalid call leaves no other diagnostic, while the unit's others are found as a valid one's are
@@ -2891,10 +2899,15 @@ static void check_input_report_redeclaration(CheckInputReader* reader, uint32_t 
     const TypeFunctionABI before = type_function_abi_kind(types, reader->declared_types[previous]);
     const bool explicit_now = reader->output->explicit_abis != NULL && reader->output->explicit_abis[token] != 0;
     const bool explicit_first = reader->output->explicit_abis != NULL && reader->output->explicit_abis[first] != 0;
-    const bool changed = message == CHECK_INPUT_CONFLICTING_TYPES && explicit_now && now != before && now != TYPE_FUNCTION_ABI_INVALID &&
+    // Conventions compare without no_caller_saved_registers' bit beside them (#1447), which is checked after them.
+    const TypeFunctionABI now_base = now == TYPE_FUNCTION_ABI_INVALID ? now : (TypeFunctionABI)(now & ~TYPE_FUNCTION_ABI_KEEPS_REGISTERS);
+    const TypeFunctionABI before_base = before == TYPE_FUNCTION_ABI_INVALID ? before : (TypeFunctionABI)(before & ~TYPE_FUNCTION_ABI_KEEPS_REGISTERS);
+    const bool now_keeps = now != TYPE_FUNCTION_ABI_INVALID && (now & TYPE_FUNCTION_ABI_KEEPS_REGISTERS) != 0;
+    const bool before_keeps = before != TYPE_FUNCTION_ABI_INVALID && (before & TYPE_FUNCTION_ABI_KEEPS_REGISTERS) != 0;
+    const bool changed = message == CHECK_INPUT_CONFLICTING_TYPES && explicit_now && now_base != before_base && now != TYPE_FUNCTION_ABI_INVALID &&
                          before != TYPE_FUNCTION_ABI_INVALID && now != TYPE_FUNCTION_ABI_NO_CALLER_SAVED && before != TYPE_FUNCTION_ABI_NO_CALLER_SAVED;
-    const uint32_t saved = message == CHECK_INPUT_CONFLICTING_TYPES && !changed && now == TYPE_FUNCTION_ABI_NO_CALLER_SAVED && before == TYPE_FUNCTION_ABI_SYSV ?
-                           check_input_no_caller_saved_written(reader->output, token) : 0;
+    const bool added = (now == TYPE_FUNCTION_ABI_NO_CALLER_SAVED && before == TYPE_FUNCTION_ABI_SYSV) || (now_keeps && !before_keeps && now_base == before_base);
+    const uint32_t saved = message == CHECK_INPUT_CONFLICTING_TYPES && !changed && added ? check_input_no_caller_saved_written(reader->output, token) : 0;
     if (changed || saved != 0)
     {
         const uint32_t count = reader->output->report_count;
@@ -2903,7 +2916,7 @@ static void check_input_report_redeclaration(CheckInputReader* reader, uint32_t 
         {
             CheckInputReport* report = reader->output->reports + count;
             report->subject = previous + 1;
-            report->detail = saved != 0 ? saved : check_input_abi_call(now) | check_input_abi_call(before) << 8 | (explicit_first ? 1u << 16 : 0);
+            report->detail = saved != 0 ? saved : check_input_abi_call(now_base) | check_input_abi_call(before_base) << 8 | (explicit_first ? 1u << 16 : 0);
             report->note_token = saved != 0 ? previous : first;
             report->note_kind = CHECK_INPUT_NOTE_PREVIOUS_DECLARATION;
         }
@@ -6661,19 +6674,55 @@ static CheckDeclaratorFrame check_input_declarator_frame(TypeId base, uint32_t f
     };
 }
 
+// The first token from `tag`, before `end`, that isn't a specifier's, a qualifier, __extension__ or an attribute list.
+static inline __attribute__((always_inline)) uint32_t check_input_specifiers_skip(const Parser* parser, uint32_t tag, uint32_t end)
+{
+    while (tag < end && (parser->tree.roles[tag] == PARSE_ROLE_SPECIFIER || parser->tokens.kinds[tag] == PARSE_KIND_QUALIFIER ||
+           parser->tokens.kinds[tag] == PARSE_KIND_EXTENSION || check_input_attribute_starts(parser, tag, end)))
+    {
+        tag = check_input_attribute_starts(parser, tag, end) ? check_input_skip_attributes(parser, tag, end) : tag + 1;
+    }
+    return tag;
+}
+
+// The specifiers' scan stopped at `tag`, an _Atomic's or a typeof's keyword or a `(` (#1447): where the group's type
+// name has the specifiers' scan go on, into each nested group, which ends it (`end`). `tag` itself where it is no such
+// group's (a declarator's `(`). Out of line: it is rare, and its callers' scan is hot (check_input_specifier_definition).
+static __attribute__((noinline, cold)) uint32_t check_input_specifier_group(const Parser* parser, uint32_t first, uint32_t tag, uint32_t* end)
+{
+    bool group = true;
+    while (group)
+    {
+        // The scan stops at the group's keyword or its `(`, whichever the parser didn't mark a specifier's.
+        const uint32_t opener = tag < *end && tag > first && parser->tokens.kinds[tag] == PARSE_KIND_L_PAREN ? tag - 1 : tag;
+        const uint8_t kind = opener < *end ? parser->tokens.kinds[opener] : PARSE_KIND_END;
+        group = (kind == PARSE_KIND_ATOMIC || kind == PARSE_KIND_TYPEOF) && opener + 1 < *end && parser->tokens.kinds[opener + 1] == PARSE_KIND_L_PAREN;
+        if (group)
+        {
+            const uint32_t close = parser->tree.parents[opener + 1];
+            *end = close > opener + 1 && close < *end ? close : opener + 2;
+            first = opener + 2;
+            tag = check_input_specifiers_skip(parser, first, *end);
+        }
+    }
+    return tag;
+}
+
 // The struct, union or enum keyword among the specifiers from `first`, before `end`, whose body follows it: a definition
 // that the reader hasn't read yet, which a declaration's, a member's or a parameter's reader reads before the specifiers
-// (check_input_tag_definition), and BUSTER_CHECK_NONE when there's none.
+// (check_input_tag_definition), and BUSTER_CHECK_NONE when there's none. One in an _Atomic's or a typeof's type name
+// (`_Atomic(struct { int a; }) m;`, `typeof(_Atomic(struct S { int a; }))`, #1447) is the declaration's too, as clang reads
+// it: the scan goes on into each group (check_input_specifier_group), where it stops at one's keyword or `(`.
 // Always inlined (#880), as profile-guided builds do; hot callers: check_input_declarator_step and
 // check_input_declaration.
 static inline __attribute__((always_inline)) uint32_t check_input_specifier_definition(const CheckInputReader* reader, uint32_t first, uint32_t end)
 {
     const Parser* parser = reader->parser;
-    uint32_t tag = first;
-    while (tag < end && (parser->tree.roles[tag] == PARSE_ROLE_SPECIFIER || parser->tokens.kinds[tag] == PARSE_KIND_QUALIFIER ||
-           parser->tokens.kinds[tag] == PARSE_KIND_EXTENSION || check_input_attribute_starts(parser, tag, end)))
+    uint32_t tag = check_input_specifiers_skip(parser, first, end);
+    const uint8_t stop = tag < end ? parser->tokens.kinds[tag] : PARSE_KIND_END;
+    if (__builtin_expect(stop == PARSE_KIND_ATOMIC || stop == PARSE_KIND_TYPEOF || stop == PARSE_KIND_L_PAREN, 0))
     {
-        tag = check_input_attribute_starts(parser, tag, end) ? check_input_skip_attributes(parser, tag, end) : tag + 1;
+        tag = check_input_specifier_group(parser, first, tag, &end);
     }
     const bool keyword = tag < end && (parser->tokens.kinds[tag] == PARSE_KIND_STRUCT || parser->tokens.kinds[tag] == PARSE_KIND_ENUM);
     const uint32_t body = keyword ? check_input_tag_body(parser, tag, end) : end;
@@ -8157,7 +8206,7 @@ static bool check_input_declarator_conventions(CheckInputReader* reader, TypeId 
                                          outside.calling_convention;
         }
         const TypeFunctionABI requested = check_input_attribute_requested_abi(&outside);
-        const TypeFunctionABI convention = !inside ? type_function_abi_kind(reader->types, wrapped) :
+        const TypeFunctionABI convention = !inside ? type_function_convention(reader->types, wrapped) :
                                            requested == TYPE_FUNCTION_ABI_INVALID ? TYPE_FUNCTION_ABI_SYSV : requested;
         valid = wrapped == 0 || type_kind(reader->types, wrapped) != BUSTER_TYPE_KIND_FUNCTION ||
                 check_input_swift_parameters_as(reader, wrapped, convention, reader->declarator_swift_places, reader->declarator_swift_tokens,
@@ -8165,7 +8214,7 @@ static bool check_input_declarator_conventions(CheckInputReader* reader, TypeId 
     }
     reader->declarator_swift_wrapped = false;
     const uint32_t name = reader->declarator_no_prototype;
-    const TypeFunctionABI convention = is_function ? type_function_abi_kind(reader->types, function) : TYPE_FUNCTION_ABI_SYSV;
+    const TypeFunctionABI convention = is_function ? type_function_convention(reader->types, function) : TYPE_FUNCTION_ABI_SYSV;
     const bool unvariadic = convention == TYPE_FUNCTION_ABI_VECTOR || convention == TYPE_FUNCTION_ABI_REG || convention == TYPE_FUNCTION_ABI_SWIFT ||
                             convention == TYPE_FUNCTION_ABI_SWIFT_ASYNC;
     if (valid && unvariadic && !is_typedef && name != BUSTER_CHECK_NONE && (reader->types->types.flags[type_index(function)] & BUSTER_TYPE_FLAG_PROTOTYPE) == 0 &&
@@ -10650,8 +10699,13 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
 static void check_input_inherit_abi(CheckInputReader* reader, uint32_t token, uint32_t old, bool overload)
 {
     const TypeId type = reader->declared_types[token];
-    if (reader->declaration_kinds[token] == C_BINDING_FUNCTION && (reader->output->explicit_abis == NULL || reader->output->explicit_abis[token] == 0) &&
-        type_function_abi_kind(reader->types, type) == TYPE_FUNCTION_ABI_SYSV)
+    const TypeFunctionABI written = type_function_abi_kind(reader->types, type);
+    const bool unannotated = (reader->output->explicit_abis == NULL || reader->output->explicit_abis[token] == 0) && written == TYPE_FUNCTION_ABI_SYSV;
+    // A redeclaration of another convention than System V's without no_caller_saved_registers inherits the bit beside it
+    // (#1447, clang's MergeFunctionDecl's withNoCallerSavedRegs).
+    const bool bare = written != TYPE_FUNCTION_ABI_INVALID && written != TYPE_FUNCTION_ABI_SYSV && written != TYPE_FUNCTION_ABI_NO_CALLER_SAVED &&
+                      (written & TYPE_FUNCTION_ABI_KEEPS_REGISTERS) == 0;
+    if (reader->declaration_kinds[token] == C_BINDING_FUNCTION && (unannotated || bare))
     {
         const uint32_t name = reader->parser->tokens.names[token];
         TypeId previous = 0;
@@ -10668,7 +10722,11 @@ static void check_input_inherit_abi(CheckInputReader* reader, uint32_t token, ui
         {
             previous = reader->linked_types[name];
         }
-        const TypeFunctionABI abi = previous != 0 ? type_function_abi_kind(reader->types, previous) : TYPE_FUNCTION_ABI_SYSV;
+        const TypeFunctionABI found = previous != 0 ? type_function_abi_kind(reader->types, previous) : TYPE_FUNCTION_ABI_SYSV;
+        // (A bare one's: its own convention with the earlier one's bit, where they are one convention.)
+        const TypeFunctionABI abi = !bare ? found :
+                                    found != TYPE_FUNCTION_ABI_INVALID && found == (TypeFunctionABI)(written | TYPE_FUNCTION_ABI_KEEPS_REGISTERS) ? found :
+                                    TYPE_FUNCTION_ABI_SYSV;
         if (abi != TYPE_FUNCTION_ABI_SYSV && abi != TYPE_FUNCTION_ABI_INVALID)
         {
             uint32_t count = 0;
@@ -10861,6 +10919,32 @@ static void check_input_bind_checked(CheckInputReader* reader, uint32_t token, u
         (reader->output->function_flags[linked_library - 1] & CHECK_INPUT_FUNCTION_IMPLICIT_LIBRARY) != 0 &&
         (reader->output->function_flags[token] & CHECK_INPUT_FUNCTION_IMPLICIT_LIBRARY) == 0;
     check_input_inherit_abi(reader, token, old, overload);
+    // A function declaration whose lookup found another declaration of its entity than the latest (#1447,
+    // CheckInput.redeclaration_links).
+    const uint32_t latest = kind == C_BINDING_FUNCTION && linked_visible && reader->linked_declarations != NULL ? reader->linked_declarations[name] : 0;
+    if (latest != 0 && latest - 1 != old_declaration && reader->declaration_kinds[latest - 1] == C_BINDING_FUNCTION)
+    {
+        check_input_lane_refuse(reader, reader->lane, "a body declares a function its lookup links to other than its latest declaration");
+        CheckInput* input = reader->output;
+        if (!reader->lane && input->redeclaration_link_count == input->redeclaration_link_capacity && !input->resource)
+        {
+            const uint32_t capacity = input->redeclaration_link_capacity != 0 ? input->redeclaration_link_capacity * 2 : 4;
+            uint32_t* grown = BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint32_t, (uint64_t)capacity * 2);
+            input->resource |= grown == NULL;
+            if (grown != NULL && input->redeclaration_link_count != 0)
+            {
+                memcpy(grown, input->redeclaration_links, (uint64_t)input->redeclaration_link_count * 2 * sizeof(uint32_t));
+            }
+            input->redeclaration_links = grown != NULL ? grown : input->redeclaration_links;
+            input->redeclaration_link_capacity = grown != NULL ? capacity : input->redeclaration_link_capacity;
+        }
+        if (!reader->lane && input->redeclaration_link_count < input->redeclaration_link_capacity)
+        {
+            input->redeclaration_links[input->redeclaration_link_count * 2] = token;
+            input->redeclaration_links[input->redeclaration_link_count * 2 + 1] = old_declaration;
+            input->redeclaration_link_count += 1;
+        }
+    }
     // A cpu_specific or cpu_dispatch declaration (#1447) of another version than the visible one before it is an entity of
     // its own, bound apart; one of an earlier version's redeclares that one, its definitions one entity's.
     bool versions = false;
