@@ -1755,7 +1755,9 @@ ICE eligibility is tracked separately from whether a value happened to fold.
 For example, an immediate floating literal cast to integer can be an ICE;
 an ordinary floating arithmetic expression is not made an ICE merely by
 folding. Source contexts explicitly request integer constant expressions,
-static assertions or constant static initializers.
+static assertions or constant static initializers. A static assertion among a
+structure's or a union's members (#2264) declares no member: the member reader
+steps past it to its `;` and the walk checks it as a block's.
 
 Constant-query answers keep source proof, speculative proof and runtime effects
 separate. A source constant answer does not erase a floating-point exception or
