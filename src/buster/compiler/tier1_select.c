@@ -285,6 +285,19 @@ typedef enum Tier1SelectRule
 // A permute (#1840): `operation` its kind past BUSTER_IR_INTRINSIC_PERMUTE (0 permute, 1 shuffle, 2 align, 3
 // shuffle_lanes), `immediate` the IR's flags (tier1_select_permute_form).
 #define BUSTER_TIER1_VECTOR_PERMUTE 11
+// A conversion (#1840): `operation` its kind past BUSTER_IR_INTRINSIC_EXTEND (0 extend, 1 truncate), `immediate` the
+// IR's flags, `source_width` the source's bytes (tier1_select_convert_form).
+#define BUSTER_TIER1_VECTOR_CONVERT 12
+// A shift by a scalar count (#1840): `operation` the IR's flags (its lanes and shift), and either the count in
+// values[1], a general register, which vmovd moves into the vector class's scratch register for the shift's form by an
+// xmm count, or, where the count is a constant (`condition` 1), the form by an immediate, the count in `immediate`
+// (tier1_select_vector_shift).
+#define BUSTER_TIER1_VECTOR_SHIFT 13
+// A mask to a vector (#1840): the select of all ones where the mask values[0] is set and zeros elsewhere, at the lanes
+// in `source_width` (vpmovm2b to vpmovm2q), and a vector's sign bits as a mask: the comparison of values[0]'s signed
+// lanes less than zero (vpmovb2m to vpmovq2m) (tier1_select_mask_vector).
+#define BUSTER_TIER1_VECTOR_MASK_EXPAND 14
+#define BUSTER_TIER1_VECTOR_SIGN_MASK 15
 
 // TIER1_RULE_X87's kinds, its pattern's `scale` (#141):
 // - CONSTANT, its constant's index in `immediate`, and UNDEF, which stores nothing;
@@ -646,6 +659,9 @@ struct Tier1SelectHoles
     bool sign_result;
     // The pattern's no-ops (Tier1SelectPattern.nops).
     uint8_t nops;
+    // A load's or a store's segment override (#1447, BUSTER_IR_SEGMENT's FS, GS or SS), which its access's record takes
+    // (tier1_select_segment), or 0.
+    uint8_t segment;
     // The target has no AVX512VL (#1281): the vector class's 16- and 32-byte values take VEX forms
     // (tier1_select_vector_forms, tier1_select_class_forms). The CFG consumer sets it (Tier1EmitPrepared.vex).
     bool vex;
@@ -1246,6 +1262,88 @@ static uint16_t tier1_select_permute_form(uint32_t kind, uint32_t flags, uint32_
 // A permute's record (#1840): its form of values[0] and values[1] into the destination; the variable permutes take their
 // indices, values[1], in vvvv and the lanes they move, values[0], in rm, the others values[0] in vvvv and values[1] in rm,
 // and align and shuffle_lanes their immediate (an align's count, its flags' low 4 bits).
+// The conversions' and the scalar shifts' forms (#1840), shared with the decoder.
+#include "buster/compiler/ir_simd_convert_forms.c"
+
+// A shift by a scalar count (#1840, BUSTER_TIER1_VECTOR_SHIFT), from the forms the decoder admits
+// (ir_simd_convert_forms.c's ir_simd_shift_forms): a constant count by the immediate form, of the source (rm) into the
+// destination (vvvv), any count of 255 or more 255, past every lane's bits, which gives the same 0 or sign; any other
+// count by vmovd into the vector scratch register, whose bytes past it the move zeroes, and the form by that xmm count.
+static void tier1_select_vector_shift(Tier1SelectRecords* result, const Tier1SelectHoles* holes)
+{
+    const uint32_t lanes = (uint32_t)holes->operation & 3;
+    const uint32_t kind = ((uint32_t)holes->operation >> 2) & 3;
+    const uint32_t width = holes->width == 16 ? 0 : holes->width == 32 ? 1 : 2;
+    const uint8_t x = holes->destination & 15;
+    const uint8_t left = holes->left & 15;
+    if (holes->condition != 0)
+    {
+        const X86Instruction record = {
+            .form = ir_simd_shift_immediate_forms[kind][lanes - 1][width],
+            .vvvv = x,
+            .rm = left,
+            .mode = BUSTER_X86_REGISTER_DIRECT,
+            .immediate = (int32_t)(holes->immediate < 255 ? holes->immediate : 255),
+        };
+        tier1_select_append(result, record);
+    }
+    else
+    {
+        const uint8_t count = BUSTER_TIER1_SELECT_FLOAT_SCRATCH;
+        tier1_select_append(result, tier1_select_register_record(X86_FORM_VMOVD_X_RM32_EVEX, count, holes->right));
+        const X86Instruction record = { .form = ir_simd_shift_forms[kind][lanes - 1][width], .reg = x, .vvvv = left, .rm = count, .mode = BUSTER_X86_REGISTER_DIRECT };
+        tier1_select_append(result, record);
+    }
+}
+
+// A mask to a vector or a vector's sign bits to a mask (#1840, BUSTER_TIER1_VECTOR_MASK_EXPAND and _SIGN_MASK), at the
+// lanes in `source_width` (#141's element types: a float's are a doubleword's bits, a double's a quadword's): vpmovm2b to
+// vpmovm2q of the mask's opmask register into the destination, and vpmovb2m to vpmovq2m of the vector into the
+// destination's opmask register. Their doublewords' and quadwords' forms are AVX512DQ's, which every vector comparison of
+// the front end needs already; at a target without it the emission's form check refuses the function to Tier 0.
+static void tier1_select_mask_vector(Tier1SelectRecords* result, const Tier1SelectHoles* holes)
+{
+    static const uint16_t expansions[4][3] = {
+        { X86_FORM_VPMOVM2B_X_K, X86_FORM_VPMOVM2B_Y_K, X86_FORM_VPMOVM2B_Z_K },
+        { X86_FORM_VPMOVM2W_X_K, X86_FORM_VPMOVM2W_Y_K, X86_FORM_VPMOVM2W_Z_K },
+        { X86_FORM_VPMOVM2D_X_K, X86_FORM_VPMOVM2D_Y_K, X86_FORM_VPMOVM2D_Z_K },
+        { X86_FORM_VPMOVM2Q_X_K, X86_FORM_VPMOVM2Q_Y_K, X86_FORM_VPMOVM2Q_Z_K },
+    };
+    static const uint16_t signs[4][3] = {
+        { X86_FORM_VPMOVB2M_K_X, X86_FORM_VPMOVB2M_K_Y, X86_FORM_VPMOVB2M_K_Z },
+        { X86_FORM_VPMOVW2M_K_X, X86_FORM_VPMOVW2M_K_Y, X86_FORM_VPMOVW2M_K_Z },
+        { X86_FORM_VPMOVD2M_K_X, X86_FORM_VPMOVD2M_K_Y, X86_FORM_VPMOVD2M_K_Z },
+        { X86_FORM_VPMOVQ2M_K_X, X86_FORM_VPMOVQ2M_K_Y, X86_FORM_VPMOVQ2M_K_Z },
+    };
+    // IrSimdLane's order: I32, I8, I16, I64, F32, F64.
+    static const uint8_t sizes[IR_SIMD_LANE_COUNT] = { 2, 0, 1, 3, 2, 3 };
+    const uint32_t size = holes->source_width < IR_SIMD_LANE_COUNT ? sizes[holes->source_width] : 2;
+    const uint32_t width = holes->width == 16 ? 0 : holes->width == 32 ? 1 : 2;
+    const bool expand = holes->scale == BUSTER_TIER1_VECTOR_MASK_EXPAND;
+    const X86Instruction record = expand ? tier1_select_register_record(expansions[size][width], holes->destination & 15, holes->left & 7) :
+                                           tier1_select_register_record(signs[size][width], holes->destination & 7, holes->left & 15);
+    tier1_select_append(result, record);
+}
+
+// Whether `value` is a vector constant of every byte zero (0) or every bit set (1) over `bytes`; 2 for any other value.
+static uint32_t tier1_select_vector_fill(const IrFunction* function, uint32_t value, uint32_t bytes)
+{
+    uint32_t fill = 2;
+    if (value < function->instruction_count && function->op[value] == IR_VCONST && function->a[value] < function->vector_constant_count)
+    {
+        const IrSimdValue* payload = &function->vector_constants[function->a[value]];
+        bool zero = true;
+        bool ones = true;
+        for (uint32_t word = 0; word < bytes / 8; word += 1)
+        {
+            zero &= payload->words[word] == 0;
+            ones &= payload->words[word] == UINT64_MAX;
+        }
+        fill = zero ? 0 : ones ? 1 : 2;
+    }
+    return fill;
+}
+
 static void tier1_select_permute(Tier1SelectRecords* result, const Tier1SelectHoles* holes)
 {
     const uint32_t kind = (uint32_t)holes->operation;
@@ -1261,6 +1359,28 @@ static void tier1_select_permute(Tier1SelectRecords* result, const Tier1SelectHo
         .immediate = kind == 2 ? (int32_t)(flags & 15) : kind == 3 ? (int32_t)flags : 0,
     };
     tier1_select_append(result, record);
+}
+
+// A conversion's EVEX form (#1840), by its kind past BUSTER_IR_INTRINSIC_EXTEND, the IR's flags, the result's bytes and
+// the source's: the decoder's tables' (ir_simd_typed_extensions at the result's width, ir_simd_typed_truncations at the
+// source's), or X86_FORM_NONE for a pair the flags don't name.
+static uint16_t tier1_select_convert_form(uint32_t kind, uint32_t flags, uint32_t width, uint32_t source_width)
+{
+    const uint32_t from = flags & 3;
+    const uint32_t to = (flags >> 2) & 3;
+    const uint32_t mode = flags >> 4;
+    const uint32_t bytes = kind == 0 ? width : source_width;
+    const uint32_t index = bytes == 16 ? 0 : bytes == 32 ? 1 : bytes == 64 ? 2 : 3;
+    uint16_t form = X86_FORM_NONE;
+    for (uint32_t pair = 0; index < 3 && pair < 6; pair += 1)
+    {
+        const uint8_t* sizes = kind == 0 ? ir_simd_typed_extension_pairs[pair] : ir_simd_typed_truncation_pairs[pair];
+        if (sizes[0] == from && sizes[1] == to)
+        {
+            form = kind == 0 && mode <= 1 ? ir_simd_typed_extensions[mode][pair][index] : kind == 1 && mode <= 2 ? ir_simd_typed_truncations[mode][pair][index] : X86_FORM_NONE;
+        }
+    }
+    return form;
 }
 
 static void tier1_select_scalar_splat(Tier1SelectRecords* result, const Tier1SelectHoles* holes)
@@ -1382,6 +1502,24 @@ static void tier1_select_sse_vector(Tier1SelectRecords* result, const Tier1Selec
             tier1_select_append(result, tier1_select_float_move(x, left));
         }
         tier1_select_append(result, tier1_select_register_record(tier1_select_lane_form(operation, holes->source_width, 16, BUSTER_TIER1_ENCODING_SSE), x, right));
+    }
+}
+
+// A load's or a store's segment override (#1447, Tier1SelectHoles.segment) on its access's records: each with a memory
+// operand, as Tier 0's tier0_apply_segments gives its own (form + segment * X86_FORM_COUNT, the encoder's form with the
+// override). A load's, a store's or an xchg's expansion has one such record, the access; its other records are moves of
+// registers. A RIP-relative operand takes it too: `%gs:sym(%rip)` is clang's access of a global in the segment. A form
+// without SS's (x86_form_has_segment: APX's EVEX forms, which no access's pattern selects) becomes NONE, which the
+// target's validation refuses, rather than an access without its override.
+static void tier1_select_segment(Tier1SelectRecords* records, uint32_t segment)
+{
+    for (uint32_t r = 0; r < records->count; r += 1)
+    {
+        X86Instruction* record = &records->records[r];
+        if ((record->mode & BUSTER_X86_MODE_MEMORY) != 0 && record->form < X86_FORM_COUNT)
+        {
+            record->form = x86_form_has_segment(record->form, segment) ? (uint16_t)(record->form + segment * X86_FORM_COUNT) : (uint16_t)X86_FORM_NONE;
+        }
     }
 }
 
@@ -1841,6 +1979,27 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         {
             tier1_select_permute(&result, holes);
         }
+        else if (kind == BUSTER_TIER1_VECTOR_SHIFT)
+        {
+            tier1_select_vector_shift(&result, holes);
+        }
+        else if (kind == BUSTER_TIER1_VECTOR_MASK_EXPAND || kind == BUSTER_TIER1_VECTOR_SIGN_MASK)
+        {
+            tier1_select_mask_vector(&result, holes);
+        }
+        else if (kind == BUSTER_TIER1_VECTOR_CONVERT)
+        {
+            // An extension's destination in reg and its source in rm; a truncation's source in reg and its destination in
+            // rm, which zeroes the register past its lanes.
+            const bool extend = holes->operation == 0;
+            const X86Instruction record = {
+                .form = tier1_select_convert_form((uint32_t)holes->operation, (uint32_t)holes->immediate, width, holes->source_width),
+                .reg = extend ? x : left,
+                .rm = extend ? left : x,
+                .mode = BUSTER_X86_REGISTER_DIRECT,
+            };
+            tier1_select_append(&result, record);
+        }
         else if (holes->sse && width == 16 && kind != BUSTER_TIER1_VECTOR_COMPARE && kind != BUSTER_TIER1_VECTOR_SELECT)
         {
             tier1_select_sse_vector(&result, holes, destination);
@@ -2131,6 +2290,10 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
     if (holes->sign_result)
     {
         tier1_select_append(&result, tier1_select_register_record(X86_FORM_MOVSXD_R64_RM32, destination, destination));
+    }
+    if (__builtin_expect(holes->segment != 0, 0))
+    {
+        tier1_select_segment(&result, holes->segment);
     }
     return result;
 }
@@ -3230,15 +3393,23 @@ static uint16_t tier1_select_part_form(uint32_t bytes, bool load)
 // The most parts a result has (#1624): a vector's split across xmm0 to xmm3.
 #define BUSTER_TIER1_SELECT_RESULT_PARTS 4u
 // The red zone's 8-byte slots, its 128 bytes below rsp, where a function's own result parts wait on the way out
-// (tier1_emit_cfg_aggregate_result, #1847): a split vector's four 32-byte parts or two 64-byte ones take all 16.
+// (tier1_emit_cfg_aggregate_result, #1847): those that aren't a whole vector register's (tier1_select_part_direct), at
+// most two eightbytes' in rax and rdx or xmm0 and xmm1.
 #define BUSTER_TIER1_SELECT_RED_ZONE_SLOTS 16u
+
+// Whether a function's own result part is loaded straight from the result's address on the way out (#1847): a whole
+// vector register's, 16, 32 or 64 bytes of a split vector (tier1_select_result_parts), which no byte past the object's
+// widens and whose load can't overwrite the address, a general register. Any other part is staged in the red zone.
+static bool tier1_select_part_direct(Tier1SelectPart part)
+{
+    return (part.reg & 0xe0) == BUSTER_ABI_REGISTER_VECTOR && part.bytes >= 16;
+}
 
 // The parts of an aggregate result of `size` bytes in rax and rdx or xmm0 and xmm1 (#789), eightbyte 1 alone with HIGH
 // (#141), or a vector's wider than the target's registers (#1624, tier0_vector_result_parts' shape, #1193): split
 // across the first two or four vector registers, 16, 32 or 64 bytes each (xmm's without AVX, ymm's with it, zmm's with
-// AVX512F: a 128-byte vector's), part k at byte k * part_bytes of its object, as long as the parts fit the red zone's
-// slots, where the function's own return stages them (#1847: a 256-byte vector's four zmm parts don't). None for any
-// other result. `parts` has room for BUSTER_TIER1_SELECT_RESULT_PARTS.
+// AVX512F: a 128-byte vector's, and a 256-byte one's four, #1847), part k at byte k * part_bytes of its object, which the
+// function's own return loads straight from the result's address (tier1_select_part_direct). None for any other result. `parts` has room for BUSTER_TIER1_SELECT_RESULT_PARTS.
 static uint32_t tier1_select_result_parts(AbiReturn result, uint32_t size, Tier1SelectPart* parts)
 {
     uint32_t vectors = 0;
@@ -3252,8 +3423,7 @@ static uint32_t tier1_select_result_parts(AbiReturn result, uint32_t size, Tier1
         rest = rest && result.registers[k] == BUSTER_ABI_REGISTER_NONE;
     }
     const bool split = result.kind == BUSTER_ABI_RESULT_REGISTERS && (result.flags & BUSTER_ABI_FLAG_HIGH) == 0 && (vectors == 2 || vectors == 4) && rest &&
-                       (result.part_bytes == 16 || result.part_bytes == 32 || result.part_bytes == 64) && size == vectors * result.part_bytes &&
-                       vectors * tier1_select_part_slots(result.part_bytes) <= BUSTER_TIER1_SELECT_RED_ZONE_SLOTS;
+                       (result.part_bytes == 16 || result.part_bytes == 32 || result.part_bytes == 64) && size == vectors * result.part_bytes;
     const bool registers = !split && result.kind == BUSTER_ABI_RESULT_REGISTERS && result.registers[2] == BUSTER_ABI_REGISTER_NONE && result.registers[3] == BUSTER_ABI_REGISTER_NONE;
     uint32_t count = registers ? tier1_select_parts_of(result.registers, (result.flags & BUSTER_ABI_FLAG_HIGH) != 0, false, false, size, BUSTER_TIER1_SELECT_RESULT_GENERAL, 2, parts) : 0;
     for (uint32_t k = 0; split && k < vectors; k += 1)
@@ -3264,15 +3434,16 @@ static uint32_t tier1_select_result_parts(AbiReturn result, uint32_t size, Tier1
     return count;
 }
 
-// The first red-zone staging slot of result part k (#1624): the slots of the parts before it, each a whole vector
-// register's bytes' or an eightbyte's one (tier1_select_part_slots). Of k = the part count, the slots they all take,
-// which BUSTER_TIER1_SELECT_RED_ZONE_SLOTS bounds (tier1_select_result_staged).
+// The first red-zone staging slot of result part k (#1624): the slots of the staged parts before it, each an eightbyte's
+// one (tier1_select_part_slots), past those loaded straight from the result's address (#1847, tier1_select_part_direct),
+// which take none. Of k = the part count, the slots they all take, which BUSTER_TIER1_SELECT_RED_ZONE_SLOTS bounds
+// (tier1_select_result_staged).
 static uint32_t tier1_select_result_slot(const Tier1SelectPart* parts, uint32_t k)
 {
     uint32_t slot = 0;
     for (uint32_t j = 0; j < k; j += 1)
     {
-        slot += tier1_select_part_slots(parts[j].bytes);
+        slot += tier1_select_part_direct(parts[j]) ? 0 : tier1_select_part_slots(parts[j].bytes);
     }
     return slot;
 }
@@ -4203,7 +4374,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
     // A vector's operations (#141), behind one test: a function without vectors pays no other here.
     const bool vector_node = (vector_width != 0 && (op == IR_VCONST || op == IR_UNDEF || op == IR_COPY || op == IR_NOT || op == IR_ADD || op == IR_SUB || op == IR_MUL || op == IR_AND ||
                                                    op == IR_OR || op == IR_XOR || op == IR_SHL || op == IR_LSHR || op == IR_ASHR || (op >= IR_FADD && op <= IR_FDIV) ||
-                                                   op == IR_VSELECT || (op == IR_INTRINSIC && (c == BUSTER_IR_INTRINSIC_SPLAT || (c >= BUSTER_IR_INTRINSIC_EXTRACT && c <= BUSTER_IR_INTRINSIC_SHUFFLE_LANES))))) ||
+                                                   op == IR_VSELECT || (op == IR_INTRINSIC && (c == BUSTER_IR_INTRINSIC_SPLAT || (c >= BUSTER_IR_INTRINSIC_EXTRACT && c <= BUSTER_IR_INTRINSIC_SHIFT))))) ||
                              compare_width != 0;
     if (vector_node)
     {
@@ -4274,6 +4445,45 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
                 tier1_select_add_candidate(forest, node, &candidates, base);
             }
         }
+        else if (vector_width != 0 && op == IR_INTRINSIC && (c == BUSTER_IR_INTRINSIC_EXTEND || c == BUSTER_IR_INTRINSIC_TRUNCATE))
+        {
+            // A conversion (#1840): its lanes and mode in the IR's flags, the source's width beside them.
+            base.rule = TIER1_RULE_VECTOR;
+            base.width = (uint8_t)vector_width;
+            base.scale = BUSTER_TIER1_VECTOR_CONVERT;
+            base.operation = (uint8_t)(c - BUSTER_IR_INTRINSIC_EXTEND);
+            base.immediate = function->flags[node];
+            base.source_width = a < function->instruction_count ? (uint8_t)tier1_select_vector_width(function->type[a]) : 0;
+            base.values[0] = a;
+            base.intrinsic_cost = 1;
+            if (tier1_select_convert_form(c - BUSTER_IR_INTRINSIC_EXTEND, function->flags[node], vector_width, base.source_width) != X86_FORM_NONE)
+            {
+                tier1_select_add_candidate(forest, node, &candidates, base);
+            }
+        }
+        else if (vector_width != 0 && op == IR_INTRINSIC && c == BUSTER_IR_INTRINSIC_SHIFT)
+        {
+            // A shift by a scalar count (#1840): where the count is a constant, by the immediate form alone, which leaves
+            // the count unused, first, as the bottom-up path's rule takes its kind's first candidate (tier1_burs_pick) and
+            // munch's ranks tie; and by the count's register, vmovd and the shift.
+            base.rule = TIER1_RULE_VECTOR;
+            base.width = (uint8_t)vector_width;
+            base.scale = BUSTER_TIER1_VECTOR_SHIFT;
+            base.operation = (uint8_t)function->flags[node];
+            base.values[0] = a;
+            uint64_t count = 0;
+            if (tier1_select_constant(function, b, &count))
+            {
+                Tier1SelectPattern immediate = base;
+                immediate.condition = 1;
+                immediate.immediate = count < 255 ? count : 255;
+                immediate.intrinsic_cost = 1;
+                tier1_select_add_candidate(forest, node, &candidates, immediate);
+            }
+            base.values[1] = b;
+            base.intrinsic_cost = 2;
+            tier1_select_add_candidate(forest, node, &candidates, base);
+        }
         else if (vector_width != 0 && (op == IR_COPY || op == IR_NOT))
         {
             base.rule = TIER1_RULE_VECTOR;
@@ -4308,6 +4518,19 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         }
         else if (compare_width != 0 && mask_width != 0 && c < IR_PREDICATE_COUNT)
         {
+            // A comparison of signed integer lanes less than a zero vector (#1840: a vector's sign bits as a mask,
+            // vpmovb2m to vpmovq2m), first, as the bottom-up path takes its kind's first candidate.
+            if (c == IR_LT && function->flags[node] < IR_SIMD_LANE_F32 && tier1_select_vector_fill(function, b, compare_width) == 0)
+            {
+                Tier1SelectPattern sign = base;
+                sign.rule = TIER1_RULE_VECTOR;
+                sign.width = (uint8_t)compare_width;
+                sign.scale = BUSTER_TIER1_VECTOR_SIGN_MASK;
+                sign.source_width = function->flags[node];
+                sign.values[0] = a;
+                sign.intrinsic_cost = 1;
+                tier1_select_add_candidate(forest, node, &candidates, sign);
+            }
             base.rule = TIER1_RULE_VECTOR;
             base.width = (uint8_t)compare_width;
             base.scale = BUSTER_TIER1_VECTOR_COMPARE;
@@ -4320,6 +4543,19 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         }
         else if (vector_width != 0 && op == IR_VSELECT)
         {
+            // A select of all ones and zeros (#1840: a mask to a vector, vpmovm2b to vpmovm2q, and a C comparison's
+            // expansion), first, as the bottom-up path takes its kind's first candidate.
+            if (tier1_select_vector_fill(function, b, vector_width) == 1 && tier1_select_vector_fill(function, c, vector_width) == 0)
+            {
+                Tier1SelectPattern expand = base;
+                expand.rule = TIER1_RULE_VECTOR;
+                expand.width = (uint8_t)vector_width;
+                expand.scale = BUSTER_TIER1_VECTOR_MASK_EXPAND;
+                expand.source_width = function->flags[node];
+                expand.values[0] = a;
+                expand.intrinsic_cost = 1;
+                tier1_select_add_candidate(forest, node, &candidates, expand);
+            }
             base.rule = TIER1_RULE_VECTOR;
             base.width = (uint8_t)vector_width;
             base.scale = BUSTER_TIER1_VECTOR_SELECT;
@@ -6065,6 +6301,11 @@ static Tier1SelectHoles tier1_select_holes(const Tier1SelectPlan* plan, const ui
         .sign_result = pattern->sign_result,
         .nops = pattern->nops,
     };
+    const IrOp op = (IrOp)plan->function->op[node];
+    if (__builtin_expect((plan->function->flags[node] & BUSTER_IR_SEGMENT) != 0, 0) && (op == IR_LOAD || op == IR_STORE))
+    {
+        holes.segment = (uint8_t)((plan->function->flags[node] & BUSTER_IR_SEGMENT) >> BUSTER_IR_SEGMENT_SHIFT);
+    }
     switch (pattern->rule)
     {
     case TIER1_RULE_LEA_ADD:

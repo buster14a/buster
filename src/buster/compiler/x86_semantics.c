@@ -2776,7 +2776,8 @@ static const X86EffectsRow x86_effects_rows[] = { BUSTER_X86_EFFECT_ROWS(BUSTER_
 // The covered forms' records, in the rows' order after the conservative record at 0, and each form's record
 // (x86_semantics_initialize fills both; 0 for an uncovered form). x86_effects and the vector resolver look a record up by
 // its form's number (the fixup flag masked off) in x86_effects_by_form, x86_effects_index three times over (a form's,
-// its FS copy's at X86_FORM_COUNT and its GS copy's at twice that) and 0 past them, without x86_semantics_row's
+// its FS copy's at X86_FORM_COUNT and its GS copy's at twice that) and its first BUSTER_X86_FORM_SS_ROWS entries once
+// more (the SS copies', at three times that, #1447), without x86_semantics_row's
 // arithmetic, which took a quarter of the vector resolver's instructions.
 // main.c's units share these, as they share the encoder's templates (x86_64_encoder.c's BUSTER_X86_SHARED): a command's
 // code runs in more than one unit, as test-ir-source's emission initializes them in the checker's and its IR adapter's
@@ -2785,8 +2786,9 @@ static const X86EffectsRow x86_effects_rows[] = { BUSTER_X86_EFFECT_ROWS(BUSTER_
 BUSTER_X86_SHARED BUSTER_BAKED X86Effects x86_effects_records[BUSTER_X86_EFFECTS_CAPACITY] __attribute__((aligned(64)));
 BUSTER_X86_SHARED BUSTER_BAKED uint16_t x86_effects_index[X86_FORM_COUNT] __attribute__((aligned(64)));
 BUSTER_X86_SHARED BUSTER_BAKED uint16_t x86_effects_by_form[BUSTER_X86_FORM_NUMBER + 1] __attribute__((aligned(64)));
-_Static_assert(BUSTER_X86_FORM_FS == X86_FORM_COUNT && BUSTER_X86_FORM_GS == 2 * X86_FORM_COUNT && 3 * X86_FORM_COUNT <= BUSTER_X86_FORM_NUMBER + 1,
-               "x86_effects_by_form holds a form's record and its FS and GS copies'");
+_Static_assert(BUSTER_X86_FORM_FS == X86_FORM_COUNT && BUSTER_X86_FORM_GS == 2 * X86_FORM_COUNT && BUSTER_X86_FORM_SS == 3 * X86_FORM_COUNT &&
+                   BUSTER_X86_FORM_TEMPLATES == BUSTER_X86_FORM_NUMBER + 1,
+               "x86_effects_by_form holds a form's record and its FS, GS and SS copies'");
 BUSTER_X86_SHARED BUSTER_BAKED uint32_t x86_effects_count;
 // Whether x86_semantics_initialize has built the tables, for the consumers that build theirs from them on demand (the
 // assembler's matcher, x86_match.c).
@@ -2815,7 +2817,7 @@ static const X86Effects x86_effects_unknown = {
 static __attribute__((unused)) uint32_t x86_semantics_row(uint32_t form)
 {
     uint32_t row = form & BUSTER_X86_FORM_NUMBER;
-    row -= row >= BUSTER_X86_FORM_GS ? BUSTER_X86_FORM_GS : row >= BUSTER_X86_FORM_FS ? BUSTER_X86_FORM_FS : 0;
+    row -= row >= BUSTER_X86_FORM_SS ? BUSTER_X86_FORM_SS : row >= BUSTER_X86_FORM_GS ? BUSTER_X86_FORM_GS : row >= BUSTER_X86_FORM_FS ? BUSTER_X86_FORM_FS : 0;
     return row < X86_FORM_COUNT ? row : 0;
 }
 
@@ -4357,7 +4359,7 @@ static bool x86_semantics_initialize(void)
     {
         memcpy(x86_effects_by_form + copy * X86_FORM_COUNT, x86_effects_index, sizeof(x86_effects_index));
     }
-    memset(x86_effects_by_form + 3 * X86_FORM_COUNT, 0, sizeof(x86_effects_by_form) - 3 * sizeof(x86_effects_index));
+    memcpy(x86_effects_by_form + BUSTER_X86_FORM_SS, x86_effects_index, BUSTER_X86_FORM_SS_ROWS * sizeof(x86_effects_index[0]));
     valid = valid && x86_choice_build();
     x86_semantics_initialized = valid;
     return valid;

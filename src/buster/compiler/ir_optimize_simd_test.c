@@ -668,14 +668,18 @@ static void ir_optimize_test_simd_widths(IrOptimizeTest* test, Arena* input, Are
     }
 }
 
-// The permutes (#1840): each kind of two constant vectors compared with a third, folded by both SCCP paths alike and to
-// the interpreter's value of the original (ir_optimize_test_simd_rewrite), at each width and a valid flags byte.
+// The permutes and the conversions (#1840): each kind of constant vectors compared with another, folded by both SCCP
+// paths alike and to the interpreter's value of the original (ir_optimize_test_simd_rewrite), at each width and a valid
+// flags byte, and to a constant.
 static void ir_optimize_test_simd_permutes(IrOptimizeTest* test, Arena* input, Arena* vector, Arena* scalar, Arena* scratch)
 {
-    static const uint8_t flags[4][3] = { { 0, 1, 3 }, { 0, 0, 0 }, { 0x21, 0x33, 0x2b }, { 0, 2, 0xb1 } };
-    for (uint32_t kind = 0; kind < 4; kind += 1)
+    // The conversions (#1840) after them: extend's of each width from its own (bytes to words, signed; words to
+    // quadwords; doublewords to quadwords, signed) and truncate's of a 16-byte vector into one (words to bytes, unsigned
+    // saturation), the only one whose source is its own type.
+    static const uint8_t flags[6][3] = { { 0, 1, 3 }, { 0, 0, 0 }, { 0x21, 0x33, 0x2b }, { 0, 2, 0xb1 }, { 0x14, 0x0d, 0x1e }, { 0x21, 0, 0 } };
+    for (uint32_t kind = 0; kind < 6; kind += 1)
     {
-        for (uint32_t width = kind == 3 ? 1 : 0; width < 3; width += 1)
+        for (uint32_t width = kind == 3 ? 1 : 0; width < (kind == 5 ? 1u : 3u); width += 1)
         {
             const uint64_t mark = input->length;
             const IrSizes sizes = { .instruction_count = 6, .block_count = 1, .vector_constant_count = 3 };
@@ -697,7 +701,7 @@ static void ir_optimize_test_simd_permutes(IrOptimizeTest* test, Arena* input, A
             }
             ir_optimize_test_instruction(&f, 0, IR_VCONST, type, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
             ir_optimize_test_instruction(&f, 1, IR_VCONST, type, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
-            ir_optimize_test_instruction(&f, 2, IR_INTRINSIC, type, 0, 1, BUSTER_IR_INTRINSIC_PERMUTE + kind);
+            ir_optimize_test_instruction(&f, 2, IR_INTRINSIC, type, 0, kind < 4 ? 1 : BUSTER_IR_NONE, BUSTER_IR_INTRINSIC_PERMUTE + kind);
             f.flags[2] = flags[kind][width];
             ir_optimize_test_instruction(&f, 3, IR_VCONST, type, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
             ir_optimize_test_instruction(&f, 4, IR_VCMP, mask, 2, 3, IR_ULT);
@@ -712,6 +716,58 @@ static void ir_optimize_test_simd_permutes(IrOptimizeTest* test, Arena* input, A
                                     "a constant permute folds through a comparison");
             arena_pop_to(vector, 0);
             arena_pop_to(input, mark);
+        }
+    }
+}
+
+// The shifts by a scalar count (#1840): a constant vector shifted by a constant count, each shift and lanes' size at each
+// width, by counts below and past the lanes' bits, compared with another constant: folded by both SCCP paths alike and
+// to the interpreter's value of the original (ir_optimize_test_simd_rewrite), and to a constant.
+static void ir_optimize_test_simd_shifts(IrOptimizeTest* test, Arena* input, Arena* vector, Arena* scalar, Arena* scratch)
+{
+    static const uint32_t amounts[4] = { 3, 17, 40, 65536 };
+    for (uint32_t width = 0; width < 3; width += 1)
+    {
+        for (uint32_t flags = 1; flags < 12; flags += 1)
+        {
+            for (uint32_t amount = 0; (flags & 3) != 0 && amount < 4; amount += 1)
+            {
+                const uint64_t mark = input->length;
+                const IrSizes sizes = { .instruction_count = 6, .block_count = 1, .constant_count = 1, .vector_constant_count = 2 };
+                IrFunction f = { 0 };
+                if (ir_create(input, &sizes, &f) != IR_OK)
+                {
+                    ir_optimize_test_expect(test, false, "constant scalar shift optimizer fixture allocation");
+                    continue;
+                }
+                const IrType type = (IrType)(IR_V4I32 + width);
+                const uint32_t mask = ir_lane_mask(type, IR_SIMD_LANE_I8);
+                f.result_type = (uint8_t)mask;
+                f.block_offsets[1] = 6;
+                f.constants[0].low = amounts[amount];
+                for (uint32_t w = 0; w < (2u << width); w += 1)
+                {
+                    f.vector_constants[0].words[w] = UINT64_C(0x8796a5b4c3d2e1f0) * (w + 1);
+                    f.vector_constants[1].words[w] = UINT64_C(0x5555aaaa3333cccc) + w;
+                }
+                ir_optimize_test_instruction(&f, 0, IR_VCONST, type, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                ir_optimize_test_instruction(&f, 1, IR_CONST, IR_I32, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                ir_optimize_test_instruction(&f, 2, IR_INTRINSIC, type, 0, 1, BUSTER_IR_INTRINSIC_SHIFT);
+                f.flags[2] = (uint8_t)flags;
+                ir_optimize_test_instruction(&f, 3, IR_VCONST, type, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                ir_optimize_test_instruction(&f, 4, IR_VCMP, mask, 2, 3, IR_ULT);
+                f.flags[4] = IR_SIMD_LANE_I8;
+                ir_optimize_test_instruction(&f, 5, IR_RET, IR_VOID, 4, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                ir_optimize_test_simd_rewrite(test, &f, vector, scalar, scratch, 7);
+                IrOptimizeResult result = { 0 };
+                IrOptimizeOptions options = ir_optimize_options();
+                options.path = BUSTER_IR_OPTIMIZE_VECTOR;
+                const IrCheck check = ir_optimize(&f, vector, scratch, options, &result);
+                ir_optimize_test_expect(test, check.error == IR_OK && result.function.instruction_count == 2 && result.function.op[0] == IR_CONST,
+                                        "a constant scalar shift folds through a comparison");
+                arena_pop_to(vector, 0);
+                arena_pop_to(input, mark);
+            }
         }
     }
 }
@@ -733,6 +789,7 @@ static void ir_optimize_test_simd(IrOptimizeTest* test)
         ir_optimize_test_simd_splats(test, &input, &vector, &scalar, &scratch);
         ir_optimize_test_simd_widths(test, &input, &vector, &scalar, &scratch);
         ir_optimize_test_simd_permutes(test, &input, &vector, &scalar, &scratch);
+        ir_optimize_test_simd_shifts(test, &input, &vector, &scalar, &scratch);
     }
     arena_release(&input);
     arena_release(&vector);

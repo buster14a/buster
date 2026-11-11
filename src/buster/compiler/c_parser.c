@@ -720,6 +720,10 @@ static const uint8_t parse_closer_roles[PARSE_ROLE_COUNT] =
     X(EXPECTED_FUNCTION_BODY, "expected function body after function declarator") \
     X(UNEXPECTED_TYPE_NAME, "unexpected type name '%s': expected identifier") \
     X(UNEXPECTED_TYPE_NAME_EXPRESSION, "unexpected type name '%s': expected expression") \
+    X(COUNTED_BY_INTEGER, "'counted_by' requires a non-boolean integer type argument") \
+    X(SIZED_BY_INTEGER, "'sized_by' requires a non-boolean integer type argument") \
+    X(COUNTED_BY_OR_NULL_INTEGER, "'counted_by_or_null' requires a non-boolean integer type argument") \
+    X(SIZED_BY_OR_NULL_INTEGER, "'sized_by_or_null' requires a non-boolean integer type argument") \
     X(PARAMETER_REDEFINITION, "redefinition of parameter '%s'") \
     X(PARAMETER_MISSING, "parameter named '%s' is missing") \
     X(DECLARATION_WITHOUT_PARAMETER, "declaration does not declare a parameter") \
@@ -770,6 +774,9 @@ struct ParseDiagnostic
     bool error;
     // The opener clang's "to match this '('" note is at, of an expected closer's error (#147), or BUSTER_PARSE_NONE.
     uint32_t note;
+    // The token where the parser knew it, where that is after `token` (a counted_by family's second error, at its
+    // argument's first token, known at the type name the first is at, #1842), or 0 for `token` itself.
+    uint32_t publication;
     // A missing `;` after a declaration's declarator before what clang takes for a declaration specifier (#147): clang's
     // ParseDeclGroup goes on as if the `;` were there, and reads the specifier as the next declaration's first.
     bool resumed;
@@ -1132,7 +1139,7 @@ struct ParseTree
 };
 
 // The spellings of the attributes whose arguments clang's parser reads its own way (parse_scalar_custom_attribute).
-#define BUSTER_PARSE_CUSTOM_ATTRIBUTES 8u
+#define BUSTER_PARSE_CUSTOM_ATTRIBUTES 12u
 
 // The bindings a parse starts from: a meaning for every IdentId, PARSE_MEANING_ORDINARY but for clang's predeclared
 // typedef names, which every parse leaves as it found them.
@@ -1143,8 +1150,8 @@ struct ParseMeanings
     uint32_t capacity;
     // The scalar parser reads attribute spellings only where they decide declaration versus statement syntax.
     const InternTable* table;
-    // availability's, external_source_symbol's, type_tag_for_datatype's and objc_bridge_related's names, and their keyword
-    // spellings (#1447), found once in `table` where the meanings are made (0 for a name the unit doesn't have):
+    // availability's, external_source_symbol's, type_tag_for_datatype's, objc_bridge_related's, swift_newtype's and
+    // swift_wrapper's names, and their keyword spellings (#1447), found once in `table` where the meanings are made (0 for a name the unit doesn't have):
     // parse_flag_custom_attributes reads these, not the table, which a caller may have released by then (the parser
     // benchmark's is).
     IdentId custom_attributes[BUSTER_PARSE_CUSTOM_ATTRIBUTES];
@@ -1199,6 +1206,10 @@ struct ParseScalar
     uint32_t error_argument;
     // The opener the error's "to match this" note is at (ParseDiagnostic.note), or BUSTER_PARSE_NONE.
     uint32_t error_note;
+    // A second error clang gives after the first (#1842): a counted_by family attribute's of an argument whose type name
+    // it read as an expression's, at the argument's first token (BUSTER_PARSE_NONE if none), and its message.
+    uint32_t error_follow_token;
+    uint8_t error_follow_message;
     uint8_t error_message;
     uint8_t error_place;
     // Whether the error is a missing `;` that clang's recovery reads past (ParseDiagnostic.resumed).

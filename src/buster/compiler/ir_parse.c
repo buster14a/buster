@@ -959,7 +959,8 @@ static void ir_parse_instruction(IrParseState* state)
                     row.c = ir_parse_named(state, ir_intrinsic_names, BUSTER_IR_INTRINSIC_COUNT);
                     // A width change's part (#1840), its flags.
                     if (row.c == BUSTER_IR_INTRINSIC_EXTRACT || row.c == BUSTER_IR_INTRINSIC_INSERT || row.c == BUSTER_IR_INTRINSIC_PERMUTE ||
-                        row.c == BUSTER_IR_INTRINSIC_ALIGN || row.c == BUSTER_IR_INTRINSIC_SHUFFLE_LANES)
+                        row.c == BUSTER_IR_INTRINSIC_ALIGN || row.c == BUSTER_IR_INTRINSIC_SHUFFLE_LANES || row.c == BUSTER_IR_INTRINSIC_EXTEND ||
+                        row.c == BUSTER_IR_INTRINSIC_TRUNCATE || row.c == BUSTER_IR_INTRINSIC_SHIFT)
                     {
                         row.flags = (uint8_t)ir_parse_unsigned(state, 255, false);
                     }
@@ -1006,6 +1007,19 @@ static void ir_parse_instruction(IrParseState* state)
                     {
                         const uint32_t order = ir_parse_named(state, ir_fence_orders, BUSTER_IR_FENCE_SEQ_CST + 1);
                         row.flags = (uint8_t)(row.flags | BUSTER_IR_ATOMIC | (order <= BUSTER_IR_FENCE_SEQ_CST ? order << BUSTER_IR_ORDER_SHIFT : 0));
+                    }
+                    // A segment override (#1447), as the printer names it.
+                    if (ir_parse_word(state, "fs"))
+                    {
+                        row.flags = (uint8_t)(row.flags | BUSTER_IR_SEGMENT_FS << BUSTER_IR_SEGMENT_SHIFT);
+                    }
+                    else if (ir_parse_word(state, "gs"))
+                    {
+                        row.flags = (uint8_t)(row.flags | BUSTER_IR_SEGMENT_GS << BUSTER_IR_SEGMENT_SHIFT);
+                    }
+                    else if (ir_parse_word(state, "ss"))
+                    {
+                        row.flags = (uint8_t)(row.flags | BUSTER_IR_SEGMENT_SS << BUSTER_IR_SEGMENT_SHIFT);
                     }
                 }
             } break;

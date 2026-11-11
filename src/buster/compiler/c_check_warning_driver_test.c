@@ -37,6 +37,96 @@ static const char check_driver_format_attributed_source[] =
 static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtures[] =
 {
     {
+        // An enclosing construct's warning comes after the diagnostics its operands gave as clang built them (#1941): a
+        // condition's -Wparentheses at its `)` or `;`, a call's -Wformat from its `)`, a bitwise operator's precedence and a
+        // logical not's at their right operand's end; a statement expression's and a nested call's warnings first. A call
+        // argument's -Wformat is at its callee.
+        .name = "enclosing warnings follow their operands' diagnostics",
+        .source = "int printf(const char *, ...);\n"
+                  "int f(int x)\n"
+                  "{\n"
+                  "    if (x = ({ printf(\"%s\", 1); x; })) return 1;\n"
+                  "    if (x = printf(\"%s\", 2)) return 1;\n"
+                  "    while (x = ({ printf(\"%s\", 3); x; })) {}\n"
+                  "    for (; x = ({ printf(\"%d\", \"v\"); 1; }); ) {}\n"
+                  "    do {} while (x = ({ printf(\"%d\", \"w\"); 1; }));\n"
+                  "    printf(\"%s\", ({ printf(\"%d\", \"s\"); 1; }));\n"
+                  "    printf(\"%s\", printf(\"%d\", \"t\"));\n"
+                  "    int a = x & ({ printf(\"%d\", \"u\"); 1; }) == 2;\n"
+                  "    int b = !x == ({ printf(\"%d\", \"y\"); 1; });\n"
+                  "    (void)a; (void)b;\n"
+                  "    return (x = 1) ? printf(\"%s\", 4) : 0;\n"
+                  "}\n",
+        .options = { "-Wall" },
+        .warnings = 19,
+        .notes = 14,
+    },
+    {
+        .name = "enclosing warnings follow their operands' diagnostics in C23 under -Wextra",
+        .source = "int printf(const char *, ...);\n"
+                  "int f(int x)\n"
+                  "{\n"
+                  "    if (x = ({ printf(\"%s\", 1); x; })) return 1;\n"
+                  "    if (x = printf(\"%s\", 2)) return 1;\n"
+                  "    while (x = ({ printf(\"%s\", 3); x; })) {}\n"
+                  "    for (; x = ({ printf(\"%d\", \"v\"); 1; }); ) {}\n"
+                  "    do {} while (x = ({ printf(\"%d\", \"w\"); 1; }));\n"
+                  "    printf(\"%s\", ({ printf(\"%d\", \"s\"); 1; }));\n"
+                  "    printf(\"%s\", printf(\"%d\", \"t\"));\n"
+                  "    int a = x & ({ printf(\"%d\", \"u\"); 1; }) == 2;\n"
+                  "    int b = !x == ({ printf(\"%d\", \"y\"); 1; });\n"
+                  "    (void)a; (void)b;\n"
+                  "    return (x = 1) ? printf(\"%s\", 4) : 0;\n"
+                  "}\n",
+        .options = { "-Wall", "-Wextra" },
+        .warnings = 19,
+        .notes = 14,
+        .c23 = true,
+    },
+    {
+        // Clang's DiagRuntimeBehavior drops a runtime warning in an array bound (ConstantEvaluated), a variable array's
+        // too, and in an unevaluated operand's statement expression: shift counts, divisions, sign comparisons, constant
+        // conversions and array indexes; a comma's unused value stays (#1447, check_common_bound).
+        .name = "runtime warnings in array bounds and unevaluated statement expressions",
+        .source = "int g(void) __attribute__((warn_unused_result));\n"
+                  "void f(int n, unsigned u) {\n"
+                  "    int b[n + (1 << 40)];\n"
+                  "    int c[n + 1 / 0];\n"
+                  "    int d[n + (u < -1)];\n"
+                  "    char cc = 0;\n"
+                  "    int e[n + (cc = 300)];\n"
+                  "    int h[n + (n, 1)];\n"
+                  "    int a2[3]; int k[n + a2[5]];\n"
+                  "    int s[n + sizeof(1 << 41)];\n"
+                  "    int t = sizeof(int[n + (1 << 45)]);\n"
+                  "    int v = (int)sizeof(({ int w = 1 << 46; w; })) + (int)sizeof(({ 1 << 47; }));\n"
+                  "    int x = (1 << 48) + 1 / 0;\n"
+                  "    (void)b; (void)c; (void)d; (void)e; (void)h; (void)k; (void)s; (void)t; (void)v; (void)x;\n"
+                  "}\n",
+        .options = { "-Wall", "-Wextra" },
+        .warnings = 3,
+    },
+    {
+        .name = "runtime warnings in array bounds and unevaluated statement expressions in C23",
+        .source = "int g(void) __attribute__((warn_unused_result));\n"
+                  "void f(int n, unsigned u) {\n"
+                  "    int b[n + (1 << 40)];\n"
+                  "    int c[n + 1 / 0];\n"
+                  "    int d[n + (u < -1)];\n"
+                  "    char cc = 0;\n"
+                  "    int e[n + (cc = 300)];\n"
+                  "    int h[n + (n, 1)];\n"
+                  "    int a2[3]; int k[n + a2[5]];\n"
+                  "    int s[n + sizeof(1 << 41)];\n"
+                  "    int t = sizeof(int[n + (1 << 45)]);\n"
+                  "    int v = (int)sizeof(({ int w = 1 << 46; w; })) + (int)sizeof(({ 1 << 47; }));\n"
+                  "    int x = (1 << 48) + 1 / 0;\n"
+                  "    (void)b; (void)c; (void)d; (void)e; (void)h; (void)k; (void)s; (void)t; (void)v; (void)x;\n"
+                  "}\n",
+        .warnings = 3,
+        .c23 = true,
+    },
+    {
         .name = "return flow conservative no-fallthrough and reachable fallthrough",
         .source = "int a(int c){if(c)return 1;return 2;}int b(int c){if(c)return 1;}int d(void){while(1){}}_Noreturn void r(void){while(1){}}\n",
         .warnings = 1,
@@ -85,6 +175,15 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
                   "enum E { A, B };\nenum E ee = 5000000000LL;\nenum Small lit = 2.5;\n",
         .warnings = 6,
         .c23 = true,
+    },
+    {
+        // An assignment's or an increment's value is no constant to clang's evaluator (#1447), in a list's element too
+        // (`{ y = 300 }`), but a comma's right operand is.
+        .name = "no constant conversion of an assignment's value",
+        .source = "void g(void) { int y; char c = y = 1000; char d[1] = { y = 300 }; unsigned char u = (y += 1, 300); char e = y++; "
+                  "char f = (y = 1, 400); _Bool b = (y = 2); float fl = (y = 16777217); "
+                  "(void)c; (void)d; (void)u; (void)e; (void)f; (void)b; (void)fl; }\n",
+        .warnings = 2,
     },
     {
         .name = "floating literal assignment return and call conversions",
@@ -365,6 +464,18 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .warnings = 4,
     },
     {
+        // A variable with an applied cleanup is used, as clang's ShouldDiagnoseUnusedDecl has it (#1881): one declarator's,
+        // a specifier's on several declarators, and one never read but assigned; another declarator of the declaration is
+        // still unused. (A file-scope variable whose cleanup is ignored is unused too, but its -Wignored-attributes would
+        // be an error before it under the sweep's -Werror, after which clang gives no file-scope unused warning.)
+        .name = "a cleanup variable is never unused",
+        .source = "void rel(int *p);\nvoid relv(void *p);\nint f(int a) { int c __attribute__((cleanup(rel))) = a; if (a) return 1; return 2; }\n"
+                  "void g(void) { __attribute__((cleanup(rel))) int c = 0, d = 1; }\nvoid h(int a) { int c __attribute__((cleanup(relv))); c = a; }\n"
+                  "void k(void) { int c __attribute__((cleanup(rel))), e; }\n",
+        .options = { "-Wall" },
+        .warnings = 1,
+    },
+    {
         // A use through a block's declaration with linkage uses the outer entity it redeclares, through nested blocks too;
         // a block's extern that nothing uses leaves a file-scope static unused (#1447).
         .name = "a use through a block's extern declaration uses the outer entity",
@@ -465,6 +576,41 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .name = "file-scope declarators queue shift counts and constant conversions to their own ends",
         .source = "int a=1<<40,b=2.5;int e[2]={1<<41,4.5},f=5.5,g=1<<42;char h[2]={301,1<<43},i[1]={6.5};struct{char c;int i;}k={302,1<<44};\n",
         .warnings = 12,
+    },
+    {
+        // A comma's left operand's -Wunused-value in a file-scope initializer is queued to the declarator's end with its
+        // operands' shift counts, in the order clang builds them (#1943); a brace initializer's values walk in
+        // initializer order, before its conversions, in a function too.
+        .name = "comma and shift warnings in initializers in clang's order",
+        .source = "struct T { char a; char b; };\n"
+                  "int z = (1 << 40, 3), y = (2, 1 << 41);\n"
+                  "int w = (2 << 42, 1 << 43, 3);\n"
+                  "char c = (1 << 42, 300);\n"
+                  "struct T s = { (1 << 43, 1), (4, 1 << 44) };\n"
+                  "int arr[2] = { (5, 6), 7 };\n"
+                  "struct T g = { (5, 302), (6, 303) };\n"
+                  "void f(int x) { struct T t = { (1, 300), (2, 301) }; struct T u = { (3, x << 40), 1.5 }; struct T v = { x / 0, (4, x) }; (void)t; (void)u; (void)v;\n"
+                  "    static int k = (1 << 45, 3); (void)k; int q = (1 << 46, 2); (void)q; }\n",
+        .options = { "-Wall" },
+        .warnings = 34,
+        // (-c can't compile a comma's static initializer yet.)
+        .syntax_only = true,
+    },
+    {
+        .name = "comma warnings in initializers in clang's order without shift counts",
+        .source = "struct T { char a; char b; };\n"
+                  "int z = (1 << 40, 3), y = (2, 1 << 41);\n"
+                  "int w = (2 << 42, 1 << 43, 3);\n"
+                  "char c = (1 << 42, 300);\n"
+                  "struct T s = { (1 << 43, 1), (4, 1 << 44) };\n"
+                  "int arr[2] = { (5, 6), 7 };\n"
+                  "struct T g = { (5, 302), (6, 303) };\n"
+                  "void f(int x) { struct T t = { (1, 300), (2, 301) }; struct T u = { (3, x << 40), 1.5 }; struct T v = { x / 0, (4, x) }; (void)t; (void)u; (void)v;\n"
+                  "    static int k = (1 << 45, 3); (void)k; int q = (1 << 46, 2); (void)q; }\n",
+        .options = { "-Wno-shift-count-overflow" },
+        .warnings = 24,
+        .c23 = true,
+        .syntax_only = true,
     },
     {
         .name = "literal conversions precede constant conversions in one brace initializer",
@@ -1976,6 +2122,67 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .source = "int g(struct T { int x; } a, struct T { int x; } b, struct T *c) { return a.x + b.x + c->x; }\n"
                   "int n(struct W { int a; } *p, int (*q)(struct W { int a; } *r)) { return p->a + (q != 0); }\n",
         .c23 = true,
+    },
+    {
+        // `#pragma pack`'s own warnings (#1849): clang's parser's for malformed directives, at the token they name or past
+        // the line's last, and Sema's at the directive (a bad value, a name and a value to pop, an empty stack's pop,
+        // show's value: the default's 8, a pack value, options align's).
+        .name = "pragma pack syntax and Sema warnings",
+        .source = "#pragma pack(3)\n#pragma pack(push, r, 4)\n#pragma pack(pop, r, 2)\n#pragma pack(pop, nosuch)\n#pragma pack\n"
+                  "#pragma pack(foo)\n#pragma pack(push, 4) extra\n#pragma pack(pop, 32)\n#pragma pack(push, 4\n#pragma pack(push, r, x)\n"
+                  "#pragma pack(+)\n#pragma pack(show)\n#pragma pack(2)\n#pragma pack(show)\n#pragma options align=packed\n#pragma pack(show)\n"
+                  "#pragma pack(pop)\n#pragma pack(pop)\nstruct S { char c; int i; };\nint main(void) { return sizeof(struct S) != 6; }\n",
+        .warnings = 14,
+    },
+    {
+        // A push left open at the unit's end (#1849): one warning each, the innermost first, the innermost with clang's
+        // note at the reset that left the default value.
+        .name = "pragma pack pushes left open at the end",
+        .source = "#pragma pack(push, 4)\n#pragma pack(push, inner, 1)\nstruct S { char c; int i; };\n#pragma pack()\n"
+                  "int main(void) { return sizeof(struct S) != 5; }\n",
+        .warnings = 2,
+        .notes = 1,
+    },
+    {
+        // The note of a push that no directive set a value after has no place (#1849), which the oracle's count of
+        // located notes leaves out; the complete output compares it.
+        .name = "pragma pack push left open without a value",
+        .source = "#pragma pack(push)\nint main(void) { return 0; }\n",
+        .warnings = 1,
+    },
+    {
+        // Sema's show after a function comes after the function's own warnings (#1849): clang handles the annotation at
+        // the top level.
+        .name = "pragma pack show after a function's warnings",
+        .source = "#pragma pack(push, 2)\nint main(void) { int x; return 0; }\n#pragma pack(show)\n#pragma pack(pop)\n",
+        .options = { "-Wall" },
+        .warnings = 2,
+    },
+    {
+        // The unit's end in clang's Sema::ActOnEndOfTranslationUnit order (#2141): an unterminated pack push, #pragma
+        // weak's undeclared identifier, an internal function used but not defined, then the unused file-scope
+        // declarations, each after the function's own unused local.
+        .name = "unit end warnings in clang's order",
+        .source = "#pragma weak nothere\n#pragma pack(push, 4)\nstatic int unused(void) { return 0; }\nstatic int unused_var;\n"
+                  "static void declared(void);\nint main(void) { int x; declared(); return 0; }\n",
+        .options = { "-Wall" },
+        .warnings = 6,
+        .notes = 1,
+    },
+    {
+        // Clang diagnoses the unused file-scope declarations only where no error occurred (#2141): under -Werror the
+        // undefined internal function's error leaves them out, and alone they reject the unit themselves.
+        .name = "unit end unused declarations after an error",
+        .source = "static int unused(void) { return 0; }\nstatic int unused_var;\nstatic void declared(void);\nint main(void) { declared(); return 0; }\n",
+        .options = { "-Wall" },
+        .warnings = 3,
+        .notes = 1,
+    },
+    {
+        .name = "unit end unused declarations alone",
+        .source = "static int unused(void) { return 0; }\nstatic int unused_var;\nint main(void) { return 0; }\n",
+        .options = { "-Wall" },
+        .warnings = 2,
     },
 };
 

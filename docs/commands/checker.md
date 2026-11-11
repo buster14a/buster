@@ -101,7 +101,9 @@ unused-warning fixtures also check exact scope-completion tokens.
   of LLVM: a shared-LLVM toolchain's `libclang-cpp`, or the official release's
   static clang and LLVM archives, which the hosted rows install; the build
   checks one request against a spawned clang), which runs each command line through clang's own
-  driver and cc1 in its process, in the run's directory and environment;
+  driver and cc1 in its process, in the run's directory and environment, and
+  a run the server doesn't answer (it ended, or gave no answer within its
+  limit, 60 s) runs as a child (#2263);
   every other run is a child as before: a response file's, a jobserver dry
   run's, and one whose process-start inputs (`BUSTER_HUGE_PAGES`,
   `BUSTER_TEST_HOST_BUSY`, the lanes' test hooks, the transparent huge pages
@@ -109,7 +111,9 @@ unused-warning fixtures also check exact scope-completion tokens.
   runs each such command as a child and fails on a difference in status or
   output, but `--time-stages` and `--lane-cpus` runs, whose numeric report
   lines and lane order differ between any two runs, compare their other lines
-  in any order. The run reports the counts and the warning sweep's time. CI
+  in any order. The run reports the counts and the warning sweep's time, and
+  a `run costs` line: the served runs' time, the requests past the server's
+  limit, and the children's wall and CPU time, each in total and per run. CI
   runs the driver's parts in these modes, with `--differential` in the native
   plain row; `--cpu-dispatch-only` runs the `cpu_specific` and
   `cpu_dispatch` section alone, #1447; `--target-versions-only` runs GNU multiversioning's `target` and
@@ -226,6 +230,13 @@ unused-warning fixtures also check exact scope-completion tokens.
   comparison pairs and unparenthesized bitwise chains (#1390). Parenthesized operands retain their explicit
   grouping. Original default-warning fixtures compare complete diagnostics and independent counts against
   pinned Clang through scalar/vector and one/three-lane readers, including warning promotion and suppression.
+  An enclosing construct's warning comes after the diagnostics its operands gave as clang built them (#1941): an
+  assignment condition's `-Wparentheses` is published at the condition's `)` (a `for`'s at its `;`), as clang's
+  CheckBooleanCondition runs once the condition is whole; a bitwise operator's precedence warning and a logical not's
+  at their right operand's end (`check_common_operand_end`); and a call's `-Wformat` from its `)` on, so a statement
+  expression's own warnings and a nested call's come first. A call argument's `-Wformat` is at its callee, the start of
+  the argument (`check_common_argument_start` now reads the node's own `)`). Each costs a warning's climb, nothing on
+  a unit without one.
   Explicit void casts on a conditional arm's value path suppress the conditional's unused-result marker (#1390).
   The existing postorder conditional/comma and selected-value facts carry that discard intent through nested
   arms and transparent GNU/generic wrappers, while inner comma and division diagnostics still run.
@@ -247,8 +258,11 @@ unused-warning fixtures also check exact scope-completion tokens.
   expression whose value is not evaluated has none of its nodes evaluated either (`check_common_region_evaluation`,
   on the analysis's own copy of the facts): clang's CFG holds none of them, so the analysis reads none of their reads
   and writes, while the warnings that read a context keep a bound's there. `sizeof ({ ... })`'s `(` is its statement
-  expression's own, as clang's parser reads a parenthesized expression there, on both parser paths. Still separate: the
-  input reader's `-Wshift-count-overflow` there; clang's runtime-warning drop in every array bound; a variable-array
+  expression's own, as clang's parser reads a parenthesized expression there, on both parser paths. A folded shift's count
+  warning there, and every runtime warning in an array bound (clang's ConstantEvaluated context, a variable array's
+  too: shift counts, divisions, sign comparisons, constant conversions, array indexes, null dereferences), is
+  dropped as clang's DiagRuntimeBehavior drops it (`check_common_bound`, the parser contexts' BOUND bit; a comma's
+  unused value stays). Still separate: a variable-array
   `sizeof`'s comma operands, which clang warns of when it evaluates them; and two forms the checker refuses: a statement expression in a variable-array
   `sizeof`'s operand and a statement expression as `_Generic`'s controlling expression, which the constant reader
   reads outside a deferred typeof region. A statement expression in a static selection's chosen operand
@@ -303,6 +317,14 @@ unused-warning fixtures also check exact scope-completion tokens.
   follow every division and count of their root. Roots the reader adds after what follows their operand (a
   statement's condition, a switch's, or a `for` increment's discard) are taken where their
   operand stands (`check_common_displaced_roots`), so a condition's warnings precede its body's, as clang analyzes it.
+  In a file-scope initializer clang's `DiagRuntimeBehavior` queues the comma's warning to the declarator's end, as it
+  does a folded shift count's (`check_driver_file_initializer_end`, #1943): both are published there, ordered by their
+  nodes' ends (the records' suborder), so that each comes in the order clang builds it (`int z = (1 << 40, 3);`'s
+  count first) and the declarator's constant conversions after them. A comma's static initializer is syntax-only,
+  as `-c` can't compile one yet. A brace initializer's values walk their roots in initializer order, after
+  the plan's literal conversions and before its constant ones (`check_common_initializer_conversions`), as clang
+  queues their runtime warnings while it parses them. Still separate: a comma in a file-scope array bound, which
+  clang refuses as a variable array at file scope and the checker folds.
   A statement expression's statements are roots of their own, ahead of its enclosing expression's in node order: the
   arithmetic scan takes each one's whole visit (`check_common_inner_roots`, a `ROOT` frame) where it enters the statement
   expression, so they warn between what the enclosing expression built before it and after it, as clang builds them, a

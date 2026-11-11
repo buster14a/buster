@@ -1,0 +1,104 @@
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+// Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+//
+// The integer lanes' conversions' and scalar shifts' x86 forms (#1840), which the typed lowering's decoder (ir_simd_typed_convert) admits
+// and Tier 1's selection (tier1_select_convert_form) emits: one table for both, so that they agree. Include after
+// x86_64_encoder.c; ir_simd_typed.c and tier1_select.c both include it, the first one alone defining it.
+#ifndef BUSTER_IR_SIMD_CONVERT_FORMS_INCLUDED
+#define BUSTER_IR_SIMD_CONVERT_FORMS_INCLUDED
+
+// The conversions' forms (#1840): the extensions by their sign (zero-extending first) and pair of lanes (bytes to words,
+// doublewords and quadwords, words to doublewords and quadwords, doublewords to quadwords) at the result's width, and the
+// truncations by their mode (wrapping, signed and unsigned saturation) and pair (words to bytes, doublewords to bytes and
+// words, quadwords to bytes, words and doublewords) at the source's width. Tier 1 selects the same forms
+// (tier1_select_convert_form).
+static const uint16_t ir_simd_typed_extensions[2][6][3] = {
+    {
+        { X86_FORM_VPMOVZXBW_X_XM64_EVEX, X86_FORM_VPMOVZXBW_Y_XM128_EVEX, X86_FORM_VPMOVZXBW_Z_YM256 },
+        { X86_FORM_VPMOVZXBD_X_XM32_EVEX, X86_FORM_VPMOVZXBD_Y_XM64_EVEX, X86_FORM_VPMOVZXBD_Z_XM128 },
+        { X86_FORM_VPMOVZXBQ_X_XM16_EVEX, X86_FORM_VPMOVZXBQ_Y_XM32_EVEX, X86_FORM_VPMOVZXBQ_Z_XM64 },
+        { X86_FORM_VPMOVZXWD_X_XM64_EVEX, X86_FORM_VPMOVZXWD_Y_XM128_EVEX, X86_FORM_VPMOVZXWD_Z_YM256 },
+        { X86_FORM_VPMOVZXWQ_X_XM32_EVEX, X86_FORM_VPMOVZXWQ_Y_XM64_EVEX, X86_FORM_VPMOVZXWQ_Z_XM128 },
+        { X86_FORM_VPMOVZXDQ_X_XM64_EVEX, X86_FORM_VPMOVZXDQ_Y_XM128_EVEX, X86_FORM_VPMOVZXDQ_Z_YM256 },
+    },
+    {
+        { X86_FORM_VPMOVSXBW_X_XM64_EVEX, X86_FORM_VPMOVSXBW_Y_XM128_EVEX, X86_FORM_VPMOVSXBW_Z_YM256 },
+        { X86_FORM_VPMOVSXBD_X_XM32_EVEX, X86_FORM_VPMOVSXBD_Y_XM64_EVEX, X86_FORM_VPMOVSXBD_Z_XM128 },
+        { X86_FORM_VPMOVSXBQ_X_XM16_EVEX, X86_FORM_VPMOVSXBQ_Y_XM32_EVEX, X86_FORM_VPMOVSXBQ_Z_XM64 },
+        { X86_FORM_VPMOVSXWD_X_XM64_EVEX, X86_FORM_VPMOVSXWD_Y_XM128_EVEX, X86_FORM_VPMOVSXWD_Z_YM256 },
+        { X86_FORM_VPMOVSXWQ_X_XM32_EVEX, X86_FORM_VPMOVSXWQ_Y_XM64_EVEX, X86_FORM_VPMOVSXWQ_Z_XM128 },
+        { X86_FORM_VPMOVSXDQ_X_XM64_EVEX, X86_FORM_VPMOVSXDQ_Y_XM128_EVEX, X86_FORM_VPMOVSXDQ_Z_YM256 },
+    },
+};
+static const uint16_t ir_simd_typed_truncations[3][6][3] = {
+    {
+        { X86_FORM_VPMOVWB_XM64_X, X86_FORM_VPMOVWB_XM128_Y, X86_FORM_VPMOVWB_YM256_Z },
+        { X86_FORM_VPMOVDB_XM32_X, X86_FORM_VPMOVDB_XM64_Y, X86_FORM_VPMOVDB_XM128_Z },
+        { X86_FORM_VPMOVDW_XM64_X, X86_FORM_VPMOVDW_XM128_Y, X86_FORM_VPMOVDW_YM256_Z },
+        { X86_FORM_VPMOVQB_XM16_X, X86_FORM_VPMOVQB_XM32_Y, X86_FORM_VPMOVQB_XM64_Z },
+        { X86_FORM_VPMOVQW_XM32_X, X86_FORM_VPMOVQW_XM64_Y, X86_FORM_VPMOVQW_XM128_Z },
+        { X86_FORM_VPMOVQD_XM64_X, X86_FORM_VPMOVQD_XM128_Y, X86_FORM_VPMOVQD_YM256_Z },
+    },
+    {
+        { X86_FORM_VPMOVSWB_XM64_X, X86_FORM_VPMOVSWB_XM128_Y, X86_FORM_VPMOVSWB_YM256_Z },
+        { X86_FORM_VPMOVSDB_XM32_X, X86_FORM_VPMOVSDB_XM64_Y, X86_FORM_VPMOVSDB_XM128_Z },
+        { X86_FORM_VPMOVSDW_XM64_X, X86_FORM_VPMOVSDW_XM128_Y, X86_FORM_VPMOVSDW_YM256_Z },
+        { X86_FORM_VPMOVSQB_XM16_X, X86_FORM_VPMOVSQB_XM32_Y, X86_FORM_VPMOVSQB_XM64_Z },
+        { X86_FORM_VPMOVSQW_XM32_X, X86_FORM_VPMOVSQW_XM64_Y, X86_FORM_VPMOVSQW_XM128_Z },
+        { X86_FORM_VPMOVSQD_XM64_X, X86_FORM_VPMOVSQD_XM128_Y, X86_FORM_VPMOVSQD_YM256_Z },
+    },
+    {
+        { X86_FORM_VPMOVUSWB_XM64_X, X86_FORM_VPMOVUSWB_XM128_Y, X86_FORM_VPMOVUSWB_YM256_Z },
+        { X86_FORM_VPMOVUSDB_XM32_X, X86_FORM_VPMOVUSDB_XM64_Y, X86_FORM_VPMOVUSDB_XM128_Z },
+        { X86_FORM_VPMOVUSDW_XM64_X, X86_FORM_VPMOVUSDW_XM128_Y, X86_FORM_VPMOVUSDW_YM256_Z },
+        { X86_FORM_VPMOVUSQB_XM16_X, X86_FORM_VPMOVUSQB_XM32_Y, X86_FORM_VPMOVUSQB_XM64_Z },
+        { X86_FORM_VPMOVUSQW_XM32_X, X86_FORM_VPMOVUSQW_XM64_Y, X86_FORM_VPMOVUSQW_XM128_Z },
+        { X86_FORM_VPMOVUSQD_XM64_X, X86_FORM_VPMOVUSQD_XM128_Y, X86_FORM_VPMOVUSQD_YM256_Z },
+    },
+};
+
+// A conversion's pair of lanes' bytes' log2s, by the tables' pair index: the extensions' (from, to), and the truncations'.
+static const uint8_t ir_simd_typed_extension_pairs[6][2] = { { 0, 1 }, { 0, 2 }, { 0, 3 }, { 1, 2 }, { 1, 3 }, { 2, 3 } };
+static const uint8_t ir_simd_typed_truncation_pairs[6][2] = { { 1, 0 }, { 2, 0 }, { 2, 1 }, { 3, 0 }, { 3, 1 }, { 3, 2 } };
+
+// The shifts by a scalar count (#1840, BUSTER_IR_INTRINSIC_SHIFT), by the shift (left, logical right, arithmetic right),
+// the lanes (words, doublewords, quadwords) and the width (16, 32 and 64 bytes): by a count in an xmm register's low
+// quadword, which the decoder admits (ir_simd_typed_shift) and Tier 1 emits after a vmovd of the count; and by an
+// immediate, which Tier 1 emits for a constant count below the lane's bits (tier1_select_vector_shift). EVEX's forms at every
+// width: VL's below 64 bytes, BW's for words.
+static const uint16_t ir_simd_shift_forms[3][3][3] = {
+    {
+        { X86_FORM_VPSLLW_X_X_XM128_EVEX, X86_FORM_VPSLLW_Y_Y_XM128_EVEX, X86_FORM_VPSLLW_Z_Z_XM128 },
+        { X86_FORM_VPSLLD_X_X_XM128_EVEX, X86_FORM_VPSLLD_Y_Y_XM128_EVEX, X86_FORM_VPSLLD_Z_Z_XM128 },
+        { X86_FORM_VPSLLQ_X_X_XM128_EVEX, X86_FORM_VPSLLQ_Y_Y_XM128_EVEX, X86_FORM_VPSLLQ_Z_Z_XM128 },
+    },
+    {
+        { X86_FORM_VPSRLW_X_X_XM128_EVEX, X86_FORM_VPSRLW_Y_Y_XM128_EVEX, X86_FORM_VPSRLW_Z_Z_XM128 },
+        { X86_FORM_VPSRLD_X_X_XM128_EVEX, X86_FORM_VPSRLD_Y_Y_XM128_EVEX, X86_FORM_VPSRLD_Z_Z_XM128 },
+        { X86_FORM_VPSRLQ_X_X_XM128_EVEX, X86_FORM_VPSRLQ_Y_Y_XM128_EVEX, X86_FORM_VPSRLQ_Z_Z_XM128 },
+    },
+    {
+        { X86_FORM_VPSRAW_X_X_XM128_EVEX, X86_FORM_VPSRAW_Y_Y_XM128_EVEX, X86_FORM_VPSRAW_Z_Z_XM128 },
+        { X86_FORM_VPSRAD_X_X_XM128_EVEX, X86_FORM_VPSRAD_Y_Y_XM128_EVEX, X86_FORM_VPSRAD_Z_Z_XM128 },
+        { X86_FORM_VPSRAQ_X_X_XM128, X86_FORM_VPSRAQ_Y_Y_XM128, X86_FORM_VPSRAQ_Z_Z_XM128 },
+    },
+};
+static const uint16_t ir_simd_shift_immediate_forms[3][3][3] = {
+    {
+        { X86_FORM_VPSLLW_X_XM128_IMM8, X86_FORM_VPSLLW_Y_YM256_IMM8, X86_FORM_VPSLLW_Z_ZM512_IMM8 },
+        { X86_FORM_VPSLLD_X_XM128_IMM8, X86_FORM_VPSLLD_Y_YM256_IMM8, X86_FORM_VPSLLD_Z_ZM512_IMM8 },
+        { X86_FORM_VPSLLQ_X_XM128_IMM8, X86_FORM_VPSLLQ_Y_YM256_IMM8, X86_FORM_VPSLLQ_Z_ZM512_IMM8 },
+    },
+    {
+        { X86_FORM_VPSRLW_X_XM128_IMM8, X86_FORM_VPSRLW_Y_YM256_IMM8, X86_FORM_VPSRLW_Z_ZM512_IMM8 },
+        { X86_FORM_VPSRLD_X_XM128_IMM8, X86_FORM_VPSRLD_Y_YM256_IMM8, X86_FORM_VPSRLD_Z_ZM512_IMM8 },
+        { X86_FORM_VPSRLQ_X_XM128_IMM8, X86_FORM_VPSRLQ_Y_YM256_IMM8, X86_FORM_VPSRLQ_Z_ZM512_IMM8 },
+    },
+    {
+        { X86_FORM_VPSRAW_X_XM128_IMM8, X86_FORM_VPSRAW_Y_YM256_IMM8, X86_FORM_VPSRAW_Z_ZM512_IMM8 },
+        { X86_FORM_VPSRAD_X_XM128_IMM8, X86_FORM_VPSRAD_Y_YM256_IMM8, X86_FORM_VPSRAD_Z_ZM512_IMM8 },
+        { X86_FORM_VPSRAQ_X_XM128_IMM8, X86_FORM_VPSRAQ_Y_YM256_IMM8, X86_FORM_VPSRAQ_Z_ZM512_IMM8 },
+    },
+};
+
+#endif

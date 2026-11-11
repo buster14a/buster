@@ -439,6 +439,14 @@ static bool check_common_integer(const TypeTable* types, TypeId type, uint32_t* 
 // Whether a constant integer changes value in an implicit conversion to `target`. Unsigned sources warn only when
 // their high bits are lost; a signed source warns unless the target represents its value, with clang's -1 exception
 // for an unsigned target.
+// Whether either of two types is a _BitInt past 128 bits (#1447), a cold path's: a kind check before its width's.
+static bool check_common_integer_kind_wide(const TypeTable* types, TypeId source, TypeId target)
+{
+    const bool result = type_kind(types, type_unqualified(type_strip_aligned(types, source))) == BUSTER_TYPE_KIND_BIT_INT ||
+                        type_kind(types, type_unqualified(type_strip_aligned(types, target))) == BUSTER_TYPE_KIND_BIT_INT;
+    return result;
+}
+
 static bool check_common_conversion_changes(const TypeTable* types, TypeId source, TypeId target, unsigned __int128 integer, __int128* converted)
 {
     uint32_t source_width = 0;
@@ -759,7 +767,8 @@ static _Thread_local CheckCommonContexts check_common_contexts;
 // them: an array declarator's bound, in the operand's type name or in a declaration inside the statement expression, is
 // constant-evaluated, where clang keeps its unused-result warnings, and a sizeof of an expression of variable array type in
 // an evaluated context evaluates its operand after all (TRANSFORMED), which warns again.
-static bool check_common_unevaluated(const Parser* parser, Preprocessor* pp, const CheckInput* input, uint32_t token, Arena* scratch)
+// `token`'s parser context (check_warning_graph_void_context's), its memo pushed at the first ask.
+static uint8_t check_common_context(const Parser* parser, Preprocessor* pp, const CheckInput* input, uint32_t token, Arena* scratch)
 {
     CheckCommonContexts* contexts = &check_common_contexts;
     const uint32_t count = parser->tokens.count;
@@ -779,7 +788,36 @@ static bool check_common_unevaluated(const Parser* parser, Preprocessor* pp, con
     }
     const uint8_t context = !contexts->failed && contexts->known != NULL && token < count ?
                             check_warning_graph_void_context(input, parser, contexts->known, contexts->path, token) : CHECK_VOID_CONTEXT_KNOWN;
+    return context;
+}
+
+static bool check_common_unevaluated(const Parser* parser, Preprocessor* pp, const CheckInput* input, uint32_t token, Arena* scratch)
+{
+    const uint8_t context = check_common_context(parser, pp, input, token, scratch);
     const bool result = (context & CHECK_VOID_CONTEXT_UNEVALUATED) != 0 && (context & CHECK_VOID_CONTEXT_TRANSFORMED) == 0;
+    return result;
+}
+
+// Whether `token` lies in an array declarator's bound, clang's ConstantEvaluated context, where DiagRuntimeBehavior
+// drops a runtime warning (#1447): a shift count's, a division's, a sign comparison's, a constant conversion's, an array
+// index's, of a variable array's bound too; its unused-value warnings stay.
+static bool check_common_bound(const Parser* parser, Preprocessor* pp, const CheckInput* input, uint32_t token, Arena* scratch)
+{
+    const uint8_t context = check_common_context(parser, pp, input, token, scratch);
+    const bool result = (context & CHECK_VOID_CONTEXT_BOUND) != 0;
+    return result;
+}
+
+// Whether warning `id` is one clang gives through DiagRuntimeBehavior, which drops it in an array bound
+// (check_common_bound): a constant conversion's, a division's, an array index's, a sign comparison's, a shift's and a
+// null dereference's (#1447).
+static bool check_common_runtime_id(uint32_t id)
+{
+    const bool result = id == CHECK_WARNING_ID_CONSTANT_CONVERSION || id == CHECK_WARNING_ID_BITFIELD_CONSTANT_CONVERSION ||
+                        id == CHECK_WARNING_ID_SINGLE_BIT_BITFIELD_CONSTANT_CONVERSION || id == CHECK_WARNING_ID_DIVISION_BY_ZERO ||
+                        id == CHECK_WARNING_ID_ARRAY_BOUNDS || id == CHECK_WARNING_ID_SIGN_COMPARE || id == CHECK_WARNING_ID_SHIFT_COUNT_NEGATIVE ||
+                        id == CHECK_WARNING_ID_SHIFT_COUNT_OVERFLOW || id == CHECK_WARNING_ID_SHIFT_NEGATIVE_VALUE ||
+                        id == CHECK_WARNING_ID_NULL_DEREFERENCE;
     return result;
 }
 
@@ -792,8 +830,10 @@ static void check_common_report_evaluated(const Parser* parser, Preprocessor* pp
     if (token < parser->tokens.count && !pp->fatal)
     {
         const CheckWarningSeverity severity = check_common_severity(pp, parser, input, token, id, default_ignored);
-        // (The contexts' allocation can fail, which is fatal: then nothing more is published.)
-        if (severity != CHECK_WARNING_IGNORE && !check_common_unevaluated(parser, pp, input, token, scratch) && !pp->fatal)
+        // (The contexts' allocation can fail, which is fatal: then nothing more is published. A runtime warning in an array
+        // bound is dropped, #1447.)
+        if (severity != CHECK_WARNING_IGNORE && !check_common_unevaluated(parser, pp, input, token, scratch) &&
+            !(check_common_runtime_id(id) && check_common_bound(parser, pp, input, token, scratch)) && !pp->fatal)
         {
             const uint32_t publication_source = publication < parser->tokens.count ? parser->tokens.sources[publication] : pp->output.count;
             check_common_publish(parser, pp, token, publication_source, phase, id, severity, message, notes, note_count, scratch);
@@ -806,6 +846,25 @@ static void check_common_report_unused(const Parser* parser, Preprocessor* pp, c
 {
     check_common_report_evaluated(parser, pp, input, token, check_common_function_boundary(parser, token), PP_DIAGNOSTIC_DEFERRED, id, false,
                                   message, notes, note_count, scratch);
+}
+
+// A comma's left operand's "has no effect", check_common_report_unused's. In a file-scope initializer clang's
+// DiagRuntimeBehavior queues it to the declarator's end, as it does a folded shift count's, in the order they are built
+// (#1943, check_driver_file_initializer_end): both are published there, ordered by their nodes' ends (`comma`'s), so
+// that a shift its operands hold comes first.
+static void check_common_report_comma_left(const Parser* parser, Preprocessor* pp, const CheckInput* input, uint32_t token, uint32_t comma,
+                                           Arena* scratch)
+{
+    const uint32_t boundary = check_common_function_boundary(parser, token);
+    const uint32_t declarator = boundary == token ? check_driver_file_initializer_end(parser, input, token) : BUSTER_CHECK_NONE;
+    const PPDiagnosticRecord* previous = pp->diagnostic_last;
+    check_common_report_evaluated(parser, pp, input, token, declarator != BUSTER_CHECK_NONE ? declarator : boundary,
+                                  declarator != BUSTER_CHECK_NONE ? PP_DIAGNOSTIC_RUNTIME : PP_DIAGNOSTIC_DEFERRED, CHECK_WARNING_ID_UNUSED_VALUE, false,
+                                  "left operand of comma operator has no effect", NULL, 0, scratch);
+    if (declarator != BUSTER_CHECK_NONE && comma < input->graph.count && input->graph.source_positions != NULL)
+    {
+        pp_diagnostic_suborder(pp, previous, (uint64_t)input->graph.source_positions[comma] + 1);
+    }
 }
 
 // The deferred publication an expression warning gets inside a function: every unused-result, bounds,
@@ -1208,6 +1267,9 @@ static void check_common_shift_unreached(const Parser* parser, Preprocessor* pp,
         const uint32_t token = shifts->records[i].token;
         const uint32_t node = input->token_nodes != NULL && token < input->token_count ? input->token_nodes[token] : BUSTER_CHECK_NONE;
         const uint32_t condition = node < graph->count && evaluated[node] == 0 ? check_common_condition_root(parser, input, token) : BUSTER_CHECK_NONE;
+        // (In an unevaluated operand's statement expression, and in an array bound, clang's DiagRuntimeBehavior drops it,
+        // #1447.)
+        const bool silent = check_common_unevaluated(parser, pp, input, token, scratch) || check_common_bound(parser, pp, input, token, scratch);
         bool drop = node < graph->count && evaluated[node] == 0;
         if (drop && !marked)
         {
@@ -1226,6 +1288,7 @@ static void check_common_shift_unreached(const Parser* parser, Preprocessor* pp,
             root = parents[root];
         }
         drop &= unselected != NULL && unselected[node] == 0 && unselected[root] == 0;
+        drop |= silent;
         shifts->records[i].message = drop ? NULL : shifts->records[i].message;
         shifts->records[i].selection = !drop && unselected != NULL && node < graph->count && (unselected[node] != 0 || unselected[root] != 0);
     }
@@ -2919,15 +2982,13 @@ static void check_common_comma_marker(CheckCommonEmission* emission, uint32_t no
                 }
                 else
                 {
-                    check_common_report_unused(parser, pp, input, cast != BUSTER_CHECK_NONE ? cast : report, CHECK_WARNING_ID_UNUSED_VALUE,
-                                               "left operand of comma operator has no effect", NULL, 0, scratch);
+                    check_common_report_comma_left(parser, pp, input, cast != BUSTER_CHECK_NONE ? cast : report, node, scratch);
                 }
             }
         }
         else
         {
-            check_common_report_unused(parser, pp, input, report, CHECK_WARNING_ID_UNUSED_VALUE,
-                                       "left operand of comma operator has no effect", NULL, 0, scratch);
+            check_common_report_comma_left(parser, pp, input, report, node, scratch);
         }
     }
 }
@@ -3682,6 +3743,27 @@ static bool check_common_bitwise_precedence(const Parser* parser, uint32_t compa
     return result;
 }
 
+// The token past the binary operator `op`'s right operand, its subtree's last token's next: the tokens after it that climb
+// to it are its right operand's. Only a warning asks, so the climbs' cost is a warning's.
+static uint32_t check_common_operand_end(const Parser* parser, uint32_t op)
+{
+    const uint32_t count = parser->tokens.count;
+    uint32_t end = op < count ? op + 1 : count;
+    bool inside = true;
+    while (inside && end < count)
+    {
+        uint32_t at = end;
+        for (uint32_t steps = 0; at < count && at != op && steps < count; steps += 1)
+        {
+            const uint32_t up = parser->tree.parents[at];
+            at = up != at ? up : count;
+        }
+        inside = at == op;
+        end += inside ? 1u : 0u;
+    }
+    return end;
+}
+
 static void check_common_parentheses(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, const TypeTable* types,
                                      Arena* scratch)
 {
@@ -3708,8 +3790,10 @@ static void check_common_parentheses(const Parser* parser, Preprocessor* pp, con
                 { token, "place parentheses around the assignment to silence this warning" },
                 { token, "use '==' to turn this assignment into an equality comparison" },
             };
-            check_common_report(parser, pp, input, token, CHECK_WARNING_ID_PARENTHESES, false,
-                                "using the result of an assignment as a condition without parentheses", notes, 2, scratch);
+            // Clang checks the condition once it is whole (CheckBooleanCondition): after the diagnostics its operands gave as
+            // they were built, a call's format or a statement expression's own (#1941), so published at its `)` or `;`.
+            check_common_report_at(parser, pp, input, token, parent, CHECK_WARNING_ID_PARENTHESES, false,
+                                   "using the result of an assignment as a condition without parentheses", notes, 2, scratch);
         }
         else if (parent_role == PARSE_ROLE_BITWISE_AND || parent_role == PARSE_ROLE_BITWISE_OR || parent_role == PARSE_ROLE_BITWISE_XOR)
         {
@@ -3722,7 +3806,9 @@ static void check_common_parentheses(const Parser* parser, Preprocessor* pp, con
                     { parent, check_warning_text(scratch, "place parentheses around the '%s' expression to silence this warning", upper) },
                     { parent, check_warning_text(scratch, "place parentheses around the %s expression to evaluate it first", lower) },
                 };
-                check_common_report(parser, pp, input, parent, CHECK_WARNING_ID_PARENTHESES, false, message, notes, 2, scratch);
+                // Clang warns as it builds the bitwise operator, after its right operand's own diagnostics (#1941).
+                check_common_report_at(parser, pp, input, parent, check_common_operand_end(parser, parent), CHECK_WARNING_ID_PARENTHESES, false, message,
+                                       notes, 2, scratch);
             }
         }
         else if (role == PARSE_ROLE_PREFIX && parser->tokens.kinds[token] == PARSE_KIND_EXCLAIM && check_common_comparison_role(parent_role) && token < parent)
@@ -3731,8 +3817,9 @@ static void check_common_parentheses(const Parser* parser, Preprocessor* pp, con
                 { token, "add parentheses after the '!' to evaluate the comparison first" },
                 { token, "add parentheses around left hand side expression to silence this warning" },
             };
-            check_common_report(parser, pp, input, token, CHECK_WARNING_ID_LOGICAL_NOT_PARENTHESES, false,
-                                "logical not is only applied to the left hand side of this comparison", notes, 2, scratch);
+            // Clang warns as it builds the comparison, after its right operand's own diagnostics (#1941).
+            check_common_report_at(parser, pp, input, token, check_common_operand_end(parser, parent), CHECK_WARNING_ID_LOGICAL_NOT_PARENTHESES, false,
+                                   "logical not is only applied to the left hand side of this comparison", notes, 2, scratch);
         }
         else if ((role == PARSE_ROLE_EQUALITY || role == PARSE_ROLE_RELATIONAL) &&
                  parent < parser->tokens.count && parser->tree.roles[parent] == PARSE_ROLE_TERMINATOR &&
@@ -4508,11 +4595,16 @@ static bool check_common_same_width(const TypeTable* types, const CheckValue* va
     bool source_signed = false;
     bool target_signed = false;
     bool result = false;
-    if (check_common_integer(types, value->type, &source_width, &source_signed) && check_common_integer(types, target, &target_width, &target_signed) &&
-        source_signed && target_signed && target_width != 0 && target_width < 128 && target_width < source_width)
+    const bool narrow = check_common_integer(types, value->type, &source_width, &source_signed) && check_common_integer(types, target, &target_width, &target_signed);
+    if (narrow && source_signed && target_signed && target_width != 0 && target_width < 128 && target_width < source_width)
     {
         const __int128 original = check_common_integer_bits(value->integer, source_width, source_signed);
         result = original >= ((__int128)1 << (target_width - 1)) && original < ((__int128)1 << target_width);
+    }
+    else if (!narrow && check_common_integer_kind_wide(types, value->type, target))
+    {
+        // A _BitInt past 128 bits on either side (#1447).
+        result = check_wide_same_width(types, value, target);
     }
     return result;
 }
@@ -4548,12 +4640,19 @@ static void check_common_conversion_leaf(const Parser* parser, Preprocessor* pp,
                                             TypeId target, const uint32_t* parents, uint32_t at_once, uint8_t leaves, Arena* scratch)
 {
     __int128 converted = 0;
-    const bool plain = check_common_conversion_target(types, target, false);
+    // An assignment's or an increment's value, which the stream may hold as its stored constant, is none to clang's
+    // evaluator (#1447: `char c = x = 1000;`, `{ x = 300 }`), so its conversion warns of nothing.
+    const CheckOp op = source < input->graph.count ? input->graph.ops[source] : CHECK_OP_COUNT;
+    const bool written = op == CHECK_OP_ASSIGN || (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_BIT_XOR_ASSIGN);
+    const bool plain = !written && check_common_conversion_target(types, target, false);
     const bool width = plain && value->constant_kind == CHECK_CONSTANT_INTEGER && check_common_same_width(types, value, target);
     const uint8_t kind = width ? BUSTER_CHECK_LEAVES_WIDTH : BUSTER_CHECK_LEAVES_INTEGER;
     const bool listed_character = width && (leaves & BUSTER_CHECK_LEAVES_LISTED) != 0 && check_common_character_type(types, target);
-    if (plain && value->constant_kind == CHECK_CONSTANT_INTEGER && (leaves & kind) != 0 && !listed_character &&
-        check_common_conversion_changes(types, value->type, target, value->integer, &converted) &&
+    const bool candidate = plain && value->constant_kind == CHECK_CONSTANT_INTEGER && (leaves & kind) != 0 && !listed_character;
+    // A _BitInt past 128 bits on either side (#1447, c_check_wide.c): its own rules' twin and its decimal digits.
+    bool wide = false;
+    const bool wide_changes = candidate && check_common_integer_kind_wide(types, value->type, target) && check_wide_conversion_changes(types, value, target, &wide);
+    if (candidate && (wide ? wide_changes : check_common_conversion_changes(types, value->type, target, value->integer, &converted)) &&
         !check_common_nondecimal_literal(parser, pp, &input->graph, types, source, value, target, scratch))
     {
         const String8 source_name = check_driver_warning_type(parser, pp, input, types, spell, scratch, value->type, 0);
@@ -4570,9 +4669,19 @@ static void check_common_conversion_leaf(const Parser* parser, Preprocessor* pp,
             check_common_integer(types, target, &target_width, &target_signed);
             check_common_number(original, sizeof(original), check_common_integer_value(value, source_width, source_signed));
             check_common_number(changed, sizeof(changed), converted);
-            const char* message = check_warning_text(scratch, "implicit conversion from %.*s to %.*s changes value from %s to %s",
-                                                      (int)source_name.length, source_name.pointer, (int)target_name.length, target_name.pointer,
-                                                      original, changed);
+            const char* original_text = original;
+            const char* changed_text = changed;
+            if (wide)
+            {
+                CheckValue result = *value;
+                check_action_convert_value(types, &result, target, source);
+                original_text = check_wide_text(types, value, scratch);
+                changed_text = check_wide_text(types, &result, scratch);
+            }
+            const char* message = original_text == NULL || changed_text == NULL ? NULL :
+                                  check_warning_text(scratch, "implicit conversion from %.*s to %.*s changes value from %s to %s",
+                                                     (int)source_name.length, source_name.pointer, (int)target_name.length, target_name.pointer,
+                                                     original_text, changed_text);
             const CheckGraph* graph = &input->graph;
             const uint32_t condition = graph->ops[source] == CHECK_OP_CONDITIONAL ? graph->operand0[source] : BUSTER_CHECK_NONE;
             const uint32_t token = condition < graph->count ? graph->tokens[condition] : graph->tokens[source];
@@ -4971,6 +5080,13 @@ static bool check_common_constant_changes(const TypeTable* types, const CheckStr
         const unsigned __int128 integer = check_common_stream_integer(stream, source, &type);
         __int128 converted = 0;
         result = check_common_conversion_changes(types, type, target, integer, &converted);
+        if (!result && check_common_integer_kind_wide(types, type, target))
+        {
+            // A _BitInt past 128 bits on either side (#1447): its whole value's.
+            bool wide = false;
+            const CheckValue value = check_stream_value(stream, source);
+            result = check_wide_conversion_changes(types, &value, target, &wide) && wide;
+        }
     }
     return result;
 }
@@ -5288,7 +5404,7 @@ static uint32_t check_common_next_unevaluated(const uint8_t* evaluated, uint32_t
 }
 
 // One brace initializer's literal conversions (check_common_initializer_roots' plan `index`), its parts in reverse
-// initializer order, each part's target conversion, then its nested ones, then the part's own root walk.
+// initializer order, each part's target conversion, then its nested ones; then the parts' own root walks, in order.
 static void check_common_initializer_conversions(CheckCommonEmission* emission, const CheckProgram* program, uint32_t index)
 {
     const Parser* parser = emission->parser;
@@ -5351,10 +5467,19 @@ static void check_common_initializer_conversions(CheckCommonEmission* emission, 
             // the conversion visit bit prevents the later parent walk from reporting them again.
             check_common_emit_push(emission, root, BUSTER_CHECK_EMIT_CONVERSIONS);
             check_common_emit_run(emission);
-            if (emission->parents[root] == BUSTER_CHECK_NONE && (emission->emitted[root] & BUSTER_CHECK_EMITTED_TREE) == 0)
-            {
-                check_common_emit_root(emission, root);
-            }
+        }
+    }
+    // The parts' own root walks, in initializer order (#1943): clang queues their runtime warnings (a comma's left operand,
+    // a shift count) as it parses each value, before the list's checks.
+    for (uint32_t p = 0; p < plan->count && !pp->fatal; p += 1)
+    {
+        const CheckInitPart* part = plan->parts + p;
+        const uint32_t root = part->node;
+        if (part->kind == CHECK_INIT_VALUE && root < graph->count && stream->diagnostics[root] == CHECK_DIAG_NONE &&
+            (evaluated == NULL || evaluated[root] != 0 || (emission->emitted[root] & BUSTER_CHECK_EMITTED_LITERAL_CONTEXT) != 0) &&
+            emission->parents[root] == BUSTER_CHECK_NONE && (emission->emitted[root] & BUSTER_CHECK_EMITTED_TREE) == 0)
+        {
+            check_common_emit_root(emission, root);
         }
     }
     emission->at_once = BUSTER_CHECK_NONE;
@@ -6208,7 +6333,8 @@ static uint32_t check_common_argument_start(const Parser* parser, uint32_t token
 {
     uint32_t result = token;
     uint32_t depth = 0;
-    for (uint32_t at = token; at < parser->tokens.count && at-- > 0;)
+    // (From the node's token itself: a call's is its `)`, whose arguments' commas are no argument's end, #1941.)
+    for (uint32_t at = token < parser->tokens.count ? token + 1 : 0; at-- > 0;)
     {
         const uint8_t kind = parser->tokens.kinds[at];
         if (kind == PARSE_KIND_R_PAREN)
@@ -6563,7 +6689,9 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
             {
                 check_common_exhausted(pp);
             }
-            uint32_t order = 0;
+            // Clang checks the format as it builds the call, once its arguments are: after the diagnostics they gave as they
+            // were built, a statement expression's own or a nested call's (#1941), so published from the call's `)` on.
+            uint32_t order = graph->tokens[node] < parser->tokens.count ? parser->tokens.sources[graph->tokens[node]] : 0;
             uint32_t max_uncovered = BUSTER_CHECK_NONE;
             bool all_covered = false;
             bool nonliteral_leaf = false;

@@ -412,13 +412,103 @@ static String8 check_semantic_token(const Parser* parser, Preprocessor* pp, uint
     return result;
 }
 
+// A character constant's spelling in a failed assertion's requirement, as clang's CharacterLiteral::print gives it (#1999):
+// its prefix, then its value quoted: a C escape for a quote, a backslash or a control character that has one; else, an
+// ordinary constant's sign extension of a byte taken off, a printable byte as itself, `\xNN` below 256, `\uNNNN` up to
+// 0xFFFF and `\UNNNNNNNN` past it, in lower case. The spelling as written where it doesn't decode.
+static String8 check_semantic_character(Preprocessor* pp, String8 written, Arena* scratch)
+{
+    String8 result = written;
+    const uint8_t* bytes = (const uint8_t*)written.pointer;
+    const CheckLiteral literal = check_literal_character_by(bytes, (uint32_t)written.length, pp->options.language.standard >= 2023,
+                                                            pp->options.predefines.char_unsigned, true);
+    uint32_t prefix = 0;
+    while (prefix < written.length && bytes[prefix] != '\'')
+    {
+        prefix += 1;
+    }
+    char* text = literal.valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, char, prefix + 16) : NULL;
+    if (text != NULL)
+    {
+        uint32_t value = (uint32_t)literal.integer;
+        const bool ordinary = prefix == 0;
+        value = ordinary && (value & ~UINT32_C(0xFF)) == ~UINT32_C(0xFF) ? value & 0xFF : value;
+        static const char escapes[][3] = { ['\a'] = "\\a", ['\b'] = "\\b", ['\t'] = "\\t", ['\n'] = "\\n", ['\v'] = "\\v", ['\f'] = "\\f", ['\r'] = "\\r" };
+        const bool quoted = value == '\'' || value == '\\';
+        const bool control = value < BUSTER_ARRAY_LENGTH(escapes) && escapes[value][0] != 0;
+        memcpy(text, written.pointer, prefix);
+        int length = 0;
+        if (quoted || control)
+        {
+            length = snprintf(text + prefix, 16, "'%s'", quoted ? (value == '\'' ? "\\'" : "\\\\") : escapes[value]);
+        }
+        else if (value >= 0x20 && value < 0x7F)
+        {
+            length = snprintf(text + prefix, 16, "'%c'", (char)value);
+        }
+        else
+        {
+            length = snprintf(text + prefix, 16, value < 256 ? "'\\x%02x'" : value <= 0xFFFF ? "'\\u%04x'" : "'\\U%08x'", (unsigned)value);
+        }
+        result = length > 0 ? (String8){ .pointer = text, .length = prefix + (uint32_t)length } : written;
+    }
+    return result;
+}
+
 static bool check_semantic_binary(uint8_t role)
 {
     return (role >= PARSE_ROLE_MULTIPLICATIVE && role <= PARSE_ROLE_ASSIGN) || role == PARSE_ROLE_COMMA || role == PARSE_ROLE_OPEN_TERNARY || role == PARSE_ROLE_CLOSE_TERNARY;
 }
 
-// Spell a failed assertion's requirement with expression spacing, not the source's arbitrary whitespace. This
-// is a bounded token pass, including macro expansions; it never walks the expression recursively.
+// A run of builtin type keywords as clang's TypePrinter spells their type (#1447): `unsigned` is "unsigned int",
+// `long unsigned int` "unsigned long", `signed` "int". NULL where the run isn't one it reorders (a typedef's, a
+// complex's, a _BitInt's, or any keyword it doesn't know), which keeps the keywords as written.
+static const char* check_semantic_builtin_spelling(const String8* parts, uint32_t count)
+{
+    uint32_t longs = 0;
+    bool is_unsigned = false;
+    bool is_signed = false;
+    bool is_int = false;
+    bool is_char = false;
+    bool is_short = false;
+    bool is_double = false;
+    bool known = count != 0;
+    for (uint32_t i = 0; known && i < count; i += 1)
+    {
+        const String8 word = parts[i];
+        const bool unsigned_word = word.length == 8 && memcmp(word.pointer, "unsigned", 8) == 0;
+        const bool signed_word = (word.length == 6 && memcmp(word.pointer, "signed", 6) == 0) ||
+                                 (word.length == 8 && memcmp(word.pointer, "__signed", 8) == 0) ||
+                                 (word.length == 10 && memcmp(word.pointer, "__signed__", 10) == 0);
+        const bool int_word = word.length == 3 && memcmp(word.pointer, "int", 3) == 0;
+        const bool char_word = word.length == 4 && memcmp(word.pointer, "char", 4) == 0;
+        const bool short_word = word.length == 5 && memcmp(word.pointer, "short", 5) == 0;
+        const bool long_word = word.length == 4 && memcmp(word.pointer, "long", 4) == 0;
+        const bool double_word = word.length == 6 && memcmp(word.pointer, "double", 6) == 0;
+        is_unsigned |= unsigned_word;
+        is_signed |= signed_word;
+        is_int |= int_word;
+        is_char |= char_word;
+        is_short |= short_word;
+        is_double |= double_word;
+        longs += long_word ? 1 : 0;
+        known = unsigned_word || signed_word || int_word || char_word || short_word || long_word || double_word;
+    }
+    const bool integer = !is_double && !(is_unsigned && is_signed) && longs <= 2 && !(is_char && (is_short || is_int || longs != 0)) && !(is_short && longs != 0);
+    const char* result = !known ? NULL :
+                         is_double ? (longs == 1 && !is_unsigned && !is_signed && !is_int && !is_char && !is_short ? "long double" : longs == 0 && count == 1 ? "double" : NULL) :
+                         !integer ? NULL :
+                         is_char ? (is_unsigned ? "unsigned char" : is_signed ? "signed char" : "char") :
+                         is_short ? (is_unsigned ? "unsigned short" : "short") :
+                         longs == 2 ? (is_unsigned ? "unsigned long long" : "long long") :
+                         longs == 1 ? (is_unsigned ? "unsigned long" : "long") :
+                         is_unsigned ? "unsigned int" : "int";
+    return result;
+}
+
+// Spell a failed assertion's requirement with expression spacing, not the source's arbitrary whitespace, and its character
+// constants by their values (check_semantic_character). This is a bounded token pass, including macro expansions; it never
+// walks the expression recursively.
 static const char* check_semantic_requirement(const Parser* parser, Preprocessor* pp, uint32_t first, uint32_t end, Arena* scratch)
 {
     const uint32_t count = end - first;
@@ -428,18 +518,59 @@ static const char* check_semantic_requirement(const Parser* parser, Preprocessor
     for (uint32_t i = 0; valid && i < count; i += 1)
     {
         parts[i] = check_semantic_token(parser, pp, first + i, scratch);
+        // A character constant by its value, as clang prints it (#1999).
+        parts[i] = parts[i].length != 0 && parser->tokens.kinds[first + i] == PARSE_KIND_CHARACTER ? check_semantic_character(pp, parts[i], scratch) : parts[i];
         valid = parts[i].length != 0 && parts[i].length < UINT64_MAX - length - 1;
         length += valid ? parts[i].length + 1 : 0;
     }
+    // A cast's type name prints its builtin type as clang's TypePrinter does (#1447, `(unsigned)n`'s `(unsigned int)n`):
+    // its run of type keywords becomes the first one's text, and the rest print nothing.
+    uint8_t* dropped = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, count) : NULL;
+    valid &= dropped != NULL;
+    for (uint32_t i = 0; valid && i < count; i += 1)
+    {
+        dropped[i] = 0;
+    }
+    for (uint32_t i = 0; valid && i < count; i += 1)
+    {
+        const bool cast = parser->tree.roles[first + i] == PARSE_ROLE_OPEN_CAST;
+        uint32_t run = cast ? i + 1 : count;
+        while (run < count && parser->tokens.kinds[first + run] == PARSE_KIND_QUALIFIER)
+        {
+            run += 1;
+        }
+        uint32_t stop = run;
+        while (stop < count && parser->tokens.kinds[first + stop] == PARSE_KIND_TYPE)
+        {
+            stop += 1;
+        }
+        const char* spelled = cast && stop > run ? check_semantic_builtin_spelling(parts + run, stop - run) : NULL;
+        if (spelled != NULL)
+        {
+            parts[run] = (String8){ .pointer = (char*)spelled, .length = strlen(spelled) };
+            length += parts[run].length;
+            for (uint32_t k = run + 1; k < stop; k += 1)
+            {
+                dropped[k] = 1;
+            }
+        }
+    }
     char* result = valid && length < UINT64_MAX ? BUSTER_ARENA_PUSH_ARRAY(scratch, char, length + 1) : NULL;
     uint64_t at = 0;
+    uint32_t last = UINT32_MAX;
     for (uint32_t i = 0; result != NULL && i < count; i += 1)
     {
+        if (dropped[i] != 0)
+        {
+            continue;
+        }
+        const uint32_t prior = last;
+        last = i;
         const uint8_t role = parser->tree.roles[first + i];
-        const uint8_t previous = i != 0 ? parser->tree.roles[first + i - 1] : PARSE_ROLE_NONE;
-        const bool word = i != 0 && pp_word_character((uint8_t)parts[i - 1].pointer[parts[i - 1].length - 1], pp_dollar_punctuation(&pp->options)) &&
-                                   pp_word_character((uint8_t)parts[i].pointer[0], pp_dollar_punctuation(&pp->options));
-        if (i != 0 && (check_semantic_binary(role) || check_semantic_binary(previous) || word))
+        const uint8_t previous = prior != UINT32_MAX ? parser->tree.roles[first + prior] : PARSE_ROLE_NONE;
+        const bool word = prior != UINT32_MAX && pp_word_character((uint8_t)parts[prior].pointer[parts[prior].length - 1], pp_dollar_punctuation(&pp->options)) &&
+                                                 pp_word_character((uint8_t)parts[i].pointer[0], pp_dollar_punctuation(&pp->options));
+        if (prior != UINT32_MAX && (check_semantic_binary(role) || check_semantic_binary(previous) || word))
         {
             result[at++] = ' ';
         }
