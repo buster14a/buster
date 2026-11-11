@@ -5745,10 +5745,13 @@ declaration and one byte of its name.
 A statement expression in an unevaluated operand drops them, as clang does
 (`check_common_report_discarded`). The functions stay out of line, as does the
 discarded selection's marker: inlined into the emission's loops they cost
-sqlite3.c's `-fsyntax-only` instructions even where no call warns. Left: a call
-whose callee is a member, an element, another call's result, a comma's or a
-conditional's value (`(n, g)()`, `(n ? fp : fq)()`) or a pointer to a pointer's
-dereference (`(*pp)()`), which warns of no return type's attribute. A call a
+sqlite3.c's `-fsyntax-only` instructions even where no call warns. A call whose
+callee has no function's name reads its return type's typedef from the
+declaration that spells the pointer (`check_common_ignored_callee`): a member's
+declarator, an element's or a pointer to a pointer's object (through its
+further `*` and its bound), another call's callee's return typedef, a comma's
+or a conditional's value (its true arm), and reports at the callee's first
+token. A call a
 macro's argument writes gets clang's "expanded from macro" note for each macro
 whose argument it is (#1447): clang's macro backtrace leaves an argument's own
 note out only where every range the diagnostic highlights is one token of that
