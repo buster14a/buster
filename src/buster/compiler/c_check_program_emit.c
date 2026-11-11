@@ -2925,7 +2925,9 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     arena_pop_to(reserved, 0);
     Arena* columns = column_bytes != 0 && reserved->base != 0 ? reserved : scratch;
     // The lanes' run: the bodies' codes and code, their frames, and the parts' cut by the bodies' tokens.
-    const uint64_t frames = unwind ? (uint64_t)count + (valid ? result->lowered.helpers.count : 0) : 0;
+    // (And the resolvers' of multiversioning by target strings, #1838, after them.)
+    const uint32_t target_frames = unwind && program->target_group_count != 0 ? check_program_target_frames(program) : 0;
+    const uint64_t frames = unwind ? (uint64_t)count + (valid ? result->lowered.helpers.count : 0) + target_frames : 0;
     CheckEmitRun run = {
         .program = program,
         .parser = parser,
@@ -4492,7 +4494,11 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     // cpu_dispatch's resolvers, and cpu_specific's versions' other names at their code (#1447).
     valid = valid && (program->cpu_group_count == 0 || check_program_cpu_atoms(result, program, bytes));
     // Multiversioning by target strings' resolvers, and target_clones' other names at their bodies (#1838).
-    valid = valid && (program->target_group_count == 0 || check_program_target_atoms(result, program, bytes));
+    const uint64_t target_first = frames - target_frames;
+    SymbolId* target_frame_symbols = valid && target_frames != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, SymbolId, target_frames) : 0;
+    valid = valid && (target_frames == 0 || target_frame_symbols != 0);
+    valid = valid && (program->target_group_count == 0 ||
+                      check_program_target_atoms(result, program, target_frames != 0 ? run.frames + target_first : NULL, target_frame_symbols, bytes));
     check_clock_mark(stage_clock, CHECK_STAGE_CODE_ATOMS);
     // The unwind tables, after the last function: measured, then written into the byte arena, one CIE and an FDE per
     // function after it, as one EH_FRAME atom whose FDEs' initial locations refer to their functions.
@@ -4510,7 +4516,8 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         valid = atom != 0;
         for (uint32_t f = 0; valid && f < frames; f += 1)
         {
-            const SymbolId symbol = f < count ? check_program_body_symbol(program, f) : helpers->items[f - count].symbol;
+            const SymbolId symbol = f < count ? check_program_body_symbol(program, f) : f < target_first ? helpers->items[f - count].symbol :
+                                    target_frame_symbols[f - target_first];
             valid = link_add_fixup(&result->link, atom, locations[f], BUSTER_LINK_FIXUP_PC32, symbol, 0) != 0;
         }
     }
