@@ -331,12 +331,14 @@ static void ir_vector_split_copy(IrVectorSplitWork* work, uint32_t i)
     const uint32_t op = f->op[i];
     const bool phi = op == IR_PHI;
     const bool call = op == IR_CALL || op == IR_CALL_INDIRECT;
+    // A ternary intrinsic's third operand (#1840) gets a slot of its own too, its `c` naming it.
+    const bool ternary = ir_ternary_instruction(f, i);
     const uint32_t list = (uint32_t)work->extra;
-    work->extra += phi ? (uint64_t)f->b[i] * 2 : call ? f->calls[f->b[i]].argument_count : 0;
+    work->extra += phi ? (uint64_t)f->b[i] * 2 : call ? f->calls[f->b[i]].argument_count : ternary ? 1 : 0;
     const uint32_t mask = ir_value_mask(f, i);
     const uint32_t a = phi ? list : (mask & 1) != 0 ? ir_vector_split_piece(work, f->a[i], 0) : f->a[i];
     const uint32_t b = (mask & 2) != 0 ? ir_vector_split_piece(work, f->b[i], 0) : f->b[i];
-    const uint32_t c = (mask & 4) != 0 ? ir_vector_split_piece(work, f->c[i], 0) : f->c[i];
+    const uint32_t c = (mask & 4) != 0 ? ir_vector_split_piece(work, f->c[i], 0) : ternary ? ir_intrinsic_ternary_c(f->c[i], list) : f->c[i];
     const uint32_t id = ir_vector_split_emit(work, op, f->type[i], a, b, c);
     if (work->output != 0)
     {
@@ -359,6 +361,10 @@ static void ir_vector_split_copy(IrVectorSplitWork* work, uint32_t i)
             {
                 output->extra[list + p] = ir_vector_split_piece(work, f->extra[source.argument_first + p], 0);
             }
+        }
+        else if (ternary)
+        {
+            output->extra[list] = ir_vector_split_piece(work, ir_intrinsic_third(f, i), 0);
         }
     }
     ir_vector_split_place(work, i, 0, id);

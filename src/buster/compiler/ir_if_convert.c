@@ -259,6 +259,10 @@ static IrError ir_if_convert_rewrite(const IrIfConvertWork* work, Arena* output,
         {
             extras += f->calls[f->b[i]].argument_count;
         }
+        else if (ir_ternary_instruction(f, i))
+        {
+            extras += 1;
+        }
     }
     IrError error = !ok ? IR_ERROR_MEMORY : extras > UINT32_MAX ? IR_ERROR_LIMIT : IR_OK;
     if (error == IR_OK)
@@ -370,6 +374,12 @@ static IrError ir_if_convert_rewrite(const IrIfConvertWork* work, Arena* output,
                 {
                     view.extra[extra++] = values[f->extra[call.argument_first + a]];
                 }
+            }
+            else if (ir_ternary_instruction(f, i))
+            {
+                // A ternary intrinsic's third operand (#1840), in its own appended slot.
+                view.c[out] = ir_intrinsic_ternary_c(f->c[i], extra);
+                view.extra[extra++] = values[ir_intrinsic_third(f, i)];
             }
         }
         view.arena_bytes = output->length - mark;

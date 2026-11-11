@@ -1002,9 +1002,14 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
                 // A compare-exchange's desired value (#1059), which it uses whether or not it stores it.
                 operands = 7;
             }
+            else if (ir_ternary_instruction(function, i))
+            {
+                // A ternary intrinsic's third operand (#1840), from the extra array.
+                operands = 7;
+            }
             for (uint32_t p = 0; result.status == INTERPRETER_OK && p < 3; p += 1)
             {
-                const uint32_t id = p == 0 ? a : p == 1 ? b : c;
+                const uint32_t id = p == 0 ? a : p == 1 ? b : ir_value_third(function, i) != BUSTER_IR_NONE ? ir_value_third(function, i) : c;
                 if ((operands & (1u << p)) != 0 && frame->defined[id] == 0 && options->check_undefined)
                 {
                     result.status = INTERPRETER_UNDEFINED;
