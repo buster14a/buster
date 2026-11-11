@@ -1923,7 +1923,13 @@ refuses each by name, as clang's code generation does for x86:
 object p points to, as clang's `PaddingClearer` does.
 
 - **Sema.** p is a pointer as written (an array isn't one) to a complete object
-  type that isn't const. Volatile and `_Atomic` pointees are fine.
+  type that isn't const. Volatile and `_Atomic` pointees are fine. Each refusal
+  is clang's error at the argument's first token (#2414,
+  `check_semantic_clear_padding`): "passing 'T' to parameter of incompatible
+  type pointer: type mismatch at 1st parameter ('T' vs pointer)", a function
+  pointer's "must be a pointer to a trivially-copyable type", "variable has
+  incomplete type 'T'" with a tag's note, and "read-only variable is not
+  assignable".
 - **Bits.** The bits no scalar, bit-field or vector of the object holds are
   padding:
   - a record's holes and tail, and an unnamed bit-field;
