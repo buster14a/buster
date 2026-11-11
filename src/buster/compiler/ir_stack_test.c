@@ -317,20 +317,22 @@ static void ir_stack_test_invalid(IrLowerTestTally* tally, IrFunction* function,
         const uint32_t i = nodes[op];
         const uint8_t type = function->type[i];
         const uint32_t a = function->a[i];
-        // Independent contract order: result type, unused fields, modifiers, then value operand validity.
+        // Independent contract order: result type, unused fields, modifiers, then value operand validity. The modifier is
+        // a flag none of them takes (a stack save's BUSTER_IR_STACK_SAVE_FRAME is its frame address, #1847).
+        const uint8_t flag = 2;
         const IrError errors[] = { IR_ERROR_TYPE, IR_ERROR_OPERAND, IR_ERROR_METADATA, IR_ERROR_METADATA, IR_ERROR_OPERAND, IR_ERROR_TYPE, IR_ERROR_OPERAND, IR_ERROR_METADATA };
         for (uint32_t mutation = 0; mutation < 8; mutation += 1)
         {
             if (mutation == 0) { function->type[i] = IR_F64; }
             if (mutation == 1) { function->b[i] = 0; }
-            if (mutation == 2) { function->flags[i] = BUSTER_IR_VOLATILE; }
+            if (mutation == 2) { function->flags[i] = flag; }
             if (mutation == 3) { function->alignment_log2[i] = 4; }
             if (mutation == 4) { function->a[i] = op == 1 ? 0 : BUSTER_IR_NONE; }
             if (mutation >= 5)
             {
                 function->type[i] = mutation == 5 ? IR_F64 : type;
                 function->b[i] = mutation < 7 ? 0 : BUSTER_IR_NONE;
-                function->flags[i] = BUSTER_IR_VOLATILE;
+                function->flags[i] = flag;
                 function->alignment_log2[i] = 4;
                 function->a[i] = BUSTER_IR_NONE;
             }

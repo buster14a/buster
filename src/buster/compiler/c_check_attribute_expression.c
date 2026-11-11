@@ -98,6 +98,19 @@ static CheckConstantError check_constant_failure_error(CheckInputReader* reader,
         const uint32_t declaration = reader->output->declarations[failure->callee];
         result.note_token = declaration < count ? declaration : BUSTER_CHECK_NONE;
         result.note_kind = CHECK_INPUT_NOTE_FUNCTION_DECLARATION;
+        // A declaration that names its only parameter: clang's single-argument words (check_driver_call_count's), the
+        // parameter's token (plus 1) above the value's count and variadic bit.
+        uint32_t parameter = BUSTER_CHECK_NONE;
+        const uint32_t list = declaration + 1;
+        const bool listed = failure->expected == 1 && declaration < count && list < count && parser->tokens.kinds[list] == PARSE_KIND_L_PAREN &&
+                            parser->tree.parents[list] > list && parser->tree.parents[list] < count;
+        for (uint32_t at = list + 1; listed && at < parser->tree.parents[list] && parser->tokens.kinds[at] != PARSE_KIND_COMMA; at += 1)
+        {
+            const uint8_t kind_at = parser->tokens.kinds[at];
+            parameter = kind_at == PARSE_KIND_IDENTIFIER && reader->output->declarations[at] == at && reader->declaration_kinds[at] == C_BINDING_OBJECT ? at : parameter;
+            at = (kind_at == PARSE_KIND_L_PAREN || kind_at == PARSE_KIND_L_SQUARE) && parser->tree.parents[at] > at ? parser->tree.parents[at] : at;
+        }
+        result.value |= parameter < count && parameter < (UINT32_MAX >> 1) ? (uint64_t)(parameter + 1) << 33 : 0;
         // Too many arguments is clang's error at the first one past the parameters.
         const uint32_t open = failure->callee + 1;
         const bool opened = open < count && parser->tokens.kinds[open] == PARSE_KIND_L_PAREN && parser->tree.parents[open] > open &&

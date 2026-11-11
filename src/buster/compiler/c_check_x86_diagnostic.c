@@ -13,7 +13,11 @@
 // marks each variable whose cleanup's call it reaches (CHECK_CONTROL_CLEANUP, or an EXIT's records, #1370) at any exit: the entry of
 // its record (by its index in CheckInput.cleanups) takes the walk's tag where it was 0 (the check's tags are all 1 or
 // more), and `cleanup_count` counts them. A statement expression's END marks its block's own, which follow the END and
-// which it runs once its value is computed (check_lower_region).
+// which it runs once its value is computed (check_lower_region). With `cleanup_links` too (one per record, each its own
+// index while it is untagged), an EXIT tags each record once whatever the exits through it (#1370): a tagged record
+// links to its parent, so a climb jumps over the records tagged before to the nearest untagged one, its links compressed
+// as it goes, and the walk costs the records plus the exits, not their product. The owner resets a record's link with
+// its tag.
 
 typedef struct CheckX86DiagnosticWalk CheckX86DiagnosticWalk;
 struct CheckX86DiagnosticWalk
@@ -28,6 +32,7 @@ struct CheckX86DiagnosticWalk
     bool call_room;
     uint32_t tag;
     uint32_t* cleanup_tags;
+    uint32_t* cleanup_links;
     uint32_t cleanup_count;
 };
 
@@ -100,6 +105,27 @@ static void check_x86_diagnostic_cleanup(CheckX86DiagnosticWalk* walk, uint32_t 
     }
 }
 
+// The nearest record from `record` up its chain whose link is its own (untagged, or tagged by its scope's end and not yet
+// climbed past), or BUSTER_CHECK_NONE past the outermost; the links on the way then point to it.
+static uint32_t check_x86_diagnostic_unclimbed(CheckX86DiagnosticWalk* walk, uint32_t record)
+{
+    const uint32_t count = walk->program->input->cleanup_count;
+    uint32_t* links = walk->cleanup_links;
+    uint32_t root = record;
+    while (root < count && links[root] != root)
+    {
+        root = links[root];
+    }
+    uint32_t at = record;
+    while (at < count && links[at] != at)
+    {
+        const uint32_t next = links[at];
+        links[at] = root;
+        at = next;
+    }
+    return root;
+}
+
 static void check_x86_diagnostic_control(CheckX86DiagnosticWalk* walk, uint32_t index)
 {
     const CheckProgram* program = walk->program;
@@ -112,17 +138,25 @@ static void check_x86_diagnostic_control(CheckX86DiagnosticWalk* walk, uint32_t 
     }
     else if (entry->kind == CHECK_CONTROL_EXIT && walk->cleanup_tags != NULL && entry->target < program->exit_count)
     {
-        // An exit through its cleanups' chain (#1370) reaches each record's call from its first to its last.
+        // An exit through its cleanups' chain (#1370) reaches each record's call from its first to its last, the records
+        // at its last's depth or deeper on the way, past those an exit climbed before (cleanup_links).
         const CheckProgramExit* exit = program->exits + entry->target;
-        uint32_t record = exit->first;
-        for (uint32_t steps = 0; record < input->cleanup_count && steps < input->cleanup_count; steps += 1)
+        const uint32_t floor = exit->last < input->cleanup_count ? program->chains[exit->last].depth : 0;
+        const bool linked = walk->cleanup_links != NULL;
+        uint32_t record = linked ? check_x86_diagnostic_unclimbed(walk, exit->first) : exit->first;
+        for (uint32_t steps = 0; record < input->cleanup_count && program->chains[record].depth >= floor && steps < input->cleanup_count; steps += 1)
         {
             if (walk->cleanup_tags[record] == 0)
             {
                 walk->cleanup_tags[record] = walk->tag;
                 walk->cleanup_count += 1;
             }
-            record = record != exit->last ? program->chains[record].parent : BUSTER_CHECK_NONE;
+            const uint32_t parent = program->chains[record].parent;
+            if (linked)
+            {
+                walk->cleanup_links[record] = parent < input->cleanup_count ? parent : BUSTER_CHECK_NONE;
+            }
+            record = !linked ? parent : parent < input->cleanup_count ? check_x86_diagnostic_unclimbed(walk, parent) : BUSTER_CHECK_NONE;
         }
     }
     if (entry->kind == CHECK_CONTROL_INITIALIZE)
