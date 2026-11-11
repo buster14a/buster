@@ -10119,6 +10119,24 @@ enables, which this checker doesn't all give.
   declarators; a union's member is the first of the target's type), in
   `-Wimplicit-enum-enum-cast` and in a failed initializer conversion's error:
   `struct S s = { .lp = c }`'s "initializing 'LP' (aka 'long *')".
+  size_t's `__size_t` sugar (#1447 item 10) in a failed conversion's source:
+  - a sizeof's or alignof's value;
+  - a call's value, of a library builtin that returns size_t;
+  - an arithmetic result, as clang's `UsualArithmeticConversions` keeps the
+    sugar of the operand the result takes its type from
+    (`check_driver_size_sugar`). That is the converted-to side's, a shift's
+    left operand's, a unary operator's, a comma's right operand's and a
+    conditional's arms'. Two operands of one type keep only a sugar both
+    have, so `n + sizeof(int)` of an `unsigned long n` is `'unsigned long'`,
+    and `strlen(s) + 1` is `'__size_t' (aka 'unsigned long')`;
+  - an implicitly declared library builtin's designator, or its address, as
+    its prototype (`check_driver_library_designator`,
+    `cbuiltin_library_spell_as`): `'void *(__size_t)' (aka 'void
+    *(unsigned long)')`, `'__size_t (*)(const char *)'`.
+
+  The other warnings' operands keep their spelling as before. A builtin named
+  outside a call before any call declares it gets its implicit declaration's
+  error after the conversion's, where clang gives it first.
   A variable array prints its size expression as written, with expression
   spacing (`check_driver_vla_bounds`): `'int (*)[n + 1]'`, `'int[n][m * 2]'`.
   A failed conversion's source and target print the typedefs a function

@@ -173,6 +173,10 @@ enum
     // conversion never selects (#1447, clang's CreateGenericSelectionExpr): -Wunreachable-code-generic-assoc, on by
     // default, under -Wunreachable-code.
     CHECK_WARNING_ID_UNREACHABLE_GENERIC_ASSOC = 131,
+    // Two unsequenced modifications of a variable, or one and a read of it (#1953, clang's SequenceChecker,
+    // c_check_unsequenced.c): -Wunsequenced, on by default, under -Wsequence-point and so -Wmost and -Wall. (Its ID past
+    // -Wunreachable-code-generic-assoc's, 131.)
+    CHECK_WARNING_ID_UNSEQUENCED = 132,
     CHECK_WARNING_ID_COUNT,
 };
 

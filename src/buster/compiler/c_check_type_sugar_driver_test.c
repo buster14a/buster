@@ -969,6 +969,52 @@ static const CheckDriverDefaultWarningFixture check_driver_const_assignment_fixt
     },
 };
 
+// size_t's __size_t sugar (#1447 item 10, check_driver_size_sugar and check_driver_library_designator): an implicitly
+// declared library builtin's designator and address by its prototype, its call's value, and arithmetic as clang's usual
+// arithmetic conversions keep the sugar of the operand the result takes its type from.
+static const CheckDriverDefaultWarningFixture check_driver_size_sugar_fixtures[] =
+{
+    {
+        .name = "library builtins' __size_t",
+        .source = "typedef struct _IO_FILE FILE;\n"
+                  "void f(const char *s, char *d, unsigned long n, int i)\n"
+                  "{\n"
+                  "    int *p = strlen(s);\n"
+                  "    void *m = malloc(1);\n"
+                  "    memcpy(d, s, 1);\n"
+                  "    int *q = malloc;\n"
+                  "    int *r = memcpy;\n"
+                  "    int *t = strlen;\n"
+                  "    int *u = &strlen;\n"
+                  "    char *a = strlen(s) + 1;\n"
+                  "    char *b = sizeof(int) * strlen(s);\n"
+                  "    char *c = (strlen(s));\n"
+                  "    char *e = sizeof(int) + 1;\n"
+                  "}\n",
+        .errors = 12,
+        .notes = 3,
+    },
+    {
+        .name = "__size_t through arithmetic",
+        .source = "typedef struct _IO_FILE FILE;\n"
+                  "void f(const char *s, char *d, unsigned long n, int i)\n"
+                  "{\n"
+                  "    char *e = sizeof(int) + 1;\n"
+                  "    char *g = 1 + sizeof(int);\n"
+                  "    char *h = n + sizeof(int);\n"
+                  "    char *k = sizeof(int) + n;\n"
+                  "    char *l = i ? sizeof(int) : 2;\n"
+                  "    char *o = -sizeof(int);\n"
+                  "    char *v = sizeof(int) << 2;\n"
+                  "    char *w = strlen(s) - n;\n"
+                  "    char *x = (unsigned long)strlen(s);\n"
+                  "    char *y = i + strlen(s);\n"
+                  "}\n",
+        .errors = 11,
+        .notes = 1,
+    },
+};
+
 // A failed static assertion's details (#2171, check_semantic_assert): clang's "expression evaluates to" note, the failing
 // conjunct of an `&&`, and its requirement's number literals as clang's StmtPrinter prints them.
 static const CheckDriverDefaultWarningFixture check_driver_static_assert_fixtures[] =
@@ -1196,6 +1242,7 @@ static void check_test_driver_type_sugar(CheckTest* test, const char* clang, con
     check_test_driver_warning_fixtures(test, clang, executable, directory, check_driver_convention_sugar_fixtures,
                                        BUSTER_ARRAY_LENGTH(check_driver_convention_sugar_fixtures));
     check_test_driver_warning_fixtures(test, clang, executable, directory, check_driver_vla_bound_fixtures, BUSTER_ARRAY_LENGTH(check_driver_vla_bound_fixtures));
+    check_test_driver_warning_fixtures(test, clang, executable, directory, check_driver_size_sugar_fixtures, BUSTER_ARRAY_LENGTH(check_driver_size_sugar_fixtures));
     check_test_driver_warning_fixtures(test, clang, executable, directory, check_driver_static_assert_fixtures,
                                        BUSTER_ARRAY_LENGTH(check_driver_static_assert_fixtures));
     check_test_driver_warning_fixtures(test, clang, executable, directory, check_driver_parameter_typedef_fixtures,
