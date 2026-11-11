@@ -348,6 +348,10 @@ typedef enum CheckInputMessage
     CHECK_INPUT_VLA_EXTERN,
     CHECK_INPUT_VM_EXTERN,
     CHECK_INPUT_VLA_FIELD,
+    // A block's automatic variable-length array with an initializer but an empty list (#1447): clang's "variable-sized
+    // object may not be initialized", at the outermost bound for a list, else at the name; recovered, the declaration
+    // valid and its initializer unchecked (CheckInputReader.vla_initializer_dropped).
+    CHECK_INPUT_VLA_INITIALIZER,
 
     // A use of an invalid declaration (#1447, check_input_invalid_declare), at its name: no diagnostic of its own, as
     // clang's RecoveryExpr has none, but the uses' and their enclosing expressions' are left out as an undeclared name's
@@ -1962,6 +1966,9 @@ struct CheckInputReader
     bool specifier_names;
     uint32_t specifier_names_mark;
     bool declarator_invalid;
+    // Whether check_input_vla_declaration recovered a block VLA's initializer's error (#1447), whose initializer the
+    // declaration then skips.
+    bool vla_initializer_dropped;
     // Whether the last complete declarator's own type was in error (#1447), not only a parameter of its own function's:
     // clang's parser then declares none of its group's later declarators.
     bool declarator_group_invalid;
@@ -10499,7 +10506,7 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
         {
             const uint8_t kind = parser->tokens.kinds[i];
             const bool direct_initializer = parser->tree.roles[i] == PARSE_ROLE_OPEN_GROUP;
-            const bool initialized = check_input_has_initializer(parser, i);
+            bool initialized = check_input_has_initializer(parser, i);
             const uint32_t direct_close = direct_initializer ? parser->tree.parents[i] : i;
             const uint32_t direct_end = direct_initializer ? check_input_direct_initializer_end(parser, i + 1, direct_close) : i;
             if (direct_initializer && direct_end < direct_close && (c23_auto || check_input_auto_type(type)))
@@ -10749,7 +10756,25 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                 check_input_report(reader, name, CHECK_INPUT_BLOCK_EXTERN_INITIALIZER);
                 valid = false;
             }
+            reader->vla_initializer_dropped = false;
             valid &= check_input_vla_declaration(reader, first, vla_begin, name, type, i, storage, is_typedef, initialized, thread_local);
+            if (__builtin_expect(valid && reader->vla_initializer_dropped, 0))
+            {
+                // Its initializer, which clang doesn't check against the type (#1447): skipped, to the declarator's end.
+                uint32_t right = reader->first_child[i];
+                while (right != BUSTER_CHECK_NONE && right < i)
+                {
+                    right = reader->next_child[right];
+                }
+                const uint32_t end = right != BUSTER_CHECK_NONE ? reader->ends[right] + 1 : i + 1;
+                for (uint32_t skipped = i; skipped < end && skipped < count; skipped += 1)
+                {
+                    reader->ignored[skipped] = true;
+                }
+                valid = right != BUSTER_CHECK_NONE;
+                initialized = false;
+                i = end;
+            }
             if (valid && reader->cleanup_attributes && attributes != 0)
             {
                 // GNU's cleanup attribute, which a variable of automatic storage in a block has, and any other declaration
