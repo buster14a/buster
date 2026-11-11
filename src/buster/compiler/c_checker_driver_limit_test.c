@@ -439,6 +439,8 @@ static void check_test_driver_preprocessor_flags(CheckTest* test, const char* cl
         "#ifdef A junk\n#endif junk\n#pragma clang diagnostic push\n#pragma clang diagnostic error \"-W#pragma-messages\"\n"
         "#pragma message(\"promoted\")\n#pragma clang diagnostic pop\n#pragma clang diagnostic ignored \"-W#warnings\"\n#warning ignored\n"
         "#pragma clang diagnostic warning \"-W#warnings\"\n#pragma clang diagnostic pop\n#define B@\nint x = 'ab';\n",
+        // A line marker without a name, and with trailing blanks (-Wgnu-line-marker's place is the line's end).
+        "# 5   \nint a;\n# 9\nint b;\n",
     };
     static const char* const options[][3] =
     {

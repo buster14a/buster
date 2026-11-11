@@ -184,6 +184,7 @@ typedef enum PPWarning
     PP_WARNING_PRAGMA_ONCE_OUTSIDE_HEADER,
     PP_WARNING_PRAGMA_SYSTEM_HEADER_OUTSIDE_HEADER,
     PP_WARNING_NONPORTABLE_INCLUDE_PATH,
+    PP_WARNING_GNU_LINE_MARKER,
     // The literals' in #if and in pragmas' strings (#1970).
     PP_WARNING_MULTICHAR,
     PP_WARNING_UNKNOWN_ESCAPE_SEQUENCE,
@@ -234,6 +235,7 @@ static const PPWarningKind pp_warnings[BUSTER_PP_WARNINGS] =
     { "pragma-once-outside-header", NULL, NULL, false, true, false, false },
     { "pragma-system-header-outside-header", NULL, NULL, false, true, false, false },
     { "nonportable-include-path", NULL, NULL, false, true, false, false },
+    { "gnu-line-marker", NULL, "gnu", true, false, false, false },
     { "multichar", NULL, "most all", false, true, false, false },
     { "unknown-escape-sequence", NULL, NULL, true, true, false, false },
     { "implicitly-unsigned-literal", NULL, NULL, true, true, false, false },
@@ -10002,6 +10004,20 @@ static void pp_apply_line(Preprocessor* pp, PPContext* context, uint32_t d, cons
     if (valid && !marker && begin + 2 < stop)
     {
         pp_diagnose_group(pp, PP_WARNING_EXTRA_TOKENS, location, "extra tokens at end of #line directive");
+    }
+    if (valid && marker && context->data != pp->predefines_data)
+    {
+        // A line marker outside the <built-in> buffer is GNU's (#1970), as clang's HandleDigitDirective warns: at its
+        // name, or where its line ends, under the numbering before it.
+        uint32_t at = begin + 1 < stop ? tokens->locations[begin + 1] : tokens->values[stop - 1];
+        const uint32_t range = begin + 1 < stop ? BUSTER_PP_NONE : pp_find_range(pp, at);
+        if (range != BUSTER_PP_NONE)
+        {
+            const PPRange* source = pp->ranges + range;
+            const ScalarLexer lexer = { .source = source->bytes, .length = source->length, .trigraphs = pp->options.trigraphs };
+            at = source->base + (uint32_t)pp_skip_blanks(&lexer, at - source->base);
+        }
+        pp_diagnose_group(pp, PP_WARNING_GNU_LINE_MARKER, at, "this style of line directive is a GNU extension");
     }
     if (!valid && !name_reported && !flags_reported)
     {
