@@ -222,4 +222,30 @@ static const uint16_t ir_simd_masked_moves[10][2][3] = {
     { { X86_FORM_VMOVAPD_X_XM128_EVEX, X86_FORM_VMOVAPD_Y_YM256_EVEX, X86_FORM_VMOVAPD_Z_ZM512 }, { X86_FORM_VMOVAPD_XM128_X_EVEX, X86_FORM_VMOVAPD_YM256_Y_EVEX, X86_FORM_VMOVAPD_ZM512_Z } },
 };
 
+// One lane of a vector and its lanes' sign bits (#1840, BUSTER_IR_INTRINSIC_LANE_EXTRACT, _LANE_INSERT and _MOVEMASK), by
+// the lane's bytes' log2: vpextrb to vpextrq of an xmm register's lane (vpextrw's destination in reg, the others' in rm),
+// vpinsrb to vpinsrq into one (reg and vvvv the vector, rm the scalar), and vpmovmskb, vmovmskps and vmovmskpd of an xmm
+// or a ymm register (X86_FORM_NONE for words, which have none); the 16-byte part's moves of a ymm and a zmm register past
+// the low one (vextracti32x4, vinserti32x4).
+static const uint16_t ir_simd_lane_extract_forms[4] = {
+    X86_FORM_VPEXTRB_RM32_X_IMM8_EVEX,
+    X86_FORM_VPEXTRW_R32_X_IMM8_EVEX,
+    X86_FORM_VPEXTRD_RM32_X_IMM8_EVEX,
+    X86_FORM_VPEXTRQ_RM64_X_IMM8_EVEX,
+};
+static const uint16_t ir_simd_lane_insert_forms[4] = {
+    X86_FORM_VPINSRB_X_X_RM32_IMM8_EVEX,
+    X86_FORM_VPINSRW_X_X_RM32_IMM8_EVEX,
+    X86_FORM_VPINSRD_X_X_RM32_IMM8_EVEX,
+    X86_FORM_VPINSRQ_X_X_RM64_IMM8_EVEX,
+};
+static const uint16_t ir_simd_movemask_forms[4][2] = {
+    { X86_FORM_VPMOVMSKB_R32_X, X86_FORM_VPMOVMSKB_R32_Y },
+    { X86_FORM_NONE, X86_FORM_NONE },
+    { X86_FORM_VMOVMSKPS_R32_X, X86_FORM_VMOVMSKPS_R32_Y },
+    { X86_FORM_VMOVMSKPD_R32_X, X86_FORM_VMOVMSKPD_R32_Y },
+};
+static const uint16_t ir_simd_part_extract_forms[2] = { X86_FORM_VEXTRACTI32X4_XM128_Y_IMM8, X86_FORM_VEXTRACTI32X4_XM128_Z_IMM8 };
+static const uint16_t ir_simd_part_insert_forms[2] = { X86_FORM_VINSERTI32X4_Y_Y_XM128_IMM8, X86_FORM_VINSERTI32X4_Z_Z_XM128_IMM8 };
+
 #endif
