@@ -3941,6 +3941,30 @@ What the lowering covers past scalars (#145's programs):
   PIE's own IFUNCs through its stubs), as clang's build runs; and compares
   every error and note of the errors above with clang's, at `-c` and at
   `-fsyntax-only`, an alias and an ifunc of themselves among them.
+- **Asm labels that name the unit's own objects** (#1979,
+  `check_program_label_merges` in `c_check_program_alias.c`). Clang's module
+  has one global per name, so `double foo(double, double) __asm__("bar")`
+  beside a definition of `bar` is that definition: every object whose asm
+  label, or identifier (of a file-scope declaration with linkage, or a
+  file-scope static), is one name takes one symbol, defined by the name's
+  definition, else its first tentative definition, else undefined (one
+  `UND` symbol for the name). The static objects' pass lists the declarations
+  with linkage and an asm label; their objects are grouped by their labels'
+  bytes, and the static declarations are scanned, 64 tokens at a time, only
+  where a label is also one of the unit's identifiers or names two objects
+  (glibc's redirections rarely do). The other objects take the group's
+  object's symbol as the symbols are numbered (`CheckProgram.label_merges`,
+  shared by the selection, whose references reach that definition), and a
+  merged object's tentative definition defines no storage of its own. Two
+  functions' definitions of one name are clang's code generation error
+  ("definition with same mangled name 'bar' as another definition", with the
+  first one's note), at `-c` and when linking, not at `-fsyntax-only`
+  (`check_driver_aliases`). Two variables' definitions of one name are
+  refused by name ("a second definition of a variable's symbol name through
+  an asm label"): clang keeps the later one's storage alone. An overloadable
+  function's identifier counts as its name here, where clang's mangled name
+  replaces it. `test-checker-driver --asm-definitions-only` compares the
+  objects' symbols with clang 23's and runs them.
 - **GNU's `retain` attribute** (#147). A definition with one before it (the
   reader drops one after it) that the unit emits keeps its section: its named
   section's (a section attribute's), or a section of its own, its class's
