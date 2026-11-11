@@ -1826,6 +1826,15 @@ static bool check_test_program_sparse(const CheckProgram* program, const CheckDa
             expected[program->cpu_groups[g].reference] |= program->cpu_groups[g].dispatch != 0;
             expected[program->cpu_groups[g].dispatch] |= program->cpu_groups[g].dispatch != 0;
         }
+        // A resolved group's R (or target_clones' f) of multiversioning by target strings, at its resolver, and a
+        // target_clones body's own symbol's object, at its body (#1838).
+        for (uint32_t g = 0; g < program->target_group_count; g += 1)
+        {
+            const CheckProgramTargetGroup* group = program->target_groups + g;
+            expected[group->reference] |= group->resolved;
+            expected[group->body] |= group->body != 0 && expected[group->clones];
+            expected[group->clones] = group->clones != 0 ? group->resolved : expected[group->clones];
+        }
     }
     for (uint32_t path = 0; same && path < 2; path += 1)
     {
@@ -3595,6 +3604,25 @@ static void check_test_program_many_declarators(CheckTest* test, const char* cla
     }
 }
 
+// #1847: the lowering's library functions that return twice (check_lower_twice_entries), whose callers Tier 1 leaves to
+// Tier 0, are exactly the catalogue's entries with the 'j' attribute but __builtin_setjmp, in its order.
+static void check_test_program_twice_library(CheckTest* test)
+{
+    uint32_t matched = 0;
+    bool ordered = true;
+    for (uint32_t i = 0; i < BUSTER_BUILTIN_INTRINSIC_COUNT; i += 1)
+    {
+        const BuiltinIntrinsicInfo* info = builtin_intrinsic_infos + i;
+        const bool own = info->name_length == sizeof("__builtin_setjmp") - 1 && memcmp(info->name, "__builtin_setjmp", info->name_length) == 0;
+        const bool listed = !own && memchr(info->attributes, 'j', info->attributes_length) != NULL;
+        const BuiltinIntrinsicName* entry = listed && matched < BUSTER_CHECK_LOWER_TWICE_NAMES ? check_lower_twice_entries + matched : NULL;
+        ordered = ordered && (!listed || (entry != NULL && entry->length == info->name_length && memcmp(entry->name, info->name, entry->length) == 0));
+        matched += listed ? 1 : 0;
+    }
+    check_test_expect(test, ordered && matched == BUSTER_CHECK_LOWER_TWICE_NAMES,
+                      "the lowering's returns-twice library names are exactly the catalogue's entries with the 'j' attribute but __builtin_setjmp");
+}
+
 static __attribute__((noinline)) void check_test_programs(CheckTest* test, const char* clang)
 {
     if (check_test_takes())
@@ -3602,6 +3630,7 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         check_test_program_array_alignment(test, clang);
         check_test_program_return_marks(test);
         check_test_program_return_library(test);
+        check_test_program_twice_library(test);
         check_test_literal_tables(test, clang);
         check_test_program_builtin_scratch(test, clang);
         check_test_program_copies(test, clang);
@@ -5212,6 +5241,20 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
             "FOLD(a);FOLD(b);FOLD(c);FOLD(d);FOLD(e);FOLD(f);FOLD(gq);FOLD(a++);FOLD(--c);FOLD(a);FOLD(c);Q big=1e40;big++;FOLD(big);"
             "Q half=0.5;Q g=half--;FOLD(g);FOLD(half);return (int)(h%1000003)+(int)(a*4)+(int)(c*4);}",
             "float128-increments", clang);
+        // Complex values' ++ and -- of aggregate parts (#1447): a _Complex __float128's and a complex _BitInt's past 128
+        // bits, whose real part alone is stepped (a -0.0 imaginary part stays -0.0), prefix and postfix, of locals and
+        // through a pointer; a postfix one's value a copy of the object before it.
+        check_test_program_source(test,
+            "typedef _Complex __float128 CQ;typedef __float128 Q;typedef _BitInt(200) B;typedef __typeof__((_Complex char)0+(B)0) CB;"
+            "static unsigned long fold(unsigned long h,Q q){unsigned long w[2];__builtin_memcpy(w,&q,16);return ((h^w[0])*1099511628211ul)^(w[1]*31u);}\n"
+            "static unsigned long foldz(unsigned long h,CQ z){return fold(fold(h,__real__ z),__imag__ z);}\n"
+            "static unsigned long foldb(unsigned long h,CB z){return ((h^(unsigned long)(__real__ z>>3))*1099511628211ul)^(unsigned long)(__imag__ z>>130)^(unsigned long)__imag__ z;}\n"
+            "static CQ step(CQ*p){return (*p)++;}\n"
+            "int tested(int n){unsigned long h=2166136261u;CQ a=n;__imag__ a=-0.0Q;CQ c=a/4,*p=&c;CQ b=a++;CQ d=++a;CQ e=c--;CQ f=--c;"
+            "h=foldz(h,a);h=foldz(h,b);h=foldz(h,c);h=foldz(h,d);h=foldz(h,e);h=foldz(h,f);h=foldz(h,step(p));h=foldz(h,--*p);"
+            "CB x=(B)n<<150;__imag__ x=-(B)n<<140;CB y=x--;CB z=++x;x++;CB w=x--;--x;"
+            "h=foldb(h,x);h=foldb(h,y);h=foldb(h,z);h=foldb(h,w);return (int)(h%1000003)+(int)__real__ a;}",
+            "complex-aggregate-increments", clang);
         // A __float128's __imag__ (#837's review): zero, folded where its operand has no effect and a frame object of zeros
         // after the operand where it has, returned directly and passed as arguments. Before the fix, the folded one was
         // refused and the other was an address of 0.
@@ -5729,13 +5772,13 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
             "transparent-union-call-machine-boundary", true, true, 1, 0);
         check_test_program_boundary(test,
             "typedef int V __attribute__((vector_size(16)));extern V global;int tested(int n){return __builtin_reduce_add(global);}",
-            "vector-builtin-live-reference-machine-boundary", true, false, 1, 0);
+            "vector-builtin-live-reference-machine-boundary", true, true, 1, 0);
         check_test_program_boundary(test,
             "typedef int V __attribute__((vector_size(16)));extern V global;int tested(int n){return __builtin_reduce_add(__builtin_nondeterministic_value(global));}",
-            "vector-builtin-unevaluated-type-argument", true, false, 0, 0);
+            "vector-builtin-unevaluated-type-argument", true, true, 0, 0);
         check_test_program_boundary(test,
             "typedef int V __attribute__((vector_size(16)));extern V global;int tested(int n){return __builtin_reduce_add(__builtin_shufflevector(global,global,0,1,2,3));}",
-            "vector-builtin-shuffle-prefix-reference-mask", true, false, 1, 0);
+            "vector-builtin-shuffle-prefix-reference-mask", true, true, 1, 0);
         check_test_program_boundary(test, "int tested(int n){int values[n+10];return sizeof values;}", "variable-length-array-program", true, true, 0, 0);
         check_test_program_boundary(test, "int extent;int tested(int n){typedef int A[extent+10];return sizeof(A);}",
                                     "vla-bound-reference", true, true, 1, 0);

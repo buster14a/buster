@@ -45,8 +45,10 @@ static uint32_t check_warning_graph_first(const CheckGraph* graph, const Parser*
 // the declared type, so `declared` passes it), an ASSIGN's left operand's root, or 0 where no declaration is
 // reachable (#992).
 // Always inlined (#880), as profile-guided builds do; hot caller: check_input_warning_graph.
+// A call's argument (`call`, its CALL node, and its index `argument`; BUSTER_CHECK_NONE otherwise) prints its parameter's
+// typedef (#1100, check_input_parameter_spelling).
 static inline __attribute__((always_inline)) void check_warning_graph_null(CheckInputReader* reader, const CheckStream* stream, uint32_t source, TypeId destination,
-                                     uint32_t lvalue, TypeId declared, uint32_t completion)
+                                     uint32_t lvalue, TypeId declared, uint32_t completion, uint32_t call, uint32_t argument)
 {
     const CheckGraph* graph = &reader->output->graph;
     const CheckValue value = source < graph->count ? check_stream_value(stream, source) : (CheckValue){ 0 };
@@ -85,6 +87,7 @@ static inline __attribute__((always_inline)) void check_warning_graph_null(Check
         // typedef specifier's declaration where its base was a typedef name.
         uint32_t spelling = 0;
         const TypeId printed = check_input_object_spelling(reader->types, reader->output, reader->parser, lvalue, declared, destination, &spelling);
+        spelling = call < graph->count ? check_input_call_parameter_spelling(reader->parser, reader->output, stream, reader->types, call, argument) : spelling;
         check_input_null_spelling(reader, destination, printed, spelling, &value, first, end, completion);
     }
 }
@@ -1416,7 +1419,8 @@ static bool check_input_warning_graph(CheckInput* input, const Parser* parser, T
                     const TypeId declared = op == CHECK_OP_INITIALIZE ? graph->types[node] : 0;
                     if (check_warning_graph_null_candidate(graph, stream, source))
                     {
-                        check_warning_graph_null(&reader, stream, source, stream->conversions[node].operands[slot].type, lvalue, declared, completion);
+                        check_warning_graph_null(&reader, stream, source, stream->conversions[node].operands[slot].type, lvalue, declared, completion,
+                                                 BUSTER_CHECK_NONE, 0);
                     }
                 }
                 else if (op == CHECK_OP_DEREFERENCE && check_warning_graph_void_candidate(&staged, parser, types, stream, node))
@@ -1456,7 +1460,7 @@ static bool check_input_warning_graph(CheckInput* input, const Parser* parser, T
                         const uint32_t argument = graph->argument_nodes[begin + i];
                         if (check_warning_graph_null_candidate(graph, stream, argument))
                         {
-                            check_warning_graph_null(&reader, stream, argument, stream->argument_conversions[begin + i].type, 0, 0, token);
+                            check_warning_graph_null(&reader, stream, argument, stream->argument_conversions[begin + i].type, 0, 0, token, node, i);
                         }
                     }
                 }
