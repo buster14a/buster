@@ -100,9 +100,12 @@ struct CheckProgramCode
     uint64_t code_bytes;
     // The first of the symbols cpu_dispatch's and cpu_specific's groups add (#1447, check_program_cpu_symbols).
     SymbolId cpu_first;
+    // The first of the symbols the groups of multiversioning by target strings add (#1838, check_program_target_symbols).
+    SymbolId target_first;
 };
 
 #include "c_check_program_cpu_dispatch.c"
+#include "c_check_program_target_versions.c"
 
 // The local symbols whose names the compiler makes are named as clang names them, so that tools and #129's comparison
 // with clang's objects (c_lowering_symbols.c) read them alike: a block-scope static is "function.name", its function's
@@ -2597,6 +2600,15 @@ static void check_program_object_access(const CheckProgram* program, uint8_t* ac
         defined[program->cpu_groups[g].reference] |= program->cpu_groups[g].dispatch != 0;
         defined[program->cpu_groups[g].dispatch] |= program->cpu_groups[g].dispatch != 0;
     }
+    // So are a resolved group's R (or target_clones' f) of multiversioning by target strings (#1838), at its resolver,
+    // and a target_clones body's own symbol's object, at its body.
+    for (uint32_t g = 0; g < program->target_group_count; g += 1)
+    {
+        const CheckProgramTargetGroup* group = program->target_groups + g;
+        defined[group->reference] |= group->resolved;
+        defined[group->body] |= group->body != 0 && defined[group->clones];
+        defined[group->clones] = group->clones != 0 ? group->resolved : defined[group->clones];
+    }
     for (uint32_t s = 0; s < program->symbol_count; s += 1)
     {
         const uint32_t object = program->symbol_objects[s];
@@ -3215,6 +3227,9 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         }
         // cpu_specific's and cpu_dispatch's names (#1447): f.ifunc for the references, f.X for each version's own.
         valid = valid && check_program_cpu_names(program, symbol_names, output);
+        // Multiversioning by target strings' (#1838): f.ifunc for target's references, each version's own name, and
+        // each target_clones body's.
+        valid = valid && check_program_target_names(program, symbol_names, output);
         if (symbol_aliases != 0)
         {
             memset(symbol_aliases, 0, ((uint64_t)program->symbol_count + 1) * sizeof(uint32_t));
@@ -3631,6 +3646,8 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     uint64_t cpu_symbols = 0;
     uint64_t cpu_fixups = 0;
     check_program_cpu_room(program, &cpu_atoms, &cpu_symbols, &cpu_fixups);
+    // And multiversioning by target strings' (#1838).
+    check_program_target_room(program, &cpu_atoms, &cpu_symbols, &cpu_fixups);
     const uint64_t atom_count = (uint64_t)data_capacity.atoms + count + helpers->count + pools->count + runtime.atoms + (frames != 0 ? 1 : 0) +
                                 (valid ? result->lowered.table_count : 0) + file_atoms + structor_count + unit_atoms + patched + cpu_atoms;
     const uint64_t fixup_count = (uint64_t)data_capacity.fixups + references + runtime.fixups + frames + table_entries + structor_count + unit_fixups + patched +
@@ -3933,6 +3950,8 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     }
     // cpu_specific's and cpu_dispatch's symbols beyond the program's (#1447).
     valid = valid && (program->cpu_group_count == 0 || check_program_cpu_symbols(result, program, output));
+    // Multiversioning by target strings' (#1838).
+    valid = valid && (program->target_group_count == 0 || check_program_target_symbols(result, program, output));
     // Every symbol of the program's exists: an executable's runtime joins now, before the program's atoms, with the
     // symbols this emission and the static data will define marked as the program's definitions (bind.c).
     for (uint32_t b = 0; valid && binding != NULL && b < count + helpers->count + binding->data_count; b += 1)
@@ -4281,6 +4300,8 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     }
     // cpu_dispatch's resolvers, and cpu_specific's versions' other names at their code (#1447).
     valid = valid && (program->cpu_group_count == 0 || check_program_cpu_atoms(result, program, bytes));
+    // Multiversioning by target strings' resolvers, and target_clones' other names at their bodies (#1838).
+    valid = valid && (program->target_group_count == 0 || check_program_target_atoms(result, program, bytes));
     check_clock_mark(stage_clock, CHECK_STAGE_CODE_ATOMS);
     // The unwind tables, after the last function: measured, then written into the byte arena, one CIE and an FDE per
     // function after it, as one EH_FRAME atom whose FDEs' initial locations refer to their functions.

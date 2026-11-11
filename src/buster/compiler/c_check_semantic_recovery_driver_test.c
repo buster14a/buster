@@ -422,6 +422,18 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "enum F : short { U = 7, T, V };\n"
         "_Static_assert(V == 0 && sizeof(V) == 2, \"v\");\n"
         "void w(void) { int loc; enum { loc, after } e; (void)e; (void)loc; }\n",
+        // A fixed enum's enumerator whose value isn't representable (#1807): clang's error, recovered with the value
+        // converted or wrapped, and a name clash at the same enumerator reported after it, with its note.
+        "int K;\n"
+        "enum E : char { K = 200, L };\n"
+        "_Static_assert(L == 0, \"l\");\n"
+        "enum A : unsigned char { A1 = 255, A2 };\n"
+        "enum B : signed char { B1 = 127, B2, B3 };\n"
+        "_Static_assert(B2 == -128 && B3 == -127, \"b\");\n"
+        "enum __attribute__((mode(QI))) C { C1 = 300, C2 };\n"
+        "enum D : char { M = 200, N, P, P = 400 };\n"
+        "_Static_assert(N == -55, \"n\");\n"
+        "int use(void) { return A2 + B3 + C2 + undeclared; }\n",
         // C23's redefinition of a record in its scope (#1447, N3037), gnu23's alone: a compatible one redeclares the
         // earlier record, typedef'd members and nested anonymous records too; an incompatible one is clang's "has
         // incompatible definitions" with its notes at the first difference (a name, a bit-field, a type, a member more or

@@ -9299,7 +9299,9 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
             libraries.linker.error = arguments[i];
             libraries.linker.missing = match.exact == C_OPTION_WL;
         }
-        const bool forwarding = !malformed_forwarding && (match.exact == C_OPTION_XLINKER || c_option_starts(arguments[i], "-Wl,"));
+        // -rpath DIRECTORY, clang's and GCC's linker option without a transport (#1854), passes on as -Xlinker -rpath
+        // -Xlinker DIRECTORY does.
+        const bool forwarding = !malformed_forwarding && (match.exact == C_OPTION_XLINKER || match.exact == C_OPTION_RPATH || c_option_starts(arguments[i], "-Wl,"));
         const bool valued = !forwarding && !malformed_forwarding && i + 1 < count && pp_option_id_takes_value(match.exact);
         if (!valued)
         {
@@ -9324,10 +9326,14 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         const bool directory = !valued && arguments[i][0] == '-' && arguments[i][1] == 'L';
         if (forwarding)
         {
-            if (match.exact == C_OPTION_XLINKER)
+            if (match.exact == C_OPTION_XLINKER || match.exact == C_OPTION_RPATH)
             {
                 if (i + 1 < count)
                 {
+                    if (match.exact == C_OPTION_RPATH)
+                    {
+                        linker_arguments[linker_count++] = arguments[i];
+                    }
                     linker_arguments[linker_count++] = arguments[++i];
                 }
                 else
