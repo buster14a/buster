@@ -8782,8 +8782,11 @@ arguments against the function. The checker now gives these as clang does.
   `types_compatible_p`, `choose_expr`). The calls are the graph's in its
   postorder, clang's order: a call's callee's and arguments' calls first;
   then those the reader's evaluator alone reads, a `typeof`'s and a constant
-  array bound's, whose `)` no graph node has, of a declared name's callee
-  (`check_interrupt_evaluated_calls`, #1447). An
+  array bound's, whose `)` no graph node has (`check_interrupt_evaluated_calls`,
+  #1447): a declared name's callee, an undeclared function's (its implicit
+  declaration's), a builtin's (a called name no declaration binds, noted at
+  its first use), and one through a member or a postfix expression's base
+  (`typeof(s.f())`, `typeof(t[0]())`), with no note. An
   interrupt service routine's definition is Tier 0's handler frame
   (`Tier0Function.interrupt`, `docs/tier0.md`): `CheckProgram.object_interrupt`
   holds each function's first declaration with the attribute,
@@ -9203,9 +9206,10 @@ arguments against the function. The checker now gives these as clang does.
       through a keyword (`__regcall`), is spelled out.
   - x86's `interrupt` (#147):
     - of the calls in operands the reader's evaluator alone reads (a
-      `typeof`'s, a constant array bound's), those of a builtin and those
-      whose callee isn't a name (`typeof(s.f())`) are neither a direct call's
-      error nor -Wexcessive-regsave's warning;
+      `typeof`'s, a constant array bound's), a callee through anything but a
+      member or a postfix expression's base (`typeof((*fp)(0))`, which a
+      declarator there looks like) is no call to it, so neither
+      -Wexcessive-regsave's warning;
     - a direct call's error drops every other diagnostic of its full
       expression (`CheckInput.interrupt_ranges`: its declarator's initializer
       or its statement, but the call's other arguments and list elements),
