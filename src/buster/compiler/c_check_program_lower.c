@@ -16461,16 +16461,22 @@ static bool check_lower_lanewise_op(CheckOp op)
            (uint32_t)op - CHECK_OP_MULTIPLY_ASSIGN <= CHECK_OP_SHIFT_RIGHT_ASSIGN - CHECK_OP_MULTIPLY_ASSIGN;
 }
 
-// The entries node `node`'s product, division, remainder or shift (check_lower_lanewise_op) may take element by element:
-// BUSTER_CHECK_LOWER_LANEWISE_ENTRIES a lane where its type is a vector's, else none. Only its type is read.
-static uint64_t check_lower_lanewise_room(const CheckProgram* program, uint32_t node)
+// The entries node `node`, a product, division, remainder or shift, `op` (check_lower_lanewise_op), may take element by
+// element: BUSTER_CHECK_LOWER_LANEWISE_ENTRIES a lane where its type is a vector's that the unit's target computes so
+// (check_vector_lower_lanewise: a division or a remainder, a product or shift no row takes), else none; a transport
+// vector's whatever its operation, whose rows are pieces'. A function's target attribute adds features to the unit's,
+// so that what runs element by element in it does at the unit's target too. Only its type is read.
+static uint64_t check_lower_lanewise_room(const CheckProgram* program, uint32_t node, CheckOp op)
 {
     const TypeTable* types = program->types;
     const bool typed = program->stream != NULL && check_stream_has_values(program->stream);
     const TypeId type = typed ? type_conversion_operand(types, check_stream_type(program->stream, node)) : 0;
     const uint8_t kind = typed ? type_kind(types, type) : BUSTER_TYPE_KIND_NONE;
     const bool vector = kind == BUSTER_TYPE_KIND_VECTOR || kind == BUSTER_TYPE_KIND_EXT_VECTOR;
-    return vector ? BUSTER_CHECK_LOWER_LANEWISE_ENTRIES * (uint64_t)check_builtin_vector_lanes(types, type) : 0;
+    const uint32_t bytes = vector ? check_lower_vector_bytes(types, type) : 0;
+    const uint32_t operator = op >= CHECK_OP_MULTIPLY_ASSIGN ? (uint32_t)op - (CHECK_OP_MULTIPLY_ASSIGN - CHECK_OP_MULTIPLY) : (uint32_t)op;
+    const bool lanewise = vector && (bytes == 0 || check_vector_lower_lanewise(&program->target, operator, check_vector_lower_element(types, type), bytes));
+    return lanewise ? BUSTER_CHECK_LOWER_LANEWISE_ENTRIES * (uint64_t)check_builtin_vector_lanes(types, type) : 0;
 }
 
 // Node `node`'s part of the counts, by the rules: the scalar twin's step (check_lower_node_counts_scalar).
@@ -16525,7 +16531,7 @@ static void check_lower_node_count(const CheckProgram* program, uint32_t node, C
         // An integer vector's product, division, remainder or shift, or its assignment's, that runs element by element
         // (check_lower_vector_lanewise, #2216): up to 16 entries an element, its operands' reads, the operation and its
         // store, as many tasks, whichever target the function has.
-        counts->transport_entries += check_lower_lanewise_op(op) ? check_lower_lanewise_room(program, node) : 0;
+        counts->transport_entries += check_lower_lanewise_op(op) ? check_lower_lanewise_room(program, node, op) : 0;
     }
     // The roundings and the fused multiply-add are calls too where the unit's target lacks their instructions
     // (check_lower_vector_library), which the bound counts whatever the target.
@@ -16625,7 +16631,8 @@ static CheckLowerNodeCounts check_lower_node_counts(const CheckProgram* program)
             // The rules' only term of a product, division, remainder or shift is its lanes' room, its type's alone.
             for (uint32_t lanes = lanewise; lanes != 0; lanes &= lanes - 1)
             {
-                counts.transport_entries += check_lower_lanewise_room(program, first + (uint32_t)__builtin_ctz(lanes));
+                const uint32_t node = first + (uint32_t)__builtin_ctz(lanes);
+                counts.transport_entries += check_lower_lanewise_room(program, node, graph->ops[node]);
             }
         }
     }
