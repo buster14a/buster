@@ -5261,6 +5261,54 @@ static bool check_input_neon_vector(CheckInputReader* reader, CheckInputAttribut
     return valid && !refused;
 }
 
+static bool check_input_auto_type(TypeId type);
+
+// Whether `type` is an __auto_type placeholder's, through pointer levels (#1844): `__auto_type`, `const __auto_type *`.
+static bool check_input_auto_type_level(const TypeTable* types, TypeId type)
+{
+    TypeId level = type != 0 ? type_strip_aligned(types, type) : 0;
+    for (uint32_t steps = 0; level != 0 && !check_input_auto_type(level) && steps < 64; steps += 1)
+    {
+        level = type_kind(types, level) == BUSTER_TYPE_KIND_POINTER ? type_strip_aligned(types, type_element(types, level)) : 0;
+    }
+    return level != 0 && check_input_auto_type(level);
+}
+
+// A vector's or a mode's attribute of an __auto_type placeholder's type `type` (#1844), as clang's handlers meet the
+// undeduced type: a vector's (vector_size, ext_vector_type, a NEON one) is "invalid vector element type 'T'", T the
+// placeholder's type there (check_semantic_auto_type_spelling), at the first one, as clang's type processing runs before
+// the declaration's; a mode's "mode attribute only supported for integer and floating-point types". Clang goes on with
+// the declaration, the reader stops at it. Whether it gave one.
+static bool check_input_attribute_auto_type(CheckInputReader* reader, CheckInputAttributes* attributes, TypeId type)
+{
+    const CheckInputAttribute* vector = NULL;
+    const CheckInputAttribute* mode = NULL;
+    for (uint32_t i = 0; i < attributes->count; i += 1)
+    {
+        const CheckInputAttribute* attribute = attributes->records + i;
+        const bool kept = !attribute->ignored && !attribute->specifier_ignored;
+        vector = vector == NULL && kept && (attribute->kind == CHECK_ATTRIBUTE_VECTOR_SIZE || attribute->kind == CHECK_ATTRIBUTE_EXT_VECTOR_TYPE) ? attribute : vector;
+        mode = mode == NULL && kept && attribute->kind == CHECK_ATTRIBUTE_MODE ? attribute : mode;
+    }
+    if (vector != NULL)
+    {
+        const uint32_t before = reader->output->report_count;
+        check_input_report_argument(reader, vector->first, CHECK_INPUT_VECTOR_ELEMENT, 0);
+        if (reader->output->report_count > before)
+        {
+            reader->output->reports[before].type = type;
+        }
+        attributes->error = CHECK_ATTRIBUTE_ERROR_VECTOR;
+        attributes->error_first = vector->first;
+        attributes->error_end = vector->end;
+    }
+    else if (mode != NULL)
+    {
+        check_input_attribute_argument_error(reader, attributes, mode, mode->first, CHECK_ARGUMENT_MODE_PRIMITIVE, mode->argument_first - mode->first);
+    }
+    return vector != NULL || mode != NULL;
+}
+
 // Mode/vector attributes change the scalar element, while a typedef's alignment wraps the resulting complete type.
 // An object's/member's alignment is declaration metadata: applying ALIGNED to its type would incorrectly alter
 // pointer/array compatibility. The caller feeds the alignment to the layout/storage consumer instead. Of `deduced`
@@ -5268,7 +5316,8 @@ static bool check_input_neon_vector(CheckInputReader* reader, CheckInputAttribut
 static TypeId check_input_attribute_type(CheckInputReader* reader, CheckInputAttributes* attributes, TypeId base, bool is_typedef, bool deduced)
 {
     TypeId result = base;
-    bool valid = base != 0 && attributes->error == CHECK_ATTRIBUTE_ERROR_NONE;
+    bool valid = base != 0 && attributes->error == CHECK_ATTRIBUTE_ERROR_NONE &&
+                 !(check_input_auto_type_level(reader->types, base) && check_input_attribute_auto_type(reader, attributes, base));
     for (uint32_t i = 0; valid && i < attributes->count; i += 1)
     {
         CheckInputAttribute* attribute = &attributes->records[i];
