@@ -894,6 +894,7 @@ static String8 check_driver_warning_type_at(const Parser* parser, Preprocessor* 
             names.space_macro_count = spell->space_macro_count;
             TypeId alias_type = 0;
             String8 alias_name = { 0 };
+            uint32_t alias_written = 0;
             if (spelling == BUSTER_CHECK_NONE)
             {
                 alias_type = type_unqualified(type_strip_aligned(types, type));
@@ -910,7 +911,11 @@ static String8 check_driver_warning_type_at(const Parser* parser, Preprocessor* 
             }
             else if (spelling != 0 && input != NULL && input->declared_types != NULL && spelling < input->token_count)
             {
-                spelling = check_driver_spelling_chain(parser, input, types, type, spelling);
+                // A typedef's use (check_input_typedef_sugar) is its declaration, with the qualifiers written again
+                // beside it (`const CI`, #1447).
+                const uint32_t direct = check_input_sugar_declaration(input, parser, spelling, &alias_written);
+                spelling = check_driver_spelling_chain(parser, input, types, type, direct);
+                alias_written = spelling == direct ? alias_written : 0;
                 const TypeId declared = input->declared_types[spelling];
                 const uint32_t name = spelling < parser->tokens.count ? parser->tokens.names[spelling] : spell->count;
                 if (type_is_valid(types, declared) && name < spell->count)
@@ -924,6 +929,7 @@ static String8 check_driver_warning_type_at(const Parser* parser, Preprocessor* 
             {
                 names.alias_types = &alias_type;
                 names.alias_names = &alias_name;
+                names.alias_written = &alias_written;
                 names.alias_count = 1;
             }
             const bool contextual = check_driver_warning_parentheses(parser, types, declaration, declared, scratch, &names);
