@@ -282,21 +282,20 @@ replaces the 9700X's lock: benchmark timings still come from there.
 ## Agent memory
 
 Agents keep what they learn about this project in the owner's private
-`davidgmbb/llm-memory` repository, cloned at `~/llm-memory` on each of the
-owner's computers:
+`davidgmbb/llm-memory` repository, cloned at `~/llm-memory` on the owner's
+computers:
 
 - Claude Code's memory folder for this project is a symlink to
   `~/llm-memory/projects/buster-fast/`, so Claude saves its memories there as
   usual.
 - Any other agent reads `~/llm-memory/projects/buster-fast/MEMORY.md` before
-  starting and saves what later sessions will need there, in the same format:
+  starting and saves what later sessions need there, in the same format:
   one fact per file, indexed in `MEMORY.md`. `~/llm-memory/AGENTS.md` has the
   rules, and Codex's automatic memories are copied to `~/llm-memory/codex/`.
-- Don't save what this repository already records, and never save secrets.
-- After saving, run `~/llm-memory/bin/llm-memory sync` to share the memory with
-  the owner's other computers.
-
-Where `~/llm-memory` doesn't exist, skip this.
+- Don't save what this repository records, and never save secrets.
+- After saving, run `~/llm-memory/bin/llm-memory sync` to share it.
+- A hook sets it up in the cloud ([guide](docs/commands/llm-memory.md)).
+  Elsewhere, without `~/llm-memory`, skip this.
 
 ## Build
 
