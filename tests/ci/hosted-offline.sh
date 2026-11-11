@@ -103,13 +103,19 @@ make_deb tcl8.6 2.0 "$native" 'libimage'
 make_deb tcl8.6-dev 2.0 "$native" 'tcl8.6 (= 2.0)'
 make_deb zstd 1.1 "$native"
 
-# Stand-ins: sudo runs its command; curl serves FIXTURE/upstream and fails FIXTURE/fail-curl times first; dpkg-query
-# reads FIXTURE/status; apt-get updates (failing FIXTURE/fail-update times first), downloads a closure from the
-# archive, or installs .debs given by path, checking their dependencies against the status and each other. Every
-# request is logged.
+# Stand-ins: sudo runs its command; getent resolves every name but FIXTURE/unresolvable's, unless pinned; curl answers DNS over
+# HTTPS with 192.0.2.7, serves FIXTURE/upstream and fails FIXTURE/fail-curl times first; dpkg-query reads
+# FIXTURE/status; apt-get updates (failing FIXTURE/fail-update times first), downloads a closure from the archive, or
+# installs .debs given by path, checking their dependencies against the status and each other. Every request is
+# logged.
 cat > "$work/bin/sudo" << 'SH'
 #!/usr/bin/env bash
 exec "$@"
+SH
+cat > "$work/bin/getent" << 'SH'
+#!/usr/bin/env bash
+# A pinned name resolves, as /etc/hosts makes it.
+grep -q " ${!#}\$" "$BUSTER_HOSTED_HOSTS_FILE" 2> /dev/null || ! grep -qxF "${!#}" "$FIXTURE/unresolvable" 2> /dev/null
 SH
 cat > "$work/bin/curl" << 'SH'
 #!/usr/bin/env bash
@@ -123,6 +129,10 @@ while [ $# -gt 0 ]; do
     shift
 done
 printf '%s\n' "$url" >> "$FIXTURE/curl-requests"
+if [[ "$url" = https://cloudflare-dns.com/dns-query\?* ]]; then
+    printf '{"Status":0,"Answer":[{"name":"x","type":1,"data": "192.0.2.7"}]}\n'
+    exit 0
+fi
 count=$(cat "$FIXTURE/fail-curl" 2> /dev/null || echo 0)
 if [ "$count" -gt 0 ]; then
     echo $((count - 1)) > "$FIXTURE/fail-curl"
@@ -240,6 +250,7 @@ mkdir -p "$archives/partial"
 SH
 chmod +x "$work/bin/"*
 export FIXTURE="$work" PATH="$work/bin:$PATH" BUSTER_HOSTED_RETRY_SECONDS=0 ImageOS=ubuntu26 ImageVersion=20261101.1
+export BUSTER_HOSTED_HOSTS_FILE="$work/hosts"
 unset BUSTER_CI_CACHE BUSTER_CI_OFFLINE GITHUB_STEP_SUMMARY GITHUB_ENV
 image_status > "$work/status"
 bundle="$work/bundle"
@@ -279,7 +290,8 @@ bash "$offline" prepare "$bundle" 2> "$work/log" || { cat "$work/log" >&2; fail 
 for input in apt baseline corpus c-testsuite sqlite; do
     grep -q "input=$input source=network" "$work/log" || fail "$input was not acquired"
 done
-grep -q 'apt-get update failed with status 100 (attempt 2 of 5)' "$work/log" || fail 'the update was not retried'
+grep -q 'apt-get update failed with status 100 (attempt 2 of 3)' "$work/log" || fail 'the update was not retried'
+test ! -e "$work/hosts" || fail 'a name that resolves was pinned'
 grep -q 'acquiring baseline failed (attempt 1 of 3)' "$work/log" || fail 'the download was not retried'
 [ "$(grep -c '^-o Acquire::Retries=3 update$' "$work/apt-requests")" = 3 ] || fail 'the lists were not updated three times'
 [ "$(grep -c -- '--download-only' "$work/apt-requests")" = 1 ] || fail 'the closure was not downloaded once'
@@ -468,4 +480,13 @@ grep -q 'records gcc:.* twice' "$work/log" || fail 'the duplicate was not the re
 check_manifest '$a mirror x' 'an unknown record'
 if bash "$offline" verify "$work/absent" 2> /dev/null; then fail 'a missing bundle was accepted'; fi
 if bash "$offline" prepare / 2> /dev/null; then fail 'the root directory was prepared'; fi
-printf 'hosted-offline: cold (retried) and warm preparation, the consumer'"'"'s offline install and reads, missing files, bad hashes, image and package-list changes and repairs checked\n'
+# A cache miss while the runner can't resolve Ubuntu's archive: the preparation pins it through DNS over HTTPS before
+# its network attempts, as setup-hosted.sh did, and leaves the names that resolve alone.
+printf 'archive.ubuntu.com\n' > "$work/unresolvable"
+reset_requests
+ImageVersion=20261115.1 bash "$offline" prepare "$work/rolled" 2> "$work/log" || { cat "$work/log" >&2; fail 'a preparation with an unresolvable archive failed'; }
+grep -q 'archive.ubuntu.com does not resolve here; pinned it to 192.0.2.7 through DNS over HTTPS' "$work/log" || fail 'the archive was not pinned'
+grep -qx '192.0.2.7 archive.ubuntu.com' "$work/hosts" || fail 'the pin is not in the hosts file'
+[ "$(grep -c . "$work/hosts")" = 1 ] || fail 'a name that resolves was pinned'
+grep -q 'cloudflare-dns.com/dns-query?name=archive.ubuntu.com&type=A' "$work/curl-requests" || fail 'the pin did not ask Cloudflare'
+printf 'hosted-offline: cold (retried) and warm preparation, the consumer'"'"'s offline install and reads, missing files, bad hashes, image and package-list changes, repairs and DNS-over-HTTPS pins checked\n'

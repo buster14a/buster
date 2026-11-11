@@ -15,8 +15,10 @@ test "$VERSION_ID" = 26.04
 here=$(cd -- "$(dirname -- "$0")" && pwd)
 bash "$here/hosted-release.sh" verify "$BUSTER_HOSTED_RELEASES"
 # The packages (hosted-offline.sh's list) come from the closure the preparation
-# job downloaded, with no apt-get update and no download (#2275): a resolver or
-# mirror outage failed every hosted job of four main runs on 2026-11-11.
+# job downloaded, with no apt-get update and no download (#2275): a resolver
+# outage on Ubuntu's mirror names failed every hosted job for over half an hour
+# on 2026-11-11. The preparation's own apt-get keeps the retries and the
+# DNS-over-HTTPS pins this script had for it.
 bash "$here/hosted-offline.sh" apt-install "$BUSTER_HOSTED_OFFLINE"
 root="$RUNNER_TEMP/buster-hosted-tools"
 start=$SECONDS

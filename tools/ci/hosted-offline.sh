@@ -41,9 +41,11 @@ packages=(gcc g++ binutils libc6-dev gdb tcc zstd linux-perf qemu-user valgrind 
 # The inputs under ROOT/ci, each acquired and checked by its own script, and the scripts whose contents pin them.
 ci_inputs=(baseline corpus c-testsuite sqlite)
 ci_scripts=(setup-baseline-runtime.sh fetch-corpus.sh fetch-c-testsuite.sh fetch-sqlite.sh cached-download.sh)
-# The pause before a failed acquisition's next attempt, times the attempt's number: 15, 30, 45 and 60 s, about the
-# 240 s the curl downloads here retry for. The fixtures set it to 0.
-retry_seconds=${BUSTER_HOSTED_RETRY_SECONDS:-15}
+# The pause before a failed acquisition's next attempt, times the attempt's number: 20 and 40 s. The fixtures set it
+# to 0.
+retry_seconds=${BUSTER_HOSTED_RETRY_SECONDS:-20}
+# Where unresolvable apt hosts are pinned; the fixtures name their own file.
+hosts_file=${BUSTER_HOSTED_HOSTS_FILE:-/etc/hosts}
 [[ "$retry_seconds" =~ ^[0-9]+$ ]] || { echo 'hosted-offline: BUSTER_HOSTED_RETRY_SECONDS must be a number of seconds' >&2; exit 1; }
 temporary=''
 trap 'rm -rf -- ${temporary:+"$temporary"}' EXIT
@@ -155,21 +157,71 @@ check_apt()
     done < <(find "$directory" -mindepth 1 -print0)
 }
 
-# apt-get "$@" up to 5 times, refreshing the package lists between an install's attempts, with the pauses above. Its
-# own Acquire::Retries retries each file too.
+# A runner's resolver can fail on Ubuntu's mirror names for a long while: from 13:51 UTC on 2026-11-11, for well over
+# half an hour, every hosted job failed in apt-get with "Temporary failure resolving 'archive.ubuntu.com'" (and
+# 'security.ubuntu.com', 'azure.archive.ubuntu.com') while packages.microsoft.com resolved on the same runner, and some
+# public resolvers (dns.google) gave no address for those names either. So before each of the preparation's network
+# attempts, each apt host that doesn't resolve here is pinned in /etc/hosts to an address a DNS-over-HTTPS resolver
+# gives it (Cloudflare's, else Google's), as setup-hosted.sh did before it stopped using the network. This brings in
+# nothing unverified: apt checks the archive's signed Release files and every package's hash, and the downloads here
+# keep their SHA-256 pins (setup-baseline-runtime.sh's come from archive.ubuntu.com too).
+apt_hosts()
+{
+    local file
+    for file in /etc/apt/apt-mirrors.txt /etc/apt/sources.list /etc/apt/sources.list.d/*; do
+        if [ -f "$file" ]; then
+            { grep -vE '^[[:space:]]*#' "$file" || true; } | { grep -oE 'https?://[^/[:space:]]+' || true; }
+        fi
+    done | sed -E 's#^https?://##'
+    printf '%s\n' archive.ubuntu.com security.ubuntu.com azure.archive.ubuntu.com
+}
+
+resolve_over_https()
+{
+    local url addresses=''
+    for url in "https://cloudflare-dns.com/dns-query?name=$1&type=A" "https://dns.google/resolve?name=$1&type=A"; do
+        if [ -z "$addresses" ]; then
+            addresses=$(curl --fail --silent --show-error --max-time 10 --retry 2 -H 'accept: application/dns-json' "$url" |
+                grep -oE '"data": *"[0-9]+(\.[0-9]+){3}"' | grep -oE '[0-9]+(\.[0-9]+){3}' | head -n 1) || addresses=''
+        fi
+    done
+    printf '%s' "$addresses"
+}
+
+pin_unresolved_apt_hosts()
+{
+    local host address
+    for host in $(apt_hosts | sort -u); do
+        if ! timeout 10 getent hosts "$host" > /dev/null; then
+            address=$(resolve_over_https "$host")
+            if [ -n "$address" ]; then
+                printf '%s %s\n' "$address" "$host" | sudo tee -a "$hosts_file" > /dev/null
+                log "$host does not resolve here; pinned it to $address through DNS over HTTPS"
+            else
+                log "$host does not resolve here, nor over HTTPS"
+            fi
+        fi
+    done
+}
+
+# apt-get "$@" up to 3 times, pinning hosts again and refreshing the package lists between an install's attempts, with
+# the pauses above. Each attempt is bounded, so a resolver that times out on every request can't hold the job for an
+# hour: a failing attempt took about 10 minutes. apt's own Acquire::Retries retries each file too.
 apt_network()
 {
     local attempt=1 status=0
-    sudo apt-get -o Acquire::Retries=3 "$@" || status=$?
-    while [ "$status" -ne 0 ] && [ "$attempt" -lt 5 ]; do
-        log "apt-get $1 failed with status $status (attempt $attempt of 5); retrying in $((attempt * retry_seconds)) s"
+    pin_unresolved_apt_hosts
+    sudo timeout 480 apt-get -o Acquire::Retries=3 "$@" || status=$?
+    while [ "$status" -ne 0 ] && [ "$attempt" -lt 3 ]; do
+        log "apt-get $1 failed with status $status (attempt $attempt of 3); retrying in $((attempt * retry_seconds)) s"
         sleep "$((attempt * retry_seconds))"
         attempt=$((attempt + 1))
         status=0
+        pin_unresolved_apt_hosts
         if [ "$1" != update ]; then
-            sudo apt-get -o Acquire::Retries=3 update || true
+            sudo timeout 480 apt-get -o Acquire::Retries=3 update || true
         fi
-        sudo apt-get -o Acquire::Retries=3 "$@" || status=$?
+        sudo timeout 480 apt-get -o Acquire::Retries=3 "$@" || status=$?
     done
     [ "$status" -eq 0 ] || die "apt-get $1 failed $attempt times, the last with status $status"
 }
@@ -283,12 +335,14 @@ prepare_ci()
             log "input=$name source=network reason=$reason"
             ci_sources[$name]=network
             attempt=1
+            pin_unresolved_apt_hosts
             until rm -rf -- "$temporary/run" && run_ci_input "$name" 0 "$cache" "$temporary/run"; do
                 sed 's/^/    /' "$temporary/run.log" >&2
                 [ "$attempt" -lt 3 ] || die "acquiring $name failed 3 times"
                 log "acquiring $name failed (attempt $attempt of 3); retrying in $((attempt * retry_seconds)) s"
                 sleep "$((attempt * retry_seconds))"
                 attempt=$((attempt + 1))
+                pin_unresolved_apt_hosts
             done
         fi
         rm -rf -- "$temporary"

@@ -223,9 +223,15 @@ fails so is acquired, and the log names every input's source
 
 - **Cache hit.** Every input is the cache's, and the job contacts no external
   host.
-- **Cache miss.** `apt-get update` and `--download-only` are tried up to 5
-  times, with pauses of 15, 30, 45 and 60 s. Each other input's script is run
-  up to 3 times; `cached-download.sh` also retries each download for 240 s.
+- **Cache miss.** `apt-get update` and `--download-only` are tried up to 3
+  times, each bounded to 8 minutes, with pauses of 20 and 40 s. Each other
+  input's script is run up to 3 times; `cached-download.sh` also retries each
+  download for 240 s. Before each network attempt, an apt host the runner
+  can't resolve is pinned in `/etc/hosts` to the address Cloudflare's
+  DNS-over-HTTPS resolver gives it, else Google's. This is the pin
+  `setup-hosted.sh` had (eb105d93), now in the only job that still reaches the
+  mirrors. It brings in nothing unverified: apt checks the archive's signed
+  Release files, and every download keeps its SHA-256.
 
 Every acquired input is checked as its consumers will use it. The corpus and
 the runtime are extracted and verified. The checkouts must be the pinned
