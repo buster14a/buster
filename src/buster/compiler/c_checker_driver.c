@@ -7613,7 +7613,7 @@ static String8 check_driver_overload_name(const CheckProgram* program, const Par
                 .object_size_compat = candidate->object_sizes != NULL,
             };
             Scratch work = scratch_begin(output);
-            check_mangle_name(&mangling, candidate->type, parser->tokens.names[candidate->declaration], work.arena, &spelling);
+            check_mangle_name(&mangling, candidate->type, parser->tokens.names[candidate->declaration], candidate->declaration, work.arena, &spelling);
             scratch_end(work);
         }
     }

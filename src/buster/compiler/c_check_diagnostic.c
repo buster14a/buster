@@ -183,6 +183,7 @@ static const CheckWarningDescription check_warning_descriptions[] =
     [CHECK_WARNING_ID_DEFAULT_CONST_INIT_VAR] = { "-Wdefault-const-init-var", "-Wdefault-const-init",
                                                   "default initialization of an object of const type is incompatible with C++" },
     [CHECK_WARNING_ID_CXX_COMPAT] = { "-Wc++-compat", NULL, "-Wc++-compat is on" },
+    [CHECK_WARNING_ID_GNU_UNION_CAST] = { "-Wgnu-union-cast", "-Wgnu", "cast to union type is a GNU extension" },
     [CHECK_WARNING_ID_UNUSED_LABEL] = { "-Wunused-label", "-Wunused", "unused label" },
 };
 

@@ -298,7 +298,16 @@ typedef enum IrOp
 // flags 0 for a round (vaesenc: ShiftRows, SubBytes and MixColumns of a, then b xor'ed) and 1 for the last one
 // (vaesenclast: without MixColumns), as FIPS 197 and x86's VAES define them.
 #define BUSTER_IR_INTRINSIC_AES 30u
-#define BUSTER_IR_INTRINSIC_COUNT 31u
+// One lane of a vector (#1840), its flags the lane's bytes' log2 in bits 0 and 1 (0 to 3) and its index in bits 2 to 7,
+// below the vector's lanes: lane_extract's result, an I32 for a lane of 1, 2 or 4 bytes and an I64 for one of 8, is a's
+// lane zero-extended (vmovd, vmovq, vpextrb to vpextrq, after vextracti32x4 for a lane past the low 16 bytes); and
+// lane_insert's is a, of its type, with the lane replaced by b's low bits, b an I32 for a lane of 1, 2 or 4 bytes and an
+// I64 for one of 8 (vpinsrb to vpinsrq). movemask's I32 holds, from bit 0, the sign bit of each of a's lanes, a vector
+// of 16 or 32 bytes, its flags the lanes' bytes' log2 (vpmovmskb's bytes 0, vmovmskps's 2 and vmovmskpd's 3).
+#define BUSTER_IR_INTRINSIC_LANE_EXTRACT 31u
+#define BUSTER_IR_INTRINSIC_LANE_INSERT 32u
+#define BUSTER_IR_INTRINSIC_MOVEMASK 33u
+#define BUSTER_IR_INTRINSIC_COUNT 34u
 #define BUSTER_IR_INTRINSIC_TERNARY BUSTER_IR_INTRINSIC_PERMUTE2
 #define BUSTER_IR_INTRINSIC_KIND 0xffu
 #define BUSTER_IR_INTRINSIC_EXTRA_SHIFT 8u
@@ -845,6 +854,9 @@ static const char* const ir_intrinsic_names[BUSTER_IR_INTRINSIC_COUNT] = {
     "compress",
     "expand",
     "aes",
+    "lane_extract",
+    "lane_insert",
+    "movemask",
 };
 
 // A fence's orders' names in the text form, C's memory_order's (BUSTER_IR_FENCE_ORDER), and its signal scope's word.
@@ -2064,6 +2076,27 @@ static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i)
                     else
                     {
                         valid = ir_vector_type(type) && ta == type && f->type[b] == type && ir_lane_op_flags_valid(part);
+                    }
+                }
+                else if (c == BUSTER_IR_INTRINSIC_LANE_EXTRACT || c == BUSTER_IR_INTRINSIC_MOVEMASK)
+                {
+                    // One lane's zero-extended bits, or the lanes' sign bits, of a vector: a lane's index below its lanes.
+                    const uint32_t size = part & 3;
+                    const uint32_t lanes = ir_vector_type(ta) ? ir_type_bits[ta] / (8u << size) : 0;
+                    valid = b == BUSTER_IR_NONE && lanes != 0 &&
+                            (c == BUSTER_IR_INTRINSIC_LANE_EXTRACT ? type == (size == 3 ? IR_I64 : IR_I32) && (part >> 2) < lanes :
+                                                                    type == IR_I32 && part != 1 && part <= 3 && ir_type_bits[ta] <= 256);
+                }
+                else if (c == BUSTER_IR_INTRINSIC_LANE_INSERT)
+                {
+                    if (b >= f->instruction_count || f->type[b] == IR_VOID || f->type[b] >= IR_TYPE_COUNT)
+                    {
+                        check = ir_check(IR_ERROR_OPERAND, i, 1);
+                    }
+                    else
+                    {
+                        const uint32_t size = part & 3;
+                        valid = ir_vector_type(type) && ta == type && f->type[b] == (size == 3 ? IR_I64 : IR_I32) && (part >> 2) < ir_type_bits[type] / (8u << size);
                     }
                 }
                 else if (c == BUSTER_IR_INTRINSIC_AES)
@@ -3519,7 +3552,8 @@ static IrError ir_print(const IrFunction* f, Arena* scratch, FILE* output)
                             // A width change's part (#1840), its immediate.
                             if (c == BUSTER_IR_INTRINSIC_EXTRACT || c == BUSTER_IR_INTRINSIC_INSERT || c == BUSTER_IR_INTRINSIC_PERMUTE || c == BUSTER_IR_INTRINSIC_ALIGN ||
                                 c == BUSTER_IR_INTRINSIC_SHUFFLE_LANES || c == BUSTER_IR_INTRINSIC_EXTEND || c == BUSTER_IR_INTRINSIC_TRUNCATE ||
-                                c == BUSTER_IR_INTRINSIC_SHIFT || c == BUSTER_IR_INTRINSIC_LANE_OP || ir_intrinsic_ternary(c) || c == BUSTER_IR_INTRINSIC_AES)
+                                c == BUSTER_IR_INTRINSIC_SHIFT || c == BUSTER_IR_INTRINSIC_LANE_OP || ir_intrinsic_ternary(c) || c == BUSTER_IR_INTRINSIC_AES ||
+                                c == BUSTER_IR_INTRINSIC_LANE_EXTRACT || c == BUSTER_IR_INTRINSIC_LANE_INSERT || c == BUSTER_IR_INTRINSIC_MOVEMASK)
                             {
                                 fprintf(output, " %u", (unsigned)f->flags[i]);
                             }

@@ -316,6 +316,15 @@ typedef enum Tier1SelectRule
 // An AES round (#1840): `immediate` the round, values[0] the state and values[1] the round key: vaesenc or vaesenclast
 // (ir_simd_aes_forms; the VEX form where the target has no VL), the state in vvvv and the key in rm.
 #define BUSTER_TIER1_VECTOR_AES 20
+// One lane of a vector and its lanes' sign bits (#1840, tier1_select_lane): `immediate` the IR's flags; a lane's
+// extraction of values[0] into the general destination, by vmovd or vmovq for lane 0 of 4 or 8 bytes and vpextrb to
+// vpextrq otherwise, after vextracti32x4 into the vector class's scratch register for a lane past the low 16 bytes; a
+// lane's insertion of the general values[1] into values[0]'s copy, by vpinsrb to vpinsrq in place in a 16-byte vector's
+// low lane and through the scratch register and vinserti32x4 otherwise; and vpmovmskb, vmovmskps or vmovmskpd of
+// values[0] into the general destination.
+#define BUSTER_TIER1_VECTOR_LANE_EXTRACT 21
+#define BUSTER_TIER1_VECTOR_LANE_INSERT 22
+#define BUSTER_TIER1_VECTOR_MOVEMASK 23
 
 // TIER1_RULE_X87's kinds, its pattern's `scale` (#141):
 // - CONSTANT, its constant's index in `immediate`, and UNDEF, which stores nothing;
@@ -1519,6 +1528,62 @@ static void tier1_select_masked_move(Tier1SelectRecords* result, const Tier1Sele
     tier1_select_append(result, record);
 }
 
+// One lane of a vector or its lanes' sign bits (#1840, BUSTER_TIER1_VECTOR_LANE_EXTRACT, _LANE_INSERT and _MOVEMASK).
+static void tier1_select_lane(Tier1SelectRecords* result, const Tier1SelectHoles* holes, uint8_t destination)
+{
+    const uint32_t width = holes->width;
+    const uint32_t flags = (uint32_t)holes->immediate;
+    const uint32_t size = flags & 3;
+    const uint32_t index = flags >> 2;
+    const uint32_t per = 16u >> size;
+    const uint32_t part = index / per;
+    const uint32_t sub = index % per;
+    const uint8_t x = destination & 15;
+    const uint8_t scratch = BUSTER_TIER1_SELECT_FLOAT_SCRATCH;
+    const uint32_t kind = holes->scale;
+    if (kind == BUSTER_TIER1_VECTOR_MOVEMASK)
+    {
+        tier1_select_append(result, tier1_select_register_record(ir_simd_movemask_forms[size][width == 32], x, holes->left & 15));
+    }
+    else if (kind == BUSTER_TIER1_VECTOR_LANE_EXTRACT)
+    {
+        uint8_t source = holes->left & 15;
+        if (part != 0)
+        {
+            const X86Instruction extract = { .form = ir_simd_part_extract_forms[width == 64], .reg = source, .rm = scratch, .mode = BUSTER_X86_REGISTER_DIRECT, .immediate = part };
+            tier1_select_append(result, extract);
+            source = scratch;
+        }
+        const bool whole = sub == 0 && size >= 2;
+        const uint16_t form = whole ? (size == 2 ? X86_FORM_VMOVD_RM32_X_EVEX : X86_FORM_VMOVQ_RM64_X_EVEX) : ir_simd_lane_extract_forms[size];
+        const bool word = !whole && size == 1;
+        const X86Instruction record = { .form = form, .reg = word ? x : source, .rm = word ? source : x, .mode = BUSTER_X86_REGISTER_DIRECT, .immediate = whole ? 0 : sub };
+        tier1_select_append(result, record);
+    }
+    else
+    {
+        const uint8_t general = holes->right & 15;
+        if (x != (holes->left & 15))
+        {
+            tier1_select_append(result, tier1_select_class_move(x, holes->left & 15, width, false));
+        }
+        const bool low = width == 16 && part == 0;
+        const uint8_t target = low ? x : scratch;
+        if (!low)
+        {
+            const X86Instruction extract = { .form = ir_simd_part_extract_forms[width == 64], .reg = x, .rm = scratch, .mode = BUSTER_X86_REGISTER_DIRECT, .immediate = part };
+            tier1_select_append(result, extract);
+        }
+        const X86Instruction insert = { .form = ir_simd_lane_insert_forms[size], .reg = target, .vvvv = target, .rm = general, .mode = BUSTER_X86_REGISTER_DIRECT, .immediate = sub };
+        tier1_select_append(result, insert);
+        if (!low)
+        {
+            const X86Instruction back = { .form = ir_simd_part_insert_forms[width == 64], .reg = x, .vvvv = x, .rm = scratch, .mode = BUSTER_X86_REGISTER_DIRECT, .immediate = part };
+            tier1_select_append(result, back);
+        }
+    }
+}
+
 // A conversion's EVEX form (#1840), by its kind past BUSTER_IR_INTRINSIC_EXTEND, the IR's flags, the result's bytes and
 // the source's: the decoder's tables' (ir_simd_typed_extensions at the result's width, ir_simd_typed_truncations at the
 // source's), or X86_FORM_NONE for a pair the flags don't name.
@@ -2163,6 +2228,10 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         else if (kind == BUSTER_TIER1_VECTOR_COMPRESS)
         {
             tier1_select_compress(&result, holes, destination);
+        }
+        else if (kind == BUSTER_TIER1_VECTOR_LANE_EXTRACT || kind == BUSTER_TIER1_VECTOR_LANE_INSERT || kind == BUSTER_TIER1_VECTOR_MOVEMASK)
+        {
+            tier1_select_lane(&result, holes, destination);
         }
         else if (kind == BUSTER_TIER1_VECTOR_AES)
         {
@@ -4582,7 +4651,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
     const bool vector_node = (vector_width != 0 && (op == IR_VCONST || op == IR_UNDEF || op == IR_COPY || op == IR_NOT || op == IR_ADD || op == IR_SUB || op == IR_MUL || op == IR_AND ||
                                                    op == IR_OR || op == IR_XOR || op == IR_SHL || op == IR_LSHR || op == IR_ASHR || (op >= IR_FADD && op <= IR_FDIV) ||
                                                    op == IR_VSELECT || (op == IR_INTRINSIC && (c == BUSTER_IR_INTRINSIC_SPLAT || (c >= BUSTER_IR_INTRINSIC_EXTRACT && c <= BUSTER_IR_INTRINSIC_LANE_OP) || ir_intrinsic_ternary(c) ||
-                                                                           c == BUSTER_IR_INTRINSIC_AES)))) ||
+                                                                           c == BUSTER_IR_INTRINSIC_AES || c == BUSTER_IR_INTRINSIC_LANE_INSERT)))) ||
                              compare_width != 0;
     if (vector_node)
     {
@@ -4681,6 +4750,18 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             base.values[0] = a;
             base.values[1] = b;
             base.values[2] = ir_intrinsic_third(function, node);
+            base.intrinsic_cost = 1;
+            tier1_select_add_candidate(forest, node, &candidates, base);
+        }
+        else if (vector_width != 0 && op == IR_INTRINSIC && c == BUSTER_IR_INTRINSIC_LANE_INSERT)
+        {
+            // A lane's insertion (#1840): the vector values[0], the general values[1], the lane in the IR's flags.
+            base.rule = TIER1_RULE_VECTOR;
+            base.width = (uint8_t)vector_width;
+            base.scale = BUSTER_TIER1_VECTOR_LANE_INSERT;
+            base.immediate = function->flags[node];
+            base.values[0] = a;
+            base.values[1] = b;
             base.intrinsic_cost = 1;
             tier1_select_add_candidate(forest, node, &candidates, base);
         }
@@ -5940,7 +6021,22 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         base.intrinsic_cost = 1;
         tier1_select_add_candidate(forest, node, &candidates, base);
     }
-    else if (op == IR_INTRINSIC && (c == BUSTER_IR_INTRINSIC_MULHU ? type == IR_I64 : c < BUSTER_IR_INTRINSIC_COUNT && integer))
+    else if (forest->vectors && op == IR_INTRINSIC && (c == BUSTER_IR_INTRINSIC_LANE_EXTRACT || c == BUSTER_IR_INTRINSIC_MOVEMASK) && a < function->instruction_count)
+    {
+        // A vector's lane, or its lanes' sign bits, into a general register (#1840): TIER1_RULE_VECTOR's of the vector's
+        // width, its destination the general one.
+        base.rule = TIER1_RULE_VECTOR;
+        base.width = (uint8_t)tier1_select_vector_width(function->type[a]);
+        base.scale = c == BUSTER_IR_INTRINSIC_MOVEMASK ? BUSTER_TIER1_VECTOR_MOVEMASK : BUSTER_TIER1_VECTOR_LANE_EXTRACT;
+        base.immediate = function->flags[node];
+        base.values[0] = a;
+        base.intrinsic_cost = 1;
+        if (base.width != 0)
+        {
+            tier1_select_add_candidate(forest, node, &candidates, base);
+        }
+    }
+    else if (op == IR_INTRINSIC && (c == BUSTER_IR_INTRINSIC_MULHU ? type == IR_I64 : c <= BUSTER_IR_INTRINSIC_SMULO && integer))
     {
         // One test in the chain for both rules, as mulhu's alone was: its mul, or the others' VEX instruction (or a signed
         // overflow's sequence, tier1_select_overflow).

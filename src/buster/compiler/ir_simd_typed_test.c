@@ -1850,6 +1850,145 @@ static void ir_simd_typed_test_masked_memory(IrTestTally* tally)
     printf("  IR SIMD rows: %u masked loads and stores decode to the IR's masked_load and masked_store\n", decoded_rows);
 }
 
+// One lane's moves and the lanes' sign bits (#1840): vmovd and vmovq of lane 0 and vpextrb to vpextrq of each lane of
+// each width's low 16 bytes, and after vextracti32x4 of each part past them, into an integer of the lane's bytes or 4;
+// vpinsrb to vpinsrq into each lane of a 16-byte vector; and vpmovmskb, vmovmskps and vmovmskpd of a 16- and a 32-byte
+// vector, decode as the IR's lane_extract, lane_insert and movemask of their lane at exactly their records' features
+// (x86_target_requirement's, and the moves'), refused without each and under 4 changes.
+static void ir_simd_typed_test_lane_moves(IrTestTally* tally)
+{
+    static const uint64_t features[] = { BUSTER_X86_FEATURE(AVX512F), BUSTER_X86_FEATURE(AVX512VL), BUSTER_X86_FEATURE(AVX512BW), BUSTER_X86_FEATURE(AVX512DQ),
+                                         BUSTER_X86_FEATURE(AVX), BUSTER_X86_FEATURE(AVX2) };
+    static const uint8_t result_classes[4] = { BUSTER_TYPED_CLASS_U8, BUSTER_TYPED_CLASS_U16, BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_I64 };
+    const uint64_t all = UINT64_MAX;
+    const uint8_t v0 = BUSTER_TIER0_ROLE_VECTOR(0);
+    const uint8_t v1 = BUSTER_TIER0_ROLE_VECTOR(1);
+    const uint8_t out = BUSTER_TIER0_ROLE_INTEGER_RESULT;
+    uint32_t decoded_rows = 0;
+    uint32_t tried = 0;
+    const bool tables = x86_encoder_initialize() && tier0_initialize();
+    ir_test_expect(tally, tables, "the encoder's, the effects' and Tier 0's tables");
+    for (uint32_t shape = 0; tables && shape < 4 * 3 * 4 * 16 + 4 * 16 + 4 * 2; shape += 1)
+    {
+        Tier0Operation row;
+        memset(&row, 0, sizeof(row));
+        uint32_t kind = 0;
+        uint32_t expected_flags = 0;
+        bool valid = true;
+        if (shape < 4 * 3 * 4 * 16)
+        {
+            // An extraction: lane sub of the part `part` of a vector of `width`, by lanes of `size`.
+            const uint32_t size = shape % 4;
+            const uint32_t width = (shape / 4) % 3;
+            const uint32_t part = (shape / 12) % 4;
+            const uint32_t sub = shape / 48;
+            const uint32_t per = 16u >> size;
+            valid = sub < per && part < (1u << width);
+            const uint8_t from = part != 0 ? v1 : v0;
+            uint32_t r = 0;
+            if (part != 0)
+            {
+                row.records[r++] = (X86Instruction){ .form = ir_simd_part_extract_forms[width == 2], .reg = v0, .rm = v1, .mode = BUSTER_X86_REGISTER_DIRECT, .immediate = part };
+            }
+            const bool whole = sub == 0 && size >= 2;
+            const bool word = !whole && size == 1;
+            row.records[r++] = (X86Instruction){ .form = whole ? (size == 2 ? X86_FORM_VMOVD_RM32_X_EVEX : X86_FORM_VMOVQ_RM64_X_EVEX) : ir_simd_lane_extract_forms[size],
+                                                 .reg = word ? out : from,
+                                                 .rm = word ? from : out,
+                                                 .mode = BUSTER_X86_REGISTER_DIRECT,
+                                                 .immediate = whole ? 0 : sub };
+            row.record_count = r;
+            row.operand_count = 1;
+            row.operand_classes[0] = BUSTER_TYPED_CLASS_VECTOR;
+            row.operand_bytes[0] = (uint8_t)(16u << width);
+            row.result_class = result_classes[size];
+            kind = BUSTER_IR_INTRINSIC_LANE_EXTRACT;
+            expected_flags = size | ((part * per + sub) << 2);
+        }
+        else if (shape < 4 * 3 * 4 * 16 + 4 * 16)
+        {
+            const uint32_t index = shape - 4 * 3 * 4 * 16;
+            const uint32_t size = index % 4;
+            const uint32_t sub = index / 4;
+            valid = sub < (16u >> size);
+            row.records[0] = (X86Instruction){ .form = ir_simd_lane_insert_forms[size], .reg = v0, .vvvv = v0, .rm = BUSTER_TIER0_ROLE_INTEGER(1), .mode = BUSTER_X86_REGISTER_DIRECT, .immediate = sub };
+            row.record_count = 1;
+            row.operand_count = 2;
+            row.operand_classes[0] = BUSTER_TYPED_CLASS_VECTOR;
+            row.operand_bytes[0] = 16;
+            row.operand_classes[1] = size == 3 ? BUSTER_TYPED_CLASS_I64 : BUSTER_TYPED_CLASS_I32;
+            row.result_class = BUSTER_TYPED_CLASS_VECTOR;
+            row.result_bytes = 16;
+            kind = BUSTER_IR_INTRINSIC_LANE_INSERT;
+            expected_flags = size | (sub << 2);
+        }
+        else
+        {
+            const uint32_t index = shape - 4 * 3 * 4 * 16 - 4 * 16;
+            const uint32_t size = index % 4;
+            const uint32_t width = index / 4;
+            valid = size != 1;
+            row.records[0] = (X86Instruction){ .form = ir_simd_movemask_forms[size][width], .reg = out, .rm = v0, .mode = BUSTER_X86_REGISTER_DIRECT };
+            row.record_count = 1;
+            row.operand_count = 1;
+            row.operand_classes[0] = BUSTER_TYPED_CLASS_VECTOR;
+            row.operand_bytes[0] = (uint8_t)(16u << width);
+            row.result_class = BUSTER_TYPED_CLASS_I32;
+            kind = BUSTER_IR_INTRINSIC_MOVEMASK;
+            expected_flags = size;
+        }
+        if (!valid)
+        {
+            continue;
+        }
+        tried += 1;
+        uint64_t records = 0;
+        for (uint32_t r = 0; r < row.record_count; r += 1)
+        {
+            records |= x86_target_requirement(row.records[r].form) & ~BUSTER_X86_TARGET_KNOWN;
+        }
+        const uint64_t expected = records | ir_typed_vector_moves(row.operand_bytes[0], all);
+        IrSimdTypedOperation decoded;
+        memset(&decoded, 0xa5, sizeof(decoded));
+        const IrSimdTypedStatus status = ir_simd_typed_row(&row, all, &decoded);
+        char description[160];
+        snprintf(description, sizeof(description), "lane move %u of flags %u at %u bytes: the IR's own at exactly its features", kind, expected_flags, row.operand_bytes[0]);
+        ir_test_expect(tally, status == IR_SIMD_TYPED_OK && !decoded.machine && decoded.lane_move == kind + 1 && decoded.immediate == expected_flags && decoded.masked_memory == 0 &&
+                                  decoded.required_features == expected,
+                       description);
+        decoded_rows += status == IR_SIMD_TYPED_OK && decoded.lane_move != 0;
+        for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(features); f += 1)
+        {
+            IrSimdTypedOperation without;
+            memset(&without, 0x5a, sizeof(without));
+            const IrSimdTypedStatus refused = ir_simd_typed_row(&row, all & ~features[f], &without);
+            // The moves at that target: a VEX record's vector moves are AVX's there without AVX512VL (#1281).
+            const uint64_t at_target = records | ir_typed_vector_moves(row.operand_bytes[0], all & ~features[f]);
+            const bool required = (at_target & features[f]) != 0;
+            ir_test_expect(tally, required ? ir_simd_typed_test_undecoded(refused, &without) : refused == IR_SIMD_TYPED_OK && without.lane_move != 0,
+                           "a lane move without a feature it needs stays the machine row, and needs no other");
+        }
+        for (uint32_t m = 0; m < 4; m += 1)
+        {
+            Tier0Operation changed = row;
+            X86Instruction* last = &changed.records[changed.record_count - 1];
+            switch (m)
+            {
+            case 0: last->decorations = BUSTER_TIER0_DECORATION_MASK(0); break;
+            case 1: last->mode = BUSTER_X86_MEMORY_BASE; break;
+            case 2: last->immediate = 16; break;
+            case 3: changed.result_class = kind == BUSTER_IR_INTRINSIC_LANE_INSERT ? BUSTER_TYPED_CLASS_I32 : BUSTER_TYPED_CLASS_F64; break;
+            }
+            memset(&decoded, 0xa5, sizeof(decoded));
+            const IrSimdTypedStatus refused = ir_simd_typed_row(&changed, all, &decoded);
+            ir_test_expect(tally, ir_simd_typed_test_undecoded(refused, &decoded), "a changed lane move's row is not the IR's");
+        }
+    }
+    // Extractions: 30 lanes in 16 bytes (16 + 8 + 4 + 2) in 7 parts (1 + 2 + 4); insertions: 30; movemasks: 3 sizes at 2 widths.
+    ir_test_expect(tally, decoded_rows == tried && tried == 30 * 7 + 30 + 3 * 2, "every lane move decodes");
+    printf("  IR SIMD rows: %u of the front end's one-lane moves and movemasks decode to the IR's lane_extract, lane_insert and movemask\n", decoded_rows);
+}
+
 // The AES rounds (#1840): vaesenc and vaesenclast, EVEX at each width and VEX at 16 and 32 bytes, VECTOR(0) the state
 // and VECTOR(1) the round key, decode as the IR's aes of their round at exactly their form's features; refused without
 // VAES and under 4 changes.
@@ -2119,6 +2258,7 @@ static void ir_simd_typed_test(IrTestTally* tally)
     ir_simd_typed_test_ternlogs(tally);
     ir_simd_typed_test_compresses(tally);
     ir_simd_typed_test_masked_memory(tally);
+    ir_simd_typed_test_lane_moves(tally);
     ir_simd_typed_test_aes(tally);
     ir_simd_typed_test_widths(tally);
     ir_simd_typed_test_splats(tally);

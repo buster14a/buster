@@ -53,6 +53,7 @@ static CheckOverloadContext check_graph_overload_context(const CheckAction* acti
     const CheckOverloadContext context = {
         .semantic = action->context,
         .scratch_peak = &stream->statistics.scratch_bytes,
+        .conditions = stream->graph != NULL ? &stream->graph->conditions : NULL,
     };
     return context;
 }
@@ -148,11 +149,18 @@ static CheckOverloadResult check_graph_overload_call(TypeTable* types, const Che
         pending |= action->arguments[i].overload_head != 0;
     }
     CheckOverloadResult* arguments = pending ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckOverloadResult, action->argument_count) : 0;
-    CheckOverloadResult selected = check_overload_result(CHECK_OVERLOAD_FULL);
-    if (!pending || arguments != 0)
+    // With conditions, which arguments are addresses never null (`&x`), which their values don't say (#1447).
+    const bool conditioned = graph->conditions.declaration_count != 0 && action->node < graph->count;
+    uint8_t* nonnull = conditioned ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)action->argument_count + 1) : 0;
+    for (uint32_t i = 0; nonnull != 0 && i < action->argument_count && i < graph->argument_counts[action->node]; i += 1)
     {
-        selected = check_overload_call(types, action, graph->overload_candidates, graph->overload_candidate_count,
-                                      head, scratch, BUSTER_SCALAR_PATH(scalar), result, arguments, &stream->statistics.scratch_bytes);
+        nonnull[i] = graph->ops[graph->argument_nodes[graph->argument_offsets[action->node] + i]] == CHECK_OP_ADDRESS;
+    }
+    CheckOverloadResult selected = check_overload_result(CHECK_OVERLOAD_FULL);
+    if ((!pending || arguments != 0) && (!conditioned || nonnull != 0))
+    {
+        selected = check_overload_call_with(types, action, graph->overload_candidates, graph->overload_candidate_count, head, scratch, BUSTER_SCALAR_PATH(scalar),
+                                            result, arguments, &stream->statistics.scratch_bytes, &graph->conditions, nonnull);
         for (uint32_t i = 0; arguments != 0 && i < action->argument_count; i += 1)
         {
             if (arguments[i].status == CHECK_OVERLOAD_OK && arguments[i].candidate != BUSTER_CHECK_NONE &&
