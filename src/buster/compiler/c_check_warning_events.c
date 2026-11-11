@@ -194,9 +194,11 @@ enum
     // -Wgnu-designator's.
     CHECK_WARNING_ID_GNU_DESIGNATOR = 138,
     CHECK_WARNING_ID_GNU_ARRAY_RANGE = 139,
+    // An integer added to a string literal (#2190, clang's diagnoseStringPlusInt): -Wstring-plus-int, on by default.
+    CHECK_WARNING_ID_STRING_PLUS_INT = 140,
     // A function's label that no goto and no address names (#2264, clang's DiagnoseUnusedDecl of a LabelDecl):
     // -Wunused-label, under -Wunused and so -Wmost and -Wall.
-    CHECK_WARNING_ID_UNUSED_LABEL = 140,
+    CHECK_WARNING_ID_UNUSED_LABEL = 141,
     CHECK_WARNING_ID_COUNT,
 };
 

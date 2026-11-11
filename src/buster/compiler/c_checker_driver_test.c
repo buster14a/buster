@@ -1501,7 +1501,8 @@ static void check_test_driver_halves(CheckTest* test, const char* clang, const c
 // with and without qualifiers written with them, a typedef named in one place of a function pointer's types and not in
 // another of the same type (its return or its parameter, fields and parameters alike), a typedef of a function pointer
 // or an array named where the same type is spelled out elsewhere in the declaration, unions, vectors, a packed record,
-// _Atomic, complex, __int128 and _BitInt fields, records of a function's body with its typedefs, a record of 5000 fields,
+// _Atomic, complex, __int128 and _BitInt fields, members whose address space a macro writes (by its declaration's macro, #1447
+// item 2) or a typedef, records of a function's body with its typedefs, a record of 5000 fields,
 // whose 5003 lines a printer hashes, #1842), through printf, printers that return or take a struct, a 128-bit integer, a
 // _Float16 or a vector, or return a complex value or take a long double (#1842), a
 // variadic printer of its own that prints each format's operands (a pointer as its offset from a record's), a printer
@@ -1552,6 +1553,11 @@ static void check_test_driver_dump_struct(CheckTest* test, const char* clang, co
                                   "struct Vec { E2 e; D2 d; C16 c; L2 l; S8 s; };\n"
                                   "struct O { struct I { int a; } i; struct { int b; struct { int c; } deep; } un; union { int d; } u2; };\n"
                                   "typedef struct { struct { int e; } in; } T;\n"
+                                  "#define AS1 __attribute__((address_space(1)))\n"
+                                  "#define ASA __attribute__((address_space(1)))\n"
+                                  "#define ASN(n) __attribute__((address_space(n)))\n"
+                                  "typedef AS1 int T1;\n"
+                                  "struct Spaces { AS1 int *f; ASA int *g; __attribute__((address_space(1))) int *h; ASN(3) char *i; T1 *t; AS1 int *const *pp; int AS1 *w, *v; };\n"
                                   "static const char *base;\n"
                                   "static int pr(int tag, const char *f, ...)\n"
                                   "{\n"
@@ -1685,6 +1691,8 @@ static void check_test_driver_dump_struct(CheckTest* test, const char* clang, co
                                   "    __builtin_dump_struct(&an, printf);\n"
                                   "    union U u = { 0x42 };\n"
                                   "    __builtin_dump_struct(&u, printf);\n"
+                                  "    struct Spaces spaces = { 0 };\n"
+                                  "    __builtin_dump_struct(&spaces, printf);\n"
                                   "    __builtin_dump_struct(&s.named, pr, next());\n"
                                   "    printf(\"calls=%d\\n\", calls);\n"
                                   "    __builtin_dump_struct(&an, get(), calls++);\n"
@@ -8166,6 +8174,7 @@ static void check_test_driver_optimize_pragmas(CheckTest* test, const char* clan
 #include "c_check_logical_unused_driver_test.c"
 #include "c_check_condition_driver_test.c"
 #include "c_check_unused_label_driver_test.c"
+#include "c_check_string_plus_int_driver_test.c"
 #include "c_check_conditional_mismatch_driver_test.c"
 #include "c_check_generic_attribute_driver_test.c"
 #include "c_check_unused_result_driver_test.c"
@@ -9105,6 +9114,7 @@ static int run_checker_driver_tests(int argc, char** argv)
         {
             check_test_driver_conditions(&test, clang, executable, directory);
             check_test_driver_unused_labels(&test, clang, executable, directory);
+            check_test_driver_string_plus_int(&test, clang, executable, directory);
             check_test_driver_conditional_mismatches(&test, clang, executable, directory);
             check_test_driver_generic_attributes(&test, clang, executable, directory);
             check_test_driver_unused_results(&test, clang, executable, directory);
