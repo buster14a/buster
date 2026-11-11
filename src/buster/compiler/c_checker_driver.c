@@ -7392,14 +7392,40 @@ static uint32_t check_driver_deferred_lanes(const CheckProgramLanes* lanes)
     return result != 0 ? result : 1;
 }
 
+// The unit's tokens from which a round of one source file's flow may pay for a lane past the first: the emission's rule
+// (check_program_emit_lanes) pays one per BUSTER_CHECK_EMIT_LANE_TOKENS of the bodies' tokens past twice the largest
+// body's, and the deferred reader's (--deferred-bodies) takes the bodies apart only on BUSTER_CHECK_DEFERRED_COMPILE_LANES
+// lanes, each past the first for BUSTER_CHECK_DEFERRED_LANE_TOKENS of them at the least; a unit has more tokens than its
+// bodies.
+#define BUSTER_CHECK_DRIVER_LANE_TOKENS BUSTER_CHECK_EMIT_LANE_TOKENS
+_Static_assert(BUSTER_CHECK_DRIVER_LANE_TOKENS <= (BUSTER_CHECK_DEFERRED_COMPILE_LANES - 1) * BUSTER_CHECK_DEFERRED_LANE_TOKENS,
+               "a unit whose bodies the deferred reader takes apart starts its lanes");
+
+// One source file's lanes (#1444), which its session starts on demand (BUSTER_LANE_SESSION_ON_DEMAND): once the unit is
+// preprocessed, if its `tokens` may pay for a second lane (BUSTER_CHECK_DRIVER_LANE_TOKENS), so that lane 1 counts the
+// cores and creates the others while lane 0 parses and checks it. A smaller unit's -c creates no thread. The rules that
+// ask for lanes start them too, before they ask (lane_session_start, which only its first call does): the emission's and
+// the deferred reader's grant.
+static void check_driver_start_lanes(const CheckProgramLanes* lanes, uint64_t tokens)
+{
+    if (lanes != NULL && lanes->flow != NULL && tokens >= BUSTER_CHECK_DRIVER_LANE_TOKENS)
+    {
+        lane_session_start();
+    }
+}
+
 // CheckDeferredFlow.grant: of the `wanted` lanes, no more than the session asks for, by default one per core
 // (lane_session_asked), those it started (lane_flow_lanes), and those the worker budget gives, whose slots it takes without
-// waiting, as the emission takes its own (worker_budget_acquire).
+// waiting, as the emission takes its own (worker_budget_acquire). An on-demand session's lanes start here if they haven't.
 static uint32_t check_driver_deferred_grant(void* context, uint32_t wanted)
 {
     CheckDriverDeferred* deferred = context;
     CheckProgramLanes* lanes = deferred->lanes;
     const uint32_t most = check_driver_deferred_lanes(lanes);
+    if (wanted > 1 && most > 1)
+    {
+        lane_session_start();
+    }
     const uint32_t asked = lane_session_asked();
     uint32_t result = wanted < most ? wanted : most;
     result = asked < result ? asked : result;
@@ -7519,6 +7545,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
         pp->diagnostic_source = true;
         check_clock_mark(stage_clock, CHECK_STAGE_PREPROCESS);
         check_clock_tokens(stage_clock, pp->output.count);
+        check_driver_start_lanes(lanes, pp->output.count);
         // The phases of pp_run alone: a diagnostic's later replay of the unit (pp_history_ensure) adds to them.
         memcpy(pp_ticks, pp->ticks, sizeof(pp->ticks));
         // The files' token columns have no reader past the run (pp_release_file_columns, #628); --poison-arenas makes
@@ -8399,10 +8426,11 @@ static void check_driver_flow(void* argument)
 // Runs the command's flow (#905). With no session, the command's own starts here: as many lanes as the command may run
 // (at most its allowed CPUs, --lanes N and --worker-budget N), by default at most one per core of those CPUs, which lane
 // 1 counts while lane 0 starts the command (BUSTER_LANE_SESSION_PER_CORE), but one for one source file without code to
-// emit (-fsyntax-only, check without -c, a dump), whose flow has no wide part; a terminal command (without `release`)
-// leaves its lanes parked for the process's exit. In a session, the flow is a collective call's, which every lane makes
-// (run_check_command_mode), whose other lanes lane 0 tells of the flow (`*announced`), or a lane's alone. Returns the
-// command's exit status.
+// emit (-fsyntax-only, check without -c, a dump), whose flow has no wide part, and for one with code, by default, none
+// until its unit is preprocessed and large enough to pay for them (check_driver_start_lanes); a terminal command
+// (without `release`) leaves its lanes parked for the process's exit. In a session, the flow is a collective call's,
+// which every lane makes (run_check_command_mode), whose other lanes lane 0 tells of the flow (`*announced`), or a lane's
+// alone. Returns the command's exit status.
 static int check_driver_run(CheckDriverRun* run, bool* announced)
 {
     const CheckDriverCommand* command = run->command;
@@ -8428,9 +8456,13 @@ static int check_driver_run(CheckDriverRun* run, bool* announced)
         LaneSession* session = BUSTER_ARENA_PUSH_ARRAY(&memory, LaneSession, 1);
         // Lane 1 creates the other lanes while lane 0 starts the command (BUSTER_LANE_SESSION_LAZY), by default no more
         // than the cores, which it counts first: two lanes on one core's SMT siblings compiled sqlite3.c slower, in 18%
-        // more user time and 44 MB more peak memory, on the 9700X.
+        // more user time and 44 MB more peak memory, on the 9700X. By default one source file's lanes start once it is
+        // preprocessed, and only if it is large enough for its rounds to pay for a second lane
+        // (BUSTER_LANE_SESSION_ON_DEMAND, check_driver_start_lanes): a small unit's -c creates no thread (#1444).
+        const bool one_unit = run->input_count <= 1 && !command->mixed_inputs;
         const uint32_t per_core = run->lanes->every_lane ? 0 : BUSTER_LANE_SESSION_PER_CORE;
-        const uint32_t flags = BUSTER_LANE_SESSION_LAZY | per_core | (run->release ? 0 : BUSTER_LANE_SESSION_PARK_AT_END) |
+        const uint32_t on_demand = one_unit && !run->lanes->every_lane ? BUSTER_LANE_SESSION_ON_DEMAND : 0;
+        const uint32_t flags = BUSTER_LANE_SESSION_LAZY | per_core | on_demand | (run->release ? 0 : BUSTER_LANE_SESSION_PARK_AT_END) |
                                (run->pinned_cpus != NULL ? BUSTER_LANE_SESSION_REQUIRE_START : 0);
         if (session == NULL || lane_session_run(session, capacity, run->pinned_cpus, check_driver_flow, run, flags) == 0)
         {

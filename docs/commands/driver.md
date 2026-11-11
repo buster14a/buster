@@ -72,7 +72,10 @@ requirements. [Command index](README.md).
   `lane_session_run`, `check_driver_run`): started once, after the options and
   before any source is read, as many as the command may take (one per core of
   its CPUs, or `--lanes N`, at most `--worker-budget N`), none for one source
-  without code to emit (`-fsyntax-only`), lane 1 counting the cores in sysfs
+  without code to emit (`-fsyntax-only`), and by default for one source with
+  code only once it is preprocessed, if it has the tokens to pay for a second
+  lane (#1444, `BUSTER_LANE_SESSION_ON_DEMAND`, `check_driver_start_lanes`), so
+  that a small file's `-c` creates no thread; lane 1 counting the cores in sysfs
   (`BUSTER_LANE_SESSION_PER_CORE`, `lane_core_count`) and creating the others
   while lane 0 starts the command (`BUSTER_LANE_SESSION_LAZY`; lane 0 learns
   how many it asks for at its first wide part, `lane_session_asked`, and how

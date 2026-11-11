@@ -62,14 +62,16 @@
 //   in a child limited as above, its object by --lanes 8 source order's; and each
 //   failing program by --lanes 2, 3 and 8, and in such a child: the exit status and diagnostics of --lanes 1.
 // - The driver's session's threads (#905): a library preloaded into the driver counts its calls of pthread_create,
-//   which its session makes once, before any source is read: none for --lanes 1, --worker-budget=1 and a source's
+//   which its session makes once, before any source is read or, by default for one source file, once it is
+//   preprocessed (#1444), on the first program of 600 functions: none for --lanes 1, --worker-budget=1 and a source's
 //   -fsyntax-only, and an object compiled on one CPU; one per lane past the first of --lanes 3 and, by default, of the
 //   cores of the CPUs it may run on (by /proc/cpuinfo, lane_test_process_cores), for an object, an executable and two
 //   sources' objects, whatever lanes their emissions take; where the process has a core's two siblings, on them by
 //   default one lane, its lane 1 created to count the core, and two by --lanes 2, and on CPUs of two cores two; and
 //   when its second lane fails to start (BUSTER_TEST_LANE_FAIL_AT), the one created, after which the command runs on one
-//   lane, writing --lanes 1's object. --time-stages reports the lanes asked for and those run on: 3 and 3 for --lanes 3,
-//   the cores' for the default, and 4 and 1 for that failure.
+//   lane, writing --lanes 1's object; and none by default for the program of three functions' object and executable,
+//   too small for a second lane to pay. --time-stages reports the lanes asked for and those run on: 3 and 3 for --lanes
+//   3, the cores' for the default, 4 and 1 for that failure, and 1 and 1 for the small program's object.
 // - A growing team (#673's tail). The growth gate alone (check_program_emit_grow), under a jobserver pipe of 7 tokens:
 //   parts left of one token fewer than pay for a guardian don't grow a team of 1 of 8 lanes, and the least that pays
 //   grows it by 7; --lanes N grows it whatever they pay; with every part lowered, their code's share of the tokens
@@ -2349,8 +2351,9 @@ static void check_lanes_test_report_lanes(const char* path, uint32_t* asked, uin
 }
 
 // The driver's session's threads (see the file's comment): `executable`'s calls of pthread_create, counted by a library
-// preloaded into it, for commands on `directory`'s generated programs, each command's object compared with --lanes 1's.
-static void check_lanes_test_session_threads(CheckLanesTestTally* tally, const char* executable, const char* directory)
+// preloaded into it, for commands on `directory`'s generated programs (the first of 600 functions, the `programs`th, and
+// the small one of three), each command's object compared with --lanes 1's.
+static void check_lanes_test_session_threads(CheckLanesTestTally* tally, const char* executable, const char* directory, uint32_t programs)
 {
     static const char counter[] = "#define _GNU_SOURCE\n"
                                   "#include <dlfcn.h>\n"
@@ -2387,15 +2390,20 @@ static void check_lanes_test_session_threads(CheckLanesTestTally* tally, const c
     const bool closed = file != NULL && fclose(file) == 0;
     const bool built = written && closed && object_test_run(compile, "/dev/null", errors) == 0;
     check_lanes_test_expect(tally, built, "compile the preloaded counter of pthread_create", source);
+    // A program large enough for its session to start its lanes, by default once it is preprocessed (#1444), and one too
+    // small for them, whose session creates no thread by default; each with --lanes 1's object.
     char program[PATH_MAX];
     char second[PATH_MAX];
     char reference[PATH_MAX];
-    snprintf(program, sizeof(program), "%s/program_3.c", directory);
+    char small_reference[PATH_MAX];
+    snprintf(program, sizeof(program), "%s/program_%u.c", directory, programs);
     snprintf(second, sizeof(second), "%s/program_2.c", directory);
     snprintf(reference, sizeof(reference), "%s/session_threads_reference.o", directory);
+    snprintf(small_reference, sizeof(small_reference), "%s/session_threads_small_reference.o", directory);
     char* reference_arguments[] = { (char*)executable, (char*)"--lanes", (char*)"1", (char*)"-c", (char*)"-o", reference, program, NULL };
-    const bool referenced = built && check_lanes_test_run(reference_arguments, errors) == 0;
-    check_lanes_test_expect(tally, !built || referenced, "the driver writes the reference object on one lane", program);
+    char* small_arguments[] = { (char*)executable, (char*)"--lanes", (char*)"1", (char*)"-c", (char*)"-o", small_reference, second, NULL };
+    const bool referenced = built && check_lanes_test_run(reference_arguments, errors) == 0 && check_lanes_test_run(small_arguments, errors) == 0;
+    check_lanes_test_expect(tally, !built || referenced, "the driver writes the reference objects on one lane", program);
     const uint32_t cpus = check_driver_cpus();
     const uint32_t two_cpus = cpus < 2 ? cpus : 2;
     const uint32_t three_cpus = cpus < 3 ? cpus : 3;
@@ -2411,15 +2419,17 @@ static void check_lanes_test_session_threads(CheckLanesTestTally* tally, const c
     uint64_t siblings[BUSTER_LANE_CPU_MASK_WORDS];
     uint64_t apart[BUSTER_LANE_CPU_MASK_WORDS];
     const bool paired = lane_test_sibling_masks(siblings, apart);
-    // The commands: their options, their sources, whether they write an object to compare, the lane of the session that
-    // fails to start (0 for none), an affinity cap (0 for unchanged) or the CPUs to run on, the threads they create, and
-    // with --time-stages the lanes its report must say the session asked for and ran on.
+    // The commands: their options, their sources (the large program, the small one, or the large and the small), whether
+    // they write an object to compare, the lane of the session that fails to start (0 for none), an affinity cap (0 for
+    // unchanged) or the CPUs to run on, the threads they create, and with --time-stages the lanes its report must say the
+    // session asked for and ran on.
     typedef struct CheckLanesSessionCommand CheckLanesSessionCommand;
     struct CheckLanesSessionCommand
     {
         const char* options[4];
         bool object;
         bool link;
+        bool small;
         bool two;
         const char* fail_at;
         uint32_t cpu_limit;
@@ -2428,7 +2438,7 @@ static void check_lanes_test_session_threads(CheckLanesTestTally* tally, const c
         uint32_t asked;
         uint32_t ran;
     };
-    CheckLanesSessionCommand commands[16] = {
+    CheckLanesSessionCommand commands[20] = {
         { .options = { "--lanes", "1", "-c" }, .object = true, .threads = 0 },
         { .options = { "--worker-budget=1", "-c" }, .object = true, .threads = 0 },
         { .options = { "-fsyntax-only" }, .threads = 0 },
@@ -2441,8 +2451,11 @@ static void check_lanes_test_session_threads(CheckLanesTestTally* tally, const c
         { .options = { "-o" }, .link = true, .threads = per_core_threads },
         { .options = { "-c" }, .two = true, .threads = per_core_threads },
         { .options = { "--lanes", "4", "-c", "--time-stages" }, .object = true, .fail_at = "2", .threads = cpus < 3 ? cpus - 1 : 1, .asked = four_cpus, .ran = cpus < 3 ? cpus : 1 },
+        // The small program by default, whose session starts no lane (#1444): its object and its executable.
+        { .options = { "-c", "--time-stages" }, .object = true, .small = true, .threads = 0, .asked = 1, .ran = 1 },
+        { .options = { "-o" }, .link = true, .small = true, .threads = 0 },
     };
-    uint32_t command_count = 12;
+    uint32_t command_count = 14;
     if (paired)
     {
         // On a core's two siblings, by default one lane, its lane 1 created to count the core; on CPUs of two cores, two;
@@ -2511,7 +2524,7 @@ static void check_lanes_test_session_threads(CheckLanesTestTally* tally, const c
         {
             arguments[count++] = executable_path;
         }
-        arguments[count++] = program;
+        arguments[count++] = command->small ? second : program;
         if (command->two)
         {
             arguments[count++] = second;
@@ -2572,8 +2585,8 @@ static void check_lanes_test_session_threads(CheckLanesTestTally* tally, const c
         const bool preloaded = BUSTER_HOST_STATIC_EXECUTABLE || (read && strcmp(text, expected) == 0);
         check_lanes_test_expect(tally, status == 0 && returned && preloaded && lanes_read && strcmp(lanes_text, lanes_expected) == 0,
                                 "the driver's session creates its lanes once, none for one lane", detail);
-        check_lanes_test_expect(tally, !command->object || check_test_driver_same_files(object, reference), "the driver's object on its session is one lane's",
-                                detail);
+        check_lanes_test_expect(tally, !command->object || check_test_driver_same_files(object, command->small ? small_reference : reference),
+                                "the driver's object on its session is one lane's", detail);
         uint32_t asked = 0;
         uint32_t ran = 0;
         if (command->asked != 0)
@@ -2941,7 +2954,7 @@ static int run_check_lanes_tests(int argc, char** argv)
             check_lanes_test_driver_deferred(&tally, executable, directory, programs, id_order);
             check_lanes_test_grow_gate(&tally);
             check_lanes_test_driver_growth(&tally, executable, directory, programs);
-            check_lanes_test_session_threads(&tally, executable, directory);
+            check_lanes_test_session_threads(&tally, executable, directory, programs);
             check_lanes_test_session_commands(&tally, executable, directory);
             check_lanes_test_session_growth(&tally, directory, programs, 0, false);
             check_lanes_test_session_growth(&tally, directory, programs, 2, false);

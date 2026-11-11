@@ -2822,9 +2822,11 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     uint32_t active = most < bodies ? most : bodies;
     active = paid < active ? (uint32_t)paid : active;
     // In a command's flow (#905), no more than its session asks for: by default one lane per core, which a lazy session's
-    // lane 1 has been counting meanwhile (lane_session_asked).
+    // lane 1 has been counting meanwhile (lane_session_asked). An on-demand session's lanes start here if they haven't
+    // (lane_session_start, #1444): the C driver starts them once a unit large enough to pay for them is preprocessed.
     if (active > 1 && lanes->flow != NULL)
     {
+        lane_session_start();
         const uint32_t asked = lane_session_asked();
         active = asked < active ? asked : active;
     }

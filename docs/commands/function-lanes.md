@@ -66,15 +66,19 @@ objects and executables by `--lanes`, by default and by `--lanes 8
 that don't start, and the failing programs' exit statuses and diagnostics by
 `--lanes 8`, with the ids in another order too, each `--lanes 1`'s. Then the
 driver's session (#905): a library preloaded into the driver counts its calls
-of `pthread_create`: none for `--lanes 1`, `--worker-budget=1`, a source's
-`-fsyntax-only` and an object compiled on one CPU, one per lane past the first
-of `--lanes 3` and by default of the cores of the CPUs it may run on (by
-`/proc/cpuinfo`), for an object, an executable and two sources' objects; where
+of `pthread_create`, on the first program of 600 functions: none for `--lanes
+1`, `--worker-budget=1`, a source's `-fsyntax-only` and an object compiled on
+one CPU, one per lane past the first of `--lanes 3` and by default of the cores
+of the CPUs it may run on (by `/proc/cpuinfo`), for an object, an executable
+and two sources' objects; where
 the process has a core's two siblings, on them by default one lane (its lane 1
 created to count the core) and by `--lanes 2` two, and on CPUs of two cores
-two; and with its second lane failing to start (`BUSTER_TEST_LANE_FAIL_AT`) the
-one created, the object `--lanes 1`'s, each with `--time-stages`' lanes asked
-for and run on (3 and 3, the cores' by default, 4 and 1); and
+two; with its second lane failing to start (`BUSTER_TEST_LANE_FAIL_AT`) the
+one created, the object `--lanes 1`'s; and by default none for the program of
+three functions' object and executable, too small to pay for a second lane
+(#1444: one source's session starts on demand); each with `--time-stages`'
+lanes asked for and run on (3 and 3, the cores' by default, 4 and 1, and 1 and
+1 for the small object); and
 commands in one process, on a session of 4 lanes: a failing command, objects
 on 4 lanes and on 2 by `--worker-budget 2`, a `-fsyntax-only`, and two
 sources' `-fsyntax-only` by 3 lanes and by 1, three times, every lane calling
