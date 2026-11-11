@@ -541,6 +541,10 @@ struct TypeTable
     // Whether the table has a QUALIFIED record (#1447), set when it makes its first and never cleared: a unit without one
     // reads no type's extended qualifiers (type_extended_qualifiers, type_object_qualifiers).
     bool extended;
+    // Whether the table has an extended vector (ext_vector_type), set when it makes its first and never cleared: only
+    // such a unit's source reader decodes a `->` member's name as a swizzle (check_input_vector_member), since `p->y`
+    // can name one only through a pointer to an extended vector.
+    bool ext_vectors;
 };
 
 // How many records of each table there is room for: types besides the builtin ones, tags and members besides record 0,
@@ -2137,6 +2141,7 @@ static uint32_t type_append(TypeTable* table, uint8_t kind, uint8_t flags, TypeI
         result = types->count;
         types->kind[result] = kind;
         table->extended |= kind == BUSTER_TYPE_KIND_QUALIFIED;
+        table->ext_vectors |= kind == BUSTER_TYPE_KIND_EXT_VECTOR;
         types->code[result] = properties.code;
         types->flags[result] = flags | properties.flags;
         types->alignment_log2[result] = properties.alignment_log2;
@@ -7036,6 +7041,7 @@ static bool type_copy(TypeTable* table, const TypeTable* source, Arena* arena, A
         const uint64_t count = source->types.count;
         memcpy(table->types.kind, source->types.kind, count * sizeof(*table->types.kind));
         table->extended = source->extended;
+        table->ext_vectors = source->ext_vectors;
         memcpy(table->types.code, source->types.code, count * sizeof(*table->types.code));
         memcpy(table->types.flags, source->types.flags, count * sizeof(*table->types.flags));
         memcpy(table->types.alignment_log2, source->types.alignment_log2, count * sizeof(*table->types.alignment_log2));

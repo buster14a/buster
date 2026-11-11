@@ -12513,6 +12513,22 @@ static inline __attribute__((always_inline)) void check_input_vector_member(Chec
             reader->output->resource |= !check_vector_member_decode(bytes, length, lanes, length, &member);
         }
     }
+    if (!reader->output->resource && member.kind != CHECK_VECTOR_MEMBER_INVALID && graph->vector_member_count == graph->vector_member_capacity)
+    {
+        // The counted capacity (check_input_counts) covers `.` members, not `->` ones, which a unit with an extended vector
+        // records too: their list grows, rarely, in the same arena.
+        const uint32_t capacity = graph->vector_member_capacity * 2 + 16;
+        CheckVectorCall* grown = arena_push_array(reader->arena, capacity, sizeof(CheckVectorCall), _Alignof(CheckVectorCall));
+        if (grown != 0)
+        {
+            if (graph->vector_member_count != 0)
+            {
+                memcpy(grown, graph->vector_members, (uint64_t)graph->vector_member_count * sizeof(CheckVectorCall));
+            }
+            graph->vector_members = grown;
+            graph->vector_member_capacity = capacity;
+        }
+    }
     if (!reader->output->resource && member.kind != CHECK_VECTOR_MEMBER_INVALID)
     {
         if (graph->vector_member_count < graph->vector_member_capacity)
@@ -13783,7 +13799,8 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
             if (op == CHECK_OP_MEMBER || op == CHECK_OP_ARROW)
             {
                 graph->members[node] = parser->tokens.names[token + 1];
-                if (op == CHECK_OP_MEMBER)
+                // `p->y` names an extended vector's lane only through a pointer to one, which only a unit with one has.
+                if (op == CHECK_OP_MEMBER || __builtin_expect(reader->types->ext_vectors, 0))
                 {
                     check_input_vector_member(reader, node, token + 1);
                 }
