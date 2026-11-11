@@ -221,6 +221,14 @@ static void check_test_driver_statement_recovery(CheckTest* test, const char* cl
         "void m(void) { M: { M: ; } N: ; N: ; goto N; }\n"
         "void n(void) { P: Q: P: ; goto Q; }\n"
         "int g(int y) { if (y = 1) return 1; int w; return 0; }\n",
+        // A goto or a case that enters a statement expression, and one that bypasses a variable length array's, a cleanup
+        // variable's or a VLA typedef's initialization: clang's jump scope errors, each with its note (#1942).
+        "void f(int x) { goto in; x = ({ in: 1; }); }\n",
+        "void c(int *p);\n"
+        "void f(int n) { goto in; int a[n]; in: ; }\n"
+        "void g(void) { goto in; int b __attribute__((cleanup(c))) = 0; (void)b; in: ; }\n"
+        "void h(int n) { switch (n) { int a[n]; case 1: ; } }\n"
+        "void k(int n) { goto in; typedef int T[n]; in: ; }\n",
         // An undeclared name in a type name's bound ends the reader's walk; the rounds find the later body's error, under -w
         // too (#2162).
         "int f(void) { return _Alignof(int[undecl3]); }\n"

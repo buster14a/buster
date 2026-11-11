@@ -585,6 +585,8 @@ typedef enum CheckInputNoteKind
     CHECK_INPUT_NOTE_FUNCTION_DECLARATION,
     CHECK_INPUT_NOTE_CONSTANT_SUBEXPRESSION,
     CHECK_INPUT_NOTE_CONSTANT_DIVISION,
+    // A jump's scope it enters (#1942): a statement expression's `(`, "jump enters a statement expression".
+    CHECK_INPUT_NOTE_JUMP,
 } CheckInputNoteKind;
 
 // A version as clang's VersionTuple holds it (#1447: an availability attribute's): its components (major, minor,
