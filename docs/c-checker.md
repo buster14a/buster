@@ -9177,9 +9177,15 @@ clang's `diagnose_if(condition, message, "warning" | "error")` and
   a conditional can skip it; otherwise each is "never produces a constant
   expression", its note at the call's name or the operator, as a call
   without a parameter is (`g(1) > 0`, `h()`). Any other shape (a subscript,
-  a builtin's call) is "not yet supported" in user code; in a system header,
-  and on an object-size wrapper (`pass_object_size`), the condition is kept
-  and decides nothing, as these wrappers had it before.
+  a builtin's call) is "not yet supported" in user code; in a system header
+  the condition is kept and decides nothing, as #1361's fortify wrappers had
+  it. A function declaration with a `pass_object_size` parameter (#1361's
+  object-size wrappers, `CheckInputAttributes.object_sizes`) doesn't read its
+  conditions at all, whatever their shape and wherever it is: none is built,
+  checked or kept (`check_input_conditions`), so in user code clang's
+  diagnostics of them are missing, an undeclared name's error and a
+  condition's warning or error at a use or a call alike
+  ([#2147](https://github.com/buster14a/buster/issues/2147)).
 - **Lists.** Each function declaration where some condition holds has its
   list (`CheckInput.condition_declarations`, by the declaration's name
   token): its previous declaration's, then its own, as clang's
