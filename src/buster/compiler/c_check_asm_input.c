@@ -98,115 +98,6 @@ static bool check_asm_text_equal(CheckAsmText text, const char* expected)
     return text.length == strlen(expected) && (text.length == 0 || memcmp(text.bytes, expected, text.length) == 0);
 }
 
-static bool check_asm_register(CheckAsmText text)
-{
-    static const char* const names[] =
-    {
-        "al",
-        "ah",
-        "ax",
-        "eax",
-        "rax",
-        "bl",
-        "bh",
-        "bx",
-        "ebx",
-        "rbx",
-        "cl",
-        "ch",
-        "cx",
-        "ecx",
-        "rcx",
-        "dl",
-        "dh",
-        "dx",
-        "edx",
-        "rdx",
-        "si",
-        "sil",
-        "esi",
-        "rsi",
-        "di",
-        "dil",
-        "edi",
-        "rdi",
-        "sp",
-        "spl",
-        "esp",
-        "rsp",
-        "bp",
-        "bpl",
-        "ebp",
-        "rbp",
-        "st",
-        "flags",
-        "dirflag",
-        "fpsr",
-        "fpcr",
-    };
-    bool valid = false;
-    if (text.length != 0 && (text.bytes[0] == '%' || text.bytes[0] == '#'))
-    {
-        text.bytes += 1;
-        text.length -= 1;
-    }
-    for (uint32_t i = 0; !valid && i < BUSTER_ARRAY_LENGTH(names); i += 1)
-    {
-        valid = check_asm_text_equal(text, names[i]);
-    }
-    if (!valid && text.length == 5 && memcmp(text.bytes, "st(", 3) == 0 && text.bytes[3] >= '1' && text.bytes[3] <= '7' && text.bytes[4] == ')')
-    {
-        valid = true;
-    }
-    uint32_t prefix = 0;
-    uint32_t limit = 0;
-    uint32_t minimum = 0;
-    bool general = false;
-    if (text.length >= 2 && text.bytes[0] == 'r')
-    {
-        prefix = 1;
-        minimum = 8;
-        limit = 31;
-        general = true;
-    }
-    else if (text.length >= 2 && text.bytes[0] == 'k')
-    {
-        prefix = 1;
-        limit = 7;
-    }
-    else if (text.length >= 3 && memcmp(text.bytes, "mm", 2) == 0)
-    {
-        prefix = 2;
-        limit = 7;
-    }
-    else if (text.length >= 4 && memcmp(text.bytes, "tmm", 3) == 0)
-    {
-        prefix = 3;
-        limit = 7;
-    }
-    else if (text.length >= 4 && (text.bytes[0] == 'x' || text.bytes[0] == 'y' || text.bytes[0] == 'z') && memcmp(text.bytes + 1, "mm", 2) == 0)
-    {
-        prefix = 3;
-        limit = 31;
-    }
-    if (!valid && prefix != 0)
-    {
-        uint32_t number = 0;
-        uint32_t cursor = prefix;
-        while (cursor < text.length && text.bytes[cursor] >= '0' && text.bytes[cursor] <= '9' && number <= limit)
-        {
-            number = number * 10 + text.bytes[cursor++] - '0';
-        }
-        const bool leading_zero = cursor > prefix + 1 && text.bytes[prefix] == '0';
-        if (general && cursor + 1 == text.length && (text.bytes[cursor] == 'b' || text.bytes[cursor] == 'w' || text.bytes[cursor] == 'd'))
-        {
-            cursor += 1;
-        }
-        valid = cursor == text.length && cursor > prefix && number >= minimum && number <= limit && !leading_zero;
-    }
-    return valid;
-}
-
 static void check_input_asm_mark(CheckInputReader* reader, uint32_t begin, uint32_t end, uint32_t id)
 {
     for (uint32_t token = begin; token < end; token += 1)
@@ -723,8 +614,7 @@ static void check_input_asm_prepare(CheckInputReader* reader, uint32_t keyword)
                 {
                     statement->memory_clobber |= check_asm_text_equal(*clobber, "memory");
                     statement->cc_clobber |= check_asm_text_equal(*clobber, "cc");
-                    valid = memchr(clobber->bytes, 0, clobber->length) == NULL &&
-                            (check_asm_text_equal(*clobber, "memory") || check_asm_text_equal(*clobber, "cc") || check_asm_register(*clobber));
+                    valid = memchr(clobber->bytes, 0, clobber->length) == NULL;
                     statement->clobber_count += 1;
                 }
             }
@@ -787,6 +677,35 @@ static void check_input_asm_prepare(CheckInputReader* reader, uint32_t keyword)
             for (uint32_t before = 0; valid && operands[operand].name != 0 && before < operand; before += 1)
             {
                 valid = operands[before].name != operands[operand].name;
+            }
+        }
+        // The clobbers clang's TargetInfo::isValidClobber takes (#2262): a register name clang's target knows
+        // (check_input_register_name_valid, past one '%' or '#', or an index into its names), memory, cc and unwind. The
+        // first other is clang's "unknown register name 'X' in asm" at its string, after the operands' constraints, and
+        // ends the statement, as clang returns there.
+        for (uint32_t c = 0; valid && c < statement->clobber_count; c += 1)
+        {
+            const CheckAsmText text = clobbers[c];
+            const String8 name = { .pointer = (char*)text.bytes, .length = text.length };
+            const bool known = check_asm_text_equal(text, "memory") || check_asm_text_equal(text, "cc") || check_asm_text_equal(text, "unwind") ||
+                               check_input_register_name_valid(name);
+            if (!known)
+            {
+                // Its bytes stay in the reader's arena, as a register variable's label's (CHECK_INPUT_REGISTER_NAME).
+                uint8_t* bytes = BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint8_t, (uint64_t)text.length + 1);
+                const uint32_t before = input->report_count;
+                if (bytes != NULL && text.length < BUSTER_CHECK_REGISTER_NAME_UNSUITABLE)
+                {
+                    memcpy(bytes, text.bytes, text.length);
+                    check_input_report(reader, text.token, CHECK_INPUT_REGISTER_NAME);
+                }
+                if (input->report_count > before)
+                {
+                    input->reports[before].value = (uint64_t)(uintptr_t)bytes;
+                    input->reports[before].detail = text.length;
+                }
+                failed = text.token;
+                valid = false;
             }
         }
         for (uint32_t label = 0; valid && label < statement->label_count; label += 1)
@@ -1071,7 +990,19 @@ static void check_input_asm_labels(CheckInputReader* reader)
                                 else if (previous != NULL && (previous->text.length != attribute->text.length ||
                                          memcmp(previous->text.pointer, attribute->text.pointer, attribute->text.length) != 0))
                                 {
-                                    check_input_report(reader, token, CHECK_INPUT_DECLARATION);
+                                    // clang's "conflicting asm label" at the name, noted at the earlier label (#2262), before
+                                    // a redefinition's error there, which the reader recovered from: published too.
+                                    const uint32_t before = input->report_count;
+                                    check_input_report(reader, token, CHECK_INPUT_ASM_LABEL_CONFLICT);
+                                    if (input->report_count > before)
+                                    {
+                                        input->reports[before].note_token = previous->argument_first;
+                                        input->reports[before].note_kind = CHECK_INPUT_NOTE_PREVIOUS_DECLARATION;
+                                    }
+                                    for (uint32_t r = 0; r < input->recovered_count; r += 1)
+                                    {
+                                        input->recovered_reports[r].repeated |= input->recovered_reports[r].token == token;
+                                    }
                                 }
                                 else if (previous == NULL && (states[object] & 2) != 0)
                                 {
