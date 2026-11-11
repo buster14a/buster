@@ -1787,6 +1787,12 @@ struct CheckInputReader
     // The attributes being read are a C23 list after a bare tag declaration's name (#1447, check_input_tag_attributes), which
     // clang's parser refuses and its Sema still applies to the tag, as the tag's own list.
     bool tag_name_list;
+    // That list's tokens [tag_name_list_first, tag_name_list_end) and the subjects its tag gives, which
+    // check_input_tag_attributes leaves to check_input_tag to read after the identity: the constant reader's way to the
+    // identity (check_constant_tag_finish) reads no attributes. tag_name_list_end is 0 where none waits.
+    uint32_t tag_name_list_first;
+    uint32_t tag_name_list_end;
+    uint32_t tag_name_list_subjects;
     // The constexpr values the initializers' finishes have read, newest first.
     CheckConstexprValue* constexpr_values;
     uint32_t constexpr_count;
@@ -4538,20 +4544,11 @@ static bool check_input_tag_attributes(CheckInputReader* reader, uint32_t token,
         {
             const uint32_t before = reader->output->report_count;
             check_input_report(reader, i, CHECK_INPUT_ATTRIBUTE_LIST_PLACE);
-            uint32_t cursor = i;
-            CheckInputAttributes* listed = 0;
-            reader->tag_attributes = true;
-            reader->tag_name_list = true;
-            const bool read = check_input_read_attributes(reader, &cursor, list_end, &listed);
-            reader->tag_attributes = false;
-            reader->tag_name_list = false;
-            // Their subjects' and counts' checks, as the tag's own list's (below).
-            const uint32_t subjects = kind == BUSTER_TYPE_KIND_ENUM ? BUSTER_CHECK_SUBJECT_ENUM : kind == BUSTER_TYPE_KIND_UNION ? BUSTER_CHECK_SUBJECT_UNION :
-                                      BUSTER_CHECK_SUBJECT_STRUCT;
-            if (read && listed != 0)
-            {
-                (void)check_input_attribute_subjects(reader, listed, subjects, 0, token, BUSTER_CHECK_NONE);
-            }
+            // Read by check_input_tag after the identity, with their subjects' and counts' checks as the tag's own list's
+            // (below).
+            reader->tag_name_list_first = i;
+            reader->tag_name_list_end = list_end;
+            reader->tag_name_list_subjects = kind == BUSTER_TYPE_KIND_UNION ? BUSTER_CHECK_SUBJECT_UNION : BUSTER_CHECK_SUBJECT_STRUCT;
             valid = !reader->output->resource && (reader->output->report_count == before || check_input_recover_reports(reader, before));
         }
         i = lists ? list_end : i + 1;
@@ -4970,7 +4967,27 @@ static TypeId check_input_tag(CheckInputReader* reader, uint32_t token, uint32_t
         reader->tag_attributes = false;
         // Before the identity, which completes an enum with a fixed underlying type and its alignment attribute.
         check_input_set_attributes_at(reader->output, token, valid ? attributes : 0);
+        reader->tag_name_list_end = 0;
         type = valid ? check_input_tag_identity(reader, token, end, definition) : 0;
+        // A C23 list after a bare declaration's name (check_input_tag_attributes): read as the tag's, its errors recovered.
+        if (type != 0 && reader->tag_name_list_end != 0)
+        {
+            const uint32_t before = reader->output->report_count;
+            uint32_t list = reader->tag_name_list_first;
+            CheckInputAttributes* listed = 0;
+            reader->tag_attributes = true;
+            reader->tag_name_list = true;
+            const bool read = check_input_read_attributes(reader, &list, reader->tag_name_list_end, &listed);
+            reader->tag_attributes = false;
+            reader->tag_name_list = false;
+            reader->tag_name_list_end = 0;
+            if (read && listed != 0)
+            {
+                (void)check_input_attribute_subjects(reader, listed, reader->tag_name_list_subjects, 0, token, BUSTER_CHECK_NONE);
+            }
+            const bool recovered = !reader->output->resource && (reader->output->report_count == before || check_input_recover_reports(reader, before));
+            type = recovered ? type : 0;
+        }
     }
     return type;
 }

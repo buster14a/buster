@@ -9399,8 +9399,9 @@ arguments against the function. The checker now gives these as clang does.
     'clang::neon_vector_type' is ignored, place it after "enum" ...", its
     scope named. Not yet clang's: the tag doesn't take such a list's other
     attributes (a later use of `struct V [[deprecated]];`'s tag isn't
-    deprecated); an enum's list's declaration attributes (`deprecated`) are
-    clang's "cannot be applied to types" error, not the warning; and a
+    deprecated); an enum's list's, or a list's after a GNU list, declaration
+    attributes (`deprecated`) are clang's "cannot be applied to types" error,
+    not the warning; and a
     definition's list (`struct S [[...]] { ... };`) is the parser's
     "expected identifier or '('" at its `{`.
 - **Tests.** `test-checker` checks the facts table's order and bounds, its
