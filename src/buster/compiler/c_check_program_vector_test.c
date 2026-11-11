@@ -1114,6 +1114,25 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
           "RF(x.v);RF(x.h[1]);RF(x.q[2]);RF(x.e[1]);RF(p.v);RF(p.h[0]);RF(p.q[1]);}\n"
           "return (int)h;}\n"
         },
+        // Masked memory builtins without AVX-512 (#1834), element by element: loads, stores, expanding loads, compressing
+        // stores, gathers and scatters (a scatter's indices counted in the indices' elements, as clang's code counts them)
+        // of 8- to 64-bit elements and 2 to 16 lanes; and at a page's end before an inaccessible one, lanes whose bits are
+        // clear past it, which must touch nothing there.
+        { "baseline-masked-memory",
+          "#include <sys/mman.h>\n"
+          "#define M(E,L) do{typedef E X __attribute__((ext_vector_type(L)));typedef _Bool B __attribute__((ext_vector_type(L)));"
+          "typedef int I __attribute__((ext_vector_type(L)));E mem[4*L];X w,v;I ix;unsigned bits;fill(mem,sizeof mem,n+L);fill(&w,sizeof w,n*3+L);"
+          "fill(&v,sizeof v,n*5+L);fill(&bits,4,n*7+L);B m;for(int i_=0;i_<L;i_++){m[i_]=(bits>>i_)&1;ix[i_]=(int)((bits>>(i_+3))%(sizeof(E)<4?L:4*L));"
+          "}X r1=__builtin_masked_load(m,mem,w);X r2=__builtin_masked_expand_load(m,mem+1,w);X r3=__builtin_masked_gather(m,ix,mem,w);FOLD(r1);FOLD(r2);FOLD(r3);"
+          "__builtin_masked_store(m,v,mem+L);__builtin_masked_compress_store(m,v,mem+2*L+1);__builtin_masked_scatter(m,ix,v,mem);FOLD(mem);"
+          "E*edge=(E*)(page+4096)-L/2;B lo;for(int i_=0;i_<L;i_++)lo[i_]=i_<L/2;X r4=__builtin_masked_load(lo,edge,w);FOLD(r4);__builtin_masked_store(lo,v,edge);"
+          "X r5=__builtin_masked_expand_load(lo,edge,w);FOLD(r5);__builtin_masked_compress_store(lo,v,edge);FOLD(*(X*)(edge-L/2));}while(0)\n"
+          "#define ALL(E) M(E,2);M(E,4);if(sizeof(E)<=8)M(E,8);if(sizeof(E)<=4)M(E,16)\n"
+          "int tested(int n){unsigned h=2166136261u;\n"
+          "char*page=mmap(0,8192,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);mprotect(page+4096,4096,PROT_NONE);\n"
+          "ALL(int);ALL(unsigned);ALL(long long);ALL(float);ALL(double);M(signed char,4);M(signed char,16);M(short,8);M(unsigned short,4);\n"
+          "munmap(page,8192);return (int)h;}\n"
+        },
         // Scalars' elementwise builtins without AVX-512F (#1834): the C library's ceilf ... roundf, fmaf and fma without
         // SSE4.1 and FMA, and ldexpf and ldexp; SSE4.1's ROUNDSS and ROUNDSD (round's of the value plus the largest value
         // below 0.5 of its sign) and FMA's VFMADD213SS and SD where the target has them; halves, values near them and past

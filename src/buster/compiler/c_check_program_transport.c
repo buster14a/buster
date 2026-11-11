@@ -1730,6 +1730,152 @@ static __attribute__((noinline)) void check_lower_transport_reduce_floating(Chec
     }
 }
 
+// The address a masked memory builtin's lane takes (check_lower_transport_masked), pushed: the real one, whose local
+// `real` (U64) holds, where the lane's bit of the mask (whose address local `mask` holds, of type `mask_type`) is set,
+// else the other, local `other`'s: other ^ ((real ^ other) & -bit), which reads no memory at either address.
+static void check_lower_masked_choose(CheckLowerWriter* writer, uint32_t mask, TypeId mask_type, uint32_t lane, uint32_t real, uint32_t other)
+{
+    check_lower_instruction(writer, BUSTER_TYPED_XOR, BUSTER_TYPED_CLASS_U64, 0);
+    check_lower_instruction(writer, BUSTER_TYPED_AND, BUSTER_TYPED_CLASS_U64, 0);
+    check_lower_instruction(writer, BUSTER_TYPED_NEG, BUSTER_TYPED_CLASS_U64, 0);
+    check_lower_transport_read(writer, mask, mask_type, lane, BUSTER_TYPE_ULONG);
+    check_lower_instruction(writer, BUSTER_TYPED_XOR, BUSTER_TYPED_CLASS_U64, 0);
+    check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, other);
+    check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, real);
+    check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, other);
+}
+
+// A masked memory builtin (__builtin_masked_load, _store, _expand_load, _compress_store, _gather and _scatter) at a target
+// without AVX-512F and AVX-512VL (#1834), element by element in the lanes' order, as clang's legalization scalarizes
+// it: a lane whose mask bit is set loads or stores its element at its address (p + i, p + k for an expanding load or
+// a compressing store, k the set bits before it, or p + index[i] for a gather or a scatter, in elements, a scatter's in
+// its indices' elements as clang's code counts them); any other lane
+// reads its pass-through element (its result's own, undefined, without one) or writes a private scratch slot. Each
+// lane's address is chosen arithmetically (check_lower_masked_choose), so that no address a clear bit names is read or
+// written. The arguments are evaluated first to last into locals: a vector's object's address, a pointer's value.
+static __attribute__((noinline)) void check_lower_transport_masked(CheckLowerWriter* writer, uint32_t node, CBuiltinId builtin)
+{
+    const CheckProgram* program = writer->program;
+    const TypeTable* types = program->types;
+    const CheckStream* stream = program->stream;
+    const CheckGraph* graph = &program->input->graph;
+    const uint32_t first = graph->argument_offsets[node];
+    const uint32_t count = graph->argument_counts[node] < 4 ? graph->argument_counts[node] : 4;
+    const bool loads = builtin == CBUILTIN_MASKED_LOAD || builtin == CBUILTIN_MASKED_EXPAND_LOAD || builtin == CBUILTIN_MASKED_GATHER;
+    const bool addressed = builtin == CBUILTIN_MASKED_GATHER || builtin == CBUILTIN_MASKED_SCATTER;
+    const bool packed = builtin == CBUILTIN_MASKED_EXPAND_LOAD || builtin == CBUILTIN_MASKED_COMPRESS_STORE;
+    // The arguments' places: the pointer's, the stored value's, the indices' and the pass-through's (count where absent).
+    const uint32_t pointer = builtin == CBUILTIN_MASKED_LOAD || builtin == CBUILTIN_MASKED_EXPAND_LOAD ? 1 : builtin == CBUILTIN_MASKED_SCATTER ? 3 : 2;
+    const uint32_t stored = builtin == CBUILTIN_MASKED_SCATTER ? 2 : loads ? count : 1;
+    const uint32_t indices = addressed ? 1 : count;
+    const uint32_t passed = builtin == CBUILTIN_MASKED_GATHER ? 3 : loads ? 2 : count;
+    const TypeId mask = stream->argument_conversions[first].type;
+    const TypeId value = loads ? check_stream_type(stream, node) : stored < count ? stream->argument_conversions[first + stored].type : BUSTER_TYPE_VOID;
+    const CheckVectorShape shape = check_vector_builtin_shape(types, value);
+    const uint32_t lanes = check_builtin_vector_lanes(types, type_conversion_operand(types, mask));
+    if (pointer >= count || stored > count || shape.element == 0 || lanes != shape.lanes || lanes == 0 || lanes > BUSTER_CHECK_LOWER_TRANSPORT_LANES)
+    {
+        check_lower_unsupported(writer, "masked vector memory builtins of these operands");
+    }
+    else
+    {
+        const TypeId element = check_lower_transport_element(types, value);
+        const uint8_t class = check_lower_class(writer, element);
+        const uint32_t size = shape.element;
+        uint32_t locals[4] = { BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE };
+        for (uint32_t a = 0; a < count; a += 1)
+        {
+            locals[a] = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
+        }
+        const uint32_t real = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
+        const uint32_t other = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
+        const uint32_t taken = packed ? check_lower_temporary(writer, BUSTER_TYPED_CLASS_I64) : BUSTER_CHECK_NONE;
+        const uint32_t scratch = loads ? BUSTER_CHECK_NONE : check_lower_addressed_temporary(writer, BUSTER_TYPED_CLASS_U64);
+        const uint32_t out = loads ? check_lower_transport_result(writer, value) : BUSTER_CHECK_NONE;
+        for (uint32_t i = lanes; i-- > 0 && writer->output->status == CHECK_PROGRAM_OK;)
+        {
+            if (packed)
+            {
+                // k += the lane's bit, after its access.
+                check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_I64, taken);
+                check_lower_instruction(writer, BUSTER_TYPED_ADD, BUSTER_TYPED_CLASS_I64, 0);
+                check_lower_transport_read(writer, locals[0], mask, i, BUSTER_TYPE_LONG);
+                check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_I64, taken);
+            }
+            check_lower_instruction(writer, BUSTER_TYPED_SET, class, 0);
+            if (loads)
+            {
+                check_lower_instruction(writer, BUSTER_TYPED_LOAD, class, 0);
+            }
+            else
+            {
+                check_lower_transport_read(writer, locals[stored], value, i, element);
+            }
+            check_lower_masked_choose(writer, locals[0], mask, i, real, other);
+            // The other address: the pass-through's element, the result's own, or the scratch slot.
+            check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, other);
+            if (loads && passed < count)
+            {
+                check_lower_transport_at(writer, locals[passed], (uint64_t)i * size);
+            }
+            else if (loads)
+            {
+                check_lower_element_address(writer, out, i * size);
+            }
+            else
+            {
+                check_lower_instruction(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, scratch);
+            }
+            // The real address.
+            check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, real);
+            if (addressed || packed)
+            {
+                // A scatter's index counts the index's elements' bytes, as clang's code's GEP does (and the AVX-512 row's
+                // VPSCATTER, check_vector_masked_row), a gather's the value's.
+                const TypeId index_type = addressed ? stream->argument_conversions[first + indices].type : BUSTER_TYPE_VOID;
+                const uint32_t scale = builtin == CBUILTIN_MASKED_SCATTER ? check_vector_builtin_shape(types, index_type).element : size;
+                check_lower_instruction(writer, BUSTER_TYPED_PTR_ADD, BUSTER_TYPED_CLASS_U64, scale);
+                if (addressed)
+                {
+                    check_lower_transport_read(writer, locals[indices], stream->argument_conversions[first + indices].type, i, BUSTER_TYPE_LONG);
+                }
+                else
+                {
+                    check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_I64, taken);
+                }
+                check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, locals[pointer]);
+            }
+            else
+            {
+                check_lower_transport_at(writer, locals[pointer], (uint64_t)i * size);
+            }
+            if (loads)
+            {
+                check_lower_element_address(writer, out, i * size);
+            }
+        }
+        if (packed)
+        {
+            check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_I64, taken);
+            check_lower_instruction(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, 0);
+        }
+        for (uint32_t a = count; a-- > 0;)
+        {
+            const TypeId type = stream->argument_conversions[first + a].type;
+            if (a == pointer)
+            {
+                check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, locals[a]);
+            }
+            else
+            {
+                check_lower_transport_source(writer, type, locals[a]);
+            }
+            check_lower_operand(writer, node, a + 3, false, type);
+        }
+        writer->vectors = true;
+    }
+}
+
 // An integer reduction of a transport vector (#137, __builtin_reduce_add, _mul, _and, _or, _xor, _max and _min): its
 // elements folded first to last in their promoted type (int, or the element's own type from 4 bytes; a vector of
 // bool's in unsigned int, its elements 0 or 1, where a sum is an exclusive or and a product a conjunction, as i1's

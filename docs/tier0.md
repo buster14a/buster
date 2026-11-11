@@ -674,6 +674,13 @@ at the target's forms, by both of the checker's paths:
   AVX) of the high part, combined with the low one by `addps` or llvm.maximum's and minimum's sequences, which without
   AVX take two rows a halving (the first packs the low part beside the high one, the high one replaced by the low where
   the low is a NaN). `max` and `min` fold the piece's lanes in order by #967's scalar rows.
+  The masked memory builtins without AVX-512F and AVX-512VL, and wherever no instruction takes them (gathers and
+  scatters of 8- and 16-bit elements, and their expanding loads and compressing stores without AVX-512 VBMI2), are
+  lowered element by element in the lanes' order (`check_lower_transport_masked`, #1834), as clang's legalization
+  scalarizes them: a lane whose bit is set loads or stores at its address, any other reads its pass-through element or
+  writes a scratch slot, the address chosen arithmetically (`other ^ ((real ^ other) & -bit)`), so that no address a
+  clear bit names is touched. A scatter's index counts the index's elements' bytes, as clang's code's GEP does (and
+  the AVX-512 row's).
   `__builtin_convertvector`'s integer extensions without SSE4.1 and truncations without AVX-512 are sequences too
   (`check_vector_baseline_resize`, #1834): an extension unpacks the low elements with zeros, or with themselves and
   shifts them right arithmetically (a qword's high dword is `psrad` by 31 of a copy); a truncation takes a qword's low
