@@ -661,7 +661,8 @@ static bool check_driver_warning_parentheses(const Parser* parser, const TypeTab
 }
 
 // c_check_semantic_diagnostic.c's, included after this file: an expression's text with expression spacing.
-static const char* check_semantic_requirement(const Parser* parser, Preprocessor* pp, uint32_t first, uint32_t end, Arena* scratch);
+static const char* check_semantic_requirement(const Parser* parser, Preprocessor* pp, uint32_t first, uint32_t end, const char* const* spelled,
+                                              Arena* scratch);
 
 // The sugar a typeof specifier prints as (#1837), clang's TypePrinter's: `typeof(T)` (`typeof_unqual(T)`) with its operand
 // type T as clang prints it, a typedef name as written and a nested typeof as its own sugar; `typeof (x)` of an expression
@@ -748,7 +749,7 @@ static String8 check_driver_typeof_text(const Parser* parser, Preprocessor* pp, 
         }
         else if (operand)
         {
-            const char* printed = check_semantic_requirement(parser, pp, first, close, scratch);
+            const char* printed = check_semantic_requirement(parser, pp, first, close, NULL, scratch);
             inner = printed != NULL ? (String8){ .pointer = (char*)printed, .length = strlen(printed) } : (String8){ 0 };
             expression = inner.length != 0;
         }
@@ -808,7 +809,8 @@ static uint32_t check_driver_spelling_chain(const Parser* parser, const CheckInp
 }
 
 // c_check_semantic_diagnostic.c's, included after this file.
-static const char* check_semantic_requirement(const Parser* parser, Preprocessor* pp, uint32_t first, uint32_t end, Arena* scratch);
+static const char* check_semantic_requirement(const Parser* parser, Preprocessor* pp, uint32_t first, uint32_t end, const char* const* spelled,
+                                              Arena* scratch);
 
 #define BUSTER_CHECK_DRIVER_VLA_BOUNDS 8
 
@@ -839,7 +841,7 @@ static uint32_t check_driver_vla_bounds(const Parser* parser, Preprocessor* pp, 
             close += scanning ? 1 : 0;
         }
         const char* text = !scanning && first != BUSTER_CHECK_NONE && close > first && count < BUSTER_CHECK_DRIVER_VLA_BOUNDS ?
-                           check_semantic_requirement(parser, pp, first, close, scratch) : NULL;
+                           check_semantic_requirement(parser, pp, first, close, NULL, scratch) : NULL;
         if (text != NULL)
         {
             ids[count] = extent;
