@@ -442,6 +442,9 @@ struct Tier0AsmBody
     uint32_t count;
     uint32_t block;
     uint32_t touched;
+    // The opmask registers its records write (k0 to k7, a bit each; CheckProgramAsm.inline_masks), whose live masks Tier 1
+    // saves around it (tier1_emit_cfg_asm). Tier 0 saves its mask stack around it as around any call.
+    uint8_t masks;
     // The template's local branches (#1839): `branch_count` of its records, ascending, each a rel8 form that branch sizing
     // sizes, and each one's target, a record of the body or its count (the body's end), as Tier0Code's branch columns
     // have them but relative to the body's first record.

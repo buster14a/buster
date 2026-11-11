@@ -15,14 +15,16 @@
 // to none and then 8 bytes more at a time until the plan succeeds: each run before it must fail for want of room
 // (CHECK_PROGRAM_RESOURCE) with both arenas as they were, among them a run whose room ends before each statement's
 // places; then the plans must be the whole arena's: an asm body each for the first two (#1839), the third refused by name,
-// and a helper for the fourth, whose form x86_semantics.c doesn't cover (rorx).
+// a helper for the fourth, whose form x86_semantics.c doesn't cover (rorx), and an asm body for the fifth, whose named label
+// the names step adds (#2090: its run without room must leave the helpers as they were).
 static void check_test_program_asm_room(CheckTest* test)
 {
     static const char source[] =
         "float through(float x){__asm__ volatile(\"\" : \"+t\"(x));return x;}"
         "long double root(long double x){__asm__(\"fsqrt\" : \"+t\"(x));return x;}"
         "int flagged(int a, float x){__int128 z;__asm__(\"cmpl $0, %2\" : \"=r\"(z), \"+t\"(x) : \"r\"(a));return (int)z+(int)x;}"
-        "int rotated(int n){int r;__asm__(\"rorxl $3, %1, %0\" : \"=r\"(r) : \"r\"(n));return r;}";
+        "int rotated(int n){int r;__asm__(\"rorxl $3, %1, %0\" : \"=r\"(r) : \"r\"(n));return r;}"
+        "int counted(int n){__asm__(\".Lcount%=:\\n\\tdecl %0\\n\\tjnz .Lcount%=\" : \"+r\"(n));return n;}";
     static InternTable identifiers;
     static Preprocessor pp;
     static Parser parser;
@@ -51,7 +53,7 @@ static void check_test_program_asm_room(CheckTest* test)
                      check_initializers_run(&plans, &input, &stream, &parser, &types.table, &input_arena, &scratch) &&
                      check_asms_run(&asms, &input, &stream, &types.table, &input_arena, &scratch);
         const CheckProgramOptions options = { .initializers = &plans, .asms = &asms, .identifiers = &identifiers, .scalar = path == 0, .predefines = &predefines };
-        ready = ready && check_program(&program, &parser, &input, &stream, &types.table, options, &output, &scratch) && input.asm_count == 4;
+        ready = ready && check_program(&program, &parser, &input, &stream, &types.table, options, &output, &scratch) && input.asm_count == 5;
         char description[256];
         snprintf(description, sizeof(description), "asm room, %s: the program is ready", path == 0 ? "scalar" : "vector");
         check_test_expect(test, ready, description);
@@ -79,8 +81,9 @@ static void check_test_program_asm_room(CheckTest* test)
                                  planned.plans[0].helper == BUSTER_CHECK_NONE && planned.plans[1].reason == NULL && planned.plans[1].inlined &&
                                  planned.plans[1].helper == BUSTER_CHECK_NONE && planned.plans[2].reason != NULL &&
                                  strcmp(planned.plans[2].reason, "inline assembly operands of this type in their constraint's registers") == 0 && planned.plans[3].reason == NULL &&
-                                 !planned.plans[3].inlined && planned.plans[3].helper != BUSTER_CHECK_NONE && helpers.count == 1;
-        snprintf(description, sizeof(description), "asm room, %s: the x87 statements are asm bodies, the __int128 operand is refused by name, rorx has a helper",
+                                 !planned.plans[3].inlined && planned.plans[3].helper != BUSTER_CHECK_NONE && planned.plans[4].reason == NULL &&
+                                 planned.plans[4].inlined && planned.plans[4].helper == BUSTER_CHECK_NONE && planned.plans[4].label_count == 1 && helpers.count == 1;
+        snprintf(description, sizeof(description), "asm room, %s: the x87 statements are asm bodies, the __int128 operand is refused by name, rorx has a helper, the named label is an asm body",
                  path == 0 ? "scalar" : "vector");
         check_test_expect(test, plans_right, description);
         parse_release(&parser);

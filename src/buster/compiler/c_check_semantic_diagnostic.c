@@ -288,7 +288,7 @@ static const char* check_semantic_input(const Parser* parser, Preprocessor* pp, 
     {
         // GNU's array initialized by a compound literal of another array type (#1447): both types as written.
         const String8 array = check_driver_warning_type(parser, pp, input, types, spell, scratch, report->type, report->type_spelling);
-        const String8 literal = check_driver_warning_type(parser, pp, input, types, spell, scratch, (TypeId)report->value, 0);
+        const String8 literal = check_driver_warning_type(parser, pp, input, types, spell, scratch, (TypeId)report->value, (uint32_t)(report->value >> 32));
         result = array.length == 0 || literal.length == 0 ? NULL : check_warning_text(scratch, "cannot initialize array of type %.*s with array of type %.*s",
                                                                                      (int)array.length, array.pointer, (int)literal.length, literal.pointer);
     }
@@ -547,6 +547,68 @@ static uint32_t check_semantic_member_token(const Parser* parser, const CheckInp
     return result;
 }
 
+// The typedef that spells the subobject an initializer's value converts to (#1447): from the initialized object's type
+// (`object`, declared at `declaration`, whose specifiers spell its own elements), down by `offset` bits through arrays'
+// elements and records' members to a level of type `target`, each member's declarator spelling it in turn
+// (check_semantic_member_token): `struct S s = { .lp = c }`'s member `LP lp` is 'LP'. A union's member is the first of
+// the target's type. 0 where the walk doesn't reach the target. A diagnostic's cold walk.
+static uint32_t check_semantic_subobject_spelling(const Parser* parser, const CheckInput* input, const TypeTable* types, TypeId object,
+                                                  uint32_t declaration, uint64_t offset, TypeId target)
+{
+    const TypeId wanted = target != 0 ? type_unqualified(type_strip_aligned(types, target)) : 0;
+    uint32_t spelling = declaration < input->token_count ? check_input_specifier_spelling(input, parser, declaration) : 0;
+    TypeId level = object;
+    bool reached = false;
+    bool walking = wanted != 0 && type_is_valid(types, object);
+    for (uint32_t depth = 0; walking && depth < 32; depth += 1)
+    {
+        const TypeId bare = type_unqualified(type_strip_aligned(types, level));
+        const uint8_t kind = type_kind(types, bare);
+        reached = bare == wanted && offset == 0;
+        walking = !reached;
+        if (walking && (kind == BUSTER_TYPE_KIND_ARRAY || kind == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY))
+        {
+            const TypeId element = type_element(types, bare);
+            const uint64_t bits = type_size(types, element) * 8;
+            walking = bits != 0;
+            offset = bits != 0 ? offset % bits : offset;
+            level = element;
+        }
+        else if (walking && (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION))
+        {
+            const uint32_t tag = types->types.index[type_index(bare)];
+            const uint32_t begin = tag < types->tags.count ? types->tags.member_begin[tag] : 0;
+            const uint32_t count = tag < types->tags.count ? types->tags.member_count[tag] : 0;
+            uint32_t found = 0;
+            for (uint32_t m = begin; m < begin + count; m += 1)
+            {
+                const TypeId member_type = types->members.type[m];
+                const uint64_t start = types->members.offset[m];
+                const uint64_t width = (types->members.flags[m] & BUSTER_TYPE_MEMBER_BIT_FIELD) != 0 ? types->members.bit_width[m] : type_size(types, member_type) * 8;
+                const bool holds = start <= offset && offset - start < (width != 0 ? width : 1);
+                const bool exact = holds && type_unqualified(type_strip_aligned(types, member_type)) == wanted && offset == start;
+                found = found == 0 && holds && (kind == BUSTER_TYPE_KIND_STRUCT || exact) ? m : found;
+                found = kind == BUSTER_TYPE_KIND_UNION && exact && found == 0 ? m : found;
+            }
+            // (A union none of whose members is the target's type: its first that holds the offset.)
+            for (uint32_t m = begin; found == 0 && kind == BUSTER_TYPE_KIND_UNION && m < begin + count; m += 1)
+            {
+                found = types->members.offset[m] <= offset ? m : 0;
+            }
+            const uint32_t declarator = found != 0 ? check_semantic_member_token(parser, input, types, found) : BUSTER_CHECK_NONE;
+            spelling = declarator < input->token_count ? check_input_specifier_spelling(input, parser, declarator) : 0;
+            walking = found != 0;
+            offset -= found != 0 ? types->members.offset[found] : 0;
+            level = found != 0 ? types->members.type[found] : level;
+        }
+        else
+        {
+            walking = false;
+        }
+    }
+    return reached ? spelling : 0;
+}
+
 // The member a `.` or `->` node (`node`) selects (#1447), a TypeMembers index found through anonymous members as the
 // action's lookup finds it, by the name after the operator and its record operand's type; 0 for none.
 static uint32_t check_semantic_member_of(const Parser* parser, const CheckInput* input, const CheckStream* stream, const TypeTable* types, uint32_t node)
@@ -586,7 +648,7 @@ static uint32_t check_semantic_operand_spelling(const Parser* parser, const Chec
         const uint32_t declaration = member ? (selected != 0 ? check_semantic_member_token(parser, input, types, selected) : BUSTER_CHECK_NONE) :
                                      token < input->token_count && input->declarations != NULL && parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER ?
                                      input->declarations[token] : 0;
-        result = declaration != 0 && declaration < input->token_count ? check_input_typedef_spelling(input, parser, declaration) : 0;
+        result = declaration != 0 && declaration < input->token_count ? check_input_typedef_sugar(input, parser, declaration) : 0;
         const bool through = declaration == 0 && (op == CHECK_OP_VALUE || op == CHECK_OP_DEREFERENCE || op == CHECK_OP_SUBSCRIPT);
         at = result == 0 && through ? graph->operand0[at] : BUSTER_CHECK_NONE;
     }
@@ -1091,6 +1153,36 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
             *location = check_semantic_switch(parser, graph->tokens[node]);
             result = type.length != 0 ? check_warning_text(scratch, "statement requires expression of integer type (%.*s invalid)", (int)type.length, type.pointer) :
                                         NULL;
+        }
+        else if ((report->diagnostic == CHECK_DIAG_ARITHMETIC_REQUIRED || report->diagnostic == CHECK_DIAG_INTEGER_REQUIRED) &&
+                 ((op >= CHECK_OP_ADD && op <= CHECK_OP_SHIFT_RIGHT) || (op >= CHECK_OP_BIT_AND && op <= CHECK_OP_BIT_XOR) ||
+                  (op >= CHECK_OP_ADD_ASSIGN && op <= CHECK_OP_BIT_XOR_ASSIGN)) && operand_type != 0 && graph->operand1[node] < stream->count &&
+                 !check_vector_type(types, type_strip_aligned(types, operand_type)) &&
+                 !check_vector_type(types, type_strip_aligned(types, check_stream_type(stream, graph->operand1[node]))))
+        {
+            // clang's err_typecheck_invalid_operands (#1872, Sema::InvalidOperands): both operands' types as written, before
+            // their conversions (an array's, a qualified lvalue's, a typedef's), at the operator, the report's token. A
+            // vector's operands have clang's vector errors.
+            const uint32_t second = graph->operand1[node];
+            const String8 left = check_driver_warning_type(parser, pp, input, types, spell, scratch, operand_type,
+                                                           check_semantic_operand_spelling(parser, input, stream, types, operand));
+            const String8 right = check_driver_warning_type(parser, pp, input, types, spell, scratch, check_stream_type(stream, second),
+                                                            check_semantic_operand_spelling(parser, input, stream, types, second));
+            result = left.length != 0 && right.length != 0 ? check_warning_text(scratch, "invalid operands to binary expression (%.*s and %.*s)", (int)left.length,
+                                                                                left.pointer, (int)right.length, right.pointer) : NULL;
+        }
+        else if (report->diagnostic == CHECK_DIAG_INCOMPATIBLE && op == CHECK_OP_SUBTRACT && operand_type != 0 && graph->operand1[node] < stream->count &&
+                 check_action_kind(types, operand_type) == BUSTER_TYPE_KIND_POINTER &&
+                 check_action_kind(types, check_stream_type(stream, graph->operand1[node])) == BUSTER_TYPE_KIND_POINTER)
+        {
+            // clang's err_typecheck_sub_ptr_compatible (#1872): two pointers to incompatible types, as written.
+            const uint32_t second = graph->operand1[node];
+            const String8 left = check_driver_warning_type(parser, pp, input, types, spell, scratch, operand_type,
+                                                           check_semantic_operand_spelling(parser, input, stream, types, operand));
+            const String8 right = check_driver_warning_type(parser, pp, input, types, spell, scratch, check_stream_type(stream, second),
+                                                            check_semantic_operand_spelling(parser, input, stream, types, second));
+            result = left.length != 0 && right.length != 0 ? check_warning_text(scratch, "%.*s and %.*s are not pointers to compatible types", (int)left.length,
+                                                                                left.pointer, (int)right.length, right.pointer) : NULL;
         }
         else if (report->diagnostic == CHECK_DIAG_ARITHMETIC_REQUIRED && op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_POST_DECREMENT &&
                  operand_type != 0 && !check_action_steppable(types, operand_type))

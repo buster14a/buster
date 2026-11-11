@@ -703,6 +703,46 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .compare_warning_text = true,
     },
     {
+        // An enum base's const and volatile (#1952): clang's -Wunderlying-cv-qualifier-ignored once per base, at its first
+        // token that isn't a qualifier, a typedef's qualifiers too, and no stand-alone declaration's warning for them.
+        .name = "enum underlying type qualifiers",
+        .source = "enum H : const int { D };\nenum I : const volatile const int { E };\nenum J : int const { F };\n"
+                  "enum K : volatile unsigned long { G };\ntypedef const int CI;\nenum L : CI { H1 };\nenum M : const CI { M1 };\n"
+                  "enum N : const int;\nconst enum O : const int { O1 };\nenum Q : const int { Q1 } q;\n"
+                  "void f(void) { enum R : const short { R1 }; enum R r = R1; (void)r; }\nstruct T { enum U : const int { U1 } u; };\n",
+        .warnings = 13,
+        .compare_warning_text = true,
+    },
+    {
+        .name = "enum underlying type qualifiers under -Wall",
+        .source = "enum H : const int { D };\nenum I : const volatile const int { E };\nenum J : int const { F };\n"
+                  "enum K : volatile unsigned long { G };\ntypedef const int CI;\nenum L : CI { H1 };\nenum M : const CI { M1 };\n"
+                  "enum N : const int;\nconst enum O : const int { O1 };\nenum Q : const int { Q1 } q;\n"
+                  "void f(void) { enum R : const short { R1 }; enum R r = R1; (void)r; }\nstruct T { enum U : const int { U1 } u; };\n",
+        .options = { "-Wall" },
+        .warnings = 13,
+        .compare_warning_text = true,
+    },
+    {
+        .name = "enum underlying type qualifiers under -w",
+        .source = "enum H : const int { D };\nenum I : const volatile const int { E };\nenum J : int const { F };\n"
+                  "enum K : volatile unsigned long { G };\ntypedef const int CI;\nenum L : CI { H1 };\nenum M : const CI { M1 };\n"
+                  "enum N : const int;\nconst enum O : const int { O1 };\nenum Q : const int { Q1 } q;\n"
+                  "void f(void) { enum R : const short { R1 }; enum R r = R1; (void)r; }\nstruct T { enum U : const int { U1 } u; };\n",
+        .options = { "-w" },
+    },
+    {
+        .name = "enum underlying type qualifiers as errors",
+        .source = "enum H : const int { D };\n",
+        .options = { "-Werror=underlying-cv-qualifier-ignored" },
+        .errors = 1,
+    },
+    {
+        .name = "enum underlying type qualifiers disabled",
+        .source = "enum H : const int { D };\n",
+        .options = { "-Wno-underlying-cv-qualifier-ignored" },
+    },
+    {
         .name = "duplicate declaration specifier group disabled",
         .source = "const const int value;\n",
         .options = { "-Wno-duplicate-decl-specifier" },
@@ -1690,6 +1730,23 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .warnings = 3,
         .notes = 2,
         .c23 = true,
+    },
+    {
+        // A statement expression in a static selection's chosen operand is evaluated where the selection is: its
+        // statements, roots of their own, are left out of the selection's unselected roots (#2023), so -Wuninitialized
+        // reads them and an initializer's -Wconstant-conversion is given; nested in another selection's other operand,
+        // they stay unselected.
+        .name = "statement expressions in a chosen selection operand are evaluated",
+        .source = "int f1(void) { int u; return _Generic(1, int: ({ u; }), default: 0); }\n"
+                  "int f2(void) { int u; return __builtin_choose_expr(1, ({ u; }), 0); }\n"
+                  "int f3(void) { return _Generic(1, int: ({ char c = 302; c; }), default: 0); }\n"
+                  "int f4(void) { int u; return _Generic(1, int: _Generic(2, long: 0, default: ({ u; })), default: 0); }\n"
+                  "int f5(void) { int u; return __builtin_choose_expr(0, _Generic(1, int: ({ u; })), 0); }\n"
+                  "int f6(int x) { return _Generic(1, int: ({ x == 1; 0; }), default: 0); }\n"
+                  "int f7(void) { int u; return _Generic(1, long: ({ u; }), int: ({ int v = 1; v; })); }\n",
+        .options = { "-Wall" },
+        .warnings = 5,
+        .notes = 4,
     },
     {
         .name = "typeof statement expressions are unevaluated",
