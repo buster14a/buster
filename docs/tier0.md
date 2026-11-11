@@ -663,6 +663,9 @@ at the target's forms, by both of the checker's paths:
   dword (`pshufd`, or of 32 bytes `vextractf128` and `shufps`), makes each element's kept bits its whole value by shifts
   and packs them with saturation (`packssdw`, `packsswb`, `packuswb`), 32 bytes as their two halves. Conversions between
   8- or 16-bit integers and floats or doubles go through dwords by them.
+- A nontemporal load without SSE4.1 is an ordinary one, as clang's code's is, and a nontemporal load or store wider
+  than the target's moves (16 bytes without AVX, a load's 32 without AVX2: `check_vector_nontemporal_width`) moves a
+  piece at a time, through temporaries of its address and its value (#1834).
 - What has no form at the target is refused by name: shuffles of bytes and words without SSSE3, their 32-byte ones
   without AVX-512, minimum and maximum of qwords without SSE4.2, and the scalars' IEEE maxima and minima (`maximum`
   and `minimum`) without AVX, which need more records than a row has. A scalar's fused multiply-add without FMA is the C library's `fmaf` or `fma`, its `ldexp` `ldexpf` or

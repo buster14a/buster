@@ -12384,8 +12384,53 @@ static __attribute__((noinline)) void check_lower_vector_builtin(CheckLowerWrite
         }
         else
         {
-            check_vector_nontemporal_row(types, memory, store, rows);
-            check_lower_instruction(writer, BUSTER_TYPED_X86, store ? BUSTER_TYPED_CLASS_VOID : BUSTER_TYPED_CLASS_VECTOR, check_lower_operation_index(writer, rows));
+            CheckVectorShape shape = check_vector_builtin_shape(types, memory);
+            const uint32_t width = check_vector_nontemporal_width(target, store, bytes);
+            shape.bytes = width;
+            shape.lanes = shape.element != 0 ? width / shape.element : 0;
+            check_vector_nontemporal_row(target, shape, store, rows);
+            const uint32_t index = check_lower_operation_index(writer, rows);
+            if (width == bytes)
+            {
+                check_lower_instruction(writer, BUSTER_TYPED_X86, store ? BUSTER_TYPED_CLASS_VOID : BUSTER_TYPED_CLASS_VECTOR, index);
+            }
+            else
+            {
+                // Wider than the target's nontemporal moves (#1834): the address (and a store's value) set into
+                // temporaries, then a row of each piece of `width` bytes at its offset, a load's into the result's
+                // temporary, read whole after. Pushed last first.
+                const uint32_t address = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
+                const uint32_t value = check_lower_temporary_of(writer, store ? stream->argument_conversions[first].type : memory);
+                if (!store)
+                {
+                    check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_VECTOR, value);
+                }
+                for (uint32_t piece = bytes / width; piece-- > 0 && writer->output->status == CHECK_PROGRAM_OK;)
+                {
+                    if (!store)
+                    {
+                        check_lower_instruction(writer, BUSTER_TYPED_SET, BUSTER_TYPED_CLASS_VECTOR, width);
+                    }
+                    check_lower_instruction(writer, BUSTER_TYPED_X86, store ? BUSTER_TYPED_CLASS_VOID : BUSTER_TYPED_CLASS_VECTOR, index);
+                    check_lower_instruction(writer, BUSTER_TYPED_PTR_ADD, BUSTER_TYPED_CLASS_U64, 1);
+                    check_lower_instruction(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, (uint64_t)piece * width);
+                    check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, address);
+                    if (store)
+                    {
+                        check_lower_instruction(writer, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_VECTOR, width);
+                    }
+                    check_lower_element_address(writer, value, piece * width);
+                }
+                if (store)
+                {
+                    // The value's set after the address's: its temporary read and dropped between them make the entry
+                    // before it one of its class (check_lower_vector_split's).
+                    check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_VECTOR, value);
+                    check_lower_instruction(writer, BUSTER_TYPED_DISCARD, BUSTER_TYPED_CLASS_VECTOR, 0);
+                    check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_VECTOR, value);
+                }
+                check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, address);
+            }
             for (uint32_t a = arguments; a-- > 0;)
             {
                 check_lower_operand(writer, node, a + 3, false, stream->argument_conversions[first + a].type);
