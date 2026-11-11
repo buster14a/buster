@@ -317,6 +317,8 @@ static bool check_input_vla_bound(CheckInputReader* reader, uint32_t open, uint3
         // A job that stopped at a definition has no value yet.
         const bool evaluated = *definition == BUSTER_CHECK_NONE;
         valid = valid && (!evaluated || walked || check_input_const_rvalue(reader, end, &value));
+        // A bound of another type than an integer's (#2170): clang's error naming it, which drops the declaration.
+        const bool non_integer = valid && evaluated && !walked && value.type != 0 && !check_action_is_integer(reader->types, value.type);
         valid = valid && (!evaluated || walked || check_action_is_integer(reader->types, value.type));
         // clang folds a GNU constant in an array bound, but not a saturated floating conversion's value.
         const bool folded = evaluated && !walked && check_input_integer_constant(reader, &value) &&
@@ -349,7 +351,11 @@ static bool check_input_vla_bound(CheckInputReader* reader, uint32_t open, uint3
             const uint32_t token = failed_at;
             const bool missing = parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER && reader->output->declarations[token] == BUSTER_CHECK_NONE;
             // A negative constant is clang's own error (#1447), at the bound's first token, naming the declarator's name.
-            if (negative || missing)
+            if (non_integer)
+            {
+                check_input_report_typed(reader, first, CHECK_INPUT_ARRAY_NON_INTEGER, type_unqualified(value.type), BUSTER_CHECK_NONE, 0);
+            }
+            else if (negative || missing)
             {
                 check_input_report(reader, negative ? first : token, negative ? CHECK_INPUT_ARRAY_NEGATIVE : CHECK_INPUT_UNDECLARED);
             }
