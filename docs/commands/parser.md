@@ -39,7 +39,7 @@ its own static parser so that its kernel measurements use the same code.
 
 `./build/compiler test-parser [--clang [PATH] [--clang-server PATH [--differential]]]
 [--mutations N] [--seed N] [--streams N] [--reports N] [--keep] [--files-only] [options]
-[file or directory...]` (about 7 s on the 9700X without files, with `--clang`)
+[file or directory...]` (about 9 s on the 9700X without files, with `--clang`, on one CPU)
 checks the parser interface and implementation; `--clang` needs
 clang 23 on `PATH`, or the one PATH names. `--clang-server PATH` sends that
 clang's `-fsyntax-only` runs (`parse_test_clang`, a file each through the oracle
@@ -63,9 +63,36 @@ K5, and K6 (flags and classes, also with every second and every third block
 left to the twin); and the twins together with the fallback, whose tree must be
 the scalar parser's. Those checks put every array in an arena followed by 4 GB
 and its own size of address space that may not be touched, so that a load past
-an array, or through a 32-bit index that wrapped below 0, faults. On:
+an array, or through a 32-bit index that wrapped below 0, faults.
 
-- snippets: 404 of valid and invalid code, each with the first error clang gives
+The generated inputs, the files and the mutations take that check unit after
+unit (`parse_test_check_unit`), with state kept from one unit to the next
+(#2078):
+
+- **Intern table:** one, reset to its predefined names before each unit
+  (`intern_reset`), so that each name gets a fresh table's id.
+- **Parsers:** the vector path's and the scalar parser's, full and tree-only,
+  each parsing unit after unit. Before a unit, each one's scratch reads as a
+  fresh parser's, zero (`parse_test_units_clear`): cleared in place up to
+  1 MB, given back to the kernel past that. The vector path reads temporaries a
+  unit didn't write (#2086).
+- **Arenas:** an arena pool (`arena_pool`), as a units lane has, takes the
+  arenas each unit's preprocessor and the parsers' columns release.
+- **Preprocessor:** each unit's own. The alignments and the streams
+  preprocess their text from memory (`pp_run_source`), under the name a file
+  of theirs would have, rather than from a file written for each.
+
+Against fresh state for every unit, a per-unit digest matched on all 36,634
+generated units. It covered the tokens with their intern ids, both trees,
+postorders and columns, the diagnostics, the statistics and the kernel tallies.
+The setup and release this saves were most of the command's time: the 34,624
+alignments took 66–70 s, and now take 15 s, on a 4-CPU Xeon container. On the
+9700X, on one CPU, the command without files took 12.1 s and now takes 5.9 s;
+with `--clang`, 15.2 s and now 9.1 s. [The
+record](https://github.com/buster14a/buster-performance/tree/d9cb41a7a9b888d919a75adfb018803b893bc566/docs/measurements/test-parser-units-2078-2026-11-11)
+has those runs and the hosted runners' (#2078). On:
+
+- snippets: 541 of valid and invalid code, each with the first error clang gives
   (or none), which the parser must give at the same line and column with the
   same message; `--clang` checks each expectation against clang too, which
   must be a parse issue but for the snippets marked as the errors clang's
@@ -85,7 +112,7 @@ an array, or through a 32-bit index that wrapped below 0, faults. On:
   siblings, the value's tree its own), through the fallback;
 - generated inputs, without files: `--streams N` random streams of C's tokens
   (2,000; half with balanced brackets), the snippets after 0 to 63 file-scope
-  `;`, at every block alignment, and nine kinds of nesting 100,000 levels deep
+  `;`, at every block alignment (34,624 units), and nine kinds of nesting 100,000 levels deep
   (commas in nested ternaries among them) and a run of 100,000 attributes, which
   mustn't grow the native stack, nor make a token cost more for what is open
   around it;

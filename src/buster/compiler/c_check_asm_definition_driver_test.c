@@ -8,7 +8,8 @@
 // and a common symbol's alignment, compared as sorted lines (check_test_asm_definition_symbols); and the relocations
 // of its sections other than code, unwind tables and debug information, which the compilers' own code makes. Both
 // objects, linked by clang, and the direct path's executables of both paths print what clang's build prints. Include
-// after the driver test's ELF reader (CheckTestElf).
+// after the driver test's ELF reader (CheckTestElf). Asm labels that name the unit's own objects (#1979) are checked here
+// too: they make one symbol of a name, which the comparison reads the same way.
 
 // Appends `text` to `lines` (`*used` of `capacity`): false when it doesn't fit.
 static bool check_test_asm_definition_append(char* lines, uint64_t capacity, uint64_t* used, const char* text)
@@ -224,6 +225,29 @@ static void check_test_driver_asm_definitions(CheckTest* test, const char* clang
           "\\t.cfi_def_cfa_offset 16\\n\\t.cfi_offset %rbx, -16\\n\\tmovl %edi, %ebx\\n\\tcall inner\\n\\taddl %ebx, %eax\\n\\tpopq %rbx\\n"
           "\\t.cfi_def_cfa_offset 8\\n\\tret\\n.cfi_endproc\\n.size trampoline, .-trampoline\");\n"
           "int main(void) { printf(\"%d\\n\", trampoline(100)); return 0; }\n" },
+        // Asm labels that name the unit's own objects (#1979): a declaration labelled as a later definition, two
+        // labelled declarations and an identifier of one name, variables labelled as a tentative and an initialized
+        // definition, and a label naming a static function; one symbol per name, as clang's module has one global.
+        { "asm labels naming the unit's objects", "main bar tally hidden",
+          "#include <stdio.h>\n"
+          "double foo(double, double) __asm__(\"bar\");\n"
+          "int count(void) __asm__(\"tally\");\n"
+          "int tally(void);\n"
+          "int twin(void) __asm__(\"tally\");\n"
+          "extern int alias_y __asm__(\"shared\");\n"
+          "int shared;\n"
+          "extern int later __asm__(\"value\");\n"
+          "int value = 7;\n"
+          "int* const pointer = &later;\n"
+          "static int hidden(void) { return 5; }\n"
+          "int call_hidden(void) __asm__(\"hidden\");\n"
+          "int main(void) {\n"
+          "    alias_y = 3;\n"
+          "    printf(\"%g %d %d %d %d %d %d %d\\n\", foo(1, 2), count(), twin(), tally(), shared, later, *pointer, call_hidden() + hidden());\n"
+          "    return 0;\n"
+          "}\n"
+          "double bar(double a, double b) { return a + b + 42; }\n"
+          "int tally(void) { static int n; return ++n; }\n" },
     };
     for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(fixtures); f += 1)
     {
@@ -328,6 +352,49 @@ static void check_test_driver_asm_definitions(CheckTest* test, const char* clang
                               description);
             free(text);
         }
+        unlink(path);
+        unlink(output);
+    }
+    // Two functions' definitions of one name through an asm label (#1979) are clang's code generation error, whole output
+    // on both paths, at -c and the direct path, but not at -fsyntax-only; two variables' are refused by name, where clang
+    // keeps the later one's storage alone.
+    static const char* const label_conflicts[] = {
+        "int foo(void) __asm__(\"bar\");\nint foo(void) { return 1; }\nint bar(void) { return 2; }\nint main(void) { return foo(); }\n",
+        "int bar(void) { return 2; }\nint foo(void) __asm__(\"bar\");\nint foo(void) { return 1; }\nint main(void) { return bar(); }\n",
+        "int y __asm__(\"z\") = 1;\nint z = 2;\nint main(void) { return z; }\n",
+    };
+    for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(label_conflicts); f += 1)
+    {
+        char path[512];
+        char output[512];
+        snprintf(path, sizeof(path), "%s/asm-label-conflict-%u.c", directory, f);
+        snprintf(output, sizeof(output), "%s/asm-label-conflict-%u.o", directory, f);
+        const bool written = parse_test_write(path, label_conflicts[f], strlen(label_conflicts[f]));
+        const bool function = f < 2;
+        char* expected = NULL;
+        char* clang_arguments[] = { (char*)clang, "-std=gnu17", "-fno-caret-diagnostics", "-c", path, "-o", output, NULL };
+        const int clang_status = written ? check_test_driver_spawn(clang_arguments, &expected) : 0;
+        char description[2048];
+        snprintf(description, sizeof(description), "asm label conflict %u: clang's -c %s", f, function ? "fails" : "succeeds");
+        check_test_expect(test, written && (clang_status != 0) == function, description);
+        for (uint32_t route = 0; written && route < 6; route += 1)
+        {
+            // Both paths, at -c, the direct path and -fsyntax-only.
+            const uint32_t mode = route >> 1;
+            char* text = NULL;
+            char* arguments[] = { (char*)executable, "-std=gnu17", "-fno-caret-diagnostics", path, mode == 2 ? "-fsyntax-only" : "-o", mode == 2 ? NULL : output,
+                                  mode == 0 ? "-c" : NULL, NULL, NULL };
+            arguments[mode == 2 ? 5 : mode == 0 ? 7 : 6] = (route & 1) != 0 ? "--scalar" : NULL;
+            const int status = check_test_driver_spawn(arguments, &text);
+            const bool reported = mode == 2 ? status == 0 && (text == NULL || text[0] == 0) :
+                                  function  ? status == 1 && text != NULL && expected != NULL && strcmp(text, expected) == 0 :
+                                              status == 1 && text != NULL && strstr(text, "unsupported: a second definition of a variable's symbol name through an asm label") != NULL;
+            snprintf(description, sizeof(description), "asm label conflict %u (%s, %s): %s\nagainst clang's\n%s", f, (route & 1) != 0 ? "scalar" : "vector",
+                     mode == 0 ? "-c" : mode == 1 ? "direct" : "-fsyntax-only", text != NULL ? text : "", expected != NULL ? expected : "");
+            check_test_expect(test, reported, description);
+            free(text);
+        }
+        free(expected);
         unlink(path);
         unlink(output);
     }
