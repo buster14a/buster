@@ -257,6 +257,44 @@ static const char check_driver_enum_cast_macro_forms_source[] =
                   "    return ID(c) ? B1 : A1;\n"
                   "}\n";
 
+// A selection that folds to an enumerator converts that enumerator's enumeration (#1447): an assignment's, a return's,
+// an argument's, an initializer's and a conditional arm's, a nested selection's and one in parentheses; another
+// enumeration's variable, an anonymous enumeration's enumerator and an integer constant give none.
+static const char check_driver_enum_cast_selection_source[] =
+    "enum A { A1, A2 };\n"
+                  "enum B { B1, B2 };\n"
+                  "enum { C1 };\n"
+                  "enum B vb;\n"
+                  "void take(enum A);\n"
+                  "enum A ret(void) { return _Generic(0, int: B2); }\n"
+                  "void f(enum A a, int c)\n"
+                  "{\n"
+                  "    a = _Generic(1, int: A1);\n"
+                  "    a = _Generic(1, int: C1);\n"
+                  "    a = _Generic(1, int: 5);\n"
+                  "    a = _Generic(1, long: A1, default: B2);\n"
+                  "    a = _Generic(1, int: _Generic(2, int: B1));\n"
+                  "    a = _Generic(1, int: vb);\n"
+                  "    a = c ? _Generic(1, int: B1) : A1;\n"
+                  "    take(_Generic(1, int: B1));\n"
+                  "    enum A x = _Generic(1, int: (B1));\n"
+                  "    enum A y[2] = { _Generic(1, int: B1), A2 };\n"
+                  "    a = (_Generic(1, int: B1));\n"
+                  "    a = _Generic(1, int: B1, char: A1);\n"
+                  "}\n";
+
+// A unit that names neither an enumerator nor an enumeration's variable (#1447): its enumerations' values reach the
+// conversions through members, calls' results and casts, which the gate (CheckInput.enum_names) opens for too.
+static const char check_driver_enum_cast_unnamed_source[] =
+    "enum A { A1 };\n"
+                  "enum B { B1 };\n"
+                  "struct S { enum A a; enum B b; };\n"
+                  "enum B gb(void);\n"
+                  "void sa(struct S *p, int i) { p->a = p->b; p->a = gb(); p->a = (enum B)i; }\n"
+                  "struct S mk(struct S *p) { struct S s = { gb() }; return s; }\n"
+                  "void take(enum A);\n"
+                  "void call(struct S *p) { take(p->b); }\n";
+
 static const CheckDriverDefaultWarningFixture check_driver_enum_cast_fixtures[] =
 {
     {
@@ -351,6 +389,22 @@ static const CheckDriverDefaultWarningFixture check_driver_enum_cast_fixtures[] 
         .source = check_driver_enum_cast_macro_forms_source,
         .warnings = 11,
         .notes = 11,
+    },
+    {
+        .name = "selections that fold to enumerators",
+        .source = check_driver_enum_cast_selection_source,
+        .warnings = 10,
+    },
+    {
+        .name = "selections that fold to enumerators in C23",
+        .source = check_driver_enum_cast_selection_source,
+        .warnings = 10,
+        .c23 = true,
+    },
+    {
+        .name = "a unit's enumerations reached only through members, calls and casts",
+        .source = check_driver_enum_cast_unnamed_source,
+        .warnings = 5,
     },
 };
 

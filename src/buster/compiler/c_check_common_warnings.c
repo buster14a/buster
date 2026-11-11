@@ -549,6 +549,24 @@ static bool check_common_comparison_role(uint8_t role)
 // A parenthesized expression's comparison or value climbs its group closers first. A GNU statement expression's last
 // statement is its value, discarded only where the statement expression is: its `;` climbs to the expression's `)`, as
 // clang's DiagnoseUnusedExprResult goes into a StmtExpr's last expression from the statement expression's own context.
+// Whether the `;` at `token` ends a statement expression's last statement, its value (a labeled one's through its labels),
+// as check_common_statement_terminator's climb finds it.
+static bool check_common_statement_value(const Parser* parser, uint32_t token)
+{
+    const uint32_t count = parser->tokens.count;
+    const uint32_t owner = token < count && parser->tree.roles[token] == PARSE_ROLE_TERMINATOR ? parser->tree.parents[token] : count;
+    uint32_t labeled = owner;
+    for (uint32_t steps = 0; labeled < count && parser->tree.roles[labeled] == PARSE_ROLE_LABEL && steps < count; steps += 1)
+    {
+        labeled = parser->tree.parents[labeled];
+    }
+    const uint8_t block_role = labeled < count ? parser->tree.roles[labeled] : PARSE_ROLE_NONE;
+    const uint32_t close = block_role == PARSE_ROLE_OPEN_BLOCK ? parser->tree.parents[labeled] : block_role == PARSE_ROLE_CLOSE_BLOCK ? labeled : count;
+    const bool result = close < count && token + 1 == close && close + 1 < count && parser->tokens.kinds[close + 1] == PARSE_KIND_R_PAREN &&
+                        parser->tree.roles[close + 1] == PARSE_ROLE_CLOSE_GROUP;
+    return result;
+}
+
 static bool check_common_statement_terminator(const Parser* parser, uint32_t token)
 {
     const uint32_t count = parser->tokens.count;
@@ -992,6 +1010,8 @@ struct CheckCommonEnabled
     // Whether the unit names a tagged enumeration's enumerator or variable (CheckInput.enum_names), which an implicit
     // conversion between enumerations needs (check_common_enum_cast).
     bool enum_cast;
+    // The const objects' initializer receipts a divisor's read may give zero from (check_common_zero_divisor), or null.
+    const CheckConstValues* const_values;
 };
 
 // A folded shift's runtime warnings the legacy driver words (#1394): its counts and its negative left operand, clang's
@@ -1883,6 +1903,49 @@ static bool check_common_comma_bound_operands(const CheckCommonEmission* emissio
     return (reach & BUSTER_CHECK_REACH_BOUND) != 0;
 }
 
+// Whether a division's divisor is zero as clang's EvaluateAsInt finds it (DiagnoseBadDivideOrRemainderValues): an integer
+// constant, or, through integer casts, a read of a const non-volatile object whose completed initializer gives it zero
+// (its receipt, CheckInput.const_values: `const int k = 0; 1 / k`, an element's or a member's too, #1447).
+static bool check_common_zero_divisor(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, const CheckConstValues* const_values,
+                                      uint32_t division, uint32_t divisor)
+{
+    uint32_t at = divisor;
+    bool result = false;
+    bool going = true;
+    for (uint32_t steps = 0; going && at < graph->count && steps < graph->count; steps += 1)
+    {
+        if (check_common_integer_constant(stream, at))
+        {
+            result = check_stream_value(stream, at).integer == 0;
+            going = false;
+        }
+        else if (graph->ops[at] == CHECK_OP_CAST || graph->ops[at] == CHECK_OP_CONVERT)
+        {
+            uint32_t width = 0;
+            bool sign = false;
+            going = check_common_integer(types, check_stream_type(stream, at), &width, &sign);
+            at = going ? graph->operand0[at] : at;
+        }
+        else
+        {
+            const CheckValue value = check_stream_value(stream, at);
+            const uint32_t qualifiers = type_qualifiers(value.type);
+            CheckValue loaded = { 0 };
+            uint32_t width = 0;
+            bool sign = false;
+            result = value.category == CHECK_LVALUE && value.constant_kind == CHECK_CONSTANT_ADDRESS && value.fault == CHECK_FAULT_NONE &&
+                     (qualifiers & BUSTER_TYPE_CONST) != 0 && (qualifiers & BUSTER_TYPE_VOLATILE) == 0 &&
+                     (value.flags & (BUSTER_CHECK_VOLATILE_PART | BUSTER_CHECK_INACTIVE_UNION_READ | BUSTER_CHECK_CONST_READ_RESTRICTED)) == 0 &&
+                     check_common_integer(types, value.type, &width, &sign) &&
+                     const_values != NULL && check_const_load(types, const_values, value.object, value.offset, value.object_bit_offset, value.bit_width,
+                                      value.type, graph->source_positions[division], &loaded) &&
+                     loaded.constant_kind == CHECK_CONSTANT_INTEGER && loaded.integer == 0;
+            going = false;
+        }
+    }
+    return result;
+}
+
 // The arithmetic-warning visit one scan frame runs after its subtree: `emit_children`'s other half. A null dereference's
 // too (check_common_null_dereference), which clang's DiagRuntimeBehavior defers to the body's end with them: reachable,
 // evaluated and read, as an lvalue conversion or an assignment's (or a compound one's) destination reads it, not where its
@@ -1910,15 +1973,28 @@ static void check_common_arithmetic_own(CheckCommonEmission* emission, uint32_t 
         const uint32_t divisor = graph->operand1[node];
         const uint32_t contexts = graph->contexts != NULL ? graph->contexts[node] : 0;
         const bool ice = (contexts & (BUSTER_CHECK_CONTEXT_ICE | BUSTER_CHECK_CONTEXT_ASSERT)) != 0;
-        if (!ice && check_common_integer_constant(emission->stream, divisor) && check_stream_value(emission->stream, divisor).integer == 0)
+        if (!ice && check_common_zero_divisor(graph, emission->stream, emission->types, &emission->input->const_values, node, divisor))
         {
             uint32_t width = 0;
             bool sign = false;
             if (check_common_integer(emission->types, check_stream_type(emission->stream, graph->operand0[node]), &width, &sign))
             {
-                check_common_report_deferred(emission->parser, emission->pp, emission->input, graph->tokens[node], CHECK_WARNING_ID_DIVISION_BY_ZERO,
-                                             false, op == CHECK_OP_DIVIDE ? "division by zero is undefined" : "remainder by zero is undefined",
-                                             NULL, 0, emission->scratch);
+                // In a file-scope initializer clang's DiagRuntimeBehavior queues it to the declarator's end, after the
+                // initializer's own errors (`const int d = 1 / 0;`'s "not a compile-time constant", #1447), as a comma's left
+                // operand (check_common_report_comma_left).
+                const Parser* parser = emission->parser;
+                const uint32_t token = graph->tokens[node];
+                const uint32_t boundary = check_common_function_boundary(parser, token);
+                const uint32_t declarator = boundary == token ? check_driver_file_initializer_end(parser, emission->input, token) : BUSTER_CHECK_NONE;
+                const PPDiagnosticRecord* previous = emission->pp->diagnostic_last;
+                check_common_report_evaluated(parser, emission->pp, emission->input, token, declarator != BUSTER_CHECK_NONE ? declarator : boundary,
+                                              declarator != BUSTER_CHECK_NONE ? PP_DIAGNOSTIC_RUNTIME : PP_DIAGNOSTIC_DEFERRED, CHECK_WARNING_ID_DIVISION_BY_ZERO,
+                                              false, op == CHECK_OP_DIVIDE ? "division by zero is undefined" : "remainder by zero is undefined", NULL, 0,
+                                              emission->scratch);
+                if (declarator != BUSTER_CHECK_NONE && node < emission->input->graph.count && emission->input->graph.source_positions != NULL)
+                {
+                    pp_diagnostic_suborder(emission->pp, previous, (uint64_t)emission->input->graph.source_positions[node] + 1);
+                }
             }
         }
     }
@@ -2070,11 +2146,13 @@ static __attribute__((noinline)) bool check_common_enum_cast_source(const Parser
                                                                     const TypeTable* types, uint32_t source)
 {
     const uint8_t source_kind = type_kind(types, check_stream_type(stream, source));
-    // (A selection's arm may carry the conversion as a conditional's arms do: `_Generic(c, int: c ? g : g)`.)
+    // (A selection's arm may carry the conversion as a conditional's arms do: `_Generic(c, int: c ? g : g)`, or be an
+    // enumerator, whose constant the selection folds to: `_Generic(1, int: B1)`, #1447.)
+    const uint32_t chosen = graph->ops[source] == CHECK_OP_SELECT ? check_common_enum_cast_unselected(graph, source) : source;
     return source_kind == BUSTER_TYPE_KIND_ENUM || source_kind == BUSTER_TYPE_KIND_ALIGNED || check_common_conversion_arms(graph, source) ||
-           (graph->ops[source] == CHECK_OP_SELECT && check_common_conversion_arms(graph, check_common_enum_cast_unselected(graph, source))) ||
-           (graph->ops[source] == CHECK_OP_VALUE && (check_stream_flags(stream, source) & BUSTER_CHECK_ICE) != 0 &&
-            graph->tokens[source] < parser->tokens.count && parser->tokens.kinds[graph->tokens[source]] == PARSE_KIND_IDENTIFIER);
+           (chosen != source && chosen < graph->count && check_common_conversion_arms(graph, chosen)) ||
+           (chosen < graph->count && graph->ops[chosen] == CHECK_OP_VALUE && (check_stream_flags(stream, chosen) & BUSTER_CHECK_ICE) != 0 &&
+            graph->tokens[chosen] < parser->tokens.count && parser->tokens.kinds[graph->tokens[chosen]] == PARSE_KIND_IDENTIFIER);
 }
 
 // Whether `source`'s implicit conversion to `target` may change its enumeration (#1447, -Wimplicit-enum-enum-cast): the
@@ -3122,8 +3200,10 @@ static void check_common_stmt_marker(CheckCommonEmission* emission, uint32_t nod
     const CheckOp op = graph->ops[node];
     if (discarded && op >= CHECK_OP_LESS && op <= CHECK_OP_NOT_EQUAL)
     {
-        // An indirect comparison takes the generic marker; a direct one already reported as a comparison.
-        if (parent_role != PARSE_ROLE_TERMINATOR)
+        // An indirect comparison takes the generic marker; a direct one already reported as a comparison, but a discarded
+        // statement expression's value, whose warning is clang's DiagnoseUnusedExprResult's of the statement expression
+        // (#1447).
+        if (parent_role != PARSE_ROLE_TERMINATOR || check_common_statement_value(parser, parent))
         {
             check_common_report_unused(parser, emission->pp, emission->input, token, CHECK_WARNING_ID_UNUSED_VALUE,
                                        "expression result unused", NULL, 0, emission->scratch);
@@ -3861,8 +3941,12 @@ static void check_common_parentheses(const Parser* parser, Preprocessor* pp, con
                                             "relational comparison result unused";
             const CheckCommonNote note = { token, parser->tokens.kinds[token] == PARSE_KIND_EQUALEQUAL ? "use '=' to turn this equality comparison into an assignment" :
                                                      parser->tokens.kinds[token] == PARSE_KIND_EXCLAIMEQUAL ? "use '|=' to turn this inequality comparison into an or-assignment" : "" };
-            check_common_report_discarded(parser, pp, input, token, CHECK_WARNING_ID_UNUSED_COMPARISON, message,
-                                          note.message[0] != 0 ? &note : NULL, note.message[0] != 0 ? 1u : 0u, scratch);
+            // (A statement expression's value is the walk's, as the statement expression's discarded value, #1447.)
+            if (!check_common_statement_value(parser, parent))
+            {
+                check_common_report_discarded(parser, pp, input, token, CHECK_WARNING_ID_UNUSED_COMPARISON, message,
+                                              note.message[0] != 0 ? &note : NULL, note.message[0] != 0 ? 1u : 0u, scratch);
+            }
         }
     }
 }
@@ -5365,6 +5449,8 @@ static uint8_t check_common_own_reach(const Parser* parser, const CheckGraph* gr
     // A null dereference shares the arithmetic scan with division and shifts.
     const bool division = ((op == CHECK_OP_DIVIDE || op == CHECK_OP_REMAINDER) && check_common_integer_constant(stream, divisor) &&
                            check_common_stream_integer(stream, divisor, &divisor_type) == 0) ||
+                          ((op == CHECK_OP_DIVIDE || op == CHECK_OP_REMAINDER) && !check_common_integer_constant(stream, divisor) &&
+                           check_common_zero_divisor(graph, stream, types, enabled->const_values, node, divisor)) ||
                           (op == CHECK_OP_DEREFERENCE && check_common_null_dereference(graph, stream, types, node));
     const bool shift = check_common_shift_op(op) && check_common_integer_constant(stream, divisor);
     const bool comparison = enabled->sign_compare && op >= CHECK_OP_LESS && op <= CHECK_OP_NOT_EQUAL;
@@ -7920,7 +8006,9 @@ static void check_common_mark_written(const CheckGraph* graph, const CheckStream
 // return, an initializer or a control condition).
 // The control entries a body's first reaches, by the walk check_program_return_flow's second pass makes for
 // -Wreturn-type: a constant branch reaches only its taken edge, a case the arm its value selects, and an
-// indirect jump or asm goto every label it may enter. `seen` and `queue` hold body->count elements each.
+// indirect jump or asm goto every label it may enter. `seen` and `queue` hold body->count elements each. A body's
+// statement expressions' entries, after its own (from entry_count), start at each one's first, taken as reached: whether
+// one is evaluated is its expression's (check_common_statement_roots), and what its exits reach is reached (#1447).
 static void check_common_body_reached(const CheckProgram* program, const CheckProgramBody* body, uint8_t* seen, uint32_t* queue)
 {
     const CheckControl* entries = program->controls + body->first;
@@ -7929,6 +8017,16 @@ static void check_common_body_reached(const CheckProgram* program, const CheckPr
     uint32_t tail = 1;
     queue[0] = 0;
     seen[0] = 1;
+    const uint32_t index = (uint32_t)(body - program->bodies);
+    for (uint32_t r = 0; body->entry_count < body->count && program->regions != NULL && r < program->input->region_count; r += 1)
+    {
+        const uint32_t first = program->regions[r].first;
+        if (program->regions[r].body == index && first < body->count && seen[first] == 0)
+        {
+            seen[first] = 1;
+            queue[tail++] = first;
+        }
+    }
     bool labels = false;
     while (head < tail)
     {
@@ -8013,7 +8111,7 @@ static bool check_common_unreachable(const CheckProgram* program, const CheckGra
     for (uint32_t b = 0; valid && b < program->body_count; b += 1)
     {
         const CheckProgramBody* body = program->bodies + b;
-        if (body->count == 0 || body->count != body->entry_count)
+        if (body->count == 0 || body->entry_count == 0)
         {
             continue;
         }
@@ -8398,6 +8496,33 @@ static uint32_t check_common_operand_mask(const CheckGraph* graph, const CheckSt
     return mask;
 }
 
+// The statements of the statement expression `node` (a STATEMENT_VALUE, at its `)`) that the source doesn't evaluate: their
+// roots, which no parent reads, taken as unevaluated as it is (#1447: clang's CFG leaves a short-circuited operand's, a
+// constant conditional's other arm's and unreachable code's statement expression's blocks unreachable). One in a sizeof's
+// or an alignof's operand is unevaluated, not unreachable, and its statements keep their warnings. Its statements' nodes
+// precede it, from its `(` on; the scan back stops at the first node before that.
+static void check_common_statement_roots(const CheckGraph* graph, const Parser* parser, const uint32_t* parents, uint32_t node, uint8_t* evaluated)
+{
+    bool queried = false;
+    for (uint32_t at = parents[node], steps = 0; !queried && at < graph->count && steps < graph->count; at = parents[at], steps += 1)
+    {
+        queried = graph->ops[at] == CHECK_OP_SIZEOF || graph->ops[at] == CHECK_OP_ALIGNOF;
+    }
+    const uint32_t close = queried ? BUSTER_CHECK_NONE : graph->tokens[node];
+    uint32_t open = BUSTER_CHECK_NONE;
+    for (uint32_t at = close; close < parser->tokens.count && open == BUSTER_CHECK_NONE && at-- > 0;)
+    {
+        open = parser->tree.roles[at] == PARSE_ROLE_OPEN_GROUP && parser->tree.parents[at] == close ? at : open;
+    }
+    bool inside = open < close;
+    for (uint32_t at = node; inside && at-- > 0;)
+    {
+        const uint32_t token = graph->tokens[at];
+        inside = token > open;
+        evaluated[at] = inside && token < close && parents[at] == BUSTER_CHECK_NONE ? 0 : evaluated[at];
+    }
+}
+
 static uint8_t* check_common_evaluated(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, const Parser* parser,
                                        const CheckProgram* program, const uint32_t* parents, Arena* scratch)
 {
@@ -8426,11 +8551,15 @@ static uint8_t* check_common_evaluated(const CheckGraph* graph, const CheckStrea
         }
         for (uint32_t node = graph->count; node-- > 0;)
         {
+            const CheckOp op = graph->ops[node];
+            if (evaluated[node] == 0 && op == CHECK_OP_STATEMENT_VALUE)
+            {
+                check_common_statement_roots(graph, parser, parents, node, evaluated);
+            }
             if (evaluated[node] == 0)
             {
                 continue;
             }
-            const CheckOp op = graph->ops[node];
             const uint32_t mask = check_common_operand_mask(graph, stream, types, program, node);
             const uint32_t operands[] = { graph->operand0[node], graph->operand1[node], graph->operand2[node] };
             for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(operands); i += 1)
@@ -10433,6 +10562,7 @@ static void check_driver_common_warnings(const Parser* parser, Preprocessor* pp,
         .uninitialized = check_common_enabled(pp, input, CHECK_WARNING_ID_UNINITIALIZED, true) ||
                          check_common_enabled(pp, input, CHECK_WARNING_ID_UNUSED_BUT_SET_PARAMETER, true),
         .enum_cast = input->enum_names,
+        .const_values = &input->const_values,
     };
     check_common_enum_arithmetic(parser, pp, input, stream, types, &spell, scratch);
     check_common_empty_bodies(parser, pp, input, scratch);

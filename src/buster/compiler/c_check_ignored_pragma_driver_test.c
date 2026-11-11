@@ -806,7 +806,8 @@ static void check_test_driver_ignored_pragmas(CheckTest* test, const char* clang
         // the checker reads the source; `barrier` is the spelling that barrier must name.
         const char* barrier;
     } refused[] = {
-        { "#pragma weak alias = target\nint target;\n", "weak", NULL, NULL, NULL },
+        // A target the unit doesn't define (#1849: clang's "alias must point to a defined variable or function").
+        { "#pragma weak alias = target\nextern int target;\n", "weak", NULL, NULL, NULL },
         // mac68k is clang's error on this target (#1849), which the checker refuses by name.
         { "#pragma align=mac68k\nstruct S{char c;int n;};\n", "align", NULL, NULL, NULL },
         { "#pragma options align=mac68k\nstruct S{char c;int n;};\n", "options", NULL, NULL, NULL },
