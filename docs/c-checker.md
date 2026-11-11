@@ -7767,10 +7767,21 @@ arguments against the function. The checker now gives these as clang does.
   `int v = 1; extern int v __attribute__((aligned(16)));` keeps `v` at 4,
   where the checker used to give it 16.
 
+  A redefinition of a compatible type is checked too, before its
+  "redefinition of 'f'" error (#1920): clang merges its attributes when it
+  declares it and reports the redefinition at its body or initializer. So is
+  a redeclaration of a multiversioned function's version
+  (`check_input_cpu_dispatch_redeclare`). A declaration that multiversioning
+  refuses isn't merged, so it gets no warning.
+
   Some attributes are left alone, as clang leaves them: type attributes, the
-  machine mode, the alias family, multiversioning's, `overloadable`, the
-  keywords, statements' and locals' attributes, and C23's `deprecated`,
-  `maybe_unused` and `nodiscard`. A tentative definition is no definition
+  machine mode, the alias family, `overloadable`, the keywords, statements'
+  and locals' attributes, and C23's `deprecated`, `maybe_unused` and
+  `nodiscard`. Multiversioning's (`target`, `target_clones`, `cpu_specific`,
+  `cpu_dispatch`) are checked where the declaration merges with the
+  definition's, as `int f(void) {...} __attribute__((target("default"))) int
+  f(void);` does. A target of another string than the definition's makes a
+  new version instead, an entity of its own. A tentative definition is no definition
   here. The check runs on the serial path: a body that a lane checks gets
   none.
 - **Deprecated and unavailable uses** (`check_input_deprecated_uses`). A use
