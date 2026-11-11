@@ -2454,6 +2454,49 @@ static char pp_ucn_letter(const Preprocessor* pp, const PPFileData* data, uint32
     return (char)peek_char(&lexer, offset + size, &letter_size);
 }
 
+// The error of a `\u` or `\U` that starts a token (BUSTER_PP_UCN_ERROR, #1447), whose backslash is byte `offset` of `data`,
+// at `location`: its value from its digits (braced or not), as clang's tryReadUCN words it there, a surrogate's
+// "invalid universal character", a control character's (below U+0020, or U+007F to U+009F) that it refers to one, and
+// any other's below U+00A0 that it "cannot be specified by a universal character name". Cold: such a UCN's alone.
+static __attribute__((noinline, cold)) void pp_diagnose_ucn(Preprocessor* pp, const PPFileData* data, uint32_t offset, uint32_t location)
+{
+    const ScalarLexer lexer = pp_file_lexer(pp->refine_flags, data);
+    uint64_t size = 0;
+    uint64_t at = 0;
+    get_char(&lexer, offset, &size, &at);
+    uint64_t p = offset + size;
+    uint64_t step = 0;
+    const int32_t letter = peek_char(&lexer, p, &step);
+    p += step;
+    const bool braced = peek_char(&lexer, p, &step) == '{';
+    p += braced ? step : 0;
+    uint32_t value = 0;
+    uint32_t digits = 0;
+    bool reading = true;
+    while (reading && digits < (braced ? 8u : letter == 'u' ? 4u : 8u))
+    {
+        const int32_t c = peek_char(&lexer, p, &step);
+        const bool decimal = c >= '0' && c <= '9';
+        const bool hex = decimal || ((c | 0x20) >= 'a' && (c | 0x20) <= 'f');
+        value = hex ? value << 4 | (uint32_t)(decimal ? c - '0' : (c | 0x20) - 'a' + 10) : value;
+        digits += hex ? 1 : 0;
+        p += hex ? step : 0;
+        reading = hex;
+    }
+    if (value >= 0xD800 && value <= 0xDFFF)
+    {
+        pp_diagnose(pp, PP_SEVERITY_ERROR, location, "invalid universal character");
+    }
+    else if (value < 0x20 || (value >= 0x7F && value < 0xA0))
+    {
+        pp_diagnose(pp, PP_SEVERITY_ERROR, location, "universal character name refers to a control character");
+    }
+    else
+    {
+        pp_diagnose(pp, PP_SEVERITY_ERROR, location, "character '%c' cannot be specified by a universal character name", (char)value);
+    }
+}
+
 // The diagnostics of a named UCN that starts a token (BUSTER_PP_NAMED_UCN_ERROR), whose backslash is byte `offset` of
 // `data`, at `base`: as clang's tryReadNamedUCN, a name that isn't exactly Unicode's is an error at the name, with a note
 // where it is one loosely, whose character clang reads it as; then as tryReadUCN, that character (or the exact name's)
@@ -2533,7 +2576,7 @@ static __attribute__((noinline, cold)) void pp_read_raw_errors_slow(Preprocessor
             }
             // A UCN's -Wunicode warning is at its token's start, the first of any line splices before its backslash, where clang's
             // lexer starts the token (#1447).
-            const bool spliced = error.kind >= BUSTER_PP_NAMED_UCN_INCOMPLETE && error.kind <= BUSTER_PP_UCN_NO_DIGITS;
+            const bool spliced = error.kind >= BUSTER_PP_NAMED_UCN_INCOMPLETE && error.kind <= BUSTER_PP_UCN_ERROR;
             const uint32_t offset = spliced ? pp_start_with_splices(data->bytes, error.offset, (pp->refine_flags & C_TOKENIZER_TRIGRAPHS) != 0) : error.offset;
             const uint32_t location = pp->ranges[context->range].base + offset;
             switch (error.kind)
@@ -2590,6 +2633,9 @@ static __attribute__((noinline, cold)) void pp_read_raw_errors_slow(Preprocessor
                     pp_diagnose_group(pp, PP_WARNING_UNICODE, location, "%s", message);
                     break;
                 }
+                case BUSTER_PP_UCN_ERROR:
+                    pp_diagnose_ucn(pp, data, error.offset, location);
+                    break;
                 case C_RAW_STRING_OK:
                     break;
             }
