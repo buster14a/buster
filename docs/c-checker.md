@@ -4570,6 +4570,26 @@ the same expression and uses, with no error and no `-Wall`/`-Wextra` warning
 of the cast's own, so its statement's warnings are given too
 (`x = p; return x / 0;`, `int x = p + (1 / 0);`).
 
+A left-out expression statement keeps its complete operands (#2120,
+`check_driver_rejected_operands`, `CHECK_DRIVER_CAST_OPERAND`). Clang builds
+an expression's operands before it finds the expression's error, and gives
+their warnings, on either side of the error: `x = s.b + printf("%s", x);`
+gives its `-Wformat`, `k(1, (2, 3), 4)` (too many arguments) its comma's
+`-Wunused-value`, `x = (x = x) + s.b;` its `-Wself-assign`. The view's `{ }`
+in the statement's place holds each subtree off the path from a known error's
+token to the statement's root, through evaluated operators, calls (their
+argument lists' separators), subscripts, groups, casts, member accesses,
+conditionals and returns, as its own `(void)(A);`, where it holds no known
+error. A `(void)` cast gives no warning of its own, and the body has an error,
+so its reading runs no flow analysis (`x = u + s.b;` gives no
+`-Wuninitialized`), as clang's doesn't. Nothing under `sizeof` is kept. Where
+the reading with the operands isn't valid, the round reads the view again
+without them. Differences left: an argument past a call's parameters whose
+first token is the error's place (`k(1, 2, printf("%d", "s"))`) has its own
+operands kept, not itself, so its `-Wformat` isn't given; a statement
+expression's earlier statements and an initializer's operands
+(`int y = (x = x, s.b);`) aren't kept yet.
+
 A condition's assignment (`while (q = p)`) is still left out: clang's
 `-Wparentheses` of it follows the conversion's error, which completes after
 the source, where the common warnings publish it at the `=`. So does a
@@ -5251,7 +5271,8 @@ The later phases are left:
   unsupported declaration") leaves its declarator out, but the first reading
   never saw the body's later errors, so a second reading that meets one isn't
   valid. The warnings clang gives of what a left-out part builds before its
-  error aren't given, but for a folded shift's, which comes at the unit's end.
+  error aren't given, but for a folded shift's, which comes at the unit's end,
+  and a left-out expression statement's complete operands' (#2120, above).
   A file-scope const object's initializer with an error is left out alone,
   so the declaration stays bound with an unknown value (`const int c;`), as
   clang's stays valid, and the bodies that use it keep their warnings
