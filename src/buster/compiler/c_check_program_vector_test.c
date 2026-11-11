@@ -1217,6 +1217,19 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
           "ALL(int);ALL(unsigned);ALL(long long);ALL(float);ALL(double);M(signed char,4);M(signed char,16);M(short,8);M(unsigned short,4);\n"
           "munmap(page,8192);return (int)h;}\n"
         },
+        // The bit builtins without AVX-512 (#1834), element by element: popcount, bitreverse, clzg and ctzg (with a zero's
+        // operand, and without one of nonzero elements alone, which clang leaves undefined for zero), fshl and fshr, of
+        // signed and unsigned 8- to 64-bit elements of 4 to 64 bytes, zeros and single bits among them.
+        { "baseline-bit-builtins",
+          "#define T(E,W) do{typedef E V __attribute__((vector_size(W)));V a,b,c;fill(&a,W,n*11+W);fill(&b,W,n*13+W+1);fill(&c,W,n*17+W+2);for(unsigned k_=0;"
+          "k_<W/sizeof(E);k_+=3)a[k_]=0;for(unsigned k_=1;k_<W/sizeof(E);k_+=5)a[k_]=(E)1<<(k_%(8*sizeof(E)));"
+          "V r_[]={__builtin_elementwise_popcount(a),__builtin_elementwise_bitreverse(a),__builtin_elementwise_clzg(a,b),__builtin_elementwise_ctzg(a,b),__builtin_elementwise_fshl(a,b,c),__builtin_elementwise_fshr(a,b,c)};FOLD(r_);V s_={0};for(unsigned k_=0;k_<W/sizeof(E);k_++)if(a[k_]){V t_=__builtin_elementwise_clzg(a);V u_=__builtin_elementwise_ctzg(a);s_[k_]=t_[k_]+u_[k_];}FOLD(s_);}while(0)\n"
+          "#define ALL(E) T(E,4);T(E,8);T(E,16);T(E,32);T(E,64)\n"
+          "int tested(int n){unsigned h=2166136261u;\n"
+          "ALL(signed char);ALL(unsigned char);ALL(short);ALL(unsigned short);T(int,8);T(int,16);T(int,32);T(int,64);T(unsigned,16);T(unsigned,64);\n"
+          "T(long long,16);T(long long,32);T(long long,64);T(unsigned long long,16);T(unsigned long long,64);\n"
+          "return (int)h;}\n"
+        },
         // Scalars' elementwise builtins without AVX-512F (#1834): the C library's ceilf ... roundf, fmaf and fma without
         // SSE4.1 and FMA, and ldexpf and ldexp; SSE4.1's ROUNDSS and ROUNDSD (round's of the value plus the largest value
         // below 0.5 of its sign) and FMA's VFMADD213SS and SD where the target has them; halves, values near them and past
