@@ -473,8 +473,8 @@ a process checks once (`oracle_serve_ready`). `OracleServer` is the client,
 which `test-checker-driver --clang-server` shares: a server a process starts as
 it first needs it, on a socket pair (`MSG_NOSIGNAL`: a server that ended fails
 a request rather than raising `SIGPIPE`), which only that process uses: a
-forked part leaves its copy alone and starts its own, as the preprocessor's
-cases' children do. A request it can't answer (a crash in clang ends it) stops
+forked part closes its copy of the socket, which leaves its parent's server as
+it was, and starts its own, as the preprocessor's cases' children do. A request it can't answer (a crash in clang ends it) stops
 it, and the next request starts another, at most four times in a process.
 
 A served run keeps the cache's contract by not entering it: the server's

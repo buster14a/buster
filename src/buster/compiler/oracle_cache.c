@@ -3928,9 +3928,9 @@ static OracleTake oracle_run_take(OracleRun* run)
 // protocol). A run then costs about 1.2 ms rather than a process's start: about 10 ms of a 12 ms `clang -E`, more under
 // the cache's tracing. OracleServer is its client, which test-checker-driver's --clang-server shares: a server a process
 // starts as it first needs it (oracle_server_start), on a socket (send's MSG_NOSIGNAL: a server that ended fails a
-// request rather than raising SIGPIPE), that only that process uses: a forked child leaves its copy alone and starts its
-// own. A request the server can't answer (a crash in clang ends it) stops it, and the next request starts another, at
-// most BUSTER_ORACLE_SERVER_STARTS times in a process.
+// request rather than raising SIGPIPE), that only that process uses: a forked child closes its copy of the socket,
+// which leaves its parent's server as it was, and starts its own. A request the server can't answer (a crash in clang
+// ends it) stops it, and the next request starts another, at most BUSTER_ORACLE_SERVER_STARTS times in a process.
 //
 // A test given --clang-server sends the oracle runs of its clang (oracle_serve, by argument 0's name) to the server
 // where they fit: no files the run writes, no time limit (the server can't stop a run), and the server's clang
@@ -4029,7 +4029,7 @@ static void oracle_server_stop(OracleServer* server)
 // Starts the process's server if it isn't running, at most BUSTER_ORACLE_SERVER_STARTS times: the server's process with
 // one end of a socket pair as its standard input and output and no other descriptor of this process's but its standard
 // error, then its first answer, the release of its clang libraries (a request of no arguments). A forked child's copy
-// of its parent's server isn't its own: it leaves it (oracle_server_stop) and starts one. Whether the server runs.
+// of its parent's server isn't its own: it closes that (oracle_server_stop) and starts one. Whether the server runs.
 static bool oracle_server_start(OracleServer* server)
 {
     if (server->socket >= 0 && server->owner != getpid())
