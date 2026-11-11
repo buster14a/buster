@@ -649,15 +649,14 @@ static void check_test_target_versions_models(CheckTest* test, const char* clang
         "void* resolve_d(void) __asm__(\"d.resolver\");\n"
         "int d0(void) __asm__(\"d.avx2.0\");\nint d1(void) __asm__(\"d.sse4.2.1\");\nint d3(void) __asm__(\"d.default.3\");\n"
         "int (*address_d)(void) = d;\n"
-        // arch= of a processor of no priority (knm, sorted first), and target_clones' of one __builtin_cpu_is doesn't name
-        // (skx, a test of the vendor against 0).
+        // arch= of a CPU type (atom), and target_clones' of a name __builtin_cpu_is doesn't know (skx, corei7-avx: tests of
+        // the vendor against 0).
         "__attribute__((target(\"default\"))) int h(void) { return 0; }\n"
-        "__attribute__((target(\"arch=knm\"))) int h(void) { return 1; }\n"
         "__attribute__((target(\"arch=atom\"))) int h(void) { return 2; }\n"
         "__attribute__((target(\"avx2\"))) int h(void) { return 3; }\n"
-        "__attribute__((target_clones(\"arch=skx\", \"arch=knm\", \"sse4.2\", \"default\"))) int e(void);\n"
+        "__attribute__((target_clones(\"arch=skx\", \"arch=corei7-avx\", \"sse4.2\", \"default\"))) int e(void);\n"
         "void* resolve_e(void) __asm__(\"e.resolver\");\n"
-        "int e0(void) __asm__(\"e.arch_skx.0\");\nint e1(void) __asm__(\"e.arch_knm.1\");\nint e2(void) __asm__(\"e.sse4.2.2\");\n"
+        "int e0(void) __asm__(\"e.arch_skx.0\");\nint e1(void) __asm__(\"e.arch_corei7-avx.1\");\nint e2(void) __asm__(\"e.sse4.2.2\");\n"
         "int e3(void) __asm__(\"e.default.3\");\n"
         "int (*address_e)(void) = e;\n"
         "int main(void)\n{\n    armed = 1;\n    void* chosen = resolve();\n    void* versions[] = { (void*)c0, (void*)c1, (void*)c2, (void*)c3, (void*)c4, (void*)c5, (void*)c6, (void*)c7 };\n"
@@ -669,7 +668,7 @@ static void check_test_target_versions_models(CheckTest* test, const char* clang
     static const char clones[] =
         "__attribute__((target_clones(\"avx2,bmi\", \"bmi2\", \"arch=x86-64-v4\", \"arch=znver5\", \"avx10.1\", \"sse4.1\", \"default\"))) int c(void) { return 1; }\n"
         "__attribute__((target_clones(\"default\", \"avx2\", \"sse4.2\", \"avx2\"))) int d(void) { return 2; }\n"
-        "__attribute__((target_clones(\"arch=skx\", \"arch=knm\", \"sse4.2\", \"default\"))) int e(void) { return 3; }\n";
+        "__attribute__((target_clones(\"arch=skx\", \"arch=corei7-avx\", \"sse4.2\", \"default\"))) int e(void) { return 3; }\n";
     char path[PATH_MAX];
     char clones_path[PATH_MAX];
     char clones_object[PATH_MAX];
@@ -703,9 +702,9 @@ static void check_test_target_versions_models(CheckTest* test, const char* clang
         { 2, 3, 30, 0, 0, 0, 0 },
         { 0, 0, 0, 0x80u, 0, 0, 0 },
         { 0, 0, 0, 0x20000u, 0, 0, 0 },
-        // knm, Intel's type 11, with and without avx2 and sse4.2.
-        { 1, 11, 0, 0, 0, 0, 0 },
-        { 1, 11, 0, 0x500u, 0, 0, 0 },
+        // atom, Intel's type 1, with and without avx2 and sse4.2; Intel's vendor with them.
+        { 1, 1, 0, 0, 0, 0, 0 },
+        { 1, 1, 0, 0x500u, 0, 0, 0 },
         { 1, 0, 0, 0x500u, 0, 0, 0 },
     };
     for (uint32_t m = 0; written && m < BUSTER_ARRAY_LENGTH(models); m += 1)

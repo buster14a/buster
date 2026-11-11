@@ -3302,10 +3302,12 @@ What the lowering covers past scalars (#145's programs):
   - *`arch=` beyond `__builtin_cpu_is`'s names.* An `arch=` processor that
     `__builtin_cpu_is` doesn't name (`corei7-avx`, `skx`: aliases of
     `-march`'s) is clang's `EmitX86CpuIs` default, a test of the model's
-    vendor against 0. A processor whose key feature has no priority (`knm`,
-    the one Sema takes) has none in clang's `getFMVPriority` either, where
-    `getFeaturePriority` is unreachable. clang 23's build sorts it above every
-    other version, and so does the checker. The models' test covers both.
+    vendor against 0; the models' test covers it. A processor whose key
+    feature has no priority (`knm`, the one Sema takes) has none in clang's
+    `getFMVPriority` either, where `getFeaturePriority` is unreachable:
+    undefined behavior, whose order differs between clang's builds (23.1.4
+    sorts it below `sse4.2`, 23.1.6 above every version). It is refused by
+    name.
 - **`cpu_specific` and `cpu_dispatch` (#1447).** clang's CPU multiversioning,
   checked as clang 23's Sema checks it (`c_check_cpu_dispatch.c`, after the
   #839 checks) and emitted as its code generation emits it
