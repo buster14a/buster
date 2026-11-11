@@ -112,7 +112,14 @@ executable's `.bss` `MADV_NOHUGEPAGE` first (`arena_static_base_pages`). It is
 empty file's or sqlite3.c's, writes 11 pages in three 2 MB stretches; with
 transparent huge pages `always`, as on the 9700X, two of them took a huge page
 each, 4 MB cleared for 44 KB of statics. Tests and benchmarks keep their
-`.bss` as the kernel gives it.
+`.bss` as the kernel gives it. The advice comes before the process reads or
+writes any of `.bss` (`main_driver`, for a command that starts with an option,
+as a compile's do), because it doesn't undo a touch before it: a
+read maps the huge zero page over its 2 MB, and a write there, even after the
+advice, then takes a huge page of its own. Until #1444, `arena_page_policy`'s
+statics were written first, and that page took one of an empty file's two huge
+pages. The `check` and `parse` commands, and a source command whose first
+argument is a file, still advise after `arena_page_policy` and take that page.
 
 ## Finite address spaces
 

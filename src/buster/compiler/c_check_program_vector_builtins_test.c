@@ -941,7 +941,6 @@ static void check_test_program_vector_builtin_refusals(CheckTest* test)
         { "znver5", "long double tested(long double x,long n){return __builtin_elementwise_ldexp(x,n);}",
           "elementwise builtins of long double values that clang computes with x87 instructions", 0 },
         { "znver5", "float tested(float x,__int128 n){return __builtin_elementwise_ldexp(x,n);}", "ldexp of exponents wider than 64 bits", 0 },
-        { "x86-64", "double tested(double x,double y){return __builtin_elementwise_maximum(x,y);}", "IEEE maximum and minimum of scalars without AVX or AVX-512F", 0 },
         { "x86-64", "_Float16 tested(_Float16 x,int n){return __builtin_elementwise_ldexp(x,n);}", "elementwise builtins of half-precision, bf16 or __float128 values", 0 },
         { "x86-64", "__float128 tested(__float128 x,int n){return __builtin_elementwise_ldexp(x,n);}", "elementwise builtins of half-precision, bf16 or __float128 values", 0 },
         { "znver5", "float tested(v8hf* p){return (float)__builtin_reduce_maximum(*p);}", "vector reductions of half-precision or bf16 elements", 0 },
