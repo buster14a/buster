@@ -130,6 +130,9 @@ struct Tier1MasksTest
     // the IR's.
     uint32_t mask_vector_attempts;
     uint32_t mask_vector_rows;
+    // The lane operations (#1840, tier1_masks_test_lane_ops): those tried, and those through every stage as the IR's.
+    uint32_t lane_op_attempts;
+    uint32_t lane_op_rows;
     // The machine rows' mutants (#1284, tier1_masks_test_row_mutants): borrowed opmask registers' reloads left out, staging
     // copies renamed into a live value's register; and of each, those the code's certificate refused.
     uint32_t row_reloads;
@@ -5474,6 +5477,123 @@ static void tier1_masks_test_mask_vectors(Tier1MasksTest* test)
     free(program);
 }
 
+// The front end's elementwise minima, maxima and saturations through the IR to Tier 1 (#1840): every form the producer
+// has (check_vector_elementwise_forms, the row's one record of VECTOR(0) and VECTOR(1) into VECTOR(0)), of each element
+// size, signedness and width, as the program's only row in 4 statements of the input buffer's vectors k and k + 1
+// (modulo 4), stored into the output's vector k; tier1_masks_test_typed_pipeline takes each through the IR as its
+// lane_op, which the interpreter runs at every stage, and Tier 1 natively, against C's minimum, maximum and clamped sum
+// and difference of each lane.
+static void tier1_masks_test_lane_ops(Tier1MasksTest* test)
+{
+    static const CBuiltinId builtins[4] = { CBUILTIN_ELEMENTWISE_MIN, CBUILTIN_ELEMENTWISE_MAX, CBUILTIN_ELEMENTWISE_ADD_SAT, CBUILTIN_ELEMENTWISE_SUB_SAT };
+    Tier0TestMaskProgram* program = malloc(sizeof(*program));
+    uint64_t* inputs = calloc(BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS, BUSTER_TIER1_MASKS_TEST_IN);
+    uint8_t* expected = malloc(BUSTER_TIER1_MASKS_TEST_OUT * BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS);
+    Arena arenas[3] = { arena_reserve(64u << 20), arena_reserve(64u << 20), arena_reserve(64u << 20) };
+    bool ready = tier1_masks_test_expect(test, program != 0 && inputs != 0 && expected != 0 && arenas[0].base != 0 && arenas[1].base != 0 && arenas[2].base != 0,
+                                         "the lane operations' memory");
+    uint64_t state = test->random ^ UINT64_C(0x9b05688c2b3e6c1f);
+    for (uint32_t form = 0; ready && form < 4 * 4 * 2 * 3; form += 1)
+    {
+        const uint32_t k = form / 24;
+        const uint32_t size = (form / 6) % 4;
+        const uint32_t sign = (form / 3) % 2;
+        const uint32_t width = form % 3;
+        const uint32_t bytes = 16u << width;
+        const uint32_t element = 1u << size;
+        const CheckVectorShape shape = { .lanes = bytes >> size, .bytes = bytes, .element = (uint8_t)element, .integer = true, .is_signed = sign != 0 };
+        uint64_t needed = 0;
+        const CheckVectorForms forms = check_vector_elementwise_forms(builtins[k], shape, &needed);
+        if (forms.forms[width] == 0)
+        {
+            continue;
+        }
+        const uint64_t output_mark = test->output.length;
+        test->lane_op_attempts += 1;
+        Tier0Operation row;
+        memset(&row, 0, sizeof(row));
+        row.records[0] = check_vector_lower_record(forms.forms[width], BUSTER_TIER0_ROLE_VECTOR(0), BUSTER_TIER0_ROLE_VECTOR(0), BUSTER_TIER0_ROLE_VECTOR(1));
+        row.record_count = 1;
+        row.operand_count = 2;
+        row.operand_classes[0] = BUSTER_TYPED_CLASS_VECTOR;
+        row.operand_classes[1] = BUSTER_TYPED_CLASS_VECTOR;
+        row.operand_bytes[0] = (uint8_t)bytes;
+        row.operand_bytes[1] = (uint8_t)bytes;
+        row.result_class = BUSTER_TYPED_CLASS_VECTOR;
+        row.result_bytes = (uint8_t)bytes;
+        char name[96];
+        snprintf(name, sizeof(name), "elementwise %u of %u-byte elements (signed %u) at %u bytes", k, element, sign, bytes);
+        program->count = 0;
+        program->overflow = false;
+        program->rows = true;
+        program->objects = false;
+        for (uint32_t s = 0; s < 4; s += 1)
+        {
+            tier0_test_mask_address(program, BUSTER_TIER0_TEST_MASK_OUT, s * bytes / 8);
+            tier0_test_mask_address(program, BUSTER_TIER0_TEST_MASK_IN, s * bytes / 8 % 32);
+            tier0_test_mask_emit(program, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_VECTOR, bytes);
+            tier0_test_mask_address(program, BUSTER_TIER0_TEST_MASK_IN, (s + 1) * bytes / 8 % 32);
+            tier0_test_mask_emit(program, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_VECTOR, bytes);
+            tier0_test_mask_emit(program, BUSTER_TYPED_X86, row.result_class, 0);
+            tier0_test_mask_emit(program, BUSTER_TYPED_SET, row.result_class, bytes);
+        }
+        tier0_test_mask_emit(program, BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_VOID, 0);
+        bool ok = tier1_masks_test_expect(test, !program->overflow, "the lane operation's program fits");
+        Tier0Function functions[2] = { tier0_test_mask_function(program), tier0_test_mask_leaf() };
+        functions[0].operations = &row;
+        functions[0].operation_count = 1;
+        for (uint32_t input = 0; ok && input < BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS; input += 1)
+        {
+            uint64_t* in = inputs + (uint64_t)input * (BUSTER_TIER1_MASKS_TEST_IN / 8);
+            uint8_t* wanted = expected + (uint64_t)input * BUSTER_TIER1_MASKS_TEST_OUT;
+            tier0_test_mask_inputs(in, &state);
+            // Every fourth word of extreme lanes, at the saturations' edges.
+            for (uint32_t w = input; w < BUSTER_TIER1_MASKS_TEST_IN / 8; w += 4)
+            {
+                in[w] = w % 8 < 4 ? UINT64_C(0x7f80ff007fff8000) : UINT64_C(0x807f00ff80007fff);
+            }
+            memset(wanted, 0xa5, BUSTER_TIER1_MASKS_TEST_OUT);
+            for (uint32_t s = 0; s < 4; s += 1)
+            {
+                const uint8_t* a = (const uint8_t*)in + s * bytes % 256;
+                const uint8_t* b = (const uint8_t*)in + (s + 1) * bytes % 256;
+                for (uint32_t lane = 0; lane < bytes / element; lane += 1)
+                {
+                    uint64_t ua = 0;
+                    uint64_t ub = 0;
+                    memcpy(&ua, a + lane * element, element);
+                    memcpy(&ub, b + lane * element, element);
+                    const int64_t sa = element == 1 ? (int8_t)ua : element == 2 ? (int16_t)ua : element == 4 ? (int32_t)ua : (int64_t)ua;
+                    const int64_t sb = element == 1 ? (int8_t)ub : element == 2 ? (int16_t)ub : element == 4 ? (int32_t)ub : (int64_t)ub;
+                    const bool less = sign != 0 ? sa < sb : ua < ub;
+                    const int64_t high = sign != 0 ? (element == 1 ? INT8_MAX : INT16_MAX) : (element == 1 ? UINT8_MAX : UINT16_MAX);
+                    const int64_t low = sign != 0 ? -high - 1 : 0;
+                    const int64_t exact = k == 2 ? (sign != 0 ? sa + sb : (int64_t)(ua + ub)) : (sign != 0 ? sa - sb : (int64_t)ua - (int64_t)ub);
+                    const uint64_t value = k == 0 ? (less ? ua : ub) : k == 1 ? (less ? ub : ua) : (uint64_t)(exact > high ? high : exact < low ? low : exact);
+                    memcpy(wanted + s * bytes + lane * element, &value, element);
+                }
+            }
+        }
+        bool machine = false;
+        ok = ok && tier1_masks_test_typed_pipeline(test, name, functions, true, inputs, expected, arenas, &machine);
+        ok = ok && tier1_masks_test_expect(test, !machine, "a lane operation is the IR's lane_op, not a machine row");
+        test->lane_op_rows += ok;
+        tier1_masks_test_expect(test, test->scratch.length == 0, "the lane operations return the scratch arena");
+        arena_pop_to(&test->output, output_mark);
+        for (uint32_t r = 0; r < 3; r += 1)
+        {
+            arena_pop_to(&arenas[r], 0);
+        }
+    }
+    for (uint32_t r = 0; r < 3; r += 1)
+    {
+        arena_release(&arenas[r]);
+    }
+    free(expected);
+    free(inputs);
+    free(program);
+}
+
 // A C model of an integer lane's conversion (#1840): `raw`, a lane of `from` bytes, to `to` bytes, by C's conversions: a
 // wider lane by its signedness, a narrower one wrapped, or saturated as a signed lane to the narrower one's signed range
 // (`mode` 1, vpmovs) or as an unsigned lane to its unsigned range (2, vpmovus: Intel's manual's unsigned source).
@@ -5840,6 +5960,7 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
             tier1_masks_test_conversions(&test);
             tier1_masks_test_shifts(&test);
             tier1_masks_test_mask_vectors(&test);
+            tier1_masks_test_lane_ops(&test);
             tier1_masks_test_refusals(&test, baseline, foundation);
             tier1_masks_test_scan(&test);
             tier1_masks_test_forms(&test);
@@ -5853,7 +5974,7 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
             tier1_masks_test_expect(&test, test.typed_programs == BUSTER_TIER1_MASKS_TEST_PROGRAMS && test.typed_machine != 0 && test.typed_machine < test.typed_programs,
                                     "Tier 0's mask programs go through the IR and Tier 1, those whose rows the decoders refuse as machine rows");
             tier1_masks_test_expect(&test, !test.native || test.typed_runs == 2u * BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS * (test.typed_programs + test.builtin_rows + test.compare_rows + test.select_rows + test.width_rows + test.permute_rows + test.convert_rows +
-                                                                               test.shift_rows + test.mask_vector_rows),
+                                                                               test.shift_rows + test.mask_vector_rows + test.lane_op_rows),
                                     "every typed program and front-end row runs natively by both of Tier 1's paths");
             // The comparisons: 24 integer rules (bytes to quadwords, signed and unsigned, at 3 widths) at 8 immediates, 6
             // of them the IR's; 6 packed float rules at 32, 12 of them the IR's.
@@ -5894,6 +6015,10 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
                                 "every front-end shift by an int goes through the IR and Tier 1 as the IR's shift, by a register and by an immediate");
         tier1_masks_test_expect(&test, test.mask_vector_attempts == 24 && test.mask_vector_rows == test.mask_vector_attempts,
                                 "every front-end mask to vector and back goes through the IR and Tier 1 as the IR's select or comparison");
+        tier1_masks_test_expect(&test, test.lane_op_attempts == 72 && test.lane_op_rows == test.lane_op_attempts,
+                                "every front-end elementwise minimum, maximum and saturation goes through the IR and Tier 1 as the IR's lane_op");
+        printf("test-tier1-masks: the front end's elementwise minima, maxima and saturations: %u through the IR's interpreter, SSA, the optimizer and Tier 1 natively as its lane_op\n",
+               test.lane_op_rows);
         printf("test-tier1-masks: the front end's masks to vectors and back: %u through the IR's interpreter, SSA, the optimizer and Tier 1 natively as vpmovm2 and vpmov2m\n",
                test.mask_vector_rows);
         printf("test-tier1-masks: the front end's shifts by an int: %u through the IR's interpreter, SSA, the optimizer and Tier 1 natively as its shift\n", test.shift_rows);
