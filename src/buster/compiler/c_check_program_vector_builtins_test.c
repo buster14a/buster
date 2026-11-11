@@ -960,8 +960,6 @@ static void check_test_program_vector_builtin_refusals(CheckTest* test)
           "floating maximum and minimum reductions of vectors their elements don't fill", 2 },
         { "znver5", "int tested(int n){v2ds a={n};v16qs c=__builtin_shufflevector(__builtin_convertvector(a,v2qs),(v2qs){(signed char)n},0,1,2,3,3,3,3,3,3,3,3,3,3,3,3,3);"
           "return c[0];}", "narrow vector shuffle operands with nonconstant values or side effects", 2 },
-        { "x86-64-v4", "int tested(int n){v16qs a={(signed char)n},b={1};v16qs c=__builtin_shufflevector(a,b,1,0,3,2,5,4,7,6,9,8,11,10,13,12,15,14);return c[0];}",
-          "vector shuffles of 8-bit elements without AVX-512 VBMI", 3 },
     };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
     {

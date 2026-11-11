@@ -3266,9 +3266,10 @@ What the lowering covers past scalars (#145's programs):
   of indices; bit reversal without GFNI (or, of bytes, AVX512-BMM); funnel
   shifts of 8-bit elements outside 16-byte vectors or without XOP; the integer elementwise functions of
   scalars; nontemporal builtins of scalars and at underaligned addresses; bit
-  casts of other types; and the rows whose extensions the target hasn't (VBMI
-  for 8-bit shuffles, BW for 16-bit ones, BITALG, VPOPCNTDQ, VBMI2, DQ, GFNI,
-  BMI2) are refused by name. `test-checker`'s vector builtin programs
+  casts of other types; and the rows whose extensions the target hasn't
+  (BITALG, VPOPCNTDQ, VBMI2, DQ, GFNI, BMI2) are refused by name. Shuffles of
+  8-bit elements without VBMI's VPERMT2B, and of 16-bit ones without BW's
+  VPERMT2W, run element by element, as the baseline's do (#1834). `test-checker`'s vector builtin programs
   (`c_check_program_vector_builtins_test.c`) call each at every width, those
   of vectors of 1, 2, 4 and 8 bytes and wider than 64 bytes, the narrowing conversions and the floating
   intrinsics as the headers write them, with the masked truncating stores and
