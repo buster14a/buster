@@ -2533,9 +2533,10 @@ static __attribute__((noinline, cold)) void check_input_duplicate_specifier(Chec
 // brace, group close or a type's keyword cannot. `declaration` is the declaration's name token; 0 says its base was spelled
 // directly (or that the declaration is not one at all). Clang prints that typedef's name for the type's base
 // then, and an `aka` for what it hides unless it is its anonymous tag's own typedef.
-static uint32_t check_input_typedef_spelling(const CheckInput* input, const Parser* parser, uint32_t declaration)
+static uint32_t check_input_typedef_use(const CheckInput* input, const Parser* parser, uint32_t declaration, uint32_t* use)
 {
     uint32_t result = 0;
+    *use = 0;
     bool found = declaration < input->token_count;
     for (uint32_t token = declaration; found && result == 0 && token > 0;)
     {
@@ -2547,6 +2548,7 @@ static uint32_t check_input_typedef_spelling(const CheckInput* input, const Pars
                 input->declaration_kinds[resolved] == C_BINDING_TYPEDEF)
             {
                 result = resolved;
+                *use = token;
             }
             // Any other identifier is a sibling declarator's or use's name: cross it for the shared specifiers.
         }
@@ -2561,6 +2563,61 @@ static uint32_t check_input_typedef_spelling(const CheckInput* input, const Pars
         }
     }
     return result;
+}
+
+static uint32_t check_input_typedef_spelling(const CheckInput* input, const Parser* parser, uint32_t declaration)
+{
+    uint32_t use = 0;
+    return check_input_typedef_use(input, parser, declaration, &use);
+}
+
+// The qualifiers a declaration's specifiers write beside its typedef name `use` (#1447): `const CI`'s const, which clang
+// keeps as a qualifier over the typedef's sugar (`'const CI[1]' (aka 'const int[1]')`) though the typedef already
+// has it. Its specifier list's neighbours both ways, through qualifiers and other specifiers.
+static bool check_input_qualifier(const Parser* parser, uint32_t token, uint32_t* qualifiers);
+static uint32_t check_input_typedef_written_qualifiers(const Parser* parser, uint32_t use)
+{
+    uint32_t qualifiers = 0;
+    const uint32_t count = parser->tokens.count;
+    for (uint32_t direction = 0; use != 0 && use < count && direction < 2; direction += 1)
+    {
+        uint32_t token = use;
+        bool reading = true;
+        while (reading)
+        {
+            token = direction == 0 ? token - 1 : token + 1;
+            reading = token != 0 && token < count && token != UINT32_MAX &&
+                      (parser->tokens.kinds[token] == PARSE_KIND_QUALIFIER || (parser->tree.roles[token] == PARSE_ROLE_SPECIFIER &&
+                                                                                parser->tokens.kinds[token] != PARSE_KIND_IDENTIFIER));
+            if (reading)
+            {
+                check_input_qualifier(parser, token, &qualifiers);
+            }
+        }
+    }
+    return qualifiers;
+}
+
+// A declaration's typedef spelling for a diagnostic's type (check_input_typedef_spelling), as its use where the
+// declaration's specifiers write a qualifier again beside it (`const CI`, #1447), which the renderer prints over the
+// typedef's name (check_input_sugar_declaration); else the typedef's declaration, or 0.
+static uint32_t check_input_typedef_sugar(const CheckInput* input, const Parser* parser, uint32_t declaration)
+{
+    uint32_t use = 0;
+    const uint32_t result = check_input_typedef_use(input, parser, declaration, &use);
+    return result != 0 && check_input_typedef_written_qualifiers(parser, use) != 0 ? use : result;
+}
+
+// A diagnostic spelling's typedef declaration (#1447): a typedef's use (check_input_typedef_sugar) resolves to it, with
+// the qualifiers it writes again in `written`; any other spelling is itself.
+static uint32_t check_input_sugar_declaration(const CheckInput* input, const Parser* parser, uint32_t spelling, uint32_t* written)
+{
+    const uint32_t resolved = spelling < input->token_count && spelling < parser->tokens.count && input->declarations != 0 &&
+                              parser->tokens.kinds[spelling] == PARSE_KIND_IDENTIFIER ? input->declarations[spelling] : 0;
+    const bool use = resolved != 0 && resolved != spelling && resolved < input->token_count && input->declaration_kinds != 0 &&
+                     input->declaration_kinds[resolved] == C_BINDING_TYPEDEF;
+    *written = use ? check_input_typedef_written_qualifiers(parser, spelling) : 0;
+    return use ? resolved : spelling;
 }
 
 // Whether `name` is a typeof keyword's: C23's, GNU's or their unqualified forms (_BitInt shares their parser kind).
@@ -2614,7 +2671,7 @@ static uint32_t check_input_typeof_spelling(const CheckInput* input, const Parse
 static uint32_t check_input_specifier_spelling(const CheckInput* input, const Parser* parser, uint32_t declaration)
 {
     const uint32_t spelled = check_input_typeof_spelling(input, parser, declaration);
-    return spelled != 0 ? spelled : check_input_typedef_spelling(input, parser, declaration);
+    return spelled != 0 ? spelled : check_input_typedef_sugar(input, parser, declaration);
 }
 
 // The printed type and its typedef specifier's declaration for a warning operand that names `token`'s
@@ -12554,6 +12611,22 @@ static inline __attribute__((always_inline)) void check_input_vector_member(Chec
             reader->output->resource |= !check_vector_member_decode(bytes, length, lanes, length, &member);
         }
     }
+    if (!reader->output->resource && member.kind != CHECK_VECTOR_MEMBER_INVALID && graph->vector_member_count == graph->vector_member_capacity)
+    {
+        // The counted capacity (check_input_counts) covers `.` members, not `->` ones, which a unit with an extended vector
+        // records too: their list grows, rarely, in the same arena.
+        const uint32_t capacity = graph->vector_member_capacity * 2 + 16;
+        CheckVectorCall* grown = arena_push_array(reader->arena, capacity, sizeof(CheckVectorCall), _Alignof(CheckVectorCall));
+        if (grown != 0)
+        {
+            if (graph->vector_member_count != 0)
+            {
+                memcpy(grown, graph->vector_members, (uint64_t)graph->vector_member_count * sizeof(CheckVectorCall));
+            }
+            graph->vector_members = grown;
+            graph->vector_member_capacity = capacity;
+        }
+    }
     if (!reader->output->resource && member.kind != CHECK_VECTOR_MEMBER_INVALID)
     {
         if (graph->vector_member_count < graph->vector_member_capacity)
@@ -13824,7 +13897,8 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
             if (op == CHECK_OP_MEMBER || op == CHECK_OP_ARROW)
             {
                 graph->members[node] = parser->tokens.names[token + 1];
-                if (op == CHECK_OP_MEMBER)
+                // `p->y` names an extended vector's lane only through a pointer to one, which only a unit with one has.
+                if (op == CHECK_OP_MEMBER || __builtin_expect(reader->types->ext_vectors, 0))
                 {
                     check_input_vector_member(reader, node, token + 1);
                 }

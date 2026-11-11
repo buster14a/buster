@@ -388,6 +388,39 @@ struct CheckProgramCpuVersion
     uint32_t group;
 };
 
+// A function multiversioned by target strings (#1838, c_check_program_target_versions.c): its first declaration with an
+// attribute (its name and linkage); for target's versions, its reference object R (f.ifunc, which every reference to
+// a version reaches) and its versions, `version_count` of CheckProgram.target_versions from `version_first`; for
+// target_clones, its object (f, the IFUNC references reach) and declaration with the attribute, and the object of its
+// body's own symbol (the first clone's, f.X.0). `resolved` is whether the unit emits its resolver (target's: where a
+// version is referenced; target_clones': where the function is defined or referenced), whose code reads libgcc's CPU
+// model (`model`) and its features' second array (`features2`).
+typedef struct CheckProgramTargetGroup CheckProgramTargetGroup;
+struct CheckProgramTargetGroup
+{
+    uint32_t first;
+    uint32_t reference;
+    uint32_t clones;
+    uint32_t clones_declaration;
+    uint32_t body;
+    uint32_t version_first;
+    uint32_t version_count;
+    // Its resolver's options: its versions, or target_clones' versions with their repetitions.
+    uint32_t option_count;
+    bool internal;
+    bool resolved;
+    bool model;
+    bool features2;
+};
+
+// A version of target's: its object and its first declaration with the attribute (its string).
+typedef struct CheckProgramTargetVersion CheckProgramTargetVersion;
+struct CheckProgramTargetVersion
+{
+    uint32_t object;
+    uint32_t declaration;
+};
+
 typedef struct CheckProgram CheckProgram;
 struct CheckProgram
 {
@@ -468,6 +501,14 @@ struct CheckProgram
     SymbolId* cpu_symbols;
     uint32_t cpu_group_count;
     uint32_t cpu_version_count;
+    // Multiversioning by target strings (#1838, c_check_program_target_versions.c): the unit's groups and target's
+    // versions, null in a unit without them; and each version's own symbol (target_version_count of them, 0 for a version
+    // without a body), then each group's body symbol (target_clones', 0 for none).
+    CheckProgramTargetGroup* target_groups;
+    CheckProgramTargetVersion* target_versions;
+    SymbolId* target_symbols;
+    uint32_t target_group_count;
+    uint32_t target_version_count;
     // The exits through cleanups' chains (#1370, CHECK_CONTROL_EXIT's), each record's plan (by its CheckInput.cleanups
     // index, of a body with such an exit) and the destinations of the records' dispatches; null in a unit without cleanups.
     CheckProgramExit* exits;
@@ -801,6 +842,12 @@ static bool check_program_cpu_number(CheckProgram* program, Arena* output);
 static String8 check_program_cpu_version_features(const CheckProgram* program, const CheckInputAttribute* attribute, Arena* output);
 static uint64_t check_program_cpu_features_write(const CheckProgram* program, const CheckInputAttribute* attribute, char* text, uint64_t capacity);
 static SymbolId check_program_body_symbol(const CheckProgram* program, uint32_t b);
+static SymbolId check_program_target_body_symbol(const CheckProgram* program, uint32_t b);
+// Multiversioning by target strings (#1838), defined in c_check_program_target_versions.c.
+static bool check_program_target_groups(CheckProgram* program, const CheckProgramTargetEvents* events, const uint32_t* initializer_references,
+                                        uint32_t initializer_reference_count, Arena* output);
+static void check_program_target_needed(const CheckProgram* program, uint8_t* needed);
+static bool check_program_target_number(CheckProgram* program, Arena* output);
 // The room a cpu_specific version's features take (check_program_cpu_features_write): more than any CPU's, 712 bytes in
 // c_check_cpu_dispatch.inc.
 #define BUSTER_CHECK_PROGRAM_CPU_FEATURES 1024u
@@ -4071,7 +4118,8 @@ static bool check_program_targets(CheckProgram* program, const CheckProgramOptio
                 }
                 const PredefinesTargetAttribute attribute_kind = readable ? last_kind : PREDEFINES_TARGET_ATTRIBUTE_IGNORED;
                 const int32_t attribute_cpu = readable ? last_cpu : -1;
-                versions |= (attribute->kind == CHECK_ATTRIBUTE_TARGET_CLONES || attribute->kind == CHECK_ATTRIBUTE_CPU_DISPATCH) && !attribute->ignored;
+                // A target_clones body is compiled with the unit's features (#1838, c_check_program_target_versions.c).
+                versions |= attribute->kind == CHECK_ATTRIBUTE_CPU_DISPATCH && !attribute->ignored;
                 specific = specific == 0 && attribute->kind == CHECK_ATTRIBUTE_CPU_SPECIFIC && !attribute->ignored ? attribute : specific;
                 if (attribute_kind != PREDEFINES_TARGET_ATTRIBUTE_IGNORED && applied == 0 && token <= body.declaration)
                 {
@@ -4083,16 +4131,6 @@ static bool check_program_targets(CheckProgram* program, const CheckProgramOptio
                 {
                     versions |= !check_program_text_equal(attribute->text, applied->text);
                 }
-            }
-        }
-        // A version of a function multiversioned by target strings (#1838): a function of its name another object with a
-        // target attribute has (the checker keeps each version apart). A lone "default" is still compiled as the function.
-        for (uint32_t e = low; input->target_multiversion && !versions && e < count && (uint32_t)(keys[e] >> 32) == body.object; e += 1)
-        {
-            const uint32_t token = (uint32_t)keys[e];
-            for (uint32_t other = 0; !versions && other < count; other += 1)
-            {
-                versions = (uint32_t)(keys[other] >> 32) != body.object && program->parser->tokens.names[(uint32_t)keys[other]] == program->parser->tokens.names[token];
             }
         }
         uint32_t target = versions ? BUSTER_CHECK_PROGRAM_TARGET_VERSIONS : 0;
@@ -4883,7 +4921,9 @@ static bool check_program(CheckProgram* program, const Parser* parser, const Che
         }
         // clang's cpu_specific and cpu_dispatch groups (#1447), whose members' references take their groups' symbols as
         // the symbols are numbered.
-        const bool grouped = !program->input->cpu_dispatch || check_program_cpu_groups(program, &target_events, output);
+        const bool grouped = (!program->input->cpu_dispatch || check_program_cpu_groups(program, &target_events, output)) &&
+                             (!program->input->target_multiversion ||
+                              check_program_target_groups(program, &target_events, options.initializer_references, options.initializer_reference_count, output));
         // GNU's alias, ifunc and weakref attributes (#147): the unit's entries, whose aliases' and ifuncs' objects are
         // needed, and whose referenced weakrefs take their targets' symbols as the symbols are numbered.
         const bool aliased = grouped && (target_events.alias_count == 0 ||

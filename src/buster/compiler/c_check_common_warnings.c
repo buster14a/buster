@@ -162,6 +162,13 @@ static void check_common_report_published(const Parser* parser, Preprocessor* pp
                                         note_count, scratch);
 }
 
+// Whether two operands' spellings are one typedef's sugar (#1447): its uses (check_input_typedef_sugar) are its declaration.
+static bool check_common_same_spelling(const CheckInput* input, const Parser* parser, uint32_t left, uint32_t right)
+{
+    uint32_t written = 0;
+    return left == right || check_input_sugar_declaration(input, parser, left, &written) == check_input_sugar_declaration(input, parser, right, &written);
+}
+
 // Find an operand's typedef specifier without recursive calls. A bounded explicit stack follows the graph through
 // casts, dereferences, subscripts, conversions and arithmetic; a bounded work budget leaves unusually large expressions
 // in their canonical spelling. `sizeof` and `alignof` use the renderer's __size_t sentinel.
@@ -214,17 +221,20 @@ static uint32_t check_common_operand_spelling(const Parser* parser, const CheckI
                 const uint32_t right = result;
                 const uint32_t left_node = graph->operand0[current];
                 const uint32_t right_node = graph->operand1[current];
+                // (An operand's value is its lvalue's unqualified, #1447: `a + b` of two `const U` objects is a `U`.)
                 const TypeId type = check_stream_type(stream, current);
-                const TypeId left_type = left_node < graph->count ? check_stream_type(stream, left_node) : 0;
-                const TypeId right_type = right_node < graph->count ? check_stream_type(stream, right_node) : 0;
+                const TypeId left_type = left_node < graph->count ? type_unqualified(check_stream_type(stream, left_node)) : 0;
+                const TypeId right_type = right_node < graph->count ? type_unqualified(check_stream_type(stream, right_node)) : 0;
                 const CheckOp op = graph->ops[current];
                 if (op == CHECK_OP_SHIFT_LEFT || op == CHECK_OP_SHIFT_RIGHT)
                 {
                     result = left_type == type ? left : 0;
                 }
-                else if (left == right && left != 0 && left_type == type && right_type == type)
+                else if (left != 0 && check_common_same_spelling(input, parser, left, right) && left_type == type && right_type == type)
                 {
-                    result = left;
+                    // (Two uses of one typedef are the same sugar, #1447: arithmetic's value has no qualifiers to write.)
+                    uint32_t written = 0;
+                    result = check_input_sugar_declaration(input, parser, left, &written);
                 }
                 else if (left != 0 && left_type == type && right_type != type)
                 {
@@ -296,7 +306,7 @@ static uint32_t check_common_operand_spelling(const Parser* parser, const CheckI
                 // A member's own declarator's typedef (#1447), found in its record's body.
                 const uint32_t member = check_semantic_member_of(parser, input, stream, types, current);
                 const uint32_t declarator = member != 0 ? check_semantic_member_token(parser, input, types, member) : BUSTER_CHECK_NONE;
-                result = declarator < input->token_count ? check_input_typedef_spelling(input, parser, declarator) : 0;
+                result = declarator < input->token_count ? check_input_typedef_sugar(input, parser, declarator) : 0;
                 count -= 1;
             }
             else
@@ -306,7 +316,7 @@ static uint32_t check_common_operand_spelling(const Parser* parser, const CheckI
                 {
                     const uint32_t declaration = input->declarations[token];
                     result = declaration != 0 && declaration != BUSTER_CHECK_NONE && declaration < input->token_count ?
-                             check_input_typedef_spelling(input, parser, declaration) : 0;
+                             check_input_typedef_sugar(input, parser, declaration) : 0;
                 }
                 count -= 1;
             }
@@ -323,8 +333,9 @@ static String8 check_common_type_text(const Parser* parser, Preprocessor* pp, co
     const TypeId stripped = type != 0 ? type_strip_aligned(types, type) : 0;
     if (stripped != 0 && type_kind_is_array(type_kind(types, type_unqualified(stripped))) && result.length != 0)
     {
-        const String8 element = check_driver_warning_type(parser, pp, input, types, spell, scratch,
-                                                          type_element(types, type_unqualified(stripped)), 0);
+        // The pointer's target keeps the array's qualifiers, as its element (`const int[2]`'s `'const int *'`, #1447).
+        const TypeId element_type = type_qualify(types, type_element(types, type_unqualified(stripped)), type_qualifiers(stripped));
+        const String8 element = check_driver_warning_type(parser, pp, input, types, spell, scratch, element_type, spelling);
         if (element.length != 0)
         {
             const char* text = element.pointer;
@@ -6333,14 +6344,32 @@ static void check_common_format_invalid_position(const Parser* parser, Preproces
     check_common_format_report_offset(parser, pp, input, format_token, offset, order, CHECK_WARNING_ID_FORMAT, message, scratch);
 }
 
+// A format argument's type as clang's lvalue conversion leaves it (#1447): without its top-level qualifiers (an array's
+// stay with its element), and without the sugar of a typedef that holds them itself (clang's getUnqualifiedType
+// desugars `CI` of `typedef const int CI` to `int`); `spelling` is updated to match.
+static TypeId check_common_format_value(const Parser* parser, const CheckInput* input, const TypeTable* types, TypeId type, uint32_t* spelling)
+{
+    const TypeId stripped = type != 0 ? type_strip_aligned(types, type) : 0;
+    const bool array = stripped != 0 && type_kind_is_array(type_kind(types, type_unqualified(stripped)));
+    const bool qualified = type != 0 && !array && type_qualifiers(type) != 0;
+    uint32_t written = 0;
+    const uint32_t declaration = *spelling != 0 && *spelling != BUSTER_CHECK_NONE ? check_input_sugar_declaration(input, parser, *spelling, &written) : 0;
+    const bool typedef_name = declaration != 0 && declaration < input->token_count && input->declared_types != NULL &&
+                              parser->tokens.kinds[declaration] != PARSE_KIND_TYPEOF;
+    const TypeId declared = typedef_name ? input->declared_types[declaration] : 0;
+    *spelling = qualified && declared != 0 && type_qualifiers(declared) != 0 ? 0 : *spelling;
+    return qualified ? type_unqualified(type) : type;
+}
+
 static void check_common_format_report_type(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
                                             TypeTable* types, CheckWarningSpelling* spell, const CheckGraph* graph, uint32_t offset, uint32_t argument,
                                             uint32_t format_token, const char* expected, bool width, uint32_t* order, Arena* scratch)
 {
     const uint32_t argument_node = graph->argument_nodes[offset + argument];
-    const TypeId type = check_common_format_argument_type(graph, stream, types, offset, argument);
-    const uint32_t spelling = argument_node < graph->count && type == check_stream_type(stream, argument_node) ?
-                              check_common_operand_spelling(parser, input, graph, stream, types, argument_node) : 0;
+    const TypeId argument_type = check_common_format_argument_type(graph, stream, types, offset, argument);
+    uint32_t spelling = argument_node < graph->count && argument_type == check_stream_type(stream, argument_node) ?
+                        check_common_operand_spelling(parser, input, graph, stream, types, argument_node) : 0;
+    const TypeId type = check_common_format_value(parser, input, types, argument_type, &spelling);
     const String8 actual = check_common_type_text(parser, pp, input, types, spell, scratch, type,
                                                   spelling);
     const uint32_t at_token = argument_node < graph->count ? check_common_argument_start(parser, graph->tokens[argument_node]) : format_token;
@@ -6366,9 +6395,10 @@ static void check_common_format_width_report(const Parser* parser, Preprocessor*
                                              uint32_t format_token, uint64_t literal_offset, bool precision, uint32_t* order, Arena* scratch)
 {
     const uint32_t argument_node = graph->argument_nodes[offset + argument];
-    const TypeId type = check_common_format_argument_type(graph, stream, types, offset, argument);
-    const uint32_t spelling = argument_node < graph->count && type == check_stream_type(stream, argument_node) ?
-                              check_common_operand_spelling(parser, input, graph, stream, types, argument_node) : 0;
+    const TypeId argument_type = check_common_format_argument_type(graph, stream, types, offset, argument);
+    uint32_t spelling = argument_node < graph->count && argument_type == check_stream_type(stream, argument_node) ?
+                        check_common_operand_spelling(parser, input, graph, stream, types, argument_node) : 0;
+    const TypeId type = check_common_format_value(parser, input, types, argument_type, &spelling);
     const String8 actual = check_common_type_text(parser, pp, input, types, spell, scratch, type,
                                                   spelling);
     if (actual.length != 0)
@@ -7881,6 +7911,51 @@ static bool check_common_unreachable(const CheckProgram* program, const CheckGra
     return valid;
 }
 
+// A static selection's range: the tokens from just past its keyword up to its closing token, which it excludes.
+typedef struct CheckCommonRange CheckCommonRange;
+struct CheckCommonRange
+{
+    uint32_t first;
+    uint32_t end;
+};
+
+// The tokens of the operand the static selection `node` chooses, from just past the top-level comma before it (or the
+// selection's `(`) up to the comma after it (or its `)`), which it excludes: a root there, a statement of a statement
+// expression in the chosen arm, is evaluated where the selection is (#2023). Its operand is the selection's first,
+// under the conversions at its `)`; none (an empty range) for one the reader folded to a constant at its `)`, or
+// without the parser's depths.
+static CheckCommonRange check_common_chosen_span(const CheckGraph* graph, const Parser* parser, uint32_t node)
+{
+    const uint32_t count = parser->tokens.count;
+    const uint32_t close = graph->ops[node] == CHECK_OP_SELECT ? graph->tokens[node] : BUSTER_CHECK_NONE;
+    uint32_t chosen = close < count ? graph->operand0[node] : BUSTER_CHECK_NONE;
+    for (uint32_t steps = 0; chosen < graph->count && graph->ops[chosen] == CHECK_OP_CONVERT && graph->tokens[chosen] == close && steps < graph->count;
+         steps += 1)
+    {
+        chosen = graph->operand0[chosen];
+    }
+    const uint32_t token = chosen < graph->count ? graph->tokens[chosen] : BUSTER_CHECK_NONE;
+    CheckCommonRange result = { 0 };
+    if (parser->tree.depths != NULL && token < close)
+    {
+        // (The selection's contents are one deeper than its parentheses.)
+        const uint32_t depth = parser->tree.depths[close] + 1;
+        uint32_t first = token;
+        while (first > 0 && parser->tree.depths[first - 1] >= depth &&
+               !(parser->tokens.kinds[first - 1] == PARSE_KIND_COMMA && parser->tree.depths[first - 1] == depth))
+        {
+            first -= 1;
+        }
+        uint32_t end = token;
+        while (end < close && !(parser->tokens.kinds[end] == PARSE_KIND_COMMA && parser->tree.depths[end] == depth))
+        {
+            end += 1;
+        }
+        result = (CheckCommonRange){ .first = first, .end = end };
+    }
+    return result;
+}
+
 // check_common_unselected_roots by its definition, a selection at a time: each walks back from its token for its keyword,
 // then visits every node. That is O(selections × (tokens + nodes)), seconds on a unit of many asserts or _Generic
 // selections (#1341, #1360). The exact path for a selection whose selected node `roots` holds, which none of the callers'
@@ -7901,23 +7976,17 @@ static void check_common_unselected_walk(const CheckGraph* graph, const Parser* 
             }
         }
         const uint32_t selected = graph->operand0[node];
+        const CheckCommonRange chosen = check_common_chosen_span(graph, parser, node);
         for (uint32_t candidate = 0; close < parser->tokens.count && candidate < graph->count; candidate += 1)
         {
-            if (roots[candidate] != 0 && candidate != selected && graph->tokens[candidate] > token && graph->tokens[candidate] < close)
+            const uint32_t at = graph->tokens[candidate];
+            if (roots[candidate] != 0 && candidate != selected && at > token && at < close && !(at >= chosen.first && at < chosen.end))
             {
                 marks[candidate] = value;
             }
         }
     }
 }
-
-// A static selection's range: the tokens from just past its keyword up to its closing token, which it excludes.
-typedef struct CheckCommonRange CheckCommonRange;
-struct CheckCommonRange
-{
-    uint32_t first;
-    uint32_t end;
-};
 
 // Sets the bits from `first` up to `end`, which it excludes, a word at a time.
 static void check_common_set_bits(uint64_t* bits, uint32_t first, uint32_t end)
@@ -7955,6 +8024,9 @@ static bool check_common_unselected_roots(const CheckGraph* graph, const Parser*
     static const CheckOp selects[] = { CHECK_OP_SELECT };
     const CheckCommonOps set = check_common_ops(selects, BUSTER_ARRAY_LENGTH(selects));
     uint64_t* bits = NULL;
+    // Each selection's `)` above its node, which the ranges find their chosen operands by (check_common_chosen_span).
+    uint64_t* keys = NULL;
+    uint64_t* temporary = NULL;
     bool valid = true;
     bool walk = false;
     uint32_t selections = 0;
@@ -7968,7 +8040,9 @@ static bool check_common_unselected_roots(const CheckGraph* graph, const Parser*
             if (bits == NULL)
             {
                 bits = CHECK_COMMON_PUSH_ARRAY(scratch, uint64_t, words);
-                valid = bits != NULL;
+                keys = CHECK_COMMON_PUSH_ARRAY(scratch, uint64_t, graph->count);
+                temporary = CHECK_COMMON_PUSH_ARRAY(scratch, uint64_t, graph->count);
+                valid = bits != NULL && keys != NULL && temporary != NULL;
                 if (valid)
                 {
                     memset(bits, 0, words * sizeof(uint64_t));
@@ -7977,6 +8051,7 @@ static bool check_common_unselected_roots(const CheckGraph* graph, const Parser*
             if (valid)
             {
                 bits[close >> 6] |= UINT64_C(1) << (close & 63);
+                keys[selections] = (uint64_t)close << 32 | node;
             }
             const uint32_t selected = graph->operand0[node];
             walk |= selected < graph->count && roots[selected] != 0;
@@ -7986,6 +8061,7 @@ static bool check_common_unselected_roots(const CheckGraph* graph, const Parser*
     }
     CheckCommonRange* ranges = valid && selections != 0 && !walk ? CHECK_COMMON_PUSH_ARRAY(scratch, CheckCommonRange, selections) : NULL;
     valid &= selections == 0 || walk || ranges != NULL;
+    const uint64_t* closes = ranges != NULL ? c_bindings_sort(keys, temporary, selections, vector, UINT32_MAX >> __builtin_clz(last)) : NULL;
     uint32_t used = 0;
     // Once every selection has its keyword, no token before them claims one.
     for (uint32_t end = ranges != NULL ? last : 0; end != 0 && used < selections;)
@@ -8019,20 +8095,51 @@ static bool check_common_unselected_roots(const CheckGraph* graph, const Parser*
     }
     if (used != 0)
     {
-        // The claims came in descending keyword order: the ranges in ascending order, each bit set once.
+        // The claims came in descending keyword order: the ranges in ascending order. Each sets its bits but its chosen
+        // operand's, whose roots are evaluated where the selection is (#2023); the ranges nest, and one inside an earlier
+        // range that left nothing out adds nothing.
         memset(bits, 0, ((uint64_t)last + 63) / 64 * sizeof(uint64_t));
         uint32_t covered = 0;
         uint32_t lowest = UINT32_MAX;
         for (uint32_t i = used; i-- > 0;)
         {
-            const uint32_t from = ranges[i].first > covered ? ranges[i].first : covered;
-            if (ranges[i].end > from)
+            const uint32_t close = ranges[i].end;
+            // (The selection whose `)` this is: the sorted keys' first at or past it, a binary search.)
+            uint32_t low = 0;
+            uint32_t high = selections;
+            while (low < high)
             {
-                check_common_set_bits(bits, from, ranges[i].end);
-                covered = ranges[i].end;
-                lowest = from < lowest ? from : lowest;
+                const uint32_t middle = low + (high - low) / 2;
+                const bool before = (uint32_t)(closes[middle] >> 32) < close;
+                low = before ? middle + 1 : low;
+                high = before ? high : middle;
             }
+            // (Selections that share a `)`, which only a test's graph has, leave out what each of them chooses.)
+            CheckCommonRange chosen = { .first = 0, .end = UINT32_MAX };
+            for (uint32_t k = low; k < selections && (uint32_t)(closes[k] >> 32) == close; k += 1)
+            {
+                const CheckCommonRange own = check_common_chosen_span(graph, parser, (uint32_t)closes[k]);
+                chosen.first = own.first > chosen.first ? own.first : chosen.first;
+                chosen.end = own.end < chosen.end ? own.end : chosen.end;
+            }
+            const bool split = chosen.end > chosen.first && chosen.end > ranges[i].first && chosen.first < close;
+            const uint32_t gap = split && chosen.first > ranges[i].first ? chosen.first : ranges[i].first;
+            const uint32_t resume = split && chosen.end < close ? chosen.end : close;
+            const CheckCommonRange pieces[] = {
+                { .first = ranges[i].first, .end = split ? gap : close },
+                { .first = split ? resume : close, .end = close },
+            };
+            for (uint32_t k = 0; ranges[i].end > covered && k < BUSTER_ARRAY_LENGTH(pieces); k += 1)
+            {
+                if (pieces[k].end > pieces[k].first)
+                {
+                    check_common_set_bits(bits, pieces[k].first, pieces[k].end);
+                    lowest = pieces[k].first < lowest ? pieces[k].first : lowest;
+                }
+            }
+            covered = !split && close > covered ? close : covered;
         }
+        covered = last;
         // The vector path gathers the bits of the roots whose tokens the ranges span alone: from the lowest range's
         // first token to the highest's end.
         for (uint32_t first = 0; first < graph->count; first += 16)

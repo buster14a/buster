@@ -248,9 +248,11 @@ unused-warning fixtures also check exact scope-completion tokens.
   input reader's `-Wshift-count-overflow` there; clang's runtime-warning drop in every array bound; a variable-array
   `sizeof`'s comma operands, which clang warns of when it evaluates them; and two forms the checker refuses: a statement expression in a variable-array
   `sizeof`'s operand and a statement expression as `_Generic`'s controlling expression, which the constant reader
-  reads outside a deferred typeof region. And a statement expression in a chosen `_Generic` arm
-  (`_Generic(1, int: ({ u; }))`), whose statements the selection's token range marks unselected, so that
-  `-Wuninitialized` reads none of them (#2023).
+  reads outside a deferred typeof region. A statement expression in a static selection's chosen operand
+  (`_Generic(1, int: ({ u; }))`) is evaluated where the selection is: `check_common_unselected_roots` leaves the
+  chosen operand's tokens, between its top-level commas (`check_common_chosen_span`), out of the selection's range, so
+  its statements, roots of their own, are read by `-Wuninitialized` and an initializer's `-Wconstant-conversion`
+  there is given; in another selection's other operand they stay unselected (#2023).
   `-Wunevaluated-expression` (#1447, clang's CheckUnaryExprOrTypeTraitOperand and CreateGenericSelectionExpr,
   `check_warning_graph_operand`) is on by default, under `-Wunused-value`: the expression operand of a sizeof or an
   alignof of no variable array type, and a `_Generic`'s controlling expression, that has a side effect as

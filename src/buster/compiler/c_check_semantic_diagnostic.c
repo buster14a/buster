@@ -648,7 +648,7 @@ static uint32_t check_semantic_operand_spelling(const Parser* parser, const Chec
         const uint32_t declaration = member ? (selected != 0 ? check_semantic_member_token(parser, input, types, selected) : BUSTER_CHECK_NONE) :
                                      token < input->token_count && input->declarations != NULL && parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER ?
                                      input->declarations[token] : 0;
-        result = declaration != 0 && declaration < input->token_count ? check_input_typedef_spelling(input, parser, declaration) : 0;
+        result = declaration != 0 && declaration < input->token_count ? check_input_typedef_sugar(input, parser, declaration) : 0;
         const bool through = declaration == 0 && (op == CHECK_OP_VALUE || op == CHECK_OP_DEREFERENCE || op == CHECK_OP_SUBSCRIPT);
         at = result == 0 && through ? graph->operand0[at] : BUSTER_CHECK_NONE;
     }
@@ -1153,6 +1153,36 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
             *location = check_semantic_switch(parser, graph->tokens[node]);
             result = type.length != 0 ? check_warning_text(scratch, "statement requires expression of integer type (%.*s invalid)", (int)type.length, type.pointer) :
                                         NULL;
+        }
+        else if ((report->diagnostic == CHECK_DIAG_ARITHMETIC_REQUIRED || report->diagnostic == CHECK_DIAG_INTEGER_REQUIRED) &&
+                 ((op >= CHECK_OP_ADD && op <= CHECK_OP_SHIFT_RIGHT) || (op >= CHECK_OP_BIT_AND && op <= CHECK_OP_BIT_XOR) ||
+                  (op >= CHECK_OP_ADD_ASSIGN && op <= CHECK_OP_BIT_XOR_ASSIGN)) && operand_type != 0 && graph->operand1[node] < stream->count &&
+                 !check_vector_type(types, type_strip_aligned(types, operand_type)) &&
+                 !check_vector_type(types, type_strip_aligned(types, check_stream_type(stream, graph->operand1[node]))))
+        {
+            // clang's err_typecheck_invalid_operands (#1872, Sema::InvalidOperands): both operands' types as written, before
+            // their conversions (an array's, a qualified lvalue's, a typedef's), at the operator, the report's token. A
+            // vector's operands have clang's vector errors.
+            const uint32_t second = graph->operand1[node];
+            const String8 left = check_driver_warning_type(parser, pp, input, types, spell, scratch, operand_type,
+                                                           check_semantic_operand_spelling(parser, input, stream, types, operand));
+            const String8 right = check_driver_warning_type(parser, pp, input, types, spell, scratch, check_stream_type(stream, second),
+                                                            check_semantic_operand_spelling(parser, input, stream, types, second));
+            result = left.length != 0 && right.length != 0 ? check_warning_text(scratch, "invalid operands to binary expression (%.*s and %.*s)", (int)left.length,
+                                                                                left.pointer, (int)right.length, right.pointer) : NULL;
+        }
+        else if (report->diagnostic == CHECK_DIAG_INCOMPATIBLE && op == CHECK_OP_SUBTRACT && operand_type != 0 && graph->operand1[node] < stream->count &&
+                 check_action_kind(types, operand_type) == BUSTER_TYPE_KIND_POINTER &&
+                 check_action_kind(types, check_stream_type(stream, graph->operand1[node])) == BUSTER_TYPE_KIND_POINTER)
+        {
+            // clang's err_typecheck_sub_ptr_compatible (#1872): two pointers to incompatible types, as written.
+            const uint32_t second = graph->operand1[node];
+            const String8 left = check_driver_warning_type(parser, pp, input, types, spell, scratch, operand_type,
+                                                           check_semantic_operand_spelling(parser, input, stream, types, operand));
+            const String8 right = check_driver_warning_type(parser, pp, input, types, spell, scratch, check_stream_type(stream, second),
+                                                            check_semantic_operand_spelling(parser, input, stream, types, second));
+            result = left.length != 0 && right.length != 0 ? check_warning_text(scratch, "%.*s and %.*s are not pointers to compatible types", (int)left.length,
+                                                                                left.pointer, (int)right.length, right.pointer) : NULL;
         }
         else if (report->diagnostic == CHECK_DIAG_ARITHMETIC_REQUIRED && op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_POST_DECREMENT &&
                  operand_type != 0 && !check_action_steppable(types, operand_type))

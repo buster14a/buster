@@ -202,7 +202,9 @@ static SymbolId check_program_body_symbol(const CheckProgram* program, uint32_t 
     {
         symbol = program->cpu_versions[v].object == object ? program->cpu_symbols[v] : symbol;
     }
-    return symbol;
+    // Multiversioning by target strings' (#1838, c_check_program_target_versions.c).
+    const SymbolId target = program->target_group_count != 0 ? check_program_target_body_symbol(program, b) : 0;
+    return target != 0 ? target : symbol;
 }
 
 // The features a version's body is compiled with beside the unit's (clang compiles a copy for each CPU of its list, each

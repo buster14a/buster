@@ -2707,8 +2707,11 @@ static void check_constant_action(CheckConstantInput* input, const CheckAction* 
         check_x86_action(reader->types, &call, &typed, &result);
         *checked = result.action;
     }
-    else if (action->op == CHECK_OP_MEMBER && check_vector_type(reader->types, action->operands[0].type))
+    else if ((action->op == CHECK_OP_MEMBER && check_vector_type(reader->types, action->operands[0].type)) ||
+             (action->op == CHECK_OP_ARROW && check_action_kind(reader->types, type_strip_aligned(reader->types, action->operands[0].type)) == BUSTER_TYPE_KIND_POINTER &&
+              check_action_kind(reader->types, type_element(reader->types, type_strip_aligned(reader->types, action->operands[0].type))) == BUSTER_TYPE_KIND_EXT_VECTOR))
     {
+        // (`p->y` too, through a pointer to an extended vector: check_vector_arrow.)
         // Type queries run before the retained graph supplies its vector-member records. Give the ordinary
         // member action the same decoded selector here, with lane storage borrowed only for this action.
         const uint64_t mark = reader->scratch->length;
