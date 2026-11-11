@@ -3445,8 +3445,10 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
         for (uint32_t i = 0; i < input->implicit_function_count; i += 1)
         {
             const uint32_t token = input->implicit_function_tokens[i];
-            const CheckWarningSeverity severity = check_diagnostic_implicit_function(input, token);
-            if (token < count && severity != CHECK_WARNING_IGNORE && (!quiet || (input->implicit_function_c99 && severity >= CHECK_WARNING_ERROR)) &&
+            const CheckWarningSeverity severity = check_diagnostic_implicit_function(input, i);
+            // An error clang makes by default (C99's, an unknown builtin's) survives -w.
+            const bool default_error = input->implicit_function_c99 || input->implicit_function_builtins[i];
+            if (token < count && severity != CHECK_WARNING_IGNORE && (!quiet || (default_error && severity >= CHECK_WARNING_ERROR)) &&
                 (repair == NULL || check_repair_warning_token(repair, token)))
             {
                 report_keys[report_total++] = (uint64_t)token << 32 | (input->report_count + stream_reports + extra_count + i);
@@ -3826,10 +3828,13 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                 }
                 else if (sequence >= offset)
                 {
-                    const CheckWarningSeverity severity = check_diagnostic_implicit_function(input, token);
+                    const uint32_t implicit = sequence - offset;
+                    const CheckWarningSeverity severity = check_diagnostic_implicit_function(input, implicit);
+                    const bool builtin = input->implicit_function_builtins[implicit];
+                    const bool default_error = input->implicit_function_c99 || builtin;
                     const bool source_error = input->fatal_errors && severity == CHECK_WARNING_ERROR;
-                    const PPSeverity pp_severity = severity == CHECK_WARNING_FATAL ? (input->implicit_function_c99 ? PP_SEVERITY_FATAL : PP_SEVERITY_MAPPED_FATAL) :
-                                                   severity == CHECK_WARNING_ERROR ? (input->implicit_function_c99 && !source_error ? PP_SEVERITY_ERROR : PP_SEVERITY_MAPPED_ERROR) : PP_SEVERITY_WARNING;
+                    const PPSeverity pp_severity = severity == CHECK_WARNING_FATAL ? (default_error ? PP_SEVERITY_FATAL : PP_SEVERITY_MAPPED_FATAL) :
+                                                   severity == CHECK_WARNING_ERROR ? (default_error && !source_error ? PP_SEVERITY_ERROR : PP_SEVERITY_MAPPED_ERROR) : PP_SEVERITY_WARNING;
                     const uint32_t name = parser->tokens.names[token];
                     const uint32_t publication = check_driver_publication_position(parser, pp, token + 1u, publication_end);
                     const bool library = (input->function_flags[token] & CHECK_INPUT_FUNCTION_IMPLICIT_LIBRARY) != 0;
@@ -3838,12 +3843,11 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                         check_driver_implicit_library(pp, types, input, pp_severity, parser->tokens.sources[token], publication, intern_bytes(pp->table, name),
                                                       intern_length(pp->table, name), input->implicit_function_c99, scratch);
                     }
-                    else if (input->implicit_function_c99)
+                    else if (default_error)
                     {
                         // The function the name may have meant (#1447, c_check_typo.c), which clang's ImplicitlyDefineFunction
                         // searches only where its diagnostic is an error: a "did you mean" note at the call's name and a
                         // "declared here" one at the function's.
-                        const uint32_t implicit = sequence - offset;
                         const uint32_t meant = input->implicit_function_corrections != NULL && implicit < input->implicit_function_count ?
                                                input->implicit_function_corrections[implicit] : BUSTER_CHECK_NONE;
                         const bool corrected = severity >= CHECK_WARNING_ERROR && meant < count;
@@ -3858,6 +3862,7 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                             { .token = corrected ? parser->tokens.sources[meant] : 0, .message = declared },
                         };
                         pp_diagnose_output_notes_at(pp, pp_severity, parser->tokens.sources[token], publication, notes, corrected ? 2u : 0u,
+                            builtin ? "use of unknown builtin '%.*s' [-Wimplicit-function-declaration]" :
                             "call to undeclared function '%.*s'; ISO C99 and later do not support implicit function declarations [-Wimplicit-function-declaration]",
                             (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
                     }

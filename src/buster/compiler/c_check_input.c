@@ -884,6 +884,8 @@ struct CheckInput
     // Beside each, the function its name may have meant's declaration token (#1447, c_check_typo.c): a "did you mean"
     // note and a "declared here" one; or BUSTER_CHECK_NONE, or BUSTER_CHECK_TYPO_UNSEARCHED where no search was made.
     uint32_t* implicit_function_corrections;
+    // Beside each, whether it declares an unknown builtin, a `__builtin_` name: clang's "use of unknown builtin" (#2121).
+    bool* implicit_function_builtins;
     uint32_t implicit_function_count;
     // The uses a typo's correction recovered (#1447, c_check_typo.c), in source order, at most its search limit: a warning
     // at an operator or a declarator whose operand holds one is published after its error (check_driver_after_corrections).
@@ -891,6 +893,7 @@ struct CheckInput
     uint32_t corrected_count;
     uint8_t implicit_function_diagnostic;
     uint8_t implicit_library_diagnostic;
+    uint8_t implicit_builtin_diagnostic;
     bool implicit_function_c99;
     // -fcommon (PredefinesOptions.common, #147): the emission makes every tentative definition a common symbol.
     bool common_tentatives;
@@ -15066,6 +15069,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                                                         pp->options.language.standard >= 1999 ? 3 : 1,
                          .implicit_library_diagnostic = pp->options.implicit_library_diagnostic != 0 ? pp->options.implicit_library_diagnostic :
                                                         pp->options.language.standard >= 1999 ? 3 : 2,
+                         .implicit_builtin_diagnostic = pp->options.implicit_builtin_diagnostic != 0 ? pp->options.implicit_builtin_diagnostic : 3,
                          .implicit_function_c99 = pp->options.language.standard >= 1999,
                          .common_tentatives = pp->options.predefines.common,
                          .implicit_function_system = pp->options.implicit_function_system,
