@@ -6917,8 +6917,17 @@ static void check_lower_helper(CheckLowerWriter* writer, uint32_t node)
     const uint32_t parameters = count + compare + init;
     // clang's code computes the IEEE maximum and minimum by AVX10.2's vminmax in a function whose target has it, whose NaN
     // results aren't the expansion's that the leaves compute (cbuiltin_atomic_rmw_ieee_body).
-    const bool minmax = source_id >= CBUILTIN_ATOMIC_FETCH_FMAXIMUM && source_id <= CBUILTIN_ATOMIC_FETCH_FMINIMUM_NUM &&
-                        (writer->target.extensions & BUSTER_X86_EXTENSION(AVX10_2)) != 0;
+    const bool ieee = source_id >= CBUILTIN_ATOMIC_FETCH_FMAXIMUM && source_id <= CBUILTIN_ATOMIC_FETCH_FMINIMUM_NUM;
+    const bool minmax = ieee && (writer->target.extensions & BUSTER_X86_EXTENSION(AVX10_2)) != 0;
+    // A _Float16's and a __bf16's leaf follows the unit's target (check_program_helper_half_format): a function whose own
+    // target differs in what decides it is refused.
+    const uint64_t half_extensions = BUSTER_X86_EXTENSION(AVX512FP16) | BUSTER_X86_EXTENSION(AVXNECONVERT);
+    const bool half_target = ieee && selected != BUSTER_CHECK_NONE && helpers->uses[selected].helper < helpers->count &&
+                             helpers->items[helpers->uses[selected].helper].rmw_format >= CBUILTIN_ATOMIC_RMW_F16_BITS &&
+                             ((writer->target.extensions ^ program->target.extensions) & half_extensions) != 0;
+    const bool half_feature = ieee && selected != BUSTER_CHECK_NONE && helpers->uses[selected].helper < helpers->count &&
+                              helpers->items[helpers->uses[selected].helper].rmw_format >= CBUILTIN_ATOMIC_RMW_F16_BITS &&
+                              ((writer->target.features ^ program->target.features) & BUSTER_X86_FEATURE(AVX512BF16)) != 0;
     CheckLowerAbi* abi = writer->abi;
     if (selected == BUSTER_CHECK_NONE || helpers->uses[selected].helper >= helpers->count)
     {
@@ -6927,6 +6936,11 @@ static void check_lower_helper(CheckLowerWriter* writer, uint32_t node)
     else if (minmax)
     {
         check_lower_unsupported(writer, "clang's atomic IEEE maximum and minimum for a target with AVX10.2");
+    }
+    else if (half_target || half_feature)
+    {
+        check_lower_unsupported(writer, "clang's atomic IEEE maximum and minimum of a _Float16 or a __bf16 in a function whose target's AVX512-FP16, "
+                                        "AVX512-BF16 or AVX-NE-CONVERT differs from its unit's");
     }
     else if (abi->count >= abi->capacity || parameters > abi->argument_capacity - abi->argument_count)
     {
@@ -6975,6 +6989,11 @@ static void check_lower_helper(CheckLowerWriter* writer, uint32_t node)
             {
                 check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_TERMINATE });
             }
+            else if (helper->result_type == BUSTER_TYPE_ULONG && check_lower_class_half(result_class) != CHECK_HALF_NONE)
+            {
+                // A half-precision value is its bits, a U16's (check_lower_storage_class), the leaf's result's low 16.
+                check_lower_convert(writer, BUSTER_TYPE_ULONG, BUSTER_TYPE_USHORT);
+            }
             else if (helper->result_type == BUSTER_TYPE_ULONG && (result_class == BUSTER_TYPED_CLASS_F32 || result_class == BUSTER_TYPED_CLASS_F64))
             {
                 const uint32_t result = check_lower_addressed_temporary(writer, BUSTER_TYPED_CLASS_U64);
@@ -7011,6 +7030,11 @@ static void check_lower_helper(CheckLowerWriter* writer, uint32_t node)
                     check_lower_instruction(writer, BUSTER_TYPED_LOAD, class == BUSTER_TYPED_CLASS_F32 ? BUSTER_TYPED_CLASS_U32 : BUSTER_TYPED_CLASS_U64, 0);
                     check_lower_instruction(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, local);
                     check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, class, local);
+                }
+                else if (helper->parameter_types[a] == BUSTER_TYPE_ULONG && check_lower_class_half(class) != CHECK_HALF_NONE)
+                {
+                    // A half-precision value's bits, a U16's, zero-extended (#1843).
+                    check_lower_convert(writer, BUSTER_TYPE_USHORT, BUSTER_TYPE_ULONG);
                 }
                 else if (check_lower_vector_of(writer, helper->parameter_types[a]) != 0)
                 {

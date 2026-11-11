@@ -1495,9 +1495,9 @@ code whose runs equal clang -O0's on both paths.
 - clang's atomic IEEE 754-2019 maximum and minimum, `__atomic_fetch_fmaximum`,
   `_fmaximum_num`, `_fminimum` and `_fminimum_num` (and their scoped forms), are
   read/modify/write rules of clang's floating types alone (complex ones among
-  them) but long double ("must be a pointer to floating point type"). A float's
-  and a double's have leaves; the other types are valid and refused by name at
-  the lowering. clang's code computes them through LLVM's x86 expansion of
+  them) but long double ("must be a pointer to floating point type"). A
+  float's, a double's, a `_Float16`'s and a `__bf16`'s have leaves; the other
+  types are valid and refused by name at the lowering. clang's code computes them through LLVM's x86 expansion of
   `llvm.maximum` and the others on every target without AVX10.2 (baseline to
   znver5 alike, at -O0 and -O2): `maxss` or `minss` of the old value and the
   operand, the result's sign cleared where the old value's is clear (maximum) or
@@ -1507,6 +1507,26 @@ code whose runs equal clang -O0's on both paths.
   and the leaves (`cbuiltin_atomic_rmw_ieee_body`) compute the same sequence.
   With AVX10.2 clang's code takes `vminmaxss` instead, whose NaN results differ,
   so a function whose target has AVX10.2 refuses them by name.
+- Of a `_Float16` or a `__bf16` (#1843), clang's code converts both values to
+  float, computes that sequence and converts the result back (a `_Float16`
+  with AVX512-FP16 computes it in half precision with `vmaxsh`). Every result is
+  one of the two values, its sign or quiet bit changed, so the leaves compute it
+  in the integer registers (`cbuiltin_atomic_rmw_ieee_half_body`): `maxss`'s or
+  `minss`'s choice by the values' order (a signed key of the magnitude), the
+  same sign and NaN steps, then what the conversion back does on the unit's
+  target, a leaf format each (`check_program_helper_half_format`):
+  - a NaN result quieted, as `__truncsfhf2`, `vcvtps2ph`, `__truncsfbf2` and
+    `vcvtneps2bf16` quiet it, but not with AVX512-FP16, which converts none;
+  - a `__bf16` denormal result flushed to its sign's zero with AVX512-BF16 or
+    AVX-NE-CONVERT, whose `vcvtneps2bf16` flushes it.
+
+  A function whose own target differs from its unit's in those features is
+  refused by name. The leaves raise no floating-point exception, where clang's
+  code raises its conversions' and `maxss`'s. And clang's `__bf16` code keeps
+  the old value as a float and converts it back for its compare-exchange, so
+  where that changes it (an object holding a signaling NaN, or a denormal where
+  `vcvtneps2bf16` flushes it) the compare fails forever and clang's program
+  hangs; the leaves compare the bits they loaded and return.
 
 `test-check-builtins-atomic` checks the queries' constants against clang's
 evaluator's rules, the generic forms' conversions and constraints and the scoped
@@ -1514,13 +1534,16 @@ families' models (`check_builtin_atomic_test_families`);
 `test-check-builtins-atomic-rmw` the added rules
 (`check_builtin_atomic_rmw_test_added`); `test-builtin-atomic-rmw-helpers` the new
 leaves against the host compiler's own builtins at every width (the IEEE
-maximum's and minimum's on every pair of 14 values of each width);
+maximum's and minimum's on every pair of 14 values of each width and type, the
+2-byte types' in the host's own format, but the old values its `__bf16` code
+hangs on);
 `test-preprocessor` the sized names' resolution, also at a guard page; and
 `test-checker` their acceptance and first errors against clang's (35 fixtures
 of the IEEE family's among them) and five programs of them against clang -O0's
 builds (`c_check_program_atomic_test.c`: sized legacy forms, wrapping, flags and
 lock-free queries, generic forms, scoped families, and the IEEE maximum and
-minimum on every pair of 13 values, signaling NaNs among them).
+minimum on every pair of 13 values, signaling NaNs among them, of a float, a
+double, a `_Float16` and a `__bf16`).
 
 `c_builtin_terminal_helpers.c` emits one baseline UD2 record for trap and a
 conservative realization of unreachable behavior. Its source consumer must
