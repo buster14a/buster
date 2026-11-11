@@ -1119,6 +1119,23 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
         "static int below(long double a, long double b){int r;__asm__(\"fcomi %%st(1), %%st\" : \"=@ccb\"(r) : \"t\"(a), \"u\"(b));return r;}"
         "int tested(int n){long double a=n*0.5L+1,b=n-2.25L;return (int)(swap_sub(a,b)*8)+(int)(add_top(a,b)*4)+(int)square(a)+(int)(reversed(a,b)*16)+below(a,b)*1000+below(b,a)*3000;}",
         "asm-x87-named", clang);
+    // A's operands (#1846): an __int128 in rdx:rax, mulq's product beside an "a" input that shares rax, a `+` pair, a
+    // pair's input matching its output, and 64-bit and narrower values in rax, printed by their 64-bit names (an
+    // unsigned zero-extended there, and a short's), a double's bits among them.
+    check_test_program_source(test,
+        "static unsigned __int128 product(unsigned long a, unsigned long b){unsigned __int128 r;__asm__(\"mulq %2\" : \"=A\"(r) : \"a\"(a), \"rm\"(b));return r;}"
+        "static unsigned __int128 swap_halves(unsigned __int128 v){__asm__(\"xchgq %%rax, %%rdx # %0\" : \"+A\"(v));return v;}"
+        "static unsigned __int128 copied(unsigned __int128 v){unsigned __int128 r;__asm__(\"# %0 %1\" : \"=A\"(r) : \"A\"(v));return r;}"
+        "static unsigned long low_bits(unsigned long v){unsigned long r;__asm__(\"lea 1(%1), %0\" : \"=A\"(r) : \"r\"(v));return r;}"
+        "static unsigned widened(unsigned v){unsigned r;__asm__(\"not %0\\n\\tshr $32, %0\" : \"=A\"(r) : \"0\"(v));return r;}"
+        "static int wide_name(short v){int r;__asm__(\"movq %1, %q0\\n\\tadd %k1, %k0\" : \"=r\"(r) : \"A\"(v));return r;}"
+        "static double through(double d){__asm__(\"# %0\" : \"+A\"(d));return d;}"
+        "int tested(int n){unsigned long a=(unsigned long)n*0x9e3779b97f4a7c15ul+1,b=(unsigned long)(n+3)*0xc2b2ae3d27d4eb4ful;"
+        "unsigned __int128 p=product(a,b);unsigned __int128 q=swap_halves(p);unsigned __int128 c=copied(q+n);"
+        "return (int)(p>>64)+(int)p*3+(int)(q>>64)*5+(int)(c>>70)+(int)low_bits(a)+(int)widened((unsigned)n*77u)+wide_name((short)(n*1000-3))+(int)through(n*2.5);}",
+        "asm-pair", clang);
+    check_test_program_boundary_reason(test, "int tested(int n){unsigned __int128 v=(unsigned)n;__asm__(\".p2align 4\\n\\tnotq %%rax\" : \"+A\"(v));return (int)v;}",
+                                       "asm-pair-directives", true, false, 0, 1, "inline assembly's 16-byte A operands in templates that take directives");
     // MMX's operands (#1846): y's registers of a long, an unsigned, a short and a byte (zero-extended into the register,
     // its low bytes stored), a double's bits, an early-clobbered output, a matching input, MMX clobbers the
     // registers avoid, an MMX input into a general output, and a template of no instructions; emms before returning.
