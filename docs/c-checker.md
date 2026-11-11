@@ -725,16 +725,30 @@ clang's error at the declarator's name (`check_input_vla_place`,
 - a member, "fields must have a constant size: 'variable length array in
   structure' extension will never be supported".
 
+A block's automatic variable-length array with an initializer other than `{}`
+is clang's "variable-sized object may not be initialized"
+(`CHECK_INPUT_VLA_INITIALIZER`): at the outermost bound's first token for a
+list, as `InitListChecker` places it, and at the name for any other
+initializer, as `InitializationSequence` does. It recovers: the declaration
+stays valid, and its initializer is skipped unchecked, as clang checks it no
+further.
+
 A `sizeof` of a variable type name in a file-scope initializer
 (`int s = 1 + sizeof(int[n]);`) is "initializer element is not a compile-time
 constant", at the start of the initializer's element that holds it.
+A cast's or an `_Alignof`'s variable type name at file scope (`(int(*)[n])0`,
+`_Alignof(int[n])`) makes a variable array type whose bound is never evaluated,
+as clang folds both (#1852): its `CheckInputVla` is not evaluated and captures
+no bound.
 
 Differences left: these errors stop the reader, where clang marks the
-declaration invalid and goes on. A file-scope cast to a variably modified
-type, and `_Alignof` of one, are still refused, though clang accepts them.
-A block's variable-length array with a non-empty initializer is still
-"invalid or unsupported declaration" (clang's "variable-sized object may not
-be initialized", at the bound).
+declaration invalid and goes on. In a body, a cast to a variably modified
+type (`(void)((int (*)[n])0)`, in `sizeof` too) is still "construct is not yet
+supported", though clang accepts it: the cast's captured bound is a second
+operand the graph's cast doesn't take.
+A skipped VLA initializer's undeclared names and expression warnings
+(`{q}`, `"y" + 1`) aren't reported; clang reports them, and an undeclared name
+in a list makes the list invalid, with no "may not be initialized" error.
 Immutable source-position diagnostic pragmas apply push/pop and exact warning
 group policy to these witnesses. Promoted warnings participate in first-error
 ordering and prevent object publication; `-w` suppresses them as Clang does.
