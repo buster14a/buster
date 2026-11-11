@@ -2326,7 +2326,8 @@ static bool type_test_sugar_prints(const TypeTable* table, const TypeSugarTable*
         .sugar_macro_count = count,
     };
     const String8 printed = type_sugar_print(table, sugar, arena, node, type, (String8){ 0 }, &names, 0);
-    const bool result = printed.length == strlen(expected) && memcmp(printed.pointer, expected, printed.length) == 0;
+    // An empty print's pointer may be null, which memcmp doesn't take even for no bytes.
+    const bool result = printed.length == strlen(expected) && (printed.length == 0 || memcmp(printed.pointer, expected, printed.length) == 0);
     if (!result)
     {
         fprintf(stderr, "test-types: sugar: \"%.*s\" against \"%s\"\n", (int)printed.length, printed.pointer, expected);
