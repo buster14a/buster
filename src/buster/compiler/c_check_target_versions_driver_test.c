@@ -545,11 +545,9 @@ static void check_test_target_versions_objects(CheckTest* test, const char* clan
         "__attribute__((target(\"popcnt,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2,avx2\"))) int g(int x);\n"
         "int call_s(void);\nint call_t(void);\n"
         "__attribute__((target_clones(\"avx2\", \"avx512f\", \"sse4.2\", \"default\"))) int w(int x);\n"
-        // (In one unit with the definition, the direct path's link doesn't take a label of a symbol the unit defines: #2204.
-        // The versions compute the same values, so the function itself stands for them there.)
-        "#ifndef TARGET_JOINED\n"
+        // Labels of the versions' names: in one unit with the definition, clang's module has one global per name, so they are
+        // the versions' own symbols (#2204, check_program_label_forwards).
         "int w0(int) __asm__(\"w.avx2.0\");\nint w2(int) __asm__(\"w.sse4.2.2\");\nint w3(int) __asm__(\"w.default.3\");\n"
-        "#else\n#define w0 w\n#define w2 w\n#define w3 w\n#endif\n"
         "int (*address_f)(int) = f;\nint (*address_c)(int) = c;\nint (*address_d)(int) = d;\n"
         "int main(void) { printf(\"%d %d %d %d %d %d %d %d %d %d %d %d %d\\n\", f(5), call_s(), address_f(1), c(2), address_c(3), call_t(), d(4), address_d(6), g(9),\n"
         "    w(2), w0(3), w2(4), w3(5));\n"
@@ -618,8 +616,39 @@ static void check_test_target_versions_objects(CheckTest* test, const char* clan
     char together[PATH_MAX];
     snprintf(together, sizeof(together), "%s/target-together.c", directory);
     char text[sizeof(versions) + sizeof(callers) + 32];
-    snprintf(text, sizeof(text), "#define TARGET_JOINED 1\n%s%s", versions, callers);
+    snprintf(text, sizeof(text), "%s%s", versions, callers);
     const bool joined = written && parse_test_write(together, text, strlen(text));
+    // The unit's -c object has clang's symbols: the labels' references are the versions' symbols, with no undefined
+    // symbol of their names (#2204).
+    {
+        char joined_objects[3][PATH_MAX];
+        char* joined_symbols[3] = { malloc(SYMBOLS), malloc(SYMBOLS), malloc(SYMBOLS) };
+        bool joined_built[3] = { false, false, false };
+        for (uint32_t p = 0; joined && p < 3; p += 1)
+        {
+            snprintf(joined_objects[p], sizeof(joined_objects[p]), "%s/target-together-%u.o", directory, p);
+            joined_built[p] = check_test_cpu_dispatch_build(p == 0 ? clang : executable, together, joined_objects[p], true, p == 2, NULL);
+        }
+        const bool read = joined_symbols[0] != NULL && joined_symbols[1] != NULL && joined_symbols[2] != NULL && joined_built[0] && joined_built[1] && joined_built[2] &&
+                          check_test_target_versions_symbols(joined_objects[0], joined_symbols[0], SYMBOLS) &&
+                          check_test_target_versions_symbols(joined_objects[1], joined_symbols[1], SYMBOLS) &&
+                          check_test_target_versions_symbols(joined_objects[2], joined_symbols[2], SYMBOLS);
+        for (uint32_t p = 1; joined && p < 3; p += 1)
+        {
+            char description[SYMBOLS * 2 + 256];
+            snprintf(description, sizeof(description), "target versions: one unit's object of labels of its versions' names has clang's symbols, by the %s path:\n%s(clang\n%s)",
+                     p == 1 ? "vector" : "scalar", read ? joined_symbols[p] : "", read ? joined_symbols[0] : "");
+            check_test_expect(test, read && check_test_target_versions_same_lines(joined_symbols[0], joined_symbols[p]), description);
+        }
+        for (uint32_t p = 0; p < 3; p += 1)
+        {
+            free(joined_symbols[p]);
+            if (joined)
+            {
+                unlink(joined_objects[p]);
+            }
+        }
+    }
     for (uint32_t p = 0; joined && p < 4; p += 1)
     {
         char built_program[PATH_MAX];
