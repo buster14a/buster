@@ -7,6 +7,69 @@
 #include "linker_options.c"
 #include "c_driver_inputs.c"
 
+// The closing brace of the function body around `token`, up its tree's parents, or BUSTER_CHECK_NONE.
+static uint32_t check_driver_body_close(const Parser* parser, uint32_t token)
+{
+    const uint32_t count = parser->tokens.count;
+    uint32_t result = BUSTER_CHECK_NONE;
+    for (uint32_t parent = token, steps = 0; result == BUSTER_CHECK_NONE && parent < count && steps < count; steps += 1)
+    {
+        result = parser->tree.roles[parent] == PARSE_ROLE_CLOSE_BODY ? parent : BUSTER_CHECK_NONE;
+        parent = parser->tree.parents[parent];
+    }
+    return result;
+}
+
+// The candidates clang's notes name for an ambiguous label's reference, report `index` (#1844, its reader's
+// check_input_report_label_ambiguous), in its lookup's order, into `candidates` (`capacity` of them), their count: the
+// innermost list's entries of the name in the candidates' scope, the latest first (its note token's, then back through
+// its block's lists, which begin the block), then where the function's own labels are among them (`detail` 1), in the
+// order clang made them: the one a reference that was no ambiguity made (`attribute`), then the one each earlier
+// ambiguous reference of the function made, at its name.
+static uint32_t check_driver_label_candidates(const Parser* parser, const CheckInput* input, uint32_t index, uint32_t* candidates, uint32_t capacity)
+{
+    const uint32_t count = parser->tokens.count;
+    const CheckInputReport* report = input->reports + index;
+    const uint32_t name = parser->tokens.names[report->token];
+    uint32_t found = 0;
+    bool listed = report->note_token < count;
+    for (uint32_t token = report->note_token; listed && found < capacity; token -= 1)
+    {
+        const uint8_t kind = parser->tokens.kinds[token];
+        if (kind == PARSE_KIND_IDENTIFIER && parser->tokens.names[token] == name)
+        {
+            candidates[found++] = token;
+        }
+        listed = token != 0 && (kind == PARSE_KIND_IDENTIFIER || kind == PARSE_KIND_COMMA || kind == PARSE_KIND_SEMI || kind == PARSE_KIND_LABEL);
+    }
+    if (report->detail == 1)
+    {
+        if (report->attribute < count && found < capacity)
+        {
+            candidates[found++] = report->attribute;
+        }
+        // The earlier ambiguous references of the name in the same body, in their tokens' order.
+        const uint32_t close = check_driver_body_close(parser, report->token);
+        const uint32_t start = found;
+        for (uint32_t r = 0; r < input->report_count && found < capacity; r += 1)
+        {
+            const CheckInputReport* other = input->reports + r;
+            if (other->message == CHECK_INPUT_LABEL_AMBIGUOUS && other->token < report->token && parser->tokens.names[other->token] == name &&
+                check_driver_body_close(parser, other->token) == close)
+            {
+                uint32_t at = found++;
+                while (at > start && candidates[at - 1] > other->token)
+                {
+                    candidates[at] = candidates[at - 1];
+                    at -= 1;
+                }
+                candidates[at] = other->token;
+            }
+        }
+    }
+    return found;
+}
+
 static const char* check_driver_action_message(CheckDiagnostic diagnostic)
 {
     const char* result = "invalid expression";
@@ -4421,6 +4484,23 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                             pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, previous < count ? 1u : 0u,
                                                         "alias definition of '%.*s' after tentative definition", (int)intern_length(pp->table, name),
                                                         intern_bytes(pp->table, name));
+                        }
+                        else if (phase == 0 && input->reports[index].message == CHECK_INPUT_LABEL_AMBIGUOUS && located < count &&
+                                 parser->tokens.kinds[located] == PARSE_KIND_IDENTIFIER)
+                        {
+                            // An ambiguous label's reference (#1844), with clang's note at each candidate its lookup found.
+                            const uint32_t name = parser->tokens.names[located];
+                            uint32_t candidates[16];
+                            const uint32_t candidate_count = check_driver_label_candidates(parser, input, index, candidates, BUSTER_ARRAY_LENGTH(candidates));
+                            char candidate[512];
+                            snprintf(candidate, sizeof(candidate), "candidate found by name lookup is '%.*s'", (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
+                            PPOutputDiagnosticNote notes[16];
+                            for (uint32_t c = 0; c < candidate_count; c += 1)
+                            {
+                                notes[c] = (PPOutputDiagnosticNote){ .token = parser->tokens.sources[candidates[c]], .message = candidate };
+                            }
+                            pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, notes, candidate_count, "reference to '%.*s' is ambiguous",
+                                                        (int)intern_length(pp->table, name), intern_bytes(pp->table, name));
                         }
                         else if (phase == 0 && input->reports[index].message >= CHECK_INPUT_LABEL_UNDECLARED &&
                                  input->reports[index].message <= CHECK_INPUT_LABEL_AMBIGUOUS && located < count && parser->tokens.kinds[located] == PARSE_KIND_IDENTIFIER)
