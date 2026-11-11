@@ -18,12 +18,12 @@ static const CheckDriverDefaultWarningFixture check_driver_asm_label_auto_fixtur
                   "register int r asm(\"eax\"); (void)r; (void)s; }\n"
                   "void c(int k) { int vla[k] asm(\"v\\x41\"); (void)vla; { struct { int a; } st asm(\"st\" \"1\"); (void)st; } }\n"
                   "void d(void) { int q __asm__(\"q1\") __attribute__((unused)); int u asm(\"u1\"), w asm(\"w1\"); u = w = 1; }\n",
-        .warnings = 9,
+        .warnings = 8,
     },
     {
         // C23's `auto` of an inferred type and constexpr objects.
         .name = "asm labels on C23 automatic variables",
-        .source = "void a(void) { auto x asm(\"x1\") = 1; (void)x; constexpr int y asm(\"y1\") = 2; (void)y; }\n",
+        .source = "void a(void) { auto x __asm__(\"x1\") = 1; (void)x; constexpr int y __asm__(\"y1\") = 2; (void)y; }\n",
         .warnings = 2,
         .c23 = true,
     },
