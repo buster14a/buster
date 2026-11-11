@@ -209,6 +209,20 @@ static __attribute__((noinline)) void check_test_undeclared(CheckTest* test, con
           "5:64: error: -\n5:75: error: -\n5:88: error: use of undeclared identifier 'undeclared'\n"
           "6:26: error: use of undeclared identifier 'undeclared'\n6:38: error: -\n"
           "7:23: error: use of undeclared identifier 'undeclared'\n7:54: error: -\n", true },
+        { "a statement expression's value after a statement with the name (#1447)",
+          "int f1(int *p) { return ({ undeclared; p; }) + 1.5; }\n"
+          "int f2(int *p) { int *q; q = ({ undeclared; 1.5; }); return *q; }\n"
+          "int f3(int x) { int y = ({ int t = undeclared; t; }) << 40; return y; }\n"
+          "int f4(int x) { return ({ undeclared; x; }) + *1 + ({ int z = 0; undeclared; }); }\n",
+          "1:28: error: use of undeclared identifier 'undeclared'\n1:46: error: -\n"
+          "2:33: error: use of undeclared identifier 'undeclared'\n2:28: error: -\n"
+          "3:36: error: use of undeclared identifier 'undeclared'\n3:54: warning: -\n"
+          "4:27: error: use of undeclared identifier 'undeclared'\n4:47: error: -\n4:66: error: use of undeclared identifier 'undeclared'\n", true },
+        { "nested statement expressions: one in an earlier statement, one in the value's statement (#1447)",
+          "int f(int *p) { return ({ (void)({ missing_a; 1; }); p; }) + 1.5; }\n"
+          "int g(int *p) { return ({ missing_b; ({ missing_c; p; }); }) + 1.5; }\n",
+          "1:36: error: use of undeclared identifier 'missing_a'\n1:60: error: -\n"
+          "2:27: error: use of undeclared identifier 'missing_b'\n2:41: error: use of undeclared identifier 'missing_c'\n2:62: error: -\n", true },
         { "a duplicate case after a case whose statement has the name",
           "int f(int x) { switch (x) { case 1: undeclared; case 1: return 0; } return 1; }\n",
           "1:37: error: use of undeclared identifier 'undeclared'\n1:54: error: -\n", true },

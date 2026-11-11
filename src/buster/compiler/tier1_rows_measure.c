@@ -11,7 +11,7 @@
 //                                     [--uncounted]
 //
 // The programs, each a unit the build compiles (`-c`) and a main by clang -O2 that runs it and prints what it computed:
-// - rows: test-checker-driver's machine rows' unit (c_check_tier1_driver_test.c's check_test_tier1_rows_source: x86-64-v4's
+// - rows: test-checker-driver's machine rows' unit (c_check_tier1_rows_fixture.h's check_test_tier1_rows_source: x86-64-v4's
 //   vector builtins and operators on bytes, words and quadwords), its main its other unit's rounds, --rounds of them
 //   (10000), hashed.
 // - scan: a lexer's byte classes over a 1 MiB C-like text, 64 bytes at a time (identifier starts, lines, quotes, and a
@@ -33,6 +33,8 @@
 // caller pins this process): a `tier1-rows-run` line per run, then every pair's medians, then a table by program and
 // metric of the builds' medians and --tier1 against Tier 0 and against --base's. DIR is a new directory under
 // --directory ($TMPDIR, or /tmp), removed at the end unless --keep.
+
+#include "buster/compiler/c_check_tier1_rows_fixture.h"
 
 #define BUSTER_TIER1_ROWS_BUILDS 4
 #define BUSTER_TIER1_ROWS_PROGRAMS 3

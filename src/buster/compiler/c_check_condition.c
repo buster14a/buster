@@ -29,6 +29,9 @@
 
 #define BUSTER_CHECK_CONDITION_CONSTANT 0xffffffffu
 #define BUSTER_CHECK_CONDITION_PARAMETER 0xfffffffeu
+#define BUSTER_CHECK_CONDITION_COMMA 0xfffffffdu
+#define CHECK_CONDITION_OPAQUE_CALL 1u
+#define CHECK_CONDITION_OPAQUE_WRITE 2u
 
 typedef enum CheckConditionKind
 {
@@ -69,6 +72,8 @@ struct CheckCondition
     uint32_t attribute;
     uint32_t message;
     uint32_t declaration;
+    // diagnose_if's warning group (CheckInputAttribute.warning_group): its index in pp_features_warning plus one, or 0.
+    uint16_t group;
     uint8_t kind;
     uint8_t state;
 };
@@ -246,10 +251,12 @@ static CheckConditionBuild check_condition_steps(CheckInputReader* reader, Check
     uint8_t* named = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint8_t, n);
     uint8_t* constant_node = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint8_t, n);
     uint8_t* skipped = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint8_t, n);
+    uint8_t* opaque = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint8_t, n);
     CheckConditionStep* steps = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, CheckConditionStep, n);
     CheckValue* constants = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, CheckValue, n);
     const bool allocated = first_child != NULL && last_child != NULL && next_sibling != NULL && order != NULL && stack != NULL && cursor != NULL && low != NULL &&
-                           high != NULL && step_of != NULL && named != NULL && constant_node != NULL && skipped != NULL && steps != NULL && constants != NULL;
+                           high != NULL && step_of != NULL && named != NULL && constant_node != NULL && skipped != NULL && opaque != NULL && steps != NULL &&
+                           constants != NULL;
     reader->output->resource |= !allocated;
     CheckConditionBuild result = allocated ? CHECK_CONDITION_BUILT : CHECK_CONDITION_FAILED;
     uint32_t root = BUSTER_CHECK_NONE;
@@ -327,6 +334,16 @@ static CheckConditionBuild check_condition_steps(CheckInputReader* reader, Check
         const bool unevaluated = (check_condition_unevaluated_keyword(parser, token) && first_child[v] != BUSTER_CHECK_NONE) ||
                                  (parser->tokens.kinds[token] == PARSE_KIND_R_PAREN && low[v] != v && check_condition_unevaluated_keyword(parser, first + low[v]));
         constant_node[v] = !named[v] || unevaluated;
+        // What no constant evaluation gets past (#1447): a call of a declared function (CHECK_CONDITION_OPAQUE_CALL), and an
+        // assignment or an increment (CHECK_CONDITION_OPAQUE_WRITE).
+        const uint8_t kind = parser->tokens.kinds[token];
+        const uint32_t callee = first_child[v] != BUSTER_CHECK_NONE ? first + first_child[v] : BUSTER_CHECK_NONE;
+        const uint32_t called = callee != BUSTER_CHECK_NONE && parser->tokens.kinds[callee] == PARSE_KIND_IDENTIFIER ? reader->output->declarations[callee] :
+                                BUSTER_CHECK_NONE;
+        const bool call = parser->tree.roles[token] == PARSE_ROLE_CLOSE_CALL && called < parser->tokens.count &&
+                          reader->declaration_kinds[called] == C_BINDING_FUNCTION && first_child[callee - first] == BUSTER_CHECK_NONE;
+        const bool write = parser->tree.roles[token] == PARSE_ROLE_ASSIGN || kind == PARSE_KIND_PLUSPLUS || kind == PARSE_KIND_MINUSMINUS;
+        opaque[v] = call ? CHECK_CONDITION_OPAQUE_CALL : write ? CHECK_CONDITION_OPAQUE_WRITE : 0;
     }
     // The nodes no step is made for, parents first: a constant's inside, a bracket's opener, a conditional's `?` and a
     // cast's type name.
@@ -339,7 +356,8 @@ static CheckConditionBuild check_condition_steps(CheckInputReader* reader, Check
         const uint8_t kind = parser->tokens.kinds[token];
         const bool opener = ((kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE) && first_child[v] == BUSTER_CHECK_NONE) || kind == PARSE_KIND_QUESTION;
         const bool type_name = !top && parser->tokens.kinds[parent] == PARSE_KIND_R_PAREN && parser->tree.roles[parent] == PARSE_ROLE_CLOSE_CAST && token < parent;
-        skipped[v] = !top && (skipped[parent - first] || constant_node[parent - first] || opener || type_name);
+        const bool callee = !top && opaque[parent - first] == CHECK_CONDITION_OPAQUE_CALL && first_child[parent - first] == v;
+        skipped[v] = !top && (skipped[parent - first] || constant_node[parent - first] || opener || type_name || callee);
     }
     uint32_t parameter_count = 0;
     const TypeId* parameter_types = type_parameters(reader->types, function, &parameter_count);
@@ -387,9 +405,16 @@ static CheckConditionBuild check_condition_steps(CheckInputReader* reader, Check
                 avoidable = ((above_kind == PARSE_KIND_AMPAMP || above_kind == PARSE_KIND_PIPEPIPE) && at > above) ||
                             (above_kind == PARSE_KIND_COLON && first_child[above - first] != at - first);
             }
-            if (!evaluated && variable != BUSTER_CHECK_NONE && !avoidable)
+            // Or a call, an assignment or an increment in it, which no constant evaluation gets past: the first, the note's.
+            uint32_t written = BUSTER_CHECK_NONE;
+            for (uint32_t t = low[v]; !evaluated && written == BUSTER_CHECK_NONE && t <= high[v]; t += 1)
             {
-                check_condition_never_constant(reader, attributes, attribute, variable);
+                written = opaque[t] == CHECK_CONDITION_OPAQUE_CALL ? first + first_child[t] : opaque[t] != 0 ? first + t : BUSTER_CHECK_NONE;
+            }
+            const uint32_t noted = variable != BUSTER_CHECK_NONE && (written == BUSTER_CHECK_NONE || variable < written) ? variable : written;
+            if (!evaluated && noted != BUSTER_CHECK_NONE && !avoidable)
+            {
+                check_condition_never_constant(reader, attributes, attribute, noted);
                 result = CHECK_CONDITION_FAILED;
             }
             else if (!evaluated && !avoidable)
@@ -404,6 +429,38 @@ static CheckConditionBuild check_condition_steps(CheckInputReader* reader, Check
                 constant_count += 1;
                 step_of[v] = step_count++;
             }
+        }
+        else if (!skipped[v] && opaque[v] != 0)
+        {
+            // A call naming a parameter is unknown, as its arguments are; an assignment or an increment that can't be skipped
+            // never gives a constant, at its operator, and one that can is unknown.
+            bool avoidable = opaque[v] == CHECK_CONDITION_OPAQUE_CALL;
+            for (uint32_t at = token; !avoidable && parser->tree.parents[at] >= first && parser->tree.parents[at] < end && parser->tree.parents[at] != at;
+                 at = parser->tree.parents[at])
+            {
+                const uint32_t above = parser->tree.parents[at];
+                const uint8_t above_kind = parser->tokens.kinds[above];
+                avoidable = ((above_kind == PARSE_KIND_AMPAMP || above_kind == PARSE_KIND_PIPEPIPE) && at > above) ||
+                            (above_kind == PARSE_KIND_COLON && first_child[above - first] != at - first);
+            }
+            if (!avoidable)
+            {
+                check_condition_never_constant(reader, attributes, attribute, token);
+                result = CHECK_CONDITION_FAILED;
+            }
+            else
+            {
+                constants[constant_count] = (CheckValue){ .type = BUSTER_TYPE_INT, .category = CHECK_RVALUE };
+                steps[step_count] = (CheckConditionStep){ .op = BUSTER_CHECK_CONDITION_CONSTANT, .index = constant_count, .operands = { 0, 0, 0 } };
+                constant_count += 1;
+                step_of[v] = step_count++;
+            }
+        }
+        else if (!skipped[v] && kind == PARSE_KIND_COMMA && operand_count == 2 && opener == BUSTER_CHECK_NONE)
+        {
+            // A comma operator's value is its right operand's, where its left one's is known.
+            steps[step_count] = (CheckConditionStep){ .op = BUSTER_CHECK_CONDITION_COMMA, .operands = { step_of[operands[0]], step_of[operands[1]], 0 } };
+            step_of[v] = step_count++;
         }
         else if (!skipped[v] && kind == PARSE_KIND_IDENTIFIER && first_child[v] == BUSTER_CHECK_NONE)
         {
@@ -485,6 +542,7 @@ static CheckConditionBuild check_condition_build(CheckInputReader* reader, Check
         .attribute = attribute->first,
         .message = valid ? check_condition_string(parser, message_first, message_end) : BUSTER_CHECK_NONE,
         .declaration = name,
+        .group = attribute->kind == CHECK_ATTRIBUTE_DIAGNOSE_IF ? attribute->warning_group : 0,
         .kind = CHECK_CONDITION_ENABLE,
         .state = CHECK_CONDITION_OPAQUE,
     };
@@ -519,7 +577,19 @@ static CheckConditionBuild check_condition_build(CheckInputReader* reader, Check
         condition->state = truth ? CHECK_CONDITION_TRUE : CHECK_CONDITION_FALSE;
         if (!known)
         {
-            check_condition_never_constant(reader, attributes, attribute, check_condition_variable(reader, parameters, list, first, end));
+            // The note at the first variable it reads, or call of a declared function, assignment or increment it makes.
+            const uint32_t variable = check_condition_variable(reader, parameters, list, first, end);
+            uint32_t written = BUSTER_CHECK_NONE;
+            for (uint32_t t = first; written == BUSTER_CHECK_NONE && t < end; t += 1)
+            {
+                const uint8_t kind = parser->tokens.kinds[t];
+                const uint32_t called = kind == PARSE_KIND_IDENTIFIER && t + 1 < end && parser->tree.roles[t + 1] == PARSE_ROLE_OPEN_CALL ?
+                                        reader->output->declarations[t] : BUSTER_CHECK_NONE;
+                const bool call = called < parser->tokens.count && reader->declaration_kinds[called] == C_BINDING_FUNCTION;
+                const bool write = parser->tree.roles[t] == PARSE_ROLE_ASSIGN || kind == PARSE_KIND_PLUSPLUS || kind == PARSE_KIND_MINUSMINUS;
+                written = call || write ? t : BUSTER_CHECK_NONE;
+            }
+            check_condition_never_constant(reader, attributes, attribute, variable != BUSTER_CHECK_NONE && variable < written ? variable : written);
             result = CHECK_CONDITION_FAILED;
         }
     }
@@ -675,27 +745,25 @@ static bool check_condition_callee(const Parser* parser, uint32_t token)
     return after + 1 < count && parser->tokens.kinds[after + 1] == PARSE_KIND_L_PAREN && parser->tree.roles[after + 1] == PARSE_ROLE_OPEN_CALL;
 }
 
-// Whether the name at `token` is in a sizeof's, an alignof's or a typeof's operand: a walk back over its statement, through
-// complete groups, to each `(` open around it and the keyword before it.
+// Whether the name at `token` is a sizeof's, an alignof's or a typeof's operand, through the parentheses around it, which
+// clang doesn't convert to an address (inside an operation there, as `sizeof(q == r)`, it does).
 static bool check_condition_unevaluated(const Parser* parser, uint32_t token)
 {
-    bool unevaluated = token > 0 && check_condition_unevaluated_keyword(parser, token - 1);
-    uint32_t depth = 0;
-    bool walking = true;
-    for (uint32_t t = token; !unevaluated && walking && t > 0; t -= 1)
+    const uint32_t count = parser->tokens.count;
+    uint32_t before = token;
+    uint32_t after = token;
+    while (before > 0 && after + 1 < count && parser->tokens.kinds[before - 1] == PARSE_KIND_L_PAREN && parser->tree.parents[before - 1] == after + 1)
     {
-        const uint8_t kind = parser->tokens.kinds[t - 1];
-        walking = depth != 0 || (kind != PARSE_KIND_SEMI && kind != PARSE_KIND_L_BRACE && kind != PARSE_KIND_R_BRACE);
-        depth += kind == PARSE_KIND_R_PAREN || kind == PARSE_KIND_R_SQUARE || kind == PARSE_KIND_R_BRACE ? 1u : 0u;
-        const bool open = kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE || kind == PARSE_KIND_L_BRACE;
-        unevaluated = walking && open && depth == 0 && kind == PARSE_KIND_L_PAREN && t > 1 && check_condition_unevaluated_keyword(parser, t - 2);
-        depth -= open && depth != 0 ? 1u : 0u;
+        before -= 1;
+        after += 1;
     }
-    return unevaluated;
+    return before > 0 && check_condition_unevaluated_keyword(parser, before - 1);
 }
 
 // diagnose_if's diagnostics of `entry`'s conditions that `holds` says hold (its ith, the list's ith), at `location`: the
-// first error alone, else each warning, each with its note at its attribute.
+// first error of no warning group alone, else each warning, each with its note at its attribute. One of a warning group
+// is clang's custom diagnostic of that group, a warning or an error by default, without the note (payload.data: the
+// group's index plus one, BUSTER_CHECK_WARNING_GROUP_ERROR for an error's).
 static void check_condition_diagnose(CheckInputReader* reader, const CheckConditionDeclaration* entry, uint32_t location, const bool* holds)
 {
     const CheckInput* input = reader->output;
@@ -703,7 +771,8 @@ static void check_condition_diagnose(CheckInputReader* reader, const CheckCondit
     uint32_t error = BUSTER_CHECK_NONE;
     for (uint32_t i = 0; error == BUSTER_CHECK_NONE && i < entry->count; i += 1)
     {
-        error = holds[i] && input->conditions[entry->conditions[i]].kind == CHECK_CONDITION_ERROR ? entry->conditions[i] : BUSTER_CHECK_NONE;
+        const CheckCondition* held = input->conditions + entry->conditions[i];
+        error = holds[i] && held->kind == CHECK_CONDITION_ERROR && held->group == 0 ? entry->conditions[i] : BUSTER_CHECK_NONE;
     }
     if (error != BUSTER_CHECK_NONE)
     {
@@ -721,8 +790,9 @@ static void check_condition_diagnose(CheckInputReader* reader, const CheckCondit
     for (uint32_t i = 0; error == BUSTER_CHECK_NONE && i < entry->count; i += 1)
     {
         const CheckCondition* condition = input->conditions + entry->conditions[i];
-        if (holds[i] && condition->kind == CHECK_CONDITION_WARNING)
+        if (holds[i] && (condition->kind == CHECK_CONDITION_WARNING || (condition->kind == CHECK_CONDITION_ERROR && condition->group != 0)))
         {
+            const uint32_t group = condition->group != 0 ? condition->group | (condition->kind == CHECK_CONDITION_ERROR ? BUSTER_CHECK_WARNING_GROUP_ERROR : 0u) : 0u;
             const CheckWarningEvent event =
             {
                 .id = CHECK_WARNING_ID_USER_DEFINED_WARNINGS,
@@ -731,7 +801,7 @@ static void check_condition_diagnose(CheckInputReader* reader, const CheckCondit
                 .source = BUSTER_CHECK_WARNING_NO_SOURCE,
                 .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
                 .completion = location + 1,
-                .payload = { .name = parser->tokens.names[condition->declaration], .token = condition->message },
+                .payload = { .name = parser->tokens.names[condition->declaration], .token = condition->message, .data = group },
             };
             const CheckWarningNote note =
             {
@@ -740,14 +810,15 @@ static void check_condition_diagnose(CheckInputReader* reader, const CheckCondit
                 .source = BUSTER_CHECK_WARNING_NO_SOURCE,
                 .payload = { .name = parser->tokens.names[condition->declaration], .token = BUSTER_CHECK_WARNING_NO_SOURCE },
             };
-            check_input_warning_event(reader, &event, &note, 1);
+            check_input_warning_event(reader, &event, &note, condition->group == 0 ? 1u : 0u);
         }
     }
 }
 
 // One use of a function with conditions, at `token`, of `entry`'s declaration: the diagnose_if conditions that name no
-// parameter and hold, and the address of a function an enable_if restricts.
-static void check_condition_use(CheckInputReader* reader, uint32_t token, const CheckConditionDeclaration* entry)
+// parameter and hold. Whether the use converts the function's name to its address where an enable_if restricts it (other
+// than a call's callee and outside sizeof's, alignof's and typeof's operands), whose error check_condition_addresses decides.
+static bool check_condition_use(CheckInputReader* reader, uint32_t token, const CheckConditionDeclaration* entry)
 {
     const CheckInput* input = reader->output;
     const uint64_t mark = reader->scratch->length;
@@ -762,22 +833,127 @@ static void check_condition_use(CheckInputReader* reader, uint32_t token, const 
     {
         check_condition_diagnose(reader, entry, token, holds);
     }
-    if (entry->restricted && !check_condition_callee(reader->parser, token) && !check_condition_unevaluated(reader->parser, token))
+    arena_pop_to(reader->scratch, mark);
+    return entry->restricted && !check_condition_callee(reader->parser, token) && !check_condition_unevaluated(reader->parser, token);
+}
+
+// The operation that converts the function a restricted use at `token` names (clang's DefaultFunctionArrayConversion, which
+// gives the address error), past the parentheses around the name: the use's parent; a call's `)` for an argument, which
+// clang converts in order, the first failure ending the call; and an initializer's outermost `}` for an element (a
+// designation's too), whose elements clang converts each on its own once the whole list is read (`*independent`).
+static uint32_t check_condition_conversion(const Parser* parser, uint32_t token, bool* independent)
+{
+    const uint32_t count = parser->tokens.count;
+    uint32_t at = parser->tree.parents[token];
+    while (at < count && parser->tree.roles[at] == PARSE_ROLE_CLOSE_GROUP)
     {
-        // At the outermost `(` around the name, where clang's parenthesized expression begins.
-        uint32_t at = token;
-        uint32_t after = token;
-        while (at > 0 && after + 1 < reader->parser->tokens.count && reader->parser->tokens.kinds[at - 1] == PARSE_KIND_L_PAREN &&
-               reader->parser->tree.roles[at - 1] == PARSE_ROLE_OPEN_GROUP && reader->parser->tree.parents[at - 1] == after + 1)
+        at = parser->tree.parents[at];
+    }
+    // Past an argument list's or an initializer list's commas, and an initializer's designations and enclosing lists.
+    uint32_t above = at;
+    uint32_t list = BUSTER_CHECK_NONE;
+    bool climbing = true;
+    while (climbing && above < count)
+    {
+        // (A comma is a SEPARATOR or a COMMA: its kind, which every comma has, says it.)
+        const uint8_t role = parser->tree.roles[above];
+        const bool comma = parser->tokens.kinds[above] == PARSE_KIND_COMMA;
+        const uint32_t parent = parser->tree.parents[above];
+        const uint8_t parent_role = parent < count ? parser->tree.roles[parent] : PARSE_ROLE_NONE;
+        const bool parent_comma = parent < count && parser->tokens.kinds[parent] == PARSE_KIND_COMMA;
+        const uint32_t grandparent = parent < count ? parser->tree.parents[parent] : BUSTER_CHECK_NONE;
+        const uint8_t grandparent_role = grandparent < count ? parser->tree.roles[grandparent] : PARSE_ROLE_NONE;
+        const bool grandparent_comma = grandparent < count && parser->tokens.kinds[grandparent] == PARSE_KIND_COMMA;
+        const bool element = parent_comma || parent_role == PARSE_ROLE_CLOSE_INITIALIZER ||
+                             (parent_role == PARSE_ROLE_ASSIGN && (grandparent_comma || grandparent_role == PARSE_ROLE_CLOSE_INITIALIZER));
+        const bool braces = role == PARSE_ROLE_CLOSE_INITIALIZER || role == PARSE_ROLE_CLOSE_COMPOUND_BODY;
+        list = braces ? above : list;
+        climbing = comma || (role == PARSE_ROLE_CLOSE_INITIALIZER && element) ||
+                   (role == PARSE_ROLE_ASSIGN && (parent_comma || parent_role == PARSE_ROLE_CLOSE_INITIALIZER));
+        above = climbing ? parent : above;
+    }
+    const uint8_t found = above < count ? parser->tree.roles[above] : PARSE_ROLE_NONE;
+    *independent = list != BUSTER_CHECK_NONE;
+    return list != BUSTER_CHECK_NONE ? list : found == PARSE_ROLE_CLOSE_CALL ? above : at;
+}
+// The address errors of the restricted uses at `uses` (in source order, `use_count` of them), as clang gives them: at the
+// operation that converts each (check_condition_conversion), which clang builds only once its operands are, so not where
+// one of them holds a failed conversion (`(q == f) + r`'s `r` has none); and, where it converts its operands in order, the
+// first that fails ends it (`c ? q : r` gives `q`'s alone, as `g(q, r)` does). Each error is at the outermost `(` around
+// the name. Marks a byte per token in the reader's scratch: bit 0 at an operation one of whose operands failed, bit 1 at one
+// that converted a failed use.
+static void check_condition_addresses(CheckInputReader* reader, const uint32_t* uses, uint32_t use_count)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t count = parser->tokens.count;
+    const uint64_t mark = reader->scratch->length;
+    uint8_t* failed = use_count > 1 ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint8_t, count) : NULL;
+    reader->output->resource |= use_count > 1 && failed == NULL;
+    if (failed != NULL)
+    {
+        memset(failed, 0, count);
+        // Each failed conversion makes its operation, and each one around it, fail up to its statement: bit 0 at their
+        // parents. A walk stops where an earlier one marked the rest.
+        for (uint32_t i = 0; i < use_count; i += 1)
         {
-            at -= 1;
-            after += 1;
+            bool independent = false;
+            uint32_t at = check_condition_conversion(parser, uses[i], &independent);
+            bool walking = at < count;
+            while (walking)
+            {
+                const uint8_t role = parser->tree.roles[at];
+                const uint32_t parent = parser->tree.parents[at];
+                walking = parent < count && role != PARSE_ROLE_TERMINATOR && role != PARSE_ROLE_CLOSE_BLOCK && role != PARSE_ROLE_CLOSE_BODY &&
+                          (failed[parent] & 1u) == 0;
+                failed[parent < count ? parent : at] |= walking ? 1u : 0u;
+                at = parent;
+            }
         }
-        const uint32_t before = reader->output->report_count;
-        check_input_report(reader, at, CHECK_INPUT_ENABLE_IF_ADDRESS);
-        if (reader->output->report_count > before)
+    }
+    for (uint32_t i = 0; i < use_count && !reader->output->resource; i += 1)
+    {
+        const uint32_t token = uses[i];
+        bool independent = false;
+        const uint32_t at = check_condition_conversion(parser, token, &independent);
+        const bool reported = failed == NULL || at >= count || ((failed[at] & 1u) == 0 && (independent || (failed[at] & 2u) == 0));
+        if (failed != NULL && at < count)
         {
-            reader->output->reports[before].value = token;
+            failed[at] |= 2u;
+        }
+        if (reported)
+        {
+            // At the outermost `(` around the name, where clang's parenthesized expression begins.
+            uint32_t first = token;
+            uint32_t after = token;
+            while (first > 0 && after + 1 < count && parser->tokens.kinds[first - 1] == PARSE_KIND_L_PAREN &&
+                   parser->tree.roles[first - 1] == PARSE_ROLE_OPEN_GROUP && parser->tree.parents[first - 1] == after + 1)
+            {
+                first -= 1;
+                after += 1;
+            }
+            const uint32_t before = reader->output->report_count;
+            check_input_report(reader, first, CHECK_INPUT_ENABLE_IF_ADDRESS);
+            if (reader->output->report_count > before)
+            {
+                reader->output->reports[before].value = token;
+            }
+            // clang's expression is invalid then, and so are its statement's or declaration's checks, which the later
+            // expression checks leave from its start: back past the tokens of its depth or more to the end of what is before
+            // it (a `;`, a block's `}`, a statement's head).
+            const uint32_t depth = parser->tree.depths[token];
+            uint32_t start = first;
+            bool walking = true;
+            while (walking && start > 0)
+            {
+                const uint32_t previous = start - 1;
+                const uint8_t role = parser->tree.roles[previous];
+                const bool ends = parser->tokens.kinds[previous] == PARSE_KIND_SEMI || role == PARSE_ROLE_CLOSE_BLOCK || role == PARSE_ROLE_CLOSE_BODY ||
+                                  role == PARSE_ROLE_CLOSE_CONDITION || role == PARSE_ROLE_CLOSE_FOR || role == PARSE_ROLE_ELSE || role == PARSE_ROLE_DO ||
+                                  role == PARSE_ROLE_LABEL || role == PARSE_ROLE_CLOSE_CASE || role == PARSE_ROLE_OPEN_BLOCK || role == PARSE_ROLE_OPEN_BODY;
+                walking = !(ends && parser->tree.depths[previous] <= depth);
+                start -= walking ? 1u : 0u;
+            }
+            reader->expression_limit = start < reader->expression_limit ? start : reader->expression_limit;
         }
     }
     arena_pop_to(reader->scratch, mark);
@@ -794,8 +970,11 @@ static void check_input_condition_uses(CheckInputReader* reader)
     const uint64_t mark = reader->scratch->length;
     // Each declaration's mark, padded for the gathers' 4-byte reads.
     uint8_t* marked = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint8_t, (uint64_t)count + 4);
-    reader->output->resource |= marked == NULL;
-    if (marked != NULL)
+    // The uses whose address errors check_condition_addresses decides, at most one per token.
+    uint32_t* addresses = marked != NULL ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, (uint64_t)count + 1) : NULL;
+    uint32_t address_count = 0;
+    reader->output->resource |= addresses == NULL;
+    if (addresses != NULL)
     {
         memset(marked, 0, (uint64_t)count + 4);
         for (uint32_t i = 0; i < input->condition_declaration_count; i += 1)
@@ -819,7 +998,9 @@ static void check_input_condition_uses(CheckInputReader* reader)
                 const uint32_t token = first + (uint32_t)__builtin_ctz(hits);
                 if (parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER && !check_input_declares(reader, token))
                 {
-                    check_condition_use(reader, token, check_condition_declaration(input, input->declarations[token]));
+                    const bool address = check_condition_use(reader, token, check_condition_declaration(input, input->declarations[token]));
+                    addresses[address_count] = token;
+                    address_count += address ? 1u : 0u;
                 }
             }
             first += length;
@@ -830,9 +1011,12 @@ static void check_input_condition_uses(CheckInputReader* reader)
             if (declaration < count && declaration != token && marked[declaration] != 0 && parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER &&
                 !check_input_declares(reader, token))
             {
-                check_condition_use(reader, token, check_condition_declaration(input, declaration));
+                const bool address = check_condition_use(reader, token, check_condition_declaration(input, declaration));
+                addresses[address_count] = token;
+                address_count += address ? 1u : 0u;
             }
         }
+        check_condition_addresses(reader, addresses, address_count);
     }
     arena_pop_to(reader->scratch, mark);
 }

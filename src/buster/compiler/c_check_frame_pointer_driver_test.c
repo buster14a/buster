@@ -258,3 +258,98 @@ static void check_test_driver_frame_pointer(CheckTest* test, const char* clang, 
     unlink(harness_object);
     unlink(reference);
 }
+
+// asm statements whose templates return (#1839), placed in their callers as asm bodies: `leave; ret` with a value in
+// eax, on a branch of the function and on the template's own branch, which leave their functions past the epilogue, as
+// clang's objects do. With -fno-omit-frame-pointer both compilers' frames are rbp's, so that the way out returns to the
+// caller: each build (Tier 0, by each path, under --verify) prints clang's build's output, rbx among the caller's
+// registers it keeps (the harness sets it before a call that returns through the template and reads it after), as a
+// function whose template returns keeps no value of its own in a callee-saved register.
+static const char check_test_asm_return_source[] =
+    "int ret_early(int x)\n"
+    "{\n"
+    "    if (x > 3)\n"
+    "    {\n"
+    "        __asm__ volatile(\"movl $7, %%eax\\n\\tleave\\n\\tret\" ::: \"eax\");\n"
+    "    }\n"
+    "    return x * 2;\n"
+    "}\n"
+    "\n"
+    "int ret_pick(int x)\n"
+    "{\n"
+    "    int kept = x * 5;\n"
+    "    __asm__ volatile(\"cmpl $5, %0\\n\\tjne 1f\\n\\tmovl $99, %%eax\\n\\tleave\\n\\tret\\n1:\" : : \"r\"(x) : \"eax\", \"cc\");\n"
+    "    return x + 1 + kept;\n"
+    "}\n";
+
+static const char check_test_asm_return_main_source[] =
+    "#include <stdio.h>\n"
+    "\n"
+    "int ret_early(int x);\n"
+    "int ret_pick(int x);\n"
+    "\n"
+    "int main(void)\n"
+    "{\n"
+    "    int s = 0;\n"
+    "    for (int i = 0; i < 8; i += 1)\n"
+    "    {\n"
+    "        s = s * 3 + ret_early(i) + ret_pick(i);\n"
+    "    }\n"
+    "    long kept;\n"
+    "    __asm__ volatile(\"movq $0x1234, %%rbx\\n\\tmovl $5, %%edi\\n\\tcall ret_pick\\n\\tmovq %%rbx, %0\"\n"
+    "                     : \"=r\"(kept) : : \"rax\", \"rcx\", \"rdx\", \"rsi\", \"rdi\", \"r8\", \"r9\", \"r10\", \"r11\", \"rbx\", \"memory\", \"cc\");\n"
+    "    printf(\"%d %ld\\n\", s, kept);\n"
+    "    return 0;\n"
+    "}\n";
+
+static void check_test_driver_asm_return(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    char source[512];
+    char harness[512];
+    char harness_object[512];
+    char reference[512];
+    snprintf(source, sizeof(source), "%s/asm-return.c", directory);
+    snprintf(harness, sizeof(harness), "%s/asm-return-main.c", directory);
+    snprintf(harness_object, sizeof(harness_object), "%s/asm-return-main.o", directory);
+    snprintf(reference, sizeof(reference), "%s/asm-return-clang", directory);
+    const bool written = parse_test_write(source, check_test_asm_return_source, sizeof(check_test_asm_return_source) - 1) &&
+                         parse_test_write(harness, check_test_asm_return_main_source, sizeof(check_test_asm_return_main_source) - 1);
+    char* reference_arguments[] = { (char*)clang, "-O0", "-fno-omit-frame-pointer", "-o", reference, source, harness, NULL };
+    char* harness_arguments[] = { (char*)clang, "-O0", "-fno-omit-frame-pointer", "-c", "-o", harness_object, harness, NULL };
+    char* text = NULL;
+    const bool referenced = written && check_test_driver_spawn(reference_arguments, &text) == 0;
+    free(text);
+    text = NULL;
+    const bool harnessed = written && check_test_driver_spawn(harness_arguments, &text) == 0;
+    free(text);
+    char expected[256] = { 0 };
+    const bool ran = referenced && harnessed && check_test_driver_capture(reference, expected, sizeof(expected)) && expected[0] != 0;
+    check_test_expect(test, ran, "clang's build of the returning asm templates runs");
+    // rbx as the harness set it: 0x1234, 4660.
+    const size_t length = strlen(expected);
+    check_test_expect(test, !ran || (length > 6 && strcmp(expected + length - 6, " 4660\n") == 0), "clang's build keeps the caller's rbx through a template's return");
+    // Each path, with the frame pointer the option keeps and with the default options, which omit it elsewhere: a function
+    // whose template returns keeps one either way, for its `leave` (tier0_kept_pointer).
+    for (uint32_t build = 0; ran && build < 4; build += 1)
+    {
+        char object[512];
+        char program[512];
+        snprintf(object, sizeof(object), "%s/asm-return-%u.o", directory, build);
+        snprintf(program, sizeof(program), "%s/asm-return-%u", directory, build);
+        const bool compiled = check_test_frame_pointer_build(executable, source, object, false, false, (build & 1) != 0, build < 2, false);
+        check_test_expect(test, compiled, "the returning asm templates compile by Tier 0, under --verify");
+        char* link_arguments[] = { (char*)clang, "-o", program, object, harness_object, NULL };
+        char* link_text = NULL;
+        const bool linked = compiled && check_test_driver_spawn(link_arguments, &link_text) == 0;
+        free(link_text);
+        char actual[256] = { 0 };
+        check_test_expect(test, linked && check_test_driver_capture(program, actual, sizeof(actual)) && strcmp(actual, expected) == 0,
+                          "the returning asm templates leave their functions as clang's build's do, the caller's rbx kept");
+        unlink(object);
+        unlink(program);
+    }
+    unlink(source);
+    unlink(harness);
+    unlink(harness_object);
+    unlink(reference);
+}
