@@ -1659,7 +1659,10 @@ once from the top 128 bits and a sticky bit; a `__float128` or a
 half-precision value isn't folded), an operator whose operands are wide or a
 narrow value shifted by a wide count (`check_wide_fold`), and an integer
 constant expression read as an `int64_t` (`check_wide_i64`: array bounds,
-enumerators). Faults are the narrow ones: signed overflow, division by zero,
+enumerators). A const object's read takes its initializer's wide constant, or
+a zero's limbs, as clang's folding does (`check_const_load`,
+`check_const_zero`); the bit and alignment builtins fold them too (the
+[builtins' guide](c-builtins-integration.md)). Faults are the narrow ones: signed overflow, division by zero,
 shift counts and shifted values, with GNU's folding where the context takes
 it (a count past the width shifts by width - 1, as clang's evaluator clamps
 it).
@@ -5881,6 +5884,21 @@ initializations, brace elements, returns and prototype arguments. An
 assignment's or an increment's value is no constant to clang's evaluator, so
 its conversion warns of nothing (`char c = x = 1000;`, `{ x = 300 }`), though a
 comma's right operand's does (`check_common_conversion_leaf`, #1447).
+
+A `_BitInt` constant past 128 bits (#1447, "Constants past 128 bits") warns as
+a narrow one does, by the same rules on its whole value
+(`check_wide_conversion_changes`, the twin of
+`check_common_conversion_changes`, and `check_wide_same_width` of
+`check_common_same_width`), into any narrower type, a wide one too, with both
+values printed in decimal (`check_wide_text`). A declarator past a specifier's
+parentheses (`_BitInt(100) n = e;`, `typeof(int) y = e;`, whose `=` the
+parser hangs off the specifier's `)`) is evaluated: the unevaluated-operand
+scan (`check_warning_graph_void_step`) counts only the tokens between the
+parentheses as typeof's operand, where it took every token after them, and
+dropped those declarators' conversion warnings. Still separate: clang's
+`-Wtautological-constant-out-of-range-compare`, whose values these would
+print, isn't given for any type, and neither is the static assertion's
+"expression evaluates to" note.
 
 A brace initializer's integer constants warn of their constant conversions too
 (#1447), in the reverse initializer order clang's `AnalyzeImplicitConversions`
