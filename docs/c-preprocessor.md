@@ -3500,9 +3500,13 @@ spellings alone would miss this change (#272).
   and follow no option. Not clang's yet, for `\N` as for `\u`: the error of a basic
   or control character's UCN in a skipped group, which clang gives; a UCN of a
   character no identifier may have within one ("character <U+2603> not allowed
-  in an identifier"), which clang reads into the identifier after that error;
-  and the -Wunicode warnings of a `\u` or `\U` without its digits, which the
-  candidates' search (a backslash before `N`) doesn't find.
+  in an identifier"), which clang reads into the identifier after that error.
+  The candidates' search takes a backslash before `u` and `U` too, so a `\u`
+  or `\U` clang reads as no UCN has its -Wunicode warning, at its token's
+  start, the first of any line splices before it: "\u used with no following
+  hex digits" (`BUSTER_PP_UCN_NO_DIGITS`), too few digits, and a delimited
+  `\u`'s empty braces or missing brace, which name its letter
+  (`pp_ucn_letter`). A `\U{`, clang's error, gives none.
 - `-E -P` keeps no line numbers, so it doesn't move the token after a
   `_Pragma` that prints nothing to its own line, as clang's printer does when
   that token is on another line; `-E` with line markers does.
