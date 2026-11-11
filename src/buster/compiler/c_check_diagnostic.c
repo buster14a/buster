@@ -176,6 +176,13 @@ static const CheckWarningDescription check_warning_descriptions[] =
                                                      "association will never be selected" },
     // (#1953: its ID past -Wunreachable-code-generic-assoc's, 131.)
     [CHECK_WARNING_ID_UNSEQUENCED] = { "-Wunsequenced", "-Wsequence-point", "multiple unsequenced modifications" },
+    [CHECK_WARNING_ID_DEFAULT_CONST_INIT_VAR_UNSAFE] = { "-Wdefault-const-init-var-unsafe", "-Wdefault-const-init-unsafe",
+                                                         "default initialization of an object of const type leaves the object uninitialized" },
+    [CHECK_WARNING_ID_DEFAULT_CONST_INIT_FIELD_UNSAFE] = { "-Wdefault-const-init-field-unsafe", "-Wdefault-const-init-unsafe",
+                                                           "default initialization of an object with const member leaves the object uninitialized" },
+    [CHECK_WARNING_ID_DEFAULT_CONST_INIT_VAR] = { "-Wdefault-const-init-var", "-Wdefault-const-init",
+                                                  "default initialization of an object of const type is incompatible with C++" },
+    [CHECK_WARNING_ID_CXX_COMPAT] = { "-Wc++-compat", NULL, "-Wc++-compat is on" },
 };
 
 _Static_assert(BUSTER_ARRAY_LENGTH(check_warning_descriptions) == CHECK_WARNING_ID_COUNT, "every sparse policy ID has a description");

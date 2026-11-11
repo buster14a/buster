@@ -3413,7 +3413,16 @@ What the lowering covers past scalars (#145's programs):
     feature's, doubled plus one), highest first. A version's condition is its
     `arch=` (`__builtin_cpu_is`'s test of the vendor, type or subtype; a
     microarchitecture level's bit) and its features' bits. A version of
-    neither is taken unconditionally, and a model none matches is a `ud2`. A
+    neither is taken unconditionally, and a model none matches is a `ud2`.
+    An `arch=X` version is chosen by the CPU model's vendor, family and
+    model alone, as clang's is, with no test of X's features, though its copy
+    is compiled with all of them (the owner's decision, #2355). On a machine
+    whose model is X but which doesn't report some of X's features (a VM that
+    hides AVX-512, as some hosted Zen 4 runners do), the resolver still
+    picks it, and an instruction of a hidden feature traps, as clang's build
+    does. A fixture that executes code on hosted runners chooses such a
+    version by feature (`avx512f`, which the resolver tests by its bit), not
+    by `arch=` (#2346). A
     static group's versions are emitted where its resolver is, as clang emits
     them. A block-scope static in a version is named by the function's name
     where clang emits it (`check_program_target_static_context`). In a
@@ -5106,7 +5115,33 @@ An undeclared name that is a typo of a visible one is clang's (#1447,
   suggests it ("did you mean 'while'?", "did you mean 'myint'?" with
   "'myint' declared here") and the name stays undeclared, the expression
   rejected with no other diagnostic of it, as clang's is (the report's
-  `detail` and `subject`, `check_typo_suggestion`).
+  `detail` and `subject`, `check_typo_suggestion`). Where an operand follows
+  the name (`sizeo a`, `retrn 5` in an initializer), the parse fails there;
+  clang's correction takes the keyword and skips the expression's rest to the
+  `,`, `;` or closer that ends it, without the parser's error. The recovery
+  view leaves that tail out for a name near an expression's or a statement's
+  keyword (`check_driver_typo_tail`, `CheckPrefixTails`), and keeps it, with
+  the parser's error, where the name's search then suggests no keyword.
+- **A statement's start** (`StatementFilterCCC`): a keyword is offered by the
+  next token as within an expression, and a type keyword or a typedef name
+  before a name, `(`, `[`, `*` or `&`; an object alone before `=`. Clang's
+  parser reads the statement again with a keyword or a type it takes
+  (`ClassifyName`): `retrn x;` returns x, `whil;` gives "expected '(' after
+  'while'", and `myin x;` declares a `myint`, its error "unknown type name
+  'myin'; did you mean 'myint'?". The reader can't parse again: the name's
+  report says what it took (`CHECK_TYPO_STATEMENT`), and the driver reads the
+  unit again from the original's tokens with each such name replaced, the view
+  recovered and checked as a failed parse's is (`check_driver_typo_edits`,
+  `CheckPrefixEdit`, up to 4 readings), its errors at the names first
+  (`check_driver_typo_errors`) and a parse error naming one spelling the
+  correction (`Parser.respelled`). An expression statement whose `;` is
+  missing after its first name or that name's call (`retrn x`, `whil (a) a--`)
+  is read on past as if the `;` were there (`ParseDiagnostic.probe`), as
+  clang's `ParseExprStatement` does once the name is classified, so that the
+  reader searches it; where the statement's expression keeps an undeclared
+  name, clang's invalid expression, its rest is left out to its `;`, with the
+  parser's error. Before C23 a name's call is an undeclared function's, which
+  no search reads as a keyword (`whil (a)` stays a call).
 - **An undeclared function's call** in C99 and later (`ImplicitlyDefineFunction`,
   only where its diagnostic is an error) takes a function. Its error gets
   "did you mean 'compute'?" at the call and "'compute' declared here", but not
@@ -5152,18 +5187,17 @@ Left as they were:
   '__builtin_abs'?`, or `'__builtin_ms_va_list'` for
   `__builtin_c23_va_start` named outside a call before C23).
 
-- At a statement's start clang parses the statement again with the keyword
-  it takes (`retrn x;` is a `return`, `whil;` then gives "expected '(' after
-  'while'", and in C23 `foo();` is a `for`). Where a keyword, or a visible
-  typedef before `(`, `[` or a name, is as near as the best value there,
-  buster suggests nothing. Clang's parser also takes a keyword before an
-  operand buster's parser can't read (`sizeo a`, `retrn 5` in an
-  initializer).
-- A declaration's type name is clang's parser's to correct
-  (`DiagnoseUnknownTypeName`): `myin x;` and a parameter's `myin v` keep
-  buster's parse errors, with no suggestion, and a parse error still ends
-  the checking. Neither does an implicit declaration's diagnostic that
-  `-Werror` makes an error before C99. A cast to one (`(myin)x`) is
+- A statement start's correction whose statement then fails to parse in a way
+  no recovery view reads past (`whil;`'s "expected '(' after 'while'", `myint
+  & 1`) ends the checking of its body there, as other such parse errors do;
+  so does a parse error within a call's parentheses (`foo (int i = 0; ...)`,
+  C23's `for`, and `sizeo (int)`). A statement whose undeclared name ends
+  before a `}` without a `;` keeps the parser's error.
+- A declaration's type name outside a statement's start is clang's parser's
+  to correct (`DiagnoseUnknownTypeName`): a parameter's `myin v` keeps
+  buster's "unknown type name" with no suggestion, and its prefix view
+  recovers it as `int`. Neither does an implicit declaration's diagnostic
+  that `-Werror` makes an error before C99. A cast to one (`(myin)x`) is
   still buster's parse error.
 - A function designator's comparison statement keeps its `-Wunused` and
   `-Wparentheses` notes after a correction.
@@ -5809,7 +5843,28 @@ the completion, so they follow Clang's after-function order; a redeclaration
 inherits an earlier `unused` or `used` attribute. A file-scope variable's
 unused warning is given only in the main file, as Clang leaves a header's
 file-scope variables alone because every unit that includes the header shares
-them. A block's declaration with linkage (an `extern` object, any function
+them. `check_input_default_const` (#2168, clang's `ActOnUninitializedDecl`) adds a
+const object without an initializer, at its name, with its type as declared.
+- **Automatic storage:**
+  - `-Wdefault-const-init-var-unsafe` where its type is const-qualified (an
+    array's elements', an `_Atomic`'s, a variable array's too);
+  - `-Wdefault-const-init-field-unsafe` where it is a struct whose first
+    const member, found depth first through its structs and unions
+    (`getConstField`), isn't an array of const elements nor a flexible array
+    member. Its note, "member 'm' declared 'const' here", is at that member's
+    declarator (`check_input_member_declarator`);
+  - both, for a const struct;
+  - none, for a union or an array of structs.
+- **Static storage:** `-Wdefault-const-init-var` alone, off by default (in
+  `-Wdefault-const-init` and `-Wc++-compat`). A file scope's object, a
+  tentative definition, gets it once, at the unit's end, from the tentative
+  definitions' walk (`check_input_tentative_arrays`): at its last tentative
+  definition, with its type completed (`'const int[1]'`), after its tentative
+  array's warning, and none where a later declaration defines it.
+- **The C++ words.** The unsafe ones say "and is incompatible with C++" where
+  `-Wc++-compat` is on there, as clang selects them by that group's fake
+  diagnostic: `CHECK_WARNING_ID_CXX_COMPAT`, a policy no event gives.
+A block's declaration with linkage (an `extern` object, any function
 declaration) is never unused: clang's semantic context for it is the
 translation unit, not the function, so `ShouldDiagnoseUnusedDecl` passes it
 by. A use through it uses the outer declaration with linkage it redeclares,
@@ -7579,15 +7634,35 @@ cached evaluator that types it doesn't take one. A redeclaration of a
 variable with linkage takes the earlier declaration's type rather than a
 deduced one, as clang's C `mergeTypes` takes the placeholder before deducing
 (`extern long p; __auto_type p = 1;` is a long, its initializer converted;
-`check_input_auto_type_merged`), through pointer declarators. Refused by
-name: `_Atomic` and `restrict` through a declarator (`_Atomic __auto_type *p`,
-whose initializer clang finds incompatible) or together (clang's restrict error
-names `_Atomic(__auto_type)`), `_Atomic` of an atomic value (clang's error names
-the placeholder's type), `restrict` of a value that is no pointer to an object
-(clang's `restrict int`, which the placeholder can't be told from), type
-attributes with `__auto_type`, a variably modified cast in the initializer, and a
-redeclaration whose merge clang refuses (its "redefinition of 'p' with a
-different type: 'const __auto_type' vs 'int'").
+`check_input_auto_type_merged`), through pointer declarators, and a `restrict`
+placeholder's over a restrict pointer. Where clang's `mergeTypes` refuses the
+merge (#1844, `check_input_auto_type_refused`), clang's error is given: the
+qualifiers of a level differ (const, volatile and restrict alike), a pointer
+declarator meets no pointer, or an `_Atomic` placeholder meets no atomic type.
+It reads "redefinition of 'p' with a different type: 'const __auto_type' vs
+'int'", or "redeclaration" with `extern`, at the name. The placeholder is
+printed through its declarator (`'volatile __auto_type *const'`,
+`'_Atomic(__auto_type)'`, `'restrict __auto_type'`;
+`check_semantic_auto_type_spelling`). The note is at the entity's latest
+earlier declaration, "previous definition is here" for a definition or a
+tentative one (`CHECK_REDECLARATION_AUTO_TYPE`). The reader stops there, as at
+other initialized invalid declarations, so clang's later errors aren't given.
+Refused by name: `_Atomic` and `restrict` through a declarator
+(`_Atomic __auto_type *p`, whose initializer clang finds incompatible) or
+together (clang's restrict error names `_Atomic(__auto_type)`), `_Atomic` of an
+atomic value (clang's error names the placeholder's type), `restrict` of a value
+that is no pointer to an object (clang's `restrict int`, which the placeholder
+can't be told from), type attributes with `__auto_type` but a vector's and a
+mode's, a variably modified cast in the initializer, and a redeclaration of an
+atomic entity, which clang merges (`_Atomic int r; __auto_type r = 1;` is an
+`_Atomic int`). A vector's attribute (`vector_size`, `ext_vector_type`) and a
+mode's meet the undeduced placeholder, as clang's handlers do (#1844,
+`check_input_attribute_auto_type`): "invalid vector element type 'T'" at the
+first vector attribute, T the placeholder's type there (the specifiers' bare
+`'__auto_type'`, or after the name the declarator's whole type,
+`'const __auto_type *'`), before "mode attribute only supported for integer and
+floating-point types" at a mode. Clang goes on with the declaration; the reader
+stops there.
 
 `test-checker`'s source fixtures compare these with clang, their acceptance and
 first error's line, on both paths, and its programs (`local-labels`,
