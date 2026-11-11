@@ -374,6 +374,20 @@ block's own, which run once its value is computed), and the check places the
 call at the CLEANUP control of its scope's closing token, in that control's
 statement, or in a statement expression's, the statement that reached it.
 
+A `target_clones` body (#2211) is checked against its **first** version's
+features, for every copy: clang's `checkTargetFeatures` asks
+`getFunctionFeatureMap` for the function's `GlobalDecl`, whose version index is
+0, whichever copy it emits. The first string is a target attribute's (`"avx2"`
+is `+avx2`, `"arch=X"` X's CPU, `"default"` the unit's). Its errors come once for
+each copy clang emits: each distinct version, a repeated one once
+(`check_target_feature_clone_count`). So `target_clones("avx2", "default")`
+calling an AVX2 `always_inline` function passes, and its `default` copy, whose
+instruction set lacks the callee's, is then refused by name where it reaches a
+builtin it can't lower. Clang compiles that copy with an out-of-line call of the
+intrinsic, through a mismatched vector ABI. Not given: clang's AVX ABI errors
+for such calls' wide vector arguments and returns, which buster gives for no
+function (#2367).
+
 That walk is Sema's reachability, its CFG's, which #487's range warnings
 follow, as clang's do. Code generation emits other code in a few shapes, and the
 check walks as it does there (`CheckTargetFeatureEmission`), #487's walk

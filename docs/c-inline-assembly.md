@@ -477,6 +477,34 @@ global register variable of a constraint that allows memory is clang's
 constraint" (its words exchanged, as for a bit-field), and `&sp` is "address of
 register variable requested".
 
+### Clobbers and asm labels' errors
+
+A clobber is checked as clang's `TargetInfo::isValidClobber` checks it (#2262):
+`memory`, `cc`, `unwind`, or a register name clang's x86-64 target knows
+(`check_input_register_name_valid`, the register variables' set: past one `%`
+or `#`, GCCRegNames and AddlRegNames, or an index of up to 180 in
+`getAsInteger`'s radixes). So `sil`, `dil`, `spl`, `bpl`, the segment
+registers, `rip`, `st0` and `st(0)` are clang's "unknown register name 'X' in
+asm" at the first such clobber's string, after the operands' constraints, and
+`dr0`, `cr0`, `fpcr`, `bnd0`, `tmm0` or `"17"` are taken. The lowering reads a
+clobber as clang normalizes it (`check_asm_clobber_name`: an index becomes its
+name, `"0x10"` `argp` and `"38"` `r8`); the control, debug, bound and tile
+registers and the flags' names need nothing of a helper or a body.
+
+A redeclaration whose asm label differs from an earlier declaration's is
+clang's "conflicting asm label" at its name, noted "previous declaration is
+here" at the earlier label's string: a linked one at the unit's end
+(`check_input_asm_labels`), and one that conflicts otherwise (a redefinition,
+another type, a local register variable declared again in its scope) before
+that conflict's own error, as clang's `mergeDeclAttributes` reports it
+(`check_input_asm_label_conflict`). `test-checker-driver`'s asm units compare
+both with clang's whole output.
+
+Differences left: an asm statement's constraint or clobber error ends its
+function's checking, where clang goes on past the statement (#2369); and
+clang's "ignored asm label 'X' on automatic variable" warning is missing
+(#2370).
+
 Such a variable has no object and no symbol (an initializer is ignored, as
 clang's): a read is its register's value, rsp's by `STACK_SAVE` and rbp's by
 `FRAME_ADDRESS`, which gives its function a frame pointer (clang's code reads rbp
