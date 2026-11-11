@@ -51,8 +51,7 @@
 // What the lowering refuses, by name (CheckProgramAsm.reason): an asm goto's label as anything but a jmp's or a jcc's
 // target, flag outputs of a size no integer store covers or with other alternatives, f's x87 registers, the vector
 // register classes and the other letters it doesn't place (p, Y but Yk, the floating constants), MMX operands with a
-// modifier or in templates that take directives, opmask operands with a modifier, in templates that
-// take directives or without their moves' features, x87 operands and clobbers off the stack's top, symbolic immediates
+// modifier, opmask operands with a modifier or without their moves' features, x87 operands and clobbers off the stack's top, symbolic immediates
 // and constants outside their
 // letter's range, operands of types no general or XMM register holds by value (but a vector in a template of no
 // instructions, BUSTER_CHECK_ASM_HELD), bit-fields, explicit register variables in registers it doesn't place one in
@@ -1767,7 +1766,7 @@ static AsmResult check_asm_unit_helper(const CheckAsmPlace* places, uint32_t cou
     }
     for (uint32_t k = 0; k < count; k += 1)
     {
-        stored |= check_asm_stores(places + k);
+        stored |= check_asm_stores(places + k) || check_asm_mmx_stores(places + k) || check_asm_pair_stores(places + k);
     }
     // At the call, rsp is 8 past a multiple of 16; the pushes and the reservation (the block's address's slot) leave it
     // at one at the template, as clang -O0's functions have it in their bodies.
@@ -1789,6 +1788,32 @@ static AsmResult check_asm_unit_helper(const CheckAsmPlace* places, uint32_t cou
     if (block)
     {
         check_asm_unit_text(output, "movq %rdi, (%rsp)\n", &valid);
+    }
+    // The MMX and opmask operands (#1846, the owner's decision on #1447), each zero-extended into rax and moved into its
+    // register, then A's pairs into rax and rdx, as the record helper loads them (check_asm_helper_code): before the
+    // general registers' loads, so that rax is free.
+    for (uint32_t k = 0; k < count; k += 1)
+    {
+        const CheckAsmPlace* place = places + k;
+        const uint32_t slot = place->written ? place->value : place->slot;
+        if (check_asm_mmx_loads(place))
+        {
+            check_asm_unit_text(output, place->size == 1 ? "movzbl " : place->size == 2 ? "movzwl " : place->size == 4 ? "movl " : "movq ", &valid);
+            check_asm_unit_number(output, slot, &valid);
+            check_asm_unit_text(output, place->size == 8 ? "(%rdi), %rax\n" : "(%rdi), %eax\n", &valid);
+            check_asm_unit_text(output, place->kind == BUSTER_CHECK_ASM_MMX ? "movq %rax, %mm" : place->size <= 2 ? "kmovw %eax, %k" :
+                                        place->size == 4 ? "kmovd %eax, %k" : "kmovq %rax, %k", &valid);
+            check_asm_unit_number(output, place->reg, &valid);
+            check_asm_unit_text(output, "\n", &valid);
+        }
+        else if (check_asm_pair_loads(place))
+        {
+            check_asm_unit_text(output, "movq ", &valid);
+            check_asm_unit_number(output, slot, &valid);
+            check_asm_unit_text(output, "(%rdi), %rax\nmovq ", &valid);
+            check_asm_unit_number(output, (int64_t)slot + 8, &valid);
+            check_asm_unit_text(output, "(%rdi), %rdx\n", &valid);
+        }
     }
     // The loads, from the block rdi holds: the one into rdi last. Only a matching pair shares a register, and of it only
     // the input loads, so one load at most goes into rdi.
@@ -1870,6 +1895,56 @@ static AsmResult check_asm_unit_helper(const CheckAsmPlace* places, uint32_t cou
         check_asm_unit_text(output, ", (", &valid);
         check_asm_unit_register(output, stores[1], 8, &valid);
         check_asm_unit_text(output, ")\n", &valid);
+    }
+    // A's pairs, rax and rdx through their addresses; then the MMX and opmask outputs (#1846), as the record helper stores
+    // them: a narrow MMX output's bytes and an opmask's bits through stores[0], whose block address is loaded again after.
+    for (uint32_t k = 0; k < count; k += 1)
+    {
+        const CheckAsmPlace* place = places + k;
+        if (!check_asm_pair_stores(place) && !check_asm_mmx_stores(place))
+        {
+            continue;
+        }
+        check_asm_unit_text(output, "movq ", &valid);
+        check_asm_unit_number(output, place->slot, &valid);
+        check_asm_unit_text(output, "(", &valid);
+        check_asm_unit_register(output, stores[0], 8, &valid);
+        check_asm_unit_text(output, "), ", &valid);
+        check_asm_unit_register(output, stores[1], 8, &valid);
+        check_asm_unit_text(output, "\n", &valid);
+        const bool through = place->kind == BUSTER_CHECK_ASM_MASK || (place->kind == BUSTER_CHECK_ASM_MMX && place->size < 4);
+        if (place->kind == BUSTER_CHECK_ASM_PAIR)
+        {
+            check_asm_unit_text(output, "movq %rax, (", &valid);
+            check_asm_unit_register(output, stores[1], 8, &valid);
+            check_asm_unit_text(output, ")\nmovq %rdx, 8(", &valid);
+            check_asm_unit_register(output, stores[1], 8, &valid);
+            check_asm_unit_text(output, ")\n", &valid);
+        }
+        else if (!through)
+        {
+            check_asm_unit_text(output, place->size == 8 ? "movq %mm" : "movd %mm", &valid);
+            check_asm_unit_number(output, place->reg, &valid);
+            check_asm_unit_text(output, ", (", &valid);
+            check_asm_unit_register(output, stores[1], 8, &valid);
+            check_asm_unit_text(output, ")\n", &valid);
+        }
+        else
+        {
+            const uint32_t wide = place->kind == BUSTER_CHECK_ASM_MASK && place->size == 8 ? 8 : 4;
+            check_asm_unit_text(output, place->kind == BUSTER_CHECK_ASM_MMX ? "movd %mm" : place->size <= 2 ? "kmovw %k" : place->size == 4 ? "kmovd %k" : "kmovq %k",
+                                &valid);
+            check_asm_unit_number(output, place->reg, &valid);
+            check_asm_unit_text(output, ", ", &valid);
+            check_asm_unit_register(output, stores[0], wide, &valid);
+            check_asm_unit_text(output, place->size == 1 ? "\nmovb " : place->size == 2 ? "\nmovw " : place->size == 4 ? "\nmovl " : "\nmovq ", &valid);
+            check_asm_unit_register(output, stores[0], place->size, &valid);
+            check_asm_unit_text(output, ", (", &valid);
+            check_asm_unit_register(output, stores[1], 8, &valid);
+            check_asm_unit_text(output, ")\nmovq (%rsp), ", &valid);
+            check_asm_unit_register(output, stores[0], 8, &valid);
+            check_asm_unit_text(output, "\n", &valid);
+        }
     }
     check_asm_unit_text(output, "addq $", &valid);
     check_asm_unit_number(output, frame, &valid);
@@ -2896,24 +2971,15 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
     bool x87 = false;
     bool held = false;
     bool flagged = false;
-    bool mmx_used = false;
-    bool masked = false;
-    bool paired = false;
     bool highs = false;
     for (uint32_t k = 0; valid && reason == NULL && k < count; k += 1)
     {
         x87 |= places[k].kind == BUSTER_CHECK_ASM_X87;
         held |= places[k].kind == BUSTER_CHECK_ASM_HELD;
         flagged |= places[k].kind == BUSTER_CHECK_ASM_FLAG;
-        mmx_used |= places[k].kind == BUSTER_CHECK_ASM_MMX;
-        masked |= places[k].kind == BUSTER_CHECK_ASM_MASK;
-        paired |= places[k].kind == BUSTER_CHECK_ASM_PAIR;
         highs |= places[k].high;
     }
     reason = valid && reason == NULL && unit_assembled && x87 ? "inline assembly x87 operands in templates that take directives" : reason;
-    reason = valid && reason == NULL && unit_assembled && mmx_used ? "inline assembly MMX operands in templates that take directives" : reason;
-    reason = valid && reason == NULL && unit_assembled && masked ? "inline assembly opmask operands in templates that take directives" : reason;
-    reason = valid && reason == NULL && unit_assembled && paired ? "inline assembly's 16-byte A operands in templates that take directives" : reason;
     reason = valid && reason == NULL && unit_assembled && highs ? "explicit register variables in high byte registers in templates that take directives" : reason;
     // The MMX registers are the x87's: a statement of both (#1846, the owner's decision on #1447) loads its x87 operands
     // first and its MMX ones after, and stores the MMX outputs before the x87 ones, as clang's code orders them; what the

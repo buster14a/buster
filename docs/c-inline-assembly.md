@@ -594,8 +594,10 @@ the statement's helper, as clang's inline bytes execute in its function; a
 assembly's, and `.popsection` or `.previous` returns to the template's own
 code. A pushed `.note.GNU-stack` is the writer's empty note, as `.section`'s is.
 
-Such a whole helper has the record path's operand block and stores, but none
-of its own paths: the x87's places, held vector operands, a flag output's
+Such a whole helper has the record path's operand block and stores, and its
+MMX and opmask operands' moves through rax and A's pairs in rax and rdx (#1846,
+the owner's decision on #1447, `check_asm_unit_helper`'s text), but none of its
+other paths: the x87's places, held vector operands, a flag output's
 `setcc` stores and an asm goto's exits (`check_asm_helper_code`). A template
 that takes directives refuses each by name ("inline assembly x87 operands",
 "vector operands", "flag outputs in templates that take directives", "asm goto
@@ -838,10 +840,9 @@ Each refusal names its feature, as the driver prints it ("unsupported: ..."):
 - flag outputs of a size no integer store covers, and with another
   alternative (`"=r@ccz"`, which clang takes as `r`);
 - the letters it doesn't place, and `A` of other sizes than up to 8 bytes and
-  an integer's 16, and in a template that takes directives with 16 bytes;
-- MMX operands with a modifier (clang refuses each), and in templates that
-  take directives;
-- opmask operands with a modifier, in templates that take directives, and
+  an integer's 16;
+- MMX operands with a modifier (clang refuses each);
+- opmask operands with a modifier, and
   without the moves' features (AVX-512F's for 1 or 2 bytes, AVX-512BW's for 4
   or 8), where clang can't place one;
 - x87 operands and clobbers off the stack's top (an input at st(1) without one

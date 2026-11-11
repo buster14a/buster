@@ -804,6 +804,14 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
         "__asm__(\"knotw %1, %1\\n\\tkmovw %%k3, %0\" : \"=r\"(o), \"+k\"(k));return (unsigned short)(o+k);}"
         "int tested(int n){return mask_variable((unsigned short)(n*977));}",
         "asm-register-variable-opmask", clang, masks_native);
+    // Opmask operands in templates that take directives (#1846): the unit helper's text moves them as the record helper does.
+    check_test_program_source_native(test,
+        "static __attribute__((target(\"avx512f\"))) unsigned short mask_and(unsigned short a, unsigned short b){unsigned short r;"
+        "__asm__(\".p2align 4\\n\\tkandw %1, %2, %0\" : \"=k\"(r) : \"k\"(a), \"Yk\"(b));return r;}"
+        "static __attribute__((target(\"avx512f,avx512bw\"))) unsigned long long mask_not(unsigned long long a){unsigned long long r;"
+        "__asm__(\".p2align 4\\n\\tknotq %1, %0\" : \"=k\"(r) : \"k\"(a));return r;}"
+        "int tested(int n){return mask_and((unsigned short)(n*977),(unsigned short)(n*31+5))+(int)(mask_not((unsigned long long)n*2654435761u)>>9);}",
+        "asm-opmask-directives", clang, masks_native);
     check_test_program_boundary_reason(test, "int tested(int n){unsigned short m=(unsigned short)n;__asm__(\"knotw %0, %0\" : \"+k\"(m));return m;}",
                                        "asm-opmask-baseline", true, false, 0, 1, "inline assembly opmask operands without AVX-512F");
     check_test_program_boundary_reason(test, "__attribute__((target(\"avx512f\"))) int tested(int n){unsigned m=(unsigned)n;__asm__(\"knotd %0, %0\" : \"+k\"(m));return (int)m;}",
@@ -1247,8 +1255,12 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
         "unsigned __int128 p=product(a,b);unsigned __int128 q=swap_halves(p);unsigned __int128 c=copied(q+n);"
         "return (int)(p>>64)+(int)p*3+(int)(q>>64)*5+(int)(c>>70)+(int)low_bits(a)+(int)widened((unsigned)n*77u)+wide_name((short)(n*1000-3))+(int)through(n*2.5);}",
         "asm-pair", clang);
-    check_test_program_boundary_reason(test, "int tested(int n){unsigned __int128 v=(unsigned)n;__asm__(\".p2align 4\\n\\tnotq %%rax\" : \"+A\"(v));return (int)v;}",
-                                       "asm-pair-directives", true, false, 0, 1, "inline assembly's 16-byte A operands in templates that take directives");
+    // A's pair in a template that takes directives (#1846, the owner's decision on #1447): the unit helper's text loads
+    // and stores it as the record helper does.
+    check_test_program_source(test,
+        "int tested(int n){unsigned __int128 v=((unsigned __int128)(unsigned)n<<64)|(unsigned)(n*7);__asm__(\".p2align 4\\n\\tnotq %%rax\\n\\taddq $3, %%rdx\" : \"+A\"(v));"
+        "return (int)v^(int)(v>>64);}",
+        "asm-pair-directives", clang);
     // MMX's operands (#1846): y's registers of a long, an unsigned, a short and a byte (zero-extended into the register,
     // its low bytes stored), a double's bits, an early-clobbered output, a matching input, MMX clobbers the
     // registers avoid, an MMX input into a general output, and a template of no instructions; emms before returning.
@@ -1276,8 +1288,11 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
         "int tested(int n){long double x=(long double)(n*n);long m=both(n*3+1,&x);unsigned char b[10];__builtin_memcpy(b,&x,10);"
         "int s=0;for(int i=0;i<10;i++)s=s*31+b[i];return (int)m+s;}",
         "asm-mmx-x87", clang);
-    check_test_program_boundary_reason(test, "int tested(int n){long m=n;__asm__(\".p2align 4\\n\\tpaddd %0, %0\" : \"+y\"(m));return (int)m;}",
-                                       "asm-mmx-directives", true, false, 0, 1, "inline assembly MMX operands in templates that take directives");
+    // MMX operands in a template that takes directives (#1846, the owner's decision on #1447), 8 and 2 bytes.
+    check_test_program_source(test,
+        "static short narrow(short a){short r;__asm__(\".p2align 4\\n\\tmovq %1, %0\" : \"=y\"(r) : \"y\"(a));return r;}"
+        "int tested(int n){long m=n;__asm__(\".p2align 4\\n\\tpaddd %0, %0\" : \"+y\"(m));int r=(int)m+narrow((short)(n*3));__asm__ volatile(\"emms\");return r;}",
+        "asm-mmx-directives", clang);
     check_test_program_boundary_reason(test, "typedef long long m64 __attribute__((vector_size(8)));int tested(int n){m64 v={n};__asm__(\"paddd %0, %0\" : \"+y\"(v));return (int)v[0];}",
                                        "asm-mmx-vector", true, false, 0, 1, "inline assembly operands of this type in their constraint's registers");
     // A template that returns is an asm body, whose return leaves its caller (#1839, test-checker-driver's returning templates);
