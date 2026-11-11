@@ -91,6 +91,12 @@ static void check_test_driver_label_attributes(CheckTest* test, const char* clan
                                                   "__attribute__((suppress(1))) __attribute__((suppress)) x++;\n__attribute__((suppress(((\"a\"))))) x++;\n"
                                                   "__attribute__((suppress(1))) T y = x;\n__attribute__((suppress(1))) return y;\n}\n" },
         { "malformed suppress after a control head", "int g(int x) {\nif (x) __attribute__((suppress(1))) x++;\nreturn x;\n}\n" },
+        // Before a label's name too, the parser's error drops it before Sema's subject error would refuse it on the label
+        // (#2332); a well-formed one is refused there, before a later refused attribute.
+        { "malformed suppress before a label's name", "int g(int x) {\n__attribute__((suppress(1))) l: x++;\nreturn x;\n}\n" },
+        { "suppress's empty argument before a label's name", "int g(int x) {\n__attribute__((suppress(\"a\",))) l: x++;\nreturn x;\n}\n" },
+        { "parenthesized malformed suppress after unused before a label's name", "int g(int x) {\n__attribute__((unused, suppress((1)))) l: x++;\nreturn x;\n}\n" },
+        { "suppress before minsize before a label's name", "int g(int x) {\n__attribute__((suppress(\"a\"), minsize)) l: x++;\nreturn x;\n}\n" },
         { "nomerge and suppress before an if", "int g(int x) {\n__attribute__((nomerge, suppress(\"a\", \"b\"))) if (x) x++;\nreturn x;\n}\n" },
         { "clang::nomerge before a return", "int g(int (*p)(void)) {\n[[clang::nomerge]] return p();\n}\n" },
         { "fallthrough in a switch, beside noinline", "int f(int);\nint g(int x) {\nswitch (x) {\ncase 0:\nx = f(x);\n__attribute__((noinline, fallthrough));\n"

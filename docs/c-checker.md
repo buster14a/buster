@@ -7753,7 +7753,11 @@ change, it refused such a declaration by name.
   (`[[x]] l:`), read as GNU ones after its colon are
   (`check_input_label_attributes`); their closer is the name's parent in the
   tree, so a label's name is the token before its colon there
-  (`check_input_label_name`). The parser reports clang's errors for C23
+  (`check_input_label_name`). A name clang refuses on a label is its error
+  before the attributes are read, but a `suppress` whose argument is no string
+  literal (`check_input_label_suppress_literal`, #2332): clang's parser drops
+  it with its string error first, which the reading gives. A refused attribute
+  before it in the list still gives its subject error instead. The parser reports clang's errors for C23
   attributes after GNU ones and before a block's `}`. Specifiers of
   attributes alone have no type: an implicit int's error at an unbound
   declarator's name. In a block, an already-declared ordinary name after GNU
