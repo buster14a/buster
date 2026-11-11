@@ -25,8 +25,8 @@ struct CheckLiteral
     TypeId type;
     // A bit-precise constant's width (wb or uwb, #768), 0 for every other literal: its type is _BitInt(bit_width), or
     // unsigned _BitInt(bit_width) with bit_unsigned, which the reader makes in its table (check_input_literal), as the
-    // literal leaves `type` 0. A width past BUSTER_CHECK_LITERAL_BIT_WIDTH, the most the checker's values hold, is one
-    // the reader refuses by name; UINT32_MAX is a value past 128 bits.
+    // literal leaves `type` 0. Past 128 bits the literal points to its limbs from floating_storage[0], c_check_wide.c's
+    // (check_literal_bit_precise_wide); UINT32_MAX is a value past BITINT_MAXWIDTH, which the reader refuses by name.
     uint32_t bit_width;
     uint64_t integer;
     // Integer storage comes first so omitted payloads in aggregate initializers are zeroed without x87.
@@ -52,8 +52,6 @@ struct CheckLiteral
     uint64_t high;
 };
 
-// The widest bit-precise constant the checker takes: its values (CheckValue.integer) hold 128 bits.
-#define BUSTER_CHECK_LITERAL_BIT_WIDTH 128u
 
 typedef struct CheckStringPart CheckStringPart;
 struct CheckStringPart
@@ -107,6 +105,64 @@ static uint32_t check_literal_digit(uint8_t c)
         value = (c | 32u) - 'a' + 10u;
     }
     return value;
+}
+
+// A bit-precise constant whose value needs more than 128 bits (#1447), whose spelling check_literal_bit_precise has
+// validated: its `digits` digits in `radix` read again into limbs from c_check_wide.c's region, a digit at a time
+// (scalar: a product of the limbs by the radix plus the digit). Its width is the smallest that holds the value (and a
+// sign bit without u), as a narrow one's; the literal points to its limbs from floating_storage[0] and keeps their low
+// 128 bits in `integer` and `high`, which check_literal_value carries into the value (CheckValue's wide constants). A
+// width past BITINT_MAXWIDTH is UINT32_MAX, which the reader refuses; so is one the region has no room for.
+static __attribute__((noinline, cold)) void check_literal_bit_precise_wide(const uint8_t* bytes, uint32_t length, uint32_t radix, uint32_t digits, bool unsign,
+                                                                          CheckLiteral* result)
+{
+    // Each digit adds at most 4 bits (hexadecimal; a decimal one log2(10) < 4).
+    const uint64_t room_bits = (uint64_t)digits * 4u + 1u;
+    const uint64_t room = (room_bits + 63u) / 64u + 1u;
+    uint64_t* limbs = room <= UINT32_MAX ? check_wide_allocate((uint32_t)room) : NULL;
+    uint32_t used = 0;
+    uint32_t position = length >= 2 && bytes[0] == '0' && ((bytes[1] | 32u) == 'x' || (bytes[1] | 32u) == 'b' || (bytes[1] | 32u) == 'o') ? 2 : 0;
+    while (limbs != NULL && position < length && check_literal_digit(bytes[position]) < radix)
+    {
+        const uint64_t digit = check_literal_digit(bytes[position]);
+        uint64_t carry = digit;
+        for (uint32_t i = 0; i < used; i += 1)
+        {
+            const unsigned __int128 product = (unsigned __int128)limbs[i] * radix + carry;
+            limbs[i] = (uint64_t)product;
+            carry = (uint64_t)(product >> 64);
+        }
+        if (carry != 0)
+        {
+            limbs[used] = carry;
+            used += 1;
+        }
+        position += 1;
+        while (position < length && bytes[position] == '\'')
+        {
+            position += 1;
+        }
+    }
+    if (limbs != NULL)
+    {
+        const uint32_t top = used != 0 ? used - 1 : 0;
+        const uint32_t bits = used != 0 ? top * 64u + 64u - (uint32_t)__builtin_clzll(limbs[top]) : 0;
+        const uint32_t width = unsign ? bits : bits + 1;
+        const bool supported = width <= BUSTER_CHECK_WIDE_MAX_WIDTH;
+        result->bit_width = supported ? width : UINT32_MAX;
+        result->bit_unsigned = unsign;
+        result->integer = limbs[0];
+        result->high = limbs[1];
+        result->floating_storage[0] = (uint64_t)(uintptr_t)limbs;
+        result->floating_storage[1] = 0;
+        result->valid = true;
+    }
+    else
+    {
+        result->bit_width = UINT32_MAX;
+        result->bit_unsigned = unsign;
+        result->valid = true;
+    }
 }
 
 // A bit-precise constant (#768: C23's wb or WB, alone or with u or U before or after it) into `result`, which the caller
@@ -168,12 +224,18 @@ static __attribute__((noinline, cold)) void check_literal_bit_precise(const uint
         unsign = true;
         position += 1;
     }
-    if (valid && suffix && digits != 0 && previous_digit && position == length)
+    // A signed value with its top bit set needs 129 bits, a wide type's limbs, as any value past 128 bits does.
+    const bool wide = !fits || (!unsign && (uint64_t)(value >> 64) >> 63 != 0);
+    if (valid && suffix && digits != 0 && previous_digit && position == length && wide)
+    {
+        check_literal_bit_precise_wide(bytes, length, radix, digits, unsign, result);
+    }
+    else if (valid && suffix && digits != 0 && previous_digit && position == length)
     {
         const uint64_t high = (uint64_t)(value >> 64);
         const uint32_t bits = high != 0 ? 128u - (uint32_t)__builtin_clzll(high) : (uint64_t)value != 0 ? 64u - (uint32_t)__builtin_clzll((uint64_t)value) : 0;
         const uint32_t width = unsign ? bits : bits + 1;
-        result->bit_width = !fits ? UINT32_MAX : width > (unsign ? 1u : 2u) ? width : unsign ? 1u : 2u;
+        result->bit_width = width > (unsign ? 1u : 2u) ? width : unsign ? 1u : 2u;
         result->bit_unsigned = unsign;
         result->integer = (uint64_t)value;
         result->high = high;

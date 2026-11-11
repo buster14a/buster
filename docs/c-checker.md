@@ -323,16 +323,16 @@ them in every mode: `_BitInt(N)` of the smallest N above 1 that holds the value
 and a sign bit, or `unsigned _BitInt(N)` of the smallest N above 0 that holds
 it. An ordinary integer constant is read as before, in 64 bits: a spelling that
 reader can't take goes to a cold reader of bit-precise constants
-(`check_literal_bit_precise`), which reads the digits again in 128 bits, the
-most the checker's values hold (`BUSTER_CHECK_LITERAL_BIT_WIDTH`), so that
-every other constant's path is as it was. (A first version that read every
+(`check_literal_bit_precise`), which reads the digits again in 128 bits, so
+that every other constant's path is as it was. (A first version that read every
 constant's suffixes for these, with a 128-bit value in every literal, cost
 1.36 million more instructions on `sqlite3.c`'s `-fsyntax-only`, about 25 per
 integer constant; this one about 196,000, in the literal's two new fields.) A
-constant that needs more than 128 bits is refused by
-name, "bit-precise integer constants wider than 128 bits are not supported",
-where clang takes it: a `wb` one of 128 bits with its top bit set is
-`_BitInt(129)`. The literal leaves its type to the reader, which makes the
+constant whose type is past 128 bits (#1447) — one that needs more bits, or a
+`wb` one of 128 bits with its top bit set, which is `_BitInt(129)` — is read
+once more, into limbs (`check_literal_bit_precise_wide`): the literal points to
+them as a wide value does ("Constants past 128 bits" below). One past
+`BITINT_MAXWIDTH` (8,388,608 bits) is refused by name. `_BitInt(129)`. The literal leaves its type to the reader, which makes the
 `_BitInt` in its table (`CheckLiteral.bit_width`, `check_input_literal`); #658's
 literal tables leave such constants to the ordinary path. `#if` reads them as
 clang does, through the preprocessor's own constants. Before C23 the suffix
@@ -1604,7 +1604,50 @@ Integer constants contain target-width bits in `unsigned __int128`. Promotions,
 usual arithmetic conversions, narrowing, sign extension and overflow checks
 use the x86-64 target type rules. Host signed overflow does not implement target
 overflow. Integer widths through 128 bits have explicit arithmetic handling;
-unsupported widths produce a defined failure rather than truncation.
+wider `_BitInt`s have their own (below), and a value that no path holds
+produces a defined failure rather than truncation.
+
+### Constants past 128 bits (#1447)
+
+A constant of a `_BitInt(N)` past 128 bits (`c_check_wide.c`) is
+`CHECK_CONSTANT_INTEGER` of its type, whose N bits are `ceil(N / 64)` 64-bit
+limbs, the least significant first, the bits past N zero, as a narrow
+constant's `integer` is masked to its width. The limbs are immutable and live
+in one region of reserved address space for the process's lifetime, bump
+allocated by an atomic add and committed as they are touched
+(`check_wide_allocate`); the value points to them from `floating_storage[0]`,
+which no integer constant uses, and keeps their low 128 bits in `integer`.
+`CheckValue` stays 96 bytes, and its pointer stays valid wherever its row is
+copied (lane outputs, the deferred bodies' merge, stream rows, initializer
+plans, emission), so nothing relocates it. A value of a wide type whose pointer
+isn't the region's is no constant (`check_wide_limbs`).
+
+`check_action_integer_type` still refuses those widths, so every narrow fold,
+reader and warning sees what it saw before; the paths that take them are cold
+branches beside it: a value's truth (`check_wide_truth`), a conversion into or
+out of a wide type (`check_wide_convert`: integers of every width, `_Bool`, the
+pointers' absolute addresses, and `float`, `double` and `long double` rounded
+once from the top 128 bits and a sticky bit; a `__float128` or a
+half-precision value isn't folded), an operator whose operands are wide or a
+narrow value shifted by a wide count (`check_wide_fold`), and an integer
+constant expression read as an `int64_t` (`check_wide_i64`: array bounds,
+enumerators). Faults are the narrow ones: signed overflow, division by zero,
+shift counts and shifted values, with GNU's folding where the context takes
+it (a count past the width shifts by width - 1, as clang's evaluator clamps
+it).
+
+The bitwise operations, sums, differences and negations, compares and shifts
+take 8 limbs a zmm with masked tails, each with an exact scalar twin, which the
+checker's scalar path takes (`test-checker`'s `check_test_wide` compares them
+at every count to 80 limbs). A sum's carries cross the limbs through the compare
+masks: where a limb's sum wrapped it generates a carry, where it is all ones it
+propagates one, and the carries into the limbs are `((G << 1 | c) + P) ^ P`.
+Shifts are `vpshldvq`/`vpshrdvq` of masked loads of neighbouring limbs.
+Products (64 x 64 -> 128-bit limb products, which AVX-512 has no instruction
+for), quotients and remainders (shift and subtract from the dividend's top bit)
+and decimal printing (`check_wide_decimal`, repeated division by 10^19) stay
+scalar: no unit of the corpus has a wide constant, and these run once a
+folded node.
 
 `float`, `double` and x86 `long double` folding uses those formats, including
 rounding arithmetic results to their destination precision. Converting a
@@ -3480,11 +3523,14 @@ What the lowering covers past scalars (#145's programs):
   limb for each node that touches one (`check_lower_limb_room`), so the stream
   grows with the width as clang's code does: a `_BitInt(1048576)`'s sum and
   product compile, and a `_BitInt(8388608)`'s too, whose frames need more than
-  the default 8 MB stack. The checker folds none of their constants (its
-  values hold 128 bits), so a static one with an initializer is refused as not
-  constant; a bit-field of one is refused by name, and so is a complex one
+  the default 8 MB stack. Their constants fold (#1447, "Constants past 128
+  bits" below): a folded value is a frame object of its limbs
+  (`check_lower_limb_constant`), and a static one's initializer is its limbs'
+  bytes (`check_data_wide_value`), the bits past the width extended as clang's
+  are. A bit-field of one is refused by name, and so is a complex one
   ("complex types of _BitInt past 128 bits"). `test-checker`'s
-  `bit-int-past-128-bits` program, against clang -O0's build of it, has each of
+  `bit-int-past-128-bits` and `bit-int-past-128-bits-constants` programs,
+  against clang -O0's builds of them, have each of
   them, clean under clang's UBSan on every input. The overflow builtins take
   them (#1447) as clang does, but `mul_overflow`'s of a signed one, which is
   clang's error ("__builtin_mul_overflow does not support 'signed _BitInt'

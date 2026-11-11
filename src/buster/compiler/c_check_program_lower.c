@@ -5313,18 +5313,19 @@ static __attribute__((noinline)) void check_lower_limb_conversion(CheckLowerWrit
     }
 }
 
-// A folded constant of a _BitInt past 128 bits: its 128 bits' limbs, then its sign's or zeros, into a frame object of its
-// own whose address it leaves (the checker folds none yet, as its values hold 128 bits).
+// A folded constant of a _BitInt past 128 bits: its limbs (c_check_wide.c, #1447), into a frame object of its own whose
+// address it leaves. A value without them holds its low 128 bits, extended by its sign's or zeros.
 static void check_lower_limb_constant(CheckLowerWriter* writer, const CheckValue* value)
 {
     const CheckLowerLimbs limbs = check_lower_limbs(writer, value->type);
     const uint32_t result = check_lower_limb_object(writer, limbs);
+    const uint64_t* wide = check_wide_limbs(value, limbs.count);
     const uint64_t halves[2] = { (uint64_t)value->integer, (uint64_t)((unsigned __int128)value->integer >> 64) };
     const uint64_t fill = limbs.sign && (int64_t)halves[1] < 0 ? UINT64_MAX : 0;
     for (uint32_t limb = 0; limb < limbs.count && writer->output->status == CHECK_PROGRAM_OK; limb += 1)
     {
         check_lower_limb_address(writer, result, true, limb);
-        check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, limb < 2 ? halves[limb] : fill);
+        check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, wide != NULL ? wide[limb] : limb < 2 ? halves[limb] : fill);
         if (limb + 1 == limbs.count)
         {
             check_lower_limb_extend(writer, limbs, BUSTER_TYPED_CLASS_U64);
