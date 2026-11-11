@@ -3490,8 +3490,8 @@ static void ir_lower_test_indirect_jump(IrLowerTestTally* tally)
     arena_pop_to(&twin_output, 0);
     arena_pop_to(&promoted, 0);
     arena_pop_to(&twin_promoted, 0);
-    // #148's frame address, which the adapter doesn't lower: refused at its entry, as X86 rows are, before anything is
-    // allocated (from nonzero marks, so that a rollback to zero would show).
+    // #148's frame address, which both paths lower to a save of BUSTER_IR_STACK_SAVE_FRAME (#1847), its function's frame
+    // pointer, of the class's U64, which the verifier takes.
     static const uint8_t frame_kinds[3] =
     {
         BUSTER_TYPED_FRAME_ADDRESS,
@@ -3588,10 +3588,16 @@ static void ir_lower_test_indirect_jump(IrLowerTestTally* tally)
         const uint64_t scratch_mark = scratch.length;
         IrFunction result = preserved;
         const IrCheck check = ir_lower_typed_path(&frame, IR_VOID, 1, &output, &scratch, &result, vector != 0);
-        ir_lower_test_expect(tally, tier0_validate(&frame).error == TIER0_OK && check.error == IR_ERROR_UNSUPPORTED && check.instruction == 0 &&
-                                        output.length == output_mark && scratch.length == scratch_mark &&
-                                        result.instruction_count == preserved.instruction_count && result.block_count == preserved.block_count,
-                             "the frame address refused at its entry without allocation", 0, vector);
+        uint32_t saves = 0;
+        for (uint32_t i = 0; check.error == IR_OK && i < result.instruction_count; i += 1)
+        {
+            saves += result.op[i] == IR_STACK_SAVE && result.type[i] == IR_I64 && result.flags[i] == BUSTER_IR_STACK_SAVE_FRAME;
+        }
+        ir_lower_test_expect(tally, tier0_validate(&frame).error == TIER0_OK && check.error == IR_OK && saves == 1 &&
+                                        ir_verify(&result, &scratch, 0).error == IR_OK && ir_verify_scalar(&result, &scratch, 0).error == IR_OK,
+                             "the frame address lowered to a frame's stack save", 0, vector);
+        arena_pop_to(&output, output_mark);
+        arena_pop_to(&scratch, scratch_mark);
     }
     arena_release(&output);
     arena_release(&twin_output);

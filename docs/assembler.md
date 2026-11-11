@@ -74,7 +74,8 @@ high-byte registers), XMM/YMM/ZMM and mask registers have explicit classes.
 The frontend checks the encoder's high-byte/REX, address and decoration rules
 before trusted encoding. Addressing is 64-bit base plus index times 1/2/4/8
 plus a signed 32-bit displacement, RIP relative, or absolute displacement;
-FS and GS overrides are supported. An Intel scale can come before or after its
+FS, GS and SS overrides are supported (SS's in a form below
+`BUSTER_X86_FORM_SS_ROWS`, every form but APX's EVEX ones). An Intel scale can come before or after its
 index (`4*rsi`, as LLVM writes it, or `rsi*4`), and a term can carry a sign
 (`[rax + -8]`); a register term takes only unary pluses (`[rax + +rsi]`). As in
 GNU as, without register prefixes a register's name is never a symbol: in an
