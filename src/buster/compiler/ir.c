@@ -22,6 +22,7 @@
 #include <inttypes.h>
 #include "host_isa.h"
 
+#ifndef BUSTER_IR_STORAGE_ONLY
 #define BUSTER_IR_NONE UINT32_MAX
 #define BUSTER_IR_VECTOR_COUNT 16
 #define BUSTER_IR_VOLATILE 1
@@ -155,7 +156,8 @@ typedef enum IrOp
     // cleared), and BMI1's bextr (a's bits from b's low byte up, as many as its second byte says), whose x86 rows the
     // typed stream's lowering admits (ir_simd_typed.c). The unary splat (#1450) repeats scalar a's raw bits throughout
     // a vector result; its scalar type gives the lane width, b is absent and flags are zero. It does no arithmetic,
-    // including on floating operands, so signed zeros and NaN payloads are unchanged.
+    // including on floating operands, so signed zeros and NaN payloads are unchanged. The vector width changes (#1840:
+    // extract, widen and insert) move a vector's bits whole between widths, their part in flags.
     IR_INTRINSIC,
     // An atomic read/modify/write (#1059): `a` the object's address, `b` the operand, of the result's type (an integer of
     // 1, 2, 4 or 8 bytes), and its flags BUSTER_IR_ATOMIC with its C memory order and its operation
@@ -202,7 +204,15 @@ typedef enum IrOp
 #define BUSTER_IR_INTRINSIC_SADDO 12u
 #define BUSTER_IR_INTRINSIC_SSUBO 13u
 #define BUSTER_IR_INTRINSIC_SMULO 14u
-#define BUSTER_IR_INTRINSIC_COUNT 15u
+// The vector width changes (#1840), which move bits whole and read no lanes, their part in the instruction's flags (an
+// intrinsic's immediate, 0 for every other kind): extract's result is a's `flags`th part of the result's width, a wider
+// vector (16 bytes of 32 or 64, 32 of 64); widen's is a, a narrower vector, in its low bytes and zeros past them (flags
+// 0); and insert's is a, of its type, with its `flags`th part of b's width replaced by b, a narrower vector. The x86
+// builtins' casts between widths, vextracti32x4 to vinserti64x4.
+#define BUSTER_IR_INTRINSIC_EXTRACT 15u
+#define BUSTER_IR_INTRINSIC_WIDEN 16u
+#define BUSTER_IR_INTRINSIC_INSERT 17u
+#define BUSTER_IR_INTRINSIC_COUNT 18u
 
 // ICMP EQ/NE accept pointers too; the other integer predicates require integer operands. FCMP uses EQ through GE:
 // ordered comparisons, except NE, which is true for unordered inputs, as in C.
@@ -271,7 +281,8 @@ struct IrAbiCall
 // The result and argument types are semantic IR types. ABI locations/registers are absent but for a call that passes or
 // returns an aggregate by value: `abi` is then 1 + its records' index in IrFunction.abi_calls, and 0 for any other call.
 // `row` is 1 + the index in IrFunction.rows of the machine row an IR_CALL runs in place of a callee (#141, a row call:
-// its symbol, a, is then 0), and 0 for any other call.
+// its symbol, a, is then 0), and 0 for any other call. `body` is 1 + the index in IrFunction.asm_bodies of the asm body
+// an IR_CALL runs in place of a callee (#1839, a body call: its symbol is 0 too, and its row 0), and 0 for any other.
 typedef struct IrCall IrCall;
 struct IrCall
 {
@@ -283,6 +294,25 @@ struct IrCall
     bool variadic;
     uint32_t abi;
     uint32_t row;
+    uint32_t body;
+};
+
+// An asm statement placed in its caller (#1839, Tier0AsmBody): the records a body call runs in its place, which read the
+// statement's operand block through BUSTER_TIER0_ASM_BLOCK's base, their own branches (relative to the first record; a
+// target may be `count`, the body's end) and the registers they write (`touched`, BUSTER_TIER0_XMM's layout: rax to r15
+// in bits 0 to 15, xmm0 to xmm15 in bits 16 to 31). The block is the call's one argument, a ptr that is the block's
+// IR_STACK_ADDR, and a body without one has none: every pass takes the call as an unknown callee's of that pointer, so
+// the block escapes into it, its stores stay before it and no access moves across it. The records are borrowed from the
+// producer, trusted as a row's are; the verifier checks the columns' shape.
+typedef struct IrAsmBody IrAsmBody;
+struct IrAsmBody
+{
+    const X86Instruction* records;
+    const uint32_t* branches;
+    const uint32_t* targets;
+    uint32_t count;
+    uint32_t branch_count;
+    uint32_t touched;
 };
 
 typedef struct IrSizes IrSizes;
@@ -302,6 +332,7 @@ struct IrSizes
     uint64_t passed_count;
     uint64_t vector_constant_count;
     uint64_t row_count;
+    uint64_t asm_body_count;
 };
 
 typedef struct IrFunction IrFunction;
@@ -432,6 +463,9 @@ struct IrFunction
     // them.
     Tier0Operation* rows;
     uint32_t row_count;
+    // The asm bodies its body calls run (#1839, IrCall.body), one per call.
+    IrAsmBody* asm_bodies;
+    uint32_t asm_body_count;
     uint8_t result_type;
     // Exclusive symbol bound supplied by the translation unit. UINT32_MAX permits any non-sentinel SymbolId.
     uint32_t symbol_count;
@@ -697,6 +731,9 @@ static const char* const ir_intrinsic_names[BUSTER_IR_INTRINSIC_COUNT] = {
     "saddo",
     "ssubo",
     "smulo",
+    "extract",
+    "widen",
+    "insert",
 };
 
 // A fence's orders' names in the text form, C's memory_order's (BUSTER_IR_FENCE_ORDER), and its signal scope's word.
@@ -769,7 +806,8 @@ static IrError ir_create(Arena* arena, const IrSizes* sizes, IrFunction* result)
     const uint64_t mark = arena->length;
     IrError error = IR_OK;
     if (sizes->instruction_count > UINT32_MAX || sizes->block_count > UINT32_MAX || sizes->extra_count > UINT32_MAX || sizes->constant_count > UINT32_MAX || sizes->slot_count > UINT32_MAX || sizes->address_count > UINT32_MAX || sizes->call_count > UINT32_MAX || sizes->call_type_count > UINT32_MAX || sizes->parameter_count > UINT32_MAX ||
-        sizes->label_count > UINT32_MAX || sizes->abi_call_count > UINT32_MAX || sizes->passed_count > UINT32_MAX || sizes->vector_constant_count > UINT32_MAX || sizes->row_count > UINT32_MAX)
+        sizes->label_count > UINT32_MAX || sizes->abi_call_count > UINT32_MAX || sizes->passed_count > UINT32_MAX || sizes->vector_constant_count > UINT32_MAX || sizes->row_count > UINT32_MAX ||
+        sizes->asm_body_count > UINT32_MAX)
     {
         error = IR_ERROR_LIMIT;
     }
@@ -788,6 +826,7 @@ static IrError ir_create(Arena* arena, const IrSizes* sizes, IrFunction* result)
             .parameter_count = (uint32_t)sizes->parameter_count,
             .vector_constant_count = (uint32_t)sizes->vector_constant_count,
             .row_count = (uint32_t)sizes->row_count,
+            .asm_body_count = (uint32_t)sizes->asm_body_count,
             .symbol_count = UINT32_MAX,
             .label_count = (uint32_t)sizes->label_count,
             .abi_call_count = (uint32_t)sizes->abi_call_count,
@@ -805,6 +844,7 @@ static IrError ir_create(Arena* arena, const IrSizes* sizes, IrFunction* result)
         candidate.constants = ir_allocate(arena, sizes->constant_count, sizeof(IrConstant), &ok);
         candidate.vector_constants = ir_allocate(arena, sizes->vector_constant_count, sizeof(IrSimdValue), &ok);
         candidate.rows = ir_allocate(arena, sizes->row_count, sizeof(Tier0Operation), &ok);
+        candidate.asm_bodies = ir_allocate(arena, sizes->asm_body_count, sizeof(IrAsmBody), &ok);
         candidate.slots = ir_allocate(arena, sizes->slot_count, sizeof(IrSlot), &ok);
         candidate.addresses = ir_allocate(arena, sizes->address_count, sizeof(IrAddress), &ok);
         candidate.calls = ir_allocate(arena, sizes->call_count, sizeof(IrCall), &ok);
@@ -1229,6 +1269,7 @@ static uint32_t ir_lane_count(uint32_t type, uint32_t lane)
     return ir_vector_type(type) && bits != 0 ? ir_type_bits[type] / bits : 0;
 }
 
+#endif
 // How many of this thread's scans for SIMD values or vectors (ir_function_has_simd_path, ir_function_has_vectors_path)
 // took the vector path: test-tier1-masks and test-ir-simd read it to check that a scalar run takes each scan's scalar
 // twin, as --scalar promises (#141's review). main.c's units share it, as lane.c's arena_small_floor, so that a command
@@ -1242,6 +1283,7 @@ _Thread_local uint64_t ir_scan_vector_paths;
 static _Thread_local uint64_t ir_scan_vector_paths;
 #endif
 
+#ifndef BUSTER_IR_STORAGE_ONLY
 // Consumers call only after structural verification. Refuse the entire function before allocating/rebuilding
 // scalar-only state, including SIMD ABI metadata and unused vector payloads rather than only executable rows. The
 // instructions' types and operations, the scan's bulk, go 64 at a time on the vector path and one at a time on its scalar
@@ -1446,6 +1488,22 @@ static bool ir_row_call_valid(const IrFunction* f, const IrCall* call)
     return valid;
 }
 
+// Whether a body call's descriptor fits its asm body (#1839): within the bodies, of no row, no ABI records and no variadic
+// arguments, void, and of one ptr argument, its block's address, or of none; and the body's branch columns in order, each
+// branch a record of it and each target one of its records or its end.
+static bool ir_body_call_valid(const IrFunction* f, const IrCall* call)
+{
+    const IrAsmBody* body = call->body <= f->asm_body_count ? &f->asm_bodies[call->body - 1] : 0;
+    bool valid = body != 0 && call->row == 0 && call->abi == 0 && !call->variadic && call->result_type == IR_VOID && call->argument_count <= 1 &&
+                 call->parameter_count == call->argument_count && (call->argument_count == 0 || f->call_types[call->type_first] == IR_PTR) &&
+                 (body->count == 0 || body->records != 0) && body->branch_count <= body->count && (body->branch_count == 0 || (body->branches != 0 && body->targets != 0));
+    for (uint32_t k = 0; valid && k < body->branch_count; k += 1)
+    {
+        valid = body->branches[k] < body->count && (k == 0 || body->branches[k - 1] < body->branches[k]) && body->targets[k] <= body->count;
+    }
+    return valid;
+}
+
 // Check shape before any instruction-indexed access. Metadata tables are checked even when no instruction uses them.
 static IrCheck ir_check_shape(const IrFunction* f)
 {
@@ -1455,7 +1513,8 @@ static IrCheck ir_check_shape(const IrFunction* f)
     {
         check.error = IR_ERROR_STRUCTURE;
     }
-    if (check.error == IR_OK && ((f->vector_constant_count != 0 && f->vector_constants == NULL) || (f->row_count != 0 && f->rows == NULL)))
+    if (check.error == IR_OK && ((f->vector_constant_count != 0 && f->vector_constants == NULL) || (f->row_count != 0 && f->rows == NULL) ||
+                                 (f->asm_body_count != 0 && f->asm_bodies == NULL)))
     {
         check.error = IR_ERROR_STRUCTURE;
     }
@@ -1619,7 +1678,7 @@ static IrCheck ir_check_shape(const IrFunction* f)
         const IrAbiCall* abi = call.abi != 0 && call.abi <= f->abi_call_count ? &f->abi_calls[call.abi - 1] : 0;
         if (call.result_type >= IR_TYPE_COUNT || call.argument_count > UINT32_MAX - 3 || !ir_slice(call.argument_first, call.argument_count, f->extra_count) || !ir_slice(call.type_first, call.parameter_count, f->call_type_count) || call.argument_count < call.parameter_count || (!call.variadic && call.argument_count != call.parameter_count) ||
             (call.abi != 0 && (abi == 0 || !ir_slice(abi->passed, call.argument_count, f->passed_count) || (abi->result_size != 0 && call.result_type != IR_VOID))) ||
-            (call.row != 0 && !ir_row_call_valid(f, &call)))
+            (call.row != 0 && !ir_row_call_valid(f, &call)) || (call.body != 0 && !ir_body_call_valid(f, &call)))
         {
             check = ir_check(IR_ERROR_METADATA, BUSTER_IR_NONE, c);
         }
@@ -1651,7 +1710,7 @@ static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i)
     }
     else if (((op == IR_LOAD || op == IR_STORE) && (!ir_access_flags_valid(op, f->flags[i]) || f->alignment_log2[i] > 31)) ||
              (op == IR_ATOMIC_RMW && (!ir_rmw_flags_valid(f->flags[i]) || f->alignment_log2[i] > 31)) ||
-             ((op != IR_LOAD && op != IR_STORE && op != IR_ATOMIC_RMW) && ((f->flags[i] != 0 && !ir_lane_valid(op, f->flags[i])) || f->alignment_log2[i] != 0)))
+             ((op != IR_LOAD && op != IR_STORE && op != IR_ATOMIC_RMW) && ((f->flags[i] != 0 && op != IR_INTRINSIC && !ir_lane_valid(op, f->flags[i])) || f->alignment_log2[i] != 0)))
     {
         check.error = IR_ERROR_METADATA;
     }
@@ -1720,7 +1779,33 @@ static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i)
             case IR_RULE_FENCE: valid = (a & ~(BUSTER_IR_FENCE_ORDER | BUSTER_IR_FENCE_SIGNAL)) == 0 && (a & BUSTER_IR_FENCE_ORDER) <= BUSTER_IR_FENCE_SEQ_CST; break;
             case IR_RULE_INTRINSIC:
             {
-                if (c == BUSTER_IR_INTRINSIC_SPLAT)
+                // An intrinsic's flags are its immediate: a width change's part (#1840), and 0 for every other kind.
+                const uint32_t part = f->flags[i];
+                if (c == BUSTER_IR_INTRINSIC_EXTRACT || c == BUSTER_IR_INTRINSIC_WIDEN)
+                {
+                    const uint32_t narrow = c == BUSTER_IR_INTRINSIC_EXTRACT ? type : ta;
+                    const uint32_t wide = c == BUSTER_IR_INTRINSIC_EXTRACT ? ta : type;
+                    valid = ir_vector_type(type) && ir_vector_type(ta) && ir_type_bits[narrow] < ir_type_bits[wide] && b == BUSTER_IR_NONE &&
+                            (c == BUSTER_IR_INTRINSIC_EXTRACT ? part < ir_type_bits[wide] / ir_type_bits[narrow] : part == 0);
+                }
+                else if (c == BUSTER_IR_INTRINSIC_INSERT)
+                {
+                    if (b >= f->instruction_count || f->type[b] == IR_VOID || f->type[b] >= IR_TYPE_COUNT)
+                    {
+                        check = ir_check(IR_ERROR_OPERAND, i, 1);
+                    }
+                    else
+                    {
+                        const uint32_t tb_part = f->type[b];
+                        valid = ir_vector_type(type) && ta == type && ir_vector_type(tb_part) && ir_type_bits[tb_part] < ir_type_bits[type] &&
+                                part < ir_type_bits[type] / ir_type_bits[tb_part];
+                    }
+                }
+                else if (part != 0)
+                {
+                    valid = false;
+                }
+                else if (c == BUSTER_IR_INTRINSIC_SPLAT)
                 {
                     valid = ir_vector_type(type) && ir_splat_scalar_type(ta) && b == BUSTER_IR_NONE;
                 }
@@ -1756,8 +1841,9 @@ static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i)
             case IR_RULE_STORE: valid = ta == IR_PTR && ((f->flags[i] & BUSTER_IR_ATOMIC) == 0 || ir_atomic_access(op == IR_LOAD ? type : tb, f->alignment_log2[i])); break;
             case IR_RULE_CALL:
             {
-                // A row call (#141, IrCall.row) is a direct call's, of no symbol.
-                valid = b < f->call_count && (op == IR_CALL ? (f->calls[b].row != 0 ? a == 0 : a != 0 && a < f->symbol_count) : ta == IR_PTR && f->calls[b].row == 0);
+                // A row call (#141, IrCall.row) and a body call (#1839, IrCall.body) are a direct call's, of no symbol.
+                valid = b < f->call_count && (op == IR_CALL ? (f->calls[b].row != 0 || f->calls[b].body != 0 ? a == 0 : a != 0 && a < f->symbol_count) :
+                                                              ta == IR_PTR && f->calls[b].row == 0 && f->calls[b].body == 0);
                 if (valid)
                 {
                     const IrCall call = f->calls[b];
@@ -2940,6 +3026,12 @@ static IrError ir_print(const IrFunction* f, Arena* scratch, FILE* output)
             }
             fputc('\n', output);
         }
+        // The asm bodies (#1839): `asm #k records=<count> branches=<count> touched=<mask>`, a form the parser doesn't read.
+        for (uint32_t k = 0; k < f->asm_body_count; k += 1)
+        {
+            const IrAsmBody* body = &f->asm_bodies[k];
+            fprintf(output, "  asm #%" PRIu32 " records=%" PRIu32 " branches=%" PRIu32 " touched=0x%08" PRIx32 "\n", k, body->count, body->branch_count, body->touched);
+        }
         for (uint32_t s = 0; s < f->slot_count; s += 1)
         {
             const IrSlot slot = f->slots[s];
@@ -3006,6 +3098,10 @@ static IrError ir_print(const IrFunction* f, Arena* scratch, FILE* output)
                         if (call.row != 0)
                         {
                             fprintf(output, " row #%" PRIu32 "(", call.row - 1);
+                        }
+                        else if (call.body != 0)
+                        {
+                            fprintf(output, " asm #%" PRIu32 "(", call.body - 1);
                         }
                         else
                         {
@@ -3093,6 +3189,11 @@ static IrError ir_print(const IrFunction* f, Arena* scratch, FILE* output)
                         if (op == IR_INTRINSIC)
                         {
                             fprintf(output, " %s", c < BUSTER_IR_INTRINSIC_COUNT ? ir_intrinsic_names[c] : "invalid");
+                            // A width change's part (#1840), its immediate.
+                            if (c == BUSTER_IR_INTRINSIC_EXTRACT || c == BUSTER_IR_INTRINSIC_INSERT)
+                            {
+                                fprintf(output, " %u", (unsigned)f->flags[i]);
+                            }
                         }
                         if (op == IR_ATOMIC_RMW)
                         {
@@ -3124,3 +3225,4 @@ static IrError ir_print(const IrFunction* f, Arena* scratch, FILE* output)
     }
     return check.error;
 }
+#endif

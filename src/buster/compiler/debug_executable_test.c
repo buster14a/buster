@@ -7,7 +7,7 @@
 // over poisoned output. The source debug sections remain untouched, including when a descriptor is refused.
 // debug_test_object_write is the object writer's half: the same code as a relocatable object of the object writer's,
 // with the units' DWARF relocated (ObjectOptions.debug, #395), for a linker to link into the consumers' executable.
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_BACKEND
 static SymbolId debug_native_symbol(const Link* link, String8 name)
 {
     SymbolId result = 0;
@@ -21,7 +21,8 @@ static SymbolId debug_native_symbol(const Link* link, String8 name)
     }
     return result;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_BACKEND
 static bool debug_native_write(Link* link, SymbolId entry, String8 path, const ExecutableDebug* debug, uint32_t lanes, bool exact, ExecutableResult* result)
 {
     ExecutableTestWrite write = {
@@ -37,7 +38,8 @@ static bool debug_native_write(Link* link, SymbolId entry, String8 path, const E
     *result = write.result;
     return ran && write.succeeded;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_BACKEND
 // An explicit symbol selection owns only .symtab/.strtab. Empty and singleton selections must leave all five
 // already finalized DWARF sections unchanged even though their address-table function set is larger.
 static bool debug_native_symbol_override(Link* link, SymbolId entry, String8 path, const ExecutableDebug* debug, const uint8_t* atoms,
@@ -115,7 +117,8 @@ static bool debug_native_symbol_override(Link* link, SymbolId entry, String8 pat
     executable_test_expect(tally, valid, "restore debug function selection for external consumers", 0);
     return valid;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_BACKEND
 static bool debug_native_unchanged(const DebugUnit* unit, const DebugOutput* output, const String8* saved, const uint32_t* positions)
 {
     bool result = true;
@@ -127,7 +130,8 @@ static bool debug_native_unchanged(const DebugUnit* unit, const DebugOutput* out
     result = result && memcmp(output->line_addresses, positions, (uint64_t)unit->function_count * sizeof(uint32_t)) == 0;
     return result;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_BACKEND
 static bool debug_native_symbols(const Link* link, const DebugUnit* unit, const SymbolId* functions, const ExecutableTestImage* image, String8 file,
                                  const Elf64_Shdr* text, const uint64_t* addresses)
 {
@@ -185,7 +189,8 @@ static bool debug_native_symbols(const Link* link, const DebugUnit* unit, const 
     }
     return result;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_BACKEND
 // The fixture has exactly one TEXT atom. Its ELF .text address and the imported symbol offsets independently give
 // each function's final address; do not take expected addresses from the debug section being checked.
 static bool debug_native_image(const Link* link, const DebugUnit* unit, const SymbolId* functions, const DebugOutput* source, String8 file,
@@ -261,7 +266,8 @@ static bool debug_native_image(const Link* link, const DebugUnit* unit, const Sy
     result = result && executable_test_unwind(link, file, BUSTER_EXECUTABLE_BASE, 1, written) == 0;
     return result;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_BACKEND
 static bool debug_test_native_write(const char* object_path, const char* executable_path, const DebugUnit* unit, const DebugOutput* output)
 {
     _Static_assert(BUSTER_EXECUTABLE_DEBUG_SECTIONS == BUSTER_DEBUG_SECTIONS + 1, "the writer and emitter carry the same sections");
@@ -521,7 +527,8 @@ static bool debug_test_native_write(const char* object_path, const char* executa
     arena_release(&arena);
     return executable_test_report(&tally);
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK
 // Units written one after another at their bases (DebugOutput.bases) into one buffer per section, `outputs[i]` unit
 // i's, attached by one descriptor with their function counts. Every lane count and the exact twins write the same file,
 // whose sections are the units' contributions one after another, each finalized at its functions' native addresses;
@@ -686,7 +693,8 @@ static bool debug_test_native_units(const char* object_path, const char* executa
     arena_release(&arena);
     return executable_test_report(&tally) && ready;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK
 // The fixture's code (GNU as's object at `object_path`, imported) as an object of the object writer's at
 // `output_path`, with the units `units`, written one after another at their bases into `outputs`' buffers (as
 // debug_test_native_units takes them), relocated against its .text: a linker's link of it must hold the units finalized
@@ -758,7 +766,8 @@ static bool debug_test_object_write(const char* object_path, const char* output_
     arena_release(&arena);
     return executable_test_report(&tally) && ready;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK
 // Whether two executables, at `a` and `b`, have the same five debug sections, byte for byte.
 static bool debug_test_same_debug(const char* a, const char* b)
 {
@@ -780,3 +789,4 @@ static bool debug_test_same_debug(const char* a, const char* b)
     arena_release(&arena);
     return result;
 }
+#endif

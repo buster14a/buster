@@ -34,6 +34,10 @@ typedef enum CheckConstantKind
     CHECK_CONSTANT_FLOATING,
     CHECK_CONSTANT_ADDRESS,
     CHECK_CONSTANT_COMPLEX,
+    // GNU's difference of two labels' addresses in a static initializer (#1447, check_init_label_difference): the
+    // minuend label's object in `object`, the subtrahend's in `integer`. Only a static initializer's constants and parts
+    // hold one, which the static data writes as the labels' distance in their function's code (check_data_label_distance).
+    CHECK_CONSTANT_LABEL_DIFFERENCE,
 } CheckConstantKind;
 
 typedef enum CheckFault
@@ -290,6 +294,9 @@ typedef enum CheckDiagnostic
     // A pointer to pointers whose levels' address spaces differ (#1447): clang's "changes address space of nested
     // pointer", worded by the conversion (c_check_semantic_diagnostic.c).
     CHECK_DIAG_ADDRESS_SPACE_NESTED,
+    // A signed _BitInt past 128 bits as one of mul_overflow's operands or its destination (#1447): clang's
+    // "__builtin_mul_overflow does not support 'signed _BitInt' operands of more than 128 bits", at that argument.
+    CHECK_DIAG_OVERFLOW_BIT_INT,
 } CheckDiagnostic;
 
 #define BUSTER_CHECK_CONVERT_LVALUE 0x01u

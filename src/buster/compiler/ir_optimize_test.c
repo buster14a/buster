@@ -12,6 +12,9 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
+// Keep the production if-converter's first include at its original position in every main unit.
+#if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
+
 typedef struct IrOptimizeTest IrOptimizeTest;
 struct IrOptimizeTest
 {
@@ -1481,7 +1484,10 @@ static int ir_optimize_text_print_fixtures(void);
 
 #include "ir_optimize_simd_test.c"
 #include "ir_optimize_layout_test.c"
+#endif
 #include "ir_if_convert_test.c"
+
+#if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 
 static __attribute__((unused)) int run_ir_optimize_tests(int argc, char** argv)
 {
@@ -1529,3 +1535,5 @@ static __attribute__((unused)) int run_ir_optimize_tests(int argc, char** argv)
     }
     return result;
 }
+
+#endif
