@@ -609,7 +609,7 @@ static void check_tier1_outcome_tests(CheckLanesTestTally* tally, const char* di
         for (uint32_t scalar = 0; written && closed && scalar < 2; scalar += 1)
         {
             CheckLanesTestUnit unit;
-            check_lanes_test_compile(&unit, &pp, &parser, &identifiers, source, scalar != 0);
+            check_lanes_test_compile_tier1(&unit, &pp, &parser, &identifiers, source, scalar != 0);
             check_lanes_test_expect(tally, unit.ready && unit.selected.program.body_count == 8, "both frontend paths select all eight designated bodies", source);
             if (unit.ready)
             {
