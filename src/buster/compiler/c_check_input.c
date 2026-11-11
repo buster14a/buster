@@ -14544,9 +14544,11 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
             }
         }
     }
-    const uint32_t a = first;
+    uint32_t a = first;
     const uint32_t b = a != BUSTER_CHECK_NONE ? reader->value_next[a] : BUSTER_CHECK_NONE;
     const uint32_t c = b != BUSTER_CHECK_NONE ? reader->value_next[b] : BUSTER_CHECK_NONE;
+    // A cast's type name's captured variable array bound, evaluated before it (#2321), or none.
+    uint32_t vla_bound = BUSTER_CHECK_NONE;
     if (evaluated_specifier && a != BUSTER_CHECK_NONE)
     {
         // The operand's value is the declaration's runtime side effect. Its graph token is the operand's own, so
@@ -14827,6 +14829,11 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
     {
         supported = count == 1 && reader->query_types[token] != 0;
         op = CHECK_OP_CAST;
+        if (count > 1)
+        {
+            // A cast to a variably modified type (#2321), whose captured bounds come before its operand.
+            vla_bound = check_input_vla_cast(reader, token, count, &a, &supported);
+        }
     }
     else if (role == PARSE_ROLE_CLOSE_SIZEOF)
     {
@@ -15320,6 +15327,10 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
                     node = proven;
                 }
             }
+        }
+        if (vla_bound != BUSTER_CHECK_NONE)
+        {
+            node = check_input_vla_cast_sequence(reader, token, vla_bound, node);
         }
         reader->output->token_nodes[token] = node;
         if (role != PARSE_ROLE_CLOSE_CONDITION && role != PARSE_ROLE_RETURN)

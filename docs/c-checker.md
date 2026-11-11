@@ -759,11 +759,20 @@ as Sema's `CheckVariableDeclarationType` gives it after the declarator
 (`CheckDeclaratorRun.parameter_invalid`); a block's `static` or `extern` one's
 at the declaration, a stand-in `int` (one with an initializer still stops).
 
+In a body, a cast to a variably modified type (`(int (*)[n])v`, in `sizeof`
+too; #2321, #1852) evaluates its type name's bounds, outermost first through
+pointers and arrays, before its operand, as clang's `EmitVariablyModifiedType`
+does: the graph's cast follows a comma of the captured bounds
+(`check_input_vla_cast_bounds`), which no -Wunused-value warns of, and a
+`sizeof` of the cast's value reads the extent stored then rather than
+evaluating the bound again. In an unevaluated `sizeof` operand the bound isn't
+evaluated.
+
 Differences left: a member's error still stops the reader, where clang marks
-the field and its record invalid. In a body, a cast to a variably modified
-type (`(void)((int (*)[n])0)`, in `sizeof` too) is still "construct is not yet
-supported", though clang accepts it: the cast's captured bound is a second
-operand the graph's cast doesn't take.
+the field and its record invalid. A warning inside a `sizeof` or `typeof`
+operand of variable array type (`sizeof(*(int (*)[(1, n)])v)`'s comma) is given
+once, where clang, which transforms that operand again as potentially
+evaluated, gives it twice.
 A skipped VLA initializer's undeclared names and expression warnings
 (`{q}`, `"y" + 1`) aren't reported; clang reports them, and an undeclared name
 in a list makes the list invalid, with no "may not be initialized" error.
@@ -7714,8 +7723,8 @@ clang's error at the declaration, in the checker's words ("'__auto_type'
 deduced types differ within one declaration"). A variably modified deduced
 type is the initializer's, whose sizes its own declaration evaluated, and the
 declaration evaluates none, as clang's doesn't (`__auto_type p = &vla;`); a
-cast to a variably modified type in the initializer is refused by name, as the
-cached evaluator that types it doesn't take one. A redeclaration of a
+cast to a variably modified type in the initializer evaluates its bounds once,
+as the cast does anywhere (#2321). A redeclaration of a
 variable with linkage takes the earlier declaration's type rather than a
 deduced one, as clang's C `mergeTypes` takes the placeholder before deducing
 (`extern long p; __auto_type p = 1;` is a long, its initializer converted;
