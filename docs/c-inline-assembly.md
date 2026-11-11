@@ -596,12 +596,22 @@ the statement's helper, as clang's inline bytes execute in its function; a
 assembly's, and `.popsection` or `.previous` returns to the template's own
 code. A pushed `.note.GNU-stack` is the writer's empty note, as `.section`'s is.
 
-Such a whole helper has the record path's operand block and stores, but none
-of its own paths: the x87's places, held vector operands, a flag output's
-`setcc` stores and an asm goto's exits (`check_asm_helper_code`). A template
-that takes directives refuses each by name ("inline assembly x87 operands",
-"vector operands", "flag outputs in templates that take directives", "asm goto
-in templates that take directives").
+Such a whole helper is the record helper's own code (`check_asm_helper_code`,
+for a template of no records) around the template, its records written as the
+bytes they encode, a `.byte` line each (`check_asm_unit_helper`, #1839's item
+10): its pushes, frame and every operand's load (the x87's, MMX's, the
+opmasks', A's pairs' and high bytes' among them) before the template, and after
+it, in the helper's default text section, an asm goto's exits, the flag
+outputs' `setcc` stores, every output's store, the x87 pops and the epilogue.
+An asm goto's labels are its exits' labels there (`.Lbuster_goto_S_L`, the
+names the substitution printed for them), so that the template's jumps reach
+them. The template is first assembled alone with those names made global
+(`__buster_goto_S_L`), and each fixup to one must be a jmp's or a jcc's rel32
+field without an addend in the template's code (`check_asm_unit_gotos`); any
+other use is refused by name, as on the record path. A template of directives
+alone with x87 operands or flag outputs has this helper too, as a template of
+no instructions does. A held vector (a vector type in a vector register) is
+refused in a helper, as on the record path.
 
 A template of alignment, section and symbol directives alone has no code
 (`entry_code` is false): its sections, data and defined labels are published,
@@ -840,10 +850,10 @@ Each refusal names its feature, as the driver prints it ("unsupported: ..."):
 - flag outputs of a size no integer store covers, and with another
   alternative (`"=r@ccz"`, which clang takes as `r`);
 - the letters it doesn't place, and `A` of other sizes than up to 8 bytes and
-  an integer's 16, and in a template that takes directives with 16 bytes;
-- MMX operands with a modifier (clang refuses each), beside x87 operands in
-  one statement, and in templates that take directives;
-- opmask operands with a modifier, in templates that take directives, and
+  an integer's 16;
+- MMX operands with a modifier (clang refuses each), and beside x87 operands in
+  one statement;
+- opmask operands with a modifier, and
   without the moves' features (AVX-512F's for 1 or 2 bytes, AVX-512BW's for 4
   or 8), where clang can't place one;
 - x87 operands and clobbers off the stack's top (an input at st(1) without one
@@ -857,7 +867,7 @@ Each refusal names its feature, as the driver prints it ("unsupported: ..."):
 - explicit register variables in registers the helper doesn't place one in
   (rsp, which is the helper's own, APX's r16 to r31 and the other classes'
   registers: the x87's, MMX's, the opmasks', YMM's and ZMM's), in XMM16 to
-  XMM31 without AVX-512F, in a high byte in a template that takes directives,
+  XMM31 without AVX-512F,
   as memory inputs (`"m"(r10)`, which clang's code refuses too), and of other
   types than a general register's or an XMM register's (an integer in an XMM
   register's variable);
