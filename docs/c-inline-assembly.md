@@ -743,6 +743,14 @@ name it. A template of no instructions with a flag output has a helper too, as
 clang sets the output after one. With flag outputs lowered, the preprocessor
 defines `__GCC_ASM_FLAG_OUTPUTS__`, as clang does.
 
+A template that names a flag output (#1846) prints the register its condition
+is set into after the template, as clang prints its own: the setcc register of
+its helper or its asm body, 32 bits wide whatever the object, as clang's code
+sets an `i32` (`%0` is `%ecx`, `%b0` `%cl`, `%q0` `%rcx`). Nothing reads it
+before the setcc, so a template may write it (clang's `setz %b0` beside the
+output is overwritten too); which register it is follows each compiler's
+allocation.
+
 ## asm goto
 
 An asm goto's template refers to its labels by `%l[name]` or `%lN`, N
@@ -804,9 +812,8 @@ reference to another template's `.set` symbol).
 Each refusal names its feature, as the driver prints it ("unsupported: ..."):
 
 - an asm goto's label as anything but a jmp's or a jcc's target;
-- flag outputs named in their templates (clang prints the register its code
-  sets the condition into after the template), of a size no integer store
-  covers, and with another alternative (`"=r@ccz"`, which clang takes as `r`);
+- flag outputs of a size no integer store covers, and with another
+  alternative (`"=r@ccz"`, which clang takes as `r`);
 - the letters it doesn't place, and `A` of other sizes than up to 8 bytes and
   an integer's 16, and in a template that takes directives with 16 bytes;
 - MMX operands with a modifier (clang refuses each), beside x87 operands in
@@ -916,6 +923,8 @@ has the commands, the logs and the default path's numbers against main.
   - the x87's control and status words and MXCSR;
   - `syscall`;
   - branches to the template's own labels;
+  - flag outputs named in their templates (#1846), by each modifier and
+    written there before the condition is set;
   - flag outputs: each of clang's 28 conditions after compares of values
     around their edges, into objects of every size an integer store covers
     (`bool`, `char`, `short`, `int`, `long`, `__int128`, a `float`'s bits, a
