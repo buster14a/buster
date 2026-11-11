@@ -1126,6 +1126,17 @@ BUSTER_PREPROCESSOR_ENTRY __attribute__((unused, format(printf, 7, 8))) void pp_
     va_end(arguments);
 }
 
+BUSTER_PREPROCESSOR_ENTRY __attribute__((unused, format(printf, 9, 10))) void pp_diagnose_placed_sources_phase(Preprocessor* pp, PPSeverity severity, uint32_t location, uint32_t origin,
+                                                                                                          uint32_t position, PPDiagnosticPhase phase, const PPDiagnosticSourceNote* placed,
+                                                                                                          uint32_t placed_count, const char* format, ...)
+{
+    va_list arguments;
+    va_start(arguments, format);
+    pp_history_ensure(pp);
+    pp_diagnose_source_location(pp, severity, location, origin, position, phase, NULL, 0, placed, placed_count, format, arguments);
+    va_end(arguments);
+}
+
 BUSTER_PREPROCESSOR_ENTRY __attribute__((unused, format(printf, 6, 7))) void pp_diagnose_unlocated_notes(Preprocessor* pp, PPSeverity severity, uint32_t position,
                                                                                                      const PPOutputDiagnosticNote* notes, uint32_t note_count,
                                                                                                      const char* format, ...)
