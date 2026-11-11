@@ -1063,10 +1063,38 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
           "F16 e9[]={__builtin_elementwise_sqrt(fa*fa)};FOLD(e9);D8 e10[]={__builtin_elementwise_sqrt(da*da)};FOLD(e10);\n"
           "return (int)h;}\n"
         },
+        // Vectors' floating elementwise builtins without AVX-512 (#1834), of 8, 16, 32 and 64 bytes of floats and 16, 32
+        // and 64 of doubles: SSE4.1's ROUNDPS and ROUNDPD (the C library's ceilf ... round an element without them), and
+        // FMA's VFMADD213PS and PD (fmaf and fma an element without it); canonicalize, copysign, maxnum and minnum by SSE's
+        // forms, and the IEEE maxima and minima, with AVX's blends or, without AVX, a chain of rows; of NaNs (their
+        // payloads and signs), signed zeros, infinities, a denormal, halves and values past 2^23 and 2^52.
+        { "baseline-vector-floating-builtins",
+          "typedef float v2sf __attribute__((vector_size(8)));typedef double v4df __attribute__((vector_size(32),aligned(16)));\n"
+          "#define U(w) do{__typeof__(w) v=w,r_[]={__builtin_elementwise_ceil(v),__builtin_elementwise_floor(v),__builtin_elementwise_trunc(v),"
+          "__builtin_elementwise_rint(v),__builtin_elementwise_nearbyint(v),__builtin_elementwise_roundeven(v),__builtin_elementwise_round(v),"
+          "__builtin_elementwise_canonicalize(v)};FOLD(r_);}while(0)\n"
+          "#define B(w,z) do{__typeof__(w) a=w,b=z,r_[]={__builtin_elementwise_copysign(a,b),__builtin_elementwise_maxnum(a,b),__builtin_elementwise_minnum(a,b),"
+          "__builtin_elementwise_maximum(a,b),__builtin_elementwise_minimum(a,b),__builtin_elementwise_maximumnum(a,b),__builtin_elementwise_minimumnum(a,b),"
+          "__builtin_elementwise_fma(a,b,a)};FOLD(r_);}while(0)\n"
+          "union F{unsigned u[16];v16sf v;v8sf h[2];v4sf q[4];v2sf e[8];};union D{unsigned long long u[8];v8df v;v4df h[2];v2df q[4];};\n"
+          "int tested(int n){unsigned h=2166136261u;\n"
+          "static const unsigned fb[]={0x7fc01234u,0xffc05678u,0x80000000u,0,0x3f800000u,0xbf800000u,0x7f800000u,0xff800000u,1,0x40490fdbu,0x3f000000u,"
+          "0xbf000000u,0x3fc00000u,0xc0200000u,0x3effffffu,0x4b7fffffu,0x7f812345u};\n"
+          "static const unsigned long long db[]={0x7ff8000000001234ull,0xfff8000000005678ull,0x8000000000000000ull,0,0x3ff0000000000000ull,"
+          "0xbff0000000000000ull,0x7ff0000000000000ull,0xfff0000000000000ull,1,0x400921fb54442d18ull,0x3fe0000000000000ull,0xbfe0000000000000ull,"
+          "0x3ff8000000000000ull,0xc004000000000000ull,0x3fdfffffffffffffull,0x432fffffffffffffull,0x7ff0000000012345ull};\n"
+          "for(unsigned i=0;i<17;i++){union F x,y;union D p,q;\n"
+          "for(unsigned j=0;j<16;j++){x.u[j]=fb[(i+j+(unsigned)n)%17];y.u[j]=fb[(i*3+j*5+(unsigned)n)%17];}\n"
+          "for(unsigned j=0;j<8;j++){p.u[j]=db[(i+j+(unsigned)n)%17];q.u[j]=db[(i*3+j*5+(unsigned)n)%17];}\n"
+          "U(x.v);U(x.h[0]);U(x.q[1]);U(x.e[2]);U(p.v);U(p.h[1]);U(p.q[0]);\n"
+          "B(x.v,y.v);B(x.h[1],y.h[1]);B(x.q[0],y.q[0]);B(x.e[3],y.e[3]);B(p.v,q.v);B(p.h[0],q.h[0]);B(p.q[1],q.q[1]);}\n"
+          "return (int)h;}\n"
+        },
         // Scalars' elementwise builtins without AVX-512F (#1834): the C library's ceilf ... roundf, fmaf and fma without
         // SSE4.1 and FMA, and ldexpf and ldexp; SSE4.1's ROUNDSS and ROUNDSD (round's of the value plus the largest value
         // below 0.5 of its sign) and FMA's VFMADD213SS and SD where the target has them; halves, values near them and past
         // 2^23 and 2^52. copysign, canonicalize, maxnum and minnum by SSE's forms, and with AVX the IEEE maxima and minima,
+        // and the fused multiply-add (b's NaN the result's of two, as clang's VFMADD213SS has b's register its destination),
         // of every pair of NaNs (their payloads), signed zeros, infinities, a denormal and others.
         { "baseline-scalar-builtins",
           "#define R(v) do{__typeof__(v) r_[]={__builtin_elementwise_ceil(v),__builtin_elementwise_floor(v),__builtin_elementwise_trunc(v),"
@@ -1077,7 +1105,7 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
           "for(int i=0;i<12;i++){float x=fs[i]*(float)(n+1);double y=ds[i]*(double)(n+1);R(x);R(y);"
           "float f=__builtin_elementwise_fma(x,1.0f/3.0f,(float)n);double g=__builtin_elementwise_fma(y,1.0/3.0,-y);FOLD(f);FOLD(g);}\n"
           "#define B(x,y) do{__typeof__(x) r_[]={__builtin_elementwise_copysign(x,y),__builtin_elementwise_maxnum(x,y),__builtin_elementwise_minnum(x,y),"
-          "__builtin_elementwise_canonicalize(x)IEEE(x,y)};FOLD(r_);}while(0)\n"
+          "__builtin_elementwise_canonicalize(x),__builtin_elementwise_fma(x,y,y)IEEE(x,y)};FOLD(r_);}while(0)\n"
           "#ifdef __AVX__\n"
           "#define IEEE(x,y) ,__builtin_elementwise_maximum(x,y),__builtin_elementwise_minimum(x,y),__builtin_elementwise_maximumnum(x,y),__builtin_elementwise_minimumnum(x,y)\n"
           "#else\n"
