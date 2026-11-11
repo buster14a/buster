@@ -379,6 +379,55 @@ static const uint8_t check_asm_order[15] = {
     X86_REGISTER_RBP,
 };
 
+// A clobber's register name as clang's target normalizes it (#2262, getNormalizedGCCRegisterName): past one '%' or '#',
+// and an index into its GCCRegNames (181 names, in getAsInteger's radix: 0x, 0b and 0 prefixes) replaced by that name,
+// written in `buffer`. The checker took only names clang knows (check_input_register_name_valid).
+static CheckAsmText check_asm_clobber_name(CheckAsmText text, char* buffer)
+{
+    if (text.length != 0 && (text.bytes[0] == '%' || text.bytes[0] == '#'))
+    {
+        text.bytes += 1;
+        text.length -= 1;
+    }
+    const bool numeric = text.length != 0 && text.bytes[0] >= '0' && text.bytes[0] <= '9';
+    const bool prefixed = numeric && text.length > 2 && text.bytes[0] == '0' && (text.bytes[1] == 'x' || text.bytes[1] == 'X' || text.bytes[1] == 'b' || text.bytes[1] == 'B');
+    const uint32_t radix = prefixed ? (text.bytes[1] == 'x' || text.bytes[1] == 'X' ? 16 : 2) : numeric && text.bytes[0] == '0' && text.length > 1 ? 8 : 10;
+    uint32_t index = 0;
+    for (uint32_t at = prefixed ? 2 : 0; numeric && at < text.length && index <= 180; at += 1)
+    {
+        const uint8_t c = text.bytes[at];
+        const uint32_t digit = c >= '0' && c <= '9' ? (uint32_t)(c - '0') : c >= 'a' && c <= 'f' ? (uint32_t)(c - 'a' + 10) : (uint32_t)(c - 'A' + 10);
+        index = index * radix + digit;
+    }
+    // GCCRegNames' runs, in order: each a prefix and its first number (or a name of its own), and its length.
+    static const struct
+    {
+        const char* name;
+        int32_t first;
+        uint32_t count;
+    } runs[] = {
+        { "ax", -1, 1 }, { "dx", -1, 1 }, { "cx", -1, 1 }, { "bx", -1, 1 }, { "si", -1, 1 }, { "di", -1, 1 }, { "bp", -1, 1 }, { "sp", -1, 1 },
+        { "st", -1, 1 }, { "st(", 1, 7 }, { "argp", -1, 1 }, { "flags", -1, 1 }, { "fpcr", -1, 1 }, { "fpsr", -1, 1 }, { "dirflag", -1, 1 },
+        { "frame", -1, 1 }, { "xmm", 0, 8 }, { "mm", 0, 8 }, { "r", 8, 8 }, { "xmm", 8, 8 }, { "ymm", 0, 16 }, { "xmm", 16, 16 }, { "ymm", 16, 16 },
+        { "zmm", 0, 32 }, { "k", 0, 8 }, { "cr0", -1, 1 }, { "cr", 2, 3 }, { "cr8", -1, 1 }, { "dr", 0, 4 }, { "dr", 6, 2 }, { "bnd", 0, 4 },
+        { "tmm", 0, 8 }, { "r", 16, 16 },
+    };
+    uint32_t start = 0;
+    for (uint32_t r = 0; numeric && r < BUSTER_ARRAY_LENGTH(runs); r += 1)
+    {
+        if (index >= start && index < start + runs[r].count)
+        {
+            const int32_t number = runs[r].first < 0 ? -1 : runs[r].first + (int32_t)(index - start);
+            const bool stack = strcmp(runs[r].name, "st(") == 0;
+            const int written = number < 0 ? snprintf(buffer, 16, "%s", runs[r].name) : snprintf(buffer, 16, stack ? "%s%d)" : "%s%d", runs[r].name, number);
+            text.bytes = (const uint8_t*)buffer;
+            text.length = written > 0 ? (uint32_t)written : 0;
+        }
+        start += runs[r].count;
+    }
+    return text;
+}
+
 // The register a clobber names: a general one's number (0 to 15), 16 plus an XMM, YMM or ZMM register's number, -1
 // for one that needs nothing of the helper (rsp, the flags, memory, the x87's, MMX's and the opmasks, which its call
 // clobbers anyway), or -2 for APX's general registers r16 to r31, which it doesn't take.
@@ -2511,13 +2560,12 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
     uint64_t barriers = 0;
     for (uint32_t c = 0; valid && reason == NULL && c < statement->clobber_count; c += 1)
     {
-        const CheckAsmText clobber = statement->clobbers[c];
-        const uint32_t named = clobber.length != 0 && (clobber.bytes[0] == '%' || clobber.bytes[0] == '#') ? 1 : 0;
-        const bool mmx_clobber = clobber.length == named + 3 && clobber.bytes[named] == 'm' && clobber.bytes[named + 1] == 'm' && clobber.bytes[named + 2] >= '0' &&
-                                 clobber.bytes[named + 2] <= '7';
-        mmx |= mmx_clobber ? 1u << (clobber.bytes[named + 2] - '0') : 0;
-        const bool mask_clobber = clobber.length == named + 2 && clobber.bytes[named] == 'k' && clobber.bytes[named + 1] >= '0' && clobber.bytes[named + 1] <= '7';
-        masks |= mask_clobber ? 1u << (clobber.bytes[named + 1] - '0') : 0;
+        char buffer[16];
+        const CheckAsmText clobber = check_asm_clobber_name(statement->clobbers[c], buffer);
+        const bool mmx_clobber = clobber.length == 3 && clobber.bytes[0] == 'm' && clobber.bytes[1] == 'm' && clobber.bytes[2] >= '0' && clobber.bytes[2] <= '7';
+        mmx |= mmx_clobber ? 1u << (clobber.bytes[2] - '0') : 0;
+        const bool mask_clobber = clobber.length == 2 && clobber.bytes[0] == 'k' && clobber.bytes[1] >= '0' && clobber.bytes[1] <= '7';
+        masks |= mask_clobber ? 1u << (clobber.bytes[1] - '0') : 0;
         const int32_t reg = check_asm_clobber(clobber);
         if (reg == -2)
         {
@@ -2998,7 +3046,8 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
     }
     for (uint32_t c = 0; valid && reason == NULL && c < statement->clobber_count; c += 1)
     {
-        clobbered |= check_asm_x87_clobber(statement->clobbers[c]);
+        char buffer[16];
+        clobbered |= check_asm_x87_clobber(check_asm_clobber_name(statement->clobbers[c], buffer));
     }
     const uint32_t popped = uses & ~chosen & (defs | clobbered);
     // Depths from st(0) without a gap: a mask of low bits (1, 3, 7...), or none.

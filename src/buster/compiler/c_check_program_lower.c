@@ -12731,7 +12731,7 @@ static __attribute__((noinline)) void check_lower_vector_builtin(CheckLowerWrite
     {
         check_lower_transport_boolean_builtin(writer, node, builtin, effect->evaluated_argument_count);
     }
-    else if (check_lower_bits_elements(writer, builtin, result, effect->evaluated_argument_count))
+    else if (check_lower_bits_elements(writer, builtin, result, effect->evaluated_argument_count) || check_lower_integer_elements(writer, builtin, result))
     {
         check_lower_transport_bit_builtin(writer, node, builtin, effect->evaluated_argument_count);
     }
@@ -16521,13 +16521,23 @@ static void check_lower_node_count(const CheckProgram* program, uint32_t node, C
         counts->transport_entries += room;
         counts->transport_locals += room != 0 ? 12 : 0;
         // A bit builtin's elements, each its SWAR sequence (check_lower_transport_bit_builtin): up to 144 entries an element,
-        // its sequence's 96 and its operands' reads and its store, for a vector of any width (#1834).
+        // its sequence's 96 and its operands' reads and its store, for a vector of any width (#1834); and so the saturating
+        // builtins' of 32- and 64-bit elements (check_lower_integer_elements, #2216), and a scalar's one element of an
+        // integer elementwise builtin (check_lower_sequence_arithmetic's or a bit builtin's), whatever its type.
+        const bool vector = check_lower_transport_is_vector(types, type);
         const bool bits = member == CBUILTIN_ELEMENTWISE_POPCOUNT || member == CBUILTIN_ELEMENTWISE_BITREVERSE || member == CBUILTIN_ELEMENTWISE_CLZG ||
                           member == CBUILTIN_ELEMENTWISE_CTZG || member == CBUILTIN_ELEMENTWISE_FSHL || member == CBUILTIN_ELEMENTWISE_FSHR;
-        if (op == CHECK_OP_BUILTIN_VECTOR && bits && check_lower_transport_is_vector(types, type))
+        const bool saturating = member == CBUILTIN_ELEMENTWISE_ADD_SAT || member == CBUILTIN_ELEMENTWISE_SUB_SAT;
+        const bool arithmetic = saturating || member == CBUILTIN_ELEMENTWISE_ABS || member == CBUILTIN_ELEMENTWISE_MAX || member == CBUILTIN_ELEMENTWISE_MIN;
+        if (op == CHECK_OP_BUILTIN_VECTOR && ((bits && vector) || (saturating && vector && check_vector_builtin_shape(types, type).element >= 4 && !check_lower_bool_vector(types, type))))
         {
             counts->transport_entries += 144 * (uint64_t)check_builtin_vector_lanes(types, type_conversion_operand(types, type));
             counts->transport_locals += room != 0 ? 0 : 12;
+        }
+        else if (op == CHECK_OP_BUILTIN_VECTOR && (bits || arithmetic) && !vector)
+        {
+            counts->transport_entries += 144;
+            counts->transport_locals += 12;
         }
     }
     // The roundings and the fused multiply-add are calls too where the unit's target lacks their instructions
