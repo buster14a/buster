@@ -291,6 +291,29 @@ static void check_test_target_versions_diagnostics(CheckTest* test, const char* 
         "__attribute__((target_clones(\"avx2\",\"default\"))) int u(void) { return 2; }\n"
         "int t(void) { return 1; }\n"
         "long t(void) { return 2; }\n",
+        // A version's redefinition is recovered and invalid (#2362): a later definition of its version is quiet, another
+        // version's redefinition is still clang's error, and so are the errors after them; the call goes on to the
+        // function's other versions.
+        "__attribute__((target(\"default\"))) int f(void) { return 0; }\n"
+        "__attribute__((target(\"avx2\"))) int f(void) { return 1; }\n"
+        "__attribute__((target(\"avx2\"))) int f(void) { return 2; }\n"
+        "__attribute__((target(\"avx2\"))) int f(void) { return 3; }\n"
+        "__attribute__((target(\"sse4.2\"))) int f(void) { return 4; }\n"
+        "__attribute__((target(\"avx2\"))) int f(void) { return 5; }\n"
+        "__attribute__((target(\"sse4.2\"))) int f(void) { return 6; }\n"
+        "int main(void) { return f() + undeclared; }\n",
+        "__attribute__((target_clones(\"avx2\",\"default\"))) int f(int a) { return 0; }\n"
+        "__attribute__((target_clones(\"avx2\",\"default\"))) int f(int a) { return 1; }\n"
+        "__attribute__((target_clones(\"avx2\",\"default\"))) int f(int a) { return 2; }\n"
+        "int main(void) { return f(1) + undeclared; }\n",
+        // An ordinary redefinition's earlier, then a version's: the version's later attributes are its own, no late
+        // warning (#2362).
+        "__attribute__((noinline)) int w(void) { return 1; }\n"
+        "__attribute__((noinline)) int w(void) { return 2; }\n"
+        "__attribute__((target(\"default\"))) int u(void) { return 1; }\n"
+        "__attribute__((target(\"avx2\"))) int u(void) { return 2; }\n"
+        "__attribute__((target(\"avx2\"))) int u(void) { return 3; }\n"
+        "__attribute__((target(\"avx2\"), used)) int u(void);\n",
     };
     // Units whose warnings each option set below changes.
     static const char* const flagged[] = {

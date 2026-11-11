@@ -942,6 +942,12 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "int a[-1]; int a[2]; float a;\nstruct S s1; int s1; float s1;\nstatic void v; int v;\nint f(void)[3]; int f(void); float f(int);\n"
         "int u(void) { return f(1, 2); }\nint y(void) { int unused; return 0; }\n",
         "int f(void)[3]; int f(void); float f(int);\nint u(void) { return f(1, 2); }\nint y(void) { int unused; return 0; }\n",
+        // A function's redefinition is clang's invalid declaration, kept in its chain (#2362): reported once, a third or
+        // a later declaration quiet, of any type, and so are its uses, a block's extern one's too; its body's errors and
+        // another kind's redeclaration (noted at it) are still reported.
+        "int g(void) { return 1; }\nint g(void) { return 2; }\nint g(void) { return 3; }\nlong g(void);\nint h(void) { return g(1); }\n"
+        "int k(void) { extern int g(void); return g(2); }\nint (*p)(int) = g;\nint y(void) { int unused; return undeclared; }\n",
+        "static int g(int a) { return 1; }\nstatic int g(int a) { return undeclared; }\nint g;\nint h(void) { return g(); }\n",
         // Another kind of entity's redeclaration after an invalid one is still clang's "redefinition of 'a' as different
         // kind of symbol" (review on #1884): an object after a function, a function after an object, and a typedef after
         // either.

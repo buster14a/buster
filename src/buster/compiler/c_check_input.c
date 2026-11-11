@@ -12295,6 +12295,8 @@ static void check_input_bind_checked(CheckInputReader* reader, uint32_t token, u
     // was compared with the visible one's there (the latest declaration of its entity, whose storage clang compares), and
     // whether a mismatch of it alone was reported.
     bool dropped = false;
+    // Whether it is a function's invalid redefinition, kept bound (#2362, below).
+    bool kept_invalid = false;
     bool thread_local_checked = false;
     bool thread_local_reported = false;
     // Whether the visible declaration, which its linked check would compare the type with too, is an invalid redefinition.
@@ -12462,10 +12464,19 @@ static void check_input_bind_checked(CheckInputReader* reader, uint32_t token, u
                 // follows below.
                 const bool loading = has_attributes && check_input_attribute_of(check_input_attributes_at(reader->output, token), CHECK_ATTRIBUTE_LOADER_UNINITIALIZED) != NULL;
                 const bool recovered = !loading && reader->output->report_count == before + 1 && check_input_recover_reports(reader, before);
-                dropped = recovered && !redefinition_alone;
+                // A function's second definition alone (#2362): clang's ActOnStartOfFunctionDef reports it after the
+                // declaration was merged, which stays in its chain and lookup, invalid: bound, its later declarations
+                // invalid with it and its uses quiet (check_input_bind), without replacing its entity's linked one.
+                const bool function_redefinition = redefined && !mismatch && !(thread_local && !thread_local_alone) && kind == C_BINDING_FUNCTION;
+                dropped = recovered && !redefinition_alone && !function_redefinition;
                 if (recovered && redefinition_alone)
                 {
                     (void)check_input_invalid_redefinition_note(reader, token);
+                }
+                if (recovered && function_redefinition)
+                {
+                    check_input_invalid_declare(reader, token);
+                    kept_invalid = true;
                 }
                 const bool loader = has_attributes &&
                     ((definition != 0 && check_input_attribute_of(check_input_attributes_at(reader->output, definition - 1), CHECK_ATTRIBUTE_LOADER_UNINITIALIZED) != NULL) ||
@@ -12532,7 +12543,7 @@ static void check_input_bind_checked(CheckInputReader* reader, uint32_t token, u
                 }
             }
         }
-        if (!dropped && (linked == 0 || !check_input_bit(reader->declaration_bits, linked - 1, BUSTER_CHECK_BITS_DEFINED)))
+        if (!dropped && !kept_invalid && (linked == 0 || !check_input_bit(reader->declaration_bits, linked - 1, BUSTER_CHECK_BITS_DEFINED)))
         {
             reader->linked_declarations[name] = token + 1;
         }
@@ -12553,7 +12564,7 @@ static void check_input_bind_checked(CheckInputReader* reader, uint32_t token, u
                                     check_input_bit(reader->output->declaration_bits, linked - 1, BUSTER_CHECK_BITS_THREAD_LOCAL),
                                     "a body's declaration with linkage differs from the one it replaces in thread-local storage");
         }
-        reader->linked_types[name] = dropped ? reader->linked_types[name] : composite;
+        reader->linked_types[name] = dropped || kept_invalid ? reader->linked_types[name] : composite;
         // Attribute evaluation may publish a declaration's attributes after it binds. Retain its scope independently of
         // that publication, for check_input_attribute_merge_exclusions and the late masks. One without a visible
         // previous declaration records none: a later declaration that sees no other finds it, as clang's
@@ -12589,6 +12600,14 @@ static void check_input_bind_checked(CheckInputReader* reader, uint32_t token, u
             check_deferred_linked(reader, name, token);
         }
     }
+    // A version's (#2362), which the linked block above leaves out: a later redeclaration of its version is checked against
+    // its attributes as any other function's, once the masks exist.
+    if (versions && !reader->lane && reader->scope_count == 0 && reader->late_attribute_masks != NULL && reader->objects[token] != 0 &&
+        reader->output->function_flags != NULL)
+    {
+        reader->late_attribute_masks[reader->objects[token]] |= check_input_attribute_late_mask(check_input_attributes_at(reader->output, token), reader->output->function_flags[token]);
+        check_input_attribute_after_kinds(reader, check_input_attributes_at(reader->output, token), reader->late_attribute_kinds + 2 * (uint64_t)reader->objects[token]);
+    }
     if (reader->output->visibility_pragmas != NULL || (reader->declaration_storage != NULL && reader->declaration_storage[token] == C_NAME_PRIVATE_EXTERN) ||
         (check_sparse_wide_present(reader->output->attributes) && check_input_attributes_at(reader->output, token) != NULL))
     {
@@ -12621,7 +12640,21 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
                                  reader->output->invalid_declarations[old_declaration] != 0;
     // Another kind of entity's redeclaration is still clang's "redefinition of 'X' as different kind of symbol", which
     // MergeFunctionDecl and MergeVarDecl give before they look at the earlier one's invalidity: checked as any other is.
-    const bool old_invalid = visible_invalid && reader->declaration_kinds[old_declaration] == reader->declaration_kinds[token];
+    // A multiversioned function's declaration of another version than the visible invalid one is another entity's, checked
+    // as any (#2362): against its own version's declarations, an invalid redefinition among them, as clang's
+    // CheckMultiVersionAdditionalDecl finds it, so that a redefinition of that is still reported.
+    bool separate = false;
+    uint32_t version = BUSTER_CHECK_NONE;
+    if (__builtin_expect(visible_invalid && reader->declaration_kinds[token] == C_BINDING_FUNCTION && reader->target_versions, 0))
+    {
+        version = check_input_target_versions_match(reader, token, &separate);
+    }
+    if (__builtin_expect(visible_invalid && reader->declaration_kinds[token] == C_BINDING_FUNCTION && reader->cpu_dispatch && !separate, 0))
+    {
+        version = check_input_cpu_dispatch_match(reader, token, old, &separate);
+    }
+    const bool apart = separate && version != old_declaration;
+    const bool old_invalid = visible_invalid && !apart && reader->declaration_kinds[old_declaration] == reader->declaration_kinds[token];
     if (__builtin_expect(old_invalid && reader->declaration_kinds[token] == C_BINDING_FUNCTION, 0))
     {
         check_input_invalid_declare(reader, token);
@@ -12646,6 +12679,13 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
         if (c_bindings_declare(&reader->bindings, C_BINDING_ORDINARY, name, (CBindingKind)reader->declaration_kinds[token], token, point, depth) == 0)
         {
             reader->output->resource = true;
+        }
+        // Its attributes are its own entity's still (#2362): a multiversioned function's later declaration of its version
+        // redeclares it, its attributes checked against these.
+        if (!reader->lane && reader->scope_count == 0 && reader->late_attribute_masks != NULL && reader->objects[token] != 0 && reader->output->function_flags != NULL)
+        {
+            reader->late_attribute_masks[reader->objects[token]] |= check_input_attribute_late_mask(check_input_attributes_at(reader->output, token), reader->output->function_flags[token]);
+            check_input_attribute_after_kinds(reader, check_input_attributes_at(reader->output, token), reader->late_attribute_kinds + 2 * (uint64_t)reader->objects[token]);
         }
     }
     else
