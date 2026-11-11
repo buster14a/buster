@@ -7578,15 +7578,35 @@ cached evaluator that types it doesn't take one. A redeclaration of a
 variable with linkage takes the earlier declaration's type rather than a
 deduced one, as clang's C `mergeTypes` takes the placeholder before deducing
 (`extern long p; __auto_type p = 1;` is a long, its initializer converted;
-`check_input_auto_type_merged`), through pointer declarators. Refused by
-name: `_Atomic` and `restrict` through a declarator (`_Atomic __auto_type *p`,
-whose initializer clang finds incompatible) or together (clang's restrict error
-names `_Atomic(__auto_type)`), `_Atomic` of an atomic value (clang's error names
-the placeholder's type), `restrict` of a value that is no pointer to an object
-(clang's `restrict int`, which the placeholder can't be told from), type
-attributes with `__auto_type`, a variably modified cast in the initializer, and a
-redeclaration whose merge clang refuses (its "redefinition of 'p' with a
-different type: 'const __auto_type' vs 'int'").
+`check_input_auto_type_merged`), through pointer declarators, and a `restrict`
+placeholder's over a restrict pointer. Where clang's `mergeTypes` refuses the
+merge (#1844, `check_input_auto_type_refused`), clang's error is given: the
+qualifiers of a level differ (const, volatile and restrict alike), a pointer
+declarator meets no pointer, or an `_Atomic` placeholder meets no atomic type.
+It reads "redefinition of 'p' with a different type: 'const __auto_type' vs
+'int'", or "redeclaration" with `extern`, at the name. The placeholder is
+printed through its declarator (`'volatile __auto_type *const'`,
+`'_Atomic(__auto_type)'`, `'restrict __auto_type'`;
+`check_semantic_auto_type_spelling`). The note is at the entity's latest
+earlier declaration, "previous definition is here" for a definition or a
+tentative one (`CHECK_REDECLARATION_AUTO_TYPE`). The reader stops there, as at
+other initialized invalid declarations, so clang's later errors aren't given.
+Refused by name: `_Atomic` and `restrict` through a declarator
+(`_Atomic __auto_type *p`, whose initializer clang finds incompatible) or
+together (clang's restrict error names `_Atomic(__auto_type)`), `_Atomic` of an
+atomic value (clang's error names the placeholder's type), `restrict` of a value
+that is no pointer to an object (clang's `restrict int`, which the placeholder
+can't be told from), type attributes with `__auto_type` but a vector's and a
+mode's, a variably modified cast in the initializer, and a redeclaration of an
+atomic entity, which clang merges (`_Atomic int r; __auto_type r = 1;` is an
+`_Atomic int`). A vector's attribute (`vector_size`, `ext_vector_type`) and a
+mode's meet the undeduced placeholder, as clang's handlers do (#1844,
+`check_input_attribute_auto_type`): "invalid vector element type 'T'" at the
+first vector attribute, T the placeholder's type there (the specifiers' bare
+`'__auto_type'`, or after the name the declarator's whole type,
+`'const __auto_type *'`), before "mode attribute only supported for integer and
+floating-point types" at a mode. Clang goes on with the declaration; the reader
+stops there.
 
 `test-checker`'s source fixtures compare these with clang, their acceptance and
 first error's line, on both paths, and its programs (`local-labels`,
