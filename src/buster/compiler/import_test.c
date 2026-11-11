@@ -96,7 +96,7 @@
 #include <signal.h>
 #include <unistd.h>
 #include <sys/mman.h>
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK
 #define BUSTER_IMPORT_TEST_REPORTED 3
 #define BUSTER_IMPORT_TEST_ROUND_TRIP_FUNCTIONS 500
 // The unit the objects made by hand are imported as.
@@ -746,10 +746,10 @@ static bool import_test_round_trips(uint64_t seed, Arena* arena)
            BUSTER_OBJECT_TEST_MANY_FUNCTIONS, (unsigned long long)tally.vector, (unsigned long long)tally.exact);
     return import_test_report(&tally);
 }
-
+#endif
 // ---------------------------------------------------------------------------------------------------------------------
 // Files made by hand
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE
 #define BUSTER_IMPORT_TEST_MAX_SECTIONS 48
 #define BUSTER_IMPORT_TEST_MAX_SYMBOLS 48
 #define BUSTER_IMPORT_TEST_MAX_RELOCATIONS 24
@@ -794,7 +794,7 @@ static const char* const import_test_spare_names[IMPORT_TEST_SPARE_NAMES] = {
 };
 // What a symbol made by hand imports as when it imports as none: not a valid flags value, whose binding doesn't exist.
 #define BUSTER_IMPORT_TEST_NONE 0xff
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK
 // The readers, which import_test_read runs by number.
 typedef enum ImportTestReader
 {
@@ -854,7 +854,7 @@ static ImportResult import_test_read(ImportTestReader reader, String8 bytes, Are
     arena_pop_to(arena, length);
     return result;
 }
-
+#endif
 typedef struct ImportTestStrings ImportTestStrings;
 struct ImportTestStrings
 {
@@ -929,7 +929,7 @@ struct ImportTestFile
     uint64_t index_header;
     uint64_t names_header;
 };
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK
 static String8 import_test_bytes(const ImportTestFile* file)
 {
     String8 result = {
@@ -938,7 +938,7 @@ static String8 import_test_bytes(const ImportTestFile* file)
     };
     return result;
 }
-
+#endif
 // An ELF file of `type` with sections 1 to count - 1 of `sections` and a .shstrtab after them: the ELF header, each
 // section's contents at its alignment (at least 8), the names (the spare ones last), then the section headers. Its
 // bytes are pushed from `arena`.
@@ -1021,7 +1021,7 @@ static bool import_test_elf(ImportTestFile* file, uint16_t type, const ImportTes
     }
     return file->bytes != 0;
 }
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK
 // A copy of `base`, from `arena`, with the `width` bytes at `offset` set to `value`, a little-endian number.
 static ImportTestFile import_test_changed(const ImportTestFile* base, uint64_t offset, uint32_t width, uint64_t value, Arena* arena)
 {
@@ -1119,7 +1119,7 @@ typedef enum ImportTestObjectSection
 // The priorities of IMPORT_TEST_INIT_PRIORITY and IMPORT_TEST_FINI_PRIORITY, by their names.
 #define BUSTER_IMPORT_TEST_INIT_PRIORITY 101
 #define BUSTER_IMPORT_TEST_FINI_PRIORITY 42
-
+#endif
 typedef struct ImportTestSymbols ImportTestSymbols;
 struct ImportTestSymbols
 {
@@ -1155,7 +1155,7 @@ static uint32_t import_test_add_symbol(ImportTestSymbols* symbols, const char* n
     symbols->count += 1;
     return result;
 }
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK
 typedef struct ImportTestRelocations ImportTestRelocations;
 struct ImportTestRelocations
 {
@@ -1575,7 +1575,8 @@ static ImportTestFile import_test_sorted(const ImportTestObject* test, const Imp
     }
     return result;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK
 // A common symbol (SHN_COMMON, #1849): the hand-made object's global_object made one of alignment 8, which the exact
 // path imports as a BUSTER_LINK_SYMBOL_COMMON symbol of its own zero-filled atom, of its size and alignment, the vector
 // path leaving the object to it.
@@ -1617,7 +1618,8 @@ static void import_test_common(ImportTestTally* tally, const ImportTestFile* bas
                        "a common past the largest alignment is unsupported before it changes the link", symbol_index);
     arena_pop_to(arena, length);
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK
 // A round trip of common symbols (#1849): a link of a common's atom of 24 bytes aligned to 16 and a function that refers
 // to it, which the object writer writes as SHN_COMMON (its value 16) with the function's relocation against it, imports
 // as the same common, the relocation's fixup against it.
@@ -2050,7 +2052,6 @@ static void import_test_archive_header(uint8_t* header, const char* name, uint64
     header[58] = '`';
     header[59] = '\n';
 }
-
 static void import_test_big_endian(uint8_t* bytes, uint64_t value, uint32_t width)
 {
     for (uint32_t i = 0; i < width; i += 1)
@@ -2058,7 +2059,6 @@ static void import_test_big_endian(uint8_t* bytes, uint64_t value, uint32_t widt
         bytes[i] = (uint8_t)(value >> (8 * (width - 1 - i)));
     }
 }
-
 // GNU's format: the magic, the symbol index, the long names' table (names of 16 bytes or more, each followed by "/\n"),
 // then the members, each at an even offset ("\n" pads the part before).
 static bool import_test_archive(ImportTestFile* file, const ImportTestArchive* archive, Arena* arena)
@@ -2953,7 +2953,8 @@ static SymbolId import_test_runtime_symbol(const Runtime* runtime, const char* n
     }
     return result;
 }
-
+#endif
+#endif
 // The name of the library's version `index`, or an empty slice.
 static String8 import_test_version_name(const ImportLibrary* library, uint16_t index)
 {
@@ -2973,7 +2974,7 @@ static __attribute__((unused)) String8 import_test_runtime_version_name(const Ru
     const String8 loader = libc.length != 0 ? libc : import_test_version_name(&runtime->loader, index);
     return loader.length != 0 ? loader : import_test_version_name(&runtime->gcc_s, index);
 }
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK
 // Whether libc exports `name` at version `version` ("" for unversioned).
 static bool import_test_exported(const ImportLibrary* library, const char* name, const char* version)
 {
@@ -2985,8 +2986,11 @@ static bool import_test_exported(const ImportLibrary* library, const char* name,
 static void import_test_cross_check(ImportTestTally* tally, const Runtime* runtime, Arena* arena);
 static bool import_test_names(const Link* link, String8 bytes, const ImportObject* object, SymbolId symbol, const char* name);
 static void import_test_cross_check_relocations(ImportTestTally* tally, const Runtime* runtime, Arena* arena);
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK
 static bool import_test_path_is(String8 path, const char* name);
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK
 // libgcc_s.so.1 in a dynamic PIE's or a shared library's runtime (#489): its soname, the unwinder's exports at their
 // default versions, its version indices past libc.so.6's and the loader's, and none of its exports one of theirs, as
 // binding's order needs (bind.c): the driver names it before libc.so, and binding takes libc.so.6's exports first. On a
@@ -3385,14 +3389,16 @@ static uint32_t import_test_symbol_piece(const Runtime* runtime, SymbolId symbol
     }
     return low;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK
 // Whether the path's last part, after its last '/', is `name`.
 static bool import_test_path_is(String8 path, const char* name)
 {
     const uint64_t length = strlen(name);
     return path.length > length && path.pointer[path.length - length - 1] == '/' && memcmp(path.pointer + path.length - length, name, length) == 0;
 }
-
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK
 // The crt objects of each static kind's runtime (import_test_static_runtime), by RuntimeObject.
 static const char* const import_test_static_objects[RUNTIME_KINDS][RUNTIME_OBJECTS] = {
     [RUNTIME_KIND_STATIC] = {
@@ -4313,3 +4319,4 @@ static int run_import_tests(int argc, char** argv)
     }
     return result;
 }
+#endif
