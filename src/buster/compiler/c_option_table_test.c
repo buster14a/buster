@@ -152,6 +152,8 @@ static const OptionTestCase option_test_cases[] = {
     { { "-o", "--version", "-fsyntax-only", "empty.c" }, 0, NULL, "buster", "", NULL, NULL },
     { { "-fsyntax-only", "empty.c", "-L", "--version" }, 0, NULL, "buster", "", NULL, NULL },
     { { "-fsyntax-only", "empty.c", "-Xlinker", "-c" }, 0, NULL, NULL, "", NULL, NULL },
+    { { "-fsyntax-only", "empty.c", "-rpath", "-c" }, 0, NULL, NULL, "", NULL, NULL },
+    { { "-E", "-P", "m.c", "-rpath", "-M" }, 0, "X Y FROM_INC\n", NULL, "", NULL, NULL },
     { { "-fsyntax-only", "empty.c", "-o", "-fsyntax-only" }, 0, NULL, NULL, "", NULL, NULL },
     // The information probes.
     { { "--version", "-target", "x86_64-unknown-linux-gnu" }, 0, "buster (development build)\nTarget: x86_64-unknown-linux-gnu\n", NULL, "", NULL, NULL },
@@ -200,6 +202,7 @@ static const OptionTestCase option_test_cases[] = {
     { { "-E", "-P", "m.c", "-x" }, 1, NULL, NULL, "error: unsupported or missing input language ''\n" BUSTER_OPTION_TEST_USAGE_E, NULL, NULL },
     { { "-E", "-P", "m.c", "-MF" }, 1, NULL, NULL, "error: missing argument to '-MF'\n" BUSTER_OPTION_TEST_USAGE_E, NULL, NULL },
     { { "-E", "-P", "m.c", "-Xlinker" }, 1, NULL, NULL, "error: missing argument to linker option '-Xlinker'\n" BUSTER_OPTION_TEST_USAGE_E, NULL, NULL },
+    { { "-E", "-P", "m.c", "-rpath" }, 1, NULL, NULL, "error: missing argument to linker option '-rpath'\n" BUSTER_OPTION_TEST_USAGE_E, NULL, NULL },
     { { "-E", "-P", "m.c", "-include" }, 1, NULL, NULL, "unknown argument: -include\n" BUSTER_OPTION_TEST_USAGE_E, NULL, NULL },
     { { "-E", "-P", "m.c", "-I" }, 1, NULL, NULL, BUSTER_OPTION_TEST_USAGE_E, NULL, NULL },
     { { "-E", "-P", "m.c", "-I-" }, 1, NULL, NULL, "error: '-I-' not supported, please use -iquote instead\n" BUSTER_OPTION_TEST_USAGE_E, NULL, NULL },

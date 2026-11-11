@@ -292,7 +292,8 @@ record](https://github.com/buster14a/buster-performance/tree/main/docs/measureme
 measured the same way: `vpermb` of xmm and ymm registers, `vpermw` and
 `vpshufb` at every width, `vpermd` of ymm and zmm registers, `vpermq` of zmm
 ones, `valignd` and `valignq` at every width, and `vshufi64x2` of ymm and zmm
-registers.
+registers. Its conversions then added 88: `vpmovzx` and `vpmovsx` of every pair of lanes at
+every width, and `vpmov`, `vpmovs` and `vpmovus` of every pair at every width.
 
 What the rows say, a few families (cycles; derived values in italics):
 
