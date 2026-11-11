@@ -193,15 +193,19 @@ static bool check_program_cpu_number(CheckProgram* program, Arena* output)
     return valid;
 }
 
-// The symbol body `b` is defined at: its object's, but a version's own (CheckProgram.cpu_symbols).
+// The symbol body `b` is defined at: its object's, but a version's own (CheckProgram.cpu_symbols). An object is at most
+// one version (check_program_cpu_groups), so the search stops at it. Clang 23 vectorizes a whole-list scan that keeps the
+// last match's symbol into a gather whose result MemorySanitizer reports as uninitialized from 9 versions on (#2359).
 static SymbolId check_program_body_symbol(const CheckProgram* program, uint32_t b)
 {
     const uint32_t object = program->bodies[b].object;
-    SymbolId symbol = program->object_symbols[object];
-    for (uint32_t v = 0; program->cpu_symbols != NULL && v < program->cpu_version_count; v += 1)
+    const uint32_t versions = program->cpu_symbols != NULL ? program->cpu_version_count : 0;
+    uint32_t v = 0;
+    while (v < versions && program->cpu_versions[v].object != object)
     {
-        symbol = program->cpu_versions[v].object == object ? program->cpu_symbols[v] : symbol;
+        v += 1;
     }
+    const SymbolId symbol = v < versions ? program->cpu_symbols[v] : program->object_symbols[object];
     // Multiversioning by target strings' (#1838, c_check_program_target_versions.c).
     const SymbolId target = program->target_group_count != 0 ? check_program_target_body_symbol(program, b) : 0;
     return target != 0 ? target : symbol;

@@ -229,7 +229,9 @@ Ubuntu mirror, DNS or release-host outage can't fail a shard (#2275).
 
 - **Release inputs:** LLVM, CMake, Ninja, mold and wild, pinned by
   `tools/ci/hosted-tools.lock` (`tools/ci/hosted-release.sh`). They come from
-  the `hosted-inputs-v1-…` cache, else the run's artifact `ARTIFACT-NAME`.
+  the `hosted-inputs-v1-…` cache, else the run's artifact `ARTIFACT-NAME`,
+  which preparation publishes only when that cache didn't verify for it
+  (#2372). It and the offline bundle below are kept 1 day.
 - **Offline inputs:** `tools/ci/hosted-offline.sh`'s bundle, the run's
   companion artifact `ARTIFACT-NAME-offline`. It holds:
   - the apt closure of `setup-hosted.sh`'s packages, resolved on the

@@ -520,6 +520,156 @@ static bool check_program_symbol_pragmas(CheckProgram* program, const CheckDataP
     return valid;
 }
 
+// Sorts `values` by `keys` (`count` of each), stably, bottom-up through `key_temporary` and `value_temporary`.
+static void check_program_sort_pairs(uint64_t* keys, uint32_t* values, uint32_t count, uint64_t* key_temporary, uint32_t* value_temporary)
+{
+    uint64_t* from_keys = keys;
+    uint32_t* from_values = values;
+    uint64_t* to_keys = key_temporary;
+    uint32_t* to_values = value_temporary;
+    for (uint32_t width = 1; width < count; width *= 2)
+    {
+        for (uint32_t low = 0; low < count; low += 2 * width)
+        {
+            const uint32_t middle = low + width < count ? low + width : count;
+            const uint32_t high = middle + width < count ? middle + width : count;
+            uint32_t left = low;
+            uint32_t right = middle;
+            for (uint32_t at = low; at < high; at += 1)
+            {
+                const bool take_left = left < middle && (right >= high || from_keys[left] <= from_keys[right]);
+                const uint32_t taken = take_left ? left : right;
+                to_keys[at] = from_keys[taken];
+                to_values[at] = from_values[taken];
+                left += take_left ? 1 : 0;
+                right += take_left ? 0 : 1;
+            }
+        }
+        uint64_t* swap_keys = from_keys;
+        uint32_t* swap_values = from_values;
+        from_keys = to_keys;
+        from_values = to_values;
+        to_keys = swap_keys;
+        to_values = swap_values;
+    }
+    if (from_keys != keys && count != 0)
+    {
+        memcpy(keys, from_keys, (uint64_t)count * sizeof(uint64_t));
+        memcpy(values, from_values, (uint64_t)count * sizeof(uint32_t));
+    }
+}
+
+// The bindings clang's deferred emission gives the watched objects that eager code never refers to (#1849): `bound` an
+// object's 1 where the first reference clang emits names a late weak declaration, 2 where it names none, 0 where clang
+// emits none. It replays CodeGenModule's order. A deferred definition (`nodes`: a static or inline body, or file-scope
+// data, by the CheckProgramUses records' sources) is scheduled where eager code first refers to it, or at its
+// definition (`times`) if that comes later, as GetOrCreateLLVMFunction and EmitGlobal add it to DeferredDeclsToEmit;
+// at the unit's end EmitDeferred emits them in that order, each one's own references scheduling the definitions it
+// reaches first, emitted right after it (depth first). A body's references are taken by token. Returns false
+// without room.
+static bool check_program_weak_deferred(const CheckProgram* program, const CheckProgramUses* uses, const uint32_t* times, uint32_t node_count, uint8_t* bound,
+                                        Arena* scratch)
+{
+    const uint64_t temporary = scratch->length;
+    const uint32_t count = uses->record_count;
+    uint64_t* keys = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (uint64_t)count + node_count + 1);
+    uint64_t* key_temporary = keys != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (uint64_t)count + node_count + 1) : NULL;
+    uint32_t* values = key_temporary != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + node_count + 1) : NULL;
+    uint32_t* value_temporary = values != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + node_count + 1) : NULL;
+    uint32_t* offsets = value_temporary != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)node_count + 1) : NULL;
+    uint64_t* schedule = offsets != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, node_count) : NULL;
+    uint32_t* next = schedule != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, node_count) : NULL;
+    uint8_t* scheduled = next != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, node_count) : NULL;
+    // The record whose reference gave a definition its scheduling: data's references share their object's point and
+    // token, and go in their initializer's order.
+    uint32_t* setters = scheduled != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, node_count) : NULL;
+    const bool valid = setters != NULL;
+    if (valid)
+    {
+        memset(scheduled, 0, node_count);
+        // Each deferred definition's references by token, and each definition's first scheduling: the earliest eager
+        // reference's (its emission point, then its token) or its definition's, whichever is later.
+        uint32_t listed = 0;
+        for (uint32_t n = 0; n < node_count; n += 1)
+        {
+            schedule[n] = UINT64_MAX;
+        }
+        for (uint32_t r = 0; r < count; r += 1)
+        {
+            const CheckProgramUseRecord* record = uses->records + r;
+            const uint32_t node = uses->nodes[record->object];
+            if (record->source == BUSTER_CHECK_NONE && record->point != BUSTER_CHECK_NONE && node != 0)
+            {
+                const uint32_t defined = times[node - 1];
+                const uint64_t key = record->point >= defined ? (uint64_t)record->point << 32 | record->token : (uint64_t)defined << 32;
+                setters[node - 1] = key < schedule[node - 1] ? r : setters[node - 1];
+                schedule[node - 1] = key < schedule[node - 1] ? key : schedule[node - 1];
+            }
+            else if (record->source < node_count)
+            {
+                keys[listed] = (uint64_t)record->source << 32 | record->token;
+                values[listed] = r;
+                listed += 1;
+            }
+        }
+        check_program_sort_pairs(keys, values, listed, key_temporary, value_temporary);
+        uint32_t cursor = 0;
+        for (uint32_t n = 0; n < node_count; n += 1)
+        {
+            offsets[n] = cursor;
+            while (cursor < listed && (uint32_t)(keys[cursor] >> 32) == n)
+            {
+                cursor += 1;
+            }
+        }
+        offsets[node_count] = listed;
+        uint64_t* order_keys = keys + listed;
+        uint32_t* order = values + listed;
+        uint32_t ordered = 0;
+        for (uint32_t r = 0; r < count; r += 1)
+        {
+            const uint32_t node = uses->nodes[uses->records[r].object];
+            if (node != 0 && schedule[node - 1] != UINT64_MAX && setters[node - 1] == r && scheduled[node - 1] == 0)
+            {
+                order_keys[ordered] = schedule[node - 1];
+                order[ordered] = node - 1;
+                ordered += 1;
+                scheduled[node - 1] = 1;
+            }
+        }
+        check_program_sort_pairs(order_keys, order, ordered, key_temporary, value_temporary);
+        // The emission order as a list, each definition's newly reached ones inserted after it.
+        uint32_t head = ordered != 0 ? order[0] : BUSTER_CHECK_NONE;
+        for (uint32_t i = 0; i < ordered; i += 1)
+        {
+            next[order[i]] = i + 1 < ordered ? order[i + 1] : BUSTER_CHECK_NONE;
+        }
+        for (uint32_t node = head; node != BUSTER_CHECK_NONE; node = next[node])
+        {
+            uint32_t after = node;
+            for (uint32_t k = offsets[node]; k < offsets[node + 1]; k += 1)
+            {
+                const CheckProgramUseRecord* record = uses->records + values[k];
+                const uint32_t object = record->object;
+                const uint32_t reached = uses->nodes[object];
+                if (uses->first[object] == BUSTER_CHECK_NONE && bound[object] == 0)
+                {
+                    bound[object] = check_program_weak_named(program, object, record->token, BUSTER_CHECK_NONE) ? 1 : 2;
+                }
+                if (reached != 0 && reached - 1 < node_count && scheduled[reached - 1] == 0)
+                {
+                    scheduled[reached - 1] = 1;
+                    next[reached - 1] = next[after];
+                    next[after] = reached - 1;
+                    after = reached - 1;
+                }
+            }
+        }
+    }
+    arena_pop_to(scratch, temporary);
+    return valid;
+}
+
 // GNU's weak attribute and `#pragma weak` after a use (#1849): which of the objects with late weak declarations
 // (CheckProgram.weak_late_keys) keep a weak symbol, as clang's code generation binds each. A definition (a body, an
 // initializer, or an alias or ifunc) has its declarations' weak attributes, all before it (the reader drops later ones). An object that the
@@ -595,16 +745,56 @@ static bool check_program_weak_bindings(CheckProgram* program, const CheckDataPr
         }
         i = end;
     }
-    CheckProgramUses uses = { .first = first, .use = use, .deferred = deferred };
+    // The deferred definitions whose order the replay follows (check_program_weak_deferred): the deferred bodies, as
+    // nodes 0 up, and the file-scope data clang defers, after them, each at its object, its node plus one.
+    const bool replay = watched != 0 && program->body_eager != NULL;
+    const uint32_t node_count = replay ? program->body_count + data->count : 0;
+    uint32_t* nodes = replay && valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, program->object_count) : NULL;
+    uint32_t* times = nodes != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)node_count + 1) : NULL;
+    const uint64_t record_capacity = replay ? 2 * ((uint64_t)program->reference_count + data->reference_count) + 64 : 0;
+    CheckProgramUseRecord* records = times != NULL && record_capacity <= UINT32_MAX ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckProgramUseRecord, record_capacity) : NULL;
+    uint8_t* bound = records != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, program->object_count) : NULL;
+    valid = valid && (!replay || bound != NULL);
+    if (bound != NULL)
+    {
+        memset(nodes, 0, (uint64_t)program->object_count * sizeof(uint32_t));
+        memset(bound, 0, program->object_count);
+        for (uint32_t b = 0; b < program->body_count; b += 1)
+        {
+            const CheckProgramBody* body = program->bodies + b;
+            times[b] = program->parser->tree.parents[body->opening] + 1;
+            if (program->body_eager[b] == 0 && body->object < program->object_count)
+            {
+                nodes[body->object] = b + 1;
+            }
+        }
+        for (uint32_t d = 0; d < data->count; d += 1)
+        {
+            const CheckDataObject* object = data->objects + d;
+            times[program->body_count + d] = object->token;
+            if (check_program_data_point(program, object) == BUSTER_CHECK_NONE && check_program_token_body(program, object->token) == 0 && object->object < program->object_count)
+            {
+                nodes[object->object] = program->body_count + d + 1;
+            }
+        }
+    }
+    CheckProgramUses uses = { .first = first, .use = use, .deferred = deferred, .nodes = nodes, .records = bound != NULL ? records : NULL,
+                              .record_capacity = (uint32_t)record_capacity, .source = BUSTER_CHECK_NONE };
     valid = valid && (watched == 0 || check_program_symbol_bodies(program, &uses, scratch));
     for (uint32_t d = 0; valid && watched != 0 && d < data->count; d += 1)
     {
         const uint32_t point = check_program_data_point(program, data->objects + d);
+        // A deferred block-scope static's references are its body's emission's; another deferred object's its own.
+        const uint32_t body = point == BUSTER_CHECK_NONE ? check_program_token_body(program, data->objects[d].token) : 0;
+        uses.source = point != BUSTER_CHECK_NONE ? BUSTER_CHECK_NONE : body != 0 ? body - 1 : program->body_count + d;
         for (uint32_t r = 0; r < data->reference_counts[d]; r += 1)
         {
             check_program_symbol_reference(program, &uses, data->references[data->reference_offsets[d] + r], point, point);
         }
     }
+    // Where the replay's references fit, clang's deferred order decides an object only deferred code refers to.
+    const bool replayed = valid && bound != NULL && !uses.records_full;
+    valid = valid && (!replayed || check_program_weak_deferred(program, &uses, times, node_count, bound, scratch));
     program->weak_refused = 0;
     for (uint32_t i = 0; valid && watched != 0 && i < count; i += 1)
     {
@@ -613,8 +803,9 @@ static bool check_program_weak_bindings(CheckProgram* program, const CheckDataPr
         if (leading && object < program->object_count && first[object] != 0)
         {
             const bool eager = first[object] != BUSTER_CHECK_NONE;
-            const bool weak = eager ? check_program_weak_named(program, object, use[object], first[object]) : deferred[object] != 2;
-            program->weak_refused = !eager && deferred[object] == 3 && program->weak_refused == 0 ? (uint32_t)keys[i] + 1 : program->weak_refused;
+            const uint8_t ordered = replayed ? bound[object] : 0;
+            const bool weak = eager ? check_program_weak_named(program, object, use[object], first[object]) : ordered != 0 ? ordered == 1 : deferred[object] != 2;
+            program->weak_refused = !eager && ordered == 0 && deferred[object] == 3 && program->weak_refused == 0 ? (uint32_t)keys[i] + 1 : program->weak_refused;
             globals[global_count] = object;
             global_count += weak ? 0 : 1;
         }
