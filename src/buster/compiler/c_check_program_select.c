@@ -1107,6 +1107,8 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
         valid = valid && check_program_alias_number(&candidate.program, needed, candidate.program.alias_states, BUSTER_SCALAR_PATH(scalar), output);
         valid = valid && (!symbol_pragmas || check_program_symbol_pragmas(&candidate.program, &candidate.data, output, scratch));
     }
+    // Late weak declarations' bindings (#1849), of the selection that stands.
+    valid = valid && (full->weak_late_count == 0 || check_program_weak_bindings(&candidate.program, &candidate.data, output, scratch));
     if (valid)
     {
         candidate.defined_functions = full->body_count;
@@ -1122,7 +1124,6 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
     else
     {
         arena_pop_to(output, mark);
-        valid = valid && (full->weak_late_count == 0 || check_program_weak_bindings(&candidate.program, &candidate.data, output, scratch));
         *result = (CheckProgramSelection){ .status = candidate.status, .token = candidate.token };
     }
     arena_pop_to(scratch, temporary);
