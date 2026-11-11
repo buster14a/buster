@@ -9515,6 +9515,10 @@ enables, which this checker doesn't all give.
   that macro, as clang's `MacroQualifiedType` does (`check_driver_space_macros`):
   `'AS1 int const *'`, `'ASN(3) int *'`, and the outermost of nested macros.
   An a.k.a. spells the space out.
+  A compound literal's type name spells its value's type as a cast's does
+  (#1812, `check_input_token_type_spelling`): `&(L){ 1 }` is `'L *'`, and
+  GNU's array initialized by a literal of another array type names it
+  (`'A2' (aka 'int[2]')`).
   A null pointer constant argument's warning (#1100) prints its parameter's
   type with the typedef the callee's declaration writes
   (`check_input_parameter_spelling`, `'N *' (aka 'struct N *')`): a

@@ -318,6 +318,14 @@ static uint32_t check_common_operand_spelling(const Parser* parser, const CheckI
                     result = declaration != 0 && declaration != BUSTER_CHECK_NONE && declaration < input->token_count ?
                              check_input_typedef_sugar(input, parser, declaration) : 0;
                 }
+                else if (token < parser->tokens.count)
+                {
+                    // A compound literal's type name (#1812, check_input_token_type_spelling).
+                    const uint8_t role = parser->tree.roles[token];
+                    const bool compound = role == PARSE_ROLE_OPEN_COMPOUND || role == PARSE_ROLE_CLOSE_COMPOUND ||
+                                          role == PARSE_ROLE_OPEN_COMPOUND_BODY || role == PARSE_ROLE_CLOSE_COMPOUND_BODY;
+                    result = compound ? check_input_token_type_spelling(input, parser, token, false) : 0;
+                }
                 count -= 1;
             }
         }
