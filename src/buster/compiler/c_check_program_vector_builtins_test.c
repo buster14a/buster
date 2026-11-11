@@ -63,6 +63,7 @@ static const char check_test_vector_builtin_types[] =
 static void check_test_program_vector_builtin_sources(CheckTest* test, const char* clang, const X86Target* target, bool run_native)
 {
     static const char* const programs[][2] = {
+        { "vector-floating-extremes", check_test_vector_floating_extremes },
         {
             // The same elementwise rows on transport pieces, with exact 1/2-byte accesses and wider operands than
             // any hardware register. The per-lane BMI2/PCLMUL paths also take these address-valued vectors.
@@ -920,8 +921,6 @@ static void check_test_program_vector_builtin_refusals(CheckTest* test)
         { "znver5", "int tested(int n){v4ss a={n},i={3,2,1,0};v4ss c=__builtin_shufflevector(a,i);return c[0];}", "vector shuffles by a vector of indices", 3 },
         { "znver5", "int tested(int n){v4ss a={n},b={1};v4ss c=__builtin_elementwise_sub_sat(a,b);return c[0];}",
           "saturating vector arithmetic of 32- and 64-bit elements", 3 },
-        { "znver5", "int tested(int n){v4sf a={(float)n},b={1};v4sf c=__builtin_elementwise_max(a,b);return (int)c[0];}",
-          "elementwise vector builtins of floating elements", 3 },
         { "x86-64-v3", "int tested(int n){v2ds a={n},b={1};v2ds c=__builtin_elementwise_clmul(a,b);return (int)c[0];}",
           "vector carry-less multiplication without AVX and PCLMUL", 3 },
         { "x86-64", "int tested(int n){v16qu a={(unsigned char)n},b={1};v16qu c=__builtin_elementwise_clmul(a,b);return c[0];}",

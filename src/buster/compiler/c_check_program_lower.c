@@ -12489,7 +12489,7 @@ static void check_lower_vector_floating(CheckLowerWriter* writer, uint32_t node,
             writer->vectors = true;
         }
     }
-    else if ((class == BUSTER_TYPED_CLASS_F80 && (builtin <= CBUILTIN_ELEMENTWISE_ROUND || builtin == CBUILTIN_ELEMENTWISE_MAXNUM || builtin == CBUILTIN_ELEMENTWISE_MINNUM ||
+    else if ((class == BUSTER_TYPED_CLASS_F80 && ((builtin >= CBUILTIN_ELEMENTWISE_CEIL && builtin <= CBUILTIN_ELEMENTWISE_ROUND) || builtin == CBUILTIN_ELEMENTWISE_MAXNUM || builtin == CBUILTIN_ELEMENTWISE_MINNUM ||
                                                   (ldexp && type_size(types, exponent) == 4))) ||
              ((class == BUSTER_TYPED_CLASS_F32 || class == BUSTER_TYPED_CLASS_F64) && ldexp && type_size(types, exponent) <= 8 &&
               (writer->target.features & BUSTER_X86_FEATURE(AVX512F)) == 0))
@@ -12575,8 +12575,13 @@ static __attribute__((noinline)) void check_lower_vector_builtin(CheckLowerWrite
     const X86Target* target = &writer->target;
     const uint32_t selected = check_program_builtin_index(stream->vectors, stream->vector_count, sizeof(CheckBuiltinVectorEffect), node);
     const CheckBuiltinVectorEffect* effect = selected != BUSTER_CHECK_NONE ? stream->vectors + selected : NULL;
-    const CBuiltinId builtin = effect != NULL ? effect->runtime_builtin : CBUILTIN_NONE;
     const TypeId result = check_stream_type(stream, node);
+    // A floating value's max and min are maxnum and minnum, as clang's are (check_vector_floating_alias); bf16 elements'
+    // keep their builtins' own refusals.
+    const TypeId plain = type_unqualified(type_strip_aligned(types, type_conversion_operand(types, result)));
+    const TypeId scalar = check_lower_transport_is_vector(types, result) ? check_lower_transport_element(types, result) : plain;
+    const bool floating = type_kind(types, scalar) == BUSTER_TYPE_KIND_FLOATING && scalar != BUSTER_TYPE_BF16;
+    const CBuiltinId builtin = check_vector_floating_alias(effect != NULL ? effect->runtime_builtin : CBUILTIN_NONE, floating);
     const uint32_t first = graph->argument_offsets[node];
     const uint32_t count = graph->argument_counts[node];
     const char* reason = NULL;
@@ -12749,7 +12754,7 @@ static __attribute__((noinline)) void check_lower_vector_builtin(CheckLowerWrite
     {
         check_lower_vector_calls(writer, node, builtin, effect->evaluated_argument_count);
     }
-    else if (check_vector_floating_instructions(builtin) || builtin == CBUILTIN_ELEMENTWISE_LDEXP)
+    else if (check_vector_floating_builtin(builtin, floating) || builtin == CBUILTIN_ELEMENTWISE_LDEXP)
     {
         check_lower_vector_floating(writer, node, builtin, effect->evaluated_argument_count);
     }

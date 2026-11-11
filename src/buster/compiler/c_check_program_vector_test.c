@@ -152,6 +152,27 @@ static const char check_test_vector_logical[] =
 
 // Packed one-bit builtins use the same scalar/byte/vector algebra at tiny, padded and multi-register widths. Check
 // every defined lane, independent guards around a one-byte result, and evaluation of a funnel's unused operands.
+// Floating max, min and abs (#1834): llvm.maxnum, minnum and fabs, as clang's code computes them, of NaN payloads (quiet
+// and signaling), signed zeros and infinities; of floats and doubles, scalars and vectors of 8 to 128 bytes and an odd
+// length. The baseline programs and the vector builtin programs (znver5's rows) run it.
+static const char check_test_vector_floating_extremes[] =
+    "typedef float f2 __attribute__((vector_size(8)));typedef float f8 __attribute__((vector_size(32),aligned(16)));"
+    "typedef double d8 __attribute__((vector_size(64),aligned(16)));typedef float f32 __attribute__((vector_size(128),aligned(16)));"
+    "typedef float e3 __attribute__((ext_vector_type(3)));typedef float f4 __attribute__((vector_size(16)));typedef double d2 __attribute__((vector_size(16)));\n"
+    "static unsigned float_bits(unsigned i){static const unsigned b[]={0,0x80000000u,0x7f800000u,0xff800000u,0x7fc00001u,0xffc00002u,0x7f800001u,1,"
+    "0x3fc00000u,0xbf800000u};return b[i%10];}\n"
+    "static unsigned long long double_bits(unsigned i){static const unsigned long long b[]={0,0x8000000000000000ull,0x7ff0000000000000ull,"
+    "0xfff0000000000000ull,0x7ff8000000000001ull,0xfff8000000000002ull,0x7ff0000000000001ull,1,0x3ff8000000000000ull,0xbff0000000000000ull};return b[i%10];}\n"
+    "#define E(T,k) {T a,b;for(unsigned i_=0;i_<__builtin_vectorelements(T);i_++){unsigned long long x_=sizeof(a[0])==4?float_bits(n+k+i_):double_bits(n+k+i_),"
+    "y_=sizeof(a[0])==4?float_bits(n*3+i_*7):double_bits(n*3+i_*7);__typeof__(a[0]) p_,q_;__builtin_memcpy(&p_,&x_,sizeof p_);__builtin_memcpy(&q_,&y_,sizeof q_);"
+    "a[i_]=p_;b[i_]=q_;}T r_[]={__builtin_elementwise_max(a,b),__builtin_elementwise_min(a,b),__builtin_elementwise_abs(a)};"
+    "for(unsigned j_=0;j_<3;j_++)for(unsigned i_=0;i_<__builtin_vectorelements(T);i_++){__typeof__(a[0]) e_=r_[j_][i_];FOLD(e_);}}\n"
+    "int tested(int n){unsigned h=2166136261u;E(f4,1)E(d2,2)E(f2,3)E(f8,4)E(d8,5)E(f32,6)E(e3,7)\n"
+    "for(unsigned i=0;i<10;i++){unsigned long long x_=double_bits(n+i),y_=double_bits(i*3);unsigned xf=float_bits(n+i),yf=float_bits(i*7);double a,b;float c,d;"
+    "__builtin_memcpy(&a,&x_,8);__builtin_memcpy(&b,&y_,8);__builtin_memcpy(&c,&xf,4);__builtin_memcpy(&d,&yf,4);"
+    "double r[]={__builtin_elementwise_max(a,b),__builtin_elementwise_min(a,b),__builtin_elementwise_abs(a)};"
+    "float s[]={__builtin_elementwise_max(c,d),__builtin_elementwise_min(c,d),__builtin_elementwise_abs(c)};FOLD(r);FOLD(s);}return (int)h;}\n";
+
 static const char check_test_vector_boolean_builtins[] =
     "#define CASE(N) static unsigned bits##N(unsigned h,int n){typedef _Bool V __attribute__((ext_vector_type(N)));V a,b,c;"
     "fill(&a,sizeof a,n);fill(&b,sizeof b,n+1);fill(&c,sizeof c,n+2);V r[]={"
@@ -1375,6 +1396,7 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
           "FOLD(q_);FOLD(a##k);}\n"
           "int tested(int n){unsigned h=2166136261u;S(sb,1,8)S(v16qu,2,8)S(ub32,3,8)S(sb64,4,8)S(uw,5,16)S(v4si,6,32)S(sq4,7,64)S(sd32,8,32)return (int)h;}\n"
         },
+        { "baseline-floating-extremes", check_test_vector_floating_extremes },
         // AVX's and AVX2's (x86-64-v3's): 256-bit unpacks, broadcasts, permutes, variable shifts, lanes' extractions and
         // insertions, extensions, gathers, FMA's (of no NaN) and F16C's conversions, and shuffles of dwords and qwords.
         { "baseline-avx2",

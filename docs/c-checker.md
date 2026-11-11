@@ -3186,7 +3186,14 @@ What the lowering covers past scalars (#145's programs):
     16-bit ones, VCVTDQ2PS/PD, or VCVTQQ2PS/PD with DQ), then VSCALEFPS/PD,
     a scalar's exponent converted in the typed stream from its promoted type
     as the signed integer of its width. Their constants (the masks, 1.0, 0.5's
-    predecessor) are operands past the arguments;
+    predecessor) are operands past the arguments. max and min of floating
+    values are llvm.maxnum and minnum, as clang's are, so they take maxnum's
+    and minnum's rows and calls (`check_vector_floating_alias`, #1834); abs of
+    them is llvm.fabs, the magnitude mask's AND (VPTERNLOGD 192, VANDPS, or
+    ANDPS without AVX), at every target, of scalars and vectors
+    (`check_vector_floating_builtin`). bf16 elements keep their own refusals,
+    and a long double's abs, which clang computes with x87's FABS, its named
+    one;
   - acos ... tanh, atan2, fmod and pow are the C library's functions, as
     clang's code calls them (sinf, sin; sinl of a long double), a vector's an
     element at a time, in element order, through frame objects of the vectors

@@ -1234,7 +1234,7 @@ static __attribute__((noinline)) void check_lower_transport_elementwise(CheckLow
     const uint32_t first = graph->argument_offsets[node];
     const CheckVectorShape shape = check_vector_builtin_shape(types, result);
     const bool ldexp = builtin == CBUILTIN_ELEMENTWISE_LDEXP;
-    const bool floating = check_vector_floating_instructions(builtin);
+    const bool floating = check_vector_floating_builtin(builtin, shape.floating);
     CheckVectorShape inputs[3] = { 0 };
     uint32_t widest = shape.element;
     bool valid = arguments >= 1 && arguments <= 3 && arguments <= graph->argument_counts[node] && shape.element != 0 && shape.lanes != 0;
