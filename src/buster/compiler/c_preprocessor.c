@@ -552,6 +552,10 @@ typedef struct PPFileData PPFileData;
 // hex digits"), too few (BUSTER_PP_NAMED_UCN_INCOMPLETE), or a delimited one's empty braces or no `}` before a byte that
 // isn't a hex digit (BUSTER_PP_NAMED_UCN_EMPTY, BUSTER_PP_NAMED_UCN_UNTERMINATED). The words name the source's letter.
 #define BUSTER_PP_UCN_NO_DIGITS 0x85
+// A `\u` or `\U` that starts a token and that clang reads whole, of a character below U+00A0 or a surrogate (#1447):
+// clang's error at its backslash (pp_diagnose_ucn), "character 'c' cannot be specified by a universal character name",
+// "universal character name refers to a control character" or "invalid universal character".
+#define BUSTER_PP_UCN_ERROR 0x86
 // The bytes of a bad name pp_diagnose_named_ucn's error prints, at most.
 #define BUSTER_PP_NAMED_UCN_NAME_BYTES 1024
 
@@ -3181,7 +3185,7 @@ static bool pp_named_ucn_at(uint32_t refine_flags, const PPFileData* data, uint6
     // (A `\U{` is clang's error, "\U used with no following hex digits", not this warning.)
     const uint8_t numeric = letter == 'U' && braced ? 0 : !hex && !braced ? BUSTER_PP_UCN_NO_DIGITS : !braced ? BUSTER_PP_NAMED_UCN_INCOMPLETE :
                             empty ? BUSTER_PP_NAMED_UCN_EMPTY : BUSTER_PP_NAMED_UCN_UNTERMINATED;
-    *kind = !result ? 0 : !named_letter ? (read ? 0 : numeric) : read && code_point == 0 ? BUSTER_PP_NAMED_UCN_ERROR : named ? BUSTER_PP_NAMED_UCN_EXTENSION :
+    *kind = !result ? 0 : !named_letter ? (read ? (code_point == 0 ? BUSTER_PP_UCN_ERROR : 0) : numeric) : read && code_point == 0 ? BUSTER_PP_NAMED_UCN_ERROR : named ? BUSTER_PP_NAMED_UCN_EXTENSION :
             read ? 0 : !braced ? BUSTER_PP_NAMED_UCN_INCOMPLETE : empty ? BUSTER_PP_NAMED_UCN_EMPTY : BUSTER_PP_NAMED_UCN_UNTERMINATED;
     result = *kind != 0;
     // The token it may start: the last that starts at it or before it.
