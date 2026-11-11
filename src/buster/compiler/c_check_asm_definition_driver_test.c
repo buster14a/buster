@@ -2,8 +2,9 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // What inline assembly defines in -c's objects and the direct path's executables (#1848), on original fixtures, against
-// clang 23's: a template's `.comm` (#1265's COMMON symbol), and a template's label or `.comm` that defines a symbol the
-// unit declares without defining, which C's references then bind to. Each fixture's -c object, by both checker paths
+// clang 23's: a template's `.comm` (#1265's COMMON symbol), a template's label or `.comm` that defines a symbol the
+// unit declares without defining, which C's references then bind to, and a `.comm` of a variable the unit defines, which
+// makes it a common of C's size. Each fixture's -c object, by both checker paths
 // (the same bytes), has clang's symbols: each named symbol's type, binding, visibility, section (or UND, COM, ABS), size
 // and a common symbol's alignment, compared as sorted lines (check_test_asm_definition_symbols); and the relocations
 // of its sections other than code, unwind tables and debug information, which the compilers' own code makes. Both
@@ -253,6 +254,30 @@ static void check_test_driver_asm_definitions(CheckTest* test, const char* clang
           "\\t.cfi_def_cfa_offset 16\\n\\t.cfi_offset %rbx, -16\\n\\tmovl %edi, %ebx\\n\\tcall inner\\n\\taddl %ebx, %eax\\n\\tpopq %rbx\\n"
           "\\t.cfi_def_cfa_offset 8\\n\\tret\\n.cfi_endproc\\n.size trampoline, .-trampoline\");\n"
           "int main(void) { printf(\"%d\\n\", trampoline(100)); return 0; }\n" },
+        // A template's `.comm` of a variable the unit defines (#1848): clang's common symbol of the name, of C's size at
+        // the `.comm`'s alignment, whichever comes first, an initializer's or a tentative definition's; the definition's
+        // bytes stay in their section without a symbol, and C's references (a pointer's relocation among them) are the
+        // common's, whose zeros the program reads and writes. A statement template's `.comm` and a file-scope one's.
+        { "a template's .comm of the unit's definitions", "declare main",
+          "#include <stdio.h>\n"
+          "int x = 7;\n"
+          "int y = 3;\n"
+          "__asm__(\".comm x,8,8\");\n"
+          "__asm__(\".comm buffer,64,16\");\n"
+          "char buffer[32];\n"
+          "long long wide = 1;\n"
+          "_Alignas(32) int aligned;\n"
+          "__asm__(\".comm aligned,4,1\");\n"
+          "int* pointer = &x;\n"
+          "short later = 5;\n"
+          "void declare(void) { __asm__ volatile(\".comm wide,4,4\\n.comm later,2,2\"); }\n"
+          "int main(void) {\n"
+          "    declare();\n"
+          "    printf(\"%d %d %d %lld %d %d %d\\n\", x, y, buffer[31], wide, aligned, *pointer, later);\n"
+          "    x = 42; buffer[31] = 9; wide = 1LL << 40; aligned = 6; later = 11;\n"
+          "    printf(\"%d %d %d %lld %d %d %d\\n\", x, y, buffer[31], wide, aligned, *pointer, later);\n"
+          "    return 0;\n"
+          "}\n" },
         // Asm labels that name the unit's own objects (#1979): a declaration labelled as a later definition, two
         // labelled declarations and an identifier of one name, variables labelled as a tentative and an initialized
         // definition, and a label naming a static function; one symbol per name, as clang's module has one global.
@@ -349,14 +374,31 @@ static void check_test_driver_asm_definitions(CheckTest* test, const char* clang
         }
         unlink(path);
     }
-    // A template's `.comm` of a name the unit defines, a tentative definition's too, stays refused by name, whatever
-    // -fcommon: clang 23 has no coherent object for it. Without -fcommon its object makes C's .bss definition a common of
-    // C's size at the template's alignment (an initializer's bytes are lost); with -fcommon a `.comm` of C's size and
-    // alignment is the one common, and another size or alignment is a backend crash ("x redeclared as different type").
-    static const char* const common_definitions[] = {
-        "int x; void declare(void) { __asm__(\".comm x,4,4\"); } int main(void) { declare(); x = 42; return x != 42; }\n",
-        "int x; void declare(void) { __asm__(\".comm x,16,16\"); } int main(void) { declare(); x = 42; return x != 42; }\n",
-        "int x = 1; void declare(void) { __asm__(\".comm x,4,4\"); } int main(void) { declare(); return x != 1; }\n",
+    // A template's `.comm` of a definition clang's code doesn't make a plain common of (#1848) is refused by name, on
+    // both paths, at -c and the direct path: a C common symbol's (-fcommon's tentative definition, which isn't one
+    // without -fcommon, and the common attribute's), where clang's backend crashes for another size or alignment ("x
+    // redeclared as different type") and keeps the one common for the same; a function's, whose code clang keeps without
+    // its symbol; a static, weak or thread-local definition's, which clang reports or makes a local, weak or thread-local
+    // common of; and a const one's, whose initializer clang's code reads where the program reads the common's zeros.
+    static const struct
+    {
+        const char* source;
+        // Refused only with -fcommon.
+        bool fcommon;
+        const char* reason;
+    } common_definitions[] = {
+        { "int x; void declare(void) { __asm__(\".comm x,16,16\"); } int main(void) { declare(); x = 42; return x != 42; }\n", true,
+          "unsupported: inline assembly .comm of the unit's common symbol" },
+        { "int x __attribute__((common)); __asm__(\".comm x,4,4\"); int main(void) { return x; }\n", false,
+          "unsupported: inline assembly .comm of the unit's common symbol" },
+        { "int f(void) { return 1; } __asm__(\".comm f,4,4\"); int main(void) { return f(); }\n", false, "unsupported: inline assembly .comm of the unit's function" },
+        { "static int x = 1; __asm__(\".comm x,4,4\"); int main(void) { return x; }\n", false,
+          "unsupported: inline assembly .comm of a static, weak, thread-local or aliased definition" },
+        { "__attribute__((weak)) int x = 1; __asm__(\".comm x,4,4\"); int main(void) { return x; }\n", false,
+          "unsupported: inline assembly .comm of a static, weak, thread-local or aliased definition" },
+        { "__thread int x = 1; __asm__(\".comm x,4,4\"); int main(void) { return x; }\n", false,
+          "unsupported: inline assembly .comm of a static, weak, thread-local or aliased definition" },
+        { "const int x = 1; __asm__(\".comm x,4,4\"); int main(void) { return x; }\n", false, "unsupported: inline assembly .comm of a read-only definition" },
     };
     for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(common_definitions); f += 1)
     {
@@ -364,7 +406,7 @@ static void check_test_driver_asm_definitions(CheckTest* test, const char* clang
         char output[512];
         snprintf(path, sizeof(path), "%s/asm-common-definition-%u.c", directory, f);
         snprintf(output, sizeof(output), "%s/asm-common-definition-%u.o", directory, f);
-        const bool written = parse_test_write(path, common_definitions[f], strlen(common_definitions[f]));
+        const bool written = parse_test_write(path, common_definitions[f].source, strlen(common_definitions[f].source));
         for (uint32_t route = 0; written && route < 8; route += 1)
         {
             // Both paths, -c and the direct path, with and without -fcommon.
@@ -373,12 +415,76 @@ static void check_test_driver_asm_definitions(CheckTest* test, const char* clang
                                   NULL, NULL };
             arguments[(route & 2) != 0 ? 7 : 6] = (route & 1) != 0 ? "--scalar" : NULL;
             const int status = check_test_driver_spawn(arguments, &text);
+            const bool refused = !common_definitions[f].fcommon || (route & 4) != 0;
             char description[1024];
-            snprintf(description, sizeof(description), "a template's .comm of the unit's definition %u is refused by name (%s, %s, %s): %s", f,
+            snprintf(description, sizeof(description), "a template's .comm of the unit's definition %u is %s (%s, %s, %s): %s", f, refused ? "refused by name" : "taken",
                      (route & 1) != 0 ? "scalar" : "vector", (route & 2) != 0 ? "-c" : "direct", (route & 4) != 0 ? "-fcommon" : "-fno-common", text != NULL ? text : "");
-            check_test_expect(test, status == 1 && text != NULL && strstr(text, "unsupported: inline assembly labels named as the unit's symbols") != NULL,
-                              description);
+            check_test_expect(test, refused ? status == 1 && text != NULL && strstr(text, common_definitions[f].reason) != NULL : status == 0, description);
             free(text);
+        }
+        unlink(path);
+        unlink(output);
+    }
+    // A file-scope label of a definition's name (#1848) is clang's assembler error, without a source location, its whole
+    // output on both paths, at -c and the direct path, with and without -fcommon, but not at -fsyntax-only: a variable's
+    // twice, a function's and a common symbol's (-fcommon's tentative definition) once, whatever the label's section or
+    // `.globl`, and beside a `.comm` that commons another definition. Labels clang reports otherwise are refused by name:
+    // several definitions' (in its module's order), a statement template's, a static definition's, and an `.lcomm`'s or a
+    // `.weak` label's (clang reports the binding too).
+    static const struct
+    {
+        const char* source;
+        const char* reason;
+    } label_definitions[] = {
+        { "int x = 1;\n__asm__(\".globl x\\nx: .long 2\");\nint main(void) { return x; }\n", NULL },
+        { "int f(void) { return 1; }\n__asm__(\".globl f\\n.type f,@function\\nf: movl $2, %eax\\nret\");\nint main(void) { return f(); }\n", NULL },
+        { "int x;\n__asm__(\".data\\n.globl x\\nx: .long 2\");\nint main(void) { return x; }\n", NULL },
+        { "char text[8] = \"text\";\n__asm__(\".pushsection .rodata\\ntext: .asciz \\\"asm\\\"\\n.popsection\");\nint main(void) { return text[0]; }\n", NULL },
+        { "int x = 1;\nint y = 2;\n__asm__(\"x: .long 2\\n.comm y,4,4\");\nint main(void) { return x + y; }\n", NULL },
+        { "int x = 1;\nint y = 2;\n__asm__(\".data\\nx: .long 2\\ny: .long 3\");\nint main(void) { return x + y; }\n",
+          "unsupported: inline assembly labels named as several of the unit's definitions" },
+        { "int x = 1;\nvoid g(void) { __asm__(\".pushsection .data\\nx: .long 2\\n.popsection\"); }\nint main(void) { g(); return x; }\n",
+          "unsupported: inline assembly labels named as the unit's symbols" },
+        { "static int x = 1;\n__asm__(\".data\\nx: .long 2\");\nint main(void) { return x; }\n", "unsupported: inline assembly labels named as the unit's symbols" },
+        { "int x;\n__asm__(\".lcomm x,8\");\nint main(void) { return x; }\n", "unsupported: inline assembly labels named as the unit's symbols" },
+        { "int x = 1;\n__asm__(\".weak x\\n.data\\nx: .long 2\");\nint main(void) { return x; }\n", "unsupported: inline assembly labels named as the unit's symbols" },
+    };
+    for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(label_definitions); f += 1)
+    {
+        char path[512];
+        char output[512];
+        snprintf(path, sizeof(path), "%s/asm-label-definition-%u.c", directory, f);
+        snprintf(output, sizeof(output), "%s/asm-label-definition-%u.o", directory, f);
+        const char* reason = label_definitions[f].reason;
+        const bool written = parse_test_write(path, label_definitions[f].source, strlen(label_definitions[f].source));
+        for (uint32_t common = 0; written && common < 2; common += 1)
+        {
+            char* expected = NULL;
+            char* clang_arguments[] = { (char*)clang, "-std=gnu17", common != 0 ? "-fcommon" : "-fno-common", "-fno-caret-diagnostics", "-c", path, "-o", output, NULL };
+            const int clang_status = check_test_driver_spawn(clang_arguments, &expected);
+            char description[2048];
+            snprintf(description, sizeof(description), "asm label of a definition %u: clang's -c fails (%s): %s", f, common != 0 ? "-fcommon" : "-fno-common",
+                     expected != NULL ? expected : "");
+            check_test_expect(test, clang_status != 0 && expected != NULL && strstr(expected, "is already defined") != NULL, description);
+            for (uint32_t route = 0; route < 6; route += 1)
+            {
+                // Both paths, at -c, the direct path and -fsyntax-only.
+                const uint32_t mode = route >> 1;
+                char* text = NULL;
+                char* arguments[] = { (char*)executable, "-std=gnu17", common != 0 ? "-fcommon" : "-fno-common", "-fno-caret-diagnostics", path,
+                                      mode == 2 ? "-fsyntax-only" : "-o", mode == 2 ? NULL : output, mode == 0 ? "-c" : NULL, NULL, NULL };
+                arguments[mode == 2 ? 6 : mode == 0 ? 8 : 7] = (route & 1) != 0 ? "--scalar" : NULL;
+                const int status = check_test_driver_spawn(arguments, &text);
+                const bool reported = mode == 2       ? status == 0 && (text == NULL || text[0] == 0) :
+                                      reason == NULL ? status == 1 && text != NULL && expected != NULL && strcmp(text, expected) == 0 :
+                                                       status == 1 && text != NULL && strstr(text, reason) != NULL;
+                snprintf(description, sizeof(description), "asm label of a definition %u (%s, %s, %s): %s\nagainst clang's\n%s", f, (route & 1) != 0 ? "scalar" : "vector",
+                         mode == 0 ? "-c" : mode == 1 ? "direct" : "-fsyntax-only", common != 0 ? "-fcommon" : "-fno-common", text != NULL ? text : "",
+                         expected != NULL ? expected : "");
+                check_test_expect(test, reported, description);
+                free(text);
+            }
+            free(expected);
         }
         unlink(path);
         unlink(output);
