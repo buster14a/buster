@@ -11,6 +11,8 @@
 
 #include "ir_optimize_verified_test.c"
 
+#if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
+
 typedef enum IrOptimizeTextPass
 {
     IR_OPTIMIZE_TEXT_SCCP,
@@ -386,3 +388,5 @@ static __attribute__((unused)) int ir_optimize_text_print_fixtures(void)
     arena_release(&source);
     return ok ? 0 : 1;
 }
+
+#endif

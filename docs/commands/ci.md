@@ -7,17 +7,22 @@ requirements. [Command index](README.md).
 ## Every main revision
 
 Every merge or direct push to `main`, including documentation/Markdown-only
-changes, starts the full hosted correctness matrix and fuzz campaigns against
-that push's `github.sha` (#1271). Main pushes use a separate run-id concurrency
+changes, starts hosted correctness against that push's `github.sha` (#1271).
+In the nightly mode it runs the plain rows only (#2057, the owner's choice on
+2026-11-10); the sanitizer rows and fuzz campaigns run on the nightly
+snapshot's daily run, until the merge queue (#1430) runs the complete suite
+before each merge and pushes run no checks. Before the nightly mode a push runs
+the full matrix and fuzzing. Main pushes use a separate run-id concurrency
 group each, so rapid merges do not replace pending main runs. PRs still cancel
 only their own superseded runs; the hardware lock still serializes the 9700X.
 
 Do not add main-push path filters, treat a successful PR run or Measurement
-storage as full main CI, or let native-evidence reuse or nightly mode suppress
-main's hosted suite. `changes --self-test` checks the trigger, concurrency and
-full hosted policy with counterexamples; `tests/ci/nightly.sh` checks that every
-push's evidence retains `scope=full`, `hosted=run` and no hosted reuse source,
-including documentation-only pushes with nightly mode on and off.
+storage as a push's own hosted rows, or let native-evidence reuse suppress
+them. `changes --self-test` checks the trigger, concurrency and hosted-scope
+policy with counterexamples; `tests/ci/nightly.sh` checks that every push's
+evidence keeps `hosted=run` and no hosted reuse source, with `scope=plain` in
+the nightly mode and `scope=full` before it, including documentation-only
+pushes.
 
 ## Sharing the 9700X
 
@@ -36,27 +41,30 @@ report when the shards' times drift apart ([the runner guide](parallel.md)).
 The repository syntax check retains each build's sanitizer feature flags and
 predefines, while excluding its exact host-only detector and frame controls
 (#1423). The compiler executing the check remains instrumented.
-On pushes to main and the daily and dispatched runs (not on pull requests, which
-they would hold up for over an hour), each host architecture also runs the
-inventory under `BUSTER_SANITIZER=address|undefined|thread|memory`, but the
+On the daily and dispatched runs, the nightly snapshot's daily run and pushes
+before the nightly mode (not on pull requests, which they would hold up for over
+an hour, nor on pushes in the nightly mode, #2057), each host architecture also runs the
+inventory under `BUSTER_SANITIZER=address|thread|memory`, but the
 compiler's own `main.c` checking comparison in the TSan and MSan rows, whose
 measured memory (docs/ci.md) exceeds a hosted runner's; their `-c` compiles run
 in a separate step after the suite. ASan combines UBSan, bounds,
-leak and stack-lifetime checks; TSan and MSan use separate builds. Diagnostic
+leak and stack-lifetime checks; TSan and MSan use separate builds.
+Standalone `BUSTER_SANITIZER=undefined` remains available for manual diagnosis,
+but no longer repeats the full suite on every main push. Diagnostic
 builds default to `-O3`, frames and line information, with fatal symbolized detector
 proofs and child-report auditing. `BUSTER_FUZZ_AVAILABLE=1` adds in-process
 coverage and the `--fuzz` driver override; `BUSTER_FUZZ_ENTRY=FILE.c` replaces
 its byte-input callback. Hosted frontend, ELF and crash/replay campaigns gate
-the same runs. Additional full ASan/UBSan suites run at `-O1`;
-`BUSTER_SANITIZER_OPTIMIZATION=1|2|3` selects an explicit level.
+the same runs. The hosted matrix runs at `-O3` throughout;
+`BUSTER_SANITIZER_OPTIMIZATION=1|2|3` remains available for explicit diagnostic builds.
 See `docs/ci.md` for usage and the precise coverage boundaries.
 After all the hosted variants and fuzz jobs a run has pass on the same triggering revision, Benchpress
 requires the complete vector feature set and runs native correctness before
-benchmarks, reusing one build and the existing shared lock. On a pull request
-it runs the benchmarks without the native correctness step (#1272): hosted
-correctness covers the pull request, and native correctness runs after the
-merge, on main's push of the landed commit and on the daily and nightly runs.
-The required aggregate's message then says native correctness was not run. All correctness builds run
+benchmarks, reusing one build and the existing shared lock. Pull requests never
+run it (#2055, the owner's choice on 2026-11-10): hosted correctness qualifies a
+pull request, and native correctness and measurements run on its merged
+first-parent state in the nightly window. The required aggregate passes a pull
+request on its hosted rows and says so. All correctness builds run
 the same suite inventory, `tools/ci/correctness.tests`. Failed, cancelled or
 skipped hosted tests cannot queue the hardware job; failed native tests cannot
 start benchmarks. A pull request's run stops at its first failure: its test rows
@@ -64,10 +72,11 @@ fail fast, and its tests don't start when the guide-size or DCO hook check
 fails. Pushes to main, the daily and dispatched runs report every row. The
 existing required check name is retained by a hosted aggregation job that fails
 when either stage fails.
-Draft PRs retain hosted feedback but cannot queue hardware. Ready/draft transitions
-start a new run and cancel the superseded run in the same PR group. The required
-aggregate explicitly fails a code-changing draft until ready; the selector's
-legitimate no-code exemption still passes. Its C predicate in
+Draft and ready PRs alike get hosted feedback and never queue hardware.
+Ready/draft transitions start a new run and cancel the superseded run in the
+same PR group. The required aggregate passes a code-changing draft on its hosted
+rows as it does a ready PR, and the selector's legitimate no-code exemption
+still passes. Its C predicate in
 `tools/ci/qualification.c` exhaustively tests the allowed outcomes, including
 missing/invalid/skipped results and event/selector consistency.
 See [the CI guide](../../docs/ci.md) for tool and frozen-input setup.
@@ -163,9 +172,8 @@ there at a time, so everything takes one lock:
   It also fails when the hosted test job's shards disagree
   (`changes_shard_policy`): its matrix's `shard: [1, ..., N]` must count from 1
   without a gap, and the same N must be in the job's name, the run step's
-  `--shard "${{ matrix.shard }}/N"` and the O1 rows' include entries (shards 1
-  to N of each architecture), since a list and an N that disagree would leave a
-  shard's commands unrun with every job green. Run it
+  `--shard "${{ matrix.shard }}/N"`, since a list and an N that disagree
+  would leave a shard's commands unrun with every job green. Run it
   locally with `cc -std=c17 -O2 -Wall -Wextra -Werror -o /tmp/changes
   tools/ci/changes.c && /tmp/changes --self-test` after changing a gate, a
   benchmark's step, the tables or the shards. Its oracle policy pins the 9700X
