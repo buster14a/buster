@@ -128,6 +128,7 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_ARRAY_NEGATIVE: result = "array size is negative"; break;
         case CHECK_INPUT_ARRAY_FUNCTIONS: result = "declared as array of functions"; break;
         case CHECK_INPUT_ARRAY_INCOMPLETE: result = "array has incomplete element type"; break;
+        case CHECK_INPUT_FUNCTION_INITIALIZER: result = "illegal initializer (only variables can be initialized)"; break;
         case CHECK_INPUT_ARRAY_ELEMENT_ALIGNMENT: result = "size of array element isn't a multiple of its alignment"; break;
         case CHECK_INPUT_ARRAY_TOO_LARGE: result = "array is too large"; break;
         case CHECK_INPUT_ARRAY_NON_INTEGER: result = "size of array has non-integer type"; break;
