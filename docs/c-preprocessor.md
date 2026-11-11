@@ -3482,12 +3482,21 @@ spellings alone would miss this change (#272).
   `}` (`BUSTER_PP_NAMED_UCN_INCOMPLETE` and after). One that starts a token,
   its name exactly Unicode's, has -pedantic's "named escape sequences are a
   Clang extension" at the backslash, before its character's error
-  (`BUSTER_PP_NAMED_UCN_EXTENSION`), as a warning under `-pedantic`,
-  `-Wpedantic` or `-Wdelimited-escape-sequence-extension` and an error under
-  `-pedantic-errors` (`pp_pedantic_severity`, the command line's alone). Both
-  are raw errors found as the others (`pp_named_ucn_at`), so a file without a
-  candidate pays nothing more, and print no flag, as the preprocessor's other
-  warnings don't. Not clang's yet, for `\N` as for `\u`: the error of a basic
+  (`BUSTER_PP_NAMED_UCN_EXTENSION`). Both are raw errors found as the others
+  (`pp_named_ucn_at`), so a file without a candidate pays nothing more. They
+  and `#if`'s C23-extension warning are the preprocessor's warnings that
+  follow clang's options and pragmas, with their flags (#1934,
+  `pp_warning_severity`, by `PPWarningGroup`): none under `-w` or in a system
+  header without `-Wsystem-headers`, whatever promotes them; then the last
+  `-W`/`-Wno-` of the group's names (`-Wunicode`; `-Wc23-extensions` and
+  `-Wc2x-extensions`; `-Wdelimited-escape-sequence-extension` and the
+  `-Wpedantic` that holds it), `-Weverything`, and for one off by default
+  `-pedantic`; promoted by `-Werror`, `-Werror=` of the group and, for an
+  extension, `-pedantic-errors`, unless `-Wno-error=` demotes it; and the
+  source's `#pragma clang diagnostic` for the group over all of that, which
+  the preprocessor follows through push and pop at any depth
+  (`Preprocessor.warning_mappings`). Its other warnings still print no flag
+  and follow no option. Not clang's yet, for `\N` as for `\u`: the error of a basic
   or control character's UCN in a skipped group, which clang gives; a UCN of a
   character no identifier may have within one ("character <U+2603> not allowed
   in an identifier"), which clang reads into the identifier after that error;
