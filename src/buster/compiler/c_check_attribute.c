@@ -5876,6 +5876,23 @@ static bool check_input_attribute_other_multiversion(const CheckInputAttributes*
     return result;
 }
 
+static bool check_cpu_dispatch_invalid(const CheckInputReader* reader, uint32_t declaration);
+
+// Whether multiversioning refused declaration `declaration` (#2135): a report of its own, or one an earlier declaration got
+// because this one made the function multiversioned (the caused-here note at it). clang leaves it out of the function's
+// lookup, so a later declaration's rules don't see it.
+static bool check_input_multiversion_refused(const CheckInputReader* reader, uint32_t declaration)
+{
+    bool refused = reader->cpu_invalid_count != 0 && check_cpu_dispatch_invalid(reader, declaration);
+    for (uint32_t r = 0; !refused && r < reader->output->multiversion_report_count; r += 1)
+    {
+        const CheckInputReport* report = reader->output->multiversion_reports + r;
+        const bool caused = report->note_kind == CHECK_INPUT_NOTE_MULTIVERSIONING_CAUSED;
+        refused = caused ? report->note_token == declaration : report->token == declaration;
+    }
+    return refused;
+}
+
 // clang's Sema checks for GNU's function multiversioning (#839), at -fsyntax-only: a target("default") function, or one
 // with target_clones, cpu_specific or cpu_dispatch, refuses every other declaration attribute clang keeps but used (for
 // target alone), nonnull and nothrow, at the function's name. A target attribute beside target_clones, cpu_specific or
@@ -5884,8 +5901,8 @@ static bool check_input_attribute_other_multiversion(const CheckInputAttributes*
 // first, at its name, with clang's note at the new declaration. `previous` is the function's previous declaration's
 // attributes, if any.
 static void check_input_attribute_multiversion(CheckInputReader* reader, CheckInputAttributes* attributes, uint32_t name,
-                                               const CheckInputAttributes* previous, uint32_t previous_name, bool inline_function,
-                                               bool previous_inline)
+                                               const CheckInputAttributes* previous, uint32_t previous_name, uint32_t previous_handle,
+                                               bool inline_function, bool previous_inline)
 {
     // A subject error (no_builtin on a declaration, for one) doesn't keep clang from reporting the multiversioning
     // conflict as well (#839's re-review).
@@ -6029,26 +6046,71 @@ static void check_input_attribute_multiversion(CheckInputReader* reader, CheckIn
             active_kind = CHECK_MULTIVERSION_TARGET;
         }
     }
-    // A new target declaration that makes the function multiversioned with an earlier one checks the earlier
-    // declaration's attributes first, at its name, and its own only if that one is clean.
-    bool causes = false;
-    if (previous != NULL && previous_name != BUSTER_CHECK_NONE && !check_input_attribute_other_multiversion(previous))
+    // The function's declarations before this one, along its name's binding chain (#2135), but those multiversioning
+    // refused, which clang leaves out of its lookup (check_input_multiversion_refused): the one before it (clang's OldFD,
+    // whose attributes include its earlier declarations'), whether one made the function multiversioned already
+    // (target("default"), target_clones, or two target strings), and whether this declaration redeclares one of its
+    // versions (an earlier declaration's target string, or target_clones again), which clang takes as that version's
+    // redeclaration before any rule (CheckMultiVersionAdditionalDecl): its attributes are merged, not checked.
+    (void)previous;
+    (void)previous_name;
+    const uint32_t current_target = check_input_attribute_target_index(attributes);
+    const bool current_clones = first_clones != BUSTER_CHECK_NONE;
+    bool multiversioned = false;
+    bool redeclaration = false;
+    String8 first_text = { 0 };
+    uint32_t before = BUSTER_CHECK_NONE;
+    uint32_t before_handle = 0;
+    for (uint32_t h = previous_handle; h != 0 && h - 1 < reader->bindings.count; h = reader->bindings.previous[h - 1])
     {
-        const uint32_t previous_target = check_input_attribute_target_index(previous);
-        const uint32_t current_target = check_input_attribute_target_index(attributes);
+        const uint32_t declaration = reader->bindings.declaration[h - 1];
+        const bool function = declaration < reader->parser->tokens.count && reader->declaration_kinds[declaration] == C_BINDING_FUNCTION &&
+                              !check_input_multiversion_refused(reader, declaration);
+        const CheckInputAttributes* earlier = function && check_sparse_wide_present(reader->output->attributes) ? check_input_attributes_at(reader->output, declaration) : NULL;
+        const uint32_t earlier_target = check_input_attribute_target_index(earlier);
+        const bool earlier_clones = check_input_attribute_other_multiversion(earlier);
+        const String8 text = earlier_target != BUSTER_CHECK_NONE ? earlier->records[earlier_target].text : (String8){ 0 };
+        multiversioned |= earlier_clones || (earlier_target != BUSTER_CHECK_NONE && check_input_attribute_equal(text, "default")) ||
+                          (earlier_target != BUSTER_CHECK_NONE && first_text.pointer != NULL && !check_input_attribute_text_equal(text, first_text));
+        first_text = first_text.pointer == NULL && earlier_target != BUSTER_CHECK_NONE ? text : first_text;
+        redeclaration |= (current_target != BUSTER_CHECK_NONE && earlier_target != BUSTER_CHECK_NONE &&
+                          check_input_attribute_text_equal(attributes->records[current_target].text, text)) ||
+                         (current_clones && earlier_clones);
+        before_handle = before == BUSTER_CHECK_NONE && function ? h : before_handle;
+        before = before == BUSTER_CHECK_NONE && function ? declaration : before;
+    }
+    const CheckInputAttributes* before_attributes = before != BUSTER_CHECK_NONE && check_sparse_wide_present(reader->output->attributes) ?
+                                                    check_input_attributes_at(reader->output, before) : NULL;
+    const bool before_inline = before != BUSTER_CHECK_NONE && reader->output->function_flags != NULL &&
+                               (reader->output->function_flags[before] & CHECK_INPUT_FUNCTION_INLINE) != 0;
+    // A new target declaration that makes the function multiversioned with the one before it checks that one's attributes
+    // first (its own and those its earlier declarations gave it), at its name, and its own only if they are clean.
+    bool causes = false;
+    if (before_attributes != NULL && !check_input_attribute_other_multiversion(before_attributes) && !multiversioned && !redeclaration)
+    {
+        const uint32_t previous_target = check_input_attribute_target_index(before_attributes);
         causes = current_target != BUSTER_CHECK_NONE &&
                  (check_input_attribute_equal(attributes->records[current_target].text, "default") ||
                   (previous_target != BUSTER_CHECK_NONE &&
-                   !check_input_attribute_text_equal(attributes->records[current_target].text, previous->records[previous_target].text)));
+                   !check_input_attribute_text_equal(attributes->records[current_target].text, before_attributes->records[previous_target].text)));
     }
     if (causes)
     {
-        const uint32_t bad = check_input_attribute_multiversion_disallowed(previous, CHECK_MULTIVERSION_TARGET, NULL, BUSTER_CHECK_NONE, previous_inline);
+        const CheckInputAttributes* holder = before_attributes;
+        uint32_t bad = check_input_attribute_multiversion_disallowed(before_attributes, CHECK_MULTIVERSION_TARGET, NULL, BUSTER_CHECK_NONE, before_inline);
+        for (uint32_t h = reader->bindings.previous[before_handle - 1]; bad == BUSTER_CHECK_NONE && h != 0 && h - 1 < reader->bindings.count; h = reader->bindings.previous[h - 1])
+        {
+            const uint32_t declaration = reader->bindings.declaration[h - 1];
+            const bool function = declaration < reader->parser->tokens.count && reader->declaration_kinds[declaration] == C_BINDING_FUNCTION &&
+                                  !check_input_multiversion_refused(reader, declaration);
+            holder = function && check_sparse_wide_present(reader->output->attributes) ? check_input_attributes_at(reader->output, declaration) : NULL;
+            bad = check_input_attribute_multiversion_disallowed(holder, CHECK_MULTIVERSION_TARGET, NULL, BUSTER_CHECK_NONE, before_inline);
+        }
         if (bad != BUSTER_CHECK_NONE)
         {
             const uint32_t reports = reader->output->multiversion_report_count;
-            check_input_report_multiversion(reader, previous_name, CHECK_INPUT_MULTIVERSION_ATTRIBUTE, CHECK_MULTIVERSION_TARGET,
-                                            previous->records[bad].name_token, name, CHECK_INPUT_NOTE_MULTIVERSIONING_CAUSED, 0);
+            check_input_report_multiversion(reader, before, CHECK_INPUT_MULTIVERSION_ATTRIBUTE, CHECK_MULTIVERSION_TARGET,
+                                            holder->records[bad].name_token, name, CHECK_INPUT_NOTE_MULTIVERSIONING_CAUSED, 0);
             if (reader->output->multiversion_report_count != reports)
             {
                 // The earlier declaration's own deferred error is at this token too; clang emits both.
@@ -6064,7 +6126,13 @@ static void check_input_attribute_multiversion(CheckInputReader* reader, CheckIn
             active_kind = CHECK_MULTIVERSION_TARGET;
         }
     }
-    if (active != BUSTER_CHECK_NONE)
+    // A new version of a function multiversioned already is checked as one (CheckMultiVersionAdditionalDecl's rules).
+    if (multiversioned && !redeclaration && active == BUSTER_CHECK_NONE && first_target != BUSTER_CHECK_NONE && !incompatible[first_target])
+    {
+        active = first_target;
+        active_kind = CHECK_MULTIVERSION_TARGET;
+    }
+    if (active != BUSTER_CHECK_NONE && !redeclaration)
     {
         const uint32_t bad = check_input_attribute_multiversion_disallowed(attributes, active_kind, incompatible, active, inline_function);
         if (bad != BUSTER_CHECK_NONE)

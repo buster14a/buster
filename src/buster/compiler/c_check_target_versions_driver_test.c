@@ -241,6 +241,38 @@ static void check_test_target_versions_diagnostics(CheckTest* test, const char* 
         "__attribute__((target(\"avx2\"))) int f(void) { return 1; }\n"
         "__attribute__((target(\"avx2\"), used)) int f(void);\n"
         "__attribute__((target(\"avx2\"), used)) int f(void) { return 2; }\n",
+        // A redeclaration of an existing version isn't checked against multiversioning's attributes, but a new version
+        // is, and so is the declaration before one that makes the function multiversioned, with what earlier ones gave it
+        // (#2135).
+        "__attribute__((target(\"default\"))) int f(void);\n"
+        "__attribute__((target(\"default\"), cold)) int f(void);\n"
+        "__attribute__((target(\"avx2\"))) int f(void);\n"
+        "__attribute__((target(\"avx2\"), noinline)) int f(void);\n"
+        "__attribute__((target(\"sse4.2\"), cold)) int f(void);\n"
+        "__attribute__((target_clones(\"avx2\",\"default\"))) int g(void);\n"
+        "__attribute__((target_clones(\"avx2\",\"default\"), cold)) int g(void);\n"
+        "__attribute__((target(\"avx2\"))) int h(void);\n"
+        "__attribute__((target(\"avx2\"), cold)) int h(void);\n"
+        "__attribute__((target(\"default\"))) int h(void);\n",
+        "__attribute__((target(\"default\"))) int f(void) { return 0; }\n"
+        "__attribute__((target(\"avx2\"))) int f(void) { return 1; }\n"
+        "__attribute__((target(\"avx2\"), cold)) int f(void);\n"
+        "__attribute__((target(\"avx2\"), noinline)) int f(void) { return 2; }\n",
+        // A declaration refused as the one that caused multiversioning doesn't make the function multiversioned: the
+        // next version causes it again, with the error repeated.
+        "__attribute__((target(\"avx2\"), cold)) int f(void);\n"
+        "__attribute__((target(\"default\"))) int f(void);\n"
+        "__attribute__((target(\"sse4.2\"))) int f(void);\n"
+        "__attribute__((cold, target(\"avx2\"))) int g(void);\n"
+        "__attribute__((target(\"sse4.2\"))) int g(void);\n"
+        "__attribute__((target(\"bmi\"))) int g(void);\n"
+        "__attribute__((target(\"avx2\"))) int h(void);\n"
+        "__attribute__((target(\"avx2\"), cold)) int h(void);\n"
+        "__attribute__((target(\"sse4.2\"))) int h(void);\n"
+        "__attribute__((target(\"bmi\"))) int h(void);\n",
+        "__attribute__((target_clones(\"sse4.2\",\"default\"))) int k(void) { return 0; }\n"
+        "__attribute__((target_clones(\"sse4.2\",\"default\"), used)) int k(void);\n"
+        "__attribute__((target_clones(\"sse4.2\",\"default\"), used)) int k(void) { return 1; }\n",
         // A version refused for its attribute isn't merged: no warning (#1920).
         "__attribute__((target(\"default\"))) int f(void) { return 0; }\n"
         "__attribute__((target(\"avx2\"), cold)) int f(void) { return 1; }\n",
