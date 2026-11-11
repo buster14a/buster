@@ -321,3 +321,13 @@ This is a manual review step in the existing PR workflow. It does not add a
 mandatory service or change branch protection. The DCO records a contributor's
 certification; it is not a warranty that every provenance question was
 independently audited.
+
+## Pull-request merge method
+
+Merge pull requests **only with merge commits**. Use GitHub's **Create a merge
+commit** option (or `gh pr merge --merge`); never squash-merge, rebase-and-merge,
+or fast-forward a PR into the target branch. Preserve the PR's individual
+commits and their original DCO sign-off trailers. This rule applies equally
+to manual merges, auto-merge, merge queues and administrator overrides.
+If a merge commit cannot be used, stop and report the blocker rather than
+switching methods. This rule does not waive required reviews or CI checks.

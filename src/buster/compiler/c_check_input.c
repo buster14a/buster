@@ -1113,6 +1113,10 @@ struct CheckInput
     // Whether a function's declaration has a cpu_specific or cpu_dispatch attribute (#1447): only then does the program
     // look for those functions' versions (c_check_program_cpu_dispatch.c).
     bool cpu_dispatch;
+    // Whether a function is multiversioned by target strings (#1838, c_check_target_versions.c): several target
+    // attributes of other strings, target("default") or target_clones. A unit with one is read in source order
+    // (check_deferred_bodies), whose binding events say what was used before a declaration.
+    bool target_multiversion;
     bool resource;
 };
 
@@ -2050,6 +2054,21 @@ struct CheckInputReader
     uint32_t* cpu_invalid;
     uint32_t cpu_invalid_count;
     uint32_t cpu_invalid_capacity;
+    // Whether a function's declaration has a target or target_clones attribute (#1838): only then are its rules and
+    // binding asked about target multiversioning (c_check_target_versions.c).
+    bool target_versions;
+    // The functions multiversioned by target strings (#1838): each one's declaration `target_mv_tokens[i]` (whose object
+    // is the function's) and the declaration that made it multiversioned, `target_mv_since[i]`; and each declaration of
+    // them that binding keeps apart from the visible one before it, `target_bind_tokens[i]`, with the earlier declaration
+    // it redeclares or BUSTER_CHECK_NONE for a version of its own (`target_bind_redeclares[i]`). In the arena.
+    uint32_t* target_mv_tokens;
+    uint32_t* target_mv_since;
+    uint32_t target_mv_count;
+    uint32_t target_mv_capacity;
+    uint32_t* target_bind_tokens;
+    uint32_t* target_bind_redeclares;
+    uint32_t target_bind_count;
+    uint32_t target_bind_capacity;
     // #619: the walk's declarations that the section settings and conflicts read (check_input_section_declaration), from
     // the first setting's position or section attribute's token on (section_record_from, BUSTER_CHECK_NONE before
     // either; check_input_attribute_read_item lowers it to each section attribute's token as it reads one).
@@ -3014,10 +3033,17 @@ static void check_input_recovered_publish(CheckInputReader* reader)
     input->recovered_count = input->resource ? input->recovered_count : 0;
 }
 
-// Publish the unit's deferred multiversioning reports after its body checks have run, in their discovery order.
+static void check_input_target_versions_calls(CheckInputReader* reader);
+
+// Publish the unit's deferred multiversioning reports after its body checks have run, in their discovery order: first the
+// calls no default version of a function multiversioned by target strings reaches (#1838).
 static void check_input_multiversion_flush(CheckInputReader* reader)
 {
     CheckInput* input = reader->output;
+    if (input->target_multiversion && !input->resource)
+    {
+        check_input_target_versions_calls(reader);
+    }
     for (uint32_t i = 0; !input->resource && i < input->multiversion_report_count; i += 1)
     {
         const CheckInputReport report = input->multiversion_reports[i];
@@ -3095,21 +3121,57 @@ static void check_input_diagnostic_recover(CheckInputReader* reader, bool resolv
             {
                 next[input->reports[report].token] |= 2;
             }
+            // A statement expression's statements before its value's (#1447): their reports cut their own constructs, but
+            // not the statement expression, whose value clang keeps, nor what holds it (`({ undeclared; p; }) + 1.5`'s
+            // `+`). Bit 2 marks such a region's last token, bit 3 its first; the scan saves the report after the region
+            // where it enters one, backwards, and gives it back where it leaves it, so the tokens before see past it.
+            bool regions = false;
+            for (uint32_t token = 0; token + 2 < count; token += 1)
+            {
+                const uint32_t close = parser->tree.parents[token + 1];
+                const bool statement = parser->tree.roles[token] == PARSE_ROLE_OPEN_GROUP && parser->tree.roles[token + 1] == PARSE_ROLE_OPEN_BLOCK &&
+                                       close < count && close > token + 1 && parser->tree.roles[close] == PARSE_ROLE_CLOSE_BLOCK;
+                // Its value's statement: the block's last child, the first token from its `}` back whose parent it is.
+                uint32_t last = statement ? close : count;
+                for (uint32_t at = close; statement && last == close && at-- > token + 2;)
+                {
+                    last = parser->tree.parents[at] == close ? at : last;
+                }
+                const uint32_t value = last < close ? limits[last] : count;
+                if (value < close && value > token + 2)
+                {
+                    next[value - 1] |= 4;
+                    next[token + 2] |= 8;
+                    regions = true;
+                }
+            }
+            uint32_t* saved = regions ? BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint32_t, count) : NULL;
+            input->resource |= regions && saved == NULL;
+            uint32_t depth = 0;
             uint32_t following = count;
             for (uint32_t token = count; token-- > 0;)
             {
                 const uint32_t marks = next[token];
+                if ((marks & 4) != 0 && saved != NULL)
+                {
+                    saved[depth++] = following;
+                }
                 following = (marks & 2) != 0 ? token : following;
                 next[token] = following;
                 following = (marks & 1) != 0 ? count : following;
+                if ((marks & 8) != 0 && saved != NULL && depth != 0)
+                {
+                    following = saved[--depth];
+                }
             }
             for (uint32_t token = 0; token < count; token += 1)
             {
                 limits[token] = next[limits[token]];
             }
-            arena_pop_to(reader->arena, kept);
-            input->diagnostic_limits = limits;
-            input->diagnostic_report_count = input->report_count;
+            // (Where the regions' stack couldn't be pushed, the unit is a resource failure, which publishes no cut.)
+            arena_pop_to(reader->arena, input->resource ? mark : kept);
+            input->diagnostic_limits = input->resource ? NULL : limits;
+            input->diagnostic_report_count = input->resource ? 0 : input->report_count;
         }
     }
 }
@@ -5439,7 +5501,7 @@ static bool check_input_assertion_escaped(CheckInputReader* reader, uint32_t fir
     result = result && open > 0 && kinds[open] == PARSE_KIND_L_PAREN && kinds[open - 1] == PARSE_KIND_STATIC_ASSERT &&
              check_constant_punctuation(parser, open + 1, end, PARSE_KIND_COMMA) == first - 1;
     uint32_t message_end = end;
-    return result && check_input_unevaluated_refused(reader, first, &message_end) != BUSTER_CHECK_NONE;
+    return result && check_input_unevaluated_refused(reader, first, &message_end, open - 1) != BUSTER_CHECK_NONE;
 }
 
 // The unknown escape sequences of the evaluated literal at `token` (#1447), whose spelling is `bytes`: each one's
@@ -6212,9 +6274,18 @@ static bool check_input_read_attributes(CheckInputReader* reader, uint32_t* curs
             }
         }
         else if (attribute->kind == CHECK_ATTRIBUTE_UNKNOWN && !attribute->keyword && attribute->argument_count >= 2 &&
-                 check_input_attribute_equal(check_input_attribute_name(reader, attribute->name), "annotate"))
+                 (check_input_attribute_equal(check_input_attribute_name(reader, attribute->name), "annotate") ||
+                  check_input_attribute_equal(check_input_attribute_name(reader, attribute->name), "annotate_type")))
         {
-            valid = check_input_attribute_annotate(reader, &parsed, attribute);
+            // (annotate_type's trailing empty argument, clang's "expected expression" at the `)`, #1447: annotate's is its
+            // expressions' reader's.)
+            const bool trailing = reader->parser->tokens.kinds[attribute->argument_end - 1] == PARSE_KIND_COMMA &&
+                                  check_input_attribute_equal(check_input_attribute_name(reader, attribute->name), "annotate_type");
+            if (trailing)
+            {
+                check_input_attribute_argument_error(reader, &parsed, attribute, attribute->argument_end, CHECK_ARGUMENT_EXPECTED_EXPRESSION, 0);
+            }
+            valid = !trailing && check_input_attribute_annotate(reader, &parsed, attribute);
         }
         else if (attribute->kind == CHECK_ATTRIBUTE_UNKNOWN && !attribute->keyword && attribute->argument_count >= 2 && attribute->argument_count <= 8 &&
                  check_input_ownership_indices(reader, attribute))
@@ -7761,7 +7832,7 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                     // Its chunk's address spaces, in their order (#1447).
                     for (uint32_t a = part->space_first; type != 0 && part->spaces != NULL && a < part->space_end; a += 1)
                     {
-                        const CheckInputAttribute* attribute = part->spaces->records + a;
+                        CheckInputAttribute* attribute = part->spaces->records + a;
                         type = attribute->kind == CHECK_ATTRIBUTE_ADDRESS_SPACE ? check_input_address_space(reader, part->spaces, attribute, type) : type;
                     }
                     noderef = part->noderef ? check_input_noderef_mark(reader, noderef) : noderef;
@@ -10281,6 +10352,15 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                     check_input_cpu_dispatch_declaration(reader, attributes, name, type, previous_handle, is_inline, is_static, main_function,
                                                          kind == PARSE_KIND_L_BRACE ? i : BUSTER_CHECK_NONE);
                 }
+                if (reader->target_versions && reader->output->multiversion_report_count == multiversion_reports)
+                {
+                    // clang's rules for multiversioning by target strings (#1838): its versions, which binding keeps
+                    // apart, and the declarations they refuse.
+                    const IdentId identifier = parser->tokens.names[name];
+                    const bool main_function = !reader->pp->options.freestanding && intern_length(reader->pp->table, identifier) == 4 &&
+                                               memcmp(intern_bytes(reader->pp->table, identifier), "main", 4) == 0;
+                    check_input_target_versions_declaration(reader, attributes, name, type, previous_handle, is_inline, is_static, main_function);
+                }
             }
             if (valid && !file && storage == C_NAME_EXTERN && initialized)
             {
@@ -10624,6 +10704,22 @@ static void check_input_alias_tentative(CheckInputReader* reader, uint32_t token
             reader->output->reports[before].note_token = tentative;
             reader->output->reports[before].note_kind = CHECK_INPUT_NOTE_PREVIOUS_DEFINITION;
         }
+        // clang erases the alias attribute and reads on (#1849): the report is recovered, and the declaration is a plain
+        // one, its alias attributes dropped from a copy of its list (a specifier's is each declarator's) and the
+        // definition they made with them.
+        const CheckInputAttributes* attributes = check_input_attributes_at(reader->output, token);
+        CheckInputAttributes* copy = reader->output->report_count == before + 1 ? BUSTER_ARENA_PUSH_ARRAY(reader->arena, CheckInputAttributes, 1) : NULL;
+        const bool copied = copy != NULL && check_input_attribute_copy(reader, attributes, copy);
+        reader->output->resource |= reader->output->report_count == before + 1 && !copied;
+        for (uint32_t i = 0; copied && i < copy->count; i += 1)
+        {
+            copy->records[i].ignored |= copy->records[i].kind == CHECK_ATTRIBUTE_ALIAS;
+        }
+        if (copied && check_input_recover_reports(reader, before))
+        {
+            check_input_set_attributes_at(reader->output, token, copy);
+            reader->definition_origins[token] = reader->definition_origins[previous];
+        }
     }
 }
 
@@ -10768,7 +10864,12 @@ static void check_input_bind_checked(CheckInputReader* reader, uint32_t token, u
     // A cpu_specific or cpu_dispatch declaration (#1447) of another version than the visible one before it is an entity of
     // its own, bound apart; one of an earlier version's redeclares that one, its definitions one entity's.
     bool versions = false;
-    const uint32_t version = reader->cpu_dispatch && kind == C_BINDING_FUNCTION && old != 0 ? check_input_cpu_dispatch_match(reader, token, old, &versions) : BUSTER_CHECK_NONE;
+    uint32_t version = reader->cpu_dispatch && kind == C_BINDING_FUNCTION && old != 0 ? check_input_cpu_dispatch_match(reader, token, old, &versions) : BUSTER_CHECK_NONE;
+    // So is a version of a function multiversioned by target strings (#1838, c_check_target_versions.c).
+    if (reader->target_versions && kind == C_BINDING_FUNCTION && old != 0 && version == BUSTER_CHECK_NONE && !versions)
+    {
+        version = check_input_target_versions_match(reader, token, &versions);
+    }
     if (version != BUSTER_CHECK_NONE)
     {
         check_input_cpu_dispatch_redeclare(reader, token, version);
@@ -11200,6 +11301,48 @@ static inline __attribute__((always_inline)) uint32_t check_input_library_call(C
     return masked ? check_input_library_declaration(reader, declaration) : 0;
 }
 
+// Whether the function whose body the walk reads (reader->function_body) has clang's no_builtin attribute for the library
+// function named `name` (#1958): with no arguments, every one; else one of its strings. clang's code then calls the
+// unit's declaration of a plain library builtin in that body rather than compute or fold it (EmitDirectCallee's
+// no-builtin-NAME and no-builtins function attributes), though its constant contexts still fold (the constant
+// evaluator doesn't read the attribute). A string clang warns names no builtin ("*" among them) matches none.
+static __attribute__((noinline)) bool check_input_no_builtin(CheckInputReader* reader, IdentId name, uint32_t token)
+{
+    const Parser* parser = reader->parser;
+    // The body the walk is in, or, where a pass after the walk asks (the reader's expression batches), the one that holds
+    // `token`: its `}` up the tree, then the `{` whose parent that is.
+    const uint32_t count = parser->tokens.count;
+    uint32_t body = reader->function_body;
+    uint32_t close = body >= count && token < count ? token : BUSTER_CHECK_NONE;
+    for (uint32_t steps = 0; close < count && parser->tree.roles[close] != PARSE_ROLE_CLOSE_BODY && steps < count; steps += 1)
+    {
+        close = parser->tree.parents[close];
+    }
+    for (uint32_t t = close < count ? token : 0; body >= count && t-- > 0;)
+    {
+        body = parser->tree.roles[t] == PARSE_ROLE_OPEN_BODY && parser->tree.parents[t] == close ? t : body;
+    }
+    const uint32_t function = body < parser->tokens.count ? check_sparse_get(reader->output->body_declarations, body) : BUSTER_CHECK_NONE;
+    const CheckInputAttributes* attributes = function < parser->tokens.count ? check_input_attributes_at(reader->output, function) : NULL;
+    const uint8_t* spelling = name != 0 ? intern_bytes(reader->pp->table, name) : NULL;
+    const uint32_t length = name != 0 ? intern_length(reader->pp->table, name) : 0;
+    bool covered = false;
+    for (uint32_t i = 0; attributes != NULL && !covered && i < attributes->count; i += 1)
+    {
+        const CheckInputAttribute* attribute = attributes->records + i;
+        const bool applies = attribute->kind == CHECK_ATTRIBUTE_NO_BUILTIN && !attribute->ignored;
+        covered = applies && attribute->argument_count == 0;
+        for (uint32_t k = 0; applies && !covered && k < attribute->argument_count; k += 1)
+        {
+            const uint32_t first = k == 0 ? attribute->argument_first : attribute->argument_ends[k - 1] + 1;
+            const uint32_t end = k + 1 < attribute->argument_count ? attribute->argument_ends[k] : attribute->argument_end;
+            String8 text = { 0 };
+            covered = check_input_attribute_string(reader, first, end, false, &text) && text.length == length && memcmp(text.pointer, spelling, length) == 0;
+        }
+    }
+    return covered;
+}
+
 #include "c_check_literal_table_input.c"
 // C23 auto's deduction (#793), as clang deduces a placeholder through the declarator's shape: the initializer's type
 // is lvalue-converted and decayed at the top, then each pointer, array, function and aligned level matches its own
@@ -11571,8 +11714,9 @@ static inline __attribute__((always_inline)) void check_input_resolve_name(Check
     const uint32_t bound = __builtin_expect(builtin != CBUILTIN_NONE, 0) ? c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, identifier) : 0;
     // A catalog builtin's name that no declaration binds or a declaration with external linkage binds
     // (check_input_builtin_kept), or a call of the unit's declaration of a <stdbit.h> function that clang makes the builtin.
-    const bool claimed = cbuiltin_stdc_library(builtin) ? check_input_stdc_library_call(reader, i, bound, builtin) :
-                         bound == 0 || check_input_builtin_kept(reader, bound, builtin);
+    // In a function whose no_builtin names the function, its call is the declaration's (#1958).
+    const bool claimed = cbuiltin_stdc_library(builtin) ? check_input_stdc_library_call(reader, i, bound, builtin) && !check_input_no_builtin(reader, identifier, i) :
+                         bound == 0 || (check_input_builtin_kept(reader, bound, builtin) && !check_input_no_builtin(reader, identifier, i));
     if (__builtin_expect(builtin != CBUILTIN_NONE, 0) && role == PARSE_ROLE_OPERAND && claimed)
     {
         // The callee may be the name in parentheses, which clang's call looks through (check_input_callee_end): they
@@ -13246,7 +13390,7 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
         // context's subtree that reports no constraint of its own (BUSTER_CHECK_CONTEXT_VALUE), whose runtime behavior's
         // warnings check_input_constant_context suppressed.
         const uint32_t separator = supported && !builtin ? check_constant_punctuation(parser, keyword + 2, token, PARSE_KIND_COMMA) : token;
-        const bool dropped = separator < token && check_input_unevaluated_strings(reader, separator + 1, token);
+        const bool dropped = separator < token && check_input_unevaluated_strings(reader, separator + 1, token, keyword);
         if (supported && !builtin && dropped)
         {
             graph->contexts[a] |= BUSTER_CHECK_CONTEXT_VALUE;
@@ -13469,7 +13613,9 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
                 // A call of a plain library builtin's declaration that clang folds (#148), marked for the checker.
                 const uint32_t callee = graph->ops[a] == CHECK_OP_ADDRESS ? graph->operand0[a] : a;
                 const uint32_t use = callee < node && graph->ops[callee] == CHECK_OP_VALUE ? graph->tokens[callee] : BUSTER_CHECK_NONE;
-                const uint32_t library = use != BUSTER_CHECK_NONE ? check_input_library_call(reader, use) : 0;
+                uint32_t library = use != BUSTER_CHECK_NONE ? check_input_library_call(reader, use) : 0;
+                // In a function whose no_builtin names it, the call is the declaration's (#1958).
+                library = library != 0 && check_input_no_builtin(reader, parser->tokens.names[use], use) ? 0 : library;
                 graph->members[node] = library != 0 ? library : graph->members[node];
             }
             if (BUSTER_CHECK_RARE(reader, builtins, token) != 0)
@@ -13923,7 +14069,7 @@ static void check_input_constant_context(CheckInputReader* reader, uint32_t toke
                 // runtime behavior's warnings then, which clang's constant context gives none of either. Before the walk
                 // makes the condition's nodes, which take their tokens' suppressions.
                 uint32_t message_end = close;
-                if (check_input_unevaluated_refused(reader, separator + 1, &message_end) != BUSTER_CHECK_NONE)
+                if (check_input_unevaluated_refused(reader, separator + 1, &message_end, token) != BUSTER_CHECK_NONE)
                 {
                     check_input_warning_suppress(reader, token + 2, separator, check_constant_unevaluated_warnings());
                 }

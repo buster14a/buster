@@ -3467,7 +3467,8 @@ static void parse_scalar_operand(ParseScalar* parser, uint32_t i, ParseFrame* fr
     else if (kind == PARSE_KIND_SIZEOF)
     {
         step->role = PARSE_ROLE_PREFIX;
-        frame->mode = parser->kinds[i + 1] == PARSE_KIND_L_PAREN ? PARSE_MODE_SIZEOF_PAREN : PARSE_MODE_OPERAND;
+        // (`sizeof ({ ... })`'s `(` is its statement expression's own: clang's parser reads a parenthesized expression.)
+        frame->mode = parser->kinds[i + 1] == PARSE_KIND_L_PAREN && parser->kinds[i + 2] != PARSE_KIND_L_BRACE ? PARSE_MODE_SIZEOF_PAREN : PARSE_MODE_OPERAND;
         frame->flags &= ~BUSTER_PARSE_FRAME_EMPTY_OK;
     }
     else if (kind == PARSE_KIND_TYPE_ARGUMENT || kind == PARSE_KIND_GENERIC)
@@ -5521,7 +5522,7 @@ static uint8_t parse_role_rule(ParseKernels* kernels, uint32_t i, bool typed, bo
                 {
                     result = PARSE_ROLE_OPEN_FOR;
                 }
-                else if (previous == PARSE_KIND_SIZEOF)
+                else if (previous == PARSE_KIND_SIZEOF && next != PARSE_KIND_L_BRACE)
                 {
                     result = PARSE_ROLE_OPEN_SIZEOF;
                 }
@@ -7974,7 +7975,9 @@ static void parse_role_statics_avx512(ParseKernels* kernels, uint32_t start, uin
         // `...`, a function's; else a group's. An attribute's `(` and an asm's go by the token before their keyword, which
         // their code in `facts` indexes ParseRoleTables.paren_by_before with.
         const __m512i paren_previous = parse_table8(t->paren_previous, vk_previous);
-        const __mmask64 by_previous = class_paren & _mm512_test_epi8_mask(paren_previous, paren_previous);
+        // (`sizeof ({ ... })`'s `(` is a group's, its statement expression's.)
+        const __mmask64 by_previous = class_paren & _mm512_test_epi8_mask(paren_previous, paren_previous) &
+                                      ~(parse_equal8(vk_previous, PARSE_KIND_SIZEOF) & parse_equal8(vk_next, PARSE_KIND_L_BRACE));
         const __mmask64 attribute_list = class_paren & parse_equal8(vk_previous, PARSE_KIND_L_PAREN) & parse_equal8(vk_before, PARSE_KIND_ATTRIBUTE);
         const __mmask64 next_starts_type = _mm512_test_epi8_mask(next_bits, _mm512_set1_epi8(BUSTER_PARSE_VKIND_STARTS_TYPE));
         const __mmask64 next_function = parse_equal8(vk_next, PARSE_KIND_R_PAREN) | parse_equal8(vk_next, PARSE_KIND_ELLIPSIS);

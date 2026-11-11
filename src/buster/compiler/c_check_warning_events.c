@@ -126,15 +126,23 @@ enum
     // A C23 record's redefinition whose attributes differ (#1447, c_check_tag_compatible.c): clang's -Wodr, an error by
     // default (check_input_odr_severity).
     CHECK_WARNING_ID_ODR = 113,
+    // An encoding prefix on an unevaluated string literal (#1447): -Winvalid-unevaluated-string, on by default.
+    CHECK_WARNING_ID_INVALID_UNEVALUATED_STRING = 114,
+    // -pedantic's warnings of an unevaluated string literal's escapes (#1447): a GNU one's (-Wpedantic) and a delimited or
+    // named one's (-Wdelimited-escape-sequence-extension), off by default, extensions -pedantic gives.
+    CHECK_WARNING_ID_NONSTANDARD_ESCAPE = 115,
+    CHECK_WARNING_ID_DELIMITED_ESCAPE = 116,
     // A target_clones attribute that mixes a string of several versions with other strings (#1838, clang's
     // SemaX86::checkTargetClonesAttr): -Wtarget-clones-mixed-specifiers, on by default, under -Wfunction-multiversion.
     CHECK_WARNING_ID_TARGET_CLONES_MIXED_SPECIFIERS = 117,
     // __builtin_cpu_supports of a feature clang doesn't know (#1843, clang's SemaX86 validateCpuSupports): its warning of no
     // option, whose call is false.
     CHECK_WARNING_ID_INVALID_CPU_SUPPORTS = 118,
+    // An alias whose function type isn't its aliasee's (#1849, clang's code generation at -c): -Wattribute-alias. (Its ID
+    // past the ones other pull requests take.)
+    CHECK_WARNING_ID_ATTRIBUTE_ALIAS = 119,
     // A call's argument whose type its type tag doesn't match (#1447, clang's CheckArgumentWithTypeTag, the attributes
-    // argument_with_type_tag, pointer_with_type_tag and type_tag_for_datatype): -Wtype-safety, on by default. (114 to 119
-    // are open pull requests' reservations.)
+    // argument_with_type_tag, pointer_with_type_tag and type_tag_for_datatype): -Wtype-safety, on by default.
     CHECK_WARNING_ID_TYPE_SAFETY = 120,
     CHECK_WARNING_ID_COUNT,
 };
@@ -397,6 +405,14 @@ typedef enum CheckWarningEventKind
     // warning (#1447, -Wno-error=odr or a pragma's): at its name, with a CHECK_WARNING_NOTE_ATTRIBUTE_HERE at each list's
     // differing attribute, the earlier's first.
     CHECK_WARNING_EVENT_ODR_ATTRIBUTE,
+    // An unevaluated string literal's encoding prefix (#1447): "encoding prefix 'P' on an unevaluated string literal has no
+    // effect", at the token, payload.data the prefix's length (1 or 2: u8). A literal with an escape clang refuses there
+    // has its warnings from the driver instead, before the escapes' (check_driver_escapes).
+    CHECK_WARNING_EVENT_UNEVALUATED_PREFIX,
+    // A delimited or named escape sequence of an unevaluated string literal clang takes (#1447, -pedantic's
+    // -Wdelimited-escape-sequence-extension): at the token, payload.data 1 for a named one's "named escape sequences are a
+    // Clang extension", 0 for "delimited escape sequences are a C2y extension".
+    CHECK_WARNING_EVENT_DELIMITED_ESCAPE,
     // A bit-precise constant's suffix (wb or uwb) before C23 (#1447): -Wc23-extensions' "'_BitInt' suffix for literals is a
     // C23 extension" (CHECK_WARNING_ID_C23_PARAMETER's option), at the constant.
     CHECK_WARNING_EVENT_BIT_INT_SUFFIX,
