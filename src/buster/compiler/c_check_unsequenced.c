@@ -891,74 +891,100 @@ static uint32_t check_unseq_count(const CheckUnseq* checker, uint32_t root, uint
     return count;
 }
 
-// Whether the walk may report in the full expression of `count` starts: some variable a modification in it names is used
-// at least twice (the modification and another use). Each usage the walk can make is listed, its subtree's (unevaluated
-// operands' and statement expressions' values' too, a superset); a node reached twice is listed twice, as the walk may
-// use it twice. A full expression with more usages than the list holds is walked.
-static bool check_unseq_repeats(const CheckUnseq* checker, const Parser* parser, const uint32_t* starts, const bool* reads, uint32_t count,
-                                uint32_t* stack, uint32_t capacity)
+// The first node of `root`'s subtree in postorder, which keeps each subtree's nodes together: its smallest child's,
+// repeatedly.
+static uint32_t check_unseq_first(const CheckUnseq* checker, uint32_t root)
 {
     const CheckGraph* graph = checker->graph;
-    uint32_t objects[64];
-    bool modified[64];
-    uint32_t used = 0;
-    bool overflow = false;
-    for (uint32_t i = 0; i < count && !overflow; i += 1)
+    uint32_t at = root;
+    bool going = true;
+    while (going)
     {
-        uint32_t name = 0;
-        const uint32_t object = reads != NULL && reads[i] && starts[i] < graph->count ? check_unseq_object(checker, parser, starts[i], false, &name) : 0;
-        overflow = object != 0 && used == 64;
-        if (object != 0 && !overflow)
+        uint32_t least = at;
+        const uint32_t slots = check_unseq_slots(graph, at);
+        for (uint32_t slot = 0; slot < slots; slot += 1)
         {
-            objects[used] = object;
-            modified[used] = false;
-            used += 1;
+            bool read = false;
+            const uint32_t child = check_unseq_child(checker, at, slot, &read);
+            least = child < least ? child : least;
         }
-        uint32_t depth = 0;
-        if (starts[i] < graph->count)
-        {
-            stack[depth++] = starts[i];
-        }
-        while (depth != 0 && !overflow)
-        {
-            const uint32_t node = stack[--depth];
-            const CheckOp op = graph->ops[node];
-            const uint32_t target = check_unseq_modification(op) && graph->operand0[node] < graph->count ?
-                                        check_unseq_object(checker, parser, graph->operand0[node], true, &name) : 0;
-            overflow = target != 0 && used == 64;
-            if (target != 0 && !overflow)
-            {
-                objects[used] = target;
-                modified[used] = true;
-                used += 1;
-            }
-            const uint32_t slots = check_unseq_slots(graph, node);
-            for (uint32_t slot = 0; slot < slots && !overflow; slot += 1)
-            {
-                bool read = false;
-                const uint32_t child = check_unseq_child(checker, node, slot, &read);
-                const uint32_t object = read && child < graph->count && child < node ? check_unseq_object(checker, parser, child, false, &name) : 0;
-                overflow = (object != 0 && used == 64) || (child < graph->count && child < node && depth == capacity);
-                if (object != 0 && !overflow)
-                {
-                    objects[used] = object;
-                    modified[used] = false;
-                    used += 1;
-                }
-                if (child < graph->count && child < node && !overflow)
-                {
-                    stack[depth++] = child;
-                }
-            }
-        }
+        going = least < at;
+        at = least;
     }
-    bool repeats = overflow;
-    for (uint32_t m = 0; m < used && !repeats; m += 1)
+    return at;
+}
+
+// Whether the walk may report in the full expression of `count` starts. A report takes two usages of a variable, one a
+// modification, and each usage names its variable through an identifier of its own (a read's, a modification's
+// target's; a modification of a modification's target takes one more): so a root whose node range (the subtree's, its
+// unevaluated operands' and statement expressions' values' with it: a superset) holds no modified variable's name more
+// than once, counting its modifications, can't report. Most roots modify a variable they name nowhere else. The vector
+// path finds the range's modifications and values 16 nodes at a time by operator; the scalar path, its twin, tests every
+// node. A brace initializer's list, and a range with more modified names than the list holds, are walked.
+static bool check_unseq_repeats(const CheckUnseq* checker, const Parser* parser, const uint32_t* starts, const bool* reads, uint32_t count,
+                                bool vector)
+{
+    const CheckGraph* graph = checker->graph;
+    const uint32_t root = count == 1 && reads == NULL ? starts[0] : BUSTER_CHECK_NONE;
+    bool repeats = root >= graph->count;
+    uint32_t names[8];
+    uint32_t uses[8];
+    uint32_t name_count = 0;
+    const uint32_t first = !repeats ? check_unseq_first(checker, root) : 0;
+    const uint32_t end = !repeats ? root + 1 : 0;
+    // (Two passes: the modifications' targets' names, then every identifier value's against them.)
+    for (uint32_t pass = 0; pass < 2 && !repeats; pass += 1)
     {
-        for (uint32_t u = 0; modified[m] && u < used && !repeats; u += 1)
+        for (uint32_t base = first; base < end && !repeats; base += 16)
         {
-            repeats = u != m && objects[u] == objects[m];
+            const uint32_t live = end - base < 16 ? end - base : 16;
+            uint32_t selected = live == 16 ? 0xffffu : (1u << live) - 1;
+            if (vector)
+            {
+                const __mmask16 lanes = (__mmask16)selected;
+                const __m512i ops = _mm512_maskz_loadu_epi32(lanes, graph->ops + base);
+                selected = pass == 0 ? (_mm512_mask_cmpge_epu32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_PRE_INCREMENT)) &
+                                        _mm512_mask_cmple_epu32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_BIT_XOR_ASSIGN))) |
+                                           _mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_ASSIGN)) :
+                                       _mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_VALUE));
+            }
+            for (; selected != 0 && !repeats; selected &= selected - 1)
+            {
+                const uint32_t node = base + (uint32_t)__builtin_ctz(selected);
+                const CheckOp op = graph->ops[node];
+                uint32_t token = BUSTER_CHECK_NONE;
+                if (pass == 0 && check_unseq_modification(op) && graph->operand0[node] < graph->count &&
+                    check_unseq_object(checker, parser, graph->operand0[node], true, &token) == 0)
+                {
+                    token = BUSTER_CHECK_NONE;
+                }
+                if (pass == 1 && op == CHECK_OP_VALUE && graph->tokens[node] < parser->tokens.count &&
+                    parser->tokens.kinds[graph->tokens[node]] == PARSE_KIND_IDENTIFIER)
+                {
+                    token = graph->tokens[node];
+                }
+                const uint32_t name = token < parser->tokens.count ? parser->tokens.names[token] : BUSTER_CHECK_NONE;
+                uint32_t k = 0;
+                while (name != BUSTER_CHECK_NONE && k < name_count && names[k] != name)
+                {
+                    k += 1;
+                }
+                repeats = pass == 0 && name != BUSTER_CHECK_NONE && k == name_count && name_count == 8;
+                if (pass == 0 && name != BUSTER_CHECK_NONE && k == name_count && !repeats)
+                {
+                    names[k] = name;
+                    uses[k] = 0;
+                    name_count += 1;
+                }
+                if (name != BUSTER_CHECK_NONE && k < name_count)
+                {
+                    uses[k] += 1;
+                    repeats = uses[k] > 2;
+                }
+            }
         }
+        // (A range without a modified variable is done after the first pass.)
+        pass += name_count == 0 ? 1 : 0;
     }
     return repeats;
 }
@@ -974,6 +1000,8 @@ struct CheckUnseqStorage
     // The count's stack and the statement expressions' values, room for the whole graph's nodes, made once.
     uint32_t* stack;
     uint32_t* inner;
+    // The vector path's or the scalar path's prefilter (check_unseq_repeats).
+    bool vector;
 };
 
 // Room for a full expression of `nodes` nodes, the tables grown to at least twice the last size: false where scratch
@@ -1100,7 +1128,7 @@ static void check_unseq_check(CheckCommonEmission* emission, CheckUnseqStorage* 
         }
         bool valid = checker->known != NULL;
         // (Most full expressions modify a variable they use nowhere else: no walk can report in them.)
-        modifies = !valid || check_unseq_repeats(checker, parser, starts, reads, count, storage->stack, graph->count + 1);
+        modifies = !valid || check_unseq_repeats(checker, parser, starts, reads, count, storage->vector);
         uint32_t inner_count = 0;
         uint32_t nodes = 0;
         for (uint32_t i = 0; valid && modifies && i < count; i += 1)

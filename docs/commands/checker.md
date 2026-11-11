@@ -305,9 +305,9 @@ unused-warning fixtures also check exact scope-completion tokens.
   selection's other operands and statement expressions' statements aren't read, a statement expression's value is
   a full expression of its own, checked first, and a brace initializer's list is one, checked once its last value
   is walked (`check_unseq_plans`, a range's value once per element). Candidates come from one vector pass over the
-  graph's operators for a modification; a full expression none of whose modified variables has a second usage
-  (`check_unseq_repeats`, a superset of the walk's) is skipped, as most are; the walk is scalar, an ordered tree walk
-  with a union-find. A random
+  graph's operators for a modification; a root whose postorder node range names no modified variable twice (counting
+  its modifications; `check_unseq_repeats`, vector and scalar twins, a superset of the walk's usages) can't report and
+  isn't walked, as most aren't; the walk is scalar, an ordered tree walk with a union-find. A random
   differential of 21,000 full expressions over three variables, without constant first operands, matches clang
   23.1.6 exactly. Differences left: buster's evaluation facts take an assignment's or a statement expression's value
   as a constant condition, which clang's CFG doesn't (`(y = 0) ? 1 / 0 : 2` misses `-Wdivision-by-zero` too), so a

@@ -5976,7 +5976,7 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
         // The displaced roots (check_common_displaced_root) join the roots' order at their operands, ahead of the later roots
         // their own nodes follow; a root walk skips them where they stand.
         // -Wunsequenced's candidates and its walk's tables (c_check_unsequenced.c), where it can warn at all.
-        CheckUnseqStorage unsequenced = { 0 };
+        CheckUnseqStorage unsequenced = { .vector = vector };
         bool unsequenced_failed = false;
         uint8_t* unsequenced_marks = check_common_enabled(pp, input, CHECK_WARNING_ID_UNSEQUENCED, false) ?
                                            check_unseq_marks(graph, parents, vector, scratch, &unsequenced_failed) : NULL;
