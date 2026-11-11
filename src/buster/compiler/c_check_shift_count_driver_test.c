@@ -4,8 +4,41 @@
 // Original runtime shift-count sources (#1394). Independent counts and the shared warning harness compare the
 // pinned Clang's complete diagnostics, warning policy and object preservation through both kernels and requested lanes.
 
+// Under -fwrapv, or -fno-strict-overflow without -fno-wrapv, signed overflow is defined, and clang's DiagnoseBadShiftValues
+// warns of neither a shift's result nor its negative left operand; its counts' warnings stay (#1447).
+static const char check_driver_shift_wrapv_source[] =
+    "int a = 1 << 40;\n"
+                  "int b = -1 << 2;\n"
+                  "int c = 3 << 31;\n"
+                  "long d = -8L << 60;\n"
+                  "int f(int x) { return (3 << 31) | (-4 << 1) | (x << 40) | (1 << -1); }\n"
+                  "void g(void) { int v = (-1 << 1); (void)v; }\n";
+
 static const CheckDriverDefaultWarningFixture check_driver_shift_count_fixtures[] =
 {
+    {
+        .name = "shift values without -fwrapv",
+        .source = check_driver_shift_wrapv_source,
+        .warnings = 9,
+    },
+    {
+        .name = "-fwrapv defines shift values",
+        .source = check_driver_shift_wrapv_source,
+        .options = { "-fwrapv" },
+        .warnings = 3,
+    },
+    {
+        .name = "-fno-strict-overflow defines shift values",
+        .source = check_driver_shift_wrapv_source,
+        .options = { "-fno-strict-overflow" },
+        .warnings = 3,
+    },
+    {
+        .name = "-fno-wrapv after -fno-strict-overflow keeps shift values' warnings",
+        .source = check_driver_shift_wrapv_source,
+        .options = { "-fno-strict-overflow", "-fno-wrapv" },
+        .warnings = 9,
+    },
     {
         .name = "nonconstant int operands retain left and right shift count warnings",
         .source = "int left(int x){return x<<40;}int right(int x){return x>>32;}\n",
