@@ -243,6 +243,7 @@ static __attribute__((noinline)) void check_input_misc_evidence(CheckInputReader
         evidence->alignment_side_effects = (value.flags & BUSTER_CHECK_SIDE_EFFECT) != 0;
         evidence->alignment_low = (uint64_t)value.integer;
         evidence->alignment_high = (uint64_t)(value.integer >> 64);
+        evidence->alignment_limbs = value.floating_storage[0];
     }
     if (builtin == CBUILTIN_ANNOTATION && count == 2 && end < token)
     {

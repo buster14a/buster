@@ -293,7 +293,11 @@ measured the same way: `vpermb` of xmm and ymm registers, `vpermw` and
 `vpshufb` at every width, `vpermd` of ymm and zmm registers, `vpermq` of zmm
 ones, `valignd` and `valignq` at every width, and `vshufi64x2` of ymm and zmm
 registers. Its conversions then added 88: `vpmovzx` and `vpmovsx` of every pair of lanes at
-every width, and `vpmov`, `vpmovs` and `vpmovus` of every pair at every width.
+every width, and `vpmov`, `vpmovs` and `vpmovus` of every pair at every width. Its shifts
+by a scalar count then added 53: `vpsllw` to `vpsraq` by an xmm count (EVEX) and by an
+immediate at every width, each 2 cycles' latency, one macro-op and 2 per cycle
+([the record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/ir-shifts-1840-2026-11-11),
+buster-performance#388).
 
 What the rows say, a few families (cycles; derived values in italics):
 

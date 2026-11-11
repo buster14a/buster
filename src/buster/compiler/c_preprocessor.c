@@ -296,6 +296,9 @@ struct PPOptions
     // The checker's implicit-function diagnostic: 0 follows the language mode, 1 ignores, 2 warns, 3 errors.
     uint8_t implicit_function_diagnostic;
     uint8_t implicit_library_diagnostic;
+    // An unknown builtin's (a `__builtin_` name's) implicit declaration, clang's DefaultError warn_builtin_unknown in every
+    // language mode before C23: the same values, 0 an error (#2121).
+    uint8_t implicit_builtin_diagnostic;
     bool implicit_function_system;
     // The file cache to read files through, made with file_cache_initialize for the same language mode and intern
     // table; or null, for a cache of the translation unit's own.
@@ -7158,6 +7161,7 @@ static bool pp_parse_options_inputs(int count, char** arguments, PPOptions* opti
     options->implicit_function_diagnostic = implicit == 2 && !implicit_no_error && warning_errors ? 3 : implicit;
     const uint8_t library = implicit_library_before_c99 == 2 && !implicit_no_error && warning_errors ? 3 : implicit_library_before_c99;
     options->implicit_library_diagnostic = options->language.standard >= 1999 ? options->implicit_function_diagnostic : library;
+    options->implicit_builtin_diagnostic = implicit_since_c99 == 2 && !implicit_no_error && warning_errors ? 3 : implicit_since_c99;
     options->quote_directories = quote;
     options->include_directories = include;
     options->system_directories = system;
