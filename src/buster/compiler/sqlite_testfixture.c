@@ -342,6 +342,8 @@ static bool testfixture_subset(Arena* arena, Testfixture* t, const char* path)
 
 static int run_sqlite_testfixture(int argc, char** argv)
 {
+    // A line at a time: the builds and runs take minutes, and a log should show each step as it ends.
+    setvbuf(stdout, NULL, _IOLBF, 0);
     Testfixture t = { 0 };
     const char* parent = getenv("TMPDIR") != NULL ? getenv("TMPDIR") : "/tmp";
     const char* subset = NULL;
