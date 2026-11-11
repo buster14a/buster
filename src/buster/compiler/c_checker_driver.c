@@ -3460,7 +3460,7 @@ static String8 check_driver_library_designator(const Parser* parser, Preprocesso
 // (check_driver_conversion_hint) and its flag. The source's type as written, with its typedef. NULL where a type has none.
 static const char* check_driver_conversion_words(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, const TypeTable* types,
                                                  CheckWarningSpelling* spell, uint32_t source, TypeId target, uint32_t target_spelling, uint32_t target_sugar,
-                                                 uint32_t target_declaration, uint8_t action, Arena* scratch)
+                                                 uint32_t target_declaration, uint32_t target_node, uint8_t action, Arena* scratch)
 {
     const char* result = NULL;
     if (source < stream->count && target != 0)
@@ -3479,7 +3479,11 @@ static const char* check_driver_conversion_words(const Parser* parser, Preproces
         CheckDriverSpaceScope scope;
         check_driver_space_scope(parser, pp, input, types, spell, target_declaration, &scope, scratch);
         const String8 placed_to = target_sugar == 0 ? check_driver_placed_type(parser, pp, input, types, spell, scratch, target, target_declaration) : (String8){ 0 };
-        const String8 to = placed_to.length != 0 ? placed_to : check_driver_warning_type_sugared(parser, pp, input, types, spell, scratch, target, target_spelling, target_sugar);
+        // A member a counted_by family attribute counts, as clang's CountAttributedType prints it (#1842's 3c).
+        const String8 counted_to = target_node != BUSTER_CHECK_NONE ? check_driver_counted_type(parser, pp, input, stream, types, spell, scratch, target_node, target) :
+                                   (String8){ 0 };
+        const String8 to = counted_to.length != 0 ? counted_to : placed_to.length != 0 ? placed_to :
+                           check_driver_warning_type_sugared(parser, pp, input, types, spell, scratch, target, target_spelling, target_sugar);
         check_driver_space_restore(spell, &scope);
         const uint32_t source_sugar = check_driver_operand_sugar(input, stream, source);
         const uint32_t source_declaration = check_driver_operand_declaration(input, stream, source);
@@ -3488,7 +3492,8 @@ static const char* check_driver_conversion_words(const Parser* parser, Preproces
         const String8 designator = check_driver_library_designator(parser, pp, input, stream, types, source, value, scratch);
         const String8 placed_from = designator.length == 0 && source_sugar == 0 ?
                                     check_driver_placed_type(parser, pp, input, types, spell, scratch, value, source_declaration) : (String8){ 0 };
-        const String8 from = designator.length != 0 ? designator : placed_from.length != 0 ? placed_from :
+        const String8 counted_from = check_driver_counted_type(parser, pp, input, stream, types, spell, scratch, source, value);
+        const String8 from = counted_from.length != 0 ? counted_from : designator.length != 0 ? designator : placed_from.length != 0 ? placed_from :
                              check_driver_warning_type_sugared(parser, pp, input, types, spell, scratch, value, source_spelling, source_sugar);
         check_driver_space_restore(spell, &scope);
         const CheckDriverConversion kind = check_driver_conversion_kind(types, target, value);
@@ -3565,7 +3570,7 @@ static const char* check_driver_initializer_conversion(const Parser* parser, Pre
     const bool wide = element == BUSTER_TYPE_INT || element == BUSTER_TYPE_USHORT || element == BUSTER_TYPE_UINT;
     const char* result = source >= stream->count ? NULL :
                          !array ? check_driver_conversion_words(parser, pp, input, stream, types, &spell, source, spelled, spelling,
-                                                                whole ? check_input_declared_sugar(input, declaration) : 0, whole ? declaration : BUSTER_CHECK_NONE, 0,
+                                                                whole ? check_input_declared_sugar(input, declaration) : 0, whole ? declaration : BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, 0,
                                                                 scratch) :
                          narrow ? "array initializer must be an initializer list or string literal" :
                          wide ? "array initializer must be an initializer list or wide string literal" : "array initializer must be an initializer list";
@@ -3600,6 +3605,7 @@ static const char* check_driver_conversion_error(const Parser* parser, Preproces
     uint32_t target_spelling = 0;
     uint32_t target_sugar = 0;
     uint32_t target_declaration = BUSTER_CHECK_NONE;
+    uint32_t target_node = BUSTER_CHECK_NONE;
     uint32_t at = token;
     *note_token = BUSTER_CHECK_NONE;
     *note = NULL;
@@ -3628,6 +3634,7 @@ static const char* check_driver_conversion_error(const Parser* parser, Preproces
         target = member ? lvalue : target;
         target_sugar = member ? 0 : check_driver_operand_sugar(input, stream, left);
         target_declaration = member ? BUSTER_CHECK_NONE : check_driver_operand_declaration(input, stream, left);
+        target_node = member ? left : BUSTER_CHECK_NONE;
     }
     else if (applies && returning)
     {
@@ -3672,7 +3679,7 @@ static const char* check_driver_conversion_error(const Parser* parser, Preproces
     }
     const uint8_t action = op == CHECK_OP_INITIALIZE ? 0 : op == CHECK_OP_ASSIGN ? 1 : returning ? 2 : 3;
     const char* result = applies ? check_driver_conversion_words(parser, pp, input, stream, types, spell, source, target, target_spelling, target_sugar,
-                                                                 target_declaration, action,
+                                                                 target_declaration, target_node, action,
                                                                  scratch) : NULL;
     *located = result != NULL ? at : *located;
     return result;
