@@ -96,6 +96,39 @@ static bool check_input_region_transfer(const CheckInputReader* reader, uint32_t
     return valid;
 }
 
+// The opening of the outermost statement expression a jump from `source` to `target` enters, which clang's jump scope
+// checker notes ("jump enters a statement expression"), else BUSTER_CHECK_NONE: check_input_region_transfer's walk from the
+// target, on to the regions' common ancestor, which reads the region that refuses the jump last. Only a refused jump's
+// report asks it (#1942).
+static uint32_t check_input_region_entered(const CheckInputReader* reader, uint32_t source, uint32_t target)
+{
+    const Parser* parser = reader->parser;
+    uint32_t entered = BUSTER_CHECK_NONE;
+    for (uint32_t ancestor = target, steps = 0; ancestor < parser->tokens.count && steps < parser->tokens.count; ancestor = parser->tree.parents[ancestor], steps += 1)
+    {
+        const uint32_t selected = reader->output->expression_regions[ancestor];
+        const CheckInputRegion* region = selected != 0 ? &reader->output->regions[selected - 1] : NULL;
+        entered = region != NULL && !(source > region->opening && source < region->closing) ? region->opening : entered;
+    }
+    return entered;
+}
+
+// A jump's report that enters a statement expression (#1942): clang's "cannot jump from this goto statement to its label",
+// or "cannot jump from switch statement to this case label", at `token`, with its note at the expression's `(`.
+static void check_input_report_jump(CheckInputReader* reader, uint32_t token, CheckInputMessage message, uint32_t source, uint32_t target)
+{
+    CheckInput* input = reader->output;
+    const uint32_t before = input->report_count;
+    check_input_report(reader, token, message);
+    const uint32_t entered = check_input_region_entered(reader, source, target);
+    if (input->report_count > before && entered != BUSTER_CHECK_NONE)
+    {
+        input->reports[before].note_kind = CHECK_INPUT_NOTE_JUMP;
+        input->reports[before].note_token = entered;
+    }
+    check_input_jump_completion(reader, before);
+}
+
 // A musttail return statement's record (CheckInput.musttails), in source order.
 static bool check_input_musttail_record(CheckInputReader* reader, CheckInputMusttail musttail)
 {
@@ -3070,9 +3103,13 @@ static __attribute__((always_inline)) void check_input_controls_range(CheckInput
                     owner = parser->tree.parents[owner];
                 }
                 const bool complete = !prefix || (owner < limit && end < limit);
-                if (owner >= count || end >= count || (complete && !check_input_region_transfer(reader, owner, end)))
+                if (owner >= count || end >= count)
                 {
                     check_input_report(reader, token, CHECK_INPUT_DECLARATION);
+                }
+                else if (complete && !check_input_region_transfer(reader, owner, end))
+                {
+                    check_input_report_jump(reader, token, CHECK_INPUT_JUMP_SWITCH, owner, end);
                 }
                 else if (complete)
                 {
@@ -3138,7 +3175,7 @@ static __attribute__((always_inline)) void check_input_controls_range(CheckInput
                     reader->output->label_address_count += address;
                     if (!address && (!prefix || !unfinished) && !check_input_region_transfer(reader, token, target))
                     {
-                        check_input_report(reader, token, CHECK_INPUT_DECLARATION);
+                        check_input_report_jump(reader, token, CHECK_INPUT_JUMP_GOTO, token, target);
                     }
                 }
                 // A missing label of the function's, and an ambiguous local one's use, for which clang's lookup creates a

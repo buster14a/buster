@@ -7066,6 +7066,25 @@ The scalar reader keeps the full ancestor walk as an independent diagnostic
 oracle. Both use the same strict region-boundary rules, including jumps out of
 nested regions and refusals when entering sibling regions.
 
+A goto's or a case's refusal reads as clang's jump scope checker words it
+(#1942): "cannot jump from this goto statement to its label" or "cannot jump
+from switch statement to this case label", with the note "jump enters a
+statement expression" at the outermost entered expression's `(`
+(`check_input_report_jump`, `CHECK_INPUT_NOTE_JUMP`). A jump that bypasses a
+variable length array's, a cleanup variable's or a VLA typedef's
+initialization takes clang's note at that declaration's name too ("jump
+bypasses initialization of variable length array", "… of variable with
+__attribute__((cleanup))", "… of VLA typedef"). Clang checks jumps in
+`ActOnFinishFunctionBody`, once the body's scopes have closed. So these errors
+complete past the body's `}`, after its unused variables' warnings, and count
+in no scope (`check_driver_error_scoped`). A computed goto's and an asm goto's
+errors don't take their notes yet ("possible target of indirect goto
+statement"). The errors clang gives in the body after such a jump are still
+lost: the rounds' edited reading that would find them isn't taken. Nor is
+clang's `void` value of a statement expression whose last statement is a
+`case` (`x = ({ case 1: 2; })`'s "assigning to 'int' from incompatible type
+'void'") given.
+
 `test-checker` compares both walks for every pair of tokens in nested and sibling
 regions, including boundaries and absent tokens, on scalar/vector normal and
 tree-only parser schedules with no parser-owned size column. It also checks 65,533 transfers
