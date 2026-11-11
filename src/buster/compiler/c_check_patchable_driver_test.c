@@ -230,7 +230,7 @@ static void check_test_patchable_compare(CheckTest* test, const char* clang, con
     unlink(source);
 }
 
-// The "error:" lines of a driver's output, `prefix` (clang's driver's "clang: ") taken off each, into `lines`.
+// The "error:" lines of a driver's output, `prefix` (clang's driver's name, "clang: ") taken off each, into `lines`.
 static void check_test_patchable_errors(const char* text, const char* prefix, char* lines, size_t capacity)
 {
     size_t length = 0;
@@ -273,6 +273,11 @@ static void check_test_patchable_options(CheckTest* test, const char* clang, con
     snprintf(source, sizeof(source), "%s/patchable-options.c", directory);
     static const char program[] = "int f(void) { return 0; }\n";
     const bool written = parse_test_write(source, program, sizeof(program) - 1);
+    // clang's driver names itself by its program's name, argv[0]'s last component (`clang-23: ` for /usr/bin/clang-23,
+    // #1790), so the oracle's prefix is that of the clang it runs.
+    const char* slash = strrchr(clang, '/');
+    char prefix[256];
+    snprintf(prefix, sizeof(prefix), "%s: ", slash != NULL ? slash + 1 : clang);
     for (uint32_t v = 0; written && v < BUSTER_ARRAY_LENGTH(values); v += 1)
     {
         char* theirs = NULL;
@@ -285,7 +290,7 @@ static void check_test_patchable_options(CheckTest* test, const char* clang, con
         const int status = check_test_driver_spawn(arguments, &ours);
         char expected[1024];
         char actual[1024];
-        check_test_patchable_errors(theirs, "clang: ", expected, sizeof(expected));
+        check_test_patchable_errors(theirs, prefix, expected, sizeof(expected));
         check_test_patchable_errors(ours, "", actual, sizeof(actual));
         char description[2048];
         snprintf(description, sizeof(description), "%s %s: the driver's status %d and errors\n%s(clang's %d,\n%s)", values[v][0], values[v][1] != NULL ? values[v][1] : "",

@@ -43,7 +43,7 @@ static char* pp_test_clang_diagnostics(const char* path, const char* directory, 
         close(null);
         unsetenv("CPATH");
         unsetenv("C_INCLUDE_PATH");
-        execlp("clang", "clang", parser ? "-fsyntax-only" : "-E", "-std=gnu17", "-fno-caret-diagnostics", "-fno-diagnostics-show-option",
+        execlp("clang", "clang", parser ? "-fsyntax-only" : "-E", "-std=gnu17", "-fno-caret-diagnostics",
                "-fmacro-backtrace-limit=0", "-I", directory, path, (char*)0);
         _exit(127);
     }

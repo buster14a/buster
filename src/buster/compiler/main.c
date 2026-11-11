@@ -1314,7 +1314,6 @@ static __attribute__((unused)) void main_checker_consumer_interfaces(void)
     (void)&parse_release;
     (void)&parse_test_outcome;
     (void)&parse_test_random;
-    (void)&parse_test_canonical_role;
     (void)&parse_test_collect;
     (void)&parse_test_preprocessed;
     (void)&parse_bindings_build;

@@ -291,16 +291,29 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+      # The draw's script, from this commit through git, not the REST API: the API's hourly limit is the whole
+      # repository's, and fetching the script in every candidate, collector and verdict helped exhaust it (#2309).
+      - name: Fetch the vector draw's script from this commit
+        if: inputs.host_arch == 'vector'
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ github.sha }}
+          path: .vector-draw-script
+          persist-credentials: false
+          sparse-checkout: tools/ci/vector-draw.sh
+          sparse-checkout-cone-mode: false
+
       # The item the draw's collector assigned this candidate becomes its shard (BUSTER_SHARD), which the steps below
       # run; without one, it ends here, successfully, as a redraw. In a rerun of the failed jobs, a candidate that held
-      # an item takes it again (tools/ci/vector-draw.sh, fetched from this commit without a checkout).
+      # an item takes it again (tools/ci/vector-draw.sh, fetched from this commit by the step above).
       - name: Take the vector item the draw assigns, or end as a redraw
         if: inputs.host_arch == 'vector'
         env:
           GH_TOKEN: ${{ github.token }}
           VERDICT: ${{ steps.probe.outputs.verdict }}
         run: |
-          gh api -H 'Accept: application/vnd.github.raw' "repos/$GITHUB_REPOSITORY/contents/tools/ci/vector-draw.sh?ref=$GITHUB_SHA" > "$RUNNER_TEMP/vector-draw.sh"
+          cp -- "$GITHUB_WORKSPACE/.vector-draw-script/tools/ci/vector-draw.sh" "$RUNNER_TEMP/vector-draw.sh"
+          rm -rf -- "$GITHUB_WORKSPACE/.vector-draw-script"
           bash "$RUNNER_TEMP/vector-draw.sh" take "$BUSTER_DRAW_LEVEL" "$BUSTER_DRAW_CANDIDATE" "$VERDICT" "$RUNNER_TEMP/vector-draw/record"
           cat "$RUNNER_TEMP/vector-draw/record"
 
@@ -561,15 +574,16 @@ jobs:
 
       - name: Fetch c-testsuite at its pinned commit
         # #145's programs, at the commit tests/c-testsuite/subset.txt was declared for: a shallow fetch of that one commit,
-        # whose hash fixes the files, without git's sample hooks. The test list below compiles and runs them. The 9700X
-        # fetches it from a mirror in its private cache, which Git's pack protocol checks again (fetch-c-testsuite.sh).
+        # whose hash fixes the files, without git's sample hooks. The test list below compiles and runs them. It comes
+        # from the mirror in the run's offline inputs, with no network (#2275), as the 9700X's comes from its private
+        # cache: Git's pack protocol checks it again (fetch-c-testsuite.sh).
         if: env.BUSTER_SHARD != ''
         run: bash tools/ci/fetch-c-testsuite.sh build/c-testsuite
 
       - name: Fetch SQLite's sources at their pinned commit
         # #146: SQLite 3.53.2's tree, whose amalgamation and shell are the frozen corpus's, for its tests (test-sqlite in
-        # the test list): a shallow fetch of that one commit, whose hash fixes the files, as c-testsuite's above; the 9700X
-        # fetches it from a mirror in its private cache (fetch-sqlite.sh).
+        # the test list): a shallow fetch of that one commit, whose hash fixes the files, from the run's offline inputs
+        # as c-testsuite's above (fetch-sqlite.sh).
         if: env.BUSTER_SHARD != ''
         run: bash tools/ci/fetch-sqlite.sh build/sqlite
 
@@ -825,12 +839,24 @@ jobs:
       BUSTER_DRAW_CANDIDATES: '12'
       BUSTER_DRAW_NEXT: '4'
     steps: &collect-steps
+      # The draw's script, from this commit through git, not the REST API: the API's hourly limit is the whole
+      # repository's, and fetching the script in every candidate, collector and verdict helped exhaust it (#2309).
+      - name: Fetch the vector draw's script from this commit
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ github.sha }}
+          path: .vector-draw-script
+          persist-credentials: false
+          sparse-checkout: tools/ci/vector-draw.sh
+          sparse-checkout-cone-mode: false
+
       - name: Assign the draw's vector items to its qualifying candidates by rank
         id: assign
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh api -H 'Accept: application/vnd.github.raw' "repos/$GITHUB_REPOSITORY/contents/tools/ci/vector-draw.sh?ref=$GITHUB_SHA" > "$RUNNER_TEMP/vector-draw.sh"
+          cp -- "$GITHUB_WORKSPACE/.vector-draw-script/tools/ci/vector-draw.sh" "$RUNNER_TEMP/vector-draw.sh"
+          rm -rf -- "$GITHUB_WORKSPACE/.vector-draw-script"
           bash "$RUNNER_TEMP/vector-draw.sh" assign "$BUSTER_DRAW_LEVEL" "$BUSTER_DRAW_CANDIDATES" "$BUSTER_DRAW_NEXT"
           cat "$RUNNER_TEMP/vector-assignment"
 
@@ -976,9 +1002,21 @@ jobs:
           pattern: vector-${{ inputs.sanitizer }}-O${{ inputs.optimization }}-*
           path: ${{ runner.temp }}/vector-records
 
+      # The draw's script, from this commit through git, not the REST API: the API's hourly limit is the whole
+      # repository's, and fetching the script in every candidate, collector and verdict helped exhaust it (#2309).
+      - name: Fetch the vector draw's script from this commit
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ github.sha }}
+          path: .vector-draw-script
+          persist-credentials: false
+          sparse-checkout: tools/ci/vector-draw.sh
+          sparse-checkout-cone-mode: false
+
       - name: Require one passing qualified execution of each vector item
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh api -H 'Accept: application/vnd.github.raw' "repos/$GITHUB_REPOSITORY/contents/tools/ci/vector-draw.sh?ref=$GITHUB_SHA" > "$RUNNER_TEMP/vector-draw.sh"
+          cp -- "$GITHUB_WORKSPACE/.vector-draw-script/tools/ci/vector-draw.sh" "$RUNNER_TEMP/vector-draw.sh"
+          rm -rf -- "$GITHUB_WORKSPACE/.vector-draw-script"
           bash "$RUNNER_TEMP/vector-draw.sh" verdict "$RUNNER_TEMP/vector-records"

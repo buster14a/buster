@@ -235,7 +235,13 @@ test has written for two days, and the keys left without one. An entry is only
 as right as the run that wrote it: the daily check finds one a pull request's
 run left wrong. The counts of what runs did (taken, run, stale, not kept) are
 in shared memory, which the parts a test forks after it sets up the cache add
-to, and a test prints them at its end (`oracle_cache_report`).
+to, and a test prints them at its end (`oracle_cache_report`). Whatever the
+mode, the same report gives the runs that ran as children and what they cost
+(#2263): their wall time from start to reap and their processes' CPU time
+(`wait4`'s, including their own children's), summed over runs that may
+overlap, and this process's time in `fork`, each in total and per run. Wall
+time well above CPU time, or a long `fork`, points at slow process creation;
+more CPU time per run points at a slower tool.
 
 A take (`oracle_run_take`) prepares the result buffers and snapshots each
 existing output without changing files (#1317). It refuses a take before any
@@ -476,6 +482,12 @@ a request rather than raising `SIGPIPE`), which only that process uses: a
 forked part closes its copy of the socket, which leaves its parent's server as
 it was, and starts its own, as the preprocessor's cases' children do. A request it can't answer (a crash in clang ends it) stops
 it, and the next request starts another, at most four times in a process.
+Every request has a time limit, and so does the server's first answer: the
+run's own, or the server's (`BUSTER_ORACLE_SERVER_SECONDS`, 60 s;
+`OracleServer.seconds` overrides it, as the test does). A server that gives no
+answer in time is stopped (killed) and the run runs as a child, so a stalled
+server costs its limit rather than hanging until the command's own (#2263,
+whose shard ran three commands to the 600 s limit).
 
 A served run keeps the cache's contract by not entering it: the server's
 process isn't traced, so its result can't be an entry, whose every dependency a
@@ -495,7 +507,9 @@ fits runs as before (taken, or run, traced and kept), is served too, and the
 first's result is the run's; a difference in status or either stream is counted
 and printed (`oracle_serve_compare`) and fails the test
 (`oracle_serve_end`, which prints the counts: served, run both ways, differing,
-and runs that fit but that the server couldn't take, which ran as children).
+and runs that fit but that the server couldn't take, which ran as children;
+then the server's answers and their time, in total and per answer, and the
+requests that ran past their limit, each also printed as it happens).
 
 A test that starts its clang itself, outside the cache (`test-preprocessor`'s
 fuzz batch, `preprocessor_fuzz_clang_process`), sends those runs to the same

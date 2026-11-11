@@ -81,6 +81,16 @@ static void check_test_driver_label_attributes(CheckTest* test, const char* clan
         { "nomerge before a call", "int g(int (*p)(void)) {\n__attribute__((nomerge)) p();\nreturn 0;\n}\n" },
         { "suppress before an expression", "int g(int x) {\n__attribute__((suppress(\"x\"))) x++;\nreturn x;\n}\n" },
         { "suppress without strings", "int g(int x) {\n__attribute__((suppress)) x++;\nreturn x;\n}\n" },
+        // A suppress whose argument is no string literal, which clang's parser drops (#1844): with no GNU attribute left, the
+        // statement is a declaration, whose first token is clang's parser's second error; one left keeps it a statement.
+        { "malformed suppress before an expression", "int g(int x) {\n__attribute__((suppress(1))) x++;\nreturn x;\n}\n" },
+        { "malformed __suppress__ before a call", "int f(int);\nint g(int x) {\n__attribute__((__suppress__(x))) f(x);\nreturn x;\n}\n" },
+        { "two malformed suppresses before an increment", "int g(int x) {\n__attribute__((suppress(1), suppress(2))) ++x;\nreturn x;\n}\n" },
+        { "malformed suppresses in two lists before a constant", "int g(int x) {\n__attribute__((suppress(1))) __attribute__((suppress(\"a\", 2))) 3;\nreturn x;\n}\n" },
+        { "malformed suppress beside a kept one", "typedef int T;\nint g(int x) {\n__attribute__((suppress(\"a\"), suppress(1))) x++;\n"
+                                                  "__attribute__((suppress(1))) __attribute__((suppress)) x++;\n__attribute__((suppress(((\"a\"))))) x++;\n"
+                                                  "__attribute__((suppress(1))) T y = x;\n__attribute__((suppress(1))) return y;\n}\n" },
+        { "malformed suppress after a control head", "int g(int x) {\nif (x) __attribute__((suppress(1))) x++;\nreturn x;\n}\n" },
         { "nomerge and suppress before an if", "int g(int x) {\n__attribute__((nomerge, suppress(\"a\", \"b\"))) if (x) x++;\nreturn x;\n}\n" },
         { "clang::nomerge before a return", "int g(int (*p)(void)) {\n[[clang::nomerge]] return p();\n}\n" },
         { "fallthrough in a switch, beside noinline", "int f(int);\nint g(int x) {\nswitch (x) {\ncase 0:\nx = f(x);\n__attribute__((noinline, fallthrough));\n"
@@ -203,6 +213,25 @@ static void check_test_driver_label_attributes(CheckTest* test, const char* clan
           "case 1: np(); __attribute__((fallthrough)); x++;\ncase 2: mp(); __attribute__((fallthrough)); x++;\n"
           "case 3: vp(); __attribute__((fallthrough)); x++;\ncase 4: (*vp)(); __attribute__((fallthrough)); x++;\n"
           "case 5: p(); __attribute__((fallthrough)); x++;\ncase 6: return 1;\n}\nreturn 0;\n}\n" },
+        // A noreturn function type not spelled by an attribute on the object's declaration or its typedef (#1844): a typeof
+        // of a function GNU's attribute marks (a later redeclaration's too) or of `&` it, of a noreturn object, a typedef of
+        // such a typeof, an element of an array of a noreturn typedef, and a cast to one.
+        { "unreachable fallthroughs after calls through typeofs, elements and casts",
+          "void die(void) __attribute__((noreturn));\n[[gnu::noreturn]] void stop(void);\nvoid late(void);\nvoid late(void) __attribute__((noreturn));\n"
+          "extern void (*np)(void) __attribute__((noreturn));\ntypedef void (*N)(void) __attribute__((noreturn));\n"
+          "__typeof__(die) *fp;\n__typeof__(stop) *sp;\n__typeof__(late) *lp;\n__typeof__(np) tp;\n__typeof__(&die) ap;\ntypedef __typeof__(die) D;\nD *dp;\nN arr[2];\n"
+          "int f(int x, void *v) {\nswitch (x) {\n"
+          "case 1: fp(); __attribute__((fallthrough)); x++;\ncase 2: sp(); __attribute__((fallthrough)); x++;\n"
+          "case 3: lp(); __attribute__((fallthrough)); x++;\ncase 4: tp(); __attribute__((fallthrough)); x++;\n"
+          "case 5: ap(); __attribute__((fallthrough)); x++;\ncase 6: dp(); __attribute__((fallthrough)); x++;\n"
+          "case 7: arr[x](); __attribute__((fallthrough)); x++;\ncase 8: ((N)v)(); __attribute__((fallthrough)); x++;\n"
+          "case 9: (*fp)(); __attribute__((fallthrough)); x++;\ncase 10: return 1;\n}\nreturn 0;\n}\n" },
+        // But not a typeof of a function the _Noreturn keyword or C23's [[noreturn]] marks: its declaration's, not its type's
+        // (each alone).
+        { "a reachable fallthrough after a call through a typeof of a _Noreturn function", "_Noreturn void quit(void);\n__typeof__(quit) *qp;\n"
+          "int f(int x) {\nswitch (x) {\ncase 1: qp(); __attribute__((fallthrough)); x++;\ncase 2: return 1;\n}\nreturn 0;\n}\n" },
+        { "a reachable fallthrough after a call through a typeof of a [[noreturn]] function", "[[noreturn]] void halt(void);\n__typeof__(halt) *hp;\n"
+          "int f(int x) {\nswitch (x) {\ncase 1: hp(); __attribute__((fallthrough)); x++;\ncase 2: return 1;\n}\nreturn 0;\n}\n" },
         // clang's CFG builder's tautology checks (#1844): comparisons of one variable with integer literals under && and ||,
         // an operand and its negation, a bitwise operation's equality with a literal it can't give, a boolean's comparison
         // with a literal past 1, a `|` of a nonzero literal, and `& 0` and `* 0`; in an if's condition and a loop's.
