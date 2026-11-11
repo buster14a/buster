@@ -113,6 +113,124 @@ static bool check_lower_padding_room(Arena* scratch, CheckLowerPaddingBits** bit
     return valid;
 }
 
+// Whether level `depth` of declaration `name`'s type (0 the type, each pointer or array level one more) is an array whose
+// type carries sugar (#1842's 1b), which clang's PaddingClearer, testing the sugared type for a ConstantArrayType, treats
+// as one scalar: a declarator group's ParenType around it (a PAREN node, c_types_sugar.c, the reader's in a unit that
+// clears padding), or a typedef's or a typeof's specifier that spells it (check_input_specifier_spelling), whose own
+// declaration answers for its levels below.
+static bool check_lower_padding_sugared(const CheckProgram* program, uint32_t name, uint32_t depth)
+{
+    const CheckInput* input = program->input;
+    const TypeTable* types = program->types;
+    bool result = false;
+    for (uint32_t hops = 0; !result && hops < 16 && name < input->token_count && input->declared_types != NULL; hops += 1)
+    {
+        // The declaration's own groups.
+        uint32_t level = 0;
+        for (uint32_t node = check_input_declared_sugar(input, name), steps = 0; !result && node != 0 && node < input->sugar.count && steps < 64; steps += 1)
+        {
+            const uint8_t kind = input->sugar.kind[node];
+            result = kind == BUSTER_TYPE_SUGAR_PAREN && level == depth && type_kind_is_array(type_kind(types, type_strip_aligned(types, input->sugar.canonical[node])));
+            level += kind == BUSTER_TYPE_SUGAR_POINTER || kind == BUSTER_TYPE_SUGAR_ARRAY ? 1 : 0;
+            node = input->sugar.inner[node];
+        }
+        // Its specifier's: the level whose type the typedef or typeof writes.
+        const uint32_t spelling = !result ? check_input_specifier_spelling(input, program->parser, name) : 0;
+        const TypeId written = spelling != 0 && spelling < input->token_count ? type_unqualified(type_strip_aligned(types, input->declared_types[spelling])) : 0;
+        TypeId at = type_strip_aligned(types, input->declared_types[name]);
+        uint32_t specifier = 0;
+        for (; written != 0 && specifier < 64 && type_is_valid(types, at) && type_unqualified(at) != written; specifier += 1)
+        {
+            const uint8_t kind = type_kind(types, at);
+            at = kind == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(kind) ? type_strip_aligned(types, type_element(types, at)) : 0;
+        }
+        const bool found = written != 0 && type_is_valid(types, at) && type_unqualified(at) == written && specifier <= depth;
+        result = result || (found && specifier == depth && type_kind_is_array(type_kind(types, written)));
+        // Below it, a typedef's own declaration's levels (a typeof's expression keeps its own, which this doesn't follow).
+        const bool deeper = !result && found && specifier < depth && input->declaration_kinds[spelling] == C_BINDING_TYPEDEF;
+        depth -= deeper ? specifier : 0;
+        name = deeper ? spelling : BUSTER_CHECK_NONE;
+    }
+    return result;
+}
+
+// The first array level from `depth` of declaration `name`'s type that carries sugar (check_lower_padding_sugared),
+// counted from `depth`, through its arrays; UINT32_MAX for none.
+static uint32_t check_lower_padding_opaque(const CheckProgram* program, uint32_t name, uint32_t depth)
+{
+    const TypeTable* types = program->types;
+    const CheckInput* input = program->input;
+    TypeId level = name < input->token_count && input->declared_types != NULL ? type_strip_aligned(types, input->declared_types[name]) : 0;
+    for (uint32_t k = 0; k < depth && level != 0 && type_is_valid(types, level); k += 1)
+    {
+        const uint8_t kind = type_kind(types, level);
+        level = kind == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(kind) ? type_strip_aligned(types, type_element(types, level)) : 0;
+    }
+    uint32_t result = UINT32_MAX;
+    for (uint32_t k = 0; result == UINT32_MAX && k < 64 && level != 0 && type_is_valid(types, level) && type_kind_is_array(type_kind(types, level)); k += 1)
+    {
+        result = check_lower_padding_sugared(program, name, depth + k) ? k : UINT32_MAX;
+        level = type_strip_aligned(types, type_element(types, level));
+    }
+    return result;
+}
+
+// The declaration a __builtin_clear_padding argument points into and the level of its type it points to (#1842's 1b):
+// through implicit conversions (an array's decay keeps the level), `&` (one less), `*` and subscripts (one more), to a
+// declared name. False for any other operand (a cast's type name, a member, a call), whose sugar this doesn't follow.
+static bool check_lower_padding_argument(const CheckProgram* program, uint32_t node, uint32_t* name, uint32_t* depth)
+{
+    const CheckGraph* graph = &program->input->graph;
+    const CheckInput* input = program->input;
+    const TypeTable* types = program->types;
+    // The operands from the argument down, then their levels back up.
+    int32_t level = 1;
+    bool walking = true;
+    bool found = false;
+    for (uint32_t steps = 0; walking && node < graph->count && steps < 32; steps += 1)
+    {
+        const CheckOp op = graph->ops[node];
+        const uint32_t operand = graph->operand0[node];
+        const bool convert = op == CHECK_OP_CONVERT && operand < graph->count;
+        // An implicit conversion keeps the pointee where it is an array's decay or keeps the pointer's own pointee.
+        const TypeId to = convert ? type_strip_aligned(types, program->stream != NULL && node < program->stream->count ? check_stream_type(program->stream, node) : 0) : 0;
+        const TypeId from = convert && operand < program->stream->count ? type_strip_aligned(types, check_stream_type(program->stream, operand)) : 0;
+        const bool decay = convert && type_kind_is_array(type_kind(types, from)) && type_kind(types, to) == BUSTER_TYPE_KIND_POINTER;
+        const bool same = convert && type_kind(types, from) == BUSTER_TYPE_KIND_POINTER && type_kind(types, to) == BUSTER_TYPE_KIND_POINTER &&
+                          type_unqualified(type_strip_aligned(types, type_element(types, from))) == type_unqualified(type_strip_aligned(types, type_element(types, to)));
+        level += op == CHECK_OP_ADDRESS ? -1 : op == CHECK_OP_DEREFERENCE || op == CHECK_OP_SUBSCRIPT ? 1 : 0;
+        found = op == CHECK_OP_VALUE && graph->tokens[node] < input->token_count && input->declarations != NULL;
+        *name = found ? input->declarations[graph->tokens[node]] : BUSTER_CHECK_NONE;
+        walking = (convert && (decay || same)) || op == CHECK_OP_ADDRESS || op == CHECK_OP_DEREFERENCE || op == CHECK_OP_SUBSCRIPT;
+        node = walking ? operand : node;
+    }
+    *depth = level >= 0 ? (uint32_t)level : 0;
+    return found && level >= 0 && *name < input->token_count;
+}
+
+// The sugar depth of member `member` of record `tag` (check_lower_padding_opaque of its declarator), UINT32_MAX for none or
+// where its declarator isn't found: only an array member's is looked for.
+static uint32_t check_lower_padding_member(const CheckProgram* program, uint32_t tag, uint32_t member)
+{
+    const TypeTable* types = program->types;
+    uint32_t result = UINT32_MAX;
+    uint32_t open = BUSTER_CHECK_NONE;
+    uint32_t close = BUSTER_CHECK_NONE;
+    const uint32_t name = types->members.name[member];
+    if (name != 0 && type_kind_is_array(type_kind(types, type_strip_aligned(types, types->members.type[member]))) && check_lower_dump_body(program, tag, &open, &close))
+    {
+        // Its declarator: the body's earlier members' own first, as they come in order.
+        uint32_t cursor = open + 1;
+        uint32_t token = 0;
+        for (uint32_t m = types->tags.member_begin[tag]; m <= member; m += 1)
+        {
+            token = types->members.name[m] != 0 ? check_lower_dump_member(program, &cursor, close, types->members.name[m]) : token;
+        }
+        result = token != 0 ? check_lower_padding_opaque(program, token, 0) : UINT32_MAX;
+    }
+    return result;
+}
+
 // The plan of a call's stores on an element of `type`, the size of `size` bytes: its entries, each the byte offset << 32,
 // the run's bytes << 8 and the mask kept (0 for a run of zeros), in `scratch`'s top. Returns their count, or UINT32_MAX
 // with `*refusal` set where an offset passes 4 GiB or its runs pass their limit, or the arena is full. The walk's stack
@@ -124,9 +242,15 @@ struct CheckLowerPaddingFrame
     TypeId type;
     uint64_t index;
     uint32_t mark;
+    // The array levels below this frame's type to the first whose sugar makes it one scalar (#1842's 1b), 0 for its own,
+    // UINT32_MAX for none.
+    uint32_t opaque;
 };
 
-static uint32_t check_lower_padding_entries(const TypeTable* types, TypeId type, uint64_t size, Arena* scratch, uint64_t** result, const char** refusal)
+// `program`, where not NULL, gives the sugar of the record members' arrays, and `opaque` the element's own
+// (CheckLowerPaddingFrame.opaque): an array its sugar makes one scalar is all occupied, as clang's walk has it.
+static uint32_t check_lower_padding_entries(const CheckProgram* program, const TypeTable* types, TypeId type, uint64_t size, uint32_t opaque, Arena* scratch,
+                                            uint64_t** result, const char** refusal)
 {
     typedef CheckLowerPaddingFrame Frame;
     uint64_t room = BUSTER_CHECK_LOWER_PADDING_DEPTH;
@@ -140,7 +264,7 @@ static uint32_t check_lower_padding_entries(const TypeTable* types, TypeId type,
     *refusal = valid ? NULL : size > UINT32_MAX ? "__builtin_clear_padding of an element past 4 GiB" : NULL;
     if (valid)
     {
-        stack[0] = (Frame){ .offset = 0, .type = type, .index = 0, .mark = 0 };
+        stack[0] = (Frame){ .offset = 0, .type = type, .index = 0, .mark = 0, .opaque = opaque };
     }
     while (valid && depth != 0)
     {
@@ -152,8 +276,16 @@ static uint32_t check_lower_padding_entries(const TypeTable* types, TypeId type,
         uint64_t last = 0;
         TypeId pushed = 0;
         uint64_t at = 0;
+        uint32_t pushed_opaque = UINT32_MAX;
         valid = check_lower_padding_room(scratch, &bits, &spare, &capacity, count, (uint64_t)count + 1);
-        if (kind == BUSTER_TYPE_KIND_ARRAY || kind == BUSTER_TYPE_KIND_COMPLEX)
+        if (top->opaque == 0)
+        {
+            // An array whose sugar makes it one scalar: all of it occupied.
+            first = top->offset;
+            last = top->offset + type_size(types, bare) * 8;
+            depth -= 1;
+        }
+        else if (kind == BUSTER_TYPE_KIND_ARRAY || kind == BUSTER_TYPE_KIND_COMPLEX)
         {
             // Its first element is walked; then its intervals are its elements', each element's own copy, or, where they
             // hold all of it, the array's one.
@@ -164,6 +296,7 @@ static uint32_t check_lower_padding_entries(const TypeTable* types, TypeId type,
             {
                 top->mark = count;
                 pushed = element;
+                pushed_opaque = top->opaque != UINT32_MAX && kind == BUSTER_TYPE_KIND_ARRAY ? top->opaque - 1 : UINT32_MAX;
                 at = top->offset;
                 top->index = 1;
             }
@@ -209,6 +342,7 @@ static uint32_t check_lower_padding_entries(const TypeTable* types, TypeId type,
             first = field && types->members.name[member] != 0 ? top->offset + types->members.offset[member] : 0;
             last = field && types->members.name[member] != 0 ? first + types->members.bit_width[member] : 0;
             pushed = more && !field ? types->members.type[member] : 0;
+            pushed_opaque = pushed != 0 && program != NULL ? check_lower_padding_member(program, tag, member) : UINT32_MAX;
             at = more ? top->offset + types->members.offset[member] : 0;
             top->index += 1;
             depth -= more ? 0 : 1;
@@ -252,7 +386,7 @@ static uint32_t check_lower_padding_entries(const TypeTable* types, TypeId type,
         }
         if (valid && pushed != 0)
         {
-            stack[depth] = (Frame){ .offset = at, .type = pushed, .index = 0, .mark = 0 };
+            stack[depth] = (Frame){ .offset = at, .type = pushed, .index = 0, .mark = 0, .opaque = pushed_opaque };
             depth += 1;
         }
     }
@@ -333,8 +467,15 @@ static bool check_lower_padding_plan(CheckLowerInitializers* pools, CheckLowerPa
     TypeId element = pointer != 0 && type_kind(types, pointer) == BUSTER_TYPE_KIND_POINTER ? type_element(types, pointer) : 0;
     uint64_t elements = 1;
     uint8_t kind = element != 0 ? type_kind(types, type_strip_aligned(types, element)) : BUSTER_TYPE_KIND_NONE;
+    // The sugar of the arrays it points to (#1842's 1b): where one of them carries some, its elements are all occupied.
+    uint32_t declaration = BUSTER_CHECK_NONE;
+    uint32_t level = 0;
+    const uint32_t opaque = graph->argument_counts[node] != 0 && check_lower_padding_argument(program, graph->argument_nodes[first], &declaration, &level) ?
+                            check_lower_padding_opaque(program, declaration, level) : UINT32_MAX;
+    uint32_t stripped = 0;
     while (kind == BUSTER_TYPE_KIND_ARRAY)
     {
+        stripped += 1;
         const TypeId bare = type_strip_aligned(types, element);
         elements *= types->types.extent[type_index(bare)];
         element = types->types.base[type_index(bare)];
@@ -349,7 +490,8 @@ static bool check_lower_padding_plan(CheckLowerInitializers* pools, CheckLowerPa
         const uint64_t mark = scratch->length;
         uint64_t* entries = NULL;
         const char* refusal = NULL;
-        const uint32_t count = check_lower_padding_entries(types, element, plan->stride, scratch, &entries, &refusal);
+        const uint32_t count = check_lower_padding_entries(program, types, element, plan->stride, opaque != UINT32_MAX && opaque <= stripped ? 0 : UINT32_MAX, scratch,
+                                                           &entries, &refusal);
         valid = count != UINT32_MAX || refusal != NULL;
         plan->refusal = refusal;
         uint64_t* kept = count != UINT32_MAX && count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint64_t, count) : NULL;
