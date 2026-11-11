@@ -121,3 +121,55 @@ static unsigned __int128 check_quad_from_integer(bool negative, unsigned __int12
     const unsigned __int128 result = check_quad_from_host((__float128)magnitude);
     return negative ? result | BUSTER_CHECK_QUAD_SIGN : result;
 }
+
+// A _Complex __float128 constant (#1250) keeps both parts' bits: the real part's in `integer`, as a real one's, and the
+// imaginary part's low and high words in `floating_storage[0]` and `imaginary_storage[0]`, which every copy, stream,
+// leaf and transition keeps whole. It has no long double parts: `floating` and `imaginary` hold none of its value (their
+// exponent words are zero), so that every reader of a complex value takes its parts by check_complex_component, which
+// gives each its bits and its mirror.
+static void check_quad_complex_set(CheckValue* value, unsigned __int128 real, unsigned __int128 imaginary)
+{
+    value->integer = real;
+    value->floating_storage[0] = (uint64_t)imaginary;
+    value->floating_storage[1] = 0;
+    value->imaginary_storage[0] = (uint64_t)(imaginary >> 64);
+    value->imaginary_storage[1] = 0;
+    value->constant_kind = CHECK_CONSTANT_COMPLEX;
+}
+
+static unsigned __int128 check_quad_complex_imaginary(const CheckValue* value)
+{
+    return (unsigned __int128)value->imaginary_storage[0] << 64 | value->floating_storage[0];
+}
+
+// Whether a binary128 value is finite.
+static bool check_quad_finite(unsigned __int128 bits)
+{
+    return (bits & BUSTER_CHECK_QUAD_EXPONENT) != BUSTER_CHECK_QUAD_EXPONENT;
+}
+
+// A finite nonzero binary128 value's ilogb: its leading bit's exponent, a subnormal's below -16382.
+static int32_t check_quad_logb(unsigned __int128 bits)
+{
+    const uint32_t field = (uint32_t)(bits >> 112) & 0x7fffu;
+    const unsigned __int128 fraction = bits & BUSTER_CHECK_QUAD_FRACTION;
+    const uint64_t high = (uint64_t)(fraction >> 64);
+    const int32_t top = high != 0 ? 127 - __builtin_clzll(high) : 63 - __builtin_clzll((uint64_t)fraction | 1);
+    return field != 0 ? (int32_t)field - 16383 : top - 16494;
+}
+
+// `value` * 2^`power`, as APFloat's scalbn: rounded once. 2^power is a binary128 value from -16494 (a subnormal) to 16383;
+// past that, steps of 2^16383 first, each exact, as a scaled value stays below 2^16384 or overflows to an infinity.
+static __float128 check_quad_scale(__float128 value, int32_t power)
+{
+    __float128 result = value;
+    int32_t left = power;
+    for (uint32_t step = 0; step < 2 && left > 16383; step += 1)
+    {
+        result *= check_quad_host((unsigned __int128)(16383 + 16383) << 112);
+        left -= 16383;
+    }
+    const unsigned __int128 factor = left >= -16382 ? (unsigned __int128)(uint32_t)(left + 16383) << 112 : (unsigned __int128)1 << (left + 16494);
+    return result * check_quad_host(factor);
+}
+

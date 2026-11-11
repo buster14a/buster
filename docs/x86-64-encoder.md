@@ -270,18 +270,36 @@ but writes only those that fit in the slot's 16, so a form that doesn't fit
 rejected without writing past its template.
 
 A segment override is the form's too, as `lock` and `rep` are: the form number
-plus `BUSTER_X86_FORM_FS` or `BUSTER_X86_FORM_GS` (8,354 or twice that) names a
-template of its own, which starts with the prefix as a static byte (64 or 65,
-before the other prefixes, as GNU as puts it). Every form has three templates,
-25,062 entries and 1.6 MB in all, of which a stream touches its own forms'
-lines; a form without a memory operand gets copies that take no operand at all.
+plus `BUSTER_X86_FORM_FS`, `BUSTER_X86_FORM_GS` or `BUSTER_X86_FORM_SS` (one,
+two or three times `X86_FORM_COUNT`, 8,358 in 2026-11) names a template of its
+own, which starts with the prefix as a static byte (64, 65 or 36, before the
+other prefixes, as GNU as and clang put it). Every form has its FS and GS
+templates; SS's set (#1447: address space 258, whose 36 clang emits though
+64-bit mode ignores SS's base) holds the rows below `BUSTER_X86_FORM_SS_ROWS`
+(0x8000 minus three sets, 7,694 rows), since the form number's 15 bits under
+the fixup flag don't hold four sets of every row. The rows without one are
+APX's EVEX forms (`X86_FORM_ANDN_R32_R32_RM32_EVEX` onwards, which an assertion
+keeps past every other form) and the forms of 16- and 32-bit modes alone, whose
+SS override is the decorations'. A stream touches its own forms' lines; a form
+without a memory operand gets copies that take no operand at all.
 So x86_encode does nothing for an override that it doesn't do for every form,
 and its loop is the same code with them as without. The fixup flag works the
-same way (see "Fixups"): the templates are copied again at the flag's index,
-1.6 MB more.
+same way (see "Fixups"): the templates are copied again at the flag's index.
+The table is then 2^16 entries and 4.2 MB; SS's set added only its marked copies
+(492 KB), as its unmarked templates are in the gap below the flag that the
+three sets left.
+
+SS's override was measured as that fourth set against a standalone `36`
+prefix record before the access (a form of its own): #1447 has the numbers. The
+record would have needed every record-indexed column of both tiers (branches,
+targets, references, labels, entries) renumbered after an insertion, and a
+record that isn't an instruction in the disassembler and the semantics; the
+set costs segment-free code nothing in the encoder's loop and keeps the IR's,
+the typed stream's and the tiers' segment numbers (`form + segment *
+X86_FORM_COUNT`) for all three overrides.
 
 In 64-bit mode, `x86_encoder_initialize` builds each form's template once and
-makes its FS and GS templates from it (`x86_template_with_segment`, #590): in
+makes its FS, GS and SS templates from it (`x86_template_with_segment`, #590): in
 64-bit mode an override changes nothing for a form without a memory operand,
 and for one with it adds the override's static byte after FWAIT's `9B` (or
 first), moves every later position one further and makes the static length
@@ -289,7 +307,7 @@ one longer, with the same checks. It fits where `build_template`'s would
 (within 15 bytes, the static length's field and the 8 static positions, which
 `X86TemplateShape` gives from the form's own build), and otherwise the template
 is the form's own without a memory operand, as `build_mode_template` makes it.
-The other modes' tables build all three, since their overrides interact with
+The other modes' tables build all four, since their overrides interact with
 other positions (a `67`, REX2's payload, the decorations' override).
 `test-x86-encoder` and `test-x86-target-selection` compare every entry and its
 marked copy with `build_mode_template`'s. Each entry's marked copy is written in

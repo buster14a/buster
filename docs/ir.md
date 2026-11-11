@@ -33,8 +33,8 @@ The explicit-target adapter admits #732's bounded 128/256/512-bit `VECTOR`
 transports and #717's exact i32 arithmetic/bitwise/comparison `X86` rows. The
 [SIMD contract](ir-simd.md) specifies widths, mask expansion, required output
 features and transactional refusal of other forms. Legacy entry points grant
-no target features. `FRAME_ADDRESS` and #147's tail calls (`TAIL_CALL`) refuse
-with `IR_ERROR_OPCODE`.
+no target features. #147's tail calls (`TAIL_CALL`) refuse with
+`IR_ERROR_OPCODE`.
 The stable printer's text is read back by `ir_parse.c` (#175).
 
 `test-ir-source --simd -march=x86-64-v4 tests/ir/vector-i32.c tests/ir/mask-builtins.c tests/ir/bmi-builtins.c tests/ir/vector-rows.c` checks actual C
@@ -416,8 +416,11 @@ need every load first. The pieces' alignment is unknown (`alignment_log2` 0),
 as a typed `LOAD`'s is.
 
 #136's `ALLOCA`, `STACK_SAVE` and `STACK_RESTORE` lower to the dynamic-stack
-operations below. #148's `FRAME_ADDRESS` (`__builtin_frame_address(0)`) is
-refused, as #147's `TAIL_CALL` is (`IR_ERROR_UNSUPPORTED`, below). Typed validation still requires class U64 and `value == 0` for each, and a
+operations below. #148's `FRAME_ADDRESS` (`__builtin_frame_address(0)`, and
+`__builtin_return_address(0)`'s load 8 bytes above it) lowers to a
+`stack_save` of the flag `BUSTER_IR_STACK_SAVE_FRAME` (#1847): the function's
+frame pointer, whose IR opcodes are all taken. #147's `TAIL_CALL` is refused
+(`IR_ERROR_UNSUPPORTED`, below). Typed validation still requires class U64 and `value == 0` for each, and a
 U64 operand for allocation/restoration. The stack-shape plan treats allocation
 as replacing its top value, save as pushing one value, and restore as popping
 one. Allocation emits `alloca.ptr` followed by `ptrtoint.i64`; saves already
@@ -444,7 +447,7 @@ whose phis promotion makes of the jumps' values, they are 3,555 and 6,089, and
 `lvm.c`'s promoted IR is 457,577 bytes, less than its lowered 518,569. A backend
 that wants a jump per site again, for the branch predictor, duplicates the
 dispatch block into its predecessors, as LLVM's tail duplication does.
-`FRAME_ADDRESS` and `TAIL_CALL` are refused with `IR_ERROR_UNSUPPORTED`, as is a
+`TAIL_CALL` is refused with `IR_ERROR_UNSUPPORTED`, as is a
 function with segment overrides (#1447, `Tier0Function.segments`: loads and
 stores in `__seg_fs` and `__seg_gs`, which the IR's flags don't carry yet), and the
 vector values and `X86` rows that the [SIMD contract](ir-simd.md) doesn't admit
@@ -835,9 +838,13 @@ made here.
 | --- | --- | --- | --- |
 | `alloca` | ptr | i64 unsigned byte count | Reserve `(size + 15) & ~15` bytes, returning a 16-byte-aligned address. |
 | `stack_save` | i64 | absent | Capture this invocation's current dynamic-stack position as opaque bits. |
+| `stack_save frame` | i64 | absent | This invocation's frame address (#1847, flag `BUSTER_IR_STACK_SAVE_FRAME`): its frame pointer, the address of the caller's rbp its prologue pushed. |
 | `stack_restore` | void | i64 saved position | Release allocations after that position in this invocation. |
 
-All other operands are `BUSTER_IR_NONE`; flags and alignment columns are zero.
+All other operands are `BUSTER_IR_NONE`; flags and alignment columns are zero,
+but a frame address's flag. The interpreters have no machine frame and refuse a
+frame address (`INTERPRETER_UNSUPPORTED`); the inliner takes no function with a
+`stack_save` of either kind.
 Alignment is exactly the typed contract's fixed 16 bytes, not a configurable
 alignment or the type's size. No sparse metadata is needed: the usual 16 bytes
 per instruction suffice. The operand/rule tables drive both verifiers, use lists,
@@ -949,7 +956,7 @@ The typed endpoint becomes a void return for a void function and an `undef`
 return for nonvoid fallthrough, whose value the existing stream leaves unspecified.
 The caller must diagnose source-language constraints before lowering. The adapter
 handles the scalar corpus and the explicit-target SIMD subset described above,
-while refusing other `X86` rows, `FRAME_ADDRESS` and `TAIL_CALL`; it does not
+while refusing other `X86` rows and `TAIL_CALL`; it does not
 invent missing volatile or prototype information. In particular,
 the stream provides argument classes and a variadic bit but no
 named-parameter count: this adapter checks all supplied classes as
