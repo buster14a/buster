@@ -246,6 +246,10 @@ unused-warning fixtures also check exact scope-completion tokens.
   fallback; they do not establish admitted deferred-reader coverage.
   A GNU statement expression in the expression operand of `sizeof`, `_Alignof`, `__alignof__` or `typeof` is
   unevaluated (#147). Its statements are graph roots of their own, outside the operand's evaluation facts.
+  A discarded statement expression whose value is a comparison warns as clang's DiagnoseUnusedExprResult of the
+  statement expression does: "expression result unused" at the comparison, `-Wunused-value`'s with no note,
+  queued after the statements before it (`check_common_statement_value`, #1447); a statement's own comparison keeps
+  `-Wunused-comparison`.
   Clang drops its unused-result, unused-comparison, comma-operand, `void *`-cast, self-assignment, division,
   bounds, sign-comparison and constant-conversion warnings there. `check_common_unevaluated` reads the token's
   parser context from `-Wvoid-ptr-dereference`'s `check_warning_graph_void_context`, only when one of these

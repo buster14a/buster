@@ -1895,6 +1895,46 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .notes = 4,
     },
     {
+        // A discarded statement expression's comparison value warns as clang's DiagnoseUnusedExprResult of the statement
+        // expression does (#1447): "expression result unused", no comparison's note, queued after the statements before it,
+        // in its own -Wunused-value rather than -Wunused-comparison; a statement's own comparison keeps its warning.
+        .name = "a discarded statement expression's comparison value",
+        .source = "int g(int);\n"
+                  "int f(int x) {\n"
+                  "    ({ x; x == 1; });\n"
+                  "    ({ l: x == 2; });\n"
+                  "    (({ x == 3; }), 0);\n"
+                  "    ({ ({ x != 4; }); });\n"
+                  "    ({ x > 5; }), x;\n"
+                  "    if (x) ({ x == 6; });\n"
+                  "    ({ g(x) == 7; });\n"
+                  "    ({ (x == 8); });\n"
+                  "    x == 9;\n"
+                  "    return 0;\n"
+                  "}\n",
+        .warnings = 11,
+        .notes = 1,
+    },
+    {
+        .name = "a discarded statement expression's comparison value under -Wno-unused-comparison in C23",
+        .source = "int g(int);\n"
+                  "int f(int x) {\n"
+                  "    ({ x; x == 1; });\n"
+                  "    ({ l: x == 2; });\n"
+                  "    (({ x == 3; }), 0);\n"
+                  "    ({ ({ x != 4; }); });\n"
+                  "    ({ x > 5; }), x;\n"
+                  "    if (x) ({ x == 6; });\n"
+                  "    ({ g(x) == 7; });\n"
+                  "    ({ (x == 8); });\n"
+                  "    x == 9;\n"
+                  "    return 0;\n"
+                  "}\n",
+        .options = { "-Wno-unused-comparison" },
+        .warnings = 10,
+        .c23 = true,
+    },
+    {
         .name = "typeof statement expressions are unevaluated",
         .source = "int *q;\nvoid f(int x) {\n    __typeof__(({ *q; x == 1; x = x; x / 0; 1; })) t = 0;\n"
                   "    typeof(({ (0, x); (void *)q; 1; })) v = 0;\n    (void)t;\n    (void)v;\n}\n",
