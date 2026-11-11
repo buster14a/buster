@@ -11811,6 +11811,25 @@ static bool check_lower_strict_round(const CheckGraph* graph, uint32_t node, CBu
     return builtin == CBUILTIN_ELEMENTWISE_ROUND && graph->fp_environments != NULL && (graph->fp_environments[node] & BUSTER_CHECK_FP_ENV_ACCESS) != 0;
 }
 
+// Whether a masked memory builtin, node `node` (its arguments from `first`, `count` of them), is lowered element by element
+// (check_lower_transport_masked), as clang's legalization scalarizes it (#1834): at a target without AVX-512F and
+// AVX-512VL; and wherever no instruction takes it, a gather or a scatter of 8- or 16-bit elements, and an expanding load
+// or a compressing store of them without AVX-512 VBMI2.
+static bool check_lower_masked_elements(const CheckLowerWriter* writer, uint32_t node, CBuiltinId builtin, uint32_t first, uint32_t count)
+{
+    const CheckStream* stream = writer->program->stream;
+    const uint64_t features = writer->target.features;
+    const uint64_t evex = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512VL);
+    const bool loads = builtin == CBUILTIN_MASKED_LOAD || builtin == CBUILTIN_MASKED_EXPAND_LOAD || builtin == CBUILTIN_MASKED_GATHER;
+    const uint32_t stored = builtin == CBUILTIN_MASKED_SCATTER ? 2 : 1;
+    const TypeId value = loads ? check_stream_type(stream, node) : stored < count ? stream->argument_conversions[first + stored].type : BUSTER_TYPE_VOID;
+    const uint32_t element = check_vector_builtin_shape(writer->program->types, value).element;
+    const bool narrow = element == 1 || element == 2;
+    const bool addressed = builtin == CBUILTIN_MASKED_GATHER || builtin == CBUILTIN_MASKED_SCATTER;
+    const bool packed = builtin == CBUILTIN_MASKED_EXPAND_LOAD || builtin == CBUILTIN_MASKED_COMPRESS_STORE;
+    return (features & evex) != evex || (narrow && (addressed || (packed && (features & BUSTER_X86_FEATURE(AVX512VBMI2)) == 0)));
+}
+
 // Whether a reduction of a vector of `source`'s type takes the baseline's ways (#1834): at a target without AVX-512F and
 // AVX-512VL, and of 8- and 16-bit integers without AVX-512BW, whose halvings' rows are EVEX ones. An integer reduction
 // is then folded element by element (check_lower_transport_reduce), its result any order's; a floating one by pieces of
@@ -12467,6 +12486,11 @@ static __attribute__((noinline)) void check_lower_vector_builtin(CheckLowerWrite
              (builtin == CBUILTIN_ELEMENTWISE_CLMUL && (check_lower_vector_of(writer, result) == 0 || !check_vector_clmul_packed(types, target, result))))
     {
         check_lower_vector_lanes(writer, node, builtin);
+    }
+    else if (builtin >= CBUILTIN_MASKED_LOAD && builtin <= CBUILTIN_MASKED_SCATTER && count >= 2 &&
+             check_lower_bool_vector(types, stream->argument_conversions[first].type) && check_lower_masked_elements(writer, node, builtin, first, count))
+    {
+        check_lower_transport_masked(writer, node, builtin);
     }
     else if (builtin >= CBUILTIN_MASKED_LOAD && builtin <= CBUILTIN_MASKED_SCATTER)
     {
