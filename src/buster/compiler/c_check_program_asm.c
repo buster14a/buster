@@ -222,6 +222,10 @@ struct CheckProgramAsm
     X86Instruction* inline_records;
     uint32_t inline_count;
     uint32_t inline_touched;
+    // Its labels' records and names (Tier0AsmBody.label_records and label_names, label_count of them): `labels`' records
+    // and, once check_program_asm_names has them, their names.
+    uint32_t* inline_label_records;
+    uint32_t* inline_label_names;
     // Its template's local branches (Tier0AsmBody.branches and targets), relative to its first record.
     uint32_t* inline_branches;
     uint32_t* inline_targets;
@@ -1314,10 +1318,10 @@ static Tier0Code check_asm_helper_code(const CheckAsmPlace* places, uint32_t cou
 // and the pops of the x87 inputs the template left. No output is in a store's register. With `passed`, the operands a
 // register holds when the template starts (check_asm_loads') are the call row's arguments instead, which Tier 0 moves into
 // their registers (CheckProgramAsm.inline_passed): the body loads only the x87's. Returns the count, and the template's
-// first record in `*first` (its branches' and labels' records are past it), with 0 records without room in `output` (a
-// statement of no records has at least an x87 or a flag output's).
+// first record in `*first` (its branches' and labels' records are past it), with 0 records and `*records` 0 without room
+// in `output`. A statement of no records but a label's (#1839) has none, and `*records` is then 0 too: `*room` says which.
 static uint32_t check_asm_inline_code(const CheckAsmPlace* places, uint32_t count, const AsmCode* code, const uint8_t stores[2], uint32_t pops,
-                                      bool passed, X86Instruction** records, uint32_t* first, Arena* output)
+                                      bool passed, X86Instruction** records, uint32_t* first, bool* room, Arena* output)
 {
     uint32_t loads = 0;
     uint32_t stored = 0;
@@ -1331,6 +1335,7 @@ static uint32_t check_asm_inline_code(const CheckAsmPlace* places, uint32_t coun
     // An x87 output that shares its depth with a later one is stored from a copy, one record more (fld %st(0)).
     const uint64_t capacity = (uint64_t)loads + code->count + 3 * (uint64_t)stored + 5 * (uint64_t)flags + pops;
     X86Instruction* written = capacity != 0 && capacity <= UINT32_MAX ? BUSTER_ARENA_PUSH_ARRAY(output, X86Instruction, capacity) : 0;
+    *room = capacity == 0 || written != 0;
     uint32_t at = 0;
     if (written != 0)
     {
@@ -2692,9 +2697,8 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
         {
             reason = code.error != NULL && strstr(code.error, "arena exhausted") == NULL ? code.error : NULL;
             valid = code.error == NULL || reason != NULL;
-            // A label with no instruction to follow in its template would be a place in the statement's function, which its
-            // code (Tier 0's) doesn't mark.
-            reason = reason == NULL && code.count == 0 && code.label_count != 0 ? "inline assembly labels in templates of no instructions" : reason;
+            // A label with no instruction to follow in its template is a place in the statement's function: an asm body
+            // of no records marks it (#1839), and a lowering that can't place one (Tier 1's) refuses it by name below.
             // A template that returns before any branch would leave a helper with its frame still reserved, where clang's
             // inline emission returns from the enclosing function: an asm body's return does that (#1839), and a helper's
             // is refused by name below. A template that jumps over its return (a called snippet's label) stays admitted,
@@ -2781,6 +2785,11 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
     // past a refusal (#929's review).
     // A flag output's object is written whatever the template, as clang's code sets it after one of no instructions too.
     const bool helped = code.count != 0 || x87 || flagged;
+    // A template of no instructions that defines a label (#1839): a place in its caller's code, an asm body of no records
+    // (but its operands' loads and stores) at which the label's symbol is defined. A body's labels keep its function on
+    // Tier 0 (the IR's body call carries none), so in a lowering for Tier 1 (CheckProgramOptions.asm_bodies) a template of
+    // instructions and labels keeps its helper, which Tier 1 calls, and only this one, which no helper places, is a body.
+    const bool marked = code.count == 0 && code.label_count != 0 && !unit_assembled;
     Tier0Operation row;
     uint32_t inline_touched = 0;
     // The held operands (BUSTER_CHECK_ASM_HELD): refused by a statement with a helper, which would read or write their
@@ -2828,8 +2837,9 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
             *plan->row = row;
         }
     }
-    else if (valid && reason == NULL && helped && !program->asm_helpers && !check_program_helper_forced(program, CHECK_PROGRAM_HELPER_ASM) &&
-             !statement->is_goto && code.reference_count == 0 && code.label_count == 0 && check_asm_inline_takes(places, count) &&
+    else if (valid && reason == NULL && (helped || marked) && !program->asm_helpers && !check_program_helper_forced(program, CHECK_PROGRAM_HELPER_ASM) &&
+             !statement->is_goto && code.reference_count == 0 && (code.label_count == 0 || (!returns && (!program->asm_bodies || marked))) &&
+             check_asm_inline_takes(places, count) &&
              !(program->asm_bodies && check_asm_names_opmask(&code)) &&
              (inline_touched = check_asm_inline_touched(places, count, &code, taken, vectors)) != UINT32_MAX)
     {
@@ -2841,11 +2851,12 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
         // stores into the block are rsp-relative.
         const bool passed = !program->asm_bodies;
         uint32_t first = 0;
-        const uint32_t records_count = check_asm_inline_code(places, count, &code, stores, pops, passed, &records, &first, output);
+        bool room = false;
+        const uint32_t records_count = check_asm_inline_code(places, count, &code, stores, pops, passed, &records, &first, &room, output);
         plan->inline_passed = passed;
         uint32_t* branches = code.branch_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, code.branch_count) : 0;
         uint32_t* targets = code.branch_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, code.branch_count) : 0;
-        valid = records != 0 && (code.branch_count == 0 || (branches != 0 && targets != 0));
+        valid = room && (code.branch_count == 0 || (branches != 0 && targets != 0));
         for (uint32_t b = 0; valid && b < code.branch_count; b += 1)
         {
             // The template's branches and their labels' records, past the body's loads.
@@ -2855,6 +2866,19 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
         plan->inline_branches = branches;
         plan->inline_targets = targets;
         plan->inline_branch_count = valid ? code.branch_count : 0;
+        // Its labels, each at its record past the body's loads (#1839): the emission defines each name's symbol at the
+        // record's offset in its caller's code (Tier0Code.asm_label_records), as a helper's at its own.
+        plan->labels = valid && code.label_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckProgramAsmLabel, code.label_count) : 0;
+        plan->inline_label_records = valid && code.label_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, code.label_count) : 0;
+        plan->inline_label_names = valid && code.label_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, code.label_count) : 0;
+        valid = valid && (code.label_count == 0 || (plan->labels != 0 && plan->inline_label_records != 0 && plan->inline_label_names != 0));
+        for (uint32_t k = 0; valid && k < code.label_count; k += 1)
+        {
+            plan->labels[k] = (CheckProgramAsmLabel){ .spelling = code.labels[k].name, .record = first + code.labels[k].record, .name = BUSTER_CHECK_NONE };
+            plan->inline_label_records[k] = first + code.labels[k].record;
+            plan->inline_label_names[k] = BUSTER_CHECK_NONE;
+        }
+        plan->label_count = valid ? code.label_count : 0;
         plan->inline_records = records;
         plan->inline_count = records_count;
         plan->inline_touched = inline_touched;
@@ -2864,6 +2888,10 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
             plan->inline_leaves |= check_asm_return(code.records[r].form);
         }
         plan->inlined = valid;
+    }
+    else if (valid && reason == NULL && marked)
+    {
+        reason = "inline assembly labels in templates of no instructions";
     }
     else if (valid && reason == NULL && helped && returns)
     {
@@ -2931,6 +2959,8 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
         plan->row = 0;
         plan->inline_records = 0;
         plan->inline_count = 0;
+        plan->inline_label_records = 0;
+        plan->inline_label_names = 0;
         plan->inlined = false;
         plan->inline_branches = 0;
         plan->inline_targets = 0;
@@ -3234,11 +3264,12 @@ static bool check_program_asm_names(CheckProgramAsms* result, const CheckProgram
             {
                 CheckProgramAsm* plan = c < statements ? result->plans + c : 0;
                 CheckProgramNaked* naked = c >= statements && c < statements + bodies ? result->naked + (c - statements) : 0;
-                const bool planned = plan != 0   ? plan->planned && plan->reason == NULL && (plan->helper != BUSTER_CHECK_NONE || plan->unit_assembled) :
+                // An asm body's labels too (#1839), which has no code of its own: its references keep a helper.
+                const bool planned = plan != 0   ? plan->planned && plan->reason == NULL && (plan->helper != BUSTER_CHECK_NONE || plan->unit_assembled || plan->inlined) :
                                      naked != 0 ? naked->planned && naked->reason == NULL :
                                                   file != 0;
                 const AsmResult* unit = !planned ? 0 : plan != 0 ? (plan->unit_assembled ? &plan->unit : 0) : naked != 0 ? (naked->unit_assembled ? &naked->unit : 0) : file;
-                const Tier0Code* code = !planned || unit != 0 ? 0 : plan != 0 ? &helpers->items[plan->helper].code : &naked->code;
+                const Tier0Code* code = !planned || unit != 0 || (plan != 0 && plan->inlined) ? 0 : plan != 0 ? &helpers->items[plan->helper].code : &naked->code;
                 CheckProgramAsmLabel* labels = plan != 0 ? plan->labels : naked != 0 ? naked->labels : 0;
                 const uint32_t label_count = !planned || unit != 0 ? 0 : plan != 0 ? plan->label_count : naked->label_count;
                 const String8* spellings = plan != 0 ? plan->names : naked != 0 ? naked->names : 0;
@@ -3249,6 +3280,10 @@ static bool check_program_asm_names(CheckProgramAsms* result, const CheckProgram
                     *reason = names[name].label ? "inline assembly labels another template defines too" : *reason;
                     names[name].label = true;
                     labels[k].name = name;
+                    if (plan != 0 && plan->inlined)
+                    {
+                        plan->inline_label_names[k] = name;
+                    }
                 }
                 for (uint32_t r = 0; pass == 1 && code != 0 && r < code->reference_count; r += 1)
                 {
