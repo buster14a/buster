@@ -444,6 +444,10 @@ typedef enum CheckWarningEventKind
     // An object's acting tentative definition, an array of unknown bound at the unit's end (#2238): "tentative array
     // definition assumed to have one element", at its name.
     CHECK_WARNING_EVENT_TENTATIVE_ARRAY,
+    // swift_newtype's and swift_wrapper's argument other than `struct` or `enum` (#1447, check_input_swift_newtype_parse),
+    // at it: "'X' attribute argument not supported: 'Y'", Y the token's identifier or keyword as written (payload.token),
+    // or "(null)" for another token, as clang streams the token's IdentifierInfo.
+    CHECK_WARNING_EVENT_ARGUMENT_UNSUPPORTED_TOKEN,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
 
@@ -497,6 +501,18 @@ typedef enum CheckWarningCompletion
     CHECK_WARNING_COMPLETE_TU_END,
     CHECK_WARNING_COMPLETION_COUNT,
 } CheckWarningCompletion;
+
+// The order of the warnings completed at the translation unit's end, as their `suborder` (#2141): clang's
+// Sema::ActOnEndOfTranslationUnit diagnoses unterminated pack pushes, then #pragma weak's undeclared identifiers, then
+// internal functions used but not defined, and the unused file-scope declarations last. Those keep suborder 0, which
+// orders after every nonzero one at the same boundary.
+typedef enum CheckWarningUnitEnd
+{
+    CHECK_WARNING_UNIT_END_UNUSED,
+    CHECK_WARNING_UNIT_END_PACK,
+    CHECK_WARNING_UNIT_END_WEAK,
+    CHECK_WARNING_UNIT_END_UNDEFINED,
+} CheckWarningUnitEnd;
 
 // Per-event source policy is independent of the ID: GNU array-bound folds warn by default, whereas an accepted
 // nonstandard ICE fold can start ignored under the same -Wgnu-folding-constant policy. Completion/lookahead is also
