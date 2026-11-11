@@ -790,6 +790,12 @@ struct CheckLowerWriter
     // Whether the body calls __builtin_setjmp, whose function keeps nothing in a callee-saved register
     // (Tier0Function.returns_twice).
     bool returns_twice;
+    // Whether the body calls another function that returns twice (#1847, Tier0Function.calls_returns_twice), and
+    // whether the unit may have one (CheckLowerShared.twice): a call asks then alone.
+    bool calls_returns_twice;
+    bool twice;
+    const IdentId* twice_names;
+    IdentId twice_tag;
     // Whether the function whose opening token is `init_reentry_body` - 1 names a returns-twice function: a whole-object
     // call initializer asks once per body, before any argument tasks are emitted (check_lower_init_reentry).
     uint32_t init_reentry_body;
@@ -5353,18 +5359,19 @@ static __attribute__((noinline)) void check_lower_limb_conversion(CheckLowerWrit
     }
 }
 
-// A folded constant of a _BitInt past 128 bits: its 128 bits' limbs, then its sign's or zeros, into a frame object of its
-// own whose address it leaves (the checker folds none yet, as its values hold 128 bits).
+// A folded constant of a _BitInt past 128 bits: its limbs (c_check_wide.c, #1447), into a frame object of its own whose
+// address it leaves. A value without them holds its low 128 bits, extended by its sign's or zeros.
 static void check_lower_limb_constant(CheckLowerWriter* writer, const CheckValue* value)
 {
     const CheckLowerLimbs limbs = check_lower_limbs(writer, value->type);
     const uint32_t result = check_lower_limb_object(writer, limbs);
+    const uint64_t* wide = check_wide_limbs(value, limbs.count);
     const uint64_t halves[2] = { (uint64_t)value->integer, (uint64_t)((unsigned __int128)value->integer >> 64) };
     const uint64_t fill = limbs.sign && (int64_t)halves[1] < 0 ? UINT64_MAX : 0;
     for (uint32_t limb = 0; limb < limbs.count && writer->output->status == CHECK_PROGRAM_OK; limb += 1)
     {
         check_lower_limb_address(writer, result, true, limb);
-        check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, limb < 2 ? halves[limb] : fill);
+        check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, wide != NULL ? wide[limb] : limb < 2 ? halves[limb] : fill);
         if (limb + 1 == limbs.count)
         {
             check_lower_limb_extend(writer, limbs, BUSTER_TYPED_CLASS_U64);
@@ -6243,6 +6250,81 @@ static void check_lower_eh_return(CheckLowerWriter* writer, uint32_t node)
     }
 }
 
+// The catalogue's library functions with the 'j' attribute, which return twice, in its order: all its entries with 'j'
+// but __builtin_setjmp, whose leaf is the lowering's own (Tier0Function.returns_twice). test-checker checks that these
+// are all of them, so a regenerated catalogue that changes the set fails there.
+#define BUSTER_CHECK_LOWER_TWICE_NAMES 8u
+static const BuiltinIntrinsicName check_lower_twice_entries[BUSTER_CHECK_LOWER_TWICE_NAMES] =
+{
+#define BUSTER_CHECK_LOWER_TWICE_NAME(n) { n, sizeof(n) - 1 },
+    BUSTER_CHECK_LOWER_TWICE_NAME("__sigsetjmp")
+    BUSTER_CHECK_LOWER_TWICE_NAME("_setjmp")
+    BUSTER_CHECK_LOWER_TWICE_NAME("_setjmpex")
+    BUSTER_CHECK_LOWER_TWICE_NAME("getcontext")
+    BUSTER_CHECK_LOWER_TWICE_NAME("savectx")
+    BUSTER_CHECK_LOWER_TWICE_NAME("setjmp")
+    BUSTER_CHECK_LOWER_TWICE_NAME("sigsetjmp")
+    BUSTER_CHECK_LOWER_TWICE_NAME("vfork")
+#undef BUSTER_CHECK_LOWER_TWICE_NAME
+};
+
+// Into names[], each entry's interned id, 0 where the unit doesn't spell it, and into *tag the jmp_buf's element's tag,
+// glibc's `__jmp_buf_tag` (check_lower_indirect_twice): whether a call may return twice, which a declaration's
+// returns_twice also makes so (#1847, check_lower_calls_twice).
+static bool check_lower_twice_names(const CheckProgram* program, IdentId* names, IdentId* tag)
+{
+    bool spelled = false;
+    for (uint32_t k = 0; k < BUSTER_CHECK_LOWER_TWICE_NAMES; k += 1)
+    {
+        const BuiltinIntrinsicName* entry = check_lower_twice_entries + k;
+        names[k] = program->identifiers != NULL ? intern_find(program->identifiers, (const uint8_t*)entry->name, entry->length) : 0;
+        spelled |= names[k] != 0;
+    }
+    static const char jmp_buf_tag[] = "__jmp_buf_tag";
+    *tag = program->identifiers != NULL ? intern_find(program->identifiers, (const uint8_t*)jmp_buf_tag, sizeof(jmp_buf_tag) - 1) : 0;
+    return spelled || *tag != 0 || program->object_returns_twice != NULL;
+}
+
+// Whether an indirect call may reach a function that returns twice (#1847): one through a pointer whose function's first
+// parameter is a jmp_buf's or a sigjmp_buf's element (a pointer to glibc's `struct __jmp_buf_tag`), as setjmp's,
+// _setjmp's, sigsetjmp's and __sigsetjmp's are. C (C17 7.13.1.1) has setjmp invoked by its name alone, so neither clang
+// nor LLVM marks such a call returns_twice; their -O0 code survives it because it gives every value its own stack home,
+// which Tier 1's shared rows and slots don't. A call through a pointer of any other type is an ordinary call.
+static bool check_lower_indirect_twice(const CheckLowerWriter* writer, const TypeId* parameter_types, uint32_t parameters)
+{
+    const TypeTable* types = writer->program->types;
+    const TypeId first = parameters != 0 ? type_strip_aligned(types, parameter_types[0]) : 0;
+    const TypeId element = first != 0 && type_kind(types, first) == BUSTER_TYPE_KIND_POINTER ? type_unqualified(type_strip_aligned(types, type_element(types, first))) : 0;
+    const bool structure = element != 0 && type_kind(types, element) == BUSTER_TYPE_KIND_STRUCT;
+    return structure && writer->twice_tag != 0 && types->tags.name[types->types.index[type_index(element)]] == writer->twice_tag;
+}
+
+// Whether a direct call's callee, `object`, returns twice (#1847, Tier0Function.calls_returns_twice): a declaration
+// gives it returns_twice, or its name is one of the catalogue's library functions that do (check_lower_twice_entries),
+// as clang marks setjmp's declaration in <setjmp.h>, which spells no attribute. The names are compared at once, the
+// eight interned ids against the callee's (its 32-bit lanes), and one at a time on the scalar path.
+static bool check_lower_calls_twice(const CheckLowerWriter* writer, uint32_t object)
+{
+    const CheckProgram* program = writer->program;
+    const uint32_t declaration = program->object_declarations != NULL ? program->object_declarations[object] : BUSTER_CHECK_NONE;
+    const IdentId name = program->parser != NULL && program->input != NULL && declaration < program->input->token_count ? program->parser->tokens.names[declaration] : 0;
+    const bool declared = program->object_returns_twice != NULL && program->object_returns_twice[object] != 0;
+    bool named = false;
+    if (BUSTER_SCALAR_PATH(writer->scalar))
+    {
+        for (uint32_t k = 0; k < BUSTER_CHECK_LOWER_TWICE_NAMES; k += 1)
+        {
+            named |= name != 0 && writer->twice_names[k] == name;
+        }
+    }
+    else
+    {
+        const __m256i names = _mm256_loadu_si256((const __m256i*)writer->twice_names);
+        named = name != 0 && _mm256_movemask_epi8(_mm256_cmpeq_epi32(names, _mm256_set1_epi32((int)name))) != 0;
+    }
+    return declared || named;
+}
+
 // A call's entries, as check_lower_call_to and check_lower_call_halves compile them: a normal source call, or an exactly
 // typed fortified libc call (`runtime`), with `halves` one that passes a half-precision argument, in an XMM register's low
 // 16 bits (a float's, its bits moved there as it is passed: check_lower_half_entry's CONVERT); without, any other, whose
@@ -6329,6 +6411,7 @@ static inline __attribute__((always_inline)) bool check_lower_call_body(CheckLow
     const bool direct = builtin || (value.category != CHECK_LVALUE && value.constant_kind == CHECK_CONSTANT_ADDRESS && value.object != 0 && value.offset == 0 &&
                         value.object < writer->program->object_count && writer->program->object_symbols[value.object] != 0 &&
                         (value.flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT)) == 0);
+    writer->calls_returns_twice |= writer->twice && !builtin && (direct ? check_lower_calls_twice(writer, value.object) : check_lower_indirect_twice(writer, parameter_types, parameters));
     if (passed != NULL || count + chained > BUSTER_TIER0_MAX_CALL_ARGUMENTS || returned != NULL)
     {
         // A half-precision argument (the first type it finds of the parameters' and the arguments'): the call is
@@ -15587,6 +15670,11 @@ struct CheckLowerShared
     // Whether the program's type table has a type in a segment's address space (#1447, check_lower_segment_types), whose
     // loads and stores the lowering refuses: an expression tests its node for one only then.
     bool segments;
+    // The interned names of the library functions that return twice (check_lower_twice_entries), 0 for one the unit
+    // doesn't spell, and whether the unit may call one: it spells one, or a declaration has returns_twice.
+    IdentId twice_names[BUSTER_CHECK_LOWER_TWICE_NAMES];
+    IdentId twice_tag;
+    bool twice;
     uint32_t* initializer_declarations;
     uint32_t* local_map;
     uint32_t* switch_locals;
@@ -16029,6 +16117,7 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
         valid = check_lower_copy_type_facts(types, shared->type_count, shared->type_facts, scratch, scalar);
         shared->bit_ints = memchr(types->types.kind, BUSTER_TYPE_KIND_BIT_INT, types->types.count) != NULL;
         shared->segments = memchr(types->types.kind, BUSTER_TYPE_KIND_QUALIFIED, types->types.count) != NULL && check_lower_segment_types(types);
+        shared->twice = check_lower_twice_names(program, shared->twice_names, &shared->twice_tag);
         shared->overloads = input == 0 || program->stream == NULL || input->overload_heads != NULL || program->stream->overload_address_count != 0 ||
                             program->stream->dense_values != NULL;
     }
@@ -16375,6 +16464,9 @@ static bool check_lower_writer_begin(CheckLowerWriter* writer, CheckLowerAbi* ab
         .bit_ints = shared->bit_ints,
         .overloads = shared->overloads,
         .segments = shared->segments,
+        .twice = shared->twice,
+        .twice_names = shared->twice_names,
+        .twice_tag = shared->twice_tag,
         .abi_table = &shared->table,
         .type_classes = shared->type_classes,
         .type_facts = shared->type_facts,
@@ -16595,6 +16687,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         writer->segment_entries = false;
         writer->unwind_init = false;
         writer->returns_twice = false;
+        writer->calls_returns_twice = false;
         writer->eh_return = false;
         writer->statement = BUSTER_CHECK_NONE;
         writer->vectors = false;
@@ -17106,6 +17199,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         function->segments = writer->segment_entries;
         function->unwind_init = writer->unwind_init;
         function->returns_twice = writer->returns_twice;
+        function->calls_returns_twice = writer->calls_returns_twice;
         function->eh_return = writer->eh_return;
         // A preserving convention's registers (#147), which Tier 0's frame keeps but for a tail call's, __builtin_eh_return's
         // or __builtin_setjmp's frame, whose teardowns and saves know nothing of them. An interrupt service routine's are every

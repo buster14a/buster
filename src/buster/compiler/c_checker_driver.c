@@ -137,7 +137,7 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_CONSTEXPR_POINTER: result = "constexpr pointer initializer is not null"; break;
         case CHECK_INPUT_CONSTEXPR_REPRESENTABLE: result = "constexpr initializer is not exactly representable in the declared type"; break;
         case CHECK_INPUT_CONSTEXPR_CONTEXT: result = "constexpr can only be used in variable declarations"; break;
-        case CHECK_INPUT_WIDE_LITERAL: result = "bit-precise integer constants wider than 128 bits are not supported"; break;
+        case CHECK_INPUT_WIDE_LITERAL: result = "bit-precise integer constants wider than 8388608 bits are not supported"; break;
         case CHECK_INPUT_PRAGMA_SEMANTICS: result = "unsupported semantic pragma"; break;
         case CHECK_INPUT_FP_EVAL_USE: result = "'__FLT_EVAL_METHOD__' cannot be expanded inside a scope containing '#pragma clang fp eval_method'"; break;
         case CHECK_INPUT_FP_EVAL_TYPE: result = "type is set according to the default eval method for the translation unit"; break;
@@ -2884,7 +2884,12 @@ static bool check_driver_conversion_site(const Parser* parser, const CheckStream
     const uint8_t parent_role = parent < count ? parser->tree.roles[parent] : PARSE_ROLE_NONE;
     const bool condition = parent_role == PARSE_ROLE_CLOSE_CONDITION || parent_role == PARSE_ROLE_CLOSE_FOR;
     const bool known = source < stream->count && target != 0 && token < count && !condition && check_driver_in_body(parser, token);
-    const uint32_t first = known ? check_warning_graph_first(graph, parser, source) : BUSTER_CHECK_NONE;
+    const uint32_t operand = known ? check_warning_graph_first(graph, parser, source) : BUSTER_CHECK_NONE;
+    // An array compound literal's node is its body's `}` (its decay's too), so its own first token is its type name's `(`:
+    // a cast before the `}` would break the view's reading and lose the body's warnings (`char *b = (int[2]){ 1, 2 };`).
+    const uint8_t operand_role = operand < count ? parser->tree.roles[operand] : PARSE_ROLE_NONE;
+    const bool compound = operand_role == PARSE_ROLE_CLOSE_COMPOUND_BODY || operand_role == PARSE_ROLE_CLOSE_COMPOUND;
+    const uint32_t first = compound ? check_warning_graph_start(parser, operand) : operand;
     const uint32_t end = known ? graph->source_positions[source] : 0;
     const bool valid = first < end && end <= count;
     *site = (CheckDriverConversionSite){

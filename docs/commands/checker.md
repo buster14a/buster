@@ -226,6 +226,13 @@ unused-warning fixtures also check exact scope-completion tokens.
   comparison pairs and unparenthesized bitwise chains (#1390). Parenthesized operands retain their explicit
   grouping. Original default-warning fixtures compare complete diagnostics and independent counts against
   pinned Clang through scalar/vector and one/three-lane readers, including warning promotion and suppression.
+  An enclosing construct's warning comes after the diagnostics its operands gave as clang built them (#1941): an
+  assignment condition's `-Wparentheses` is published at the condition's `)` (a `for`'s at its `;`), as clang's
+  CheckBooleanCondition runs once the condition is whole; a bitwise operator's precedence warning and a logical not's
+  at their right operand's end (`check_common_operand_end`); and a call's `-Wformat` from its `)` on, so a statement
+  expression's own warnings and a nested call's come first. A call argument's `-Wformat` is at its callee, the start of
+  the argument (`check_common_argument_start` now reads the node's own `)`). Each costs a warning's climb, nothing on
+  a unit without one.
   Explicit void casts on a conditional arm's value path suppress the conditional's unused-result marker (#1390).
   The existing postorder conditional/comma and selected-value facts carry that discard intent through nested
   arms and transparent GNU/generic wrappers, while inner comma and division diagnostics still run.
