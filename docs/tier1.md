@@ -427,6 +427,8 @@ the operand the destination's register holds first, its table permuted.
 The compresses and expands are its `compress` and `expand` (#1840, its
 "Compresses and expands"), `BUSTER_TIER1_VECTOR_COMPRESS`: the form merged under
 the mask into the destination, which takes the passthrough first.
+The AES rounds are its `aes` (#1840, its "AES rounds"), `BUSTER_TIER1_VECTOR_AES`:
+`vaesenc` or `vaesenclast`, EVEX, or VEX where the target has no VL.
 
 ### Inlining (#1282)
 
