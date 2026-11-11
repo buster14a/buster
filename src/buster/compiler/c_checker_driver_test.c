@@ -873,8 +873,8 @@ static void check_test_driver_setjmp_held(CheckTest* test, const char* executabl
 // no literal, which clang's code reads as one
 // (check_test_driver_cfstrings has the constant strings' objects); z/OS's va_start and
 // va_copy, which clang's x86-64 code makes over a char *; os_log's
-// data taken again across side effects, a __float128's and a 2-byte vector's, and those clang's code crashes on (a 32-byte
-// vector); dump_struct's generated calls; and
+// data taken again across side effects, a __float128's and a 2-byte vector's, those clang's code crashes on (a 32-byte
+// vector), and a format of more than 255 items, whose count byte clang's code truncates (#1785); dump_struct's generated calls; and
 // __builtin_available with an empty version, an invalid expression of clang's, which its code generation refuses too.
 static void check_test_driver_codegen_refusals(CheckTest* test, const char* executable, const char* directory)
 {
@@ -899,6 +899,9 @@ static void check_test_driver_codegen_refusals(CheckTest* test, const char* exec
           "unsupported: __builtin_os_log_format of data clang's code doesn't make (past 16 bytes, a _BitInt past 128 bits)" },
         { "void* f(void* b, _BitInt(200) w) { return __builtin_os_log_format(b, \"%d\", w); }\n",
           "unsupported: __builtin_os_log_format of data clang's code doesn't make (past 16 bytes, a _BitInt past 128 bits)" },
+        { "#define F \"%1$d %1$d %1$d %1$d %1$d %1$d %1$d %1$d %1$d %1$d \"\n#define G F F F F F F F F F F\n"
+          "void* f(void* b) { return __builtin_os_log_format(b, G G G, 1); }\n",
+          "unsupported: __builtin_os_log_format of more than 255 items, whose count clang's code truncates" },
         { "int g(int, const char*, ...);\nstruct S { int a; };\nvoid f(struct S* s, int n) { __builtin_dump_struct(s, g, ({ n; })); }\n",
           "unsupported: __builtin_dump_struct whose printer or other arguments have a statement expression or more than 4096 nodes, which its calls evaluate again" },
         // A record in a segment's space (#1447), whose fields' loads would take no override.
@@ -7521,8 +7524,7 @@ static void check_test_driver_quad_literals(CheckTest* test, const char* clang, 
 // text setting gives it, and the file-scope assembly's sections (check_program_sections, check_program_asm_plan_file),
 // which must be clang's -O0 -c's of the same source (check_test_driver_same_sections); and the refusals by name: a
 // static-storage definition under an active object setting (conservatively, until the emission selects its section
-// kind), a section whose name gives it another kind or type, and file-scope assembly with a section of another kind
-// (an init array's).
+// kind), and a section whose name gives it another kind or type.
 #include "c_check_symbol_driver_test.c"
 #include "c_check_asm_definition_driver_test.c"
 #include "c_check_symbol_pragma_driver_test.c"
@@ -7685,7 +7687,6 @@ static void check_test_driver_section_pragmas(CheckTest* test, const char* clang
     static const char placed[] = "unsupported: a definition under active '#pragma clang section' settings";
     static const char kind[] = "unsupported: a definition in a section whose name gives it another kind";
     static const char typed[] = "unsupported: a section name with an unsupported ELF type or reserved family";
-    static const char asm_kind[] = "unsupported: file-scope assembly's section of this kind";
     static const struct
     {
         const char* name;
@@ -7754,7 +7755,9 @@ static void check_test_driver_section_pragmas(CheckTest* test, const char* clang
         { "two file-scope statements in order", "__asm__(\".section .data.asm,\\\"aw\\\",@progbits\\n.byte 1\");\n__asm__(\".section .data.asm,\\\"aw\\\",@progbits\\n.byte 2\");\n"
                                                 "int main(void) { return 0; }\n", 0, 0, NULL, false, ".data.asm", true },
         { "file-scope assembly's label", "__asm__(\".globl answer\\nanswer: .byte 42\");\nint main(void) { return 0; }\n" },
-        { "file-scope assembly's init array", "__asm__(\".section .init_array,\\\"aw\\\"\\n.quad 0\");\nint main(void) { return 0; }\n", 0, 1, asm_kind },
+        // (An entry the startup calls: 0 would crash clang's executable too.)
+        { "file-scope assembly's init array", "int ran;\nvoid buster_init(void) { ran = 1; }\n__asm__(\".section .init_array,\\\"aw\\\"\\n.quad buster_init\");\n"
+                                              "int main(void) { return ran - 1; }\n", 0, 0, NULL, false, ".init_array", true },
         { "an initialized variable in a .bss", "int g __attribute__((section(\".bss.g\"))) = 1;\nint main(void) { return g - 1; }\n", 0, 1, kind },
         { "a variable in a .tdata", "int g __attribute__((section(\".tdata.g\"))) = 1;\nint main(void) { return g - 1; }\n", 0, 1, kind },
         { "a note's section", "int g __attribute__((section(\".note.g\"))) = 1;\nint main(void) { return g - 1; }\n", 0, 1, typed },
@@ -7981,6 +7984,7 @@ static void check_test_driver_optimize_pragmas(CheckTest* test, const char* clan
 #include "c_check_vla_fold_driver_test.c"
 #include "c_check_for_loop_driver_test.c"
 #include "c_check_enum_cast_driver_test.c"
+#include "c_check_unevaluated_driver_test.c"
 #include "c_check_sign_compare_driver_test.c"
 #include "c_check_type_sugar_driver_test.c"
 
@@ -8879,6 +8883,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             check_test_driver_vla_fold(&test, clang, executable, directory);
             check_test_driver_for_loops(&test, clang, executable, directory);
             check_test_driver_enum_casts(&test, clang, executable, directory);
+            check_test_driver_unevaluated(&test, clang, executable, directory);
         }
         if (!lazy && check_test_driver_takes())
         {
@@ -8957,6 +8962,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             if (!lazy && check_test_driver_takes())
             {
                 check_test_driver_string_pool(&test, clang, executable, directory);
+                check_test_driver_weak_late(&test, clang, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
             {

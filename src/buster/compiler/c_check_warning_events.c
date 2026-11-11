@@ -141,6 +141,9 @@ enum
     // An alias whose function type isn't its aliasee's (#1849, clang's code generation at -c): -Wattribute-alias. (Its ID
     // past the ones other pull requests take.)
     CHECK_WARNING_ID_ATTRIBUTE_ALIAS = 119,
+    // An unevaluated operand with a side effect (#1447, clang's CheckUnaryExprOrTypeTraitOperand and
+    // CreateGenericSelectionExpr): -Wunevaluated-expression, on by default, under -Wunused-value and so -Wunused and -Wall.
+    CHECK_WARNING_ID_UNEVALUATED_EXPRESSION = 121,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -410,6 +413,9 @@ typedef enum CheckWarningEventKind
     // -Wdelimited-escape-sequence-extension): at the token, payload.data 1 for a named one's "named escape sequences are a
     // Clang extension", 0 for "delimited escape sequences are a C2y extension".
     CHECK_WARNING_EVENT_DELIMITED_ESCAPE,
+    // A sizeof's, an alignof's or a _Generic's unevaluated operand with a side effect (#1447,
+    // check_warning_graph_unevaluated), at its expression's location: the description's message.
+    CHECK_WARNING_EVENT_UNEVALUATED_EXPRESSION,
     // A bit-precise constant's suffix (wb or uwb) before C23 (#1447): -Wc23-extensions' "'_BitInt' suffix for literals is a
     // C23 extension" (CHECK_WARNING_ID_C23_PARAMETER's option), at the constant.
     CHECK_WARNING_EVENT_BIT_INT_SUFFIX,
