@@ -9315,23 +9315,65 @@ static uint32_t check_input_direct_initializer_end(const Parser* parser, uint32_
     return token;
 }
 
-// An __auto_type declarator, as clang takes it before deducing its type: a typedef's and a function's are errors at the
-// keyword, one without an initializer at its name, an array's and an initializer list's at the initializer. A pointer
-// declarator and a declaration's later declarators are deduced as clang deduces them, as C++ deduces a declarator's
-// type (GCC refuses them). Refused by name: a variable with linkage that a declaration before it declared, whose types
-// bind before the deduction.
+// The type a redeclaration with __auto_type takes from the entity's earlier declaration with linkage, as clang's C
+// mergeTypes takes the placeholder (MergeVarDeclTypes, before any deduction): `extern long p; __auto_type p = 1;` is a
+// long, and so is a pointer declarator's (`__auto_type *p` after `int *p`), its levels' qualifiers the earlier type's
+// and the placeholder's const and volatile its own; 0 for another shape, which isn't modeled.
+static TypeId check_input_auto_type_merged(const TypeTable* types, TypeId declared, TypeId previous)
+{
+    TypeId result = 0;
+    TypeId level = declared;
+    TypeId earlier = previous;
+    bool walking = previous != 0;
+    for (uint32_t steps = 0; walking && steps < 64; steps += 1)
+    {
+        const TypeId stripped = type_strip_aligned(types, level);
+        const TypeId prior = type_strip_aligned(types, earlier);
+        const uint32_t qualifiers = type_qualifiers(stripped);
+        if (check_input_auto_type(stripped))
+        {
+            result = (qualifiers & (BUSTER_TYPE_CONST | BUSTER_TYPE_VOLATILE)) == type_qualifiers(prior) && type_kind(types, prior) != BUSTER_TYPE_KIND_ATOMIC ? previous : 0;
+            walking = false;
+        }
+        else if (type_kind(types, stripped) == BUSTER_TYPE_KIND_POINTER && type_kind(types, prior) == BUSTER_TYPE_KIND_POINTER && qualifiers == type_qualifiers(prior))
+        {
+            level = type_element(types, stripped);
+            earlier = type_element(types, prior);
+        }
+        else
+        {
+            walking = false;
+        }
+    }
+    return result;
+}
+
+// An __auto_type declarator, as clang takes it before deducing its type: a redeclaration of a variable with linkage that
+// an earlier declaration declared takes that one's type (check_input_auto_type_merged, `*merged`), and isn't deduced; a
+// typedef's and a function's are errors at the keyword, one without an initializer at its name, an array's and an
+// initializer list's at the initializer. A pointer declarator and a declaration's later declarators are deduced as clang
+// deduces them, as C++ deduces a declarator's type (GCC refuses them). Refused by name: a redeclaration whose merge
+// clang's mergeTypes refuses (its "redefinition with a different type" error), or of a name the earlier declaration
+// gave no linkage.
 static __attribute__((noinline)) bool check_input_auto_type_declarator(CheckInputReader* reader, TypeId base, TypeId type, uint32_t name, uint32_t next,
-                                                                         bool is_typedef, uint32_t storage)
+                                                                         bool is_typedef, uint32_t storage, TypeId* merged)
 {
     const Parser* parser = reader->parser;
     const uint8_t kind = type_kind(reader->types, type_strip_aligned(reader->types, type));
     const bool initialized = check_input_has_initializer(parser, next);
     const bool linked = reader->function_result == 0 || storage == C_NAME_EXTERN;
     const uint32_t spelled = parser->tokens.names[name];
+    const bool visible = c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, spelled) != 0;
+    const bool earlier = linked && !is_typedef && kind != BUSTER_TYPE_KIND_FUNCTION && (visible || reader->linked_declarations[spelled] != 0);
     uint32_t token = BUSTER_CHECK_NONE;
     CheckInputMessage message = CHECK_INPUT_UNSUPPORTED;
     (void)base;
-    if (is_typedef || kind == BUSTER_TYPE_KIND_FUNCTION)
+    *merged = earlier && reader->linked_declarations[spelled] != 0 ? check_input_auto_type_merged(reader->types, type, reader->linked_types[spelled]) : 0;
+    if (earlier)
+    {
+        token = *merged == 0 ? name : BUSTER_CHECK_NONE;
+    }
+    else if (is_typedef || kind == BUSTER_TYPE_KIND_FUNCTION)
     {
         token = reader->specifier_auto_type;
         message = CHECK_INPUT_AUTO_TYPE_CONTEXT;
@@ -9350,10 +9392,6 @@ static __attribute__((noinline)) bool check_input_auto_type_declarator(CheckInpu
     {
         token = next + 1;
         message = CHECK_INPUT_AUTO_TYPE_LIST;
-    }
-    else if (linked && (c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, spelled) != 0 || reader->linked_declarations[spelled] != 0))
-    {
-        token = name;
     }
     if (token != BUSTER_CHECK_NONE)
     {
@@ -10026,11 +10064,14 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
         }
         if (valid && check_input_auto_type(base))
         {
+            TypeId merged = 0;
             valid = c23_auto ? check_input_c23_auto_declarator(reader, base, type, name, i, is_typedef, storage) :
-                               check_input_auto_type_declarator(reader, base, type, name, i, is_typedef, storage);
+                               check_input_auto_type_declarator(reader, base, type, name, i, is_typedef, storage, &merged);
             // Both deduce as clang's DeduceAutoType does, through the declarator and the same in each of the
-            // declaration's declarators (check_input_c23_auto_deduce); __auto_type's errors name it (#147).
-            if (valid)
+            // declaration's declarators (check_input_c23_auto_deduce); __auto_type's errors name it (#147). A
+            // redeclaration of an entity with linkage takes its earlier type instead (check_input_auto_type_merged).
+            type = merged != 0 ? merged : type;
+            if (valid && merged == 0)
             {
                 check_input_rare_claim(reader, &reader->declaration_flags[name]);
                 reader->declaration_flags[name] |= BUSTER_CHECK_DECLARATION_DEDUCED | (c23_auto ? 0 : BUSTER_CHECK_DECLARATION_GNU_AUTO);
