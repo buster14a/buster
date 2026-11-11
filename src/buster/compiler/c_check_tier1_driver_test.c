@@ -4526,8 +4526,9 @@ static void check_test_driver_tier1_rows(CheckTest* test, const char* clang, con
     // inserts, extracts and casts between widths into the IR's own intrinsics, its variable permutes and byte shuffles
     // into the IR's permutes and its widening conversion into the IR's extend, which leaves 45 rows and 26 moves by Tier
     // 1 (75 and 39 before). #1840's later families decode rows that took no move (its shifts by an int: 39 rows left; its
-    // masks' conversions and lane operations: 33), so the bound counts the unit's 45 rows as of the conversions, as it
-    // counts the compares. The floor of 30 rows keeps the unit a machine rows' test as #1840 decodes more of them.
+    // masks' conversions and lane operations: 33; its permutes of two tables: 27; its bitwise functions, compresses and
+    // AES rounds: 24), so the bound counts the unit's 45 rows as of the conversions, as it counts the compares. The floor
+    // of 20 rows keeps the unit a machine rows' test as #1840 decodes more of them.
     const uint64_t compares = 11;
     const uint64_t rows = 45;
     char header[512];
@@ -4547,7 +4548,7 @@ static void check_test_driver_tier1_rows(CheckTest* test, const char* clang, con
         snprintf(message, sizeof(message),
                  "the machine rows' unit takes at most a move into or out of place for every two rows and compares (path %u, rematerialize %u: %llu rows, %llu moves)", run & 1,
                  (run & 2) == 0 ? 1u : 0u, (unsigned long long)build.machine_rows, (unsigned long long)build.row_moves);
-        check_test_expect(test, compiled && build.machine_rows >= 30 && build.machine_rows <= rows && 2 * build.row_moves <= rows + compares, message);
+        check_test_expect(test, compiled && build.machine_rows >= 20 && build.machine_rows <= rows && 2 * build.row_moves <= rows + compares, message);
         unlink(object);
     }
     unlink(unit);
