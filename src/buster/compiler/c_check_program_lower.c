@@ -12642,8 +12642,8 @@ static __attribute__((noinline)) void check_lower_vector_builtin(CheckLowerWrite
             if (reason != NULL && plan.elementwise)
             {
                 // A shuffle no row of the target's sequences takes (bytes and words without SSSE3, 32-byte ones of them
-                // without AVX-512 or of any element without AVX2) runs element by element through memory, as a wide
-                // vector's does (#1834).
+                // without AVX-512 or of any element without AVX2, and bytes with AVX-512 but not its VBMI) runs element by
+                // element through memory, as a wide vector's does (#1834).
                 reason = NULL;
                 transport = true;
                 check_lower_transport_shuffle(writer, node);

@@ -908,6 +908,20 @@ static void check_common_report_deferred(const Parser* parser, Preprocessor* pp,
                                   default_ignored, message, notes, note_count, scratch);
 }
 
+// An array index's warning (#1447), check_common_report_deferred's. In a file-scope initializer clang checks the index once
+// the full expression is complete and DiagRuntimeBehavior queues it to the declarator's end: after the initializer's own
+// errors (a typo's correction of the array's name) and its operands' queued warnings (a shift count's, a comma's left
+// operand's, which carry a suborder that this one, with none, follows).
+static void check_common_report_bounds(const Parser* parser, Preprocessor* pp, const CheckInput* input, uint32_t token, const char* message,
+                                       const CheckCommonNote* notes, uint32_t note_count, Arena* scratch)
+{
+    const uint32_t boundary = check_common_function_boundary(parser, token);
+    const uint32_t declarator = boundary == token ? check_driver_file_initializer_end(parser, input, token) : BUSTER_CHECK_NONE;
+    check_common_report_evaluated(parser, pp, input, token, declarator != BUSTER_CHECK_NONE ? declarator : boundary,
+                                  declarator != BUSTER_CHECK_NONE ? PP_DIAGNOSTIC_RUNTIME : PP_DIAGNOSTIC_DEFERRED, CHECK_WARNING_ID_ARRAY_BOUNDS, false,
+                                  message, notes, note_count, scratch);
+}
+
 // The unused-result warnings clang reports where the expression stands rather than at the body's end: an unused
 // comparison and the `void *` cast question.
 static void check_common_report_discarded(const Parser* parser, Preprocessor* pp, const CheckInput* input, uint32_t token, uint32_t id,
@@ -2800,9 +2814,8 @@ static void check_common_own(CheckCommonEmission* emission, uint32_t node)
                         {
                             // Array bounds queues in clang's function-end diagnostics where the body's walk
                             // emitted it — right after this expression's own discard warnings.
-                            check_common_report_deferred(parser, pp, input, graph->tokens[root],
-                                                         CHECK_WARNING_ID_ARRAY_BOUNDS, false, message,
-                                                         note.message != NULL ? &note : NULL, note.message != NULL ? 1u : 0u, scratch);
+                            check_common_report_bounds(parser, pp, input, graph->tokens[root], message, note.message != NULL ? &note : NULL,
+                                                       note.message != NULL ? 1u : 0u, scratch);
                         }
                     }
                 }
