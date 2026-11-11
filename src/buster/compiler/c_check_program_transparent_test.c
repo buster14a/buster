@@ -143,16 +143,30 @@ static void check_test_program_transparent(CheckTest* test, const char* clang)
         }
     }
     check_test_program_source(test, check_test_program_transparent_first, "transparent-union-made-between-initializers", clang);
-    // A union aligned past its first member by an attribute of its own: clang's code takes its registers from the member
-    // and its stack slot from the union, so the lowering refuses it by name, as a call's argument, a parameter and va_arg's.
-    check_test_program_boundary_reason(test,
-        "typedef union __attribute__((transparent_union,aligned(16))){int*p;long*q;}A;int take(A);int tested(int n){return take(&n);}",
-        "transparent-union-aligned-argument", true, false, 1, 0, "transparent unions sized or aligned otherwise than their first member");
-    check_test_program_boundary_reason(test,
-        "typedef union __attribute__((transparent_union,aligned(16))){int*p;long*q;}A;int take(A a){return *a.p;}int tested(int n){return n;}",
-        "transparent-union-aligned-parameter", true, false, 0, 0, "transparent unions sized or aligned otherwise than their first member");
-    check_test_program_boundary_reason(test,
+    // A union aligned or packed otherwise than its first member: clang's code takes its registers from the member and,
+    // where none is left, a stack slot of the union's size and alignment, as an argument, a parameter, through a pointer
+    // and as va_arg's, which reads the member from the union's slot.
+    check_test_program_source(test,
         "typedef union __attribute__((transparent_union,aligned(16))){int*p;long*q;}A;"
-        "int pick(int n,...){__builtin_va_list a;__builtin_va_start(a,n);A x=__builtin_va_arg(a,A);__builtin_va_end(a);return *x.p;}int tested(int n){return n;}",
-        "transparent-union-aligned-va-arg", true, false, 0, 1, "transparent unions sized or aligned otherwise than their first member");
+        "typedef union __attribute__((transparent_union,aligned(16))){int i;unsigned u;}I;"
+        "typedef union __attribute__((transparent_union,packed)){int*p;long*q;}P;"
+        "static long take(A a){return *a.p;}"
+        "static long take_late(long l0,long l1,long l2,long l3,long l4,long l5,A a,I i,P p,long g){return l0+l5*3+*a.p*5+i.i*7+*p.p*11+g*13;}"
+        "static long(*volatile through)(long,long,long,long,long,long,A,I,P,long)=take_late;"
+        "static long pick(int n,...){__builtin_va_list v;__builtin_va_start(v,n);long s=0;"
+        "for(int k=0;k<n;k++){A x=__builtin_va_arg(v,A);I y=__builtin_va_arg(v,I);s=s*31+*x.p+y.i;}__builtin_va_end(v);return s;}"
+        "int tested(int n){int z=n+1;A a={.p=&z};"
+        "long h=take(&n)+take_late(1,2,3,4,5,6,&z,n,&z,9)*3+through(n,2,3,4,5,6,a,n*2,&n,n)*5;"
+        "I i1={.i=n},i2={.i=2};A b={.p=&n};h+=pick(5,a,i1,b,i2,a,i1,b,i2,a,i1);return (int)(h%1000003);}",
+        "transparent-union-aligned", clang);
+    // Past two eightbytes, or of a first member clang passes as an aggregate, the union's own slot isn't taken.
+    check_test_program_boundary_reason(test,
+        "typedef union __attribute__((transparent_union,aligned(32))){int*p;long*q;}A;int take(A);int tested(int n){return take(&n);}",
+        "transparent-union-aligned-past-two-eightbytes", true, false, 1, 0,
+        "transparent unions sized or aligned otherwise than their first member, an aggregate, a pair, a vector or a value in memory");
+    check_test_program_boundary_reason(test,
+        "struct S{int a,b;};typedef union __attribute__((transparent_union,aligned(16))){struct S s;struct S t;}A;int take(A);"
+        "int tested(int n){struct S s={n,2};return take(s);}",
+        "transparent-union-aligned-aggregate-member", true, false, 1, 1,
+        "transparent unions sized or aligned otherwise than their first member, an aggregate, a pair, a vector or a value in memory");
 }
