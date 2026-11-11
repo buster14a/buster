@@ -14,20 +14,30 @@ shift
 (( $# > 0 )) || { echo 'usage: costs.sh LOGS_DIRECTORY RUN...' >&2; exit 2; }
 repository=buster14a/buster
 mkdir -p "$logs"
+# An API call, again after 2, 4 and 8 s when GitHub fails it (a 502 or 503 now and then over many runs' logs).
+fetch()
+{
+    local attempt
+    for attempt in 1 2 3; do
+        gh api "$@" && return 0
+        sleep $((2 ** attempt))
+    done
+    gh api "$@"
+}
 # The given runs' logs alone, whatever else the directory keeps from earlier fetches.
 fetched=()
 for run in "$@"; do
     [[ "$run" =~ ^[1-9][0-9]*$ ]] || { echo "costs.sh: not a run id: $run" >&2; exit 2; }
     # The run's latest attempt's shard jobs whose test step ran (passed or failed): a shard that stopped before it has no
     # report, which costs.c would reject.
-    gh api --paginate "repos/$repository/actions/runs/$run/jobs?per_page=100&filter=latest" \
+    fetch --paginate "repos/$repository/actions/runs/$run/jobs?per_page=100&filter=latest" \
         --jq '.jobs[] | select(.name | test(", shard [0-9]+ of [0-9]+\\)$"))
               | select(any(.steps[]?; .name == "Run correctness tests within the hosted CPU budget" and (.conclusion == "success" or .conclusion == "failure")))
               | .id' > "$logs/jobs-$run.txt"
     while IFS= read -r job; do
         [[ "$job" =~ ^[1-9][0-9]*$ ]]
         if [ ! -s "$logs/$run-$job.log" ]; then
-            gh api "repos/$repository/actions/jobs/$job/logs" > "$logs/$run-$job.log.part"
+            fetch "repos/$repository/actions/jobs/$job/logs" > "$logs/$run-$job.log.part"
             mv "$logs/$run-$job.log.part" "$logs/$run-$job.log"
         fi
         fetched+=("$logs/$run-$job.log")

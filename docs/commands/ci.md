@@ -222,9 +222,9 @@ build/costs --self-test --root .
   8573C and 6973P-C, and a deal can't choose one. The scale is each CPU's
   speed against the reference CPU's (the one most jobs drew): the median, over
   the commands both ran in one row, of the ratio of their median times. On
-  11 November the 9V45 took 0.64 of the 7763's time, the 6973P-C 0.65, the
-  9V74 0.80, the 8573C 0.82 and the 8370C 0.89. A CPU that shares fewer than
-  five commands with the reference keeps its samples as they are (`-`).
+  11 November the 9V45 and the 6973P-C took 0.64 of the 7763's time, the 9V74
+  0.79, the 8573C 0.80 and the 8370C 0.89. A CPU that shares fewer than five
+  commands with the reference keeps its samples as they are (`-`).
 - **Commands without a good sample.** A command whose samples all failed costs
   its longest failure, a lower bound (`#: lower-bound`). One without any sample
   costs the row's median per CPU times its CPUs (`#: unmeasured`).
@@ -258,9 +258,10 @@ The tables name their runner's CPUs (`#: runner-cpus 4`). With that line,
 command first, each to the shard that, run on 4 CPUs in the list's order as
 the runner runs it, would end the earliest with it. A deal by costs alone
 couldn't see that the shard holding a row's longest command also started its
-8-CPU commands first, which hold every CPU. In the plain `x86-64` row that
-deal predicted 457 s against 328 s by schedule. `plan` shares the function,
-so its deal is the runner's.
+8-CPU commands first, which hold every CPU. With the 11 November tables, that
+deal predicted 389 s for the plain `x86-64` row's longest shard against 321 s
+by schedule, and 527 s against 454 s for the plain `native` row. `plan` shares
+the function, so its deal is the runner's.
 
 The test job in `9700x.yml` gives each row its count (`shards`):
 

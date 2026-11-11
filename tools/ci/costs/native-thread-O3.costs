@@ -10,146 +10,148 @@
 # stale cost makes a shard longer, never a test go missing.
 #: row native thread O3
 #: runner-cpus 4
-#: samples 1 1
+#: samples 2 2
 #: revision 2eff3c58125390bf06c13a681d221cc50b3643f8 4
-#: cpu 1 1.00 AMD EPYC 7763 64-Core Processor
-#: cpu 1 0.64 AMD EPYC 9V45 96-Core Processor
-#: cpu 2 0.80 AMD EPYC 9V74 80-Core Processor
+#: revision 92da7275dfad08e445cf82f86e8d019e9da8db78 4
+#: cpu 3 1.00 AMD EPYC 7763 64-Core Processor
+#: cpu 2 0.64 AMD EPYC 9V45 96-Core Processor
+#: cpu 2 0.79 AMD EPYC 9V74 80-Core Processor
+#: cpu 1 0.64 Intel(R) Xeon(R) 6973P-C
 7.4 Check unity fixture ownership without rebuilding
-202.8 Test the foreign inputs [8 CPUs]
-240.3 Check the no-recursion rule on the call graph [8 CPUs]
+205.4 Test the foreign inputs [8 CPUs]
+242.5 Check the no-recursion rule on the call graph [8 CPUs]
 180.4 Test the calling convention [8 CPUs]
 319.6 Test the static executables with libc [8 CPUs]
-556.0 Test the functions' lanes [8 CPUs]
-276.7 Test the dynamic PIEs [8 CPUs]
-39.2 Test the foreign linker against lld and mold [8 CPUs]
-72.5 Test the per-file jobs [8 CPUs]
-68.4 Test the per-file jobs on the frozen C library corpus, flat [8 CPUs]
+552.5 Test the functions' lanes [8 CPUs]
+275.0 Test the dynamic PIEs [8 CPUs]
+39.7 Test the foreign linker against lld and mold [8 CPUs]
+79.6 Test the per-file jobs [8 CPUs]
+84.6 Test the per-file jobs on the frozen C library corpus, flat [8 CPUs]
 356.8 Test the runtime snapshot [8 CPUs]
 0.6 Test the floors' shared-libc input
-24.7 Test the per-file jobs on the frozen sqlite3.c [8 CPUs]
-73.0 Test SQLite's shell by both tiers against clang's [4 CPUs]
-53.3 Test the direct path's executables [8 CPUs]
-22.6 Test the lanes [8 CPUs]
-23.3 Test the per-file jobs on the repository's sources, flat [8 CPUs]
+58.8 Test the per-file jobs on the frozen sqlite3.c [8 CPUs]
+130.4 Test SQLite's shell by both tiers against clang's [4 CPUs]
+62.0 Test the direct path's executables [8 CPUs]
+22.5 Test the lanes [8 CPUs]
+23.1 Test the per-file jobs on the repository's sources, flat [8 CPUs]
 2.5 Test the link representation [8 CPUs]
-84.5 Compile c-testsuite's programs as the units of one command [8 CPUs]
-224.4 Test the driver's commands of several source files [8 CPUs]
-135.8 Test mixed-tier single- and multi-file determinism [8 CPUs]
-185.5 Test c-testsuite's programs end to end [4 CPUs]
-278.6 Test c-testsuite's programs with Tier 1's code [4 CPUs]
-38.7 Reject unfinished SSA-source runs and preserve normal program exits [4 CPUs]
-319.5 Promote and run random C programs of structured and unstructured control flow [4 CPUs]
-133.6 Promote random C programs with their blocks' lifetimes, as --tier1 does [3 CPUs]
+91.6 Compile c-testsuite's programs as the units of one command [8 CPUs]
+278.0 Test the driver's commands of several source files [8 CPUs]
+135.0 Test mixed-tier single- and multi-file determinism [8 CPUs]
+184.4 Test c-testsuite's programs end to end [4 CPUs]
+278.8 Test c-testsuite's programs with Tier 1's code [4 CPUs]
+43.5 Reject unfinished SSA-source runs and preserve normal program exits [4 CPUs]
+317.5 Promote and run random C programs of structured and unstructured control flow [4 CPUs]
+140.4 Promote random C programs with their blocks' lifetimes, as --tier1 does [3 CPUs]
 276.2 Test the preprocessor on the repository's translation units against clang [2 CPUs]
 2076.0 Compare c-testsuite's typed streams, SSA and strict Tier 1 programs [4 CPUs]
-4.0 Run typed aggregate, variadic and indirect source calls and linked units [4 CPUs]
-8.6 Test native fixed-frame CFI and generated GDB/perf consumers [2 CPUs]
-189.9 Test the preprocessor's cases against clang (part 1 of 4)
-185.1 Test the preprocessor's cases against clang (part 2 of 4)
-344.4 Test the preprocessor's cases against clang (part 3 of 4)
-167.2 Test the preprocessor's cases against clang (part 4 of 4)
-834.0 Test the parser's snippets against clang
-653.5 Test the semantic driver's diagnostics and emission against clang (part 1 of 4)
-549.9 Test the semantic driver's diagnostics and emission against clang (part 2 of 4)
-605.0 Test the semantic driver's diagnostics and emission against clang (part 3 of 4)
-523.0 Test the semantic driver's diagnostics and emission against clang (part 4 of 4)
-20.4 Check narrow-unsigned sign comparisons and admitted deferred diagnostics [2 CPUs]
-180.7 Test the per-file jobs on the frozen musl units
-353.9 Test the per-file jobs on the repository's translation units
-394.5 Test the parser on the repository's translation units
-204.1 Test Tier 0
-59.4 Test Tier 0's inlining of always_inline functions
-281.3 Check the repository's translation units with the checker
+4.4 Run typed aggregate, variadic and indirect source calls and linked units [4 CPUs]
+10.0 Test native fixed-frame CFI and generated GDB/perf consumers [2 CPUs]
+199.0 Test the preprocessor's cases against clang (part 1 of 4)
+183.9 Test the preprocessor's cases against clang (part 2 of 4)
+348.8 Test the preprocessor's cases against clang (part 3 of 4)
+169.3 Test the preprocessor's cases against clang (part 4 of 4)
+844.6 Test the parser's snippets against clang
+667.3 Test the semantic driver's diagnostics and emission against clang (part 1 of 4)
+639.3 Test the semantic driver's diagnostics and emission against clang (part 2 of 4)
+612.7 Test the semantic driver's diagnostics and emission against clang (part 3 of 4)
+689.0 Test the semantic driver's diagnostics and emission against clang (part 4 of 4)
+20.3 Check narrow-unsigned sign comparisons and admitted deferred diagnostics [2 CPUs]
+179.5 Test the per-file jobs on the frozen musl units
+351.7 Test the per-file jobs on the repository's translation units
+395.2 Test the parser on the repository's translation units
+202.8 Test Tier 0
+108.7 Test Tier 0's inlining of always_inline functions
+279.5 Check the repository's translation units with the checker
 143.9 Compare -c's functions and objects with clang -O0 -c's on frozen musl sources
-25.4 Test differential harness accounting, subprocesses and failure preservation
-373.8 Test deferred function bodies against source order
-15.6 Test integer builtin actions against Clang (part 1 of 4)
-24.2 Test integer builtin actions against Clang (part 2 of 4)
+25.7 Test differential harness accounting, subprocesses and failure preservation
+385.1 Test deferred function bodies against source order
+15.8 Test integer builtin actions against Clang (part 1 of 4)
+24.1 Test integer builtin actions against Clang (part 2 of 4)
 54.1 Test integer builtin actions against Clang (part 3 of 4)
-13.5 Test integer builtin actions against Clang (part 4 of 4)
-156.1 Test typed postorder checking and source fixtures (part 1 of 8)
-13.5 Lower c-testsuite's programs and the frozen SQLite source with node templates as the tasks do
+14.8 Test integer builtin actions against Clang (part 4 of 4)
+158.1 Test typed postorder checking and source fixtures (part 1 of 8)
+13.4 Lower c-testsuite's programs and the frozen SQLite source with node templates as the tasks do
 219.6 Lower every function of c-testsuite's programs and the frozen SQLite and musl sources into the IR
-172.8 Test the C lexer as C++
+234.7 Test the C lexer as C++
 0.0 Compare main.c's checking and its functions and objects with clang's
-179.7 Check semantic mutants of the frozen SQLite and musl sources against Clang
+206.7 Check semantic mutants of the frozen SQLite and musl sources against Clang
 0.0 Compile main.c by -c, its referenced definitions and all of them, by both paths
-99.9 Test typed postorder checking and source fixtures (part 2 of 8)
+106.4 Test typed postorder checking and source fixtures (part 2 of 8)
 121.2 Test typed postorder checking and source fixtures (part 3 of 8)
-184.6 Test typed postorder checking and source fixtures (part 4 of 8)
-145.4 Test typed postorder checking and source fixtures (part 5 of 8)
+185.0 Test typed postorder checking and source fixtures (part 4 of 8)
+144.5 Test typed postorder checking and source fixtures (part 5 of 8)
 47.9 Test typed postorder checking and source fixtures (part 6 of 8)
-48.8 Test typed postorder checking and source fixtures (part 7 of 8)
-57.6 Test typed postorder checking and source fixtures (part 8 of 8)
-60.9 Test the semantic driver's diagnostics and emission against clang, with lazy system headers
-113.1 Allocate every function of c-testsuite's programs and the frozen SQLite and musl sources over its CFG
+49.4 Test typed postorder checking and source fixtures (part 7 of 8)
+58.3 Test typed postorder checking and source fixtures (part 8 of 8)
+61.7 Test the semantic driver's diagnostics and emission against clang, with lazy system headers
+112.3 Allocate every function of c-testsuite's programs and the frozen SQLite and musl sources over its CFG
 144.4 Test the IR and typed-stream lowering
-85.2 Promote every function of the frozen SQLite and musl sources to SSA with the verifier's checks
+84.7 Promote every function of the frozen SQLite and musl sources to SSA with the verifier's checks
 30.6 Test the object writer
-16.4 Test the oracle cache
-16.4 Test the runner
+16.5 Test the oracle cache
+18.7 Test the runner
 3.3 Test the external tools' diagnostics
-48.7 Test GNU inline assembly's semantic fixtures against clang
-12.7 Test c-testsuite's harness
-54.1 Test the C lexer without digraphs and // comments, as c89
-50.9 Test the C lexer without digraphs, as -fno-digraphs
-59.6 Test the C driver's source rows and DWARF
+49.3 Test GNU inline assembly's semantic fixtures against clang
+15.7 Test c-testsuite's harness
+53.8 Test the C lexer without digraphs and // comments, as c89
+52.6 Test the C lexer without digraphs, as -fno-digraphs
+63.1 Test the C driver's source rows and DWARF
 54.9 Test branch sizing
-54.7 Test the C lexer without // comments, as C94
-52.2 Test the C lexer
-39.3 Compare source binding columns on main.c
-26.5 Test the x86-64 encoder
-1.1 Test the backend's baked tables
-44.7 Test zlib decompression of debug sections against gzip's streams
-77.0 Test token refinement
-36.9 Check c-testsuite's programs with their bodies read apart on 8 lanes
+79.5 Test the C lexer without // comments, as C94
+52.9 Test the C lexer
+39.5 Compare source binding columns on main.c
+46.9 Test the x86-64 encoder
+1.2 Test the backend's baked tables
+45.2 Test zlib decompression of debug sections against gzip's streams
+87.2 Test token refinement
+41.7 Check c-testsuite's programs with their bodies read apart on 8 lanes
 33.3 Compare a frozen preprocessor corpus subset with Clang
-10.7 Test DWARF source lines and late address finalization
-46.3 Test the x86-64 disassembler against GNU tools
-32.1 Check the frozen SQLite source against Clang
-118.4 Test the scalar and AVX-512 assembly frontends
+10.6 Test DWARF source lines and late address finalization
+54.0 Test the x86-64 disassembler against GNU tools
+31.9 Check the frozen SQLite source against Clang
+119.9 Test the scalar and AVX-512 assembly frontends
 0.5 Assemble a .s and a .S file that -c comes before
 12.5 Test generated-code ISA selection and native records
 15.7 Test binding
-8.3 Test the corpus oracle's accounting and process failures
+8.9 Test the corpus oracle's accounting and process failures
 24.2 Test shared IR local promotion and typed-stream semantics
-94.0 Test Tier 1 selection, liveness and native fragments
-16.6 Test the C type table
-18.9 Compare the headers' x86 intrinsics with clang's code
-5.9 Test generated-code ISA policy
-21.7 Test local SSA construction and its memory interpreter
-3.1 Test the independent preprocessor fuzz harness in C23
-18.0 Test the x86 semantics
+95.2 Test Tier 1 selection, liveness and native fragments
+16.8 Test the C type table
+23.6 Compare the headers' x86 intrinsics with clang's code
+6.0 Test generated-code ISA policy
+21.6 Test local SSA construction and its memory interpreter
+3.2 Test the independent preprocessor fuzz harness in C23
+18.4 Test the x86 semantics
 7.2 Test streaming the output against writing it at the end, with GDB, perf and llvm-dwarfdump on the data-first layout
-2.1 Test the independent preprocessor fuzz harness in C17
-15.7 Test the import path
+2.2 Test the independent preprocessor fuzz harness in C17
+16.2 Test the import path
 1.3 Test Make dependency-rule serialization
-181.3 Test selective lowering against its independent oracle and Clang symbols
-3.5 Test RSS accounting across exec from small and large parents
+183.6 Test selective lowering against its independent oracle and Clang symbols
+5.2 Test RSS accounting across exec from small and large parents
 2.7 Test the preprocessor directive tables
 3.6 Test C-source binding identities and scope semantics
-7.9 Test Tier 1 allocation, reload splitting and rematerialization
-4.0 Compare source binding columns on the frozen SQLite input
-3.0 Test GNU syntax metadata against clang
-2.3 Test Tier 1 frame planning and slot coloring
+10.8 Test Tier 1 allocation, reload splitting and rematerialization
+6.2 Compare source binding columns on the frozen SQLite input
+3.1 Test GNU syntax metadata against clang
+2.4 Test Tier 1 frame planning and slot coloring
 0.8 Test live compressed identifier tails under every placement mask
-15.1 Test Tier 1 allocation over CFGs, edge moves and the independent checker
+15.3 Test Tier 1 allocation over CFGs, edge moves and the independent checker
 3.6 Test deterministic diagnostic ordering
 0.9 Test compiler-owned resource failure boundaries
 0.9 Test the profiling tools
 0.3 Dispatch Tier 1's program measurement and refuse its incomplete commands
 1.5 Measure the frames and keep the frame pointer on request
-2.8 Dispatch Tier 1's vector code measurement and refuse its incomplete commands
+3.1 Dispatch Tier 1's vector code measurement and refuse its incomplete commands
 2.5 Test dominators, frontiers and natural loops
 4.1 Test fences and atomic loads and stores through the IR's lowerings, promotion, text and interpreter against clang
-3.0 Test the overflow builtins through the IR's lowerings, promotion, text, interpreters and Tier 1 against clang
-1.4 Test deferred-body source-position environments
-1.5 Test experimental Tier 1 scheduling, model coverage and native execution
-3.0 Test verified Tier 1 optimization passes
-1.6 Test dataflow bitsets
+3.1 Test the overflow builtins through the IR's lowerings, promotion, text, interpreters and Tier 1 against clang
+1.5 Test deferred-body source-position environments
+1.9 Test experimental Tier 1 scheduling, model coverage and native execution
+3.1 Test verified Tier 1 optimization passes
+1.7 Test dataflow bitsets
 0.3 Test the emission metadata protocol
 4.2 Test the tier-neutral emitted function and its frame verifier
-1.0 Test scoped name-resolution kernels
-23.6 Test the partial Zen 5 model and instruction harness
+1.1 Test scoped name-resolution kernels
+23.9 Test the partial Zen 5 model and instruction harness
 1.4 Test Tier 1 integer truth round trips against native and instruction-shape oracles
