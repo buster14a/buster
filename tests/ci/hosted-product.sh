@@ -2,8 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 # Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 # tools/ci/hosted-product.sh's producer and shard sides on a fake checkout, toolchain and build: a product that
-# installs, every way one must be refused (digest, files, entries, identity, libraries, native), the clang server's
-# status 77, and the inventory's ownership heading on a shard. No network; tiny scripts stand in for the executables.
+# installs, every way one must be refused (digest, files, entries, identity, libraries, native, no server), the clang
+# server's status 77 (a failure on the hosted toolchain, none elsewhere), and the inventory's ownership heading on a
+# shard. No network; tiny scripts stand in for the executables.
 set -euo pipefail
 root=$(cd -- "$(dirname -- "$0")/../.." && pwd)
 work=$(mktemp -d)
@@ -176,13 +177,13 @@ consume()
     pass
 }
 
-# Without a server (status 77): the product holds the compiler, the oracle and the build's commands, and installs.
-export FIXTURE_SERVER=77
+# The product holds the compiler, the pragma oracle, the clang server and the build's commands, and installs.
+export FIXTURE_SERVER=0
 produce plain
 consume 0 'a verified product' "$work/products/plain" "$(cat "$work/products/plain.digest")"
 grep -qx "BUSTER_COMPILER=$checkout/build/compiler" "$GITHUB_ENV" || fail 'BUSTER_COMPILER is not build/compiler'
 grep -q '^BUSTER_PPF_PRAGMA_ORACLE=' "$GITHUB_ENV" || fail 'no pragma oracle exported'
-! grep -q '^BUSTER_CLANG_SERVER=' "$GITHUB_ENV" || fail 'a server exported where none was built'
+grep -qx "BUSTER_CLANG_SERVER=$RUNNER_TEMP/clang-server" "$GITHUB_ENV" && [ -x "$RUNNER_TEMP/clang-server" ] || fail 'the server is not installed'
 product=$(sed -n 's/^BUSTER_PRODUCT=//p' "$GITHUB_ENV")
 [ "$(head -n 1 "$product/provenance/ownership")" = passed ] || fail 'the ownership record'
 [ -x "$checkout/build/compiler" ] && [ -f "$checkout/build/compile_commands.json" ] || fail 'not installed in build/'
@@ -205,23 +206,37 @@ produce again
 cmp -s "$work/products/plain/product.tar.zst" "$work/products/again/product.tar.zst" || fail 'packing is not reproducible'
 pass
 
-# With a server: it is a product, and the shard exports it.
-export FIXTURE_SERVER=0
-produce served
-consume 0 'a product with a server' "$work/products/served" "$(cat "$work/products/served.digest")"
-grep -qx "BUSTER_CLANG_SERVER=$RUNNER_TEMP/clang-server" "$GITHUB_ENV" && [ -x "$RUNNER_TEMP/clang-server" ] || fail 'the server is not installed'
+# The clang server's build, which exits 77 for a toolchain without what the server needs. On the hosted toolchain that
+# is a regression (#2071): the build fails, loudly, and exports nothing.
+fresh_runner
+if FIXTURE_SERVER=77 run build > "$work/log" 2>&1; then cat "$work/log"; fail 'status 77 on the hosted toolchain passed'; fi
+grep -q '::error.*status 77' "$work/log" || { cat "$work/log"; fail 'status 77 on the hosted toolchain failed without its error'; }
+! grep -q '^BUSTER_' "$GITHUB_ENV" || fail 'status 77 on the hosted toolchain exported paths'
+[ ! -e "$checkout/build/compiler" ] || fail 'status 77 on the hosted toolchain built the compiler'
 pass
-# A server build that fails otherwise fails the build.
-FIXTURE_SERVER=1
+# With another toolchain's clang (no lock above it: a distribution's, the 9700X's), 77 is no server, a notice, and the
+# rest builds without one.
+mv "$toolchain/hosted-tools.lock" "$toolchain/moved.lock"
+fresh_runner
+FIXTURE_SERVER=77 run build > "$work/log" 2>&1 || { cat "$work/log"; mv "$toolchain/moved.lock" "$toolchain/hosted-tools.lock"; fail 'status 77 on another toolchain failed'; }
+mv "$toolchain/moved.lock" "$toolchain/hosted-tools.lock"
+grep -q '::notice::No clang server' "$work/log" || fail 'status 77 on another toolchain gave no notice'
+grep -q '^BUSTER_COMPILER=' "$GITHUB_ENV" && ! grep -q '^BUSTER_CLANG_SERVER=' "$GITHUB_ENV" || fail 'status 77 on another toolchain exported a server, or no compiler'
+pass
+# A pack without a server, which only another toolchain's build leaves, is refused even before the identity.
+run ownership > /dev/null 2>&1
+if run pack "$RUNNER_TEMP/product" > "$work/log" 2>&1; then fail 'packed a product without a server'; fi
+grep -q '::error.*no clang server' "$work/log" || { cat "$work/log"; fail 'refused a product without a server without its error'; }
+pass
+# A server build that fails otherwise fails the build, on any toolchain.
 fresh_runner
 if FIXTURE_SERVER=1 run build > "$work/log" 2>&1; then fail 'a failing server build passed'; fi
 pass
-export FIXTURE_SERVER=77
 
 digest=$(cat "$work/products/plain.digest")
 plain="$work/products/plain/product.tar.zst"
 # The archive's digest: another digest, no digest, a truncated (partial) download, a changed byte.
-consume 1 'another digest' "$work/products/plain" "$(cat "$work/products/served.digest")"
+consume 1 'another digest' "$work/products/plain" "$(printf other | sha256sum | cut -c 1-64)"
 consume 1 'no digest' "$work/products/plain" ''
 mkdir -p "$work/bad/truncated"
 head -c "$(($(stat -c %s "$plain") / 2))" "$plain" > "$work/bad/truncated/product.tar.zst"
@@ -256,6 +271,9 @@ consume 1 'a missing file' "$work/bad/missing" "$(repack missing 'rm product/com
 consume 1 'a symbolic link' "$work/bad/link" "$(repack link 'ln -s /bin/sh product/link')"
 consume 1 'a path outside product/' "$work/bad/outside" "$(repack outside 'printf x > outside')"
 consume 1 'no list of files' "$work/bad/unlisted-all" "$(repack unlisted-all 'rm product/files.sha256')"
+# A product without its server, its identity and list made to match: refused for the missing executable.
+consume 1 'a product without a server' "$work/bad/serverless" "$(repack serverless "rm product/bin/clang-server && sed -i '/^clang-server:\$/,/^preprocessor-pragma-oracle:\$/{/^preprocessor-pragma-oracle:\$/!d}' product/identity/libraries && (cd product && find . -type f ! -path ./files.sha256 -print0 | LC_ALL=C sort -z | xargs -0 sha256sum > files.sha256)")"
+grep -q 'lacks its executables' "$work/log" || { cat "$work/log"; fail 'a product without a server was refused for another reason'; }
 consume 1 'another identity, listed' "$work/bad/identity" "$(repack identity "sed -i 's/^run\t42/run\t41/' product/identity/summary && (cd product && find . -type f ! -path ./files.sha256 -print0 | LC_ALL=C sort -z | xargs -0 sha256sum > files.sha256)")"
 
 # A shard whose own configuration differs from the producer's: another run, revision, row, toolchain or runtime.
