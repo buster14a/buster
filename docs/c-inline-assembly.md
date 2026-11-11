@@ -747,7 +747,9 @@ field without an addend in the template's code (`check_asm_unit_gotos`); any
 other use is refused by name, as on the record path. A template of directives
 alone with x87 operands or flag outputs has this helper too, as a template of
 no instructions does. A held vector (a vector type in a vector register) is
-refused in a helper, as on the record path.
+refused in a helper, as on the record path. A template with a 32-bit address
+(`leal (%1,%2), %0` of `int` operands, #2339) is assembled whole in such a
+helper too, since a record has no room for its 67 (`docs/assembler.md`).
 
 A template of alignment, section and symbol directives alone has no code
 (`entry_code` is false): its sections, data and defined labels are published,
@@ -819,9 +821,9 @@ makes of it (#1848, `check_program_emit_asm_symbols`):
   (clang warns and makes it a weak common), thread-local (a `TLS` common), alias's
   or selectany definition's; and a read-only one's (`const int x = 1;`), whose
   reads clang's code folds to the initializer where the program would read the
-  common's zeros. Without an alignment operand, the assembler aligns a `.comm` as
-  GNU as does (the size's power of two up to 16) where clang's integrated
-  assembler takes 1; the fixtures give one.
+  common's zeros. Without an alignment operand, a C unit's `.comm` and every
+  `.lcomm` align to 1, as clang's integrated assembler aligns them, where GNU
+  as takes the size's power of two (#2304; `docs/assembler.md`).
 - A file-scope label of an external, non-weak definition (`int x = 1;` with
   `asm(".globl x\nx: .long 2")`, `int f(void)` with `f: ret`, `int x;` with a
   `.data` label), without a binding directive but `.globl`, is clang's

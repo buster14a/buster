@@ -475,6 +475,17 @@ static void check_test_driver_asm_definitions(CheckTest* test, const char* clang
           "static void declare(void) { __asm__ volatile(\".comm counter,8,8\\n.comm private_common,24,16\"); }\n"
           "static void later(void) { __asm__ volatile(\".comm pair,8,4\"); }\n"
           "int main(void) { declare(); later(); counter += 41; pair[1] = 2; printf(\"%ld %d %d\\n\", counter, pair[0], pair[1]); return 0; }\n" },
+        // `.comm` without an alignment and `.lcomm` (#2304): clang's integrated assembler aligns both to 1, where GNU as
+        // takes the size's power of two (up to 16 for `.comm`, 8 for `.lcomm`). Statement and file-scope templates, a
+        // `.comm` of the unit's definition, and `.lcomm`s whose sizes would pad under GNU's rule.
+        { "common symbols without an alignment", "declare main",
+          "#include <stdio.h>\n"
+          "extern int counter;\n"
+          "extern char odd[3];\n"
+          "int defined = 1;\n"
+          "static void declare(void) { __asm__ volatile(\".comm counter,4\\n.comm odd,3\\n.lcomm scratch,4\\n.lcomm pad,1\"); }\n"
+          "__asm__(\".comm defined,8\\n.comm wide,40\\n.lcomm local_pad,3\\n.lcomm local_word,8\");\n"
+          "int main(void) { declare(); counter += 41; odd[2] = 2; printf(\"%d %d %d\\n\", counter, odd[2], defined); return 0; }\n" },
         // A template's label defines a function the unit declares, called from C; `.globl` and `.type` make it
         // clang's global function, and another local label stays local.
         { "a template's label defines a declared function", "jump main",
