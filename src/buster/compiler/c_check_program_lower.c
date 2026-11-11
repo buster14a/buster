@@ -16461,6 +16461,18 @@ static bool check_lower_lanewise_op(CheckOp op)
            (uint32_t)op - CHECK_OP_MULTIPLY_ASSIGN <= CHECK_OP_SHIFT_RIGHT_ASSIGN - CHECK_OP_MULTIPLY_ASSIGN;
 }
 
+// The entries node `node`'s product, division, remainder or shift (check_lower_lanewise_op) may take element by element:
+// BUSTER_CHECK_LOWER_LANEWISE_ENTRIES a lane where its type is a vector's, else none. Only its type is read.
+static uint64_t check_lower_lanewise_room(const CheckProgram* program, uint32_t node)
+{
+    const TypeTable* types = program->types;
+    const bool typed = program->stream != NULL && check_stream_has_values(program->stream);
+    const TypeId type = typed ? type_conversion_operand(types, check_stream_type(program->stream, node)) : 0;
+    const uint8_t kind = typed ? type_kind(types, type) : BUSTER_TYPE_KIND_NONE;
+    const bool vector = kind == BUSTER_TYPE_KIND_VECTOR || kind == BUSTER_TYPE_KIND_EXT_VECTOR;
+    return vector ? BUSTER_CHECK_LOWER_LANEWISE_ENTRIES * (uint64_t)check_builtin_vector_lanes(types, type) : 0;
+}
+
 // Node `node`'s part of the counts, by the rules: the scalar twin's step (check_lower_node_counts_scalar).
 static void check_lower_node_count(const CheckProgram* program, uint32_t node, CheckLowerNodeCounts* counts)
 {
@@ -16513,10 +16525,7 @@ static void check_lower_node_count(const CheckProgram* program, uint32_t node, C
         // An integer vector's product, division, remainder or shift, or its assignment's, that runs element by element
         // (check_lower_vector_lanewise, #2216): up to 16 entries an element, its operands' reads, the operation and its
         // store, as many tasks, whichever target the function has.
-        if (check_lower_lanewise_op(op) && (kind == BUSTER_TYPE_KIND_VECTOR || kind == BUSTER_TYPE_KIND_EXT_VECTOR))
-        {
-            counts->transport_entries += BUSTER_CHECK_LOWER_LANEWISE_ENTRIES * (uint64_t)check_builtin_vector_lanes(types, type_conversion_operand(types, type));
-        }
+        counts->transport_entries += check_lower_lanewise_op(op) ? check_lower_lanewise_room(program, node) : 0;
     }
     // The roundings and the fused multiply-add are calls too where the unit's target lacks their instructions
     // (check_lower_vector_library), which the bound counts whatever the target.
@@ -16548,9 +16557,10 @@ _Static_assert(sizeof(CheckOp) == sizeof(uint32_t), "the graph's ops load 16 to 
 // of the ops' compares, which population counts add up. A node's type or its update's destination is _Atomic only where
 // the type table has an _Atomic kind (type_strip_aligned's base is a type of the table too), so a unit without one, which
 // is nearly every unit, reads no node's type; a unit with one takes the rules for every node. A vector builtin's node,
-// rare, takes the rules for its lane calls, of which the masks count no other term; so does, in a unit with vector
-// types, a product, division, remainder or shift (check_lower_lanewise_op), whose type says whether it runs element by
-// element. The loads are masked to the graph's nodes.
+// rare, takes the rules for its lane calls, of which the masks count no other term; in a unit with vector types, a
+// product, division, remainder or shift (check_lower_lanewise_op) takes its one term, its lanes' room
+// (check_lower_lanewise_room), whose type says whether it runs element by element. The loads are masked to the graph's
+// nodes.
 static CheckLowerNodeCounts check_lower_node_counts(const CheckProgram* program)
 {
     const TypeTable* types = program->types;
@@ -16608,9 +16618,14 @@ static CheckLowerNodeCounts check_lower_node_counts(const CheckProgram* program)
                                                        _mm512_mask_cmpeq_epi32_mask(active, ops, logical_or) | _mm512_mask_cmpeq_epi32_mask(active, ops, conditional) : 0;
             const __mmask16 lanewise = vector_types ? _mm512_mask_cmple_epu32_mask(active, _mm512_sub_epi32(ops, products), operators) |
                                                           _mm512_mask_cmple_epu32_mask(active, _mm512_sub_epi32(ops, product_assigns), assigns) : 0;
-            for (uint32_t lanes = _mm512_mask_cmpeq_epi32_mask(active, ops, vector) | logical | lanewise; lanes != 0; lanes &= lanes - 1)
+            for (uint32_t lanes = _mm512_mask_cmpeq_epi32_mask(active, ops, vector) | logical; lanes != 0; lanes &= lanes - 1)
             {
                 check_lower_node_count(program, first + (uint32_t)__builtin_ctz(lanes), &counts);
+            }
+            // The rules' only term of a product, division, remainder or shift is its lanes' room, its type's alone.
+            for (uint32_t lanes = lanewise; lanes != 0; lanes &= lanes - 1)
+            {
+                counts.transport_entries += check_lower_lanewise_room(program, first + (uint32_t)__builtin_ctz(lanes));
             }
         }
     }
