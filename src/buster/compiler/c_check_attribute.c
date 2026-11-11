@@ -5905,18 +5905,20 @@ static bool check_input_attribute_other_multiversion(const CheckInputAttributes*
 
 static bool check_cpu_dispatch_invalid(const CheckInputReader* reader, uint32_t declaration);
 
-// Whether multiversioning refused declaration `declaration` (#2135): a report of its own, or one an earlier declaration got
-// because this one made the function multiversioned (the caused-here note at it). clang leaves it out of the function's
-// lookup, so a later declaration's rules don't see it.
-static bool check_input_multiversion_refused(const CheckInputReader* reader, uint32_t declaration)
+// How multiversioning refused declaration `declaration` (#2135): 0 not at all; 1 for its own attributes or rules (a report
+// at it), after which clang keeps it as its function's previous declaration but not as one that made the function
+// multiversioned; 2 as the declaration that made the function multiversioned (the caused-here note at it, with the
+// report at the one before), which clang leaves out of the function's lookup.
+static uint32_t check_input_multiversion_refused(const CheckInputReader* reader, uint32_t declaration)
 {
-    bool refused = reader->cpu_invalid_count != 0 && check_cpu_dispatch_invalid(reader, declaration);
-    for (uint32_t r = 0; !refused && r < reader->output->multiversion_report_count; r += 1)
+    uint32_t refused = 0;
+    for (uint32_t r = 0; refused != 2 && r < reader->output->multiversion_report_count; r += 1)
     {
         const CheckInputReport* report = reader->output->multiversion_reports + r;
         const bool caused = report->note_kind == CHECK_INPUT_NOTE_MULTIVERSIONING_CAUSED;
-        refused = caused ? report->note_token == declaration : report->token == declaration;
+        refused = caused && report->note_token == declaration ? 2 : !caused && report->token == declaration ? 1 : refused;
     }
+    refused = refused == 0 && reader->cpu_invalid_count != 0 && check_cpu_dispatch_invalid(reader, declaration) ? 1 : refused;
     return refused;
 }
 
@@ -6091,9 +6093,11 @@ static void check_input_attribute_multiversion(CheckInputReader* reader, CheckIn
     for (uint32_t h = previous_handle; h != 0 && h - 1 < reader->bindings.count; h = reader->bindings.previous[h - 1])
     {
         const uint32_t declaration = reader->bindings.declaration[h - 1];
-        const bool function = declaration < reader->parser->tokens.count && reader->declaration_kinds[declaration] == C_BINDING_FUNCTION &&
-                              !check_input_multiversion_refused(reader, declaration);
-        const CheckInputAttributes* earlier = function && check_sparse_wide_present(reader->output->attributes) ? check_input_attributes_at(reader->output, declaration) : NULL;
+        const uint32_t refused = declaration < reader->parser->tokens.count ? check_input_multiversion_refused(reader, declaration) : 0;
+        const bool function = declaration < reader->parser->tokens.count && reader->declaration_kinds[declaration] == C_BINDING_FUNCTION && refused != 2;
+        // (One refused for its own attributes is the previous declaration still, but made nothing multiversioned.)
+        const CheckInputAttributes* earlier = function && refused == 0 && check_sparse_wide_present(reader->output->attributes) ?
+                                              check_input_attributes_at(reader->output, declaration) : NULL;
         const uint32_t earlier_target = check_input_attribute_target_index(earlier);
         const bool earlier_clones = check_input_attribute_other_multiversion(earlier);
         const String8 text = earlier_target != BUSTER_CHECK_NONE ? earlier->records[earlier_target].text : (String8){ 0 };
@@ -6129,7 +6133,7 @@ static void check_input_attribute_multiversion(CheckInputReader* reader, CheckIn
         {
             const uint32_t declaration = reader->bindings.declaration[h - 1];
             const bool function = declaration < reader->parser->tokens.count && reader->declaration_kinds[declaration] == C_BINDING_FUNCTION &&
-                                  !check_input_multiversion_refused(reader, declaration);
+                                  check_input_multiversion_refused(reader, declaration) != 2;
             holder = function && check_sparse_wide_present(reader->output->attributes) ? check_input_attributes_at(reader->output, declaration) : NULL;
             bad = check_input_attribute_multiversion_disallowed(holder, CHECK_MULTIVERSION_TARGET, NULL, BUSTER_CHECK_NONE, before_inline);
         }
