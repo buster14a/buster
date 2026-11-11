@@ -1,0 +1,15 @@
+# The fixtures of tests/ci/rerun.sh (#2276): tests/ci/rerun/NAME.json, recorded on 2026-11-11 by tests/ci/rerun/record.sh
+# from buster14a/buster's run RUN, attempt ATTEMPT, an EVENT run of 9700x.yml ("Tests and Zen 5 benchmarks"), but for
+# `timeout`; the decision tools/ci/rerun.c must reach; and what the run shows. NAME.expected and NAME.md are the
+# classifier's report and Markdown for it, which `bash tests/ci/rerun.sh --update` writes.
+# name	run	attempt	event	decision	what
+outage-push	43033518877	1	push	rerun	#2194's merge, in the DNS outage of 2026-11-11: the portable row's build and the native row's shards failed in setup-hosted.sh's apt-get, the portable row's shards for want of the build's product; no test ran. Recorded 20 jobs a page: two pages.
+outage-pull-request	43032684469	1	pull_request	rerun	A pull request's run in the same outage: a vector candidate failed in setup, fail-fast cancelled the others in setup or before they started, and the vector verdict and the required aggregate followed.
+fail-fast-draws	43033022704	2	pull_request	rerun	A pull request's second attempt in the outage (a person's re-run; the workflow re-runs no second attempt, whatever this fixture decides): the portable row's build failed in setup, and fail-fast cancelled vector candidates while they waited for their draw's assignment, which only their annotations tell from a timeout.
+test-failure-push	42127373598	1	push	keep	A merge whose shards' correctness tests failed.
+compile-failure	42117119356	1	pull_request	keep	A pull request whose native shards failed to build the compiler; fail-fast cancelled the other shards, some in setup.
+test-failure-fail-fast	42115861754	1	pull_request	keep	A pull request whose shard's correctness tests failed, and fail-fast cancelled five shards in their tests and two in setup.
+self-hosted	42617067650	1	pull_request	keep	The 9700X's job failed, and the required aggregate followed: no self-hosted job is re-run automatically.
+runner-lost-setup	42200505058	1	push	keep	A merge whose shard's runner stopped answering in setup-hosted.sh (its step left running, the job failed), beside shards whose tests failed.
+runner-lost-test	42613914061	1	push	keep	A merge whose sanitizer shard's runner stopped answering in its tests (the test step left running, the job failed), beside shards whose tests failed.
+timeout	43042106174	1	push	keep	A temporary workflow's run on #2276's branch: a job that its timeout-minutes stopped in a step, one that failed and one that fail-fast cancelled. The jobs API reports the first and the last alike; their annotations differ.
