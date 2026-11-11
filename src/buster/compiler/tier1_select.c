@@ -649,6 +649,9 @@ struct Tier1SelectHoles
     bool sign_result;
     // The pattern's no-ops (Tier1SelectPattern.nops).
     uint8_t nops;
+    // A load's or a store's segment override (#1447, BUSTER_IR_SEGMENT's FS or GS), which its access's record takes
+    // (tier1_select_segment), or 0.
+    uint8_t segment;
     // The target has no AVX512VL (#1281): the vector class's 16- and 32-byte values take VEX forms
     // (tier1_select_vector_forms, tier1_select_class_forms). The CFG consumer sets it (Tier1EmitPrepared.vex).
     bool vex;
@@ -1412,6 +1415,22 @@ static void tier1_select_sse_vector(Tier1SelectRecords* result, const Tier1Selec
     }
 }
 
+// A load's or a store's segment override (#1447, Tier1SelectHoles.segment) on its access's records: each with a memory
+// operand, as Tier 0's tier0_apply_segments gives its own (form + segment * X86_FORM_COUNT, the encoder's form with the
+// override). A load's, a store's or an xchg's expansion has one such record, the access; its other records are moves of
+// registers. A RIP-relative operand takes it too: `%gs:sym(%rip)` is clang's access of a global in the segment.
+static void tier1_select_segment(Tier1SelectRecords* records, uint32_t segment)
+{
+    for (uint32_t r = 0; r < records->count; r += 1)
+    {
+        X86Instruction* record = &records->records[r];
+        if ((record->mode & BUSTER_X86_MODE_MEMORY) != 0 && record->form < X86_FORM_COUNT)
+        {
+            record->form = (uint16_t)(record->form + segment * X86_FORM_COUNT);
+        }
+    }
+}
+
 static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
 {
     Tier1SelectRecords result = {0};
@@ -2171,6 +2190,10 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
     if (holes->sign_result)
     {
         tier1_select_append(&result, tier1_select_register_record(X86_FORM_MOVSXD_R64_RM32, destination, destination));
+    }
+    if (__builtin_expect(holes->segment != 0, 0))
+    {
+        tier1_select_segment(&result, holes->segment);
     }
     return result;
 }
@@ -6129,6 +6152,11 @@ static Tier1SelectHoles tier1_select_holes(const Tier1SelectPlan* plan, const ui
         .sign_result = pattern->sign_result,
         .nops = pattern->nops,
     };
+    const IrOp op = (IrOp)plan->function->op[node];
+    if (__builtin_expect((plan->function->flags[node] & BUSTER_IR_SEGMENT) != 0, 0) && (op == IR_LOAD || op == IR_STORE))
+    {
+        holes.segment = (uint8_t)((plan->function->flags[node] & BUSTER_IR_SEGMENT) >> BUSTER_IR_SEGMENT_SHIFT);
+    }
     switch (pattern->rule)
     {
     case TIER1_RULE_LEA_ADD:
