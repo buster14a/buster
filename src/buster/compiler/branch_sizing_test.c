@@ -72,7 +72,7 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_X86
 // Each check prints its first failures, this many.
 #define BUSTER_BRANCH_SIZING_TEST_REPORTED 3
 // Random functions by default, and the most records one has.
@@ -85,8 +85,9 @@
 // Random functions and chains in the GNU as cross-check.
 #define BUSTER_BRANCH_SIZING_TEST_ASSEMBLER_FUNCTIONS 300
 #define BUSTER_BRANCH_SIZING_TEST_PATH_BYTES 512
+#endif
 #define BUSTER_BRANCH_SIZING_TEST_RUN_SECONDS 120
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_X86
 typedef struct BranchSizingTestTally BranchSizingTestTally;
 struct BranchSizingTestTally
 {
@@ -1104,7 +1105,7 @@ static bool branch_sizing_test_memory(Arena* arena, uint64_t seed)
     printf("memory: %llu attempts\n", (unsigned long long)attempts);
     return branch_sizing_test_report(&tally);
 }
-
+#endif
 // ---------------------------------------------------------------------------------------------------------------------
 // GNU as
 
@@ -1150,7 +1151,7 @@ static int branch_sizing_test_run(char* const* arguments, const char* log_path)
     }
     return result;
 }
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_X86
 // Prints the function as GNU as source in a section of its own, .text.fN for function N: a label .LN_i before each
 // record that a branch aims at (.LN_count at the end), each branch as its mnemonic and its target's label, and the
 // other records as x86_print_instruction writes them (records of no bytes as nothing).
@@ -1426,3 +1427,4 @@ static int run_branch_sizing_tests(int argc, char** argv)
     arena_release(&arena);
     return result;
 }
+#endif

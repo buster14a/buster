@@ -87,9 +87,26 @@ static bool check_builtin_source_complete(const TypeTable* table, TypeId type, c
     return complete;
 }
 
+// A _BitInt past 128 bits' width (#1447), after its qualifiers, an aligned typedef and _Atomic, or 0 for any other type,
+// and its signedness.
+static uint32_t check_builtin_limb_width(const TypeTable* table, TypeId type, bool* is_signed)
+{
+    const TypeId base = type_conversion_operand(table, type);
+    uint64_t rank = 0;
+    uint64_t bits = 0;
+    *is_signed = false;
+    if (type_kind(table, base) == BUSTER_TYPE_KIND_BIT_INT)
+    {
+        type_integer_properties(table, base, &rank, &bits, is_signed);
+    }
+    return bits > 128 ? (uint32_t)bits : 0;
+}
+
 // An overflow builtin's operand's descriptor for the 64-bit fold, or 0 with a diagnostic. One of 65 to 128 bits (an
 // __int128, a _BitInt) is valid but can't enter the fold by truncation: `wide` says so, and its action is a runtime one,
-// never folded, which C allows, since the builtin's store keeps it out of every constant expression.
+// never folded, which C allows, since the builtin's store keeps it out of every constant expression. So is a _BitInt
+// past 128 bits (#1447), but a signed one of mul_overflow's, which clang refuses ("__builtin_mul_overflow does not support
+// 'signed _BitInt' operands of more than 128 bits", CHECK_DIAG_OVERFLOW_BIT_INT).
 static uint32_t check_builtin_descriptor(const TypeTable* table, TypeId type, const CheckBuiltinAction* action, CheckActionResult* result, uint32_t operand,
                                          bool* wide)
 {
@@ -104,7 +121,15 @@ static uint32_t check_builtin_descriptor(const TypeTable* table, TypeId type, co
     {
         check_action_diagnose(result, CHECK_DIAG_INCOMPLETE, operand);
     }
-    else if (!check_action_integer_type(table, type, &width, &is_signed) || width > 128)
+    else if (check_builtin_limb_width(table, type, &is_signed) != 0)
+    {
+        *wide = true;
+        if (is_signed && action->id == CBUILTIN_MUL_OVERFLOW)
+        {
+            check_action_diagnose(result, CHECK_DIAG_OVERFLOW_BIT_INT, operand);
+        }
+    }
+    else if (!check_action_integer_type(table, type, &width, &is_signed))
     {
         check_action_diagnose(result, CHECK_DIAG_UNSUPPORTED, operand);
     }

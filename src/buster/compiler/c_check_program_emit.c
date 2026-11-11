@@ -17,9 +17,9 @@
 // returns' epilogues bracketed and open where its code doesn't end in one, #177) resolved through its records' starts
 // and ends after branch sizing (emitted_unwind), written after the last function (unwind_write) as one EH_FRAME atom,
 // a CIE and an FDE per function after it, each FDE's initial location a PC32 fixup to its function's symbol; with
-// `verify`, each proved against its records and their control flow (emitted_verify_frames), and the fixed-frame
-// analyzer's proof the same CFI where the analyzer takes the function (unwind_tier0).
-
+// `verify`, each proved against its records/control flow, with the same CFI as the fixed-frame analyzer (unwind_tier0).
+// Backend tests share only the frame verifier; source consumers retain the complete emission below.
+#if !defined(BUSTER_UNIT) || BUSTER_SOURCE_CONSUMER
 #include "worker_budget.c"
 #include "c_check_tier1_outcome.c"
 
@@ -51,8 +51,8 @@ struct CheckProgramCode
     Link link;
     CheckProgramLowered lowered;
     AtomId* function_atoms;
-    // #619: the file-scope assembly's atoms (check_program_emit_file_asm), in the link before the functions', and each
-    // one's section, which -c's object gives it (check_program_sections).
+    // #619: the file-scope assembly's atoms (check_program_asm_plan_file's, which check_program_emit_asm_unit publishes),
+    // in the link before the functions', and each one's section, which -c's object gives it (check_program_sections).
     AtomId* asm_atoms;
     ObjectAtomSection* asm_sections;
     uint32_t asm_atom_count;
@@ -961,11 +961,12 @@ static __attribute__((noinline)) bool check_program_emit_body_rows(CheckEmitBody
     }
     return valid;
 }
-
+#endif
 // A function's unwind descriptor, `frame`, from its emitted code's frame events after branch sizing (`offsets`, which
 // gets the length at the record count): resolved through the final layout (emitted_unwind) into `rows` (frame_count
 // room, which the tables read once the lanes are done). With `verify`, the events are proved against the records and
-// their control flow too (emitted_verify_frames: but an assembly template's code, the user's, and a rule a form
+// their control flow too (emitted_verify_frames: but an assembly template's code, the user's, a function an asm
+// statement's template returns from, and a rule a form
 // x86_semantics.c doesn't cover leaves unproven), and where Tier 0's fixed-frame analyzer takes the records
 // (unwind_tier0, which reads them alone), its frame must be the same CFI. Code past 2 GB is unsupported, not an
 // internal error; no room is a resource failure,
@@ -1033,7 +1034,7 @@ static __attribute__((unused)) CheckProgramStatus check_program_emit_frame(const
 {
     return check_program_emit_frame_checked(code, offsets, length, verify, scalar, rows, scratch, frame, reason, NULL);
 }
-
+#if !defined(BUSTER_UNIT) || BUSTER_SOURCE_CONSUMER
 // A bounded diagnostic for the selected failure only, after the lanes have joined. Numeric form and raw operand
 // fields identify the exact record; the resolved width is what the frame verifier uses to clobber saved slots.
 static void check_program_emit_frame_record(const EmittedCode* code, uint32_t body, uint32_t index)
@@ -1607,7 +1608,10 @@ static void check_program_emit_code_half(CheckEmitRun* run, CheckEmitLane* lane,
                 {
                     tier0_inline_code(&compiled, function, &inlined, lane->scratch);
                 }
-                run->codes[b] = emitted_from_tier0(&compiled, run->unwind && naked == 0, run->sources, naked != 0, lane->scratch);
+                // A body whose asm template returns (#1839) leaves its frame as its template does, which the verifier doesn't
+                // read, as it doesn't a naked function's.
+                run->codes[b] = emitted_from_tier0(&compiled, run->unwind && naked == 0, run->sources, naked != 0 || tier0_asm_leaves(source),
+                                                   lane->scratch);
             }
             check_clock_lap(run->stage_clock, CHECK_STAGE_TIER0);
             if (forbidden || run->codes[b].error != TIER0_OK)
@@ -2172,17 +2176,20 @@ static void check_program_emit_help(CheckEmitBoard* board, uint32_t index)
     }
 }
 
-// The asm templates' names' symbols (CheckProgramAsms.names), into `symbols`, by name: a label's a local symbol of its
-// own, which the merge defines where its template's code puts it; another name's the program's symbol of that link name
-// (its asm label or its identifier: a name the emission makes is no template's to know), found in one pass over the
-// program's symbols; or else an undefined global symbol of its own, as GNU as and clang make one for a name the unit
-// doesn't define. The symbols of its own are numbered from `first` in the names' order, `*own` of them, and `externals`
-// (with binding, or 0) gets each undefined one's spelling. A label with one of the program's symbols' names is refused
-// (`*reason`), as GNU as and clang refuse a symbol defined twice. False for that, or an arena without room. The pass is
-// scalar: a unit's templates have few names (main.c's units 6), and it looks up only symbols' names of their lengths.
+// The asm templates' names' symbols (CheckProgramAsms.names), into `symbols`, by name: another name's the program's
+// symbol of that link name (its asm label or its identifier: a name the emission makes is no template's to know), found
+// in one pass over the program's symbols; a label's (or a `.comm`'s) the program's symbol of its name where the unit
+// declares that symbol without defining it (`defined`, by object: `void f(void);` with a template's `f:`, or `extern int
+// x;` with its `.comm x,4,4`), which the merge then defines where its template puts it, as clang's assembler binds the
+// C references to the template's definition; another label's a local symbol of its own; or else an undefined global
+// symbol of its own, as GNU as and clang make one for a name the unit doesn't define. The symbols of its own are
+// numbered from `first` in the names' order, `*own` of them, and `externals` (with binding, or 0) gets each undefined
+// one's spelling. A label (or an absolute symbol) with the name of a symbol the unit defines is refused (`*reason`), as
+// GNU as and clang refuse a symbol defined twice. False for that, or an arena without room. The pass is scalar: a unit's
+// templates have few names (main.c's units 6), and it looks up only symbols' names of their lengths.
 static bool check_program_emit_asm_symbols(const CheckProgram* program, const Parser* parser, const InternTable* identifiers, const String8* symbol_names,
-                                           const CheckProgramAsms* asms, SymbolId first, SymbolId* symbols, uint32_t* own, String8* externals,
-                                           uint32_t* external_count, const char** reason, Arena* scratch)
+                                           const uint8_t* defined, const CheckProgramAsms* asms, SymbolId first, SymbolId* symbols, uint32_t* own,
+                                           String8* externals, uint32_t* external_count, const char** reason, Arena* scratch)
 {
     const CheckInput* input = program->input;
     const uint32_t count = asms->name_count;
@@ -2232,7 +2239,7 @@ static bool check_program_emit_asm_symbols(const CheckProgram* program, const Pa
                 slot = (slot + 1) & (slots - 1);
             }
             const uint32_t n = table[slot] != 0 ? table[slot] - 1 : BUSTER_CHECK_NONE;
-            if (n != BUSTER_CHECK_NONE && asms->names[n].label)
+            if (n != BUSTER_CHECK_NONE && asms->names[n].label && (asms->names[n].absolute || defined[program->symbol_objects[s]] != 0))
             {
                 *reason = "inline assembly labels named as the unit's symbols";
                 valid = false;
@@ -2262,7 +2269,7 @@ static bool check_program_emit_asm_symbols(const CheckProgram* program, const Pa
         {
             symbols[n] = 0;
         }
-        else if (name->label || symbols[n] == 0)
+        else if (symbols[n] == 0)
         {
             symbols[n] = first + *own;
             *own += 1;
@@ -2657,124 +2664,6 @@ static bool check_program_access(CheckProgramCode* code, const CheckProgram* pro
 // lanes (above): one, and one more per BUSTER_CHECK_EMIT_LANE_TOKENS of the bodies' tokens beyond twice the largest
 // body's, but with lanes->every_lane as many as there are parts for; without, on the calling thread alone. With
 // `stage_clock` (the driver's --time-stages), each step's time is charged to its stage (c_check_clock.c).
-// The unit's file-scope assembly (#619), as clang emits a module's: its statements' templates in source order, a line
-// each, before the functions, assembled by assembler.c into sections of its own (asm_assemble). Of what it makes, the
-// emission takes the sections' bytes and alignments into atoms of their classes before the functions' (`file_asm`, their
-// bytes in `bytes` and their descriptors' names in `output`), each in its section in -c's object
-// (CheckProgramCode.asm_sections), as main.c's `.section`, `.p2align` and `.text` make an empty, page-aligned
-// .text.buster_checker. Refused by name: a template the assembler doesn't take, one that defines or refers to a symbol
-// (a label, an instruction's operand, CFI), which the unit's symbols don't join yet, and a section of a class C's
-// definitions don't have (an init array's, a note). Returns false with `result`'s status and reason set.
-typedef struct CheckProgramFileAsm CheckProgramFileAsm;
-struct CheckProgramFileAsm
-{
-    uint8_t* classes;
-    uint8_t* alignments;
-    uint64_t* sizes;
-    uint8_t** bytes;
-    ObjectAtomSection* sections;
-    uint32_t count;
-};
-
-static bool check_program_emit_file_asm(CheckProgramFileAsm* file_asm, CheckProgramCode* result, const CheckProgram* program, bool scalar, Arena* bytes,
-                                        Arena* output, Arena* scratch)
-{
-    const CheckInput* input = program->input;
-    *file_asm = (CheckProgramFileAsm){ 0 };
-    uint64_t length = 0;
-    uint32_t first = BUSTER_CHECK_NONE;
-    for (uint32_t i = 0; i < input->asm_count; i += 1)
-    {
-        const CheckInputAsm* statement = input->asm_statements + i;
-        length += statement->body == BUSTER_CHECK_NONE ? (uint64_t)statement->template_text.length + 1 : 0;
-        first = statement->body == BUSTER_CHECK_NONE && first == BUSTER_CHECK_NONE ? statement->token : first;
-    }
-    bool valid = true;
-    if (first != BUSTER_CHECK_NONE)
-    {
-        const uint64_t mark = scratch->length;
-        char* source = length < UINT32_MAX ? arena_push(scratch, length, 1) : 0;
-        const X86MatchIndex* index = source != 0 ? check_asm_matches(scratch) : 0;
-        valid = index != 0;
-        uint64_t at = 0;
-        for (uint32_t i = 0; valid && i < input->asm_count; i += 1)
-        {
-            const CheckInputAsm* statement = input->asm_statements + i;
-            if (statement->body == BUSTER_CHECK_NONE)
-            {
-                memcpy(source + at, statement->template_text.bytes, statement->template_text.length);
-                at += statement->template_text.length;
-                source[at] = '\n';
-                at += 1;
-            }
-        }
-        const AsmResult assembled = valid ? asm_assemble((String8){ .pointer = source, .length = length }, index, (AsmOptions){ .vectorized = !scalar }, scratch) :
-                                            (AsmResult){ .error = "" };
-        const Link* link = &assembled.link;
-        const char* refused = !valid ? NULL :
-                              assembled.error != 0 ? "file-scope assembly the assembler doesn't take" :
-                              link->symbols.count > 1 || link->fixups.count > 1 ? "file-scope assembly that defines or refers to a symbol" :
-                              NULL;
-        // A section of a class C's definitions have, of its type (or with bytes, PROGBITS), as the object writer takes it:
-        // not an init array's (.init_array is one in a data class), a note's or a group's.
-        for (AtomId atom = 1; valid && refused == NULL && atom < link->atoms.count; atom += 1)
-        {
-            const uint8_t class = link->atoms.class[atom];
-            const uint32_t type = assembled.object_options.atom_sections[atom].type;
-            const bool kind = class == BUSTER_LINK_CLASS_TEXT || class == BUSTER_LINK_CLASS_RODATA || class == BUSTER_LINK_CLASS_DATA ||
-                              class == BUSTER_LINK_CLASS_DATA_RELRO || class == BUSTER_LINK_CLASS_BSS || class == BUSTER_LINK_CLASS_TDATA ||
-                              class == BUSTER_LINK_CLASS_TBSS;
-            refused = kind && (type == object_class_sections[class].type || (!link_class_is_zero_fill(class) && type == SHT_PROGBITS)) ? NULL :
-                      "file-scope assembly's section of this kind";
-        }
-        const uint32_t count = valid && refused == NULL && link->atoms.count > 1 ? link->atoms.count - 1 : 0;
-        file_asm->classes = count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint8_t, count) : 0;
-        file_asm->alignments = count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint8_t, count) : 0;
-        file_asm->sizes = count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint64_t, count) : 0;
-        file_asm->bytes = count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint8_t*, count) : 0;
-        file_asm->sections = count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, ObjectAtomSection, count) : 0;
-        valid = valid && (count == 0 || (file_asm->classes != 0 && file_asm->alignments != 0 && file_asm->sizes != 0 && file_asm->bytes != 0 &&
-                                         file_asm->sections != 0));
-        for (uint32_t a = 0; valid && a < count; a += 1)
-        {
-            const AtomId atom = a + 1;
-            const uint64_t size = link->atoms.size[atom];
-            const bool zero = link_class_is_zero_fill(link->atoms.class[atom]);
-            const ObjectAtomSection section = assembled.object_options.atom_sections[atom];
-            uint8_t* copy = !zero && size != 0 ? arena_push(bytes, size, 16) : 0;
-            char* name = section.name.length != 0 ? arena_push(output, section.name.length, 1) : 0;
-            valid = (zero || size == 0 || copy != 0) && (section.name.length == 0 || name != 0);
-            if (valid)
-            {
-                if (copy != 0)
-                {
-                    memcpy(copy, link->atoms.bytes[atom], size);
-                }
-                if (name != 0)
-                {
-                    memcpy(name, section.name.pointer, section.name.length);
-                }
-                file_asm->classes[a] = link->atoms.class[atom];
-                file_asm->alignments[a] = link->atoms.alignment_log2[atom];
-                file_asm->sizes[a] = size;
-                file_asm->bytes[a] = copy;
-                file_asm->sections[a] = section;
-                file_asm->sections[a].name = (String8){ .pointer = name, .length = section.name.length };
-            }
-        }
-        file_asm->count = valid ? count : 0;
-        if (!valid || refused != NULL)
-        {
-            result->status = refused != NULL ? CHECK_PROGRAM_UNSUPPORTED : CHECK_PROGRAM_RESOURCE;
-            result->reason = refused;
-            result->token = first;
-            valid = false;
-        }
-        arena_pop_to(scratch, mark);
-    }
-    return valid;
-}
-
 // Returns an emission's `count` leases (worker_budget_release): false if one of them couldn't return its tokens.
 static bool check_program_emit_return(WorkerBudgetLease* leases, uint32_t count)
 {
@@ -3127,8 +3016,15 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         result->lowered.output_bytes = output->length - mark;
     }
     check_clock_mark(stage_clock, CHECK_STAGE_LOWER);
-    CheckProgramFileAsm file_asm = { 0 };
-    valid = valid && check_program_emit_file_asm(&file_asm, result, program, scalar, bytes, output, scratch);
+    // The file-scope assembly's refusal (check_program_asm_plan_file), at its first statement, after the bodies' own.
+    const AsmResult* file_unit = valid && result->lowered.asms.file_assembled && result->lowered.asms.file_reason == NULL ? &result->lowered.asms.file_unit : 0;
+    if (valid && result->lowered.asms.file_reason != NULL)
+    {
+        result->status = CHECK_PROGRAM_UNSUPPORTED;
+        result->reason = result->lowered.asms.file_reason;
+        result->token = result->lowered.asms.file_token;
+        valid = false;
+    }
     uint8_t* alignments = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)program->symbol_count + 1) : 0;
     String8* symbol_names = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, String8, (uint64_t)program->symbol_count + 1) : 0;
     // Each symbol's weak binding, and its constructor's and destructor's priorities (#147), two a symbol, each plus one (0
@@ -3574,32 +3470,6 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
                                                                                                     asms->name_count + 1) : 0;
     uint32_t external_count = 0;
     valid = valid && (binding == NULL || externals != 0);
-    for (uint32_t s = 0; valid && externals != 0 && s < program->symbol_count; s += 1)
-    {
-        const uint32_t object = program->symbol_objects[s];
-        const uint32_t declaration = program->object_declarations[object];
-        // A weakref's own symbol (#147) refers to its name, which symbol_names holds, and a weakref's target referred to
-        // through weakrefs alone is weak whatever its linkage.
-        const bool weakref = symbol_aliases != 0 && symbol_aliases[s + 1] != 0 && program->aliases[symbol_aliases[s + 1] - 1].kind == CHECK_PROGRAM_WEAKREF;
-        if (declaration != BUSTER_CHECK_NONE && !check_input_bit(program->input->declaration_bits, declaration, BUSTER_CHECK_BITS_COMPOUND) && !defined[object] &&
-            (check_input_linkage(program->input->declaration_bits, declaration) == 2 || weakref || weak[s + 1]))
-        {
-            const uint32_t identifier = parser->tokens.names[declaration];
-            externals[external_count++] = symbol_names[s + 1].length != 0 ? symbol_names[s + 1] :
-                                                                              (String8){ .pointer = (char*)intern_bytes(identifiers, identifier),
-                                                                                         .length = intern_length(identifiers, identifier) };
-        }
-        else if (program->cfstring_class_own && object == program->cfstring_class)
-        {
-            // The class the unit's constant CFStrings point to (#148), which it doesn't declare.
-            externals[external_count++] = (String8){ .pointer = (char*)check_program_cfstring_class_name, .length = sizeof(check_program_cfstring_class_name) - 1 };
-        }
-    }
-    for (uint32_t r = 0; valid && externals != 0 && r < result->lowered.runtime_symbol_count; r += 1)
-    {
-        const char* spelling = check_lower_runtime_names[result->lowered.runtime_order[r]];
-        externals[external_count++] = (String8){ .pointer = (char*)spelling, .length = strlen(spelling) };
-    }
     // The jump tables: an atom each, a fixup per entry, and their symbols and their labels'.
     uint64_t table_entries = 0;
     for (uint32_t t = 0; valid && t < result->lowered.table_count; t += 1)
@@ -3618,10 +3488,56 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     if (valid && asms->name_count != 0)
     {
         const char* reason = NULL;
-        valid = check_program_emit_asm_symbols(program, parser, identifiers, symbol_names, asms, asm_first, asm_symbols, &asm_own, externals, &external_count,
-                                               &reason, scratch);
+        valid = check_program_emit_asm_symbols(program, parser, identifiers, symbol_names, defined, asms, asm_first, asm_symbols, &asm_own, externals,
+                                               &external_count, &reason, scratch);
         result->status = valid ? result->status : reason != NULL ? CHECK_PROGRAM_UNSUPPORTED : CHECK_PROGRAM_RESOURCE;
         result->reason = reason != NULL ? reason : result->reason;
+    }
+    // The program's symbols a template's label or `.comm` defines (check_program_emit_asm_symbols), by symbol: its name's
+    // index plus one. Such a symbol is the template's definition, not an undefined name for the runtime to supply.
+    bool asm_defining = false;
+    for (uint32_t n = 0; valid && n < asms->name_count; n += 1)
+    {
+        asm_defining |= asms->names[n].label && asm_symbols[n] != 0 && asm_symbols[n] < asm_first;
+    }
+    uint32_t* asm_defines = asm_defining ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)program->symbol_count + 1) : 0;
+    valid = valid && (!asm_defining || asm_defines != 0);
+    if (valid && asm_defining)
+    {
+        memset(asm_defines, 0, ((uint64_t)program->symbol_count + 1) * sizeof(uint32_t));
+        for (uint32_t n = 0; n < asms->name_count; n += 1)
+        {
+            if (asms->names[n].label && asm_symbols[n] != 0 && asm_symbols[n] < asm_first)
+            {
+                asm_defines[asm_symbols[n]] = n + 1;
+            }
+        }
+    }
+    for (uint32_t s = 0; valid && externals != 0 && s < program->symbol_count; s += 1)
+    {
+        const uint32_t object = program->symbol_objects[s];
+        const uint32_t declaration = program->object_declarations[object];
+        // A weakref's own symbol (#147) refers to its name, which symbol_names holds, and a weakref's target referred to
+        // through weakrefs alone is weak whatever its linkage.
+        const bool weakref = symbol_aliases != 0 && symbol_aliases[s + 1] != 0 && program->aliases[symbol_aliases[s + 1] - 1].kind == CHECK_PROGRAM_WEAKREF;
+        if (declaration != BUSTER_CHECK_NONE && !check_input_bit(program->input->declaration_bits, declaration, BUSTER_CHECK_BITS_COMPOUND) && !defined[object] &&
+            (asm_defines == 0 || asm_defines[s + 1] == 0) && (check_input_linkage(program->input->declaration_bits, declaration) == 2 || weakref || weak[s + 1]))
+        {
+            const uint32_t identifier = parser->tokens.names[declaration];
+            externals[external_count++] = symbol_names[s + 1].length != 0 ? symbol_names[s + 1] :
+                                                                              (String8){ .pointer = (char*)intern_bytes(identifiers, identifier),
+                                                                                         .length = intern_length(identifiers, identifier) };
+        }
+        else if (program->cfstring_class_own && object == program->cfstring_class)
+        {
+            // The class the unit's constant CFStrings point to (#148), which it doesn't declare.
+            externals[external_count++] = (String8){ .pointer = (char*)check_program_cfstring_class_name, .length = sizeof(check_program_cfstring_class_name) - 1 };
+        }
+    }
+    for (uint32_t r = 0; valid && externals != 0 && r < result->lowered.runtime_symbol_count; r += 1)
+    {
+        const char* spelling = check_lower_runtime_names[result->lowered.runtime_order[r]];
+        externals[external_count++] = (String8){ .pointer = (char*)spelling, .length = strlen(spelling) };
     }
     const LinkCapacity runtime = binding != NULL && valid ? bind_capacity_needed(binding->runtime, externals, external_count, scratch, &name_bytes, &atom_bytes) :
                                                             (LinkCapacity){ 0 };
@@ -3663,6 +3579,15 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             unit_wide += naked->unit.link.fixups.wide_count;
         }
     }
+    // The file-scope assembly's (check_program_asm_plan_file), whose atoms are counted apart: they come first.
+    const uint64_t file_atoms = file_unit != 0 && file_unit->link.atoms.count != 0 ? file_unit->link.atoms.count - 1 : 0;
+    if (file_unit != 0)
+    {
+        unit_symbols += file_unit->link.symbols.count != 0 ? file_unit->link.symbols.count - 1 : 0;
+        unit_names += file_unit->link.names.count != 0 ? file_unit->link.names.count - 1 : 0;
+        unit_fixups += file_unit->link.fixups.count;
+        unit_wide += file_unit->link.fixups.wide_count;
+    }
     // patchable_function_entry's entries (#1447, CheckProgramCode.patchable_atoms): an atom, a fixup, a label and its name
     // each.
     uint32_t patched = 0;
@@ -3680,7 +3605,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     uint64_t cpu_fixups = 0;
     check_program_cpu_room(program, &cpu_atoms, &cpu_symbols, &cpu_fixups);
     const uint64_t atom_count = (uint64_t)data_capacity.atoms + count + helpers->count + pools->count + runtime.atoms + (frames != 0 ? 1 : 0) +
-                                (valid ? result->lowered.table_count : 0) + file_asm.count + structor_count + unit_atoms + patched + cpu_atoms;
+                                (valid ? result->lowered.table_count : 0) + file_atoms + structor_count + unit_atoms + patched + cpu_atoms;
     const uint64_t fixup_count = (uint64_t)data_capacity.fixups + references + runtime.fixups + frames + table_entries + structor_count + unit_fixups + patched +
                                  cpu_fixups;
     const uint64_t wide_count = (uint64_t)data_capacity.wide_addends + references + runtime.wide_addends + unit_wide;
@@ -3813,6 +3738,14 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             const bool is_common = check_program_emit_common(commons[s + 1], program->input->common_tentatives) && alias == NULL &&
                                    kind == BUSTER_LINK_SYMBOL_OBJECT && (flags & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_GLOBAL;
             flags = is_common ? (uint8_t)((flags & ~BUSTER_LINK_SYMBOL_TYPE) | BUSTER_LINK_SYMBOL_COMMON) : flags;
+            // A symbol a template defines (asm_defines: a declaration's, `f:` or `.comm x,4,4`) is the template's label,
+            // as clang's assembler makes it: its type the template's (none without `.type`, a `.comm`'s common), local
+            // without a binding directive, and of the template's visibility or else the declaration's.
+            const CheckAsmName* defining = asm_defines != 0 && asm_defines[s + 1] != 0 ? &asms->names[asm_defines[s + 1] - 1] : NULL;
+            const uint8_t defining_visibility = defining != NULL ? defining->flags & BUSTER_LINK_SYMBOL_VISIBILITY : BUSTER_LINK_SYMBOL_DEFAULT;
+            flags = defining == NULL ? flags :
+                    (uint8_t)((defining->flags & (BUSTER_LINK_SYMBOL_TYPE | BUSTER_LINK_SYMBOL_BINDING)) |
+                              (defining_visibility != BUSTER_LINK_SYMBOL_DEFAULT ? defining_visibility : flags & BUSTER_LINK_SYMBOL_VISIBILITY));
         }
         else if (object != 0 && object - 1 < parser->tokens.count &&
                  (parser->tokens.kinds[object - 1] == PARSE_KIND_STRING || check_input_function_name_token(parser, object - 1) ||
@@ -3989,6 +3922,11 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     {
         result->link.symbols.source[result->lowered.label_symbols[k]] = BUSTER_LINK_SOURCE_PROGRAM;
     }
+    // The program's symbols the templates define (asm_defines), which the units' merge defines.
+    for (uint32_t s = 1; valid && binding != NULL && asm_defines != 0 && s <= program->symbol_count; s += 1)
+    {
+        result->link.symbols.source[s] = asm_defines[s] != 0 ? BUSTER_LINK_SOURCE_PROGRAM : result->link.symbols.source[s];
+    }
     // The aliases' and ifuncs' symbols (#147), which check_program_sections defines once the static data's atoms exist:
     // the program's in -c's link too, so that the static data may refer to a local one before it has an atom
     // (check_data_emit's local targets).
@@ -4057,16 +3995,6 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             references[i].target = valid ? asm_symbols[references[i].target] : 0;
         }
     }
-    // The file-scope assembly's atoms, before the functions', as clang's assembly output has a module's asm first.
-    result->asm_atoms = valid && file_asm.count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, AtomId, file_asm.count) : 0;
-    valid = valid && (file_asm.count == 0 || result->asm_atoms != 0);
-    for (uint32_t a = 0; valid && a < file_asm.count; a += 1)
-    {
-        result->asm_atoms[a] = link_add_atom(&result->link, file_asm.classes[a], file_asm.alignments[a], file_asm.sizes[a], file_asm.bytes[a], 0);
-        valid = result->asm_atoms[a] != 0;
-    }
-    result->asm_sections = valid ? file_asm.sections : 0;
-    result->asm_atom_count = valid ? file_asm.count : 0;
     // The bodies' atoms, symbols and fixups in source order, each body's code as its lane made it, then the helpers', which
     // are encoded here: the labels' symbols, each function's after the ones before it (CheckProgramLowered.label_symbols),
     // and with unwind tables each function's frame, as its code is sized.
@@ -4078,6 +4006,23 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     result->unit_temporary_count = 0;
     valid = valid && (unit_atoms == 0 || (result->unit_atoms != 0 && result->unit_sections != 0)) &&
             (unit_symbols == 0 || result->unit_temporary != 0);
+    // The file-scope assembly's atoms, symbols and fixups (check_program_asm_plan_file), before the functions', as clang's
+    // assembly output has a module's asm first: each atom in its section in -c's object (CheckProgramCode.asm_sections).
+    result->asm_atoms = valid && file_atoms != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, AtomId, file_atoms) : 0;
+    result->asm_sections = valid && file_atoms != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, ObjectAtomSection, file_atoms) : 0;
+    result->asm_atom_count = 0;
+    valid = valid && (file_atoms == 0 || (result->asm_atoms != 0 && result->asm_sections != 0));
+    if (valid && file_unit != 0)
+    {
+        AtomId entry_atom = 0;
+        uint8_t* entry_bytes = 0;
+        uint64_t entry_length = 0;
+        valid = check_program_emit_asm_unit(result, asms, file_unit, asm_symbols, 0, result->asm_atoms, result->asm_sections, &result->asm_atom_count, bytes,
+                                            scratch, &entry_atom, &entry_bytes, &entry_length);
+        // Its atoms' bytes are the only room it takes that the link's capacity doesn't count, as the file-scope assembly's
+        // copy did before (#619): a failure is the bytes arena's.
+        result->status = valid ? result->status : CHECK_PROGRAM_RESOURCE;
+    }
     // The templates of alignment and section directives alone: their data atoms and labels, without a helper to call.
     for (uint32_t s = 0; valid && asms->plans != 0 && s < program->input->asm_count; s += 1)
     {
@@ -4840,3 +4785,4 @@ static bool check_program_sections(CheckProgramCode* code, const CheckProgram* p
     }
     return valid;
 }
+#endif

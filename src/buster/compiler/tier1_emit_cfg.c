@@ -108,7 +108,7 @@ static bool tier1_emit_cfg_chain(const Tier1SelectPlan* plan)
         const bool dynamic = op == IR_ALLOCA || op == IR_STACK_SAVE || op == IR_STACK_RESTORE;
         // A machine row (#141) is the CFG consumer's (tier1_emit_cfg_row).
         chain = op != IR_PHI && op != IR_STACK_ADDR && op != IR_LIFETIME && op != IR_SYMBOL_ADDR && op != IR_CALL_INDIRECT && (op != IR_PARAM || (prefix && !narrow)) && rule != TIER1_RULE_DIVIDE && !dynamic &&
-                (op != IR_CALL || (function->calls[function->b[node]].abi == 0 && function->calls[function->b[node]].row == 0)) &&
+                (op != IR_CALL || (function->calls[function->b[node]].abi == 0 && function->calls[function->b[node]].row == 0 && function->calls[function->b[node]].body == 0)) &&
                 rule != TIER1_RULE_SHIFT && !mask && !floating && !stacked;
         prefix &= op == IR_PARAM;
     }
@@ -534,9 +534,14 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
         returns += function->op[node] == IR_RET;
         symbols += function->op[node] == IR_SYMBOL_ADDR;
         // A division's rax and rdx, and a shift's rcx, may need call-save rows for the values it doesn't take.
-        const uint8_t rule = plan->covered[node] ? TIER1_RULE_NONE : plan->patterns[node].rule;
-        fixed_saves |= tier1_select_fixed_registers(rule);
-        emitted->fixed_count += tier1_select_fixed_registers(rule) != 0;
+        // An asm body's general registers too (#1839, tier1_select_node_fixed), callee-saved ones among them, which the
+        // prologue saves (Tier1EmitPrepared.asm_callee).
+        const uint32_t fixed = plan->covered[node] ? 0 : tier1_select_node_fixed(function, &plan->patterns[node]);
+        const bool body = !plan->covered[node] && plan->patterns[node].rule == TIER1_RULE_ASM;
+        fixed_saves |= fixed;
+        emitted->fixed_count += fixed != 0;
+        prepared->asm_count += body;
+        prepared->asm_callee |= body ? fixed & BUSTER_ABI_CALLEE_SAVED : 0;
         if (tier1_select_function_call(function, node))
         {
             prepared->call_count += 1;
@@ -578,7 +583,9 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
     // The general registers' call-save columns: every caller-saved register where the function calls, and the fixed
     // registers' sequences'. Their rows, after allocation, are those of them a call or a sequence saves (tier1_emit_cfg_saves;
     // #177): until then, every column's.
-    prepared->call_save_columns = (prepared->call_count != 0 ? options->register_mask : 0) | (fixed_saves & options->register_mask);
+    // An asm body's callee-saved registers (#1839) hold values only in a function that calls (tier1_emit_cfg_callee).
+    const uint32_t held = options->register_mask | (prepared->call_count != 0 ? BUSTER_TIER1_EMIT_CFG_CALLEE : 0);
+    prepared->call_save_columns = (prepared->call_count != 0 ? options->register_mask : 0) | (fixed_saves & held);
     prepared->call_save_mask = prepared->call_save_columns;
     const uint32_t call_slots = (uint32_t)__builtin_popcount(prepared->call_save_columns);
     // The slots' columns: a value's at its node, the general registers' caller-save rows', the opmask registers' (one
@@ -693,8 +700,8 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
                 .column_count = prepared->slot_columns,
             },
             .calls = &prepared->call_abi,
-            .call_count = prepared->call_count != 0,
-            .flags = tier1_emit_cfg_frame_flags(plan->function, options, prepared->call_count != 0),
+            .call_count = prepared->call_count + prepared->asm_count != 0,
+            .flags = tier1_emit_cfg_frame_flags(plan->function, options, prepared->call_count + prepared->asm_count != 0),
         };
         Tier1FrameRequirements requirements = { 0 };
         const Tier1FrameError framed = tier1_frame_requirements(&request, &requirements);
@@ -1012,10 +1019,24 @@ static Tier1EmitError tier1_emit_cfg_saves(const Tier1SelectPlan* plan, Arena* s
         rows[row_count] = base + 2 * node + 1;
         row_count += tier1_emit_cfg_row_masks(plan, node) ? 1 : 0;
     }
+    // And the asm bodies' definition phases (#1839), whose touched xmm registers' floating values are saved in rows as a
+    // call's are (tier1_emit_cfg_asm).
+    uint32_t body_count = 0;
+    for (uint32_t node = 0; ok && emitted->prepared.vector_columns != 0 && emitted->prepared.asm_count != 0 && node < count; node += 1)
+    {
+        body_count += !plan->covered[node] && plan->patterns[node].rule == TIER1_RULE_ASM ? 1 : 0;
+    }
+    uint32_t* bodies = ok && body_count != 0 ? ir_allocate(scratch, (uint64_t)body_count + 1, 4, &ok) : 0;
+    body_count = 0;
+    for (uint32_t node = 0; ok && bodies != 0 && node < count; node += 1)
+    {
+        bodies[body_count] = base + 2 * node + 1;
+        body_count += !plan->covered[node] && plan->patterns[node].rule == TIER1_RULE_ASM ? 1 : 0;
+    }
     uint32_t general_saved = 0;
     uint32_t saved = 0;
     uint32_t vectors_saved = 0;
-    for (uint32_t i = 0; ok && (saves.positions != 0 || row_count != 0) && i < cfg->intervals.count; i += 1)
+    for (uint32_t i = 0; ok && (saves.positions != 0 || row_count != 0 || body_count != 0) && i < cfg->intervals.count; i += 1)
     {
         const uint32_t class = cfg->intervals.classes[i];
         const uint32_t own = emitted->cfg_input.definitions[cfg->intervals.values[i]];
@@ -1025,14 +1046,14 @@ static Tier1EmitError tier1_emit_cfg_saves(const Tier1SelectPlan* plan, Arena* s
             const bool in_register = allocation->kinds[f] == BUSTER_TIER1_ALLOCATE_REGISTER;
             // A register found saved isn't searched again: its column is left out.
             general_saved |= class == BUSTER_TIER1_ALLOCATE_GPR && tier1_emit_fragment_saved(allocation, f, own, columns & ~general_saved, emitted->callee_registers, &saves) ? 1u << reg : 0;
-            for (uint32_t list = 0; class != BUSTER_TIER1_ALLOCATE_GPR && list < 2; list += 1)
+            for (uint32_t list = 0; class != BUSTER_TIER1_ALLOCATE_GPR && list < 3; list += 1)
             {
-                const uint32_t* positions = list == 0 ? calls : rows;
-                const uint32_t position_count = list == 0 ? call_count : row_count;
+                const uint32_t* positions = list == 0 ? calls : list == 1 ? rows : bodies;
+                const uint32_t position_count = list == 0 ? call_count : list == 1 ? row_count : body_count;
                 const uint32_t low = tier1_emit_first_at(positions, position_count, allocation->starts[f]);
                 const bool covers = low < position_count && positions[low] < allocation->ends[f] && in_register;
-                saved |= class == BUSTER_TIER1_ALLOCATE_MASK && covers && reg < 8 ? 1u << reg : 0;
-                vectors_saved |= list == 0 && class == BUSTER_TIER1_ALLOCATE_VECTOR && covers && reg < 16 ? 1u << reg : 0;
+                saved |= list != 2 && class == BUSTER_TIER1_ALLOCATE_MASK && covers && reg < 8 ? 1u << reg : 0;
+                vectors_saved |= list != 1 && class == BUSTER_TIER1_ALLOCATE_VECTOR && covers && reg < 16 ? 1u << reg : 0;
             }
         }
     }
@@ -1323,9 +1344,10 @@ static Tier1EmitError tier1_emit_cfg_frame(const Tier1SelectPlan* plan, const Ti
                 .column_count = prepared->slot_columns,
             },
             .calls = &prepared->call_abi,
-            .call_count = prepared->call_count != 0,
-            .used_callee_saved = emitted->callee_used,
-            .flags = tier1_emit_cfg_frame_flags(plan->function, options, prepared->call_count != 0),
+            .call_count = prepared->call_count + prepared->asm_count != 0,
+            // The callee-saved registers an asm body touches (#1839), which the prologue saves as clang's saves cpuid's rbx.
+            .used_callee_saved = emitted->callee_used | prepared->asm_callee,
+            .flags = tier1_emit_cfg_frame_flags(plan->function, options, prepared->call_count + prepared->asm_count != 0),
         };
         const Tier1FrameError framed = BUSTER_VECTOR_PATH(options->vector) ? tier1_frame_plan(&request, output, scratch, &emitted->frame) : tier1_frame_plan_scalar(&request, output, scratch, &emitted->frame);
         tier1_emit_diagnose(options, TIER1_EMIT_CAUSE_FRAME, framed);
@@ -2945,6 +2967,95 @@ static Tier1EmitError tier1_emit_cfg_kernel(const Tier1SelectPlan* plan, const T
     return error;
 }
 
+// An asm body's records (#1839, TIER1_RULE_ASM) in its node's place, at its definition phase: the values that live past
+// the node in the general registers it touches (its fixed registers, tier1_select_node_fixed), a callee-saved one's
+// among them, stored into their call-save rows and loaded after, as a fixed rule's sequence has them (tier1_emit_fixed),
+// and the floating values in the xmm registers it touches into theirs, as a call's are; between them its records, each
+// that addresses the operand block (BUSTER_TIER0_ASM_BLOCK) addressing the block's frame object from the frame's base
+// register, and its own branches, each to its target's record in the function's code (the restores' first record for one
+// to its end), sized with the function's. The consumer gave those registers rows (tier1_emit_cfg_saves); one missing is
+// TIER1_EMIT_ALLOCATION. Its records are one ORIGINAL of the node, the saves' and the restores' moves. Into `range`, the
+// body's first record and the one past its last: the template's own, which the target's forms don't bound (as the
+// assembler takes any instruction whatever -march says, so does clang's object).
+static Tier1EmitError tier1_emit_cfg_asm(const Tier1SelectPlan* plan, Tier1EmitResult* emitted, const Tier1EmitTransitions* transitions, uint32_t node, uint32_t use, Tier1EmitBuffer* buffer,
+                                         uint32_t* range)
+{
+    const IrFunction* function = plan->function;
+    const IrCall* call = &function->calls[function->b[node]];
+    const uint32_t index = (uint32_t)plan->patterns[node].immediate;
+    const IrAsmBody* body = index < function->asm_body_count ? &function->asm_bodies[index] : 0;
+    const uint32_t block = body != 0 && call->argument_count == 1 ? function->extra[call->argument_first] : BUSTER_IR_NONE;
+    int32_t offset = 0;
+    const bool placed = block == BUSTER_IR_NONE || (block < function->instruction_count && function->op[block] == IR_STACK_ADDR && tier1_emit_cfg_object(function, emitted, function->a[block], &offset));
+    Tier1EmitError error = body == 0 ? TIER1_EMIT_INVALID : placed ? TIER1_EMIT_OK : TIER1_EMIT_FRAME;
+    uint32_t saved = 0;
+    uint32_t vectors_saved = 0;
+    for (uint32_t location = 0; location < BUSTER_TIER1_EMIT_VECTOR_LOCATION + 15; location += 1)
+    {
+        const bool general = location < BUSTER_TIER1_EMIT_GENERAL_REGISTERS;
+        const bool vector = location >= BUSTER_TIER1_EMIT_VECTOR_LOCATION;
+        const uint32_t reg = vector ? location - BUSTER_TIER1_EMIT_VECTOR_LOCATION : location;
+        const bool touched = body != 0 && (general || vector) && ((body->touched >> (vector ? 16 + reg : reg)) & 1) != 0;
+        const uint32_t owner = touched ? transitions->owners[location] : BUSTER_IR_NONE;
+        const bool live = owner != BUSTER_IR_NONE && owner != node && transitions->registers[owner] == location && tier1_cfg_interval_at(&emitted->cfg, emitted->node_values[owner], use + 1) != BUSTER_TIER1_CFG_NONE;
+        saved |= live && general ? 1u << reg : 0;
+        vectors_saved |= live && vector ? 1u << reg : 0;
+    }
+    error = error == TIER1_EMIT_OK && ((saved & ~emitted->prepared.call_save_mask) != 0 || (vectors_saved & ~emitted->prepared.vector_save_mask) != 0) ? TIER1_EMIT_ALLOCATION : error;
+    const Tier1SelectFloatForms* forms = emitted->prepared.vector_bytes != 0 ? tier1_select_class_forms(emitted->prepared.vector_bytes, tier1_emit_encoding(&emitted->prepared)) : 0;
+    for (uint32_t pass = 0; pass < 2; pass += 1)
+    {
+        for (uint32_t reg = 0; error == TIER1_EMIT_OK && reg < BUSTER_TIER1_EMIT_GENERAL_REGISTERS; reg += 1)
+        {
+            error = ((saved >> reg) & 1) == 0 || tier1_emit_append(buffer, tier1_emit_call_save(emitted, reg, pass == 1)) ? error : TIER1_EMIT_MEMORY;
+            emitted->call_stores += pass == 0 ? (saved >> reg) & 1 : 0;
+            emitted->call_loads += pass == 1 ? (saved >> reg) & 1 : 0;
+        }
+        for (uint32_t x = 0; error == TIER1_EMIT_OK && x < 15; x += 1)
+        {
+            const uint32_t row = tier1_emit_cfg_vector_save_row(emitted, x);
+            const bool listed = ((vectors_saved >> x) & 1) != 0;
+            error = !listed || row < emitted->frame.count ? error : TIER1_EMIT_FRAME;
+            const X86Instruction record = {
+                .displacement = listed ? emitted->frame.offset[row] : 0,
+                .reg = (uint8_t)x,
+                .rm = (uint8_t)emitted->frame.base_register,
+                .mode = BUSTER_X86_MEMORY_BASE,
+                .form = forms != 0 ? (pass == 0 ? forms->store : forms->load) : pass == 0 ? X86_FORM_MOVSD_XM64_X : X86_FORM_MOVSD_X_XM64,
+            };
+            error = error != TIER1_EMIT_OK || !listed || tier1_emit_append(buffer, record) ? error : TIER1_EMIT_MEMORY;
+            emitted->call_stores += pass == 0 && listed;
+            emitted->call_loads += pass == 1 && listed;
+        }
+        tier1_emit_mark(buffer, tier1_origin(TIER1_ORIGIN_MOVE, use + 1), BUSTER_IR_NONE);
+        // The body's records, between the saves and the restores.
+        const uint32_t first = buffer->count;
+        range[0] = pass == 0 ? first : range[0];
+        uint32_t branch = 0;
+        for (uint32_t r = 0; error == TIER1_EMIT_OK && pass == 0 && r < body->count; r += 1)
+        {
+            X86Instruction record = body->records[r];
+            const bool addressed = (record.mode & BUSTER_X86_MODE_MEMORY) != 0 && (record.mode & BUSTER_X86_MODE_BASE) != 0 && record.rm == BUSTER_TIER0_ASM_BLOCK;
+            error = !addressed || block != BUSTER_IR_NONE ? error : TIER1_EMIT_INVALID;
+            record.rm = addressed ? (uint8_t)emitted->frame.base_register : record.rm;
+            record.displacement += addressed ? offset : 0;
+            const bool branches = branch < body->branch_count && body->branches[branch] == r;
+            error = error != TIER1_EMIT_OK || !branches || buffer->branch_count < buffer->branch_capacity ? error : TIER1_EMIT_MEMORY;
+            if (error == TIER1_EMIT_OK && branches)
+            {
+                buffer->branches[buffer->branch_count] = first + r;
+                buffer->targets[buffer->branch_count] = first + body->targets[branch];
+                buffer->branch_count += 1;
+                branch += 1;
+            }
+            error = error != TIER1_EMIT_OK || tier1_emit_append(buffer, record) ? error : TIER1_EMIT_MEMORY;
+        }
+        range[1] = pass == 0 ? buffer->count : range[1];
+        tier1_emit_mark(buffer, tier1_origin(TIER1_ORIGIN_NODE, node), BUSTER_IR_NONE);
+    }
+    return error;
+}
+
 static uint64_t tier1_emit_cfg_record_capacity(const IrFunction* function, bool probe)
 {
     uint64_t records = function->parameter_passed != 0 ? 2u * (uint64_t)function->parameter_count + 2 : 0;
@@ -2959,12 +3070,27 @@ static uint64_t tier1_emit_cfg_record_capacity(const IrFunction* function, bool 
         records += op == IR_VCONST ? 17u : 0;
         // A machine row's records, its operands' moves and its result's (#141, tier1_emit_cfg_row).
         records += call != 0 && call->row != 0 ? BUSTER_TIER1_EMIT_ROW_RECORDS : 0;
+        // An asm body's records and its saves and restores (#1839, tier1_emit_cfg_asm): of the general registers and of
+        // xmm0 to xmm14.
+        records += call != 0 && call->body != 0 && call->body <= function->asm_body_count ? function->asm_bodies[call->body - 1].count + 2u * (BUSTER_TIER1_EMIT_GENERAL_REGISTERS + 15u) : 0;
         // A dynamic allocation's probes (#177, tier1_emit_cfg_probed_allocation), past its rule's, and a call area's
         // loop and final touch (tier1_emit_cfg_adjust: up to eight records replacing its one subtraction).
         records += probe && op == IR_ALLOCA ? BUSTER_TIER1_EMIT_PROBE_RECORDS : 0;
         records += probe && call != 0 ? 7u : 0;
     }
     return records;
+}
+
+// An asm body's own branches (#1839, tier1_emit_cfg_asm).
+static uint64_t tier1_emit_cfg_asm_branches(const IrFunction* function)
+{
+    uint64_t branches = 0;
+    for (uint32_t node = 0; function->asm_body_count != 0 && node < function->instruction_count; node += 1)
+    {
+        const IrCall* call = function->op[node] == IR_CALL ? &function->calls[function->b[node]] : 0;
+        branches += call != 0 && call->body != 0 && call->body <= function->asm_body_count ? function->asm_bodies[call->body - 1].branch_count : 0;
+    }
+    return branches;
 }
 
 // The dynamic allocations' probes' branches (#177, tier1_emit_cfg_probed_allocation), three each, and each call area's
@@ -3030,7 +3156,7 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
     const uint64_t capacity = (uint64_t)count * BUSTER_TIER1_SELECT_RECORDS_PER_NODE + (uint64_t)allocation->fragment_count * 2 + (uint64_t)cfg->move_count * 2 + BUSTER_TIER1_FRAME_EMIT_RECORDS * ((uint64_t)returns + 1) + (uint64_t)emitted->prepared.call_count * BUSTER_TIER1_EMIT_CALL_RECORDS + (uint64_t)blocks * 2 + input->edge_count + tier1_emit_cfg_record_capacity(function, emitted->frame.probe_stack) +
                               tier1_emit_cfg_x87_copy_records(function, input, emitted->prepared.x87_count) + tier1_emit_cfg_x87_node_records(plan, emitted->prepared.x87_count) + (uint64_t)emitted->fixed_count * BUSTER_TIER1_EMIT_FIXED_RECORDS + 2 * BUSTER_TIER1_SELECT_MAX_ARGUMENTS;
     const uint64_t branch_capacity = BUSTER_TIER1_FRAME_EMIT_BRANCHES * ((uint64_t)returns + 1) + (uint64_t)blocks * 2 + input->edge_count +
-                                     (emitted->frame.probe_stack ? tier1_emit_cfg_probe_branches(function) : 0);
+                                     (emitted->frame.probe_stack ? tier1_emit_cfg_probe_branches(function) : 0) + tier1_emit_cfg_asm_branches(function);
     const uint64_t output_mark = output->length;
     const uint64_t scratch_mark = scratch->length;
     Tier1EmitError error = capacity <= UINT32_MAX && branch_capacity <= UINT32_MAX ? TIER1_EMIT_OK : TIER1_EMIT_LIMIT;
@@ -3098,6 +3224,9 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
     uint32_t* pending_branches = ok ? ir_allocate(scratch, branch_capacity + 1, 4, &ok) : 0;
     uint32_t* pending_goals = ok ? ir_allocate(scratch, branch_capacity + 1, 4, &ok) : 0;
     uint8_t* dropped = ok ? ir_allocate(scratch, (uint64_t)count + 1, 1, &ok) : 0;
+    // The asm bodies' records' ranges (#1839), in code order, which the target's forms don't bound.
+    uint32_t* asm_ranges = ok ? ir_allocate(scratch, 2 * (uint64_t)emitted->prepared.asm_count + 2, 4, &ok) : 0;
+    uint32_t asm_range_count = 0;
     error = ok || error != TIER1_EMIT_OK ? error : TIER1_EMIT_MEMORY;
     uint32_t* entries = 0;
     uint32_t pending = 0;
@@ -3555,6 +3684,14 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
             {
                 error = tier1_emit_cfg_row(plan, emitted, &transitions, row_sources, node, use, &buffer);
             }
+            else if (error == TIER1_EMIT_OK && selected && plan->patterns[node].rule == TIER1_RULE_ASM)
+            {
+                // An asm body (#1839): the saves of its fixed registers' rows hold their owners now, which nothing else
+                // stored since; those rows are taken as a fixed rule's are.
+                error = asm_range_count < emitted->prepared.asm_count ? tier1_emit_cfg_asm(plan, emitted, &transitions, node, use, &buffer, asm_ranges + 2 * asm_range_count) : TIER1_EMIT_INVALID;
+                asm_range_count += 1;
+                tier1_emit_fixed_rows(&saves, tier1_select_node_fixed(function, &plan->patterns[node]));
+            }
             else if (error == TIER1_EMIT_OK && selected && plan->patterns[node].rule == TIER1_RULE_VECTOR && plan->patterns[node].scale == BUSTER_TIER1_VECTOR_CONSTANT)
             {
                 error = tier1_emit_cfg_vector_constant(function, &holes, &buffer);
@@ -3693,9 +3830,15 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
     {
         error = TIER1_EMIT_INVALID;
     }
+    uint32_t asm_range = 0;
     for (uint32_t r = 0; error == TIER1_EMIT_OK && r < buffer.count; r += 1)
     {
-        if (!x86_target_form_allowed(allowed_forms, buffer.records[r].form))
+        while (asm_range < asm_range_count && r >= asm_ranges[2 * asm_range + 1])
+        {
+            asm_range += 1;
+        }
+        const bool own = asm_range < asm_range_count && r >= asm_ranges[2 * asm_range];
+        if (!own && !x86_target_form_allowed(allowed_forms, buffer.records[r].form))
         {
             error = TIER1_EMIT_TARGET;
         }
