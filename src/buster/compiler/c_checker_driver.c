@@ -3249,7 +3249,7 @@ static uint32_t check_driver_parameter_place(const Parser* parser, const CheckIn
 // (check_driver_conversion_hint) and its flag. The source's type as written, with its typedef. NULL where a type has none.
 static const char* check_driver_conversion_words(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, const TypeTable* types,
                                                  CheckWarningSpelling* spell, uint32_t source, TypeId target, uint32_t target_spelling, uint32_t target_sugar,
-                                                 uint8_t action, Arena* scratch)
+                                                 uint32_t target_declaration, uint8_t action, Arena* scratch)
 {
     const char* result = NULL;
     if (source < stream->count && target != 0)
@@ -3257,9 +3257,15 @@ static const char* check_driver_conversion_words(const Parser* parser, Preproces
         const TypeId value = check_stream_type(stream, source);
         const uint32_t source_spelling = check_driver_pointer_spelling(parser, input, stream, types, source);
         // Each as its declaration's sugar writes it, where it has some (#1447).
-        const String8 to = check_driver_warning_type_sugared(parser, pp, input, types, spell, scratch, target, target_spelling, target_sugar);
+        // A declaration whose parameters' specifiers name typedefs prints them, with the a.k.a. (#1447 item 5).
+        const String8 placed_to = target_sugar == 0 ? check_driver_placed_type(parser, pp, input, types, spell, scratch, target, target_declaration) : (String8){ 0 };
+        const String8 to = placed_to.length != 0 ? placed_to : check_driver_warning_type_sugared(parser, pp, input, types, spell, scratch, target, target_spelling, target_sugar);
         const uint32_t source_sugar = check_driver_operand_sugar(input, stream, source);
-        const String8 from = check_driver_warning_type_sugared(parser, pp, input, types, spell, scratch, value, source_spelling, source_sugar);
+        const String8 placed_from = source_sugar == 0 ?
+                                    check_driver_placed_type(parser, pp, input, types, spell, scratch, value, check_driver_operand_declaration(input, stream, source)) :
+                                    (String8){ 0 };
+        const String8 from = placed_from.length != 0 ? placed_from :
+                             check_driver_warning_type_sugared(parser, pp, input, types, spell, scratch, value, source_spelling, source_sugar);
         const CheckDriverConversion kind = check_driver_conversion_kind(types, target, value);
         const uint32_t incompatible = kind == CHECK_DRIVER_CONVERSION_INCOMPATIBLE ? 1 : 0;
         static const char* const lead[] = {
@@ -3334,7 +3340,8 @@ static const char* check_driver_initializer_conversion(const Parser* parser, Pre
     const bool wide = element == BUSTER_TYPE_INT || element == BUSTER_TYPE_USHORT || element == BUSTER_TYPE_UINT;
     const char* result = source >= stream->count ? NULL :
                          !array ? check_driver_conversion_words(parser, pp, input, stream, types, &spell, source, spelled, spelling,
-                                                                whole ? check_input_declared_sugar(input, declaration) : 0, 0, scratch) :
+                                                                whole ? check_input_declared_sugar(input, declaration) : 0, whole ? declaration : BUSTER_CHECK_NONE, 0,
+                                                                scratch) :
                          narrow ? "array initializer must be an initializer list or string literal" :
                          wide ? "array initializer must be an initializer list or wide string literal" : "array initializer must be an initializer list";
     *located = whole ? declaration : token;
@@ -3367,6 +3374,7 @@ static const char* check_driver_conversion_error(const Parser* parser, Preproces
     TypeId target = 0;
     uint32_t target_spelling = 0;
     uint32_t target_sugar = 0;
+    uint32_t target_declaration = BUSTER_CHECK_NONE;
     uint32_t at = token;
     *note_token = BUSTER_CHECK_NONE;
     *note = NULL;
@@ -3379,6 +3387,7 @@ static const char* check_driver_conversion_error(const Parser* parser, Preproces
         }
         target = check_input_object_spelling(types, input, parser, at, graph->types[node], graph->types[node], &target_spelling);
         target_sugar = at < input->token_count ? check_input_declared_sugar(input, at) : 0;
+        target_declaration = at;
     }
     else if (applies && op == CHECK_OP_ASSIGN)
     {
@@ -3393,6 +3402,7 @@ static const char* check_driver_conversion_error(const Parser* parser, Preproces
         target_spelling = declarator < input->token_count ? check_input_specifier_spelling(input, parser, declarator) : member ? 0 : target_spelling;
         target = member ? lvalue : target;
         target_sugar = member ? 0 : check_driver_operand_sugar(input, stream, left);
+        target_declaration = member ? BUSTER_CHECK_NONE : check_driver_operand_declaration(input, stream, left);
     }
     else if (applies && returning)
     {
@@ -3432,10 +3442,12 @@ static const char* check_driver_conversion_error(const Parser* parser, Preproces
             *note = named ? check_warning_text(scratch, "passing argument to parameter '%.*s' here", (int)intern_length(pp->table, identifier),
                                                intern_bytes(pp->table, identifier)) : "passing argument to parameter here";
             target_spelling = check_driver_parameter_spelling(parser, input, parameter);
+            target_declaration = parameter;
         }
     }
     const uint8_t action = op == CHECK_OP_INITIALIZE ? 0 : op == CHECK_OP_ASSIGN ? 1 : returning ? 2 : 3;
-    const char* result = applies ? check_driver_conversion_words(parser, pp, input, stream, types, spell, source, target, target_spelling, target_sugar, action,
+    const char* result = applies ? check_driver_conversion_words(parser, pp, input, stream, types, spell, source, target, target_spelling, target_sugar,
+                                                                 target_declaration, action,
                                                                  scratch) : NULL;
     *located = result != NULL ? at : *located;
     return result;
