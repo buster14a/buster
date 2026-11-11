@@ -1012,6 +1012,13 @@ typedef enum CheckAttributeArgumentError
     CHECK_ARGUMENT_OBJC_RELATED_CLASS,
     CHECK_ARGUMENT_OBJC_RELATED_SELECTOR,
     CHECK_ARGUMENT_EXPECTED_COMMA,
+    // swift_newtype's and swift_wrapper's parser's empty parentheses (#1447, check_input_swift_newtype_parse), "argument
+    // required after attribute", at the `)`.
+    CHECK_ARGUMENT_REQUIRED_AFTER,
+    // swift_async_error's convention other than `none` with swift_async(none) on the function (#1447,
+    // check_input_attribute_swift_async_error), "'swift_async' attribute must be applied to a function annotated with
+    // non-'none' attribute 'swift_async'", at the swift_async.
+    CHECK_ARGUMENT_SWIFT_ASYNC_NONE,
     CHECK_ARGUMENT_COUNT,
 } CheckAttributeArgumentError;
 
@@ -2309,6 +2316,27 @@ static bool check_input_attribute_validate(CheckInputReader* reader, CheckInputA
 #define BUSTER_CHECK_PARSED_ERROR 1
 #define BUSTER_CHECK_PARSED_UNSURE 2
 
+
+// Where suppress's argument from `argument` to `stop` (its `,` or the list's end) is no string literal (#1844), or
+// BUSTER_CHECK_NONE: clang's parser reads each of its string literals through any number of parentheses
+// (`suppress((("a")))`), and its "expected string literal" is at the first token inside them that starts none. What
+// follows a whole literal that is no `)` is the parser's error.
+static uint32_t check_input_attribute_suppress_literal(const Parser* parser, uint32_t argument, uint32_t stop)
+{
+    uint32_t token = argument;
+    while (token + 1 < stop && parser->tokens.kinds[token] == PARSE_KIND_L_PAREN)
+    {
+        token += 1;
+    }
+    return token < stop && parser->tokens.kinds[token] == PARSE_KIND_STRING ? BUSTER_CHECK_NONE : token;
+}
+
+// Whether a name is suppress's, as written with its keyword underscores or without.
+static bool check_input_attribute_suppress_name(String8 name)
+{
+    return check_input_attribute_equal(name, "suppress") || check_input_attribute_equal(name, "__suppress__");
+}
+
 static uint8_t check_input_attribute_parsed(CheckInputReader* reader, CheckInputAttributes* attributes, const CheckInputAttribute* attribute)
 {
     const Parser* parser = reader->parser;
@@ -2337,7 +2365,7 @@ static uint8_t check_input_attribute_parsed(CheckInputReader* reader, CheckInput
         for (uint32_t token = first; !identifier && token < end; token += 1)
         {
             const uint8_t kind = parser->tokens.kinds[token];
-            literal &= kind == PARSE_KIND_STRING;
+            literal &= kind == PARSE_KIND_STRING || (attribute->kind == CHECK_ATTRIBUTE_SUPPRESS && (kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_R_PAREN));
             const String8 spelled = kind == PARSE_KIND_IDENTIFIER ? check_input_attribute_name(reader, parser->tokens.names[token]) : (String8){ 0 };
             const uint8_t previous = token > 0 ? parser->tokens.kinds[token - 1] : PARSE_KIND_END;
             const uint8_t next = token + 1 < stop ? parser->tokens.kinds[token + 1] : PARSE_KIND_END;
@@ -2352,9 +2380,11 @@ static uint8_t check_input_attribute_parsed(CheckInputReader* reader, CheckInput
         if (identifier)
         {
         }
-        else if (string && first < end && parser->tokens.kinds[first] != PARSE_KIND_STRING)
+        else if (string && first < end && (attribute->kind == CHECK_ATTRIBUTE_SUPPRESS ? check_input_attribute_suppress_literal(parser, first, end) != BUSTER_CHECK_NONE :
+                                                                                         parser->tokens.kinds[first] != PARSE_KIND_STRING))
         {
-            check_input_attribute_argument_error(reader, attributes, attribute, first, CHECK_ARGUMENT_STRING_LITERAL, 0);
+            const uint32_t at = attribute->kind == CHECK_ATTRIBUTE_SUPPRESS ? check_input_attribute_suppress_literal(parser, first, end) : first;
+            check_input_attribute_argument_error(reader, attributes, attribute, at, CHECK_ARGUMENT_STRING_LITERAL, 0);
             result = BUSTER_CHECK_PARSED_ERROR;
         }
         else if (unsure || (string && !literal))
@@ -2928,6 +2958,7 @@ static uint32_t check_input_availability_parse(CheckInputReader* reader, CheckIn
 static uint32_t check_input_external_source_parse(CheckInputReader* reader, CheckInputAttributes* attributes, CheckInputAttribute* attribute);
 static uint32_t check_input_type_tag_parse(CheckInputReader* reader, CheckInputAttributes* attributes, CheckInputAttribute* attribute);
 static uint32_t check_input_objc_bridge_related_parse(CheckInputReader* reader, CheckInputAttributes* attributes, CheckInputAttribute* attribute);
+static uint32_t check_input_swift_newtype_parse(CheckInputReader* reader, CheckInputAttributes* attributes, CheckInputAttribute* attribute);
 static bool check_input_type_tag_handled(CheckInputReader* reader, CheckInputAttributes* attributes, CheckInputAttribute* attribute, uint32_t declaration, TypeId type);
 static bool check_input_type_tag_declaration(CheckInputReader* reader, CheckInputAttributes* attributes, uint32_t name, TypeId type, uint32_t previous,
                                              uint32_t initializer);
@@ -2988,7 +3019,8 @@ static bool check_input_attribute_ignored_lists(CheckInputReader* reader, uint32
                 const bool availability = check_input_attribute_equal(spelled, "availability");
                 const bool type_tag = check_input_attribute_equal(spelled, "type_tag_for_datatype");
                 const bool related = check_input_attribute_equal(spelled, "objc_bridge_related");
-                const bool custom = availability || type_tag || related || check_input_attribute_equal(spelled, "external_source_symbol");
+                const bool newtype = check_input_attribute_equal(spelled, "swift_newtype") || check_input_attribute_equal(spelled, "swift_wrapper");
+                const bool custom = availability || type_tag || related || newtype || check_input_attribute_equal(spelled, "external_source_symbol");
                 if (pass == 0 && valid && custom)
                 {
                     CheckInputAttributes holder = { 0 };
@@ -3002,10 +3034,12 @@ static bool check_input_attribute_ignored_lists(CheckInputReader* reader, uint32
                     };
                     valid = (availability ? check_input_availability_parse(reader, &holder, &item) :
                              type_tag ? check_input_type_tag_parse(reader, &holder, &item) :
-                             related ? check_input_objc_bridge_related_parse(reader, &holder, &item) : check_input_external_source_parse(reader, &holder, &item)) !=
+                             related ? check_input_objc_bridge_related_parse(reader, &holder, &item) :
+                             newtype ? check_input_swift_newtype_parse(reader, &holder, &item) : check_input_external_source_parse(reader, &holder, &item)) !=
                             BUSTER_CHECK_CUSTOM_ERROR;
                 }
                 uint32_t index = 0;
+                const bool suppress = check_input_attribute_suppress_name(check_input_attribute_name(reader, parser->tokens.names[name]));
                 for (uint32_t argument = arguments_first; pass == 0 && valid && !typed && !custom && argument < arguments_end; index += 1)
                 {
                     uint32_t stop = argument;
@@ -3041,11 +3075,13 @@ static bool check_input_attribute_ignored_lists(CheckInputReader* reader, uint32
                         // An escape sequence clang refuses in it, its error: then clang drops the attribute.
                         valid = false;
                     }
-                    else if (string && !identifier && !literals)
+                    else if (string && !identifier && !literals &&
+                             (!suppress || check_input_attribute_suppress_literal(parser, argument, stop) != BUSTER_CHECK_NONE))
                     {
                         CheckInputAttributes holder = { 0 };
                         const CheckInputAttribute item = { .first = name, .name_token = name, .name = parser->tokens.names[name], .end = items_end };
-                        check_input_attribute_argument_error(reader, &holder, &item, argument, CHECK_ARGUMENT_STRING_LITERAL, 0);
+                        const uint32_t at = suppress ? check_input_attribute_suppress_literal(parser, argument, stop) : argument;
+                        check_input_attribute_argument_error(reader, &holder, &item, at, CHECK_ARGUMENT_STRING_LITERAL, 0);
                         valid = false;
                     }
                     else if (undeclared != BUSTER_CHECK_NONE)
@@ -3640,7 +3676,7 @@ static bool check_input_attribute_generic(String8 name, const CheckInputFactRow*
         // Its resolved typedef uses are checked after expression reading, including constant-only type queries.
         "available_only_in_default_eval_method",
         "btf_decl_tag", "randomize_layout", "no_randomize_layout", "objc_boxable", "objc_bridge_mutable",
-        "objc_bridge", "objc_bridge_related", "release_handle", "use_handle", "suppress", "swift_bridge", "unsafe_buffer_usage", "amdgpu_max_num_work_groups",
+        "objc_bridge", "objc_bridge_related", "swift_newtype", "swift_wrapper", "swift_async_error", "release_handle", "use_handle", "suppress", "swift_bridge", "unsafe_buffer_usage", "amdgpu_max_num_work_groups",
         // The retain-ownership attributes, whose handlers' checks are check_input_attribute_ownership's.
         "cf_consumed", "ns_consumed", "os_consumed", "cf_returns_retained", "cf_returns_not_retained", "ns_returns_retained",
         "ns_returns_not_retained", "ns_returns_autoreleased", "os_returns_retained", "os_returns_not_retained",
@@ -4081,6 +4117,7 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
         // skips. The compatibility conditions' messages are strings too, which check_input_unevaluated_strings peels.
         const CheckInputArgumentsRow* read = valid && (known || !standard) && !custom ? check_input_attribute_gnu_arguments(reader, attribute.name) : NULL;
         const uint32_t identifiers = BUSTER_CHECK_ARGUMENTS_VARIADIC_IDENTIFIER | BUSTER_CHECK_ARGUMENTS_STRICT_IDENTIFIER;
+        const bool suppress = check_input_attribute_suppress_name(name);
         uint32_t literal = BUSTER_CHECK_NONE;
         uint32_t index = 0;
         for (uint32_t argument = attribute.argument_first; read != NULL && literal == BUSTER_CHECK_NONE && !escaped && argument < attribute.argument_end; index += 1)
@@ -4096,7 +4133,9 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
             const bool identifier = lone && ((index == 0 && (read->flags & BUSTER_CHECK_ARGUMENTS_IDENTIFIER) != 0) || (read->flags & identifiers) != 0);
             const bool string = index < 32 && ((read->strings >> index) & 1u) != 0 && (read->flags & (identifiers | BUSTER_CHECK_ARGUMENTS_TYPE)) == 0;
             escaped = string && !identifier && check_input_unevaluated_strings(reader, argument, stop, BUSTER_CHECK_NONE);
-            literal = arguments != NULL && string && !identifier && !escaped && (!strings || stop == argument) ? argument : BUSTER_CHECK_NONE;
+            // suppress's through parentheses (check_input_attribute_suppress_literal).
+            const uint32_t suppressed = suppress && stop != argument ? check_input_attribute_suppress_literal(parser, argument, stop) : argument;
+            literal = arguments != NULL && string && !identifier && !escaped && (!strings || stop == argument) ? suppressed : BUSTER_CHECK_NONE;
             argument = stop + 1;
         }
         if (literal != BUSTER_CHECK_NONE)
@@ -4165,10 +4204,14 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
         const bool type_tag = valid && known && custom && parenthesized && check_input_attribute_equal(name, "type_tag_for_datatype");
         // objc_bridge_related's class and selectors (#1447, check_input_objc_bridge_related_parse) too.
         const bool related = valid && known && custom && parenthesized && check_input_attribute_equal(name, "objc_bridge_related");
+        // swift_newtype's and swift_wrapper's kind (#1447, check_input_swift_newtype_parse) too.
+        const bool newtype = valid && known && custom && parenthesized &&
+                             (check_input_attribute_equal(name, "swift_newtype") || check_input_attribute_equal(name, "swift_wrapper"));
         const uint32_t custom_parse = availability ? check_input_availability_parse(reader, attributes, &attribute) :
                                       external_source ? check_input_external_source_parse(reader, attributes, &attribute) :
                                       type_tag ? check_input_type_tag_parse(reader, attributes, &attribute) :
-                                      related ? check_input_objc_bridge_related_parse(reader, attributes, &attribute) : BUSTER_CHECK_CUSTOM_KEPT;
+                                      related ? check_input_objc_bridge_related_parse(reader, attributes, &attribute) :
+                                      newtype ? check_input_swift_newtype_parse(reader, attributes, &attribute) : BUSTER_CHECK_CUSTOM_KEPT;
         valid &= custom_parse != BUSTER_CHECK_CUSTOM_ERROR;
         const bool dropped = custom_parse == BUSTER_CHECK_CUSTOM_DROPPED;
         // A type argument's (ParseTypeName's): an identifier that names no type is "unknown type name"; any other start of
@@ -4242,8 +4285,10 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
         uint32_t tag_bound = 0;
         // A tag's own list, between its keyword and its name or body, of its declaration or definition (a reference's is
         // the parser's error alone: check_input_tag_attributes).
-        const bool tag_keyword = declaration_place && reader->tag_attributes && (before_list == PARSE_KIND_STRUCT || before_list == PARSE_KIND_ENUM);
-        const bool tag_list = tag_keyword && check_input_attribute_tag_declares(parser, list_opener - 2);
+        // (Or a bare declaration's list after the tag's name, as clang's Sema takes it: CheckInputReader.tag_name_list.)
+        const bool tag_keyword = declaration_place && reader->tag_attributes &&
+                                 (before_list == PARSE_KIND_STRUCT || before_list == PARSE_KIND_ENUM || reader->tag_name_list);
+        const bool tag_list = tag_keyword && (reader->tag_name_list || check_input_attribute_tag_declares(parser, list_opener - 2));
         // annotate_type is a type's alone: on a declaration, clang's "cannot be applied to a declaration" (#1447); so is a
         // sliding type attribute on a declaration of no declarator (`[[clang::address_space(1)]];`).
         const bool annotate_type = check_input_attribute_equal(name, "annotate_type");
@@ -4537,9 +4582,11 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
             attribute.count_check = check_input_attribute_count_check(generic_fact, count, &attribute.count_bound);
             // Without parentheses, availability's handler's checkExactlyNumArgs(1) and external_source_symbol's
             // checkAtLeastNumArgs(1), which clang's parser's reading of its arguments always passes.
-            if (!parenthesized && (check_input_attribute_equal(name, "availability") || check_input_attribute_equal(name, "external_source_symbol")))
+            // swift_newtype's and swift_wrapper's checkExactlyNumArgs(1) too (#1447).
+            if (!parenthesized && (check_input_attribute_equal(name, "availability") || check_input_attribute_equal(name, "external_source_symbol") ||
+                                   check_input_attribute_equal(name, "swift_newtype") || check_input_attribute_equal(name, "swift_wrapper")))
             {
-                attribute.count_check = check_input_attribute_equal(name, "availability") ? BUSTER_CHECK_COUNT_EXACT : BUSTER_CHECK_COUNT_LEAST;
+                attribute.count_check = check_input_attribute_equal(name, "external_source_symbol") ? BUSTER_CHECK_COUNT_LEAST : BUSTER_CHECK_COUNT_EXACT;
                 attribute.count_bound = 1;
             }
             // A thread-safety handler's own count of at least one, after the facts' (checkAtLeastNumArgs), and abi_tag's;
@@ -4671,7 +4718,8 @@ static bool check_input_attributes(CheckInputReader* reader, uint32_t* cursor, u
         const uint8_t kind = parser->tokens.kinds[i];
         const uint32_t name = parser->tokens.names[i];
         const bool standard = kind == PARSE_KIND_L_SQUARE;
-        const uint32_t place = standard ? check_input_standard_place(parser, i) : BUSTER_CHECK_PLACE_DECLARATION;
+        // (A list after a bare tag declaration's name is the tag's, its declaration's: CheckInputReader.tag_name_list.)
+        const uint32_t place = standard && !reader->tag_name_list ? check_input_standard_place(parser, i) : BUSTER_CHECK_PLACE_DECLARATION;
         bool recovered = false;
         if (kind == PARSE_KIND_ATTRIBUTE || standard)
         {
@@ -7268,6 +7316,34 @@ static uint32_t check_input_checks_parameter_place(CheckInputReader* reader, uin
 // completion handler's index, as checkFunctionOrMethodParameterIndex reads it ("parameter 2"), whose parameter must be a
 // block pointer, which C has none of: always its error there, at the parameter, naming its type. Whether the declaration
 // goes on.
+// swift_async_error's convention (#1447, SemaSwift's handleAsyncError): 0 for none of clang's, else 1 none, 2 nonnull_error,
+// 3 zero_argument and 4 nonzero_argument, as written; a first argument of no identifier is 5.
+static uint32_t check_input_swift_async_error_convention(const CheckInputReader* reader, const CheckInputAttribute* attribute)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t argument = attribute->argument_first;
+    const bool identifier = attribute->argument_count != 0 && argument < attribute->argument_end && parser->tokens.kinds[argument] == PARSE_KIND_IDENTIFIER;
+    const uint32_t word = identifier ? parser->tokens.names[argument] : 0;
+    return !identifier ? 5u : check_input_checks_spelled(reader, word, "none") ? 1u : check_input_checks_spelled(reader, word, "nonnull_error") ? 2u :
+           check_input_checks_spelled(reader, word, "zero_argument") ? 3u : check_input_checks_spelled(reader, word, "nonzero_argument") ? 4u : 0u;
+}
+
+// Whether a declaration's attributes before `before` hold a swift_async_error its handler applied, of a convention other
+// than none (#1447): one a function's swift_async(none) can't have (checkSwiftAsyncErrorBlock).
+static bool check_input_swift_async_error_of(const CheckInputReader* reader, const CheckInputAttributes* attributes, const CheckInputAttribute* before)
+{
+    bool found = false;
+    for (const CheckInputAttribute* other = attributes->records; !found && other < before; other += 1)
+    {
+        const bool kept = other->kind == CHECK_ATTRIBUTE_UNKNOWN && !other->keyword && !other->ignored && !other->subject_ignored &&
+                          other->count_check == BUSTER_CHECK_COUNT_NONE;
+        const uint32_t convention = kept && check_input_attribute_equal(check_input_attribute_name((CheckInputReader*)reader, other->name), "swift_async_error") ?
+                                    check_input_swift_async_error_convention(reader, other) : 0u;
+        found = convention >= 2 && convention <= 4;
+    }
+    return found;
+}
+
 static bool check_input_attribute_swift_async(CheckInputReader* reader, CheckInputAttributes* attributes, CheckInputAttribute* attribute, TypeId function, uint32_t name)
 {
     const Parser* parser = reader->parser;
@@ -7332,6 +7408,79 @@ static bool check_input_attribute_swift_async(CheckInputReader* reader, CheckInp
                 reader->output->reports[before].type_spelling = spelled ? check_input_typedef_spelling(reader->output, parser, place) : 0;
             }
         }
+    }
+    else if (check_input_swift_async_error_of(reader, attributes, attribute))
+    {
+        // An earlier swift_async_error of a convention other than none (clang's checkSwiftAsyncErrorBlock).
+        check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_SWIFT_ASYNC_NONE, 0);
+    }
+    else
+    {
+        valid = true;
+    }
+    if (!valid && attributes->error == CHECK_ATTRIBUTE_ERROR_NONE)
+    {
+        attributes->error = CHECK_ATTRIBUTE_ERROR_ARGUMENTS;
+        attributes->error_first = attribute->first;
+        attributes->error_end = attribute->end;
+    }
+    return valid;
+}
+
+// swift_async_error's handler (#1447, SemaSwift's handleAsyncError), past its subjects and its count of one or two: its
+// convention (check_input_swift_async_error_convention); one clang doesn't know is its warning "'X' attribute argument not
+// supported: 'Y'" at the attribute, which ignores it; zero_argument and nonzero_argument take exactly two arguments, the
+// second an integer constant in 32 bits (CheckInputAttribute.constants, read with the attributes), and none and
+// nonnull_error one; a convention other than none on a function with swift_async(none) is clang's error at the
+// swift_async (check_input_swift_async_error_of for the other order). A first argument of no identifier, on which clang 23
+// crashes (handleAsyncError reads it as an identifier), is refused by name. Whether the declaration goes on.
+static bool check_input_attribute_swift_async_error(CheckInputReader* reader, CheckInputAttributes* attributes, CheckInputAttribute* attribute)
+{
+    const uint32_t convention = check_input_swift_async_error_convention(reader, attribute);
+    const bool indexed = convention == 3 || convention == 4;
+    const uint32_t wanted = indexed ? 2u : 1u;
+    // (The second argument's tokens: past the first's top-level comma.)
+    const uint32_t first = check_input_checks_argument_end(reader->parser, attribute->argument_first, attribute->argument_end) + 1;
+    const uint32_t end = attribute->argument_end;
+    const bool located = indexed && first < end;
+    const bool constant = ((attribute->constants >> 1) & 1u) != 0 && attribute->argument_values != NULL;
+    const bool wide = ((attribute->wide >> 1) & 1u) != 0;
+    bool valid = false;
+    const CheckInputAttribute* none = NULL;
+    for (const CheckInputAttribute* other = attributes->records; convention >= 2 && convention <= 4 && none == NULL && other < attribute; other += 1)
+    {
+        const bool kept = other->kind == CHECK_ATTRIBUTE_UNKNOWN && !other->keyword && !other->ignored && !other->subject_ignored &&
+                          other->count_check == BUSTER_CHECK_COUNT_NONE && other->argument_count == 1 &&
+                          check_input_attribute_equal(check_input_attribute_name(reader, other->name), "swift_async");
+        none = kept && reader->parser->tokens.kinds[other->argument_first] == PARSE_KIND_IDENTIFIER &&
+               check_input_checks_spelled(reader, reader->parser->tokens.names[other->argument_first], "none") ? other : NULL;
+    }
+    if (convention == 5)
+    {
+        check_input_attribute_error(reader, attributes, attribute->name_token, attribute->end, CHECK_ATTRIBUTE_ERROR_UNKNOWN);
+    }
+    else if (convention == 0)
+    {
+        check_input_attribute_named_event_at(reader, attribute, CHECK_WARNING_ID_IGNORED_ATTRIBUTES, CHECK_WARNING_EVENT_ARGUMENT_UNSUPPORTED_TOKEN, attribute->first,
+                                             attribute->argument_first);
+        attribute->ignored = true;
+        valid = true;
+    }
+    else if (attribute->argument_count != wanted)
+    {
+        check_input_report_argument(reader, attribute->first, CHECK_INPUT_ATTRIBUTE_ARGUMENT_COUNT, BUSTER_CHECK_COUNT_EXACT | wanted << 8);
+    }
+    else if (indexed && !constant)
+    {
+        check_input_attribute_argument_error(reader, attributes, attribute, attribute->first, CHECK_ARGUMENT_AN_INTEGER_CONSTANT, 0);
+    }
+    else if (indexed && located && wide)
+    {
+        check_input_attribute_too_large(reader, attributes, attribute, first, end, attribute->argument_values[1]);
+    }
+    else if (none != NULL)
+    {
+        check_input_attribute_argument_error(reader, attributes, attribute, none->first, CHECK_ARGUMENT_SWIFT_ASYNC_NONE, 0);
     }
     else
     {
@@ -7488,6 +7637,10 @@ static bool check_input_attribute_checks(CheckInputReader* reader, CheckInputAtt
     else if (check_input_attribute_equal(spelled, "swift_async") && function)
     {
         valid = check_input_attribute_swift_async(reader, attributes, attribute, bare, name);
+    }
+    else if (check_input_attribute_equal(spelled, "swift_async_error"))
+    {
+        valid = check_input_attribute_swift_async_error(reader, attributes, attribute);
     }
     else if (check_input_attribute_equal(spelled, "diagnose_as_builtin") && function)
     {
@@ -8508,8 +8661,7 @@ static bool check_input_attribute_after_kind(CheckInputReader* reader, const Che
                           kind == CHECK_ATTRIBUTE_ALIAS ||
                           kind == CHECK_ATTRIBUTE_IFUNC || kind == CHECK_ATTRIBUTE_WEAKREF || kind == CHECK_ATTRIBUTE_ASM_LABEL ||
                           kind == CHECK_ATTRIBUTE_CALLING_CONVENTION || kind == CHECK_ATTRIBUTE_NORETURN || kind == CHECK_ATTRIBUTE_OVERLOADABLE ||
-                          kind == CHECK_ATTRIBUTE_TARGET || kind == CHECK_ATTRIBUTE_TARGET_CLONES || kind == CHECK_ATTRIBUTE_CPU_SPECIFIC ||
-                          kind == CHECK_ATTRIBUTE_CPU_DISPATCH || kind == CHECK_ATTRIBUTE_CLEANUP || kind == CHECK_ATTRIBUTE_FALLTHROUGH ||
+                          kind == CHECK_ATTRIBUTE_CLEANUP || kind == CHECK_ATTRIBUTE_FALLTHROUGH ||
                           kind == CHECK_ATTRIBUTE_UNSEQUENCED || kind == CHECK_ATTRIBUTE_REPRODUCIBLE || kind == CHECK_ATTRIBUTE_NULLABILITY ||
                           kind == CHECK_ATTRIBUTE_REGPARM || kind == CHECK_ATTRIBUTE_MUSTTAIL || kind == CHECK_ATTRIBUTE_NOMERGE ||
                           kind == CHECK_ATTRIBUTE_SUPPRESS ||
@@ -8620,12 +8772,14 @@ static void check_input_attribute_merge_exclusions(CheckInputReader* reader, uin
 // retain, gnu_inline and unscoped standard noreturn; and on the serial path any other declaration attribute that the
 // definition and the declarations before it lack the kind of (check_input_attribute_after_kind, #147), whose layout
 // it then no longer changes. Earlier accepted attributes remain in their declaration records. A specifier's list is
-// each declarator's: one declarator's is copied before its records are marked.
-static void check_input_attribute_late(CheckInputReader* reader, uint32_t token, uint32_t previous, uint32_t point, bool visible)
+// each declarator's: one declarator's is copied before its records are marked. A `redefinition` (a second definition of
+// the entity, of a compatible type) is checked too, before its error (#1920): clang merges its attributes when it
+// declares it (mergeDeclAttributes) and reports the redefinition at its body or initializer.
+static void check_input_attribute_late(CheckInputReader* reader, uint32_t token, uint32_t previous, uint32_t point, bool visible, bool redefinition)
 {
     const CheckInputAttributes* attributes = check_sparse_wide_present(reader->output->attributes) ? check_input_attributes_at(reader->output, token) : 0;
     const bool after = attributes != 0 && reader->definition_origins != NULL && reader->definition_origins[previous] &&
-                       !check_input_bit(reader->declaration_bits, token, BUSTER_CHECK_BITS_DEFINED);
+                       (redefinition || !check_input_bit(reader->declaration_bits, token, BUSTER_CHECK_BITS_DEFINED));
     bool late = false;
     // A body on a lane: what the earlier declarations' attributes decide, which the lane can't read (other lanes' columns
     // hold them), and what its own decide for later declarations, which it can't publish to them, is source order's
@@ -8707,7 +8861,8 @@ static void check_input_attribute_late(CheckInputReader* reader, uint32_t token,
                     .token = attribute->name_token,
                     .source = BUSTER_CHECK_WARNING_NO_SOURCE,
                     .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
-                    .completion = point,
+                    // (A redefinition's comes before its error, at the declaration's name: at the attribute.)
+                    .completion = redefinition ? attribute->name_token : point,
                     .payload = { .token = BUSTER_CHECK_WARNING_NO_SOURCE },
                 };
                 const CheckWarningNote note = {
