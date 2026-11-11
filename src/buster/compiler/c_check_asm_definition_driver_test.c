@@ -8,7 +8,8 @@
 // (the same bytes), has clang's symbols: each named symbol's type, binding, visibility, section (or UND, COM, ABS), size
 // and a common symbol's alignment, compared as sorted lines (check_test_asm_definition_symbols); and the relocations
 // of its sections other than code, unwind tables and debug information, which the compilers' own code makes. Both
-// objects, linked by clang, and the direct path's executables of both paths print what clang's build prints. Include
+// objects, linked by clang, and the direct path's executables of both paths print what clang's build prints, and the
+// direct path's has the program's own note sections, PT_NOTEs and notes that clang's build has. Include
 // after the driver test's ELF reader (CheckTestElf). Asm labels that name the unit's own objects (#1979) are checked here
 // too: they make one symbol of a name, which the comparison reads the same way.
 
@@ -160,6 +161,102 @@ static bool check_test_asm_definition_code_temporary(const char* path, char* fou
     return kept;
 }
 
+// Whether a note section is the toolchain's (the C runtime's ABI tag, the linker's build ID, GNU properties), not the
+// program's own.
+static bool check_test_asm_definition_toolchain_note(const char* name)
+{
+    return strcmp(name, ".note.ABI-tag") == 0 || strncmp(name, ".note.gnu.", 10) == 0;
+}
+
+// The program's own notes in the executable at `path` (#1848), as readelf -lSn reads them, into `lines`: a line per
+// SHT_NOTE section but the toolchain's (check_test_asm_definition_toolchain_note), with its type, flags, alignment and
+// whether a PT_NOTE of its alignment covers it whole; then a line per note in those sections as the PT_NOTE segments
+// parse them, each padded to its segment's alignment as readelf pads it (8 for an alignment of 8, else 4): its owner,
+// type and description bytes in hex, in file order. False when it doesn't read or the lines don't fit.
+static bool check_test_asm_definition_notes(const char* path, char* lines, uint64_t capacity)
+{
+    Arena arena = arena_reserve(UINT64_C(1) << 24);
+    CheckTestElf elf = { 0 };
+    bool valid = arena.base != 0 && capacity != 0 && check_test_elf_open(&elf, object_test_read_file(&arena, path));
+    const Elf64_Ehdr* header = valid ? (const Elf64_Ehdr*)elf.file.pointer : 0;
+    valid = valid && header->e_phentsize == sizeof(Elf64_Phdr) && check_test_elf_range(elf.file, header->e_phoff, (uint64_t)header->e_phnum * sizeof(Elf64_Phdr));
+    const Elf64_Phdr* segments = valid ? (const Elf64_Phdr*)(elf.file.pointer + header->e_phoff) : 0;
+    const uint32_t segment_count = valid ? header->e_phnum : 0;
+    uint64_t used = 0;
+    if (capacity != 0)
+    {
+        lines[0] = 0;
+    }
+    for (uint32_t s = 1; valid && s < elf.section_count; s += 1)
+    {
+        const Elf64_Shdr* section = &elf.sections[s];
+        const char* name = check_test_elf_section_name(&elf, s);
+        if (section->sh_type == SHT_NOTE && name != 0 && !check_test_asm_definition_toolchain_note(name))
+        {
+            bool covered = false;
+            for (uint32_t p = 0; p < segment_count; p += 1)
+            {
+                const Elf64_Phdr* segment = &segments[p];
+                covered = covered || (segment->p_type == PT_NOTE && segment->p_align == section->sh_addralign && segment->p_offset <= section->sh_offset &&
+                                      section->sh_offset + section->sh_size <= segment->p_offset + segment->p_filesz);
+            }
+            char line[512];
+            snprintf(line, sizeof(line), "section %s type %u flags %llu align %llu%s\n", name, section->sh_type, (unsigned long long)section->sh_flags,
+                     (unsigned long long)section->sh_addralign, covered ? " in a PT_NOTE" : " in no PT_NOTE");
+            valid = check_test_asm_definition_append(lines, capacity, &used, line);
+        }
+    }
+    for (uint32_t p = 0; valid && p < segment_count; p += 1)
+    {
+        const Elf64_Phdr* segment = &segments[p];
+        const uint64_t padding = segment->p_align == 8 ? 8 : 4;
+        uint64_t at = segment->p_offset;
+        const uint64_t end = segment->p_offset + segment->p_filesz;
+        valid = segment->p_type != PT_NOTE || check_test_elf_range(elf.file, segment->p_offset, segment->p_filesz);
+        while (valid && segment->p_type == PT_NOTE && end - at >= sizeof(Elf64_Nhdr))
+        {
+            Elf64_Nhdr note;
+            memcpy(&note, elf.file.pointer + at, sizeof(note));
+            const uint64_t name_at = at + sizeof(note);
+            // The description and the next note each start at the padding's multiple from the note's start.
+            const uint64_t description_at = at + ((sizeof(note) + note.n_namesz + padding - 1) & ~(padding - 1));
+            const uint64_t next = at + ((description_at - at + note.n_descsz + padding - 1) & ~(padding - 1));
+            valid = next <= end && note.n_namesz != 0 && elf.file.pointer[name_at + note.n_namesz - 1] == 0;
+            // The section the note is in: one of the program's own, or the toolchain's, which the lines leave out.
+            const char* owner = 0;
+            for (uint32_t s = 1; valid && s < elf.section_count; s += 1)
+            {
+                const Elf64_Shdr* section = &elf.sections[s];
+                const char* name = check_test_elf_section_name(&elf, s);
+                const bool inside = section->sh_type == SHT_NOTE && section->sh_offset <= at && at < section->sh_offset + section->sh_size;
+                owner = inside && name != 0 && !check_test_asm_definition_toolchain_note(name) ? name : owner;
+            }
+            if (valid && owner != 0)
+            {
+                char line[512];
+                int length = snprintf(line, sizeof(line), "note in %s owner %s type %u description", owner, elf.file.pointer + name_at, note.n_type);
+                for (uint32_t b = 0; b < note.n_descsz && length > 0 && (uint64_t)length + 4 < sizeof(line); b += 1)
+                {
+                    length += snprintf(line + length, sizeof(line) - (uint64_t)length, " %02x", (uint8_t)elf.file.pointer[description_at + b]);
+                }
+                valid = length > 0 && (uint64_t)length + 2 < sizeof(line);
+                if (valid)
+                {
+                    line[length] = '\n';
+                    line[length + 1] = 0;
+                    valid = check_test_asm_definition_append(lines, capacity, &used, line);
+                }
+            }
+            at = next;
+        }
+    }
+    if (arena.base != 0)
+    {
+        arena_release(&arena);
+    }
+    return valid;
+}
+
 static void check_test_driver_asm_definitions(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     static const struct
@@ -229,7 +326,8 @@ static void check_test_driver_asm_definitions(CheckTest* test, const char* clang
           "    return 0;\n"
           "}\n" },
         // File-scope sections of other kinds (#1848): an init array's and a fini array's entries, which run C's
-        // functions before and after main, a note, merged strings and custom flags.
+        // functions before and after main, a note (its own SHT_NOTE section and PT_NOTE in the executable), merged
+        // strings and custom flags.
         { "file-scope assembly's sections of other kinds", "early late main",
           "#include <stdio.h>\n"
           "int order = 1;\n"
@@ -363,6 +461,15 @@ static void check_test_driver_asm_definitions(CheckTest* test, const char* clang
         }
         snprintf(description, sizeof(description), "%s: the direct path's scalar and vector executables match byte for byte", fixtures[f].name);
         check_test_expect(test, written && check_test_driver_same_files(direct[0], direct[1]), description);
+        // The program's own notes (#1848): the direct path's executable has clang's build's note sections, each in a
+        // PT_NOTE, and the same notes in them. A fixture with a note must find one in clang's build.
+        static char notes[2][4096];
+        const bool clang_notes = written && check_test_asm_definition_notes(programs[0], notes[0], sizeof(notes[0]));
+        const bool direct_notes = written && check_test_asm_definition_notes(direct[0], notes[1], sizeof(notes[1]));
+        snprintf(description, sizeof(description), "%s: the direct path's executable's notes are clang's build's:\n%s\nagainst clang's\n%s", fixtures[f].name,
+                 direct_notes ? notes[1] : "(unread)", clang_notes ? notes[0] : "(unread)");
+        check_test_expect(test, clang_notes && direct_notes && strcmp(notes[0], notes[1]) == 0 && (strstr(fixtures[f].source, "@note") == NULL || notes[0][0] != 0),
+                          description);
         for (uint32_t p = 0; written && p < 3; p += 1)
         {
             unlink(objects[p]);

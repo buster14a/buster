@@ -873,9 +873,10 @@ own name, type and flags (`CheckProgramCode.asm_sections`,
 `check_program_sections`); the direct path's executable merges it into its
 class's output section. Its sections are any the assembler makes (#1848):
 custom flags (`.pushsection __ex_table,"a"`), merged strings, notes (`-c`'s
-`SHT_NOTE`; the direct path keeps a note's bytes with its class's data, without
-a `PT_NOTE`), and the arrays of constructors and destructors
-(`.section .init_array,"aw"`), whose entries the direct path's executable runs
+`SHT_NOTE`; the direct path's executable gives a `.note*` section an `SHT_NOTE`
+output section of its name and a `PT_NOTE`, as lld does, sharing one output
+section between names of one alignment), and the arrays of constructors and
+destructors (`.section .init_array,"aw"`), whose entries the direct path's executable runs
 as C's constructors'. Its CFI's frames are an `.eh_frame` atom of their own
 beside the functions' unwind table, its CIE and FDEs as the assembler makes them
 (clang's object shares one CIE between the module's assembly and its
