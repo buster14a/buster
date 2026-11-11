@@ -3830,9 +3830,14 @@ What the lowering covers past scalars (#145's programs):
   tests an I32 destination slot, which every exit and fall that crosses one
   stores first (a fall 0, at its run's head, past which exits enter): the
   issue's function of early returns stores none, and its calls are its
-  variables' count. An exit from a statement expression, through a record
-  whose scope's end a constant switch's kept statements leave out, or whose
-  jump no path reaches keeps its run in place. Code and call rows grow
+  variables' count. An exit from a statement expression's statements takes
+  the chain through the records within its block, whose calls its region
+  lowers with its statements, from the empty evaluation stack the region
+  starts with: the dispatch's jumps and the exit's agree on the stack, out of
+  the region as within it. An exit that leaves the block's own records (their
+  calls run after its END, once its value is kept) or records outside it, one
+  through a record whose scope's end a constant switch's kept statements leave
+  out, and one whose jump no path reaches keep their runs in place. Code and call rows grow
   linearly in exits plus cleanups, where they grew as their product (85
   cleanups with an early return each made 3,825 calls, and 86 exhausted the
   call rows). An exit keeps only the innermost record whose scope holds its
