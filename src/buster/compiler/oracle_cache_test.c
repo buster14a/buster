@@ -82,7 +82,13 @@
 //   - writers at once: 8 processes running the same 4 runs 16 times each, whose counts add up in the parent's and
 //     whose entries are whole after, with no file left beside them;
 //   - the process's cache: BUSTER_ORACLE_CACHE and XDG_CACHE_HOME, a directory made private, three levels deep, and
-//     turned off (oracle_cache_disable).
+//     turned off (oracle_cache_disable);
+//   - served runs (oracle_serve), through a server of the test's own (oracle_test_server) that stands for the test's
+//     program: served with the cache off; in use mode an entry taken where one fits and another run served, no entry
+//     written; in check mode a served run that differs from its entry, stale; --differential's runs both ways and a
+//     difference that fails; a server that ends in a run, the run as a child and another server for the next; a
+//     forked child's server of its own; a server whose release isn't the tool's, serving none; and runs that don't
+//     fit, not served.
 // It prints its checks and failures and exits with status 1 if any fail.
 
 #include "buster/compiler/test_paths.h"
@@ -1454,6 +1460,7 @@ static const char oracle_test_helper[] =
     "        putchar('\\n');\n"
     "    }\n"
     "    else if (argc == 2 && strcmp(argv[1], \"tty\") == 0) puts(open(\"/dev/tty\", O_RDWR | O_NOCTTY) >= 0 ? \"tty\" : \"none\");\n"
+    "    else if (argc == 2 && strcmp(argv[1], \"-dumpversion\") == 0) puts(\"oracle-test 1\");\n"
     "    else if (argc == 3 && strcmp(argv[1], \"environment\") == 0)\n"
     "    {\n"
     "        const char* value = getenv(argv[2]);\n"
@@ -1485,6 +1492,60 @@ static const char oracle_test_helper[] =
     "        unlink(names[1]);\n"
     "        const int ran = open(\"replay-ran\", O_WRONLY | O_CREAT | O_TRUNC, 0666);\n"
     "        if (ran >= 0) close(ran);\n"
+    "    }\n"
+    "    return 0;\n"
+    "}\n";
+
+// A clang server of the test's own (oracle_test_served), on the protocol of tools/clang-server's clang_server.cpp: it
+// runs each request as a child of its own (argument 0 a path), in the request's directory with exactly its environment
+// and standard input, so that its answers are the run's. The request's ORACLE_TEST_SERVER says otherwise: `lie` adds a
+// line to its output, `crash` ends the server without a reply. Its release is ORACLE_TEST_SERVER_VERSION's, as it
+// started, or "oracle-test 1", which the test's program gives for -dumpversion.
+static const char oracle_test_server[] =
+    "#define _GNU_SOURCE\n"
+    "#include <fcntl.h>\n"
+    "#include <stdint.h>\n"
+    "#include <stdlib.h>\n"
+    "#include <string.h>\n"
+    "#include <sys/mman.h>\n"
+    "#include <sys/stat.h>\n"
+    "#include <sys/wait.h>\n"
+    "#include <unistd.h>\n"
+    "static int get(void* data, size_t size) { char* at = data; while (size) { ssize_t got = read(0, at, size); if (got <= 0) return 0; at += got; size -= (size_t)got; } return 1; }\n"
+    "static int put(const void* data, size_t size) { const char* at = data; while (size) { ssize_t done = write(1, at, size); if (done <= 0) return 0; at += done; size -= (size_t)done; } return 1; }\n"
+    "static char* text(void) { uint32_t length; if (!get(&length, 4)) return 0; char* bytes = malloc(length + 1); if (!bytes || !get(bytes, length)) return 0; bytes[length] = 0; return bytes; }\n"
+    "static int reply(int capture, const char* extra) { struct stat status; fstat(capture, &status); uint32_t length = (uint32_t)status.st_size; size_t more = extra ? strlen(extra) : 0; length += (uint32_t)more;\n"
+    "    char* bytes = malloc(length + 1); if (!bytes || pread(capture, bytes, (size_t)status.st_size, 0) != status.st_size) return 0; memcpy(bytes + status.st_size, extra ? extra : \"\", more);\n"
+    "    return put(&length, 4) && put(bytes, length); }\n"
+    "int main(void)\n"
+    "{\n"
+    "    const char* version = getenv(\"ORACLE_TEST_SERVER_VERSION\");\n"
+    "    uint32_t header[3];\n"
+    "    while (get(header, sizeof(header)))\n"
+    "    {\n"
+    "        if (header[0] == 0) { const char* answer = version ? version : \"oracle-test 1\"; uint32_t length = (uint32_t)strlen(answer); int32_t status = 0;\n"
+    "            if (!put(&status, 4) || !put(&length, 4) || !put(answer, length)) return 1; continue; }\n"
+    "        char* directory = text(); char* input = (header[1] & 4) ? text() : 0;\n"
+    "        char** arguments = calloc(header[0] + 1, sizeof(char*)); char** environment = calloc(header[2] + 1, sizeof(char*));\n"
+    "        for (uint32_t i = 0; i < header[0]; i += 1) arguments[i] = text();\n"
+    "        const char* mode = \"\";\n"
+    "        for (uint32_t i = 0; i < header[2]; i += 1) { environment[i] = text(); if (environment[i] && strncmp(environment[i], \"ORACLE_TEST_SERVER=\", 19) == 0) mode = environment[i] + 19; }\n"
+    "        if (strcmp(mode, \"crash\") == 0) return 1;\n"
+    "        const int output = memfd_create(\"output\", 0), errors = memfd_create(\"errors\", 0);\n"
+    "        const pid_t child = fork();\n"
+    "        if (child == 0)\n"
+    "        {\n"
+    "            const int source = open(input ? input : \"/dev/null\", O_RDONLY);\n"
+    "            if (chdir(directory) == 0 && source >= 0 && dup2(source, 0) >= 0 && dup2(output, 1) >= 0 && dup2(errors, 2) >= 0) execve(arguments[0], arguments, environment);\n"
+    "            _exit(127);\n"
+    "        }\n"
+    "        int wait_status = 0;\n"
+    "        if (child < 0 || waitpid(child, &wait_status, 0) != child) return 1;\n"
+    "        int32_t status = WIFEXITED(wait_status) ? WEXITSTATUS(wait_status) : 1;\n"
+    "        if (!put(&status, 4)) return 1;\n"
+    "        if ((header[1] & 1) && !reply(output, strcmp(mode, \"lie\") == 0 ? \"served\\n\" : 0)) return 1;\n"
+    "        if ((header[1] & 2) && !reply(errors, 0)) return 1;\n"
+    "        close(output); close(errors);\n"
     "    }\n"
     "    return 0;\n"
     "}\n";
@@ -3787,6 +3848,220 @@ static void oracle_test_epoch_scopes(OracleTest* test)
     free(saved);
 }
 
+// --- Served runs ---
+
+// This process's environment and `extra` after it (a calloc'd array of its strings, or null).
+static char** oracle_test_served_environment(const char* extra)
+{
+    uint32_t count = 0;
+    while (environ[count] != 0)
+    {
+        count += 1;
+    }
+    char** environment = calloc((size_t)count + 2, sizeof(char*));
+    for (uint32_t i = 0; environment != 0 && i < count; i += 1)
+    {
+        environment[i] = environ[i];
+    }
+    if (environment != 0)
+    {
+        environment[count] = (char*)extra;
+    }
+    return environment;
+}
+
+// A run of `arguments` through `cache` that may be served, with `input`, `environment` and `timeout`: whether it ran
+// (or took its entry, or was served). The caller releases its result.
+static bool oracle_test_serve(OracleCache* cache, char* const* arguments, const char* input, char* const* environment, uint32_t timeout, OracleRun* run)
+{
+    *run = (OracleRun){
+        .cache = cache,
+        .purpose = "oracle test: served",
+        .arguments = arguments,
+        .input = input,
+        .environment = environment,
+        .timeout = timeout,
+    };
+    return oracle_run(run);
+}
+
+// Whether a run gave the test's program's `cat` of `text`: status 0, that output and no errors.
+static bool oracle_test_served_text(const OracleRun* run, const char* text)
+{
+    return WIFEXITED(run->status) && WEXITSTATUS(run->status) == 0 && run->output != 0 && strcmp(run->output, text) == 0 && run->errors != 0 && run->errors[0] == 0;
+}
+
+// Served runs (oracle_serve, oracle_cache.c's --- Served runs ---), with a server of the test's own (oracle_test_server)
+// standing for the test's program, whose `cat` of a run's input is the run: served with the cache off; in use mode an
+// entry taken where one fits and otherwise served, no entry written; in check mode a served run that differs from the
+// entry it would have taken, stale and the entry removed; with --differential each run both ways, the child's result the
+// run's and a difference counted, which fails the test; a server that ends in a run, the run as a child, and the next
+// served by another; a forked child's served run through a server of its own, the parent's left as it was; a server
+// whose release isn't the program's, no run served and the test failed; and runs that don't fit (another tool's, a
+// response file, process statistics, a debugging variable of clang's main, a time limit, a file the run writes), not
+// served.
+static void oracle_test_served(OracleTest* test)
+{
+    OracleCache off;
+    OracleCache use;
+    OracleCache check;
+    oracle_cache_open(&off, 0, 0);
+    oracle_test_open(test, &use, "use", "served");
+    oracle_test_open(test, &check, "check", "served");
+    char server[BUSTER_ORACLE_PATH_BYTES + 16];
+    char source[BUSTER_ORACLE_PATH_BYTES + 16];
+    char input[BUSTER_ORACLE_PATH_BYTES + 32];
+    char other[BUSTER_ORACLE_PATH_BYTES + 32];
+    snprintf(server, sizeof(server), "%s/server", test->base);
+    snprintf(source, sizeof(source), "%s/server.c", test->base);
+    snprintf(input, sizeof(input), "%s/served-input", test->runs[0]);
+    snprintf(other, sizeof(other), "%s/served-other", test->runs[0]);
+    char* compile[] = { "clang", "-O0", "-w", "-o", server, source, 0 };
+    OracleRun build = { .cache = &off, .arguments = compile };
+    const bool built = oracle_test_write(source, oracle_test_server, strlen(oracle_test_server)) && oracle_run(&build) && WIFEXITED(build.status) &&
+                       WEXITSTATUS(build.status) == 0;
+    oracle_run_release(&build);
+    unlink(source);
+    char** lying = oracle_test_served_environment("ORACLE_TEST_SERVER=lie");
+    char** crashing = oracle_test_served_environment("ORACLE_TEST_SERVER=crash");
+    char** overriding = oracle_test_served_environment("CCC_OVERRIDE_OPTIONS=#");
+    const bool ready = built && lying != 0 && crashing != 0 && overriding != 0 && oracle_test_write(input, "served bytes\n", 13) &&
+                       oracle_test_write(other, "other bytes\n", 12);
+    oracle_test_expect(test, ready, "served: the test's server built");
+    char* cat[] = { test->helper, "cat", 0 };
+    OracleRun run;
+    uint32_t files = 0;
+    uint32_t others = 0;
+
+    // The cache off: served, the input read.
+    oracle_serve(server, test->helper, false);
+    bool ran = ready && oracle_test_serve(&off, cat, input, 0, 0, &run);
+    oracle_test_expect(test, ran && run.served && !run.taken && oracle_test_served_text(&run, "served bytes\n") && oracle_serving.counts->served == 1,
+                       "served: a run of the tool the server stands for, served with the cache off, its input read");
+    oracle_run_release(&run);
+
+    // Use mode: an entry a run kept, taken; another run served, no entry written.
+    oracle_serve(0, 0, false);
+    ran = ready && oracle_test_serve(&use, cat, input, 0, 0, &run) && !run.taken && !run.served;
+    oracle_run_release(&run);
+    oracle_test_count(&use, &files, &others);
+    const bool kept = ran && files == 1;
+    oracle_serve(server, test->helper, false);
+    ran = kept && oracle_test_serve(&use, cat, input, 0, 0, &run) && run.taken && !run.served && oracle_test_served_text(&run, "served bytes\n");
+    oracle_run_release(&run);
+    ran = ran && oracle_test_serve(&use, cat, other, 0, 0, &run) && run.served && oracle_test_served_text(&run, "other bytes\n");
+    oracle_run_release(&run);
+    oracle_test_count(&use, &files, &others);
+    oracle_test_expect(test, ran && files == 1 && others == 0, "served: in use mode an entry that fits taken, another run served and no entry written");
+
+    // Check mode: a served run that differs from the entry it would have taken, stale (the test makes one on purpose),
+    // the entry removed; one with no entry, served.
+    const uint64_t stale = check.counts->stale;
+    printf("oracle cache: a served run's entry made stale on purpose, which the next line reports:\n");
+    fflush(stdout);
+    ran = kept && !oracle_test_serve(&check, cat, input, lying, 0, &run) && run.served && oracle_test_served_text(&run, "served bytes\nserved\n");
+    oracle_run_release(&run);
+    oracle_test_count(&check, &files, &others);
+    oracle_test_expect(test, ran && check.counts->stale == stale + 1 && files == 0, "served: in check mode a served run that differs from its entry, stale, the entry removed");
+    ran = ready && oracle_test_serve(&check, cat, other, 0, 0, &run) && run.served && oracle_test_served_text(&run, "other bytes\n");
+    oracle_run_release(&run);
+    oracle_test_count(&check, &files, &others);
+    oracle_test_expect(test, ran && files == 0, "served: in check mode a served run without an entry, no entry written");
+
+    // --differential: each run both ways, the child's result the run's; a difference counted (the test makes one on
+    // purpose), which fails the test.
+    oracle_serve(server, test->helper, true);
+    ran = ready && oracle_test_serve(&off, cat, input, 0, 0, &run) && !run.served && oracle_test_served_text(&run, "served bytes\n");
+    oracle_run_release(&run);
+    const bool alike = ran && oracle_serving.counts->compared == 1 && oracle_serving.counts->differences == 0;
+    printf("oracle cache: a served run that differs on purpose, which the next lines report:\n");
+    fflush(stdout);
+    ran = ready && oracle_test_serve(&off, cat, input, lying, 0, &run) && !run.served && oracle_test_served_text(&run, "served bytes\n");
+    oracle_run_release(&run);
+    oracle_test_expect(test, alike && ran && oracle_serving.counts->compared == 2 && oracle_serving.counts->differences == 1 && !oracle_serve_end("oracle test"),
+                       "served: --differential runs each both ways, the child's result the run's, and a difference fails");
+
+    // A server that ends in a run: the run as a child, the next served by another.
+    oracle_serve(server, test->helper, false);
+    ran = ready && oracle_test_serve(&off, cat, input, 0, 0, &run) && run.served;
+    oracle_run_release(&run);
+    const pid_t ended = oracle_serving.server.pid;
+    ran = ran && oracle_test_serve(&off, cat, input, crashing, 0, &run) && !run.served && oracle_test_served_text(&run, "served bytes\n");
+    oracle_run_release(&run);
+    ran = ran && oracle_test_serve(&off, cat, other, 0, 0, &run) && run.served && oracle_test_served_text(&run, "other bytes\n");
+    oracle_run_release(&run);
+    oracle_test_expect(test, ran && oracle_serving.server.pid != ended && oracle_serving.server.starts == 2 && oracle_serving.counts->unserved == 1 &&
+                                 oracle_serve_end("oracle test"),
+                       "served: a server that ends in a run, the run as a child and the next served by another");
+
+    // A forked child: served through a server of its own, the parent's server left as it was.
+    oracle_serve(server, test->helper, false);
+    ran = ready && oracle_test_serve(&off, cat, input, 0, 0, &run) && run.served;
+    oracle_run_release(&run);
+    const pid_t parents = oracle_serving.server.pid;
+    fflush(0);
+    const pid_t child = ran ? fork() : -1;
+    if (child == 0)
+    {
+        const bool own = oracle_test_serve(&off, cat, other, 0, 0, &run) && run.served && oracle_test_served_text(&run, "other bytes\n") &&
+                         oracle_serving.server.pid != parents && oracle_serving.server.owner == getpid();
+        _exit(own ? 0 : 1);
+    }
+    int status = 0;
+    const bool waited = child > 0 && waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    ran = waited && oracle_test_serve(&off, cat, input, 0, 0, &run) && run.served && oracle_serving.server.pid == parents;
+    oracle_run_release(&run);
+    oracle_test_expect(test, ran && oracle_serving.counts->served == 3 && oracle_serve_end("oracle test"),
+                       "served: a forked child's run through a server of its own, the parent's left as it was");
+
+    // A server whose release isn't the tool's: no run served, and the test fails.
+    const bool versioned = setenv("ORACLE_TEST_SERVER_VERSION", "oracle-test 2", 1) == 0;
+    oracle_serve(server, test->helper, false);
+    printf("oracle cache: a server of another release on purpose, which the next line reports:\n");
+    fflush(stdout);
+    ran = ready && versioned && oracle_test_serve(&off, cat, input, 0, 0, &run) && !run.served && oracle_test_served_text(&run, "served bytes\n");
+    oracle_run_release(&run);
+    ran = ran && oracle_test_serve(&off, cat, input, 0, 0, &run) && !run.served;
+    oracle_run_release(&run);
+    oracle_test_expect(test, ran && oracle_serving.mismatched && oracle_serving.counts->served == 0 && !oracle_serve_end("oracle test"),
+                       "served: a server whose release isn't the tool's serves no run, and fails the test");
+    unsetenv("ORACLE_TEST_SERVER_VERSION");
+
+    // Runs that don't fit: another tool's, a response file's, one that reports its process's statistics, a debugging
+    // variable of clang's main, a time limit, a file the run writes.
+    oracle_serve(server, test->helper, false);
+    char* response[] = { test->helper, "cat", "@served-response", 0 };
+    char* statistics[] = { test->helper, "cat", "-fproc-stat-report", 0 };
+    char* shell[] = { "sh", "-c", "cat", 0 };
+    bool unserved = ready && oracle_test_serve(&off, shell, input, 0, 0, &run) && !run.served && oracle_test_served_text(&run, "served bytes\n");
+    oracle_run_release(&run);
+    unserved = unserved && oracle_test_serve(&off, response, input, 0, 0, &run) && !run.served;
+    oracle_run_release(&run);
+    unserved = unserved && oracle_test_serve(&off, statistics, input, 0, 0, &run) && !run.served;
+    oracle_run_release(&run);
+    unserved = unserved && oracle_test_serve(&off, cat, input, overriding, 0, &run) && !run.served;
+    oracle_run_release(&run);
+    unserved = unserved && oracle_test_serve(&off, cat, input, 0, 30, &run) && !run.served;
+    oracle_run_release(&run);
+    const char* written[] = { "served-written" };
+    run = (OracleRun){ .cache = &off, .purpose = "oracle test: served", .arguments = cat, .input = input, .files = written, .file_count = 1 };
+    unserved = unserved && oracle_run(&run) && !run.served;
+    oracle_run_release(&run);
+    oracle_test_expect(test, unserved && oracle_serving.counts->served == 0 && oracle_serving.counts->unserved == 0 && oracle_serve_end("oracle test"),
+                       "served: another tool's run, a response file, process statistics, clang's debugging variables, a time limit and a written file, not served");
+
+    oracle_serve(0, 0, false);
+    unlink(input);
+    unlink(other);
+    unlink(server);
+    free(lying);
+    free(crashing);
+    free(overriding);
+    oracle_cache_close(&off);
+    oracle_cache_close(&use);
+    oracle_cache_close(&check);
+}
+
 static int run_oracle_cache_tests(int argc, char** argv)
 {
     (void)argv;
@@ -3843,6 +4118,7 @@ static int run_oracle_cache_tests(int argc, char** argv)
         oracle_test_adapter(&test);
         oracle_test_fresh_scopes(&test);
         oracle_test_epoch_scopes(&test);
+        oracle_test_served(&test);
         printf("oracle cache: %u checks, %u failures\n", test.checks, test.failures);
     }
     else
@@ -3871,7 +4147,8 @@ static int run_oracle_cache_tests(int argc, char** argv)
                                                "listings/oracle",    "changes/oracle",      "streams/oracle",    "streams-other/oracle",
                                                "streams-terminal/oracle", "numbers/oracle", "path-spellings/oracle",
                                                "unfollowed/oracle",  "groups/oracle",       "check/oracle",      "damaged/oracle",
-                                               "writers/oracle",     "process/one/two/buster/oracle", "adapter/oracle", "fresh/oracle", "dependency-environment/oracle", "" };
+                                               "writers/oracle",     "process/one/two/buster/oracle", "adapter/oracle", "fresh/oracle", "dependency-environment/oracle",
+                                               "served/oracle",      "" };
     for (uint32_t i = 0; made && i < sizeof(directories) / sizeof(directories[0]); i += 1)
     {
         oracle_test_remove(test.base, directories[i]);

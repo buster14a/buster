@@ -3,25 +3,32 @@
 //
 // A clang that stays up (#2071's prototype): it reads clang command lines from its standard input and runs each one as
 // the clang executable would, through clang's own Driver, with every cc1 job in this process (as a single-input clang
-// runs its cc1 job), and replies with the run's exit status and the stream the request captured. A test that compares
+// runs its cc1 job), and replies with the run's exit status and the streams the request captured. A test that compares
 // with thousands of clang runs then pays clang's start (about 10 ms of a 12 ms oracle run: the dynamic loader and the
 // libraries' initializers) once, not per run. It is C++ because clang's driver and frontend have no C API.
 //
 // Protocol, native-endian 32-bit integers, on standard input and output (which the requests' runs never see):
-//   request: count, stream (2: capture standard error and discard standard output; 1: the other way), variables; then
-//            the working directory, count arguments and variables environment entries (NAME=VALUE), each its length and
-//            its bytes. Argument 0 names the clang, as execvp finds it. The run takes the directory and exactly that
-//            environment, as the client's child would. A count of 0, alone, asks for the version this server's clang
-//            libraries are (CLANG_VERSION_STRING), with status 0.
-//   reply:   status (the exit status the clang process would have had), length, the captured bytes.
+//   request: count, streams, variables; then the working directory, the standard input's path if streams has bit 4,
+//            count arguments and variables environment entries (NAME=VALUE), each string its length and its bytes.
+//            Streams' bit 1 captures standard output and bit 2 standard error, each discarded without its bit (2:
+//            standard error alone, 1: standard output alone, 3: both); with bit 4 the run's standard input reads that
+//            file (from the directory), else /dev/null. Argument 0 names the clang, as execvp finds it. The run takes
+//            the directory and exactly that environment, as the client's child would. A count of 0, alone, asks for
+//            the version this server's clang libraries are (CLANG_VERSION_STRING): status 0 and that one stream.
+//   reply:   status (the exit status the clang process would have had), then each captured stream, standard output's
+//            first: its length and its bytes.
+// A request the server can't take (an input it can't open, a descriptor it can't move) ends its service: the client
+// reads the end of its replies.
 //
-// Usage: clang-server [--version], its standard input and output pipes to one client. It exits at the end of its input.
+// Usage: clang-server [--version], its standard input and output connecting it to one client (pipes, or one socket, as
+// oracle_cache.c's OracleServer has it). It exits at the end of its input.
 // tools/clang-server/build.sh builds it against the libraries of the clang it stands for.
 
 #include <clang/Basic/Diagnostic.h>
 #include <clang/Basic/DiagnosticIDs.h>
 #include <clang/Basic/DiagnosticOptions.h>
 #include <clang/Basic/Version.h>
+#include <clang/CodeGen/ObjectFilePCHContainerWriter.h>
 #include <clang/Driver/Compilation.h>
 #include <clang/Driver/Driver.h>
 #include <clang/Driver/ToolChain.h>
@@ -31,8 +38,12 @@
 #include <clang/Frontend/TextDiagnosticPrinter.h>
 #include <clang/Frontend/Utils.h>
 #include <clang/FrontendTool/Utils.h>
+#include <clang/Serialization/ObjectFilePCHContainerReader.h>
+#include <clang/Serialization/PCHContainerOperations.h>
 #include <llvm/ADT/SmallVector.h>
+#include <llvm/ADT/SmallString.h>
 #include <llvm/Support/CommandLine.h>
+#include <llvm/Support/FileSystem.h>
 #include <llvm/Support/Path.h>
 #include <llvm/Support/Program.h>
 #include <llvm/Support/TargetSelect.h>
@@ -99,7 +110,8 @@ bool read_string(int descriptor, std::string& text)
 }
 
 // One cc1 job, as clang's cc1_main runs it, but freeing what it made: the driver's -disable-free lets a process that is
-// about to exit skip that, and this one doesn't exit.
+// about to exit skip that, and this one doesn't exit. As cc1_main, its compiler instance reads and writes modules wrapped
+// in object files (-gmodules' format, "obj"), which without these fails as a fatal error, an abort of the server.
 int run_cc1(llvm::SmallVectorImpl<const char*>& argv)
 {
     std::vector<const char*> arguments;
@@ -111,7 +123,10 @@ int run_cc1(llvm::SmallVectorImpl<const char*>& argv)
         }
     }
     llvm::cl::ResetAllOptionOccurrences();
-    auto instance = std::make_unique<clang::CompilerInstance>();
+    auto containers = std::make_shared<clang::PCHContainerOperations>();
+    containers->registerWriter(std::make_unique<clang::ObjectFilePCHContainerWriter>());
+    containers->registerReader(std::make_unique<clang::ObjectFilePCHContainerReader>());
+    auto instance = std::make_unique<clang::CompilerInstance>(std::make_shared<clang::CompilerInvocation>(), containers);
     clang::DiagnosticOptions parse_options;
     auto* buffer = new clang::TextDiagnosticBuffer;
     clang::DiagnosticsEngine parse_diagnostics(llvm::makeIntrusiveRefCnt<clang::DiagnosticIDs>(), parse_options, buffer);
@@ -131,6 +146,36 @@ int run_cc1(llvm::SmallVectorImpl<const char*>& argv)
     return result;
 }
 
+// The clang's path, as its driver's main finds it (GetExecutablePath), whose directory the driver's resource directory
+// and tools are found from: with canonical prefixes (the default), the file the clang process would run, which a
+// symbolic link on PATH leads to (its /proc/self/exe); with -no-canonical-prefixes, argument 0 as given where that
+// exists, else as PATH finds it. Argument 0 alone (execvp's PATH search) would put a clang reached through a link in the
+// link's directory: /usr/local/bin/clang's resource directory /usr/local/lib/clang/23 rather than its own.
+std::string executable_path(const std::vector<std::string>& request)
+{
+    bool canonical = true;
+    for (size_t i = 1; i < request.size(); i += 1)
+    {
+        canonical = request[i] == "-canonical-prefixes" ? true : request[i] == "-no-canonical-prefixes" ? false : canonical;
+    }
+    std::string executable = request[0];
+    const bool searched = canonical ? executable.find('/') == std::string::npos : !llvm::sys::fs::exists(executable);
+    if (searched)
+    {
+        llvm::ErrorOr<std::string> found = llvm::sys::findProgramByName(executable);
+        if (found)
+        {
+            executable = *found;
+        }
+    }
+    llvm::SmallString<256> real;
+    if (canonical && !llvm::sys::fs::real_path(executable, real))
+    {
+        executable = std::string(real);
+    }
+    return executable;
+}
+
 // One clang command line, as clang's driver main runs it: diagnostics options from the arguments, the driver's
 // diagnostics prefixed by the program's name, the compilation built and executed, the first failing command's status.
 int run_clang(const std::vector<std::string>& request)
@@ -140,15 +185,7 @@ int run_clang(const std::vector<std::string>& request)
     {
         argv.push_back(argument.c_str());
     }
-    std::string executable = request[0];
-    if (executable.find('/') == std::string::npos)
-    {
-        llvm::ErrorOr<std::string> found = llvm::sys::findProgramByName(executable);
-        if (found)
-        {
-            executable = *found;
-        }
-    }
+    const std::string executable = executable_path(request);
     std::unique_ptr<clang::DiagnosticOptions> options = clang::CreateAndPopulateDiagOpts(argv);
     auto* printer = new clang::TextDiagnosticPrinter(llvm::errs(), *options);
     printer->setPrefix(std::string(llvm::sys::path::stem(request[0])));
@@ -201,8 +238,13 @@ int main(int argc, char** argv)
     {
         uint32_t header[3] = { 0, 0, 0 };
         serving = read_all(requests, header, sizeof(header));
+        const bool capture_output = (header[1] & 1) != 0;
+        const bool capture_errors = (header[1] & 2) != 0;
+        const bool reads_input = (header[1] & 4) != 0;
         std::string directory;
+        std::string input;
         serving = serving && (header[0] == 0 || read_string(requests, directory));
+        serving = serving && (header[0] == 0 || !reads_input || read_string(requests, input));
         std::vector<std::string> request;
         for (uint32_t i = 0; serving && i < header[0]; i += 1)
         {
@@ -230,33 +272,50 @@ int main(int argc, char** argv)
             serving = chdir(directory.c_str()) == 0;
         }
         int32_t status = 0;
-        std::string captured;
+        std::string captured[2];
         if (serving && header[0] == 0)
         {
-            captured = CLANG_VERSION_STRING;
+            captured[1] = CLANG_VERSION_STRING;
         }
         else if (serving)
         {
-            const int capture = memfd_create("clang-server-capture", MFD_CLOEXEC);
+            // Each captured stream into a file in memory, the other to /dev/null; the input from its file.
+            const int output = capture_output ? memfd_create("clang-server-output", MFD_CLOEXEC) : -1;
+            const int errors = capture_errors ? memfd_create("clang-server-errors", MFD_CLOEXEC) : -1;
+            const int source = reads_input ? open(input.c_str(), O_RDONLY | O_CLOEXEC) : -1;
             const int saved_output = dup(STDOUT_FILENO);
             const int saved_errors = dup(STDERR_FILENO);
-            const bool errors = header[1] != 1;
-            serving = capture >= 0 && saved_output >= 0 && saved_errors >= 0 &&
-                      dup2(errors ? empty : capture, STDOUT_FILENO) >= 0 && dup2(errors ? capture : empty, STDERR_FILENO) >= 0;
+            serving = (!capture_output || output >= 0) && (!capture_errors || errors >= 0) && (!reads_input || source >= 0) && saved_output >= 0 &&
+                      saved_errors >= 0 && dup2(capture_output ? output : empty, STDOUT_FILENO) >= 0 &&
+                      dup2(capture_errors ? errors : empty, STDERR_FILENO) >= 0 && (!reads_input || dup2(source, STDIN_FILENO) >= 0);
             status = serving ? run_clang(request) : 1;
             llvm::outs().flush();
             llvm::errs().flush();
-            serving = serving && dup2(saved_output, STDOUT_FILENO) >= 0 && dup2(saved_errors, STDERR_FILENO) >= 0;
-            struct stat size = {};
-            serving = serving && fstat(capture, &size) == 0 && lseek(capture, 0, SEEK_SET) == 0;
-            captured.resize(serving ? static_cast<size_t>(size.st_size) : 0);
-            serving = serving && read_all(capture, captured.data(), captured.size());
-            close(capture);
-            close(saved_output);
-            close(saved_errors);
+            serving = serving && dup2(saved_output, STDOUT_FILENO) >= 0 && dup2(saved_errors, STDERR_FILENO) >= 0 && dup2(empty, STDIN_FILENO) >= 0;
+            const int captures[2] = { output, errors };
+            for (uint32_t c = 0; c < 2; c += 1)
+            {
+                struct stat size = {};
+                serving = serving && (captures[c] < 0 || (fstat(captures[c], &size) == 0 && lseek(captures[c], 0, SEEK_SET) == 0));
+                captured[c].resize(serving && captures[c] >= 0 ? static_cast<size_t>(size.st_size) : 0);
+                serving = serving && read_all(captures[c], captured[c].data(), captured[c].size());
+            }
+            const int descriptors[5] = { output, errors, source, saved_output, saved_errors };
+            for (int descriptor : descriptors)
+            {
+                if (descriptor >= 0)
+                {
+                    close(descriptor);
+                }
+            }
         }
-        const uint32_t reply[2] = { static_cast<uint32_t>(status), static_cast<uint32_t>(captured.size()) };
-        serving = serving && write_all(replies, reply, sizeof(reply)) && write_all(replies, captured.data(), captured.size());
+        const bool streams[2] = { header[0] != 0 && capture_output, header[0] == 0 || capture_errors };
+        serving = serving && write_all(replies, &status, sizeof(status));
+        for (uint32_t c = 0; c < 2; c += 1)
+        {
+            const uint32_t length = static_cast<uint32_t>(captured[c].size());
+            serving = serving && (!streams[c] || (write_all(replies, &length, sizeof(length)) && write_all(replies, captured[c].data(), captured[c].size())));
+        }
     }
     return 0;
 }

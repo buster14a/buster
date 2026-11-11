@@ -171,8 +171,9 @@ jobs:
         shell: bash
     env:
       BUSTER_ORACLE_CACHE: check
-      # The native plain row also runs each of the semantic driver's in-process and served runs as a child and fails on
-      # a difference (test-checker-driver --differential, #2071); the other rows run them in-process and served alone.
+      # The native plain row also runs each of the semantic driver's in-process and served runs, and the parser's and
+      # the preprocessor's served clang oracle runs, as a child and fails on a difference (--differential, #2071); the
+      # other rows run them in-process and served alone.
       BUSTER_DRIVER_DIFFERENTIAL: ${{ inputs.host_arch == 'native' && inputs.sanitizer == 'none' && '1' || '' }}
     steps:
       - name: Require this row's compiler product
