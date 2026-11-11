@@ -338,6 +338,17 @@ static bool check_asm_clang_valid(const CheckInputAsm* statement, uint32_t index
             // x87's 'f' isn't an output's, and 'p' only the generic input check knows.
             valid = !output || (byte != 'f' && byte != 'p');
         }
+        else if (output && byte == '@' && next == 'c' && cursor + 2 < text.length && text.bytes[cursor + 2] == 'c')
+        {
+            // A flag output (`=@ccz`), which x86's validateAsmConstraint takes with its condition: a register's
+            // (check_asm_constraint checks the condition's name).
+            operand = true;
+            register_allowed = true;
+            while (cursor + 1 < text.length && text.bytes[cursor + 1] != ',')
+            {
+                cursor += 1;
+            }
+        }
         else if ((byte == 'Y' && next != 0 && strchr("ikmtz2", next) != NULL) || (byte == 'W' && next == 's'))
         {
             operand = true;
