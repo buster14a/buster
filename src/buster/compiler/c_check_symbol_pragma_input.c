@@ -35,6 +35,10 @@ struct CheckInputSymbolPragma
     uint32_t diagnostic_source;
     uint32_t diagnostic_location;
     uint32_t declaration;
+    // `#pragma weak A = T` whose A the unit never declares (#1849): T's declaration, whose definition the emission gives
+    // a weak symbol A of its own (check_program_define_pragma_aliases), as clang's clone of T's declaration is; else
+    // BUSTER_CHECK_NONE.
+    uint32_t alias_target;
     uint8_t kind;
     uint8_t warning;
     bool supported;
@@ -79,7 +83,7 @@ static bool check_input_symbol_record(CheckInputReader* reader, uint32_t pragma,
     if (matched)
     {
         *record = (CheckInputSymbolPragma){ .pragma = pragma, .source = source, .end = end, .token = token,
-                                           .declaration = BUSTER_CHECK_NONE, .kind = rename ? CHECK_SYMBOL_PRAGMA_REDEFINE : CHECK_SYMBOL_PRAGMA_WEAK,
+                                           .declaration = BUSTER_CHECK_NONE, .alias_target = BUSTER_CHECK_NONE, .kind = rename ? CHECK_SYMBOL_PRAGMA_REDEFINE : CHECK_SYMBOL_PRAGMA_WEAK,
                                            .supported = true };
         uint32_t at = source + 3;
         if (!check_input_symbol_identifier(reader, at, end))
@@ -210,6 +214,7 @@ static bool check_input_symbol_warning_append(CheckInputReader* reader, uint32_t
         .source = record->diagnostic_source,
         .completion_kind = completion_kind,
         .completion = completion,
+        .suborder = completion_kind == CHECK_WARNING_COMPLETE_TU_END ? CHECK_WARNING_UNIT_END_WEAK : 0,
         .payload = { .name = record->kind == CHECK_SYMBOL_PRAGMA_ALIAS && record->warning == CHECK_SYMBOL_WARNING_UNDECLARED ? record->target : record->name,
                      .token = record->source, .data = index + 1 },
     };
@@ -331,10 +336,11 @@ static CheckInputSymbolNamed check_input_symbol_named(const CheckInputReader* re
 // `#pragma weak A = T` (#1849): clang's Sema looks T up at the pragma (or at its first later external declaration) and
 // declares A a weak alias of it, a clone of T's declaration, unless T already has an alias attribute; "weak identifier
 // 'T' never declared" at A otherwise. The shapes whose A the unit declares, with external linkage, of T's kind and type,
-// that nothing names after the pragma, take the alias as attributes of A's declaration (the latest before the pragma, or
-// else the first after it): weak and alias("T"), which the emission makes clang's weak alias of. One whose A the unit
-// defined before it is clang's no-op. The others (A undeclared, defined after the pragma, named after it, of another
-// kind or type, or T not defined in the unit, whose error clang reports at the pragma) are refused by name.
+// that nothing names after the pragma where A is declared before it, take the alias as attributes of A's declaration
+// (the latest before the pragma, or else the first after it): weak and alias("T"), which the emission makes clang's weak
+// alias of. One whose A the unit defined before it, or made an alias of its own, is clang's no-op. Where clang's clone
+// is A's only declaration the emission makes, the record's alias_target is T's declaration. The others, at which clang's
+// Sema errors, are refused by name.
 static bool check_input_symbol_alias(CheckInputReader* reader, CheckInputSymbolPragma* record, uint32_t index, const uint64_t* ordered, uint32_t count,
                                      bool complete)
 {
@@ -359,21 +365,41 @@ static bool check_input_symbol_alias(CheckInputReader* reader, CheckInputSymbolP
     {
         const CheckInputSymbolNamed alias = check_input_symbol_named(reader, ordered, count, record->name, record->token);
         const uint32_t declaration = alias.previous != BUSTER_CHECK_NONE ? alias.previous : alias.next;
+        // Whether C names A after the pragma, and anywhere at all.
         bool named_after = false;
-        for (uint32_t event = 0; declaration != BUSTER_CHECK_NONE && !named_after && event < bindings->count; event += 1)
+        bool named = false;
+        for (uint32_t event = 0; declaration != BUSTER_CHECK_NONE && event < bindings->count; event += 1)
         {
-            named_after = bindings->operation[event] == C_BINDING_USE && bindings->key[event] == record->name && bindings->point[event] > record->token;
+            const bool use = bindings->operation[event] == C_BINDING_USE && bindings->key[event] == record->name;
+            named |= use;
+            named_after |= use && alias.previous != BUSTER_CHECK_NONE && bindings->point[event] > record->token;
         }
         const TypeId declared = declaration != BUSTER_CHECK_NONE ? input->declared_types[declaration] : 0;
         const TypeAnswer same = declared != 0 ? type_compatible(reader->types, declared, input->declared_types[selected]) : TYPE_ANSWER_NO;
         reader->output->resource |= same == TYPE_ANSWER_FULL;
-        const bool no_op = declaration != BUSTER_CHECK_NONE && alias.defined_before;
-        refused = !no_op && (declaration == BUSTER_CHECK_NONE || alias.defined_after || named_after || alias.aliased || alias.sectioned ||
-                             (!target.defined_before && !target.defined_after) || input->declaration_kinds[declaration] != kind ||
-                             check_input_linkage(input->declaration_bits, declaration) != 2 || same != TYPE_ANSWER_YES ||
-                             check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_THREAD_LOCAL) !=
-                                 check_input_bit(input->declaration_bits, selected, BUSTER_CHECK_BITS_THREAD_LOCAL));
-        if (!no_op && !refused)
+        const bool defined = target.defined_before || target.defined_after;
+        // A defined before the pragma is clang's no-op, and so is one that is an alias already: clang keeps its own alias.
+        const bool no_op = alias.previous != BUSTER_CHECK_NONE && (alias.defined_before || alias.aliased);
+        const bool mismatched = declaration != BUSTER_CHECK_NONE &&
+                                (alias.sectioned || input->declaration_kinds[declaration] != kind || same != TYPE_ANSWER_YES ||
+                                 check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_THREAD_LOCAL) !=
+                                     check_input_bit(input->declaration_bits, selected, BUSTER_CHECK_BITS_THREAD_LOCAL));
+        // An A the unit never declares, or declares only before the pragma, of external linkage, never defines and never
+        // names, of a T it defines (#1849): clang's clone of T's declaration, a weak alias at T's definition of T's kind,
+        // type and size, whatever A's own declaration says (its kind, type, thread-local storage or section), which no C
+        // reference names.
+        const bool unnamed = declaration == BUSTER_CHECK_NONE ||
+                             (alias.next == BUSTER_CHECK_NONE && !named && !alias.defined_before && !alias.aliased && mismatched &&
+                              check_input_linkage(input->declaration_bits, declaration) == 2);
+        const bool undeclared = !no_op && defined && unnamed;
+        record->alias_target = undeclared ? selected : BUSTER_CHECK_NONE;
+        // Refused by name, where clang's Sema errors: A declared before the pragma and named after it ("reference to 'A' is
+        // ambiguous"), declared after it with another kind or type ("redefinition of 'A' as different kind of symbol",
+        // "redeclaration of 'A' with a different type") or defined after it ("redefinition of 'A'"), and T not defined
+        // ("alias must point to a defined variable or function"); and A of internal linkage.
+        refused = !no_op && !undeclared && (declaration == BUSTER_CHECK_NONE || alias.defined_after || named_after || alias.aliased || !defined ||
+                                            mismatched || check_input_linkage(input->declaration_bits, declaration) != 2);
+        if (!no_op && !refused && !undeclared)
         {
             valid = check_input_symbol_attribute(reader, record, declaration);
         }

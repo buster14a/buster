@@ -329,6 +329,9 @@ typedef enum CheckInputMessage
     // An array of more than BUSTER_TYPE_MAX_OBJECT_BYTES (#1447, clang's limit too), at its bound: "array is too large
     // (2'305'843'009'213'693'952 elements)", its count in `value`.
     CHECK_INPUT_ARRAY_TOO_LARGE,
+    // An array bound of a type that isn't an integer's (#2170, clang's err_array_size_non_int), at the bound's first token:
+    // "size of array has non-integer type 'double'", the bound's type in `type`.
+    CHECK_INPUT_ARRAY_NON_INTEGER,
     // A list of specifiers whose only type specifier was a _BitInt with an undeclared name in its width (#1447), which clang
     // drops: its parser's error at the list's end, by `detail`: 0 "type specifier missing, defaults to 'int'; ISO C99 and
     // later do not support implicit int [-Wimplicit-int]", 1 C23's "a type specifier is required for all declarations",
@@ -348,6 +351,14 @@ typedef enum CheckInputMessage
     CHECK_INPUT_VLA_EXTERN,
     CHECK_INPUT_VM_EXTERN,
     CHECK_INPUT_VLA_FIELD,
+    // A block's automatic variable-length array with an initializer but an empty list (#1447): clang's "variable-sized
+    // object may not be initialized", at the outermost bound for a list, else at the name; recovered, the declaration
+    // valid and its initializer unchecked (CheckInputReader.vla_initializer_dropped).
+    CHECK_INPUT_VLA_INITIALIZER,
+    // clang's parser's second error after a GNU suppress it drops for a malformed argument (#1844,
+    // check_input_suppress_dropped): the statement after it, its block item's GNU attributes all gone, parsed as a
+    // declaration, whose first token starts no declarator.
+    CHECK_INPUT_DROPPED_SUPPRESS_DECLARATION,
 
     // A use of an invalid declaration (#1447, check_input_invalid_declare), at its name: no diagnostic of its own, as
     // clang's RecoveryExpr has none, but the uses' and their enclosing expressions' are left out as an undeclared name's
@@ -523,6 +534,7 @@ static const char* const check_input_messages[] =
     [CHECK_INPUT_VLA_EXTERN] = "variable length array declaration cannot have 'extern' linkage",
     [CHECK_INPUT_VM_EXTERN] = "variably modified type declaration cannot have 'extern' linkage",
     [CHECK_INPUT_VLA_FIELD] = "fields must have a constant size: 'variable length array in structure' extension will never be supported",
+    [CHECK_INPUT_DROPPED_SUPPRESS_DECLARATION] = "expected identifier or '('",
 };
 
 // The type/action tables currently describe one C LP64 model: 32-bit wchar_t, x87 long double stored in 16 bytes, and
@@ -884,6 +896,8 @@ struct CheckInput
     // Beside each, the function its name may have meant's declaration token (#1447, c_check_typo.c): a "did you mean"
     // note and a "declared here" one; or BUSTER_CHECK_NONE, or BUSTER_CHECK_TYPO_UNSEARCHED where no search was made.
     uint32_t* implicit_function_corrections;
+    // Beside each, whether it declares an unknown builtin, a `__builtin_` name: clang's "use of unknown builtin" (#2121).
+    bool* implicit_function_builtins;
     uint32_t implicit_function_count;
     // The uses a typo's correction recovered (#1447, c_check_typo.c), in source order, at most its search limit: a warning
     // at an operator or a declarator whose operand holds one is published after its error (check_driver_after_corrections).
@@ -891,6 +905,7 @@ struct CheckInput
     uint32_t corrected_count;
     uint8_t implicit_function_diagnostic;
     uint8_t implicit_library_diagnostic;
+    uint8_t implicit_builtin_diagnostic;
     bool implicit_function_c99;
     // -fcommon (PredefinesOptions.common, #147): the emission makes every tentative definition a common symbol.
     bool common_tentatives;
@@ -1777,6 +1792,15 @@ struct CheckInputReader
     // ext_vector_type: ProcessDeclAttribute leaves GNU type attributes to a declarator's type) are read without their
     // arguments' values.
     bool tag_attributes;
+    // The attributes being read are a C23 list after a bare tag declaration's name (#1447, check_input_tag_attributes), which
+    // clang's parser refuses and its Sema still applies to the tag, as the tag's own list.
+    bool tag_name_list;
+    // That list's tokens [tag_name_list_first, tag_name_list_end) and the subjects its tag gives, which
+    // check_input_tag_attributes leaves to check_input_tag to read after the identity: the constant reader's way to the
+    // identity (check_constant_tag_finish) reads no attributes. tag_name_list_end is 0 where none waits.
+    uint32_t tag_name_list_first;
+    uint32_t tag_name_list_end;
+    uint32_t tag_name_list_subjects;
     // The constexpr values the initializers' finishes have read, newest first.
     CheckConstexprValue* constexpr_values;
     uint32_t constexpr_count;
@@ -1959,6 +1983,9 @@ struct CheckInputReader
     bool specifier_names;
     uint32_t specifier_names_mark;
     bool declarator_invalid;
+    // Whether check_input_vla_declaration recovered a block VLA's initializer's error (#1447), whose initializer the
+    // declaration then skips.
+    bool vla_initializer_dropped;
     // Whether the last complete declarator's own type was in error (#1447), not only a parameter of its own function's:
     // clang's parser then declares none of its group's later declarators.
     bool declarator_group_invalid;
@@ -4450,7 +4477,8 @@ static void check_input_tag_attribute_warning(CheckInputReader* reader, const Ch
         .source = BUSTER_CHECK_WARNING_NO_SOURCE,
         .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
         .completion = attribute->first + 1,
-        .payload = { .name = attribute->name, .token = BUSTER_CHECK_WARNING_NO_SOURCE,
+        // (A C23 attribute's scope, which TAG_ATTRIBUTE_PLACE's data doesn't hold, is its token's: the warning names it.)
+        .payload = { .name = attribute->name, .token = kind == CHECK_WARNING_EVENT_TAG_ATTRIBUTE_PLACE && scope_name != 0 ? attribute->first : BUSTER_CHECK_WARNING_NO_SOURCE,
                      .data = kind == CHECK_WARNING_EVENT_TAG_ATTRIBUTE_PLACE ? data : scope_name | (attribute->standard ? BUSTER_CHECK_WARNING_STANDARD_ATTRIBUTE : 0) },
     };
     const CheckWarningNote note =
@@ -4483,14 +4511,55 @@ static bool check_input_tag_attributes(CheckInputReader* reader, uint32_t token,
     const uint8_t kind = type_kind(reader->types, type);
     const uint32_t keyword = kind == BUSTER_TYPE_KIND_UNION ? 1u : kind == BUSTER_TYPE_KIND_ENUM ? 2u : 0u;
     // A bare declaration's attributes after its name, which nothing takes: clang's parser's reading of them alone, and its
-    // warning of each (check_input_attribute_ignored_lists).
-    for (uint32_t i = after_name; valid && bare && i < after; i += 1)
+    // warning of each (check_input_attribute_ignored_lists). A C23 list there is its parser's error, after which its Sema
+    // applies the list to the tag as the tag's own (#1447): a type attribute's count error, or "cannot be applied to a
+    // declaration" (check_input_attribute_rule's tag_list). The declaration goes on, as clang's does, its errors recovered.
+    // (The list's other attributes are read and checked, but the tag doesn't take them.)
+    for (uint32_t i = after_name; valid && bare && i < after;)
     {
-        if (parser->tokens.kinds[i] == PARSE_KIND_L_SQUARE && check_input_attribute_starts(parser, i, after))
+        // The C23 lists from `i` on, which clang's parser reads together: one error at the first, of a struct's or a union's
+        // right after its name. An enum's, or lists after a GNU one, its parser ignores as a GNU list's, warning of each.
+        const bool lists = parser->tokens.kinds[i] == PARSE_KIND_L_SQUARE && check_input_attribute_starts(parser, i, after);
+        const bool list = lists && i == after_name && kind != BUSTER_TYPE_KIND_ENUM;
+        uint32_t list_end = i;
+        while (list_end < after && parser->tokens.kinds[list_end] == PARSE_KIND_L_SQUARE && check_input_attribute_starts(parser, list_end, after))
         {
-            check_input_report(reader, i, CHECK_INPUT_ATTRIBUTE_LIST_PLACE);
-            valid = false;
+            list_end = parser->tree.parents[list_end] < after ? parser->tree.parents[list_end] + 1 : after;
         }
+        for (uint32_t t = i + 2; lists && !list && t < list_end; t += 1)
+        {
+            // Each item's name: the identifier (or keyword) before its arguments, a comma or the list's end, its scope's
+            // three tokens before it (the parser's `::` is two colons).
+            const uint8_t next = t + 1 < list_end ? parser->tokens.kinds[t + 1] : PARSE_KIND_END;
+            const bool scoped = t >= 3 && parser->tokens.kinds[t - 1] == PARSE_KIND_COLON && parser->tokens.kinds[t - 2] == PARSE_KIND_COLON;
+            const bool item = parser->tokens.kinds[t] != PARSE_KIND_L_SQUARE && parser->tokens.kinds[t] != PARSE_KIND_R_SQUARE &&
+                              parser->tokens.kinds[t] != PARSE_KIND_COMMA && parser->tokens.kinds[t] != PARSE_KIND_COLON &&
+                              (next == PARSE_KIND_L_PAREN || next == PARSE_KIND_COMMA || next == PARSE_KIND_R_SQUARE) &&
+                              (scoped || parser->tokens.kinds[t - 1] == PARSE_KIND_L_SQUARE || parser->tokens.kinds[t - 1] == PARSE_KIND_COMMA);
+            if (item)
+            {
+                const CheckInputAttribute ignored = { .first = scoped ? t - 3 : t, .name_token = t, .name = parser->tokens.names[t], .standard = true };
+                check_input_tag_attribute_warning(reader, &ignored, CHECK_WARNING_EVENT_TAG_ATTRIBUTE_PLACE, keyword, BUSTER_CHECK_NONE);
+            }
+            t = item && next == PARSE_KIND_L_PAREN ? parser->tree.parents[t + 1] : t;
+        }
+        if (lists && !list)
+        {
+            // (Read: the specifiers take nothing of them, as check_input_attribute_ignored_lists marks a GNU list.)
+            memset(reader->ignored + i, 1, list_end - i);
+        }
+        if (list)
+        {
+            const uint32_t before = reader->output->report_count;
+            check_input_report(reader, i, CHECK_INPUT_ATTRIBUTE_LIST_PLACE);
+            // Read by check_input_tag after the identity, with their subjects' and counts' checks as the tag's own list's
+            // (below).
+            reader->tag_name_list_first = i;
+            reader->tag_name_list_end = list_end;
+            reader->tag_name_list_subjects = kind == BUSTER_TYPE_KIND_UNION ? BUSTER_CHECK_SUBJECT_UNION : BUSTER_CHECK_SUBJECT_STRUCT;
+            valid = !reader->output->resource && (reader->output->report_count == before || check_input_recover_reports(reader, before));
+        }
+        i = lists ? list_end : i + 1;
     }
     valid = valid && (!bare || check_input_attribute_ignored_lists(reader, after_name, after, true, keyword, BUSTER_CHECK_NONE));
     // A reference's C23 list before its name, which clang's parser rejects at its first attribute. One after its name is
@@ -4668,11 +4737,11 @@ static TypeId check_input_tag_identity(CheckInputReader* reader, uint32_t token,
         const bool again = !c23 && earlier_tag != 0 && type_is_complete(reader->types, earlier) &&
                            (kind != BUSTER_TYPE_KIND_ENUM || (earlier_state == BUSTER_CHECK_ENUM_NONE && !fixed) ||
                             (earlier_state == BUSTER_CHECK_ENUM_LISTED && fixed && reader->types->types.base[type_index(earlier)] == underlying));
-        // An enum's, at file scope (#1447, check_tag_enum_compatible): one without a fixed type after one without, or one
+        // An enum's, in any scope (#1447, check_tag_enum_compatible): one without a fixed type after one without, or one
         // listed again with its fixed base. Its body is an anonymous enum's whose enumerators of the earlier one's names
-        // are ambiguous (check_tag_enum_ambiguous), compared with the earlier once complete. (A block's notes name its
-        // function, `f()::X`, which the reader doesn't spell: it still refuses there.)
-        const bool enum_again = c23 && earlier_tag != 0 && kind == BUSTER_TYPE_KIND_ENUM && type_is_complete(reader->types, earlier) && depth == 0 &&
+        // are ambiguous (check_tag_enum_ambiguous), compared with the earlier once complete. (A block's ambiguity notes
+        // name its function, `g(int)::B`: check_driver_function_scope, #1826.)
+        const bool enum_again = c23 && earlier_tag != 0 && kind == BUSTER_TYPE_KIND_ENUM && type_is_complete(reader->types, earlier) &&
                                 ((earlier_state == BUSTER_CHECK_ENUM_NONE && !fixed) ||
                                  (earlier_state == BUSTER_CHECK_ENUM_LISTED && fixed && reader->types->types.base[type_index(earlier)] == underlying));
         const bool compatible = c23 && earlier_tag != 0 && (kind != BUSTER_TYPE_KIND_ENUM || enum_again) && type_is_complete(reader->types, earlier);
@@ -4906,19 +4975,54 @@ static TypeId check_input_tag(CheckInputReader* reader, uint32_t token, uint32_t
         reader->tag_attributes = false;
         // Before the identity, which completes an enum with a fixed underlying type and its alignment attribute.
         check_input_set_attributes_at(reader->output, token, valid ? attributes : 0);
+        reader->tag_name_list_end = 0;
         type = valid ? check_input_tag_identity(reader, token, end, definition) : 0;
+        // A C23 list after a bare declaration's name (check_input_tag_attributes): read as the tag's, its errors recovered.
+        if (type != 0 && reader->tag_name_list_end != 0)
+        {
+            const uint32_t before = reader->output->report_count;
+            uint32_t list = reader->tag_name_list_first;
+            CheckInputAttributes* listed = 0;
+            reader->tag_attributes = true;
+            reader->tag_name_list = true;
+            const bool read = check_input_read_attributes(reader, &list, reader->tag_name_list_end, &listed);
+            reader->tag_attributes = false;
+            reader->tag_name_list = false;
+            reader->tag_name_list_end = 0;
+            if (read && listed != 0)
+            {
+                (void)check_input_attribute_subjects(reader, listed, reader->tag_name_list_subjects, 0, token, BUSTER_CHECK_NONE);
+            }
+            const bool recovered = !reader->output->resource && (reader->output->report_count == before || check_input_recover_reports(reader, before));
+            type = recovered ? type : 0;
+        }
     }
     return type;
 }
 
 // GNU C's __auto_type, the type a declaration of one variable takes from its initializer. Until the walk has read the
 // initializer (check_input_auto_type_finish), the declaration's type is this placeholder with the specifiers' const and
-// volatile: no specifiers give it otherwise, as restrict on a type other than a pointer is an error.
+// volatile: no specifiers give it otherwise, as restrict on a type other than a pointer is an error. The specifiers'
+// _Atomic and restrict, which apply to the deduced type (#1844), make it one of three others of the same kind (an
+// integer type with restrict, which no declaration has): `_Atomic __auto_type` is unsigned int's, `__auto_type restrict`
+// long's (check_input_auto_type_qualifiers).
 #define BUSTER_CHECK_AUTO_TYPE (BUSTER_TYPE_INT | BUSTER_TYPE_RESTRICT)
+#define BUSTER_CHECK_AUTO_TYPE_ATOMIC (BUSTER_TYPE_UINT | BUSTER_TYPE_RESTRICT)
+#define BUSTER_CHECK_AUTO_TYPE_RESTRICT (BUSTER_TYPE_LONG | BUSTER_TYPE_RESTRICT)
 
 static bool check_input_auto_type(TypeId type)
 {
-    return (type & ~(TypeId)(BUSTER_TYPE_CONST | BUSTER_TYPE_VOLATILE)) == BUSTER_CHECK_AUTO_TYPE;
+    const TypeId marker = type & ~(TypeId)(BUSTER_TYPE_CONST | BUSTER_TYPE_VOLATILE);
+    return marker == BUSTER_CHECK_AUTO_TYPE || marker == BUSTER_CHECK_AUTO_TYPE_ATOMIC || marker == BUSTER_CHECK_AUTO_TYPE_RESTRICT;
+}
+
+// The qualifiers an __auto_type placeholder asks of its deduced type: its const and volatile, and the _Atomic (as
+// BUSTER_TYPE_KIND_ATOMIC's wrapper, in `*atomic`) or the restrict its marker says.
+static uint32_t check_input_auto_type_qualifiers(TypeId placeholder, bool* atomic)
+{
+    const TypeId marker = placeholder & ~(TypeId)(BUSTER_TYPE_CONST | BUSTER_TYPE_VOLATILE);
+    *atomic = marker == BUSTER_CHECK_AUTO_TYPE_ATOMIC;
+    return (type_qualifiers(placeholder) & (BUSTER_TYPE_CONST | BUSTER_TYPE_VOLATILE)) | (marker == BUSTER_CHECK_AUTO_TYPE_RESTRICT ? BUSTER_TYPE_RESTRICT : 0);
 }
 
 // Where clang reports specifiers that clash with __auto_type, the list's reading having failed at `token`: a second type
@@ -4955,8 +5059,9 @@ static __attribute__((noinline)) uint32_t check_input_auto_type_clash(const Chec
 }
 
 // The rest of a list of specifiers with __auto_type, from `first` to `end`, as clang reads it: _Complex is an error at its
-// keyword; _Atomic, restrict and attributes that change the type are refused by name, as what clang deduces with them
-// isn't modeled yet.
+// keyword; _Atomic and restrict apply to the deduced type (check_input_auto_type_qualifiers), but both together, whose
+// restrict clang reports against `_Atomic(__auto_type)` before deducing, are refused by name at the restrict, and so are
+// attributes that change the type.
 static __attribute__((noinline)) bool check_input_auto_type_specifiers(CheckInputReader* reader, uint32_t first, uint32_t end, bool complex, bool atomic,
                                                                          uint32_t restrict_token)
 {
@@ -4969,12 +5074,14 @@ static __attribute__((noinline)) bool check_input_auto_type_specifiers(CheckInpu
         complex_token = complex_token == BUSTER_CHECK_NONE && (name == C_NAME_COMPLEX_C99 || name == C_NAME_GNU_COMPLEX || name == C_NAME_GNU_COMPLEX2) ? i : complex_token;
         atomic_token = atomic_token == BUSTER_CHECK_NONE && parser->tokens.kinds[i] == PARSE_KIND_ATOMIC ? i : atomic_token;
     }
-    const uint32_t token = complex ? complex_token : atomic ? atomic_token : restrict_token;
-    if (complex || atomic || restrict_token != BUSTER_CHECK_NONE)
+    (void)atomic_token;
+    const bool both = atomic && restrict_token != BUSTER_CHECK_NONE;
+    const uint32_t token = complex ? complex_token : restrict_token;
+    if (complex || both)
     {
         check_input_report(reader, token != BUSTER_CHECK_NONE ? token : first, complex ? CHECK_INPUT_DECLARATION : CHECK_INPUT_UNSUPPORTED);
     }
-    return !complex && !atomic && restrict_token == BUSTER_CHECK_NONE;
+    return !complex && !both;
 }
 
 // Specifiers are retained in source order because their inherited base type precedes declarators semantically,
@@ -5527,7 +5634,7 @@ static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor,
         valid = check_input_auto_type_specifiers(reader, first, i, complex, atomic, (qualifiers & BUSTER_TYPE_RESTRICT) != 0 ? restrict_token : BUSTER_CHECK_NONE);
     }
     reader->specifier_restrict = BUSTER_CHECK_NONE;
-    if ((qualifiers & BUSTER_TYPE_RESTRICT) != 0 && valid && !inferred_auto)
+    if ((qualifiers & BUSTER_TYPE_RESTRICT) != 0 && valid && !inferred_auto && auto_type == BUSTER_CHECK_NONE)
     {
         const bool pointer = type_kind(reader->types, base) == BUSTER_TYPE_KIND_POINTER &&
                              type_kind(reader->types, reader->types->types.base[type_index(base)]) != BUSTER_TYPE_KIND_FUNCTION;
@@ -5561,7 +5668,8 @@ static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor,
         }
         base = !valid ? 0 : complex ? check_input_type_result(reader, type_complex(reader->types, base)) : base;
     }
-    if (atomic && valid)
+    // __auto_type's _Atomic is its deduced type's (its placeholder's marker, below).
+    if (atomic && valid && auto_type == BUSTER_CHECK_NONE)
     {
         base = check_input_type_result(reader, type_atomic(reader->types, base));
         noderef = check_input_noderef_wrap(reader, noderef);
@@ -5617,7 +5725,8 @@ static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor,
             check_input_report(reader, auto_type, CHECK_INPUT_UNSUPPORTED);
         }
         valid = base == BUSTER_TYPE_INT;
-        base = BUSTER_CHECK_AUTO_TYPE;
+        base = atomic ? BUSTER_CHECK_AUTO_TYPE_ATOMIC : (qualifiers & BUSTER_TYPE_RESTRICT) != 0 ? BUSTER_CHECK_AUTO_TYPE_RESTRICT : BUSTER_CHECK_AUTO_TYPE;
+        qualifiers &= ~(uint32_t)BUSTER_TYPE_RESTRICT;
         reader->specifier_auto_type = auto_type;
     }
     if (inferred_auto)
@@ -6365,7 +6474,8 @@ static uint32_t check_input_checked_indices(CheckInputReader* reader, const Chec
 {
     const String8 name = check_input_attribute_name(reader, attribute->name);
     return check_input_attribute_equal(name, "callback") ? 1u : check_input_attribute_equal(name, "swift_async") && attribute->argument_count == 2 ? 2u :
-           check_input_attribute_equal(name, "diagnose_as_builtin") || check_input_type_tag_rule(name) ? 3u : 0u;
+           check_input_attribute_equal(name, "diagnose_as_builtin") || check_input_type_tag_rule(name) ||
+           (check_input_attribute_equal(name, "swift_async_error") && attribute->argument_count == 2) ? 3u : 0u;
 }
 
 // A type argument's type (#147, CheckInputAttribute.argument_type): a C23 attribute's lone typedef name, which its tokens
@@ -7786,8 +7896,10 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                 valid = check_input_vla_bound(reader, i, bound, close, frame->name, frame->parameter_context || reader->kr_declarator, star, &run->bound, &run->definition,
                                               &part.kind, &part.extent);
                 run->definition_end = run->definition != BUSTER_CHECK_NONE ? close : run->definition_end;
-                // A negative constant bound (#1447): an invalid declaration, its array a stand-in of no element.
-                if (__builtin_expect(!valid, 0) && reader->output->report_count == before + 1 && reader->output->reports[before].message == CHECK_INPUT_ARRAY_NEGATIVE &&
+                // A negative constant bound (#1447), or one of another type than an integer's (#2170): an invalid
+                // declaration, its array a stand-in of no element.
+                if (__builtin_expect(!valid, 0) && reader->output->report_count == before + 1 &&
+                    (reader->output->reports[before].message == CHECK_INPUT_ARRAY_NEGATIVE || reader->output->reports[before].message == CHECK_INPUT_ARRAY_NON_INTEGER) &&
                     check_input_declarator_recover(reader, run, frame, before))
                 {
                     valid = true;
@@ -9139,10 +9251,15 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
                             // A C23 redefinition compares its members' attributes (c_check_tag_compatible.c).
                             valid = check_tag_member_attributes_note(reader, name, attributes);
                         }
-                        // clang's counted_by family (#148), on this member, among the record's members declared before it.
+                        // clang's counted_by family (#148), on this member, among the record's members declared before it. An
+                        // error drops the attribute, as clang's handler does, and the member is declared without it (#1842).
                         const uint32_t counted_begin = check_input_attribute_begin(parser, frame->member_begin, frame->close);
-                        valid = attributes == 0 || !attributes->counted ||
-                                check_input_counted_by_member(reader, frames, depth, members, member_count, attributes, counted_begin, &member);
+                        if (attributes != 0 && attributes->counted)
+                        {
+                            const uint32_t counted_reports = reader->output->report_count;
+                            const bool counted = check_input_counted_by_member(reader, frames, depth, members, member_count, attributes, counted_begin, &member);
+                            valid = counted || (reader->output->report_count > counted_reports && check_input_recover_reports(reader, counted_reports));
+                        }
                         bool flexible = false;
                         // clang's CheckFieldDecl (#1447): a member whose type, or its array's element, has an address space.
                         if (valid && type_address_space(type_object_qualifiers(reader->types, type)) != 0)
@@ -10490,7 +10607,7 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
         {
             const uint8_t kind = parser->tokens.kinds[i];
             const bool direct_initializer = parser->tree.roles[i] == PARSE_ROLE_OPEN_GROUP;
-            const bool initialized = check_input_has_initializer(parser, i);
+            bool initialized = check_input_has_initializer(parser, i);
             const uint32_t direct_close = direct_initializer ? parser->tree.parents[i] : i;
             const uint32_t direct_end = direct_initializer ? check_input_direct_initializer_end(parser, i + 1, direct_close) : i;
             if (direct_initializer && direct_end < direct_close && (c23_auto || check_input_auto_type(type)))
@@ -10740,7 +10857,25 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                 check_input_report(reader, name, CHECK_INPUT_BLOCK_EXTERN_INITIALIZER);
                 valid = false;
             }
+            reader->vla_initializer_dropped = false;
             valid &= check_input_vla_declaration(reader, first, vla_begin, name, type, i, storage, is_typedef, initialized, thread_local);
+            if (__builtin_expect(valid && reader->vla_initializer_dropped, 0))
+            {
+                // Its initializer, which clang doesn't check against the type (#1447): skipped, to the declarator's end.
+                uint32_t right = reader->first_child[i];
+                while (right != BUSTER_CHECK_NONE && right < i)
+                {
+                    right = reader->next_child[right];
+                }
+                const uint32_t end = right != BUSTER_CHECK_NONE ? reader->ends[right] + 1 : i + 1;
+                for (uint32_t skipped = i; skipped < end && skipped < count; skipped += 1)
+                {
+                    reader->ignored[skipped] = true;
+                }
+                valid = right != BUSTER_CHECK_NONE;
+                initialized = false;
+                i = end;
+            }
             if (valid && reader->cleanup_attributes && attributes != 0)
             {
                 // GNU's cleanup attribute, which a variable of automatic storage in a block has, and any other declaration
@@ -11282,7 +11417,7 @@ static void check_input_bind_checked(CheckInputReader* reader, uint32_t token, u
     }
     if (version != BUSTER_CHECK_NONE)
     {
-        check_input_cpu_dispatch_redeclare(reader, token, version);
+        check_input_cpu_dispatch_redeclare(reader, token, version, point);
     }
     if (old == 0 && reader->scope_count == 0)
     {
@@ -11435,6 +11570,18 @@ static void check_input_bind_checked(CheckInputReader* reader, uint32_t token, u
             const bool redefined = reader->definition_origins[token] && definition && !repeated_loader;
             const bool redefinition_alone = redefined && !mismatch && !(thread_local && !thread_local_alone) && kind == C_BINDING_OBJECT;
             const bool conflict = mismatch || redefined || (thread_local && !thread_local_alone);
+            // A redefinition of a compatible type merges its attributes first (#1920): their late-attribute warnings come
+            // before its error. (Not one multiversioning refused, which clang leaves unmerged.)
+            bool refused = reader->cpu_invalid_count != 0 && check_cpu_dispatch_invalid(reader, token);
+            for (uint32_t r = 0; !refused && r < reader->output->multiversion_report_count; r += 1)
+            {
+                refused = reader->output->multiversion_reports[r].token == token;
+            }
+            const bool late_first = redefined && !mismatch && !(thread_local && !thread_local_alone) && !refused;
+            if (late_first)
+            {
+                check_input_attribute_late(reader, token, previous, point, linked_visible, true);
+            }
             if (conflict)
             {
                 const uint32_t before = reader->output->report_count;
@@ -11467,7 +11614,10 @@ static void check_input_bind_checked(CheckInputReader* reader, uint32_t token, u
             }
             if (!conflict || (redefinition_alone && !dropped && reader->output->report_count == 0))
             {
-                check_input_attribute_late(reader, token, previous, point, linked_visible);
+                if (!late_first)
+                {
+                    check_input_attribute_late(reader, token, previous, point, linked_visible, false);
+                }
                 if (reader->merged_attributes)
                 {
                     check_input_attribute_merge_checks(reader, token, previous, linked_visible, point);
@@ -11811,7 +11961,12 @@ static __attribute__((noinline)) TypeId check_input_c23_auto_deduce(CheckInputRe
     {
         if (check_input_c23_auto_placeholder(types, declared_level))
         {
-            const TypeId base = type_qualify(types, deduced, type_qualifiers(declared_level) & (BUSTER_TYPE_CONST | BUSTER_TYPE_VOLATILE));
+            // __auto_type's _Atomic and restrict are the deduced type's (check_input_auto_type_qualifiers).
+            bool atomic = false;
+            const uint32_t qualifiers = check_input_auto_type(declared_level) ? check_input_auto_type_qualifiers(declared_level, &atomic) :
+                                        type_qualifiers(declared_level) & (BUSTER_TYPE_CONST | BUSTER_TYPE_VOLATILE);
+            const TypeId atomic_base = atomic ? type_atomic(types, deduced) : deduced;
+            const TypeId base = atomic_base != 0 ? type_qualify(types, atomic_base, qualifiers) : 0;
             valid = base != 0;
             *base_out = base;
             result = base;
@@ -11871,7 +12026,8 @@ static __attribute__((noinline)) TypeId check_input_c23_auto_deduce(CheckInputRe
             valid = initializer_kind == BUSTER_TYPE_KIND_POINTER && (level = check_input_c23_auto_level(reader, &top, kind)) != 0;
             if (valid)
             {
-                level->qualifiers = type_qualifiers(declared_level) & ~BUSTER_TYPE_RESTRICT;
+                // A pointer's restrict is its own (`__auto_type *restrict p`, #1844): only the placeholder's marks it.
+                level->qualifiers = type_qualifiers(declared_level);
                 declared_level = types->types.base[type_index(declared_level)];
                 deduced = types->types.base[type_index(deduced)];
             }
@@ -14993,6 +15149,16 @@ static bool check_input_enum_records(CheckInputReader* reader, Arena* arena)
         input->enum_definitions = definitions;
         input->enum_definition_count = definition_count;
     }
+    // A named enumeration's definition opens the implicit-conversion gate too (CheckInput.enum_names, #1447): its values
+    // reach a conversion through a member, a call's result or a cast as well as through a name.
+
+    for (uint32_t i = 0; valid && !input->enum_names && i < definition_count; i += 1)
+    {
+        const TypeId tag = definitions[i].type != 0 ? type_unqualified(definitions[i].type) : 0;
+        const uint32_t declarator = check_input_skip_attributes(parser, definitions[i].close + 1, parser->tokens.count);
+        input->enum_names = tag != 0 && type_kind(reader->types, tag) == BUSTER_TYPE_KIND_ENUM &&
+                            (reader->types->tags.name[reader->types->types.index[type_index(tag)]] != 0 || check_input_enum_typedef(reader, declarator, tag));
+    }
     return valid;
 }
 
@@ -15060,6 +15226,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                                                         pp->options.language.standard >= 1999 ? 3 : 1,
                          .implicit_library_diagnostic = pp->options.implicit_library_diagnostic != 0 ? pp->options.implicit_library_diagnostic :
                                                         pp->options.language.standard >= 1999 ? 3 : 2,
+                         .implicit_builtin_diagnostic = pp->options.implicit_builtin_diagnostic != 0 ? pp->options.implicit_builtin_diagnostic : 3,
                          .implicit_function_c99 = pp->options.language.standard >= 1999,
                          .common_tentatives = pp->options.predefines.common,
                          .implicit_function_system = pp->options.implicit_function_system,

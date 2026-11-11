@@ -837,8 +837,99 @@ static void ir_test_conversions(IrTestTally* test, Arena* output, Arena* scratch
     ir_test_expect(test, admitted_count == 156, "every conversion of the IR's vector widths is admitted, and no other");
 }
 
+// The shifts by a scalar count (#1840): shift at every vector width, every flags byte below 32 and a count of each of
+// I32, I64, I16 and the vector's own type, admitted by both verifiers exactly where the flags name lanes of 2, 4 or 8
+// bytes and one of the three shifts and the count is an I32; and the model's lanes against C's shifts of each lane, at
+// counts around every lane's bits and past 16 and 32 bits, read unsigned.
+static void ir_test_scalar_shifts(IrTestTally* test, Arena* output, Arena* scratch)
+{
+    static const IrType counts[4] = { IR_I32, IR_I64, IR_I16, IR_V4I32 };
+    static const uint32_t amounts[] = { 0, 1, 7, 15, 16, 17, 31, 32, 33, 63, 64, 65, 255, 256, 65535, 65536, 65537, 0x7fffffffu, 0x80000000u, UINT32_MAX };
+    const uint64_t mark = output->length;
+    uint32_t admitted_count = 0;
+    uint64_t state = UINT64_C(0x9e3779b97f4a7c15);
+    for (uint32_t width = 0; width < 3; width += 1)
+    {
+        for (uint32_t count = 0; count < 4; count += 1)
+        {
+            for (uint32_t flags = 0; flags < 32; flags += 1)
+            {
+                const IrType type = (IrType)(IR_V4I32 + width);
+                const IrType count_type = count == 3 ? type : counts[count];
+                const bool admitted = (flags & 3) != 0 && ((flags >> 2) & 3) <= 2 && flags < 16 && count == 0;
+                admitted_count += admitted;
+                IrFunction function = {0};
+                const IrSizes sizes = { .instruction_count = 4, .block_count = 1 };
+                if (ir_create(output, &sizes, &function) != IR_OK)
+                {
+                    ir_test_expect(test, false, "scalar shift verifier fixture allocation");
+                    continue;
+                }
+                function.result_type = IR_VOID;
+                function.block_offsets[1] = 4;
+                ir_test_instruction(&function, 0, IR_UNDEF, type, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                ir_test_instruction(&function, 1, IR_UNDEF, count_type, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                ir_test_instruction(&function, 2, IR_INTRINSIC, type, 0, 1, BUSTER_IR_INTRINSIC_SHIFT);
+                ir_test_instruction(&function, 3, IR_RET, IR_VOID, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                function.flags[2] = (uint8_t)flags;
+                ir_test_pair(test, &function, scratch, NULL, admitted, "a scalar shift is admitted exactly where its lanes, shift and count's type agree");
+                arena_pop_to(output, mark);
+                for (uint32_t amount = 0; admitted && amount < BUSTER_ARRAY_LENGTH(amounts); amount += 1)
+                {
+                    const uint32_t bytes = 16u << width;
+                    const uint32_t size = 1u << (flags & 3);
+                    const uint32_t kind = (flags >> 2) & 3;
+                    IrSimdValue value_a = { 0 };
+                    for (uint32_t w = 0; w < bytes / 8; w += 1)
+                    {
+                        state = state * UINT64_C(6364136223846793005) + UINT64_C(1442695040888963407);
+                        value_a.words[w] = (state & 3) == 0 ? UINT64_C(0x8000800080008000) : state;
+                    }
+                    // A count's upper 32 bits, which the shift doesn't read.
+                    const IrSimdValue value_b = { { (uint64_t)amounts[amount] | UINT64_C(0xdead000000000000) } };
+                    const IrSimdValue* operands[3] = { &value_a, &value_b, 0 };
+                    const IrSimdAction action = {
+                        .operation = IR_SIMD_SHIFT,
+                        .result = ir_simd_shape(type),
+                        .operands = { ir_simd_shape(type), IR_SIMD_NONE, IR_SIMD_NONE },
+                        .index = (uint8_t)flags,
+                    };
+                    IrSimdValue value;
+                    memset(&value, 0xa5, sizeof(value));
+                    bool exact = ir_simd_evaluate(&action, operands, 0, 0, 0, &value);
+                    const uint8_t* in = (const uint8_t*)value_a.words;
+                    const uint8_t* out = (const uint8_t*)value.words;
+                    const uint32_t c = amounts[amount];
+                    for (uint32_t lane = 0; exact && lane < bytes / size; lane += 1)
+                    {
+                        uint64_t raw = 0;
+                        memcpy(&raw, in + lane * size, size);
+                        const uint32_t bits = 8 * size;
+                        // C's shifts of the lane as an unsigned or signed integer of its size, past its bits written out.
+                        const int64_t signed_value = size == 2 ? (int16_t)raw : size == 4 ? (int32_t)raw : (int64_t)raw;
+                        const uint64_t expected = kind == 0 ? (c >= bits ? 0 : raw << c) :
+                                                  kind == 1 ? (c >= bits ? 0 : raw >> c) :
+                                                              (uint64_t)(c >= bits ? (signed_value < 0 ? -1 : 0) : signed_value >> c);
+                        uint64_t actual = 0;
+                        memcpy(&actual, out + lane * size, size);
+                        exact = actual == (size == 8 ? expected : expected & ((UINT64_C(1) << bits) - 1));
+                    }
+                    for (uint32_t byte = bytes; exact && byte < 64; byte += 1)
+                    {
+                        exact = out[byte] == 0;
+                    }
+                    ir_test_expect(test, exact, "the model shifts each lane as C does, by the count read unsigned, its tail zero");
+                }
+            }
+        }
+    }
+    // Three lanes' sizes and three shifts at each width.
+    ir_test_expect(test, admitted_count == 3 * 3 * 3, "every scalar shift of the IR's vector widths is admitted, and no other");
+}
+
 static void ir_test_simd(IrTestTally* test, Arena* output, Arena* scratch)
 {
+    ir_test_scalar_shifts(test, output, scratch);
     ir_test_conversions(test, output, scratch);
     ir_test_permutes(test, output, scratch);
     ir_test_width_changes(test, output, scratch);

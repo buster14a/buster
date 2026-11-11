@@ -11,7 +11,8 @@
 // bodies on two lanes, under gnu17 and gnu23 and the warning and error-limit options; and -c of each, which must be
 // refused with no object written. The asm and control errors are compared whole too: every one, in clang's words, a
 // duplicate case's with its "previous case defined here" note, after a graph's error and in a unit without one (#1447).
-// A rejected unit's other bodies get their common warnings (check_driver_rejected_common, #1447).
+// A rejected unit's other bodies get their common warnings (check_driver_rejected_common, #1447), and a left-out
+// statement's complete operands theirs (#2120).
 // Include after c_check_semantic_recovery_driver_test.c, whose reader this takes.
 
 static void check_test_driver_statement_recovery(CheckTest* test, const char* clang, const char* executable, const char* directory)
@@ -220,6 +221,21 @@ static void check_test_driver_statement_recovery(CheckTest* test, const char* cl
         "void m(void) { M: { M: ; } N: ; N: ; goto N; }\n"
         "void n(void) { P: Q: P: ; goto Q; }\n"
         "int g(int y) { if (y = 1) return 1; int w; return 0; }\n",
+        // An undeclared name in a type name's bound ends the reader's walk; the rounds find the later body's error, under -w
+        // too (#2162).
+        "int f(void) { return _Alignof(int[undecl3]); }\n"
+        "int k(void) { return d; }\n",
+        // A file-scope array initialized by a compound literal whose body holds a value that is no constant (#1812): the
+        // literal's error once at its place, and no mismatch of the array's type with the literal's, which clang's invalid
+        // literal leaves out; a valid body's mismatch is still given.
+        "int a[] = (int[2]){\"x\", 1};\n"
+        "int g;\n"
+        "int b[] = (int[2]){&g, 1};\n"
+        "const int q[] = (int[2]){\"x\", 1};\n"
+        "int h;\n"
+        "long u[] = (int[2]){h, 1};\n"
+        "long s[] = (int[2]){\"x\", 1};\n"
+        "const int t[] = (int[2]){2, 1};\n",
         // Warnings that default to errors (#1969): a conversion between an integer and a pointer or between pointers, and a
         // return's missing or extra value. Clang's scopes don't count them (DiagnosticIDs::isUnrecoverable), so their unused
         // variables are given; the view casts a conversion's source, so its statement's warnings are given too.
@@ -244,6 +260,25 @@ static void check_test_driver_statement_recovery(CheckTest* test, const char* cl
         "void f(int n) { char *b = (int[2]){ 1, 2 }; printf(\"%s\\n\", n); }\n"
         "void g(int n) { int u; char *e = (long[]){ 1, 2, 3 }; long *l = (int[1]){ 0 }; printf(\"%s\\n\", n); }\n"
         "void h(int n) { int w = (struct { int x; }){ 1 }; char *a = (int[2]){ 1, 2 }; if (n < (unsigned){ 4 }) {} }\n",
+        // A left-out statement's complete operands, kept as `(void)(A);` (#2120): the warnings clang gives as it builds them,
+        // before its error or after it, a call's -Wformat, a comma's -Wunused-value and -Wself-assign, and an erroneous
+        // call's arguments'.
+        "int printf(const char *, ...);\nstruct S { int a; } s;\nint k(int, int);\nvoid f(int x, int *p)\n{\n"
+        "    x = printf(\"%s\", x) + s.b;\n    x = s.b + printf(\"%s\", x);\n    k(1, (2, 3), 4);\n    p + (2, 3.0);\n"
+        "    x = (x = x) + s.b;\n}\n",
+        // Through a cast, a call, a subscript and a conditional; not in sizeof; a statement-level comma, a for's body and a
+        // return; and no flow analysis's warning (`u`).
+        "typedef int T;\nint g(int);\nstruct S { int a; } s;\nint f(int x, int *p)\n{\n    int u;\n    x = (T)s.b + (x = x);\n"
+        "    x = g(s.b) + (1, 2);\n    x = p[s.b] + p[(1, 2)];\n    x = x ? (3, 4) : s.b;\n    x = sizeof(s.b + (1, 2));\n"
+        "    x = u + s.b;\n    x = (1, 2), s.b;\n    for (;;) x = s.b + (1, 2);\n    return (1, 2) + s.b;\n}\n"
+        "int h(int x) { x = undeclared + (1, 2); return x << 40; }\n",
+        // A static initializer that is only no constant keeps its warnings (#1447): the view keeps it, its error first and
+        // then its division's at the declarator's end, in a unit of no body too, a later declarator's, a record's and an
+        // array's.
+        "const int d = 1 / 0;\nconst int a = 2, b = 1 / 0, c = 3;\nstruct S { int a, b; } s = { 1 / 0, 2 };\nint arr[2] = { 1, 1 / 0 };\n",
+        // Its uses stay bound, a block's static's too, and an undeclared name's body is another error.
+        "const int d = 1 / 0;\nint use(void) { int u; return d; }\nint f(void) { return undeclared; }\nint e = 1 % 0;\n"
+        "void g(void) { static int r = (1, 2) + 1 / 0; int w; (void)r; }\n",
     };
     static const char* const standards[] = { "-std=gnu17", "-std=gnu23" };
     // Each run's options: none, one or two.

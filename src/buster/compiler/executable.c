@@ -229,13 +229,17 @@
 // The output sections, in the order of the file and of the addresses. .tbss takes no address space in its segment:
 // the section after it starts where it does. Only a dynamic PIE has .interp, the ABI note, the dynamic symbols, their
 // strings, versions and hash, the dynamic relocations, .init, .fini, the stubs and .dynamic; and only an executable
-// whose link has unwind tables (EH_FRAME atoms) has .eh_frame and .eh_frame_hdr, its index.
+// whose link has unwind tables (EH_FRAME atoms) has .eh_frame and .eh_frame_hdr, its index. The note sections hold the
+// read-only atoms whose input section is a .note one (file-scope asm's, #1848), after the build ID's note: one per
+// alignment, from EXECUTABLE_SECTION_NOTE's, a page's, down to a byte's, each named after its first atom's input
+// section (executable_bound_sections); only a link with such atoms has any.
 typedef enum ExecutableSection
 {
     EXECUTABLE_SECTION_INTERP,
     EXECUTABLE_SECTION_ABI_NOTE,
     EXECUTABLE_SECTION_BUILD_ID,
-    EXECUTABLE_SECTION_DYNSYM,
+    EXECUTABLE_SECTION_NOTE,
+    EXECUTABLE_SECTION_DYNSYM = EXECUTABLE_SECTION_NOTE + BUSTER_EXECUTABLE_PAGE_LOG2 + 1,
     EXECUTABLE_SECTION_VERSYM,
     EXECUTABLE_SECTION_VERNEED,
     EXECUTABLE_SECTION_GNU_HASH,
@@ -839,6 +843,8 @@ static const char* const executable_section_names[EXECUTABLE_SECTION_COUNT] = {
     [EXECUTABLE_SECTION_INTERP] = ".interp",
     [EXECUTABLE_SECTION_ABI_NOTE] = ".note.ABI-tag",
     [EXECUTABLE_SECTION_BUILD_ID] = ".note.gnu.build-id",
+    // A placeholder: a note section takes its atoms' input section's name (ExecutableLayout.note_names).
+    [EXECUTABLE_SECTION_NOTE ... EXECUTABLE_SECTION_DYNSYM - 1] = ".note",
     [EXECUTABLE_SECTION_DYNSYM] = ".dynsym",
     [EXECUTABLE_SECTION_VERSYM] = ".gnu.version",
     [EXECUTABLE_SECTION_VERNEED] = ".gnu.version_r",
@@ -888,10 +894,11 @@ static const char* const executable_section_names[EXECUTABLE_SECTION_COUNT] = {
     [EXECUTABLE_SECTION_STRTAB] = ".strtab",
 };
 
-// .shstrtab's bytes: room for every section's name with its NUL (594 bytes with its first NUL and its own name, the 50
+// .shstrtab's bytes: room for every section's name with its NUL (672 bytes with its first NUL and its own name, the 63
 // names of executable_section_names; .iplt is shorter than .plt.got, which it replaces), which test-executable checks,
-// and which executable_lay_out refuses a layout past.
-#define BUSTER_EXECUTABLE_SHSTRTAB_BYTES 640
+// and which executable_lay_out refuses a layout past. A note section's name is its input section's, which the rest
+// holds: a link's notes are mostly of one or two alignments, whose names then have more than 300 bytes.
+#define BUSTER_EXECUTABLE_SHSTRTAB_BYTES 1024
 
 // .eh_frame_hdr's first 12 bytes: version 1; the encodings of .eh_frame's address (pc-relative sdata4), of the count
 // (udata4) and of the table's entries (datarel sdata4: from the header's start); .eh_frame's address and the count.
