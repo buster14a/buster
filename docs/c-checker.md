@@ -8797,7 +8797,9 @@ arguments against the function. The checker now gives these as clang does.
   ignored" on a typedef, target's strings clang's `checkTargetAttr` doesn't
   take ("unsupported 'F' in the 'target' attribute string; 'target'
   attribute ignored", its unknown CPU and tune CPU, a duplicate `arch=` or
-  `tune=`, `fpmath=` and `branch-protection=`: `check_input_target_warning`),
+  `tune=`, `fpmath=` and `branch-protection=`: `check_input_target_warning`;
+  `apxf` and `no-apxf` are taken, as clang 23 takes them, for `-mapxf`'s
+  features, #1919),
   and no_sanitize's "'no_sanitize' attribute argument 'S' not supported on a
   global variable" (but address, hwaddress and memtag, at the variable's
   name); with no_sanitize's "unknown sanitizer 'S' ignored"
