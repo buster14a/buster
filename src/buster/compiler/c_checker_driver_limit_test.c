@@ -382,6 +382,42 @@ static void check_test_driver_fatal_errors(CheckTest* test, const char* clang, c
         check_test_expect(test, oracle_text && actual_text, "a fatal default-error warning keeps its flag suffix");
         free(text);
     }
+    // A fatal error names its group without "-Werror," wherever it is rendered (#1447): a checker warning and a
+    // preprocessor warning -Werror promoted and -Wfatal-errors made fatal, and a pragma's fatal; a pragma's error stays an
+    // error under -Wfatal-errors, with its "-Werror,".
+    {
+        static const struct
+        {
+            const char* text;
+            const char* option;
+            const char* line;
+        } cases[] =
+        {
+            { "int x = 1 << 40;\n", "-Werror", "fatal error: shift count >= width of type [-Wshift-count-overflow]" },
+            { "#if 1wb\n#endif\n", "-Werror", "fatal error: '_BitInt' suffix for literals is a C23 extension [-Wc23-extensions]" },
+            { "#pragma clang diagnostic fatal \"-Wshift-count-overflow\"\nint x = 1 << 40;\n", "-Wall",
+              "fatal error: shift count >= width of type [-Wshift-count-overflow]" },
+            { "#pragma clang diagnostic error \"-Wshift-count-overflow\"\nint x = 1 << 40;\n", "-Wall",
+              "error: shift count >= width of type [-Werror,-Wshift-count-overflow]" },
+        };
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(cases); i += 1)
+        {
+            const bool written = parse_test_write(source, cases[i].text, strlen(cases[i].text));
+            char* arguments[] = { (char*)clang, "-std=gnu17", "-fsyntax-only", "-fno-color-diagnostics", (char*)cases[i].option, "-Wfatal-errors", source, NULL };
+            char* checked[] = { (char*)(executable != NULL ? executable : "/proc/self/exe"), "-std=gnu17", "-fsyntax-only", (char*)cases[i].option, "-Wfatal-errors", source, NULL };
+            char* text = NULL;
+            const int oracle = check_test_driver_spawn(arguments, &text);
+            const bool oracle_text = oracle == 1 && text != NULL && strstr(text, cases[i].line) != NULL;
+            free(text);
+            text = NULL;
+            const int status = check_test_driver_spawn(checked, &text);
+            const bool actual_text = status == 1 && text != NULL && strstr(text, cases[i].line) != NULL;
+            char description[192];
+            snprintf(description, sizeof(description), "fatal flag case %u: %s", i, cases[i].line);
+            check_test_expect(test, written && oracle_text && actual_text, description);
+            free(text);
+        }
+    }
     unlink(source);
     unlink(object);
 }

@@ -77,7 +77,7 @@ static void check_builtin_atomic_c11_one(TypeTable* table, const CheckBuiltinAto
     CheckValue values[6] = {0};
     if (input->argument_count != count)
     {
-        check_action_diagnose(&output->action, CHECK_DIAG_ARGUMENT_COUNT, 0);
+        check_action_diagnose_count(&output->action, input->argument_count, count, count);
     }
     else if (input->arguments == NULL)
     {
@@ -247,7 +247,7 @@ static void check_builtin_atomic_generic_one(TypeTable* table, const CheckBuilti
     CheckValue values[6] = {0};
     if (input->argument_count != count)
     {
-        check_action_diagnose(&output->action, CHECK_DIAG_ARGUMENT_COUNT, 0);
+        check_action_diagnose_count(&output->action, input->argument_count, count, count);
     }
     else if (input->arguments == NULL)
     {
@@ -443,12 +443,7 @@ static __attribute__((unused)) void check_builtin_atomic_family(TypeTable* table
     base.id = check_builtin_atomic_base(input->id);
     base.argument_count = input->argument_count - scoped;
     base.plain_object = scope == CHECK_BUILTIN_ATOMIC_SCOPE_HIP;
-    if (scope != CHECK_BUILTIN_ATOMIC_SCOPE_NONE && input->argument_count == 0)
-    {
-        *output = (CheckBuiltinAtomicResult){0};
-        check_action_diagnose(&output->action, CHECK_DIAG_ARGUMENT_COUNT, 0);
-    }
-    else if (check_builtin_atomic_c11(base.id))
+    if (check_builtin_atomic_c11(base.id))
     {
         check_builtin_atomic_c11_one(table, &base, output);
     }
@@ -469,6 +464,18 @@ static __attribute__((unused)) void check_builtin_atomic_family(TypeTable* table
     else
     {
         check_builtin_atomic(table, &base, output, 1);
+    }
+    // The scope is the last argument: the base's count error names one more (#1860), and the base's own arguments, none
+    // where the scope is missing too, are the same error where the base takes none.
+    if (scope != CHECK_BUILTIN_ATOMIC_SCOPE_NONE && input->argument_count == 0 && output->action.diagnostic == CHECK_DIAG_NONE)
+    {
+        *output = (CheckBuiltinAtomicResult){0};
+        check_action_diagnose_count(&output->action, 0, 1, 1);
+    }
+    else if (scope != CHECK_BUILTIN_ATOMIC_SCOPE_NONE && output->action.diagnostic == CHECK_DIAG_ARGUMENT_COUNT && (output->action.diagnostic_operand & 0x80u) != 0 &&
+             (output->action.diagnostic_operand & 0x3fu) < 0x3fu)
+    {
+        output->action.diagnostic_operand += 1;
     }
     if (scoped != 0 && output->action.diagnostic == CHECK_DIAG_NONE)
     {

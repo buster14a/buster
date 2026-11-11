@@ -101,6 +101,9 @@ typedef enum CheckBuiltinAtomicRmwFormat
     CHECK_BUILTIN_ATOMIC_RMW_F32_BITS,
     CHECK_BUILTIN_ATOMIC_RMW_F64_BITS,
     CHECK_BUILTIN_ATOMIC_RMW_UNSUPPORTED_BITS,
+    // A _Float16's and a __bf16's, for clang's IEEE maximum and minimum alone (#1843).
+    CHECK_BUILTIN_ATOMIC_RMW_F16_BITS,
+    CHECK_BUILTIN_ATOMIC_RMW_BF16_BITS,
 } CheckBuiltinAtomicRmwFormat;
 
 typedef struct CheckBuiltinAtomicRmwAction CheckBuiltinAtomicRmwAction;
@@ -384,6 +387,8 @@ static void check_builtin_atomic_rmw_object(TypeTable* table, const CheckBuiltin
             output->format = unqualified == BUSTER_TYPE_BOOL ? CHECK_BUILTIN_ATOMIC_RMW_BOOL_BITS :
                 unqualified == BUSTER_TYPE_FLOAT ? CHECK_BUILTIN_ATOMIC_RMW_F32_BITS :
                 unqualified == BUSTER_TYPE_DOUBLE ? CHECK_BUILTIN_ATOMIC_RMW_F64_BITS :
+                ieee && unqualified == BUSTER_TYPE_FLOAT16 ? CHECK_BUILTIN_ATOMIC_RMW_F16_BITS :
+                ieee && unqualified == BUSTER_TYPE_BF16 ? CHECK_BUILTIN_ATOMIC_RMW_BF16_BITS :
                 floating ? CHECK_BUILTIN_ATOMIC_RMW_UNSUPPORTED_BITS : CHECK_BUILTIN_ATOMIC_RMW_INTEGER_BITS;
             if (floating && output->format == CHECK_BUILTIN_ATOMIC_RMW_UNSUPPORTED_BITS)
             {
@@ -421,7 +426,13 @@ static void check_builtin_atomic_rmw_convert(TypeTable* table, const CheckBuilti
         value->flags &= ~(BUSTER_CHECK_ICE | BUSTER_CHECK_ICE_UNEVALUATED | BUSTER_CHECK_FLOAT_LITERAL);
         output->atomic.unsupported |= BUSTER_CHECK_BUILTIN_ATOMIC_UNSUPPORTED_CONVERSION;
     }
+    const uint32_t earlier = output->atomic.unsupported & BUSTER_CHECK_BUILTIN_ATOMIC_UNSUPPORTED_CONVERSION;
     check_builtin_atomic_convert(table, &input->source, &output->atomic, value, index, destination);
+    // clang's IEEE maximum and minimum of a _Float16 or a __bf16 (#1843): the operand's conversion to it, of a real value,
+    // is the lowering's half-precision one (c_check_program_half.c), with no constant to fold here.
+    const bool half = (output->format == CHECK_BUILTIN_ATOMIC_RMW_F16_BITS || output->format == CHECK_BUILTIN_ATOMIC_RMW_BF16_BITS) &&
+                      check_action_half_format(target) != CHECK_HALF_NONE && type_kind(table, original) != BUSTER_TYPE_KIND_COMPLEX;
+    output->atomic.unsupported &= half ? ~BUSTER_CHECK_BUILTIN_ATOMIC_UNSUPPORTED_CONVERSION | earlier : ~UINT32_C(0);
     if (output->atomic.action.diagnostic == CHECK_DIAG_NONE && original != type_unqualified(type_strip_aligned(table, destination)) &&
         (check_builtin_atomic_rmw_floating(table, original) || check_builtin_atomic_rmw_floating(table, destination)))
     {
@@ -488,7 +499,9 @@ static __attribute__((unused)) void check_builtin_atomic_rmw_one(TypeTable* tabl
     }
     else if (source->argument_count < rule->fixed_count || ((!rule->legacy || rule->prototype != 0) && source->argument_count != rule->fixed_count))
     {
-        check_action_diagnose(&atomic->action, CHECK_DIAG_ARGUMENT_COUNT, 0);
+        // A legacy builtin with no prototype takes more (clang's "expected at least").
+        const uint32_t maximum = rule->legacy && rule->prototype == 0 ? UINT32_MAX : rule->fixed_count;
+        check_action_diagnose_count(&atomic->action, source->argument_count, rule->fixed_count, maximum);
     }
     else if (source->arguments == NULL)
     {

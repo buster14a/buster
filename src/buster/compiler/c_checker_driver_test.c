@@ -875,7 +875,7 @@ static void check_test_driver_setjmp_held(CheckTest* test, const char* executabl
 // va_copy, which clang's x86-64 code makes over a char *; os_log's
 // data taken again across side effects, a __float128's and a 2-byte vector's, those clang's code crashes on (a 32-byte
 // vector), and a format of more than 255 items, whose count byte clang's code truncates (#1785); dump_struct's generated calls; and
-// __builtin_available with an empty version, an invalid expression of clang's, which its code generation refuses too.
+// __builtin_available with an empty version, an invalid expression of clang's, which its code generation refuses or drops.
 static void check_test_driver_codegen_refusals(CheckTest* test, const char* executable, const char* directory)
 {
     static const struct
@@ -890,6 +890,10 @@ static void check_test_driver_codegen_refusals(CheckTest* test, const char* exec
         { "struct S { char c[1L << 32]; int i; };\nvoid f(struct S* p) { __builtin_clear_padding(p); }\n",
           "unsupported: __builtin_clear_padding of an element past 4 GiB" },
         { "const void* f(const char* s) { return __builtin___NSStringMakeConstantString(s); }\n",
+          "unsupported: an NSString of no string literal, whose object clang's code makes from the literal its argument isn't" },
+        // A static initializer of one, which clang's evaluator takes as an address constant (#1785): its object refused by the
+        // static data.
+        { "static const char m[] = \"x\";\nconst void* p = __builtin___NSStringMakeConstantString(m);\n",
           "unsupported: an NSString of no string literal, whose object clang's code makes from the literal its argument isn't" },
         { "int f(int n, ...) { char* a; __builtin_zos_va_start(&a, n); return 0; }\n",
           "unsupported: __builtin_zos_va_start and __builtin_zos_va_copy, z/OS's lists, which clang's x86-64 code overruns" },
@@ -908,7 +912,7 @@ static void check_test_driver_codegen_refusals(CheckTest* test, const char* exec
         { "struct S { int a; long b; };\nint printf(const char*, ...);\nvoid f(struct S __seg_fs* s) { __builtin_dump_struct(s, printf); }\n",
           "unsupported: __builtin_dump_struct of a record in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
         { "int f(void) { return __builtin_available(macos 0.0.0, *); }\n",
-          "unsupported: __builtin_available with an empty version, which clang doesn't compile either" },
+          "unsupported: __builtin_available with an empty version, an invalid expression whose code clang refuses or drops" },
     };
     char source[256];
     char object[256];
@@ -1744,6 +1748,116 @@ static void check_test_driver_dump_struct(CheckTest* test, const char* clang, co
         if (status == 0 && !same)
         {
             fprintf(stderr, "record dumps by %s:\n%s\nclang's build:\n%s\n", option_names[path], captured, expected);
+        }
+    }
+    unlink(source);
+    for (uint32_t o = 0; o < 5; o += 1)
+    {
+        unlink(outputs[o]);
+    }
+}
+
+// __builtin_dump_struct's rest of the arguments converted as a call's (#1842): complex values to a complex or a real
+// printer parameter, of each floating type and of int, a real one to a complex parameter, complex values through the
+// variadic part, a call's complex value evaluated again for each line, a transparent union's parameter of each of its
+// members, of a void pointer and of the union itself, and _Atomic aggregates' parameters (8 and 4 bytes, lock-free, of a
+// plain and of an _Atomic argument), beside a complex long double's and an _Atomic int's, whose reads each line evaluates
+// again (their atomic plans past the nodes' own, CheckLowerInitializers.extra_atomics): by the direct path, by --scalar
+// and by --tier1 with and without it, each printing what clang -O0's build does.
+static void check_test_driver_dump_struct_rest(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const char program[] =
+        "#include <stdarg.h>\n"
+        "#include <stdio.h>\n"
+        "struct S { int a; double b; };\n"
+        "struct A { int x; int y; };\n"
+        "struct B { char x[3]; };\n"
+        "typedef union __attribute__((transparent_union)) { int* i; const char* c; } U;\n"
+        "static int calls;\n"
+        "static int pr(_Complex double z, const char* f, ...) { va_list ap; va_start(ap, f); printf(\"(%g,%g)\", __real__ z, __imag__ z); vprintf(f, ap); va_end(ap); return 0; }\n"
+        "static int pf(_Complex float z, int k, const char* f, ...) { va_list ap; va_start(ap, f); printf(\"(%g,%g,%d)\", __real__ z, __imag__ z, k); vprintf(f, ap); va_end(ap); return 0; }\n"
+        "static int pl(_Complex long double z, const char* f, ...) { va_list ap; va_start(ap, f); printf(\"(%Lg,%Lg)\", __real__ z, __imag__ z); vprintf(f, ap); va_end(ap); return 0; }\n"
+        "static int pi(_Complex int z, const char* f, ...) { va_list ap; va_start(ap, f); printf(\"(%d,%d)\", __real__ z, __imag__ z); vprintf(f, ap); va_end(ap); return 0; }\n"
+        "static int pd(double d, const char* f, ...) { va_list ap; va_start(ap, f); printf(\"(%g)\", d); vprintf(f, ap); va_end(ap); return 0; }\n"
+        "static int pv(int k, ...) { va_list ap; va_start(ap, k); _Complex double z = va_arg(ap, _Complex double); printf(\"<%d|%g,%g>\", k, __real__ z, __imag__ z); calls++; va_end(ap); return 0; }\n"
+        "static int pvf(int k, ...) { va_list ap; va_start(ap, k); _Complex float z = va_arg(ap, _Complex float); _Complex long double w = va_arg(ap, _Complex long double); printf(\"<%d|%g,%g|%Lg,%Lg>\", k, __real__ z, __imag__ z, __real__ w, __imag__ w); calls++; va_end(ap); return 0; }\n"
+        "static int pu(U u, const char* f, ...) { va_list ap; va_start(ap, f); printf(\"[%d]\", *u.i); vprintf(f, ap); va_end(ap); return 0; }\n"
+        "static int pa(_Atomic struct A a, const char* f, ...) { struct A v = a; va_list ap; va_start(ap, f); printf(\"[%d,%d]\", v.x, v.y); vprintf(f, ap); va_end(ap); return 0; }\n"
+        "static int pb(_Atomic struct B a, const char* f, ...) { struct B v = a; va_list ap; va_start(ap, f); printf(\"[%d%d%d]\", v.x[0], v.x[1], v.x[2]); vprintf(f, ap); va_end(ap); return 0; }\n"
+        "static int pk(int k, const char* f, ...) { va_list ap; va_start(ap, f); printf(\"{%d}\", k); vprintf(f, ap); va_end(ap); return 0; }\n"
+        "static _Complex double next(int* n) { *n += 1; return *n + 0.5i; }\n"
+        "int main(void) {\n"
+        "    struct S s = { 1, 2.5 };\n"
+        "    _Complex double z = 1.0 + 2.0i;\n"
+        "    _Complex float zf = 3.0f - 1.0if;\n"
+        "    int n = 0;\n"
+        "    __builtin_dump_struct(&s, pr, z);\n"
+        "    __builtin_dump_struct(&s, pr, zf);\n"
+        "    __builtin_dump_struct(&s, pf, z, 7);\n"
+        "    __builtin_dump_struct(&s, pl, (_Complex long double)(5.0L + 6.0iL));\n"
+        "    __builtin_dump_struct(&s, pi, (_Complex int)(3 + 4i));\n"
+        "    __builtin_dump_struct(&s, pr, 9);\n"
+        "    __builtin_dump_struct(&s, pd, z);\n"
+        "    __builtin_dump_struct(&s, pr, next(&n));\n"
+        "    __builtin_dump_struct(&s, pv, 1, z);\n"
+        "    __builtin_dump_struct(&s, pvf, 2, zf, (_Complex long double)(7.0L - 8.0iL));\n"
+        "    int k = 42;\n"
+        "    U u;\n"
+        "    u.i = &k;\n"
+        "    struct A a = { 3, 4 };\n"
+        "    struct B b = { { 5, 6, 7 } };\n"
+        "    _Atomic struct A aa = a;\n"
+        "    __builtin_dump_struct(&s, pu, &k);\n"
+        "    __builtin_dump_struct(&s, pu, u);\n"
+        "    __builtin_dump_struct(&s, pu, (const char*)&k);\n"
+        "    __builtin_dump_struct(&s, pu, (void*)&k);\n"
+        "    __builtin_dump_struct(&s, pa, a);\n"
+        "    __builtin_dump_struct(&s, pb, b);\n"
+        "    __builtin_dump_struct(&s, pa, aa);\n"
+        "    _Atomic int ai = 7;\n"
+        "    __builtin_dump_struct(&s, pk, ai);\n"
+        "    printf(\"n=%d calls=%d\\n\", n, calls);\n"
+        "    return 0;\n"
+        "}\n";
+    char source[256];
+    char outputs[5][256];
+    snprintf(source, sizeof(source), "%s/dump_struct_rest.c", directory);
+    for (uint32_t o = 0; o < 5; o += 1)
+    {
+        snprintf(outputs[o], sizeof(outputs[o]), "%s/dump_struct_rest-%u", directory, o);
+    }
+    const bool written = parse_test_write(source, program, sizeof(program) - 1);
+    check_test_expect(test, written, "the dumps' rest program written");
+    char* text = NULL;
+    char* const reference[] = { (char*)clang, "-O0", "-w", "-o", outputs[4], source, NULL };
+    const int built = written ? check_test_driver_spawn(reference, &text) : 1;
+    free(text);
+    static char expected[4096];
+    static char captured[4096];
+    const bool ran = built == 0 && check_test_driver_capture(outputs[4], expected, sizeof(expected));
+    check_test_expect(test, ran && strlen(expected) > 1000, "clang's build of the dumps' rest runs");
+    static const char* const option_names[] = { "the direct path", "--scalar", "--tier1", "--tier1 --scalar" };
+    for (uint32_t path = 0; ran && path < 4; path += 1)
+    {
+        char* plain[] = { (char*)executable, "-w", "-o", outputs[path], source, NULL };
+        char* scalar[] = { (char*)executable, "--scalar", "-w", "-o", outputs[path], source, NULL };
+        char* tier1[] = { (char*)executable, "--tier1", "-w", "-o", outputs[path], source, NULL };
+        char* tier1_scalar[] = { (char*)executable, "--tier1", "--scalar", "-w", "-o", outputs[path], source, NULL };
+        char* const* arguments = path == 0 ? plain : path == 1 ? scalar : path == 2 ? tier1 : tier1_scalar;
+        text = NULL;
+        const int status = check_test_driver_spawn(arguments, &text);
+        if (status != 0 && text != NULL)
+        {
+            fprintf(stderr, "%s", text);
+        }
+        free(text);
+        const bool same = status == 0 && check_test_driver_capture(outputs[path], captured, sizeof(captured)) && strcmp(captured, expected) == 0;
+        char description[256];
+        snprintf(description, sizeof(description), "the dumps' rest by %s print what clang's build does", option_names[path]);
+        check_test_expect(test, same, description);
+        if (status == 0 && !same)
+        {
+            fprintf(stderr, "dumps' rest by %s:\n%s\nclang's build:\n%s\n", option_names[path], captured, expected);
         }
     }
     unlink(source);
@@ -3313,6 +3427,25 @@ static void check_test_driver_members(CheckTest* test, const char* clang, const 
         check_test_expect(test, status == 1 && text != NULL && strstr(text, "unsupported: this member access") != NULL,
                           path == 0 ? "a vector's element through a pointer is refused as a member access" :
                                       "a vector's element through a pointer is refused as a member access, scalar");
+        free(text);
+        text = NULL;
+    }
+    // `p->y` (#1447's finding): the checker takes it as `(*p).y`, and the lowering refuses it as it refuses that.
+    static const char arrow[] = "typedef float v4 __attribute__((ext_vector_type(4)));\nfloat f(v4* p) { return p->y; }\n";
+    const bool arrow_written = parse_test_write(source, arrow, sizeof(arrow) - 1);
+    for (uint32_t path = 0; arrow_written && path < 4; path += 1)
+    {
+        char* const vector_arguments[] = { (char*)executable, path < 2 ? "-fsyntax-only" : "-c", "-o", objects[0], source, NULL };
+        char* const scalar_arguments[] = { (char*)executable, "--scalar", path < 2 ? "-fsyntax-only" : "-c", "-o", objects[1], source, NULL };
+        const int status = check_test_driver_spawn(path % 2 == 0 ? vector_arguments : scalar_arguments, &text);
+        const bool expected = path < 2 ? status == 0 : status == 1 && text != NULL && strstr(text, "unsupported: this member access") != NULL;
+        static const char* const names[] = {
+            "a pointer's extended vector's lane is checked",
+            "a pointer's extended vector's lane is checked, scalar",
+            "a pointer's extended vector's lane is refused as a member access",
+            "a pointer's extended vector's lane is refused as a member access, scalar",
+        };
+        check_test_expect(test, expected, names[path]);
         free(text);
         text = NULL;
     }
@@ -7986,9 +8119,11 @@ static void check_test_driver_optimize_pragmas(CheckTest* test, const char* clan
 #include "c_check_for_loop_driver_test.c"
 #include "c_check_enum_cast_driver_test.c"
 #include "c_check_type_safety_driver_test.c"
+#include "c_check_objc_bridge_driver_test.c"
 #include "c_check_unevaluated_driver_test.c"
 #include "c_check_sign_compare_driver_test.c"
 #include "c_check_type_sugar_driver_test.c"
+#include "c_check_call_count_driver_test.c"
 
 // The terminal CLI may leave mappings for exit, but callers that go on compiling must retain the reusable command's
 // cleanup contract. Warm each route once so lazy thread scratch and libc state are outside the comparison.
@@ -8132,6 +8267,8 @@ static int run_checker_driver_tests(int argc, char** argv)
     bool type_sugar_only = false;
     // --asm-definitions-only: what inline assembly defines, against clang's objects and builds, alone (#1848).
     bool asm_definitions_only = false;
+    // --call-counts-only: the call argument count section alone (#1860).
+    bool call_counts_only = false;
     bool options = true;
     for (int i = 0; options && i < argc; i += 1)
     {
@@ -8167,6 +8304,10 @@ static int run_checker_driver_tests(int argc, char** argv)
         {
             asm_definitions_only = true;
         }
+        else if (strcmp(argv[i], "--call-counts-only") == 0)
+        {
+            call_counts_only = true;
+        }
         else if (strcmp(argv[i], "--lazy-system-headers") == 0)
         {
             lazy = true;
@@ -8198,7 +8339,7 @@ static int run_checker_driver_tests(int argc, char** argv)
         }
     }
     const uint32_t focuses = (uint32_t)sign_compare_only + (uint32_t)cpu_dispatch_only + (uint32_t)target_versions_only + (uint32_t)semantic_recovery_only +
-                             (uint32_t)type_sugar_only + (uint32_t)asm_definitions_only;
+                             (uint32_t)type_sugar_only + (uint32_t)asm_definitions_only + (uint32_t)call_counts_only;
     options &= focuses <= 1 && (focuses == 0 || (!lazy && check_driver_part.count == 1));
     // One focused section's alone: the others' gates take `focused` as --sign-compare-only's did.
     const bool focused = focuses != 0;
@@ -8713,6 +8854,10 @@ static int run_checker_driver_tests(int argc, char** argv)
     {
         check_test_driver_type_sugar(&test, clang, executable, directory);
     }
+    if (temporary && call_counts_only)
+    {
+        check_test_driver_call_counts(&test, clang, executable, directory);
+    }
     if (temporary && asm_definitions_only)
     {
         check_test_driver_asm_definitions(&test, clang, executable != NULL ? executable : "./build/compiler", directory);
@@ -8899,6 +9044,10 @@ static int run_checker_driver_tests(int argc, char** argv)
         }
         if (!lazy && check_test_driver_takes())
         {
+            check_test_driver_call_counts(&test, clang, executable, directory);
+        }
+        if (!lazy && check_test_driver_takes())
+        {
             check_test_driver_lazy_final_warnings(&test, clang, executable, directory);
         }
         if (!lazy && check_test_driver_takes())
@@ -8969,6 +9118,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             if (!lazy && check_test_driver_takes())
             {
                 check_test_driver_ignored_pragmas(&test, clang, executable, directory);
+                check_test_driver_pack_includes(&test, clang, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
             {
@@ -9027,6 +9177,10 @@ static int run_checker_driver_tests(int argc, char** argv)
             if (!lazy && check_test_driver_takes())
             {
                 check_test_driver_type_safety(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_objc_bridge(&test, clang, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
             {
@@ -9136,6 +9290,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             if (!lazy && check_test_driver_takes())
             {
                 check_test_driver_dump_struct(&test, clang, executable, directory);
+                check_test_driver_dump_struct_rest(&test, clang, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
             {
@@ -9259,6 +9414,10 @@ static int run_checker_driver_tests(int argc, char** argv)
             }
             if (!lazy && check_test_driver_takes())
             {
+                check_test_driver_tier1_twice(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
                 check_test_driver_tier1_asm(&test, clang, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
@@ -9283,11 +9442,23 @@ static int run_checker_driver_tests(int argc, char** argv)
             }
             if (!lazy && check_test_driver_takes())
             {
+                check_test_driver_tier1_results256(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
                 check_test_driver_tier1_extremes(&test, clang, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
             {
+                check_test_driver_tier1_frame_address(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
                 check_test_driver_tier1_rows(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_tier1_shared(&test, clang, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
             {
