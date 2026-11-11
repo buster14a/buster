@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 # Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
-# Network-free tests of the 9700X's verified caches (#1207): cached-download.sh and fetch-c-testsuite.sh, through a
-# hit, a miss and a corrupted entry each, and tree-manifest.sh, through a tree changed in each way it can be.
+# Network-free tests of the 9700X's verified caches (#1207): cached-download.sh, fetch-c-testsuite.sh and
+# fetch-sqlite.sh (#146), through a hit, a miss and a corrupted entry each, and tree-manifest.sh, through a tree changed in each way it can be.
 set -euo pipefail
 root=$(pwd)
 work=$(mktemp -d)
@@ -61,6 +61,37 @@ test "$(git -C "$work/suite-3" rev-parse HEAD)" = "$pinned" || fail 'a corrupted
 git -C "$work/suite-3" fsck --no-progress > /dev/null 2>&1 || fail 'the checkout is intact'
 unset BUSTER_C_TESTSUITE_URL BUSTER_C_TESTSUITE_COMMIT
 
+# fetch-sqlite.sh (#146): the same, for SQLite's tree, whose VERSION must be 3.53.2.
+upstream="$work/sqlite-upstream"
+git init -q -b main "$upstream"
+mkdir "$upstream/test"
+printf '3.53.2\n' > "$upstream/VERSION"
+printf 'SELECT 1;\n' > "$upstream/test/one.sql"
+git -C "$upstream" add -A
+git -C "$upstream" -c user.name=t -c user.email=t@example.com commit -q -m tree
+git -C "$upstream" config uploadpack.allowAnySHA1InWant true
+pinned=$(git -C "$upstream" rev-parse HEAD)
+export BUSTER_SQLITE_URL="file://$upstream" BUSTER_SQLITE_COMMIT="$pinned"
+bash tools/ci/fetch-sqlite.sh "$work/sqlite-1"
+test "$(git -C "$work/sqlite-1" rev-parse HEAD)" = "$pinned" || fail 'the SQLite checkout is the pinned commit'
+git -C "$BUSTER_CI_CACHE/sqlite.git" cat-file -e "refs/pinned/$pinned^{commit}" || fail 'the SQLite mirror keeps the commit'
+mv "$upstream" "$upstream.moved"
+bash tools/ci/fetch-sqlite.sh "$work/sqlite-2"
+cmp "$work/sqlite-2/test/one.sql" "$upstream.moved/test/one.sql" || fail 'the SQLite mirror serves the commit without the upstream'
+mv "$upstream.moved" "$upstream"
+find "$BUSTER_CI_CACHE/sqlite.git/objects" -type f -name '*.pack' -exec sh -c 'chmod u+w "$1" && printf garbage > "$1"' _ {} \;
+find "$BUSTER_CI_CACHE/sqlite.git/objects" -type f ! -name '*.pack' ! -name '*.idx' ! -path '*/info/*' -exec sh -c 'chmod u+w "$1" && printf garbage > "$1"' _ {} \;
+bash tools/ci/fetch-sqlite.sh "$work/sqlite-3" 2> "$work/log"
+test "$(git -C "$work/sqlite-3" rev-parse HEAD)" = "$pinned" || fail 'a corrupted SQLite mirror is fetched again'
+git -C "$work/sqlite-3" fsck --no-progress > /dev/null 2>&1 || fail 'the SQLite checkout is intact'
+printf '3.53.1\n' > "$upstream/VERSION"
+git -C "$upstream" -c user.name=t -c user.email=t@example.com commit -q -am other
+export BUSTER_SQLITE_COMMIT="$(git -C "$upstream" rev-parse HEAD)"
+if bash tools/ci/fetch-sqlite.sh "$work/sqlite-4" 2> /dev/null; then
+    fail 'a tree of another SQLite version was accepted'
+fi
+unset BUSTER_SQLITE_URL BUSTER_SQLITE_COMMIT
+
 # tree-manifest.sh: a tree matches its manifest until a file's contents, a file, or a link changes.
 tree="$work/tree"
 mkdir -p "$tree/bin" "$tree/lib"
@@ -86,4 +117,4 @@ printf 'library\n' > "$tree/lib/libclang-cpp.so"
 bash tools/ci/tree-manifest.sh check "$tree" || fail 'the restored tree matches again'
 
 cd "$root"
-printf 'caches: downloads, c-testsuite mirror and tree manifests through hits, misses, corruption and changes checked\n'
+printf 'caches: downloads, c-testsuite and SQLite mirrors and tree manifests through hits, misses, corruption and changes checked\n'

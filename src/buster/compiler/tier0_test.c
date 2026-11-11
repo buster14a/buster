@@ -14,7 +14,7 @@
 // Layout, in this order: the tally; the tables (types and the calling convention) and the functions of a program
 // (tier0_program_functions); the interpreter (tier0_test_interpret); compiling, sizing and encoding a program
 // (tier0_test_build); the native run in a child process (tier0_test_run); the checks; the cross-check; the command.
-
+// BACKEND owns the fixtures; tier0_test_same_code stays shared with unwind_tier0_test.c.
 #include "buster/compiler/test_paths.h"
 #include <stdint.h>
 #include <stdbool.h>
@@ -23,14 +23,14 @@
 #include <stdlib.h>
 #include <stdarg.h>
 #include <inttypes.h>
-
+#include "buster/compiler/calling_convention_test_limits.h"
 #include <signal.h>
 #include <unistd.h>
 #include <asm/prctl.h>
 #include <sys/mman.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_BACKEND
 // The calling convention's compiled worlds keep their types within Tier 0's objects' alignments, and their calls with
 // memory-class values within its depths (calling_convention_test.c).
 _Static_assert(BUSTER_ABI_TEST_TIER0_INTEGER_DEPTHS == BUSTER_TIER0_INTEGER_DEPTHS && BUSTER_ABI_TEST_TIER0_FLOATING_DEPTHS == BUSTER_TIER0_FLOATING_DEPTHS,
@@ -708,7 +708,7 @@ struct Tier0TestCode
     uint64_t realigned;
     uint64_t based;
 };
-
+#endif
 // Whether two compilations of a function made the same code: records, branch columns, references, labels' records and
 // the entries' first records.
 static bool tier0_test_same_code(const Tier0Code* a, const Tier0Code* b)
@@ -731,7 +731,7 @@ static bool tier0_test_same_code(const Tier0Code* a, const Tier0Code* b)
     }
     return same;
 }
-
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_BACKEND
 // Calls whose byte effects cross the signed boundary, with live prefixes across the old 240 limit and byte wrap.
 // Build the pushes as well as the call: the cold selector now derives full depths from the stream, not seeded bytes.
 static void tier0_test_wide_call_depths(Tier0TestTally* tally)
@@ -6876,3 +6876,4 @@ static int run_tier0_tests(int argc, char** argv)
     oracle_epoch_end(epoch);
     return result;
 }
+#endif

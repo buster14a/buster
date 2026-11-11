@@ -4,14 +4,16 @@
 
 // Compare every primary/note's exact location and severity in sequence. Message wording is checked elsewhere;
 // these fixtures distinguish collection/order without weakening the include-stack or attached-note boundaries.
+// Lines end within the text's length (memchr), as check_test_driver_diagnostic_counts's do (#2030).
 static bool check_test_driver_recovery_groups(const char* text, char* groups, uint64_t capacity)
 {
     uint64_t used = 0;
     bool valid = text != NULL && capacity != 0;
-    for (const char* at = text; valid && at != NULL && *at != 0;)
+    const char* stop = text != NULL ? text + strlen(text) : NULL;
+    for (const char* at = text; valid && at != NULL && at < stop;)
     {
-        const char* end = strchr(at, '\n');
-        const uint64_t length = end != NULL ? (uint64_t)(end - at) : strlen(at);
+        const char* end = memchr(at, '\n', (size_t)(stop - at));
+        const uint64_t length = end != NULL ? (uint64_t)(end - at) : (uint64_t)(stop - at);
         static const char* const kinds[] = { ": warning: ", ": error: ", ": fatal error: ", ": note: " };
         uint64_t take = 0;
         for (uint32_t kind = 0; kind < BUSTER_ARRAY_LENGTH(kinds); kind += 1)

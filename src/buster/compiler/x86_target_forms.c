@@ -36,25 +36,13 @@ _Static_assert(X86_FEATURE_AES + 6 < 30 && X86_FEATURE_PCLMUL > X86_FEATURE_AES 
 
 // The scalar reference keeps full-width requirements densely; the inverse map returns zero for unknown forms.
 // Slot zero is reserved in the inverse map, so each explicit canonical row stores its ordinal plus one.
-#define BUSTER_X86_TARGET_REQUIREMENT(name, required) BUSTER_X86_TARGET_SLOT_##name,
-#define BUSTER_X86_TARGET_EXTENDED(name, required) BUSTER_X86_TARGET_SLOT_##name,
+// Readers need the two bounds, not every row's slot and policy assertions. The data owner and standalone
+// inclusions derive both counts from the canonical rows below and reject a stale interface at compile time.
 enum
 {
-#include "buster/compiler/x86_target_rows.c"
-    BUSTER_X86_TARGET_CLASSIFIED_COUNT
+    BUSTER_X86_TARGET_CLASSIFIED_COUNT = 4444,
+    BUSTER_X86_TARGET_COMPACT_COUNT = 4223
 };
-#undef BUSTER_X86_TARGET_EXTENDED
-#undef BUSTER_X86_TARGET_REQUIREMENT
-// The compact rows' count: the extended rows' slots start there (each one's assertion below keeps them last).
-#define BUSTER_X86_TARGET_REQUIREMENT(name, required) BUSTER_X86_TARGET_COMPACT_SLOT_##name,
-#define BUSTER_X86_TARGET_EXTENDED(name, required)
-enum
-{
-#include "buster/compiler/x86_target_rows.c"
-    BUSTER_X86_TARGET_COMPACT_COUNT
-};
-#undef BUSTER_X86_TARGET_EXTENDED
-#undef BUSTER_X86_TARGET_REQUIREMENT
 _Static_assert(X86_FORM_COUNT <= UINT16_MAX, "classified form index fits its stored width");
 _Static_assert(BUSTER_X86_TARGET_CLASSIFIED_COUNT <= UINT16_MAX && BUSTER_X86_TARGET_CLASSIFIED_COUNT <= X86_FORM_COUNT, "classified slot fits the inverse map");
 
@@ -64,6 +52,28 @@ extern const uint16_t x86_target_requirement_slots[X86_FORM_COUNT] __attribute__
 extern const uint16_t x86_target_classified_forms[BUSTER_X86_TARGET_CLASSIFIED_COUNT] __attribute__((visibility("hidden")));
 extern const uint64_t x86_target_classified_requirements[BUSTER_X86_TARGET_CLASSIFIED_COUNT] __attribute__((visibility("hidden")));
 #else
+#define BUSTER_X86_TARGET_REQUIREMENT(name, required) BUSTER_X86_TARGET_SLOT_##name,
+#define BUSTER_X86_TARGET_EXTENDED(name, required) BUSTER_X86_TARGET_SLOT_##name,
+enum
+{
+#include "buster/compiler/x86_target_rows.c"
+    BUSTER_X86_TARGET_CLASSIFIED_ROWS
+};
+#undef BUSTER_X86_TARGET_EXTENDED
+#undef BUSTER_X86_TARGET_REQUIREMENT
+// The compact rows' count: the extended rows' slots start there (each one's assertion below keeps them last).
+#define BUSTER_X86_TARGET_REQUIREMENT(name, required) BUSTER_X86_TARGET_COMPACT_SLOT_##name,
+#define BUSTER_X86_TARGET_EXTENDED(name, required)
+enum
+{
+#include "buster/compiler/x86_target_rows.c"
+    BUSTER_X86_TARGET_COMPACT_ROWS
+};
+#undef BUSTER_X86_TARGET_EXTENDED
+#undef BUSTER_X86_TARGET_REQUIREMENT
+_Static_assert(BUSTER_X86_TARGET_CLASSIFIED_ROWS == BUSTER_X86_TARGET_CLASSIFIED_COUNT, "classified target row count must match its readers");
+_Static_assert(BUSTER_X86_TARGET_COMPACT_ROWS == BUSTER_X86_TARGET_COMPACT_COUNT, "compact target row count must match its readers");
+
 #ifndef BUSTER_X86_TARGET_DATA
 #define BUSTER_X86_TARGET_DATA static
 #endif
@@ -98,8 +108,6 @@ BUSTER_X86_TARGET_DATA const uint64_t x86_target_classified_requirements[BUSTER_
 };
 #undef BUSTER_X86_TARGET_EXTENDED
 #undef BUSTER_X86_TARGET_REQUIREMENT
-#endif
-_Static_assert(BUSTER_ARRAY_LENGTH(x86_target_classified_forms) == BUSTER_ARRAY_LENGTH(x86_target_classified_requirements), "one full-width requirement per classified form");
 
 // Extending the canonical policy outside the projection must fail at build time, never silently drop a feature.
 // Update the projection deliberately before adding such a row; the exhaustive tests also check every round trip.
@@ -110,6 +118,8 @@ _Static_assert(BUSTER_ARRAY_LENGTH(x86_target_classified_forms) == BUSTER_ARRAY_
 #include "buster/compiler/x86_target_rows.c"
 #undef BUSTER_X86_TARGET_EXTENDED
 #undef BUSTER_X86_TARGET_REQUIREMENT
+#endif
+_Static_assert(BUSTER_ARRAY_LENGTH(x86_target_classified_forms) == BUSTER_ARRAY_LENGTH(x86_target_classified_requirements), "one full-width requirement per classified form");
 _Static_assert(sizeof(x86_target_compact_requirements) == X86_FORM_COUNT * sizeof(uint32_t), "one compact requirement per form");
 _Static_assert(__alignof__(x86_target_requirement_slots) >= 64 && __alignof__(x86_target_compact_requirements) >= 64, "target requirement map cache-line alignment");
 
