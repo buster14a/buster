@@ -154,8 +154,8 @@ static const CheckDriverDefaultWarningFixture check_driver_type_safety_fixtures[
         .name = "-Werror=type-safety",
         .source = check_driver_type_safety_calls_source,
         .options = { "-Werror=type-safety" },
-        .warnings = 1,
-        .errors = 24,
+        // clang's error limit stops it at its twentieth error, before the other warning.
+        .errors = 20,
     },
     {
         .name = "registered values in source order, a pragma and redeclarations' rules",
