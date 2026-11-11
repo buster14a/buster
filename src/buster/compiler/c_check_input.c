@@ -113,7 +113,7 @@ typedef enum CheckInputMessage
     CHECK_INPUT_CONSTEXPR_POINTER,
     CHECK_INPUT_CONSTEXPR_REPRESENTABLE,
     CHECK_INPUT_CONSTEXPR_CONTEXT,
-    // A bit-precise constant wider than the checker's values (BUSTER_CHECK_LITERAL_BIT_WIDTH, #768).
+    // A bit-precise constant wider than BITINT_MAXWIDTH (BUSTER_CHECK_WIDE_MAX_WIDTH, #768, #1447).
     CHECK_INPUT_WIDE_LITERAL,
     CHECK_INPUT_PRAGMA_SEMANTICS,
     // clang's musttail attribute (#147) where it doesn't go, at the attribute: with arguments, on a declaration (a label
@@ -145,6 +145,10 @@ typedef enum CheckInputMessage
     // takes (check_input_file_type), at the name: clang's "use of unknown builtin".
     CHECK_INPUT_UNKNOWN_BUILTIN,
     CHECK_INPUT_INVOKE_ARGUMENTS,
+    // A unary, overflow or complex part builtin's call with another count of arguments (#1860), which the graph doesn't
+    // take: clang's "too few/too many arguments to function call", the count it takes and the call's in the detail's low
+    // and high halves, at the call's `)` (too few) or its first extra argument.
+    CHECK_INPUT_BUILTIN_ARGUMENT_COUNT,
     CHECK_INPUT_BUILTIN_NOT_CALLED,
     // A declaration with external linkage of a builtin's name (#1843, check_input_builtin_declaration), at its name: one
     // whose type isn't compatible with the builtin's (clang's "conflicting types", with its note of the builtin's type, the
@@ -654,7 +658,9 @@ struct CheckInputKrDiagnostic
     uint32_t token;
     uint32_t warning;
     // A definition diagnostic's body opening, where clang completes the warning when the function's checking does:
-    // its body's own diagnostics publish first, ahead of the same boundary's deferred and return ones (#992).
+    // its body's own diagnostics publish first, ahead of the same boundary's deferred and return ones (#992). A call's:
+    // its callee's name, which names the function and chooses the severity, where `token` is clang's place for it
+    // (check_input_kr_call), or BUSTER_CHECK_NONE where `token` is the name itself.
     uint32_t body;
 };
 
@@ -2709,7 +2715,22 @@ static TypeId check_input_object_spelling(const TypeTable* types, const CheckInp
 static uint32_t check_input_token_type_spelling(const CheckInput* input, const Parser* parser, uint32_t token, bool cast)
 {
     uint32_t result = 0;
-    if (cast && token < parser->tokens.count && parser->tree.roles[token] == PARSE_ROLE_CLOSE_CAST)
+    // A compound literal's type name is its value's specifier too (#1812): `(L){ 1 }` is an 'L', at its `(`, its `)` or
+    // its body's braces.
+    const uint8_t role = token < parser->tokens.count ? parser->tree.roles[token] : PARSE_ROLE_NONE;
+    const bool body = role == PARSE_ROLE_OPEN_COMPOUND_BODY || role == PARSE_ROLE_CLOSE_COMPOUND_BODY;
+    uint32_t brace = role == PARSE_ROLE_CLOSE_COMPOUND_BODY ? token : body ? parser->tree.parents[token] : BUSTER_CHECK_NONE;
+    // (The body's `{` follows the type name's `)`: back from its `}` to its `{`.)
+    uint32_t open_brace = brace;
+    while (body && open_brace != 0 && open_brace < parser->tokens.count && !(parser->tree.roles[open_brace] == PARSE_ROLE_OPEN_COMPOUND_BODY && parser->tree.parents[open_brace] == brace))
+    {
+        open_brace -= 1;
+    }
+    const uint32_t compound = role == PARSE_ROLE_CLOSE_COMPOUND ? token : role == PARSE_ROLE_OPEN_COMPOUND ? parser->tree.parents[token] :
+                              body && open_brace != 0 && parser->tree.roles[open_brace - 1] == PARSE_ROLE_CLOSE_COMPOUND ? open_brace - 1 : BUSTER_CHECK_NONE;
+    token = compound < parser->tokens.count ? compound : token;
+    cast |= compound < parser->tokens.count;
+    if (cast && token < parser->tokens.count && (parser->tree.roles[token] == PARSE_ROLE_CLOSE_CAST || parser->tree.roles[token] == PARSE_ROLE_CLOSE_COMPOUND))
     {
         // A cast's own type name is the operand's specifier (#992): `(size_t)4`'s `size_t` is itself
         // the typedef-name use, so its resolution is the specifier's declaration — no declaration to
@@ -2962,6 +2983,35 @@ static void check_input_report_argument(CheckInputReader* reader, uint32_t token
     {
         reader->output->reports[before].detail = detail;
         reader->output->reports[before].completion = reader->parser != NULL && token + 1 < reader->parser->tokens.count ? token + 1 : 0;
+    }
+}
+
+// A unary, overflow or complex part builtin's call, closed by `close`, with `count` arguments where it takes `expected`
+// (CHECK_INPUT_BUILTIN_ARGUMENT_COUNT): too many at the first extra argument, the one after `expected` commas.
+static void check_input_builtin_count(CheckInputReader* reader, uint32_t close, uint32_t expected, uint32_t count)
+{
+    const Parser* parser = reader->parser;
+    uint32_t open = count > expected ? close : 0;
+    while (open != 0 && !(parser->tokens.kinds[open] == PARSE_KIND_L_PAREN && parser->tree.parents[open] == close))
+    {
+        open -= 1;
+    }
+    uint32_t at = expected == 0 && open != 0 && open + 1 < close ? open + 1 : close;
+    uint32_t commas = 0;
+    for (uint32_t k = open + 1; open != 0 && k < close && commas < expected; k += 1)
+    {
+        const uint8_t kind = parser->tokens.kinds[k];
+        const bool nested = (kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE || kind == PARSE_KIND_L_BRACE) && parser->tree.parents[k] > k &&
+                            parser->tree.parents[k] < close;
+        commas += kind == PARSE_KIND_COMMA ? 1u : 0u;
+        at = kind == PARSE_KIND_COMMA && commas == expected ? k + 1 : at;
+        k = nested ? parser->tree.parents[k] : k;
+    }
+    const uint32_t before = reader->output->report_count;
+    check_input_report(reader, at, CHECK_INPUT_BUILTIN_ARGUMENT_COUNT);
+    if (reader->output->report_count > before)
+    {
+        reader->output->reports[before].detail = (expected & 0xffffu) | (count < 0xffffu ? count : 0xffffu) << 16;
     }
 }
 
@@ -3355,6 +3405,22 @@ static void check_input_kr_diagnostic(CheckInputReader* reader, uint32_t token, 
             input->kr_diagnostics[input->kr_diagnostic_count++] = (CheckInputKrDiagnostic){ .token = token, .warning = warning, .body = body };
         }
     }
+}
+
+// A call's K&R warning the constant reader checks (#1994), at clang's place as the graph's
+// (check_diagnostic_kr_call_place): passing arguments without a prototype at the call's `(`, too few or too many at its
+// `)`, `close`; the callee's name, `name`, in the record's body.
+static void check_input_kr_call(CheckInputReader* reader, uint32_t name, uint32_t close, uint32_t warning)
+{
+    const Parser* parser = reader->parser;
+    uint32_t open = warning == CHECK_WARNING_NON_PROTOTYPE_CALL && close < parser->tokens.count ? close : 0;
+    while (open != 0 && !(parser->tokens.kinds[open] == PARSE_KIND_L_PAREN && parser->tree.parents[open] == close))
+    {
+        open -= 1;
+    }
+    const uint32_t place = open != 0 ? open : close;
+    const bool placed = name < parser->tokens.count && place < parser->tokens.count;
+    check_input_kr_diagnostic(reader, placed ? place : name < parser->tokens.count ? name : close, warning, placed ? name : BUSTER_CHECK_NONE);
 }
 
 // Scans of a token column for the reader's passes that act on few tokens (#529): each gives the tokens from `first`
@@ -5898,9 +5964,9 @@ static inline __attribute__((always_inline)) void check_input_literal(CheckInput
     }
     if (result->valid && result->bit_width != 0)
     {
-        // A bit-precise constant (#768): its _BitInt, of up to 128 bits, the most the checker's values hold; a wider one
-        // is refused by name (check_input_literal_report).
-        const bool supported = result->bit_width <= BUSTER_CHECK_LITERAL_BIT_WIDTH;
+        // A bit-precise constant (#768): its _BitInt, of up to BITINT_MAXWIDTH bits, past 128 with its limbs
+        // (c_check_wide.c, #1447); a wider one is refused by name (check_input_literal_report).
+        const bool supported = result->bit_width <= BUSTER_CHECK_WIDE_MAX_WIDTH;
         result->type = supported ? check_input_type_result(reader, type_bit_int(reader->types, result->bit_width, result->bit_unsigned)) : 0;
         result->valid = result->type != 0;
         if (reader->parser->language.standard < 2023)
@@ -5921,7 +5987,7 @@ static inline __attribute__((always_inline)) void check_input_literal(CheckInput
 // an invalid or unsupported literal.
 static CheckInputMessage check_input_literal_report(const CheckLiteral* literal)
 {
-    return literal->bit_width > BUSTER_CHECK_LITERAL_BIT_WIDTH ? CHECK_INPUT_WIDE_LITERAL : CHECK_INPUT_LITERAL;
+    return literal->bit_width > BUSTER_CHECK_WIDE_MAX_WIDTH && literal->bit_width != 0 ? CHECK_INPUT_WIDE_LITERAL : CHECK_INPUT_LITERAL;
 }
 
 // A numeric zero literal's source provenance: parentheses and selections keep it; a character, enum, object read,
@@ -12794,9 +12860,55 @@ static bool check_input_char_subobject(const TypeTable* types, TypeId type, uint
     return found;
 }
 
-static uint32_t check_input_verbose_trap_object(CheckInputReader* reader, const CheckValue* argument, uint32_t position)
+// Whether clang's evaluator keeps a designator through an argument's casts (#1843, ExprConstant's CK_BitCast): kept where
+// every pointer the argument's value passes through, the converted operand's type and each cast's, points to plain char
+// (or is an array of it) as the designated chars are, and lost where one points to another type (`void`, `unsigned char`,
+// a record, an array). Unknown where an operand isn't evaluated.
+typedef enum CheckInputVerboseTrapDesignator
+{
+    CHECK_INPUT_VERBOSE_TRAP_DESIGNATED,
+    CHECK_INPUT_VERBOSE_TRAP_UNDESIGNATED,
+    CHECK_INPUT_VERBOSE_TRAP_UNKNOWN,
+} CheckInputVerboseTrapDesignator;
+
+// Whether `type` points to plain char or is an array of it, qualified or not.
+static bool check_input_verbose_trap_chars(const TypeTable* types, TypeId type)
+{
+    const TypeId plain = type != 0 ? type_strip_aligned(types, type) : 0;
+    const uint8_t kind = plain != 0 ? type_kind(types, plain) : 0;
+    const bool indirect = plain != 0 && (kind == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(kind));
+    return indirect && type_unqualified(type_strip_aligned(types, type_element(types, plain))) == BUSTER_TYPE_CHAR;
+}
+
+// The designator verdict of the argument [first, end): the argument's own type, which converts to const char*, and each
+// cast to a pointer in it with its operand, the tokens up to its expression's end (CheckInputReader.ends). A cast to an
+// integer converts no designator.
+static CheckInputVerboseTrapDesignator check_input_verbose_trap_designator(CheckInputReader* reader, uint32_t first, uint32_t end)
+{
+    const Parser* parser = reader->parser;
+    const TypeTable* types = reader->types;
+    CheckValue whole = { 0 };
+    bool evaluated = check_input_evaluate_cached(reader, first, end, &whole);
+    bool chars = evaluated && check_input_verbose_trap_chars(types, whole.type);
+    for (uint32_t t = first; t < end; t += 1)
+    {
+        const uint32_t close = parser->tree.parents[t];
+        const bool cast = parser->tree.roles[t] == PARSE_ROLE_OPEN_CAST && close > t && close < end && reader->ends[close] < end;
+        const TypeId target = cast ? reader->query_types[close] : 0;
+        const bool pointer = target != 0 && type_kind(types, type_strip_aligned(types, target)) == BUSTER_TYPE_KIND_POINTER;
+        CheckValue operand = { 0 };
+        const bool typed = pointer && check_input_evaluate_cached(reader, close + 1, reader->ends[close] + 1, &operand);
+        evaluated &= !cast || target != 0;
+        evaluated &= !pointer || typed;
+        chars &= !pointer || (check_input_verbose_trap_chars(types, target) && typed && check_input_verbose_trap_chars(types, operand.type));
+    }
+    return !evaluated ? CHECK_INPUT_VERBOSE_TRAP_UNKNOWN : chars ? CHECK_INPUT_VERBOSE_TRAP_DESIGNATED : CHECK_INPUT_VERBOSE_TRAP_UNDESIGNATED;
+}
+
+static uint32_t check_input_verbose_trap_object(CheckInputReader* reader, const CheckValue* argument, CheckInputVerboseTrapDesignator designator, uint32_t position)
 {
     const TypeTable* types = reader->types;
+    const Parser* parser = reader->parser;
     const CheckConstValues* owner = NULL;
     const CheckConstObject* receipt = check_const_find(&reader->output->const_values, argument->object, position, &owner);
     // A const pointer object's value (#1917's review): the address constant its initializer kept, once.
@@ -12810,10 +12922,24 @@ static uint32_t check_input_verbose_trap_object(CheckInputReader* reader, const 
     uint64_t begin = 0;
     uint64_t end = 0;
     const bool placed = receipt != NULL && address->fault == CHECK_FAULT_NONE && address->offset >= 0;
-    const bool chars = placed && check_input_char_subobject(types, receipt->type, (uint64_t)address->offset, &begin, &end) && end <= receipt->byte_size;
+    // A narrow string literal's bytes clang reads at the offset whatever the casts on the way (tryEvaluateString's fast
+    // path), up to the first NUL: at its terminator, the empty string, past it no string. Another object's chars it reads
+    // through the designator, which casts can lose.
+    const uint32_t token = address->object - 1;
+    const bool literal = placed && token < parser->tokens.count && parser->tokens.kinds[token] == PARSE_KIND_STRING &&
+                         type_kind_is_array(type_kind(types, type_strip_aligned(types, receipt->type))) &&
+                         type_size(types, type_element(types, type_strip_aligned(types, receipt->type))) == 1;
+    const bool designated = literal || designator == CHECK_INPUT_VERBOSE_TRAP_DESIGNATED;
+    if (literal)
+    {
+        end = receipt->byte_size;
+    }
+    const bool chars = placed && designated && (literal || check_input_char_subobject(types, receipt->type, (uint64_t)address->offset, &begin, &end)) &&
+                       end <= receipt->byte_size;
     const bool inside = chars && (uint64_t)address->offset >= begin && (uint64_t)address->offset < end;
-    uint32_t result = !placed || !chars ? (placed && (uint64_t)address->offset >= receipt->byte_size ? CHECK_INPUT_VERBOSE_TRAP_STRING : CHECK_INPUT_UNSUPPORTED) :
-                                          CHECK_INPUT_VERBOSE_TRAP_STRING;
+    uint32_t result = !designated ? (designator == CHECK_INPUT_VERBOSE_TRAP_UNKNOWN ? CHECK_INPUT_UNSUPPORTED : CHECK_INPUT_VERBOSE_TRAP_STRING) :
+                      !placed || !chars ? (placed && (uint64_t)address->offset >= receipt->byte_size ? CHECK_INPUT_VERBOSE_TRAP_STRING : CHECK_INPUT_UNSUPPORTED) :
+                      CHECK_INPUT_VERBOSE_TRAP_STRING;
     bool known = inside;
     bool ended = false;
     bool dollar = false;
@@ -12872,9 +12998,24 @@ static void check_input_verbose_trap_arguments(CheckInputReader* reader, const C
         CheckValue value = { 0 };
         if (string != NULL)
         {
-            // A wide literal's conversion to const char* is the call's own error.
+            // A narrow literal clang reads whole whatever the casts on it. __func__'s name it reads through the designator,
+            // which casts can lose, and so a wide literal's, which a cast's pointer to char loses (unless no cast converts it,
+            // when the conversion to const char* is the call's own error).
             const TypeId element = type_element(reader->types, string->type);
-            if (type_size(reader->types, element) == 1 && memchr(string->bytes, '$', string->byte_count) != NULL)
+            const bool narrow = type_size(reader->types, element) == 1;
+            bool cast = false;
+            for (uint32_t t = span.first; t < first; t += 1)
+            {
+                cast |= parser->tree.roles[t] == PARSE_ROLE_OPEN_CAST;
+            }
+            const CheckInputVerboseTrapDesignator designator = narrow && !string->predefined ? CHECK_INPUT_VERBOSE_TRAP_DESIGNATED :
+                                                               cast ? check_input_verbose_trap_designator(reader, span.first, span.end) :
+                                                               CHECK_INPUT_VERBOSE_TRAP_DESIGNATED;
+            if (designator != CHECK_INPUT_VERBOSE_TRAP_DESIGNATED)
+            {
+                check_input_report(reader, span.first, designator == CHECK_INPUT_VERBOSE_TRAP_UNKNOWN ? CHECK_INPUT_UNSUPPORTED : CHECK_INPUT_VERBOSE_TRAP_STRING);
+            }
+            else if (narrow && memchr(string->bytes, '$', string->byte_count) != NULL)
             {
                 check_input_report(reader, span.first, CHECK_INPUT_VERBOSE_TRAP_DOLLAR);
             }
@@ -12887,14 +13028,9 @@ static void check_input_verbose_trap_arguments(CheckInputReader* reader, const C
         }
         else
         {
-            // A cast on the way clang's evaluator may not read through (`(const char*)(const void*)m` it calls no constant
-            // string, #1917's review): refused by name, as the bytes of an object the reader didn't keep are.
-            bool cast = false;
-            for (uint32_t t = span.first; t < span.end; t += 1)
-            {
-                cast |= parser->tree.roles[t] == PARSE_ROLE_OPEN_CAST;
-            }
-            const uint32_t verdict = cast ? CHECK_INPUT_UNSUPPORTED : check_input_verbose_trap_object(reader, &value, call->closing + 1);
+            // The casts on the way decide whether clang's evaluator reads an object's chars (`(const char*)(const void*)m` it
+            // calls no constant string, #1917's review); a literal's it reads whatever they are.
+            const uint32_t verdict = check_input_verbose_trap_object(reader, &value, check_input_verbose_trap_designator(reader, span.first, span.end), call->closing + 1);
             if (verdict != BUSTER_CHECK_VERBOSE_TRAP_STRING_VALID)
             {
                 check_input_report(reader, span.first, (CheckInputMessage)verdict);
@@ -13645,6 +13781,11 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
         const bool component = check_input_complex_builtin((CBuiltinId)builtin);
         supported = intrinsic || (component ? count == 1 : special == CHECK_OP_BUILTIN_OVERFLOW ? count == 3 :
                     builtin != 0 ? special != CHECK_OP_COUNT || (builtin < CBUILTIN_COUNT && count == (overflow ? 3 : 1)) : count != 0);
+        const uint32_t expected = component ? 1 : special == CHECK_OP_BUILTIN_OVERFLOW || overflow ? 3 : 1;
+        if (!supported && !intrinsic && builtin != 0 && (component || special == CHECK_OP_BUILTIN_OVERFLOW || (builtin < CBUILTIN_COUNT && special == CHECK_OP_COUNT)))
+        {
+            check_input_builtin_count(reader, token, expected, count);
+        }
         op = intrinsic ? CHECK_OP_BUILTIN_X86 : component ? (builtin >= CBUILTIN_CIMAG ? CHECK_OP_IMAGINARY : CHECK_OP_REAL) :
              special != CHECK_OP_COUNT ? special : builtin != 0 ? (overflow ? CHECK_OP_BUILTIN_OVERFLOW : CHECK_OP_BUILTIN_UNARY) : CHECK_OP_CALL;
     }

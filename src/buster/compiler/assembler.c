@@ -1788,9 +1788,11 @@ static void asm_operand(AsmParser* parser, uint32_t end, bool branch, X86Operand
     }
     uint32_t segment_at = parser->at;
     segment_at += segment_at < end && parser->tokens[segment_at].kind == '%';
-    if (!immediate && segment_at + 1 < end && parser->tokens[segment_at + 1].kind == ':' && (asm_is_case(parser, segment_at, "fs") || asm_is_case(parser, segment_at, "gs")))
+    // FS's, GS's or SS's override (the encoder's BUSTER_X86_SEGMENT_FS, _GS and _SS).
+    const bool colon = !immediate && segment_at + 1 < end && parser->tokens[segment_at + 1].kind == ':';
+    if (colon && (asm_is_case(parser, segment_at, "fs") || asm_is_case(parser, segment_at, "gs") || asm_is_case(parser, segment_at, "ss")))
     {
-        operand->segment = asm_is_case(parser, segment_at, "fs") ? 1 : 2;
+        operand->segment = asm_is_case(parser, segment_at, "fs") ? BUSTER_X86_SEGMENT_FS : asm_is_case(parser, segment_at, "gs") ? BUSTER_X86_SEGMENT_GS : BUSTER_X86_SEGMENT_SS;
         parser->at = segment_at + 2;
     }
     const uint16_t width = operand->width;

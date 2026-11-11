@@ -1181,6 +1181,24 @@ static uint64_t check_lower_access(CheckLowerWriter* writer, uint8_t class, Type
     return check_lower_access_value(types, class, type) | segment;
 }
 
+// A vector's element's segment override (#1447): where `node` is an element of a vector lvalue in %fs or %gs, which its
+// own type has lost (check_vector_subscript), the vector's (check_lower_segment_override), which the element's LOAD or
+// STORE takes; 0 otherwise. clang reads the whole vector through the override and extracts the element, and writes it by
+// a read, an insertion and a store of the whole vector: one access of the element's bytes through the same override is
+// the same access of a vector that isn't volatile (an element of a volatile one is refused by name).
+static uint64_t check_lower_element_segment(CheckLowerWriter* writer, uint32_t node)
+{
+    const CheckProgram* program = writer->program;
+    const CheckGraph* graph = &program->input->graph;
+    const CheckStream* stream = program->stream;
+    const uint32_t vector = node < stream->count ? graph->operand0[node] : BUSTER_CHECK_NONE;
+    const bool element = __builtin_expect(writer->segments, 0) && vector < stream->count && graph->ops[node] == CHECK_OP_SUBSCRIPT &&
+                         (check_stream_flags(stream, node) & BUSTER_CHECK_VECTOR_ELEMENT) != 0 && check_stream_category(stream, vector) == CHECK_LVALUE;
+    const uint64_t segment = element ? check_lower_segment_override(program->types, check_stream_type(stream, vector)) : 0;
+    writer->segment_entries = writer->segment_entries || segment != 0;
+    return segment;
+}
+
 // The widest vector register the convention passes a vector in (abi_initialize's vector_bytes), as clang's x86-64 ABI
 // takes it from the target's features (X86AVXABILevel): AVX-512F's 64 bytes, AVX's 32, or else 16.
 static uint32_t check_lower_vector_register_bytes(uint64_t features)
@@ -5335,18 +5353,19 @@ static __attribute__((noinline)) void check_lower_limb_conversion(CheckLowerWrit
     }
 }
 
-// A folded constant of a _BitInt past 128 bits: its 128 bits' limbs, then its sign's or zeros, into a frame object of its
-// own whose address it leaves (the checker folds none yet, as its values hold 128 bits).
+// A folded constant of a _BitInt past 128 bits: its limbs (c_check_wide.c, #1447), into a frame object of its own whose
+// address it leaves. A value without them holds its low 128 bits, extended by its sign's or zeros.
 static void check_lower_limb_constant(CheckLowerWriter* writer, const CheckValue* value)
 {
     const CheckLowerLimbs limbs = check_lower_limbs(writer, value->type);
     const uint32_t result = check_lower_limb_object(writer, limbs);
+    const uint64_t* wide = check_wide_limbs(value, limbs.count);
     const uint64_t halves[2] = { (uint64_t)value->integer, (uint64_t)((unsigned __int128)value->integer >> 64) };
     const uint64_t fill = limbs.sign && (int64_t)halves[1] < 0 ? UINT64_MAX : 0;
     for (uint32_t limb = 0; limb < limbs.count && writer->output->status == CHECK_PROGRAM_OK; limb += 1)
     {
         check_lower_limb_address(writer, result, true, limb);
-        check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, limb < 2 ? halves[limb] : fill);
+        check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, wide != NULL ? wide[limb] : limb < 2 ? halves[limb] : fill);
         if (limb + 1 == limbs.count)
         {
             check_lower_limb_extend(writer, limbs, BUSTER_TYPED_CLASS_U64);
@@ -5756,7 +5775,9 @@ static void check_lower_complex_parts_conversion(CheckLowerWriter* writer, TypeI
 // value and the destination's address in temporaries `locals` (the value's in the low 32 bits): the destination read in
 // the calculation's type (check_lower_complex_parts_conversion), the result computed (check_lower_complex_parts_compute)
 // and stored back, converted: copied into an aggregate destination, whose address is the expression's value, or stored
-// into a scalar one, which STORE leaves.
+// into a scalar one, which STORE leaves. An increment's or a decrement's value is a real one of the element's type (a
+// __float128's or a _BitInt's past 128 bits), added to or subtracted from the real part alone, as clang -O0's is
+// (#1447); a postfix one's expression is a copy of the object before it.
 static void check_lower_complex_parts_update_emit(CheckLowerWriter* writer, uint32_t node, uint64_t locals)
 {
     const CheckProgram* program = writer->program;
@@ -5764,14 +5785,48 @@ static void check_lower_complex_parts_update_emit(CheckLowerWriter* writer, uint
     const CheckStream* stream = program->stream;
     const TypeTable* types = program->types;
     const CheckOp op = graph->ops[node];
-    const CheckOp computed = op == CHECK_OP_ADD_ASSIGN ? CHECK_OP_ADD : op == CHECK_OP_SUBTRACT_ASSIGN ? CHECK_OP_SUBTRACT :
+    const bool increment = op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_POST_DECREMENT;
+    const bool postfix = op == CHECK_OP_POST_INCREMENT || op == CHECK_OP_POST_DECREMENT;
+    const CheckOp computed = op == CHECK_OP_ADD_ASSIGN || op == CHECK_OP_PRE_INCREMENT || op == CHECK_OP_POST_INCREMENT ? CHECK_OP_ADD :
+                             op == CHECK_OP_SUBTRACT_ASSIGN || op == CHECK_OP_PRE_DECREMENT || op == CHECK_OP_POST_DECREMENT ? CHECK_OP_SUBTRACT :
                              op == CHECK_OP_MULTIPLY_ASSIGN ? CHECK_OP_MULTIPLY : CHECK_OP_DIVIDE;
     const TypeId stored = check_stream_type(stream, graph->operand0[node]);
     const TypeId calculated = stream->conversions[node].operands[0].type;
     const bool converted = type_unqualified(type_strip_aligned(types, stored)) != type_unqualified(type_strip_aligned(types, calculated));
     const bool stored_aggregate = check_lower_aggregate(writer, stored);
-    const CheckLowerComplexOperand value = { .local = (uint32_t)locals, .complex = check_lower_complex(writer, check_stream_type(stream, graph->operand1[node])) };
+    CheckLowerComplexOperand value = { .local = (uint32_t)locals, .complex = false };
     const uint32_t destination = (uint32_t)(locals >> 32);
+    if (increment)
+    {
+        // One of the element's type, into a frame object whose address the value's temporary holds.
+        const TypeId element = check_lower_complex_element(types, calculated);
+        CheckValue one = { .type = element, .integer = 1 };
+        if (check_lower_quad(writer, element))
+        {
+            check_quad_set(&one, check_quad_widen(1.0L, false));
+        }
+        value.local = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
+        if (check_lower_quad(writer, element))
+        {
+            check_lower_quad_constant(writer, &one);
+        }
+        else
+        {
+            check_lower_limb_constant(writer, &one);
+        }
+        check_lower_emit(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, value.local);
+    }
+    else
+    {
+        value.complex = check_lower_complex(writer, check_stream_type(stream, graph->operand1[node]));
+    }
+    const uint32_t old = postfix ? check_lower_object(writer, type_size(types, stored), type_alignment_log2(types, stored)) : BUSTER_CHECK_NONE;
+    if (old != BUSTER_CHECK_NONE)
+    {
+        check_lower_emit(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, old);
+        check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, destination);
+        check_lower_copy(writer, type_size(types, stored), false, false);
+    }
     const CheckLowerComplexOperand current = { .local = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64), .complex = true };
     const uint32_t result = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
     check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, destination);
@@ -5799,7 +5854,8 @@ static void check_lower_complex_parts_update_emit(CheckLowerWriter* writer, uint
         if (stored_aggregate)
         {
             check_lower_copy(writer, type_size(types, stored), false, false);
-            check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, destination);
+            check_lower_emit(writer, old != BUSTER_CHECK_NONE ? BUSTER_TYPED_LOCAL_ADDRESS : BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64,
+                             old != BUSTER_CHECK_NONE ? old : destination);
         }
         else
         {
@@ -7361,7 +7417,9 @@ static void check_lower_update(CheckLowerWriter* writer, uint32_t node)
         address_temporary = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
         old_temporary = check_lower_temporary(writer, stored_class);
     }
-    check_lower_instruction(writer, store, stored_class, direct ? destination : check_lower_access(writer, stored_class, stored));
+    // An element of a vector in a segment takes the vector's override (check_lower_element_segment).
+    const uint64_t element_segment = check_lower_element_segment(writer, left);
+    check_lower_instruction(writer, store, stored_class, direct ? destination : check_lower_access(writer, stored_class, stored) | element_segment);
     check_lower_convert(writer, through, stored);
     if (vector)
     {
@@ -7461,7 +7519,7 @@ static void check_lower_update(CheckLowerWriter* writer, uint32_t node)
         {
             check_lower_bit_int_extend(writer, stored, false, true);
         }
-        check_lower_instruction(writer, BUSTER_TYPED_LOAD, stored_class, check_lower_access(writer, stored_class, stored));
+        check_lower_instruction(writer, BUSTER_TYPED_LOAD, stored_class, check_lower_access(writer, stored_class, stored) | element_segment);
         check_lower_instruction(writer, BUSTER_TYPED_DUP, BUSTER_TYPED_CLASS_U64, 0);
         check_lower_operand(writer, node, 0, true, 0);
     }
@@ -7474,7 +7532,7 @@ static void check_lower_update(CheckLowerWriter* writer, uint32_t node)
         {
             check_lower_bit_int_extend(writer, stored, false, true);
         }
-        check_lower_instruction(writer, BUSTER_TYPED_LOAD, stored_class, check_lower_access(writer, stored_class, stored));
+        check_lower_instruction(writer, BUSTER_TYPED_LOAD, stored_class, check_lower_access(writer, stored_class, stored) | element_segment);
         check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, address_temporary);
         check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, address_temporary);
         check_lower_operand(writer, node, 0, true, 0);
@@ -7521,7 +7579,10 @@ static void check_lower_complex_update(CheckLowerWriter* writer, uint32_t node)
                                    !check_lower_quad(writer, calculated) && check_lower_complex(writer, check_stream_type(program->stream, graph->operand0[node]));
     // A __float128's (#147, check_lower_quad_update_emit): one added or subtracted with libgcc's __addtf3 or __subtf3.
     const bool quad_increment = increment && check_lower_quad(writer, calculated);
-    if (!limbs && !complex_increment && !quad_increment && op != CHECK_OP_ADD_ASSIGN && op != CHECK_OP_SUBTRACT_ASSIGN && op != CHECK_OP_MULTIPLY_ASSIGN &&
+    // A complex value's of aggregate parts (check_lower_complex_parts_update_emit): a complex __float128's real part
+    // stepped with __addtf3 or __subtf3, a complex _BitInt's past 128 bits with its limbs' sum or difference.
+    const bool parts_increment = increment && check_lower_complex_parts(writer, calculated);
+    if (!limbs && !complex_increment && !quad_increment && !parts_increment && op != CHECK_OP_ADD_ASSIGN && op != CHECK_OP_SUBTRACT_ASSIGN && op != CHECK_OP_MULTIPLY_ASSIGN &&
         op != CHECK_OP_DIVIDE_ASSIGN)
     {
         check_lower_unsupported(writer, "increments of complex values");
@@ -11610,6 +11671,19 @@ static bool check_lower_strict_round(const CheckGraph* graph, uint32_t node, CBu
     return builtin == CBUILTIN_ELEMENTWISE_ROUND && graph->fp_environments != NULL && (graph->fp_environments[node] & BUSTER_CHECK_FP_ENV_ACCESS) != 0;
 }
 
+// Whether a reduction of a vector of `source`'s type takes the baseline's ways (#1834): at a target without AVX-512F and
+// AVX-512VL, and of 8- and 16-bit integers without AVX-512BW, whose halvings' rows are EVEX ones. An integer reduction
+// is then folded element by element (check_lower_transport_reduce), its result any order's; a floating one by pieces of
+// the registers' bytes and their halvings' rows (check_lower_transport_reduce_floating), in clang's order.
+static bool check_lower_reduce_baseline(const CheckLowerWriter* writer, TypeId source)
+{
+    const CheckVectorShape shape = check_vector_builtin_shape(writer->program->types, source);
+    const uint64_t features = writer->target.features;
+    const uint64_t evex = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512VL);
+    const bool narrow = shape.integer && shape.element != 0 && shape.element <= 2 && (features & BUSTER_X86_FEATURE(AVX512BW)) == 0;
+    return check_lower_vector_of(writer, source) != 0 && ((features & evex) != evex || narrow);
+}
+
 // Whether clang's code computes a floating elementwise builtin of a vector of floats or doubles (`result`) by the C
 // library's function for each element at the unit's target (#1834): the roundings (ceil ... round) without SSE4.1's
 // ROUNDPS and ROUNDPD, and the fused multiply-add (fmaf or fma) without FMA, as its legalization scalarizes them.
@@ -12311,7 +12385,7 @@ static __attribute__((noinline)) void check_lower_vector_builtin(CheckLowerWrite
         check_lower_fail(writer, CHECK_PROGRAM_INVALID);
     }
     else if (((builtin >= CBUILTIN_REDUCE_MAXIMUM && builtin <= CBUILTIN_REDUCE_ASSOC_FADD) &&
-              check_lower_transport_type(types, stream->argument_conversions[first].type)) ||
+              (check_lower_transport_type(types, stream->argument_conversions[first].type) || check_lower_reduce_baseline(writer, stream->argument_conversions[first].type))) ||
              ((builtin == CBUILTIN_REDUCE_MAX || builtin == CBUILTIN_REDUCE_MIN) &&
               check_vector_builtin_shape(types, stream->argument_conversions[first].type).floating))
     {
@@ -12411,9 +12485,10 @@ static __attribute__((noinline)) void check_lower_vector_builtin(CheckLowerWrite
         }
     }
     else if (((builtin >= CBUILTIN_REDUCE_ADD && builtin <= CBUILTIN_REDUCE_OR) || builtin == CBUILTIN_REDUCE_XOR) &&
-             check_lower_vector_of(writer, stream->argument_conversions[first].type) == 0)
+             (check_lower_vector_of(writer, stream->argument_conversions[first].type) == 0 || check_lower_reduce_baseline(writer, stream->argument_conversions[first].type)))
     {
-        // Of a transport vector (#137), element by element.
+        // Of a transport vector (#137), element by element; so too at a target whose vectors' rows have no reduction's
+        // (check_lower_reduce_baseline), whose integer results are any order's.
         check_lower_transport_reduce(writer, node, builtin);
     }
     else if ((builtin >= CBUILTIN_REDUCE_ADD && builtin <= CBUILTIN_REDUCE_OR) || builtin == CBUILTIN_REDUCE_XOR)
@@ -12668,7 +12743,9 @@ static bool check_lower_segment_carried(const CheckLowerWriter* writer, TypeId t
     const uint8_t facts = check_lower_facts(writer, type);
     const uint8_t refused = BUSTER_CHECK_LOWER_TYPE_AGGREGATE | BUSTER_CHECK_LOWER_TYPE_COMPLEX | BUSTER_CHECK_LOWER_TYPE_ADDRESS | BUSTER_CHECK_LOWER_TYPE_ATOMIC |
                             BUSTER_CHECK_LOWER_TYPE_BIT_INT;
-    const bool classed = class != BUSTER_TYPED_CLASS_VOID && class <= BUSTER_TYPED_CLASS_VECTOR;
+    // A half-precision value's loads and stores are a U16's (c_check_program_half.c), whose entries keep the access's value.
+    const bool half = class == BUSTER_CHECK_LOWER_CLASS_BINARY16 || class == BUSTER_CHECK_LOWER_CLASS_BFLOAT16;
+    const bool classed = (class != BUSTER_TYPED_CLASS_VOID && class <= BUSTER_TYPED_CLASS_VECTOR) || half;
     return check_lower_segment_override(types, type) != 0 && classed && (facts & refused) == 0 &&
            (class != BUSTER_TYPED_CLASS_VECTOR || !check_lower_transport_type(types, type));
 }
@@ -12714,8 +12791,8 @@ static bool check_lower_atomic_other_segment(const CheckLowerWriter* writer, uin
 
 // A node that loads from or stores to a segment's space (check_lower_segment), which the lowering refuses by name: an
 // lvalue read (not an address taken, `&` or a member's or a subscript's base), or an assignment's, a compound
-// assignment's or an increment's or decrement's operand; a vector's element, read or written, whose type has lost its
-// vector's space; and an atomic builtin's object, which its pointer argument reaches (its object type's space, or its
+// assignment's or an increment's or decrement's operand; a bit of a vector of bool, read or written, whose type has lost
+// its vector's space (another element takes its vector's override: check_lower_element_segment); and an atomic builtin's object, which its pointer argument reaches (its object type's space, or its
 // pointer's pointee's: check_lower_atomic_pointee).
 static bool check_lower_segment_access(const CheckLowerWriter* writer, uint32_t node, const CheckValue* value, bool address)
 {
@@ -12750,7 +12827,13 @@ static bool check_lower_segment_access(const CheckLowerWriter* writer, uint32_t 
     // A bit-field's read and store take it on its unit's pieces (check_lower_bit_unit, check_lower_bit_store), from its
     // place (check_lower_bit_member).
     const bool carried = read ? reader && check_lower_segment_carried(writer, value->type) : written && check_lower_segment_carried(writer, check_stream_type(stream, target));
-    return ((read || written) && !carried) || (element && check_lower_segment(program->types, check_stream_type(stream, target))) ||
+    // A vector's element takes its vector lvalue's override (check_lower_element_segment) where the element is of a class one
+    // LOAD or STORE moves, and not a bit of a vector of bool (a transport vector's, which no address reaches).
+    const TypeId vector = element ? check_stream_type(stream, target) : 0;
+    const bool element_carried = element && check_stream_category(stream, target) == CHECK_LVALUE && check_lower_segment_override(types, vector) != 0 &&
+                                 !check_lower_bool_vector(types, vector) && check_lower_class(writer, value->type) != BUSTER_TYPED_CLASS_VOID &&
+                                 check_lower_class(writer, value->type) <= BUSTER_TYPED_CLASS_VECTOR;
+    return ((read || written) && !carried) || (element && check_lower_segment(program->types, vector) && !element_carried) ||
            (effect != NULL && ((check_lower_segment(types, atomic_space) && !(direct && check_lower_segment_override(types, atomic_space) != 0)) ||
                                check_lower_atomic_other_segment(writer, node)));
 }
@@ -13297,7 +13380,8 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
         }
         else if (op == CHECK_OP_ASSIGN)
         {
-            check_lower_instruction(writer, BUSTER_TYPED_STORE, class, check_lower_access_value(types, class, value->type) | (check_lower_access(writer, class, target) & BUSTER_TYPED_ACCESS_SEGMENT));
+            check_lower_instruction(writer, BUSTER_TYPED_STORE, class, check_lower_access_value(types, class, value->type) | (check_lower_access(writer, class, target) & BUSTER_TYPED_ACCESS_SEGMENT) |
+                                                                          check_lower_element_segment(writer, a));
             check_lower_operand(writer, node, 1, false, value->type);
             check_lower_operand(writer, node, 0, true, 0);
         }
@@ -13351,7 +13435,7 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
         {
             if (!address && !address_value)
             {
-                check_lower_instruction(writer, BUSTER_TYPED_LOAD, class, 0);
+                check_lower_instruction(writer, BUSTER_TYPED_LOAD, class, check_lower_element_segment(writer, node));
             }
             check_lower_instruction(writer, BUSTER_TYPED_PTR_ADD, BUSTER_TYPED_CLASS_U64, type_size(types, value->type));
             check_lower_operand(writer, node, 1, false, BUSTER_TYPE_LONG);

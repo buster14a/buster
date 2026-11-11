@@ -467,6 +467,41 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .warnings = 12,
     },
     {
+        // A comma's left operand's -Wunused-value in a file-scope initializer is queued to the declarator's end with its
+        // operands' shift counts, in the order clang builds them (#1943); a brace initializer's values walk in
+        // initializer order, before its conversions, in a function too.
+        .name = "comma and shift warnings in initializers in clang's order",
+        .source = "struct T { char a; char b; };\n"
+                  "int z = (1 << 40, 3), y = (2, 1 << 41);\n"
+                  "int w = (2 << 42, 1 << 43, 3);\n"
+                  "char c = (1 << 42, 300);\n"
+                  "struct T s = { (1 << 43, 1), (4, 1 << 44) };\n"
+                  "int arr[2] = { (5, 6), 7 };\n"
+                  "struct T g = { (5, 302), (6, 303) };\n"
+                  "void f(int x) { struct T t = { (1, 300), (2, 301) }; struct T u = { (3, x << 40), 1.5 }; struct T v = { x / 0, (4, x) }; (void)t; (void)u; (void)v;\n"
+                  "    static int k = (1 << 45, 3); (void)k; int q = (1 << 46, 2); (void)q; }\n",
+        .options = { "-Wall" },
+        .warnings = 34,
+        // (-c can't compile a comma's static initializer yet.)
+        .syntax_only = true,
+    },
+    {
+        .name = "comma warnings in initializers in clang's order without shift counts",
+        .source = "struct T { char a; char b; };\n"
+                  "int z = (1 << 40, 3), y = (2, 1 << 41);\n"
+                  "int w = (2 << 42, 1 << 43, 3);\n"
+                  "char c = (1 << 42, 300);\n"
+                  "struct T s = { (1 << 43, 1), (4, 1 << 44) };\n"
+                  "int arr[2] = { (5, 6), 7 };\n"
+                  "struct T g = { (5, 302), (6, 303) };\n"
+                  "void f(int x) { struct T t = { (1, 300), (2, 301) }; struct T u = { (3, x << 40), 1.5 }; struct T v = { x / 0, (4, x) }; (void)t; (void)u; (void)v;\n"
+                  "    static int k = (1 << 45, 3); (void)k; int q = (1 << 46, 2); (void)q; }\n",
+        .options = { "-Wno-shift-count-overflow" },
+        .warnings = 24,
+        .c23 = true,
+        .syntax_only = true,
+    },
+    {
         .name = "literal conversions precede constant conversions in one brace initializer",
         .source = "char a[4]={300,1.5,301,2.5};void f(void){char b[4]={303,5.5,304,6.5};int y=7.5;(void)b;(void)y;}\n",
         .warnings = 9,

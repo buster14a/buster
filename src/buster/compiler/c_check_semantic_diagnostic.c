@@ -252,7 +252,13 @@ static const char* check_semantic_input(const Parser* parser, Preprocessor* pp, 
     const uint32_t count = input->token_count;
     const String8 name = check_semantic_name(parser, pp, token);
     const char* result = check_driver_input_report_message(input, report);
-    if (report->message == CHECK_INPUT_RETURN)
+    if (report->message == CHECK_INPUT_BUILTIN_ARGUMENT_COUNT)
+    {
+        const uint32_t expected = report->detail & 0xffffu;
+        const uint32_t have = report->detail >> 16;
+        result = check_warning_text(scratch, "too %s arguments to function call, expected %u, have %u", have < expected ? "few" : "many", expected, have);
+    }
+    else if (report->message == CHECK_INPUT_RETURN)
     {
         const uint32_t function = check_semantic_function(parser, input, token);
         const String8 function_name = check_semantic_name(parser, pp, function);
@@ -288,7 +294,7 @@ static const char* check_semantic_input(const Parser* parser, Preprocessor* pp, 
     {
         // GNU's array initialized by a compound literal of another array type (#1447): both types as written.
         const String8 array = check_driver_warning_type(parser, pp, input, types, spell, scratch, report->type, report->type_spelling);
-        const String8 literal = check_driver_warning_type(parser, pp, input, types, spell, scratch, (TypeId)report->value, 0);
+        const String8 literal = check_driver_warning_type(parser, pp, input, types, spell, scratch, (TypeId)report->value, (uint32_t)(report->value >> 32));
         result = array.length == 0 || literal.length == 0 ? NULL : check_warning_text(scratch, "cannot initialize array of type %.*s with array of type %.*s",
                                                                                      (int)array.length, array.pointer, (int)literal.length, literal.pointer);
     }

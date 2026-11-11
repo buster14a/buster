@@ -1957,7 +1957,7 @@ function yet"). The others clang does compile, but its code for them isn't
 sound, and this compiler keeps refusing them:
 
 - `__builtin___NSStringMakeConstantString` of no string literal, whose
-  object clang's code makes from what isn't one (below, "Code of no
+  object clang's code makes from what isn't one (below, "Of no
   literal");
 - `__builtin_zos_va_start` and `__builtin_zos_va_copy`, whose code clang
   writes over a `char *` that its 24-byte list overruns. The owner decided on
@@ -2116,11 +2116,16 @@ scope `sizeof`'s).
   - **The class:** the unit's file-scope declaration of
     `__CFConstantStringClassReference` (`check_input_cfstring_class`), or else
     an undefined global of that name, the program's own.
-- **Code of no literal.** An NSString of what isn't a literal stays a value:
-  clang's code makes its object from the literal its argument isn't (a
-  `cast<StringLiteral>` of another expression), and `-c` refuses it by name
-  ("unsupported: an NSString of no string literal, whose object clang's code
-  makes from the literal its argument isn't").
+- **Of no literal.** Clang's evaluator takes an NSString of what isn't a
+  literal as an address constant too (`IsOpaqueConstantCall` looks at no
+  argument), so it is one here as well, of its call's own object: a static
+  initializer of one is accepted, `(long)` of it plus an offset too, and two
+  compared aren't an initializer's constant, as clang's. But clang's code
+  makes its object from the literal its argument isn't (a `cast<StringLiteral>`
+  of another expression), so `-c` refuses the object by name, wherever the call
+  is, in the static data (`check_data_cfstring_keys`, at the call's `)`):
+  "unsupported: an NSString of no string literal, whose object clang's code
+  makes from the literal its argument isn't" (#1785).
   - What clang's object holds is another node's bytes read as a literal's,
     so it isn't defined, and an assertion-enabled clang aborts at the cast.
     Clang 23.1.5's release build (#1785) makes an empty 8-bit string (flags
@@ -2130,9 +2135,6 @@ scope `sizeof`'s).
     through casts first, so `(const char *)(void *)"zz"` makes the literal's
     own string.
 - **Differences.**
-  - Clang's evaluator takes an NSString of no literal as an address constant
-    too, and accepts a static initializer of one; this checker refuses it as
-    "initializer is not a constant expression".
   - A static `_Bool` of one is refused, as one of any address is
     (`static _Bool b = &x;`).
   - Clang's ELF object also has an `objc_imageinfo` section where it makes a
@@ -2597,9 +2599,27 @@ unit's constant objects (`check_input_verbose_trap_object`, #1843) up to the
 first NUL, of an array of plain char, with clang's errors where the string has a
 `$` or the read leaves the array (past its end, or no NUL in it). The address
 of a const record's member array reads its string to the member's end, and a
-const pointer object's value its pointee's. An object whose bytes the reader
-doesn't keep, and such an argument under a cast (which through `void *` clang
-calls no constant string), are still refused by name.
+const pointer object's value its pointee's.
+
+Casts on the way are clang's evaluator's (`check_input_verbose_trap_designator`,
+#1843). A narrow literal's bytes it reads at the address whatever the casts
+(`tryEvaluateString`'s fast path: `(const char *)(const void *)"m" + 1`,
+`(const char *)(const unsigned char *)p` of a pointer to a literal), up to its
+terminator: one past that is no string. Any other object's chars, `__func__`'s
+and a wide literal's among them, it reads through the lvalue's designator, which
+a conversion between pointers to different types loses (ExprConstant's
+`CK_BitCast`). So the argument's own type, each cast to a pointer and each such
+cast's operand must point to plain char (or be an array of it), qualifiers
+aside: `(const char *)(char *)m` reads `m`, but `(const char *)(const void *)m`,
+`(const char *)u` of an `unsigned char` array, `(const char *)&s` of a record
+and `(const char *)&m` of the array itself are clang's "must be a pointer to a
+constant string". An object whose bytes the reader doesn't keep is still refused
+by name.
+
+Differences left: a const pointer object whose own initializer converted its
+value through such a cast is read here, where clang's stored designator is lost;
+and two warnings at such arguments, `-Wstring-plus-int` (not given here) and
+`-Wpointer-sign`'s wording for a builtin's argument, differ from clang's.
 
 Two costs are accepted for now:
 - A call of `memcpy_inline` or `memset_inline` is a call of its leaf, where
