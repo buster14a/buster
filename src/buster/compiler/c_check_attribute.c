@@ -4785,6 +4785,22 @@ static bool check_input_attributes(CheckInputReader* reader, uint32_t* cursor, u
             }
             const bool definition = suffix && after <= end && after < parser->tokens.count && parser->tree.roles[after] == PARSE_ROLE_OPEN_BODY;
             i = open + 2;
+            if (valid && standard && parser->language.standard < 2023)
+            {
+                // Before C23, the list is an extension clang's parser warns of as it reads it, once whichever reading reaches it.
+                const CheckWarningEvent extension =
+                {
+                    .id = CHECK_WARNING_ID_C23_ATTRIBUTES,
+                    .kind = CHECK_WARNING_EVENT_C23_ATTRIBUTES,
+                    .flags = BUSTER_CHECK_WARNING_DEFAULT_IGNORED,
+                    .token = first,
+                    .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                    .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+                    .completion = first + 1,
+                    .payload = { .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+                };
+                check_input_warning_once(reader, &extension);
+            }
             if (valid && (place == BUSTER_CHECK_PLACE_QUALIFIERS || place == BUSTER_CHECK_PLACE_GROUP))
             {
                 // clang's declarator parser rejects a C23 list after a pointer's qualifiers, or at a group's start

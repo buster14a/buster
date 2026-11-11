@@ -2153,6 +2153,9 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
         case CHECK_WARNING_EVENT_BIT_INT_SUFFIX:
             result = "'_BitInt' suffix for literals is a C23 extension";
             break;
+        case CHECK_WARNING_EVENT_C23_ATTRIBUTES:
+            result = "[[]] attributes are a C23 extension";
+            break;
         case CHECK_WARNING_EVENT_GNU_DESIGNATOR:
             result = payload->data == BUSTER_CHECK_GNU_DESIGNATOR_OLD_STYLE ? "use of GNU old-style field designator extension" :
                      payload->data == BUSTER_CHECK_GNU_DESIGNATOR_RANGE ? "use of GNU array range extension" :

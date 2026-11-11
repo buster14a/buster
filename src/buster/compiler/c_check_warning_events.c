@@ -196,6 +196,8 @@ enum
     CHECK_WARNING_ID_GNU_ARRAY_RANGE = 139,
     // An integer added to a string literal (#2190, clang's diagnoseStringPlusInt): -Wstring-plus-int, on by default.
     CHECK_WARNING_ID_STRING_PLUS_INT = 140,
+    // A C23 attribute list before C23 (#2409): -Wc23-extensions' clang extension, off by default, -pedantic's.
+    CHECK_WARNING_ID_C23_ATTRIBUTES = 141,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -474,6 +476,9 @@ typedef enum CheckWarningEventKind
     // A bit-precise constant's suffix (wb or uwb) before C23 (#1447): -Wc23-extensions' "'_BitInt' suffix for literals is a
     // C23 extension" (CHECK_WARNING_ID_C23_PARAMETER's option), at the constant.
     CHECK_WARNING_EVENT_BIT_INT_SUFFIX,
+    // A C23 attribute list before C23 (#2409, CHECK_WARNING_ID_C23_ATTRIBUTES): -Wc23-extensions' "[[]] attributes are a
+    // C23 extension", at its first `[`, as clang's parser gives it (ext_c_attributes).
+    CHECK_WARNING_EVENT_C23_ATTRIBUTES,
     // __builtin_cpu_supports's literal of a feature clang doesn't know (#1843, check_input_cpu_supports_literal), at the
     // builtin's name: the description's message.
     CHECK_WARNING_EVENT_INVALID_CPU_SUPPORTS,
