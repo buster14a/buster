@@ -672,12 +672,7 @@ static void check_test_program_segment_refusals(CheckTest* test, const X86Target
           "an aggregate copy of more than 8 vector registers in a segment's address space (256, 257 or 258: %gs, %fs or %ss), which clang can't lower either" },
         { "segment-struct-store-past-limit", "struct S{char c[1025];};void tested(struct S __seg_gs*p,struct S*q){*p=*q;}",
           "an aggregate copy of more than 8 vector registers in a segment's address space (256, 257 or 258: %gs, %fs or %ss), which clang can't lower either" },
-        // What the lowering doesn't carry the override through yet (check_lower_segment_carried): a complex value's store,
-        // a _BitInt and an _Atomic object.
-        { "segment-complex-store", "void tested(_Complex double __seg_gs*p,_Complex double v){*p=v;}",
-          "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
-        { "segment-bit-int", "int tested(_BitInt(40) __seg_fs*p){return (int)*p;}",
-          "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
+        // What the lowering doesn't carry the override through yet (check_lower_segment_carried): an _Atomic object.
         { "segment-atomic-object", "int tested(_Atomic int __seg_fs*p){return *p;}",
           "a load or store in a segment's address space (256, 257 or 258: %gs, %fs or %ss)" },
     };
@@ -818,6 +813,27 @@ static void check_test_program_segments(CheckTest* test, const char* clang)
         "_Complex float zf=*sc*2.0f;r+=(long)__real__ zf+(long)__imag__ zf;r+=sum(*fs)+(n?*ps:*fs).b;"
         "return (int)(r+gs_.a+gs_.b+gs_.c+ts.b+ts.c+gp.x+go.c[0]+go.c[11]+gu.c[1]);}",
         "segment-aggregates", clang);
+    // Complex values, __float128s and _BitInts (#1447): a complex value's store (a copy through the override), its updates
+    // and a real object's update by a complex value (check_lower_segment_update: the object copied to a frame object,
+    // updated there and copied back), its parts as lvalues (check_lower_element_segment: `__real__ *p` read, stored and
+    // updated), a __float128's and a wide _BitInt's updates the same way, and a narrow _BitInt's read, store and update,
+    // whose LOAD and STORE take the override as an integer's do. In %fs and %ss.
+    check_test_program_source(test,
+        "#define SS __attribute__((address_space(258)))\n"
+        "static _Thread_local _Complex double tc=1.5+2.5i;static _Thread_local _BitInt(40) tb=-12345;static _Thread_local unsigned _BitInt(200) tw;"
+        "static _Complex float gc=3.0f-1.0if;static _BitInt(13) gb=100;static __float128 gq=2.5;static _BitInt(130) gw;static double gd=4.0;"
+        "int tested(int n){char*tp=__builtin_thread_pointer();tw=77+n;gw=-5-n;"
+        "_Complex double __seg_fs*fc=(_Complex double __seg_fs*)((char*)&tc-tp);_BitInt(40) __seg_fs*fb=(_BitInt(40) __seg_fs*)((char*)&tb-tp);"
+        "unsigned _BitInt(200) __seg_fs*fw=(unsigned _BitInt(200) __seg_fs*)((char*)&tw-tp);_Complex float SS*sc=(_Complex float SS*)&gc;"
+        "_BitInt(13) SS*sb=(_BitInt(13) SS*)&gb;__float128 SS*sq=(__float128 SS*)&gq;_BitInt(130) SS*sw=(_BitInt(130) SS*)&gw;double SS*sd=(double SS*)&gd;"
+        "long r=0;*fc=3.0-4.0i;*fc+=n;*fc*=2.0i;_Complex double z=(*fc)++;r+=(long)__real__ z+(long)__imag__ *fc*3;"
+        "*sc=*sc/2.0f;*sc-=1.0if;r+=(long)(__real__ *sc*10)+(long)(__imag__ *sc*10);__real__ *fc=n;__imag__ *sc+=1.5f;--__imag__ *fc;"
+        "r+=(long)__real__ *fc+(long)__imag__ *fc+(long)(__imag__ *sc*4);"
+        "*fb=*fb*3+n;*fb+=100;(*fb)--;r+=(long)*fb;*sb=4000;*sb+=200;++*sb;r+=(long)*sb+(*sb>>2);"
+        "*fw=*fw*1000000007;*fw+=5;++*fw;r+=(long)(*fw%1000003);*sw=*sw*3;*sw-=1000;(*sw)++;r+=(long)*sw;"
+        "*sq=*sq*2;*sq+=n;(*sq)++;r+=(long)*sq;*sd+=1.0i;r+=(long)*sd;"
+        "return (int)(r+(long)__real__ tc+(long)(__imag__ gc*4)+(long)tb+(long)gb+(long)(tw%1000)+(long)gw+(long)gq);}",
+        "segment-complex-bit-int", clang);
 }
 
 // Initializer validation keeps atomic rvalue identity while storage uses the underlying vector bytes.
