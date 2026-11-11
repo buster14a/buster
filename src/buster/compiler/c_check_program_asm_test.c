@@ -10,7 +10,7 @@
 #include <cpuid.h>
 
 // The planner without room (#929's review): a statement of x87 operands and a template of no instructions, one of an
-// x87 operand and an instruction, and one refused at its first operand (an MMX register's) before its x87 operand, whose
+// x87 operand and an instruction, and one refused at its first operand (an __int128 in a general register) before its x87 operand, whose
 // later places the planner never writes. check_program_asm_plan of them, by both paths, with the output arena's room cut
 // to none and then 8 bytes more at a time until the plan succeeds: each run before it must fail for want of room
 // (CHECK_PROGRAM_RESOURCE) with both arenas as they were, among them a run whose room ends before each statement's
@@ -21,7 +21,7 @@ static void check_test_program_asm_room(CheckTest* test)
     static const char source[] =
         "float through(float x){__asm__ volatile(\"\" : \"+t\"(x));return x;}"
         "long double root(long double x){__asm__(\"fsqrt\" : \"+t\"(x));return x;}"
-        "int flagged(int a, float x){long long z;__asm__(\"cmpl $0, %2\" : \"=y\"(z), \"+t\"(x) : \"r\"(a));return (int)z+(int)x;}"
+        "int flagged(int a, float x){__int128 z;__asm__(\"cmpl $0, %2\" : \"=r\"(z), \"+t\"(x) : \"r\"(a));return (int)z+(int)x;}"
         "int rotated(int n){int r;__asm__(\"rorxl $3, %1, %0\" : \"=r\"(r) : \"r\"(n));return r;}";
     static InternTable identifiers;
     static Preprocessor pp;
@@ -78,9 +78,9 @@ static void check_test_program_asm_room(CheckTest* test)
         const bool plans_right = done && planned.plans != NULL && planned.plans[0].reason == NULL && planned.plans[0].inlined &&
                                  planned.plans[0].helper == BUSTER_CHECK_NONE && planned.plans[1].reason == NULL && planned.plans[1].inlined &&
                                  planned.plans[1].helper == BUSTER_CHECK_NONE && planned.plans[2].reason != NULL &&
-                                 strcmp(planned.plans[2].reason, "inline assembly operands in MMX registers") == 0 && planned.plans[3].reason == NULL &&
+                                 strcmp(planned.plans[2].reason, "inline assembly operands of this type in their constraint's registers") == 0 && planned.plans[3].reason == NULL &&
                                  !planned.plans[3].inlined && planned.plans[3].helper != BUSTER_CHECK_NONE && helpers.count == 1;
-        snprintf(description, sizeof(description), "asm room, %s: the x87 statements are asm bodies, the MMX operand is refused by name, rorx has a helper",
+        snprintf(description, sizeof(description), "asm room, %s: the x87 statements are asm bodies, the __int128 operand is refused by name, rorx has a helper",
                  path == 0 ? "scalar" : "vector");
         check_test_expect(test, plans_right, description);
         parse_release(&parser);
@@ -1095,6 +1095,31 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
         "static int below(long double a, long double b){int r;__asm__(\"fcomi %%st(1), %%st\" : \"=@ccb\"(r) : \"t\"(a), \"u\"(b));return r;}"
         "int tested(int n){long double a=n*0.5L+1,b=n-2.25L;return (int)(swap_sub(a,b)*8)+(int)(add_top(a,b)*4)+(int)square(a)+(int)(reversed(a,b)*16)+below(a,b)*1000+below(b,a)*3000;}",
         "asm-x87-named", clang);
+    // MMX's operands (#1846): y's registers of a long, an unsigned, a short and a byte (zero-extended into the register,
+    // its low bytes stored), a double's bits, an early-clobbered output, a matching input, MMX clobbers the
+    // registers avoid, an MMX input into a general output, and a template of no instructions; emms before returning.
+    check_test_program_source(test,
+        "static long add_lanes(long a, long b){long r;__asm__(\"movq %1, %0\\n\\tpaddd %2, %0\" : \"=&y\"(r) : \"y\"(a), \"y\"(b));return r;}"
+        "static unsigned flip(unsigned a, unsigned b){__asm__(\"pxor %1, %0\" : \"+y\"(a) : \"y\"(b));return a;}"
+        "static short doubled(short a){short r;__asm__(\"paddd %0, %0\" : \"=y\"(r) : \"0\"(a));return r;}"
+        "static unsigned char byte_copy(unsigned char a){unsigned char r;__asm__(\"movq %1, %0\" : \"=y\"(r) : \"y\"(a));return r;}"
+        "static double through(double d){__asm__(\"movq %0, %%mm7\\n\\tmovq %%mm7, %0\" : \"+y\"(d) : : \"mm7\");return d;}"
+        "static long avoiding(long a){long r;__asm__(\"movq %1, %%mm0\\n\\tmovq %%mm0, %0\" : \"=y\"(r) : \"y\"(a) : \"mm0\", \"mm1\");return r;}"
+        "static long to_general(long a){long r;__asm__(\"movq %1, %0\" : \"=r\"(r) : \"y\"(a));return r;}"
+        "static int low_half(long a){int r;__asm__(\"movd %1, %0\" : \"=r\"(r) : \"y\"(a));return r;}"
+        "static void empty(long* p){__asm__(\"\" : \"+y\"(*p));}"
+        "int tested(int n){long a=((long)n<<32)|(unsigned)(n*3+1);long b=((long)(n+5)<<32)|7u;long e=a*3;empty(&e);"
+        "long r=add_lanes(a,b)+(long)flip((unsigned)n*2654435761u,0x5a5a5a5au)+doubled((short)(n*1000))+byte_copy((unsigned char)(n*37))+(long)through(n*0.75)+avoiding(a^b)+to_general(b)+low_half(a)+e;"
+        "__asm__ volatile(\"emms\");return (int)(r^(r>>32));}",
+        "asm-mmx", clang);
+    check_test_program_boundary_reason(test, "int tested(int n){long m=n;__asm__(\"movq %q0, %0\" : \"+y\"(m));return (int)m;}",
+                                       "asm-mmx-modifier", true, false, 0, 1, "this inline assembly operand modifier");
+    check_test_program_boundary_reason(test, "int tested(int n){long m=n;long double x=n;__asm__(\"\" : \"+y\"(m), \"+t\"(x));return (int)m+(int)x;}",
+                                       "asm-mmx-x87", true, false, 0, 2, "inline assembly x87 and MMX operands in one statement");
+    check_test_program_boundary_reason(test, "int tested(int n){long m=n;__asm__(\".p2align 4\\n\\tpaddd %0, %0\" : \"+y\"(m));return (int)m;}",
+                                       "asm-mmx-directives", true, false, 0, 1, "inline assembly MMX operands in templates that take directives");
+    check_test_program_boundary_reason(test, "typedef long long m64 __attribute__((vector_size(8)));int tested(int n){m64 v={n};__asm__(\"paddd %0, %0\" : \"+y\"(v));return (int)v[0];}",
+                                       "asm-mmx-vector", true, false, 0, 1, "inline assembly operands of this type in their constraint's registers");
     // A template that returns is an asm body, whose return leaves its caller (#1839, test-checker-driver's returning templates);
     // one that keeps its helper, as a named label's does, is refused by name.
     check_test_program_boundary_reason(test, "int tested(int n){__asm__ volatile(\"rep ret\\n.Lafter%=:\" ::: \"memory\");return n;}",
