@@ -1436,6 +1436,30 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
           "unsigned long long o[]={s[0],s[1],s[2],d[0],d[1],d[2]};FOLD(o);}\n"
           "A(signed char,1)S(unsigned char,2)A(short,3)S(unsigned short,4)A(int,5)S(unsigned,6)A(long long,7)S(unsigned long,8)S(char,9)return (int)h;}\n"
         },
+        // The integer elementwise builtins of _BitInt scalars of up to 64 bits, of each signedness and widths no power of
+        // two among them (#2410): the sequences of check_lower_integer_elements of their bits zero-extended, fshl's and fshr's
+        // count modulo a width no power of two; and pdep and pext of a _BitInt and a long (check_lower_scalar_lanes) where the
+        // target has BMI2, each alone in a function of its own ("vector-integer-bits" has more).
+        { "scalar-bitint-elements",
+          "#define S(T,k) {T a=(T)((unsigned long long)n*0x9e3779b97f4a7c15ull>>k),b=(T)((unsigned long long)n*0x2545f4914f6cdd1dull>>(k+3)),c=(T)-1;"
+          "T q_[]={__builtin_elementwise_add_sat(a,b),__builtin_elementwise_add_sat(c,a),__builtin_elementwise_sub_sat(a,b),__builtin_elementwise_sub_sat(b,c),"
+          "__builtin_elementwise_max(a,b),__builtin_elementwise_min(a,c),__builtin_elementwise_popcount(a),__builtin_elementwise_bitreverse(a),"
+          "__builtin_elementwise_clzg(a,b),__builtin_elementwise_ctzg((T)(a&~a),c),__builtin_elementwise_ctzg(b,c),__builtin_elementwise_clzg(c),"
+          "__builtin_elementwise_fshl(a,b,(T)(k*7)),__builtin_elementwise_fshr(a,b,(T)(n+k))};FOLD(q_);}\n"
+          "#define A(T,k) S(T,k) {T a=(T)((unsigned long long)n*0x9e37ull>>k),m=(T)((unsigned long long)1<<(sizeof(T)*8-1));"
+          "T q_[]={__builtin_elementwise_abs(a),__builtin_elementwise_abs((T)-a),__builtin_elementwise_abs((T)(m<<1))};FOLD(q_);}\n"
+          "#if defined(__BMI2__)\n"
+          "static unsigned _BitInt(37) deposit(unsigned _BitInt(37) a,unsigned _BitInt(37) b){return __builtin_elementwise_pdep(a,b);}\n"
+          "static long extract(long a,long b){return __builtin_elementwise_pext(a,b);}\n"
+          "#else\n"
+          "#define deposit(a,b) 0\n#define extract(a,b) 0\n"
+          "#endif\n"
+          "int tested(int n){unsigned h=2166136261u;\n"
+          "S(unsigned _BitInt(1),1)A(_BitInt(2),2)S(unsigned _BitInt(5),3)A(_BitInt(5),4)A(_BitInt(13),5)S(unsigned _BitInt(33),6)A(_BitInt(37),7)"
+          "S(unsigned _BitInt(37),8)A(_BitInt(63),9)A(_BitInt(64),10)S(unsigned _BitInt(64),11)\n"
+          "unsigned long long e[]={(unsigned long long)deposit((unsigned _BitInt(37))(n*0x12345),(unsigned _BitInt(37))0x1f0f0f0f0full),"
+          "(unsigned long long)extract(n*0x9e3779b97f4a7c15,0x0ff00ff00ff00ff0)};FOLD(e);return (int)h;}\n"
+        },
         { "baseline-floating-extremes", check_test_vector_floating_extremes },
         // AVX's and AVX2's (x86-64-v3's): 256-bit unpacks, broadcasts, permutes, variable shifts, lanes' extractions and
         // insertions, extensions, gathers, FMA's (of no NaN) and F16C's conversions, and shuffles of dwords and qwords.

@@ -12278,6 +12278,62 @@ static void check_lower_reduce_in_order(CheckLowerWriter* writer, uint32_t node)
     }
 }
 
+// __builtin_elementwise_pdep, _pext and _clmul of an integer scalar `element` of `width` bits, up to 64 (#2410): its
+// operands converted to an unsigned int (an unsigned long long's 64 bits past 32) and masked to its width, so that a
+// signed or a _BitInt operand is its bits zero-extended, then BMI2's PDEP or PEXT, or PCLMULQDQ's product of them moved
+// into xmm registers and back (VEX's forms with AVX, else SSE's), whose low bits are the result; converted back to the
+// element, which truncates the product to its width. The operands are evaluated first to last.
+static void check_lower_scalar_lanes(CheckLowerWriter* writer, uint32_t node, CBuiltinId builtin, TypeId element, uint32_t width)
+{
+    const CheckProgram* program = writer->program;
+    const CheckStream* stream = program->stream;
+    const uint32_t first = program->input->graph.argument_offsets[node];
+    const bool wide = width > 32;
+    const uint8_t computed = wide ? BUSTER_TYPED_CLASS_U64 : BUSTER_TYPED_CLASS_U32;
+    const TypeId computed_type = wide ? BUSTER_TYPE_ULLONG : BUSTER_TYPE_UINT;
+    const uint64_t kept = width == 64 ? UINT64_MAX : (UINT64_C(1) << width) - 1;
+    Tier0Operation row;
+    memset(&row, 0, sizeof(row));
+    if (builtin == CBUILTIN_ELEMENTWISE_CLMUL)
+    {
+        const uint8_t v0 = BUSTER_TIER0_ROLE_VECTOR(0);
+        const uint8_t v1 = BUSTER_TIER0_ROLE_VECTOR(1);
+        const bool avx = (writer->target.features & BUSTER_X86_FEATURE(AVX)) != 0;
+        const uint32_t into = wide ? (avx ? X86_FORM_VMOVQ_X_RM64 : X86_FORM_MOVQ_X_RM64) : (avx ? X86_FORM_VMOVD_X_RM32 : X86_FORM_MOVD_X_RM32);
+        const uint32_t from = wide ? (avx ? X86_FORM_VMOVQ_RM64_X : X86_FORM_MOVQ_RM64_X) : (avx ? X86_FORM_VMOVD_RM32_X : X86_FORM_MOVD_RM32_X);
+        row.records[0] = check_vector_lower_record(into, v0, 0, BUSTER_TIER0_ROLE_INTEGER(0));
+        row.records[1] = check_vector_lower_record(into, v1, 0, BUSTER_TIER0_ROLE_INTEGER(1));
+        row.records[2] = avx ? check_vector_lower_record(X86_FORM_VPCLMULQDQ_X_X_XM128_IMM8, v0, v0, v1) : check_vector_lower_record(X86_FORM_PCLMULQDQ_X_XM128_IMM8, v0, 0, v1);
+        row.records[3] = check_vector_lower_record(from, v0, 0, BUSTER_TIER0_ROLE_INTEGER_RESULT);
+        row.record_count = 4;
+    }
+    else
+    {
+        const bool deposit = builtin == CBUILTIN_ELEMENTWISE_PDEP;
+        row.records[0] = check_vector_lower_record(deposit ? (wide ? X86_FORM_PDEP_R64_R64_RM64 : X86_FORM_PDEP_R32_R32_RM32) :
+                                                             (wide ? X86_FORM_PEXT_R64_R64_RM64 : X86_FORM_PEXT_R32_R32_RM32),
+                                                   BUSTER_TIER0_ROLE_INTEGER_RESULT, BUSTER_TIER0_ROLE_INTEGER(0), BUSTER_TIER0_ROLE_INTEGER(1));
+        row.record_count = 1;
+    }
+    row.operand_count = 2;
+    row.operand_classes[0] = computed;
+    row.operand_classes[1] = computed;
+    row.result_class = computed;
+    const uint32_t operation = check_lower_operation_index(writer, &row);
+    // Pushed last first: the conversion of the result, the row, then each operand's value, converted and masked.
+    check_lower_convert(writer, computed_type, element);
+    check_lower_instruction(writer, BUSTER_TYPED_X86, computed, operation);
+    for (uint32_t a = 2; a-- > 0;)
+    {
+        const TypeId type = stream->argument_conversions[first + a].type;
+        check_lower_instruction(writer, BUSTER_TYPED_AND, computed, 0);
+        check_lower_instruction(writer, BUSTER_TYPED_CONST, computed, kept);
+        check_lower_convert(writer, type, computed_type);
+        check_lower_operand(writer, node, a + 3, false, type);
+    }
+    writer->vectors = true;
+}
+
 // __builtin_elementwise_pdep and _pext of vectors of integers, element by element: each element's BMI2 PDEP or PEXT (no
 // vector instruction deposits or extracts bits), of its zero extension to 32 bits for 8- and 16-bit elements (the mask's
 // extension has no bits past theirs, so neither has the result), the elements read from frame objects the vectors are
@@ -12295,9 +12351,26 @@ static void check_lower_vector_lanes(CheckLowerWriter* writer, uint32_t node, CB
     const uint32_t first = program->input->graph.argument_offsets[node];
     const CheckVectorShape shape = check_vector_builtin_shape(program->types, result);
     const uint8_t kind = check_action_kind(program->types, result);
-    if (kind != BUSTER_TYPE_KIND_VECTOR && kind != BUSTER_TYPE_KIND_EXT_VECTOR)
+    const bool scalar = kind != BUSTER_TYPE_KIND_VECTOR && kind != BUSTER_TYPE_KIND_EXT_VECTOR;
+    const TypeId element = scalar ? type_unqualified(type_strip_aligned(program->types, result)) : 0;
+    uint32_t width = 0;
+    bool is_signed = false;
+    const bool integer = scalar && element != BUSTER_TYPE_BOOL && check_action_integer_type(program->types, element, &width, &is_signed) && width != 0 && width <= 64;
+    if (scalar && !integer)
     {
-        check_lower_unsupported(writer, "elementwise builtins of scalars");
+        check_lower_unsupported(writer, "elementwise builtins of scalars of more than 64 bits");
+    }
+    else if (scalar && builtin != CBUILTIN_ELEMENTWISE_CLMUL && (writer->target.features & BUSTER_X86_FEATURE(BMI2)) == 0)
+    {
+        check_lower_unsupported(writer, "bit deposits and extractions without BMI2");
+    }
+    else if (scalar && builtin == CBUILTIN_ELEMENTWISE_CLMUL && (writer->target.features & BUSTER_X86_FEATURE(PCLMUL)) == 0)
+    {
+        check_lower_unsupported(writer, "carry-less multiplication without PCLMUL");
+    }
+    else if (scalar)
+    {
+        check_lower_scalar_lanes(writer, node, builtin, element, width);
     }
     else if (!shape.integer || shape.element == 0)
     {
@@ -16567,7 +16640,8 @@ static void check_lower_node_count(const CheckProgram* program, uint32_t node, C
         // A bit builtin's elements, each its SWAR sequence (check_lower_transport_bit_builtin): up to 144 entries an element,
         // its sequence's 96 and its operands' reads and its store, for a vector of any width (#1834); and so the saturating
         // builtins' of 32- and 64-bit elements (check_lower_integer_elements, #2216), and a scalar's one element of an
-        // integer elementwise builtin (check_lower_sequence_arithmetic's or a bit builtin's), whatever its type.
+        // integer elementwise builtin (check_lower_sequence_arithmetic's or a bit builtin's), whatever its type, and its pdep,
+        // pext or clmul (check_lower_scalar_lanes, #2410).
         const bool vector = check_lower_transport_is_vector(types, type);
         const bool bits = member == CBUILTIN_ELEMENTWISE_POPCOUNT || member == CBUILTIN_ELEMENTWISE_BITREVERSE || member == CBUILTIN_ELEMENTWISE_CLZG ||
                           member == CBUILTIN_ELEMENTWISE_CTZG || member == CBUILTIN_ELEMENTWISE_FSHL || member == CBUILTIN_ELEMENTWISE_FSHR;
@@ -16578,7 +16652,8 @@ static void check_lower_node_count(const CheckProgram* program, uint32_t node, C
             counts->transport_entries += 144 * (uint64_t)check_builtin_vector_lanes(types, type_conversion_operand(types, type));
             counts->transport_locals += room != 0 ? 0 : 12;
         }
-        else if (op == CHECK_OP_BUILTIN_VECTOR && (bits || arithmetic) && !vector)
+        else if (op == CHECK_OP_BUILTIN_VECTOR && (bits || arithmetic || member == CBUILTIN_ELEMENTWISE_PDEP || member == CBUILTIN_ELEMENTWISE_PEXT ||
+                                                   member == CBUILTIN_ELEMENTWISE_CLMUL) && !vector)
         {
             counts->transport_entries += 144;
             counts->transport_locals += 12;
