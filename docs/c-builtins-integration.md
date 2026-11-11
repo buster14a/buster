@@ -2573,11 +2573,15 @@ features. Their prototypes are clang's metadata's:
   is saved in a region of the call's own in such a function
   (`tier0_layout_frame`), so the second return finds it whatever calls ran
   before the longjmp. Before #1242's review the regions were shared, so a later
-  call could overwrite the value. A value held in its depth's frame slot can't
-  be saved that way, since later expressions share the slot: a long double, an
-  `__int128`, a vector, a mask, or any value of a function with deep entries.
-  Such a call is refused by name (`tier0_returns_twice_saves`). C's contexts
-  for setjmp (a condition, compared with a constant) hold none. Ordinary Tier 1
+  call could overwrite the value. A long double's, an `__int128`'s or a
+  vector's value lives in its depth's frame slot, which later expressions
+  share: the call copies the slots below its arguments into a snapshot of its
+  own and back after it (`tier0_returns_twice_snapshot`, #1843), 8 bytes at a
+  time through the x87 stack's FILD and FISTP, which keep every bit pattern and
+  touch no register the call's moves hold. A mask on the mask stack, or any
+  value of a function with deep entries, is still refused by name
+  (`tier0_returns_twice_saves`). C's contexts for setjmp (a condition, compared
+  with a constant) hold none. Ordinary Tier 1
   leaves such a function to Tier 0.
   longjmp's second argument must be a constant 1, wherever the call is, with
   clang's two errors at the call (`check_input_longjmp_argument`).
