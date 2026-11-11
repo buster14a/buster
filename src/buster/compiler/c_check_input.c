@@ -2213,6 +2213,9 @@ struct CheckInputReader
     bool merged_attributes;
     // Whether an objc_gc or objc_ownership attribute was read, for its declarators' types (#1447, check_input_attribute_objc).
     bool objc_attributes;
+    // Whether the unit names __builtin_clear_padding, whose plan reads the sugar its declarators' groups write over arrays
+    // (#1842's 1b, check_input_declarator_sugar): only then are those made.
+    bool padding_sugar;
     // Whether an argument_with_type_tag, pointer_with_type_tag or type_tag_for_datatype attribute was read, for its
     // handler's checks and its declarations' rules and tags (#1447, c_check_type_safety_input.c).
     bool type_tag_attributes;
@@ -8615,7 +8618,12 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                     const CheckInputAttributes* specifiers = frame->parameter ? frame->common_attributes : run->common_attributes;
                     if (__builtin_expect(!frame->parameter && (check_input_sugar_list(specifiers) || check_input_sugar_list(frame->attributes)), 0))
                     {
-                        check_input_declarator_sugar(reader, frame, specifiers, parts, reverse, type);
+                        check_input_declarator_sugar(reader, frame, specifiers, parts, reverse, type, true);
+                    }
+                    else if (__builtin_expect(reader->padding_sugar && frame->name != BUSTER_CHECK_NONE, 0))
+                    {
+                        // A unit that clears padding: its declarators' groups over arrays, a parameter's too (#1842's 1b).
+                        check_input_declarator_sugar(reader, frame, NULL, parts, reverse, type, false);
                     }
                     else if (__builtin_expect(reader->output->sugar_entries != 0 && !frame->parameter && frame->name != BUSTER_CHECK_NONE, 0))
                     {
@@ -16315,6 +16323,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
         reader.builtin_member_names[i] = intern_find_or_add(pp->table, (const uint8_t*)builtin_members[i], (uint32_t)strlen(builtin_members[i]));
         valid &= reader.builtin_member_names[i] != 0;
     }
+    reader.padding_sugar = intern_find(pp->table, (const uint8_t*)"__builtin_clear_padding", 23) != 0;
     for (uint32_t i = 0; valid && i < BUSTER_PARSE_PREDECLARED_TYPEDEFS; i += 1)
     {
         reader.predefined_names[i] = intern_find(pp->table, (const uint8_t*)parse_predeclared_typedefs[i], (uint32_t)strlen(parse_predeclared_typedefs[i]));

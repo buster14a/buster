@@ -175,12 +175,14 @@ static void check_input_set_sugar(CheckInputReader* reader, uint32_t token, uint
 }
 
 static __attribute__((noinline, cold)) uint32_t check_input_declarator_sugar(CheckInputReader* reader, const CheckDeclaratorFrame* frame, const CheckInputAttributes* common,
-                                             const CheckDeclaratorPart* parts, uint32_t order, TypeId type)
+                                             const CheckDeclaratorPart* parts, uint32_t order, TypeId type, bool attributes)
 {
     const Parser* parser = reader->parser;
     const TypeTable* types = reader->types;
     CheckInput* output = reader->output;
-    const CheckInputAttributes* own = frame->attributes;
+    // Without `attributes`, a declarator's groups over arrays alone (#1842's 1b), and none of its conventions.
+    const CheckInputAttributes* own = attributes ? frame->attributes : NULL;
+    common = attributes ? common : NULL;
     uint32_t result = 0;
     check_input_lane_refuse(reader, reader->lane, "a declarator's type sugar is the source order's");
     // The parts in the order they apply, from the base out, and the type each makes in the final type.
@@ -226,9 +228,12 @@ static __attribute__((noinline, cold)) uint32_t check_input_declarator_sugar(Che
         // then its leading attributes.
         uint32_t groups[8];
         const uint32_t group_count = check_input_sugar_groups(parser, part->token, frame->start, groups, 8);
+        // A group around an array is sugar of its own, in a unit that clears padding (#1842's 1b: clang's PaddingClearer
+        // doesn't look through a ParenType): a PAREN over the canonical array, where it has none beneath.
+        const bool array_group = reader->padding_sugar && type_kind_is_array(type_kind(types, type_strip_aligned(types, below)));
         for (uint32_t g = depth; g < group_count; g += 1)
         {
-            current = current != 0 ? type_sugar_make(&output->sugar, reader->arena, BUSTER_TYPE_SUGAR_PAREN, 0, current, below, 0) : 0;
+            current = current != 0 || array_group ? type_sugar_make(&output->sugar, reader->arena, BUSTER_TYPE_SUGAR_PAREN, 0, current, below, 0) : 0;
             for (uint32_t a = 0; own != NULL && a < own->count; a += 1)
             {
                 const CheckInputAttribute* attribute = own->records + a;

@@ -1952,13 +1952,33 @@ object p points to, as clang's `PaddingClearer` does.
   stack grows with the type's nesting, which no limit of its own bounds
   (#1842; before, a type nested past 64 levels was refused, and its frame
   written past the stack).
-- **Difference.** Clang's walk doesn't look through an array type's sugar
-  (`dyn_cast<ConstantArrayType>` of the sugared type), so it keeps the padding
-  of an array of a typedef's type, of `typeof`'s, or that a pointer declared
-  with parentheses points to (`struct S (*p)[2]`, `ParenType` sugar), and of
-  such an array member; a complex typedef's padding is cleared (`getAs`). The
-  type table here has no sugar, so the padding is cleared (#1842 asks which
-  way to take).
+- **Sugared arrays** (#1842's 1b). Clang's walk doesn't look through an
+  array type's sugar (`dyn_cast<ConstantArrayType>` of the sugared type). So
+  it treats as one scalar, and clears nothing inside:
+  - an array of a typedef's type or of `typeof`'s;
+  - one that a pointer declared with parentheses points to
+    (`struct S (*p)[2]`, `ParenType` sugar), a parameter's and a typedef's of
+    such a pointer too;
+  - an element that is such an array (`A d[2]`), and such a member, whose
+    record's other padding is cleared.
+
+  A complex typedef's padding and an array of a typedef's struct are
+  cleared. The plan does the same with the declarations' sugar.
+  - **The argument** (`check_lower_padding_argument`): the call's argument is
+    followed through implicit conversions, `&`, `*` and subscripts to the
+    declaration it points into, at the level of that declaration's type.
+  - **The sugar** (`check_lower_padding_sugared`):
+    - a group's `PAREN` node, which the reader makes over an array in a unit
+      that names the builtin (`docs/c-types.md`'s "Type sugar");
+    - a typedef or `typeof` specifier that writes the level, below which
+      the typedef's own declaration answers.
+  - **Members:** found through their record's body
+    (`check_lower_padding_member`).
+  - **The walk:** a frame's `opaque` count makes the array it reaches all
+    occupied (`check_lower_padding_entries`).
+
+  **Still cleared:** an array that a cast's type name, a member access, or a
+  call's result points to, which clang keeps.
 
 `__builtin_invoke(f, a...)` (0x455, #148) is the call `f(a...)` in C, as
 clang's Sema builds it.
