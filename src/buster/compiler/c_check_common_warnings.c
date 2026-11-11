@@ -759,7 +759,8 @@ static _Thread_local CheckCommonContexts check_common_contexts;
 // them: an array declarator's bound, in the operand's type name or in a declaration inside the statement expression, is
 // constant-evaluated, where clang keeps its unused-result warnings, and a sizeof of an expression of variable array type in
 // an evaluated context evaluates its operand after all (TRANSFORMED), which warns again.
-static bool check_common_unevaluated(const Parser* parser, Preprocessor* pp, const CheckInput* input, uint32_t token, Arena* scratch)
+// `token`'s parser context (check_warning_graph_void_context's), its memo pushed at the first ask.
+static uint8_t check_common_context(const Parser* parser, Preprocessor* pp, const CheckInput* input, uint32_t token, Arena* scratch)
 {
     CheckCommonContexts* contexts = &check_common_contexts;
     const uint32_t count = parser->tokens.count;
@@ -779,7 +780,36 @@ static bool check_common_unevaluated(const Parser* parser, Preprocessor* pp, con
     }
     const uint8_t context = !contexts->failed && contexts->known != NULL && token < count ?
                             check_warning_graph_void_context(input, parser, contexts->known, contexts->path, token) : CHECK_VOID_CONTEXT_KNOWN;
+    return context;
+}
+
+static bool check_common_unevaluated(const Parser* parser, Preprocessor* pp, const CheckInput* input, uint32_t token, Arena* scratch)
+{
+    const uint8_t context = check_common_context(parser, pp, input, token, scratch);
     const bool result = (context & CHECK_VOID_CONTEXT_UNEVALUATED) != 0 && (context & CHECK_VOID_CONTEXT_TRANSFORMED) == 0;
+    return result;
+}
+
+// Whether `token` lies in an array declarator's bound, clang's ConstantEvaluated context, where DiagRuntimeBehavior
+// drops a runtime warning (#1447): a shift count's, a division's, a sign comparison's, a constant conversion's, an array
+// index's, of a variable array's bound too; its unused-value warnings stay.
+static bool check_common_bound(const Parser* parser, Preprocessor* pp, const CheckInput* input, uint32_t token, Arena* scratch)
+{
+    const uint8_t context = check_common_context(parser, pp, input, token, scratch);
+    const bool result = (context & CHECK_VOID_CONTEXT_BOUND) != 0;
+    return result;
+}
+
+// Whether warning `id` is one clang gives through DiagRuntimeBehavior, which drops it in an array bound
+// (check_common_bound): a constant conversion's, a division's, an array index's, a sign comparison's, a shift's and a
+// null dereference's (#1447).
+static bool check_common_runtime_id(uint32_t id)
+{
+    const bool result = id == CHECK_WARNING_ID_CONSTANT_CONVERSION || id == CHECK_WARNING_ID_BITFIELD_CONSTANT_CONVERSION ||
+                        id == CHECK_WARNING_ID_SINGLE_BIT_BITFIELD_CONSTANT_CONVERSION || id == CHECK_WARNING_ID_DIVISION_BY_ZERO ||
+                        id == CHECK_WARNING_ID_ARRAY_BOUNDS || id == CHECK_WARNING_ID_SIGN_COMPARE || id == CHECK_WARNING_ID_SHIFT_COUNT_NEGATIVE ||
+                        id == CHECK_WARNING_ID_SHIFT_COUNT_OVERFLOW || id == CHECK_WARNING_ID_SHIFT_NEGATIVE_VALUE ||
+                        id == CHECK_WARNING_ID_NULL_DEREFERENCE;
     return result;
 }
 
@@ -792,8 +822,10 @@ static void check_common_report_evaluated(const Parser* parser, Preprocessor* pp
     if (token < parser->tokens.count && !pp->fatal)
     {
         const CheckWarningSeverity severity = check_common_severity(pp, parser, input, token, id, default_ignored);
-        // (The contexts' allocation can fail, which is fatal: then nothing more is published.)
-        if (severity != CHECK_WARNING_IGNORE && !check_common_unevaluated(parser, pp, input, token, scratch) && !pp->fatal)
+        // (The contexts' allocation can fail, which is fatal: then nothing more is published. A runtime warning in an array
+        // bound is dropped, #1447.)
+        if (severity != CHECK_WARNING_IGNORE && !check_common_unevaluated(parser, pp, input, token, scratch) &&
+            !(check_common_runtime_id(id) && check_common_bound(parser, pp, input, token, scratch)) && !pp->fatal)
         {
             const uint32_t publication_source = publication < parser->tokens.count ? parser->tokens.sources[publication] : pp->output.count;
             check_common_publish(parser, pp, token, publication_source, phase, id, severity, message, notes, note_count, scratch);
@@ -1227,6 +1259,9 @@ static void check_common_shift_unreached(const Parser* parser, Preprocessor* pp,
         const uint32_t token = shifts->records[i].token;
         const uint32_t node = input->token_nodes != NULL && token < input->token_count ? input->token_nodes[token] : BUSTER_CHECK_NONE;
         const uint32_t condition = node < graph->count && evaluated[node] == 0 ? check_common_condition_root(parser, input, token) : BUSTER_CHECK_NONE;
+        // (In an unevaluated operand's statement expression, and in an array bound, clang's DiagRuntimeBehavior drops it,
+        // #1447.)
+        const bool silent = check_common_unevaluated(parser, pp, input, token, scratch) || check_common_bound(parser, pp, input, token, scratch);
         bool drop = node < graph->count && evaluated[node] == 0;
         if (drop && !marked)
         {
@@ -1245,6 +1280,7 @@ static void check_common_shift_unreached(const Parser* parser, Preprocessor* pp,
             root = parents[root];
         }
         drop &= unselected != NULL && unselected[node] == 0 && unselected[root] == 0;
+        drop |= silent;
         shifts->records[i].message = drop ? NULL : shifts->records[i].message;
         shifts->records[i].selection = !drop && unselected != NULL && node < graph->count && (unselected[node] != 0 || unselected[root] != 0);
     }
@@ -4591,7 +4627,11 @@ static void check_common_conversion_leaf(const Parser* parser, Preprocessor* pp,
                                             TypeId target, const uint32_t* parents, uint32_t at_once, uint8_t leaves, Arena* scratch)
 {
     __int128 converted = 0;
-    const bool plain = check_common_conversion_target(types, target, false);
+    // An assignment's or an increment's value, which the stream may hold as its stored constant, is none to clang's
+    // evaluator (#1447: `char c = x = 1000;`, `{ x = 300 }`), so its conversion warns of nothing.
+    const CheckOp op = source < input->graph.count ? input->graph.ops[source] : CHECK_OP_COUNT;
+    const bool written = op == CHECK_OP_ASSIGN || (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_BIT_XOR_ASSIGN);
+    const bool plain = !written && check_common_conversion_target(types, target, false);
     const bool width = plain && value->constant_kind == CHECK_CONSTANT_INTEGER && check_common_same_width(types, value, target);
     const uint8_t kind = width ? BUSTER_CHECK_LEAVES_WIDTH : BUSTER_CHECK_LEAVES_INTEGER;
     const bool listed_character = width && (leaves & BUSTER_CHECK_LEAVES_LISTED) != 0 && check_common_character_type(types, target);
