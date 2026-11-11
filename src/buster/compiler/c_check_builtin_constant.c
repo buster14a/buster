@@ -220,7 +220,7 @@ static bool check_constant_call(CheckConstantInput* input, uint32_t keyword, uin
     {
         if (count != 1)
         {
-            check_action_diagnose(&result, CHECK_DIAG_ARGUMENT_COUNT, 0);
+            check_action_diagnose_count(&result, count, 1, 1);
         }
         else
         {
