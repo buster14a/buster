@@ -517,12 +517,6 @@ static void check_test_program_vector_refusals(CheckTest* test, const X86Target*
             2,
         },
         {
-            "vector-divide-integers",
-            "typedef int v4si __attribute__((vector_size(16)));int tested(int n){v4si a={n},b={2};a=a/b;return a[0];}",
-            "vector division of integers",
-            2,
-        },
-        {
             "vector-shift-bytes",
             "typedef unsigned char v16qu __attribute__((vector_size(16)));int tested(int n){v16qu a={(unsigned char)n},b={1};a=a<<b;return a[0];}",
             "vector shifts of 8-bit elements",
@@ -553,12 +547,6 @@ static void check_test_program_vector_refusals(CheckTest* test, const X86Target*
             "typedef _Bool V __attribute__((ext_vector_type(8)));void tested(V*p){*p=__builtin_elementwise_ctzg(*p);}",
             "elementwise leading/trailing zero counts of boolean vectors, which clang 23 miscompiles",
             0,
-        },
-        {
-            "vector-divide-integers-past-64-bytes",
-            "typedef int w32 __attribute__((vector_size(128)));int tested(int n){w32 a={n},b={2};a=a/b;return a[0];}",
-            "vector division of integers",
-            2,
         },
         {
             "vector-bf16-arithmetic-past-64-bytes",
@@ -1218,6 +1206,19 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
           "FOLD(c7);FOLD(c8);FOLD(d7);FOLD(e7);FOLD(d8);FOLD(e8);\n"
           "return (int)h;}\n"
         },
+        // Integer vectors' division and remainder, element by element at every target (#2216): of each element size and
+        // signedness, of 8 to 128 bytes and an odd length, by a splat and in place; no divisor is 0, nor INT_MIN's -1.
+        { "baseline-integer-division",
+          "typedef signed char sb8 __attribute__((vector_size(8)));typedef unsigned short uw __attribute__((vector_size(16)));"
+          "typedef unsigned ud8 __attribute__((vector_size(32),aligned(16)));typedef long long sq8 __attribute__((vector_size(64),aligned(16)));"
+          "typedef int sd32 __attribute__((vector_size(128),aligned(16)));typedef short e3 __attribute__((ext_vector_type(3)));\n"
+          "#define D(T,k) T a##k,b##k;fill(&a##k,sizeof(T),n+k);fill(&b##k,sizeof(T),n+k+50);"
+          "for(unsigned i_=0;i_<sizeof(T)/sizeof(a##k[0]);i_++){if(b##k[i_]==0||b##k[i_]==(__typeof__(b##k[0]))-1)b##k[i_]=3;"
+          "if(a##k[i_]==(__typeof__(a##k[0]))(1ull<<(8*sizeof(a##k[0])-1)))a##k[i_]=1;}"
+          "{T q_[]={a##k/b##k,a##k%b##k,a##k/(__typeof__(a##k[0]))7,a##k%(__typeof__(a##k[0]))5};a##k/=b##k;FOLD(q_);FOLD(a##k);}\n"
+          "int tested(int n){unsigned h=2166136261u;D(sb8,1)D(v16qu,2)D(uw,3)D(v4si,4)D(ud8,5)D(v2di,6)D(sq8,7)D(sd32,8)\n"
+          "e3 c={(short)n,-7,300},d={3,(short)(n|1),-9};e3 r[]={c/d,c%d};short o[]={r[0][0],r[0][1],r[0][2],r[1][0],r[1][1],r[1][2]};FOLD(o);return (int)h;}\n"
+        },
         // AVX's and AVX2's (x86-64-v3's): 256-bit unpacks, broadcasts, permutes, variable shifts, lanes' extractions and
         // insertions, extensions, gathers, FMA's (of no NaN) and F16C's conversions, and shuffles of dwords and qwords.
         { "baseline-avx2",
@@ -1288,11 +1289,6 @@ static void check_test_program_vector_baselines(CheckTest* test, const char* cla
         }
         if (parsed)
         {
-            // A wide operator's pieces are refused by their own reason (#1193).
-            check_test_program_boundary_target(test, "typedef int V __attribute__((vector_size(64)));V tested(V a,V b){return a/b;}",
-                                               "baseline-wide-integer-vector-division", true, false, 0, 0, "vector division of integers", &target);
-            check_test_program_boundary_target(test, "typedef int V __attribute__((vector_size(16)));V tested(V a,V b){return a/b;}",
-                                               "baseline-integer-vector-division", true, false, 0, 0, "vector division of integers", &target);
             // Without AVX-512, what the baseline's rows refuse by name (#775), at each level that hasn't the instructions.
             static const struct
             {
