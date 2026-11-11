@@ -6,6 +6,25 @@
 // its initializer. Structural preparation emits no future binding events; the source pass executes each bound
 // job at its actual opener. The token scan skips expression groups and uses no recursive descent.
 
+// A GNU designator's -Wgnu-designator warning (#2202), as clang's parser gives it, at `token`: `form` one of the
+// BUSTER_CHECK_GNU_DESIGNATOR_* forms. An array range is -pedantic's, ignored by default. Once whichever read reaches it.
+static __attribute__((noinline, cold)) void check_input_gnu_designator(CheckInputReader* reader, uint32_t token, uint32_t form)
+{
+    const bool range = form == BUSTER_CHECK_GNU_DESIGNATOR_RANGE;
+    const CheckWarningEvent event =
+    {
+        .id = range ? CHECK_WARNING_ID_GNU_ARRAY_RANGE : CHECK_WARNING_ID_GNU_DESIGNATOR,
+        .kind = CHECK_WARNING_EVENT_GNU_DESIGNATOR,
+        .token = token,
+        .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+        .flags = range ? BUSTER_CHECK_WARNING_DEFAULT_IGNORED : 0,
+        .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+        .completion = token + 1,
+        .payload = { .token = BUSTER_CHECK_WARNING_NO_SOURCE, .data = form },
+    };
+    check_input_warning_once(reader, &event);
+}
+
 static bool check_input_initializer_prepare_slow(CheckInputReader* reader, uint32_t assignment)
 {
     const Parser* parser = reader->parser;
@@ -29,6 +48,7 @@ static bool check_input_initializer_prepare_slow(CheckInputReader* reader, uint3
         }
         else if (item && check_init_old_style_designator(parser, token, end))
         {
+            check_input_gnu_designator(reader, token, BUSTER_CHECK_GNU_DESIGNATOR_OLD_STYLE);
             reader->ignored[token] = true;
             reader->initializers[token + 1] = 2;
             item = false;
@@ -71,6 +91,19 @@ static bool check_input_initializer_prepare_slow(CheckInputReader* reader, uint3
                 check_input_rare_claim(reader, &reader->designator_ranges[token]);
                 reader->designator_ranges[token] = range;
                 memset(reader->ignored + token, 1, close - token + 1);
+                // A designation's only designator, an array's, without its `=` (clang's ext_gnu_missing_equal_designator), and
+                // an array range: GNU's (#2202).
+                const uint8_t before = token > begin ? parser->tokens.kinds[token - 1] : PARSE_KIND_L_BRACE;
+                const uint8_t after = close + 1 < end ? parser->tokens.kinds[close + 1] : PARSE_KIND_EQUAL;
+                if (range != close)
+                {
+                    check_input_gnu_designator(reader, range, BUSTER_CHECK_GNU_DESIGNATOR_RANGE);
+                }
+                if ((before == PARSE_KIND_L_BRACE || before == PARSE_KIND_COMMA) && after != PARSE_KIND_EQUAL && after != PARSE_KIND_L_SQUARE &&
+                    after != PARSE_KIND_PERIOD)
+                {
+                    check_input_gnu_designator(reader, close + 1, BUSTER_CHECK_GNU_DESIGNATOR_MISSING_EQUAL);
+                }
                 token = close + 1;
             }
         }

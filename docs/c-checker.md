@@ -8337,6 +8337,19 @@ arguments against the function. The checker now gives these as clang does.
   an undeclared name, which the walk builds no node of, gets it too, after the
   name's error, as clang reads it as an expression; a type name's doesn't
   (`check_input_alignof_undeclared`, #1946).
+- **`-Wgnu-designator`** (#2202, `check_input_gnu_designator`). GNU's designators
+  get the warnings clang's parser gives as it reads them, where the reader
+  prepares the initializer: an array designation of one designator without
+  its `=` (`[0] 2`), "use of GNU 'missing =' extension in designator" at the
+  value, and an old-style field designator (`b: 1`), "use of GNU old-style
+  field designator extension" at its name, both on by default
+  (`CHECK_WARNING_ID_GNU_DESIGNATOR`, an extension `-pedantic-errors`
+  promotes); and an array range (`[1 ... 2]`), "use of GNU array range
+  extension" at its `...`, `-pedantic`'s (`CHECK_WARNING_ID_GNU_ARRAY_RANGE`,
+  ignored by default). All three are `-Wgnu-designator`'s, under `-Wgnu`.
+  Differences left: in a unit rejected by a parse error that holds a record
+  definition, these warnings are dropped, as the reader's other warnings are
+  there.
 - **Attributes after a definition.** A function's or variable's declaration
   after the entity's definition may carry a declaration attribute that the
   definition lacks: the definition's own and those it took from earlier
