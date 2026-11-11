@@ -293,6 +293,11 @@ typedef enum Tier1SelectRule
 // xmm count, or, where the count is a constant (`condition` 1), the form by an immediate, the count in `immediate`
 // (tier1_select_vector_shift).
 #define BUSTER_TIER1_VECTOR_SHIFT 13
+// A mask to a vector (#1840): the select of all ones where the mask values[0] is set and zeros elsewhere, at the lanes
+// in `source_width` (vpmovm2b to vpmovm2q), and a vector's sign bits as a mask: the comparison of values[0]'s signed
+// lanes less than zero (vpmovb2m to vpmovq2m) (tier1_select_mask_vector).
+#define BUSTER_TIER1_VECTOR_MASK_EXPAND 14
+#define BUSTER_TIER1_VECTOR_SIGN_MASK 15
 
 // TIER1_RULE_X87's kinds, its pattern's `scale` (#141):
 // - CONSTANT, its constant's index in `immediate`, and UNDEF, which stores nothing;
@@ -1291,6 +1296,54 @@ static void tier1_select_vector_shift(Tier1SelectRecords* result, const Tier1Sel
     }
 }
 
+// A mask to a vector or a vector's sign bits to a mask (#1840, BUSTER_TIER1_VECTOR_MASK_EXPAND and _SIGN_MASK), at the
+// lanes in `source_width` (#141's element types: a float's are a doubleword's bits, a double's a quadword's): vpmovm2b to
+// vpmovm2q of the mask's opmask register into the destination, and vpmovb2m to vpmovq2m of the vector into the
+// destination's opmask register. Their doublewords' and quadwords' forms are AVX512DQ's, which every vector comparison of
+// the front end needs already; at a target without it the emission's form check refuses the function to Tier 0.
+static void tier1_select_mask_vector(Tier1SelectRecords* result, const Tier1SelectHoles* holes)
+{
+    static const uint16_t expansions[4][3] = {
+        { X86_FORM_VPMOVM2B_X_K, X86_FORM_VPMOVM2B_Y_K, X86_FORM_VPMOVM2B_Z_K },
+        { X86_FORM_VPMOVM2W_X_K, X86_FORM_VPMOVM2W_Y_K, X86_FORM_VPMOVM2W_Z_K },
+        { X86_FORM_VPMOVM2D_X_K, X86_FORM_VPMOVM2D_Y_K, X86_FORM_VPMOVM2D_Z_K },
+        { X86_FORM_VPMOVM2Q_X_K, X86_FORM_VPMOVM2Q_Y_K, X86_FORM_VPMOVM2Q_Z_K },
+    };
+    static const uint16_t signs[4][3] = {
+        { X86_FORM_VPMOVB2M_K_X, X86_FORM_VPMOVB2M_K_Y, X86_FORM_VPMOVB2M_K_Z },
+        { X86_FORM_VPMOVW2M_K_X, X86_FORM_VPMOVW2M_K_Y, X86_FORM_VPMOVW2M_K_Z },
+        { X86_FORM_VPMOVD2M_K_X, X86_FORM_VPMOVD2M_K_Y, X86_FORM_VPMOVD2M_K_Z },
+        { X86_FORM_VPMOVQ2M_K_X, X86_FORM_VPMOVQ2M_K_Y, X86_FORM_VPMOVQ2M_K_Z },
+    };
+    // IrSimdLane's order: I32, I8, I16, I64, F32, F64.
+    static const uint8_t sizes[IR_SIMD_LANE_COUNT] = { 2, 0, 1, 3, 2, 3 };
+    const uint32_t size = holes->source_width < IR_SIMD_LANE_COUNT ? sizes[holes->source_width] : 2;
+    const uint32_t width = holes->width == 16 ? 0 : holes->width == 32 ? 1 : 2;
+    const bool expand = holes->scale == BUSTER_TIER1_VECTOR_MASK_EXPAND;
+    const X86Instruction record = expand ? tier1_select_register_record(expansions[size][width], holes->destination & 15, holes->left & 7) :
+                                           tier1_select_register_record(signs[size][width], holes->destination & 7, holes->left & 15);
+    tier1_select_append(result, record);
+}
+
+// Whether `value` is a vector constant of every byte zero (0) or every bit set (1) over `bytes`; 2 for any other value.
+static uint32_t tier1_select_vector_fill(const IrFunction* function, uint32_t value, uint32_t bytes)
+{
+    uint32_t fill = 2;
+    if (value < function->instruction_count && function->op[value] == IR_VCONST && function->a[value] < function->vector_constant_count)
+    {
+        const IrSimdValue* payload = &function->vector_constants[function->a[value]];
+        bool zero = true;
+        bool ones = true;
+        for (uint32_t word = 0; word < bytes / 8; word += 1)
+        {
+            zero &= payload->words[word] == 0;
+            ones &= payload->words[word] == UINT64_MAX;
+        }
+        fill = zero ? 0 : ones ? 1 : 2;
+    }
+    return fill;
+}
+
 static void tier1_select_permute(Tier1SelectRecords* result, const Tier1SelectHoles* holes)
 {
     const uint32_t kind = (uint32_t)holes->operation;
@@ -1927,6 +1980,10 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         else if (kind == BUSTER_TIER1_VECTOR_SHIFT)
         {
             tier1_select_vector_shift(&result, holes);
+        }
+        else if (kind == BUSTER_TIER1_VECTOR_MASK_EXPAND || kind == BUSTER_TIER1_VECTOR_SIGN_MASK)
+        {
+            tier1_select_mask_vector(&result, holes);
         }
         else if (kind == BUSTER_TIER1_VECTOR_CONVERT)
         {
@@ -4459,6 +4516,19 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         }
         else if (compare_width != 0 && mask_width != 0 && c < IR_PREDICATE_COUNT)
         {
+            // A comparison of signed integer lanes less than a zero vector (#1840: a vector's sign bits as a mask,
+            // vpmovb2m to vpmovq2m), first, as the bottom-up path takes its kind's first candidate.
+            if (c == IR_LT && function->flags[node] < IR_SIMD_LANE_F32 && tier1_select_vector_fill(function, b, compare_width) == 0)
+            {
+                Tier1SelectPattern sign = base;
+                sign.rule = TIER1_RULE_VECTOR;
+                sign.width = (uint8_t)compare_width;
+                sign.scale = BUSTER_TIER1_VECTOR_SIGN_MASK;
+                sign.source_width = function->flags[node];
+                sign.values[0] = a;
+                sign.intrinsic_cost = 1;
+                tier1_select_add_candidate(forest, node, &candidates, sign);
+            }
             base.rule = TIER1_RULE_VECTOR;
             base.width = (uint8_t)compare_width;
             base.scale = BUSTER_TIER1_VECTOR_COMPARE;
@@ -4471,6 +4541,19 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         }
         else if (vector_width != 0 && op == IR_VSELECT)
         {
+            // A select of all ones and zeros (#1840: a mask to a vector, vpmovm2b to vpmovm2q, and a C comparison's
+            // expansion), first, as the bottom-up path takes its kind's first candidate.
+            if (tier1_select_vector_fill(function, b, vector_width) == 1 && tier1_select_vector_fill(function, c, vector_width) == 0)
+            {
+                Tier1SelectPattern expand = base;
+                expand.rule = TIER1_RULE_VECTOR;
+                expand.width = (uint8_t)vector_width;
+                expand.scale = BUSTER_TIER1_VECTOR_MASK_EXPAND;
+                expand.source_width = function->flags[node];
+                expand.values[0] = a;
+                expand.intrinsic_cost = 1;
+                tier1_select_add_candidate(forest, node, &candidates, expand);
+            }
             base.rule = TIER1_RULE_VECTOR;
             base.width = (uint8_t)vector_width;
             base.scale = BUSTER_TIER1_VECTOR_SELECT;
