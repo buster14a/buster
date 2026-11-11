@@ -884,6 +884,8 @@ struct CheckInput
     // Beside each, the function its name may have meant's declaration token (#1447, c_check_typo.c): a "did you mean"
     // note and a "declared here" one; or BUSTER_CHECK_NONE, or BUSTER_CHECK_TYPO_UNSEARCHED where no search was made.
     uint32_t* implicit_function_corrections;
+    // Beside each, whether it declares an unknown builtin, a `__builtin_` name: clang's "use of unknown builtin" (#2121).
+    bool* implicit_function_builtins;
     uint32_t implicit_function_count;
     // The uses a typo's correction recovered (#1447, c_check_typo.c), in source order, at most its search limit: a warning
     // at an operator or a declarator whose operand holds one is published after its error (check_driver_after_corrections).
@@ -891,6 +893,7 @@ struct CheckInput
     uint32_t corrected_count;
     uint8_t implicit_function_diagnostic;
     uint8_t implicit_library_diagnostic;
+    uint8_t implicit_builtin_diagnostic;
     bool implicit_function_c99;
     // -fcommon (PredefinesOptions.common, #147): the emission makes every tentative definition a common symbol.
     bool common_tentatives;
@@ -6365,7 +6368,8 @@ static uint32_t check_input_checked_indices(CheckInputReader* reader, const Chec
 {
     const String8 name = check_input_attribute_name(reader, attribute->name);
     return check_input_attribute_equal(name, "callback") ? 1u : check_input_attribute_equal(name, "swift_async") && attribute->argument_count == 2 ? 2u :
-           check_input_attribute_equal(name, "diagnose_as_builtin") || check_input_type_tag_rule(name) ? 3u : 0u;
+           check_input_attribute_equal(name, "diagnose_as_builtin") || check_input_type_tag_rule(name) ||
+           (check_input_attribute_equal(name, "swift_async_error") && attribute->argument_count == 2) ? 3u : 0u;
 }
 
 // A type argument's type (#147, CheckInputAttribute.argument_type): a C23 attribute's lone typedef name, which its tokens
@@ -9139,10 +9143,15 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
                             // A C23 redefinition compares its members' attributes (c_check_tag_compatible.c).
                             valid = check_tag_member_attributes_note(reader, name, attributes);
                         }
-                        // clang's counted_by family (#148), on this member, among the record's members declared before it.
+                        // clang's counted_by family (#148), on this member, among the record's members declared before it. An
+                        // error drops the attribute, as clang's handler does, and the member is declared without it (#1842).
                         const uint32_t counted_begin = check_input_attribute_begin(parser, frame->member_begin, frame->close);
-                        valid = attributes == 0 || !attributes->counted ||
-                                check_input_counted_by_member(reader, frames, depth, members, member_count, attributes, counted_begin, &member);
+                        if (attributes != 0 && attributes->counted)
+                        {
+                            const uint32_t counted_reports = reader->output->report_count;
+                            const bool counted = check_input_counted_by_member(reader, frames, depth, members, member_count, attributes, counted_begin, &member);
+                            valid = counted || (reader->output->report_count > counted_reports && check_input_recover_reports(reader, counted_reports));
+                        }
                         bool flexible = false;
                         // clang's CheckFieldDecl (#1447): a member whose type, or its array's element, has an address space.
                         if (valid && type_address_space(type_object_qualifiers(reader->types, type)) != 0)
@@ -15075,6 +15084,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                                                         pp->options.language.standard >= 1999 ? 3 : 1,
                          .implicit_library_diagnostic = pp->options.implicit_library_diagnostic != 0 ? pp->options.implicit_library_diagnostic :
                                                         pp->options.language.standard >= 1999 ? 3 : 2,
+                         .implicit_builtin_diagnostic = pp->options.implicit_builtin_diagnostic != 0 ? pp->options.implicit_builtin_diagnostic : 3,
                          .implicit_function_c99 = pp->options.language.standard >= 1999,
                          .common_tentatives = pp->options.predefines.common,
                          .implicit_function_system = pp->options.implicit_function_system,
