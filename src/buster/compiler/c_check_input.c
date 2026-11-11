@@ -12641,9 +12641,55 @@ static bool check_input_char_subobject(const TypeTable* types, TypeId type, uint
     return found;
 }
 
-static uint32_t check_input_verbose_trap_object(CheckInputReader* reader, const CheckValue* argument, uint32_t position)
+// Whether clang's evaluator keeps a designator through an argument's casts (#1843, ExprConstant's CK_BitCast): kept where
+// every pointer the argument's value passes through, the converted operand's type and each cast's, points to plain char
+// (or is an array of it) as the designated chars are, and lost where one points to another type (`void`, `unsigned char`,
+// a record, an array). Unknown where an operand isn't evaluated.
+typedef enum CheckInputVerboseTrapDesignator
+{
+    CHECK_INPUT_VERBOSE_TRAP_DESIGNATED,
+    CHECK_INPUT_VERBOSE_TRAP_UNDESIGNATED,
+    CHECK_INPUT_VERBOSE_TRAP_UNKNOWN,
+} CheckInputVerboseTrapDesignator;
+
+// Whether `type` points to plain char or is an array of it, qualified or not.
+static bool check_input_verbose_trap_chars(const TypeTable* types, TypeId type)
+{
+    const TypeId plain = type != 0 ? type_strip_aligned(types, type) : 0;
+    const uint8_t kind = plain != 0 ? type_kind(types, plain) : 0;
+    const bool indirect = plain != 0 && (kind == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(kind));
+    return indirect && type_unqualified(type_strip_aligned(types, type_element(types, plain))) == BUSTER_TYPE_CHAR;
+}
+
+// The designator verdict of the argument [first, end): the argument's own type, which converts to const char*, and each
+// cast to a pointer in it with its operand, the tokens up to its expression's end (CheckInputReader.ends). A cast to an
+// integer converts no designator.
+static CheckInputVerboseTrapDesignator check_input_verbose_trap_designator(CheckInputReader* reader, uint32_t first, uint32_t end)
+{
+    const Parser* parser = reader->parser;
+    const TypeTable* types = reader->types;
+    CheckValue whole = { 0 };
+    bool evaluated = check_input_evaluate_cached(reader, first, end, &whole);
+    bool chars = evaluated && check_input_verbose_trap_chars(types, whole.type);
+    for (uint32_t t = first; t < end; t += 1)
+    {
+        const uint32_t close = parser->tree.parents[t];
+        const bool cast = parser->tree.roles[t] == PARSE_ROLE_OPEN_CAST && close > t && close < end && reader->ends[close] < end;
+        const TypeId target = cast ? reader->query_types[close] : 0;
+        const bool pointer = target != 0 && type_kind(types, type_strip_aligned(types, target)) == BUSTER_TYPE_KIND_POINTER;
+        CheckValue operand = { 0 };
+        const bool typed = pointer && check_input_evaluate_cached(reader, close + 1, reader->ends[close] + 1, &operand);
+        evaluated &= !cast || target != 0;
+        evaluated &= !pointer || typed;
+        chars &= !pointer || (check_input_verbose_trap_chars(types, target) && typed && check_input_verbose_trap_chars(types, operand.type));
+    }
+    return !evaluated ? CHECK_INPUT_VERBOSE_TRAP_UNKNOWN : chars ? CHECK_INPUT_VERBOSE_TRAP_DESIGNATED : CHECK_INPUT_VERBOSE_TRAP_UNDESIGNATED;
+}
+
+static uint32_t check_input_verbose_trap_object(CheckInputReader* reader, const CheckValue* argument, CheckInputVerboseTrapDesignator designator, uint32_t position)
 {
     const TypeTable* types = reader->types;
+    const Parser* parser = reader->parser;
     const CheckConstValues* owner = NULL;
     const CheckConstObject* receipt = check_const_find(&reader->output->const_values, argument->object, position, &owner);
     // A const pointer object's value (#1917's review): the address constant its initializer kept, once.
@@ -12657,10 +12703,24 @@ static uint32_t check_input_verbose_trap_object(CheckInputReader* reader, const 
     uint64_t begin = 0;
     uint64_t end = 0;
     const bool placed = receipt != NULL && address->fault == CHECK_FAULT_NONE && address->offset >= 0;
-    const bool chars = placed && check_input_char_subobject(types, receipt->type, (uint64_t)address->offset, &begin, &end) && end <= receipt->byte_size;
+    // A narrow string literal's bytes clang reads at the offset whatever the casts on the way (tryEvaluateString's fast
+    // path), up to the first NUL: at its terminator, the empty string, past it no string. Another object's chars it reads
+    // through the designator, which casts can lose.
+    const uint32_t token = address->object - 1;
+    const bool literal = placed && token < parser->tokens.count && parser->tokens.kinds[token] == PARSE_KIND_STRING &&
+                         type_kind_is_array(type_kind(types, type_strip_aligned(types, receipt->type))) &&
+                         type_size(types, type_element(types, type_strip_aligned(types, receipt->type))) == 1;
+    const bool designated = literal || designator == CHECK_INPUT_VERBOSE_TRAP_DESIGNATED;
+    if (literal)
+    {
+        end = receipt->byte_size;
+    }
+    const bool chars = placed && designated && (literal || check_input_char_subobject(types, receipt->type, (uint64_t)address->offset, &begin, &end)) &&
+                       end <= receipt->byte_size;
     const bool inside = chars && (uint64_t)address->offset >= begin && (uint64_t)address->offset < end;
-    uint32_t result = !placed || !chars ? (placed && (uint64_t)address->offset >= receipt->byte_size ? CHECK_INPUT_VERBOSE_TRAP_STRING : CHECK_INPUT_UNSUPPORTED) :
-                                          CHECK_INPUT_VERBOSE_TRAP_STRING;
+    uint32_t result = !designated ? (designator == CHECK_INPUT_VERBOSE_TRAP_UNKNOWN ? CHECK_INPUT_UNSUPPORTED : CHECK_INPUT_VERBOSE_TRAP_STRING) :
+                      !placed || !chars ? (placed && (uint64_t)address->offset >= receipt->byte_size ? CHECK_INPUT_VERBOSE_TRAP_STRING : CHECK_INPUT_UNSUPPORTED) :
+                      CHECK_INPUT_VERBOSE_TRAP_STRING;
     bool known = inside;
     bool ended = false;
     bool dollar = false;
@@ -12719,9 +12779,24 @@ static void check_input_verbose_trap_arguments(CheckInputReader* reader, const C
         CheckValue value = { 0 };
         if (string != NULL)
         {
-            // A wide literal's conversion to const char* is the call's own error.
+            // A narrow literal clang reads whole whatever the casts on it. __func__'s name it reads through the designator,
+            // which casts can lose, and so a wide literal's, which a cast's pointer to char loses (unless no cast converts it,
+            // when the conversion to const char* is the call's own error).
             const TypeId element = type_element(reader->types, string->type);
-            if (type_size(reader->types, element) == 1 && memchr(string->bytes, '$', string->byte_count) != NULL)
+            const bool narrow = type_size(reader->types, element) == 1;
+            bool cast = false;
+            for (uint32_t t = span.first; t < first; t += 1)
+            {
+                cast |= parser->tree.roles[t] == PARSE_ROLE_OPEN_CAST;
+            }
+            const CheckInputVerboseTrapDesignator designator = narrow && !string->predefined ? CHECK_INPUT_VERBOSE_TRAP_DESIGNATED :
+                                                               cast ? check_input_verbose_trap_designator(reader, span.first, span.end) :
+                                                               CHECK_INPUT_VERBOSE_TRAP_DESIGNATED;
+            if (designator != CHECK_INPUT_VERBOSE_TRAP_DESIGNATED)
+            {
+                check_input_report(reader, span.first, designator == CHECK_INPUT_VERBOSE_TRAP_UNKNOWN ? CHECK_INPUT_UNSUPPORTED : CHECK_INPUT_VERBOSE_TRAP_STRING);
+            }
+            else if (narrow && memchr(string->bytes, '$', string->byte_count) != NULL)
             {
                 check_input_report(reader, span.first, CHECK_INPUT_VERBOSE_TRAP_DOLLAR);
             }
@@ -12734,14 +12809,9 @@ static void check_input_verbose_trap_arguments(CheckInputReader* reader, const C
         }
         else
         {
-            // A cast on the way clang's evaluator may not read through (`(const char*)(const void*)m` it calls no constant
-            // string, #1917's review): refused by name, as the bytes of an object the reader didn't keep are.
-            bool cast = false;
-            for (uint32_t t = span.first; t < span.end; t += 1)
-            {
-                cast |= parser->tree.roles[t] == PARSE_ROLE_OPEN_CAST;
-            }
-            const uint32_t verdict = cast ? CHECK_INPUT_UNSUPPORTED : check_input_verbose_trap_object(reader, &value, call->closing + 1);
+            // The casts on the way decide whether clang's evaluator reads an object's chars (`(const char*)(const void*)m` it
+            // calls no constant string, #1917's review); a literal's it reads whatever they are.
+            const uint32_t verdict = check_input_verbose_trap_object(reader, &value, check_input_verbose_trap_designator(reader, span.first, span.end), call->closing + 1);
             if (verdict != BUSTER_CHECK_VERBOSE_TRAP_STRING_VALID)
             {
                 check_input_report(reader, span.first, (CheckInputMessage)verdict);

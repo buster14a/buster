@@ -2599,9 +2599,27 @@ unit's constant objects (`check_input_verbose_trap_object`, #1843) up to the
 first NUL, of an array of plain char, with clang's errors where the string has a
 `$` or the read leaves the array (past its end, or no NUL in it). The address
 of a const record's member array reads its string to the member's end, and a
-const pointer object's value its pointee's. An object whose bytes the reader
-doesn't keep, and such an argument under a cast (which through `void *` clang
-calls no constant string), are still refused by name.
+const pointer object's value its pointee's.
+
+Casts on the way are clang's evaluator's (`check_input_verbose_trap_designator`,
+#1843). A narrow literal's bytes it reads at the address whatever the casts
+(`tryEvaluateString`'s fast path: `(const char *)(const void *)"m" + 1`,
+`(const char *)(const unsigned char *)p` of a pointer to a literal), up to its
+terminator: one past that is no string. Any other object's chars, `__func__`'s
+and a wide literal's among them, it reads through the lvalue's designator, which
+a conversion between pointers to different types loses (ExprConstant's
+`CK_BitCast`). So the argument's own type, each cast to a pointer and each such
+cast's operand must point to plain char (or be an array of it), qualifiers
+aside: `(const char *)(char *)m` reads `m`, but `(const char *)(const void *)m`,
+`(const char *)u` of an `unsigned char` array, `(const char *)&s` of a record
+and `(const char *)&m` of the array itself are clang's "must be a pointer to a
+constant string". An object whose bytes the reader doesn't keep is still refused
+by name.
+
+Differences left: a const pointer object whose own initializer converted its
+value through such a cast is read here, where clang's stored designator is lost;
+and two warnings at such arguments, `-Wstring-plus-int` (not given here) and
+`-Wpointer-sign`'s wording for a builtin's argument, differ from clang's.
 
 Two costs are accepted for now:
 - A call of `memcpy_inline` or `memset_inline` is a call of its leaf, where
