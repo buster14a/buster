@@ -5495,7 +5495,7 @@ static bool check_input_assertion_escaped(CheckInputReader* reader, uint32_t fir
     result = result && open > 0 && kinds[open] == PARSE_KIND_L_PAREN && kinds[open - 1] == PARSE_KIND_STATIC_ASSERT &&
              check_constant_punctuation(parser, open + 1, end, PARSE_KIND_COMMA) == first - 1;
     uint32_t message_end = end;
-    return result && check_input_unevaluated_refused(reader, first, &message_end) != BUSTER_CHECK_NONE;
+    return result && check_input_unevaluated_refused(reader, first, &message_end, open - 1) != BUSTER_CHECK_NONE;
 }
 
 // The unknown escape sequences of the evaluated literal at `token` (#1447), whose spelling is `bytes`: each one's
@@ -13296,7 +13296,7 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
         // context's subtree that reports no constraint of its own (BUSTER_CHECK_CONTEXT_VALUE), whose runtime behavior's
         // warnings check_input_constant_context suppressed.
         const uint32_t separator = supported && !builtin ? check_constant_punctuation(parser, keyword + 2, token, PARSE_KIND_COMMA) : token;
-        const bool dropped = separator < token && check_input_unevaluated_strings(reader, separator + 1, token);
+        const bool dropped = separator < token && check_input_unevaluated_strings(reader, separator + 1, token, keyword);
         if (supported && !builtin && dropped)
         {
             graph->contexts[a] |= BUSTER_CHECK_CONTEXT_VALUE;
@@ -13973,7 +13973,7 @@ static void check_input_constant_context(CheckInputReader* reader, uint32_t toke
                 // runtime behavior's warnings then, which clang's constant context gives none of either. Before the walk
                 // makes the condition's nodes, which take their tokens' suppressions.
                 uint32_t message_end = close;
-                if (check_input_unevaluated_refused(reader, separator + 1, &message_end) != BUSTER_CHECK_NONE)
+                if (check_input_unevaluated_refused(reader, separator + 1, &message_end, token) != BUSTER_CHECK_NONE)
                 {
                     check_input_warning_suppress(reader, token + 2, separator, check_constant_unevaluated_warnings());
                 }

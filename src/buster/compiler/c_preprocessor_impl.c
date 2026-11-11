@@ -2223,6 +2223,26 @@ static void pp_diagnose_ucn_basic(Preprocessor* pp, uint32_t location, uint32_t 
     }
 }
 
+// How -pedantic's warnings of the preprocessor are given (#1447): as warnings under -pedantic, -Wpedantic,
+// -Wdelimited-escape-sequence-extension or -Weverything, errors under -pedantic-errors, the last of those and their -Wno-
+// forms deciding; PP_SEVERITY_NOTE for none. The command line's alone: the source's pragmas don't reach the lexer's raw
+// diagnostics.
+static PPSeverity pp_pedantic_severity(const Preprocessor* pp)
+{
+    PPSeverity result = PP_SEVERITY_NOTE;
+    bool errors = false;
+    for (uint32_t i = 0; i < pp->options.semantic_warning_option_count; i += 1)
+    {
+        const char* option = pp->options.semantic_warning_options[i];
+        const bool on = strcmp(option, "-pedantic") == 0 || strcmp(option, "-Wpedantic") == 0 || strcmp(option, "-Wdelimited-escape-sequence-extension") == 0 ||
+                        strcmp(option, "-Weverything") == 0;
+        const bool off = strcmp(option, "-Wno-pedantic") == 0 || strcmp(option, "-Wno-delimited-escape-sequence-extension") == 0 || strcmp(option, "-Wno-everything") == 0;
+        errors |= strcmp(option, "-pedantic-errors") == 0;
+        result = on || strcmp(option, "-pedantic-errors") == 0 ? PP_SEVERITY_WARNING : off ? PP_SEVERITY_NOTE : result;
+    }
+    return result == PP_SEVERITY_WARNING && errors ? PP_SEVERITY_ERROR : result;
+}
+
 // The diagnostics of a named UCN that starts a token (BUSTER_PP_NAMED_UCN_ERROR), whose backslash is byte `offset` of
 // `data`, at `base`: as clang's tryReadNamedUCN, a name that isn't exactly Unicode's is an error at the name, with a note
 // where it is one loosely, whose character clang reads it as; then as tryReadUCN, that character (or the exact name's)
@@ -2238,8 +2258,14 @@ static __attribute__((noinline, cold)) void pp_diagnose_named_ucn(Preprocessor* 
     {
         const uint32_t shown = length < sizeof(name) ? (uint32_t)length : (uint32_t)sizeof(name);
         uint32_t code_point = 0;
-        const bool exact = unicode_name_strict(name, shown, &code_point);
+        const bool exact = length < sizeof(name) && unicode_name_strict(name, shown, &code_point);
         bool found = exact;
+        const PPSeverity extension = exact ? pp_pedantic_severity(pp) : PP_SEVERITY_NOTE;
+        if (extension != PP_SEVERITY_NOTE)
+        {
+            // -pedantic's (#1447), at the backslash, before its character's error.
+            pp_diagnose(pp, extension, base + offset, "named escape sequences are a Clang extension");
+        }
         if (!exact)
         {
             UnicodeNameDiagnosis diagnosis;
@@ -2329,7 +2355,17 @@ static __attribute__((noinline, cold)) void pp_read_raw_errors_slow(Preprocessor
                     break;
                 }
                 case BUSTER_PP_NAMED_UCN_ERROR:
+                case BUSTER_PP_NAMED_UCN_EXTENSION:
                     pp_diagnose_named_ucn(pp, data, pp->ranges[context->range].base, error.offset);
+                    break;
+                case BUSTER_PP_NAMED_UCN_INCOMPLETE:
+                    pp_diagnose(pp, PP_SEVERITY_WARNING, location, "incomplete universal character name; treating as '\\' followed by identifier");
+                    break;
+                case BUSTER_PP_NAMED_UCN_EMPTY:
+                    pp_diagnose(pp, PP_SEVERITY_WARNING, location, "empty delimited universal character name; treating as '\\' 'N' '{' '}'");
+                    break;
+                case BUSTER_PP_NAMED_UCN_UNTERMINATED:
+                    pp_diagnose(pp, PP_SEVERITY_WARNING, location, "incomplete delimited universal character name; treating as '\\' 'N' '{' identifier");
                     break;
                 case C_RAW_STRING_OK:
                     break;
@@ -9447,13 +9483,13 @@ static uint32_t pp_decode_file_name(Preprocessor* pp, const uint8_t* spelling, u
     bool valid = length >= 2 && spelling[0] == '"' && spelling[length - 1] == '"';
     bool reported = false;
     bool counted_error = false;
-    const uint32_t escapes = valid ? check_literal_unevaluated_escapes(spelling, length, pp->options.language.standard >= 2023, NULL, &counted_error) : 0;
+    const uint32_t escapes = valid ? check_literal_unevaluated_escapes(spelling, length, pp->options.language.standard >= 2023, false, NULL, &counted_error) : 0;
     if (escapes != 0)
     {
         Scratch scratch = scratch_begin(0);
         CheckEscapeDiagnostic* diagnostics = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, CheckEscapeDiagnostic, BUSTER_CHECK_ESCAPE_DIAGNOSTICS(length));
         bool had_error = false;
-        const uint32_t count = diagnostics != NULL ? check_literal_unevaluated_escapes(spelling, length, pp->options.language.standard >= 2023, diagnostics, &had_error) : 0;
+        const uint32_t count = diagnostics != NULL ? check_literal_unevaluated_escapes(spelling, length, pp->options.language.standard >= 2023, false, diagnostics, &had_error) : 0;
         for (uint32_t i = 0; i < count; i += 1)
         {
             const CheckEscapeDiagnostic* diagnostic = diagnostics + i;

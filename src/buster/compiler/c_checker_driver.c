@@ -1013,6 +1013,8 @@ static void check_driver_escape(const Parser* parser, Preprocessor* pp, const Ch
     const uint32_t source = parser->tokens.sources[token];
     const uint32_t offset = diagnostic->offset;
     const char character = (char)diagnostic->character;
+    // A macro argument's literal: its escape's diagnostics show the argument (#1447, Preprocessor.diagnostic_arguments).
+    pp->diagnostic_arguments = true;
     switch (diagnostic->kind)
     {
         case CHECK_ESCAPE_DIAGNOSTIC_UNKNOWN:
@@ -1036,6 +1038,29 @@ static void check_driver_escape(const Parser* parser, Preprocessor* pp, const Ch
             {
                 pp_diagnose_output_offset_at(pp, disposition, source, offset, publication, "unknown escape sequence '\\%s' [%s-Wunknown-escape-sequence]", escaped,
                                              error ? "-Werror," : "");
+            }
+            break;
+        }
+        case CHECK_ESCAPE_DIAGNOSTIC_NONSTANDARD:
+        case CHECK_ESCAPE_DIAGNOSTIC_DELIMITED:
+        case CHECK_ESCAPE_DIAGNOSTIC_NAMED:
+        {
+            // -pedantic's warnings (#1447), off by default.
+            const bool nonstandard = diagnostic->kind == CHECK_ESCAPE_DIAGNOSTIC_NONSTANDARD;
+            const CheckWarningSeverity severity = check_common_severity(pp, parser, input, token, nonstandard ? CHECK_WARNING_ID_NONSTANDARD_ESCAPE :
+                                                                                                                CHECK_WARNING_ID_DELIMITED_ESCAPE, true);
+            const bool error = severity == CHECK_WARNING_ERROR;
+            const PPSeverity disposition = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_MAPPED_FATAL : error ? PP_SEVERITY_MAPPED_ERROR : PP_SEVERITY_WARNING;
+            if (severity != CHECK_WARNING_IGNORE && nonstandard)
+            {
+                pp_diagnose_output_offset_at(pp, disposition, source, offset, publication, "use of non-standard escape character '\\%c' [%s-Wpedantic]", character,
+                                             error ? "-Werror," : "");
+            }
+            else if (severity != CHECK_WARNING_IGNORE)
+            {
+                pp_diagnose_output_offset_at(pp, disposition, source, offset, publication, "%s escape sequences are a %s extension [%s-Wdelimited-escape-sequence-extension]",
+                                             diagnostic->kind == CHECK_ESCAPE_DIAGNOSTIC_NAMED ? "named" : "delimited",
+                                             diagnostic->kind == CHECK_ESCAPE_DIAGNOSTIC_NAMED ? "Clang" : "C2y", error ? "-Werror," : "");
             }
             break;
         }
@@ -1100,6 +1125,35 @@ static void check_driver_escape(const Parser* parser, Preprocessor* pp, const Ch
                                          (int)diagnostic->length, spelling.pointer + offset);
             break;
     }
+    pp->diagnostic_arguments = false;
+}
+
+// The encoding prefixes of an unevaluated string literal's tokens from `first` to `end` (#1447): each one's
+// -Winvalid-unevaluated-string warning at it, as the warning options and `input`'s pragmas map it, with the macro argument
+// the token came from.
+static void check_driver_unevaluated_prefixes(const Parser* parser, Preprocessor* pp, const CheckInput* input, uint32_t first, uint32_t end, uint32_t publication,
+                                              Arena* scratch)
+{
+    for (uint32_t token = first; token < end && token < parser->tokens.count && !pp->fatal; token += 1)
+    {
+        const uint64_t mark = scratch->length;
+        const String8 spelling = check_warning_string_spelling(parser, pp, token, scratch);
+        const uint32_t prefix = check_literal_encoding_prefix((const uint8_t*)spelling.pointer, (uint32_t)spelling.length);
+        const char* written = prefix == 2 ? "u8" : prefix != 0 && spelling.pointer[0] == 'L' ? "L" : prefix != 0 && spelling.pointer[0] == 'U' ? "U" : "u";
+        arena_pop_to(scratch, mark);
+        const CheckWarningSeverity severity = prefix != 0 ? check_common_severity(pp, parser, input, token, CHECK_WARNING_ID_INVALID_UNEVALUATED_STRING, false) :
+                                                            CHECK_WARNING_IGNORE;
+        const bool error = severity == CHECK_WARNING_ERROR;
+        const PPSeverity disposition = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_MAPPED_FATAL : error ? PP_SEVERITY_MAPPED_ERROR : PP_SEVERITY_WARNING;
+        if (severity != CHECK_WARNING_IGNORE)
+        {
+            pp->diagnostic_arguments = true;
+            pp_diagnose_output_offset_at(pp, disposition, parser->tokens.sources[token], 0, publication,
+                                         "encoding prefix '%s' on an unevaluated string literal has no effect [%s-Winvalid-unevaluated-string]", written,
+                                         error ? "-Werror," : "");
+            pp->diagnostic_arguments = false;
+        }
+    }
 }
 
 // The escape sequences' diagnostics of an unevaluated string literal's tokens from `first` to `end` (#147), each at its
@@ -1108,6 +1162,14 @@ static void check_driver_escape(const Parser* parser, Preprocessor* pp, const Ch
 // (check_literal_unevaluated_escapes). The tokens before `first` have no escape clang refuses: none set its error state.
 static void check_driver_escapes(const Parser* parser, Preprocessor* pp, const CheckInput* input, uint32_t first, uint32_t end, uint32_t publication, Arena* scratch)
 {
+    // Clang's unevaluated string literal warns of each token's encoding prefix first (#1447), its tokens before `first`
+    // (adjacent string literals, which concatenate) too.
+    uint32_t begin = first;
+    while (begin > 0 && begin <= parser->tokens.count && parser->tokens.kinds[begin - 1] == PARSE_KIND_STRING)
+    {
+        begin -= 1;
+    }
+    check_driver_unevaluated_prefixes(parser, pp, input, begin, end, publication, scratch);
     bool had_error = false;
     for (uint32_t token = first; token < end && token < parser->tokens.count && !pp->fatal; token += 1)
     {
@@ -1115,7 +1177,7 @@ static void check_driver_escapes(const Parser* parser, Preprocessor* pp, const C
         const String8 spelling = check_warning_string_spelling(parser, pp, token, scratch);
         const uint32_t length = (uint32_t)spelling.length;
         CheckEscapeDiagnostic* diagnostics = length != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckEscapeDiagnostic, BUSTER_CHECK_ESCAPE_DIAGNOSTICS(length)) : NULL;
-        const uint32_t count = diagnostics != NULL ? check_literal_unevaluated_escapes((const uint8_t*)spelling.pointer, length, pp->options.language.standard >= 2023, diagnostics, &had_error) : 0;
+        const uint32_t count = diagnostics != NULL ? check_literal_unevaluated_escapes((const uint8_t*)spelling.pointer, length, pp->options.language.standard >= 2023, true, diagnostics, &had_error) : 0;
         for (uint32_t i = 0; i < count && !pp->fatal; i += 1)
         {
             check_driver_escape(parser, pp, input, token, spelling, diagnostics + i, publication);
@@ -1219,6 +1281,30 @@ static void check_driver_unparsed_literals(const Parser* parser, Preprocessor* p
     }
 }
 
+static void check_driver_unparsed_strings(const Parser* parser, Preprocessor* pp, uint32_t begin, Arena* scratch);
+
+// The literals a rejected unit's reader left unread (#1447): from where its error stopped the walk
+// (CheckInput.walk_end), and past its last report's token and the string literals adjacent to it, read as the unchecked
+// rest of a failed parse is (check_driver_unparsed_literals, check_driver_unparsed_strings): each literal's errors and
+// warnings, which clang's literal parsers give whatever came before.
+static void check_driver_unread_literals(const Parser* parser, Preprocessor* pp, const CheckInput* input, Arena* scratch)
+{
+    uint32_t begin = input->walk_end;
+    for (uint32_t r = 0; r < input->report_count; r += 1)
+    {
+        begin = input->reports[r].token < parser->tokens.count && input->reports[r].token + 1 > begin ? input->reports[r].token + 1 : begin;
+    }
+    while (begin > 0 && begin < parser->tokens.count && parser->tokens.kinds[begin] == PARSE_KIND_STRING && parser->tokens.kinds[begin - 1] == PARSE_KIND_STRING)
+    {
+        begin += 1;
+    }
+    if (begin < parser->tokens.count)
+    {
+        check_driver_unparsed_literals(parser, pp, begin, scratch);
+        check_driver_unparsed_strings(parser, pp, begin, scratch);
+    }
+}
+
 // Whether the tokens from `first` to `end`, any parentheses around them peeled, are string literals whose escape sequences
 // clang refuses in an unevaluated string literal (#147): then their diagnostics (check_driver_escapes), from the first
 // token that has one, published at it, the warning's severity the command line's (`input` holds no pragmas).
@@ -1241,12 +1327,16 @@ static bool check_driver_unparsed_escapes(const Parser* parser, Preprocessor* pp
         const uint64_t mark = scratch->length;
         const String8 spelling = check_warning_string_spelling(parser, pp, token, scratch);
         bool had_error = false;
-        refused = spelling.length != 0 && check_literal_unevaluated_escapes((const uint8_t*)spelling.pointer, (uint32_t)spelling.length, pp->options.language.standard >= 2023, NULL, &had_error) != 0 ? token : end;
+        refused = spelling.length != 0 && check_literal_unevaluated_escapes((const uint8_t*)spelling.pointer, (uint32_t)spelling.length, pp->options.language.standard >= 2023, false, NULL, &had_error) != 0 ? token : end;
         arena_pop_to(scratch, mark);
     }
     if (refused != end)
     {
         check_driver_escapes(parser, pp, input, refused, end, parser->tokens.sources[refused], scratch);
+    }
+    else if (strings)
+    {
+        check_driver_unevaluated_prefixes(parser, pp, input, first, end, parser->tokens.sources[first], scratch);
     }
     return refused != end;
 }
@@ -8270,6 +8360,13 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         result = 1;
                     }
                     original_pragmas_printed = true;
+                    if (ready && !quiet && !parse_failed && !repairing && !prefix_only && checking == recovered && input.report_count != 0 &&
+                        input.walk_end != 0 && input.walk_end < tokens && !pp->fatal)
+                    {
+                        // The literals past where the reader's error stopped it (#1447): clang's literal parsers diagnose them as
+                        // they do the unchecked rest of a failed parse.
+                        check_driver_unread_literals(checking, pp, &input, scratch);
+                    }
                     if (input_valid && dump && !prefix_only)
                     {
                         check_driver_dump(&input.graph, &stream, &types, scratch);
