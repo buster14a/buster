@@ -2880,7 +2880,12 @@ static bool check_driver_conversion_site(const Parser* parser, const CheckStream
     const uint8_t parent_role = parent < count ? parser->tree.roles[parent] : PARSE_ROLE_NONE;
     const bool condition = parent_role == PARSE_ROLE_CLOSE_CONDITION || parent_role == PARSE_ROLE_CLOSE_FOR;
     const bool known = source < stream->count && target != 0 && token < count && !condition && check_driver_in_body(parser, token);
-    const uint32_t first = known ? check_warning_graph_first(graph, parser, source) : BUSTER_CHECK_NONE;
+    const uint32_t operand = known ? check_warning_graph_first(graph, parser, source) : BUSTER_CHECK_NONE;
+    // An array compound literal's node is its body's `}` (its decay's too), so its own first token is its type name's `(`:
+    // a cast before the `}` would break the view's reading and lose the body's warnings (`char *b = (int[2]){ 1, 2 };`).
+    const uint8_t operand_role = operand < count ? parser->tree.roles[operand] : PARSE_ROLE_NONE;
+    const bool compound = operand_role == PARSE_ROLE_CLOSE_COMPOUND_BODY || operand_role == PARSE_ROLE_CLOSE_COMPOUND;
+    const uint32_t first = compound ? check_warning_graph_start(parser, operand) : operand;
     const uint32_t end = known ? graph->source_positions[source] : 0;
     const bool valid = first < end && end <= count;
     *site = (CheckDriverConversionSite){
