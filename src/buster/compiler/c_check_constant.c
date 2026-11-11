@@ -278,6 +278,24 @@ static CheckOverloadResult check_constant_address(CheckConstantInput* input, con
     return selected;
 }
 
+// Whether the compound literal whose `(` is `open`, body's `{` is `body` and `}` is `body_end` holds one item of numbers,
+// characters, operators and parentheses alone (#1447: `(int){3}`, `(long){2 * 4}`), which a scalar type's literal folds as
+// a cast's value, not an integer constant expression, as clang folds it in a bound as a GNU constant. Not one an `&` takes
+// (`&(int){1}`), whose object is the value.
+static bool check_constant_compound_folds(const Parser* parser, uint32_t open, uint32_t body, uint32_t body_end)
+{
+    const uint32_t outer = parser->tree.parents[body_end];
+    bool folds = body + 1 < body_end && !(outer < parser->tokens.count && parser->tokens.kinds[outer] == PARSE_KIND_AMP && outer < open);
+    for (uint32_t t = body + 1; folds && t < body_end; t += 1)
+    {
+        const uint8_t kind = parser->tokens.kinds[t];
+        folds = kind == PARSE_KIND_NUMBER || kind == PARSE_KIND_CHARACTER || kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_R_PAREN ||
+                (parser->tree.roles[t] != PARSE_ROLE_OPERAND && kind != PARSE_KIND_COMMA && kind != PARSE_KIND_L_BRACE && kind != PARSE_KIND_R_BRACE &&
+                 kind != PARSE_KIND_L_SQUARE && kind != PARSE_KIND_PERIOD && kind != PARSE_KIND_ARROW && kind != PARSE_KIND_IDENTIFIER && kind != PARSE_KIND_STRING);
+    }
+    return folds;
+}
+
 static bool check_constant_resolve(CheckConstantInput* input, const CheckValue* source, TypeId target, CheckValue* resolved)
 {
     const CheckOverloadResult selected = check_constant_address(input, source, target, resolved);
@@ -1961,7 +1979,9 @@ static bool check_constant_bind(CheckConstantInput* input, bool type_name)
                 input->type_begin[close - input->first] = next;
                 check_constant_mark_type(input, next, close);
                 input->syntax[close - input->first] = true;
-                for (uint32_t item = body; item < body_end; item += 1)
+                // (A scalar literal's one constant item is evaluated, check_constant_compound_folds: its `{` alone is syntax.)
+                const bool folds = check_constant_compound_folds(parser, token, body, body_end);
+                for (uint32_t item = body; item < (folds ? body + 1 : body_end); item += 1)
                 {
                     input->syntax[item - input->first] = true;
                 }
@@ -2968,6 +2988,7 @@ static bool check_constant_evaluate(CheckConstantInput* input)
         uint32_t first = BUSTER_CHECK_NONE;
         uint32_t last = BUSTER_CHECK_NONE;
         uint32_t count = 0;
+        bool compound_fold = false;
         CheckAction action =
         {
             .op = CHECK_OP_COUNT,
@@ -3056,7 +3077,18 @@ static bool check_constant_evaluate(CheckConstantInput* input)
             const uint8_t kind = type != 0 ? type_kind(reader->types, type) : BUSTER_TYPE_KIND_VOID;
             valid = type != 0 && kind != BUSTER_TYPE_KIND_FUNCTION && kind != BUSTER_TYPE_KIND_VOID &&
                     kind != BUSTER_TYPE_KIND_VARIABLE_ARRAY;
-            if (valid)
+            const uint32_t opening = close < parser->tokens.count && close > 0 ? type_first - 1 : BUSTER_CHECK_NONE;
+            const uint32_t body = close + 1;
+            const bool scalar = kind == BUSTER_TYPE_KIND_INTEGER || kind == BUSTER_TYPE_KIND_FLOATING || kind == BUSTER_TYPE_KIND_ENUM;
+            compound_fold = valid && scalar && opening < close && body < token && check_constant_compound_folds(parser, opening, body, token);
+            if (compound_fold)
+            {
+                // Its one item converted to its type, as a cast converts it: a folded value, no integer constant expression.
+                action.op = CHECK_OP_CAST;
+                action.type = type;
+                valid = count == 1;
+            }
+            else if (valid)
             {
                 input->values[index] = (CheckValue)
                 {
@@ -3531,6 +3563,7 @@ static bool check_constant_evaluate(CheckConstantInput* input)
                 reader->output->resource |= checked.diagnostic == CHECK_DIAG_RESOURCE;
                 valid = checked.diagnostic == CHECK_DIAG_NONE;
                 input->values[index] = checked.value;
+                input->values[index].flags &= compound_fold ? ~(uint32_t)BUSTER_CHECK_ICE : ~0u;
                 if (valid && check_sparse_wide_present(reader->output->noderef_types))
                 {
                     const TypeId types[3] = { action.operands[0].type, action.operands[1].type, action.operands[2].type };

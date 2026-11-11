@@ -82,7 +82,7 @@ static bool ir_typed_access_valid(uint8_t kind, uint8_t class, uint64_t value)
 }
 
 // Whether entry `i`'s segment override (#1447, BUSTER_TYPED_ACCESS_SEGMENT), if it has one, is one the IR carries
-// (BUSTER_IR_SEGMENT): FS's or GS's, on a LOAD, STORE or SET of an integer, a float, a double or a vector (a 128-bit
+// (BUSTER_IR_SEGMENT): FS's, GS's or SS's, on a LOAD, STORE or SET of an integer, a float, a double or a vector (a 128-bit
 // integer's halves, ir_wide.c, and a wide vector's pieces, ir_vector_split.c, keep their access's flags). An atomic
 // read/modify/write's (ATOMIC_RMW, ATOMIC_CAS), whose IR flags hold its operation where a load's hold the segment, and an
 // access of a long double or a mask, which Tier 1 moves through rows of their own (the x87 stack's, kmov's), are Tier 0's.
@@ -94,7 +94,7 @@ static bool ir_typed_segment_valid(const Tier0Function* input, uint32_t i)
     const bool access = kind == BUSTER_TYPED_LOAD || kind == BUSTER_TYPED_STORE || kind == BUSTER_TYPED_SET;
     const bool atomic = kind == BUSTER_TYPED_ATOMIC_RMW || kind == BUSTER_TYPED_ATOMIC_CAS;
     const bool carried = class != BUSTER_TYPED_CLASS_F80 && class != BUSTER_TYPED_CLASS_MASK;
-    return segment == 0 || (!atomic && (!access || (segment != 3 && carried)));
+    return segment == 0 || (!atomic && (!access || carried));
 }
 
 typedef struct IrTypedPlan IrTypedPlan;
@@ -755,6 +755,25 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_vector_operation(
             ir_typed_lanes(sink, value, operation->lane);
         }
     }
+    else if (operation->mask_expand)
+    {
+        // A mask to a vector (#1840): all ones in each lane whose bit is set, zeros elsewhere.
+        const uint64_t zero[8] = {0};
+        const uint64_t ones[8] = { UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX };
+        const uint32_t active = ir_typed_vector_constant(sink, type, ones);
+        const uint32_t inactive = ir_typed_vector_constant(sink, type, zero);
+        value = ir_typed_emit(sink, IR_VSELECT, type, operands[0], active, inactive, 0);
+        ir_typed_lanes(sink, value, operation->lane);
+    }
+    else if (operation->sign_mask)
+    {
+        // A vector's sign bits as a mask (#1840): its signed lanes less than zero, at the vector's width.
+        const uint64_t zero[8] = {0};
+        const IrType vector = (IrType)(IR_V4I32 + (operation->shape - IR_SIMD_V4I32));
+        const uint32_t inactive = ir_typed_vector_constant(sink, vector, zero);
+        value = ir_typed_emit(sink, IR_VCMP, type, operands[0], inactive, IR_LT, 0);
+        ir_typed_lanes(sink, value, operation->lane);
+    }
     else if (operation->shift)
     {
         // A shift by a scalar count (#1840), its lanes and shift in its flags.
@@ -1311,12 +1330,14 @@ static bool ir_typed_ignored_arguments(const Tier0Function* input, bool vector)
 // of no size on the stack (#1879: a record of a flexible array member alone, MEMORY, which clang passes byval in an
 // 8-byte slot), whose value, its address, a call without records would place in the next general register: in a
 // function with aggregates (argument_sizes), an argument of a general class on the stack while the call's locations
-// before it leave a general register free.
+// before it leave a general register free. And so does one whose value is on the stack past the next 8-byte slot (#1844:
+// a transparent union's member, which takes the union's own slot, aligned to 16, where clang has no register for it).
 static bool ir_typed_aggregate_call(const Tier0Function* input, uint32_t call, bool ignored)
 {
     bool aggregate = input->call_result_objects != 0 && input->call_result_objects[call] != 0;
     const bool located = ignored || (input->argument_sizes != 0 && input->argument_locations != 0);
     uint32_t general = 0;
+    uint32_t slots = 0;
     for (uint32_t a = 0; (input->argument_sizes != 0 || ignored) && a < input->call_argument_counts[call]; a += 1)
     {
         const uint32_t argument = input->call_first[call] + a;
@@ -1327,7 +1348,9 @@ static bool ir_typed_aggregate_call(const Tier0Function* input, uint32_t call, b
         const bool general_class = class >= BUSTER_TYPED_CLASS_I8 && class <= BUSTER_TYPED_CLASS_U64;
         aggregate |= (input->argument_sizes != 0 && input->argument_sizes[argument] != 0) || location.kind == BUSTER_ABI_LOCATION_IGNORE ||
                      (location.kind == BUSTER_ABI_LOCATION_REGISTERS && location.registers[0] == BUSTER_ABI_R10) ||
-                     (location.kind == BUSTER_ABI_LOCATION_STACK && general_class && general < BUSTER_ABI_INTEGER_ARGUMENTS);
+                     (location.kind == BUSTER_ABI_LOCATION_STACK && general_class && general < BUSTER_ABI_INTEGER_ARGUMENTS) ||
+                     (located && location.kind == BUSTER_ABI_LOCATION_STACK && location.stack_offset != slots * BUSTER_ABI_SLOT_BYTES);
+        slots += location.kind == BUSTER_ABI_LOCATION_STACK ? 1 : 0;
         general += location.kind != BUSTER_ABI_LOCATION_STACK && location.registers[0] < 16 ? 1 : 0;
         general += location.kind != BUSTER_ABI_LOCATION_STACK && location.registers[1] < 16 ? 1 : 0;
     }

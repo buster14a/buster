@@ -19,8 +19,9 @@ sh .githooks/test-sign-off.sh
 - `audit` reports the sign-off trailers of the commits the head has and the
   base doesn't, from a full clone or from GitHub's pull request API pages. It
   exits 0 when every commit has a sign-off record, 1 with gaps, 2 when the
-  input is incomplete. The `DCO sign-off audit` job of the 9700X workflow runs
-  it on each pull request, informationally.
+  input is incomplete. The 9700X workflow's `Measurement storage policy` job
+  runs it on each pull request, informationally: a step that can't fail the
+  job.
 - `compose` and `uncompose` chain the sign-off hook with hooks a checkout
   already has, without replacing them.
 
@@ -28,5 +29,6 @@ sh .githooks/test-sign-off.sh
 and revocation" (the opt-in and its worktree scope), "Existing hooks"
 (composition) and "Auditing sign-offs" (the report and its limits).
 `sh .githooks/test-sign-off.sh` runs every fixture in disposable repositories,
-in the required `DCO hook regression` job. It takes a few seconds, so it needs
+in the required `Measurement storage policy` job, the repository's policy
+checks (#2334). It takes a few seconds, so it needs
 no `cores` grant; on the 9700X, run it under the host lock like anything else.

@@ -36,6 +36,7 @@ done
 case "$path" in
     */artifacts\?*) file="$FIXTURE/artifacts.json" ;;
     */attempts/*/jobs\?*) attempt=${path#*/attempts/}; file="$FIXTURE/jobs-${attempt%%/*}.json" ;;
+    */attempts/[0-9]*) attempt=${path##*/attempts/}; file="$FIXTURE/attempt-$attempt.json"; printf '{"run_started_at":"2026-11-11T15:31:37Z"}\n' > "$file" ;;
     *) echo "fake gh: unexpected $path" >&2; exit 1 ;;
 esac
 [ -e "$file" ] || { echo "fake gh: no $file" >&2; exit 1; }
@@ -49,13 +50,16 @@ artifacts()
 {
     printf '%s\n' "$@" | jq -R . | jq -s '{ artifacts: map({ name: . }) }' > "$FIXTURE/artifacts.json"
 }
-# Attempt $1's jobs: NAME|STATUS|ATTEMPT each.
+# Attempt $1's jobs: NAME|STATUS|ATTEMPT each, as the API lists them: a job an earlier attempt ran, which this one
+# didn't rerun, carries this attempt's number but started before this attempt (whose start the fake gh gives as
+# 15:31:37); ATTEMPT is the attempt that ran it.
 jobs()
 {
     local attempt=$1
     shift
     [ $# -gt 0 ] || { printf '{ "jobs": [] }\n' > "$FIXTURE/jobs-$attempt.json"; return 0; }
-    printf '%s\n' "$@" | jq -R 'split("|") | { name: .[0], status: .[1], run_attempt: (.[2] | tonumber) }' | jq -s '{ jobs: . }' > "$FIXTURE/jobs-$attempt.json"
+    printf '%s\n' "$@" | jq -R --argjson listed "$attempt" 'split("|") | { name: .[0], status: .[1], run_attempt: $listed,
+        started_at: (if (.[2] | tonumber) == $listed then "2026-11-11T15:31:41Z" else "2026-11-11T15:28:15Z" end) }' | jq -s '{ jobs: . }' > "$FIXTURE/jobs-$attempt.json"
 }
 draw() { printf 'Tests on Ubuntu 26.04 (vector, none, O3) / Vector draw %s, candidate %s (Clang 23, none, O3)|%s|%s' "$1" "$2" "$3" "$4"; }
 collector() { printf "Tests on Ubuntu 26.04 (vector, none, O3) / Vector draw %s's assignment (Clang 23, none, O3)|%s|%s" "$1" "$2" "$3"; }
@@ -126,7 +130,7 @@ pass
 # A rerun of the failed jobs (attempt 2, whose collectors didn't run again): the holder retakes its item.
 export GITHUB_RUN_ATTEMPT=2
 artifacts "$p-1-assign-1-1x3-2x5" "$p-1-assign-2-3x1-4x6" "$p-1-evidence-1"
-jobs 2 "$(collector 1 completed 1)" "$(draw 2 6 in_progress 2)"
+jobs 2 "$(collector 1 completed 1)" "$(collector 2 completed 1)" "$(draw 2 6 in_progress 2)"
 take 2 6 qualified || fail 'a rerun holder that qualifies'
 grep -qx 'BUSTER_SHARD=4' "$GITHUB_ENV" && grep -qx "$(printf 'decision\ttook 4 again (assigned in attempt 1)')" "$work/record" || fail 'a rerun holder retakes its item'
 if take 2 6 'unqualified (status 1)'; then fail 'a rerun holder on a CPU that does not qualify passes'; fi
