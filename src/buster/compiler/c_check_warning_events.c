@@ -156,6 +156,10 @@ enum
     // `#pragma pack(show)`'s value, and a pop with both a name and an alignment (#1849, clang's ActOnPragmaPack): warnings
     // of no option.
     CHECK_WARNING_ID_PRAGMA_PACK_NOTICE = 124,
+    // A generic selection's association of array type or of a qualified type, which its controlling expression's lvalue
+    // conversion never selects (#1447, clang's CreateGenericSelectionExpr): -Wunreachable-code-generic-assoc, on by
+    // default, under -Wunreachable-code.
+    CHECK_WARNING_ID_UNREACHABLE_GENERIC_ASSOC = 125,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -438,6 +442,10 @@ typedef enum CheckWarningEventKind
     // type ignored", or "'const' and 'volatile' qualifiers ...", at the base's first token that isn't a qualifier;
     // payload.data the qualifiers (BUSTER_TYPE_CONST, BUSTER_TYPE_VOLATILE).
     CHECK_WARNING_EVENT_UNDERLYING_CV_QUALIFIER,
+    // A generic association that is never selected (#1447, check_generic_unreachable): at its type name's first token
+    // that isn't a qualifier, payload.first_type its type, payload.name its typedef's spelling (or 0), payload.data 0 for an
+    // array's, 1 for a qualified one's.
+    CHECK_WARNING_EVENT_UNREACHABLE_ASSOCIATION,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
 

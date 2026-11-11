@@ -1862,6 +1862,14 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
         case CHECK_WARNING_EVENT_TYPEDEF_NAMELESS:
             result = "typedef requires a name";
             break;
+        case CHECK_WARNING_EVENT_UNREACHABLE_ASSOCIATION:
+        {
+            const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, payload->first_type, payload->name);
+            result = type.length != 0 ? check_warning_text(scratch, "due to lvalue conversion of the controlling expression, association of type %.*s will never "
+                                                           "be selected because it is %s", (int)type.length, type.pointer,
+                                                           payload->data == 0 ? "of array type" : "qualified") : NULL;
+            break;
+        }
         case CHECK_WARNING_EVENT_UNDERLYING_CV_QUALIFIER:
             result = payload->data == (BUSTER_TYPE_CONST | BUSTER_TYPE_VOLATILE) ? "'const' and 'volatile' qualifiers in enumeration underlying type ignored" :
                      payload->data == BUSTER_TYPE_VOLATILE ? "'volatile' qualifier in enumeration underlying type ignored" :

@@ -165,6 +165,8 @@ static const CheckWarningDescription check_warning_descriptions[] =
     [CHECK_WARNING_ID_UNDERLYING_CV_QUALIFIER] = { "-Wunderlying-cv-qualifier-ignored", NULL, "qualifier in enumeration underlying type ignored" },
     [CHECK_WARNING_ID_PRAGMA_PACK] = { "-Wpragma-pack", "-Wpragmas", "unterminated '#pragma pack (push, ...)' at end of file" },
     [CHECK_WARNING_ID_PRAGMA_PACK_NOTICE] = { NULL, NULL, "value of #pragma pack(show)" },
+    [CHECK_WARNING_ID_UNREACHABLE_GENERIC_ASSOC] = { "-Wunreachable-code-generic-assoc", "-Wunreachable-code",
+                                                     "association will never be selected" },
 };
 
 _Static_assert(BUSTER_ARRAY_LENGTH(check_warning_descriptions) == CHECK_WARNING_ID_COUNT, "every sparse policy ID has a description");

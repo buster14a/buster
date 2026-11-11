@@ -2257,6 +2257,10 @@ static bool check_constant_selection(CheckConstantInput* input, uint32_t keyword
                 const uint8_t kind = type_kind(reader->types, type_strip_aligned(reader->types, type));
                 // An incomplete type, void's too, as the expression's reader takes it (check_input_selection_type).
                 valid = type != 0 && kind != BUSTER_TYPE_KIND_FUNCTION && (type_inherited_flags(reader->types, type) & BUSTER_TYPE_FLAG_VARIABLY_MODIFIED) == 0;
+                if (valid)
+                {
+                    check_generic_unreachable(reader, association, colon, type);
+                }
                 bool matches = false;
                 valid = valid && check_generic_association(reader, &seen, type, &matches);
                 if (valid)
