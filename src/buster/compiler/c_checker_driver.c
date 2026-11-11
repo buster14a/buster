@@ -5648,6 +5648,9 @@ static CheckDriverRound check_driver_rejected_read(const Parser* unit, const Par
     *found_count = 0;
     const Parser* parser = unit;
     const uint32_t count = unit->tokens.count;
+    // The first reading's stop in the unit's tokens, past which the driver gives each literal's own errors (#1447,
+    // check_driver_literal_escapes): a reading's error at such a literal is the unit's already.
+    const uint32_t unit_stop = stop;
     const bool edited = edits != NULL;
     // The view, where an error's part is left out; its mask is the bodies', each brace with the token before it.
     CheckDriverRejectedView view = { 0 };
@@ -5799,7 +5802,9 @@ static CheckDriverRound check_driver_rejected_read(const Parser* unit, const Par
             const uint32_t index = phase == 0 ? i : phase == 1 ? i - input.report_count : i - input.report_count - stream.report_count;
             const uint32_t token = phase == 0 ? input.reports[index].token : phase == 1 ? stream.reports[index].token : control.constraints[index].token;
             const uint32_t at = token < view_count && edited ? view.to_original[token] : token;
-            const bool fresh = at < count && !check_driver_rejected_known(errors, error_count, at) &&
+            const bool literal = phase == 0 && at < count && at >= unit_stop &&
+                                 (input.reports[index].message == CHECK_INPUT_LITERAL || input.reports[index].message == CHECK_INPUT_WIDE_LITERAL);
+            const bool fresh = at < count && !literal && !check_driver_rejected_known(errors, error_count, at) &&
                                !check_driver_rejected_known(found, *found_count, at) && (!edited || !check_driver_rejected_top_known(unit, errors, error_count, at));
             valid = !fresh || *found_count < found_capacity;
             if (fresh && valid)
