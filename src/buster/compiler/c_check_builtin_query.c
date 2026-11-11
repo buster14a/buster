@@ -264,7 +264,7 @@ static __attribute__((unused)) void check_builtin_query_one(TypeTable* table, co
     }
     else if (input->argument_count != expected)
     {
-        check_action_diagnose(&output->action, CHECK_DIAG_ARGUMENT_COUNT, 0);
+        check_action_diagnose_count(&output->action, input->argument_count, expected, expected);
     }
     else if (constant && !check_builtin_query_proof_shape(input))
     {

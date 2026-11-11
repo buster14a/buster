@@ -38,6 +38,10 @@
 #define BUSTER_IR_ACCESS_FLAGS (BUSTER_IR_VOLATILE | BUSTER_IR_ATOMIC | BUSTER_IR_ORDER)
 // The accesses every pass keeps as they are and where they are: a volatile one and an atomic one.
 #define BUSTER_IR_OBSERVABLE (BUSTER_IR_VOLATILE | BUSTER_IR_ATOMIC)
+// An IR_STACK_SAVE's flag (#1847): the function's frame address, __builtin_frame_address(0), rather than rsp: its frame
+// pointer, rbp, the address of the caller's rbp its prologue pushed, as clang's and Tier 0's frames have it. The typed
+// stream's FRAME_ADDRESS. The function keeps a frame pointer (Tier 1's frame planner, BUSTER_TIER1_FRAME_KEEP_POINTER).
+#define BUSTER_IR_STACK_SAVE_FRAME 1
 #define BUSTER_IR_SLOT_ADDRESS_TAKEN 1
 #define BUSTER_IR_SLOT_VOLATILE 2
 #define BUSTER_IR_SLOT_TEMPORARY 4
@@ -158,7 +162,8 @@ typedef enum IrOp
     // a vector result; its scalar type gives the lane width, b is absent and flags are zero. It does no arithmetic,
     // including on floating operands, so signed zeros and NaN payloads are unchanged. The vector width changes (#1840:
     // extract, widen and insert) move a vector's bits whole between widths, their part in flags, and the permutes (#1840:
-    // permute, shuffle, align and shuffle_lanes) move lanes of two vectors, their immediate in flags.
+    // permute, shuffle, align and shuffle_lanes) move lanes of two vectors, their immediate in flags; the conversions
+    // (#1840: extend and truncate) widen or narrow integer lanes, their lanes and mode in flags.
     IR_INTRINSIC,
     // An atomic read/modify/write (#1059): `a` the object's address, `b` the operand, of the result's type (an integer of
     // 1, 2, 4 or 8 bytes), and its flags BUSTER_IR_ATOMIC with its C memory order and its operation
@@ -223,7 +228,15 @@ typedef enum IrOp
 #define BUSTER_IR_INTRINSIC_SHUFFLE 19u
 #define BUSTER_IR_INTRINSIC_ALIGN 20u
 #define BUSTER_IR_INTRINSIC_SHUFFLE_LANES 21u
-#define BUSTER_IR_INTRINSIC_COUNT 22u
+// The conversions between integer lanes (#1840), unary, their lanes in flags: the source's lanes' bytes' log2 in bits 0
+// and 1, the result's in bits 2 and 3, and the mode in bits 4 and 5. extend's lane i is a's lane i, zero-extended (mode 0)
+// or sign-extended (1) to a wider lane, as many lanes as the result has, from a's low bytes (vpmovzx, vpmovsx); truncate's
+// lane i is a's lane i, every lane of a, narrowed by wrapping (mode 0), saturation of a signed lane to the signed range
+// (1) or of an unsigned lane to the unsigned range (2), in the result's low bytes and zeros past them, the result 16 bytes
+// or the lanes' bytes if more (vpmov, vpmovs, vpmovus).
+#define BUSTER_IR_INTRINSIC_EXTEND 22u
+#define BUSTER_IR_INTRINSIC_TRUNCATE 23u
+#define BUSTER_IR_INTRINSIC_COUNT 24u
 
 // ICMP EQ/NE accept pointers too; the other integer predicates require integer operands. FCMP uses EQ through GE:
 // ordered comparisons, except NE, which is true for unordered inputs, as in C.
@@ -324,6 +337,9 @@ struct IrAsmBody
     uint32_t count;
     uint32_t branch_count;
     uint32_t touched;
+    // The opmask registers the records write (k0 to k7, a bit each; Tier0AsmBody.masks), whose live masks Tier 1's CFG
+    // consumer saves around the body (tier1_emit_cfg_asm).
+    uint8_t masks;
 };
 
 typedef struct IrSizes IrSizes;
@@ -749,6 +765,8 @@ static const char* const ir_intrinsic_names[BUSTER_IR_INTRINSIC_COUNT] = {
     "shuffle",
     "align",
     "shuffle_lanes",
+    "extend",
+    "truncate",
 };
 
 // A fence's orders' names in the text form, C's memory_order's (BUSTER_IR_FENCE_ORDER), and its signal scope's word.
@@ -1282,6 +1300,29 @@ static bool ir_permute_flags_valid(uint32_t kind, uint32_t type, uint32_t flags)
     return valid;
 }
 
+// Whether a conversion's flags (#1840, BUSTER_IR_INTRINSIC_EXTEND and _TRUNCATE) are valid from vector type `from` to
+// vector type `type`: an extend's to wider lanes, zero or sign, of no more of the source's bytes than it has; a truncate's
+// to narrower lanes, of every one of the source's lanes, wrapping or saturating, into 16 bytes or the lanes' bytes if more.
+static bool ir_convert_flags_valid(uint32_t kind, uint32_t from, uint32_t type, uint32_t flags)
+{
+    const uint32_t source = flags & 3;
+    const uint32_t result = (flags >> 2) & 3;
+    const uint32_t mode = flags >> 4;
+    bool valid = false;
+    if (kind == BUSTER_IR_INTRINSIC_EXTEND)
+    {
+        const uint32_t lanes = ir_type_bits[type] / (8u << result);
+        valid = result > source && mode <= 1 && lanes * (8u << source) <= ir_type_bits[from];
+    }
+    else
+    {
+        const uint32_t lanes = ir_type_bits[from] / (8u << source);
+        const uint32_t bits = lanes * (8u << result);
+        valid = result < source && mode <= 2 && ir_type_bits[type] == (bits > 128 ? bits : 128);
+    }
+    return valid;
+}
+
 // The mask type of a comparison of vector type `type`'s lanes `lane`, a bit per lane (m8 for 8 lanes or fewer): IR_VOID
 // for a type that isn't a vector.
 static uint32_t ir_lane_mask(uint32_t type, uint32_t lane)
@@ -1739,7 +1780,8 @@ static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i)
     }
     else if (((op == IR_LOAD || op == IR_STORE) && (!ir_access_flags_valid(op, f->flags[i]) || f->alignment_log2[i] > 31)) ||
              (op == IR_ATOMIC_RMW && (!ir_rmw_flags_valid(f->flags[i]) || f->alignment_log2[i] > 31)) ||
-             ((op != IR_LOAD && op != IR_STORE && op != IR_ATOMIC_RMW) && ((f->flags[i] != 0 && op != IR_INTRINSIC && !ir_lane_valid(op, f->flags[i])) || f->alignment_log2[i] != 0)))
+             ((op != IR_LOAD && op != IR_STORE && op != IR_ATOMIC_RMW) && ((f->flags[i] != 0 && op != IR_INTRINSIC && !ir_lane_valid(op, f->flags[i]) && (op != IR_STACK_SAVE || f->flags[i] != BUSTER_IR_STACK_SAVE_FRAME)) ||
+              f->alignment_log2[i] != 0)))
     {
         check.error = IR_ERROR_METADATA;
     }
@@ -1829,6 +1871,10 @@ static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i)
                         valid = ir_vector_type(type) && ta == type && ir_vector_type(tb_part) && ir_type_bits[tb_part] < ir_type_bits[type] &&
                                 part < ir_type_bits[type] / ir_type_bits[tb_part];
                     }
+                }
+                else if (c == BUSTER_IR_INTRINSIC_EXTEND || c == BUSTER_IR_INTRINSIC_TRUNCATE)
+                {
+                    valid = ir_vector_type(type) && ir_vector_type(ta) && b == BUSTER_IR_NONE && ir_convert_flags_valid(c, ta, type, part);
                 }
                 else if (c >= BUSTER_IR_INTRINSIC_PERMUTE && c <= BUSTER_IR_INTRINSIC_SHUFFLE_LANES)
                 {
@@ -3231,10 +3277,14 @@ static IrError ir_print(const IrFunction* f, Arena* scratch, FILE* output)
                             fprintf(output, " %s", c < BUSTER_IR_INTRINSIC_COUNT ? ir_intrinsic_names[c] : "invalid");
                             // A width change's part (#1840), its immediate.
                             if (c == BUSTER_IR_INTRINSIC_EXTRACT || c == BUSTER_IR_INTRINSIC_INSERT || c == BUSTER_IR_INTRINSIC_PERMUTE || c == BUSTER_IR_INTRINSIC_ALIGN ||
-                                c == BUSTER_IR_INTRINSIC_SHUFFLE_LANES)
+                                c == BUSTER_IR_INTRINSIC_SHUFFLE_LANES || c == BUSTER_IR_INTRINSIC_EXTEND || c == BUSTER_IR_INTRINSIC_TRUNCATE)
                             {
                                 fprintf(output, " %u", (unsigned)f->flags[i]);
                             }
+                        }
+                        if (op == IR_STACK_SAVE && f->flags[i] == BUSTER_IR_STACK_SAVE_FRAME)
+                        {
+                            fprintf(output, " frame");
                         }
                         if (op == IR_ATOMIC_RMW)
                         {
