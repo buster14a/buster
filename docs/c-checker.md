@@ -8847,8 +8847,7 @@ arguments against the function. The checker now gives these as clang does.
   argument's pointee's. Tier 1 falls back to
   Tier 0 for such a function. The rest is refused by name ("a load or store in a
   segment's address space", check_lower_segment_access, where a unit has such a
-  type at all: CheckLowerWriter.segments): an `_Atomic` object, an
-  aggregate's copy past 8 of the
+  type at all: CheckLowerWriter.segments): an aggregate's copy past 8 of the
   target's widest vector registers (as clang stops on), atomic
   builtins of another plan (generic ones by pointer, `__atomic_clear`,
   `__sync_lock_release`); and so are the accesses whose lvalue doesn't carry the
