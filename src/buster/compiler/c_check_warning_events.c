@@ -189,9 +189,14 @@ enum
     // GCC's cast to a union from a member's type (#2301, clang's CheckCStyleCast): -Wgnu-union-cast, an extension off by
     // default, under -Wgnu and -Wpedantic. (Its ID past -Wc++-compat's, 136.)
     CHECK_WARNING_ID_GNU_UNION_CAST = 137,
+    // GNU's designators (#2202, clang's parser's ParseInitializerWithPotentialDesignator): an array designation without its
+    // `=` and an old-style `name:` field designator, on by default, and an array range designator, -pedantic's, all
+    // -Wgnu-designator's.
+    CHECK_WARNING_ID_GNU_DESIGNATOR = 138,
+    CHECK_WARNING_ID_GNU_ARRAY_RANGE = 139,
     // sizeof of a binary operator whose operand is an array decayed to the operator's own pointer type (#2264, clang's
     // warnOnSizeofOnArrayDecay): -Wsizeof-array-decay, on by default.
-    CHECK_WARNING_ID_SIZEOF_ARRAY_DECAY = 138,
+    CHECK_WARNING_ID_SIZEOF_ARRAY_DECAY = 140,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -510,8 +515,17 @@ typedef enum CheckWarningEventKind
     CHECK_WARNING_EVENT_UNREACHABLE_ASSOCIATION,
     // GCC's cast to a union (#2301, check_warning_graph_union_cast), at the cast's `(`: its description's words.
     CHECK_WARNING_EVENT_GNU_UNION_CAST,
+    // A GNU designator's -Wgnu-designator warning (#2202, check_input_gnu_designator) at its token: payload.data one of the
+    // BUSTER_CHECK_GNU_DESIGNATOR_* forms.
+    CHECK_WARNING_EVENT_GNU_DESIGNATOR,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
+
+// CHECK_WARNING_EVENT_GNU_DESIGNATOR's forms (#2202): an array designation without its `=` (at the value's first token), an
+// old-style field designator (at its name) and an array range (at its `...`).
+#define BUSTER_CHECK_GNU_DESIGNATOR_MISSING_EQUAL 0u
+#define BUSTER_CHECK_GNU_DESIGNATOR_OLD_STYLE 1u
+#define BUSTER_CHECK_GNU_DESIGNATOR_RANGE 2u
 
 // CHECK_WARNING_EVENT_SWIFT_NAME's messages (#1447), as clang's SemaSwift words them.
 #define BUSTER_CHECK_SWIFT_NAME_FUNCTION 0u

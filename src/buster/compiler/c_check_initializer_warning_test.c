@@ -337,6 +337,27 @@ static void check_test_driver_initializer_fields(CheckTest* test, const char* cl
         "struct I{int x;};struct O{int lead;struct I inner;} t={inner:{z:1}};\n",
         "union U{int x;} u={z:1};\n",
         "struct {int x;} t={z:1};\n",
+        // A designator of the wrong kind for its current object, named by its type (#2202): arrays' and fields' at the
+        // designator, nested ones' by the subobject the previous designator selected, and a qualified record's; an array
+        // of unknown bound's through its inference; a designated list of a scalar or a vector at the declarator where it
+        // is the whole initializer, else at its `{`, its type as the declaration spells it.
+        "struct P{int a,b;} q={.a=1,[0]=2};\n",
+        "union U{int i;} v={[1]=2};\n",
+        "int z[2]={.a=1};\n",
+        "int z[2]={a:1};\n",
+        "int w[]={.a=1};\n",
+        "struct P{int a,b;} t={.a[0]=1};\n",
+        "struct P{int a,b;} u={.a.b=1};\n",
+        "struct P{int a,b;} r[]={[0].b[1]=1};\n",
+        "struct F{int n;int m[2];} g={.m.x=1};\n",
+        "const struct P{int a,b;} k={[0]=1};\n",
+        "void h(void){struct P{int a,b;} s={.b[1]=2};(void)s;}\n",
+        "int x={[0]=1};\n",
+        "int v={1,[0]=1};\n",
+        "struct Q{int i;} y={{.a=1}};\n",
+        "int *p[2]={{[0]=0}};\n",
+        "typedef int V4 __attribute__((vector_size(16)));V4 u={[1]=2};\n",
+        "void f(void){int w={.b=2};(void)w;}\n",
     };
     char source[PATH_MAX];
     char object[PATH_MAX];
@@ -353,8 +374,10 @@ static void check_test_driver_initializer_fields(CheckTest* test, const char* cl
             char* expected = NULL;
             unlink(object);
             const int oracle = check_test_driver_spawn(arguments, &expected);
-            const bool ready = oracle == 1 && expected != NULL && strstr(expected, "does not refer to any field in type") != NULL;
-            check_test_expect(test, ready, "Clang rejects the unknown field with its name and actual selected record type");
+            const bool ready = oracle == 1 && expected != NULL && (strstr(expected, "does not refer to any field in type") != NULL ||
+                                                                   strstr(expected, "designator cannot initialize") != NULL ||
+                                                                   strstr(expected, "with a designated initializer list") != NULL);
+            check_test_expect(test, ready, "Clang rejects the designator with its name or kind and the actual selected type");
             for (uint32_t scalar = 0; ready && scalar < 2; scalar += 1)
             {
                 arguments[0] = (char*)(executable != NULL ? executable : "/proc/self/exe");
@@ -363,7 +386,7 @@ static void check_test_driver_initializer_fields(CheckTest* test, const char* cl
                 unlink(object);
                 const int status = check_test_driver_spawn(arguments, &actual);
                 char description[192];
-                snprintf(description, sizeof(description), "unknown initializer field %u mode=%u %s: exact Clang location, member and type",
+                snprintf(description, sizeof(description), "invalid initializer designator %u mode=%u %s: exact Clang location, member and type",
                          f, mode, scalar != 0 ? "scalar" : "vector");
                 check_test_expect(test, status == oracle && actual != NULL && strcmp(actual, expected) == 0, description);
                 check_test_expect(test, access(object, F_OK) != 0, "invalid field designator publishes no object");
