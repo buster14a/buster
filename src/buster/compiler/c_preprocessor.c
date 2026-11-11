@@ -78,6 +78,7 @@
 //   - clang's arguments for ours (pp_clang_arguments), and a clang run (pp_clang_preprocess), for the commands that run
 //     clang with them.
 
+#include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
@@ -795,8 +796,6 @@ struct FileCache
     // The four arrays' arena of tables, file_cache_initialize's (#1521), or empty where they are tables of a unit's
     // (pp_initialize_once).
     Arena arrays;
-    // Each lane's arenas, reserved when the lane first prepares a record.
-    FileCacheArenas lanes[BUSTER_LANE_MAX_COUNT];
     // The records prepared, and their tokens (for the tests and the benchmark).
     uint64_t prepared_records;
     uint64_t prepared_tokens;
@@ -806,6 +805,14 @@ struct FileCache
     // The base pages at the start of the token columns' arenas of the lanes past lane 0, which c_files.c sets for a group
     // of many lanes before it reserves them (file_cache_arenas), or 0 for arena_reserve's.
     uint64_t lane_small_bytes;
+    // The lanes whose arenas file_cache_arenas has reserved, or tried to, a bit each: a lane whose bit is clear has its
+    // arenas all zero. What walks the lanes' arenas (file_cache_release, pp_release_file_columns) walks these alone
+    // (#1444): `lanes` is 130 KB, 32 pages, of which a compile on one lane uses the first, and a walk of every lane read
+    // and wrote every page, 63 of an empty file's 98 faults in its preprocessor's tables, where the cache is.
+    uint64_t lanes_reserved[BUSTER_LANE_MAX_COUNT / 64];
+    // Each lane's arenas, reserved when the lane first prepares a record. Last, so that the fields before it are
+    // cleared without its pages (file_cache_release).
+    FileCacheArenas lanes[BUSTER_LANE_MAX_COUNT];
 };
 
 // A range of the location space: one inclusion of a file, or a chunk of scratch spellings (`file` BUSTER_PP_NONE).
@@ -3884,19 +3891,24 @@ static __attribute__((unused)) void file_cache_release(FileCache* cache)
             munmap((void*)cache->paths[p].probe.bytes, cache->paths[p].probe.length);
         }
     }
-    for (uint32_t lane = 0; lane < BUSTER_LANE_MAX_COUNT; lane += 1)
+    for (uint32_t word = 0; word < BUSTER_ARRAY_LENGTH(cache->lanes_reserved); word += 1)
     {
-        FileCacheArenas* arenas = &cache->lanes[lane];
-        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(arenas->columns); i += 1)
+        for (uint64_t lanes = cache->lanes_reserved[word]; lanes != 0; lanes &= lanes - 1)
         {
-            arena_release(&arenas->columns[i]);
+            FileCacheArenas* arenas = &cache->lanes[word * 64 + (uint32_t)__builtin_ctzll(lanes)];
+            for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(arenas->columns); i += 1)
+            {
+                arena_release(&arenas->columns[i]);
+            }
+            arena_release(&arenas->arena);
+            arena_release(&arenas->bytes);
         }
-        arena_release(&arenas->arena);
-        arena_release(&arenas->bytes);
     }
     arena_release(&cache->arrays);
     arena_release(&cache->path_arena);
-    *cache = (FileCache){ 0 };
+    // Every lane's arenas are zero now, released or never reserved: the rest of the cache is cleared without touching
+    // their pages, of which a unit's cache, in its tables, has written only the reserved lanes'.
+    memset(cache, 0, offsetof(FileCache, lanes));
 }
 
 // The arenas lane `lane` prepares records into, reserved the first time. Reserving takes the process's memory map lock,
@@ -3906,6 +3918,9 @@ static FileCacheArenas* file_cache_arenas(FileCache* cache, uint32_t lane)
     FileCacheArenas* result = &cache->lanes[lane];
     if (result->arena.base == 0)
     {
+        // Atomic, as two lanes whose first reservations failed may try again at once (c_files.c reserves them before its
+        // lanes start, one lane after another), each on its own lane's bit of a shared word.
+        __atomic_fetch_or(&cache->lanes_reserved[lane / 64], 1ull << (lane % 64), __ATOMIC_RELAXED);
         // Reserved in turn until one can't be, and then none of them, so that a lane short of address space fails to
         // prepare, as a reservation that fails stops a run, rather than going on without the arena it lacked.
         Arena* arenas[] = { &result->columns[0], &result->columns[1], &result->columns[2], &result->arena, &result->bytes };

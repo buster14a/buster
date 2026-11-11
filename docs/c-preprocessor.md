@@ -533,7 +533,12 @@ makes its own; with one, the units and lanes that share it read each file once
   (`file_cache_initialize`'s `*cache = (FileCache){ 0 }`, 30 pages of it the
   lanes' arenas) nor reserves an arena for each array. A cache that units
   share (`PPOptions.files`) is still made with `file_cache_initialize`, its
-  arrays in arenas of their own.
+  arrays in arenas of their own. What walks the lanes' arenas
+  (`pp_release_file_columns` after the run, `file_cache_release`) walks only
+  the lanes whose arenas were reserved (`FileCache.lanes_reserved`, a bit a
+  lane, #1444): a walk of all 256 read and then wrote every one of those
+  pages, 63 of an empty file's 98 faults in the unit's tables on the 9700X,
+  and a release that cleared the whole cache wrote them again.
 - **Small files read** (#261). A unit reads each file of up to 16 KB that it
   opens into its lane's bytes arena in the cache
   (`BUSTER_FILE_CACHE_READ_LIMIT`), as `c_files.c`'s lanes read theirs, and maps
