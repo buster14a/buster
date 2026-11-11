@@ -3506,7 +3506,13 @@ spellings alone would miss this change (#272).
   start, the first of any line splices before it: "\u used with no following
   hex digits" (`BUSTER_PP_UCN_NO_DIGITS`), too few digits, and a delimited
   `\u`'s empty braces or missing brace, which name its letter
-  (`pp_ucn_letter`). A `\U{`, clang's error, gives none.
+  (`pp_ucn_letter`). A `\U{`, clang's error, gives none. One that starts a token and that clang
+  reads whole, of a character below U+00A0 or a surrogate, is clang's error at
+  its backslash (`BUSTER_PP_UCN_ERROR`, `pp_diagnose_ucn`): "character 'A'
+  cannot be specified by a universal character name", "universal character
+  name refers to a control character" or "invalid universal character". Not
+  clang's yet: that error in a skipped group, which clang gives (`\u` and `\N`
+  alike).
 - `-E -P` keeps no line numbers, so it doesn't move the token after a
   `_Pragma` that prints nothing to its own line, as clang's printer does when
   that token is on another line; `-E` with line markers does.
