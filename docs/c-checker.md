@@ -593,9 +593,15 @@ does, each rule checked against clang's answers on probes of it:
   value converted to its type, where that is a number or a static object's
   address constant (#1447, `check_init_scalar_literal`): the constant cache that
   folds a vector literal's lanes folds it, and the operations around it, a
-  conditional's among them (`(int){ 5 } ? 6 : 7`). Still refused: one in a
-  file-scope array's bound (`char e[(int){ 2 }];`), which clang folds to a
-  constant array with its `-Wgnu-folding-constant` warning.
+  conditional's among them (`(int){ 5 } ? 6 : 7`). In a bound, an enumerator
+  and the constant reader's other walks (#1447), a scalar literal whose one
+  item is numbers, characters, operators and parentheses alone folds as a cast
+  of it, but no integer constant expression (`check_constant_compound_folds`):
+  `char e[(int){ 2 }];` is a constant array with clang's "variable length array
+  folded to constant array as an extension", at file scope, in a member and in
+  a block's `static` object, and `enum { E = (int){ 1 } }` is 1. One an `&`
+  takes stays its object. Left: `_Static_assert((int){ 1 }, "")`, which clang
+  folds quietly, is still "expression is not an integer constant expression".
 
 Declaration specifiers and comma-separated declarators are elaborated in source
 order, including the scope of a name in its own initializer. The reader

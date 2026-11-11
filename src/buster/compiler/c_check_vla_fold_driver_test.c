@@ -137,8 +137,26 @@ static const char check_driver_vla_place_source_16[] =
     "int n;\n"
     "int (*(p))[n];\n";
 
+// Scalar compound literals in bounds (#1447): folded, with clang's warning where the array can't be variable, an
+// enumerator's quietly; an `&` keeps the literal's object.
+static const char check_driver_vla_compound_source[] =
+    "int a[(int){3}];\n"
+    "int b[(long){2 * 4} + 1];\n"
+    "struct S { int m[(int){2}]; };\n"
+    "void f(void) { static int s[(int){4}]; int t[(int){5}]; int *p = &(int){1}; (void)s; (void)t; (void)p; }\n"
+    "int c[(const int){2}];\n"
+    "enum { E = (int){1} };\n"
+    "int e = (int){3} + E;\n"
+    "int sz = sizeof((int){1});\n"
+    "_Static_assert(sizeof(a) == 12 && sizeof(b) == 36, \"\");\n";
+
 static const CheckDriverDefaultWarningFixture check_driver_vla_fold_fixtures[] =
 {
+    {
+        .name = "scalar compound literals in bounds",
+        .source = check_driver_vla_compound_source,
+        .warnings = 5,
+    },
     {
         .name = "folded bounds in each context, by default",
         .source = check_driver_vla_fold_contexts_source,
