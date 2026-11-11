@@ -155,8 +155,8 @@ static bool ir_typed_plan_arrive(IrTypedPlan* plan, Arena* scratch, uint32_t blo
 }
 
 // The plan's and the emitter's default cases take every kind they don't name for a binary operation, so a kind added
-// must be lowered (or refused, as FRAME_ADDRESS and TAIL_CALL are, and the X86 rows past the SIMD subset) here before
-// tier0_validate accepts it. A FENCE (#1059) is an IR_FENCE of its value, which is the IR's operand as it is, and an
+// must be lowered (or refused, as TAIL_CALL is, and the X86 rows past the SIMD subset) here before tier0_validate accepts
+// it. A FRAME_ADDRESS is an IR_STACK_SAVE of BUSTER_IR_STACK_SAVE_FRAME (#1847). A FENCE (#1059) is an IR_FENCE of its value, which is the IR's operand as it is, and an
 // ATOMIC_RMW an IR_ATOMIC_RMW of its operation and order, and an ATOMIC_CAS one of the compare-exchange.
 _Static_assert(BUSTER_TYPED_KINDS == 52 && BUSTER_TYPED_FENCE == BUSTER_TYPED_X86 + 1 && BUSTER_TYPED_ATOMIC_RMW == BUSTER_TYPED_FENCE + 1 &&
                    BUSTER_TYPED_ATOMIC_CAS == BUSTER_TYPED_ATOMIC_RMW + 1 && BUSTER_TYPED_KINDS == BUSTER_TYPED_ATOMIC_CAS + 1,
@@ -261,6 +261,7 @@ static IrTypedPlan ir_typed_plan(const Tier0Function* input, Arena* scratch)
                 case BUSTER_TYPED_GLOBAL:
                 case BUSTER_TYPED_GLOBAL_ADDRESS:
                 case BUSTER_TYPED_STACK_SAVE:
+                case BUSTER_TYPED_FRAME_ADDRESS:
                     stack[depth] = class;
                     depth += 1;
                     break;
@@ -1929,10 +1930,10 @@ static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType res
             check.error = IR_ERROR_UNSUPPORTED;
             check.instruction = i;
         }
-        else if (kind == BUSTER_TYPED_FRAME_ADDRESS || kind == BUSTER_TYPED_TAIL_CALL)
+        else if (kind == BUSTER_TYPED_TAIL_CALL)
         {
-            // These are valid typed operations, but this adapter does not lower them. Refuse before planning so
-            // neither reaches the default binary-operation case; ordinary Tier 1 may fall back to Tier 0.
+            // A valid typed operation, but this adapter does not lower it. Refuse before planning so it doesn't reach
+            // the default binary-operation case; ordinary Tier 1 may fall back to Tier 0.
             check.error = IR_ERROR_UNSUPPORTED;
             check.instruction = i;
         }

@@ -308,7 +308,11 @@ patterns are:
   (`lea d, [size + alignment - 1]`, `and d, -alignment`, `sub rsp, d`,
   `mov d, rsp`), or with a constant size of up to 1 GB a `sub` of the rounded
   constant (`TIER1_RULE_ALLOCA_IMMEDIATE`); `stack_save` copies rsp and
-  `stack_restore` sets it. The alignment is the most the function's calls'
+  `stack_restore` sets it. A frame address (#1847, `stack_save frame`,
+  `TIER1_RULE_FRAME_ADDRESS`) copies rbp, the frame pointer its function keeps
+  (`tier1_emit_cfg_frame_flags`' `KEEP_POINTER`, whatever the leaf rule says),
+  without the dynamic stack's places; the CFG consumer emits it, and the code's
+  certificate decodes it as a move from the frame pointer. The alignment is the most the function's calls'
   stack arguments need: 16 bytes, or a 32- or 64-byte vector's or an
   over-aligned aggregate's. The CFG consumer sets it in the holes' `scale`, so
   that rsp keeps it at every call after an allocation. An object's own

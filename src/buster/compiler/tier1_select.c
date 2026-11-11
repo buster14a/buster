@@ -165,6 +165,9 @@ typedef enum Tier1SelectRule
     TIER1_RULE_ALLOCA_IMMEDIATE,
     TIER1_RULE_STACK_SAVE,
     TIER1_RULE_STACK_RESTORE,
+    // The function's frame address (#1847, IR_STACK_SAVE of BUSTER_IR_STACK_SAVE_FRAME): a copy of its frame pointer, rbp,
+    // which its frame keeps (tier1_emit_cfg_frame_flags), into the destination.
+    TIER1_RULE_FRAME_ADDRESS,
     // A memory fence (IR_FENCE, #1059) of the order and scope `immediate`: mfence for a thread fence of seq_cst, the one
     // x86-64 needs an instruction for, and no records for the others. No value; no pass moved an access across it.
     TIER1_RULE_FENCE,
@@ -1708,6 +1711,9 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         break;
     case TIER1_RULE_STACK_RESTORE:
         tier1_select_append(&result, tier1_select_move(8, X86_REGISTER_RSP, holes->left));
+        break;
+    case TIER1_RULE_FRAME_ADDRESS:
+        tier1_select_append(&result, tier1_select_move(8, destination, X86_REGISTER_RBP));
         break;
     case TIER1_RULE_STACK_ADDRESS:
         tier1_select_append(&result, (X86Instruction){ .form = X86_FORM_LEA_R64_M, .reg = destination, .rm = X86_REGISTER_RSP, .mode = BUSTER_X86_MEMORY_BASE });
@@ -5303,7 +5309,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
     }
     else if (op == IR_STACK_SAVE)
     {
-        base.rule = TIER1_RULE_STACK_SAVE;
+        base.rule = function->flags[node] == BUSTER_IR_STACK_SAVE_FRAME ? TIER1_RULE_FRAME_ADDRESS : TIER1_RULE_STACK_SAVE;
         base.width = 8;
         base.intrinsic_cost = 1;
         tier1_select_add_candidate(forest, node, &candidates, base);
@@ -6144,7 +6150,8 @@ static Tier1SelectError tier1_select_emit(const Tier1SelectPlan* plan, const uin
             tier1_select_fixed_registers(plan->patterns[node].rule) != 0 ||
             tier1_select_mask_rule(plan->patterns[node].rule) || tier1_select_float_rule(plan->patterns[node].rule) || plan->patterns[node].rule == TIER1_RULE_VECTOR ||
             plan->patterns[node].stack_object != BUSTER_IR_NONE ||
-            plan->patterns[node].rule == TIER1_RULE_JUMP_INDIRECT || (plan->patterns[node].rule >= TIER1_RULE_ALLOCA && plan->patterns[node].rule <= TIER1_RULE_STACK_RESTORE))
+            plan->patterns[node].rule == TIER1_RULE_JUMP_INDIRECT || (plan->patterns[node].rule >= TIER1_RULE_ALLOCA && plan->patterns[node].rule <= TIER1_RULE_STACK_RESTORE) ||
+            plan->patterns[node].rule == TIER1_RULE_FRAME_ADDRESS)
         {
             error = TIER1_SELECT_ERROR_UNSUPPORTED;
             failed_node = node;

@@ -316,17 +316,23 @@ static uint32_t tier1_emit_cfg_frame_flags(const IrFunction* function, const Tie
     }
     // The dynamic stack (#141): a frame pointer, the frame's places from rbp (or a realigned frame's from r15) and each
     // call's outgoing area at its own rsp (Tier1Frame.dynamic_outgoing).
+    // A frame address (#1847, a save of BUSTER_IR_STACK_SAVE_FRAME) keeps the frame pointer it reads, whatever the
+    // options say of a leaf's, without the dynamic stack's places.
     bool dynamic = false;
+    bool frame_address = false;
     for (uint32_t node = 0; node < function->instruction_count; node += 1)
     {
-        dynamic |= function->op[node] == IR_ALLOCA || function->op[node] == IR_STACK_SAVE || function->op[node] == IR_STACK_RESTORE;
+        const bool frame = function->op[node] == IR_STACK_SAVE && function->flags[node] == BUSTER_IR_STACK_SAVE_FRAME;
+        dynamic |= function->op[node] == IR_ALLOCA || (function->op[node] == IR_STACK_SAVE && !frame) || function->op[node] == IR_STACK_RESTORE;
+        frame_address |= frame;
     }
     const bool vector_constants = function->vector_constant_count != 0;
     // A function with its own ABI records (#789) stages an aggregate result's parts below rsp on its way out
     // (tier1_emit_cfg_aggregate_result), and one with vector constants (#141) builds them there
     // (tier1_emit_cfg_vector_constant): its frame stays out of the red zone.
     return tier1_emit_frame_flags(options, calls) | (function->variadic && save_area ? BUSTER_TIER1_FRAME_VARIADIC : 0) |
-           (function->parameter_passed != 0 || vector_constants ? BUSTER_TIER1_FRAME_NO_RED_ZONE : 0) | (dynamic ? BUSTER_TIER1_FRAME_DYNAMIC_STACK : 0);
+           (function->parameter_passed != 0 || vector_constants ? BUSTER_TIER1_FRAME_NO_RED_ZONE : 0) | (dynamic ? BUSTER_TIER1_FRAME_DYNAMIC_STACK : 0) |
+           (frame_address ? BUSTER_TIER1_FRAME_KEEP_POINTER : 0);
 }
 
 // The alignment's log2 that rsp keeps in a dynamic frame (#141): the most any call's stack arguments need, 16 bytes or a
