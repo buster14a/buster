@@ -346,6 +346,54 @@ static uint32_t check_vector_baseline_binary_form(const CheckVectorBaseline* con
     return form;
 }
 
+// A compare of qwords without SSE4.1's PCMPEQQ (`equality`) or SSE4.2's PCMPGTQ (#1834), of `==`, `!=`, `<` or `>`
+// (`<=` and `>=` are the complements of `>` and `<`, check_vector_baseline_complement), in 8 records at most. Equality
+// is PCMPEQD's, each dword's, ANDed with its qword's other dword's (PSHUFD 0xB1); `!=` its complement. `p < q` is the
+// sign of e = p - q (PSUBQ) where p and q have the same sign bit, where it can't overflow, and otherwise the sign of p
+// (signed) or q (unsigned): r chosen by x = p ^ q's sign, e ^ ((r ^ e) & x); the sign spread over its qword by PSRAD 31
+// and PSHUFD 0xF5. `>` is `<` of the swapped operands.
+static void check_vector_baseline_compare_qwords(CheckVectorBaseline* context, CheckVectorElement element, uint32_t op, bool equality)
+{
+    const uint8_t v0 = BUSTER_TIER0_ROLE_VECTOR(0);
+    const uint8_t v1 = BUSTER_TIER0_ROLE_VECTOR(1);
+    const uint8_t v2 = BUSTER_TIER0_ROLE_VECTOR(2);
+    if (equality)
+    {
+        check_vector_baseline_binary(context, BUSTER_CHECK_BASE_PACKED(context, PCMPEQD), v0, v0, v1);
+        check_vector_baseline_shuffle(context, v1, v0, 0xb1);
+        check_vector_baseline_binary(context, BUSTER_CHECK_BASE_PACKED(context, ANDPS), v0, v0, v1);
+        if (op == CHECK_OP_NOT_EQUAL)
+        {
+            check_vector_baseline_ones(context, v1);
+            check_vector_baseline_binary(context, BUSTER_CHECK_BASE_PACKED(context, XORPS), v0, v0, v1);
+        }
+    }
+    else
+    {
+        const uint8_t p = op == CHECK_OP_LESS ? v0 : v1;
+        const uint8_t q = op == CHECK_OP_LESS ? v1 : v0;
+        const uint8_t r = element.is_signed ? p : q;
+        const uint8_t other = element.is_signed ? q : p;
+        check_vector_baseline_binary(context, BUSTER_CHECK_BASE_PACKED(context, PSUBQ), v2, p, q);
+        check_vector_baseline_binary(context, BUSTER_CHECK_BASE_PACKED(context, XORPS), other, other, r);
+        check_vector_baseline_binary(context, BUSTER_CHECK_BASE_PACKED(context, XORPS), r, r, v2);
+        check_vector_baseline_binary(context, BUSTER_CHECK_BASE_PACKED(context, ANDPS), r, r, other);
+        check_vector_baseline_binary(context, BUSTER_CHECK_BASE_PACKED(context, XORPS), r, r, v2);
+        check_vector_baseline_shift_kind(context, 2, r, 4, 31);
+        check_vector_baseline_shuffle(context, v0, r, 0xf5);
+    }
+}
+
+// The ordered compare whose row's complement a baseline target computes `op` as (#1834), or 0: `<=` and `>=` of qwords
+// without SSE4.2's PCMPGTQ (or AVX-512), whose `>` and `<` take a row's 8 records (check_vector_baseline_compare_qwords).
+// Their callers follow that row with the complement's (CHECK_OP_BIT_NOT's).
+static uint32_t check_vector_baseline_complement(const X86Target* target, uint32_t op, CheckVectorElement element)
+{
+    const uint64_t evex = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512VL);
+    const bool qwords = (target->features & evex) != evex && (target->features & BUSTER_X86_FEATURE(SSE42)) == 0 && !element.floating && element.bytes == 8;
+    return !qwords ? 0 : op == CHECK_OP_LESS_EQUAL ? CHECK_OP_GREATER : op == CHECK_OP_GREATER_EQUAL ? CHECK_OP_LESS : 0;
+}
+
 static void check_vector_baseline_compare(CheckVectorBaseline* context, CheckVectorElement element, uint32_t op)
 {
     const uint8_t v0 = BUSTER_TIER0_ROLE_VECTOR(0);
@@ -530,6 +578,13 @@ static const char* check_vector_lower_baseline_element(const X86Target* target, 
         {
             check_vector_baseline_binary(&context, BUSTER_CHECK_BASE_PACKED(&context, XORPS), v0, v0, v1);
         }
+    }
+    else if (compare && !element.floating && element.bytes == 8 &&
+             (target->features & ((op == CHECK_OP_EQUAL || op == CHECK_OP_NOT_EQUAL) ? BUSTER_X86_FEATURE(SSE41) : BUSTER_X86_FEATURE(SSE42))) == 0)
+    {
+        // `<=` and `>=` are refused here: their callers take their complements' rows (check_vector_baseline_complement).
+        context.valid = op != CHECK_OP_LESS_EQUAL && op != CHECK_OP_GREATER_EQUAL;
+        check_vector_baseline_compare_qwords(&context, element, op, op == CHECK_OP_EQUAL || op == CHECK_OP_NOT_EQUAL);
     }
     else if (compare)
     {
@@ -807,10 +862,12 @@ static void check_vector_baseline_dwords(CheckVectorBaseline* context, const Che
 //     each vector with the constant's indices (the other's elements zeroed by their top bits), ORed;
 //   - with AVX, a 32-byte vector of two 16-byte ones by VINSERTF128, one's high half by VEXTRACTF128, and with AVX2 a
 //     shuffle of 32-byte vectors' dwords by VPERMD's of each and VPBLENDD's of the two.
-// Others are refused by name, as clang -O0 computes them in sequences no row takes.
+// Others are refused by name, as clang -O0 computes them in sequences no row takes; `elementwise` says the caller runs
+// them element by element instead (shuffles of bytes and words without SSSE3, of 32 bytes of them without AVX-512, of
+// 32 bytes without AVX2: #1834).
 static const char* check_vector_baseline_shuffle_row(const X86Target* target, uint32_t element, uint32_t in_lanes, uint32_t in_bytes, uint32_t out_lanes,
                                                      uint32_t out_bytes, const uint32_t* indices, uint8_t constant_role, Tier0Operation* row,
-                                                     uint8_t* constant, uint32_t* constant_bytes)
+                                                     uint8_t* constant, uint32_t* constant_bytes, bool* elementwise)
 {
     const bool avx = (target->features & BUSTER_X86_FEATURE(AVX)) != 0;
     const bool avx2 = (target->features & BUSTER_X86_FEATURE(AVX2)) != 0;
@@ -824,6 +881,7 @@ static const char* check_vector_baseline_shuffle_row(const X86Target* target, ui
     CheckVectorBaseline context = { row, 16, avx, true };
     CheckVectorBaselineShuffle plan = { .element = element, .lanes = out_lanes };
     *constant_bytes = 0;
+    *elementwise = false;
     for (uint32_t i = 0; i < out_lanes && i < BUSTER_CHECK_BASE_LANES; i += 1)
     {
         const uint32_t k = indices[i];
@@ -929,6 +987,7 @@ static const char* check_vector_baseline_shuffle_row(const X86Target* target, ui
     else if (wide > 16)
     {
         reason = !avx2 ? "vector shuffles of 32-byte vectors without AVX2" : "vector shuffles of 32-byte vectors of 8- and 16-bit elements without AVX-512";
+        *elementwise = true;
     }
     else if (plan.element == 8)
     {
@@ -1044,6 +1103,7 @@ static const char* check_vector_baseline_shuffle_row(const X86Target* target, ui
         else
         {
             reason = plan.element == 1 ? "vector shuffles of 8-bit elements without SSSE3" : "vector shuffles of 16-bit elements without SSSE3";
+            *elementwise = true;
         }
     }
     const uint64_t available = target->features | BUSTER_X86_TARGET_KNOWN;
