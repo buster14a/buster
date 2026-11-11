@@ -3175,7 +3175,7 @@ static const char* check_driver_initializer_conversion(const Parser* parser, Pre
     const bool wide = element == BUSTER_TYPE_INT || element == BUSTER_TYPE_USHORT || element == BUSTER_TYPE_UINT;
     const char* result = source >= stream->count ? NULL :
                          !array ? check_driver_conversion_words(parser, pp, input, stream, types, &spell, source, spelled, spelling,
-                                                                whole && input->declared_sugar != NULL ? input->declared_sugar[declaration] : 0, 0, scratch) :
+                                                                whole ? check_input_declared_sugar(input, declaration) : 0, 0, scratch) :
                          narrow ? "array initializer must be an initializer list or string literal" :
                          wide ? "array initializer must be an initializer list or wide string literal" : "array initializer must be an initializer list";
     *located = whole ? declaration : token;
@@ -3219,7 +3219,7 @@ static const char* check_driver_conversion_error(const Parser* parser, Preproces
             at = check_sparse_get(input->initializer_nodes, declaration) == node ? declaration : at;
         }
         target = check_input_object_spelling(types, input, parser, at, graph->types[node], graph->types[node], &target_spelling);
-        target_sugar = input->declared_sugar != NULL && at < input->token_count ? input->declared_sugar[at] : 0;
+        target_sugar = at < input->token_count ? check_input_declared_sugar(input, at) : 0;
     }
     else if (applies && op == CHECK_OP_ASSIGN)
     {

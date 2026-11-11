@@ -1077,19 +1077,19 @@ static String8 check_driver_warning_type(const Parser* parser, Preprocessor* pp,
     return check_driver_warning_type_at(parser, pp, input, types, spell, scratch, type, spelling, BUSTER_CHECK_NONE, 0);
 }
 
-// The type sugar of a warning operand (#1447, c_types_sugar.c): its declaration's (CheckInput.declared_sugar), through the
+// The type sugar of a warning operand (#1447, c_types_sugar.c): its declaration's (check_input_declared_sugar), through the
 // addresses, indirections and subscripts whose levels the sugar's printer finds (type_sugar_print); 0 for none.
 static uint32_t check_driver_operand_sugar(const CheckInput* input, const CheckStream* stream, uint32_t node)
 {
     const CheckGraph* graph = stream->graph;
     uint32_t result = 0;
-    bool walking = input->declared_sugar != NULL;
+    bool walking = input->sugar_entries != 0;
     for (uint32_t steps = 0; walking && node < graph->count && steps < 16; steps += 1)
     {
         const CheckOp op = graph->ops[node];
         const uint32_t token = graph->tokens[node];
         const uint32_t declaration = op == CHECK_OP_VALUE && token < input->token_count && input->declarations != NULL ? input->declarations[token] : BUSTER_CHECK_NONE;
-        result = declaration < input->token_count ? input->declared_sugar[declaration] : 0;
+        result = declaration < input->token_count ? check_input_declared_sugar(input, declaration) : 0;
         walking = op == CHECK_OP_ADDRESS || op == CHECK_OP_DEREFERENCE || op == CHECK_OP_SUBSCRIPT;
         node = walking ? graph->operand0[node] : node;
     }
@@ -1104,7 +1104,7 @@ static String8 check_driver_sugar_type(const Parser* parser, Preprocessor* pp, c
                                        Arena* scratch, TypeId type, uint32_t sugar)
 {
     String8 result = { 0 };
-    if (sugar != 0 && input != NULL && input->declared_sugar != NULL && type != 0 && check_driver_spelling_ready(parser, pp, input, types, spell, scratch))
+    if (sugar != 0 && input != NULL && input->sugar.slots != NULL && type != 0 && check_driver_spelling_ready(parser, pp, input, types, spell, scratch))
     {
         uint32_t tokens[8];
         String8 texts[8];

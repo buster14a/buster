@@ -20,7 +20,8 @@
 //
 // Only a declaration's own declarator (not a parameter's) of a list that writes a convention makes sugar; a declarator
 // whose levels have an _Atomic pointer, an address space or an aligned typedef keeps none (its type prints as before).
-// The nodes and declared_sugar are made from the output arena when the unit first needs them. On a lane the unit goes
+// The nodes and the map of declarations to them (CheckInput.sugar_tokens) are made from the output arena when the unit
+// first needs them. On a lane the unit goes
 // to source order, whose reader alone makes sugar (its nodes then need no merge).
 
 // The deepest declarator this keeps sugar for: more chunks keep none.
@@ -124,6 +125,55 @@ static uint32_t check_input_sugar_groups(const Parser* parser, uint32_t token, u
     return count < capacity ? count : capacity;
 }
 
+// Sets the sugar of the declaration at `token` (CheckInput.sugar_tokens), the map grown from the output arena past half
+// full; a map that can't grow keeps the token without sugar (its type prints as before).
+static void check_input_set_sugar(CheckInputReader* reader, uint32_t token, uint32_t node)
+{
+    CheckInput* output = reader->output;
+    if (output->sugar_mask == 0 || 2 * (output->sugar_entries + 1) > output->sugar_mask + 1)
+    {
+        const uint32_t slots = output->sugar_mask == 0 ? 64 : 2 * (output->sugar_mask + 1);
+        uint32_t* tokens = slots < (1u << 30) ? BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint32_t, slots) : NULL;
+        uint32_t* nodes = tokens != NULL ? BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint32_t, slots) : NULL;
+        if (nodes != NULL)
+        {
+            memset(tokens, 0, slots * sizeof(uint32_t));
+            for (uint32_t old = 0; output->sugar_mask != 0 && old <= output->sugar_mask; old += 1)
+            {
+                const uint32_t key = output->sugar_tokens[old];
+                uint32_t slot = key != 0 ? ((key - 1) * 0x9e3779b1u) & (slots - 1) : 0;
+                while (key != 0 && tokens[slot] != 0)
+                {
+                    slot = (slot + 1) & (slots - 1);
+                }
+                if (key != 0)
+                {
+                    tokens[slot] = key;
+                    nodes[slot] = output->sugar_nodes[old];
+                }
+            }
+            output->sugar_tokens = tokens;
+            output->sugar_nodes = nodes;
+            output->sugar_mask = slots - 1;
+        }
+        output->resource |= nodes == NULL;
+    }
+    // A full map that couldn't grow takes no new token.
+    uint32_t slot = output->sugar_mask != 0 ? (token * 0x9e3779b1u) & output->sugar_mask : 0;
+    bool probing = output->sugar_mask != 0;
+    while (probing && output->sugar_tokens[slot] != 0 && output->sugar_tokens[slot] != token + 1)
+    {
+        slot = (slot + 1) & output->sugar_mask;
+    }
+    const bool room = output->sugar_mask != 0 && 2 * (output->sugar_entries + 1) <= output->sugar_mask + 1;
+    if (probing && (output->sugar_tokens[slot] == token + 1 || room))
+    {
+        output->sugar_entries += output->sugar_tokens[slot] == 0 ? 1 : 0;
+        output->sugar_tokens[slot] = token + 1;
+        output->sugar_nodes[slot] = node;
+    }
+}
+
 static __attribute__((noinline, cold)) uint32_t check_input_declarator_sugar(CheckInputReader* reader, const CheckDeclaratorFrame* frame, const CheckInputAttributes* common,
                                              const CheckDeclaratorPart* parts, uint32_t order, TypeId type)
 {
@@ -159,16 +209,10 @@ static __attribute__((noinline, cold)) uint32_t check_input_declarator_sugar(Che
         level = !valid ? 0 : part == BUSTER_TYPE_KIND_FUNCTION ? type_return(types, level) : type_element(types, level);
     }
     const TypeId base = level;
-    // The table and the column, once a unit first needs them.
-    if (valid && output->declared_sugar == NULL)
+    // The table, once a unit first needs it.
+    if (valid && output->sugar.slots == NULL)
     {
-        uint32_t* column = BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint32_t, (uint64_t)output->token_count + 1);
-        valid = column != NULL && type_sugar_initialize(&output->sugar, reader->arena, 64);
-        if (column != NULL)
-        {
-            memset(column, 0, ((uint64_t)output->token_count + 1) * sizeof(uint32_t));
-        }
-        output->declared_sugar = valid ? column : NULL;
+        valid = type_sugar_initialize(&output->sugar, reader->arena, 64);
         output->resource |= !valid;
     }
     uint32_t current = 0;
@@ -252,9 +296,9 @@ static __attribute__((noinline, cold)) uint32_t check_input_declarator_sugar(Che
         }
     }
     result = valid && current != 0 && output->sugar.canonical[current] == type ? current : 0;
-    if (output->declared_sugar != NULL)
+    if (frame->name != BUSTER_CHECK_NONE && (result != 0 || output->sugar_entries != 0))
     {
-        output->declared_sugar[frame->name] = result;
+        check_input_set_sugar(reader, frame->name, result);
     }
     return result;
 }
