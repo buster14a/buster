@@ -10432,7 +10432,10 @@ enables, which this checker doesn't all give.
   is `'I' (aka 'int')`, a file-scope `const int` is `'int'`), and desugared
   where its typedef holds them itself, as clang's `getUnqualifiedType` does
   (`CI`'s `'int'`). An array decays to a pointer to its qualified element
-  (`'const int *'`).
+  (`'const int *'`). An `_Atomic` argument is checked and printed as its value
+  type, which the lvalue conversion leaves (#2234,
+  `check_common_format_argument_type`): `%d` of an `_Atomic int` is quiet, and
+  `%s` of one is "the argument has type 'int'".
   A declaration's calling convention keeps clang's `AttributedType` where it
   is written, in a type sugar node of its own (`c_types_sugar.c`, made by
   `c_check_type_sugar_input.c`; `docs/c-types.md`'s "Type sugar"). A failed

@@ -6574,6 +6574,9 @@ static TypeId check_common_format_argument_type(const CheckGraph* graph, const C
 {
     const uint32_t node = graph->argument_nodes[offset + argument];
     TypeId result = node < graph->count ? check_stream_type(stream, node) : 0;
+    // An _Atomic argument's lvalue conversion drops _Atomic (#2234): its value type is what the format checks.
+    const TypeId stripped = result != 0 ? type_strip_aligned(types, result) : 0;
+    result = stripped != 0 && type_kind(types, stripped) == BUSTER_TYPE_KIND_ATOMIC ? type_element(types, stripped) : result;
     if (stream->argument_conversions != NULL)
     {
         const CheckConversion conversion = stream->argument_conversions[offset + argument];
