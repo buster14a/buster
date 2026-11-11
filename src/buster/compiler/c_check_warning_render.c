@@ -1549,10 +1549,12 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
                 length += copied;
                 token = string ? token : count;
             }
-            // target's warning's piece of its string (check_input_target_warning's data).
+            // target's warning's piece of its string (check_input_target_warning's data), from the whole string, which can be
+            // longer than `argument`.
+            const String8 whole = target ? check_warning_strings_value(parser, pp, payload->token, scratch) : (String8){ "", 0 };
             const uint32_t offset = (payload->data >> 4) & 0x3fffu;
-            const uint32_t piece = offset <= length ? ((payload->data >> 18) & 0x3fffu) : 0u;
-            const uint32_t shown = offset <= length ? (piece < length - offset ? piece : length - offset) : 0u;
+            const uint32_t piece = offset <= whole.length ? ((payload->data >> 18) & 0x3fffu) : 0u;
+            const uint32_t shown = offset <= whole.length ? (piece < whole.length - offset ? piece : (uint32_t)whole.length - offset) : 0u;
             static const char* const target_cases[] = { "unsupported", "duplicate", "unknown", "unknown" };
             static const char* const target_places[] = { "", " CPU", " tune CPU", "" };
             // ns_returns_retained's type check names it by a string, and consumed's by their names alone (#147).
@@ -1577,7 +1579,7 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
                                    event->kind == CHECK_WARNING_EVENT_CONSUMED_OBJECT ? "Objective-C object" : "pointer") :
                 event->kind == CHECK_WARNING_EVENT_TARGET_UNSUPPORTED ?
                 check_warning_text(scratch, "%s%s '%.*s' in the 'target' attribute string; 'target' attribute ignored", target_cases[payload->data & 3u],
-                                   target_places[(payload->data >> 2) & 3u], (int)shown, argument + (offset <= length ? offset : 0)) :
+                                   target_places[(payload->data >> 2) & 3u], (int)shown, whole.pointer + (offset <= whole.length ? offset : 0)) :
                 event->kind == CHECK_WARNING_EVENT_UNKNOWN_SANITIZER ? check_warning_text(scratch, "unknown sanitizer '%s' ignored", argument) :
                 event->kind == CHECK_WARNING_EVENT_SANITIZER_GLOBAL ?
                 check_warning_text(scratch, "'%.*s%s%.*s' attribute argument '%s' not supported on a global variable", (int)scope.length, scope.pointer,

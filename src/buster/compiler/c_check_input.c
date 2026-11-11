@@ -1110,6 +1110,10 @@ struct CheckInput
     // Whether a function's declaration has a cpu_specific or cpu_dispatch attribute (#1447): only then does the program
     // look for those functions' versions (c_check_program_cpu_dispatch.c).
     bool cpu_dispatch;
+    // Whether a function is multiversioned by target strings (#1838, c_check_target_versions.c): several target
+    // attributes of other strings, target("default") or target_clones. A unit with one is read in source order
+    // (check_deferred_bodies), whose binding events say what was used before a declaration.
+    bool target_multiversion;
     bool resource;
 };
 
@@ -2047,6 +2051,21 @@ struct CheckInputReader
     uint32_t* cpu_invalid;
     uint32_t cpu_invalid_count;
     uint32_t cpu_invalid_capacity;
+    // Whether a function's declaration has a target or target_clones attribute (#1838): only then are its rules and
+    // binding asked about target multiversioning (c_check_target_versions.c).
+    bool target_versions;
+    // The functions multiversioned by target strings (#1838): each one's declaration `target_mv_tokens[i]` (whose object
+    // is the function's) and the declaration that made it multiversioned, `target_mv_since[i]`; and each declaration of
+    // them that binding keeps apart from the visible one before it, `target_bind_tokens[i]`, with the earlier declaration
+    // it redeclares or BUSTER_CHECK_NONE for a version of its own (`target_bind_redeclares[i]`). In the arena.
+    uint32_t* target_mv_tokens;
+    uint32_t* target_mv_since;
+    uint32_t target_mv_count;
+    uint32_t target_mv_capacity;
+    uint32_t* target_bind_tokens;
+    uint32_t* target_bind_redeclares;
+    uint32_t target_bind_count;
+    uint32_t target_bind_capacity;
     // #619: the walk's declarations that the section settings and conflicts read (check_input_section_declaration), from
     // the first setting's position or section attribute's token on (section_record_from, BUSTER_CHECK_NONE before
     // either; check_input_attribute_read_item lowers it to each section attribute's token as it reads one).
@@ -3008,10 +3027,17 @@ static void check_input_recovered_publish(CheckInputReader* reader)
     input->recovered_count = input->resource ? input->recovered_count : 0;
 }
 
-// Publish the unit's deferred multiversioning reports after its body checks have run, in their discovery order.
+static void check_input_target_versions_calls(CheckInputReader* reader);
+
+// Publish the unit's deferred multiversioning reports after its body checks have run, in their discovery order: first the
+// calls no default version of a function multiversioned by target strings reaches (#1838).
 static void check_input_multiversion_flush(CheckInputReader* reader)
 {
     CheckInput* input = reader->output;
+    if (input->target_multiversion && !input->resource)
+    {
+        check_input_target_versions_calls(reader);
+    }
     for (uint32_t i = 0; !input->resource && i < input->multiversion_report_count; i += 1)
     {
         const CheckInputReport report = input->multiversion_reports[i];
@@ -10256,6 +10282,15 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                     check_input_cpu_dispatch_declaration(reader, attributes, name, type, previous_handle, is_inline, is_static, main_function,
                                                          kind == PARSE_KIND_L_BRACE ? i : BUSTER_CHECK_NONE);
                 }
+                if (reader->target_versions && reader->output->multiversion_report_count == multiversion_reports)
+                {
+                    // clang's rules for multiversioning by target strings (#1838): its versions, which binding keeps
+                    // apart, and the declarations they refuse.
+                    const IdentId identifier = parser->tokens.names[name];
+                    const bool main_function = !reader->pp->options.freestanding && intern_length(reader->pp->table, identifier) == 4 &&
+                                               memcmp(intern_bytes(reader->pp->table, identifier), "main", 4) == 0;
+                    check_input_target_versions_declaration(reader, attributes, name, type, previous_handle, is_inline, is_static, main_function);
+                }
             }
             if (valid && !file && storage == C_NAME_EXTERN && initialized)
             {
@@ -10743,7 +10778,12 @@ static void check_input_bind_checked(CheckInputReader* reader, uint32_t token, u
     // A cpu_specific or cpu_dispatch declaration (#1447) of another version than the visible one before it is an entity of
     // its own, bound apart; one of an earlier version's redeclares that one, its definitions one entity's.
     bool versions = false;
-    const uint32_t version = reader->cpu_dispatch && kind == C_BINDING_FUNCTION && old != 0 ? check_input_cpu_dispatch_match(reader, token, old, &versions) : BUSTER_CHECK_NONE;
+    uint32_t version = reader->cpu_dispatch && kind == C_BINDING_FUNCTION && old != 0 ? check_input_cpu_dispatch_match(reader, token, old, &versions) : BUSTER_CHECK_NONE;
+    // So is a version of a function multiversioned by target strings (#1838, c_check_target_versions.c).
+    if (reader->target_versions && kind == C_BINDING_FUNCTION && old != 0 && version == BUSTER_CHECK_NONE && !versions)
+    {
+        version = check_input_target_versions_match(reader, token, &versions);
+    }
     if (version != BUSTER_CHECK_NONE)
     {
         check_input_cpu_dispatch_redeclare(reader, token, version);
