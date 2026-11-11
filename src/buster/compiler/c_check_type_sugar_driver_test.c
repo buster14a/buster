@@ -1154,6 +1154,27 @@ static const CheckDriverDefaultWarningFixture check_driver_static_assert_fixture
         .notes = 3,
         .c23 = true,
     },
+    {
+        // A static assertion among a structure's or a union's members (#2264), which declares none: checked as a block's,
+        // a failing one's details too, and the members around it kept.
+        .name = "static assertions among members",
+        .source = "struct S { int a; _Static_assert(1, \"\"); int b; };\n"
+                  "struct T { _Static_assert(sizeof(int) == 4, \"x\"); int c; union { _Static_assert(1, \"y\"); int d; }; };\n"
+                  "union U { _Static_assert(1, \"u\"); int a; float b; };\n"
+                  "struct V { int a; _Static_assert(sizeof(int) == 3, \"fails\"); char b : 2; };\n"
+                  "struct X { int a; _Static_assert(1, \"\"); };\n"
+                  "int z = sizeof(struct S) + sizeof(struct T) + sizeof(union U) + sizeof(struct V) + sizeof(struct X);\n"
+                  "void f(struct S *s) { s->b = s->a; }\n",
+        .errors = 1,
+        .notes = 1,
+    },
+    {
+        .name = "C23 static assertions among members",
+        .source = "struct S { int a; static_assert(1); int b; static_assert(sizeof(int) == 4, \"m\"); };\n"
+                  "struct W { static_assert(1); };\n"
+                  "int z = sizeof(struct S);\n",
+        .c23 = true,
+    },
 };
 
 static void check_test_driver_type_sugar(CheckTest* test, const char* clang, const char* executable, const char* directory)

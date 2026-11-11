@@ -864,7 +864,7 @@ static bool check_corpus_check_policy(CheckCorpusPath* path, Parser* parser, Pre
         ready = path->resumed != NULL && path->prefix != NULL && path->scratch.base != NULL;
         if (ready)
         {
-            const CheckPrefixStatus status = check_prefix_resume(path->resumed, parser, &path->prefix_arena, &path->scratch);
+            const CheckPrefixStatus status = check_prefix_resume(path->resumed, parser, NULL, 0, NULL, &path->prefix_arena, &path->scratch);
             path->resource |= status == CHECK_PREFIX_RESOURCE;
             recovered = status == CHECK_PREFIX_READY ? &path->resumed->parser : parser;
             semantic = recovered != parser && recovered->errors == 0;

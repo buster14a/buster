@@ -184,8 +184,22 @@ typedef enum IrOp
     // locked access; no pass moves an access across it or eliminates it, as an atomic store's and load's. The typed
     // stream's ATOMIC_RMW and ATOMIC_CAS.
     IR_ATOMIC_RMW,
+    // A masked vector load (#1840): `a` the address, `b` the mask and `c` the passthrough, a vector of the result's type;
+    // its flags the lanes (an IrSimdLane of integers, as a vselect's), whose mask `b` is (ir_lane_mask), and its
+    // alignment_log2 a load's. Its lane i is the lane at the address's lane i where b's bit i is set, and the
+    // passthrough's lane i where it isn't. A lane whose bit is clear is never read, so it can't fault: the masked
+    // builtins' tail reads past an array's end are defined (vmovdqu8 to vmovdqu64 zmm{k}, [p]). A load's effect on
+    // memory, of the set lanes' bytes alone: no pass moves it across a store or eliminates it but as an unused load.
+    IR_MASKED_LOAD,
+    // A masked vector store (#1840): `a` the address, `b` the stored vector and `c` the mask, its flags the lanes as a
+    // masked load's and its alignment_log2 a store's. It writes the vector's lane i at the address's lane i where c's bit
+    // i is set, and no byte of a lane whose bit is clear (vmovdqu8 to vmovdqu64 [p]{k}, zmm). A store's effect.
+    IR_MASKED_STORE,
     IR_OP_COUNT,
 } IrOp;
+
+// The opcode tables' entries (#1840): two byte-permute registers' worth, which vpermi2b looks up at once.
+#define BUSTER_IR_OP_TABLE 128
 
 // An IR_FENCE's operand (#1059), as the typed stream's FENCE value: its order and its scope, and seq_cst, the order a
 // thread fence needs an instruction for on x86-64 (mfence).
@@ -766,6 +780,8 @@ static const char* const ir_op_names[IR_OP_COUNT] = {
     "fence",
     "intrinsic",
     "rmw",
+    "masked_load",
+    "masked_store",
 };
 
 // The text form's names of a machine row's classes (#141, IrFunction.rows): the typed stream's, a vector's and a mask's
@@ -858,6 +874,12 @@ static bool ir_access_flags_valid(uint32_t op, uint8_t flags)
     const uint32_t order = (flags & BUSTER_IR_ORDER) >> BUSTER_IR_ORDER_SHIFT;
     const uint32_t orders = op == IR_LOAD ? 0x27u : 0x29u;
     return (flags & ~BUSTER_IR_ACCESS_FLAGS) == 0 && ((flags & BUSTER_IR_ATOMIC) != 0 ? (orders >> order & 1) != 0 : order == 0);
+}
+
+// Whether a masked load's or store's flags are its lanes (#1840): an IrSimdLane of integers, whose mask is its operand.
+static bool ir_masked_lanes_valid(uint8_t flags)
+{
+    return flags == IR_SIMD_LANE_I8 || flags == IR_SIMD_LANE_I16 || flags == IR_SIMD_LANE_I32 || flags == IR_SIMD_LANE_I64;
 }
 
 // Whether an atomic read/modify/write's flags are an atomic access's of a C order, any of them (#1059): the locked access
@@ -1135,6 +1157,8 @@ typedef enum IrRule
     IR_RULE_FENCE,
     IR_RULE_ATOMIC_RMW,
     IR_RULE_INTRINSIC,
+    IR_RULE_MASKED_LOAD,
+    IR_RULE_MASKED_STORE,
 } IrRule;
 
 #define BUSTER_IR_INTS (((1u << (IR_I128 + 1)) - 1) & ~1u)
@@ -1207,15 +1231,17 @@ typedef enum IrRule
     X(IR_LIFETIME,      0, 3, 1u << IR_VOID, IR_RULE_SLOT, 0) \
     X(IR_FENCE,         0, 1, 1u << IR_VOID, IR_RULE_FENCE, 0) \
     X(IR_INTRINSIC,     1, 7, (1u << IR_I32) | (1u << IR_I64) | BUSTER_IR_VECTORS, IR_RULE_INTRINSIC, 0) \
-    X(IR_ATOMIC_RMW,    3, 7, (1u << IR_I8) | (1u << IR_I16) | (1u << IR_I32) | (1u << IR_I64), IR_RULE_ATOMIC_RMW, 0)
+    X(IR_ATOMIC_RMW,    3, 7, (1u << IR_I8) | (1u << IR_I16) | (1u << IR_I32) | (1u << IR_I64), IR_RULE_ATOMIC_RMW, 0) \
+    X(IR_MASKED_LOAD,   7, 7, BUSTER_IR_VECTORS, IR_RULE_MASKED_LOAD, 0) \
+    X(IR_MASKED_STORE,  7, 7, 1u << IR_VOID, IR_RULE_MASKED_STORE, 0)
 
 #define BUSTER_IR_OPERAND_ROW(op, uses, fields, types, rule, term) [op] = uses,
-static const uint8_t ir_operand_table[64] = { BUSTER_IR_ROWS(BUSTER_IR_OPERAND_ROW) };
+static const uint8_t ir_operand_table[BUSTER_IR_OP_TABLE] = { BUSTER_IR_ROWS(BUSTER_IR_OPERAND_ROW) };
 #undef BUSTER_IR_OPERAND_ROW
 // The operands that are values where they aren't BUSTER_IR_NONE, as ir_operand_table's bits: an address's index (b),
 // a return's value (a), a call's destination for its aggregate result (c) and an atomic compare-exchange's desired
 // value (c, #1059), and an intrinsic's second input (b, absent for splat alone).
-static const uint8_t ir_optional_table[64] = {
+static const uint8_t ir_optional_table[BUSTER_IR_OP_TABLE] = {
     [IR_ADDRESS] = 2,
     [IR_RET] = 1,
     [IR_CALL] = 4,
@@ -1224,19 +1250,19 @@ static const uint8_t ir_optional_table[64] = {
     [IR_INTRINSIC] = 2,
 };
 #define BUSTER_IR_FIELD_ROW(op, uses, fields, types, rule, term) [op] = fields,
-static const uint8_t ir_field_table[64] = { BUSTER_IR_ROWS(BUSTER_IR_FIELD_ROW) };
+static const uint8_t ir_field_table[BUSTER_IR_OP_TABLE] = { BUSTER_IR_ROWS(BUSTER_IR_FIELD_ROW) };
 #undef BUSTER_IR_FIELD_ROW
 #define BUSTER_IR_TYPE_ROW(op, uses, fields, types, rule, term) [op] = types,
-static const uint32_t ir_result_table[64] = { BUSTER_IR_ROWS(BUSTER_IR_TYPE_ROW) };
+static const uint32_t ir_result_table[BUSTER_IR_OP_TABLE] = { BUSTER_IR_ROWS(BUSTER_IR_TYPE_ROW) };
 #undef BUSTER_IR_TYPE_ROW
 #define BUSTER_IR_RULE_ROW(op, uses, fields, types, rule, term) [op] = rule,
-static const uint8_t ir_rule_table[64] = { BUSTER_IR_ROWS(BUSTER_IR_RULE_ROW) };
+static const uint8_t ir_rule_table[BUSTER_IR_OP_TABLE] = { BUSTER_IR_ROWS(BUSTER_IR_RULE_ROW) };
 #undef BUSTER_IR_RULE_ROW
 #define BUSTER_IR_TERM_ROW(op, uses, fields, types, rule, term) [op] = term,
-static const uint8_t ir_terminator_table[64] = { BUSTER_IR_ROWS(BUSTER_IR_TERM_ROW) };
+static const uint8_t ir_terminator_table[BUSTER_IR_OP_TABLE] = { BUSTER_IR_ROWS(BUSTER_IR_TERM_ROW) };
 #undef BUSTER_IR_TERM_ROW
 #undef BUSTER_IR_ROWS
-_Static_assert(IR_OP_COUNT <= 64, "IR opcode tables must fit one byte-permute register");
+_Static_assert(IR_OP_COUNT <= BUSTER_IR_OP_TABLE, "IR opcode tables must fit two byte-permute registers");
 
 static bool ir_vector_type(uint32_t type)
 {
@@ -1899,7 +1925,8 @@ static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i)
     }
     else if (((op == IR_LOAD || op == IR_STORE) && (!ir_access_flags_valid(op, f->flags[i]) || f->alignment_log2[i] > 31)) ||
              (op == IR_ATOMIC_RMW && (!ir_rmw_flags_valid(f->flags[i]) || f->alignment_log2[i] > 31)) ||
-             ((op != IR_LOAD && op != IR_STORE && op != IR_ATOMIC_RMW) && ((f->flags[i] != 0 && op != IR_INTRINSIC && !ir_lane_valid(op, f->flags[i]) && (op != IR_STACK_SAVE || f->flags[i] != BUSTER_IR_STACK_SAVE_FRAME)) ||
+             ((op == IR_MASKED_LOAD || op == IR_MASKED_STORE) && (!ir_masked_lanes_valid(f->flags[i]) || f->alignment_log2[i] > 31)) ||
+             ((op != IR_LOAD && op != IR_STORE && op != IR_ATOMIC_RMW && op != IR_MASKED_LOAD && op != IR_MASKED_STORE) && ((f->flags[i] != 0 && op != IR_INTRINSIC && !ir_lane_valid(op, f->flags[i]) && (op != IR_STACK_SAVE || f->flags[i] != BUSTER_IR_STACK_SAVE_FRAME)) ||
               f->alignment_log2[i] != 0)))
     {
         check.error = IR_ERROR_METADATA;
@@ -2092,6 +2119,9 @@ static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i)
                 valid = ta == IR_PTR && tb == type && (compare ? c < f->instruction_count && f->type[c] == type : c == BUSTER_IR_NONE) &&
                         ir_atomic_access(type, f->alignment_log2[i]);
             } break;
+            // A masked load's mask at its lanes and passthrough of its type, and a masked store's vector and mask so.
+            case IR_RULE_MASKED_LOAD: valid = ta == IR_PTR && ir_vector_type(type) && tb == ir_lane_mask(type, f->flags[i]) && operand_types[2] == type; break;
+            case IR_RULE_MASKED_STORE: valid = ta == IR_PTR && ir_vector_type(tb) && operand_types[2] == ir_lane_mask(tb, f->flags[i]); break;
             case IR_RULE_SYMBOL: valid = a != 0 && a < f->symbol_count; break;
             case IR_RULE_ADDRESS:
             {
@@ -2159,9 +2189,10 @@ static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i)
     return check;
 }
 
-static __m512i ir_lookup_bytes(__m512i table, __m128i op)
+// An opcode table's (BUSTER_IR_OP_TABLE bytes) entries of 16 opcodes, one vpermi2b of its two halves.
+static __m512i ir_lookup_bytes(const uint8_t* table, __m128i op)
 {
-    return _mm512_cvtepu8_epi32(_mm512_castsi512_si128(_mm512_permutexvar_epi8(_mm512_zextsi128_si512(op), table)));
+    return _mm512_cvtepu8_epi32(_mm512_castsi512_si128(_mm512_permutex2var_epi8(_mm512_loadu_si512(table), _mm512_zextsi128_si512(op), _mm512_loadu_si512(table + 64))));
 }
 
 // The types of one operand column's `valid` lanes, and zero in the others. `low` and `high` hold the 128 types from
@@ -2211,13 +2242,19 @@ static __mmask16 ir_check_batch(const IrFunction* f, __m512i head, uint32_t firs
     const __m512i a = _mm512_maskz_loadu_epi32(active, f->a + first);
     const __m512i b = _mm512_maskz_loadu_epi32(active, f->b + first);
     const __m512i c = _mm512_maskz_loadu_epi32(active, f->c + first);
-    const __m512i operands = ir_lookup_bytes(_mm512_loadu_si512(ir_operand_table), op_bytes);
-    const __m512i fields = ir_lookup_bytes(_mm512_loadu_si512(ir_field_table), op_bytes);
-    const __m512i rules = ir_lookup_bytes(_mm512_loadu_si512(ir_rule_table), op_bytes);
-    const __m512i terms = ir_lookup_bytes(_mm512_loadu_si512(ir_terminator_table), op_bytes);
-    const __m512i allowed_low = _mm512_permutex2var_epi32(_mm512_loadu_si512(ir_result_table), op, _mm512_loadu_si512(ir_result_table + 16));
-    const __m512i allowed_high = _mm512_permutex2var_epi32(_mm512_loadu_si512(ir_result_table + 32), op, _mm512_loadu_si512(ir_result_table + 48));
-    const __m512i allowed = _mm512_mask_blend_epi32(_mm512_cmpge_epu32_mask(op, _mm512_set1_epi32(32)), allowed_low, allowed_high);
+    const __m512i operands = ir_lookup_bytes(ir_operand_table, op_bytes);
+    const __m512i fields = ir_lookup_bytes(ir_field_table, op_bytes);
+    const __m512i rules = ir_lookup_bytes(ir_rule_table, op_bytes);
+    const __m512i terms = ir_lookup_bytes(ir_terminator_table, op_bytes);
+    // The result types' 128 words, 32 opcodes per permute, chosen by the opcode's bits 5 and 6.
+    const __m512i allowed_first = _mm512_permutex2var_epi32(_mm512_loadu_si512(ir_result_table), op, _mm512_loadu_si512(ir_result_table + 16));
+    const __m512i allowed_second = _mm512_permutex2var_epi32(_mm512_loadu_si512(ir_result_table + 32), op, _mm512_loadu_si512(ir_result_table + 48));
+    const __m512i allowed_third = _mm512_permutex2var_epi32(_mm512_loadu_si512(ir_result_table + 64), op, _mm512_loadu_si512(ir_result_table + 80));
+    const __m512i allowed_fourth = _mm512_permutex2var_epi32(_mm512_loadu_si512(ir_result_table + 96), op, _mm512_loadu_si512(ir_result_table + 112));
+    const __mmask16 odd = _mm512_test_epi32_mask(op, _mm512_set1_epi32(32));
+    const __m512i allowed_low = _mm512_mask_blend_epi32(odd, allowed_first, allowed_second);
+    const __m512i allowed_high = _mm512_mask_blend_epi32(odd, allowed_third, allowed_fourth);
+    const __m512i allowed = _mm512_mask_blend_epi32(_mm512_test_epi32_mask(op, _mm512_set1_epi32(64)), allowed_low, allowed_high);
     const __m512i one = _mm512_set1_epi32(1);
     const __m512i none = _mm512_set1_epi32(-1);
     const __m512i limit = _mm512_set1_epi32((int)f->instruction_count);
@@ -2343,7 +2380,7 @@ static __attribute__((noinline, aligned(64))) IrCheck ir_check_rows(const IrFunc
 // A terminator's successor source by operation: none, one target in a, two in b and c, a switch's
 // case list in extra, or a br_indirect's labels. The op-indexed read keeps each block's dispatch a
 // load where the equivalent compare chain lowered to a jump table's indirect branch (#786).
-static const uint8_t ir_successor_table[64] = {
+static const uint8_t ir_successor_table[BUSTER_IR_OP_TABLE] = {
     [IR_BR] = 1,
     [IR_CBR] = 2,
     [IR_SWITCH] = 3,
@@ -2781,8 +2818,8 @@ static __mmask16 ir_dominance_batch(const IrFunction* f, const IrCfg* cfg, const
 {
     const __mmask16 active = (__mmask16)((1u << count) - 1u);
     const __m128i op = _mm_maskz_loadu_epi8(active, f->op + first);
-    const __m512i operands = ir_lookup_bytes(_mm512_loadu_si512(ir_operand_table), op);
-    const __m512i optional = ir_lookup_bytes(_mm512_loadu_si512(ir_optional_table), op);
+    const __m512i operands = ir_lookup_bytes(ir_operand_table, op);
+    const __m512i optional = ir_lookup_bytes(ir_optional_table, op);
     const __m512i a = _mm512_maskz_loadu_epi32(active, f->a + first);
     const __m512i b = _mm512_maskz_loadu_epi32(active, f->b + first);
     const __m512i c = _mm512_maskz_loadu_epi32(active, f->c + first);
@@ -3013,8 +3050,8 @@ static uint64_t ir_uses_batch(const IrFunction* f, uint32_t first, uint32_t coun
     const __mmask16 active = (__mmask16)((1u << count) - 1u);
     const __m128i op_bytes = _mm_maskz_loadu_epi8(active, f->op + first);
     const __m512i op = _mm512_cvtepu8_epi32(op_bytes);
-    const __m512i operands = ir_lookup_bytes(_mm512_loadu_si512(ir_operand_table), op_bytes);
-    const __m512i optional = ir_lookup_bytes(_mm512_loadu_si512(ir_optional_table), op_bytes);
+    const __m512i operands = ir_lookup_bytes(ir_operand_table, op_bytes);
+    const __m512i optional = ir_lookup_bytes(ir_optional_table, op_bytes);
     const __m512i none = _mm512_set1_epi32(-1);
     const __m512i one = _mm512_set1_epi32(1);
     const __m512i two = _mm512_set1_epi32(2);
@@ -3498,6 +3535,11 @@ static IrError ir_print(const IrFunction* f, Arena* scratch, FILE* output)
                             fprintf(output, " align=%" PRIu32 " %s %s", UINT32_C(1) << f->alignment_log2[i],
                                     operation == BUSTER_IR_RMW_ADD ? "add" : operation == BUSTER_IR_RMW_COMPARE ? "cas" : operation == BUSTER_IR_RMW_EXCHANGE ? "xchg" : "invalid",
                                     order <= BUSTER_IR_FENCE_SEQ_CST ? ir_fence_orders[order] : "invalid");
+                        }
+                        if (op == IR_MASKED_LOAD || op == IR_MASKED_STORE)
+                        {
+                            // A masked access's alignment and lanes (#1840), always named: its mask's type depends on them.
+                            fprintf(output, " align=%" PRIu32 " lanes=%s", UINT32_C(1) << f->alignment_log2[i], f->flags[i] < IR_SIMD_LANE_COUNT ? ir_lane_names[f->flags[i]] : "invalid");
                         }
                         if (op == IR_LOAD || op == IR_STORE)
                         {

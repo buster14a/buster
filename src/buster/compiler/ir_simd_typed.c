@@ -129,6 +129,9 @@ struct IrSimdTypedOperation
     uint8_t compress;
     // An AES round (#1840, ir_simd_typed_aes): whether the row is one, its round (0, or 1 for the last) in `immediate`.
     bool aes;
+    // A masked load or store (#1840, ir_simd_typed_masked_memory): 1 for a load, 2 for a store, 0 for any other row; its
+    // lanes in `lane` and its alignment's log2 (an aligned form's, 0 for an unaligned one) in `immediate`.
+    uint8_t masked_memory;
 };
 
 // The conversions' and the scalar shifts' forms (#1840), shared with Tier 1's selection.
@@ -1704,9 +1707,69 @@ static IrSimdTypedStatus ir_simd_typed_zero(const Tier0Operation* source, uint64
     return status;
 }
 
+// The masked loads and stores (#1840): the masked load builtins' rows (CHECK_X86_LOWER_LOAD: loaddqu, loadups, loadupd,
+// loadaps, loadapd, movdqa32load, movdqa64load, and the scalar loadss128 and loadsd128 of the whole vector) and the stores'
+// (CHECK_X86_LOWER_STORE). Of a U64 address, a vector and its mask: a load's first record its move of the vector's width
+// from [INTEGER(0)] into VECTOR(1), the passthrough, under MASK(2), its second VECTOR(1) moved whole into VECTOR(0); a
+// store's one record the move of VECTOR(1) to [INTEGER(0)] under MASK(2). Its lanes are its move's element: vmovdqu8 to
+// vmovdqu64's, vmovdqa32's and vmovups's and vmovaps's doublewords, vmovdqa64's, vmovupd's and vmovapd's quadwords; an aligned
+// move's (vmovdqa, vmovaps, vmovapd) alignment the vector's bytes, which it faults without. Its features are its forms'
+// (BW for bytes and words, VL below 64 bytes), the moves' and the mask's (DQ for a byte, BW for 4 bytes or more);
+// otherwise it stays a machine row, as the expanding loads do.
+static IrSimdTypedStatus ir_simd_typed_masked_memory(const Tier0Operation* source, uint64_t target_features, IrSimdTypedOperation* result)
+{
+    // Each kind's (ir_simd_masked_moves) lanes' bytes' log2 and whether it is aligned.
+    static const uint8_t sizes[10] = { 0, 1, 2, 3, 2, 3, 2, 3, 2, 3 };
+    static const bool aligned[10] = { false, false, false, false, true, true, false, false, true, true };
+    static const uint8_t lanes[4] = { IR_SIMD_LANE_I8, IR_SIMD_LANE_I16, IR_SIMD_LANE_I32, IR_SIMD_LANE_I64 };
+    static const uint16_t whole[3] = { X86_FORM_VMOVDQU64_X_XM128, X86_FORM_VMOVDQU64_Y_YM256, X86_FORM_VMOVDQU64_Z_ZM512 };
+    const bool store = source->result_class == BUSTER_TYPED_CLASS_VOID;
+    const uint32_t bytes = source->operand_bytes[1];
+    const uint32_t width = bytes == 16 ? 0 : bytes == 32 ? 1 : 2;
+    const bool admitted = (store || (source->result_class == BUSTER_TYPED_CLASS_VECTOR && source->result_bytes == bytes)) && (bytes == 16 || bytes == 32 || bytes == 64) &&
+                          source->record_count == (store ? 1 : 2) && source->operand_count == 3 && source->operand_classes[0] == BUSTER_TYPED_CLASS_U64 &&
+                          source->operand_classes[1] == BUSTER_TYPED_CLASS_VECTOR && source->operand_classes[2] == BUSTER_TYPED_CLASS_MASK;
+    const X86Instruction moved = { .form = whole[width], .reg = BUSTER_TIER0_ROLE_VECTOR(0), .rm = BUSTER_TIER0_ROLE_VECTOR(1), .mode = BUSTER_X86_REGISTER_DIRECT };
+    IrSimdTypedOperation candidate = { .operation = IR_SIMD_OPERATION_COUNT };
+    for (uint32_t kind = 0; admitted && kind < 10; kind += 1)
+    {
+        const uint32_t size = sizes[kind];
+        const uint32_t count = bytes >> size;
+        const uint32_t mask_bytes = count <= 8 ? 1 : count / 8;
+        const X86Instruction expected = {
+            .form = ir_simd_masked_moves[kind][store][width],
+            .reg = BUSTER_TIER0_ROLE_VECTOR(1),
+            .rm = BUSTER_TIER0_ROLE_INTEGER(0),
+            .mode = BUSTER_X86_MEMORY_BASE,
+            .decorations = BUSTER_TIER0_DECORATION_MASK(2),
+        };
+        if (source->operand_bytes[2] == mask_bytes && memcmp(&source->records[0], &expected, sizeof(expected)) == 0 &&
+            (store || memcmp(&source->records[1], &moved, sizeof(moved)) == 0))
+        {
+            candidate.masked_memory = (uint8_t)(store ? 2 : 1);
+            candidate.lane = (IrSimdLane)lanes[size];
+            candidate.immediate = (uint8_t)(aligned[kind] ? 4 + width : 0);
+            const uint64_t mask = (mask_bytes == 1 ? BUSTER_X86_FEATURE(AVX512DQ) : 0) | (mask_bytes >= 4 ? BUSTER_X86_FEATURE(AVX512BW) : 0);
+            candidate.required_features = ir_typed_vector_moves(bytes, target_features) | BUSTER_X86_FEATURE(AVX512F) |
+                                          ((x86_target_requirement(expected.form) | (store ? 0 : x86_target_requirement(moved.form))) & ~BUSTER_X86_TARGET_KNOWN) | mask;
+        }
+    }
+    const IrSimdTypedStatus status = candidate.masked_memory != 0 && (target_features & candidate.required_features) == candidate.required_features ? IR_SIMD_TYPED_OK : IR_SIMD_TYPED_UNSUPPORTED;
+    if (status == IR_SIMD_TYPED_OK)
+    {
+        candidate.shape = (IrSimdShape)(IR_SIMD_V4I32 + width);
+        candidate.operand_count = 3;
+        memcpy(candidate.operand_classes, source->operand_classes, sizeof(candidate.operand_classes));
+        memcpy(candidate.operand_bytes, source->operand_bytes, sizeof(candidate.operand_bytes));
+        *result = candidate;
+    }
+    return status;
+}
+
 // A row's decoding: the bit builtins', the signed overflow builtins', masks, scalar intrinsics, lane operations,
 // comparisons into a mask alone, masked moves' selects, undefined vectors, width changes, permutes, conversions and
-// shifts by a scalar count, lane operations and masks to vectors and back (#1840), then exact scalar splats; other admitted forms stay machine rows. A semantic match
+// shifts by a scalar count, lane operations, masks to vectors and back and masked loads and stores (#1840), then exact
+// scalar splats; other admitted forms stay machine rows. A semantic match
 // whose target lacks a required feature stays refused, but a comparison into a mask alone, a select, an undefined
 // vector, a width change, a permute, a conversion or a shift, whose machine row a target may still run, stays one.
 static IrSimdTypedStatus ir_simd_typed_row(const Tier0Operation* source, uint64_t target_features, IrSimdTypedOperation* result)
@@ -1776,6 +1839,10 @@ static IrSimdTypedStatus ir_simd_typed_row(const Tier0Operation* source, uint64_
     if (status == IR_SIMD_TYPED_UNSUPPORTED && source->result_class == BUSTER_TYPED_CLASS_VECTOR)
     {
         status = ir_simd_typed_aes(source, target_features, result);
+    }
+    if (status == IR_SIMD_TYPED_UNSUPPORTED && (source->result_class == BUSTER_TYPED_CLASS_VECTOR || source->result_class == BUSTER_TYPED_CLASS_VOID))
+    {
+        status = ir_simd_typed_masked_memory(source, target_features, result);
     }
     if (status == IR_SIMD_TYPED_UNSUPPORTED)
     {
