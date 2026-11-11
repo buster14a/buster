@@ -101,11 +101,12 @@ static inline __attribute__((unused)) uint64_t test_deal_makespan(const uint64_t
 // Deals as test_deal does, the heaviest item first (of two that weigh the same, the earlier), but each to the bin that,
 // run as the runner runs a shard of `cpus` CPUs (test_deal_makespan), would end the earliest with it (of those, the one
 // whose items weigh the least so far, then the first): the deal that minds a long item's start behind items that hold
-// every CPU, which the weights alone don't see. held[i] is item i's CPUs, at most `cpus`, and weights[i] its time times
+// every CPU, which the weights alone don't see. Bin 0 ends `first` later than its items alone: the time of the steps
+// that a row's shard 1 alone runs besides them (#2031), so that it gets less of the deal. held[i] is item i's CPUs, at most `cpus`, and weights[i] its time times
 // them. It depends on the weights, the CPUs and the bins alone, never on the machine. `order` and `assigned` take
 // `count` entries, `loads` min(bins, count), `ends` and `holds` `cpus`; at most min(bins, count) bins are used, as
 // test_deal's.
-static inline __attribute__((unused)) void test_deal_scheduled(const uint64_t* weights, const uint64_t* held, uint64_t count, uint64_t bins, uint64_t cpus, uint64_t* order, uint64_t* loads, uint64_t* assigned, uint64_t* ends, uint64_t* holds)
+static inline __attribute__((unused)) void test_deal_scheduled(const uint64_t* weights, const uint64_t* held, uint64_t count, uint64_t bins, uint64_t cpus, uint64_t first, uint64_t* order, uint64_t* loads, uint64_t* assigned, uint64_t* ends, uint64_t* holds)
 {
     const uint64_t used = bins < count ? bins : count;
     for (uint64_t i = 0; i < count; i += 1)
@@ -131,7 +132,7 @@ static inline __attribute__((unused)) void test_deal_scheduled(const uint64_t* w
         for (uint64_t b = 0; b < used; b += 1)
         {
             assigned[item] = b;
-            const uint64_t time = test_deal_makespan(weights, held, count, assigned, b, cpus, ends, holds);
+            const uint64_t time = test_deal_makespan(weights, held, count, assigned, b, cpus, ends, holds) + (b == 0 ? first : 0);
             const bool better = time < best_time || (time == best_time && loads[b] < loads[best]);
             best = better ? b : best;
             best_time = better ? time : best_time;

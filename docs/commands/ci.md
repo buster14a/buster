@@ -242,6 +242,12 @@ build/costs --self-test --root .
 - **Commands without a good sample.** A command whose samples all failed costs
   its longest failure, a lower bound (`#: lower-bound`). One without any sample
   costs the row's median per CPU times its CPUs (`#: unmeasured`).
+- **Shard 1's once-only steps.** `#: first-shard SECONDS` is how much longer a
+  row's shard 1 runs than its other shards besides their commands: the median
+  of shard 1's jobs' time outside the test step, less the others' median, each
+  scaled to the slowest CPU as samples are. Only jobs whose commands all passed
+  count (a failure skips the later steps), and not the vector row's draws, which
+  also wait for their collector; without both kinds of job the line is left out.
 - **Provenance.** The `#:` lines record the row, the runner's CPUs, the
   revisions measured and the CPUs drawn, each with its jobs.
 - **Collect.** After a full run (the nightly snapshot's, or a dispatched
@@ -262,7 +268,8 @@ build/costs --self-test --root .
   drops the removed ones; no logs are needed.
 - **Plan.** `build/costs plan --tests tools/ci/correctness.tests --costs
   tools/ci/costs/ROW.costs --shards 2-8 [--setup S] [--first S] [--deal
-  FILE]` predicts the runner's deal and schedule for each shard count. For
+  FILE]` predicts the runner's deal and schedule for each shard count, adding
+  the table's `#: first-shard` to shard 1 unless `--first` gives another. For
   each N it prints the longest shard, the mean, the imbalance, the floor (the
   longest command alone) and the runner-minutes. A single N lists each
   command's start and end. `--deal` deals by another file, such as an older
@@ -293,8 +300,10 @@ The test job in `9700x.yml` gives each row its count (`shards`):
 No deal beats a row's longest command. In the MSan rows that is a part of the
 preprocessor's cases against clang (about 20 minutes on an EPYC 7763), and in
 the plain rows the semantic driver's and the parser's clang checks; finer parts
-(#2030) lower it. A row's once-only steps run on its shard 1 after the deal, so
-`plan --first` adds them, but the deal doesn't see them.
+(#2030) lower it. A row's once-only steps run on its shard 1 besides its part of
+the deal, and the deal sees them: shard 1's simulated schedule ends its table's
+`#: first-shard` later, so the commands go to the other shards until they end as
+late.
 
 ## Reuse and the nightly backlog
 
