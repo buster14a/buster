@@ -891,7 +891,9 @@ static void check_builtin_vector_fp_effects(const TypeTable* table, const CheckB
 // Whether a call's argument count is its builtin's: a fixed count, two or more for a shuffle, or one of two counts for
 // the builtins with an optional last operand (clzg's and ctzg's zero values, assoc_fadd's start, a masked load's and a
 // gather's passthru).
-static bool check_builtin_vector_count(const CheckBuiltinVectorAction* input)
+// Whether the call has a count the builtin takes, and its bounds in `minimum` and `maximum` (UINT32_MAX for
+// shufflevector's indices), which its count error names (#1860).
+static bool check_builtin_vector_count(const CheckBuiltinVectorAction* input, uint32_t* minimum, uint32_t* maximum)
 {
     const CBuiltinId id = input->id;
     const uint32_t count = input->argument_count;
@@ -927,6 +929,8 @@ static bool check_builtin_vector_count(const CheckBuiltinVectorAction* input)
         optional = 4;
     }
     const bool result = id == CBUILTIN_SHUFFLEVECTOR ? count >= 2 : count == arity || (optional != 0 && count == optional);
+    *minimum = id == CBUILTIN_SHUFFLEVECTOR ? 2 : arity;
+    *maximum = id == CBUILTIN_SHUFFLEVECTOR ? UINT32_MAX : optional != 0 ? optional : arity;
     return result;
 }
 
@@ -934,14 +938,16 @@ static __attribute__((unused)) void check_builtin_vector_one(TypeTable* table, c
 {
     *output = (CheckBuiltinVectorResult){ 0 };
     const bool recognized = cbuiltin_vector(input->id);
-    const bool count_ok = check_builtin_vector_count(input);
+    uint32_t minimum = 0;
+    uint32_t maximum = 0;
+    const bool count_ok = check_builtin_vector_count(input, &minimum, &maximum);
     if (!recognized)
     {
         check_action_diagnose(&output->action, CHECK_DIAG_UNSUPPORTED, 0);
     }
     else if (!count_ok)
     {
-        check_action_diagnose(&output->action, CHECK_DIAG_ARGUMENT_COUNT, 0);
+        check_action_diagnose_count(&output->action, input->argument_count, minimum, maximum);
     }
     else if (input->id == CBUILTIN_SHUFFLEVECTOR &&
              ((input->shuffle_index_ice == NULL && input->shuffle_index_ice_count != 0) ||

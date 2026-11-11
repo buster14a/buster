@@ -176,10 +176,10 @@ static void ir_gvn_classify(IrGvnWork* work)
         const __m128i flags = _mm_maskz_loadu_epi8(valid, f->flags + first);
         const __mmask16 integer_compare = _mm_cmpeq_epi8_mask(kinds, _mm_set1_epi8(2)) & _mm_cmplt_epu8_mask(flags, _mm_set1_epi8(IR_SIMD_LANE_F32));
         const __m512i discriminators = _mm512_maskz_loadu_epi32(valid, f->c + first);
-        // A splat, the width changes and the permutes (#1840: extract to shuffle_lanes, consecutive kinds) are pure moves of bits.
+        // A splat, the width changes, the permutes and the conversions (#1840: extract to truncate, consecutive kinds) are pure.
         const __mmask16 splat = _mm_cmpeq_epi8_mask(kinds, _mm_set1_epi8(3)) & (_mm512_cmpeq_epi32_mask(discriminators, _mm512_set1_epi32(BUSTER_IR_INTRINSIC_SPLAT)) |
                                                                           (_mm512_cmpge_epu32_mask(discriminators, _mm512_set1_epi32(BUSTER_IR_INTRINSIC_EXTRACT)) &
-                                                                           _mm512_cmple_epu32_mask(discriminators, _mm512_set1_epi32(BUSTER_IR_INTRINSIC_SHUFFLE_LANES))));
+                                                                           _mm512_cmple_epu32_mask(discriminators, _mm512_set1_epi32(BUSTER_IR_INTRINSIC_TRUNCATE))));
         const __mmask16 eligible = (_mm_cmpeq_epi8_mask(kinds, _mm_set1_epi8(1)) | integer_compare | splat) & _mm_cmpeq_epi8_mask(tainted, _mm_setzero_si128());
         _mm_mask_storeu_epi8(work->pure + first, valid, _mm_maskz_set1_epi8(eligible, 1));
     }

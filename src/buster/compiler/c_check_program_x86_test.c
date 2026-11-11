@@ -2000,8 +2000,8 @@ static void check_test_program_x86_rows(CheckTest* test)
 // A function's target attribute (#180, check_program_targets): in a baseline unit, functions of BMI, BMI2 and CRC32
 // builtins, each by its own attribute, an inherited one, an arch=, a list that turns a feature on and off, a trimmed one
 // and "default", against clang -O0's code; then what doesn't apply, refused as without the attribute (one after the
-// definition, one clang ignores, one that turns the feature off), a function of several versions (target attributes
-// of two strings, target_clones), and vectors where the unit's target or the function's has no AVX-512F and VL.
+// definition, one clang ignores, one that turns the feature off), functions of several versions (target attributes of
+// two strings, target_clones, #1838), lowered, and vectors where the unit's target or the function's has no AVX-512F and VL.
 static void check_test_program_x86_target_attributes(CheckTest* test, const char* clang)
 {
     X86Target baseline = { 0 };
@@ -2043,16 +2043,25 @@ static void check_test_program_x86_target_attributes(CheckTest* test, const char
               "x86 builtins whose instructions the target hasn't" },
             { "target-attribute-ignored", "__attribute__((target(\"bmi2,bogus\"))) int tested(int n){return (int)__builtin_ia32_bzhi_si((unsigned)n,3u);}",
               "x86 builtins whose instructions the target hasn't" },
-            { "target-attribute-versions", "__attribute__((target(\"bmi\"))) int tested(int n);__attribute__((target(\"bmi2\"))) int tested(int n){return n;}",
-              "functions of several target versions (target_clones, or target attributes of other strings)" },
-            { "target-attribute-later-version", "__attribute__((target(\"bmi2\"))) int tested(int n){return n;}__attribute__((target(\"bmi\"))) int tested(int n);",
-              "functions of several target versions (target_clones, or target attributes of other strings)" },
-            { "target-clones", "__attribute__((target_clones(\"bmi2\",\"default\"))) int tested(int n){return n;}",
-              "functions of several target versions (target_clones, or target attributes of other strings)" },
         };
         for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(refusals); i += 1)
         {
             check_test_program_boundary_target(test, refusals[i].source, refusals[i].name, true, false, 0, 0, refusals[i].reason, &baseline);
+        }
+        // GNU's multiversioning by target strings (#1838): each version is lowered with its own features, a target_clones
+        // body with the unit's.
+        static const struct
+        {
+            const char* name;
+            const char* source;
+        } versions[] = {
+            { "target-attribute-versions", "__attribute__((target(\"bmi\"))) int tested(int n);__attribute__((target(\"bmi2\"))) int tested(int n){return n;}" },
+            { "target-attribute-later-version", "__attribute__((target(\"bmi2\"))) int tested(int n){return n;}__attribute__((target(\"bmi\"))) int tested(int n);" },
+            { "target-clones", "__attribute__((target_clones(\"bmi2\",\"default\"))) int tested(int n){return n;}" },
+        };
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(versions); i += 1)
+        {
+            check_test_program_boundary_target(test, versions[i].source, versions[i].name, true, true, 0, 0, NULL, &baseline);
         }
         check_test_program_march = "-march=x86-64-v3";
         check_test_program_boundary_target(test, "__attribute__((target(\"no-bmi2\"))) int tested(int n){return (int)__builtin_ia32_bzhi_si((unsigned)n,3u);}",
