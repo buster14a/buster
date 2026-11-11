@@ -24,5 +24,5 @@ requirements. [Command index](README.md).
   user cycles and instructions where perf_event_open allows them, each compiler's time and cycles per preprocessed token
   (the report's `time-process tokens`), each stage's medians with its TSC ticks and core cycles per token, and the
   lowering's coverage; the 9700X job runs it on
-  `sqlite3.c` against tcc, with perf's counters and profile, where `changes`' `compile_time` says. [The compile-time
+  `sqlite3.c` against tcc, clang -O0 and gcc -O0 (those two unpinned, their versions printed), with perf's counters and profile, where `changes`' `compile_time` says. [The compile-time
   guide](../../docs/compile-time.md) has the attribution. `test-checker-driver --executable` checks both.

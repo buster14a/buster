@@ -1065,6 +1065,7 @@ static bool check_lower_dump_plan(CheckLowerInitializers* pools, CheckLowerDumpB
             pools->extra_calls += lines_count * (1 + 3 * reevaluated);
             pools->extra_arguments += lines_count * (count + 4 * reevaluated) + builder->operand_count;
             pools->extra_locals += 2 + lines_count * 6 * reevaluated + builder->operand_count;
+            pools->extra_atomics += lines_count * reevaluated;
         }
     }
     return valid;
@@ -1099,6 +1100,7 @@ static bool check_lower_dump_prepare(CheckLowerInitializers* pools, const CheckP
                 pools->extra_calls += 3 * bounded;
                 pools->extra_arguments += 4 * bounded;
                 pools->extra_locals += 6 * bounded + 2;
+                pools->extra_atomics += bounded;
             }
         }
     }

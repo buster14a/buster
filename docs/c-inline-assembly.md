@@ -9,7 +9,7 @@ caller, as one of Tier 0's machine operations (#1059: "Placed in the caller",
 below); most others are placed in their caller as an asm body, the helper's
 loads, template and stores in the call's place (#1839: "Asm bodies", below),
 and under `--tier1` every statement placed in its caller is one; the rest,
-templates of named labels and references, of directives and asm goto, are
+templates of references to names, of directives and asm goto, are
 ordinary calls of a helper. A naked function's statements
 are its whole code instead, and the names templates define and refer to become
 symbols of the unit's object or executable.
@@ -24,8 +24,9 @@ floating-environment helpers (`c_check_program_helpers.c`), and
 each, named `.Lbuster_asm_N` after its statement, sized, encoded and given its
 unwind entry.
 
-A template that assembles to no instructions makes no helper and no call. These
-are the compiler barriers, `asm volatile("" : : "r"(x) : "memory")`, and comments
+A template that assembles to no instructions makes no helper and no call, but
+one that defines a label, an asm body of no records that marks its place in its
+caller (#1839, below). These are the compiler barriers, `asm volatile("" : : "r"(x) : "memory")`, and comments
 with operands substituted into them. But one with x87 operands has a helper,
 whose loads and stores pass their values through the x87's stack as clang's
 code does: `asm volatile("" : "+t"(x))` of a `float` holding a signaling NaN
@@ -145,7 +146,7 @@ statement as the `asm` family's direct form.
 Clang places every asm statement in its caller, and the owner decided that
 this compiler does too ([#1447](https://github.com/buster14a/buster/issues/1447#issuecomment-6736401463),
 item 2). A statement that isn't a row (above), and whose template has no
-named label or reference and isn't an asm goto, is an asm body: the records a helper would have
+reference to a name and isn't an asm goto, is an asm body: the records a helper would have
 between its frame and its return, which run in the statement's place in its
 function (`check_asm_inline_code`, `Tier0AsmBody`):
 
@@ -167,6 +168,19 @@ function (`check_asm_inline_code`, `Tier0AsmBody`):
    addresses, the x87 outputs' stores from st(0) down and the pops of the x87
    inputs the template left, each address loaded from the block into a store
    register that no output holds.
+
+Its named labels (`.Lx%=:`, or a global name another template refers to) are
+the function's: each at its record in the body (`Tier0AsmBody.label_records`,
+past its loads; a template of no instructions but a label has no records, and
+its label is the next record's), whose place in the function's code Tier 0
+writes as it emits the body's call (`Tier0Code.asm_label_records`), and whose
+symbol the emission defines at that record's offset, as a naked function's
+labels are (`EmittedCode.asm_label_records`). Such a function isn't inlined by
+Tier 0 (`tier0_inline_callee_valid`), so each label is defined once. The IR's
+body call carries no labels, so under `--tier1` a template of instructions and
+labels keeps its helper, which Tier 1 calls, and a function with a label of a
+template of no instructions is Tier 0's (`ir_lower`'s `IR_ERROR_UNSUPPORTED`). A template that returns and has a label keeps the
+helper's refusal.
 
 The lowering stores the outputs' addresses (and the x87 inputs) in the block
 as for a helper, leaves the register operands' values on the stack in the
@@ -327,8 +341,8 @@ between functions: ours `int3`, clang's a `nop`).
 ## Labels and names
 
 A template's named labels, `.L` ones among them, are local symbols with no type,
-each at its record's offset in its helper's or its naked function's code, as GNU
-as and clang make them. Every other symbolic field refers to a name, which the
+each at its record's offset in its helper's, its naked function's or (an asm
+body's) its caller's code, as GNU as and clang make them. Every other symbolic field refers to a name, which the
 emission resolves (`check_program_emit_asm_symbols`):
 
 - a label some template of the unit defines;
@@ -343,8 +357,9 @@ rel32 form. `check_program_asm_names` gives the unit's names one table, which
 the emission's symbols follow. Its pass over the program's symbols looks up
 only names of the asm names' lengths.
 
-A label in a helper is inside the helper, not the statement's function: its
-address is right, as data and as a call's target. Jumping to it from outside
+A label in a helper (a template that refers to a name keeps one) is inside the
+helper, not the statement's function: its address is right, as data and as a
+call's target. Jumping to it from outside
 runs the helper's epilogue, which only a template that leaves the helper as it
 came in can rely on.
 
@@ -455,7 +470,7 @@ it. A statement of MMX and x87 operands (whose registers are the same) loads its
 x87 operands first and its MMX ones after, and stores its MMX outputs before
 its x87 ones, as clang's code orders them (#1846, the owner's decision on
 #1447): what the x87's stack holds after an MMX load is the template's to know.
-One whose template takes directives is refused by name. A statement of MMX
+A statement of MMX
 operands is an asm body (#1839) that loads them as the helper does, through rax
 before its other loads, from its block. MMX's forms, which `x86_semantics.c`
 doesn't cover, are taken to write the general and XMM registers their fields
@@ -594,12 +609,22 @@ the statement's helper, as clang's inline bytes execute in its function; a
 assembly's, and `.popsection` or `.previous` returns to the template's own
 code. A pushed `.note.GNU-stack` is the writer's empty note, as `.section`'s is.
 
-Such a whole helper has the record path's operand block and stores, but none
-of its own paths: the x87's places, held vector operands, a flag output's
-`setcc` stores and an asm goto's exits (`check_asm_helper_code`). A template
-that takes directives refuses each by name ("inline assembly x87 operands",
-"vector operands", "flag outputs in templates that take directives", "asm goto
-in templates that take directives").
+Such a whole helper is the record helper's own code (`check_asm_helper_code`,
+for a template of no records) around the template, its records written as the
+bytes they encode, a `.byte` line each (`check_asm_unit_helper`, #1839's item
+10): its pushes, frame and every operand's load (the x87's, MMX's, the
+opmasks', A's pairs' and high bytes' among them) before the template, and after
+it, in the helper's default text section, an asm goto's exits, the flag
+outputs' `setcc` stores, every output's store, the x87 pops and the epilogue.
+An asm goto's labels are its exits' labels there (`.Lbuster_goto_S_L`, the
+names the substitution printed for them), so that the template's jumps reach
+them. The template is first assembled alone with those names made global
+(`__buster_goto_S_L`), and each fixup to one must be a jmp's or a jcc's rel32
+field without an addend in the template's code (`check_asm_unit_gotos`); any
+other use is refused by name, as on the record path. A template of directives
+alone with x87 operands or flag outputs has this helper too, as a template of
+no instructions does. A held vector (a vector type in a vector register) is
+refused in a helper, as on the record path.
 
 A template of alignment, section and symbol directives alone has no code
 (`entry_code` is false): its sections, data and defined labels are published,
@@ -838,10 +863,9 @@ Each refusal names its feature, as the driver prints it ("unsupported: ..."):
 - flag outputs of a size no integer store covers, and with another
   alternative (`"=r@ccz"`, which clang takes as `r`);
 - the letters it doesn't place, and `A` of other sizes than up to 8 bytes and
-  an integer's 16, and in a template that takes directives with 16 bytes;
-- MMX operands with a modifier (clang refuses each), and in templates that
-  take directives;
-- opmask operands with a modifier, in templates that take directives, and
+  an integer's 16;
+- MMX operands with a modifier (clang refuses each);
+- opmask operands with a modifier, and
   without the moves' features (AVX-512F's for 1 or 2 bytes, AVX-512BW's for 4
   or 8), where clang can't place one;
 - x87 operands and clobbers off the stack's top (an input at st(1) without one
@@ -854,8 +878,7 @@ Each refusal names its feature, as the driver prints it ("unsupported: ..."):
 - bit-fields;
 - explicit register variables in registers the helper doesn't place one in
   (rsp, which is the helper's own, APX's r16 to r31, st(2) to st(7), YMM's and
-  ZMM's), in XMM16 to
-  XMM31 without AVX-512F, in a high byte in a template that takes directives,
+  ZMM's), in XMM16 to XMM31 without AVX-512F,
   as memory inputs (`"m"(r10)`, which clang's code refuses too), and of other
   types than a general register's or an XMM register's (an integer in an XMM
   register's variable);
@@ -1070,6 +1093,14 @@ has the commands, the logs and the default path's numbers against main.
   clang's too: its `.L` and numeric labels are the assembler's temporary
   symbols, its undefined `.globl` declaration and `.set` absolute are left out,
   and its `.hidden` label has its visibility as clang's object gives it.
+  Every local `.L` label in code is a temporary of `-c`'s object too
+  (#1845, `check_driver_code_temporary`): the labels of templates assembled
+  by their own statements and of naked functions and `&&label`'s
+  `.Lbuster_label_N` (clang's `.Ltmp`), whose relocations then name their
+  section, as clang's assembler leaves its `.L` labels out. The helpers' own
+  function symbols (`.Lbuster_asm_N`, `.Lbuster_builtin_*`), which clang's
+  code has none of, stay: `test-x86-intrinsics` finds their calls by them; `test-checker-driver
+  --asm-definitions-only` checks that on both paths and runs the object.
 - `test-checker-driver` reads a placed statement's instructions from its
   function's own records in `-c`'s object, with no call, by both paths and with
   `--tier1` (its asm bodies, #1839, the function not refused);
@@ -1098,21 +1129,21 @@ has the commands, the logs and the default path's numbers against main.
 ## Pending
 
 What placement in the caller doesn't take yet (#1839), each keeping its helper:
-templates of named labels (a symbol at the label's record) or references to
-names, asm goto, `loop` and `jrcxz` (which the lowering refuses by name),
+templates of references to names, asm goto, `loop` and `jrcxz` (which the lowering refuses by name),
 templates that return but keep a helper for another reason (refused by name), templates
 that take directives, and forms of unknown effects outside `check_asm_implicit`.
-Under `--tier1`, a function with a template that returns is Tier 0's, and the
+Under `--tier1`, templates of named labels keep their helpers (a body's labels
+would make its function Tier 0's), a function with a template that returns or a
+label of a template of no instructions is Tier 0's, and the
 code's certificate (`--verify`) leaves a function with an asm body uncertified.
 
 What the lowering still refuses of what GCC and clang take:
 
 - an asm goto's label as data or a call's target (the Linux kernel's jump
   tables), whose exits a helper has no address for;
-
-- labels in templates of no instructions (a place in the caller's code);
-- a template that returns and keeps its helper for another of the reasons
-  above (a named label, a directive), which the helper design refuses by name;
+- a template that returns and has a named label, or keeps its helper for
+  another of the reasons above (a reference, a directive), which the helper
+  design refuses by name;
 - naked functions of no instructions, and naked functions' operands other than
   integer constants (clang's `"m"(global)`, printed RIP-relative);
 - the matcher's gaps: the
