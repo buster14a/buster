@@ -3421,7 +3421,16 @@ What the lowering covers past scalars (#145's programs):
     feature's, doubled plus one), highest first. A version's condition is its
     `arch=` (`__builtin_cpu_is`'s test of the vendor, type or subtype; a
     microarchitecture level's bit) and its features' bits. A version of
-    neither is taken unconditionally, and a model none matches is a `ud2`. A
+    neither is taken unconditionally, and a model none matches is a `ud2`.
+    An `arch=X` version is chosen by the CPU model's vendor, family and
+    model alone, as clang's is, with no test of X's features, though its copy
+    is compiled with all of them (the owner's decision, #2355). On a machine
+    whose model is X but which doesn't report some of X's features (a VM that
+    hides AVX-512, as some hosted Zen 4 runners do), the resolver still
+    picks it, and an instruction of a hidden feature traps, as clang's build
+    does. A fixture that executes code on hosted runners chooses such a
+    version by feature (`avx512f`, which the resolver tests by its bit), not
+    by `arch=` (#2346). A
     static group's versions are emitted where its resolver is, as clang emits
     them. A block-scope static in a version is named by the function's name
     where clang emits it (`check_program_target_static_context`). In a
@@ -5817,7 +5826,28 @@ the completion, so they follow Clang's after-function order; a redeclaration
 inherits an earlier `unused` or `used` attribute. A file-scope variable's
 unused warning is given only in the main file, as Clang leaves a header's
 file-scope variables alone because every unit that includes the header shares
-them. A block's declaration with linkage (an `extern` object, any function
+them. `check_input_default_const` (#2168, clang's `ActOnUninitializedDecl`) adds a
+const object without an initializer, at its name, with its type as declared.
+- **Automatic storage:**
+  - `-Wdefault-const-init-var-unsafe` where its type is const-qualified (an
+    array's elements', an `_Atomic`'s, a variable array's too);
+  - `-Wdefault-const-init-field-unsafe` where it is a struct whose first
+    const member, found depth first through its structs and unions
+    (`getConstField`), isn't an array of const elements nor a flexible array
+    member. Its note, "member 'm' declared 'const' here", is at that member's
+    declarator (`check_input_member_declarator`);
+  - both, for a const struct;
+  - none, for a union or an array of structs.
+- **Static storage:** `-Wdefault-const-init-var` alone, off by default (in
+  `-Wdefault-const-init` and `-Wc++-compat`). A file scope's object, a
+  tentative definition, gets it once, at the unit's end, from the tentative
+  definitions' walk (`check_input_tentative_arrays`): at its last tentative
+  definition, with its type completed (`'const int[1]'`), after its tentative
+  array's warning, and none where a later declaration defines it.
+- **The C++ words.** The unsafe ones say "and is incompatible with C++" where
+  `-Wc++-compat` is on there, as clang selects them by that group's fake
+  diagnostic: `CHECK_WARNING_ID_CXX_COMPAT`, a policy no event gives.
+A block's declaration with linkage (an `extern` object, any function
 declaration) is never unused: clang's semantic context for it is the
 translation unit, not the function, so `ShouldDiagnoseUnusedDecl` passes it
 by. A use through it uses the outer declaration with linkage it redeclares,
