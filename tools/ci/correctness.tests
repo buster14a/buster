@@ -137,7 +137,9 @@ grep -q "^test-sqlite: 9 of SQLite's CLI tests and 5 scripts: every build agrees
 # The two units-test headings above are eight-CPU budgets for the same reason: their children take up to
 # eight lanes, so the runner must not co-schedule other two-CPU commands on the same cores.
 mapfile -d '' -t sanitizer_flags < <(./build.sh print-sanitizer-flags)
-clang -std=c17 -O2 -march="$BUSTER_HOST_ARCH" -Wall -Wextra -Werror -fno-strict-aliasing "${sanitizer_flags[@]}" tests/driver/multicore.c -o build/test-driver-multicore
+mapfile -d '' -t host_flags < <(./build.sh print-host-flags)
+test "${#host_flags[@]}" -gt 0
+clang -std=c17 -O2 "${host_flags[@]}" -Wall -Wextra -Werror -fno-strict-aliasing "${sanitizer_flags[@]}" tests/driver/multicore.c -o build/test-driver-multicore
 ./build/test-driver-multicore "$BUSTER_COMPILER"
 == Test c-testsuite's programs end to end [4 CPUs]
 # #145: each program checked, lowered, compiled by Tier 0 and linked by the direct path, by the vector paths and
@@ -171,7 +173,9 @@ clang -std=c17 -O2 -march="$BUSTER_HOST_ARCH" -Wall -Wextra -Werror -fno-strict-
 # --clang also preprocesses each unit with clang -E, with clang's predefines for its options, and compares the
 # tokens. -target and its triple (clang's default) go to both. clang's runs go to the job's clang server where it built
 # one (#2071), compared as the cases' parts' are.
-"$BUSTER_COMPILER" test-preprocessor --clang -target x86_64-pc-linux-gnu -march="$BUSTER_HOST_ARCH" -Isrc -fwrapv -funsigned-char -DBUSTER_COMPLETE_DRIVER=1 src/buster/compiler/main.c src/buster/compiler/*_benchmark.c ${BUSTER_CLANG_SERVER:+--clang-server "$BUSTER_CLANG_SERVER"} ${BUSTER_DRIVER_DIFFERENTIAL:+--differential}
+mapfile -d '' -t host_flags < <(./build.sh print-host-flags)
+test "${#host_flags[@]}" -gt 0
+"$BUSTER_COMPILER" test-preprocessor --clang -target x86_64-pc-linux-gnu "${host_flags[@]}" -Isrc -fwrapv -funsigned-char -DBUSTER_COMPLETE_DRIVER=1 src/buster/compiler/main.c src/buster/compiler/*_benchmark.c ${BUSTER_CLANG_SERVER:+--clang-server "$BUSTER_CLANG_SERVER"} ${BUSTER_DRIVER_DIFFERENTIAL:+--differential}
 == Compare c-testsuite's typed streams, SSA and strict Tier 1 programs [4 CPUs]
 # #134: each function -c compiles lowered with every local in memory and promoted by both of ssa_ir.c's paths, with
 # ssa.c's verifier on each promotion and no trivial phi left, then each program run by the shared IR's interpreter
@@ -244,7 +248,9 @@ musl="$corpus/libc/musl"
   "$musl"/src/*/*.c "$musl"/src/*/x86_64/*.c
 == Test the per-file jobs on the repository's translation units
 # The predefines follow the options as clang's do (c_predefines.c).
-"$BUSTER_COMPILER" test-files -target x86_64-pc-linux-gnu -march="$BUSTER_HOST_ARCH" -Isrc -fwrapv -funsigned-char -DBUSTER_COMPLETE_DRIVER=1 src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
+mapfile -d '' -t host_flags < <(./build.sh print-host-flags)
+test "${#host_flags[@]}" -gt 0
+"$BUSTER_COMPILER" test-files -target x86_64-pc-linux-gnu "${host_flags[@]}" -Isrc -fwrapv -funsigned-char -DBUSTER_COMPLETE_DRIVER=1 src/buster/compiler/main.c src/buster/compiler/*_benchmark.c
 == Test the parser on the repository's translation units
 # Both paths, which must agree kernel by kernel, and accept each unit the build compiles (build.sh print-sources),
 # but main_unit_*.c, which are main.c again with another BUSTER_UNIT. clang has accepted each, with -Wall -Werror, in
@@ -259,7 +265,9 @@ for unit in "${sources[@]}"; do
     [[ "${unit##*/}" == main_unit_* ]] || units+=("$unit")
 done
 test "${#units[@]}" -gt 0
-"$BUSTER_COMPILER" test-parser --files-only -march="$BUSTER_HOST_ARCH" -Isrc -fwrapv -funsigned-char --predefines build/predefines.h "${units[@]}"
+mapfile -d '' -t host_flags < <(./build.sh print-host-flags)
+test "${#host_flags[@]}" -gt 0
+"$BUSTER_COMPILER" test-parser --files-only "${host_flags[@]}" -Isrc -fwrapv -funsigned-char --predefines build/predefines.h "${units[@]}"
 == Test Tier 0
 # Generated programs compiled by both paths, which must agree, run against an interpreter of the typed stream;
 # --cross-check also runs them beside clang -O0's builds of the same programs as C, and links those that pass
@@ -269,7 +277,9 @@ test "${#units[@]}" -gt 0
 # #1398: the driver fixture's bodies and the compiler's own main.c spliced by the vector path and its scalar twin,
 # which must give the same streams, each accepted by tier0_validate and compiled.
 "$BUSTER_COMPILER" test-tier0-inline
-"$BUSTER_COMPILER" test-tier0-inline -march="$BUSTER_HOST_ARCH" -Isrc -fwrapv -funsigned-char -fno-strict-aliasing -DBUSTER_COMPLETE_DRIVER=1 src/buster/compiler/main.c
+mapfile -d '' -t host_flags < <(./build.sh print-host-flags)
+test "${#host_flags[@]}" -gt 0
+"$BUSTER_COMPILER" test-tier0-inline "${host_flags[@]}" -Isrc -fwrapv -funsigned-char -fno-strict-aliasing -DBUSTER_COMPLETE_DRIVER=1 src/buster/compiler/main.c
 == Check the repository's translation units with the checker
 # #619: run in both hosted variants and the target suite, using the build's expanded arguments (including
 # its configured host ISA, target defaults and optimization) rather than shell text from build.sh.
@@ -538,7 +548,9 @@ musl="$corpus/libc/musl"
 == Test the C lexer
 "$BUSTER_COMPILER" test-lexer
 == Compare source binding columns on main.c
-"$BUSTER_COMPILER" test-parser-bindings --clang -march="$BUSTER_HOST_ARCH" -Isrc -fwrapv -funsigned-char --predefines build/predefines.h -DBUSTER_COMPLETE_DRIVER=1 src/buster/compiler/main.c
+mapfile -d '' -t host_flags < <(./build.sh print-host-flags)
+test "${#host_flags[@]}" -gt 0
+"$BUSTER_COMPILER" test-parser-bindings --clang "${host_flags[@]}" -Isrc -fwrapv -funsigned-char --predefines build/predefines.h -DBUSTER_COMPLETE_DRIVER=1 src/buster/compiler/main.c
 == Test the x86-64 encoder
 "$BUSTER_COMPILER" test-x86-encoder
 == Test the backend's baked tables
@@ -718,7 +730,9 @@ corpus=$BUSTER_CORPUS
 mapfile -d '' -t sanitizer_flags < <(./build.sh print-sanitizer-flags)
 # The focused MSan regression retains the O1 boundary where the old full-vector
 # load is observable. The compiler and its main refinement tests keep the matrix's optimization.
-clang -std=c17 -O3 -march="$BUSTER_HOST_ARCH" -Isrc -fwrapv -funsigned-char -fno-strict-aliasing -Wall -Wextra -Werror -Wno-unused-function -Wno-psabi "${sanitizer_flags[@]}" -O1 tests/sanitizers/refinement_tail.c -o build/test-refinement-tail
+mapfile -d '' -t host_flags < <(./build.sh print-host-flags)
+test "${#host_flags[@]}" -gt 0
+clang -std=c17 -O3 "${host_flags[@]}" -Isrc -fwrapv -funsigned-char -fno-strict-aliasing -Wall -Wextra -Werror -Wno-unused-function -Wno-psabi "${sanitizer_flags[@]}" -O1 tests/sanitizers/refinement_tail.c -o build/test-refinement-tail
 ./build/test-refinement-tail
 == Test Tier 1 allocation over CFGs, edge moves and the independent checker
 "$BUSTER_COMPILER" test-tier1-cfg
@@ -726,7 +740,9 @@ clang -std=c17 -O3 -march="$BUSTER_HOST_ARCH" -Isrc -fwrapv -funsigned-char -fno
 "$BUSTER_COMPILER" test-diagnostics
 == Test compiler-owned resource failure boundaries
 mapfile -d '' -t sanitizer_flags < <(./build.sh print-sanitizer-flags)
-clang -std=c17 -O3 -march="$BUSTER_HOST_ARCH" -Isrc -Wall -Wextra -Werror -Wno-unused-function -Wno-psabi "${sanitizer_flags[@]}" tests/sanitizers/resources.c -o build/test-sanitizer-resources
+mapfile -d '' -t host_flags < <(./build.sh print-host-flags)
+test "${#host_flags[@]}" -gt 0
+clang -std=c17 -O3 "${host_flags[@]}" -Isrc -Wall -Wextra -Werror -Wno-unused-function -Wno-psabi "${sanitizer_flags[@]}" tests/sanitizers/resources.c -o build/test-sanitizer-resources
 ./build/test-sanitizer-resources
 == Test the profiling tools
 "$BUSTER_COMPILER" test-profile
