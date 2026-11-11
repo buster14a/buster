@@ -801,6 +801,43 @@ static uint32_t check_warning_graph_void_opener(const Parser* parser, uint32_t c
     return open > 0 ? open - 1 : BUSTER_CHECK_NONE;
 }
 
+// Whether the static selection whose `)` is `close` (a _Generic's or a __builtin_choose_expr's) chooses the operand that
+// holds `token`, a token inside its parentheses: `token` and the chosen operand's token lie between the same top-level
+// commas, as the separators' tree nests the operands before each one under it. The node at its `)` is the selection's,
+// or, for one the source reader chose, the chosen operand's own, under the conversions at that `)`. True where `close`
+// closes no selection, or one whose choice the graph doesn't hold.
+static bool check_warning_graph_chooses(const CheckInput* input, const Parser* parser, uint32_t close, uint32_t token)
+{
+    const CheckGraph* graph = &input->graph;
+    const uint32_t open = parser->tree.roles[close] == PARSE_ROLE_CLOSE_KEYWORD ? check_warning_graph_void_opener(parser, close) : BUSTER_CHECK_NONE;
+    const uint32_t keyword = open != BUSTER_CHECK_NONE && open > 0 ? open - 1 : BUSTER_CHECK_NONE;
+    const bool selection = keyword != BUSTER_CHECK_NONE && parser->tree.depths != NULL && open + 1 < close &&
+                           (parser->tokens.kinds[keyword] == PARSE_KIND_GENERIC || parser->tokens.names[keyword] == C_NAME_BUILTIN_CHOOSE_EXPR);
+    uint32_t chosen = selection && close < input->token_count && input->token_nodes != NULL ? input->token_nodes[close] : BUSTER_CHECK_NONE;
+    chosen = chosen < graph->count && graph->ops[chosen] == CHECK_OP_SELECT ? graph->operand0[chosen] : chosen;
+    for (uint32_t steps = 0; chosen < graph->count && graph->ops[chosen] == CHECK_OP_CONVERT && graph->tokens[chosen] == close && steps < graph->count;
+         steps += 1)
+    {
+        chosen = graph->operand0[chosen];
+    }
+    const uint32_t chosen_token = chosen < graph->count ? graph->tokens[chosen] : BUSTER_CHECK_NONE;
+    bool result = true;
+    if (selection && chosen_token > open && chosen_token < close && token > open && token < close)
+    {
+        const uint32_t depth = parser->tree.depths[open + 1];
+        uint32_t before_token = 0;
+        uint32_t before_chosen = 0;
+        for (uint32_t at = open + 1; at < close; at += 1)
+        {
+            const bool comma = parser->tokens.kinds[at] == PARSE_KIND_COMMA && parser->tree.depths[at] == depth;
+            before_token += comma && at < token ? 1u : 0u;
+            before_chosen += comma && at < chosen_token ? 1u : 0u;
+        }
+        result = before_token == before_chosen;
+    }
+    return result;
+}
+
 // The context of `child` of `parent`, whose context is `context`: the parent's, but in an operand that opens another.
 // A sizeof's or an alignof's operand (CLOSE_SIZEOF's, or the keyword's without parentheses), a typeof's and a
 // _Generic's controlling expression (left of its first separator) are unevaluated; an array declarator's bound is

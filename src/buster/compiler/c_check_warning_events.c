@@ -126,6 +126,18 @@ enum
     // A C23 record's redefinition whose attributes differ (#1447, c_check_tag_compatible.c): clang's -Wodr, an error by
     // default (check_input_odr_severity).
     CHECK_WARNING_ID_ODR = 113,
+    // An encoding prefix on an unevaluated string literal (#1447): -Winvalid-unevaluated-string, on by default.
+    CHECK_WARNING_ID_INVALID_UNEVALUATED_STRING = 114,
+    // -pedantic's warnings of an unevaluated string literal's escapes (#1447): a GNU one's (-Wpedantic) and a delimited or
+    // named one's (-Wdelimited-escape-sequence-extension), off by default, extensions -pedantic gives.
+    CHECK_WARNING_ID_NONSTANDARD_ESCAPE = 115,
+    CHECK_WARNING_ID_DELIMITED_ESCAPE = 116,
+    // A target_clones attribute that mixes a string of several versions with other strings (#1838, clang's
+    // SemaX86::checkTargetClonesAttr): -Wtarget-clones-mixed-specifiers, on by default, under -Wfunction-multiversion.
+    CHECK_WARNING_ID_TARGET_CLONES_MIXED_SPECIFIERS = 117,
+    // __builtin_cpu_supports of a feature clang doesn't know (#1843, clang's SemaX86 validateCpuSupports): its warning of no
+    // option, whose call is false.
+    CHECK_WARNING_ID_INVALID_CPU_SUPPORTS = 118,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -351,7 +363,8 @@ typedef enum CheckWarningEventKind
     CHECK_WARNING_EVENT_MULTICHAR,
     CHECK_WARNING_EVENT_CHARACTER_TOO_LONG,
     // A warning diagnose_if's condition gives (#1447, c_check_condition.c), at the call's `)` or at the function's use:
-    // payload.token the message's first string token, with a CHECK_WARNING_NOTE_DIAGNOSE_IF at the attribute.
+    // payload.token the message's first string token, with a CHECK_WARNING_NOTE_DIAGNOSE_IF at the attribute; or, of a
+    // warning group (payload.data, BUSTER_CHECK_WARNING_GROUP_ERROR), clang's custom diagnostic of that group, without it.
     CHECK_WARNING_EVENT_DIAGNOSE_IF,
     // -Wfunction-multiversion's (#1447): a CPU list's repeated mangling, at the attribute's name, and a cpu_dispatch
     // function's body, at its `{`.
@@ -370,6 +383,12 @@ typedef enum CheckWarningEventKind
     // payload.first_type and second_type its operands' types as clang's getEnumCoercedType gives them, payload.name and
     // data their typedef spellings (0 for none). check_common_enum_arithmetic reports it as the graph's operators.
     CHECK_WARNING_EVENT_ENUM_MIX,
+    // target_clones' versions (#1838, c_check_target_versions.c), each at its string literal's quote plus its offset in
+    // the trimmed string (BUSTER_CHECK_TARGET_CLONES_CPU's payload): -Wignored-attributes' unsupported one,
+    // -Wfunction-multiversion's duplicate one, and -Wtarget-clones-mixed-specifiers' at the first string.
+    CHECK_WARNING_EVENT_TARGET_CLONES_UNSUPPORTED,
+    CHECK_WARNING_EVENT_TARGET_CLONES_DUPLICATE,
+    CHECK_WARNING_EVENT_TARGET_CLONES_MIXED,
     // A tag a prototype's parameter list (or an old-style definition's declarations) declares first, which no declaration
     // outside it names (#1447, -Wvisibility): at its name, an unnamed enum's keyword; payload.first_type the tag's type.
     CHECK_WARNING_EVENT_PROTOTYPE_TAG,
@@ -380,8 +399,27 @@ typedef enum CheckWarningEventKind
     // warning (#1447, -Wno-error=odr or a pragma's): at its name, with a CHECK_WARNING_NOTE_ATTRIBUTE_HERE at each list's
     // differing attribute, the earlier's first.
     CHECK_WARNING_EVENT_ODR_ATTRIBUTE,
+    // An unevaluated string literal's encoding prefix (#1447): "encoding prefix 'P' on an unevaluated string literal has no
+    // effect", at the token, payload.data the prefix's length (1 or 2: u8). A literal with an escape clang refuses there
+    // has its warnings from the driver instead, before the escapes' (check_driver_escapes).
+    CHECK_WARNING_EVENT_UNEVALUATED_PREFIX,
+    // A delimited or named escape sequence of an unevaluated string literal clang takes (#1447, -pedantic's
+    // -Wdelimited-escape-sequence-extension): at the token, payload.data 1 for a named one's "named escape sequences are a
+    // Clang extension", 0 for "delimited escape sequences are a C2y extension".
+    CHECK_WARNING_EVENT_DELIMITED_ESCAPE,
+    // A bit-precise constant's suffix (wb or uwb) before C23 (#1447): -Wc23-extensions' "'_BitInt' suffix for literals is a
+    // C23 extension" (CHECK_WARNING_ID_C23_PARAMETER's option), at the constant.
+    CHECK_WARNING_EVENT_BIT_INT_SUFFIX,
+    // __builtin_cpu_supports's literal of a feature clang doesn't know (#1843, check_input_cpu_supports_literal), at the
+    // builtin's name: the description's message.
+    CHECK_WARNING_EVENT_INVALID_CPU_SUPPORTS,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
+
+// CHECK_WARNING_EVENT_TARGET_CLONES_*'s payload (#1838): `name` the version's first byte in its string's decoded text (it
+// ends at the next comma, trimmed), and `data` its place's offset from the trimmed text's start, with
+// BUSTER_CHECK_TARGET_CLONES_CPU where an unsupported one is a CPU's.
+#define BUSTER_CHECK_TARGET_CLONES_CPU (1u << 31)
 
 // CHECK_WARNING_EVENT_TRANSPARENT_UNION's case, in its data's low byte (its bits above it), and its note's.
 #define BUSTER_CHECK_TRANSPARENT_INCOMPLETE 1u
@@ -442,7 +480,13 @@ typedef enum CheckWarningCompletion
 // A CHECK_WARNING_EVENT_LATE_ATTRIBUTE of an implicit attribute, which clang gives no location (#147: interrupt's used
 // after a definition), its token the attribute's that made it, for its policy's place.
 #define BUSTER_CHECK_WARNING_UNLOCATED 0x10u
+// CHECK_WARNING_EVENT_PRAGMA's payload.data indexes CheckInputPackPragmas only with this discriminator (#1849: a
+// `#pragma options align` or `#pragma align` warning).
+#define BUSTER_CHECK_WARNING_PACK_PRAGMA 0x20u
 #define BUSTER_CHECK_WARNING_NO_SOURCE UINT32_MAX
+// CHECK_WARNING_EVENT_DIAGNOSE_IF's payload.data bit of a grouped diagnose_if's "error" (#1447): its low bits are its
+// warning group's index in pp_features_warning plus one, 0 for none.
+#define BUSTER_CHECK_WARNING_GROUP_ERROR 0x80000000u
 // CHECK_WARNING_EVENT_UNKNOWN_ATTRIBUTE's payload.data bit of a C23 attribute's spelling, past its scope's identifier.
 #define BUSTER_CHECK_WARNING_STANDARD_ATTRIBUTE 0x80000000u
 
@@ -527,10 +571,10 @@ static __attribute__((unused)) CheckWarningEvents check_warning_view(const Check
 // pragma's payload without affecting its warning policy, and are invalid on every other event kind.
 static bool check_warning_flags_valid(uint32_t kind, uint32_t flags)
 {
-    const uint32_t histories = BUSTER_CHECK_WARNING_SYMBOL_PRAGMA | BUSTER_CHECK_WARNING_MS_PRAGMA;
+    const uint32_t histories = BUSTER_CHECK_WARNING_SYMBOL_PRAGMA | BUSTER_CHECK_WARNING_MS_PRAGMA | BUSTER_CHECK_WARNING_PACK_PRAGMA;
     const uint32_t payload = flags & histories;
     return (flags & ~(BUSTER_CHECK_WARNING_DEFAULT_IGNORED | BUSTER_CHECK_WARNING_SUPPRESSED | histories | BUSTER_CHECK_WARNING_UNLOCATED)) == 0 &&
-           (payload == 0 || kind == CHECK_WARNING_EVENT_PRAGMA) && payload != histories &&
+           (payload == 0 || kind == CHECK_WARNING_EVENT_PRAGMA) && (payload & (payload - 1)) == 0 &&
            ((flags & BUSTER_CHECK_WARNING_UNLOCATED) == 0 || kind == CHECK_WARNING_EVENT_LATE_ATTRIBUTE);
 }
 

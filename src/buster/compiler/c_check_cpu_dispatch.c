@@ -65,6 +65,24 @@ typedef enum CheckCpuDispatchError
     CHECK_CPU_DISPATCH_RETURN_TYPE,
     CHECK_CPU_DISPATCH_INLINE,
     CHECK_CPU_DISPATCH_LINKAGE,
+    // Multiversioning by target strings' (#1838, c_check_target_versions.c): "function multiversioning doesn't support
+    // feature 'X'" (or "architecture"), `attribute` the target string's first token and `value` the item's bytes in its
+    // decoded text (start, and length above bit 32), with the caused-here note where an earlier declaration has it;
+    CHECK_CPU_DISPATCH_TARGET_FEATURE,
+    CHECK_CPU_DISPATCH_TARGET_ARCHITECTURE,
+    // "multiversioned function redeclarations require identical target attributes", with a note at the previous
+    // declaration;
+    CHECK_CPU_DISPATCH_TARGET_DUPLICATE,
+    // "function declaration cannot become a multiversioned function after first usage", with a note at the previous
+    // declaration where `note_token` has one;
+    CHECK_CPU_DISPATCH_AFTER_USE,
+    // "function declaration is missing 'target' attribute in a multiversioned function", with the caused-here note where
+    // `note_token` has one;
+    CHECK_CPU_DISPATCH_TARGET_REQUIRED,
+    // "'target_clones' attribute does not match previous declaration", with a note at the previous declaration;
+    CHECK_CPU_DISPATCH_CLONES_MISMATCH,
+    // "no matching function for call to 'f'", at a call's callee where no default version is visible.
+    CHECK_CPU_DISPATCH_NO_MATCH,
 } CheckCpuDispatchError;
 
 // A declaration's multiversioning by these attributes: none, a version (cpu_specific) or the dispatcher (cpu_dispatch).
