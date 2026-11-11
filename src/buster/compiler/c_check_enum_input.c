@@ -93,8 +93,10 @@ static bool check_input_enum_fixed_value(CheckInputReader* reader, const CheckTa
         const unsigned __int128 bits = value->integer & mask;
         const bool negative = valid && value_sign && (bits >> (value_width - 1)) != 0;
         const uint32_t needed = negative ? check_input_enum_active_bits(~bits & mask) + 1 : check_input_enum_active_bits(bits);
+        const bool typed = valid;
         valid = valid && needed <= (negative || !sign ? width : width - 1);
-        if (valid && !moded)
+        // (One that isn't representable is converted all the same, as clang's CheckEnumConstant casts it after its error.)
+        if (typed && !moded)
         {
             check_action_convert_plain(types, value, underlying, name);
         }
@@ -133,6 +135,9 @@ static bool check_input_enum_fixed_value(CheckInputReader* reader, const CheckTa
         reader->output->reports[before].type_spelling = moded ? 0 : check_input_typedef_spelling(reader->output, reader->parser, open);
         reader->output->reports[before].detail = explicit_value ? 0 : 1;
         reader->output->reports[before].value = (uint64_t)next;
+        // Recovered, as clang goes on with the converted or wrapped value (#1807): the enumerator is declared, or reported
+        // as a redefinition, and the walk goes on.
+        valid = reader->output->report_count == before + 1 && check_input_recover_reports(reader, before);
     }
     return valid;
 }
@@ -523,6 +528,8 @@ static bool check_input_enum_read(CheckInputReader* reader, CheckTagFrame* frame
                     reader->output->reports[before].detail = message == CHECK_INPUT_REDECLARATION ? CHECK_REDECLARATION_DEFINITION : 0;
                     reader->output->reports[before].note_token = reader->bindings.declaration[old - 1];
                     reader->output->reports[before].note_kind = CHECK_INPUT_NOTE_PREVIOUS_DEFINITION;
+                    // (After a value error at the same name, recovered, as clang reports both: #1807.)
+                    reader->output->reports[before].repeated = true;
                     valid = check_input_recover_reports(reader, before);
                     frame->dropped |= valid;
                     frame->restart |= valid;

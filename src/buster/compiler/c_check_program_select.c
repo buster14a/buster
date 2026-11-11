@@ -835,6 +835,21 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
                 definition_flags[definition - 1] |= BUSTER_C_LOWERING_ALIAS_TARGET;
             }
         }
+        // A static function multiversioned by target strings whose resolver the unit emits (#1838): clang emits each
+        // version, which the resolver reaches though no reference names its object (references reach R).
+        for (uint32_t g = 0; valid && g < full->target_group_count; g += 1)
+        {
+            const CheckProgramTargetGroup* group = full->target_groups + g;
+            for (uint32_t m = 0; group->resolved && group->internal && m <= group->version_count; m += 1)
+            {
+                const uint32_t object = m < group->version_count ? full->target_versions[group->version_first + m].object : group->clones;
+                const uint32_t definition = object != 0 && object < objects ? object_definitions[object] : 0;
+                if (definition != 0)
+                {
+                    definition_flags[definition - 1] |= BUSTER_C_LOWERING_USED;
+                }
+            }
+        }
         candidate.status = valid ? CHECK_PROGRAM_RESOURCE : CHECK_PROGRAM_INVALID;
         // The block-scope statics' bodies, asked in the definitions' token order (check_program_token_body_next).
         CheckProgramBodyCursor static_bodies = { 0 };
