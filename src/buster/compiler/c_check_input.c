@@ -11291,7 +11291,7 @@ static void check_input_bind_checked(CheckInputReader* reader, uint32_t token, u
     }
     if (version != BUSTER_CHECK_NONE)
     {
-        check_input_cpu_dispatch_redeclare(reader, token, version);
+        check_input_cpu_dispatch_redeclare(reader, token, version, point);
     }
     if (old == 0 && reader->scope_count == 0)
     {
@@ -11444,6 +11444,18 @@ static void check_input_bind_checked(CheckInputReader* reader, uint32_t token, u
             const bool redefined = reader->definition_origins[token] && definition && !repeated_loader;
             const bool redefinition_alone = redefined && !mismatch && !(thread_local && !thread_local_alone) && kind == C_BINDING_OBJECT;
             const bool conflict = mismatch || redefined || (thread_local && !thread_local_alone);
+            // A redefinition of a compatible type merges its attributes first (#1920): their late-attribute warnings come
+            // before its error. (Not one multiversioning refused, which clang leaves unmerged.)
+            bool refused = reader->cpu_invalid_count != 0 && check_cpu_dispatch_invalid(reader, token);
+            for (uint32_t r = 0; !refused && r < reader->output->multiversion_report_count; r += 1)
+            {
+                refused = reader->output->multiversion_reports[r].token == token;
+            }
+            const bool late_first = redefined && !mismatch && !(thread_local && !thread_local_alone) && !refused;
+            if (late_first)
+            {
+                check_input_attribute_late(reader, token, previous, point, linked_visible, true);
+            }
             if (conflict)
             {
                 const uint32_t before = reader->output->report_count;
@@ -11476,7 +11488,10 @@ static void check_input_bind_checked(CheckInputReader* reader, uint32_t token, u
             }
             if (!conflict || (redefinition_alone && !dropped && reader->output->report_count == 0))
             {
-                check_input_attribute_late(reader, token, previous, point, linked_visible);
+                if (!late_first)
+                {
+                    check_input_attribute_late(reader, token, previous, point, linked_visible, false);
+                }
                 if (reader->merged_attributes)
                 {
                     check_input_attribute_merge_checks(reader, token, previous, linked_visible, point);
