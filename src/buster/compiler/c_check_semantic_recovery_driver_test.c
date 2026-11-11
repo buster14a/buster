@@ -779,6 +779,12 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         // A name near a keyword before an operand that no search corrects (whilx is as near as while): clang's expression is
         // invalid all the same, its rest skipped without the parser's error.
         "int whilx;\nint f(int a)\n{\n    int v = whilz a;\n    return v;\n}\n",
+        // A member access whose base is no structure or union (#2288): clang's "member reference base type ... is not a
+        // structure or union" at the operator, the type as written for `.`; `.` of a pointer to one is "is a pointer; did you
+        // mean to use '->'?" there, and `->` of no pointer "member reference type ... is not a pointer" at the member's name.
+        "typedef int myint;\nstruct S { int a; } s, *sp;\nunion U { int u; } uu;\nint z = sizeof(((int *)0)->a);\n"
+        "int f(int x, int *p, double d, myint m)\n{\n    int unused;\n    x = p->a + (1, 2);\n    d.re = 1;\n    uu.v = 2;\n"
+        "    return x.a + sp.a + x->b + sizeof(d.k) + m.c + s.zz + sp->yy;\n}\nint g(int a) { int u2; if (a = 1) return 2; return 0; }\n",
         // A block item's GNU attributes before a name that a correction takes as a value (#1447, check_driver_typo_tail):
         // clang's typo error, then "expected identifier or '('" there, the item skipped; the body's unused variable is quiet.
         "int counter;\nvoid f(int n)\n{\n    int value;\n    __attribute__((unused)) valu = 1;\n"
