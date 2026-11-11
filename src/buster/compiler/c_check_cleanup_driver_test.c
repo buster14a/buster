@@ -141,14 +141,16 @@ static void check_test_driver_cleanup_errors(CheckTest* test, const char* clang,
     unlink(source);
 }
 
-// Cleanups' shared chains (#1370): each exit runs one copy of each cleanup's call, the one at its scope's end, and goes on
-// to its own destination. A program of every kind of path through a chain (a goto back before a declaration of its own
-// block, which stops in the middle of a scope's run; exits through three scopes with a fall at each; a continue, a break
-// and a fall at one record, and a switch's break; a statement expression's break, continue, goto and return, which keep
-// their runs; kept, named and void returns; an array of a runtime length whose cleanup reads it, left by a break; a for
-// statement's own variables; and a cleanup that longjmps out, then the same chain's fall) and the issue's four shapes of
-// many cleanups, each followed by an exit, run against clang -O0's build by Tier 0 and Tier 1, on both paths. The
-// shapes' objects at 300 and 600 cleanups take linear room: past 85, the run at each exit exhausted the call rows.
+// Cleanups' shared chains (#1370): each exit runs one copy of each cleanup's call, the one at its scope's end, and goes
+// on to its own destination. A program of every kind of path through a chain (a goto back before a declaration of its
+// own block, which stops in the middle of a scope's run; exits through three scopes with a fall at each; a continue, a
+// break and a fall at one record, and a switch's break; a statement expression's break, continue, goto and return,
+// which keep their runs where they leave its block's records, and its exits through the records within its block, which
+// take their chain, out of it and within it; kept, named and void returns; an array of a runtime length whose cleanup
+// reads it, left by a break; a for statement's own variables; and a cleanup that longjmps out, then the same chain's
+// fall) and the issue's four shapes of many cleanups, each followed by an exit, and a fifth in a statement expression's
+// block, run against clang -O0's build by Tier 0 and Tier 1, on both paths. The shapes' objects at 300 and 600 cleanups
+// take linear room: past 85, the run at each exit exhausted the call rows.
 static const char check_test_cleanup_chain_paths[] =
     "#include <setjmp.h>\n"
     "#include <stdio.h>\n"
@@ -166,6 +168,13 @@ static const char check_test_cleanup_chain_paths[] =
     "static int expressions(int n) { int r = 0; for (int i = 0; i < 4; i++) { int a __attribute__((cleanup(note))) = i;\n"
     "r += ({ int b __attribute__((cleanup(note))) = 10 + i; if (n == i) break; if (n == i + 1) continue; if (n == 9 && i == 2) goto out; if (n == 8 && i == 3) return 77; b; }); }\n"
     "out: return r; }\n"
+    "static int regions(int k) { int s = 0; for (int i = 0; i < 4; i++) {\n"
+    "s += ({ int r = 0; { int v1 __attribute__((cleanup(note))) = 1; { int v2 __attribute__((cleanup(note))) = 2; if (k == i) break;\n"
+    "{ int v3 __attribute__((cleanup(note))) = 3; if (k == i + 1) continue; if (k == 7) goto out; r = v3; }\n"
+    "{ int v4 __attribute__((cleanup(note))) = 4; if (k == i + 2) goto inner; r += v4; } } inner: r += 1; } r; }); }\n"
+    "out: s += ({ int v9 __attribute__((cleanup(note))) = 9; int t = 0; do { int v5 __attribute__((cleanup(note))) = 5;\n"
+    "{ int v6 __attribute__((cleanup(note))) = 6; if (k & 1) break; t += v6; } { int v7 __attribute__((cleanup(note))) = 7; if (k & 2) continue; t += v7; } } while (0); t; });\n"
+    "return s; }\n"
     "struct S { int a, b; };\n"
     "static void sn(struct S *p) { trace = trace * 31u + (unsigned)p->a; p->a = -5; }\n"
     "static struct S named(int n) { int x __attribute__((cleanup(note))) = n; if (n == 1) { struct S s __attribute__((cleanup(sn))) = { 1, 2 }; if (n) return s; }\n"
@@ -184,14 +193,15 @@ static const char check_test_cleanup_chain_paths[] =
     "if (n == 2) return 4; r += a; } return r; }\n"
     "int main(void) {\n"
     "    for (int n = 0; n < 10; n++) {\n"
-    "        trace = 0; int r = midrun(n) + 3 * three(n) + 5 * loops(n) + 7 * expressions(n) + 11 * kept(n) + 13 * lengths(n) + 17 * owned(n);\n"
+    "        trace = 0; int r = midrun(n) + 3 * three(n) + 5 * loops(n) + 7 * expressions(n) + 11 * kept(n) + 13 * lengths(n) + 17 * owned(n) + 23 * regions(n);\n"
     "        struct S s = named(n); none(n); jumpy = 1; if (setjmp(jumps) == 0) { jumped(n); } r += 19 * jumped(n);\n"
     "        printf(\"%d %d %d %d %u\\n\", n, r, s.a, s.b, trace);\n"
     "    }\n"
     "    return 0;\n"
     "}\n";
 
-// The issue's shapes (#1370) of `count` cleanups, each followed by an exit, and a main that runs each over every exit.
+// The issue's shapes (#1370) of `count` cleanups, each followed by an exit, one of them in a statement expression's block,
+// and a main that runs each over every exit.
 static bool check_test_cleanup_chain_shapes(char* text, size_t capacity, uint32_t count)
 {
     size_t used = 0;
@@ -222,8 +232,13 @@ static bool check_test_cleanup_chain_shapes(char* text, size_t capacity, uint32_
     {
         BUSTER_CHECK_TEST_CHAIN_PRINT("int c%u __attribute__((cleanup(rel))) = a + %u; if (a == %u) goto fail; s += c%u;\n", i, i, i, i);
     }
-    BUSTER_CHECK_TEST_CHAIN_PRINT("} return s; fail: return -s; }\n");
-    BUSTER_CHECK_TEST_CHAIN_PRINT("int main(void) { unsigned h = 0; for (int a = -1; a < %u; a++) { trace = 0; int r = returns(a) + 3 * nested(a) + 5 * loop(a) + 7 * jumps(a);\n"
+    BUSTER_CHECK_TEST_CHAIN_PRINT("} return s; fail: return -s; }\nstatic int region(int a) { return ({ int s = 0; {\n");
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        BUSTER_CHECK_TEST_CHAIN_PRINT("int c%u __attribute__((cleanup(rel))) = a + %u; if (a == %u) goto done; s += c%u;\n", i, i, i, i);
+    }
+    BUSTER_CHECK_TEST_CHAIN_PRINT("} done:; s; }); }\n");
+    BUSTER_CHECK_TEST_CHAIN_PRINT("int main(void) { unsigned h = 0; for (int a = -1; a < %u; a++) { trace = 0; int r = returns(a) + 3 * nested(a) + 5 * loop(a) + 7 * jumps(a) + 11 * region(a);\n"
                                   "h = h * 31u + (unsigned)r + trace; } printf(\"%%u\\n\", h); return 0; }\n", count + 3);
 #undef BUSTER_CHECK_TEST_CHAIN_PRINT
     return valid;
