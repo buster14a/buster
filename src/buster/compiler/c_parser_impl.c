@@ -6888,6 +6888,15 @@ static void parse_check_begin(const ParseCheckFrames* frames, ParseCheckCarry* c
     };
 }
 
+// A token's role once K6 has its group (#1968): a call's parentheses that hold a declarator's parameters are a
+// function's, as the scalar parser marks them. K2's rules can't tell them apart (both follow an operand); K6's group
+// can (PARSE_GROUP_PARAMETERS, from the declaration's mode). Its vector twin is parse_function_roles_block_avx512.
+static uint8_t parse_function_role(uint8_t role, uint8_t group)
+{
+    const bool parameters = group == PARSE_GROUP_PARAMETERS;
+    return parameters && role == PARSE_ROLE_OPEN_CALL ? PARSE_ROLE_OPEN_FUNCTION : parameters && role == PARSE_ROLE_CLOSE_CALL ? PARSE_ROLE_CLOSE_FUNCTION : role;
+}
+
 // K6, the twin, on tokens [begin, end): every token's mode from the frames (`frames`, which have an entry per node
 // depth) and the carry, then the checks, which flag the tokens that fail them. `names` are the tokens' IdentIds,
 // `line_flags` their output flags (BUSTER_PP_START_OF_LINE) and `typed` K2's typed state per token. `classes` gets
@@ -6977,9 +6986,12 @@ static void parse_check_range(ParseKernels* kernels, const uint32_t* names, cons
             frames->part[depth] = parse_check_part_after(c, frames->part[depth]);
         }
         frames->after_body[depth] = c == PARSE_ROLE_CLOSE_STRUCT || c == PARSE_ROLE_CLOSE_ENUM || (after_body && transparent);
-        if (parse_role_rules[role] == PARSE_RULE_OPENER)
+        const bool opener = parse_role_rules[role] == PARSE_RULE_OPENER;
+        const uint8_t opened = opener ? parse_check_group(c, mode, previous) : PARSE_GROUP_OTHER;
+        kernels->check_groups[i] = closer ? inner_group : opened;
+        if (opener)
         {
-            frames->group[depth + 1] = parse_check_group(c, mode, previous);
+            frames->group[depth + 1] = opened;
             frames->kind[depth + 1] = BUSTER_PARSE_ITEM_OTHER;
             frames->part[depth + 1] = PARSE_PART_START;
             frames->items[depth + 1] = 0;
@@ -7199,6 +7211,7 @@ static bool parse_kernels_reserve_tree(ParseKernels* kernels, Arena* arena, uint
         .check_typed = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, slots),
         .check_after_body = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, slots),
         .check_classes = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, slots),
+        .check_groups = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, slots),
     };
     const bool result = kernels->vkinds != 0 && kernels->depths != 0 && kernels->node_depths != 0 && kernels->enclosing != 0 && kernels->bracket_blocks != 0 &&
                         kernels->role_statics != 0 && kernels->roles != 0 &&
@@ -7208,7 +7221,7 @@ static bool parse_kernels_reserve_tree(ParseKernels* kernels, Arena* arena, uint
                         kernels->typedef_tokens != 0 && kernels->typedef_points != 0 && kernels->typedef_ends != 0 && kernels->typedef_previous != 0 &&
                         kernels->typedef_scopes != 0 && kernels->check_group != 0 && kernels->check_kind != 0 &&
                         kernels->check_part != 0 && kernels->check_items != 0 && kernels->check_typed != 0 && kernels->check_after_body != 0 &&
-                        kernels->check_classes != 0;
+                        kernels->check_classes != 0 && kernels->check_groups != 0;
     if (result)
     {
         memset(kernels->typedef_names, 0, name_capacity);
@@ -7273,6 +7286,7 @@ static ParseKernelResult parse_twins(ParseKernels* kernels, const ParseInput* in
         for (uint32_t i = 0; i < count; i += 1)
         {
             result.flagged_tokens += kernels->flags[i] != 0;
+            kernels->roles[i] = parse_function_role(kernels->roles[i], kernels->check_groups[i]);
         }
     }
     result.fallback = parse_fallback(kernels, input, result.everything);
@@ -10095,6 +10109,9 @@ static bool parse_check_block_avx512(ParseKernels* kernels, const uint32_t* name
             const __mmask64 starts_before = (starts << 1) | (carry->previous_start != 0);
             const __mmask64 empty = closers & _mm512_cmpeq_epi8_mask(level, level_before);
             const __m512i inner_group = _mm512_mask_mov_epi8(group_before, empty, opened_before);
+            const __mmask64 openers = _mm512_test_epi8_mask(role_bits, _mm512_set1_epi8(BUSTER_PARSE_CHECK_OPENER));
+            _mm512_mask_storeu_epi8(kernels->check_groups + block, live_mask,
+                                    _mm512_mask_mov_epi8(_mm512_mask_mov_epi8(_mm512_set1_epi8(PARSE_GROUP_OTHER), openers, opened), closers, inner_group));
             const __m512i inner_items = _mm512_maskz_mov_epi8(~empty, items_before);
             // _Alignas's closer, by its group's type and the typed state before its keyword.
             uint64_t alignas = parse_equal8(role, PARSE_ROLE_CLOSE_SPECIFIER) & parse_equal8(inner_group, PARSE_GROUP_ALIGNAS) & live_mask;
@@ -10281,6 +10298,17 @@ static void parse_check_avx512_period(ParseKernels* kernels, const uint32_t* nam
 static void parse_check_avx512(ParseKernels* kernels, const uint32_t* names, const uint8_t* line_flags, uint32_t count, const uint8_t* typed, uint64_t* twin_blocks)
 {
     parse_check_avx512_period(kernels, names, line_flags, count, typed, twin_blocks, 0);
+}
+
+// parse_function_role on the block of tokens from `block`, the lanes of `live_mask`, after K6.
+BUSTER_INLINE void parse_function_roles_block_avx512(ParseKernels* kernels, uint32_t block, __mmask64 live_mask)
+{
+    const __m512i role = _mm512_maskz_loadu_epi8(live_mask, kernels->roles + block);
+    const __mmask64 parameters = parse_equal8(_mm512_maskz_loadu_epi8(live_mask, kernels->check_groups + block), PARSE_GROUP_PARAMETERS) & live_mask;
+    const __mmask64 opens = parameters & parse_equal8(role, PARSE_ROLE_OPEN_CALL);
+    const __mmask64 closes = parameters & parse_equal8(role, PARSE_ROLE_CLOSE_CALL);
+    const __m512i function = _mm512_mask_mov_epi8(_mm512_set1_epi8(PARSE_ROLE_CLOSE_FUNCTION), opens, _mm512_set1_epi8(PARSE_ROLE_OPEN_FUNCTION));
+    _mm512_mask_storeu_epi8(kernels->roles + block, opens | closes, function);
 }
 
 // K2's by-depth stacks, each from the start of a page and a quarter page after the one before it: a block stores its
@@ -10490,6 +10518,7 @@ static ParseKernelResult parse_vector(ParseKernels* kernels, const ParseInput* i
             const __mmask64 live = count - block < 64 ? (((__mmask64)1 << (count - block)) - 1) : ~(__mmask64)0;
             const __m512i flags = _mm512_maskz_loadu_epi8(live, kernels->flags + block);
             result.flagged_tokens += (uint64_t)__builtin_popcountll(_mm512_test_epi8_mask(flags, flags));
+            parse_function_roles_block_avx512(kernels, block, live);
         }
     }
     result.fallback = parse_fallback(kernels, input, result.everything);

@@ -81,8 +81,9 @@ What the tree guarantees, which the later passes may rely on:
   opener's parent is its closer, after it; following parents always reaches
   the root;
 - both paths give the same tree, the same parents, node depths and roles, on
-  every token of every unit without errors (a function declarator's
-  parentheses and a call's compare as one role: they have the same tree).
+  every token of every unit without errors (a declarator's parameter list
+  included: the vector path's K2 marks its parentheses a call's, and K6's
+  groups make them a function's, #1968).
 
 ## The tree
 
@@ -314,6 +315,14 @@ keeps is one the scalar parser accepts with the same tree. Each token gets:
   attribute, a builtin's arguments, 27 in all) and its part of its item (its
   start, a declaration's specifiers and declarators, an initializer, a
   bit-field's width, a statement): 49 modes.
+
+K6 also records the group each opener opens and each closer closes
+(`ParseKernels.check_groups`). K2's rules can't tell a declarator's parameter
+list from a call's arguments, as both follow an operand, so the vector path
+marks both a call's; after K6, a call's parentheses in a parameter list's group
+become a function's (`parse_function_role`, and in AVX-512 a block at a time in
+the loop that counts the flagged tokens), as the scalar parser marks them
+(#1968). The checker reads that role, `check_driver_in_parameters` among others.
 
 A token passes if its class may follow the class before it (`follows`, 128 by
 128 classes), may appear in its mode (`allows`), may end its group when the

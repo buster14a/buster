@@ -1423,6 +1423,9 @@ struct ParseKernels
     uint8_t* check_typed;
     uint8_t* check_after_body;
     uint8_t* check_classes;
+    // The group each opener opens and each closer closes, by K6 (PARSE_GROUP_OTHER for the other tokens): what tells a
+    // declarator's parameter list from a call's arguments (parse_function_roles, #1968).
+    uint8_t* check_groups;
     // What the kernels report.
     bool unbalanced;
     bool unsupported;
