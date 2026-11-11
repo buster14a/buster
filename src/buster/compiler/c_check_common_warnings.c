@@ -8381,11 +8381,17 @@ static uint32_t check_common_operand_mask(const CheckGraph* graph, const CheckSt
 
 // The statements of the statement expression `node` (a STATEMENT_VALUE, at its `)`) that the source doesn't evaluate: their
 // roots, which no parent reads, taken as unevaluated as it is (#1447: clang's CFG leaves a short-circuited operand's, a
-// constant conditional's other arm's and unreachable code's statement expression's blocks unreachable). Its statements'
-// nodes precede it, from its `(` on; the scan back stops at the first node before that.
+// constant conditional's other arm's and unreachable code's statement expression's blocks unreachable). One in a sizeof's
+// or an alignof's operand is unevaluated, not unreachable, and its statements keep their warnings. Its statements' nodes
+// precede it, from its `(` on; the scan back stops at the first node before that.
 static void check_common_statement_roots(const CheckGraph* graph, const Parser* parser, const uint32_t* parents, uint32_t node, uint8_t* evaluated)
 {
-    const uint32_t close = graph->tokens[node];
+    bool queried = false;
+    for (uint32_t at = parents[node], steps = 0; !queried && at < graph->count && steps < graph->count; at = parents[at], steps += 1)
+    {
+        queried = graph->ops[at] == CHECK_OP_SIZEOF || graph->ops[at] == CHECK_OP_ALIGNOF;
+    }
+    const uint32_t close = queried ? BUSTER_CHECK_NONE : graph->tokens[node];
     uint32_t open = BUSTER_CHECK_NONE;
     for (uint32_t at = close; close < parser->tokens.count && open == BUSTER_CHECK_NONE && at-- > 0;)
     {
