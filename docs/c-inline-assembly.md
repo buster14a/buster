@@ -424,8 +424,9 @@ clang's code gives it (CodeGen's `AddVariableConstraints`;
   variable is refused, where clang's code loads both and the byte's load
   overwrites the other's bits 8 to 15.
 
-A statement of a high byte's or an XMM16-up variable keeps its helper: #1839's
-asm bodies don't load them by those names.
+A statement of a high byte's or an XMM16-up variable is an asm body (#1839) that
+loads its operands from its block by those names, as the helper does, rather
+than take them as its call's arguments (`check_asm_inline_passes`).
 
 rsp stays refused: clang's code moves the variable's value into rsp before the
 template (an uninitialized local's garbage), where a helper's rsp is its own;
@@ -445,8 +446,8 @@ names by rax's 64-bit name (`%rax` for an `int` too; `%k0` is `%eax`); and an
 template names `%rax` (GCC's "ax:dx pair"). An input fixed to rax or rdx shares
 its register with a pair output that isn't early-clobbered or `+`, as clang's
 code shares it: mulq's `"=A"(r) : "a"(x), "rm"(y)` multiplies x in rax. The
-helper loads and stores the pair by its halves, from a slot of 16 bytes; a
-statement of one keeps its helper (#1839's asm bodies don't move pairs).
+helper loads and stores the pair by its halves, from a slot of 16 bytes, and so
+does an asm body (#1839), which loads its operands from its block.
 
 ### MMX's operands
 
@@ -462,7 +463,10 @@ a narrower one's through a general register). As in clang's code, nothing runs
 `emms`: the template's author leaves the x87's state as the code after it needs
 it. A statement of MMX and x87 operands is refused by name (their registers are
 the same), and so is one whose template takes directives. A statement of MMX
-operands keeps its helper: #1839's asm bodies don't load them. A template of no
+operands is an asm body (#1839) that loads them as the helper does, through rax
+before its other loads, from its block. MMX's forms, which `x86_semantics.c`
+doesn't cover, are taken to write the general and XMM registers their fields
+name and nothing else, and `emms` nothing. A template of no
 instructions has no helper, as for general registers: clang's code would move
 the values through an MMX register and back, unchanged.
 
@@ -475,8 +479,9 @@ clang's code generation; the lowering refuses it by name). The template names
 it `%k0`; clang refuses every modifier of one, and so does the lowering. The
 helper loads it zero-extended into rax and moves it in by its width (`kmovw
 %eax, %k0`, `kmovd`, `kmovq`), and stores an output's bits through a general
-register, as clang's code does (a statement of one keeps its helper: #1839's
-asm bodies don't move them). kmovw needs AVX-512F, kmovd and kmovq
+register, as clang's code does, and so does an asm body (#1839), whose
+operands are then its block's and whose operands' registers are among the masks
+Tier 1 saves around it. kmovw needs AVX-512F, kmovd and kmovq
 AVX-512BW, by the body's instruction set (its function's target attributes
 among them): without them, clang can't place the operand ("could not allocate
 output register"), and the lowering refuses it by name.
@@ -655,13 +660,56 @@ the GOT for an extern variable, as clang's code does). A `.comm` of a name the
 unit doesn't declare is the template's own common symbol. Both are
 `BUSTER_LINK_SYMBOL_COMMON` symbols of their own atoms, as C's commons are,
 which `-c`'s object writes `SHN_COMMON` and the direct path and the units' merge
-place as they place C's. A label or `.comm` of a name the unit defines, a
-tentative definition's too, stays refused ("inline assembly labels named as the
-unit's symbols"), with or without `-fcommon`: clang 23 has no coherent object
-for it. Without `-fcommon` its object makes C's `.bss` definition a common of
-C's size at the template's alignment, dropping an initializer's bytes; with
-`-fcommon` a `.comm` of C's size and alignment is the one common, and another
-size or alignment is a backend crash ("redeclared as different type").
+place as they place C's.
+
+A template's name of a symbol the unit defines is what clang 23's assembler
+makes of it (#1848, `check_program_emit_asm_symbols`):
+
+- A `.comm` of an external variable the unit defines (`int x = 1;`, a tentative
+  `int x;` without `-fcommon`, `char x[32];`, `_Alignas(32) int x;`), in a
+  file-scope or a statement template, before or after the definition, makes the
+  name clang's common symbol: one `SHN_COMMON` symbol of the C definition's size
+  at the `.comm`'s alignment (`.comm x,8,8` makes 8, `.comm x,64,16` 16), the
+  `.comm`'s own size ignored. The definition's bytes stay in their section
+  (`.data`, `.bss`) without a symbol (`int x = 7; int y = 3;` keeps `.data`'s 8
+  bytes, `y` at 4), and C's references, a static pointer's relocation among them,
+  are the common's, so the linked program reads the common's zeros, not the
+  initializer. The static data defines the symbol at C's atom as usual; the
+  template's common atom is recorded instead of defining it
+  (`CheckProgramCode.commoned_symbols`, `check_program_emit_asm_unit`), and
+  `check_program_sections` then moves the symbol to that atom, sized as C's, of
+  the common type, on `-c`, the direct path and both checker paths alike.
+  Refused by name: a C common symbol's `.comm` (`int x;` under `-fcommon`, or the
+  common attribute), since clang's backend crashes for another size or alignment
+  ("Symbol: x redeclared as different type") and keeps the one common for the same
+  (buster refuses both); a function's (clang keeps its code without its symbol and
+  makes a `FUNC` common); a static (clang reports a zero-filled one's "changed
+  binding to STB_LOCAL" and makes an initialized one a global common), weak
+  (clang warns and makes it a weak common), thread-local (a `TLS` common), alias's
+  or selectany definition's; and a read-only one's (`const int x = 1;`), whose
+  reads clang's code folds to the initializer where the program would read the
+  common's zeros. Without an alignment operand, the assembler aligns a `.comm` as
+  GNU as does (the size's power of two up to 16) where clang's integrated
+  assembler takes 1; the fixtures give one.
+- A file-scope label of an external, non-weak definition (`int x = 1;` with
+  `asm(".globl x\nx: .long 2")`, `int f(void)` with `f: ret`, `int x;` with a
+  `.data` label), without a binding directive but `.globl`, is clang's
+  assembler error, as clang prints it, without a source location, at `-c` and
+  the direct path but not at `-fsyntax-only` (`CheckProgramRedefined`,
+  `check_driver_emission_failed`): `error: symbol 'x' is already defined`, once
+  for a function's or a common symbol's definition (`int x;` under `-fcommon`)
+  and twice for another variable's, as clang streams the module's assembly
+  before its definitions. Refused by name ("inline assembly labels named as the
+  unit's symbols", or "... as several of the unit's definitions"), where clang's
+  output depends on what buster doesn't model: labels of several definitions
+  (clang reports them in its module's emission order, functions first), a
+  statement template's label (clang reports an earlier function's at the
+  template, with a note, and a later one's without a location), a static
+  definition's (clang emits none for an unused one, and the label stands), an
+  `.lcomm`'s or a `.local`/`.weak` label's (clang adds "x changed binding to
+  STB_GLOBAL"), a weak definition's (clang adds a binding warning) and an
+  absolute (`.set`) symbol's (which clang takes, the C definition keeping the
+  name).
 `test-checker-driver --asm-definitions-only`
 (`c_check_asm_definition_driver_test.c`) compares each fixture's `-c` symbols
 and data relocations with clang 23's, on both paths, and runs the objects
@@ -830,9 +878,10 @@ own name, type and flags (`CheckProgramCode.asm_sections`,
 `check_program_sections`); the direct path's executable merges it into its
 class's output section. Its sections are any the assembler makes (#1848):
 custom flags (`.pushsection __ex_table,"a"`), merged strings, notes (`-c`'s
-`SHT_NOTE`; the direct path keeps a note's bytes with its class's data, without
-a `PT_NOTE`), and the arrays of constructors and destructors
-(`.section .init_array,"aw"`), whose entries the direct path's executable runs
+`SHT_NOTE`; the direct path's executable gives a `.note*` section an `SHT_NOTE`
+output section of its name and a `PT_NOTE`, as lld does, sharing one output
+section between names of one alignment), and the arrays of constructors and
+destructors (`.section .init_array,"aw"`), whose entries the direct path's executable runs
 as C's constructors'. Its CFI's frames are an `.eh_frame` atom of their own
 beside the functions' unwind table, its CIE and FDEs as the assembler makes them
 (clang's object shares one CIE between the module's assembly and its

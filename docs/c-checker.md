@@ -3345,7 +3345,7 @@ What the lowering covers past scalars (#145's programs):
     Every symbol, with its binding, type and definedness, must be clang's; the
     scalar and vector objects must be the same bytes; and every mix of the
     objects linked by cc, the direct path's executables and `-g`'s objects must
-    run as clang's build. It then runs the resolvers over 21 models of libgcc's
+    run as clang's build. It then runs the resolvers over 24 models of libgcc's
     CPU model, which the fixture defines: `target`'s versions by their values,
     and `target_clones`' by calling the resolver of a unit of their
     declaration, linked before clang's object of their definition. The
@@ -3353,9 +3353,16 @@ What the lowering covers past scalars (#145's programs):
   - *Differences from clang's code.* A `target_clones` body is compiled once,
     with the unit's features, where clang compiles a copy per version (each is
     valid there). The resolver is `.text`'s, not a COMDAT section's, and has no
-    unwind entry. An `arch=` that names a vendor or a CPU type, or a processor
-    of no key feature with a priority, which clang's `getFMVPriority` leaves
-    undefined, is refused by name.
+    unwind entry.
+  - *`arch=` beyond `__builtin_cpu_is`'s names.* An `arch=` processor that
+    `__builtin_cpu_is` doesn't name (`corei7-avx`, `skx`: aliases of
+    `-march`'s) is clang's `EmitX86CpuIs` default, a test of the model's
+    vendor against 0; the models' test covers it. A processor whose key
+    feature has no priority (`knm`, the one Sema takes) has none in clang's
+    `getFMVPriority` either, where `getFeaturePriority` is unreachable:
+    undefined behavior, whose order differs between clang's builds (23.1.4
+    sorts it below `sse4.2`, 23.1.6 above every version). It is refused by
+    name.
 - **`cpu_specific` and `cpu_dispatch` (#1447).** clang's CPU multiversioning,
   checked as clang 23's Sema checks it (`c_check_cpu_dispatch.c`, after the
   #839 checks) and emitted as its code generation emits it
@@ -4896,7 +4903,13 @@ own completed type where it had none (`(int[]){1, 2}`). Any other array type
 is clang's "cannot initialize array of type 'int[3]' with array of type
 'int[2]'" at the name (`CHECK_INPUT_ARRAY_LITERAL_MISMATCH`, its value the
 literal's TypeId, which lanes remap), recovered, the array keeping its type and
-no initializer.
+no initializer. A file-scope array's mismatch is left out where the literal's body
+holds a value that is no constant (#1812): clang's file-scope literal is then
+invalid, and its initialization of the array gives no error of its own. The
+body's own "initializer element is not a compile-time constant" is given once
+at its place, though both the literal's declaration and the array check it. At
+block scope the mismatch still comes before the body's conversion error, where
+clang gives it after.
 
 An undeclared name that is a typo of a visible one is clang's (#1447,
 `c_check_typo.c`). The rules are clang 23's, as probed:
@@ -4950,6 +4963,19 @@ An undeclared name that is a typo of a visible one is clang's (#1447,
   the name was declared with linkage before, another call's implicit
   declaration or a block's extern (clang's `ExternCPrev`). The call still
   declares the function implicitly.
+- **An unknown builtin's call** (#2121): a `__builtin_` name that no clang
+  builtin row has in the unit's language mode, called directly before C23,
+  is declared implicitly as any undeclared function, with clang's
+  `warn_builtin_unknown`: "use of unknown builtin '__builtin_foo'
+  [-Wimplicit-function-declaration]", an error by default in every mode
+  (C89's too, and under `-w`), a warning under
+  `-Wno-error=implicit-function-declaration` and nothing under
+  `-Wno-implicit-function-declaration` (`PPOptions.implicit_builtin_diagnostic`,
+  `CheckInput.implicit_function_builtins`). Its error searches for a
+  correction in every mode. `__builtin_c23_va_start` is such a name before
+  C23, as clang's table makes it a builtin in C23 alone
+  (`check_constant_builtin_name`, `check_input_builtin_language`). In C23,
+  and where the name isn't called, it is an undeclared identifier.
 - **The limit.** At most 50 searches are made in a unit
   (`-fspell-checking-limit`), counted in source order: the values', the
   calls', and clang's search at each call of a prototyped function with too
@@ -4969,6 +4995,11 @@ use the dynamic-programming table, the twin that `test-checker` checks against
 with an undeclared name fails them and is read again in source order.
 
 Left as they were:
+
+- No search offers a builtin's name or a predefined type's (clang's
+  `use of undeclared identifier '__builtin_absx'; did you mean
+  '__builtin_abs'?`, or `'__builtin_ms_va_list'` for
+  `__builtin_c23_va_start` named outside a call before C23).
 
 - At a statement's start clang parses the statement again with the keyword
   it takes (`retrn x;` is a `return`, `whil;` then gives "expected '(' after
@@ -5846,7 +5877,10 @@ enumeration by its integer type's range (`enum Small : signed char e = 300;`).
 An `_Atomic` destination takes neither. Its conversion is to the atomic's value
 type, which the lowering needs, so the action marks it
 `BUSTER_CHECK_CONVERT_ATOMIC` wherever it strips `_Atomic`: assignments,
-initializations, brace elements, returns and prototype arguments.
+initializations, brace elements, returns and prototype arguments. An
+assignment's or an increment's value is no constant to clang's evaluator, so
+its conversion warns of nothing (`char c = x = 1000;`, `{ x = 300 }`), though a
+comma's right operand's does (`check_common_conversion_leaf`, #1447).
 
 A brace initializer's integer constants warn of their constant conversions too
 (#1447), in the reverse initializer order clang's `AnalyzeImplicitConversions`
@@ -7936,10 +7970,21 @@ arguments against the function. The checker now gives these as clang does.
   `int v = 1; extern int v __attribute__((aligned(16)));` keeps `v` at 4,
   where the checker used to give it 16.
 
+  A redefinition of a compatible type is checked too, before its
+  "redefinition of 'f'" error (#1920): clang merges its attributes when it
+  declares it and reports the redefinition at its body or initializer. So is
+  a redeclaration of a multiversioned function's version
+  (`check_input_cpu_dispatch_redeclare`). A declaration that multiversioning
+  refuses isn't merged, so it gets no warning.
+
   Some attributes are left alone, as clang leaves them: type attributes, the
-  machine mode, the alias family, multiversioning's, `overloadable`, the
-  keywords, statements' and locals' attributes, and C23's `deprecated`,
-  `maybe_unused` and `nodiscard`. A tentative definition is no definition
+  machine mode, the alias family, `overloadable`, the keywords, statements'
+  and locals' attributes, and C23's `deprecated`, `maybe_unused` and
+  `nodiscard`. Multiversioning's (`target`, `target_clones`, `cpu_specific`,
+  `cpu_dispatch`) are checked where the declaration merges with the
+  definition's, as `int f(void) {...} __attribute__((target("default"))) int
+  f(void);` does. A target of another string than the definition's makes a
+  new version instead, an entity of its own. A tentative definition is no definition
   here. The check runs on the serial path: a body that a lane checks gets
   none.
 - **Deprecated and unavailable uses** (`check_input_deprecated_uses`). A use
@@ -8135,7 +8180,34 @@ arguments against the function. The checker now gives these as clang does.
     located at its name rather than its scope in every report
     (`check_diagnostic_custom_attribute_name`). `test-checker-driver`
     (`c_check_objc_bridge_driver_test.c`) compares each unit's whole output
-    with clang's, by both paths, in GNU C17 and C23.
+    with clang's, by both paths, in GNU C17 and C23;
+  - Swift's `swift_newtype` and `swift_wrapper` (GNU spellings alone) and
+    `swift_async_error` (#1447), which change nothing in C past their
+    handlers' checks. `swift_newtype`'s and `swift_wrapper`'s argument is
+    read as clang's ParseSwiftNewTypeAttribute reads it
+    (`check_input_swift_newtype_parse`, a balanced run of tokens to the
+    parser): empty parentheses are "argument required after attribute";
+    a token other than `struct` or `enum` is the warning "'X' attribute
+    argument not supported: 'Y'" (Y the identifier or keyword as written,
+    `(null)` for another token, as clang streams the token's
+    IdentifierInfo), which drops the attribute before its subjects are
+    checked, and consumes the token unless it is a parenthesis, bracket,
+    brace or string; then "expected ')'" with its note. Without parentheses
+    the handler's count, exactly one, follows the subjects' check.
+    `swift_async_error`'s convention (`check_input_attribute_swift_async_error`)
+    is `none`, `nonnull_error`, `zero_argument` or `nonzero_argument`, as
+    written; another identifier is "'X' attribute argument not supported: 'Y'"
+    at the attribute, which ignores it. The two indexed conventions take
+    exactly two arguments, the second an integer constant in 32 bits
+    (`requires an integer constant`, or the too-large error at it), and the
+    others one. A convention other than `none` on a function with
+    `swift_async(none)`, in either order, is "'swift_async' attribute must
+    be applied to a function annotated with non-'none' attribute
+    'swift_async'" at the `swift_async`. (A non-`none` `swift_async` needs a
+    block parameter, which C hasn't, so its error-parameter checks never
+    apply.) A first argument that is no identifier, on which clang 23 crashes
+    (its handler reads it as an identifier), is refused by name.
+    `c_check_swift_attribute_driver_test.c` compares their units as above.
 
   Every attribute's arguments are read first as clang's parser reads them,
   by their kinds (`check_input_arguments_row`, from
@@ -8864,9 +8936,8 @@ arguments against the function. The checker now gives these as clang does.
   guide](object-writer-and-linker.md)'s "Patchable function entries".
 
   The rest stay refused by name, where they apply: `format_matches`,
-  `cfi_salt`, `swift_name`, `swift_async_name`, `swift_error`,
-  `swift_async_error`, `swift_newtype` and `swift_wrapper` in either syntax,
-  and the C23 spellings of `objc_gc` and `objc_ownership`. Recognizing their
+  `cfi_salt`, `swift_name`, `swift_async_name` and `swift_error` in either
+  syntax, and the C23 spellings of `objc_gc` and `objc_ownership`. Recognizing their
   names does not supply their handlers.
 - **Type arguments.** The attributes clang's `attributeIsTypeArgAttr` names
   (`preferred_type`, `vec_type_hint`, `iboutletcollection`, `preferred_name`,
@@ -9436,9 +9507,8 @@ part in its overload resolution, are "not yet supported" in user code (a
 tautological `enable_if(1, ...)`, glibc's, aside); the condition shapes
 above (and clang's `-Wunused-value` of a comma operator's left operand in a
 condition isn't given); and, as everywhere in this driver, the uses' errors stop the unit's
-later expression checks, so a call after one such error isn't diagnosed. An
-assignment expression as an initializer list's element (`{ x = q }`) is read
-as a designation, whose value clang converts with the list's. A grouped
+later expression checks, so a call after one such error isn't diagnosed. A
+grouped
 diagnose_if under `-Weverything` meets every other warning that option
 enables, which this checker doesn't all give.
 
@@ -9618,7 +9688,8 @@ enables, which this checker doesn't all give.
   target and the null pointer warning's target do too, with a member's
   `typeof` (`&s.m` of a `typeof(long) m` is `'typeof(long) *'`, #1837). An a.k.a. keeps a
   vector's own typedef at any level (`'pv' (aka 'v4si *')`), as
-  `desugarForDiagnostic` stops there. A typedef'd array's element keeps its
+  `desugarForDiagnostic` stops there. It doesn't look inside an `_Atomic`
+  either: `_Atomic(I) *` has no a.k.a. (`check_driver_atomic_value`). A typedef'd array's element keeps its
   qualified typedef (`'CI[2]' (aka 'const int[2]')`, `type_print`). A qualifier
   the specifiers write again beside a qualified typedef prints over its name
   (`const CI twice[1]`'s `'const CI[1]' (aka 'const int[1]')`): the operand's
@@ -9664,6 +9735,12 @@ enables, which this checker doesn't all give.
     has no space (`sizeof(x)`, clang's `sizeof (x)`; the static assertion's
     requirement shares the spacing). Only a type's first eight bounds print;
     later ones print `[]`.
+  - A typedef written in a function type's parameters prints canonically:
+    clang prints `void (*fp)(I)` as `'void (*)(I)' (aka 'void (*)(int)')`,
+    this `'void (*)(int)'`. The warning renderer takes one typedef, by type;
+    the `__builtin_dump_struct` printer's places (`check_lower_dump_places`,
+    `TypeNames.alias_order`) spell each parameter's own and would serve here
+    once they read the parser and input rather than a `CheckProgram`.
   - An initializer subobject's null pointer warning (`{ .lp = 1-1 }`) prints
     its target canonically: the initializer walk that gives it keeps neither
     the declaration nor its subobject's member.

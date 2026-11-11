@@ -33,9 +33,13 @@ requirements. [Command index](README.md).
   the unit's symbols of those link names or undefined globals
   (`check_program_emit_asm_symbols`). A label or `.comm` (a
   `BUSTER_LINK_SYMBOL_COMMON` symbol) of a name the unit declares without
-  defining defines that symbol (#1848); `test-checker-driver
-  --asm-definitions-only` compares such fixtures' `-c` symbols with clang's and
-  runs them. A file-scope `asm`'s templates are
+  defining defines that symbol (#1848); a `.comm` of an external variable the
+  unit defines makes it clang's common symbol of C's size at the `.comm`'s
+  alignment, C's bytes left without a symbol, and a file-scope label of an
+  external definition is clang's location-less "symbol 'x' is already defined"
+  error (other shapes are refused by name: `docs/c-inline-assembly.md`);
+  `test-checker-driver --asm-definitions-only` compares such fixtures' `-c`
+  symbols with clang's, runs them and compares the errors' whole output. A file-scope `asm`'s templates are
   assembled together by the planning (`check_program_asm_plan_file`, #619),
   their names joining the templates' (#1848), and published as atoms of their
   sections before the functions', each in its section in `-c`'s object.
