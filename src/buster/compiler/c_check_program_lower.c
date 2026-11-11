@@ -12211,6 +12211,10 @@ static __attribute__((noinline)) void check_lower_vector_builtin(CheckLowerWrite
     {
         check_lower_transport_boolean_builtin(writer, node, builtin, effect->evaluated_argument_count);
     }
+    else if (check_lower_bits_elements(writer, builtin, result, effect->evaluated_argument_count))
+    {
+        check_lower_transport_bit_builtin(writer, node, builtin, effect->evaluated_argument_count);
+    }
     else if ((check_lower_transport_type(types, result) || check_lower_vector_wide(writer, result) ||
               (builtin == CBUILTIN_ELEMENTWISE_LDEXP && count >= 2 && (check_lower_transport_type(types, stream->argument_conversions[first + 1].type) ||
                                                                       check_lower_vector_wide(writer, stream->argument_conversions[first + 1].type)))) &&
@@ -15738,6 +15742,15 @@ static void check_lower_node_count(const CheckProgram* program, uint32_t node, C
         }
         counts->transport_entries += room;
         counts->transport_locals += room != 0 ? 12 : 0;
+        // A bit builtin's elements, each its SWAR sequence (check_lower_transport_bit_builtin): up to 144 entries an element,
+        // its sequence's 96 and its operands' reads and its store, for a vector of any width (#1834).
+        const bool bits = member == CBUILTIN_ELEMENTWISE_POPCOUNT || member == CBUILTIN_ELEMENTWISE_BITREVERSE || member == CBUILTIN_ELEMENTWISE_CLZG ||
+                          member == CBUILTIN_ELEMENTWISE_CTZG || member == CBUILTIN_ELEMENTWISE_FSHL || member == CBUILTIN_ELEMENTWISE_FSHR;
+        if (op == CHECK_OP_BUILTIN_VECTOR && bits && check_lower_transport_is_vector(types, type))
+        {
+            counts->transport_entries += 144 * (uint64_t)check_builtin_vector_lanes(types, type_conversion_operand(types, type));
+            counts->transport_locals += room != 0 ? 0 : 12;
+        }
     }
     // The roundings and the fused multiply-add are calls too where the unit's target lacks their instructions
     // (check_lower_vector_library), which the bound counts whatever the target.
