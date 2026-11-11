@@ -3985,10 +3985,18 @@ the same local completion cuts, and independent tentative-definition
 constraints still run at translation-unit end. `test-checker`
 (`c_check_undeclared_test.c`) compares fixtures of both orders, the parents the
 name silences and the siblings it doesn't with clang, by both paths, with
-`-fsyntax-only` and `-c`. What remains conservative: a statement expression
-that holds the name is cut whole, where clang still checks an operator on its
-value (`({ undeclared; p; }) + 1.5`); and a missing name that
-the declaration walk reports in an array's bound, a `typeof` operand, a
+`-fsyntax-only` and `-c`. A statement expression's statements before its
+value's cut their own constructs alone, not the statement expression, whose
+value clang keeps, nor what holds it (`({ undeclared; p; }) + 1.5`'s
+"invalid operands", #1447): the cut scan steps over them. What remains
+conservative: a statement expression whose value's statement holds the name
+is still cut, where clang reads it as `void` and checks what holds it
+(`({ x; undeclared; }) + 1.5`'s "invalid operands ... 'void'"), and loses the
+unused-value warnings of its statements before it; an enclosing
+operator's warning is published before the statement expression's own
+diagnostics, where clang gives it after them, in valid units too
+(`if (x = ({ printf("%s", 1); x; }))`); and a missing name that the
+declaration walk reports in an array's bound, a `typeof` operand, a
 `_BitInt` width or a file-scope designator is a declarator failure, which
 keeps the whole unit's conservative prefix (an enumerator's value's, a
 bit-field width's, and a declaration's last declarator's bound's or
