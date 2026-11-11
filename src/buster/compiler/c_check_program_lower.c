@@ -12585,8 +12585,8 @@ static __attribute__((noinline)) void check_lower_vector_builtin(CheckLowerWrite
             }
         }
         // Of a transport vector, or into one (#137), element by element: its entries are its own.
-        const bool transport = check_lower_vector_of(writer, operand_type) == 0 || check_lower_vector_of(writer, result) == 0 ||
-                               check_lower_vector_wide(writer, operand_type) || check_lower_vector_wide(writer, result);
+        bool transport = check_lower_vector_of(writer, operand_type) == 0 || check_lower_vector_of(writer, result) == 0 ||
+                         check_lower_vector_wide(writer, operand_type) || check_lower_vector_wide(writer, result);
         if (transport)
         {
             check_lower_transport_convertvector(writer, node);
@@ -12594,6 +12594,20 @@ static __attribute__((noinline)) void check_lower_vector_builtin(CheckLowerWrite
         else
         {
             reason = check_vector_convert_row(types, target, source, check_lower_vector_of(writer, operand_type), result, rows);
+            // Without AVX-512, a conversion between integers and floats or doubles that no row of SSE's or AVX's takes
+            // (unsigned integers', 64-bit integers' without AVX-512DQ) converts element by element, as C converts each
+            // scalar, which clang's sequences compute (#1834).
+            const CheckVectorShape in = check_vector_builtin_shape(types, source);
+            const CheckVectorShape out = check_vector_builtin_shape(types, result);
+            const uint64_t evex = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512VL);
+            const bool scalars = in.element != 0 && out.element != 0 && !in.bfloat && !out.bfloat && !(in.floating && in.element == 2) &&
+                                 !(out.floating && out.element == 2) && (in.floating != out.floating);
+            if (reason != NULL && operand_node == node && scalars && (target->features & evex) != evex)
+            {
+                reason = NULL;
+                transport = true;
+                check_lower_transport_convertvector(writer, node);
+            }
         }
         if (reason == NULL && !transport)
         {

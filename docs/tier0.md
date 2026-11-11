@@ -706,6 +706,9 @@ at the target's forms, by both of the checker's paths:
 - A nontemporal load without SSE4.1 is an ordinary one, as clang's code's is, and a nontemporal load or store wider
   than the target's moves (16 bytes without AVX, a load's 32 without AVX2: `check_vector_nontemporal_width`) moves a
   piece at a time, through temporaries of its address and its value (#1834).
+- A `__builtin_convertvector` between integers and floats or doubles that no row of SSE's or AVX's takes (of unsigned
+  integers, and of 64-bit ones without AVX-512DQ) converts element by element, as C converts each scalar
+  (`check_lower_transport_convertvector`, #1834): clang's sequences compute the same values.
 - What has no form at the target is refused by name: the scalars' IEEE maxima and minima (`maximum`
   and `minimum`) without AVX, which need more records than a row has. A scalar's fused multiply-add without FMA is the C library's `fmaf` or `fma`, its `ldexp` `ldexpf` or
   `ldexp` (of the exponent's low 32 bits), and its roundings (ceil, floor, trunc, rint, nearbyint, roundeven and round)
