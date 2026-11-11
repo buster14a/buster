@@ -56,11 +56,21 @@ static uint32_t check_common_sparse_get(CheckSparseColumn column, uint32_t token
     return result;
 }
 
+// The common warnings clang makes errors by default (DefaultError): a chained comparison's (#2264).
+static bool check_common_default_error(uint32_t id)
+{
+    return id == CHECK_WARNING_ID_CHAINED_COMPARISON;
+}
+
 static CheckWarningSeverity check_common_severity(Preprocessor* pp, const Parser* parser, const CheckInput* input, uint32_t token, uint32_t id, bool default_ignored)
 {
-    const CheckWarningCommandLine command = check_warning_command_line(&pp->options, id, default_ignored, false);
-    CheckWarningSeverity severity = command.quiet ? CHECK_WARNING_IGNORE :
-        check_diagnostic_severity_id_from(input, token, BUSTER_CHECK_NONE, id, command.severity);
+    // One that is an error by default stays one under -w unless something demoted it (clang's -w spares errors).
+    const bool default_error = check_common_default_error(id);
+    const CheckWarningCommandLine command = check_warning_command_line(&pp->options, id, default_ignored, default_error);
+    const CheckWarningSeverity mapped = default_error ? command.mapped : command.severity;
+    CheckWarningSeverity severity = command.quiet && !default_error ? CHECK_WARNING_IGNORE :
+        check_diagnostic_severity_id_from(input, token, BUSTER_CHECK_NONE, id, mapped);
+    severity = command.quiet && severity < CHECK_WARNING_ERROR ? CHECK_WARNING_IGNORE : severity;
     bool system = check_graph_system_token(&input->graph, token);
     if (!system && pp->output.locations != NULL && parser != NULL && token < parser->tokens.count && parser->tokens.sources[token] < pp->output.count)
     {
@@ -80,8 +90,9 @@ static CheckWarningSeverity check_common_severity(Preprocessor* pp, const Parser
 // Clang skips an analysis whose diagnostics are all ignored.
 static bool check_common_enabled(const Preprocessor* pp, const CheckInput* input, uint32_t id, bool default_ignored)
 {
-    const CheckWarningCommandLine command = check_warning_command_line(&pp->options, id, default_ignored, false);
-    bool enabled = !command.quiet && command.severity != CHECK_WARNING_IGNORE;
+    const bool default_error = check_common_default_error(id);
+    const CheckWarningCommandLine command = check_warning_command_line(&pp->options, id, default_ignored, default_error);
+    bool enabled = default_error ? command.mapped != CHECK_WARNING_IGNORE : !command.quiet && command.severity != CHECK_WARNING_IGNORE;
     const CheckInputDiagnosticPragmas* history = input->diagnostic_pragmas;
     for (uint32_t i = 0; !command.quiet && !enabled && history != NULL && i < history->count; i += 1)
     {
@@ -118,7 +129,9 @@ static void check_common_publish(const Parser* parser, Preprocessor* pp, uint32_
 {
     const char* option = id < BUSTER_ARRAY_LENGTH(check_warning_descriptions) ? check_warning_descriptions[id].option : NULL;
     const bool error = severity >= CHECK_WARNING_ERROR;
-    const char* suffix = option != NULL ? check_warning_text(scratch, " [%s%s]", error ? "-Werror," : "", option) : error ? " [-Werror]" : "";
+    // (An error by default names its group alone, as clang's does.)
+    const bool promoted = error && !check_common_default_error(id);
+    const char* suffix = option != NULL ? check_warning_text(scratch, " [%s%s]", promoted ? "-Werror," : "", option) : promoted ? " [-Werror]" : "";
     const PPSeverity disposition = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_MAPPED_FATAL :
                                    error ? PP_SEVERITY_MAPPED_ERROR : PP_SEVERITY_WARNING;
     PPOutputDiagnosticNote attached[8];
@@ -4010,6 +4023,40 @@ static void check_common_shift_op_parentheses(const Parser* parser, Preprocessor
                 }
                 arena_pop_to(scratch, mark);
             }
+        }
+    }
+}
+
+// A chained comparison (#2264, clang's diagnoseChainedComparison as it builds a relational comparison): a `<`, `>`, `<=` or
+// `>=` whose left operand is one, unparenthesized, "chained comparison 'X < Y < Z' does not behave the same as a
+// mathematical expression" at the outer operator, -Wparentheses' error by default.
+static void check_common_chained_comparisons(const Parser* parser, Preprocessor* pp, const CheckInput* input, Arena* scratch)
+{
+    const uint32_t count = parser->tokens.count;
+    const bool vector = !BUSTER_SCALAR_PATH(parser->options.scalar);
+    static const uint8_t roles[] = { PARSE_ROLE_RELATIONAL };
+    CheckCommonScan scan = { 0 };
+    const bool enabled = check_common_enabled(pp, input, CHECK_WARNING_ID_CHAINED_COMPARISON, false);
+    for (uint32_t token = enabled ? check_common_next_token(parser, count, BUSTER_CHECK_NONE, roles, BUSTER_ARRAY_LENGTH(roles), &scan, vector) : count; token < count;
+         token = check_common_next_token(parser, count, BUSTER_CHECK_NONE, roles, BUSTER_ARRAY_LENGTH(roles), &scan, vector))
+    {
+        // The left operand's root: the comparison's child before it. (The scalar scan visits every token.)
+        uint32_t left = token > 0 && parser->tree.roles[token] == PARSE_ROLE_RELATIONAL ? token - 1 : count;
+        for (uint32_t steps = 0; left < count && parser->tree.parents[left] != token && steps < count; steps += 1)
+        {
+            const uint32_t up = parser->tree.parents[left];
+            left = up != left ? up : count;
+        }
+        if (left < token && parser->tree.roles[left] == PARSE_ROLE_RELATIONAL)
+        {
+            const uint64_t mark = scratch->length;
+            const char* message = check_warning_text(scratch, "chained comparison 'X %s Y %s Z' does not behave the same as a mathematical expression",
+                                                     check_common_operator_spelling(parser, left), check_common_operator_spelling(parser, token));
+            if (message != NULL)
+            {
+                check_common_report(parser, pp, input, token, CHECK_WARNING_ID_CHAINED_COMPARISON, false, message, NULL, 0, scratch);
+            }
+            arena_pop_to(scratch, mark);
         }
     }
 }
@@ -10833,6 +10880,7 @@ static void check_driver_common_warnings(const Parser* parser, Preprocessor* pp,
     // -Wparentheses.
     check_common_self_assigns(parser, pp, input, stream, types, &spell, &facts, scratch);
     check_common_parentheses(parser, pp, input, stream, types, scratch);
+    check_common_chained_comparisons(parser, pp, input, scratch);
     check_common_shift_op_parentheses(parser, pp, input, scratch);
     check_common_string_plus_int(parser, pp, input, stream, types, &spell, scratch);
     check_common_sizeof_array_decay(parser, pp, input, stream, types, &spell, scratch);

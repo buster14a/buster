@@ -10518,6 +10518,11 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                             check_driver_common_warnings(checking, pp, &input, &stream, &types, &program, flushed, &shift_warnings, scratch);
                             arena_pop_to(scratch, flushed_mark);
                         }
+                        else
+                        {
+                            // -w spares the common checks that are errors by default (#2264): a chained comparison's.
+                            check_common_chained_comparisons(checking, pp, &input, scratch);
+                        }
                     }
                     else if (!driver_fatal && ready && (!prefix_only || checking == recovered) && !repairing && !pp->fatal &&
                              !pp->diagnostic_collection_failed && !pp->history_failed && (located || (program_diagnostics && program.token < tokens)))
