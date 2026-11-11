@@ -4725,6 +4725,25 @@ and thread-local errors still note it, and a third definition's error notes
 the first. A block's duplicate local is still dropped, as clang's lookup
 finds the first there.
 
+A function's second definition of a compatible type stays in its chain as
+well (#2362): clang's `ActOnStartOfFunctionDef` reports "redefinition of
+'f'" after the declaration was merged, and marks it invalid. The checker
+recovers the error, binds the definition as an invalid declaration
+(`check_input_invalid_declare`) and leaves its entity's linked declaration
+as it was. So, while it is visible, a later declaration of the function is
+invalid and quiet, a third definition and a conflicting type alike, and so
+are the name's uses, a block's `extern` one's too. Its body's errors and
+another kind's redeclaration, noted at it, are still reported. A
+multiversioned function's version (`target`, `target_clones`, `cpu_specific`)
+is recovered the same way, as an ordinary redefinition is, so the reader goes
+on past it. A declaration of another version is another entity's, checked
+as any, and one of the invalid version's that follows it is a redefinition of
+it again, noted there, as clang's `CheckMultiVersionAdditionalDecl` finds it.
+A call of a `target` multiversioned name keeps its other versions, as clang's
+overload resolution does. Its argument errors are still the plain call's
+wording, not clang's "no matching function", as with every multiversioned
+call.
+
 `check_driver_rejected_warnings` follows clang's `ActOnPopScope`: a scope in
 which an error occurred gives no unused-variable warning, nested scopes'
 errors included. Its extent runs from the scope's `{` to its `}`, from a
