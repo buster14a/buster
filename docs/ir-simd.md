@@ -744,6 +744,87 @@ The tests:
   source, which an earlier version took as signed.
 - `test-checker-driver`'s machine-rows unit: 59 rows and 32 moves.
 
+## Shifts by a scalar count (#1840)
+
+One more binary kind of `intrinsic`, `shift` (`BUSTER_IR_INTRINSIC_SHIFT`),
+shifts every integer lane of a vector by one count:
+
+```text
+%7 = intrinsic.v16i32 %4, %1 shift 11
+```
+
+- a is the vector, of the result's type; b is an `i32`, the count, read
+  unsigned.
+- `flags` hold the lanes' bytes' log2 (bits 0 and 1: 1, 2 or 3, words to
+  quadwords) and the shift (bits 2 and 3: 0 left, 1 logical right, 2
+  arithmetic right).
+- A count of the lane's bits or more gives 0, or every bit the sign for an
+  arithmetic shift, as `vpsllw` to `vpsraq` do by a count in an xmm register's
+  low quadword. The lane-wise `shl`, `lshr` and `ashr` can't express this
+  without clamping first: a count of 65,537 splatted into 16-bit lanes would
+  wrap to 1.
+
+`ir_shift_flags_valid` is the verifier's rule. The model's `IR_SIMD_SHIFT`
+shifts lane by lane with the lane operations' own shifts, and the interpreter,
+SCCP, GVN and LICM take it as they take the conversions.
+
+`ir_simd_typed_shift` decodes the x86 builtins' shifts by an int
+(`CHECK_X86_LOWER_SHIFT`, `__builtin_ia32_psllwi512` to
+`__builtin_ia32_psraqi128`, 27 rules). clang's header wrappers
+(`_mm512_slli_epi64` and the rest) pass the count as a parameter, so the row is
+`vmovd` of the count into VECTOR(1), which zeroes its bytes past 32 bits, then
+the shift's form by that xmm count. The target needs the forms' features (BW
+for words), AVX512F's and VL's below 64 bytes.
+
+Tier 1 selects it (`BUSTER_TIER1_VECTOR_SHIFT`, `tier1_select_vector_shift`)
+from the forms the decoder shares (`ir_simd_convert_forms.c`):
+
+- a count that is a constant, as it is once the wrapper is inlined, by the
+  immediate form alone (`vpsrlq $32, %zmm0, %zmm0`), a count of 255 or more as
+  255, past every lane. This candidate comes first, since the bottom-up path
+  takes its rule's first candidate;
+- any other count by `vmovd` into the vector class's scratch register, then the
+  form by that xmm count, the row's two records.
+
+Its 53 register forms that had no Zen 5 row were measured on the 9700X
+([the record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/ir-shifts-1840-2026-11-11),
+buster-performance#388): each has 2 cycles of latency and runs 2 per cycle.
+
+Measured by `--tier1 --tier1-report -march=znver5`, both compilers compiling
+the same sources (#1972's head `2461071`):
+
+| Unit | Rows before | Records before | Rows after | Records after |
+| --- | ---: | ---: | ---: | ---: |
+| `main_unit_frontend.c` | 660 | 543,674 | 628 | 543,620 |
+| `main_unit_backend.c` | 967 | 1,542,016 | 792 | 1,541,683 |
+
+No shift by an int stays a machine row, and the moves around rows are
+unchanged (535 and 708). Spills are within 3 of before.
+
+The tests:
+
+- `test-ir`: both verifiers admit `shift` at each vector width, for every
+  flags byte below 32 and a count of `i32`, `i64`, `i16` or the vector's type,
+  exactly where the flags name a lane size and shift and the count is an `i32`
+  (27 forms). The model is checked against C's shifts of each lane at counts
+  around every lane's bits, past 16 and 32 bits, and with high bits above the
+  count's 32.
+- `test-ir-parse` and `test-ir-optimize`: the text, and SCCP's folds of a
+  constant vector by a constant count by both paths.
+- `test-ir-simd`: decodes, by the real producer, every shift rule's row (27),
+  checked against flags and features written out from the builtin's name. Each
+  is refused without each feature it needs and under 8 changes, among them a
+  64-bit count (`vmovq`), which stays a machine row.
+- `test-tier1-masks`: each of the 27 rules runs as a program's only row twice,
+  once with counts loaded from memory (5, the lane's bits less 1, its bits, and
+  65,537) and once with constant counts (1, bits less 1, bits plus 1, and 300).
+  They go through both lowering paths, the interpreter at every stage and Tier
+  1's native code, by a register and by an immediate, against a lane-by-lane C
+  model.
+
+Rotates (`vprold` and the rest by an immediate) stay machine rows: the
+compiler's own units have one.
+
 ## Lanes: the vectors' element types (#141)
 
 The IR's vector types are containers of 16, 32 and 64 bytes (`v4i32`, `v8i32`
