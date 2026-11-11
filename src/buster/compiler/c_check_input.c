@@ -9707,6 +9707,11 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
                         const bool read = check_input_constant(reader, begin, i, &bits);
                         reader->constant_names = CHECK_CONSTANT_NAMES_NONE;
                         reader->constant_failure = NULL;
+                        if (read)
+                        {
+                            // Its comma operators' left operands' -Wunused-value, as a constant array bound's (#2202).
+                            check_input_attribute_unused(reader, begin, i, true);
+                        }
                         const bool named = reader->constant_missing != missing;
                         // Its failure's error in clang's words (#1447).
                         if (!read && !named && failure.diagnostic != CHECK_DIAG_NONE && reader->output->report_count == width_reports)

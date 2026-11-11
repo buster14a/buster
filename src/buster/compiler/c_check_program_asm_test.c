@@ -729,6 +729,9 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
         "static long thrice_address(void){long a;__asm__(\"leaq thrice_entry(%%rip), %0\" : \"=r\"(a));return a;}"
         "int tested(int n){long (*f)(long)=(long (*)(long))thrice_address();return (int)(twice(n)*10+f(n));}",
         "asm-naked-entries", clang);
+    // A function's template's CFI is refused by name: clang adds it to the function's own frame description.
+    check_test_program_boundary_reason(test, "int tested(int n){__asm__ volatile(\"pushq %%rbx\\n\\t.cfi_adjust_cfa_offset 8\\n\\tpopq %%rbx\\n\\t.cfi_adjust_cfa_offset -8\" ::: \"memory\");return n;}",
+                                       "asm-template-cfi", true, false, 0, 0, "inline assembly CFI directives in a function's template (clang adds them to the function's frame)");
     // interpreter_native_bridge's shape: a frame of its own, the flags, a string copy, SSE2's movq, the x87's load and
     // store, a call through a register and a numeric label's branch.
     check_test_program_source(test,
