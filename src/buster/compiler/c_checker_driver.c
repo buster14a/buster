@@ -2678,13 +2678,14 @@ static bool check_driver_rejected_warnings(const Parser* parser, const CheckWarn
     return valid;
 }
 
-// The class of a reader's warning event for check_driver_unit_end_split: 0 published where it stands, 1 a tentative array's
-// (#2238), 2 an unused file-scope declaration's.
+// The class of a reader's warning event for check_driver_unit_end_split: 0 published where it stands, 1 a tentative
+// definition's (#2238's array, #2168's const object), 2 an unused file-scope declaration's.
 static uint32_t check_driver_unit_end_class(const CheckWarningEvent* event)
 {
-    const bool unused = (event->kind == CHECK_WARNING_EVENT_UNUSED_VARIABLE || event->kind == CHECK_WARNING_EVENT_UNUSED_FUNCTION) &&
-                        event->completion_kind == CHECK_WARNING_COMPLETE_TU_END;
-    return event->kind == CHECK_WARNING_EVENT_TENTATIVE_ARRAY ? 1u : unused ? 2u : 0u;
+    const bool unit_end = event->completion_kind == CHECK_WARNING_COMPLETE_TU_END;
+    const bool unused = (event->kind == CHECK_WARNING_EVENT_UNUSED_VARIABLE || event->kind == CHECK_WARNING_EVENT_UNUSED_FUNCTION) && unit_end;
+    const bool tentative = event->kind == CHECK_WARNING_EVENT_TENTATIVE_ARRAY || (event->kind == CHECK_WARNING_EVENT_DEFAULT_CONST_INIT && unit_end);
+    return tentative ? 1u : unused ? 2u : 0u;
 }
 
 // Splits a reader's warning events (`events`) into those published where they stand (`kept`) and the unit-end ones
