@@ -2026,11 +2026,13 @@ static __attribute__((noinline)) bool check_common_enum_cast_source(const Parser
                                                                     const TypeTable* types, uint32_t source)
 {
     const uint8_t source_kind = type_kind(types, check_stream_type(stream, source));
-    // (A selection's arm may carry the conversion as a conditional's arms do: `_Generic(c, int: c ? g : g)`.)
+    // (A selection's arm may carry the conversion as a conditional's arms do: `_Generic(c, int: c ? g : g)`, or be an
+    // enumerator, whose constant the selection folds to: `_Generic(1, int: B1)`, #1447.)
+    const uint32_t chosen = graph->ops[source] == CHECK_OP_SELECT ? check_common_enum_cast_unselected(graph, source) : source;
     return source_kind == BUSTER_TYPE_KIND_ENUM || source_kind == BUSTER_TYPE_KIND_ALIGNED || check_common_conversion_arms(graph, source) ||
-           (graph->ops[source] == CHECK_OP_SELECT && check_common_conversion_arms(graph, check_common_enum_cast_unselected(graph, source))) ||
-           (graph->ops[source] == CHECK_OP_VALUE && (check_stream_flags(stream, source) & BUSTER_CHECK_ICE) != 0 &&
-            graph->tokens[source] < parser->tokens.count && parser->tokens.kinds[graph->tokens[source]] == PARSE_KIND_IDENTIFIER);
+           (chosen != source && chosen < graph->count && check_common_conversion_arms(graph, chosen)) ||
+           (chosen < graph->count && graph->ops[chosen] == CHECK_OP_VALUE && (check_stream_flags(stream, chosen) & BUSTER_CHECK_ICE) != 0 &&
+            graph->tokens[chosen] < parser->tokens.count && parser->tokens.kinds[graph->tokens[chosen]] == PARSE_KIND_IDENTIFIER);
 }
 
 // Whether `source`'s implicit conversion to `target` may change its enumeration (#1447, -Wimplicit-enum-enum-cast): the

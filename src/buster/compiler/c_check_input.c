@@ -14993,6 +14993,16 @@ static bool check_input_enum_records(CheckInputReader* reader, Arena* arena)
         input->enum_definitions = definitions;
         input->enum_definition_count = definition_count;
     }
+    // A named enumeration's definition opens the implicit-conversion gate too (CheckInput.enum_names, #1447): its values
+    // reach a conversion through a member, a call's result or a cast as well as through a name.
+
+    for (uint32_t i = 0; valid && !input->enum_names && i < definition_count; i += 1)
+    {
+        const TypeId tag = definitions[i].type != 0 ? type_unqualified(definitions[i].type) : 0;
+        const uint32_t declarator = check_input_skip_attributes(parser, definitions[i].close + 1, parser->tokens.count);
+        input->enum_names = tag != 0 && type_kind(reader->types, tag) == BUSTER_TYPE_KIND_ENUM &&
+                            (reader->types->tags.name[reader->types->types.index[type_index(tag)]] != 0 || check_input_enum_typedef(reader, declarator, tag));
+    }
     return valid;
 }
 
