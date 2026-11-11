@@ -3152,8 +3152,8 @@ What the lowering covers past scalars (#145's programs):
   header's functions have, is read as that one was. A unit without one, the
   usual one, makes no column. A function of several versions
   (GNU's function multiversioning: `target_clones`, or two strings, which the
-  checker keeps apart, #1838) is refused by name when its body is selected (a
-  lone `target("default")` function is compiled as a plain one); a declaration-only version with no body is
+  checker keeps apart, #1838) has each `target` version's body compiled with its
+  own string's features, and a `target_clones` body with the unit's (below); a declaration-only version with no body is
   still outside that refusal, and so are vector values in a function whose
   attribute turns AVX-512F or AVX-512VL off; the convention stays the unit's, as
   clang's does.
@@ -3232,8 +3232,50 @@ What the lowering covers past scalars (#145's programs):
     argument types gets this checker's call errors, not "no matching function"
     with its candidate notes. A reference other than a call, which clang
     resolves only against a function pointer type and a default version,
-    is accepted. A different calling convention isn't compared. Code
-    generation is #1838's next step: the versions' bodies are refused by name.
+    is accepted. A different calling convention isn't compared.
+  - *Code* (`c_check_program_target_versions.c`, as clang's
+    `emitMultiVersionFunctions` and `EmitX86MultiVersionResolver` make it). A
+    name's versions form a group (`CheckProgram.target_groups`). A `target`
+    version's body is its own symbol, its mangled name: `f` for `default`;
+    otherwise `f.`, then `arch_CPU`, then its features sorted by multiversioning
+    priority, highest first, joined by `_` (`f.popcnt_sse4.2`). Every reference
+    to a version reaches the group's synthetic reference object R, whose
+    symbol is `f.ifunc`. A `target_clones` function's own symbol `f` is that
+    reference. Its body is compiled once, at its first version's name (the
+    version, `arch_CPU` for `arch=`, then `.` and its place among the versions
+    that aren't `default`, which takes their count: `f.avx2.0`, `f.default.2`),
+    and the other versions' names are symbols at the same code; `f.ifunc` is
+    another IFUNC at the resolver. A group with a reference, or a
+    `target_clones` function the unit defines with external linkage, gets its
+    resolver `f.resolver`, a weak function (local in a static group), and its
+    IFUNCs of that binding. The resolver calls `__cpu_indicator_init` and
+    returns the first version whose condition libgcc's CPU model meets. The
+    versions are in clang's stable order by priority (`getFMVPriority`: the
+    highest of their features' priorities, doubled, and an `arch=`'s key
+    feature's, doubled plus one), highest first. A version's condition is its
+    `arch=` (`__builtin_cpu_is`'s test of the vendor, type or subtype; a
+    microarchitecture level's bit) and its features' bits. A version of
+    neither is taken unconditionally, and a model none matches is a `ud2`. A
+    static group's versions are emitted where its resolver is, as clang emits
+    them. The CPU model's symbols are the lowering's, only those a resolver
+    reads (`check_lower_finish`).
+  - *Tests.* `test-checker-driver --target-versions-only` also compiles a unit
+    of versions (`target`'s and `target_clones`', external and static) and one
+    of their callers (declarations, calls, addresses) by clang and both paths.
+    Every symbol, with its binding, type and definedness, must be clang's; the
+    scalar and vector objects must be the same bytes; and every mix of the
+    objects linked by cc, the direct path's executables and `-g`'s objects must
+    run as clang's build. It then runs the resolvers over 21 models of libgcc's
+    CPU model, which the fixture defines: `target`'s versions by their values,
+    and `target_clones`' by calling the resolver of a unit of their
+    declaration, linked before clang's object of their definition. The
+    resolver's result is named among clang's versions' distinct addresses.
+  - *Differences from clang's code.* A `target_clones` body is compiled once,
+    with the unit's features, where clang compiles a copy per version (each is
+    valid there). The resolver is `.text`'s, not a COMDAT section's, and has no
+    unwind entry. An `arch=` that names a vendor or a CPU type, or a processor
+    of no key feature with a priority, which clang's `getFMVPriority` leaves
+    undefined, is refused by name.
 - **`cpu_specific` and `cpu_dispatch` (#1447).** clang's CPU multiversioning,
   checked as clang 23's Sema checks it (`c_check_cpu_dispatch.c`, after the
   #839 checks) and emitted as its code generation emits it
