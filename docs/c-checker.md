@@ -8712,8 +8712,9 @@ arguments against the function. The checker now gives these as clang does.
   Other targets' vector types (`arm_sve_vector_bits`, `riscv_rvv_vector_bits`)
   are clang's target error wherever a declarator's type takes them ("is not
   supported on targets missing 'sve'"), a tag's subject's error elsewhere;
-  `clang_builtin_alias` is always its error on x86-64 ("can only be applied to a
-  ARM, HLSL, SPIR-V or RISC-V builtin"); `blocks(byref)` is a local variable's
+  `clang_builtin_alias`, and C23's `clang::builtin_alias` (#2291), is always
+  its error on x86-64 ("can only be applied to a ARM, HLSL, SPIR-V or RISC-V
+  builtin"); `blocks(byref)` is a local variable's
   (another argument warned of, a static local's or a nonlocal one's an error).
   The statements' hints, which change nothing at -O0, are clang's
   (`check_input_statement_attribute_kinds`): `code_align` and
@@ -8723,7 +8724,17 @@ arguments against the function. The checker now gives these as clang does.
   "expression is not an integer constant expression", and a second code_align
   "conflicting loop attribute" noted at the first; `atomic` before a compound
   statement, its options `remote_memory`, `fine_grained_memory` and
-  `ignore_denormal_mode` (each with `no_` or not). On a declaration each is
+  `ignore_denormal_mode` (each with `no_` or not). C23's `clang::likely` and
+  `clang::unlikely` (#2291) on any statement, a label's or a `case` or
+  `default` label too, without a word; an argument is their count's error, the
+  other one in the same statement's attributes "'clang::unlikely' and
+  'clang::likely' attributes are not compatible" noted at the first, and an
+  `if` whose branches are both likely or both unlikely is -Wignored-attributes'
+  "conflicting attributes 'clang::likely' are ignored" at the then branch's,
+  noted at the else branch's, once the `if` is read (`check_input_statement_likelihood`).
+  After the not-compatible error in a then branch, the rest of that `if` isn't
+  read, so its conflicting-attributes warning, which clang still gives, is
+  lost. On a declaration each is
   "cannot be applied to a declaration". GNU's `assume` is an empty
   statement's ("only applies to empty statements" elsewhere): one argument, a
   conditional expression (an assignment or a comma at its top is "use of this

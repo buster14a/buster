@@ -1828,6 +1828,7 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
         case CHECK_WARNING_EVENT_PRECEDENCE_ALWAYS_INLINE:
         case CHECK_WARNING_EVENT_PRECEDENCE_FLATTEN:
         case CHECK_WARNING_EVENT_PRECEDENCE_NOINLINE:
+        case CHECK_WARNING_EVENT_LIKELIHOOD_CONFLICT:
         {
             // Named as CHECK_WARNING_EVENT_UNKNOWN_ATTRIBUTE's are (target's data is its warning's own).
             const bool target = event->kind == CHECK_WARNING_EVENT_TARGET_UNSUPPORTED;
@@ -1945,6 +1946,7 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
                                             "statement attribute '%.*s%s%.*s' has higher precedence than function attribute 'flatten'" :
                                         event->kind == CHECK_WARNING_EVENT_PRECEDENCE_NOINLINE ?
                                             "statement attribute '%.*s%s%.*s' has higher precedence than function attribute 'noinline'" :
+                                        event->kind == CHECK_WARNING_EVENT_LIKELIHOOD_CONFLICT ? "conflicting attributes '%.*s%s%.*s' are ignored" :
                                         event->kind == CHECK_WARNING_EVENT_NO_CALLS ?
                                             "'%.*s%s%.*s' attribute is ignored because there exists no call expression inside the statement" :
                                         "'%.*s%s%.*s' attribute ignored",
