@@ -30,8 +30,12 @@ The workflow in `.github/workflows/9700x.yml` runs correctness tests on
 GitHub-hosted `ubuntu-26.04` runners. Its matrix builds the triggering revision
 with `BUSTER_HOST_ARCH=x86-64` and `BUSTER_HOST_ARCH=native`. Both use the current
 official stable LLVM 23.1.4 release, including its matching C++ pragma oracle,
-LLVM object/DWARF tools and lld. The installer runs only on disposable hosted
-runners. GCC remains the `cc` oracle for fixtures that require GNU C extensions.
+LLVM object/DWARF tools and lld. Each shard also builds the clang server that
+the semantic driver's checks send the oracle clang's runs to (#2071), from the
+release's static clang and LLVM archives, and the native plain row's
+`--differential` compares every served run with a child's. The installer runs
+only on disposable hosted runners. GCC remains the `cc` oracle for fixtures
+that require GNU C extensions.
 
 The build pins `-fno-stack-protector` (#916). A distribution's Clang can
 default to `-fstack-protector-strong` while the official release does not, so
