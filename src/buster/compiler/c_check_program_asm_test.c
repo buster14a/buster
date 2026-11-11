@@ -1192,6 +1192,17 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
         "int tested(int n){int a=0,b=0;int f=five(n%7,&a)+five(5,&b);"
         "return (int)(root(n*n+0.25)*4)+(int)(sum(n*0.5L,2.25L)*8)+(int)kept(n*1.5f)+zero(n&3)*3+below((unsigned)n,7u)*5+flag_only()*11+sign(n-9)*13+sign(9-n)*17+sign(0)+f*19+a+b;}",
         "asm-directives-helper", clang);
+    // loop and jrcxz to the template's own labels (#1839's item 4): asm bodies whose rel8 displacements the assembler
+    // fixed, a loop summing rcx's counts down, a jrcxz skipping a store, and a loop and a jrcxz in one template; and one
+    // whose jrcxz jumps over a je (which branch sizing sizes), which the whole assembler takes. clang's build must print
+    // the same.
+    check_test_program_source(test,
+        "static long sum(long n){long s=0;if(n<=0)return 0;__asm__(\"1:\\n\\taddq %%rcx, %0\\n\\tloop 1b\" : \"+r\"(s), \"+c\"(n));return s;}"
+        "static int zero(long n){int r=1;__asm__(\"jrcxz 1f\\n\\tmovl $0, %0\\n1:\" : \"+r\"(r) : \"c\"(n));return r;}"
+        "static long both(long n){long s=0;__asm__(\"jrcxz 2f\\n1:\\n\\tincq %0\\n\\tloop 1b\\n2:\" : \"+r\"(s), \"+c\"(n));return s;}"
+        "static int over(long n){int r=0;__asm__(\"jrcxz 2f\\n1:\\n\\tincl %0\\n\\tcmpl $5, %0\\n\\tje 2f\\n\\tloop 1b\\n2:\" : \"+r\"(r), \"+c\"(n));return r;}"
+        "int tested(int n){long m=(long)((unsigned)n%9u);return (int)sum(m+1)+zero(m)*3+zero(0)*5+(int)both(m)*7+(int)both(0)*11+over(m)*13+over(0)*17;}",
+        "asm-loop-bodies", clang);
     check_test_program_boundary_reason(test, "int tested(int n){asm goto(\".p2align 4\\n\\tleaq %l0(%%rip), %%rax\" : : : \"rax\" : out);return n;out:return -n;}",
                                        "asm-directives-goto-data", true, false, 0, 0, "asm goto labels other than a jmp's or a jcc's target");
     check_test_program_boundary_reason(test, "int tested(int n){__asm__(\".cfi_startproc\\n\\t.cfi_endproc\");return n;}",
@@ -1318,8 +1329,17 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
         "asm-mmx-x87", clang);
     check_test_program_source(test, "int tested(int n){long m=n;__asm__(\".p2align 4\\n\\tpaddd %0, %0\" : \"+y\"(m));__asm__ volatile(\"emms\");return (int)m;}",
                               "asm-mmx-directives", clang);
-    check_test_program_boundary_reason(test, "typedef long long m64 __attribute__((vector_size(8)));int tested(int n){m64 v={n};__asm__(\"paddd %0, %0\" : \"+y\"(v));return (int)v[0];}",
-                                       "asm-mmx-vector", true, false, 0, 1, "inline assembly operands of this type in their constraint's registers");
+    // An __m64 in an MMX register (#1846, the owner's decision on #1447): an object's 8 bytes, read through its address,
+    // as an input, a `+` operand and an early-clobbered output; an input of no object stays refused by name.
+    check_test_program_source(test,
+        "typedef long long m64 __attribute__((vector_size(8)));"
+        "static long long added(long long a, long long b){m64 x={a},y={b},r;__asm__(\"movq %1, %0\\n\\tpaddd %2, %0\" : \"=&y\"(r) : \"y\"(x), \"y\"(y));"
+        "__asm__ volatile(\"emms\");return r[0];}"
+        "int tested(int n){m64 v={n*65537};__asm__(\"paddd %0, %0\" : \"+y\"(v));__asm__ volatile(\"emms\");"
+        "return (int)v[0]+(int)added((long long)n<<33|7,(long long)n*3);}",
+        "asm-mmx-vector", clang);
+    check_test_program_boundary_reason(test, "typedef long long m64 __attribute__((vector_size(8)));int tested(int n){m64 v={n};long r;__asm__(\"movq %1, %0\" : \"=r\"(r) : \"y\"(v+v));return (int)r;}",
+                                       "asm-mmx-vector-value", true, false, 0, 1, "inline assembly __m64 inputs that aren't objects");
     // A template that returns is an asm body, whose return leaves its caller (#1839, test-checker-driver's returning templates);
     // one that keeps its helper, as a named label's does, is refused by name.
     check_test_program_boundary_reason(test, "int tested(int n){__asm__ volatile(\"rep ret\\n.Lafter%=:\" ::: \"memory\");return n;}",

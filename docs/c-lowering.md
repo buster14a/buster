@@ -1455,8 +1455,17 @@ vector's element has, and takes the complex object's override on its read, store
 and update (`check_lower_element_segment`), as clang's code does. A narrow
 `_BitInt`'s read, store and update take it as an integer's do.
 
+An `_Atomic` lvalue's read, store and update go through its plan
+(`check_lower_atomic_prepare`), whose direct accesses take the object's override
+(`CheckLowerAtomic.segment`): a load's `mov`, a store's `xchg`, an addition's
+`lock xadd` and another update's loop of a load and `lock cmpxchg`, the
+instructions clang's code has. A library call (`__atomic_load`, `__atomic_store`
+of an object no instruction moves atomically) takes the object's address as it
+is, as clang's does: the segment's offset, which is the object's own only in
+`%ss`.
+
 The rest the lowering refuses by name, rather than compile it as a plain access:
-an `_Atomic` object in those spaces (read or written as an lvalue), an atomic
+an atomic
 builtin another plan takes (a generic one by pointer, `__atomic_clear`,
 `__sync_lock_release`, one of 16 bytes); a bit of a vector of bool in one,
 which no address reaches; and an atomic builtin's object in one, which its pointer argument reaches

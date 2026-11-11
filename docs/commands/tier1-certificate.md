@@ -45,7 +45,11 @@ requirements. [Command index](README.md).
   moves: borrowed masks' reloads left out, staging copies onto live registers,
   claimed placements of roles sharing a register while both hold values, of k0
   for a numbered opmask register or of a corrupted split (#1283's early
-  register), and ymm or zmm moves narrowed to xmm; each must be refused.
+  register), and ymm or zmm moves narrowed to xmm; each must be refused. Its
+  asm body fixture's code is certified (#1839), and its masks' reloads after
+  the body left out and the body's records changed are refused.
+  `test-checker-driver --executable`'s asm body fixtures check `--verify`'s
+  counts: every function with a body certified.
   The carried-call-row fixture proves a value in both its
   register and row, then corrupts the owner, predecessor store and supplied
   assertions, with and without a frame pointer and through both emitter paths;
