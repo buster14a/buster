@@ -397,6 +397,13 @@ static bool check_input_type_tag_declaration(CheckInputReader* reader, CheckInpu
     uint32_t own_datatypes = 0;
     for (uint32_t i = 0; valid && attributes != NULL && i < attributes->count; i += 1)
     {
+        // A type tag whose list a declarator's suffix read, which check_input_read_attributes didn't, reads its type here.
+        if (((uint64_t)attributes->records[i].value & BUSTER_CHECK_TYPE_TAG_PENDING) != 0 && attributes->records[i].argument_type == 0 &&
+            attributes->records[i].kind == CHECK_ATTRIBUTE_UNKNOWN && !attributes->records[i].keyword &&
+            check_input_attribute_equal(check_input_attribute_name(reader, attributes->records[i].name), "type_tag_for_datatype"))
+        {
+            check_input_type_tag_type(reader, attributes, attributes->records + i);
+        }
         const CheckInputAttribute* attribute = attributes->records + i;
         const bool kept = attribute->kind == CHECK_ATTRIBUTE_UNKNOWN && !attribute->keyword && !attribute->ignored && !attribute->subject_ignored;
         const String8 spelled = kept ? check_input_attribute_name(reader, attribute->name) : (String8){ 0 };
