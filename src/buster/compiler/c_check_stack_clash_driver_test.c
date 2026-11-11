@@ -423,7 +423,9 @@ static const char check_test_stack_clash_tail_source[] =
 #define BUSTER_CHECK_TEST_STACK_CLASH_TAIL_CASES 6
 
 // A build of `source` into `object` by Tier 0 or by --tier1 (`tier1`, with or without rematerialization), by each path,
-// with `options` (up to two, NULL-ended) and --verify: whether it compiled, every function Tier 1's.
+// with `options` (up to two, NULL-ended) and --verify: whether it compiled, every function Tier 1's but a main that Tier
+// 1's admission leaves to Tier 0 as a caller of getcontext, which returns twice by clang's catalogue (its 'j', #1847):
+// the guard fixtures' main calls it, to make the context their functions run on. No other refusal of main passes.
 static bool check_test_stack_clash_build(const char* executable, const char* source, const char* object, bool tier1, bool rematerialize, bool scalar,
                                          const char* const* options)
 {
@@ -453,9 +455,11 @@ static bool check_test_stack_clash_build(const char* executable, const char* sou
     arguments[count] = NULL;
     char* text = NULL;
     const int status = check_test_driver_spawn(arguments, &text);
-    static const char* const names[] = { "frame", "allocation", "array", "aligned", "paged", "run", "handler", "main", "table_sum", "array_sum", "allocation_chain", "edges", "deep", "many", "take_big",
+    static const char* const names[] = { "frame", "allocation", "array", "aligned", "paged", "run", "handler", "table_sum", "array_sum", "allocation_chain", "edges", "deep", "many", "take_big",
                                          "call_area", "tail_register", "tail_constant", "tail_constant_large", "tail_array" };
-    const bool taken = !tier1 || check_test_tier1_taken(text, names, BUSTER_ARRAY_LENGTH(names));
+    const bool main_taken = text != NULL && strstr(text, "tier1-refused\tmain\t") == NULL;
+    const bool main_returns_twice = text != NULL && strstr(text, "tier1-refused\tmain\tlowering\tcategory=unsupported\tcause=admission\terror=2\t") != NULL;
+    const bool taken = !tier1 || (check_test_tier1_taken(text, names, BUSTER_ARRAY_LENGTH(names)) && (main_taken || main_returns_twice));
     if ((status != 0 || !taken) && text != NULL)
     {
         fprintf(stderr, "%s", text);

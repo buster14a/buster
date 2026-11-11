@@ -1741,6 +1741,8 @@ static const char* const predefines_test_attribute_texts[] = {
     "avx512f,tune=generic", "avx512f,tune=i386", "avx512f,arch=znver4,arch=znver5", "avx512f,tune=znver4,tune=znver3",
     "avx512f,branch-protection=standard", "avx512f,no-", "avx512f,default", "default,avx512f", " default", "avx512f,evex512", "",
     "avx512f, no-bogus", "avx512f,no-arch=znver5", "avx512f,ARCH=znver5",
+    // #1919: apxf, its features without cf, on and off.
+    "apxf", "no-apxf", "apxf,no-ndd", "no-ndd,apxf", "cf,no-apxf", "arch=x86-64-v4,apxf", "APXF",
 };
 
 // Writes `text` as a C string literal's contents.
