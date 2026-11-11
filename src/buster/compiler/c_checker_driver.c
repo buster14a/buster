@@ -2994,22 +2994,29 @@ static bool check_driver_pointer_arguments(const Parser* parser, Preprocessor* p
 {
     const uint32_t node = input->token_nodes != NULL && token < input->token_count ? input->token_nodes[token] : BUSTER_CHECK_NONE;
     const CheckGraph* graph = stream != NULL ? stream->graph : NULL;
-    const bool call = types != NULL && graph != NULL && node < stream->count && graph->ops[node] == CHECK_OP_CALL &&
-                      graph->argument_offsets != NULL && graph->argument_counts != NULL && stream->argument_conversions != NULL;
+    const CheckOp op = types != NULL && graph != NULL && node < stream->count ? graph->ops[node] : CHECK_OP_COUNT;
+    // A builtin's call (#2189): its arguments a list's, or its operands' (`__builtin_strcpy`), each converted to its
+    // prototype's parameter, which no declaration in the source names.
+    const bool builtin = op != CHECK_OP_CALL && op != CHECK_OP_COUNT && check_graph_has_arguments(op);
+    const bool lists = graph != NULL && graph->argument_offsets != NULL && graph->argument_counts != NULL && stream->argument_conversions != NULL;
+    const bool listed = lists && (op == CHECK_OP_CALL || (builtin && graph->argument_counts[node] != 0));
+    const bool operands = builtin && !listed && stream->conversions != NULL;
+    const bool call = listed || operands;
     if (call)
     {
         const uint32_t callee = graph->operand0[node];
         const uint32_t name = callee < stream->count ? graph->tokens[callee] : BUSTER_CHECK_NONE;
         const uint32_t declaration = name < input->token_count && input->declarations != NULL ? input->declarations[name] : BUSTER_CHECK_NONE;
-        const bool direct = callee < stream->count && graph->ops[callee] == CHECK_OP_VALUE &&
+        const bool direct = op == CHECK_OP_CALL && callee < stream->count && graph->ops[callee] == CHECK_OP_VALUE &&
                             check_action_kind(types, check_stream_type(stream, callee)) == BUSTER_TYPE_KIND_FUNCTION &&
                             declaration < input->token_count && input->declaration_kinds != NULL &&
                             input->declaration_kinds[declaration] == C_BINDING_FUNCTION;
-        const uint32_t offset = graph->argument_offsets[node];
-        for (uint32_t i = 0; !pp->fatal && i < graph->argument_counts[node]; i += 1)
+        const uint32_t offset = listed ? graph->argument_offsets[node] : 0;
+        const uint32_t arguments = listed ? graph->argument_counts[node] : 3;
+        for (uint32_t i = 0; !pp->fatal && i < arguments; i += 1)
         {
-            const uint32_t argument = graph->argument_nodes[offset + i];
-            const CheckConversion conversion = stream->argument_conversions[offset + i];
+            const uint32_t argument = listed ? graph->argument_nodes[offset + i] : i == 0 ? graph->operand0[node] : i == 1 ? graph->operand1[node] : graph->operand2[node];
+            const CheckConversion conversion = listed ? stream->argument_conversions[offset + i] : stream->conversions[node].operands[i];
             if (argument < stream->count && (conversion.flags & BUSTER_CHECK_CONVERT_ASSIGNMENT) != 0)
             {
                 const CheckValue value = check_stream_value(stream, argument);
