@@ -489,4 +489,9 @@ grep -q 'archive.ubuntu.com does not resolve here; pinned it to 192.0.2.7 throug
 grep -qx '192.0.2.7 archive.ubuntu.com' "$work/hosts" || fail 'the pin is not in the hosts file'
 [ "$(grep -c . "$work/hosts")" = 1 ] || fail 'a name that resolves was pinned'
 grep -q 'cloudflare-dns.com/dns-query?name=archive.ubuntu.com&type=A' "$work/curl-requests" || fail 'the pin did not ask Cloudflare'
+# The drill's outage (tools/ci/hosts-down.sh) replaces a host's earlier entries, such as those pins, rather than adding
+# to them: glibc returns every matching line, so a pin left beside the loopback entry kept the host reachable.
+printf '127.0.0.1 localhost\n# pinned\n192.0.2.7 archive.ubuntu.com mirror.example # pin\n198.51.100.1 GitHub.com\n' > "$work/drill-hosts"
+BUSTER_HOSTS_FILE="$work/drill-hosts" bash "$root/tools/ci/hosts-down.sh" archive.ubuntu.com github.com || fail 'the drill could not edit its table'
+[ "$(cat "$work/drill-hosts")" = "$(printf '127.0.0.1 localhost\n# pinned\n192.0.2.7 mirror.example # pin\n127.0.0.1 archive.ubuntu.com\n::1 archive.ubuntu.com\n127.0.0.1 github.com\n::1 github.com')" ] || { cat "$work/drill-hosts" >&2; fail 'the drill left an earlier address for a host it took down'; }
 printf 'hosted-offline: cold (retried) and warm preparation, the consumer'"'"'s offline install and reads, missing files, bad hashes, image and package-list changes, repairs and DNS-over-HTTPS pins checked\n'
