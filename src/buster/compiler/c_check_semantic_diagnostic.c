@@ -1829,6 +1829,20 @@ static const char* check_semantic_overload_call(const Parser* parser, Preprocess
 
 // A semantic report's clang text and location, with its notes in `note`, an array of BUSTER_CHECK_SEMANTIC_NOTES
 // (check_semantic_note_count counts them): const assignment's are several (#1447).
+// The first token of call `node`'s argument `argument`, its parentheses included: clang's getBeginLoc of it.
+static uint32_t check_semantic_argument_begin(const Parser* parser, const CheckGraph* graph, uint32_t node, uint32_t argument)
+{
+    const uint32_t value = graph->argument_nodes[graph->argument_offsets[node] + argument];
+    uint32_t first = graph->argument_tokens[graph->argument_offsets[node] + argument];
+    const uint32_t token = value < graph->count ? graph->tokens[value] : first;
+    while (first > 0 && first < parser->tokens.count && parser->tokens.kinds[first - 1] == PARSE_KIND_L_PAREN &&
+           parser->tree.roles[first - 1] == PARSE_ROLE_OPEN_GROUP && parser->tree.parents[first - 1] > token)
+    {
+        first -= 1;
+    }
+    return first;
+}
+
 static const char* check_semantic_expression(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
                                             const TypeTable* types, const CheckReport* report, CheckWarningSpelling* spell, uint32_t* location,
                                             PPOutputDiagnosticNote* note, Arena* scratch)
@@ -1851,6 +1865,21 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
     if (overloaded != NULL)
     {
         result = overloaded;
+    }
+    else if (report->message == CHECK_MESSAGE_ACTION && op == CHECK_OP_BUILTIN_MISC && graph->members[node] == CBUILTIN_CFSTRING_MAKE_CONSTANT_STRING &&
+             graph->argument_counts[node] == 1 && report->diagnostic == CHECK_DIAG_INCOMPATIBLE)
+    {
+        // CFString's argument that converts but is no ordinary literal (#2189, clang's CheckObjCString), at its first token.
+        CheckBuiltinMiscConstraint constraint = CHECK_BUILTIN_MISC_CONSTRAINT_NONE;
+        for (uint32_t i = 0; i < stream->misc_count; i += 1)
+        {
+            constraint = stream->misc[i].node == node ? stream->misc[i].constraint : constraint;
+        }
+        if (constraint == CHECK_BUILTIN_MISC_CONSTRAINT_CONSTANT)
+        {
+            result = "CFString literal is not a string constant";
+            *location = check_semantic_argument_begin(parser, graph, node, 0);
+        }
     }
     else if (report->message == CHECK_MESSAGE_STATIC_ASSERT)
     {
