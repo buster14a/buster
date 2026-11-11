@@ -445,7 +445,7 @@ static void check_builtin_atomic_query(TypeTable* table, const CheckBuiltinAtomi
     CheckValue values[2] = { 0 };
     if (input->argument_count != 2)
     {
-        check_action_diagnose(&output->action, CHECK_DIAG_ARGUMENT_COUNT, 0);
+        check_action_diagnose_count(&output->action, input->argument_count, 2, 2);
     }
     else if (input->arguments == NULL)
     {
@@ -509,7 +509,7 @@ static __attribute__((unused)) void check_builtin_atomic_one(TypeTable* table, c
     }
     else if (input->argument_count != arity)
     {
-        check_action_diagnose(&output->action, CHECK_DIAG_ARGUMENT_COUNT, 0);
+        check_action_diagnose_count(&output->action, input->argument_count, arity, arity);
     }
     else if (arity != 0 && input->arguments == NULL)
     {

@@ -41,7 +41,9 @@ static void check_builtin_rounds_test_result(CheckBuiltinRoundsTest* test, const
 {
     const CheckDiagnostic expected = input->id != CBUILTIN_FLT_ROUNDS ? CHECK_DIAG_UNSUPPORTED :
         input->argument_count != 0 ? CHECK_DIAG_ARGUMENT_COUNT : CHECK_DIAG_NONE;
-    check_builtin_rounds_test_expect(test, output->action.diagnostic == expected && output->action.diagnostic_operand == 0,
+    // A count error carries clang's expected count, exactly 0 (check_action_diagnose_count's 0x80 marks it present).
+    const uint32_t operand = expected == CHECK_DIAG_ARGUMENT_COUNT ? 0x80u : 0u;
+    check_builtin_rounds_test_expect(test, output->action.diagnostic == expected && output->action.diagnostic_operand == operand,
         "identity and exact zero arity determine the diagnostic before argument access");
     check_builtin_rounds_test_expect(test, output->evaluated_operands == 0 && output->action.value.constant_kind == CHECK_CONSTANT_NONE &&
         output->action.value.fault == CHECK_FAULT_NONE && output->action.value.fault_node == 0,
