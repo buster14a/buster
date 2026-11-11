@@ -7,7 +7,8 @@
 #   llm-memory.sh stop    Stop: run `llm-memory sync` in the background, so each turn's memories reach GitHub
 #
 # On the owner's own computers the clone, the link and the sync timer already exist, so the hook acts only in a
-# cloud session: Claude Code's (CLAUDE_CODE_REMOTE=true), or Codex's, whose environment sets BUSTER_LLM_MEMORY_TOKEN.
+# cloud session: Claude Code's (CLAUDE_CODE_REMOTE=true), or Codex's, whose environment already sets
+# BUSTER_TAILNET_DISPOSABLE=1 to join the tailnet (docs/commands/benchpress.md).
 #
 # Claude Code: the session's git proxy serves only the repositories attached to the session, so where the clone
 # can't be made the hook says so in the session's context, and the agent attaches the repository with add_repo and
@@ -15,9 +16,10 @@
 # to that clone rather than make a second one. Auto memory is off in Claude Code's cloud unless the environment sets
 # CLAUDE_CODE_DISABLE_AUTO_MEMORY=0; without it, agents save by hand.
 #
-# Codex: BUSTER_LLM_MEMORY_TOKEN is a GitHub token that can read and write davidgmbb/llm-memory. The clone's
-# credential helper reads it from the environment when git asks, so it is never written to disk. Codex saves its
-# memories by hand, as AGENTS.md says.
+# Codex: the clone uses the credentials the container already has: git's own, else the environment's GH_TOKEN or
+# GITHUB_TOKEN, which the clone's credential helper reads from the environment when git asks, so the token is never
+# written to disk. Whichever it is must be able to read and push davidgmbb/llm-memory. Codex saves its memories by
+# hand, as AGENTS.md says.
 #
 # Neither cloud copies ~/.codex/memories: a container's host name is new each time, so each session would add a
 # codex/<host>/ folder of its own.
@@ -30,7 +32,8 @@ project=${CLAUDE_PROJECT_DIR:-$(cd "$(dirname "$0")/../.." && pwd)}
 sibling=$(dirname "$project")/llm-memory
 state=$home/.local/state/llm-memory
 name=buster-fast
-helper='!f() { test "$1" = get && echo username=x-access-token && echo "password=$BUSTER_LLM_MEMORY_TOKEN"; }; f'
+helper='!f() { test "$1" = get && echo username=x-access-token && echo "password=${GH_TOKEN:-$GITHUB_TOKEN}"; }; f'
+url=https://github.com/davidgmbb/llm-memory
 
 claude()
 {
@@ -39,7 +42,7 @@ claude()
 
 codex()
 {
-    ! claude && [ -n "${BUSTER_LLM_MEMORY_TOKEN:-}" ]
+    ! claude && [ "${BUSTER_TAILNET_DISPOSABLE:-}" = 1 ]
 }
 
 is_clone()
@@ -53,15 +56,14 @@ start()
         if claude && [ ! -e "$memory" ] && is_clone "$sibling"; then
             ln -s "$sibling" "$memory"
         elif [ ! -e "$memory" ]; then
-            if codex; then
-                timeout 300 git -c credential.helper= -c credential.helper="$helper" clone -q --depth 1 https://github.com/davidgmbb/llm-memory "$memory" > /dev/null 2>&1 || rm -rf "$memory"
-            else
-                timeout 300 git clone -q --depth 1 https://github.com/davidgmbb/llm-memory "$memory" > /dev/null 2>&1 || rm -rf "$memory"
+            GIT_TERMINAL_PROMPT=0 timeout 300 git clone -q --depth 1 "$url" "$memory" > /dev/null 2>&1 || rm -rf "$memory"
+            if [ ! -e "$memory" ] && codex && [ -n "${GH_TOKEN:-$GITHUB_TOKEN}" ]; then
+                GIT_TERMINAL_PROMPT=0 timeout 300 git -c credential.helper= -c credential.helper="$helper" clone -q --depth 1 "$url" "$memory" > /dev/null 2>&1 || rm -rf "$memory"
+                [ ! -e "$memory" ] || git -C "$memory" config credential.helper "$helper"
             fi
         fi
     fi
     if is_clone "$memory" && codex; then
-        git -C "$memory" config credential.helper "$helper"
         # Codex's container may have no Git identity; sync commits need one.
         git -C "$memory" config user.email > /dev/null || git -C "$memory" config user.email noreply@openai.com
         git -C "$memory" config user.name > /dev/null || git -C "$memory" config user.name Codex
@@ -79,7 +81,7 @@ start()
     elif claude; then
         echo "Agent memory: davidgmbb/llm-memory isn't attached to this session. Attach it with the add_repo tool (access: push), let add_repo's clone finish, then run: bash .claude/hooks/llm-memory.sh start"
     else
-        echo "Agent memory: couldn't clone davidgmbb/llm-memory with BUSTER_LLM_MEMORY_TOKEN; check that the environment's agent internet access allows github.com and that the token can read the repository."
+        echo "Agent memory: couldn't clone davidgmbb/llm-memory with this container's Git credentials or GH_TOKEN/GITHUB_TOKEN; check that the agent's internet access allows github.com and that a token can read the repository."
     fi
 }
 

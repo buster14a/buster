@@ -7,16 +7,17 @@ from Claude Code's memory folder and a sync timer keep it current. Claude Code's
 and Codex's (ChatGPT's) cloud containers start empty and are discarded, so
 `.claude/hooks/llm-memory.sh`, run by `.claude/settings.json` and
 `.codex/hooks.json`, sets the same thing up in each cloud session. It acts only
-in Claude Code's cloud (`CLAUDE_CODE_REMOTE=true`) or where
-`BUSTER_LLM_MEMORY_TOKEN` is set (Codex's cloud), and does nothing elsewhere.
+in Claude Code's cloud (`CLAUDE_CODE_REMOTE=true`) or Codex's, whose
+environment already sets `BUSTER_TAILNET_DISPOSABLE=1` to join the tailnet
+([benchpress](benchpress.md)), and does nothing elsewhere.
 
 - **SessionStart (`start`):** makes `~/llm-memory` a clone, then, in Claude
   Code, runs `llm-memory link` so that `~/.claude/projects/<checkout>/memory`
   points at `~/llm-memory/projects/buster-fast/`. In Claude Code, a clone that
   `add_repo` made beside the checkout (`/home/user/llm-memory`) is linked to
   `~/llm-memory`; otherwise the hook clones the repository itself, which works
-  only where the session already has it attached (Claude Code) or with the
-  token (Codex).
+  only where the session already has it attached (Claude Code) or the
+  container's credentials reach it (Codex).
 - **Stop (`stop`):** runs `llm-memory sync` in the background after every turn,
   logging to `~/.local/state/llm-memory/cloud-sync.log`. Sync commits, rebases
   onto GitHub and pushes; its lock makes overlapping runs no-ops, and a failed
@@ -51,17 +52,13 @@ session.
 
 ## Codex (ChatGPT) cloud
 
-Codex's container reaches GitHub with no credentials of the owner's, so its
-environment (chatgpt.com/codex, Environments, this repository's environment)
-needs:
-
-- **Environment variable `BUSTER_LLM_MEMORY_TOKEN`:** a fine-grained GitHub
-  token for `davidgmbb/llm-memory` alone, with Contents read and write. It has
-  to be an environment variable, not a secret: Codex removes secrets after the
-  setup script, and the Stop hook pushes during the task. The clone's
-  credential helper reads it from the environment when Git asks, so it is never
-  written to disk.
-- **Agent internet access** that allows `github.com`.
+The hook adds no variable of its own. It clones with the credentials Codex's
+container already has: Git's own, else the environment's `GH_TOKEN` or
+`GITHUB_TOKEN`. A token is read from the environment by the clone's credential
+helper whenever Git asks, so it is never written to disk. Whichever credential
+it is must be able to read and push `davidgmbb/llm-memory`, and the agent's
+internet access must allow `github.com`. Codex removes secrets after the setup
+script, so a token the Stop hook pushes with has to be an environment variable.
 
 Codex has no Claude-style auto memory, so its agents read
 `~/llm-memory/projects/buster-fast/MEMORY.md` and save there by hand, as
@@ -70,4 +67,4 @@ AGENTS.md says; the hook's Stop run commits and pushes what they save, as
 clone fails, the hook says so in the session's context.
 
 To try the hook without touching `$HOME`, set `BUSTER_LLM_MEMORY_HOME` to a
-scratch directory and `CLAUDE_CODE_REMOTE=true` or `BUSTER_LLM_MEMORY_TOKEN`.
+scratch directory and `CLAUDE_CODE_REMOTE=true` or `BUSTER_TAILNET_DISPOSABLE=1`.
