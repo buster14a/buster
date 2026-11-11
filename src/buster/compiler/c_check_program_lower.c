@@ -1192,15 +1192,20 @@ static uint64_t check_lower_access(CheckLowerWriter* writer, uint8_t class, Type
 // own type has lost (check_vector_subscript), the vector's (check_lower_segment_override), which the element's LOAD or
 // STORE takes; 0 otherwise. clang reads the whole vector through the override and extracts the element, and writes it by
 // a read, an insertion and a store of the whole vector: one access of the element's bytes through the same override is
-// the same access of a vector that isn't volatile (an element of a volatile one is refused by name).
+// the same access of a vector that isn't volatile (an element of a volatile one is refused by name). So does a complex
+// lvalue's part (`__real__ *p`, `__imag__ *p`), whose type has lost its complex object's space as well, and whose read,
+// store or update clang's code makes through the complex object's override.
 static uint64_t check_lower_element_segment(CheckLowerWriter* writer, uint32_t node)
 {
     const CheckProgram* program = writer->program;
     const CheckGraph* graph = &program->input->graph;
     const CheckStream* stream = program->stream;
     const uint32_t vector = node < stream->count ? graph->operand0[node] : BUSTER_CHECK_NONE;
-    const bool element = __builtin_expect(writer->segments, 0) && vector < stream->count && graph->ops[node] == CHECK_OP_SUBSCRIPT &&
-                         (check_stream_flags(stream, node) & BUSTER_CHECK_VECTOR_ELEMENT) != 0 && check_stream_category(stream, vector) == CHECK_LVALUE;
+    const bool operand = __builtin_expect(writer->segments, 0) && vector < stream->count && check_stream_category(stream, vector) == CHECK_LVALUE;
+    const CheckOp op = operand ? graph->ops[node] : CHECK_OP_VALUE;
+    const bool part = (op == CHECK_OP_REAL || op == CHECK_OP_IMAGINARY) &&
+                      type_kind(program->types, type_strip_aligned(program->types, check_stream_type(stream, vector))) == BUSTER_TYPE_KIND_COMPLEX;
+    const bool element = operand && (part || (op == CHECK_OP_SUBSCRIPT && (check_stream_flags(stream, node) & BUSTER_CHECK_VECTOR_ELEMENT) != 0));
     const uint64_t segment = element ? check_lower_segment_override(program->types, check_stream_type(stream, vector)) : 0;
     writer->segment_entries = writer->segment_entries || segment != 0;
     return segment;
@@ -7775,7 +7780,58 @@ static void check_lower_complex_update_emit(CheckLowerWriter* writer, uint32_t n
 
 // A complex values', __float128s' or _BitInts' past 128 bits task (CHECK_LOWER_COMPLEX or CHECK_LOWER_COMPLEX_TRUTH), or
 // a half-precision chain link's (CHECK_LOWER_HALF), out of the tasks' loop: few functions have them.
+static void check_lower_complex_task_body(CheckLowerWriter* writer, CheckLowerTask task);
+
+// An update task (CHECK_LOWER_COMPLEX with `address`: a complex value's, a __float128's or a _BitInt's past 128 bits, or a
+// complex calculation's into a real object) whose destination is in a segment's space (#1447): its emitters read and
+// write the destination through its address, which they would take as a flat one. So the object is copied through the
+// override to a frame object of its own (check_lower_copy_segmented), the update runs on that, and its bytes are copied
+// back through the override after: the expression's value, an address or a value, is then the frame object's or of it,
+// kept in a temporary across the copy, so that its consumer reads its class from the entry before it (tier0_validate).
+static __attribute__((noinline)) void check_lower_segment_update(CheckLowerWriter* writer, CheckLowerTask task, uint8_t segment)
+{
+    const CheckProgram* program = writer->program;
+    const TypeTable* types = program->types;
+    const TypeId stored = check_stream_type(program->stream, program->input->graph.operand0[task.node]);
+    const uint64_t size = type_size(types, stored);
+    const uint32_t destination = (uint32_t)(task.value >> 32);
+    const uint32_t original = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
+    const uint32_t object = check_lower_object(writer, size, type_alignment_log2(types, stored));
+    check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, destination);
+    check_lower_emit(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, original);
+    check_lower_emit(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, object);
+    check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, original);
+    check_lower_copy_segmented(writer, size, false, segment);
+    check_lower_emit(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, object);
+    check_lower_emit(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, destination);
+    check_lower_complex_task_body(writer, task);
+    const uint8_t class = check_lower_aggregate(writer, stored) ? BUSTER_TYPED_CLASS_U64 : check_lower_class(writer, stored);
+    const uint32_t value = check_lower_temporary(writer, class);
+    check_lower_emit(writer, BUSTER_TYPED_SET_LOCAL, class, value);
+    check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, original);
+    check_lower_emit(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, object);
+    check_lower_copy_segmented(writer, size, false, (uint8_t)(segment << 2));
+    check_lower_emit(writer, BUSTER_TYPED_LOCAL, class, value);
+}
+
 static __attribute__((noinline)) void check_lower_complex_task(CheckLowerWriter* writer, CheckLowerTask task)
+{
+    const bool update = task.address && (task.kind == CHECK_LOWER_COMPLEX);
+    const uint8_t segment = update && __builtin_expect(writer->segments, 0) ?
+                                (uint8_t)(check_lower_segment_override(writer->program->types, check_stream_type(writer->program->stream, writer->program->input->graph.operand0[task.node])) >>
+                                          BUSTER_TYPED_ACCESS_SEGMENT_SHIFT) :
+                                0;
+    if (segment != 0)
+    {
+        check_lower_segment_update(writer, task, segment);
+    }
+    else
+    {
+        check_lower_complex_task_body(writer, task);
+    }
+}
+
+static void check_lower_complex_task_body(CheckLowerWriter* writer, CheckLowerTask task)
 {
     const bool half = task.kind == CHECK_LOWER_HALF;
     const TypeId type = task.kind == CHECK_LOWER_COMPLEX_TRUTH ? task.type : half ? BUSTER_TYPE_VOID : writer->program->stream->conversions[task.node].operands[0].type;
@@ -12755,8 +12811,7 @@ static bool check_lower_segment_carried(const CheckLowerWriter* writer, TypeId t
     const TypeTable* types = writer->program->types;
     const uint8_t class = check_lower_class(writer, type);
     const uint8_t facts = check_lower_facts(writer, type);
-    const uint8_t refused = BUSTER_CHECK_LOWER_TYPE_AGGREGATE | BUSTER_CHECK_LOWER_TYPE_COMPLEX | BUSTER_CHECK_LOWER_TYPE_ADDRESS | BUSTER_CHECK_LOWER_TYPE_ATOMIC |
-                            BUSTER_CHECK_LOWER_TYPE_BIT_INT;
+    const uint8_t refused = BUSTER_CHECK_LOWER_TYPE_AGGREGATE | BUSTER_CHECK_LOWER_TYPE_COMPLEX | BUSTER_CHECK_LOWER_TYPE_ADDRESS | BUSTER_CHECK_LOWER_TYPE_ATOMIC;
     // A half-precision value's loads and stores are a U16's (c_check_program_half.c), whose entries keep the access's value.
     const bool half = class == BUSTER_CHECK_LOWER_CLASS_BINARY16 || class == BUSTER_CHECK_LOWER_CLASS_BFLOAT16;
     const bool classed = (class != BUSTER_TYPED_CLASS_VOID && class <= BUSTER_TYPED_CLASS_VECTOR) || half;
@@ -12840,10 +12895,13 @@ static bool check_lower_segment_access(const CheckLowerWriter* writer, uint32_t 
     const bool reader = op == CHECK_OP_DEREFERENCE || member || (op == CHECK_OP_SUBSCRIPT && !element) || op == CHECK_OP_VALUE;
     // A bit-field's read and store take it on its unit's pieces (check_lower_bit_unit, check_lower_bit_store), from its
     // place (check_lower_bit_member).
-    // A struct's or union's assignment copies into the segment (check_lower_copy_segments_of).
-    const uint8_t target_facts = written ? check_lower_facts(writer, check_stream_type(stream, target)) : 0;
-    const bool aggregate_store = op == CHECK_OP_ASSIGN && (target_facts & BUSTER_CHECK_LOWER_TYPE_AGGREGATE) != 0 &&
-                                 (target_facts & (BUSTER_CHECK_LOWER_TYPE_COMPLEX | BUSTER_CHECK_LOWER_TYPE_ATOMIC)) == 0;
+    // An assignment to an object whose value is an address (a struct's, a union's, a complex value's) copies into the
+    // segment (check_lower_copy_segments_of); an update of a complex value, a __float128 or a wide _BitInt goes through a
+    // frame object's copy of the object (check_lower_segment_update), but a transport vector's.
+    const TypeId target_type = written ? check_stream_type(stream, target) : 0;
+    const uint8_t target_facts = written ? check_lower_facts(writer, target_type) : 0;
+    const bool aggregate_store = (target_facts & BUSTER_CHECK_LOWER_TYPE_AGGREGATE) != 0 && (target_facts & BUSTER_CHECK_LOWER_TYPE_ATOMIC) == 0 &&
+                                 (op == CHECK_OP_ASSIGN || !check_lower_transport_type(types, target_type));
     const bool carried = read ? reader && check_lower_segment_carried(writer, value->type)
                               : written && (aggregate_store || check_lower_segment_carried(writer, check_stream_type(stream, target)));
     // A vector's element takes its vector lvalue's override (check_lower_element_segment) where the element is of a class one
@@ -13049,12 +13107,14 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
             // object's address. An aggregate part's value (a __float128's, a _BitInt's past 128 bits) is its address.
             if (!address && !aggregate)
             {
-                check_lower_instruction(writer, BUSTER_TYPED_LOAD, class, 0);
+                // A complex lvalue's part in a segment takes its override (check_lower_element_segment).
+                check_lower_instruction(writer, BUSTER_TYPED_LOAD, class, check_lower_element_segment(writer, node));
             }
             if (op == CHECK_OP_IMAGINARY)
             {
                 check_lower_instruction(writer, BUSTER_TYPED_PTR_ADD, BUSTER_TYPED_CLASS_U64, 1);
-                check_lower_instruction(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, type_size(types, type_element(types, input_type)));
+                // The part's size, from the complex type under its qualifiers (an address space's record's too, #1447).
+                check_lower_instruction(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, type_size(types, type_element(types, type_conversion_operand(types, input_type))));
             }
             check_lower_operand(writer, node, 0, check_stream_category(stream, a) == CHECK_LVALUE, 0);
         }
