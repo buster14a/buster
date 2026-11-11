@@ -355,8 +355,11 @@ alternative (`check_asm_constraint_parse`):
 | --- | --- |
 | `r`, `q`, `l`, `R`, `Q` | a general register of the class (`Q`: rax, rbx, rcx, rdx; `R`: the first eight) |
 | `a b c d S D` | that register |
+| `A` | rax for up to 8 bytes, printed by its 64-bit name; rdx:rax for an `__int128` |
 | `x`, `v` | an XMM register, for a `float` or a `double`; a vector in a template of no instructions |
 | `t`, `u` | the x87's st(0) and st(1), for a `float`, a `double` or a `long double` |
+| `y` | an MMX register, mm0 up, for an integer, a pointer, a `float` or a `double` of up to 8 bytes |
+| `k`, `Yk` | an opmask register, k0 up (`Yk`: k1 up), for an integer or a pointer of up to 8 bytes |
 | `m`, `o`, `V`, `<`, `>` | memory at an lvalue's address, which a general register holds |
 | `i`, `n`, `I J K M N O`, `e`, `Z` | an integer constant, within its letter's range |
 | a digit, `[name]` | the output's register (a matching input) |
@@ -389,11 +392,77 @@ clang's code gives it (CodeGen's `AddVariableConstraints`;
   output of a memory constraint (`"=m"(r10)`) is r10 too, and a matching input
   is in its variable's register rather than its output's;
 - a general register by any of its names (`"ebx"` is rbx; an `int`'s operand
-  prints `%r10d`), and xmm0 to xmm15 for a `float` or a `double`.
+  prints `%r10d`), and xmm0 to xmm15 for a `float` or a `double`;
+- xmm16 to xmm31 too (#1846), where the body's instruction set has AVX-512F
+  (its function's target attributes among them): the helper moves them by
+  EVEX's `vmovd` and `vmovq`. Without it clang can't place one ("could not
+  allocate output register"), and the lowering refuses it by name;
+- a high byte register (#1846), `register unsigned char c __asm__("ah")`: a
+  byte's operand is the high byte, which the helper loads and stores by its
+  name (through a register of the first eight, as a REX prefix can't name it)
+  and the template prints by it, `%ah` (under a modifier, the register's other
+  names: `%b0` is `%al`, `%k0` `%eax`, as clang prints them); a wider value's is
+  its register's low bytes, as clang's code takes a `short` in "ah" as ax. The
+  variable takes its whole register: an operand fixed to rax beside an "ah"
+  variable is refused, where clang's code loads both and the byte's load
+  overwrites the other's bits 8 to 15.
+
+A statement of a high byte's or an XMM16-up variable keeps its helper: #1839's
+asm bodies don't load them by those names.
+
+rsp stays refused: clang's code moves the variable's value into rsp before the
+template (an uninitialized local's garbage), where a helper's rsp is its own;
+the Linux kernel's idiom, a global register variable in rsp, is a declaration
+the checker doesn't take yet.
 
 The variable is an ordinary local otherwise: the operand block takes its value,
 or an output's address, as any operand's, and the helper loads it into the
 register (a callee-saved one among the helper's pushes).
+
+### A's operands
+
+`A` is clang 23's on x86-64 (#1846): a value of up to 8 bytes in rax,
+zero-extended there as clang's code widens it to 64 bits, which the template
+names by rax's 64-bit name (`%rax` for an `int` too; `%k0` is `%eax`); and an
+`__int128` in rdx:rax, its low half in rax, its high half in rdx, which the
+template names `%rax` (GCC's "ax:dx pair"). An input fixed to rax or rdx shares
+its register with a pair output that isn't early-clobbered or `+`, as clang's
+code shares it: mulq's `"=A"(r) : "a"(x), "rm"(y)` multiplies x in rax. The
+helper loads and stores the pair by its halves, from a slot of 16 bytes; a
+statement of one keeps its helper (#1839's asm bodies don't move pairs).
+
+### MMX's operands
+
+`y` places an operand in an MMX register (#1846), mm0 up but the ones the
+clobbers name (`"mm0"`): an integer, a pointer, a `float` or a `double` of up
+to 8 bytes, as clang takes them (clang takes an `__m64` too, a vector whose
+8-byte loads Tier 0 doesn't have, so the lowering refuses it by name). The template
+names it `%mm0`; clang refuses every modifier of one, and so does the lowering.
+The helper loads it as clang's code does, zero-extended into rax and moved into
+its register (`movzwl`, then `movq %rax, %mm0`), before the general registers'
+loads, and stores an output's low bytes through its address (`movq` or `movd`,
+a narrower one's through a general register). As in clang's code, nothing runs
+`emms`: the template's author leaves the x87's state as the code after it needs
+it. A statement of MMX and x87 operands is refused by name (their registers are
+the same), and so is one whose template takes directives. A statement of MMX
+operands keeps its helper: #1839's asm bodies don't load them. A template of no
+instructions has no helper, as for general registers: clang's code would move
+the values through an MMX register and back, unchanged.
+
+### The opmasks' operands
+
+`k` places an operand in an opmask register, k0 up, and `Yk` in one a write
+mask takes, k1 up (#1846), but the ones the clobbers name (`"k1"`): an integer
+or a pointer of 1, 2, 4 or 8 bytes, as clang takes them (a `float` crashes
+clang's code generation; the lowering refuses it by name). The template names
+it `%k0`; clang refuses every modifier of one, and so does the lowering. The
+helper loads it zero-extended into rax and moves it in by its width (`kmovw
+%eax, %k0`, `kmovd`, `kmovq`), and stores an output's bits through a general
+register, as clang's code does (a statement of one keeps its helper: #1839's
+asm bodies don't move them). kmovw needs AVX-512F, kmovd and kmovq
+AVX-512BW, by the body's instruction set (its function's target attributes
+among them): without them, clang can't place the operand ("could not allocate
+output register"), and the lowering refuses it by name.
 
 ### The x87's operands
 
@@ -731,12 +800,19 @@ or undefined globals. The emission publishes it with the templates' units
 before the functions' atoms in the link, and in `-c`'s object a section of its
 own name, type and flags (`CheckProgramCode.asm_sections`,
 `check_program_sections`); the direct path's executable merges it into its
-class's output section. Refused by name, at the first file-scope statement:
-templates the assembler refuses; CFI, whose frames the emission's unwind table
-doesn't merge; a section of a class C's definitions don't have, or of another
-type than its class's (an init array's, a note); and what the templates' names
-refuse (a label another template defines too, or that the unit defines, a
-reference to another template's `.set` symbol).
+class's output section. Its sections are any the assembler makes (#1848):
+custom flags (`.pushsection __ex_table,"a"`), merged strings, notes (`-c`'s
+`SHT_NOTE`; the direct path keeps a note's bytes with its class's data, without
+a `PT_NOTE`), and the arrays of constructors and destructors
+(`.section .init_array,"aw"`), whose entries the direct path's executable runs
+as C's constructors'. Its CFI's frames are an `.eh_frame` atom of their own
+beside the functions' unwind table, its CIE and FDEs as the assembler makes them
+(clang's object shares one CIE between the module's assembly and its
+functions), which the direct path's `.eh_frame_hdr` indexes with the
+functions'. Refused by name, at the first file-scope statement: templates the
+assembler refuses; section groups (COMDAT), which the units' merge doesn't carry;
+and what the templates' names refuse (a label another template defines too, or
+that the unit defines, a reference to another template's `.set` symbol).
 
 ## What the lowering refuses
 
@@ -745,8 +821,13 @@ Each refusal names its feature, as the driver prints it ("unsupported: ..."):
 - an asm goto's label as anything but a jmp's or a jcc's target;
 - flag outputs of a size no integer store covers, and with another
   alternative (`"=r@ccz"`, which clang takes as `r`);
-- MMX's, the opmasks' and the rax and rdx pair's constraints (`y`, `k`, `A`),
-  and the other letters it doesn't place;
+- the letters it doesn't place, and `A` of other sizes than up to 8 bytes and
+  an integer's 16, and in a template that takes directives with 16 bytes;
+- MMX operands with a modifier (clang refuses each), beside x87 operands in
+  one statement, and in templates that take directives;
+- opmask operands with a modifier, in templates that take directives, and
+  without the moves' features (AVX-512F's for 1 or 2 bytes, AVX-512BW's for 4
+  or 8), where clang can't place one;
 - x87 operands and clobbers off the stack's top (an input at st(1) without one
   at st(0), a clobber below the outputs), which clang's code refuses too; and
   an integer in an x87 register. An x87 operand named in the template prints as
@@ -756,10 +837,12 @@ Each refusal names its feature, as the driver prints it ("unsupported: ..."):
   but a vector in a template of no instructions that doesn't refer to it;
 - bit-fields;
 - explicit register variables in registers the helper doesn't place one in
-  (rsp, which is the helper's own, the high bytes, APX's r16 to r31, XMM16 to
-  XMM31 and the other classes' registers), as memory inputs (`"m"(r10)`, which
-  clang's code refuses too), and of other types than a general register's or
-  an XMM register's (an integer in an XMM register's variable);
+  (rsp, which is the helper's own, APX's r16 to r31 and the other classes'
+  registers: the x87's, MMX's, the opmasks', YMM's and ZMM's), in XMM16 to
+  XMM31 without AVX-512F, in a high byte in a template that takes directives,
+  as memory inputs (`"m"(r10)`, which clang's code refuses too), and of other
+  types than a general register's or an XMM register's (an integer in an XMM
+  register's variable);
 - an operand fixed to another's register or to a clobber;
 - APX's registers r16 to r31;
 - statements of more than 64 operands;
@@ -905,6 +988,10 @@ has the commands, the logs and the default path's numbers against main.
     (`sqrtsd`, `cvtsd2si` into 64- and 32-bit registers, `fabs`'s mask),
     dr_flac's `rep; bsr` in GCC's dialect alternatives, and FMA3's
     `vfmadd132sd` and `vfmadd132ss`, run where the host has FMA;
+  - explicit register variables in high byte registers (#1846): a `+` one, an
+    input by its modifiers, an output, a matching input, and a `short` in
+    "ah" as ax; and in XMM16 to XMM31, in functions whose target attributes
+    have AVX-512F, run where the host has it;
   - explicit register variables: wrappers of the test's own in the shape of
     musl's syscall wrappers (r10, r8 and r9 beside the fixed registers) on
     harmless system calls, and each shape of a
@@ -912,6 +999,22 @@ has the commands, the logs and the default path's numbers against main.
     width, a 32-bit name, outputs of a register's and a memory constraint, a
     `+` operand in rbx, a matching input in its variable's register, an XMM
     register's, and a template of no instructions;
+  - A's operands (#1846): mulq's 128-bit product into rdx:rax beside an `"a"`
+    input that shares rax, a `+` pair, a pair's input matching its output, and
+    values of 2 to 8 bytes in rax, printed by their 64-bit names (an
+    `unsigned` zero-extended there, a `double`'s bits); and the refusal of a
+    pair in a template that takes directives;
+  - MMX's operands (#1846): `y`'s of a `long`, an `unsigned`, a `short`, a
+    byte, a `double`'s bits, an early-clobbered output, a
+    matching input, MMX clobbers that the operands avoid, an MMX input into a
+    general output, and a template of no instructions; their refusals: a
+    modifier, x87 operands beside them, and a template that takes directives;
+  - opmask operands (#1846): `k`'s and `Yk`'s of a `short`, a byte, an
+    `unsigned` and an `unsigned long long` in functions whose target
+    attributes have AVX-512F or AVX-512BW, a `k` clobber the operands avoid, a
+    matching input, and an opmask input into a general output, run where the
+    host has AVX-512BW; their refusals: no AVX-512F, 4 bytes without
+    AVX-512BW, and a modifier;
   - `f`'s inputs, below the fixed operands, each in a register of its own,
     beside a `+t` operand, early-clobbered outputs the template pushes, and a
     template of no instructions;
@@ -996,8 +1099,9 @@ What the lowering still refuses of what GCC and clang take:
   above (a named label, a directive), which the helper design refuses by name;
 - naked functions of no instructions, and naked functions' operands other than
   integer constants (clang's `"m"(global)`, printed RIP-relative);
-- the matcher's gaps: MMX's `movq`, `lock xchg`, `ffreep`, and the
+- the matcher's gaps: `lock xchg`, `ffreep`, and the
   instructions outside its families (an x87 memory operand without a width,
   `fstp (%rax)`, is refused as clang refuses it);
-- explicit register variables in the registers the helper doesn't place them
-  in.
+- explicit register variables in rsp (clang's code moves the variable's value
+  into it, a local's garbage where it has none), and in the other classes'
+  registers (the x87's, MMX's, the opmasks', YMM's and ZMM's).

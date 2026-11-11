@@ -542,9 +542,9 @@ does, each rule checked against clang's answers on probes of it:
   atoms join the unit's link before its functions', as clang emits a module's
   `asm` first (`check_program_asm_plan_file`), each in its section in `-c`'s
   object; its labels and references join the unit's symbols as a template's do
-  (#1848). Refused by name: a template the assembler doesn't take, CFI, and a
-  section of a class C's definitions don't have or of another type than its
-  class's (an init array's, a note).
+  (#1848), and its sections are any the assembler makes (notes, init and fini
+  arrays, merged strings, custom flags, CFI's frames). Refused by name: a
+  template the assembler doesn't take, and section groups.
 - **`#pragma clang optimize`** (`c_check_optimize_input.c`), whose `off` and
   `on` `main.c` puts around the checker unit's own tests (#681): one
   identifier, `on` or `off`, read as clang's `PragmaOptimizeHandler` reads it,
@@ -3814,13 +3814,26 @@ What the lowering covers past scalars (#145's programs):
   previous declaration one, as clang's `getActingDefinition` requires) is
   clang's "alias definition of 'w' after tentative definition" at its name,
   with "previous definition is here" at the last one
-  (`check_input_alias_tentative`). Refused by name: an alias whose
-  thread-local storage isn't its definition's, and at `-c` an alias variable
-  the unit defines tentatively after it (clang takes the declaration as the
-  alias's). Not modeled: clang's warnings at them (an alias
-  of a weak alias, a section on an alias, different types, an ifunc on a
-  variable, which is ignored), and the redefinition's own message (the
-  generic "conflicting declaration"). `__has_attribute` and
+  (`check_input_alias_tentative`), after which clang drops the alias
+  attribute and reads on, as the reader does (the report is a recovered one,
+  #1849). A redefinition of an alias or ifunc is clang's "redefinition of
+  'x'" with its note, and an ifunc on a variable is ignored with clang's
+  warning. An alias variable that the unit defines tentatively after the alias
+  is the alias's declaration, as clang takes it: the selection leaves out its
+  data, and its symbol is at its aliasee's definition (#1849). An alias whose
+  thread-local storage isn't its definition's has its definition's symbol
+  type, section and value, as clang's object has it; a reference to one, which
+  clang's code makes as the alias's own declaration says, is refused by name
+  (`BUSTER_CHECK_PROGRAM_ALIAS_REFERENCED`). Clang's code generation warnings
+  at the aliases and ifuncs it accepts are `check_driver_alias_warnings`', at
+  `-c` and in its order beside the errors (#1849): "alias and aliasee have
+  different types" (`-Wattribute-alias`, a function alias whose type isn't
+  compatible with its aliasee's definition's, which the note names), "alias
+  (or ifunc) will not be in section '.s' but in the same section as the
+  aliasee (resolver)" at a section attribute whose name isn't the aliasee's,
+  and "alias will always resolve to f even if weak definition of wf is
+  overridden" where the immediate target is a weak alias
+  (`-Wignored-attributes`), each as the options and pragmas map it. `__has_attribute` and
   `__has_c_attribute` answer 1 for them. `test-checker` runs programs of
   aliases of static functions and objects (thread-local ones too) and chains of
   them, with static data that refers to local ones, ifuncs and weakrefs
@@ -4359,8 +4372,12 @@ do:
   ignored one doesn't make the definitions incompatible: one that is otherwise
   compatible declares the earlier type, as in clang (`check_input_odr_severity`).
 
-  Left as they were: an `_Atomic(struct { ... })` member is the parser's refusal, with or without a
-  redefinition.
+  A tag defined in an `_Atomic(...)` or a `typeof(...)` specifier
+  (`_Atomic(struct S { int a; }) m;`, `typeof(_Atomic(struct S { ... }))`) is
+  read before the specifiers, as a declaration's own definition is
+  (`check_input_specifier_definition` goes on into each group, #1447), in a
+  declaration, a member, a prototype's parameter (of prototype scope, with clang's `-Wvisibility` before C23), a typedef and a type name; it used to be
+  the reader's generic refusal.
 
   An enum defined again at file scope (#1447, c_check_enum_input.c) is read the
   same way, an enum without a fixed type after one without, or one listed again
@@ -4552,7 +4569,11 @@ first didn't reach: past a reader's error that isn't recovered (an incomplete
 object's type), which ends the first reading's walk and skips its control
 scan, a duplicate case, a label's redefinition or another such error. A view's
 reading with errors falls back to the bodies' as above, as they may be the
-view's own; the bodies' reading publishes those its known errors don't hold,
+view's own; an error outside every body falls back to its whole declaration
+or definition left out (`check_driver_rejected_declaration`), with the bodies
+that name it, which leaves no use undeclared, so that reading's errors are the
+unit's too, unless a left-out declaration defines a tag outside every body,
+whose later uses would read an incomplete type. The bodies' reading publishes those its known errors don't hold,
 its reader's and graph's reports and its controls' constraints, in clang's
 words (its reader's alone where its graph can't run after them), and the next
 round leaves their parts out too. Each round adds an error and its parts, up
@@ -4957,7 +4978,13 @@ The later phases are left:
   initializer's) leaves the whole declaration out of the view, to its `;`
   (`check_driver_rejected_declaration`, #1447), and every body that names one
   of its names; a dropped part's error counts just before the token after it,
-  so the definition that follows keeps its unused variables. Clang instead
+  so the definition that follows keeps its unused variables. An error in a
+  function definition outside its body (its declarator's, its parameters')
+  leaves the whole definition out the same way, to its body's `}`, so its own
+  body's warnings aren't given, nor those of the bodies that name it, where
+  clang gives both. The view puts a `;` at a left-out declaration's place, so
+  the deferred warnings of the body before it, which clang gives at the token
+  after the body, still come before the declaration's errors. Clang instead
   keeps such a declaration bound and invalid, its uses quiet: the reader does
   so for the declarator errors (invalid declarations, above), whose uses are
   known errors of their own; for the others the bodies that name it lose their
@@ -4965,9 +4992,9 @@ The later phases are left:
   (`const int d = 1 / 0;`'s division). An unsized array's
   (`int y[] = undeclared;`) isn't left out alone: the first reading leaves
   out the events of the bodies that use the array, which a later reading
-  doesn't give again. A file-scope use elsewhere,
-  an error in a function definition outside its body, or an error outside
-  every body other than an initializer's or a file-scope declaration's still
+  doesn't give again. A file-scope use of a left-out declaration's name
+  elsewhere, or an error outside every body other than an initializer's, a
+  file-scope declaration's or a definition's head, still
   leaves the unit without its common warnings.
 - **Errors an edited reading meets.** A reading of the view that finds an error
   of its own isn't taken (its body is left out whole instead), so a body with
@@ -5500,13 +5527,23 @@ redeclaration's in source order, so that a call reads those up to the
 declaration its lookup finds; a call then tests one bit of its callee's first
 declaration and one byte of its name.
 A statement expression in an unevaluated operand drops them, as clang does
-(`check_common_report_discarded`). The functions stay out of line, as does
-the discarded selection's marker: inlined into the emission's loops they cost
-sqlite3.c's `-fsyntax-only` instructions even where no call warns. Left: a
-call whose callee is a member, an element, another call's result, a comma's or
-a conditional's value (`(n, g)()`, `(n ? fp : fq)()`) or a pointer to a
-pointer's dereference (`(*pp)()`), which warns of no return type's attribute, and the "expanded from macro" note clang gives a call a macro's
-argument writes (as for every warning at a macro argument here).
+(`check_common_report_discarded`). The functions stay out of line, as does the
+discarded selection's marker: inlined into the emission's loops they cost
+sqlite3.c's `-fsyntax-only` instructions even where no call warns. Left: a call
+whose callee is a member, an element, another call's result, a comma's or a
+conditional's value (`(n, g)()`, `(n ? fp : fq)()`) or a pointer to a pointer's
+dereference (`(*pp)()`), which warns of no return type's attribute. A call a
+macro's argument writes gets clang's "expanded from macro" note for each macro
+whose argument it is (#1447): clang's macro backtrace leaves an argument's own
+note out only where every range the diagnostic highlights is one token of that
+argument, and a call's range spans its callee and its parentheses. The checker
+marks such a diagnostic (`check_common_report_spanning`,
+Preprocessor.diagnostic_spans), which the renderer reads while its primary line
+renders. Left: the other warnings at a macro argument, whose ranges clang
+23.1.5 treats unevenly (an unused comparison's and a lone unused value's, and a
+comma's left operand's, get the note; an unused binary operator's and a sign
+comparison's don't), and the notes of a warning's own notes, such as the unused
+comparison's fix-it.
 `-Warray-bounds` reports a direct array object, including a nested subscript
 such as `b[1][5]` at `b`, treats a zero extent as unknown, and leaves
 struct-member arrays to a full bounds analysis. `-Wunused-function` reports a
@@ -6961,7 +6998,10 @@ keys a label with its name (the function's body for the others). An inner list
 so shadows an outer one and the function's label of the same name, and a goto
 from outside the block reaches none of them. Clang's errors, at its places: a
 list's name that its block doesn't define is "use of undeclared label" at the
-name in the list, reported as the block ends; a second definition in the scope
+name in the list, given as the block ends, after the errors within it, and a
+missing label of the function's at its first use, once a name, as the function
+ends (`check_input_report_label_undeclared`'s order key, the closing brace); a
+second definition in the scope
 is "redefinition of label" at its name, with clang's "previous definition is
 here" at the first (a local label's at its name in the list). First is clang's
 order: it defines a label as its statement completes, so of a label and one
@@ -6970,9 +7010,11 @@ definition, which gotos reach, and the outer the redefinition. The
 redefinition is recovered (#1447): clang drops the label and keeps its
 statement, so the unit is read on as a valid one, and a later duplicate case in
 the body is given too. A name that a block's lists declare
-twice is ambiguous where it is defined or used, and undeclared at both of its
-declarations. Clang reports that last one's ambiguity first, the driver in
-source order. A unit without a list builds none of it; the vector path's mask
+twice is ambiguous where it is defined or used, undeclared at both of its
+declarations as the block ends, and undeclared at a use as the function ends:
+clang's lookup makes a label of the function's for it, which nothing defines.
+The driver gives them in clang's order (the notes naming the candidates
+aren't given). A unit without a list builds none of it; the vector path's mask
 takes `__label__`'s kind among the first walk's events, which the scalar path's
 full walk meets anyway.
 
@@ -8379,8 +8421,16 @@ arguments against the function. The checker now gives these as clang does.
   clang's function type bit, a System V function's type whose callee keeps
   every register. Its count is checked before its subject, as clang's type
   processing does. On a tag it is nothing; elsewhere it gets the function
-  types' warning. With `sysv_abi` or `cdecl` it is the same type. With
-  another convention, which clang also takes, it is refused by name.
+  types' warning. With `sysv_abi` or `cdecl` it is the same type. Beside
+  another convention it is clang's bit beside that one (#1447,
+  `CHECK_CALL_KEEPS_REGISTERS`, `TYPE_FUNCTION_ABI_KEEPS_REGISTERS`): printed
+  after the convention (`'void (void) __attribute__((ms_abi))
+  __attribute__((no_caller_saved_registers))'`), part of the type's identity,
+  inherited by a redeclaration that names the convention alone, and clang's
+  "function declared with 'no_caller_saved_registers' attribute was previously
+  declared without" where a redeclaration adds it. Where it stands between two
+  conventions of their own (`ms_abi, no_caller_saved_registers, sysv_abi`),
+  clang 23 gives no conflict error, which the checker gives as without it.
 
   x86's `interrupt` has its own rule (`CHECK_ATTRIBUTE_INTERRUPT`), clang's
   `handleAnyX86InterruptAttr` on x86-64. Its subjects are functions and
@@ -8416,6 +8466,10 @@ arguments against the function. The checker now gives these as clang does.
   (`CheckInput.interrupt_calls`), the calls are looked through
   (`check_input_interrupt_calls`): a direct call of a function an
   interrupt attribute marks, at or before the declaration its name finds
+  (along the declarations each redeclaration's lookup found, which clang
+  merges it with: one in a closed or hidden block isn't a later file-scope
+  declaration's that has an earlier visible one, #1447,
+  `CheckInput.redeclaration_links`)
   (through parentheses, `_Generic`, `__builtin_choose_expr` and one
   address-of, as `ActOnCallExpr` finds it; in `sizeof` and `_Generic`'s
   operands too), is clang's "interrupt service routine cannot be called
@@ -8847,10 +8901,6 @@ arguments against the function. The checker now gives these as clang does.
       `typeof`'s, a constant array bound's), those of a builtin and those
       whose callee isn't a name (`typeof(s.f())`) are neither a direct call's
       error nor -Wexcessive-regsave's warning;
-    - a declaration's interrupt and no_caller_saved_registers are an entity's
-      first declarations' with them, up to the declaration a call's name finds
-      (or the definition): a block's redeclaration that clang's chain doesn't
-      link is taken as linked;
     - a direct call's error drops every other diagnostic of its full
       expression (`CheckInput.interrupt_ranges`: its declarator's initializer
       or its statement, but the call's other arguments and list elements),

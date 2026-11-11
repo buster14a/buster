@@ -138,6 +138,9 @@ enum
     // __builtin_cpu_supports of a feature clang doesn't know (#1843, clang's SemaX86 validateCpuSupports): its warning of no
     // option, whose call is false.
     CHECK_WARNING_ID_INVALID_CPU_SUPPORTS = 118,
+    // An alias whose function type isn't its aliasee's (#1849, clang's code generation at -c): -Wattribute-alias. (Its ID
+    // past the ones other pull requests take.)
+    CHECK_WARNING_ID_ATTRIBUTE_ALIAS = 119,
     CHECK_WARNING_ID_COUNT,
 };
 
