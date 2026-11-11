@@ -1410,9 +1410,9 @@ static __attribute__((noinline)) void check_test_attributes(CheckTest* test, con
         // One clang applies that the checker doesn't take is refused by name.
         {
             .name = "an attribute clang applies and the checker doesn't take is refused",
-            .source = "int f(void) __attribute__((swift_name(\"g()\")));\n",
+            .source = "int f(void) __attribute__((cfi_salt(\"g\")));\n",
             .error = CHECK_ATTRIBUTE_ERROR_UNKNOWN,
-            .error_word = "swift_name",
+            .error_word = "cfi_salt",
         },
     };
     enum { FILE_COUNT = BUSTER_ARRAY_LENGTH(fixtures) };
