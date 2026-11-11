@@ -198,6 +198,21 @@ static void check_test_driver_asm_definitions(CheckTest* test, const char* clang
           "           shared_buffer[3], weak != 0 ? *weak : -1);\n"
           "    return 0;\n"
           "}\n" },
+        // File-scope sections of other kinds (#1848): an init array's and a fini array's entries, which run C's
+        // functions before and after main, a note, merged strings and custom flags.
+        { "file-scope assembly's sections of other kinds", "early late main",
+          "#include <stdio.h>\n"
+          "int order = 1;\n"
+          "void early(void) { order = order * 10 + 2; }\n"
+          "void late(void) { printf(\"late %d\\n\", order); }\n"
+          "extern const char* const names[2];\n"
+          "__asm__(\".section .init_array,\\\"aw\\\",@init_array\\n.p2align 3\\n.quad early\\n.section .fini_array,\\\"aw\\\"\\n.p2align 3\\n.quad late\\n.text\");\n"
+          "__asm__(\".pushsection .note.buster,\\\"a\\\",@note\\n.p2align 2\\n.long 7, 4, 1\\n.asciz \\\"buster\\\"\\n.p2align 2\\n.long 42\\n.popsection\");\n"
+          "__asm__(\".pushsection .rodata.asm.str1.1,\\\"aMS\\\",@progbits,1\\n.Lfirst: .asciz \\\"merged\\\"\\n.Lsecond: .asciz \\\"strings\\\"\\n.popsection\\n"
+          ".pushsection .data.rel.ro.names,\\\"aw\\\"\\n.p2align 3\\n.globl names\\nnames: .quad .Lfirst, .Lsecond\\n.popsection\");\n"
+          "__asm__(\".pushsection custom_table,\\\"a\\\"\\n.globl custom_entry\\ncustom_entry: .long 3\\n.popsection\");\n"
+          "extern const int custom_entry;\n"
+          "int main(void) { printf(\"%d %s %s %d\\n\", order, names[0], names[1], custom_entry); order = 5; return 0; }\n" },
     };
     for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(fixtures); f += 1)
     {
