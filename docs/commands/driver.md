@@ -201,8 +201,18 @@ end (`-I`, `-MF`, `-Wl,`, `-fno-builtin-`, `-fptrauth`) stay character tests or
 `c_option_starts`. A new option adds its spelling to the table in order;
 `test-checker --requests` fails on one out of order.
 
-In a one-line `-c` this took the `strcmp` calls of option parsing from about 950 to
-none, and `strncmp`'s from about 115 to none (Callgrind on a baseline-ISA build).
+The target's resolution names the predefined features by index
+(`PredefinesFeatureIndex`, generated with the feature table: the preprocessor
+guide's "The predefined macros"), where it looked fixed names up by binary search.
+On the 9700X, against main at four code placements, the two take a compile's
+user instructions down by 70,000 to 78,000 (12.8% of an empty `-fsyntax-only`,
+12.3% of a one-line `-c`) and its user cycles by 4 to 8%, and by 260,000 to
+270,000 with `-march=native`, whose host detection looked up each feature it
+lists (−33% of its instructions, −9 to −12% of its wall time); `sqlite3.c` is
+unchanged. In a one-line `-c` Callgrind counts 951 `strcmp`, 189 `strncmp` and
+about 970 `memcmp` calls of option parsing and target resolution on main, and 2,
+0 and 0 with them. The record: buster-performance's
+`docs/measurements/option-ids-1444-2026-11-11`.
 `test-checker --requests` checks the table (`c_option_table_test.c`): its order,
 offsets and lengths, `c_option_find` against a linear scan on every spelling and
 its neighbours, and every option form through the driver's routing as `main`'s,
