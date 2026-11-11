@@ -1558,7 +1558,7 @@ static uint32_t check_driver_character_count(const uint8_t* bytes, uint32_t leng
     {
         if (bytes[at] == '\\')
         {
-            at = check_literal_evaluated_escape(bytes, at, end, c23, UINT32_MAX, NULL, &ignored, &had_error);
+            at = check_literal_evaluated_escape(bytes, at, end, c23, false, UINT32_MAX, NULL, &ignored, &had_error);
             count += 1;
         }
         else
