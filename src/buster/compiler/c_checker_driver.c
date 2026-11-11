@@ -4172,8 +4172,12 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                     const bool library = (input->function_flags[token] & CHECK_INPUT_FUNCTION_IMPLICIT_LIBRARY) != 0;
                     if (library)
                     {
+                        // Clang declares the builtin as its name is resolved, before the expression around it is built: where
+                        // the name completes with that expression (a value's `int *q = malloc;`, #2348), its error comes first.
+                        const PPDiagnosticRecord* previous = pp->diagnostic_last;
                         check_driver_implicit_library(pp, types, input, pp_severity, parser->tokens.sources[token], publication, intern_bytes(pp->table, name),
                                                       intern_length(pp->table, name), input->implicit_function_c99, scratch);
+                        pp_diagnostic_suborder(pp, previous, 1);
                     }
                     else if (default_error)
                     {
