@@ -12493,7 +12493,7 @@ static void check_lower_vector_floating(CheckLowerWriter* writer, uint32_t node,
             writer->vectors = true;
         }
     }
-    else if ((class == BUSTER_TYPED_CLASS_F80 && (builtin <= CBUILTIN_ELEMENTWISE_ROUND || builtin == CBUILTIN_ELEMENTWISE_MAXNUM || builtin == CBUILTIN_ELEMENTWISE_MINNUM ||
+    else if ((class == BUSTER_TYPED_CLASS_F80 && ((builtin >= CBUILTIN_ELEMENTWISE_CEIL && builtin <= CBUILTIN_ELEMENTWISE_ROUND) || builtin == CBUILTIN_ELEMENTWISE_MAXNUM || builtin == CBUILTIN_ELEMENTWISE_MINNUM ||
                                                   (ldexp && type_size(types, exponent) == 4))) ||
              ((class == BUSTER_TYPED_CLASS_F32 || class == BUSTER_TYPED_CLASS_F64) && ldexp && type_size(types, exponent) <= 8 &&
               (writer->target.features & BUSTER_X86_FEATURE(AVX512F)) == 0))
@@ -12579,8 +12579,13 @@ static __attribute__((noinline)) void check_lower_vector_builtin(CheckLowerWrite
     const X86Target* target = &writer->target;
     const uint32_t selected = check_program_builtin_index(stream->vectors, stream->vector_count, sizeof(CheckBuiltinVectorEffect), node);
     const CheckBuiltinVectorEffect* effect = selected != BUSTER_CHECK_NONE ? stream->vectors + selected : NULL;
-    const CBuiltinId builtin = effect != NULL ? effect->runtime_builtin : CBUILTIN_NONE;
     const TypeId result = check_stream_type(stream, node);
+    // A floating value's max and min are maxnum and minnum, as clang's are (check_vector_floating_alias); bf16 elements'
+    // keep their builtins' own refusals.
+    const TypeId plain = type_unqualified(type_strip_aligned(types, type_conversion_operand(types, result)));
+    const TypeId scalar = check_lower_transport_is_vector(types, result) ? check_lower_transport_element(types, result) : plain;
+    const bool floating = type_kind(types, scalar) == BUSTER_TYPE_KIND_FLOATING && scalar != BUSTER_TYPE_BF16;
+    const CBuiltinId builtin = check_vector_floating_alias(effect != NULL ? effect->runtime_builtin : CBUILTIN_NONE, floating);
     const uint32_t first = graph->argument_offsets[node];
     const uint32_t count = graph->argument_counts[node];
     const char* reason = NULL;
@@ -12753,7 +12758,7 @@ static __attribute__((noinline)) void check_lower_vector_builtin(CheckLowerWrite
     {
         check_lower_vector_calls(writer, node, builtin, effect->evaluated_argument_count);
     }
-    else if (check_vector_floating_instructions(builtin) || builtin == CBUILTIN_ELEMENTWISE_LDEXP)
+    else if (check_vector_floating_builtin(builtin, floating) || builtin == CBUILTIN_ELEMENTWISE_LDEXP)
     {
         check_lower_vector_floating(writer, node, builtin, effect->evaluated_argument_count);
     }
@@ -16484,6 +16489,41 @@ static uint64_t check_lower_transport_room(const TypeTable* types, TypeId type, 
     return room;
 }
 
+// The entries an element of check_lower_vector_lanewise's takes, at most: its store, its conversion and operation,
+// each operand's load and conversion, and the three addresses'.
+#define BUSTER_CHECK_LOWER_LANEWISE_ENTRIES 16u
+
+// Whether an operator may run element by element on integer vectors (check_vector_lower_lanewise): a product, a
+// division, a remainder or a shift, or its compound assignment, which are two ranges of the ops.
+static bool check_lower_lanewise_op(CheckOp op)
+{
+    return (uint32_t)op - CHECK_OP_MULTIPLY <= CHECK_OP_SHIFT_RIGHT - CHECK_OP_MULTIPLY ||
+           (uint32_t)op - CHECK_OP_MULTIPLY_ASSIGN <= CHECK_OP_SHIFT_RIGHT_ASSIGN - CHECK_OP_MULTIPLY_ASSIGN;
+}
+
+// The entries node `node`, a product, division, remainder or shift, `op` (check_lower_lanewise_op), may take element by
+// element: BUSTER_CHECK_LOWER_LANEWISE_ENTRIES a lane where its type is a vector's that may run so
+// (check_vector_lower_lanewise's cases, by a bound that builds no row: a division or a remainder, an operation of bytes,
+// and any of them where the unit's target hasn't AVX2 and AVX-512F, VL and BW, whose rows take every other product and
+// shift), else none; a transport vector's whatever its operation, whose rows are pieces'. A function's target attribute
+// adds features to the unit's, so that what runs element by element in it does at the unit's target too. Only its type
+// is read.
+static uint64_t check_lower_lanewise_room(const CheckProgram* program, uint32_t node, CheckOp op)
+{
+    const TypeTable* types = program->types;
+    const bool typed = program->stream != NULL && check_stream_has_values(program->stream);
+    const TypeId type = typed ? type_conversion_operand(types, check_stream_type(program->stream, node)) : 0;
+    const uint8_t kind = typed ? type_kind(types, type) : BUSTER_TYPE_KIND_NONE;
+    const bool vector = kind == BUSTER_TYPE_KIND_VECTOR || kind == BUSTER_TYPE_KIND_EXT_VECTOR;
+    const uint32_t bytes = vector ? check_lower_vector_bytes(types, type) : 0;
+    const uint32_t operator = op >= CHECK_OP_MULTIPLY_ASSIGN ? (uint32_t)op - (CHECK_OP_MULTIPLY_ASSIGN - CHECK_OP_MULTIPLY) : (uint32_t)op;
+    const uint64_t rows = BUSTER_X86_FEATURE(AVX2) | BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512VL) | BUSTER_X86_FEATURE(AVX512BW);
+    const CheckVectorElement element = vector ? check_vector_lower_element(types, type) : (CheckVectorElement){ 0 };
+    const bool lanewise = vector && !element.floating &&
+                          (bytes == 0 || operator == CHECK_OP_DIVIDE || operator == CHECK_OP_REMAINDER || element.bytes == 1 || (program->target.features & rows) != rows);
+    return lanewise ? BUSTER_CHECK_LOWER_LANEWISE_ENTRIES * (uint64_t)check_builtin_vector_lanes(types, type) : 0;
+}
+
 // Node `node`'s part of the counts, by the rules: the scalar twin's step (check_lower_node_counts_scalar).
 static void check_lower_node_count(const CheckProgram* program, uint32_t node, CheckLowerNodeCounts* counts)
 {
@@ -16543,6 +16583,10 @@ static void check_lower_node_count(const CheckProgram* program, uint32_t node, C
             counts->transport_entries += 144;
             counts->transport_locals += 12;
         }
+        // An integer vector's product, division, remainder or shift, or its assignment's, that runs element by element
+        // (check_lower_vector_lanewise, #2216): up to 16 entries an element, its operands' reads, the operation and its
+        // store, as many tasks, wherever it may run so (check_lower_lanewise_room).
+        counts->transport_entries += check_lower_lanewise_op(op) ? check_lower_lanewise_room(program, node, op) : 0;
     }
     // The roundings and the fused multiply-add are calls too where the unit's target lacks their instructions
     // (check_lower_vector_library), which the bound counts whatever the target.
@@ -16574,7 +16618,9 @@ _Static_assert(sizeof(CheckOp) == sizeof(uint32_t), "the graph's ops load 16 to 
 // of the ops' compares, which population counts add up. A node's type or its update's destination is _Atomic only where
 // the type table has an _Atomic kind (type_strip_aligned's base is a type of the table too), so a unit without one, which
 // is nearly every unit, reads no node's type; a unit with one takes the rules for every node. A vector builtin's node,
-// rare, takes the rules for its lane calls, of which the masks count no other term. The loads are masked to the graph's
+// rare, takes the rules for its lane calls, of which the masks count no other term; in a unit with vector types, a
+// product, division, remainder or shift (check_lower_lanewise_op) takes its one term, its lanes' room
+// (check_lower_lanewise_room), whose type says whether it runs element by element. The loads are masked to the graph's
 // nodes.
 static CheckLowerNodeCounts check_lower_node_counts(const CheckProgram* program)
 {
@@ -16612,6 +16658,14 @@ static CheckLowerNodeCounts check_lower_node_counts(const CheckProgram* program)
         const __m512i logical_and = _mm512_set1_epi32(CHECK_OP_LOGICAL_AND);
         const __m512i logical_or = _mm512_set1_epi32(CHECK_OP_LOGICAL_OR);
         const __m512i conditional = _mm512_set1_epi32(CHECK_OP_CONDITIONAL);
+        // A vector type's products, divisions, remainders and shifts may run element by element (check_lower_lanewise_op):
+        // the two ranges of their ops, by unsigned compares of the ops less each range's first.
+        const bool vector_types = nodes != 0 && types != NULL && program->stream != NULL && check_stream_has_values(program->stream) &&
+                                  (logical_types || memchr(types->types.kind, BUSTER_TYPE_KIND_VECTOR, types->types.count) != NULL);
+        const __m512i products = _mm512_set1_epi32(CHECK_OP_MULTIPLY);
+        const __m512i product_assigns = _mm512_set1_epi32(CHECK_OP_MULTIPLY_ASSIGN);
+        const __m512i operators = _mm512_set1_epi32(CHECK_OP_SHIFT_RIGHT - CHECK_OP_MULTIPLY);
+        const __m512i assigns = _mm512_set1_epi32(CHECK_OP_SHIFT_RIGHT_ASSIGN - CHECK_OP_MULTIPLY_ASSIGN);
         for (uint32_t first = 0; first < nodes; first += 16)
         {
             const uint32_t left = nodes - first;
@@ -16624,9 +16678,21 @@ static CheckLowerNodeCounts check_lower_node_counts(const CheckProgram* program)
             counts.atomics += (uint32_t)__builtin_popcount(_mm512_mask_cmpeq_epi32_mask(active, ops, atomic));
             const __mmask16 logical = logical_types ? _mm512_mask_cmpeq_epi32_mask(active, ops, logical_not) | _mm512_mask_cmpeq_epi32_mask(active, ops, logical_and) |
                                                        _mm512_mask_cmpeq_epi32_mask(active, ops, logical_or) | _mm512_mask_cmpeq_epi32_mask(active, ops, conditional) : 0;
+            const __mmask16 lanewise = vector_types ? _mm512_mask_cmple_epu32_mask(active, _mm512_sub_epi32(ops, products), operators) |
+                                                          _mm512_mask_cmple_epu32_mask(active, _mm512_sub_epi32(ops, product_assigns), assigns) : 0;
             for (uint32_t lanes = _mm512_mask_cmpeq_epi32_mask(active, ops, vector) | logical; lanes != 0; lanes &= lanes - 1)
             {
                 check_lower_node_count(program, first + (uint32_t)__builtin_ctz(lanes), &counts);
+            }
+            // The rules' only term of a product, division, remainder or shift is its lanes' room, its type's alone: a
+            // scalar's kind, nearly every one's, is read from the table directly, and only another (a vector's, or a
+            // type with qualifiers' or alignment's wrapping) takes check_lower_lanewise_room.
+            for (uint32_t lanes = lanewise; lanes != 0; lanes &= lanes - 1)
+            {
+                const uint32_t node = first + (uint32_t)__builtin_ctz(lanes);
+                const uint8_t kind = types->types.kind[type_index(check_stream_type(program->stream, node))];
+                const bool scalar = kind == BUSTER_TYPE_KIND_INTEGER || kind == BUSTER_TYPE_KIND_FLOATING || kind == BUSTER_TYPE_KIND_POINTER;
+                counts.transport_entries += scalar ? 0 : check_lower_lanewise_room(program, node, graph->ops[node]);
             }
         }
     }
