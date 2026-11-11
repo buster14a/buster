@@ -1,0 +1,217 @@
+name: Vector claim race fixture
+
+# The race fixture of the vector row's claim (#2033; docs/ci.md, "The vector row"). The row's candidates claim an item by
+# uploading an artifact under the item's name (hosted-correctness.yml's "Claim ..." steps), and an artifact's name is
+# unique in its run: upload-artifact v4 fails when the run already has one by that name. GitHub documents the refusal,
+# not its atomicity when several jobs upload the same name at once, so this fixture races them. 16 racers, each a job of
+# its own on its own runner, wait for the same instants and then each uploads the same round's name as the row's claim
+# steps do (`overwrite: false`), for 4 rounds. The judge requires, per round, exactly one racer whose upload succeeded,
+# exactly one artifact by that name in the run, holding that racer's record, and every other racer's upload failed; and
+# it reports how many racers raced on time. It needs no write permission: the artifacts are the run's own. If it ever
+# finds two winners, the row's claim must move to its fallback, a rendezvous by rank (docs/ci.md).
+on:
+  # A pull request that changes the claim (the row workflow, whose steps claim) or this fixture.
+  pull_request:
+    paths:
+      - .github/workflows/hosted-correctness.yml
+      - .github/workflows/vector-claim-race.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vector-claim-race-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  start:
+    name: Set the race's instants
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    outputs:
+      at: ${{ steps.at.outputs.at }}
+    steps:
+      # Far enough ahead for the racers' jobs to start: hosted jobs start seconds after their run asks, at quiet times.
+      - name: Set the first round's instant
+        id: at
+        shell: bash
+        run: printf 'at=%s\n' "$(($(date +%s) + 120))" >> "$GITHUB_OUTPUT"
+
+  race:
+    name: Racer ${{ matrix.racer }}
+    needs: start
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        racer: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+    defaults:
+      run:
+        shell: bash
+    env:
+      AT: ${{ needs.start.outputs.at }}
+      # The rounds' instants are AT, AT + 20 s, AT + 40 s and AT + 60 s.
+      ROUND_SECONDS: '20'
+    steps:
+      - name: Wait for round 1
+        id: wait1
+        run: &wait |
+          round=${GITHUB_ACTION#wait}
+          race="$RUNNER_TEMP/race"
+          mkdir -p "$race"
+          printf 'racer\t%s\nrunner\t%s\ncpu\t%s\n' "${{ matrix.racer }}" "$RUNNER_NAME" \
+              "$(sed -n 's/^model name[[:space:]]*:[[:space:]]*//p' /proc/cpuinfo | head -n 1)" > "$race/claim"
+          instant=$((AT + (round - 1) * ROUND_SECONDS))
+          now=$(date +%s.%N)
+          late=$(awk -v now="$now" -v instant="$instant" 'BEGIN { print (now > instant) ? 1 : 0 }')
+          if [ "$late" = 0 ]; then
+              sleep "$(awk -v now="$now" -v instant="$instant" 'BEGIN { printf "%.3f", instant - now }')"
+          fi
+          printf 'late%s\t%s\n' "$round" "$late" >> "$race/late"
+          printf 'round %s: late %s, uploading at %s\n' "$round" "$late" "$(date +%s.%N)"
+
+      - name: Round 1's claim
+        id: round1
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: race-${{ github.run_attempt }}-round-1
+          path: ${{ runner.temp }}/race/claim
+          overwrite: false
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Wait for round 2
+        id: wait2
+        run: *wait
+
+      - name: Round 2's claim
+        id: round2
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: race-${{ github.run_attempt }}-round-2
+          path: ${{ runner.temp }}/race/claim
+          overwrite: false
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Wait for round 3
+        id: wait3
+        run: *wait
+
+      - name: Round 3's claim
+        id: round3
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: race-${{ github.run_attempt }}-round-3
+          path: ${{ runner.temp }}/race/claim
+          overwrite: false
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Wait for round 4
+        id: wait4
+        run: *wait
+
+      - name: Round 4's claim
+        id: round4
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: race-${{ github.run_attempt }}-round-4
+          path: ${{ runner.temp }}/race/claim
+          overwrite: false
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Record this racer's outcomes
+        env:
+          ROUND1: ${{ steps.round1.outcome }}
+          ROUND2: ${{ steps.round2.outcome }}
+          ROUND3: ${{ steps.round3.outcome }}
+          ROUND4: ${{ steps.round4.outcome }}
+        run: |
+          race="$RUNNER_TEMP/race"
+          {
+              printf 'racer\t%s\nrunner\t%s\n' "${{ matrix.racer }}" "$RUNNER_NAME"
+              printf 'round1\t%s\nround2\t%s\nround3\t%s\nround4\t%s\n' "$ROUND1" "$ROUND2" "$ROUND3" "$ROUND4"
+              cat "$race/late"
+          } > "$race/outcomes"
+          cat "$race/outcomes"
+
+      - name: Publish this racer's outcomes
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: race-${{ github.run_attempt }}-racer-${{ matrix.racer }}
+          path: ${{ runner.temp }}/race/outcomes
+          overwrite: false
+          if-no-files-found: error
+          retention-days: 7
+
+  judge:
+    name: Exactly one claim per round
+    needs: race
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Download the racers' outcomes and the rounds' claims
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: race-${{ github.run_attempt }}-*
+          path: ${{ runner.temp }}/race
+
+      - name: Require one winner per round, its claim alone under the round's name
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          race="$RUNNER_TEMP/race"
+          prefix="race-$GITHUB_RUN_ATTEMPT"
+          names=$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts?per_page=100" --jq '.artifacts[].name')
+          racers=$(find "$race" -path "*/$prefix-racer-*/outcomes" | wc -l)
+          failures=0
+          {
+              printf '## Claim race, attempt %s: %s racers\n\n' "$GITHUB_RUN_ATTEMPT" "$racers"
+              printf '| Round | Racers on time | Uploads that succeeded | Artifacts by its name | Winner | Claim holds |\n'
+              printf '| ---: | ---: | ---: | ---: | --- | --- |\n'
+          } > "$race/summary.md"
+          for round in 1 2 3 4; do
+              won=()
+              lost=0
+              on_time=0
+              for outcomes in "$race/$prefix"-racer-*/outcomes; do
+                  [ -e "$outcomes" ] || continue
+                  case "$(sed -n "s/^round$round\t//p" "$outcomes")" in
+                      success) won+=("$(sed -n 's/^racer\t//p' "$outcomes")") ;;
+                      failure) lost=$((lost + 1)) ;;
+                  esac
+                  if [ "$(sed -n "s/^late$round\t//p" "$outcomes")" = 0 ]; then
+                      on_time=$((on_time + 1))
+                  fi
+              done
+              # The round's artifact, by its name: one in the run, and the winner's record.
+              artifacts=$(grep -cxF "$prefix-round-$round" <<< "$names" || true)
+              holder=$(sed -n 's/^racer\t//p' "$race/$prefix-round-$round/claim" 2> /dev/null | head -n 1)
+              verdict=ok
+              if [ "${#won[@]}" -ne 1 ] || [ "$artifacts" -ne 1 ] || [ "$holder" != "${won[0]:-}" ] || [ $((${#won[@]} + lost)) -ne "$racers" ]; then
+                  verdict=FAILED
+                  failures=$((failures + 1))
+              fi
+              printf '| %s | %s | %s | %s | %s | racer %s (%s) |\n' "$round" "$on_time" "${#won[@]}" "$artifacts" "${won[*]:-none}" "${holder:-none}" "$verdict" >> "$race/summary.md"
+          done
+          cat "$race/summary.md"
+          cat "$race/summary.md" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$racers" -lt 2 ] || [ "$failures" -ne 0 ]; then
+              printf '::error title=Vector claim race::%s of 4 rounds did not have exactly one claim (%s racers).\n' "$failures" "$racers"
+              exit 1
+          fi
