@@ -729,6 +729,12 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_vector_operation(
             ir_typed_lanes(sink, value, operation->lane);
         }
     }
+    else if (operation->shift)
+    {
+        // A shift by a scalar count (#1840), its lanes and shift in its flags.
+        value = ir_typed_emit(sink, IR_INTRINSIC, type, operands[0], operands[1], BUSTER_IR_INTRINSIC_SHIFT, 0);
+        ir_typed_lanes(sink, value, (IrSimdLane)operation->immediate);
+    }
     else if (operation->permute != 0)
     {
         // A permute (#1840), its immediate in its flags.
