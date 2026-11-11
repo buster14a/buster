@@ -89,6 +89,8 @@ struct CheckVectorShuffle
     uint64_t second[8];
     bool reads_b;
     bool permutes;
+    // Whether no row of the target's sequences takes it and it runs element by element instead (#1834).
+    bool elementwise;
 };
 
 // The row of __builtin_shufflevector(a, b, indices...) of vectors of `source`'s type into one of `result`'s, its
@@ -140,7 +142,7 @@ static const char* check_vector_shuffle_row(const TypeTable* types, const X86Tar
         uint8_t constant[64] = { 0 };
         uint32_t constant_bytes = 0;
         reason = check_vector_baseline_shuffle_row(target, in.element, in.lanes, in.bytes, out.lanes, out.bytes, indices, BUSTER_TIER0_ROLE_VECTOR(operands), row,
-                                                   constant, &constant_bytes);
+                                                   constant, &constant_bytes, &plan->elementwise);
         plan->permutes = constant_bytes != 0;
         if (constant_bytes != 0)
         {
@@ -1006,9 +1008,9 @@ static const char* check_vector_baseline_elementwise(const X86Target* target, CB
 // result is too): of integers, max and min, abs, saturating addition and subtraction, population counts, leading and
 // trailing zero counts (clzg's and ctzg's second operands the elements a zero element takes) and funnel shifts; of
 // half-precision elements (with AVX512-FP16), floats and doubles, the square roots and the fused multiply-adds at the
-// current rounding, as llvm.sqrt's and llvm.fma's are (VSQRTPH/PS/PD of a, VFMADD213PH/PS/PD of a, b and c: a = b * a +
-// c); of bf16 elements (with AVX10.2), VSQRTBF16 of a, and the fused multiply-add of b, a and c (b = a * b + c, as clang's
-// code has b in ModRM.reg and a in VEX.vvvv), moved to VECTOR(0), whose operands `negated` has the bit of (the lowering
+// current rounding, as llvm.sqrt's and llvm.fma's are (VSQRTPH/PS/PD of a, VFMADD213PH/PS/PD of b, a and c: b = a * b +
+// c, moved to VECTOR(0), as clang's code has b in ModRM.reg, so that of two NaNs b's is the result); of bf16 elements
+// (with AVX10.2), VSQRTBF16 of a, and the fused multiply-add of b, a and c (b = a * b + c) the same way, whose operands `negated` has the bit of (the lowering
 // takes their negations' operands: check_lower_brain_negations) negate the product (a's or b's alone) or the sum (c's) as
 // the form does, as clang's instruction selection folds the negations: VFMADD213BF16, VFMSUB213BF16, VFNMADD213BF16 or
 // VFNMSUB213BF16. `constants` gets any extra constant operands.
@@ -1038,9 +1040,12 @@ static const char* check_vector_elementwise_shape_row(const X86Target* target, C
         static const CheckVectorForms products[3] = { BUSTER_CHECK_VECTOR_PACKED(VFMADD213PH), BUSTER_CHECK_VECTOR_EVEX(VFMADD213PS),
                                                       BUSTER_CHECK_VECTOR_EVEX(VFMADD213PD) };
         const uint32_t d = shape.element == 2 ? 0 : shape.element == 4 ? 1 : 2;
+        // The product's destination is b, as clang's code has it (so that of two NaNs, b's is the result's), then moved to
+        // VECTOR(0).
         row->records[0] = builtin == CBUILTIN_ELEMENTWISE_SQRT ? check_vector_lower_record(roots[d].forms[width], v0, 0, v0) :
-                                                                  check_vector_lower_record(products[d].forms[width], v0, v1, v2);
-        row->record_count = 1;
+                                                                  check_vector_lower_record(products[d].forms[width], v1, v0, v2);
+        row->records[1] = check_x86_lower_move_result(shape.bytes, v1);
+        row->record_count = builtin == CBUILTIN_ELEMENTWISE_SQRT ? 1 : 2;
         reason = shape.element == 2 && (target->extensions & BUSTER_X86_EXTENSION(AVX512FP16)) == 0 ?
                      "elementwise vector builtins of half-precision elements without AVX512-FP16" :
                      NULL;
@@ -1312,8 +1317,9 @@ static const char* check_vector_elementwise_row(const TypeTable* types, const X8
 }
 
 // The row of __builtin_elementwise_sqrt or _fma of float or double scalars (`class`, F32 or F64), of `arguments`
-// operands of the class: VSQRTSS/SD of the operand, or VFMADD213SS/SD of a, b and c (a = b * a + c), into the first
-// operand's register at the current rounding, as llvm.sqrt and llvm.fma compute them. Their EVEX forms are AVX-512F's,
+// operands of the class: VSQRTSS/SD of the operand, or VFMADD213SS/SD of b, a and c (b = a * b + c, b's register the
+// destination as clang's code has it, so that of two NaNs b's is the result), moved into the first operand's register,
+// at the current rounding, as llvm.sqrt and llvm.fma compute them. Their EVEX forms are AVX-512F's,
 // which a target may lack though the operands are no vectors.
 static const char* check_vector_scalar_row(const X86Target* target, CBuiltinId builtin, uint8_t class, uint32_t arguments, Tier0Operation* row)
 {
@@ -1339,11 +1345,13 @@ static const char* check_vector_scalar_row(const X86Target* target, CBuiltinId b
         }
         else
         {
-            row->records[0] = check_vector_lower_record(d ? X86_FORM_VFMADD213SD_X_X_XM64 : X86_FORM_VFMADD213SS_X_X_XM32, result, BUSTER_TIER0_ROLE_FLOATING(1),
-                                                        BUSTER_TIER0_ROLE_FLOATING(2));
+            // b's register is the product's destination, as clang's code has it (of two NaNs, b's is the result's).
+            row->records[0] = check_vector_lower_record(d ? X86_FORM_VFMADD213SD_X_X_XM64 : X86_FORM_VFMADD213SS_X_X_XM32, BUSTER_TIER0_ROLE_FLOATING(1),
+                                                        BUSTER_TIER0_ROLE_FLOATING(0), BUSTER_TIER0_ROLE_FLOATING(2));
+            row->records[1] = check_vector_lower_record(X86_FORM_VMOVAPS_X_XM128, result, 0, BUSTER_TIER0_ROLE_FLOATING(1));
             reason = (target->features & BUSTER_X86_FEATURE(FMA)) == 0 ? "fused multiply-adds of scalars without FMA or AVX-512F" : NULL;
         }
-        row->record_count = 1;
+        row->record_count = root ? 1 : 2;
         row->operand_count = (uint8_t)arguments;
         for (uint32_t j = 0; j < arguments; j += 1)
         {
@@ -1358,8 +1366,9 @@ static const char* check_vector_scalar_row(const X86Target* target, CBuiltinId b
         row->records[0] = root ? check_vector_lower_record(d ? X86_FORM_VSQRTSD_X_X_XM64_EVEX : X86_FORM_VSQRTSS_X_X_XM32_EVEX, BUSTER_TIER0_ROLE_FLOATING_RESULT,
                                                            f0, f0) :
                                  check_vector_lower_record(d ? X86_FORM_VFMADD213SD_X_X_XM64_EVEX : X86_FORM_VFMADD213SS_X_X_XM32_EVEX,
-                                                           BUSTER_TIER0_ROLE_FLOATING_RESULT, BUSTER_TIER0_ROLE_FLOATING(1), BUSTER_TIER0_ROLE_FLOATING(2));
-        row->record_count = 1;
+                                                           BUSTER_TIER0_ROLE_FLOATING(1), f0, BUSTER_TIER0_ROLE_FLOATING(2));
+        row->records[1] = check_vector_lower_record(X86_FORM_VMOVAPS_X_XM128_EVEX, BUSTER_TIER0_ROLE_FLOATING_RESULT, 0, BUSTER_TIER0_ROLE_FLOATING(1));
+        row->record_count = root ? 1 : 2;
         row->operand_count = (uint8_t)arguments;
         for (uint32_t j = 0; j < arguments; j += 1)
         {
@@ -1522,9 +1531,227 @@ static const char* check_vector_floating_shape_row(CBuiltinId builtin, CheckVect
     return reason;
 }
 
-static const char* check_vector_floating_row(const TypeTable* types, CBuiltinId builtin, TypeId vector, Tier0Operation* row, CheckVectorConstants* constants)
+// The rows of a floating elementwise builtin that check_vector_floating_rows gives: up to three.
+#define BUSTER_CHECK_VECTOR_FLOATING_ROWS 3u
+
+// The baseline's select row of check_vector_baseline_floating_rows' chain: of its operands, the previous row's result
+// VECTOR(0) and the arguments x VECTOR(1) and y VECTOR(2), `with` where `tested` is a NaN, else the previous result,
+// that result xor the two's xor under CMPUNORDP's mask (MOVAPS, CMPUNORDP, PXOR, PAND, PXOR). `tested` is copied first,
+// so that `with` may be the same operand.
+static void check_vector_baseline_select_row(CheckVectorShape shape, uint8_t tested, uint8_t with, Tier0Operation* row)
 {
-    return check_vector_floating_shape_row(builtin, check_vector_builtin_shape(types, vector), row, constants);
+    const bool d = shape.element == 8;
+    const uint8_t v0 = BUSTER_TIER0_ROLE_VECTOR(0);
+    const uint8_t v3 = BUSTER_TIER0_ROLE_VECTOR(3);
+    uint32_t r = 0;
+    memset(row, 0, sizeof(*row));
+    row->result_class = BUSTER_TYPED_CLASS_VECTOR;
+    row->result_bytes = (uint8_t)shape.bytes;
+    row->operand_count = 3;
+    for (uint32_t j = 0; j < 3; j += 1)
+    {
+        row->operand_classes[j] = BUSTER_TYPED_CLASS_VECTOR;
+        row->operand_bytes[j] = (uint8_t)shape.bytes;
+    }
+    row->records[r++] = check_vector_lower_record(X86_FORM_MOVAPS_X_XM, v3, 0, tested);
+    row->records[r] = check_vector_lower_record(d ? X86_FORM_CMPPD_X_XM128_IMM8 : X86_FORM_CMPPS_X_XM128_IMM8, v3, 0, v3);
+    row->records[r++].immediate = 3;
+    row->records[r++] = check_vector_lower_record(X86_FORM_PXOR_X_XM128, with, 0, v0);
+    row->records[r++] = check_vector_lower_record(X86_FORM_PAND_X_XM128, with, 0, v3);
+    row->records[r++] = check_vector_lower_record(X86_FORM_PXOR_X_XM128, v0, 0, with);
+    row->record_count = (uint8_t)r;
+}
+
+// check_vector_floating_shape_row's builtins of floats or doubles without AVX-512F and AVX-512VL (#1834), the same
+// values by SSE's forms (AVX's VEX ones, of 32 bytes too), its operands and constants that row's: SSE4.1's ROUNDPS and
+// ROUNDPD for the roundings (round's of the value plus the largest value below 0.5 of its sign: PAND, POR, ADDP),
+// canonicalize's MULP by 1.0, copysign's x's magnitude and y's sign (PAND, PANDN and POR; with AVX ANDPS, then y's bits
+// less its magnitude's by ANDPS and XORPS, ORPS), maxnum's and minnum's MAXP or MINP of y and x, y where x is a NaN
+// (CMPUNORDP's mask: PAND, PANDN and POR; with AVX VBLENDVP). The IEEE maxima and minima are MAXP or MINP of x and y,
+// its sign bit cleared where x's is clear (maximum's ANDPS by x ORed with the magnitude mask) or set where x's is
+// (minimum's ORPS by x ANDed with the sign mask), x where x is a NaN, and for the _num forms y where x is one, then x where
+// y is: with AVX one row (VBLENDVP by CMPUNORDP's masks), without it more records than a row has, so a chain of rows,
+// each after the first of the previous one's result and x and y (check_vector_baseline_select_row's), `*count` of
+// them. Without SSE4.1 the roundings are the C library's functions (check_lower_vector_library), as clang's code calls
+// them.
+static const char* check_vector_baseline_floating_rows(const X86Target* target, CBuiltinId builtin, CheckVectorShape shape, Tier0Operation* rows, uint32_t* count,
+                                                       CheckVectorConstants* constants)
+{
+    const bool avx = (target->features & BUSTER_X86_FEATURE(AVX)) != 0;
+    const bool d = shape.element == 8;
+    const uint32_t w = shape.bytes > 16 ? 1 : 0;
+    const uint8_t v0 = BUSTER_TIER0_ROLE_VECTOR(0);
+    const uint8_t v1 = BUSTER_TIER0_ROLE_VECTOR(1);
+    const uint8_t v2 = BUSTER_TIER0_ROLE_VECTOR(2);
+    const uint8_t v3 = BUSTER_TIER0_ROLE_VECTOR(3);
+    const bool binary = builtin >= CBUILTIN_ELEMENTWISE_COPYSIGN;
+    const uint64_t sign = check_vector_floating_sign(d);
+    Tier0Operation* row = rows;
+    const char* reason = NULL;
+    memset(row, 0, sizeof(*row));
+    *constants = (CheckVectorConstants){ 0 };
+    *count = 1;
+    row->result_class = BUSTER_TYPED_CLASS_VECTOR;
+    row->result_bytes = (uint8_t)shape.bytes;
+    row->operand_count = binary ? 2 : 1;
+    for (uint32_t j = 0; j < row->operand_count; j += 1)
+    {
+        row->operand_classes[j] = BUSTER_TYPED_CLASS_VECTOR;
+        row->operand_bytes[j] = (uint8_t)shape.bytes;
+    }
+    // Each family's legacy form, then its VEX forms of 16 and 32 bytes; a legacy form's destination is its first source.
+    static const uint16_t roundings[2][3] = { { X86_FORM_ROUNDPS_X_XM128_IMM8, X86_FORM_VROUNDPS_X_XM128_IMM8, X86_FORM_VROUNDPS_Y_YM256_IMM8 },
+                                              { X86_FORM_ROUNDPD_X_XM128_IMM8, X86_FORM_VROUNDPD_X_XM128_IMM8, X86_FORM_VROUNDPD_Y_YM256_IMM8 } };
+    static const uint16_t adds[2][3] = { { X86_FORM_ADDPS_X_XM128, X86_FORM_VADDPS_X_X_XM128, X86_FORM_VADDPS_Y_Y_YM256 },
+                                         { X86_FORM_ADDPD_X_XM128, X86_FORM_VADDPD_X_X_XM128, X86_FORM_VADDPD_Y_Y_YM256 } };
+    static const uint16_t products[2][3] = { { X86_FORM_MULPS_X_XM128, X86_FORM_VMULPS_X_X_XM128, X86_FORM_VMULPS_Y_Y_YM256 },
+                                             { X86_FORM_MULPD_X_XM128, X86_FORM_VMULPD_X_X_XM128, X86_FORM_VMULPD_Y_Y_YM256 } };
+    static const uint16_t maxima[2][3] = { { X86_FORM_MAXPS_X_XM128, X86_FORM_VMAXPS_X_X_XM128, X86_FORM_VMAXPS_Y_Y_YM256 },
+                                           { X86_FORM_MAXPD_X_XM128, X86_FORM_VMAXPD_X_X_XM128, X86_FORM_VMAXPD_Y_Y_YM256 } };
+    static const uint16_t minima[2][3] = { { X86_FORM_MINPS_X_XM128, X86_FORM_VMINPS_X_X_XM128, X86_FORM_VMINPS_Y_Y_YM256 },
+                                           { X86_FORM_MINPD_X_XM128, X86_FORM_VMINPD_X_X_XM128, X86_FORM_VMINPD_Y_Y_YM256 } };
+    static const uint16_t compares[2][3] = { { X86_FORM_CMPPS_X_XM128_IMM8, X86_FORM_VCMPPS_X_X_XM128_IMM8, X86_FORM_VCMPPS_Y_Y_YM256_IMM8 },
+                                             { X86_FORM_CMPPD_X_XM128_IMM8, X86_FORM_VCMPPD_X_X_XM128_IMM8, X86_FORM_VCMPPD_Y_Y_YM256_IMM8 } };
+    static const uint16_t blends[2][2] = { { X86_FORM_VBLENDVPS_X_X_XM128_X, X86_FORM_VBLENDVPS_Y_Y_YM256_Y },
+                                           { X86_FORM_VBLENDVPD_X_X_XM128_X, X86_FORM_VBLENDVPD_Y_Y_YM256_Y } };
+    static const uint16_t ands[3] = { X86_FORM_PAND_X_XM128, X86_FORM_VANDPS_X_X_XM128, X86_FORM_VANDPS_Y_Y_YM256 };
+    static const uint16_t ors[3] = { X86_FORM_POR_X_XM128, X86_FORM_VORPS_X_X_XM128, X86_FORM_VORPS_Y_Y_YM256 };
+    static const uint16_t xors[3] = { X86_FORM_PXOR_X_XM128, X86_FORM_VXORPS_X_X_XM128, X86_FORM_VXORPS_Y_Y_YM256 };
+    const uint32_t f = avx ? 1 + w : 0;
+    const uint32_t extreme = builtin == CBUILTIN_ELEMENTWISE_MAXIMUM || builtin == CBUILTIN_ELEMENTWISE_MAXNUM || builtin == CBUILTIN_ELEMENTWISE_MAXIMUMNUM ?
+                                 maxima[d][f] :
+                                 minima[d][f];
+    uint32_t r = 0;
+    if (!shape.floating || shape.bfloat || shape.element == 2)
+    {
+        reason = "elementwise vector builtins of half-precision or bf16 elements";
+    }
+    else if (shape.bytes > (avx ? 32u : 16u))
+    {
+        reason = "vector machine operation unavailable at this target";
+    }
+    else if (builtin <= CBUILTIN_ELEMENTWISE_ROUND && (target->features & BUSTER_X86_FEATURE(SSE41)) == 0)
+    {
+        reason = "vector roundings without SSE4.1";
+    }
+    else if (builtin <= CBUILTIN_ELEMENTWISE_ROUNDEVEN)
+    {
+        row->records[r] = check_vector_lower_record(roundings[d][f], v0, 0, v0);
+        row->records[r++].immediate = check_vector_rounding(builtin);
+    }
+    else if (builtin == CBUILTIN_ELEMENTWISE_ROUND)
+    {
+        check_vector_constant(row, constants, check_vector_floating_half(d), shape.element, BUSTER_TYPED_CLASS_VECTOR, shape.bytes);
+        check_vector_constant(row, constants, sign, shape.element, BUSTER_TYPED_CLASS_VECTOR, shape.bytes);
+        row->records[r++] = check_vector_lower_record(ands[f], v2, avx ? v2 : 0, v0);
+        row->records[r++] = check_vector_lower_record(ors[f], v2, avx ? v2 : 0, v1);
+        row->records[r++] = check_vector_lower_record(adds[d][f], v2, avx ? v2 : 0, v0);
+        row->records[r] = check_vector_lower_record(roundings[d][f], v0, 0, v2);
+        row->records[r++].immediate = 11;
+    }
+    else if (builtin == CBUILTIN_ELEMENTWISE_CANONICALIZE)
+    {
+        check_vector_constant(row, constants, check_vector_floating_one(d), shape.element, BUSTER_TYPED_CLASS_VECTOR, shape.bytes);
+        row->records[r++] = check_vector_lower_record(products[d][f], v0, avx ? v0 : 0, v1);
+    }
+    else if (builtin == CBUILTIN_ELEMENTWISE_COPYSIGN)
+    {
+        check_vector_constant(row, constants, sign - 1, shape.element, BUSTER_TYPED_CLASS_VECTOR, shape.bytes);
+        if (avx)
+        {
+            row->records[r++] = check_vector_lower_record(ands[f], v3, v1, v2);
+            row->records[r++] = check_vector_lower_record(xors[f], v3, v3, v1);
+            row->records[r++] = check_vector_lower_record(ands[f], v0, v0, v2);
+            row->records[r++] = check_vector_lower_record(ors[f], v0, v0, v3);
+        }
+        else
+        {
+            row->records[r++] = check_vector_lower_record(X86_FORM_PAND_X_XM128, v0, 0, v2);
+            row->records[r++] = check_vector_lower_record(X86_FORM_PANDN_X_XM128, v2, 0, v1);
+            row->records[r++] = check_vector_lower_record(X86_FORM_POR_X_XM128, v0, 0, v2);
+        }
+    }
+    else if ((builtin == CBUILTIN_ELEMENTWISE_MAXNUM || builtin == CBUILTIN_ELEMENTWISE_MINNUM) && avx)
+    {
+        row->records[r++] = check_vector_lower_record(extreme, v3, v1, v0);
+        row->records[r] = check_vector_lower_record(compares[d][f], v2, v0, v0);
+        row->records[r++].immediate = 3;
+        row->records[r] = check_vector_lower_record(blends[d][w], v0, v3, v1);
+        row->records[r++].immediate = 2 << 4;
+    }
+    else if (builtin == CBUILTIN_ELEMENTWISE_MAXNUM || builtin == CBUILTIN_ELEMENTWISE_MINNUM)
+    {
+        row->records[r++] = check_vector_lower_record(X86_FORM_MOVAPS_X_XM, v3, 0, v1);
+        row->records[r++] = check_vector_lower_record(extreme, v3, 0, v0);
+        row->records[r] = check_vector_lower_record(compares[d][0], v0, 0, v0);
+        row->records[r++].immediate = 3;
+        row->records[r++] = check_vector_lower_record(X86_FORM_PAND_X_XM128, v1, 0, v0);
+        row->records[r++] = check_vector_lower_record(X86_FORM_PANDN_X_XM128, v0, 0, v3);
+        row->records[r++] = check_vector_lower_record(X86_FORM_POR_X_XM128, v0, 0, v1);
+    }
+    else
+    {
+        const bool maximum = builtin == CBUILTIN_ELEMENTWISE_MAXIMUM || builtin == CBUILTIN_ELEMENTWISE_MAXIMUMNUM;
+        const bool number = builtin == CBUILTIN_ELEMENTWISE_MAXIMUMNUM || builtin == CBUILTIN_ELEMENTWISE_MINIMUMNUM;
+        check_vector_constant(row, constants, maximum ? sign - 1 : sign, shape.element, BUSTER_TYPED_CLASS_VECTOR, shape.bytes);
+        if (avx)
+        {
+            row->records[r++] = check_vector_lower_record(extreme, v3, v0, v1);
+            row->records[r++] = check_vector_lower_record(maximum ? ors[f] : ands[f], v2, v2, v0);
+            row->records[r++] = check_vector_lower_record(maximum ? ands[f] : ors[f], v3, v3, v2);
+            row->records[r] = check_vector_lower_record(compares[d][f], v2, v0, v0);
+            row->records[r++].immediate = 3;
+            if (number)
+            {
+                row->records[r] = check_vector_lower_record(blends[d][w], v3, v3, v1);
+                row->records[r++].immediate = 2 << 4;
+                row->records[r] = check_vector_lower_record(compares[d][f], v2, v1, v1);
+                row->records[r++].immediate = 3;
+            }
+            row->records[r] = check_vector_lower_record(blends[d][w], v0, v3, v0);
+            row->records[r++].immediate = 2 << 4;
+        }
+        else
+        {
+            row->records[r++] = check_vector_lower_record(X86_FORM_MOVAPS_X_XM, v3, 0, v0);
+            row->records[r++] = check_vector_lower_record(extreme, v3, 0, v1);
+            row->records[r++] = check_vector_lower_record(maximum ? X86_FORM_POR_X_XM128 : X86_FORM_PAND_X_XM128, v2, 0, v0);
+            row->records[r++] = check_vector_lower_record(maximum ? X86_FORM_PAND_X_XM128 : X86_FORM_POR_X_XM128, v3, 0, v2);
+            row->records[r++] = check_vector_lower_record(X86_FORM_MOVAPS_X_XM, v0, 0, v3);
+            if (number)
+            {
+                check_vector_baseline_select_row(shape, v1, v2, rows + 1);
+                check_vector_baseline_select_row(shape, v2, v1, rows + 2);
+                *count = 3;
+            }
+            else
+            {
+                check_vector_baseline_select_row(shape, v1, v1, rows + 1);
+                *count = 2;
+            }
+        }
+    }
+    row->record_count = (uint8_t)r;
+    return reason;
+}
+
+// The rows of a floating elementwise builtin of a vector shape at a target: check_vector_floating_shape_row's one
+// with AVX-512F and AVX-512VL, else check_vector_baseline_floating_rows'.
+static const char* check_vector_floating_rows(const X86Target* target, CBuiltinId builtin, CheckVectorShape shape, Tier0Operation* rows, uint32_t* count,
+                                              CheckVectorConstants* constants)
+{
+    const uint64_t evex = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512VL);
+    const char* reason = NULL;
+    *count = 1;
+    if ((target->features & evex) == evex)
+    {
+        reason = check_vector_floating_shape_row(builtin, shape, rows, constants);
+    }
+    else
+    {
+        reason = check_vector_baseline_floating_rows(target, builtin, shape, rows, count, constants);
+    }
+    return reason;
 }
 
 // The baseline's row of the scalar builtins check_vector_floating_scalar_row's AVX-512F row computes, but its roundings
@@ -2069,6 +2296,198 @@ static const char* check_vector_reduce_floating_rows(const TypeTable* types, CBu
                                                     Tier0Operation rows[BUSTER_CHECK_VECTOR_FLOATING_REDUCE_ROWS], uint32_t* count)
 {
     return check_vector_reduce_floating_shape_rows(builtin, check_vector_builtin_shape(types, vector), rows, count);
+}
+
+// check_vector_reduce_floating_shape_rows' reductions without AVX-512F and AVX-512VL (#1834), of a vector of the
+// target's registers' bytes at most (16, or 32 with AVX), by the same halvings, as clang's code reduces it: the high 16
+// bytes of 32 by VEXTRACTF128, the high 8 of 16 by PSHUFD 0xee (VPERMILPD 1 with AVX) and a float's high 4 of 8 by PSHUFD
+// 0x55 (VMOVSHDUP with AVX) into v2, then the low part combined with the high one, the low one first: a sum's ADDP (its
+// start + the tree last, ADDSS or ADDSD into the start's copy), and a maximum's or minimum's llvm.maximum or minimum
+// (check_vector_baseline_floating_rows'), its mask each row's second operand. With AVX that is a row a halving (VBLENDVP
+// of the low part where it is a NaN); without, two: the first packs the low part with the high one, the high replaced by
+// the low where the low is a NaN (CMPUNORDP's mask, PXOR, PAND, PXOR, then PUNPCKLQDQ or PUNPCKLDQ, so that the packed
+// vector's high part is the second row's to extract), which MAXP or MINP then gives as the low NaN itself, and the second
+// takes MAXP or MINP and the sign's correction (the low part's NaN unchanged by it). `count` gets the rows' number.
+static const char* check_vector_baseline_reduce_floating_rows(const X86Target* target, CBuiltinId builtin, CheckVectorShape shape,
+                                                              Tier0Operation rows[BUSTER_CHECK_VECTOR_FLOATING_REDUCE_ROWS], uint32_t* count)
+{
+    const bool avx = (target->features & BUSTER_X86_FEATURE(AVX)) != 0;
+    const uint8_t v0 = BUSTER_TIER0_ROLE_VECTOR(0);
+    const uint8_t v1 = BUSTER_TIER0_ROLE_VECTOR(1);
+    const uint8_t v2 = BUSTER_TIER0_ROLE_VECTOR(2);
+    const uint8_t v3 = BUSTER_TIER0_ROLE_VECTOR(3);
+    const uint8_t fr = BUSTER_TIER0_ROLE_FLOATING_RESULT;
+    const char* reason = NULL;
+    memset(rows, 0, BUSTER_CHECK_VECTOR_FLOATING_REDUCE_ROWS * sizeof(*rows));
+    *count = 0;
+    if (!shape.floating || shape.bfloat || shape.element == 2)
+    {
+        reason = "vector reductions of half-precision or bf16 elements";
+    }
+    else if (shape.bytes > (avx ? 32u : 16u))
+    {
+        reason = "vector machine operation unavailable at this target";
+    }
+    else if (builtin != CBUILTIN_REDUCE_ASSOC_FADD && shape.lanes * shape.element < shape.bytes)
+    {
+        reason = "floating maximum and minimum reductions of vectors their elements don't fill";
+    }
+    else
+    {
+        const bool d = shape.element == 8;
+        const bool sum = builtin == CBUILTIN_REDUCE_ASSOC_FADD;
+        const bool maximum = builtin == CBUILTIN_REDUCE_MAXIMUM;
+        const uint8_t class = d ? BUSTER_TYPED_CLASS_F64 : BUSTER_TYPED_CLASS_F32;
+        const uint32_t f = avx ? 1 : 0;
+        static const uint16_t adds[2][2] = { { X86_FORM_ADDPS_X_XM128, X86_FORM_VADDPS_X_X_XM128 }, { X86_FORM_ADDPD_X_XM128, X86_FORM_VADDPD_X_X_XM128 } };
+        static const uint16_t maxima[2][2] = { { X86_FORM_MAXPS_X_XM128, X86_FORM_VMAXPS_X_X_XM128 }, { X86_FORM_MAXPD_X_XM128, X86_FORM_VMAXPD_X_X_XM128 } };
+        static const uint16_t minima[2][2] = { { X86_FORM_MINPS_X_XM128, X86_FORM_VMINPS_X_X_XM128 }, { X86_FORM_MINPD_X_XM128, X86_FORM_VMINPD_X_X_XM128 } };
+        static const uint16_t compares[2][2] = { { X86_FORM_CMPPS_X_XM128_IMM8, X86_FORM_VCMPPS_X_X_XM128_IMM8 },
+                                                 { X86_FORM_CMPPD_X_XM128_IMM8, X86_FORM_VCMPPD_X_X_XM128_IMM8 } };
+        const uint32_t extreme = (maximum ? maxima : minima)[d][f];
+        uint32_t span = shape.bytes;
+        uint32_t row = 0;
+        uint32_t r = 0;
+        rows[0].operand_count = sum ? 1 : 2;
+        rows[0].operand_classes[0] = BUSTER_TYPED_CLASS_VECTOR;
+        rows[0].operand_bytes[0] = (uint8_t)span;
+        rows[0].operand_classes[1] = sum ? 0 : BUSTER_TYPED_CLASS_VECTOR;
+        rows[0].operand_bytes[1] = sum ? 0 : (uint8_t)span;
+        while (span > shape.element && reason == NULL)
+        {
+            const uint32_t half = span / 2;
+            X86Instruction high;
+            if (half == 16)
+            {
+                high = check_vector_lower_record(X86_FORM_VEXTRACTF128_XM128_Y_IMM8, v0, 0, v2);
+                high.immediate = 1;
+            }
+            else if (avx)
+            {
+                high = check_vector_lower_record(half == 8 ? X86_FORM_VPERMILPD_X_XM128_IMM8 : X86_FORM_VMOVSHDUP_X_XM128, v2, 0, v0);
+                high.immediate = half == 8 ? 1 : 0;
+            }
+            else
+            {
+                high = check_vector_lower_record(X86_FORM_PSHUFD_X_XM128_IMM8, v2, 0, v0);
+                high.immediate = half == 8 ? 0xee : 0x55;
+            }
+            // Each maximum's or minimum's halving starts a row of its own (two without AVX); a sum's share one.
+            if (!sum && r != 0)
+            {
+                if (row + 1 >= BUSTER_CHECK_VECTOR_FLOATING_REDUCE_ROWS)
+                {
+                    reason = "vector reductions of more elements than their rows hold";
+                }
+                else
+                {
+                    rows[row].record_count = (uint8_t)r;
+                    rows[row].result_class = BUSTER_TYPED_CLASS_VECTOR;
+                    rows[row].result_bytes = (uint8_t)span;
+                    row += 1;
+                    r = 0;
+                    rows[row].operand_count = 2;
+                    rows[row].operand_classes[0] = BUSTER_TYPED_CLASS_VECTOR;
+                    rows[row].operand_bytes[0] = (uint8_t)span;
+                    rows[row].operand_classes[1] = BUSTER_TYPED_CLASS_VECTOR;
+                    rows[row].operand_bytes[1] = (uint8_t)span;
+                }
+            }
+            if (reason == NULL && sum)
+            {
+                rows[row].records[r++] = high;
+                rows[row].records[r++] = check_vector_lower_record(adds[d][f], v0, avx ? v0 : 0, v2);
+            }
+            else if (reason == NULL && avx)
+            {
+                rows[row].records[r++] = high;
+                rows[row].records[r++] = check_vector_lower_record(extreme, v3, v0, v2);
+                rows[row].records[r++] = check_vector_lower_record(maximum ? X86_FORM_VORPS_X_X_XM128 : X86_FORM_VANDPS_X_X_XM128, v1, v1, v0);
+                rows[row].records[r++] = check_vector_lower_record(maximum ? X86_FORM_VANDPS_X_X_XM128 : X86_FORM_VORPS_X_X_XM128, v3, v3, v1);
+                rows[row].records[r] = check_vector_lower_record(compares[d][1], v1, v0, v0);
+                rows[row].records[r++].immediate = 3;
+                rows[row].records[r] = check_vector_lower_record(d ? X86_FORM_VBLENDVPD_X_X_XM128_X : X86_FORM_VBLENDVPS_X_X_XM128_X, v0, v3, v0);
+                rows[row].records[r++].immediate = 1 << 4;
+            }
+            else if (reason == NULL && row + 1 >= BUSTER_CHECK_VECTOR_FLOATING_REDUCE_ROWS)
+            {
+                reason = "vector reductions of more elements than their rows hold";
+            }
+            else if (reason == NULL)
+            {
+                // The packing row: its one operand the vector, its result the same bytes.
+                rows[row].operand_count = 1;
+                rows[row].operand_classes[1] = 0;
+                rows[row].operand_bytes[1] = 0;
+                rows[row].records[r++] = high;
+                rows[row].records[r++] = check_vector_lower_record(X86_FORM_MOVAPS_X_XM, v3, 0, v0);
+                rows[row].records[r] = check_vector_lower_record(compares[d][0], v3, 0, v3);
+                rows[row].records[r++].immediate = 3;
+                rows[row].records[r++] = check_vector_lower_record(X86_FORM_MOVAPS_X_XM, v1, 0, v0);
+                rows[row].records[r++] = check_vector_lower_record(X86_FORM_PXOR_X_XM128, v1, 0, v2);
+                rows[row].records[r++] = check_vector_lower_record(X86_FORM_PAND_X_XM128, v1, 0, v3);
+                rows[row].records[r++] = check_vector_lower_record(X86_FORM_PXOR_X_XM128, v2, 0, v1);
+                rows[row].records[r++] = check_vector_lower_record(half == 8 ? X86_FORM_PUNPCKLQDQ_X_XM128 : X86_FORM_PUNPCKLDQ_X_XM128, v0, 0, v2);
+                rows[row].record_count = (uint8_t)r;
+                rows[row].result_class = BUSTER_TYPED_CLASS_VECTOR;
+                rows[row].result_bytes = (uint8_t)span;
+                row += 1;
+                r = 0;
+                rows[row].operand_count = 2;
+                rows[row].operand_classes[0] = BUSTER_TYPED_CLASS_VECTOR;
+                rows[row].operand_bytes[0] = (uint8_t)span;
+                rows[row].operand_classes[1] = BUSTER_TYPED_CLASS_VECTOR;
+                rows[row].operand_bytes[1] = (uint8_t)span;
+                rows[row].records[r++] = high;
+                rows[row].records[r++] = check_vector_lower_record(X86_FORM_MOVAPS_X_XM, v3, 0, v0);
+                rows[row].records[r++] = check_vector_lower_record(extreme, v3, 0, v2);
+                rows[row].records[r++] = check_vector_lower_record(maximum ? X86_FORM_POR_X_XM128 : X86_FORM_PAND_X_XM128, v1, 0, v0);
+                rows[row].records[r++] = check_vector_lower_record(maximum ? X86_FORM_PAND_X_XM128 : X86_FORM_POR_X_XM128, v3, 0, v1);
+                rows[row].records[r++] = check_vector_lower_record(X86_FORM_MOVAPS_X_XM, v0, 0, v3);
+            }
+            span = half;
+        }
+        if (reason == NULL)
+        {
+            Tier0Operation* current = rows + row;
+            if (sum)
+            {
+                // The start's addition: start + tree, into a copy of the start, the row's last operand.
+                const uint32_t start = current->operand_count;
+                current->operand_classes[start] = class;
+                current->operand_count = (uint8_t)(start + 1);
+                const uint32_t add = avx ? (d ? X86_FORM_VADDSD_X_X_XM64 : X86_FORM_VADDSS_X_X_XM32) : (d ? X86_FORM_ADDSD_X_XM64 : X86_FORM_ADDSS_X_XM32);
+                if (avx)
+                {
+                    current->records[r++] = check_vector_lower_record(add, fr, BUSTER_TIER0_ROLE_FLOATING(start), v0);
+                }
+                else
+                {
+                    current->records[r++] = check_vector_lower_record(X86_FORM_MOVAPS_X_XM, fr, 0, BUSTER_TIER0_ROLE_FLOATING(start));
+                    current->records[r++] = check_vector_lower_record(add, fr, 0, v0);
+                }
+            }
+            else
+            {
+                current->records[r++] = check_vector_lower_record(avx ? X86_FORM_VMOVAPS_X_XM128 : X86_FORM_MOVAPS_X_XM, fr, 0, v0);
+            }
+            current->record_count = (uint8_t)r;
+            current->result_class = class;
+            current->result_bytes = 0;
+            *count = row + 1;
+        }
+    }
+    return reason;
+}
+
+// A floating reduction's rows at a target: check_vector_reduce_floating_shape_rows' with AVX-512F and AVX-512VL, else
+// check_vector_baseline_reduce_floating_rows'.
+static const char* check_vector_reduce_floating_target_rows(const X86Target* target, CBuiltinId builtin, CheckVectorShape shape,
+                                                            Tier0Operation rows[BUSTER_CHECK_VECTOR_FLOATING_REDUCE_ROWS], uint32_t* count)
+{
+    const uint64_t evex = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512VL);
+    return (target->features & evex) == evex ? check_vector_reduce_floating_shape_rows(builtin, shape, rows, count) :
+                                               check_vector_baseline_reduce_floating_rows(target, builtin, shape, rows, count);
 }
 
 // The row of __builtin_nontemporal_store(value, p) or __builtin_nontemporal_load(p) of a vector of `vector`'s type at

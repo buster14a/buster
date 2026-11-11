@@ -286,6 +286,43 @@ static const CheckDriverDefaultWarningFixture check_driver_type_sugar_fixtures[]
         .warnings = 8,
     },
     {
+        // A compound literal's type name spells its value's type (#1812, check_input_token_type_spelling): through `&`, a
+        // decay, a member, -Wformat's and -Wsign-compare's operands.
+        .name = "compound literals' typedefs",
+        .source = "int printf(const char *, ...);\n"
+                  "typedef long L;\n"
+                  "typedef unsigned U;\n"
+                  "typedef struct P { int x; } P;\n"
+                  "typedef int A2[2];\n"
+                  "void f(int n)\n"
+                  "{\n"
+                  "    char *a = &(L){ 1 };\n"
+                  "    char *b = (A2){ 1, 2 };\n"
+                  "    int c = (P){ 1 };\n"
+                  "    char *d = &(const L){ 2 };\n"
+                  "    printf(\"%s %s\\n\", (L){ 3 }, (A2){ 0 });\n"
+                  "    if (n < (U){ 4 }) {}\n"
+                  "    char *e = (L[]){ 1, 2, 3 };\n"
+                  "    char *g = &(P){ 0 }.x;\n"
+                  "}\n",
+        .options = { "-Wsign-compare" },
+        .warnings = 3,
+        .errors = 6,
+    },
+    {
+        // GNU's array initialized by a compound literal of another array type: the literal's typedef as written.
+        .name = "an array literal's typedef in its mismatch",
+        .source = "typedef int A2[2];\n"
+                  "typedef const int CA[2];\n"
+                  "void f(void)\n"
+                  "{\n"
+                  "    int x[3] = (A2){1,2};\n"
+                  "    long y[2] = (A2){1,2};\n"
+                  "    int z[2] = (CA){1,2};\n"
+                  "}\n",
+        .errors = 3,
+    },
+    {
         // A null pointer constant argument's warning prints its parameter's type with the typedef the callee's declaration
         // writes (#1100, check_input_parameter_spelling): a function's, a function pointer object's (through `*`), its
         // typedef'd function type's and a member's own parameter list; a variadic argument has none.
@@ -313,6 +350,48 @@ static const CheckDriverDefaultWarningFixture check_driver_type_sugar_fixtures[]
                   "    return 0;\n"
                   "}\n",
         .warnings = 13,
+    },
+    {
+        // A conversion's target keeps the typedef its declaration writes (#1447): an enumeration conversion's parameter
+        // (check_input_call_parameter_spelling), and an initializer subobject's member or element, found by its offset
+        // from the initialized object (check_semantic_subobject_spelling), in -Wimplicit-enum-enum-cast and in a failed
+        // conversion's error alike.
+        .name = "parameter, member and element targets' typedefs",
+        .source = "enum E { A, B };\n"
+                  "enum F { X, Y };\n"
+                  "typedef enum E TE;\n"
+                  "typedef long L;\n"
+                  "typedef long *LP;\n"
+                  "struct S { TE te; L l; LP lp; };\n"
+                  "void take(TE e);\n"
+                  "TE arr[2];\n"
+                  "void f(enum F v, char *c)\n"
+                  "{\n"
+                  "    take(X);\n"
+                  "    take(v);\n"
+                  "    struct S s = { .te = X };\n"
+                  "    struct S t = { v };\n"
+                  "    s.te = v;\n"
+                  "    arr[0] = v;\n"
+                  "    TE local = v;\n"
+                  "    TE ls[2] = { v, X };\n"
+                  "    struct S w = { .lp = c };\n"
+                  "    struct S z = { 0, c };\n"
+                  "    L la[2] = { c };\n"
+                  "    LP lpa[2] = { 0, c };\n"
+                  "}\n"
+                  "struct In { TE e; LP p; };\n"
+                  "struct Out { int k; struct In in[2]; union { L ul; TE ue; } u; };\n"
+                  "void g(enum F v, char *c, struct S *ps)\n"
+                  "{\n"
+                  "    struct Out o = { 0, { { X, 0 }, { .e = v } }, { .ue = v } };\n"
+                  "    struct Out q = { 0, { { A, 0 }, { .p = c } } };\n"
+                  "    void (*fp)(int, TE) = 0;\n"
+                  "    fp(0, v);\n"
+                  "    (*fp)(1, X);\n"
+                  "}\n",
+        .warnings = 14,
+        .errors = 5,
     },
 };
 
@@ -387,6 +466,27 @@ static const CheckDriverDefaultWarningFixture check_driver_vla_bound_fixtures[] 
                   "}\n",
         .errors = 5,
         .notes = 1,
+    },
+    {
+        // A cast's builtin type keywords print as clang's TypePrinter spells the type (check_semantic_builtin_spelling):
+        // `(unsigned)n` is `(unsigned int)n`, `(long unsigned)n` `(unsigned long)n`, `(signed)1` `(int)1`.
+        .name = "cast type names in variable array bounds",
+        .source = "typedef long L;\n"
+                  "int printf(const char *, ...);\n"
+                  "int n;\n"
+                  "void f(void)\n"
+                  "{\n"
+                  "    int a[(unsigned)n];\n"
+                  "    int b[(long unsigned)n];\n"
+                  "    int c[(const short)n + (signed)1];\n"
+                  "    int d[(unsigned long long int)n];\n"
+                  "    int e[(L)n * (char)2];\n"
+                  "    int g[(int long)n];\n"
+                  "    int h[(unsigned char)n];\n"
+                  "    int i[(signed char)n + (short int)n];\n"
+                  "    a(); b(); c(); d(); e(); g(); h(); i();\n"
+                  "}\n",
+        .errors = 8,
     },
 };
 

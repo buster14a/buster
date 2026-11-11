@@ -318,6 +318,14 @@ static uint32_t check_common_operand_spelling(const Parser* parser, const CheckI
                     result = declaration != 0 && declaration != BUSTER_CHECK_NONE && declaration < input->token_count ?
                              check_input_typedef_sugar(input, parser, declaration) : 0;
                 }
+                else if (token < parser->tokens.count)
+                {
+                    // A compound literal's type name (#1812, check_input_token_type_spelling).
+                    const uint8_t role = parser->tree.roles[token];
+                    const bool compound = role == PARSE_ROLE_OPEN_COMPOUND || role == PARSE_ROLE_CLOSE_COMPOUND ||
+                                          role == PARSE_ROLE_OPEN_COMPOUND_BODY || role == PARSE_ROLE_CLOSE_COMPOUND_BODY;
+                    result = compound ? check_input_token_type_spelling(input, parser, token, false) : 0;
+                }
                 count -= 1;
             }
         }
@@ -798,6 +806,25 @@ static void check_common_report_unused(const Parser* parser, Preprocessor* pp, c
 {
     check_common_report_evaluated(parser, pp, input, token, check_common_function_boundary(parser, token), PP_DIAGNOSTIC_DEFERRED, id, false,
                                   message, notes, note_count, scratch);
+}
+
+// A comma's left operand's "has no effect", check_common_report_unused's. In a file-scope initializer clang's
+// DiagRuntimeBehavior queues it to the declarator's end, as it does a folded shift count's, in the order they are built
+// (#1943, check_driver_file_initializer_end): both are published there, ordered by their nodes' ends (`comma`'s), so
+// that a shift its operands hold comes first.
+static void check_common_report_comma_left(const Parser* parser, Preprocessor* pp, const CheckInput* input, uint32_t token, uint32_t comma,
+                                           Arena* scratch)
+{
+    const uint32_t boundary = check_common_function_boundary(parser, token);
+    const uint32_t declarator = boundary == token ? check_driver_file_initializer_end(parser, input, token) : BUSTER_CHECK_NONE;
+    const PPDiagnosticRecord* previous = pp->diagnostic_last;
+    check_common_report_evaluated(parser, pp, input, token, declarator != BUSTER_CHECK_NONE ? declarator : boundary,
+                                  declarator != BUSTER_CHECK_NONE ? PP_DIAGNOSTIC_RUNTIME : PP_DIAGNOSTIC_DEFERRED, CHECK_WARNING_ID_UNUSED_VALUE, false,
+                                  "left operand of comma operator has no effect", NULL, 0, scratch);
+    if (declarator != BUSTER_CHECK_NONE && comma < input->graph.count && input->graph.source_positions != NULL)
+    {
+        pp_diagnostic_suborder(pp, previous, (uint64_t)input->graph.source_positions[comma] + 1);
+    }
 }
 
 // The deferred publication an expression warning gets inside a function: every unused-result, bounds,
@@ -2101,20 +2128,38 @@ static uint32_t check_common_enum_cast_location(const Parser* parser, const Chec
     return operator || binary || role == PARSE_ROLE_POSTFIX ? token : role == PARSE_ROLE_MEMBER_OPERATOR && token + 1 < parser->tokens.count ? token + 1 : first;
 }
 
+// Where an enumeration conversion's target is spelled (#1447): its conversion node (`conversion`, BUSTER_CHECK_NONE for
+// none), else a call's argument (`call` and `argument`, check_input_call_parameter_spelling), else an initializer's
+// subobject (`object`, nonzero, declared at `declaration`, `offset` bits in, check_semantic_subobject_spelling).
+typedef struct CheckCommonEnumTarget CheckCommonEnumTarget;
+struct CheckCommonEnumTarget
+{
+    uint32_t conversion;
+    uint32_t call;
+    uint32_t argument;
+    TypeId object;
+    uint32_t declaration;
+    uint64_t offset;
+};
+
 // The target's typedef as written (clang's sugar) for the conversion node `conversion` (BUSTER_CHECK_NONE for none): an
 // assignment's left operand's, an initializer's declaration's (its `=` reads the specifiers back) or a return's
-// function's. Only a warning reads it: the function's search is a scan of the unit's bodies.
+// function's; a call argument's parameter's or an initializer subobject's otherwise (CheckCommonEnumTarget). Only a
+// warning reads it: the function's search is a scan of the unit's bodies.
 static uint32_t check_common_enum_cast_spelling(const Parser* parser, const CheckInput* input, const CheckStream* stream, const TypeTable* types,
-                                                uint32_t conversion)
+                                                const CheckCommonEnumTarget* place, TypeId target)
 {
     const CheckGraph* graph = &input->graph;
+    const uint32_t conversion = place->conversion;
     const CheckOp op = conversion < graph->count ? graph->ops[conversion] : CHECK_OP_COUNT;
     const uint32_t token = conversion < graph->count ? graph->tokens[conversion] : BUSTER_CHECK_NONE;
     const bool returned = op == CHECK_OP_CONVERT && token < parser->tokens.count && parser->tokens.kinds[token] == PARSE_KIND_RETURN;
     const uint32_t function = returned ? check_semantic_function(parser, input, token) : BUSTER_CHECK_NONE;
     return op == CHECK_OP_ASSIGN ? check_common_operand_spelling(parser, input, graph, stream, types, graph->operand0[conversion]) :
            op == CHECK_OP_INITIALIZE ? check_input_typedef_spelling(input, parser, token) :
-           function < input->token_count ? check_input_typedef_spelling(input, parser, function) : 0;
+           function < input->token_count ? check_input_typedef_spelling(input, parser, function) :
+           place->call < graph->count ? check_input_call_parameter_spelling(parser, input, stream, types, place->call, place->argument) :
+           place->object != 0 ? check_semantic_subobject_spelling(parser, input, types, place->object, place->declaration, place->offset, target) : 0;
 }
 
 // Clang's conversion between different enumerations (#1447, CheckImplicitConversion's last case): `source`'s implicit
@@ -2123,8 +2168,8 @@ static uint32_t check_common_enum_cast_spelling(const Parser* parser, const Chec
 // (check_common_enum_coerced), is a named enumeration other than the target's named one. It is a plain Diag, published
 // as the full expression completes.
 static __attribute__((noinline)) void check_common_enum_cast(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, TypeTable* types,
-                                   CheckWarningSpelling* spell, uint32_t source, TypeId target, uint32_t conversion, bool arm, const uint32_t* parents,
-                                   uint32_t at_once, Arena* scratch)
+                                   CheckWarningSpelling* spell, uint32_t source, TypeId target, const CheckCommonEnumTarget* place, bool arm,
+                                   const uint32_t* parents, uint32_t at_once, Arena* scratch)
 {
     const CheckGraph* graph = &input->graph;
     const TypeId target_enum = type_unqualified(type_strip_aligned(types, target));
@@ -2159,7 +2204,7 @@ static __attribute__((noinline)) void check_common_enum_cast(const Parser* parse
         if (converts && !rendered)
         {
             rendered = true;
-            const uint32_t target_spelling = check_common_enum_cast_spelling(parser, input, stream, types, conversion);
+            const uint32_t target_spelling = check_common_enum_cast_spelling(parser, input, stream, types, place, target);
             target_name = check_driver_warning_type(parser, pp, input, types, spell, scratch, target, target_spelling);
             const String8 target_plain = check_driver_warning_type(parser, pp, input, types, spell, scratch, target_enum, 0);
             // (An unnamed target warns of nothing.)
@@ -2215,8 +2260,13 @@ static void check_common_call_argument(CheckCommonEmission* emission, uint32_t i
             check_common_enum_cast_candidate(emission->input->enum_names, emission->parser, graph, stream, emission->types, argument, conversion.type) &&
             !conditional)
         {
-            check_common_enum_cast(emission->parser, emission->pp, emission->input, stream, emission->types, emission->spell, argument, conversion.type, BUSTER_CHECK_NONE, false,
-                                   emission->parents, emission->at_once, emission->scratch);
+            // (Its parameter's typedef, #1447: the argument's parent is its CALL node.)
+            const uint32_t parent = emission->parents != NULL ? emission->parents[argument] : BUSTER_CHECK_NONE;
+            const uint32_t call = parent < graph->count && graph->ops[parent] == CHECK_OP_CALL && index >= graph->argument_offsets[parent] ? parent : BUSTER_CHECK_NONE;
+            const CheckCommonEnumTarget place = { .conversion = BUSTER_CHECK_NONE, .call = call,
+                                                  .argument = call != BUSTER_CHECK_NONE ? index - graph->argument_offsets[call] : 0 };
+            check_common_enum_cast(emission->parser, emission->pp, emission->input, stream, emission->types, emission->spell, argument, conversion.type, &place,
+                                   false, emission->parents, emission->at_once, emission->scratch);
         }
         if (argument < graph->count && (conversion.flags & BUSTER_CHECK_CONVERT_ASSIGNMENT) != 0 && !check_common_query_suppressed(graph, argument) &&
             (conversion.flags & (BUSTER_CHECK_CONVERT_CAST | BUSTER_CHECK_CONVERT_ATOMIC)) == 0 &&
@@ -2384,8 +2434,9 @@ static void check_common_conversion_own(CheckCommonEmission* emission, uint32_t 
             check_common_enum_cast_candidate(emission->input->enum_names, emission->parser, graph, stream, emission->types, source, check_stream_type(stream, node)) &&
             graph->ops[check_common_enum_cast_unselected(graph, source)] != CHECK_OP_CONDITIONAL)
         {
+            const CheckCommonEnumTarget place = { .conversion = node, .call = BUSTER_CHECK_NONE };
             check_common_enum_cast(emission->parser, emission->pp, emission->input, stream, emission->types, emission->spell, source,
-                                   check_stream_type(stream, node), node, false, emission->parents, emission->at_once, emission->scratch);
+                                   check_stream_type(stream, node), &place, false, emission->parents, emission->at_once, emission->scratch);
         }
         // (A conditional source's arms report in their own frames: check_common_constant_arms.)
         if (!bitfield && source < graph->count && (flags & BUSTER_CHECK_CONVERT_ASSIGNMENT) != 0 && (flags & BUSTER_CHECK_CONVERT_CAST) == 0 &&
@@ -2887,15 +2938,13 @@ static void check_common_comma_marker(CheckCommonEmission* emission, uint32_t no
                 }
                 else
                 {
-                    check_common_report_unused(parser, pp, input, cast != BUSTER_CHECK_NONE ? cast : report, CHECK_WARNING_ID_UNUSED_VALUE,
-                                               "left operand of comma operator has no effect", NULL, 0, scratch);
+                    check_common_report_comma_left(parser, pp, input, cast != BUSTER_CHECK_NONE ? cast : report, node, scratch);
                 }
             }
         }
         else
         {
-            check_common_report_unused(parser, pp, input, report, CHECK_WARNING_ID_UNUSED_VALUE,
-                                       "left operand of comma operator has no effect", NULL, 0, scratch);
+            check_common_report_comma_left(parser, pp, input, report, node, scratch);
         }
     }
 }
@@ -3171,9 +3220,9 @@ static void check_common_emit_run(CheckCommonEmission* emission)
                     if (check_common_enum_cast_arms(emission, owner) != BUSTER_CHECK_NONE)
                     {
                         // (An argument's target has no typedef spelling here, as check_common_call_argument's had none.)
+                        const CheckCommonEnumTarget place = { .conversion = check_common_arm_argument(owner) ? BUSTER_CHECK_NONE : owner, .call = BUSTER_CHECK_NONE };
                         check_common_enum_cast(emission->parser, emission->pp, emission->input, emission->stream, emission->types, emission->spell, node,
-                                               target, check_common_arm_argument(owner) ? BUSTER_CHECK_NONE : owner, true, emission->parents, emission->at_once,
-                                               emission->scratch);
+                                               target, &place, true, emission->parents, emission->at_once, emission->scratch);
                     }
                 }
                 break;
@@ -3650,6 +3699,27 @@ static bool check_common_bitwise_precedence(const Parser* parser, uint32_t compa
     return result;
 }
 
+// The token past the binary operator `op`'s right operand, its subtree's last token's next: the tokens after it that climb
+// to it are its right operand's. Only a warning asks, so the climbs' cost is a warning's.
+static uint32_t check_common_operand_end(const Parser* parser, uint32_t op)
+{
+    const uint32_t count = parser->tokens.count;
+    uint32_t end = op < count ? op + 1 : count;
+    bool inside = true;
+    while (inside && end < count)
+    {
+        uint32_t at = end;
+        for (uint32_t steps = 0; at < count && at != op && steps < count; steps += 1)
+        {
+            const uint32_t up = parser->tree.parents[at];
+            at = up != at ? up : count;
+        }
+        inside = at == op;
+        end += inside ? 1u : 0u;
+    }
+    return end;
+}
+
 static void check_common_parentheses(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, const TypeTable* types,
                                      Arena* scratch)
 {
@@ -3676,8 +3746,10 @@ static void check_common_parentheses(const Parser* parser, Preprocessor* pp, con
                 { token, "place parentheses around the assignment to silence this warning" },
                 { token, "use '==' to turn this assignment into an equality comparison" },
             };
-            check_common_report(parser, pp, input, token, CHECK_WARNING_ID_PARENTHESES, false,
-                                "using the result of an assignment as a condition without parentheses", notes, 2, scratch);
+            // Clang checks the condition once it is whole (CheckBooleanCondition): after the diagnostics its operands gave as
+            // they were built, a call's format or a statement expression's own (#1941), so published at its `)` or `;`.
+            check_common_report_at(parser, pp, input, token, parent, CHECK_WARNING_ID_PARENTHESES, false,
+                                   "using the result of an assignment as a condition without parentheses", notes, 2, scratch);
         }
         else if (parent_role == PARSE_ROLE_BITWISE_AND || parent_role == PARSE_ROLE_BITWISE_OR || parent_role == PARSE_ROLE_BITWISE_XOR)
         {
@@ -3690,7 +3762,9 @@ static void check_common_parentheses(const Parser* parser, Preprocessor* pp, con
                     { parent, check_warning_text(scratch, "place parentheses around the '%s' expression to silence this warning", upper) },
                     { parent, check_warning_text(scratch, "place parentheses around the %s expression to evaluate it first", lower) },
                 };
-                check_common_report(parser, pp, input, parent, CHECK_WARNING_ID_PARENTHESES, false, message, notes, 2, scratch);
+                // Clang warns as it builds the bitwise operator, after its right operand's own diagnostics (#1941).
+                check_common_report_at(parser, pp, input, parent, check_common_operand_end(parser, parent), CHECK_WARNING_ID_PARENTHESES, false, message,
+                                       notes, 2, scratch);
             }
         }
         else if (role == PARSE_ROLE_PREFIX && parser->tokens.kinds[token] == PARSE_KIND_EXCLAIM && check_common_comparison_role(parent_role) && token < parent)
@@ -3699,8 +3773,9 @@ static void check_common_parentheses(const Parser* parser, Preprocessor* pp, con
                 { token, "add parentheses after the '!' to evaluate the comparison first" },
                 { token, "add parentheses around left hand side expression to silence this warning" },
             };
-            check_common_report(parser, pp, input, token, CHECK_WARNING_ID_LOGICAL_NOT_PARENTHESES, false,
-                                "logical not is only applied to the left hand side of this comparison", notes, 2, scratch);
+            // Clang warns as it builds the comparison, after its right operand's own diagnostics (#1941).
+            check_common_report_at(parser, pp, input, token, check_common_operand_end(parser, parent), CHECK_WARNING_ID_LOGICAL_NOT_PARENTHESES, false,
+                                   "logical not is only applied to the left hand side of this comparison", notes, 2, scratch);
         }
         else if ((role == PARSE_ROLE_EQUALITY || role == PARSE_ROLE_RELATIONAL) &&
                  parent < parser->tokens.count && parser->tree.roles[parent] == PARSE_ROLE_TERMINATOR &&
@@ -5256,7 +5331,7 @@ static uint32_t check_common_next_unevaluated(const uint8_t* evaluated, uint32_t
 }
 
 // One brace initializer's literal conversions (check_common_initializer_roots' plan `index`), its parts in reverse
-// initializer order, each part's target conversion, then its nested ones, then the part's own root walk.
+// initializer order, each part's target conversion, then its nested ones; then the parts' own root walks, in order.
 static void check_common_initializer_conversions(CheckCommonEmission* emission, const CheckProgram* program, uint32_t index)
 {
     const Parser* parser = emission->parser;
@@ -5300,7 +5375,10 @@ static void check_common_initializer_conversions(CheckCommonEmission* emission, 
             const bool atomic = (part->conversion.flags & BUSTER_CHECK_CONVERT_ATOMIC) != 0;
             if (!atomic && check_common_enum_cast_candidate(input->enum_names, parser, graph, stream, emission->types, root, part->conversion.type))
             {
-                check_common_enum_cast(parser, pp, input, stream, emission->types, emission->spell, root, part->conversion.type, BUSTER_CHECK_NONE, false, emission->parents,
+                // (Its member's or element's typedef, #1447.)
+                const CheckCommonEnumTarget place = { .conversion = BUSTER_CHECK_NONE, .call = BUSTER_CHECK_NONE, .object = plan->type,
+                                                      .declaration = declaration, .offset = part->bit_offset };
+                check_common_enum_cast(parser, pp, input, stream, emission->types, emission->spell, root, part->conversion.type, &place, false, emission->parents,
                                        emission->at_once, emission->scratch);
             }
             if (!atomic && !check_common_query_suppressed(graph, root) && check_common_initializer_literal(parser, input, stream, emission->types, part))
@@ -5316,10 +5394,19 @@ static void check_common_initializer_conversions(CheckCommonEmission* emission, 
             // the conversion visit bit prevents the later parent walk from reporting them again.
             check_common_emit_push(emission, root, BUSTER_CHECK_EMIT_CONVERSIONS);
             check_common_emit_run(emission);
-            if (emission->parents[root] == BUSTER_CHECK_NONE && (emission->emitted[root] & BUSTER_CHECK_EMITTED_TREE) == 0)
-            {
-                check_common_emit_root(emission, root);
-            }
+        }
+    }
+    // The parts' own root walks, in initializer order (#1943): clang queues their runtime warnings (a comma's left operand,
+    // a shift count) as it parses each value, before the list's checks.
+    for (uint32_t p = 0; p < plan->count && !pp->fatal; p += 1)
+    {
+        const CheckInitPart* part = plan->parts + p;
+        const uint32_t root = part->node;
+        if (part->kind == CHECK_INIT_VALUE && root < graph->count && stream->diagnostics[root] == CHECK_DIAG_NONE &&
+            (evaluated == NULL || evaluated[root] != 0 || (emission->emitted[root] & BUSTER_CHECK_EMITTED_LITERAL_CONTEXT) != 0) &&
+            emission->parents[root] == BUSTER_CHECK_NONE && (emission->emitted[root] & BUSTER_CHECK_EMITTED_TREE) == 0)
+        {
+            check_common_emit_root(emission, root);
         }
     }
     emission->at_once = BUSTER_CHECK_NONE;
@@ -6173,7 +6260,8 @@ static uint32_t check_common_argument_start(const Parser* parser, uint32_t token
 {
     uint32_t result = token;
     uint32_t depth = 0;
-    for (uint32_t at = token; at < parser->tokens.count && at-- > 0;)
+    // (From the node's token itself: a call's is its `)`, whose arguments' commas are no argument's end, #1941.)
+    for (uint32_t at = token < parser->tokens.count ? token + 1 : 0; at-- > 0;)
     {
         const uint8_t kind = parser->tokens.kinds[at];
         if (kind == PARSE_KIND_R_PAREN)
@@ -6528,7 +6616,9 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
             {
                 check_common_exhausted(pp);
             }
-            uint32_t order = 0;
+            // Clang checks the format as it builds the call, once its arguments are: after the diagnostics they gave as they
+            // were built, a statement expression's own or a nested call's (#1941), so published from the call's `)` on.
+            uint32_t order = graph->tokens[node] < parser->tokens.count ? parser->tokens.sources[graph->tokens[node]] : 0;
             uint32_t max_uncovered = BUSTER_CHECK_NONE;
             bool all_covered = false;
             bool nonliteral_leaf = false;
