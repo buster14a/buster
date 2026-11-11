@@ -9797,6 +9797,12 @@ enables, which this checker doesn't all give.
   A variable array prints its size expression as written, with expression
   spacing (`check_driver_vla_bounds`): `'int (*)[n + 1]'`, `'int[n][m * 2]'`.
   `c_check_type_sugar_driver_test.c` compares these whole-output with clang.
+- A failed static assertion's requirement prints a character constant by its
+  value, as clang's `CharacterLiteral::print` does (#1999,
+  `check_semantic_character`): its prefix; `\'`, `\\` and the control
+  characters' C escapes; else, with an ordinary constant's sign extension of a
+  byte taken off, a printable byte as itself, `\xNN` below 256, `\uNNNN` to
+  0xFFFF and `\UNNNNNNNN` past it (`'ab'` is `'\u6162'`).
 - **Differences left.**
   - A cast inside a variable array's bound prints its builtin type keywords
     as clang's TypePrinter does (`int[(unsigned)n]` is `'int[(unsigned int)n]'`,
