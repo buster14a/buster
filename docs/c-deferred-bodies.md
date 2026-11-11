@@ -290,6 +290,8 @@ source order, said with the reason:
   #1447, is merged: see "Semantic error recovery" in
   [c-checker.md](c-checker.md));
 - the unit has overloadable functions, whose sets later declarations join;
+- the unit has a function multiversioned by target strings (#1838), whose rules
+  ask whether a body used it before a later declaration;
 - a body's declaration with linkage (`extern`, a function at block scope)
   that changes what later declarations see (below): its entity's first
   declaration, one that changes the entity's type, or one unlike the linked

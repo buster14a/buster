@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// Selector tests: identical scalar/vector table covers, independent maximal munch, exact effective-use handoff,
-// target/form validation,
-// and native execution against independent C arithmetic. Emitted functions execute in a child, so a bad instruction
-// or address is a test failure. No arbitrary external IR or machine code is executed.
+// Selector tests: identical scalar/vector table covers, independent maximal munch, exact effective-use handoff and
+// target/form validation. Native execution against independent C arithmetic runs in a child; a bad instruction or
+// address fails the test. The backend unit owns these fixtures. The bottom-up rewrite's common checks stay at their
+// original include point for the checker's code-certificate corpus. No arbitrary external IR or machine code runs.
 
 #include <stdio.h>
 #include <inttypes.h>
@@ -12,7 +12,7 @@
 #include <sys/mman.h>
 #include <sys/wait.h>
 #include <unistd.h>
-
+#if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 typedef struct Tier1SelectTest Tier1SelectTest;
 struct Tier1SelectTest
 {
@@ -5244,8 +5244,10 @@ static void tier1_select_test_walks(Tier1SelectTest* test)
 }
 
 #include "buster/compiler/tier1_compare_memory_test.c"
+#endif
 #include "buster/compiler/tier1_select_burs_test.c"
 
+#if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 static int run_tier1_select_tests(int argc, char** argv)
 {
     int result = 1;
@@ -5358,3 +5360,4 @@ static int run_tier1_select_tests(int argc, char** argv)
     }
     return result;
 }
+#endif
