@@ -179,6 +179,10 @@ static __attribute__((unused)) CBuiltinLibraryFold cbuiltin_library_fold(CBuilti
 // builtin (its name a builtin of the unit, external, of the row's prototype: Sema's BuiltinAttr), folds as __builtin_X's
 // does (c_check_builtin_library.c's check_builtin_library_fold_plain). memchr, strchr, wcschr and wmemchr fold to
 // pointers, which the code calls instead, and memcpy, memmove, wmemcpy and wmemmove in C++'s constant evaluation alone.
+// Past them, the plain builtins that don't fold (no E: CBUILTIN_LIBRARY_FOLD_NONE) but whose call clang -O0's code
+// computes inline (#967): fmax, fmin, fmaximum_num and fminimum_num of float and double, llvm.maxnum's, minnum's,
+// maximumnum's and minimumnum's, which the lowering computes as __builtin_X's (`library`, their library builtin, and
+// CBUILTIN_LIBRARY_COUNT for the folds').
 typedef struct CBuiltinLibraryPlainFold CBuiltinLibraryPlainFold;
 struct CBuiltinLibraryPlainFold
 {
@@ -186,19 +190,28 @@ struct CBuiltinLibraryPlainFold
     const char* prototype;
     CBuiltinLibraryFold fold;
     bool wide;
+    CBuiltinLibraryId library;
 };
 
 static const CBuiltinLibraryPlainFold cbuiltin_library_plain_folds[] __attribute__((unused)) =
 {
-    { "bcmp", "ivC*vC*z", CBUILTIN_LIBRARY_FOLD_COMPARE_MEMORY, false },
-    { "memcmp", "ivC*vC*z", CBUILTIN_LIBRARY_FOLD_COMPARE_MEMORY, false },
-    { "strcmp", "icC*cC*", CBUILTIN_LIBRARY_FOLD_COMPARE, false },
-    { "strlen", "zcC*", CBUILTIN_LIBRARY_FOLD_LENGTH, false },
-    { "strncmp", "icC*cC*z", CBUILTIN_LIBRARY_FOLD_COMPARE_BOUNDED, false },
-    { "wcscmp", "iwC*wC*", CBUILTIN_LIBRARY_FOLD_COMPARE, true },
-    { "wcslen", "zwC*", CBUILTIN_LIBRARY_FOLD_LENGTH, true },
-    { "wcsncmp", "iwC*wC*z", CBUILTIN_LIBRARY_FOLD_COMPARE_BOUNDED, true },
-    { "wmemcmp", "iwC*wC*z", CBUILTIN_LIBRARY_FOLD_COMPARE_MEMORY, true },
+    { "bcmp", "ivC*vC*z", CBUILTIN_LIBRARY_FOLD_COMPARE_MEMORY, false, CBUILTIN_LIBRARY_COUNT },
+    { "memcmp", "ivC*vC*z", CBUILTIN_LIBRARY_FOLD_COMPARE_MEMORY, false, CBUILTIN_LIBRARY_COUNT },
+    { "strcmp", "icC*cC*", CBUILTIN_LIBRARY_FOLD_COMPARE, false, CBUILTIN_LIBRARY_COUNT },
+    { "strlen", "zcC*", CBUILTIN_LIBRARY_FOLD_LENGTH, false, CBUILTIN_LIBRARY_COUNT },
+    { "strncmp", "icC*cC*z", CBUILTIN_LIBRARY_FOLD_COMPARE_BOUNDED, false, CBUILTIN_LIBRARY_COUNT },
+    { "wcscmp", "iwC*wC*", CBUILTIN_LIBRARY_FOLD_COMPARE, true, CBUILTIN_LIBRARY_COUNT },
+    { "wcslen", "zwC*", CBUILTIN_LIBRARY_FOLD_LENGTH, true, CBUILTIN_LIBRARY_COUNT },
+    { "wcsncmp", "iwC*wC*z", CBUILTIN_LIBRARY_FOLD_COMPARE_BOUNDED, true, CBUILTIN_LIBRARY_COUNT },
+    { "wmemcmp", "iwC*wC*z", CBUILTIN_LIBRARY_FOLD_COMPARE_MEMORY, true, CBUILTIN_LIBRARY_COUNT },
+    { "fmax", "ddd", CBUILTIN_LIBRARY_FOLD_NONE, false, CBUILTIN_LIBRARY_FMAX },
+    { "fmaxf", "fff", CBUILTIN_LIBRARY_FOLD_NONE, false, CBUILTIN_LIBRARY_FMAXF },
+    { "fmin", "ddd", CBUILTIN_LIBRARY_FOLD_NONE, false, CBUILTIN_LIBRARY_FMIN },
+    { "fminf", "fff", CBUILTIN_LIBRARY_FOLD_NONE, false, CBUILTIN_LIBRARY_FMINF },
+    { "fmaximum_num", "ddd", CBUILTIN_LIBRARY_FOLD_NONE, false, CBUILTIN_LIBRARY_FMAXIMUM_NUM },
+    { "fmaximum_numf", "fff", CBUILTIN_LIBRARY_FOLD_NONE, false, CBUILTIN_LIBRARY_FMAXIMUM_NUMF },
+    { "fminimum_num", "ddd", CBUILTIN_LIBRARY_FOLD_NONE, false, CBUILTIN_LIBRARY_FMINIMUM_NUM },
+    { "fminimum_numf", "fff", CBUILTIN_LIBRARY_FOLD_NONE, false, CBUILTIN_LIBRARY_FMINIMUM_NUMF },
 };
 
 #define BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS ((uint32_t)(sizeof(cbuiltin_library_plain_folds) / sizeof(cbuiltin_library_plain_folds[0])))
@@ -378,6 +391,15 @@ static void cbuiltin_library_append(CBuiltinLibraryText* text, const char* bytes
 static bool cbuiltin_library_spell_type(const char* encoding, uint32_t length, uint32_t* position, bool sugared, bool* sized, CBuiltinLibraryText* text)
 {
     uint32_t at = *position;
+    // A vector's lanes (`V8s`: eight shorts), spelled as clang's TypePrinter spells a vector_size type.
+    uint32_t lanes = 0;
+    const bool vector = at < length && encoding[at] == 'V';
+    at += vector;
+    while (vector && at < length && encoding[at] >= '0' && encoding[at] <= '9' && lanes < 100000)
+    {
+        lanes = lanes * 10u + (uint32_t)(encoding[at] - '0');
+        at += 1;
+    }
     uint32_t longs = 0;
     bool is_unsigned = false;
     bool complex = false;
@@ -428,6 +450,16 @@ static bool cbuiltin_library_spell_type(const char* encoding, uint32_t length, u
     {
         cbuiltin_library_append(text, "_Complex ");
     }
+    if (vector && base != NULL)
+    {
+        char size[32];
+        snprintf(size, sizeof(size), "%u", lanes);
+        cbuiltin_library_append(text, "__attribute__((__vector_size__(");
+        cbuiltin_library_append(text, size);
+        cbuiltin_library_append(text, " * sizeof(");
+        cbuiltin_library_append(text, base);
+        cbuiltin_library_append(text, ")))) ");
+    }
     cbuiltin_library_append(text, base != NULL ? base : "");
     while (at < length && (encoding[at] == '*' || encoding[at] == 'C' || encoding[at] == 'R'))
     {
@@ -437,7 +469,7 @@ static bool cbuiltin_library_spell_type(const char* encoding, uint32_t length, u
         at += 1;
     }
     *position = at;
-    return base != NULL;
+    return base != NULL && (!vector || (lanes != 0 && !constant && !complex));
 }
 
 // A plain library builtin's prototype, from its row's encoding and attributes (`r` noreturn), as clang's diagnostics
@@ -511,19 +543,22 @@ static __attribute__((unused)) bool cbuiltin_library_nonnull(const char* attribu
 // says), with " _Nonnull" where its row's N attribute lists it and `sugared` says. Into `buffer` of `capacity` bytes,
 // NUL-terminated. False where it and the parameters before it aren't spelled so, or it doesn't fit.
 static __attribute__((unused)) bool cbuiltin_library_spell_parameter(const char* encoding, uint32_t length, const char* attributes, uint32_t attributes_length,
-                                                                     uint32_t index, bool sugared, bool c99, char* buffer, uint32_t capacity, bool* sized)
+                                                                     uint32_t index, bool sugared, bool c99, const CBuiltinLibraryNamed* named, char* buffer,
+                                                                     uint32_t capacity, bool* sized)
 {
-    char skipped[128];
+    char skipped[256];
     CBuiltinLibraryText skip = {
         .bytes = skipped,
         .capacity = sizeof(skipped),
         .restrict_spelling = "restrict",
+        .named = named,
     };
     CBuiltinLibraryText text = {
         .bytes = buffer,
         .capacity = capacity,
         .full = capacity == 0,
         .restrict_spelling = c99 ? "restrict" : "__restrict",
+        .named = named,
     };
     uint32_t position = 0;
     bool ignored = false;
@@ -541,6 +576,43 @@ static __attribute__((unused)) bool cbuiltin_library_spell_parameter(const char*
         cbuiltin_library_append(&text, " _Nonnull");
     }
     return valid && !text.full;
+}
+
+// clang's description after a vector parameter's spelling (#1447, diagnose_as_builtin's error of mismatched types): the
+// `index`th (from 0) of `encoding`'s parameters, where it is a vector and no pointer, as "(vector of 8 'short' values)",
+// into `buffer` of `capacity` bytes. False where it isn't one, or it doesn't fit.
+static __attribute__((unused)) bool cbuiltin_library_vector_description(const char* encoding, uint32_t length, uint32_t index, char* buffer, uint32_t capacity)
+{
+    char skipped[256];
+    CBuiltinLibraryText skip = {
+        .bytes = skipped,
+        .capacity = sizeof(skipped),
+        .restrict_spelling = "restrict",
+    };
+    uint32_t position = 0;
+    bool ignored = false;
+    bool valid = cbuiltin_library_spell_type(encoding, length, &position, true, &ignored, &skip);
+    for (uint32_t i = 0; valid && i < index; i += 1)
+    {
+        skip.length = 0;
+        skip.full = false;
+        valid = position < length && encoding[position] != '.' && cbuiltin_library_spell_type(encoding, length, &position, true, &ignored, &skip);
+    }
+    const uint32_t start = position;
+    skip.length = 0;
+    skip.full = false;
+    valid = valid && position < length && encoding[position] == 'V' && cbuiltin_library_spell_type(encoding, length, &position, true, &ignored, &skip);
+    // The element's spelling follows the attribute's, and no pointer follows it.
+    const char* close = valid ? memchr(skipped, ')', skip.length) : NULL;
+    const char* element = close != NULL && skip.length > 5 ? strstr(skipped, ")))) ") : NULL;
+    valid = valid && !skip.full && element != NULL && skipped[skip.length - 1] != '*';
+    uint32_t lanes = 0;
+    for (uint32_t at = start + 1; valid && at < length && encoding[at] >= '0' && encoding[at] <= '9'; at += 1)
+    {
+        lanes = lanes * 10u + (uint32_t)(encoding[at] - '0');
+    }
+    const int written = valid ? snprintf(buffer, capacity, "(vector of %u '%.*s' values)", lanes, (int)(skip.length - (uint32_t)(element + 5 - skipped)), element + 5) : -1;
+    return valid && written > 0 && (uint32_t)written < capacity;
 }
 
 // The header that clang's note names for a row's header token (Builtins::getHeaderName), NULL for NO_HEADER or a token

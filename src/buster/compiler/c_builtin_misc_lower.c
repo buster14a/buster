@@ -48,12 +48,13 @@ struct CBuiltinMiscLowerCall
     uint32_t result_object;
     // Optional primitive machine rows for a bit recipe, selected by the producer from this function's target.
     CBuiltinBitsRows bit_rows;
-    // __builtin_clear_padding's stores (c_check_program_lower.c's check_lower_padding): each a byte offset << 32, its
+    // __builtin_clear_padding's stores (c_check_program_padding.c's check_lower_padding_entries): each a byte offset << 32, its
     // bytes << 8 and the mask of the bits it keeps (0 for a run of zeros, else one byte's AND).
     const uint64_t* padding;
     uint32_t padding_count;
     // Its elements, through arrays of arrays, each of padding_stride bytes, which a loop clears in turn (none for a variable
-    // length array's), or 1.
+    // length array's), or 1. With a second argument, the address of a table of the entries' 8 bytes each, which a loop reads
+    // (cbuiltin_misc_lower_padding_table) in place of the stores made one by one.
     uint64_t padding_elements;
     uint64_t padding_stride;
 };
@@ -615,13 +616,97 @@ static void cbuiltin_misc_lower_padding_stores(CBuiltinLowerRecipe* recipe, cons
     }
 }
 
+// An element's stores at `base`, from the table of its entries at the second argument (the entries' encoding, in 8
+// bytes each): for each, a byte's load ANDed with its mask, or a run of zeros stored 8 bytes, then 1, at a time.
+static void cbuiltin_misc_lower_padding_table(CBuiltinLowerRecipe* recipe, const CBuiltinMiscLowerCall* call, uint32_t base, uint32_t first)
+{
+    const uint32_t entry = cbuiltin_lower_temporary(recipe);
+    const uint32_t end = cbuiltin_lower_temporary(recipe);
+    const uint32_t value = cbuiltin_lower_temporary(recipe);
+    const uint32_t address = cbuiltin_lower_temporary(recipe);
+    const uint32_t bytes = cbuiltin_lower_temporary(recipe);
+    cbuiltin_lower_local(recipe, call->arguments[1]);
+    cbuiltin_lower_set(recipe, entry);
+    cbuiltin_lower_immediate(recipe, end, BUSTER_TYPED_ADD, call->arguments[1], (uint64_t)call->padding_count * 8);
+    const uint32_t head = first + recipe->count;
+    cbuiltin_lower_local(recipe, entry);
+    cbuiltin_lower_local(recipe, end);
+    cbuiltin_lower_operation(recipe, BUSTER_TYPED_LT);
+    const uint32_t done = cbuiltin_misc_lower_branch(recipe, BUSTER_TYPED_BRANCH_FALSE);
+    cbuiltin_lower_local(recipe, entry);
+    cbuiltin_lower_emit(recipe, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_U64, 0);
+    cbuiltin_lower_set(recipe, value);
+    cbuiltin_lower_immediate(recipe, address, BUSTER_TYPED_SHR, value, 32);
+    cbuiltin_misc_lower_address(recipe, base, address);
+    cbuiltin_lower_set(recipe, address);
+    cbuiltin_lower_immediate(recipe, bytes, BUSTER_TYPED_SHR, value, 8);
+    cbuiltin_lower_immediate(recipe, bytes, BUSTER_TYPED_AND, bytes, 0xffffff);
+    cbuiltin_lower_immediate(recipe, value, BUSTER_TYPED_AND, value, 0xff);
+    cbuiltin_lower_local(recipe, value);
+    cbuiltin_lower_constant(recipe, 0);
+    cbuiltin_lower_operation(recipe, BUSTER_TYPED_EQ);
+    const uint32_t zeros = cbuiltin_misc_lower_branch(recipe, BUSTER_TYPED_BRANCH_TRUE);
+    cbuiltin_lower_local(recipe, address);
+    cbuiltin_lower_local(recipe, address);
+    cbuiltin_lower_emit(recipe, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_U8, 0);
+    cbuiltin_lower_emit(recipe, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U64, 0);
+    cbuiltin_lower_local(recipe, value);
+    cbuiltin_lower_operation(recipe, BUSTER_TYPED_AND);
+    cbuiltin_lower_emit(recipe, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U8, 0);
+    cbuiltin_lower_emit(recipe, BUSTER_TYPED_SET, BUSTER_TYPED_CLASS_U8, 0);
+    const uint32_t masked = cbuiltin_misc_lower_branch(recipe, BUSTER_TYPED_JUMP);
+    cbuiltin_misc_lower_patch(recipe, zeros, first);
+    const uint32_t words = first + recipe->count;
+    cbuiltin_lower_local(recipe, bytes);
+    cbuiltin_lower_constant(recipe, 8);
+    cbuiltin_lower_operation(recipe, BUSTER_TYPED_GE);
+    const uint32_t tail = cbuiltin_misc_lower_branch(recipe, BUSTER_TYPED_BRANCH_FALSE);
+    cbuiltin_lower_local(recipe, address);
+    cbuiltin_lower_constant(recipe, 0);
+    cbuiltin_lower_emit(recipe, BUSTER_TYPED_SET, BUSTER_TYPED_CLASS_U64, 0);
+    cbuiltin_lower_immediate(recipe, address, BUSTER_TYPED_ADD, address, 8);
+    cbuiltin_lower_immediate(recipe, bytes, BUSTER_TYPED_SUB, bytes, 8);
+    cbuiltin_lower_emit(recipe, BUSTER_TYPED_JUMP, BUSTER_TYPED_CLASS_VOID, words);
+    cbuiltin_misc_lower_patch(recipe, tail, first);
+    const uint32_t singles = first + recipe->count;
+    cbuiltin_lower_local(recipe, bytes);
+    cbuiltin_lower_constant(recipe, 0);
+    cbuiltin_lower_operation(recipe, BUSTER_TYPED_NE);
+    const uint32_t next = cbuiltin_misc_lower_branch(recipe, BUSTER_TYPED_BRANCH_FALSE);
+    cbuiltin_lower_local(recipe, address);
+    cbuiltin_lower_constant(recipe, 0);
+    cbuiltin_lower_emit(recipe, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U8, 0);
+    cbuiltin_lower_emit(recipe, BUSTER_TYPED_SET, BUSTER_TYPED_CLASS_U8, 0);
+    cbuiltin_lower_immediate(recipe, address, BUSTER_TYPED_ADD, address, 1);
+    cbuiltin_lower_immediate(recipe, bytes, BUSTER_TYPED_SUB, bytes, 1);
+    cbuiltin_lower_emit(recipe, BUSTER_TYPED_JUMP, BUSTER_TYPED_CLASS_VOID, singles);
+    cbuiltin_misc_lower_patch(recipe, next, first);
+    cbuiltin_misc_lower_patch(recipe, masked, first);
+    cbuiltin_lower_immediate(recipe, entry, BUSTER_TYPED_ADD, entry, 8);
+    cbuiltin_lower_emit(recipe, BUSTER_TYPED_JUMP, BUSTER_TYPED_CLASS_VOID, head);
+    cbuiltin_misc_lower_patch(recipe, done, first);
+}
+
+// An element's stores at `base`: its own, or its table's loop.
+static void cbuiltin_misc_lower_padding_element(CBuiltinLowerRecipe* recipe, const CBuiltinMiscLowerCall* call, uint32_t base, uint32_t first)
+{
+    if (call->argument_count == 2)
+    {
+        cbuiltin_misc_lower_padding_table(recipe, call, base, first);
+    }
+    else
+    {
+        cbuiltin_misc_lower_padding_stores(recipe, call, base);
+    }
+}
+
 // The stores of one object at the pointer's argument, or of an array's elements in a loop: a temporary from the pointer to
 // its end by the elements' stride, each element's stores at it (`first` is the recipe's place in the stream).
 static void cbuiltin_misc_lower_padding(CBuiltinLowerRecipe* recipe, const CBuiltinMiscLowerCall* call, uint32_t first)
 {
     if (call->padding_elements <= 1 && call->padding_count != 0)
     {
-        cbuiltin_misc_lower_padding_stores(recipe, call, call->arguments[0]);
+        cbuiltin_misc_lower_padding_element(recipe, call, call->arguments[0], first);
     }
     else if (call->padding_count != 0)
     {
@@ -635,7 +720,7 @@ static void cbuiltin_misc_lower_padding(CBuiltinLowerRecipe* recipe, const CBuil
         cbuiltin_lower_local(recipe, end);
         cbuiltin_lower_operation(recipe, BUSTER_TYPED_LT);
         const uint32_t done = cbuiltin_misc_lower_branch(recipe, BUSTER_TYPED_BRANCH_FALSE);
-        cbuiltin_misc_lower_padding_stores(recipe, call, base);
+        cbuiltin_misc_lower_padding_element(recipe, call, base, first);
         cbuiltin_lower_immediate(recipe, base, BUSTER_TYPED_ADD, base, call->padding_stride);
         cbuiltin_lower_emit(recipe, BUSTER_TYPED_JUMP, BUSTER_TYPED_CLASS_VOID, head);
         cbuiltin_misc_lower_patch(recipe, done, first);
@@ -677,7 +762,7 @@ static CBuiltinLowerResult cbuiltin_misc_append(CBuiltinLowerBuffer* buffer, con
         case CBUILTIN_FRAME_ADDRESS:
         case CBUILTIN_RETURN_ADDRESS:
         case CBUILTIN_DWARF_CFA: minimum = maximum = 0; result_class = BUSTER_TYPED_CLASS_U64; break;
-        case CBUILTIN_CLEAR_PADDING: minimum = maximum = 1; break;
+        case CBUILTIN_CLEAR_PADDING: minimum = 1; maximum = 2; break;
         default:
             if (cbuiltin_bits(call->id) || cbuiltin_align(call->id))
             {

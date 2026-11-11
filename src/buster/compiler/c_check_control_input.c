@@ -610,6 +610,8 @@ static bool check_input_statement_attribute_kinds(CheckInputReader* reader, Chec
         const bool msvc_noinline = msvc && check_input_attribute_equal(generic, "noinline");
         const bool msvc_force = msvc && (check_input_attribute_equal(generic, "forceinline") || check_input_attribute_equal(generic, "forceinline_calls"));
         const bool unroll = check_input_attribute_equal(generic, "opencl_unroll_hint");
+        // A nomerge of arguments, which the reader's count check made generic: clang's count error, "takes no arguments".
+        const bool nomerge = !msvc && check_input_attribute_equal(generic, "nomerge");
         const bool loop = next == PARSE_KIND_FOR || next == PARSE_KIND_WHILE || next == PARSE_KIND_DO;
         const uint32_t reported = reader->output->report_count;
         if (code_align || unroll)
@@ -818,7 +820,7 @@ static bool check_input_statement_attribute_kinds(CheckInputReader* reader, Chec
             }
             attribute->ignored = true;
         }
-        else if ((msvc_noinline || msvc_force) && attribute->count_check != BUSTER_CHECK_COUNT_NONE)
+        else if ((msvc_noinline || msvc_force || nomerge) && attribute->count_check != BUSTER_CHECK_COUNT_NONE)
         {
             check_input_report_argument(reader, attribute->first, CHECK_INPUT_ATTRIBUTE_ARGUMENT_COUNT, attribute->count_check | attribute->count_bound << 8);
             valid = false;
@@ -1665,15 +1667,333 @@ static uint32_t check_input_fallthrough_truth(CheckInputReader* reader, uint32_t
     return result;
 }
 
+// A range `*first` to `*end` past the parentheses around it, as clang's IgnoreParens: its root token, or BUSTER_CHECK_NONE.
+static uint32_t check_input_fallthrough_ungroup(const Parser* parser, uint32_t* first, uint32_t* end)
+{
+    const uint32_t count = parser->tokens.count;
+    uint32_t root = check_input_fallthrough_root(parser, *first, *end);
+    while (root < count && root + 1 == *end && *first < root && parser->tree.roles[root] == PARSE_ROLE_CLOSE_GROUP && parser->tokens.kinds[*first] == PARSE_KIND_L_PAREN &&
+           parser->tree.roles[*first] == PARSE_ROLE_OPEN_GROUP && parser->tree.parents[*first] == root)
+    {
+        *first += 1;
+        *end -= 1;
+        root = check_input_fallthrough_root(parser, *first, *end);
+    }
+    return root;
+}
+
+// An integer literal's value and width (`first` to `end`, one number token), its bits below its width, as clang's
+// IntegerLiteral has it.
+static bool check_input_fallthrough_integer_literal(CheckInputReader* reader, uint32_t first, uint32_t end, uint64_t* bits, uint32_t* width, bool* is_signed)
+{
+    const Parser* parser = reader->parser;
+    CheckValue value = { 0 };
+    bool result = first + 1 == end && parser->tokens.kinds[first] == PARSE_KIND_NUMBER && reader->pp != NULL &&
+                  check_input_evaluate_cached(reader, first, end, &value) && value.constant_kind == CHECK_CONSTANT_INTEGER &&
+                  check_action_integer_type(reader->types, value.type, width, is_signed) && *width <= 64;
+    *bits = result ? (uint64_t)value.integer & (*width == 64 ? UINT64_MAX : (UINT64_C(1) << *width) - 1) : 0;
+    return result;
+}
+
+// clang's CFG builder's getIntegerLiteralSubexpressionValue: an integer literal past its parentheses, or one that `+`,
+// `-`, `~` or `!` takes, its value computed in the literal's width (`!`'s in int's); its bits and width.
+static bool check_input_fallthrough_literal_value(CheckInputReader* reader, uint32_t first, uint32_t end, uint64_t* bits, uint32_t* width)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t count = parser->tokens.count;
+    const uint32_t root = check_input_fallthrough_ungroup(parser, &first, &end);
+    const uint8_t kind = root < count ? parser->tokens.kinds[root] : 0;
+    const bool unary = root == first && root + 1 < end && parser->tree.roles[root] == PARSE_ROLE_PREFIX &&
+                       (kind == PARSE_KIND_PLUS || kind == PARSE_KIND_MINUS || kind == PARSE_KIND_TILDE || kind == PARSE_KIND_EXCLAIM);
+    uint32_t inner_first = unary ? first + 1 : first;
+    uint32_t inner_end = end;
+    if (unary)
+    {
+        (void)check_input_fallthrough_ungroup(parser, &inner_first, &inner_end);
+    }
+    bool is_signed = false;
+    const bool result = check_input_fallthrough_integer_literal(reader, inner_first, inner_end, bits, width, &is_signed);
+    const uint64_t mask = *width == 64 ? UINT64_MAX : (UINT64_C(1) << *width) - 1;
+    if (result && unary && kind == PARSE_KIND_MINUS)
+    {
+        *bits = (0 - *bits) & mask;
+    }
+    else if (result && unary && kind == PARSE_KIND_TILDE)
+    {
+        *bits = ~*bits & mask;
+    }
+    else if (result && unary && kind == PARSE_KIND_EXCLAIM)
+    {
+        *bits = *bits == 0;
+        *width = 32;
+    }
+    return result;
+}
+
+// Whether two operands are the same, as clang's Expr::isSameComparisonOperand takes them: past their parentheses, one
+// identifier each that names one declaration.
+static bool check_input_fallthrough_same_operand(const CheckInputReader* reader, uint32_t first1, uint32_t end1, uint32_t first2, uint32_t end2)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t count = parser->tokens.count;
+    (void)check_input_fallthrough_ungroup(parser, &first1, &end1);
+    (void)check_input_fallthrough_ungroup(parser, &first2, &end2);
+    const uint32_t one = first1 + 1 == end1 && parser->tokens.kinds[first1] == PARSE_KIND_IDENTIFIER ? reader->output->declarations[first1] : BUSTER_CHECK_NONE;
+    const uint32_t two = first2 + 1 == end2 && parser->tokens.kinds[first2] == PARSE_KIND_IDENTIFIER ? reader->output->declarations[first2] : BUSTER_CHECK_NONE;
+    return one < count && one == two;
+}
+
+// Whether an expression has a boolean value, as clang's isKnownToHaveBooleanValue takes it here: past its parentheses, a
+// `!`, a comparison or a logical operator.
+static bool check_input_fallthrough_boolean(const Parser* parser, uint32_t first, uint32_t end)
+{
+    const uint32_t count = parser->tokens.count;
+    const uint32_t root = check_input_fallthrough_ungroup(parser, &first, &end);
+    const uint8_t role = root < count ? parser->tree.roles[root] : PARSE_ROLE_NONE;
+    return (root == first && root + 1 < end && role == PARSE_ROLE_PREFIX && parser->tokens.kinds[root] == PARSE_KIND_EXCLAIM) || role == PARSE_ROLE_RELATIONAL ||
+           role == PARSE_ROLE_EQUALITY || role == PARSE_ROLE_LOGICAL_AND || role == PARSE_ROLE_LOGICAL_OR;
+}
+
+// A comparison's operand that is a literal constant, as clang's CFG builder's tryTransformToLiteralConstant takes one for
+// its tautology checks: past its parentheses, an integer literal or a character constant, or one that `-` takes; its
+// value converted to `common`, the comparison's type (as clang's implicit cast gives it), and its literal's type.
+static bool check_input_fallthrough_constant(CheckInputReader* reader, uint32_t first, uint32_t end, TypeId* type)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t count = parser->tokens.count;
+    const uint32_t root = check_input_fallthrough_ungroup(parser, &first, &end);
+    const bool negated = root == first && root + 2 == end && parser->tree.roles[root] == PARSE_ROLE_PREFIX && parser->tokens.kinds[root] == PARSE_KIND_MINUS;
+    const uint32_t literal = negated ? first + 1 : first;
+    const uint8_t kind = literal < count ? parser->tokens.kinds[literal] : 0;
+    CheckValue value = { 0 };
+    const bool result = literal + 1 == end && (kind == PARSE_KIND_NUMBER || kind == PARSE_KIND_CHARACTER) && reader->pp != NULL &&
+                        check_input_evaluate_cached(reader, first, end, &value);
+    *type = result ? value.type : 0;
+    return result;
+}
+
+// One comparison of a tautology's: its variable's tokens, its operator as `variable OP constant` (flipped where the
+// constant is on the left: tryNormalizeBinaryOperator) and its constant's tokens; false where it isn't one.
+typedef struct CheckFallthroughComparison CheckFallthroughComparison;
+struct CheckFallthroughComparison
+{
+    uint32_t variable_first;
+    uint32_t variable_end;
+    uint32_t constant_first;
+    uint32_t constant_end;
+    uint8_t kind;
+};
+
+static bool check_input_fallthrough_comparison(CheckInputReader* reader, uint32_t first, uint32_t end, CheckFallthroughComparison* comparison)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t count = parser->tokens.count;
+    const uint32_t root = check_input_fallthrough_ungroup(parser, &first, &end);
+    const uint8_t role = root < count ? parser->tree.roles[root] : PARSE_ROLE_NONE;
+    TypeId type = 0;
+    bool result = (role == PARSE_ROLE_RELATIONAL || role == PARSE_ROLE_EQUALITY) && first < root && root + 1 < end;
+    const bool right = result && check_input_fallthrough_constant(reader, root + 1, end, &type);
+    const bool left = result && !right && check_input_fallthrough_constant(reader, first, root, &type);
+    uint8_t kind = result ? parser->tokens.kinds[root] : 0;
+    if (left)
+    {
+        kind = kind == PARSE_KIND_GREATER ? PARSE_KIND_LESS : kind == PARSE_KIND_GREATEREQUAL ? PARSE_KIND_LESSEQUAL :
+               kind == PARSE_KIND_LESS ? PARSE_KIND_GREATER : kind == PARSE_KIND_LESSEQUAL ? PARSE_KIND_GREATEREQUAL : kind;
+    }
+    *comparison = (CheckFallthroughComparison){
+        .variable_first = right ? first : root + 1,
+        .variable_end = right ? root : end,
+        .constant_first = right ? root + 1 : first,
+        .constant_end = right ? end : root,
+        .kind = kind,
+    };
+    return right || left;
+}
+
+// A comparison's constant's value as its comparison takes it: converted to the usual arithmetic conversions' type of its
+// variable and itself, an integer type's; its bits below the width, the width and the signedness.
+static bool check_input_fallthrough_compared(CheckInputReader* reader, const CheckFallthroughComparison* comparison, uint64_t* bits, uint32_t* width, bool* is_signed)
+{
+    TypeTable* types = reader->types;
+    CheckValue variable = { 0 };
+    CheckValue constant = { 0 };
+    const bool typed = check_input_evaluate_cached(reader, comparison->variable_first, comparison->variable_end, &variable) && variable.type != 0 &&
+                       check_input_evaluate_cached(reader, comparison->constant_first, comparison->constant_end, &constant) &&
+                       constant.constant_kind == CHECK_CONSTANT_INTEGER;
+    const TypeId common = typed ? type_usual_arithmetic(types, type_unqualified(type_strip_aligned(types, variable.type)), constant.type) : 0;
+    const bool result = common != 0 && check_action_integer_type(types, common, width, is_signed) && *width <= 64;
+    *bits = result ? (uint64_t)constant.integer & (*width == 64 ? UINT64_MAX : (UINT64_C(1) << *width) - 1) : 0;
+    return result;
+}
+
+// A comparison of two values of a width and signedness (their bits below the width), by a comparison's token kind.
+static bool check_input_fallthrough_compare(uint8_t kind, uint64_t left, uint64_t right, uint32_t width, bool is_signed)
+{
+    const uint32_t shift = 64 - width;
+    const int64_t signed_left = (int64_t)(left << shift) >> shift;
+    const int64_t signed_right = (int64_t)(right << shift) >> shift;
+    const bool less = is_signed ? signed_left < signed_right : left < right;
+    const bool equal = left == right;
+    return kind == PARSE_KIND_EQUALEQUAL ? equal : kind == PARSE_KIND_EXCLAIMEQUAL ? !equal : kind == PARSE_KIND_LESS ? less :
+           kind == PARSE_KIND_LESSEQUAL ? less || equal : kind == PARSE_KIND_GREATER ? !less && !equal : !less;
+}
+
+// clang's CFG builder's checkIncorrectLogicOperator, of a `&&` or `||` (`root`) whose operands' values are unknown: an
+// operand's negation of the other (`x || !x`, true; `x && !x`, false), or two comparisons of the same variable with
+// integer literals of one type (`x > 5 && x < 3`), whose value is the same at the smallest value, each literal, the one
+// past the smaller literal and the largest; 1, 0 or 2 for unknown. (clang's floating literals' case is unknown here.)
+static uint32_t check_input_fallthrough_logic_tautology(CheckInputReader* reader, uint32_t first, uint32_t root, uint32_t end)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t count = parser->tokens.count;
+    const bool either = parser->tree.roles[root] == PARSE_ROLE_LOGICAL_OR;
+    uint32_t left_first = first;
+    uint32_t left_end = root;
+    uint32_t right_first = root + 1;
+    uint32_t right_end = end;
+    const uint32_t left_root = check_input_fallthrough_ungroup(parser, &left_first, &left_end);
+    const uint32_t right_root = check_input_fallthrough_ungroup(parser, &right_first, &right_end);
+    const bool left_not = left_root == left_first && left_root + 1 < left_end && parser->tree.roles[left_root] == PARSE_ROLE_PREFIX &&
+                          parser->tokens.kinds[left_root] == PARSE_KIND_EXCLAIM;
+    const bool right_not = right_root == right_first && right_root + 1 < right_end && parser->tree.roles[right_root] == PARSE_ROLE_PREFIX &&
+                           parser->tokens.kinds[right_root] == PARSE_KIND_EXCLAIM;
+    uint32_t result = 2;
+    CheckFallthroughComparison one = { 0 };
+    CheckFallthroughComparison two = { 0 };
+    uint64_t literal_one = 0;
+    uint64_t literal_two = 0;
+    uint32_t width_one = 0;
+    uint32_t width_two = 0;
+    bool signed_one = false;
+    bool signed_two = false;
+    if ((left_not && check_input_fallthrough_same_operand(reader, left_first + 1, left_end, right_first, right_end)) ||
+        (right_not && check_input_fallthrough_same_operand(reader, right_first + 1, right_end, left_first, left_end)))
+    {
+        result = either ? 1 : 0;
+    }
+    else if (left_root < count && right_root < count && check_input_fallthrough_comparison(reader, left_first, left_end, &one) &&
+             check_input_fallthrough_comparison(reader, right_first, right_end, &two) &&
+             check_input_fallthrough_same_operand(reader, one.variable_first, one.variable_end, two.variable_first, two.variable_end) &&
+             check_input_fallthrough_compared(reader, &one, &literal_one, &width_one, &signed_one) &&
+             check_input_fallthrough_compared(reader, &two, &literal_two, &width_two, &signed_two) && width_one == width_two && signed_one == signed_two)
+    {
+        const uint32_t width = width_one;
+        const uint64_t mask = width == 64 ? UINT64_MAX : (UINT64_C(1) << width) - 1;
+        const uint64_t smallest = signed_one ? (UINT64_C(1) << (width - 1)) & mask : 0;
+        const uint64_t largest = signed_one ? mask >> 1 : mask;
+        const uint64_t lower = check_input_fallthrough_compare(PARSE_KIND_LESS, literal_one, literal_two, width, signed_one) ? literal_one : literal_two;
+        const uint64_t values[5] = { smallest, literal_one, (lower + 1) & mask, literal_two, largest };
+        bool always_true = true;
+        bool always_false = true;
+        for (uint32_t i = 0; i < 5; i += 1)
+        {
+            const bool first_holds = check_input_fallthrough_compare(one.kind, values[i], literal_one, width, signed_one);
+            const bool second_holds = check_input_fallthrough_compare(two.kind, values[i], literal_two, width, signed_one);
+            const bool combined = either ? first_holds || second_holds : first_holds && second_holds;
+            always_true &= combined;
+            always_false &= !combined;
+        }
+        result = always_true ? 1 : always_false ? 0 : 2;
+    }
+    return result;
+}
+
+// clang's CFG builder's checks of one operand that isn't a logical operator, whose value its evaluator doesn't fold, past
+// no parentheses (tryEvaluateBool's): `x & 0` and `x * 0` false; an equality of an integer literal (getIntegerLiteral-
+// SubexpressionValue's) with a bitwise `&` or `|` of another that can't give it (`(x & 4) == 3`, checkIncorrectEquality-
+// Operator), or with a boolean value it isn't (`(x < y) == 10`); a relational one of a boolean value and an integer
+// literal other than 0 and 1 (checkIncorrectRelationalOperator); and a `|` of one literal constant that isn't 0
+// (checkIncorrectBitwiseOrOperator). 1, 0 or 2 for unknown.
+static uint32_t check_input_fallthrough_tautology(CheckInputReader* reader, uint32_t first, uint32_t root, uint32_t end)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t count = parser->tokens.count;
+    const uint8_t role = root < count && first < root && root + 1 < end ? parser->tree.roles[root] : PARSE_ROLE_NONE;
+    const uint8_t kind = role != PARSE_ROLE_NONE ? parser->tokens.kinds[root] : 0;
+    uint32_t result = 2;
+    if (role == PARSE_ROLE_BITWISE_AND || (role == PARSE_ROLE_MULTIPLICATIVE && kind == PARSE_KIND_STAR))
+    {
+        CheckValue value = { 0 };
+        const bool left = check_input_evaluate_cached(reader, first, root, &value) && check_input_const_rvalue(reader, root, &value) &&
+                          value.constant_kind == CHECK_CONSTANT_INTEGER && value.fault == CHECK_FAULT_NONE && value.integer == 0;
+        value = (CheckValue){ 0 };
+        const bool right = !left && check_input_evaluate_cached(reader, root + 1, end, &value) && check_input_const_rvalue(reader, end, &value) &&
+                           value.constant_kind == CHECK_CONSTANT_INTEGER && value.fault == CHECK_FAULT_NONE && value.integer == 0;
+        result = left || right ? 0 : 2;
+    }
+    else if (role == PARSE_ROLE_EQUALITY)
+    {
+        uint64_t literal = 0;
+        uint32_t width = 0;
+        const bool on_left = check_input_fallthrough_literal_value(reader, first, root, &literal, &width);
+        const bool on_right = !on_left && check_input_fallthrough_literal_value(reader, root + 1, end, &literal, &width);
+        uint32_t other_first = on_left ? root + 1 : first;
+        uint32_t other_end = on_left ? end : root;
+        const uint32_t bit_root = on_left || on_right ? check_input_fallthrough_ungroup(parser, &other_first, &other_end) : BUSTER_CHECK_NONE;
+        const uint8_t bit_role = bit_root < count && other_first < bit_root && bit_root + 1 < other_end ? parser->tree.roles[bit_root] : PARSE_ROLE_NONE;
+        if (bit_role == PARSE_ROLE_BITWISE_AND || bit_role == PARSE_ROLE_BITWISE_OR)
+        {
+            uint64_t mask = 0;
+            uint32_t mask_width = 0;
+            const bool known = check_input_fallthrough_literal_value(reader, other_first, bit_root, &mask, &mask_width) ||
+                               check_input_fallthrough_literal_value(reader, bit_root + 1, other_end, &mask, &mask_width);
+            const bool impossible = known && (bit_role == PARSE_ROLE_BITWISE_AND ? (mask & literal) != literal : (mask | literal) != literal);
+            result = impossible ? kind != PARSE_KIND_EQUALEQUAL : 2;
+        }
+        else if ((on_left || on_right) && literal > 1 && check_input_fallthrough_boolean(parser, other_first, other_end))
+        {
+            result = kind != PARSE_KIND_EQUALEQUAL;
+        }
+    }
+    else if (role == PARSE_ROLE_RELATIONAL)
+    {
+        uint32_t left_first = first;
+        uint32_t left_end = root;
+        uint32_t right_first = root + 1;
+        uint32_t right_end = end;
+        (void)check_input_fallthrough_ungroup(parser, &left_first, &left_end);
+        (void)check_input_fallthrough_ungroup(parser, &right_first, &right_end);
+        uint64_t literal = 0;
+        uint32_t width = 0;
+        bool is_signed = false;
+        const bool literal_first = check_input_fallthrough_integer_literal(reader, left_first, left_end, &literal, &width, &is_signed);
+        const bool literal_second = !literal_first && check_input_fallthrough_integer_literal(reader, right_first, right_end, &literal, &width, &is_signed);
+        const bool boolean = literal_first ? check_input_fallthrough_boolean(parser, right_first, right_end) :
+                             literal_second && check_input_fallthrough_boolean(parser, left_first, left_end);
+        if (boolean && literal > 1)
+        {
+            // An integer literal is never negative (clang's IntLarger): 10 > bool and bool < 10 are true.
+            const bool greater = kind == PARSE_KIND_GREATER || kind == PARSE_KIND_GREATEREQUAL;
+            result = greater ? literal_first : !literal_first;
+        }
+    }
+    else if (role == PARSE_ROLE_BITWISE_OR)
+    {
+        TypeId type = 0;
+        CheckValue value = { 0 };
+        const bool left = check_input_fallthrough_constant(reader, first, root, &type);
+        const bool right = check_input_fallthrough_constant(reader, root + 1, end, &type);
+        const bool known = left != right && check_input_evaluate_cached(reader, left ? first : root + 1, left ? root : end, &value) &&
+                           value.constant_kind == CHECK_CONSTANT_INTEGER;
+        result = known && value.integer != 0 ? 1 : 2;
+    }
+    return result;
+}
+
 // A control statement's condition, tokens `first` to `end`, as clang's CFG builder takes it, its edges to a branch that
 // can't run pruned (tryEvaluateBool, #1126's review): 1 for true, 0 for false, 2 for unknown (or no condition: `for (;;)`'s
 // is true, which its caller takes). Its && and || operators fold as clang's have it, each operand past its parentheses:
 // a known left operand that decides (`0 && x`, `1 || x`) is the value; otherwise both known operands' value, or a known
 // right one that decides (`x && 0`, `x || 1`), even past the left operand's side effects; any other operand is
 // check_input_fallthrough_truth's; a `!` before an operand negates its known value (`!(x && 0)`, which clang's evaluator
-// folds past the side effects). Clang's tautology checks of comparisons (`x > 5 && x < 3`) aren't made: unknown here.
+// folds past the side effects). An operand its evaluator doesn't fold, inside no parentheses or `!` (where clang's
+// tryEvaluateBool finds no binary operator, and its evaluator alone folds), takes clang's tautology checks of
+// comparisons: a logical operator's of two unknown operands (`x > 5 && x < 3`, check_input_fallthrough_logic_tautology)
+// and another's (`(x & 4) == 3`, check_input_fallthrough_tautology), where `tautologies` says so (tryEvaluateBool's;
+// not __builtin_assume's, whose argument clang's evaluator alone folds). A do loop's condition is this; an if's, a
+// while's and a for's are check_input_fallthrough_branches'.
 // A stack of 16 operators takes the operands: no recursion (the call graph's rule), and a deeper one is unknown.
-static uint32_t check_input_fallthrough_condition(CheckInputReader* reader, uint32_t first, uint32_t end)
+static uint32_t check_input_fallthrough_condition(CheckInputReader* reader, uint32_t first, uint32_t end, bool tautologies)
 {
     const Parser* parser = reader->parser;
     const uint32_t count = parser->tokens.count;
@@ -1683,11 +2003,14 @@ static uint32_t check_input_fallthrough_condition(CheckInputReader* reader, uint
     uint32_t lefts[16];
     uint8_t phases[16];
     bool negations[16];
+    // Whether a level's operand had no parentheses and no `!` around it, where clang's tautology checks apply.
+    bool bares[16];
     uint32_t depth = first < end ? 1 : 0;
     firsts[0] = first;
     ends[0] = end;
     phases[0] = 0;
     negations[0] = false;
+    bares[0] = tautologies;
     uint32_t result = 2;
     bool returned = false;
     while (depth != 0)
@@ -1708,6 +2031,7 @@ static uint32_t check_input_fallthrough_condition(CheckInputReader* reader, uint
                                    parser->tree.roles[a] == PARSE_ROLE_OPEN_GROUP && parser->tree.parents[a] == root;
                 const bool negation = root == a && root + 1 < b && parser->tokens.kinds[root] == PARSE_KIND_EXCLAIM && parser->tree.roles[root] == PARSE_ROLE_PREFIX;
                 negations[top] ^= negation;
+                bares[top] &= !group && !negation;
                 a += group || negation ? 1 : 0;
                 b -= group ? 1 : 0;
                 stripping = group || negation;
@@ -1716,6 +2040,7 @@ static uint32_t check_input_fallthrough_condition(CheckInputReader* reader, uint
             const bool logical = root < count && (parser->tree.roles[root] == PARSE_ROLE_LOGICAL_AND || parser->tree.roles[root] == PARSE_ROLE_LOGICAL_OR);
             if (logical && depth < 16 && a < root && root + 1 < b)
             {
+                firsts[top] = a;
                 ends[top] = b;
                 operators[top] = root;
                 phases[top] = 1;
@@ -1723,11 +2048,13 @@ static uint32_t check_input_fallthrough_condition(CheckInputReader* reader, uint
                 ends[depth] = root;
                 phases[depth] = 0;
                 negations[depth] = false;
+                bares[depth] = bares[top];
                 depth += 1;
             }
             else
             {
-                const uint32_t value = logical ? 2 : check_input_fallthrough_truth(reader, a, b);
+                const uint32_t truth = logical ? 2 : check_input_fallthrough_truth(reader, a, b);
+                const uint32_t value = truth == 2 && !logical && bares[top] ? check_input_fallthrough_tautology(reader, a, root, b) : truth;
                 result = value != 2 && negations[top] ? value ^ 1 : value;
                 depth -= 1;
                 returned = true;
@@ -1749,6 +2076,7 @@ static uint32_t check_input_fallthrough_condition(CheckInputReader* reader, uint
                 ends[depth] = ends[top];
                 phases[depth] = 0;
                 negations[depth] = false;
+                bares[depth] = bares[top];
                 depth += 1;
                 returned = false;
             }
@@ -1757,12 +2085,105 @@ static uint32_t check_input_fallthrough_condition(CheckInputReader* reader, uint
         {
             const uint32_t left = lefts[top];
             const uint32_t right = result;
-            const uint32_t value = left != 2 && right != 2 ? (either ? (left | right) : (left & right)) : left == 2 && right != 2 && (right == 1) == either ? right : 2;
+            const uint32_t folded = left != 2 && right != 2 ? (either ? (left | right) : (left & right)) : left == 2 && right != 2 && (right == 1) == either ? right : 2;
+            const uint32_t value = left == 2 && right == 2 && bares[top] ? check_input_fallthrough_logic_tautology(reader, firsts[top], operators[top], ends[top]) : folded;
             result = value != 2 && negations[top] ? value ^ 1 : value;
             depth -= 1;
         }
     }
     return result;
+}
+
+// Which branches of an if's, a while's or a for's condition can run, as clang's CFG builder builds a condition whose
+// operator, past its parentheses, is && or || (VisitLogicalOperator): a block for each operand that isn't one itself,
+// past its parentheses, whose edges tryEvaluateBool prunes (check_input_fallthrough_condition), a right operand's by the
+// operator's own value where its own is unknown; any other condition is one block, by its value, its parentheses kept.
+// 1 where only the true branch can run, 0 where only the false one can, 2 for both. A stack of 16 operators, as above;
+// a deeper one is unknown.
+static uint32_t check_input_fallthrough_branches(CheckInputReader* reader, uint32_t first, uint32_t end)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t count = parser->tokens.count;
+    uint32_t firsts[16];
+    uint32_t ends[16];
+    uint32_t operators[16];
+    uint8_t phases[16];
+    uint8_t lefts[16];
+    uint32_t a = first;
+    uint32_t b = end;
+    const uint32_t root = first < end ? check_input_fallthrough_ungroup(parser, &a, &b) : BUSTER_CHECK_NONE;
+    const bool logical = root < count && a < root && root + 1 < b &&
+                         (parser->tree.roles[root] == PARSE_ROLE_LOGICAL_AND || parser->tree.roles[root] == PARSE_ROLE_LOGICAL_OR);
+    // A branch set: bit 0 for true, bit 1 for false.
+    uint32_t result = 3;
+    if (!logical)
+    {
+        const uint32_t value = first < end ? check_input_fallthrough_condition(reader, first, end, true) : 2;
+        result = value == 1 ? 1u : value == 0 ? 2u : 3u;
+    }
+    uint32_t depth = 0;
+    if (logical)
+    {
+        firsts[0] = a;
+        ends[0] = b;
+        operators[0] = root;
+        phases[0] = 0;
+        depth = 1;
+    }
+    bool returned = false;
+    while (depth != 0)
+    {
+        const uint32_t top = depth - 1;
+        const bool either = parser->tree.roles[operators[top]] == PARSE_ROLE_LOGICAL_OR;
+        if (returned)
+        {
+            // A child operator's branches, the left operand's or the right one's.
+            returned = false;
+        }
+        else
+        {
+            // The next operand: past its parentheses, an operator of its own, or a block whose value prunes its edges.
+            const bool right = phases[top] != 0;
+            uint32_t c = right ? operators[top] + 1 : firsts[top];
+            uint32_t d = right ? ends[top] : operators[top];
+            const uint32_t inner = check_input_fallthrough_ungroup(parser, &c, &d);
+            const bool nested = inner < count && c < inner && inner + 1 < d &&
+                                (parser->tree.roles[inner] == PARSE_ROLE_LOGICAL_AND || parser->tree.roles[inner] == PARSE_ROLE_LOGICAL_OR);
+            if (nested && depth < 16)
+            {
+                firsts[depth] = c;
+                ends[depth] = d;
+                operators[depth] = inner;
+                phases[depth] = 0;
+                depth += 1;
+                continue;
+            }
+            uint32_t value = nested ? 2 : check_input_fallthrough_condition(reader, c, d, true);
+            if (value == 2 && right && !nested)
+            {
+                value = check_input_fallthrough_condition(reader, firsts[top], ends[top], true);
+            }
+            result = value == 1 ? 1u : value == 0 ? 2u : 3u;
+        }
+        if (phases[top] == 0)
+        {
+            lefts[top] = (uint8_t)result;
+            phases[top] = 1;
+        }
+        else
+        {
+            const bool left_true = (lefts[top] & 1) != 0;
+            const bool left_false = (lefts[top] & 2) != 0;
+            const bool right_true = (result & 1) != 0;
+            const bool right_false = (result & 2) != 0;
+            const bool can_true = either ? left_true || (left_false && right_true) : left_true && right_true;
+            const bool can_false = either ? left_false && right_false : left_false || (left_true && right_false);
+            result = (can_true ? 1u : 0u) | (can_false ? 2u : 0u);
+            depth -= 1;
+            returned = depth != 0;
+        }
+    }
+    return result == 1 ? 1 : result == 2 ? 0 : 2;
 }
 
 // Whether `token` lies in the subtree of `root`, before it or after it (a branch after an if's parentheses).
@@ -1808,7 +2229,7 @@ static bool check_input_fallthrough_breaks(CheckInputReader* reader, uint32_t bo
                 {
                     open = parser->tree.roles[item] == PARSE_ROLE_OPEN_CONDITION ? item : open;
                 }
-                const uint32_t condition = open != BUSTER_CHECK_NONE ? check_input_fallthrough_condition(reader, open + 1, at) : 2;
+                const uint32_t condition = open != BUSTER_CHECK_NONE ? check_input_fallthrough_branches(reader, open + 1, at) : 2;
                 live = !(branch && condition == 0) && !(otherwise && condition == 1);
             }
             above = at == body;
@@ -1870,12 +2291,31 @@ static uint32_t check_input_fallthrough_callee(const CheckInputReader* reader, u
     return callee < count && parser->tokens.kinds[callee] == PARSE_KIND_IDENTIFIER ? callee : BUSTER_CHECK_NONE;
 }
 
+// Whether an object's (a variable's or a parameter's) function type is noreturn, as clang's CFG reads a call through it
+// (CFGBuilder::VisitCallExpr: the callee's type's noreturn): GNU's noreturn attribute, a type's in clang, on its own
+// declaration (`void (*p)(void) __attribute__((noreturn))`), or on the typedef its specifiers name, through the typedefs
+// that typedef's name in turn (`typedef void (*N)(void) __attribute__((noreturn)); N p;`), a bounded walk.
+static bool check_input_fallthrough_noreturn_object(const CheckInputReader* reader, uint32_t declaration)
+{
+    const CheckInput* input = reader->output;
+    const Parser* parser = reader->parser;
+    const uint32_t count = parser->tokens.count;
+    bool noreturn = false;
+    uint32_t at = declaration;
+    for (uint32_t steps = 0; !noreturn && at < count && at != 0 && steps < 16; steps += 1)
+    {
+        noreturn = check_input_noreturn_attribute(check_input_attributes_at(input, at));
+        at = check_input_typedef_spelling(input, parser, at);
+    }
+    return noreturn;
+}
+
 // Whether call `close` never returns, as clang's CFG ends its block there (CFGBuilder::VisitCallExpr): its callee names a
 // function declared noreturn (CHECK_INPUT_FUNCTION_NORETURN, which a redeclaration inherits), a builtin clang's table marks
 // noreturn (`r`: __builtin_abort, __builtin_unreachable, __builtin_trap), or a library function it marks so (abort, exit,
 // _Exit) declared with external linkage where the library's builtins are on, as clang's declaration merges the builtin's
-// noreturn type; or it is __builtin_assume of a false condition (isBuiltinAssumeFalse). A call through a pointer whose
-// type is noreturn isn't known here.
+// noreturn type; a call through an object whose function type is noreturn (check_input_fallthrough_noreturn_object); or
+// it is __builtin_assume of a false condition (isBuiltinAssumeFalse).
 static bool check_input_fallthrough_noreturn(CheckInputReader* reader, uint32_t close)
 {
     const Parser* parser = reader->parser;
@@ -1892,7 +2332,8 @@ static bool check_input_fallthrough_noreturn(CheckInputReader* reader, uint32_t 
     const bool library = info != NULL && memchr(info->attributes, 'f', info->attributes_length) != NULL;
     const bool builtin = marked && (!library || (function && check_input_linkage(reader->declaration_bits, declaration) == 2 &&
                                                  check_input_library_enabled(info, &reader->pp->options)));
-    bool noreturn = declared || builtin || check_input_fallthrough_trap(reader, callee);
+    bool noreturn = declared || builtin || check_input_fallthrough_trap(reader, callee) ||
+                    (declaration < count && !function && check_input_fallthrough_noreturn_object(reader, declaration));
     if (!noreturn && callee < count && declaration >= count && reader->pp != NULL)
     {
         uint8_t buffer[32];
@@ -1903,7 +2344,7 @@ static bool check_input_fallthrough_noreturn(CheckInputReader* reader, uint32_t 
         {
             open = parser->tree.roles[child] == PARSE_ROLE_OPEN_CALL ? child : open;
         }
-        noreturn = length == 16 && memcmp(bytes, "__builtin_assume", 16) == 0 && open < close && check_input_fallthrough_condition(reader, open + 1, close) == 0;
+        noreturn = length == 16 && memcmp(bytes, "__builtin_assume", 16) == 0 && open < close && check_input_fallthrough_condition(reader, open + 1, close, false) == 0;
     }
     return noreturn;
 }
@@ -2027,7 +2468,7 @@ static bool check_input_fallthrough_leaves(CheckInputReader* reader, uint32_t it
             // A condition that is true, or that calls a function that never returns, which every iteration that doesn't
             // break reaches.
             leaves = open != BUSTER_CHECK_NONE && body != BUSTER_CHECK_NONE && !check_input_fallthrough_breaks(reader, body) &&
-                     (check_input_fallthrough_stops(reader, open + 1, condition) || check_input_fallthrough_condition(reader, open + 1, condition) == 1);
+                     (check_input_fallthrough_stops(reader, open + 1, condition) || check_input_fallthrough_condition(reader, open + 1, condition, true) == 1);
         }
         else if (statement && check_input_fallthrough_stops(reader, first, node))
         {
@@ -2067,7 +2508,7 @@ static bool check_input_fallthrough_leaves(CheckInputReader* reader, uint32_t it
             }
             // A condition that calls a function that never returns leaves before either branch.
             const bool stops = open != BUSTER_CHECK_NONE && check_input_fallthrough_stops(reader, open + 1, node);
-            const uint32_t condition = open != BUSTER_CHECK_NONE && !stops ? check_input_fallthrough_condition(reader, open + 1, node) : 2;
+            const uint32_t condition = open != BUSTER_CHECK_NONE && !stops ? check_input_fallthrough_branches(reader, open + 1, node) : 2;
             const bool both = otherwise != BUSTER_CHECK_NONE && condition == 2;
             const uint32_t taken = condition == 1 ? branch : condition == 0 ? otherwise : BUSTER_CHECK_NONE;
             leaves = stops || (branch != BUSTER_CHECK_NONE && (both || taken != BUSTER_CHECK_NONE) && pending_count + 2 <= 16);
@@ -2107,8 +2548,8 @@ static bool check_input_fallthrough_leaves(CheckInputReader* reader, uint32_t it
             // nothing under it.
             const bool absent = second != BUSTER_CHECK_NONE && (second == 0 || !check_input_fallthrough_within(parser, second - 1, second));
             const bool forever = keyword_kind == PARSE_KIND_FOR ?
-                                     absent || (initial < second && second != BUSTER_CHECK_NONE && check_input_fallthrough_condition(reader, initial + 1, second) == 1) :
-                                     open != BUSTER_CHECK_NONE && check_input_fallthrough_condition(reader, open + 1, node) == 1;
+                                     absent || (initial < second && second != BUSTER_CHECK_NONE && check_input_fallthrough_branches(reader, initial + 1, second) == 1) :
+                                     open != BUSTER_CHECK_NONE && check_input_fallthrough_branches(reader, open + 1, node) == 1;
             // A loop's first evaluation, its condition's (a for's first clause and its condition), may call a function
             // that never returns.
             const bool stops = keyword_kind == PARSE_KIND_FOR ?
