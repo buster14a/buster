@@ -6527,15 +6527,18 @@ static bool check_driver_rejected_top_known(const Parser* parser, const uint32_t
 }
 
 // Whether the first reading's errors at `token` all leave their declaration valid (check_driver_report_keeps_valid,
-// #1835): no other error is there. Only a rejected unit's rounds call it.
-static bool check_driver_rejected_recovered(const CheckInput* input, uint32_t token)
+// #1835): no other error is there. A typo's correction (#1447, CHECK_INPUT_UNDECLARED_CORRECTED) does in a body too
+// (`bodied`): the reading corrects it again, its use bound as clang's, whose warnings (an array index's) stay. Only a
+// rejected unit's rounds call it.
+static bool check_driver_rejected_recovered(const CheckInput* input, uint32_t token, bool bodied)
 {
     bool recovered = false;
     bool stopped = false;
     for (uint32_t i = 0; i < input->report_count; i += 1)
     {
         const bool at = input->reports[i].token == token;
-        const bool keeps = check_driver_report_keeps_valid(input->reports + i);
+        const bool corrected = input->reports[i].message == CHECK_INPUT_UNDECLARED_CORRECTED && input->reports[i].recovered;
+        const bool keeps = corrected || (!bodied && check_driver_report_keeps_valid(input->reports + i));
         recovered |= at && keeps;
         stopped |= at && !keeps;
     }
@@ -7218,10 +7221,10 @@ static void check_driver_rejected_common(const Parser* unit, const Parser* origi
             }
             const bool head = !bodied && top < count && parser->tree.roles[top] == PARSE_ROLE_CLOSE_BODY;
             // A recovered error outside every body (#1447, CheckInputReport.recovered: a definition's parameter's, #1835)
-            // needs no part left out: the reading recovers it again, its declaration valid, as clang keeps it. It still
-            // counts in its scope (error_counts). (A prototype's dropped declaration would leave out the bodies that name
-            // its parameters' names too.)
-            const bool recovered = !bodied && check_driver_rejected_recovered(first_input, token);
+            // needs no part left out, nor does a typo's correction anywhere: the reading recovers it again, its declaration
+            // valid, as clang keeps it. It still counts in its scope (error_counts). (A prototype's dropped declaration would
+            // leave out the bodies that name its parameters' names too.)
+            const bool recovered = token < count && check_driver_rejected_recovered(first_input, token, bodied);
             // A conversion that defaults to an error (#1969) is kept, its source cast, where its tokens are all kept; where
             // the parts left out before it hold them all, it is left out with them. (Its sites come after the others' errors.)
             const CheckDriverConversionSite* site = NULL;
@@ -7261,7 +7264,7 @@ static void check_driver_rejected_common(const Parser* unit, const Parser* origi
                 memset(bodies + ranges[low - 1].begin, 1, ranges[low - 1].end - ranges[low - 1].begin);
                 memset(fallback_mask + ranges[low - 1].begin, 1, ranges[low - 1].end - ranges[low - 1].begin);
             }
-            if (!kept && bodied)
+            if (!kept && !recovered && bodied)
             {
                 memset(mask + ranges[low - 1].begin, 1, ranges[low - 1].end - ranges[low - 1].begin);
             }

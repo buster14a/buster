@@ -738,6 +738,13 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "void f(void)\n{\n    countr = 5;\n    ++countr;\n    int y = olde;\n    int *p = &countr;\n    unsigned *u = &icoun;\n"
         "    take(&countr);\n    takeu(&icoun);\n    int *q;\n    q = &countr, q = 0;\n    int *r = 0, *s = &countr;\n"
         "    (void)y; (void)p; (void)u; (void)q; (void)r; (void)s;\n}\n",
+        // A corrected use's warnings stay in a unit with another error (check_driver_rejected_recovered): an array index's
+        // at the function's end, after the body's later errors, or at a file-scope declarator's end, after its correction's
+        // error; a division's. An operand of an uncorrected name's expression gives none, as clang's, nor does pointer
+        // arithmetic past the end (-Warray-bounds-pointer-arithmetic, off by default).
+        "int arr[3];\nint *p = &arx[5], *q = &arx[7];\nint f(void)\n{\n    int x = arx[5];\n    int *r = &arx[4];\n    int *s = arx + 5;\n"
+        "    int y = zzz;\n    return x + y + *r + *s + arx[-1];\n}\nint g(void) { return yyy + arx[3]; }\n"
+        "int h(void) { return arx[1] / 0 + 1 / 0; }\n",
         // Keywords within an expression (#1447): an expression's and, within a function, a statement's, `break` and
         // `continue` in a loop's body, `case` and `default` in a switch's, a statement's none before a `)`; a value as near
         // leaves the name uncorrected, and one taken where no keyword is offered corrects it. C23's `true` and `false`.
