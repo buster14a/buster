@@ -71,9 +71,10 @@ unit (`parse_test_check_unit`), with state kept from one unit to the next
 - **Intern table:** one, reset to its predefined names before each unit
   (`intern_reset`), so that each name gets a fresh table's id.
 - **Parsers:** the vector path's and the scalar parser's, full and tree-only,
-  each parsing unit after unit. Each one's scratch is zeroed to its peak
-  before a unit (`arena_poison`), as a fresh parser's is: the vector path reads
-  temporaries a unit didn't write (#2086).
+  each parsing unit after unit. Before a unit, each one's scratch reads as a
+  fresh parser's, zero (`parse_test_units_clear`): cleared in place up to
+  1 MB, given back to the kernel past that. The vector path reads temporaries a
+  unit didn't write (#2086).
 - **Arenas:** an arena pool (`arena_pool`), as a units lane has, takes the
   arenas each unit's preprocessor and the parsers' columns release.
 - **Preprocessor:** each unit's own. The alignments and the streams

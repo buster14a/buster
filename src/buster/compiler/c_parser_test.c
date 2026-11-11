@@ -2771,6 +2771,28 @@ static void parse_test_units_release(ParseTestUnits* units)
     *units = (ParseTestUnits){ 0 };
 }
 
+// A parser's scratch back to a fresh one's: empty, and every byte a parse pushed zero again. A few pages, as a generated
+// unit's (55 KB at the median), are cleared in place; more, as a file's (up to 480 MB of main.c's), go back to the kernel
+// from the scratch's first page boundary, as a fresh parser's mapping would: a clear touches every pushed page, written or not,
+// where the kernel frees only those a parse wrote. Then the peak goes back to 0, as no byte past it differs from a fresh
+// arena's, so that the next unit's clearing reaches only as far as that unit pushed.
+static void parse_test_units_clear(Arena* scratch)
+{
+    const uint64_t page = BUSTER_ARENA_PAGE_BYTES;
+    const uint64_t pushed = scratch->peak > scratch->length ? scratch->peak : scratch->length;
+    const uintptr_t base = (uintptr_t)scratch->base;
+    const uintptr_t first = (base + page - 1) & ~(uintptr_t)(page - 1);
+    const uintptr_t end = (base + pushed + page - 1) & ~(uintptr_t)(page - 1);
+    const bool large = scratch->base != 0 && pushed > (1ull << 20) && end > first;
+    const bool given = large && madvise((void*)first, end - first, MADV_DONTNEED) == 0;
+    if (scratch->base != 0)
+    {
+        memset(scratch->base, 0, given ? first - base : pushed);
+    }
+    scratch->length = 0;
+    scratch->peak = 0;
+}
+
 // The table, as a fresh one, and the parsers for `language`. Returns false if either can't be had.
 static bool parse_test_units_prepare(ParseTestUnits* units, CLanguage language)
 {
@@ -2778,13 +2800,12 @@ static bool parse_test_units_prepare(ParseTestUnits* units, CLanguage language)
     units->table_ready = units->table_ready || table;
     const bool same_language = units->language.standard == language.standard && units->language.gnu == language.gnu &&
                                units->language.gnu_keywords == language.gnu_keywords && units->language.digraphs == language.digraphs;
-    // What the last unit's parses wrote in each parser's scratch, back to the zeros of a fresh parser's (arena_poison):
-    // a parse that reads a temporary it didn't write must read what it reads on a fresh parser, for the checks to be
-    // a fresh parser's. The vector path does: on some invalid streams, K5's verdict follows what an earlier unit left
-    // in its temporaries (#2086).
+    // Each parser's scratch as a fresh parser's (parse_test_units_clear): a parse that reads a temporary it didn't write
+    // must read what it reads on a fresh parser, for the checks to be a fresh parser's. The vector path does: on some
+    // invalid streams, K5's verdict follows what an earlier unit left in its temporaries (#2086).
     for (uint32_t i = 0; units->parsers_ready && same_language && i < BUSTER_ARRAY_LENGTH(units->parsers); i += 1)
     {
-        arena_poison(&units->parsers[i].scratch, 0);
+        parse_test_units_clear(&units->parsers[i].scratch);
     }
     if (!units->parsers_ready || !same_language)
     {
