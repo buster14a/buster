@@ -725,16 +725,30 @@ clang's error at the declarator's name (`check_input_vla_place`,
 - a member, "fields must have a constant size: 'variable length array in
   structure' extension will never be supported".
 
+A block's automatic variable-length array with an initializer other than `{}`
+is clang's "variable-sized object may not be initialized"
+(`CHECK_INPUT_VLA_INITIALIZER`): at the outermost bound's first token for a
+list, as `InitListChecker` places it, and at the name for any other
+initializer, as `InitializationSequence` does. It recovers: the declaration
+stays valid, and its initializer is skipped unchecked, as clang checks it no
+further.
+
 A `sizeof` of a variable type name in a file-scope initializer
 (`int s = 1 + sizeof(int[n]);`) is "initializer element is not a compile-time
 constant", at the start of the initializer's element that holds it.
+A cast's or an `_Alignof`'s variable type name at file scope (`(int(*)[n])0`,
+`_Alignof(int[n])`) makes a variable array type whose bound is never evaluated,
+as clang folds both (#1852): its `CheckInputVla` is not evaluated and captures
+no bound.
 
 Differences left: these errors stop the reader, where clang marks the
-declaration invalid and goes on. A file-scope cast to a variably modified
-type, and `_Alignof` of one, are still refused, though clang accepts them.
-A block's variable-length array with a non-empty initializer is still
-"invalid or unsupported declaration" (clang's "variable-sized object may not
-be initialized", at the bound).
+declaration invalid and goes on. In a body, a cast to a variably modified
+type (`(void)((int (*)[n])0)`, in `sizeof` too) is still "construct is not yet
+supported", though clang accepts it: the cast's captured bound is a second
+operand the graph's cast doesn't take.
+A skipped VLA initializer's undeclared names and expression warnings
+(`{q}`, `"y" + 1`) aren't reported; clang reports them, and an undeclared name
+in a list makes the list invalid, with no "may not be initialized" error.
 Immutable source-position diagnostic pragmas apply push/pop and exact warning
 group policy to these witnesses. Promoted warnings participate in first-error
 ordering and prevent object publication; `-w` suppresses them as Clang does.
@@ -1659,7 +1673,10 @@ once from the top 128 bits and a sticky bit; a `__float128` or a
 half-precision value isn't folded), an operator whose operands are wide or a
 narrow value shifted by a wide count (`check_wide_fold`), and an integer
 constant expression read as an `int64_t` (`check_wide_i64`: array bounds,
-enumerators). Faults are the narrow ones: signed overflow, division by zero,
+enumerators). A const object's read takes its initializer's wide constant, or
+a zero's limbs, as clang's folding does (`check_const_load`,
+`check_const_zero`); the bit and alignment builtins fold them too (the
+[builtins' guide](c-builtins-integration.md)). Faults are the narrow ones: signed overflow, division by zero,
 shift counts and shifted values, with GNU's folding where the context takes
 it (a count past the width shifts by width - 1, as clang's evaluator clamps
 it).
@@ -3813,9 +3830,14 @@ What the lowering covers past scalars (#145's programs):
   tests an I32 destination slot, which every exit and fall that crosses one
   stores first (a fall 0, at its run's head, past which exits enter): the
   issue's function of early returns stores none, and its calls are its
-  variables' count. An exit from a statement expression, through a record
-  whose scope's end a constant switch's kept statements leave out, or whose
-  jump no path reaches keeps its run in place. Code and call rows grow
+  variables' count. An exit from a statement expression's statements takes
+  the chain through the records within its block, whose calls its region
+  lowers with its statements, from the empty evaluation stack the region
+  starts with: the dispatch's jumps and the exit's agree on the stack, out of
+  the region as within it. An exit that leaves the block's own records (their
+  calls run after its END, once its value is kept) or records outside it, one
+  through a record whose scope's end a constant switch's kept statements leave
+  out, and one whose jump no path reaches keep their runs in place. Code and call rows grow
   linearly in exits plus cleanups, where they grew as their product (85
   cleanups with an early return each made 3,825 calls, and 86 exhausted the
   call rows). An exit keeps only the innermost record whose scope holds its
@@ -4553,6 +4575,26 @@ the same expression and uses, with no error and no `-Wall`/`-Wextra` warning
 of the cast's own, so its statement's warnings are given too
 (`x = p; return x / 0;`, `int x = p + (1 / 0);`).
 
+A left-out expression statement keeps its complete operands (#2120,
+`check_driver_rejected_operands`, `CHECK_DRIVER_CAST_OPERAND`). Clang builds
+an expression's operands before it finds the expression's error, and gives
+their warnings, on either side of the error: `x = s.b + printf("%s", x);`
+gives its `-Wformat`, `k(1, (2, 3), 4)` (too many arguments) its comma's
+`-Wunused-value`, `x = (x = x) + s.b;` its `-Wself-assign`. The view's `{ }`
+in the statement's place holds each subtree off the path from a known error's
+token to the statement's root, through evaluated operators, calls (their
+argument lists' separators), subscripts, groups, casts, member accesses,
+conditionals and returns, as its own `(void)(A);`, where it holds no known
+error. A `(void)` cast gives no warning of its own, and the body has an error,
+so its reading runs no flow analysis (`x = u + s.b;` gives no
+`-Wuninitialized`), as clang's doesn't. Nothing under `sizeof` is kept. Where
+the reading with the operands isn't valid, the round reads the view again
+without them. Differences left: an argument past a call's parameters whose
+first token is the error's place (`k(1, 2, printf("%d", "s"))`) has its own
+operands kept, not itself, so its `-Wformat` isn't given; a statement
+expression's earlier statements and an initializer's operands
+(`int y = (x = x, s.b);`) aren't kept yet.
+
 A condition's assignment (`while (q = p)`) is still left out: clang's
 `-Wparentheses` of it follows the conversion's error, which completes after
 the source, where the common warnings publish it at the `=`. So does a
@@ -5234,7 +5276,8 @@ The later phases are left:
   unsupported declaration") leaves its declarator out, but the first reading
   never saw the body's later errors, so a second reading that meets one isn't
   valid. The warnings clang gives of what a left-out part builds before its
-  error aren't given, but for a folded shift's, which comes at the unit's end.
+  error aren't given, but for a folded shift's, which comes at the unit's end,
+  and a left-out expression statement's complete operands' (#2120, above).
   A file-scope const object's initializer with an error is left out alone,
   so the declaration stays bound with an unknown value (`const int c;`), as
   clang's stays valid, and the bodies that use it keep their warnings
@@ -5648,7 +5691,10 @@ declaration) is never unused: clang's semantic context for it is the
 translation unit, not the function, so `ShouldDiagnoseUnusedDecl` passes it
 by. A use through it uses the outer declaration with linkage it redeclares,
 so `static int s; void f(void) { extern int s; (void)s; }` leaves `s` used.
-A block's own `static`, `register` and automatic objects can be unused. The
+A block's own `static`, `register` and automatic objects can be unused. A
+variable with an applied `cleanup` attribute is used, as clang treats it,
+since its cleanup takes its address (#1881); one ignored at file scope can still
+be unused. The
 graph pass adds `-Wunused-but-set-parameter` for a parameter a statement
 assignment writes and no read uses.
 
@@ -5881,6 +5927,21 @@ initializations, brace elements, returns and prototype arguments. An
 assignment's or an increment's value is no constant to clang's evaluator, so
 its conversion warns of nothing (`char c = x = 1000;`, `{ x = 300 }`), though a
 comma's right operand's does (`check_common_conversion_leaf`, #1447).
+
+A `_BitInt` constant past 128 bits (#1447, "Constants past 128 bits") warns as
+a narrow one does, by the same rules on its whole value
+(`check_wide_conversion_changes`, the twin of
+`check_common_conversion_changes`, and `check_wide_same_width` of
+`check_common_same_width`), into any narrower type, a wide one too, with both
+values printed in decimal (`check_wide_text`). A declarator past a specifier's
+parentheses (`_BitInt(100) n = e;`, `typeof(int) y = e;`, whose `=` the
+parser hangs off the specifier's `)`) is evaluated: the unevaluated-operand
+scan (`check_warning_graph_void_step`) counts only the tokens between the
+parentheses as typeof's operand, where it took every token after them, and
+dropped those declarators' conversion warnings. Still separate: clang's
+`-Wtautological-constant-out-of-range-compare`, whose values these would
+print, isn't given for any type, and neither is the static assertion's
+"expression evaluates to" note.
 
 A brace initializer's integer constants warn of their constant conversions too
 (#1447), in the reverse initializer order clang's `AnalyzeImplicitConversions`
@@ -7309,7 +7370,13 @@ initializer's type converted as an lvalue's (its qualifiers dropped, but not
 `_Atomic`, a kind), an array's and a function's decayed, with the specifiers'
 `const` and `volatile`. Until the walk has read the initializer, the
 declaration's type is a placeholder, `restrict int` with the specifiers'
-qualifiers (`BUSTER_CHECK_AUTO_TYPE`), which no specifiers give otherwise. Its
+qualifiers (`BUSTER_CHECK_AUTO_TYPE`), which no specifiers give otherwise; the
+specifiers' `_Atomic` and `restrict`, which clang applies to the deduced type
+(#1844), make it `restrict unsigned int` or `restrict long` instead
+(`check_input_auto_type_qualifiers`), so `_Atomic __auto_type a = 1;` is an
+`_Atomic(int)`, `const _Atomic` of an array's value a `const _Atomic(int *)`,
+and `__auto_type restrict q = p;` an `int *restrict`; a pointer declarator's own
+`restrict` is its pointer's (`__auto_type *restrict p`). Its
 initializer registers a finish event (`check_input_initializer_prepare`), so
 that the initializer's uses capture their declarations as an incomplete array's
 do (`inference_end`). The finish (`check_input_auto_type_finish`) types the
@@ -7352,8 +7419,12 @@ variable with linkage takes the earlier declaration's type rather than a
 deduced one, as clang's C `mergeTypes` takes the placeholder before deducing
 (`extern long p; __auto_type p = 1;` is a long, its initializer converted;
 `check_input_auto_type_merged`), through pointer declarators. Refused by
-name: `_Atomic`, `restrict` and type attributes with `__auto_type`, a
-variably modified cast in the initializer, and a
+name: `_Atomic` and `restrict` through a declarator (`_Atomic __auto_type *p`,
+whose initializer clang finds incompatible) or together (clang's restrict error
+names `_Atomic(__auto_type)`), `_Atomic` of an atomic value (clang's error names
+the placeholder's type), `restrict` of a value that is no pointer to an object
+(clang's `restrict int`, which the placeholder can't be told from), type
+attributes with `__auto_type`, a variably modified cast in the initializer, and a
 redeclaration whose merge clang refuses (its "redefinition of 'p' with a
 different type: 'const __auto_type' vs 'int'").
 
@@ -8535,10 +8606,14 @@ arguments against the function. The checker now gives these as clang does.
     (`int __builtin_abs(int);`) is still that builtin, as an argument and in
     another expression, but a static one.
     More than 32 arguments are the count's error, as no builtin takes as many.
-    Refused by name are an undeclared library function's name, whose
-    diagnostics are its implicit declaration's (`diagnose_as_builtin(memcpy,
-    ...)` with no declaration of `memcpy`), and an index of 0, on which clang
-    23 crashes. A definition's identifier list compares its parameters by
+    An undeclared library function's name (`diagnose_as_builtin(memcpy,
+    ...)` with no declaration of `memcpy`, or `(memmove)`) is its implicit
+    declaration, as clang's lookup of a name in any attribute argument's
+    expression makes it: "call to undeclared library function" with its
+    header's note (C89's "implicitly declaring library function" warning),
+    and the attribute takes it, so a later call declares nothing again
+    (`check_input_generic_undeclared`). Refused by name is an index of 0, on
+    which clang 23 crashes. A definition's identifier list compares its parameters by
     their declarations' types, the promoted prototype's standing aside, as
     clang's ParmVarDecl types do. It changes nothing else here: the
     `-Wfortify-source` warnings clang gives the function's calls, as it gives
@@ -8634,7 +8709,7 @@ arguments against the function. The checker now gives these as clang does.
 
   Lowering: clang's x86 target maps address spaces 256, 257 and 258
   (`__seg_gs`, `__seg_fs`) to the `%gs`, `%fs` and `%ss` segments, whose loads
-  and stores take a segment override. A load or store in `%fs` or `%gs` of an
+  and stores take a segment override. A load or store in `%fs`, `%gs` or `%ss` of an
   integer, a floating value (long double too), a 128-bit integer or a vector,
   by indirection, member (a bit-field's unit's pieces too), subscript or name, and an assignment, compound
   assignment, increment or decrement of one, takes it (check_lower_access: the
@@ -8648,8 +8723,7 @@ arguments against the function. The checker now gives these as clang does.
   Tier 0 for such a function. The rest is refused by name ("a load or store in a
   segment's address space", check_lower_segment_access, where a unit has such a
   type at all: CheckLowerWriter.segments): an aggregate's copy, a complex,
-  half-precision or `_BitInt` value, an `_Atomic` object, and `%ss`'s
-  space (258, whose `36` prefix no 64-bit form of the encoder's has), atomic
+  half-precision or `_BitInt` value, an `_Atomic` object, atomic
   builtins of another plan (generic ones by pointer, `__atomic_clear`,
   `__sync_lock_release`); and so are the accesses whose lvalue doesn't carry the
   space: a vector's element, read or written (its type loses the vector's
@@ -9727,6 +9801,12 @@ enables, which this checker doesn't all give.
   A variable array prints its size expression as written, with expression
   spacing (`check_driver_vla_bounds`): `'int (*)[n + 1]'`, `'int[n][m * 2]'`.
   `c_check_type_sugar_driver_test.c` compares these whole-output with clang.
+- A failed static assertion's requirement prints a character constant by its
+  value, as clang's `CharacterLiteral::print` does (#1999,
+  `check_semantic_character`): its prefix; `\'`, `\\` and the control
+  characters' C escapes; else, with an ordinary constant's sign extension of a
+  byte taken off, a printable byte as itself, `\xNN` below 256, `\uNNNN` to
+  0xFFFF and `\UNNNNNNNN` past it (`'ab'` is `'\u6162'`).
 - **Differences left.**
   - A cast inside a variable array's bound prints its builtin type keywords
     as clang's TypePrinter does (`int[(unsigned)n]` is `'int[(unsigned int)n]'`,

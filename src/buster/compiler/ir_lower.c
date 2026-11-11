@@ -82,7 +82,7 @@ static bool ir_typed_access_valid(uint8_t kind, uint8_t class, uint64_t value)
 }
 
 // Whether entry `i`'s segment override (#1447, BUSTER_TYPED_ACCESS_SEGMENT), if it has one, is one the IR carries
-// (BUSTER_IR_SEGMENT): FS's or GS's, on a LOAD, STORE or SET of an integer, a float, a double or a vector (a 128-bit
+// (BUSTER_IR_SEGMENT): FS's, GS's or SS's, on a LOAD, STORE or SET of an integer, a float, a double or a vector (a 128-bit
 // integer's halves, ir_wide.c, and a wide vector's pieces, ir_vector_split.c, keep their access's flags). An atomic
 // read/modify/write's (ATOMIC_RMW, ATOMIC_CAS), whose IR flags hold its operation where a load's hold the segment, and an
 // access of a long double or a mask, which Tier 1 moves through rows of their own (the x87 stack's, kmov's), are Tier 0's.
@@ -94,7 +94,7 @@ static bool ir_typed_segment_valid(const Tier0Function* input, uint32_t i)
     const bool access = kind == BUSTER_TYPED_LOAD || kind == BUSTER_TYPED_STORE || kind == BUSTER_TYPED_SET;
     const bool atomic = kind == BUSTER_TYPED_ATOMIC_RMW || kind == BUSTER_TYPED_ATOMIC_CAS;
     const bool carried = class != BUSTER_TYPED_CLASS_F80 && class != BUSTER_TYPED_CLASS_MASK;
-    return segment == 0 || (!atomic && (!access || (segment != 3 && carried)));
+    return segment == 0 || (!atomic && (!access || carried));
 }
 
 typedef struct IrTypedPlan IrTypedPlan;
@@ -754,6 +754,31 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_vector_operation(
             value = ir_typed_emit(sink, IR_VSELECT, type, operands[2], value, operands[1], 0);
             ir_typed_lanes(sink, value, operation->lane);
         }
+    }
+    else if (operation->mask_expand)
+    {
+        // A mask to a vector (#1840): all ones in each lane whose bit is set, zeros elsewhere.
+        const uint64_t zero[8] = {0};
+        const uint64_t ones[8] = { UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX };
+        const uint32_t active = ir_typed_vector_constant(sink, type, ones);
+        const uint32_t inactive = ir_typed_vector_constant(sink, type, zero);
+        value = ir_typed_emit(sink, IR_VSELECT, type, operands[0], active, inactive, 0);
+        ir_typed_lanes(sink, value, operation->lane);
+    }
+    else if (operation->sign_mask)
+    {
+        // A vector's sign bits as a mask (#1840): its signed lanes less than zero, at the vector's width.
+        const uint64_t zero[8] = {0};
+        const IrType vector = (IrType)(IR_V4I32 + (operation->shape - IR_SIMD_V4I32));
+        const uint32_t inactive = ir_typed_vector_constant(sink, vector, zero);
+        value = ir_typed_emit(sink, IR_VCMP, type, operands[0], inactive, IR_LT, 0);
+        ir_typed_lanes(sink, value, operation->lane);
+    }
+    else if (operation->shift)
+    {
+        // A shift by a scalar count (#1840), its lanes and shift in its flags.
+        value = ir_typed_emit(sink, IR_INTRINSIC, type, operands[0], operands[1], BUSTER_IR_INTRINSIC_SHIFT, 0);
+        ir_typed_lanes(sink, value, (IrSimdLane)operation->immediate);
     }
     else if (operation->permute != 0)
     {
