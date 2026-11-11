@@ -299,8 +299,12 @@ enumerators of one base are of one type before C23, and of two after it). Each
 value is representable in the base as clang's `isRepresentableIntegerValue` has
 it (a negative one by its significant bits, any other by its active bits, less a
 signed base's sign bit) and converted to it; the base drops `const` and `volatile` (`restrict`, which
-needs a pointer, is refused), and an integer type of any width but `_BitInt`
-takes it. GNU attributes among the base's specifiers are the base type's, as
+needs a pointer, is refused), written or a typedef's, with clang's
+"'const' qualifier in enumeration underlying type ignored"
+(`-Wunderlying-cv-qualifier-ignored`, #1952) once, at the base's first token
+that isn't a qualifier; they aren't the declaration's own, so a declaration of
+the enum alone gives no "'const' ignored on this declaration" for them. An
+integer type of any width but `_BitInt` takes it. GNU attributes among the base's specifiers are the base type's, as
 clang has them: ignored, but one that would make it a vector's (`vector_size`,
 `ext_vector_type`), refused. Its redeclarations in its scope keep the base, a
 declaration of it alone (`enum E;`) too; a reference to it (`enum E x;`) needs

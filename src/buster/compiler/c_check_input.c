@@ -4183,6 +4183,32 @@ static TypeId check_input_enum_underlying(CheckInputReader* reader, uint32_t col
     {
         check_input_report(reader, colon + 1 < end ? colon + 1 : colon, CHECK_INPUT_DECLARATION);
     }
+    else
+    {
+        // Its const and volatile, written or a typedef's, which clang drops with -Wunderlying-cv-qualifier-ignored (#1952),
+        // once, at the base's first token that isn't a qualifier (its type's location).
+        const uint32_t dropped = (qualifiers | type_qualifiers(base)) & (BUSTER_TYPE_CONST | BUSTER_TYPE_VOLATILE);
+        uint32_t at = colon + 1;
+        uint32_t ignored_qualifiers = 0;
+        while (at + 1 < end && (check_input_qualifier(parser, at, &ignored_qualifiers) || check_input_attribute_starts(parser, at, end)))
+        {
+            at = check_input_attribute_starts(parser, at, end) ? check_input_skip_attributes(parser, at, end) : at + 1;
+        }
+        if (dropped != 0 && at < end)
+        {
+            const CheckWarningEvent event =
+            {
+                .id = CHECK_WARNING_ID_UNDERLYING_CV_QUALIFIER,
+                .kind = CHECK_WARNING_EVENT_UNDERLYING_CV_QUALIFIER,
+                .token = at,
+                .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                .completion_kind = CHECK_WARNING_COMPLETE_AFTER_DELIMITER,
+                .completion = end,
+                .payload = { .token = BUSTER_CHECK_WARNING_NO_SOURCE, .data = dropped },
+            };
+            check_input_warning_event(reader, &event, NULL, 0);
+        }
+    }
     for (uint32_t i = colon; valid && i < end; i += 1)
     {
         reader->ignored[i] = true;
@@ -9772,6 +9798,16 @@ static void check_input_standalone_specifiers(CheckInputReader* reader, uint32_t
         {
             const uint32_t close = parser->tree.parents[token];
             token = close > token && close < end ? close : end;
+            continue;
+        }
+        if (kind == PARSE_KIND_COLON)
+        {
+            // An enum's fixed base, to its body: its qualifiers are the base's, which it drops with a warning of its own
+            // (#1952, check_input_enum_underlying), not the declaration's.
+            while (token + 1 < end && parser->tokens.kinds[token + 1] != PARSE_KIND_L_BRACE)
+            {
+                token += 1;
+            }
             continue;
         }
         const uint32_t name = parser->tokens.names[token];
