@@ -14,34 +14,28 @@ struct PPSystemWarningCase
     uint32_t errors;
 };
 
+// Clang's diagnostics for a fixture, preprocessed with `directory` as a system (or with `system` false, an -I) directory
+// and its system headers' warnings shown or not, without CPATH and C_INCLUDE_PATH, its output discarded: null unless it
+// exits with status 1 where the fixture has `errors`, else 0. Through the clang server where test-preprocessor has one
+// (oracle_serve_child), else as a child.
 static char* pp_test_system_warning_clang(const char* path, const char* directory, bool system, bool show, uint32_t errors)
 {
-    FILE* diagnostics = tmpfile();
+    char* const arguments[] = { "clang", "-E", "-std=gnu17", "-nostdinc", "-fno-caret-diagnostics", "-fmacro-backtrace-limit=0",
+                                "-D__INT64_C(c)=c##L", show ? "-Wsystem-headers" : "-Wno-system-headers", system ? "-isystem" : "-I", (char*)directory, (char*)path, NULL };
+    char** environment = pp_test_clang_environment();
+    char* output = NULL;
     char* text = NULL;
-    const pid_t child = diagnostics != NULL ? fork() : -1;
-    if (child == 0)
+    uint64_t output_length = 0;
+    uint64_t length = 0;
+    const int status = environment != NULL ? oracle_serve_child("preprocessor: system warnings' clang diagnostics", arguments, environment, 2, &output, &output_length, &text, &length)
+                                           : -1;
+    if (status != (errors != 0) || length >= BUSTER_PP_TEST_MAX_OUTPUT)
     {
-        const int output = open("/dev/null", O_WRONLY);
-        if (output >= 0 && dup2(output, STDOUT_FILENO) >= 0 && dup2(fileno(diagnostics), STDERR_FILENO) >= 0)
-        {
-            unsetenv("CPATH");
-            unsetenv("C_INCLUDE_PATH");
-            execlp("clang", "clang", "-E", "-std=gnu17", "-nostdinc", "-fno-caret-diagnostics", "-fmacro-backtrace-limit=0",
-                   "-D__INT64_C(c)=c##L", show ? "-Wsystem-headers" : "-Wno-system-headers", system ? "-isystem" : "-I", directory, path, (char*)NULL);
-        }
-        _exit(127);
+        free(text);
+        text = NULL;
     }
-    int status = 0;
-    size_t length = 0;
-    const bool ran = child > 0 && waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == (errors != 0);
-    if (ran)
-    {
-        pp_test_read_output(diagnostics, &text, &length);
-    }
-    if (diagnostics != NULL)
-    {
-        fclose(diagnostics);
-    }
+    free(output);
+    free(environment);
     return text;
 }
 
