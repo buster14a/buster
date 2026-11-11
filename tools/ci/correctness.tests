@@ -108,6 +108,17 @@ if grep -q "shell by\|shell: built" "$directory/bad.txt"; then exit 1; fi
 cat "$directory/good.txt"
 grep -q "^test-sqlite: silent.sql: every build's output is clang -O0's$" "$directory/good.txt"
 grep -q "^test-sqlite: 9 of SQLite's CLI tests and 5 scripts: every build agrees with clang -O0's$" "$directory/good.txt"
+== Test SQLite's Tcl suite's pinned subset through testfixture by both tiers against clang's [4 CPUs]
+# #146: testfixture (tclsqlite.c, SQLite's test sources and the amalgamation its Makefile generates, which must be the
+# frozen corpus's sqlite3.c) built by SQLite's configure and Makefile with clang -O0, Tier 0 and --tier1, against Tcl 8.6's
+# distribution package (hosted: Ubuntu 26.04's tcl8.6-dev, pinned below); each runs tests/sqlite/testfixture-subset.txt's
+# scripts of SQLite's `full` permutation, which clang's must all pass, and the other builds' every script must have
+# clang's state, errors and test count (docs/commands/c-testsuite.md). The full permutation runs on main, in a job of its
+# own (hosted-correctness.yml's `sqlite-full`). A host without Tcl's development package skips it, but a hosted runner.
+unset CPATH C_INCLUDE_PATH
+tcl=$(bash tools/ci/tcl-config.sh) || exit $?
+"$BUSTER_COMPILER" test-sqlite-testfixture --clang clang --tree build/sqlite --tcl "$tcl" --amalgamation "$BUSTER_CORPUS/sqlite/sqlite3.c" \
+    --subset tests/sqlite/testfixture-subset.txt --jobs "${CORES:-4}" --directory build
 == Test the direct path's executables [8 CPUs]
 "$BUSTER_COMPILER" test-executable
 == Test the lanes [8 CPUs]
