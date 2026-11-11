@@ -147,10 +147,13 @@ enum
     // An unevaluated operand with a side effect (#1447, clang's CheckUnaryExprOrTypeTraitOperand and
     // CreateGenericSelectionExpr): -Wunevaluated-expression, on by default, under -Wunused-value and so -Wunused and -Wall.
     CHECK_WARNING_ID_UNEVALUATED_EXPRESSION = 121,
+    // An enum's fixed underlying type with const or volatile, which it drops (#1952, clang's ActOnTag):
+    // -Wunderlying-cv-qualifier-ignored, on by default.
+    CHECK_WARNING_ID_UNDERLYING_CV_QUALIFIER = 122,
     // Two unsequenced modifications of a variable, or one and a read of it (#1953, clang's SequenceChecker,
     // c_check_unsequenced.c): -Wunsequenced, on by default, under -Wsequence-point and so -Wmost and -Wall. (Its ID past
-    // the ones #2142 takes, which its rows fill.)
-    CHECK_WARNING_ID_UNSEQUENCED = 126,
+    // the ones #2142 takes (123 to 126), which its rows fill.)
+    CHECK_WARNING_ID_UNSEQUENCED = 127,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -429,6 +432,10 @@ typedef enum CheckWarningEventKind
     // __builtin_cpu_supports's literal of a feature clang doesn't know (#1843, check_input_cpu_supports_literal), at the
     // builtin's name: the description's message.
     CHECK_WARNING_EVENT_INVALID_CPU_SUPPORTS,
+    // An enum's fixed underlying type's const and volatile, dropped (#1952): "'const' qualifier in enumeration underlying
+    // type ignored", or "'const' and 'volatile' qualifiers ...", at the base's first token that isn't a qualifier;
+    // payload.data the qualifiers (BUSTER_TYPE_CONST, BUSTER_TYPE_VOLATILE).
+    CHECK_WARNING_EVENT_UNDERLYING_CV_QUALIFIER,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
 

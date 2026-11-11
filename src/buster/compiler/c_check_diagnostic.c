@@ -162,7 +162,8 @@ static const CheckWarningDescription check_warning_descriptions[] =
     [CHECK_WARNING_ID_TYPE_SAFETY] = { "-Wtype-safety", NULL, "argument type doesn't match specified type tag" },
     [CHECK_WARNING_ID_UNEVALUATED_EXPRESSION] =
         { "-Wunevaluated-expression", "-Wunused-value", "expression with side effects has no effect in an unevaluated context" },
-    // (#1953: its ID assigned past the ones #2142 takes, which its rows fill.)
+    [CHECK_WARNING_ID_UNDERLYING_CV_QUALIFIER] = { "-Wunderlying-cv-qualifier-ignored", NULL, "qualifier in enumeration underlying type ignored" },
+    // (#1953: its ID assigned past the ones #2142 takes (123 to 126), which its rows fill.)
     [CHECK_WARNING_ID_UNSEQUENCED] = { "-Wunsequenced", "-Wsequence-point", "multiple unsequenced modifications" },
 };
 
@@ -387,6 +388,25 @@ static uint32_t check_diagnostic_kr_call_token(const CheckInput* input, uint32_t
     return known != 0 ? known - 1 : callee < graph->count ? graph->tokens[callee] : graph->tokens[node];
 }
 
+// The name a reader's K&R record's severity and words read: a call's callee's (check_input_kr_call), else its token.
+static uint32_t check_diagnostic_kr_name(const CheckInputKrDiagnostic* diagnostic)
+{
+    return diagnostic->warning != CHECK_WARNING_KR_DEFINITION && diagnostic->body != BUSTER_CHECK_NONE ? diagnostic->body : diagnostic->token;
+}
+
+// Where clang reports a call's K&R warning (#1994, Sema::BuildResolvedCallExpr and ConvertArgumentsForCall): passing
+// arguments without a prototype at the call's `(`, a known definition's too few or too many at its `)`, the node's token.
+static uint32_t check_diagnostic_kr_call_place(const CheckInput* input, const Parser* parser, uint32_t node, uint32_t warning)
+{
+    const uint32_t close = input->graph.tokens[node];
+    uint32_t open = warning == CHECK_WARNING_NON_PROTOTYPE_CALL && close < parser->tokens.count ? close : 0;
+    while (open != 0 && !(parser->tokens.kinds[open] == PARSE_KIND_L_PAREN && parser->tree.parents[open] == close))
+    {
+        open -= 1;
+    }
+    return open != 0 ? open : close;
+}
+
 static CheckWarningSeverity check_diagnostic_kr_severity(const CheckInput* input, uint32_t token, uint32_t warning)
 {
     const uint32_t declaration = input->declarations != NULL && token < input->token_count ? input->declarations[token] : BUSTER_CHECK_NONE;
@@ -564,7 +584,7 @@ static bool check_diagnostic_first_error(const CheckInput* input, const CheckStr
     {
         const CheckInputKrDiagnostic diagnostic = input->kr_diagnostics[i];
         const uint32_t at = diagnostic.token;
-        if (at < first && check_diagnostic_kr_severity(input, at, diagnostic.warning) >= CHECK_WARNING_ERROR)
+        if (at < first && check_diagnostic_kr_severity(input, check_diagnostic_kr_name(&diagnostic), diagnostic.warning) >= CHECK_WARNING_ERROR)
         {
             first = at;
         }
@@ -643,9 +663,31 @@ static const char* check_diagnostic_pragma_message(const CheckInputFpPragma* rec
     return result;
 }
 
+// The name of the C23 attribute whose scope is at `token`, where clang's parser reads its arguments its own way (#1447,
+// ParseClangAttributeArgs: availability's, external_source_symbol's, type_tag_for_datatype's and objc_bridge_related's,
+// with parentheses), or BUSTER_CHECK_NONE: clang's attribute is located at its name, not at its scope, as each of these
+// parsers makes it. Only a `clang::` one is known, so only one has reports at its scope. Cold: an attribute's report.
+static uint32_t check_diagnostic_custom_attribute_name(const Parser* parser, uint32_t token)
+{
+    const uint32_t count = parser->tokens.count;
+    const uint8_t* kinds = parser->tokens.kinds;
+    const bool scoped = token + 4 < count && kinds[token] == PARSE_KIND_IDENTIFIER && kinds[token + 1] == PARSE_KIND_COLON &&
+                        kinds[token + 2] == PARSE_KIND_COLON && kinds[token + 4] == PARSE_KIND_L_PAREN && token >= 1 &&
+                        (kinds[token - 1] == PARSE_KIND_L_SQUARE || kinds[token - 1] == PARSE_KIND_COMMA);
+    const uint32_t name = scoped ? parser->tokens.names[token + 3] : 0;
+    bool custom = false;
+    for (uint32_t s = 0; name != 0 && s < BUSTER_PARSE_CUSTOM_ATTRIBUTES; s += 1)
+    {
+        custom |= parser->meanings.custom_attributes[s] == name;
+    }
+    return custom ? token + 3 : BUSTER_CHECK_NONE;
+}
+
 static uint32_t check_diagnostic_input_report_source(const CheckInput* input, const Parser* parser, const CheckInputReport* report)
 {
     uint32_t source = check_input_report_source(parser, report);
+    const uint32_t custom = report->pragma == 0 && report->token < parser->tokens.count ? check_diagnostic_custom_attribute_name(parser, report->token) : BUSTER_CHECK_NONE;
+    source = custom != BUSTER_CHECK_NONE ? parser->tokens.sources[custom] : source;
     if (input->naked_diagnostic != NULL && report->pragma == 0 && report->token == input->naked_diagnostic->position)
     {
         source = parser->tokens.sources[input->naked_diagnostic->token];

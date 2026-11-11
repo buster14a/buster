@@ -46,13 +46,16 @@ static uint32_t check_program_alias_of(const CheckProgramAlias* aliases, uint32_
     return low < count && aliases[low].object == object ? low + 1 : 0;
 }
 
+static uint32_t check_program_label_redirect(const CheckProgram* program, uint32_t object);
+
 // The object whose symbol a reference to `object` takes: a weakref's target's, where the unit has an object of its name,
-// and otherwise its own.
+// and otherwise its own; then the object its asm label names, if another (#1979).
 static uint32_t check_program_alias_redirect(const CheckProgram* program, uint32_t object)
 {
     const uint32_t entry = program->alias_count != 0 ? check_program_alias_of(program->aliases, program->alias_count, object) : 0;
     const CheckProgramAlias* alias = entry != 0 ? program->aliases + entry - 1 : NULL;
-    return alias != NULL && alias->kind == CHECK_PROGRAM_WEAKREF && alias->target_object != 0 ? alias->target_object : object;
+    const uint32_t target = alias != NULL && alias->kind == CHECK_PROGRAM_WEAKREF && alias->target_object != 0 ? alias->target_object : object;
+    return program->label_merge_count != 0 ? check_program_label_redirect(program, target) : target;
 }
 
 // Whether `object` is a weakref's whose own symbol is a weak reference to its name: one whose target isn't an object of
@@ -492,6 +495,233 @@ static bool check_program_aliases(CheckProgram* program, CheckProgramTargetEvent
     return valid;
 }
 
+// The object a reference to `object` takes the symbol of through an asm label (#1979, CheckProgram.label_merges): its
+// name's other object, or itself.
+static uint32_t check_program_label_redirect(const CheckProgram* program, uint32_t object)
+{
+    uint32_t low = 0;
+    uint32_t high = program->label_merge_count;
+    while (low < high)
+    {
+        const uint32_t middle = low + (high - low) / 2;
+        low = (uint32_t)(program->label_merges[middle] >> 32) < object ? middle + 1 : low;
+        high = (uint32_t)(program->label_merges[middle] >> 32) < object ? high : middle;
+    }
+    return low < program->label_merge_count && (uint32_t)(program->label_merges[low] >> 32) == object ? (uint32_t)program->label_merges[low] : object;
+}
+
+// The position of `object` among `count` sorted keys of objects in their high halves, or `count`.
+static uint32_t check_program_label_find(const uint64_t* keys, uint32_t count, uint32_t object)
+{
+    const uint32_t at = check_program_alias_lower(keys, count, object);
+    return at < count && (uint32_t)(keys[at] >> 32) == object ? at : count;
+}
+
+// A labelled object of group `group`: one of its `count` objects'.
+static uint32_t check_program_label_member(const uint32_t* groups, uint32_t count, uint32_t group)
+{
+    uint32_t member = 0;
+    while (member + 1 < count && groups[member] != group)
+    {
+        member += 1;
+    }
+    return member;
+}
+
+// Asm labels' names (#1979): clang's module has one global per name, so an object whose asm label (`double foo(double)
+// __asm__("bar")`) names another object's symbol, another label's or an identifier's (`double bar(double)`, of a
+// file-scope declaration with linkage or a file-scope static, as check_program_alias_named takes them), is that object:
+// a reference to either is to the one symbol, which the name's definition defines, or else its first tentative
+// definition, or else nothing (an undefined symbol, one for the name). Two functions' definitions of one name are clang's
+// error at code generation (label_conflict, which check_driver_aliases reports); two variables' definitions are refused
+// by name (label_refused): clang keeps the later one's storage alone. An overloadable function's identifier, which its
+// mangled name replaces, is taken as its name too; such a unit is refused at its mangled name's emission elsewhere.
+//
+// Cost: nothing in a unit without asm labels with linkage. With them (glibc's headers' redirections), each labelled
+// object is sorted once by object and by its label's hash; the unit's declarations are scanned, 64 tokens at a time,
+// only where a label is also an identifier of the unit or names two objects, which glibc's redirections rarely are.
+static bool check_program_label_merges(CheckProgram* program, const CheckProgramTargetEvents* events, bool scalar, Arena* output, Arena* scratch)
+{
+    const CheckInput* input = program->input;
+    const Parser* parser = program->parser;
+    const InternTable* identifiers = program->identifiers != NULL ? program->identifiers :
+                                     program->parser->preprocessor != NULL ? program->parser->preprocessor->table : NULL;
+    const uint32_t event_count = events->label_count;
+    const uint64_t mark = scratch->length;
+    uint64_t* sorting = events->room ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, event_count) : 0;
+    bool valid = events->room && sorting != 0;
+    const uint64_t* keys = valid && event_count > 1 ? c_bindings_sort(events->label_keys, sorting, event_count, !BUSTER_SCALAR_PATH(scalar), UINT32_MAX) : events->label_keys;
+    // The labelled objects, one each: its key (the object and its first labelled declaration), its label, the hash keys
+    // that group them, and each one's group.
+    uint32_t count = 0;
+    for (uint32_t e = 0; valid && e < event_count; e += 1)
+    {
+        count += e == 0 || keys[e] >> 32 != keys[e - 1] >> 32;
+    }
+    uint64_t* objects = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, count) : 0;
+    String8* labels = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, String8, count) : 0;
+    uint64_t* hashes = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (uint64_t)count * 2) : 0;
+    uint32_t* groups = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, count) : 0;
+    valid = valid && objects != 0 && labels != 0 && hashes != 0 && groups != 0;
+    uint32_t unique = 0;
+    for (uint32_t e = 0; valid && e < event_count; e += 1)
+    {
+        if (e == 0 || keys[e] >> 32 != keys[e - 1] >> 32)
+        {
+            objects[unique] = keys[e];
+            labels[unique] = check_program_alias_label(input, (uint32_t)keys[e]);
+            hashes[unique] = (uint64_t)(uint32_t)link_hash((const uint8_t*)labels[unique].pointer, labels[unique].length) << 32 | unique;
+            unique += 1;
+        }
+    }
+    const uint64_t* by_hash = valid && count > 1 ? c_bindings_sort(hashes, hashes + count, count, !BUSTER_SCALAR_PATH(scalar), UINT32_MAX) : hashes;
+    // The groups, a name each: its first labelled object (by hash order), how many it has, and the unit's identifier of
+    // its spelling, as keys of the identifier and the group.
+    uint32_t* sizes = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, count) : 0;
+    uint64_t* names = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (uint64_t)count * 2) : 0;
+    valid = valid && sizes != 0 && names != 0;
+    uint32_t group_count = 0;
+    uint32_t named = 0;
+    bool scan = false;
+    for (uint32_t i = 0; valid && i < count; i += 1)
+    {
+        const uint32_t u = (uint32_t)by_hash[i];
+        uint32_t group = UINT32_MAX;
+        for (uint32_t j = i; group == UINT32_MAX && j != 0 && by_hash[j - 1] >> 32 == by_hash[i] >> 32; j -= 1)
+        {
+            const uint32_t other = (uint32_t)by_hash[j - 1];
+            group = check_program_alias_same(labels[other], labels[u]) ? groups[other] : UINT32_MAX;
+        }
+        if (group == UINT32_MAX)
+        {
+            group = group_count++;
+            sizes[group] = 0;
+            const IdentId identifier = identifiers != NULL && labels[u].length != 0 && labels[u].length < UINT32_MAX ?
+                                       intern_find(identifiers, (const uint8_t*)labels[u].pointer, (uint32_t)labels[u].length) : 0;
+            names[named] = (uint64_t)identifier << 32 | group;
+            named += identifier != 0;
+        }
+        groups[u] = group;
+        sizes[group] += 1;
+        scan |= sizes[group] > 1;
+    }
+    scan |= named != 0;
+    const uint64_t* by_name = valid && named > 1 ? c_bindings_sort(names, names + count, named, !BUSTER_SCALAR_PATH(scalar), UINT32_MAX) : names;
+    // The members: the labelled objects (0 to count - 1) and each group's identifier's object (count + group), with their
+    // first definitions and tentative definitions, found by one scan of the unit's static declarations.
+    const uint32_t members = count + group_count;
+    uint32_t* member_objects = valid && scan ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, members) : 0;
+    uint32_t* definitions = valid && scan ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, members) : 0;
+    uint32_t* tentatives = valid && scan ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, members) : 0;
+    uint8_t* functions = valid && scan ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, members) : 0;
+    valid = valid && (!scan || (member_objects != 0 && definitions != 0 && tentatives != 0 && functions != 0));
+    for (uint32_t m = 0; valid && scan && m < members; m += 1)
+    {
+        member_objects[m] = m < count ? (uint32_t)(objects[m] >> 32) : 0;
+        definitions[m] = BUSTER_CHECK_NONE;
+        tentatives[m] = BUSTER_CHECK_NONE;
+        functions[m] = 0;
+    }
+    const uint32_t token_count = input->token_count;
+    for (uint32_t first = 0; valid && scan && first < token_count; first += 64)
+    {
+        const uint64_t lanes = BUSTER_SCALAR_PATH(scalar) ? check_input_scan_all(first, token_count) : check_input_scan_bit(input->declaration_bits, first, token_count, BUSTER_CHECK_BITS_STATIC);
+        for (uint64_t selected = lanes; selected != 0; selected &= selected - 1)
+        {
+            const uint32_t token = first + (uint32_t)__builtin_ctzll(selected);
+            const bool declaring = input->declarations[token] == token && check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_STATIC);
+            const uint32_t object = declaring ? input->objects[token] : 0;
+            const uint32_t labelled = object != 0 ? check_program_label_find(objects, count, object) : count;
+            const bool candidate = object != 0 && labelled == count && check_program_alias_named(program, program->aliases, program->alias_count, token);
+            const uint32_t identifier = candidate ? parser->tokens.names[token] : 0;
+            const uint32_t at = identifier != 0 ? check_program_label_find(by_name, named, identifier) : named;
+            const uint32_t group = at < named ? (uint32_t)by_name[at] : UINT32_MAX;
+            // A group's identifier names one object; another of its spelling (a second file-scope entity, which the reader
+            // refuses but for a block-scope static's) is left alone.
+            const uint32_t member = labelled < count ? labelled :
+                                    group != UINT32_MAX && (member_objects[count + group] == 0 || member_objects[count + group] == object) ? count + group :
+                                                                                                                                              members;
+            if (member < members)
+            {
+                member_objects[member] = object;
+                functions[member] = input->declaration_kinds[token] == C_BINDING_FUNCTION;
+                definitions[member] = check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_DEFINED) && definitions[member] == BUSTER_CHECK_NONE ? token : definitions[member];
+                tentatives[member] = check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_TENTATIVE) && tentatives[member] == BUSTER_CHECK_NONE ? token : tentatives[member];
+            }
+        }
+    }
+    // Each group's object: its definition's member, else its first tentative definition's, else its first member; and the
+    // second definition of a name, if any. Each group's members are its labelled objects, in object order, and its
+    // identifier's object.
+    uint32_t* canonical = valid && scan ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, group_count) : 0;
+    uint32_t* firsts = valid && scan ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, group_count) : 0;
+    uint32_t* seconds = valid && scan ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, group_count) : 0;
+    uint32_t* tentative = valid && scan ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, group_count) : 0;
+    valid = valid && (!scan || (canonical != 0 && firsts != 0 && seconds != 0 && tentative != 0));
+    for (uint32_t g = 0; valid && scan && g < group_count; g += 1)
+    {
+        canonical[g] = members;
+        firsts[g] = BUSTER_CHECK_NONE;
+        seconds[g] = BUSTER_CHECK_NONE;
+        tentative[g] = BUSTER_CHECK_NONE;
+    }
+    uint32_t merges = 0;
+    for (uint32_t m = 0; valid && scan && m < members; m += 1)
+    {
+        const uint32_t g = m < count ? groups[m] : m - count;
+        const uint32_t definition = definitions[m];
+        const bool earliest = definition < firsts[g];
+        seconds[g] = earliest ? firsts[g] : definition < seconds[g] ? definition : seconds[g];
+        firsts[g] = earliest ? definition : firsts[g];
+        const bool first_tentative = definition == BUSTER_CHECK_NONE && firsts[g] == BUSTER_CHECK_NONE && tentatives[m] < tentative[g];
+        canonical[g] = member_objects[m] == 0 ? canonical[g] :
+                       earliest || first_tentative || canonical[g] == members ? m : canonical[g];
+        tentative[g] = first_tentative ? tentatives[m] : tentative[g];
+        merges += member_objects[m] != 0;
+    }
+    // A name's second definition: a function's is clang's error, a variable's refused; the earliest of the unit's.
+    for (uint32_t g = 0; valid && scan && g < group_count; g += 1)
+    {
+        const uint32_t member = canonical[g];
+        merges -= member < members ? 1 : 0;
+        const bool function = member < members && functions[member];
+        if (seconds[g] != BUSTER_CHECK_NONE && function && (program->label_conflict == 0 || seconds[g] < program->label_conflict - 1))
+        {
+            program->label_conflict = seconds[g] + 1;
+            program->label_previous = firsts[g];
+            program->label_conflict_name = labels[member < count ? member : check_program_label_member(groups, count, g)];
+        }
+        program->label_refused = seconds[g] != BUSTER_CHECK_NONE && !function && (program->label_refused == 0 || seconds[g] < program->label_refused - 1) ?
+                                 seconds[g] + 1 :
+                                 program->label_refused;
+    }
+    // The merges, by object: each member but its group's object takes that object's symbol.
+    uint64_t* merged = valid && merges != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint64_t, merges) : 0;
+    uint64_t* merge_sorting = valid && merges > 1 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, merges) : 0;
+    valid = valid && (merges == 0 || merged != 0) && (merges <= 1 || merge_sorting != 0);
+    uint32_t merge_count = 0;
+    for (uint32_t m = 0; valid && merges != 0 && m < members; m += 1)
+    {
+        const uint32_t g = m < count ? groups[m] : m - count;
+        if (member_objects[m] != 0 && canonical[g] != m)
+        {
+            merged[merge_count++] = (uint64_t)member_objects[m] << 32 | member_objects[canonical[g]];
+        }
+    }
+    const uint64_t* sorted_merges = valid && merge_count > 1 ? c_bindings_sort(merged, merge_sorting, merge_count, !BUSTER_SCALAR_PATH(scalar), UINT32_MAX) : merged;
+    if (valid && merge_count != 0)
+    {
+        if (sorted_merges != merged)
+        {
+            memcpy(merged, sorted_merges, (uint64_t)merge_count * sizeof(uint64_t));
+        }
+        program->label_merges = merged;
+        program->label_merge_count = merge_count;
+    }
+    arena_pop_to(scratch, mark);
+    return valid;
+}
+
 // Numbers the `needed` objects' symbols (check_program_needed_number), into `program`'s columns from `output`, after its
 // weakrefs' references (and its constant CFStrings' calls', to their canonical calls, #148) are moved to their targets: a referenced weakref with a target object takes the target's symbol
 // rather than one of its own, and makes the target needed, its undefined symbol weak in `states` (zero before) where
@@ -500,6 +730,14 @@ static bool check_program_aliases(CheckProgram* program, CheckProgramTargetEvent
 // there was no room.
 static bool check_program_alias_number(CheckProgram* program, uint8_t* needed, uint8_t* states, bool scalar, Arena* output)
 {
+    // An object an asm label makes another's symbol (#1979) needs that one's instead.
+    for (uint32_t k = 0; k < program->label_merge_count; k += 1)
+    {
+        const uint32_t object = (uint32_t)(program->label_merges[k] >> 32);
+        const uint32_t target = (uint32_t)program->label_merges[k];
+        needed[target] |= needed[object];
+        needed[object] = 0;
+    }
     for (uint32_t k = 0; k < program->alias_count; k += 1)
     {
         const CheckProgramAlias* alias = program->aliases + k;
@@ -537,6 +775,8 @@ static bool check_program_alias_number(CheckProgram* program, uint8_t* needed, u
     }
     // cpu_specific's versions and cpu_dispatch's dispatchers (#1447): their groups' reference objects are needed.
     check_program_cpu_needed(program, needed);
+    // Multiversioning by target strings' groups (#1838): their reference objects and bodies' own symbols' objects.
+    check_program_target_needed(program, needed);
     program->symbol_count = check_program_needed_count(needed, program->object_count, BUSTER_SCALAR_PATH(scalar));
     program->symbol_objects = program->symbol_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, program->symbol_count) : 0;
     const bool valid = program->symbol_count == 0 || program->symbol_objects != 0;
@@ -557,7 +797,11 @@ static bool check_program_alias_number(CheckProgram* program, uint8_t* needed, u
         const CheckDataCFString* call = program->cfstrings + k;
         program->object_symbols[call->object] = program->object_symbols[call->canonical];
     }
-    return valid && check_program_cpu_number(program, output);
+    for (uint32_t k = 0; valid && k < program->label_merge_count; k += 1)
+    {
+        program->object_symbols[program->label_merges[k] >> 32] = program->object_symbols[(uint32_t)program->label_merges[k]];
+    }
+    return valid && check_program_cpu_number(program, output) && check_program_target_number(program, output);
 }
 
 #endif
