@@ -5402,7 +5402,10 @@ The later phases are left:
   specifiers', its declarator's, an invalid type's or an unsized array's
   initializer's) leaves the whole declaration out of the view, to its `;`
   (`check_driver_rejected_declaration`, #1447), and every body that names one
-  of its names; a dropped part's error counts just before the token after it,
+  of its names (not the words in its attributes' lists, `noinline` or an
+  argument, which declare nothing, #2137: another declaration's attribute that
+  spells the same word outside every body no longer refuses the view); a
+  dropped part's error counts just before the token after it,
   so the definition that follows keeps its unused variables. An error in a
   function definition outside its body (its declarator's, its parameters')
   leaves the whole definition out the same way, to its body's `}`, so its own

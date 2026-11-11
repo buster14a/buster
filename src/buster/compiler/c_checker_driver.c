@@ -6414,11 +6414,13 @@ static bool check_driver_rejected_declaration(const Parser* parser, const CheckI
         valid = definition || (edits[at] != CHECK_DRIVER_EDIT_BLOCK && !body);
     }
     valid = valid && (!definition || open < top);
-    // Its names, outside its parameter lists (the parse reads a definition's as a call's): a declaration's declared
-    // identifiers; a definition's ordinary identifiers before its body, its name among them, which the reader doesn't
-    // record (and a K&R list's parameters, which mask a body needlessly).
+    // Its names, outside its parameter lists (the parse reads a definition's as a call's) and its attributes' lists (#2137:
+    // an attribute's name, `noinline`, or an argument it names declares nothing): a declaration's declared identifiers; a
+    // definition's ordinary identifiers before its body, its name among them, which the reader doesn't record (and a K&R
+    // list's parameters, which mask a body needlessly).
     const uint32_t names_last = definition ? open : top;
     uint32_t depth = 0;
+    uint32_t attributes = 0;
     // The bodies that name one of its names, outside it; a file-scope use declines. A C23 enum redefinition's enumerator
     // of a name the earlier definition declares too (#1447, CheckInput.ambiguous_index) is still declared where it's left
     // out, by that one.
@@ -6427,11 +6429,13 @@ static bool check_driver_rejected_declaration(const Parser* parser, const CheckI
     {
         const uint8_t role = parser->tree.roles[at];
         depth -= (role == PARSE_ROLE_CLOSE_FUNCTION || role == PARSE_ROLE_CLOSE_CALL) && depth != 0;
+        attributes -= role == PARSE_ROLE_CLOSE_ATTRIBUTE_LIST && attributes != 0;
         const uint32_t name = parser->tokens.names[at];
-        const bool declared = parser->tokens.kinds[at] == PARSE_KIND_IDENTIFIER && name != 0 && depth == 0 &&
+        const bool declared = parser->tokens.kinds[at] == PARSE_KIND_IDENTIFIER && name != 0 && depth == 0 && attributes == 0 &&
                               (definition ? role == PARSE_ROLE_OPERAND : input->declarations[at] == at) &&
                               (input->ambiguous_index == NULL || input->ambiguous_index[at] == 0);
         depth += role == PARSE_ROLE_OPEN_FUNCTION || role == PARSE_ROLE_OPEN_CALL;
+        attributes += role == PARSE_ROLE_OPEN_ATTRIBUTE_LIST;
         for (uint32_t use = 0; declared && valid && use < count; use += 1)
         {
             // (Another declaration of the name, an earlier C23 definition's enumerator among them, names nothing.)
@@ -6454,15 +6458,18 @@ static bool check_driver_rejected_declaration(const Parser* parser, const CheckI
     if (valid)
     {
         depth = 0;
+        attributes = 0;
         for (uint32_t at = low; users != 0 && at <= names_last; at += 1)
         {
             const uint8_t role = parser->tree.roles[at];
             depth -= (role == PARSE_ROLE_CLOSE_FUNCTION || role == PARSE_ROLE_CLOSE_CALL) && depth != 0;
+            attributes -= role == PARSE_ROLE_CLOSE_ATTRIBUTE_LIST && attributes != 0;
             const uint32_t name = parser->tokens.names[at];
-            const bool declared = parser->tokens.kinds[at] == PARSE_KIND_IDENTIFIER && name != 0 && depth == 0 &&
+            const bool declared = parser->tokens.kinds[at] == PARSE_KIND_IDENTIFIER && name != 0 && depth == 0 && attributes == 0 &&
                                   (definition ? role == PARSE_ROLE_OPERAND : input->declarations[at] == at) &&
                                   (input->ambiguous_index == NULL || input->ambiguous_index[at] == 0);
             depth += role == PARSE_ROLE_OPEN_FUNCTION || role == PARSE_ROLE_OPEN_CALL;
+            attributes += role == PARSE_ROLE_OPEN_ATTRIBUTE_LIST;
             for (uint32_t b = 0; declared && b < body_count; b += 1)
             {
                 bool names = false;
