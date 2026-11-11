@@ -548,6 +548,10 @@ typedef struct PPFileData PPFileData;
 #define BUSTER_PP_NAMED_UCN_INCOMPLETE 0x82
 #define BUSTER_PP_NAMED_UCN_EMPTY 0x83
 #define BUSTER_PP_NAMED_UCN_UNTERMINATED 0x84
+// The same of a `\u` or `\U` clang reads as no UCN (#1447): no hex digit after it (its letter's "\u used with no following
+// hex digits"), too few (BUSTER_PP_NAMED_UCN_INCOMPLETE), or a delimited one's empty braces or no `}` before a byte that
+// isn't a hex digit (BUSTER_PP_NAMED_UCN_EMPTY, BUSTER_PP_NAMED_UCN_UNTERMINATED). The words name the source's letter.
+#define BUSTER_PP_UCN_NO_DIGITS 0x85
 // The bytes of a bad name pp_diagnose_named_ucn's error prints, at most.
 #define BUSTER_PP_NAMED_UCN_NAME_BYTES 1024
 
@@ -3010,7 +3014,8 @@ struct PPNamedUcnScan
 };
 
 // The candidates for a named UCN's backslash among bytes [b, end) of a source of `length` bytes, at most 64 of them, as
-// bits: a backslash (or with trigraphs a '/' after a '?', the end of a ??/) followed by 'N', by a line splice's backslash and a
+// bits: a backslash (or with trigraphs a '/' after a '?', the end of a ??/) followed by 'N', 'u' or 'U' (#1447: a `\u`
+// clang reads as no UCN is -Wunicode's too), by a line splice's backslash and a
 // blank or a line break, or with trigraphs by a '?' (a ??/ that splices the line). A named UCN's backslash is always one,
 // since its N follows it after any line splices; pp_named_ucn_at decides which of them are. No byte past `length` is
 // read: the loads are masked. The vector path and its scalar twin give the same bits.
@@ -3037,7 +3042,10 @@ BUSTER_INLINE uint64_t pp_named_ucn_candidates(const uint8_t* bytes, uint64_t le
             // A blank or a line break: ' ', or '\t' to '\r'.
             const __mmask64 blank = _mm512_cmpeq_epi8_mask(bytes_2, _mm512_set1_epi8(' ')) |
                                     _mm512_cmple_epu8_mask(_mm512_sub_epi8(bytes_2, _mm512_set1_epi8('\t')), _mm512_set1_epi8('\r' - '\t'));
-            const __mmask64 next = _mm512_cmpeq_epi8_mask(bytes_1, _mm512_set1_epi8('N')) | (_mm512_cmpeq_epi8_mask(bytes_1, _mm512_set1_epi8('\\')) & blank) |
+            // ('u' and 'U' are one compare of the byte with bit 5 set.)
+            const __mmask64 letter = _mm512_cmpeq_epi8_mask(bytes_1, _mm512_set1_epi8('N')) |
+                                     _mm512_cmpeq_epi8_mask(_mm512_or_si512(bytes_1, _mm512_set1_epi8(0x20)), _mm512_set1_epi8('u'));
+            const __mmask64 next = letter | (_mm512_cmpeq_epi8_mask(bytes_1, _mm512_set1_epi8('\\')) & blank) |
                                    (trigraphs ? _mm512_cmpeq_epi8_mask(bytes_1, _mm512_set1_epi8('?')) : 0);
             result = slash & next;
         }
@@ -3051,7 +3059,7 @@ BUSTER_INLINE uint64_t pp_named_ucn_candidates(const uint8_t* bytes, uint64_t le
             const uint8_t after = i + 2 < length ? bytes[i + 2] : 0;
             const bool slash = bytes[i] == '\\' || (trigraphs && bytes[i] == '/' && i != 0 && bytes[i - 1] == '?');
             const bool blank = after == ' ' || (after >= '\t' && after <= '\r');
-            const bool candidate = slash && (next == 'N' || (next == '\\' && blank) || (trigraphs && next == '?'));
+            const bool candidate = slash && (next == 'N' || next == 'u' || next == 'U' || (next == '\\' && blank) || (trigraphs && next == '?'));
             result |= (uint64_t)candidate << k;
         }
     }
@@ -3129,7 +3137,9 @@ static bool pp_named_ucn_at(uint32_t refine_flags, const PPFileData* data, uint6
     uint64_t at = 0;
     result = result && get_char(&lexer, start, &size, &at) == '\\' && at == start;
     uint64_t kind_size = 0;
-    result = result && peek_char(&lexer, start + size, &kind_size) == 'N';
+    const int32_t letter = result ? peek_char(&lexer, start + size, &kind_size) : 0;
+    const bool named_letter = letter == 'N';
+    result = result && (named_letter || letter == 'u' || letter == 'U');
     uint64_t end = 0;
     uint32_t code_point = 0;
     const bool read = result && read_ucn(&lexer, start, &end, &code_point);
@@ -3144,9 +3154,15 @@ static bool pp_named_ucn_at(uint32_t refine_flags, const PPFileData* data, uint6
     uint64_t name_start = 0;
     uint64_t name_end = 0;
     uint32_t exact = 0;
-    const bool named = read && code_point != 0 && read_ucn_name(&lexer, start, name, sizeof(name), &name_length, &name_start, &name_end) &&
+    const bool named = named_letter && read && code_point != 0 && read_ucn_name(&lexer, start, name, sizeof(name), &name_length, &name_start, &name_end) &&
                        name_length < sizeof(name) && unicode_name_strict(name, (uint32_t)name_length, &exact);
-    *kind = !result ? 0 : read && code_point == 0 ? BUSTER_PP_NAMED_UCN_ERROR : named ? BUSTER_PP_NAMED_UCN_EXTENSION :
+    // A `\u` or `\U` clang reads as no UCN (#1447): no hex digit, too few, or a delimited `\u`'s braces (a `\U` takes none).
+    uint64_t digit_size = 0;
+    const int32_t digit = result && !named_letter && !read ? peek_char(&lexer, start + size + kind_size, &digit_size) : 0;
+    const bool hex = (digit >= '0' && digit <= '9') || ((digit | 0x20) >= 'a' && (digit | 0x20) <= 'f');
+    const uint8_t numeric = !hex && !(letter == 'u' && braced) ? BUSTER_PP_UCN_NO_DIGITS : !braced ? BUSTER_PP_NAMED_UCN_INCOMPLETE :
+                            empty ? BUSTER_PP_NAMED_UCN_EMPTY : BUSTER_PP_NAMED_UCN_UNTERMINATED;
+    *kind = !result ? 0 : !named_letter ? (read ? 0 : numeric) : read && code_point == 0 ? BUSTER_PP_NAMED_UCN_ERROR : named ? BUSTER_PP_NAMED_UCN_EXTENSION :
             read ? 0 : !braced ? BUSTER_PP_NAMED_UCN_INCOMPLETE : empty ? BUSTER_PP_NAMED_UCN_EMPTY : BUSTER_PP_NAMED_UCN_UNTERMINATED;
     result = *kind != 0;
     // The token it may start: the last that starts at it or before it.
