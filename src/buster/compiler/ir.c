@@ -324,6 +324,9 @@ struct IrAsmBody
     uint32_t count;
     uint32_t branch_count;
     uint32_t touched;
+    // The opmask registers the records write (k0 to k7, a bit each; Tier0AsmBody.masks), whose live masks Tier 1's CFG
+    // consumer saves around the body (tier1_emit_cfg_asm).
+    uint8_t masks;
 };
 
 typedef struct IrSizes IrSizes;

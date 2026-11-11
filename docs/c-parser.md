@@ -220,8 +220,16 @@ calling convention; not `_Static_assert`, `__extension__` or `[[`), with no
 were there. At file scope the parse goes on at the specifier, so that the next
 declaration's errors are clang's too; in a body it skips the rest as any error,
 and the checker's view parses past it again (`check_prefix_resume`,
-`docs/c-checker.md`). `test-parser` checks every diagnostic's place and mark
-on both paths (`parse_test_check_resumed`). It reports one syntax error per
+`docs/c-checker.md`). A comma at the top of an array declarator's size or an
+array designator's index (an assignment-expression, so "expected ']'" at the
+comma; #1867) is resumed the same way: clang's balanced tracker skips to the
+`]`, before any `;`, and goes on with what came before the comma, so the error
+marks [comma, `]`) for the view to drop (`ParseDiagnostic.resume_delete`). The
+vector path's checks take the comma there as an error by the group's mode
+(`PARSE_CHECK_ARRAY`, for `PARSE_GROUP_ARRAY` and `PARSE_GROUP_DESIGNATOR`).
+Without a `]` before the `;` nothing is resumed, where clang reads on.
+`test-parser` checks every diagnostic's place and mark on both paths
+(`parse_test_check_resumed`). It reports one syntax error per
 top-level declaration, the first, after the errors clang gives without
 changing how it parses (a missing type specifier, an unknown type name); clang
 may report more. Its places follow
@@ -694,8 +702,8 @@ selection, positional continuation, constant evaluation and override history as
 `.member = value`; an unknown field names the selected record in its diagnostic.
 Quad-precision `q`/`Q` literals are read on supported glibc hosts by
 `strtof128`, rounded once, and keep their binary128 bits (#1250,
-`c_check_quad.c`); an imaginary one is taken only where its long double holds
-it exactly, and unsupported hosts refuse them.
+`c_check_quad.c`), an imaginary one as its complex constant's imaginary part;
+unsupported hosts refuse them.
 
 The kernels' checks put every array in an arena followed by 4 GB and its own
 size of address space that may not be touched, so that a load past an array, or

@@ -3069,8 +3069,8 @@ static void check_test_driver_tier1_asm(CheckTest* test, const char* clang, cons
 }
 
 // The asm bodies' opmask fixture (#1839): two masks live across a template that writes k1 to k7, its clobbers, in a
-// function Tier 1 compiles. Tier 1's CFG consumer saves no mask value around an asm body, so such a template keeps its
-// helper (check_asm_names_opmask), whose call saves them; the masks then pick the lanes the sum adds.
+// function Tier 1 compiles. The template is an asm body, around which Tier 1's CFG consumer saves the masks live in the
+// opmask registers it writes (IrAsmBody.masks, tier1_emit_cfg_asm); the masks then pick the lanes the sum adds.
 static const char check_test_tier1_asm_masks_source[] =
     "#include <immintrin.h>\n"
     "#include <stdio.h>\n"
@@ -3128,6 +3128,32 @@ static void check_test_driver_tier1_asm_masks(CheckTest* test, const char* clang
                               "Tier 1 keeps the masks live across a template that writes k1 to k7, as clang -O0's build does");
             unlink(program);
         }
+    }
+    // The template is an asm body: tier1_kept's own records write k7 and hold no call.
+    char object[512];
+    snprintf(object, sizeof(object), "%s/tier1-asm-masks.o", directory);
+    for (uint32_t path = 0; referenced && path < 2; path += 1)
+    {
+        CheckTestTier1Build build;
+        const bool compiled = check_test_tier1_build(executable, unit, "tier1_kept", object, true, path != 0, true, false, "-march=x86-64-v4", &build);
+        X86Decoded records[1024];
+        uint32_t offsets[1024];
+        uint32_t types[1024];
+        uint32_t relocations = 0;
+        const uint32_t decoded = compiled ? check_test_tier1_function(object, "tier1_kept", records, 1024, offsets, types, &relocations) : 0;
+        uint32_t written_k7 = 0;
+        uint32_t calls = 0;
+        for (uint32_t r = 0; r < decoded; r += 1)
+        {
+            const X86Instruction* record = &records[r].instruction;
+            written_k7 += record->form == X86_FORM_KMOVW_K_R32 && record->reg == 7;
+            calls += record->form == X86_FORM_CALL_REL32 || record->form == X86_FORM_CALL_RM64;
+        }
+        char message[256];
+        snprintf(message, sizeof(message), "asm bodies' opmask fixture (%s path, --tier1): tier1_kept's own records write k7 %u times and hold %u calls", path != 0 ? "scalar" : "vector",
+                 written_k7, calls);
+        check_test_expect(test, compiled && decoded != 0 && written_k7 == 1 && calls == 0, message);
+        unlink(object);
     }
     unlink(unit);
     unlink(reference);

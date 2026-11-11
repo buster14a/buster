@@ -2533,9 +2533,10 @@ static __attribute__((noinline, cold)) void check_input_duplicate_specifier(Chec
 // brace, group close or a type's keyword cannot. `declaration` is the declaration's name token; 0 says its base was spelled
 // directly (or that the declaration is not one at all). Clang prints that typedef's name for the type's base
 // then, and an `aka` for what it hides unless it is its anonymous tag's own typedef.
-static uint32_t check_input_typedef_spelling(const CheckInput* input, const Parser* parser, uint32_t declaration)
+static uint32_t check_input_typedef_use(const CheckInput* input, const Parser* parser, uint32_t declaration, uint32_t* use)
 {
     uint32_t result = 0;
+    *use = 0;
     bool found = declaration < input->token_count;
     for (uint32_t token = declaration; found && result == 0 && token > 0;)
     {
@@ -2547,6 +2548,7 @@ static uint32_t check_input_typedef_spelling(const CheckInput* input, const Pars
                 input->declaration_kinds[resolved] == C_BINDING_TYPEDEF)
             {
                 result = resolved;
+                *use = token;
             }
             // Any other identifier is a sibling declarator's or use's name: cross it for the shared specifiers.
         }
@@ -2561,6 +2563,61 @@ static uint32_t check_input_typedef_spelling(const CheckInput* input, const Pars
         }
     }
     return result;
+}
+
+static uint32_t check_input_typedef_spelling(const CheckInput* input, const Parser* parser, uint32_t declaration)
+{
+    uint32_t use = 0;
+    return check_input_typedef_use(input, parser, declaration, &use);
+}
+
+// The qualifiers a declaration's specifiers write beside its typedef name `use` (#1447): `const CI`'s const, which clang
+// keeps as a qualifier over the typedef's sugar (`'const CI[1]' (aka 'const int[1]')`) though the typedef already
+// has it. Its specifier list's neighbours both ways, through qualifiers and other specifiers.
+static bool check_input_qualifier(const Parser* parser, uint32_t token, uint32_t* qualifiers);
+static uint32_t check_input_typedef_written_qualifiers(const Parser* parser, uint32_t use)
+{
+    uint32_t qualifiers = 0;
+    const uint32_t count = parser->tokens.count;
+    for (uint32_t direction = 0; use != 0 && use < count && direction < 2; direction += 1)
+    {
+        uint32_t token = use;
+        bool reading = true;
+        while (reading)
+        {
+            token = direction == 0 ? token - 1 : token + 1;
+            reading = token != 0 && token < count && token != UINT32_MAX &&
+                      (parser->tokens.kinds[token] == PARSE_KIND_QUALIFIER || (parser->tree.roles[token] == PARSE_ROLE_SPECIFIER &&
+                                                                                parser->tokens.kinds[token] != PARSE_KIND_IDENTIFIER));
+            if (reading)
+            {
+                check_input_qualifier(parser, token, &qualifiers);
+            }
+        }
+    }
+    return qualifiers;
+}
+
+// A declaration's typedef spelling for a diagnostic's type (check_input_typedef_spelling), as its use where the
+// declaration's specifiers write a qualifier again beside it (`const CI`, #1447), which the renderer prints over the
+// typedef's name (check_input_sugar_declaration); else the typedef's declaration, or 0.
+static uint32_t check_input_typedef_sugar(const CheckInput* input, const Parser* parser, uint32_t declaration)
+{
+    uint32_t use = 0;
+    const uint32_t result = check_input_typedef_use(input, parser, declaration, &use);
+    return result != 0 && check_input_typedef_written_qualifiers(parser, use) != 0 ? use : result;
+}
+
+// A diagnostic spelling's typedef declaration (#1447): a typedef's use (check_input_typedef_sugar) resolves to it, with
+// the qualifiers it writes again in `written`; any other spelling is itself.
+static uint32_t check_input_sugar_declaration(const CheckInput* input, const Parser* parser, uint32_t spelling, uint32_t* written)
+{
+    const uint32_t resolved = spelling < input->token_count && spelling < parser->tokens.count && input->declarations != 0 &&
+                              parser->tokens.kinds[spelling] == PARSE_KIND_IDENTIFIER ? input->declarations[spelling] : 0;
+    const bool use = resolved != 0 && resolved != spelling && resolved < input->token_count && input->declaration_kinds != 0 &&
+                     input->declaration_kinds[resolved] == C_BINDING_TYPEDEF;
+    *written = use ? check_input_typedef_written_qualifiers(parser, spelling) : 0;
+    return use ? resolved : spelling;
 }
 
 // Whether `name` is a typeof keyword's: C23's, GNU's or their unqualified forms (_BitInt shares their parser kind).
@@ -2614,7 +2671,7 @@ static uint32_t check_input_typeof_spelling(const CheckInput* input, const Parse
 static uint32_t check_input_specifier_spelling(const CheckInput* input, const Parser* parser, uint32_t declaration)
 {
     const uint32_t spelled = check_input_typeof_spelling(input, parser, declaration);
-    return spelled != 0 ? spelled : check_input_typedef_spelling(input, parser, declaration);
+    return spelled != 0 ? spelled : check_input_typedef_sugar(input, parser, declaration);
 }
 
 // The printed type and its typedef specifier's declaration for a warning operand that names `token`'s
@@ -2701,19 +2758,60 @@ static uint32_t check_input_operand_spelling(CheckInputReader* reader, uint32_t 
     return check_input_operand_type_spelling(reader->output, reader->parser, node);
 }
 
-static void check_input_null_warning(CheckInputReader* reader, TypeId destination, const CheckValue* value,
-                                      uint32_t first, uint32_t end, uint32_t completion)
+// c_checker_driver.c's, which a call argument's parameter spelling shares (#1100).
+static uint32_t check_driver_parameter_source(const Parser* parser, const CheckInput* input, uint32_t declaration, uint32_t index);
+static uint32_t check_driver_parameter_place(const Parser* parser, const CheckInput* input, uint32_t declaration, uint32_t index);
+static uint32_t check_driver_parameter_spelling(const Parser* parser, const CheckInput* input, uint32_t token);
+
+// The typedef that parameter `index` of a direct call's callee, named at `name`, is declared with (#1100): clang prints
+// the argument's conversion to it as the parameter's type, `'N *' (aka 'struct N *')`. The callee's visible
+// declaration's own parameter list gives it, as the driver's conversion notes find it (check_driver_parameter_source);
+// 0 where the callee isn't a function's name or its declaration lists no such parameter.
+static uint32_t check_input_parameter_spelling(const Parser* parser, const CheckInput* input, uint32_t name, uint32_t index)
 {
-    CheckWarningEvent event;
-    if (check_warning_null_event(reader->parser, reader->types, destination, value, first, end, completion, &event))
-    {
-        event.flags = check_input_warning_unevaluated(reader, event.token) ? BUSTER_CHECK_WARNING_SUPPRESSED : 0;
-        event.payload.token = reader->warning_bound_open;
-        check_input_warning_once(reader, &event);
-    }
+    const uint32_t function = name < parser->tokens.count && name < input->token_count && parser->tokens.kinds[name] == PARSE_KIND_IDENTIFIER &&
+                              input->declarations != 0 ? input->declarations[name] : BUSTER_CHECK_NONE;
+    const uint32_t kind = function < input->token_count && input->declaration_kinds != 0 ? input->declaration_kinds[function] : C_BINDING_USE;
+    const bool direct = kind == C_BINDING_FUNCTION;
+    uint32_t parameter = direct || kind == C_BINDING_OBJECT ? check_driver_parameter_source(parser, input, function, index) : BUSTER_CHECK_NONE;
+    parameter = parameter < input->token_count ? parameter : direct ? check_driver_parameter_place(parser, input, function, index) : BUSTER_CHECK_NONE;
+    // A pointer to a function its object's typedef spells (`F *gp` of `typedef void F(N *)`) has that typedef's list.
+    const uint32_t spelled = parameter >= input->token_count && kind == C_BINDING_OBJECT ? check_input_typedef_spelling(input, parser, function) : 0;
+    parameter = spelled != 0 ? check_driver_parameter_source(parser, input, spelled, index) : parameter;
+    return parameter < input->token_count ? check_driver_parameter_spelling(parser, input, parameter) : 0;
 }
 
-// The same, with the destination operand's own spelling facts (#992): `printed` is the type clang's message
+// The same for a member's declarator (`void (*m)(N *)`), its own list's.
+static uint32_t check_input_declarator_parameter_spelling(const Parser* parser, const CheckInput* input, uint32_t declarator, uint32_t index)
+{
+    const uint32_t parameter = check_driver_parameter_source(parser, input, declarator, index);
+    return parameter < input->token_count ? check_driver_parameter_spelling(parser, input, parameter) : 0;
+}
+
+// c_check_semantic_diagnostic.c's: a member access's member declarator (#1447).
+static uint32_t check_semantic_member_of(const Parser* parser, const CheckInput* input, const CheckStream* stream, const TypeTable* types, uint32_t node);
+static uint32_t check_semantic_member_token(const Parser* parser, const CheckInput* input, const TypeTable* types, uint32_t member);
+
+// The typedef of argument `argument`'s parameter in the call node `call` (#1100): its callee's name's
+// (check_input_parameter_spelling), through a function pointer's dereferences, or a member's declarator's.
+static uint32_t check_input_call_parameter_spelling(const Parser* parser, const CheckInput* input, const CheckStream* stream, const TypeTable* types,
+                                                    uint32_t call, uint32_t argument)
+{
+    const CheckGraph* graph = &input->graph;
+    uint32_t callee = call < graph->count ? graph->operand0[call] : BUSTER_CHECK_NONE;
+    for (uint32_t steps = 0; steps < 8 && callee < graph->count && graph->ops[callee] == CHECK_OP_DEREFERENCE; steps += 1)
+    {
+        callee = graph->operand0[callee];
+    }
+    const bool named = callee < graph->count && graph->ops[callee] == CHECK_OP_VALUE;
+    const bool member = callee < graph->count && (graph->ops[callee] == CHECK_OP_MEMBER || graph->ops[callee] == CHECK_OP_ARROW);
+    const uint32_t selected = member ? check_semantic_member_of(parser, input, stream, types, callee) : 0;
+    const uint32_t declarator = selected != 0 ? check_semantic_member_token(parser, input, types, selected) : BUSTER_CHECK_NONE;
+    return named ? check_input_parameter_spelling(parser, input, graph->tokens[callee], argument) :
+           declarator < input->token_count ? check_input_declarator_parameter_spelling(parser, input, declarator, argument) : 0;
+}
+
+// A null pointer constant warning, with the destination operand's own spelling facts (#992): `printed` is the type clang's message
 // shows (the declaration's written type, qualifiers kept) and `spelling` its typedef specifier's declaration,
 // or BUSTER_CHECK_NONE for `__size_t`, or 0 for no sugar.
 static void check_input_null_spelling(CheckInputReader* reader, TypeId destination, TypeId printed, uint32_t spelling,
@@ -3409,6 +3507,7 @@ struct CheckTagFrame;
 struct CheckTagMember;
 static bool check_input_thread_names(CheckInputReader* reader, CheckInputAttributes* attributes, uint32_t parameters, const struct CheckTagFrame* frames,
                                      uint32_t depth, const struct CheckTagMember* members, uint32_t member_count);
+static bool check_input_tag_names(CheckInputReader* reader, const CheckInputAttributes* attributes);
 
 // A report at `token` naming `type` (#1447): spelled by the typedef name that `spelling`'s declaration's specifiers give it
 // (BUSTER_CHECK_NONE for none), with `value`, and an incomplete tag's forward declaration's note.
@@ -4183,6 +4282,32 @@ static TypeId check_input_enum_underlying(CheckInputReader* reader, uint32_t col
     {
         check_input_report(reader, colon + 1 < end ? colon + 1 : colon, CHECK_INPUT_DECLARATION);
     }
+    else
+    {
+        // Its const and volatile, written or a typedef's, which clang drops with -Wunderlying-cv-qualifier-ignored (#1952),
+        // once, at the base's first token that isn't a qualifier (its type's location).
+        const uint32_t dropped = (qualifiers | type_qualifiers(base)) & (BUSTER_TYPE_CONST | BUSTER_TYPE_VOLATILE);
+        uint32_t at = colon + 1;
+        uint32_t ignored_qualifiers = 0;
+        while (at + 1 < end && (check_input_qualifier(parser, at, &ignored_qualifiers) || check_input_attribute_starts(parser, at, end)))
+        {
+            at = check_input_attribute_starts(parser, at, end) ? check_input_skip_attributes(parser, at, end) : at + 1;
+        }
+        if (dropped != 0 && at < end)
+        {
+            const CheckWarningEvent event =
+            {
+                .id = CHECK_WARNING_ID_UNDERLYING_CV_QUALIFIER,
+                .kind = CHECK_WARNING_EVENT_UNDERLYING_CV_QUALIFIER,
+                .token = at,
+                .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                .completion_kind = CHECK_WARNING_COMPLETE_AFTER_DELIMITER,
+                .completion = end,
+                .payload = { .token = BUSTER_CHECK_WARNING_NO_SOURCE, .data = dropped },
+            };
+            check_input_warning_event(reader, &event, NULL, 0);
+        }
+    }
     for (uint32_t i = colon; valid && i < end; i += 1)
     {
         reader->ignored[i] = true;
@@ -4330,8 +4455,9 @@ static bool check_input_tag_attributes(CheckInputReader* reader, uint32_t token,
     {
         const uint32_t subjects = kind == BUSTER_TYPE_KIND_ENUM ? BUSTER_CHECK_SUBJECT_ENUM : kind == BUSTER_TYPE_KIND_UNION ? BUSTER_CHECK_SUBJECT_UNION :
                                   BUSTER_CHECK_SUBJECT_STRUCT;
-        // (The tag's keyword is its declaration's first token, where some handlers warn.)
-        valid = check_input_attribute_subjects(reader, own, subjects, 0, token, BUSTER_CHECK_NONE);
+        // (The tag's keyword is its declaration's first token, where some handlers warn.) Its attributes' expressions' names
+        // first, which clang's parser looks up (#1447: objc_bridge's second argument).
+        valid = check_input_tag_names(reader, own) && check_input_attribute_subjects(reader, own, subjects, 0, token, BUSTER_CHECK_NONE);
         // Complete before this declaration: a fixed enum's first declaration completes it with its attributes.
         const bool complete = type_is_complete(reader->types, type) && canonical != declaration;
         for (uint32_t r = 0; valid && kind == BUSTER_TYPE_KIND_UNION && !complete && r < own->count; r += 1)
@@ -8561,7 +8687,8 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
             reader->tag_attributes = false;
             // The tag's subjects as clang's attributes name them (#147).
             const uint32_t subjects = kind == BUSTER_TYPE_KIND_ENUM ? BUSTER_CHECK_SUBJECT_ENUM : kind == BUSTER_TYPE_KIND_UNION ? BUSTER_CHECK_SUBJECT_UNION : BUSTER_CHECK_SUBJECT_STRUCT;
-            valid = valid && check_input_attribute_subjects(reader, frame->attributes, subjects, 0, frame->token, BUSTER_CHECK_NONE);
+            valid = valid && check_input_tag_names(reader, frame->attributes) &&
+                    check_input_attribute_subjects(reader, frame->attributes, subjects, 0, frame->token, BUSTER_CHECK_NONE);
             check_input_set_attributes_at(reader->output, frame->token, frame->attributes);
             for (uint32_t attribute = 0; valid && frame->attributes != 0 && attribute < frame->attributes->count; attribute += 1)
             {
@@ -9772,6 +9899,16 @@ static void check_input_standalone_specifiers(CheckInputReader* reader, uint32_t
         {
             const uint32_t close = parser->tree.parents[token];
             token = close > token && close < end ? close : end;
+            continue;
+        }
+        if (kind == PARSE_KIND_COLON)
+        {
+            // An enum's fixed base, to its body: its qualifiers are the base's, which it drops with a warning of its own
+            // (#1952, check_input_enum_underlying), not the declaration's.
+            while (token + 1 < end && parser->tokens.kinds[token + 1] != PARSE_KIND_L_BRACE)
+            {
+                token += 1;
+            }
             continue;
         }
         const uint32_t name = parser->tokens.names[token];
@@ -12513,6 +12650,22 @@ static inline __attribute__((always_inline)) void check_input_vector_member(Chec
             reader->output->resource |= !check_vector_member_decode(bytes, length, lanes, length, &member);
         }
     }
+    if (!reader->output->resource && member.kind != CHECK_VECTOR_MEMBER_INVALID && graph->vector_member_count == graph->vector_member_capacity)
+    {
+        // The counted capacity (check_input_counts) covers `.` members, not `->` ones, which a unit with an extended vector
+        // records too: their list grows, rarely, in the same arena.
+        const uint32_t capacity = graph->vector_member_capacity * 2 + 16;
+        CheckVectorCall* grown = arena_push_array(reader->arena, capacity, sizeof(CheckVectorCall), _Alignof(CheckVectorCall));
+        if (grown != 0)
+        {
+            if (graph->vector_member_count != 0)
+            {
+                memcpy(grown, graph->vector_members, (uint64_t)graph->vector_member_count * sizeof(CheckVectorCall));
+            }
+            graph->vector_members = grown;
+            graph->vector_member_capacity = capacity;
+        }
+    }
     if (!reader->output->resource && member.kind != CHECK_VECTOR_MEMBER_INVALID)
     {
         if (graph->vector_member_count < graph->vector_member_capacity)
@@ -13783,7 +13936,8 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
             if (op == CHECK_OP_MEMBER || op == CHECK_OP_ARROW)
             {
                 graph->members[node] = parser->tokens.names[token + 1];
-                if (op == CHECK_OP_MEMBER)
+                // `p->y` names an extended vector's lane only through a pointer to one, which only a unit with one has.
+                if (op == CHECK_OP_MEMBER || __builtin_expect(reader->types->ext_vectors, 0))
                 {
                     check_input_vector_member(reader, node, token + 1);
                 }

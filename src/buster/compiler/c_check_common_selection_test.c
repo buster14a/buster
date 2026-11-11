@@ -3,8 +3,9 @@
 //
 // check_common_unselected_roots (#1341, #1360) by both paths against check_common_unselected_walk, its definition one
 // selection at a time: fixtures of _Generic's, __builtin_choose_expr's and __extension__'s token shapes, nested and side by
-// side, whose marks are also written out by hand; then random trees and graphs, with roots that hold no selection's selected
-// node (the bits) and roots that do (the walk), into marks of their own and into the roots themselves. Every column ends
+// side, whose marks are also written out by hand, with roots in a chosen operand (a statement expression's statements,
+// #2023) that only an enclosing selection's other operand marks; then random trees and graphs, with roots that hold no
+// selection's selected node (the bits) and roots that do (the walk), into marks of their own and into the roots themselves. Every column ends
 // at a PROT_NONE page, so that a read or write past one faults; the scratch arena must be as it was after each call; and
 // each of the function's scratch allocations, failed in turn, must return false and leave the marks as they were.
 // Included by c_checker_driver_test.c.
@@ -16,6 +17,8 @@ struct CheckTestSelections
 {
     uint8_t* kinds;
     uint32_t* parents;
+    // The parser's depths, which find each selection's chosen operand (check_common_chosen_span), or null for none.
+    uint32_t* depths;
     uint32_t token_count;
     CheckOp* ops;
     uint32_t* tokens;
@@ -77,6 +80,7 @@ static bool check_test_selection_compare(const CheckTestSelections* input, uint8
             parser.tokens.kinds = input->kinds;
             parser.tokens.count = input->token_count;
             parser.tree.parents = input->parents;
+            parser.tree.depths = input->depths;
             for (uint32_t i = 0; i < input->node_count; i += 1)
             {
                 expected[i] = aliased ? input->roots[i] : (uint8_t)(0x5a ^ i);
@@ -103,13 +107,14 @@ static bool check_test_selection_compare(const CheckTestSelections* input, uint8
     return same;
 }
 
-// The columns of `input` copied to guarded memory (columns[0..6]), then compared for the values 0, 1 and 0x80.
+// The columns of `input` copied to guarded memory (columns[0..7]), then compared for the values 0, 1 and 0x80.
 static bool check_test_selection_case(const CheckTestSelections* input, Arena* scratch, uint32_t* changed)
 {
-    CheckTestSelectionColumn columns[6] = { 0 };
+    CheckTestSelectionColumn columns[7] = { 0 };
     CheckTestSelections guarded = {
         .kinds = check_test_selection_column(&columns[0], input->token_count),
         .parents = check_test_selection_column(&columns[1], (uint64_t)input->token_count * sizeof(uint32_t)),
+        .depths = input->depths != NULL ? check_test_selection_column(&columns[6], (uint64_t)input->token_count * sizeof(uint32_t)) : NULL,
         .token_count = input->token_count,
         .ops = check_test_selection_column(&columns[2], (uint64_t)input->node_count * sizeof(CheckOp)),
         .tokens = check_test_selection_column(&columns[3], (uint64_t)input->node_count * sizeof(uint32_t)),
@@ -118,9 +123,13 @@ static bool check_test_selection_case(const CheckTestSelections* input, Arena* s
         .node_count = input->node_count,
     };
     bool same = guarded.kinds != NULL && guarded.parents != NULL && guarded.ops != NULL && guarded.tokens != NULL && guarded.operands != NULL &&
-                guarded.roots != NULL;
+                guarded.roots != NULL && (input->depths == NULL || guarded.depths != NULL);
     if (same)
     {
+        if (input->depths != NULL)
+        {
+            memcpy(guarded.depths, input->depths, (uint64_t)input->token_count * sizeof(uint32_t));
+        }
         memcpy(guarded.kinds, input->kinds, input->token_count);
         memcpy(guarded.parents, input->parents, (uint64_t)input->token_count * sizeof(uint32_t));
         memcpy(guarded.ops, input->ops, (uint64_t)input->node_count * sizeof(CheckOp));
@@ -148,15 +157,23 @@ static uint32_t check_test_selection_random(uint64_t* state)
 
 // A random tree of `token_count` tokens and graph of `node_count` nodes: keyword kinds among other kinds, parents mostly
 // a little after their children (where a selection's keyword is), selections at those parents and elsewhere, and roots;
-// with `fast`, no selection's selected node among the roots.
+// with `fast`, no selection's selected node among the roots; with depths, commas among the kinds and depths that rise and
+// fall by a step, which make chosen operands of every shape, nested in others or not.
 static void check_test_selection_generate(CheckTestSelections* input, uint64_t* state, bool fast)
 {
     const uint32_t count = input->token_count;
+    uint32_t depth = 0;
     for (uint32_t at = 0; at < count; at += 1)
     {
         const uint32_t r = check_test_selection_random(state);
         input->kinds[at] = (r & 7) == 0 ? PARSE_KIND_GENERIC : (r & 7) == 1 ? PARSE_KIND_TYPE_ARGUMENT : (r & 15) == 2 ? PARSE_KIND_EXTENSION :
-                           (uint8_t)(r >> 8);
+                           (r & 7) == 3 ? PARSE_KIND_COMMA : (uint8_t)(r >> 8);
+        const uint32_t step = (r >> 24) & 3;
+        depth = step == 0 ? depth + 1 : step == 1 && depth > 0 ? depth - 1 : depth;
+        if (input->depths != NULL)
+        {
+            input->depths[at] = depth;
+        }
         const uint32_t shape = (r >> 16) & 3;
         input->parents[at] = shape <= 1 ? at + 1 + (r >> 18) % 40 : shape == 2 ? BUSTER_CHECK_NONE : (r >> 18) % (count + 3);
     }
@@ -189,7 +206,9 @@ static void check_test_driver_unselected_roots(CheckTest* test)
     // _Generic(c, int: a, default: b) = n; __extension__ (e); __builtin_choose_expr(1, f, _Generic(g, long: h)): the
     // tokens, the tree's parents (each selection's keyword a child of its closing parenthesis) and the graph, with the
     // marks the definition gives written out: the control c and the unselected b; f and h are selected and so not roots,
-    // g is the inner _Generic's control, inside both ranges; e, n and the semicolons' roots are in none.
+    // g is the inner _Generic's control, inside both ranges; e, n and the semicolons' roots are in none. A statement
+    // expression's statement in a (s) and in f (t) is a root in a chosen operand, which the parser's depths find, so
+    // unmarked, but one in h (u) lies in __builtin_choose_expr's other operand too, so marked (#2023).
     enum
     {
         G_KEYWORD = 0,
@@ -232,11 +251,21 @@ static void check_test_driver_unselected_roots(CheckTest* test)
     };
     uint8_t kinds[FIXTURE_TOKENS];
     uint32_t parents[FIXTURE_TOKENS];
+    uint32_t depths[FIXTURE_TOKENS];
     for (uint32_t at = 0; at < FIXTURE_TOKENS; at += 1)
     {
         kinds[at] = PARSE_KIND_IDENTIFIER;
         parents[at] = BUSTER_CHECK_NONE;
+        // (A group's contents are one deeper than its parentheses: _Generic's, the extension's and the outer selection's
+        // at 1, the inner _Generic's at 2.)
+        depths[at] = (at > G_OPEN && at < G_CLOSE) || at == E_E || (at > C_OPEN && at < C_CLOSE) ? 1 : 0;
+        depths[at] += at > I_OPEN && at < I_CLOSE ? 1 : 0;
     }
+    kinds[G_COMMA] = PARSE_KIND_COMMA;
+    kinds[G_COMMA2] = PARSE_KIND_COMMA;
+    kinds[C_COMMA] = PARSE_KIND_COMMA;
+    kinds[C_COMMA2] = PARSE_KIND_COMMA;
+    kinds[I_COMMA] = PARSE_KIND_COMMA;
     kinds[G_KEYWORD] = PARSE_KIND_GENERIC;
     kinds[E_KEYWORD] = PARSE_KIND_EXTENSION;
     kinds[C_KEYWORD] = PARSE_KIND_TYPE_ARGUMENT;
@@ -273,6 +302,9 @@ static void check_test_driver_unselected_roots(CheckTest* test)
         N_H,
         N_INNER,
         N_CHOOSE,
+        N_S,
+        N_T,
+        N_U,
         FIXTURE_NODES,
     };
     CheckOp ops[FIXTURE_NODES];
@@ -300,6 +332,9 @@ static void check_test_driver_unselected_roots(CheckTest* test)
         [N_H] = I_H,
         [N_INNER] = I_CLOSE,
         [N_CHOOSE] = C_CLOSE,
+        [N_S] = G_A,
+        [N_T] = C_F,
+        [N_U] = I_H,
     };
     uint32_t operands[FIXTURE_NODES];
     for (uint32_t node = 0; node < FIXTURE_NODES; node += 1)
@@ -323,9 +358,13 @@ static void check_test_driver_unselected_roots(CheckTest* test)
     roots[N_G] = 1;
     roots[N_INNER] = 1;
     roots[N_CHOOSE] = 1;
+    roots[N_S] = 1;
+    roots[N_T] = 1;
+    roots[N_U] = 1;
     CheckTestSelections fixture = {
         .kinds = kinds,
         .parents = parents,
+        .depths = depths,
         .token_count = FIXTURE_TOKENS,
         .ops = ops,
         .tokens = tokens,
@@ -335,22 +374,26 @@ static void check_test_driver_unselected_roots(CheckTest* test)
     };
     const CheckGraph graph = { .ops = ops, .tokens = tokens, .operand0 = operands, .count = FIXTURE_NODES };
     bool marked = true;
-    for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+    for (uint32_t scalar = 0; scalar < 4; scalar += 1)
     {
+        // (Without the depths, which a test's parser may lack, no operand is known to be chosen.)
+        const bool deep = scalar < 2;
         Parser parser = { 0 };
-        parser.options.scalar = scalar != 0;
+        parser.options.scalar = (scalar & 1) != 0;
         parser.tokens.kinds = kinds;
         parser.tokens.count = FIXTURE_TOKENS;
         parser.tree.parents = parents;
+        parser.tree.depths = deep ? depths : NULL;
         uint8_t marks[FIXTURE_NODES] = { 0 };
         uint8_t walked[FIXTURE_NODES] = { 0 };
         marked &= check_common_unselected_roots(&graph, &parser, roots, marks, 1, &scratch);
         check_common_unselected_walk(&graph, &parser, roots, walked, 1);
         for (uint32_t node = 0; node < FIXTURE_NODES; node += 1)
         {
-            // The control and b of the first _Generic, the 1 and the inner selection inside __builtin_choose_expr's, and
-            // g inside both of the last two.
-            const bool expected = node == N_CONTROL || node == N_B || node == N_ONE || node == N_G || node == N_INNER;
+            // The control and b of the first _Generic, the 1 and the inner selection inside __builtin_choose_expr's, g
+            // and u inside both of the last two; s and t only where the chosen operands aren't known.
+            const bool expected = node == N_CONTROL || node == N_B || node == N_ONE || node == N_G || node == N_INNER || node == N_U ||
+                                  (!deep && (node == N_S || node == N_T));
             marked &= marks[node] == expected && walked[node] == expected;
         }
     }
@@ -361,14 +404,16 @@ static void check_test_driver_unselected_roots(CheckTest* test)
     roots[N_F] = 1;
     check_test_expect(test, check_test_selection_case(&fixture, &scratch, &changed), "unselected roots: a selected root takes the walk");
     roots[N_F] = 0;
-    // Each scratch allocation failed in turn: the bits, then the ranges. The third count succeeds.
+    // Each scratch allocation failed in turn: the bits, the selections' keys and their sort's temporary, then the ranges.
+    // The fifth count succeeds.
     bool exhausted = true;
-    for (uint32_t fail = 0; fail < 3; fail += 1)
+    for (uint32_t fail = 0; fail < 5; fail += 1)
     {
         Parser parser = { 0 };
         parser.tokens.kinds = kinds;
         parser.tokens.count = FIXTURE_TOKENS;
         parser.tree.parents = parents;
+        parser.tree.depths = depths;
         uint8_t marks[FIXTURE_NODES];
         memset(marks, 0x33, sizeof(marks));
         check_common_resources.fail_at = fail;
@@ -378,9 +423,9 @@ static void check_test_driver_unselected_roots(CheckTest* test)
         bool kept = true;
         for (uint32_t node = 0; node < FIXTURE_NODES; node += 1)
         {
-            kept &= marks[node] == 0x33 || (fail == 2 && marks[node] == 1);
+            kept &= marks[node] == 0x33 || (fail == 4 && marks[node] == 1);
         }
-        exhausted &= kept && returned == (fail == 2);
+        exhausted &= kept && returned == (fail == 4);
     }
     check_test_expect(test, exhausted, "unselected roots: each failed scratch allocation returns false and leaves the marks");
     // Random trees and graphs, each size across the 64-token and 16-node blocks, with and without selected roots.
@@ -399,11 +444,14 @@ static void check_test_driver_unselected_roots(CheckTest* test)
         uint32_t* random_tokens = malloc(((uint64_t)node_count + 1) * sizeof(uint32_t));
         uint32_t* random_operands = malloc(((uint64_t)node_count + 1) * sizeof(uint32_t));
         uint8_t* random_roots = malloc(node_count + 1);
+        // (Every other pair of rounds has depths, and so chosen operands.)
+        uint32_t* random_depths = (round & 2) != 0 ? malloc(((uint64_t)token_count + 1) * sizeof(uint32_t)) : NULL;
         same = random_kinds != NULL && random_parents != NULL && random_ops != NULL && random_tokens != NULL && random_operands != NULL &&
-               random_roots != NULL;
+               random_roots != NULL && ((round & 2) == 0 || random_depths != NULL);
         CheckTestSelections input = {
             .kinds = random_kinds,
             .parents = random_parents,
+            .depths = random_depths,
             .token_count = token_count,
             .ops = random_ops,
             .tokens = random_tokens,
@@ -426,6 +474,7 @@ static void check_test_driver_unselected_roots(CheckTest* test)
         free(random_tokens);
         free(random_operands);
         free(random_roots);
+        free(random_depths);
     }
     check_test_expect(test, same && cases == 220, "unselected roots: random trees and graphs against the walk, by both paths");
     check_test_expect(test, fast_changed != 0, "unselected roots: the random cases without selected roots mark some");
