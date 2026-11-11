@@ -434,6 +434,31 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "enum D : char { M = 200, N, P, P = 400 };\n"
         "_Static_assert(N == -55, \"n\");\n"
         "int use(void) { return A2 + B3 + C2 + undeclared; }\n",
+        // A typedef's and a parameter's declarator errors (#1447): a typedef keeps its stand-in type, whose uses are
+        // checked; a parameter is an invalid stand-in int, quiet in its body, and makes the function whose own list it is
+        // invalid, but not a function pointer. After a declarator whose own type is in error, the group's later
+        // declarators aren't declared, and a typedef name it dropped is "unknown type name", which still stops.
+        "typedef int U[-1];\n"
+        "U u1 = \"x\";\n"
+        "int w = u1 + (char*)0;\n"
+        "void k(void) { U loc; int *pp = loc; typedef int L[-3]; L l = \"s\"; (void)pp; (void)l; }\n"
+        "typedef struct X SX[3];\n"
+        "SX sx;\n"
+        "typedef int F(void)[3];\n"
+        "int bad(int q[-1]);\n"
+        "int call = bad(\"x\");\n"
+        "void (*fp)(int r[-1]);\n"
+        "void use(void) { char *c = bad(1); fp(\"y\"); (void)c; }\n"
+        "int def(int a[-1], int b) { int *pk = a; char *c = b; (void)pk; (void)c; return 0; }\n"
+        "int c2 = def(\"z\", 1);\n"
+        "int nested(void (*cb)(int n[-1]), int m[-2]);\n"
+        "int g(int q2[-1]), h(int);\n"
+        "int z = h(\"w\");\n"
+        "int a[-1], b;\n"
+        "int c = b;\n"
+        "void f(void) { int p[-1], r; int s = r; (void)s; }\n"
+        "int x = undeclared;\n",
+        "typedef int T, U[-1], V;\nV v;\n",
         // An array of an element whose alignment an attribute raised past its size (#1893): clang's "size of array element
         // of type 'enum E' (4 bytes) isn't a multiple of its alignment (8 bytes)" at the `[`, recovered, the declaration
         // invalid and its uses quiet; arrays of pointers to it and an over-aligned record whose size grew are fine.
@@ -446,6 +471,9 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
         "struct A8 ok[3];\n"
         "int use = arr[0] + two[0][0] + sizeof(arr) + sizeof(ptrs) + sizeof(ok);\n"
         "int x = undeclared;\n",
+        // (A typedef's and a parameter's, which recover as their other declarator errors do.)
+        "enum __attribute__((aligned(8))) E { A };\ntypedef enum E TE;\ntypedef enum E TA[2];\nTA ta;\n"
+        "int g(TE p[3]) { return p[0]; }\nint h(enum E q[2]);\nint c = h(0) + g(0);\nint x = undeclared;\n",
         // C23's redefinition of a record in its scope (#1447, N3037), gnu23's alone: a compatible one redeclares the
         // earlier record, typedef'd members and nested anonymous records too; an incompatible one is clang's "has
         // incompatible definitions" with its notes at the first difference (a name, a bit-field, a type, a member more or
