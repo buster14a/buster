@@ -71,7 +71,8 @@ struct CheckProgramConstraint
 // record it runs and the outermost. The controls after it (its tail: its STACK_RESTORE, its LIFETIME ends and its JUMP,
 // or its RETURN) are what follows the calls, so every walk of the controls sees the path it saw when the calls were
 // there. The lowering runs each record's call once, at its CLEANUP at its scope's end, the chain the exit enters
-// (check_program_chains, CheckProgramChain). An exit from a statement expression keeps its run of CLEANUPs.
+// (check_program_chains, CheckProgramChain). An exit from a statement expression does so through the records within its
+// block, apart from the block's own; one that leaves the block's records keeps its run of CLEANUPs.
 // A block's objects' lifetimes (#177, c_check_program_lifetime.c), in a program asked for them: CHECK_CONTROL_LIFETIME
 // (`target` the block's closing brace, whose locals CheckProgram.lifetime_first lists, `node` 0 for their start and 1 for
 // their end, `token` where) where the block's statements begin, where they end, after its cleanups, and before each
@@ -157,9 +158,10 @@ struct CheckProgramRegion
 // outermost (`last`), both CheckInput.cleanups' records; the destination slot's value it stores before it jumps to its
 // first record's entry, BUSTER_CHECK_NONE where no dispatch on its path tests it; and how many of the controls after it,
 // its tail, the lowering leaves out: where its destination's tail is another exit's, or its target the dispatch's own.
-// A `skip` of BUSTER_CHECK_NONE marks an exit that runs its calls in place, as an exit from a statement expression does:
-// one through a record without a CLEANUP at its scope's end (a constant switch's kept statements leave their compounds'
-// ends out), or one no path completes (its JUMP unreached, an END now).
+// A `skip` of BUSTER_CHECK_NONE marks an exit that runs its calls in place: one through a record without a CLEANUP at its
+// scope's end (a constant switch's kept statements leave their compounds' ends out, and a statement expression's block's
+// own records run after its END), one from a statement expression whose records leave its block, or one no path
+// completes (its JUMP unreached, an END now).
 typedef struct CheckProgramExit CheckProgramExit;
 struct CheckProgramExit
 {
@@ -170,6 +172,12 @@ struct CheckProgramExit
     uint32_t hold;
     uint32_t value;
     uint32_t skip;
+    // An exit from a statement expression's statements: the closing token of the region's block, whose own records'
+    // cleanups run after its END, and the token that opens it; BUSTER_CHECK_NONE for an exit of the function's statements.
+    // Only one whose records' scopes all lie within the block, apart from the block's own records, goes through their
+    // chain; any other keeps its run in place (check_program_chains).
+    uint32_t region_open;
+    uint32_t region_close;
 };
 
 // A record's place in its body's chain of cleanups (#1370, check_program_chains), by its index in CheckInput.cleanups:
@@ -711,11 +719,13 @@ struct CheckControlWriter
     uint32_t cleanup_first;
     uint32_t cleanup_count;
     // CheckProgram.exits while the bodies are written, `exit_capacity` of them, and whether a statement expression's
-    // region is being written, whose exits keep their runs of CLEANUPs.
+    // region is being written, the tokens that open and close its block (CheckProgramExit.region_open, region_close).
     CheckProgramExit* exits;
     uint32_t exit_count;
     uint32_t exit_capacity;
     bool in_region;
+    uint32_t region_open;
+    uint32_t region_close;
     // The statement expression's last statement while its region is written: the region's result, never a statement of
     // its own, also where it is a label's (CheckInputRegion.final_statement).
     uint32_t region_final;
@@ -1518,11 +1528,18 @@ static void check_control_cleanups(CheckControlWriter* writer, uint32_t position
     // the innermost whose scope holds where it goes (`hold`, none for a return's), an ancestor of the first, as no jump
     // enters a cleanup's scope. Its last, the hold's child on the path, check_program_chains finds in one sweep, where a
     // climb here took each exit's whole path.
-    const bool chained = scope == BUSTER_CHECK_NONE && !writer->in_region;
+    // An exit from a statement expression's statements too, whose records the planner checks lie within its block.
+    const bool chained = scope == BUSTER_CHECK_NONE;
     const uint32_t hold = chained && record != BUSTER_CHECK_NONE && target != BUSTER_CHECK_NONE ? check_control_cleanup_at(writer, target) : BUSTER_CHECK_NONE;
     if (chained && record != BUSTER_CHECK_NONE && record != hold && writer->exit_count < writer->exit_capacity)
     {
-        writer->exits[writer->exit_count] = (CheckProgramExit){ .first = record, .last = BUSTER_CHECK_NONE, .hold = hold, .value = BUSTER_CHECK_NONE, .skip = 0 };
+        writer->exits[writer->exit_count] = (CheckProgramExit){ .first = record,
+                                                                .last = BUSTER_CHECK_NONE,
+                                                                .hold = hold,
+                                                                .value = BUSTER_CHECK_NONE,
+                                                                .skip = 0,
+                                                                .region_open = writer->in_region ? writer->region_open : BUSTER_CHECK_NONE,
+                                                                .region_close = writer->in_region ? writer->region_close : BUSTER_CHECK_NONE };
         check_control_entry(writer, CHECK_CONTROL_EXIT, position, BUSTER_CHECK_NONE, writer->exit_count);
         writer->exit_count += 1;
     }
@@ -2668,6 +2685,8 @@ static void check_control_build(CheckControlWriter* writer, uint32_t opening)
         else
         {
             writer->in_region = true;
+            writer->region_open = check_control_opening(writer, source->block, PARSE_ROLE_OPEN_BLOCK);
+            writer->region_close = source->block;
             writer->region_final = source->final_statement;
             for (uint32_t child = writer->last[source->block]; child != BUSTER_CHECK_NONE; child = writer->previous[child])
             {
@@ -3076,15 +3095,19 @@ static void check_program_chains(CheckControlWriter* writer, CheckProgramBody* b
         }
         // The controls that branches go to, the records' entries and the exits' places. An asm goto or a label whose
         // address is taken may go to any: every fall is then reached.
+        // A statement expression's region's CLEANUPs past the function's controls are entries too, but for its block's
+        // own, the run after its END, which the region lowers after its value (check_lower_region).
         bool anywhere = false;
+        bool ended = false;
         for (uint32_t i = 0; i < count; i += 1)
         {
             const CheckControl* control = controls + i;
+            ended = control->kind == CHECK_CONTROL_END || (ended && control->kind == CHECK_CONTROL_CLEANUP);
             if (control->kind >= CHECK_CONTROL_BRANCH_FALSE && control->target < count)
             {
                 check_program_bit_set(targeted, control->target);
             }
-            else if (control->kind == CHECK_CONTROL_CLEANUP && i < body->entry_count && control->target >= record_first && control->target < record_end)
+            else if (control->kind == CHECK_CONTROL_CLEANUP && (i < body->entry_count || !ended) && control->target >= record_first && control->target < record_end)
             {
                 chains[control->target].entry = i;
             }
@@ -3142,7 +3165,11 @@ static void check_program_chains(CheckControlWriter* writer, CheckProgramBody* b
             }
             const bool held = exit->first >= record_first && exit->first < record_end && exit->last >= record_first && exit->last < record_end;
             const uint32_t missing = held ? absent[exit->first - record_first] : 0;
-            const bool live = held && end < count && (controls[end].kind == CHECK_CONTROL_RETURN || controls[end].kind == CHECK_CONTROL_JUMP) &&
+            // A statement expression's exit, only through records within its block, not of the block itself: their entries
+            // are its statements' controls, lowered with its region.
+            const bool within = exit->region_open == BUSTER_CHECK_NONE ||
+                                (held && cleanups[exit->last].declaration > exit->region_open && cleanups[exit->last].end < exit->region_close);
+            const bool live = held && within && end < count && (controls[end].kind == CHECK_CONTROL_RETURN || controls[end].kind == CHECK_CONTROL_JUMP) &&
                               (missing == 0 || missing - 1 < chains[exit->last].depth);
             if (!held)
             {

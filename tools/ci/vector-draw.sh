@@ -39,7 +39,24 @@ attempt=${GITHUB_RUN_ATTEMPT:?}
 read -r -a items <<< "${BUSTER_VECTOR_ITEMS:?}"
 row="(Clang 23, $BUSTER_SANITIZER, O$BUSTER_SANITIZER_OPTIMIZATION)"
 # The interval between polls, and how long a collector waits for its candidates and a candidate for its collector.
-poll=${VECTOR_DRAW_POLL:-5}
+# Each poll lists the run's artifacts (and a collector's, its jobs) through the REST API, whose hourly limit the whole
+# repository shares: polls every 5 s exhausted it with many pull requests open (#2309). A failed listing (the limit,
+# for one) doubles the pause, up to poll_limit, until a listing succeeds again.
+poll=${VECTOR_DRAW_POLL:-15}
+poll_limit=${VECTOR_DRAW_POLL_LIMIT:-60}
+
+# The pause after a listing that succeeded ($1 = 0) or failed: $poll, or the last pause doubled, at most $poll_limit.
+pause=$poll
+next_pause()
+{
+    if [ "$1" -eq 0 ]; then
+        pause=$poll
+    else
+        pause=$((pause * 2))
+        [ "$pause" -le "$poll_limit" ] || pause=$poll_limit
+        [ "$pause" -ge "$poll" ] || pause=$poll
+    fi
+}
 collect_limit=${VECTOR_DRAW_COLLECT_LIMIT:-1500}
 take_limit=${VECTOR_DRAW_TAKE_LIMIT:-1800}
 
@@ -112,7 +129,12 @@ assign()
     : "${GITHUB_OUTPUT:?}" "${RUNNER_TEMP:?}"
     while true; do
         polls=$((polls + 1))
-        names=$(artifact_names) || names=''
+        if names=$(artifact_names); then
+            next_pause 0
+        else
+            names=''
+            next_pause 1
+        fi
         # The items no earlier draw of this attempt assigned, the costliest first.
         taken=''
         for ((k = 1; k < level; k += 1)); do
@@ -135,7 +157,7 @@ assign()
                 "$level" "$decided" "$candidates" "$((SECONDS - start))"
             break
         fi
-        sleep "$poll"
+        sleep "$pause"
     done
     # By rank: the i-th qualifying candidate gets the i-th missing item.
     pairs=()
@@ -180,12 +202,17 @@ take()
             # The collector decides once enough candidates qualified, or all decided.
             found=''
             while [ -z "$found" ] && [ $((SECONDS - start)) -lt "$take_limit" ]; do
-                names=$(artifact_names) || names=''
+                if names=$(artifact_names); then
+                    next_pause 0
+                else
+                    names=''
+                    next_pause 1
+                fi
                 if found=$(assignment "$names" "$attempt" "$level"); then
                     found=${found:-none}
                 else
                     found=''
-                    sleep "$poll"
+                    sleep "$pause"
                 fi
             done
             item=$(awk -v candidate="$candidate" '$2 == candidate { print $1 }' <<< "$found")
