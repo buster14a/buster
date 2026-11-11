@@ -3830,13 +3830,26 @@ What the lowering covers past scalars (#145's programs):
   previous declaration one, as clang's `getActingDefinition` requires) is
   clang's "alias definition of 'w' after tentative definition" at its name,
   with "previous definition is here" at the last one
-  (`check_input_alias_tentative`). Refused by name: an alias whose
-  thread-local storage isn't its definition's, and at `-c` an alias variable
-  the unit defines tentatively after it (clang takes the declaration as the
-  alias's). Not modeled: clang's warnings at them (an alias
-  of a weak alias, a section on an alias, different types, an ifunc on a
-  variable, which is ignored), and the redefinition's own message (the
-  generic "conflicting declaration"). `__has_attribute` and
+  (`check_input_alias_tentative`), after which clang drops the alias
+  attribute and reads on, as the reader does (the report is a recovered one,
+  #1849). A redefinition of an alias or ifunc is clang's "redefinition of
+  'x'" with its note, and an ifunc on a variable is ignored with clang's
+  warning. An alias variable that the unit defines tentatively after the alias
+  is the alias's declaration, as clang takes it: the selection leaves out its
+  data, and its symbol is at its aliasee's definition (#1849). An alias whose
+  thread-local storage isn't its definition's has its definition's symbol
+  type, section and value, as clang's object has it; a reference to one, which
+  clang's code makes as the alias's own declaration says, is refused by name
+  (`BUSTER_CHECK_PROGRAM_ALIAS_REFERENCED`). Clang's code generation warnings
+  at the aliases and ifuncs it accepts are `check_driver_alias_warnings`', at
+  `-c` and in its order beside the errors (#1849): "alias and aliasee have
+  different types" (`-Wattribute-alias`, a function alias whose type isn't
+  compatible with its aliasee's definition's, which the note names), "alias
+  (or ifunc) will not be in section '.s' but in the same section as the
+  aliasee (resolver)" at a section attribute whose name isn't the aliasee's,
+  and "alias will always resolve to f even if weak definition of wf is
+  overridden" where the immediate target is a weak alias
+  (`-Wignored-attributes`), each as the options and pragmas map it. `__has_attribute` and
   `__has_c_attribute` answer 1 for them. `test-checker` runs programs of
   aliases of static functions and objects (thread-local ones too) and chains of
   them, with static data that refers to local ones, ifuncs and weakrefs
@@ -4568,7 +4581,11 @@ first didn't reach: past a reader's error that isn't recovered (an incomplete
 object's type), which ends the first reading's walk and skips its control
 scan, a duplicate case, a label's redefinition or another such error. A view's
 reading with errors falls back to the bodies' as above, as they may be the
-view's own; the bodies' reading publishes those its known errors don't hold,
+view's own; an error outside every body falls back to its whole declaration
+or definition left out (`check_driver_rejected_declaration`), with the bodies
+that name it, which leaves no use undeclared, so that reading's errors are the
+unit's too, unless a left-out declaration defines a tag outside every body,
+whose later uses would read an incomplete type. The bodies' reading publishes those its known errors don't hold,
 its reader's and graph's reports and its controls' constraints, in clang's
 words (its reader's alone where its graph can't run after them), and the next
 round leaves their parts out too. Each round adds an error and its parts, up
@@ -4973,7 +4990,13 @@ The later phases are left:
   initializer's) leaves the whole declaration out of the view, to its `;`
   (`check_driver_rejected_declaration`, #1447), and every body that names one
   of its names; a dropped part's error counts just before the token after it,
-  so the definition that follows keeps its unused variables. Clang instead
+  so the definition that follows keeps its unused variables. An error in a
+  function definition outside its body (its declarator's, its parameters')
+  leaves the whole definition out the same way, to its body's `}`, so its own
+  body's warnings aren't given, nor those of the bodies that name it, where
+  clang gives both. The view puts a `;` at a left-out declaration's place, so
+  the deferred warnings of the body before it, which clang gives at the token
+  after the body, still come before the declaration's errors. Clang instead
   keeps such a declaration bound and invalid, its uses quiet: the reader does
   so for the declarator errors (invalid declarations, above), whose uses are
   known errors of their own; for the others the bodies that name it lose their
@@ -4981,9 +5004,9 @@ The later phases are left:
   (`const int d = 1 / 0;`'s division). An unsized array's
   (`int y[] = undeclared;`) isn't left out alone: the first reading leaves
   out the events of the bodies that use the array, which a later reading
-  doesn't give again. A file-scope use elsewhere,
-  an error in a function definition outside its body, or an error outside
-  every body other than an initializer's or a file-scope declaration's still
+  doesn't give again. A file-scope use of a left-out declaration's name
+  elsewhere, or an error outside every body other than an initializer's, a
+  file-scope declaration's or a definition's head, still
   leaves the unit without its common warnings.
 - **Errors an edited reading meets.** A reading of the view that finds an error
   of its own isn't taken (its body is left out whole instead), so a body with
@@ -5516,13 +5539,23 @@ redeclaration's in source order, so that a call reads those up to the
 declaration its lookup finds; a call then tests one bit of its callee's first
 declaration and one byte of its name.
 A statement expression in an unevaluated operand drops them, as clang does
-(`check_common_report_discarded`). The functions stay out of line, as does
-the discarded selection's marker: inlined into the emission's loops they cost
-sqlite3.c's `-fsyntax-only` instructions even where no call warns. Left: a
-call whose callee is a member, an element, another call's result, a comma's or
-a conditional's value (`(n, g)()`, `(n ? fp : fq)()`) or a pointer to a
-pointer's dereference (`(*pp)()`), which warns of no return type's attribute, and the "expanded from macro" note clang gives a call a macro's
-argument writes (as for every warning at a macro argument here).
+(`check_common_report_discarded`). The functions stay out of line, as does the
+discarded selection's marker: inlined into the emission's loops they cost
+sqlite3.c's `-fsyntax-only` instructions even where no call warns. Left: a call
+whose callee is a member, an element, another call's result, a comma's or a
+conditional's value (`(n, g)()`, `(n ? fp : fq)()`) or a pointer to a pointer's
+dereference (`(*pp)()`), which warns of no return type's attribute. A call a
+macro's argument writes gets clang's "expanded from macro" note for each macro
+whose argument it is (#1447): clang's macro backtrace leaves an argument's own
+note out only where every range the diagnostic highlights is one token of that
+argument, and a call's range spans its callee and its parentheses. The checker
+marks such a diagnostic (`check_common_report_spanning`,
+Preprocessor.diagnostic_spans), which the renderer reads while its primary line
+renders. Left: the other warnings at a macro argument, whose ranges clang
+23.1.5 treats unevenly (an unused comparison's and a lone unused value's, and a
+comma's left operand's, get the note; an unused binary operator's and a sign
+comparison's don't), and the notes of a warning's own notes, such as the unused
+comparison's fix-it.
 `-Warray-bounds` reports a direct array object, including a nested subscript
 such as `b[1][5]` at `b`, treats a zero extent as unknown, and leaves
 struct-member arrays to a full bounds analysis. `-Wunused-function` reports a

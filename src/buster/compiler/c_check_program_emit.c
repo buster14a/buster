@@ -3215,8 +3215,9 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             const SymbolId taken = program->object_symbols[alias->object];
             const SymbolId symbol = taken != 0 && program->symbol_objects[taken - 1] == alias->object ? taken : 0;
             const uint8_t state = program->alias_states[k];
-            const bool failed = alias->error != CHECK_PROGRAM_ALIAS_OK || (state & BUSTER_CHECK_PROGRAM_ALIAS_UNEMITTED) != 0 ||
-                                (alias->kind != CHECK_PROGRAM_WEAKREF && alias->base == 0);
+            const bool mismatched = alias->error == CHECK_PROGRAM_ALIAS_THREAD_LOCAL;
+            const bool failed = (mismatched ? (state & BUSTER_CHECK_PROGRAM_ALIAS_REFERENCED) != 0 : alias->error != CHECK_PROGRAM_ALIAS_OK) ||
+                                (state & BUSTER_CHECK_PROGRAM_ALIAS_UNEMITTED) != 0 || (alias->kind != CHECK_PROGRAM_WEAKREF && alias->base == 0);
             refused = failed && alias->attribute < refused ? alias->attribute : refused;
             if (symbol != 0)
             {
@@ -3235,8 +3236,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             if (alias->attribute == refused)
             {
                 result->status = CHECK_PROGRAM_UNSUPPORTED;
-                result->reason = alias->error == CHECK_PROGRAM_ALIAS_THREAD_LOCAL ? "an alias whose thread-local storage isn't its definition's" :
-                                 alias->error == CHECK_PROGRAM_ALIAS_DEFINED ? "an alias variable that the unit also defines tentatively" :
+                result->reason = alias->error == CHECK_PROGRAM_ALIAS_THREAD_LOCAL ? "a reference to an alias whose thread-local storage isn't its definition's" :
                                  alias->kind == CHECK_PROGRAM_WEAKREF ? "a weakref without a target" :
                                                                          "an alias or ifunc that clang's code generation refuses";
                 result->token = refused;
