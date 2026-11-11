@@ -451,6 +451,12 @@ struct Tier0AsmBody
     const uint32_t* branches;
     const uint32_t* targets;
     uint32_t branch_count;
+    // The template's named labels (#1839): `label_count` of them, each one's record (relative to the body's first, or its
+    // count for its end) and its name, a front end's index that Tier 0 passes through (Tier0Code.asm_label_names). A
+    // function whose bodies have labels isn't inlined (tier0_inline.c): each label is defined once.
+    const uint32_t* label_records;
+    const uint32_t* label_names;
+    uint32_t label_count;
     // Whether the template returns (#1839): its `ret`, and the records on the straight way to it (`leave`, `pop`), leave
     // the function as clang's object does, past the epilogue. Its function keeps no local and no value in a
     // callee-saved register, as one that calls __builtin_setjmp keeps none (tier0_leaves_callee_saved), so that the way
@@ -629,6 +635,14 @@ struct Tier0Function
     // local in one (tier0_assign_homes) and no value of its stacks either (its integer depths are the caller-saved
     // registers' alone), and a realigned frame whose base is r15 is refused.
     bool returns_twice;
+    // Whether the function calls another function that returns twice (#1847): setjmp's library kin, the catalogue's
+    // entries with the 'j' attribute, or one a declaration gives returns_twice. Their longjmp restores the callee-saved
+    // registers, and C's contexts for setjmp hold no value of the stacks across its call, so Tier 0's frame needs nothing
+    // more. Its IR lowers as any other's, but Tier 1 leaves it to Tier 0 (check_tier1_compile): its call-save rows and
+    // spill slots are shared by values whose ranges don't meet on the CFG, which has no edge from a longjmp back to the
+    // call, as LLVM's StackSlotColoring stays out of such a function; and neither inliner takes such a callee, as LLVM's
+    // isInlineViable doesn't.
+    bool calls_returns_twice;
     // Whether the function calls __builtin_eh_return (#148): its frame, and its TAIL_CALL of a BUSTER_TIER0_TAIL_EH row.
     bool eh_return;
     const uint64_t* vector_constants;
@@ -847,6 +861,11 @@ struct Tier0Code
     uint32_t choice_count;
     uint32_t* label_records;
     uint32_t label_count;
+    // The asm bodies' labels (#1839, Tier0AsmBody.labels), in the bodies' order: each one's record in the code and its
+    // name, as the body has it.
+    uint32_t* asm_label_records;
+    const uint32_t* asm_label_names;
+    uint32_t asm_label_count;
     uint32_t* tail_records;
     uint32_t tail_count;
     uint32_t deferred;
@@ -5373,6 +5392,8 @@ struct Tier0Writer
     // where no nested interrupt's frame lands; anyone else's are below rsp.
     bool frame_temporaries;
     int32_t temporaries;
+    // The code's asm label column (Tier0Code.asm_label_records), which an asm body's call record fills (#1839).
+    uint32_t* asm_labels;
 };
 
 static void tier0_put(Tier0Writer* writer, X86Instruction record)
@@ -6507,6 +6528,11 @@ static __attribute__((noinline, cold)) bool tier0_asm_bodies_check(const Tier0Fu
         {
             valid = body->branches[b] < body->count && (b == 0 || body->branches[b - 1] < body->branches[b]) && body->targets[b] <= body->count;
         }
+        valid = valid && (body->label_count == 0 || (body->label_records != 0 && body->label_names != 0));
+        for (uint32_t k = 0; valid && k < body->label_count; k += 1)
+        {
+            valid = body->label_records[k] <= body->count;
+        }
         for (uint32_t r = 0; valid && r < body->count; r += 1)
         {
             const X86Instruction* record = &body->records[r];
@@ -6556,6 +6582,16 @@ static void tier0_emit_call_record(const Tier0Function* function, const Tier0Hom
     if (body != 0)
     {
         const uint32_t first = writer->count;
+        // Its labels' records (#1839), past the labels of the bodies before it.
+        uint32_t label_base = 0;
+        for (uint32_t b = 0; writer->asm_labels != 0 && body->label_count != 0 && function->asm_bodies + b != body; b += 1)
+        {
+            label_base += function->asm_bodies[b].label_count;
+        }
+        for (uint32_t k = 0; writer->asm_labels != 0 && k < body->label_count; k += 1)
+        {
+            writer->asm_labels[label_base + k] = first + body->label_records[k];
+        }
         uint32_t branch = 0;
         for (uint32_t r = 0; r < body->count; r += 1)
         {
@@ -10699,7 +10735,7 @@ static inline __attribute__((always_inline)) void tier0_emit_body_entries(const 
                                                                          const Tier0Home* homes, const uint32_t* references, Tier0Code* code, Tier0Choices* choices,
                                                                          bool deep)
 {
-    Tier0Writer writer = { code->records, 0, code->references, 0, code->branches, code->targets, 0, choices, 0, frame->interrupt != 0, frame->temporaries };
+    Tier0Writer writer = { code->records, 0, code->references, 0, code->branches, code->targets, 0, choices, 0, frame->interrupt != 0, frame->temporaries, code->asm_label_records };
     tier0_emit_prologue(function, frame, homes, references, &writer);
     // The body's branches after the prologue's (a probe's loop's, #177).
     uint32_t branches = writer.branch_count;
@@ -10956,6 +10992,30 @@ static void tier0_apply_segments(X86Instruction* records, const uint32_t* positi
     }
 }
 
+// The code's asm label columns (#1839, Tier0Code.asm_label_records and asm_label_names): `count` labels, the bodies'
+// in order, each record UINT32_MAX until its body's call record is written (a label whose body isn't emitted stays one,
+// which the emission refuses), and each name its body's. Out of line and cold: few functions have them.
+static __attribute__((noinline, cold)) bool tier0_push_asm_labels(const Tier0Function* function, uint32_t count, Arena* output, Tier0Code* code)
+{
+    uint32_t* records = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, count);
+    uint32_t* names = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, count);
+    const bool room = records != 0 && names != 0;
+    uint32_t at = 0;
+    for (uint32_t b = 0; room && b < function->asm_body_count; b += 1)
+    {
+        for (uint32_t k = 0; k < function->asm_bodies[b].label_count; k += 1)
+        {
+            records[at] = UINT32_MAX;
+            names[at] = function->asm_bodies[b].label_names[k];
+            at += 1;
+        }
+    }
+    code->asm_label_records = room ? records : 0;
+    code->asm_label_names = room ? names : 0;
+    code->asm_label_count = room ? count : 0;
+    return room;
+}
+
 // What both paths share once the fusion and the depths are in the entries' columns, each pass in the path's version:
 // selection, the references' count, the homes and the frame (shared), measuring and positions (the vector path's
 // measuring sums them), the output, emission and the immediates' choice (x86_choose_forms or its twin).
@@ -11059,6 +11119,16 @@ static Tier0Error tier0_generate(const Tier0Function* function, const uint8_t* s
                                         function->count))
         {
             error = TIER0_ERROR_MEMORY;
+        }
+        // The asm bodies' labels (#1839): their names now, their records as the bodies' call records are written.
+        uint32_t asm_labels = 0;
+        for (uint32_t b = 0; error == TIER0_OK && b < function->asm_body_count; b += 1)
+        {
+            asm_labels += function->asm_bodies[b].label_count;
+        }
+        if (error == TIER0_OK && asm_labels != 0)
+        {
+            error = tier0_push_asm_labels(function, asm_labels, output, code) ? error : TIER0_ERROR_MEMORY;
         }
     }
     if (error == TIER0_OK)
@@ -13680,7 +13750,7 @@ static inline __attribute__((always_inline)) void tier0_emit_vector_entries(cons
     int64_t* choice_values = choices->values;
     uint16_t* contexts = choices->contexts;
     const Tier0HomeTable table = tier0_home_table(homes, function->local_count);
-    Tier0Writer writer = { records, 0, links, 0, branch_records, targets, 0, choices, 0, frame->interrupt != 0, frame->temporaries };
+    Tier0Writer writer = { records, 0, links, 0, branch_records, targets, 0, choices, 0, frame->interrupt != 0, frame->temporaries, code->asm_label_records };
     tier0_emit_prologue(function, frame, homes, references, &writer);
     // The body's branches after the prologue's (a probe's loop's, #177).
     uint32_t branches = writer.branch_count;

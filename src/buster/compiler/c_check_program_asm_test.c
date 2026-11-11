@@ -15,7 +15,8 @@
 // to none and then 8 bytes more at a time until the plan succeeds: each run before it must fail for want of room
 // (CHECK_PROGRAM_RESOURCE) with both arenas as they were, among them a run whose room ends before each statement's
 // places; then the plans must be the whole arena's: an asm body each for the first two (#1839), the third refused by name,
-// and a helper for the fourth, whose form x86_semantics.c doesn't cover (rorx).
+// a helper for the fourth, whose form x86_semantics.c doesn't cover (rorx), and an asm body for the fifth, whose named label
+// the names step adds (#2090: its run without room must leave the helpers as they were).
 static void check_test_program_asm_room(CheckTest* test)
 {
     static const char source[] =
@@ -81,8 +82,8 @@ static void check_test_program_asm_room(CheckTest* test)
                                  planned.plans[1].helper == BUSTER_CHECK_NONE && planned.plans[2].reason != NULL &&
                                  strcmp(planned.plans[2].reason, "inline assembly operands of this type in their constraint's registers") == 0 && planned.plans[3].reason == NULL &&
                                  !planned.plans[3].inlined && planned.plans[3].helper != BUSTER_CHECK_NONE && planned.plans[4].reason == NULL &&
-                                 planned.plans[4].helper != BUSTER_CHECK_NONE && helpers.count == 2;
-        snprintf(description, sizeof(description), "asm room, %s: the x87 statements are asm bodies, the __int128 operand is refused by name, rorx and the named label have helpers",
+                                 planned.plans[4].inlined && planned.plans[4].helper == BUSTER_CHECK_NONE && planned.plans[4].label_count == 1 && helpers.count == 1;
+        snprintf(description, sizeof(description), "asm room, %s: the x87 statements are asm bodies, the __int128 operand is refused by name, rorx has a helper, the named label is an asm body",
                  path == 0 ? "scalar" : "vector");
         check_test_expect(test, plans_right, description);
         parse_release(&parser);
@@ -181,7 +182,8 @@ static void check_test_program_asm_kinds(CheckTest* test)
 // arguments, whose body runs cpuid and stores its four outputs through their addresses, and which touches rbx; rdtsc's; a shift's count
 // in cl), a literal register (`%%rsp`, read), a syntax switch, more records than a row takes, an x87 operand, a form
 // x86_semantics.c doesn't cover (ldmxcsr), an explicit register variable, and a register class narrower than the sixteen
-// (Q's), and a branch to a numeric label (a branch of the body); but a named label, which keeps its helper.
+// (Q's), a branch to a numeric label (a branch of the body), and a named label (#1839: the body's label, at the record
+// after its movl, the template's end).
 static void check_test_program_asm_placement(CheckTest* test)
 {
     static const char source[] =
@@ -258,7 +260,7 @@ static void check_test_program_asm_placement(CheckTest* test)
             const CheckProgramAsm* plan = planned.plans + s;
             const Tier0Operation* row = plan->row;
             const bool placed = s < PLACED;
-            const bool helped = s == NAMED;
+            const bool helped = false;
             bool right = plan->planned && plan->reason == NULL && (row != NULL) == placed && (plan->helper != BUSTER_CHECK_NONE) == helped &&
                          plan->inlined == (!placed && !helped) && (plan->inline_count != 0) == plan->inlined;
             if (right && s == BRANCHED)
@@ -267,6 +269,14 @@ static void check_test_program_asm_placement(CheckTest* test)
                 // its label at the template's end, the first store.
                 right = plan->inline_branch_count == 1 && plan->inline_branches[0] == 1 && plan->inline_targets[0] == 3 &&
                         plan->inline_records[0].form == X86_FORM_TEST_RM32_R32;
+            }
+            if (right && s == NAMED)
+            {
+                // The named label's body: testl, jle to the label and movl, the label at the template's end (record 3),
+                // its spelling the substituted `.Lnamed` and the statement's number.
+                right = plan->label_count == 1 && plan->labels[0].record == 3 && plan->inline_label_records != 0 && plan->inline_label_records[0] == 3 &&
+                        plan->labels[0].spelling.length > 7 && memcmp(plan->labels[0].spelling.pointer, ".Lnamed", 7) == 0 && plan->inline_branch_count == 1 &&
+                        plan->inline_targets[0] == 3;
             }
             if (right && s == PLACED)
             {
@@ -320,8 +330,8 @@ static void check_test_program_asm_placement(CheckTest* test)
                                widened->records[0].immediate == 7;
             snprintf(description, sizeof(description), "asm placement, %s: the rows' roles are the operands', scratch's and stores' as planned", path == 0 ? "scalar" : "vector");
             check_test_expect(test, roles, description);
-            snprintf(description, sizeof(description), "asm placement, %s: the branch's helper, of %u", path == 0 ? "scalar" : "vector", helpers.count);
-            check_test_expect(test, helpers.count == 1, description);
+            snprintf(description, sizeof(description), "asm placement, %s: no helper, of %u (the named label's is an asm body too)", path == 0 ? "scalar" : "vector", helpers.count);
+            check_test_expect(test, helpers.count == 0, description);
         }
         parse_release(&parser);
         check_test_types_close(&types);
@@ -587,6 +597,16 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
         "int tested(int n){int r;__asm__(\"testl %1, %1\\n\\tjle .Lneg%=\\n\\tmovl $5, %0\\n\\tjmp .Lend%=\\n.Lneg%=:\\n\\tmovl $7, %0\\n.Lend%=:\" : \"=r\"(r) : \"r\"(n));"
         "int s=0,k=(n&7)+1;__asm__(\"1:\\n\\taddl $2, %0\\n\\tdecl %1\\n\\tjnz 1b\" : \"+r\"(s), \"+r\"(k));return r*100+s+n;}",
         "asm-local-branches", clang);
+    // Named labels placed in their caller (#1839): a loop back to a %= label, a label of a template of no instructions (a
+    // place in the caller's code), and a global label another template refers to as data, each address within the
+    // caller's code.
+    check_test_program_source(test,
+        "int tested(int n){int r=0,k=(n&7)+1;__asm__(\".Lcount%=:\\n\\tincl %1\\n\\tdecl %0\\n\\tjnz .Lcount%=\" : \"+r\"(k), \"+r\"(r));"
+        "__asm__ volatile(\"buster_place_%=:\" : : : \"memory\");__asm__(\"buster_named_here:\\n\\taddl $3, %0\" : \"+r\"(r));long p,q;"
+        "__asm__(\"leaq buster_named_here(%%rip), %0\" : \"=r\"(p));q=(long)&tested;"
+        "return r*10+(p!=q&&p!=0)+n;}",
+        "asm-named-labels", clang);
+    check_test_program_source(test, "int tested(int n){__asm__(\"lonely:\");return n;}", "asm-label-no-instructions", clang);
     // Callee-saved clobbers inside a loop of live values, and a statement expression's asm under a live value.
     check_test_program_source(test,
         "int tested(int n){long a=n,b=n+1,c=n+2,d=n+3,e=n+4,f=n+5,g=n+6;long r;"
@@ -804,14 +824,6 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
         "__asm__(\"knotw %1, %1\\n\\tkmovw %%k3, %0\" : \"=r\"(o), \"+k\"(k));return (unsigned short)(o+k);}"
         "int tested(int n){return mask_variable((unsigned short)(n*977));}",
         "asm-register-variable-opmask", clang, masks_native);
-    // Opmask operands in templates that take directives (#1846): the unit helper's text moves them as the record helper does.
-    check_test_program_source_native(test,
-        "static __attribute__((target(\"avx512f\"))) unsigned short mask_and(unsigned short a, unsigned short b){unsigned short r;"
-        "__asm__(\".p2align 4\\n\\tkandw %1, %2, %0\" : \"=k\"(r) : \"k\"(a), \"Yk\"(b));return r;}"
-        "static __attribute__((target(\"avx512f,avx512bw\"))) unsigned long long mask_not(unsigned long long a){unsigned long long r;"
-        "__asm__(\".p2align 4\\n\\tknotq %1, %0\" : \"=k\"(r) : \"k\"(a));return r;}"
-        "int tested(int n){return mask_and((unsigned short)(n*977),(unsigned short)(n*31+5))+(int)(mask_not((unsigned long long)n*2654435761u)>>9);}",
-        "asm-opmask-directives", clang, masks_native);
     check_test_program_boundary_reason(test, "int tested(int n){unsigned short m=(unsigned short)n;__asm__(\"knotw %0, %0\" : \"+k\"(m));return m;}",
                                        "asm-opmask-baseline", true, false, 0, 1, "inline assembly opmask operands without AVX-512F");
     check_test_program_boundary_reason(test, "__attribute__((target(\"avx512f\"))) int tested(int n){unsigned m=(unsigned)n;__asm__(\"knotd %0, %0\" : \"+k\"(m));return (int)m;}",
@@ -1162,6 +1174,24 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
         "__asm__ volatile(\".set dir_repeat, 8\\naddl $dir_repeat, %0\" : \"+r\"(g));"
         "return (*(unsigned char*)a*10000+*(unsigned char*)b*1000+*(unsigned char*)c*100+*(unsigned char*)d*10+*(unsigned char*)f+e+g+n)%1000+directivenaked(n);}",
         "asm-directives", clang);
+    // Templates that take directives with the record helper's own loads and stores (#1839's item 10,
+    // check_asm_unit_helper): x87 operands (one of directives alone among them, whose helper passes its value through the
+    // x87's stack), flag outputs (one of directives alone, whose object is set), and asm goto's labels, by name and number,
+    // with an output reaching a label. clang's build of the same source must print the same.
+    check_test_program_source(test,
+        "static double root(double x){double r;__asm__(\".p2align 4\\n\\tfsqrt\" : \"=t\"(r) : \"0\"(x));return r;}"
+        "static long double sum(long double a, long double b){long double r;__asm__(\".p2align 3\\n\\tfaddp\" : \"=t\"(r) : \"0\"(a), \"u\"(b) : \"st(1)\");return r;}"
+        "static float kept(float x){__asm__(\".p2align 4\" : \"+t\"(x));return x;}"
+        "static int zero(long x){int z;__asm__(\".p2align 4\\n\\ttestq %1, %1\" : \"=@ccz\"(z) : \"r\"(x));return z;}"
+        "static int below(unsigned a, unsigned b){_Bool c;__asm__(\".nops 3\\n\\tcmpl %2, %1\" : \"=@ccb\"(c) : \"r\"(a), \"r\"(b));return c;}"
+        "static int flag_only(void){int f;__asm__(\".p2align 4\" : \"=@ccz\"(f));return f == 0 || f == 1;}"
+        "static int sign(int x){asm goto(\".p2align 4\\n\\ttestl %0, %0\\n\\tjz %l1\\n\\tjs %l[negative]\" : : \"r\"(x) : : zero, negative);return 1;zero:return 0;negative:return -1;}"
+        "static int five(int x, int* o){int r=x*2;asm goto(\".balign 8\\n\\tcmpl $5, %1\\n\\tje %l[hit]\\n\\tmovl $7, %0\" : \"+r\"(r) : \"r\"(x) : : hit);*o=r;return 0;hit:*o=r;return 5;}"
+        "int tested(int n){int a=0,b=0;int f=five(n%7,&a)+five(5,&b);"
+        "return (int)(root(n*n+0.25)*4)+(int)(sum(n*0.5L,2.25L)*8)+(int)kept(n*1.5f)+zero(n&3)*3+below((unsigned)n,7u)*5+flag_only()*11+sign(n-9)*13+sign(9-n)*17+sign(0)+f*19+a+b;}",
+        "asm-directives-helper", clang);
+    check_test_program_boundary_reason(test, "int tested(int n){asm goto(\".p2align 4\\n\\tleaq %l0(%%rip), %%rax\" : : : \"rax\" : out);return n;out:return -n;}",
+                                       "asm-directives-goto-data", true, false, 0, 0, "asm goto labels other than a jmp's or a jcc's target");
     check_test_program_boundary_reason(test, "int tested(int n){__asm__(\".cfi_startproc\\n\\t.cfi_endproc\");return n;}",
                                        "asm-cfi", true, false, 0, 0, "inline assembly's CFI directives");
     check_test_program_boundary_reason(test, "int tested(int n){int e;__asm__ volatile(\".set crossset, 7\");__asm__(\"movl $crossset, %0\" : \"=r\"(e));return e+n;}",
@@ -1255,12 +1285,8 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
         "unsigned __int128 p=product(a,b);unsigned __int128 q=swap_halves(p);unsigned __int128 c=copied(q+n);"
         "return (int)(p>>64)+(int)p*3+(int)(q>>64)*5+(int)(c>>70)+(int)low_bits(a)+(int)widened((unsigned)n*77u)+wide_name((short)(n*1000-3))+(int)through(n*2.5);}",
         "asm-pair", clang);
-    // A's pair in a template that takes directives (#1846, the owner's decision on #1447): the unit helper's text loads
-    // and stores it as the record helper does.
-    check_test_program_source(test,
-        "int tested(int n){unsigned __int128 v=((unsigned __int128)(unsigned)n<<64)|(unsigned)(n*7);__asm__(\".p2align 4\\n\\tnotq %%rax\\n\\taddq $3, %%rdx\" : \"+A\"(v));"
-        "return (int)v^(int)(v>>64);}",
-        "asm-pair-directives", clang);
+    check_test_program_source(test, "int tested(int n){unsigned __int128 v=(unsigned)n;__asm__(\".p2align 4\\n\\tnotq %%rax\" : \"+A\"(v));return (int)v+(int)(v>>64)*3;}",
+                              "asm-pair-directives", clang);
     // MMX's operands (#1846): y's registers of a long, an unsigned, a short and a byte (zero-extended into the register,
     // its low bytes stored), a double's bits, an early-clobbered output, a matching input, MMX clobbers the
     // registers avoid, an MMX input into a general output, and a template of no instructions; emms before returning.
@@ -1288,11 +1314,8 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
         "int tested(int n){long double x=(long double)(n*n);long m=both(n*3+1,&x);unsigned char b[10];__builtin_memcpy(b,&x,10);"
         "int s=0;for(int i=0;i<10;i++)s=s*31+b[i];return (int)m+s;}",
         "asm-mmx-x87", clang);
-    // MMX operands in a template that takes directives (#1846, the owner's decision on #1447), 8 and 2 bytes.
-    check_test_program_source(test,
-        "static short narrow(short a){short r;__asm__(\".p2align 4\\n\\tmovq %1, %0\" : \"=y\"(r) : \"y\"(a));return r;}"
-        "int tested(int n){long m=n;__asm__(\".p2align 4\\n\\tpaddd %0, %0\" : \"+y\"(m));int r=(int)m+narrow((short)(n*3));__asm__ volatile(\"emms\");return r;}",
-        "asm-mmx-directives", clang);
+    check_test_program_source(test, "int tested(int n){long m=n;__asm__(\".p2align 4\\n\\tpaddd %0, %0\" : \"+y\"(m));__asm__ volatile(\"emms\");return (int)m;}",
+                              "asm-mmx-directives", clang);
     // An __m64 in an MMX register (#1846, the owner's decision on #1447): an object's 8 bytes, read through its address,
     // as an input, a `+` operand and an early-clobbered output; an input of no object (an rvalue, a call's) through a copy's.
     check_test_program_source(test,
@@ -1329,11 +1352,10 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
         "asm-register-variable-rsp", clang);
     check_test_program_boundary_reason(test, "int tested(int n){register long r __asm__(\"rsp\");__asm__ volatile(\".p2align 4\\n\\tmovq %0, %%rax\" : : \"r\"(r) : \"rax\");return n;}",
                                        "asm-register-variable-rsp-directives", true, false, 0, 0, "explicit register variables in rsp in templates that take directives");
-    // Explicit register variables the lowering doesn't place: in an XMM register past XMM15 without AVX-512F and in a high
-    // byte in a template that takes directives; an input of a memory constraint, which clang's code refuses too; and an
-    // integer in an XMM register.
-    check_test_program_boundary_reason(test, "int tested(int n){register char r __asm__(\"ah\")=(char)n;__asm__ volatile(\".p2align 4\\n\\tincb %0\" : \"+q\"(r));return r;}",
-                                       "asm-register-variable-high", true, false, 0, 1, "explicit register variables in high byte registers in templates that take directives");
+    // Explicit register variables the lowering doesn't place: in an XMM register past XMM15 without AVX-512F; an input of a
+    // memory constraint, which clang's code refuses too; and an integer in an XMM register.
+    check_test_program_source(test, "int tested(int n){register char r __asm__(\"ah\")=(char)n;__asm__ volatile(\".p2align 4\\n\\tincb %0\" : \"+q\"(r));return r;}",
+                              "asm-register-variable-high", clang);
     check_test_program_boundary_reason(test, "int tested(int n){register double r __asm__(\"xmm16\")=n;__asm__ volatile(\"\" : : \"v\"(r));return n;}",
                                        "asm-register-variable-xmm16", true, false, 0, 1, "explicit register variables in XMM16 to XMM31 without AVX-512F");
     check_test_program_boundary_reason(test, "int tested(int n){register long r __asm__(\"r10\")=n;__asm__ volatile(\"\" : : \"m\"(r));return n;}",
@@ -1353,8 +1375,6 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
                                        "asm-label-twice", true, false, 0, 0, "inline assembly labels another template defines too");
     check_test_program_boundary_reason(test, "int tested(int n){__asm__(\"jmp .Lnowhere\");return n;}",
                                        "asm-local-undefined", true, false, 0, 0, "inline assembly's local labels that no template defines");
-    check_test_program_boundary_reason(test, "int tested(int n){__asm__(\"lonely:\");return n;}",
-                                       "asm-label-no-instructions", true, false, 0, 0, "inline assembly labels in templates of no instructions");
     // Vectors of 16, 32 and 64 bytes in vector registers (#1846, the owner's decision on #1447), for x86-64-v4: in
     // templates of instructions, through their addresses, as inputs (a call's value, an rvalue's), `+` operands, outputs,
     // matching inputs (in a template of no instructions too, whose output takes the input's value), a volatile `+`

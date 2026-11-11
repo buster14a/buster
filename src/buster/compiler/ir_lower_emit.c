@@ -356,6 +356,19 @@ static IrSizes BUSTER_IR_TYPED_EMIT_NAME(const Tier0Function* input, IrType resu
                 classes[depth] = class;
                 depth += 1;
                 break;
+            case BUSTER_TYPED_FRAME_ADDRESS:
+            {
+                // The frame pointer (#1847): a save of BUSTER_IR_STACK_SAVE_FRAME, of the class's U64 as a save's.
+                const uint32_t saved = ir_typed_emit(&sink, IR_STACK_SAVE, type, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+                if (sink.output != 0)
+                {
+                    sink.output->flags[saved] = BUSTER_IR_STACK_SAVE_FRAME;
+                }
+                stack[depth] = saved;
+                classes[depth] = class;
+                depth += 1;
+                break;
+            }
             case BUSTER_TYPED_STACK_RESTORE:
                 depth -= 1;
                 ir_typed_emit(&sink, IR_STACK_RESTORE, IR_VOID, stack[depth], BUSTER_IR_NONE, BUSTER_IR_NONE, 0);

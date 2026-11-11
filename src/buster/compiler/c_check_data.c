@@ -354,6 +354,33 @@ static CheckDataStatus check_data_plan_scalar(const TypeTable* types, const Chec
     return status;
 }
 
+// A _BitInt past 128 bits' constant `value` as `type`'s `size` bytes at `destination` (#1447): its limbs, the bits past
+// its width extended as the x86-64 ABI keeps them (check_wide_bytes). A value of another type, an lvalue, a faulted or
+// side-effecting one, or one no constant is refused as check_data_plan_scalar refuses them.
+static CheckDataStatus check_data_wide_value(const TypeTable* types, const CheckValue* value, TypeId type, uint8_t* destination, uint64_t size)
+{
+    CheckDataStatus status = CHECK_DATA_OK;
+    const bool valid_type = type_is_valid(types, value->type);
+    if (!valid_type || type_unqualified(type_strip_aligned(types, value->type)) != type_unqualified(type_strip_aligned(types, type)) || value->category != CHECK_RVALUE)
+    {
+        status = CHECK_DATA_INVALID;
+    }
+    else if (value->fault != CHECK_FAULT_NONE || (value->flags & BUSTER_CHECK_SIDE_EFFECT) != 0 || value->constant_kind != CHECK_CONSTANT_INTEGER ||
+             !check_wide_bytes(types, value, destination, size))
+    {
+        status = CHECK_DATA_NON_CONSTANT;
+    }
+    return status;
+}
+
+// Whether `type` is a _BitInt past 128 bits, whose constants check_data_wide_value writes.
+static bool check_data_wide_type(const TypeTable* types, TypeId type)
+{
+    uint32_t width = 0;
+    bool is_signed = false;
+    return type_is_valid(types, type) && check_wide_type(types, type, &width, &is_signed);
+}
+
 static bool check_data_nonzero(const uint8_t* bytes, uint64_t size)
 {
     bool nonzero = false;
@@ -737,8 +764,9 @@ static CheckDataStatus check_data_plan_object(const TypeTable* types, const Chec
     CheckDataStatus status = check_data_plan_header(types, object, object_symbols, object_count, link, plan);
     const TypeId base = status == CHECK_DATA_OK ? type_strip_aligned(types, object->type) : 0;
     const uint8_t kind = status == CHECK_DATA_OK ? type_kind(types, type_conversion_operand(types, base)) : 0;
-    // A _BitInt past 128 bits (#137) without an initializer is zeros, as an aggregate's are, and so is a complex one: the
-    // checker folds none of their constants, so that one with an initializer is refused as not constant.
+    // A _BitInt past 128 bits (#137) without an initializer is zeros, as an aggregate's are, and so is a complex one,
+    // whose constants the checker doesn't fold, so that one with an initializer is refused as not constant. A _BitInt's
+    // constant (#1447) is its limbs (check_data_wide_value).
     const bool aggregate = kind == BUSTER_TYPE_KIND_ARRAY || kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION ||
                            kind == BUSTER_TYPE_KIND_VECTOR || kind == BUSTER_TYPE_KIND_EXT_VECTOR ||
                            (kind == BUSTER_TYPE_KIND_BIT_INT && type_size(types, base) > 16) || (kind == BUSTER_TYPE_KIND_COMPLEX && type_size(types, base) > 32);
@@ -787,7 +815,8 @@ static CheckDataStatus check_data_plan_object(const TypeTable* types, const Chec
                 if (part->kind == CHECK_INIT_VALUE)
                 {
                     const uint64_t size = type_size(types, part->type);
-                    if (size > 32)
+                    // A _BitInt past 128 bits' slot holds its bytes (check_data_wide_value), whatever their size.
+                    if (size > 32 && !(part->bit_width == 0 && check_data_wide_type(types, part->type)))
                     {
                         status = CHECK_DATA_UNSUPPORTED;
                     }
@@ -824,6 +853,24 @@ static CheckDataStatus check_data_plan_object(const TypeTable* types, const Chec
             {
                 memcpy(plan->bytes, object->literal_bytes, plan->size);
             }
+        }
+    }
+    else if (status == CHECK_DATA_OK && initializer == 0 && object->initializer != BUSTER_CHECK_NONE && plan->size > 16 &&
+             check_data_wide_type(types, object->type))
+    {
+        if (stream == 0 || object->initializer >= stream->count || !check_stream_has_values(stream) || stream->diagnostics == 0)
+        {
+            status = CHECK_DATA_INVALID;
+        }
+        else if (stream->status != CHECK_STATUS_OK || stream->report_count != 0 || stream->diagnostics[object->initializer] != CHECK_DIAG_NONE)
+        {
+            status = CHECK_DATA_CHECK_FAILED;
+        }
+        else
+        {
+            const CheckValue value = check_stream_value(stream, object->initializer);
+            plan->bytes = check_data_payload(bytes, scratch, plan->size);
+            status = plan->bytes == 0 ? CHECK_DATA_RESOURCE : check_data_wide_value(types, &value, object->type, plan->bytes, plan->size);
         }
     }
     else if (status == CHECK_DATA_OK && initializer == 0 && (!aggregate || object->initializer != BUSTER_CHECK_NONE))
@@ -901,6 +948,13 @@ static CheckDataStatus check_data_plan_object(const TypeTable* types, const Chec
             {
                 part_nonzero = check_data_nonzero_bits(part->bytes, 0, size * 8, false);
             }
+        }
+        else if (part->kind == CHECK_INIT_VALUE && part->bit_width == 0 && size > 16 && check_data_wide_type(types, part->type))
+        {
+            // A _BitInt past 128 bits (#1447): its bytes, in place or in its slot.
+            uint8_t* encoded = direct ? plan->bytes + offset : values + (uint64_t)i * value_stride;
+            status = check_data_wide_value(types, &part->value, part->type, encoded, size);
+            part_nonzero = status == CHECK_DATA_OK && !direct && check_data_nonzero_bits(encoded, 0, size * 8, false);
         }
         else if (part->kind == CHECK_INIT_VALUE)
         {
