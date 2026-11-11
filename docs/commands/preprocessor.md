@@ -262,12 +262,24 @@ Every case and file runs with clang's answers to the feature queries
 (`--clang-features`, the oracle's mode), and a check runs a line of queries both
 ways: by default they answer what buster implements.
 
-`--clang-server PATH` sends the oracle cache's runs of `clang`
-(`pp_test_clang_process`'s and the predefines' jobs') to `tools/clang-server`,
-and `--differential` also runs each as before and fails on a difference
-([Served runs](oracle-cache.md#served-runs)). The fuzz batch's clang processes
-and the few checks that start clang themselves (the history's and the system
-warnings' diagnostics) don't run through the cache, and run as before.
+`--clang-server PATH` sends the runs of `clang` to `tools/clang-server`: the
+oracle cache's (`pp_test_clang_process`'s, for the cases and for the files
+given to it, and the predefines' jobs') and the fuzz batch's, which start clang
+outside the cache (`preprocessor_fuzz_clang_process`: its seeds, batches and
+checks as before, its standard input a file, and its 30 s limit kept by the
+client, which stops a server past it). `--differential` also runs each as
+before and fails on a difference ([Served runs](oracle-cache.md#served-runs)).
+These run as before:
+
+- the library-builtin release fixture's 17 runs (`pp_test_builtin_release`),
+  through a wrapper script, another program: it has a `--version` of its own,
+  it reaches clang through its trampoline's `exec`, the awkward path the
+  fixture checks, and `/bin/sh` sets `PWD` where the environment's is missing
+  or stale, which LLVM reads for its working directory. A served run would
+  stand for clang, not for the script;
+- the checks that start clang themselves, outside the cache: the history's and
+  the system warnings' diagnostics, the directive tables' commands, the
+  predefines' shell commands, and `clang --version` for the reference report.
 
 `--clang` also compares every case and file with `clang -E` and the same
 options (but `--predefines`, `--location-limit` and `--window-bytes`, ours alone), token spelling by token spelling, and then where clang's line markers

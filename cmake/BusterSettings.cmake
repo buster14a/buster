@@ -160,9 +160,18 @@ function(buster_settings_normalize)
     if(arch STREQUAL "")
         set(arch native)
     endif()
-    # The name is clang's -march value and part of the build tree's directory name.
+    # The name is clang's -march value, or `vector`, and part of the build tree's directory name.
     if(NOT arch MATCHES "^[A-Za-z0-9_.][A-Za-z0-9_.-]*$")
-        buster_settings_fail("BUSTER_HOST_ARCH must be a -march name, such as native, x86-64 or znver5")
+        buster_settings_fail("BUSTER_HOST_ARCH must be a -march name, such as native, x86-64 or znver5, or vector")
+    endif()
+    # The host target's flags: clang's -march=ARCH, or for `vector`, the explicit target that is exactly host_isa.h's
+    # predicate (#2033): x86-64-v4 and the predicate's features beyond it, the same on every runner, so that any CPU whose
+    # features and OS enable them all runs the executable, whatever its model. tools/ci/changes.c's self-test keeps this
+    # line, host_isa.h's predicate and the hosted vector row's probe in step; keep it on one line.
+    if(arch STREQUAL "vector")
+        set(host_flags -march=x86-64-v4 -maes -mgfni -mvaes -mavx512vbmi -mavx512vbmi2 -mavx512vpopcntdq -mavx512bitalg -mavx512vnni)
+    else()
+        set(host_flags -march=${arch})
     endif()
 
     set(optimization "")
@@ -295,6 +304,7 @@ function(buster_settings_normalize)
     set(buster_sanitizer ${sanitizer} PARENT_SCOPE)
     set(buster_sanitizer_optimization "${optimization}" PARENT_SCOPE)
     set(buster_arch "${arch}" PARENT_SCOPE)
+    set(buster_host_flags ${host_flags} PARENT_SCOPE)
     set(buster_debug_info ${debug_info} PARENT_SCOPE)
     set(buster_defines ${defines} PARENT_SCOPE)
     set(buster_bake ${bake} PARENT_SCOPE)
@@ -336,7 +346,7 @@ function(buster_settings_tools clang)
     else()
         set(ssp BUSTER_PREDEFINES_SSP_OFF)
     endif()
-    set(flags -march=${buster_arch} -Isrc -fwrapv -funsigned-char -fno-strict-aliasing -Wall -Werror -fno-stack-protector
+    set(flags ${buster_host_flags} -Isrc -fwrapv -funsigned-char -fno-strict-aliasing -Wall -Werror -fno-stack-protector
         -DBUSTER_HOST_SSP_DEFAULT=${ssp})
 
     # The target-query defaults follow the Clang driver used to build this compiler. Keep the triple as a single
@@ -359,10 +369,13 @@ function(buster_settings_tools clang)
         WORKING_DIRECTORY "${BUSTER_SOURCE_DIR}"
         OUTPUT_VARIABLE host_defines ERROR_VARIABLE error RESULT_VARIABLE status)
     if(NOT status EQUAL 0)
-        buster_settings_fail("${clang} -march=${buster_arch} can't preprocess host_isa.h:\n${error}")
+        buster_settings_fail("${clang} ${buster_host_flags} can't preprocess host_isa.h:\n${error}")
     endif()
     if(host_defines MATCHES "(^|\n)#define BUSTER_HOST_VECTOR 1\n")
         set(host_vector 1)
+    elseif(buster_arch STREQUAL "vector")
+        # The explicit vector target exists to run the vector path: a scalar build of it would pass for one.
+        buster_settings_fail("BUSTER_HOST_ARCH=vector (${buster_host_flags}) doesn't select host_isa.h's vector path: its flags and the predicate differ")
     else()
         set(host_vector 0)
         list(APPEND flags -Wno-unused-function -Wno-psabi)

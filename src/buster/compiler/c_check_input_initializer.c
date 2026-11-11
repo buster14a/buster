@@ -113,8 +113,10 @@ static bool check_input_initializer_prepare_slow(CheckInputReader* reader, uint3
     const bool incomplete = type_kind(reader->types, type) == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY;
     // An array whose initializer is parenthesized may be a compound literal's (GNU's, check_input_initializer_finish).
     const bool parenthesized = parser->tokens.kinds[begin] == PARSE_KIND_L_PAREN && type_kind_is_array(type_kind(reader->types, type_strip_aligned(reader->types, type)));
+    // (A variable whose type tags register its initializer's value, #1447, c_check_type_safety_input.c, finishes too.)
     if (valid && (incomplete || parenthesized || check_const_eligible(reader->types, type) || check_input_auto_type(type) ||
-                  (BUSTER_CHECK_RARE(reader, declaration_flags, declaration) & BUSTER_CHECK_DECLARATION_DEDUCED) != 0))
+                  (BUSTER_CHECK_RARE(reader, declaration_flags, declaration) & BUSTER_CHECK_DECLARATION_DEDUCED) != 0 ||
+                  (reader->type_tag_attributes && check_type_tags_pending(reader->output, declaration) != NULL)))
     {
         check_input_rare_claim(reader, &reader->incomplete_array_types[declaration]);
         reader->incomplete_array_types[declaration] = incomplete ? type : 0;
@@ -195,9 +197,9 @@ static bool check_input_initializer_designator(CheckInputReader* reader, uint32_
 // inference_end), as clang deduces it: the initializer's, converted as an lvalue's (its qualifiers dropped, but not
 // _Atomic) and decayed, with the specifiers' const and volatile. A use of the variable in its initializer is an error
 // there, a bit-field's value one at the member's name, an incomplete type one at the variable's name, and an _Alignas
-// below the type's own alignment one at the _Alignas (the specifiers and the declarator left it to this); a variably
-// modified type, whose sizes the declaration would have evaluated, is refused by name. The declaration's columns take the
-// type, which is returned, or 0.
+// below the type's own alignment one at the _Alignas (the specifiers and the declarator left it to this). A variably
+// modified type is the initializer's, whose sizes its own declaration or cast evaluated: the declaration evaluates none,
+// as clang's evaluates none for a deduced type. The declaration's columns take the type, which is returned, or 0.
 static __attribute__((noinline)) TypeId check_input_auto_type_finish(CheckInputReader* reader, uint32_t declaration, uint32_t begin, uint32_t end,
                                                                      TypeId placeholder)
 {
@@ -275,10 +277,6 @@ static __attribute__((noinline)) TypeId check_input_auto_type_finish(CheckInputR
         if (deduced != 0 && !type_is_complete(types, deduced))
         {
             check_input_report(reader, declaration, CHECK_INPUT_INCOMPLETE_OBJECT);
-        }
-        else if (deduced != 0 && (type_inherited_flags(types, deduced) & BUSTER_TYPE_FLAG_VARIABLY_MODIFIED) != 0)
-        {
-            check_input_report(reader, declaration, CHECK_INPUT_UNSUPPORTED);
         }
         else if (deduced != 0 && required != 0 && required - 1 < type_alignment_log2(types, deduced))
         {
@@ -718,6 +716,10 @@ static bool check_input_initializer_finish(CheckInputReader* reader, uint32_t de
     if (valid && !listless && check_const_eligible(reader->types, type))
     {
         check_input_initializer_const(reader, declaration, begin, end, type);
+    }
+    if (valid && !listless && reader->type_tag_attributes)
+    {
+        valid = check_input_type_tag_finish(reader, declaration, begin, end);
     }
     if (!valid && !mismatched && reader->output->report_count == 0)
     {

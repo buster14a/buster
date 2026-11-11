@@ -27,7 +27,7 @@ struct PPWarningOption
 
 static bool pp_warning_transport(const char* argument)
 {
-    return strncmp(argument, "-Wa,", 4) == 0 || strncmp(argument, "-Wp,", 4) == 0 || strncmp(argument, "-Wl,", 4) == 0;
+    return argument[0] == '-' && argument[1] == 'W' && (argument[2] == 'a' || argument[2] == 'p' || argument[2] == 'l') && argument[3] == ',';
 }
 
 // Only these positive spellings are driver options with a value. In particular, do not remove an arbitrary =VALUE

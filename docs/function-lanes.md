@@ -375,6 +375,53 @@ rounds of its flow too (`CheckUnitsFlow`, the [translation units
 guide](translation-units.md)), and so does `link-foreign` (the [driver's
 contract](foreign-driver.md)).
 
+### One source file's lanes on demand (#1444)
+
+One source file's session starts on demand by default
+(`BUSTER_LANE_SESSION_ON_DEMAND`, the lazy start moved later): lane 0 creates
+no thread as the command starts, but once the unit is preprocessed, if it has
+`BUSTER_CHECK_EMIT_LANE_TOKENS` tokens or more (`check_driver_start_lanes`),
+so that lane 1 counts the cores and creates the others while lane 0 parses
+and checks it. A unit with fewer tokens has fewer bodies' tokens than pay for
+a second lane in the emission's rule or the deferred reader's, so its `-c`
+runs on lane 0 alone and creates no thread; the emission and the deferred
+reader's grant start the lanes too before they ask for them
+(`lane_session_start`), so that a rule that pays always finds them. Several
+units, `--lanes N` and pinned lanes start as before.
+
+On the 9700X a one-line `-c` then made 129 system calls rather than 233 (no
+`clone3` against 7, no `futex` against 14), about 430 page faults rather than
+610 and no context switch against 19, in 0.58 ms of task clock rather than
+0.99. Run 8 at a time, 400 of them took 70 ms rather than 96, with 36% fewer
+cycles on every CPU. Run one at a time, as a configure script runs its tests,
+they took 16% longer (a `#include <stdio.h>` file's 20%): on Linux 6.18 a
+process exits before its address space is torn down, in a kworker, only if it
+has 6 threads or more, so a process of one tears it down in its exit (90 µs of
+the one-line `-c`'s, 130 µs of the `stdio.h` file's), and, most likely, the
+lanes had kept cores out of deep idle for the next process, which now starts
+and runs on an idle one ([measurements](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/lazy-lanes-1444-2026-11-11)).
+
+So a source command whose lanes created no thread leaves its teardown to a
+helper as it exits (`lane_exit_helper_start`, `lane.c`): its streams flushed and
+every descriptor closed, it starts a process that shares its address space and
+holds nothing else, which ends as it does, so that its parent's wait returns
+before `exit_mmap` runs. It starts only where PID 1 reaps orphans
+(`lane_exit_reaped`, a read of `/proc/1/stat` of about 3 µs), or by
+`BUSTER_EXIT_HELPER=1`: a PID 1 that never waits, as in some containers and
+virtual machines, would keep each helper as a zombie, a process ID per compile.
+With it the one-line `-c`'s process took 0.31% longer than main's run one at a
+time (`time-runs`, the floor −0.23%), a `stdio.h` file's 1.43% less, and an empty
+file's `-fsyntax-only`, which never had lanes, 3.5% less. 400 one-line compiles in
+a row took 305 ms against main's 307 and 357 without the helper; the `stdio.h`
+file's 840 ms against 767 and 921, its next process still starting on an idle
+core; 8 at a time 72 and 125 ms against main's 96 and 146, with 31% and 20%
+fewer cycles on every CPU, the helpers' among them. The helper's start costs
+about 0.7 million cycles of a serial compile's, on a second core.
+`sqlite3.c`'s `-c`, a unit of 200 functions on several lanes and four units'
+objects start their lanes, start no helper and didn't change beyond their
+floors. The [measurements](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/exit-helper-1444-2026-11-11)
+have the runs.
+
 ### Memory
 
 Lane 0 is the calling thread, with the caller's arenas but for its writer's

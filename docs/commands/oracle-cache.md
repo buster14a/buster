@@ -493,6 +493,17 @@ of daily `check` runs that serve them, and their runs would then be served
 rather than taken. `--differential` keeps the cache as it was: each run that
 fits runs as before (taken, or run, traced and kept), is served too, and the
 first's result is the run's; a difference in status or either stream is counted
-and printed (`oracle_run_compare_served`) and fails the test
+and printed (`oracle_serve_compare`) and fails the test
 (`oracle_serve_end`, which prints the counts: served, run both ways, differing,
 and runs that fit but that the server couldn't take, which ran as children).
+
+A test that starts its clang itself, outside the cache (`test-preprocessor`'s
+fuzz batch, `preprocessor_fuzz_clang_process`), sends those runs to the same
+server: `oracle_serve_takes` says whether the server takes a command line (its
+clang's, and one that fits), and `oracle_serve_command` runs it there with its
+standard input from a file. The client keeps the run's time limit: a request
+that gets no reply in time stops the server (killed, as a child past its time
+would be), and the next request starts another. A run the server couldn't take
+runs as a child; none enters the cache, and with `--differential` each runs as
+a child too, which gives its result, and the two are compared and counted with
+the cache's runs.

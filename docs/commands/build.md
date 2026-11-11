@@ -28,7 +28,7 @@ the binutils `nm` and `readelf`. CI stages the official Clang 23.1.4, CMake
 ./build.sh test [--config Debug|Release] [--jobs N] [-- CTEST_ARGUMENT...]
 ./build.sh clean [--config Debug|Release | --all]
 ./build.sh configure
-./build.sh print-sources | print-compile-flags [--config C] | print-sanitizer-flags | print-output [--config C]
+./build.sh print-sources | print-compile-flags [--config C] | print-sanitizer-flags | print-host-flags | print-output [--config C]
 ./build.sh check-call-graph [--config C] [--jobs N]
 ./build.sh lexer-variant [--config C] [--jobs N] NAME=SOURCE...
 ./build.sh lexer-variant-assembly NAME SOURCE OUTPUT.s
@@ -53,7 +53,10 @@ the binutils `nm` and `readelf`. CI stages the official Clang 23.1.4, CMake
   the sources in link order; a unit's compile arguments but `-c`, the source
   and the output (`-g`, the flags with `-Isrc`, `-O3`, `BUSTER_BUILD_DEFINES`;
   Debug's with `--config Debug`); and a sanitizer build's optimization, debug
-  information, sanitizer flags and link mode, or nothing. Consumers read arrays
+  information, sanitizer flags and link mode, or nothing. **print-host-flags**
+  prints the host target alone, `-march=$BUSTER_HOST_ARCH` or the explicit
+  vector target's flags (below), which the inventory's commands that compile for
+  the build's host pass to clang and to the compiler. Consumers read arrays
   rather than shell text. **print-output** prints the configuration's executable's
   path, built or not.
 - **check-call-graph** captures each unit's LLVM IR in the tree
@@ -78,7 +81,7 @@ One tree holds **Release** and **Debug**, in `CONFIG/` subdirectories of their
 own; switching between them builds nothing that is up to date.
 
 - **Release** is the production build, with the flags the build has always had:
-  `-g` (none with `BUSTER_DEBUG_INFO=0`), `-march=$BUSTER_HOST_ARCH -Isrc
+  `-g` (none with `BUSTER_DEBUG_INFO=0`), the host target (`-march=$BUSTER_HOST_ARCH`), `-Isrc
   -fwrapv -funsigned-char -fno-strict-aliasing -Wall -Werror
   -fno-stack-protector`, the host Clang's stack-protector default and default
   triple as definitions, `-DBUSTER_EXECUTABLE_UNIT` (a unit of its own, such
@@ -137,7 +140,7 @@ a preset's tree with `cmake --fresh --preset NAME`, or build it with
 
 | Variable | Default | Effect |
 | --- | --- | --- |
-| `BUSTER_HOST_ARCH` | `native` | `-march`: `x86-64` for the scalar baseline, `znver5` for benchmark builds |
+| `BUSTER_HOST_ARCH` | `native` | `-march`: `x86-64` for the scalar baseline, `znver5` for benchmark builds; `vector` is the explicit vector target, `-march=x86-64-v4` and host_isa.h's other features (`-maes -mgfni -mvaes -mavx512vbmi -mavx512vbmi2 -mavx512vpopcntdq -mavx512bitalg -mavx512vnni`), which must select `BUSTER_HOST_VECTOR=1` (#2033; the hosted vector row's) |
 | `BUSTER_HOST_RUNTIME` | none | links CI's emulated old CPU's runtime from that root (`x86-64` alone) |
 | `BUSTER_DEBUG_INFO` | `1` | `0` leaves `-g` out of Release, a fifth of its build time |
 | `BUSTER_LINKER` | `auto` | `auto` (wild, then mold, then clang's; for a static link lld, then mold, then clang's), `system`, `wild`, `mold`, `lld`, `bfd` or a path; lld links at `-O0` |

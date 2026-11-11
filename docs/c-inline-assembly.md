@@ -672,8 +672,9 @@ takes the one-byte form, as GNU as does.
 For musl's templates (`arch/x86_64/atomic_arch.h`, `pthread_arch.h` and
 `src/math/x86_64`) the matcher also admits the `lock` prefix, as a statement of
 its own (`lock ; cmpxchg %3, %1`, which GNU as applies to the next instruction)
-or on the instruction's line, on `cmpxchg`, `xadd` and the arithmetic of memory
-destinations; `bsf`, `bsr` and `hlt`; SSE's `sqrtsd`, `cvtsd2si`, `andps` and
+or on the instruction's line, on `cmpxchg`, `xadd`, the arithmetic of memory
+destinations and `xchg` (#1846: `lock xchg %0, %1`, F0 before 87, which GNU as
+and clang keep though an exchange with memory is locked without it); `bsf`, `bsr` and `hlt`; SSE's `sqrtsd`, `cvtsd2si`, `andps` and
 SSE2's `psrlq` with their siblings; FMA3's scalar forms; the x87's operations on
 the stack's top (`fsqrt`, `fprem`, `frndint` and the rest), `fnstsw %ax` and
 `fistpll`. Since #1115 the x87's register operands (`fld %st(0)`, `fxch %st(1)`,
@@ -1099,7 +1100,7 @@ What the lowering still refuses of what GCC and clang take:
   above (a named label, a directive), which the helper design refuses by name;
 - naked functions of no instructions, and naked functions' operands other than
   integer constants (clang's `"m"(global)`, printed RIP-relative);
-- the matcher's gaps: `lock xchg`, `ffreep`, and the
+- the matcher's gaps: the
   instructions outside its families (an x87 memory operand without a width,
   `fstp (%rax)`, is refused as clang refuses it);
 - explicit register variables in rsp (clang's code moves the variable's value

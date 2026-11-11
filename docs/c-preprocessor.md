@@ -533,7 +533,12 @@ makes its own; with one, the units and lanes that share it read each file once
   (`file_cache_initialize`'s `*cache = (FileCache){ 0 }`, 30 pages of it the
   lanes' arenas) nor reserves an arena for each array. A cache that units
   share (`PPOptions.files`) is still made with `file_cache_initialize`, its
-  arrays in arenas of their own.
+  arrays in arenas of their own. What walks the lanes' arenas
+  (`pp_release_file_columns` after the run, `file_cache_release`) walks only
+  the lanes whose arenas were reserved (`FileCache.lanes_reserved`, a bit a
+  lane, #1444): a walk of all 256 read and then wrote every one of those
+  pages, 63 of an empty file's 98 faults in the unit's tables on the 9700X,
+  and a release that cleared the whole cache wrote them again.
 - **Small files read** (#261). A unit reads each file of up to 16 KB that it
   opens into its lane's bytes arena in the cache
   (`BUSTER_FILE_CACHE_READ_LIMIT`), as `c_files.c`'s lanes read theirs, and maps
@@ -1590,7 +1595,10 @@ flags, `-march=native`, and `-O`, `-f...`, `-g`, `-pthread`, `-mcmodel` and
 **The generated tables.** The CPUs, the features and their closures and macros
 are clang's answers, and `./build/compiler test-preprocessor --generate-targets`
 prints them as `c_predefines.c`'s generated block (`predefines_features`,
-`predefines_cpus`, `predefines_tunes`). It asks clang 23 (on `PATH`, with
+`predefines_cpus`, `predefines_tunes`, and `PredefinesFeatureIndex`, each
+feature's index as `PREDEFINES_FEATURE_` and its name in capitals with `.` and
+`-` as `_`, by which the compiler's own code names a feature without looking its
+name up, #1444). It asks clang 23 (on `PATH`, with
 `CPATH` unset) these questions:
 
 - The CPUs: from its errors for an unknown `-march` (the 79 of x86-64) and an
