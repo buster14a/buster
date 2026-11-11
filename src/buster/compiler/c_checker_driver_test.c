@@ -76,14 +76,11 @@ struct CheckDriverRunModes
 {
     bool in_process;
     bool differential;
-    const char* clang_server;
+    // --clang-server's server (oracle_cache.c's OracleServer, its path the option's).
+    OracleServer server;
     // The names the checks run buster and the oracle clang by: --executable's (or /proc/self/exe) and --clang's.
     const char* executable;
     const char* clang;
-    pid_t server;
-    int requests;
-    int replies;
-    char server_version[64];
     uint64_t in_process_runs;
     uint64_t served_runs;
     uint64_t child_runs;
@@ -92,7 +89,11 @@ struct CheckDriverRunModes
     uint64_t sweep_nanoseconds;
 };
 
-static CheckDriverRunModes check_driver_run_modes = { .server = -1, .requests = -1, .replies = -1 };
+static CheckDriverRunModes check_driver_run_modes = {
+    .server = {
+        .socket = -1,
+    },
+};
 
 // What main_driver reads as a process starts: arena_page_policy's variables and transparent huge pages setting, and the
 // lanes' test hooks. A run whose differ from this process's at its start needs a start of its own: a child.
@@ -277,100 +278,24 @@ static bool check_test_driver_run_in_process(char* const* arguments, char** text
     return taken;
 }
 
-// Starts --clang-server's server once, and asks the version of its clang libraries.
-static bool check_test_driver_clang_server_start(void)
-{
-    CheckDriverRunModes* modes = &check_driver_run_modes;
-    if (modes->server < 0 && modes->clang_server != NULL)
-    {
-        int to_server[2] = { -1, -1 };
-        int from_server[2] = { -1, -1 };
-        const bool piped = pipe(to_server) == 0 && pipe(from_server) == 0 && fcntl(to_server[0], F_SETFD, FD_CLOEXEC) == 0 &&
-                           fcntl(to_server[1], F_SETFD, FD_CLOEXEC) == 0 && fcntl(from_server[0], F_SETFD, FD_CLOEXEC) == 0 &&
-                           fcntl(from_server[1], F_SETFD, FD_CLOEXEC) == 0;
-        if (piped)
-        {
-            fflush(NULL);
-            modes->server = fork();
-            if (modes->server == 0)
-            {
-                if (dup2(to_server[0], STDIN_FILENO) >= 0 && dup2(from_server[1], STDOUT_FILENO) >= 0)
-                {
-                    char* const server_arguments[] = { (char*)modes->clang_server, NULL };
-                    execv(modes->clang_server, server_arguments);
-                }
-                _exit(127);
-            }
-            close(to_server[0]);
-            close(from_server[1]);
-            modes->requests = to_server[1];
-            modes->replies = from_server[0];
-            uint32_t header[3] = { 0, 2, 0 };
-            uint32_t reply[2] = { 0, 0 };
-            const bool answered = modes->server > 0 && check_test_driver_transfer(modes->requests, header, sizeof(header), true) &&
-                                  check_test_driver_transfer(modes->replies, reply, sizeof(reply), false) &&
-                                  reply[1] < sizeof(modes->server_version) &&
-                                  check_test_driver_transfer(modes->replies, modes->server_version, reply[1], false);
-            if (!answered)
-            {
-                modes->server_version[0] = 0;
-            }
-        }
-    }
-    return modes->server > 0 && modes->server_version[0] != 0;
-}
-
-// Sends one length-prefixed string to the server.
-static bool check_test_driver_clang_send(const char* text)
-{
-    const uint32_t length = (uint32_t)strlen(text);
-    return check_test_driver_transfer(check_driver_run_modes.requests, (void*)&length, sizeof(length), true) &&
-           check_test_driver_transfer(check_driver_run_modes.requests, (void*)text, length, true);
-}
-
-// The oracle clang's `arguments` through the server, with this process's working directory and environment: the
-// selected stream into *text (the caller frees it), the exit status, or -1.
+// The oracle clang's `arguments` through the server (oracle_server_run), with this process's working directory and
+// environment: the selected stream into *text (the caller frees it), the exit status, or -1.
 static int check_test_driver_clang_request(char* const* arguments, char** text, bool stdout_capture)
 {
     CheckDriverRunModes* modes = &check_driver_run_modes;
-    *text = NULL;
-    uint32_t count = 0;
-    while (arguments[count] != NULL)
-    {
-        count += 1;
-    }
-    uint32_t variables = 0;
-    while (environ[variables] != NULL)
-    {
-        variables += 1;
-    }
     char directory[PATH_MAX];
-    uint32_t header[3] = { count, stdout_capture ? 1u : 2u, variables };
-    bool sent = getcwd(directory, sizeof(directory)) != NULL && check_test_driver_clang_server_start() &&
-                check_test_driver_transfer(modes->requests, header, sizeof(header), true) && check_test_driver_clang_send(directory);
-    for (uint32_t i = 0; sent && i < count; i += 1)
+    char* output = NULL;
+    char* errors = NULL;
+    uint64_t output_length = 0;
+    uint64_t errors_length = 0;
+    const bool placed = getcwd(directory, sizeof(directory)) != NULL;
+    const int status = placed ? oracle_server_run(&modes->server, arguments, environ, directory, NULL, stdout_capture ? 1u : 2u, &output, &output_length, &errors, &errors_length) : -1;
+    *text = stdout_capture ? output : errors;
+    if (status >= 0)
     {
-        sent = check_test_driver_clang_send(arguments[i]);
-    }
-    for (uint32_t i = 0; sent && i < variables; i += 1)
-    {
-        sent = check_test_driver_clang_send(environ[i]);
-    }
-    uint32_t reply[2] = { 0, 0 };
-    const bool replied = sent && check_test_driver_transfer(modes->replies, reply, sizeof(reply), false);
-    *text = replied ? malloc((size_t)reply[1] + 1) : NULL;
-    const bool read = *text != NULL && check_test_driver_transfer(modes->replies, *text, reply[1], false);
-    if (read)
-    {
-        (*text)[reply[1]] = 0;
         modes->served_runs += 1;
     }
-    else
-    {
-        free(*text);
-        *text = NULL;
-    }
-    return read ? (int)(int32_t)reply[0] : -1;
+    return status;
 }
 
 // Whether a line (of `length` bytes) is one of --time-stages' report lines (c_check_clock.c, and run_check_command_mode's
@@ -536,7 +461,7 @@ static int check_test_driver_spawn_stream(char* const* arguments, char** text, b
 {
     CheckDriverRunModes* modes = &check_driver_run_modes;
     const bool buster = arguments[0] != NULL && ((modes->executable != NULL && strcmp(arguments[0], modes->executable) == 0) || strcmp(arguments[0], "/proc/self/exe") == 0);
-    const bool clang = !buster && arguments[0] != NULL && modes->clang_server != NULL && modes->clang != NULL && strcmp(arguments[0], modes->clang) == 0;
+    const bool clang = !buster && arguments[0] != NULL && modes->server.path != NULL && modes->clang != NULL && strcmp(arguments[0], modes->clang) == 0;
     int status = -1;
     *text = NULL;
     if (buster)
@@ -948,8 +873,8 @@ static void check_test_driver_setjmp_held(CheckTest* test, const char* executabl
 // no literal, which clang's code reads as one
 // (check_test_driver_cfstrings has the constant strings' objects); z/OS's va_start and
 // va_copy, which clang's x86-64 code makes over a char *; os_log's
-// data taken again across side effects, a __float128's and a 2-byte vector's, and those clang's code crashes on (a 32-byte
-// vector); dump_struct's generated calls; and
+// data taken again across side effects, a __float128's and a 2-byte vector's, those clang's code crashes on (a 32-byte
+// vector), and a format of more than 255 items, whose count byte clang's code truncates (#1785); dump_struct's generated calls; and
 // __builtin_available with an empty version, an invalid expression of clang's, which its code generation refuses too.
 static void check_test_driver_codegen_refusals(CheckTest* test, const char* executable, const char* directory)
 {
@@ -974,6 +899,9 @@ static void check_test_driver_codegen_refusals(CheckTest* test, const char* exec
           "unsupported: __builtin_os_log_format of data clang's code doesn't make (past 16 bytes, a _BitInt past 128 bits)" },
         { "void* f(void* b, _BitInt(200) w) { return __builtin_os_log_format(b, \"%d\", w); }\n",
           "unsupported: __builtin_os_log_format of data clang's code doesn't make (past 16 bytes, a _BitInt past 128 bits)" },
+        { "#define F \"%1$d %1$d %1$d %1$d %1$d %1$d %1$d %1$d %1$d %1$d \"\n#define G F F F F F F F F F F\n"
+          "void* f(void* b) { return __builtin_os_log_format(b, G G G, 1); }\n",
+          "unsupported: __builtin_os_log_format of more than 255 items, whose count clang's code truncates" },
         { "int g(int, const char*, ...);\nstruct S { int a; };\nvoid f(struct S* s, int n) { __builtin_dump_struct(s, g, ({ n; })); }\n",
           "unsupported: __builtin_dump_struct whose printer or other arguments have a statement expression or more than 4096 nodes, which its calls evaluate again" },
         // A record in a segment's space (#1447), whose fields' loads would take no override.
@@ -7596,8 +7524,7 @@ static void check_test_driver_quad_literals(CheckTest* test, const char* clang, 
 // text setting gives it, and the file-scope assembly's sections (check_program_sections, check_program_asm_plan_file),
 // which must be clang's -O0 -c's of the same source (check_test_driver_same_sections); and the refusals by name: a
 // static-storage definition under an active object setting (conservatively, until the emission selects its section
-// kind), a section whose name gives it another kind or type, and file-scope assembly with a section of another kind
-// (an init array's).
+// kind), and a section whose name gives it another kind or type.
 #include "c_check_symbol_driver_test.c"
 #include "c_check_asm_definition_driver_test.c"
 #include "c_check_symbol_pragma_driver_test.c"
@@ -7760,7 +7687,6 @@ static void check_test_driver_section_pragmas(CheckTest* test, const char* clang
     static const char placed[] = "unsupported: a definition under active '#pragma clang section' settings";
     static const char kind[] = "unsupported: a definition in a section whose name gives it another kind";
     static const char typed[] = "unsupported: a section name with an unsupported ELF type or reserved family";
-    static const char asm_kind[] = "unsupported: file-scope assembly's section of this kind";
     static const struct
     {
         const char* name;
@@ -7829,7 +7755,9 @@ static void check_test_driver_section_pragmas(CheckTest* test, const char* clang
         { "two file-scope statements in order", "__asm__(\".section .data.asm,\\\"aw\\\",@progbits\\n.byte 1\");\n__asm__(\".section .data.asm,\\\"aw\\\",@progbits\\n.byte 2\");\n"
                                                 "int main(void) { return 0; }\n", 0, 0, NULL, false, ".data.asm", true },
         { "file-scope assembly's label", "__asm__(\".globl answer\\nanswer: .byte 42\");\nint main(void) { return 0; }\n" },
-        { "file-scope assembly's init array", "__asm__(\".section .init_array,\\\"aw\\\"\\n.quad 0\");\nint main(void) { return 0; }\n", 0, 1, asm_kind },
+        // (An entry the startup calls: 0 would crash clang's executable too.)
+        { "file-scope assembly's init array", "int ran;\nvoid buster_init(void) { ran = 1; }\n__asm__(\".section .init_array,\\\"aw\\\"\\n.quad buster_init\");\n"
+                                              "int main(void) { return ran - 1; }\n", 0, 0, NULL, false, ".init_array", true },
         { "an initialized variable in a .bss", "int g __attribute__((section(\".bss.g\"))) = 1;\nint main(void) { return g - 1; }\n", 0, 1, kind },
         { "a variable in a .tdata", "int g __attribute__((section(\".tdata.g\"))) = 1;\nint main(void) { return g - 1; }\n", 0, 1, kind },
         { "a note's section", "int g __attribute__((section(\".note.g\"))) = 1;\nint main(void) { return g - 1; }\n", 0, 1, typed },
@@ -8056,6 +7984,7 @@ static void check_test_driver_optimize_pragmas(CheckTest* test, const char* clan
 #include "c_check_vla_fold_driver_test.c"
 #include "c_check_for_loop_driver_test.c"
 #include "c_check_enum_cast_driver_test.c"
+#include "c_check_unevaluated_driver_test.c"
 #include "c_check_sign_compare_driver_test.c"
 #include "c_check_type_sugar_driver_test.c"
 
@@ -8246,7 +8175,7 @@ static int run_checker_driver_tests(int argc, char** argv)
         }
         else if (strcmp(argv[i], "--clang-server") == 0 && i + 1 < argc)
         {
-            check_driver_run_modes.clang_server = argv[++i];
+            check_driver_run_modes.server.path = argv[++i];
         }
         else if (strcmp(argv[i], "--differential") == 0)
         {
@@ -8954,6 +8883,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             check_test_driver_vla_fold(&test, clang, executable, directory);
             check_test_driver_for_loops(&test, clang, executable, directory);
             check_test_driver_enum_casts(&test, clang, executable, directory);
+            check_test_driver_unevaluated(&test, clang, executable, directory);
         }
         if (!lazy && check_test_driver_takes())
         {
@@ -9032,6 +8962,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             if (!lazy && check_test_driver_takes())
             {
                 check_test_driver_string_pool(&test, clang, executable, directory);
+                check_test_driver_weak_late(&test, clang, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
             {
@@ -9509,22 +9440,16 @@ static int run_checker_driver_tests(int argc, char** argv)
     }
     check_test_expect(&test, check_driver_part.taken != 0 || focused, "the driver test's part runs some of its checks");
     CheckDriverRunModes* modes = &check_driver_run_modes;
-    if (modes->server > 0)
-    {
-        close(modes->requests);
-        close(modes->replies);
-        int server_status = 0;
-        waitpid(modes->server, &server_status, 0);
-    }
+    oracle_server_stop(&modes->server);
     // The server's clang libraries must be the oracle's clang's release (clang_reference_report's name of it).
-    check_test_expect(&test, modes->clang_server == NULL || modes->served_runs == 0 ||
-                             (modes->server_version[0] != 0 && strstr(check_driver_clang_version, modes->server_version) != NULL),
+    check_test_expect(&test, modes->server.path == NULL || modes->served_runs == 0 ||
+                             (modes->server.version[0] != 0 && strstr(check_driver_clang_version, modes->server.version) != NULL),
                       "run modes: the clang server started, and its clang is the oracle clang's release");
     check_test_expect(&test, modes->differences == 0, "run modes: every run gave the same status and output both ways");
     printf("checker-driver: run modes: buster %s, clang %s%s%s%s: %" PRIu64 " runs in this process, %" PRIu64 " through the server, %" PRIu64
            " as children; warning sweep: %" PRIu64 " fixtures, %.3f s; %" PRIu64 " differences\n",
-           modes->in_process ? "in-process" : "as children", modes->clang_server != NULL ? "through the server (" : "as children",
-           modes->clang_server != NULL ? modes->server_version : "", modes->clang_server != NULL ? ")" : "", modes->differential ? ", differential" : "",
+           modes->in_process ? "in-process" : "as children", modes->server.path != NULL ? "through the server (" : "as children",
+           modes->server.path != NULL ? modes->server.version : "", modes->server.path != NULL ? ")" : "", modes->differential ? ", differential" : "",
            modes->in_process_runs, modes->served_runs, modes->child_runs, modes->sweep_fixtures, (double)modes->sweep_nanoseconds / 1e9, modes->differences);
     oracle_cache_report(oracle, "test-checker-driver");
     if (check_driver_part.count > 1)

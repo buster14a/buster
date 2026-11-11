@@ -9185,6 +9185,10 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
     uint32_t part = 1;
     uint32_t parts = 1;
     bool parted = false;
+    // --clang-server PATH: the oracle clang's runs through tools/clang-server (oracle_serve, oracle_cache.c), with
+    // --differential each also run as before and compared.
+    const char* clang_server = 0;
+    bool differential = false;
     char** passed = calloc((size_t)argument_count + 1, sizeof(char*));
     char** clang_passed = calloc((size_t)argument_count + 1, sizeof(char*));
     char** files = calloc((size_t)argument_count + 1, sizeof(char*));
@@ -9214,6 +9218,16 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
         else if (strcmp(argument, "--clang") == 0)
         {
             with_clang = true;
+        }
+        else if (strcmp(argument, "--clang-server") == 0)
+        {
+            clang_server = next;
+            valid = valid && next != 0;
+            i += 1;
+        }
+        else if (strcmp(argument, "--differential") == 0)
+        {
+            differential = true;
         }
         else if (strcmp(argument, "--keep") == 0)
         {
@@ -9301,7 +9315,13 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
     valid = valid && (!parted || (file_count == 0 && !tables && !generate_targets && !print_case));
     if (!valid || fuzz.jobs == 0 || fuzz.jobs > BUSTER_PP_FUZZ_MAX_JOBS)
     {
-        fprintf(stderr, "usage: test-preprocessor [--clang] [--keep] [--id-order N] [--fuzz N] [--first N] [--seed N] [--std c17|c23] [--jobs N] [--part K/N] [--print-case N] [options] [file...]\n");
+        fprintf(stderr, "usage: test-preprocessor [--clang] [--clang-server PATH [--differential]] [--keep] [--id-order N] [--fuzz N] [--first N] [--seed N] [--std c17|c23] [--jobs N] [--part K/N] [--print-case N] [options] [file...]\n");
+    }
+    if (valid && clang_server != 0)
+    {
+        // Before the checks and the processes they fork: clang's oracle runs (by the name "clang", which
+        // pp_test_clang_process and the predefines' jobs run it by) go to the server.
+        oracle_serve(clang_server, "clang", differential);
     }
     char directory[4096];
     const char* temporary = oracle_temporary_directory();
@@ -9366,6 +9386,7 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
         passed_all = failures == 0;
     }
     oracle_cache_report(oracle, "test-preprocessor");
+    passed_all = oracle_serve_end("test-preprocessor") && passed_all;
     if (valid && print_case)
     {
         passed_all = pp_fuzz_print_case(&fuzz, printed_case);
