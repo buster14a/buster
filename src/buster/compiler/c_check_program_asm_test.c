@@ -1114,7 +1114,6 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
                                        "asm-mmx-directives", true, false, 0, 1, "inline assembly MMX operands in templates that take directives");
     check_test_program_boundary_reason(test, "typedef long long m64 __attribute__((vector_size(8)));int tested(int n){m64 v={n};__asm__(\"paddd %0, %0\" : \"+y\"(v));return (int)v[0];}",
                                        "asm-mmx-vector", true, false, 0, 1, "inline assembly operands of this type in their constraint's registers");
-    check_test_program_boundary_reason(test, "int tested(int n){__asm__ volatile(\"rep ret\" ::: \"memory\");return n;}",
     // A template that returns is an asm body, whose return leaves its caller (#1839, test-checker-driver's returning templates);
     // one that keeps its helper, as a named label's does, is refused by name.
     check_test_program_boundary_reason(test, "int tested(int n){__asm__ volatile(\"rep ret\\n.Lafter%=:\" ::: \"memory\");return n;}",
