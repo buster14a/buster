@@ -225,6 +225,43 @@ static const CheckDriverDefaultWarningFixture check_driver_type_sugar_fixtures[]
         .options = { "-Wsign-compare" },
         .warnings = 8,
     },
+    {
+        // A compound literal's type name spells its value's type (#1812, check_input_token_type_spelling): through `&`, a
+        // decay, a member, -Wformat's and -Wsign-compare's operands.
+        .name = "compound literals' typedefs",
+        .source = "int printf(const char *, ...);\n"
+                  "typedef long L;\n"
+                  "typedef unsigned U;\n"
+                  "typedef struct P { int x; } P;\n"
+                  "typedef int A2[2];\n"
+                  "void f(int n)\n"
+                  "{\n"
+                  "    char *a = &(L){ 1 };\n"
+                  "    char *b = (A2){ 1, 2 };\n"
+                  "    int c = (P){ 1 };\n"
+                  "    char *d = &(const L){ 2 };\n"
+                  "    printf(\"%s %s\\n\", (L){ 3 }, (A2){ 0 });\n"
+                  "    if (n < (U){ 4 }) {}\n"
+                  "    char *e = (L[]){ 1, 2, 3 };\n"
+                  "    char *g = &(P){ 0 }.x;\n"
+                  "}\n",
+        .options = { "-Wsign-compare" },
+        .warnings = 3,
+        .errors = 6,
+    },
+    {
+        // GNU's array initialized by a compound literal of another array type: the literal's typedef as written.
+        .name = "an array literal's typedef in its mismatch",
+        .source = "typedef int A2[2];\n"
+                  "typedef const int CA[2];\n"
+                  "void f(void)\n"
+                  "{\n"
+                  "    int x[3] = (A2){1,2};\n"
+                  "    long y[2] = (A2){1,2};\n"
+                  "    int z[2] = (CA){1,2};\n"
+                  "}\n",
+        .errors = 3,
+    },
 };
 
 // A variable array's size expression as written (#1447, check_driver_vla_bounds), through pointers, arrays, typedefs

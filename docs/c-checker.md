@@ -9351,6 +9351,10 @@ enables, which this checker doesn't all give.
   that macro, as clang's `MacroQualifiedType` does (`check_driver_space_macros`):
   `'AS1 int const *'`, `'ASN(3) int *'`, and the outermost of nested macros.
   An a.k.a. spells the space out.
+  A compound literal's type name spells its value's type as a cast's does
+  (#1812, `check_input_token_type_spelling`): `&(L){ 1 }` is `'L *'`, and
+  GNU's array initialized by a literal of another array type names it
+  (`'A2' (aka 'int[2]')`).
   A variable array prints its size expression as written, with expression
   spacing (`check_driver_vla_bounds`): `'int (*)[n + 1]'`, `'int[n][m * 2]'`.
   `c_check_type_sugar_driver_test.c` compares these whole-output with clang.

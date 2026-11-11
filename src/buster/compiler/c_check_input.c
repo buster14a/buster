@@ -2652,7 +2652,22 @@ static TypeId check_input_object_spelling(const TypeTable* types, const CheckInp
 static uint32_t check_input_token_type_spelling(const CheckInput* input, const Parser* parser, uint32_t token, bool cast)
 {
     uint32_t result = 0;
-    if (cast && token < parser->tokens.count && parser->tree.roles[token] == PARSE_ROLE_CLOSE_CAST)
+    // A compound literal's type name is its value's specifier too (#1812): `(L){ 1 }` is an 'L', at its `(`, its `)` or
+    // its body's braces.
+    const uint8_t role = token < parser->tokens.count ? parser->tree.roles[token] : PARSE_ROLE_NONE;
+    const bool body = role == PARSE_ROLE_OPEN_COMPOUND_BODY || role == PARSE_ROLE_CLOSE_COMPOUND_BODY;
+    uint32_t brace = role == PARSE_ROLE_CLOSE_COMPOUND_BODY ? token : body ? parser->tree.parents[token] : BUSTER_CHECK_NONE;
+    // (The body's `{` follows the type name's `)`: back from its `}` to its `{`.)
+    uint32_t open_brace = brace;
+    while (body && open_brace != 0 && open_brace < parser->tokens.count && !(parser->tree.roles[open_brace] == PARSE_ROLE_OPEN_COMPOUND_BODY && parser->tree.parents[open_brace] == brace))
+    {
+        open_brace -= 1;
+    }
+    const uint32_t compound = role == PARSE_ROLE_CLOSE_COMPOUND ? token : role == PARSE_ROLE_OPEN_COMPOUND ? parser->tree.parents[token] :
+                              body && open_brace != 0 && parser->tree.roles[open_brace - 1] == PARSE_ROLE_CLOSE_COMPOUND ? open_brace - 1 : BUSTER_CHECK_NONE;
+    token = compound < parser->tokens.count ? compound : token;
+    cast |= compound < parser->tokens.count;
+    if (cast && token < parser->tokens.count && (parser->tree.roles[token] == PARSE_ROLE_CLOSE_CAST || parser->tree.roles[token] == PARSE_ROLE_CLOSE_COMPOUND))
     {
         // A cast's own type name is the operand's specifier (#992): `(size_t)4`'s `size_t` is itself
         // the typedef-name use, so its resolution is the specifier's declaration — no declaration to

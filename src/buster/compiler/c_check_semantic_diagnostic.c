@@ -288,7 +288,7 @@ static const char* check_semantic_input(const Parser* parser, Preprocessor* pp, 
     {
         // GNU's array initialized by a compound literal of another array type (#1447): both types as written.
         const String8 array = check_driver_warning_type(parser, pp, input, types, spell, scratch, report->type, report->type_spelling);
-        const String8 literal = check_driver_warning_type(parser, pp, input, types, spell, scratch, (TypeId)report->value, 0);
+        const String8 literal = check_driver_warning_type(parser, pp, input, types, spell, scratch, (TypeId)report->value, (uint32_t)(report->value >> 32));
         result = array.length == 0 || literal.length == 0 ? NULL : check_warning_text(scratch, "cannot initialize array of type %.*s with array of type %.*s",
                                                                                      (int)array.length, array.pointer, (int)literal.length, literal.pointer);
     }
