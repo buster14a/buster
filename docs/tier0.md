@@ -651,6 +651,12 @@ at the target's forms, by both of the checker's paths:
   The generic builtins of vectors wider than the target's registers (32 bytes without AVX, 64 without AVX-512) run on
   pieces of the registers' width through memory, as a transport vector's do (`check_lower_vector_wide`, #1834):
   shuffles element by element, conversions and elementwise builtins each piece's row.
+  Compares of qwords without SSE4.1's `pcmpeqq` or SSE4.2's `pcmpgtq` (`check_vector_baseline_compare_qwords`, #1834)
+  are `pcmpeqd` ANDed with its qword's other dword (`pshufd` 0xb1) for `==` and `!=`, and for `p < q` the sign of
+  `p - q` (`psubq`) where p and q have the same sign bit, the sign of p (signed) or of q (unsigned) where they differ,
+  spread over the qword by `psrad` and `pshufd` 0xf5; `>` swaps the operands, and `<=` and `>=`, past a row's 8
+  records, are `>`'s and `<`'s rows followed by `~`'s (`check_vector_baseline_complement`), which `?:`, `!` and `&&`
+  take as they take the other compares.
   The integers' `__builtin_elementwise_min` and `_max` without SSE4.1's (or AVX-512's qword) instructions are a
   compare's blend (`check_vector_baseline_extremes`, #1834): the mask `pcmpgt` of a and b (of b and a for a minimum),
   unsigned elements' biased by their sign bits first (a constant operand, `xorps`), then `pand`, `pandn` and `por`;

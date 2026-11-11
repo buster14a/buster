@@ -359,8 +359,15 @@ static void check_lower_transport_rows(CheckLowerWriter* writer, uint32_t node, 
     }
     else
     {
-        main_row = brain ? check_lower_transport_brain_row(writer, op, piece) : check_lower_transport_row(writer, op, element, piece, 0, rows);
+        // `<=` and `>=` of qwords without SSE4.2 are their complements' rows and a complement (#1834).
+        const uint32_t complement = brain ? 0 : check_vector_baseline_complement(&writer->target, op, element);
+        main_row = brain ? check_lower_transport_brain_row(writer, op, piece) : check_lower_transport_row(writer, complement != 0 ? complement : op, element, piece, 0, rows);
+        if (complement != 0)
+        {
+            not_row = check_lower_transport_row(writer, CHECK_OP_BIT_NOT, element, piece, 0, rows + 1);
+        }
     }
+    const bool not_result = bits != NULL ? bits->not_result : not_row != BUSTER_CHECK_NONE;
     if (writer->output->status == CHECK_PROGRAM_OK)
     {
         bool scalars[2] = { false, false };
@@ -375,7 +382,7 @@ static void check_lower_transport_rows(CheckLowerWriter* writer, uint32_t node, 
         {
             const uint64_t offset = (uint64_t)p * piece;
             check_lower_instruction(writer, BUSTER_TYPED_SET, BUSTER_TYPED_CLASS_VECTOR, piece);
-            if (bits != NULL && bits->not_result)
+            if (not_result)
             {
                 check_lower_instruction(writer, BUSTER_TYPED_X86, BUSTER_TYPED_CLASS_VECTOR, not_row);
             }

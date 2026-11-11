@@ -2848,7 +2848,13 @@ static __attribute__((noinline)) void check_lower_vector_split(CheckLowerWriter*
                                                                 uint32_t width)
 {
     Tier0Operation row;
-    const char* reason = check_vector_lower_baseline_piece(writer->program->types, &writer->target, op, vector, width, scalar_class, &row);
+    Tier0Operation not_row;
+    const uint32_t complement = check_vector_baseline_complement(&writer->target, op, check_vector_lower_element(writer->program->types, vector));
+    const char* reason = check_vector_lower_baseline_piece(writer->program->types, &writer->target, complement != 0 ? complement : op, vector, width, scalar_class, &row);
+    if (reason == NULL && complement != 0)
+    {
+        reason = check_vector_lower_baseline_piece(writer->program->types, &writer->target, CHECK_OP_BIT_NOT, vector, width, scalar_class, &not_row);
+    }
     if (reason != NULL)
     {
         check_lower_unsupported(writer, reason);
@@ -2856,6 +2862,7 @@ static __attribute__((noinline)) void check_lower_vector_split(CheckLowerWriter*
     else
     {
         const uint32_t index = check_lower_operation_index(writer, &row);
+        const uint32_t not_index = complement != 0 ? check_lower_operation_index(writer, &not_row) : BUSTER_CHECK_NONE;
         const uint32_t operands = row.operand_count;
         uint32_t temporaries[BUSTER_TIER0_OPERATION_OPERANDS] = { 0 };
         for (uint32_t j = 0; j < operands; j += 1)
@@ -2868,6 +2875,10 @@ static __attribute__((noinline)) void check_lower_vector_split(CheckLowerWriter*
         for (uint32_t piece = bytes / width; piece-- > 0 && writer->output->status == CHECK_PROGRAM_OK;)
         {
             check_lower_instruction(writer, BUSTER_TYPED_SET, BUSTER_TYPED_CLASS_VECTOR, width);
+            if (not_index != BUSTER_CHECK_NONE)
+            {
+                check_lower_instruction(writer, BUSTER_TYPED_X86, BUSTER_TYPED_CLASS_VECTOR, not_index);
+            }
             check_lower_instruction(writer, BUSTER_TYPED_X86, BUSTER_TYPED_CLASS_VECTOR, index);
             for (uint32_t j = operands; j-- > 0;)
             {
@@ -2919,13 +2930,24 @@ static void check_lower_vector_row(CheckLowerWriter* writer, uint32_t op, TypeId
     else
     {
         const bool excess = (writer->program->target.extensions & BUSTER_X86_EXTENSION(AVX512FP16)) == 0;
-        const char* reason = check_vector_lower_row(writer->program->types, &writer->target, excess, op, vector, scalar_class, &row);
+        const uint32_t complement = check_vector_baseline_complement(&writer->target, op, check_vector_lower_element(writer->program->types, vector));
+        Tier0Operation not_row;
+        const char* reason = check_vector_lower_row(writer->program->types, &writer->target, excess, complement != 0 ? complement : op, vector, scalar_class, &row);
+        if (reason == NULL && complement != 0)
+        {
+            reason = check_vector_lower_row(writer->program->types, &writer->target, excess, CHECK_OP_BIT_NOT, vector, scalar_class, &not_row);
+        }
         if (reason != NULL)
         {
             check_lower_unsupported(writer, reason);
         }
         else
         {
+            // A complement's row runs after its compare's: pushed first.
+            if (complement != 0)
+            {
+                check_lower_instruction(writer, BUSTER_TYPED_X86, BUSTER_TYPED_CLASS_VECTOR, check_lower_operation_index(writer, &not_row));
+            }
             const uint32_t index = check_lower_operation_index(writer, &row);
             check_lower_instruction(writer, BUSTER_TYPED_X86, BUSTER_TYPED_CLASS_VECTOR, index);
         }
