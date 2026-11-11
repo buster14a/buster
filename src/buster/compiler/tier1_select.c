@@ -288,6 +288,11 @@ typedef enum Tier1SelectRule
 // A conversion (#1840): `operation` its kind past BUSTER_IR_INTRINSIC_EXTEND (0 extend, 1 truncate), `immediate` the
 // IR's flags, `source_width` the source's bytes (tier1_select_convert_form).
 #define BUSTER_TIER1_VECTOR_CONVERT 12
+// A shift by a scalar count (#1840): `operation` the IR's flags (its lanes and shift), and either the count in
+// values[1], a general register, which vmovd moves into the vector class's scratch register for the shift's form by an
+// xmm count, or, where the count is a constant (`condition` 1), the form by an immediate, the count in `immediate`
+// (tier1_select_vector_shift).
+#define BUSTER_TIER1_VECTOR_SHIFT 13
 
 // TIER1_RULE_X87's kinds, its pattern's `scale` (#141):
 // - CONSTANT, its constant's index in `immediate`, and UNDEF, which stores nothing;
@@ -1252,6 +1257,40 @@ static uint16_t tier1_select_permute_form(uint32_t kind, uint32_t flags, uint32_
 // A permute's record (#1840): its form of values[0] and values[1] into the destination; the variable permutes take their
 // indices, values[1], in vvvv and the lanes they move, values[0], in rm, the others values[0] in vvvv and values[1] in rm,
 // and align and shuffle_lanes their immediate (an align's count, its flags' low 4 bits).
+// The conversions' and the scalar shifts' forms (#1840), shared with the decoder.
+#include "buster/compiler/ir_simd_convert_forms.c"
+
+// A shift by a scalar count (#1840, BUSTER_TIER1_VECTOR_SHIFT), from the forms the decoder admits
+// (ir_simd_convert_forms.c's ir_simd_shift_forms): a constant count by the immediate form, of the source (rm) into the
+// destination (vvvv), any count of 255 or more 255, past every lane's bits, which gives the same 0 or sign; any other
+// count by vmovd into the vector scratch register, whose bytes past it the move zeroes, and the form by that xmm count.
+static void tier1_select_vector_shift(Tier1SelectRecords* result, const Tier1SelectHoles* holes)
+{
+    const uint32_t lanes = (uint32_t)holes->operation & 3;
+    const uint32_t kind = ((uint32_t)holes->operation >> 2) & 3;
+    const uint32_t width = holes->width == 16 ? 0 : holes->width == 32 ? 1 : 2;
+    const uint8_t x = holes->destination & 15;
+    const uint8_t left = holes->left & 15;
+    if (holes->condition != 0)
+    {
+        const X86Instruction record = {
+            .form = ir_simd_shift_immediate_forms[kind][lanes - 1][width],
+            .vvvv = x,
+            .rm = left,
+            .mode = BUSTER_X86_REGISTER_DIRECT,
+            .immediate = (int32_t)(holes->immediate < 255 ? holes->immediate : 255),
+        };
+        tier1_select_append(result, record);
+    }
+    else
+    {
+        const uint8_t count = BUSTER_TIER1_SELECT_FLOAT_SCRATCH;
+        tier1_select_append(result, tier1_select_register_record(X86_FORM_VMOVD_X_RM32_EVEX, count, holes->right));
+        const X86Instruction record = { .form = ir_simd_shift_forms[kind][lanes - 1][width], .reg = x, .vvvv = left, .rm = count, .mode = BUSTER_X86_REGISTER_DIRECT };
+        tier1_select_append(result, record);
+    }
+}
+
 static void tier1_select_permute(Tier1SelectRecords* result, const Tier1SelectHoles* holes)
 {
     const uint32_t kind = (uint32_t)holes->operation;
@@ -1268,8 +1307,6 @@ static void tier1_select_permute(Tier1SelectRecords* result, const Tier1SelectHo
     };
     tier1_select_append(result, record);
 }
-
-#include "buster/compiler/ir_simd_convert_forms.c"
 
 // A conversion's EVEX form (#1840), by its kind past BUSTER_IR_INTRINSIC_EXTEND, the IR's flags, the result's bytes and
 // the source's: the decoder's tables' (ir_simd_typed_extensions at the result's width, ir_simd_typed_truncations at the
@@ -1886,6 +1923,10 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         else if (kind == BUSTER_TIER1_VECTOR_PERMUTE)
         {
             tier1_select_permute(&result, holes);
+        }
+        else if (kind == BUSTER_TIER1_VECTOR_SHIFT)
+        {
+            tier1_select_vector_shift(&result, holes);
         }
         else if (kind == BUSTER_TIER1_VECTOR_CONVERT)
         {
@@ -4274,7 +4315,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
     // A vector's operations (#141), behind one test: a function without vectors pays no other here.
     const bool vector_node = (vector_width != 0 && (op == IR_VCONST || op == IR_UNDEF || op == IR_COPY || op == IR_NOT || op == IR_ADD || op == IR_SUB || op == IR_MUL || op == IR_AND ||
                                                    op == IR_OR || op == IR_XOR || op == IR_SHL || op == IR_LSHR || op == IR_ASHR || (op >= IR_FADD && op <= IR_FDIV) ||
-                                                   op == IR_VSELECT || (op == IR_INTRINSIC && (c == BUSTER_IR_INTRINSIC_SPLAT || (c >= BUSTER_IR_INTRINSIC_EXTRACT && c <= BUSTER_IR_INTRINSIC_TRUNCATE))))) ||
+                                                   op == IR_VSELECT || (op == IR_INTRINSIC && (c == BUSTER_IR_INTRINSIC_SPLAT || (c >= BUSTER_IR_INTRINSIC_EXTRACT && c <= BUSTER_IR_INTRINSIC_SHIFT))))) ||
                              compare_width != 0;
     if (vector_node)
     {
@@ -4360,6 +4401,29 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
             {
                 tier1_select_add_candidate(forest, node, &candidates, base);
             }
+        }
+        else if (vector_width != 0 && op == IR_INTRINSIC && c == BUSTER_IR_INTRINSIC_SHIFT)
+        {
+            // A shift by a scalar count (#1840): where the count is a constant, by the immediate form alone, which leaves
+            // the count unused, first, as the bottom-up path's rule takes its kind's first candidate (tier1_burs_pick) and
+            // munch's ranks tie; and by the count's register, vmovd and the shift.
+            base.rule = TIER1_RULE_VECTOR;
+            base.width = (uint8_t)vector_width;
+            base.scale = BUSTER_TIER1_VECTOR_SHIFT;
+            base.operation = (uint8_t)function->flags[node];
+            base.values[0] = a;
+            uint64_t count = 0;
+            if (tier1_select_constant(function, b, &count))
+            {
+                Tier1SelectPattern immediate = base;
+                immediate.condition = 1;
+                immediate.immediate = count < 255 ? count : 255;
+                immediate.intrinsic_cost = 1;
+                tier1_select_add_candidate(forest, node, &candidates, immediate);
+            }
+            base.values[1] = b;
+            base.intrinsic_cost = 2;
+            tier1_select_add_candidate(forest, node, &candidates, base);
         }
         else if (vector_width != 0 && (op == IR_COPY || op == IR_NOT))
         {
