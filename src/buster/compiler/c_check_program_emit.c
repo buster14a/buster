@@ -45,6 +45,18 @@ struct CheckProgramBinding
     char failed_name[256];
 };
 
+// A file-scope assembly label that names a C definition of the unit (#1848, check_program_emit_asm_symbols): clang's
+// assembler reports "symbol 'NAME' is already defined" without a source location as the module's definition is
+// streamed after the label, once for a function or a common symbol and twice for another variable's, which the driver
+// prints as it does (check_driver_emission_failed). The name is copied, as a failed emission rolls its arenas back.
+typedef struct CheckProgramRedefined CheckProgramRedefined;
+struct CheckProgramRedefined
+{
+    char name[256];
+    uint32_t length;
+    uint32_t lines;
+};
+
 typedef struct CheckProgramCode CheckProgramCode;
 struct CheckProgramCode
 {
@@ -56,6 +68,12 @@ struct CheckProgramCode
     AtomId* asm_atoms;
     ObjectAtomSection* asm_sections;
     uint32_t asm_atom_count;
+    // Its section groups (COMDAT, #1848), the assembler's (asm_object_groups) with the program's names, symbols and atoms,
+    // group 0 null, and each asm atom's group (0 for none), parallel to asm_atoms; check_program_sections publishes them
+    // with selectany's in the link's LinkGroups. None for a unit whose assembly makes none.
+    LinkGroup* asm_groups;
+    uint32_t* asm_atom_groups;
+    uint32_t asm_group_count;
     // GNU's retain attribute (#147): the symbols of the program whose declarations have one before their definitions, in
     // symbol order, whose definitions -c's object puts in sections of their own with SHF_GNU_RETAIN
     // (check_program_sections); none in a unit without one.
@@ -77,6 +95,16 @@ struct CheckProgramCode
     // definitions' atoms exist only after the static data is published, so check_program_sections applies them.
     uint64_t* asm_sizes;
     uint8_t* asm_size_set;
+    // A template's `.comm` of a variable the unit defines (#1848): clang's assembler makes the name its common symbol, of
+    // the C definition's size at the `.comm`'s alignment, and leaves the definition's bytes in their section without a
+    // symbol. asm_commoned marks such names (by CheckProgramAsms.names index, null for none); check_program_emit_asm_unit
+    // leaves each one's symbol undefined and records it with its common atom (commoned_symbols, commoned_atoms), which
+    // check_program_sections defines it at once the static data has defined it at its C definition's atom.
+    uint8_t* asm_commoned;
+    SymbolId* commoned_symbols;
+    AtomId* commoned_atoms;
+    uint32_t commoned_count;
+    CheckProgramRedefined redefined;
     // patchable_function_entry's (#1447, check_program_patchable): each such function's entry, `patchable_count` of them in
     // its bodies' order, an 8-byte atom (patchable_atoms) whose absolute fixup points to its NOP sled, through a label at its
     // function's atom's start (patchable_functions): local temporaries from patchable_symbol_base, named
@@ -2190,12 +2218,28 @@ static void check_program_emit_help(CheckEmitBoard* board, uint32_t index)
 // C references to the template's definition; another label's a local symbol of its own; or else an undefined global
 // symbol of its own, as GNU as and clang make one for a name the unit doesn't define. The symbols of its own are
 // numbered from `first` in the names' order, `*own` of them, and `externals` (with binding, or 0) gets each undefined
-// one's spelling. A label (or an absolute symbol) with the name of a symbol the unit defines is refused (`*reason`), as
-// GNU as and clang refuse a symbol defined twice. False for that, or an arena without room. The pass is scalar: a unit's
-// templates have few names (main.c's units 6), and it looks up only symbols' names of their lengths.
+// one's spelling. A template's name of a symbol the unit defines is what clang's assembler makes of it (#1848):
+// - A `.comm` of a variable the unit defines (`int x = 1;`, a tentative `int x;` without -fcommon) is clang's common
+//   symbol of the name, of C's size at the `.comm`'s alignment, and the definition's bytes stay in its section without a
+//   symbol: `commoned` (by name) marks it, and the name takes the program's symbol. Only an external, non-weak object
+//   that isn't thread-local, an alias's or selectany's: clang's backend refuses a C common symbol's (-fcommon's
+//   tentative definition's or the common attribute's) `.comm` of another size or alignment ("x redeclared as different
+//   type"), and gives the others shapes of their own (a function's code without its symbol, a weak or thread-local
+//   common), all refused by name (`*reason`), as check_program_sections refuses a read-only definition's.
+// - A file-scope label of an external, non-weak definition (not an alias's or selectany's), without a binding directive
+//   but `.globl`, is clang's assembler error, which `redefined` gets (and `*reason`): clang streams the module's
+//   assembly before its definitions, and reports each definition of the label's name without a source location, a
+//   function's and a common symbol's once and another variable's twice. One such name: several are refused by name, as
+//   clang orders their reports by its module's emission, and so are a statement template's labels (clang reports an
+//   earlier function's at the template), a static definition's (clang emits none for an unused one) and a local
+//   `.comm`'s or `.lcomm`'s, whose binding clang reports too.
+// - An absolute (`.set`) symbol of a definition's name, refused by name.
+// False for those refusals and errors, or an arena without room. The pass is scalar: a unit's templates have few names
+// (main.c's units 6), and it looks up only symbols' names of their lengths.
 static bool check_program_emit_asm_symbols(const CheckProgram* program, const Parser* parser, const InternTable* identifiers, const String8* symbol_names,
-                                           const uint8_t* defined, const CheckProgramAsms* asms, SymbolId first, SymbolId* symbols, uint32_t* own,
-                                           String8* externals, uint32_t* external_count, const char** reason, Arena* scratch)
+                                           const uint8_t* defined, const uint8_t* commons, const uint8_t* weak, const uint32_t* symbol_aliases,
+                                           const CheckProgramAsms* asms, SymbolId first, SymbolId* symbols, uint32_t* own, String8* externals,
+                                           uint32_t* external_count, uint8_t* commoned, CheckProgramRedefined* redefined, const char** reason, Arena* scratch)
 {
     const CheckInput* input = program->input;
     const uint32_t count = asms->name_count;
@@ -2245,9 +2289,46 @@ static bool check_program_emit_asm_symbols(const CheckProgram* program, const Pa
                 slot = (slot + 1) & (slots - 1);
             }
             const uint32_t n = table[slot] != 0 ? table[slot] - 1 : BUSTER_CHECK_NONE;
-            if (n != BUSTER_CHECK_NONE && asms->names[n].label && (asms->names[n].absolute || defined[program->symbol_objects[s]] != 0))
+            const CheckAsmName* name = n != BUSTER_CHECK_NONE ? &asms->names[n] : NULL;
+            const bool conflict = name != NULL && name->label && (name->absolute || defined[program->symbol_objects[s]] != 0);
+            // What clang's assembler makes of the template's definition of a C definition's name (#1848).
+            const bool external = conflict && check_input_linkage(input->declaration_bits, declaration) == 2 && weak[s + 1] == 0 &&
+                                  (symbol_aliases == 0 || symbol_aliases[s + 1] == 0) && (commons[s + 1] & BUSTER_CHECK_EMIT_SELECTANY) == 0;
+            const bool function = conflict && input->declaration_kinds[declaration] == C_BINDING_FUNCTION;
+            const bool thread = conflict && check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_THREAD_LOCAL);
+            const bool common = conflict && !function && check_program_emit_common(commons[s + 1], input->common_tentatives);
+            const bool comm = conflict && !name->absolute && (name->flags & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_COMMON;
+            const uint8_t binding = conflict ? name->flags & BUSTER_LINK_SYMBOL_BINDING : 0;
+            const bool plain = conflict && (name->directives & BUSTER_ASM_DIRECTIVE_LOCAL_COMMON) == 0 &&
+                               ((name->directives & BUSTER_ASM_DIRECTIVE_BINDING) == 0 || binding == BUSTER_LINK_SYMBOL_GLOBAL);
+            const bool reported = conflict && !name->absolute && !comm && name->file && external && plain && spelling.length < sizeof(redefined->name);
+            if (conflict && name->absolute)
             {
-                *reason = "inline assembly labels named as the unit's symbols";
+                *reason = "inline assembly absolute symbols named as the unit's definitions";
+                valid = false;
+            }
+            else if (comm && external && !function && !thread && !common)
+            {
+                commoned[n] = 1;
+                symbols[n] = s + 1;
+            }
+            else if (comm)
+            {
+                *reason = common   ? "inline assembly .comm of the unit's common symbol, which clang's backend refuses for another size or alignment" :
+                          function ? "inline assembly .comm of the unit's function" :
+                                     "inline assembly .comm of a static, weak, thread-local or aliased definition";
+                valid = false;
+            }
+            else if (reported && redefined->lines == 0)
+            {
+                memcpy(redefined->name, spelling.pointer, spelling.length);
+                redefined->length = (uint32_t)spelling.length;
+                redefined->lines = function || common ? 1 : 2;
+            }
+            else if (conflict)
+            {
+                *reason = reported ? "inline assembly labels named as several of the unit's definitions" : "inline assembly labels named as the unit's symbols";
+                redefined->lines = 0;
                 valid = false;
             }
             else if (n != BUSTER_CHECK_NONE)
@@ -2255,6 +2336,11 @@ static bool check_program_emit_asm_symbols(const CheckProgram* program, const Pa
                 symbols[n] = s + 1;
             }
         }
+    }
+    if (valid && redefined->lines != 0)
+    {
+        *reason = "inline assembly labels named as the unit's definitions, which clang's assembler refuses";
+        valid = false;
     }
     for (uint32_t n = 0; valid && n < count; n += 1)
     {
@@ -2410,7 +2496,17 @@ static bool check_program_emit_asm_unit(CheckProgramCode* result, const CheckPro
                 continue;
             }
             valid = valid && symbols[s] != 0;
-            if (valid && defined)
+            // A `.comm` of a C definition's name (#1848): the static data defines the symbol at C's atom first, and
+            // check_program_sections then moves it to the common's.
+            const bool commoned = valid && defined && result->asm_commoned != 0 && result->asm_commoned[n] != 0;
+            if (commoned)
+            {
+                valid = atom < source->atoms.count;
+                result->commoned_symbols[result->commoned_count] = symbols[s];
+                result->commoned_atoms[result->commoned_count] = valid ? mapped[atom] : 0;
+                result->commoned_count += valid;
+            }
+            else if (valid && defined)
             {
                 valid = atom < source->atoms.count && link_define_symbol(&result->link, symbols[s], mapped[atom], source->symbols.value[s], source->symbols.size[s]);
                 if (valid)
@@ -2452,6 +2548,69 @@ static bool check_program_emit_asm_unit(CheckProgramCode* result, const CheckPro
         }
     }
     arena_pop_to(scratch, mark);
+    return valid;
+}
+
+// The file-scope assembly's section groups (#1848), once check_program_emit_asm_unit published its atoms, the unit's
+// atom a at result->asm_atoms[a - 1]: each group of the assembler's (asm_object_groups) as the program's, in `output`
+// (CheckProgramCode.asm_groups), its signature the program's symbol of its name (asm_symbols, as the unit's symbols
+// map), or, for a section's name, that section's atom, or, for a name the unit has no symbol of (a group's own, as
+// `other_group` in `.section .data.x,"awG",@progbits,other_group,comdat`), none, which asks the object writer for the
+// local symbol clang's assembler makes in the group's section. The scans are scalar: only a unit whose assembly makes
+// groups takes them, and it makes a few. False for an arena without room.
+static bool check_program_emit_asm_groups(CheckProgramCode* result, const CheckProgramAsms* asms, const AsmResult* unit, const SymbolId* asm_symbols, Arena* output)
+{
+    const Link* source = &unit->link;
+    const LinkGroups* groups = &source->groups;
+    const bool grouped = groups->count > 1 && groups->atom_count == source->atoms.count && result->asm_atom_count + 1 == source->atoms.count;
+    result->asm_groups = grouped ? BUSTER_ARENA_PUSH_ARRAY(output, LinkGroup, groups->count) : 0;
+    result->asm_atom_groups = grouped ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, result->asm_atom_count) : 0;
+    bool valid = groups->count <= 1 || (result->asm_groups != 0 && result->asm_atom_groups != 0);
+    if (valid && grouped)
+    {
+        result->asm_groups[0] = (LinkGroup){ 0 };
+        for (uint32_t a = 0; a < result->asm_atom_count; a += 1)
+        {
+            result->asm_atom_groups[a] = groups->atom_groups[a + 1];
+        }
+    }
+    for (uint32_t g = 1; valid && grouped && g < groups->count; g += 1)
+    {
+        const LinkGroup group = groups->data[g];
+        const String8 spelling = group.signature != 0 ? check_asm_unit_name(unit, group.signature) : (String8){ 0 };
+        const uint32_t n = spelling.length != 0 ? check_program_emit_asm_name(asms, spelling) : BUSTER_CHECK_NONE;
+        const AtomId signature_atom = group.signature_atom != 0 && group.signature_atom < source->atoms.count ? result->asm_atoms[group.signature_atom - 1] : 0;
+        SymbolId signature = n != BUSTER_CHECK_NONE ? asm_symbols[n] : 0;
+        // A name the assembly has no symbol of may be C's (`int sig;` beside `.section ...,sig,comdat`), whose symbol is
+        // the signature, as one module's symbol is clang's; a common one stays the group's own, which no group has.
+        const bool named = signature == 0 && signature_atom == 0 && group.name != 0 && group.name < source->names.count;
+        for (SymbolId s = 1; named && signature == 0 && s < result->link.symbols.count; s += 1)
+        {
+            const NameId other = result->link.symbols.name[s];
+            const bool same = other != 0 && result->link.names.length[other] == source->names.length[group.name] &&
+                              memcmp(result->link.names.bytes[other], source->names.bytes[group.name], source->names.length[group.name]) == 0 &&
+                              (result->link.symbols.flags[s] & BUSTER_LINK_SYMBOL_TYPE) != BUSTER_LINK_SYMBOL_COMMON;
+            signature = same ? s : 0;
+        }
+        // A member's unit, the program's.
+        AtomId member = signature_atom;
+        for (uint32_t a = 0; member == 0 && a < result->asm_atom_count; a += 1)
+        {
+            member = result->asm_atom_groups[a] == g ? result->asm_atoms[a] : 0;
+        }
+        const NameId name = signature != 0 ? result->link.symbols.name[signature] :
+                            group.name != 0 && group.name < source->names.count ? link_add_name(&result->link, source->names.bytes[group.name], source->names.length[group.name]) :
+                                                                                  0;
+        valid = name != 0 && result->link.error == LINK_ERROR_NONE;
+        result->asm_groups[g] = (LinkGroup){
+            .name = name,
+            .signature = signature,
+            .signature_atom = signature != 0 ? 0 : signature_atom,
+            .unit = member != 0 ? result->link.atoms.unit[member] : 0,
+            .flags = group.flags,
+        };
+    }
+    result->asm_group_count = valid && grouped ? groups->count : 0;
     return valid;
 }
 
@@ -3406,7 +3565,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             result->status = error == TIER0_ERROR_MEMORY ? CHECK_PROGRAM_RESOURCE :
                              error == TIER0_ERROR_UNSUPPORTED || error == TIER0_ERROR_DEPTH || twice ? CHECK_PROGRAM_UNSUPPORTED : CHECK_PROGRAM_BACKEND;
             result->reason = error == TIER0_ERROR_DEPTH ? "Tier 0 mask depth or operand register window exceeded" :
-                             twice ? "a long double, __int128, vector or mask value, or a deep expression's, held across a call in a function that calls __builtin_setjmp" :
+                             twice ? "a mask value, or a deep expression's, held across a call in a function that calls __builtin_setjmp" :
                              error != TIER0_ERROR_UNSUPPORTED ? NULL : "this operation in Tier 0";
             result->backend_error = error;
             result->backend_node = code->node;
@@ -3530,20 +3689,36 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     SymbolId* asm_symbols = valid && asms->name_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, SymbolId, asms->name_count) : 0;
     uint32_t asm_own = 0;
     valid = valid && (asms->name_count == 0 || asm_symbols != 0);
+    // The names whose `.comm` makes a C definition's symbol a common one (#1848, CheckProgramCode.asm_commoned), and the
+    // room to record their symbols and atoms as the templates' units are published.
+    uint8_t* asm_commoned = valid && asms->name_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint8_t, asms->name_count) : 0;
+    valid = valid && (asms->name_count == 0 || asm_commoned != 0);
     if (valid && asms->name_count != 0)
     {
+        memset(asm_commoned, 0, asms->name_count);
         const char* reason = NULL;
-        valid = check_program_emit_asm_symbols(program, parser, identifiers, symbol_names, defined, asms, asm_first, asm_symbols, &asm_own, externals,
-                                               &external_count, &reason, scratch);
-        result->status = valid ? result->status : reason != NULL ? CHECK_PROGRAM_UNSUPPORTED : CHECK_PROGRAM_RESOURCE;
+        valid = check_program_emit_asm_symbols(program, parser, identifiers, symbol_names, defined, commons, weak, symbol_aliases, asms, asm_first, asm_symbols,
+                                               &asm_own, externals, &external_count, asm_commoned, &result->redefined, &reason, scratch);
+        result->status = valid ? result->status : result->redefined.lines != 0 ? CHECK_PROGRAM_BACKEND : reason != NULL ? CHECK_PROGRAM_UNSUPPORTED : CHECK_PROGRAM_RESOURCE;
         result->reason = reason != NULL ? reason : result->reason;
     }
+    uint32_t commoning = 0;
+    for (uint32_t n = 0; valid && n < asms->name_count; n += 1)
+    {
+        commoning += asm_commoned[n];
+    }
+    result->asm_commoned = commoning != 0 ? asm_commoned : 0;
+    result->commoned_symbols = commoning != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, SymbolId, commoning) : 0;
+    result->commoned_atoms = commoning != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, AtomId, commoning) : 0;
+    result->commoned_count = 0;
+    valid = valid && (commoning == 0 || (result->commoned_symbols != 0 && result->commoned_atoms != 0));
     // The program's symbols a template's label or `.comm` defines (check_program_emit_asm_symbols), by symbol: its name's
-    // index plus one. Such a symbol is the template's definition, not an undefined name for the runtime to supply.
+    // index plus one. Such a symbol is the template's definition, not an undefined name for the runtime to supply. A
+    // `.comm` of a C definition's name (asm_commoned) isn't: the symbol is C's, which the static data defines first.
     bool asm_defining = false;
     for (uint32_t n = 0; valid && n < asms->name_count; n += 1)
     {
-        asm_defining |= asms->names[n].label && asm_symbols[n] != 0 && asm_symbols[n] < asm_first;
+        asm_defining |= asms->names[n].label && asm_symbols[n] != 0 && asm_symbols[n] < asm_first && asm_commoned[n] == 0;
     }
     uint32_t* asm_defines = asm_defining ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)program->symbol_count + 1) : 0;
     valid = valid && (!asm_defining || asm_defines != 0);
@@ -3552,7 +3727,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         memset(asm_defines, 0, ((uint64_t)program->symbol_count + 1) * sizeof(uint32_t));
         for (uint32_t n = 0; n < asms->name_count; n += 1)
         {
-            if (asms->names[n].label && asm_symbols[n] != 0 && asm_symbols[n] < asm_first)
+            if (asms->names[n].label && asm_symbols[n] != 0 && asm_symbols[n] < asm_first && asm_commoned[n] == 0)
             {
                 asm_defines[asm_symbols[n]] = n + 1;
             }
@@ -4068,6 +4243,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         uint64_t entry_length = 0;
         valid = check_program_emit_asm_unit(result, asms, file_unit, asm_symbols, 0, result->asm_atoms, result->asm_sections, &result->asm_atom_count, bytes,
                                             scratch, &entry_atom, &entry_bytes, &entry_length);
+        valid = valid && check_program_emit_asm_groups(result, asms, file_unit, asm_symbols, output);
         // Its atoms' bytes are the only room it takes that the link's capacity doesn't count, as the file-scope assembly's
         // copy did before (#619): a failure is the bytes arena's.
         result->status = valid ? result->status : CHECK_PROGRAM_RESOURCE;
@@ -4400,7 +4576,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     for (uint32_t n = 0; valid && sized == false && n < asms->name_count; n += 1)
     {
         const SymbolId symbol = asm_symbols[n];
-        sized = symbol != 0 && symbol < asm_first && (asms->names[n].directives & BUSTER_ASM_DIRECTIVE_SIZE) != 0;
+        sized = symbol != 0 && symbol < asm_first && (asms->names[n].directives & BUSTER_ASM_DIRECTIVE_SIZE) != 0 && asm_commoned[n] == 0;
     }
     result->asm_sizes = sized ? BUSTER_ARENA_PUSH_ARRAY(output, uint64_t, result->link.symbols.count) : 0;
     result->asm_size_set = sized ? BUSTER_ARENA_PUSH_ARRAY(output, uint8_t, result->link.symbols.count) : 0;
@@ -4411,7 +4587,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         for (uint32_t n = 0; n < asms->name_count; n += 1)
         {
             const SymbolId symbol = asm_symbols[n];
-            if (symbol != 0 && symbol < asm_first && (asms->names[n].directives & BUSTER_ASM_DIRECTIVE_SIZE) != 0)
+            if (symbol != 0 && symbol < asm_first && (asms->names[n].directives & BUSTER_ASM_DIRECTIVE_SIZE) != 0 && asm_commoned[n] == 0)
             {
                 result->asm_sizes[symbol] = asms->names[n].size;
                 result->asm_size_set[symbol] = 1;
@@ -4481,9 +4657,11 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         const CheckTier1Outcome tier1_failure = result->tier1_failure;
         const uint32_t backend_node = result->backend_node;
         const char* reason = result->reason;
+        const CheckProgramRedefined redefined = result->redefined;
         arena_pop_to(output, mark);
         arena_pop_to(bytes, byte_mark);
-        *result = (CheckProgramCode){ .status = status, .token = token, .backend_error = backend, .backend_node = backend_node, .reason = reason, .tier1_failure = tier1_failure };
+        *result = (CheckProgramCode){ .status = status, .token = token, .backend_error = backend, .backend_node = backend_node, .reason = reason, .tier1_failure = tier1_failure,
+                                      .redefined = redefined };
         if (rows != NULL)
         {
             *rows = (CheckProgramRows){ 0 };
@@ -4746,12 +4924,16 @@ static bool check_program_sections(CheckProgramCode* code, const CheckProgram* p
         // Retained and selectany definitions (#147) need their named section or one of their own, their
         // class's section's name and its symbol's ("<section>.<name>", as LLVM names a retained global's unique section,
         // getELFSectionNameForGlobal), of its class's type and flags. Retain adds SHF_GNU_RETAIN; selectany supplies the
-        // group signature, which also makes otherwise equal explicit section names distinct between groups.
-        const uint32_t previous_groups = link->groups.count != 0 ? link->groups.count : 1;
+        // group signature, which also makes otherwise equal explicit section names distinct between groups. The
+        // file-scope assembly's groups (#1848, CheckProgramCode.asm_groups) come first, once, as its atoms do.
+        const uint32_t base_groups = link->groups.count != 0 ? link->groups.count : 1;
+        const uint32_t asm_groups = link->groups.count == 0 && code->asm_group_count > 1 ? code->asm_group_count - 1 : 0;
+        const uint32_t previous_groups = base_groups + asm_groups;
         const uint64_t group_count = (uint64_t)previous_groups + code->selectany_count;
-        LinkGroup* groups = valid && code->selectany_count != 0 && group_count < UINT32_MAX ? BUSTER_ARENA_PUSH_ARRAY(output, LinkGroup, group_count) : NULL;
+        const bool grouping = code->selectany_count != 0 || asm_groups != 0;
+        LinkGroup* groups = valid && grouping && group_count < UINT32_MAX ? BUSTER_ARENA_PUSH_ARRAY(output, LinkGroup, group_count) : NULL;
         uint32_t* memberships = groups != NULL ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, link->atoms.count) : NULL;
-        valid = valid && (code->selectany_count == 0 || (groups != NULL && memberships != NULL));
+        valid = valid && (!grouping || (groups != NULL && memberships != NULL));
         code->status = valid ? code->status : CHECK_PROGRAM_RESOURCE;
         if (valid && groups != NULL)
         {
@@ -4761,6 +4943,15 @@ static bool check_program_sections(CheckProgramCode* code, const CheckProgram* p
             {
                 memcpy(groups, link->groups.data, (uint64_t)link->groups.count * sizeof(LinkGroup));
                 memcpy(memberships, link->groups.atom_groups, (uint64_t)link->groups.atom_count * sizeof(uint32_t));
+            }
+            for (uint32_t g = 0; g < asm_groups; g += 1)
+            {
+                groups[base_groups + g] = code->asm_groups[g + 1];
+            }
+            for (uint32_t a = 0; asm_groups != 0 && a < code->asm_atom_count; a += 1)
+            {
+                const uint32_t group = code->asm_atom_groups[a];
+                memberships[code->asm_atoms[a]] = group != 0 ? base_groups + group - 1 : 0;
             }
         }
         const uint64_t unique_count = (uint64_t)code->retained_count + code->selectany_count;
@@ -4832,6 +5023,33 @@ static bool check_program_sections(CheckProgramCode* code, const CheckProgram* p
         else
         {
             code->link.symbols.size[symbol] = code->asm_sizes[symbol];
+        }
+    }
+    // A template's `.comm` of a C definition's name (#1848, CheckProgramCode.commoned_symbols): the static data defined
+    // the symbol at C's atom, which keeps its bytes in its section without a symbol, as clang's object does; the symbol is
+    // the common one, of C's size at the `.comm`'s alignment (its atom's), as clang's assembler makes it. A read-only
+    // definition's is refused by name: clang's code reads a const variable's initializer where the program reads the
+    // common's zeros.
+    for (uint32_t k = 0; valid && k < code->commoned_count; k += 1)
+    {
+        const SymbolId symbol = code->commoned_symbols[k];
+        const AtomId atom = code->commoned_atoms[k];
+        const AtomId data = symbol < link->symbols.count ? link->symbols.atom[symbol] : 0;
+        const bool constant = data != 0 && data < link->atoms.count &&
+                              (link->atoms.class[data] == BUSTER_LINK_CLASS_RODATA || link->atoms.class[data] == BUSTER_LINK_CLASS_DATA_RELRO);
+        valid = data != 0 && data < link->atoms.count && atom != 0 && atom < link->atoms.count && !constant;
+        if (valid)
+        {
+            link->atoms.size[atom] = link->symbols.size[symbol];
+            link->symbols.atom[symbol] = atom;
+            link->symbols.value[symbol] = 0;
+            link->symbols.flags[symbol] = (uint8_t)((link->symbols.flags[symbol] & ~(BUSTER_LINK_SYMBOL_TYPE | BUSTER_LINK_SYMBOL_BINDING)) |
+                                                    BUSTER_LINK_SYMBOL_COMMON | BUSTER_LINK_SYMBOL_GLOBAL);
+        }
+        else
+        {
+            code->status = constant ? CHECK_PROGRAM_UNSUPPORTED : CHECK_PROGRAM_BACKEND;
+            code->reason = constant ? "inline assembly .comm of a read-only definition" : "a .comm of a definition whose static data wasn't emitted";
         }
     }
     valid = valid && check_program_define_aliases(code, program);
