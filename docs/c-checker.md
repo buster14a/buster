@@ -8802,7 +8802,9 @@ arguments against the function. The checker now gives these as clang does.
     is clang's "enumerator value is not representable in the underlying type
     'T'" (`CHECK_INPUT_ENUM_NOT_REPRESENTABLE`), the base spelled as written
     ("'T' (aka 'signed char')"), and a fixed type's value after its greatest
-    names the value.
+    names the value. The error is recovered, as clang's `CheckEnumConstant`
+    goes on: the value is converted (or wrapped) to the type, and a name clash
+    at the same enumerator is still reported after it, with its note (#1807).
 
   And the handlers' warnings, each of which ignores its attribute
   (-Wignored-attributes): "'X' attribute argument not supported: Y" (a
