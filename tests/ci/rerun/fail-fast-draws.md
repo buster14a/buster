@@ -1,0 +1,14 @@
+- `Install official Clang 23.1.4 and test tools` (1 job). Setup: a setup step.
+  - [`Tests on Ubuntu 26.04 (x86-64, none, O3) / Build the compiler once for the row's shards`](https://github.com/buster14a/buster/actions/runs/43033022704/job/130573147561) (failure)
+- `Take the vector item the draw assigns, or end as a redraw` (2 jobs). Cancelled: fail-fast cancelled it after another job failed.
+  - [`Tests on Ubuntu 26.04 (vector, none, O3) / Vector draw 1, candidate 4 (Clang 23, none, O3)`](https://github.com/buster14a/buster/actions/runs/43033022704/job/130573152099) (cancelled)
+  - [`Tests on Ubuntu 26.04 (vector, none, O3) / Vector draw 1, candidate 3 (Clang 23, none, O3)`](https://github.com/buster14a/buster/actions/runs/43033022704/job/130573152127) (cancelled)
+- `Require this row's compiler product` (4 jobs). Follows setup: its row's compiler build stopped in setup.
+  - [`Tests on Ubuntu 26.04 (x86-64, none, O3) / Tests on Ubuntu 26.04 (Clang 23, x86-64, none, O3, shard 2 of 4)`](https://github.com/buster14a/buster/actions/runs/43033022704/job/130579330080) (cancelled)
+  - [`Tests on Ubuntu 26.04 (x86-64, none, O3) / Tests on Ubuntu 26.04 (Clang 23, x86-64, none, O3, shard 4 of 4)`](https://github.com/buster14a/buster/actions/runs/43033022704/job/130579330187) (failure)
+  - [`Tests on Ubuntu 26.04 (x86-64, none, O3) / Tests on Ubuntu 26.04 (Clang 23, x86-64, none, O3, shard 3 of 4)`](https://github.com/buster14a/buster/actions/runs/43033022704/job/130579330288) (cancelled)
+  - [`Tests on Ubuntu 26.04 (x86-64, none, O3) / Tests on Ubuntu 26.04 (Clang 23, x86-64, none, O3, shard 1 of 4)`](https://github.com/buster14a/buster/actions/runs/43033022704/job/130579330596) (cancelled)
+- `Require hosted and native correctness before successful qualification` (1 job). Follows setup: a job it needs stopped in setup.
+  - [`Build and execute on Ryzen 7 9700X`](https://github.com/buster14a/buster/actions/runs/43033022704/job/130579549968) (failure)
+- No step (1 job). Cancelled: cancelled before any step ran.
+  - [`Tests on Ubuntu 26.04 (vector, none, O3) / Vector row verdict (Clang 23, ${{ inputs.sanitizer }}, O${{ inputs.optimization }})`](https://github.com/buster14a/buster/actions/runs/43033022704/job/130579550292) (cancelled)
