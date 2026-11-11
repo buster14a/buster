@@ -3242,6 +3242,134 @@ static uint32_t check_driver_parameter_place(const Parser* parser, const CheckIn
     return result;
 }
 
+// The implicitly declared library builtin a node names (#1447 item 10, CHECK_INPUT_FUNCTION_IMPLICIT_LIBRARY), through
+// conversions and `&`: its catalog row, or NULL.
+static const BuiltinIntrinsicInfo* check_driver_library_named_by(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
+                                                               uint32_t node, bool* address)
+{
+    const CheckGraph* graph = stream->graph;
+    *address = false;
+    for (uint32_t steps = 0; node < graph->count && steps < 8 && (graph->ops[node] == CHECK_OP_CONVERT || graph->ops[node] == CHECK_OP_ADDRESS); steps += 1)
+    {
+        *address |= graph->ops[node] == CHECK_OP_ADDRESS;
+        node = graph->operand0[node];
+    }
+    const uint32_t token = node < graph->count && graph->ops[node] == CHECK_OP_VALUE ? graph->tokens[node] : BUSTER_CHECK_NONE;
+    const uint32_t declaration = token < input->token_count && input->declarations != NULL ? input->declarations[token] : BUSTER_CHECK_NONE;
+    const bool library = declaration < input->token_count && input->function_flags != NULL &&
+                         (input->function_flags[declaration] & CHECK_INPUT_FUNCTION_IMPLICIT_LIBRARY) != 0;
+    const uint32_t name = library ? parser->tokens.names[token] : 0;
+    return library ? builtin_intrinsic_lookup((const char*)intern_bytes(pp->table, name), intern_length(pp->table, name)) : NULL;
+}
+
+// Whether a library builtin's encoding returns size_t (its first type's code `z`).
+static bool check_driver_library_returns_size(const BuiltinIntrinsicInfo* info)
+{
+    uint32_t at = 0;
+    while (info != NULL && at < info->encoding_length && (info->encoding[at] == 'L' || info->encoding[at] == 'U' || info->encoding[at] == 'S'))
+    {
+        at += 1;
+    }
+    return info != NULL && at < info->encoding_length && info->encoding[at] == 'z';
+}
+
+// Whether an integer value keeps clang's __size_t sugar (#1447 item 10): a sizeof's or an alignof's, a call's of a library
+// builtin that returns size_t, and an operator's whose usual arithmetic conversions keep that sugar (clang's
+// UsualArithmeticConversions): the operand of the result's type where only one has it, a common sugar where both have
+// (getCommonSugaredType), a shift's left operand, a unary operator's, a comma's right one and a conditional's arms. Its
+// own walk with a stack of the operands every one of which must keep it.
+static bool check_driver_size_sugar(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, const TypeTable* types, uint32_t node)
+{
+    const CheckGraph* graph = stream->graph;
+    uint32_t pending[32];
+    uint32_t count = 0;
+    pending[count++] = node;
+    bool result = node < graph->count;
+    for (uint32_t steps = 0; result && count != 0 && steps < 256; steps += 1)
+    {
+        count -= 1;
+        uint32_t at = pending[count];
+        // A parenthesized operand has no node; an implicit conversion's value is its own (the converted operand's type
+        // is the conversion's, which the operator's choice below compares).
+        const CheckOp op = at < graph->count ? graph->ops[at] : CHECK_OP_COUNT;
+        const TypeId type = at < stream->count ? type_unqualified(type_strip_aligned(types, check_stream_type(stream, at))) : 0;
+        bool address = false;
+        const bool binary = (op >= CHECK_OP_ADD && op <= CHECK_OP_REMAINDER) || (op >= CHECK_OP_BIT_AND && op <= CHECK_OP_BIT_XOR);
+        // (A sizeof's or an alignof's value keeps it.)
+        if (op == CHECK_OP_CALL)
+        {
+            result = check_driver_library_returns_size(check_driver_library_named_by(parser, pp, input, stream, graph->operand0[at], &address));
+        }
+        else if (binary || op == CHECK_OP_CONDITIONAL)
+        {
+            // The operands the result takes its type from: those whose own type (before the conversion to the common
+            // type) is the result's.
+            const uint32_t left = op == CHECK_OP_CONDITIONAL ? graph->operand1[at] : graph->operand0[at];
+            const uint32_t right = op == CHECK_OP_CONDITIONAL ? graph->operand2[at] : graph->operand1[at];
+            uint32_t sides[2] = { left, right };
+            uint32_t chosen = 0;
+            for (uint32_t k = 0; k < 2; k += 1)
+            {
+                uint32_t side = sides[k];
+                while (side < graph->count && graph->ops[side] == CHECK_OP_CONVERT)
+                {
+                    side = graph->operand0[side];
+                }
+                const TypeId own = side < stream->count ? type_unqualified(type_strip_aligned(types, check_stream_type(stream, side))) : 0;
+                if (own == type && count + 1 < 32)
+                {
+                    pending[count++] = side;
+                    chosen += 1;
+                }
+            }
+            result = chosen != 0;
+        }
+        else if (op == CHECK_OP_SHIFT_LEFT || op == CHECK_OP_SHIFT_RIGHT || op == CHECK_OP_POSITIVE || op == CHECK_OP_NEGATIVE || op == CHECK_OP_BIT_NOT ||
+                 op == CHECK_OP_COMMA)
+        {
+            const uint32_t operand = op == CHECK_OP_COMMA ? graph->operand1[at] : graph->operand0[at];
+            pending[count++] = operand;
+        }
+        else
+        {
+            result = op == CHECK_OP_SIZEOF || op == CHECK_OP_ALIGNOF;
+        }
+    }
+    return result && count == 0;
+}
+
+// A function designator of an implicitly declared library builtin, or its address (#1447 item 10), as clang prints it:
+// its prototype with size_t's __size_t and FILE's and ucontext_t's typedefs, and its a.k.a. without them
+// (`'void *(__size_t)' (aka 'void *(unsigned long)')`, `'__size_t (*)(const char *)' (aka ...)`); empty for another.
+static CBuiltinLibraryNamed check_driver_library_named(Preprocessor* pp, const TypeTable* types, const CheckInput* input, Arena* scratch);
+static String8 check_driver_library_designator(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, const TypeTable* types,
+                                               uint32_t node, TypeId value, Arena* scratch)
+{
+    bool address = false;
+    const BuiltinIntrinsicInfo* info = check_driver_library_named_by(parser, pp, input, stream, node, &address);
+    const TypeId bare = value != 0 ? type_unqualified(type_strip_aligned(types, value)) : 0;
+    const uint8_t kind = bare != 0 ? type_kind(types, bare) : BUSTER_TYPE_KIND_NONE;
+    const bool pointer = kind == BUSTER_TYPE_KIND_POINTER;
+    String8 result = { 0 };
+    if (info != NULL && (kind == BUSTER_TYPE_KIND_FUNCTION || pointer))
+    {
+        const bool c99 = pp->options.language.standard >= 1999;
+        const bool needs = memchr(info->encoding, 'P', info->encoding_length) != NULL || memchr(info->encoding, 'J', info->encoding_length) != NULL ||
+                           memchr(info->encoding, 'K', info->encoding_length) != NULL;
+        const CBuiltinLibraryNamed named = needs ? check_driver_library_named(pp, types, input, scratch) : (CBuiltinLibraryNamed){ 0 };
+        char sugared[256];
+        char plain[256];
+        bool sized = false;
+        const bool spelled = cbuiltin_library_spell_as(info->encoding, info->encoding_length, info->attributes, info->attributes_length, true, c99, &named, pointer,
+                                                       sugared, sizeof(sugared), &sized) &&
+                             cbuiltin_library_spell_as(info->encoding, info->encoding_length, info->attributes, info->attributes_length, false, c99, &named,
+                                                       pointer, plain, sizeof(plain), &sized);
+        const char* text = spelled ? check_warning_text(scratch, sized ? "'%s' (aka '%s')" : "'%s'", sugared, plain) : NULL;
+        result = text != NULL ? (String8){ .pointer = (char*)text, .length = strlen(text) } : (String8){ 0 };
+    }
+    return result;
+}
+
 // A failed conversion of `source`'s value to `target` (spelled with `target_spelling`'s typedef, or `target_sugar`'s
 // sugar) as clang words it (#147,
 // Sema::DiagnoseAssignmentResult): its kind's words (check_driver_conversion_kind), its `action`'s (0 initializing, 1
@@ -3255,11 +3383,20 @@ static const char* check_driver_conversion_words(const Parser* parser, Preproces
     if (source < stream->count && target != 0)
     {
         const TypeId value = check_stream_type(stream, source);
-        const uint32_t source_spelling = check_driver_pointer_spelling(parser, input, stream, types, source);
+        // An integer's __size_t sugar as clang's usual arithmetic conversions keep it (#1447 item 10): `n + sizeof(int)` of
+        // an `unsigned long n` has none, which the pointer arithmetic's walk would find in the sizeof.
+        const uint32_t walked = check_driver_pointer_spelling(parser, input, stream, types, source);
+        const uint8_t value_kind = type_kind(types, type_unqualified(type_strip_aligned(types, value)));
+        const bool integer = value_kind == BUSTER_TYPE_KIND_INTEGER;
+        const bool sized = integer && check_driver_size_sugar(parser, pp, input, stream, types, source);
+        const uint32_t source_spelling = sized ? BUSTER_CHECK_NONE : integer && walked == BUSTER_CHECK_NONE ? 0 : walked;
         // Each as its declaration's sugar writes it, where it has some (#1447).
         const String8 to = check_driver_warning_type_sugared(parser, pp, input, types, spell, scratch, target, target_spelling, target_sugar);
         const uint32_t source_sugar = check_driver_operand_sugar(input, stream, source);
-        const String8 from = check_driver_warning_type_sugared(parser, pp, input, types, spell, scratch, value, source_spelling, source_sugar);
+        // A library builtin's designator by its prototype (#1447 item 10).
+        const String8 designator = check_driver_library_designator(parser, pp, input, stream, types, source, value, scratch);
+        const String8 from = designator.length != 0 ? designator :
+                             check_driver_warning_type_sugared(parser, pp, input, types, spell, scratch, value, source_spelling, source_sugar);
         const CheckDriverConversion kind = check_driver_conversion_kind(types, target, value);
         const uint32_t incompatible = kind == CHECK_DRIVER_CONVERSION_INCOMPATIBLE ? 1 : 0;
         static const char* const lead[] = {
